@@ -6,6 +6,8 @@ import {
   sharedWindowsHeader,
   sharedWindowsRuntime,
   sharedWindowsRuntimeGate,
+  sharedWindowsNodeInstall,
+  sharedWindowsDetachInstall,
   sharedWindowsCore,
   sharedWindowsDesktopPrelude,
   sharedWindowsNativePrelude,
@@ -251,7 +253,11 @@ function windowsBootstrapHeaderPowerShell(config: LeaseConfig): string {
   );
   // An omitted mode retains the native default; WSL2 owns a separate Linux runtime.
   if (config.windowsMode !== "wsl2") {
-    script += sharedWindowsRuntime() + sharedWindowsRuntimeGate();
+    script +=
+      sharedWindowsRuntime() +
+      sharedWindowsRuntimeGate() +
+      sharedWindowsNodeInstall() +
+      sharedWindowsDetachInstall();
   }
   return script;
 }

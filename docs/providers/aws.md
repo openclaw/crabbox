@@ -378,7 +378,7 @@ readiness preflight, API, AWS-GO gate, and live canary are in
 | Target | Notes |
 | --- | --- |
 | Linux | Ubuntu bootstrap, SSH, rsync sync, optional desktop/browser/code, Tailscale, Actions hydration. |
-| Windows native | EC2Launch bootstrap, OpenSSH, Git for Windows, archive sync; optional desktop with `--desktop`. |
+| Windows native | EC2Launch bootstrap, OpenSSH, Git for Windows, Node/npm baseline, archive sync; explicit `Start-CrabboxDetachedProcess.ps1` launcher for lease-lifetime daemons; optional desktop with `--desktop`. |
 | Windows WSL2 | `--windows-mode wsl2`; launches on nested-virtualization families (`c8i`/`m8i`/`m8i-flex`/`r8i`); POSIX sync and commands run inside WSL with the Linux image Node/npm baseline. |
 | macOS | Non-root SSH commands, portable workspace ownership, and Node/npm baseline. Requires an available EC2 Mac Dedicated Host in the region; On-Demand only. Admin-authenticated broker requests can pin any host with `CRABBOX_HOST_ID` / `aws.macHostId` (`CRABBOX_AWS_MAC_HOST_ID` is a legacy alias); normal broker users can pin a host with an exact coordinator allocation record for that host, their current org, and the requested region. See the host ownership rules below. |
 
@@ -404,6 +404,15 @@ distro settings, so staged commands, WSL sessions, sync/copy, readiness, and
 workspace ownership share one identity. Root is used only for distro setup;
 the Windows SSH transport account is unchanged. Existing leases need
 reprovisioning to receive this setup.
+
+Managed native Windows bootstrap installs checksum-pinned Node 24.19.0 and npm
+in `C:\Program Files\nodejs` on the machine PATH when either is missing or
+broken, retaining healthy installations. Readiness verifies both tools. No
+admin broker token or host pin is needed. For daemons across fixed-ID `run`
+invocations, use `Start-CrabboxDetachedProcess.ps1`; ordinary hidden
+`Start-Process` children remain in OpenSSH's session job. See the
+[Windows detach pattern](../commands/run.md#native-windows-background-processes) for arguments,
+logging, and lifetime. Lease destruction terminates detached processes.
 
 Managed WSL2 bootstrap runs the Node-only entrypoint of
 `scripts/install-linux-developer-tools.sh`, bundled in the CLI/coordinator rather

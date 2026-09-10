@@ -207,6 +207,8 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		return statusView{}, err
 	}
 	target = resolved.Target
+	workRootConfig, workRootTarget := cfg, target
+	applyResolvedLeaseConfig(&workRootConfig, server, &workRootTarget)
 	state := blank(server.Labels["state"], server.Status)
 	ready := hasHost && leaseStatusStateCanBeReady(lease, state) && probeSSHReady(ctx, &target, statusSSHReadinessTimeout(target))
 	meta := serverTailscaleMetadata(server)
@@ -224,6 +226,7 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		Slug:             serverSlug(server),
 		Provider:         provider,
 		TargetOS:         blank(server.Labels["target"], cfg.TargetOS),
+		WorkRoot:         workRootConfig.WorkRoot,
 		WindowsMode:      blank(server.Labels["windows_mode"], cfg.WindowsMode),
 		State:            state,
 		ServerID:         serverID,
@@ -272,6 +275,7 @@ type StatusView struct {
 	Slug        string `json:"slug,omitempty"`
 	Provider    string `json:"provider"`
 	TargetOS    string `json:"target"`
+	WorkRoot    string `json:"workroot,omitempty"`
 	WindowsMode string `json:"windowsMode,omitempty"`
 	State       string `json:"state"`
 	ServerID    string `json:"serverId"`

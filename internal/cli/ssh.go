@@ -661,6 +661,10 @@ func sshReadyCommand(target SSHTarget) string {
 		return powershellCommand(`$ErrorActionPreference = "Stop"
 git --version | Out-Null
 tar --version | Out-Null
+node --version | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "node readiness failed" }
+npm.cmd --version | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "npm readiness failed" }
 if (-not (Test-Path -LiteralPath ` + psQuote(targetWindowsReadyRoot(target)) + `)) { throw "work root missing" }`)
 	}
 	if target.TargetOS == targetMacOS {

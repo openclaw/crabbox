@@ -33,6 +33,11 @@
       "parameters": {}
     },
     {
+      "name": "windowsNodeInstall",
+      "file": "windowsNodeInstall.ps1",
+      "parameters": {}
+    },
+    {
       "name": "windowsCore",
       "file": "windowsCore.ps1",
       "parameters": {}

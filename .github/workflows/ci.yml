@@ -188,6 +188,9 @@ jobs:
       - name: Test native Windows runtime prerequisite
         run: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/test-windows-runtime.ps1
 
+      - name: Test native Windows detached process launcher
+        run: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/test-windows-detached-process.ps1
+
       - name: Run required native transport behaviors without skips
         shell: pwsh
         run: |

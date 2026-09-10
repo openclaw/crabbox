@@ -471,6 +471,40 @@ writes uploaded Windows scripts as UTF-8 with a BOM when the input has none, so
 Windows PowerShell 5.1 does not treat non-ASCII source as the system ANSI code
 page.
 
+### Native Windows background processes
+
+Managed native Windows leases install Node 24.19.0 and npm when either runtime
+is missing or broken. The checksum-pinned x64 or ARM64 runtime lives in
+`C:\Program Files\nodejs` on the machine PATH; working existing installations
+are retained. Readiness requires both version commands to succeed.
+
+To launch a native Windows daemon that survives the command and SSH session,
+use the managed lease's explicit detached launcher from a PowerShell script:
+
+```powershell
+$daemonPid = Start-CrabboxDetachedProcess.ps1 -FilePath powershell.exe `
+  -ArgumentList '-NoProfile -Command "Start-Sleep 600"' `
+  -WorkingDirectory $PWD.Path
+Write-Output "daemon_pid=$daemonPid"
+```
+
+Check it from a later `run` with `Get-Process -Id <daemon_pid>`. For a real
+service, pass its executable and a single Windows command-line argument string;
+quote paths containing spaces inside that string. The launcher inherits the
+calling user's identity and environment, returns the child PID, and gives it a
+private hidden console without inheriting SSH input/output/error handles. Have the service write its own log
+files. It lives until it exits, you stop it, or the managed lease is destroyed;
+keep daemon files outside a workspace you intend to replace with `--full-resync`.
+
+`Start-Process -WindowStyle Hidden` alone does not escape OpenSSH's Windows
+session job, which kills its descendants when the session closes. The launcher
+uses Windows' explicit job-breakaway flag, permitted by managed OpenSSH, without
+changing session policy. A host that denies breakaway returns an error. Ordinary
+commands, command timeouts, workspace-owner renewal, and result collection keep
+their existing supervision. The launcher is installed at
+`C:\Program Files\Crabbox\bin\Start-CrabboxDetachedProcess.ps1`; stock leases
+created before this bootstrap change need to be recreated.
+
 ## Scripts
 
 Use `--script <file>` or `--script-stdin` for multi-line remote commands. On

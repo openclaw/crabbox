@@ -134,7 +134,7 @@ func windowsBootstrapHeaderPowerShell(cfg Config, publicKey, workRoot string) st
 	script := sharedWindowsHeader(cfg.SSHUser, publicKey, workRoot, sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts))
 	// An omitted mode retains the native default; WSL2 owns a separate Linux runtime.
 	if cfg.WindowsMode != windowsModeWSL2 {
-		script += sharedWindowsRuntime() + sharedWindowsRuntimeGate()
+		script += sharedWindowsRuntime() + sharedWindowsRuntimeGate() + sharedWindowsNodeInstall() + sharedWindowsDetachInstall()
 	}
 	return script
 }

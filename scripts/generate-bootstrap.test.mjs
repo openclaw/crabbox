@@ -302,7 +302,9 @@ test("check detects missing and stale outputs without rewriting, and regeneratio
   const directory = await temporary(t);
   await cp(resolve(repoRoot, "recipes"), join(directory, "recipes"), { recursive: true });
   await mkdir(join(directory, "scripts"), { recursive: true });
-  await cp(resolve(repoRoot, "scripts/install-linux-developer-tools.sh"), join(directory, "scripts/install-linux-developer-tools.sh"));
+  for (const name of ["install-linux-developer-tools.sh", "start-windows-detached-process.ps1"]) {
+    await cp(resolve(repoRoot, "scripts", name), join(directory, "scripts", name));
+  }
   await mkdir(join(directory, "internal/cli"), { recursive: true });
   await mkdir(join(directory, "worker/src"), { recursive: true });
   await mkdir(join(directory, "scripts"), { recursive: true });
