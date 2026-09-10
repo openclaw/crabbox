@@ -482,6 +482,11 @@ func (c *daytonaSDKClient) findFixedAttemptSandbox(ctx context.Context, claim Le
 	// A bounded exact-attempt search must expose ambiguity, never pick a first
 	// match. Errored resources with a pending deletion still hold a resource.
 	req := c.api.SandboxAPI.ListSandboxes(c.ctx(ctx)).Labels(string(filter)).IncludeErroredDeleted(true).Limit(2)
+	if claim.CloudID != "" {
+		// A known UUID narrows the search to the exact resource, including an
+		// errored sandbox whose pending deletion hides it from GET.
+		req = req.Id(claim.CloudID)
+	}
 	if c.orgID != "" {
 		req = req.XDaytonaOrganizationID(c.orgID)
 	}

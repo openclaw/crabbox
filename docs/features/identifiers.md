@@ -78,8 +78,10 @@ persists its exact create attempt before submission and the first observed
 sandbox UUID before readiness or deletion. Its `daytona-fixed-v1` claim marker
 prevents older clients from treating it as an ordinary lease. Submitted cleanup
 records a deletion acknowledgement (the DELETE response, an observed destroying
-sandbox, or an authorized empty exact-attempt inventory) before a 404 for that
-UUID retires the claim; a 404 alone never does. See
+sandbox, or an authorized empty read of a known UUID) before a 404 for that
+UUID retires the claim, and re-checks inventory for an errored pending deletion
+first; a 404 alone never does, and a never-observed UUID is never finalized
+from an empty search. See
 [Daytona fixed operation IDs](../providers/daytona.md#fixed-operation-ids)
 for organization discovery and recovery limits.
 

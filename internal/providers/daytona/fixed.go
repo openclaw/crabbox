@@ -395,9 +395,10 @@ func (b *daytonaLeaseBackend) releaseFixed(ctx context.Context, claim core.Lease
 				return err
 			}
 			if sandbox == nil {
-				// The attempt never landed or was already destroyed natively; a
-				// destroyed sandbox holds no resource, so nothing remains to delete.
-				return finalize(claim, func() error { return nil })
+				// The list index is eventually consistent and cannot prove that a
+				// never-observed attempt holds nothing; only an exact UUID can be
+				// attested. Retain custody until the resource becomes visible.
+				return exit(4, "Daytona fixed lease %s has no observed resource UUID and no visible sandbox matches its create attempt (label lease=%s); absence is unverified, so its ownership record is retained: retry after the inventory index catches up, or inspect the organization for that label", claim.LeaseID, claim.LeaseID)
 			}
 		}
 		if err := ctx.Err(); err != nil {
@@ -569,21 +570,15 @@ func acknowledgeFixedDaytonaDeletion(ctx context.Context, client fixedDaytonaDel
 			return claim, err
 		}
 		// A 404 may mask failed access, and a DELETE whose response was lost
-		// left no acknowledgement. Only an authorized live search decides.
+		// left no acknowledgement. GET is authoritative for every readable
+		// state; only an errored sandbox with a pending deletion stays hidden.
 		if err := verifyFixedDaytonaOrganization(ctx, client, claim); err != nil {
 			return claim, err
 		}
-		live, err := client.findFixedAttemptSandbox(ctx, claim)
-		if err != nil {
+		if err := confirmFixedDaytonaAbsence(ctx, client, claim); err != nil {
 			return claim, err
 		}
-		if live == nil {
-			return recordFixedDaytonaDeletionAcknowledgement(claim), nil
-		}
-		if live.GetId() != claim.CloudID {
-			return claim, exit(4, "Daytona fixed attempt inventory names a different resource; retain its ownership record")
-		}
-		sandbox = live
+		return recordFixedDaytonaDeletionAcknowledgement(claim), nil
 	}
 	if err := validateFixedDaytonaDeletionIdentity(client, claim, sandbox); err != nil {
 		return claim, err
@@ -620,6 +615,35 @@ func recordFixedDaytonaDeletionAcknowledgement(claim LeaseClaim) LeaseClaim {
 	return claim
 }
 
+// Daytona's list endpoint is eventually consistent; a second read after this
+// delay bounds the window in which an errored deletion is not indexed yet.
+var fixedDaytonaAbsenceRecheckDelay = 3 * time.Second
+
+// confirmFixedDaytonaAbsence rejects a 404 that hides an errored sandbox whose
+// deletion is still pending: such a resource is absent from GET but remains in
+// inventory with includeErroredDeleted. Two consistent empty reads are required.
+func confirmFixedDaytonaAbsence(ctx context.Context, client fixedDaytonaDeletionAPI, claim LeaseClaim) error {
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			if err := shared.SleepContext(ctx, fixedDaytonaAbsenceRecheckDelay); err != nil {
+				return err
+			}
+		}
+		live, err := client.findFixedAttemptSandbox(ctx, claim)
+		if err != nil {
+			return err
+		}
+		if live == nil {
+			continue
+		}
+		if live.GetId() != claim.CloudID {
+			return exit(4, "Daytona fixed attempt inventory names a different resource; retain its ownership record")
+		}
+		return exit(4, "Daytona still lists fixed resource %s in state %s with a pending deletion; native destruction has not completed, so its ownership record is retained", live.GetId(), live.GetState())
+	}
+	return nil
+}
+
 // awaitFixedDaytonaDeletion waits for the acknowledged resource to disappear.
 // After an acknowledgement, a 404 for that exact UUID under the claim's
 // verified endpoint and organization is the terminal witness; native soft
@@ -632,7 +656,10 @@ func awaitFixedDaytonaDeletion(ctx context.Context, client fixedDaytonaDeletionA
 		sandbox, err := client.GetSandbox(ctx, claim.CloudID)
 		if err != nil {
 			if daytonaIsNotFoundError(err) {
-				return verifyFixedDaytonaOrganization(ctx, client, claim)
+				if err := verifyFixedDaytonaOrganization(ctx, client, claim); err != nil {
+					return err
+				}
+				return confirmFixedDaytonaAbsence(ctx, client, claim)
 			}
 			return err
 		}

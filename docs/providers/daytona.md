@@ -229,21 +229,25 @@ a sandbox is gone. An unqualified 404 is still not deletion proof, because the
 provider's resource-access layer uses the same response for failed access.
 Fixed cleanup therefore records a deletion acknowledgement on the claim before
 anything becomes terminal: the DELETE response naming the exact owned sandbox,
-an owned sandbox already observed as being destroyed, or an authorized
-organization-scoped search for the exact create attempt that finds no
-resource-holding sandbox. After that acknowledgement, a 404 for the recorded
-UUID retires the claim. The DELETE and its acknowledgement run under the
-exclusive claim fence, so a live run or repository transfer cannot race them,
-and a previously acknowledged claim re-establishes its endpoint and
-organization before absence is accepted. A DELETE whose response was lost records nothing; the
-next stop re-reads the resource and resolves it through the inventory search
-once the organization is re-established. An unknown UUID from a lost create
-response uses the same bounded exact-attempt search: one live match is adopted
-and deleted, an empty result finalizes the attempt because a destroyed sandbox
-holds no resource, and ambiguous inventory or an unverifiable organization
-retains the claim. These contracts were checked against the Daytona v0.190.0
-API sources pinned by this release and must be re-verified for a different
-deployed provider version before relying on automatic fixed capacity.
+an owned sandbox already observed as being destroyed, or, for a known UUID, an
+authorized organization-scoped read that finds no resource. After that
+acknowledgement, a 404 for the recorded UUID retires the claim once two
+inventory reads a few seconds apart confirm that no errored sandbox with a
+pending deletion still carries that UUID; Daytona hides such sandboxes from
+`GET` while they may still hold resources, and its list index is eventually
+consistent. An errored deletion retains the claim until Daytona finishes it.
+The DELETE and its acknowledgement run under the exclusive claim fence, so a
+live run or repository transfer cannot race them, and a previously acknowledged
+claim re-establishes its endpoint and organization before absence is accepted.
+A DELETE whose response was lost records nothing; the next stop re-reads the
+resource. A create attempt whose response was lost before any UUID was observed
+is resolved only through a visible sandbox carrying its exact attempt labels:
+one match is adopted and deleted, while ambiguous inventory, an unverifiable
+organization, or an empty search retains the claim, because an eventually
+consistent index cannot prove that a never-observed attempt holds nothing.
+These contracts were checked against the Daytona v0.190.0 API sources pinned by
+this release and must be re-verified for a different deployed provider version
+before relying on automatic fixed capacity.
 
 The fixed producer also labels its native sandbox with `fixed_claim_provider`
 and an attempt nonce. The fingerprint alone remains opaque metadata on ordinary

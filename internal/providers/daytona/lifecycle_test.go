@@ -96,6 +96,12 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 					t.Errorf("exact attempt discovery did not use bounded live selectors: %s", r.URL.RawQuery)
 				}
 				matches := f.sandbox != nil && f.sandbox.GetState() != api.SANDBOXSTATE_DESTROYED && !f.hideAttemptInventory
+				if matches && sandboxErroredPendingDeletion(f.sandbox) && r.URL.Query().Get("includeErroredDeleted") != "true" {
+					matches = false
+				}
+				if id := r.URL.Query().Get("id"); matches && id != "" && f.sandbox.GetId() != id {
+					matches = false
+				}
 				for key, value := range filter {
 					if f.sandbox == nil || f.sandbox.GetLabels()[key] != value {
 						matches = false
@@ -178,7 +184,8 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 					f.sandbox.SetState(api.SANDBOXSTATE_DESTROYED)
 				}
 			}
-			if f.identityOrganization != "" && f.sandbox.GetState() == api.SANDBOXSTATE_DESTROYED {
+			// Native GET hides destroyed sandboxes and errored sandboxes with a pending deletion.
+			if f.identityOrganization != "" && (f.sandbox.GetState() == api.SANDBOXSTATE_DESTROYED || sandboxErroredPendingDeletion(f.sandbox)) {
 				w.WriteHeader(http.StatusNotFound)
 				_, _ = io.WriteString(w, `{"message":"resource access could not be established"}`)
 				return
@@ -858,4 +865,9 @@ func TestDaytonaClientSendsOrganizationHeaderOnce(t *testing.T) {
 	if _, err := client.GetSandbox(t.Context(), "identity-sandbox"); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func sandboxErroredPendingDeletion(sandbox *api.Sandbox) bool {
+	return sandbox != nil && (sandbox.GetState() == api.SANDBOXSTATE_ERROR || sandbox.GetState() == api.SANDBOXSTATE_BUILD_FAILED) &&
+		sandbox.GetDesiredState() == api.SANDBOXDESIREDSTATE_DESTROYED
 }

@@ -27,6 +27,9 @@ func newFixedDaytonaFixture(t *testing.T) (*daytonaLifecycleFixture, *daytonaLea
 	}
 	f, b, repo := newDaytonaLifecycleFixture(t)
 	f.identityOrganization = "org-test"
+	previousRecheck := fixedDaytonaAbsenceRecheckDelay
+	fixedDaytonaAbsenceRecheckDelay = 5 * time.Millisecond
+	t.Cleanup(func() { fixedDaytonaAbsenceRecheckDelay = previousRecheck })
 	f.classSnapshot = &api.SnapshotDto{Id: "snapshot-exact-id", Name: "test-snapshot", State: api.SNAPSHOTSTATE_ACTIVE, Cpu: 1, Mem: 1, Disk: 3, RegionIds: []string{"us"}, Entrypoint: []string{}}
 	f.classSnapshot.SetOrganizationId("org-test")
 	f.classSnapshot.SetSandboxClass("container")
@@ -533,8 +536,10 @@ func TestDaytonaFixedCleanupResolvesUnknownUUIDFromLiveInventory(t *testing.T) {
 					t.Fatal("acknowledged native destruction was deleted again or not finalized")
 				}
 			case "absent":
-				if err != nil || after.FixedCreateIntent.State != "released" || f.deletes != 0 {
-					t.Fatalf("authorized empty exact-attempt inventory did not finalize: %v", err)
+				// The list index is eventually consistent; a never-observed UUID
+				// cannot be finalized from an empty search.
+				if err == nil || mustJSON(t, before) != mustJSON(t, after) || f.deletes != 0 || !strings.Contains(err.Error(), "absence is unverified") {
+					t.Fatalf("empty inventory finalized a never-observed attempt: %v", err)
 				}
 			default:
 				if err == nil || mustJSON(t, before) != mustJSON(t, after) || f.deletes != 0 {
@@ -766,5 +771,49 @@ func TestDaytonaFixedAcknowledgedCleanupRevalidatesOrganization(t *testing.T) {
 	}
 	if final, _, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID); final.FixedCreateIntent.State != "released" || f.deletes != 1 {
 		t.Fatalf("acknowledged terminal reconciliation failed: deletes=%d", f.deletes)
+	}
+}
+
+func TestDaytonaFixedCleanupRetainsErroredPendingDeletion(t *testing.T) {
+	for _, phase := range []string{"before acknowledgement", "after acknowledgement"} {
+		t.Run(phase, func(t *testing.T) {
+			f, b, req := newFixedDaytonaFixture(t)
+			lease, err := b.Acquire(t.Context(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if phase == "after acknowledgement" {
+				f.destroyingReads = 1000
+				ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+				err = b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease})
+				cancel()
+				if err == nil {
+					t.Fatal("a still-visible resource retired the claim")
+				}
+				f.destroyingReads = 0
+			}
+			// Native destruction errored: GET answers 404, but the errored resource
+			// remains in inventory with a pending deletion.
+			f.sandbox.SetState(api.SANDBOXSTATE_ERROR)
+			f.sandbox.SetDesiredState(api.SANDBOXDESIREDSTATE_DESTROYED)
+			before, _, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+			restarted := &daytonaLeaseBackend{cfg: b.cfg, rt: b.rt}
+			err = restarted.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID})
+			after, _, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+			if err == nil || !strings.Contains(err.Error(), "pending deletion") || after.FixedCreateIntent.State == "released" {
+				t.Fatalf("errored pending deletion retired the claim: %v", err)
+			}
+			if phase == "before acknowledgement" && (mustJSON(t, before) != mustJSON(t, after) || f.deletes != 0) {
+				t.Fatalf("errored resource changed custody or was deleted: deletes=%d", f.deletes)
+			}
+			// Once Daytona finishes the destruction, the same claim finalizes.
+			f.sandbox.SetState(api.SANDBOXSTATE_DESTROYED)
+			if err := restarted.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err != nil {
+				t.Fatal(err)
+			}
+			if final, _, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID); final.FixedCreateIntent.State != "released" {
+				t.Fatal("destroyed resource did not finalize")
+			}
+		})
 	}
 }
