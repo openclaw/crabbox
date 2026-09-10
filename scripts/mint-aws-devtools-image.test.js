@@ -79,7 +79,7 @@ case "$1" in
     done
     if [[ -n "$capture" ]]; then
       if [[ -n "\${CRABBOX_FAKE_PNPM_RUNNER:-}" ]]; then
-        "$CRABBOX_FAKE_PNPM_RUNNER" "$lease" "\${@: -1}" >"$capture" || exit $?
+        "$CRABBOX_FAKE_PNPM_RUNNER" capture "$lease" "\${@: -1}" >"$capture" || exit $?
       else
         printf '%s\\n' "\${CRABBOX_FAKE_RESOLVED_PNPM:-11.1.0}" >"$capture"
       fi
@@ -89,7 +89,7 @@ case "$1" in
       exit "\${CRABBOX_FAKE_CAPTURE_EXIT:-0}"
     fi
     if [[ -n "\${CRABBOX_FAKE_PNPM_RUNNER:-}" && "\${@: -1}" == *"docker_probe="* ]]; then
-      "$CRABBOX_FAKE_PNPM_RUNNER" "$lease" "\${@: -1}" || exit $?
+      "$CRABBOX_FAKE_PNPM_RUNNER" smoke "$lease" "\${@: -1}" || exit $?
       exit 0
     fi
     if [[ -n "\${CRABBOX_FAKE_SMOKE_FAIL_LEASE:-}" && " $* " == *" --id \${CRABBOX_FAKE_SMOKE_FAIL_LEASE} "* && "\${@: -1}" == *"docker_probe="* ]]; then
@@ -208,6 +208,31 @@ function runScript(args, env, scriptPath = script, onOutput) {
   });
 }
 
+function runtimePnpmCommand(kind, source) {
+  if (typeof source !== "string" || !source.trim()) throw new Error("runtime pnpm command is empty");
+  if (kind === "capture") return source;
+  if (kind !== "smoke") throw new Error(`unknown runtime pnpm command kind: ${kind}`);
+  const marker = source.indexOf("\nsmoke_dir=");
+  if (marker < 0) throw new Error("runtime pnpm smoke boundary is missing");
+  return source.slice(0, marker);
+}
+
+test("runtime pnpm fixture distinguishes capture and smoke command boundaries", () => {
+  const source = "printf before\\n\nsmoke_dir=fixture\nprintf after\\n";
+  assert.equal(runtimePnpmCommand("capture", source), source);
+  assert.equal(runtimePnpmCommand("smoke", source), "printf before\\n");
+});
+
+for (const [name, kind, source, error] of [
+  ["missing smoke boundary", "smoke", "printf unchanged", /smoke boundary is missing/],
+  ["empty capture", "capture", "", /command is empty/],
+  ["unknown kind", "other", "printf unchanged", /unknown runtime pnpm command kind/],
+]) {
+  test(`runtime pnpm fixture rejects ${name}`, () => {
+    assert.throws(() => runtimePnpmCommand(kind, source), error);
+  });
+}
+
 async function runtimePnpmFixture(t, options = {}) {
   const fake = await setupFakeCrabbox();
   t.after(() => rm(fake.dir, { recursive: true, force: true }));
@@ -274,11 +299,11 @@ fi`,
     runner,
     `#!${process.execPath}
 const {spawnSync} = require("node:child_process");
-const [lease, source] = process.argv.slice(2);
+const [kind, lease, source] = process.argv.slice(2);
 const actual = JSON.parse(process.env.FIXTURE_PNPM_VERSIONS)[lease] || "";
 // Run the real rendered version checks; later native/artifact probes have separate proof.
-const marker = source.indexOf("\\nsmoke_dir=");
-const command = marker < 0 ? source : source.slice(0, marker);
+${runtimePnpmCommand.toString()}
+const command = runtimePnpmCommand(kind, source);
 const env = {...process.env, PATH: ${JSON.stringify(bin)} + ":" + process.env.PATH,
   HOME: ${JSON.stringify(fake.dir)}, FIXTURE_ACTUAL_PNPM: actual};
 delete env.COREPACK_HOME;
@@ -436,7 +461,9 @@ test("AWS developer image smoke executes package managers and requires TruffleHo
   assert.match(linuxSmoke, /version="\$\(COREPACK_ENABLE_NETWORK=0 pnpm --version\)"/);
   assert.doesNotMatch(linuxSmoke, /COREPACK_ENABLE_PROJECT_SPEC=0|corepack prepare|corepack install/);
   assert.match(linuxSmoke, /\(\n  export COREPACK_ENABLE_NETWORK=0 npm_config_offline=true\n  cd "\$smoke_dir"\n  npm --offline run check\n  pnpm run check\n\)/);
-  assert.doesNotMatch(linuxSmoke.slice(0, linuxSmoke.indexOf("\nsmoke_dir=")), /export COREPACK_ENABLE_NETWORK|npm_config_offline/);
+  const smokeStart = linuxSmoke.indexOf("\nsmoke_dir=");
+  assert.ok(smokeStart >= 0, "Linux smoke scratch boundary is missing");
+  assert.doesNotMatch(linuxSmoke.slice(0, smokeStart), /export COREPACK_ENABLE_NETWORK|npm_config_offline/);
   assert.match(windowsSmoke, /docker image inspect .*\nif \(\$LASTEXITCODE -ne 0\).*throw.*\nWrite-Output "devtools-smoke-ok"\n$/);
   assert.match(text, /trap 'exit 130' INT\ntrap 'exit 143' TERM/);
   assert.match(text, /rollback_pending=1\nrun_json_tee "\$promotion_log"/);
@@ -999,7 +1026,11 @@ test("bundled Linux smoke rejects a different ordinary pnpm default without acti
   const result = execute({ FIXTURE_PNPM_VERSION: "12.3.4" });
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stderr, /pnpm default mismatch: expected 11\.1\.0/);
-  const normalCheck = generated.slice(generated.indexOf('corepack --version\nif '), generated.indexOf("\nsmoke_dir="));
+  const normalStart = generated.indexOf('corepack --version\nif ');
+  assert.ok(normalStart >= 0, "ordinary pnpm version check is missing");
+  const smokeStart = generated.indexOf("\nsmoke_dir=", normalStart);
+  assert.ok(smokeStart > normalStart, "ordinary pnpm version check boundary is missing");
+  const normalCheck = generated.slice(normalStart, smokeStart);
   assert.match(normalCheck, /COREPACK_ENABLE_NETWORK=0/);
   assert.doesNotMatch(normalCheck, /corepack prepare|corepack install|COREPACK_ENABLE_PROJECT_SPEC=0/);
 });
@@ -1397,6 +1428,33 @@ test("Linux smoke keeps its quoted Python probe parseable by both Bash interpret
   }
 });
 
+function browserProbeDefinition(raw) {
+  const opener = "browser_probe=\"$(cat <<'PY'\n";
+  const terminator = "\nPY\n)\"";
+  const start = raw.indexOf(opener);
+  assert.ok(start >= 0, "browser probe heredoc opener is missing");
+  const end = raw.indexOf(terminator, start + opener.length);
+  assert.ok(end >= 0, "browser probe heredoc terminator is missing");
+  return raw.slice(start, end + terminator.length);
+}
+
+test("browser probe extraction isolates the complete actual heredoc", async () => {
+  const raw = await readFile(path.join(scriptDir, "devtools-image-smoke-linux.sh"), "utf8");
+  const definition = browserProbeDefinition(raw);
+  assert.ok(definition.startsWith("browser_probe=\"$(cat <<'PY'\n"));
+  assert.ok(definition.endsWith("\nsys.exit(status)\nPY\n)\""));
+  assert.ok(definition.includes('"--kill-after=5", "30"'));
+  assert.doesNotMatch(definition, /cmake_minimum_required|docker run|devtools-smoke-ok/);
+});
+
+test("browser probe extraction rejects missing or unterminated heredocs", () => {
+  assert.throws(() => browserProbeDefinition("\nPY\n)\""), /heredoc opener is missing/);
+  assert.throws(
+    () => browserProbeDefinition("\nPY\n)\"\nbrowser_probe=\"$(cat <<'PY'\npass\n"),
+    /heredoc terminator is missing/,
+  );
+});
+
 for (const [mode, expected] of [["exit", 37], ["timeout", 124], ["ignore-term", 137], ["interrupt", 143], ["diagnostic-failure", 37]]) {
   test(`browser diagnostics preserve ${mode} status and settle only owned descendants`, {
     skip: process.platform !== "linux" && "native Linux supervision requires GNU timeout and /proc",
@@ -1434,7 +1492,7 @@ setInterval(() => {}, 1000);
 `);
     await chmod(browser, 0o755);
     const raw = await readFile(path.join(scriptDir, "devtools-image-smoke-linux.sh"), "utf8");
-    let definition = raw.slice(raw.indexOf('browser_probe="$(cat'), raw.indexOf("\n# Check the ordinary"));
+    let definition = browserProbeDefinition(raw);
     assert.ok(definition.includes('"--kill-after=5", "30"'));
     assert.ok(definition.includes("started + 1, started + 25"));
     if (mode === "diagnostic-failure") definition = definition.replace("json.dumps(", "(lambda *_args, **_kwargs: 1 / 0)(");
