@@ -4,6 +4,7 @@
 
 - Keep Sprites API, bootstrap, and SSH commands on the configured account and endpoint; validate ownership before reuse, require explicit adoption without a local claim, keep status observational, and safely recover already-deleted resources. [PR 1776](https://github.com/openclaw/crabbox/pull/1776). Thanks @aezell.
 
+- Refresh native Windows PowerShell command and readiness PATH from machine/user settings, and verify SSH returns on fresh connections after baseline installation restarts the service. [PR 2074](https://github.com/openclaw/crabbox/pull/2074).
 - Install checksum-pinned Node 24.19.0/npm on managed native Windows leases when missing or broken, require both tools for readiness, and update the developer-image default pin while preserving overrides. [PR 2069](https://github.com/openclaw/crabbox/pull/2069).
 - Add `Start-CrabboxDetachedProcess.ps1` for native Windows daemons that survive command and SSH-session exit with a private hidden console, preserving ordinary command timeouts and workspace ownership. [PR 2069](https://github.com/openclaw/crabbox/pull/2069).
 - Include the resolved `workroot` in SSH-backed inspect/status JSON, including native Windows and WSL2 leases. [PR 2069](https://github.com/openclaw/crabbox/pull/2069).

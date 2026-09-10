@@ -407,7 +407,11 @@ reprovisioning to receive this setup.
 
 Managed native Windows bootstrap installs checksum-pinned Node 24.19.0 and npm
 in `C:\Program Files\nodejs` on the machine PATH when either is missing or
-broken, retaining healthy installations. Readiness verifies both tools. No
+broken, retaining healthy installations. Bootstrap restarts OpenSSH after the
+machine PATH updates, and client-side completion waits for stable readiness on
+fresh SSH connections. Native PowerShell commands and readiness probes refresh
+PATH from the machine and user registry values so they also work when an SSH
+session inherited an older environment. Readiness verifies both tools. No
 admin broker token or host pin is needed. For daemons across fixed-ID `run`
 invocations, use `Start-CrabboxDetachedProcess.ps1`; ordinary hidden
 `Start-Process` children remain in OpenSSH's session job. See the

@@ -112,7 +112,7 @@ export function sharedWindowsNativePrelude(): string {
 
 // prettier-ignore
 export function sharedWindowsFinalize(): string {
-  return "\n\tgit --version | Out-Null\n\ttar --version | Out-Null\n\tSet-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString(\"o\")\n\tRestart-Service sshd -Force\n";
+  return "\n\tgit --version | Out-Null\n\ttar --version | Out-Null\n\tSet-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString(\"o\")\n\t# Keep this last: Node and the other baselines update machine PATH above.\n\tRestart-Service sshd -Force\n";
 }
 
 // prettier-ignore

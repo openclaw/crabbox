@@ -30850,6 +30850,89 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("preserves whole-sample precedence for lease history and current telemetry ties", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "blue-lobster",
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        telemetryHistory: [
+          {
+            capturedAt: "2026-05-01T00:00:20.000Z",
+            source: "ssh-linux",
+            load1: 9,
+            memoryPercent: 90,
+            diskPercent: 90,
+          },
+          {
+            capturedAt: "2026-05-01T00:00:10.000Z",
+            source: "ssh-linux",
+            load1: 1,
+            memoryPercent: 10,
+            diskPercent: 10,
+          },
+        ],
+        telemetry: {
+          capturedAt: "2026-05-01T00:00:20.000Z",
+          source: "ssh-linux",
+          load1: 2,
+        },
+      }),
+    );
+
+    const page = await fleet.fetch(request("GET", "/portal/leases/blue-lobster", { headers }));
+    expect(page.status).toBe(200);
+    const body = await page.text();
+    // Two load samples, 1 then 2; the current sample replaces all metrics at its timestamp.
+    expect(body).toContain('<polyline points="0.0,14.0 100.0,2.0" />');
+    expect(body).toContain("<span>2.00</span>");
+    expect(body).toContain(
+      '<div class="telemetry-line"><span>memory</span><span class="muted">waiting for samples</span></div>',
+    );
+    expect(body).toContain(
+      '<div class="telemetry-line"><span>disk</span><span class="muted">waiting for samples</span></div>',
+    );
+
+    const heartbeat = await fleet.fetch(
+      request("POST", "/v1/leases/blue-lobster/heartbeat", {
+        headers,
+        body: {
+          telemetry: {
+            capturedAt: "2026-05-01T00:00:20.000Z",
+            source: "ssh-linux",
+            load1: 3,
+          },
+        },
+      }),
+    );
+    expect(heartbeat.status).toBe(200);
+    const { lease } = (await heartbeat.json()) as { lease: LeaseRecord };
+    expect(lease.telemetry).toEqual({
+      capturedAt: "2026-05-01T00:00:20.000Z",
+      source: "ssh-linux",
+      load1: 3,
+    });
+    expect(lease.telemetryHistory).toEqual([
+      {
+        capturedAt: "2026-05-01T00:00:10.000Z",
+        source: "ssh-linux",
+        load1: 1,
+        memoryPercent: 10,
+        diskPercent: 10,
+      },
+      { capturedAt: "2026-05-01T00:00:20.000Z", source: "ssh-linux", load1: 3 },
+    ]);
+  });
+
   it("hides exact lease IDs and lists from other non-admin users", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
@@ -44095,6 +44178,71 @@ describe("fleet run history", () => {
     const finished = (await finish.json()) as { run: RunRecord };
     expect(finished.run.telemetry?.end).toMatchObject({ load1: 1.2, memoryPercent: 60 });
     expect(finished.run.telemetry?.samples?.map((sample) => sample.load1)).toEqual([0.4, 0.9]);
+  });
+
+  it("renders run telemetry ties with stored samples over start and end over stored samples", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    storage.seed(
+      "run:run_000000000001",
+      testRun({
+        id: "run_000000000001",
+        leaseID: "cbx_000000000001",
+        owner: "alice@example.com",
+        org: "example-org",
+        telemetry: {
+          start: {
+            capturedAt: "2026-05-01T00:00:10.000Z",
+            load1: 1,
+            memoryPercent: 10,
+            diskPercent: 10,
+          },
+          samples: [
+            {
+              capturedAt: "2026-05-01T00:00:30.000Z",
+              load1: 8,
+              memoryPercent: 80,
+              diskPercent: 80,
+            },
+            { capturedAt: "2026-05-01T00:00:10.000Z", load1: 2 },
+            {
+              capturedAt: "2026-05-01T00:00:20.000Z",
+              load1: 3,
+              memoryPercent: 30,
+              diskPercent: 30,
+            },
+          ],
+          end: { capturedAt: "2026-05-01T00:00:30.000Z", load1: 4 },
+        },
+      }),
+    );
+
+    const page = await fleet.fetch(request("GET", "/portal/runs/run_000000000001", { headers }));
+    expect(page.status).toBe(200);
+    const body = await page.text();
+    // Load is 2, 3, 4; only the middle sample retains memory and disk metrics.
+    expect(body).toContain("<small>3 samples</small>");
+    expect(body).toContain('<polyline points="0.0,14.0 50.0,8.0 100.0,2.0" />');
+    expect(body).toContain("<span>4.00</span>");
+    expect(body).toContain(
+      '<div class="telemetry-line"><span>memory</span><span class="muted">waiting for samples</span></div>',
+    );
+    expect(body).toContain(
+      '<div class="telemetry-line"><span>disk</span><span class="muted">waiting for samples</span></div>',
+    );
   });
 
   it("accepts Go nil slices in passing test results", async () => {
