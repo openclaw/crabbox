@@ -22,6 +22,7 @@ import {
   fleetRequestQueue,
   isReadinessRequestMethod,
   isTrustedProxySource,
+  nodeRequestOrigin,
   nodeResponseHeaders,
   nodeRequestAbortSignal,
   readNodeRequestBody,
@@ -250,14 +251,14 @@ function webRequestFromNode(
   context: NodeRequestContext,
   signal?: AbortSignal,
 ): Request {
-  const protocol = context.trustedProxy
-    ? firstHeader(request.headers["x-forwarded-proto"]) || "http"
-    : "http";
-  const forwardedHost = context.trustedProxy
-    ? firstHeader(request.headers["x-forwarded-host"])
-    : "";
-  const host = forwardedHost || request.headers.host || "localhost";
-  const url = `${protocol}://${host}${request.url || "/"}`;
+  const origin = nodeRequestOrigin({
+    directHost: request.headers.host,
+    forwardedHost: firstHeader(request.headers["x-forwarded-host"]),
+    forwardedProtocol: firstHeader(request.headers["x-forwarded-proto"]),
+    publicURL: env.CRABBOX_PUBLIC_URL,
+    trustedProxy: context.trustedProxy,
+  });
+  const url = `${origin}${request.url || "/"}`;
   const headers = new Headers();
   for (const [name, value] of Object.entries(request.headers)) {
     if (Array.isArray(value)) {

@@ -72,6 +72,15 @@ Node deployments should put TLS termination and WebSocket-capable ingress in
 front of port `8080` (or `PORT`). Health checks use `/v1/health`; readiness
 checks use `/v1/ready`.
 
+`CRABBOX_TRUSTED_PROXY_CIDRS` grants trust to forwarded client identity and
+must contain only authenticated proxy peers. A Node coordinator can still
+reconstruct its canonical origin from `CRABBOX_PUBLIC_URL` when the direct
+`Host` exactly matches the host and port in that configured origin; this does
+not trust forwarded host, protocol, or client-address assertions from an
+unknown peer. This keeps canonical HTTPS routing stable behind providers whose
+edge peer addresses can change without widening identity trust to a shared
+private network.
+
 See [Broker Auth And Routing](features/broker-auth-routing.md) for the full route
 and auth model.
 
