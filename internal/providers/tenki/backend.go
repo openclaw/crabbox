@@ -50,10 +50,10 @@ func RegisterTenkiProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyTenkiProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == tenkiProvider {
-		if flagWasSet(fs, "class") {
+		if core.FlagWasSet(fs, "class") {
 			return exit(2, "--class is not supported for provider=tenki; use --tenki-cpus/--tenki-memory-mb/--tenki-disk-gb")
 		}
-		if flagWasSet(fs, "type") {
+		if core.FlagWasSet(fs, "type") {
 			return exit(2, "--type is not supported for provider=tenki; use --tenki-image or --tenki-snapshot")
 		}
 		if cfg.TargetOS != "" && cfg.TargetOS != targetLinux {
@@ -64,37 +64,37 @@ func ApplyTenkiProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "tenki-cli") {
+	if core.FlagWasSet(fs, "tenki-cli") {
 		cfg.Tenki.CLIPath = *v.CLIPath
 	}
-	if flagWasSet(fs, "tenki-endpoint") {
+	if core.FlagWasSet(fs, "tenki-endpoint") {
 		cfg.Tenki.Endpoint = *v.Endpoint
 	}
-	if flagWasSet(fs, "tenki-gateway") {
+	if core.FlagWasSet(fs, "tenki-gateway") {
 		cfg.Tenki.Gateway = *v.Gateway
 	}
-	if flagWasSet(fs, "tenki-workspace") {
+	if core.FlagWasSet(fs, "tenki-workspace") {
 		cfg.Tenki.Workspace = *v.Workspace
 	}
-	if flagWasSet(fs, "tenki-project") {
+	if core.FlagWasSet(fs, "tenki-project") {
 		cfg.Tenki.Project = *v.Project
 	}
-	if flagWasSet(fs, "tenki-image") {
+	if core.FlagWasSet(fs, "tenki-image") {
 		cfg.Tenki.Image = *v.Image
 	}
-	if flagWasSet(fs, "tenki-snapshot") {
+	if core.FlagWasSet(fs, "tenki-snapshot") {
 		cfg.Tenki.Snapshot = *v.Snapshot
 	}
-	if flagWasSet(fs, "tenki-work-root") {
+	if core.FlagWasSet(fs, "tenki-work-root") {
 		cfg.Tenki.WorkRoot = *v.WorkRoot
 	}
-	if flagWasSet(fs, "tenki-cpus") {
+	if core.FlagWasSet(fs, "tenki-cpus") {
 		cfg.Tenki.CPUs = *v.CPUs
 	}
-	if flagWasSet(fs, "tenki-memory-mb") {
+	if core.FlagWasSet(fs, "tenki-memory-mb") {
 		cfg.Tenki.MemoryMB = *v.MemoryMB
 	}
-	if flagWasSet(fs, "tenki-disk-gb") {
+	if core.FlagWasSet(fs, "tenki-disk-gb") {
 		cfg.Tenki.DiskGB = *v.DiskGB
 	}
 	normalizeTenkiProviderConfig(cfg)

@@ -1,5 +1,7 @@
 package awslambdamicrovm
 
+import core "github.com/openclaw/crabbox/internal/cli"
+
 import (
 	"flag"
 	"fmt"
@@ -41,28 +43,28 @@ func applyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "aws-lambda-microvm-region") {
+	if core.FlagWasSet(fs, "aws-lambda-microvm-region") {
 		cfg.AWSRegion = strings.TrimSpace(*v.Region)
 	}
-	if flagWasSet(fs, "aws-lambda-microvm-image") {
+	if core.FlagWasSet(fs, "aws-lambda-microvm-image") {
 		cfg.AWSLambdaMicroVM.Image = strings.TrimSpace(*v.Image)
 	}
-	if flagWasSet(fs, "aws-lambda-microvm-image-version") {
+	if core.FlagWasSet(fs, "aws-lambda-microvm-image-version") {
 		cfg.AWSLambdaMicroVM.ImageVersion = strings.TrimSpace(*v.ImageVersion)
 	}
-	if flagWasSet(fs, "aws-lambda-microvm-execution-role-arn") {
+	if core.FlagWasSet(fs, "aws-lambda-microvm-execution-role-arn") {
 		cfg.AWSLambdaMicroVM.ExecutionRoleARN = strings.TrimSpace(*v.ExecutionRoleARN)
 	}
-	if flagWasSet(fs, "aws-lambda-microvm-workdir") {
+	if core.FlagWasSet(fs, "aws-lambda-microvm-workdir") {
 		cfg.AWSLambdaMicroVM.Workdir = strings.TrimSpace(*v.Workdir)
 	}
-	if flagWasSet(fs, "aws-lambda-microvm-ingress-connectors") {
+	if core.FlagWasSet(fs, "aws-lambda-microvm-ingress-connectors") {
 		cfg.AWSLambdaMicroVM.IngressConnectors = csv(*v.IngressConnectors)
 	}
-	if flagWasSet(fs, "aws-lambda-microvm-egress-connectors") {
+	if core.FlagWasSet(fs, "aws-lambda-microvm-egress-connectors") {
 		cfg.AWSLambdaMicroVM.EgressConnectors = csv(*v.EgressConnectors)
 	}
-	if flagWasSet(fs, "aws-lambda-microvm-forget-missing") {
+	if core.FlagWasSet(fs, "aws-lambda-microvm-forget-missing") {
 		cfg.AWSLambdaMicroVM.ForgetMissing = *v.ForgetMissing
 	}
 	return validateConfig(*cfg)

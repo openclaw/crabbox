@@ -1,5 +1,7 @@
 package nebius
 
+import core "github.com/openclaw/crabbox/internal/cli"
+
 import (
 	"flag"
 	"strings"
@@ -48,46 +50,46 @@ func ApplyNebiusProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "nebius-cli") {
+	if core.FlagWasSet(fs, "nebius-cli") {
 		cfg.Nebius.CLI = *v.CLI
 	}
-	if flagWasSet(fs, "nebius-profile") {
+	if core.FlagWasSet(fs, "nebius-profile") {
 		cfg.Nebius.Profile = *v.Profile
 	}
-	if flagWasSet(fs, "nebius-parent-id") {
+	if core.FlagWasSet(fs, "nebius-parent-id") {
 		cfg.Nebius.ParentID = *v.ParentID
 	}
-	if flagWasSet(fs, "nebius-subnet-id") {
+	if core.FlagWasSet(fs, "nebius-subnet-id") {
 		cfg.Nebius.SubnetID = *v.SubnetID
 	}
-	if flagWasSet(fs, "nebius-platform") {
+	if core.FlagWasSet(fs, "nebius-platform") {
 		cfg.Nebius.Platform = *v.Platform
 	}
-	if flagWasSet(fs, "nebius-preset") {
+	if core.FlagWasSet(fs, "nebius-preset") {
 		cfg.Nebius.Preset = *v.Preset
 	}
-	if flagWasSet(fs, "nebius-image-family") {
+	if core.FlagWasSet(fs, "nebius-image-family") {
 		cfg.Nebius.ImageFamily = *v.ImageFamily
 	}
-	if flagWasSet(fs, "nebius-disk-type") {
+	if core.FlagWasSet(fs, "nebius-disk-type") {
 		cfg.Nebius.DiskType = *v.DiskType
 	}
-	if flagWasSet(fs, "nebius-disk-size-gib") {
+	if core.FlagWasSet(fs, "nebius-disk-size-gib") {
 		cfg.Nebius.DiskSizeGiB = *v.DiskSizeGiB
 	}
-	if flagWasSet(fs, "nebius-user") {
+	if core.FlagWasSet(fs, "nebius-user") {
 		cfg.Nebius.User = *v.User
 	}
-	if flagWasSet(fs, "nebius-public-ip") {
+	if core.FlagWasSet(fs, "nebius-public-ip") {
 		cfg.Nebius.PublicIP = *v.PublicIP
 	}
-	if flagWasSet(fs, "nebius-security-group-ids") {
+	if core.FlagWasSet(fs, "nebius-security-group-ids") {
 		cfg.Nebius.SecurityGroupIDs = splitCommaList(*v.SecurityGroupIDs)
 	}
-	if flagWasSet(fs, "nebius-service-account-id") {
+	if core.FlagWasSet(fs, "nebius-service-account-id") {
 		cfg.Nebius.ServiceAccountID = *v.ServiceAccountID
 	}
-	if flagWasSet(fs, "nebius-recovery-policy") {
+	if core.FlagWasSet(fs, "nebius-recovery-policy") {
 		cfg.Nebius.RecoveryPolicy = *v.RecoveryPolicy
 	}
 	if cfg.Provider == providerName {

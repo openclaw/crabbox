@@ -82,31 +82,31 @@ func ApplyIsloProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "islo-base-url") {
+	if core.FlagWasSet(fs, "islo-base-url") {
 		cfg.Islo.BaseURL = *v.BaseURL
 	}
-	if flagWasSet(fs, "islo-image") {
+	if core.FlagWasSet(fs, "islo-image") {
 		cfg.Islo.Image = *v.Image
 		core.MarkIsloImageExplicit(cfg)
 	}
-	if flagWasSet(fs, "islo-workdir") {
+	if core.FlagWasSet(fs, "islo-workdir") {
 		cfg.Islo.Workdir = *v.Workdir
 	}
-	if flagWasSet(fs, "islo-gateway-profile") {
+	if core.FlagWasSet(fs, "islo-gateway-profile") {
 		cfg.Islo.GatewayProfile = *v.GatewayProfile
 	}
-	if flagWasSet(fs, "islo-snapshot-name") {
+	if core.FlagWasSet(fs, "islo-snapshot-name") {
 		cfg.Islo.SnapshotName = *v.SnapshotName
 	}
-	if flagWasSet(fs, "islo-vcpus") {
+	if core.FlagWasSet(fs, "islo-vcpus") {
 		cfg.Islo.VCPUs = *v.VCPUs
 		core.MarkIsloVCPUsExplicit(cfg)
 	}
-	if flagWasSet(fs, "islo-memory-mb") {
+	if core.FlagWasSet(fs, "islo-memory-mb") {
 		cfg.Islo.MemoryMB = *v.MemoryMB
 		core.MarkIsloMemoryMBExplicit(cfg)
 	}
-	if flagWasSet(fs, "islo-disk-gb") {
+	if core.FlagWasSet(fs, "islo-disk-gb") {
 		cfg.Islo.DiskGB = *v.DiskGB
 		core.MarkIsloDiskGBExplicit(cfg)
 	}

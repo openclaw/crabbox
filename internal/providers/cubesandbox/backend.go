@@ -50,28 +50,28 @@ func ApplyCubeSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) er
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "cubesandbox-api-url") {
+	if core.FlagWasSet(fs, "cubesandbox-api-url") {
 		cfg.CubeSandbox.APIURL = *v.APIURL
 	}
-	if flagWasSet(fs, "cubesandbox-domain") {
+	if core.FlagWasSet(fs, "cubesandbox-domain") {
 		cfg.CubeSandbox.Domain = *v.Domain
 	}
-	if flagWasSet(fs, "cubesandbox-template") {
+	if core.FlagWasSet(fs, "cubesandbox-template") {
 		cfg.CubeSandbox.Template = *v.Template
 	}
-	if flagWasSet(fs, "cubesandbox-workdir") {
+	if core.FlagWasSet(fs, "cubesandbox-workdir") {
 		cfg.CubeSandbox.Workdir = *v.Workdir
 	}
-	if flagWasSet(fs, "cubesandbox-user") {
+	if core.FlagWasSet(fs, "cubesandbox-user") {
 		cfg.CubeSandbox.User = *v.User
 	}
-	if flagWasSet(fs, "cubesandbox-proxy-node-ip") {
+	if core.FlagWasSet(fs, "cubesandbox-proxy-node-ip") {
 		cfg.CubeSandbox.ProxyNodeIP = *v.ProxyNodeIP
 	}
-	if flagWasSet(fs, "cubesandbox-proxy-port-http") {
+	if core.FlagWasSet(fs, "cubesandbox-proxy-port-http") {
 		cfg.CubeSandbox.ProxyPortHTTP = *v.ProxyPortHTTP
 	}
-	if flagWasSet(fs, "cubesandbox-proxy-scheme") {
+	if core.FlagWasSet(fs, "cubesandbox-proxy-scheme") {
 		cfg.CubeSandbox.ProxyScheme = *v.ProxyScheme
 	}
 	return nil

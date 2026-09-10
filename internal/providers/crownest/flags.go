@@ -1,5 +1,7 @@
 package crownest
 
+import core "github.com/openclaw/crabbox/internal/cli"
+
 import (
 	"flag"
 	"net/url"
@@ -36,19 +38,19 @@ func applyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "crownest-url") {
+	if core.FlagWasSet(fs, "crownest-url") {
 		cfg.Crownest.APIURL = *v.APIURL
 	}
-	if flagWasSet(fs, "crownest-project-id") {
+	if core.FlagWasSet(fs, "crownest-project-id") {
 		cfg.Crownest.ProjectID = *v.ProjectID
 	}
-	if flagWasSet(fs, "crownest-template") {
+	if core.FlagWasSet(fs, "crownest-template") {
 		cfg.Crownest.Template = *v.Template
 	}
-	if flagWasSet(fs, "crownest-timeout-secs") {
+	if core.FlagWasSet(fs, "crownest-timeout-secs") {
 		cfg.Crownest.TimeoutSecs = *v.TimeoutSecs
 	}
-	if flagWasSet(fs, "crownest-forget-missing") {
+	if core.FlagWasSet(fs, "crownest-forget-missing") {
 		cfg.Crownest.ForgetMissing = *v.ForgetMissing
 	}
 	return validateConfig(*cfg)

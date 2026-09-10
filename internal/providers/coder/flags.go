@@ -1,5 +1,7 @@
 package coder
 
+import core "github.com/openclaw/crabbox/internal/cli"
+
 import (
 	"flag"
 	"path"
@@ -49,35 +51,35 @@ func ApplyCoderProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "coder-cli") {
+	if core.FlagWasSet(fs, "coder-cli") {
 		cfg.Coder.CLIPath = *v.CLIPath
 	}
-	if flagWasSet(fs, "coder-template") {
+	if core.FlagWasSet(fs, "coder-template") {
 		cfg.Coder.Template = *v.Template
 	}
-	if flagWasSet(fs, "coder-preset") {
+	if core.FlagWasSet(fs, "coder-preset") {
 		cfg.Coder.Preset = *v.Preset
 	}
-	if flagWasSet(fs, "coder-workspace-prefix") {
+	if core.FlagWasSet(fs, "coder-workspace-prefix") {
 		cfg.Coder.WorkspacePrefix = *v.WorkspacePrefix
 	}
-	if flagWasSet(fs, "coder-work-root") {
+	if core.FlagWasSet(fs, "coder-work-root") {
 		cfg.Coder.WorkRoot = *v.WorkRoot
 		cfg.WorkRoot = *v.WorkRoot
 	}
-	if flagWasSet(fs, "coder-delete-on-release") {
+	if core.FlagWasSet(fs, "coder-delete-on-release") {
 		cfg.Coder.DeleteOnRelease = *v.DeleteOnRelease
 	}
-	if flagWasSet(fs, "coder-wait") {
+	if core.FlagWasSet(fs, "coder-wait") {
 		cfg.Coder.Wait = *v.Wait
 	}
-	if flagWasSet(fs, "coder-use-parameter-defaults") {
+	if core.FlagWasSet(fs, "coder-use-parameter-defaults") {
 		cfg.Coder.UseParameterDefaults = *v.UseParameterDefaults
 	}
-	if flagWasSet(fs, "coder-parameter") {
+	if core.FlagWasSet(fs, "coder-parameter") {
 		cfg.Coder.Parameters = splitCommaList(*v.Parameters)
 	}
-	if flagWasSet(fs, "coder-rich-parameter-file") {
+	if core.FlagWasSet(fs, "coder-rich-parameter-file") {
 		cfg.Coder.RichParameterFile = *v.RichParameterFile
 	}
 	if cfg.Provider == coderProvider {
