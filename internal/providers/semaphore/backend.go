@@ -48,8 +48,8 @@ func (b *semaphoreBackend) Acquire(ctx context.Context, req core.AcquireRequest)
 		return core.LeaseTarget{}, core.Exit(2, "semaphore.project is required")
 	}
 
-	machine := withDefault(b.cfg.Semaphore.Machine, "f1-standard-2")
-	osImage := withDefault(b.cfg.Semaphore.OSImage, "ubuntu2204")
+	machine := core.Blank(b.cfg.Semaphore.Machine, core.SemaphoreConfigFlagFallbackMachine)
+	osImage := core.Blank(b.cfg.Semaphore.OSImage, core.SemaphoreConfigFlagFallbackOSImage)
 	timeout, err := idleTimeout(b.cfg)
 	if err != nil {
 		return core.LeaseTarget{}, core.Exit(2, "%v", err)
@@ -194,7 +194,7 @@ func (b *semaphoreBackend) resolveByJobID(ctx context.Context, jobID string, rel
 			"provider": providerName,
 		},
 	}
-	server.ServerType.Name = withDefault(b.cfg.Semaphore.Machine, "f1-standard-2")
+	server.ServerType.Name = core.Blank(b.cfg.Semaphore.Machine, core.SemaphoreConfigFlagFallbackMachine)
 	if host != "" {
 		server.PublicNet.IPv4.IP = host
 	}

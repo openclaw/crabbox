@@ -91,7 +91,7 @@ func TestEgressDaemonConcurrentStartDoubleProvision(t *testing.T) {
 				defer wg.Done()
 				app := App{Stdout: &outs[g], Stderr: &outs[g]}
 				<-release
-				errs[g] = app.startEgressHostDaemon(leaseID, []string{"host", "--id", leaseID, "crabbox-test-supervisor"}, nil)
+				errs[g] = app.startEgressHostDaemon(t.Context(), leaseID, []string{"host", "--id", leaseID, "crabbox-test-supervisor"}, nil)
 			}(g)
 		}
 		close(release)
@@ -133,7 +133,7 @@ func TestEgressDaemonConcurrentStartDoubleProvision(t *testing.T) {
 		}
 
 		var stopOutput bytes.Buffer
-		stopped, stopErr := (App{Stdout: &stopOutput, Stderr: &stopOutput}).stopEgressHostDaemon(leaseID)
+		stopped, stopErr := (App{Stdout: &stopOutput, Stderr: &stopOutput}).stopEgressHostDaemon(t.Context(), leaseID)
 		if stopErr != nil || !stopped {
 			t.Fatalf("iteration %d: stop recorded supervisor: stopped=%t err=%v output=%s", i, stopped, stopErr, strings.TrimSpace(stopOutput.String()))
 		}
@@ -152,13 +152,13 @@ func TestEgressDaemonStopUsesLeaseLock(t *testing.T) {
 	leaseID := "stop-lock"
 	var output bytes.Buffer
 	app := App{Stdout: &output, Stderr: &output}
-	if err := app.startEgressHostDaemon(leaseID, []string{"host", "--id", leaseID, "crabbox-test-supervisor"}, nil); err != nil {
+	if err := app.startEgressHostDaemon(t.Context(), leaseID, []string{"host", "--id", leaseID, "crabbox-test-supervisor"}, nil); err != nil {
 		t.Fatalf("start egress daemon: %v (output: %s)", err, strings.TrimSpace(output.String()))
 	}
 	pid := egressDaemonTestPID(t, &output)
 	t.Cleanup(func() { killEgressDaemonTestGroup(pid) })
 
-	unlock, err := acquireEgressDaemonLock(leaseID)
+	unlock, err := acquireEgressDaemonLock(t.Context(), leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestEgressDaemonStopUsesLeaseLock(t *testing.T) {
 	}
 	result := make(chan stopResult, 1)
 	go func() {
-		stopped, err := app.stopEgressHostDaemon(leaseID)
+		stopped, err := app.stopEgressHostDaemon(t.Context(), leaseID)
 		result <- stopResult{stopped: stopped, err: err}
 	}()
 
@@ -222,7 +222,7 @@ func TestPrepareEgressClientCutoverPreservesDaemonWhenTicketCreationFails(t *tes
 	leaseID := "ticket-failure"
 	var output bytes.Buffer
 	app := App{Stdout: &output, Stderr: &output}
-	if err := app.startEgressHostDaemon(leaseID, []string{"host", "--id", leaseID, "crabbox-test-supervisor"}, nil); err != nil {
+	if err := app.startEgressHostDaemon(t.Context(), leaseID, []string{"host", "--id", leaseID, "crabbox-test-supervisor"}, nil); err != nil {
 		t.Fatalf("start egress daemon: %v (output: %s)", err, strings.TrimSpace(output.String()))
 	}
 	pid := egressDaemonTestPID(t, &output)
@@ -263,7 +263,7 @@ func TestPrepareEgressClientCutoverStopsDaemonForForegroundStart(t *testing.T) {
 	leaseID := "foreground-cutover"
 	var output bytes.Buffer
 	app := App{Stdout: &output, Stderr: &output}
-	if err := app.startEgressHostDaemon(leaseID, []string{"host", "--id", leaseID, "crabbox-test-supervisor"}, nil); err != nil {
+	if err := app.startEgressHostDaemon(t.Context(), leaseID, []string{"host", "--id", leaseID, "crabbox-test-supervisor"}, nil); err != nil {
 		t.Fatalf("start egress daemon: %v (output: %s)", err, strings.TrimSpace(output.String()))
 	}
 	pid := egressDaemonTestPID(t, &output)
@@ -352,7 +352,7 @@ esac
 	lockResult := make(chan error, 1)
 	lockRelease := make(chan struct{})
 	go func() {
-		unlock, err := acquireEgressDaemonLock("cbx_env_profile_test")
+		unlock, err := acquireEgressDaemonLock(t.Context(), "cbx_env_profile_test")
 		lockResult <- err
 		if err == nil {
 			<-lockRelease

@@ -19,6 +19,7 @@ import (
 	"github.com/scaleway/scaleway-sdk-go/scw"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const defaultScalewayAPIURL = "https://api.scaleway.com"
@@ -279,24 +280,7 @@ func isScalewayRedirect(status int) bool {
 }
 
 func sameScalewayOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveScalewayPort(a) == effectiveScalewayPort(b)
-}
-
-func effectiveScalewayPort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
+	return shared.SameOrigin(a, b)
 }
 
 func scalewayProfileFromSDKConfig() (*scw.Profile, error) {
@@ -332,10 +316,10 @@ func applyCrabboxScalewayOverrides(profile *scw.Profile, cfg core.Config) {
 
 func applyScalewayLocationDefaults(profile *scw.Profile) {
 	if stringPtrValue(profile.DefaultRegion) == "" {
-		profile.DefaultRegion = scw.StringPtr(defaultRegion)
+		profile.DefaultRegion = scw.StringPtr(core.ScalewayConfigDefaultRegion)
 	}
 	if stringPtrValue(profile.DefaultZone) == "" {
-		profile.DefaultZone = scw.StringPtr(defaultZone)
+		profile.DefaultZone = scw.StringPtr(core.ScalewayConfigDefaultZone)
 	}
 }
 

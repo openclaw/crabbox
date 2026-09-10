@@ -71,6 +71,11 @@ from idling out only when an exact local claim matches the configured provider
 scope and live resource identity. Claimless or mismatched resources remain
 strictly read-only while status waits.
 
+Windows WSL2 snapshots allow up to 30 seconds for WSL startup, SFTP negotiation,
+and the Linux ready check. Other SSH targets retain a four-second probe budget.
+Readiness is checked on every request; a failed probe reports `ready: false`
+even when an earlier request succeeded.
+
 ## Flags
 
 ```text
@@ -112,6 +117,11 @@ includes SSH connection details, lease labels, and `telemetryHistory` when the
 coordinator has retained recent samples (bounded to the latest 60 per lease) for
 portal trend charts. Under `--wait`, JSON is printed once the lease is ready or
 terminal rather than on every poll.
+
+For Local Container, non-wait JSON status includes fresh read-only
+`diagnostic.memory.*` labels, as described in
+[`inspect`](inspect.md). These optional observations are not requested by
+`status --wait`, heartbeat, or other lifecycle callers, and do not change claims.
 
 ## See also
 

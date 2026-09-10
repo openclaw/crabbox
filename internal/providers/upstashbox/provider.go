@@ -23,13 +23,14 @@ func (Provider) ClaimScope(cfg core.Config) string { return upstashBoxClaimScope
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:             providerName,
-		Family:           "upstash",
-		Kind:             core.ProviderKindDelegatedRun,
-		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:         core.FeatureSet{core.FeatureArchiveSync, core.FeatureRunSession},
-		Coordinator:      core.CoordinatorNever,
-		ClassDisposition: core.ProviderClassDispositionUnmapped,
+		SyncGuardrailFullCandidate: true,
+		Name:                       providerName,
+		Family:                     "upstash",
+		Kind:                       core.ProviderKindDelegatedRun,
+		Targets:                    []core.TargetSpec{{OS: core.TargetLinux}},
+		Features:                   core.FeatureSet{core.FeatureArchiveSync, core.FeatureRunSession},
+		Coordinator:                core.CoordinatorNever,
+		ClassDisposition:           core.ProviderClassDispositionUnmapped,
 	}
 }
 

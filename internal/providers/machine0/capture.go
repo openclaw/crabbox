@@ -42,7 +42,7 @@ func (b *backend) advanceCheckpointCapture(ctx context.Context, req core.NativeC
 			return exit(2, "Machine0 checkpoint account identity changed; retain source")
 		}
 		readSource := func() (machine, error) {
-			if err := b.attestCheckpointAccount(ctx, metadata); err != nil {
+			if err := b.attestCheckpointAccount(ctx, metadata[metadataAccountID]); err != nil {
 				return machine{}, err
 			}
 			return b.readCheckpointSource(ctx, claim, req.Capture.SourceName)
@@ -57,7 +57,7 @@ func (b *backend) advanceCheckpointCapture(ctx context.Context, req core.NativeC
 				return err
 			}
 		}
-		if err := b.attestCheckpointAccount(ctx, metadata); err != nil {
+		if err := b.attestCheckpointAccount(ctx, metadata[metadataAccountID]); err != nil {
 			return err
 		}
 		if req.Capture.Phase == "prepared" {
@@ -183,7 +183,7 @@ func (b *backend) advanceCheckpointCapture(ctx context.Context, req core.NativeC
 	return result, err
 }
 
-func (b *backend) releaseCheckpointSource(ctx context.Context, req ReleaseLeaseRequest) error {
+func (b *backend) releaseCheckpointSource(ctx context.Context, req ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	claim, exists, err := core.ReadLeaseClaimWithPresence(req.Lease.LeaseID)
 	if err != nil {
 		return err
@@ -207,7 +207,7 @@ func (b *backend) releaseCheckpointSource(ctx context.Context, req ReleaseLeaseR
 			return exit(2, "checkpoint source release identity changed")
 		}
 		findSource := func() (bool, error) {
-			if err := b.attestCheckpointAccount(ctx, resource.Metadata); err != nil {
+			if err := b.attestCheckpointSourceAccount(ctx, resource.Metadata, resource.Capture); err != nil {
 				return false, err
 			}
 			items, err := b.api.List(ctx)
@@ -226,10 +226,11 @@ func (b *backend) releaseCheckpointSource(ctx context.Context, req ReleaseLeaseR
 					found = true
 				}
 			}
-			return found, b.attestCheckpointAccount(ctx, resource.Metadata)
+			return found, b.attestCheckpointSourceAccount(ctx, resource.Metadata, resource.Capture)
 		}
 		found, err := findSource()
 		if err != nil || !found {
+			outcome.Terminal = err == nil
 			return err
 		}
 		item, err := b.readCheckpointSource(ctx, claim, name)
@@ -243,7 +244,7 @@ func (b *backend) releaseCheckpointSource(ctx context.Context, req ReleaseLeaseR
 		default:
 			return exit(5, "checkpoint source state=%s is not safe to retire; retain operation", item.Status)
 		}
-		if err := b.attestCheckpointAccount(ctx, resource.Metadata); err != nil {
+		if err := b.attestCheckpointSourceAccount(ctx, resource.Metadata, resource.Capture); err != nil {
 			return err
 		}
 		removeErr := b.api.Remove(ctx, name)
@@ -252,6 +253,7 @@ func (b *backend) releaseCheckpointSource(ctx context.Context, req ReleaseLeaseR
 			return err
 		}
 		if !found {
+			outcome.Terminal = true
 			return nil
 		}
 		if removeErr != nil {
@@ -262,29 +264,32 @@ func (b *backend) releaseCheckpointSource(ctx context.Context, req ReleaseLeaseR
 }
 
 func (b *backend) CheckpointSourceAbsent(ctx context.Context, req core.CheckpointSourceRequest) (bool, error) {
-	if err := b.attestCheckpointAccount(ctx, req.Resource.Metadata); err != nil {
+	if err := b.attestCheckpointSourceAccount(ctx, req.Resource.Metadata, &req.Capture); err != nil {
 		return false, err
 	}
 	items, err := b.api.List(ctx)
 	if err != nil {
 		return false, err
 	}
+	found := false
 	for _, item := range items {
 		if item.Name == req.Capture.SourceName && item.ID != req.Capture.SourceID {
 			return false, exit(2, "checkpoint source name now belongs to a replacement")
 		}
 		if item.ID == req.Capture.SourceID {
-			return false, nil
+			if item.Name != req.Capture.SourceName {
+				return false, exit(2, "checkpoint source name changed")
+			}
+			found = true
 		}
 	}
-	if err := b.attestCheckpointAccount(ctx, req.Resource.Metadata); err != nil {
+	if err := b.attestCheckpointSourceAccount(ctx, req.Resource.Metadata, &req.Capture); err != nil {
 		return false, err
 	}
-	return true, nil
+	return !found, nil
 }
 
-func (b *backend) attestCheckpointAccount(ctx context.Context, metadata map[string]string) error {
-	expected := metadata[metadataAccountID]
+func (b *backend) attestCheckpointAccount(ctx context.Context, expected string) error {
 	if expected == "" {
 		return exit(2, "checkpoint has no captured Machine0 account identity; retain source for recovery")
 	}

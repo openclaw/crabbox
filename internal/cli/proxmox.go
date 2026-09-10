@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
@@ -35,7 +36,7 @@ type ProxmoxReadinessCheck struct {
 
 var (
 	proxmoxRunSSHQuietWithOptions = runSSHQuietWithOptions
-	proxmoxRunSSHInputQuiet       = runSSHInputQuiet
+	proxmoxRunSSHInput            = runSSHInput
 	proxmoxAPITokenPattern        = regexp.MustCompile(`PVEAPIToken=[A-Za-z0-9@._!%+=:/~-]+`)
 )
 
@@ -1101,12 +1102,45 @@ func (c *ProxmoxClient) waitServerIP(ctx context.Context, vmid int) (Server, err
 	}
 }
 
+const proxmoxBootstrapDiagnosticLimit = 16 << 10
+
+// Display only the safe diagnostic; keep the native cause without promoting its
+// status to the CLI's separate ExitError contract.
+type proxmoxBootstrapError struct {
+	message string
+	cause   error
+}
+
+func (e *proxmoxBootstrapError) Error() string { return e.message }
+func (e *proxmoxBootstrapError) Unwrap() error { return e.cause }
+
 func (c *ProxmoxClient) bootstrapSSH(ctx context.Context, host string, cfg Config) error {
 	target := SSHTargetFromConfig(cfg, host)
 	deadline := time.Now().Add(10 * time.Minute)
 	for {
 		if proxmoxRunSSHQuietWithOptions(ctx, target, sshTransportProbeCommand(target), "5", "1") == nil {
-			return proxmoxRunSSHInputQuiet(ctx, target, "sudo /bin/bash -s", proxmoxBootstrapScript(cfg))
+			out := newSynchronizedBuffer(proxmoxBootstrapDiagnosticLimit)
+			err := proxmoxRunSSHInput(ctx, target, "sudo /bin/bash -s", strings.NewReader(proxmoxBootstrapScript(cfg)), &out, &out)
+			if err == nil {
+				return nil
+			}
+			status := "unknown"
+			var native *exec.ExitError
+			if errors.As(err, &native) && native.ExitCode() >= 0 {
+				status = strconv.Itoa(native.ExitCode())
+			}
+			diagnostic, truncated := out.boundedString()
+			if truncated {
+				// A cut credential cannot be reliably redacted from a partial capture.
+				diagnostic = "diagnostics truncated; captured output omitted"
+			}
+			message := fmt.Sprintf("proxmox guest bootstrap exit=%s: %v", status, err)
+			if diagnostic = strings.TrimSpace(diagnostic); diagnostic != "" {
+				message += ": " + diagnostic
+			}
+			message = RedactDiagnosticSecrets(message, c.TokenID, c.TokenSecret, cfg.Proxmox.TokenID, cfg.Proxmox.TokenSecret)
+			message = proxmoxAPITokenPattern.ReplaceAllString(message, "PVEAPIToken=<redacted>")
+			return &proxmoxBootstrapError{message: message, cause: err}
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timeout waiting for proxmox ssh bootstrap transport")
@@ -1363,19 +1397,6 @@ func (c *ProxmoxClient) waitTask(ctx context.Context, upid string) error {
 		}
 	}
 }
-
-type proxmoxAgentExecStart struct {
-	PID int `json:"pid"`
-}
-
-type proxmoxAgentExecStatus struct {
-	Exited   proxmoxBool `json:"exited"`
-	ExitCode int         `json:"exitcode"`
-	OutData  string      `json:"out-data"`
-	ErrData  string      `json:"err-data"`
-}
-
-type proxmoxBool bool
 
 type proxmoxAgentInterface struct {
 	Name        string `json:"name"`

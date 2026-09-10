@@ -194,6 +194,14 @@ Failed stops report both the native failure and any independent verification or
 finalization failure, preserving the native exit code. Failed-query stderr is
 diagnostic only and never proves completion.
 
+A never-assigned Testbox can move directly from `queued` to `completed`, with
+empty IP and `RUN URL` cells. This permits cleanup only after a successful,
+uncanceled native status query returns the exact owned identity in a complete
+native table, with nonempty `CREATED`, aligned columns, trailing padding through
+the empty `RUN URL` cell, and the final newline. Present run URLs remain
+validated. Missing or failed status is still not completion evidence; the
+exclusive claim/status recheck and key-before-claim finalization remain required.
+
 Use the same organization/API route when reusing or stopping a lease. Workflow
 flags are still unnecessary for reuse; the provider checks stored native
 workflow/job/ref metadata. Token rotation within the same organization remains
@@ -284,6 +292,8 @@ for inventory and enrichment semantics.
 - Provider sync: yes, Blacksmith-owned.
 - Desktop/browser/code: no Crabbox VNC/code surface.
 - Proof: yes, from the delegated stream, timing, and metadata.
+- Prepared artifact workspace: optional CI-owned binding; see
+  [prepared artifact workspace](../features/blacksmith-testbox.md#prepared-artifact-workspace).
 - Actions hydration: Blacksmith owns workflow setup; not Crabbox SSH hydration.
 - Coordinator: no (always direct from the CLI).
 
@@ -307,8 +317,34 @@ for inventory and enrichment semantics.
   `--download` are rejected because Blacksmith owns command transport and remote
   file transport. Use `--emit-proof` for PR-ready transcript proof.
 - `--artifact-glob` and `--require-artifact` run through the Blacksmith adapter:
-  after command success, Crabbox asks the same Testbox to validate required
-  globs and stream one bounded local tarball under `.crabbox/runs/<lease>/`.
+  an adapter-owned supervisor finalizes a bounded archive in the original native invocation after
+  a normal terminal workload exit, including failures below 128. No follow-up
+  native run or re-sync occurs; the native download primitive transfers the exact
+  finalized file under the same claim and deadline. Signal-like exits skip collection. Publication
+  requires a fresh complete receipt, clean native transport, an uncanceled
+  caller, and the original unchanged claim fence; stopped-lease recovery is not
+  supported. Collection failures preserve an earlier workload failure; after
+  workload success they still fail the run. Required globs remain all-or-nothing.
+  The defaults are 256 files and 10 MiB compressed, stored privately under
+  `.crabbox/runs/<lease>/<nonce>/blacksmith-artifacts.tgz`, with protected paths and
+  symlink handling unchanged. Linux `timeout` with `--kill-after` is required
+  before execution; collection and native download share one 30-second budget,
+  subordinate to caller cancellation, not a workload deadline. Finalized remote
+  transfer archives remain nonce-scoped until canonical lease cleanup; their
+  locator and policy are recorded. Bounded downloads require a macOS/Linux
+  client, native download support, compatible `ps` process-group inspection and
+  unprivileged OpenSSH scp. Missing or incompatible process inspection and
+  unavailable or privileged scp helpers fail before the workload launches. Keep the installed
+  tools stable during transfer: observed scp path, identity or content changes
+  withhold artifacts. Standalone command groups
+  remain owned until live members close; inherited controller-owned mode is
+  refused before workload execution. Cleanup-pending failure holds the original
+  claim while joining and never extends the success deadline. The leader remains
+  unreaped through cleanup; a contradicted child reservation retains the same
+  pending owner without further signals or reaping. Command
+  timing ends at the workload receipt; collection and cleanup count toward total.
+  Artifacts from a failed run are not success proof or remote source attestation.
+  See the [artifact contract](../features/blacksmith-testbox.md#run-artifacts).
 - `--actions-runner` is rejected; Blacksmith owns runner hydration.
 - `--tailscale`, desktop helpers, screenshots, VNC, and `artifacts collect` are
   rejected because Blacksmith owns machine connectivity.

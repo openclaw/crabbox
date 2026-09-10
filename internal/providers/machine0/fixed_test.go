@@ -328,8 +328,8 @@ func TestMachine0FixedReleasedTombstoneRefusesReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	previous := readFixedMachine0Claim(t, lease.LeaseID)
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
-		t.Fatal(err)
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil || !outcome.Terminal {
+		t.Fatalf("fixed deletion outcome=%+v err=%v", outcome, err)
 	}
 	if len(api.removed) != 1 {
 		t.Fatalf("removed=%v", api.removed)
@@ -339,6 +339,10 @@ func TestMachine0FixedReleasedTombstoneRefusesReplay(t *testing.T) {
 	retained, err := b.RetainLeaseClaimAfterReleaseWithClaim(lease, previous)
 	if err != nil || !retained {
 		t.Fatalf("retained=%v err=%v", retained, err)
+	}
+	b.cfg.Machine0.ReleasePolicy = "suspend"
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: lease.LeaseID}}); err != nil || !outcome.Terminal || len(api.removed) != 1 {
+		t.Fatalf("terminal receipt under suspend policy: outcome=%+v err=%v removed=%v", outcome, err, api.removed)
 	}
 	_, err = b.Acquire(context.Background(), req)
 	assertMachine0Exit(t, err, 4, "is terminal and cannot be replayed")
@@ -605,8 +609,8 @@ func TestMachine0FixedSuspendReleaseKeepsLiveClaimAndReplayStartsMachine(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
-		t.Fatal(err)
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil || outcome.Terminal {
+		t.Fatalf("suspend outcome=%+v err=%v", outcome, err)
 	}
 	claim := readFixedMachine0Claim(t, lease.LeaseID)
 	if claim.FixedCreateIntent.State != fixedMachine0IntentAcquired || claim.CloudID != lease.Server.CloudID || claim.ProviderScope != machineScope(lease.Server.CloudID) {

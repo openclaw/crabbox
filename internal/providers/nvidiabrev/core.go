@@ -2,7 +2,6 @@ package nvidiabrev
 
 import (
 	"flag"
-	"strings"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -120,12 +119,3 @@ func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
 }
 
 var waitForSSH = core.WaitForSSH
-
-func isNvidiaBrevProviderName(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case providerName, "brev", "nvidia":
-		return true
-	default:
-		return false
-	}
-}

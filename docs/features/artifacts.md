@@ -25,10 +25,16 @@ delegated providers still need an advertised bounded-artifact capability. On
 macOS, the remote needs stock `/bin/bash`, `find` with `-print0`, `tar`,
 `base64`, and `/bin/rm`.
 
+Literal artifact paths limit discovery to their parent directory, so unrelated
+subdirectories do not consume the artifact-discovery budget.
+
 Repeat `--require-artifact <glob>` when the run should fail unless a proof file,
 manifest, or report exists after the command exits successfully. Required
 artifacts use the same safe relative glob syntax and target limits as
 `--artifact-glob`; each required glob must resolve to at least one regular file.
+Both flags reject literal `..`, `.git`, and `.crabbox` path components locally
+before lease acquisition. Ordinary names containing consecutive dots, such as
+`reports/result..json`, remain valid.
 A symlink counts only when its target is a regular file; dangling symlinks and
 symlinks to directories do not satisfy the proof gate or enter artifact archives.
 Directory symlinks are never traversed during matching, including when a

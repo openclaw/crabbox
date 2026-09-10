@@ -129,7 +129,7 @@ func TestConfirmedAbsentStateCleanupRecoversControllerTombstones(t *testing.T) {
 		if err := os.WriteFile(path+".deleted", []byte("stale WebVNC identity"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		stopped, err := (App{Stdout: io.Discard, Stderr: io.Discard}).stopWebVNCDaemonIfRunning(leaseID)
+		stopped, err := (App{Stdout: io.Discard, Stderr: io.Discard}).stopWebVNCDaemonIfRunning(t.Context(), leaseID)
 		if err != nil {
 			t.Fatal(err)
 		}

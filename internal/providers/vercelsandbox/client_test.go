@@ -169,6 +169,66 @@ func TestRunBridgeExecAcceptsLegacyResult(t *testing.T) {
 	}
 }
 
+func TestRunBridgeExecPreservesCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stdout := &notifyingWriter{ch: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() {
+		_, err := runBridgeExec(ctx, commandSpec{
+			Name: "sh", Args: []string{"-c", `printf '%s\n' '{"type":"stdout","data":"ready"}'; exec sleep 30`},
+			Env: []string{"PATH=/usr/bin:/bin"},
+		}, bridgeRequest{Action: "exec"}, stdout, io.Discard)
+		done <- err
+	}()
+	select {
+	case <-stdout.ch:
+		cancel()
+	case err := <-done:
+		t.Fatalf("bridge ended before cancellation: %v", err)
+	case <-time.After(5 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("bridge did not reach its running state")
+	}
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("bridge lost cancellation cause: %v", err)
+	}
+}
+
+func TestRunBridgeExecPreservesDeadlineDuringPartialFrame(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	_, err := runBridgeExec(ctx, commandSpec{
+		Name: "sh", Args: []string{"-c", `printf '{"type":'; exec sleep 30`},
+		Env: []string{"PATH=/usr/bin:/bin"},
+	}, bridgeRequest{Action: "exec"}, io.Discard, io.Discard)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("partial frame lost deadline cause: %v", err)
+	}
+}
+
+func TestRunBridgeCommandsPreserveDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(context.Context, commandSpec) error
+	}{
+		{name: "command", run: runBridgeCommand},
+		{name: "JSON", run: func(ctx context.Context, spec commandSpec) error {
+			return runBridgeJSONWithPayload(ctx, spec, bridgeRequest{Action: "fixture"}, nil, nil)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			err := tc.run(ctx, commandSpec{Name: "sh", Args: []string{"-c", "exec sleep 30"}, Env: []string{"PATH=/usr/bin:/bin"}})
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("bridge lost deadline: %v", err)
+			}
+		})
+	}
+}
+
 func TestAppendBridgeExecOutputBoundsCapturedResult(t *testing.T) {
 	got := strings.Repeat("a", bridgeExecCaptureLimit-1)
 	appendBridgeExecOutput(&got, "bc")

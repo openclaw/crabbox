@@ -33,6 +33,28 @@ func isolateBlacksmithOwnership(t *testing.T) {
 	t.Setenv("CRABBOX_ENV_ALLOW", "")
 }
 
+func TestParseBlacksmithIdentityNeverAssignedCompleted(t *testing.T) {
+	const id = "tbx_01aaaaaaaaaaaaaaaaaaaaaaaa"
+	// Synthetic identities, retaining the observed native 0.4.57 table framing.
+	const output = "ID                              STATUS     IP  WORKFLOW                                  JOB  REF                                     CREATED                      RUN URL\n" +
+		"tbx_01aaaaaaaaaaaaaaaaaaaaaaaa  completed      .github/workflows/ci-testing-testbox.yml  go   fix/queue-testbox-cleanup-verification  2026-09-02T13:54:37.000000Z  \n"
+	identity, err := parseBlacksmithIdentity(output, id)
+	if err != nil || identity != (blacksmithIdentity{ID: id, State: "completed", Workflow: ".github/workflows/ci-testing-testbox.yml", Job: "go", Ref: "fix/queue-testbox-cleanup-verification"}) {
+		t.Fatalf("complete native row with empty IP/URL rejected: identity=%+v err=%v", identity, err)
+	}
+}
+
+func TestParseBlacksmithIdentityRejectsTruncatedCompletion(t *testing.T) {
+	const id = "tbx_truncated123"
+	for _, output := range []string{nativeNeverAssignedStatus(id, "completed"), nativeStopStatus(id, "completed", "")} {
+		for end := 0; end < len(output); end++ {
+			if _, err := parseBlacksmithIdentity(output[:end], id); err == nil {
+				t.Fatalf("accepted truncated completion: %q", output[:end])
+			}
+		}
+	}
+}
+
 func TestBlacksmithStopRejectsUnownedIdentity(t *testing.T) {
 	for _, kind := range []string{"missing", "legacy", "provider", "cloud-id", "slug", "revision", "repository", "scope", "workflow", "duplicate"} {
 		t.Run(kind, func(t *testing.T) {

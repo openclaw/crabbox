@@ -11,6 +11,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type cubesandboxFlagValues struct {
@@ -41,11 +42,8 @@ func RegisterCubeSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyCubeSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == providerName {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=cubesandbox")
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=cubesandbox")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(cubesandboxFlagValues)
@@ -96,7 +94,7 @@ func (b *cubesandboxBackend) Warmup(ctx context.Context, req WarmupRequest) erro
 	if err := validateCubeSandboxUser(b.cfg.CubeSandbox.User); err != nil {
 		return err
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	client, err := newCubeSandboxClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -109,186 +107,102 @@ func (b *cubesandboxBackend) Warmup(ctx context.Context, req WarmupRequest) erro
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: cubesandbox warmup keeps the sandbox until explicit stop\n")
 	}
-	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  leaseID,
-			Slug:     slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	total := core.ClockNow(b.rt.Clock).Sub(started)
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
 
 func (b *cubesandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
-	if err := rejectCubeSandboxSyncOptions(req); err != nil {
-		return RunResult{}, err
-	}
-	processUser, err := cubesandboxProcessUser(b.cfg.CubeSandbox.User)
-	if err != nil {
-		return RunResult{}, err
-	}
-	started := b.now()
-	client, err := newCubeSandboxClient(b.cfg, b.rt)
-	if err != nil {
-		return RunResult{}, err
-	}
-	var prepared *core.PreparedArchive
-	if req.ID == "" && !req.NoSync {
-		prepared, err = core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-			Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-			TempPattern: "crabbox-cubesandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
-		})
-		if err != nil {
-			return RunResult{}, err
-		}
-		defer prepared.Close()
-	}
-	leaseID, sandboxID, slug := "", "", ""
-	acquired := false
-	if req.ID == "" {
-		var sandbox cubesandboxSandbox
-		leaseID, sandbox, slug, err = b.createSandbox(ctx, client, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug)
-		if err != nil {
-			return RunResult{}, err
-		}
-		sandboxID = sandbox.SandboxID
-		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=cubesandbox sandbox=%s\n", leaseID, slug, sandboxID)
-		acquired = true
-	} else {
-		leaseID, sandboxID, slug, err = b.resolveSandboxID(ctx, client, req.ID, req.Repo.Root, req.Reclaim)
-		if err != nil {
-			return RunResult{}, err
-		}
-	}
-	shouldStop := acquired && !req.Keep
-	if shouldStop {
-		defer func() {
-			if !shouldStop {
-				return
-			}
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), cubesandboxCleanupTimeout)
-			defer cancel()
-			if err := b.deleteClaimedSandbox(cleanupCtx, client, leaseID, sandboxID); err != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: cubesandbox stop failed for %s: %v\n", sandboxID, err)
-			}
-		}()
-	}
-	result := RunResult{
-		SyncDelegated: true,
-		Session: &RunSessionHandle{
-			Provider:       providerName,
-			LeaseID:        leaseID,
-			Slug:           slug,
-			Reused:         !acquired,
-			Kept:           !shouldStop,
-			CleanupCommand: cubesandboxCleanupCommand(leaseID),
-		},
-	}
-	finishResult := func() RunResult {
-		result.Total = b.now().Sub(started)
-		result.Session.Kept = !shouldStop
-		return result
-	}
-
-	session, err := client.ConnectSandbox(ctx, sandboxID, cubesandboxTimeoutSeconds(b.cfg.TTL))
-	if err != nil {
-		return finishResult(), cubesandboxError("connect sandbox", err)
-	}
+	var client cubesandboxAPI
+	var processUser, leaseID, sandboxID, slug string
+	var session cubesandboxSession
 	workspace := cubesandboxWorkspacePath(b.cfg)
-	syncDuration := time.Duration(0)
-	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
-	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, session, req, workspace, prepared)
-		if err != nil {
-			return finishResult(), err
-		}
-		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.prepareWorkspace(ctx, client, session, workspace); err != nil {
-		return finishResult(), err
+	boundSandbox := func() shared.DelegatedSandbox {
+		return shared.DelegatedSandbox{LeaseID: leaseID, Slug: slug, CleanupCommand: cubesandboxCleanupCommand(leaseID)}
 	}
-	if req.SyncOnly {
-		result := finishResult()
-		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workspace)
-		if req.TimingJSON {
-			err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-				Provider:      providerName,
-				LeaseID:       leaseID,
-				Slug:          slug,
-				SyncDelegated: true,
-				SyncMs:        syncDuration.Milliseconds(),
-				SyncPhases:    syncPhases,
-				SyncSkipped:   req.NoSync,
-				TotalMs:       result.Total.Milliseconds(),
-				ExitCode:      0,
-				Label:         strings.TrimSpace(req.Label),
-			}, result, nil))
-			return result, err
-		}
-		return result, nil
-	}
-	command := cubesandboxCommandString(req.Command, req.ShellMode)
-	if command == "" {
-		return finishResult(), exit(2, "missing command")
-	}
-	commandStarted := b.now()
-	fmt.Fprintf(b.rt.Stderr, "running on cubesandbox %s\n", strings.Join(req.Command, " "))
-	commandEnv, strippedAuthEnv := cubeSandboxCommandEnv(req.Env)
-	if len(strippedAuthEnv) > 0 {
-		fmt.Fprintf(b.rt.Stderr, "warning: provider=%s did not forward provider authentication variables: %s\n", providerName, strings.Join(strippedAuthEnv, ","))
-	}
-	exitCode, commandErr := client.StartProcess(ctx, session, cubesandboxProcessRequest{
-		Command: command,
-		CWD:     workspace,
-		Env:     commandEnv,
-		User:    processUser,
-		Timeout: cubesandboxTimeoutDuration(b.cfg.TTL),
-		Stdout:  b.rt.Stdout,
-		Stderr:  b.rt.Stderr,
+	return shared.RunDelegatedSandbox(ctx, req, shared.DelegatedSandboxLifecycle{
+		Provider: providerName, Runtime: b.rt, Workdir: workspace,
+		IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL, CleanupTimeout: cubesandboxCleanupTimeout,
+		Preflight: func(context.Context) error {
+			if err := rejectCubeSandboxSyncOptions(req); err != nil {
+				return err
+			}
+			var err error
+			processUser, err = cubesandboxProcessUser(b.cfg.CubeSandbox.User)
+			if err != nil {
+				return err
+			}
+			client, err = newCubeSandboxClient(b.cfg, b.rt)
+			return err
+		},
+		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
+			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
+				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
+				TempPattern: "crabbox-cubesandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
+			})
+		},
+		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var sandbox cubesandboxSandbox
+			var err error
+			leaseID, sandbox, slug, err = b.createSandbox(ctx, client, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			sandboxID = sandbox.SandboxID
+			fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=cubesandbox sandbox=%s\n", leaseID, slug, sandboxID)
+			return boundSandbox(), nil
+		},
+		Resolve: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var err error
+			leaseID, sandboxID, slug, err = b.resolveSandboxID(ctx, client, req.ID, req.Repo.Root, req.Reclaim)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			return boundSandbox(), nil
+		},
+		Setup: func(ctx context.Context) error {
+			var err error
+			session, err = client.ConnectSandbox(ctx, sandboxID, cubesandboxTimeoutSeconds(b.cfg.TTL))
+			if err != nil {
+				return cubesandboxError("connect sandbox", err)
+			}
+			return nil
+		},
+		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+			return b.syncWorkspace(ctx, client, session, req, workspace, prepared)
+		},
+		NoSync: func(ctx context.Context) error {
+			return b.prepareWorkspace(ctx, client, session, workspace)
+		},
+		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
+			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
+			if err != nil {
+				return shared.DelegatedSandboxCommand{}, exit(2, "%v", err)
+			}
+			command := intent.ShellSource()
+			fmt.Fprintf(b.rt.Stderr, "running on cubesandbox %s\n", strings.Join(req.Command, " "))
+			commandEnv, strippedAuthEnv := cubeSandboxCommandEnv(req.Env)
+			if len(strippedAuthEnv) > 0 {
+				fmt.Fprintf(b.rt.Stderr, "warning: provider=%s did not forward provider authentication variables: %s\n", providerName, strings.Join(strippedAuthEnv, ","))
+			}
+			return shared.DelegatedSandboxCommand{
+				Text: strings.Join(req.Command, " "),
+				Run: func(ctx context.Context) (int, error) {
+					return client.StartProcess(ctx, session, cubesandboxProcessRequest{
+						Command: command, CWD: workspace, Env: commandEnv, User: processUser,
+						Timeout: cubesandboxTimeoutDuration(b.cfg.TTL), Stdout: b.rt.Stdout, Stderr: b.rt.Stderr,
+					})
+				},
+			}, nil
+		},
+		Cleanup: func(ctx context.Context) error {
+			return b.deleteClaimedSandbox(ctx, client, leaseID, sandboxID)
+		},
 	})
-	commandDuration := b.now().Sub(commandStarted)
-	result.ExitCode = exitCode
-	result.Command = commandDuration
-	result.Total = b.now().Sub(started)
-	result.Session.Kept = !shouldStop
-	if req.NoSync {
-		fmt.Fprintf(b.rt.Stderr, "cubesandbox run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
-	} else {
-		fmt.Fprintf(b.rt.Stderr, "cubesandbox run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
-	}
-	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-			Provider:      providerName,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			SyncDelegated: true,
-			SyncMs:        syncDuration.Milliseconds(),
-			SyncPhases:    syncPhases,
-			SyncSkipped:   req.NoSync,
-			CommandMs:     commandDuration.Milliseconds(),
-			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      result.ExitCode,
-			Label:         strings.TrimSpace(req.Label),
-		}, result, commandErr)); err != nil {
-			return result, err
-		}
-	}
-	if commandErr != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		failureCode := result.ExitCode
-		if failureCode == 0 {
-			failureCode = 1
-		}
-		return finishResult(), ExitError{Code: failureCode, Message: fmt.Sprintf("cubesandbox run failed: %v", commandErr)}
-	}
-	if result.ExitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return finishResult(), ExitError{Code: result.ExitCode, Message: fmt.Sprintf("cubesandbox run exited %d", result.ExitCode)}
-	}
-	return finishResult(), nil
 }
 
 func cubeSandboxCommandEnv(env map[string]string) (map[string]string, []string) {
@@ -343,9 +257,9 @@ func (b *cubesandboxBackend) Status(ctx context.Context, req StatusRequest) (sta
 	if err != nil {
 		return statusView{}, err
 	}
-	deadline := b.now().Add(req.WaitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
 	if req.WaitTimeout <= 0 {
-		deadline = b.now().Add(5 * time.Minute)
+		deadline = core.ClockNow(b.rt.Clock).Add(5 * time.Minute)
 	}
 	for {
 		sandbox, err := client.GetSandbox(ctx, sandboxID)
@@ -356,7 +270,7 @@ func (b *cubesandboxBackend) Status(ctx context.Context, req StatusRequest) (sta
 		if !req.Wait || view.Ready {
 			return view, nil
 		}
-		if b.now().After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return statusView{}, exit(5, "timed out waiting for sandbox %s to become ready", sandboxID)
 		}
 		select {
@@ -485,7 +399,7 @@ func (b *cubesandboxBackend) createSandbox(ctx context.Context, client cubesandb
 	}
 	cfg.TTL = cubesandboxTimeoutDuration(cfg.TTL)
 	cfg.ServerType = template
-	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", keep, b.now().UTC())
+	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", keep, core.ClockNow(b.rt.Clock).UTC())
 	labels["state"] = "ready"
 	labels["workdir"] = workspace
 	labels["template"] = template
@@ -855,19 +769,6 @@ func cubesandboxProcessUser(user string) (string, error) {
 	return clean, nil
 }
 
-func cubesandboxCommandString(command []string, shellMode bool) string {
-	if len(command) == 0 {
-		return ""
-	}
-	if shellMode {
-		return strings.Join(command, " ")
-	}
-	if shouldUseShell(command) || leadingEnvAssignment(command) {
-		return shellScriptFromArgv(command)
-	}
-	return strings.Join(shellWords(command), " ")
-}
-
 func rejectCubeSandboxSyncOptions(req RunRequest) error {
 	if req.ChecksumSync {
 		return exit(2, "%s uses CubeSandbox archive sync; --checksum is not supported", providerName)
@@ -892,11 +793,4 @@ func cubesandboxError(action string, err error) error {
 		return nil
 	}
 	return fmt.Errorf("cubesandbox %s: %w", action, err)
-}
-
-func (b *cubesandboxBackend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }

@@ -26,7 +26,7 @@ func (b *backend) syncWorkspace(ctx context.Context, transport sandboxTransport,
 		PhaseName:           "cloud_run_sandbox_sync",
 		Provider:            providerName,
 		Stderr:              b.rt.Stderr,
-		Now:                 b.now,
+		Now:                 func() time.Time { return core.ClockNow(b.rt.Clock) },
 		CleanupContext:      b.cleanupContext,
 		Upload: func(uploadCtx context.Context, remoteArchive string, body io.Reader) error {
 			return b.uploadArchive(uploadCtx, transport, sandboxID, remoteArchive, body)

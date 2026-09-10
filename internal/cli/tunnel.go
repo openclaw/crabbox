@@ -81,7 +81,7 @@ func runSSHLocalForward(ctx context.Context, target SSHTarget, requestedLocalPor
 	defer stopTerminationSignals()
 	ctx = terminationCtx
 
-	reservation, err := reserveSSHLocalForwardPort(requestedLocalPort)
+	reservation, err := reserveSSHLocalForwardPort(ctx, requestedLocalPort)
 	if err != nil {
 		return err
 	}
@@ -239,18 +239,21 @@ type sshLocalForwardPortReservation struct {
 	unlock func()
 }
 
-func reserveSSHLocalForwardPort(requested string) (*sshLocalForwardPortReservation, error) {
+func reserveSSHLocalForwardPort(ctx context.Context, requested string) (*sshLocalForwardPortReservation, error) {
 	if requested != "" {
-		return reserveSpecificSSHLocalForwardPort(requested)
+		return reserveSpecificSSHLocalForwardPort(ctx, requested)
 	}
 	for attempt := 0; attempt < 32; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		listener, err := net.Listen("tcp4", net.JoinHostPort(sshTunnelLoopbackHost, "0"))
 		if err != nil {
 			return nil, fmt.Errorf("choose local SSH tunnel port: %w", err)
 		}
 		port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
 		_ = listener.Close()
-		reservation, err := reserveSpecificSSHLocalForwardPort(port)
+		reservation, err := reserveSpecificSSHLocalForwardPort(ctx, port)
 		if err == nil {
 			return reservation, nil
 		}
@@ -258,7 +261,7 @@ func reserveSSHLocalForwardPort(requested string) (*sshLocalForwardPortReservati
 	return nil, exit(5, "no available IPv4 loopback port found for SSH tunnel")
 }
 
-func reserveSpecificSSHLocalForwardPort(port string) (*sshLocalForwardPortReservation, error) {
+func reserveSpecificSSHLocalForwardPort(ctx context.Context, port string) (*sshLocalForwardPortReservation, error) {
 	portNumber, err := strconv.Atoi(port)
 	if err != nil || portNumber < 1 || portNumber > 65535 {
 		return nil, exit(2, "local port must be a TCP port in 1..65535")
@@ -274,7 +277,7 @@ func reserveSpecificSSHLocalForwardPort(port string) (*sshLocalForwardPortReserv
 	if err := os.Chmod(lockDir, 0o700); err != nil {
 		return nil, fmt.Errorf("secure local tunnel port lock directory: %w", err)
 	}
-	unlock, err := acquireDaemonFileLock(filepath.Join(lockDir, port+".lock"))
+	unlock, err := acquireDaemonFileLock(ctx, filepath.Join(lockDir, port+".lock"))
 	if err != nil {
 		return nil, fmt.Errorf("reserve local tunnel port %s: %w", port, err)
 	}

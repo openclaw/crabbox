@@ -171,7 +171,7 @@ func (b *backend) acquireDurable(ctx context.Context, req AcquireRequest) (Lease
 		if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
 			return LeaseTarget{}, err
 		}
-		server.Labels = touchInstanceLabels(server.Labels, cfg, "ready", time.Now().UTC())
+		server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", time.Now().UTC())
 		if err := setInstanceLabels(ctx, client, name, server.Labels); err != nil {
 			return LeaseTarget{}, err
 		}
@@ -203,6 +203,10 @@ func (b *backend) acquireDurable(ctx context.Context, req AcquireRequest) (Lease
 }
 
 func (b *backend) releaseDurable(ctx context.Context, client instanceClient, leaseID string, remove, force bool) error {
+	return b.releaseDurableWithOutcome(ctx, client, leaseID, remove, force, &core.ReleaseLeaseOutcome{})
+}
+
+func (b *backend) releaseDurableWithOutcome(ctx context.Context, client instanceClient, leaseID string, remove, force bool, outcome *core.ReleaseLeaseOutcome) error {
 	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
 	if err != nil {
 		return err
@@ -211,10 +215,11 @@ func (b *backend) releaseDurable(ctx context.Context, client instanceClient, lea
 		return core.Exit(4, "Incus lease %s has no durable ownership claim", leaseID)
 	}
 	if claim.FixedCreateIntent.State == "released" {
+		outcome.Terminal = true
 		return nil
 	}
 	if remove {
-		if _, err := b.deleteDurable(ctx, client, claim, force); err != nil {
+		if _, err := b.deleteDurableWithOutcome(ctx, client, claim, force, outcome); err != nil {
 			return err
 		}
 		core.RemoveStoredTestboxKey(leaseID)
@@ -272,6 +277,10 @@ func (b *backend) RetainLeaseClaimAfterReleaseWithClaim(lease LeaseTarget, previ
 // Commit validated deletion before the remote effect. A prepared create's first
 // 404 is inconclusive, whereas absence after this phase is safe to finalize.
 func (b *backend) deleteDurable(ctx context.Context, client instanceClient, claim core.LeaseClaim, force bool) (bool, error) {
+	return b.deleteDurableWithOutcome(ctx, client, claim, force, &core.ReleaseLeaseOutcome{})
+}
+
+func (b *backend) deleteDurableWithOutcome(ctx context.Context, client instanceClient, claim core.LeaseClaim, force bool, outcome *core.ReleaseLeaseOutcome) (bool, error) {
 	name := claim.FixedCreateIntent.Attempt["name"]
 	lookup := func() (*api.Instance, error) {
 		if err := verifyConnection(client, claim.ProviderScope); err != nil {
@@ -307,6 +316,7 @@ func (b *backend) deleteDurable(ctx context.Context, client instanceClient, clai
 	err := incusLeaseKind.FinalizeAfterCleanup(claim, func() error {
 		inst, err := lookup()
 		if err != nil || inst == nil {
+			outcome.Terminal = err == nil
 			return err
 		}
 		if inst.IsActive() {
@@ -317,9 +327,12 @@ func (b *backend) deleteDurable(ctx context.Context, client instanceClient, clai
 		// Stop may wait for a remote operation; recheck the same incarnation
 		// before the subsequent name-based deletion.
 		if current, err := lookup(); err != nil || current == nil {
+			outcome.Terminal = err == nil
 			return err
 		}
-		return client.DeleteInstance(name)
+		err = client.DeleteInstance(name)
+		outcome.Terminal = err == nil
+		return err
 	})
 	return true, err
 }

@@ -53,6 +53,14 @@ crabbox stop --provider islo --id isb_crabbox-repo-abcdef
 Read-only status lookup can still use a canonical sandbox name without a claim.
 Delete, pause, resume, SSH reuse, and delegated reuse cannot.
 
+A sandbox name is an addressing convenience, not the sandbox's identity: the
+immutable Islo sandbox `id` is. That Islo `id` is not what Crabbox's `--id`
+flag takes — `--id` accepts a Crabbox lease id, a Crabbox-generated sandbox
+name, or a slug, and rejects anything else with exit code 4. Existence is
+decided by a get on the exact sandbox, never by the eventually consistent list
+endpoint. See
+[identity and absence semantics](../features/islo.md#identity-and-absence-semantics).
+
 ## Auth
 
 ```sh
@@ -137,6 +145,41 @@ rejected before workspace preparation and sync.
 5. Require an `exit` event before treating a stream as successful.
 6. Delete the sandbox on release unless the lease is kept.
 
+Run outcomes and timing are finalized after retention or guarded cleanup. A
+cleanup-only failure exits `1`, reports `provider-error`, and keeps the recovery
+session and claim when teardown is unproven. An earlier command, setup, or
+artifact failure stays primary when cleanup or timing output also fails; the
+secondary diagnostics remain visible and reachable error causes are retained.
+Total time includes cleanup; command time excludes downloads and cleanup.
+
+Once a run has a bound session, `--keep-on-failure` also retains failures during
+workspace ownership repair, sync, and preparation. Errors before acquisition or
+reuse admission finishes remain with those operations' existing rollback and
+ownership policy. A later timing-output failure cannot undo successful deletion.
+
+For an enrolled reused lease, existing claim/scope/live-identity admission stays
+before the run session is bound. Resume, root health checks, daemon recovery, and
+metadata updates then run inside bound-session finalization: a failure returns a
+kept reused session and final timing, without running the workload or deleting
+the reused resource. Plain and legacy leases keep their existing admission
+semantics; this does not add a universal live lookup or upgrade an ID-less claim.
+Post-admission Tailscale errors retain their actual causes while preserving the
+existing public codes and messages, including fallback `1` for opaque validation
+errors. A status code alone does not create a context-cancellation cause.
+
+Observed SSE command exits keep their exact codes when stream decoding and output
+delivery complete successfully. A stream read, decode, or stdout/stderr delivery
+failure returns `1` even after an exit event was observed. Transport and cancellation
+failures also return `1` with their known failure origin and reachable cause.
+Closing the stream does not establish that the remote process stopped.
+Setup/helper failures preserve their public code without being mislabeled as
+user-command exits. Required-artifact and download failures after command success
+are provider errors: required-artifact failures keep `7`, and local download-write
+failures keep `2`. A first typed timing-writer failure keeps its own public code.
+The final error message redacts the configured Islo API key; workload output and
+upstream errors that already discarded causes are not reconstructed by this run
+finalizer.
+
 `crabbox status --wait` polls the sandbox every 2 seconds until it reports
 `running`, bounded by `--wait-timeout` (default 5 minutes). If the sandbox
 enters a terminal state (`failed`, `stopped`, `stopping`, or `deleted`) before
@@ -148,13 +191,47 @@ sandbox is resumed automatically and given up to 2 minutes to report `running`
 again before the command fails. A sandbox in a terminal state fails
 immediately with exit code 5.
 
+### Teardown safety
+
+Crabbox atomically records the API-assigned sandbox ID with a new or adopted
+claim; it never overwrites a claim that appeared during the API lookup.
+`DELETE /sandboxes/{name}` is name-only. For an ID-bound lease, `stop` first
+identifies the current name as the claimed ID. Cleanup requires a matching
+by-ID response with terminal status `deleted`, or a name 404 after positively
+identifying the resource during that teardown. A timestamp alone or list
+omission is not proof. Only confirmed cleanup removes the local claim.
+
+These checks are not an atomic delete-by-ID guarantee: the API's name-only
+DELETE can still race with an out-of-band resource replacement after the read.
+Legacy claims without an ID can fall back to the weaker `name-404-unbound`
+proof with a warning when no resource was positively identified.
+
+When neither identity lookup can tie the recorded name to the claimed resource -
+during an API read outage, for instance - `stop` refuses to delete, keeps the
+claim, and exits 5. Retrying it once reads answer again is the normal fix, and
+the sandbox may be running and billable until then.
+
+Run cleanup and Tailscale setup rollback use the resource identity and repository
+owner captured when the claim was published. They leave a replacement resource
+or repository claim untouched; a bookkeeping refresh does not transfer cleanup
+authority. An unproven teardown retains its recovery claim. If that claim is
+missing or unreadable, cleanup fails without deleting by the stored name. Verify
+the original resource ID and ownership before cleanup; the sandbox may remain
+running and billable.
+
 ## Capabilities
 
 - SSH: yes for direct login to existing Crabbox-created sandboxes. `crabbox ssh
   --provider islo --id <slug>` renders `ssh islo@<sandbox>.islo` on port 22
-  by default. Crabbox still does not use SSH for Islo `run` or sync.
+  by default. Crabbox still does not use SSH for Islo `run` or sync: its adapter
+  does not provision an SSH endpoint or manage a per-lease SSH credential,
+  expiry, and revocation. See
+  [why the provider kind stays delegated-run](../features/islo.md#why-the-provider-kind-stays-delegated-run).
 - Crabbox sync: yes, archive sync through the Islo files-archive API, with a
   base64 exec-upload fallback.
+  `--no-sync` creates the workspace directory if needed without deleting
+  existing files. Workspace replacement applies only during archive sync when
+  `sync.delete` is enabled; disabling it preserves existing files before upload.
 - URL bridge: yes. Exposed ports become public HTTPS shares through Islo's
   `/sandboxes/{name}/shares` API, surfaced by `--expose` and the pond bridge
   plane. Share creation is idempotent per port. Requested TTLs are clamped
@@ -172,11 +249,13 @@ immediately with exit code 5.
   files-archive API with mode 0700, and run as `bash -lc 'exec bash "$@"' bash
   <path>` (or `exec "$@"` when the script carries a shebang), so the remote path
   is always a positional argument and never spliced into shell text. Trailing
-  argv is forwarded to the script. The uploaded file is then removed on a
-  best-effort basis through a short bounded cleanup context of its own, so a
-  cancelled or timed-out run still removes its script instead of leaving it in a
-  kept or reused sandbox; a failed removal is warned about on stderr and never
-  changes the exit code.
+  argv is forwarded to the script. On Tailnet leases, ownership is handed to
+  the workload user in the configured workspace before execution. Cleanup
+  uses the administrative user that uploaded the archive, so it can remove
+  the file even from directories created by that upload. Removal is attempted
+  through a separate bounded context after execution, cancellation, or upload
+  and ownership failures. A failed removal is warned about on stderr and never
+  changes the workload exit code.
 - Desktop / browser / code: no.
 - Actions hydration: no.
 - Coordinator (broker): no — always direct from the CLI.
@@ -206,11 +285,30 @@ immediately with exit code 5.
   claim. Names that require case, whitespace, or punctuation normalization and
   non-Crabbox sandboxes are rejected.
 
+## Create deadlines and uncertain responses
+
+Sandbox creation has a five-minute total client budget, including authentication,
+response headers, response body, and existing SDK retries. An earlier caller
+cancellation or deadline still wins. The internally owned create transport does
+not apply the ordinary 30-second response-header cutoff; ordinary API and auth
+requests retain it. Command streams remain governed by their caller context,
+cleanup retains its separate 15-second budget, and bounded run-file reads retain
+20 seconds. Explicitly supplied HTTP clients keep their own transport/timeouts.
+
+These are client limits, not a provider provisioning SLA, resource TTL, or
+billing cap. A create timeout, lost response, or incomplete response can leave a sandbox running even
+though Crabbox has no acquired lease. The error reports the requested name as an
+**unconfirmed attempt locator**, not an ownership claim. Inspect the resource's
+identity and the intended repository/account before explicitly using the
+existing `--reclaim` adoption flow and `crabbox stop`. Crabbox does not
+invent a pending claim, automatically adopt/delete by that name, or add a create
+retry. The locator is not a crash-safe journal or an exactly-once guarantee.
+
 ## Live testing
 
 Two opt-in smoke tests in `internal/providers/islo/backend_live_test.go`
 (build tag `smoke`) exercise the real Islo API. Neither runs in the default
-`go test -race ./...` job, and both skip in `go test -short` mode. Both read
+`go test -race -timeout=20m ./...` job, and both skip in `go test -short` mode. Both read
 `ISLO_API_KEY` only — `CRABBOX_ISLO_API_KEY`, which authenticates normal
 Crabbox runs, is not consulted — and skip when it is unset.
 
@@ -234,7 +332,9 @@ CRABBOX_LIVE_ISLO_PAUSE_RESUME=1 ISLO_API_KEY=... \
 The lifecycle test honors `ISLO_BASE_URL` (default `https://api.islo.dev`) and
 `CRABBOX_LIVE_ISLO_IMAGE` (default `docker.io/library/ubuntu:26.04`). After it
 captures the lease ID, it attempts to delete the sandbox on exit even when a
-later assertion fails. If setup fails before lease capture or the process is
+later assertion fails. Success requires a matching terminal by-ID tombstone,
+name not-found, and local claim absence; a cleanup failure fails the test.
+If setup fails before lease capture or the process is
 interrupted, remove the leftover `crabbox-pause-resume-live-*` sandbox through
 the `--reclaim` adoption flow above followed by `crabbox stop`, or delete it on
 the Islo side.

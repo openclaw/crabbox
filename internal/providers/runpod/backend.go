@@ -9,6 +9,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 // Polling configuration for waiting on a freshly deployed pod to expose its
@@ -316,33 +319,27 @@ func applyRunpodDefaults(cfg *Config) {
 		cfg.TargetOS = targetLinux
 	}
 	if cfg.Runpod.APIURL == "" {
-		cfg.Runpod.APIURL = "https://rest.runpod.io/v1"
+		cfg.Runpod.APIURL = core.RunpodConfigDefaultAPIURL
 	}
 	if cfg.Runpod.CloudType == "" {
-		cfg.Runpod.CloudType = "SECURE"
+		cfg.Runpod.CloudType = core.RunpodConfigDefaultCloudType
 	}
 	if cfg.Runpod.InstanceID == "" {
-		cfg.Runpod.InstanceID = "NVIDIA L4,NVIDIA RTX 4000 Ada Generation,NVIDIA RTX A4000,NVIDIA GeForce RTX 3090,NVIDIA GeForce RTX 4090,NVIDIA RTX A5000,NVIDIA RTX A4500"
+		cfg.Runpod.InstanceID = core.RunpodConfigDefaultInstanceID
 	}
 	if cfg.Runpod.Image == "" {
-		cfg.Runpod.Image = "runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04"
+		cfg.Runpod.Image = core.RunpodConfigDefaultImage
 	}
 	if cfg.Runpod.DiskGB <= 0 {
-		cfg.Runpod.DiskGB = 20
+		cfg.Runpod.DiskGB = core.RunpodConfigDefaultDiskGB
 	}
-	if cfg.Runpod.WorkRoot == "" {
-		if !isDefaultWorkRoot(cfg.WorkRoot) {
-			cfg.Runpod.WorkRoot = cfg.WorkRoot
-		} else {
-			cfg.Runpod.WorkRoot = "/tmp/crabbox"
-		}
-	}
+	cfg.Runpod.WorkRoot = core.ResolveInheritedWorkRoot(cfg.Runpod.WorkRoot, cfg.WorkRoot, core.RunpodWorkRootFallback)
 	if cfg.Runpod.User != "" {
 		cfg.SSHUser = cfg.Runpod.User
 	} else if cfg.SSHUser == "" || cfg.SSHUser == "crabbox" {
 		// RunPod pods always boot with root as the SSH user. The local USER
 		// environment variable is unrelated to the remote account.
-		cfg.SSHUser = "root"
+		cfg.SSHUser = core.RunpodSSHUserFallback
 	}
 	if cfg.Runpod.WorkRoot != "" {
 		cfg.WorkRoot = cfg.Runpod.WorkRoot
@@ -601,13 +598,15 @@ func unclaimedRunpodError(identifier string) error {
 }
 
 func validateCreatedRunpodPod(pod runpodPod, expectedID, expectedName string) error {
-	if strings.TrimSpace(expectedID) == "" || pod.ID != expectedID {
+	expected := shared.NamedResourceIdentity{ID: expectedID, Name: expectedName}
+	mismatch := expected.Validate(shared.NamedResourceIdentity{ID: pod.ID, Name: pod.Name})
+	if mismatch == nil {
+		return nil
+	}
+	if mismatch.Field == "ID" {
 		return exit(1, "runpod create returned pod %s but readiness resolved %s", blank(expectedID, "<empty>"), blank(pod.ID, "<empty>"))
 	}
-	if strings.TrimSpace(expectedName) == "" || pod.Name != expectedName {
-		return exit(1, "runpod create expected pod name %s but readiness returned %s", blank(expectedName, "<empty>"), blank(pod.Name, "<empty>"))
-	}
-	return nil
+	return exit(1, "runpod create expected pod name %s but readiness returned %s", blank(expectedName, "<empty>"), blank(pod.Name, "<empty>"))
 }
 
 func (b *runpodLeaseBackend) findPodByName(ctx context.Context, client runpodAPI, name string) (runpodPod, error) {

@@ -115,16 +115,13 @@ func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 
 func doctorResult(checks []core.DoctorCheck) core.DoctorResult {
 	status := "ready"
-	for _, check := range checks {
-		if check.Status == "failed" || check.Status == "missing" {
-			status = "blocked"
-			break
-		}
+	if core.DoctorChecksStatus(checks) == "failed" {
+		status = "blocked"
 	}
 	return core.DoctorResult{
 		Provider: providerName,
 		Status:   status,
-		Message:  formatDoctorSummary(checks),
+		Message:  formatDoctorSummary(status),
 		Checks:   checks,
 	}
 }
@@ -464,12 +461,6 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	}
 	server := b.serverFromDevbox(item)
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.cfg, req.State, b.now())
-	// TouchDirectLeaseLabels sanitizes values for provider label limits. Keep the
-	// authoritative ownership annotations lossless so a touch cannot orphan the
-	// resource by truncating its SHA-256 scope fingerprint.
-	server.Labels["provider-scope"] = b.claimScopeID()
-	server.Labels["provider_scope_id"] = b.claimScopeID()
-	server.Labels["provider_scope"] = b.claimScope()
 	claim, err := b.revalidateClaimSnapshot(req.Lease.Server, leaseID)
 	if err != nil {
 		return core.Server{}, err

@@ -240,10 +240,10 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		return exit(2, "--preflight cannot be combined with --open, --take-control, or --local-port")
 	}
 	if *daemonStatus {
-		return a.webVNCDaemonStatus(*id, *controllerOwnerID)
+		return a.webVNCDaemonStatus(ctx, *id, *controllerOwnerID)
 	}
 	if *stopDaemon {
-		return a.stopWebVNCDaemon(*id)
+		return a.stopWebVNCDaemon(ctx, *id)
 	}
 	if *daemon || *background {
 		return a.webVNCDaemonStart(ctx, stripLegacyWebVNCDaemonFlags(args))
@@ -635,11 +635,11 @@ func (a App) webVNCDaemonCommand(ctx context.Context, args []string) error {
 	case "start":
 		return a.webVNCDaemonStart(ctx, args[1:])
 	case "status":
-		return a.webVNCDaemonStatusCommand(args[1:])
+		return a.webVNCDaemonStatusCommand(ctx, args[1:])
 	case "stop":
-		return a.webVNCDaemonStopCommand(args[1:])
+		return a.webVNCDaemonStopCommand(ctx, args[1:])
 	case "list", "ls":
-		return a.webVNCDaemonListCommand(args[1:])
+		return a.webVNCDaemonListCommand(ctx, args[1:])
 	default:
 		return exit(2, "usage: crabbox webvnc daemon start|status|stop|list --id <lease-id-or-slug>")
 	}
@@ -802,7 +802,7 @@ func (a App) webVNCDaemonStart(ctx context.Context, args []string) error {
 		daemonArgs.Args = append(daemonArgs.Args, "--reclaim")
 	}
 	daemonArgs.Args = append(daemonArgs.Args, expectedIdentity.args()...)
-	return a.startWebVNCDaemon(daemonArgs, *id, *controllerOwned, *controllerOwnerID, credentialInput, target.ChildEnvDenylist...)
+	return a.startWebVNCDaemon(ctx, daemonArgs, *id, *controllerOwned, *controllerOwnerID, credentialInput, target.ChildEnvDenylist...)
 }
 
 type webVNCRedactingWriter struct {
@@ -879,7 +879,7 @@ func validateWebVNCResetCredentials(target SSHTarget, endpoint vncEndpoint, cred
 	return requireMacOSWebVNCCredentials(credentials, authMode)
 }
 
-func (a App) webVNCDaemonStatusCommand(args []string) error {
+func (a App) webVNCDaemonStatusCommand(ctx context.Context, args []string) error {
 	fs := newFlagSet("webvnc daemon status", a.Stderr)
 	id := fs.String("id", "", "lease id or slug")
 	controllerOwnerID := fs.String("controller-owner-id", "", "internal: controller ownership identity")
@@ -894,10 +894,10 @@ func (a App) webVNCDaemonStatusCommand(args []string) error {
 	if *id == "" {
 		return exit(2, "usage: crabbox webvnc daemon status --id <lease-id-or-slug>")
 	}
-	return a.webVNCDaemonStatus(*id, *controllerOwnerID)
+	return a.webVNCDaemonStatus(ctx, *id, *controllerOwnerID)
 }
 
-func (a App) webVNCDaemonStopCommand(args []string) error {
+func (a App) webVNCDaemonStopCommand(ctx context.Context, args []string) error {
 	fs := newFlagSet("webvnc daemon stop", a.Stderr)
 	id := fs.String("id", "", "lease id or slug")
 	if err := parseFlags(fs, args); err != nil {
@@ -907,10 +907,10 @@ func (a App) webVNCDaemonStopCommand(args []string) error {
 	if *id == "" {
 		return exit(2, "usage: crabbox webvnc daemon stop --id <lease-id-or-slug>")
 	}
-	return a.stopWebVNCDaemon(*id)
+	return a.stopWebVNCDaemon(ctx, *id)
 }
 
-func (a App) webVNCDaemonListCommand(args []string) error {
+func (a App) webVNCDaemonListCommand(ctx context.Context, args []string) error {
 	fs := newFlagSet("webvnc daemon list", a.Stderr)
 	if err := parseFlags(fs, args); err != nil {
 		return err
@@ -937,7 +937,7 @@ func (a App) webVNCDaemonListCommand(args []string) error {
 			continue
 		}
 		leaseID := strings.TrimSuffix(name, ".pid")
-		status, err := localWebVNCDaemonStatus(leaseID)
+		status, err := localWebVNCDaemonStatus(ctx, leaseID)
 		if err != nil {
 			fmt.Fprintf(a.Stdout, "webvnc daemon: %s error=%v\n", leaseID, err)
 		} else {
@@ -1045,9 +1045,9 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 		*localPort = availableLocalVNCPort()
 	}
 	endpoint, endpointErr := resolveVNCEndpoint(ctx, cfg, &target)
-	daemon, daemonErr := localWebVNCDaemonStatus(leaseID)
+	daemon, daemonErr := localWebVNCDaemonStatus(ctx, leaseID)
 	if daemonErr == nil && leaseID != *id {
-		if aliasDaemon, err := localWebVNCDaemonStatus(*id); err == nil && !aliasDaemon.Missing {
+		if aliasDaemon, err := localWebVNCDaemonStatus(ctx, *id); err == nil && !aliasDaemon.Missing {
 			daemon = aliasDaemon
 		}
 	}
@@ -1204,9 +1204,9 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 		return err
 	}
 	if leaseID != *id {
-		_, _ = a.stopWebVNCDaemonIfRunning(*id)
+		_, _ = a.stopWebVNCDaemonIfRunning(ctx, *id)
 	}
-	if _, err := a.stopWebVNCDaemonIfRunning(leaseID); err != nil {
+	if _, err := a.stopWebVNCDaemonIfRunning(ctx, leaseID); err != nil {
 		return err
 	}
 	rescueCtx := rescueContext{Cfg: commandCfg, Target: target, LeaseID: leaseID}
@@ -1232,7 +1232,7 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	if strings.TrimSpace(daemonName) == "" {
 		daemonName = leaseID
 	}
-	if err := a.startWebVNCDaemon(daemonArgs, daemonName, false, "", credentialInput, target.ChildEnvDenylist...); err != nil {
+	if err := a.startWebVNCDaemon(ctx, daemonArgs, daemonName, false, "", credentialInput, target.ChildEnvDenylist...); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "webvnc reset: lease=%s slug=%s\n", leaseID, blank(serverSlug(server), "-"))
@@ -1253,7 +1253,7 @@ func webVNCResetDaemonLaunch(cfg Config, target SSHTarget, leaseID string, openP
 	return args, registeredWebVNCDaemonCredentialInput(cfg, args.Args)
 }
 
-func (a App) startWebVNCDaemon(routing CommandRouting, leaseID string, controllerOwned bool, controllerOwnerID string, credentialInput *string, childEnvDenylist ...string) error {
+func (a App) startWebVNCDaemon(ctx context.Context, routing CommandRouting, leaseID string, controllerOwned bool, controllerOwnerID string, credentialInput *string, childEnvDenylist ...string) error {
 	args := prepareWebVNCDaemonArgs(routing.Args, controllerOwned)
 	localPort := webVNCDaemonLocalPortArg(args)
 	if localPort != "" && !validWebVNCDaemonPort(localPort) {
@@ -1286,7 +1286,7 @@ func (a App) startWebVNCDaemon(routing CommandRouting, leaseID string, controlle
 	} else if credentialInput != nil {
 		return exit(2, "external desktop credential stdin requires an external macOS password environment reference")
 	}
-	unlock, err := acquireWebVNCDaemonLock(leaseID)
+	unlock, err := acquireWebVNCDaemonLock(ctx, leaseID)
 	if err != nil {
 		return exit(2, "lock WebVNC daemon state: %v", err)
 	}
@@ -2057,8 +2057,8 @@ func webVNCDaemonSupervisorChildArgs(args []string, first, credential bool) []st
 	return childArgs
 }
 
-func (a App) webVNCDaemonStatus(leaseID, expectedOwnerID string) error {
-	status, err := localWebVNCDaemonStatus(leaseID)
+func (a App) webVNCDaemonStatus(ctx context.Context, leaseID, expectedOwnerID string) error {
+	status, err := localWebVNCDaemonStatus(ctx, leaseID)
 	if err != nil {
 		return err
 	}
@@ -2100,8 +2100,8 @@ type webVNCDaemonIdentity struct {
 	CleanupTracked           bool   `json:"cleanupTracked,omitempty"`
 }
 
-func localWebVNCDaemonStatus(leaseID string) (localWebVNCDaemon, error) {
-	unlock, err := acquireWebVNCDaemonLock(leaseID)
+func localWebVNCDaemonStatus(ctx context.Context, leaseID string) (localWebVNCDaemon, error) {
+	unlock, err := acquireWebVNCDaemonLock(ctx, leaseID)
 	if err != nil {
 		return localWebVNCDaemon{}, err
 	}
@@ -2203,8 +2203,8 @@ func validWebVNCControllerOwnerID(value string) bool {
 	return true
 }
 
-func (a App) stopWebVNCDaemon(leaseID string) error {
-	stopped, err := a.stopWebVNCDaemonIfRunning(leaseID)
+func (a App) stopWebVNCDaemon(ctx context.Context, leaseID string) error {
+	stopped, err := a.stopWebVNCDaemonIfRunning(ctx, leaseID)
 	if err != nil {
 		return err
 	}
@@ -2214,8 +2214,8 @@ func (a App) stopWebVNCDaemon(leaseID string) error {
 	return nil
 }
 
-func (a App) stopWebVNCDaemonIfRunning(leaseID string) (bool, error) {
-	unlock, err := acquireWebVNCDaemonLock(leaseID)
+func (a App) stopWebVNCDaemonIfRunning(ctx context.Context, leaseID string) (bool, error) {
+	unlock, err := acquireWebVNCDaemonLock(ctx, leaseID)
 	if err != nil {
 		return false, exit(2, "lock WebVNC daemon state: %v", err)
 	}
@@ -2325,7 +2325,7 @@ func (a App) stopWebVNCDaemonIfRunningLocked(leaseID string) (bool, error) {
 	return true, nil
 }
 
-func acquireWebVNCDaemonLock(leaseID string) (func(), error) {
+func acquireWebVNCDaemonLock(ctx context.Context, leaseID string) (func(), error) {
 	_, pidPath, err := webVNCDaemonPaths(leaseID)
 	if err != nil {
 		return nil, err
@@ -2337,10 +2337,10 @@ func acquireWebVNCDaemonLock(leaseID string) (func(), error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, err
 	}
-	return acquireDaemonFileLock(pidPath + ".lock")
+	return acquireDaemonFileLock(ctx, pidPath+".lock")
 }
 
-func acquireDaemonFileLock(lockPath string) (func(), error) {
+func acquireDaemonFileLock(ctx context.Context, lockPath string) (func(), error) {
 	if info, err := os.Lstat(lockPath); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return nil, fmt.Errorf("daemon lock must be a regular file")
@@ -2366,7 +2366,24 @@ func acquireDaemonFileLock(lockPath string) (func(), error) {
 	if err := file.Chmod(0o600); err != nil {
 		return closeWithError(err)
 	}
-	if err := lockWebVNCDaemonFile(file); err != nil {
+	// Keep the validated descriptor: path-based lock wrappers reopen the file.
+	// Cancellation retires only this waiter, never the daemon holding the lock.
+	for {
+		if err := ctx.Err(); err != nil {
+			return closeWithError(err)
+		}
+		locked, err := tryLockWebVNCDaemonFile(file)
+		if err != nil {
+			return closeWithError(err)
+		}
+		if locked {
+			break
+		}
+		if err := sleepContext(ctx, claimLockRetryDelay); err != nil {
+			return closeWithError(err)
+		}
+	}
+	if err := ctx.Err(); err != nil {
 		return closeWithError(err)
 	}
 	return func() {
@@ -3555,9 +3572,9 @@ func (a App) directSSHWebVNCStatus(ctx context.Context, cfg Config, id, localPor
 		return err
 	}
 	if !expected.set && (localPort == "" || expectedListenerOwnerPID == 0) {
-		daemon, daemonErr := localWebVNCDaemonStatus(leaseID)
+		daemon, daemonErr := localWebVNCDaemonStatus(ctx, leaseID)
 		if daemonErr == nil && leaseID != id {
-			if aliasDaemon, aliasErr := localWebVNCDaemonStatus(id); aliasErr == nil && !aliasDaemon.Missing {
+			if aliasDaemon, aliasErr := localWebVNCDaemonStatus(ctx, id); aliasErr == nil && !aliasDaemon.Missing {
 				daemon = aliasDaemon
 			}
 		}

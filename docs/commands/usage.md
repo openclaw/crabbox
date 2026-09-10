@@ -2,6 +2,10 @@
 
 `crabbox usage` reports lease cost and usage estimates from the broker, broken down by user, organization, or the whole fleet.
 
+For the authenticated owner's all-months/all-orgs admission count and effective
+owner limit, use [capacity](capacity.md). This separate read-only diagnostic does
+not change monthly usage filtering or access to lease records.
+
 This page is the command reference for cost visibility. Keep command-specific behavior here; broker policy and provider internals live in [../orchestrator.md](../orchestrator.md) and [../features/cost-usage.md](../features/cost-usage.md).
 
 ```sh

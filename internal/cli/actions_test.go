@@ -1,10 +1,14 @@
 package cli
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -17,6 +21,59 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+type exitCodeSelectionAsError struct{ code int }
+
+func (e exitCodeSelectionAsError) Error() string { return "adapted public exit" }
+
+func (e exitCodeSelectionAsError) As(target any) bool {
+	public, ok := target.(*ExitError)
+	if ok {
+		*public = ExitError{Code: e.code, Message: e.Error()}
+	}
+	return ok
+}
+
+// Preserve the behavior characterized before moving the selector to its shared owner.
+func TestExitCodeForErrorCompatibility(t *testing.T) {
+	public := ExitError{Code: 69, Message: "typed public exit"}
+	zero := ExitError{Code: 0, Message: "zero public exit"}
+	signed := ExitError{Code: -1, Message: "signed public exit"}
+	ordinary := errors.New("ordinary error")
+	var nilPublic *ExitError
+	for _, tc := range []struct {
+		name           string
+		err            error
+		fallback, want int
+	}{
+		{name: "nil with zero fallback", fallback: 0, want: 0},
+		{name: "nil with nonzero fallback", fallback: 7, want: 7},
+		{name: "ordinary error", err: ordinary, fallback: 7, want: 7},
+		{name: "signed fallback", err: ordinary, fallback: -9, want: -9},
+		{name: "nonzero value", err: public, fallback: 1, want: 69},
+		{name: "signed value", err: signed, fallback: 1, want: -1},
+		{name: "zero value", err: zero, fallback: 7, want: 7},
+		{name: "zero value with zero fallback", err: zero, fallback: 0, want: 0},
+		{name: "wrapped value", err: fmt.Errorf("wrapped: %w", public), fallback: 1, want: 69},
+		{name: "wrapped zero value", err: fmt.Errorf("wrapped: %w", zero), fallback: 7, want: 7},
+		{name: "pointer is not a value target", err: &public, fallback: 7, want: 7},
+		{name: "wrapped pointer is not a value target", err: fmt.Errorf("wrapped: %w", &public), fallback: 7, want: 7},
+		{name: "typed nil pointer", err: nilPublic, fallback: 7, want: 7},
+		{name: "custom As", err: exitCodeSelectionAsError{code: 69}, fallback: 1, want: 69},
+		{name: "wrapped custom As", err: fmt.Errorf("wrapped: %w", exitCodeSelectionAsError{code: 69}), fallback: 1, want: 69},
+		{name: "zero custom As", err: exitCodeSelectionAsError{}, fallback: 7, want: 7},
+		{name: "joined first public value", err: errors.Join(ExitError{Code: 23}, public), fallback: 1, want: 23},
+		{name: "joined first zero does not search later values", err: errors.Join(zero, public), fallback: 7, want: 7},
+		{name: "joined ordinary then public value", err: errors.Join(ordinary, public), fallback: 1, want: 69},
+		{name: "joined signed first value", err: errors.Join(signed, public), fallback: 1, want: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ExitCodeForError(tc.err, tc.fallback); got != tc.want {
+				t.Fatalf("ExitCodeForError fallback=%d: got %d, want %d", tc.fallback, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestParseGitHubRepo(t *testing.T) {
 	tests := map[string]string{
@@ -349,6 +406,317 @@ exit 99
 	}
 }
 
+func TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache(t *testing.T) {
+	for _, name := range []string{"bash", "python3"} {
+		if _, err := exec.LookPath(name); err != nil {
+			t.Skip(name + " is required")
+		}
+	}
+	cases := []struct {
+		name             string
+		env              map[string]string
+		dotEnv           string
+		workFolder       string
+		change           string
+		managerEnv       string
+		wantNode, wantGo bool
+	}{
+		{name: "default", wantNode: true, wantGo: true},
+		{name: "custom work folder", workFolder: "custom"},
+		{name: "inherited root", env: map[string]string{"RUNNER_TOOL_CACHE": "/custom"}},
+		{name: "legacy runner root", env: map[string]string{"RUNNER_TOOLSDIRECTORY": "/custom"}},
+		{name: "legacy agent root", env: map[string]string{"AGENT_TOOLSDIRECTORY": "/custom"}},
+		{name: "legacy dotted root", env: map[string]string{"agent.ToolsDirectory": "/custom"}},
+		{name: "dotenv overrides inherited", env: map[string]string{"RUNNER_TOOL_CACHE": "DEFAULT"}, dotEnv: "RUNNER_TOOL_CACHE=/custom\n"},
+		{name: "dotenv removes inherited", env: map[string]string{"RUNNER_TOOL_CACHE": "/custom"}, dotEnv: "RUNNER_TOOL_CACHE=\n", wantNode: true, wantGo: true},
+		{name: "dotenv is not shell", dotEnv: "RUNNER_TOOL_CACHE=$(touch should-not-exist)\n"},
+		{name: "dotenv preserves vertical tab", dotEnv: "RUNNER_TOOL_CACHE=/custom\vRUNNER_TOOL_CACHE=\n"},
+		{name: "higher precedence wins", env: map[string]string{"RUNNER_TOOL_CACHE": "DEFAULT", "AGENT_TOOLSDIRECTORY": "/custom"}, wantNode: true, wantGo: true},
+		{name: "dotenv legacy root", dotEnv: "agent.ToolsDirectory=/custom\n"},
+		{name: "duplicate dotenv last wins", dotEnv: "RUNNER_TOOL_CACHE=\nRUNNER_TOOL_CACHE=/custom\n"},
+		{name: "runner busy", change: "busy"},
+		{name: "service busy", change: "active"},
+		{name: "service environment", change: "service-env"},
+		{name: "service environment file", change: "service-env-file"},
+		{name: "service pass environment", change: "service-pass-env"},
+		{name: "manager unrelated environment", managerEnv: `"LANG=en_US.UTF-8" "PATH=/usr/bin:/bin"`, wantNode: true, wantGo: true},
+		{name: "manager runner cache", managerEnv: "RUNNER_TOOL_CACHE=/custom"},
+		{name: "manager legacy runner cache", managerEnv: "RUNNER_TOOLSDIRECTORY=/custom"},
+		{name: "manager legacy agent cache", managerEnv: "AGENT_TOOLSDIRECTORY=/custom"},
+		{name: "manager legacy dotted cache", managerEnv: `"agent.ToolsDirectory=/custom cache"`},
+		{name: "manager missing response", change: "manager-missing"},
+		{name: "manager query failure", change: "manager-failed"},
+		{name: "service dropin", change: "dropin"},
+		{name: "foreign writable cache", change: "writable"},
+		{name: "symlink cache", change: "symlink"},
+		{name: "existing slot preserved", change: "existing", wantNode: true},
+		{name: "incomplete image slot", change: "incomplete", wantNode: true},
+		{name: "tampered archive", change: "archive", wantNode: true},
+		{name: "tampered tree", change: "tree", wantNode: true},
+		{name: "extra tree file", change: "extra", wantNode: true},
+		{name: "foreign image link", change: "link", wantNode: true},
+		{name: "wrong executable mode", change: "mode", wantNode: true},
+		{name: "wrong root mode", change: "root-mode", wantNode: true},
+		{name: "wrong Node Yarn target", change: "node-yarn", wantGo: true},
+		{name: "extra Node entry", change: "node-extra", wantGo: true},
+		{name: "arm runner", change: "arm"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := filepath.Join(root, "actions-runner")
+			cache := filepath.Join(runner, "_work", "_tool")
+			image := filepath.Join(root, "image")
+			archives := filepath.Join(root, "archives")
+			bin := filepath.Join(root, "bin")
+			write := func(p, value string, mode os.FileMode) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte(value), mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			link := func(target, p string) {
+				t.Helper()
+				if err := os.Symlink(target, p); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, dir := range []string{runner, cache, image, archives, bin} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			pack := func(tool, version, archiveName string) string {
+				t.Helper()
+				var buf bytes.Buffer
+				gz := gzip.NewWriter(&buf)
+				tw := tar.NewWriter(gz)
+				slot := filepath.Join(image, tool, version, "x64")
+				if err := os.MkdirAll(filepath.Join(slot, "bin"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				for _, dir := range []string{tool + "/", tool + "/bin/"} {
+					if err := tw.WriteHeader(&tar.Header{Name: dir, Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				body := "#!/bin/sh\nprintf 'fixture only\\n'\n"
+				if err := tw.WriteHeader(&tar.Header{Name: tool + "/bin/" + tool, Typeflag: tar.TypeReg, Mode: 0o755, Size: int64(len(body))}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := tw.Write([]byte(body)); err != nil {
+					t.Fatal(err)
+				}
+				if err := tw.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if err := gz.Close(); err != nil {
+					t.Fatal(err)
+				}
+				write(filepath.Join(slot, "bin", tool), body, 0o755)
+				if tool == "node" {
+					for _, name := range []string{"pnpm", "pnpx", "yarn", "yarnpkg"} {
+						link("../lib/node_modules/corepack/dist/"+name+".js", filepath.Join(slot, "bin", name))
+					}
+				}
+				write(slot+".complete", "", 0o644)
+				write(filepath.Join(archives, archiveName), buf.String(), 0o644)
+				return fmt.Sprintf("%x", sha256.Sum256(buf.Bytes()))
+			}
+			nodeDigest := pack("node", "24.19.0", "node-v24.19.0-linux-x64.tar.xz")
+			goDigest := pack("go", "1.27.0", "go1.27.0.linux-amd64.tar.gz")
+			nodeSlot := filepath.Join(image, "node", "24.19.0", "x64")
+			goSlot := filepath.Join(image, "go", "1.27.0", "x64")
+			destGo := filepath.Join(cache, "go", "1.27.0", "x64")
+			write(filepath.Join(runner, ".crabbox-runner-version-2.337.0-x64-sha256-"+strings.Repeat("a", 64)), "", 0o644)
+			workFolder := tc.workFolder
+			if workFolder == "" {
+				workFolder = "_work"
+			}
+			write(filepath.Join(runner, "config.sh"), "#!/bin/sh\nif [ \"${1:-}\" = remove ]; then rm -f .runner; exit 0; fi\nprintf '{\"workFolder\":\""+workFolder+"\"}\\n' >.runner\nprintf 'configured\\n' >>\"$HOME/order\"\n", 0o755)
+			write(filepath.Join(runner, ".env"), tc.dotEnv, 0o600)
+			write(filepath.Join(bin, "curl"), "#!/bin/sh\nprintf '{}'\n", 0o755)
+			write(filepath.Join(bin, "jq"), "#!/bin/sh\ncase \"$*\" in *tag_name*) printf 2.337.0;; *digest*) printf '"+strings.Repeat("a", 64)+"';; *) exit 2;; esac\n", 0o755)
+			write(filepath.Join(bin, "uname"), "#!/bin/sh\nprintf '"+map[bool]string{true: "aarch64", false: "x86_64"}[tc.change == "arm"]+"\\n'\n", 0o755)
+			// Nothing privileged or networked runs: only the generated owner's filesystem logic.
+			write(filepath.Join(bin, "sudo"), "#!/bin/sh\nif [ \"$1\" = tee ]; then cat >/dev/null; elif [ \"$1\" = systemctl ]; then shift; exec systemctl \"$@\"; fi\n", 0o755)
+			write(filepath.Join(bin, "pgrep"), "#!/bin/sh\nexit "+map[bool]string{true: "0", false: "1"}[tc.change == "busy"]+"\n", 0o755)
+			unitState := "LoadState=not-found\\nActiveState=inactive\\nEnvironment=\\nEnvironmentFiles=\\nDropInPaths=\\n"
+			switch tc.change {
+			case "active":
+				unitState = "LoadState=loaded\\nActiveState=active\\n"
+			case "service-env":
+				unitState = "LoadState=loaded\\nActiveState=inactive\\nEnvironment=RUNNER_TOOL_CACHE=/custom\\n"
+			case "service-env-file":
+				unitState = "LoadState=loaded\\nActiveState=inactive\\nEnvironmentFiles=/custom.env\\n"
+			case "service-pass-env":
+				unitState = "LoadState=loaded\\nActiveState=inactive\\nPassEnvironment=RUNNER_TOOL_CACHE\\n"
+			case "dropin":
+				unitState = "LoadState=loaded\\nActiveState=inactive\\nDropInPaths=/custom.conf\\n"
+			case "writable":
+				if err := os.Chmod(cache, 0o777); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				if err := os.Remove(cache); err != nil {
+					t.Fatal(err)
+				}
+				foreign := filepath.Join(root, "foreign")
+				if err := os.Mkdir(foreign, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				link(foreign, cache)
+			case "existing":
+				write(filepath.Join(destGo, "keep"), "operator", 0o644)
+			case "incomplete":
+				if err := os.Remove(goSlot + ".complete"); err != nil {
+					t.Fatal(err)
+				}
+			case "archive":
+				write(filepath.Join(archives, "go1.27.0.linux-amd64.tar.gz"), "tampered", 0o644)
+			case "tree":
+				write(filepath.Join(goSlot, "bin", "go"), "tampered", 0o755)
+			case "extra":
+				write(filepath.Join(goSlot, "extra"), "unexpected", 0o644)
+			case "link":
+				if err := os.Remove(filepath.Join(goSlot, "bin", "go")); err != nil {
+					t.Fatal(err)
+				}
+				link("/foreign", filepath.Join(goSlot, "bin", "go"))
+			case "mode":
+				if err := os.Chmod(filepath.Join(goSlot, "bin", "go"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			case "root-mode":
+				if err := os.Chmod(goSlot, 0o777); err != nil {
+					t.Fatal(err)
+				}
+			case "node-yarn":
+				yarn := filepath.Join(nodeSlot, "bin", "yarn")
+				if err := os.Remove(yarn); err != nil {
+					t.Fatal(err)
+				}
+				link("../lib/node_modules/corepack/dist/pnpm.js", yarn)
+			case "node-extra":
+				write(filepath.Join(nodeSlot, "bin", "extra"), "unexpected", 0o644)
+			}
+			managerResponse := "printf '%s\\n' " + shellQuote("Environment="+tc.managerEnv)
+			switch tc.change {
+			case "manager-missing":
+				managerResponse = ":"
+			case "manager-failed":
+				managerResponse += "; exit 7"
+			}
+			// Manager properties differ from unit properties; unknown filters return no output.
+			write(filepath.Join(bin, "systemctl"), `#!/bin/sh
+case "$1" in
+show)
+  case "$2" in
+    --property=Environment) `+managerResponse+` ;;
+    --property=*) exit 0 ;;
+    crabbox-actions-runner.service) printf '`+unitState+`' ;;
+    *) exit 2 ;;
+  esac
+  ;;
+enable)
+  printf 'started\n' >>"$HOME/order"
+  find "$HOME/actions-runner" -name '*.complete' >"$HOME/started-slots"
+  ;;
+esac
+`, 0o755)
+			script := strings.NewReplacer(
+				"/opt/hostedtoolcache", image,
+				"/opt/crabbox/toolchain-archives", archives,
+				"14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647", nodeDigest,
+				"675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685", goDigest,
+			).Replace(githubActionsRunnerInstallScript("2.337.0", true))
+			// The ARM case must not trigger the unrelated Runner download path.
+			if tc.change == "arm" {
+				write(filepath.Join(runner, ".crabbox-runner-version-2.337.0-arm64-sha256-"+strings.Repeat("a", 64)), "", 0o644)
+			}
+			cmd := exec.Command("bash", "-c", script)
+			cmd.Env = []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"), "HOME=" + root,
+				"RUNNER_REPO=example-org/my-app", "RUNNER_NAME=fixture", "RUNNER_TOKEN=fixture",
+				"RUNNER_LABELS=fixture"}
+			for k, v := range tc.env {
+				if v == "DEFAULT" {
+					v = cache
+				}
+				cmd.Env = append(cmd.Env, k+"="+v)
+			}
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("installer failed: %v\n%s", err, output)
+			}
+			for _, expected := range []struct {
+				tool, version string
+				present       bool
+			}{
+				{"node", "24.19.0", tc.wantNode}, {"go", "1.27.0", tc.wantGo},
+			} {
+				slot := filepath.Join(cache, expected.tool, expected.version, "x64")
+				_, err := os.Stat(slot + ".complete")
+				if (err == nil) != expected.present {
+					t.Fatalf("%s completion=%v want %v\n%s", expected.tool, err, expected.present, output)
+				}
+				if expected.present {
+					want, _ := os.ReadFile(filepath.Join(image, expected.tool, expected.version, "x64", "bin", expected.tool))
+					got, err := os.ReadFile(filepath.Join(slot, "bin", expected.tool))
+					if err != nil || !bytes.Equal(got, want) {
+						t.Fatalf("copied bytes: %v", err)
+					}
+					if expected.tool == "node" {
+						for _, name := range []string{"pnpm", "pnpx", "yarn", "yarnpkg"} {
+							target, err := os.Readlink(filepath.Join(slot, "bin", name))
+							if err != nil || target != "../lib/node_modules/corepack/dist/"+name+".js" {
+								t.Fatalf("copied %s target=%q: %v", name, target, err)
+							}
+						}
+					}
+					// The destination owns an independent copy, not a hardlink or image-root redirect.
+					write(filepath.Join(slot, "bin", expected.tool), "local mutation", 0o755)
+					after, _ := os.ReadFile(filepath.Join(image, expected.tool, expected.version, "x64", "bin", expected.tool))
+					if !bytes.Equal(after, want) {
+						t.Fatal("runner mutation reached image seed")
+					}
+					started, _ := os.ReadFile(filepath.Join(root, "started-slots"))
+					if !strings.Contains(string(started), slot+".complete") {
+						t.Fatal("seed published after service start")
+					}
+				} else if expected.tool == "node" {
+					for _, absent := range []string{slot, slot + ".complete"} {
+						if _, err := os.Lstat(absent); !os.IsNotExist(err) {
+							t.Fatalf("rejected Node path still present: %s: %v", absent, err)
+						}
+					}
+				}
+			}
+			if tc.change == "existing" {
+				got, _ := os.ReadFile(filepath.Join(destGo, "keep"))
+				if string(got) != "operator" {
+					t.Fatal("existing slot changed")
+				}
+			}
+			if _, err := os.Stat(filepath.Join(runner, "should-not-exist")); !os.IsNotExist(err) {
+				t.Fatal("dotenv executed")
+			}
+			if tc.wantGo && !strings.Contains(string(output), "copy_ms=") {
+				t.Fatalf("missing copy cost: %s", output)
+			}
+			order, _ := os.ReadFile(filepath.Join(root, "order"))
+			if string(order) != "configured\nstarted\n" {
+				t.Fatalf("lifecycle order %q", order)
+			}
+		})
+	}
+}
+
 func TestGitHubActionsRunnerInstallTransportKeepsValuesOffRemoteCommand(t *testing.T) {
 	values := []string{"example-org/my-app", "runner name", "linux,x64", "sentinel-registration-token"}
 	script := "printf transport-ok\\n"
@@ -573,9 +941,9 @@ cat >/dev/null
 	repo := Repo{Root: f.source, Name: "repo", RemoteURL: f.origin, Head: f.b, BaseRef: "main"}
 	var stderr bytes.Buffer
 	app := App{Stdout: io.Discard, Stderr: &stderr}
-	err := app.syncLocalActionsWorkspace(context.Background(), cfg, repo, SSHTarget{
+	_, err := app.syncLocalActionsWorkspace(context.Background(), cfg, repo, SSHTarget{
 		User: "crabbox", Host: "example.test", Port: "22", TargetOS: targetLinux,
-	}, "/work/repo")
+	}, "/work/repo", false)
 	if err != nil {
 		t.Fatalf("sync local Actions workspace: %v\n%s", err, stderr.String())
 	}
@@ -588,6 +956,53 @@ cat >/dev/null
 	for _, want := range []string{plan.RemoteURL, plan.Target, plan.Tree, "refs/crabbox/sync-", "read-tree --reset", "update-ref --no-deref HEAD"} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("Actions sync missing coherence contract %q:\n%s", want, log)
+		}
+	}
+}
+
+func TestSyncLocalActionsWorkspaceIsolatesNonForwardableOrigin(t *testing.T) {
+	f := newGitCoherenceFixture(t)
+	tools := t.TempDir()
+	logPath := filepath.Join(tools, "ssh.log")
+	sshScript := `#!/bin/sh
+last=
+for arg do last="$arg"; done
+printf '%s\n' "$last" >> "$CRABBOX_ACTIONS_SSH_LOG"
+cat >/dev/null
+`
+	if err := os.WriteFile(filepath.Join(tools, "ssh"), []byte(sshScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tools, "rsync"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_ACTIONS_SSH_LOG", logPath)
+
+	cfg := baseConfig()
+	cfg.Sync.Fingerprint = true
+	cfg.Sync.BaseRef = "main"
+	repo := Repo{Root: f.source, Name: "repo", RemoteURL: "git@example.test:repo.git", Head: f.b, BaseRef: "main"}
+	var stderr bytes.Buffer
+	_, err := (App{Stdout: io.Discard, Stderr: &stderr}).syncLocalActionsWorkspace(context.Background(), cfg, repo, SSHTarget{
+		User: "crabbox", Host: "example.test", Port: "22", TargetOS: targetLinux,
+	}, "/work/repo", true)
+	if err != nil {
+		t.Fatalf("sync local Actions workspace: %v\n%s", err, stderr.String())
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logData)
+	for _, forbidden := range []string{"git clone ", "git fetch ", "git ls-files -z", "repair_origin", "base_tmp=", "refs/remotes/origin/"} {
+		if strings.Contains(log, forbidden) {
+			t.Fatalf("Actions plain manifest ran forbidden Git path %q:\n%s", forbidden, log)
+		}
+	}
+	for _, want := range []string{"/usr/bin/env -i", "/bin/bash --noprofile --norc", "plain_git", "protocol.allow=never"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("Actions plain manifest missing %q:\n%s", want, log)
 		}
 	}
 }
@@ -1436,7 +1851,7 @@ exit 0
 	}
 	target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22"}
 	app := App{Stdout: io.Discard, Stderr: io.Discard}
-	if _, err := app.executeLocalActionsHydration(context.Background(), cfg, Repo{Name: "repo"}, target, plan, time.Minute, false, false, nil); err != nil {
+	if _, err := app.executeLocalActionsHydration(context.Background(), cfg, Repo{Name: "repo"}, target, plan, time.Minute, false, false, false, nil); err != nil {
 		logData, _ := os.ReadFile(logPath)
 		t.Fatalf("%v\n%s", err, logData)
 	}
@@ -1447,6 +1862,394 @@ exit 0
 	logText := string(logData)
 	if !strings.Contains(logText, "timeout --signal=TERM") || strings.Contains(logText, "nohup") {
 		t.Fatalf("config-derived WSL2 target used the wrong hydration path:\n%s", logText)
+	}
+}
+
+func TestExecuteLocalActionsHydrationUsesCallerPlainManifestMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell ssh fixture")
+	}
+	tests := []struct {
+		name           string
+		remoteURL      string
+		syncBefore     bool
+		wantPlain      bool
+		deriveMode     bool
+		fallback       string
+		fallbackReason string
+		wantError      string
+	}{
+		{name: "empty origin", wantPlain: true},
+		{name: "SCP origin", remoteURL: "git@example.test:repo.git", wantPlain: true},
+		{name: "promoted safe HTTP origin", remoteURL: "https://example.test/repo.git", syncBefore: true},
+		{name: "production filesystem seed fallback", syncBefore: true, deriveMode: true, fallback: "seed", fallbackReason: "origin_unavailable"},
+		{name: "production private HTTPS finalize fallback", syncBefore: true, deriveMode: true, fallback: "finalize-auth", fallbackReason: "origin_auth_required"},
+		{name: "production HTTPS transport finalize fallback", syncBefore: true, deriveMode: true, fallback: "finalize-transport", fallbackReason: "origin_unavailable"},
+		{name: "production non-auth HTTP seed failure", syncBefore: true, deriveMode: true, fallback: "seed-http-error", wantError: "remote git seed failed"},
+		{name: "production marker spoof seed failure", syncBefore: true, deriveMode: true, fallback: "seed-marker", wantError: "remote git seed failed"},
+		{name: "production missing branch finalize failure", syncBefore: true, deriveMode: true, fallback: "finalize-missing-branch", wantError: "remote sync finalize failed"},
+		{name: "production marker spoof finalize failure", syncBefore: true, deriveMode: true, fallback: "finalize-marker", wantError: "remote sync finalize failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tools := filepath.Join(dir, "tools")
+			hostile := filepath.Join(dir, "hostile")
+			for _, path := range []string{tools, hostile} {
+				if err := os.MkdirAll(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sshPath := filepath.Join(tools, "ssh")
+			logPath := filepath.Join(dir, "ssh.log")
+			countPath := filepath.Join(dir, "invalidations")
+			hydratedPath := filepath.Join(dir, "hydrated")
+			hostileMarker := filepath.Join(dir, "hostile-ran")
+			hostileProfile := filepath.Join(dir, "hostile-profile")
+			hostileGitConfig := filepath.Join(dir, "hostile.gitconfig")
+			workRoot := filepath.Join(dir, "work")
+			workdir := filepath.Join(workRoot, "cbx_123", "repo")
+			fingerprint := filepath.Join(workdir, ".crabbox", "sync-fingerprint")
+			if err := os.MkdirAll(filepath.Dir(fingerprint), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(fingerprint, []byte("stale"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			hostileScript := "#!/bin/sh\n: > \"$CRABBOX_HOSTILE_MARKER\"\nexit 97\n"
+			for _, name := range []string{"bash", "git", "rm"} {
+				if err := os.WriteFile(filepath.Join(hostile, name), []byte(hostileScript), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(hostileProfile, []byte(": > \"$CRABBOX_HOSTILE_MARKER\"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(hostileGitConfig, []byte("[broken\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			sshScript := `#!/bin/sh
+remote=""
+for arg do remote="$arg"; done
+decoded="$remote"
+decode_base64() {
+  if [ "$(/usr/bin/uname -s)" = Darwin ]; then
+    /usr/bin/base64 -D
+  else
+    /usr/bin/base64 -d
+  fi
+}
+case "$remote" in
+  *" -EncodedCommand "*)
+    encoded=${remote##* }
+    outer=$(printf '%s' "$encoded" | decode_base64 | /usr/bin/iconv -f UTF-16LE -t UTF-8)
+    nested=$(printf '%s\n' "$outer" | /usr/bin/sed -n 's/.*FromBase64String("\([^"]*\)").*/\1/p' | /usr/bin/head -1)
+    if [ -n "$nested" ]; then
+      decoded=$(printf '%s' "$nested" | decode_base64)
+    else
+      decoded="$outer"
+    fi
+    ;;
+esac
+printf '%s\n---\n' "$decoded" >> "$CRABBOX_FAKE_SSH_LOG"
+case "$decoded" in
+  *"nohup sh -c"*) : > "$CRABBOX_FAKE_HYDRATED"; printf '123\n'; exit 0 ;;
+  *"origin_git clone"*)
+    case "$CRABBOX_FAKE_ORIGIN_FALLBACK" in
+      seed)
+        printf '%s\n' 'fatal: unable to access: Could not resolve host: example.test' >&2
+        exit 78
+        ;;
+      seed-http-error)
+        printf '%s\n' 'fatal: unable to access: The requested URL returned error: 500' >&2
+        exit 78
+        ;;
+      seed-marker)
+        printf '%s\n' 'CRABBOX_GIT_ORIGIN_FALLBACK:origin_unavailable' >&2
+        exit 78
+        ;;
+    esac
+    ;;
+  *"origin_git fetch"*)
+    case "$CRABBOX_FAKE_ORIGIN_FALLBACK" in
+      finalize-auth)
+        printf '%s\n' 'fatal: Authentication failed' >&2
+        exit 78
+        ;;
+      finalize-transport)
+        printf '%s\n' 'fatal: unable to access: Failed to connect to example.test' >&2
+        exit 78
+        ;;
+      finalize-missing-branch)
+        printf '%s\n' "fatal: couldn't find remote ref absent" >&2
+        exit 78
+        ;;
+      finalize-marker)
+        printf '%s\n' 'CRABBOX_GIT_ORIGIN_FALLBACK:origin_auth_required' >&2
+        exit 78
+        ;;
+    esac
+    ;;
+  *"/bin/rm -f --"*sync-fingerprint*)
+    count=0
+    if [ -f "$CRABBOX_INVALIDATION_COUNT" ]; then
+      count=$(/bin/cat "$CRABBOX_INVALIDATION_COUNT")
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$CRABBOX_INVALIDATION_COUNT"
+    case "$decoded" in
+      *"/usr/bin/env -i PATH=/usr/bin:/bin"*)
+        PATH="$CRABBOX_HOSTILE_PATH"
+        BASH_ENV="$CRABBOX_HOSTILE_PROFILE"
+        ENV="$CRABBOX_HOSTILE_PROFILE"
+        GIT_CONFIG_GLOBAL="$CRABBOX_HOSTILE_GIT_CONFIG"
+        export PATH BASH_ENV ENV GIT_CONFIG_GLOBAL
+        ;;
+    esac
+    eval "$decoded" || exit $?
+    if [ "$count" -eq 1 ]; then
+      printf stale > "$CRABBOX_FINGERPRINT"
+    fi
+    exit 0
+    ;;
+  *"timeout --signal=TERM"*)
+    : > "$CRABBOX_FAKE_HYDRATED"
+    exit 0
+    ;;
+  *"cat"*".crabbox/actions/cbx_123.env"*)
+    if [ -e "$CRABBOX_FAKE_HYDRATED" ]; then
+      printf '%s\n' \
+        "WORKSPACE=$CRABBOX_WORKDIR" \
+        'ENV_FILE=/home/crabbox/.crabbox/actions/cbx_123.env.sh'
+    fi
+    ;;
+esac
+/bin/cat >/dev/null || true
+exit 0
+`
+			if err := os.WriteFile(sshPath, []byte(sshScript), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(tools, "rsync"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
+			t.Setenv("CRABBOX_INVALIDATION_COUNT", countPath)
+			t.Setenv("CRABBOX_FAKE_HYDRATED", hydratedPath)
+			t.Setenv("CRABBOX_HOSTILE_PATH", hostile)
+			t.Setenv("CRABBOX_HOSTILE_PROFILE", hostileProfile)
+			t.Setenv("CRABBOX_HOSTILE_GIT_CONFIG", hostileGitConfig)
+			t.Setenv("CRABBOX_HOSTILE_MARKER", hostileMarker)
+			t.Setenv("CRABBOX_FINGERPRINT", fingerprint)
+			t.Setenv("CRABBOX_WORKDIR", workdir)
+			t.Setenv("CRABBOX_FAKE_ORIGIN_FALLBACK", tt.fallback)
+
+			root := filepath.Join(dir, "source")
+			repo := Repo{Root: root, Name: "repo", RemoteURL: tt.remoteURL}
+			if tt.deriveMode {
+				fixture := newGitCoherenceFixture(t)
+				root = fixture.source
+				remoteURL := fixture.origin + ".missing"
+				if tt.fallback != "seed" {
+					remoteURL = "https://example.test/private.git"
+				}
+				repo = Repo{Root: root, Name: "repo", RemoteURL: remoteURL, Head: fixture.c, BaseRef: "main"}
+				workflowPath := filepath.Join(root, ".github", "workflows", "hydrate.yml")
+				if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(workflowPath, []byte("jobs:\n  hydrate:\n    steps:\n      - run: echo ok\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.MkdirAll(root, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("content\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.syncBefore && !tt.deriveMode {
+				for _, args := range [][]string{
+					{"init"},
+					{"config", "user.name", "Test"},
+					{"config", "user.email", "test@example.test"},
+					{"add", "tracked.txt"},
+					{"commit", "-m", "test"},
+				} {
+					if out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
+						t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+					}
+				}
+				runGit(t, root, "update-ref", "refs/remotes/origin/main", gitOutput(root, "rev-parse", "HEAD"))
+			}
+			cfg := defaultConfig()
+			cfg.TargetOS = targetLinux
+			cfg.WorkRoot = workRoot
+			if tt.deriveMode {
+				cfg.Actions.Workflow = ".github/workflows/hydrate.yml"
+			} else if tt.syncBefore {
+				repo.Head = gitOutput(root, "rev-parse", "HEAD")
+				repo.BaseRef = "main"
+			}
+			plan := localActionsHydrationPlan{
+				leaseID: "cbx_123",
+				workdir: workdir,
+				jobName: "hydrate",
+				script:  "echo ok\n",
+			}
+			target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22"}
+			var stderr bytes.Buffer
+			app := App{Stdout: io.Discard, Stderr: &stderr}
+			plainManifest := classifyGitOrigin(repo.RemoteURL) != gitOriginRemoteAttemptSafe
+			if plainManifest != tt.wantPlain {
+				t.Fatalf("plain manifest=%t want=%t", plainManifest, tt.wantPlain)
+			}
+			if plainManifest {
+				t.Setenv("CRABBOX_EXPECT_PLAIN", "1")
+			} else {
+				t.Setenv("CRABBOX_EXPECT_PLAIN", "0")
+			}
+			var hydrateErr error
+			if tt.deriveMode {
+				_, hydrateErr = app.hydrateActionsLocally(context.Background(), cfg, repo, target, "cbx_123", "", nil, time.Minute, false, true, nil)
+			} else {
+				_, hydrateErr = app.executeLocalActionsHydration(context.Background(), cfg, repo, target, plan, time.Minute, false, tt.syncBefore, plainManifest, nil)
+			}
+			if tt.wantError != "" {
+				if hydrateErr == nil || !strings.Contains(hydrateErr.Error(), tt.wantError) {
+					t.Fatalf("error=%v want containing %q", hydrateErr, tt.wantError)
+				}
+				return
+			}
+			if hydrateErr != nil {
+				logData, _ := os.ReadFile(logPath)
+				t.Fatalf("%v\n%s", hydrateErr, logData)
+			}
+			count, err := os.ReadFile(countPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.TrimSpace(string(count)) != "2" {
+				t.Fatalf("fingerprint invalidations=%q want 2", count)
+			}
+			if _, err := os.Stat(fingerprint); !os.IsNotExist(err) {
+				t.Fatalf("fingerprint survived second invalidation: %v", err)
+			}
+			if _, err := os.Stat(hostileMarker); !os.IsNotExist(err) {
+				t.Fatalf("hostile command or profile ran: %v", err)
+			}
+			logData, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			log := string(logData)
+			wantHermeticInvalidations := 0
+			if plainManifest {
+				wantHermeticInvalidations = 2
+			} else if tt.deriveMode {
+				wantHermeticInvalidations = 1
+			}
+			if strings.Count(log, "/usr/bin/env -i PATH=/usr/bin:/bin") < wantHermeticInvalidations {
+				t.Fatalf("fingerprint invalidations were not hermetic:\n%s", log)
+			}
+			if tt.deriveMode {
+				if !strings.Contains(stderr.String(), "git origin fallback reason="+tt.fallbackReason) {
+					t.Fatalf("production caller did not observe runtime fallback: %s", stderr.String())
+				}
+				if !strings.Contains(log, "protocol.allow=never") {
+					t.Fatalf("production caller did not promote plain manifest mode:\n%s", log)
+				}
+			} else if tt.syncBefore {
+				if plainManifest {
+					for _, forbidden := range []string{"git clone ", "git fetch ", "git ls-files -z", "repair_origin", "refs/remotes/origin/"} {
+						if strings.Contains(log, forbidden) {
+							t.Fatalf("caller plain mode reached Git path %q:\n%s", forbidden, log)
+						}
+					}
+					if !strings.Contains(log, "sync-manifest.") || !strings.Contains(log, "protocol.allow=never") {
+						t.Fatalf("caller plain mode did not reach Actions sync:\n%s", log)
+					}
+				} else {
+					for _, want := range []string{"git clone ", tt.remoteURL, "refs/remotes/origin/"} {
+						if !strings.Contains(log, want) {
+							t.Fatalf("eligible origin did not reach Git hydration %q:\n%s", want, log)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestHydrateActionsWithGitHubRunnerInvalidatesPrivateOriginHermetically(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell ssh fixture")
+	}
+	dir := t.TempDir()
+	tools := filepath.Join(dir, "tools")
+	if err := os.MkdirAll(tools, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "ssh.log")
+	dispatchedPath := filepath.Join(dir, "dispatched")
+	sshScript := `#!/bin/sh
+remote=""
+for arg do remote="$arg"; done
+printf '%s\n---\n' "$remote" >> "$CRABBOX_FAKE_SSH_LOG"
+case "$remote" in
+  *"cat"*".crabbox/actions/cbx_gh.env"*)
+    if [ -e "$CRABBOX_FAKE_DISPATCHED" ]; then
+      printf '%s\n' 'WORKSPACE=/work/cbx_gh/repo'
+    fi
+    ;;
+esac
+/bin/cat >/dev/null || true
+exit 0
+`
+	ghScript := `#!/bin/sh
+case "$*" in
+  *registration-token*) printf '%s\n' test-token ;;
+  *"workflow run"*) : > "$CRABBOX_FAKE_DISPATCHED" ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(tools, "ssh"), []byte(sshScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tools, "gh"), []byte(ghScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
+	t.Setenv("CRABBOX_FAKE_DISPATCHED", dispatchedPath)
+
+	cfg := defaultConfig()
+	cfg.Actions.Workflow = "hydrate.yml"
+	repo := Repo{Root: dir, Name: "repo", RemoteURL: "ssh://git@example.test/repo.git"}
+	target := SSHTarget{User: "crabbox", Host: "example.test", Port: "22", TargetOS: targetLinux}
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	if _, err := app.hydrateActionsWithGitHubRunner(context.Background(), cfg, repo, target, "cbx_gh", "", GitHubRepo{Owner: "example", Name: "repo"}, "crabbox-cbx-gh", "main", nil, time.Minute, nil); err != nil {
+		logData, _ := os.ReadFile(logPath)
+		t.Fatalf("%v\n%s", err, logData)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidations := 0
+	for _, command := range strings.Split(string(logData), "---\n") {
+		if strings.Contains(command, "/bin/rm -f --") && strings.Contains(command, "sync-fingerprint") {
+			invalidations++
+			for _, want := range []string{remoteJoin(cfg, "cbx_gh", "repo"), "/usr/bin/env -i", "/bin/bash --noprofile --norc"} {
+				if !strings.Contains(command, want) {
+					t.Fatalf("GitHub runner invalidation missing %q:\n%s", want, command)
+				}
+			}
+		}
+	}
+	if invalidations != 1 {
+		t.Fatalf("GitHub runner fingerprint invalidations=%d want 1:\n%s", invalidations, logData)
 	}
 }
 

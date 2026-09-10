@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestRunUploadsArchiveStreamsLogsAndCleansUp(t *testing.T) {
@@ -32,8 +34,9 @@ func TestRunUploadsArchiveStreamsLogsAndCleansUp(t *testing.T) {
 	}
 
 	result, err := b.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: repoRoot, Name: "demo"},
-		Command: []string{"pnpm", "test"},
+		Repo:               Repo{Root: repoRoot, Name: "demo"},
+		Command:            []string{"pnpm", "test", "&&"},
+		CommandLiteralArgs: map[int]bool{2: true},
 	})
 	if err != nil {
 		t.Fatalf("Run err=%v", err)
@@ -66,6 +69,194 @@ func TestRunUploadsArchiveStreamsLogsAndCleansUp(t *testing.T) {
 	}
 	if claim, err := readLeaseClaim(result.LeaseID); err != nil || claim.LeaseID != "" {
 		t.Fatalf("claim=%#v err=%v, want one-shot local claim removed without sandbox delete", claim, err)
+	}
+	if result.CommandText != "'pnpm' 'test' '&&'" {
+		t.Fatalf("literal intent lost in final payload: %q", result.CommandText)
+	}
+}
+
+type crownestOutcomeClock struct{ current time.Time }
+
+func (c *crownestOutcomeClock) Now() time.Time        { return c.current }
+func (c *crownestOutcomeClock) Sleep(d time.Duration) { c.current = c.current.Add(d) }
+
+type crownestOutcomeWriter struct {
+	bytes.Buffer
+	report *timingReport
+	err    error
+	onTime func()
+}
+
+func (w *crownestOutcomeWriter) WriteTimingReport(report timingReport) error {
+	if w.onTime != nil {
+		w.onTime()
+	}
+	w.report = &report
+	return w.err
+}
+
+func TestRunFinalizesCrownestOutcomesAfterTerminalActions(t *testing.T) {
+	streamFailure := errors.New("stream disconnected")
+	deleteFailure := errors.New("delete failed")
+	cancelFailure := errors.New("cancel failed")
+	writerFailure := errors.New("timing writer failed")
+	typedCleanupFailure := &apiError{StatusCode: 503, err: exit(5, "typed cleanup provider failure")}
+	for _, tc := range []struct {
+		name        string
+		terminal    string
+		streamErr   error
+		cancelLocal bool
+		cancelErr   error
+		keep        bool
+		keepFailure bool
+		deleteErr   error
+		writerErr   error
+		wantCode    int
+		wantStatus  core.RunStatus
+		wantKind    core.RunErrorKind
+		wantKept    bool
+	}{
+		{name: "one-shot success control", wantStatus: core.RunStatusSucceeded},
+		{name: "kept success control", keep: true, wantKept: true, wantStatus: core.RunStatusSucceeded},
+		{name: "keep-on-failure success deletes once", keepFailure: true, wantStatus: core.RunStatusSucceeded},
+		{name: "cleanup-only failure", keepFailure: true, deleteErr: deleteFailure, wantKept: true, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "cleanup and writer failure", keepFailure: true, deleteErr: deleteFailure, writerErr: writerFailure, wantKept: true, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "typed cleanup failure keeps public code", keepFailure: true, deleteErr: typedCleanupFailure, wantKept: true, wantCode: 5, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "typed cleanup code survives writer failure", keepFailure: true, deleteErr: typedCleanupFailure, writerErr: writerFailure, wantKept: true, wantCode: 5, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "command control", terminal: "command", wantCode: 7, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorCommandExit},
+		{name: "retained command control", terminal: "command", keepFailure: true, wantKept: true, wantCode: 7, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorCommandExit},
+		{name: "command and writer failure", terminal: "command", writerErr: writerFailure, wantCode: 7, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorCommandExit},
+		{name: "platform failure", terminal: "platform", wantCode: 5, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "platform and writer failure", terminal: "platform", writerErr: writerFailure, wantCode: 5, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "missing exit failure", terminal: "missing", wantCode: 5, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "stream failure accepted cancellation", streamErr: streamFailure, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "stream and writer failure", streamErr: streamFailure, writerErr: writerFailure, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "transport deadline preserves cause", streamErr: context.DeadlineExceeded, wantCode: 1, wantStatus: core.RunStatusTimedOut, wantKind: core.RunErrorTimeout},
+		{name: "local cancellation and writer failure", streamErr: context.Canceled, cancelLocal: true, writerErr: writerFailure, wantCode: 1, wantStatus: core.RunStatusCanceled, wantKind: core.RunErrorCanceled},
+		{name: "failed cancellation keeps recovery claim", streamErr: streamFailure, cancelErr: cancelFailure, wantKept: true, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "cancel deadline cannot replace stream failure", streamErr: streamFailure, cancelErr: context.DeadlineExceeded, writerErr: writerFailure, wantKept: true, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "failed cancellation preserves local cancellation", streamErr: context.Canceled, cancelLocal: true, cancelErr: cancelFailure, wantKept: true, wantCode: 1, wantStatus: core.RunStatusCanceled, wantKind: core.RunErrorCanceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			clock := &crownestOutcomeClock{current: time.Unix(1700000000, 0)}
+			api := &fakeCrownestClient{baseURL: "https://api.crownest.dev", createSandboxID: "sbx_123", latestRun: workspaceRun{ID: "wsr_123", Status: "running", SandboxID: "sbx_123"}}
+			deleteCalls, cancelCalls := 0, 0
+			api.deleteHook = func(ctx context.Context) error {
+				deleteCalls++
+				clock.Sleep(3 * time.Second)
+				return tc.deleteErr
+			}
+			api.cancelHook = func(cleanupCtx context.Context) (workspaceRun, error) {
+				cancelCalls++
+				if cleanupCtx.Err() != nil {
+					t.Errorf("cancellation request inherited canceled context: %v", cleanupCtx.Err())
+				}
+				if _, ok := cleanupCtx.Deadline(); !ok {
+					t.Error("cancellation request has no deadline")
+				}
+				claim, err := readLeaseClaim(leasePrefix + "sbx_123")
+				if err != nil || claim.LeaseID == "" {
+					t.Errorf("claim retired before cancellation attempt: claim=%+v err=%v", claim, err)
+				}
+				clock.Sleep(2 * time.Second)
+				// Accepted cancellation need not be terminal; retain the server-owned contract.
+				return workspaceRun{ID: "wsr_123", Status: "canceling"}, tc.cancelErr
+			}
+			api.stream = func() (io.ReadCloser, error) {
+				if tc.cancelLocal {
+					cancel()
+				}
+				if tc.streamErr != nil {
+					return nil, tc.streamErr
+				}
+				terminal := workspaceRun{ID: "wsr_123", Status: "succeeded", SandboxID: "sbx_123"}
+				code := 0
+				terminal.ExitCode = &code
+				switch tc.terminal {
+				case "command":
+					code, terminal.Status, terminal.FailureReason = 7, "failed", "command_exit"
+				case "platform":
+					terminal.Status, terminal.FailureReason, terminal.FailureClass = "failed", "provisioning", "platform"
+				case "missing":
+					terminal.Status, terminal.FailureReason, terminal.ExitCode = "canceled", "timeout", nil
+				}
+				payload, err := json.Marshal(streamEvent{Type: "terminal", Seq: 1, WorkspaceRun: terminal})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return io.NopCloser(strings.NewReader("data: " + string(payload) + "\n\n")), nil
+			}
+			writer := &crownestOutcomeWriter{err: tc.writerErr}
+			writer.onTime = func() {
+				if tc.streamErr != nil && cancelCalls != 1 {
+					t.Errorf("timing emitted before cancellation: calls=%d", cancelCalls)
+				}
+			}
+			b := &backend{spec: Provider{}.Spec(), cfg: testConfig(), rt: Runtime{Stdout: io.Discard, Stderr: writer, Clock: clock}, newClient: func(Config, Runtime) (client, error) { return api, nil }}
+			result, err := b.Run(ctx, RunRequest{Repo: Repo{Root: tempGitRepo(t), Name: "demo"}, Command: []string{"true"}, Keep: tc.keep, KeepOnFailure: tc.keepFailure, TimingJSON: true})
+			final := core.FinalizeRunResult(result, err)
+			if final.ExitCode != tc.wantCode || final.Status != tc.wantStatus || final.ErrorKind != tc.wantKind {
+				t.Errorf("outcome=(%d,%s,%s), want (%d,%s,%s); error=%v", final.ExitCode, final.Status, final.ErrorKind, tc.wantCode, tc.wantStatus, tc.wantKind, err)
+			}
+			if tc.wantCode == 0 && err != nil {
+				t.Errorf("success error=%v", err)
+			}
+			if tc.wantCode != 0 {
+				var public ExitError
+				if !errors.As(err, &public) || public.Code != tc.wantCode {
+					t.Errorf("public error=%v, want code %d", err, tc.wantCode)
+				}
+				for _, cause := range []error{tc.streamErr, tc.cancelErr, tc.deleteErr, tc.writerErr} {
+					if cause != nil && (!errors.Is(err, cause) || !strings.Contains(public.Message, cause.Error())) {
+						t.Errorf("cause or public diagnostic lost: cause=%v error=%v public=%q", cause, err, public.Message)
+					}
+				}
+			}
+			if result.Session == nil || result.Session.Kept != tc.wantKept {
+				t.Errorf("session=%+v, want kept=%v", result.Session, tc.wantKept)
+			}
+			claim, claimErr := readLeaseClaim(result.LeaseID)
+			if claimErr != nil || (claim.LeaseID != "") != tc.wantKept {
+				t.Errorf("claim=%+v err=%v, want retained=%v", claim, claimErr, tc.wantKept)
+			}
+			wantDeletes := 0
+			if tc.keepFailure && tc.terminal == "" && tc.streamErr == nil {
+				wantDeletes = 1
+			}
+			if deleteCalls != wantDeletes {
+				t.Errorf("delete calls=%d, want %d", deleteCalls, wantDeletes)
+			}
+			wantTotal := time.Duration(deleteCalls*3+cancelCalls*2) * time.Second
+			if result.Total != wantTotal {
+				t.Errorf("total=%s, want terminal actions included: %s", result.Total, wantTotal)
+			}
+			if writer.report == nil || writer.report.ExitCode != tc.wantCode || writer.report.RunStatus != tc.wantStatus || writer.report.ErrorKind != tc.wantKind || writer.report.TotalMs != wantTotal.Milliseconds() {
+				t.Errorf("timing=%+v, want final (%d,%s,%s) total=%s", writer.report, tc.wantCode, tc.wantStatus, tc.wantKind, wantTotal)
+			}
+		})
+	}
+}
+
+func TestRunPreservesFirstTypedTimingWriterFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeCrownestClient{baseURL: "https://api.crownest.dev"}
+	writerFailure := exit(69, "typed timing writer failure")
+	writer := &crownestOutcomeWriter{err: writerFailure}
+	b := &backend{spec: Provider{}.Spec(), cfg: testConfig(), rt: Runtime{Stdout: io.Discard, Stderr: writer}, newClient: func(Config, Runtime) (client, error) { return api, nil }}
+	result, err := b.Run(context.Background(), RunRequest{Repo: Repo{Root: tempGitRepo(t), Name: "demo"}, Command: []string{"true"}, TimingJSON: true})
+	var public ExitError
+	if !errors.As(err, &public) || public.Code != 69 || !errors.Is(err, writerFailure) {
+		t.Errorf("typed writer failure changed: result=%+v error=%v", result, err)
+	}
+	if result.ExitCode != 69 || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider {
+		t.Errorf("outcome=%+v, want 69/failed/provider-error", result)
+	}
+	// A rejected record cannot be rewritten after the writer returns its error.
+	if writer.report == nil || writer.report.ExitCode != 0 || writer.report.RunStatus != core.RunStatusSucceeded {
+		t.Errorf("attempted timing=%+v, want the completed successful outcome", writer.report)
 	}
 }
 
@@ -156,6 +347,41 @@ func TestRunRejectsWorkspaceEnvUntilCrownestSupportsIt(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "does not support command environment forwarding") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRunDistinguishesFrameworkMetadataFromUnsupportedUserEnv(t *testing.T) {
+	for _, userName := range []string{"", "FOO", "CRABBOX_CUSTOM", "CRABBOX_RUN_ID_EXTRA", "CRABBOX_SLUG_PREFIX", "CRABBOX_LEASE_ID_SUFFIX"} {
+		t.Run(blank(userName, "framework-only"), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			api := &fakeCrownestClient{baseURL: "https://api.crownest.dev"}
+			var stderr bytes.Buffer
+			b := &backend{spec: Provider{}.Spec(), cfg: testConfig(), rt: Runtime{Stdout: io.Discard, Stderr: &stderr}, newClient: func(Config, Runtime) (client, error) { return api, nil }}
+			env := map[string]string{"CRABBOX_LEASE_ID": "framework-lease", "crabbox_run_id": "framework-run", "CrAbBoX_SlUg": "framework-slug", "CROWNEST_API_KEY": "fixture-auth"}
+			if userName != "" {
+				env[userName] = "user-value"
+			}
+			_, err := b.Run(context.Background(), RunRequest{Repo: Repo{Root: tempGitRepo(t), Name: "demo"}, Command: []string{"true"}, Env: env})
+			if userName != "" {
+				var public ExitError
+				if !errors.As(err, &public) || public.Code != 2 || !strings.Contains(err.Error(), "does not support command environment forwarding") || api.created.Command != "" {
+					t.Fatalf("unsupported user env admitted: error=%v request=%+v", err, api.created)
+				}
+				return
+			}
+			if err != nil || !api.started || api.uploadBytes == 0 {
+				t.Fatalf("framework metadata prevented run: error=%v started=%v upload=%d", err, api.started, api.uploadBytes)
+			}
+			payload, err := json.Marshal(api.created)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, value := range env {
+				if bytes.Contains(payload, []byte(value)) || strings.Contains(stderr.String(), value) {
+					t.Fatalf("local framework/auth value forwarded or printed: request=%s stderr=%s", payload, stderr.String())
+				}
+			}
+		})
 	}
 }
 
@@ -742,6 +968,8 @@ type fakeCrownestClient struct {
 	deletedSandboxID string
 	canceledRunID    string
 	deleteErr        error
+	deleteHook       func(context.Context) error
+	cancelHook       func(context.Context) (workspaceRun, error)
 	transferErr      error
 	stream           func() (io.ReadCloser, error)
 }
@@ -764,8 +992,11 @@ func (f *fakeCrownestClient) GetSandbox(context.Context, string) (sandbox, error
 	return sandbox{ID: "sbx_123", Status: "running"}, nil
 }
 
-func (f *fakeCrownestClient) DeleteSandbox(_ context.Context, id string) error {
+func (f *fakeCrownestClient) DeleteSandbox(ctx context.Context, id string) error {
 	f.deletedSandboxID = id
+	if f.deleteHook != nil {
+		return f.deleteHook(ctx)
+	}
 	return f.deleteErr
 }
 
@@ -805,8 +1036,11 @@ func (f *fakeCrownestClient) StartWorkspaceRun(context.Context, string, string) 
 	return workspaceRun{ID: "wsr_123", Status: "running", SandboxID: sandboxID}, nil
 }
 
-func (f *fakeCrownestClient) CancelWorkspaceRun(_ context.Context, id string, _ string) (workspaceRun, error) {
+func (f *fakeCrownestClient) CancelWorkspaceRun(ctx context.Context, id string, _ string) (workspaceRun, error) {
 	f.canceledRunID = id
+	if f.cancelHook != nil {
+		return f.cancelHook(ctx)
+	}
 	return workspaceRun{ID: "wsr_123", Status: "canceled"}, nil
 }
 

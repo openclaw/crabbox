@@ -476,9 +476,9 @@ func TestMachine0CheckpointAccountFencesAbsenceAndRelease(t *testing.T) {
 			if (err != nil) != tc.fail || absent == tc.fail {
 				t.Fatalf("absence=%t err=%v", absent, err)
 			}
-			err = b.releaseCheckpointSource(context.Background(), ReleaseLeaseRequest{Lease: lease, CheckpointID: checkpointID})
-			if (err != nil) != tc.fail {
-				t.Fatalf("release=%v", err)
+			outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: lease, CheckpointID: checkpointID})
+			if (err != nil) != tc.fail || outcome.Terminal == tc.fail {
+				t.Fatalf("release outcome=%+v err=%v", outcome, err)
 			}
 			after, _, err := resolveClaim(lease.LeaseID)
 			if err != nil {

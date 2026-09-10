@@ -173,20 +173,26 @@ lease ID with `_` rewritten to `-`).
 Each `crabbox run` gets a run ID:
 
 ```text
-run_abcdef123456
+run_abcdef1234567890abcdef1234567890
 ```
 
-Like lease IDs, run IDs are the `run_` prefix plus 12 lowercase hex characters
-from 6 random bytes. A configured coordinator mints the durable run record; the
-CLI uses that issued ID for execution metadata. Coordinator-free runs mint the
-same shape locally before dispatch. A run ID is stable across a single
-invocation; retrying the same command produces a new run.
+Current clients mint the `run_` prefix plus 32 lowercase hex characters from
+16 random bytes before admission. The same ID identifies coordinator history
+and execution metadata. Legacy coordinator-issued IDs use 12 lowercase hex
+characters and remain valid history handles. A run ID is stable across a single
+invocation; a new invocation of the same command always produces a new ID.
 
-Coordinator-issued IDs are durable handles accepted by `crabbox history`,
+The caller-known admission route binds the ID to the initiating actor and
+original create request. Repeating that admission while its record is retained
+returns the existing record, without restarting it or adding an event. It does
+not replay remote execution, grant authority from an ID alone, or permit an
+invocation to adopt another actor's record.
+
+Admitted IDs are durable handles accepted by `crabbox history`,
 `crabbox events`, `crabbox attach`, `crabbox logs`, and `crabbox results`.
-Locally minted IDs identify the invocation in command environments, timing,
-proof, and failure artifacts but do not create coordinator history. Slugs do
-not resolve to runs — only to leases.
+Coordinator-free runs use their locally minted IDs in command environments,
+timing, proof, and failure artifacts without creating coordinator history.
+Slugs do not resolve to runs — only to leases.
 
 ## Local Claims
 
@@ -297,6 +303,12 @@ Resolution order:
 This is why `--id blue-lobster` can select both the canonical lease and its
 provider before provider credentials or configuration are validated. Exact IDs
 remain deterministic even when another claim uses the same text as a slug.
+Canonical IDs never fall back to a normalized local slug: if
+`cbx_abcdef123456` has no matching claim, a different lease named
+`cbx-abcdef123456` is not selected through that slug, nor is its provider. Exact
+native provider-ID matching remains available where supported. The normal
+provider-specific missing-claim or inventory-recovery behavior still applies.
+Use the hyphenated slug explicitly to select that other lease.
 
 ## Identifier Lifetime
 
@@ -305,7 +317,7 @@ provisional lease ID  newLeaseID() before the broker call
 final lease ID        broker may return a different ID; key dir + claim re-keyed to it
 slug                  computed on first lease creation, stable for that lease
 provider name         derived from final lease ID + slug
-run ID                minted per crabbox run by the coordinator or local CLI
+run ID                minted per invocation by the CLI; legacy coordinators mint POST-created IDs
 ```
 
 Slugs are not reserved after a lease ends. The next lease that happens to hash

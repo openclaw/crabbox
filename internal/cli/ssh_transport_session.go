@@ -1115,11 +1115,11 @@ func (a App) probeSSHTransportLeaseAfterClaim(ctx context.Context, cfg Config, l
 	}
 	// Refresh claim state after the first ownership-checked claim, then persist
 	// the probed endpoint through another compare-and-swap ownership check.
-	repo, err := findRepo()
+	boundary, err := findRepositoryBoundary()
 	if err != nil {
 		return err
 	}
-	if err := a.claimLeaseTargetForRepoAndRegister(ctx, lease.LeaseID, serverSlug(lease.Server), cfg, &lease.Server, lease.SSH, repo.Root, reclaim); err != nil {
+	if err := a.claimLeaseTargetForRepoAndRegister(ctx, lease.LeaseID, serverSlug(lease.Server), cfg, &lease.Server, lease.SSH, boundary.root, reclaim); err != nil {
 		return err
 	}
 	lease.Server = a.touchLeaseTargetBestEffort(ctx, cfg, *lease, "")

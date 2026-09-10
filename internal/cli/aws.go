@@ -859,20 +859,22 @@ func mapMarket(spot bool) string {
 }
 
 func (c *AWSClient) waitForServerIP(ctx context.Context, id string) (Server, error) {
-	deadline := time.Now().Add(10 * time.Minute)
+	ctx, cancel := context.WithTimeoutCause(ctx, 10*time.Minute, exit(5, "timed out waiting for AWS instance public IP"))
+	defer cancel()
 	for {
 		server, err := c.GetServer(ctx, id)
-		if err != nil {
+		if ctx.Err() != nil {
+			return Server{}, context.Cause(ctx)
+		}
+		// RunInstances can return an ID before DescribeInstances can see it.
+		if err != nil && awsAPIErrorCode(err) != "InvalidInstanceID.NotFound" {
 			return Server{}, err
 		}
-		if server.PublicNet.IPv4.IP != "" {
+		if err == nil && server.PublicNet.IPv4.IP != "" {
 			return server, nil
 		}
-		if time.Now().After(deadline) {
-			return Server{}, exit(5, "timed out waiting for AWS instance public IP")
-		}
 		if err := sleepContext(ctx, 5*time.Second); err != nil {
-			return Server{}, err
+			return Server{}, context.Cause(ctx)
 		}
 	}
 }
@@ -906,7 +908,7 @@ func (c *AWSClient) DeleteServer(ctx context.Context, id string) error {
 func (c *AWSClient) CreateImageCheckpoint(ctx context.Context, instanceID, name string, noReboot bool) (CoordinatorImage, error) {
 	accountID, err := c.CallerAccountID(ctx)
 	if err != nil {
-		return CoordinatorImage{}, err
+		return CoordinatorImage{}, NativeCheckpointNotSubmittedError{Cause: err}
 	}
 	tags := awsTagsWithName(map[string]string{
 		"crabbox":           "true",
@@ -978,27 +980,36 @@ func (c *AWSClient) GetImageCheckpoint(ctx context.Context, imageID string) (Coo
 	}, nil
 }
 
-func (c *AWSClient) DeleteImageCheckpoint(ctx context.Context, imageID string, fallbackSnapshotIDs []string, expectedAccountID string) error {
+func (c *AWSClient) DeleteImageCheckpoint(ctx context.Context, imageID string, fallbackSnapshotIDs []string, expectedAccountID string, persist func([]string) error) error {
 	if err := c.GuardAccount(ctx, expectedAccountID); err != nil {
 		return err
 	}
 	out, err := c.ec2.DescribeImages(ctx, &ec2.DescribeImagesInput{
 		ImageIds: []string{imageID},
 	})
-	imageNotFound := err != nil && strings.Contains(err.Error(), "InvalidAMIID.NotFound")
-	if err != nil {
-		if !imageNotFound {
-			return err
-		}
-		if expectedAccountID == "" {
-			return exit(3, "cannot confirm direct AWS checkpoint delete for %s: image not found and checkpoint record has no accountId; switch to the original AWS account or use --local-only", imageID)
-		}
+	imageNotFound := err != nil && strings.Contains(err.Error(), "InvalidAMIID.NotFound") || err == nil && len(out.Images) == 0
+	if err != nil && !imageNotFound {
+		return err
+	}
+	if imageNotFound && expectedAccountID == "" {
+		return exit(3, "cannot confirm direct AWS checkpoint delete for %s: image not found and checkpoint record has no accountId; switch to the original AWS account or use --local-only", imageID)
 	}
 	snapshotIDs := append([]string(nil), fallbackSnapshotIDs...)
 	if err == nil && len(out.Images) > 0 {
 		snapshotIDs = append(snapshotIDs, awsImageSnapshotIDs(out.Images[0])...)
 	}
 	snapshotIDs = uniqueStrings(snapshotIDs)
+	if len(snapshotIDs) == 0 {
+		return exit(3, "cannot delete direct AWS checkpoint %s: backing snapshot identities are unavailable; retain the checkpoint and retry discovery", imageID)
+	}
+	if persist == nil {
+		return exit(3, "direct AWS checkpoint deletion requires durable snapshot identity persistence")
+	}
+	// Deregistration removes the provider mapping. Retain the complete union before
+	// that boundary so an interrupted or partially failed deletion can resume.
+	if err := persist(snapshotIDs); err != nil {
+		return err
+	}
 	if _, err := c.ec2.DeregisterImage(ctx, &ec2.DeregisterImageInput{ImageId: aws.String(imageID)}); err != nil && !strings.Contains(err.Error(), "InvalidAMIID.NotFound") {
 		return err
 	}

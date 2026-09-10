@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -20,7 +19,7 @@ func (b *modalBackend) syncWorkspace(ctx context.Context, client modalAPI, sandb
 	return shared.RunSandboxArchiveSync(ctx, shared.SandboxArchiveSyncRequest{
 		Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge, Workdir: workdir,
 		TempPattern: "crabbox-modal-sync-*.tgz", RemoteArchivePrefix: "crabbox-modal-sync-",
-		PhaseName: "modal_sync", Provider: providerName, Stderr: b.rt.Stderr, Now: b.now,
+		PhaseName: "modal_sync", Provider: providerName, Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 		Upload: func(ctx context.Context, remoteArchive string, archive io.Reader) error {
 			// The Modal SDK upload requires a local path. The shared archive
 			// transport owns this file and keeps it open until upload completes.
@@ -59,8 +58,4 @@ func (b *modalBackend) execShell(ctx context.Context, client modalAPI, sandboxID
 		return exit(code, "modal exec %q exited %d", command, code)
 	}
 	return nil
-}
-
-func modalRandomSuffix() string {
-	return strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "")
 }

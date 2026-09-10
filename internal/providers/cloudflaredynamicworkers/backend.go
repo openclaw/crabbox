@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type backend struct {
@@ -78,7 +80,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if req.Script == nil || len(req.Script.Data) == 0 {
 		return RunResult{}, exit(2, "%s requires --script or --script-stdin module source", providerName)
 	}
-	started := now(b.rt)
+	started := core.ClockNow(b.rt.Clock)
 	client, err := newLoaderAPI(b.cfg, b.rt)
 	if err != nil {
 		return RunResult{}, err
@@ -98,11 +100,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if req.EnvSummary {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
-	commandStarted := now(b.rt)
+	commandStarted := core.ClockNow(b.rt.Clock)
 	run, err := client.Run(ctx, loaderReq)
-	commandDuration := now(b.rt).Sub(commandStarted)
+	commandDuration := core.ClockNow(b.rt.Clock).Sub(commandStarted)
 	if err != nil {
-		total := now(b.rt).Sub(started)
+		total := core.ClockNow(b.rt.Clock).Sub(started)
 		timingWritten := false
 		result := RunResult{
 			ExitCode:    1,
@@ -154,7 +156,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			fmt.Fprintf(b.rt.Stderr, "kept uncertain run=%s slug=%s after request error\n", leaseID, slug)
 			fmt.Fprintf(b.rt.Stderr, "inspect: crabbox status --provider %s --id %s\n", providerName, slug)
 			fmt.Fprintf(b.rt.Stderr, "stop: crabbox stop --provider %s --id %s\n", providerName, slug)
-			total = now(b.rt).Sub(started)
+			total = core.ClockNow(b.rt.Clock).Sub(started)
 			result.Total = total
 			if req.TimingJSON {
 				report := timingReportWithProviderError(timingReportWithRunResult(timingReport{
@@ -249,7 +251,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if exitCode != 0 {
 		runErr = ExitError{Code: exitCode, Message: fmt.Sprintf("%s run exited %d", providerName, exitCode)}
 	}
-	total := now(b.rt).Sub(started)
+	total := core.ClockNow(b.rt.Clock).Sub(started)
 	keepRun := req.Keep || cacheMode == "explicit" || (req.KeepOnFailure && exitCode != 0) || run.LifecycleUncertain
 	result := RunResult{
 		ExitCode:    exitCode,
@@ -359,9 +361,9 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	if err != nil {
 		return StatusView{}, err
 	}
-	deadline := now(b.rt).Add(req.WaitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
 	if req.WaitTimeout <= 0 {
-		deadline = now(b.rt).Add(5 * time.Minute)
+		deadline = core.ClockNow(b.rt.Clock).Add(5 * time.Minute)
 	}
 	for {
 		status, err := client.Status(ctx, leaseID)
@@ -375,7 +377,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		if !req.Wait || view.Ready || terminalState(view.State) {
 			return view, nil
 		}
-		if now(b.rt).After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return StatusView{}, exit(5, "timed out waiting for %s run %s to become ready", providerName, leaseID)
 		}
 		select {

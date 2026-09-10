@@ -989,6 +989,113 @@ func TestRetryableAWSSnapshotDeleteError(t *testing.T) {
 	}
 }
 
+func TestAWSWaitForServerIPWaitsForCreatedInstanceVisibility(t *testing.T) {
+	const instanceID = "i-1234567890abcdef0"
+	describes := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+			return
+		}
+		if r.Form.Get("Action") != "DescribeInstances" || r.Form.Get("InstanceId.1") != instanceID {
+			t.Errorf("unexpected lookup: %v", r.Form)
+			writeEC2Error(w, "Unexpected", "wrong instance lookup", http.StatusBadRequest)
+			return
+		}
+		describes++
+		if describes == 1 {
+			writeEC2Error(w, "InvalidInstanceID.NotFound", "newly created instance has not propagated", http.StatusBadRequest)
+			return
+		}
+		writeEC2XML(w, `<DescribeInstancesResponse><reservationSet><item><instancesSet><item><instanceId>`+instanceID+`</instanceId><instanceType>t3.micro</instanceType><ipAddress>203.0.113.44</ipAddress><instanceState><name>running</name></instanceState></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`)
+	}))
+	t.Cleanup(server.Close)
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	observed, err := testAWSClient(server.URL).WaitForServerIP(ctx, instanceID)
+	if err != nil {
+		t.Fatalf("newly created instance readiness stopped before visibility: %v", err)
+	}
+	if observed.CloudID != instanceID || observed.PublicNet.IPv4.IP != "203.0.113.44" || describes != 2 {
+		t.Fatalf("readiness=%+v describes=%d, want exact instance after propagation", observed, describes)
+	}
+}
+
+func TestAWSWaitForServerIPRejectsNonVisibilityErrors(t *testing.T) {
+	for _, code := range []string{"UnauthorizedOperation", "InvalidInstanceID.Malformed", ""} {
+		t.Run(code, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if code == "" {
+					writeEC2XML(w, `<DescribeInstancesResponse><reservationSet/></DescribeInstancesResponse>`)
+				} else {
+					writeEC2Error(w, code, "InvalidInstanceID.NotFound text is not the API code", http.StatusBadRequest)
+				}
+			}))
+			t.Cleanup(server.Close)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			_, err := testAWSClient(server.URL).WaitForServerIP(ctx, "i-1234567890abcdef0")
+			if err == nil || calls != 1 || code != "" && awsAPIErrorCode(err) != code || code == "" && !strings.Contains(err.Error(), "aws instance not found") {
+				t.Fatalf("lookup err=%v calls=%d, want original error without retry", err, calls)
+			}
+		})
+	}
+}
+
+func TestAWSWaitForServerIPHonorsCallerCancellation(t *testing.T) {
+	for _, boundary := range []string{"cancel", "deadline", "in-flight deadline"} {
+		t.Run(boundary, func(t *testing.T) {
+			seen := make(chan struct{}, 1)
+			release := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seen <- struct{}{}
+				if boundary == "in-flight deadline" {
+					select {
+					case <-r.Context().Done():
+					case <-release:
+						writeEC2Error(w, "UnauthorizedOperation", "test request released", http.StatusBadRequest)
+					}
+					return
+				}
+				writeEC2Error(w, "InvalidInstanceID.NotFound", "not visible yet", http.StatusBadRequest)
+			}))
+			t.Cleanup(server.Close)
+			t.Cleanup(func() { close(release) })
+			ctx, cancel := context.WithCancel(t.Context())
+			wantErr := context.Canceled
+			if boundary != "cancel" {
+				cancel()
+				ctx, cancel = context.WithTimeout(t.Context(), 200*time.Millisecond)
+				wantErr = context.DeadlineExceeded
+			}
+			defer cancel()
+			result := make(chan error, 1)
+			go func() {
+				_, err := testAWSClient(server.URL).WaitForServerIP(ctx, "i-1234567890abcdef0")
+				result <- err
+			}()
+			select {
+			case <-seen:
+			case <-time.After(2 * time.Second):
+				t.Fatal("readiness never issued its lookup")
+			}
+			if boundary == "cancel" {
+				cancel()
+			}
+			select {
+			case err := <-result:
+				if !errors.Is(err, wantErr) {
+					t.Fatalf("readiness error=%v, want %v", err, wantErr)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("cancelled readiness waited for its next five-second poll")
+			}
+		})
+	}
+}
+
 func TestCreateImageCheckpointRecordsCallerAccount(t *testing.T) {
 	var sawCreate bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1083,21 +1190,30 @@ func TestValidateImageCheckpointSourceRejectsMissingInstance(t *testing.T) {
 }
 
 func TestDeleteImageCheckpointRefusesNotFoundWithoutAccountID(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseForm(); err != nil {
-			t.Fatal(err)
-		}
-		if action := r.Form.Get("Action"); action != "DescribeImages" {
-			writeEC2Error(w, "Unexpected", action, http.StatusBadRequest)
-			return
-		}
-		writeEC2Error(w, "InvalidAMIID.NotFound", "image not found", http.StatusBadRequest)
-	}))
-	defer server.Close()
+	for _, absent := range []string{"not found", "empty response"} {
+		t.Run(absent, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := r.ParseForm(); err != nil {
+					t.Error(err)
+					return
+				}
+				if action := r.Form.Get("Action"); action != "DescribeImages" {
+					writeEC2Error(w, "Unexpected", action, http.StatusBadRequest)
+					return
+				}
+				if absent == "not found" {
+					writeEC2Error(w, "InvalidAMIID.NotFound", "image not found", http.StatusBadRequest)
+				} else {
+					writeEC2XML(w, `<DescribeImagesResponse><imagesSet/></DescribeImagesResponse>`)
+				}
+			}))
+			defer server.Close()
 
-	err := testAWSClient(server.URL).DeleteImageCheckpoint(context.Background(), "ami-12345678", nil, "")
-	if err == nil || !strings.Contains(err.Error(), "checkpoint record has no accountId") {
-		t.Fatalf("err=%v, want account guard error", err)
+			err := testAWSClient(server.URL).DeleteImageCheckpoint(context.Background(), "ami-12345678", nil, "", nil)
+			if err == nil || !strings.Contains(err.Error(), "checkpoint record has no accountId") {
+				t.Fatalf("err=%v, want account guard error", err)
+			}
+		})
 	}
 }
 
@@ -1119,7 +1235,7 @@ func TestDeleteImageCheckpointRefusesAccountMismatchBeforeDescribe(t *testing.T)
 	}))
 	defer server.Close()
 
-	err := testAWSClient(server.URL).DeleteImageCheckpoint(context.Background(), "ami-12345678", nil, "123456789012")
+	err := testAWSClient(server.URL).DeleteImageCheckpoint(context.Background(), "ami-12345678", nil, "123456789012", nil)
 	if err == nil || !strings.Contains(err.Error(), "account mismatch") {
 		t.Fatalf("err=%v, want account mismatch", err)
 	}

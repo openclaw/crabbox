@@ -318,14 +318,14 @@ describe("usage accounting", () => {
       testLease({
         id: `cbx_admin_${index}`,
         owner: "Admin@Example.com",
-        org: "openclaw",
+        org: "example-org",
         expiresAt: "2026-05-01T03:00:00Z",
       }),
     );
     const candidate = testLease({
       id: "cbx_admin_next",
-      owner: "admin@example.com",
-      org: "openclaw",
+      owner: "Admin@Example.com",
+      org: "example-org",
       createdAt: "2026-05-01T02:00:00Z",
       expiresAt: "2026-05-01T03:00:00Z",
     });
@@ -342,6 +342,14 @@ describe("usage accounting", () => {
     const error = enforceCostLimits(activeLeases, candidate, limits, now);
 
     expect(error).toBe("");
+    expect(
+      enforceCostLimits(
+        activeLeases,
+        candidate,
+        { ...limits, maxActiveLeasesPerCapacityAdmin: 0 },
+        now,
+      ),
+    ).toBe("active lease limit for owner exceeded: 5/4");
   });
 
   it("keeps the regular owner active cap for non-admin owners", () => {

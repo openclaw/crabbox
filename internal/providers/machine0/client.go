@@ -9,6 +9,8 @@ import (
 	"io"
 	"os/exec"
 	"regexp"
+	"runtime"
+	"slices"
 	"strings"
 	"time"
 )
@@ -137,6 +139,9 @@ func (c *client) run(ctx context.Context, args ...string) (LocalCommandResult, e
 		Name:                   c.cfg.CLIPath,
 		Args:                   args,
 		MaxCapturedOutputBytes: maxCLIOutput,
+		// Native JSON printing is followed by process.exit; POSIX pipe writes
+		// can be dropped. Node's Windows pipe writes are synchronous already.
+		CaptureOutputToFiles: runtime.GOOS != "windows" && slices.Contains(args, "--json"),
 	})
 	if err == nil && result.ExitCode == 0 {
 		return result, nil

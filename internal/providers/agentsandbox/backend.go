@@ -7,6 +7,9 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type backend struct {
@@ -71,7 +74,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if req.Options.Tailscale.Enabled {
 		return exit(2, "provider=%s is delegated-run only and does not support Tailscale options", providerName)
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	client, err := b.client(ctx)
 	if err != nil {
 		return err
@@ -81,7 +84,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 		return err
 	}
 	defer unlockOperation()
-	total := b.now().Sub(started)
+	total := core.ClockNow(b.rt.Clock).Sub(started)
 	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s claim=%s sandbox=%s pod=%s\n", leaseID, slug, providerName, claimName, ready.SandboxName, ready.PodName)
 	if !req.Keep {
 		if expiresAt := strings.TrimSpace(claim.Labels[claimLabelExpiresAt]); expiresAt != "" {
@@ -90,19 +93,29 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 			fmt.Fprintf(b.rt.Stderr, "warning: agent-sandbox warmup keeps the claim until explicit stop\n")
 		}
 	}
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{Provider: providerName, LeaseID: leaseID, Slug: slug, TotalMs: total.Milliseconds(), ExitCode: 0})
-	}
-	return nil
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
+
+type runClaimCustody uint8
+
+const (
+	runClaimUnbound runClaimCustody = iota
+	runClaimRetained
+	runClaimForgotten
+	runClaimReleased
+)
 
 func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
 	if req.Options.Tailscale.Enabled {
 		return RunResult{}, exit(2, "provider=%s is delegated-run only and does not support Tailscale options", providerName)
 	}
 	workdir := path.Clean(b.cfg.AgentSandbox.Workdir)
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	client, err := b.client(ctx)
 	if err != nil {
 		return RunResult{}, err
@@ -110,21 +123,88 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	leaseID, slug, claimName := "", "", ""
 	ready := sandboxReadiness{}
 	claim := LeaseClaim{}
-	acquired := false
-	shouldStop := false
+	acquired, admitted, earlyExpiry := false, false, false
+	custody := runClaimUnbound
+	var syncDuration time.Duration
+	var syncPhases []timingPhase
 	var unlockOperation func()
 	defer func() {
 		if unlockOperation != nil {
 			unlockOperation()
 		}
 	}()
+	// Activation requires positive binding, not merely a local ID. Finalization
+	// remains under the operation lock, including the single timing attempt.
+	defer func() {
+		if custody == runClaimUnbound {
+			return
+		}
+		result.Provider, result.LeaseID, result.Slug = providerName, leaseID, slug
+		result.SyncDelegated = true
+		result, retErr = shared.PinDelegatedRunFailure(result, retErr)
+		shouldStop := acquired && !req.Keep && b.cfg.AgentSandbox.DeleteOnRelease
+		expired := claimTTLExpired(claim, core.ClockNow(b.rt.Clock).UTC())
+		if admitted && retErr != nil && !earlyExpiry && !expired {
+			handleDelegatedRunFailure(b.rt.Stderr, b.cfg, req, leaseID, slug, acquired, &shouldStop)
+		}
+		if custody == runClaimRetained {
+			if earlyExpiry || expired {
+				shouldStop = true
+				if !earlyExpiry {
+					result, retErr = shared.AppendDelegatedRunFailure(result, retErr,
+						exit(1, "agent-sandbox claim %s reached its TTL expiry during the run", claim.LeaseID), 1)
+				}
+			}
+			if shouldStop {
+				cleanupCtx, cancel := b.cleanupContext(ctx)
+				cleanupErr := b.deleteCurrentRunClaim(cleanupCtx, client, leaseID, claimName)
+				cancel()
+				if cleanupErr == nil {
+					custody = runClaimReleased
+				} else {
+					if earlyExpiry {
+						cleanupErr = fmt.Errorf("release expired agent-sandbox claim %s: %w", leaseID, cleanupErr)
+					}
+					result, retErr = shared.AppendDelegatedRunFailure(result, retErr, cleanupErr, 1)
+				}
+			} else if admitted {
+				if activityErr := refreshClaimLeaseActivity(b.cfg, claim); activityErr != nil {
+					fmt.Fprintf(b.rt.Stderr, "warning: refresh agent-sandbox lease activity failed lease=%s: %v\n", leaseID, activityErr)
+					activityCode := 1
+					if !req.SyncOnly {
+						activityCode = core.ExitCodeForError(activityErr, 1)
+					}
+					result, retErr = shared.AppendDelegatedRunFailure(result, retErr,
+						fmt.Errorf("refresh agent-sandbox lease activity: %w", activityErr), activityCode)
+				}
+			}
+		}
+		result.Session = &RunSessionHandle{
+			Provider: providerName, LeaseID: leaseID, Slug: slug, Reused: !acquired,
+			Kept: custody == runClaimRetained, CleanupCommand: agentSandboxCleanupCommand(leaseID),
+		}
+		result.Total = core.ClockNow(b.rt.Clock).Sub(started)
+		result = core.FinalizeRunResult(result, retErr)
+		if req.TimingJSON {
+			report := timingReportWithRunResult(timingReport{
+				Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true,
+				SyncMs: syncDuration.Milliseconds(), SyncPhases: syncPhases, SyncSkipped: req.NoSync,
+				CommandMs: result.Command.Milliseconds(), TotalMs: result.Total.Milliseconds(),
+				ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label),
+			}, result, retErr)
+			if writerErr := writeTimingJSON(b.rt.Stderr, report); writerErr != nil {
+				result, retErr = shared.AppendDelegatedRunFailure(result, retErr, writerErr, core.ExitCodeForError(writerErr, 1))
+			}
+		}
+		fmt.Fprintf(b.rt.Stderr, "agent-sandbox run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
+	}()
 	if req.ID == "" {
 		leaseID, claimName, slug, ready, claim, unlockOperation, err = b.createClaim(ctx, client, req.RequestedSlug, req.Repo, req.Reclaim)
 		if err != nil {
 			return RunResult{}, err
 		}
+		acquired, admitted, custody = true, true, runClaimRetained
 		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s claim=%s sandbox=%s pod=%s\n", leaseID, slug, providerName, claimName, ready.SandboxName, ready.PodName)
-		acquired = true
 	} else {
 		claim, err = resolveLocalClaim(req.ID)
 		if err != nil {
@@ -148,7 +228,8 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		liveClaim, err := client.Get(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
 		if err != nil {
 			if isNotFound(err) {
-				return RunResult{}, b.missingClaimRunError(claim)
+				_, missingErr := b.missingClaimRunError(claim)
+				return RunResult{}, missingErr
 			}
 			return RunResult{}, err
 		}
@@ -157,21 +238,20 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		if err != nil {
 			return RunResult{}, err
 		}
-		if expired, expiryErr := b.releaseExpiredRunClaim(ctx, client, claim, claimName); expired {
-			return RunResult{}, expiryErr
+		custody = runClaimRetained
+		if claimTTLExpired(claim, core.ClockNow(b.rt.Clock).UTC()) {
+			earlyExpiry = true
+			return RunResult{}, exit(4, "agent-sandbox claim %s reached its TTL expiry; command not run", claim.LeaseID)
 		}
 		ready, err = b.waitForClaimReadiness(ctx, client, claimName, identity)
 		if err != nil {
 			var ttlErr claimTTLExpiryError
 			if errors.As(err, &ttlErr) {
-				cleanupCtx, cancel := b.cleanupContext(ctx)
-				defer cancel()
-				if cleanupErr := b.deleteOwnedClaim(cleanupCtx, client, claim, claim.LeaseID, claimName, false); cleanupErr != nil {
-					return RunResult{}, errors.Join(err, fmt.Errorf("release expired agent-sandbox claim %s: %w", claim.LeaseID, cleanupErr))
-				}
+				earlyExpiry = true
 				return RunResult{}, err
 			}
-			return RunResult{}, b.readinessRunError(ctx, client, claim, claimName, err)
+			custody, err = b.readinessRunError(ctx, client, claim, claimName, err)
+			return RunResult{}, err
 		}
 		if err := claimLeaseForRepo(b.cfg, claim.LeaseID, claim.Slug, req.Repo, req.Reclaim); err != nil {
 			return RunResult{}, err
@@ -180,149 +260,47 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		if err != nil {
 			return RunResult{}, err
 		}
-		claim, err = updateLeaseClaimLabelsIfUnchanged(claim.LeaseID, updated, claimReadinessLabels(claim.Labels, ready))
+		refreshed, err := updateLeaseClaimLabelsIfUnchanged(claim.LeaseID, updated, claimReadinessLabels(claim.Labels, ready))
 		if err != nil {
 			return RunResult{}, err
 		}
+		claim = refreshed
+		admitted = true
 	}
-	shouldStop = acquired && !req.Keep && b.cfg.AgentSandbox.DeleteOnRelease
-	session := &RunSessionHandle{
-		Provider:       providerName,
-		LeaseID:        leaseID,
-		Slug:           slug,
-		Reused:         !acquired,
-		Kept:           !shouldStop,
-		CleanupCommand: agentSandboxCleanupCommand(leaseID),
-	}
-	var pendingTiming *timingReport
-	commandFailed := false
-	providerFailure := false
-	defer func() {
-		if result.Provider == "" && leaseID != "" {
-			result.Provider = providerName
-			result.LeaseID = leaseID
-			result.Slug = slug
-		}
-		if claim.LeaseID != "" && claimTTLExpired(claim, b.now().UTC()) {
-			shouldStop = true
-			providerFailure = true
-			expiryErr := exit(1, "agent-sandbox claim %s reached its TTL expiry during the run", claim.LeaseID)
-			if result.ExitCode == 0 {
-				result.ExitCode = 1
-			}
-			if retErr == nil {
-				retErr = expiryErr
-			} else {
-				retErr = errors.Join(retErr, expiryErr)
-			}
-		}
-		if shouldStop {
-			cleanupCtx, cancel := b.cleanupContext(ctx)
-			defer cancel()
-			if cleanupErr := b.deleteCurrentRunClaim(cleanupCtx, client, leaseID, claimName); cleanupErr != nil {
-				session.Kept = true
-				if result.ExitCode == 0 {
-					result.ExitCode = 1
-				}
-				if !commandFailed {
-					providerFailure = true
-				}
-				if retErr == nil {
-					retErr = exit(1, "%v", cleanupErr)
-				} else {
-					retErr = errors.Join(retErr, cleanupErr)
-				}
-			} else {
-				session.Kept = false
-			}
-		} else {
-			session.Kept = true
-		}
-		if result.LeaseID != "" {
-			result.Session = session
-		}
-		if pendingTiming != nil {
-			pendingTiming.ExitCode = result.ExitCode
-			if result.Total > 0 {
-				pendingTiming.TotalMs = result.Total.Milliseconds()
-			}
-			report := timingReportWithRunResult(*pendingTiming, result, retErr)
-			if providerFailure {
-				report = timingReportWithProviderError(report)
-			}
-			_ = writeTimingJSON(b.rt.Stderr, report)
-		}
-	}()
 	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s claim=%s sandbox=%s pod=%s workdir=%s\n", providerName, leaseID, claimName, ready.SandboxName, ready.PodName, workdir)
-
-	syncDuration := time.Duration(0)
-	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
 	if !req.NoSync {
 		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, ready, req, workdir)
 		if err != nil {
-			handleDelegatedRunFailure(b.rt.Stderr, b.cfg, req, leaseID, slug, acquired, &shouldStop)
-			result := RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true}
-			return result, b.refreshRetainedFailureActivity(claim, leaseID, shouldStop, err)
+			return RunResult{}, err
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.execShell(ctx, client, ready, "mkdir -p "+shellQuote(workdir)); err != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, b.cfg, req, leaseID, slug, acquired, &shouldStop)
-		result := RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true}
-		return result, b.refreshRetainedFailureActivity(claim, leaseID, shouldStop, err)
+	} else {
+		syncPhases = []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
+		if err := b.execShell(ctx, client, ready, "mkdir -p "+shellQuote(workdir)); err != nil {
+			return RunResult{}, err
+		}
 	}
-	if claimTTLExpired(claim, b.now().UTC()) {
-		shouldStop = true
-		result := RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true}
-		return result, exit(4, "agent-sandbox claim %s reached its TTL expiry; command not run", claim.LeaseID)
+	if claimTTLExpired(claim, core.ClockNow(b.rt.Clock).UTC()) {
+		return RunResult{}, exit(4, "agent-sandbox claim %s reached its TTL expiry; command not run", claim.LeaseID)
 	}
 	if req.SyncOnly {
-		result = RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true}
 		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
-		if !shouldStop {
-			if err := refreshClaimLeaseActivity(b.cfg, claim); err != nil && claim.LeaseID != "" {
-				fmt.Fprintf(b.rt.Stderr, "warning: refresh agent-sandbox lease activity failed lease=%s: %v\n", leaseID, err)
-				result.ExitCode = 1
-				providerFailure = true
-			}
-		}
-		if req.TimingJSON {
-			pendingTiming = &timingReport{Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true, SyncMs: syncDuration.Milliseconds(), SyncPhases: syncPhases, SyncSkipped: req.NoSync, TotalMs: result.Total.Milliseconds(), ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label)}
-		}
-		if result.ExitCode != 0 {
-			return result, exit(result.ExitCode, "agent-sandbox sync-only completed with warnings")
-		}
-		return result, nil
+		return RunResult{}, nil
 	}
-	commandStart := b.now()
+	commandStart := core.ClockNow(b.rt.Clock)
 	exitCode, runErr := b.runCommand(ctx, client, ready, req, workdir)
-	commandDuration := b.now().Sub(commandStart)
-	result = RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, ExitCode: exitCode, Command: commandDuration, Total: b.now().Sub(started), SyncDelegated: true}
-	fmt.Fprintf(b.rt.Stderr, "agent-sandbox run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), commandDuration.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
-	var commandErr error
+	result = shared.FinalizeDelegatedCommandOutcome(exitCode, runErr)
+	result.Command = core.ClockNow(b.rt.Clock).Sub(commandStart)
 	if runErr != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, b.cfg, req, leaseID, slug, acquired, &shouldStop)
-		commandErr = runErr
-	} else if exitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, b.cfg, req, leaseID, slug, acquired, &shouldStop)
-		commandErr = exit(exitCode, "agent-sandbox run exited %d", exitCode)
+		// Public callers already select typed errors through the transport wrapper;
+		// retain that code without reclassifying it as a workload exit.
+		result.ExitCode = core.ExitCodeForError(runErr, result.ExitCode)
+		return result, shared.ExitErrorWithCause(result.ExitCode, runErr.Error(), runErr)
 	}
-	commandFailed = commandErr != nil
-	if !shouldStop {
-		if err := refreshClaimLeaseActivity(b.cfg, claim); err != nil && claim.LeaseID != "" {
-			fmt.Fprintf(b.rt.Stderr, "warning: refresh agent-sandbox lease activity failed lease=%s: %v\n", leaseID, err)
-			if commandErr == nil {
-				result.ExitCode = 1
-				commandErr = err
-				providerFailure = true
-			} else {
-				commandErr = errors.Join(commandErr, fmt.Errorf("refresh agent-sandbox lease activity: %w", err))
-			}
-		}
+	if exitCode != 0 {
+		return result, exit(exitCode, "agent-sandbox run exited %d", exitCode)
 	}
-	if req.TimingJSON {
-		pendingTiming = &timingReport{Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true, SyncMs: syncDuration.Milliseconds(), SyncPhases: syncPhases, SyncSkipped: req.NoSync, CommandMs: commandDuration.Milliseconds(), TotalMs: result.Total.Milliseconds(), ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label)}
-	}
-	return result, commandErr
+	return result, nil
 }
 
 func agentSandboxCleanupCommand(leaseID string) string {
@@ -338,30 +316,6 @@ func (b *backend) deleteCurrentRunClaim(ctx context.Context, client kubernetesCl
 		return exit(4, "agent-sandbox lease %s disappeared before release", leaseID)
 	}
 	return b.deleteOwnedClaim(ctx, client, claim, leaseID, claimName, false)
-}
-
-func (b *backend) refreshRetainedFailureActivity(claim LeaseClaim, leaseID string, shouldStop bool, cause error) error {
-	if shouldStop || claim.LeaseID == "" {
-		return cause
-	}
-	if err := refreshClaimLeaseActivity(b.cfg, claim); err != nil {
-		fmt.Fprintf(b.rt.Stderr, "warning: refresh agent-sandbox lease activity failed lease=%s: %v\n", leaseID, err)
-		return errors.Join(cause, fmt.Errorf("refresh agent-sandbox lease activity: %w", err))
-	}
-	return cause
-}
-
-func (b *backend) releaseExpiredRunClaim(ctx context.Context, client kubernetesClient, claim LeaseClaim, claimName string) (bool, error) {
-	if !claimTTLExpired(claim, b.now().UTC()) {
-		return false, nil
-	}
-	cleanupCtx, cancel := b.cleanupContext(ctx)
-	defer cancel()
-	cause := exit(4, "agent-sandbox claim %s reached its TTL expiry; command not run", claim.LeaseID)
-	if err := b.deleteOwnedClaim(cleanupCtx, client, claim, claim.LeaseID, claimName, false); err != nil {
-		return true, errors.Join(cause, fmt.Errorf("release expired agent-sandbox claim %s: %w", claim.LeaseID, err))
-	}
-	return true, cause
 }
 
 func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) {
@@ -388,7 +342,7 @@ func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) 
 			if err != nil {
 				return nil, err
 			}
-			if expired, reason := sandboxClaimExpired(claim, liveClaim, b.now().UTC()); expired {
+			if expired, reason := sandboxClaimExpired(claim, liveClaim, core.ClockNow(b.rt.Clock).UTC()); expired {
 				state = "expired"
 				stateReason = reason
 			} else {
@@ -478,7 +432,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		if err != nil {
 			return StatusView{}, err
 		}
-		if expired, reason := sandboxClaimExpired(claim, liveClaim, b.now().UTC()); expired {
+		if expired, reason := sandboxClaimExpired(claim, liveClaim, core.ClockNow(b.rt.Clock).UTC()); expired {
 			view := baseView
 			view.State = "expired"
 			view.Labels = cloneStringMap(baseView.Labels)
@@ -574,7 +528,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	if err != nil {
 		return err
 	}
-	now := b.now().UTC()
+	now := core.ClockNow(b.rt.Clock).UTC()
 	checked, removed, claimsRemoved := 0, 0, 0
 	for _, listedClaim := range claims {
 		if listedClaim.Provider != providerName || listedClaim.ProviderScope != claimScope(b.cfg) {
@@ -689,7 +643,7 @@ func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requ
 	}
 	expiresAt := ""
 	if b.cfg.TTL > 0 {
-		deadline := b.now().UTC().Add(b.cfg.TTL)
+		deadline := core.ClockNow(b.rt.Clock).UTC().Add(b.cfg.TTL)
 		if deadline.Nanosecond() != 0 {
 			deadline = deadline.Truncate(time.Second).Add(time.Second)
 		}
@@ -751,7 +705,7 @@ func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requ
 	if err != nil {
 		return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, b.rollbackCreatedClaim(client, leaseID, slug, repo, reclaim, claimResourceName, pending, expiresAt, recoveryNonce, err)
 	}
-	if claimTTLExpired(pendingClaim, b.now().UTC()) {
+	if claimTTLExpired(pendingClaim, core.ClockNow(b.rt.Clock).UTC()) {
 		cause := exit(4, "agent-sandbox claim %s reached its TTL expiry before becoming ready", leaseID)
 		return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, b.rollbackCreatedClaim(client, leaseID, slug, repo, reclaim, claimResourceName, pending, expiresAt, recoveryNonce, cause)
 	}
@@ -772,7 +726,7 @@ func (b *backend) waitForClaimReadiness(ctx context.Context, client kubernetesCl
 		if err != nil {
 			return sandboxReadiness{}, exit(4, "agent-sandbox claim %s has invalid TTL expiry %q", identity.LeaseID, identity.ExpiresAt)
 		}
-		remaining := expiresAt.Sub(b.now().UTC())
+		remaining := expiresAt.Sub(core.ClockNow(b.rt.Clock).UTC())
 		if remaining <= 0 {
 			return sandboxReadiness{}, claimTTLExpiryError{err: exit(4, "agent-sandbox claim %s reached its TTL expiry before becoming ready", identity.LeaseID)}
 		}
@@ -1114,31 +1068,31 @@ func sandboxClaimControllerExpiry(obj *kubernetesObject) (string, bool) {
 	return "", false
 }
 
-func (b *backend) missingClaimRunError(claim LeaseClaim) error {
+func (b *backend) missingClaimRunError(claim LeaseClaim) (runClaimCustody, error) {
 	if b.cfg.AgentSandbox.ForgetMissing {
 		if err := b.removeLocalClaim(claim.LeaseID, claim); err != nil {
-			return errors.Join(
+			return runClaimRetained, errors.Join(
 				exit(4, "agent-sandbox claim %s is missing in Kubernetes; command not run", claim.LeaseID),
 				fmt.Errorf("remove local agent-sandbox lease %s: %w", claim.LeaseID, err),
 			)
 		}
-		return exit(4, "agent-sandbox claim %s is missing in Kubernetes; local claim forgotten, command not run", claim.LeaseID)
+		return runClaimForgotten, exit(4, "agent-sandbox claim %s is missing in Kubernetes; local claim forgotten, command not run", claim.LeaseID)
 	}
-	return retainMissingClaim(b.cfg, claim)
+	return runClaimRetained, retainMissingClaim(b.cfg, claim)
 }
 
-func (b *backend) readinessRunError(ctx context.Context, client kubernetesClient, claim LeaseClaim, claimName string, readinessErr error) error {
+func (b *backend) readinessRunError(ctx context.Context, client kubernetesClient, claim LeaseClaim, claimName string, readinessErr error) (runClaimCustody, error) {
 	if !isNotFound(readinessErr) {
-		return readinessErr
+		return runClaimRetained, readinessErr
 	}
 	_, err := client.Get(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
 	if err == nil {
-		return readinessErr
+		return runClaimRetained, readinessErr
 	}
 	if isNotFound(err) {
 		return b.missingClaimRunError(claim)
 	}
-	return errors.Join(readinessErr, fmt.Errorf("recheck agent-sandbox claim %s/%s after readiness failure: %w", b.cfg.AgentSandbox.Namespace, claimName, err))
+	return runClaimRetained, errors.Join(readinessErr, fmt.Errorf("recheck agent-sandbox claim %s/%s after readiness failure: %w", b.cfg.AgentSandbox.Namespace, claimName, err))
 }
 
 func (b *backend) removeLocalClaim(leaseID string, claim LeaseClaim) error {

@@ -2,50 +2,29 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { adminGrantVersion, issueUserToken, sha256Hex } from "../src/auth";
 import type { BridgeTicketKind, LeaseBridgeTicketRecord } from "../src/bridge-tickets";
-import {
-  CloudflareCoordinatorRuntime,
-  type CoordinatorStorage,
-  type CoordinatorStorageView,
-} from "../src/coordinator-runtime";
+import { CloudflareCoordinatorRuntime } from "../src/coordinator-runtime";
 import { FleetCoordinator } from "../src/fleet";
 import { orgKeyForLabel } from "../src/org-identity";
 import type { Env, LeaseRecord } from "../src/types";
+import { ProvisioningTestStorage } from "./provisioning-fixtures";
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-class TicketStorage implements CoordinatorStorage {
-  readonly values = new Map<string, unknown>();
-  beforeGet: (key: string) => Promise<void> = async () => {};
-
-  async get<T>(key: string): Promise<T | undefined> {
-    await this.beforeGet(key);
-    return structuredClone(this.values.get(key)) as T | undefined;
-  }
-  async put<T>(key: string, value: T): Promise<void> {
-    this.values.set(key, structuredClone(value));
-  }
-  async delete(key: string): Promise<void> {
-    this.values.delete(key);
-  }
-  async list<T>({ prefix = "" } = {}): Promise<Map<string, T>> {
-    return new Map(
-      [...this.values]
-        .filter(([key]) => key.startsWith(prefix))
-        .map(([key, value]) => [key, structuredClone(value) as T]),
-    );
-  }
-  async transaction<T>(callback: (storage: CoordinatorStorageView) => Promise<T>): Promise<T> {
-    return callback(this);
-  }
-}
+class TicketStorage extends ProvisioningTestStorage {}
 
 class TicketRuntime extends CloudflareCoordinatorRuntime {
   readonly accepted: unknown[] = [];
 
   constructor(storage: TicketStorage) {
-    super({ storage } as unknown as DurableObjectState);
+    super({
+      storage,
+      blockConcurrencyWhile<T>(callback: () => Promise<T>): Promise<T> {
+        return callback();
+      },
+      waitUntil() {},
+    } as unknown as DurableObjectState);
   }
   override createWebSocketUpgrade() {
     const socket = {

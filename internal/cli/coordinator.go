@@ -12,10 +12,13 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/prefixbuffer"
 )
 
 type CoordinatorClient struct {
@@ -54,64 +57,106 @@ func (e CoordinatorHTTPError) Error() string {
 }
 
 type CoordinatorLease struct {
-	ID                    string                         `json:"id"`
-	Slug                  string                         `json:"slug,omitempty"`
-	Provider              string                         `json:"provider"`
-	Lifecycle             string                         `json:"lifecycle,omitempty"`
-	RuntimeAdapterID      string                         `json:"runtimeAdapterID,omitempty"`
-	RuntimeWorkspaceID    string                         `json:"runtimeAdapterWorkspaceID,omitempty"`
-	RuntimeRegistrationID string                         `json:"runtimeAdapterRegistrationID,omitempty"`
-	TargetOS              string                         `json:"target,omitempty"`
-	Architecture          string                         `json:"architecture,omitempty"`
-	WindowsMode           string                         `json:"windowsMode,omitempty"`
-	Desktop               bool                           `json:"desktop,omitempty"`
-	DesktopEnv            string                         `json:"desktopEnv,omitempty"`
-	Browser               bool                           `json:"browser,omitempty"`
-	Code                  bool                           `json:"code,omitempty"`
-	Tailscale             *TailscaleMetadata             `json:"tailscale,omitempty"`
-	Region                string                         `json:"region,omitempty"`
-	Owner                 string                         `json:"owner"`
-	Org                   string                         `json:"org"`
-	Share                 *CoordinatorShare              `json:"share,omitempty"`
-	Profile               string                         `json:"profile"`
-	Class                 string                         `json:"class"`
-	Pond                  string                         `json:"pond,omitempty"`
-	ExposedPorts          []string                       `json:"exposedPorts,omitempty"`
-	ServerType            string                         `json:"serverType"`
-	RequestedServerType   string                         `json:"requestedServerType,omitempty"`
-	HostID                string                         `json:"hostId,omitempty"`
-	HostIDCompat          string                         `json:"hostID,omitempty"`
-	Market                string                         `json:"market,omitempty"`
-	ProvisioningAttempts  []ProvisioningAttempt          `json:"provisioningAttempts,omitempty"`
-	Image                 *CoordinatorLeaseImage         `json:"image,omitempty"`
-	ProvisioningTiming    *CoordinatorProvisioningTiming `json:"provisioningTiming,omitempty"`
-	CapacityHints         []CapacityHint                 `json:"capacityHints,omitempty"`
-	ServerID              int64                          `json:"serverID"`
-	CloudID               string                         `json:"cloudID"`
-	ServerName            string                         `json:"serverName"`
-	Host                  string                         `json:"host"`
-	SSHUser               string                         `json:"sshUser"`
-	SSHPort               string                         `json:"sshPort"`
-	SSHHostKey            string                         `json:"sshHostKey,omitempty"`
-	SSHFallbackPorts      []string                       `json:"sshFallbackPorts,omitempty"`
-	WorkRoot              string                         `json:"workRoot"`
-	Keep                  bool                           `json:"keep"`
-	State                 string                         `json:"state"`
-	TTLSeconds            int                            `json:"ttlSeconds,omitempty"`
-	IdleTimeoutSeconds    int                            `json:"idleTimeoutSeconds,omitempty"`
-	CreatedAt             string                         `json:"createdAt,omitempty"`
-	UpdatedAt             string                         `json:"updatedAt,omitempty"`
-	LastTouchedAt         string                         `json:"lastTouchedAt,omitempty"`
-	ExpiresAt             string                         `json:"expiresAt"`
-	Telemetry             *LeaseTelemetry                `json:"telemetry,omitempty"`
-	TelemetryHistory      []*LeaseTelemetry              `json:"telemetryHistory,omitempty"`
-	CleanupAttempts       int                            `json:"cleanupAttempts,omitempty"`
-	CleanupStartedAt      string                         `json:"cleanupStartedAt,omitempty"`
-	CleanupError          string                         `json:"cleanupError,omitempty"`
-	CleanupRetryAt        string                         `json:"cleanupRetryAt,omitempty"`
-	ReleaseDeletesServer  *bool                          `json:"releaseDeletesServer,omitempty"`
-	FailureError          string                         `json:"failureError,omitempty"`
-	ProviderMetadata      map[string]any                 `json:"providerMetadata,omitempty"`
+	ID                           string                         `json:"id"`
+	Slug                         string                         `json:"slug,omitempty"`
+	Provider                     string                         `json:"provider"`
+	Lifecycle                    string                         `json:"lifecycle,omitempty"`
+	RuntimeAdapterID             string                         `json:"runtimeAdapterID,omitempty"`
+	RuntimeWorkspaceID           string                         `json:"runtimeAdapterWorkspaceID,omitempty"`
+	RuntimeRegistrationID        string                         `json:"runtimeAdapterRegistrationID,omitempty"`
+	TargetOS                     string                         `json:"target,omitempty"`
+	Architecture                 string                         `json:"architecture,omitempty"`
+	WindowsMode                  string                         `json:"windowsMode,omitempty"`
+	Desktop                      bool                           `json:"desktop,omitempty"`
+	DesktopEnv                   string                         `json:"desktopEnv,omitempty"`
+	Browser                      bool                           `json:"browser,omitempty"`
+	Code                         bool                           `json:"code,omitempty"`
+	Network                      *LeaseNetworkDiagnostics       `json:"network,omitempty"`
+	Tailscale                    *TailscaleMetadata             `json:"tailscale,omitempty"`
+	Region                       string                         `json:"region,omitempty"`
+	ProviderProject              string                         `json:"providerProject,omitempty"`
+	Owner                        string                         `json:"owner"`
+	Org                          string                         `json:"org"`
+	Share                        *CoordinatorShare              `json:"share,omitempty"`
+	Profile                      string                         `json:"profile"`
+	Class                        string                         `json:"class"`
+	Pond                         string                         `json:"pond,omitempty"`
+	ExposedPorts                 []string                       `json:"exposedPorts,omitempty"`
+	ServerType                   string                         `json:"serverType"`
+	RequestedServerType          string                         `json:"requestedServerType,omitempty"`
+	HostID                       string                         `json:"hostId,omitempty"`
+	HostIDCompat                 string                         `json:"hostID,omitempty"`
+	Market                       string                         `json:"market,omitempty"`
+	ProvisioningAttempts         []ProvisioningAttempt          `json:"provisioningAttempts,omitempty"`
+	Image                        *CoordinatorLeaseImage         `json:"image,omitempty"`
+	ProvisioningTiming           *CoordinatorProvisioningTiming `json:"provisioningTiming,omitempty"`
+	CapacityHints                []CapacityHint                 `json:"capacityHints,omitempty"`
+	ServerID                     int64                          `json:"serverID"`
+	CloudID                      string                         `json:"cloudID"`
+	ServerName                   string                         `json:"serverName"`
+	Host                         string                         `json:"host"`
+	SSHUser                      string                         `json:"sshUser"`
+	SSHPort                      string                         `json:"sshPort"`
+	SSHHostKey                   string                         `json:"sshHostKey,omitempty"`
+	ProviderAccessExpiresAt      string                         `json:"providerAccessExpiresAt,omitempty"`
+	SSHFallbackPorts             []string                       `json:"sshFallbackPorts,omitempty"`
+	WorkRoot                     string                         `json:"workRoot"`
+	Keep                         bool                           `json:"keep"`
+	State                        string                         `json:"state"`
+	TTLSeconds                   int                            `json:"ttlSeconds,omitempty"`
+	IdleTimeoutSeconds           int                            `json:"idleTimeoutSeconds,omitempty"`
+	CreatedAt                    string                         `json:"createdAt,omitempty"`
+	UpdatedAt                    string                         `json:"updatedAt,omitempty"`
+	LastTouchedAt                string                         `json:"lastTouchedAt,omitempty"`
+	ExpiresAt                    string                         `json:"expiresAt"`
+	Telemetry                    *LeaseTelemetry                `json:"telemetry,omitempty"`
+	TelemetryHistory             []*LeaseTelemetry              `json:"telemetryHistory,omitempty"`
+	CleanupAttempts              int                            `json:"cleanupAttempts,omitempty"`
+	CleanupStatus                string                         `json:"cleanupStatus,omitempty"`
+	ProviderCleanup              *ProviderCleanupEvidence       `json:"providerCleanup,omitempty"`
+	CleanupStartedAt             string                         `json:"cleanupStartedAt,omitempty"`
+	CleanupCompletedAt           string                         `json:"cleanupCompletedAt,omitempty"`
+	CleanupError                 string                         `json:"cleanupError,omitempty"`
+	CleanupRetryAt               string                         `json:"cleanupRetryAt,omitempty"`
+	ReleaseDeletesServer         *bool                          `json:"releaseDeletesServer,omitempty"`
+	FailureError                 string                         `json:"failureError,omitempty"`
+	ProvisioningResourceMayExist *bool                          `json:"provisioningResourceMayExist,omitempty"`
+	ProvisioningFailureRetryable *bool                          `json:"provisioningFailureRetryable,omitempty"`
+	ProviderMetadata             map[string]any                 `json:"providerMetadata,omitempty"`
+}
+
+// LeaseNetworkDiagnostics retains broker records, not live ingress observations.
+// Pointers preserve unknown fields separately from explicit false or empty values.
+type LeaseNetworkDiagnostics struct {
+	SSHSourceCIDRs         *[]string `json:"sshSourceCIDRs,omitempty"`
+	SSHPinnedSourceCIDRs   *[]string `json:"sshPinnedSourceCIDRs,omitempty"`
+	SSHSourceCIDRsComplete *bool     `json:"sshSourceCIDRsComplete,omitempty"`
+	AWSSecurityGroupID     *string   `json:"awsSecurityGroupID,omitempty"`
+	AWSSecurityGroupName   *string   `json:"awsSecurityGroupName,omitempty"`
+	AWSSubnetID            *string   `json:"awsSubnetID,omitempty"`
+	AWSPrivate             *bool     `json:"awsPrivate,omitempty"`
+}
+
+// ProviderCleanupEvidence is recorded broker evidence, not a live provider observation.
+type ProviderCleanupEvidence struct {
+	Version           int                          `json:"version"`
+	Provider          string                       `json:"provider"`
+	LeaseID           string                       `json:"leaseID"`
+	ServerID          int64                        `json:"serverID"`
+	DispatchStartedAt string                       `json:"dispatchStartedAt,omitempty"`
+	DeleteNotFoundAt  string                       `json:"deleteNotFoundAt,omitempty"`
+	Action            *ProviderCleanupAction       `json:"action,omitempty"`
+	Confirmation      *ProviderCleanupConfirmation `json:"confirmation,omitempty"`
+}
+
+type ProviderCleanupAction struct {
+	ID     int64  `json:"id"`
+	Status string `json:"status"`
+}
+
+type ProviderCleanupConfirmation struct {
+	Method string `json:"method"`
+	At     string `json:"at"`
 }
 
 type CoordinatorCanceledCreateAttestation struct {
@@ -137,10 +182,64 @@ type CoordinatorLeaseImage struct {
 }
 
 type CoordinatorProvisioningTiming struct {
-	RequestMs      int64 `json:"requestMs"`
-	NetworkReadyMs int64 `json:"networkReadyMs,omitempty"`
-	BootstrapMs    int64 `json:"bootstrapMs,omitempty"`
-	TotalMs        int64 `json:"totalMs"`
+	RequestMs      int64                          `json:"requestMs"`
+	NetworkReadyMs int64                          `json:"networkReadyMs,omitempty"`
+	BootstrapMs    int64                          `json:"bootstrapMs,omitempty"`
+	TotalMs        int64                          `json:"totalMs"`
+	Phases         []CoordinatorProvisioningPhase `json:"phases,omitempty"`
+}
+
+type CoordinatorProvisioningPhase struct {
+	Name string `json:"name"`
+	Ms   int64  `json:"ms"`
+}
+
+func (timing *CoordinatorProvisioningTiming) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		RequestMs      int64           `json:"requestMs"`
+		NetworkReadyMs int64           `json:"networkReadyMs"`
+		BootstrapMs    int64           `json:"bootstrapMs"`
+		TotalMs        int64           `json:"totalMs"`
+		Phases         json.RawMessage `json:"phases"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		*timing = CoordinatorProvisioningTiming{}
+		return err
+	}
+	*timing = CoordinatorProvisioningTiming{
+		RequestMs:      raw.RequestMs,
+		NetworkReadyMs: raw.NetworkReadyMs,
+		BootstrapMs:    raw.BootstrapMs,
+		TotalMs:        raw.TotalMs,
+		Phases:         decodeCoordinatorProvisioningPhases(raw.Phases),
+	}
+	return nil
+}
+
+func decodeCoordinatorProvisioningPhases(data json.RawMessage) []CoordinatorProvisioningPhase {
+	if len(data) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return nil
+	}
+	var raw []struct {
+		Name json.RawMessage `json:"name"`
+		Ms   json.RawMessage `json:"ms"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	phases := make([]CoordinatorProvisioningPhase, 0, len(raw))
+	for _, phase := range raw {
+		var name string
+		if err := json.Unmarshal(phase.Name, &name); err != nil {
+			return nil
+		}
+		var ms int64
+		if err := json.Unmarshal(phase.Ms, &ms); err != nil || ms <= 0 {
+			return nil
+		}
+		phases = append(phases, CoordinatorProvisioningPhase{Name: name, Ms: ms})
+	}
+	return phases
 }
 
 type CoordinatorLeaseRegistration struct {
@@ -244,6 +343,13 @@ type CoordinatorUsageResponse struct {
 	Limits CoordinatorCostLimits   `json:"limits"`
 }
 
+type CoordinatorCapacityResponse struct {
+	Owner          string `json:"owner"`
+	ActiveLeases   int    `json:"activeLeases"`
+	EffectiveLimit int    `json:"effectiveLimit"`
+	ObservedAt     string `json:"observedAt"`
+}
+
 type CoordinatorMarketplaceStatusResponse struct {
 	Marketplace CoordinatorMarketplaceStatus `json:"marketplace"`
 	Owner       string                       `json:"owner,omitempty"`
@@ -292,11 +398,30 @@ type CoordinatorImage struct {
 	ServerType           string                           `json:"serverType,omitempty"`
 	Architecture         string                           `json:"architecture,omitempty"`
 	PromotedAt           string                           `json:"promotedAt,omitempty"`
+	Revision             string                           `json:"revision,omitempty"`
 	FastSnapshotRestores []CoordinatorFastSnapshotRestore `json:"fastSnapshotRestores,omitempty"`
 	Capabilities         *imageCapabilities               `json:"capabilities,omitempty"`
 	CatalogOnly          bool                             `json:"catalogOnly,omitempty"`
 	VariantSelectors     *imageVariantSelectors           `json:"variantSelectors,omitempty"`
 	managedCheckpoint    *coordinatorCheckpoint
+}
+
+type CoordinatorImageDefaultState struct {
+	State    string                              `json:"state"`
+	ImageID  string                              `json:"imageId,omitempty"`
+	Revision string                              `json:"revision,omitempty"`
+	Aliases  []CoordinatorImageDefaultAliasState `json:"aliases,omitempty"`
+}
+
+type CoordinatorImageDefaultAliasState struct {
+	Alias string          `json:"alias"`
+	State string          `json:"state"`
+	Image json.RawMessage `json:"image,omitempty"`
+}
+
+type CoordinatorImagePromotionResult struct {
+	Image    *CoordinatorImage            `json:"image,omitempty"`
+	Previous CoordinatorImageDefaultState `json:"previous"`
 }
 
 type CoordinatorFastSnapshotRestore struct {
@@ -896,7 +1021,9 @@ func newCoordinatorClient(cfg Config) (*CoordinatorClient, bool, error) {
 					Timeout:   5 * time.Second,
 					KeepAlive: 30 * time.Second,
 				}).DialContext,
-				TLSHandshakeTimeout:   10 * time.Second,
+				TLSHandshakeTimeout: 10 * time.Second,
+				// Custom dialing otherwise disables HTTP/2 and its independent streams.
+				ForceAttemptHTTP2:     true,
 				ResponseHeaderTimeout: coordinatorHTTPTimeout,
 				IdleConnTimeout:       90 * time.Second,
 			},
@@ -1019,9 +1146,6 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 	method := http.MethodPost
 	path := "/v1/leases"
 	checkpointClaim, checkpointBacked := checkpointLeaseClaimFromContext(ctx)
-	if checkpointBacked && fixed {
-		return CoordinatorLease{}, fmt.Errorf("checkpoint-backed leases do not support fixed lease identifiers")
-	}
 	if fixed {
 		method = http.MethodPut
 		path = "/v1/leases/" + url.PathEscape(leaseID)
@@ -1048,8 +1172,11 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 		req["checkpointID"] = checkpointClaim.CheckpointID
 		req["checkpointUseClaim"] = checkpointClaim.Token
 		path = "/v1/leases/from-checkpoint"
+		if fixed {
+			path = "/v1/leases/" + url.PathEscape(leaseID) + "/from-checkpoint"
+		}
 	}
-	err = c.do(ctx, method, path, req, &res)
+	err = c.doWithHeaders(ctx, method, path, req, &res, http.Header{"Prefer": {"respond-async"}})
 	if err == nil && checkpointBacked && checkpointClaim.LeaseCreated != nil {
 		checkpointClaim.LeaseCreated()
 	}
@@ -1347,10 +1474,20 @@ func (c *CoordinatorClient) Pool(ctx context.Context, cfg Config) ([]Coordinator
 }
 
 func (c *CoordinatorClient) Leases(ctx context.Context, state string, limit int) ([]CoordinatorLease, error) {
+	return c.listLeases(ctx, state, limit, "", "")
+}
+
+func (c *CoordinatorClient) listLeases(ctx context.Context, state string, limit int, view, provider string) ([]CoordinatorLease, error) {
 	var res struct {
 		Leases []CoordinatorLease `json:"leases"`
 	}
 	values := url.Values{}
+	if view != "" {
+		values.Set("view", view)
+	}
+	if provider != "" {
+		values.Set("provider", provider)
+	}
 	if state != "" {
 		values.Set("state", state)
 	}
@@ -1512,6 +1649,32 @@ func (c *CoordinatorClient) doTypedReadyPool(ctx context.Context, method, key, a
 		return fmt.Errorf("typed ready pools are unsupported by this coordinator: %w", err)
 	}
 	return err
+}
+
+func (c *CoordinatorClient) Capacity(ctx context.Context) (CoordinatorCapacityResponse, error) {
+	// Pointers distinguish an explicit zero (limit off) from a missing field.
+	var payload struct {
+		Owner          string `json:"owner"`
+		ActiveLeases   *int   `json:"activeLeases"`
+		EffectiveLimit *int   `json:"effectiveLimit"`
+		ObservedAt     string `json:"observedAt"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/capacity", nil, &payload); err != nil {
+		var httpErr CoordinatorHTTPError
+		if errors.As(err, &httpErr) && (httpErr.StatusCode == http.StatusNotFound || httpErr.StatusCode == http.StatusMethodNotAllowed) {
+			return CoordinatorCapacityResponse{}, fmt.Errorf("capacity is unsupported by this coordinator: %w", err)
+		}
+		return CoordinatorCapacityResponse{}, err
+	}
+	observedAt, err := time.Parse(time.RFC3339Nano, payload.ObservedAt)
+	if strings.TrimSpace(payload.Owner) == "" || payload.ActiveLeases == nil || *payload.ActiveLeases < 0 ||
+		payload.EffectiveLimit == nil || *payload.EffectiveLimit < 0 || err != nil || !strings.HasSuffix(payload.ObservedAt, "Z") || observedAt.IsZero() {
+		return CoordinatorCapacityResponse{}, fmt.Errorf("invalid capacity response from coordinator")
+	}
+	return CoordinatorCapacityResponse{
+		Owner: payload.Owner, ActiveLeases: *payload.ActiveLeases,
+		EffectiveLimit: *payload.EffectiveLimit, ObservedAt: payload.ObservedAt,
+	}, nil
 }
 
 func (c *CoordinatorClient) Usage(ctx context.Context, scope, owner, org, month string) (CoordinatorUsageResponse, error) {
@@ -1747,6 +1910,23 @@ func (c *CoordinatorClient) AdminDeleteLease(ctx context.Context, id string) (Co
 	}
 	err := c.do(ctx, http.MethodPost, "/v1/admin/leases/"+url.PathEscape(id)+"/delete", map[string]any{}, &res)
 	return res.Lease, err
+}
+
+// AdminHostReservation reads or clears coordinator host associations without changing provider resources.
+func (c *CoordinatorClient) AdminHostReservation(ctx context.Context, region, hostID string, clear, force bool) (json.RawMessage, error) {
+	values := adminHostScopeValues(region, "")
+	if clear && force {
+		values.Set("force", "true")
+	}
+	method := http.MethodGet
+	if clear {
+		// Older coordinators dispatch any host DELETE suffix as a Dedicated Host release.
+		method = http.MethodPost
+	}
+	path := "/v1/admin/hosts/" + url.PathEscape(hostID) + "/reservation?" + values.Encode()
+	var result json.RawMessage
+	err := c.do(ctx, method, path, nil, &result)
+	return result, err
 }
 
 func (c *CoordinatorClient) AdminMacHosts(ctx context.Context, region, serverType, state string) ([]CoordinatorMacHost, error) {
@@ -1992,6 +2172,28 @@ func (c *CoordinatorClient) PromoteImage(ctx context.Context, imageID string, re
 	return res.Image, nil
 }
 
+func (c *CoordinatorClient) PromoteImageCAS(ctx context.Context, imageID string, expected CoordinatorImageDefaultState, clear, retireExpectedCatalog bool, restorePrevious *CoordinatorImageDefaultState, refs ...CoordinatorImageRef) (CoordinatorImagePromotionResult, error) {
+	var res CoordinatorImagePromotionResult
+	req := map[string]any{"expectedCurrent": expected}
+	if clear {
+		req["clearDefault"] = true
+	}
+	if retireExpectedCatalog {
+		req["retireExpectedCatalog"] = true
+	}
+	if restorePrevious != nil {
+		req["restorePrevious"] = restorePrevious
+	}
+	err := c.do(ctx, http.MethodPost, imagePath(imageID, "promote-cas", refs...), req, &res)
+	if isCoordinatorNotFound(err) {
+		return res, fmt.Errorf("coordinator does not support transactional image promotion; upgrade the coordinator before publishing images (%w)", err)
+	}
+	if err == nil && (res.Previous.State == "" || (!clear && res.Image == nil)) {
+		return res, fmt.Errorf("coordinator did not return a transactional image promotion receipt")
+	}
+	return res, err
+}
+
 func (c *CoordinatorClient) FastSnapshotRestoreStatus(ctx context.Context, imageID string, refs ...CoordinatorImageRef) (CoordinatorImage, error) {
 	var res struct {
 		Image                CoordinatorImage                 `json:"image"`
@@ -2093,8 +2295,7 @@ func imagePath(imageID, action string, refs ...CoordinatorImageRef) string {
 	return path
 }
 
-func (c *CoordinatorClient) CreateRun(ctx context.Context, leaseID string, cfg Config, command []string, label string) (CoordinatorRun, error) {
-	var res CoordinatorRunResponse
+func (c *CoordinatorClient) CreateRun(ctx context.Context, runID, leaseID string, cfg Config, command []string, label string) (CoordinatorRun, error) {
 	body := map[string]any{
 		"leaseID":     leaseID,
 		"provider":    cfg.Provider,
@@ -2107,18 +2308,45 @@ func (c *CoordinatorClient) CreateRun(ctx context.Context, leaseID string, cfg C
 	if strings.TrimSpace(label) != "" {
 		body["label"] = strings.TrimSpace(label)
 	}
-	err := c.do(ctx, http.MethodPost, "/v1/runs", body, &res)
-	return res.Run, err
+	// Only identity-bound admission is replayed, within the caller's original budget.
+	ctx, cancel := context.WithTimeout(ctx, runRecorderRequestTimeout)
+	defer cancel()
+	var err error
+	for attempt := 0; attempt < 2 && ctx.Err() == nil; attempt++ {
+		var res CoordinatorRunResponse
+		err = c.do(ctx, http.MethodPut, "/v1/runs/"+url.PathEscape(runID), body, &res)
+		if err == nil {
+			if ctx.Err() != nil {
+				return CoordinatorRun{}, ctx.Err()
+			}
+			if res.Run.ID != runID || res.Run.State != "running" || res.Run.Phase != "starting" || !slices.Equal(res.Run.Command, command) {
+				return CoordinatorRun{}, exit(7, "coordinator returned a mismatched or already-started run admission for %s", runID)
+			}
+			return res.Run, nil
+		}
+		if !runRecorderFinishRetryable(err) {
+			break
+		}
+	}
+	if ctx.Err() != nil {
+		return CoordinatorRun{}, ctx.Err()
+	}
+	if isCoordinatorNotFoundError(err) {
+		return CoordinatorRun{}, fmt.Errorf("coordinator run admission unavailable; upgrade the coordinator: %w", err)
+	}
+	return CoordinatorRun{}, err
 }
 
 func (c *CoordinatorClient) FinishRun(ctx context.Context, runID string, exitCode int, sync, command time.Duration, log string, truncated bool, results *TestResultSummary, telemetry *RunTelemetrySummary, classification FailureClassification, receipt *terminalRunReceipt) (CoordinatorRun, error) {
 	var res CoordinatorRunResponse
+	log, changed := retainedRunLogText(log, maxRunLogBytes)
+	truncated = truncated || changed
 	logChunks := splitRunLogChunks(log)
 	body := map[string]any{
 		"exitCode":     exitCode,
 		"syncMs":       sync.Milliseconds(),
 		"commandMs":    command.Milliseconds(),
-		"log":          runLogFallbackPreview(log, truncated),
+		"log":          runLogFallbackPreview(log),
 		"logChunks":    logChunks,
 		"logTruncated": truncated,
 		"results":      results,
@@ -2251,6 +2479,10 @@ func (c *CoordinatorClient) doControl(ctx context.Context, method, path string, 
 }
 
 func (c *CoordinatorClient) do(ctx context.Context, method, path string, body any, out any) error {
+	return c.doWithHeaders(ctx, method, path, body, out, nil)
+}
+
+func (c *CoordinatorClient) doWithHeaders(ctx context.Context, method, path string, body any, out any, headers http.Header) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -2262,8 +2494,8 @@ func (c *CoordinatorClient) do(ctx context.Context, method, path string, body an
 			return err
 		}
 	}
-	err = c.doHTTP(ctx, method, path, data, body != nil, out)
-	if err == nil || !shouldUseCoordinatorCurlFallback(method, body != nil, err) {
+	err = c.doHTTPWithHeaders(ctx, method, path, data, body != nil, out, headers)
+	if err == nil || !shouldUseCoordinatorCurlFallback(ctx, method, body != nil, err) {
 		return err
 	}
 	if curlErr := c.doCurl(ctx, method, path, data, body != nil, out); curlErr == nil {
@@ -2274,12 +2506,19 @@ func (c *CoordinatorClient) do(ctx context.Context, method, path string, body an
 }
 
 func (c *CoordinatorClient) doHTTP(ctx context.Context, method, path string, data []byte, hasBody bool, out any) error {
+	return c.doHTTPWithHeaders(ctx, method, path, data, hasBody, out, nil)
+}
+
+func (c *CoordinatorClient) doHTTPWithHeaders(ctx context.Context, method, path string, data []byte, hasBody bool, out any, headers http.Header) error {
 	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
 	if hasBody {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for name, values := range headers {
+		req.Header[name] = append([]string(nil), values...)
 	}
 	if err := c.addRequestHeaders(ctx, req.Header); err != nil {
 		return err
@@ -2332,7 +2571,7 @@ func (c *CoordinatorClient) authorizationToken(ctx context.Context) (string, err
 	cmd := exec.CommandContext(commandCtx, c.TokenCommand[0], c.TokenCommand[1:]...)
 	configureBoundedCommandCancellation(cmd)
 	c.applyChildEnvironment(cmd)
-	var output limitedCoordinatorTokenOutput
+	output := prefixbuffer.NewLimited(maxCoordinatorTokenBytes)
 	cmd.Stdout = &output
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
@@ -2344,7 +2583,7 @@ func (c *CoordinatorClient) authorizationToken(ctx context.Context) (string, err
 		}
 		return "", fmt.Errorf("coordinator token command failed: %w", err)
 	}
-	if output.overflow {
+	if output.Exceeded() {
 		return "", fmt.Errorf("coordinator token command output exceeds %d bytes", maxCoordinatorTokenBytes)
 	}
 	token := strings.TrimSuffix(output.String(), "\n")
@@ -2356,26 +2595,6 @@ func (c *CoordinatorClient) authorizationToken(ctx context.Context) (string, err
 		return "", errors.New("coordinator token command must return exactly one token line")
 	}
 	return token, nil
-}
-
-type limitedCoordinatorTokenOutput struct {
-	bytes.Buffer
-	overflow bool
-}
-
-func (w *limitedCoordinatorTokenOutput) Write(p []byte) (int, error) {
-	originalLength := len(p)
-	remaining := maxCoordinatorTokenBytes - w.Len()
-	if remaining <= 0 {
-		w.overflow = w.overflow || originalLength > 0
-		return originalLength, nil
-	}
-	if len(p) > remaining {
-		p = p[:remaining]
-		w.overflow = true
-	}
-	_, _ = w.Buffer.Write(p)
-	return originalLength, nil
 }
 
 func (c *CoordinatorClient) doCurl(ctx context.Context, method, path string, data []byte, hasBody bool, out any) error {
@@ -2537,16 +2756,23 @@ func isCoordinatorTransportError(err error) bool {
 	return errors.As(err, &urlErr)
 }
 
-func shouldUseCoordinatorCurlFallback(method string, hasBody bool, err error) bool {
-	if hasBody {
+func shouldUseCoordinatorCurlFallback(ctx context.Context, method string, hasBody bool, err error) bool {
+	if ctx.Err() != nil || hasBody || errors.Is(err, context.Canceled) {
 		return false
 	}
 	switch method {
 	case http.MethodGet, http.MethodHead:
-		return isCoordinatorTransportError(err)
 	default:
 		return false
 	}
+	if isCoordinatorTransportError(err) {
+		return true
+	}
+	// A dial timeout can match DeadlineExceeded while the request budget is live.
+	var urlErr *url.Error
+	var dialErr *net.OpError
+	return errors.As(err, &urlErr) && errors.As(urlErr.Err, &dialErr) &&
+		dialErr.Op == "dial" && dialErr.Timeout()
 }
 
 func (c *CoordinatorClient) applyChildEnvironment(cmd *exec.Cmd) {

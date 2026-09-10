@@ -4,46 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { copySmokeRepo, writeExecutable, writeGoStub } from "./test-support/smoke-fixtures.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
-function writeExecutable(file, body) {
-  fs.writeFileSync(file, body, "utf8");
-  fs.chmodSync(file, 0o755);
-}
-
-function prepareSmokeRepo(dir) {
-  const tempRoot = path.join(dir, "repo");
-  const tempScripts = path.join(tempRoot, "scripts");
-  const smokeScript = path.join(tempScripts, "live-scaleway-smoke.sh");
-  fs.mkdirSync(tempScripts, { recursive: true });
-  fs.copyFileSync(path.join(repoRoot, "scripts", "live-scaleway-smoke.sh"), smokeScript);
-  fs.chmodSync(smokeScript, 0o755);
-  return { tempRoot, smokeScript };
-}
-
-function writeGoStub(binDir, scriptBody) {
-  writeExecutable(
-    path.join(binDir, "go"),
-    `#!/usr/bin/env bash
-set -euo pipefail
-out=""
-while [[ "$#" -gt 0 ]]; do
-  if [[ "$1" == "-o" ]]; then
-    out="$2"
-    shift 2
-    continue
-  fi
-  shift
-done
-mkdir -p "$(dirname "$out")"
-cat >"$out" <<'SCRIPT'
-${scriptBody}
-SCRIPT
-chmod +x "$out"
-`,
-  );
-}
+const prepareSmokeRepo = (dir) =>
+  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-scaleway-smoke.sh"), [
+    "lib/live-smoke-common.sh",
+  ]);
 
 const validEnv = {
   CRABBOX_LIVE: "1",
@@ -135,6 +103,8 @@ fi
 case "$1" in
   doctor)
     printf 'auth=ready control_plane=ready inventory=ready api=list mutation=false leases=0 region=fr-par zone=fr-par-1 type=DEV1-S\\n'
+    printf 'access=%s\\n' "\${SCW_ACCESS_KEY}"
+    printf 'secret=%s\\n' "\${SCW_SECRET_KEY}" >&2
     ;;
   warmup)
     printf '%s\\n' "$5" >"${slugFile}"
@@ -180,6 +150,7 @@ esac
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /classification=live_scaleway_smoke_passed/);
   assert.doesNotMatch(result.stdout + result.stderr, /test-scaleway-access|test-scaleway-secret/);
+  assert.match(result.stdout, /access=\[redacted\]\nsecret=\[redacted\]/);
 
   const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
   assert.equal(seen[0], "doctor --provider scaleway");
@@ -193,8 +164,8 @@ esac
   assert.equal(seen[8], "list --provider scaleway --json");
 });
 
-test("live scaleway smoke builds from the script root when cwd differs", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-scaleway-cwd-"));
+test("live scaleway smoke builds from the script root with spaces when cwd differs", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox live scaleway cwd-"));
   const binDir = path.join(dir, "bin");
   const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
   const calls = path.join(dir, "calls.log");
@@ -411,6 +382,41 @@ esac
     "doctor --provider scaleway",
     "list --provider scaleway --json",
   ]);
+});
+
+test("live scaleway smoke redacts secret-bearing validation diagnostics", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-scaleway-redact-validation-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  fs.mkdirSync(binDir);
+  writeExecutable(
+    path.join(binDir, "python3"),
+    '#!/usr/bin/env bash\nprintf "invalid JSON: access=%s secret=%s\\n" "$SCW_ACCESS_KEY" "$SCW_SECRET_KEY" >&2\nexit 1\n',
+  );
+  writeGoStub(
+    binDir,
+    `#!/usr/bin/env bash
+case "$1" in
+  doctor) printf 'ready\\n' ;;
+  list) printf '[]\\n' ;;
+  *) exit 99 ;;
+esac
+`,
+  );
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      ...validEnv,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /classification=validation_failed/);
+  assert.match(result.stderr, /invalid JSON: access=\[redacted\] secret=\[redacted\]/);
+  assert.doesNotMatch(result.stdout + result.stderr, /test-scaleway-access|test-scaleway-secret/);
 });
 
 test("live scaleway smoke classifies quota output and redacts leaked keys", () => {

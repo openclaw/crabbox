@@ -268,25 +268,6 @@ func TestParseExposedPortsLabelTolerantOfGarbage(t *testing.T) {
 	}
 }
 
-func TestPondMeshDoctorCounts(t *testing.T) {
-	servers := []Server{
-		{Name: "web", Labels: map[string]string{pondLabelKey: "alpha", pondExposedPortsLabelKey: "8080-9090"}},
-		{Name: "client", Labels: map[string]string{pondLabelKey: "alpha"}},
-		{Name: "worker", Labels: map[string]string{pondLabelKey: "alpha", pondExposedPortsLabelKey: "3000"}},
-	}
-	members, exposed, ports := pondMeshDoctorCounts(servers)
-	if members != 3 || exposed != 2 || ports != 3 {
-		t.Fatalf("counts=(%d,%d,%d) want (3,2,3)", members, exposed, ports)
-	}
-}
-
-func TestPondMeshDoctorCountsEmpty(t *testing.T) {
-	members, exposed, ports := pondMeshDoctorCounts(nil)
-	if members != 0 || exposed != 0 || ports != 0 {
-		t.Fatalf("counts=(%d,%d,%d) want (0,0,0)", members, exposed, ports)
-	}
-}
-
 func TestPreparePondMeshSummaryRendersHostsAndEnv(t *testing.T) {
 	tmp := t.TempDir()
 	members := []pondMember{

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
+import { writeExecutable } from "./test-support/smoke-fixtures.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const smokeScript = path.join(repoRoot, "scripts", "live-unikraft-cloud-smoke.sh");
@@ -34,11 +35,6 @@ async function waitForFile(file, timeoutMs = 15_000) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error(`timed out waiting for ${path.basename(file)}`);
-}
-
-function writeExecutable(file, body) {
-  fs.writeFileSync(file, body, "utf8");
-  fs.chmodSync(file, 0o755);
 }
 
 function embeddedRawHelper() {
@@ -644,10 +640,25 @@ esac`,
   crabbox = crabbox.replaceAll('"$FAKE_REMOTE"', JSON.stringify(harness.remote));
   fs.writeFileSync(harness.fakeCrabbox, crabbox);
 
-  const startedAt = Date.now();
+  const fakeBin = path.join(harness.dir, "bin");
+  const pollDelays = path.join(harness.dir, "poll-delays.log");
+  fs.mkdirSync(fakeBin);
+  // Observe the cleanup delay directly; process startup varies under parallel test load.
+  writeExecutable(
+    path.join(fakeBin, "sleep"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  0.1|0.05) exec /bin/sleep "$@" ;;
+  *) printf '%s\\n' "$*" >>"$CRABBOX_TEST_POLL_DELAYS" ;;
+esac
+`,
+  );
   const result = spawnSync(bashPath, [smokeScript], {
     cwd: repoRoot,
     env: baseEnv({
+      PATH: `${fakeBin}${path.delimiter}${process.env.PATH}`,
+      CRABBOX_TEST_POLL_DELAYS: pollDelays,
       CRABBOX_BIN: harness.fakeCrabbox,
       CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_DIR: harness.proofDir,
       CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_RAW_HELPER: harness.rawHelper,
@@ -667,7 +678,7 @@ esac`,
     new RegExp(`^delete ${createdUUID} ${createdName}$`, "m"),
   );
   assert.equal(fs.readFileSync(harness.deleteAttempts, "utf8"), "2");
-  assert.ok(Date.now() - startedAt < 12_000, result.stdout + result.stderr);
+  assert.equal(fs.readFileSync(pollDelays, "utf8"), "5.000\n");
   assert.doesNotMatch(
     result.stdout + result.stderr + fs.readFileSync(harness.rawCalls, "utf8"),
     /smoke-secret-token/,
@@ -912,9 +923,10 @@ test("TERM interrupts an active warmup and starts zero-residue cleanup promptly"
   warmup)
     printf '%s' '[{"name":"existing-service","uuid":"${existingUUID}"},{"name":"${createdName}","uuid":"${createdUUID}"}]\n' >${JSON.stringify("$FAKE_REMOTE")}
     printf 'leased ${createdLease} slug=unikraft-cloud-live-smoke-test provider=unikraft-cloud instance=${createdUUID} state=running\n'
-    : >${JSON.stringify("$WARMUP_STARTED")}
     (trap '' TERM; while :; do sleep 1; done) &
     printf '%s' "$!" >${JSON.stringify("$SLEEP_PID")}
+    # TERM must not interrupt before the descendant PID is recorded.
+    : >${JSON.stringify("$WARMUP_STARTED")}
     wait
     ;;
   stop)

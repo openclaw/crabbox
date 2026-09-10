@@ -82,10 +82,6 @@ type execResult struct {
 	ExitCode int    `json:"exitCode"`
 }
 
-type writeFileResponse struct {
-	OK bool `json:"ok,omitempty"`
-}
-
 type persistRequest struct {
 	Path string `json:"path,omitempty"`
 }
@@ -110,7 +106,7 @@ func newBridgeClient(cfg Config, rt Runtime) (bridgeClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	httpClient, dataHTTPClient := cloudflareSandboxHTTPClients(rt.HTTP, cloudflareSandboxControlTimeout)
+	httpClient, dataHTTPClient := shared.ControlAndDataHTTPClients(rt.HTTP, cloudflareSandboxControlTimeout)
 	trusted, _ := url.Parse(baseURL)
 	return &client{
 		baseURL:  baseURL,
@@ -118,13 +114,6 @@ func newBridgeClient(cfg Config, rt Runtime) (bridgeClient, error) {
 		http:     shared.SecureHTTPClient(httpClient, trusted, cloudflareSandboxRedirectError),
 		dataHTTP: shared.SecureHTTPClient(dataHTTPClient, trusted, cloudflareSandboxRedirectError),
 	}, nil
-}
-
-func cloudflareSandboxHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
-	if injected != nil {
-		return injected, injected
-	}
-	return &http.Client{Timeout: controlTimeout}, &http.Client{}
 }
 
 func cloudflareSandboxRedirectError(destination *url.URL) error {

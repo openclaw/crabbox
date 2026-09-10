@@ -122,8 +122,19 @@ func (b *isloBackend) restoreRunScriptOwnership(ctx context.Context, client islo
 	if user == "" || user == isloAdminUser {
 		return nil
 	}
-	command := "chown " + shellQuote(user+":"+user) + " " + shellQuote(remote)
-	return b.execShellAs(ctx, client, name, command, isloAdminUser, io.Discard)
+	req := &gosdk.ExecRequest{
+		Command: []string{"chown", "--", user + ":" + user, remote},
+		User:    stringValue(isloAdminUser),
+		Workdir: stringValue(workspace),
+	}
+	code, err := client.ExecStream(ctx, name, req, io.Discard, b.rt.Stderr)
+	if err != nil {
+		return fmt.Errorf("islo restore run script ownership: %w", err)
+	}
+	if code != 0 {
+		return exit(code, "islo restore run script ownership exited %d", code)
+	}
+	return nil
 }
 
 // removeRunScript deletes the uploaded script. Cleanup is best effort: the
@@ -137,7 +148,7 @@ func (b *isloBackend) restoreRunScriptOwnership(ctx context.Context, client islo
 // removal request is never sent and the uploaded script stays in a kept or
 // reused sandbox. A fresh bounded context, the same primitive sandbox deletion
 // uses, keeps cleanup reachable while still being unable to hang forever.
-func (b *isloBackend) removeRunScript(client isloAPI, name, workspace string, spec *core.RunScriptSpec, user string) {
+func (b *isloBackend) removeRunScript(client isloAPI, name, workspace string, spec *core.RunScriptSpec) {
 	remote, err := isloScriptRemotePath(spec)
 	if err != nil {
 		// Unreachable via runScript, which only schedules cleanup for a
@@ -148,15 +159,20 @@ func (b *isloBackend) removeRunScript(client isloAPI, name, workspace string, sp
 	}
 	ctx, cancel := isloCleanupContext()
 	defer cancel()
-	req := &gosdk.ExecRequest{Command: []string{"bash", "-lc", `rm -f -- "$1"`, "bash", remote}}
-	if user != "" {
-		req.User = stringValue(user)
+	// The archive API may create parent directories as the administrative user.
+	// Owning the script does not let the workload user unlink it from those
+	// directories, including after an upload or ownership-repair failure.
+	req := &gosdk.ExecRequest{
+		Command: []string{"bash", "-lc", `rm -f -- "$1"`, "bash", remote},
+		User:    stringValue(isloAdminUser),
 	}
 	if workspace != "" {
 		req.Workdir = stringValue(workspace)
 	}
-	if _, err := client.ExecStream(ctx, name, req, io.Discard, io.Discard); err != nil {
+	if code, err := client.ExecStream(ctx, name, req, io.Discard, io.Discard); err != nil {
 		fmt.Fprintf(b.rt.Stderr, "warning: islo could not remove run script %s: %v\n", remote, err)
+	} else if code != 0 {
+		fmt.Fprintf(b.rt.Stderr, "warning: islo could not remove run script %s: exit %d\n", remote, code)
 	}
 }
 
@@ -165,15 +181,17 @@ func (b *isloBackend) removeRunScript(client isloAPI, name, workspace string, sp
 func (b *isloBackend) runScript(ctx context.Context, client isloAPI, name, workspace string, req RunRequest, env map[string]string, user string) (int, error) {
 	uploaded, err := b.uploadRunScript(ctx, client, name, workspace, req.Script)
 	if uploaded {
-		defer b.removeRunScript(client, name, workspace, req.Script, user)
+		defer b.removeRunScript(client, name, workspace, req.Script)
 	}
 	if err != nil {
 		return 7, err
 	}
-	if remote, pathErr := isloScriptRemotePath(req.Script); pathErr == nil {
-		if err := b.restoreRunScriptOwnership(ctx, client, name, workspace, remote, user); err != nil {
-			return 7, err
-		}
+	remote, err := isloScriptRemotePath(req.Script)
+	if err != nil {
+		return 7, err
+	}
+	if err := b.restoreRunScriptOwnership(ctx, client, name, workspace, remote, user); err != nil {
+		return 7, err
 	}
 	execReq := &gosdk.ExecRequest{Command: isloScriptCommand(req.Script, req.Command)}
 	if user != "" {

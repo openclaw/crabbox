@@ -7,12 +7,11 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -91,6 +90,54 @@ func TestAttestReceiptRoundTrip(t *testing.T) {
 		if _, ok := receipt[key]; !ok {
 			t.Fatalf("receipt missing %s", key)
 		}
+	}
+}
+
+func TestPrepareRunReceiptIsSideEffectFreeAndPersistsExactBytes(t *testing.T) {
+	setAttestTestHome(t)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedKeyPath, err := attestKeyPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptPath := filepath.Join(t.TempDir(), "nested", "receipt.json")
+	prepared, err := prepareRunReceipt(receiptPath, key, fullReceiptInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(managedKeyPath); !os.IsNotExist(err) {
+		t.Fatalf("managed key exists after preparation: %v", err)
+	}
+	if _, err := os.Stat(receiptPath); !os.IsNotExist(err) {
+		t.Fatalf("receipt exists after preparation: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(receiptPath)); !os.IsNotExist(err) {
+		t.Fatalf("receipt directory exists after preparation: %v", err)
+	}
+	if prepared.artifact.Kind != "receipt" || prepared.artifact.Path != receiptPath || prepared.artifact.Bytes != len(prepared.encoded) {
+		t.Fatalf("prepared artifact=%#v encoded bytes=%d", prepared.artifact, len(prepared.encoded))
+	}
+
+	artifact, err := persistPreparedRunReceipt(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, prepared.encoded) || artifact != prepared.artifact || info.Size() != int64(artifact.Bytes) {
+		t.Fatalf("persisted artifact=%#v size=%d data bytes=%d", artifact, info.Size(), len(data))
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("receipt mode=%#o, want 0600", info.Mode().Perm())
 	}
 }
 
@@ -488,50 +535,6 @@ func TestVerifyRejectsSignedNonReceipt(t *testing.T) {
 	}
 }
 
-func TestAttestDigestWriterSerializesConcurrentStreams(t *testing.T) {
-	writer := newAttestDigestWriter()
-	stdout := io.MultiWriter(io.Discard, writer)
-	stderr := io.MultiWriter(io.Discard, writer)
-	chunk := bytes.Repeat([]byte("a"), 1024)
-	rounds := 64
-	var wg sync.WaitGroup
-	for _, stream := range []io.Writer{stdout, stderr} {
-		wg.Add(1)
-		go func(stream io.Writer) {
-			defer wg.Done()
-			for i := 0; i < rounds; i++ {
-				if _, err := stream.Write(chunk); err != nil {
-					t.Error(err)
-				}
-			}
-		}(stream)
-	}
-	wg.Wait()
-	expected := sha256.Sum256(bytes.Repeat([]byte("a"), 2*rounds*1024))
-	if got := writer.sum(); got != "sha256:"+hex.EncodeToString(expected[:]) {
-		t.Fatalf("unexpected digest %s", got)
-	}
-}
-
-func TestAttestDigestWriterHashesMixedStreamsInArrivalOrder(t *testing.T) {
-	writer := newAttestDigestWriter()
-	stdout := io.MultiWriter(io.Discard, writer)
-	stderr := io.MultiWriter(io.Discard, writer)
-	if _, err := stdout.Write([]byte("out line\n")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := stderr.Write([]byte("err line\n")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := stdout.Write([]byte("done\n")); err != nil {
-		t.Fatal(err)
-	}
-	expected := sha256.Sum256([]byte("out line\nerr line\ndone\n"))
-	if got := writer.sum(); got != "sha256:"+hex.EncodeToString(expected[:]) {
-		t.Fatalf("unexpected digest %s", got)
-	}
-}
-
 func TestDelegatedRunReceiptOmitsMissingLeaseID(t *testing.T) {
 	setAttestTestHome(t)
 	path := filepath.Join(t.TempDir(), "receipt.json")
@@ -571,6 +574,86 @@ func TestDelegatedRunReceiptOmitsMissingLeaseID(t *testing.T) {
 	}
 	if !strings.HasPrefix(out, "PASS ") {
 		t.Fatalf("unexpected verify output: %q", out)
+	}
+}
+
+type attestOutcomeProvider struct {
+	testStopReclaimProvider
+	result RunResult
+	err    error
+}
+
+func (p attestOutcomeProvider) Name() string { return "attest-outcome-test" }
+func (p attestOutcomeProvider) Spec() ProviderSpec {
+	spec := p.testStopReclaimProvider.Spec()
+	spec.Name = p.Name()
+	return spec
+}
+func (p attestOutcomeProvider) Configure(Config, Runtime) (Backend, error) {
+	return attestOutcomeBackend{testDelegatedBackend{spec: p.Spec()}, p.result, p.err}, nil
+}
+
+type attestOutcomeBackend struct {
+	testDelegatedBackend
+	result RunResult
+	err    error
+}
+
+func (b attestOutcomeBackend) Run(context.Context, RunRequest) (RunResult, error) {
+	return b.result, b.err
+}
+
+func TestDelegatedAttestUsesNormalizedPrimaryOutcome(t *testing.T) {
+	for _, scenario := range []string{"legacy command exit", "command plus cleanup cancellation", "command plus cleanup timeout", "provider timeout", "cleanup only"} {
+		t.Run(scenario, func(t *testing.T) {
+			clearConfigEnv(t)
+			isolatedConfigPath(t)
+			setAttestTestHome(t)
+			t.Chdir(t.TempDir())
+			result := RunResult{Provider: "attest-outcome-test", ExitCode: 42, CommandText: "exit 42"}
+			var runErr error = ExitError{Code: 42, Message: "command exited 42"}
+			wantReceipt := true
+			switch scenario {
+			case "command plus cleanup cancellation", "command plus cleanup timeout":
+				result.Status, result.ErrorKind = RunStatusFailed, RunErrorCommandExit
+				cleanupErr := context.Canceled
+				if scenario == "command plus cleanup timeout" {
+					cleanupErr = context.DeadlineExceeded
+				}
+				runErr = errors.Join(runErr, cleanupErr)
+			case "provider timeout":
+				runErr, wantReceipt = context.DeadlineExceeded, false
+			case "cleanup only":
+				result.Status, result.ErrorKind = RunStatusFailed, RunErrorProvider
+				runErr, wantReceipt = errors.New("cleanup failed"), false
+			}
+			p := attestOutcomeProvider{result: result, err: runErr}
+			RegisterProvider(p)
+			t.Cleanup(func() { delete(providerRegistry, p.Name()) })
+			receiptPath := filepath.Join(t.TempDir(), "receipt.json")
+			app := App{Stdout: io.Discard, Stderr: io.Discard}
+			err := app.Run(t.Context(), []string{"run", "--provider", p.Name(), "--no-sync", "--attest", receiptPath, "--", "true"})
+			if !errors.Is(err, runErr) {
+				t.Fatalf("primary error changed: %v", err)
+			}
+			data, err := os.ReadFile(receiptPath)
+			if !wantReceipt {
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("unexpected provider-failure receipt: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("completed command receipt missing: %v", err)
+			}
+			receipt, err := decodeRunReceipt(data)
+			if err != nil || receipt["exit_code"] != json.Number("42") {
+				t.Fatalf("receipt=%#v err=%v", receipt, err)
+			}
+			if _, err := runVerify(t, receiptPath); err != nil {
+				t.Fatalf("verify receipt: %v", err)
+			}
+		})
 	}
 }
 
@@ -875,11 +958,6 @@ func TestPreflightAttestPathsProtectsReceiptAndSigningKey(t *testing.T) {
 			opts: attestPathPreflight{Receipt: receiptPath, KeyOverride: keyPath, TimingRecord: keyHardlink, TimingRecordEnabled: true},
 			want: "attest key and timing record paths must be different",
 		},
-		{
-			name: "invalid override fails before run",
-			opts: attestPathPreflight{Receipt: receiptPath, KeyOverride: filepath.Join(dir, "missing.pem")},
-			want: "attest key:",
-		},
 	}
 	if symlinkAvailable {
 		cases = append(cases, pathCase{
@@ -902,6 +980,11 @@ func TestPreflightAttestPathsProtectsReceiptAndSigningKey(t *testing.T) {
 				t.Fatalf("error=%v, want %q", err, tc.want)
 			}
 		})
+	}
+	if err := preflightAttestPaths(attestPathPreflight{
+		Receipt: receiptPath, KeyOverride: filepath.Join(dir, "missing.pem"),
+	}); err != nil {
+		t.Fatalf("path-only preflight rejected missing signer: %v", err)
 	}
 	if err := preflightAttestPaths(attestPathPreflight{
 		Receipt:             receiptPath,

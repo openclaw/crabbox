@@ -31,6 +31,13 @@ export interface CostLimitUsage {
   orgReservedUSD: number;
 }
 
+export interface OwnerCapacity {
+  owner: string;
+  activeLeases: number;
+  effectiveLimit: number;
+  observedAt: string;
+}
+
 export interface UsageFilter {
   scope: "user" | "org" | "all";
   owner?: string;
@@ -390,7 +397,7 @@ function envList(value: string | undefined): string[] {
     .filter(Boolean);
 }
 
-function activeLeaseLimitForOwner(limits: CostLimits, owner: string): number {
+export function activeLeaseLimitForOwner(limits: CostLimits, owner: string): number {
   if (
     limits.maxActiveLeasesPerCapacityAdmin > 0 &&
     limits.capacityAdminOwners.includes(owner.toLowerCase())

@@ -49,6 +49,16 @@ func (Provider) DescribeImplicitArchitecture(core.Config) string {
 	return "native"
 }
 
+func (Provider) NormalizeConfigForShow(cfg core.Config) core.Config {
+	effective := cfg
+	applyDefaults(&effective)
+	// Execution also derives SSH settings and a checkpoint display name. Keep
+	// those out of offline presentation normalization.
+	cfg.LocalContainer = effective.LocalContainer
+	cfg.WorkRoot = effective.WorkRoot
+	return cfg
+}
+
 func (Provider) CreationOnlyFlagNames() []string {
 	return []string{"local-container-volume"}
 }

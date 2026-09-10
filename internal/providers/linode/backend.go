@@ -127,7 +127,7 @@ func (b *linodeLeaseBackend) acquireOnce(ctx context.Context, req core.AcquireRe
 	if err != nil {
 		return core.LeaseTarget{}, fmt.Errorf("generate linode root password: %w", err)
 	}
-	now := b.now()
+	now := core.ClockNow(b.RT.Clock).UTC()
 	created := linodeInstance{}
 	committed := false
 	defer func() {
@@ -365,7 +365,7 @@ func (b *linodeLeaseBackend) releaseTargetFromClaim(ctx context.Context, client 
 			grace = ambiguousCreateRecoveryGrace
 		}
 		createdAt, _ := strconv.ParseInt(claim.Labels["created_at"], 10, 64)
-		if createdAt <= 0 || b.now().Before(time.Unix(createdAt, 0).Add(grace)) {
+		if createdAt <= 0 || core.ClockNow(b.RT.Clock).UTC().Before(time.Unix(createdAt, 0).Add(grace)) {
 			return core.LeaseTarget{}, core.Exit(4, "linode ambiguous-create recovery is still pending for lease=%s; retry stop later", claim.LeaseID)
 		}
 		if target, found, err := b.reconcilePendingRecovery(ctx, client, claim, accountID); err != nil {
@@ -603,7 +603,7 @@ func (b *linodeLeaseBackend) updateFencedLinodeMetadata(ctx context.Context, lea
 	}
 	providerCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	now := b.now()
+	now := core.ClockNow(b.RT.Clock).UTC()
 	action := func() (core.Server, core.SSHTarget, bool, error) {
 		if err := providerCtx.Err(); err != nil {
 			return core.Server{}, core.SSHTarget{}, false, err
@@ -633,8 +633,8 @@ func (b *linodeLeaseBackend) updateFencedLinodeMetadata(ctx context.Context, lea
 		labels := normalizedLinodeLabels(item.Tags)
 		if touch != nil {
 			exactLabels := map[string]string{}
-			for _, key := range tagLabelKeys() {
-				if value, ok := labels[key]; ok && exactTagValueKey(key) {
+			for _, key := range tagSchema.Keys() {
+				if value, ok := labels[key]; ok && tagSchema.Exact(key) {
 					exactLabels[key] = value
 				}
 			}
@@ -661,7 +661,7 @@ func (b *linodeLeaseBackend) updateFencedLinodeMetadata(ctx context.Context, lea
 	}
 	var updated core.LeaseClaim
 	if touch != nil {
-		updated, server, _, err = core.UpdateLeaseClaimTouchIfUnchangedAction(lease.LeaseID, expected, now, touch.IdleTimeoutOverride, action)
+		updated, server, _, err = core.UpdateLeaseClaimTouchIfUnchangedAction(providerCtx, lease.LeaseID, expected, now, touch.IdleTimeoutOverride, action)
 	} else {
 		updated, server, _, err = core.UpdateLeaseClaimEndpointIfUnchangedAction(lease.LeaseID, expected, action)
 	}
@@ -950,13 +950,6 @@ func (b *linodeLeaseBackend) waitForLinodeIP(ctx context.Context, client linodeA
 	return result.Value, err
 }
 
-func (b *linodeLeaseBackend) now() time.Time {
-	if b.RT.Clock != nil {
-		return b.RT.Clock.Now().UTC()
-	}
-	return time.Now().UTC()
-}
-
 func rollbackLinodeAcquire(client linodeAPI, linodeID int64) error {
 	if linodeID == 0 {
 		return nil
@@ -1084,10 +1077,10 @@ func applyLinodeDefaults(cfg *core.Config) {
 		cfg.TargetOS = core.TargetLinux
 	}
 	if cfg.Linode.Region == "" {
-		cfg.Linode.Region = defaultRegion
+		cfg.Linode.Region = core.LinodeConfiguredRegionDefault
 	}
 	if cfg.Linode.Image == "" {
-		cfg.Linode.Image = defaultImage
+		cfg.Linode.Image = core.LinodeImageFallback
 	}
 	if cfg.Linode.Type == "" {
 		cfg.Linode.Type = linodeServerTypeForClass(cfg.Class)

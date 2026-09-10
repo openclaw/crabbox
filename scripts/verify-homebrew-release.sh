@@ -14,7 +14,6 @@ PROTECTED_HOMEBREW_TOOLING=(
   scripts/extract-release-vmd.mjs
   scripts/release-config.sh
   scripts/release-provenance.mjs
-  scripts/render-homebrew-formula.mjs
   scripts/validate-release-publication.mjs
   scripts/verify-go-release-binary.mjs
   scripts/verify-homebrew-release.sh
@@ -29,7 +28,7 @@ cleanup_homebrew_work() {
 }
 
 usage() {
-  echo "usage: $0 vX.Y.Z <asset-directory> <tag-object> <source-commit> <verifier-commit> <release-id> <public-verifier-run-id> <public-proof-zip-directory>" >&2
+  echo "usage: $0 vX.Y.Z <asset-directory> <tag-object> <source-commit> <verifier-commit> <release-id>" >&2
   exit 2
 }
 
@@ -182,41 +181,23 @@ sha256_file() {
   shasum -a 256 "$1" | awk '{print $1}'
 }
 
-require_public_workflow_ancestry() {
-  local verifier_commit=$1 workflow_commit=$2 tooling_commit=$3
-  git -C "$ROOT" merge-base --is-ancestor "$verifier_commit" "$workflow_commit" || {
-    echo "public workflow commit is not a descendant of the provenance verifier" >&2
-    return 1
-  }
-  git -C "$ROOT" merge-base --is-ancestor "$workflow_commit" "$tooling_commit" || {
-    echo "public workflow commit is not an ancestor of protected tooling" >&2
-    return 1
-  }
-}
-
 freeze_public_release() {
-  [[ $# -eq 10 ]] || usage
+  [[ $# -eq 8 ]] || usage
   local tag=$1 asset_dir=$2 tag_object=$3 source_commit=$4 verifier_commit=$5
-  local release_id=$6 run_id=$7 proof_dir=$8 work=$9 node_bin=${10}
-  local repository=$CRABBOX_RELEASE_REPOSITORY version=${tag#v} workflow_id workflow_commit tooling_commit arch
-  tooling_commit=${CRABBOX_VERIFY_TOOLING_COMMIT:-$verifier_commit}
-  [[ "$release_id" =~ ^[1-9][0-9]*$ && "$run_id" =~ ^[1-9][0-9]*$ ]] || usage
-  [[ -d "$proof_dir" && ! -L "$proof_dir" ]] || {
-    echo "public proof ZIP directory must be a real directory" >&2
-    return 1
-  }
-  local proof_names
-  proof_names=$(find "$proof_dir" -mindepth 1 -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)
-  [[ "$proof_names" == $'verified-assets-arm64.zip\nverified-assets-x86_64.zip' ]] || {
-    echo "public proof ZIP inventory is not exact" >&2
-    return 1
-  }
+  local release_id=$6 work=$7 node_bin=$8
+  local repository=$CRABBOX_RELEASE_REPOSITORY version=${tag#v}
+  [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || usage
 
   local expected_names="$work/expected-assets.txt" notes="$work/expected-notes.md"
   crabbox_release_asset_names "$version" | LC_ALL=C sort >"$expected_names"
   git -C "$ROOT" show "$source_commit:CHANGELOG.md" >"$work/tagged-changelog.md"
   "$ROOT/scripts/extract-release-notes.sh" "$tag" <"$work/tagged-changelog.md" >"$notes"
 
+  find "$asset_dir" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort >"$work/actual-assets.txt"
+  cmp -s "$expected_names" "$work/actual-assets.txt" || {
+    echo "public asset inventory is not exact" >&2
+    return 1
+  }
   local frozen="$work/public-assets"
   mkdir -m 700 "$frozen"
   while IFS= read -r name; do
@@ -228,42 +209,12 @@ freeze_public_release() {
   done <"$expected_names"
 
   public_api_get() {
-    curl --fail --silent --show-error --location --retry 3 \
+    curl --disable --fail --silent --show-error --location --retry 3 \
       --header 'Accept: application/vnd.github+json' \
       --header 'X-GitHub-Api-Version: 2026-03-10' \
       "https://api.github.com/$1"
   }
   public_api_get "repos/$repository/releases/$release_id" >"$work/public-release.json"
-  public_api_get "repos/$repository/actions/runs/$run_id" >"$work/public-run.json"
-  workflow_commit=$(jq -er '.head_sha | select(type == "string" and test("^[0-9a-f]{40}$"))' \
-    "$work/public-run.json")
-  require_public_workflow_ancestry "$verifier_commit" "$workflow_commit" "$tooling_commit"
-  workflow_id=$(jq -er '.workflow_id | select(type == "number" and . > 0)' "$work/public-run.json")
-  public_api_get "repos/$repository/actions/workflows/$workflow_id" >"$work/public-workflow.json"
-  public_api_get "repos/$repository/actions/runs/$run_id/artifacts?per_page=100" \
-    >"$work/public-artifacts.json"
-
-  for arch in arm64 x86_64; do
-    local zip="$proof_dir/verified-assets-$arch.zip" artifact_json="$work/artifact-$arch.json"
-    jq -e --arg name "verified-assets-$arch" '
-      [.artifacts[] | select(.name == $name)] |
-      if length == 1 then .[0] else error("ambiguous public proof artifact") end
-    ' "$work/public-artifacts.json" >"$artifact_json"
-    local expected_size expected_digest
-    expected_size=$(jq -er '.size_in_bytes | select(type == "number" and . > 0)' "$artifact_json")
-    expected_digest=$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' "$artifact_json")
-    [[ "$(stat -f '%z' "$zip")" == "$expected_size" && "sha256:$(sha256_file "$zip")" == "$expected_digest" ]] || {
-      echo "$arch public proof ZIP does not match its GitHub artifact digest" >&2
-      return 1
-    }
-    [[ "$(unzip -Z1 "$zip")" == verified-assets.json ]] || {
-      echo "$arch public proof ZIP must contain only verified-assets.json" >&2
-      return 1
-    }
-    mkdir -m 700 "$work/proof-$arch"
-    unzip -qq "$zip" -d "$work/proof-$arch"
-  done
-
   env -i \
     CRABBOX_PUBLISH_REPOSITORY="$repository" \
     CRABBOX_PUBLISH_RELEASE_ID="$release_id" \
@@ -271,196 +222,31 @@ freeze_public_release() {
     CRABBOX_PUBLISH_TAG_OBJECT="$tag_object" \
     CRABBOX_PUBLISH_SOURCE_COMMIT="$source_commit" \
     CRABBOX_PUBLISH_VERIFIER_COMMIT="$verifier_commit" \
-    CRABBOX_PUBLISH_WORKFLOW_COMMIT="$workflow_commit" \
-    CRABBOX_PUBLISH_VERIFIER_RUN_ID="$run_id" \
-    CRABBOX_PUBLISH_DEFAULT_BRANCH="$CRABBOX_RELEASE_DEFAULT_BRANCH" \
-    CRABBOX_PUBLISH_WORKFLOW_PATH=.github/workflows/release-assets.yml \
     HOME="${HOME:-/tmp}" LANG=C LC_ALL=C PATH="$PATH" TMPDIR="$work" \
-    "$node_bin" "$ROOT/scripts/validate-release-publication.mjs" public-proof \
-      "$work/public-release.json" "$work/public-run.json" "$work/public-workflow.json" \
-      "$work/public-artifacts.json" \
-      "$work/proof-arm64/verified-assets.json" \
-      "$work/proof-x86_64/verified-assets.json" \
-      "$expected_names" "$notes" "$frozen" >"$work/public-proof.json"
+    "$node_bin" "$ROOT/scripts/validate-release-publication.mjs" public-release \
+      "$work/public-release.json" "$expected_names" "$notes" "$frozen" >"$work/validated-release.json"
 }
 
 verify_homebrew_formula() {
-  local node_bin=$1 formula_file=$2 tag=$3
-  local darwin_amd64_sha=$4 darwin_arm64_sha=$5 linux_amd64_sha=$6 linux_arm64_sha=$7
-  local canonical
-  canonical=$(mktemp "${TMPDIR:-/tmp}/crabbox-formula.XXXXXX")
-  if ! "$node_bin" "$ROOT/scripts/render-homebrew-formula.mjs" \
-    "$tag" "$darwin_amd64_sha" "$darwin_arm64_sha" \
-    "$linux_amd64_sha" "$linux_arm64_sha" >"$canonical"; then
-    rm -f "$canonical"
-    return 1
-  fi
-  if ! cmp -s "$canonical" "$formula_file"; then
-    rm -f "$canonical"
-    echo "Homebrew formula is not the exact protected canonical program" >&2
-    return 1
-  fi
-  rm -f "$canonical"
-  "$node_bin" - \
-    "$formula_file" "$tag" \
-    "$darwin_amd64_sha" "$darwin_arm64_sha" \
-    "$linux_amd64_sha" "$linux_arm64_sha" <<'NODE'
+  local node_bin=$1 metadata_file=$2 tag=$3 archive_name=$4 archive_sha=$5
+  "$node_bin" - "$metadata_file" "$tag" "$archive_name" "$archive_sha" <<'NODE'
 const fs = require("node:fs");
-
-const [formulaFile, tag, darwinAmd64, darwinArm64, linuxAmd64, linuxArm64] =
-  process.argv.slice(2);
-const version = tag.slice(1);
-const digestPattern = /^[0-9a-f]{64}$/;
-for (const digest of [darwinAmd64, darwinArm64, linuxAmd64, linuxArm64]) {
-  if (!digestPattern.test(digest)) throw new Error("expected archive SHA-256 is invalid");
-}
-
-const expected = new Map([
-  [
-    "darwin/amd64",
-    {
-      url: `https://github.com/openclaw/crabbox/releases/download/${tag}/crabbox_${version}_darwin_amd64.tar.gz`,
-      template:
-        "https://github.com/openclaw/crabbox/releases/download/v#{version}/crabbox_#{version}_darwin_amd64.tar.gz",
-      sha256: darwinAmd64,
-    },
-  ],
-  [
-    "darwin/arm64",
-    {
-      url: `https://github.com/openclaw/crabbox/releases/download/${tag}/crabbox_${version}_darwin_arm64.tar.gz`,
-      template:
-        "https://github.com/openclaw/crabbox/releases/download/v#{version}/crabbox_#{version}_darwin_arm64.tar.gz",
-      sha256: darwinArm64,
-    },
-  ],
-  [
-    "linux/amd64",
-    {
-      url: `https://github.com/openclaw/crabbox/releases/download/${tag}/crabbox_${version}_linux_amd64.tar.gz`,
-      template:
-        "https://github.com/openclaw/crabbox/releases/download/v#{version}/crabbox_#{version}_linux_amd64.tar.gz",
-      sha256: linuxAmd64,
-    },
-  ],
-  [
-    "linux/arm64",
-    {
-      url: `https://github.com/openclaw/crabbox/releases/download/${tag}/crabbox_${version}_linux_arm64.tar.gz`,
-      template:
-        "https://github.com/openclaw/crabbox/releases/download/v#{version}/crabbox_#{version}_linux_arm64.tar.gz",
-      sha256: linuxArm64,
-    },
-  ],
-]);
-
-const lines = fs.readFileSync(formulaFile, "utf8").split(/\r?\n/);
-const versions = lines.filter((line) => /^\s*version\b/.test(line));
-if (versions.length !== 0) {
-  throw new Error("Homebrew formula version must be derived from the exact release URL");
-}
-if (lines.filter((line) => line.trim() === "class Crabbox < Formula").length !== 1) {
-  throw new Error("Homebrew formula class is not exactly Crabbox");
-}
-
-let osContext;
-let osIndent = -1;
-let archContext;
-let archIndent = -1;
-let pending;
-const actual = new Map();
-for (let index = 0; index < lines.length; index += 1) {
-  const raw = lines[index];
-  const trimmed = raw.trim();
-  if (!trimmed || trimmed.startsWith("#")) continue;
-  if (raw.includes("\t")) throw new Error("Homebrew formula must use spaces for indentation");
-  const indent = raw.length - raw.trimStart().length;
-  if (archContext && indent <= archIndent) {
-    archContext = undefined;
-    archIndent = -1;
-  }
-  if (osContext && indent <= osIndent) {
-    osContext = undefined;
-    osIndent = -1;
-  }
-
-  if (trimmed === "on_macos do" || trimmed === "on_linux do") {
-    if (pending) throw new Error("Homebrew URL is missing its adjacent SHA-256");
-    osContext = trimmed === "on_macos do" ? "darwin" : "linux";
-    osIndent = indent;
-    archContext = undefined;
-    continue;
-  }
-  if (/^if Hardware::CPU\.intel\?(?: && Hardware::CPU\.is_64_bit\?)?$/.test(trimmed)) {
-    if (!osContext) throw new Error("Homebrew Intel selector is outside an OS block");
-    archContext = "amd64";
-    archIndent = indent;
-    continue;
-  }
-  if (/^if Hardware::CPU\.arm\?(?: && Hardware::CPU\.is_64_bit\?)?$/.test(trimmed)) {
-    if (!osContext) throw new Error("Homebrew arm selector is outside an OS block");
-    archContext = "arm64";
-    archIndent = indent;
-    continue;
-  }
-
-  if (/^url(?:\s|\()/.test(trimmed)) {
-    const match = /^url "([^"]+)"$/.exec(trimmed);
-    if (!match || !osContext || !archContext || pending) {
-      throw new Error(`non-literal, misplaced, or duplicate Homebrew URL at line ${index + 1}`);
-    }
-    pending = { key: `${osContext}/${archContext}`, url: match[1] };
-    continue;
-  }
-  if (/^sha256(?:\s|\()/.test(trimmed)) {
-    const match = /^sha256 "([0-9a-f]{64})"$/.exec(trimmed);
-    if (!match || !pending || pending.key !== `${osContext}/${archContext}`) {
-      throw new Error(`non-literal or misplaced Homebrew SHA-256 at line ${index + 1}`);
-    }
-    if (actual.has(pending.key)) throw new Error(`duplicate Homebrew target: ${pending.key}`);
-    actual.set(pending.key, { url: pending.url, sha256: match[1] });
-    pending = undefined;
-  }
-}
-if (pending) throw new Error("Homebrew URL is missing its adjacent SHA-256");
-if (actual.size !== expected.size) throw new Error("Homebrew formula target inventory is not exact");
-for (const [key, expectedEntry] of expected) {
-  const actualEntry = actual.get(key);
-  if (
-    !actualEntry ||
-    (actualEntry.url !== expectedEntry.url && actualEntry.url !== expectedEntry.template) ||
-    actualEntry.sha256 !== expectedEntry.sha256
-  ) {
-    throw new Error(`Homebrew formula does not match the frozen ${key} archive`);
-  }
-  const resolvedUrl = actualEntry.url.replaceAll("#{version}", version);
-  if (resolvedUrl !== expectedEntry.url) {
-    throw new Error(`Homebrew formula does not resolve to the frozen ${key} archive`);
-  }
-}
-
-const helperInstalls = lines
-  .map((line) => line.trim())
-  .filter((line) => line.includes('bin.install "crabbox-apple-vm-helper"'));
+const [file, tag, archive, sha256] = process.argv.slice(2);
+const { formulae } = JSON.parse(fs.readFileSync(file, "utf8"));
+const formula = formulae?.[0];
+const url = `https://github.com/openclaw/crabbox/releases/download/${tag}/${archive}`;
 if (
-  helperInstalls.length === 0 ||
-  helperInstalls.some(
-    (line) =>
-      line !==
-      'bin.install "crabbox-apple-vm-helper" if OS.mac? && Hardware::CPU.arm?',
-  )
-) {
-  throw new Error("Homebrew helper install must be restricted to macOS arm64");
-}
-if (!lines.some((line) => line.trim() === 'bin.install "crabbox"')) {
-  throw new Error("Homebrew formula does not install the Crabbox CLI");
-}
+  formulae?.length !== 1 || formula?.name !== "crabbox" ||
+  formula.full_name !== "openclaw/tap/crabbox" || formula.tap !== "openclaw/tap" ||
+  formula.versions?.stable !== tag.slice(1) || formula.urls?.stable?.url !== url ||
+  !/^[0-9a-f]{64}$/.test(sha256) || formula.urls.stable.checksum !== sha256
+) throw new Error("Homebrew formula metadata does not match the selected release archive");
 NODE
 }
 
 homebrew_phase() {
   [[ $# -eq 9 ]] || usage
-  local tag=$1 asset_dir=$2 tag_object=$3 source_commit=$4 verifier_commit=$5 archive
+  local tag=$1 asset_dir=$2 tag_object=$3 source_commit=$4 verifier_commit=$5
   local native_arch=$6 brew_bin=$7 node_bin=$8 work=$9 version archive_arch
   assert_clean_homebrew_environment
   validate_release_identity "$tag" "$tag_object" "$source_commit" "$verifier_commit"
@@ -505,38 +291,25 @@ homebrew_phase() {
   (
     cd "$ROOT"
     CRABBOX_VERIFY_EXEC_ARCH="$native_arch" \
+      CRABBOX_VERIFY_MODE=static \
       CRABBOX_VERIFY_TOOLING_COMMIT="${CRABBOX_VERIFY_TOOLING_COMMIT:-$verifier_commit}" \
       "$ROOT/scripts/verify-release.sh" \
       "$tag" "$asset_dir" "$tag_object" "$source_commit" "$verifier_commit"
   )
 
   version=${tag#v}
-  local darwin_amd64_archive="$asset_dir/crabbox_${version}_darwin_amd64.tar.gz"
-  local darwin_arm64_archive="$asset_dir/crabbox_${version}_darwin_arm64.tar.gz"
-  local linux_amd64_archive="$asset_dir/crabbox_${version}_linux_amd64.tar.gz"
-  local linux_arm64_archive="$asset_dir/crabbox_${version}_linux_arm64.tar.gz"
-  for archive in \
-    "$darwin_amd64_archive" "$darwin_arm64_archive" \
-    "$linux_amd64_archive" "$linux_arm64_archive"; do
-    [[ -f "$archive" && ! -L "$archive" ]] || {
-      echo "frozen release archive is missing or is a symlink: $archive" >&2
-      return 1
-    }
-  done
-
-  local darwin_amd64_sha darwin_arm64_sha linux_amd64_sha linux_arm64_sha
-  darwin_amd64_sha=$(sha256_file "$darwin_amd64_archive")
-  darwin_arm64_sha=$(sha256_file "$darwin_arm64_archive")
-  linux_amd64_sha=$(sha256_file "$linux_amd64_archive")
-  linux_arm64_sha=$(sha256_file "$linux_arm64_archive")
-
-  local formula_file="$work/crabbox.rb"
+  archive_arch=amd64
+  [[ "$native_arch" == arm64 ]] && archive_arch=arm64
+  local archive_name="crabbox_${version}_darwin_${archive_arch}.tar.gz"
+  local native_archive="$asset_dir/$archive_name"
+  local archive_sha
+  archive_sha=$(sha256_file "$native_archive")
+  local metadata_file="$work/formula.json"
+  "$brew_bin" tap openclaw/tap
   "$brew_bin" update --force
-  "$brew_bin" cat "$FORMULA" >"$formula_file"
-  verify_homebrew_formula \
-    "$node_bin" "$formula_file" "$tag" \
-    "$darwin_amd64_sha" "$darwin_arm64_sha" \
-    "$linux_amd64_sha" "$linux_arm64_sha"
+  # Tap maintainers own executable formulae; metadata is not a Ruby sandbox.
+  "$brew_bin" info --json=v2 --formula "$FORMULA" >"$metadata_file"
+  verify_homebrew_formula "$node_bin" "$metadata_file" "$tag" "$archive_name" "$archive_sha"
   # Force a fresh public download into the per-run empty cache. A previously
   # cached archive can never stand in for a missing or inaccessible release URL.
   "$brew_bin" fetch --force --formula "$FORMULA"
@@ -559,9 +332,6 @@ homebrew_phase() {
     echo "Homebrew Crabbox CLI is not a regular executable" >&2
     return 1
   }
-  archive_arch=amd64
-  [[ "$native_arch" == arm64 ]] && archive_arch=arm64
-  local native_archive="$asset_dir/crabbox_${version}_darwin_${archive_arch}.tar.gz"
   local extracted="$work/extracted"
   mkdir -m 700 "$extracted"
   local expected_members=crabbox
@@ -644,27 +414,14 @@ homebrew_phase() {
 }
 
 main() {
-  [[ $# -eq 8 ]] || usage
+  [[ $# -eq 6 ]] || usage
   local tag=$1 asset_dir=$2 tag_object=$3 source_commit=$4 verifier_commit=$5
-  local release_id=$6 public_run_id=$7 proof_dir=$8
-  local native_arch brew_bin node_bin go_bin work clean_path user_name homebrew_home homebrew_cache source_asset_dir tooling_commit
+  local release_id=$6
+  [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || usage
+  local native_arch brew_bin node_bin go_bin work clean_path user_name homebrew_home homebrew_cache tooling_commit
   validate_release_identity "$tag" "$tag_object" "$source_commit" "$verifier_commit"
   tooling_commit=${CRABBOX_VERIFY_TOOLING_COMMIT:-$verifier_commit}
   assert_no_downstream_credentials
-  case "${CRABBOX_HOMEBREW_EXTERNAL_PUBLIC_POSTFLIGHT:-}" in
-    "") ;;
-    1)
-      [[ "${GITHUB_ACTIONS:-}" == true &&
-        "${GITHUB_WORKFLOW_REF:-}" == "$CRABBOX_RELEASE_REPOSITORY/.github/workflows/verify-homebrew.yml@refs/heads/$CRABBOX_RELEASE_DEFAULT_BRANCH" ]] || {
-        echo "external public postflight requires the protected Homebrew workflow" >&2
-        exit 1
-      }
-      ;;
-    *)
-      echo "invalid external public postflight mode" >&2
-      exit 1
-      ;;
-  esac
   [[ "$(uname -s)" == Darwin ]] || {
     echo "downstream Homebrew verification must run natively on macOS" >&2
     exit 1
@@ -679,9 +436,6 @@ main() {
     exit 1
   }
   asset_dir=$(cd "$asset_dir" && pwd -P)
-  source_asset_dir=$asset_dir
-  [[ -d "$proof_dir" && ! -L "$proof_dir" ]] || usage
-  proof_dir=$(cd "$proof_dir" && pwd -P)
 
   # This blocked/ready decision precedes the credential-free child, which
   # repeats it before upstream candidate execution or any brew command.
@@ -705,7 +459,7 @@ main() {
   mkdir -m 700 "$work/public-preflight"
   freeze_public_release \
     "$tag" "$asset_dir" "$tag_object" "$source_commit" "$verifier_commit" \
-    "$release_id" "$public_run_id" "$proof_dir" "$work/public-preflight" "$node_bin"
+    "$release_id" "$work/public-preflight" "$node_bin"
   asset_dir="$work/public-preflight/public-assets"
   clean_path="${brew_bin%/*}:${node_bin%/*}:${go_bin%/*}:/usr/bin:/bin:/usr/sbin:/sbin"
   user_name=$(id -un)
@@ -732,20 +486,6 @@ main() {
       "$native_arch" "$brew_bin" "$node_bin" "$work"
 
   require_protected_homebrew_tooling "$verifier_commit" "$tag"
-  if [[ "${CRABBOX_HOMEBREW_EXTERNAL_PUBLIC_POSTFLIGHT:-}" == 1 ]]; then
-    # The protected hosted workflow closes this boundary in a clean Linux job.
-    # Never re-read candidate-writable witness files after candidate execution.
-    return 0
-  fi
-
-  # Close the downstream verification window with a fresh unauthenticated read.
-  # A concurrent release, run, artifact, proof, or public-byte change is an
-  # incident and must invalidate this host's proof rather than silently pass.
-  mkdir -m 700 "$work/public-postflight"
-  freeze_public_release \
-    "$tag" "$source_asset_dir" "$tag_object" "$source_commit" "$verifier_commit" \
-    "$release_id" "$public_run_id" "$proof_dir" "$work/public-postflight" "$node_bin"
-  cmp "$work/public-preflight/public-proof.json" "$work/public-postflight/public-proof.json"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -293,65 +294,6 @@ func TestShouldCleanupSkipsMissingClaim(t *testing.T) {
 	server := Server{Status: "running", Labels: map[string]string{}}
 	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, false, time.Now()); ok || reason != "missing claim" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
-	}
-}
-
-func TestAcquireKeepIPFailureDeletesUnclaimedVMAndKey(t *testing.T) {
-	testutil.IsolateUserDirs(t)
-	t.Setenv("TART_HOME", t.TempDir())
-	binDir := t.TempDir()
-	fakeTart := filepath.Join(binDir, "tart")
-	if err := os.WriteFile(fakeTart, []byte("#!/bin/sh\nsleep 0.2\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	runner := &recordingRunner{
-		responses: map[string]core.LocalCommandResult{
-			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: "[]"},
-		},
-		onRun: func(req core.LocalCommandRequest) {
-			if req.Args[0] == "clone" {
-				if err := os.MkdirAll(filepath.Join(os.Getenv("TART_HOME"), "vms", req.Args[2]), 0o700); err != nil {
-					t.Fatal(err)
-				}
-			}
-		},
-	}
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.Tart.Image = "custom-base"
-	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
-	b.startupObserveTimeout = 20 * time.Millisecond
-	// Keep setup outside the deadline race under coverage while still forcing
-	// waitForIP to fail promptly after the VM starts.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	if _, err := b.Acquire(ctx, core.AcquireRequest{Keep: true, Repo: core.Repo{Root: t.TempDir()}}); err == nil {
-		t.Fatal("Acquire succeeded")
-	}
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	keys, err := filepath.Glob(filepath.Join(configDir, "crabbox", "testboxes", "*", "id_ed25519"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(keys) != 0 {
-		t.Fatalf("unclaimed failed VM key count=%d paths=%v, want 0", len(keys), keys)
-	}
-	stopped, deleted := false, false
-	for _, call := range runner.calls {
-		if len(call.Args) > 0 && call.Args[0] == "stop" {
-			stopped = true
-		}
-		if len(call.Args) > 0 && call.Args[0] == "delete" {
-			deleted = true
-		}
-	}
-	if !stopped || !deleted {
-		t.Fatalf("keep=true unclaimed post-start failure should cleanup VM, stopped=%t deleted=%t calls=%v", stopped, deleted, runner.calls)
 	}
 }
 
@@ -2211,13 +2153,25 @@ func TestCommandErrorMinimalExitCode(t *testing.T) {
 }
 
 func TestIsTartProviderName(t *testing.T) {
+	selected := func(name string) bool {
+		cfg := core.BaseConfig()
+		cfg.Provider = name
+		cfg.TargetOS = "linux"
+		fs := flag.NewFlagSet("name-contract", flag.ContinueOnError)
+		p := Provider{}
+		values := p.RegisterFlags(fs, cfg)
+		if err := p.ApplyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		return cfg.TargetOS == "macos"
+	}
 	for _, name := range []string{"tart", "Tart", "TART", "local-tart", "macos-vm", " tart "} {
-		if !isTartProviderName(name) {
+		if !selected(name) {
 			t.Errorf("isTartProviderName(%q) = false, want true", name)
 		}
 	}
 	for _, name := range []string{"docker", "aws", "hyperv", ""} {
-		if isTartProviderName(name) {
+		if selected(name) {
 			t.Errorf("isTartProviderName(%q) = true, want false", name)
 		}
 	}
@@ -4308,5 +4262,58 @@ func TestNormalizeLeaseSlugWithPrefix(t *testing.T) {
 	result := normalizeLeaseSlug("my-slug")
 	if result == "" {
 		t.Fatal("normalizeLeaseSlug should return non-empty for valid slug")
+	}
+}
+
+func TestInheritedWorkRootCallerContract(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USER", "fixture-user")
+	for _, tc := range []struct{ providerRoot, genericRoot, want string }{
+		{"", "", "/Users/admin/crabbox"},
+		{"", "/work/crabbox", "/Users/admin/crabbox"},
+		{"", "/Users/ec2-user/crabbox", "/Users/admin/crabbox"},
+		{"", "C:\\crabbox", "/Users/admin/crabbox"},
+		{"", " /work/crabbox ", " /work/crabbox "},
+		{"", "/WORK/crabbox", "/WORK/crabbox"},
+		{"", "c:\\crabbox", "c:\\crabbox"},
+		{"", "/srv/custom", "/srv/custom"},
+		{"", "/Users/alice/custom", "/Users/alice/custom"},
+		{"", "D:\\custom", "D:\\custom"},
+		{"", "  ", "  "},
+		{" ", "/srv/custom", " "},
+		{"/work/crabbox", "/srv/custom", "/work/crabbox"},
+		{"relative", "/srv/custom", "relative"},
+		{"/provider/root", "/srv/custom", "/provider/root"},
+	} {
+		for _, explicit := range []bool{false, true} {
+			cfg := Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
+			if explicit {
+				core.MarkWorkRootExplicit(&cfg)
+				cfg.TargetOS = "existing-target"
+				cfg.WindowsMode = "prior-mode"
+			}
+			cfg.WorkRoot = tc.genericRoot
+			cfg.Tart.WorkRoot = tc.providerRoot
+			cfg.Tart.Image = "fixture-image"
+			want := cfg
+			want.Provider = "tart"
+			if !explicit {
+				want.TargetOS = "macos"
+			}
+			want.Tart.WorkRoot = tc.want
+			want.WorkRoot = tc.want
+			want.Tart.User = "fixture-user"
+			want.Tart.Password = "admin"
+			want.Tart.CPUs = 4
+			want.Tart.Memory = 8192
+			want.SSHPort = "22"
+			want.SSHFallbackPorts = []string{}
+			want.WindowsMode = ""
+			want.ServerType = "fixture-image"
+			applyDefaults(&cfg)
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("whole config differs for roots=%q/%q explicit=%t: got=%#v want=%#v", tc.providerRoot, tc.genericRoot, explicit, cfg, want)
+			}
+		}
 	}
 }

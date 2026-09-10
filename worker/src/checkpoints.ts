@@ -1215,68 +1215,94 @@ export async function validateCheckpointUse(
   });
 }
 
-export async function bindCheckpointUseProvisioning(
-  storage: CoordinatorStorage,
+export function checkpointLeaseSourceIdentity(checkpoint: CoordinatorCheckpointRecord): string {
+  const { scope, image } = checkpoint;
+  // Deletion changes generation, but does not change a completed fork's source.
+  return JSON.stringify([
+    checkpoint.id,
+    checkpoint.createdAt,
+    checkpoint.provider,
+    checkpoint.target,
+    scope.region,
+    scope.accountID,
+    scope.subscriptionID,
+    scope.resourceGroup,
+    scope.project,
+    image?.kind,
+    image?.resourceID,
+    image?.immutableID,
+  ]);
+}
+
+export async function bindCheckpointUseProvisioningInTransaction(
+  transaction: CoordinatorStorageView,
   checkpointID: string,
-  token: string,
+  tokenHash: string,
   principal: CheckpointPrincipal,
   attemptID: string,
   leaseID: string,
+  sourceIdentity?: string,
 ): Promise<CoordinatorCheckpointRecord> {
-  const tokenHash = await sha256Hex(token);
-  return storage.transaction(async (transaction) => {
-    const { checkpoint, claim } = await validatedUseClaim(
-      transaction,
-      checkpointID,
-      tokenHash,
-      principal,
+  const { checkpoint, claim } = await validatedUseClaim(
+    transaction,
+    checkpointID,
+    tokenHash,
+    principal,
+  );
+  if (
+    sourceIdentity !== undefined &&
+    checkpointLeaseSourceIdentity(checkpoint) !== sourceIdentity
+  ) {
+    throw new CheckpointError(
+      "checkpoint_source_mismatch",
+      "checkpoint changed during lease admission",
     );
-    const attemptKey = `create-attempt:${leaseID}`;
-    const attempt = await transaction.get<CreateAttemptRecord>(attemptKey);
-    if (
-      !attempt ||
-      attempt.version !== 1 ||
-      attempt.requestedLeaseID !== leaseID ||
-      attempt.token !== attemptID ||
-      attempt.owner !== principal.owner ||
-      attempt.org !== principal.org
-    ) {
-      throw new CheckpointError("create_attempt_conflict", "checkpoint lease attempt is invalid");
-    }
-    if (attempt.state === "canceled") {
-      throw new CheckpointError("create_canceled", "checkpoint lease attempt was canceled");
-    }
-    if (attempt.state !== "pending") {
-      throw new CheckpointError("create_attempt_conflict", "checkpoint lease attempt is invalid");
-    }
-    if (attempt.checkpointID !== checkpointID || attempt.checkpointUseClaimHash !== tokenHash) {
-      throw new CheckpointError(
-        "create_attempt_binding_conflict",
-        "create attempt is not bound to the exact checkpoint claim",
-      );
-    }
-    if (claim.state === "provisioning") {
-      throw new CheckpointError(
-        "checkpoint_in_use",
-        claim.attemptID === attemptID && claim.leaseID === leaseID
-          ? "checkpoint lease attempt is already provisioning"
-          : "checkpoint claim already owns a lease attempt",
-      );
-    }
-    await transaction.put(checkpointUseKey(checkpointID, tokenHash), {
-      ...claim,
-      state: "provisioning",
-      attemptID,
-      leaseID,
-    } satisfies CoordinatorCheckpointUseClaim);
-    return writeCheckpointTransition(
-      transaction,
-      checkpoint,
-      checkpoint,
-      "checkpoint.use.provisioning",
-      principal.owner,
+  }
+  const attemptKey = `create-attempt:${leaseID}`;
+  const attempt = await transaction.get<CreateAttemptRecord>(attemptKey);
+  if (
+    !attempt ||
+    (attempt.version !== 1 && attempt.version !== 2) ||
+    attempt.requestedLeaseID !== leaseID ||
+    attempt.token !== attemptID ||
+    attempt.owner !== principal.owner ||
+    attempt.org !== principal.org
+  ) {
+    throw new CheckpointError("create_attempt_conflict", "checkpoint lease attempt is invalid");
+  }
+  if (attempt.state === "canceled") {
+    throw new CheckpointError("create_canceled", "checkpoint lease attempt was canceled");
+  }
+  if (attempt.state !== "pending") {
+    throw new CheckpointError("create_attempt_conflict", "checkpoint lease attempt is invalid");
+  }
+  if (attempt.checkpointID !== checkpointID || attempt.checkpointUseClaimHash !== tokenHash) {
+    throw new CheckpointError(
+      "create_attempt_binding_conflict",
+      "create attempt is not bound to the exact checkpoint claim",
     );
-  });
+  }
+  if (claim.state === "provisioning") {
+    throw new CheckpointError(
+      "checkpoint_in_use",
+      claim.attemptID === attemptID && claim.leaseID === leaseID
+        ? "checkpoint lease attempt is already provisioning"
+        : "checkpoint claim already owns a lease attempt",
+    );
+  }
+  await transaction.put(checkpointUseKey(checkpointID, tokenHash), {
+    ...claim,
+    state: "provisioning",
+    attemptID,
+    leaseID,
+  } satisfies CoordinatorCheckpointUseClaim);
+  return writeCheckpointTransition(
+    transaction,
+    checkpoint,
+    checkpoint,
+    "checkpoint.use.provisioning",
+    principal.owner,
+  );
 }
 
 export async function abortCheckpointProvisioningForLease(
@@ -1356,7 +1382,7 @@ export async function resolveRejectedCheckpointProvisioning(
       claim.owner !== principal.owner ||
       !sameOrgIdentityKey(claim.org, principal.org) ||
       !attempt ||
-      attempt.version !== 1 ||
+      (attempt.version !== 1 && attempt.version !== 2) ||
       attempt.requestedLeaseID !== leaseID ||
       attempt.token !== attemptID ||
       attempt.owner !== principal.owner ||
@@ -1473,7 +1499,7 @@ async function completedCheckpointUse(
         ["deleting", "delete-pending", "deleted"].includes(checkpoint.state)
       )) ||
     !attempt ||
-    attempt.version !== 1 ||
+    (attempt.version !== 1 && attempt.version !== 2) ||
     attempt.requestedLeaseID !== completion.requestedLeaseID ||
     attempt.token !== attemptID ||
     attempt.state === "canceled" ||

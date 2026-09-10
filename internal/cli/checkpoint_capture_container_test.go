@@ -36,6 +36,7 @@ func runCheckpointContainerReviewContract(t *testing.T, repo, binary string) {
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build fake Docker: %v\n%s", err, output)
 	}
+	t.Parallel()
 	for _, strategy := range []string{"", "auto", "image", "disk-snapshot"} {
 		t.Run("local container retirement strategy "+blank(strategy, "default"), func(t *testing.T) {
 			f := newCheckpointContainerFixture(t, repo, binary, docker)

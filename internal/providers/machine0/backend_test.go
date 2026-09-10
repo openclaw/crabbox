@@ -1342,6 +1342,103 @@ func TestResolveRunningMachinePreservesIsolatedHostTrust(t *testing.T) {
 	}
 }
 
+func TestMachine0RunResolutionPreparesWithoutPublishingClaim(t *testing.T) {
+	for _, fixed := range []bool{false, true} {
+		for _, scenario := range []string{"ready", "stopped", "replacement", "checkpoint hold", "canceled readiness"} {
+			name := "ordinary/" + scenario
+			if fixed {
+				name = "fixed/" + scenario
+			}
+			t.Run(name, func(t *testing.T) {
+				b, api, req := fixedMachine0TestFixture(t)
+				if !fixed {
+					req.RequestedLeaseID = ""
+				}
+				lease, err := b.Acquire(t.Context(), req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "checkpoint hold" {
+					if err := core.WithDurableLeaseClaimLock(lease.LeaseID, func(claim *LeaseClaim, _ bool, persist func() error) error {
+						claim.CheckpointCapture = &core.CheckpointCaptureBinding{ID: "chk_runhold", Revision: claim.Revision, BoundRevision: claim.Revision}
+						return persist()
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before, err := core.ReadLeaseClaim(lease.LeaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				const trust = "203.0.113.10 ssh-ed25519 synthetic-host-key\n"
+				if err := os.WriteFile(lease.SSH.KnownHostsFile, []byte(trust), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				ready := api.machine
+				ready.IP = "203.0.113.99"
+				api.machine, api.machines = ready, []machine{ready}
+				if scenario == "stopped" || scenario == "checkpoint hold" {
+					stopped := ready
+					stopped.Status, stopped.IP = "STOPPED", ""
+					api.machine, api.machines = stopped, []machine{stopped}
+					api.getSequence = []machine{stopped, ready}
+				}
+				if scenario == "replacement" {
+					api.machine.ID = "vm-replacement"
+					api.machines = []machine{api.machine}
+				}
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				prepared := false
+				b.waitSSH = func(prepareCtx context.Context, target *SSHTarget, _ time.Duration) error {
+					prepared = true
+					if target.Host != ready.IP || target.KnownHostsFile != lease.SSH.KnownHostsFile {
+						t.Fatal("readiness lost the exact endpoint or isolated trust path")
+					}
+					if scenario == "canceled readiness" {
+						cancel()
+						return context.Cause(prepareCtx)
+					}
+					return nil
+				}
+				resolved, resolveErr := b.ResolveRunLeaseUnderClaim(ctx, ResolveRequest{ID: lease.LeaseID, Repo: req.Repo, Prepare: true}, before)
+				if scenario == "ready" || scenario == "stopped" {
+					if resolveErr != nil || !prepared || resolved.Server.CloudID != before.CloudID || resolved.SSH.Host != ready.IP {
+						t.Fatalf("run resolution did not prepare the bound machine: %v", resolveErr)
+					}
+				} else if resolveErr == nil {
+					t.Fatal("run resolution accepted failed authority or canceled readiness")
+				}
+				if scenario == "canceled readiness" && !errors.Is(resolveErr, context.Canceled) {
+					t.Fatalf("readiness lost caller cancellation: %v", resolveErr)
+				}
+				wantStarts := 0
+				if scenario == "stopped" {
+					wantStarts = 1
+				}
+				if len(api.started) != wantStarts || len(api.removed)+len(api.primed) != 0 {
+					t.Fatalf("unexpected preparation effects: starts=%v removals=%v primes=%v", api.started, api.removed, api.primed)
+				}
+				if (scenario == "replacement" || scenario == "checkpoint hold") && prepared {
+					t.Fatal("rejected authority reached SSH readiness")
+				}
+				trustAfter, trustErr := os.ReadFile(lease.SSH.KnownHostsFile)
+				if scenario == "stopped" {
+					if !errors.Is(trustErr, os.ErrNotExist) {
+						t.Fatalf("restart retained stale host trust: %v", trustErr)
+					}
+				} else if trustErr != nil || string(trustAfter) != trust {
+					t.Fatalf("resolution unexpectedly changed host trust: %v", trustErr)
+				}
+				after, err := core.ReadLeaseClaim(lease.LeaseID)
+				if err != nil || !reflect.DeepEqual(before, after) {
+					t.Fatalf("provider run resolution published a claim: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestAcquirePreservesExplicitMachine0WorkRoot(t *testing.T) {
 	repo := setupState(t)
 	api := &fakeAPI{sizes: []machineSize{testSize()}, getSequence: []machine{readyMachine("203.0.113.10")}}

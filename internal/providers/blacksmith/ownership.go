@@ -154,8 +154,14 @@ func parseBlacksmithIdentity(output, id string) (blacksmithIdentity, error) {
 	if identity.ID != id || identity.Workflow == "" || identity.Job == "" || identity.Ref == "" || !identity.knownState() {
 		return identity, exit(2, "Blacksmith exact status has missing or mismatched identity/state")
 	}
-	if identity.terminal() && (values[6] == "" || !blacksmithStatusRunURL.MatchString(values[7])) {
-		return identity, exit(2, "Blacksmith completion requires complete native metadata")
+	if identity.terminal() {
+		// Never-assigned Testboxes have no Actions URL. Native output still
+		// pads CREATED up to the RUN URL column and terminates the row; without
+		// that framing an empty (or numeric-prefix) URL could be truncation.
+		runURLComplete := blacksmithStatusRunURL.MatchString(values[7]) || (values[7] == "" && len(row) == columns[2+7*2])
+		if values[6] == "" || !strings.HasSuffix(output, "\n") || !runURLComplete {
+			return identity, exit(2, "Blacksmith completion requires complete native metadata")
+		}
 	}
 	return identity, nil
 }
@@ -212,7 +218,11 @@ func blacksmithExitDiagnostics(err error) error {
 }
 
 func blacksmithContextError(ctx context.Context, err error) error {
-	if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+	ctxErr := ctx.Err()
+	if ctxErr == nil {
+		return err
+	}
+	if !errors.Is(err, ctxErr) {
 		err = errors.Join(err, ctxErr)
 	}
 	if cause := context.Cause(ctx); cause != nil && !errors.Is(err, cause) {

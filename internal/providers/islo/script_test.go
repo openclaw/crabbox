@@ -223,7 +223,7 @@ func TestIsloRunScriptCleanupRefusesUnvalidatedPath(t *testing.T) {
 	var stderr bytes.Buffer
 	backend := isloScriptTestBackend(&stderr)
 
-	backend.removeRunScript(client, "crabbox-test", "/workspace/repo", &core.RunScriptSpec{RemotePath: "/etc/cron.d/payload"}, "")
+	backend.removeRunScript(client, "crabbox-test", "/workspace/repo", &core.RunScriptSpec{RemotePath: "/etc/cron.d/payload"})
 
 	if len(client.prepareCommands) != 0 {
 		t.Fatalf("an unvalidated path was handed to the sandbox: %q", client.prepareCommands)
@@ -239,28 +239,104 @@ func TestIsloRunScriptCleanupRefusesUnvalidatedPath(t *testing.T) {
 // 0700, so without an explicit chown the unprivileged workload user cannot read
 // the file it was asked to execute.
 func TestIsloRunScriptHandsScriptToTheWorkloadUser(t *testing.T) {
-	client := &fakeIsloSyncClient{}
-	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	for _, workspace := range []string{"/workspace/crabbox", "/workspace/a b'c;literal"} {
+		t.Run(workspace, func(t *testing.T) {
+			client := &fakeIsloSyncClient{}
+			backend := &isloBackend{
+				cfg: Config{Islo: IsloConfig{APIKey: "test"}},
+				rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+			}
+			spec := &core.RunScriptSpec{Data: []byte("echo hi\n"), RemotePath: ".crabbox/scripts/a b'c;literal.sh"}
+			if _, err := backend.runScript(context.Background(), client, "sbx", workspace,
+				RunRequest{Script: spec}, nil, isloWorkloadUser); err != nil {
+				t.Fatalf("runScript: %v", err)
+			}
+			if client.uploadPath != workspace {
+				t.Fatalf("upload workspace=%q, want %q", client.uploadPath, workspace)
+			}
+			if len(client.execRequests) != 3 {
+				t.Fatalf("exec requests=%d, want ownership repair, workload, cleanup", len(client.execRequests))
+			}
+			wantChown := []string{"chown", "--", isloWorkloadUser + ":" + isloWorkloadUser, spec.RemotePath}
+			if got := client.execRequests[0].Command; !reflect.DeepEqual(got, wantChown) {
+				t.Fatalf("ownership argv=%q, want %q", got, wantChown)
+			}
+			for i, req := range client.execRequests {
+				if req.Workdir == nil || *req.Workdir != workspace {
+					t.Fatalf("exec %d workspace=%v, want %q", i, req.Workdir, workspace)
+				}
+				wantUser := isloAdminUser
+				if i == 1 {
+					wantUser = isloWorkloadUser
+				}
+				if req.User == nil || *req.User != wantUser {
+					t.Fatalf("exec %d user=%v, want %q", i, req.User, wantUser)
+				}
+			}
+		})
 	}
-	spec := &core.RunScriptSpec{Data: []byte("echo hi\n"), RemotePath: ".crabbox/scripts/abc-script.sh"}
-	if _, err := backend.runScript(context.Background(), client, "sbx", "/workspace/crabbox",
-		RunRequest{Script: spec}, nil, isloWorkloadUser); err != nil {
-		t.Fatalf("runScript: %v", err)
+}
+
+func TestIsloRunScriptCleansUpAfterOwnershipRepairFailure(t *testing.T) {
+	transportErr := errors.New("ownership transport failed")
+	for _, tc := range []struct {
+		name    string
+		client  *fakeIsloSyncClient
+		wantErr error
+	}{
+		{"nonzero exit", &fakeIsloSyncClient{execCodes: []int{1, 0}}, nil},
+		{"transport error", &fakeIsloSyncClient{execErrOnCommand: transportErr, execErrOnCommandContains: "chown"}, transportErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := isloScriptTestBackend(io.Discard)
+			code, err := backend.runScript(t.Context(), tc.client, "sbx", "/workspace/repo",
+				isloScriptTestRequest(".crabbox/scripts/test.sh"), nil, isloWorkloadUser)
+			if code != 7 || err == nil {
+				t.Fatalf("runScript=(%d, %v), want preparation failure", code, err)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error=%v, want %v", err, tc.wantErr)
+			}
+			if tc.client.commandContains(`exec bash "$@"`) {
+				t.Fatal("script executed after ownership repair failed")
+			}
+			if len(tc.client.execRequests) != 2 || !tc.client.commandContains(isloScriptRemoveCommand) {
+				t.Fatalf("expected ownership repair then cleanup, got %q", tc.client.prepareCommands)
+			}
+			cleanup := tc.client.execRequests[1]
+			if cleanup.User == nil || *cleanup.User != isloAdminUser {
+				t.Fatalf("cleanup user=%v, want administrative user", cleanup.User)
+			}
+		})
 	}
-	var chown string
-	for _, c := range client.prepareCommands {
-		if strings.Contains(c, "chown") {
-			chown = c
-			break
-		}
-	}
-	if chown == "" {
-		t.Fatalf("no chown issued for a workload-user run; commands=%q", client.prepareCommands)
-	}
-	if !strings.Contains(chown, isloWorkloadUser+":"+isloWorkloadUser) || !strings.Contains(chown, ".crabbox/scripts/abc-script.sh") {
-		t.Fatalf("chown did not hand the script to the workload user: %q", chown)
+}
+
+func TestIsloRunScriptCleanupFailurePreservesWorkloadExit(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		cleanupCode int
+		cleanupErr  error
+	}{
+		{"nonzero exit", 1, nil},
+		{"transport error", 0, errors.New("cleanup transport failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &fakeIsloSyncClient{
+				execCodes:                []int{0, 23, tc.cleanupCode},
+				execErrOnCommand:         tc.cleanupErr,
+				execErrOnCommandContains: isloScriptRemoveCommand,
+			}
+			var stderr bytes.Buffer
+			backend := isloScriptTestBackend(&stderr)
+			code, err := backend.runScript(t.Context(), client, "sbx", "/workspace/repo",
+				isloScriptTestRequest(".crabbox/scripts/test.sh"), nil, isloWorkloadUser)
+			if code != 23 || err != nil {
+				t.Fatalf("runScript=(%d, %v), want workload exit 23", code, err)
+			}
+			if !strings.Contains(stderr.String(), "could not remove run script") {
+				t.Fatalf("missing cleanup warning: %q", stderr.String())
+			}
+		})
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type flagValues struct {
@@ -38,7 +40,7 @@ func RegisterGitHubCodespacesProviderFlags(fs *flag.FlagSet, defaults Config) an
 }
 
 func ApplyGitHubCodespacesProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	if isGitHubCodespacesProviderName(cfg.Provider) {
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		if flagWasSet(fs, "class") {
 			return exit(2, "--class is not supported for provider=github-codespaces; use --type or --github-codespaces-machine for a Codespaces machine slug")
 		}
@@ -98,7 +100,7 @@ func ApplyGitHubCodespacesProviderFlags(cfg *Config, fs *flag.FlagSet, values an
 }
 
 func ValidateGitHubCodespacesConfig(cfg Config) error {
-	if isGitHubCodespacesProviderName(cfg.Provider) && strings.TrimSpace(cfg.TargetOS) != "" && strings.ToLower(strings.TrimSpace(cfg.TargetOS)) != targetLinux {
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) && strings.TrimSpace(cfg.TargetOS) != "" && strings.ToLower(strings.TrimSpace(cfg.TargetOS)) != targetLinux {
 		return exit(2, "provider=github-codespaces supports target=linux only")
 	}
 	c := cfg.GitHubCodespaces
@@ -151,15 +153,6 @@ func validateGitHubCodespacesWorkRoot(label, value string) error {
 func validRepo(repo string) bool {
 	owner, name, ok := strings.Cut(strings.TrimSpace(repo), "/")
 	return ok && validRepoOwner(owner) && validRepoName(name)
-}
-
-func isGitHubCodespacesProviderName(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case providerName, "codespaces", "gh-codespaces":
-		return true
-	default:
-		return false
-	}
 }
 
 func validRepoOwner(value string) bool {

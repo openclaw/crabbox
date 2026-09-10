@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/openclaw/crabbox/internal/providers/shared"
+	"github.com/openclaw/crabbox/internal/tailbuffer"
 )
 
 var (
@@ -519,8 +520,7 @@ func (c *kubectlKubernetesClient) Exec(ctx context.Context, req podExecRequest) 
 	args = append(args, "--")
 	args = append(args, req.Command...)
 
-	var stderrTail tailBuffer
-	stderrTail.limit = kubectlErrorDetailLimitBytes
+	stderrTail := tailbuffer.NewLimited(kubectlErrorDetailLimitBytes)
 	stderr := io.Writer(&stderrTail)
 	if req.Stderr != nil {
 		stderr = io.MultiWriter(req.Stderr, &stderrTail)
@@ -603,32 +603,6 @@ func kubectlRemoteExitStatus(stderr string, processExitCode int) (int, bool) {
 		return 0, false
 	}
 	return code, true
-}
-
-type tailBuffer struct {
-	data  []byte
-	limit int
-}
-
-func (b *tailBuffer) Write(p []byte) (int, error) {
-	if b.limit <= 0 {
-		return len(p), nil
-	}
-	if len(p) >= b.limit {
-		b.data = append(b.data[:0], p[len(p)-b.limit:]...)
-		return len(p), nil
-	}
-	overflow := len(b.data) + len(p) - b.limit
-	if overflow > 0 {
-		copy(b.data, b.data[overflow:])
-		b.data = b.data[:len(b.data)-overflow]
-	}
-	b.data = append(b.data, p...)
-	return len(p), nil
-}
-
-func (b *tailBuffer) String() string {
-	return string(b.data)
 }
 
 func podStateFromObject(object kubernetesObject) podState {
@@ -788,22 +762,6 @@ func resolveSandboxPod(
 	return podState{}, fmt.Errorf("%w: Sandbox %s has no pod annotation or selector", errNotReady, sandbox.Metadata.Name)
 }
 
-func waitForSandboxReadiness(ctx context.Context, client kubernetesClient, namespace, claimName string, identity claimIdentity, poll time.Duration) (sandboxReadiness, error) {
-	resource, err := waitForSandboxResourceReadiness(ctx, client, namespace, claimName, identity, poll)
-	if err != nil {
-		return sandboxReadiness{}, err
-	}
-	pod, err := waitForSandboxPodReadiness(ctx, client, namespace, resource.ClaimName, resource.Sandbox, identity, poll)
-	if err != nil {
-		return sandboxReadiness{}, err
-	}
-	container, err := resolvePodContainer(pod, identity.Container)
-	if err != nil {
-		return sandboxReadiness{}, err
-	}
-	return newSandboxReadiness(resource, pod, identity, container), nil
-}
-
 func waitForSandboxReadinessWithTimeouts(ctx context.Context, client kubernetesClient, namespace, claimName string, identity claimIdentity, sandboxTimeout, podTimeout, poll time.Duration) (sandboxReadiness, error) {
 	sandboxCtx := ctx
 	sandboxCancel := func() {}
@@ -867,7 +825,8 @@ func waitForSandboxResourceReadiness(ctx context.Context, client kubernetesClien
 		if lastErr == nil {
 			lastErr = cause
 		}
-		return sandboxResourceReadiness{}, fmt.Errorf("agent-sandbox readiness timed out for claim %s: %w", claimName, lastErr)
+		diagnostic := fmt.Errorf("agent-sandbox readiness timed out for claim %s: %w", claimName, lastErr)
+		return sandboxResourceReadiness{}, shared.PollTerminationError(ctx, err, diagnostic)
 	}
 	return sandboxResourceReadiness{}, err
 }
@@ -907,7 +866,8 @@ func waitForSandboxPodReadiness(ctx context.Context, client kubernetesClient, na
 		if lastErr == nil {
 			lastErr = cause
 		}
-		return podState{}, fmt.Errorf("agent-sandbox pod readiness timed out for sandbox %s: %w", sandbox.Metadata.Name, lastErr)
+		diagnostic := fmt.Errorf("agent-sandbox pod readiness timed out for sandbox %s: %w", sandbox.Metadata.Name, lastErr)
+		return podState{}, shared.PollTerminationError(ctx, err, diagnostic)
 	}
 	return podState{}, err
 }

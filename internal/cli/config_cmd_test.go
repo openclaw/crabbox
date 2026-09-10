@@ -6,11 +6,78 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
+
+func TestLocalContainerOrdinaryFileRoundTrip(t *testing.T) {
+	for _, tc := range []struct {
+		name, input, wantYAML string
+		present, enabled      bool
+	}{
+		{"omitted", "{}", "localContainer: {}\n", false, true},
+		{"null", "{dockerSocket: null, noHostname: null}", "localContainer: {}\n", false, true},
+		{"false", "{dockerSocket: false, noHostname: false}", "localContainer:\n    dockerSocket: false\n    noHostname: false\n", true, false},
+		{"true", "{dockerSocket: true, noHostname: true}", "localContainer:\n    dockerSocket: true\n    noHostname: true\n", true, true},
+		{"zero values", "{runtime: '', image: '', user: '', workRoot: '', cpus: 0, memory: '', network: ''}", "localContainer: {}\n", false, true},
+		{"nine values", "{runtime: custom, image: example:tag, user: runner, workRoot: '~/literal', cpus: 3, memory: 4g, network: custom, dockerSocket: false, noHostname: false}", "localContainer:\n    runtime: custom\n    image: example:tag\n    user: runner\n    workRoot: ~/literal\n    cpus: 3\n    memory: 4g\n    network: custom\n    dockerSocket: false\n    noHostname: false\n", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := isolatedConfigPath(t)
+			if err := os.WriteFile(path, []byte("localContainer: "+tc.input+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			file, err := readFileConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if file.LocalContainer == nil || (file.LocalContainer.DockerSocket != nil) != tc.present || (file.LocalContainer.NoHostname != nil) != tc.present {
+				t.Fatal("reader lost pointer boolean presence")
+			}
+			cfg := baseConfig()
+			cfg.Provider = "unselected-config-test"
+			cfg.LocalContainer.DockerSocket, cfg.LocalContainer.NoHostname = !tc.enabled, !tc.enabled
+			if !tc.present {
+				cfg.LocalContainer.DockerSocket, cfg.LocalContainer.NoHostname = true, true
+			}
+			if err := applyFileConfig(&cfg, file); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.LocalContainer.DockerSocket != tc.enabled || cfg.LocalContainer.NoHostname != tc.enabled {
+				t.Fatal("file boolean layering changed")
+			}
+			written, err := writeUserFileConfig(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if written != path {
+				t.Fatalf("write path=%q, want %q", written, path)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != tc.wantYAML {
+				t.Fatalf("written YAML=%q, want %q", data, tc.wantYAML)
+			}
+			again, err := readFileConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(again, file) {
+				t.Fatal("file values changed on round trip")
+			}
+		})
+	}
+}
 
 type configArchitectureTestProvider struct {
 	architectureCapabilityTestProvider
@@ -19,6 +86,17 @@ type configArchitectureTestProvider struct {
 func (configArchitectureTestProvider) Name() string { return "config-architecture-test" }
 func (configArchitectureTestProvider) DescribeImplicitArchitecture(Config) string {
 	return "native"
+}
+
+func isolatedConfigPath(t *testing.T) string {
+	t.Helper()
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	return configPath
 }
 
 func TestConfigShowUsesProviderImplicitArchitecture(t *testing.T) {
@@ -53,6 +131,116 @@ func TestConfigShowUsesProviderImplicitArchitecture(t *testing.T) {
 			}
 			if got := effectiveArchitectureForConfig(cfg); got != tc.architecture {
 				t.Fatalf("diagnostics changed execution architecture=%q", got)
+			}
+		})
+	}
+}
+
+func TestConfigShowEffectiveLeaseDurations(t *testing.T) {
+	for _, tc := range []struct {
+		name, userYAML, repoYAML, envTTL, envIdleTimeout string
+		wantTTL, wantIdleTimeout, wantProvider           string
+	}{
+		{
+			name: "compiled defaults", wantTTL: "1h30m0s", wantIdleTimeout: "30m0s",
+		},
+		{
+			name: "top-level YAML", userYAML: "ttl: 125m\nidleTimeout: 75s\n",
+			wantTTL: "2h5m0s", wantIdleTimeout: "1m15s",
+		},
+		{
+			name:     "nested lease overrides top-level",
+			userYAML: "ttl: 125m\nidleTimeout: 75s\nlease:\n  ttl: 150m\n  idleTimeout: 45m\n",
+			wantTTL:  "2h30m0s", wantIdleTimeout: "45m0s",
+		},
+		{
+			name:     "environment overrides file",
+			userYAML: "ttl: 125m\nidleTimeout: 75s\nlease:\n  ttl: 150m\n  idleTimeout: 45m\n",
+			envTTL:   "195m", envIdleTimeout: "90.5s",
+			wantTTL: "3h15m0s", wantIdleTimeout: "1m30.5s",
+		},
+		{
+			name:     "repo overrides user and preserves omitted values",
+			userYAML: "lease:\n  ttl: 150m\n  idleTimeout: 45m\n",
+			repoYAML: "ttl: 240m\n",
+			wantTTL:  "4h0m0s", wantIdleTimeout: "45m0s",
+		},
+		{
+			name: "AWS with distinct provider and job durations",
+			userYAML: `provider: aws
+blaxel:
+  ttl: 11m
+  idleTTL: 2m
+githubCodespaces:
+  idleTimeout: 13m
+jobs:
+  test:
+    ttl: 17m
+    idleTimeout: 3m
+`,
+			wantTTL: "1h30m0s", wantIdleTimeout: "30m0s", wantProvider: "aws",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Chdir(t.TempDir())
+			// clearConfigEnv does not clear these generic selection/duration inputs.
+			for _, key := range []string{"CRABBOX_CONFIG", "CRABBOX_PROVIDER", "CRABBOX_PROFILE", "CRABBOX_TARGET", "CRABBOX_OS", "CRABBOX_ARCH", "CRABBOX_TTL", "CRABBOX_IDLE_TIMEOUT"} {
+				t.Setenv(key, "")
+			}
+			for path, content := range map[string]string{userConfigPath(): tc.userYAML, "crabbox.yaml": tc.repoYAML} {
+				if content == "" {
+					continue
+				}
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("CRABBOX_TTL", tc.envTTL)
+			t.Setenv("CRABBOX_IDLE_TIMEOUT", tc.envIdleTimeout)
+			for _, format := range []string{"json", "text"} {
+				t.Run(format, func(t *testing.T) {
+					var stdout, stderr bytes.Buffer
+					var args []string
+					if format == "json" {
+						args = []string{"--json"}
+					}
+					if err := (App{Stdout: &stdout, Stderr: &stderr}).configShow(args); err != nil {
+						t.Fatalf("config show: %v", err)
+					}
+					output := stdout.String()
+					if format == "json" {
+						var view map[string]any
+						if err := json.Unmarshal(stdout.Bytes(), &view); err != nil {
+							t.Fatal(err)
+						}
+						for key, want := range map[string]string{"ttl": tc.wantTTL, "idleTimeout": tc.wantIdleTimeout, "provider": tc.wantProvider} {
+							if got := view[key]; got != want {
+								t.Errorf("top-level %s=%v, want string %q", key, got, want)
+							}
+						}
+						if tc.wantProvider == "aws" {
+							blaxel := view["blaxel"].(map[string]any)
+							codespaces := view["githubCodespaces"].(map[string]any)
+							job := view["jobs"].(map[string]any)["test"].(map[string]any)
+							if blaxel["ttl"] != "11m" || blaxel["idleTTL"] != "2m" || codespaces["idleTimeout"] != "13m0s" || job["ttl"] != "17m0s" || job["idleTimeout"] != "3m0s" {
+								t.Error("provider/job durations were not retained separately")
+							}
+						}
+						return
+					}
+					wantLine := fmt.Sprintf("lease ttl=%s idle_timeout=%s\n", tc.wantTTL, tc.wantIdleTimeout)
+					if !strings.Contains(output, "\n"+wantLine) || strings.Count(output, "\nlease ") != 1 {
+						t.Errorf("want one complete generic lease line %q", wantLine)
+					}
+					lines := strings.Split(output, "\n")
+					if len(lines) < 4 || !strings.HasPrefix(lines[1], "provider="+tc.wantProvider+" ") || lines[2]+"\n" != wantLine || !strings.HasPrefix(lines[3], "broker=") {
+						t.Error("generic lease line must appear immediately between provider and broker summaries")
+					}
+				})
 			}
 		})
 	}
@@ -320,13 +508,309 @@ func TestConfigShowIncludesFirecrackerConfig(t *testing.T) {
 	}
 }
 
+func TestAppleVMOrdinaryFileRoundTrip(t *testing.T) {
+	full := "  helperPath: ' ~/helper '\n  image: ' ~/image '\n  imageSHA256: ' checksum '\n  user: ' user '\n  workRoot: ' ~/work '\n  cpus: 0\n  memoryMiB: -2\n  diskGiB: 0\n"
+	zeros := "  cpus: 0\n  memoryMiB: 0\n  diskGiB: 0\n"
+	for _, tc := range []struct {
+		name, document, serialized string
+	}{
+		{"current-all-fields", "appleVM:\n" + full, "appleVM:\n" + full},
+		{"legacy-retained", "appleVZ:\n" + full, "appleVZ:\n" + full},
+		{"both-retained", "appleVM:\n" + full + "appleVZ:\n" + zeros, "appleVM:\n" + full + "appleVZ:\n" + zeros},
+		{"empty-current-retained", "appleVM: {}\nappleVZ:\n" + full, "appleVM: {}\nappleVZ:\n" + full},
+		{"null-current-omitted", "appleVM: null\nappleVZ:\n" + full, "appleVZ:\n" + full},
+		{"value-strings-omitted-zero-pointers-retained", "appleVM:\n  helperPath: ''\n  image: ''\n  imageSHA256: ''\n  user: ''\n  workRoot: ''\n" + zeros, "appleVM:\n" + zeros},
+		{"null-numeric-pointers-omitted", "appleVM:\n  cpus: null\n  memoryMiB: null\n  diskGiB: null\n", "appleVM: {}\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := isolatedConfigPath(t)
+			if err := os.WriteFile(path, []byte(tc.document), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			file, err := readFileConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var original fileConfig
+			if err := yaml.Unmarshal([]byte(tc.document), &original); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(file, original) {
+				t.Fatalf("read file=%+v, want %+v", file, original)
+			}
+			// Runtime alias selection must not normalize the persistent document.
+			cfg := Config{}
+			if err := applyFileConfig(&cfg, file); err != nil {
+				t.Fatal(err)
+			}
+			writtenPath, err := writeUserFileConfig(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if writtenPath != path {
+				t.Fatalf("writer path=%q, want %q", writtenPath, path)
+			}
+			if !reflect.DeepEqual(file, original) {
+				t.Fatal("apply/write mutated the input file config")
+			}
+			reread, err := readFileConfig(writtenPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(reread, original) {
+				t.Fatalf("round-trip file=%+v, want %+v", reread, original)
+			}
+			data, err := os.ReadFile(writtenPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var gotMap, wantMap map[string]any
+			if err := yaml.Unmarshal(data, &gotMap); err != nil {
+				t.Fatal(err)
+			}
+			if err := yaml.Unmarshal([]byte(tc.serialized), &wantMap); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(gotMap, wantMap) {
+				t.Fatalf("serialized config=%s, want semantic YAML %s", data, tc.serialized)
+			}
+			if strings.Contains(tc.serialized, "appleVM:") && strings.Contains(tc.serialized, "appleVZ:") && strings.Index(string(data), "appleVM:") > strings.Index(string(data), "appleVZ:") {
+				t.Fatal("current section should precede legacy section")
+			}
+		})
+	}
+}
+
+func TestSealosConfigWriter(t *testing.T) {
+	for _, value := range []string{"null", "{}", "{kubectl: '', kubeconfig: '', context: '', namespace: '', image: '', templateID: '', cpu: '', memory: '', storageLimit: '', network: '', sshGatewayHost: '', sshGatewayPort: '', sshUser: '', workRoot: '', nodeHost: '', deleteOnRelease: false}"} {
+		path := isolatedConfigPath(t)
+		if err := os.WriteFile(path, []byte("sealosDevbox: "+value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writeUserFileConfig(file); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := yaml.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]any{}
+		if value != "null" {
+			want["sealosDevbox"] = map[string]any{}
+		}
+		if strings.Contains(value, "false") {
+			want["sealosDevbox"] = map[string]any{"deleteOnRelease": false}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("writer=%#v want %#v", got, want)
+		}
+	}
+}
+
+func TestKubeVirtConfigWriter(t *testing.T) {
+	for _, input := range []string{"null", "{}", "{kubectl: '', virtctl: '', kubeconfig: '', context: '', namespace: '', template: '', sshUser: '', sshKey: '', sshPublicKey: '', sshPort: '', workRoot: '', deleteOnRelease: false}", "{context: '  ', workRoot: '/workspace/~/guest', deleteOnRelease: true}"} {
+		path := isolatedConfigPath(t)
+		if err := os.WriteFile(path, []byte("kubevirt: "+input), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := yaml.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := baseConfig()
+		if err := applyFileConfig(&cfg, file); err != nil {
+			t.Fatal(err)
+		}
+		after, err := yaml.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Fatal("overlay mutated writer input")
+		}
+		if _, err := writeUserFileConfig(file); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := yaml.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]any{}
+		if input != "null" {
+			want["kubevirt"] = map[string]any{}
+		}
+		if strings.Contains(input, "false") {
+			want["kubevirt"] = map[string]any{"deleteOnRelease": false}
+		}
+		if strings.Contains(input, "true") {
+			want["kubevirt"] = map[string]any{"context": "  ", "workRoot": "/workspace/~/guest", "deleteOnRelease": true}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("writer=%#v want %#v", got, want)
+		}
+	}
+}
+
+func TestAppleContainerConfigWriterAndJSON(t *testing.T) {
+	if reflect.TypeOf(fileAppleContainerConfig{}).Name() != "fileAppleContainerConfig" {
+		t.Fatal("file decoder destination name changed")
+	}
+	for _, tc := range []struct{ input, want string }{{"null", "{}"}, {"{}", "appleContainer: {}"}, {"{cliPath: '', image: '', user: '', workRoot: '', cpus: 0, memory: '', extraRunArgs: []}", "appleContainer: {}"}, {"{cliPath: '~/literal', image: '  ', cpus: -2, extraRunArgs: [' a ', a, a]}", "appleContainer: {cliPath: '~/literal', image: '  ', cpus: -2, extraRunArgs: [' a ', a, a]}"}} {
+		path := isolatedConfigPath(t)
+		if err := os.WriteFile(path, []byte("appleContainer: "+tc.input), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := yaml.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := baseConfig()
+		if err := applyFileConfig(&cfg, file); err != nil {
+			t.Fatal(err)
+		}
+		after, err := yaml.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Fatal("overlay mutated writer input")
+		}
+		if _, err := writeUserFileConfig(file); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got, want map[string]any
+		if err := yaml.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		if err := yaml.Unmarshal([]byte(tc.want), &want); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("writer=%#v want %#v", got, want)
+		}
+	}
+	cfg := baseConfig()
+	cfg.AppleContainer = AppleContainerConfig{CLIPath: "tool", Image: "image-example", User: "user-example", WorkRoot: "/workspace/example", CPUs: 3, Memory: "6g"}
+	wantView := map[string]any{"cliPath": "tool", "image": "image-example", "user": "user-example", "workRoot": "/workspace/example", "cpus": 3, "memory": "6g"}
+	if got := configShowView(cfg)["appleContainer"]; !reflect.DeepEqual(got, wantView) {
+		t.Fatalf("view=%#v", got)
+	}
+	data, err := json.Marshal(cfg.AppleContainer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	wantJSON := map[string]any{"CLIPath": "tool", "Image": "image-example", "User": "user-example", "WorkRoot": "/workspace/example", "CPUs": float64(3), "Memory": "6g", "ExtraRunArgs": nil}
+	if !reflect.DeepEqual(got, wantJSON) {
+		t.Fatalf("runtime JSON=%#v", got)
+	}
+}
+
+func TestGeneratedFileStorageWriter(t *testing.T) {
+	for _, tc := range []struct{ name, input, want string }{
+		{"missing", "{}", "{}"},
+		{"null sections", "vultr: null\ntensorlake: null\ntencentcloud: null\nrunpod: null\nlinode: null", "{}"},
+		{"empty sections", "vultr: {}\ntensorlake: {}\ntencentcloud: {}\nrunpod: {}\nlinode: {}", "vultr: {}\ntensorlake: {}\ntencentcloud: {}\nrunpod: {}\nlinode: {}"},
+		{"null values", "vultr: {region: null, vpcIds: null}\ntensorlake: {cpus: null, memoryMB: null}\ntencentcloud: {rootGB: null}\nrunpod: {diskGB: null}\nlinode: {region: null, image: null, type: null, firewall: null, sshCIDRs: null}", "vultr: {}\ntensorlake: {}\ntencentcloud: {}\nrunpod: {}\nlinode: {}"},
+		{"historical zero omission", "vultr: {region: '', vpcIds: [], sshCIDRs: []}\ntensorlake: {cpus: 0, memoryMB: 0}\ntencentcloud: {rootGB: 0}\nrunpod: {diskGB: 0}\nlinode: {region: '', image: '', type: '', firewall: '', sshCIDRs: []}", "vultr: {}\ntensorlake: {}\ntencentcloud: {}\nrunpod: {}\nlinode: {}"},
+		{"raw nonzero storage", "vultr: {region: '  ', vpcIds: [' a ', a, a]}\ntensorlake: {cpus: -0.5, memoryMB: -2}\ntencentcloud: {rootGB: 4294967296}\nrunpod: {diskGB: -3}\nlinode: {region: '  ', image: image-example, type: type-example, firewall: firewall-example, sshCIDRs: [' 192.0.2.0/24 ', 192.0.2.0/24, 192.0.2.0/24]}", "vultr: {region: '  ', vpcIds: [' a ', a, a]}\ntensorlake: {cpus: -0.5, memoryMB: -2}\ntencentcloud: {rootGB: 4294967296}\nrunpod: {diskGB: -3}\nlinode: {region: '  ', image: image-example, type: type-example, firewall: firewall-example, sshCIDRs: [' 192.0.2.0/24 ', 192.0.2.0/24, 192.0.2.0/24]}"},
+		{"negative int64 retained", "tencentcloud: {rootGB: -4}", "tencentcloud: {rootGB: -4}"},
+		{"intentional presence and clear", "blaxel: {execTimeoutSecs: 0, forgetMissing: false}\nanthropicSandboxRuntime: {settings: '', debug: false}\nmodal: {secrets: []}", "blaxel: {execTimeoutSecs: 0, forgetMissing: false}\nanthropicSandboxRuntime: {settings: '', debug: false}\nmodal: {secrets: []}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := isolatedConfigPath(t)
+			if err := os.WriteFile(path, []byte(tc.input), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			file, err := readFileConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := writeUserFileConfig(file); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got, want map[string]any
+			if err := yaml.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			if err := yaml.Unmarshal([]byte(tc.want), &want); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("stored config = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+func TestGeneratedFileStorageSetBroker(t *testing.T) {
+	path := isolatedConfigPath(t)
+	if err := os.WriteFile(path, []byte("vultr: {region: '', vpcIds: []}\nlinode: {region: '', image: '', type: '', firewall: '', sshCIDRs: []}\nmodal: {secrets: []}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if err := app.configSetBroker([]string{"--url", "https://broker.example.invalid"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := yaml.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got["vultr"], map[string]any{}) {
+		t.Errorf("vultr storage = %#v, want empty mapping", got["vultr"])
+	}
+	if !reflect.DeepEqual(got["linode"], map[string]any{}) {
+		t.Errorf("linode storage = %#v, want empty mapping", got["linode"])
+	}
+	if !reflect.DeepEqual(got["modal"], map[string]any{"secrets": []any{}}) {
+		t.Errorf("modal clear lost: %#v", got["modal"])
+	}
+	file, err := readFileConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Broker == nil || file.Broker.URL != "https://broker.example.invalid" {
+		t.Fatalf("broker update missing")
+	}
+}
+
 func TestConfigSetBrokerRegisteredMode(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_PROVIDER", "")
 
 	var stdout bytes.Buffer
@@ -352,12 +836,7 @@ func TestConfigSetBrokerRegisteredMode(t *testing.T) {
 }
 
 func TestConfigSetBrokerRegisteredModeAcceptsDirectProvider(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_PROVIDER", "")
 
 	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
@@ -378,12 +857,7 @@ func TestConfigSetBrokerRegisteredModeAcceptsDirectProvider(t *testing.T) {
 }
 
 func TestConfigSetBrokerRegisteredModeRejectsUnknownProvider(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_PROVIDER", "")
 
 	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
@@ -401,12 +875,7 @@ func TestConfigSetBrokerRegisteredModeRejectsUnknownProvider(t *testing.T) {
 }
 
 func TestConfigSetBrokerUsesPersistedRegisteredModeForProviderValidation(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_PROVIDER", "")
 	if err := os.WriteFile(configPath, []byte("broker:\n  url: https://old.example.test\n  mode: Registered\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -429,12 +898,7 @@ func TestConfigSetBrokerUsesPersistedRegisteredModeForProviderValidation(t *test
 }
 
 func TestConfigSetBrokerRejectsPersistedDirectProviderWhenSwitchingToManaged(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_PROVIDER", "")
 	original := "provider: xcp-ng\nbroker:\n  url: https://old.example.test\n  mode: registered\n  provider: xcp-ng\n"
 	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
@@ -459,12 +923,7 @@ func TestConfigSetBrokerRejectsPersistedDirectProviderWhenSwitchingToManaged(t *
 }
 
 func TestConfigSetBrokerDoesNotPromoteTopLevelProviderWhenOmitted(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_PROVIDER", "")
 	if err := os.WriteFile(configPath, []byte("provider: xcp-ng\nbroker:\n  url: https://old.example.test\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -484,12 +943,7 @@ func TestConfigSetBrokerDoesNotPromoteTopLevelProviderWhenOmitted(t *testing.T) 
 }
 
 func TestConfigShowIncludesRunPreflightTools(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	if err := os.WriteFile(configPath, []byte("run:\n  preflightTools: [node, bun]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -521,12 +975,7 @@ func TestConfigShowIncludesRunPreflightTools(t *testing.T) {
 }
 
 func TestConfigShowReportsWebVNCAgentBaseURLSupport(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_WEBVNC_AGENT_BASE_URL", "https://agent.example.test")
 	if err := os.WriteFile(configPath, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -549,12 +998,7 @@ func TestConfigShowReportsWebVNCAgentBaseURLSupport(t *testing.T) {
 }
 
 func TestConfigShowExportsControllerProviderContract(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	config := "provider: external\nbroker:\n  url: https://broker-user:broker-pass@broker.example.test/root/?token=query-secret#fragment-secret\n  mode: registered\nexternal:\n  command: provider-a\n  capabilities:\n    idempotentLeaseId: true\n"
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
@@ -584,12 +1028,7 @@ func TestConfigShowExportsControllerProviderContract(t *testing.T) {
 }
 
 func TestConfigShowExportsRawControllerProviderIdentityContract(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	config := "provider: external\nbroker:\n  url: https://broker-user:broker-pass@broker.example.test/root/?token=query-secret#fragment-secret\n  mode: registered\nexternal:\n  command: provider-a\n  capabilities:\n    idempotentLeaseId: true\n"
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
@@ -614,12 +1053,7 @@ func TestConfigShowExportsRawControllerProviderIdentityContract(t *testing.T) {
 }
 
 func TestConfigShowRedactsCloudflareDynamicWorkers(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	if err := os.WriteFile(configPath, []byte(`provider: aws
 cloudflareDynamicWorkers:
   loaderUrl: https://user:pass@loader.example.test?token=query-secret#fragment-secret
@@ -670,12 +1104,7 @@ cloudflareDynamicWorkers:
 }
 
 func TestConfigSetBrokerRejectsDirectOnlyProvider(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 
 	var stdout bytes.Buffer
 	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
@@ -689,12 +1118,7 @@ func TestConfigSetBrokerRejectsDirectOnlyProvider(t *testing.T) {
 }
 
 func TestConfigShowIncludesJobHydrateGitHubRunner(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	if err := os.WriteFile(configPath, []byte("jobs:\n  smoke:\n    architecture: arm64\n    label: nightly smoke\n    artifactGlobs:\n      - reports/**\n    requiredArtifacts:\n      - reports/summary.json\n    hydrate:\n      actions: true\n      githubRunner: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -730,12 +1154,7 @@ func TestConfigShowIncludesJobHydrateGitHubRunner(t *testing.T) {
 }
 
 func TestConfigShowRedactsCloudflareSandbox(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	if err := os.WriteFile(configPath, []byte(`provider: aws
 cloudflareSandbox:
   url: https://user:pass@bridge.example.test?token=query-secret#fragment-secret
@@ -789,12 +1208,7 @@ cloudflareSandbox:
 }
 
 func TestConfigShowIncludesCloudflareWithoutSecret(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_CLOUDFLARE_RUNNER_TOKEN", "cloudflare-secret-token")
 	if err := os.WriteFile(configPath, []byte("cloudflare:\n  apiUrl: https://cloudflare.example.test\n  workdir: /workspace/test\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -836,12 +1250,7 @@ func TestConfigShowIncludesCloudflareWithoutSecret(t *testing.T) {
 }
 
 func TestConfigShowIncludesBlaxelWithoutSecret(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_BLAXEL_API_KEY", "blaxel-secret-token")
 	t.Setenv("CRABBOX_BLAXEL_API_URL", "https://api.blaxel.example.test")
 	if err := os.WriteFile(configPath, []byte(strings.Join([]string{
@@ -914,12 +1323,7 @@ func TestConfigShowIncludesBlaxelWithoutSecret(t *testing.T) {
 }
 
 func TestConfigShowIncludesNomadWithoutSecret(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("NOMAD_TOKEN", "nomad-secret-token")
 	t.Setenv("CRABBOX_NOMAD_DATACENTERS", "dc1,dc2")
 	if err := os.WriteFile(configPath, []byte(strings.Join([]string{
@@ -1003,12 +1407,7 @@ func TestConfigShowIncludesNomadWithoutSecret(t *testing.T) {
 }
 
 func TestConfigShowIncludesSuperserveWithoutSecret(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "superserve-secret-token")
 	if err := os.WriteFile(configPath, []byte("superserve:\n  baseUrl: https://user:base-url-secret@superserve.example.test\n  template: superserve/custom\n  workdir: /workspace/test\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1051,12 +1450,7 @@ func TestConfigShowIncludesSuperserveWithoutSecret(t *testing.T) {
 }
 
 func TestConfigShowIncludesDigitalOceanProviderConfig(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	if err := os.WriteFile(configPath, []byte("provider: digitalocean\ndigitalocean:\n  region: sfo3\n  image: ubuntu-24-04-x64\n  vpc: vpc-123\n  sshCIDRs: [203.0.113.0/24, 2001:db8::/64]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1104,12 +1498,7 @@ func TestConfigShowIncludesDigitalOceanProviderConfig(t *testing.T) {
 }
 
 func TestConfigShowIncludesVultrProviderConfigWithoutSecret(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("VULTR_API_KEY", "vultr-secret-token")
 	if err := os.WriteFile(configPath, []byte("provider: vultr\nvultr:\n  region: sjc\n  os: \"2284\"\n  image: image-123\n  snapshot: snapshot-123\n  firewallGroup: fw-123\n  vpcIds: [vpc-a, vpc-b]\n  sshCIDRs: [203.0.113.0/24, 2001:db8::/64]\n  userScheme: limited\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1172,12 +1561,7 @@ func TestConfigShowIncludesVultrProviderConfigWithoutSecret(t *testing.T) {
 }
 
 func TestConfigShowIncludesScalewayProviderConfigWithoutSecrets(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("SCW_ACCESS_KEY", "redaction-fixture-access")
 	t.Setenv("SCW_SECRET_KEY", "redaction-fixture-private")
 	if err := os.WriteFile(configPath, []byte("provider: scaleway\nscaleway:\n  region: fr-par\n  zone: fr-par-1\n  image: ubuntu_noble\n  type: DEV1-S\n  projectId: project-123\n  organizationId: org-123\n  securityGroup: sg-123\n  sshCIDRs: [203.0.113.0/24, 2001:db8::/64]\n"), 0o600); err != nil {
@@ -1261,12 +1645,7 @@ func TestConfigShowScalewayPartialAuth(t *testing.T) {
 }
 
 func TestConfigShowIncludesHostingerWithoutSecret(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("HOSTINGER_API_TOKEN", "hostinger-secret-token")
 	if err := os.WriteFile(configPath, []byte(`hostinger:
   apiUrl: https://hostinger.example.test
@@ -1337,12 +1716,7 @@ func TestConfigShowIncludesHostingerWithoutSecret(t *testing.T) {
 }
 
 func TestConfigShowIncludesLambdaWithoutSecret(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("LAMBDA_API_KEY", "lambda-secret-token")
 	if err := os.WriteFile(configPath, []byte(`provider: lambda
 lambda:
@@ -1409,12 +1783,7 @@ lambda:
 }
 
 func TestConfigShowIncludesNvidiaBrevWithoutSecretSurface(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_NVIDIA_BREV_TOKEN", "ignored-brev-secret")
 	if err := os.WriteFile(configPath, []byte(`nvidiaBrev:
   cli: /usr/local/bin/brev
@@ -1503,12 +1872,7 @@ func TestConfigShowIncludesNvidiaBrevWithoutSecretSurface(t *testing.T) {
 }
 
 func TestConfigShowIncludesVastWithoutSecretSurface(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_VAST_API_KEY", "vast-redaction-fixture-secret")
 	if err := os.WriteFile(configPath, []byte(`provider: vast
 ssh:
@@ -1600,12 +1964,7 @@ vast:
 }
 
 func TestConfigShowIncludesNebiusWithoutSecretSurface(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_NEBIUS_PROFILE", "env-profile")
 	if err := os.WriteFile(configPath, []byte(`provider: nebius
 nebius:
@@ -1732,13 +2091,199 @@ func TestConfigShowAppliesHostingerPerUserWorkRootDefault(t *testing.T) {
 	}
 }
 
-func TestConfigShowPreservesExplicitDigitalOceanSSHBaseValues(t *testing.T) {
+func TestConfigShowSSHDefaults(t *testing.T) {
 	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	type sshValues struct{ user, port string }
+	for _, tc := range []struct {
+		name, provider     string
+		source             providerSelectionSource
+		user, port         string
+		marked             *sshValues
+		fallback           []string
+		fallbackExplicit   bool
+		wantUser, wantPort string
+		wantFallback       []string
+	}{
+		{
+			name: "digitalocean/empty", provider: "digitalocean",
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "digitalocean/base compiled default", provider: "digitalocean", source: providerSelectionCompiledDefault,
+			user: "crabbox", port: "2222", fallback: []string{"22", "2201"}, fallbackExplicit: true,
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "linode/empty", provider: "linode", fallback: []string{},
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "linode/base compiled default", provider: "linode", source: providerSelectionCompiledDefault,
+			user: "crabbox", port: "2222", fallback: []string{"22", "2201"},
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "vultr/empty", provider: "vultr", fallback: []string{"22", "2201"},
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "vultr/base compiled default", provider: "vultr", source: providerSelectionCompiledDefault,
+			user: "crabbox", port: "2222", fallback: []string{}, fallbackExplicit: true,
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "lambda/empty with fallback backing data", provider: "lambda",
+			fallback: []string{"2201", "2202"}[:0], fallbackExplicit: true,
+			wantUser: "ubuntu", wantPort: "22",
+		},
+		{
+			name: "lambda/base compiled default", provider: "lambda", source: providerSelectionCompiledDefault,
+			user: "crabbox", port: "2222", fallback: []string{"22", "2201"}, fallbackExplicit: true,
+			wantUser: "ubuntu", wantPort: "22",
+		},
+		{
+			name: "scaleway/empty with explicit nil fallback", provider: "scaleway", fallbackExplicit: true,
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "scaleway/base compiled default", provider: "scaleway", source: providerSelectionCompiledDefault,
+			user: "crabbox", port: "2222", fallback: []string{"22", "2201"},
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "tencentcloud/empty", provider: "tencentcloud", fallback: []string{"22", "2201"},
+			wantUser: "ubuntu", wantPort: "22",
+		},
+		{
+			name: "tencentcloud/base compiled default", provider: "tencentcloud", source: providerSelectionCompiledDefault,
+			user: "crabbox", port: "2222", fallback: []string{},
+			wantUser: "ubuntu", wantPort: "22",
+		},
+		{
+			name: "digitalocean/custom user with base port", provider: "digitalocean",
+			user: "operator", port: "2222", fallback: []string{"2201"},
+			wantUser: "operator", wantPort: "22",
+		},
+		{
+			name: "linode/base user with custom port", provider: "linode",
+			user: "crabbox", port: "2200", wantUser: "root", wantPort: "2200",
+		},
+		{
+			name: "lambda/padded base values", provider: "lambda",
+			user: " crabbox ", port: " 2222 ", fallback: []string{"2201"},
+			wantUser: " crabbox ", wantPort: " 2222 ",
+		},
+		{
+			name: "vultr/whitespace values", provider: "vultr",
+			user: " \t", port: " ", wantUser: " \t", wantPort: " ",
+		},
+		{
+			name: "scaleway/user marker only", provider: "scaleway",
+			user: "crabbox", port: "2222", marked: &sshValues{user: "crabbox"},
+			wantUser: "crabbox", wantPort: "22",
+		},
+		{
+			name: "tencentcloud/port marker only", provider: "tencentcloud",
+			user: "crabbox", port: "2222", marked: &sshValues{port: "2222"},
+			wantUser: "ubuntu", wantPort: "2222",
+		},
+		{
+			name: "linode/both marked then base values", provider: "linode",
+			user: "crabbox", port: "2222", marked: &sshValues{user: "saved-user", port: "2200"},
+			fallback: []string{"22", "2201"}, fallbackExplicit: true,
+			wantUser: "crabbox", wantPort: "2222",
+		},
+		{
+			name: "vultr/both marked then cleared", provider: "vultr",
+			marked: &sshValues{user: "saved-user", port: "2200"}, fallback: []string{"2201"},
+			wantUser: "", wantPort: "",
+		},
+		{
+			name: "lambda/both marked then changed", provider: "lambda",
+			user: "current-user", port: "2202", marked: &sshValues{user: "saved-user", port: "2200"},
+			fallback: []string{"2203"}, fallbackExplicit: true,
+			wantUser: "current-user", wantPort: "2202",
+		},
+		{
+			name: "digitalocean/empty snapshots are not explicit", provider: "digitalocean",
+			user: "crabbox", port: "2222", marked: &sshValues{},
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "tencentcloud/whitespace snapshots are explicit", provider: "tencentcloud",
+			marked:   &sshValues{user: " ", port: "\t"},
+			wantUser: "", wantPort: "",
+		},
+		{
+			name: "scaleway/actionable selection", provider: "scaleway", source: providerSelectionFlag,
+			fallback: []string{"2201"}, wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "outside cohort/hetzner", provider: "hetzner",
+			fallback: []string{"22", "2201"}, wantFallback: []string{"22", "2201"},
+			wantUser: "", wantPort: "",
+		},
+		{
+			name: "outside cohort/padded provider", provider: " digitalocean ",
+			user: "crabbox", port: "2222", fallback: []string{"2201"},
+			wantUser: "crabbox", wantPort: "2222", wantFallback: []string{"2201"},
+		},
+		{
+			name: "outside cohort/alias", provider: "do",
+			fallback: []string{}, wantFallback: []string{},
+			wantUser: "", wantPort: "",
+		},
+		{
+			name: "outside cohort/case variant", provider: "Lambda",
+			user: "crabbox", port: "2222", fallback: []string{"2201"},
+			wantUser: "crabbox", wantPort: "2222", wantFallback: []string{"2201"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{
+				Provider: tc.provider, providerSelectionSource: tc.source,
+				TargetOS: "windows", WindowsMode: "wsl", Class: "beast", WorkRoot: "/srv/config-show",
+				SSHFallbackPorts: tc.fallback, sshFallbackPortsExplicit: tc.fallbackExplicit,
+			}
+			// Keep the unrelated work-root preprojections stable for the full-config comparison.
+			cfg.Hostinger.WorkRoot = "/srv/hostinger"
+			cfg.Vast.WorkRoot = "/srv/vast"
+			cfg.NvidiaBrev.WorkRoot = "/srv/brev"
+			MarkWorkRootExplicit(&cfg)
+			if tc.marked != nil {
+				cfg.SSHUser, cfg.SSHPort = tc.marked.user, tc.marked.port
+				MarkSSHUserExplicit(&cfg)
+				MarkSSHPortExplicit(&cfg)
+			}
+			cfg.SSHUser, cfg.SSHPort = tc.user, tc.port
+			if tc.fallbackExplicit {
+				cfg.explicitSSHFallbackPorts = []string{"2205", "2206"}
+			}
+			before := cfg
+			before.SSHFallbackPorts = slices.Clone(cfg.SSHFallbackPorts)
+			before.explicitSSHFallbackPorts = slices.Clone(cfg.explicitSSHFallbackPorts)
+			fallbackBacking := cfg.SSHFallbackPorts[:cap(cfg.SSHFallbackPorts)]
+			beforeBacking := slices.Clone(fallbackBacking)
+			want := before
+			want.SSHUser, want.SSHPort, want.SSHFallbackPorts = tc.wantUser, tc.wantPort, tc.wantFallback
+
+			got := effectiveConfigForShow(cfg)
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("display config differs from expected SSH-only projection: user=%q port=%q fallbacks=%#v; want user=%q port=%q fallbacks=%#v",
+					got.SSHUser, got.SSHPort, got.SSHFallbackPorts, tc.wantUser, tc.wantPort, tc.wantFallback)
+			}
+			if !reflect.DeepEqual(cfg, before) {
+				t.Error("display projection changed the input config or marker snapshots")
+			}
+			if !reflect.DeepEqual(fallbackBacking, beforeBacking) {
+				t.Errorf("display projection changed fallback backing data: got %#v, want %#v", fallbackBacking, beforeBacking)
+			}
+		})
+	}
+}
+
+func TestConfigShowPreservesExplicitDigitalOceanSSHBaseValues(t *testing.T) {
+	configPath := isolatedConfigPath(t)
 	if err := os.WriteFile(configPath, []byte("provider: digitalocean\nssh:\n  user: crabbox\n  port: \"2222\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1761,12 +2306,7 @@ func TestConfigShowPreservesExplicitDigitalOceanSSHBaseValues(t *testing.T) {
 }
 
 func TestConfigShowIncludesMorphWithoutSecret(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("MORPH_API_KEY", "morph-secret-token")
 	if err := os.WriteFile(configPath, []byte("morph:\n  apiUrl: https://morph.example.test\n  snapshot: snapshot_123\n  sshGatewayHost: ssh.morph.example.test\n  workRoot: /tmp/morph\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1812,12 +2352,7 @@ func TestConfigShowIncludesMorphWithoutSecret(t *testing.T) {
 }
 
 func TestConfigShowSurfacesUnsupportedAzureDynamicSessionsPool(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	if err := os.WriteFile(configPath, []byte("azureDynamicSessions:\n  endpoint: https://pool.env.eastus.azurecontainerapps.io\n  pool: legacy-pool\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1849,12 +2384,7 @@ func TestConfigShowSurfacesUnsupportedAzureDynamicSessionsPool(t *testing.T) {
 }
 
 func TestConfigShowIncludesSyncInclude(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	if err := os.WriteFile(configPath, []byte("sync:\n  include:\n    - src\n    - scripts\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1886,12 +2416,7 @@ func TestConfigShowIncludesSyncInclude(t *testing.T) {
 }
 
 func TestConfigShowIncludesXCPNgWithoutSecret(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	config := []byte(`xcpNg:
   apiUrl: https://xcp-ng.example.test
   username: root
@@ -1958,12 +2483,7 @@ func TestConfigShowIncludesXCPNgWithoutSecret(t *testing.T) {
 }
 
 func TestConfigShowRedactsXCPNgAPIURLUserinfo(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	config := []byte(`xcpNg:
   apiUrl: https://pool-user:pool-pass@xcp-ng.example.test/path?token=query-secret#fragment-secret
   username: root
@@ -2013,12 +2533,7 @@ func TestConfigShowRedactsXCPNgAPIURLUserinfo(t *testing.T) {
 }
 
 func TestConfigShowRedactsProxmoxAPIURLUserinfo(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	config := []byte(`proxmox:
   apiUrl: https://proxy-user:proxy-pass@pve.example.test:8006/api2/json?view=1
   tokenId: crabbox@pve!ci
@@ -2067,12 +2582,7 @@ func TestConfigShowRedactsProxmoxAPIURLUserinfo(t *testing.T) {
 }
 
 func TestConfigShowRedactsSchemeLessXCPNgAPIURLUserinfo(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	config := []byte(`xcpNg:
   apiUrl: pool-user:pool-pass@xcp-ng.example.test/path?view=1
   username: root
@@ -2437,12 +2947,7 @@ func TestRoutingSafeURLRedactsUserinfoOnMalformedURL(t *testing.T) {
 }
 
 func TestConfigShowIncludesDockerSandboxConfig(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_PROVIDER", "")
 	if err := os.WriteFile(configPath, []byte(`provider: docker-sandbox
 dockerSandbox:
@@ -2509,12 +3014,7 @@ dockerSandbox:
 }
 
 func TestConfigShowRejectsInvalidDockerSandboxCPUConfig(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_PROVIDER", "docker-sandbox")
 	if err := os.WriteFile(configPath, []byte("profile: default\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -2593,5 +3093,266 @@ func TestConfigShowArchitectureExplicitnessOffline(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestConfigShowLocalContainerSettingsOffline(t *testing.T) {
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const configured = `localContainer:
+  runtime: docker
+  image: debian:bookworm
+  user: test-runner
+  workRoot: /work/custom
+  cpus: 3
+  memory: 6g
+  network: none
+  dockerSocket: true
+`
+	for _, tc := range []struct {
+		name, yaml, root, arch string
+		env, args              []string
+		local                  map[string]any
+		socketDefault          bool
+	}{
+		{name: "defaults", yaml: "provider: local-container\n"},
+		{name: "issue reproduction", yaml: "provider: local-container\nprofile: local-container-config-proof\n" + configured, root: "/work/custom", local: map[string]any{
+			"image": "debian:bookworm", "user": "test-runner", "cpus": float64(3), "memory": "6g", "network": "none", "dockerSocket": true,
+		}},
+		{name: "environment overrides file", yaml: "provider: local-container\n" + configured, root: "/work/env", env: []string{
+			"CRABBOX_LOCAL_CONTAINER_RUNTIME=podman", "CRABBOX_LOCAL_CONTAINER_IMAGE=example-org/custom:latest",
+			"CRABBOX_LOCAL_CONTAINER_USER=env-runner", "CRABBOX_LOCAL_CONTAINER_WORK_ROOT=/work/env",
+			"CRABBOX_LOCAL_CONTAINER_CPUS=4", "CRABBOX_LOCAL_CONTAINER_MEMORY=8g", "CRABBOX_LOCAL_CONTAINER_NETWORK=bridge",
+			"CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET=false",
+		}, local: map[string]any{"runtime": "podman", "image": "example-org/custom:latest", "user": "env-runner", "cpus": float64(4), "memory": "8g"}},
+		{name: "environment zero false and empty", yaml: "provider: local-container\n" + configured, root: "/work/custom", env: []string{
+			"CRABBOX_LOCAL_CONTAINER_RUNTIME=", "CRABBOX_LOCAL_CONTAINER_IMAGE=", "CRABBOX_LOCAL_CONTAINER_USER=",
+			"CRABBOX_LOCAL_CONTAINER_WORK_ROOT=", "CRABBOX_LOCAL_CONTAINER_CPUS=0", "CRABBOX_LOCAL_CONTAINER_MEMORY=",
+			"CRABBOX_LOCAL_CONTAINER_NETWORK=", "CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET=false",
+		}, local: map[string]any{"image": "debian:bookworm", "user": "test-runner", "memory": "6g", "network": "none"}},
+		{name: "file zero false and empty", yaml: "provider: local-container\nlocalContainer:\n  cpus: 0\n  memory: ''\n  dockerSocket: false\n"},
+		{name: "generic file root", yaml: "provider: local-container\nworkRoot: /work/generic\n", root: "/work/generic"},
+		{name: "generic environment root", yaml: "provider: local-container\nworkRoot: /work/file\n", env: []string{"CRABBOX_WORK_ROOT=/work/env"}, root: "/work/env"},
+		{name: "provider file beats generic environment", yaml: "provider: local-container\nlocalContainer:\n  workRoot: /work/provider\n", env: []string{"CRABBOX_WORK_ROOT=/work/env"}, root: "/work/provider"},
+		{name: "provider environment beats file", yaml: "provider: local-container\nworkRoot: /work/generic\nlocalContainer:\n  workRoot: /work/file\n", env: []string{"CRABBOX_LOCAL_CONTAINER_WORK_ROOT=/work/provider"}, root: "/work/provider"},
+		{name: "socket default root", yaml: "provider: local-container\nlocalContainer:\n  dockerSocket: true\n", socketDefault: true, local: map[string]any{"dockerSocket": true}},
+		{name: "socket explicit generic default", yaml: "provider: local-container\nworkRoot: /work/crabbox\nlocalContainer:\n  dockerSocket: true\n", local: map[string]any{"dockerSocket": true}},
+		{name: "socket explicit provider default", yaml: "provider: local-container\nlocalContainer:\n  workRoot: /work/crabbox\n  dockerSocket: true\n", local: map[string]any{"dockerSocket": true}},
+		{name: "socket generic custom root", yaml: "provider: local-container\nworkRoot: /work/generic\nlocalContainer:\n  dockerSocket: true\n", root: "/work/generic", local: map[string]any{"dockerSocket": true}},
+		{name: "socket environment explicit default", yaml: "provider: local-container\nlocalContainer:\n  dockerSocket: true\n", env: []string{"CRABBOX_LOCAL_CONTAINER_WORK_ROOT=/work/crabbox"}, local: map[string]any{"dockerSocket": true}},
+		{name: "no provider selected", local: map[string]any{"workRoot": ""}, arch: "amd64"},
+		{name: "other provider selected", yaml: "provider: hetzner\nworkRoot: /work/other\nlocalContainer:\n  workRoot: /work/local\n  dockerSocket: true\n", root: "/work/other", arch: "amd64", local: map[string]any{"workRoot": "/work/local", "dockerSocket": true}},
+		{name: "provider flag override", yaml: "provider: hetzner\nlocalContainer:\n  workRoot: /work/local\n", args: []string{"--provider", "local-container"}, root: "/work/local"},
+		{name: "explicit amd64", yaml: "provider: local-container\narchitecture: amd64\n", arch: "amd64"},
+		{name: "explicit arm64", yaml: "provider: local-container\narchitecture: arm64\n", arch: "arm64"},
+		{name: "environment architecture", yaml: "provider: local-container\narchitecture: arm64\n", env: []string{"CRABBOX_ARCH=amd64"}, arch: "amd64"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			home := filepath.Join(root, "home")
+			configPath := filepath.Join(root, "config.yaml")
+			if err := os.Mkdir(home, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, []byte(tc.yaml), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			wantRoot := tc.root
+			if wantRoot == "" {
+				wantRoot = "/work/crabbox"
+			}
+			cache := filepath.Join(root, "cache")
+			if tc.socketDefault && runtime.GOOS != "windows" {
+				if runtime.GOOS == "darwin" {
+					cache = filepath.Join(home, "Library", "Caches")
+				}
+				wantRoot = filepath.Join(cache, "crabbox", "local-container-work")
+			}
+			want := map[string]any{
+				"runtime": "docker", "image": baseConfig().LocalContainer.Image, "user": "crabbox", "workRoot": wantRoot,
+				"cpus": float64(0), "memory": "", "network": "bridge", "dockerSocket": false,
+			}
+			for key, value := range tc.local {
+				want[key] = value
+			}
+			arch := tc.arch
+			if arch == "" {
+				arch = "native"
+			}
+			explicit := strings.Contains(tc.yaml, "architecture:")
+			var baseline [2]string
+			for _, tools := range []string{"unavailable", "podman", "docker and podman"} {
+				binDir := filepath.Join(root, tools)
+				if err := os.Mkdir(binDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				trap := filepath.Join(root, "runtime-executed")
+				if runtime.GOOS != "windows" && tools != "unavailable" {
+					for _, name := range strings.Fields(tools) {
+						if name == "and" {
+							continue
+						}
+						if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\nprintf invoked > \"$RUNTIME_TRAP\"\nexit 97\n"), 0o700); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				for format := range 2 {
+					args := append([]string{"config", "show"}, tc.args...)
+					if format == 1 {
+						args = append(args, "--json")
+					}
+					cmd := exec.Command(binary, args...)
+					cmd.Dir = root
+					cmd.Env = append([]string{
+						"HOME=" + home, "USERPROFILE=" + home, "APPDATA=" + root, "LOCALAPPDATA=" + cache,
+						"XDG_CONFIG_HOME=" + root, "XDG_CACHE_HOME=" + cache, "XDG_STATE_HOME=" + root,
+						"CRABBOX_CONFIG=" + configPath, "PATH=" + binDir, "RUNTIME_TRAP=" + trap,
+					}, tc.env...)
+					var stderr bytes.Buffer
+					cmd.Stderr = &stderr
+					out, err := cmd.Output()
+					if err != nil || stderr.Len() != 0 {
+						t.Fatalf("config show format=%d tools=%s: %v stderr=%s", format, tools, err, &stderr)
+					}
+					if tools == "unavailable" {
+						baseline[format] = string(out)
+					} else if string(out) != baseline[format] {
+						t.Errorf("format=%d changed when %s became discoverable", format, tools)
+					}
+					if format == 1 {
+						var view map[string]any
+						if err := json.Unmarshal(out, &view); err != nil {
+							t.Fatal(err)
+						}
+						if !reflect.DeepEqual(view["localContainer"], want) {
+							t.Errorf("localContainer=%#v, want %#v", view["localContainer"], want)
+						}
+						if view["workRoot"] != wantRoot {
+							t.Errorf("workRoot=%v, want %s", view["workRoot"], wantRoot)
+						}
+						if view["architecture"] != arch || view["architectureExplicit"] != explicit {
+							t.Errorf("architecture=%v explicit=%v, want %s/%t", view["architecture"], view["architectureExplicit"], arch, explicit)
+						}
+					} else {
+						wantLine := fmt.Sprintf("local_container runtime=%s image=%s user=%s work_root=%s cpus=%g memory=%s network=%s docker_socket=%t\n",
+							want["runtime"], want["image"], want["user"], blank(want["workRoot"].(string), "-"), want["cpus"], blank(want["memory"].(string), "-"), want["network"], want["dockerSocket"])
+						if !strings.Contains(string(out), wantLine) {
+							t.Errorf("missing text line %q", wantLine)
+						}
+						if !strings.Contains(string(out), fmt.Sprintf("arch=%s architecture_explicit=%t", arch, explicit)) {
+							t.Errorf("missing architecture %s/%t", arch, explicit)
+						}
+					}
+				}
+				if _, err := os.Stat(trap); !os.IsNotExist(err) {
+					t.Fatalf("runtime trap executed: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestConfigShowLocalContainerExcludesInternalFields(t *testing.T) {
+	cfg := baseConfig()
+	cfg.LocalContainer.Volumes = []string{"/synthetic-private-volume:/mnt/data"}
+	cfg.LocalContainer.CheckpointMetadata = map[string]string{"fork_name": "synthetic-private-checkpoint"}
+	cfg.CoordToken = "synthetic-private-token"
+	cfg.Coordinator = "https://broker.example.test/api"
+	view := configShowView(cfg)
+	local, ok := view["localContainer"].(map[string]any)
+	if !ok || len(local) != 8 {
+		t.Fatalf("public localContainer fields=%#v", local)
+	}
+	data, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text bytes.Buffer
+	writeConfigShowText(&text, cfg)
+	for name, output := range map[string]string{"json": string(data), "text": text.String()} {
+		if strings.Contains(output, "synthetic-private") || strings.Contains(strings.ToLower(output), "checkpointmetadata") {
+			t.Errorf("%s exposed internal fields or credentials", name)
+		}
+		if !strings.Contains(output, "broker.example.test/api") || !strings.Contains(output, "configured") {
+			t.Errorf("%s lost safe endpoint or token status", name)
+		}
+	}
+}
+
+func TestLambdaBindingFileRoundTrip(t *testing.T) {
+	path := isolatedConfigPath(t)
+	for _, tc := range []struct {
+		input, want string
+		nilLambda   bool
+	}{{"{}\n", "{}\n", true}, {"lambda: null\n", "{}\n", true}, {"lambda: {}\n", "lambda: {}\n", false}, {"lambda: {sshCIDRs: [], filesystemNames: [], filesystemMounts: []}\n", "lambda: {}\n", false}, {"lambda:\n  region: west\n  type: gpu\n  image: image\n  imageFamily: family\n  firewallRuleset: rule\n  sshCIDRs: [cidr]\n  filesystemNames: [data]\n  filesystemMounts:\n    - name: data\n      mountPath: /mnt/data\n    - {}\n", "lambda:\n    region: west\n    type: gpu\n    image: image\n    imageFamily: family\n    firewallRuleset: rule\n    sshCIDRs:\n        - cidr\n    filesystemNames:\n        - data\n    filesystemMounts:\n        - name: data\n          mountPath: /mnt/data\n        - {}\n", false}} {
+		if err := os.WriteFile(path, []byte(tc.input), 0600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (file.Lambda == nil) != tc.nilLambda {
+			t.Fatalf("decoded lambda=%#v", file.Lambda)
+		}
+		if tc.input == "lambda: {}\n" && !reflect.DeepEqual(*file.Lambda, fileLambdaConfig{}) {
+			t.Fatal("decoded file initialized runtime defaults")
+		}
+		written, err := writeUserFileConfig(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if written != path {
+			t.Fatalf("write path=%q", written)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(data) != tc.want {
+			t.Fatalf("YAML got=%q want=%q", data, tc.want)
+		}
+		again, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tc.input != "lambda: {sshCIDRs: [], filesystemNames: [], filesystemMounts: []}\n" && !reflect.DeepEqual(again, file) {
+			t.Fatal("roundtrip fields changed")
+		}
+	}
+	for _, tc := range []struct{ input, detail string }{{"lambda: wrong\n", "line 1: cannot unmarshal !!str `wrong` into cli.fileLambdaConfig"}, {"lambda: [wrong]\n", "line 1: cannot unmarshal !!seq into cli.fileLambdaConfig"}} {
+		if err := os.WriteFile(path, []byte(tc.input), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := readFileConfig(path)
+		want := "parse config " + path + ": yaml: unmarshal errors:\n  " + tc.detail
+		if err == nil || err.Error() != want {
+			t.Fatalf("diagnostic=%v want=%q", err, want)
+		}
+	}
+}
+
+func TestLambdaBindingJSON(t *testing.T) {
+	isolatedConfigPath(t)
+	cfg := baseConfig()
+	cfg.Lambda = LambdaConfig{Region: "west", Type: "gpu", Image: "image", ImageFamily: "family", FirewallRuleset: "rule", SSHCIDRs: []string{"cidr"}, FilesystemNames: []string{"data"}, FilesystemMounts: []LambdaFilesystemMount{{Name: "data", MountPath: "/mnt/data"}, {}}}
+	data, err := json.Marshal(cfg.Lambda)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"Region":"west","Type":"gpu","Image":"image","ImageFamily":"family","FirewallRuleset":"rule","SSHCIDRs":["cidr"],"FilesystemNames":["data"],"FilesystemMounts":[{"name":"data","mountPath":"/mnt/data"},{}]}`
+	if string(data) != want {
+		t.Fatalf("runtime JSON=%s", data)
+	}
+	data, err = json.Marshal(configShowView(cfg)["lambda"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = `{"auth":"missing","filesystemMounts":[{"name":"data","mountPath":"/mnt/data"},{}],"filesystemNames":["data"],"firewallRuleset":"rule","image":"image","imageFamily":"family","region":"west","sshCIDRs":["cidr"],"type":"gpu"}`
+	if string(data) != want {
+		t.Fatalf("config-show JSON=%s", data)
 	}
 }

@@ -16,7 +16,7 @@ import (
 const daytonaActivityRequestTimeout = 10 * time.Second
 
 func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo Repo, keep, reclaim bool, requestedSlug string) (sandbox *daytona.Sandbox, leaseID, slug string, err error) {
-	if strings.TrimSpace(b.cfg.Daytona.Snapshot) == "" {
+	if strings.TrimSpace(b.cfg.Daytona.Snapshot) == "" && !classSnapshotRequested(b.cfg) {
 		return nil, "", "", exit(2, "provider=daytona requires --daytona-snapshot or daytona.snapshot")
 	}
 	if b.cfg.TTL <= 0 || b.cfg.IdleTimeout <= 0 || durationMinutesCeil(b.cfg.TTL) > math.MaxInt32 || durationMinutesCeil(b.cfg.IdleTimeout) > math.MaxInt32 {
@@ -26,17 +26,25 @@ func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo Rep
 	if err != nil {
 		return nil, "", "", err
 	}
+	cfg := b.cfg
+	snapshot, err := selectClassSnapshot(ctx, client, cfg)
+	if err != nil {
+		return nil, "", "", err
+	}
 	existing, err := client.ListCrabboxSandboxes(ctx)
 	if err != nil {
 		return nil, "", "", daytonaError("list sandboxes", err)
 	}
 	leaseID = newLeaseID()
-	slug, err = allocateDirectLeaseSlug(leaseID, requestedSlug, daytonaSandboxesToServers(existing, b.cfg))
+	slug, err = allocateDirectLeaseSlug(leaseID, requestedSlug, daytonaSandboxesToServers(existing))
 	if err != nil {
 		return nil, "", "", err
 	}
-	cfg := b.cfg
-	cfg.ServerType, cfg.WorkRoot, cfg.SSHUser, cfg.SSHPort = "snapshot", daytonaWorkRoot(cfg), daytonaUser(cfg), "22"
+	cfg.ServerType, cfg.WorkRoot, cfg.SSHUser, cfg.SSHPort = (Provider{}).ServerTypeForConfig(cfg), daytonaWorkRoot(cfg), daytonaUser(cfg), "22"
+	if snapshot != nil {
+		// Carry the resolved selection; setting Snapshot changes configuration precedence.
+		cfg.Daytona.Snapshot, cfg.ServerType = snapshot.GetId(), snapshot.GetId()
+	}
 	labels := directLeaseLabels(cfg, leaseID, slug, daytonaProvider, "", keep, time.Now().UTC())
 	labels["lease_name"], labels["work_root"] = leaseProviderName(leaseID, slug), cfg.WorkRoot
 	body := daytona.NewCreateSandbox()
@@ -58,7 +66,8 @@ func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo Rep
 		if createErr == nil {
 			createErr = errors.New("create response missing sandbox id")
 		}
-		// Never retry allocation after an ambiguous response; recover only this attempt.
+		// Even HTTP 400 can follow allocation when native startup fails.
+		// Never retry the POST; recover only this attempt before cleanup.
 		recoveryCtx, cancel := daytonaCleanupContext()
 		defer cancel()
 		var recoveryErr error
@@ -81,6 +90,9 @@ func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo Rep
 	}
 	sandbox, err = waitForDaytonaReady(ctx, client, resourceID, 5*time.Minute)
 	if err != nil {
+		return nil, leaseID, slug, err
+	}
+	if err = validateClassSandbox(sandbox, snapshot); err != nil {
 		return nil, leaseID, slug, err
 	}
 	labels["state"], labels["last_touched_at"] = "ready", leaseLabelTime(time.Now().UTC())
@@ -168,6 +180,18 @@ func daytonaActivityInterval(idle time.Duration) time.Duration {
 		interval = time.Second
 	}
 	return interval
+}
+
+func (b *daytonaLeaseBackend) BeginSSHRunActivity(ctx context.Context, lease LeaseTarget) (func(), error) {
+	client, err := newDaytonaClient(b.cfg, b.rt)
+	if err != nil {
+		return nil, err
+	}
+	sandbox, err := client.GetSandbox(ctx, lease.Server.CloudID)
+	if err != nil {
+		return nil, daytonaError("get sandbox before SSH run", err)
+	}
+	return b.startDaytonaActivity(ctx, sandbox)
 }
 
 func (b *daytonaLeaseBackend) startDaytonaActivity(ctx context.Context, sandbox *daytona.Sandbox) (func(), error) {

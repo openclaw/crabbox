@@ -143,18 +143,18 @@ func TestValidateAzureOwnedVMDoesNotRequireExpiry(t *testing.T) {
 			"provider_key": providerKeyForLease("cbx_123456abcdef"),
 		},
 	}
-	if err := validateAzureOwnedVM(expected, expected); err != nil {
+	if err := ValidateAzureOwnedVM(expected, expected); err != nil {
 		t.Fatalf("valid release VM rejected: %v", err)
 	}
 	replacement := expected
 	replacement.ImmutableID = "vmid-replacement"
-	if err := validateAzureOwnedVM(expected, replacement); err == nil || !strings.Contains(err.Error(), "identity") {
+	if err := ValidateAzureOwnedVM(expected, replacement); err == nil || !strings.Contains(err.Error(), "identity") {
 		t.Fatalf("replacement VM error=%v", err)
 	}
 	changedKey := expected
 	changedKey.Labels = maps.Clone(expected.Labels)
 	changedKey.Labels["provider_key"] = "replacement"
-	if err := validateAzureOwnedVM(expected, changedKey); err == nil || !strings.Contains(err.Error(), "provider key") {
+	if err := ValidateAzureOwnedVM(expected, changedKey); err == nil || !strings.Contains(err.Error(), "provider key") {
 		t.Fatalf("changed provider key error=%v", err)
 	}
 }

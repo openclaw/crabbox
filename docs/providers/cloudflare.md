@@ -21,7 +21,7 @@ ports; they run module source through the Cloudflare Workers runtime.
 
 - **Targets:** Linux only.
 - **Supported commands:** `run`, `warmup`, `status`, `stop`, `list`, `doctor`,
-  and local-claim `cleanup`.
+  and claim-scoped `cleanup`.
 - **Run sessions:** `run --keep --lease-output <path>` writes a reusable lease
   handle with an exact cleanup command.
 - **Sync:** archive upload/extract (gzipped tar), not rsync.
@@ -78,6 +78,15 @@ export CRABBOX_CLOUDFLARE_RUNNER_TOKEN=...
 
 The token is intentionally **not** exposed as a command-line flag, because
 command-line arguments can be captured in shell history and process listings.
+
+All three bindings share one typed declaration. The loader retains its existing
+user/repository YAML handling, including nonempty `token` input; this does not
+change the advice to keep tokens out of repository files. Omitted, null, and empty
+YAML strings preserve earlier values, while whitespace is accepted for later
+validation. Environment overrides use raw nonempty values. Accepted URL/token
+inputs keep their existing source classification; an explicit URL flag visit is
+still recorded separately after successful provider flag application.
+
 Runner redirects are followed only when they keep the configured scheme, host,
 and effective port. Cross-origin redirects fail before command, environment, or
 upload bodies can be replayed to another destination.
@@ -87,6 +96,12 @@ bearer-shaped credentials before they reach CLI diagnostics.
 The workdir defaults to `/workspace/crabbox` and must resolve to an absolute
 path. Broad system paths (`/`, `/workspace`, `/usr`, `/var`, and similar) are
 rejected; pick a dedicated subdirectory.
+
+The CLI's configured workdir and runtime fallback share that default. The bundled
+Worker keeps a separate HTTP-protocol fallback for requests that omit workdir;
+the Go client sends its resolved workdir explicitly. Instance-type mapping,
+URL-first client validation, authentication, and Worker lifecycle remain outside
+the generated bindings.
 
 Check the configured runner URL and token without creating a container:
 
@@ -222,16 +237,29 @@ crabbox run \
 
 ## Behavior
 
-- `run` creates or reuses a container Durable Object, prepares `workdir`,
-  uploads a gzipped archive of the local checkout (unless `--no-sync`), extracts
-  it, then relays stdout, stderr, and exit status.
+- `run` creates or reuses a container Durable Object, uploads a gzipped archive
+  of the local checkout (unless `--no-sync`), extracts it, then relays stdout,
+  stderr, and exit status. Fresh runs prepare and size-check the full archive
+  before creating a container; a small dirty delta does not bypass full-archive limits.
+- With `sync.delete: true`, extraction uses a sibling staging directory and
+  replaces `workdir` only after extraction succeeds. Failed admission, upload,
+  or extraction preserves the old checkout, and exact temporary paths receive
+  best-effort cleanup. With deletion disabled, extraction merges into `workdir`.
 - Before upload, the provider checks remote disk headroom for both the archive
   and the extracted checkout, and fails early with a sizing hint if the selected
-  type is too small.
+  type is too small. This check does not remove the old checkout to free space.
 - `warmup` starts a container and leaves it alive until `crabbox stop` or the
   configured TTL/idle deadline expires.
 - Reuse, `status`, and `stop` resolve local Crabbox claims before calling the
   runner and reject raw sandbox IDs without a matching claim.
+- Reuse and cleanup keep the captured local claim revision: another caller
+  replacing or removing that claim prevents stale admission or teardown. This
+  fences local claim writers, not remote operators recreating the same Durable
+  Object identity; the runner has no conditional generation-delete API.
+- Automatic cleanup finishes before the final result and timing record. A
+  cleanup failure fails an otherwise successful run and retains its recovery
+  claim; an existing command failure or cancellation stays the primary outcome.
+  `--keep-on-failure` also retains fresh sessions after preparation or sync fails.
 - `list` reports local Cloudflare claims. Add `--refresh` to check runner state
   for those claims. The runner intentionally does not expose a global container
   enumeration API.
@@ -245,8 +273,13 @@ crabbox run \
 - The runner stores lease metadata in Durable Object storage and schedules
   cleanup at the earlier of `--ttl` or `--idle-timeout`. Uploads and command
   execution extend the idle deadline.
-- `crabbox cleanup --provider cloudflare` only checks local claims. It removes
-  claims whose runner state is expired, stopped, or missing.
+- `status` reports expired or stopped metadata without retiring the local claim:
+  the runner may have stored that state before native destruction failed.
+  `crabbox cleanup --provider cloudflare` checks local claims and confirms or
+  retries native deletion for terminal containers before removing their claims.
+  An HTTP 404 can retire the exact unchanged claim; other errors preserve it.
+  `--dry-run` sends no DELETE requests and does not remove local claims; the
+  runner's expiry policy still applies during status reads.
 
 Cloudflare Containers can also reach Worker bindings through outbound handlers.
 Crabbox does not wire those by default, but custom runner images can add them:
@@ -255,7 +288,7 @@ Crabbox does not wire those by default, but custom runner images can add them:
 ## Limitations
 
 - Only Linux delegated `run`, `warmup`, `status`, `stop`, `list`, `doctor`, and
-  local-claim cleanup are supported.
+  claim-scoped cleanup are supported.
 - SSH, VNC, browser desktop, code-server, Actions hydration, `--download`, and
   `--fresh-pr` are not supported.
 - `--checksum` is not supported, because sync uses archive upload/extract rather
@@ -265,3 +298,8 @@ Crabbox does not wire those by default, but custom runner images can add them:
 - Cleanup cannot discover containers that have no local Crabbox claim.
 - Container capacity is bounded by the checked-in Wrangler bindings
   (`max_instances`) and the target account's Cloudflare Containers limits.
+
+If a command stream ends before its completion event while the caller context is
+canceled, Crabbox reports cancellation rather than a missing-completion error.
+An accepted completion event and explicit stream-read errors retain their
+existing precedence.

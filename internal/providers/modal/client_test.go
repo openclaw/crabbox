@@ -35,6 +35,30 @@ func TestModalExecPreservesRemoteExit125(t *testing.T) {
 	}
 }
 
+func TestModalTransportErrorsPreserveCauses(t *testing.T) {
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded, io.ErrShortWrite} {
+		for _, operation := range []string{"exec", "upload", "json"} {
+			t.Run(operation+"/"+cause.Error(), func(t *testing.T) {
+				runner := &modalClientRunner{result: core.LocalCommandResult{ExitCode: 1}, err: cause}
+				client := &modalPythonClient{cfg: newTestConfig(), rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+				var err error
+				switch operation {
+				case "exec":
+					_, err = client.Exec(t.Context(), modalExecRequest{SandboxID: "sb-123", Command: []string{"true"}})
+				case "upload":
+					err = client.UploadFile(t.Context(), "sb-123", "local", "/tmp/remote")
+				default:
+					var result map[string]any
+					err = client.runJSON(t.Context(), "fixture", nil, &result)
+				}
+				if !errors.Is(err, cause) {
+					t.Fatalf("transport cause lost: %v, want %v", err, cause)
+				}
+			})
+		}
+	}
+}
+
 const modalScopeTestFixture = `
 import sys, types
 class Config:

@@ -8,6 +8,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type tensorlakeCLI struct {
@@ -22,7 +24,7 @@ func newTensorlakeCLI(cfg Config, rt Runtime) (*tensorlakeCLI, error) {
 	if rt.Exec == nil {
 		return nil, exit(2, "provider=tensorlake requires Runtime.Exec")
 	}
-	apiURL, err := canonicalTensorlakeURL(blank(cfg.Tensorlake.APIURL, defaultAPIURL))
+	apiURL, err := canonicalTensorlakeURL(blank(cfg.Tensorlake.APIURL, core.TensorlakeConfigDefaultAPIURL))
 	if err != nil {
 		return nil, err
 	}
@@ -35,7 +37,7 @@ func newTensorlakeCLI(cfg Config, rt Runtime) (*tensorlakeCLI, error) {
 }
 
 func (c *tensorlakeCLI) binary() string {
-	return blank(strings.TrimSpace(c.cfg.Tensorlake.CLIPath), defaultCLIPath)
+	return blank(strings.TrimSpace(c.cfg.Tensorlake.CLIPath), core.TensorlakeConfigDefaultCLIPath)
 }
 
 func (c *tensorlakeCLI) globalArgs() []string {
@@ -96,10 +98,9 @@ func (c *tensorlakeCLI) runQuiet(ctx context.Context, sub []string, args []strin
 }
 
 // runStreamed runs a tensorlake CLI subcommand and streams output to the
-// provided writers. Non-zero exit codes are reported via the int return,
-// not as an error — callers must propagate them as the wrapped command's
-// exit. Errors are reserved for transport-level failures (binary missing,
-// I/O errors).
+// provided writers. Ordinary native exits are reported via the int return.
+// Other returned errors retain transport/cancellation/I/O evidence regardless
+// of the numeric result; that result is a command exit only when err is nil.
 func (c *tensorlakeCLI) runStreamed(ctx context.Context, sub []string, args []string, stdout, stderr io.Writer) (int, error) {
 	full := append([]string{}, c.globalArgs()...)
 	full = append(full, sub...)
@@ -111,7 +112,10 @@ func (c *tensorlakeCLI) runStreamed(ctx context.Context, sub []string, args []st
 		Stdout: stdout,
 		Stderr: stderr,
 	})
-	if err != nil && res.ExitCode == 0 {
+	if err != nil {
+		if core.IsPlainLocalCommandExit(res, err) {
+			return res.ExitCode, nil
+		}
 		return res.ExitCode, fmt.Errorf("tensorlake %s: %w", strings.Join(sub, " "), err)
 	}
 	return res.ExitCode, nil
@@ -245,7 +249,7 @@ func tensorlakeError(action string, exitCode int, stdout, stderr *bytes.Buffer, 
 		tail = tail[:4096]
 	}
 	if runErr != nil {
-		return fmt.Errorf("tensorlake %s (exit=%d): %v: %s", action, exitCode, runErr, tail)
+		return fmt.Errorf("tensorlake %s (exit=%d): %w: %s", action, exitCode, runErr, tail)
 	}
 	return fmt.Errorf("tensorlake %s exited %d: %s", action, exitCode, tail)
 }

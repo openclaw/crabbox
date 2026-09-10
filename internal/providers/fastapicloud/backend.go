@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/url"
 	"strings"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func NewFastAPICloudBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
@@ -28,7 +30,7 @@ func (b *fastAPICloudBackend) Warmup(ctx context.Context, req WarmupRequest) err
 
 func (b *fastAPICloudBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	_ = ctx
-	if err := rejectFastAPICloudRunOptions(req); err != nil {
+	if err := shared.RejectServiceRunOptions(req, providerName, "lifecycle is owned by FastAPI Cloud", "cannot open an interactive shell"); err != nil {
 		return RunResult{}, err
 	}
 	if len(req.Command) == 0 {
@@ -173,35 +175,4 @@ func hostFromAppURL(raw string) string {
 		return parsed.Hostname()
 	}
 	return strings.TrimSpace(raw)
-}
-
-func rejectFastAPICloudRunOptions(req RunRequest) error {
-	if req.Keep {
-		return exit(2, "provider=%s lifecycle is owned by FastAPI Cloud; --keep is not supported", providerName)
-	}
-	if req.Reclaim {
-		return exit(2, "provider=%s lifecycle is owned by FastAPI Cloud; --reclaim is not supported", providerName)
-	}
-	if !req.NoSync {
-		return exit(2, "provider=%s does not support workspace sync; pass --no-sync", providerName)
-	}
-	if req.SyncOnly {
-		return exit(2, "provider=%s does not support sync; --sync-only is rejected", providerName)
-	}
-	if req.ChecksumSync {
-		return exit(2, "provider=%s does not support sync; --checksum is rejected", providerName)
-	}
-	if req.ForceSyncLarge {
-		return exit(2, "provider=%s does not support sync; --force-sync-large is rejected", providerName)
-	}
-	if req.FullResync {
-		return exit(2, "provider=%s does not support sync; --full-resync is rejected", providerName)
-	}
-	if req.ShellMode {
-		return exit(2, "provider=%s cannot open an interactive shell; --shell is not supported", providerName)
-	}
-	if req.EnvSummary {
-		return exit(2, "provider=%s cannot forward per-run environment variables", providerName)
-	}
-	return nil
 }

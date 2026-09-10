@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 const (
@@ -53,7 +55,7 @@ func cloneLabels(labels map[string]string) map[string]string {
 }
 
 func (b *backend) createIntentClaim(leaseID, slug, scope, accountUUID string, req WarmupRequest, createReq createInstanceRequest) (LeaseClaim, error) {
-	labels := directLeaseLabels(b.cfg, leaseID, slug, req.Keep, b.now())
+	labels := directLeaseLabels(b.cfg, leaseID, slug, req.Keep, core.ClockNow(b.rt.Clock))
 	labels["state"] = ukcStateCreatePreflight
 	labels[ukcLabelResourceName] = createReq.Name
 	labels[ukcLabelRequestHash] = unikraftCloudCreateRequestHash(createReq)
@@ -718,7 +720,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			return err
 		}
 		state := current.Labels["state"]
-		remove, reason := shouldCleanupServer(serverFromClaim(current), b.now())
+		remove, reason := shouldCleanupServer(serverFromClaim(current), core.ClockNow(b.rt.Clock))
 		if state == ukcStateDeleteAttempt || state == ukcStateDeleteAccepted || state == ukcStateCreatePreflight || state == ukcStateCreateConflict {
 			remove, reason = true, "resume "+state
 		}

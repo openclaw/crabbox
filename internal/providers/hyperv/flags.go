@@ -2,7 +2,6 @@ package hyperv
 
 import (
 	"flag"
-	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -55,7 +54,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if flagWasSet(fs, "hyperv-init-password") {
 		cfg.HyperV.InitPassword = *v.InitPassword
 	}
-	if isHyperVProviderName(cfg.Provider) {
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		// Target flags are applied after provider flags on several lifecycle
 		// commands. Leave target validation to the centralized provider-target
 		// check after all flag sources have been applied. When no target source
@@ -66,13 +65,4 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		applyDefaults(cfg)
 	}
 	return nil
-}
-
-func isHyperVProviderName(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case providerName:
-		return true
-	default:
-		return false
-	}
 }

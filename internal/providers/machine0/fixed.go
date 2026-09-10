@@ -50,7 +50,7 @@ func (b *backend) acquireFixed(ctx context.Context, req AcquireRequest) (LeaseTa
 		WindowsMode:  cfg.WindowsMode,
 		TTL:          cfg.TTL,
 		IdleTimeout:  cfg.IdleTimeout,
-		Now:          b.now,
+		Now:          func() time.Time { return core.ClockNow(b.rt.Clock).UTC() },
 	}, func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		freshClaim = !exists
 		var err error
@@ -126,7 +126,7 @@ func (b *backend) acquireFixed(ctx context.Context, req AcquireRequest) (LeaseTa
 			attempt := machine0CreateAttempt{
 				Name: name, Size: cfg.Machine0.Size, Region: cfg.Machine0.Region,
 				Image: image, ImageVersion: cfg.Machine0.ImageVersion, Key: cfg.Machine0.Key,
-				CreatedAt: b.now().Format(time.RFC3339Nano),
+				CreatedAt: core.ClockNow(b.rt.Clock).UTC().Format(time.RFC3339Nano),
 			}
 			data, err := json.Marshal(attempt)
 			if err != nil {
@@ -164,7 +164,7 @@ func (b *backend) acquireFixed(ctx context.Context, req AcquireRequest) (LeaseTa
 			return LeaseTarget{}, err
 		}
 		server := b.serverFromMachine(item, *claim, cfg)
-		server.Labels = machineLabels(cfg, item, leaseID, intent.Slug, req.Keep, b.now())
+		server.Labels = machineLabels(cfg, item, leaseID, intent.Slug, req.Keep, core.ClockNow(b.rt.Clock).UTC())
 		return b.prepareLease(ctx, item, server, leaseID, true)
 	}, ctx)
 	if err != nil {
@@ -294,7 +294,7 @@ func (b *backend) bindFixedMachine0(claim *LeaseClaim, item machine, keep bool, 
 	}
 	claim.CloudID, claim.CloudImmutableID = item.ID, item.ID
 	claim.ProviderScope = machineScope(item.ID)
-	claim.Labels = machineLabels(b.configForRun(), item, claim.LeaseID, claim.Slug, keep, b.now())
+	claim.Labels = machineLabels(b.configForRun(), item, claim.LeaseID, claim.Slug, keep, core.ClockNow(b.rt.Clock).UTC())
 	return persist()
 }
 
@@ -309,6 +309,10 @@ func (b *backend) bindFixedMachine0Claim(claim LeaseClaim, item machine) (LeaseC
 }
 
 func (b *backend) destroyClaimedMachine(ctx context.Context, expected LeaseClaim, lease LeaseTarget) error {
+	return b.destroyClaimedMachineWithOutcome(ctx, expected, lease, &core.ReleaseLeaseOutcome{})
+}
+
+func (b *backend) destroyClaimedMachineWithOutcome(ctx context.Context, expected LeaseClaim, lease LeaseTarget, outcome *core.ReleaseLeaseOutcome) error {
 	if expected.Provider != core.FixedMachine0ClaimProvider && expected.FixedCreateIntent == nil {
 		return fixedMachine0LeaseKind.FinalizeAfterCleanup(expected, func() error {
 			// Reservation holds the source before it changes the claim revision.
@@ -316,8 +320,11 @@ func (b *backend) destroyClaimedMachine(ctx context.Context, expected LeaseClaim
 				return err
 			}
 			if lease.Server.Name != "" {
-				return b.api.Remove(ctx, lease.Server.Name)
+				err := b.api.Remove(ctx, lease.Server.Name)
+				outcome.Terminal = err == nil
+				return err
 			}
+			outcome.Terminal = true
 			return nil
 		})
 	}
@@ -333,6 +340,7 @@ func (b *backend) destroyClaimedMachine(ctx context.Context, expected LeaseClaim
 		}
 		item, err := b.resolveFixedMachine0(ctx, *claim)
 		if err != nil || claim.FixedCreateIntent.State == fixedMachine0IntentReleased {
+			outcome.Terminal = err == nil
 			return err
 		}
 		resourceID := firstNonBlank(item.ID, claim.CloudID)
@@ -355,10 +363,11 @@ func (b *backend) destroyClaimedMachine(ctx context.Context, expected LeaseClaim
 			if err := b.api.Remove(ctx, item.Name); err != nil {
 				return err
 			}
+			outcome.Terminal = true
 		} else {
 			return exit(4, "fixed Machine0 lease %s is not visible in the current account; absence is unverified, retain its claim and inspect the original account", claim.LeaseID)
 		}
-		*claim = fixedMachine0LeaseKind.TerminalClaim(*claim, b.now())
+		*claim = fixedMachine0LeaseKind.TerminalClaim(*claim, core.ClockNow(b.rt.Clock).UTC())
 		return persist()
 	})
 }

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -194,6 +195,65 @@ func TestProfileEnvAllowRespectsEnvironmentAndCLIPrecedence(t *testing.T) {
 	}
 }
 
+func TestEmptyReplacementListsPreserveAdditiveProfileAndSyncPolicy(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Chdir(t.TempDir())
+	writeReplacementListConfig(t, userConfigPath(), `profile: qa
+env:
+  allow: [BUILD_FLAVOR]
+sync:
+  exclude: [user-cache]
+profiles:
+  qa:
+    env:
+      allow: [PROFILE_FIRST]
+    envAllow: [PROFILE_SECOND]
+`)
+	writeReplacementListConfig(t, "crabbox.yaml", `env:
+  allow: []
+sync:
+  exclude: [repo-cache]
+profiles:
+  qa:
+    envAllow: [PROFILE_THIRD, PROFILE_FIRST]
+`)
+	writeReplacementListConfig(t, ".crabbox.yaml", `sync:
+  exclude: []
+profiles:
+  qa:
+    env:
+      allow: []
+    envAllow: []
+`)
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applySelectedProfileConfig(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.EnvAllow, ","); got != "PROFILE_FIRST,PROFILE_SECOND,PROFILE_THIRD" {
+		t.Fatalf("profile additions after top-level clear=%q", got)
+	}
+	wantExcludes := appendOrderedStrings(baseConfig().Sync.Excludes, "user-cache", "repo-cache")
+	if strings.Join(cfg.Sync.Excludes, ",") != strings.Join(wantExcludes, ",") {
+		t.Fatalf("empty sync.exclude cleared additive exclusions: %v", cfg.Sync.Excludes)
+	}
+	t.Setenv("CRABBOX_ENV_ALLOW", "BUILD_FLAVOR")
+	cfg, err = loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applySelectedProfileConfig(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	applyRunEnvAllowFlags(&cfg, []string{"CI"})
+	if got := strings.Join(cfg.EnvAllow, ","); got != "BUILD_FLAVOR,CI" {
+		t.Fatalf("env replacement followed by CLI append=%q", got)
+	}
+}
+
 func TestPresetCommandPreservesQuotedArguments(t *testing.T) {
 	cfg := Config{
 		Profile: "qa",
@@ -278,6 +338,10 @@ func TestPresetCommandTreatsVariablesAsArgValues(t *testing.T) {
 	if shouldUseShellWithLiteralArgs(expansion.Command, expansion.LiteralArgs) {
 		t.Fatalf("placeholder value should not introduce shell operators: %#v", expansion.Command)
 	}
+	intent, err := ParseCommandIntent(expansion.Command, false, expansion.LiteralArgs)
+	if err != nil || !slices.Equal(intent.Argv("bash", "-lc"), want) {
+		t.Fatalf("profile command intent=%q err=%v", intent.Argv("bash", "-lc"), err)
+	}
 	if got := runCommandDisplayWithLiteralArgs(expansion.Command, false, expansion.LiteralArgs); got != "pnpm qa --scenario '&&' --fail-fast" {
 		t.Fatalf("display=%q", got)
 	}
@@ -290,6 +354,10 @@ func TestPresetCommandTreatsVariablesAsArgValues(t *testing.T) {
 	}
 	if shouldUseShellWithLiteralArgs(single.Command, single.LiteralArgs) {
 		t.Fatalf("single placeholder value should remain a literal arg: %#v", single.Command)
+	}
+	singleIntent, err := ParseCommandIntent(single.Command, false, single.LiteralArgs)
+	if err != nil || !slices.Equal(singleIntent.Argv("bash", "-lc"), single.Command) {
+		t.Fatalf("single profile intent=%q err=%v", singleIntent.Argv("bash", "-lc"), err)
 	}
 	if got := runCommandShellStringWithLiteralArgs(single.Command, false, single.LiteralArgs); got != "'echo ok && false'" {
 		t.Fatalf("single shell command=%q", got)
@@ -729,13 +797,37 @@ func TestProfileDoctorWorkdirUsesConfiguredWorkRoot(t *testing.T) {
 }
 
 func TestSafeArtifactGlob(t *testing.T) {
-	if !safeArtifactGlob(".artifacts/qa-e2e/**") {
-		t.Fatal("expected QA artifact glob to be accepted")
+	for _, glob := range []string{".artifacts/qa-e2e/**", "reports/result..json", "reports/.../proof.json", ".gitignore"} {
+		if !safeArtifactGlob(glob) {
+			t.Fatalf("expected safe glob %q to be accepted", glob)
+		}
 	}
-	for _, glob := range []string{"", "../secret", "/etc/passwd", ".//etc/passwd", ".artifacts/$(id)", "-C/tmp", "{/,}etc/passwd", ".{.,}/secret"} {
+	for _, glob := range []string{"", "..", "../secret", "reports/../secret", "/etc/passwd", ".//etc/passwd", ".artifacts/$(id)", "-C/tmp", "{/,}etc/passwd", ".{.,}/secret"} {
 		if safeArtifactGlob(glob) {
 			t.Fatalf("expected unsafe glob %q to be rejected", glob)
 		}
+	}
+}
+
+func TestRunArtifactGlobsValidateComponents(t *testing.T) {
+	for flag, validate := range map[string]func([]string) error{
+		"--artifact-glob":    ValidateRunArtifactGlobs,
+		"--require-artifact": ValidateRequiredRunArtifactGlobs,
+	} {
+		t.Run(flag, func(t *testing.T) {
+			for _, glob := range []string{"reports/result..json", "reports/.gitignore", "reports/.crabbox-report.json", "reports/.git-backup/**", "**/*"} {
+				if err := validate([]string{glob}); err != nil {
+					t.Fatalf("safe glob %q rejected: %v", glob, err)
+				}
+			}
+			for _, glob := range []string{"..", "reports/../proof.json", ".git", ".git/config", ".crabbox/evidence/proof.json", "reports/.git/config", "./reports/.crabbox/**", "reports/**/.git/config"} {
+				err := validate([]string{glob})
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, flag) {
+					t.Fatalf("unsafe glob %q error=%v, want flag-specific exit 2", glob, err)
+				}
+			}
+		})
 	}
 }
 
@@ -784,6 +876,10 @@ func TestRunArtifactCollectScriptExcludesEnvProfiles(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".artifacts", "result.txt"), []byte("ok\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	proof := []byte("{\"ok\":true}\n")
+	if err := os.WriteFile(filepath.Join(dir, ".artifacts", "result..json"), proof, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	archivePath := filepath.Join(dir, ".crabbox", "artifacts.tgz")
 	script := runArtifactCollectScript(dir, ".crabbox/artifacts.tgz", []string{"./**"})
 	if out, err := exec.Command("bash", "-lc", script).CombinedOutput(); err != nil {
@@ -797,6 +893,9 @@ func TestRunArtifactCollectScriptExcludesEnvProfiles(t *testing.T) {
 	}
 	if !stringSliceContains(names, ".artifacts/result.txt") {
 		t.Fatalf("archive missing artifact file: %#v", names)
+	}
+	if got := readTarGzContents(t, archivePath)[".artifacts/result..json"]; !bytes.Equal(got, proof) {
+		t.Fatalf("archive lost consecutive-dot artifact bytes: %q", got)
 	}
 }
 
@@ -827,14 +926,22 @@ func TestRunArtifactRequireScriptMatchesRequiredArtifacts(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "reports", "data", "nested", "quality.json"), []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	script := runArtifactRequireScript(dir, []string{"reports/data/manifest.json", "reports/data/**/*.json"})
+	if err := os.WriteFile(filepath.Join(dir, "reports", "data", "result..json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	globs := []string{"reports/data/manifest.json", "reports/data/result..json", "reports/data/**/*.json"}
+	if err := validateRequiredRunArtifactGlobs(globs); err != nil {
+		t.Fatal(err)
+	}
+	script := runArtifactRequireScript(dir, globs)
 	out, err := exec.Command("bash", "-lc", script).CombinedOutput()
 	if err != nil {
 		t.Fatalf("require script failed: %v\n%s", err, out)
 	}
 	for _, want := range []string{
 		"required artifact reports/data/manifest.json matched=1",
-		"required artifact reports/data/**/*.json matched=2",
+		"required artifact reports/data/result..json matched=1",
+		"required artifact reports/data/**/*.json matched=3",
 	} {
 		if !strings.Contains(string(out), want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
@@ -1463,6 +1570,7 @@ profiles:
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	downloadedArtifacts := []byte("artifacts\n")
 	script := `#!/bin/sh
 cmd=""
 for arg do cmd="$arg"; done
@@ -1470,7 +1578,7 @@ input="$(cat)"
 printf '%s\n%s\n---\n' "$cmd" "$input" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$cmd
 $input" in
-  *"base64 <"*) printf 'YXJ0aWZhY3RzCg=='; exit 0 ;;
+  *"base64 <"*) printf '%s' ` + shellQuote(encodedRunDownloadPayload(int64(len(downloadedArtifacts)), downloadedArtifacts)) + `; exit 0 ;;
   *"base64 -d >"*) printf 'ok      node             v22.1.0\nok      pnpm             9.0.0\nok      docker-compose   Docker Compose version v2.27.0\n'; exit 0 ;;
   *"artifacts.tgz"*) printf 'warning: no artifact matches\n'; exit 0 ;;
 esac

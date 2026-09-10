@@ -2,7 +2,12 @@ package agentsandbox
 
 import (
 	"context"
-	"reflect"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,25 +38,63 @@ func TestExecContextHonorsZeroAsNoDeadline(t *testing.T) {
 	}
 }
 
-func TestBuildCommandUsesBashCompatibleShell(t *testing.T) {
-	tests := []struct {
-		name      string
-		command   []string
-		shellMode bool
-		want      []string
-	}{
-		{name: "shell mode", command: []string{"echo ok"}, shellMode: true, want: []string{"bash", "-lc", "echo ok"}},
-		{name: "single string shell syntax", command: []string{"echo ok && pwd"}, want: []string{"bash", "-lc", "echo ok && pwd"}},
-		{name: "leading env assignment", command: []string{"FOO=bar", "printenv", "FOO"}, want: []string{"bash", "-lc", "FOO='bar' 'printenv' 'FOO'"}},
+func TestRunLiteralArgumentsSurviveNativeStdinTransport(t *testing.T) {
+	if os.PathSeparator != '/' {
+		t.Skip("POSIX stdin transport")
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := buildCommand(tt.command, tt.shellMode)
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh unavailable")
+	}
+	for _, literalExecutable := range []bool{false, true} {
+		t.Run(fmt.Sprint(literalExecutable), func(t *testing.T) {
+			cfg := testAgentSandboxConfig(t)
+			fake := readyFakeClient(cfg)
+			b := testBackend(cfg, fake, nil, nil)
+			ready, err := sandboxReadinessOnce(t.Context(), fake, cfg.AgentSandbox.Namespace, "claim-a", fakeClaimIdentity(cfg))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("buildCommand()=%#v want %#v", got, tt.want)
+			workdir := t.TempDir()
+			marker := filepath.Join(workdir, "must-not-exist")
+			command := []string{"printf", "%s", ";", "touch", marker}
+			literal := map[int]bool{2: true}
+			want := ";touch" + marker
+			wantCode := 0
+			if literalExecutable {
+				program := filepath.Join(workdir, "FOO=x")
+				if err := os.WriteFile(program, []byte("#!/bin/sh\nprintf 'literal:%s' \"$*\"\nexit 42\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				command = []string{"FOO=x", "argument"}
+				literal = map[int]bool{0: true}
+				want = "literal:argument"
+				wantCode = 42
+			}
+			_, err = b.runCommand(t.Context(), fake, ready, RunRequest{Command: command, CommandLiteralArgs: literal}, workdir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(fake.execInput) != 1 {
+				t.Fatalf("exec inputs=%d", len(fake.execInput))
+			}
+			cmd := exec.Command(sh, "-s")
+			cmd.Stdin = strings.NewReader(string(fake.execInput[0]))
+			cmd.Env = []string{"HOME=" + workdir, "PATH=" + workdir + ":/usr/bin:/bin", "ENV=" + os.DevNull}
+			out, runErr := cmd.CombinedOutput()
+			code := 0
+			if runErr != nil {
+				var exitErr *exec.ExitError
+				if !errors.As(runErr, &exitErr) {
+					t.Fatal(runErr)
+				}
+				code = exitErr.ExitCode()
+			}
+			if string(out) != want || code != wantCode {
+				t.Fatalf("script=%q output=%q code=%d want=%q/%d", fake.execInput[0], out, code, want, wantCode)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("literal created marker: %v", err)
 			}
 		})
 	}

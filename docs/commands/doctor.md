@@ -24,6 +24,11 @@ crabbox doctor --all --prepare-check
 crabbox doctor --json
 ```
 
+`crabbox doctor --help` (or `-h`) shows these modes and the primary doctor flags
+before the complete provider flag reference. Help prints to stderr and exits
+successfully even when configuration is invalid; it does not run readiness checks or change
+configuration.
+
 ## What it checks
 
 Doctor walks a sequence of checks, skipping any that do not apply to the

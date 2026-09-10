@@ -98,6 +98,58 @@ func TestClaimFenceContextBoundsBothWriterWaits(t *testing.T) {
 	}
 }
 
+func TestClaimTouchCancellationLeavesHeldClaimUnchanged(t *testing.T) {
+	for _, action := range []bool{false, true} {
+		for _, shared := range []bool{false, true} {
+			t.Run(fmt.Sprintf("action=%t/shared=%t", action, shared), func(t *testing.T) {
+				expected := seedClaimContract(t)
+				path, err := leaseClaimPath(expected.LeaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				done := make(chan error, 1)
+				called, joined := false, false
+				err = withLeaseClaimLockContext(t.Context(), path, shared, func() error {
+					ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+					defer cancel()
+					go func() {
+						var err error
+						if action {
+							_, _, _, err = UpdateLeaseClaimTouchIfUnchangedAction(ctx, expected.LeaseID, expected, time.Now(), nil, func() (Server, SSHTarget, bool, error) {
+								called = true
+								return Server{Provider: "aws"}, SSHTarget{}, true, nil
+							})
+						} else {
+							_, err = UpdateLeaseClaimTouchIfUnchanged(ctx, expected.LeaseID, expected, map[string]string{"state": "touched"}, time.Now(), nil)
+						}
+						done <- err
+					}()
+					select {
+					case err := <-done:
+						joined = true
+						if !errors.Is(err, context.DeadlineExceeded) {
+							t.Errorf("touch deadline returned %v", err)
+						}
+					case <-time.After(time.Second):
+						t.Error("touch ignored cancellation while waiting for the claim")
+					}
+					return nil
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !joined {
+					<-done
+				}
+				if called {
+					t.Fatal("canceled touch reached the provider action")
+				}
+				assertClaimContractStored(t, expected.LeaseID, expected)
+			})
+		}
+	}
+}
+
 func TestClaimSharedFenceChild(t *testing.T) {
 	path := os.Getenv("CRABBOX_TEST_CLAIM_SHARED_PATH")
 	if path == "" {

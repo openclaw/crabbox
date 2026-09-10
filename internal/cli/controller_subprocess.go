@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/prefixbuffer"
 )
 
 type execControllerRunnerOptions struct {
@@ -42,6 +44,7 @@ type execControllerWorkspaceRunner struct {
 }
 
 const controllerChildIdentityVersion = 1
+const controllerOutputLimitBytes = 1 << 20
 
 const controllerChildWaitDelay = 250 * time.Millisecond
 
@@ -236,8 +239,7 @@ type controllerChildIdentity struct {
 }
 
 func (r *execControllerWorkspaceRunner) ProviderIdentity(ctx context.Context) (controllerProviderIdentity, error) {
-	var output controllerLimitedBuffer
-	output.limit = 1 << 20
+	output := prefixbuffer.NewLimited(controllerOutputLimitBytes)
 	args := []string{"config", "show", "--json", "--controller-provider-identity"}
 	if provider := strings.TrimSpace(r.opts.Provider); provider != "" {
 		args = append(args, "--provider", provider)
@@ -245,7 +247,7 @@ func (r *execControllerWorkspaceRunner) ProviderIdentity(ctx context.Context) (c
 	if err := r.runWithStarted(ctx, controllerWorkspaceRequest{}, args, &output, nil); err != nil {
 		return controllerProviderIdentity{}, fmt.Errorf("resolve controller provider identity: %w", err)
 	}
-	if err := output.overflowError("controller provider identity"); err != nil {
+	if err := controllerOutputOverflowError(output.Exceeded(), "controller provider identity", controllerOutputLimitBytes); err != nil {
 		return controllerProviderIdentity{}, err
 	}
 	var view struct {
@@ -282,15 +284,14 @@ func (r *execControllerWorkspaceRunner) Warmup(
 	if err != nil {
 		return controllerAcquireIdentity{}, err
 	}
-	var output controllerLimitedBuffer
-	output.limit = 1 << 20
+	output := prefixbuffer.NewLimited(controllerOutputLimitBytes)
 	warmupEnv := gate.environment()
 	warmupEnv[controllerCoordinatorRegistrationExpectedEnv] = "1"
 	warmupEnv[controllerCoordinatorRegistrationURLEnv] = request.CoordinatorRegistrationURL
 	runErr := r.runWithStartedEnv(ctx, request, r.warmupArgs(attemptLeaseID, slug, request), &output, onStarted, warmupEnv)
 	gate.close()
 	identityResult := gate.wait()
-	return identityResult.Identity, errors.Join(runErr, output.overflowError("controller provider warmup"), identityResult.Err)
+	return identityResult.Identity, errors.Join(runErr, controllerOutputOverflowError(output.Exceeded(), "controller provider warmup", controllerOutputLimitBytes), identityResult.Err)
 }
 
 func (r *execControllerWorkspaceRunner) warmupArgs(attemptLeaseID, slug string, request controllerWorkspaceRequest) []string {
@@ -332,8 +333,7 @@ func (r *execControllerWorkspaceRunner) Inspect(ctx context.Context, identifier 
 	if err != nil {
 		return StatusView{}, err
 	}
-	var output controllerLimitedBuffer
-	output.limit = 1 << 20
+	output := prefixbuffer.NewLimited(controllerOutputLimitBytes)
 	if err := r.run(ctx, request, args, &output); err != nil {
 		absent, confirmErr := r.workspaceAbsent(ctx, identifier, request)
 		if confirmErr == nil && absent {
@@ -344,7 +344,7 @@ func (r *execControllerWorkspaceRunner) Inspect(ctx context.Context, identifier 
 		}
 		return StatusView{}, err
 	}
-	if err := output.overflowError("controller provider inspection"); err != nil {
+	if err := controllerOutputOverflowError(output.Exceeded(), "controller provider inspection", controllerOutputLimitBytes); err != nil {
 		return StatusView{}, err
 	}
 	var status StatusView
@@ -434,15 +434,14 @@ func (r *execControllerWorkspaceRunner) DesktopConnection(ctx context.Context, i
 		defer cancel()
 		resultErr = errors.Join(resultErr, r.StopLocal(cleanupCtx, identifier, request))
 	}()
-	var daemonStatus controllerLimitedBuffer
-	daemonStatus.limit = 1 << 20
+	daemonStatus := prefixbuffer.NewLimited(controllerOutputLimitBytes)
 	if err := r.run(ctx, request, []string{
 		"webvnc", "daemon", "status", "--id", identifier,
 		"--controller-owner-id", ownerID,
 	}, &daemonStatus); err != nil {
 		return "", err
 	}
-	if err := daemonStatus.overflowError("controller WebVNC daemon status"); err != nil {
+	if err := controllerOutputOverflowError(daemonStatus.Exceeded(), "controller WebVNC daemon status", controllerOutputLimitBytes); err != nil {
 		return "", err
 	}
 	localPort := controllerWebVNCDaemonLocalPort(daemonStatus.String())
@@ -471,12 +470,11 @@ func (r *execControllerWorkspaceRunner) DesktopConnection(ctx context.Context, i
 		}
 		startArgs = append(startArgs, "--controller-owned=true", "--controller-owner-id", ownerID)
 		startArgs = append(startArgs, expectedIdentityArgs...)
-		var startOutput controllerLimitedBuffer
-		startOutput.limit = 1 << 20
+		startOutput := prefixbuffer.NewLimited(controllerOutputLimitBytes)
 		if err := r.run(ctx, request, startArgs, &startOutput); err != nil {
 			return "", err
 		}
-		if err := startOutput.overflowError("controller WebVNC daemon start"); err != nil {
+		if err := controllerOutputOverflowError(startOutput.Exceeded(), "controller WebVNC daemon start", controllerOutputLimitBytes); err != nil {
 			return "", err
 		}
 		startedHere = true
@@ -501,12 +499,11 @@ func (r *execControllerWorkspaceRunner) DesktopConnection(ctx context.Context, i
 		"--controller-owner-id", ownerID,
 	)
 	statusArgs = append(statusArgs, expectedIdentityArgs...)
-	var output controllerLimitedBuffer
-	output.limit = 1 << 20
+	output := prefixbuffer.NewLimited(controllerOutputLimitBytes)
 	if err := r.run(ctx, request, statusArgs, &output); err != nil {
 		return "", err
 	}
-	if err := output.overflowError("controller WebVNC status"); err != nil {
+	if err := controllerOutputOverflowError(output.Exceeded(), "controller WebVNC status", controllerOutputLimitBytes); err != nil {
 		return "", err
 	}
 	if !controllerWebVNCReady(output.String()) {
@@ -561,15 +558,14 @@ func controllerWebVNCExpectedProviderArgs(request controllerWorkspaceRequest) ([
 }
 
 func (r *execControllerWorkspaceRunner) verifyWebVNCDaemon(ctx context.Context, identifier, localPort, ownerID string, request controllerWorkspaceRequest) (int, error) {
-	var output controllerLimitedBuffer
-	output.limit = 1 << 20
+	output := prefixbuffer.NewLimited(controllerOutputLimitBytes)
 	if err := r.run(ctx, request, []string{
 		"webvnc", "daemon", "status", "--id", identifier,
 		"--controller-owner-id", ownerID,
 	}, &output); err != nil {
 		return 0, fmt.Errorf("verify WebVNC daemon: %w", err)
 	}
-	if err := output.overflowError("controller WebVNC daemon verification"); err != nil {
+	if err := controllerOutputOverflowError(output.Exceeded(), "controller WebVNC daemon verification", controllerOutputLimitBytes); err != nil {
 		return 0, err
 	}
 	verifiedPort := controllerWebVNCDaemonLocalPort(output.String())
@@ -808,12 +804,11 @@ func (r *execControllerWorkspaceRunner) workspaceAbsent(ctx context.Context, ide
 	if err != nil {
 		return false, err
 	}
-	var output controllerLimitedBuffer
-	output.limit = 1 << 20
+	output := prefixbuffer.NewLimited(controllerOutputLimitBytes)
 	if err := r.run(ctx, request, args, &output); err != nil {
 		return false, err
 	}
-	if err := output.overflowError("controller provider inventory"); err != nil {
+	if err := controllerOutputOverflowError(output.Exceeded(), "controller provider inventory", controllerOutputLimitBytes); err != nil {
 		return false, fmt.Errorf("provider absence cannot be confirmed: %w", err)
 	}
 	identities, err := controllerAbsenceIdentitySet(identifier, request)
@@ -1813,30 +1808,9 @@ func (r *execControllerWorkspaceRunner) adapterChildEnv(overrides map[string]str
 	return merged
 }
 
-type controllerLimitedBuffer struct {
-	bytes.Buffer
-	limit    int
-	overflow bool
-}
-
-func (b *controllerLimitedBuffer) Write(data []byte) (int, error) {
-	original := len(data)
-	remaining := b.limit - b.Len()
-	if remaining > 0 {
-		if len(data) > remaining {
-			b.overflow = true
-			data = data[:remaining]
-		}
-		_, _ = b.Buffer.Write(data)
-	} else if original > 0 {
-		b.overflow = true
-	}
-	return original, nil
-}
-
-func (b *controllerLimitedBuffer) overflowError(label string) error {
-	if !b.overflow {
+func controllerOutputOverflowError(exceeded bool, label string, limit int) error {
+	if !exceeded {
 		return nil
 	}
-	return fmt.Errorf("%s exceeded %d-byte output limit", label, b.limit)
+	return fmt.Errorf("%s exceeded %d-byte output limit", label, limit)
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -136,7 +136,7 @@ func (b *coderLeaseBackend) rollbackCreatedWorkspace(name, leaseID string, clien
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := b.releaseWorkspace(cleanupCtx, client, name); err != nil {
-		return exit(coderExitCode(cause), "%v; coder rollback %s failed for workspace %s; manual cleanup: %s: %v", cause, coderReleaseActionFromConfig(b.cfg), name, coderManualCleanupCommand(b.cfg, name), err)
+		return exit(core.ExitCodeForError(cause, 1), "%v; coder rollback %s failed for workspace %s; manual cleanup: %s: %v", cause, coderReleaseActionFromConfig(b.cfg), name, coderManualCleanupCommand(b.cfg, name), err)
 	}
 	removeLeaseClaim(leaseID)
 	return cause
@@ -147,14 +147,6 @@ func (b *coderLeaseBackend) releaseWorkspace(ctx context.Context, client *coderC
 		return client.delete(ctx, name)
 	}
 	return client.stop(ctx, name)
-}
-
-func coderExitCode(err error) int {
-	var exitErr ExitError
-	if errors.As(err, &exitErr) && exitErr.Code != 0 {
-		return exitErr.Code
-	}
-	return 1
 }
 
 func (b *coderLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {

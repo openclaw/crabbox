@@ -104,6 +104,25 @@ Trusted local config may also set `apiUrl` and `workspace`. Repository config ma
 set only non-secret runtime settings such as region, image, memory, lifetimes,
 workdir, exec timeout, and `forgetMissing`.
 
+All eleven bindings share one typed declaration. The API key remains
+environment-only, with no YAML or flag field. API URL and workspace retain their
+trusted-file gate. Empty YAML strings preserve earlier URL/workspace/region/TTL
+values; explicit empty image and workdir values still apply. Environment strings
+retain raw nonempty primary/alias precedence.
+
+Memory uses the existing source-specific rules: negative YAML is rejected
+immediately, but malformed, padded, or out-of-range `CRABBOX_BLAXEL_MEMORY_MB`
+input retains the earlier value. A parsed negative environment value continues
+to the existing later provider validation. Exec-timeout environment input stays
+strict and can fail before later boolean application. Flags retain their existing
+opportunity to override earlier values before semantic validation.
+
+The client, validator, doctor, create request, workdir, and exec-timeout helpers
+share the compiled defaults while retaining their raw-empty/trimmed-empty and
+zero-value distinctions. Memory zero remains a service default; exec-timeout zero
+retains its Crabbox fallback. Upload, retry, lifetime, and cleanup policy are
+unchanged.
+
 Provider flags:
 
 ```text
@@ -149,6 +168,11 @@ crabbox run --provider blaxel --allow-env API_TOKEN -- printenv API_TOKEN
 
 ## Lifecycle
 
+Fresh `run` builds and validates its archive before creating a sandbox, so local
+guardrail/archive failures do not allocate a resource. The uploaded snapshot
+does not include edits made during provisioning. Reuse prepares only after
+claim and remote ownership validation. `--no-sync` creates no archive.
+
 1. `warmup` or `run` without `--id` creates a sandbox with a
    `crabbox-<repo-slug>-<random6>` name, the configured image/region/memory and
    lifetime settings, and initial Crabbox ownership labels.
@@ -156,9 +180,10 @@ crabbox run --provider blaxel --allow-env API_TOKEN -- printenv API_TOKEN
    a friendly slug, and a random ownership token. The same token is stored in
    the local lease claim.
 3. Crabbox waits for the sandbox to reach a ready state.
-4. By default, `run` archive-syncs the working tree: Crabbox builds a manifest,
-   creates a gzipped tar archive locally, uploads it through the Blaxel file API,
-   and extracts it into `blaxel.workdir`. `--no-sync` skips the archive and only
+4. By default, `run` uploads the prepared archive through the Blaxel file API
+   and extracts it into `blaxel.workdir`. The shared sync owner manages staging,
+   replacement/rollback and bounded temporary-file cleanup; native multipart
+   retries retain a seekable archive. `--no-sync` skips the archive and only
    ensures the workdir exists. `--sync-only` syncs and exits without running a
    command.
 5. The command runs through the Blaxel process API with the configured workdir,
@@ -166,6 +191,26 @@ crabbox run --provider blaxel --allow-env API_TOKEN -- printenv API_TOKEN
 6. New one-shot runs delete the sandbox unless `--keep` or `--keep-on-failure`
    retains it. `stop` deletes a retained sandbox only after the local claim and
    remote ownership labels match.
+
+Run finalization is shared with other delegated sandboxes. Automatic sandbox
+deletion failures fail an otherwise successful run and retain a recovery
+session; later cleanup or timing-report errors cannot replace a primary
+command failure. Early setup failures also honor `--keep-on-failure` and retain
+their session metadata. Cleanup compares the original local claim and remote
+ownership labels before deletion, with its timeout covering the claim-lock wait.
+These run changes do not change explicit stop's `forgetMissing` policy.
+
+Sync timing counts preparation once and excludes provisioning wait. Archive
+construction uses `sync.timeout`; a prepared archive's construction time reduces
+the subsequent transfer budget. Manifest/preflight checks are outside that
+budget. Archive temporary-file cleanup failures are warnings and preserve the
+primary sync error.
+
+Cancellation during process polling attempts to stop the original process with a bounded
+cleanup context, even when the interrupted HTTP request failed before response
+headers arrived. Redacted transport errors retain their underlying cancellation
+or timeout cause; run errors keep exit code 1 and completed commands retain their
+remote exit code.
 
 If create-time cleanup fails after Blaxel has created a sandbox, Crabbox records
 a recovery claim. `cleanup --provider blaxel` can later find the matching

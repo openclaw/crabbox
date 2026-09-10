@@ -146,7 +146,7 @@ func TestCheckpointReservationFencesPreviouslyAuthorizedTouch(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := updateLeaseClaimTouchIfUnchanged(leaseID, original, map[string]string{"state": "ready"}, time.Now(), nil); err == nil {
+	if _, err := updateLeaseClaimTouchIfUnchanged(t.Context(), leaseID, original, map[string]string{"state": "ready"}, time.Now(), nil); err == nil {
 		t.Fatal("previously authorized touch rewrote the reserved source claim")
 	}
 	current, err := readLeaseClaim(leaseID)

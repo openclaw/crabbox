@@ -94,13 +94,6 @@ func (b *backend) SupportsRequestedLeaseID() bool { return true }
 
 func (b *backend) SupportsRequestedCheckpointID() bool { return true }
 
-func (b *backend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now().UTC()
-	}
-	return time.Now().UTC()
-}
-
 func (b *backend) configForRun() Config {
 	cfg := b.cfg
 	applyDefaults(&cfg)
@@ -167,7 +160,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		return LeaseTarget{}, err
 	}
 	pendingMachine := machine{Name: name, Status: "CREATING", Size: cfg.Machine0.Size, Region: cfg.Machine0.Region, Image: image, ImageVersion: cfg.Machine0.ImageVersion}
-	pendingServer := Server{Provider: providerName, Name: name, Status: "provisioning", Labels: machineLabels(cfg, pendingMachine, leaseID, slug, req.Keep, b.now())}
+	pendingServer := Server{Provider: providerName, Name: name, Status: "provisioning", Labels: machineLabels(cfg, pendingMachine, leaseID, slug, req.Keep, core.ClockNow(b.rt.Clock).UTC())}
 	pendingServer.Labels["recovery"] = "create-pending"
 	recoveryClaim, claimErr := core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurable(
 		leaseID, slug, cfg, machine0NameScope(name), pendingServer, SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, LeaseClaim{}, false,
@@ -211,7 +204,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	recoveryClaim = boundClaim
 	claim := LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: machineScope(item.ID)}
 	server := b.serverFromMachine(item, claim, cfg)
-	server.Labels = machineLabels(cfg, item, leaseID, slug, req.Keep, b.now())
+	server.Labels = machineLabels(cfg, item, leaseID, slug, req.Keep, core.ClockNow(b.rt.Clock).UTC())
 	lease, err := b.prepareLease(ctx, item, server, leaseID, true)
 	if err != nil {
 		return LeaseTarget{}, rollback(err)
@@ -333,27 +326,51 @@ func resolveClaim(identifier string) (LeaseClaim, bool, error) {
 	if err != nil || !exists {
 		return claim, exists, err
 	}
+	if err := validateResolvedMachine0Claim(identifier, claim); err != nil {
+		return LeaseClaim{}, false, err
+	}
+	return claim, true, nil
+}
+
+func validateResolvedMachine0Claim(identifier string, claim LeaseClaim) error {
 	if claim.Provider == core.FixedMachine0ClaimProvider || claim.FixedCreateIntent != nil {
+		var err error
 		if claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == fixedMachine0IntentReleased {
 			err = fixedMachine0LeaseKind.ValidateTerminalClaim(claim, LeaseClaim{}, claim.LeaseID, validateFixedMachine0TerminalClaimExtra)
 		} else {
 			_, err = fixedMachine0ClaimAttempt(claim)
 		}
 		if err != nil {
-			return LeaseClaim{}, false, err
+			return err
 		}
 	} else if firstNonBlank(claim.Labels["machine0_name"], claim.CloudID) == "" {
-		return LeaseClaim{}, false, exit(4, "machine0 lease %q has no bound native resource", identifier)
+		return exit(4, "machine0 lease %q has no bound native resource", identifier)
 	}
-	return claim, true, nil
+	return nil
 }
 
 func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+	return b.resolve(ctx, req, nil)
+}
+
+func (b *backend) ResolveRunLeaseUnderClaim(ctx context.Context, req ResolveRequest, original core.LeaseClaim) (LeaseTarget, error) {
+	return b.resolve(ctx, req, &original)
+}
+
+func (b *backend) resolve(ctx context.Context, req ResolveRequest, original *LeaseClaim) (LeaseTarget, error) {
 	if req.Reclaim && req.Repo.Root == "" {
 		return LeaseTarget{}, exit(2, "machine0 --reclaim requires repository context")
 	}
 	baseCfg := b.configForRun()
-	claim, claimed, err := resolveClaim(req.ID)
+	var claim LeaseClaim
+	var claimed bool
+	var err error
+	if original == nil {
+		claim, claimed, err = resolveClaim(req.ID)
+	} else {
+		claim, claimed = *original, true
+		err = validateResolvedMachine0Claim(req.ID, claim)
+	}
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -367,7 +384,7 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 			return LeaseTarget{}, exit(4, "lease_id_conflict: fixed Machine0 lease %s is bound to another repository", claim.LeaseID)
 		}
 		item, err = b.resolveFixedMachine0(ctx, claim)
-		if err == nil && item.ID != "" && !req.NoLocalStateMutations {
+		if err == nil && item.ID != "" && original == nil && !req.NoLocalStateMutations {
 			claim, err = b.bindFixedMachine0Claim(claim, item)
 		}
 		if err != nil {
@@ -454,6 +471,14 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 		}
 		return b.prepareLeaseWithOptions(ctx, item, server, leaseID, machine0PrepareOptions{Check: req.Prepare || req.ReadyProbe, ResetHostTrust: resetHostTrust})
 	}
+	if original != nil {
+		// Core already owns the claim transaction; preparation keeps its
+		// checkpoint fence without reentering endpoint publication.
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			return LeaseTarget{}, err
+		}
+		return prepare()
+	}
 	if claimed {
 		var lease LeaseTarget
 		updated, _, _, err := core.UpdateLeaseClaimEndpointIfUnchangedAction(leaseID, claim, func() (Server, SSHTarget, bool, error) {
@@ -482,7 +507,7 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 		return LeaseTarget{}, err
 	}
 	if !claimed && req.Reclaim {
-		lease.Server.Labels = machineLabels(cfg, item, leaseID, slug, true, b.now())
+		lease.Server.Labels = machineLabels(cfg, item, leaseID, slug, true, core.ClockNow(b.rt.Clock).UTC())
 		if err := claimLease(leaseID, slug, cfg, req.Repo.Root, true, lease.Server, lease.SSH); err != nil {
 			return LeaseTarget{}, err
 		}
@@ -531,30 +556,23 @@ func (b *backend) AuthorizeStatusTouchClaim(_ context.Context, lease LeaseTarget
 }
 
 func (b *backend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
-	expected, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server)
-	if !set || !exists {
-		return Server{}, exit(4, "machine0 lease %s has no exact claim snapshot; refusing touch", req.Lease.LeaseID)
-	}
-	if err := b.AuthorizeStatusTouchClaim(ctx, req.Lease, expected); err != nil {
-		return Server{}, err
-	}
-	if req.IdleTimeoutOverride != nil && *req.IdleTimeoutOverride <= 0 {
-		return Server{}, exit(2, "machine0 lease %s idle timeout override must be positive", req.Lease.LeaseID)
-	}
-
-	cfg := b.configForRun()
-	if expected.IdleTimeoutSeconds > 0 {
-		cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
-	}
-	labels := shared.CloneLabels(expected.Labels)
-	for _, key := range machineLabelKeys {
-		if value := req.Lease.Server.Labels[key]; value != "" {
-			labels[key] = value
-		}
-	}
-	now := b.now()
-	labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, req.State, now, req.IdleTimeoutOverride)
-	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
+	updated, err := shared.CommitClaimTouch(ctx, req, shared.ClaimTouchPolicy{
+		Provider: "machine0", Authorize: b.AuthorizeStatusTouchClaim,
+		Prepare: func(expected LeaseClaim) (map[string]string, time.Time) {
+			cfg := b.configForRun()
+			if expected.IdleTimeoutSeconds > 0 {
+				cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
+			}
+			labels := shared.CloneLabels(expected.Labels)
+			for _, key := range machineLabelKeys {
+				if value := req.Lease.Server.Labels[key]; value != "" {
+					labels[key] = value
+				}
+			}
+			now := core.ClockNow(b.rt.Clock).UTC()
+			return core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, req.State, now, req.IdleTimeoutOverride), now
+		},
+	})
 	if err != nil {
 		return Server{}, err
 	}
@@ -565,11 +583,22 @@ func (b *backend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
 }
 
 func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *backend) ReleaseLeaseWithOutcome(ctx context.Context, req ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	var outcome core.ReleaseLeaseOutcome
+	err := b.releaseLease(ctx, req, &outcome)
+	return outcome, err
+}
+
+func (b *backend) releaseLease(ctx context.Context, req ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	if err := core.ValidateLeaseTargetProviderIdentity(req.Lease, req.ExpectedProviderIdentity); err != nil {
 		return err
 	}
 	if req.CheckpointID != "" {
-		return b.releaseCheckpointSource(ctx, req)
+		return b.releaseCheckpointSource(ctx, req, outcome)
 	}
 	identifier := firstNonBlank(req.Lease.LeaseID, req.Lease.Server.Labels["lease"], req.Lease.Server.CloudID, req.Lease.Server.Name)
 	claim, claimed, err := resolveClaim(identifier)
@@ -577,7 +606,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 		return err
 	}
 	if claimed && fixedMachine0LeaseKind.IsFixedClaim(claim) && (claim.FixedCreateIntent.State == fixedMachine0IntentReleased || normalizeReleasePolicy(b.configForRun().Machine0.ReleasePolicy) == "destroy") {
-		return b.destroyClaimedMachine(ctx, claim, req.Lease)
+		return b.destroyClaimedMachineWithOutcome(ctx, claim, req.Lease, outcome)
 	}
 	if claimed && claim.Provider == providerName && claim.CloudID == "" && claim.Labels["recovery"] == "create-pending" {
 		name := machine0MachineName(claim.LeaseID, claim.Slug)
@@ -588,7 +617,11 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 			return exit(2, "pending machine0 lease=%s cannot be suspended before its resource identity is known; use --machine0-release-policy destroy", claim.LeaseID)
 		}
 		// Pending claims retain only the exact-name deletion already authorized by create rollback.
-		return core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error { return b.api.Remove(ctx, name) })
+		return core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+			err := b.api.Remove(ctx, name)
+			outcome.Terminal = err == nil
+			return err
+		})
 	}
 	claim, item, err := b.releaseTarget(ctx, req.Lease)
 	if err != nil {
@@ -600,7 +633,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	if normalizeReleasePolicy(b.configForRun().Machine0.ReleasePolicy) == "suspend" {
 		return b.suspendClaimedMachine(ctx, claim, item)
 	}
-	return b.destroyClaimedMachine(ctx, claim, LeaseTarget{LeaseID: claim.LeaseID, Server: b.serverFromMachine(item, claim, b.configForRun())})
+	return b.destroyClaimedMachineWithOutcome(ctx, claim, LeaseTarget{LeaseID: claim.LeaseID, Server: b.serverFromMachine(item, claim, b.configForRun())}, outcome)
 }
 
 func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
@@ -630,7 +663,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			continue
 		}
 		server := b.serverFromMachine(item, claim, cfg)
-		should, reason := shouldCleanupMachine0(server, claim, claim.LeaseID != "", b.now())
+		should, reason := shouldCleanupMachine0(server, claim, claim.LeaseID != "", core.ClockNow(b.rt.Clock).UTC())
 		if !should {
 			fmt.Fprintf(b.rt.Stderr, "skip machine name=%s reason=%s\n", item.Name, reason)
 			continue
@@ -1274,7 +1307,7 @@ func (b *backend) serverFromMachine(item machine, claim LeaseClaim, cfg Config) 
 	labels := shared.CloneLabels(claim.Labels)
 	leaseID, slug := claim.LeaseID, claim.Slug
 	if len(labels) == 0 {
-		labels = machineLabels(cfg, item, leaseID, slug, false, b.now())
+		labels = machineLabels(cfg, item, leaseID, slug, false, core.ClockNow(b.rt.Clock).UTC())
 	}
 	for key, value := range machineDynamicLabels(item) {
 		labels[key] = value

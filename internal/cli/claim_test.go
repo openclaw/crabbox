@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -374,6 +375,42 @@ func TestDurableGuardedClaimActionFailurePreventsPublication(t *testing.T) {
 	}
 	if claim, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || exists {
 		t.Fatalf("claim published after action failure: claim=%#v exists=%v err=%v", claim, exists, readErr)
+	}
+}
+
+func TestDurableGuardedClaimCompletedActionStillPublishesAfterCancellation(t *testing.T) {
+	for _, reclaim := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reclaim=%t", reclaim), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			const leaseID = "cbx_completed_action"
+			cfg := Config{Provider: "aws"}
+			server := Server{Provider: "aws", CloudID: "i-confirmed"}
+			var previous leaseClaim
+			if reclaim {
+				var err error
+				previous, err = claimLeaseTargetForRepoConfigScopeIfUnchangedDurable(
+					leaseID, "completed-action", cfg, "account:test", server, SSHTarget{}, t.TempDir(), time.Minute, false, leaseClaim{}, false,
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			repo := t.TempDir()
+			called := false
+			updated, err := ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfterContext(
+				ctx, leaseID, "completed-action", cfg, "account:test", server, SSHTarget{}, repo, time.Minute, reclaim, previous, reclaim,
+				func() error { called = true; cancel(); return nil },
+			)
+			if err != nil || !called || !errors.Is(ctx.Err(), context.Canceled) {
+				t.Fatalf("completed action was discarded: called=%t err=%v", called, err)
+			}
+			stored, exists, err := readLeaseClaimWithPresence(leaseID)
+			if err != nil || !exists || !reflect.DeepEqual(stored, updated) || stored.RepoRoot != repo || stored.Revision == "" || reclaim && stored.Revision == previous.Revision {
+				t.Fatalf("completed action was not durably published: stored=%+v updated=%+v err=%v", stored, updated, err)
+			}
+		})
 	}
 }
 
@@ -1262,7 +1299,7 @@ func TestUpdateLeaseClaimTouchIfUnchangedCommitsOptionalTimeoutAtomically(t *tes
 	}
 
 	firstTouch := time.Date(2026, time.August, 16, 20, 0, 0, 0, time.UTC)
-	preserved, err := updateLeaseClaimTouchIfUnchanged(leaseID, expected, map[string]string{
+	preserved, err := updateLeaseClaimTouchIfUnchanged(t.Context(), leaseID, expected, map[string]string{
 		"state": "ready", "idle_timeout_secs": "1800", "last_touched_at": leaseLabelTime(firstTouch),
 	}, firstTouch, nil)
 	if err != nil {
@@ -1274,7 +1311,7 @@ func TestUpdateLeaseClaimTouchIfUnchangedCommitsOptionalTimeoutAtomically(t *tes
 
 	secondTouch := firstTouch.Add(time.Minute)
 	override := 45 * time.Minute
-	replaced, err := updateLeaseClaimTouchIfUnchanged(leaseID, preserved, map[string]string{
+	replaced, err := updateLeaseClaimTouchIfUnchanged(t.Context(), leaseID, preserved, map[string]string{
 		"state": "ready", "idle_timeout_secs": "2700", "last_touched_at": leaseLabelTime(secondTouch),
 	}, secondTouch, &override)
 	if err != nil {
@@ -1284,11 +1321,11 @@ func TestUpdateLeaseClaimTouchIfUnchangedCommitsOptionalTimeoutAtomically(t *tes
 		t.Fatalf("replaced claim=%#v", replaced)
 	}
 
-	if _, err := updateLeaseClaimTouchIfUnchanged(leaseID, preserved, nil, time.Now(), nil); err == nil || !strings.Contains(err.Error(), "claim changed") {
+	if _, err := updateLeaseClaimTouchIfUnchanged(t.Context(), leaseID, preserved, nil, time.Now(), nil); err == nil || !strings.Contains(err.Error(), "claim changed") {
 		t.Fatalf("stale touch err=%v", err)
 	}
 	removeLeaseClaim(leaseID)
-	if _, err := updateLeaseClaimTouchIfUnchanged(leaseID, replaced, nil, time.Now(), nil); err == nil || !strings.Contains(err.Error(), "claim changed") {
+	if _, err := updateLeaseClaimTouchIfUnchanged(t.Context(), leaseID, replaced, nil, time.Now(), nil); err == nil || !strings.Contains(err.Error(), "claim changed") {
 		t.Fatalf("raced-away touch err=%v", err)
 	}
 	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
@@ -1311,7 +1348,7 @@ func TestUpdateLeaseClaimTouchIfUnchangedActionCommitsAtomically(t *testing.T) {
 	server := initial
 	server.Labels = map[string]string{"provider": "aws", "slug": "touch", "state": "running", "idle_timeout_secs": "1800"}
 	target := SSHTarget{Host: "203.0.113.20", Port: "2222"}
-	updated, gotServer, gotTarget, err := UpdateLeaseClaimTouchIfUnchangedAction(leaseID, expected, now, nil, func() (Server, SSHTarget, bool, error) {
+	updated, gotServer, gotTarget, err := UpdateLeaseClaimTouchIfUnchangedAction(t.Context(), leaseID, expected, now, nil, func() (Server, SSHTarget, bool, error) {
 		return server, target, true, nil
 	})
 	if err != nil {
@@ -1326,7 +1363,7 @@ func TestUpdateLeaseClaimTouchIfUnchangedActionCommitsAtomically(t *testing.T) {
 	}
 	override := 45 * time.Minute
 	server.Labels["idle_timeout_secs"] = "2700"
-	replaced, _, _, err := UpdateLeaseClaimTouchIfUnchangedAction(leaseID, updated, now.Add(time.Minute), &override, func() (Server, SSHTarget, bool, error) {
+	replaced, _, _, err := UpdateLeaseClaimTouchIfUnchangedAction(t.Context(), leaseID, updated, now.Add(time.Minute), &override, func() (Server, SSHTarget, bool, error) {
 		return server, target, true, nil
 	})
 	persisted, readErr := readLeaseClaim(leaseID)
@@ -1404,7 +1441,7 @@ func TestUpdateLeaseClaimTouchIfUnchangedActionFailsClosed(t *testing.T) {
 					return server, SSHTarget{}, true, nil
 				}
 			}
-			_, _, _, err = UpdateLeaseClaimTouchIfUnchangedAction(leaseID, expected, time.Now(), test.override, action)
+			_, _, _, err = UpdateLeaseClaimTouchIfUnchangedAction(t.Context(), leaseID, expected, time.Now(), test.override, action)
 			if (err != nil) != test.wantErr || called != test.wantCall {
 				t.Fatalf("err=%v called=%t wantErr=%t wantCall=%t", err, called, test.wantErr, test.wantCall)
 			}
@@ -1426,7 +1463,7 @@ func TestConditionalClaimActionsRejectMisfiledClaimBeforeProviderMutation(t *tes
 			return err
 		}},
 		{name: "touch", run: func(leaseID string, expected leaseClaim, action func() (Server, SSHTarget, bool, error)) error {
-			_, _, _, err := UpdateLeaseClaimTouchIfUnchangedAction(leaseID, expected, time.Now(), nil, action)
+			_, _, _, err := UpdateLeaseClaimTouchIfUnchangedAction(t.Context(), leaseID, expected, time.Now(), nil, action)
 			return err
 		}},
 	}
@@ -1491,7 +1528,7 @@ func TestUpdateLeaseClaimTouchIfUnchangedActionHoldsFenceDuringCallback(t *testi
 	proceed := make(chan struct{})
 	touchDone := make(chan error, 1)
 	go func() {
-		_, _, _, err := UpdateLeaseClaimTouchIfUnchangedAction(leaseID, expected, time.Now(), nil, func() (Server, SSHTarget, bool, error) {
+		_, _, _, err := UpdateLeaseClaimTouchIfUnchangedAction(t.Context(), leaseID, expected, time.Now(), nil, func() (Server, SSHTarget, bool, error) {
 			close(entered)
 			<-proceed
 			return server, SSHTarget{}, true, nil
@@ -1801,15 +1838,6 @@ func TestConditionalClaimHelpersAndExactResolution(t *testing.T) {
 		if got := leaseClaimMatchesIdentifier(labeled, identifier); got != want {
 			t.Fatalf("leaseClaimMatchesIdentifier(%q)=%v want %v", identifier, got, want)
 		}
-	}
-	if exists, err := leaseClaimExists(leaseID); err != nil || !exists {
-		t.Fatalf("existing claim exists=%v err=%v", exists, err)
-	}
-	if exists, err := leaseClaimExists("cbx_missingclaim123"); err != nil || exists {
-		t.Fatalf("missing claim exists=%v err=%v", exists, err)
-	}
-	if exists, err := leaseClaimExists("../invalid"); err != nil || exists {
-		t.Fatalf("invalid claim exists=%v err=%v", exists, err)
 	}
 }
 
@@ -2378,6 +2406,71 @@ func TestReadLeaseClaimRejectsInvalidJSON(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "parse claim") {
 		t.Fatalf("expected parse claim error, got %v", err)
 	}
+}
+
+func TestResolveLeaseClaimDoesNotTreatCanonicalIDAsSlug(t *testing.T) {
+	const requestedID = "cbx_aaaaaaaaaaaa"
+	const otherID = "cbx_bbbbbbbbbbbb"
+	const scope = "endpoint:https://api.example.test"
+	lookups := []struct {
+		name    string
+		resolve func(string) (leaseClaim, bool, error)
+	}{
+		{"unscoped", resolveLeaseClaim},
+		{"provider", func(id string) (leaseClaim, bool, error) {
+			return resolveLeaseClaimForProvider(id, "e2b")
+		}},
+		{"provider exact", func(id string) (leaseClaim, bool, error) {
+			claim, ok, _, err := resolveLeaseClaimForProviderWithExact(id, "e2b")
+			return claim, ok, err
+		}},
+		{"scope exact", func(id string) (leaseClaim, bool, error) {
+			claim, ok, _, err := resolveLeaseClaimForProviderScopeWithExact(id, "e2b", scope)
+			return claim, ok, err
+		}},
+	}
+	for _, lookup := range lookups {
+		t.Run(lookup.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			if err := claimLeaseForRepoProviderScope(otherID, "cbx-aaaaaaaaaaaa", "e2b", scope, "/repo", time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			if claim, ok, err := lookup.resolve(requestedID); err != nil || ok || claim.LeaseID != "" {
+				t.Errorf("missing canonical ID selected alias: claim=%#v ok=%t err=%v", claim, ok, err)
+			}
+			if claim, ok, err := lookup.resolve("CBX AAAAAAAAAAAA"); err != nil || !ok || claim.LeaseID != otherID {
+				t.Fatalf("ordinary normalized slug: claim=%#v ok=%t err=%v", claim, ok, err)
+			}
+			if err := claimLeaseForRepoProviderScope(requestedID, "exact-lease", "e2b", scope, "/repo", time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			if claim, ok, err := lookup.resolve(requestedID); err != nil || !ok || claim.LeaseID != requestedID {
+				t.Fatalf("exact claim precedence: claim=%#v ok=%t err=%v", claim, ok, err)
+			}
+			if err := claimLeaseForRepoProviderScope("legacy-file", "cbx-not-canonical", "e2b", scope, "/repo", time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range []string{"legacy-file", "cbx_not_canonical"} {
+				if claim, ok, err := lookup.resolve(id); err != nil || !ok || claim.LeaseID != "legacy-file" {
+					t.Fatalf("legacy/literal identifier %q: claim=%#v ok=%t err=%v", id, claim, ok, err)
+				}
+			}
+		})
+	}
+	t.Run("foreign exact provider does not select alias", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		for _, claim := range []leaseClaim{
+			{LeaseID: requestedID, Slug: "exact-lease", Provider: "gcp"},
+			{LeaseID: otherID, Slug: "cbx-aaaaaaaaaaaa", Provider: "e2b"},
+		} {
+			if err := claimLeaseForRepoProvider(claim.LeaseID, claim.Slug, claim.Provider, "/repo", time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if claim, ok, err := resolveLeaseClaimForProvider(requestedID, "e2b"); err != nil || ok || claim.LeaseID != "" {
+			t.Fatalf("provider fallback selected alias: claim=%#v ok=%t err=%v", claim, ok, err)
+		}
+	})
 }
 
 func TestResolveLeaseClaimFindsSlug(t *testing.T) {

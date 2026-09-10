@@ -28,15 +28,6 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 	return &backend{spec: spec, cfg: cfg, rt: rt}
 }
 
-func isAppleContainerProvider(name string) bool {
-	switch name {
-	case providerName, "apple", "applecontainer":
-		return true
-	default:
-		return false
-	}
-}
-
 func applyDefaults(cfg *core.Config) {
 	cfg.Provider = providerName
 	if cfg.TargetOS == "" {
@@ -417,16 +408,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 
 func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, error) {
 	server := req.Lease.Server
-	if server.Labels == nil {
-		server.Labels = map[string]string{}
-	}
-	original := server.Labels
-	server.Labels = core.TouchDirectLeaseLabels(original, b.configForRun(), req.State, time.Now().UTC())
-	for _, key := range []string{"container_id", "image", "ssh_user", "ssh_port", "work_root"} {
-		if value := strings.TrimSpace(original[key]); value != "" {
-			server.Labels[key] = value
-		}
-	}
+	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.configForRun(), req.State, time.Now().UTC())
 	return server, nil
 }
 

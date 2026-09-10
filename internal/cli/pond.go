@@ -178,7 +178,7 @@ func pondDynamicTailscaleTagAllowed(cfg Config) bool {
 	if err != nil {
 		return false
 	}
-	return !shouldUseCoordinator(cfg, provider.Spec())
+	return !ShouldUseCoordinator(cfg, provider.Spec())
 }
 
 // providerCapableOfTailscale reports whether the named provider advertises

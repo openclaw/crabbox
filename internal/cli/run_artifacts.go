@@ -62,7 +62,7 @@ func collectRunArtifactGlobs(ctx context.Context, target SSHTarget, workdir, rep
 	name := safeCaptureName(firstNonBlank(runID, leaseID, "run")) + "-artifacts.tgz"
 	remotePath := ".crabbox/" + name
 	script := runArtifactCollectScript(workdir, remotePath, globs)
-	var output synchronizedBuffer
+	output := newSynchronizedBuffer(0)
 	err := runSSHInput(ctx, target, remoteRunArtifactShellInputCommand(target), strings.NewReader(script), &output, &output)
 	out := output.String()
 	if err != nil {
@@ -112,6 +112,11 @@ func validateRunArtifactGlobsForFlag(flag string, globs []string) error {
 		if !safeArtifactGlob(glob) {
 			return exit(2, "%s contains unsupported characters or non-relative path: %s", flag, glob)
 		}
+		for _, component := range strings.Split(filepath.ToSlash(strings.TrimSpace(glob)), "/") {
+			if component == ".git" || component == ".crabbox" {
+				return exit(2, "%s excludes protected path components: %s", flag, glob)
+			}
+		}
 	}
 	return nil
 }
@@ -133,12 +138,17 @@ func validateRunArtifactGlobTargetForFlag(target SSHTarget, globs []string, flag
 
 func safeArtifactGlob(glob string) bool {
 	glob = strings.TrimSpace(glob)
-	if glob == "" || strings.HasPrefix(glob, "-") || strings.HasPrefix(glob, "/") || strings.Contains(glob, "..") || strings.ContainsAny(glob, "{}") {
+	if glob == "" || strings.HasPrefix(glob, "-") || strings.HasPrefix(glob, "/") || strings.ContainsAny(glob, "{}") {
 		return false
 	}
 	rel := strings.TrimPrefix(filepath.ToSlash(glob), "./")
 	if strings.HasPrefix(rel, "/") {
 		return false
+	}
+	for _, component := range strings.Split(rel, "/") {
+		if component == ".." {
+			return false
+		}
 	}
 	return regexp.MustCompile(`^[A-Za-z0-9_./*?@+=:,-]+$`).MatchString(glob)
 }
@@ -182,7 +192,13 @@ func writeArtifactGlobMatcher(b *strings.Builder) {
 }
 
 func writeArtifactGlobEnumeration(b *strings.Builder, glob, addFunction string) {
-	b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; artifact_root=" + shellQuote(artifactGlobSearchRoot(glob)) + "; if artifact_safe_search_root \"$artifact_root\"; then while IFS= read -r -d '' f; do rel=$(artifact_rel_path \"$f\") || continue; if [[ \"$rel\" =~ $artifact_regex || \"./$rel\" =~ $artifact_regex ]]; then " + addFunction + " \"$f\"; fi; done < <(find \"$artifact_root\" \\( -name .git -o -name .crabbox \\) -prune -o \\( -type f -o -type l \\) -print0); fi\n")
+	depth := ""
+	// Literal globs need only their guarded parent. Keep case folding and
+	// filename normalization in the existing matcher rather than a name prefilter.
+	if !strings.ContainsAny(glob, "*?") {
+		depth = " -mindepth 1 -maxdepth 1"
+	}
+	b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; artifact_root=" + shellQuote(artifactGlobSearchRoot(glob)) + "; if artifact_safe_search_root \"$artifact_root\"; then while IFS= read -r -d '' f; do rel=$(artifact_rel_path \"$f\") || continue; if [[ \"$rel\" =~ $artifact_regex || \"./$rel\" =~ $artifact_regex ]]; then " + addFunction + " \"$f\"; fi; done < <(find \"$artifact_root\"" + depth + " \\( -name .git -o -name .crabbox \\) -prune -o \\( -type f -o -type l \\) -print0); fi\n")
 }
 
 func runArtifactRequireScript(workdir string, globs []string) string {
@@ -218,6 +234,17 @@ func runArtifactCollectScript(workdir, remotePath string, globs []string) string
 }
 
 func DelegatedRunArtifactScript(requiredGlobs, artifactGlobs []string, maxFiles int, maxBytes int64) string {
+	return delegatedRunArtifactScript(requiredGlobs, artifactGlobs, maxFiles, maxBytes, false)
+}
+
+// DelegatedRunArtifactFileScript finalizes an archive at the single absolute path
+// passed as $1. The caller owns an existing, exclusive transfer directory and the
+// finalized file's lifetime. Collection keeps its original working directory.
+func DelegatedRunArtifactFileScript(requiredGlobs, artifactGlobs []string, maxFiles int, maxBytes int64) string {
+	return delegatedRunArtifactScript(requiredGlobs, artifactGlobs, maxFiles, maxBytes, true)
+}
+
+func delegatedRunArtifactScript(requiredGlobs, artifactGlobs []string, maxFiles int, maxBytes int64, finalizeFile bool) string {
 	if maxFiles <= 0 {
 		maxFiles = DelegatedRunArtifactDefaultMaxFiles
 	}
@@ -226,6 +253,14 @@ func DelegatedRunArtifactScript(requiredGlobs, artifactGlobs []string, maxFiles 
 	}
 	var b strings.Builder
 	b.WriteString("set -euo pipefail\n")
+	if finalizeFile {
+		b.WriteString("[ \"$#\" -eq 1 ] || { printf 'expected one absolute artifact archive path\\n' >&2; exit 7; }\n")
+		b.WriteString("archive_path=$1; case \"$archive_path\" in /|*/|*/.|*/..|*/./*|*/../*) printf 'invalid artifact archive path\\n' >&2; exit 7;; /*) ;; *) printf 'expected absolute artifact archive path\\n' >&2; exit 7;; esac\n")
+		b.WriteString("archive_dir=${archive_path%/*}; [ -n \"$archive_dir\" ] || archive_dir=/\n")
+		b.WriteString("[ -d \"$archive_dir\" ] && [ ! -L \"$archive_dir\" ] && [ \"$(cd -P \"$archive_dir\" && pwd -P)\" = \"$archive_dir\" ] || { printf 'invalid artifact transfer directory\\n' >&2; exit 7; }\n")
+		b.WriteString("[ ! -e \"$archive_path\" ] && [ ! -L \"$archive_path\" ] || { printf 'artifact archive path already exists\\n' >&2; exit 7; }\numask 077\n")
+		b.WriteString("if stat -c '%d:%i' / >/dev/null 2>&1; then artifact_file_identity() { stat -c '%d:%i' -- \"$1\"; }; else artifact_file_identity() { stat -f '%d:%i' -- \"$1\"; }; fi\n")
+	}
 	writeArtifactGlobMatcher(&b)
 	b.WriteString("check_artifact_file() { local f=\"$1\" rel; [ -f \"$f\" ] || return 1; rel=$(artifact_rel_path \"$f\") || return 1; return 0; }\n")
 	b.WriteString("dedupe_artifact_match() { local f=\"$1\" rel existing; check_artifact_file \"$f\" || return 0; rel=$(artifact_rel_path \"$f\") || return 0; if [ ${#matches[@]} -gt 0 ]; then for existing in \"${matches[@]}\"; do [ \"$existing\" = \"$rel\" ] && return 0; done; fi; matches+=(\"$rel\"); }\n")
@@ -241,7 +276,7 @@ func DelegatedRunArtifactScript(requiredGlobs, artifactGlobs []string, maxFiles 
 		}
 		b.WriteString("if [ ${#missing[@]} -gt 0 ]; then for f in \"${missing[@]}\"; do printf 'missing required artifact: %s\\n' \"$f\" >&2; done; exit 8; fi\n")
 	}
-	if len(artifactGlobs) == 0 {
+	if len(artifactGlobs) == 0 && !finalizeFile {
 		return b.String()
 	}
 	b.WriteString("matches=()\n")
@@ -249,10 +284,22 @@ func DelegatedRunArtifactScript(requiredGlobs, artifactGlobs []string, maxFiles 
 		appendArtifactGlobMatches(glob)
 	}
 	b.WriteString("if [ ${#matches[@]} -gt " + fmt.Sprint(maxFiles) + " ]; then printf 'artifact-glob matched too many files: %s > %s\\n' \"${#matches[@]}\" " + shellQuote(fmt.Sprint(maxFiles)) + " >&2; exit 9; fi\n")
-	b.WriteString("tmp=$(mktemp -t crabbox-artifacts.XXXXXX.tgz); trap 'rm -f \"$tmp\"' EXIT\n")
+	if finalizeFile {
+		// Hold the inode through cleanup; Darwin's /dev/fd device differs from the file's.
+		b.WriteString("tmp=$(mktemp \"$archive_dir/.crabbox-artifact.XXXXXX\"); exec 9<\"$tmp\"; tmp_identity=$(artifact_file_identity \"$tmp\")\n")
+		b.WriteString("trap 'if [ -n \"$tmp\" ] && [ ! -L \"$tmp\" ] && [ \"$(artifact_file_identity \"$tmp\" 2>/dev/null)\" = \"$tmp_identity\" ]; then rm -f -- \"$tmp\"; fi' EXIT\n")
+	} else {
+		b.WriteString("tmp=$(mktemp -t crabbox-artifacts.XXXXXX.tgz); trap 'rm -f \"$tmp\"' EXIT\n")
+	}
 	b.WriteString("if [ ${#matches[@]} -eq 0 ]; then printf 'warning: no artifact matches\\n' >&2; COPYFILE_DISABLE=1 tar -czf \"$tmp\" --files-from /dev/null; else COPYFILE_DISABLE=1 tar -czf \"$tmp\" -- \"${matches[@]}\"; fi\n")
 	b.WriteString("bytes=$(wc -c < \"$tmp\" | tr -d ' ')\n")
 	b.WriteString("if [ \"$bytes\" -gt " + shellQuote(fmt.Sprint(maxBytes)) + " ]; then printf 'artifact-glob archive too large: %s > %s bytes\\n' \"$bytes\" " + shellQuote(fmt.Sprint(maxBytes)) + " >&2; exit 9; fi\n")
+	if finalizeFile {
+		b.WriteString("[ ! -L \"$tmp\" ] && [ \"$(artifact_file_identity \"$tmp\")\" = \"$tmp_identity\" ] && [ ! -e \"$archive_path\" ] && [ ! -L \"$archive_path\" ] || { printf 'artifact archive identity changed\\n' >&2; exit 7; }\n")
+		b.WriteString("mv -n -- \"$tmp\" \"$archive_path\"\n")
+		b.WriteString("[ ! -L \"$archive_path\" ] && [ \"$(artifact_file_identity \"$archive_path\")\" = \"$tmp_identity\" ] || { printf 'artifact archive finalization failed\\n' >&2; exit 7; }\ntmp=\n")
+		return b.String()
+	}
 	b.WriteString("printf '" + DelegatedRunArtifactBeginMarker + "\\n'\n")
 	b.WriteString("base64 < \"$tmp\"\n")
 	b.WriteString("printf '\\n" + DelegatedRunArtifactEndMarker + "\\n'\n")

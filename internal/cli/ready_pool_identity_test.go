@@ -28,6 +28,40 @@ func testReadyPoolIdentity(t *testing.T, repo, ref, commit, fingerprint string) 
 	}
 }
 
+func testGCPReadyPoolIdentity(t *testing.T, repo, ref, commit, fingerprint string) CoordinatorReadyPoolIdentityV1 {
+	t.Helper()
+	identity := testReadyPoolIdentity(t, repo, ref, commit, fingerprint)
+	identity.Image = CoordinatorReadyPoolImageIdentity{
+		Provider: "gcp", Scope: "projects/source-project/global/images", ID: "1234567890123456789",
+	}
+	identity.Architecture = "arm64"
+	return identity
+}
+
+func testGCPReadyPoolLease(identity CoordinatorReadyPoolIdentityV1) CoordinatorLease {
+	return CoordinatorLease{
+		Provider: "gcp", ProviderProject: "execution-project", Region: "europe-west4-a",
+		TargetOS: targetLinux, Architecture: identity.Architecture,
+		Image: &CoordinatorLeaseImage{
+			ID: identity.Image.ID, Provider: "gcp", Kind: "gcp-image", Region: "us-central1-b",
+			SourceID: "https://www.googleapis.com/compute/v1/projects/source-project/global/images/runner-v3",
+		},
+	}
+}
+
+type readyPoolIdentityCapabilityTestProvider struct {
+	testAzureProvider
+	match   bool
+	called  bool
+	request ProviderReadyPoolImageIdentityRequest
+}
+
+func (p *readyPoolIdentityCapabilityTestProvider) ReadyPoolImageIdentityMatchesLease(req ProviderReadyPoolImageIdentityRequest) bool {
+	p.called = true
+	p.request = req
+	return p.match
+}
+
 func writeTestReadyPoolIdentity(t *testing.T, identity CoordinatorReadyPoolIdentityV1) string {
 	t.Helper()
 	encoded, err := json.Marshal(identity)
@@ -107,20 +141,50 @@ func TestReadyPoolSeedDigestCrossLanguageVectors(t *testing.T) {
 	}
 }
 
-func TestReadyPoolIdentityRejectsMismatchedLeaseEvidence(t *testing.T) {
+func TestReadyPoolIdentityDelegatesProviderEvidence(t *testing.T) {
+	identity := testReadyPoolIdentity(t, "", "", "", "")
+	identity.Image = CoordinatorReadyPoolImageIdentity{Provider: "azure", Scope: "scope", ID: "image"}
+	lease := CoordinatorLease{
+		Provider: "azure", ProviderProject: "project", Region: "region",
+		TargetOS: targetLinux, Architecture: identity.Architecture,
+		Image: &CoordinatorLeaseImage{ID: "image", Provider: "azure", Region: "image-region"},
+	}
+	provider := &readyPoolIdentityCapabilityTestProvider{match: true}
+	if err := readyPoolIdentityMatchesLeaseWithProvider(provider, identity, lease); err != nil {
+		t.Fatal(err)
+	}
+	if !provider.called ||
+		provider.request.Identity != identity.Image ||
+		provider.request.Lease.Provider != lease.Provider ||
+		provider.request.Lease.Region != lease.Region ||
+		provider.request.Lease.Project != lease.ProviderProject ||
+		provider.request.Lease.Image != lease.Image {
+		t.Fatalf("capability request=%#v called=%t", provider.request, provider.called)
+	}
+
+	provider.match = false
+	if err := readyPoolIdentityMatchesLeaseWithProvider(provider, identity, lease); err == nil {
+		t.Fatal("provider capability mismatch accepted")
+	}
+	if err := readyPoolIdentityMatchesLeaseWithProvider(testAzureProvider{}, identity, lease); err == nil {
+		t.Fatal("provider without ready-pool identity capability accepted")
+	}
+}
+
+func TestReadyPoolIdentityKeepsGenericLeaseChecksInCore(t *testing.T) {
 	identity := testReadyPoolIdentity(t, "", "", "", "")
 	lease := CoordinatorLease{
 		Provider: "aws", Region: "us-east-1", TargetOS: targetLinux, Architecture: "amd64",
-		Image: &CoordinatorLeaseImage{ID: identity.Image.ID, Provider: "aws", Region: "us-east-1"},
+		Image: &CoordinatorLeaseImage{
+			ID: identity.Image.ID, Provider: "aws", Kind: "aws-ami", Region: "us-east-1",
+		},
 	}
 	if err := readyPoolIdentityMatchesLease(identity, lease); err != nil {
 		t.Fatal(err)
 	}
 	for _, mutate := range []func(*CoordinatorLease){
 		func(value *CoordinatorLease) { value.Architecture = "arm64" },
-		func(value *CoordinatorLease) { value.Image = nil },
-		func(value *CoordinatorLease) { value.Region = "eu-west-1" },
-		func(value *CoordinatorLease) { value.Provider = "azure" },
+		func(value *CoordinatorLease) { value.TargetOS = targetWindows },
 	} {
 		changed := lease
 		mutate(&changed)
@@ -257,7 +321,7 @@ func TestTypedReadyPoolBorrowDrainsMismatchedResponse(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(CoordinatorReadyPoolResponse{
 				Entry: CoordinatorReadyPoolEntry{Key: "builders", LeaseID: "cbx_000000000001", BorrowToken: "borrow", Identity: &changed},
 				Lease: CoordinatorLease{Provider: "aws", Region: "us-east-1", TargetOS: targetLinux, Architecture: "amd64",
-					Image: &CoordinatorLeaseImage{ID: identity.Image.ID, Provider: "aws", Region: "us-east-1"}},
+					Image: &CoordinatorLeaseImage{ID: identity.Image.ID, Provider: "aws", Kind: "aws-ami", Region: "us-east-1"}},
 			})
 		case "/v1/ready-pools/builders/return-identity":
 			var input map[string]any
@@ -275,6 +339,80 @@ func TestTypedReadyPoolBorrowDrainsMismatchedResponse(t *testing.T) {
 	}, identity)
 	if err == nil || !drained {
 		t.Fatalf("mismatch error=%v drained=%t", err, drained)
+	}
+}
+
+func TestTypedGCPReadyPoolBorrowAcceptsSourceIdentityWithoutZoneBinding(t *testing.T) {
+	identity := testGCPReadyPoolIdentity(t, "example-org/my-app", "main", "abc123", "")
+	lease := testGCPReadyPoolLease(identity)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/ready-pools/builders/borrow-identity" {
+			t.Fatalf("valid GCP borrow attempted cleanup through %s", request.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(CoordinatorReadyPoolResponse{
+			Entry: CoordinatorReadyPoolEntry{
+				Key: "builders", LeaseID: "cbx_000000000002", BorrowToken: "borrow", Identity: &identity,
+			},
+			Lease: lease,
+		})
+	}))
+	defer server.Close()
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	if _, err := borrowValidatedTypedReadyPoolLease(context.Background(), &client, "builders", map[string]any{
+		"repo": "example-org/my-app", "ref": "main", "commit": "abc123", "identity": identity,
+	}, identity); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTypedGCPReadyPoolBorrowDrainsMismatchedLeaseEvidence(t *testing.T) {
+	identity := testGCPReadyPoolIdentity(t, "example-org/my-app", "main", "abc123", "")
+	for _, tc := range []struct {
+		name   string
+		mutate func(*CoordinatorLease)
+	}{
+		{"numeric id", func(lease *CoordinatorLease) { lease.Image.ID = "987654321" }},
+		{"source project", func(lease *CoordinatorLease) {
+			lease.Image.SourceID = "projects/other-project/global/images/runner-v3"
+		}},
+		{"source collection", func(lease *CoordinatorLease) {
+			lease.Image.Kind = "gcp-disk-snapshot"
+			lease.Image.SourceID = "projects/source-project/global/snapshots/runner-v3"
+		}},
+		{"architecture", func(lease *CoordinatorLease) { lease.Architecture = "amd64" }},
+		{"execution project evidence", func(lease *CoordinatorLease) { lease.ProviderProject = "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lease := testGCPReadyPoolLease(identity)
+			tc.mutate(&lease)
+			drained := false
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch request.URL.Path {
+				case "/v1/ready-pools/builders/borrow-identity":
+					_ = json.NewEncoder(w).Encode(CoordinatorReadyPoolResponse{
+						Entry: CoordinatorReadyPoolEntry{
+							Key: "builders", LeaseID: "cbx_000000000002", BorrowToken: "borrow", Identity: &identity,
+						},
+						Lease: lease,
+					})
+				case "/v1/ready-pools/builders/return-identity":
+					drained = true
+					_ = json.NewEncoder(w).Encode(map[string]any{"entry": map[string]any{"state": "draining"}})
+				default:
+					t.Fatalf("unexpected path %s", request.URL.Path)
+				}
+			}))
+			defer server.Close()
+			client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+			_, err := borrowValidatedTypedReadyPoolLease(context.Background(), &client, "builders", map[string]any{
+				"repo": "example-org/my-app", "ref": "main", "commit": "abc123", "identity": identity,
+			}, identity)
+			if err == nil || !drained {
+				t.Fatalf("mismatch error=%v drained=%t", err, drained)
+			}
+		})
 	}
 }
 
@@ -321,5 +459,117 @@ func TestLegacyReadyPoolMatchingRejectsTypedEntries(t *testing.T) {
 	entry.Identity = nil
 	if count := countReadyPoolEntries([]CoordinatorReadyPoolEntry{entry}, map[string]any{}); count != 1 {
 		t.Fatalf("unchanged legacy entry count=%d", count)
+	}
+}
+
+func TestReadyPoolIdentityProviderBinding(t *testing.T) {
+	identity := testReadyPoolIdentity(t, "", "", "", "")
+
+	t.Run("omitted selects identity provider", func(t *testing.T) {
+		fs := newFlagSet("test", &bytes.Buffer{})
+		provider := fs.String("provider", "", "")
+		if err := parseFlags(fs, nil); err != nil {
+			t.Fatal(err)
+		}
+		cfg := Config{}
+		if err := bindReadyPoolIdentityProviderConfig(&cfg, fs, provider, identity); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Provider != "aws" || cfg.providerSelectionSource != providerSelectionLeaseContext || *provider != "aws" {
+			t.Fatalf("provider binding cfg=%+v flag=%q", cfg, *provider)
+		}
+	})
+
+	t.Run("explicit mismatch", func(t *testing.T) {
+		fs := newFlagSet("test", &bytes.Buffer{})
+		provider := fs.String("provider", "", "")
+		if err := parseFlags(fs, []string{"--provider", "gcp"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := bindReadyPoolIdentityProviderConfig(&Config{}, fs, provider, identity); err == nil {
+			t.Fatal("explicit provider mismatch succeeded")
+		}
+	})
+
+	t.Run("configured mismatch", func(t *testing.T) {
+		cfg := Config{}
+		setProviderSelection(&cfg, "gcp", providerSelectionUserConfig)
+		if err := bindReadyPoolIdentityConfiguredProvider(&cfg, identity); err == nil {
+			t.Fatal("configured provider mismatch succeeded")
+		}
+	})
+
+	t.Run("request derives provider", func(t *testing.T) {
+		input := map[string]any{}
+		if err := bindReadyPoolIdentityProvider(input, identity); err != nil {
+			t.Fatal(err)
+		}
+		if got := readyPoolInputString(input, "provider"); got != "aws" {
+			t.Fatalf("provider=%q, want aws", got)
+		}
+	})
+}
+
+func TestReadyPoolReturnDrainsUnavailableIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		result     string
+		identity   string
+		missing    bool
+		status     int
+		wantErr    string
+		wantResult string
+	}{
+		{name: "malformed ready drains", result: "ready", identity: `{`, wantErr: "decode ready-pool identity", wantResult: "drain"},
+		{name: "missing ready drains", result: "ready", missing: true, wantErr: "read ready-pool identity", wantResult: "drain"},
+		{name: "explicit drain skips identity", result: "drain", identity: `{`, wantResult: "drain"},
+		{name: "explicit release skips identity", result: "release", identity: `{`, wantResult: "release"},
+		{name: "cleanup failure joins original error", result: "ready", identity: `{`, status: http.StatusInternalServerError, wantErr: "decode ready-pool identity", wantResult: "drain"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			var received map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+					t.Fatal(err)
+				}
+				if tc.status != 0 {
+					http.Error(w, "cleanup failed", tc.status)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"entry":{"key":"builders","leaseID":"cbx_123","state":"draining"}}`))
+			}))
+			defer server.Close()
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_TOKEN", "local-test-token")
+
+			identityPath := filepath.Join(t.TempDir(), "identity.json")
+			if tc.missing {
+				identityPath = filepath.Join(t.TempDir(), "missing.json")
+			} else if err := os.WriteFile(identityPath, []byte(tc.identity), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).readyPoolReturn(
+				context.Background(),
+				[]string{"builders", "--id", "cbx_123", "--result", tc.result, "--reason", "caller cleanup", "--identity-file", identityPath},
+			)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error=%v, want %q", err, tc.wantErr)
+			}
+			if tc.status != 0 && (err == nil || !strings.Contains(err.Error(), "cleanup failed")) {
+				t.Fatalf("joined error=%v", err)
+			}
+			if received["result"] != tc.wantResult {
+				t.Fatalf("result=%v, want %q", received["result"], tc.wantResult)
+			}
+			if tc.result == "ready" && received["identity"] != nil {
+				t.Fatalf("invalid identity was sent: %#v", received["identity"])
+			}
+		})
 	}
 }

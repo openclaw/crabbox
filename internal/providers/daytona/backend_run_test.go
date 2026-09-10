@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
 	"math"
@@ -13,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +23,7 @@ import (
 	sdkdaytona "github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
 	sdktypes "github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
 	toolbox "github.com/daytonaio/daytona/libs/toolbox-api-client-go"
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
@@ -290,11 +293,31 @@ func TestUploadDaytonaFileStreamDoesNotPrebuffer(t *testing.T) {
 		bodyRead <- data
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer srv.Close()
+	defer func() {
+		_ = sourceWriter.Close()
+		_ = sourceReader.Close()
+		srv.Close()
+	}()
 
+	dataClient, err := daytonaHTTPClient(nil, srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := dataClient.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	callerDeadline, callerBounded := t.Context().Deadline()
+	dataClient.Transport = daytonaDeadlineRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		deadline, bounded := req.Context().Deadline()
+		if bounded != callerBounded || (bounded && !deadline.Equal(callerDeadline)) {
+			t.Error("archive upload acquired an independent control deadline")
+		}
+		return transport.RoundTrip(req)
+	})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- uploadDaytonaFileStream(t.Context(), srv.Client(), srv.URL+"/sbx-123/files/upload?path=%2Ftmp%2Farchive.tgz", map[string]string{
+		errCh <- uploadDaytonaFileStream(t.Context(), dataClient, srv.URL+"/sbx-123/files/upload?path=%2Ftmp%2Farchive.tgz", map[string]string{
 			"Authorization": "Bearer token",
 		}, sourceReader, "archive.tgz")
 	}()
@@ -303,6 +326,8 @@ func TestUploadDaytonaFileStreamDoesNotPrebuffer(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("upload did not start until the source reader completed")
 	}
+	// The upload remains active beyond the budget used by the control stall test.
+	time.Sleep(3 * daytonaControlTestTimeout)
 	if _, err := sourceWriter.Write([]byte("hello archive")); err != nil {
 		t.Fatal(err)
 	}
@@ -446,17 +471,24 @@ func TestDaytonaEnvAuthOverridesCLIConfig(t *testing.T) {
 	}
 }
 
-func TestApplyDaytonaProviderFlagsRejectsResourceNoops(t *testing.T) {
-	cfg := baseConfig()
-	cfg.Provider = daytonaProvider
+func TestApplyDaytonaProviderFlagsAcceptsClassAndRejectsType(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		args []string
+		name        string
+		args        []string
+		coordinator string
+		mode        core.BrokerMode
+		wantError   bool
 	}{
-		{name: "class", args: []string{"--class", "standard"}},
-		{name: "type", args: []string{"--type", "large"}},
+		{name: "direct class", args: []string{"--class", "standard"}},
+		{name: "registered class", args: []string{"--class", "standard"}, coordinator: "https://coordinator.example", mode: core.BrokerModeRegistered},
+		{name: "broker class", args: []string{"--class", "standard"}, coordinator: "https://coordinator.example"},
+		{name: "type", args: []string{"--type", "large"}, wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider, cfg.Coordinator, cfg.BrokerMode = daytonaProvider, tc.coordinator, tc.mode
+			cfg.Class = "standard"
+			core.MarkClassExplicit(&cfg)
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			fs.String("class", "", "")
 			fs.String("type", "", "")
@@ -465,8 +497,15 @@ func TestApplyDaytonaProviderFlagsRejectsResourceNoops(t *testing.T) {
 				t.Fatal(err)
 			}
 			err := ApplyDaytonaProviderFlags(&cfg, fs, values)
-			if err == nil || !strings.Contains(err.Error(), "provider=daytona") {
-				t.Fatalf("err=%v, want daytona resource flag rejection", err)
+			if (err != nil) != tc.wantError || err != nil && !strings.Contains(err.Error(), "provider=daytona") {
+				t.Fatalf("flag=%s err=%v", tc.name, err)
+			}
+			wantType := "daytona-medium"
+			if tc.coordinator != "" && tc.mode != core.BrokerModeRegistered {
+				wantType = "snapshot"
+			}
+			if err == nil && (Provider{}).ServerTypeForConfig(cfg) != wantType {
+				t.Fatalf("server type=%q, want %q", (Provider{}).ServerTypeForConfig(cfg), wantType)
 			}
 		})
 	}
@@ -635,6 +674,116 @@ func TestDaytonaResolveRejectsClaimOwnedByAnotherRepo(t *testing.T) {
 	}
 }
 
+type runAdmissionDaytonaAPI struct {
+	fakeDaytonaDoctorAPI
+	started    []string
+	accessed   []string
+	accessTTL  time.Duration
+	blockStart bool
+}
+
+func (a *runAdmissionDaytonaAPI) StartSandbox(ctx context.Context, id string) (*apidaytona.Sandbox, error) {
+	a.started = append(a.started, id)
+	if a.blockStart {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Second):
+			return nil, errors.New("caller deadline not passed to Start")
+		}
+	}
+	sandbox := a.getSandboxes[id]
+	sandbox.SetState(apidaytona.SANDBOXSTATE_STARTED)
+	return sandbox, nil
+}
+
+func (a *runAdmissionDaytonaAPI) CreateSSHAccess(_ context.Context, id string, ttl time.Duration) (daytonaSSHAccess, error) {
+	a.accessed = append(a.accessed, id)
+	a.accessTTL = ttl
+	return daytonaSSHAccess{Token: "synthetic-token", Command: "ssh -p 2222 synthetic-token@ssh.example.invalid"}, nil
+}
+
+func TestDaytonaRunResolutionPreparesWithoutPublishingClaim(t *testing.T) {
+	for _, scenario := range []string{"ready", "lagging inventory", "stopped", "canceled start", "wrong repository", "replacement resource", "checkpoint hold"} {
+		t.Run(scenario, func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			const leaseID = "cbx_454545454545"
+			sandbox := apidaytona.Sandbox{}
+			sandbox.SetId("sandbox-run-owned")
+			sandbox.SetState(apidaytona.SANDBOXSTATE_STOPPED)
+			if scenario == "ready" || scenario == "lagging inventory" {
+				sandbox.SetState(apidaytona.SANDBOXSTATE_STARTED)
+			}
+			sandbox.SetLabels(map[string]string{"crabbox": "true", "provider": daytonaProvider, "lease": leaseID, "slug": "run-owned"})
+			cfg := baseConfig()
+			cfg.Provider, cfg.Daytona.SSHAccessMinutes = daytonaProvider, 17
+			repoRoot := t.TempDir()
+			server := daytonaSandboxToServer(&sandbox)
+			if err := claimLeaseTargetForRepoConfig(leaseID, "run-owned", cfg, server, SSHTarget{}, repoRoot, time.Hour, false); err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "checkpoint hold" {
+				if err := core.WithDurableLeaseClaimLock(leaseID, func(claim *LeaseClaim, _ bool, persist func() error) error {
+					claim.CheckpointCapture = &core.CheckpointCaptureBinding{ID: "chk_runhold", Revision: claim.Revision, BoundRevision: claim.Revision}
+					return persist()
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := core.ReadLeaseClaim(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "replacement resource" {
+				sandbox.SetId("sandbox-replacement")
+			}
+			fake := &runAdmissionDaytonaAPI{fakeDaytonaDoctorAPI: fakeDaytonaDoctorAPI{
+				sandboxes: []apidaytona.Sandbox{sandbox}, getSandboxes: map[string]*apidaytona.Sandbox{sandbox.GetId(): &sandbox},
+			}, blockStart: scenario == "canceled start"}
+			if scenario == "lagging inventory" {
+				fake.sandboxes = nil
+			}
+			oldClient := newDaytonaClient
+			newDaytonaClient = func(Config, Runtime) (daytonaAPI, error) { return fake, nil }
+			t.Cleanup(func() { newDaytonaClient = oldClient })
+			req := ResolveRequest{ID: leaseID, Repo: Repo{Root: repoRoot}, Prepare: true}
+			if scenario == "wrong repository" {
+				req.Repo.Root = t.TempDir()
+			}
+			timeout := 2 * time.Second
+			if scenario == "canceled start" {
+				timeout = 50 * time.Millisecond
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), timeout)
+			defer cancel()
+			b := &daytonaLeaseBackend{cfg: cfg, rt: Runtime{Stderr: io.Discard}}
+			resolved, resolveErr := b.ResolveRunLeaseUnderClaim(ctx, req, before)
+			wantStarts, wantAccess := 0, 0
+			if scenario == "stopped" || scenario == "canceled start" {
+				wantStarts = 1
+			}
+			if scenario == "ready" || scenario == "lagging inventory" || scenario == "stopped" {
+				wantAccess = 1
+				if resolveErr != nil || resolved.LeaseID != leaseID || resolved.Server.CloudID != before.CloudID || !resolved.SSH.AuthSecret || resolved.SSH.Host != "ssh.example.invalid" || resolved.SSH.Port != "2222" || fake.accessTTL != 17*time.Minute {
+					t.Fatalf("run resolution lost exact resource or SSH access contract: %v", resolveErr)
+				}
+			} else if resolveErr == nil {
+				t.Fatal("run resolution accepted changed authority or canceled Start")
+			}
+			if scenario == "canceled start" && !errors.Is(resolveErr, context.DeadlineExceeded) {
+				t.Fatalf("Start lost caller deadline: %v", resolveErr)
+			}
+			if len(fake.started) != wantStarts || len(fake.accessed) != wantAccess || fake.mutated {
+				t.Fatalf("unexpected provider effects: starts=%v access=%v other=%t", fake.started, fake.accessed, fake.mutated)
+			}
+			after, err := core.ReadLeaseClaim(leaseID)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("provider run resolution published a claim: %v", err)
+			}
+		})
+	}
+}
+
 func TestDaytonaResolveRefusesImplicitAdoption(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_555555555555"
@@ -698,13 +847,43 @@ func TestDaytonaSSHTargetFallsBackWhenCommandMissing(t *testing.T) {
 	}
 }
 
+func TestDaytonaSSHTargetErrorsDoNotExposeCommandCredentials(t *testing.T) {
+	const credential = "synthetic-ssh-credential"
+	for _, tc := range []struct {
+		name, command, reason string
+	}{
+		{"missing-port", "ssh " + credential + "@ssh.example.invalid -p", "missing -p value"},
+		{"missing-destination", "ssh " + credential + "@", "missing user@host destination"},
+		{"unsupported-option", "ssh -oProxyCommand=" + credential + " " + credential + "@ssh.example.invalid", "unsupported option"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := daytonaSSHTargetFromAccess(baseConfig(), daytonaSSHAccess{Token: "synthetic-access-token", Command: tc.command})
+			if err == nil || !strings.Contains(err.Error(), tc.reason) {
+				t.Fatalf("error=%v, want useful validation reason %q", err, tc.reason)
+			}
+			if strings.Contains(err.Error(), credential) || strings.Contains(err.Error(), tc.command) {
+				t.Fatalf("error exposes a credential-bearing response: %s", err)
+			}
+		})
+	}
+}
+
 func TestDaytonaBackendIsHybridSDKRunAndSSHAccess(t *testing.T) {
-	backend := NewDaytonaLeaseBackend(ProviderSpec{Name: daytonaProvider}, baseConfig(), Runtime{})
+	backend, err := (Provider{}).Configure(baseConfig(), Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := backend.(DelegatedRunBackend); !ok {
 		t.Fatal("daytona should use delegated SDK run path")
 	}
 	if _, ok := backend.(SSHLeaseBackend); !ok {
 		t.Fatal("daytona should still expose explicit SSH access")
+	}
+	if !backend.Spec().Features.Has(core.FeatureSSHScriptRun) {
+		t.Fatal("daytona scripts must select the core SSH runner")
+	}
+	if _, ok := backend.(core.SSHRunActivityBackend); !ok {
+		t.Fatal("SSH scripts require native Daytona idle activity")
 	}
 }
 

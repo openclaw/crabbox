@@ -2,15 +2,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
+import { writeExecutable } from "./test-support/smoke-fixtures.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
-
-function writeExecutable(file, body) {
-  fs.writeFileSync(file, body, "utf8");
-  fs.chmodSync(file, 0o755);
-}
 
 test("operations docs cover local runtime live-smoke dispatches", () => {
   const docs = fs.readFileSync(path.join(repoRoot, "docs", "operations.md"), "utf8");
@@ -1328,7 +1324,7 @@ esac
   assert.doesNotMatch(tenkiCalls, /^sandbox /m);
 });
 
-test("Tenki live smoke proves paused status waits do not resume the session", () => {
+test("Tenki live smoke proves paused status waits do not resume the session", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-tenki-"));
   const bin = path.join(dir, "bin");
   const fakeCrabbox = path.join(bin, "crabbox");
@@ -1367,10 +1363,13 @@ case "$1" in
     ;;
   list)
     printf 'crabbox list warning\\n' >&2
-    printf '[{"id":"cbx_123456789abc","serverId":"00000000-0000-0000-0000-000000000001","slug":"tenki-smoke-test","provider":"tenki","state":"ready"}]\\n'
+    printf '[{"id":"cbx_123456789abc","serverId":"00000000-0000-0000-0000-000000000001","slug":"tenki-smoke-test","provider":"tenki","state":"ready","labels":{"crabbox":"true"}}]\\n'
     ;;
   stop)
     printf 'stopped %s\\n' "\${*: -1}"
+    ;;
+  claims)
+    printf '%s\\n' "\${CRABBOX_FAKE_CLAIMS:?}"
     ;;
   admin)
     printf '[]\\n'
@@ -1419,13 +1418,14 @@ esac
 `,
   );
 
-  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+  const runSmoke = (claims) => spawnSync("bash", ["scripts/live-smoke.sh"], {
     cwd: repoRoot,
     env: {
       ...process.env,
       PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
       CRABBOX_BIN: fakeCrabbox,
       CRABBOX_FAKE_LOG: crabboxLog,
+      CRABBOX_FAKE_CLAIMS: claims,
       CRABBOX_LIVE: "1",
       CRABBOX_LIVE_COORDINATOR: "0",
       CRABBOX_LIVE_PROVIDERS: "tenki",
@@ -1438,9 +1438,12 @@ esac
     encoding: "utf8",
   });
 
+  const result = runSmoke('{"claims":[],"problems":[]}');
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /crabbox-tenki-ok/);
   assert.match(result.stdout, /paused-session readiness check preserved state=paused/);
+  assert.match(result.stdout, /"smoke_matches": 1/);
+  assert.match(result.stdout, /"unmanaged": 0/);
   assert.match(result.stderr, /tenki status warning/);
   assert.match(result.stderr, /crabbox list warning/);
 
@@ -1449,9 +1452,11 @@ esac
   assert.match(crabboxCalls, /warmup --provider tenki --slug tenki-smoke-/);
   assert.match(crabboxCalls, /status --provider tenki --id tenki-smoke-test --wait --wait-timeout 120s/);
   assert.match(crabboxCalls, /run --provider tenki --id tenki-smoke-test --no-sync -- echo crabbox-tenki-ok/);
-  assert.match(crabboxCalls, /list --provider tenki --json/);
+  assert.match(crabboxCalls, /^list --provider tenki --json$/m);
+  assert.match(crabboxCalls, /^list --provider tenki --all --json$/m);
   assert.match(crabboxCalls, /status --provider tenki --id tenki-smoke-test --wait --wait-timeout 2s/);
   assert.match(crabboxCalls, /stop --provider tenki tenki-smoke-test/);
+  assert.match(crabboxCalls, /^claims list --json$/m);
 
   const tenkiCalls = fs.readFileSync(tenkiLog, "utf8");
   assert.match(
@@ -1464,6 +1469,19 @@ esac
   );
   assert.doesNotMatch(tenkiCalls, /sandbox resume/);
   assert.equal(fs.readFileSync(stateFile, "utf8").trim(), "PAUSED");
+
+  for (const [name, claims] of [
+    ["malformed output", "not JSON"],
+    ["missing claims", '{"problems":[]}'],
+    ["unreadable claims", '{"claims":[],"problems":[{"error":"unreadable claim"}]}'],
+    ["retained claim", '{"claims":[{"leaseId":"cbx_123456789abc"}],"problems":[]}'],
+  ]) {
+    await t.test(`rejects ${name} as cleanup proof`, () => {
+      const failed = runSmoke(claims);
+      assert.notEqual(failed.status, 0, failed.stdout + failed.stderr);
+      assert.match(failed.stderr, /tenki stop did not confirm local claim removal/);
+    });
+  }
 });
 
 test("Machine0 live smoke proves guarded lifecycle, IP refresh, checkpoint, and cleanup", () => {
@@ -2178,11 +2196,12 @@ esac
   }
 });
 
-test("local-container live smoke uses the generic SSH lease lifecycle", () => {
+test("local-container live smoke uses the generic SSH lease lifecycle", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-local-container-"));
   const bin = path.join(dir, "bin");
   const fakeCrabbox = path.join(bin, "crabbox");
   const crabboxLog = path.join(dir, "crabbox.log");
+  const progressAck = path.join(dir, "progress-ack");
   fs.mkdirSync(bin);
   writeExecutable(
     fakeCrabbox,
@@ -2200,6 +2219,11 @@ printf '%s\\n' "$*" >>"\${CRABBOX_FAKE_LOG:?}"
 case "$1" in
   warmup)
     printf 'provisioning provider=local-container lease=cbx_123456789abc slug=local-container-smoke-test\\n'
+    for i in {1..200}; do
+      [[ -f "\${CRABBOX_PROGRESS_ACK:?}" ]] && break
+      sleep 0.05
+    done
+    [[ -f "\${CRABBOX_PROGRESS_ACK:?}" ]] || exit 92
     printf 'provisioned lease=cbx_123456789abc slug=local-container-smoke-test state=ready\\n'
     ;;
   status)
@@ -2234,24 +2258,41 @@ esac
 `,
   );
 
-  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
-    cwd: repoRoot,
-    env: {
-      ...process.env,
-      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
-      CRABBOX_BIN: fakeCrabbox,
-      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
-      CRABBOX_FAKE_LOG: crabboxLog,
-      CRABBOX_LIVE: "1",
-      CRABBOX_LIVE_COORDINATOR: "0",
-      CRABBOX_LIVE_PROVIDERS: "local-container",
-      CRABBOX_LIVE_REPO: repoRoot,
-    },
-    encoding: "utf8",
+  const result = await new Promise((resolve, reject) => {
+    const child = spawn("bash", ["scripts/live-smoke.sh"], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+        CRABBOX_BIN: fakeCrabbox,
+        CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+        CRABBOX_FAKE_LOG: crabboxLog,
+        CRABBOX_PROGRESS_ACK: progressAck,
+        CRABBOX_LIVE: "1",
+        CRABBOX_LIVE_COORDINATOR: "0",
+        CRABBOX_LIVE_PROVIDERS: "local-container",
+        CRABBOX_LIVE_REPO: repoRoot,
+      },
+      timeout: 15000,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      if (stdout.includes("provisioning provider=local-container") && !fs.existsSync(progressAck)) {
+        fs.writeFileSync(progressAck, "progress observed before warmup completed");
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
   });
 
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /crabbox-live-ok/);
+  assert.equal((result.stdout.match(/provisioning provider=local-container/g) ?? []).length, 1);
   const calls = fs.readFileSync(crabboxLog, "utf8");
   assert.match(calls, /^warmup --provider local-container --ttl 15m --idle-timeout 5m$/m);
   for (const command of ["status", "inspect", "ssh", "cache", "run", "stop"]) {
@@ -2260,15 +2301,20 @@ esac
   assert.doesNotMatch(calls, /^history(?: |$)/m);
 });
 
-test("generic coordinatorless live smoke cleans up after lifecycle failure", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-cleanup-failure-"));
-  const fakeCrabbox = path.join(dir, "crabbox");
-  const crabboxLog = path.join(dir, "crabbox.log");
-  writeExecutable(
-    fakeCrabbox,
-    `#!/usr/bin/env bash
+for (const failStep of ["warmup", "inspect", "run"]) {
+  test(`generic coordinatorless smoke preserves ${failStep} failure and cleanup`, () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-cleanup-failure-"));
+    const fakeCrabbox = path.join(dir, "crabbox");
+    const crabboxLog = path.join(dir, "crabbox.log");
+    writeExecutable(
+      fakeCrabbox,
+      `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\\n' "$*" >>"\${CRABBOX_FAKE_LOG:?}"
+if [[ "$1" == "\${CRABBOX_FAIL_STEP:?}" ]]; then
+  printf 'forced %s failure\\n' "$1" >&2
+  exit 42
+fi
 case "$1" in
   warmup)
     printf 'provisioned lease=cbx_123456789abc slug=cleanup-failure state=ready\\n'
@@ -2277,8 +2323,16 @@ case "$1" in
     printf 'lease=cbx_123456789abc slug=cleanup-failure state=ready\\n'
     ;;
   inspect)
-    printf 'forced inspect failure\\n' >&2
-    exit 42
+    printf '{}\\n'
+    ;;
+  ssh)
+    exit 0
+    ;;
+  cache)
+    printf '[]\\n'
+    ;;
+  run)
+    exit 98
     ;;
   stop)
     printf 'stopped %s\\n' "\${*: -1}"
@@ -2289,28 +2343,35 @@ case "$1" in
     ;;
 esac
 `,
-  );
+    );
 
-  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
-    cwd: repoRoot,
-    env: {
-      ...process.env,
-      CRABBOX_BIN: fakeCrabbox,
-      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
-      CRABBOX_FAKE_LOG: crabboxLog,
-      CRABBOX_LIVE: "1",
-      CRABBOX_LIVE_COORDINATOR: "0",
-      CRABBOX_LIVE_PROVIDERS: "local-container",
-      CRABBOX_LIVE_REPO: repoRoot,
-    },
-    encoding: "utf8",
+    const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        CRABBOX_BIN: fakeCrabbox,
+        CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+        CRABBOX_FAKE_LOG: crabboxLog,
+        CRABBOX_FAIL_STEP: failStep,
+        CRABBOX_LIVE: "1",
+        CRABBOX_LIVE_COORDINATOR: "0",
+        CRABBOX_LIVE_PROVIDERS: "local-container",
+        CRABBOX_LIVE_REPO: repoRoot,
+      },
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 42, result.stdout + result.stderr);
+    const calls = fs.readFileSync(crabboxLog, "utf8");
+    assert.match(result.stdout + result.stderr, new RegExp(`forced ${failStep} failure`));
+    if (failStep === "warmup") {
+      assert.doesNotMatch(calls, /^(?:status|inspect|run|stop) /m);
+    } else {
+      assert.match(calls, /^inspect --provider local-container /m);
+      assert.match(calls, /^stop --provider local-container cleanup-failure$/m);
+    }
   });
-
-  assert.equal(result.status, 42, result.stdout + result.stderr);
-  const calls = fs.readFileSync(crabboxLog, "utf8");
-  assert.match(calls, /^inspect --provider local-container /m);
-  assert.match(calls, /^stop --provider local-container cleanup-failure$/m);
-});
+}
 
 test("docker-sandbox live smoke dispatches to the provider-specific smoke", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-docker-sandbox-dispatch-"));

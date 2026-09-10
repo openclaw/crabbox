@@ -28,7 +28,6 @@ type api interface {
 	Exec(context.Context, string, string, string) (execResult, error)
 	ExecStream(context.Context, string, string, string, io.Writer) (int, error)
 	UploadFile(context.Context, string, string, string) error
-	WriteFile(context.Context, string, string, string) error
 }
 
 type client struct {
@@ -79,7 +78,7 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 			return nil, fmt.Errorf("%s HTTP client setup: %w", providerName, err)
 		}
 	}
-	base := strings.TrimRight(blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), "https://us-east-1.box.upstash.com"), "/")
+	base := strings.TrimRight(blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), core.UpstashBoxConfigDefaultBaseURL), "/")
 	trusted, _ := url.Parse(base)
 	return &client{apiKey: apiKey, base: base, http: shared.SecureHTTPClient(httpClient, trusted, upstashBoxRedirectError)}, nil
 }
@@ -280,11 +279,6 @@ func (c *client) UploadFile(ctx context.Context, boxID, localPath, remotePath st
 		return finishProducer(c.apiError(resp))
 	}
 	return finishProducer(nil)
-}
-
-func (c *client) WriteFile(ctx context.Context, boxID, remotePath, content string) error {
-	body := map[string]any{"path": remotePath, "content": content}
-	return c.doJSON(ctx, http.MethodPost, "/v2/box/"+url.PathEscape(boxID)+"/files/write", nil, body, nil)
 }
 
 func (c *client) doJSON(ctx context.Context, method, path string, query url.Values, body any, out any) error {

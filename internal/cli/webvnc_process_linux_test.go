@@ -4,6 +4,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -13,6 +14,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestWebVNCDaemonProcessStartIdentityFromProc(t *testing.T) {
@@ -70,7 +74,7 @@ func TestWebVNCDaemonStopDoesNotSignalPriorBootPID(t *testing.T) {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	stopped, err := (App{Stdout: &output, Stderr: io.Discard}).stopWebVNCDaemonIfRunning("prior-boot-workspace")
+	stopped, err := (App{Stdout: &output, Stderr: io.Discard}).stopWebVNCDaemonIfRunning(t.Context(), "prior-boot-workspace")
 	if err != nil || !stopped || !strings.Contains(output.String(), "removed prior-boot identity") {
 		t.Fatalf("prior-boot cleanup stopped=%t output=%q err=%v", stopped, output.String(), err)
 	}
@@ -128,4 +132,36 @@ func differentLinuxBootID(bootID string) string {
 		replacement = '1'
 	}
 	return string(replacement) + bootID[1:]
+}
+
+func TestSSHControlMasterReleaseDoesNotRequireReaping(t *testing.T) {
+	const child = "CRABBOX_TEST_SSH_SUBREAPER"
+	if os.Getenv(child) == "1" {
+		// Only this isolated test child adopts the daemonized native masters.
+		// Their exit must not depend on an unrelated PID 1 reaping them.
+		if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			// This subprocess runs only this fixture; ordinary exec children have
+			// already been waited, leaving just its adopted native SSH masters.
+			for {
+				pid, _ := unix.Wait4(-1, nil, unix.WNOHANG, nil)
+				if pid <= 0 {
+					break
+				}
+			}
+		})
+		testCoordinatorReleaseJoinsSSHControlMasters(t, "unreaped native masters")
+		return
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSSHControlMasterReleaseDoesNotRequireReaping$", "-test.v")
+	cmd.Env = append(os.Environ(), child+"=1")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native unreaped-master proof: %v\n%s", err, output)
+	}
+	t.Logf("%s", output)
 }

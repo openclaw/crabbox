@@ -1285,11 +1285,11 @@ func TestMorphReleaseUsesStoredPolicyAndPreservesPausedClaim(t *testing.T) {
 			if got := backend.RetainLeaseClaimAfterRelease(lease); got != tc.explicitRetain {
 				t.Fatalf("RetainLeaseClaimAfterRelease=%t release=%s", got, tc.release)
 			}
-			err = backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{
+			outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{
 				Lease: lease,
 			})
-			if err != nil {
-				t.Fatal(err)
+			if err != nil || outcome.Terminal != (tc.wantDeleteCalls == 1) {
+				t.Fatalf("release outcome=%+v err=%v", outcome, err)
 			}
 			if pauseCalls != tc.wantPauseCalls || deleteCalls != tc.wantDeleteCalls {
 				t.Fatalf("pauseCalls=%d deleteCalls=%d", pauseCalls, deleteCalls)
@@ -1570,4 +1570,154 @@ func testMorphConfig() Config {
 func configureMorphTestHome(t *testing.T) {
 	t.Helper()
 	testutil.IsolateUserDirs(t)
+}
+
+func TestMorphConfigFlagAndRoutingContract(t *testing.T) {
+	for _, provider := range []string{"morph", " MORPH ", "aws"} {
+		cfg := core.BaseConfig()
+		cfg.Provider = provider
+		cfg.Morph.APIKey = "inert"
+		cfg.Morph.Snapshot = "prior"
+		cfg.Morph.DeleteOnRelease = false
+		fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+		values := RegisterMorphProviderFlags(fs, cfg)
+		count := 0
+		fs.VisitAll(func(*flag.Flag) { count++ })
+		if count != 6 || fs.Lookup("morph-api-key") != nil {
+			t.Fatal("flag surface changed")
+		}
+		if err := fs.Parse([]string{"--morph-api-url=", "--morph-snapshot=flag-snapshot", "--morph-ssh-gateway-host=  ", "--morph-work-root=/workspace/flag", "--morph-delete-on-release=false", "--morph-wake-on-ssh=false"}); err != nil {
+			t.Fatal(err)
+		}
+		before := fmt.Sprintf("%#v", cfg)
+		if err := ApplyMorphProviderFlags(&cfg, fs, struct{}{}); err != nil {
+			t.Fatal(err)
+		}
+		if fmt.Sprintf("%#v", cfg) != before {
+			t.Fatal("wrong-type changed config")
+		}
+		if err := ApplyMorphProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want := MorphConfig{APIKey: "inert", Snapshot: "flag-snapshot", SSHGatewayHost: "  ", WorkRoot: "/workspace/flag"}
+		if provider != "aws" {
+			want.APIURL = "https://cloud.morph.so"
+			want.SSHGatewayHost = "ssh.cloud.morph.so"
+			if cfg.WorkRoot != "/workspace/flag" || cfg.ServerType != "flag-snapshot" {
+				t.Fatal("selected defaults no longer follow copies")
+			}
+		}
+		if cfg.Morph != want || !core.DeleteOnReleaseExplicit(cfg, "morph") {
+			t.Fatalf("flags provider=%q got=%#v want=%#v", provider, cfg.Morph, want)
+		}
+		args := Provider{}.CommandRouting(cfg, core.CommandRoutingRequest{}).Args
+		if !containsMorphConfigArg(args, "--morph-delete-on-release=false") || !containsMorphConfigArg(args, "--morph-wake-on-ssh=false") {
+			t.Fatalf("explicit false routing=%v", args)
+		}
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = "morph"
+	args := Provider{}.CommandRouting(cfg, core.CommandRoutingRequest{}).Args
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--morph-delete-on-release") {
+			t.Fatal("unmarked default emitted delete policy")
+		}
+	}
+	fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+	values := RegisterMorphProviderFlags(fs, cfg)
+	if err := ApplyMorphProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if core.DeleteOnReleaseExplicit(cfg, "morph") {
+		t.Fatal("unvisited default marked")
+	}
+	for _, value := range []bool{false, true} {
+		cfg.Morph.DeleteOnRelease = value
+		core.MarkDeleteOnReleaseExplicit(&cfg, "morph")
+		if !containsMorphConfigArg(Provider{}.CommandRouting(cfg, core.CommandRoutingRequest{}).Args, fmt.Sprintf("--morph-delete-on-release=%t", value)) {
+			t.Fatal("explicit routing value lost")
+		}
+	}
+}
+
+func containsMorphConfigArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestMorphConfigFlagPhaseContract(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{{[]string{"--type=machine", "--class="}, "--class is not supported for provider=morph"}, {[]string{"--type="}, "--type is not supported for provider=morph; use --morph-snapshot"}, {nil, "provider=morph supports target=linux only"}} {
+		cfg := core.BaseConfig()
+		cfg.Provider = " MORPH "
+		cfg.TargetOS = "windows"
+		fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+		fs.String("class", "", "")
+		fs.String("type", "", "")
+		RegisterMorphProviderFlags(fs, cfg)
+		if err := fs.Parse(append(tc.args, "--morph-delete-on-release=false")); err != nil {
+			t.Fatal(err)
+		}
+		before := fmt.Sprintf("%#v", cfg)
+		err := ApplyMorphProviderFlags(&cfg, fs, struct{}{})
+		var exitErr core.ExitError
+		if err == nil || err.Error() != tc.want || !errors.As(err, &exitErr) || exitErr.Code != 2 {
+			t.Fatalf("err=%v want=%q", err, tc.want)
+		}
+		if fmt.Sprintf("%#v", cfg) != before {
+			t.Fatal("rejection changed config/explicit marker")
+		}
+	}
+}
+
+func TestMorphConfigEffectiveDefaultsContract(t *testing.T) {
+	for _, tc := range []struct{ morph, generic, want string }{{"", "", "/tmp/crabbox"}, {"  ", "/work/crabbox", "/tmp/crabbox"}, {"", "/Users/ec2-user/crabbox", "/tmp/crabbox"}, {"", `C:\crabbox`, "/tmp/crabbox"}, {"", "/workspace/generic", "/workspace/generic"}, {" /workspace/morph ", "/workspace/generic", " /workspace/morph "}} {
+		cfg := Config{WorkRoot: tc.generic, Morph: MorphConfig{APIURL: "  ", SSHGatewayHost: "  ", WorkRoot: tc.morph}, SSHPort: "1234", SSHFallbackPorts: []string{"5678"}}
+		applyMorphDefaults(&cfg)
+		if cfg.Morph.APIURL != "https://cloud.morph.so" || cfg.Morph.SSHGatewayHost != "ssh.cloud.morph.so" || cfg.Morph.WorkRoot != tc.want || cfg.WorkRoot != tc.want || cfg.Morph.WakeOnSSH || cfg.Provider != "morph" || cfg.TargetOS != "linux" || cfg.SSHPort != "22" || len(cfg.SSHFallbackPorts) != 0 || cfg.ServerType != "snapshot" {
+			t.Fatalf("defaults roots=%q/%q cfg=%#v", tc.morph, tc.generic, cfg.Morph)
+		}
+	}
+	for _, tc := range []struct {
+		root string
+		want bool
+	}{{"", true}, {" /tmp/crabbox ", true}, {"/work/crabbox", true}, {"/Users/ec2-user/crabbox", true}, {`C:\crabbox`, true}, {"/workspace/custom", false}, {"/tmp/crabbox/", false}} {
+		if got := isDefaultMorphWorkRoot(tc.root); got != tc.want {
+			t.Fatalf("root=%q default=%t want=%t", tc.root, got, tc.want)
+		}
+	}
+	backend, err := NewMorphBackend(Provider{}.Spec(), Config{}, Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backend.(*morphLeaseBackend).cfg.Morph.WakeOnSSH {
+		t.Fatal("raw zero WakeOnSSH was defaulted true")
+	}
+}
+
+func TestMorphConfigEndpointAndPresentationContract(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{{"", "https://cloud.morph.so/api"}, {"  ", "https://cloud.morph.so/api"}, {" https://fixture.example/ ", "https://fixture.example/api"}} {
+		got, err := normalizeMorphAPIURL(tc.raw)
+		if err != nil || got != tc.want {
+			t.Fatalf("normalizer=%q err=%v want=%q", got, err, tc.want)
+		}
+	}
+	for _, tc := range []struct{ raw, want string }{{"", "ssh.cloud.morph.so"}, {"  ", "ssh.cloud.morph.so"}, {" gateway.example ", "gateway.example"}} {
+		cfg := Config{Morph: MorphConfig{SSHGatewayHost: tc.raw}}
+		instance := morphInstance{ID: "inst_fixture", Status: "ready"}
+		server := morphServer(instance, cfg, "cbx_fixture", "fixture")
+		if server.PublicNet.IPv4.IP != tc.want {
+			t.Fatalf("presentation gateway=%q want=%q", server.PublicNet.IPv4.IP, tc.want)
+		}
+		target := morphSSHTarget(cfg, instance, "/fixture/key", "/fixture/known-hosts")
+		if target.Host != tc.want || target.User != "inst_fixture" || target.Port != "22" {
+			t.Fatalf("target struct=%#v", target)
+		}
+	}
 }

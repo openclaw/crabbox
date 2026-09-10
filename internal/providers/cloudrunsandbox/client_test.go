@@ -4,16 +4,76 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"os/exec"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
+
+func TestCloudRunNativeExitFixture(t *testing.T) {
+	if value := os.Getenv("CRABBOX_CLOUDRUN_EXIT_FIXTURE"); value != "" {
+		code, err := strconv.Atoi(value)
+		if err != nil {
+			os.Exit(99)
+		}
+		os.Exit(code)
+	}
+}
+
+func cloudRunNativeExit(t *testing.T, code int) error {
+	t.Helper()
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, "-test.run=^TestCloudRunNativeExitFixture$")
+	cmd.Env = append(os.Environ(), "CRABBOX_CLOUDRUN_EXIT_FIXTURE="+strconv.Itoa(code))
+	err = cmd.Run()
+	if !core.IsPlainLocalCommandExit(core.LocalCommandResult{ExitCode: code}, err) {
+		t.Fatalf("native fixture did not establish plain exit %d: %v", code, err)
+	}
+	return err
+}
+
+func TestDirectTransportExecPreservesNativeBoundary(t *testing.T) {
+	plain := cloudRunNativeExit(t, 23)
+	for _, tc := range []struct {
+		name  string
+		code  int
+		err   error
+		plain bool
+	}{
+		{name: "plain exit", code: 23, err: plain, plain: true},
+		{name: "wrapped exit", code: 23, err: fmt.Errorf("transport: %w", plain)},
+		{name: "joined exit", code: 23, err: errors.Join(plain, io.ErrUnexpectedEOF)},
+		{name: "mismatched exit", code: 17, err: plain},
+		{name: "nonzero transport", code: 23, err: io.ErrUnexpectedEOF},
+		{name: "canceled exit", code: 23, err: errors.Join(plain, context.Canceled)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := &directTransport{rt: Runtime{Exec: recordingLocalExec{handler: func(LocalCommandRequest) (LocalCommandResult, error) {
+				return LocalCommandResult{ExitCode: tc.code}, tc.err
+			}}}}
+			code, err := transport.Exec(t.Context(), "fixture", "true", execOptions{}, io.Discard, io.Discard)
+			if code != tc.code || tc.plain && err != nil || !tc.plain && !errors.Is(err, tc.err) {
+				t.Fatalf("code=%d err=%v", code, err)
+			}
+		})
+	}
+}
 
 func TestValidateGatewayURL(t *testing.T) {
 	t.Parallel()
@@ -73,6 +133,55 @@ func TestRemoteRequestBody(t *testing.T) {
 	}
 	if body["rootfs"] != "override" || body["workdir"] != "/work" || body["cwd"] != "/work" || body["command"] != "echo ok" {
 		t.Fatalf("unexpected optional body: %#v", body)
+	}
+}
+
+func TestCloudRunOperationOptionsKeepRawConfigSemantics(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		cfg             Config
+		opts            runOptions
+		args            []string
+		write, egress   bool
+		rootfs, workdir string
+	}{
+		{name: "raw zero"},
+		{name: "base", cfg: core.BaseConfig(), args: []string{"--rootfs", "/", "--workdir", "/tmp/crabbox", "--write"}, write: true, rootfs: "/", workdir: "/tmp/crabbox"},
+		{name: "option priority", cfg: Config{CloudRunSandbox: CloudRunSandboxConfig{Rootfs: "/base", Workdir: "/base", Write: true}}, opts: runOptions{Rootfs: "/option", Workdir: "/option", AllowEgress: true}, args: []string{"--allow-egress", "--rootfs", "/option", "--workdir", "/option", "--write"}, write: true, egress: true, rootfs: "/option", workdir: "/option"},
+		{name: "config OR", cfg: Config{CloudRunSandbox: CloudRunSandboxConfig{AllowEgress: true}}, opts: runOptions{Write: true}, args: []string{"--allow-egress", "--write"}, write: true, egress: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			direct := &directTransport{cfg: tc.cfg}
+			if got := direct.pushRunArgs(nil, tc.opts); !reflect.DeepEqual(got, tc.args) {
+				t.Fatalf("args=%v want=%v", got, tc.args)
+			}
+			body := (&remoteTransport{cfg: tc.cfg}).requestBody("example", tc.opts, nil)
+			if body["write"] != tc.write || body["allowEgress"] != tc.egress {
+				t.Fatalf("booleans=%v", body)
+			}
+			for key, want := range map[string]string{"rootfs": tc.rootfs, "workdir": tc.workdir, "cwd": tc.workdir} {
+				got, present := body[key]
+				if (want == "" && present) || (want != "" && got != want) {
+					t.Fatalf("%s=%v present=%t want=%q", key, got, present, want)
+				}
+			}
+		})
+	}
+	cfg := core.BaseConfig()
+	cfg.CloudRunSandbox.Workdir = "/tmp/custom"
+	var calls []LocalCommandRequest
+	transport := &directTransport{cfg: cfg, rt: Runtime{Exec: recordingLocalExec{handler: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		calls = append(calls, req)
+		return LocalCommandResult{}, nil
+	}}}}
+	if err := transport.Create(context.Background(), "example", runOptions{OwnershipToken: "example", Workdir: "/tmp/option"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("recorded calls=%d", len(calls))
+	}
+	if strings.Contains(strings.Join(calls[0].Args, " "), "--workdir") {
+		t.Fatal("keeper must omit configured and option workdir")
 	}
 }
 
@@ -141,8 +250,8 @@ func TestRemoteTransportLifecycle(t *testing.T) {
 		cfg: Config{
 			CloudRunSandbox: CloudRunSandboxConfig{
 				GatewayURL: server.URL,
-				CLIPath:    defaultCLIPath,
-				Workdir:    defaultWorkdir,
+				CLIPath:    "/usr/local/gcp/bin/sandbox",
+				Workdir:    "/tmp/crabbox",
 				Write:      true,
 			},
 		},
@@ -234,7 +343,7 @@ func TestNewTransportRemoteAndDirect(t *testing.T) {
 	t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_AUTH_TOKEN", "")
 	_, err := newTransport(Config{CloudRunSandbox: CloudRunSandboxConfig{
 		GatewayURL: "https://gw.example.run.app",
-		CLIPath:    defaultCLIPath,
+		CLIPath:    "/usr/local/gcp/bin/sandbox",
 	}}, Runtime{})
 	if err == nil || !strings.Contains(err.Error(), "requires CLOUD_RUN_SANDBOX_SECRET") {
 		t.Fatalf("expected secret requirement, got %v", err)
@@ -244,7 +353,7 @@ func TestNewTransportRemoteAndDirect(t *testing.T) {
 	t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_AUTH_TOKEN", "tok")
 	transport, err := newTransport(Config{CloudRunSandbox: CloudRunSandboxConfig{
 		GatewayURL: "https://gw.example.run.app/",
-		CLIPath:    defaultCLIPath,
+		CLIPath:    "/usr/local/gcp/bin/sandbox",
 	}}, Runtime{})
 	if err != nil {
 		t.Fatalf("remote newTransport: %v", err)
@@ -258,7 +367,7 @@ func TestNewTransportRemoteAndDirect(t *testing.T) {
 	}
 
 	// Direct mode requires Runtime.Exec.
-	_, err = newTransport(Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath}}, Runtime{})
+	_, err = newTransport(Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox"}}, Runtime{})
 	if err == nil || !strings.Contains(err.Error(), "requires Runtime.Exec") {
 		t.Fatalf("expected Exec requirement, got %v", err)
 	}

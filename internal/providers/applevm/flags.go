@@ -95,13 +95,10 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		if applevmhelper.IsRemoteImageRef(image) {
 			return exit(2, "--apple-vm-image accepts local paths only; use CRABBOX_APPLE_VM_IMAGE or configuration for remote URLs")
 		}
-		cfg.AppleVM.Image = image
-		cfg.AppleVM.ImageSHA256 = ""
-		core.MarkAppleVMImageExplicit(cfg)
+		core.ApplyAppleVMImage(cfg, image)
 	}
 	if checksum, set := stringFlag(fs, "apple-vm-image-sha256", v.ImageSHA256, "apple-vz-image-sha256", v.LegacyImageSHA256); set {
-		cfg.AppleVM.ImageSHA256 = strings.TrimSpace(checksum)
-		core.MarkAppleVMImageSHA256Explicit(cfg)
+		core.ApplyAppleVMImageSHA256(cfg, strings.TrimSpace(checksum))
 	}
 	if user, set := stringFlag(fs, "apple-vm-user", v.User, "apple-vz-user", v.LegacyUser); set {
 		cfg.AppleVM.User = strings.TrimSpace(user)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"path"
 	"regexp"
 	"strings"
@@ -110,7 +111,16 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 func (b *backend) rollbackBox(ctx context.Context, client api, leaseID string, box boxData, claim LeaseClaim, exists bool) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), boxReleaseTimeout)
 	defer cancel()
-	return core.CleanupLeaseClaimIfUnchangedAfter(leaseID, claim, exists, func() error {
+	if exists {
+		if claim.LeaseID != leaseID || box.ID != box.createdID || !concreteBoxID(box.createdID) {
+			return exit(2, "ascii-box rollback has no matching original publication identity")
+		}
+		if err := validateBoxIdentity(box, boxFromClaim(claim)); err != nil {
+			return err
+		}
+		return releaseClaimedBox(cleanupCtx, client, claim, nil)
+	}
+	return core.CleanupLeaseClaimIfUnchangedAfter(leaseID, claim, false, func() error {
 		if box.ID != box.createdID || !concreteBoxID(box.createdID) {
 			return exit(2, "ascii-box rollback has no original creation identity")
 		}
@@ -124,7 +134,7 @@ func (b *backend) rollbackBox(ctx context.Context, client api, leaseID string, b
 			}
 			box = mergeBox(box, fresh)
 		}
-		return releaseExactBox(cleanupCtx, client, box, nil)
+		return releaseExactBox(cleanupCtx, client, box, nil, nil)
 	})
 }
 
@@ -159,9 +169,21 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 				return err
 			}
 		}
-		box, err := client.GetBox(ctx, claim.CloudID)
-		if err != nil {
-			return err
+		var box boxData
+		if req.ReleaseOnly {
+			var absent bool
+			box, absent, err = exactBoxForRelease(ctx, client, boxFromClaim(claim))
+			if err != nil {
+				return err
+			}
+			if absent {
+				box = boxFromClaim(claim)
+			}
+		} else {
+			box, err = client.GetBox(ctx, claim.CloudID)
+			if err != nil {
+				return err
+			}
 		}
 		if err := validateBoxIdentity(box, boxFromClaim(claim)); err != nil {
 			return err
@@ -286,8 +308,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	if err != nil {
 		return err
 	}
-	want, err := boxClaimBinding(cfg, claim)
-	if err != nil {
+	if _, err := boxClaimBinding(cfg, claim); err != nil {
 		return err
 	}
 	if req.Lease.LeaseID != claim.LeaseID || req.Lease.Server.CloudID != claim.CloudID || req.Lease.Server.Labels["box_id"] != claim.CloudID {
@@ -295,17 +316,15 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	}
 	ctx, cancel := context.WithTimeout(ctx, boxReleaseTimeout)
 	defer cancel()
-	return shared.RemoveExactClaimAfter(claim, want, func() error {
-		return releaseExactBox(ctx, client, boxFromClaim(claim), func(box boxData) {
-			if req.GuardedRemoteCleanup != nil {
-				lease := req.Lease
-				lease.Server = boxToServer(cfg, box, claim.LeaseID, claim.Slug, true)
-				if target, err := boxSSHTarget(cfg, box); err == nil {
-					lease.SSH = target
-					req.GuardedRemoteCleanup(ctx, lease)
-				}
+	return releaseClaimedBox(ctx, client, claim, func(box boxData) {
+		if req.GuardedRemoteCleanup != nil {
+			lease := req.Lease
+			lease.Server = boxToServer(cfg, box, claim.LeaseID, claim.Slug, true)
+			if target, err := boxSSHTarget(cfg, box); err == nil {
+				lease.SSH = target
+				req.GuardedRemoteCleanup(ctx, lease)
 			}
-		})
+		}
 	})
 }
 
@@ -470,6 +489,12 @@ func boxToServer(cfg Config, box boxData, leaseID, slug string, keep bool) Serve
 func statusFromBox(cfg Config, box boxData, leaseID, slug string) StatusView {
 	server := boxToServer(cfg, box, leaseID, slug, true)
 	host := boxHost(box)
+	sshHost := host
+	port := "22"
+	if endpointHost, endpointPort, err := boxSSHConnection(box); err == nil {
+		sshHost = endpointHost
+		port = endpointPort
+	}
 	user := boxSSHUser(box)
 	return StatusView{
 		ID:         leaseID,
@@ -481,9 +506,9 @@ func statusFromBox(cfg Config, box boxData, leaseID, slug string) StatusView {
 		ServerType: server.ServerType.Name,
 		Host:       host,
 		Network:    networkPublic,
-		SSHHost:    host,
+		SSHHost:    sshHost,
 		SSHUser:    user,
-		SSHPort:    "22",
+		SSHPort:    port,
 		SSHKey:     boxSSHKey(cfg),
 		ExpiresAt:  boxExpiresAt(box),
 		Labels:     server.Labels,
@@ -493,9 +518,9 @@ func statusFromBox(cfg Config, box boxData, leaseID, slug string) StatusView {
 }
 
 func boxSSHTarget(cfg Config, box boxData) (SSHTarget, error) {
-	host := boxHost(box)
-	if host == "" {
-		return SSHTarget{}, exit(5, "ascii-box %s is missing ip for SSH", box.ID)
+	host, port, err := boxSSHConnection(box)
+	if err != nil {
+		return SSHTarget{}, err
 	}
 	user := boxSSHUser(box)
 	if user == "" {
@@ -505,12 +530,27 @@ func boxSSHTarget(cfg Config, box boxData) (SSHTarget, error) {
 		User:            user,
 		Host:            host,
 		Key:             boxSSHKey(cfg),
-		Port:            "22",
+		Port:            port,
 		TargetOS:        targetLinux,
 		NetworkKind:     networkPublic,
 		NoControlMaster: true,
 		ReadyCheck:      "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null",
 	}, nil
+}
+
+func boxSSHConnection(box boxData) (string, string, error) {
+	if endpoint := strings.TrimSpace(firstNonBlank(box.SSHEndpoint, box.SSHEndpointAlt)); endpoint != "" {
+		host, port, err := net.SplitHostPort(endpoint)
+		if err != nil || strings.TrimSpace(host) == "" || strings.TrimSpace(port) == "" {
+			return "", "", exit(5, "ascii-box %s has invalid SSH endpoint %q", box.ID, endpoint)
+		}
+		return strings.TrimSpace(host), strings.TrimSpace(port), nil
+	}
+	host := boxHost(box)
+	if host == "" {
+		return "", "", exit(5, "ascii-box %s is missing ip for SSH", box.ID)
+	}
+	return host, "22", nil
 }
 
 func boxSSHKey(cfg Config) string {
@@ -625,6 +665,10 @@ func boxClaimsByID(cfg Config) (map[string]LeaseClaim, error) {
 
 func isNotFound(err error) bool {
 	if err == nil {
+		return false
+	}
+	var identityErr *boxIdentityError
+	if errors.As(err, &identityErr) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())

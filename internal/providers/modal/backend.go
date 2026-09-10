@@ -31,7 +31,7 @@ const (
 func (b *modalBackend) Spec() ProviderSpec { return b.spec }
 
 func (b *modalBackend) Warmup(ctx context.Context, req WarmupRequest) error {
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	client, err := newModalAPI(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -45,18 +45,13 @@ func (b *modalBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: modal warmup keeps the sandbox until explicit stop\n")
 	}
-	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  leaseID,
-			Slug:     slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	total := core.ClockNow(b.rt.Clock).Sub(started)
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
 
 func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
@@ -96,7 +91,7 @@ func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
 			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-modal-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+				TempPattern: "crabbox-modal-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 			})
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
@@ -140,6 +135,7 @@ func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
 			var cleanup func(context.Context)
+			var closeCommand func(context.Context) error
 			if len(req.Env) > 0 {
 				var envPath string
 				err = fenced(func() error {
@@ -147,12 +143,18 @@ func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 					envPath, cleanup, err = b.uploadEnvProfile(ctx, client, claim, req.Env)
 					return err
 				})
-				if err != nil {
-					return shared.DelegatedSandboxCommand{Close: cleanup}, err
+				if cleanup != nil {
+					closeCommand = func(ctx context.Context) error {
+						cleanup(ctx)
+						return nil
+					}
 				}
-				command = wrapModalCommandWithEnvProfile(command, envPath)
+				if err != nil {
+					return shared.DelegatedSandboxCommand{Close: closeCommand}, err
+				}
+				command = shared.WrapCommandWithShellEnvProfile(command, envPath)
 			}
-			return shared.DelegatedSandboxCommand{Close: cleanup, Run: func(ctx context.Context) (int, error) {
+			return shared.DelegatedSandboxCommand{Close: closeCommand, Run: func(ctx context.Context) (int, error) {
 				var code int
 				err := fenced(func() error {
 					var err error
@@ -205,9 +207,9 @@ func (b *modalBackend) Status(ctx context.Context, req StatusRequest) (StatusVie
 	if err != nil {
 		return StatusView{}, err
 	}
-	deadline := b.now().Add(req.WaitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
 	if req.WaitTimeout <= 0 {
-		deadline = b.now().Add(5 * time.Minute)
+		deadline = core.ClockNow(b.rt.Clock).Add(5 * time.Minute)
 	}
 	for {
 		sandbox, err := client.GetSandbox(ctx, sandboxID)
@@ -218,7 +220,7 @@ func (b *modalBackend) Status(ctx context.Context, req StatusRequest) (StatusVie
 		if !req.Wait || view.Ready {
 			return view, nil
 		}
-		if b.now().After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return StatusView{}, exit(5, "timed out waiting for modal sandbox %s to become ready", sandboxID)
 		}
 		select {
@@ -261,7 +263,7 @@ func (b *modalBackend) createSandbox(ctx context.Context, client modalAPI, repo 
 	cfg := b.cfg
 	cfg.TTL = modalTimeoutDuration(cfg.TTL)
 	cfg.ServerType = modalImage(cfg)
-	labels := modalSandboxTags(cfg, leaseID, slug, repo.Name, keep, b.now().UTC())
+	labels := modalSandboxTags(cfg, leaseID, slug, repo.Name, keep, core.ClockNow(b.rt.Clock).UTC())
 	timeoutSeconds := durationSecondsCeil(cfg.TTL)
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=modal lease=%s slug=%s app=%s image=%s timeout=%ds\n", leaseID, slug, modalApp(cfg), modalImage(cfg), timeoutSeconds)
 	sandbox, err := client.CreateSandbox(ctx, modalCreateSandboxRequest{
@@ -440,15 +442,15 @@ func isCrabboxModalSandbox(sandbox modalSandbox) bool {
 }
 
 func modalApp(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Modal.App), "crabbox")
+	return blank(strings.TrimSpace(cfg.Modal.App), core.ModalConfigDefaultApp)
 }
 
 func modalImage(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Modal.Image), "python:3.13-slim")
+	return blank(strings.TrimSpace(cfg.Modal.Image), core.ModalConfigDefaultImage)
 }
 
 func modalWorkdir(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Modal.Workdir), "/workspace/crabbox")
+	return blank(strings.TrimSpace(cfg.Modal.Workdir), core.ModalConfigDefaultWorkdir)
 }
 
 func cleanModalWorkdir(workdir string) (string, error) {
@@ -522,11 +524,4 @@ func modalError(action string, err error) error {
 		return nil
 	}
 	return fmt.Errorf("modal %s: %w", action, err)
-}
-
-func (b *modalBackend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }

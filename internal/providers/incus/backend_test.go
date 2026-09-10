@@ -1692,8 +1692,8 @@ func TestReleaseLeaseRetainsStoppedInstanceWhenDeleteOnReleaseFalse(t *testing.T
 	if !b.RetainLeaseClaimAfterRelease(lease) {
 		t.Fatal("explicit retain policy did not override stored delete policy")
 	}
-	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
-		t.Fatal(err)
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil || outcome.Terminal {
+		t.Fatalf("stop outcome=%+v err=%v", outcome, err)
 	}
 	if len(fake.deleted) != 0 {
 		t.Fatalf("deleted=%v want retained instance to be stopped, not deleted", fake.deleted)
@@ -1821,8 +1821,8 @@ func TestReleaseLeaseDeleteOnReleaseFinalizesClaimAndRemovesKey(t *testing.T) {
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
 	lease := core.LeaseTarget{LeaseID: "cbx_delete12345", Server: core.Server{Name: "crabbox-delete", CloudID: "crabbox-delete", Labels: map[string]string{"lease": "cbx_delete12345", "slug": "delete-slug"}}}
-	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
-		t.Fatal(err)
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil || !outcome.Terminal {
+		t.Fatalf("delete outcome=%+v err=%v", outcome, err)
 	}
 	if len(fake.deleted) != 1 || fake.deleted[0] != "crabbox-delete" {
 		t.Fatalf("deleted=%v want crabbox-delete removed", fake.deleted)
@@ -1836,6 +1836,11 @@ func TestReleaseLeaseDeleteOnReleaseFinalizesClaimAndRemovesKey(t *testing.T) {
 	}
 	if claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "released" {
 		t.Fatalf("expected delete-on-release to finalize durable claim, got %#v", claim)
+	}
+	b.cfg.Incus.DeleteOnRelease = false
+	core.MarkDeleteOnReleaseExplicit(&b.cfg, providerName)
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil || !outcome.Terminal || len(fake.deleted) != 1 {
+		t.Fatalf("terminal receipt under stop policy: outcome=%+v err=%v deletes=%v", outcome, err, fake.deleted)
 	}
 	keyPath, err := core.TestboxKeyPath("cbx_delete12345")
 	if err != nil {

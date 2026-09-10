@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type backend struct {
@@ -115,7 +117,7 @@ func (b backend) Status(ctx context.Context, req StatusRequest) (StatusView, err
 		pollCtx, cancel = context.WithTimeout(ctx, waitTimeout)
 	}
 	defer cancel()
-	deadline := b.now().Add(waitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(waitTimeout)
 	for {
 		sb, getErr := b.client().GetSandbox(pollCtx, sandboxID)
 		if getErr == nil && claimed {
@@ -160,7 +162,7 @@ func (b backend) Status(ctx context.Context, req StatusRequest) (StatusView, err
 		if isTerminalState(state) {
 			return StatusView{}, exit(5, "CUA sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
-		if b.now().After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return StatusView{}, exit(5, "timed out waiting for CUA sandbox %s to become ready", sandboxID)
 		}
 		select {
@@ -207,13 +209,6 @@ func (b backend) serverFromSandbox(claim LeaseClaim, sb bridgeSandboxSummary) Se
 func (b backend) claimMatchesActiveScope(claim LeaseClaim) bool {
 	scope, err := cuaScope(b.cfg)
 	return err == nil && claim.ProviderScope == scope
-}
-
-func (b backend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }
 
 func normalizedSandboxState(sb bridgeSandboxSummary) string {
