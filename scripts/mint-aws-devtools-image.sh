@@ -787,9 +787,10 @@ smoke_script() {
   smoke_script_value=""
   IFS= read -r -d '' smoke_script_value <"$smoke_script_path" || [[ -n "$smoke_script_value" ]] || return 1
   if [[ "$target" == "linux" ]]; then
-    local expected_node_major="" archive_probe=":"
+    local expected_node_major="" expected_pnpm_version="" archive_probe=":"
     if [[ "$linux_developer_builder" == "1" ]]; then
       [[ "$linux_node_major" == "24" ]] || expected_node_major="$linux_node_major"
+      expected_pnpm_version="$linux_pnpm_version"
       # Only the bundled builder declares archives. Freeze its selection, not guest environment.
       archive_probe="$(
         CRABBOX_LINUX_NODE_MAJOR="$linux_node_major" \
@@ -810,8 +811,8 @@ smoke_script() {
       )" || return $?
       archive_probe+=$'\n'"$go_archive_probe"$'\n'"$bun_archive_probe"$'\n'"$rust_archive_probe"$'\n'"$uv_archive_probe"
     fi
-    printf -v smoke_script_value 'set -euo pipefail\nexpected_node_major=%q\ndeveloper_archive_probe() {\n%s\n}\n%s' \
-      "$expected_node_major" "$archive_probe" "$smoke_script_value"
+    printf -v smoke_script_value 'set -euo pipefail\nexpected_node_major=%q\nexpected_pnpm_version=%q\ndeveloper_archive_probe() {\n%s\n}\n%s' \
+      "$expected_node_major" "$expected_pnpm_version" "$archive_probe" "$smoke_script_value"
   fi
 }
 

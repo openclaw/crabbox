@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Activate and verify Linux developer-image pnpm defaults as the intended runtime user, reject stale candidate defaults offline, and preserve bounded browser failure evidence without retries or longer smoke limits. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
+
 - Keep Linux developer-image smoke scripts valid when rendered by Bash 5.2, and link the C++ native-library probe against older libxdo C headers. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
 
 - Expand Linux developer images with native CMake/Ninja and desktop/media build libraries, pinned user-owned Rust and uv toolchains, offline Python wheel checks, and a guarded Go 1.27.0-to-1.27.1 migration. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.

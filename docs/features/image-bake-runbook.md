@@ -504,6 +504,21 @@ installer's pnpm default of 11.1.0. Existing `CRABBOX_LINUX_PNPM_VERSION` and
 the existing ARM installer route retain the fingerprint-checked NodeSource
 path; this recipe does not add an ARM image.
 
+The installer activates pnpm through Corepack as the NSS account named by
+`SUDO_USER`, or `CRABBOX_SSH_USER` when there is no sudo user. With neither
+selector, it uses root; an explicit valid root selector is also supported for
+pnpm. Unknown accounts and unsafe or malformed owned Corepack paths stop
+preparation before Node or Corepack changes. Rust retains its separate nonroot
+Bash-account requirement.
+
+Corepack writes its own `lastKnownGood.json` in that account's normal home,
+replacing an existing pnpm default when necessary while preserving other
+manager entries. No root cache is copied into the runtime home. Activation,
+ordinary offline `pnpm --version` verification, and version reporting use the
+same clean account environment without changing shell startup files or project
+pins. Activation or verification failure stops the installer before readiness
+and fast-boot preparation.
+
 For a nondefault Node major, the installer selects an exact native-architecture
 version from that major's fingerprint-checked NodeSource repository. An explicit
 `CRABBOX_LINUX_NODE_MAJOR=22` permits replacing an installed Node 24 package with
@@ -522,7 +537,7 @@ this does not add packaging for newer Node majors.
 The mint wrapper applies this archive contract only when its selected prep
 script is the bundled Linux builder. It forwards the existing
 `CRABBOX_LINUX_NODE_MAJOR` and `CRABBOX_LINUX_PNPM_VERSION` overrides to that
-builder and freezes the same Node-major declaration into each smoke. The smoke
+builder and freezes the same Node-major and pnpm-version declarations into each smoke. The smoke
 checks the guest's Debian package architecture, not the mint host's architecture.
 Only Node major 24 on guest `amd64` requires the Node/pnpm archives. Go, Bun, Rust and uv
 have independent Linux `amd64` contracts, including when the Node major is
@@ -716,6 +731,15 @@ whole script as root. Enabled browser and desktop checks render local HTML and
 capture the active display. When both are enabled, the smoke verifies pixels
 from its own browser window on that display. Cleanup stops only that browser
 and removes disposable files, containers, and the test image on success or failure.
+Browser execution remains a single invocation with a 30-second limit and bounded
+forced termination. Before removing its temporary files, each browser probe
+records its command exit status and elapsed time, a capped static-fixture DOM excerpt,
+redacted stderr diagnostics, wrapper/package identity, and at most two
+samples of owned-process state, CPU ticks, memory and I/O. It does not dump
+arguments, environments, arbitrary DOM or raw stderr. Failed visible-render
+assertions relay this observation even when the browser exited zero. Diagnostic collection
+does not replace the original timeout, signal or command failure status.
+These diagnostics do not establish or repair the cause of a browser hang.
 
 Later managed Linux boots independently rerun the declared readiness probes
 before skipping baseline APT. A successful post-boot smoke proves current
@@ -725,9 +749,12 @@ Keep scenario state out of the source image as described in
 request, network readiness, bootstrap, and end-to-end time before and after each bake.
 
 Linux source, candidate, and promoted smokes require a nonroot user and execute
-the normal `pnpm --version` command in that user's existing environment, preserving
-its readiness check and first-use cache warming. This normal command is not
-used to authenticate cached archives or skip their verification.
+the normal `pnpm --version` command with network access disabled in a
+manifest-free temporary directory, using that user's existing Corepack home.
+The bundled builder requires the selected pnpm version; custom prep does not
+declare a pnpm pin. Smoke never activates or repairs the default, bypasses
+project selection, or warms a missing package from the network. This normal
+command is not used to authenticate cached archives or skip their verification.
 
 For the bundled Node-24/amd64 builder, each smoke additionally revalidates public
 archive bytes in private temporary directories. It executes fresh Node and both

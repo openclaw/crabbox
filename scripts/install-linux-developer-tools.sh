@@ -673,20 +673,87 @@ install_node_runtime() {
       apt_install nodejs || return $?
     fi
   fi
-  command -v npm >/dev/null
-  command -v corepack >/dev/null
+  command -v npm >/dev/null || return $?
+  command -v corepack >/dev/null || return $?
   if [[ "$use_pinned_node" == "0" ]]; then
     corepack enable
   fi
 }
 
 install_node_pnpm() {
+  local runtime_user runtime_home runtime_uid runtime_shell actual
+  resolve_runtime_user root-allowed || return $?
+  check_runtime_corepack_state || return $?
   install_node_runtime || return $?
   if pinned_node_supported; then
     cache_public_toolchain_archives || return $?
   fi
-  corepack prepare "pnpm@$pnpm_version" --activate
-  command -v pnpm >/dev/null
+  # Corepack activation belongs to the account that will run pnpm, not sudo's
+  # root cache. Let Corepack update its own metadata, preserving other managers.
+  check_runtime_corepack_state || return $?
+  run_runtime_user corepack prepare "pnpm@$pnpm_version" --activate || return $?
+  actual="$(run_runtime_user env COREPACK_ENABLE_NETWORK=0 pnpm --version)" || return $?
+  [[ "$actual" == "$pnpm_version" ]] || {
+    log "runtime pnpm version differs from requested $pnpm_version"
+    return 1
+  }
+}
+
+check_runtime_corepack_state() {
+  run_runtime_user python3 - "$runtime_uid" "$pnpm_version" <<'PY'
+import json
+import os
+import pathlib
+import stat
+import sys
+home = pathlib.Path.home()
+uid = int(sys.argv[1])
+def fail():
+    sys.exit("linux-tools: unsafe or malformed runtime Corepack state; resolve before rebake")
+if os.getuid() != uid or not home.is_absolute() or home == pathlib.Path("/"):
+    fail()
+for parent in (home, *home.parents):
+    if parent.is_symlink() or not parent.is_dir():
+        fail()
+def check(path, directory):
+    value = path.lstat()
+    if (value.st_uid != uid or value.st_mode & 0o022 or
+            not (stat.S_ISDIR(value.st_mode) if directory else stat.S_ISREG(value.st_mode)) or
+            (not directory and value.st_nlink != 1)):
+        fail()
+check(home, True)
+cache = home / ".cache/node/corepack"
+for path in (home / ".cache", home / ".cache/node", cache, cache / "v1", cache / "v1/pnpm"):
+    if os.path.lexists(path):
+        check(path, True)
+# Corepack reuses this version's metadata or atomically renames a new archive.
+# Other versions and package-internal archive symlinks are not write targets.
+version = sys.argv[2].split("+", 1)[0]
+if version not in ("", ".", "..") and "/" not in version:
+    selected = cache / "v1/pnpm" / version
+    if os.path.lexists(selected):
+        check(selected, True)
+    if os.path.lexists(selected / ".corepack"):
+        check(selected / ".corepack", False)
+metadata = cache / "lastKnownGood.json"
+if os.path.lexists(metadata):
+    check(metadata, False)
+    if metadata.stat().st_size > 65536:
+        fail()
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                fail()
+            result[key] = value
+        return result
+    try:
+        value = json.loads(metadata.read_text(), object_pairs_hook=unique)
+    except (ValueError, UnicodeError):
+        fail()
+    if not isinstance(value, dict) or any(not isinstance(v, str) for v in value.values()):
+        fail()
+PY
 }
 
 offline_node_pnpm_probe() (
@@ -984,16 +1051,33 @@ prepare_rust_seed() (
   check_rust_seed
 )
 
-resolve_rust_runtime_user() {
-  local entry password uid gid description shell selected="${SUDO_USER:-${CRABBOX_SSH_USER:-}}"
-  [[ -n "$selected" && "$selected" != root && "$selected" != -* ]] || {
+resolve_runtime_user() {
+  local entry password gid description selected="${SUDO_USER:-${CRABBOX_SSH_USER:-}}"
+  if [[ -z "$selected" && "${1:-}" == root-allowed && -z "${SUDO_USER+x}${CRABBOX_SSH_USER+x}" ]]; then
+    selected=root
+  elif [[ -z "$selected" || "$selected" == -* || ( "$selected" == root && "${1:-}" != root-allowed ) ]]; then
     log "run from the nonroot runtime account with sudo, or use the container's CRABBOX_SSH_USER"
     return 1
-  }
+  fi
   entry="$(getent passwd "$selected")" || return $?
-  IFS=: read -r runtime_user password uid gid description runtime_home shell <<<"$entry"
-  [[ "$runtime_user" == "$selected" && "$uid" =~ ^[0-9]+$ && "$uid" -ne 0 &&
-    "$runtime_home" == /* && "$runtime_home" != / && "$shell" == /bin/bash ]] || return 1
+  [[ "$entry" != *$'\n'* ]] || return 1
+  IFS=: read -r runtime_user password runtime_uid gid description runtime_home runtime_shell <<<"$entry"
+  [[ "$runtime_user" == "$selected" && "$runtime_uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ &&
+    "$runtime_home" == /* && "$runtime_home" != / && "$runtime_shell" == /* && "$runtime_shell" != *:* &&
+    ( ( "$runtime_uid" -ne 0 && "$selected" != root ) || ( "$runtime_uid" -eq 0 && "$selected" == root ) ) ]] || return 1
+}
+
+resolve_rust_runtime_user() {
+  resolve_runtime_user || return $?
+  [[ "$runtime_uid" -ne 0 && "$runtime_shell" == /bin/bash ]]
+}
+
+run_runtime_user() {
+  # A root-level project would change ordinary Corepack selection even from /.
+  [[ ! -e /package.json && ! -L /package.json ]] || return 1
+  (cd / && runuser -u "$runtime_user" -- env -i "HOME=$runtime_home" "USER=$runtime_user" "LOGNAME=$runtime_user" \
+    "SHELL=$runtime_shell" PATH=/usr/local/bin:/usr/bin:/bin CI=1 \
+    COREPACK_DEFAULT_TO_LATEST=0 COREPACK_ENABLE_AUTO_PIN=0 COREPACK_ENV_FILE=0 "$@")
 }
 
 rust_user_state() {
@@ -1169,7 +1253,7 @@ rust_runtime_probe() (
 
 install_rust() {
   linux_x64_supported || return 0
-  local runtime_user runtime_home state probe
+  local runtime_user runtime_home runtime_uid runtime_shell state probe
   resolve_rust_runtime_user || return $?
   state="$(rust_user_state check)" || return $?
   if [[ "$state" == fresh ]]; then
@@ -1418,7 +1502,7 @@ prepare_fast_boot() {
 }
 
 print_versions() {
-  local runtime_user runtime_home
+  local runtime_user runtime_home runtime_uid runtime_shell
   # shellcheck disable=SC1091
   . "$os_release_file"
   printf 'os=%s %s\n' "${PRETTY_NAME:-unknown}" "$(uname -m)"
@@ -1431,7 +1515,8 @@ print_versions() {
   node --version
   npm --version
   corepack --version
-  pnpm --version
+  resolve_runtime_user root-allowed || return $?
+  run_runtime_user env COREPACK_ENABLE_NETWORK=0 pnpm --version || return $?
   if linux_x64_supported; then
     "$go_link_dir/go" version
     uv --version
@@ -1571,7 +1656,7 @@ APT
   if [[ "$install_browser" == "1" ]]; then
     install_chrome_or_chromium
   fi
-  install_node_pnpm
+  install_node_pnpm || return $?
   install_go_toolchain || return $?
   install_bun
   install_uv || return $?

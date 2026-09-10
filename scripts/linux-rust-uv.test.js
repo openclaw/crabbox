@@ -115,6 +115,8 @@ for (const [sudo, container, account, expected] of [
   ["", "", "", null],
   ["root", "bob", "root:x:0:0::/root:/bin/bash", null],
   ["alice", "", "mallory:x:1000:1000::/home/mallory:/bin/bash", null],
+  ["alice", "", "alice:x:1000:1000::/home/alice:/bin/sh", null],
+  ["alice", "", "alice:x:1000:1000::/home/alice:/usr/bin/zsh", null],
 ]) {
   test(`Rust resolves the explicit runtime identity: sudo=${sudo || "absent"} container=${container || "absent"} account=${account.split(":")[0]}`, (t) => {
     const { run } = fixture(t);

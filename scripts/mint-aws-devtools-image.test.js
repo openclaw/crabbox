@@ -204,9 +204,10 @@ test("AWS developer image smoke executes package managers and requires TruffleHo
   assert.match(windowsSmoke, /pnpm --version\ntrufflehog --no-update --version\ndocker --version/);
   assert.match(
     linuxSmoke,
-    /command -v pnpm\ncommand -v trufflehog\ntrufflehog --no-update --version\ncommand -v docker\nnode --version\nnode -e .*\ncorepack --version\npnpm --version\n/,
+    /command -v pnpm\ncommand -v trufflehog\ntrufflehog --no-update --version\ncommand -v docker\nnode --version\nnode -e .*\ncorepack --version\n/,
   );
-  assert.match(linuxSmoke, /corepack --version\npnpm --version\n\nsmoke_dir=/);
+  assert.match(linuxSmoke, /COREPACK_ENV_FILE=0 pnpm --version/);
+  assert.doesNotMatch(linuxSmoke, /COREPACK_ENABLE_PROJECT_SPEC=0|corepack prepare|corepack install/);
   assert.match(linuxSmoke, /\(\n  export COREPACK_ENABLE_NETWORK=0 npm_config_offline=true\n  cd "\$smoke_dir"\n  npm --offline run check\n  pnpm run check\n\)/);
   assert.doesNotMatch(linuxSmoke.slice(0, linuxSmoke.indexOf("\nsmoke_dir=")), /COREPACK_ENABLE_NETWORK|npm_config_offline/);
   assert.match(windowsSmoke, /docker image inspect .*\nif \(\$LASTEXITCODE -ne 0\).*throw.*\nWrite-Output "devtools-smoke-ok"\n$/);
@@ -305,7 +306,7 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
   assert.equal((log.match(/\n  rust_runtime_probe\nfi\npublic_toolchain_archive_dir=/g) ?? []).length, 3);
   assert.equal((log.match(/\n  offline_uv_probe\nfi\n}/g) ?? []).length, 3);
   assert.equal((log.match(/\ndeveloper_archive_probe\necho devtools-smoke-ok/g) ?? []).length, 3);
-  assert.equal((log.match(/\npnpm --version\n/g) ?? []).length, 3);
+  assert.equal((log.match(/COREPACK_ENV_FILE=0 pnpm --version/g) ?? []).length, 3);
   assert.match(log, /docker image inspect hello-world ubuntu:24\.04 node:24-bookworm/);
   assert.match(
     log,
@@ -596,8 +597,9 @@ fi`);
   await writeTool("id", 'printf "%s\\n" "$FIXTURE_UID"');
   await writeTool("dpkg", '[[ "$*" == "--print-architecture" ]] || exit 65\nprintf "%s\\n" "$FIXTURE_ARCH"');
   await writeTool("pnpm", `if [[ "$*" == --version ]]; then
-  [[ "\${COREPACK_ENABLE_NETWORK:-}" != 0 ]] || exit 66
+  [[ "\${COREPACK_ENABLE_NETWORK:-}" == 0 && -z "\${COREPACK_ENABLE_PROJECT_SPEC+x}" ]] || exit 66
   printf "%s\\n" "$HOME" >>"$HOME/normal-pnpm.called"
+  printf '%s\\n' "\${FIXTURE_PNPM_VERSION:-${pnpm}}"
   exit "\${FIXTURE_PNPM_EXIT:-0}"
 fi
 [[ "$*" == "run check" && "$COREPACK_ENABLE_NETWORK" == 0 && "$npm_config_offline" == true ]]`);
@@ -756,6 +758,23 @@ test("generated Linux smoke requires the normal nonroot pnpm command even when p
   assert.equal(result.status, 48, result.stderr);
   assert.doesNotMatch(result.stdout, /devtools-smoke-ok/);
   assert.equal((await readFile(path.join(fake.dir, "normal-pnpm.called"), "utf8")).trim(), fake.dir);
+});
+
+test("bundled Linux smoke rejects a different ordinary pnpm default without activating it", async (t) => {
+  const { generated, execute } = await linuxSmokeFixture(t);
+  const result = execute({ FIXTURE_PNPM_VERSION: "12.3.4" });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /runtime pnpm version differs from requested 11\.1\.0/);
+  const normalCheck = generated.slice(generated.indexOf("# Check the ordinary"), generated.indexOf("printf 'int main"));
+  assert.match(normalCheck, /COREPACK_ENABLE_NETWORK=0/);
+  assert.doesNotMatch(normalCheck, /corepack prepare|corepack install|COREPACK_ENABLE_PROJECT_SPEC=0/);
+});
+
+test("custom Linux prep does not invent an expected pnpm version", async (t) => {
+  const { generated, execute } = await linuxSmokeFixture(t, { customPrep: true });
+  const result = execute({ FIXTURE_PNPM_VERSION: "12.3.4" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(generated, /expected_pnpm_version=''/);
 });
 
 test("generated Linux smoke keeps required x64 archives under a pnpm override", async (t) => {
@@ -959,18 +978,24 @@ ${body}
 `);
     await chmod(file, 0o755);
   };
-  for (const name of ["git", "gh", "jq", "rg", "fd", "python3", "trufflehog", "xset",
+  for (const name of ["git", "gh", "jq", "rg", "fd", "trufflehog", "xset",
     "autoconf", "automake", "gawk", "nasm", "yasm", "batcat", "direnv", "zoxide", "sqlite3"]) {
     await writeTool(name, "exit 0");
   }
   for (const name of ["npm", "corepack", "pnpm"]) {
     await writeTool(name, `if [[ "$*" == --version ]]; then
-  [[ "$COREPACK_ENABLE_NETWORK" == 1 && "$npm_config_offline" == false ]]
+  if [[ "${name}" == pnpm ]]; then
+    [[ "$COREPACK_ENABLE_NETWORK" == 0 && -z "\${COREPACK_ENABLE_PROJECT_SPEC+x}" ]]
+    echo 11.1.0
+  else
+    [[ "$COREPACK_ENABLE_NETWORK" == 1 && "$npm_config_offline" == false ]]
+  fi
 else
   [[ "$COREPACK_ENABLE_NETWORK" == 0 && "$npm_config_offline" == true ]]
 fi`);
   }
   await writeTool("node", `exec ${JSON.stringify(process.execPath)} "$@"`);
+  await writeTool("python3", '[[ "$1" != - && "$1" != -c ]] || exec /usr/bin/python3 "$@"');
   await writeTool("cc", `[[ "$2" == -o ]]
 printf '#!/bin/sh\\nexit 0\\n' >"$3"
 chmod +x "$3"`);
@@ -1003,7 +1028,15 @@ exit 0`);
   await writeTool("sg", '[[ "$1 $2" == "docker -c" ]]\nCRABBOX_FAKE_IN_SG=1 sh -c "$3"');
   await writeTool("sudo", "exit 80");
   await writeTool("timeout", '[[ "$1" != --kill-after=* ]] || shift\nshift\nexec "$@"');
-  await writeTool("crabbox-browser", `if [[ "$*" == *"--headless"* ]]; then echo '<p>crabbox-browser-smoke</p>'; exit 0; fi
+  await writeTool("crabbox-browser", `if [[ "$*" == *"--headless"* ]]; then
+  case "\${CRABBOX_SMOKE_FAIL:-}" in
+    missing-dom) exit 0 ;;
+    partial-dom) printf '<p>crabbox-browser-'; exit 0 ;;
+  esac
+  echo '<p>crabbox-browser-smoke</p>'; exit 0
+fi
+[[ "\${CRABBOX_SMOKE_FAIL:-}" != visible-browser ]] || exit 124
+[[ "\${CRABBOX_SMOKE_FAIL:-}" != visible-zero ]] || exit 0
 exec ${JSON.stringify(process.execPath)} -e 'const fs=require("node:fs"); const file=process.env.CRABBOX_SMOKE_BROWSER_PID; process.on("SIGTERM",()=>{fs.unlinkSync(file); process.exit(0)}); fs.writeFileSync(file,String(process.pid)); setInterval(()=>{},1000)'`);
   await writeTool("xdotool", `if [[ "$1" == search ]]; then
   [[ "\${CRABBOX_SMOKE_FAIL:-}" != window && -f "$CRABBOX_SMOKE_BROWSER_PID" ]] || exit 1
@@ -1022,6 +1055,7 @@ fi`);
     TMPDIR: scratch,
     DISPLAY: ":99",
     expected_node_major: "",
+    expected_pnpm_version: "11.1.0",
     COREPACK_ENABLE_NETWORK: "1",
     npm_config_offline: "false",
     CRABBOX_SMOKE_EVENTS: events,
@@ -1067,6 +1101,26 @@ test("Linux image smoke refreshes the first Docker group member without root exe
   assert.doesNotMatch(result.events, /sudo /);
 });
 
+test("Linux visible browser preserves its failed child status before removing evidence", async (t) => {
+  const result = await runLinuxSmoke(t, { fail: "visible-browser" });
+  assert.equal(result.code, 124, result.stderr);
+  assert.match(result.stderr, /browser-smoke-evidence .*"commandExit": 124/);
+  assert.doesNotMatch(result.stdout, /devtools-smoke-ok/);
+});
+
+for (const [fail, dom] of [["missing-dom", ""], ["partial-dom", "<p>crabbox-browser-"], ["visible-zero", ""]]) {
+  test(`Linux browser assertion preserves exit-zero evidence: ${fail}`, async (t) => {
+    const result = await runLinuxSmoke(t, { fail });
+    assert.notEqual(result.code, 0, result.stderr);
+    const lines = result.stderr.split("\n").filter((line) => line.startsWith("browser-smoke-evidence "));
+    const evidence = JSON.parse(lines.at(-1).slice("browser-smoke-evidence ".length));
+    assert.equal(evidence.commandExit, 0);
+    assert.equal(evidence.dom, dom);
+    assert.equal(evidence.identity.wrapperSHA256.length, 64);
+    assert.doesNotMatch(result.stdout, /devtools-smoke-ok/);
+  });
+}
+
 test("Linux image smoke rejects failed capabilities without success output and cleans fixtures", async (t) => {
   for (const fail of ["cc", "cmake", "native-build", "native-run", "python3", "npm", "pnpm", "cache", "buildx", "compose", "access", "crabbox-browser", "xset", "ffprobe", "window", "render"]) {
     await t.test(fail, async (subtest) => {
@@ -1080,6 +1134,7 @@ test("Linux image smoke rejects failed capabilities without success output and c
       }
       if (fail === "window" || fail === "render") {
         assert.match(result.stderr, /browser did not render the local fixture/);
+        assert.match(result.stderr, /browser-smoke-evidence .*"commandExit": 143/);
       }
     });
   }
@@ -1096,6 +1151,101 @@ test("Linux image smoke respects disabled browser and desktop capabilities", asy
     });
   }
 });
+
+test("Linux smoke keeps its quoted Python probe parseable by both Bash interpreters", () => {
+  for (const bash of ["bash", "/bin/bash"]) {
+    const result = spawnSync(bash, ["-n", path.join(scriptDir, "devtools-image-smoke-linux.sh")], { encoding: "utf8" });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+  }
+});
+
+for (const [mode, expected] of [["exit", 37], ["timeout", 124], ["ignore-term", 137], ["interrupt", 143], ["diagnostic-failure", 37]]) {
+  test(`browser diagnostics preserve ${mode} status and settle only owned descendants`, async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "crabbox-browser-evidence-"));
+    const bin = path.join(root, "bin");
+    await mkdir(bin);
+    const pids = path.join(root, "pids");
+    const owner = path.join(root, "owner");
+    t.after(async () => {
+      for (const pid of (await readFile(pids, "utf8").catch(() => "")).trim().split(/\s+/).map(Number)) {
+        if (pid > 1) { try { process.kill(pid, "SIGKILL"); } catch {} }
+      }
+      await rm(root, { recursive: true, force: true });
+    });
+    const timeout = execFileSync("bash", ["-c", "command -v timeout"], { encoding: "utf8" }).trim();
+    const timeoutFile = path.join(bin, "timeout");
+    await writeFile(timeoutFile, `#!/bin/sh
+test "$1 $2" = "--kill-after=5 30" || exit 91
+shift 2
+exec ${JSON.stringify(timeout)} --kill-after=0.1 1.5 "$@"
+`);
+    await chmod(timeoutFile, 0o755);
+    const browser = path.join(bin, "crabbox-browser");
+    await writeFile(browser, `#!${process.execPath}
+const fs = require("node:fs"), cp = require("node:child_process");
+fs.appendFileSync(process.env.PIDS, String(process.pid) + "\\n");
+process.stderr.write("org.freedesktop.UPower /private/sensitive token=fixture-secret\\n".repeat(500));
+process.stdout.write("<p>crabbox-browser-smoke</p>" + "private-dom-token".repeat(500));
+if (["exit", "diagnostic-failure"].includes(process.env.MODE)) process.exit(37);
+const descendant = cp.spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)"], { stdio: "inherit" });
+fs.appendFileSync(process.env.PIDS, String(descendant.pid) + "\\n");
+if (process.env.MODE === "ignore-term") process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+`);
+    await chmod(browser, 0o755);
+    const raw = await readFile(path.join(scriptDir, "devtools-image-smoke-linux.sh"), "utf8");
+    let definition = raw.slice(raw.indexOf('browser_probe="$(cat'), raw.indexOf("\n# Check the ordinary"));
+    assert.ok(definition.includes('"--kill-after=5", "30"'));
+    assert.ok(definition.includes("started + 1, started + 25"));
+    if (mode === "diagnostic-failure") definition = definition.replace("json.dumps(", "(lambda *_args, **_kwargs: 1 / 0)(");
+    const child = spawn("bash", ["-c", `${definition}
+python3 -c "$browser_probe" --headless --dump-dom 'data:text/html,<p>crabbox-browser-smoke</p>' &
+owner=$!
+printf '%s\\n' "$owner" >"$OWNER"
+wait "$owner"
+`], { env: { PATH: `${bin}:${process.env.PATH}`, HOME: root, OWNER: owner, PIDS: pids, MODE: mode },
+      stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", (data) => { stdout += data; });
+    child.stderr.on("data", (data) => { stderr += data; });
+    const done = new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", (code, signal) => resolve({ code, signal }));
+    });
+    if (mode === "interrupt") {
+      const until = Date.now() + 5000;
+      while (!(await readFile(pids, "utf8").catch(() => "")).includes("\n") && Date.now() < until) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      process.kill(Number((await readFile(owner, "utf8")).trim()), "SIGTERM");
+    }
+    const result = await done;
+    assert.equal(result.code, expected, stderr);
+    assert.equal(result.signal, null);
+    assert.equal(stdout, "");
+    const line = stderr.split("\n").find((value) => value.startsWith("browser-smoke-evidence "));
+    if (mode === "diagnostic-failure") {
+      assert.equal(line, undefined, "diagnostic failure must preserve the original command status");
+      assert.equal(stderr, "");
+      return;
+    }
+    assert.ok(line, stderr);
+    assert.ok(line.length < 8192);
+    const evidence = JSON.parse(line.slice("browser-smoke-evidence ".length));
+    assert.equal(evidence.commandExit, expected);
+    assert.equal(evidence.dom, "<p>crabbox-browser-smoke</p>");
+    assert.ok(evidence.stderr.includes("org.freedesktop.UPower"));
+    assert.equal(evidence.identity.wrapperSHA256.length, 64);
+    assert.doesNotMatch(line, /fixture-secret|private-dom-token|sensitive|cmdline|environ/);
+    const owned = (await readFile(pids, "utf8")).trim().split(/\s+/).map(Number);
+    for (const pid of owned) {
+      // macOS may briefly retain an orphan zombie after group termination.
+      const probe = spawnSync("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8" });
+      assert.ok(probe.status !== 0 || probe.stdout.trim().startsWith("Z"), `owned browser process ${pid} survived: ${probe.stdout}`);
+    }
+  });
+}
 
 test("publisher checks the builder profile in every Linux lifecycle phase", async (t) => {
   for (const phase of ["source", "candidate", "promoted"]) {
