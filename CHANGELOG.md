@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Match Linux WebVNC desktops to the viewer window with controller-only resize requests and a Fit opt-out; use resize-capable TigerVNC for new local-container and public-installer XFCE desktops, retain the installer's fixed-size 8-bit mode, and surface Wayland sizing ownership limits.
+
 ## 0.58.0 - 2026-09-12
 
 ### Highlights

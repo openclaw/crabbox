@@ -188,8 +188,8 @@ deletions, missing manifest entries, and other suspicious sync outcomes. See
 ## Capabilities
 
 **Desktop** - lease capability (`--desktop`) that adds a visible session:
-resize-capable TigerVNC + XFCE on managed cloud Linux, Xvfb + XFCE + x11vnc in
-local containers, or Wayland/GNOME. Required for `crabbox
+resize-capable TigerVNC + XFCE on managed cloud Linux and new local
+containers, or Wayland/GNOME. Required for `crabbox
 vnc`, `crabbox webvnc`, and most `--browser` UI runs.
 
 **Browser** - lease capability (`--browser`) that installs Chrome/Chromium and

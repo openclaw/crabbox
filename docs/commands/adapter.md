@@ -553,12 +553,15 @@ credential store or child environment; never put them in HTTP requests.
 
 [`scripts/install-linux-desktop.sh`](../../scripts/install-linux-desktop.sh) is
 the reusable open-source Debian/Ubuntu guest bootstrap. It installs
-XFCE/Xvfb/x11vnc plus noVNC and websockify from distribution packages, creates
+XFCE/TigerVNC plus noVNC and websockify from distribution packages, creates
 the Crabbox desktop state files, binds VNC only to `127.0.0.1:5900`, and starts
 hardened systemd services. The generated VNC password is owned by the desktop
 user with mode `0600`; it is never readable through a shared primary group. It
 also installs `/usr/local/bin/crabbox-start-desktop`, the reset helper used by
-WebVNC to restart the matching XFCE and x11vnc units. The bootstrap installs
+WebVNC to restart the matching XFCE and TigerVNC units. TigerVNC accepts
+client-requested desktop resizing; `CRABBOX_DESKTOP_GEOMETRY` sets the initial
+width, height, and depth. An explicit 8-bit depth retains the fixed-size
+Xvfb/x11vnc backend; 16/24/32-bit depths use TigerVNC. The bootstrap installs
 `sudo` and a mode-`0440` sudoers rule granting only the desktop user passwordless
 execution of that root-owned helper; it does not grant general sudo access. It
 installs no proprietary browser. External provider lifecycle configuration can
