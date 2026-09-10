@@ -41,6 +41,11 @@ crabbox stop --provider koyeb swift-crab
 Configure the normal broker URL and user authentication on the CLI. Do not put
 the Koyeb API token or Tailscale OAuth secret in local Crabbox config.
 
+The CLI defaults to Tailscale and the remote work root `/workspace/crabbox`.
+Explicit `tailscale.enabled` YAML values, `CRABBOX_TAILSCALE`, and `--tailscale`
+override the transport default, including `false` for native mesh. An explicit
+`workRoot` is preserved, even when it equals another provider's default.
+
 ## Coordinator configuration
 
 ```text

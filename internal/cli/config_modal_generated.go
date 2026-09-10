@@ -7,11 +7,11 @@ import (
 )
 
 type fileModalConfig struct {
-	App         *string   `yaml:"app,omitempty"`
-	Image       *string   `yaml:"image,omitempty"`
-	Workdir     *string   `yaml:"workdir,omitempty"`
-	Python      *string   `yaml:"python,omitempty"`
-	Environment *string   `yaml:"environment,omitempty"`
+	App         string    `yaml:"app,omitempty"`
+	Image       string    `yaml:"image,omitempty"`
+	Workdir     string    `yaml:"workdir,omitempty"`
+	Python      string    `yaml:"python,omitempty"`
+	Environment string    `yaml:"environment,omitempty"`
 	Secrets     *[]string `yaml:"secrets,omitempty"`
 }
 
@@ -33,20 +33,20 @@ func (cfg *ModalConfig) applyFile(file *fileModalConfig, trusted bool) error {
 	if file == nil {
 		return nil
 	}
-	if file.App != nil && *file.App != "" {
-		cfg.App = *file.App
+	if file.App != "" {
+		cfg.App = file.App
 	}
-	if file.Image != nil && *file.Image != "" {
-		cfg.Image = *file.Image
+	if file.Image != "" {
+		cfg.Image = file.Image
 	}
-	if file.Workdir != nil && *file.Workdir != "" {
-		cfg.Workdir = *file.Workdir
+	if file.Workdir != "" {
+		cfg.Workdir = file.Workdir
 	}
-	if file.Python != nil && *file.Python != "" {
-		cfg.Python = *file.Python
+	if file.Python != "" {
+		cfg.Python = file.Python
 	}
-	if trusted && file.Environment != nil && *file.Environment != "" {
-		cfg.Environment = *file.Environment
+	if trusted && file.Environment != "" {
+		cfg.Environment = file.Environment
 	}
 	if trusted && file.Secrets != nil {
 		cfg.Secrets = append([]string(nil), (*file.Secrets)...)

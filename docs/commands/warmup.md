@@ -53,6 +53,12 @@ the ready lease; it does not allocate again or stop the Testbox.
 Warmup records a local claim binding the lease to the current repo checkout. Use
 `--reclaim` to overwrite an existing claim for that lease.
 
+If a coordinator lease ends while provisioning, warmup reports the lease ID,
+terminal state, and recorded failure cause. When the coordinator retains the
+cause in cleanup metadata because a resource may still exist, warmup includes
+that diagnostic. Use `crabbox inspect --id <lease>` to check the retained
+provisioning and cleanup evidence before recovery.
+
 Warmup requires an explicit provider selection from `--provider`,
 `CRABBOX_PROVIDER`, user or repository config, broker config, or an applicable
 recorded lease route. With no selection it exits before provider initialization
@@ -296,9 +302,10 @@ hydration.
 already allocated Dedicated Host. Crabbox can discover an available host in the
 selected region, or pin one with `CRABBOX_HOST_ID` / `hostId`
 (`CRABBOX_AWS_MAC_HOST_ID` and `aws.macHostId` remain AWS compatibility
-aliases). Brokered host pinning requires admin authentication unless the host
-has a retained instance from the same owner and organization's released lease;
-other users rely on automatic available-host discovery. Use `--market on-demand`, and
+aliases). Org-member broker requests can pin a host only when the coordinator
+has an exact allocation record for that host, the current org, and the requested
+region. Historical leases do not grant pin access; other explicit host pins
+require admin authentication. Use `--market on-demand`, and
 expect EC2 Mac host lifecycle rules to dominate cleanup and cost. Warmup never
 allocates a Dedicated Host implicitly; trusted operators manage host lifecycle with
 `crabbox admin hosts offerings|quota|list|allocate|release --provider aws --target macos`.
@@ -311,6 +318,12 @@ per-lease macOS account password set by bootstrap.
 self-hosted GitHub Actions runner for the current repository. Most projects
 should instead prefer [`crabbox actions hydrate --id <lease>`](actions.md) after
 warmup, because it also dispatches the workflow and waits for the ready marker.
+
+A new warmup does not adopt an existing lease by slug or pinned host. An occupied
+host returns a conflict identifying its lease; inspect or explicitly stop that
+lease before requesting a new one. `--lease-id` replays only the same fixed ID
+and create intent. If a coordinator returns another ID, the CLI stops before
+bootstrap, key migration, or failure cleanup.
 
 ## Flags
 

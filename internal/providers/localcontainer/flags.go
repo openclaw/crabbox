@@ -44,7 +44,7 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 	}
 	// CLI-only: bind mounts expose host paths and must be an explicit
 	// operator action. Not loaded from repo-local .crabbox.yaml — see
-	// the comment in config.go where YAML ingestion is blocked.
+	// the omission comment in config_local_container.go.
 	fs.Var(&volumes, "local-container-volume",
 		"bind-mount a host path into the container; host:container[:ro]; repeatable")
 	return v
@@ -56,22 +56,19 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		return nil
 	}
 	if core.FlagWasSet(fs, "local-container-runtime") {
-		cfg.LocalContainer.Runtime = *v.Runtime
-		core.MarkLocalContainerRuntimeExplicit(cfg)
+		core.ApplyLocalContainerRuntime(cfg, *v.Runtime)
 	}
 	if core.FlagWasSet(fs, "local-container-image") {
-		cfg.LocalContainer.Image = *v.Image
-		core.MarkLocalContainerImageExplicit(cfg)
+		core.ApplyLocalContainerImage(cfg, *v.Image)
 	}
 	if core.FlagWasSet(fs, "local-container-user") {
 		cfg.LocalContainer.User = *v.User
 		cfg.SSHUser = *v.User
 	}
 	if core.FlagWasSet(fs, "local-container-work-root") {
-		cfg.LocalContainer.WorkRoot = *v.WorkRoot
+		core.ApplyLocalContainerWorkRoot(cfg, *v.WorkRoot)
 		cfg.WorkRoot = *v.WorkRoot
 		core.MarkWorkRootExplicit(cfg)
-		core.MarkLocalContainerWorkRootExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "local-container-cpus") {
 		cfg.LocalContainer.CPUs = *v.CPUs

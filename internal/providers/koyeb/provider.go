@@ -51,6 +51,10 @@ func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
 	// location and image defaults into the coordinator request.
 	cfg.Location = ""
 	cfg.Image = ""
+	core.ApplyTailscaleEnabledDefault(cfg, true)
+	if !core.IsWorkRootExplicit(cfg) {
+		cfg.WorkRoot = "/workspace/crabbox"
+	}
 	return nil
 }
 

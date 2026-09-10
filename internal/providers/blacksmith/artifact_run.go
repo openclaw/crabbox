@@ -25,11 +25,17 @@ type blacksmithArtifactReceipt struct {
 	stage       int // 0: startup, 1: workload, 2: collection, 3: complete
 	code        int
 	collectCode int
+	archiveSize int64
+	digest      string
 	exitedAt    time.Time
 	payload     bytes.Buffer
 	onExit      func()
 	now         func() time.Time
 	output      io.Writer
+}
+
+func (r *blacksmithArtifactReceipt) remotePath() string {
+	return ".crabbox/blacksmith-artifact-" + r.nonce + "/archive.tgz"
 }
 
 func newBlacksmithArtifactReceipt(now func() time.Time) (*blacksmithArtifactReceipt, error) {
@@ -45,28 +51,36 @@ func (r *blacksmithArtifactReceipt) command(req RunRequest, budget time.Duration
 	format := `\036CRABBOX_BS_` + r.nonce + ":"
 	child := "printf '" + format + "start\\037' || exit 7\n" + blacksmithCommandString(req.Command, req.ShellMode)
 	globs := append(append([]string{}, req.ArtifactGlobs...), req.RequiredArtifactGlobs...)
-	collector := core.DelegatedRunArtifactScript(req.RequiredArtifactGlobs, globs, core.DelegatedRunArtifactDefaultMaxFiles, core.DelegatedRunArtifactDefaultMaxBytes)
-	for _, marker := range []string{core.DelegatedRunArtifactBeginMarker, core.DelegatedRunArtifactEndMarker} {
-		collector = strings.ReplaceAll(collector, marker, `\137`+marker[1:])
-	}
+	collector := core.DelegatedRunArtifactFileScript(req.RequiredArtifactGlobs, globs, core.DelegatedRunArtifactDefaultMaxFiles, core.DelegatedRunArtifactDefaultMaxBytes) +
+		"\narchive_bytes=$(wc -c < \"$1\" | tr -d ' ') || exit 7\n" +
+		"archive_digest=$(sha256sum < \"$1\") || exit 7\narchive_digest=${archive_digest%% *}\n" +
+		"printf '" + format + "bytes:%s\\037' \"$archive_bytes\" || exit 7\n" +
+		"printf '" + format + "digest0:%.32s\\037' \"$archive_digest\" || exit 7\n" +
+		"printf '" + format + "digest1:%s\\037' \"${archive_digest:32}\" || exit 7\n"
 	// Pin the prepared directory before workload code can retarget its binding.
 	// Only the child returns to the native cwd; cd, exit, exec, and traps stay child-owned.
-	body := `native_cwd=
+	body := `# Preserve filename newlines; remove only pwd's newline and the sentinel.
+native_cwd=$(pwd -P && printf .) || exit 7
+native_cwd=${native_cwd%??}
 binding=./.git/crabbox-artifact-root
 if [ -e "$binding" ] || [ -L "$binding" ]; then
-  native_cwd=$(pwd -P) || exit 7
   if [ ! -L "$binding" ] || ! cd -P "$binding" 2>/dev/null; then
     printf '%s\n' 'invalid prepared artifact workspace; recreate the Testbox binding in trusted CI' >&2
     exit 7
   fi
 fi
 ` + "timeout --kill-after=1s 1s /bin/sh -c ':' >/dev/null 2>&1 || exit 7\n" +
-		"(if [ -n \"$native_cwd\" ]; then cd -P \"$native_cwd\" || exit 7; fi\nexec bash -c " + shellQuote(child) + ")\n" +
+		"command -v sha256sum >/dev/null 2>&1 || { printf '%s\\n' 'artifact collection requires sha256sum' >&2; exit 7; }\n" +
+		"(cd -P \"$native_cwd\" || exit 7\nexec bash -c " + shellQuote(child) + ")\n" +
 		"workload_code=$?\n" +
 		"printf '" + format + "exit:%d\\037' \"$workload_code\" || exit 7\n" +
 		"collection_code=0\n" +
 		"if [ \"$workload_code\" -lt 128 ]; then\n" +
-		"timeout --kill-after=1s " + shellQuote(fmt.Sprintf("%gs", budget.Seconds())) + " bash -c " + shellQuote(collector) + " 2>&1\n" +
+		"transfer_parent=\"$native_cwd/.crabbox\"\n" +
+		"if [ -L \"$transfer_parent\" ] || ! mkdir -p -- \"$transfer_parent\"; then exit 7; fi\n" +
+		"transfer_dir=\"$native_cwd/" + filepath.ToSlash(filepath.Dir(r.remotePath())) + "\"\n" +
+		"umask 077\nmkdir -- \"$transfer_dir\" || exit 7\n" +
+		"timeout --kill-after=1s " + shellQuote(fmt.Sprintf("%gs", budget.Seconds())) + " bash -c " + shellQuote(collector) + " -- \"$transfer_dir/archive.tgz\" 2>&1\n" +
 		"collection_code=$?\nfi\n" +
 		"printf '" + format + "end:%d\\037' \"$collection_code\" || exit 7\nexit 0"
 	return "/bin/sh -c " + shellQuote(body)
@@ -82,6 +96,28 @@ func (r *blacksmithArtifactReceipt) record(record string) error {
 		return nil
 	}
 	kind, number, _ := strings.Cut(value, ":")
+	if r.stage == 2 && r.code < 128 {
+		switch kind {
+		case "bytes":
+			size, err := strconv.ParseInt(number, 10, 64)
+			if err != nil || size <= 0 || size > core.DelegatedRunArtifactDefaultMaxBytes || strconv.FormatInt(size, 10) != number || r.archiveSize != 0 {
+				return errors.New("invalid or duplicate artifact size receipt")
+			}
+			r.archiveSize = size
+			return nil
+		case "digest0", "digest1":
+			part, err := hex.DecodeString(number)
+			wantLength := 0
+			if kind == "digest1" {
+				wantLength = 32
+			}
+			if r.archiveSize == 0 || err != nil || len(part) != 16 || hex.EncodeToString(part) != number || len(r.digest) != wantLength {
+				return errors.New("invalid or unordered artifact digest receipt")
+			}
+			r.digest += number
+			return nil
+		}
+	}
 	code, err := strconv.Atoi(number)
 	if err != nil || code < 0 || code > 255 || strconv.Itoa(code) != number {
 		return errors.New("malformed artifact receipt")
@@ -108,22 +144,10 @@ func (r *blacksmithArtifactReceipt) data(data []byte) error {
 		_, err := r.output.Write(data)
 		return err
 	}
-	limit := blacksmithArtifactOutputCaptureLimit(core.DelegatedRunArtifactDefaultMaxBytes)
-	if int64(r.payload.Len()+len(data)) > limit {
-		return errors.New("artifact output too large")
-	}
-	r.payload.Write(data)
-	begin := bytes.Index(r.payload.Bytes(), []byte(core.DelegatedRunArtifactBeginMarker+"\n"))
-	diagnosticBytes := r.payload.Len()
-	if begin >= 0 {
-		diagnosticBytes = begin
-		if end := bytes.Index(r.payload.Bytes(), []byte(core.DelegatedRunArtifactEndMarker+"\n")); end >= 0 {
-			diagnosticBytes += r.payload.Len() - end - len(core.DelegatedRunArtifactEndMarker+"\n")
-		}
-	}
-	if int64(diagnosticBytes) > blacksmithArtifactDiagnosticCaptureBytes {
+	if int64(r.payload.Len()+len(data)) > blacksmithArtifactDiagnosticCaptureBytes {
 		return errors.New("artifact diagnostics too large")
 	}
+	r.payload.Write(data)
 	return nil
 }
 
@@ -218,27 +242,19 @@ func (d *blacksmithControlDemux) finish() {
 	}
 }
 
-func (r *blacksmithArtifactReceipt) archive() ([]byte, error) {
-	output := r.payload.String()
+func (r *blacksmithArtifactReceipt) validateArchiveReceipt() error {
 	// Never include unvalidated payload in errors, even if collection failed
 	// after writing only an archive prefix or base64 fragment.
 	if r.collectCode != 0 {
 		if r.collectCode == 8 {
-			return nil, exit(7, "collection exited 8: missing required artifact")
+			return exit(7, "collection exited 8: missing required artifact")
 		}
-		return nil, exit(7, "collection exited %d", r.collectCode)
+		return exit(7, "collection exited %d", r.collectCode)
 	}
-	if strings.Count(output, core.DelegatedRunArtifactBeginMarker+"\n") != 1 || strings.Count(output, core.DelegatedRunArtifactEndMarker+"\n") != 1 {
-		return nil, exit(7, "collection returned an invalid archive envelope")
+	if r.archiveSize == 0 || len(r.digest) != 64 {
+		return exit(7, "collection returned incomplete archive metadata")
 	}
-	archive, diagnostic, err := blacksmithExtractArtifactArchive(output, core.DelegatedRunArtifactDefaultMaxBytes)
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(diagnostic)) > blacksmithArtifactDiagnosticCaptureBytes {
-		return nil, exit(7, "artifact diagnostics too large")
-	}
-	return archive, nil
+	return nil
 }
 
 // A missing exit record must not turn the collector's archive into console
@@ -275,6 +291,26 @@ func (g *blacksmithArchiveGuard) flush() {
 // Called only inside the original shared claim fence. There is no follow-up
 // native run, route resolution, sync, or stopped-lease recovery.
 func (b *blacksmithBackend) runArtifactTestbox(ctx context.Context, req RunRequest, leaseID string, phases *core.CommandPhaseTracker, stdoutExtra, stderrExtra io.Writer, budget time.Duration) (code int, ended time.Time, collected []core.RunArtifact, artifactErr error) {
+	if err := core.ValidateLocalCommandProcessGroupJoin(ctx); err != nil {
+		return 2, time.Time{}, collected, exit(2, "Blacksmith artifact command ownership: %v", err)
+	}
+	capability, err := b.runCommandCaptureInDir(ctx, []string{"testbox", "download", "--help"}, nil, nil, false, req.Repo.Root)
+	if err = blacksmithContextError(ctx, err); err != nil {
+		return core.ExitCodeForError(err, 1), time.Time{}, collected, err
+	}
+	if capability.ExitCode != 0 {
+		return capability.ExitCode, time.Time{}, collected, exit(capability.ExitCode, "Blacksmith artifact capability probe failed")
+	}
+	if !strings.Contains(capability.Stdout, "testbox download --id") || !strings.Contains(capability.Stdout, "--ssh-private-key") {
+		return 2, time.Time{}, collected, exit(2, "Blacksmith artifact collection requires native testbox download support; update the Blacksmith CLI")
+	}
+	scp, err := blacksmithDownloadExecutable("scp")
+	if err == nil {
+		_, err = inspectBlacksmithDownloadExecutable(ctx, scp)
+	}
+	if err = blacksmithContextError(ctx, err); err != nil {
+		return core.ExitCodeForError(err, 2), time.Time{}, collected, fmt.Errorf("Blacksmith artifact scp preflight: %w", err)
+	}
 	r, err := newBlacksmithArtifactReceipt(b.rt.Clock.Now)
 	if err != nil {
 		return 2, time.Time{}, collected, err
@@ -286,11 +322,17 @@ func (b *blacksmithBackend) runArtifactTestbox(ctx context.Context, req RunReque
 	runCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	var timer *time.Timer
+	var collectionDeadline time.Time
 	r.onExit = func() {
+		collectionDeadline = time.Now().Add(budget)
+		if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(collectionDeadline) {
+			collectionDeadline = parentDeadline
+		}
 		timer = time.AfterFunc(budget, func() { cancel(errors.New("artifact collection timed out")) })
 	}
 	stdout, stdoutPhase := commandPhaseWriter(mergeWriters(b.rt.Stdout, stdoutExtra), phases)
 	stderr, stderrPhase := commandPhaseWriter(mergeWriters(b.rt.Stderr, stderrExtra), phases)
+	fmt.Fprintf(stderr, "blacksmith artifact transfer planned lease=%s remote=%s retention=finalized-only-until-lease-cleanup\n", leaseID, r.remotePath())
 	var out, diagnostic *blacksmithControlDemux
 	var outGuard, errGuard *blacksmithArchiveGuard
 	filter := func(stdout, stderr io.Writer) (io.Writer, io.Writer) {
@@ -328,25 +370,42 @@ func (b *blacksmithBackend) runArtifactTestbox(ctx context.Context, req RunReque
 		if r.stage >= 2 && r.code != 0 {
 			code = r.code
 		}
-		return code, ended, collected, exit(7, "native run did not complete a clean artifact protocol; artifacts withheld")
+		protocolErr := exit(7, "native run did not complete a clean artifact protocol; artifacts withheld")
+		return code, ended, collected, blacksmithContextError(runCtx, protocolErr)
 	}
 	code = r.code
 	if code >= 128 {
 		return code, ended, collected, nil
 	}
-	archive, err := r.archive()
+	if err := r.validateArchiveReceipt(); err != nil {
+		return code, ended, collected, err
+	}
+	fmt.Fprintf(stderr, "blacksmith finalized artifact retained lease=%s remote=%s bytes=%d retention=lease-cleanup\n", leaseID, r.remotePath(), r.archiveSize)
+	archive, err := b.downloadArtifact(runCtx, req.Repo.Root, leaseID, keyPath, r.remotePath(), r.archiveSize, r.digest)
 	if err != nil {
 		return code, ended, collected, err
 	}
-	path := core.LocalRunArtifactPath(req.Repo.Root, "", leaseID, "blacksmith-artifacts.tgz")
-	if err := writeBlacksmithRunArchive(runCtx, path, archive); err != nil {
-		return code, ended, collected, exit(2, "blacksmith artifact write: %v", err)
+	if err := validateBlacksmithArtifactArchive(runCtx, archive, req.ArtifactGlobs, req.RequiredArtifactGlobs); err != nil {
+		return code, ended, collected, err
+	}
+	path := core.LocalRunArtifactPath(req.Repo.Root, "", leaseID, filepath.Join(r.nonce, "blacksmith-artifacts.tgz"))
+	if err := writeBlacksmithRunArchive(runCtx, path, archive, collectionDeadline); err != nil {
+		return code, ended, collected, errors.Join(exit(2, "blacksmith artifact write: %v", err), err)
 	}
 	return code, ended, []core.RunArtifact{{Kind: "artifact-glob", Path: path, Bytes: len(archive)}}, nil
 }
 
-func writeBlacksmithRunArchive(ctx context.Context, path string, archive []byte) error {
-	if err := ctx.Err(); err != nil {
+func writeBlacksmithRunArchive(ctx context.Context, path string, archive []byte, deadline time.Time) (err error) {
+	publicationError := func() error {
+		if err := blacksmithContextError(ctx, nil); err != nil {
+			return err
+		}
+		if deadline.IsZero() || !time.Now().Before(deadline) {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	if err := publicationError(); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -356,10 +415,41 @@ func writeBlacksmithRunArchive(ctx context.Context, path string, archive []byte)
 	if err != nil {
 		return err
 	}
-	defer os.Remove(file.Name())
+	var owned os.FileInfo
+	published, moved := false, false
+	defer func() {
+		if !moved {
+			if cleanupErr := os.Remove(file.Name()); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
+				err = errors.Join(err, cleanupErr)
+			}
+		}
+		if err == nil {
+			err = publicationError()
+		}
+		if err == nil || !published {
+			return
+		}
+		current, statErr := os.Lstat(path)
+		if statErr != nil {
+			err = errors.Join(err, statErr)
+			return
+		}
+		if !os.SameFile(owned, current) {
+			err = errors.Join(err, errors.New("artifact publication changed before cancellation rollback"))
+			return
+		}
+		err = errors.Join(err, os.Remove(path))
+	}()
 	_, writeErr := file.Write(archive)
-	if err := errors.Join(writeErr, file.Close(), ctx.Err()); err != nil {
+	var statErr error
+	owned, statErr = file.Stat()
+	if err := errors.Join(writeErr, statErr, file.Close(), publicationError()); err != nil {
 		return err
 	}
-	return os.Rename(file.Name(), path)
+	moved, err = publishBlacksmithArtifactFile(file.Name(), path)
+	if err != nil {
+		return err
+	}
+	published = true
+	return nil
 }

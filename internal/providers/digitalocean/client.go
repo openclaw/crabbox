@@ -850,7 +850,7 @@ func digitalOceanRegion(cfg core.Config) string {
 	if cfg.Location != "" {
 		return cfg.Location
 	}
-	return "nyc3"
+	return core.DigitalOceanRegionFallback
 }
 
 func digitalOceanImage(cfg core.Config) string {
@@ -860,7 +860,7 @@ func digitalOceanImage(cfg core.Config) string {
 	if cfg.Image != "" {
 		return cfg.Image
 	}
-	return "ubuntu-24-04-x64"
+	return core.DigitalOceanImageFallback
 }
 
 func providerKeyForLease(leaseID string) string {

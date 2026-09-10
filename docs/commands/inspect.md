@@ -62,7 +62,9 @@ key path, port, user, and host). Empty fields render as `-`.
 
 `--json` prints the structured status record (the same shape returned by
 [`status`](status.md)), including non-secret Tailscale metadata and the full
-label map. Secrets such as broker tokens, provider keys, and VNC passwords are
+label map. SSH-backed records include `workroot`, resolved from the lease's
+recorded work root or its target defaults (including native Windows and WSL2).
+Secrets such as broker tokens, provider keys, and VNC passwords are
 never included in either output mode.
 
 Brokered JSON records may also include `networkDiagnostics`, retaining the

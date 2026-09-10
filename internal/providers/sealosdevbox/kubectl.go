@@ -338,13 +338,6 @@ func doctorCheck(status, check, message string, details map[string]string) core.
 	}
 }
 
-func formatDoctorSummary(checks []core.DoctorCheck) string {
-	status := "ready"
-	for _, check := range checks {
-		if strings.EqualFold(check.Status, "failed") || strings.EqualFold(check.Status, "missing") {
-			status = "blocked"
-			break
-		}
-	}
+func formatDoctorSummary(status string) string {
 	return fmt.Sprintf("automation_surface=%s control_plane=%s mutation=false", AutomationSurfaceDecision, status)
 }

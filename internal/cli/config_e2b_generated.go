@@ -7,11 +7,11 @@ import (
 )
 
 type fileE2BConfig struct {
-	APIURL   *string `yaml:"apiUrl,omitempty"`
-	Domain   *string `yaml:"domain,omitempty"`
-	Template *string `yaml:"template,omitempty"`
-	Workdir  *string `yaml:"workdir,omitempty"`
-	User     *string `yaml:"user,omitempty"`
+	APIURL   string `yaml:"apiUrl,omitempty"`
+	Domain   string `yaml:"domain,omitempty"`
+	Template string `yaml:"template,omitempty"`
+	Workdir  string `yaml:"workdir,omitempty"`
+	User     string `yaml:"user,omitempty"`
 }
 
 const E2BConfigDefaultAPIURL string = "https://api.e2b.app"
@@ -40,22 +40,22 @@ func (cfg *E2BConfig) applyFile(file *fileE2BConfig) (E2BConfigApplied, error) {
 	if file == nil {
 		return applied, nil
 	}
-	if file.APIURL != nil && *file.APIURL != "" {
-		cfg.APIURL = *file.APIURL
+	if file.APIURL != "" {
+		cfg.APIURL = file.APIURL
 		applied.APIURL = true
 	}
-	if file.Domain != nil && *file.Domain != "" {
-		cfg.Domain = *file.Domain
+	if file.Domain != "" {
+		cfg.Domain = file.Domain
 		applied.Domain = true
 	}
-	if file.Template != nil && *file.Template != "" {
-		cfg.Template = *file.Template
+	if file.Template != "" {
+		cfg.Template = file.Template
 	}
-	if file.Workdir != nil && *file.Workdir != "" {
-		cfg.Workdir = *file.Workdir
+	if file.Workdir != "" {
+		cfg.Workdir = file.Workdir
 	}
-	if file.User != nil && *file.User != "" {
-		cfg.User = *file.User
+	if file.User != "" {
+		cfg.User = file.User
 	}
 	return applied, nil
 }

@@ -7,9 +7,9 @@ import (
 )
 
 type fileCloudflareConfig struct {
-	APIURL  *string `yaml:"apiUrl,omitempty"`
-	Token   *string `yaml:"token,omitempty"`
-	Workdir *string `yaml:"workdir,omitempty"`
+	APIURL  string `yaml:"apiUrl,omitempty"`
+	Token   string `yaml:"token,omitempty"`
+	Workdir string `yaml:"workdir,omitempty"`
 }
 
 const CloudflareConfigDefaultWorkdir string = "/workspace/crabbox"
@@ -31,16 +31,16 @@ func (cfg *CloudflareConfig) applyFile(file *fileCloudflareConfig) (CloudflareCo
 	if file == nil {
 		return applied, nil
 	}
-	if file.APIURL != nil && *file.APIURL != "" {
-		cfg.APIURL = *file.APIURL
+	if file.APIURL != "" {
+		cfg.APIURL = file.APIURL
 		applied.APIURL = true
 	}
-	if file.Token != nil && *file.Token != "" {
-		cfg.Token = *file.Token
+	if file.Token != "" {
+		cfg.Token = file.Token
 		applied.Token = true
 	}
-	if file.Workdir != nil && *file.Workdir != "" {
-		cfg.Workdir = *file.Workdir
+	if file.Workdir != "" {
+		cfg.Workdir = file.Workdir
 	}
 	return applied, nil
 }

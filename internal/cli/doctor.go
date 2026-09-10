@@ -644,6 +644,20 @@ func doctorProviderMessage(provider, message string) string {
 	return strings.Join(fields, " ")
 }
 
+// DoctorChecksStatus returns failed, warning, or ok without modifying checks or their details.
+func DoctorChecksStatus(checks []DoctorCheck) string {
+	status := "ok"
+	for _, check := range checks {
+		if doctorStatusFails(check.Status) {
+			return "failed"
+		}
+		if strings.TrimSpace(strings.ToLower(check.Status)) == "warning" {
+			status = "warning"
+		}
+	}
+	return status
+}
+
 func doctorStatusFails(status string) bool {
 	switch strings.TrimSpace(strings.ToLower(status)) {
 	case "failed", "missing":

@@ -1474,10 +1474,20 @@ func (c *CoordinatorClient) Pool(ctx context.Context, cfg Config) ([]Coordinator
 }
 
 func (c *CoordinatorClient) Leases(ctx context.Context, state string, limit int) ([]CoordinatorLease, error) {
+	return c.listLeases(ctx, state, limit, "", "")
+}
+
+func (c *CoordinatorClient) listLeases(ctx context.Context, state string, limit int, view, provider string) ([]CoordinatorLease, error) {
 	var res struct {
 		Leases []CoordinatorLease `json:"leases"`
 	}
 	values := url.Values{}
+	if view != "" {
+		values.Set("view", view)
+	}
+	if provider != "" {
+		values.Set("provider", provider)
+	}
 	if state != "" {
 		values.Set("state", state)
 	}
@@ -1900,6 +1910,23 @@ func (c *CoordinatorClient) AdminDeleteLease(ctx context.Context, id string) (Co
 	}
 	err := c.do(ctx, http.MethodPost, "/v1/admin/leases/"+url.PathEscape(id)+"/delete", map[string]any{}, &res)
 	return res.Lease, err
+}
+
+// AdminHostReservation reads or clears coordinator host associations without changing provider resources.
+func (c *CoordinatorClient) AdminHostReservation(ctx context.Context, region, hostID string, clear, force bool) (json.RawMessage, error) {
+	values := adminHostScopeValues(region, "")
+	if clear && force {
+		values.Set("force", "true")
+	}
+	method := http.MethodGet
+	if clear {
+		// Older coordinators dispatch any host DELETE suffix as a Dedicated Host release.
+		method = http.MethodPost
+	}
+	path := "/v1/admin/hosts/" + url.PathEscape(hostID) + "/reservation?" + values.Encode()
+	var result json.RawMessage
+	err := c.do(ctx, method, path, nil, &result)
+	return result, err
 }
 
 func (c *CoordinatorClient) AdminMacHosts(ctx context.Context, region, serverType, state string) ([]CoordinatorMacHost, error) {
@@ -2468,7 +2495,7 @@ func (c *CoordinatorClient) doWithHeaders(ctx context.Context, method, path stri
 		}
 	}
 	err = c.doHTTPWithHeaders(ctx, method, path, data, body != nil, out, headers)
-	if err == nil || !shouldUseCoordinatorCurlFallback(method, body != nil, err) {
+	if err == nil || !shouldUseCoordinatorCurlFallback(ctx, method, body != nil, err) {
 		return err
 	}
 	if curlErr := c.doCurl(ctx, method, path, data, body != nil, out); curlErr == nil {
@@ -2729,16 +2756,23 @@ func isCoordinatorTransportError(err error) bool {
 	return errors.As(err, &urlErr)
 }
 
-func shouldUseCoordinatorCurlFallback(method string, hasBody bool, err error) bool {
-	if hasBody {
+func shouldUseCoordinatorCurlFallback(ctx context.Context, method string, hasBody bool, err error) bool {
+	if ctx.Err() != nil || hasBody || errors.Is(err, context.Canceled) {
 		return false
 	}
 	switch method {
 	case http.MethodGet, http.MethodHead:
-		return isCoordinatorTransportError(err)
 	default:
 		return false
 	}
+	if isCoordinatorTransportError(err) {
+		return true
+	}
+	// A dial timeout can match DeadlineExceeded while the request budget is live.
+	var urlErr *url.Error
+	var dialErr *net.OpError
+	return errors.As(err, &urlErr) && errors.As(urlErr.Err, &dialErr) &&
+		dialErr.Op == "dial" && dialErr.Timeout()
 }
 
 func (c *CoordinatorClient) applyChildEnvironment(cmd *exec.Cmd) {

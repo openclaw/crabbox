@@ -165,7 +165,7 @@ func (coordinatorCheckpointDriver) Create(ctx context.Context, req NativeCheckpo
 	}
 	if !isWindowsNativeTarget(req.Target) {
 		if err := prepareNativeImageSource(ctx, req.Target); err != nil {
-			return CoordinatorImage{}, err
+			return CoordinatorImage{}, NativeCheckpointNotSubmittedError{Cause: err}
 		}
 	}
 	var image CoordinatorImage

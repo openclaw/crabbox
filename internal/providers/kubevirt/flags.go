@@ -9,79 +9,17 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-type flagValues struct {
-	Kubectl         *string
-	Virtctl         *string
-	Kubeconfig      *string
-	Context         *string
-	Namespace       *string
-	Template        *string
-	SSHUser         *string
-	SSHKey          *string
-	SSHPublicKey    *string
-	SSHPort         *string
-	WorkRoot        *string
-	DeleteOnRelease *bool
-}
-
-func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return flagValues{
-		Kubectl:         fs.String("kubevirt-kubectl", defaults.KubeVirt.Kubectl, "kubectl executable"),
-		Virtctl:         fs.String("kubevirt-virtctl", defaults.KubeVirt.Virtctl, "virtctl executable"),
-		Kubeconfig:      fs.String("kubevirt-kubeconfig", defaults.KubeVirt.Kubeconfig, "Kubernetes kubeconfig path"),
-		Context:         fs.String("kubevirt-context", defaults.KubeVirt.Context, "Kubernetes context"),
-		Namespace:       fs.String("kubevirt-namespace", defaults.KubeVirt.Namespace, "Kubernetes namespace"),
-		Template:        fs.String("kubevirt-template", defaults.KubeVirt.Template, "KubeVirt VirtualMachine manifest template"),
-		SSHUser:         fs.String("kubevirt-ssh-user", defaults.KubeVirt.SSHUser, "guest SSH user"),
-		SSHKey:          fs.String("kubevirt-ssh-key", defaults.KubeVirt.SSHKey, "guest SSH private key"),
-		SSHPublicKey:    fs.String("kubevirt-ssh-public-key", defaults.KubeVirt.SSHPublicKey, "guest SSH public key inserted into the template"),
-		SSHPort:         fs.String("kubevirt-ssh-port", defaults.KubeVirt.SSHPort, "guest SSH port"),
-		WorkRoot:        fs.String("kubevirt-work-root", defaults.KubeVirt.WorkRoot, "guest Crabbox work root"),
-		DeleteOnRelease: fs.Bool("kubevirt-delete-on-release", defaults.KubeVirt.DeleteOnRelease, "delete the VM on release instead of stopping it"),
-	}
-}
-
-func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(flagValues)
+func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(core.KubeVirtConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if core.FlagWasSet(fs, "kubevirt-kubectl") {
-		cfg.KubeVirt.Kubectl = core.ExpandUserPath(*v.Kubectl)
+	applied := v.Apply(&cfg.KubeVirt, fs)
+	cfg.KubeVirt.ExpandAppliedLocalPaths(applied)
+	if applied.WorkRoot {
+		cfg.WorkRoot = cfg.KubeVirt.WorkRoot
 	}
-	if core.FlagWasSet(fs, "kubevirt-virtctl") {
-		cfg.KubeVirt.Virtctl = core.ExpandUserPath(*v.Virtctl)
-	}
-	if core.FlagWasSet(fs, "kubevirt-kubeconfig") {
-		cfg.KubeVirt.Kubeconfig = core.ExpandUserPath(*v.Kubeconfig)
-	}
-	if core.FlagWasSet(fs, "kubevirt-context") {
-		cfg.KubeVirt.Context = *v.Context
-	}
-	if core.FlagWasSet(fs, "kubevirt-namespace") {
-		cfg.KubeVirt.Namespace = *v.Namespace
-	}
-	if core.FlagWasSet(fs, "kubevirt-template") {
-		cfg.KubeVirt.Template = core.ExpandUserPath(*v.Template)
-	}
-	if core.FlagWasSet(fs, "kubevirt-ssh-user") {
-		cfg.KubeVirt.SSHUser = *v.SSHUser
-	}
-	if core.FlagWasSet(fs, "kubevirt-ssh-key") {
-		cfg.KubeVirt.SSHKey = core.ExpandUserPath(*v.SSHKey)
-	}
-	if core.FlagWasSet(fs, "kubevirt-ssh-public-key") {
-		cfg.KubeVirt.SSHPublicKey = core.ExpandUserPath(*v.SSHPublicKey)
-	}
-	if core.FlagWasSet(fs, "kubevirt-ssh-port") {
-		cfg.KubeVirt.SSHPort = *v.SSHPort
-	}
-	if core.FlagWasSet(fs, "kubevirt-work-root") {
-		cfg.KubeVirt.WorkRoot = *v.WorkRoot
-		cfg.WorkRoot = *v.WorkRoot
-	}
-	if core.FlagWasSet(fs, "kubevirt-delete-on-release") {
-		cfg.KubeVirt.DeleteOnRelease = *v.DeleteOnRelease
+	if applied.DeleteOnRelease {
 		core.MarkDeleteOnReleaseExplicit(cfg, providerName)
 	}
 	return validateConfig(*cfg)

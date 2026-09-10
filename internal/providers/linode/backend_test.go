@@ -255,7 +255,7 @@ func TestAcquireCreatesLinodeClaimsLeaseAndMarksReady(t *testing.T) {
 		t.Fatalf("createRequests=%#v", api.createRequests)
 	}
 	req := api.createRequests[0]
-	if req.Label != core.LeaseProviderName(lease.LeaseID, "my-app") || req.Region != defaultRegion || req.Type != defaultType || req.Image != defaultImage {
+	if req.Label != core.LeaseProviderName(lease.LeaseID, "my-app") || req.Region != "us-ord" || req.Type != defaultType || req.Image != "linode/ubuntu24.04" {
 		t.Fatalf("request=%#v", req)
 	}
 	if len(req.AuthorizedKeys) != 1 || !strings.HasPrefix(req.AuthorizedKeys[0], "ssh-ed25519 ") {

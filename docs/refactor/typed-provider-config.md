@@ -4,7 +4,7 @@ Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
 runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, Semaphore,
 Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, OVHcloud, Lume, Runpod, Vast,
-W&B, Scaleway, and Tencent Cloud
+W&B, Scaleway, Tencent Cloud, DigitalOcean, Vultr, Linode, Sealos DevBox, and KubeVirt
 describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
@@ -21,16 +21,52 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_morph.go`, `internal/cli/config_exe_dev.go`,
 `internal/cli/config_ovh.go`, `internal/cli/config_lume.go`,
 `internal/cli/config_runpod.go`, `internal/cli/config_vast.go`,
-`internal/cli/config_wandb.go`, `internal/cli/config_scaleway.go`, and
-`internal/cli/config_tencentcloud.go`.
+`internal/cli/config_wandb.go`, `internal/cli/config_scaleway.go`,
+`internal/cli/config_tencentcloud.go`, `internal/cli/config_digitalocean.go`,
+`internal/cli/config_vultr.go`, `internal/cli/config_linode.go`,
+`internal/cli/config_sealos_devbox.go`, and
+`internal/cli/config_kubevirt.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
 and storage, registration, and presence-based application for admitted flags.
 
-This is a wiring refactor, not a behavior correction. Other providers retain
+Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.
+
+Sealos DevBox uses all sixteen bindings together. Its fifteen file strings retain
+value storage and trusted-user admission; the pointer-backed release boolean
+also accepts repository input and preserves explicit false. Applied facts for
+the two host paths let file and flag wrappers expand only accepted values;
+environment wrappers expand the final fallback values unconditionally. The
+existing path algorithm, guest-work-root rules, explicit markers, and validation
+remain outside generation. Moving path expansion immediately after assignment
+is valid here because these string/bool bindings are non-fallible and no
+intermediate observer reads them; it is not a generic delayed-normalization rule.
+
+KubeVirt's complete twelve-field binding uses a mandatory typed file wrapper.
+The wrapper copies file input and applies the existing conditional public-key
+admission rule to that snapshot before calling the generated overlay. A rejected
+snapshot value becomes an ignored empty assignment, not a request to clear the
+runtime value. The original file object remains available unchanged to the
+writer. The generated overlay is a mechanical primitive; production file
+callers must go through the wrapper rather than treating source tags alone as
+the complete admission policy.
+
+Accepted reports retain KubeVirt's six host-path transformations and release
+marker. File/flags expand only accepted paths; environment processing expands
+final fallback values unconditionally. Only flags copy the raw provider work
+root to the generic root, without introducing a new explicitness bit. The
+provider owns the shared inherited-root decision used by configuration and
+command forwarding; its distinct routing and trim-aware fallback rules stay
+separate. No generator callback or new normalization policy is introduced.
+
+Each provider owns an `ExpandAppliedLocalPaths` method used by its file and
+flag wrappers. It consumes the actual applied report and preserves the ordered
+field transformations; it does not change acceptance, markers, or guest paths.
+Environment fallback expansion stays explicit and does not manufacture an
+all-true applied report.
 
 ## Why generation
 
@@ -93,6 +129,140 @@ raw configuration. Named runtime constants share effective fallback values witho
 initializing flag defaults. Its trusted endpoint admission, four explicit markers,
 class matrix, market selection, and service-family endpoint policy remain separate.
 
+DigitalOcean has no provider flags. Its declaration owns file/environment input
+and a used zero constructor; the generator emits no flag storage, registration,
+application, or presence APIs for a flagless schema. Runtime region/image values
+remain separate from portable-OS mapping and lower generic-field inheritance.
+
+Vultr reuses the same flagless bindings without extending the generator. Its two
+raw file lists retain sharing and its environment lists retain their own empty
+representation. Its handwritten `WithRuntimeDefaults` value method owns raw-empty
+region/user-scheme filling at the existing core and backend phases and supplies
+read-only user-scheme projections. It preserves other fields and slice sharing;
+the generated raw constructor stays zero-valued. The lower region helper retains
+its separate generic-location fallback. SSH-user policy, native boot-source
+parsing, and OS catalog selection remain outside this transformation.
+
+Linode combines generated flagless bindings with a concrete typed initializer.
+The initializer supplies configured region/type defaults and copies the image
+already resolved by core's portable-OS mapping, including an empty image. It
+does not repeat that lookup or introduce an eager image fallback. Accepted image
+and type inputs still set their existing explicit-source markers; later OS
+selection, class policy, and validation before backend defaults remain separate.
+All five file fields retain their legacy value-backed YAML storage, so saving
+configuration omits ignored empty strings and lists without adding defaults.
+
+## File storage and configuration writes
+
+File assignment and file persistence are separate contracts. Commands such as
+`config set-broker` read and rewrite the whole user configuration. A pointer to
+an explicit empty value survives YAML `omitempty`, whereas the corresponding
+value field is omitted. Ignoring an empty overlay does not establish which
+representation a provider historically used.
+
+File fields remain pointers by default, preserving explicit false, zero, empty
+strings and empty-list clears. Use `fileStorage:"value"` only when the field's
+original value-backed storage and zero-ignoring assignment rule are established.
+The generator then emits a value field with the same YAML tag and a raw-value
+predicate; it does not normalize the stored value or change environment/flag
+handling. An explicitly present empty provider block remains `{}`.
+
+| Kind | Required file rule |
+| --- | --- |
+| `string` | `fileIgnoreEmpty:"true"` |
+| `[]string` | `fileList:"nonempty-raw"` |
+| `int`, `int64` | `fileInt:"positive"` or `fileInt:"nonzero"` |
+| `float64` | `fileFloat:"positive"` |
+
+Presence-sensitive rules, booleans and fields without file input cannot use value
+storage. Existing pointer-backed fields must not opt in merely because they
+ignore zero. Modal's `secrets: []` deliberately remains pointer-backed so a write
+retains the explicit clear. Positive-only numeric overlays still store negative
+inputs verbatim: ignoring an assignment is not permission to erase its file value.
+
+## Apple VM's concrete source owner
+
+`config_apple_vm.go` owns all eight settings, initialization, and complete file
+and environment application without generated bindings. Runtime and file types
+remain distinct: three pointer-backed file integers preserve explicit zero and
+null/omitted values, so deriving the file type from runtime values would lose a
+real storage contract. Initialization accepts the already-selected image and
+checksum pair without repeating OS-image selection or setting explicit markers.
+
+Shared accepted-image and checksum operations own the associated value and
+marker changes together. File and environment callers retain their raw-input
+acceptance; flags call those operations only after their existing trimming and
+validation. Source selection, legacy precedence, signed numeric parsing, exact
+errors and earlier mutations on failure remain explicit and ordered.
+
+The provider retains its sixteen current/deprecated flag spellings, current-name
+visit precedence, image-identity display, early validation and selected-provider
+defaults call. Native behavior and default-image selection are not source-input
+events and do not use the explicit-image transition. No generic alias, callback
+or staged-validation framework is added to the generator.
+
+## Lambda's concrete owner
+
+Lambda uses `config_lambda.go` without generated bindings. Its structured mount
+list and different file/environment image-pair rules remain explicit typed code.
+`LambdaConfig` owns one eight-field YAML shape; the defined
+`type fileLambdaConfig LambdaConfig` preserves the existing file-input type name
+in decoder diagnostics without duplicating the fields. File input stays zero-valued,
+and runtime initialization is a separate function. No JSON tags or custom marshal
+methods are added; the supported file writer and config-show formats stay unchanged.
+Ad-hoc YAML serialization of the raw runtime type is not a supported contract.
+
+The source applicators and existing mount parser live with that concrete owner.
+`WithRuntimeDefaults` owns raw-empty region/type filling and the image-family
+fallback when both image and family are empty. Runtime initialization delegates
+from the zero value. Core applies the transform before its explicit OS override;
+the backend retains generic server-type projection before applying it. Trim-aware
+provider lookups remain separate from these raw-empty rules.
+Native mount filtering, lookup, credentials, class selection and OS mappings remain
+provider policy. The following field instructions apply to generated owners.
+
+## Local Container's concrete source owner
+
+`config_local_container.go` keeps eleven runtime members distinct from nine
+file/environment settings. The file type retains two pointer booleans and its
+existing omissions. CLI-only volumes and transient checkpoint metadata remain
+runtime data, not new persisted settings; their list/map identities survive
+ordinary source application. The initializer accepts the resolved image and
+keeps the raw work root empty without marking compiled defaults explicit.
+
+Three accepted-input operations pair Runtime, Image and WorkRoot assignments
+with their existing source markers. File/environment predicates and scalar flag
+visitation stay with their current callers. The flag work-root operation sets
+the provider bit before the independent generic root copy/snapshot; later
+observers see the same state, including the existing empty-snapshot semantics.
+No concurrency guarantee or callback layer is introduced.
+
+Flag storage, raw volume-list behavior, creation-only checks and provider
+defaults remain provider-owned. NoHostname stays file/environment-only. This
+concrete owner needs neither generated runtime-state exclusions nor a new flag
+list framework; native, socket, mount and checkpoint behavior is unchanged.
+
+## Apple Container's shared concrete owner
+
+`config_apple_container.go` owns all seven shared settings without generated
+bindings. A YAML-tagged `AppleContainerConfig` and distinct defined
+`fileAppleContainerConfig` retain one field roster, the existing file type name,
+and zero-valued decoding. File persistence and the six-field config-show view
+remain unchanged; raw runtime JSON retains its existing shape. Ad-hoc YAML
+serialization of the runtime type is not a supported compatibility contract.
+
+Initialization accepts the already-resolved OS image, including an empty value,
+rather than resolving it again. File input clones nonempty argument lists;
+environment input ignores empty whitespace-tokenized results; a visited flag
+clears the list to nil when tokenization is empty. These are distinct policies,
+not interchangeable list modes.
+
+The owner provides two typed flag surfaces: seven Apple Container flags and four
+Apple Machine flags with their existing names and help. They are not aliases or
+a configurable prefix factory. Provider wrappers retain image markers, generic
+user/root propagation, and the exact selected Container defaults call. OS-image
+selection and native Container/Machine behavior remain outside this owner.
+
 ## Adding a field
 
 1. Add an exported, singly named field to the provider's config struct. Supported types
@@ -110,12 +280,16 @@ class matrix, market selection, and service-family endpoint policy remain separa
    primary `env`, allow an existing alias, and omit `config`, `flag`, `help`, and
    `default` tags entirely. This mode retains a zero default and exposes no YAML
    or command-line field; it does not generate credential presentation or policy.
-   An existing string with file/environment input but no flag uses the exact
+   An existing string or string list with file/environment input but no flag uses the exact
    `sources:"user,repo,env"` grant: require `config` and primary `env`, and omit
    `flag`, `help`, and `default` tags entirely. It retains a zero default and
    uses existing file predicates and applied reports without adding a flag or
    changing trust policy. This grant does not permit a file input on an
    environment-only field.
+   String lists are admitted only by this untrusted-file-capable no-flag grant,
+   with the same existing file/environment list rules; other no-flag grants remain
+   string-only. A schema with no flag-admitted fields emits no placeholder flag
+   API or flag import. Mixed schemas retain their admitted flag bindings.
    A trusted-file/environment string without a flag uses the exact
    `sources:"user,env"` grant with the same absent flag/help/default requirement;
    its file assignment uses the loader's existing trusted decision.
@@ -133,7 +307,8 @@ class matrix, market selection, and service-family endpoint policy remain separa
    by the tag.
    Environment-admitted `int64` fields currently require this fallback mode;
    strict `int64` environment parsing and aliases are not generated. File fields
-   remain `*int64`, and flags use `flag.Int64`, with no platform-width conversion.
+   use `*int64` by default or `int64` with `fileStorage:"value"`; flags use
+   `flag.Int64`, with no platform-width conversion.
    Compiled `int` defaults retain the existing signed 32-bit check; `int64`
    defaults are checked at signed 64-bit width.
    An existing positive-only integer file binding can opt into
@@ -218,7 +393,7 @@ class matrix, market selection, and service-family endpoint policy remain separa
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo ./internal/providers/opencomputer ./internal/providers/modal ./internal/providers/morph ./internal/providers/exedev ./internal/providers/ovh ./internal/providers/lume ./internal/providers/runpod ./internal/providers/vast ./internal/providers/wandb ./internal/providers/scaleway ./internal/providers/tencentcloud` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo ./internal/providers/opencomputer ./internal/providers/modal ./internal/providers/morph ./internal/providers/exedev ./internal/providers/ovh ./internal/providers/lume ./internal/providers/runpod ./internal/providers/vast ./internal/providers/wandb ./internal/providers/scaleway ./internal/providers/tencentcloud ./internal/providers/digitalocean ./internal/providers/vultr` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:
@@ -265,15 +440,18 @@ trust remain outside the generator.
 
 The loader still applies defaults, user files, repository files, environment,
 and explicit flags in that order. Both repository filenames retain their
-existing order. A YAML pointer distinguishes omission/null from explicit false,
-zero, an empty string, or an empty list. Only an explicit `fileIgnoreEmpty:"true"`
-binding ignores an empty string; whitespace is still applied. Lists are trimmed and blank entries
-removed, without deduplication. Empty environment strings fall through; a
-nonempty list value containing only whitespace/commas clears the list. Existing
-boolean environment aliases (`yes/no`, `on/off`, `1/0`) remain accepted.
-Malformed boolean/float environment values keep the previous value, while
-malformed or negative timeout values fail. These differences are preserved,
-not standardized by this refactor.
+existing order. Presence-sensitive YAML bindings use pointers to distinguish
+omission/null from explicit false, zero, an empty string, or an empty list.
+Value-backed fields retain their declared zero-ignoring rules. Only an explicit
+`fileIgnoreEmpty:"true"` binding ignores an empty string; whitespace still applies.
+List normalization follows each declared source mode: raw file lists stay raw,
+while ordinary comma-separated environment input trims blanks without deduplication.
+Ordinary empty environment strings fall through; presence-based list bindings
+can clear on empty input. Existing boolean aliases (`yes/no`, `on/off`, `1/0`)
+remain accepted. Malformed boolean/float environment values keep the previous
+value. Strict nonnegative integer bindings reject malformed or negative input;
+explicitly tolerant integer bindings retain their documented fallback behavior.
+These differences are preserved, not standardized by generation.
 
 Flags keep their names, help, types, defaults, and `flag.FlagSet` presence
 semantics. Explicit false/zero/empty flags override earlier layers. Registration

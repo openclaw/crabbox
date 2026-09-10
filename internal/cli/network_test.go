@@ -2,9 +2,225 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
+	"flag"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+type tailscaleDefaultsTestProvider struct {
+	testAWSProvider
+	name          string
+	supplyDefault bool
+}
+
+func (p tailscaleDefaultsTestProvider) Name() string { return p.name }
+
+func (p tailscaleDefaultsTestProvider) Spec() ProviderSpec {
+	spec := p.testAWSProvider.Spec()
+	spec.Name = p.name
+	spec.Targets = []TargetSpec{{OS: targetLinux}}
+	spec.Features = append(spec.Features, FeatureTailscale)
+	return spec
+}
+
+func (p tailscaleDefaultsTestProvider) ApplyConfigDefaults(cfg *Config) error {
+	if p.supplyDefault {
+		ApplyTailscaleEnabledDefault(cfg, true)
+	}
+	return nil
+}
+
+func TestProviderTailscaleDefaultsAcrossSelection(t *testing.T) {
+	const source = "test-tailscale-default"
+	const destination = "test-no-tailscale-default"
+	for _, provider := range []tailscaleDefaultsTestProvider{
+		{name: source, supplyDefault: true},
+		{name: destination},
+	} {
+		name := provider.Name()
+		previous, existed := providerRegistry[name]
+		providerRegistry[name] = provider
+		t.Cleanup(func() {
+			if existed {
+				providerRegistry[name] = previous
+			} else {
+				delete(providerRegistry, name)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name      string
+		args      []string
+		want      bool
+		wantReset bool
+	}{
+		{name: "omitted", want: true},
+		{name: "explicit false", args: []string{"--tailscale=false"}},
+		{name: "explicit true", args: []string{"--tailscale=true"}, want: true, wantReset: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Provider = source
+			if err := applyProviderConfigDefaults(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			fs := flag.NewFlagSet(tc.name, flag.ContinueOnError)
+			values := registerLeaseCreateFlags(fs, baseConfig())
+			if err := fs.Parse(append([]string{"--provider", source}, tc.args...)); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyLeaseCreateFlagsForLeaseMode(&cfg, fs, values, "", false); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyProviderConfigDefaults(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			var body struct {
+				Tailscale *bool `json:"tailscale"`
+			}
+			client := CoordinatorClient{
+				BaseURL: "https://coordinator.example.test",
+				Client: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					if r.Method != http.MethodPost || r.URL.Path != "/v1/leases" {
+						t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+					}
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Fatal(err)
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"lease":{"id":"cbx_123456abcdef"}}`))}, nil
+				})},
+			}
+			if _, err := client.CreateLease(context.Background(), cfg, "ssh-ed25519 test", true, "", "test"); err != nil {
+				t.Fatal(err)
+			}
+			if body.Tailscale == nil || *body.Tailscale != tc.want {
+				t.Fatalf("serialized enabled=%v, want %v", body.Tailscale, tc.want)
+			}
+			cfg.Provider = destination
+			if err := applyProviderConfigDefaults(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Tailscale.Enabled != tc.wantReset {
+				t.Fatalf("after provider change=%v, want %v", cfg.Tailscale.Enabled, tc.wantReset)
+			}
+			cfg.Provider = source
+			if err := applyProviderConfigDefaults(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Tailscale.Enabled != tc.want {
+				t.Fatalf("after reselect=%v, want %v", cfg.Tailscale.Enabled, tc.want)
+			}
+		})
+	}
+}
+
+func TestProviderTailscaleDefaultsPreserveIntent(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		initial      bool
+		explicit     bool
+		defaultValue bool
+		override     bool
+		want         bool
+		wantReset    bool
+	}{
+		{name: "omitted", defaultValue: true, want: true},
+		{name: "explicit false", explicit: true, defaultValue: true},
+		{name: "explicit true", initial: true, explicit: true, defaultValue: true, want: true, wantReset: true},
+		{name: "programmatic true", initial: true, defaultValue: true, want: true, wantReset: true},
+		{name: "programmatic true beats false default", initial: true, want: true, wantReset: true},
+		{name: "programmatic false after default", defaultValue: true, override: true},
+		{name: "programmatic true after false default", override: true, want: true, wantReset: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Tailscale.Enabled = tc.initial
+			if tc.explicit {
+				MarkTailscaleEnabledExplicit(&cfg)
+			}
+			ApplyTailscaleEnabledDefault(&cfg, tc.defaultValue)
+			if tc.override {
+				cfg.Tailscale.Enabled = !tc.defaultValue
+			}
+			ApplyTailscaleEnabledDefault(&cfg, tc.defaultValue)
+			if cfg.Tailscale.Enabled != tc.want {
+				t.Fatalf("enabled=%v, want %v", cfg.Tailscale.Enabled, tc.want)
+			}
+			copied := cfg
+			resetProviderDerivedDefaults(&copied)
+			if copied.Tailscale.Enabled != tc.wantReset {
+				t.Fatalf("after provider reset=%v, want %v", copied.Tailscale.Enabled, tc.wantReset)
+			}
+			ApplyTailscaleEnabledDefault(&copied, tc.defaultValue)
+			if copied.Tailscale.Enabled != tc.want {
+				t.Fatalf("after reselect=%v, want %v", copied.Tailscale.Enabled, tc.want)
+			}
+		})
+	}
+}
+
+func TestProviderTailscaleDefaultsRespectConfigSources(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		file string
+		env  string
+		args []string
+		want bool
+	}{
+		{name: "omitted", file: "tailscale: {}\n", want: true},
+		{name: "null", file: "tailscale: {enabled: null}\n", want: true},
+		{name: "yaml false", file: "tailscale: {enabled: false}\n"},
+		{name: "yaml true", file: "tailscale: {enabled: true}\n", want: true},
+		{name: "env false", env: "false"},
+		{name: "env true overrides file", file: "tailscale: {enabled: false}\n", env: "true", want: true},
+		{name: "flag false", args: []string{"--tailscale=false"}},
+		{name: "flag true overrides env", env: "false", args: []string{"--tailscale=true"}, want: true},
+		{name: "file env flag precedence", file: "tailscale: {enabled: false}\n", env: "true", args: []string{"--tailscale=false"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			ApplyTailscaleEnabledDefault(&cfg, true)
+			if tc.file != "" {
+				path := filepath.Join(t.TempDir(), "config.yaml")
+				if err := os.WriteFile(path, []byte(tc.file), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyConfigFile(&cfg, path, configPathTrust{}); err != nil {
+					t.Fatal(err)
+				}
+				ApplyTailscaleEnabledDefault(&cfg, true)
+			}
+			if tc.env != "" {
+				t.Setenv("CRABBOX_TAILSCALE", tc.env)
+				if err := applyEnv(&cfg); err != nil {
+					t.Fatal(err)
+				}
+				ApplyTailscaleEnabledDefault(&cfg, true)
+			}
+			if tc.args != nil {
+				fs := flag.NewFlagSet(tc.name, flag.ContinueOnError)
+				values := registerNetworkFlags(fs, baseConfig())
+				if err := fs.Parse(tc.args); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyNetworkFlagOverrides(&cfg, fs, values); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ApplyTailscaleEnabledDefault(&cfg, true)
+			if cfg.Tailscale.Enabled != tc.want {
+				t.Fatalf("enabled=%v, want %v", cfg.Tailscale.Enabled, tc.want)
+			}
+		})
+	}
+}
 
 func TestNetworkPublicIgnoresTailscaleMetadata(t *testing.T) {
 	cfg := baseConfig()

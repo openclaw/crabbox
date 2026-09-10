@@ -224,6 +224,7 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		Slug:             serverSlug(server),
 		Provider:         provider,
 		TargetOS:         blank(server.Labels["target"], cfg.TargetOS),
+		WorkRoot:         statusWorkRoot(cfg, server, target),
 		WindowsMode:      blank(server.Labels["windows_mode"], cfg.WindowsMode),
 		State:            state,
 		ServerID:         serverID,
@@ -249,6 +250,11 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 	}, nil
 }
 
+func statusWorkRoot(cfg Config, server Server, target SSHTarget) string {
+	applyResolvedLeaseConfig(&cfg, server, &target)
+	return cfg.WorkRoot
+}
+
 func inspectProviderMetadata(provider string, metadata map[string]any) map[string]any {
 	if provider != "aws" {
 		return nil
@@ -272,6 +278,7 @@ type StatusView struct {
 	Slug        string `json:"slug,omitempty"`
 	Provider    string `json:"provider"`
 	TargetOS    string `json:"target"`
+	WorkRoot    string `json:"workroot,omitempty"`
 	WindowsMode string `json:"windowsMode,omitempty"`
 	State       string `json:"state"`
 	ServerID    string `json:"serverId"`

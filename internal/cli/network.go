@@ -27,6 +27,29 @@ type TailscaleConfig struct {
 	ExitNodeAllowLANAccess bool
 }
 
+// MarkTailscaleEnabledExplicit preserves an intentional true or false through provider defaults.
+func MarkTailscaleEnabledExplicit(cfg *Config) {
+	cfg.tailscaleExplicit = true
+	cfg.tailscaleDefaultApplied = false
+}
+
+// ApplyTailscaleEnabledDefault supplies a provider default without replacing explicit settings.
+func ApplyTailscaleEnabledDefault(cfg *Config, enabled bool) {
+	reconcileTailscaleDefault(cfg)
+	if cfg.tailscaleExplicit || (cfg.Tailscale.Enabled && !cfg.tailscaleDefaultApplied) {
+		return
+	}
+	cfg.Tailscale.Enabled = enabled
+	cfg.tailscaleDefaultApplied = true
+	cfg.tailscaleDefaultValue = enabled
+}
+
+func reconcileTailscaleDefault(cfg *Config) {
+	if cfg.tailscaleDefaultApplied && cfg.Tailscale.Enabled != cfg.tailscaleDefaultValue {
+		MarkTailscaleEnabledExplicit(cfg)
+	}
+}
+
 type TailscaleMetadata struct {
 	Enabled                bool     `json:"enabled"`
 	Hostname               string   `json:"hostname,omitempty"`
@@ -103,6 +126,7 @@ func applyNetworkFlagOverrides(cfg *Config, fs *flag.FlagSet, values networkFlag
 	}
 	if flagWasSet(fs, "tailscale") {
 		cfg.Tailscale.Enabled = *values.Tailscale
+		MarkTailscaleEnabledExplicit(cfg)
 	}
 	if flagWasSet(fs, "tailscale-tags") {
 		cfg.Tailscale.Tags = normalizeTailscaleTags(splitCommaList(*values.TailscaleTags))

@@ -2,7 +2,13 @@ package koyeb
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -120,6 +126,75 @@ func TestProviderDefaultsRemoveUnrelatedCloudValuesAndPreserveNativeType(t *test
 	}
 	if cfg.ServerType != "medium" || (Provider{}).ServerTypeForConfig(cfg) != "medium" {
 		t.Fatalf("native type=%q resolved=%q", cfg.ServerType, (Provider{}).ServerTypeForConfig(cfg))
+	}
+	if !cfg.Tailscale.Enabled || cfg.WorkRoot != "/workspace/crabbox" {
+		t.Fatalf("defaults tailscale=%v workRoot=%q", cfg.Tailscale.Enabled, cfg.WorkRoot)
+	}
+}
+
+func TestProviderLoadedDefaultsReachCoordinatorRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		file          string
+		env           string
+		wantTailscale bool
+		wantRoot      string
+	}{
+		{name: "omitted", wantTailscale: true, wantRoot: "/workspace/crabbox"},
+		{name: "yaml false", file: "tailscale: {enabled: false}\n", wantRoot: "/workspace/crabbox"},
+		{name: "env false", env: "false", wantRoot: "/workspace/crabbox"},
+		{name: "explicit base root", file: "workRoot: /work/crabbox\n", wantTailscale: true, wantRoot: "/work/crabbox"},
+		{name: "custom root", file: "workRoot: /workspace/project\n", wantTailscale: true, wantRoot: "/workspace/project"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, entry := range os.Environ() {
+				name, _, _ := strings.Cut(entry, "=")
+				if strings.HasPrefix(name, "CRABBOX_") {
+					t.Setenv(name, "")
+				}
+			}
+			home := t.TempDir()
+			t.Chdir(home)
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			t.Setenv("CRABBOX_PROVIDER", providerName)
+			t.Setenv("CRABBOX_TAILSCALE", tc.env)
+			path := filepath.Join(home, "config.yaml")
+			t.Setenv("CRABBOX_CONFIG", path)
+			if err := os.WriteFile(path, []byte("provider: koyeb\n"+tc.file), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := core.LoadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var body struct {
+				Tailscale *bool  `json:"tailscale"`
+				WorkRoot  string `json:"workRoot"`
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/leases" {
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123456abcdef","provider":"koyeb"}}`))
+			}))
+			defer server.Close()
+			client := core.CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+			if _, err := client.CreateLease(context.Background(), cfg, "ssh-ed25519 test", true, "", "test"); err != nil {
+				t.Fatal(err)
+			}
+			if body.Tailscale == nil || *body.Tailscale != tc.wantTailscale || body.WorkRoot != tc.wantRoot {
+				t.Fatalf("request tailscale=%v workRoot=%q; want enabled=%v workRoot=%q", body.Tailscale, body.WorkRoot, tc.wantTailscale, tc.wantRoot)
+			}
+		})
 	}
 }
 

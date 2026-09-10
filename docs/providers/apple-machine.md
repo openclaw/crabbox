@@ -53,6 +53,13 @@ Provider flags:
 --apple-machine-memory <size>
 ```
 
+These four flags remain separate from Apple Container's seven-flag surface;
+they do not expose its user, work-root, or extra-run-argument flags. Both surfaces
+share configuration values and image explicitness, but retain their distinct
+post-flag defaults and runtime behavior. See the [shared input rules](apple-container.md#configuration)
+for file and environment semantics; displayed configuration is not a claim about
+the native machine's defaults.
+
 ## Behavior and limits
 
 - `warmup` maps to `container machine create`.

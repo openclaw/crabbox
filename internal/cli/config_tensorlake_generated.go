@@ -7,19 +7,19 @@ import (
 )
 
 type fileTensorlakeConfig struct {
-	APIURL         *string  `yaml:"apiUrl,omitempty"`
-	CLIPath        *string  `yaml:"cliPath,omitempty"`
-	Image          *string  `yaml:"image,omitempty"`
-	Snapshot       *string  `yaml:"snapshot,omitempty"`
-	OrganizationID *string  `yaml:"organizationId,omitempty"`
-	ProjectID      *string  `yaml:"projectId,omitempty"`
-	Namespace      *string  `yaml:"namespace,omitempty"`
-	Workdir        *string  `yaml:"workdir,omitempty"`
-	CPUs           *float64 `yaml:"cpus,omitempty"`
-	MemoryMB       *int     `yaml:"memoryMB,omitempty"`
-	DiskMB         *int     `yaml:"diskMB,omitempty"`
-	TimeoutSecs    *int     `yaml:"timeoutSecs,omitempty"`
-	NoInternet     *bool    `yaml:"noInternet,omitempty"`
+	APIURL         string  `yaml:"apiUrl,omitempty"`
+	CLIPath        string  `yaml:"cliPath,omitempty"`
+	Image          string  `yaml:"image,omitempty"`
+	Snapshot       string  `yaml:"snapshot,omitempty"`
+	OrganizationID string  `yaml:"organizationId,omitempty"`
+	ProjectID      string  `yaml:"projectId,omitempty"`
+	Namespace      string  `yaml:"namespace,omitempty"`
+	Workdir        string  `yaml:"workdir,omitempty"`
+	CPUs           float64 `yaml:"cpus,omitempty"`
+	MemoryMB       int     `yaml:"memoryMB,omitempty"`
+	DiskMB         int     `yaml:"diskMB,omitempty"`
+	TimeoutSecs    int     `yaml:"timeoutSecs,omitempty"`
+	NoInternet     *bool   `yaml:"noInternet,omitempty"`
 }
 
 const TensorlakeConfigDefaultAPIURL string = "https://api.tensorlake.ai"
@@ -51,42 +51,42 @@ func (cfg *TensorlakeConfig) applyFile(file *fileTensorlakeConfig) (TensorlakeCo
 	if file == nil {
 		return applied, nil
 	}
-	if file.APIURL != nil && *file.APIURL != "" {
-		cfg.APIURL = *file.APIURL
+	if file.APIURL != "" {
+		cfg.APIURL = file.APIURL
 		applied.APIURL = true
 	}
-	if file.CLIPath != nil && *file.CLIPath != "" {
-		cfg.CLIPath = *file.CLIPath
+	if file.CLIPath != "" {
+		cfg.CLIPath = file.CLIPath
 	}
-	if file.Image != nil && *file.Image != "" {
-		cfg.Image = *file.Image
+	if file.Image != "" {
+		cfg.Image = file.Image
 	}
-	if file.Snapshot != nil && *file.Snapshot != "" {
-		cfg.Snapshot = *file.Snapshot
+	if file.Snapshot != "" {
+		cfg.Snapshot = file.Snapshot
 	}
-	if file.OrganizationID != nil && *file.OrganizationID != "" {
-		cfg.OrganizationID = *file.OrganizationID
+	if file.OrganizationID != "" {
+		cfg.OrganizationID = file.OrganizationID
 	}
-	if file.ProjectID != nil && *file.ProjectID != "" {
-		cfg.ProjectID = *file.ProjectID
+	if file.ProjectID != "" {
+		cfg.ProjectID = file.ProjectID
 	}
-	if file.Namespace != nil && *file.Namespace != "" {
-		cfg.Namespace = *file.Namespace
+	if file.Namespace != "" {
+		cfg.Namespace = file.Namespace
 	}
-	if file.Workdir != nil && *file.Workdir != "" {
-		cfg.Workdir = *file.Workdir
+	if file.Workdir != "" {
+		cfg.Workdir = file.Workdir
 	}
-	if file.CPUs != nil && *file.CPUs > 0 {
-		cfg.CPUs = *file.CPUs
+	if file.CPUs > 0 {
+		cfg.CPUs = file.CPUs
 	}
-	if file.MemoryMB != nil && *file.MemoryMB > 0 {
-		cfg.MemoryMB = *file.MemoryMB
+	if file.MemoryMB > 0 {
+		cfg.MemoryMB = file.MemoryMB
 	}
-	if file.DiskMB != nil && *file.DiskMB > 0 {
-		cfg.DiskMB = *file.DiskMB
+	if file.DiskMB > 0 {
+		cfg.DiskMB = file.DiskMB
 	}
-	if file.TimeoutSecs != nil && *file.TimeoutSecs > 0 {
-		cfg.TimeoutSecs = *file.TimeoutSecs
+	if file.TimeoutSecs > 0 {
+		cfg.TimeoutSecs = file.TimeoutSecs
 	}
 	if file.NoInternet != nil {
 		cfg.NoInternet = *file.NoInternet
