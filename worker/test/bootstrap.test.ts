@@ -835,6 +835,11 @@ describe("cloud-init bootstrap", () => {
       "Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath",
     );
     const restartIndex = got.indexOf("Restart-Service sshd -Force");
+    const nodeIndex = got.indexOf("\nEnsure-CrabboxNode\n");
+    const pathIndex = got.lastIndexOf('SetEnvironmentVariable("Path", $machinePath, "Machine")');
+    expect(nodeIndex).toBeGreaterThan(0);
+    expect(pathIndex).toBeGreaterThan(nodeIndex);
+    expect(restartIndex).toBeGreaterThan(pathIndex);
     expect(setupIndex).toBeGreaterThanOrEqual(0);
     expect(setupIndex).toBeLessThan(restartIndex);
     expect(got).not.toContain("tightvnc-2.8.85-gpl-setup-64bit.msi");

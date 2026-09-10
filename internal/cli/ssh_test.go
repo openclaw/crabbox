@@ -122,6 +122,7 @@ func TestWindowsPowerShellStdinScriptCommandUsesExactLengthFrame(t *testing.T) {
 		t.Fatalf("stdin script command length=%d exceeds cmd.exe limit", len(command))
 	}
 	decoded := decodePowerShellCommand(t, command)
+	assertWindowsPowerShellPathRefresh(t, decoded)
 	for _, want := range []string{
 		"$remaining = [Int64]12345",
 		"$stdin.ReadAsync($buffer, 0, $readSize).GetAwaiter().GetResult()",

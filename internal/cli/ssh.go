@@ -658,7 +658,7 @@ func sshReadyCommand(target SSHTarget) string {
 		return target.ReadyCheck
 	}
 	if isWindowsNativeTarget(target) {
-		return powershellCommand(`$ErrorActionPreference = "Stop"
+		return powershellCommand(windowsPowerShellPathRefresh + `$ErrorActionPreference = "Stop"
 git --version | Out-Null
 tar --version | Out-Null
 node --version | Out-Null
@@ -1798,8 +1798,12 @@ if ($remaining -gt 0) {
 `
 }
 
+// OpenSSH sessions can inherit PATH from before bootstrap updated the registry.
+const windowsPowerShellPathRefresh = `$env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+`
+
 func windowsPowerShellStdinScriptCommand(inputSize int) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return powershellCommand(windowsPowerShellPathRefresh + `$ErrorActionPreference = "Stop"
 $path = Join-Path $env:TEMP ("crabbox-stdin-command-" + [Guid]::NewGuid().ToString("N") + ".ps1")
 try {
 	$scriptFile = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)

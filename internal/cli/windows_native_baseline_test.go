@@ -51,6 +51,11 @@ func TestWindowsNativeBaselineBootstrap(t *testing.T) {
 				if verify < 0 || expand < verify || (ready >= 0 && ready < install) {
 					t.Fatal("verification, install and readiness are out of order")
 				}
+				pathUpdate := strings.LastIndex(script, `SetEnvironmentVariable("Path", $machinePath, "Machine")`)
+				restart := strings.LastIndex(script, "Restart-Service sshd -Force")
+				if restart < pathUpdate || restart < install {
+					t.Fatal("sshd must restart after Node install and all machine PATH updates")
+				}
 			})
 		}
 	}
@@ -58,10 +63,20 @@ func TestWindowsNativeBaselineBootstrap(t *testing.T) {
 
 func TestWindowsNativeReadinessRequiresNodeAndNpm(t *testing.T) {
 	script := decodePowerShellCommand(t, sshReadyCommand(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}))
+	assertWindowsPowerShellPathRefresh(t, script)
 	for _, want := range []string{"node --version", "npm.cmd --version", `throw "node readiness failed"`, `throw "npm readiness failed"`} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("missing readiness requirement %s", want)
 		}
+	}
+}
+
+func assertWindowsPowerShellPathRefresh(t *testing.T, script string) {
+	t.Helper()
+	const prefix = "$ProgressPreference = \"SilentlyContinue\"\n" +
+		"$env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')\n"
+	if !strings.HasPrefix(script, prefix) {
+		t.Fatal("native PowerShell must refresh machine and user PATH before executing commands")
 	}
 }
 
