@@ -450,6 +450,7 @@ func TestAppleVMOrdinaryPublicFlags(t *testing.T) {
 				want := initial
 				want.AppleVM = tc.want
 				if tc.visited {
+					core.RecordProviderFlagInputs(&want, true, providerName)
 					want.SSHUser, want.WorkRoot = tc.want.User, tc.want.WorkRoot
 					core.MarkAppleVMImageExplicit(&want)
 					core.MarkAppleVMImageSHA256Explicit(&want)
@@ -514,6 +515,8 @@ func TestAppleVMOrdinaryPublicFlags(t *testing.T) {
 					t.Fatal(err)
 				}
 				want = initial
+				// Earlier accepted image inputs remain recorded on the final no-op step.
+				core.RecordProviderFlagInputs(&want, true, providerName)
 				want.AppleVM.Image, want.AppleVM.ImageSHA256 = step.image, step.checksum
 				if step.imageMarked {
 					core.MarkAppleVMImageExplicit(&want)
@@ -590,6 +593,7 @@ func TestAppleVMOrdinaryPublicFlagNumericErrors(t *testing.T) {
 							t.Fatalf("error=%v, want exit 2: %s", err, message)
 						}
 						want.AppleVM.HelperPath, want.AppleVM.ImageSHA256 = "~/helper", ""
+						core.RecordProviderFlagInputs(&want, true, providerName)
 						want.AppleVM.User, want.SSHUser = "ci", "ci"
 						want.AppleVM.WorkRoot, want.WorkRoot = "/work/ci", "/work/ci"
 						core.MarkAppleVMImageExplicit(&want)
