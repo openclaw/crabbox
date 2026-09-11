@@ -661,11 +661,19 @@ func TestClearConfigEnvPreservesAbsence(t *testing.T) {
 	const key = "CRABBOX_NOMAD_DATACENTERS"
 	t.Setenv(key, "prior")
 	t.Run("absent is not an explicit clear", func(t *testing.T) {
-		clearConfigEnv(t)
-		if _, present := os.LookupEnv(key); present {
-			t.Fatal("environment reset must unset presence-aware inputs")
+		for range 2 {
+			clearConfigEnv(t)
+			if _, present := os.LookupEnv(key); present {
+				t.Fatal("environment reset must unset presence-aware inputs")
+			}
 		}
 		t.Setenv(key, "")
+		t.Run("restore explicit empty", func(t *testing.T) {
+			clearConfigEnv(t)
+			if _, present := os.LookupEnv(key); present {
+				t.Fatal("nested reset must remove explicit empty input")
+			}
+		})
 		if value, present := os.LookupEnv(key); !present || value != "" {
 			t.Fatal("an explicit empty input must remain distinguishable")
 		}
@@ -1266,6 +1274,11 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_HOSTINGER_RELEASE_ACTION",
 		"CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID",
 	} {
+		// Recreating absent keys accumulates Go environment tombstones and makes
+		// later subprocess environment copies progressively more expensive.
+		if _, present := os.LookupEnv(key); !present {
+			continue
+		}
 		t.Setenv(key, "")
 		if err := os.Unsetenv(key); err != nil {
 			t.Fatal(err)
