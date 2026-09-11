@@ -35,6 +35,52 @@ func TestSortSyncPlanRows(t *testing.T) {
 	}
 }
 
+func TestSyncPlanOrdinarySparseScope(t *testing.T) {
+	for _, tc := range []struct {
+		name, config, ignore    string
+		wantError, materialized bool
+	}{
+		{name: "in scope", wantError: true},
+		{name: "outside include", config: "sync: {include: [visible]}\n"},
+		{name: "excluded", config: "sync: {exclude: [hidden]}\n"},
+		{name: "ignore file", ignore: "hidden\n"},
+		{name: "ordered reinclude", config: "sync: {exclude: [hidden, '!hidden/drop.txt']}\n", wantError: true},
+		{name: "materialized", materialized: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := setupOrdinaryHiddenSyncRepo(t, false)
+			if tc.materialized {
+				runGit(t, dir, "sparse-checkout", "set", "visible", "hidden")
+			}
+			if tc.config != "" {
+				writeFile(t, os.Getenv("CRABBOX_CONFIG"), tc.config)
+			}
+			if tc.ignore != "" {
+				writeFile(t, filepath.Join(dir, ".crabboxignore"), tc.ignore)
+			}
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).syncPlan(context.Background(), nil)
+			if tc.wantError {
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != 6 {
+					t.Fatalf("error=%v want exit6", err)
+				}
+				assertOrdinaryHiddenSyncGuidance(t, err)
+				return
+			}
+			if err != nil {
+				t.Fatalf("scope control: %v", err)
+			}
+			if !strings.Contains(stdout.String(), "visible/keep.txt") {
+				t.Fatalf("visible path missing: %s", stdout.String())
+			}
+			if tc.materialized && !strings.Contains(stdout.String(), "hidden/drop.txt") {
+				t.Fatal("materialized path missing")
+			}
+		})
+	}
+}
+
 func TestSyncPlanJSONOutput(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

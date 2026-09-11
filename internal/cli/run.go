@@ -1165,7 +1165,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 	}
 	if !*noSync && freshPR.Empty() {
-		if err := validateLocalWorkspaceSyncSource(repo); err != nil {
+		if err := validateLocalWorkspaceSyncScope(repo, cfg); err != nil {
 			return err
 		}
 	}

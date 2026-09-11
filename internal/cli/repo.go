@@ -977,6 +977,21 @@ func validateLocalWorkspaceSyncSource(repo Repo) error {
 	return nil
 }
 
+// Validate effective scope without retaining a manifest; transfer rebuilds it later.
+func validateLocalWorkspaceSyncScope(repo Repo, cfg Config) error {
+	if err := validateLocalWorkspaceSyncSource(repo); err != nil {
+		return err
+	}
+	excludes, err := syncExcludes(repo.Root, cfg)
+	if err != nil {
+		return err
+	}
+	if _, err := validatedSyncManifestScope(repo.Root, excludes, syncIncludes(cfg)); err != nil {
+		return exit(6, "build sync file list: %v", err)
+	}
+	return nil
+}
+
 func syncManifest(root string, excludes SyncExcludeRules) (SyncManifest, error) {
 	return syncManifestFilteredRules(root, excludes, nil)
 }
@@ -994,30 +1009,11 @@ func syncManifestFilteredRules(root string, excludes SyncExcludeRules, includes 
 	if err != nil {
 		return SyncManifest{}, err
 	}
-	tracked, err := loadGitTrackedPaths(root)
+	scope, err := validatedSyncManifestScope(root, excludes, includes)
 	if err != nil {
-		return SyncManifest{}, fmt.Errorf("verify sync manifest scope: %w", err)
+		return SyncManifest{}, err
 	}
-	trackedRegular := trackedRegularPathSet(tracked)
-	inManifestScope := func(entry gitTrackedPath) bool {
-		rel := filepath.ToSlash(entry.name)
-		return safeRepoRel(rel) &&
-			!pathExcludedByRules(rel, excludes, gitModeIsRegular(entry.mode)) &&
-			pathIncluded(rel, includes)
-	}
-	gitlinkPaths, err := trackedGitlinkPaths(tracked, inManifestScope)
-	if err != nil {
-		return SyncManifest{}, fmt.Errorf("verify sync manifest scope: %w", err)
-	}
-	hidden, err := gitCheckoutHiddenOmissionForTracked(root, tracked, gitCheckoutSparseEnabled(root), func(entry gitTrackedPath) bool {
-		return entry.mode != "160000" && inManifestScope(entry)
-	}, sparseCheckoutIncludedPaths)
-	if err != nil {
-		return SyncManifest{}, fmt.Errorf("verify sync manifest scope: %w", err)
-	}
-	if hidden != "" {
-		return SyncManifest{}, fmt.Errorf("tracked path %q is hidden by sparse checkout or skip-worktree state but remains in sync manifest scope", hidden)
-	}
+	trackedRegular, gitlinkPaths := scope.trackedRegular, scope.gitlinkPaths
 	seen := map[string]bool{}
 	manifest := SyncManifest{}
 	for _, rel := range splitNul(out) {
@@ -1064,6 +1060,39 @@ func syncManifestFilteredRules(root string, excludes SyncExcludeRules, includes 
 	manifest.Changed, manifest.ChangedBytes = changedPathSetBytes(root, changed)
 	manifest.OverlayFiles, manifest.OverlayBytes = overlayPathSetBytes(root, manifest.Files, manifest.Changed)
 	return manifest, nil
+}
+
+type syncManifestScope struct {
+	trackedRegular map[string]struct{}
+	gitlinkPaths   map[string]struct{}
+}
+
+func validatedSyncManifestScope(root string, excludes SyncExcludeRules, includes []string) (syncManifestScope, error) {
+	tracked, err := loadGitTrackedPaths(root)
+	if err != nil {
+		return syncManifestScope{}, fmt.Errorf("verify sync manifest scope: %w", err)
+	}
+	trackedRegular := trackedRegularPathSet(tracked)
+	inManifestScope := func(entry gitTrackedPath) bool {
+		rel := filepath.ToSlash(entry.name)
+		return safeRepoRel(rel) &&
+			!pathExcludedByRules(rel, excludes, gitModeIsRegular(entry.mode)) &&
+			pathIncluded(rel, includes)
+	}
+	gitlinkPaths, err := trackedGitlinkPaths(tracked, inManifestScope)
+	if err != nil {
+		return syncManifestScope{}, fmt.Errorf("verify sync manifest scope: %w", err)
+	}
+	hidden, err := gitCheckoutHiddenOmissionForTracked(root, tracked, gitCheckoutSparseEnabled(root), func(entry gitTrackedPath) bool {
+		return entry.mode != "160000" && inManifestScope(entry)
+	}, sparseCheckoutIncludedPaths)
+	if err != nil {
+		return syncManifestScope{}, fmt.Errorf("verify sync manifest scope: %w", err)
+	}
+	if hidden != "" {
+		return syncManifestScope{}, fmt.Errorf("tracked path %q is hidden by sparse checkout or skip-worktree state but remains in sync manifest scope; materialize the checkout, or adjust sync.include, ordered sync.exclude, or .crabboxignore so this path is outside sync scope", hidden)
+	}
+	return syncManifestScope{trackedRegular: trackedRegular, gitlinkPaths: gitlinkPaths}, nil
 }
 
 func trackedRegularPathSet(tracked []gitTrackedPath) map[string]struct{} {

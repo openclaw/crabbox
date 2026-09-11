@@ -61,10 +61,15 @@ That list is then filtered by the active excludes:
 - repo-local `sync.exclude` (config) patterns;
 - root `.crabboxignore` patterns.
 
-Before transfer, Crabbox checks tracked paths that remain in the effective
-manifest scope. If sparse-checkout rules or `skip-worktree` state hide one of
+Before ordinary SSH lease work, Crabbox checks tracked paths that remain in the
+effective manifest scope; it still rebuilds the final manifest after acquisition.
+If sparse-checkout rules or `skip-worktree` state hide one of
 those paths, sync stops instead of treating the omission as a deletion. Hidden
 paths outside `sync.include` or removed by ordered excludes are ignored.
+Materialize the checkout, or intentionally adjust `sync.include`, ordered
+`sync.exclude`, or `.crabboxignore` to put those paths outside sync scope. Later
+reinclusion rules remain authoritative; fully materialized sparse checkouts
+remain supported.
 Gitlinks are not manifest files or remote file deletions, while symlinks remain
 file-like.
 
