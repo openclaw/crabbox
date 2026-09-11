@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -89,6 +89,41 @@ gsettings() {
   printf 'gsettings\\t%s\\t%s\\t%s\\n' "\${DBUS_SESSION_BUS_ADDRESS:-}" "\${DISPLAY:-}" "$*" >> "$FIXTURE_QUERIES"
   [ "\${DBUS_SESSION_BUS_ADDRESS:-}" = "$FIXTURE_EXPECTED_BUS" ]
 }
+dbus-send() {
+  local destination= method= object= argument= owner= behavior=
+  for value in "$@"; do
+    case "$value" in
+      --dest=*) destination="\${value#*=}" ;;
+      /*) object="$value" ;;
+      org.*) method="$value" ;;
+      string:*|boolean:*) argument="$value" ;;
+    esac
+  done
+  printf '%s\\t%s\\t%s\\t%s\\t%s\\n' "\${DBUS_SESSION_BUS_ADDRESS:-}" "$destination" "$object" "$method" "$argument" >> "$FIXTURE_PANEL_CALLS"
+  [ "\${DBUS_SESSION_BUS_ADDRESS:-}" = "$FIXTURE_EXPECTED_BUS" ] || return 96
+  owner="$(cat "$FIXTURE_PANEL_OWNER")"
+  case "$method" in
+    org.freedesktop.DBus.GetNameOwner)
+      [ "$destination" = org.freedesktop.DBus ] && [ "$object" = /org/freedesktop/DBus ] && [ "$argument" = string:org.xfce.Panel ] || return 97
+      if [ -z "$owner" ]; then
+        printf 'org.freedesktop.DBus.Error.NameHasNoOwner\\n' >&2
+        return 1
+      fi
+      printf '   %s' "$owner" ;;
+    org.xfce.Panel.Terminate)
+      [ "$destination" = "$owner" ] && [ "$object" = /org/xfce/Panel ] && [ "$argument" = boolean:true ] || return 98
+      cp "$FIXTURE_HOME/.config/gtk-3.0/gtk.css" "$FIXTURE_PANEL_RESTART_CSS"
+      behavior="$(cat "$FIXTURE_PANEL_BEHAVIOR")"
+      case "$behavior" in
+        replace) printf ':1.%s\\n' "$((\${owner##*.} + 1))" > "$FIXTURE_PANEL_OWNER" ;;
+        failed-dispatch) printf ':1.41\\n' > "$FIXTURE_PANEL_OWNER"; return 1 ;;
+        acknowledge) : ;;
+        supersede) cp "$FIXTURE_PANEL_OTHER_CSS" "$FIXTURE_HOME/.config/gtk-3.0/gtk.css" ;;
+        *) return 99 ;;
+      esac ;;
+    *) return 95 ;;
+  esac
+}
 pkill() { printf 'signal %s\\n' "$*" >> "$FIXTURE_COMPONENTS"; }
 xfce4-panel() { printf 'panel %s\\n' "$*" >> "$FIXTURE_COMPONENTS"; }
 xfdesktop() { printf 'desktop %s\\n' "$*" >> "$FIXTURE_COMPONENTS"; }
@@ -97,14 +132,21 @@ fixture_terminal() {
   terminal_command="$1"
   shift
   terminal_title=
+  terminal_background=
+  terminal_foreground=
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --title=*) terminal_title="\${1#*=}" ;;
       --title|-title|-T) shift; terminal_title="$1" ;;
+      -bg|-background) shift; terminal_background="$1" ;;
+      -fg|-foreground) shift; terminal_foreground="$1" ;;
     esac
     shift
   done
   printf '%s\\t%s\\t%s\\t%s\\n' "$terminal_command" "\${DBUS_SESSION_BUS_ADDRESS:-}" "\${DISPLAY:-}" "$terminal_title" >> "$FIXTURE_TERMINALS"
+  if [ "$terminal_command" = xterm ]; then
+    printf '%s\\t%s\\n' "$terminal_background" "$terminal_foreground" >> "$FIXTURE_TERMINAL_COLORS"
+  fi
 }
 xfce4-terminal() { fixture_terminal xfce4-terminal "$@"; }
 xterm() { fixture_terminal xterm "$@"; }
@@ -122,7 +164,7 @@ command() {
 }
 xsetroot() { :; }
 sleep() { :; }
-export -f getent id install chown pgrep xfconf-query gsettings pkill xfce4-panel xfdesktop xfwm4 fixture_terminal xfce4-terminal xterm command xsetroot sleep
+export -f getent id install chown pgrep xfconf-query gsettings dbus-send pkill xfce4-panel xfdesktop xfwm4 fixture_terminal xfce4-terminal xterm command xsetroot sleep
 `;
 
 const rows = (file: string) =>
@@ -150,25 +192,47 @@ interface TerminalSelection {
 const relocateSessionLibrary = (source: string) =>
   source.replaceAll("/usr/local/lib/crabbox/xfce-session.sh", '"$FIXTURE_SESSION_LIBRARY"');
 
-function themeFixture(terminalSelection?: TerminalSelection) {
+function themeFixture(
+  terminalSelection?: TerminalSelection,
+  options: { inheritedSession?: boolean; generatedTheme?: boolean } = {},
+) {
   const directory = mkdtempSync(join(tmpdir(), "crabbox-xfce-session-"));
   const script = join(directory, "theme.sh");
   const sessionLibrary = join(directory, "xfce-session.sh");
   const queryPath = join(directory, "queries");
   const componentPath = join(directory, "components");
   const terminalPath = join(directory, "terminals");
+  const terminalColorsPath = join(directory, "terminal-colors");
+  const panelCallsPath = join(directory, "panel-calls");
+  const panelOwnerPath = join(directory, "panel-owner");
+  const panelBehaviorPath = join(directory, "panel-behavior");
+  const panelRestartCSSPath = join(directory, "panel-restart.css");
+  const panelOtherCSSPath = join(directory, "panel-other.css");
   const home = join(directory, "home");
   const sessions: ChildProcess[] = [];
+  const stubTheme = terminalSelection && !options.generatedTheme;
   // Portable terminal-selection cases stub theme and session binding;
   // the Linux case below runs its complete generated script and real /proc reads.
   // Historical helper component logs also stay inside the temporary directory.
   writeFileSync(
     sessionLibrary,
-    terminalSelection ? ":\n" : installedBootstrapFile("/usr/local/lib/crabbox/xfce-session.sh"),
+    terminalSelection || options.inheritedSession
+      ? ":\n"
+      : installedBootstrapFile("/usr/local/lib/crabbox/xfce-session.sh"),
   );
+  writeFileSync(panelOwnerPath, ":1.40\n");
+  writeFileSync(panelBehaviorPath, "replace\n");
+  if (stubTheme) {
+    const terminalConfigDirectory = join(home, ".config/xfce4/terminal");
+    mkdirSync(terminalConfigDirectory, { recursive: true });
+    writeFileSync(
+      join(terminalConfigDirectory, "terminalrc"),
+      "[Configuration]\nColorForeground=#e5e7eb\nColorBackground=#111827\n",
+    );
+  }
   writeFileSync(
     script,
-    terminalSelection
+    stubTheme
       ? "#!/bin/sh\nexit 0\n"
       : relocateSessionLibrary(
           installedBootstrapFile("/usr/local/bin/crabbox-configure-desktop-theme"),
@@ -188,8 +252,14 @@ function themeFixture(terminalSelection?: TerminalSelection) {
       FIXTURE_QUERIES: queryPath,
       FIXTURE_COMPONENTS: componentPath,
       FIXTURE_TERMINALS: terminalPath,
+      FIXTURE_TERMINAL_COLORS: terminalColorsPath,
       FIXTURE_THEME_SCRIPT: script,
       FIXTURE_SESSION_LIBRARY: sessionLibrary,
+      FIXTURE_PANEL_CALLS: panelCallsPath,
+      FIXTURE_PANEL_OWNER: panelOwnerPath,
+      FIXTURE_PANEL_BEHAVIOR: panelBehaviorPath,
+      FIXTURE_PANEL_RESTART_CSS: panelRestartCSSPath,
+      FIXTURE_PANEL_OTHER_CSS: panelOtherCSSPath,
       FIXTURE_PREFERRED_AVAILABLE: terminalSelection?.preferredAvailable === false ? "0" : "1",
       FIXTURE_PREFERRED_EXISTING: terminalSelection?.preferredExisting ? "1" : "0",
       FIXTURE_FALLBACK_AVAILABLE: terminalSelection?.fallbackAvailable === false ? "0" : "1",
@@ -234,6 +304,8 @@ function themeFixture(terminalSelection?: TerminalSelection) {
     writeFileSync(queryPath, "");
     writeFileSync(componentPath, "");
     writeFileSync(terminalPath, "");
+    writeFileSync(terminalColorsPath, "");
+    writeFileSync(panelCallsPath, "");
     const result = spawnSync(
       "bash",
       ["-c", fixtureCommands + '\nsource "$1" "$2"\nwait\n', "xfce-fixture", path, mode],
@@ -249,10 +321,23 @@ function themeFixture(terminalSelection?: TerminalSelection) {
       queries: rows(queryPath),
       components: readFileSync(componentPath, "utf8"),
       terminals: rows(terminalPath),
+      terminalColors: rows(terminalColorsPath),
+      panelCalls: rows(panelCallsPath),
     };
   }
   return {
     home,
+    cssPath: join(home, ".config/gtk-3.0/gtk.css"),
+    panelRestartCSSPath,
+    panel(
+      owner: string,
+      behavior: "replace" | "acknowledge" | "supersede" | "failed-dispatch" = "replace",
+      otherCSS = "",
+    ) {
+      writeFileSync(panelOwnerPath, owner);
+      writeFileSync(panelBehaviorPath, behavior);
+      writeFileSync(panelOtherCSSPath, otherCSS);
+    },
     async session(display: string, bus?: string) {
       const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
         env: { DISPLAY: display, ...(bus ? { DBUS_SESSION_BUS_ADDRESS: bus } : {}) },
@@ -264,8 +349,13 @@ function themeFixture(terminalSelection?: TerminalSelection) {
     run(mode: "light" | "dark", display?: string, callerBus?: string, expectedBus = "") {
       return execute(script, mode, display, callerBus, expectedBus);
     },
-    autostart(display: string, callerBus?: string, expectedBus = callerBus ?? "") {
-      return execute(installedAutostart(), "", display, callerBus, expectedBus);
+    autostart(
+      display: string,
+      callerBus?: string,
+      expectedBus = callerBus ?? "",
+      mode?: "light" | "dark",
+    ) {
+      return execute(installedAutostart(), mode ?? "", display, callerBus, expectedBus);
     },
     spawnAutostart(guiProgram: string) {
       const gui = join(directory, "gui.mjs");
@@ -317,6 +407,25 @@ function xfconfValue(queries: string[][], channel: string, property: string) {
   return value;
 }
 
+function panelPalette(css: string) {
+  const rule = /(?:^|\n)\.xfce4-panel\s*\{([^}]+)\}/.exec(css);
+  expect(rule).not.toBeNull();
+  const properties = new Map<string, string>();
+  for (const declaration of rule![1]!.split(";")) {
+    const separator = declaration.indexOf(":");
+    if (separator >= 0)
+      properties.set(
+        declaration.slice(0, separator).trim(),
+        declaration.slice(separator + 1).trim(),
+      );
+  }
+  return {
+    background: properties.get("background"),
+    backgroundColor: properties.get("background-color"),
+    color: properties.get("color"),
+  };
+}
+
 it.skipIf(process.platform === "win32")(
   "seeds an offline XFCE theme without starting a settings or desktop owner",
   async () => {
@@ -331,6 +440,184 @@ it.skipIf(process.platform === "win32")(
         "gtk-application-prefer-dark-theme=0",
       );
       expect(result.queries).toEqual([]);
+      expect(result.panelCalls).toEqual([]);
+      expect(result.components).toBe("");
+    } finally {
+      await fixture.close();
+    }
+  },
+);
+
+it.skipIf(process.platform === "win32").each([
+  { mode: "light", previous: "dark", background: "#eef2f7", foreground: "#111827" },
+  { mode: "dark", previous: "light", background: "#20242b", foreground: "#e5e7eb" },
+] as const)(
+  "reloads the existing panel owner after publishing the $mode CSS palette",
+  async ({ mode, previous, background, foreground }) => {
+    const fixture = themeFixture(undefined, { inheritedSession: true });
+    const bus = "unix:abstract=crabbox-fixture-panel";
+    try {
+      const offline = fixture.run(previous);
+      expect({ status: offline.status, stderr: offline.stderr }).toEqual({ status: 0, stderr: "" });
+      expect(offline.panelCalls).toEqual([]);
+      const customCSS = ".user-defined-widget { padding: 7px; }\n";
+      writeFileSync(fixture.cssPath, customCSS + readFileSync(fixture.cssPath, "utf8"));
+      const changed = fixture.run(mode, ":99", bus, bus);
+      expect({ status: changed.status, stderr: changed.stderr }).toEqual({ status: 0, stderr: "" });
+      const css = readFileSync(fixture.cssPath, "utf8");
+      expect(panelPalette(css)).toEqual({
+        background,
+        backgroundColor: background,
+        color: foreground,
+      });
+      expect(css.startsWith(customCSS)).toBe(true);
+      expect(readFileSync(fixture.panelRestartCSSPath, "utf8")).toBe(css);
+      const lookup = [
+        bus,
+        "org.freedesktop.DBus",
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus.GetNameOwner",
+        "string:org.xfce.Panel",
+      ];
+      expect(changed.panelCalls[0]).toEqual(lookup);
+      expect(changed.panelCalls.at(-1)).toEqual(lookup);
+      expect(
+        changed.panelCalls.filter((call) => call[3] !== "org.freedesktop.DBus.GetNameOwner"),
+      ).toEqual([[bus, ":1.40", "/org/xfce/Panel", "org.xfce.Panel.Terminate", "boolean:true"]]);
+      expect(changed.components).toBe("");
+
+      const unchanged = fixture.run(mode, ":99", bus, bus);
+      expect({ status: unchanged.status, stderr: unchanged.stderr }).toEqual({
+        status: 0,
+        stderr: "",
+      });
+      expect(unchanged.panelCalls).toEqual([]);
+      expect(readFileSync(fixture.cssPath, "utf8")).toBe(css);
+      expect(unchanged.components).toBe("");
+
+      const appendedCSS = css + ".another-user-widget { margin: 3px; }\n";
+      writeFileSync(fixture.cssPath, appendedCSS);
+      const unmanagedChange = fixture.run(mode, ":99", bus, bus);
+      expect({ status: unmanagedChange.status, stderr: unmanagedChange.stderr }).toEqual({
+        status: 0,
+        stderr: "",
+      });
+      expect(unmanagedChange.panelCalls).toEqual([]);
+      expect(readFileSync(fixture.cssPath, "utf8")).toBe(appendedCSS);
+    } finally {
+      await fixture.close();
+    }
+  },
+);
+
+it.skipIf(process.platform === "win32").each([
+  { name: "no panel owner", owner: "" },
+  { name: "a well-known name instead of a unique owner", owner: "org.xfce.Panel" },
+])(
+  "refuses a changed live palette with $name without advancing CSS or activating a panel",
+  async ({ owner }) => {
+    const fixture = themeFixture(undefined, { inheritedSession: true });
+    const bus = "unix:abstract=crabbox-fixture-panel";
+    try {
+      expect(fixture.run("dark").status).toBe(0);
+      const previousCSS = readFileSync(fixture.cssPath, "utf8");
+      fixture.panel(owner);
+      const result = fixture.run("light", ":99", bus, bus);
+      expect(result.status).not.toBe(0);
+      expect(result.panelCalls).toEqual([
+        [
+          bus,
+          "org.freedesktop.DBus",
+          "/org/freedesktop/DBus",
+          "org.freedesktop.DBus.GetNameOwner",
+          "string:org.xfce.Panel",
+        ],
+      ]);
+      expect(readFileSync(fixture.cssPath, "utf8")).toBe(previousCSS);
+      expect(existsSync(fixture.panelRestartCSSPath)).toBe(false);
+      expect(result.components).toBe("");
+    } finally {
+      await fixture.close();
+    }
+  },
+);
+
+it.skipIf(process.platform === "win32").each([true, false])(
+  "keeps a failed panel replacement retryable with previous CSS=%s",
+  async (hasPreviousCSS) => {
+    const fixture = themeFixture(undefined, { inheritedSession: true });
+    const bus = "unix:abstract=crabbox-fixture-panel";
+    try {
+      const seed = hasPreviousCSS ? fixture.run("dark") : undefined;
+      expect(seed?.status).toBe(hasPreviousCSS ? 0 : undefined);
+      const previousCSS = hasPreviousCSS ? readFileSync(fixture.cssPath, "utf8") : undefined;
+      fixture.panel(":1.40", "acknowledge");
+      const failed = fixture.run("light", ":99", bus, bus);
+      expect(failed.status).not.toBe(0);
+      expect(failed.panelCalls.filter((call) => call[3] === "org.xfce.Panel.Terminate")).toEqual([
+        [bus, ":1.40", "/org/xfce/Panel", "org.xfce.Panel.Terminate", "boolean:true"],
+      ]);
+      expect(
+        failed.panelCalls.filter((call) => call[3] === "org.freedesktop.DBus.GetNameOwner").length,
+      ).toBeGreaterThan(1);
+      expect(existsSync(fixture.cssPath)).toBe(hasPreviousCSS);
+      const retainedCSS = existsSync(fixture.cssPath)
+        ? readFileSync(fixture.cssPath, "utf8")
+        : undefined;
+      expect(retainedCSS).toBe(previousCSS);
+      expect(failed.components).toBe("");
+
+      fixture.panel(":1.40", "replace");
+      const retried = fixture.run("light", ":99", bus, bus);
+      expect({ status: retried.status, stderr: retried.stderr }).toEqual({ status: 0, stderr: "" });
+      expect(retried.panelCalls.filter((call) => call[3] === "org.xfce.Panel.Terminate")).toEqual([
+        [bus, ":1.40", "/org/xfce/Panel", "org.xfce.Panel.Terminate", "boolean:true"],
+      ]);
+      expect(readFileSync(fixture.cssPath, "utf8")).toBe(
+        readFileSync(fixture.panelRestartCSSPath, "utf8"),
+      );
+      expect(retried.components).toBe("");
+    } finally {
+      await fixture.close();
+    }
+  },
+);
+
+it.skipIf(process.platform === "win32")(
+  "does not accept an unrelated panel replacement after failed dispatch",
+  async () => {
+    const fixture = themeFixture(undefined, { inheritedSession: true });
+    const bus = "unix:abstract=crabbox-fixture-panel";
+    try {
+      expect(fixture.run("dark").status).toBe(0);
+      const previousCSS = readFileSync(fixture.cssPath, "utf8");
+      fixture.panel(":1.40", "failed-dispatch");
+      const result = fixture.run("light", ":99", bus, bus);
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("did not acknowledge");
+      expect(readFileSync(fixture.cssPath, "utf8")).toBe(previousCSS);
+      expect(result.components).toBe("");
+    } finally {
+      await fixture.close();
+    }
+  },
+);
+
+it.skipIf(process.platform === "win32")(
+  "preserves a newer CSS writer when panel replacement fails",
+  async () => {
+    const fixture = themeFixture(undefined, { inheritedSession: true });
+    const bus = "unix:abstract=crabbox-fixture-panel";
+    const newerCSS = ".another-theme-writer { color: #abcdef; }\n";
+    try {
+      expect(fixture.run("dark").status).toBe(0);
+      fixture.panel(":1.40", "supersede", newerCSS);
+      const result = fixture.run("light", ":99", bus, bus);
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(fixture.cssPath, "utf8")).toBe(newerCSS);
+      expect(
+        result.panelCalls.filter((call) => call[3] === "org.xfce.Panel.Terminate"),
+      ).toHaveLength(1);
       expect(result.components).toBe("");
     } finally {
       await fixture.close();
@@ -467,6 +754,37 @@ it.skipIf(process.platform !== "linux").each([
     await fixture.close();
   }
 });
+
+it.skipIf(process.platform === "win32").each([
+  { mode: "light", previous: "dark", background: "#f8fafc", foreground: "#1f2937" },
+  { mode: "dark", previous: "light", background: "#111827", foreground: "#e5e7eb" },
+] as const)(
+  "restores xterm using the requested $mode theme owner's palette",
+  async ({ mode, previous, background, foreground }) => {
+    const fixture = themeFixture(
+      {
+        preferredAvailable: false,
+        preferredExisting: false,
+        fallbackAvailable: true,
+        fallbackExisting: false,
+      },
+      { generatedTheme: true },
+    );
+    const bus = "unix:abstract=crabbox-fixture-xterm-palette";
+    try {
+      expect(fixture.run(previous).status).toBe(0);
+      const result = fixture.autostart(":99", bus, bus, mode);
+      expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: "" });
+      expect(readFileSync(join(fixture.home, ".config/crabbox/desktop-theme"), "utf8").trim()).toBe(
+        mode,
+      );
+      expect(result.terminalColors).toEqual([[background, foreground]]);
+      expect(result.components).toBe("");
+    } finally {
+      await fixture.close();
+    }
+  },
+);
 
 it.skipIf(process.platform === "win32").each([
   {

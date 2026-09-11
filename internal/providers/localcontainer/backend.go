@@ -3503,7 +3503,7 @@ if ! pgrep -u "$user" -x xfce4-session >/dev/null 2>&1; then
   env -u DISPLAY CRABBOX_DESKTOP_USER="$user" /usr/local/bin/crabbox-configure-desktop-theme "${1:-}"
   su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' dbus-launch startxfce4 >/tmp/crabbox-desktop.log 2>&1 &"
 else
-  su "$user" -s /bin/sh -c "DISPLAY=:99 /usr/local/bin/crabbox-desktop-session"
+  runuser -u "$user" -- env DISPLAY=:99 /usr/local/bin/crabbox-desktop-session "${1:-}"
 fi
 if ! ss -ltn | grep -q '127.0.0.1:5900'; then
   su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' x11vnc -display :99 -localhost -rfbport 5900 -forever -shared -rfbauth /var/lib/crabbox/vnc.pass -wait 16 -defer 8 -nowait_bog -o /tmp/crabbox-x11vnc.log >/tmp/crabbox-x11vnc.stdout.log 2>&1 &"

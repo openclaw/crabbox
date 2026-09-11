@@ -5065,13 +5065,6 @@ func TestBootstrapDesktopResetRestoresTerminalInExistingSession(t *testing.T) {
 	if end < 0 {
 		t.Fatal("desktop startup helper is incomplete")
 	}
-	dir := t.TempDir()
-	launcher := filepath.Join(dir, "desktop-session")
-	receipt := filepath.Join(dir, "terminal-restored")
-	if err := os.WriteFile(launcher, []byte("#!/bin/sh\nprintf '%s\\n' \"$DISPLAY\" >\"$RESTORED\"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	command := strings.ReplaceAll(bootstrapScript[start:start+end], "/usr/local/bin/crabbox-desktop-session", launcher)
 	fixture := `install() { :; }
 pgrep() { return 0; }
 sleep() { :; }
@@ -5084,15 +5077,36 @@ su() {
   done
   return 3
 }
+runuser() {
+  [ "$1" = -u ] && [ "$2" = fixture ] && [ "$3" = -- ] || return 2
+  shift 3
+  "$@"
+}
 `
-	cmd := exec.Command("sh", "-c", fixture+command)
-	cmd.Env = []string{"PATH=/usr/bin:/bin", "CRABBOX_SSH_USER=fixture", "RESTORED=" + receipt}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("desktop reset failed: %v: %s", err, out)
-	}
-	got, err := os.ReadFile(receipt)
-	if err != nil || string(got) != ":99\n" {
-		t.Fatalf("desktop reset did not restore the terminal on the existing display: %q, %v", got, err)
+	for _, tc := range []struct{ name, mode string }{
+		{name: "saved theme"},
+		{name: "light", mode: "light"},
+		{name: "dark", mode: "dark"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			launcher := filepath.Join(dir, "desktop-session")
+			receipt := filepath.Join(dir, "terminal-restored")
+			if err := os.WriteFile(launcher, []byte("#!/bin/sh\nprintf '%s\\n' \"$DISPLAY\" \"${1:-}\" >\"$RESTORED\"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			command := strings.ReplaceAll(bootstrapScript[start:start+end], "/usr/local/bin/crabbox-desktop-session", launcher)
+			cmd := exec.Command("sh", "-c", fixture+command, "desktop-reset", tc.mode)
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "CRABBOX_SSH_USER=fixture", "RESTORED=" + receipt}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("desktop reset failed: %v: %s", err, out)
+			}
+			got, err := os.ReadFile(receipt)
+			want := ":99\n" + tc.mode + "\n"
+			if err != nil || string(got) != want {
+				t.Fatalf("desktop reset did not restore the terminal with its requested display and theme: got %q, want %q, error %v", got, want, err)
+			}
+		})
 	}
 }
 

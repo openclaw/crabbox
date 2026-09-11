@@ -114,6 +114,17 @@ panel_css_border="$panel_css_fg"
 if [ "$css_style" = coordinator ]; then panel_css_border=transparent; fi
 css_file="$config_dir/gtk-3.0/gtk.css"
 css_tmp="$(mktemp "$config_dir/gtk-3.0/gtk.css.XXXXXX")"
+css_saved=
+css_install=
+css_reload_pending=false
+cleanup_theme_css() {
+  # Keep failed reloads retryable without overwriting another theme writer.
+  if [ "$css_reload_pending" = true ] && cmp -s "$css_file" "$css_tmp"; then
+    if [ -n "$css_saved" ]; then mv "$css_saved" "$css_file"; else rm -f "$css_file"; fi
+  fi
+  rm -f "$css_tmp" "${css_saved:-}" "${css_install:-}"
+}
+trap cleanup_theme_css EXIT
 if [ -f "$css_file" ]; then
   sed '/^[/][*] crabbox desktop theme start [*][/]$/,/^[/][*] crabbox desktop theme end [*][/]$/d' "$css_file" > "$css_tmp" || true
 fi
@@ -187,11 +198,15 @@ menubar > menuitem:selected label {
 EOF
 fi
 printf '/* crabbox desktop theme end */\n' >> "$css_tmp"
-mv "$css_tmp" "$css_file"
+css_changed=false
+managed_css='/^[/][*] crabbox desktop theme start [*][/]$/,/^[/][*] crabbox desktop theme end [*][/]$/p'
+if [ ! -f "$css_file" ] || ! cmp -s <(sed -n "$managed_css" "$css_tmp") <(sed -n "$managed_css" "$css_file"); then
+  css_changed=true
+fi
 background_file="$config_dir/crabbox/desktop-background-$mode.svg"
 printf '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080"><rect width="100%%" height="100%%" fill="%s"/></svg>\n' "$root_color" >"$background_file"
 if [ "$(id -u)" -eq 0 ]; then chown -R "$user" "$config_dir" "$home_dir/.gtkrc-2.0"; fi
-[ -n "${DISPLAY:-}" ] || exit 0
+if [ -z "${DISPLAY:-}" ]; then mv "$css_tmp" "$css_file"; exit 0; fi
 
 xfconf-query -c xsettings -p /Net/ThemeName -n -t string -s "$gtk_theme"
 xfconf-query -c xsettings -p /Net/IconThemeName -n -t string -s Adwaita
@@ -220,3 +235,43 @@ if command -v gsettings >/dev/null 2>&1; then
   gsettings set org.gnome.desktop.interface color-scheme "$gsettings_scheme" >/dev/null 2>&1 || true
   gsettings set org.gnome.desktop.interface gtk-theme "$gtk_theme" >/dev/null 2>&1 || true
 fi
+
+[ "$css_changed" = true ] || exit 0
+panel_name_owner() {
+  local owner
+  owner="$(dbus-send --session --type=method_call --print-reply=literal --reply-timeout=500 \
+    --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+    org.freedesktop.DBus.GetNameOwner string:org.xfce.Panel)" || return
+  # dbus-send indents even literal strings by three spaces.
+  printf '%s\n' "${owner#   }"
+}
+panel_owner="$(panel_name_owner)" || { echo "XFCE panel is not running; restore the desktop session and retry the theme" >&2; exit 1; }
+case "$panel_owner" in :*) ;; *) echo "XFCE panel did not report a unique D-Bus owner" >&2; exit 1 ;; esac
+if [ -f "$css_file" ]; then
+  css_saved="$(mktemp "$config_dir/gtk-3.0/gtk.css.previous.XXXXXX")"
+  cp -p "$css_file" "$css_saved"
+fi
+css_install="$(mktemp "$config_dir/gtk-3.0/gtk.css.install.XXXXXX")"
+cp -p "$css_tmp" "$css_install"
+mv "$css_install" "$css_file"
+css_reload_pending=true
+# The existing panel suppresses session-manager respawn and starts its replacement itself.
+if ! dbus-send --session --type=method_call --print-reply=literal --reply-timeout=2000 \
+  --dest="$panel_owner" /org/xfce/Panel org.xfce.Panel.Terminate boolean:true >/dev/null; then
+  echo "XFCE panel did not acknowledge its theme reload; restore the desktop session and retry" >&2
+  exit 1
+fi
+for _attempt in $(seq 1 25); do
+  replacement="$(panel_name_owner 2>/dev/null || true)"
+  case "$replacement" in
+    :*)
+      if [ "$replacement" != "$panel_owner" ]; then
+        css_reload_pending=false
+        exit 0
+      fi
+      ;;
+  esac
+  sleep 0.2
+done
+echo "XFCE panel did not acquire a replacement owner after its theme reload; restore the desktop session and retry" >&2
+exit 1
