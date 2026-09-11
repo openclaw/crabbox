@@ -1,8 +1,11 @@
 package localcontainer
 
 import (
+	"bytes"
+	"encoding/json"
 	"flag"
 	"reflect"
+	"strings"
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -96,5 +99,53 @@ func TestNormalizeConfigForShowPreservesUnrelatedSettings(t *testing.T) {
 	}
 	if got.ServerType == "synthetic-private-checkpoint" || got.SSHUser == "test-runner" {
 		t.Fatal("display normalization exposed checkpoint metadata or changed SSH defaults")
+	}
+}
+
+func TestLocalContainerConfigShowSection(t *testing.T) {
+	projector, ok := any(Provider{}).(core.ProviderConfigShowProjector)
+	if !ok {
+		t.Fatal("real provider is missing passive config-show ownership")
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  core.LocalContainerConfig
+		want map[string]any
+		text string
+	}{
+		{name: "zero", cfg: core.LocalContainerConfig{Runtime: "", Image: "", User: "", WorkRoot: "", CPUs: 0, Memory: "", Network: "", DockerSocket: false, NoHostname: true, Volumes: []string{"internal-volume"}, CheckpointMetadata: map[string]string{"internal-key": "internal-checkpoint"}}, want: map[string]any{"runtime": "", "image": "", "user": "", "workRoot": "", "cpus": 0, "memory": "", "network": "", "dockerSocket": false}, text: "local_container runtime= image= user= work_root=- cpus=0 memory=- network= docker_socket=false\n"},
+		{name: "raw", cfg: core.LocalContainerConfig{Runtime: " raw-runtime ", Image: " raw-image ", User: " raw-user ", WorkRoot: " raw-root ", CPUs: -2, Memory: "   ", Network: " raw-network ", DockerSocket: true, NoHostname: true, Volumes: []string{"internal-volume"}, CheckpointMetadata: map[string]string{"internal-key": "internal-checkpoint"}}, want: map[string]any{"runtime": " raw-runtime ", "image": " raw-image ", "user": " raw-user ", "workRoot": " raw-root ", "cpus": -2, "memory": "   ", "network": " raw-network ", "dockerSocket": true}, text: "local_container runtime= raw-runtime  image= raw-image  user= raw-user  work_root= raw-root  cpus=-2 memory=    network= raw-network  docker_socket=true\n"},
+		{name: "configured", cfg: core.LocalContainerConfig{Runtime: "docker", Image: "example:stable", User: "runner", WorkRoot: "/work/example", CPUs: 3, Memory: "6g", Network: "none", DockerSocket: true, NoHostname: true, Volumes: []string{"internal-volume"}, CheckpointMetadata: map[string]string{"internal-key": "internal-checkpoint"}}, want: map[string]any{"runtime": "docker", "image": "example:stable", "user": "runner", "workRoot": "/work/example", "cpus": 3, "memory": "6g", "network": "none", "dockerSocket": true}, text: "local_container runtime=docker image=example:stable user=runner work_root=/work/example cpus=3 memory=6g network=none docker_socket=true\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.Config{Provider: "unselected-display-test", LocalContainer: tc.cfg}
+			before, err := json.Marshal(cfg.LocalContainer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			section := projector.ConfigShowSection(cfg)
+			got := map[string]any{}
+			var fields []string
+			for _, field := range section.Fields {
+				got[field.JSONName] = field.JSONValue
+				fields = append(fields, field.TextName+"="+field.TextValue)
+			}
+			if section.JSONKey != "localContainer" || section.TextLabel != "local_container" || !reflect.DeepEqual(section.Providers, []string{"local-container"}) || len(section.Fields) != 8 {
+				t.Fatalf("section metadata=%#v", section)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("public fields=%#v want %#v", got, tc.want)
+			}
+			if line := section.TextLabel + " " + strings.Join(fields, " ") + "\n"; line != tc.text {
+				t.Fatalf("text=%q want %q", line, tc.text)
+			}
+			after, err := json.Marshal(cfg.LocalContainer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("projection mutated original config or slice contents")
+			}
+		})
 	}
 }
