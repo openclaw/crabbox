@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Create private GitHub Runner registration, environment, and wrapper files even under a group-writable shell umask, so owned image tool caches can be seeded without changing existing operator file permissions. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
+
 - Read UTF-8 BOM-prefixed GitHub Runner registration files when seeding and qualifying the owned tool cache, without rewriting registration or accepting malformed settings. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
 
 - Add an opt-in registered-Runner image toolcache qualification job that checks pinned Go setup offline and verifies the Runner-applied environment without changing ordinary hydration. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.

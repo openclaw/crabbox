@@ -3151,6 +3151,7 @@ func githubActionsRunnerInstallScript(version string, ephemeral bool) string {
 		ephemeralArg = "--ephemeral"
 	}
 	return fmt.Sprintf(`set -euo pipefail
+umask 077
 if [ -z "${RUNNER_REPO:-}" ] || [ -z "${RUNNER_NAME:-}" ] || [ -z "${RUNNER_TOKEN:-}" ]; then
   echo "missing runner env" >&2
   exit 2
