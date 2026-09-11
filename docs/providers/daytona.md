@@ -196,6 +196,67 @@ for lifetime, key-rotation, and recovery behavior.
 
 ## Direct lifecycle
 
+### Fixed operation IDs
+
+Direct `warmup --lease-id cbx_<12 lowercase hex>` and checkpoint forks with the
+same flag bind one operation to its exact sandbox. A durable create intent is
+written before submission; an uncertain response can be reconciled by replaying
+the original request without submitting another create. The binding includes the
+API endpoint, native organization, snapshot selection, project repository and
+checkpoint, sizing, user, target, and lifetime. Credential rotation within that
+same organization does not change the binding. A released ID cannot be reused.
+
+Keep the source snapshot until acquisition completes successfully. Incomplete
+retries revalidate the exact pinned snapshot and sandbox sizing, even if the
+resource UUID is already known. If the source is retired first, the incomplete
+lease remains held for explicit cleanup; no replacement is created. Successfully
+acquired children can replay after their source snapshot is retired.
+
+Fixed acquisition must establish the organization before allocation. OAuth uses
+the selected organization from the existing CLI profile. API-key mode uses an
+exact existing child, its retained private checkpoint, or a visible sandbox to
+establish native organization. A private checkpoint can refill a pool after all
+live workers drain; general snapshots cannot attest the allocating organization.
+An API-key account without one of these identity sources cannot use fixed
+acquisition. Ordinary warmup without a fixed ID retains its existing API-key
+behavior. No credentials or token-derived identifiers are stored in fixed claims.
+
+Fixed claims use a distinct provider marker so older clients cannot treat them
+as ordinary Daytona claims and erase terminal replay protection. Failed or
+uncertain cleanup retains the claim. An unqualified 404 is not deletion proof:
+the provider's resource-access layer can also use that response for failed access.
+Fixed cleanup durably binds the native UUID, verifies that UUID through the
+existing `/sandbox/paginated` database-backed inventory, and records an
+identity-validated deletion acknowledgment before reconciling removal. The query
+uses only the UUID and `includeErroredDeleted`, without mutable label filters;
+it reads the sandbox table directly rather than the ordinary search index.
+
+Once cleanup durably records its entry before DELETE, replay and execution are
+blocked even if the DELETE response is lost and the sandbox still appears ready;
+retry `stop` to reconcile it. Acknowledgment only means destruction was requested.
+Cleanup then requires an exact UUID lookup returning 404, fresh authenticated
+access to the original organization, and complete database inventory showing no
+exact UUID. Required pagination metadata must be present, integral, and
+consistent; failed-deletion rows, malformed responses, and incomplete pages
+retain custody. No timed sampling or search-index fallback establishes absence.
+This confirms removal from the provider's database, not independent proof of
+physical storage reclamation.
+
+This works after deletion of the last live sandbox and accommodates the native
+rename during deletion. The durable acknowledgment survives interruption and
+same-organization credential rotation. A lost response can be reconciled only
+while the exact resource still positively reports destruction requested; a bare
+404 without that witness, or an expired create whose UUID was never observed,
+remains an explicit operator reconciliation obligation. No second create is
+submitted. A valid released claim remains available through `inspect` and
+`status` as `released`, never ready, with no provider request or remote access.
+`status --wait` reports that terminal state instead of waiting for readiness.
+
+The fixed producer also labels its native sandbox with `fixed_claim_provider`
+and an attempt nonce. The fingerprint alone remains opaque metadata on ordinary
+leases; it does not identify a fixed owner or grant recovery authority. Native
+labels never replace the matching durable claim.
+
 Direct control-plane HTTP requests have a 60-second default whole-request
 timeout, including response-body reads. Earlier caller cancellation or deadlines
 still apply. Toolbox execution and archive uploads keep their caller-controlled

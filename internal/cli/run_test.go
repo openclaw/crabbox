@@ -6441,8 +6441,8 @@ func TestRemotePreflightOmitsUnassertedArchitectureLabel(t *testing.T) {
 }
 
 func TestValidatePreflightToolsRejectsUnknown(t *testing.T) {
-	if err := validatePreflightTools([]string{"node", "bogus"}); err == nil {
-		t.Fatal("expected unknown preflight tool error")
+	if err := validatePreflightTools([]string{"node", "bogus"}); ExitCodeForError(err, 1) != 2 || !strings.Contains(err.Error(), "crabbox preflight-tools") {
+		t.Fatalf("expected unknown preflight tool error with discovery hint: %v", err)
 	}
 	if err := validatePreflightTools([]string{"default", "bun"}); err != nil {
 		t.Fatalf("default tools should validate: %v", err)
@@ -6682,6 +6682,31 @@ func TestCMakePreflightUserAndRepositoryConfig(t *testing.T) {
 	}
 }
 
+func TestPreflightRawEmptyFlagKeepsConfiguredTools(t *testing.T) {
+	for _, supplied := range []bool{false, true} {
+		t.Run(fmt.Sprintf("supplied-%t", supplied), func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+			t.Setenv("CRABBOX_PREFLIGHT_TOOLS", "unknown-inherited-tool")
+			acquireCalls := 0
+			runEnvProfileTestAcquireHook = func(AcquireRequest) { acquireCalls++ }
+			t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
+			args := []string{"--provider", runEnvProfileTestProvider{}.Name(), "--preflight", "--no-sync", "--no-hydrate"}
+			if supplied {
+				args = append(args, "--preflight-tools", "")
+			}
+			args = append(args, "--", "true")
+			err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(t.Context(), args)
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, `unknown preflight tool "unknown-inherited-tool"`) || acquireCalls != 0 {
+				t.Fatalf("resolved tools changed or acquired: %v; calls=%d", err, acquireCalls)
+			}
+		})
+	}
+}
+
 func TestCMakeUnknownPreflightToolFailsBeforeAcquire(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
@@ -6705,6 +6730,9 @@ func TestCMakeUnknownPreflightToolFailsBeforeAcquire(t *testing.T) {
 	}
 	if acquireCalls != 0 {
 		t.Fatalf("Acquire called %d time(s) before unknown preflight tool rejection", acquireCalls)
+	}
+	if !strings.Contains(exitErr.Message, "crabbox preflight-tools") {
+		t.Fatal("pre-acquisition error omitted offline discovery hint")
 	}
 }
 

@@ -65,10 +65,10 @@ func applyDefaults(cfg *core.Config) {
 	cfg.SSHPort = "22"
 	cfg.SSHFallbackPorts = nil
 	if cfg.NamespaceInstance.CLIPath == "" {
-		cfg.NamespaceInstance.CLIPath = "nsc"
+		cfg.NamespaceInstance.CLIPath = core.NamespaceInstanceConfigDefaultCLIPath
 	}
 	if cfg.NamespaceInstance.WorkRoot == "" {
-		cfg.NamespaceInstance.WorkRoot = "/work/crabbox"
+		cfg.NamespaceInstance.WorkRoot = core.NamespaceInstanceConfigDefaultWorkRoot
 	}
 	if cfg.NamespaceInstance.Duration > 0 {
 		cfg.TTL = cfg.NamespaceInstance.Duration

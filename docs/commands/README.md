@@ -25,6 +25,7 @@ same order as the CLI help.
 - [artifacts](artifacts.md)
 - [sync-plan](sync-plan.md)
 - [providers](providers.md)
+- [preflight-tools](preflight-tools.md)
 - [history](history.md)
 - [logs](logs.md)
 - [events](events.md)

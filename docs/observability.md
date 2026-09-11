@@ -357,12 +357,10 @@ Preflight is a probe layer, not an installer. Missing tools print
 a prebaked image, a devcontainer/Nix/mise/asdf setup, or the uploaded
 script/command itself.
 
-The built-in probes cover common toolchains — `git`, `tar`, `node`, `npm`,
-`corepack`, `pnpm`, `yarn`, `bun`, and `docker`; opt-in `go`, `cargo`, `cmake`,
-`uv`, `python`, and `python3` on POSIX, WSL2, and native Windows; and opt-in
-`make` on POSIX and WSL2 — plus target-specific probes such as `sudo`, `apt`,
-`bubblewrap`, `powershell`, `execution_policy`, `longpaths`, `temp`, and `pwsh`.
-Linux and WSL2 also support an opt-in `raw_socket` capability probe. Override
+The built-in probes cover common toolchains and target-specific capabilities.
+Use [`crabbox preflight-tools [--json]`](commands/preflight-tools.md) for the
+complete names, selector aliases, default membership, and target support in the
+installed binary. This inspection is offline and executes no probes. Override
 the probe list per run:
 
 ```sh

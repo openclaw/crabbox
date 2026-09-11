@@ -171,6 +171,7 @@ See [pond](commands/pond.md) and the [pond feature](features/pond.md).
 ```text
 crabbox providers                             show provider capabilities
 crabbox providers describe <provider>         show compiled run flags for one runnable provider
+crabbox preflight-tools [--json]              list accepted preflight names and target support offline
 crabbox usage [--scope user|org|all]          cost and usage estimates
 crabbox capacity [--json]                   self-owner admission count and limit
 crabbox marketplace status|quote              preview the credits gateway and smart-routing quotes
@@ -178,7 +179,7 @@ crabbox admin leases|lease-audit|providers|hosts|release|delete
 crabbox admin aws-identity|aws-policy|mac-hosts
 ```
 
-See [providers](commands/providers.md), [usage](commands/usage.md),
+See [providers](commands/providers.md), [preflight-tools](commands/preflight-tools.md), [usage](commands/usage.md),
 [capacity](commands/capacity.md),
 [marketplace](commands/marketplace.md), [admin](commands/admin.md).
 

@@ -1013,12 +1013,13 @@ run:
 
 `run.preflightTools` configures which built-in probes `crabbox run --preflight`
 executes before the remote command. The CLI flag
-`--preflight-tools default,cmake` overrides this list for one run. Opt-in probes
-include `go`, `cargo`, `cmake`, `uv`, `python`, and `python3` on POSIX, WSL2,
-and native Windows, plus `make` on POSIX and WSL2. The CMake probe invokes only
+`--preflight-tools default,cmake` overrides this list for one run. Inspect the
+same accepted names, aliases, defaults, and target support offline with
+[`crabbox preflight-tools [--json]`](../commands/preflight-tools.md). The CMake probe invokes only
 the literal `cmake --version` command and reports its first output line or
-`cmake=missing`. Use `default` to include Crabbox's default built-ins and `none`
-to print only the workspace summary. An omitted `run.preflightTools` inherits
+`cmake=missing`. Use `default` (alias `defaults`) to include Crabbox's default built-ins
+and `none` alone to print only the workspace summary; mixed `none,git` still
+selects `git`. An omitted `run.preflightTools` inherits
 the lower layer (built-in probes by default); `preflightTools: []` clears the
 list and prints only the workspace summary, without restoring default probes.
 Preflight probes are diagnostic only: a missing tool does not block the

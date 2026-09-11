@@ -571,13 +571,10 @@ belongs in Actions hydration, a prebaked image, a devcontainer, Nix/mise/asdf,
 or the command/script you run.
 
 By default it probes common language and infrastructure tools plus OS-specific
-basics. Default generic probes are `git`, `tar`, `node`, `npm`, `corepack`,
-`pnpm`, `yarn`, `bun`, and `docker`. Additional opt-in built-ins are `go`,
-`cargo`, `cmake`, `uv`, `python`, and `python3` on POSIX, WSL2, and native
-Windows targets, plus `make` on POSIX and WSL2. Linux and WSL2 also support the
-opt-in `raw_socket` capability probe. POSIX/Linux/WSL probes include `sudo`,
-`apt`, and `bubblewrap`; native Windows probes include `powershell`,
-`execution_policy`, `longpaths`, `temp`, and `pwsh`.
+basics. Run [`crabbox preflight-tools`](preflight-tools.md), or add `--json`, to
+inspect every accepted name, aliases, default membership, and target support
+from the installed binary. Discovery works offline without configuration or a
+provider and does not run probes.
 
 Use `--preflight-tools` to replace the default tool list for one run:
 
@@ -590,9 +587,10 @@ crabbox run --preflight --preflight-tools raw_socket -- ./packet-tests
 crabbox run --preflight --preflight-tools none -- ./smoke.sh
 ```
 
-`default` expands to the default probe list; `none` keeps only the workspace
-summary. Unknown tool names fail before leasing so typos do not hide missing
-diagnostics. Unsupported OS-specific probes are skipped for the current target.
+`default` (alias `defaults`) expands to the default probe list; `none` alone keeps
+only the workspace summary, while mixed `none,git` still selects `git`. Unknown
+tool names fail before leasing and point to `crabbox preflight-tools` so typos do
+not hide missing diagnostics. Unsupported OS-specific probes are skipped for the current target.
 The CMake probe invokes the literal `cmake --version` command on POSIX, WSL2,
 and native Windows targets. It prints only the first output line when CMake is
 present or `cmake=missing` when it is unavailable; either result is diagnostic

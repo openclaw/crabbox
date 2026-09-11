@@ -1772,6 +1772,172 @@ func TestAgentSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestNamespaceConfigBindingSources(t *testing.T) {
+	clearConfigEnv(t)
+	defaults := baseConfig().Namespace
+	if defaults.Image != "builtin:base" || defaults.Size != "" || defaults.Repository != "" || defaults.Site != "" || defaults.VolumeSizeGB != 0 || defaults.AutoStopIdleTimeout != 30*time.Minute || defaults.WorkRoot != "/workspaces/crabbox" || defaults.DeleteOnRelease {
+		t.Fatalf("Namespace defaults=%#v", defaults)
+	}
+	for _, tc := range []struct {
+		name, duration, volumeEnv     string
+		volumeFile, fileWant, envWant int
+		wantDuration                  time.Duration
+	}{
+		{"positive", "45m", "9", 9, 9, 9, 45 * time.Minute},
+		{"zero", "0s", "0", 0, 7, 0, 17 * time.Minute},
+		{"negative", "-1m", "-2", -2, 7, -2, 17 * time.Minute},
+		{"malformed", "invalid", "invalid", 0, 7, 7, 17 * time.Minute},
+		{"padded", " 45m ", "7", 0, 7, 7, 17 * time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			newConfig := func() Config {
+				cfg := baseConfig()
+				cfg.Namespace.VolumeSizeGB = 7
+				cfg.Namespace.AutoStopIdleTimeout = 17 * time.Minute
+				cfg.Namespace.DeleteOnRelease = true
+				return cfg
+			}
+			value := false
+			file := fileConfig{Namespace: &fileNamespaceConfig{Image: " raw-image ", Size: " l ", Repository: " raw-repo ", Site: " raw-site ", VolumeSizeGB: tc.volumeFile, AutoStopIdleTimeout: tc.duration, WorkRoot: " /workspaces/raw ", DeleteOnRelease: &value}}
+			cfg := newConfig()
+			priorRoot, priorType := cfg.WorkRoot, cfg.ServerType
+			if err := applyFileConfig(&cfg, file); err != nil {
+				t.Fatal(err)
+			}
+			assertRaw := func(cfg Config, volume int) {
+				t.Helper()
+				got := cfg.Namespace
+				if got.Image != " raw-image " || got.Size != " l " || got.Repository != " raw-repo " || got.Site != " raw-site " || got.WorkRoot != " /workspaces/raw " || got.VolumeSizeGB != volume || got.AutoStopIdleTimeout != tc.wantDuration || got.DeleteOnRelease || !DeleteOnReleaseExplicit(cfg, "namespace-devbox") {
+					t.Fatalf("raw source binding=%#v", got)
+				}
+				if cfg.WorkRoot != priorRoot || cfg.ServerType != priorType {
+					t.Fatal("file/environment input acquired flag-only generic effects")
+				}
+			}
+			assertRaw(cfg, tc.fileWant)
+			encoded, err := yaml.Marshal(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded fileConfig
+			if err := yaml.Unmarshal(encoded, &decoded); err != nil || !reflect.DeepEqual(file.Namespace, decoded.Namespace) {
+				t.Fatalf("raw Namespace writer representation changed: %s (%v)", encoded, err)
+			}
+			for name, raw := range map[string]string{"IMAGE": " raw-image ", "SIZE": " l ", "REPOSITORY": " raw-repo ", "SITE": " raw-site ", "WORK_ROOT": " /workspaces/raw ", "VOLUME_SIZE_GB": tc.volumeEnv, "AUTO_STOP_IDLE_TIMEOUT": tc.duration, "DELETE_ON_RELEASE": "false"} {
+				t.Setenv("CRABBOX_NAMESPACE_"+name, raw)
+			}
+			cfg = newConfig()
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			assertRaw(cfg, tc.envWant)
+		})
+	}
+}
+
+func TestAgentSandboxDurationOverlays(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want time.Duration
+	}{
+		{"", 13 * time.Second}, {"0", 13 * time.Second}, {"0s", 13 * time.Second},
+		{"-1s", 13 * time.Second}, {"invalid", 13 * time.Second}, {" 2m ", 13 * time.Second},
+		{"999999999999999999999h", 13 * time.Second}, {"2m", 2 * time.Minute}, {"1500ms", 1500 * time.Millisecond},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.AgentSandbox.SandboxReadyTimeout = 13 * time.Second
+			cfg.AgentSandbox.PodReadyTimeout = 13 * time.Second
+			file := fileConfig{AgentSandbox: &fileAgentSandboxConfig{SandboxReadyTimeout: tc.raw, PodReadyTimeout: tc.raw}}
+			if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.AgentSandbox.SandboxReadyTimeout != tc.want || cfg.AgentSandbox.PodReadyTimeout != tc.want {
+				t.Fatalf("file durations=%v/%v, want %v", cfg.AgentSandbox.SandboxReadyTimeout, cfg.AgentSandbox.PodReadyTimeout, tc.want)
+			}
+			encoded, err := yaml.Marshal(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded fileConfig
+			if err := yaml.Unmarshal(encoded, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if decoded.AgentSandbox == nil || decoded.AgentSandbox.SandboxReadyTimeout != tc.raw || decoded.AgentSandbox.PodReadyTimeout != tc.raw {
+				t.Fatalf("duration storage changed raw input %q", tc.raw)
+			}
+			cfg.AgentSandbox.SandboxReadyTimeout = 13 * time.Second
+			cfg.AgentSandbox.PodReadyTimeout = 13 * time.Second
+			t.Setenv("CRABBOX_AGENT_SANDBOX_SANDBOX_READY_TIMEOUT", tc.raw)
+			t.Setenv("CRABBOX_AGENT_SANDBOX_POD_READY_TIMEOUT", tc.raw)
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.AgentSandbox.SandboxReadyTimeout != tc.want || cfg.AgentSandbox.PodReadyTimeout != tc.want {
+				t.Fatalf("env durations=%v/%v, want %v", cfg.AgentSandbox.SandboxReadyTimeout, cfg.AgentSandbox.PodReadyTimeout, tc.want)
+			}
+		})
+	}
+}
+
+func TestAgentSandboxPartialInputAndPathEvents(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	negative, disabled, forgotten := -1, false, true
+	file := fileConfig{AgentSandbox: &fileAgentSandboxConfig{
+		Kubectl: "custom-kubectl", Kubeconfig: "~/accepted", Namespace: "changed",
+		SandboxReadyTimeout: "2m", PodReadyTimeout: "invalid", ExecTimeoutSecs: &negative,
+		DeleteOnRelease: &disabled, ForgetMissing: &forgotten,
+	}}
+	cfg := baseConfig()
+	err := applyFileConfig(&cfg, file)
+	if err == nil || err.Error() != "agentSandbox execTimeoutSecs must be non-negative" {
+		t.Fatalf("file error=%v", err)
+	}
+	if cfg.AgentSandbox.Kubeconfig != filepath.Join(home, "accepted") || cfg.AgentSandbox.Namespace != "changed" ||
+		cfg.AgentSandbox.SandboxReadyTimeout != 2*time.Minute || cfg.AgentSandbox.PodReadyTimeout != 180*time.Second || cfg.AgentSandbox.ExecTimeoutSecs != 600 {
+		t.Fatalf("file partial values=%#v", cfg.AgentSandbox)
+	}
+	if !cfg.AgentSandbox.DeleteOnRelease || cfg.AgentSandbox.ForgetMissing || DeleteOnReleaseExplicit(cfg, "agent-sandbox") {
+		t.Fatal("later booleans applied after file error")
+	}
+	if file.AgentSandbox.Kubeconfig != "~/accepted" {
+		t.Fatal("file input was normalized in place")
+	}
+
+	cfg = baseConfig()
+	cfg.AgentSandbox.Kubeconfig = "~/inherited"
+	file.AgentSandbox.ExecTimeoutSecs = nil
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AgentSandbox.Kubeconfig != "~/inherited" || cfg.AgentSandbox.Kubectl != "kubectl" || cfg.AgentSandbox.Namespace != "default" {
+		t.Fatal("unaccepted strings changed")
+	}
+	if cfg.AgentSandbox.DeleteOnRelease || !cfg.AgentSandbox.ForgetMissing || !DeleteOnReleaseExplicit(cfg, "agent-sandbox") {
+		t.Fatal("admitted explicit booleans were lost")
+	}
+
+	cfg = baseConfig()
+	cfg.AgentSandbox.Kubeconfig = "~/inherited"
+	t.Setenv("CRABBOX_AGENT_SANDBOX_SANDBOX_READY_TIMEOUT", "90s")
+	t.Setenv("CRABBOX_AGENT_SANDBOX_EXEC_TIMEOUT_SECS", "invalid")
+	t.Setenv("CRABBOX_AGENT_SANDBOX_DELETE_ON_RELEASE", "false")
+	t.Setenv("CRABBOX_AGENT_SANDBOX_FORGET_MISSING", "true")
+	if err := applyEnv(&cfg); err == nil {
+		t.Fatal("missing integer environment error")
+	}
+	if cfg.AgentSandbox.Kubeconfig != filepath.Join(home, "inherited") || cfg.AgentSandbox.SandboxReadyTimeout != 90*time.Second || cfg.AgentSandbox.ExecTimeoutSecs != 0 {
+		t.Fatalf("env partial values=%#v", cfg.AgentSandbox)
+	}
+	if !cfg.AgentSandbox.DeleteOnRelease || cfg.AgentSandbox.ForgetMissing || DeleteOnReleaseExplicit(cfg, "agent-sandbox") {
+		t.Fatal("later booleans applied after environment error")
+	}
+}
+
 func TestSealosDevboxUntrustedConfigCannotRedirectClusterWorkload(t *testing.T) {
 	cfg := baseConfig()
 	cfg.SealosDevbox.Kubectl = "/trusted/kubectl"
@@ -4954,6 +5120,104 @@ func TestAppleVMConfigDefaultsRedactSignedImageServerType(t *testing.T) {
 	}
 }
 
+func TestMultipassOrdinarySourceMetadata(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	image, err := osImageDefaultMultipassImage(cfg.OSImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDefault := MultipassConfig{CLIPath: "multipass", Image: image, User: "crabbox", WorkRoot: "/work/crabbox", CPUs: 4, Memory: "8G", Disk: "30G", LaunchTimeout: 20 * time.Minute}
+	if cfg.Multipass != wantDefault || cfg.multipassImageExplicit {
+		t.Fatalf("defaults=%#v want %#v", cfg.Multipass, wantDefault)
+	}
+	for _, source := range []string{"file", "env"} {
+		for _, tc := range []struct {
+			text, cpu, duration string
+			fileCPU, envCPU     int
+			wantDuration        time.Duration
+		}{{"", "0", "", 5, 0, time.Minute}, {"~/literal", "-2", "0s", 5, -2, time.Minute}, {" ", "3", " 2m ", 3, 3, time.Minute}, {"same", "bad", "invalid", 5, 5, time.Minute}, {"same", "6", "2m", 6, 6, 2 * time.Minute}} {
+			t.Run(source+"/"+tc.text+"/"+tc.duration, func(t *testing.T) {
+				clearConfigEnv(t)
+				cfg := baseConfig()
+				cfg.Multipass = MultipassConfig{CLIPath: "same", Image: "same", User: "same", WorkRoot: "same", CPUs: 5, Memory: "same", Disk: "same", LaunchTimeout: time.Minute}
+				genericRoot, genericUser := cfg.WorkRoot, cfg.SSHUser
+				wantCPU := tc.fileCPU
+				if source == "file" {
+					cpu, _ := strconv.Atoi(tc.cpu)
+					if err := applyFileConfig(&cfg, fileConfig{Multipass: &fileMultipassConfig{CLIPath: tc.text, Image: tc.text, User: tc.text, WorkRoot: tc.text, CPUs: cpu, Memory: tc.text, Disk: tc.text, LaunchTimeout: tc.duration}}); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					wantCPU = tc.envCPU
+					for key, value := range map[string]string{"CLI": tc.text, "IMAGE": tc.text, "USER": tc.text, "WORK_ROOT": tc.text, "CPUS": tc.cpu, "MEMORY": tc.text, "DISK": tc.text, "LAUNCH_TIMEOUT": tc.duration} {
+						t.Setenv("CRABBOX_MULTIPASS_"+key, value)
+					}
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				}
+				text := tc.text
+				if text == "" {
+					text = "same"
+				}
+				want := MultipassConfig{CLIPath: text, Image: text, User: text, WorkRoot: text, CPUs: wantCPU, Memory: text, Disk: text, LaunchTimeout: tc.wantDuration}
+				if cfg.Multipass != want || cfg.multipassImageExplicit != (tc.text != "") || cfg.WorkRoot != genericRoot || cfg.SSHUser != genericUser {
+					t.Fatalf("source=%#v want %#v", cfg.Multipass, want)
+				}
+			})
+		}
+	}
+}
+
+func TestMultipassOrdinaryWriterMetadata(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{{"multipass: null", "{}"}, {"multipass: {}", "multipass: {}"}, {"multipass: {cliPath: '', image: '', user: '', workRoot: '', cpus: 0, memory: '', disk: '', launchTimeout: ''}", "multipass: {}"}, {"multipass: {cliPath: '~/literal', image: custom-image, user: example, workRoot: '~/guest', cpus: -2, memory: 4G, disk: 20G, launchTimeout: 0s}", "multipass: {cliPath: '~/literal', image: custom-image, user: example, workRoot: '~/guest', cpus: -2, memory: 4G, disk: 20G, launchTimeout: 0s}"}} {
+		path := isolatedConfigPath(t)
+		if err := os.WriteFile(path, []byte(tc.input), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := yaml.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := baseConfig()
+		if err := applyFileConfig(&cfg, file); err != nil {
+			t.Fatal(err)
+		}
+		after, err := yaml.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Fatal("source overlay changed file DTO")
+		}
+		if _, err := writeUserFileConfig(file); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got, want map[string]any
+		if err := yaml.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		if err := yaml.Unmarshal([]byte(tc.want), &want); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("writer=%#v want %#v", got, want)
+		}
+	}
+	if reflect.TypeOf(fileMultipassConfig{}).Name() != "fileMultipassConfig" {
+		t.Fatal("file DTO identity")
+	}
+}
+
 func TestMultipassConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
@@ -5122,6 +5386,135 @@ func TestTartConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 	if cfg.tartDiskExplicit {
 		t.Fatal("zero CRABBOX_TART_DISK should not mark tart disk explicit")
+	}
+}
+
+func TestCoderOrdinaryFileMetadata(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	wantDefault := CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}
+	if got := baseConfig().Coder; !reflect.DeepEqual(got, wantDefault) {
+		t.Fatalf("defaults=%#v want %#v", got, wantDefault)
+	}
+	for _, tc := range []struct {
+		name        string
+		input, want []string
+	}{{"nil", nil, []string{"prior"}}, {"empty", []string{}, []string{"prior"}}, {"all blank", []string{" ", ""}, []string{}}, {"normalized clone", []string{" a=1 ", " ", "b=2", "a=1"}, []string{"a=1", "b=2", "a=1"}}} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Coder.Parameters = []string{"prior"}
+			generic := cfg.WorkRoot
+			no := false
+			file := fileConfig{Coder: &fileCoderConfig{CLIPath: "~/coder", Template: " template ", Preset: " preset ", WorkspacePrefix: " prefix ", WorkRoot: "~/guest", DeleteOnRelease: &no, Wait: " auto ", UseParameterDefaults: &no, Parameters: tc.input, RichParameterFile: "~/params"}}
+			if err := applyFileConfig(&cfg, file); err != nil {
+				t.Fatal(err)
+			}
+			want := CoderConfig{CLIPath: filepath.Join(home, "coder"), Template: " template ", Preset: " preset ", WorkspacePrefix: " prefix ", WorkRoot: "~/guest", Wait: " auto ", Parameters: tc.want, RichParameterFile: filepath.Join(home, "params")}
+			if !reflect.DeepEqual(cfg.Coder, want) || cfg.WorkRoot != generic {
+				t.Fatalf("file=%#v want %#v", cfg.Coder, want)
+			}
+			if len(tc.input) > 0 && len(tc.want) > 0 {
+				tc.input[0] = "changed"
+				if cfg.Coder.Parameters[0] != "a=1" {
+					t.Fatal("file list not cloned")
+				}
+			}
+		})
+	}
+	for _, input := range []string{"{}", "{cliPath: '', richParameterFile: '', deleteOnRelease: null, useParameterDefaults: null}", "{cliPath: '~/coder', richParameterFile: '~/params', deleteOnRelease: false, useParameterDefaults: false}"} {
+		var file fileConfig
+		if err := yaml.Unmarshal([]byte("coder: "+input), &file); err != nil {
+			t.Fatal(err)
+		}
+		cfg := baseConfig()
+		cfg.Coder.CLIPath = "~/coder"
+		cfg.Coder.RichParameterFile = "~/params"
+		cfg.Coder.DeleteOnRelease = true
+		cfg.Coder.UseParameterDefaults = true
+		if err := applyFileConfig(&cfg, file); err != nil {
+			t.Fatal(err)
+		}
+		accepted := strings.Contains(input, "~/")
+		wantCLI, wantRich := "~/coder", "~/params"
+		if accepted {
+			wantCLI, wantRich = filepath.Join(home, "coder"), filepath.Join(home, "params")
+		}
+		if cfg.Coder.CLIPath != wantCLI || cfg.Coder.RichParameterFile != wantRich || cfg.Coder.DeleteOnRelease == accepted || cfg.Coder.UseParameterDefaults == accepted {
+			t.Fatal("file accepted path/bool presence")
+		}
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Coder.CLIPath != filepath.Join(home, "coder") || cfg.Coder.RichParameterFile != filepath.Join(home, "params") {
+			t.Fatal("env fallback path expansion")
+		}
+	}
+}
+
+func TestCoderOrdinaryEnvMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want []string
+	}{{"", []string{"prior"}}, {" \t ", []string{"prior"}}, {" NoNe ", []string{}}, {", ,", []string{}}, {" a=1, ,b=2,a=1 ", []string{"a=1", "b=2", "a=1"}}} {
+		t.Run(tc.raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			for key, value := range map[string]string{"CLI": "~/coder", "TEMPLATE": " template ", "PRESET": " preset ", "WORKSPACE_PREFIX": " prefix ", "WORK_ROOT": "~/guest", "DELETE_ON_RELEASE": "false", "WAIT": " auto ", "USE_PARAMETER_DEFAULTS": "false", "PARAMETERS": tc.raw, "RICH_PARAMETER_FILE": "~/params"} {
+				t.Setenv("CRABBOX_CODER_"+key, value)
+			}
+			cfg := baseConfig()
+			cfg.Coder.Parameters = []string{"prior"}
+			cfg.Coder.DeleteOnRelease = true
+			cfg.Coder.UseParameterDefaults = true
+			generic := cfg.WorkRoot
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			want := CoderConfig{CLIPath: filepath.Join(home, "coder"), Template: " template ", Preset: " preset ", WorkspacePrefix: " prefix ", WorkRoot: "~/guest", Wait: " auto ", Parameters: tc.want, RichParameterFile: filepath.Join(home, "params")}
+			if !reflect.DeepEqual(cfg.Coder, want) || cfg.WorkRoot != generic {
+				t.Fatalf("env=%#v want %#v", cfg.Coder, want)
+			}
+		})
+	}
+}
+
+func TestCoderOrdinaryCodecAndWriter(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{{"coder: {}\n", "coder: {}\n"}, {"coder: {parameters: [], deleteOnRelease: false, useParameterDefaults: false}\n", "coder: {deleteOnRelease: false, useParameterDefaults: false}\n"}, {"coder: {parameters: [' a=1 ', '', 'a=1']}\n", "coder: {parameters: ['a=1', 'a=1']}\n"}, {"coder: {parameters: [' ', '']}\n", "coder: {}\n"}} {
+		path := isolatedConfigPath(t)
+		if err := os.WriteFile(path, []byte(tc.input), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writeUserFileConfig(file); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got, want map[string]any
+		if err := yaml.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		if err := yaml.Unmarshal([]byte(tc.want), &want); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("writer=%#v want %#v", got, want)
+		}
+	}
+	for _, tc := range []struct{ input, kind string }{{"parameters: a=1", "!!str `a=1`"}, {"parameters: {a: b}", "!!map"}} {
+		file := fileCoderConfig{Template: "prior"}
+		err := yaml.Unmarshal([]byte(tc.input), &file)
+		want := "yaml: unmarshal errors:\n  line 1: cannot unmarshal " + tc.kind + " into []string"
+		if err == nil || err.Error() != want || file.Template != "prior" {
+			t.Fatalf("codec error=%v, want %q; template=%q", err, want, file.Template)
+		}
 	}
 }
 

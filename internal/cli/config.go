@@ -347,16 +347,6 @@ type CapacityConfig struct {
 	Hints             bool
 }
 
-type AWSLambdaMicroVMConfig struct {
-	Image             string
-	ImageVersion      string
-	ExecutionRoleARN  string
-	Workdir           string
-	IngressConnectors []string
-	EgressConnectors  []string
-	ForgetMissing     bool
-}
-
 // GitHubCodespacesConfig is intentionally token-free. Authentication comes
 // from the GitHub CLI credential store or GitHub's standard environment
 // variables at the point of use, never from Crabbox config or argv.
@@ -412,21 +402,6 @@ type BlacksmithConfig struct {
 	Ref         string
 	IdleTimeout time.Duration
 	Debug       bool
-}
-
-type AgentSandboxConfig struct {
-	Kubectl             string
-	Kubeconfig          string
-	Context             string
-	Namespace           string
-	WarmPool            string
-	Container           string
-	Workdir             string
-	SandboxReadyTimeout time.Duration
-	PodReadyTimeout     time.Duration
-	ExecTimeoutSecs     int
-	DeleteOnRelease     bool
-	ForgetMissing       bool
 }
 
 type ExternalConfig struct {
@@ -502,30 +477,6 @@ type ExternalDesktopConfig struct {
 	PasswordEnv string `yaml:"passwordEnv,omitempty" json:"passwordEnv,omitempty"`
 }
 
-type NamespaceConfig struct {
-	Image               string
-	Size                string
-	Repository          string
-	Site                string
-	VolumeSizeGB        int
-	AutoStopIdleTimeout time.Duration
-	WorkRoot            string
-	DeleteOnRelease     bool
-}
-
-type NamespaceInstanceConfig struct {
-	CLIPath     string
-	MachineType string
-	Duration    time.Duration
-	Region      string
-	Endpoint    string
-	Keychain    string
-	TenantID    string
-	Volumes     []string
-	WorkRoot    string
-	Bare        bool
-}
-
 // PhalaConfig configures the Phala Cloud confidential TDX CVM provider. Phala
 // authenticates through its own stored credentials (device flow or
 // PHALA_CLOUD_API_KEY), so no API key is held here.
@@ -540,19 +491,6 @@ type PhalaConfig struct {
 	// backend treats nil as true. A non-nil false value (set only by the local
 	// --phala-skip-attestation flag or CRABBOX_PHALA_ATTEST=false env) opts out.
 	Attest *bool
-}
-
-type CoderConfig struct {
-	CLIPath              string
-	Template             string
-	Preset               string
-	WorkspacePrefix      string
-	WorkRoot             string
-	DeleteOnRelease      bool
-	Wait                 string
-	UseParameterDefaults bool
-	Parameters           []string
-	RichParameterFile    string
 }
 
 type DaytonaConfig struct {
@@ -915,17 +853,6 @@ type MXCConfig struct {
 	AllowDACLMutation bool
 	AllowWindowsUI    bool
 	Experimental      bool
-}
-
-type MultipassConfig struct {
-	CLIPath       string
-	Image         string
-	User          string
-	WorkRoot      string
-	CPUs          int
-	Memory        string
-	Disk          string
-	LaunchTimeout time.Duration
 }
 
 type Machine0Config struct {
@@ -2304,26 +2231,24 @@ func baseConfig() Config {
 		Image:                   hetznerImage,
 		AWSRegion:               "eu-west-1",
 		AWSRootGB:               400,
-		AWSLambdaMicroVM: AWSLambdaMicroVMConfig{
-			Workdir: "/workspace/crabbox",
-		},
-		AzureBackend:         "vm",
-		AzureLocation:        "eastus",
-		AzureResourceGroup:   "crabbox-leases",
-		AzureImage:           azureImage,
-		AzureOSDisk:          AzureOSDiskManaged,
-		AzureVNet:            "crabbox-vnet",
-		AzureSubnet:          "crabbox-subnet",
-		AzureNSG:             "crabbox-nsg",
-		AzureDynamicSessions: defaultAzureDynamicSessionsConfig(),
-		GCPZone:              "europe-west2-a",
-		GCPImage:             gcpImage,
-		GCPNetwork:           "default",
-		GCPTags:              []string{"crabbox-ssh"},
-		GCPRootGB:            400,
-		DigitalOcean:         defaultDigitalOceanConfig(),
-		Vultr:                defaultVultrConfig(),
-		Linode:               initialLinodeConfig(linodeImage),
+		AWSLambdaMicroVM:        defaultAWSLambdaMicroVMConfig(),
+		AzureBackend:            "vm",
+		AzureLocation:           "eastus",
+		AzureResourceGroup:      "crabbox-leases",
+		AzureImage:              azureImage,
+		AzureOSDisk:             AzureOSDiskManaged,
+		AzureVNet:               "crabbox-vnet",
+		AzureSubnet:             "crabbox-subnet",
+		AzureNSG:                "crabbox-nsg",
+		AzureDynamicSessions:    defaultAzureDynamicSessionsConfig(),
+		GCPZone:                 "europe-west2-a",
+		GCPImage:                gcpImage,
+		GCPNetwork:              "default",
+		GCPTags:                 []string{"crabbox-ssh"},
+		GCPRootGB:               400,
+		DigitalOcean:            defaultDigitalOceanConfig(),
+		Vultr:                   defaultVultrConfig(),
+		Linode:                  initialLinodeConfig(linodeImage),
 		GitHubCodespaces: GitHubCodespacesConfig{
 			APIURL:          "https://api.github.com",
 			GHPath:          "gh",
@@ -2382,28 +2307,12 @@ func baseConfig() Config {
 		},
 		KubeVirt:     defaultKubeVirtConfig(),
 		SealosDevbox: defaultSealosDevboxConfig(),
-		AgentSandbox: AgentSandboxConfig{
-			Kubectl:             "kubectl",
-			Namespace:           "default",
-			Workdir:             "/workspace/crabbox",
-			SandboxReadyTimeout: 180 * time.Second,
-			PodReadyTimeout:     180 * time.Second,
-			ExecTimeoutSecs:     600,
-			DeleteOnRelease:     true,
-		},
+		AgentSandbox: defaultAgentSandboxConfig(),
 		External: ExternalConfig{
 			WorkRoot: defaultPOSIXWorkRoot,
 		},
-		Namespace: NamespaceConfig{
-			Image:               "builtin:base",
-			WorkRoot:            "/workspaces/crabbox",
-			AutoStopIdleTimeout: 30 * time.Minute,
-		},
-		NamespaceInstance: NamespaceInstanceConfig{
-			CLIPath:  "nsc",
-			WorkRoot: "/work/crabbox",
-			Bare:     true,
-		},
+		Namespace:         defaultNamespaceConfig(),
+		NamespaceInstance: defaultNamespaceInstanceConfig(),
 		Phala: PhalaConfig{
 			CLIPath:      "phala",
 			InstanceType: "tdx.small",
@@ -2416,12 +2325,7 @@ func baseConfig() Config {
 			WorkRoot:        "/home/boxd/crabbox",
 			DeleteOnRelease: true,
 		},
-		Coder: CoderConfig{
-			CLIPath:         "coder",
-			WorkspacePrefix: "crabbox-",
-			WorkRoot:        "/home/coder/crabbox",
-			Wait:            "yes",
-		},
+		Coder: defaultCoderConfig(),
 		Morph: defaultMorphConfig(),
 		Orgo:  defaultOrgoConfig(),
 		Daytona: DaytonaConfig{
@@ -2587,16 +2491,7 @@ func baseConfig() Config {
 			Containment: "processcontainer",
 			Network:     "block",
 		},
-		Multipass: MultipassConfig{
-			CLIPath:       "multipass",
-			Image:         multipassImage,
-			User:          "crabbox",
-			WorkRoot:      defaultPOSIXWorkRoot,
-			CPUs:          4,
-			Memory:        "8G",
-			Disk:          "30G",
-			LaunchTimeout: 20 * time.Minute,
-		},
+		Multipass: initialMultipassConfig(multipassImage),
 		Machine0: Machine0Config{
 			CLIPath:       "machine0",
 			Image:         "ubuntu-24-04-loaded",
@@ -2836,16 +2731,6 @@ type fileAWSConfig struct {
 	MacHostID       string   `yaml:"macHostId,omitempty"`
 }
 
-type fileAWSLambdaMicroVMConfig struct {
-	Image             string    `yaml:"image,omitempty"`
-	ImageVersion      string    `yaml:"imageVersion,omitempty"`
-	ExecutionRoleARN  string    `yaml:"executionRoleArn,omitempty"`
-	Workdir           string    `yaml:"workdir,omitempty"`
-	IngressConnectors *[]string `yaml:"ingressConnectors,omitempty"`
-	EgressConnectors  *[]string `yaml:"egressConnectors,omitempty"`
-	ForgetMissing     *bool     `yaml:"forgetMissing,omitempty"`
-}
-
 type fileAzureConfig struct {
 	SubscriptionID string   `yaml:"subscriptionId,omitempty"`
 	TenantID       string   `yaml:"tenantId,omitempty"`
@@ -3054,21 +2939,6 @@ type fileBlacksmithConfig struct {
 	Debug       *bool  `yaml:"debug,omitempty"`
 }
 
-type fileAgentSandboxConfig struct {
-	Kubectl             string `yaml:"kubectl,omitempty"`
-	Kubeconfig          string `yaml:"kubeconfig,omitempty"`
-	Context             string `yaml:"context,omitempty"`
-	Namespace           string `yaml:"namespace,omitempty"`
-	WarmPool            string `yaml:"warmPool,omitempty"`
-	Container           string `yaml:"container,omitempty"`
-	Workdir             string `yaml:"workdir,omitempty"`
-	SandboxReadyTimeout string `yaml:"sandboxReadyTimeout,omitempty"`
-	PodReadyTimeout     string `yaml:"podReadyTimeout,omitempty"`
-	ExecTimeoutSecs     *int   `yaml:"execTimeoutSecs,omitempty"`
-	DeleteOnRelease     *bool  `yaml:"deleteOnRelease,omitempty"`
-	ForgetMissing       *bool  `yaml:"forgetMissing,omitempty"`
-}
-
 type fileExternalConfig struct {
 	Command      string                      `yaml:"command,omitempty"`
 	Args         []string                    `yaml:"args,omitempty"`
@@ -3078,29 +2948,6 @@ type fileExternalConfig struct {
 	Connection   *ExternalConnectionConfig   `yaml:"connection,omitempty"`
 	WorkRoot     string                      `yaml:"workRoot,omitempty"`
 	RoutingFile  string                      `yaml:"routingFile,omitempty"`
-}
-
-type fileNamespaceConfig struct {
-	Image               string `yaml:"image,omitempty"`
-	Size                string `yaml:"size,omitempty"`
-	Repository          string `yaml:"repository,omitempty"`
-	Site                string `yaml:"site,omitempty"`
-	VolumeSizeGB        int    `yaml:"volumeSizeGB,omitempty"`
-	AutoStopIdleTimeout string `yaml:"autoStopIdleTimeout,omitempty"`
-	WorkRoot            string `yaml:"workRoot,omitempty"`
-	DeleteOnRelease     *bool  `yaml:"deleteOnRelease,omitempty"`
-}
-
-type fileNamespaceInstanceConfig struct {
-	CLIPath     string   `yaml:"cli,omitempty"`
-	MachineType string   `yaml:"machineType,omitempty"`
-	Duration    string   `yaml:"duration,omitempty"`
-	Region      string   `yaml:"region,omitempty"`
-	Endpoint    string   `yaml:"endpoint,omitempty"`
-	Keychain    string   `yaml:"keychain,omitempty"`
-	Volumes     []string `yaml:"volumes,omitempty"`
-	WorkRoot    string   `yaml:"workRoot,omitempty"`
-	Bare        *bool    `yaml:"bare,omitempty"`
 }
 
 // BoxdConfig contains non-secret HTTPS console routing and lease settings.
@@ -3126,47 +2973,6 @@ type filePhalaConfig struct {
 	NodeID       string `yaml:"nodeId,omitempty"`
 	Compose      string `yaml:"compose,omitempty"`
 	Attest       *bool  `yaml:"attest,omitempty"`
-}
-
-type fileCoderConfig struct {
-	CLIPath              string   `yaml:"cliPath,omitempty"`
-	Template             string   `yaml:"template,omitempty"`
-	Preset               string   `yaml:"preset,omitempty"`
-	WorkspacePrefix      string   `yaml:"workspacePrefix,omitempty"`
-	WorkRoot             string   `yaml:"workRoot,omitempty"`
-	DeleteOnRelease      *bool    `yaml:"deleteOnRelease,omitempty"`
-	Wait                 string   `yaml:"wait,omitempty"`
-	UseParameterDefaults *bool    `yaml:"useParameterDefaults,omitempty"`
-	Parameters           []string `yaml:"parameters,omitempty"`
-	RichParameterFile    string   `yaml:"richParameterFile,omitempty"`
-}
-
-func (c *fileCoderConfig) UnmarshalYAML(node *yaml.Node) error {
-	type plain fileCoderConfig
-	var out plain
-	if err := node.Decode(&out); err != nil {
-		return err
-	}
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		key := node.Content[i].Value
-		value := node.Content[i+1]
-		if key != "parameters" {
-			continue
-		}
-		switch value.Kind {
-		case yaml.SequenceNode:
-			out.Parameters = out.Parameters[:0]
-			for _, item := range value.Content {
-				if strings.TrimSpace(item.Value) != "" {
-					out.Parameters = append(out.Parameters, strings.TrimSpace(item.Value))
-				}
-			}
-		case yaml.ScalarNode:
-			out.Parameters = splitCommaList(value.Value)
-		}
-	}
-	*c = fileCoderConfig(out)
-	return nil
 }
 
 type fileDaytonaConfig struct {
@@ -3471,17 +3277,6 @@ type fileMXCConfig struct {
 	AllowDACLMutation *bool    `yaml:"allowDaclMutation,omitempty"`
 	AllowWindowsUI    *bool    `yaml:"allowWindowsUI,omitempty"`
 	Experimental      *bool    `yaml:"experimental,omitempty"`
-}
-
-type fileMultipassConfig struct {
-	CLIPath       string `yaml:"cliPath,omitempty"`
-	Image         string `yaml:"image,omitempty"`
-	User          string `yaml:"user,omitempty"`
-	WorkRoot      string `yaml:"workRoot,omitempty"`
-	CPUs          int    `yaml:"cpus,omitempty"`
-	Memory        string `yaml:"memory,omitempty"`
-	Disk          string `yaml:"disk,omitempty"`
-	LaunchTimeout string `yaml:"launchTimeout,omitempty"`
 }
 
 type fileMachine0Config struct {
@@ -4257,26 +4052,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			}
 		}
 	}
-	if file.AWSLambdaMicroVM != nil {
-		if file.AWSLambdaMicroVM.Image != "" {
-			cfg.AWSLambdaMicroVM.Image = file.AWSLambdaMicroVM.Image
-		}
-		if file.AWSLambdaMicroVM.ImageVersion != "" {
-			cfg.AWSLambdaMicroVM.ImageVersion = file.AWSLambdaMicroVM.ImageVersion
-		}
-		if file.AWSLambdaMicroVM.ExecutionRoleARN != "" {
-			cfg.AWSLambdaMicroVM.ExecutionRoleARN = file.AWSLambdaMicroVM.ExecutionRoleARN
-		}
-		if file.AWSLambdaMicroVM.Workdir != "" {
-			cfg.AWSLambdaMicroVM.Workdir = file.AWSLambdaMicroVM.Workdir
-		}
-		if file.AWSLambdaMicroVM.IngressConnectors != nil {
-			cfg.AWSLambdaMicroVM.IngressConnectors = append([]string(nil), (*file.AWSLambdaMicroVM.IngressConnectors)...)
-		}
-		if file.AWSLambdaMicroVM.EgressConnectors != nil {
-			cfg.AWSLambdaMicroVM.EgressConnectors = append([]string(nil), (*file.AWSLambdaMicroVM.EgressConnectors)...)
-		}
-		applyOptional(&cfg.AWSLambdaMicroVM.ForgetMissing, file.AWSLambdaMicroVM.ForgetMissing)
+	if _, err := cfg.AWSLambdaMicroVM.applyFile(file.AWSLambdaMicroVM); err != nil {
+		return err
 	}
 	if file.Azure != nil {
 		if file.Azure.Backend != "" {
@@ -4752,45 +4529,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.AgentSandbox != nil {
-		if trusted && file.AgentSandbox.Kubectl != "" {
-			cfg.AgentSandbox.Kubectl = file.AgentSandbox.Kubectl
-		}
-		if trusted && file.AgentSandbox.Kubeconfig != "" {
-			cfg.AgentSandbox.Kubeconfig = expandUserPath(file.AgentSandbox.Kubeconfig)
-		}
-		if trusted && file.AgentSandbox.Context != "" {
-			cfg.AgentSandbox.Context = file.AgentSandbox.Context
-		}
-		if trusted && file.AgentSandbox.Namespace != "" {
-			cfg.AgentSandbox.Namespace = file.AgentSandbox.Namespace
-		}
-		if trusted && file.AgentSandbox.WarmPool != "" {
-			cfg.AgentSandbox.WarmPool = file.AgentSandbox.WarmPool
-		}
-		if trusted && file.AgentSandbox.Container != "" {
-			cfg.AgentSandbox.Container = file.AgentSandbox.Container
-		}
-		if trusted && file.AgentSandbox.Workdir != "" {
-			cfg.AgentSandbox.Workdir = file.AgentSandbox.Workdir
-		}
-		if file.AgentSandbox.SandboxReadyTimeout != "" {
-			applyLeaseDuration(&cfg.AgentSandbox.SandboxReadyTimeout, file.AgentSandbox.SandboxReadyTimeout)
-		}
-		if file.AgentSandbox.PodReadyTimeout != "" {
-			applyLeaseDuration(&cfg.AgentSandbox.PodReadyTimeout, file.AgentSandbox.PodReadyTimeout)
-		}
-		if file.AgentSandbox.ExecTimeoutSecs != nil {
-			if *file.AgentSandbox.ExecTimeoutSecs < 0 {
-				return exit(2, "agentSandbox execTimeoutSecs must be non-negative")
-			}
-			cfg.AgentSandbox.ExecTimeoutSecs = *file.AgentSandbox.ExecTimeoutSecs
-		}
-		if file.AgentSandbox.DeleteOnRelease != nil {
-			cfg.AgentSandbox.DeleteOnRelease = *file.AgentSandbox.DeleteOnRelease
-			MarkDeleteOnReleaseExplicit(cfg, "agent-sandbox")
-		}
-		applyOptional(&cfg.AgentSandbox.ForgetMissing, file.AgentSandbox.ForgetMissing)
+	if err := applyAgentSandboxFileConfig(cfg, file.AgentSandbox, trusted); err != nil {
+		return err
 	}
 	if file.External != nil {
 		if file.External.Command != "" {
@@ -4898,57 +4638,17 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			}
 		}
 	}
-	if file.Namespace != nil {
-		if file.Namespace.Image != "" {
-			cfg.Namespace.Image = file.Namespace.Image
-		}
-		if file.Namespace.Size != "" {
-			cfg.Namespace.Size = file.Namespace.Size
-		}
-		if file.Namespace.Repository != "" {
-			cfg.Namespace.Repository = file.Namespace.Repository
-		}
-		if file.Namespace.Site != "" {
-			cfg.Namespace.Site = file.Namespace.Site
-		}
-		if file.Namespace.VolumeSizeGB > 0 {
-			cfg.Namespace.VolumeSizeGB = file.Namespace.VolumeSizeGB
-		}
-		applyLeaseDuration(&cfg.Namespace.AutoStopIdleTimeout, file.Namespace.AutoStopIdleTimeout)
-		if file.Namespace.WorkRoot != "" {
-			cfg.Namespace.WorkRoot = file.Namespace.WorkRoot
-		}
-		if file.Namespace.DeleteOnRelease != nil {
-			cfg.Namespace.DeleteOnRelease = *file.Namespace.DeleteOnRelease
+	{
+		applied, err := cfg.Namespace.applyFile(file.Namespace)
+		if applied.DeleteOnRelease {
 			MarkDeleteOnReleaseExplicit(cfg, "namespace-devbox")
 		}
+		if err != nil {
+			return err
+		}
 	}
-	if file.NamespaceInstance != nil {
-		if trusted {
-			if file.NamespaceInstance.CLIPath != "" {
-				cfg.NamespaceInstance.CLIPath = expandUserPath(file.NamespaceInstance.CLIPath)
-			}
-			if file.NamespaceInstance.Region != "" {
-				cfg.NamespaceInstance.Region = file.NamespaceInstance.Region
-			}
-			if file.NamespaceInstance.Endpoint != "" {
-				cfg.NamespaceInstance.Endpoint = file.NamespaceInstance.Endpoint
-			}
-			if file.NamespaceInstance.Keychain != "" {
-				cfg.NamespaceInstance.Keychain = file.NamespaceInstance.Keychain
-			}
-			if file.NamespaceInstance.Volumes != nil {
-				cfg.NamespaceInstance.Volumes = append([]string(nil), file.NamespaceInstance.Volumes...)
-			}
-		}
-		if file.NamespaceInstance.MachineType != "" {
-			cfg.NamespaceInstance.MachineType = file.NamespaceInstance.MachineType
-		}
-		applyLeaseDuration(&cfg.NamespaceInstance.Duration, file.NamespaceInstance.Duration)
-		if file.NamespaceInstance.WorkRoot != "" {
-			cfg.NamespaceInstance.WorkRoot = file.NamespaceInstance.WorkRoot
-		}
-		applyOptional(&cfg.NamespaceInstance.Bare, file.NamespaceInstance.Bare)
+	if err := applyNamespaceInstanceFileConfig(cfg, file.NamespaceInstance, trusted); err != nil {
+		return err
 	}
 	if file.Phala != nil {
 		if trusted {
@@ -4997,33 +4697,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			MarkDeleteOnReleaseExplicit(cfg, "boxd")
 		}
 	}
-	if file.Coder != nil {
-		if file.Coder.CLIPath != "" {
-			cfg.Coder.CLIPath = expandUserPath(file.Coder.CLIPath)
-		}
-		if file.Coder.Template != "" {
-			cfg.Coder.Template = file.Coder.Template
-		}
-		if file.Coder.Preset != "" {
-			cfg.Coder.Preset = file.Coder.Preset
-		}
-		if file.Coder.WorkspacePrefix != "" {
-			cfg.Coder.WorkspacePrefix = file.Coder.WorkspacePrefix
-		}
-		if file.Coder.WorkRoot != "" {
-			cfg.Coder.WorkRoot = file.Coder.WorkRoot
-		}
-		applyOptional(&cfg.Coder.DeleteOnRelease, file.Coder.DeleteOnRelease)
-		if file.Coder.Wait != "" {
-			cfg.Coder.Wait = file.Coder.Wait
-		}
-		applyOptional(&cfg.Coder.UseParameterDefaults, file.Coder.UseParameterDefaults)
-		if len(file.Coder.Parameters) > 0 {
-			cfg.Coder.Parameters = normalizeList(file.Coder.Parameters)
-		}
-		if file.Coder.RichParameterFile != "" {
-			cfg.Coder.RichParameterFile = expandUserPath(file.Coder.RichParameterFile)
-		}
+	if err := applyCoderFileConfig(cfg, file.Coder); err != nil {
+		return err
 	}
 	{
 		applied, err := cfg.Morph.applyFile(file.Morph)
@@ -5644,31 +5319,13 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		applyOptional(&cfg.MXC.AllowWindowsUI, file.MXC.AllowWindowsUI)
 		applyOptional(&cfg.MXC.Experimental, file.MXC.Experimental)
 	}
-	if file.Multipass != nil {
-		if file.Multipass.CLIPath != "" {
-			cfg.Multipass.CLIPath = file.Multipass.CLIPath
+	{
+		applied, err := cfg.Multipass.applyFile(file.Multipass)
+		if applied.Image {
+			MarkMultipassImageExplicit(cfg)
 		}
-		if file.Multipass.Image != "" {
-			cfg.Multipass.Image = file.Multipass.Image
-			cfg.multipassImageExplicit = true
-		}
-		if file.Multipass.User != "" {
-			cfg.Multipass.User = file.Multipass.User
-		}
-		if file.Multipass.WorkRoot != "" {
-			cfg.Multipass.WorkRoot = file.Multipass.WorkRoot
-		}
-		if file.Multipass.CPUs > 0 {
-			cfg.Multipass.CPUs = file.Multipass.CPUs
-		}
-		if file.Multipass.Memory != "" {
-			cfg.Multipass.Memory = file.Multipass.Memory
-		}
-		if file.Multipass.Disk != "" {
-			cfg.Multipass.Disk = file.Multipass.Disk
-		}
-		if file.Multipass.LaunchTimeout != "" {
-			applyLeaseDuration(&cfg.Multipass.LaunchTimeout, file.Multipass.LaunchTimeout)
+		if err != nil {
+			return err
 		}
 	}
 	if file.Machine0 != nil {
@@ -6273,18 +5930,8 @@ func applyEnv(cfg *Config) error {
 	cfg.AWSProfile = getenv("CRABBOX_AWS_INSTANCE_PROFILE", cfg.AWSProfile)
 	cfg.AWSRootGB = getenvInt32("CRABBOX_AWS_ROOT_GB", cfg.AWSRootGB)
 	cfg.AWSMacHostID = getenv("CRABBOX_AWS_MAC_HOST_ID", cfg.AWSMacHostID)
-	cfg.AWSLambdaMicroVM.Image = getenv("CRABBOX_AWS_LAMBDA_MICROVM_IMAGE", cfg.AWSLambdaMicroVM.Image)
-	cfg.AWSLambdaMicroVM.ImageVersion = getenv("CRABBOX_AWS_LAMBDA_MICROVM_IMAGE_VERSION", cfg.AWSLambdaMicroVM.ImageVersion)
-	cfg.AWSLambdaMicroVM.ExecutionRoleARN = getenv("CRABBOX_AWS_LAMBDA_MICROVM_EXECUTION_ROLE_ARN", cfg.AWSLambdaMicroVM.ExecutionRoleARN)
-	cfg.AWSLambdaMicroVM.Workdir = getenv("CRABBOX_AWS_LAMBDA_MICROVM_WORKDIR", cfg.AWSLambdaMicroVM.Workdir)
-	if value := os.Getenv("CRABBOX_AWS_LAMBDA_MICROVM_INGRESS_CONNECTORS"); value != "" {
-		cfg.AWSLambdaMicroVM.IngressConnectors = splitCSV(value)
-	}
-	if value := os.Getenv("CRABBOX_AWS_LAMBDA_MICROVM_EGRESS_CONNECTORS"); value != "" {
-		cfg.AWSLambdaMicroVM.EgressConnectors = splitCSV(value)
-	}
-	if value, ok := getenvBool("CRABBOX_AWS_LAMBDA_MICROVM_FORGET_MISSING"); ok {
-		cfg.AWSLambdaMicroVM.ForgetMissing = value
+	if _, err := cfg.AWSLambdaMicroVM.applyEnv(); err != nil {
+		return err
 	}
 	if cfg.HostID == "" && cfg.AWSMacHostID != "" {
 		cfg.HostID = cfg.AWSMacHostID
@@ -6645,30 +6292,15 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	cfg.AgentSandbox.Kubectl = getenv("CRABBOX_AGENT_SANDBOX_KUBECTL", cfg.AgentSandbox.Kubectl)
-	cfg.AgentSandbox.Kubeconfig = expandUserPath(getenv("CRABBOX_AGENT_SANDBOX_KUBECONFIG", cfg.AgentSandbox.Kubeconfig))
-	cfg.AgentSandbox.Context = getenv("CRABBOX_AGENT_SANDBOX_CONTEXT", cfg.AgentSandbox.Context)
-	cfg.AgentSandbox.Namespace = getenv("CRABBOX_AGENT_SANDBOX_NAMESPACE", cfg.AgentSandbox.Namespace)
-	cfg.AgentSandbox.WarmPool = getenv("CRABBOX_AGENT_SANDBOX_WARM_POOL", cfg.AgentSandbox.WarmPool)
-	cfg.AgentSandbox.Container = getenv("CRABBOX_AGENT_SANDBOX_CONTAINER", cfg.AgentSandbox.Container)
-	cfg.AgentSandbox.Workdir = getenv("CRABBOX_AGENT_SANDBOX_WORKDIR", cfg.AgentSandbox.Workdir)
-	if timeout := os.Getenv("CRABBOX_AGENT_SANDBOX_SANDBOX_READY_TIMEOUT"); timeout != "" {
-		applyLeaseDuration(&cfg.AgentSandbox.SandboxReadyTimeout, timeout)
-	}
-	if timeout := os.Getenv("CRABBOX_AGENT_SANDBOX_POD_READY_TIMEOUT"); timeout != "" {
-		applyLeaseDuration(&cfg.AgentSandbox.PodReadyTimeout, timeout)
-	}
-	var agentSandboxEnvErr error
-	cfg.AgentSandbox.ExecTimeoutSecs, agentSandboxEnvErr = getenvNonNegativeInt("CRABBOX_AGENT_SANDBOX_EXEC_TIMEOUT_SECS", cfg.AgentSandbox.ExecTimeoutSecs)
-	if agentSandboxEnvErr != nil {
-		return agentSandboxEnvErr
-	}
-	if value, ok := getenvBool("CRABBOX_AGENT_SANDBOX_DELETE_ON_RELEASE"); ok {
-		cfg.AgentSandbox.DeleteOnRelease = value
-		MarkDeleteOnReleaseExplicit(cfg, "agent-sandbox")
-	}
-	if value, ok := getenvBool("CRABBOX_AGENT_SANDBOX_FORGET_MISSING"); ok {
-		cfg.AgentSandbox.ForgetMissing = value
+	{
+		applied, err := cfg.AgentSandbox.applyEnv()
+		cfg.AgentSandbox.Kubeconfig = expandUserPath(cfg.AgentSandbox.Kubeconfig)
+		if applied.DeleteOnRelease {
+			MarkDeleteOnReleaseExplicit(cfg, "agent-sandbox")
+		}
+		if err != nil {
+			return err
+		}
 	}
 	externalProviderOutputExplicit := false
 	if value := os.Getenv("CRABBOX_EXTERNAL_COMMAND"); value != "" {
@@ -6691,34 +6323,19 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID"); ok {
 		cfg.External.Capabilities.IdempotentLeaseID = value
 	}
-	cfg.Namespace.Image = getenv("CRABBOX_NAMESPACE_IMAGE", cfg.Namespace.Image)
-	cfg.Namespace.Size = getenv("CRABBOX_NAMESPACE_SIZE", cfg.Namespace.Size)
-	cfg.Namespace.Repository = getenv("CRABBOX_NAMESPACE_REPOSITORY", cfg.Namespace.Repository)
-	cfg.Namespace.Site = getenv("CRABBOX_NAMESPACE_SITE", cfg.Namespace.Site)
-	cfg.Namespace.VolumeSizeGB = getenvInt("CRABBOX_NAMESPACE_VOLUME_SIZE_GB", cfg.Namespace.VolumeSizeGB)
-	if idleTimeout := os.Getenv("CRABBOX_NAMESPACE_AUTO_STOP_IDLE_TIMEOUT"); idleTimeout != "" {
-		applyLeaseDuration(&cfg.Namespace.AutoStopIdleTimeout, idleTimeout)
+	{
+		applied, err := cfg.Namespace.applyEnv()
+		if applied.DeleteOnRelease {
+			MarkDeleteOnReleaseExplicit(cfg, "namespace-devbox")
+		}
+		if err != nil {
+			return err
+		}
 	}
-	cfg.Namespace.WorkRoot = getenv("CRABBOX_NAMESPACE_WORK_ROOT", cfg.Namespace.WorkRoot)
-	if value, ok := getenvBool("CRABBOX_NAMESPACE_DELETE_ON_RELEASE"); ok {
-		cfg.Namespace.DeleteOnRelease = value
-		MarkDeleteOnReleaseExplicit(cfg, "namespace-devbox")
+	if _, err := cfg.NamespaceInstance.applyEnv(); err != nil {
+		return err
 	}
-	cfg.NamespaceInstance.CLIPath = expandUserPath(getenv("CRABBOX_NAMESPACE_INSTANCE_CLI", cfg.NamespaceInstance.CLIPath))
-	cfg.NamespaceInstance.MachineType = getenv("CRABBOX_NAMESPACE_INSTANCE_MACHINE_TYPE", cfg.NamespaceInstance.MachineType)
-	if duration := os.Getenv("CRABBOX_NAMESPACE_INSTANCE_DURATION"); duration != "" {
-		applyLeaseDuration(&cfg.NamespaceInstance.Duration, duration)
-	}
-	cfg.NamespaceInstance.Region = getenv("CRABBOX_NAMESPACE_INSTANCE_REGION", cfg.NamespaceInstance.Region)
-	cfg.NamespaceInstance.Endpoint = getenv("CRABBOX_NAMESPACE_INSTANCE_ENDPOINT", cfg.NamespaceInstance.Endpoint)
-	cfg.NamespaceInstance.Keychain = getenv("CRABBOX_NAMESPACE_INSTANCE_KEYCHAIN", cfg.NamespaceInstance.Keychain)
-	if volumes, ok := getenvList("CRABBOX_NAMESPACE_INSTANCE_VOLUMES"); ok {
-		cfg.NamespaceInstance.Volumes = volumes
-	}
-	cfg.NamespaceInstance.WorkRoot = getenv("CRABBOX_NAMESPACE_INSTANCE_WORK_ROOT", cfg.NamespaceInstance.WorkRoot)
-	if value, ok := getenvBool("CRABBOX_NAMESPACE_INSTANCE_BARE"); ok {
-		cfg.NamespaceInstance.Bare = value
-	}
+	cfg.NamespaceInstance.CLIPath = expandUserPath(cfg.NamespaceInstance.CLIPath)
 	cfg.Phala.CLIPath = expandUserPath(getenv("CRABBOX_PHALA_CLI", cfg.Phala.CLIPath))
 	if value := os.Getenv("CRABBOX_PHALA_INSTANCE_TYPE"); value != "" {
 		cfg.Phala.InstanceType = value
@@ -6762,26 +6379,11 @@ func applyEnv(cfg *Config) error {
 		cfg.Boxd.DeleteOnRelease = value
 		MarkDeleteOnReleaseExplicit(cfg, "boxd")
 	}
-	cfg.Coder.CLIPath = expandUserPath(getenv("CRABBOX_CODER_CLI", cfg.Coder.CLIPath))
-	cfg.Coder.Template = getenv("CRABBOX_CODER_TEMPLATE", cfg.Coder.Template)
-	cfg.Coder.Preset = getenv("CRABBOX_CODER_PRESET", cfg.Coder.Preset)
-	cfg.Coder.WorkspacePrefix = getenv("CRABBOX_CODER_WORKSPACE_PREFIX", cfg.Coder.WorkspacePrefix)
-	cfg.Coder.WorkRoot = getenv("CRABBOX_CODER_WORK_ROOT", cfg.Coder.WorkRoot)
-	if value, ok := getenvBool("CRABBOX_CODER_DELETE_ON_RELEASE"); ok {
-		cfg.Coder.DeleteOnRelease = value
+	if _, err := cfg.Coder.applyEnv(); err != nil {
+		return err
 	}
-	cfg.Coder.Wait = getenv("CRABBOX_CODER_WAIT", cfg.Coder.Wait)
-	if value, ok := getenvBool("CRABBOX_CODER_USE_PARAMETER_DEFAULTS"); ok {
-		cfg.Coder.UseParameterDefaults = value
-	}
-	if paramsEnv := os.Getenv("CRABBOX_CODER_PARAMETERS"); strings.TrimSpace(paramsEnv) != "" {
-		params := splitCommaList(paramsEnv)
-		if strings.EqualFold(strings.TrimSpace(paramsEnv), "none") {
-			params = []string{}
-		}
-		cfg.Coder.Parameters = params
-	}
-	cfg.Coder.RichParameterFile = expandUserPath(getenv("CRABBOX_CODER_RICH_PARAMETER_FILE", cfg.Coder.RichParameterFile))
+	cfg.Coder.CLIPath = expandUserPath(cfg.Coder.CLIPath)
+	cfg.Coder.RichParameterFile = expandUserPath(cfg.Coder.RichParameterFile)
 	if value, ok := firstNonEmptyEnv("CRABBOX_DAYTONA_API_KEY", "DAYTONA_API_KEY"); ok {
 		cfg.Daytona.APIKey = value
 		cfg.credentialProvenance.daytonaAPIKey = credentialSourceEnvironment
@@ -7296,18 +6898,14 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_MXC_EXPERIMENTAL"); ok {
 		cfg.MXC.Experimental = value
 	}
-	cfg.Multipass.CLIPath = getenv("CRABBOX_MULTIPASS_CLI", cfg.Multipass.CLIPath)
-	if image := os.Getenv("CRABBOX_MULTIPASS_IMAGE"); image != "" {
-		cfg.Multipass.Image = image
-		cfg.multipassImageExplicit = true
-	}
-	cfg.Multipass.User = getenv("CRABBOX_MULTIPASS_USER", cfg.Multipass.User)
-	cfg.Multipass.WorkRoot = getenv("CRABBOX_MULTIPASS_WORK_ROOT", cfg.Multipass.WorkRoot)
-	cfg.Multipass.CPUs = getenvInt("CRABBOX_MULTIPASS_CPUS", cfg.Multipass.CPUs)
-	cfg.Multipass.Memory = getenv("CRABBOX_MULTIPASS_MEMORY", cfg.Multipass.Memory)
-	cfg.Multipass.Disk = getenv("CRABBOX_MULTIPASS_DISK", cfg.Multipass.Disk)
-	if timeout := os.Getenv("CRABBOX_MULTIPASS_LAUNCH_TIMEOUT"); timeout != "" {
-		applyLeaseDuration(&cfg.Multipass.LaunchTimeout, timeout)
+	{
+		applied, err := cfg.Multipass.applyEnv()
+		if applied.Image {
+			MarkMultipassImageExplicit(cfg)
+		}
+		if err != nil {
+			return err
+		}
 	}
 	cfg.Machine0.CLIPath = getenv("CRABBOX_MACHINE0_CLI", cfg.Machine0.CLIPath)
 	cfg.Machine0.Image = getenv("CRABBOX_MACHINE0_IMAGE", cfg.Machine0.Image)
@@ -7996,10 +7594,14 @@ func getenvList(name string) ([]string, bool) {
 	if !ok {
 		return nil, false
 	}
+	return parseEnvListValue(value), true
+}
+
+func parseEnvListValue(value string) []string {
 	if strings.EqualFold(strings.TrimSpace(value), "none") {
-		return []string{}, true
+		return []string{}
 	}
-	return splitCommaList(value), true
+	return splitCommaList(value)
 }
 
 func splitCommaList(value string) []string {

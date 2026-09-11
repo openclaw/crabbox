@@ -2,6 +2,18 @@ package cli
 
 import "strings"
 
+// appendTrimmedListFlag retains inherited items and appends each whole occurrence.
+// Empty strings and commas are values, not clearing or splitting instructions.
+type appendTrimmedListFlag struct{ stringListFlag }
+
+func newAppendTrimmedListFlag(defaults []string) *appendTrimmedListFlag {
+	return &appendTrimmedListFlag{stringListFlag(append([]string(nil), defaults...))}
+}
+
+func (s *appendTrimmedListFlag) Set(value string) error {
+	return s.stringListFlag.Set(strings.TrimSpace(value))
+}
+
 // replaceAppendListFlag replaces its snapshot on the first occurrence, then
 // appends trimmed comma-separated items in order, including duplicates.
 type replaceAppendListFlag struct {

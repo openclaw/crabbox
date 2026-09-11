@@ -711,7 +711,7 @@ func resolveNamespaceDevboxName(identifier string, reclaim bool) (string, string
 }
 
 func namespaceImage(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Namespace.Image), "builtin:base")
+	return blank(strings.TrimSpace(cfg.Namespace.Image), core.NamespaceConfigDefaultImage)
 }
 
 func namespaceSize(cfg Config) string {
@@ -739,7 +739,7 @@ func namespaceValidSize(value string) string {
 }
 
 func namespaceWorkRoot(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Namespace.WorkRoot), "/workspaces/crabbox")
+	return blank(strings.TrimSpace(cfg.Namespace.WorkRoot), core.NamespaceConfigDefaultWorkRoot)
 }
 
 func namespaceAutoStopIdleTimeout(cfg Config) time.Duration {
@@ -749,7 +749,7 @@ func namespaceAutoStopIdleTimeout(cfg Config) time.Duration {
 	if cfg.IdleTimeout > 0 {
 		return cfg.IdleTimeout
 	}
-	return 30 * time.Minute
+	return core.NamespaceConfigDefaultAutoStopIdleTimeout
 }
 
 func extractJSONObject(output string) string {
