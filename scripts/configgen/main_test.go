@@ -364,6 +364,12 @@ func TestCheckMissingFreshAndStaleOutput(t *testing.T) {
 }
 
 // Part of ordinary go test ./...: no separate CI registration is required.
+func TestMachine0GeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_machine0.go", "../../internal/cli/config_machine0_generated.go", "Machine0Config", "machine0", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestVercelSandboxGeneratedConfigIsCurrent(t *testing.T) {
 	if err := run("../../internal/cli/config_vercel_sandbox.go", "../../internal/cli/config_vercel_sandbox_generated.go", "VercelSandboxConfig", "vercel-sandbox", true); err != nil {
 		t.Fatal(err)

@@ -5,7 +5,7 @@ Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
 runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, Semaphore,
 Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, OVHcloud, Lume, Runpod, Vast,
 W&B, Scaleway, Tencent Cloud, DigitalOcean, Vultr, Linode, Sealos DevBox, KubeVirt,
-Agent Sandbox, AWS Lambda MicroVM, Namespace Devbox, Namespace Instance, Coder, and Multipass
+Agent Sandbox, AWS Lambda MicroVM, Namespace Devbox, Namespace Instance, Coder, Multipass, and Machine0
 describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
@@ -29,7 +29,7 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_kubevirt.go`, `internal/cli/config_agentsandbox.go`, and
 `internal/cli/config_aws_lambda_microvm.go`, `internal/cli/config_namespace.go`, and
 `internal/cli/config_namespace_instance.go`, `internal/cli/config_coder.go`, and
-`internal/cli/config_multipass.go`.
+`internal/cli/config_multipass.go`, and `internal/cli/config_machine0.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -212,6 +212,24 @@ default function shares four configured fallbacks but keeps its existing
 predicates and inherited-root resolution; it does not reset CPU, memory or disk.
 Its lower `26.04` image fallback remains separate from portable OS selection.
 Native VM lifecycle, mounts and commands are unchanged.
+
+Machine0 uses the existing mechanisms for all eleven inputs, while SizeExplicit
+remains a runtime-only member in its original position. Its pointer-backed
+ImageVersion accepts explicit zero and negative file values; environment parsing
+is tolerant and flags keep signed integers, with validation at its existing later
+phase. Eight file strings stay raw and nonempty-only, and both raw duration
+strings retain their original DTO representation. CLI paths are not expanded.
+
+Both duration flags use the same raw-positive mode in their original order.
+Applied Size and WorkRoot facts preserve earlier explicit-size and generic
+server-type/root effects before either duration error is returned. An error in
+PollInterval retains an already applied CreateTimeout. File/env Size acceptance
+sets only the runtime explicitness bit, including values equal to the default;
+absent input preserves it. The selected-provider predicate and default callback
+remain unchanged. Backend defaults already read the core initializer, so no
+backend rewrite is needed. Empty WorkRoot remains the dynamic resolved-user
+sentinel. Live catalog selection, key lookup, and native lifecycle stay outside
+the generated bindings.
 
 ## Why generation
 
