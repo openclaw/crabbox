@@ -436,6 +436,32 @@ export class KoyebClient {
   }
 }
 
+function retryableManagementFailure(error: unknown): error is KoyebHTTPError {
+  return (
+    error instanceof KoyebHTTPError &&
+    (error.status === 0 ||
+      error.status === 408 ||
+      error.status === 425 ||
+      error.status === 429 ||
+      error.status >= 500)
+  );
+}
+
+function managementFailureCategory(error: KoyebHTTPError): string {
+  if (error.status === 0) return "transport_unavailable";
+  if (error.status === 408) return "request_timeout";
+  if (error.status === 425) return "service_not_ready";
+  if (error.status === 429) return "rate_limited";
+  return "server_unavailable";
+}
+
+function managementBlockedReason(error: unknown): string {
+  if (!(error instanceof KoyebHTTPError)) return "koyeb_management_response_invalid";
+  if (error.status === 401 || error.status === 403) return "koyeb_management_unauthorized";
+  if (error.status === 404) return "koyeb_management_route_missing";
+  return "koyeb_management_rejected";
+}
+
 export class KoyebResumableProvisioning implements ProviderResumableProvisioning {
   readonly version = 1 as const;
   private readonly client: KoyebClient;
@@ -648,43 +674,57 @@ export class KoyebResumableProvisioning implements ProviderResumableProvisioning
     ) {
       return { ...output("blocked"), blockedReason: "bootstrap_identity_unavailable" };
     }
-    await this.client.managementHealth(
-      management.baseURL,
-      management.routingKey,
-      input.material.providerSecret,
-    );
-    await this.client.managementWriteFile(
-      management.baseURL,
-      management.routingKey,
-      input.material.providerSecret,
-      publicKeyPath,
-      plan.sshPublicKey,
-    );
-    const bootstrapEnvironment: Record<string, string> = {
-      CRABBOX_KOYEB_LEASE_ID: plan.runnerLeaseID,
-      CRABBOX_KOYEB_SSH_PUBLIC_KEY_FILE: publicKeyPath,
-      ...(plan.transport === "tailscale"
-        ? {
-            CRABBOX_KOYEB_TAILSCALE_AUTH_KEY: input.material.bootstrap,
-            CRABBOX_KOYEB_TAILSCALE_HOSTNAME: plan.tailscaleHostname,
-            CRABBOX_KOYEB_TAILSCALE_TAGS: plan.tailscaleTags.join(","),
-          }
-        : {
-            CRABBOX_KOYEB_NETWORK: "koyeb-mesh",
-            CRABBOX_KOYEB_PRIVATE_HOST: plan.privateHost!,
-          }),
-    };
-    const run = await this.client.managementRun(
-      management.baseURL,
-      management.routingKey,
-      input.material.providerSecret,
-      {
-        cmd: bootstrapCommand,
-        cwd: workRoot,
-        env: bootstrapEnvironment,
-      },
-      plan.transport === "tailscale" ? [input.material.bootstrap] : [],
-    );
+    let run: { stdout: string; stderr: string; code: number };
+    try {
+      await this.client.managementHealth(
+        management.baseURL,
+        management.routingKey,
+        input.material.providerSecret,
+      );
+      await this.client.managementWriteFile(
+        management.baseURL,
+        management.routingKey,
+        input.material.providerSecret,
+        publicKeyPath,
+        plan.sshPublicKey,
+      );
+      const bootstrapEnvironment: Record<string, string> = {
+        CRABBOX_KOYEB_LEASE_ID: plan.runnerLeaseID,
+        CRABBOX_KOYEB_SSH_PUBLIC_KEY_FILE: publicKeyPath,
+        ...(plan.transport === "tailscale"
+          ? {
+              CRABBOX_KOYEB_TAILSCALE_AUTH_KEY: input.material.bootstrap,
+              CRABBOX_KOYEB_TAILSCALE_HOSTNAME: plan.tailscaleHostname,
+              CRABBOX_KOYEB_TAILSCALE_TAGS: plan.tailscaleTags.join(","),
+            }
+          : {
+              CRABBOX_KOYEB_NETWORK: "koyeb-mesh",
+              CRABBOX_KOYEB_PRIVATE_HOST: plan.privateHost!,
+            }),
+      };
+      run = await this.client.managementRun(
+        management.baseURL,
+        management.routingKey,
+        input.material.providerSecret,
+        {
+          cmd: bootstrapCommand,
+          cwd: workRoot,
+          env: bootstrapEnvironment,
+        },
+        plan.transport === "tailscale" ? [input.material.bootstrap] : [],
+      );
+    } catch (error) {
+      if (retryableManagementFailure(error)) {
+        console.warn("koyeb sandbox bootstrap deferred", {
+          phase: "bootstrap",
+          category: managementFailureCategory(error),
+        });
+        return output("provisioning");
+      }
+      const blockedReason = managementBlockedReason(error);
+      console.error("koyeb sandbox bootstrap blocked", { phase: "bootstrap", blockedReason });
+      return { ...output("blocked"), blockedReason };
+    }
     if (run.code !== 0) {
       return { ...output("blocked"), blockedReason: "runner_bootstrap_failed" };
     }
@@ -693,12 +733,25 @@ export class KoyebResumableProvisioning implements ProviderResumableProvisioning
       return { ...output("blocked"), blockedReason: "runner_readiness_invalid" };
     }
     if (plan.transport === "koyeb-mesh") {
-      await this.client.managementBindPort(
-        management.baseURL,
-        management.routingKey,
-        input.material.providerSecret,
-        "22",
-      );
+      try {
+        await this.client.managementBindPort(
+          management.baseURL,
+          management.routingKey,
+          input.material.providerSecret,
+          "22",
+        );
+      } catch (error) {
+        if (retryableManagementFailure(error)) {
+          console.warn("koyeb sandbox bootstrap deferred", {
+            phase: "bind-port",
+            category: managementFailureCategory(error),
+          });
+          return output("provisioning");
+        }
+        const blockedReason = managementBlockedReason(error);
+        console.error("koyeb sandbox bootstrap blocked", { phase: "bind-port", blockedReason });
+        return { ...output("blocked"), blockedReason };
+      }
     }
     const tailscale: TailscaleMetadata | undefined =
       plan.transport === "tailscale"
@@ -1666,7 +1719,10 @@ function managementBaseURL(value: string, publicEdge: boolean): string {
   if ((!validPublic && !validPrivate) || url.username || url.password || url.search || url.hash) {
     throw new Error("koyeb sandbox management URL is malformed");
   }
-  url.pathname = `${url.pathname.replace(/\/+$/, "")}${managementRoute}`;
+  // The public Sandbox endpoint is mounted below /koyeb-sandbox. A private
+  // mesh address reaches port 3030 directly, where the API is rooted at /
+  // (/health, /run, and the other operation paths).
+  if (publicEdge) url.pathname = `${url.pathname.replace(/\/+$/, "")}${managementRoute}`;
   return url.toString().replace(/\/+$/, "");
 }
 

@@ -904,13 +904,13 @@ describe("Koyeb Sandbox coordinator adapter", () => {
         }
       }
       managementRequests.push(incoming);
-      if (incoming.method === "GET" && url.pathname === "/koyeb-sandbox/health") {
+      if (incoming.method === "GET" && url.pathname === "/health") {
         return Response.json({ ok: true });
       }
-      if (incoming.method === "POST" && url.pathname === "/koyeb-sandbox/write_file") {
+      if (incoming.method === "POST" && url.pathname === "/write_file") {
         return Response.json({ ok: true });
       }
-      if (incoming.method === "POST" && url.pathname === "/koyeb-sandbox/run") {
+      if (incoming.method === "POST" && url.pathname === "/run") {
         return Response.json({
           stdout: JSON.stringify({
             schema: "crabbox-koyeb-sandbox-runner/v2",
@@ -929,7 +929,7 @@ describe("Koyeb Sandbox coordinator adapter", () => {
           code: 0,
         });
       }
-      if (incoming.method === "POST" && url.pathname === "/koyeb-sandbox/bind_port") {
+      if (incoming.method === "POST" && url.pathname === "/bind_port") {
         return Response.json({ success: true, message: "Port binding configured", port: "22" });
       }
       throw new Error(`unexpected request ${incoming.method} ${incoming.url}`);
@@ -970,10 +970,10 @@ describe("Koyeb Sandbox coordinator adapter", () => {
         new URL(request.url).pathname,
       ]),
     ).toEqual([
-      [`http://${privateHost}:3030`, "/koyeb-sandbox/health"],
-      [`http://${privateHost}:3030`, "/koyeb-sandbox/write_file"],
-      [`http://${privateHost}:3030`, "/koyeb-sandbox/run"],
-      [`http://${privateHost}:3030`, "/koyeb-sandbox/bind_port"],
+      [`http://${privateHost}:3030`, "/health"],
+      [`http://${privateHost}:3030`, "/write_file"],
+      [`http://${privateHost}:3030`, "/run"],
+      [`http://${privateHost}:3030`, "/bind_port"],
     ]);
     for (const request of managementRequests) {
       expect(request.headers.get("authorization")).toBe(`Bearer ${material.providerSecret}`);
@@ -993,6 +993,75 @@ describe("Koyeb Sandbox coordinator adapter", () => {
     expect(JSON.stringify(run)).not.toContain("TAILSCALE");
     await expect(managementRequests[3]!.json()).resolves.toEqual({ port: "22" });
     expect(JSON.stringify(published)).not.toContain(material.providerSecret);
+  });
+
+  it("retries bootstrap while the private Sandbox endpoint is becoming reachable", async () => {
+    const providerSecret = "v".repeat(32);
+    const managementPaths: string[] = [];
+    let failFirstHealth = true;
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const capability = new KoyebResumableProvisioning(baseEnv, async (request) => {
+      const incoming = request instanceof Request ? request.clone() : new Request(request);
+      const url = new URL(incoming.url);
+      if (url.origin === "https://koyeb.example") {
+        if (url.pathname === `/v1/services/${serviceID}`) {
+          return Response.json({ service: service() });
+        }
+        if (url.pathname === `/v1/deployments/${deploymentID}`) {
+          return Response.json({ deployment: meshDeployment(providerSecret) });
+        }
+      }
+      managementPaths.push(url.pathname);
+      if (incoming.method === "GET" && url.pathname === "/health") {
+        if (failFirstHealth) {
+          failFirstHealth = false;
+          throw new Error(`getaddrinfo ENOTFOUND ${url.hostname} ${providerSecret}`);
+        }
+        return Response.json({ ok: true });
+      }
+      if (incoming.method === "POST" && url.pathname === "/write_file") {
+        return Response.json({ ok: true });
+      }
+      if (incoming.method === "POST" && url.pathname === "/run") {
+        return Response.json({
+          stdout: JSON.stringify({
+            schema: "crabbox-koyeb-sandbox-runner/v2",
+            leaseId: serviceName,
+            ssh: { user: "crabbox", host: privateHost, port: 22, hostKey: sshHostKey },
+            network: { transport: "koyeb-mesh", privateHost },
+          }),
+          stderr: "",
+          code: 0,
+        });
+      }
+      if (incoming.method === "POST" && url.pathname === "/bind_port") {
+        return Response.json({ success: true, message: "Port binding configured", port: "22" });
+      }
+      throw new Error(`unexpected request ${incoming.method} ${incoming.url}`);
+    });
+    const prepared = await capability.prepare(meshConfig(), lease());
+    prepared.material.providerSecret = providerSecret;
+    const bootstrapStep: ProvisioningStep = {
+      ...prepared.step,
+      phase: "provisioning",
+      state: { version: 1, action: "bootstrap", serviceID, deploymentID },
+    };
+
+    const deferred = await capability.advance(advanceInput(prepared, bootstrapStep, true));
+    expect(deferred).toMatchObject({
+      phase: "provisioning",
+      state: { action: "bootstrap", serviceID, deploymentID },
+    });
+    expect(warning).toHaveBeenCalledWith("koyeb sandbox bootstrap deferred", {
+      phase: "bootstrap",
+      category: "transport_unavailable",
+    });
+    expect(JSON.stringify(warning.mock.calls)).not.toContain(providerSecret);
+
+    const published = await capability.advance(advanceInput(prepared, deferred, true));
+    expect(published).toMatchObject({ phase: "ready-to-publish" });
+    expect(managementPaths).toEqual(["/health", "/health", "/write_file", "/run", "/bind_port"]);
+    warning.mockRestore();
   });
 
   it("treats only an exact existing Sandbox TCP proxy binding as idempotent", async () => {
