@@ -364,6 +364,12 @@ func TestCheckMissingFreshAndStaleOutput(t *testing.T) {
 }
 
 // Part of ordinary go test ./...: no separate CI registration is required.
+func TestMachine0GeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_machine0.go", "../../internal/cli/config_machine0_generated.go", "Machine0Config", "machine0", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestVercelSandboxGeneratedConfigIsCurrent(t *testing.T) {
 	if err := run("../../internal/cli/config_vercel_sandbox.go", "../../internal/cli/config_vercel_sandbox_generated.go", "VercelSandboxConfig", "vercel-sandbox", true); err != nil {
 		t.Fatal(err)
@@ -924,7 +930,7 @@ func TestGenerateDurationBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	helpers := ""
+	helpers := applyLeaseDurationFixtureSource(t)
 	for _, name := range []string{"applyLeaseDuration", "getenvNonNegativeInt", "getenvBool"} {
 		start := strings.Index(string(coreSource), "func "+name+"(")
 		if start < 0 {
@@ -3220,19 +3226,7 @@ func testGenerateRawDurationFlags(t *testing.T, mode string) {
 		}
 		typecheckGenerated(t, source+"\nfunc ApplyLeaseDuration(*time.Duration, string) error { panic(\"stub\") }\n", output)
 	}
-	coreSource, err := os.ReadFile("../../internal/cli/provider_exports.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	start := strings.Index(string(coreSource), "func ApplyLeaseDuration(")
-	if start < 0 {
-		t.Fatal("missing core ApplyLeaseDuration")
-	}
-	rest := string(coreSource)[start:]
-	end := strings.Index(rest, "\nfunc ")
-	if end < 0 {
-		t.Fatal("missing end of core ApplyLeaseDuration")
-	}
+	helper := applyLeaseDurationFixtureSource(t)
 	const behavior = `package cli
 import("flag";"fmt";"testing";"time")
 func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
@@ -3273,7 +3267,7 @@ func TestRawDurationContractAndOrder(t *testing.T){
 	if mode == "raw-zero-reset" {
 		resetZero = "true"
 	}
-	runScalarFixture(t, tracked, trackedOutput, behavior+"\nconst resetZero = "+resetZero+"\n"+rest[:end])
+	runScalarFixture(t, tracked, trackedOutput, behavior+"\nconst resetZero = "+resetZero+"\n"+helper)
 	const untrackedBehavior = `package cli
 import("flag";"fmt";"testing";"time")
 func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
@@ -3290,5 +3284,23 @@ func TestUntrackedPartialOrder(t *testing.T){
  if err:=values.Apply(&cfg,fs);err!=nil||cfg.Timeout!=17*time.Second||cfg.Second!=3*time.Second||cfg.After!="later"{t.Fatalf("empty raw input: %+v %v",cfg,err)}
 }
 `
-	runScalarFixture(t, untracked, untrackedOutput, untrackedBehavior+rest[:end])
+	runScalarFixture(t, untracked, untrackedOutput, untrackedBehavior+helper)
+}
+
+func applyLeaseDurationFixtureSource(t *testing.T) string {
+	t.Helper()
+	source, err := os.ReadFile("../../internal/cli/provider_exports.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(source), "func ApplyLeaseDuration(")
+	if start < 0 {
+		t.Fatal("missing core ApplyLeaseDuration")
+	}
+	rest := string(source)[start:]
+	end := strings.Index(rest, "\nfunc ")
+	if end < 0 {
+		t.Fatal("missing end of core ApplyLeaseDuration")
+	}
+	return rest[:end] + "\n"
 }

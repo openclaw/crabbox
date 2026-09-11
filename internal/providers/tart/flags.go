@@ -81,7 +81,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		if err := validateTartEnvInt("CRABBOX_TART_MEMORY", 4096, "tart memory must be at least 4096 MB"); err != nil {
 			return err
 		}
-		if err := validateTartEnvIntNonNegative("CRABBOX_TART_DISK", "tart disk size must be non-negative"); err != nil {
+		if err := validateTartEnvInt("CRABBOX_TART_DISK", 0, "tart disk size must be non-negative"); err != nil {
 			return err
 		}
 		applyDefaults(cfg)
@@ -100,21 +100,6 @@ func validateTartEnvInt(name string, floor int, floorMsg string) error {
 	}
 	if n < floor {
 		return exit(2, "%s (got %d)", floorMsg, n)
-	}
-	return nil
-}
-
-func validateTartEnvIntNonNegative(name string, msg string) error {
-	v := os.Getenv(name)
-	if v == "" {
-		return nil
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return exit(2, "%s must be a valid integer (got %q)", name, v)
-	}
-	if n < 0 {
-		return exit(2, "%s (got %d)", msg, n)
 	}
 	return nil
 }

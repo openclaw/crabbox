@@ -855,21 +855,6 @@ type MXCConfig struct {
 	Experimental      bool
 }
 
-type Machine0Config struct {
-	CLIPath       string
-	Image         string
-	ImageVersion  int
-	DesktopImage  string
-	Size          string
-	SizeExplicit  bool
-	Region        string
-	Key           string
-	WorkRoot      string
-	ReleasePolicy string
-	CreateTimeout time.Duration
-	PollInterval  time.Duration
-}
-
 // DefaultTartImage is the immutable built-in image; the Tart adapter verifies its contents.
 const DefaultTartImage = "ghcr.io/cirruslabs/macos-sequoia-base@sha256:785c3acb40fa5af6dd5aab96cd60408372c26125e173c14ea417498d086f829c"
 
@@ -2492,15 +2477,7 @@ func baseConfig() Config {
 			Network:     "block",
 		},
 		Multipass: initialMultipassConfig(multipassImage),
-		Machine0: Machine0Config{
-			CLIPath:       "machine0",
-			Image:         "ubuntu-24-04-loaded",
-			Size:          "large",
-			Region:        "eu",
-			ReleasePolicy: "destroy",
-			CreateTimeout: 15 * time.Minute,
-			PollInterval:  60 * time.Second,
-		},
+		Machine0:  defaultMachine0Config(),
 		Tart: TartConfig{
 			Image:    DefaultTartImage,
 			User:     "admin",
@@ -3277,20 +3254,6 @@ type fileMXCConfig struct {
 	AllowDACLMutation *bool    `yaml:"allowDaclMutation,omitempty"`
 	AllowWindowsUI    *bool    `yaml:"allowWindowsUI,omitempty"`
 	Experimental      *bool    `yaml:"experimental,omitempty"`
-}
-
-type fileMachine0Config struct {
-	CLIPath       string `yaml:"cliPath,omitempty"`
-	Image         string `yaml:"image,omitempty"`
-	ImageVersion  *int   `yaml:"imageVersion,omitempty"`
-	DesktopImage  string `yaml:"desktopImage,omitempty"`
-	Size          string `yaml:"size,omitempty"`
-	Region        string `yaml:"region,omitempty"`
-	Key           string `yaml:"key,omitempty"`
-	WorkRoot      string `yaml:"workRoot,omitempty"`
-	ReleasePolicy string `yaml:"releasePolicy,omitempty"`
-	CreateTimeout string `yaml:"createTimeout,omitempty"`
-	PollInterval  string `yaml:"pollInterval,omitempty"`
 }
 
 type fileTartConfig struct {
@@ -5328,38 +5291,13 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.Machine0 != nil {
-		if file.Machine0.CLIPath != "" {
-			cfg.Machine0.CLIPath = file.Machine0.CLIPath
-		}
-		if file.Machine0.Image != "" {
-			cfg.Machine0.Image = file.Machine0.Image
-		}
-		applyOptional(&cfg.Machine0.ImageVersion, file.Machine0.ImageVersion)
-		if file.Machine0.DesktopImage != "" {
-			cfg.Machine0.DesktopImage = file.Machine0.DesktopImage
-		}
-		if file.Machine0.Size != "" {
-			cfg.Machine0.Size = file.Machine0.Size
+	{
+		applied, err := cfg.Machine0.applyFile(file.Machine0)
+		if applied.Size {
 			cfg.Machine0.SizeExplicit = true
 		}
-		if file.Machine0.Region != "" {
-			cfg.Machine0.Region = file.Machine0.Region
-		}
-		if file.Machine0.Key != "" {
-			cfg.Machine0.Key = file.Machine0.Key
-		}
-		if file.Machine0.WorkRoot != "" {
-			cfg.Machine0.WorkRoot = file.Machine0.WorkRoot
-		}
-		if file.Machine0.ReleasePolicy != "" {
-			cfg.Machine0.ReleasePolicy = file.Machine0.ReleasePolicy
-		}
-		if file.Machine0.CreateTimeout != "" {
-			applyLeaseDuration(&cfg.Machine0.CreateTimeout, file.Machine0.CreateTimeout)
-		}
-		if file.Machine0.PollInterval != "" {
-			applyLeaseDuration(&cfg.Machine0.PollInterval, file.Machine0.PollInterval)
+		if err != nil {
+			return err
 		}
 	}
 	if file.Tart != nil {
@@ -5794,12 +5732,8 @@ func applyFileJobConfig(job JobConfig, file fileJobConfig) JobConfig {
 }
 
 func applyLeaseDuration(target *time.Duration, value string) {
-	if value == "" {
-		return
-	}
-	if parsed, err := time.ParseDuration(value); err == nil && parsed > 0 {
-		*target = parsed
-	}
+	// File and environment overlays intentionally ignore invalid durations.
+	_ = ApplyLeaseDuration(target, value)
 }
 
 func applyNonNegativeLeaseDuration(target *time.Duration, value string) bool {
@@ -6907,23 +6841,14 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	cfg.Machine0.CLIPath = getenv("CRABBOX_MACHINE0_CLI", cfg.Machine0.CLIPath)
-	cfg.Machine0.Image = getenv("CRABBOX_MACHINE0_IMAGE", cfg.Machine0.Image)
-	cfg.Machine0.ImageVersion = getenvInt("CRABBOX_MACHINE0_IMAGE_VERSION", cfg.Machine0.ImageVersion)
-	cfg.Machine0.DesktopImage = getenv("CRABBOX_MACHINE0_DESKTOP_IMAGE", cfg.Machine0.DesktopImage)
-	if size := os.Getenv("CRABBOX_MACHINE0_SIZE"); size != "" {
-		cfg.Machine0.Size = size
-		cfg.Machine0.SizeExplicit = true
-	}
-	cfg.Machine0.Region = getenv("CRABBOX_MACHINE0_REGION", cfg.Machine0.Region)
-	cfg.Machine0.Key = getenv("CRABBOX_MACHINE0_KEY", cfg.Machine0.Key)
-	cfg.Machine0.WorkRoot = getenv("CRABBOX_MACHINE0_WORK_ROOT", cfg.Machine0.WorkRoot)
-	cfg.Machine0.ReleasePolicy = getenv("CRABBOX_MACHINE0_RELEASE_POLICY", cfg.Machine0.ReleasePolicy)
-	if timeout := os.Getenv("CRABBOX_MACHINE0_CREATE_TIMEOUT"); timeout != "" {
-		applyLeaseDuration(&cfg.Machine0.CreateTimeout, timeout)
-	}
-	if interval := os.Getenv("CRABBOX_MACHINE0_POLL_INTERVAL"); interval != "" {
-		applyLeaseDuration(&cfg.Machine0.PollInterval, interval)
+	{
+		applied, err := cfg.Machine0.applyEnv()
+		if applied.Size {
+			cfg.Machine0.SizeExplicit = true
+		}
+		if err != nil {
+			return err
+		}
 	}
 	if image := os.Getenv("CRABBOX_TART_IMAGE"); image != "" {
 		cfg.Tart.Image = image

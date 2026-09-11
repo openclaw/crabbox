@@ -5255,6 +5255,107 @@ func TestMultipassConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestMachine0OrdinarySourceMetadata(t *testing.T) {
+	clearConfigEnv(t)
+	wantDefault := Machine0Config{CLIPath: "machine0", Image: "ubuntu-24-04-loaded", Size: "large", Region: "eu", ReleasePolicy: "destroy", CreateTimeout: 15 * time.Minute, PollInterval: time.Minute}
+	if got := baseConfig().Machine0; got != wantDefault {
+		t.Fatalf("defaults=%#v want %#v", got, wantDefault)
+	}
+	for _, source := range []string{"file", "env"} {
+		for _, marked := range []bool{false, true} {
+			for _, tc := range []struct {
+				text, version, duration string
+				wantVersion             int
+				wantDuration            time.Duration
+			}{{"", "", "", 5, time.Minute}, {"large", "0", "0s", 0, time.Minute}, {"~/literal", "-2", " 2m ", -2, time.Minute}, {" ", "bad", "invalid", 5, time.Minute}, {"large", "3", "2m", 3, 2 * time.Minute}} {
+				t.Run(source+"/"+tc.text+"/"+tc.version+"/"+strconv.FormatBool(marked), func(t *testing.T) {
+					clearConfigEnv(t)
+					cfg := baseConfig()
+					cfg.Machine0 = Machine0Config{CLIPath: "prior", Image: "prior", ImageVersion: 5, DesktopImage: "prior", Size: "large", SizeExplicit: marked, Region: "prior", Key: "prior", WorkRoot: "prior", ReleasePolicy: "prior", CreateTimeout: time.Minute, PollInterval: time.Minute}
+					genericRoot, genericSize := cfg.WorkRoot, cfg.ServerType
+					if source == "file" {
+						var version *int
+						if tc.version != "" && tc.version != "bad" {
+							value, err := strconv.Atoi(tc.version)
+							if err != nil {
+								t.Fatal(err)
+							}
+							version = &value
+						}
+						if err := applyFileConfig(&cfg, fileConfig{Machine0: &fileMachine0Config{CLIPath: tc.text, Image: tc.text, ImageVersion: version, DesktopImage: tc.text, Size: tc.text, Region: tc.text, Key: tc.text, WorkRoot: tc.text, ReleasePolicy: tc.text, CreateTimeout: tc.duration, PollInterval: tc.duration}}); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						for key, value := range map[string]string{"CLI": tc.text, "IMAGE": tc.text, "IMAGE_VERSION": tc.version, "DESKTOP_IMAGE": tc.text, "SIZE": tc.text, "REGION": tc.text, "KEY": tc.text, "WORK_ROOT": tc.text, "RELEASE_POLICY": tc.text, "CREATE_TIMEOUT": tc.duration, "POLL_INTERVAL": tc.duration} {
+							t.Setenv("CRABBOX_MACHINE0_"+key, value)
+						}
+						if err := applyEnv(&cfg); err != nil {
+							t.Fatal(err)
+						}
+					}
+					text := tc.text
+					if text == "" {
+						text = "prior"
+					}
+					size := tc.text
+					if size == "" {
+						size = "large"
+					}
+					want := Machine0Config{CLIPath: text, Image: text, ImageVersion: tc.wantVersion, DesktopImage: text, Size: size, SizeExplicit: marked || tc.text != "", Region: text, Key: text, WorkRoot: text, ReleasePolicy: text, CreateTimeout: tc.wantDuration, PollInterval: tc.wantDuration}
+					if cfg.Machine0 != want || cfg.WorkRoot != genericRoot || cfg.ServerType != genericSize || cfg.ServerTypeExplicit {
+						t.Fatalf("source=%#v want %#v", cfg.Machine0, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestMachine0OrdinaryWriterMetadata(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{{"machine0: null", "{}"}, {"machine0: {}", "machine0: {}"}, {"machine0: {cliPath: '', image: '', imageVersion: null, desktopImage: '', size: '', region: '', key: '', workRoot: '', releasePolicy: '', createTimeout: '', pollInterval: ''}", "machine0: {}"}, {"machine0: {imageVersion: 0, createTimeout: 0s, pollInterval: 0s}", "machine0: {imageVersion: 0, createTimeout: 0s, pollInterval: 0s}"}, {"machine0: {cliPath: '~/literal', image: image-example, imageVersion: -2, desktopImage: desktop-example, size: large, region: eu, key: name-example, workRoot: '~/guest', releasePolicy: suspend, createTimeout: 2m, pollInterval: 3s}", "machine0: {cliPath: '~/literal', image: image-example, imageVersion: -2, desktopImage: desktop-example, size: large, region: eu, key: name-example, workRoot: '~/guest', releasePolicy: suspend, createTimeout: 2m, pollInterval: 3s}"}} {
+		path := isolatedConfigPath(t)
+		if err := os.WriteFile(path, []byte(tc.input), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := yaml.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := baseConfig()
+		if err := applyFileConfig(&cfg, file); err != nil {
+			t.Fatal(err)
+		}
+		after, err := yaml.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Fatal("overlay changed DTO input")
+		}
+		if _, err := writeUserFileConfig(file); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got, want map[string]any
+		if err := yaml.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		if err := yaml.Unmarshal([]byte(tc.want), &want); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("writer=%#v want %#v", got, want)
+		}
+	}
+}
+
 func TestMachine0ConfigDefaultsFileAndEnvPrecedence(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
@@ -10671,6 +10772,41 @@ func TestRepoConfigIsYamlOnly(t *testing.T) {
 	}
 	if cfg.Profile != "yaml-profile" || cfg.Provider != "aws" {
 		t.Fatalf("unexpected config: profile=%s provider=%s", cfg.Profile, cfg.Provider)
+	}
+}
+
+func TestLeaseDurationErrorPolicies(t *testing.T) {
+	const prior = 17 * time.Second
+	for _, tc := range []struct {
+		raw  string
+		want time.Duration
+		bad  bool
+	}{
+		{"", prior, false}, {" ", prior, true}, {"invalid", prior, true},
+		{"0", prior, true}, {"0s", prior, true}, {"-1ns", prior, true},
+		{" 2m ", prior, true}, {"999999999999999999h", prior, true},
+		{"2m", 2 * time.Minute, false}, {"125ms", 125 * time.Millisecond, false},
+		{"+1s", time.Second, false},
+	} {
+		t.Run(fmt.Sprintf("%q", tc.raw), func(t *testing.T) {
+			strict, tolerant := prior, prior
+			err := ApplyLeaseDuration(&strict, tc.raw)
+			applyLeaseDuration(&tolerant, tc.raw)
+			if strict != tc.want || tolerant != tc.want {
+				t.Fatalf("strict=%s tolerant=%s want=%s", strict, tolerant, tc.want)
+			}
+			if tc.bad {
+				if err == nil || err.Error() != fmt.Sprintf("invalid duration %q", tc.raw) {
+					t.Fatalf("error=%v", err)
+				}
+				var exitErr ExitError
+				if AsExitError(err, &exitErr) {
+					t.Fatalf("ordinary duration error changed to ExitError: %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
