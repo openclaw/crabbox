@@ -30,8 +30,7 @@ type daytonaFlagValues struct {
 }
 
 func RegisterDaytonaProviderFlags(fs *flag.FlagSet, defaults Config) any {
-	return daytonaFlagValues{
-		ForgetMissing:    fs.Bool("daytona-forget-missing", false, "remove only the local ordinary Daytona claim after a structured missing-sandbox response"),
+	values := daytonaFlagValues{
 		APIURL:           fs.String("daytona-api-url", defaults.Daytona.APIURL, "Daytona API URL"),
 		Snapshot:         fs.String("daytona-snapshot", defaults.Daytona.Snapshot, "Daytona snapshot name"),
 		Target:           fs.String("daytona-target", defaults.Daytona.Target, "Daytona compute target"),
@@ -40,6 +39,10 @@ func RegisterDaytonaProviderFlags(fs *flag.FlagSet, defaults Config) any {
 		SSHGatewayHost:   fs.String("daytona-ssh-gateway-host", defaults.Daytona.SSHGatewayHost, "Daytona SSH gateway host"),
 		SSHAccessMinutes: fs.Int("daytona-ssh-access-minutes", defaults.Daytona.SSHAccessMinutes, "Daytona SSH access token TTL in minutes"),
 	}
+	if fs.Name() == "stop" {
+		values.ForgetMissing = fs.Bool("daytona-forget-missing", false, "remove only the local ordinary Daytona claim after a structured missing-sandbox response")
+	}
+	return values
 }
 
 func ApplyDaytonaProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
@@ -53,9 +56,6 @@ func ApplyDaytonaProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error 
 		return nil
 	}
 	if core.FlagWasSet(fs, "daytona-forget-missing") {
-		if fs.Name() != "stop" {
-			return exit(2, "--daytona-forget-missing is only supported by stop")
-		}
 		if *v.ForgetMissing && cfg.Provider != daytonaProvider {
 			return exit(2, "--daytona-forget-missing requires direct provider=daytona")
 		}

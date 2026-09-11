@@ -131,6 +131,12 @@ func TestDaytonaForgetMissingRejectsOtherCommandsAndProviders(t *testing.T) {
 			cfg.Provider = tc.provider
 			fs := flag.NewFlagSet(tc.command, flag.ContinueOnError)
 			values := RegisterDaytonaProviderFlags(fs, cfg)
+			if tc.command != "stop" {
+				if fs.Lookup("daytona-forget-missing") != nil {
+					t.Fatal("stop-only recovery flag was registered on another command")
+				}
+				return
+			}
 			if err := fs.Parse([]string{"--daytona-forget-missing"}); err != nil {
 				t.Fatal(err)
 			}
