@@ -39,6 +39,9 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	return ApplyDaytonaProviderFlags(cfg, fs, values)
 }
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
+	if cfg.Daytona.ForgetMissing && core.ShouldUseCoordinator(cfg, p.Spec()) {
+		return nil, core.Exit(2, "--daytona-forget-missing requires direct provider=daytona; brokered leases require normal stop")
+	}
 	return NewDaytonaLeaseBackend(p.Spec(), cfg, rt), nil
 }
 

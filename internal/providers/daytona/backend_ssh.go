@@ -56,6 +56,9 @@ func ApplyDaytonaProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error 
 		if fs.Name() != "stop" {
 			return exit(2, "--daytona-forget-missing is only supported by stop")
 		}
+		if *v.ForgetMissing && cfg.Provider != daytonaProvider {
+			return exit(2, "--daytona-forget-missing requires direct provider=daytona")
+		}
 		cfg.Daytona.ForgetMissing = *v.ForgetMissing
 		core.RecordProviderFlagInputs(cfg, true, "daytona")
 	}

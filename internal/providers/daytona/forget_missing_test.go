@@ -2,6 +2,7 @@ package daytona
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -94,6 +95,47 @@ func TestDaytonaForgetMissing(t *testing.T) {
 			}
 			if requests.Load() != 1 || strings.Contains(stdout.String()+stderr.String(), "released") {
 				t.Errorf("requests=%d output=%q", requests.Load(), stdout.String()+stderr.String())
+			}
+		})
+	}
+}
+
+func TestDaytonaForgetMissingRejectsBrokeredStop(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	t.Chdir(t.TempDir())
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	for _, name := range []string{"CRABBOX_COORDINATOR", "CRABBOX_COORDINATOR_MODE", "CRABBOX_COORDINATOR_TOKEN_COMMAND", "CRABBOX_POND", "CRABBOX_TAILSCALE"} {
+		t.Setenv(name, "")
+	}
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("provider: daytona\ntarget: linux\ncoordinator: "+srv.URL+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	var stdout, stderr bytes.Buffer
+	err := (core.App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), []string{"stop", "--provider", "daytona", "--daytona-forget-missing", "cbx_123456abcdef"})
+	if err == nil || !strings.Contains(err.Error(), "requires direct provider=daytona") || requests.Load() != 0 {
+		t.Fatalf("brokered local cleanup was not rejected before requests: err=%v requests=%d", err, requests.Load())
+	}
+}
+
+func TestDaytonaForgetMissingRejectsOtherCommandsAndProviders(t *testing.T) {
+	for _, tc := range []struct{ command, provider string }{{"run", "daytona"}, {"stop", "other-provider"}} {
+		t.Run(tc.command+"/"+tc.provider, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = tc.provider
+			fs := flag.NewFlagSet(tc.command, flag.ContinueOnError)
+			values := RegisterDaytonaProviderFlags(fs, cfg)
+			if err := fs.Parse([]string{"--daytona-forget-missing"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := ApplyDaytonaProviderFlags(&cfg, fs, values); err == nil || cfg.Daytona.ForgetMissing {
+				t.Fatalf("incompatible flag accepted: err=%v enabled=%t", err, cfg.Daytona.ForgetMissing)
 			}
 		})
 	}

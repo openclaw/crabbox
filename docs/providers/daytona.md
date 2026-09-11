@@ -214,6 +214,7 @@ registrations that require normal release reconciliation. It never
 sends DELETE or reports remote release: a 404 can also mean the current credentials
 cannot access the original account, so any remaining sandbox may still be billed.
 The flag is command-only and cannot be enabled in a profile or environment variable.
+Brokered mode and other providers reject the flag before contacting the service.
 Fixed claims cannot be forgotten; use ordinary `stop` to reconcile them and retain
 their terminal replay protection as described below.
 
