@@ -39,7 +39,7 @@ const shared = new Proxy({}, {
 const hasPowerShell = spawnSync("pwsh", ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"], { encoding: "utf8" }).status === 0;
 const nameFor = (name) => "shared" + name[0].toUpperCase() + name.slice(1);
 function parameters(fixture) {
-  return { ...fixture, version: sources.constants.defaultTailscaleVersion, amd64SHA: sources.constants.defaultTailscaleAMD64SHA256, arm64SHA: sources.constants.defaultTailscaleARM64SHA256 };
+  return { cssStyle: "coordinator", ...fixture, version: sources.constants.defaultTailscaleVersion, amd64SHA: sources.constants.defaultTailscaleAMD64SHA256, arm64SHA: sources.constants.defaultTailscaleARM64SHA256 };
 }
 function render(fragment, fixture) {
   const values = parameters(fixture);

@@ -169,6 +169,17 @@ the installation path, and installation failures remain failures. Bootstrap
 always configures the requested services and runs the complete readiness check;
 reusing an image does not implicitly update its working browser.
 
+XFCE owns its panel, window manager, and desktop renderer. Its session autostart
+launches the visible Crabbox terminal; a separate system service does not start
+or replace desktop components. Theme changes use the matching user's XFCE
+session bus, so an SSH connection cannot create a second settings daemon. New
+bootstrap runs retire the former independent `crabbox-desktop-session.service`
+helper and keep its name as a systemd alias of `crabbox-desktop.service`.
+Released CLI versions 0.55 and 0.56 still request that name during WebVNC reset;
+retain the alias until supported clients use the canonical unit name. The alias
+shares the same service and processes, so it does not start another helper.
+Recreate older leases or rebake their images to receive the startup repair.
+
 Crabbox owns these machine capabilities; scenario systems still own browser
 automation and proof artifacts. For slow QA lanes, bake these capabilities into
 a provider image while keeping secrets, browser profiles, repository checkouts,
