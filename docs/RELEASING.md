@@ -107,6 +107,13 @@ commit. That gate constructs a complete read-only local module proxy from the
 exact commit and verifies a cold, version-suffixed `go install` outside the
 checkout. It must pass before candidate production begins.
 
+The online dependency-seeding phase retries once, after five seconds, only for
+the recognized checksum-database tile HTTP/2 `INTERNAL_ERROR` diagnostic.
+Both attempts use the same source, isolated cache and enabled checksum
+verification. Checksum mismatches, mixed or unknown errors, and interruptions
+remain immediately fatal. Original diagnostics remain visible after recovery;
+the read-only proxy, offline install and binary checks are not retried.
+
 Run the credential-free producer first and capture its printed manifest digest:
 
 ```sh

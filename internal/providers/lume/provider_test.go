@@ -121,6 +121,54 @@ func must(t *testing.T, err error) {
 	}
 }
 
+func TestConfigShowIncludesLume(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Lume.CLIPath = "/opt/homebrew/bin/lume"
+	cfg.Lume.Base = "macos-golden"
+	cfg.Lume.Storage = "fast"
+	cfg.Lume.User = "builder"
+	cfg.Lume.WorkRoot = "/Users/builder/work"
+	before := cfg.Lume
+	for _, storage := range []string{"fast", "", " padded "} {
+		cfg.Lume.Storage = storage
+		section := (Provider{}).ConfigShowSection(cfg)
+		view := map[string]any{}
+		var fields []string
+		for _, f := range section.Fields {
+			view[f.JSONName] = f.JSONValue
+			fields = append(fields, f.TextName+"="+f.TextValue)
+		}
+		want := map[string]any{"cliPath": "/opt/homebrew/bin/lume", "base": "macos-golden", "storage": storage, "user": "builder", "workRoot": "/Users/builder/work"}
+		if section.JSONKey != "lume" || section.TextLabel != "lume" || !reflect.DeepEqual(section.Providers, []string{"lume"}) || len(section.Fields) != 5 || !reflect.DeepEqual(view, want) {
+			t.Fatalf("lume view=%#v", view)
+		}
+		shown := storage
+		if storage == "" {
+			shown = "default"
+		}
+		text := section.TextLabel + " " + strings.Join(fields, " ")
+		if text != "lume cli=/opt/homebrew/bin/lume base=macos-golden storage="+shown+" user=builder work_root=/Users/builder/work" {
+			t.Fatalf("config show missing Lume settings: %q", text)
+		}
+		wantConfig := before
+		wantConfig.Storage = storage
+		if cfg.Lume != wantConfig {
+			t.Fatal("projection mutated Lume")
+		}
+	}
+	section := (Provider{}).ConfigShowSection(core.Config{})
+	var fields []string
+	for _, f := range section.Fields {
+		fields = append(fields, f.TextName+"="+f.TextValue)
+		if f.JSONValue != "" {
+			t.Fatal("raw empty JSON changed")
+		}
+	}
+	if strings.Join(fields, " ") != "cli= base= storage=default user= work_root=" {
+		t.Fatal("empty Lume text changed")
+	}
+}
+
 func TestSpecAndAliases(t *testing.T) {
 	p := Provider{}
 	for _, alias := range []string{"lume", "local-lume", "lume-macos"} {

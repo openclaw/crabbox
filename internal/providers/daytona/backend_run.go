@@ -279,6 +279,12 @@ func (b *daytonaLeaseBackend) Status(ctx context.Context, req StatusRequest) (st
 	for {
 		sandbox, leaseID, err := resolveDaytonaSandbox(ctx, client, b.cfg, req.ID)
 		if err != nil {
+			if exists && claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == "acquired" && daytonaIsNotFoundError(err) {
+				if err := b.releaseFixed(ctx, claim, "", true); err != nil {
+					return statusView{}, err
+				}
+				return b.Status(ctx, req)
+			}
 			return statusView{}, err
 		}
 		view := daytonaStatusView(leaseID, sandbox)
@@ -337,7 +343,7 @@ func (b *daytonaLeaseBackend) Stop(ctx context.Context, req StopRequest) error {
 }
 
 func (b *daytonaLeaseBackend) stopFixed(ctx context.Context, claim LeaseClaim) error {
-	if err := b.releaseFixed(ctx, claim, ""); err != nil {
+	if err := b.releaseFixed(ctx, claim, "", false); err != nil {
 		return err
 	}
 	fmt.Fprintf(b.rt.Stderr, "released fixed lease=%s\n", claim.LeaseID)

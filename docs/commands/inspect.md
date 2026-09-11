@@ -26,6 +26,12 @@ slug selects its recorded provider before provider initialization. An explicit
 lease ID or `--provider`, while missing claims keep the configured-provider
 fallback.
 
+For an acquired fixed Daytona lease removed by native TTL or external deletion,
+inspection can persist its terminal tombstone after verifying the original
+organization and complete provider database absence. It reports `released` and
+never deletes a provider resource. Unverified absence retains the claim and
+returns an error; see [Daytona fixed lifecycle](../providers/daytona.md#fixed-operation-ids).
+
 ## Output
 
 Human output prints one `key=value` line per field, followed by any Tailscale

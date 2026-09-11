@@ -36,7 +36,7 @@ func ConfigShowSecretState(value string) string { return tokenState(value) }
 
 // Names only: no legacy value projection or environment reads are needed to
 // protect existing text slots. Retire a name only when its legacy row migrates.
-const legacyConfigShowTextLabels = "config provider lease broker access_auth ssh sync env run capacity actions blacksmith agent_sandbox phala namespace namespace_instance morph e2b cubesandbox upstash_box smolvm blaxel nomad ascii_box superserve local_container apple_container mxc docker_sandbox multipass machine0 tart lume cloudflare fastapi_cloud cloudflare_dynamic_workers cloudflare_sandbox static results cache jobs aws aws_lambda_microvm azure digitalocean vultr linode github_codespaces lambda vast nvidia_brev nebius hostinger ovh scaleway tencentcloud azure_dynamic_sessions gcp proxmox firecracker xcp_ng parallels inspection provider_status"
+const legacyConfigShowTextLabels = "config provider lease broker access_auth ssh sync env run capacity actions blacksmith agent_sandbox phala namespace namespace_instance morph e2b cubesandbox upstash_box smolvm blaxel nomad ascii_box superserve local_container apple_container mxc docker_sandbox machine0 cloudflare fastapi_cloud cloudflare_dynamic_workers cloudflare_sandbox static results cache jobs aws aws_lambda_microvm azure digitalocean vultr linode github_codespaces lambda vast nvidia_brev nebius hostinger ovh scaleway tencentcloud azure_dynamic_sessions gcp proxmox firecracker xcp_ng parallels inspection provider_status"
 
 func collectProviderConfigShowSections(cfg Config) ([]ProviderConfigShowSection, error) {
 	return collectProviderConfigShowSectionsFrom(cfg, registeredProviders())
@@ -148,6 +148,44 @@ func writeProviderConfigShowSections(w io.Writer, sections []ProviderConfigShowS
 		if n != line.Len() {
 			return io.ErrShortWrite
 		}
+	}
+	return nil
+}
+
+// A layout consumes already-collected data at legacy slots, then writes the rest.
+// Absent sections are optional here; this renderer does not consult the registry.
+type configShowTextLayout struct {
+	sections []ProviderConfigShowSection
+	consumed []bool
+}
+
+func newConfigShowTextLayout(sections []ProviderConfigShowSection) *configShowTextLayout {
+	return &configShowTextLayout{sections: sections, consumed: make([]bool, len(sections))}
+}
+
+func (layout *configShowTextLayout) writeSlot(w io.Writer, label string) error {
+	for i, section := range layout.sections {
+		if section.TextLabel != label || layout.consumed[i] {
+			continue
+		}
+		if err := writeProviderConfigShowSections(w, layout.sections[i:i+1]); err != nil {
+			return err
+		}
+		layout.consumed[i] = true
+		return nil
+	}
+	return nil
+}
+
+func (layout *configShowTextLayout) writeRemaining(w io.Writer) error {
+	for i := range layout.sections {
+		if layout.consumed[i] {
+			continue
+		}
+		if err := writeProviderConfigShowSections(w, layout.sections[i:i+1]); err != nil {
+			return err
+		}
+		layout.consumed[i] = true
 	}
 	return nil
 }

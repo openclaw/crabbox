@@ -199,6 +199,116 @@ func (w configShowFailureWriter) Write(p []byte) (int, error) {
 	return 0, w.err
 }
 
+func TestConfigShowLegacySlotPositions(t *testing.T) {
+	parsed, err := parser.ParseFile(token.NewFileSet(), "config_cmd.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body *ast.BlockStmt
+	for _, decl := range parsed.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "writeConfigShowText" {
+			body = fn.Body
+		}
+	}
+	if body == nil {
+		t.Fatal("missing text formatter")
+	}
+	var order []string
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) < 2 {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		literal, ok := call.Args[1].(*ast.BasicLit)
+		if !ok || literal.Kind != token.STRING {
+			return true
+		}
+		value, err := strconv.Unquote(literal.Value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sel.Sel.Name == "writeSlot" {
+			order = append(order, value)
+		} else if sel.Sel.Name == "Fprintf" {
+			name := strings.SplitN(value, " ", 2)[0]
+			if name == "docker_sandbox" || name == "machine0" || name == "cloudflare" {
+				order = append(order, name)
+			}
+		}
+		return true
+	})
+	if got := strings.Join(order, ","); got != "docker_sandbox,multipass,machine0,tart,lume,cloudflare" {
+		t.Fatalf("legacy text slot positions: %s", got)
+	}
+}
+
+func TestConfigShowTextLayoutConsumesSlotsOnce(t *testing.T) {
+	section := func(label string) ProviderConfigShowSection {
+		return ProviderConfigShowSection{TextLabel: label, Fields: []ProviderConfigShowField{{TextName: "value", TextValue: label}}}
+	}
+	layout := newConfigShowTextLayout([]ProviderConfigShowSection{section("alpha"), section("lume"), section("multipass"), section("tart"), section("zeta")})
+	var out bytes.Buffer
+	for _, label := range []string{"absent", "multipass", "multipass", "tart", "lume"} {
+		if err := layout.writeSlot(&out, label); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := layout.writeRemaining(&out); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := out.String(), "multipass value=multipass\ntart value=tart\nlume value=lume\nalpha value=alpha\nzeta value=zeta\n"; got != want {
+		t.Fatalf("slot order/duplication got %q want %q", got, want)
+	}
+	out.Reset()
+	if err := layout.writeSlot(&out, "lume"); err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.writeRemaining(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Fatal("consumed section emitted again")
+	}
+	empty := newConfigShowTextLayout(nil)
+	if err := empty.writeSlot(configShowFailureWriter{err: errors.New("must not write")}, "multipass"); err != nil {
+		t.Fatalf("absent optional section: %v", err)
+	}
+}
+
+func TestConfigShowTextLayoutWriteErrors(t *testing.T) {
+	failure := errors.New("slot write failed")
+	for _, writer := range []configShowFailureWriter{{err: failure}, {short: true}} {
+		section := projectionTestSection("slot_fixture")
+		layout := newConfigShowTextLayout([]ProviderConfigShowSection{section})
+		err := layout.writeSlot(writer, "slot_fixture")
+		want := failure
+		if writer.short {
+			want = io.ErrShortWrite
+		}
+		if !errors.Is(err, want) {
+			t.Fatalf("slot write error %v", err)
+		}
+		var got, wantText bytes.Buffer
+		if err := layout.writeRemaining(&got); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeProviderConfigShowSections(&wantText, []ProviderConfigShowSection{section}); err != nil {
+			t.Fatal(err)
+		}
+		if got.String() != wantText.String() {
+			t.Fatal("failed slot was consumed")
+		}
+		layout = newConfigShowTextLayout([]ProviderConfigShowSection{section})
+		if err := layout.writeRemaining(writer); !errors.Is(err, want) {
+			t.Fatalf("remaining write error %v", err)
+		}
+	}
+}
+
 func TestProviderConfigShowProjectionWriteErrors(t *testing.T) {
 	failure := errors.New("display write failed")
 	section := projectionTestSection("test_projection")

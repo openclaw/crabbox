@@ -179,6 +179,12 @@ renewal and release fail closed. After a client crash, an expired owner is
 recoverable only when the exact witnessed child is no longer alive. POSIX,
 WSL2, and native Windows targets share these semantics.
 
+Transport failures during renewal, child inspection, and phase-witness waiting
+retain recognized `MISMATCH`, `EXPIRED`, or `AMBIGUOUS` protocol labels alongside
+the original error. These labels add diagnostic context, not permission to
+continue or retry; arbitrary protocol output is not added to those transport
+error messages. An ambiguous inspection still fails closed.
+
 POSIX and WSL2 children register themselves before executing the requested
 workload. Registration waits at most five seconds for the owner lock; it does
 not leave a background child waiting indefinitely for a start file. A failed

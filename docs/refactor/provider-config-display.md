@@ -12,6 +12,11 @@ already loaded into configuration; Crownest does not look up its separate key.
 Zero sizes/timeouts, explicit false, and raw strings retain their configured
 meaning. Neither section establishes authentication or readiness.
 
+OpenComputer, OpenSandbox and CUA use the same passive capability for all 34
+of their configuration fields. Their separate credential sources are not read.
+CUA's bridge and SDK strings are references only: projection does not execute a
+command, inspect an installation, resolve imports or enable provisioning.
+
 ## Ownership
 
 - `JSONValue` is an explicitly selected public value, never a runtime-config dump.
@@ -35,6 +40,15 @@ New sections have stable text-label order immediately before the existing
 offline inspection/status block. Existing lines and fields keep their current
 order. Output errors, including short writes, propagate from text rendering.
 
+Multipass, Tart and Lume now define their existing JSON/text fields through the
+same passive API. Their sections are consumed at their original text positions:
+`docker_sandbox`, Multipass, `machine0`, Tart, Lume, `cloudflare`. A small layout
+tracks which supplied sections have been written, then emits only the remaining
+sections before inspection. It does not consult the provider registry, resolve
+missing data, or fall back to the old formatters. An absent optional section is
+a no-op for this data-only renderer; real-provider tests and whole-binary output
+comparisons establish the migrated built-ins' actual coverage and positions.
+
 ## Remaining migration
 
 The baseline census contains 81 canonical providers: 49 have both value formats,
@@ -42,10 +56,14 @@ three have JSON only, and 29 have neither. Apple Machine shares Apple Container'
 configuration, so complete coverage means **80 distinct sections**, not 81
 duplicate sections.
 
-The first two adopters leave **27 missing sections and three missing text
+The five newly added sections leave **24 missing sections and three missing text
 sections**. They do not complete the migration. Existing provider projections
 also still need to move out of the parallel JSON map and text formatter so
 their field selection and transformations have one owner.
+
+The Multipass/Tart/Lume migration removes three of the original 49 canonical
+both-format providers from that legacy implementation, leaving 46 in that
+cohort. It does not fill any of the missing sections above.
 
 For each remaining provider, establish the explicit public field contract
 before implementation. Preserve existing keys, types, null/empty distinctions,
