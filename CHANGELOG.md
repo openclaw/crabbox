@@ -6,6 +6,8 @@
 - Show Freestyle and Crownest settings through a shared offline JSON/text display path, preserving zero and false values while redacting URLs and reporting only loaded key presence. [PR 2104](https://github.com/openclaw/crabbox/pull/2104). Thanks @steipete.
 - Retain recognized workspace-owner protocol states in child and phase-witness inspection errors, improving diagnostics without changing ownership decisions or retry behavior. [PR 2106](https://github.com/openclaw/crabbox/pull/2106). Thanks @steipete.
 
+- Daytona: omit unverified default class labels from snapshot forks and document opt-in workload concurrency and memory limits. [PR 2114](https://github.com/openclaw/crabbox/pull/2114). Thanks @Patrick-Erichsen.
+
 ## 0.56.0 - 2026-09-11
 
 ### Highlights
