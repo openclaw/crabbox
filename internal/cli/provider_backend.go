@@ -95,6 +95,14 @@ type RunLeaseClaimResolver interface {
 	ResolveRunLeaseUnderClaim(context.Context, ResolveRequest, LeaseClaim) (LeaseTarget, error)
 }
 
+// ExecLeaseClaimResolver admits only lease kinds whose release paths honor the
+// same claim fence as exec. Core holds a shared fence through execution; the
+// resolver must reject incompatible claims before native effects and must not
+// reenter or publish claims while preparing fresh access.
+type ExecLeaseClaimResolver interface {
+	ResolveExecLeaseUnderClaim(context.Context, ResolveRequest, LeaseClaim) (LeaseTarget, error)
+}
+
 // ProviderDiagnosticSecretSource contributes runtime-only credentials to the
 // final diagnostic redaction pass. Providers should include every credential
 // source that is intentionally absent from Config, including local CLI stores.
@@ -719,7 +727,7 @@ const (
 	// FeatureSSHScriptRun routes explicit scripts through the core SSH owner,
 	// while a hybrid backend may delegate ordinary commands.
 	FeatureSSHScriptRun Feature = "ssh-script-run"
-	// FeatureClaimExec requires RunLeaseClaimResolver, private POSIX SSH execution,
+	// FeatureClaimExec requires ExecLeaseClaimResolver, private POSIX SSH execution,
 	// and provider-owned idle activity that does not require exclusive claim writes.
 	FeatureClaimExec Feature = "claim-exec"
 	// FeatureFixedCurrentRepoStop requires RepositoryScopedStopBackend for fixed IDs.

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Add `crabbox exec` for byte-preserving commands without workspace sync or hydration, retaining repository ownership through transport cleanup; provide offline capability discovery and `stop --current-repo` for Daytona fixed-ID cleanup after ownership checks inside its release fence. [PR 2119](https://github.com/openclaw/crabbox/pull/2119). Thanks @steipete.
+- Add `crabbox exec` for byte-preserving commands on completed Daytona fixed-ID leases without workspace sync or hydration, retaining repository ownership through transport cleanup; provide offline capability discovery and `stop --current-repo` cleanup after ownership checks inside the same release fence. [PR 2119](https://github.com/openclaw/crabbox/pull/2119). Thanks @steipete.
 - Daytona: attest API-key cleanup through current-key organization metadata and retire acquired fixed leases after verified native TTL or external deletion; inspection records a terminal tombstone without issuing deletion or reusing the fixed ID. [PR 2111](https://github.com/openclaw/crabbox/pull/2111). Thanks @steipete.
 - Show Freestyle and Crownest settings through a shared offline JSON/text display path, preserving zero and false values while redacting URLs and reporting only loaded key presence. [PR 2104](https://github.com/openclaw/crabbox/pull/2104). Thanks @steipete.
 - Retain recognized workspace-owner protocol states in child and phase-witness inspection errors, improving diagnostics without changing ownership decisions or retry behavior. [PR 2106](https://github.com/openclaw/crabbox/pull/2106). Thanks @steipete.

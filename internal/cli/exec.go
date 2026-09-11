@@ -70,7 +70,7 @@ func (a App) execCommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	resolver, ok := backend.(RunLeaseClaimResolver)
+	resolver, ok := backend.(ExecLeaseClaimResolver)
 	if !ok || !backend.Spec().Features.Has(FeatureSSH) {
 		return exit(2, "provider=%s does not support claim-fenced SSH execution", backend.Spec().Name)
 	}
@@ -97,7 +97,7 @@ func (a App) execCommand(ctx context.Context, args []string) error {
 		}
 		// This resolver contract cannot publish or reenter claim operations. The
 		// shared fence lets independent commands run but excludes claim writers.
-		lease, err := resolver.ResolveRunLeaseUnderClaim(ctx, ResolveRequest{
+		lease, err := resolver.ResolveExecLeaseUnderClaim(ctx, ResolveRequest{
 			ID: *id, Repo: Repo{Root: boundary.root}, Options: options, Prepare: true,
 		}, claim)
 		if err != nil {

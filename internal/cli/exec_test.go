@@ -43,7 +43,7 @@ type execTestBackend struct {
 	prepareMessage                   string
 }
 
-func (b *execTestBackend) ResolveRunLeaseUnderClaim(_ context.Context, _ ResolveRequest, _ LeaseClaim) (LeaseTarget, error) {
+func (b *execTestBackend) ResolveExecLeaseUnderClaim(_ context.Context, _ ResolveRequest, _ LeaseClaim) (LeaseTarget, error) {
 	b.resolveCalls++
 	if b.prepareMessage != "" {
 		_, _ = io.WriteString(b.output, b.prepareMessage)

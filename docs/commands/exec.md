@@ -1,6 +1,6 @@
 # exec
 
-`crabbox exec` executes a command on an existing lease without syncing files,
+`crabbox exec` executes a command on a supported existing lease without syncing files,
 hydrating a workspace, or changing its working directory. It resolves fresh SSH
 access and keeps the current repository claim held until the command and local
 transport cleanup finish.
@@ -30,19 +30,23 @@ crabbox exec --check --provider daytona
 
 This reads configuration and compiled provider capabilities without configuring a
 backend, authenticating, inspecting claims, or contacting a provider. `execution`
-reports support for this command on the selected target. `currentRepoStop`
+reports support for this command on completed fixed-ID leases of the selected target. `currentRepoStop`
 reports support for repository-scoped cleanup of **fixed-ID** leases. Integrations
 that require both must reject either false value before allocating. These flags
 do not prove credentials, connectivity, capacity, or an existing lease's state.
 `--check` cannot combine an ID, command, or `--pty`.
 
-Direct Daytona initially supports both capabilities through its existing native
-activity renewal. Other providers, including AWS and Machine0, and coordinator
+Direct Daytona initially supports both capabilities for completed fixed-ID leases
+through its existing native activity renewal and fixed-lease release fence.
+Ordinary Daytona leases and incomplete fixed acquisitions are rejected before
+native access preparation; use `run` for ordinary leases. Other providers,
+including AWS and Machine0, and coordinator
 routes report both unavailable. The underlying `claim-exec` and `fixed-current-repo-stop`
 feature names also appear in `crabbox providers --json`.
 
 Run from the repository that currently owns the lease. `--id` requires the
-canonical Crabbox lease ID and an existing resource-bound repository claim.
+canonical Crabbox lease ID and an existing resource-bound repository claim of a
+kind admitted by the provider's execution owner.
 Provider routing uses that stored claim unless explicitly overridden. A
 different repository is rejected before native access preparation. `exec` does
 not acquire, adopt, reclaim, or release a lease.
@@ -72,8 +76,9 @@ pipe and owns any local terminal modes or resizing; `exec` is a command transpor
 not a local interactive terminal UI. A controlling-terminal stdin is rejected;
 redirect from `/dev/null` when the command needs no input.
 
-The initial command supports Linux and macOS SSH targets whose provider
-implements claim-fenced resolution. Unsupported providers and Windows targets
+The transport supports Linux and macOS SSH targets whose provider implements
+execution-specific claim admission; initial support is Daytona fixed-ID Linux
+leases. Unsupported providers and Windows targets
 are rejected; there is no raw-credential fallback. Provider-native proxy routes
 are retained through Crabbox's private SSH transport.
 
