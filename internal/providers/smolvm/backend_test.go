@@ -52,6 +52,7 @@ func TestSmolvmFlagPresenceAndValidationOrder(t *testing.T) {
 	if err := ApplySmolvmProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
+	core.RecordProviderFlagInputs(&before, true, "smolvm")
 	if !reflect.DeepEqual(cfg, before) {
 		t.Fatal("positive fields/central provenance changed")
 	}

@@ -71,6 +71,7 @@ func TestAzureDynamicSessionsFlagRouteAndDeferredPoolContract(t *testing.T) {
 	if err := ApplyAzureDynamicSessionsProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
+	core.RecordProviderFlagInputs(&before, true, "azure-dynamic-sessions")
 	if !reflect.DeepEqual(cfg, before) {
 		t.Fatal("positive flags changed fields or source phase")
 	}

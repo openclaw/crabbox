@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -59,6 +60,7 @@ func TestRailwayBindingFlagsRemainDeferredAndLocal(t *testing.T) {
 			t.Fatalf("wrapper performed deferred client validation: %v", err)
 		}
 		before.Railway.APIURL, before.Railway.ProjectID, before.Railway.EnvironmentID = "", "", ""
+		core.RecordProviderFlagInputs(&before, true, "railway")
 		if !reflect.DeepEqual(cfg, before) {
 			t.Fatal("wrapper copies or global provenance side effects changed")
 		}

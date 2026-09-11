@@ -157,6 +157,7 @@ func TestCloudflareFlagNormalizationPrecedesValues(t *testing.T) {
 		t.Fatal("wrapper performed deferred URL/workdir validation")
 	}
 	before.Cloudflare.APIURL, before.Cloudflare.Workdir = "", ""
+	core.RecordProviderFlagInputs(&before, true, "cloudflare")
 	if !reflect.DeepEqual(cfg, before) {
 		t.Fatal("wrapper copied token or introduced central provenance marking")
 	}

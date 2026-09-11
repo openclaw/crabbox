@@ -9100,8 +9100,8 @@ func TestRepoConfigCannotOverrideFreestyleAPIURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.inputProvenance.summary("freestyle").state != "unknown" {
-		t.Fatal("URL-only repository input acquired a finalized source")
+	if got := cfg.inputProvenance.summary("freestyle"); got.state != "none" || len(got.sources) != 0 {
+		t.Fatalf("complete load should record no accepted Freestyle input: %+v", got)
 	}
 }
 
