@@ -268,15 +268,30 @@ env -i \
 
 # Download the complete selected dependency graph into an isolated cache, then
 # copy the proxy-form cache entries. Network access ends before the install.
+seed_proxy_escape() {
+  printf '%s' "$1" | LC_ALL=C sed 's/[A-Z]/!&/g' | LC_ALL=C tr 'A-Z' 'a-z'
+}
+
 seed_download_retryable() {
+  local LC_ALL=C
   local line recognized=0
+  local module version url escaped_module escaped_version
   local progress='^go: downloading [^[:space:]]+ v[^[:space:]]+$'
   local transient='^go: ([^[:space:]:]+@v[^[:space:]:]+): verifying go[.]mod: ([^[:space:]:]+@v[^[:space:]:]+)/go[.]mod: reading https://sum[.]golang[.]org/tile/[0-9]+/[0-9]+/(x[0-9]+/)*[0-9]+: stream error: stream ID [0-9]+; INTERNAL_ERROR; received from peer$'
+  local zip_transient='^go: ([A-Za-z0-9][A-Za-z0-9._~/-]*)@(v[0-9][0-9A-Za-z.+-]*): read "([^"]+)": stream error: stream ID [0-9]+; INTERNAL_ERROR; received from peer$'
   while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ $progress ]]; then
       continue
     fi
     if [[ "$line" =~ $transient ]] && [[ "${BASH_REMATCH[1]}" == "${BASH_REMATCH[2]}" ]]; then
+      recognized=1
+    elif [[ "$line" =~ $zip_transient ]]; then
+      module=${BASH_REMATCH[1]}
+      version=${BASH_REMATCH[2]}
+      url=${BASH_REMATCH[3]}
+      escaped_module=$(seed_proxy_escape "$module") || return 1
+      escaped_version=$(seed_proxy_escape "$version") || return 1
+      [[ "$url" == "https://proxy.golang.org/$escaped_module/@v/$escaped_version.zip" ]] || return 1
       recognized=1
     else
       return 1
@@ -307,7 +322,7 @@ seed_dependencies() {
     if [[ "$attempt" -ne 1 || "$download_status" -ne 1 ]] || ! seed_download_retryable "$log"; then
       return "$download_status"
     fi
-    echo "Dependency seed attempt 1 failed with a checksum-database transport error; retrying once in 5 seconds." >&2
+    echo "Dependency seed attempt 1 failed with a dependency-download transport error; retrying once in 5 seconds." >&2
     sleep 5 || return $?
   done
 }

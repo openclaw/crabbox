@@ -1918,3 +1918,53 @@ func TestRunCommandIntentReachesNativeRequest(t *testing.T) {
 		return call.Args[4:]
 	})
 }
+
+func TestDockerSandboxConfigShowSection(t *testing.T) {
+	projector, ok := any(Provider{}).(core.ProviderConfigShowProjector)
+	if !ok {
+		t.Fatal("real provider is missing passive config-show ownership")
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  core.DockerSandboxConfig
+		want map[string]any
+		text string
+	}{
+		{name: "nil lists", cfg: core.DockerSandboxConfig{CLIPath: "", Agent: "", Template: "", CPUs: float64(0), Memory: "", Clone: false, Workdir: "", ExtraWorkspaces: []string(nil), MCP: []string(nil), Kit: []string(nil)}, want: map[string]any{"cliPath": "", "agent": "", "template": "", "cpus": float64(0), "memory": "", "clone": false, "workdir": "", "extraWorkspaces": []string(nil), "mcp": []string(nil), "kit": []string(nil)}, text: "docker_sandbox cli= agent= template=- cpus=0 memory=- clone=false workdir=- extra_workspaces=- mcp=- kit=-\n"},
+		{name: "empty lists", cfg: core.DockerSandboxConfig{CLIPath: "", Agent: "", Template: "", CPUs: float64(0), Memory: "", Clone: false, Workdir: "", ExtraWorkspaces: []string{}, MCP: []string{}, Kit: []string{}}, want: map[string]any{"cliPath": "", "agent": "", "template": "", "cpus": float64(0), "memory": "", "clone": false, "workdir": "", "extraWorkspaces": []string{}, "mcp": []string{}, "kit": []string{}}, text: "docker_sandbox cli= agent= template=- cpus=0 memory=- clone=false workdir=- extra_workspaces=- mcp=- kit=-\n"},
+		{name: "fractional raw ordered", cfg: core.DockerSandboxConfig{CLIPath: " raw-cli ", Agent: " raw-agent ", Template: "", CPUs: float64(2.5), Memory: "   ", Clone: true, Workdir: "", ExtraWorkspaces: []string{"/example/a", " /example/b ", "/example/a"}, MCP: []string{"one", "one", " two "}, Kit: []string{""}}, want: map[string]any{"cliPath": " raw-cli ", "agent": " raw-agent ", "template": "", "cpus": float64(2.5), "memory": "   ", "clone": true, "workdir": "", "extraWorkspaces": []string{"/example/a", " /example/b ", "/example/a"}, "mcp": []string{"one", "one", " two "}, "kit": []string{""}}, text: "docker_sandbox cli= raw-cli  agent= raw-agent  template=- cpus=2.5 memory=    clone=true workdir=- extra_workspaces=/example/a, /example/b ,/example/a mcp=one,one, two  kit=-\n"},
+		{name: "large float", cfg: core.DockerSandboxConfig{CLIPath: "", Agent: "", Template: "", CPUs: float64(1e+20), Memory: "", Clone: false, Workdir: "", ExtraWorkspaces: []string(nil), MCP: []string(nil), Kit: []string(nil)}, want: map[string]any{"cliPath": "", "agent": "", "template": "", "cpus": float64(1e+20), "memory": "", "clone": false, "workdir": "", "extraWorkspaces": []string(nil), "mcp": []string(nil), "kit": []string(nil)}, text: "docker_sandbox cli= agent= template=- cpus=1e+20 memory=- clone=false workdir=- extra_workspaces=- mcp=- kit=-\n"},
+		{name: "small float", cfg: core.DockerSandboxConfig{CLIPath: "", Agent: "", Template: "", CPUs: float64(1e-09), Memory: "", Clone: false, Workdir: "", ExtraWorkspaces: []string(nil), MCP: []string(nil), Kit: []string(nil)}, want: map[string]any{"cliPath": "", "agent": "", "template": "", "cpus": float64(1e-09), "memory": "", "clone": false, "workdir": "", "extraWorkspaces": []string(nil), "mcp": []string(nil), "kit": []string(nil)}, text: "docker_sandbox cli= agent= template=- cpus=1e-09 memory=- clone=false workdir=- extra_workspaces=- mcp=- kit=-\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.Config{Provider: "unselected-display-test", DockerSandbox: tc.cfg}
+			before, err := json.Marshal(cfg.DockerSandbox)
+			if err != nil {
+				t.Fatal(err)
+			}
+			section := projector.ConfigShowSection(cfg)
+			got := map[string]any{}
+			var fields []string
+			for _, field := range section.Fields {
+				got[field.JSONName] = field.JSONValue
+				fields = append(fields, field.TextName+"="+field.TextValue)
+			}
+			if section.JSONKey != "dockerSandbox" || section.TextLabel != "docker_sandbox" || !reflect.DeepEqual(section.Providers, []string{"docker-sandbox"}) || len(section.Fields) != 10 {
+				t.Fatalf("section metadata=%#v", section)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("public fields=%#v want %#v", got, tc.want)
+			}
+			if line := section.TextLabel + " " + strings.Join(fields, " ") + "\n"; line != tc.text {
+				t.Fatalf("text=%q want %q", line, tc.text)
+			}
+			after, err := json.Marshal(cfg.DockerSandbox)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("projection mutated original config or slice contents")
+			}
+		})
+	}
+}

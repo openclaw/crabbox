@@ -49,6 +49,13 @@ missing data, or fall back to the old formatters. An absent optional section is
 a no-op for this data-only renderer; real-provider tests and whole-binary output
 comparisons establish the migrated built-ins' actual coverage and positions.
 
+Local Container, Apple Container, MXC and Docker Sandbox also own their existing
+35 display fields and retain their original text slots. Apple Container supplies
+one shared section for both Apple Container and Apple Machine; it does not apply
+either backend's runtime defaults. MXC retains JSON lists with text counts,
+Docker Sandbox retains JSON lists with comma-joined text and `%g` CPU formatting,
+and nil versus empty lists remain distinct. Internal-only fields stay omitted.
+
 ## Remaining migration
 
 The baseline census contains 81 canonical providers: 49 have both value formats,
@@ -61,9 +68,11 @@ sections**. They do not complete the migration. Existing provider projections
 also still need to move out of the parallel JSON map and text formatter so
 their field selection and transformations have one owner.
 
-The Multipass/Tart/Lume migration removes three of the original 49 canonical
-both-format providers from that legacy implementation, leaving 46 in that
-cohort. It does not fill any of the missing sections above.
+The Multipass/Tart/Lume and local-container cohorts remove eight of the original
+49 canonical both-format providers from that legacy implementation, leaving 41
+in that cohort. The local cohort covers five identities through four sections
+because Apple Machine shares Apple Container's values. These migrations do not
+fill any of the missing sections above.
 
 For each remaining provider, establish the explicit public field contract
 before implementation. Preserve existing keys, types, null/empty distinctions,
