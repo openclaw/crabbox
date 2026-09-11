@@ -1101,6 +1101,98 @@ func TestBlacksmithGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+const nullableBoolSample = "package cli\ntype PilotConfig struct {\n" +
+	" Enabled *bool `sources:\"user,repo,env,flag\" config:\"enabled\" env:\"PILOT_ENABLED\" flag:\"pilot-enabled\" help:\"Enabled\"`\n" +
+	" Count int `sources:\"user,repo,env,flag\" config:\"count\" env:\"PILOT_COUNT\" flag:\"pilot-count\" help:\"Count\" nonnegative:\"true\"`\n}"
+
+func TestSchemaNullableBool(t *testing.T) {
+	for _, tag := range []string{`default:"true"`, `default:""`, `fileStorage:"value"`, `fileIgnoreEmpty:"true"`, `envAlias:"OTHER"`, `envAlias2:"OTHER"`, `fileInt:"present"`, `envInt:"fallback"`, `nonnegative:"true"`, `duration:"positive-overlay"`, `fileList:"raw"`, `envList:"presence"`, `flagList:"csv"`, `reportApplied:"true"`, `flagFallback:"true"`} {
+		source := strings.Replace(nullableBoolSample, `help:"Enabled"`, `help:"Enabled" `+tag, 1)
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil {
+			t.Fatalf("accepted unsupported nullable bool tag %s", tag)
+		}
+	}
+	for _, kind := range []string{"*string", "**bool"} {
+		if _, err := parseSchema([]byte(strings.Replace(nullableBoolSample, "Enabled *bool", "Enabled "+kind, 1)), "PilotConfig", "pilot"); err == nil {
+			t.Fatalf("accepted %s", kind)
+		}
+	}
+	noFlag := strings.Replace(nullableBoolSample, `sources:"user,repo,env,flag"`, `sources:"user,repo,env"`, 1)
+	noFlag = strings.Replace(noFlag, ` flag:"pilot-enabled" help:"Enabled"`, "", 1)
+	if _, err := parseSchema([]byte(noFlag), "PilotConfig", "pilot"); err == nil {
+		t.Fatal("broadened no-flag grant")
+	}
+}
+
+func TestGenerateNullableBool(t *testing.T) {
+	s, err := parseSchema([]byte(nullableBoolSample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatal("nondeterministic nullable bool")
+	}
+	if strings.Contains(string(output), "**bool") || !strings.Contains(string(output), `defaults.Enabled != nil && *defaults.Enabled`) {
+		t.Fatal("nullable storage/default shape")
+	}
+	typecheckGenerated(t, nullableBoolSample, output)
+	manual := strings.Replace(nullableBoolSample, "type PilotConfig", "//configgen:flag-application manual\ntype PilotConfig", 1)
+	ms, err := parseSchema([]byte(manual), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mo, err := generate(ms, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	typecheckGenerated(t, manual, mo)
+	if strings.Contains(string(mo), " Apply(") {
+		t.Fatal("manual nullable bool emitted Apply")
+	}
+	const behavior = `package cli
+import("flag";"fmt";"os";"strings";"testing")
+func exit(_ int,pattern string,args ...any)error{return fmt.Errorf(pattern,args...)}
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestNullableSources(t *testing.T){
+ if defaultPilotConfig().Enabled!=nil {t.Fatal("nil default lost")}
+ old:=true;cfg:=PilotConfig{Enabled:&old,Count:7};previous:=cfg.Enabled
+ got,err:=cfg.applyFile(&filePilotConfig{});if err!=nil||got.InputAccepted||cfg.Enabled!=previous {t.Fatal("nil file replaced pointer")}
+ for _,raw:=range []bool{false,true,true}{
+  value:=raw;file:=filePilotConfig{Enabled:&value};previous=cfg.Enabled
+  got,err=cfg.applyFile(&file);if err!=nil||!got.InputAccepted||cfg.Enabled==file.Enabled||cfg.Enabled==previous||*cfg.Enabled!=raw {t.Fatal("file must fresh-copy accepted bool")}
+  *file.Enabled=!raw;if *cfg.Enabled!=raw {t.Fatal("file/runtime alias")}
+ }
+ t.Setenv("PILOT_COUNT","");for _,raw:=range []string{"","invalid"}{
+  t.Setenv("PILOT_ENABLED",raw);previous=cfg.Enabled;got,err=cfg.applyEnv();if err!=nil||got.InputAccepted||cfg.Enabled!=previous {t.Fatal("ignored env pointer")}
+ }
+ for _,raw:=range []string{"false","true","true"}{
+  t.Setenv("PILOT_ENABLED",raw);previous=cfg.Enabled;got,err=cfg.applyEnv();if err!=nil||!got.InputAccepted||cfg.Enabled==previous||*cfg.Enabled!=(raw=="true") {t.Fatal("env fresh-copy")}
+ }
+ negative:=-1;value:=false;got,err=cfg.applyFile(&filePilotConfig{Enabled:&value,Count:&negative});if err==nil||!got.InputAccepted||cfg.Enabled==&value||*cfg.Enabled {t.Fatal("partial file bool before error")}
+ for _,initial:=range []*bool{nil,&old}{
+  cfg=PilotConfig{Enabled:initial};fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+  if *values.Enabled!=(initial!=nil&&*initial)||cfg.Enabled!=initial {t.Fatal("raw registration default/mutation")}
+  got,err=values.Apply(&cfg,fs);if err!=nil||got.InputAccepted||cfg.Enabled!=initial {t.Fatal("unvisited flag pointer")}
+  if err:=fs.Parse([]string{"--pilot-enabled=false"});err!=nil {t.Fatal(err)}
+  got,err=values.Apply(&cfg,fs);if err!=nil||!got.InputAccepted||cfg.Enabled==initial||cfg.Enabled==values.Enabled||*cfg.Enabled {t.Fatal("flag fresh-copy")}
+  previous=cfg.Enabled;got,err=values.Apply(&cfg,fs);if err!=nil||!got.InputAccepted||cfg.Enabled==previous {t.Fatal("equal visited value still accepted")}
+ }
+}
+`
+	runScalarFixture(t, nullableBoolSample, output, behavior+configFixtureFunctions(t, "getenvBool"))
+}
+
+func TestPhalaGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_phala.go", "../../internal/cli/config_phala_generated.go", "PhalaConfig", "phala", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSchemaDurationContract(t *testing.T) {
 	for _, tc := range []struct{ raw, expression string }{
 		{"180s", "180 * time.Second"}, {"250ms", "250 * time.Millisecond"},

@@ -7,24 +7,17 @@ import (
 )
 
 type flagValues struct {
-	CLIPath      *string
-	InstanceType *string
-	NodeID       *string
-	WorkRoot     *string
-	Compose      *string
-	Attest       *bool
-	SkipAttest   *bool
+	Config     core.PhalaConfigFlagValues
+	SkipAttest *bool
 }
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
+	registrationDefaults := defaults.Phala
+	effective := attestEnabled(defaults)
+	registrationDefaults.Attest = &effective
 	return flagValues{
-		CLIPath:      fs.String("phala-cli", defaults.Phala.CLIPath, "Phala CLI path"),
-		InstanceType: fs.String("phala-instance-type", defaults.Phala.InstanceType, "Phala confidential TDX instance type, for example tdx.small"),
-		NodeID:       fs.String("phala-node-id", defaults.Phala.NodeID, "Phala node id to pin deployments to"),
-		WorkRoot:     fs.String("phala-work-root", defaults.Phala.WorkRoot, "remote Crabbox work root"),
-		Compose:      fs.String("phala-compose", defaults.Phala.Compose, "optional Docker Compose file deployed alongside the dev OS"),
-		Attest:       fs.Bool("phala-attest", attestEnabled(defaults), "verify the leased CVM's Intel TDX remote attestation before trusting it (default true)"),
-		SkipAttest:   fs.Bool("phala-skip-attestation", false, "skip TDX remote attestation verification of the leased CVM (insecure; for diagnostics only)"),
+		Config:     core.RegisterPhalaConfigFlags(fs, registrationDefaults),
+		SkipAttest: fs.Bool("phala-skip-attestation", false, "skip TDX remote attestation verification of the leased CVM (insecure; for diagnostics only)"),
 	}
 }
 
@@ -33,25 +26,26 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	if core.FlagWasSet(fs, "phala-cli") {
-		cfg.Phala.CLIPath = *v.CLIPath
+	visited := core.PhalaConfigFlagPresence(fs)
+	if visited.CLIPath {
+		cfg.Phala.CLIPath = *v.Config.CLIPath
 		core.RecordProviderFlagInputs(cfg, true, "phala")
 	}
-	if core.FlagWasSet(fs, "phala-instance-type") {
-		cfg.Phala.InstanceType = *v.InstanceType
+	if visited.InstanceType {
+		cfg.Phala.InstanceType = *v.Config.InstanceType
 		core.RecordProviderFlagInputs(cfg, true, "phala")
 		core.MarkPhalaInstanceTypeExplicit(cfg)
 	}
-	if core.FlagWasSet(fs, "phala-node-id") {
-		cfg.Phala.NodeID = *v.NodeID
+	if visited.NodeID {
+		cfg.Phala.NodeID = *v.Config.NodeID
 		core.RecordProviderFlagInputs(cfg, true, "phala")
 	}
-	if core.FlagWasSet(fs, "phala-work-root") {
-		cfg.Phala.WorkRoot = *v.WorkRoot
+	if visited.WorkRoot {
+		cfg.Phala.WorkRoot = *v.Config.WorkRoot
 		core.RecordProviderFlagInputs(cfg, true, "phala")
 	}
-	if core.FlagWasSet(fs, "phala-compose") {
-		cfg.Phala.Compose = *v.Compose
+	if visited.Compose {
+		cfg.Phala.Compose = *v.Config.Compose
 		core.RecordProviderFlagInputs(cfg, true, "phala")
 	}
 	// --phala-skip-attestation is the explicit opt-out and wins over --phala-attest
@@ -61,8 +55,8 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		disabled := false
 		cfg.Phala.Attest = &disabled
 		core.RecordProviderFlagInputs(cfg, true, "phala")
-	} else if core.FlagWasSet(fs, "phala-attest") {
-		value := *v.Attest
+	} else if visited.Attest {
+		value := *v.Config.Attest
 		cfg.Phala.Attest = &value
 		core.RecordProviderFlagInputs(cfg, true, "phala")
 	}

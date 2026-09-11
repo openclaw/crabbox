@@ -448,22 +448,6 @@ type ExternalDesktopConfig struct {
 	PasswordEnv string `yaml:"passwordEnv,omitempty" json:"passwordEnv,omitempty"`
 }
 
-// PhalaConfig configures the Phala Cloud confidential TDX CVM provider. Phala
-// authenticates through its own stored credentials (device flow or
-// PHALA_CLOUD_API_KEY), so no API key is held here.
-type PhalaConfig struct {
-	CLIPath      string
-	InstanceType string
-	WorkRoot     string
-	NodeID       string
-	Compose      string
-	// Attest gates the TDX remote-attestation check the Phala backend runs after
-	// a leased CVM becomes reachable. nil means "default" (attestation ON); the
-	// backend treats nil as true. A non-nil false value (set only by the local
-	// --phala-skip-attestation flag or CRABBOX_PHALA_ATTEST=false env) opts out.
-	Attest *bool
-}
-
 type DaytonaConfig struct {
 	APIKey           string
 	JWTToken         string
@@ -2170,13 +2154,7 @@ func baseConfig() Config {
 		},
 		Namespace:         defaultNamespaceConfig(),
 		NamespaceInstance: defaultNamespaceInstanceConfig(),
-		Phala: PhalaConfig{
-			CLIPath:      "phala",
-			InstanceType: "tdx.small",
-			// The dstack --dev-os guest roots on a read-only squashfs; /work is not
-			// writable. /var/volatile is a writable tmpfs on every dstack guest.
-			WorkRoot: "/var/volatile/crabbox",
-		},
+		Phala:             defaultPhalaConfig(),
 		Boxd: BoxdConfig{
 			APIURL:          "https://app.boxd.sh",
 			WorkRoot:        "/home/boxd/crabbox",
@@ -2717,15 +2695,6 @@ type fileBoxdConfig struct {
 	Org             string `yaml:"org,omitempty"`
 	WorkRoot        string `yaml:"workRoot,omitempty"`
 	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
-}
-
-type filePhalaConfig struct {
-	CLIPath      string `yaml:"cli,omitempty"`
-	InstanceType string `yaml:"instanceType,omitempty"`
-	WorkRoot     string `yaml:"workRoot,omitempty"`
-	NodeID       string `yaml:"nodeId,omitempty"`
-	Compose      string `yaml:"compose,omitempty"`
-	Attest       *bool  `yaml:"attest,omitempty"`
 }
 
 type fileDaytonaConfig struct {
@@ -4439,39 +4408,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 	if err := applyNamespaceInstanceFileConfig(cfg, file.NamespaceInstance, trusted, inputSource); err != nil {
 		return err
 	}
-	if file.Phala != nil {
-		if trusted {
-			if file.Phala.CLIPath != "" {
-				cfg.Phala.CLIPath = expandUserPath(file.Phala.CLIPath)
-				recordConfigInput(cfg, "phala", inputSource, true)
-			}
-			if file.Phala.NodeID != "" {
-				cfg.Phala.NodeID = file.Phala.NodeID
-				recordConfigInput(cfg, "phala", inputSource, true)
-			}
-			if file.Phala.Compose != "" {
-				cfg.Phala.Compose = expandUserPath(file.Phala.Compose)
-				recordConfigInput(cfg, "phala", inputSource, true)
-			}
-		}
-		if file.Phala.InstanceType != "" {
-			cfg.Phala.InstanceType = file.Phala.InstanceType
-			recordConfigInput(cfg, "phala", inputSource, true)
-			MarkPhalaInstanceTypeExplicit(cfg)
-		}
-		if file.Phala.WorkRoot != "" {
-			cfg.Phala.WorkRoot = file.Phala.WorkRoot
-			recordConfigInput(cfg, "phala", inputSource, true)
-		}
-		// attest is read from untrusted config ONLY when it tightens security
-		// (enabling the TDX attestation gate). Disabling it (attest: false)
-		// requires trusted config, the local --phala-skip-attestation flag, or the
-		// env var, so an untrusted repo config can never weaken the security gate.
-		if file.Phala.Attest != nil && (trusted || *file.Phala.Attest) {
-			value := *file.Phala.Attest
-			cfg.Phala.Attest = &value
-			recordConfigInput(cfg, "phala", inputSource, true)
-		}
+	if err := applyPhalaFileConfig(cfg, file.Phala, trusted, inputSource); err != nil {
+		return err
 	}
 	if file.Boxd != nil {
 		// Only trusted config can redirect credentials or organization billing.
@@ -6397,18 +6335,17 @@ func applyEnv(cfg *Config) error {
 		}
 	}
 	cfg.NamespaceInstance.CLIPath = expandUserPath(cfg.NamespaceInstance.CLIPath)
-	cfg.Phala.CLIPath = expandUserPath(configInputEnvString(cfg, "phala", cfg.Phala.CLIPath, "CRABBOX_PHALA_CLI"))
-	if value := os.Getenv("CRABBOX_PHALA_INSTANCE_TYPE"); value != "" {
-		cfg.Phala.InstanceType = value
-		recordConfigInput(cfg, "phala", configInputEnvironment, true)
-		MarkPhalaInstanceTypeExplicit(cfg)
-	}
-	cfg.Phala.WorkRoot = configInputEnvString(cfg, "phala", cfg.Phala.WorkRoot, "CRABBOX_PHALA_WORK_ROOT")
-	cfg.Phala.NodeID = configInputEnvString(cfg, "phala", cfg.Phala.NodeID, "CRABBOX_PHALA_NODE_ID")
-	cfg.Phala.Compose = expandUserPath(configInputEnvString(cfg, "phala", cfg.Phala.Compose, "CRABBOX_PHALA_COMPOSE"))
-	if value, ok := getenvBool("CRABBOX_PHALA_ATTEST"); ok {
-		cfg.Phala.Attest = &value
-		recordConfigInput(cfg, "phala", configInputEnvironment, true)
+	{
+		applied, err := cfg.Phala.applyEnv()
+		recordConfigInput(cfg, "phala", configInputEnvironment, applied.InputAccepted)
+		cfg.Phala.CLIPath = expandUserPath(cfg.Phala.CLIPath)
+		cfg.Phala.Compose = expandUserPath(cfg.Phala.Compose)
+		if applied.InstanceType {
+			MarkPhalaInstanceTypeExplicit(cfg)
+		}
+		if err != nil {
+			return err
+		}
 	}
 	{
 		applied, err := cfg.Morph.applyEnv()
