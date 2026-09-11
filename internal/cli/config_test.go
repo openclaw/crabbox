@@ -7662,6 +7662,133 @@ func TestSuperserveConfigDefaultsAndNoPersistentSecretSurface(t *testing.T) {
 	}
 }
 
+func TestCrownestOrdinaryFileAndWriter(t *testing.T) {
+	for _, body := range []string{"crownest: null", "crownest: {}", "crownest: {apiUrl: ' ', projectId: null, template: null, timeoutSecs: null, forgetMissing: null}", "crownest: {apiUrl: ' https://example.invalid ', projectId: '', template: '', timeoutSecs: 0, forgetMissing: false}", "crownest: {apiUrl: ' https://example.invalid ', projectId: 'next', template: 'next', timeoutSecs: -1, forgetMissing: false}"} {
+		path := isolatedConfigPath(t)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		original, err := yaml.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := Config{Crownest: CrownestConfig{APIURL: "https://prior.invalid", ProjectID: "prior", Template: "prior", TimeoutSecs: 7, ForgetMissing: true}}
+		want := cfg.Crownest
+		accepted := strings.Contains(body, "https://example.invalid")
+		negative := strings.Contains(body, "-1")
+		if accepted {
+			want.APIURL = " https://example.invalid "
+			want.ProjectID, want.Template = "", ""
+			if negative {
+				want.ProjectID, want.Template = "next", "next"
+			} else {
+				want.TimeoutSecs, want.ForgetMissing = 0, false
+			}
+		}
+		err = applyFileConfig(&cfg, file)
+		if (err != nil) != negative || (err != nil && err.Error() != "crownest timeoutSecs must be non-negative") {
+			t.Fatalf("file error %v", err)
+		}
+		var ledger configInputLedger
+		if accepted {
+			ledger = ledger.withInput("crownest", configInputUser, configInputValue)
+		}
+		if cfg.Crownest != want || !reflect.DeepEqual(cfg.inputProvenance, ledger) {
+			t.Fatalf("partial file %#v ledger %#v", cfg.Crownest, cfg.inputProvenance)
+		}
+		after, err := yaml.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(original, after) {
+			t.Fatal("input DTO changed")
+		}
+		if _, err := writeUserFileConfig(file); err != nil {
+			t.Fatal(err)
+		}
+		written, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := yaml.Unmarshal(written, &got); err != nil {
+			t.Fatal(err)
+		}
+		wantFile := map[string]any{}
+		if strings.Contains(body, "crownest: {") {
+			wantFile["crownest"] = map[string]any{}
+		}
+		if strings.Contains(body, "apiUrl: ' '") {
+			wantFile["crownest"] = map[string]any{"apiUrl": " "}
+		}
+		if accepted {
+			values := map[string]any{"apiUrl": " https://example.invalid ", "projectId": "", "template": "", "timeoutSecs": 0, "forgetMissing": false}
+			if negative {
+				values["projectId"], values["template"], values["timeoutSecs"] = "next", "next", -1
+			}
+			wantFile["crownest"] = values
+		}
+		if !reflect.DeepEqual(got, wantFile) {
+			t.Fatalf("writer %#v want %#v", got, wantFile)
+		}
+	}
+}
+
+func TestCrownestOrdinaryEnvironmentAliases(t *testing.T) {
+	for _, tc := range []struct {
+		primary, alias string
+		want           int
+		diagnostic     string
+	}{{"", "", 7, ""}, {"", "0", 0, ""}, {"0", "12", 0, ""}, {"7", "12", 7, ""}, {"bad", "12", 7, "CRABBOX_CROWNEST_TIMEOUT_SECS must be an integer"}, {" 7 ", "12", 7, "CRABBOX_CROWNEST_TIMEOUT_SECS must be an integer"}, {" ", "12", 7, "CRABBOX_CROWNEST_TIMEOUT_SECS must be an integer"}, {"-1", "12", 7, "CRABBOX_CROWNEST_TIMEOUT_SECS must be non-negative"}, {"", "bad", 7, "CROWNEST_TIMEOUT_SECS must be an integer"}, {"", "-1", 7, "CROWNEST_TIMEOUT_SECS must be non-negative"}} {
+		t.Run(tc.primary+"/"+tc.alias, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := Config{Crownest: CrownestConfig{TimeoutSecs: 7, ForgetMissing: true}}
+			for _, name := range []string{"API_URL", "PROJECT_ID", "TEMPLATE"} {
+				t.Setenv("CRABBOX_CROWNEST_"+name, " raw ")
+				t.Setenv("CROWNEST_"+name, "alias")
+			}
+			t.Setenv("CRABBOX_CROWNEST_TIMEOUT_SECS", tc.primary)
+			t.Setenv("CROWNEST_TIMEOUT_SECS", tc.alias)
+			t.Setenv("CRABBOX_CROWNEST_FORGET_MISSING", "false")
+			err := applyEnv(&cfg)
+			if (err != nil) != (tc.diagnostic != "") || (err != nil && err.Error() != tc.diagnostic) {
+				t.Fatalf("error %v want %q", err, tc.diagnostic)
+			}
+			want := CrownestConfig{APIURL: " raw ", ProjectID: " raw ", Template: " raw ", TimeoutSecs: tc.want, ForgetMissing: tc.diagnostic != ""}
+			if cfg.Crownest != want {
+				t.Fatalf("partial env %#v want %#v", cfg.Crownest, want)
+			}
+			ledger := configInputLedger(nil).withInput("crownest", configInputEnvironment, configInputValue)
+			if !reflect.DeepEqual(cfg.inputProvenance, ledger) {
+				t.Fatal("accepted prefix missing")
+			}
+		})
+	}
+	for _, tc := range []struct {
+		primary, alias string
+		want, accepted bool
+	}{{"false", "true", false, true}, {"invalid", "true", true, true}, {"", " OFF ", false, true}, {" TRUE ", "false", true, true}, {"invalid", "bad", true, false}, {"", "", true, false}} {
+		clearConfigEnv(t)
+		cfg := Config{Crownest: CrownestConfig{ForgetMissing: true}}
+		t.Setenv("CRABBOX_CROWNEST_FORGET_MISSING", tc.primary)
+		t.Setenv("CROWNEST_FORGET_MISSING", tc.alias)
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		var ledger configInputLedger
+		if tc.accepted {
+			ledger = ledger.withInput("crownest", configInputEnvironment, configInputValue)
+		}
+		if cfg.Crownest.ForgetMissing != tc.want || !reflect.DeepEqual(cfg.inputProvenance, ledger) {
+			t.Fatal("bool alias parsing/acceptance mismatch")
+		}
+	}
+}
+
 func TestCrownestConfigDefaultsAndNoPersistentSecretSurface(t *testing.T) {
 	cfg := baseConfig()
 	if cfg.Crownest.APIURL != "https://api.crownest.dev" || cfg.Crownest.Template != "python-node" || cfg.Crownest.TimeoutSecs != 600 {

@@ -94,7 +94,8 @@ func TestSchemaEnvironmentOnlyAndAliasFailsClosed(t *testing.T) {
 		{"whitespace alias", `env:"PILOT_NAME"`, `env:"PILOT_NAME" envAlias:" ALIAS"`, "invalid env binding"},
 		{"integer alias", `env:"PILOT_COUNT"`, `env:"PILOT_COUNT" envAlias:"COUNT_ALIAS"`, "only for string fields"},
 		{"float alias", `env:"PILOT_CPUS"`, `env:"PILOT_CPUS" envAlias:"CPU_ALIAS"`, "only for string fields"},
-		{"boolean alias", `env:"PILOT_ENABLED"`, `env:"PILOT_ENABLED" envAlias:"BOOL_ALIAS"`, "only for string fields"},
+		// One parsed bool fallback is supported; a second remains unsupported.
+		{"second boolean alias", `env:"PILOT_ENABLED"`, `env:"PILOT_ENABLED" envAlias:"BOOL_ALIAS" envAlias2:"BOOL_ALIAS_2"`, "envAlias2 requires"},
 		{"list alias", `env:"PILOT_PORTS"`, `env:"PILOT_PORTS" envAlias:"LIST_ALIAS"`, "only for string fields"},
 		{"own primary collision", `env:"PILOT_NAME"`, `env:"PILOT_NAME" envAlias:"PILOT_NAME"`, "duplicate env binding"},
 		{"later primary collision", `env:"PILOT_NAME"`, `env:"PILOT_NAME" envAlias:"PILOT_COUNT"`, "duplicate env binding"},
@@ -700,10 +701,11 @@ func normalizeList([]string) []string { panic("stub") }
 func splitCommaList(string) []string { panic("stub") }
 `
 	for name, stub := range map[string]string{
-		"firstNonEmptyEnv":             "func firstNonEmptyEnv(...string) (string, bool) { panic(\"stub\") }",
-		"lookupEnvInteger":             "func lookupEnvInteger(string, int) (int64, bool) { panic(\"stub\") }",
-		"lookupEnvFloat":               "func lookupEnvFloat(string) (float64, bool) { panic(\"stub\") }",
-		"getenvNonNegativeIntAccepted": "func getenvNonNegativeIntAccepted(string, int) (int, bool, error) { panic(\"stub\") }",
+		"firstNonEmptyEnv":                  "func firstNonEmptyEnv(...string) (string, bool) { panic(\"stub\") }",
+		"lookupEnvInteger":                  "func lookupEnvInteger(string, int) (int64, bool) { panic(\"stub\") }",
+		"lookupEnvFloat":                    "func lookupEnvFloat(string) (float64, bool) { panic(\"stub\") }",
+		"getenvNonNegativeIntAccepted":      "func getenvNonNegativeIntAccepted(string, int) (int, bool, error) { panic(\"stub\") }",
+		"getenvNonNegativeIntAliasAccepted": "func getenvNonNegativeIntAliasAccepted(string, string, int) (int, bool, error) { panic(\"stub\") }",
 	} {
 		if !strings.Contains(source, "func "+name+"(") {
 			helpers += stub + "\n"
@@ -1189,6 +1191,83 @@ func TestNullableSources(t *testing.T){
 
 func TestPhalaGeneratedConfigIsCurrent(t *testing.T) {
 	if err := run("../../internal/cli/config_phala.go", "../../internal/cli/config_phala_generated.go", "PhalaConfig", "phala", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const checkedAliasSample = "package cli\ntype PilotConfig struct {\n" +
+	" Name string `sources:\"user,repo,env,flag\" config:\"name\" env:\"PILOT_NAME\" flag:\"name\" help:\"Name\"`\n" +
+	" Count int `sources:\"user,repo,env,flag\" config:\"count\" env:\"PILOT_COUNT\" envAlias:\"ALIAS_COUNT\" flag:\"count\" help:\"Count\" nonnegative:\"true\" envInt:\"checked-alias\"`\n" +
+	" Enabled bool `sources:\"user,repo,env,flag\" config:\"enabled\" env:\"PILOT_ENABLED\" envAlias:\"ALIAS_ENABLED\" flag:\"enabled\" help:\"Enabled\" reportApplied:\"true\"`\n}"
+
+func TestSchemaCheckedIntegerAndBoolAliases(t *testing.T) {
+	for _, tc := range []struct{ old, replacement string }{
+		{`envAlias:"ALIAS_COUNT"`, ""}, {`envInt:"checked-alias"`, `envInt:""`},
+		{`envInt:"checked-alias"`, `envInt:"strict"`}, {`nonnegative:"true"`, ""},
+		{`Count int`, `Count int64`}, {`Count int`, `Count bool`},
+		{`envAlias:"ALIAS_COUNT"`, `envAlias:"ALIAS_COUNT" envAlias2:"OTHER"`},
+		{`envAlias:"ALIAS_ENABLED"`, `envAlias:"ALIAS_ENABLED" envAlias2:"OTHER"`},
+		{`envAlias:"ALIAS_ENABLED"`, `envAlias:"ALIAS_ENABLED" envAliasAfterConfig:"true"`},
+		{`envAlias:"ALIAS_ENABLED"`, `envAlias:"PILOT_COUNT"`},
+		{`envAlias:"ALIAS_COUNT"`, `envAlias:"PILOT_ENABLED"`},
+		{`Enabled bool`, `Enabled *bool`},
+	} {
+		if _, err := parseSchema([]byte(strings.Replace(checkedAliasSample, tc.old, tc.replacement, 1)), "PilotConfig", "pilot"); err == nil {
+			t.Fatalf("accepted %s -> %s", tc.old, tc.replacement)
+		}
+	}
+}
+
+func TestGenerateCheckedIntegerAndBoolAliases(t *testing.T) {
+	s, err := parseSchema([]byte(checkedAliasSample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatal("nondeterministic aliases")
+	}
+	typecheckGenerated(t, checkedAliasSample, output)
+	if strings.Count(string(output), `getenvNonNegativeIntAliasAccepted("PILOT_COUNT", "ALIAS_COUNT", cfg.Count)`) != 1 {
+		t.Fatal("checked alias must parse once")
+	}
+	const behavior = `package cli
+import("flag";"fmt";"os";"strings";"testing")
+func exit(_ int,pattern string,args ...any)error{return fmt.Errorf(pattern,args...)}
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestAliasSources(t *testing.T){
+ t.Setenv("PILOT_NAME","early");t.Setenv("PILOT_ENABLED","true");t.Setenv("ALIAS_ENABLED","")
+ for _,tc:=range []struct{primary,alias string;want int;message string}{
+  {"","",9,""},{"","12",12,""},{"0","12",0,""},{"3","bad",3,""},
+  {"bad","12",9,"PILOT_COUNT must be an integer"},{" 2 ","12",9,"PILOT_COUNT must be an integer"},
+  {"-1","12",9,"PILOT_COUNT must be non-negative"},{"","bad",9,"ALIAS_COUNT must be an integer"},
+  {"","-1",9,"ALIAS_COUNT must be non-negative"},
+ }{
+  t.Setenv("PILOT_COUNT",tc.primary);t.Setenv("ALIAS_COUNT",tc.alias);cfg:=PilotConfig{Count:9}
+  applied,err:=cfg.applyEnv();if cfg.Name!="early"||!applied.InputAccepted||cfg.Count!=tc.want {t.Fatalf("prefix/count %+v %+v %v",cfg,applied,err)}
+  if tc.message!="" {if err==nil||err.Error()!=tc.message||cfg.Enabled||applied.Enabled {t.Fatalf("partial %q: %+v %+v %v",tc.message,cfg,applied,err)}} else if err!=nil||!cfg.Enabled||!applied.Enabled {t.Fatalf("suffix: %+v %+v %v",cfg,applied,err)}
+ }
+ t.Setenv("PILOT_NAME","");t.Setenv("PILOT_COUNT","");t.Setenv("ALIAS_COUNT","")
+ for _,tc:=range []struct{primary,alias string;want,accepted bool}{
+  {"false","true",false,true},{"bad","true",true,true},{"","false",false,true},{" TRUE ","false",true,true},{"bad","bad",true,false},{"","",true,false},
+ }{
+  t.Setenv("PILOT_ENABLED",tc.primary);t.Setenv("ALIAS_ENABLED",tc.alias);cfg:=PilotConfig{Count:9,Enabled:true}
+  got,err:=cfg.applyEnv();if err!=nil||cfg.Enabled!=tc.want||got.Enabled!=tc.accepted||got.InputAccepted!=tc.accepted||cfg.Count!=9 {t.Fatalf("bool %+v: %+v %+v %v",tc,cfg,got,err)}
+ }
+ // Existing strict helper preserves its zero-on-error return contract.
+ t.Setenv("STRICT_COUNT","bad");value,accepted,err:=getenvNonNegativeIntAccepted("STRICT_COUNT",9)
+ if value!=0||accepted||err==nil||err.Error()!="STRICT_COUNT must be an integer" {t.Fatal("old strict contract changed")}
+}
+`
+	runScalarFixture(t, checkedAliasSample, output, behavior+configFixtureFunctions(t, "getenvBool"))
+}
+
+func TestCrownestGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_crownest.go", "../../internal/cli/config_crownest_generated.go", "CrownestConfig", "crownest", true); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -3728,8 +3807,10 @@ func acceptanceFixtureSource(t *testing.T, existing, generated string) string {
 		{"config.go", "lookupEnvInteger"},
 		{"config.go", "lookupEnvFloat"},
 		{"config.go", "getenvNonNegativeIntAccepted"},
+		{"config.go", "getenvNonNegativeIntAliasAccepted"},
+		{"config.go", "parseNonNegativeIntAccepted"},
 	} {
-		if strings.Contains(generated+existing, helper.name+"(") && !strings.Contains(existing, "func "+helper.name+"(") {
+		if strings.Contains(generated+existing+functions, helper.name+"(") && !strings.Contains(existing+functions, "func "+helper.name+"(") {
 			functions += sourceFixtureFunctions(t, helper.file, helper.name)
 		}
 	}

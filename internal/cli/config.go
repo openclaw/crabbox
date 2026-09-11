@@ -590,18 +590,6 @@ type SuperserveConfig struct {
 	ForgetMissing   bool
 }
 
-// CrownestConfig configures the delegated CrowNest provider. The API key is
-// intentionally absent: it is read at runtime from
-// CRABBOX_CROWNEST_API_KEY / CROWNEST_API_KEY and sent only in request headers,
-// never persisted in Crabbox config or placed on argv.
-type CrownestConfig struct {
-	APIURL        string
-	ProjectID     string
-	Template      string
-	TimeoutSecs   int
-	ForgetMissing bool
-}
-
 type DockerSandboxConfig struct {
 	CLIPath         string
 	Agent           string
@@ -2240,11 +2228,7 @@ func baseConfig() Config {
 			Workdir:         "/workspace/crabbox",
 			ExecTimeoutSecs: 600,
 		},
-		Crownest: CrownestConfig{
-			APIURL:      "https://api.crownest.dev",
-			Template:    "python-node",
-			TimeoutSecs: 600,
-		},
+		Crownest: defaultCrownestConfig(),
 		DockerSandbox: DockerSandboxConfig{
 			CLIPath: "sbx",
 			Agent:   "shell",
@@ -2808,14 +2792,6 @@ type fileSuperserveConfig struct {
 	NetworkAllowOut []string `yaml:"networkAllowOut,omitempty"`
 	NetworkDenyOut  []string `yaml:"networkDenyOut,omitempty"`
 	ForgetMissing   *bool    `yaml:"forgetMissing,omitempty"`
-}
-
-type fileCrownestConfig struct {
-	APIURL        string  `yaml:"apiUrl,omitempty"`
-	ProjectID     *string `yaml:"projectId,omitempty"`
-	Template      *string `yaml:"template,omitempty"`
-	TimeoutSecs   *int    `yaml:"timeoutSecs,omitempty"`
-	ForgetMissing *bool   `yaml:"forgetMissing,omitempty"`
 }
 
 type fileDockerSandboxConfig struct {
@@ -4991,30 +4967,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 		recordConfigInput(cfg, "superserve", inputSource, applyOptional(&cfg.Superserve.ForgetMissing, file.Superserve.ForgetMissing))
 	}
-	if file.Crownest != nil {
-		if trusted && strings.TrimSpace(file.Crownest.APIURL) != "" {
-			cfg.Crownest.APIURL = file.Crownest.APIURL
-			recordConfigInput(cfg, "crownest", inputSource, true)
-		}
-		if file.Crownest.ProjectID != nil {
-			applyOptional(&cfg.Crownest.ProjectID, file.Crownest.ProjectID)
-			recordConfigInput(cfg, "crownest", inputSource, true)
-		}
-		if file.Crownest.Template != nil {
-			applyOptional(&cfg.Crownest.Template, file.Crownest.Template)
-			recordConfigInput(cfg, "crownest", inputSource, true)
-		}
-		if file.Crownest.TimeoutSecs != nil {
-			if *file.Crownest.TimeoutSecs < 0 {
-				return exit(2, "crownest timeoutSecs must be non-negative")
-			}
-			cfg.Crownest.TimeoutSecs = *file.Crownest.TimeoutSecs
-			recordConfigInput(cfg, "crownest", inputSource, true)
-		}
-		if file.Crownest.ForgetMissing != nil {
-			applyOptional(&cfg.Crownest.ForgetMissing, file.Crownest.ForgetMissing)
-			recordConfigInput(cfg, "crownest", inputSource, true)
-		}
+	if err := applyCrownestFileConfig(cfg, file.Crownest, trusted, inputSource); err != nil {
+		return err
 	}
 	if file.DockerSandbox != nil {
 		if file.DockerSandbox.CLIPath != "" {
@@ -6917,32 +6871,12 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	cfg.Crownest.APIURL = configInputEnvString(cfg, "crownest", cfg.Crownest.APIURL, "CRABBOX_CROWNEST_API_URL", "CROWNEST_API_URL")
-	cfg.Crownest.ProjectID = configInputEnvString(cfg, "crownest", cfg.Crownest.ProjectID, "CRABBOX_CROWNEST_PROJECT_ID", "CROWNEST_PROJECT_ID")
-	cfg.Crownest.Template = configInputEnvString(cfg, "crownest", cfg.Crownest.Template, "CRABBOX_CROWNEST_TEMPLATE", "CROWNEST_TEMPLATE")
-	crownestTimeoutEnv := "CRABBOX_CROWNEST_TIMEOUT_SECS"
-	crownestTimeoutValue := os.Getenv(crownestTimeoutEnv)
-	if crownestTimeoutValue == "" {
-		crownestTimeoutEnv = "CROWNEST_TIMEOUT_SECS"
-		crownestTimeoutValue = os.Getenv(crownestTimeoutEnv)
-	}
-	if crownestTimeoutValue != "" {
-		parsed, parseErr := strconv.Atoi(crownestTimeoutValue)
-		if parseErr != nil {
-			return exit(2, "%s must be an integer", crownestTimeoutEnv)
+	{
+		applied, err := cfg.Crownest.applyEnv()
+		recordConfigInput(cfg, "crownest", configInputEnvironment, applied.InputAccepted)
+		if err != nil {
+			return err
 		}
-		if parsed < 0 {
-			return exit(2, "%s must be non-negative", crownestTimeoutEnv)
-		}
-		cfg.Crownest.TimeoutSecs = parsed
-		recordConfigInput(cfg, "crownest", configInputEnvironment, true)
-	}
-	if v, ok := getenvBool("CRABBOX_CROWNEST_FORGET_MISSING"); ok {
-		cfg.Crownest.ForgetMissing = v
-		recordConfigInput(cfg, "crownest", configInputEnvironment, true)
-	} else if v, ok := getenvBool("CROWNEST_FORGET_MISSING"); ok {
-		cfg.Crownest.ForgetMissing = v
-		recordConfigInput(cfg, "crownest", configInputEnvironment, true)
 	}
 	cfg.CloudflareDynamicWorkers.LoaderURL = configInputEnvString(cfg, "cloudflare-dynamic-workers", cfg.CloudflareDynamicWorkers.LoaderURL, "CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL", "CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_LOADER_URL")
 	cfg.CloudflareDynamicWorkers.Token = configInputEnvString(cfg, "cloudflare-dynamic-workers", cfg.CloudflareDynamicWorkers.Token, "CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN")
@@ -7687,7 +7621,19 @@ func getenvNonNegativeInt(name string, fallback int) (int, error) {
 }
 
 func getenvNonNegativeIntAccepted(name string, fallback int) (int, bool, error) {
+	return parseNonNegativeIntAccepted(name, os.Getenv(name), fallback)
+}
+
+func getenvNonNegativeIntAliasAccepted(name, alias string, fallback int) (int, bool, error) {
 	value := os.Getenv(name)
+	if value == "" {
+		name = alias
+		value = os.Getenv(name)
+	}
+	return parseNonNegativeIntAccepted(name, value, fallback)
+}
+
+func parseNonNegativeIntAccepted(name, value string, fallback int) (int, bool, error) {
 	if value == "" {
 		return fallback, false, nil
 	}

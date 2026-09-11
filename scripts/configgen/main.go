@@ -20,6 +20,7 @@ import (
 )
 
 type field struct {
+	envIntCheckedAlias                                                                                                                                                           bool
 	envSplitBefore                                                                                                                                                               bool
 	flagDurationRawPositive                                                                                                                                                      bool
 	fileListNonemptyNormalized, envListTrimmedNonempty, flagListCSV                                                                                                              bool
@@ -387,16 +388,22 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			f.fileFloatPositive = true
 		}
 		if value, ok := tags.Lookup("envInt"); ok {
-			if value != "fallback" || (f.kind != "int" && f.kind != "int64") || f.noEnv || !f.nonnegative {
+			if value == "checked-alias" {
+				if f.kind != "int" || !f.nonnegative || f.noEnv || !hasAlias || hasAlias2 {
+					return s, fmt.Errorf("%s: envInt checked-alias requires an environment-admitted nonnegative int with exactly one envAlias", f.name)
+				}
+				f.envIntCheckedAlias = true
+			} else if value != "fallback" || (f.kind != "int" && f.kind != "int64") || f.noEnv || !f.nonnegative {
 				return s, fmt.Errorf("%s: envInt is supported only as fallback for environment-admitted nonnegative int fields", f.name)
+			} else {
+				f.envIntFallback = true
 			}
-			f.envIntFallback = true
 		}
 		if f.kind == "int64" && !f.noEnv && !f.envIntFallback {
 			return s, fmt.Errorf("%s: int64 environment fields require envInt fallback", f.name)
 		}
-		if hasAlias && f.kind != "string" && !(f.kind == "int" && !f.noEnv && f.envIntFallback) {
-			return s, fmt.Errorf("%s: envAlias is supported only for string fields or environment-admitted int fields with envInt fallback", f.name)
+		if hasAlias && f.kind != "string" && !(f.kind == "bool" && !f.noEnv) && !(f.kind == "int" && !f.noEnv && (f.envIntFallback || f.envIntCheckedAlias)) {
+			return s, fmt.Errorf("%s: envAlias is supported only for string fields, environment-admitted bool fields, or int fields with envInt fallback or checked-alias", f.name)
 		}
 		if value, ok := tags.Lookup("flagFallback"); ok {
 			if value == "" || f.kind != "string" || f.noFlag {
@@ -690,6 +697,10 @@ func generate(s schema, source string) ([]byte, error) {
 			case "float64":
 				p("if value, ok := lookupEnvFloat(%q); ok { cfg.%s = value; applied.InputAccepted = true }\n", f.env, f.name)
 			case "int":
+				if f.envIntCheckedAlias {
+					p("{ value, accepted, err := getenvNonNegativeIntAliasAccepted(%q, %q, cfg.%s); if err != nil { return %serr }; if accepted { cfg.%s = value; applied.InputAccepted = true } }\n", f.env, f.envAlias, f.name, resultPrefix, f.name)
+					continue
+				}
 				if f.envIntFallback {
 					if f.envAlias != "" {
 						p("{ value, accepted := lookupEnvInteger(%q, strconv.IntSize); if primary, ok := lookupEnvInteger(%q, strconv.IntSize); ok { value, accepted = primary, true }; if accepted { cfg.%s = int(value); applied.InputAccepted = true } }\n", f.envAlias, f.env, f.name)
@@ -704,6 +715,14 @@ func generate(s schema, source string) ([]byte, error) {
 			case "*bool":
 				p("if value, ok := getenvBool(%q); ok { cfg.%s = &value; applied.InputAccepted = true }\n", f.env, f.name)
 			case "bool":
+				if f.envAlias != "" {
+					p("{ value, accepted := getenvBool(%q); if !accepted { value, accepted = getenvBool(%q) }; if accepted { cfg.%s = value; applied.InputAccepted = true\n", f.env, f.envAlias, f.name)
+					if f.reportApplied {
+						p("applied.%s = true\n", f.name)
+					}
+					p("} }\n")
+					continue
+				}
 				if f.reportApplied {
 					p("if value, ok := getenvBool(%q); ok { cfg.%s = value; applied.InputAccepted = true; applied.%s = true }\n", f.env, f.name, f.name)
 				} else {
