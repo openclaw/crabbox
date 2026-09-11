@@ -39,6 +39,24 @@ Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.
 
+Phala's complete six-field hybrid owner is `internal/cli/config_phala.go`.
+Its nullable bool remains nil by default; accepted file, environment and ordinary
+generated flag assignments copy into a fresh pointer, while ignored inputs keep
+the previous pointer. File storage remains a single pointer with its existing
+omission behavior. The primitive's scalar bool flag defaults to false for nil;
+Phala supplies its existing effective default through a local registration copy,
+without changing runtime configuration. Pointer defaults, aliases and unrelated
+scalar/list modes are not accepted.
+
+Phala uses manual flag application with six generated bindings and one separate
+provider-owned skip control, not a seventh configuration member. The imperative
+application order and existing policy remain unchanged. Its typed file snapshot
+wrapper retains conditional admission without modifying the file DTO. File paths
+expand only when accepted, environment fallback paths expand unconditionally,
+and flag paths remain raw. The ordinary registration order of distinct named
+flags does not affect name-sorted help, metadata or parsing. Native provider and
+attestation algorithms remain outside this owner.
+
 Firecracker's complete fifteen-field owner is `internal/cli/config_firecracker.go`.
 It uses existing value-string, present-int, tolerant integer environment and
 raw-positive duration modes. Eight file strings remain trusted-user-only;

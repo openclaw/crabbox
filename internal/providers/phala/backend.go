@@ -39,14 +39,14 @@ const phalaListPageSize = 100
 
 // defaultInstanceType is the smallest confidential TDX shape Phala Cloud
 // advertises. dstack provisions Intel TDX CVMs; tdx.small is the cheapest.
-const defaultInstanceType = "tdx.small"
+const defaultInstanceType = core.PhalaConfigDefaultInstanceType
 
 // defaultWorkRoot is the remote crabbox work root on a leased CVM. The dstack
 // --dev-os guest mounts its root as a read-only squashfs, so the work root must
 // live on a writable mount; /var/volatile is a writable tmpfs present on every
 // dstack guest. The earlier /work/crabbox default sat on the read-only root and
 // failed live at "write sync manifests: exit status 1" (the manifest mkdir).
-const defaultWorkRoot = "/var/volatile/crabbox"
+const defaultWorkRoot = core.PhalaConfigDefaultWorkRoot
 
 // crabboxCVMNamePrefix marks Phala CVMs created by crabbox. Phala's deploy CLI
 // has no arbitrary label facility, so ownership is carried by the CVM name and
@@ -209,7 +209,7 @@ func applyDefaults(cfg *core.Config) {
 	cfg.SSHPort = "22"
 	cfg.SSHFallbackPorts = nil
 	if cfg.Phala.CLIPath == "" {
-		cfg.Phala.CLIPath = "phala"
+		cfg.Phala.CLIPath = core.PhalaConfigDefaultCLIPath
 	}
 	if cfg.Phala.InstanceType == "" {
 		cfg.Phala.InstanceType = defaultInstanceType

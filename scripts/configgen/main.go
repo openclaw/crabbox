@@ -258,7 +258,7 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		}
 		f.kind = typeText.String()
 		switch f.kind {
-		case "string", "int", "int64", "float64", "bool", "[]string":
+		case "string", "int", "int64", "float64", "bool", "*bool", "[]string":
 		case "time.Duration":
 			standardTime := false
 			for _, spec := range file.Imports {
@@ -551,6 +551,9 @@ func generate(s schema, source string) ([]byte, error) {
 	for _, f := range s.fields {
 		for _, binding := range f.fileBindings() {
 			kind := "*" + f.kind
+			if f.kind == "*bool" {
+				kind = "*bool"
+			}
 			if f.fileStorageValue {
 				kind = f.kind
 			}
@@ -638,6 +641,8 @@ func generate(s schema, source string) ([]byte, error) {
 			}
 			if f.kind == "time.Duration" {
 				p("if applyLeaseDuration(&cfg.%s, %s) { applied.InputAccepted = true }\n", f.name, value)
+			} else if f.kind == "*bool" {
+				p("value := %s\ncfg.%s = &value\napplied.InputAccepted = true\n", value, f.name)
 			} else {
 				p("cfg.%s = %s\napplied.InputAccepted = true\n", f.name, value)
 			}
@@ -696,6 +701,8 @@ func generate(s schema, source string) ([]byte, error) {
 				p("{ var accepted bool; var err error; cfg.%s, accepted, err = getenvNonNegativeIntAccepted(%q, cfg.%s); if err != nil { return %serr }; if accepted { applied.InputAccepted = true } }\n", f.name, f.env, f.name, resultPrefix)
 			case "int64":
 				p("if value, ok := lookupEnvInteger(%q, 64); ok { cfg.%s = value; applied.InputAccepted = true }\n", f.env, f.name)
+			case "*bool":
+				p("if value, ok := getenvBool(%q); ok { cfg.%s = &value; applied.InputAccepted = true }\n", f.env, f.name)
 			case "bool":
 				if f.reportApplied {
 					p("if value, ok := getenvBool(%q); ok { cfg.%s = value; applied.InputAccepted = true; applied.%s = true }\n", f.env, f.name, f.name)
@@ -739,6 +746,9 @@ func generate(s schema, source string) ([]byte, error) {
 				continue
 			}
 			kind := f.kind
+			if kind == "*bool" {
+				kind = "bool"
+			}
 			if f.stringDurationFlag() {
 				kind = "string"
 			}
@@ -778,7 +788,7 @@ func generate(s schema, source string) ([]byte, error) {
 				p("%s: list%s,\n", f.name, f.name)
 				continue
 			}
-			method := map[string]string{"string": "String", "int": "Int", "int64": "Int64", "float64": "Float64", "bool": "Bool", "[]string": "String", "time.Duration": "Duration"}[f.kind]
+			method := map[string]string{"string": "String", "int": "Int", "int64": "Int64", "float64": "Float64", "bool": "Bool", "*bool": "Bool", "[]string": "String", "time.Duration": "Duration"}[f.kind]
 			value := "defaults." + f.name
 			if f.stringDurationFlag() {
 				method = "String"
@@ -786,6 +796,9 @@ func generate(s schema, source string) ([]byte, error) {
 			}
 			if f.flagFallbackExpr != "" {
 				value = fmt.Sprintf("blank(%s, %sFlagFallback%s)", value, s.name, f.name)
+			}
+			if f.kind == "*bool" {
+				value = value + " != nil && *" + value
 			}
 			if f.kind == "[]string" {
 				if f.flagListEmptyScalar {
@@ -861,7 +874,9 @@ func generate(s schema, source string) ([]byte, error) {
 						value = "splitCommaList(" + value + ")"
 					}
 				}
-				if f.reportApplied {
+				if f.kind == "*bool" {
+					p("if flagWasSet(fs, %q) { value := %s; cfg.%s = &value; applied.InputAccepted = true }\n", f.flag, value, f.name)
+				} else if f.reportApplied {
 					p("if visited.%s { cfg.%s = %s; applied.InputAccepted = true; applied.%s = true }\n", f.name, f.name, value, f.name)
 				} else {
 					p("if flagWasSet(fs, %q) { cfg.%s = %s; applied.InputAccepted = true }\n", f.flag, f.name, value)
