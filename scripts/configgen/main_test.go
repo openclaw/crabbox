@@ -616,6 +616,12 @@ func TestMultipassGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestNebiusGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_nebius.go", "../../internal/cli/config_nebius_generated.go", "NebiusConfig", "nebius", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
