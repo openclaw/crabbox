@@ -268,15 +268,51 @@ env -i \
 
 # Download the complete selected dependency graph into an isolated cache, then
 # copy the proxy-form cache entries. Network access ends before the install.
-(
-  cd "$SOURCE"
-  env -i \
-    GOCACHE="$SEED_GOCACHE" GOMODCACHE="$SEED_MODCACHE" \
-    GOENV=off GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org \
-    GOTOOLCHAIN=local GOWORK=off \
-    HOME="$SEED_HOME" PATH="$PATH" TMPDIR="$SEED_TMP" \
-    go mod download all
-)
+seed_download_retryable() {
+  local line recognized=0
+  local progress='^go: downloading [^[:space:]]+ v[^[:space:]]+$'
+  local transient='^go: ([^[:space:]:]+@v[^[:space:]:]+): verifying go[.]mod: ([^[:space:]:]+@v[^[:space:]:]+)/go[.]mod: reading https://sum[.]golang[.]org/tile/[0-9]+/[0-9]+/(x[0-9]+/)*[0-9]+: stream error: stream ID [0-9]+; INTERNAL_ERROR; received from peer$'
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ $progress ]]; then
+      continue
+    fi
+    if [[ "$line" =~ $transient ]] && [[ "${BASH_REMATCH[1]}" == "${BASH_REMATCH[2]}" ]]; then
+      recognized=1
+    else
+      return 1
+    fi
+  done <"$1"
+  [[ "$recognized" -eq 1 ]]
+}
+
+seed_dependencies() {
+  local attempt download_status log
+  for attempt in 1 2; do
+    log="$WORK/seed-download-attempt-$attempt.log"
+    if (
+      cd "$SOURCE" || exit $?
+      env -i \
+        GOCACHE="$SEED_GOCACHE" GOMODCACHE="$SEED_MODCACHE" \
+        GOENV=off GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org \
+        GOTOOLCHAIN=local GOWORK=off \
+        HOME="$SEED_HOME" PATH="$PATH" TMPDIR="$SEED_TMP" \
+        go mod download all
+    ) >"$log" 2>&1; then
+      cat "$log" >&2
+      return 0
+    else
+      download_status=$?
+    fi
+    cat "$log" >&2
+    if [[ "$attempt" -ne 1 || "$download_status" -ne 1 ]] || ! seed_download_retryable "$log"; then
+      return "$download_status"
+    fi
+    echo "Dependency seed attempt 1 failed with a checksum-database transport error; retrying once in 5 seconds." >&2
+    sleep 5 || return $?
+  done
+}
+
+seed_dependencies
 [[ -d "$SEED_MODCACHE/cache/download" ]] || fail "dependency download did not create proxy cache metadata"
 cp -R "$SEED_MODCACHE/cache/download/." "$PROXY/"
 
