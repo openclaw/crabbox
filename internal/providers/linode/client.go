@@ -128,11 +128,7 @@ func (c *linodeClient) AccountSettings(ctx context.Context) (accountSettings, er
 }
 
 func (c *linodeClient) ListLinodes(ctx context.Context) ([]linodeInstance, error) {
-	var out []linodeInstance
-	err := c.listPaged(ctx, "/linode/instances", func(page linodePage) {
-		out = append(out, page.Linodes...)
-	})
-	return out, err
+	return listLinodePages[linodeInstance](ctx, c, "/linode/instances")
 }
 
 func (c *linodeClient) GetLinode(ctx context.Context, id int64) (linodeInstance, error) {
@@ -160,53 +156,27 @@ func (c *linodeClient) UpdateLinodeTags(ctx context.Context, id int64, tags []st
 }
 
 func (c *linodeClient) ListTypes(ctx context.Context) ([]linodeType, error) {
-	var out []linodeType
-	err := c.listPaged(ctx, "/linode/types", func(page linodePage) {
-		out = append(out, page.Types...)
-	})
-	return out, err
+	return listLinodePages[linodeType](ctx, c, "/linode/types")
 }
 
 func (c *linodeClient) ListImages(ctx context.Context) ([]linodeImage, error) {
-	var out []linodeImage
-	err := c.listPaged(ctx, "/images", func(page linodePage) {
-		out = append(out, page.Images...)
-	})
-	return out, err
+	return listLinodePages[linodeImage](ctx, c, "/images")
 }
 
 func (c *linodeClient) ListRegions(ctx context.Context) ([]linodeRegion, error) {
-	var out []linodeRegion
-	err := c.listPaged(ctx, "/regions", func(page linodePage) {
-		out = append(out, page.Regions...)
-	})
-	return out, err
+	return listLinodePages[linodeRegion](ctx, c, "/regions")
 }
 
 func (c *linodeClient) ListFirewalls(ctx context.Context) ([]linodeFirewall, error) {
-	var out []linodeFirewall
-	err := c.listPaged(ctx, "/networking/firewalls", func(page linodePage) {
-		out = append(out, page.Firewalls...)
-	})
-	return out, err
+	return listLinodePages[linodeFirewall](ctx, c, "/networking/firewalls")
 }
 
 func (c *linodeClient) AddFirewallDevice(ctx context.Context, firewallID int64, req firewallDeviceRequest) error {
 	return c.do(ctx, http.MethodPost, fmt.Sprintf("/networking/firewalls/%d/devices", firewallID), req, nil)
 }
 
-type linodePage struct {
-	Page      int              `json:"page"`
-	Pages     int              `json:"pages"`
-	Results   int              `json:"results"`
-	Linodes   []linodeInstance `json:"data,omitempty"`
-	Types     []linodeType     `json:"-"`
-	Images    []linodeImage    `json:"-"`
-	Regions   []linodeRegion   `json:"-"`
-	Firewalls []linodeFirewall `json:"-"`
-}
-
-func (c *linodeClient) listPaged(ctx context.Context, path string, consume func(linodePage)) error {
+func listLinodePages[T any](ctx context.Context, c *linodeClient, path string) ([]T, error) {
+	var out []T
 	page := 1
 	for {
 		nextPath := withPage(path, page)
@@ -217,36 +187,15 @@ func (c *linodeClient) listPaged(ctx context.Context, path string, consume func(
 			Data    json.RawMessage `json:"data"`
 		}
 		if err := c.do(ctx, http.MethodGet, nextPath, nil, &raw); err != nil {
-			return err
+			return out, err
 		}
-		parsed := linodePage{Page: raw.Page, Pages: raw.Pages, Results: raw.Results}
-		switch path {
-		case "/linode/instances":
-			if err := json.Unmarshal(raw.Data, &parsed.Linodes); err != nil {
-				return fmt.Errorf("linode %s decode data: %w", nextPath, err)
-			}
-		case "/linode/types":
-			if err := json.Unmarshal(raw.Data, &parsed.Types); err != nil {
-				return fmt.Errorf("linode %s decode data: %w", nextPath, err)
-			}
-		case "/images":
-			if err := json.Unmarshal(raw.Data, &parsed.Images); err != nil {
-				return fmt.Errorf("linode %s decode data: %w", nextPath, err)
-			}
-		case "/regions":
-			if err := json.Unmarshal(raw.Data, &parsed.Regions); err != nil {
-				return fmt.Errorf("linode %s decode data: %w", nextPath, err)
-			}
-		case "/networking/firewalls":
-			if err := json.Unmarshal(raw.Data, &parsed.Firewalls); err != nil {
-				return fmt.Errorf("linode %s decode data: %w", nextPath, err)
-			}
-		default:
-			return core.Exit(2, "linode unsupported paged path %s", path)
+		var data []T
+		if err := json.Unmarshal(raw.Data, &data); err != nil {
+			return out, fmt.Errorf("linode %s decode data: %w", nextPath, err)
 		}
-		consume(parsed)
-		if parsed.Pages <= 0 || page >= parsed.Pages {
-			return nil
+		out = append(out, data...)
+		if raw.Pages <= 0 || page >= raw.Pages {
+			return out, nil
 		}
 		page++
 	}

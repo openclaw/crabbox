@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -193,6 +195,22 @@ func TestLinodeClientPagination(t *testing.T) {
 	if strings.Join(paths, ",") != "/linode/instances?page=1&page_size=500,/linode/instances?page=2&page_size=500" {
 		t.Fatalf("paths=%v", paths)
 	}
+
+	t.Run("instances", func(t *testing.T) {
+		testLinodePageContract(t, "/linode/instances", (*linodeClient).ListLinodes, linodeInstance{ID: 1, Label: "one"}, linodeInstance{ID: 2, Label: "two"})
+	})
+	t.Run("types", func(t *testing.T) {
+		testLinodePageContract(t, "/linode/types", (*linodeClient).ListTypes, linodeType{ID: "one", Label: "one"}, linodeType{ID: "two", Label: "two"})
+	})
+	t.Run("images", func(t *testing.T) {
+		testLinodePageContract(t, "/images", (*linodeClient).ListImages, linodeImage{ID: "one", Label: "one"}, linodeImage{ID: "two", Label: "two"})
+	})
+	t.Run("regions", func(t *testing.T) {
+		testLinodePageContract(t, "/regions", (*linodeClient).ListRegions, linodeRegion{ID: "one", Label: "one"}, linodeRegion{ID: "two", Label: "two"})
+	})
+	t.Run("firewalls", func(t *testing.T) {
+		testLinodePageContract(t, "/networking/firewalls", (*linodeClient).ListFirewalls, linodeFirewall{ID: 1, Label: "one"}, linodeFirewall{ID: 2, Label: "two"})
+	})
 }
 
 func TestLinodeClientErrorRedaction(t *testing.T) {
@@ -327,4 +345,136 @@ func TestLinodeClientRequestEnvelope(t *testing.T) {
 			t.Fatalf("transport calls=%d", calls)
 		}
 	})
+}
+
+type paginationErrorReader struct{ err error }
+
+func (r paginationErrorReader) Read([]byte) (int, error) { return 0, r.err }
+
+func testLinodePageContract[T any](t *testing.T, path string, list func(*linodeClient, context.Context) ([]T, error), first, second T) {
+	t.Helper()
+	encode := func(v any) string {
+		t.Helper()
+		data, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	page := func(data string, pages int) string {
+		return `{"data":` + data + `,"page":99,"pages":` + strconv.Itoa(pages) + `,"results":0}`
+	}
+	firstPage := page(encode([]T{first}), 2)
+	secondData := encode([]T{second})
+	partialBad := `[` + encode(second) + `,{"id":[]}]`
+	sentinel := errors.New("synthetic pagination read failure")
+	type response struct {
+		body      string
+		status    int
+		readError bool
+	}
+	for _, tc := range []struct {
+		name      string
+		responses []response
+		want      []T
+		errorKind string
+	}{
+		{"order and duplicates", []response{{body: page(encode([]T{first, second, first}), 2)}, {body: page(secondData, 2)}}, []T{first, second, first, second}, ""},
+		{"empty first page continues despite results and response page", []response{{body: page("[]", 2)}, {body: page(secondData, 2)}}, []T{second}, ""},
+		{"null first page continues", []response{{body: page("null", 2)}, {body: page(secondData, 2)}}, []T{second}, ""},
+		{"empty terminal page remains nil", []response{{body: page("[]", 1)}}, nil, ""},
+		{"null terminal page remains nil", []response{{body: page("null", 1)}}, nil, ""},
+		{"omitted metadata empty data", []response{{body: `{"data":[]}`}}, nil, ""},
+		{"null metadata empty data", []response{{body: `{"data":[],"page":null,"pages":null,"results":null}`}}, nil, ""},
+		{"pages zero still appends current data", []response{{body: page(encode([]T{first}), 0)}}, []T{first}, ""},
+		{"pages negative still appends current data", []response{{body: page(encode([]T{first}), -1)}}, []T{first}, ""},
+		{"later HTTP failure retains prior", []response{{body: firstPage}, {body: "synthetic unavailable", status: 503}}, []T{first}, "http"},
+		{"later data failure discards partial current page", []response{{body: firstPage}, {body: page(partialBad, 2)}}, []T{first}, "data"},
+		{"decode data before terminal stop", []response{{body: page(partialBad, 0)}}, nil, "data"},
+		{"missing data remains a decode failure", []response{{body: `{"page":1,"pages":0,"results":0}`}}, nil, "missing-data"},
+		{"later invalid page metadata", []response{{body: firstPage}, {body: `{"data":` + secondData + `,"page":"bad","pages":2,"results":0}`}}, []T{first}, "metadata"},
+		{"later invalid results metadata", []response{{body: firstPage}, {body: `{"data":` + secondData + `,"page":2,"pages":2,"results":"bad"}`}}, []T{first}, "metadata"},
+		{"later invalid pages metadata", []response{{body: firstPage}, {body: `{"data":` + secondData + `,"page":2,"pages":"bad","results":0}`}}, []T{first}, "metadata"},
+		{"later response read failure retains prior", []response{{body: firstPage}, {readError: true}}, []T{first}, "read"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.WithValue(context.Background(), struct{ key string }{"pagination"}, tc.name)
+			calls := 0
+			client := &linodeClient{baseURL: "https://api.example.test", token: "synthetic-page-token"}
+			client.client = &http.Client{Transport: envelopeRoundTripper(func(req *http.Request) (*http.Response, error) {
+				calls++
+				if calls > len(tc.responses) {
+					t.Fatalf("unexpected additional page%d", calls)
+				}
+				wantPath := path + "?page=" + strconv.Itoa(calls) + "&page_size=500"
+				if req.URL.RequestURI() != wantPath || req.Method != http.MethodGet || req.Body != nil || req.Context() != ctx {
+					t.Fatalf("request=%s %s body=%v context preserved=%v", req.Method, req.URL, req.Body, req.Context() == ctx)
+				}
+				if req.Header.Get("Authorization") != "Bearer synthetic-page-token" || req.Header.Get("Accept") != "application/json" || req.Header.Get("Content-Type") != "" {
+					t.Fatalf("headers=%v", req.Header)
+				}
+				response := tc.responses[calls-1]
+				status := response.status
+				if status == 0 {
+					status = 200
+				}
+				var body io.Reader = strings.NewReader(response.body)
+				if response.readError {
+					body = paginationErrorReader{sentinel}
+				}
+				return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(body), Request: req}, nil
+			})}
+			got, err := list(client, ctx)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("items=%#v want %#v", got, tc.want)
+			}
+			if calls != len(tc.responses) {
+				t.Fatalf("calls=%d want %d", calls, len(tc.responses))
+			}
+			nextPath := path + "?page=" + strconv.Itoa(calls) + "&page_size=500"
+			switch tc.errorKind {
+			case "":
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "http":
+				var api *linodeAPIError
+				if !errors.As(err, &api) || api.Status != 503 || api.Operation != "GET "+nextPath || api.Body != "synthetic unavailable" || err.Error() != "linode GET "+nextPath+": http 503: synthetic unavailable" {
+					t.Fatalf("HTTP error=%T %v", err, err)
+				}
+			case "read":
+				if !errors.Is(err, sentinel) || err.Error() != "linode GET "+nextPath+" response body: "+sentinel.Error() {
+					t.Fatalf("read error=%T %v", err, err)
+				}
+			case "data", "missing-data":
+				if err == nil {
+					t.Fatal("missing data decode error")
+				}
+				cause := errors.Unwrap(err)
+				if cause == nil || err.Error() != "linode "+nextPath+" decode data: "+cause.Error() {
+					t.Fatalf("data wrapper=%T %v", err, err)
+				}
+				if tc.errorKind == "data" {
+					var mismatch *json.UnmarshalTypeError
+					if !errors.As(err, &mismatch) {
+						t.Fatalf("data cause=%T", cause)
+					}
+				} else {
+					var syntax *json.SyntaxError
+					if !errors.As(err, &syntax) {
+						t.Fatalf("missing-data cause=%T", cause)
+					}
+				}
+			case "metadata":
+				if err == nil {
+					t.Fatal("missing metadata error")
+				}
+				cause := errors.Unwrap(err)
+				var mismatch *json.UnmarshalTypeError
+				if cause == nil || !errors.As(err, &mismatch) || err.Error() != "linode GET "+nextPath+" decode: "+cause.Error() {
+					t.Fatalf("metadata wrapper=%T %v", err, err)
+				}
+			}
+		})
+	}
 }
