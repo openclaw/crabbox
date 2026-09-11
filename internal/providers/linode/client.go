@@ -1,7 +1,6 @@
 package linode
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const apiBaseURL = "https://api.linode.com/v4"
@@ -47,15 +47,7 @@ func newLinodeClient(rt core.Runtime) (*linodeClient, error) {
 }
 
 func (c *linodeClient) do(ctx context.Context, method, path string, body any, out any) error {
-	var reader io.Reader
-	if body != nil {
-		var buf bytes.Buffer
-		if err := json.NewEncoder(&buf).Encode(body); err != nil {
-			return err
-		}
-		reader = &buf
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
+	req, err := shared.NewJSONRequest(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return err
 	}
