@@ -10,22 +10,8 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type flagValues struct {
-	APIURL        *string
-	ProjectID     *string
-	Template      *string
-	TimeoutSecs   *int
-	ForgetMissing *bool
-}
-
 func registerFlags(fs *flag.FlagSet, defaults Config) any {
-	return flagValues{
-		APIURL:        fs.String("crownest-url", defaults.Crownest.APIURL, "Trusted CrowNest API base URL"),
-		ProjectID:     fs.String("crownest-project-id", defaults.Crownest.ProjectID, "CrowNest project ID"),
-		Template:      fs.String("crownest-template", defaults.Crownest.Template, "CrowNest Workspace Run template"),
-		TimeoutSecs:   fs.Int("crownest-timeout-secs", defaults.Crownest.TimeoutSecs, "CrowNest Workspace Run timeout in seconds"),
-		ForgetMissing: fs.Bool("crownest-forget-missing", defaults.Crownest.ForgetMissing, "remove the local claim when stop gets 404"),
-	}
+	return core.RegisterCrownestConfigFlags(fs, defaults.Crownest)
 }
 
 func applyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
@@ -34,29 +20,14 @@ func applyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 			return err
 		}
 	}
-	v, ok := values.(flagValues)
+	v, ok := values.(core.CrownestConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if core.FlagWasSet(fs, "crownest-url") {
-		cfg.Crownest.APIURL = *v.APIURL
-		core.RecordProviderFlagInputs(cfg, true, "crownest")
-	}
-	if core.FlagWasSet(fs, "crownest-project-id") {
-		cfg.Crownest.ProjectID = *v.ProjectID
-		core.RecordProviderFlagInputs(cfg, true, "crownest")
-	}
-	if core.FlagWasSet(fs, "crownest-template") {
-		cfg.Crownest.Template = *v.Template
-		core.RecordProviderFlagInputs(cfg, true, "crownest")
-	}
-	if core.FlagWasSet(fs, "crownest-timeout-secs") {
-		cfg.Crownest.TimeoutSecs = *v.TimeoutSecs
-		core.RecordProviderFlagInputs(cfg, true, "crownest")
-	}
-	if core.FlagWasSet(fs, "crownest-forget-missing") {
-		cfg.Crownest.ForgetMissing = *v.ForgetMissing
-		core.RecordProviderFlagInputs(cfg, true, "crownest")
+	applied, err := v.Apply(&cfg.Crownest, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, "crownest")
+	if err != nil {
+		return err
 	}
 	return validateConfig(*cfg)
 }
@@ -77,7 +48,7 @@ func validateConfig(cfg Config) error {
 func validateBaseURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		raw = "https://api.crownest.dev"
+		raw = core.CrownestConfigDefaultAPIURL
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {

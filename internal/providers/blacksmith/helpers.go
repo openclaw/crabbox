@@ -1,7 +1,6 @@
 package blacksmith
 
 import (
-	"flag"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -21,13 +20,6 @@ var (
 	blacksmithStatusPollDelay  = 5 * time.Second
 )
 
-type blacksmithFlagValues struct {
-	Org      *string
-	Workflow *string
-	Job      *string
-	Ref      *string
-}
-
 type blacksmithListItem struct {
 	ID       string `json:"id"`
 	Status   string `json:"status"`
@@ -36,34 +28,6 @@ type blacksmithListItem struct {
 	Job      string `json:"job"`
 	Ref      string `json:"ref"`
 	Created  string `json:"created"`
-}
-
-func registerBlacksmithFlags(fs *flag.FlagSet, defaults Config) blacksmithFlagValues {
-	return blacksmithFlagValues{
-		Org:      fs.String("blacksmith-org", defaults.Blacksmith.Org, "Blacksmith organization"),
-		Workflow: fs.String("blacksmith-workflow", defaults.Blacksmith.Workflow, "Blacksmith Testbox workflow file, name, or id"),
-		Job:      fs.String("blacksmith-job", defaults.Blacksmith.Job, "Blacksmith Testbox workflow job"),
-		Ref:      fs.String("blacksmith-ref", defaults.Blacksmith.Ref, "Blacksmith Testbox git ref"),
-	}
-}
-
-func applyBlacksmithFlagOverrides(cfg *Config, fs *flag.FlagSet, values blacksmithFlagValues) {
-	if core.FlagWasSet(fs, "blacksmith-org") {
-		cfg.Blacksmith.Org = *values.Org
-		core.RecordProviderFlagInputs(cfg, true, "blacksmith-testbox")
-	}
-	if core.FlagWasSet(fs, "blacksmith-workflow") {
-		cfg.Blacksmith.Workflow = *values.Workflow
-		core.RecordProviderFlagInputs(cfg, true, "blacksmith-testbox")
-	}
-	if core.FlagWasSet(fs, "blacksmith-job") {
-		cfg.Blacksmith.Job = *values.Job
-		core.RecordProviderFlagInputs(cfg, true, "blacksmith-testbox")
-	}
-	if core.FlagWasSet(fs, "blacksmith-ref") {
-		cfg.Blacksmith.Ref = *values.Ref
-		core.RecordProviderFlagInputs(cfg, true, "blacksmith-testbox")
-	}
 }
 
 func blacksmithWarmupArgs(cfg Config, publicKey string) ([]string, error) {

@@ -94,7 +94,8 @@ func TestSchemaEnvironmentOnlyAndAliasFailsClosed(t *testing.T) {
 		{"whitespace alias", `env:"PILOT_NAME"`, `env:"PILOT_NAME" envAlias:" ALIAS"`, "invalid env binding"},
 		{"integer alias", `env:"PILOT_COUNT"`, `env:"PILOT_COUNT" envAlias:"COUNT_ALIAS"`, "only for string fields"},
 		{"float alias", `env:"PILOT_CPUS"`, `env:"PILOT_CPUS" envAlias:"CPU_ALIAS"`, "only for string fields"},
-		{"boolean alias", `env:"PILOT_ENABLED"`, `env:"PILOT_ENABLED" envAlias:"BOOL_ALIAS"`, "only for string fields"},
+		// One parsed bool fallback is supported; a second remains unsupported.
+		{"second boolean alias", `env:"PILOT_ENABLED"`, `env:"PILOT_ENABLED" envAlias:"BOOL_ALIAS" envAlias2:"BOOL_ALIAS_2"`, "envAlias2 requires"},
 		{"list alias", `env:"PILOT_PORTS"`, `env:"PILOT_PORTS" envAlias:"LIST_ALIAS"`, "only for string fields"},
 		{"own primary collision", `env:"PILOT_NAME"`, `env:"PILOT_NAME" envAlias:"PILOT_NAME"`, "duplicate env binding"},
 		{"later primary collision", `env:"PILOT_NAME"`, `env:"PILOT_NAME" envAlias:"PILOT_COUNT"`, "duplicate env binding"},
@@ -604,8 +605,20 @@ func TestCoderGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestNvidiaBrevGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_nvidia_brev.go", "../../internal/cli/config_nvidia_brev_generated.go", "NvidiaBrevConfig", "nvidia-brev", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMultipassGeneratedConfigIsCurrent(t *testing.T) {
 	if err := run("../../internal/cli/config_multipass.go", "../../internal/cli/config_multipass_generated.go", "MultipassConfig", "multipass", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNebiusGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_nebius.go", "../../internal/cli/config_nebius_generated.go", "NebiusConfig", "nebius", true); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -688,10 +701,11 @@ func normalizeList([]string) []string { panic("stub") }
 func splitCommaList(string) []string { panic("stub") }
 `
 	for name, stub := range map[string]string{
-		"firstNonEmptyEnv":             "func firstNonEmptyEnv(...string) (string, bool) { panic(\"stub\") }",
-		"lookupEnvInteger":             "func lookupEnvInteger(string, int) (int64, bool) { panic(\"stub\") }",
-		"lookupEnvFloat":               "func lookupEnvFloat(string) (float64, bool) { panic(\"stub\") }",
-		"getenvNonNegativeIntAccepted": "func getenvNonNegativeIntAccepted(string, int) (int, bool, error) { panic(\"stub\") }",
+		"firstNonEmptyEnv":                  "func firstNonEmptyEnv(...string) (string, bool) { panic(\"stub\") }",
+		"lookupEnvInteger":                  "func lookupEnvInteger(string, int) (int64, bool) { panic(\"stub\") }",
+		"lookupEnvFloat":                    "func lookupEnvFloat(string) (float64, bool) { panic(\"stub\") }",
+		"getenvNonNegativeIntAccepted":      "func getenvNonNegativeIntAccepted(string, int) (int, bool, error) { panic(\"stub\") }",
+		"getenvNonNegativeIntAliasAccepted": "func getenvNonNegativeIntAliasAccepted(string, string, int) (int, bool, error) { panic(\"stub\") }",
 	} {
 		if !strings.Contains(source, "func "+name+"(") {
 			helpers += stub + "\n"
@@ -867,6 +881,396 @@ const durationSample = "package cli\nimport \"time\"\ntype PilotConfig struct {\
 	" Timeout time.Duration `sources:\"user,repo,env,flag\" config:\"timeout\" env:\"PILOT_TIMEOUT\" flag:\"pilot-timeout\" help:\"Timeout\" duration:\"positive-overlay\" fileStorage:\"value\" default:\"180s\"`\n" +
 	" Count int `sources:\"user,repo,env,flag\" config:\"count\" env:\"PILOT_COUNT\" flag:\"pilot-count\" help:\"Count\" nonnegative:\"true\"`\n" +
 	" After bool `sources:\"user,repo,env,flag\" config:\"after\" env:\"PILOT_AFTER\" flag:\"pilot-after\" help:\"After\" reportApplied:\"true\"`\n}"
+
+func TestFirecrackerGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_firecracker.go", "../../internal/cli/config_firecracker_generated.go", "FirecrackerConfig", "firecracker", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManualFlagApplicationSchema(t *testing.T) {
+	source := strings.Replace(durationSample, "type PilotConfig", "//configgen:flag-application manual\ntype PilotConfig", 1)
+	for _, tc := range []struct{ old, replacement string }{
+		{"//configgen:flag-application manual", "//configgen:flag-application"},
+		{"//configgen:flag-application manual", "//configgen:flag-application automatic"},
+		{"//configgen:flag-application manual", "//configgen:flag-application manual\n//configgen:flag-application manual"},
+		{"//configgen:flag-application manual\ntype PilotConfig", "//configgen:flag-application manual\ntype Other string\ntype PilotConfig"},
+		{"//configgen:flag-application manual\ntype PilotConfig", "//configgen:flag-application manual\n\ntype PilotConfig"},
+	} {
+		_, err := parseSchema([]byte(strings.Replace(source, tc.old, tc.replacement, 1)), "PilotConfig", "pilot")
+		if err == nil || !strings.Contains(err.Error(), "flag-application") {
+			t.Fatalf("%q: %v", tc.replacement, err)
+		}
+	}
+	noFlags := "package cli\n//configgen:flag-application manual\ntype PilotConfig struct { Name string `sources:\"env\" env:\"NAME\"` }"
+	if _, err := parseSchema([]byte(noFlags), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "flag-admitted") {
+		t.Fatalf("no flags: %v", err)
+	}
+	for _, tags := range []string{`sources:"runtime"`, `sources:"runtime" yaml:"-"`, `sources:"runtime" json:"-"`, `json:"-" sources:"runtime" yaml:"-"`, `sources:"runtime"  yaml:"-"   json:"-"`} {
+		withRuntime := strings.Replace(source, "type PilotConfig struct {", "type PilotConfig struct {\n Metadata map[string]string `"+tags+"`", 1)
+		if _, err := parseSchema([]byte(withRuntime), "PilotConfig", "pilot"); err != nil {
+			t.Fatalf("%s: %v", tags, err)
+		}
+	}
+	for _, tags := range []string{`sources:"runtime" yaml:"value"`, `sources:"runtime" json:"-,omitempty"`, `sources:"runtime" yaml:"-" yaml:"-"`, `sources:"runtime" json:"-" json:"-"`, `sources:"runtime" sources:"runtime"`, `sources:"runtime" config:"-"`} {
+		withRuntime := strings.Replace(source, "type PilotConfig struct {", "type PilotConfig struct {\n Metadata map[string]string `"+tags+"`", 1)
+		if _, err := parseSchema([]byte(withRuntime), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "runtime fields") {
+			t.Fatalf("%s: %v", tags, err)
+		}
+	}
+	for _, separator := range []string{"\t", "\n", "\r", "\u00a0"} {
+		tags := `sources:"runtime"` + separator + `yaml:"-" json:"-"`
+		withRuntime := strings.Replace(source, "type PilotConfig struct {", "type PilotConfig struct {\n Metadata map[string]string `"+tags+"`", 1)
+		if _, err := parseSchema([]byte(withRuntime), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "runtime fields") {
+			t.Fatalf("runtime separator %q: %v", separator, err)
+		}
+	}
+}
+
+func TestGenerateManualFlagApplication(t *testing.T) {
+	const source = "package cli\nimport \"time\"\n//configgen:flag-application manual\ntype PilotConfig struct {\n" +
+		" Metadata map[string]string `sources:\"runtime\" yaml:\"-\" json:\"-\"`\n" +
+		" Name string `sources:\"user,repo,env,flag\" config:\"name\" env:\"NAME\" flag:\"name\" help:\"Name\"`\n" +
+		" Enabled bool `sources:\"user,repo,env,flag\" config:\"enabled\" env:\"ENABLED\" flag:\"enabled\" help:\"Enabled\" reportApplied:\"true\"`\n" +
+		" Timeout time.Duration `sources:\"user,repo,env,flag\" config:\"timeout\" env:\"TIMEOUT\" flag:\"timeout\" help:\"Timeout\" duration:\"positive-overlay\" fileStorage:\"value\" flagDuration:\"raw-positive\"`\n}"
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatal("nondeterministic manual flags")
+	}
+	for _, absent := range []string{" Apply(", "Metadata", `"time"`, `"strings"`} {
+		if strings.Contains(string(output), absent) {
+			t.Fatalf("unexpected %q", absent)
+		}
+	}
+	for _, field := range []string{"Name", "Enabled", "Timeout"} {
+		if !strings.Contains(string(output), field+":") || !strings.Contains(string(output), "flagWasSet(fs,") {
+			t.Fatalf("missing visit %s", field)
+		}
+	}
+	typecheckGenerated(t, source, output)
+	// Import accounting must follow registration/default use, not suppressed Apply parsing.
+	strict := strings.Replace(source, `flagDuration:"raw-positive"`, `flagDuration:"trim-positive" flagDurationError:"positive required"`, 1)
+	strictSchema, err := parseSchema([]byte(strict), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	strictOutput, err := generate(strictSchema, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	typecheckGenerated(t, strict, strictOutput)
+	const behavior = `package cli
+import("flag";"fmt";"os";"strings";"testing";"time")
+func exit(_ int,pattern string,args ...any)error{return fmt.Errorf(pattern,args...)}
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestMechanicalManualFlags(t *testing.T){
+ cfg:=PilotConfig{Name:"prior",Enabled:true,Timeout:time.Minute,Metadata:map[string]string{"label":"same"}}
+ fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+ if PilotConfigFlagPresence(fs)!=(PilotConfigVisitedFlags{}){t.Fatal("unvisited facts")}
+ if err:=fs.Parse([]string{"--name=", "--enabled=false", "--timeout=invalid"});err!=nil{t.Fatal(err)}
+ visited:=PilotConfigFlagPresence(fs)
+ if !visited.Name||!visited.Enabled||!visited.Timeout||*values.Name!=""||*values.Enabled||*values.Timeout!="invalid"{t.Fatal("raw storage/visits changed")}
+ if cfg.Name!="prior"||!cfg.Enabled||cfg.Timeout!=time.Minute{t.Fatal("registration/visits applied inputs")}
+ no:=false;got,err:=cfg.applyFile(&filePilotConfig{Timeout:"invalid",Enabled:&no});if err!=nil||!got.InputAccepted||!got.Enabled||cfg.Enabled||cfg.Timeout!=time.Minute{t.Fatal("file application")}
+ cfg.Metadata["label"]="retained";t.Setenv("TIMEOUT","2m");t.Setenv("NAME","");t.Setenv("ENABLED","")
+ got,err=cfg.applyEnv();if err!=nil||!got.InputAccepted||cfg.Timeout!=2*time.Minute||cfg.Metadata["label"]!="retained"{t.Fatal("env/runtime state")}
+}
+`
+	runScalarFixture(t, source, output, behavior+applyLeaseDurationFixtureSource(t)+configFixtureFunctions(t, "applyLeaseDuration", "getenvBool"))
+}
+
+func TestIncusGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_incus.go", "../../internal/cli/config_incus_generated.go", "IncusConfig", "incus", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const splitEnvSample = "package cli\nimport \"time\"\ntype PilotConfig struct {\n" +
+	" Name string `sources:\"user,repo,env,flag\" config:\"name\" env:\"PILOT_NAME\" flag:\"pilot-name\" help:\"Name\" fileIgnoreEmpty:\"true\" fileStorage:\"value\"`\n" +
+	" Timeout time.Duration `sources:\"user,repo,env\" config:\"timeout\" env:\"PILOT_TIMEOUT\" duration:\"positive-overlay\" fileStorage:\"value\" envSplitBefore:\"true\"`\n" +
+	" Enabled bool `sources:\"user,repo,env\" config:\"enabled\" env:\"PILOT_ENABLED\"`\n}"
+
+func TestSchemaEnvironmentSplit(t *testing.T) {
+	for _, tc := range []struct{ old, replacement, want string }{
+		{`envSplitBefore:"true"`, `envSplitBefore:""`, "envSplitBefore"},
+		{`envSplitBefore:"true"`, `envSplitBefore:"false"`, "envSplitBefore"},
+		{`envSplitBefore:"true"`, `envSplitBefore:"later"`, "envSplitBefore"},
+		{`help:"Name"`, `help:"Name" envSplitBefore:"true"`, "envSplitBefore"},
+		{`env:"PILOT_ENABLED"`, `env:"PILOT_ENABLED" envSplitBefore:"true"`, "envSplitBefore"},
+		{`sources:"user,repo,env" config:"enabled" env:"PILOT_ENABLED"`, `sources:"flag" flag:"enabled" help:"Enabled" envSplitBefore:"true"`, "envSplitBefore"},
+		{`env:"PILOT_TIMEOUT"`, `env:""`, "invalid env binding"},
+		{`sources:"user,repo,env"`, `sources:"user,env"`, "support only string"},
+		{`sources:"user,repo,env"`, `sources:"user,repo,env" default:"1s"`, "absent default"},
+		{`sources:"user,repo,env"`, `sources:"user,repo,env" flag:""`, "absent flag"},
+		{`sources:"user,repo,env"`, `sources:"user,repo,env" help:""`, "absent help"},
+		{`Enabled bool`, `Enabled int`, "support only"},
+	} {
+		_, err := parseSchema([]byte(strings.Replace(splitEnvSample, tc.old, tc.replacement, 1)), "PilotConfig", "pilot")
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s -> %s: %v, want %s", tc.old, tc.replacement, err, tc.want)
+		}
+	}
+	// A flag-only prefix cannot create a meaningful environment split.
+	noPrefix := strings.Replace(splitEnvSample, `sources:"user,repo,env,flag" config:"name" env:"PILOT_NAME"`, `sources:"flag"`, 1)
+	noPrefix = strings.Replace(noPrefix, ` fileIgnoreEmpty:"true" fileStorage:"value"`, "", 1)
+	if _, err := parseSchema([]byte(noPrefix), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "envSplitBefore") {
+		t.Fatalf("empty environment prefix: %v", err)
+	}
+}
+
+func TestGenerateEnvironmentSplit(t *testing.T) {
+	s, err := parseSchema([]byte(splitEnvSample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatal("nondeterministic split")
+	}
+	for _, absent := range []string{`"time"`, " applyEnv()", `fs.Duration`, `fs.Bool`, "Timeout *"} {
+		if strings.Contains(string(output), absent) {
+			t.Fatalf("unexpected split output %q", absent)
+		}
+	}
+	typecheckGenerated(t, splitEnvSample, output)
+	// No-flag-only duration and bool schemas must not gain unused flag/time imports.
+	for _, field := range []string{
+		"Timeout time.Duration `sources:\"user,repo,env\" config:\"timeout\" env:\"TIMEOUT\" duration:\"positive-overlay\" fileStorage:\"value\"`",
+		"Enabled bool `sources:\"user,repo,env\" config:\"enabled\" env:\"ENABLED\"`",
+	} {
+		imports := ""
+		if strings.Contains(field, "time.Duration") {
+			imports = "import \"time\"\n"
+		}
+		source := "package cli\n" + imports + "type PilotConfig struct {" + field + "}"
+		schema, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+		if err != nil {
+			t.Fatal(err)
+		}
+		generated, err := generate(schema, "pilot.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		typecheckGenerated(t, source, generated)
+	}
+	const behavior = `package cli
+import ("flag";"fmt";"os";"strings";"testing";"time")
+func exit(_ int, pattern string, args ...any) error { return fmt.Errorf(pattern,args...) }
+func flagWasSet(fs *flag.FlagSet,name string) bool { found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found }
+func TestSplitSources(t *testing.T) {
+ if defaultPilotConfig()!=(PilotConfig{}) {t.Fatal("invented defaults")}
+ t.Setenv("PILOT_NAME","same");t.Setenv("PILOT_TIMEOUT","2m");t.Setenv("PILOT_ENABLED","false")
+ cfg:=PilotConfig{Name:"same",Timeout:time.Second,Enabled:true}
+ applied,err:=cfg.applyEnvPrefix()
+ if err!=nil||!applied.InputAccepted||cfg.Timeout!=time.Second||!cfg.Enabled {t.Fatalf("prefix: %+v %+v %v",cfg,applied,err)}
+ applied,err=cfg.applyEnvSuffix()
+ if err!=nil||!applied.InputAccepted||cfg.Timeout!=2*time.Minute||cfg.Enabled||cfg.Name!="same" {t.Fatalf("suffix: %+v %+v %v",cfg,applied,err)}
+ t.Setenv("PILOT_NAME","");t.Setenv("PILOT_ENABLED","invalid")
+ for _,raw:=range []string{"","0s","-1s","invalid"," 2m "} {
+  t.Setenv("PILOT_TIMEOUT",raw);cfg=PilotConfig{Timeout:time.Second}
+  applied,err=cfg.applyEnvSuffix();if err!=nil||applied.InputAccepted||cfg.Timeout!=time.Second {t.Fatalf("ignored %q: %+v %+v %v",raw,cfg,applied,err)}
+  file:=filePilotConfig{Timeout:raw};applied,err=cfg.applyFile(&file)
+  if err!=nil||applied.InputAccepted||cfg.Timeout!=time.Second||file.Timeout!=raw {t.Fatalf("file ignored %q",raw)}
+ }
+ no:=false;cfg=PilotConfig{Enabled:true};applied,err=cfg.applyFile(&filePilotConfig{Timeout:"2m",Enabled:&no})
+ if err!=nil||!applied.InputAccepted||cfg.Enabled||cfg.Timeout!=2*time.Minute {t.Fatal("file duration/false")}
+ fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,PilotConfig{Name:"base"})
+ if fs.Lookup("pilot-timeout")!=nil||fs.Lookup("pilot-enabled")!=nil {t.Fatal("extra flags")}
+ cfg.Name="prior";applied,err=values.Apply(&cfg,fs);if err!=nil||applied.InputAccepted||cfg.Name!="prior" {t.Fatal("unvisited")}
+ if err:=fs.Parse([]string{"--pilot-name="});err!=nil {t.Fatal(err)}
+ applied,err=values.Apply(&cfg,fs);if err!=nil||!applied.InputAccepted||cfg.Name!=""||cfg.Timeout!=2*time.Minute {t.Fatal("flag clear")}
+}
+`
+	helpers := applyLeaseDurationFixtureSource(t) + configFixtureFunctions(t, "applyLeaseDuration", "getenvBool")
+	runScalarFixture(t, splitEnvSample, output, behavior+helpers)
+}
+
+func TestBlacksmithGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_blacksmith.go", "../../internal/cli/config_blacksmith_generated.go", "BlacksmithConfig", "blacksmith-testbox", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const nullableBoolSample = "package cli\ntype PilotConfig struct {\n" +
+	" Enabled *bool `sources:\"user,repo,env,flag\" config:\"enabled\" env:\"PILOT_ENABLED\" flag:\"pilot-enabled\" help:\"Enabled\"`\n" +
+	" Count int `sources:\"user,repo,env,flag\" config:\"count\" env:\"PILOT_COUNT\" flag:\"pilot-count\" help:\"Count\" nonnegative:\"true\"`\n}"
+
+func TestSchemaNullableBool(t *testing.T) {
+	for _, tag := range []string{`default:"true"`, `default:""`, `fileStorage:"value"`, `fileIgnoreEmpty:"true"`, `envAlias:"OTHER"`, `envAlias2:"OTHER"`, `fileInt:"present"`, `envInt:"fallback"`, `nonnegative:"true"`, `duration:"positive-overlay"`, `fileList:"raw"`, `envList:"presence"`, `flagList:"csv"`, `reportApplied:"true"`, `flagFallback:"true"`} {
+		source := strings.Replace(nullableBoolSample, `help:"Enabled"`, `help:"Enabled" `+tag, 1)
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil {
+			t.Fatalf("accepted unsupported nullable bool tag %s", tag)
+		}
+	}
+	for _, kind := range []string{"*string", "**bool"} {
+		if _, err := parseSchema([]byte(strings.Replace(nullableBoolSample, "Enabled *bool", "Enabled "+kind, 1)), "PilotConfig", "pilot"); err == nil {
+			t.Fatalf("accepted %s", kind)
+		}
+	}
+	noFlag := strings.Replace(nullableBoolSample, `sources:"user,repo,env,flag"`, `sources:"user,repo,env"`, 1)
+	noFlag = strings.Replace(noFlag, ` flag:"pilot-enabled" help:"Enabled"`, "", 1)
+	if _, err := parseSchema([]byte(noFlag), "PilotConfig", "pilot"); err == nil {
+		t.Fatal("broadened no-flag grant")
+	}
+}
+
+func TestGenerateNullableBool(t *testing.T) {
+	s, err := parseSchema([]byte(nullableBoolSample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatal("nondeterministic nullable bool")
+	}
+	if strings.Contains(string(output), "**bool") || !strings.Contains(string(output), `defaults.Enabled != nil && *defaults.Enabled`) {
+		t.Fatal("nullable storage/default shape")
+	}
+	typecheckGenerated(t, nullableBoolSample, output)
+	manual := strings.Replace(nullableBoolSample, "type PilotConfig", "//configgen:flag-application manual\ntype PilotConfig", 1)
+	ms, err := parseSchema([]byte(manual), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mo, err := generate(ms, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	typecheckGenerated(t, manual, mo)
+	if strings.Contains(string(mo), " Apply(") {
+		t.Fatal("manual nullable bool emitted Apply")
+	}
+	const behavior = `package cli
+import("flag";"fmt";"os";"strings";"testing")
+func exit(_ int,pattern string,args ...any)error{return fmt.Errorf(pattern,args...)}
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestNullableSources(t *testing.T){
+ if defaultPilotConfig().Enabled!=nil {t.Fatal("nil default lost")}
+ old:=true;cfg:=PilotConfig{Enabled:&old,Count:7};previous:=cfg.Enabled
+ got,err:=cfg.applyFile(&filePilotConfig{});if err!=nil||got.InputAccepted||cfg.Enabled!=previous {t.Fatal("nil file replaced pointer")}
+ for _,raw:=range []bool{false,true,true}{
+  value:=raw;file:=filePilotConfig{Enabled:&value};previous=cfg.Enabled
+  got,err=cfg.applyFile(&file);if err!=nil||!got.InputAccepted||cfg.Enabled==file.Enabled||cfg.Enabled==previous||*cfg.Enabled!=raw {t.Fatal("file must fresh-copy accepted bool")}
+  *file.Enabled=!raw;if *cfg.Enabled!=raw {t.Fatal("file/runtime alias")}
+ }
+ t.Setenv("PILOT_COUNT","");for _,raw:=range []string{"","invalid"}{
+  t.Setenv("PILOT_ENABLED",raw);previous=cfg.Enabled;got,err=cfg.applyEnv();if err!=nil||got.InputAccepted||cfg.Enabled!=previous {t.Fatal("ignored env pointer")}
+ }
+ for _,raw:=range []string{"false","true","true"}{
+  t.Setenv("PILOT_ENABLED",raw);previous=cfg.Enabled;got,err=cfg.applyEnv();if err!=nil||!got.InputAccepted||cfg.Enabled==previous||*cfg.Enabled!=(raw=="true") {t.Fatal("env fresh-copy")}
+ }
+ negative:=-1;value:=false;got,err=cfg.applyFile(&filePilotConfig{Enabled:&value,Count:&negative});if err==nil||!got.InputAccepted||cfg.Enabled==&value||*cfg.Enabled {t.Fatal("partial file bool before error")}
+ for _,initial:=range []*bool{nil,&old}{
+  cfg=PilotConfig{Enabled:initial};fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+  if *values.Enabled!=(initial!=nil&&*initial)||cfg.Enabled!=initial {t.Fatal("raw registration default/mutation")}
+  got,err=values.Apply(&cfg,fs);if err!=nil||got.InputAccepted||cfg.Enabled!=initial {t.Fatal("unvisited flag pointer")}
+  if err:=fs.Parse([]string{"--pilot-enabled=false"});err!=nil {t.Fatal(err)}
+  got,err=values.Apply(&cfg,fs);if err!=nil||!got.InputAccepted||cfg.Enabled==initial||cfg.Enabled==values.Enabled||*cfg.Enabled {t.Fatal("flag fresh-copy")}
+  previous=cfg.Enabled;got,err=values.Apply(&cfg,fs);if err!=nil||!got.InputAccepted||cfg.Enabled==previous {t.Fatal("equal visited value still accepted")}
+ }
+}
+`
+	runScalarFixture(t, nullableBoolSample, output, behavior+configFixtureFunctions(t, "getenvBool"))
+}
+
+func TestPhalaGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_phala.go", "../../internal/cli/config_phala_generated.go", "PhalaConfig", "phala", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const checkedAliasSample = "package cli\ntype PilotConfig struct {\n" +
+	" Name string `sources:\"user,repo,env,flag\" config:\"name\" env:\"PILOT_NAME\" flag:\"name\" help:\"Name\"`\n" +
+	" Count int `sources:\"user,repo,env,flag\" config:\"count\" env:\"PILOT_COUNT\" envAlias:\"ALIAS_COUNT\" flag:\"count\" help:\"Count\" nonnegative:\"true\" envInt:\"checked-alias\"`\n" +
+	" Enabled bool `sources:\"user,repo,env,flag\" config:\"enabled\" env:\"PILOT_ENABLED\" envAlias:\"ALIAS_ENABLED\" flag:\"enabled\" help:\"Enabled\" reportApplied:\"true\"`\n}"
+
+func TestSchemaCheckedIntegerAndBoolAliases(t *testing.T) {
+	for _, tc := range []struct{ old, replacement string }{
+		{`envAlias:"ALIAS_COUNT"`, ""}, {`envInt:"checked-alias"`, `envInt:""`},
+		{`envInt:"checked-alias"`, `envInt:"strict"`}, {`nonnegative:"true"`, ""},
+		{`Count int`, `Count int64`}, {`Count int`, `Count bool`},
+		{`envAlias:"ALIAS_COUNT"`, `envAlias:"ALIAS_COUNT" envAlias2:"OTHER"`},
+		{`envAlias:"ALIAS_ENABLED"`, `envAlias:"ALIAS_ENABLED" envAlias2:"OTHER"`},
+		{`envAlias:"ALIAS_ENABLED"`, `envAlias:"ALIAS_ENABLED" envAliasAfterConfig:"true"`},
+		{`envAlias:"ALIAS_ENABLED"`, `envAlias:"PILOT_COUNT"`},
+		{`envAlias:"ALIAS_COUNT"`, `envAlias:"PILOT_ENABLED"`},
+		{`Enabled bool`, `Enabled *bool`},
+	} {
+		if _, err := parseSchema([]byte(strings.Replace(checkedAliasSample, tc.old, tc.replacement, 1)), "PilotConfig", "pilot"); err == nil {
+			t.Fatalf("accepted %s -> %s", tc.old, tc.replacement)
+		}
+	}
+}
+
+func TestGenerateCheckedIntegerAndBoolAliases(t *testing.T) {
+	s, err := parseSchema([]byte(checkedAliasSample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatal("nondeterministic aliases")
+	}
+	typecheckGenerated(t, checkedAliasSample, output)
+	if strings.Count(string(output), `getenvNonNegativeIntAliasAccepted("PILOT_COUNT", "ALIAS_COUNT", cfg.Count)`) != 1 {
+		t.Fatal("checked alias must parse once")
+	}
+	const behavior = `package cli
+import("flag";"fmt";"os";"strings";"testing")
+func exit(_ int,pattern string,args ...any)error{return fmt.Errorf(pattern,args...)}
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestAliasSources(t *testing.T){
+ t.Setenv("PILOT_NAME","early");t.Setenv("PILOT_ENABLED","true");t.Setenv("ALIAS_ENABLED","")
+ for _,tc:=range []struct{primary,alias string;want int;message string}{
+  {"","",9,""},{"","12",12,""},{"0","12",0,""},{"3","bad",3,""},
+  {"bad","12",9,"PILOT_COUNT must be an integer"},{" 2 ","12",9,"PILOT_COUNT must be an integer"},
+  {"-1","12",9,"PILOT_COUNT must be non-negative"},{"","bad",9,"ALIAS_COUNT must be an integer"},
+  {"","-1",9,"ALIAS_COUNT must be non-negative"},
+ }{
+  t.Setenv("PILOT_COUNT",tc.primary);t.Setenv("ALIAS_COUNT",tc.alias);cfg:=PilotConfig{Count:9}
+  applied,err:=cfg.applyEnv();if cfg.Name!="early"||!applied.InputAccepted||cfg.Count!=tc.want {t.Fatalf("prefix/count %+v %+v %v",cfg,applied,err)}
+  if tc.message!="" {if err==nil||err.Error()!=tc.message||cfg.Enabled||applied.Enabled {t.Fatalf("partial %q: %+v %+v %v",tc.message,cfg,applied,err)}} else if err!=nil||!cfg.Enabled||!applied.Enabled {t.Fatalf("suffix: %+v %+v %v",cfg,applied,err)}
+ }
+ t.Setenv("PILOT_NAME","");t.Setenv("PILOT_COUNT","");t.Setenv("ALIAS_COUNT","")
+ for _,tc:=range []struct{primary,alias string;want,accepted bool}{
+  {"false","true",false,true},{"bad","true",true,true},{"","false",false,true},{" TRUE ","false",true,true},{"bad","bad",true,false},{"","",true,false},
+ }{
+  t.Setenv("PILOT_ENABLED",tc.primary);t.Setenv("ALIAS_ENABLED",tc.alias);cfg:=PilotConfig{Count:9,Enabled:true}
+  got,err:=cfg.applyEnv();if err!=nil||cfg.Enabled!=tc.want||got.Enabled!=tc.accepted||got.InputAccepted!=tc.accepted||cfg.Count!=9 {t.Fatalf("bool %+v: %+v %+v %v",tc,cfg,got,err)}
+ }
+ // Existing strict helper preserves its zero-on-error return contract.
+ t.Setenv("STRICT_COUNT","bad");value,accepted,err:=getenvNonNegativeIntAccepted("STRICT_COUNT",9)
+ if value!=0||accepted||err==nil||err.Error()!="STRICT_COUNT must be an integer" {t.Fatal("old strict contract changed")}
+}
+`
+	runScalarFixture(t, checkedAliasSample, output, behavior+configFixtureFunctions(t, "getenvBool"))
+}
+
+func TestCrownestGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_crownest.go", "../../internal/cli/config_crownest_generated.go", "CrownestConfig", "crownest", true); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestSchemaDurationContract(t *testing.T) {
 	for _, tc := range []struct{ raw, expression string }{
@@ -1109,7 +1513,12 @@ func TestSchemaFileEnvironmentOnlyFailsClosed(t *testing.T) {
 	}
 	for _, kind := range []string{"bool", "int", "float64"} {
 		_, err := parseSchema([]byte(strings.Replace(fileEnvSample, "Input string", "Input "+kind, 1)), "PilotConfig", "pilot")
-		if err == nil || !strings.Contains(err.Error(), "user,repo,env sources support only string fields") {
+		want := "user,repo,env sources support only string fields"
+		if kind == "bool" {
+			// The file/env bool grant is valid, but this string-only predicate is not.
+			want = "fileIgnoreEmpty is supported only as true for string"
+		}
+		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("kind %s: %v", kind, err)
 		}
 	}
@@ -3398,8 +3807,10 @@ func acceptanceFixtureSource(t *testing.T, existing, generated string) string {
 		{"config.go", "lookupEnvInteger"},
 		{"config.go", "lookupEnvFloat"},
 		{"config.go", "getenvNonNegativeIntAccepted"},
+		{"config.go", "getenvNonNegativeIntAliasAccepted"},
+		{"config.go", "parseNonNegativeIntAccepted"},
 	} {
-		if strings.Contains(generated+existing, helper.name+"(") && !strings.Contains(existing, "func "+helper.name+"(") {
+		if strings.Contains(generated+existing+functions, helper.name+"(") && !strings.Contains(existing+functions, "func "+helper.name+"(") {
 			functions += sourceFixtureFunctions(t, helper.file, helper.name)
 		}
 	}

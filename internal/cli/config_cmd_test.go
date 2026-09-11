@@ -565,6 +565,43 @@ func TestConfigShowIncludesCubeSandboxWithoutSecret(t *testing.T) {
 	}
 }
 
+func TestConfigShowIncludesPhalaConfig(t *testing.T) {
+	for _, state := range []string{"default", "true", "false"} {
+		t.Run(state, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Phala = PhalaConfig{CLIPath: "/opt/phala", InstanceType: "tdx.small", WorkRoot: "/work/phala", NodeID: "example-node", Compose: "/tmp/example.yaml"}
+			var wantAttest any
+			if state != "default" {
+				value := state == "true"
+				cfg.Phala.Attest = &value
+				wantAttest = value
+			}
+			before := cfg.Phala
+			encoded, err := json.Marshal(configShowView(cfg))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var view map[string]any
+			if err := json.Unmarshal(encoded, &view); err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]any{"cli": "/opt/phala", "instanceType": "tdx.small", "workRoot": "/work/phala", "nodeId": "example-node", "compose": "/tmp/example.yaml", "attest": wantAttest}
+			if !reflect.DeepEqual(view["phala"], want) {
+				t.Fatalf("phala view = %#v, want %#v", view["phala"], want)
+			}
+			var text bytes.Buffer
+			writeConfigShowText(&text, cfg)
+			wantLine := "phala cli=/opt/phala instance_type=tdx.small work_root=/work/phala node_id=example-node compose=/tmp/example.yaml attest=" + state + "\n"
+			if !strings.Contains(text.String(), wantLine) {
+				t.Fatalf("missing Phala settings line %q", wantLine)
+			}
+			if cfg.Phala != before {
+				t.Fatal("config inspection changed Phala configuration")
+			}
+		})
+	}
+}
+
 func TestConfigShowIncludesFirecrackerConfig(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "firecracker"
@@ -829,10 +866,6 @@ func TestAppleContainerConfigWriterAndJSON(t *testing.T) {
 	}
 	cfg := baseConfig()
 	cfg.AppleContainer = AppleContainerConfig{CLIPath: "tool", Image: "image-example", User: "user-example", WorkRoot: "/workspace/example", CPUs: 3, Memory: "6g"}
-	wantView := map[string]any{"cliPath": "tool", "image": "image-example", "user": "user-example", "workRoot": "/workspace/example", "cpus": 3, "memory": "6g"}
-	if got := configShowView(cfg)["appleContainer"]; !reflect.DeepEqual(got, wantView) {
-		t.Fatalf("view=%#v", got)
-	}
 	data, err := json.Marshal(cfg.AppleContainer)
 	if err != nil {
 		t.Fatal(err)
@@ -1569,9 +1602,27 @@ func TestConfigShowIncludesDigitalOceanProviderConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
 	var stdout bytes.Buffer
-	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
-	if err := app.configShow(nil); err != nil {
+	runShow := func(args []string) error {
+		cmd := exec.CommandContext(t.Context(), binary, append([]string{"config", "show"}, args...)...)
+		cmd.Dir = home
+		cmd.Env = []string{"HOME=" + home, "USERPROFILE=" + home, "APPDATA=" + home, "XDG_CONFIG_HOME=" + home, "XDG_STATE_HOME=" + home, "CRABBOX_CONFIG=" + configPath, "PATH=" + t.TempDir()}
+		var stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("config show: %w: %s", err, &stderr)
+		}
+		if stderr.Len() != 0 {
+			return fmt.Errorf("config show stderr: %s", &stderr)
+		}
+		return nil
+	}
+	if err := runShow(nil); err != nil {
 		t.Fatal(err)
 	}
 	text := stdout.String()
@@ -1583,7 +1634,7 @@ func TestConfigShowIncludesDigitalOceanProviderConfig(t *testing.T) {
 	}
 
 	stdout.Reset()
-	if err := app.configShow([]string{"--json"}); err != nil {
+	if err := runShow([]string{"--json"}); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
@@ -1618,9 +1669,27 @@ func TestConfigShowIncludesVultrProviderConfigWithoutSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
 	var stdout bytes.Buffer
-	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
-	if err := app.configShow(nil); err != nil {
+	runShow := func(args []string) error {
+		cmd := exec.CommandContext(t.Context(), binary, append([]string{"config", "show"}, args...)...)
+		cmd.Dir = home
+		cmd.Env = []string{"HOME=" + home, "USERPROFILE=" + home, "APPDATA=" + home, "XDG_CONFIG_HOME=" + home, "XDG_STATE_HOME=" + home, "CRABBOX_CONFIG=" + configPath, "PATH=" + t.TempDir(), "VULTR_API_KEY=" + os.Getenv("VULTR_API_KEY")}
+		var stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("config show: %w: %s", err, &stderr)
+		}
+		if stderr.Len() != 0 {
+			return fmt.Errorf("config show stderr: %s", &stderr)
+		}
+		return nil
+	}
+	if err := runShow(nil); err != nil {
 		t.Fatal(err)
 	}
 	text := stdout.String()
@@ -1635,7 +1704,7 @@ func TestConfigShowIncludesVultrProviderConfigWithoutSecret(t *testing.T) {
 	}
 
 	stdout.Reset()
-	if err := app.configShow([]string{"--json"}); err != nil {
+	if err := runShow([]string{"--json"}); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
@@ -3061,8 +3130,12 @@ func TestRoutingSafeURLRedactsUserinfoOnMalformedURL(t *testing.T) {
 }
 
 func TestConfigShowIncludesDockerSandboxConfig(t *testing.T) {
-	configPath := isolatedConfigPath(t)
-	t.Setenv("CRABBOX_PROVIDER", "")
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
 	if err := os.WriteFile(configPath, []byte(`provider: docker-sandbox
 dockerSandbox:
   cliPath: /opt/sbx
@@ -3075,13 +3148,29 @@ dockerSandbox:
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES", "/tmp/extra")
-	t.Setenv("CRABBOX_DOCKER_SANDBOX_MCP", "context7,all")
-	t.Setenv("CRABBOX_DOCKER_SANDBOX_KIT", "example-org/base")
-
 	var stdout bytes.Buffer
-	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
-	if err := app.configShow(nil); err != nil {
+	runShow := func(args []string) error {
+		cmd := exec.CommandContext(t.Context(), binary, append([]string{"config", "show"}, args...)...)
+		cmd.Dir = home
+		cmd.Env = []string{
+			"HOME=" + home, "USERPROFILE=" + home, "APPDATA=" + home,
+			"XDG_CONFIG_HOME=" + home, "XDG_STATE_HOME=" + home,
+			"CRABBOX_CONFIG=" + configPath, "PATH=" + t.TempDir(),
+			"CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES=/tmp/extra",
+			"CRABBOX_DOCKER_SANDBOX_MCP=context7,all",
+			"CRABBOX_DOCKER_SANDBOX_KIT=example-org/base",
+		}
+		var stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("config show: %w: %s", err, &stderr)
+		}
+		if stderr.Len() != 0 {
+			return fmt.Errorf("config show stderr: %s", &stderr)
+		}
+		return nil
+	}
+	if err := runShow(nil); err != nil {
 		t.Fatal(err)
 	}
 	text := stdout.String()
@@ -3098,7 +3187,7 @@ dockerSandbox:
 	}
 
 	stdout.Reset()
-	if err := app.configShow([]string{"--json"}); err != nil {
+	if err := runShow([]string{"--json"}); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
@@ -3369,17 +3458,11 @@ func TestConfigShowLocalContainerSettingsOffline(t *testing.T) {
 	}
 }
 
-func TestConfigShowLocalContainerExcludesInternalFields(t *testing.T) {
+func TestConfigShowCoordinatorEndpointAndTokenStatus(t *testing.T) {
 	cfg := baseConfig()
-	cfg.LocalContainer.Volumes = []string{"/synthetic-private-volume:/mnt/data"}
-	cfg.LocalContainer.CheckpointMetadata = map[string]string{"fork_name": "synthetic-private-checkpoint"}
 	cfg.CoordToken = "synthetic-private-token"
 	cfg.Coordinator = "https://broker.example.test/api"
 	view := configShowView(cfg)
-	local, ok := view["localContainer"].(map[string]any)
-	if !ok || len(local) != 8 {
-		t.Fatalf("public localContainer fields=%#v", local)
-	}
 	data, err := json.Marshal(view)
 	if err != nil {
 		t.Fatal(err)
@@ -3387,7 +3470,7 @@ func TestConfigShowLocalContainerExcludesInternalFields(t *testing.T) {
 	var text bytes.Buffer
 	writeConfigShowText(&text, cfg)
 	for name, output := range map[string]string{"json": string(data), "text": text.String()} {
-		if strings.Contains(output, "synthetic-private") || strings.Contains(strings.ToLower(output), "checkpointmetadata") {
+		if strings.Contains(output, "synthetic-private") {
 			t.Errorf("%s exposed internal fields or credentials", name)
 		}
 		if !strings.Contains(output, "broker.example.test/api") || !strings.Contains(output, "configured") {

@@ -127,6 +127,52 @@ func newTestBlacksmithBackend(cfg Config, runner CommandRunner) *blacksmithBacke
 	}
 }
 
+func TestBlacksmithOrdinaryFlagMetadata(t *testing.T) {
+	for _, provider := range []string{"other", "blacksmith-testbox", " BLACKSMITH "} {
+		for _, value := range []string{"", "same", " padded "} {
+			cfg := Config{Provider: provider, Blacksmith: BlacksmithConfig{Org: "same", Workflow: "same", Job: "same", Ref: "same", IdleTimeout: time.Minute, Debug: true}}
+			before := cfg
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			values := RegisterBlacksmithProviderFlags(fs, cfg)
+			if fs.NFlag() != 0 {
+				t.Fatal("registration visited flags")
+			}
+			for _, name := range []string{"blacksmith-idle-timeout", "blacksmith-debug"} {
+				if fs.Lookup(name) != nil {
+					t.Fatalf("unexpected --%s", name)
+				}
+			}
+			for _, foreign := range []any{nil, struct{}{}} {
+				if err := ApplyBlacksmithProviderFlags(&cfg, fs, foreign); err != nil || !reflect.DeepEqual(cfg, before) {
+					t.Fatalf("foreign values: %v", err)
+				}
+			}
+			if err := ApplyBlacksmithProviderFlags(&cfg, fs, values); err != nil || !reflect.DeepEqual(cfg, before) {
+				t.Fatalf("unvisited: %v", err)
+			}
+			args := []string{}
+			for _, name := range []string{"org", "workflow", "job", "ref"} {
+				if fs.Lookup("blacksmith-"+name).DefValue != "same" {
+					t.Fatal("inherited default changed")
+				}
+				args = append(args, "--blacksmith-"+name+"=first", "--blacksmith-"+name+"="+value)
+			}
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			if err := ApplyBlacksmithProviderFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			want := before
+			want.Blacksmith.Org, want.Blacksmith.Workflow, want.Blacksmith.Job, want.Blacksmith.Ref = value, value, value, value
+			core.RecordProviderFlagInputs(&want, true, "blacksmith-testbox")
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("flags: %#v want %#v", cfg, want)
+			}
+		}
+	}
+}
+
 func TestManualConfigInputFlags(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = "fixture-other"
@@ -1486,7 +1532,7 @@ func TestApplyBlacksmithFlagOverrides(t *testing.T) {
 	}
 	cfg := Config{}
 	fs := newFlagSet("test", io.Discard)
-	values := registerBlacksmithFlags(fs, defaults)
+	values := RegisterBlacksmithProviderFlags(fs, defaults)
 	if err := parseFlags(fs, []string{
 		"--blacksmith-org", "openclaw",
 		"--blacksmith-workflow", ".github/workflows/testbox.yml",
@@ -1495,7 +1541,9 @@ func TestApplyBlacksmithFlagOverrides(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	applyBlacksmithFlagOverrides(&cfg, fs, values)
+	if err := ApplyBlacksmithProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
 	if cfg.Blacksmith.Org != "openclaw" || cfg.Blacksmith.Workflow != ".github/workflows/testbox.yml" || cfg.Blacksmith.Job != "test" || cfg.Blacksmith.Ref != "feature" {
 		t.Fatalf("blacksmith flags not applied: %#v", cfg.Blacksmith)
 	}

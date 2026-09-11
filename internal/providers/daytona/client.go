@@ -73,7 +73,7 @@ var newDaytonaClient = func(cfg Config, rt Runtime) (daytonaAPI, error) {
 // Resolve native organization identity using the same authenticated client.
 // An API key's optional organization header is not an attestation: Daytona
 // derives its organization from the key and ignores that header.
-func (c *daytonaSDKClient) fixedOrganization(ctx context.Context) (string, string, error) {
+func (c *daytonaSDKClient) fixedOrganization(ctx context.Context, allowResourceIdentity bool) (string, string, error) {
 	if !c.apiKey {
 		if c.orgID == "" {
 			return "", "", exit(4, "Daytona fixed leases require a selected organization")
@@ -87,6 +87,30 @@ func (c *daytonaSDKClient) fixedOrganization(ctx context.Context) (string, strin
 		}
 		return c.apiURL, organization.GetId(), nil
 	}
+	key, _, err := c.api.ApiKeysAPI.GetCurrentApiKey(c.ctx(ctx)).Execute()
+	if err != nil {
+		return "", "", c.redactError(err)
+	}
+	if key == nil {
+		return "", "", exit(4, "Daytona current API-key response is missing its identity")
+	}
+	// Deployed Daytona supplies this field; the pinned SDK retains it as an
+	// additional property. Never persist or report the other key metadata.
+	if value, present := key.AdditionalProperties["organizationId"]; present {
+		organization, valid := value.(string)
+		if !valid || strings.TrimSpace(organization) == "" || organization != strings.TrimSpace(organization) {
+			return "", "", exit(4, "Daytona current API-key response has an invalid organization identity")
+		}
+		if c.orgID != "" && c.orgID != organization {
+			return "", "", exit(4, "Daytona authenticated API-key organization differs from the selected organization")
+		}
+		return c.apiURL, organization, nil
+	}
+	if !allowResourceIdentity {
+		return "", "", exit(4, "Daytona current API-key response does not expose organizationId; this API deployment cannot attest fixed cleanup with an API key; use an OAuth organization profile")
+	}
+	// The public v0.190.0 server omits organizationId from current-key metadata.
+	// Preserve its resource-backed acquisition contract, never absence proof.
 	identity := c.api.SandboxAPI.ListSandboxes(c.ctx(ctx)).Limit(1)
 	if c.orgID != "" {
 		identity = identity.XDaytonaOrganizationID(c.orgID)
@@ -524,17 +548,15 @@ func (c *daytonaSDKClient) findPendingDeletion(ctx context.Context, id string) (
 	}
 }
 
-// OrganizationAuthContextGuard checks the path against an API key's intrinsic
-// organization. Unlike the optional header, this also attests an empty account.
 func (c *daytonaSDKClient) attestDeletionOrganization(ctx context.Context, expected string) error {
 	if expected == "" || c.orgID != "" && c.orgID != expected {
 		return exit(4, "Daytona deletion organization differs from the selected organization")
 	}
-	organization, _, err := c.api.OrganizationsAPI.GetOrganization(c.ctx(ctx), expected).Execute()
+	_, organization, err := c.fixedOrganization(ctx, false)
 	if err != nil {
-		return c.redactError(err)
+		return err
 	}
-	if organization == nil || organization.GetId() != expected {
+	if organization != expected {
 		return exit(4, "Daytona deletion organization could not be attested")
 	}
 	return nil

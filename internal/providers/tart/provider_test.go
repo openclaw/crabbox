@@ -54,6 +54,28 @@ func commandKey(args []string) string {
 	return strings.Join(args, "\x00")
 }
 
+func TestTartConfigShowSection(t *testing.T) {
+	for _, number := range []int{0, -2, 4} {
+		cfg := core.Config{Provider: "other", Tart: core.TartConfig{Image: " raw-image ", User: "", WorkRoot: " raw-root ", CPUs: number, Memory: number, Disk: number}}
+		before := cfg
+		section := (Provider{}).ConfigShowSection(cfg)
+		got := map[string]any{}
+		var fields []string
+		for _, f := range section.Fields {
+			got[f.JSONName] = f.JSONValue
+			fields = append(fields, f.TextName+"="+f.TextValue)
+		}
+		want := map[string]any{"image": " raw-image ", "user": "", "workRoot": " raw-root ", "cpus": number, "memory": number, "disk": number}
+		text := fmt.Sprintf("image= raw-image  user= work_root= raw-root  cpus=%d memory=%d disk=%d", number, number, number)
+		if section.JSONKey != "tart" || section.TextLabel != "tart" || !reflect.DeepEqual(section.Providers, []string{"tart"}) || len(section.Fields) != 6 || !reflect.DeepEqual(got, want) || strings.Join(fields, " ") != text {
+			t.Fatalf("Tart projection %#v", section)
+		}
+		if !reflect.DeepEqual(cfg, before) {
+			t.Fatal("projection mutated config")
+		}
+	}
+}
+
 func TestProviderSpecAndAliases(t *testing.T) {
 	p := Provider{}
 	if p.Name() != providerName {

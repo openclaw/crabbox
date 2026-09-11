@@ -39,6 +39,79 @@ Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.
 
+Crownest's complete five-field owner is `internal/cli/config_crownest.go`.
+Its shallow file snapshot ignores a trimmed-blank URL only for application,
+without changing the persisted input. Pointer strings, zero timeout and false
+cleanup values retain their existing file semantics. Flag validation still
+runs after all visited assignments; URL validation remains provider-owned.
+
+A bool may have one `envAlias`: the primary wins when it parses, including
+false, otherwise the alias is tried with the same bool parser. The explicit
+`envInt:"checked-alias"` mode requires a nonnegative int and exactly one alias.
+It selects by raw nonempty text, parses once through the shared strict parser,
+names the selected variable on errors and preserves the old field on failure.
+Earlier accepted effects are returned; later fields are not applied. Existing
+strict and tolerant-fallback integer modes retain their distinct behavior.
+These fixed modes add no parser callbacks, trimming or general alias policy.
+
+Freestyle declares all five fields in `internal/cli/config_freestyle.go`.
+Its API key remains environment-only, and the API URL admits trusted user files
+but not repository files. Enforcing that rule in the file binding removes the
+save-and-restore special case from both configuration loaders. The four file
+fields retain value storage; file sizes accept only positive values, while
+environment and flag integers retain their existing signed values until provider
+validation. Generated constants also own the two configured fallback defaults;
+endpoint validation, workspace containment and lifecycle behavior stay with the
+provider.
+
+Phala's complete six-field hybrid owner is `internal/cli/config_phala.go`.
+Its nullable bool remains nil by default; accepted file, environment and ordinary
+generated flag assignments copy into a fresh pointer, while ignored inputs keep
+the previous pointer. File storage remains a single pointer with its existing
+omission behavior. The primitive's scalar bool flag defaults to false for nil;
+Phala supplies its existing effective default through a local registration copy,
+without changing runtime configuration. Pointer defaults, aliases and unrelated
+scalar/list modes are not accepted.
+
+Phala uses manual flag application with six generated bindings and one separate
+provider-owned skip control, not a seventh configuration member. The imperative
+application order and existing policy remain unchanged. Its typed file snapshot
+wrapper retains conditional admission without modifying the file DTO. File paths
+expand only when accepted, environment fallback paths expand unconditionally,
+and flag paths remain raw. The ordinary registration order of distinct named
+flags does not affect name-sorted help, metadata or parsing. Native provider and
+attestation algorithms remain outside this owner.
+
+Firecracker's complete fifteen-field owner is `internal/cli/config_firecracker.go`.
+It uses existing value-string, present-int, tolerant integer environment and
+raw-positive duration modes. Eight file strings remain trusted-user-only;
+the three pointer integers retain explicit signed values and the release bool
+retains explicit false. File duration text stays raw for persistence.
+The initializer preserves the shared WorkRoot default through a typed alias,
+with the remaining thirteen nonzero defaults generated from the declaration.
+The flag wrapper consumes earlier accepted path/user/root effects before a
+timeout error, leaving the later release value, marker, intent and final default
+phase untouched on that error. Environment path expansion remains unconditional
+on the final fallback values. Backend defaults and native operations stay
+outside the generated owner.
+
+Incus uses a complete hybrid owner in `internal/cli/config_incus.go`. The exact
+type-doc directive `//configgen:flag-application manual` generates file/env
+application, flag storage and registration, and a typed raw-visit query for all
+admitted flags, but no flag `Apply` method. Its provider retains the existing
+ordered enum/duration checks, projections, accepted-input records and final
+normalization. Raw visits are not accepted-input facts. The directive must occur
+once on the selected type and requires at least one flag; no callbacks or stages
+are encoded in metadata. Ordinary declarations retain their generated output.
+
+Runtime-only fields may add unique `yaml:"-"` and `json:"-"` omission tags to
+`sources:"runtime"`; other serialization tags and values are rejected. Incus's
+checkpoint metadata remains runtime-only and omitted from both serializations.
+Its initializer retains the shared WorkRoot default through a typed alias;
+generated defaults own the remaining compiled values. File paths expand only
+after accepted assignments, while environment paths expand their final fallback
+values unconditionally. The imperative flag path keeps its original ordering.
+
 Sealos DevBox uses all sixteen bindings together. Its fifteen file strings retain
 value storage and trusted-user admission; the pointer-backed release boolean
 also accepts repository input and preserves explicit false. Applied facts for
@@ -96,6 +169,18 @@ acceptance. The Namespace string-flag exceptions are described below.
 Declared defaults must parse to a positive duration and produce typed constants;
 an omitted default remains zero. Arbitrary qualified types, alternate parsers,
 callbacks and additional file/environment duration policies are not supported.
+
+Blacksmith uses all six bindings together, with four string flags and two
+file/environment-only fields: a positive-overlay duration and a pointer-backed
+file boolean. These flagless fields retain zero defaults and do not introduce
+timeout or debug flags. Its four environment coordinates apply earlier than its
+timeout and debug settings. `envSplitBefore:"true"` on the timeout field preserves
+that boundary by generating `applyEnvPrefix` and `applyEnvSuffix` instead of a
+combined `applyEnv`. Both use the same field emitter and return ordinary applied
+reports; the loader records each report at its original position. An intervening
+error therefore cannot apply later fields early. At most one split is allowed,
+on an environment-admitted field with a nonempty environment prefix and suffix.
+The split adds no callbacks, normalization, or provider-specific generation.
 
 AWS Lambda MicroVM uses all seven bindings together. Its four string flags trim
 only accepted values; file/environment strings remain raw. The existing flat
@@ -450,15 +535,18 @@ selection and native Container/Machine behavior remain outside this owner.
    primary `env`, allow an existing alias, and omit `config`, `flag`, `help`, and
    `default` tags entirely. This mode retains a zero default and exposes no YAML
    or command-line field; it does not generate credential presentation or policy.
-   An existing string or string list with file/environment input but no flag uses the exact
+   An existing string, string list, boolean, or positive-overlay duration with
+   file/environment input but no flag uses the exact
    `sources:"user,repo,env"` grant: require `config` and primary `env`, and omit
    `flag`, `help`, and `default` tags entirely. It retains a zero default and
    uses existing file predicates and applied reports without adding a flag or
    changing trust policy. This grant does not permit a file input on an
    environment-only field.
-   String lists are admitted only by this untrusted-file-capable no-flag grant,
-   with the same existing file/environment list rules; other no-flag grants remain
-   string-only. A schema with no flag-admitted fields emits no placeholder flag
+   String lists, booleans, and durations are admitted only by this untrusted-file-capable
+   no-flag grant, with their existing file/environment rules; other no-flag grants remain
+   string-only. Duration file storage stays a raw string, boolean file storage
+   stays a pointer, and neither gains a flag. A schema with no flag-admitted
+   fields emits no placeholder flag
    API or flag import. Mixed schemas retain their admitted flag bindings.
    A trusted-file/environment string without a flag uses the exact
    `sources:"user,env"` grant with the same absent flag/help/default requirement;

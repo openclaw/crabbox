@@ -53,6 +53,39 @@ func (r *fixedIdentityExecControllerRunner) ProviderIdentity(context.Context) (c
 	return controllerProviderIdentity{Route: "external", Scope: "test-provider-scope", IdempotentFixedLeaseID: true}, nil
 }
 
+func TestFreestyleConfigLoadersAgree(t *testing.T) {
+	clearConfigEnv(t)
+	home, repo := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_FREESTYLE_MEMORY_GB", "16")
+	t.Chdir(repo)
+	userPath := userConfigPath()
+	if err := os.MkdirAll(filepath.Dir(userPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userPath, []byte("freestyle:\n  apiUrl: https://user.example.test\n  workdir: user-workdir\n  vcpus: 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "crabbox.yaml"), []byte("freestyle:\n  apiUrl: https://repo.example.test\n  workdir: repo-workdir\n  vcpus: 4\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := FreestyleConfig{APIURL: "https://user.example.test", Workdir: "repo-workdir", VCPUs: 4, MemoryGB: 16}
+	for _, load := range []func() (Config, error){
+		func() (Config, error) { return loadConfigWithOverrides("", "xcp-ng") },
+		func() (Config, error) { return loadControllerRunnerConfigState("", "xcp-ng", repo) },
+	} {
+		cfg, err := load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Freestyle != want {
+			t.Fatalf("Freestyle configuration = %#v, want %#v", cfg.Freestyle, want)
+		}
+	}
+}
+
 func TestControllerWarmupArgsUseFixedRoutingAndCapabilities(t *testing.T) {
 	runner := execControllerWorkspaceRunner{opts: execControllerRunnerOptions{
 		Provider: "external",

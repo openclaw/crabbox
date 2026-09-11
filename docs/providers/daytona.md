@@ -213,13 +213,18 @@ lease remains held for explicit cleanup; no replacement is created. Successfully
 acquired children can replay after their source snapshot is retired.
 
 Fixed acquisition must establish the organization before allocation. OAuth uses
-the selected organization from the existing CLI profile. API-key mode uses an
-exact existing child, its retained private checkpoint, or a visible sandbox to
-establish native organization. A private checkpoint can refill a pool after all
-live workers drain; general snapshots cannot attest the allocating organization.
-An API-key account without one of these identity sources cannot use fixed
-acquisition. Ordinary warmup without a fixed ID retains its existing API-key
-behavior. No credentials or token-derived identifiers are stored in fixed claims.
+the selected organization from the existing CLI profile. API-key mode reads the
+authenticated `organizationId` from `/api-keys/current`, including empty accounts.
+The deployed API returns this field although the pinned Go SDK retains it only
+as an additional property. Invalid or conflicting identity is rejected.
+Older servers matching the public Daytona 0.190.0 contract omit this field;
+acquisition retains their existing child, private-checkpoint, or visible-sandbox
+identity path. That compatibility path remains until those servers are no longer
+supported, and never authorizes cleanup of an absent resource. API-key cleanup
+requires the current-key organization field; older servers require an OAuth
+organization profile instead. Ordinary warmup without a fixed ID retains its
+existing API-key behavior. No credentials or token-derived identifiers are stored
+in fixed claims.
 
 Fixed claims use a distinct provider marker so older clients cannot treat them
 as ordinary Daytona claims and erase terminal replay protection. Failed or
@@ -239,16 +244,21 @@ access to the original organization, and complete database inventory showing no
 exact UUID. Required pagination metadata must be present, integral, and
 consistent; failed-deletion rows, malformed responses, and incomplete pages
 retain custody. No timed sampling or search-index fallback establishes absence.
-This confirms removal from the provider's database, not independent proof of
-physical storage reclamation.
+This confirms that the provider has no remaining nonterminal record for that
+resource, including failed destruction, not independent proof of physical storage
+reclamation.
 
 This works after deletion of the last live sandbox and accommodates the native
 rename during deletion. The durable acknowledgment survives interruption and
-same-organization credential rotation. A lost response can be reconciled only
-while the exact resource still positively reports destruction requested; a bare
-404 without that witness, or an expired create whose UUID was never observed,
-remains an explicit operator reconciliation obligation. No second create is
-submitted. A valid released claim remains available through `inspect` and
+same-organization credential rotation. Native TTL or external deletion can remove
+a successfully acquired sandbox before Crabbox requests deletion. In that case,
+`stop`, `inspect`, and `status` reconcile the recorded exact UUID against fresh
+authenticated organization identity and complete failure-inclusive database
+absence, then persist the same terminal claim. Inspection never issues DELETE.
+Neither a bare 404 nor an elapsed deadline establishes removal. Incomplete creates
+without a deletion witness, including attempts whose UUID was never observed,
+remain explicit operator reconciliation obligations. No second create is submitted.
+A valid released claim remains available through `inspect` and
 `status` as `released`, never ready, with no provider request or remote access.
 `status --wait` reports that terminal state instead of waiting for readiness.
 

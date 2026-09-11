@@ -36,6 +36,75 @@ func (f workspaceOwnerTransportFunc) Do(ctx context.Context, req workspaceOwnerR
 	return f(ctx, req)
 }
 
+func TestWorkspaceOwnerTransportErrorDiagnostics(t *testing.T) {
+	original := errors.New("ordinary transport error")
+	for _, response := range []string{"MISMATCH", "EXPIRED", "AMBIGUOUS", "", "unrecognized response", "CHILD", "OWNED"} {
+		recognized := response == "MISMATCH" || response == "EXPIRED" || response == "AMBIGUOUS"
+		annotated := workspaceOwnerProtocolError(response, original)
+		if !errors.Is(annotated, original) {
+			t.Fatal("annotation lost original error")
+		}
+		if !recognized && annotated != original {
+			t.Fatal("unknown response changed original error")
+		}
+		for _, operation := range []string{"renew", "inspect", "wait"} {
+			t.Run(operation+"/"+response, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				calls := 0
+				owner := &workspaceOwner{
+					ctx: ctx, cancel: cancel, stop: make(chan struct{}), done: make(chan struct{}),
+					transport: workspaceOwnerTransportFunc(func(_ context.Context, req workspaceOwnerRemoteRequest) (string, error) {
+						calls++
+						wantAction := workspaceOwnerInspect
+						if operation == "renew" {
+							wantAction = workspaceOwnerRenew
+						}
+						if req.Action != wantAction {
+							t.Fatalf("action=%v", req.Action)
+						}
+						return response, original
+					}),
+				}
+				var err error
+				var prefix string
+				switch operation {
+				case "renew":
+					ticks := make(chan time.Time, 1)
+					ticks <- time.Now()
+					owner.renewLoopWithTicks(ticks, time.Second)
+					err = owner.Err()
+					prefix = "remote workspace owner renewal failed closed: "
+					if ctx.Err() != context.Canceled {
+						t.Fatal("renewal no longer cancels")
+					}
+				case "inspect":
+					var result workspaceOwnerInspectResult
+					result, err = owner.inspectChild(ctx)
+					prefix = "confirm remote workspace owner child state: ambiguous remote state: "
+					if result != workspaceOwnerQuiescent {
+						t.Fatal("inspection failure result changed")
+					}
+				case "wait":
+					err = owner.WaitForChild(ctx, time.Second)
+					prefix = "confirm remote workspace phase witness: ambiguous remote state: "
+				}
+				want := prefix + original.Error()
+				if recognized {
+					want = prefix + "protocol state " + response + ": " + original.Error()
+				}
+				var exitErr ExitError
+				if calls != 1 || !AsExitError(err, &exitErr) || exitErr.Code != 7 || err.Error() != want {
+					t.Fatalf("calls=%d err=%v want=%q", calls, err, want)
+				}
+				if operation != "renew" && ctx.Err() != nil {
+					t.Fatal("diagnostic canceled caller context")
+				}
+			})
+		}
+	}
+}
+
 func newFakeWorkspaceOwnerRemote() *fakeWorkspaceOwnerRemote {
 	return &fakeWorkspaceOwnerRemote{changed: make(chan struct{})}
 }

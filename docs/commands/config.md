@@ -58,6 +58,29 @@ the `environment` retain the canonical provider name and report selected=true. P
 `config show --provider <name>` reports `flag` because that command-scoped
 override wins the merge.
 
+Phala settings appear in the JSON `phala` section and the text `phala` line.
+Its `attest` value preserves the configured state: JSON `null` (text `default`)
+means no explicit override; `true` and `false` remain distinct. This is a
+configuration value, not evidence that remote attestation has run or passed.
+Inspection does not read Phala's stored credentials or invoke its CLI.
+
+Freestyle and Crownest also have value sections in both formats, including
+when unselected. Freestyle shows the loaded URL, relative workdir, CPU/memory
+settings and API-key presence (`auth: configured` or `missing`), never the key.
+Zero sizing remains zero rather than a guessed service-plan default. Crownest
+shows its loaded URL, project, template, timeout and cleanup preference without
+looking up credentials. Zero timeout and explicit false remain visible. URLs
+are redacted; these values are configuration, not live-provider proof.
+
+OpenComputer, OpenSandbox and CUA expose their loaded settings in the JSON
+`openComputer`, `openSandbox` and `cua` sections and corresponding lowercase
+text lines, even when unselected. URLs are redacted; raw zero, false and empty
+values are not replaced with service defaults. These sections do not discover
+credentials or read external CLI configuration. CUA's bridge command and SDK
+package/import names are configured references, not evidence that an executable
+or SDK is installed or working. Displaying them does not execute the bridge or
+enable CUA provisioning.
+
 ### Offline provider status
 
 JSON adds a `providerStatus` object with `schemaVersion: 1`, `kind: "offline"`,

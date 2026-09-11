@@ -364,25 +364,6 @@ type GitHubCodespacesConfig struct {
 	WorkRoot         string
 }
 
-// NebiusConfig is intentionally non-secret. Authentication stays in the
-// Nebius CLI profile store and is never accepted as Crabbox config or argv.
-type NebiusConfig struct {
-	CLI              string
-	Profile          string
-	ParentID         string
-	SubnetID         string
-	Platform         string
-	Preset           string
-	ImageFamily      string
-	DiskType         string
-	DiskSizeGiB      int
-	User             string
-	PublicIP         string
-	SecurityGroupIDs []string
-	ServiceAccountID string
-	RecoveryPolicy   string
-}
-
 type ActionsConfig struct {
 	Repo          string
 	Workflow      string
@@ -392,15 +373,6 @@ type ActionsConfig struct {
 	RunnerLabels  []string
 	RunnerVersion string
 	Ephemeral     bool
-}
-
-type BlacksmithConfig struct {
-	Org         string
-	Workflow    string
-	Job         string
-	Ref         string
-	IdleTimeout time.Duration
-	Debug       bool
 }
 
 type ExternalConfig struct {
@@ -476,22 +448,6 @@ type ExternalDesktopConfig struct {
 	PasswordEnv string `yaml:"passwordEnv,omitempty" json:"passwordEnv,omitempty"`
 }
 
-// PhalaConfig configures the Phala Cloud confidential TDX CVM provider. Phala
-// authenticates through its own stored credentials (device flow or
-// PHALA_CLOUD_API_KEY), so no API key is held here.
-type PhalaConfig struct {
-	CLIPath      string
-	InstanceType string
-	WorkRoot     string
-	NodeID       string
-	Compose      string
-	// Attest gates the TDX remote-attestation check the Phala backend runs after
-	// a leased CVM becomes reachable. nil means "default" (attestation ON); the
-	// backend treats nil as true. A non-nil false value (set only by the local
-	// --phala-skip-attestation flag or CRABBOX_PHALA_ATTEST=false env) opts out.
-	Attest *bool
-}
-
 type DaytonaConfig struct {
 	APIKey           string
 	JWTToken         string
@@ -541,24 +497,6 @@ type UnikraftCloudConfig struct {
 	MemoryMB int
 }
 
-// NvidiaBrevConfig is intentionally non-secret. Authentication stays in the
-// NVIDIA Brev CLI's own credential store and is never accepted as Crabbox
-// config or argv.
-type NvidiaBrevConfig struct {
-	CLI           string
-	Org           string
-	Type          string
-	GPUName       string
-	Provider      string
-	Mode          string
-	Launchable    string
-	StartupScript string
-	ReleaseAction string
-	Target        string
-	User          string
-	WorkRoot      string
-}
-
 type HostingerConfig struct {
 	APIToken        string
 	APIURL          string
@@ -583,14 +521,6 @@ type IsloConfig struct {
 	VCPUs          int
 	MemoryMB       int
 	DiskGB         int
-}
-
-type FreestyleConfig struct {
-	APIKey   string
-	APIURL   string
-	Workdir  string
-	VCPUs    int
-	MemoryGB int
 }
 
 type TenkiConfig struct {
@@ -652,18 +582,6 @@ type SuperserveConfig struct {
 	ForgetMissing   bool
 }
 
-// CrownestConfig configures the delegated CrowNest provider. The API key is
-// intentionally absent: it is read at runtime from
-// CRABBOX_CROWNEST_API_KEY / CROWNEST_API_KEY and sent only in request headers,
-// never persisted in Crabbox config or placed on argv.
-type CrownestConfig struct {
-	APIURL        string
-	ProjectID     string
-	Template      string
-	TimeoutSecs   int
-	ForgetMissing bool
-}
-
 type DockerSandboxConfig struct {
 	CLIPath         string
 	Agent           string
@@ -720,24 +638,6 @@ type ProxmoxConfig struct {
 	InsecureTLS bool
 }
 
-type FirecrackerConfig struct {
-	Binary          string
-	Jailer          string
-	Kernel          string
-	RootFS          string
-	User            string
-	WorkRoot        string
-	CPUs            int
-	MemoryMiB       int
-	DiskMiB         int
-	Network         string
-	CNINetwork      string
-	CNIConfDir      string
-	CNIBinDir       string
-	LaunchTimeout   time.Duration
-	DeleteOnRelease bool
-}
-
 type XCPNgConfig struct {
 	APIURL       string
 	Username     string
@@ -762,28 +662,6 @@ func applyXCPNgNameUUIDPair(dstName, dstUUID *string, incomingName, incomingUUID
 	*dstName = incomingName
 	*dstUUID = incomingUUID
 	return true
-}
-
-type IncusConfig struct {
-	CheckpointMetadata map[string]string `yaml:"-" json:"-"`
-	Remote             string
-	Project            string
-	Address            string
-	Socket             string
-	InstanceType       string
-	Image              string
-	Profile            string
-	User               string
-	WorkRoot           string
-	DeleteOnRelease    bool
-	StartTimeout       time.Duration
-	LaunchPort         string
-	ProxyListenHost    string
-	ProxyListenPort    string
-	ProxyDevice        string
-	TLSServerCert      string
-	InsecureTLS        bool
-	RemoteImageServer  string
 }
 
 type ParallelsConfig struct {
@@ -1157,12 +1035,8 @@ func loadConfigWithOverrides(coordinator, provider string) (Config, error) {
 	cfg := baseConfig()
 	for _, path := range configPaths() {
 		trust := classifyConfigPath(path)
-		freestyleAPIURL := cfg.Freestyle.APIURL
 		if err := applyConfigFile(&cfg, path, trust); err != nil {
 			return Config{}, err
-		}
-		if !trust.trusted {
-			cfg.Freestyle.APIURL = freestyleAPIURL
 		}
 	}
 	if err := applyEnv(&cfg); err != nil {
@@ -1415,33 +1289,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		return validateTargetConfig(*cfg)
 	}
 	if cfg.Provider == "nebius" {
-		if cfg.Nebius.CLI == "" {
-			cfg.Nebius.CLI = "nebius"
-		}
-		if cfg.Nebius.Platform == "" {
-			cfg.Nebius.Platform = "cpu-d3"
-		}
-		if cfg.Nebius.Preset == "" {
-			cfg.Nebius.Preset = "4vcpu-16gb"
-		}
-		if cfg.Nebius.ImageFamily == "" {
-			cfg.Nebius.ImageFamily = "ubuntu24.04-driverless"
-		}
-		if cfg.Nebius.DiskType == "" {
-			cfg.Nebius.DiskType = "network_ssd"
-		}
-		if cfg.Nebius.DiskSizeGiB == 0 {
-			cfg.Nebius.DiskSizeGiB = 50
-		}
-		if cfg.Nebius.User == "" {
-			cfg.Nebius.User = "crabbox"
-		}
-		if cfg.Nebius.PublicIP == "" {
-			cfg.Nebius.PublicIP = "dynamic"
-		}
-		if cfg.Nebius.RecoveryPolicy == "" {
-			cfg.Nebius.RecoveryPolicy = "fail"
-		}
+		cfg.Nebius = cfg.Nebius.WithRuntimeDefaults()
 		applyLinuxConnectionDefaults(cfg, cfg.Nebius.User, baseConfig().SSHPort)
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
@@ -2136,7 +1984,7 @@ func normalizeVastInstanceType(value string) string {
 }
 
 func EffectiveNvidiaBrevWorkRoot(cfg Config) string {
-	return resolveExplicitProviderWorkRoot(cfg.NvidiaBrev.WorkRoot, "/tmp/crabbox", cfg.explicitWorkRoot, IsNvidiaBrevWorkRootExplicit(&cfg))
+	return resolveExplicitProviderWorkRoot(cfg.NvidiaBrev.WorkRoot, NvidiaBrevConfigDefaultWorkRoot, cfg.explicitWorkRoot, IsNvidiaBrevWorkRootExplicit(&cfg))
 }
 
 func resolveExplicitProviderWorkRoot(providerRoot, providerFallback, explicitGenericRoot string, providerExplicit bool) string {
@@ -2239,23 +2087,11 @@ func baseConfig() Config {
 			DeleteOnRelease: true,
 			WorkRoot:        "/workspaces/crabbox",
 		},
-		Lambda:       initialLambdaConfig(),
-		OVH:          defaultOVHConfig(),
-		Scaleway:     defaultScalewayConfig(),
-		TencentCloud: defaultTencentCloudConfig(),
-		Incus: IncusConfig{
-			Remote:          "local",
-			Project:         "",
-			InstanceType:    "container",
-			Image:           "images:ubuntu/24.04/cloud",
-			User:            "crabbox",
-			WorkRoot:        defaultPOSIXWorkRoot,
-			DeleteOnRelease: true,
-			StartTimeout:    10 * time.Minute,
-			LaunchPort:      "22",
-			ProxyListenHost: "127.0.0.1",
-			ProxyDevice:     "crabbox-ssh",
-		},
+		Lambda:           initialLambdaConfig(),
+		OVH:              defaultOVHConfig(),
+		Scaleway:         defaultScalewayConfig(),
+		TencentCloud:     defaultTencentCloudConfig(),
+		Incus:            initialIncusConfig(),
 		SSHUser:          "crabbox",
 		SSHKey:           sshKey,
 		SSHPort:          "2222",
@@ -2294,13 +2130,7 @@ func baseConfig() Config {
 		},
 		Namespace:         defaultNamespaceConfig(),
 		NamespaceInstance: defaultNamespaceInstanceConfig(),
-		Phala: PhalaConfig{
-			CLIPath:      "phala",
-			InstanceType: "tdx.small",
-			// The dstack --dev-os guest roots on a read-only squashfs; /work is not
-			// writable. /var/volatile is a writable tmpfs on every dstack guest.
-			WorkRoot: "/var/volatile/crabbox",
-		},
+		Phala:             defaultPhalaConfig(),
 		Boxd: BoxdConfig{
 			APIURL:          "https://app.boxd.sh",
 			WorkRoot:        "/home/boxd/crabbox",
@@ -2330,27 +2160,11 @@ func baseConfig() Config {
 		UnikraftCloud: UnikraftCloudConfig{
 			Metro: "fra",
 		},
-		Runpod: defaultRunpodConfig(),
-		Vast:   defaultVastConfig(),
-		NvidiaBrev: NvidiaBrevConfig{
-			CLI:           "brev",
-			GPUName:       "A100",
-			Mode:          "vm",
-			ReleaseAction: "delete",
-			Target:        "container",
-			WorkRoot:      "/tmp/crabbox",
-		},
-		Nebius: NebiusConfig{
-			CLI:            "nebius",
-			Platform:       "cpu-d3",
-			Preset:         "4vcpu-16gb",
-			ImageFamily:    "ubuntu24.04-driverless",
-			DiskType:       "network_ssd",
-			DiskSizeGiB:    50,
-			User:           "crabbox",
-			PublicIP:       "dynamic",
-			RecoveryPolicy: "fail",
-		},
+		Runpod:     defaultRunpodConfig(),
+		Vast:       defaultVastConfig(),
+		Blacksmith: defaultBlacksmithConfig(),
+		NvidiaBrev: defaultNvidiaBrevConfig(),
+		Nebius:     (NebiusConfig{}).WithRuntimeDefaults(),
 		Hostinger: HostingerConfig{
 			APIURL:         "https://developers.hostinger.com",
 			HostnamePrefix: "crabbox",
@@ -2365,11 +2179,8 @@ func baseConfig() Config {
 			MemoryMB: 4096,
 			DiskGB:   20,
 		},
-		Wandb: defaultWandbConfig(),
-		Freestyle: FreestyleConfig{
-			APIURL:  "https://api.freestyle.sh",
-			Workdir: "crabbox",
-		},
+		Wandb:     defaultWandbConfig(),
+		Freestyle: defaultFreestyleConfig(),
 		Tenki: TenkiConfig{
 			CLIPath:  "tenki",
 			WorkRoot: "/home/tenki/crabbox",
@@ -2402,11 +2213,7 @@ func baseConfig() Config {
 			Workdir:         "/workspace/crabbox",
 			ExecTimeoutSecs: 600,
 		},
-		Crownest: CrownestConfig{
-			APIURL:      "https://api.crownest.dev",
-			Template:    "python-node",
-			TimeoutSecs: 600,
-		},
+		Crownest: defaultCrownestConfig(),
 		DockerSandbox: DockerSandboxConfig{
 			CLIPath: "sbx",
 			Agent:   "shell",
@@ -2434,22 +2241,7 @@ func baseConfig() Config {
 			WorkRoot:  defaultPOSIXWorkRoot,
 			FullClone: true,
 		},
-		Firecracker: FirecrackerConfig{
-			Binary:          "firecracker",
-			Kernel:          "/var/lib/crabbox/firecracker/vmlinux",
-			RootFS:          "/var/lib/crabbox/firecracker/rootfs.ext4",
-			User:            "crabbox",
-			WorkRoot:        defaultPOSIXWorkRoot,
-			CPUs:            4,
-			MemoryMiB:       4096,
-			DiskMiB:         16384,
-			Network:         "cni",
-			CNINetwork:      "crabbox-firecracker",
-			CNIConfDir:      "/etc/cni/conf.d",
-			CNIBinDir:       "/opt/cni/bin",
-			LaunchTimeout:   2 * time.Minute,
-			DeleteOnRelease: true,
-		},
+		Firecracker: initialFirecrackerConfig(),
 		XCPNg: XCPNgConfig{
 			User:     "crabbox",
 			WorkRoot: defaultPOSIXWorkRoot,
@@ -2676,23 +2468,6 @@ type fileGitHubCodespacesConfig struct {
 	WorkRoot         string `yaml:"workRoot,omitempty"`
 }
 
-type fileNebiusConfig struct {
-	CLI              string   `yaml:"cli,omitempty"`
-	Profile          string   `yaml:"profile,omitempty"`
-	ParentID         string   `yaml:"parentId,omitempty"`
-	SubnetID         string   `yaml:"subnetId,omitempty"`
-	Platform         string   `yaml:"platform,omitempty"`
-	Preset           string   `yaml:"preset,omitempty"`
-	ImageFamily      string   `yaml:"imageFamily,omitempty"`
-	DiskType         string   `yaml:"diskType,omitempty"`
-	DiskSizeGiB      int      `yaml:"diskSizeGiB,omitempty"`
-	User             string   `yaml:"user,omitempty"`
-	PublicIP         string   `yaml:"publicIP,omitempty"`
-	SecurityGroupIDs []string `yaml:"securityGroupIds,omitempty"`
-	ServiceAccountID string   `yaml:"serviceAccountId,omitempty"`
-	RecoveryPolicy   string   `yaml:"recoveryPolicy,omitempty"`
-}
-
 type fileAWSConfig struct {
 	Region          string   `yaml:"region,omitempty"`
 	AMI             string   `yaml:"ami,omitempty"`
@@ -2734,27 +2509,6 @@ type fileGCPConfig struct {
 	ServiceAccount string   `yaml:"serviceAccount,omitempty"`
 }
 
-type fileIncusConfig struct {
-	Remote            string `yaml:"remote,omitempty"`
-	Project           string `yaml:"project,omitempty"`
-	Address           string `yaml:"address,omitempty"`
-	Socket            string `yaml:"socket,omitempty"`
-	InstanceType      string `yaml:"instanceType,omitempty"`
-	Image             string `yaml:"image,omitempty"`
-	Profile           string `yaml:"profile,omitempty"`
-	User              string `yaml:"user,omitempty"`
-	WorkRoot          string `yaml:"workRoot,omitempty"`
-	DeleteOnRelease   *bool  `yaml:"deleteOnRelease,omitempty"`
-	StartTimeout      string `yaml:"startTimeout,omitempty"`
-	LaunchPort        string `yaml:"launchPort,omitempty"`
-	ProxyListenHost   string `yaml:"proxyListenHost,omitempty"`
-	ProxyListenPort   string `yaml:"proxyListenPort,omitempty"`
-	ProxyDevice       string `yaml:"proxyDevice,omitempty"`
-	TLSServerCert     string `yaml:"tlsServerCert,omitempty"`
-	InsecureTLS       *bool  `yaml:"insecureTLS,omitempty"`
-	RemoteImageServer string `yaml:"remoteImageServer,omitempty"`
-}
-
 type fileProxmoxConfig struct {
 	APIURL      string `yaml:"apiUrl,omitempty"`
 	TokenID     string `yaml:"tokenId,omitempty"`
@@ -2768,24 +2522,6 @@ type fileProxmoxConfig struct {
 	WorkRoot    string `yaml:"workRoot,omitempty"`
 	FullClone   *bool  `yaml:"fullClone,omitempty"`
 	InsecureTLS *bool  `yaml:"insecureTLS,omitempty"`
-}
-
-type fileFirecrackerConfig struct {
-	Binary          string `yaml:"binary,omitempty"`
-	Jailer          string `yaml:"jailer,omitempty"`
-	Kernel          string `yaml:"kernel,omitempty"`
-	RootFS          string `yaml:"rootfs,omitempty"`
-	User            string `yaml:"user,omitempty"`
-	WorkRoot        string `yaml:"workRoot,omitempty"`
-	CPUs            *int   `yaml:"cpus,omitempty"`
-	MemoryMiB       *int   `yaml:"memoryMiB,omitempty"`
-	DiskMiB         *int   `yaml:"diskMiB,omitempty"`
-	Network         string `yaml:"network,omitempty"`
-	CNINetwork      string `yaml:"cniNetwork,omitempty"`
-	CNIConfDir      string `yaml:"cniConfDir,omitempty"`
-	CNIBinDir       string `yaml:"cniBinDir,omitempty"`
-	LaunchTimeout   string `yaml:"launchTimeout,omitempty"`
-	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
 }
 
 type fileXCPNgConfig struct {
@@ -2903,15 +2639,6 @@ type fileActionsConfig struct {
 	Ephemeral     *bool    `yaml:"ephemeral,omitempty"`
 }
 
-type fileBlacksmithConfig struct {
-	Org         string `yaml:"org,omitempty"`
-	Workflow    string `yaml:"workflow,omitempty"`
-	Job         string `yaml:"job,omitempty"`
-	Ref         string `yaml:"ref,omitempty"`
-	IdleTimeout string `yaml:"idleTimeout,omitempty"`
-	Debug       *bool  `yaml:"debug,omitempty"`
-}
-
 type fileExternalConfig struct {
 	Command      string                      `yaml:"command,omitempty"`
 	Args         []string                    `yaml:"args,omitempty"`
@@ -2939,15 +2666,6 @@ type fileBoxdConfig struct {
 	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
 }
 
-type filePhalaConfig struct {
-	CLIPath      string `yaml:"cli,omitempty"`
-	InstanceType string `yaml:"instanceType,omitempty"`
-	WorkRoot     string `yaml:"workRoot,omitempty"`
-	NodeID       string `yaml:"nodeId,omitempty"`
-	Compose      string `yaml:"compose,omitempty"`
-	Attest       *bool  `yaml:"attest,omitempty"`
-}
-
 type fileDaytonaConfig struct {
 	APIURL           string `yaml:"apiUrl,omitempty"`
 	Snapshot         string `yaml:"snapshot,omitempty"`
@@ -2969,34 +2687,12 @@ type fileCubeSandboxConfig struct {
 	ProxyScheme   string `yaml:"proxyScheme,omitempty"`
 }
 
-type fileFreestyleConfig struct {
-	APIURL   string `yaml:"apiUrl,omitempty"`
-	Workdir  string `yaml:"workdir,omitempty"`
-	VCPUs    int    `yaml:"vcpus,omitempty"`
-	MemoryGB int    `yaml:"memoryGB,omitempty"`
-}
-
 type fileUnikraftCloudConfig struct {
 	APIKey   string `yaml:"apiKey,omitempty"`
 	APIURL   string `yaml:"apiUrl,omitempty"`
 	Metro    string `yaml:"metro,omitempty"`
 	Image    string `yaml:"image,omitempty"`
 	MemoryMB int    `yaml:"memoryMB,omitempty"`
-}
-
-type fileNvidiaBrevConfig struct {
-	CLI           string `yaml:"cli,omitempty"`
-	Org           string `yaml:"org,omitempty"`
-	Type          string `yaml:"type,omitempty"`
-	GPUName       string `yaml:"gpuName,omitempty"`
-	Provider      string `yaml:"provider,omitempty"`
-	Mode          string `yaml:"mode,omitempty"`
-	Launchable    string `yaml:"launchable,omitempty"`
-	StartupScript string `yaml:"startupScript,omitempty"`
-	ReleaseAction string `yaml:"releaseAction,omitempty"`
-	Target        string `yaml:"target,omitempty"`
-	User          string `yaml:"user,omitempty"`
-	WorkRoot      string `yaml:"workRoot,omitempty"`
 }
 
 type fileHostingerConfig struct {
@@ -3074,14 +2770,6 @@ type fileSuperserveConfig struct {
 	NetworkAllowOut []string `yaml:"networkAllowOut,omitempty"`
 	NetworkDenyOut  []string `yaml:"networkDenyOut,omitempty"`
 	ForgetMissing   *bool    `yaml:"forgetMissing,omitempty"`
-}
-
-type fileCrownestConfig struct {
-	APIURL        string  `yaml:"apiUrl,omitempty"`
-	ProjectID     *string `yaml:"projectId,omitempty"`
-	Template      *string `yaml:"template,omitempty"`
-	TimeoutSecs   *int    `yaml:"timeoutSecs,omitempty"`
-	ForgetMissing *bool   `yaml:"forgetMissing,omitempty"`
 }
 
 type fileDockerSandboxConfig struct {
@@ -3973,62 +3661,11 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.lambdaImageFamilyExplicit = true
 		}
 	}
-	if file.Nebius != nil {
-		if trusted && file.Nebius.CLI != "" {
-			cfg.Nebius.CLI = file.Nebius.CLI
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if trusted && file.Nebius.Profile != "" {
-			cfg.Nebius.Profile = file.Nebius.Profile
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if file.Nebius.ParentID != "" {
-			cfg.Nebius.ParentID = file.Nebius.ParentID
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if file.Nebius.SubnetID != "" {
-			cfg.Nebius.SubnetID = file.Nebius.SubnetID
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if file.Nebius.Platform != "" {
-			cfg.Nebius.Platform = file.Nebius.Platform
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if file.Nebius.Preset != "" {
-			cfg.Nebius.Preset = file.Nebius.Preset
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if file.Nebius.ImageFamily != "" {
-			cfg.Nebius.ImageFamily = file.Nebius.ImageFamily
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if file.Nebius.DiskType != "" {
-			cfg.Nebius.DiskType = file.Nebius.DiskType
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if file.Nebius.DiskSizeGiB > 0 {
-			cfg.Nebius.DiskSizeGiB = file.Nebius.DiskSizeGiB
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if file.Nebius.User != "" {
-			cfg.Nebius.User = file.Nebius.User
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if file.Nebius.PublicIP != "" {
-			cfg.Nebius.PublicIP = file.Nebius.PublicIP
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if len(file.Nebius.SecurityGroupIDs) > 0 {
-			cfg.Nebius.SecurityGroupIDs = file.Nebius.SecurityGroupIDs
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if trusted && file.Nebius.ServiceAccountID != "" {
-			cfg.Nebius.ServiceAccountID = file.Nebius.ServiceAccountID
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if file.Nebius.RecoveryPolicy != "" {
-			cfg.Nebius.RecoveryPolicy = file.Nebius.RecoveryPolicy
-			recordConfigInput(cfg, "nebius", inputSource, true)
+	{
+		applied, err := cfg.Nebius.applyFile(file.Nebius, trusted)
+		recordConfigInput(cfg, "nebius", inputSource, applied.InputAccepted)
+		if err != nil {
+			return err
 		}
 	}
 	{
@@ -4222,78 +3859,15 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			recordConfigInput(cfg, "gcp", inputSource, true)
 		}
 	}
-	if file.Incus != nil {
-		if file.Incus.Remote != "" {
-			cfg.Incus.Remote = file.Incus.Remote
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.Project != "" {
-			cfg.Incus.Project = file.Incus.Project
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.Address != "" {
-			cfg.Incus.Address = file.Incus.Address
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.Socket != "" {
-			cfg.Incus.Socket = expandUserPath(file.Incus.Socket)
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.InstanceType != "" {
-			cfg.Incus.InstanceType = file.Incus.InstanceType
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.Image != "" {
-			cfg.Incus.Image = file.Incus.Image
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.Profile != "" {
-			cfg.Incus.Profile = file.Incus.Profile
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.User != "" {
-			cfg.Incus.User = file.Incus.User
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.WorkRoot != "" {
-			cfg.Incus.WorkRoot = file.Incus.WorkRoot
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.DeleteOnRelease != nil {
-			cfg.Incus.DeleteOnRelease = *file.Incus.DeleteOnRelease
-			recordConfigInput(cfg, "incus", inputSource, true)
+	{
+		applied, err := cfg.Incus.applyFile(file.Incus)
+		recordConfigInput(cfg, "incus", inputSource, applied.InputAccepted)
+		cfg.Incus.ExpandAppliedLocalPaths(applied)
+		if applied.DeleteOnRelease {
 			MarkDeleteOnReleaseExplicit(cfg, "incus")
 		}
-		if file.Incus.StartTimeout != "" {
-			recordConfigInput(cfg, "incus", inputSource, applyLeaseDuration(&cfg.Incus.StartTimeout, file.Incus.StartTimeout))
-		}
-		if file.Incus.LaunchPort != "" {
-			cfg.Incus.LaunchPort = file.Incus.LaunchPort
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.ProxyListenHost != "" {
-			cfg.Incus.ProxyListenHost = file.Incus.ProxyListenHost
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.ProxyListenPort != "" {
-			cfg.Incus.ProxyListenPort = file.Incus.ProxyListenPort
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.ProxyDevice != "" {
-			cfg.Incus.ProxyDevice = file.Incus.ProxyDevice
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.TLSServerCert != "" {
-			cfg.Incus.TLSServerCert = expandUserPath(file.Incus.TLSServerCert)
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.InsecureTLS != nil {
-			cfg.Incus.InsecureTLS = *file.Incus.InsecureTLS
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.RemoteImageServer != "" {
-			cfg.Incus.RemoteImageServer = file.Incus.RemoteImageServer
-			recordConfigInput(cfg, "incus", inputSource, true)
+		if err != nil {
+			return err
 		}
 	}
 	if file.Proxmox != nil {
@@ -4347,67 +3921,16 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.credentialProvenance.proxmoxInsecureTLS = credentialSource
 		}
 	}
-	if file.Firecracker != nil {
-		if trusted && file.Firecracker.Binary != "" {
-			cfg.Firecracker.Binary = expandUserPath(file.Firecracker.Binary)
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if trusted && file.Firecracker.Jailer != "" {
-			cfg.Firecracker.Jailer = expandUserPath(file.Firecracker.Jailer)
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if trusted && file.Firecracker.Kernel != "" {
-			cfg.Firecracker.Kernel = expandUserPath(file.Firecracker.Kernel)
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if trusted && file.Firecracker.RootFS != "" {
-			cfg.Firecracker.RootFS = expandUserPath(file.Firecracker.RootFS)
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if file.Firecracker.User != "" {
-			cfg.Firecracker.User = file.Firecracker.User
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if file.Firecracker.WorkRoot != "" {
-			cfg.Firecracker.WorkRoot = file.Firecracker.WorkRoot
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if file.Firecracker.CPUs != nil {
-			applyOptional(&cfg.Firecracker.CPUs, file.Firecracker.CPUs)
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if file.Firecracker.MemoryMiB != nil {
-			applyOptional(&cfg.Firecracker.MemoryMiB, file.Firecracker.MemoryMiB)
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if file.Firecracker.DiskMiB != nil {
-			applyOptional(&cfg.Firecracker.DiskMiB, file.Firecracker.DiskMiB)
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if trusted && file.Firecracker.Network != "" {
-			cfg.Firecracker.Network = file.Firecracker.Network
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if trusted && file.Firecracker.CNINetwork != "" {
-			cfg.Firecracker.CNINetwork = file.Firecracker.CNINetwork
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if trusted && file.Firecracker.CNIConfDir != "" {
-			cfg.Firecracker.CNIConfDir = expandUserPath(file.Firecracker.CNIConfDir)
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if trusted && file.Firecracker.CNIBinDir != "" {
-			cfg.Firecracker.CNIBinDir = expandUserPath(file.Firecracker.CNIBinDir)
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if file.Firecracker.LaunchTimeout != "" {
-			recordConfigInput(cfg, "firecracker", inputSource, applyLeaseDuration(&cfg.Firecracker.LaunchTimeout, file.Firecracker.LaunchTimeout))
-		}
-		if file.Firecracker.DeleteOnRelease != nil {
-			cfg.Firecracker.DeleteOnRelease = *file.Firecracker.DeleteOnRelease
-			recordConfigInput(cfg, "firecracker", inputSource, true)
+	{
+		applied, err := cfg.Firecracker.applyFile(file.Firecracker, trusted)
+		recordConfigInput(cfg, "firecracker", inputSource, applied.InputAccepted)
+		cfg.Firecracker.ExpandAppliedLocalPaths(applied)
+		if applied.DeleteOnRelease {
 			MarkDeleteOnReleaseExplicit(cfg, "firecracker")
 			recordConfigInputIntent(cfg, "firecracker", inputSource, true)
+		}
+		if err != nil {
+			return err
 		}
 	}
 	if file.XCPNg != nil {
@@ -4684,27 +4207,11 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Actions.Ephemeral, file.Actions.Ephemeral))
 	}
-	if file.Blacksmith != nil {
-		if file.Blacksmith.Org != "" {
-			cfg.Blacksmith.Org = file.Blacksmith.Org
-			recordConfigInput(cfg, "blacksmith-testbox", inputSource, true)
-		}
-		if file.Blacksmith.Workflow != "" {
-			cfg.Blacksmith.Workflow = file.Blacksmith.Workflow
-			recordConfigInput(cfg, "blacksmith-testbox", inputSource, true)
-		}
-		if file.Blacksmith.Job != "" {
-			cfg.Blacksmith.Job = file.Blacksmith.Job
-			recordConfigInput(cfg, "blacksmith-testbox", inputSource, true)
-		}
-		if file.Blacksmith.Ref != "" {
-			cfg.Blacksmith.Ref = file.Blacksmith.Ref
-			recordConfigInput(cfg, "blacksmith-testbox", inputSource, true)
-		}
-		recordConfigInput(cfg, "blacksmith-testbox", inputSource, applyLeaseDuration(&cfg.Blacksmith.IdleTimeout, file.Blacksmith.IdleTimeout))
-		if file.Blacksmith.Debug != nil {
-			applyOptional(&cfg.Blacksmith.Debug, file.Blacksmith.Debug)
-			recordConfigInput(cfg, "blacksmith-testbox", inputSource, true)
+	{
+		applied, err := cfg.Blacksmith.applyFile(file.Blacksmith)
+		recordConfigInput(cfg, "blacksmith-testbox", inputSource, applied.InputAccepted)
+		if err != nil {
+			return err
 		}
 	}
 	if err := applyKubeVirtFileConfig(cfg, file.KubeVirt, trusted, inputSource); err != nil {
@@ -4855,39 +4362,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 	if err := applyNamespaceInstanceFileConfig(cfg, file.NamespaceInstance, trusted, inputSource); err != nil {
 		return err
 	}
-	if file.Phala != nil {
-		if trusted {
-			if file.Phala.CLIPath != "" {
-				cfg.Phala.CLIPath = expandUserPath(file.Phala.CLIPath)
-				recordConfigInput(cfg, "phala", inputSource, true)
-			}
-			if file.Phala.NodeID != "" {
-				cfg.Phala.NodeID = file.Phala.NodeID
-				recordConfigInput(cfg, "phala", inputSource, true)
-			}
-			if file.Phala.Compose != "" {
-				cfg.Phala.Compose = expandUserPath(file.Phala.Compose)
-				recordConfigInput(cfg, "phala", inputSource, true)
-			}
-		}
-		if file.Phala.InstanceType != "" {
-			cfg.Phala.InstanceType = file.Phala.InstanceType
-			recordConfigInput(cfg, "phala", inputSource, true)
-			MarkPhalaInstanceTypeExplicit(cfg)
-		}
-		if file.Phala.WorkRoot != "" {
-			cfg.Phala.WorkRoot = file.Phala.WorkRoot
-			recordConfigInput(cfg, "phala", inputSource, true)
-		}
-		// attest is read from untrusted config ONLY when it tightens security
-		// (enabling the TDX attestation gate). Disabling it (attest: false)
-		// requires trusted config, the local --phala-skip-attestation flag, or the
-		// env var, so an untrusted repo config can never weaken the security gate.
-		if file.Phala.Attest != nil && (trusted || *file.Phala.Attest) {
-			value := *file.Phala.Attest
-			cfg.Phala.Attest = &value
-			recordConfigInput(cfg, "phala", inputSource, true)
-		}
+	if err := applyPhalaFileConfig(cfg, file.Phala, trusted, inputSource); err != nil {
+		return err
 	}
 	if file.Boxd != nil {
 		// Only trusted config can redirect credentials or organization billing.
@@ -5100,58 +4576,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.NvidiaBrev != nil {
-		if trusted && file.NvidiaBrev.CLI != "" {
-			cfg.NvidiaBrev.CLI = file.NvidiaBrev.CLI
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-		}
-		if file.NvidiaBrev.Org != "" {
-			cfg.NvidiaBrev.Org = file.NvidiaBrev.Org
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-		}
-		if file.NvidiaBrev.Type != "" {
-			cfg.NvidiaBrev.Type = file.NvidiaBrev.Type
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-		}
-		if file.NvidiaBrev.GPUName != "" {
-			cfg.NvidiaBrev.GPUName = file.NvidiaBrev.GPUName
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-		}
-		if file.NvidiaBrev.Provider != "" {
-			cfg.NvidiaBrev.Provider = file.NvidiaBrev.Provider
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-		}
-		if file.NvidiaBrev.Mode != "" {
-			cfg.NvidiaBrev.Mode = file.NvidiaBrev.Mode
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-		}
-		if file.NvidiaBrev.Launchable != "" {
-			cfg.NvidiaBrev.Launchable = file.NvidiaBrev.Launchable
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-		}
-		if file.NvidiaBrev.StartupScript != "" &&
-			(trusted || !strings.HasPrefix(strings.TrimSpace(file.NvidiaBrev.StartupScript), "@")) {
-			cfg.NvidiaBrev.StartupScript = file.NvidiaBrev.StartupScript
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-		}
-		if file.NvidiaBrev.ReleaseAction != "" {
-			cfg.NvidiaBrev.ReleaseAction = file.NvidiaBrev.ReleaseAction
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-			MarkDeleteOnReleaseExplicit(cfg, "nvidia-brev")
-		}
-		if file.NvidiaBrev.Target != "" {
-			cfg.NvidiaBrev.Target = file.NvidiaBrev.Target
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-		}
-		if file.NvidiaBrev.User != "" {
-			cfg.NvidiaBrev.User = file.NvidiaBrev.User
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-		}
-		if file.NvidiaBrev.WorkRoot != "" {
-			cfg.NvidiaBrev.WorkRoot = file.NvidiaBrev.WorkRoot
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-			MarkNvidiaBrevWorkRootExplicit(cfg)
-		}
+	if err := applyNvidiaBrevFileConfig(cfg, file.NvidiaBrev, trusted, inputSource); err != nil {
+		return err
 	}
 	if file.Hostinger != nil {
 		if trusted && file.Hostinger.APIToken != "" {
@@ -5260,23 +4686,11 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.isloDiskGBExplicit = true
 		}
 	}
-	if file.Freestyle != nil {
-		if file.Freestyle.APIURL != "" {
-			cfg.Freestyle.APIURL = file.Freestyle.APIURL
-			// The canonical loader restores repository URL input after this layer.
-			recordConfigInput(cfg, "freestyle", inputSource, trusted)
-		}
-		if file.Freestyle.Workdir != "" {
-			cfg.Freestyle.Workdir = file.Freestyle.Workdir
-			recordConfigInput(cfg, "freestyle", inputSource, true)
-		}
-		if file.Freestyle.VCPUs > 0 {
-			cfg.Freestyle.VCPUs = file.Freestyle.VCPUs
-			recordConfigInput(cfg, "freestyle", inputSource, true)
-		}
-		if file.Freestyle.MemoryGB > 0 {
-			cfg.Freestyle.MemoryGB = file.Freestyle.MemoryGB
-			recordConfigInput(cfg, "freestyle", inputSource, true)
+	{
+		applied, err := cfg.Freestyle.applyFile(file.Freestyle, trusted)
+		recordConfigInput(cfg, "freestyle", inputSource, applied.InputAccepted)
+		if err != nil {
+			return err
 		}
 	}
 	if file.Tenki != nil {
@@ -5519,30 +4933,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 		recordConfigInput(cfg, "superserve", inputSource, applyOptional(&cfg.Superserve.ForgetMissing, file.Superserve.ForgetMissing))
 	}
-	if file.Crownest != nil {
-		if trusted && strings.TrimSpace(file.Crownest.APIURL) != "" {
-			cfg.Crownest.APIURL = file.Crownest.APIURL
-			recordConfigInput(cfg, "crownest", inputSource, true)
-		}
-		if file.Crownest.ProjectID != nil {
-			applyOptional(&cfg.Crownest.ProjectID, file.Crownest.ProjectID)
-			recordConfigInput(cfg, "crownest", inputSource, true)
-		}
-		if file.Crownest.Template != nil {
-			applyOptional(&cfg.Crownest.Template, file.Crownest.Template)
-			recordConfigInput(cfg, "crownest", inputSource, true)
-		}
-		if file.Crownest.TimeoutSecs != nil {
-			if *file.Crownest.TimeoutSecs < 0 {
-				return exit(2, "crownest timeoutSecs must be non-negative")
-			}
-			cfg.Crownest.TimeoutSecs = *file.Crownest.TimeoutSecs
-			recordConfigInput(cfg, "crownest", inputSource, true)
-		}
-		if file.Crownest.ForgetMissing != nil {
-			applyOptional(&cfg.Crownest.ForgetMissing, file.Crownest.ForgetMissing)
-			recordConfigInput(cfg, "crownest", inputSource, true)
-		}
+	if err := applyCrownestFileConfig(cfg, file.Crownest, trusted, inputSource); err != nil {
+		return err
 	}
 	if file.DockerSandbox != nil {
 		if file.DockerSandbox.CLIPath != "" {
@@ -6510,33 +5902,18 @@ func applyEnv(cfg *Config) error {
 		recordConfigInputIntent(cfg, "gcp", configInputEnvironment, true)
 	}
 	cfg.GCPServiceAccount = configInputEnvString(cfg, "gcp", cfg.GCPServiceAccount, "CRABBOX_GCP_SERVICE_ACCOUNT")
-	cfg.Incus.Remote = configInputEnvString(cfg, "incus", cfg.Incus.Remote, "CRABBOX_INCUS_REMOTE")
-	cfg.Incus.Project = configInputEnvString(cfg, "incus", cfg.Incus.Project, "CRABBOX_INCUS_PROJECT")
-	cfg.Incus.Address = configInputEnvString(cfg, "incus", cfg.Incus.Address, "CRABBOX_INCUS_ADDRESS")
-	cfg.Incus.Socket = expandUserPath(configInputEnvString(cfg, "incus", cfg.Incus.Socket, "CRABBOX_INCUS_SOCKET"))
-	cfg.Incus.InstanceType = configInputEnvString(cfg, "incus", cfg.Incus.InstanceType, "CRABBOX_INCUS_INSTANCE_TYPE")
-	cfg.Incus.Image = configInputEnvString(cfg, "incus", cfg.Incus.Image, "CRABBOX_INCUS_IMAGE")
-	cfg.Incus.Profile = configInputEnvString(cfg, "incus", cfg.Incus.Profile, "CRABBOX_INCUS_PROFILE")
-	cfg.Incus.User = configInputEnvString(cfg, "incus", cfg.Incus.User, "CRABBOX_INCUS_USER")
-	cfg.Incus.WorkRoot = configInputEnvString(cfg, "incus", cfg.Incus.WorkRoot, "CRABBOX_INCUS_WORK_ROOT")
-	if value, ok := getenvBool("CRABBOX_INCUS_DELETE_ON_RELEASE"); ok {
-		cfg.Incus.DeleteOnRelease = value
-		recordConfigInput(cfg, "incus", configInputEnvironment, true)
-		MarkDeleteOnReleaseExplicit(cfg, "incus")
+	{
+		applied, err := cfg.Incus.applyEnv()
+		recordConfigInput(cfg, "incus", configInputEnvironment, applied.InputAccepted)
+		cfg.Incus.Socket = expandUserPath(cfg.Incus.Socket)
+		cfg.Incus.TLSServerCert = expandUserPath(cfg.Incus.TLSServerCert)
+		if applied.DeleteOnRelease {
+			MarkDeleteOnReleaseExplicit(cfg, "incus")
+		}
+		if err != nil {
+			return err
+		}
 	}
-	if timeout := os.Getenv("CRABBOX_INCUS_START_TIMEOUT"); timeout != "" {
-		recordConfigInput(cfg, "incus", configInputEnvironment, applyLeaseDuration(&cfg.Incus.StartTimeout, timeout))
-	}
-	cfg.Incus.LaunchPort = configInputEnvString(cfg, "incus", cfg.Incus.LaunchPort, "CRABBOX_INCUS_LAUNCH_PORT")
-	cfg.Incus.ProxyListenHost = configInputEnvString(cfg, "incus", cfg.Incus.ProxyListenHost, "CRABBOX_INCUS_PROXY_LISTEN_HOST")
-	cfg.Incus.ProxyListenPort = configInputEnvString(cfg, "incus", cfg.Incus.ProxyListenPort, "CRABBOX_INCUS_PROXY_LISTEN_PORT")
-	cfg.Incus.ProxyDevice = configInputEnvString(cfg, "incus", cfg.Incus.ProxyDevice, "CRABBOX_INCUS_PROXY_DEVICE")
-	cfg.Incus.TLSServerCert = expandUserPath(configInputEnvString(cfg, "incus", cfg.Incus.TLSServerCert, "CRABBOX_INCUS_TLS_SERVER_CERT"))
-	if value, ok := getenvBool("CRABBOX_INCUS_INSECURE_TLS"); ok {
-		cfg.Incus.InsecureTLS = value
-		recordConfigInput(cfg, "incus", configInputEnvironment, true)
-	}
-	cfg.Incus.RemoteImageServer = configInputEnvString(cfg, "incus", cfg.Incus.RemoteImageServer, "CRABBOX_INCUS_REMOTE_IMAGE_SERVER")
 	if tags := os.Getenv("CRABBOX_GCP_TAGS"); tags != "" {
 		cfg.GCPTags = splitCommaList(tags)
 		recordConfigInput(cfg, "gcp", configInputEnvironment, true)
@@ -6612,23 +5989,13 @@ func applyEnv(cfg *Config) error {
 			cfg.lambdaImageFamilyExplicit = true
 		}
 	}
-	cfg.Nebius.CLI = configInputEnvString(cfg, "nebius", cfg.Nebius.CLI, "CRABBOX_NEBIUS_CLI")
-	cfg.Nebius.Profile = configInputEnvString(cfg, "nebius", cfg.Nebius.Profile, "CRABBOX_NEBIUS_PROFILE")
-	cfg.Nebius.ParentID = configInputEnvString(cfg, "nebius", cfg.Nebius.ParentID, "CRABBOX_NEBIUS_PARENT_ID")
-	cfg.Nebius.SubnetID = configInputEnvString(cfg, "nebius", cfg.Nebius.SubnetID, "CRABBOX_NEBIUS_SUBNET_ID")
-	cfg.Nebius.Platform = configInputEnvString(cfg, "nebius", cfg.Nebius.Platform, "CRABBOX_NEBIUS_PLATFORM")
-	cfg.Nebius.Preset = configInputEnvString(cfg, "nebius", cfg.Nebius.Preset, "CRABBOX_NEBIUS_PRESET")
-	cfg.Nebius.ImageFamily = configInputEnvString(cfg, "nebius", cfg.Nebius.ImageFamily, "CRABBOX_NEBIUS_IMAGE_FAMILY")
-	cfg.Nebius.DiskType = configInputEnvString(cfg, "nebius", cfg.Nebius.DiskType, "CRABBOX_NEBIUS_DISK_TYPE")
-	cfg.Nebius.DiskSizeGiB = configInputEnvInt(cfg, "nebius", cfg.Nebius.DiskSizeGiB, "CRABBOX_NEBIUS_DISK_SIZE_GIB")
-	cfg.Nebius.User = configInputEnvString(cfg, "nebius", cfg.Nebius.User, "CRABBOX_NEBIUS_USER")
-	cfg.Nebius.PublicIP = configInputEnvString(cfg, "nebius", cfg.Nebius.PublicIP, "CRABBOX_NEBIUS_PUBLIC_IP")
-	if groups := os.Getenv("CRABBOX_NEBIUS_SECURITY_GROUP_IDS"); groups != "" {
-		cfg.Nebius.SecurityGroupIDs = splitCommaList(groups)
-		recordConfigInput(cfg, "nebius", configInputEnvironment, true)
+	{
+		applied, err := cfg.Nebius.applyEnv()
+		recordConfigInput(cfg, "nebius", configInputEnvironment, applied.InputAccepted)
+		if err != nil {
+			return err
+		}
 	}
-	cfg.Nebius.ServiceAccountID = configInputEnvString(cfg, "nebius", cfg.Nebius.ServiceAccountID, "CRABBOX_NEBIUS_SERVICE_ACCOUNT_ID")
-	cfg.Nebius.RecoveryPolicy = configInputEnvString(cfg, "nebius", cfg.Nebius.RecoveryPolicy, "CRABBOX_NEBIUS_RECOVERY_POLICY")
 	{
 		applied, err := cfg.OVH.applyEnv()
 		recordConfigInput(cfg, "ovh", configInputEnvironment, applied.InputAccepted)
@@ -6686,27 +6053,22 @@ func applyEnv(cfg *Config) error {
 		recordConfigInput(cfg, "proxmox", configInputEnvironment, true)
 		cfg.credentialProvenance.proxmoxInsecureTLS = credentialSourceEnvironment
 	}
-	cfg.Firecracker.Binary = expandUserPath(configInputEnvString(cfg, "firecracker", cfg.Firecracker.Binary, "CRABBOX_FIRECRACKER_BINARY"))
-	cfg.Firecracker.Jailer = expandUserPath(configInputEnvString(cfg, "firecracker", cfg.Firecracker.Jailer, "CRABBOX_FIRECRACKER_JAILER"))
-	cfg.Firecracker.Kernel = expandUserPath(configInputEnvString(cfg, "firecracker", cfg.Firecracker.Kernel, "CRABBOX_FIRECRACKER_KERNEL"))
-	cfg.Firecracker.RootFS = expandUserPath(configInputEnvString(cfg, "firecracker", cfg.Firecracker.RootFS, "CRABBOX_FIRECRACKER_ROOTFS"))
-	cfg.Firecracker.User = configInputEnvString(cfg, "firecracker", cfg.Firecracker.User, "CRABBOX_FIRECRACKER_USER")
-	cfg.Firecracker.WorkRoot = configInputEnvString(cfg, "firecracker", cfg.Firecracker.WorkRoot, "CRABBOX_FIRECRACKER_WORK_ROOT")
-	cfg.Firecracker.CPUs = configInputEnvInt(cfg, "firecracker", cfg.Firecracker.CPUs, "CRABBOX_FIRECRACKER_CPUS")
-	cfg.Firecracker.MemoryMiB = configInputEnvInt(cfg, "firecracker", cfg.Firecracker.MemoryMiB, "CRABBOX_FIRECRACKER_MEMORY_MIB")
-	cfg.Firecracker.DiskMiB = configInputEnvInt(cfg, "firecracker", cfg.Firecracker.DiskMiB, "CRABBOX_FIRECRACKER_DISK_MIB")
-	cfg.Firecracker.Network = configInputEnvString(cfg, "firecracker", cfg.Firecracker.Network, "CRABBOX_FIRECRACKER_NETWORK")
-	cfg.Firecracker.CNINetwork = configInputEnvString(cfg, "firecracker", cfg.Firecracker.CNINetwork, "CRABBOX_FIRECRACKER_CNI_NETWORK")
-	cfg.Firecracker.CNIConfDir = expandUserPath(configInputEnvString(cfg, "firecracker", cfg.Firecracker.CNIConfDir, "CRABBOX_FIRECRACKER_CNI_CONF_DIR"))
-	cfg.Firecracker.CNIBinDir = expandUserPath(configInputEnvString(cfg, "firecracker", cfg.Firecracker.CNIBinDir, "CRABBOX_FIRECRACKER_CNI_BIN_DIR"))
-	if timeout := os.Getenv("CRABBOX_FIRECRACKER_LAUNCH_TIMEOUT"); timeout != "" {
-		recordConfigInput(cfg, "firecracker", configInputEnvironment, applyLeaseDuration(&cfg.Firecracker.LaunchTimeout, timeout))
-	}
-	if value, ok := getenvBool("CRABBOX_FIRECRACKER_DELETE_ON_RELEASE"); ok {
-		cfg.Firecracker.DeleteOnRelease = value
-		recordConfigInput(cfg, "firecracker", configInputEnvironment, true)
-		MarkDeleteOnReleaseExplicit(cfg, "firecracker")
-		recordConfigInputIntent(cfg, "firecracker", configInputEnvironment, true)
+	{
+		applied, err := cfg.Firecracker.applyEnv()
+		recordConfigInput(cfg, "firecracker", configInputEnvironment, applied.InputAccepted)
+		cfg.Firecracker.Binary = expandUserPath(cfg.Firecracker.Binary)
+		cfg.Firecracker.Jailer = expandUserPath(cfg.Firecracker.Jailer)
+		cfg.Firecracker.Kernel = expandUserPath(cfg.Firecracker.Kernel)
+		cfg.Firecracker.RootFS = expandUserPath(cfg.Firecracker.RootFS)
+		cfg.Firecracker.CNIConfDir = expandUserPath(cfg.Firecracker.CNIConfDir)
+		cfg.Firecracker.CNIBinDir = expandUserPath(cfg.Firecracker.CNIBinDir)
+		if applied.DeleteOnRelease {
+			MarkDeleteOnReleaseExplicit(cfg, "firecracker")
+			recordConfigInputIntent(cfg, "firecracker", configInputEnvironment, true)
+		}
+		if err != nil {
+			return err
+		}
 	}
 	cfg.XCPNg.APIURL = configInputEnvString(cfg, "xcp-ng", cfg.XCPNg.APIURL, "CRABBOX_XCP_NG_API_URL")
 	cfg.XCPNg.Username = configInputEnvString(cfg, "xcp-ng", cfg.XCPNg.Username, "CRABBOX_XCP_NG_USERNAME")
@@ -6801,10 +6163,13 @@ func applyEnv(cfg *Config) error {
 	cfg.Actions.Ref = configInputEnvString(cfg, configInputGeneric, cfg.Actions.Ref, "CRABBOX_ACTIONS_REF")
 	cfg.Actions.Repo = configInputEnvString(cfg, configInputGeneric, cfg.Actions.Repo, "CRABBOX_ACTIONS_REPO")
 	cfg.Actions.RunnerVersion = configInputEnvString(cfg, configInputGeneric, cfg.Actions.RunnerVersion, "CRABBOX_ACTIONS_RUNNER_VERSION")
-	cfg.Blacksmith.Org = configInputEnvString(cfg, "blacksmith-testbox", cfg.Blacksmith.Org, "CRABBOX_BLACKSMITH_ORG")
-	cfg.Blacksmith.Workflow = configInputEnvString(cfg, "blacksmith-testbox", cfg.Blacksmith.Workflow, "CRABBOX_BLACKSMITH_WORKFLOW")
-	cfg.Blacksmith.Job = configInputEnvString(cfg, "blacksmith-testbox", cfg.Blacksmith.Job, "CRABBOX_BLACKSMITH_JOB")
-	cfg.Blacksmith.Ref = configInputEnvString(cfg, "blacksmith-testbox", cfg.Blacksmith.Ref, "CRABBOX_BLACKSMITH_REF")
+	{
+		applied, err := cfg.Blacksmith.applyEnvPrefix()
+		recordConfigInput(cfg, "blacksmith-testbox", configInputEnvironment, applied.InputAccepted)
+		if err != nil {
+			return err
+		}
+	}
 	{
 		applied, err := cfg.KubeVirt.applyEnv()
 		recordConfigInput(cfg, "kubevirt", configInputEnvironment, applied.InputAccepted)
@@ -6890,18 +6255,17 @@ func applyEnv(cfg *Config) error {
 		}
 	}
 	cfg.NamespaceInstance.CLIPath = expandUserPath(cfg.NamespaceInstance.CLIPath)
-	cfg.Phala.CLIPath = expandUserPath(configInputEnvString(cfg, "phala", cfg.Phala.CLIPath, "CRABBOX_PHALA_CLI"))
-	if value := os.Getenv("CRABBOX_PHALA_INSTANCE_TYPE"); value != "" {
-		cfg.Phala.InstanceType = value
-		recordConfigInput(cfg, "phala", configInputEnvironment, true)
-		MarkPhalaInstanceTypeExplicit(cfg)
-	}
-	cfg.Phala.WorkRoot = configInputEnvString(cfg, "phala", cfg.Phala.WorkRoot, "CRABBOX_PHALA_WORK_ROOT")
-	cfg.Phala.NodeID = configInputEnvString(cfg, "phala", cfg.Phala.NodeID, "CRABBOX_PHALA_NODE_ID")
-	cfg.Phala.Compose = expandUserPath(configInputEnvString(cfg, "phala", cfg.Phala.Compose, "CRABBOX_PHALA_COMPOSE"))
-	if value, ok := getenvBool("CRABBOX_PHALA_ATTEST"); ok {
-		cfg.Phala.Attest = &value
-		recordConfigInput(cfg, "phala", configInputEnvironment, true)
+	{
+		applied, err := cfg.Phala.applyEnv()
+		recordConfigInput(cfg, "phala", configInputEnvironment, applied.InputAccepted)
+		cfg.Phala.CLIPath = expandUserPath(cfg.Phala.CLIPath)
+		cfg.Phala.Compose = expandUserPath(cfg.Phala.Compose)
+		if applied.InstanceType {
+			MarkPhalaInstanceTypeExplicit(cfg)
+		}
+		if err != nil {
+			return err
+		}
 	}
 	{
 		applied, err := cfg.Morph.applyEnv()
@@ -7109,25 +6473,18 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	cfg.NvidiaBrev.CLI = configInputEnvString(cfg, "nvidia-brev", cfg.NvidiaBrev.CLI, "CRABBOX_NVIDIA_BREV_CLI")
-	cfg.NvidiaBrev.Org = configInputEnvString(cfg, "nvidia-brev", cfg.NvidiaBrev.Org, "CRABBOX_NVIDIA_BREV_ORG")
-	cfg.NvidiaBrev.Type = configInputEnvString(cfg, "nvidia-brev", cfg.NvidiaBrev.Type, "CRABBOX_NVIDIA_BREV_TYPE")
-	cfg.NvidiaBrev.GPUName = configInputEnvString(cfg, "nvidia-brev", cfg.NvidiaBrev.GPUName, "CRABBOX_NVIDIA_BREV_GPU_NAME")
-	cfg.NvidiaBrev.Provider = configInputEnvString(cfg, "nvidia-brev", cfg.NvidiaBrev.Provider, "CRABBOX_NVIDIA_BREV_PROVIDER")
-	cfg.NvidiaBrev.Mode = configInputEnvString(cfg, "nvidia-brev", cfg.NvidiaBrev.Mode, "CRABBOX_NVIDIA_BREV_MODE")
-	cfg.NvidiaBrev.Launchable = configInputEnvString(cfg, "nvidia-brev", cfg.NvidiaBrev.Launchable, "CRABBOX_NVIDIA_BREV_LAUNCHABLE")
-	cfg.NvidiaBrev.StartupScript = configInputEnvString(cfg, "nvidia-brev", cfg.NvidiaBrev.StartupScript, "CRABBOX_NVIDIA_BREV_STARTUP_SCRIPT")
-	if value := os.Getenv("CRABBOX_NVIDIA_BREV_RELEASE_ACTION"); value != "" {
-		cfg.NvidiaBrev.ReleaseAction = value
-		recordConfigInput(cfg, "nvidia-brev", configInputEnvironment, true)
-		MarkDeleteOnReleaseExplicit(cfg, "nvidia-brev")
-	}
-	cfg.NvidiaBrev.Target = configInputEnvString(cfg, "nvidia-brev", cfg.NvidiaBrev.Target, "CRABBOX_NVIDIA_BREV_TARGET")
-	cfg.NvidiaBrev.User = configInputEnvString(cfg, "nvidia-brev", cfg.NvidiaBrev.User, "CRABBOX_NVIDIA_BREV_USER")
-	if value := os.Getenv("CRABBOX_NVIDIA_BREV_WORK_ROOT"); value != "" {
-		cfg.NvidiaBrev.WorkRoot = value
-		recordConfigInput(cfg, "nvidia-brev", configInputEnvironment, true)
-		MarkNvidiaBrevWorkRootExplicit(cfg)
+	{
+		applied, err := cfg.NvidiaBrev.applyEnv()
+		recordConfigInput(cfg, "nvidia-brev", configInputEnvironment, applied.InputAccepted)
+		if applied.ReleaseAction {
+			MarkDeleteOnReleaseExplicit(cfg, "nvidia-brev")
+		}
+		if applied.WorkRoot {
+			MarkNvidiaBrevWorkRootExplicit(cfg)
+		}
+		if err != nil {
+			return err
+		}
 	}
 	cfg.Hostinger.APIToken = configInputEnvString(cfg, "hostinger", cfg.Hostinger.APIToken, "CRABBOX_HOSTINGER_API_TOKEN", "HOSTINGER_API_TOKEN")
 	cfg.Hostinger.APIURL = configInputEnvString(cfg, "hostinger", cfg.Hostinger.APIURL, "CRABBOX_HOSTINGER_API_URL", "HOSTINGER_API_URL")
@@ -7207,11 +6564,13 @@ func applyEnv(cfg *Config) error {
 			cfg.isloDiskGBExplicit = true
 		}
 	}
-	cfg.Freestyle.APIKey = configInputEnvString(cfg, "freestyle", cfg.Freestyle.APIKey, "CRABBOX_FREESTYLE_API_KEY", "FREESTYLE_API_KEY")
-	cfg.Freestyle.APIURL = configInputEnvString(cfg, "freestyle", cfg.Freestyle.APIURL, "CRABBOX_FREESTYLE_API_URL", "FREESTYLE_API_URL")
-	cfg.Freestyle.Workdir = configInputEnvString(cfg, "freestyle", cfg.Freestyle.Workdir, "CRABBOX_FREESTYLE_WORKDIR")
-	cfg.Freestyle.VCPUs = configInputEnvInt(cfg, "freestyle", cfg.Freestyle.VCPUs, "CRABBOX_FREESTYLE_VCPUS")
-	cfg.Freestyle.MemoryGB = configInputEnvInt(cfg, "freestyle", cfg.Freestyle.MemoryGB, "CRABBOX_FREESTYLE_MEMORY_GB")
+	{
+		applied, err := cfg.Freestyle.applyEnv()
+		recordConfigInput(cfg, "freestyle", configInputEnvironment, applied.InputAccepted)
+		if err != nil {
+			return err
+		}
+	}
 	cfg.Tenki.CLIPath = configInputEnvString(cfg, "tenki", cfg.Tenki.CLIPath, "CRABBOX_TENKI_CLI", "TENKI_CLI")
 	if value, ok := firstNonEmptyEnv("CRABBOX_TENKI_ENDPOINT", "TENKI_ENDPOINT"); ok {
 		cfg.Tenki.Endpoint = value
@@ -7480,32 +6839,12 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	cfg.Crownest.APIURL = configInputEnvString(cfg, "crownest", cfg.Crownest.APIURL, "CRABBOX_CROWNEST_API_URL", "CROWNEST_API_URL")
-	cfg.Crownest.ProjectID = configInputEnvString(cfg, "crownest", cfg.Crownest.ProjectID, "CRABBOX_CROWNEST_PROJECT_ID", "CROWNEST_PROJECT_ID")
-	cfg.Crownest.Template = configInputEnvString(cfg, "crownest", cfg.Crownest.Template, "CRABBOX_CROWNEST_TEMPLATE", "CROWNEST_TEMPLATE")
-	crownestTimeoutEnv := "CRABBOX_CROWNEST_TIMEOUT_SECS"
-	crownestTimeoutValue := os.Getenv(crownestTimeoutEnv)
-	if crownestTimeoutValue == "" {
-		crownestTimeoutEnv = "CROWNEST_TIMEOUT_SECS"
-		crownestTimeoutValue = os.Getenv(crownestTimeoutEnv)
-	}
-	if crownestTimeoutValue != "" {
-		parsed, parseErr := strconv.Atoi(crownestTimeoutValue)
-		if parseErr != nil {
-			return exit(2, "%s must be an integer", crownestTimeoutEnv)
+	{
+		applied, err := cfg.Crownest.applyEnv()
+		recordConfigInput(cfg, "crownest", configInputEnvironment, applied.InputAccepted)
+		if err != nil {
+			return err
 		}
-		if parsed < 0 {
-			return exit(2, "%s must be non-negative", crownestTimeoutEnv)
-		}
-		cfg.Crownest.TimeoutSecs = parsed
-		recordConfigInput(cfg, "crownest", configInputEnvironment, true)
-	}
-	if v, ok := getenvBool("CRABBOX_CROWNEST_FORGET_MISSING"); ok {
-		cfg.Crownest.ForgetMissing = v
-		recordConfigInput(cfg, "crownest", configInputEnvironment, true)
-	} else if v, ok := getenvBool("CROWNEST_FORGET_MISSING"); ok {
-		cfg.Crownest.ForgetMissing = v
-		recordConfigInput(cfg, "crownest", configInputEnvironment, true)
 	}
 	cfg.CloudflareDynamicWorkers.LoaderURL = configInputEnvString(cfg, "cloudflare-dynamic-workers", cfg.CloudflareDynamicWorkers.LoaderURL, "CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL", "CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_LOADER_URL")
 	cfg.CloudflareDynamicWorkers.Token = configInputEnvString(cfg, "cloudflare-dynamic-workers", cfg.CloudflareDynamicWorkers.Token, "CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN")
@@ -7693,12 +7032,12 @@ func applyEnv(cfg *Config) error {
 	cfg.Static.User = configInputEnvString(cfg, "ssh", cfg.Static.User, "CRABBOX_STATIC_USER")
 	cfg.Static.Port = configInputEnvString(cfg, "ssh", cfg.Static.Port, "CRABBOX_STATIC_PORT")
 	cfg.Static.WorkRoot = configInputEnvString(cfg, "ssh", cfg.Static.WorkRoot, "CRABBOX_STATIC_WORK_ROOT")
-	if idleTimeout := os.Getenv("CRABBOX_BLACKSMITH_IDLE_TIMEOUT"); idleTimeout != "" {
-		recordConfigInput(cfg, "blacksmith-testbox", configInputEnvironment, applyLeaseDuration(&cfg.Blacksmith.IdleTimeout, idleTimeout))
-	}
-	if value, ok := getenvBool("CRABBOX_BLACKSMITH_DEBUG"); ok {
-		cfg.Blacksmith.Debug = value
-		recordConfigInput(cfg, "blacksmith-testbox", configInputEnvironment, true)
+	{
+		applied, err := cfg.Blacksmith.applyEnvSuffix()
+		recordConfigInput(cfg, "blacksmith-testbox", configInputEnvironment, applied.InputAccepted)
+		if err != nil {
+			return err
+		}
 	}
 	if labels := os.Getenv("CRABBOX_ACTIONS_RUNNER_LABELS"); labels != "" {
 		cfg.Actions.RunnerLabels = splitCommaList(labels)
@@ -8250,7 +7589,19 @@ func getenvNonNegativeInt(name string, fallback int) (int, error) {
 }
 
 func getenvNonNegativeIntAccepted(name string, fallback int) (int, bool, error) {
+	return parseNonNegativeIntAccepted(name, os.Getenv(name), fallback)
+}
+
+func getenvNonNegativeIntAliasAccepted(name, alias string, fallback int) (int, bool, error) {
 	value := os.Getenv(name)
+	if value == "" {
+		name = alias
+		value = os.Getenv(name)
+	}
+	return parseNonNegativeIntAccepted(name, value, fallback)
+}
+
+func parseNonNegativeIntAccepted(name, value string, fallback int) (int, bool, error) {
 	if value == "" {
 		return fallback, false, nil
 	}

@@ -1198,6 +1198,96 @@ func setupRunWorkdirCase(t *testing.T, tc runWorkdirCase) string {
 	return dir
 }
 
+func TestRunOrdinarySparseScopeBeforeLeaseWork(t *testing.T) {
+	for _, skip := range []bool{false, true} {
+		for _, existing := range []bool{false, true} {
+			t.Run(fmt.Sprintf("skip=%t/existing=%t", skip, existing), func(t *testing.T) {
+				setupOrdinaryHiddenSyncRepo(t, skip)
+				acquires := 0
+				runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) {
+					acquires++
+					return LeaseTarget{}, exit(9, "acquire captured")
+				}
+				t.Cleanup(func() { runEnvProfileTestAcquireLease = nil })
+				runPrepareTestResolveRequests = nil
+				args := []string{"--provider", "run-env-profile-test"}
+				if existing {
+					args = []string{"--provider", "run-prepare-test", "--id", "cbx_existing"}
+				}
+				args = append(args, "--", "true")
+				err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(context.Background(), args)
+				if acquires != 0 || len(runPrepareTestResolveRequests) != 0 {
+					t.Errorf("lease calls before scope failure: Acquire=%d Resolve/Prepare=%d", acquires, len(runPrepareTestResolveRequests))
+				}
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != 6 {
+					t.Errorf("error=%v want exit6", err)
+				}
+				assertOrdinaryHiddenSyncGuidance(t, err)
+			})
+		}
+	}
+}
+
+func TestRunOrdinarySparseScopeBeforePoolRequest(t *testing.T) {
+	for _, skip := range []bool{false, true} {
+		t.Run(fmt.Sprintf("skip=%t", skip), func(t *testing.T) {
+			setupOrdinaryHiddenSyncRepo(t, skip)
+			var requests atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				http.Error(w, "recorded unit-test request", http.StatusBadRequest)
+			}))
+			t.Cleanup(server.Close)
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-token")
+			err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(context.Background(), []string{"--provider", "run-ready-pool-preflight-test", "--pool", "shared-linux", "--pool-return", "drain", "--", "true"})
+			if n := requests.Load(); n != 0 {
+				t.Errorf("ready-pool requests before scope failure=%d", n)
+			}
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 6 {
+				t.Errorf("error=%v want exit6", err)
+			}
+			assertOrdinaryHiddenSyncGuidance(t, err)
+		})
+	}
+}
+
+func TestRunOrdinarySparseScopeControls(t *testing.T) {
+	for _, tc := range []struct {
+		name, config, ignore string
+		materialized         bool
+	}{
+		{name: "outside include", config: "sync: {include: [visible]}\n"},
+		{name: "excluded", config: "sync: {exclude: [hidden]}\n"},
+		{name: "ignore file", ignore: "hidden\n"},
+		{name: "materialized", materialized: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := setupOrdinaryHiddenSyncRepo(t, false)
+			if tc.materialized {
+				runGit(t, dir, "sparse-checkout", "set", "visible", "hidden")
+			}
+			if tc.config != "" {
+				writeFile(t, os.Getenv("CRABBOX_CONFIG"), tc.config)
+			}
+			if tc.ignore != "" {
+				writeFile(t, filepath.Join(dir, ".crabboxignore"), tc.ignore)
+			}
+			runPrepareTestResolveRequests = nil
+			err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(context.Background(), []string{"--provider", "run-prepare-test", "--id", "cbx_existing", "--", "true"})
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 9 || !strings.Contains(exitErr.Message, "resolve captured") {
+				t.Fatalf("scope control error=%v", err)
+			}
+			if len(runPrepareTestResolveRequests) != 1 || !runPrepareTestResolveRequests[0].Prepare {
+				t.Fatalf("Resolve/Prepare=%#v", runPrepareTestResolveRequests)
+			}
+		})
+	}
+}
+
 func TestRunWorkdirFailsBeforeAcquire(t *testing.T) {
 	for _, tc := range runWorkdirCases() {
 		t.Run(tc.name, func(t *testing.T) {
