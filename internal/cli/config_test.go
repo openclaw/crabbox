@@ -1351,6 +1351,176 @@ func TestProviderExplicitMarkerHelpers(t *testing.T) {
 	}
 }
 
+func TestBlacksmithOrdinarySources(t *testing.T) {
+	clearConfigEnv(t)
+	if got := baseConfig().Blacksmith; got != (BlacksmithConfig{}) {
+		t.Fatalf("raw defaults: %#v", got)
+	}
+	for _, source := range []string{"user", "repo", "env"} {
+		for _, value := range []string{"", "same", " padded "} {
+			t.Run(source+"/"+value, func(t *testing.T) {
+				clearConfigEnv(t)
+				cfg := Config{Blacksmith: BlacksmithConfig{Org: "same", Workflow: "same", Job: "same", Ref: "same"}}
+				want := cfg.Blacksmith
+				if value != "" {
+					want.Org, want.Workflow, want.Job, want.Ref = value, value, value, value
+				}
+				inputSource := configInputEnvironment
+				if source == "env" {
+					for _, name := range []string{"ORG", "WORKFLOW", "JOB", "REF"} {
+						t.Setenv("CRABBOX_BLACKSMITH_"+name, value)
+					}
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					selection := providerSelectionUserConfig
+					inputSource = configInputUser
+					if source == "repo" {
+						selection = providerSelectionRepoConfig
+						inputSource = configInputRepo
+					}
+					file := fileConfig{Blacksmith: &fileBlacksmithConfig{Org: value, Workflow: value, Job: value, Ref: value}}
+					original := *file.Blacksmith
+					if err := applyFileConfigWithTrustAndProviderSource(&cfg, file, source == "user", selection); err != nil {
+						t.Fatal(err)
+					}
+					if *file.Blacksmith != original {
+						t.Fatal("input mutated")
+					}
+				}
+				var wantLedger configInputLedger
+				if value != "" {
+					wantLedger = wantLedger.withInput("blacksmith-testbox", inputSource, configInputValue)
+				}
+				if cfg.Blacksmith != want || !reflect.DeepEqual(cfg.inputProvenance, wantLedger) {
+					t.Fatalf("source result: %#v ledger %#v", cfg.Blacksmith, cfg.inputProvenance)
+				}
+			})
+		}
+	}
+	for _, source := range []string{"file", "env"} {
+		for _, duration := range []string{"", "bad", "0s", "-1s", " 2m ", "2m"} {
+			for _, debug := range []string{"", "false", "true", "null", "invalid", " FALSE "} {
+				if source == "file" && (debug == "invalid" || debug == " FALSE ") {
+					continue
+				}
+				t.Run(source+"/"+duration+"/"+debug, func(t *testing.T) {
+					clearConfigEnv(t)
+					cfg := Config{Blacksmith: BlacksmithConfig{IdleTimeout: time.Minute, Debug: true}}
+					want := cfg.Blacksmith
+					accepted := duration == "2m"
+					if accepted {
+						want.IdleTimeout = 2 * time.Minute
+					}
+					if debug == "false" || debug == " FALSE " {
+						want.Debug = false
+						accepted = true
+					}
+					if debug == "true" {
+						accepted = true
+					}
+					inputSource := configInputEnvironment
+					if source == "env" {
+						t.Setenv("CRABBOX_BLACKSMITH_IDLE_TIMEOUT", duration)
+						t.Setenv("CRABBOX_BLACKSMITH_DEBUG", debug)
+						if err := applyEnv(&cfg); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						inputSource = configInputUser
+						file := fileConfig{Blacksmith: &fileBlacksmithConfig{IdleTimeout: duration}}
+						if debug == "true" || debug == "false" {
+							v := debug == "true"
+							file.Blacksmith.Debug = &v
+						}
+						if err := applyFileConfig(&cfg, file); err != nil {
+							t.Fatal(err)
+						}
+					}
+					var wantLedger configInputLedger
+					if accepted {
+						wantLedger = wantLedger.withInput("blacksmith-testbox", inputSource, configInputValue)
+					}
+					if cfg.Blacksmith != want || !reflect.DeepEqual(cfg.inputProvenance, wantLedger) {
+						t.Fatalf("options: %#v ledger %#v want %#v %#v", cfg.Blacksmith, cfg.inputProvenance, want, wantLedger)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestBlacksmithOrdinaryEnvironmentPhase(t *testing.T) {
+	for _, early := range []bool{false, true} {
+		for _, fail := range []bool{false, true} {
+			t.Run(fmt.Sprintf("early=%t/error=%t", early, fail), func(t *testing.T) {
+				clearConfigEnv(t)
+				cfg := Config{Blacksmith: BlacksmithConfig{Org: "prior", Workflow: "prior", Job: "prior", Ref: "prior", IdleTimeout: time.Minute, Debug: true}}
+				want := cfg.Blacksmith
+				if early {
+					for _, name := range []string{"ORG", "WORKFLOW", "JOB", "REF"} {
+						t.Setenv("CRABBOX_BLACKSMITH_"+name, "next")
+					}
+					want.Org, want.Workflow, want.Job, want.Ref = "next", "next", "next", "next"
+				}
+				t.Setenv("CRABBOX_BLACKSMITH_IDLE_TIMEOUT", "2m")
+				t.Setenv("CRABBOX_BLACKSMITH_DEBUG", "false")
+				if fail {
+					t.Setenv("CRABBOX_AGENT_SANDBOX_EXEC_TIMEOUT_SECS", "ordinary-invalid-integer")
+				} else {
+					want.IdleTimeout, want.Debug = 2*time.Minute, false
+				}
+				err := applyEnv(&cfg)
+				if (err != nil) != fail || (err != nil && !strings.Contains(err.Error(), "CRABBOX_AGENT_SANDBOX_EXEC_TIMEOUT_SECS")) {
+					t.Fatalf("error=%v", err)
+				}
+				var wantFacts configInputFacts
+				if early || !fail {
+					wantFacts.values = 1 << (configInputEnvironment - 1)
+				}
+				if cfg.Blacksmith != want || cfg.inputProvenance["blacksmith-testbox"] != wantFacts {
+					t.Fatalf("partial state: %#v facts %#v", cfg.Blacksmith, cfg.inputProvenance["blacksmith-testbox"])
+				}
+			})
+		}
+	}
+}
+
+func TestBlacksmithOrdinaryWriter(t *testing.T) {
+	for _, input := range []string{"{}", "blacksmith: null", "blacksmith: {}", "blacksmith: {org: '', workflow: '', job: '', ref: '', idleTimeout: '', debug: null}", "blacksmith: {org: ' padded ', workflow: ' padded ', job: ' padded ', ref: ' padded ', idleTimeout: 'bad', debug: false}"} {
+		path := isolatedConfigPath(t)
+		if err := os.WriteFile(path, []byte(input), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writeUserFileConfig(file); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := yaml.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]any{}
+		if strings.Contains(input, "blacksmith: {") {
+			want["blacksmith"] = map[string]any{}
+		}
+		if strings.Contains(input, "padded") {
+			want["blacksmith"] = map[string]any{"org": " padded ", "workflow": " padded ", "job": " padded ", "ref": " padded ", "idleTimeout": "bad", "debug": false}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("writer %q: %#v want %#v", input, got, want)
+		}
+	}
+}
+
 func TestNvidiaBrevOrdinarySourcesAndWriter(t *testing.T) {
 	clearConfigEnv(t)
 	wantDefaults := NvidiaBrevConfig{CLI: "brev", GPUName: "A100", Mode: "vm", ReleaseAction: "delete", Target: "container", WorkRoot: "/tmp/crabbox"}
@@ -6459,6 +6629,165 @@ func TestCoderConfigDefaultsSetWorkRoot(t *testing.T) {
 	}
 	if cfg.Coder.WorkRoot != "/tmp/explicit" || cfg.WorkRoot != "/tmp/explicit" {
 		t.Fatalf("explicit top-level work root not propagated: coder=%q work=%q", cfg.Coder.WorkRoot, cfg.WorkRoot)
+	}
+}
+
+func TestIncusOrdinarySourcesAndMetadata(t *testing.T) {
+	clearConfigEnv(t)
+	wantDefaults := IncusConfig{Remote: "local", InstanceType: "container", Image: "images:ubuntu/24.04/cloud", User: "crabbox", WorkRoot: "/work/crabbox", DeleteOnRelease: true, StartTimeout: 10 * time.Minute, LaunchPort: "22", ProxyListenHost: "127.0.0.1", ProxyDevice: "crabbox-ssh"}
+	if got := baseConfig().Incus; !reflect.DeepEqual(got, wantDefaults) {
+		t.Fatalf("defaults %#v", got)
+	}
+	fields := []struct{ field, key, env string }{
+		{"Remote", "remote", "REMOTE"}, {"Project", "project", "PROJECT"}, {"Address", "address", "ADDRESS"}, {"Socket", "socket", "SOCKET"}, {"InstanceType", "instanceType", "INSTANCE_TYPE"}, {"Image", "image", "IMAGE"}, {"Profile", "profile", "PROFILE"}, {"User", "user", "USER"}, {"WorkRoot", "workRoot", "WORK_ROOT"}, {"LaunchPort", "launchPort", "LAUNCH_PORT"}, {"ProxyListenHost", "proxyListenHost", "PROXY_LISTEN_HOST"}, {"ProxyListenPort", "proxyListenPort", "PROXY_LISTEN_PORT"}, {"ProxyDevice", "proxyDevice", "PROXY_DEVICE"}, {"TLSServerCert", "tlsServerCert", "TLS_SERVER_CERT"}, {"RemoteImageServer", "remoteImageServer", "REMOTE_IMAGE_SERVER"},
+	}
+	for _, source := range []string{"file", "env"} {
+		for _, value := range []string{"", "same", " padded ", "~/fixture"} {
+			t.Run(source+"/"+value, func(t *testing.T) {
+				clearConfigEnv(t)
+				home := t.TempDir()
+				t.Setenv("HOME", home)
+				metadata := map[string]string{"fixture": "retained"}
+				cfg := Config{WorkRoot: "/generic", SSHUser: "generic", Incus: IncusConfig{CheckpointMetadata: metadata}}
+				for _, f := range fields {
+					reflect.ValueOf(&cfg.Incus).Elem().FieldByName(f.field).SetString("same")
+				}
+				cfg.Incus.Socket, cfg.Incus.TLSServerCert = "~/inherited", "~/inherited"
+				want := cfg.Incus
+				if value != "" {
+					for _, f := range fields {
+						reflect.ValueOf(&want).Elem().FieldByName(f.field).SetString(value)
+					}
+				}
+				if source == "env" || value != "" {
+					for _, name := range []string{"Socket", "TLSServerCert"} {
+						v := reflect.ValueOf(&want).Elem().FieldByName(name)
+						if strings.HasPrefix(v.String(), "~/") {
+							v.SetString(filepath.Join(home, strings.TrimPrefix(v.String(), "~/")))
+						}
+					}
+				}
+				inputSource := configInputUser
+				if source == "file" {
+					body := map[string]any{}
+					for _, f := range fields {
+						body[f.key] = value
+					}
+					data, err := yaml.Marshal(map[string]any{"incus": body})
+					if err != nil {
+						t.Fatal(err)
+					}
+					var file fileConfig
+					if err := yaml.Unmarshal(data, &file); err != nil {
+						t.Fatal(err)
+					}
+					original := *file.Incus
+					if err := applyFileConfig(&cfg, file); err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(*file.Incus, original) {
+						t.Fatal("file mutated")
+					}
+				} else {
+					inputSource = configInputEnvironment
+					for _, f := range fields {
+						t.Setenv("CRABBOX_INCUS_"+f.env, value)
+					}
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if !reflect.DeepEqual(cfg.Incus, want) || cfg.WorkRoot != "/generic" || cfg.SSHUser != "generic" {
+					t.Fatalf("source %#v want %#v", cfg.Incus, want)
+				}
+				var ledger configInputLedger
+				if value != "" {
+					ledger = ledger.withInput("incus", inputSource, configInputValue)
+				}
+				if !reflect.DeepEqual(cfg.inputProvenance, ledger) {
+					t.Fatal("accepted source mismatch")
+				}
+				cfg.Incus.CheckpointMetadata["same-map"] = "yes"
+				if metadata["same-map"] != "yes" {
+					t.Fatal("runtime metadata map replaced")
+				}
+			})
+		}
+	}
+	for _, source := range []string{"file", "env"} {
+		for _, duration := range []string{"", "bad", "0s", "-1s", " 2m ", "2m"} {
+			t.Run(source+"/options/"+duration, func(t *testing.T) {
+				clearConfigEnv(t)
+				cfg := Config{Incus: IncusConfig{StartTimeout: time.Minute, DeleteOnRelease: true, InsecureTLS: true}}
+				if source == "file" {
+					v := false
+					if err := applyFileConfig(&cfg, fileConfig{Incus: &fileIncusConfig{StartTimeout: duration, DeleteOnRelease: &v, InsecureTLS: &v}}); err != nil {
+						t.Fatal(err)
+					}
+					if v {
+						t.Fatal("bool input mutated")
+					}
+				} else {
+					t.Setenv("CRABBOX_INCUS_START_TIMEOUT", duration)
+					t.Setenv("CRABBOX_INCUS_DELETE_ON_RELEASE", " false ")
+					t.Setenv("CRABBOX_INCUS_INSECURE_TLS", "OFF")
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				}
+				want := time.Minute
+				if duration == "2m" {
+					want = 2 * time.Minute
+				}
+				if cfg.Incus.StartTimeout != want || cfg.Incus.DeleteOnRelease || cfg.Incus.InsecureTLS || !DeleteOnReleaseExplicit(cfg, "incus") || cfg.Incus.CheckpointMetadata != nil {
+					t.Fatalf("options %#v", cfg.Incus)
+				}
+			})
+		}
+	}
+	metadata := IncusConfig{CheckpointMetadata: map[string]string{"ordinary-metadata": "not-input"}}
+	for _, marshal := range []func(any) ([]byte, error){json.Marshal, yaml.Marshal} {
+		data, err := marshal(metadata)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "ordinary-metadata") || strings.Contains(strings.ToLower(string(data)), "checkpointmetadata") {
+			t.Fatal("runtime metadata serialized")
+		}
+	}
+}
+
+func TestIncusOrdinaryWriter(t *testing.T) {
+	for _, input := range []string{"incus: null", "incus: {}", "incus: {remote: '', startTimeout: '', deleteOnRelease: null, insecureTLS: null}", "incus: {remote: ' padded ', socket: '~/ordinary', startTimeout: 'bad', deleteOnRelease: false, insecureTLS: false}"} {
+		path := isolatedConfigPath(t)
+		if err := os.WriteFile(path, []byte(input), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writeUserFileConfig(file); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := yaml.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]any{}
+		if strings.Contains(input, "incus: {") {
+			want["incus"] = map[string]any{}
+		}
+		if strings.Contains(input, "padded") {
+			want["incus"] = map[string]any{"remote": " padded ", "socket": "~/ordinary", "startTimeout": "bad", "deleteOnRelease": false, "insecureTLS": false}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("writer %#v want %#v", got, want)
+		}
 	}
 }
 

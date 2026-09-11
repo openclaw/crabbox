@@ -375,15 +375,6 @@ type ActionsConfig struct {
 	Ephemeral     bool
 }
 
-type BlacksmithConfig struct {
-	Org         string
-	Workflow    string
-	Job         string
-	Ref         string
-	IdleTimeout time.Duration
-	Debug       bool
-}
-
 type ExternalConfig struct {
 	Command                  string
 	Args                     []string
@@ -707,28 +698,6 @@ func applyXCPNgNameUUIDPair(dstName, dstUUID *string, incomingName, incomingUUID
 	*dstName = incomingName
 	*dstUUID = incomingUUID
 	return true
-}
-
-type IncusConfig struct {
-	CheckpointMetadata map[string]string `yaml:"-" json:"-"`
-	Remote             string
-	Project            string
-	Address            string
-	Socket             string
-	InstanceType       string
-	Image              string
-	Profile            string
-	User               string
-	WorkRoot           string
-	DeleteOnRelease    bool
-	StartTimeout       time.Duration
-	LaunchPort         string
-	ProxyListenHost    string
-	ProxyListenPort    string
-	ProxyDevice        string
-	TLSServerCert      string
-	InsecureTLS        bool
-	RemoteImageServer  string
 }
 
 type ParallelsConfig struct {
@@ -2158,23 +2127,11 @@ func baseConfig() Config {
 			DeleteOnRelease: true,
 			WorkRoot:        "/workspaces/crabbox",
 		},
-		Lambda:       initialLambdaConfig(),
-		OVH:          defaultOVHConfig(),
-		Scaleway:     defaultScalewayConfig(),
-		TencentCloud: defaultTencentCloudConfig(),
-		Incus: IncusConfig{
-			Remote:          "local",
-			Project:         "",
-			InstanceType:    "container",
-			Image:           "images:ubuntu/24.04/cloud",
-			User:            "crabbox",
-			WorkRoot:        defaultPOSIXWorkRoot,
-			DeleteOnRelease: true,
-			StartTimeout:    10 * time.Minute,
-			LaunchPort:      "22",
-			ProxyListenHost: "127.0.0.1",
-			ProxyDevice:     "crabbox-ssh",
-		},
+		Lambda:           initialLambdaConfig(),
+		OVH:              defaultOVHConfig(),
+		Scaleway:         defaultScalewayConfig(),
+		TencentCloud:     defaultTencentCloudConfig(),
+		Incus:            initialIncusConfig(),
 		SSHUser:          "crabbox",
 		SSHKey:           sshKey,
 		SSHPort:          "2222",
@@ -2251,6 +2208,7 @@ func baseConfig() Config {
 		},
 		Runpod:     defaultRunpodConfig(),
 		Vast:       defaultVastConfig(),
+		Blacksmith: defaultBlacksmithConfig(),
 		NvidiaBrev: defaultNvidiaBrevConfig(),
 		Nebius:     (NebiusConfig{}).WithRuntimeDefaults(),
 		Hostinger: HostingerConfig{
@@ -2604,27 +2562,6 @@ type fileGCPConfig struct {
 	ServiceAccount string   `yaml:"serviceAccount,omitempty"`
 }
 
-type fileIncusConfig struct {
-	Remote            string `yaml:"remote,omitempty"`
-	Project           string `yaml:"project,omitempty"`
-	Address           string `yaml:"address,omitempty"`
-	Socket            string `yaml:"socket,omitempty"`
-	InstanceType      string `yaml:"instanceType,omitempty"`
-	Image             string `yaml:"image,omitempty"`
-	Profile           string `yaml:"profile,omitempty"`
-	User              string `yaml:"user,omitempty"`
-	WorkRoot          string `yaml:"workRoot,omitempty"`
-	DeleteOnRelease   *bool  `yaml:"deleteOnRelease,omitempty"`
-	StartTimeout      string `yaml:"startTimeout,omitempty"`
-	LaunchPort        string `yaml:"launchPort,omitempty"`
-	ProxyListenHost   string `yaml:"proxyListenHost,omitempty"`
-	ProxyListenPort   string `yaml:"proxyListenPort,omitempty"`
-	ProxyDevice       string `yaml:"proxyDevice,omitempty"`
-	TLSServerCert     string `yaml:"tlsServerCert,omitempty"`
-	InsecureTLS       *bool  `yaml:"insecureTLS,omitempty"`
-	RemoteImageServer string `yaml:"remoteImageServer,omitempty"`
-}
-
 type fileProxmoxConfig struct {
 	APIURL      string `yaml:"apiUrl,omitempty"`
 	TokenID     string `yaml:"tokenId,omitempty"`
@@ -2753,15 +2690,6 @@ type fileActionsConfig struct {
 	RunnerLabels  []string `yaml:"runnerLabels,omitempty"`
 	RunnerVersion string   `yaml:"runnerVersion,omitempty"`
 	Ephemeral     *bool    `yaml:"ephemeral,omitempty"`
-}
-
-type fileBlacksmithConfig struct {
-	Org         string `yaml:"org,omitempty"`
-	Workflow    string `yaml:"workflow,omitempty"`
-	Job         string `yaml:"job,omitempty"`
-	Ref         string `yaml:"ref,omitempty"`
-	IdleTimeout string `yaml:"idleTimeout,omitempty"`
-	Debug       *bool  `yaml:"debug,omitempty"`
 }
 
 type fileExternalConfig struct {
@@ -4008,78 +3936,15 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			recordConfigInput(cfg, "gcp", inputSource, true)
 		}
 	}
-	if file.Incus != nil {
-		if file.Incus.Remote != "" {
-			cfg.Incus.Remote = file.Incus.Remote
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.Project != "" {
-			cfg.Incus.Project = file.Incus.Project
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.Address != "" {
-			cfg.Incus.Address = file.Incus.Address
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.Socket != "" {
-			cfg.Incus.Socket = expandUserPath(file.Incus.Socket)
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.InstanceType != "" {
-			cfg.Incus.InstanceType = file.Incus.InstanceType
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.Image != "" {
-			cfg.Incus.Image = file.Incus.Image
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.Profile != "" {
-			cfg.Incus.Profile = file.Incus.Profile
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.User != "" {
-			cfg.Incus.User = file.Incus.User
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.WorkRoot != "" {
-			cfg.Incus.WorkRoot = file.Incus.WorkRoot
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.DeleteOnRelease != nil {
-			cfg.Incus.DeleteOnRelease = *file.Incus.DeleteOnRelease
-			recordConfigInput(cfg, "incus", inputSource, true)
+	{
+		applied, err := cfg.Incus.applyFile(file.Incus)
+		recordConfigInput(cfg, "incus", inputSource, applied.InputAccepted)
+		cfg.Incus.ExpandAppliedLocalPaths(applied)
+		if applied.DeleteOnRelease {
 			MarkDeleteOnReleaseExplicit(cfg, "incus")
 		}
-		if file.Incus.StartTimeout != "" {
-			recordConfigInput(cfg, "incus", inputSource, applyLeaseDuration(&cfg.Incus.StartTimeout, file.Incus.StartTimeout))
-		}
-		if file.Incus.LaunchPort != "" {
-			cfg.Incus.LaunchPort = file.Incus.LaunchPort
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.ProxyListenHost != "" {
-			cfg.Incus.ProxyListenHost = file.Incus.ProxyListenHost
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.ProxyListenPort != "" {
-			cfg.Incus.ProxyListenPort = file.Incus.ProxyListenPort
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.ProxyDevice != "" {
-			cfg.Incus.ProxyDevice = file.Incus.ProxyDevice
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.TLSServerCert != "" {
-			cfg.Incus.TLSServerCert = expandUserPath(file.Incus.TLSServerCert)
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.InsecureTLS != nil {
-			cfg.Incus.InsecureTLS = *file.Incus.InsecureTLS
-			recordConfigInput(cfg, "incus", inputSource, true)
-		}
-		if file.Incus.RemoteImageServer != "" {
-			cfg.Incus.RemoteImageServer = file.Incus.RemoteImageServer
-			recordConfigInput(cfg, "incus", inputSource, true)
+		if err != nil {
+			return err
 		}
 	}
 	if file.Proxmox != nil {
@@ -4419,27 +4284,11 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Actions.Ephemeral, file.Actions.Ephemeral))
 	}
-	if file.Blacksmith != nil {
-		if file.Blacksmith.Org != "" {
-			cfg.Blacksmith.Org = file.Blacksmith.Org
-			recordConfigInput(cfg, "blacksmith-testbox", inputSource, true)
-		}
-		if file.Blacksmith.Workflow != "" {
-			cfg.Blacksmith.Workflow = file.Blacksmith.Workflow
-			recordConfigInput(cfg, "blacksmith-testbox", inputSource, true)
-		}
-		if file.Blacksmith.Job != "" {
-			cfg.Blacksmith.Job = file.Blacksmith.Job
-			recordConfigInput(cfg, "blacksmith-testbox", inputSource, true)
-		}
-		if file.Blacksmith.Ref != "" {
-			cfg.Blacksmith.Ref = file.Blacksmith.Ref
-			recordConfigInput(cfg, "blacksmith-testbox", inputSource, true)
-		}
-		recordConfigInput(cfg, "blacksmith-testbox", inputSource, applyLeaseDuration(&cfg.Blacksmith.IdleTimeout, file.Blacksmith.IdleTimeout))
-		if file.Blacksmith.Debug != nil {
-			applyOptional(&cfg.Blacksmith.Debug, file.Blacksmith.Debug)
-			recordConfigInput(cfg, "blacksmith-testbox", inputSource, true)
+	{
+		applied, err := cfg.Blacksmith.applyFile(file.Blacksmith)
+		recordConfigInput(cfg, "blacksmith-testbox", inputSource, applied.InputAccepted)
+		if err != nil {
+			return err
 		}
 	}
 	if err := applyKubeVirtFileConfig(cfg, file.KubeVirt, trusted, inputSource); err != nil {
@@ -6195,33 +6044,18 @@ func applyEnv(cfg *Config) error {
 		recordConfigInputIntent(cfg, "gcp", configInputEnvironment, true)
 	}
 	cfg.GCPServiceAccount = configInputEnvString(cfg, "gcp", cfg.GCPServiceAccount, "CRABBOX_GCP_SERVICE_ACCOUNT")
-	cfg.Incus.Remote = configInputEnvString(cfg, "incus", cfg.Incus.Remote, "CRABBOX_INCUS_REMOTE")
-	cfg.Incus.Project = configInputEnvString(cfg, "incus", cfg.Incus.Project, "CRABBOX_INCUS_PROJECT")
-	cfg.Incus.Address = configInputEnvString(cfg, "incus", cfg.Incus.Address, "CRABBOX_INCUS_ADDRESS")
-	cfg.Incus.Socket = expandUserPath(configInputEnvString(cfg, "incus", cfg.Incus.Socket, "CRABBOX_INCUS_SOCKET"))
-	cfg.Incus.InstanceType = configInputEnvString(cfg, "incus", cfg.Incus.InstanceType, "CRABBOX_INCUS_INSTANCE_TYPE")
-	cfg.Incus.Image = configInputEnvString(cfg, "incus", cfg.Incus.Image, "CRABBOX_INCUS_IMAGE")
-	cfg.Incus.Profile = configInputEnvString(cfg, "incus", cfg.Incus.Profile, "CRABBOX_INCUS_PROFILE")
-	cfg.Incus.User = configInputEnvString(cfg, "incus", cfg.Incus.User, "CRABBOX_INCUS_USER")
-	cfg.Incus.WorkRoot = configInputEnvString(cfg, "incus", cfg.Incus.WorkRoot, "CRABBOX_INCUS_WORK_ROOT")
-	if value, ok := getenvBool("CRABBOX_INCUS_DELETE_ON_RELEASE"); ok {
-		cfg.Incus.DeleteOnRelease = value
-		recordConfigInput(cfg, "incus", configInputEnvironment, true)
-		MarkDeleteOnReleaseExplicit(cfg, "incus")
+	{
+		applied, err := cfg.Incus.applyEnv()
+		recordConfigInput(cfg, "incus", configInputEnvironment, applied.InputAccepted)
+		cfg.Incus.Socket = expandUserPath(cfg.Incus.Socket)
+		cfg.Incus.TLSServerCert = expandUserPath(cfg.Incus.TLSServerCert)
+		if applied.DeleteOnRelease {
+			MarkDeleteOnReleaseExplicit(cfg, "incus")
+		}
+		if err != nil {
+			return err
+		}
 	}
-	if timeout := os.Getenv("CRABBOX_INCUS_START_TIMEOUT"); timeout != "" {
-		recordConfigInput(cfg, "incus", configInputEnvironment, applyLeaseDuration(&cfg.Incus.StartTimeout, timeout))
-	}
-	cfg.Incus.LaunchPort = configInputEnvString(cfg, "incus", cfg.Incus.LaunchPort, "CRABBOX_INCUS_LAUNCH_PORT")
-	cfg.Incus.ProxyListenHost = configInputEnvString(cfg, "incus", cfg.Incus.ProxyListenHost, "CRABBOX_INCUS_PROXY_LISTEN_HOST")
-	cfg.Incus.ProxyListenPort = configInputEnvString(cfg, "incus", cfg.Incus.ProxyListenPort, "CRABBOX_INCUS_PROXY_LISTEN_PORT")
-	cfg.Incus.ProxyDevice = configInputEnvString(cfg, "incus", cfg.Incus.ProxyDevice, "CRABBOX_INCUS_PROXY_DEVICE")
-	cfg.Incus.TLSServerCert = expandUserPath(configInputEnvString(cfg, "incus", cfg.Incus.TLSServerCert, "CRABBOX_INCUS_TLS_SERVER_CERT"))
-	if value, ok := getenvBool("CRABBOX_INCUS_INSECURE_TLS"); ok {
-		cfg.Incus.InsecureTLS = value
-		recordConfigInput(cfg, "incus", configInputEnvironment, true)
-	}
-	cfg.Incus.RemoteImageServer = configInputEnvString(cfg, "incus", cfg.Incus.RemoteImageServer, "CRABBOX_INCUS_REMOTE_IMAGE_SERVER")
 	if tags := os.Getenv("CRABBOX_GCP_TAGS"); tags != "" {
 		cfg.GCPTags = splitCommaList(tags)
 		recordConfigInput(cfg, "gcp", configInputEnvironment, true)
@@ -6471,10 +6305,13 @@ func applyEnv(cfg *Config) error {
 	cfg.Actions.Ref = configInputEnvString(cfg, configInputGeneric, cfg.Actions.Ref, "CRABBOX_ACTIONS_REF")
 	cfg.Actions.Repo = configInputEnvString(cfg, configInputGeneric, cfg.Actions.Repo, "CRABBOX_ACTIONS_REPO")
 	cfg.Actions.RunnerVersion = configInputEnvString(cfg, configInputGeneric, cfg.Actions.RunnerVersion, "CRABBOX_ACTIONS_RUNNER_VERSION")
-	cfg.Blacksmith.Org = configInputEnvString(cfg, "blacksmith-testbox", cfg.Blacksmith.Org, "CRABBOX_BLACKSMITH_ORG")
-	cfg.Blacksmith.Workflow = configInputEnvString(cfg, "blacksmith-testbox", cfg.Blacksmith.Workflow, "CRABBOX_BLACKSMITH_WORKFLOW")
-	cfg.Blacksmith.Job = configInputEnvString(cfg, "blacksmith-testbox", cfg.Blacksmith.Job, "CRABBOX_BLACKSMITH_JOB")
-	cfg.Blacksmith.Ref = configInputEnvString(cfg, "blacksmith-testbox", cfg.Blacksmith.Ref, "CRABBOX_BLACKSMITH_REF")
+	{
+		applied, err := cfg.Blacksmith.applyEnvPrefix()
+		recordConfigInput(cfg, "blacksmith-testbox", configInputEnvironment, applied.InputAccepted)
+		if err != nil {
+			return err
+		}
+	}
 	{
 		applied, err := cfg.KubeVirt.applyEnv()
 		recordConfigInput(cfg, "kubevirt", configInputEnvironment, applied.InputAccepted)
@@ -7356,12 +7193,12 @@ func applyEnv(cfg *Config) error {
 	cfg.Static.User = configInputEnvString(cfg, "ssh", cfg.Static.User, "CRABBOX_STATIC_USER")
 	cfg.Static.Port = configInputEnvString(cfg, "ssh", cfg.Static.Port, "CRABBOX_STATIC_PORT")
 	cfg.Static.WorkRoot = configInputEnvString(cfg, "ssh", cfg.Static.WorkRoot, "CRABBOX_STATIC_WORK_ROOT")
-	if idleTimeout := os.Getenv("CRABBOX_BLACKSMITH_IDLE_TIMEOUT"); idleTimeout != "" {
-		recordConfigInput(cfg, "blacksmith-testbox", configInputEnvironment, applyLeaseDuration(&cfg.Blacksmith.IdleTimeout, idleTimeout))
-	}
-	if value, ok := getenvBool("CRABBOX_BLACKSMITH_DEBUG"); ok {
-		cfg.Blacksmith.Debug = value
-		recordConfigInput(cfg, "blacksmith-testbox", configInputEnvironment, true)
+	{
+		applied, err := cfg.Blacksmith.applyEnvSuffix()
+		recordConfigInput(cfg, "blacksmith-testbox", configInputEnvironment, applied.InputAccepted)
+		if err != nil {
+			return err
+		}
 	}
 	if labels := os.Getenv("CRABBOX_ACTIONS_RUNNER_LABELS"); labels != "" {
 		cfg.Actions.RunnerLabels = splitCommaList(labels)
