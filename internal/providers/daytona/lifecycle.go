@@ -28,6 +28,11 @@ func validateDaytonaCreateConfig(cfg Config) error {
 func daytonaCreateBody(cfg Config, leaseID, slug string, keep bool, now time.Time) *daytona.CreateSandbox {
 	cfg.WorkRoot, cfg.SSHUser = daytonaWorkRoot(cfg), daytonaUser(cfg)
 	labels := directLeaseLabels(cfg, leaseID, slug, daytonaProvider, "", keep, now)
+	// A selected snapshot owns its sizing. Only retain a class that acquisition
+	// actually used to select or validate that snapshot, never an inherited default.
+	if !classSnapshotRequested(cfg) {
+		delete(labels, "class")
+	}
 	labels["lease_name"], labels["work_root"] = leaseProviderName(leaseID, slug), cfg.WorkRoot
 	body := daytona.NewCreateSandbox()
 	body.SetName(labels["lease_name"])
@@ -80,10 +85,14 @@ func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo Rep
 	}
 	cfg.ServerType, cfg.WorkRoot, cfg.SSHUser, cfg.SSHPort = (Provider{}).ServerTypeForConfig(cfg), daytonaWorkRoot(cfg), daytonaUser(cfg), "22"
 	if snapshot != nil {
-		// Carry the resolved selection; setting Snapshot changes configuration precedence.
-		cfg.Daytona.Snapshot, cfg.ServerType = snapshot.GetId(), snapshot.GetId()
+		cfg.ServerType = snapshot.GetId()
 	}
 	body := daytonaCreateBody(cfg, leaseID, slug, keep, time.Now().UTC())
+	if snapshot != nil {
+		// Resolve labels before changing Snapshot, which changes class precedence.
+		cfg.Daytona.Snapshot = snapshot.GetId()
+		body.SetSnapshot(cfg.Daytona.Snapshot)
+	}
 	labels := body.GetLabels()
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=daytona lease=%s slug=%s snapshot=%s target=%s keep=%v\n", leaseID, slug, cfg.Daytona.Snapshot, blank(cfg.Daytona.Target, "-"), keep)
 	created, createErr := client.CreateSandbox(ctx, *body)
