@@ -71,7 +71,7 @@ func createAzureDynamicSessionsSyncArchive(ctx context.Context, repo Repo, manif
 }
 
 func azureDynamicSessionsWorkspace(cfg Config) (string, error) {
-	return cleanAzureDynamicSessionsWorkspacePath(blank(strings.TrimSpace(cfg.AzureDynamicSessions.Workdir), core.AzureDynamicSessionsConfigDefaultWorkdir))
+	return cleanAzureDynamicSessionsWorkspacePath(core.Blank(strings.TrimSpace(cfg.AzureDynamicSessions.Workdir), core.AzureDynamicSessionsConfigDefaultWorkdir))
 }
 
 func cleanAzureDynamicSessionsWorkspacePath(workspace string) (string, error) {

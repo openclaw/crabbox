@@ -343,7 +343,7 @@ func pruneLeaseState(leaseID string) {
 }
 
 func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
-	return fmt.Sprintf("released lease=%s instance=%s", lease.LeaseID, blank(firstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]), "-"))
+	return fmt.Sprintf("released lease=%s instance=%s", lease.LeaseID, core.Blank(firstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]), "-"))
 }
 
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
@@ -402,7 +402,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			continue
 		}
 		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would remove instance name=%s lease=%s reason=%s\n", inst.Name, blank(claim.LeaseID, "-"), reason)
+			fmt.Fprintf(b.rt.Stdout, "would remove instance name=%s lease=%s reason=%s\n", inst.Name, core.Blank(claim.LeaseID, "-"), reason)
 			continue
 		}
 		if err := b.cleanupInstance(ctx, cfg, inst, claim, storage); err != nil {
@@ -428,16 +428,16 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		}
 		reason := "missing instance"
 		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=%s\n", claim.LeaseID, blank(claim.Slug, "-"), reason)
+			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=%s\n", claim.LeaseID, core.Blank(claim.Slug, "-"), reason)
 			continue
 		}
 		// Acquisition creates or reuses the key before publishing its claim, so
 		// missing-instance cleanup cannot safely delete that key without a wider fence.
 		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
-			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, blank(claim.Slug, "-"), err)
+			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, core.Blank(claim.Slug, "-"), err)
 			continue
 		}
-		fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=%s\n", claim.LeaseID, blank(claim.Slug, "-"), reason)
+		fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=%s\n", claim.LeaseID, core.Blank(claim.Slug, "-"), reason)
 		claimsRemoved++
 	}
 	if !req.DryRun {
@@ -886,7 +886,7 @@ func shouldCleanup(server Server, claim core.LeaseClaim, hasClaim bool, now time
 		return false, "missing claim"
 	}
 	if !instanceRunning(server.Status) && server.Status != "ready" {
-		return true, "instance state=" + blank(server.Status, "unknown")
+		return true, "instance state=" + core.Blank(server.Status, "unknown")
 	}
 	if hasClaim {
 		lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))

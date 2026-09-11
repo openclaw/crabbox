@@ -58,10 +58,6 @@ func validateNativeCredentialDestination(cfg Config) error {
 	return core.ValidateNativeCredentialDestination(cfg, providerName)
 }
 
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
-}
-
 func newSessionID() string {
 	var b [6]byte
 	if _, err := rand.Read(b[:]); err != nil {

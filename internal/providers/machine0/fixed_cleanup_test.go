@@ -264,7 +264,7 @@ func TestMachine0FixedPreparedStopCommand(t *testing.T) {
 			attempt := machine0CreateAttempt{Name: machine0MachineName(req.RequestedLeaseID, req.RequestedSlug), Size: cfg.Machine0.Size, Region: cfg.Machine0.Region, Image: cfg.Machine0.Image, Key: cfg.Machine0.Key, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 			seedFixedMachine0PreparedClaim(t, b, req, &attempt)
 			item := fixedMachine0TestMachine(createMachineRequest{Name: attempt.Name, Size: attempt.Size, Region: attempt.Region, Image: attempt.Image})
-			item.Status, item.IP = blank(tc.state, "CREATING"), ""
+			item.Status, item.IP = core.Blank(tc.state, "CREATING"), ""
 			initial := readFixedMachine0Claim(t, req.RequestedLeaseID)
 			replacement := initial
 			intent := *initial.FixedCreateIntent

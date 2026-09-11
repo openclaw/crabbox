@@ -61,7 +61,7 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (result RunResul
 	}
 	started := core.ClockNow(b.rt.Clock)
 	cfg := b.cfg
-	image := blank(strings.TrimSpace(cfg.Wandb.DefaultImage), core.WandbDefaultImageFallback)
+	image := core.Blank(strings.TrimSpace(cfg.Wandb.DefaultImage), core.WandbDefaultImageFallback)
 	maxLifetime := wandbMaxLifetimeSeconds(cfg)
 
 	sandboxID := strings.TrimSpace(req.ID)

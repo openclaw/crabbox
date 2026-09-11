@@ -143,7 +143,7 @@ func restoreNamespaceClaimLabels(server *Server, claim LeaseClaim, claimOK bool,
 	}
 	state := "ready"
 	if server.Labels != nil {
-		state = blank(strings.TrimSpace(server.Labels["state"]), state)
+		state = core.Blank(strings.TrimSpace(server.Labels["state"]), state)
 	}
 	labels := touchDirectLeaseLabels(claim.Labels, cfg, state, time.Now().UTC())
 	for _, key := range []string{"lease", "name", "provider", "slug", "target"} {
@@ -618,12 +618,12 @@ func namespaceServer(name, leaseID, slug string, cfg Config, keep bool) Server {
 }
 
 func namespaceItemToServer(item namespaceListItem, cfg Config) Server {
-	name := blank(item.Name, item.ID)
+	name := core.Blank(item.Name, item.ID)
 	slug := namespaceSlugFromName(name)
 	leaseID := namespaceLeaseIDFromName(name)
 	labels := directLeaseLabels(cfg, leaseID, slug, namespaceProvider, "", true, time.Now().UTC())
 	labels["name"] = name
-	labels["state"] = blank(item.Status, "unknown")
+	labels["state"] = core.Blank(item.Status, "unknown")
 	labels["release"] = namespaceReleaseAction(cfg)
 	if item.Repository != "" {
 		labels["repo"] = item.Repository
@@ -638,7 +638,7 @@ func namespaceItemToServer(item namespaceListItem, cfg Config) Server {
 		Status:   labels["state"],
 		Labels:   labels,
 	}
-	server.ServerType.Name = blank(item.Size, namespaceSize(cfg))
+	server.ServerType.Name = core.Blank(item.Size, namespaceSize(cfg))
 	return server
 }
 
@@ -696,7 +696,7 @@ func resolveNamespaceDevboxName(identifier string, reclaim bool) (string, string
 			return "", "", "", exit(4, "%q is claimed by provider %s", identifier, claim.Provider)
 		}
 		_ = reclaim
-		slug := blank(claim.Slug, newLeaseSlug(claim.LeaseID))
+		slug := core.Blank(claim.Slug, newLeaseSlug(claim.LeaseID))
 		if strings.HasPrefix(claim.LeaseID, "nsd_") {
 			return slug, claim.LeaseID, slug, nil
 		}
@@ -711,7 +711,7 @@ func resolveNamespaceDevboxName(identifier string, reclaim bool) (string, string
 }
 
 func namespaceImage(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Namespace.Image), core.NamespaceConfigDefaultImage)
+	return core.Blank(strings.TrimSpace(cfg.Namespace.Image), core.NamespaceConfigDefaultImage)
 }
 
 func namespaceSize(cfg Config) string {
@@ -739,7 +739,7 @@ func namespaceValidSize(value string) string {
 }
 
 func namespaceWorkRoot(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Namespace.WorkRoot), core.NamespaceConfigDefaultWorkRoot)
+	return core.Blank(strings.TrimSpace(cfg.Namespace.WorkRoot), core.NamespaceConfigDefaultWorkRoot)
 }
 
 func namespaceAutoStopIdleTimeout(cfg Config) time.Duration {

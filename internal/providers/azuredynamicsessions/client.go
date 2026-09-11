@@ -100,7 +100,7 @@ var newAzureDynamicSessionsClient = func(ctx context.Context, cfg Config, rt Run
 	httpClient, dataHTTPClient := shared.ControlAndDataHTTPClients(rt.HTTP, azureDynamicSessionsControlTimeout)
 	return &azureDynamicSessionsClient{
 		endpoint:             endpoint,
-		managementAPIVersion: blank(strings.TrimSpace(cfg.AzureDynamicSessions.APIVersion), core.AzureDynamicSessionsConfigDefaultAPIVersion),
+		managementAPIVersion: core.Blank(strings.TrimSpace(cfg.AzureDynamicSessions.APIVersion), core.AzureDynamicSessionsConfigDefaultAPIVersion),
 		token:                token,
 		httpClient:           httpClient,
 		dataHTTPClient:       dataHTTPClient,

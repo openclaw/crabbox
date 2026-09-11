@@ -4199,10 +4199,10 @@ func TestShouldCleanupEmptyStatus(t *testing.T) {
 }
 
 func TestBlankHelper(t *testing.T) {
-	if got := blank("value", "fallback"); got != "value" {
+	if got := core.Blank("value", "fallback"); got != "value" {
 		t.Fatalf("blank(\"value\", \"fallback\") = %q", got)
 	}
-	if got := blank("", "fallback"); got != "fallback" {
+	if got := core.Blank("", "fallback"); got != "fallback" {
 		t.Fatalf("blank(\"\", \"fallback\") = %q", got)
 	}
 }

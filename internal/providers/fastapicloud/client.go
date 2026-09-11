@@ -136,7 +136,7 @@ func newFastAPICloudClient(cfg Config, rt Runtime) (fastAPICloudAPI, error) {
 	if token == "" {
 		return nil, exit(2, "provider=%s requires FASTAPI_CLOUD_TOKEN", providerName)
 	}
-	apiURL, err := validateFastAPICloudAPIURL(blank(cfg.FastAPICloud.APIURL, core.FastAPICloudConfigDefaultAPIURL))
+	apiURL, err := validateFastAPICloudAPIURL(core.Blank(cfg.FastAPICloud.APIURL, core.FastAPICloudConfigDefaultAPIURL))
 	if err != nil {
 		return nil, err
 	}

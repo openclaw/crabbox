@@ -294,7 +294,7 @@ func (b *openSandboxBackend) List(ctx context.Context, req ListRequest) ([]Lease
 			if err := validateOpenSandboxOwnership(claim, sb); err != nil {
 				return nil, err
 			}
-			state = blank(strings.ToLower(sb.State), statusViewReady)
+			state = core.Blank(strings.ToLower(sb.State), statusViewReady)
 		}
 		servers = append(servers, Server{
 			Provider: providerName,
@@ -508,13 +508,13 @@ func (b *openSandboxBackend) Cleanup(ctx context.Context, req CleanupRequest) er
 					return nil
 				}
 				if req.DryRun {
-					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 					return nil
 				}
 				if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 					return err
 				}
-				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 				claimRemovedOne = true
 				return nil
 			}

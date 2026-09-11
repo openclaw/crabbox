@@ -269,10 +269,10 @@ func (t *remoteTransport) requestBody(sandboxID string, opts runOptions, extra m
 	if opts.OwnershipToken != "" {
 		body["ownershipToken"] = opts.OwnershipToken
 	}
-	if rootfs := blank(opts.Rootfs, t.cfg.CloudRunSandbox.Rootfs); rootfs != "" {
+	if rootfs := core.Blank(opts.Rootfs, t.cfg.CloudRunSandbox.Rootfs); rootfs != "" {
 		body["rootfs"] = rootfs
 	}
-	if workdir := blank(opts.Workdir, t.cfg.CloudRunSandbox.Workdir); workdir != "" {
+	if workdir := core.Blank(opts.Workdir, t.cfg.CloudRunSandbox.Workdir); workdir != "" {
 		body["workdir"] = workdir
 		body["cwd"] = workdir
 	}
@@ -512,7 +512,7 @@ type directTransport struct {
 func (t *directTransport) Mode() string { return "direct" }
 
 func (t *directTransport) binary() string {
-	return blank(strings.TrimSpace(t.cfg.CloudRunSandbox.CLIPath), core.CloudRunSandboxConfigDefaultCLIPath)
+	return core.Blank(strings.TrimSpace(t.cfg.CloudRunSandbox.CLIPath), core.CloudRunSandboxConfigDefaultCLIPath)
 }
 
 func (t *directTransport) baseArgs() []string { return nil }
@@ -521,11 +521,11 @@ func (t *directTransport) pushRunArgs(args []string, opts runOptions) []string {
 	if opts.AllowEgress || t.cfg.CloudRunSandbox.AllowEgress {
 		args = append(args, "--allow-egress")
 	}
-	if rootfs := blank(opts.Rootfs, t.cfg.CloudRunSandbox.Rootfs); rootfs != "" {
+	if rootfs := core.Blank(opts.Rootfs, t.cfg.CloudRunSandbox.Rootfs); rootfs != "" {
 		args = append(args, "--rootfs", rootfs)
 	}
 	if !opts.OmitWorkdir {
-		if workdir := blank(opts.Workdir, t.cfg.CloudRunSandbox.Workdir); workdir != "" {
+		if workdir := core.Blank(opts.Workdir, t.cfg.CloudRunSandbox.Workdir); workdir != "" {
 			args = append(args, "--workdir", workdir)
 		}
 	}
@@ -536,7 +536,7 @@ func (t *directTransport) pushRunArgs(args []string, opts runOptions) []string {
 }
 
 func (t *directTransport) pushExecArgs(args []string, opts execOptions) []string {
-	if workdir := blank(opts.Workdir, t.cfg.CloudRunSandbox.Workdir); workdir != "" {
+	if workdir := core.Blank(opts.Workdir, t.cfg.CloudRunSandbox.Workdir); workdir != "" {
 		args = append(args, "--workdir", workdir)
 	}
 	return args

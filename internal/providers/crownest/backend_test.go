@@ -352,7 +352,7 @@ func TestRunRejectsWorkspaceEnvUntilCrownestSupportsIt(t *testing.T) {
 
 func TestRunDistinguishesFrameworkMetadataFromUnsupportedUserEnv(t *testing.T) {
 	for _, userName := range []string{"", "FOO", "CRABBOX_CUSTOM", "CRABBOX_RUN_ID_EXTRA", "CRABBOX_SLUG_PREFIX", "CRABBOX_LEASE_ID_SUFFIX"} {
-		t.Run(blank(userName, "framework-only"), func(t *testing.T) {
+		t.Run(core.Blank(userName, "framework-only"), func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			api := &fakeCrownestClient{baseURL: "https://api.crownest.dev"}
 			var stderr bytes.Buffer
@@ -977,7 +977,7 @@ type fakeCrownestClient struct {
 func (f *fakeCrownestClient) BaseURL() string { return f.baseURL }
 
 func (f *fakeCrownestClient) CreateSandbox(context.Context, createSandboxRequest) (sandbox, error) {
-	return sandbox{ID: blank(f.createSandboxID, "sbx_123"), Status: "running"}, nil
+	return sandbox{ID: core.Blank(f.createSandboxID, "sbx_123"), Status: "running"}, nil
 }
 
 func (f *fakeCrownestClient) GetSandbox(context.Context, string) (sandbox, error) {
@@ -1032,7 +1032,7 @@ func (f *fakeCrownestClient) FinalizeArchive(_ context.Context, _ string, req fi
 
 func (f *fakeCrownestClient) StartWorkspaceRun(context.Context, string, string) (workspaceRun, error) {
 	f.started = true
-	sandboxID := blank(f.startSandboxID, "sbx_123")
+	sandboxID := core.Blank(f.startSandboxID, "sbx_123")
 	return workspaceRun{ID: "wsr_123", Status: "running", SandboxID: sandboxID}, nil
 }
 

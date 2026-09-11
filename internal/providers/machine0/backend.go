@@ -249,11 +249,11 @@ func (b *backend) preflightSSHKey(ctx context.Context, name string) error {
 	}
 	fileName := strings.TrimSpace(key.FileName)
 	if fileName == "" || filepath.IsAbs(fileName) || fileName == "." || fileName == ".." || strings.ContainsAny(fileName, `/\`) || filepath.Base(fileName) != fileName {
-		return exit(2, "Machine0 PUBLIC SSH key %q has no usable local private-key filename; select a managed key with --machine0-key <managed-key-name>", blank(key.Name, "<default>"))
+		return exit(2, "Machine0 PUBLIC SSH key %q has no usable local private-key filename; select a managed key with --machine0-key <managed-key-name>", core.Blank(key.Name, "<default>"))
 	}
 	keyRoot, err := machine0SSHKeyDirectory()
 	if err != nil {
-		return exit(2, "resolve private key for Machine0 PUBLIC SSH key %q: set SSH_KEY_PATH or select --machine0-key <managed-key-name>", blank(key.Name, "<default>"))
+		return exit(2, "resolve private key for Machine0 PUBLIC SSH key %q: set SSH_KEY_PATH or select --machine0-key <managed-key-name>", core.Blank(key.Name, "<default>"))
 	}
 	keyPath := filepath.Join(keyRoot, fileName)
 	info, err := b.stat(keyPath)
@@ -283,9 +283,9 @@ func (b *backend) preflightSSHKey(ctx context.Context, name string) error {
 		return nil
 	}
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return exit(2, "inspect private key for Machine0 PUBLIC SSH key %q at %q: %v", blank(key.Name, "<default>"), keyPath, err)
+		return exit(2, "inspect private key for Machine0 PUBLIC SSH key %q at %q: %v", core.Blank(key.Name, "<default>"), keyPath, err)
 	}
-	return exit(2, "Machine0 PUBLIC SSH key %q has no local private key at %q; select a managed key with --machine0-key <managed-key-name>", blank(key.Name, "<default>"), keyPath)
+	return exit(2, "Machine0 PUBLIC SSH key %q has no local private key at %q; select a managed key with --machine0-key <managed-key-name>", core.Blank(key.Name, "<default>"), keyPath)
 }
 
 func machine0SSHKeyDirectory() (string, error) {
@@ -547,7 +547,7 @@ func (b *backend) AuthorizeStatusTouchClaim(_ context.Context, lease LeaseTarget
 	if !core.IsCanonicalLeaseID(lease.LeaseID) || claim.LeaseID != lease.LeaseID ||
 		lease.Server.Provider != providerName || !isMachine0ClaimProvider(claim.Provider) ||
 		resourceID == "" || lease.Server.ImmutableID != resourceID || claim.CloudImmutableID != resourceID {
-		return exit(4, "refusing machine0 lifecycle touch for lease=%s resource=%s: claim does not match the canonical lease, provider, or immutable Machine0 identity", lease.LeaseID, blank(resourceID, "<empty>"))
+		return exit(4, "refusing machine0 lifecycle touch for lease=%s resource=%s: claim does not match the canonical lease, provider, or immutable Machine0 identity", lease.LeaseID, core.Blank(resourceID, "<empty>"))
 	}
 	if err := validateMachineClaimOwnership(claim, machine{ID: resourceID}); err != nil {
 		return exit(4, "refusing machine0 lifecycle touch for lease=%s resource=%s: %v", lease.LeaseID, resourceID, err)
@@ -735,7 +735,7 @@ func (b *backend) RetainLeaseClaimAfterReleaseWithClaim(lease LeaseTarget, previ
 
 func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
 	action := normalizeReleasePolicy(b.configForRun().Machine0.ReleasePolicy)
-	return fmt.Sprintf("released lease=%s machine=%s action=%s", lease.LeaseID, blank(lease.Server.Name, "-"), action)
+	return fmt.Sprintf("released lease=%s machine=%s action=%s", lease.LeaseID, core.Blank(lease.Server.Name, "-"), action)
 }
 
 func (b *backend) Pause(ctx context.Context, req PauseRequest) error {
@@ -890,7 +890,7 @@ func (b *backend) validateCatalogSelection(ctx context.Context, sizeName, region
 				return nil
 			}
 		}
-		return exit(2, "machine0 size %q is not currently available in region %q; available regions: %s", sizeName, region, blank(strings.Join(size.Regions, ","), "none"))
+		return exit(2, "machine0 size %q is not currently available in region %q; available regions: %s", sizeName, region, core.Blank(strings.Join(size.Regions, ","), "none"))
 	}
 	available := make([]string, 0, len(sizes))
 	for _, size := range sizes {
@@ -1038,9 +1038,9 @@ func (b *backend) pollMachine(
 	}, nil)
 	if err != nil && context.Cause(ctx) == nil && errors.Is(context.Cause(waitCtx), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
 		if target == "" {
-			err = exit(5, "timed out waiting for machine0 machine %s; last state=%s", name, blank(result.Value.Status, "unknown"))
+			err = exit(5, "timed out waiting for machine0 machine %s; last state=%s", name, core.Blank(result.Value.Status, "unknown"))
 		} else {
-			err = exit(5, "timed out waiting for machine0 machine %s to reach %s; last state=%s", name, target, blank(result.Value.Status, "unknown"))
+			err = exit(5, "timed out waiting for machine0 machine %s to reach %s; last state=%s", name, target, core.Blank(result.Value.Status, "unknown"))
 		}
 	}
 	return result.Value, err
@@ -1277,7 +1277,7 @@ func validateMachineClaimOwnership(claim LeaseClaim, item machine) error {
 		return fmt.Errorf("Machine0 id mismatch: claim=%s machine=%s", claim.CloudID, item.ID)
 	}
 	if claim.ProviderScope != machineScope(item.ID) {
-		return fmt.Errorf("provider scope mismatch: claim=%s machine=%s", blank(claim.ProviderScope, "missing"), machineScope(item.ID))
+		return fmt.Errorf("provider scope mismatch: claim=%s machine=%s", core.Blank(claim.ProviderScope, "missing"), machineScope(item.ID))
 	}
 	return nil
 }
@@ -1381,7 +1381,7 @@ func shouldCleanupMachine0(server Server, claim LeaseClaim, hasClaim bool, now t
 		return false, "missing claim"
 	}
 	if machineStopped(server.Labels["machine0_status"]) || machineTerminal(server.Labels["machine0_status"]) {
-		return true, "machine state=" + blank(server.Labels["machine0_status"], "unknown")
+		return true, "machine state=" + core.Blank(server.Labels["machine0_status"], "unknown")
 	}
 	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
 	if err != nil || lastUsed.IsZero() || claim.IdleTimeoutSeconds <= 0 {
@@ -1442,7 +1442,7 @@ func machineTerminal(value string) bool {
 	return value == "ERRORED" || value == "UNAVAILABLE"
 }
 func terminalMachineError(item machine) error {
-	return exit(5, "machine0 machine %s entered terminal state %s: %s", item.Name, item.Status, blank(item.LastErrorMessage, "run `machine0 get "+item.Name+" --json` for diagnostics"))
+	return exit(5, "machine0 machine %s entered terminal state %s: %s", item.Name, item.Status, core.Blank(item.LastErrorMessage, "run `machine0 get "+item.Name+" --json` for diagnostics"))
 }
 func sleepContext(ctx context.Context, delay time.Duration) error {
 	timer := time.NewTimer(delay)

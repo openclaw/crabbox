@@ -407,13 +407,13 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 					return nil
 				}
 				if req.DryRun {
-					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 					return nil
 				}
 				if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 					return err
 				}
-				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 				claimRemovedOne = true
 				return nil
 			}
@@ -648,12 +648,12 @@ func (b *backend) bindProviderScope(ctx context.Context, api vercelSandboxClient
 }
 
 func (b *backend) providerScopeBase() string {
-	projectID := blank(strings.TrimSpace(b.resolvedProject), strings.TrimSpace(b.cfg.VercelSandbox.ProjectID))
-	teamID := blank(strings.TrimSpace(b.resolvedTeam), strings.TrimSpace(b.cfg.VercelSandbox.TeamID))
+	projectID := core.Blank(strings.TrimSpace(b.resolvedProject), strings.TrimSpace(b.cfg.VercelSandbox.ProjectID))
+	teamID := core.Blank(strings.TrimSpace(b.resolvedTeam), strings.TrimSpace(b.cfg.VercelSandbox.TeamID))
 	parts := []string{
-		"scope:" + blank(strings.TrimSpace(b.cfg.VercelSandbox.Scope), "-"),
-		"team:" + blank(teamID, "-"),
-		"project:" + blank(projectID, "-"),
+		"scope:" + core.Blank(strings.TrimSpace(b.cfg.VercelSandbox.Scope), "-"),
+		"team:" + core.Blank(teamID, "-"),
+		"project:" + core.Blank(projectID, "-"),
 	}
 	return strings.Join(parts, "/")
 }
@@ -764,7 +764,7 @@ func (b *backend) execTimeoutSecs() int {
 }
 
 func normalizedSandboxState(sb sandboxSummary) string {
-	return strings.ToLower(blank(strings.TrimSpace(sb.Status), blank(strings.TrimSpace(sb.State), "unknown")))
+	return strings.ToLower(core.Blank(strings.TrimSpace(sb.Status), core.Blank(strings.TrimSpace(sb.State), "unknown")))
 }
 
 func isReadyState(state string) bool {
@@ -786,7 +786,7 @@ func isTerminalState(state string) bool {
 }
 
 func vercelSandboxRuntime(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.VercelSandbox.Runtime), defaultRuntime)
+	return core.Blank(strings.TrimSpace(cfg.VercelSandbox.Runtime), defaultRuntime)
 }
 
 func newSandboxName(repo Repo) string {

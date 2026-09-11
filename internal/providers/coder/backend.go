@@ -451,7 +451,7 @@ func (b *coderLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 			continue
 		}
 		action := coderCleanupReleaseAction(claim, hasClaim)
-		fmt.Fprintf(b.rt.Stdout, "coder cleanup %s workspace=%s lease=%s reason=%s dry_run=%t\n", action, workspace.Name, blank(leaseID, "-"), reason, req.DryRun)
+		fmt.Fprintf(b.rt.Stdout, "coder cleanup %s workspace=%s lease=%s reason=%s dry_run=%t\n", action, workspace.Name, core.Blank(leaseID, "-"), reason, req.DryRun)
 		if req.DryRun {
 			continue
 		}
@@ -825,7 +825,7 @@ func coderWorkspaceToServerWithClaim(workspace coderWorkspace, cfg Config, lease
 	labels["work_root"] = coderWorkRoot(cfg)
 	labels["state"] = coderWorkspaceState(workspace)
 	server := Server{CloudID: coderWorkspaceCommandName(workspace), Provider: coderProvider, Name: workspace.Name, Status: labels["state"], Labels: labels}
-	server.ServerType.Name = blank(workspace.Template, "coder-workspace")
+	server.ServerType.Name = core.Blank(workspace.Template, "coder-workspace")
 	return server
 }
 
@@ -893,7 +893,7 @@ func coderSSHTarget(cfg Config, workspaceName, workspaceID string) SSHTarget {
 		NetworkKind:    networkPublic,
 		ReadyCheck:     "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null",
 		SSHConfigProxy: true,
-		ProxyCommand:   shellQuote(cfg.Coder.CLIPath) + " ssh --stdio --wait " + shellQuote(blank(cfg.Coder.Wait, core.CoderConfigDefaultWait)) + " " + shellQuote(workspaceName),
+		ProxyCommand:   shellQuote(cfg.Coder.CLIPath) + " ssh --stdio --wait " + shellQuote(core.Blank(cfg.Coder.Wait, core.CoderConfigDefaultWait)) + " " + shellQuote(workspaceName),
 	}
 }
 
@@ -915,7 +915,7 @@ func coderKnownHostsFile(workspaceName, workspaceID string) string {
 func coderWorkspaceSSHHost(ref string) string {
 	ref = strings.TrimSpace(ref)
 	if !strings.Contains(ref, "/") {
-		return blank(coderWorkspaceNameFromRef(ref), "coder-workspace")
+		return core.Blank(coderWorkspaceNameFromRef(ref), "coder-workspace")
 	}
 	base := normalizeLeaseSlug(ref)
 	hash := coderWorkspaceHash(ref)
@@ -962,7 +962,7 @@ func coderWorkspaceState(workspace coderWorkspace) string {
 			return value
 		}
 	}
-	return blank(strings.ToLower(strings.TrimSpace(workspace.Status)), "unknown")
+	return core.Blank(strings.ToLower(strings.TrimSpace(workspace.Status)), "unknown")
 }
 
 func findCoderWorkspace(workspaces []coderWorkspace, name string) (coderWorkspace, bool) {

@@ -57,7 +57,7 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	if err != nil {
 		checks = append(checks, DoctorCheck{Status: "failed", Check: "health", Message: redactSecrets(err.Error()), Details: map[string]string{"mutation": "false"}})
 	} else if !health.OK {
-		checks = append(checks, DoctorCheck{Status: "failed", Check: "health", Message: fmt.Sprintf("bridge=unhealthy status=%s ok=false mutation=false", blank(health.Status, "-")), Details: map[string]string{"mutation": "false"}})
+		checks = append(checks, DoctorCheck{Status: "failed", Check: "health", Message: fmt.Sprintf("bridge=unhealthy status=%s ok=false mutation=false", core.Blank(health.Status, "-")), Details: map[string]string{"mutation": "false"}})
 	} else {
 		checks = append(checks, DoctorCheck{Status: "ok", Check: "health", Message: fmt.Sprintf("bridge=ready ok=%t mutation=false", health.OK), Details: map[string]string{"mutation": "false"}})
 	}
@@ -65,7 +65,7 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	if err != nil {
 		checks = append(checks, DoctorCheck{Status: "failed", Check: "openapi", Message: redactSecrets(err.Error()), Details: map[string]string{"mutation": "false"}})
 	} else {
-		checks = append(checks, DoctorCheck{Status: "ok", Check: "openapi", Message: fmt.Sprintf("openapi=ready title=%s mutation=false", blank(openapi.Info.Title, "-")), Details: map[string]string{"mutation": "false"}})
+		checks = append(checks, DoctorCheck{Status: "ok", Check: "openapi", Message: fmt.Sprintf("openapi=ready title=%s mutation=false", core.Blank(openapi.Info.Title, "-")), Details: map[string]string{"mutation": "false"}})
 	}
 	return DoctorResult{
 		Provider: providerName,
@@ -427,13 +427,13 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 					return "skip", nil
 				}
 				if req.DryRun {
-					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 					return "skip", nil
 				}
 				if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 					return "", err
 				}
-				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 				return "claim-removed", nil
 			}
 			due, reason := claimCleanupDue(claim, now)
@@ -758,7 +758,7 @@ func (b *backend) execTimeoutSecs() int {
 }
 
 func normalizedSandboxState(sb sandboxSummary) string {
-	return strings.ToLower(blank(strings.TrimSpace(sb.Status), "unknown"))
+	return strings.ToLower(core.Blank(strings.TrimSpace(sb.Status), "unknown"))
 }
 
 func isReadyState(state string) bool {

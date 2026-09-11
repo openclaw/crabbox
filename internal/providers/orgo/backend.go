@@ -488,7 +488,7 @@ func (b *orgoBackend) claimLease(repo Repo, lease orgoLease, reclaim bool) error
 }
 
 func orgoClaimScope(cfg Config, workspaceID string) string {
-	endpoint := strings.TrimRight(strings.TrimSpace(blank(cfg.Orgo.APIBase, core.OrgoConfigDefaultAPIBase)), "/")
+	endpoint := strings.TrimRight(strings.TrimSpace(core.Blank(cfg.Orgo.APIBase, core.OrgoConfigDefaultAPIBase)), "/")
 	if parsed, err := url.Parse(endpoint); err == nil && parsed.Host != "" {
 		parsed.Scheme = strings.ToLower(parsed.Scheme)
 		parsed.Host = strings.ToLower(parsed.Host)
@@ -574,8 +574,8 @@ func (b *orgoBackend) deleteLease(ctx context.Context, client orgoAPI, lease org
 	if !exists {
 		return exit(2, "provider=%s lease=%s has no exact local ownership claim", providerName, lease.LeaseID)
 	}
-	computerID := blank(strings.TrimSpace(lease.Computer.ID), claim.CloudID)
-	workspaceID := blank(strings.TrimSpace(lease.Computer.WorkspaceID), claim.Labels[orgoWorkspaceLabel])
+	computerID := core.Blank(strings.TrimSpace(lease.Computer.ID), claim.CloudID)
+	workspaceID := core.Blank(strings.TrimSpace(lease.Computer.WorkspaceID), claim.Labels[orgoWorkspaceLabel])
 	binding := b.orgoClaimBinding(lease.LeaseID, lease.Slug, computerID, workspaceID)
 	claim, err = shared.RequireExactClaim(binding)
 	if err != nil {
@@ -748,7 +748,7 @@ func orgoComputerServer(computer orgoComputer, claim LeaseClaim) Server {
 	server := Server{
 		CloudID:  computer.ID,
 		Provider: providerName,
-		Name:     blank(computer.Name, computer.ID),
+		Name:     core.Blank(computer.Name, computer.ID),
 		Status:   normalizeOrgoStatus(computer.Status),
 		Labels:   labels,
 	}
@@ -764,14 +764,14 @@ func orgoComputerServer(computer orgoComputer, claim LeaseClaim) Server {
 func orgoStatusView(lease orgoLease) StatusView {
 	state := normalizeOrgoStatus(lease.Computer.Status)
 	return StatusView{
-		ID:         blank(lease.LeaseID, lease.Computer.ID),
+		ID:         core.Blank(lease.LeaseID, lease.Computer.ID),
 		Slug:       lease.Slug,
 		Provider:   providerName,
 		TargetOS:   targetLinux,
 		State:      state,
 		ServerID:   lease.Computer.ID,
 		ServerType: "orgo-computer",
-		Host:       blank(lease.Computer.ConnectionURL, lease.Computer.Hostname),
+		Host:       core.Blank(lease.Computer.ConnectionURL, lease.Computer.Hostname),
 		Network:    networkPublic,
 		Ready:      state == "running",
 		Labels: map[string]string{

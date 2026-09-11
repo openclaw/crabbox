@@ -484,7 +484,7 @@ func TestStopRequiresExactOrgoEndpointWorkspaceAndComputerIdentity(t *testing.T)
 			currentAPI.computers[computer.ID] = computer
 			current := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{
 				APIKey:      "test-key",
-				APIBase:     blank(test.endpoint, "https://one.example.test/api"),
+				APIBase:     core.Blank(test.endpoint, "https://one.example.test/api"),
 				WorkspaceID: test.workspace,
 			}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 			current.client = currentAPI

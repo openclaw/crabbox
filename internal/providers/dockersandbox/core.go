@@ -91,7 +91,3 @@ func resolveLeaseClaimForProvider(identifier, provider string) (core.LeaseClaim,
 func listLeaseClaims() ([]core.LeaseClaim, error) {
 	return core.ListLeaseClaims()
 }
-
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
-}

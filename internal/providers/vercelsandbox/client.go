@@ -186,10 +186,10 @@ type bridgeConfig struct {
 }
 
 func (c *bridgeClient) CreateSandbox(ctx context.Context, req createSandboxRequest) (sandboxSummary, error) {
-	req.Runtime = blank(req.Runtime, vercelSandboxRuntime(c.cfg))
-	req.ProjectID = blank(req.ProjectID, strings.TrimSpace(c.cfg.VercelSandbox.ProjectID))
-	req.TeamID = blank(req.TeamID, strings.TrimSpace(c.cfg.VercelSandbox.TeamID))
-	req.Scope = blank(req.Scope, strings.TrimSpace(c.cfg.VercelSandbox.Scope))
+	req.Runtime = core.Blank(req.Runtime, vercelSandboxRuntime(c.cfg))
+	req.ProjectID = core.Blank(req.ProjectID, strings.TrimSpace(c.cfg.VercelSandbox.ProjectID))
+	req.TeamID = core.Blank(req.TeamID, strings.TrimSpace(c.cfg.VercelSandbox.TeamID))
+	req.Scope = core.Blank(req.Scope, strings.TrimSpace(c.cfg.VercelSandbox.Scope))
 	req.VCPUs = c.cfg.VercelSandbox.VCPUs
 	req.TimeoutSeconds = c.cfg.VercelSandbox.TimeoutSecs
 	req.Persistent = c.cfg.VercelSandbox.Persistent || req.Persistent

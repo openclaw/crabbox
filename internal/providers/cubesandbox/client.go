@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -98,11 +99,11 @@ func (e *cubesandboxAPIError) Error() string {
 var newCubeSandboxClient = func(cfg Config, rt Runtime) (cubesandboxAPI, error) {
 	apiKey := strings.TrimSpace(cfg.CubeSandbox.APIKey)
 	httpClient, dataPlaneClient := shared.ControlAndDataHTTPClients(rt.HTTP, cubesandboxControlTimeout)
-	apiURL, err := validateCubeSandboxAPIURL(blank(cfg.CubeSandbox.APIURL, "http://127.0.0.1:3000"))
+	apiURL, err := validateCubeSandboxAPIURL(core.Blank(cfg.CubeSandbox.APIURL, "http://127.0.0.1:3000"))
 	if err != nil {
 		return nil, err
 	}
-	domain := strings.TrimSpace(blank(cfg.CubeSandbox.Domain, "cube.app"))
+	domain := strings.TrimSpace(core.Blank(cfg.CubeSandbox.Domain, "cube.app"))
 	proxyScheme, err := cubeSandboxProxyScheme(cfg.CubeSandbox.ProxyScheme, cfg.CubeSandbox.ProxyPortHTTP)
 	if err != nil {
 		return nil, err

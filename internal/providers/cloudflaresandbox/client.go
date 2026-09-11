@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -246,7 +247,7 @@ func (c *client) parseExecSSE(body io.Reader, stdout, stderr io.Writer) (execRes
 		if err := json.Unmarshal([]byte(data), &frame); err != nil {
 			return fmt.Errorf("decode cloudflare-sandbox exec SSE event: %w", err)
 		}
-		kind := strings.ToLower(blank(frame.Type, ev))
+		kind := strings.ToLower(core.Blank(frame.Type, ev))
 		stream := strings.ToLower(frame.Stream)
 		switch kind {
 		case "stdout", "stderr", "output":

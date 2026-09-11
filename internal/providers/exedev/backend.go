@@ -394,7 +394,7 @@ func applyExeDevDefaults(cfg *Config) {
 	if cfg.ExeDev.User != "" {
 		cfg.SSHUser = cfg.ExeDev.User
 	} else if cfg.SSHUser == "" || cfg.SSHUser == "crabbox" {
-		cfg.SSHUser = blank(os.Getenv("USER"), "root")
+		cfg.SSHUser = core.Blank(os.Getenv("USER"), "root")
 	}
 	if cfg.ExeDev.WorkRoot != "" {
 		cfg.WorkRoot = cfg.ExeDev.WorkRoot
@@ -679,7 +679,7 @@ func (b *exeDevLeaseBackend) resolveVM(ctx context.Context, identifier string) (
 	if claim, ok, err := resolveLeaseClaimForProvider(identifier, providerName); err != nil {
 		return exeDevVM{}, "", "", err
 	} else if ok {
-		slug := blank(claim.Slug, newLeaseSlug(claim.LeaseID))
+		slug := core.Blank(claim.Slug, newLeaseSlug(claim.LeaseID))
 		name := leaseProviderName(claim.LeaseID, slug)
 		vm, err := b.findVM(ctx, name)
 		return vm, claim.LeaseID, slug, err
@@ -1004,13 +1004,13 @@ func exeDevControlScope(cfg Config, accountFingerprint string) (string, error) {
 	if accountFingerprint == "" {
 		return "", exit(2, "exe.dev account fingerprint is empty")
 	}
-	return "ssh:" + destination + "|port:" + blank(port, "default") + "|account:sha256:" + accountFingerprint, nil
+	return "ssh:" + destination + "|port:" + core.Blank(port, "default") + "|account:sha256:" + accountFingerprint, nil
 }
 
 func exeDevServer(vm exeDevVM, leaseID, slug string, cfg Config, keep bool) Server {
 	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
 	labels["name"] = vm.Name()
-	labels["state"] = blank(vm.Status, "unknown")
+	labels["state"] = core.Blank(vm.Status, "unknown")
 	labels["work_root"] = cfg.WorkRoot
 	if vm.Region != "" {
 		labels["region"] = vm.Region
@@ -1085,7 +1085,7 @@ func (b *exeDevLeaseBackend) leaseIdentityForVM(vm exeDevVM) (string, string, er
 		if claim, ok, err := resolveLeaseClaimForProvider(slug, providerName); err != nil {
 			return "", "", err
 		} else if ok {
-			claimSlug := blank(claim.Slug, newLeaseSlug(claim.LeaseID))
+			claimSlug := core.Blank(claim.Slug, newLeaseSlug(claim.LeaseID))
 			if leaseProviderName(claim.LeaseID, claimSlug) == vm.Name() {
 				return claim.LeaseID, claimSlug, nil
 			}
@@ -1191,5 +1191,5 @@ func isLowerHex(value string) bool {
 }
 
 func exeDevImage(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.ExeDev.Image), core.ExeDevDefaultImageLabel)
+	return core.Blank(strings.TrimSpace(cfg.ExeDev.Image), core.ExeDevDefaultImageLabel)
 }

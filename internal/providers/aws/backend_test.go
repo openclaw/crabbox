@@ -352,7 +352,7 @@ func TestAWSFixedAcquireReplaysSameLeaseAndRejectsIntentDrift(t *testing.T) {
 		drifted := req
 		drifted.RequestedCheckpointID = checkpointID
 		_, err := second.Acquire(context.Background(), drifted)
-		if err == nil || !strings.Contains(err.Error(), req.RequestedCheckpointID) || !strings.Contains(err.Error(), blank(checkpointID, "<none>")) {
+		if err == nil || !strings.Contains(err.Error(), req.RequestedCheckpointID) || !strings.Contains(err.Error(), core.Blank(checkpointID, "<none>")) {
 			t.Fatalf("checkpoint drift=%q err=%v", checkpointID, err)
 		}
 		if fake.createCalls != 1 {

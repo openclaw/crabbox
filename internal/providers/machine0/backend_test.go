@@ -214,7 +214,7 @@ func (f *fakeAPI) GetImage(ctx context.Context, name string) (machineImageDetail
 func (f *fakeAPI) recordImageSnapshot(detail machineImageDetail) {
 	state := "MISSING"
 	if len(detail.Versions) > 0 {
-		state = strings.ToUpper(blank(detail.Versions[0].SnapshotStatus, "UNKNOWN"))
+		state = strings.ToUpper(core.Blank(detail.Versions[0].SnapshotStatus, "UNKNOWN"))
 	}
 	f.actions = append(f.actions, "image:"+state)
 	if state == "READY" {
@@ -873,7 +873,7 @@ func TestAcquirePreflightsPublicSSHKeyBeforeCreate(t *testing.T) {
 		{name: "managed key can materialize later", key: machineKey{Name: "managed-key", Type: "MANAGED", FileName: "machine0__managed-key"}},
 	} {
 		for _, leaseID := range []string{"", fixedMachine0TestLeaseID} {
-			t.Run(tc.name+"/"+blank(leaseID, "ordinary"), func(t *testing.T) {
+			t.Run(tc.name+"/"+core.Blank(leaseID, "ordinary"), func(t *testing.T) {
 				repo := setupState(t)
 				keyPath := filepath.Join(os.Getenv("SSH_KEY_PATH"), tc.key.FileName)
 				if tc.private != nil {
@@ -987,7 +987,7 @@ func TestAcquirePublicSSHKeyFileKinds(t *testing.T) {
 	}
 	for _, kind := range []string{"fifo", "symlink fifo", "device", "symlink regular"} {
 		for _, leaseID := range []string{"", fixedMachine0TestLeaseID} {
-			t.Run(kind+"/"+blank(leaseID, "ordinary"), func(t *testing.T) {
+			t.Run(kind+"/"+core.Blank(leaseID, "ordinary"), func(t *testing.T) {
 				repo := setupState(t)
 				keyPath := filepath.Join(os.Getenv("SSH_KEY_PATH"), "local-key")
 				target := keyPath + "-target"

@@ -409,7 +409,7 @@ func machineToServer(cfg Config, m machineData) Server {
 	labels := directLeaseLabels(cfg, leaseID, machineSlug(leaseID, m), providerName, "", cfg.Smolvm.Keep, time.Now().UTC())
 	labels["machine_id"] = m.ID
 	labels["machine_name"] = m.Name
-	labels["image"] = blank(m.Source.Reference, imageName(cfg))
+	labels["image"] = core.Blank(m.Source.Reference, imageName(cfg))
 	if m.Resources.CPUs > 0 {
 		labels["cpus"] = fmt.Sprintf("%d", m.Resources.CPUs)
 	}
@@ -420,7 +420,7 @@ func machineToServer(cfg Config, m machineData) Server {
 	server := Server{
 		Provider: providerName,
 		CloudID:  m.ID,
-		Name:     blank(m.Name, m.ID),
+		Name:     core.Blank(m.Name, m.ID),
 		Status:   m.State,
 		Labels:   labels,
 	}
@@ -430,7 +430,7 @@ func machineToServer(cfg Config, m machineData) Server {
 }
 
 func machineBaseHost(cfg Config) string {
-	raw := blank(strings.TrimSpace(cfg.Smolvm.BaseURL), core.SmolvmConfigDefaultBaseURL)
+	raw := core.Blank(strings.TrimSpace(cfg.Smolvm.BaseURL), core.SmolvmConfigDefaultBaseURL)
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" {
 		return raw
@@ -468,7 +468,7 @@ func statusReady(status string) bool {
 }
 
 func imageName(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Smolvm.Image), core.SmolvmConfigDefaultImage)
+	return core.Blank(strings.TrimSpace(cfg.Smolvm.Image), core.SmolvmConfigDefaultImage)
 }
 
 func machineName(leaseID, slug string) string {
@@ -505,7 +505,7 @@ func networkMode(cfg Config) string {
 }
 
 func workdir(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Smolvm.Workdir), core.SmolvmConfigDefaultWorkdir)
+	return core.Blank(strings.TrimSpace(cfg.Smolvm.Workdir), core.SmolvmConfigDefaultWorkdir)
 }
 
 func cleanWorkdir(workdir string) (string, error) {

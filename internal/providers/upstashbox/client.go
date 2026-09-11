@@ -78,7 +78,7 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 			return nil, fmt.Errorf("%s HTTP client setup: %w", providerName, err)
 		}
 	}
-	base := strings.TrimRight(blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), core.UpstashBoxConfigDefaultBaseURL), "/")
+	base := strings.TrimRight(core.Blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), core.UpstashBoxConfigDefaultBaseURL), "/")
 	trusted, _ := url.Parse(base)
 	return &client{apiKey: apiKey, base: base, http: shared.SecureHTTPClient(httpClient, trusted, upstashBoxRedirectError)}, nil
 }
@@ -131,7 +131,7 @@ func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, err
 			return boxData{}, c.cleanupCreatedBox(box.ID, exit(5, "upstash-box creation failed for %s", box.ID))
 		}
 		if time.Now().After(deadline) {
-			return boxData{}, c.cleanupCreatedBox(box.ID, exit(5, "upstash-box creation timed out for %s status=%s", box.ID, blank(box.Status, "unknown")))
+			return boxData{}, c.cleanupCreatedBox(box.ID, exit(5, "upstash-box creation timed out for %s status=%s", box.ID, core.Blank(box.Status, "unknown")))
 		}
 		select {
 		case <-ctx.Done():

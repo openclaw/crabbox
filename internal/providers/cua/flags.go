@@ -40,7 +40,7 @@ func validateProviderConfig(cfg Config) error {
 	if _, err := cuaWorkdir(cfg); err != nil {
 		return err
 	}
-	kind := strings.ToLower(strings.TrimSpace(blank(cfg.Cua.Kind, core.CuaConfigDefaultKind)))
+	kind := strings.ToLower(strings.TrimSpace(core.Blank(cfg.Cua.Kind, core.CuaConfigDefaultKind)))
 	if kind != "container" && kind != "vm" {
 		return exit(2, "%s kind must be container or vm", providerName)
 	}
@@ -75,7 +75,7 @@ func validateProviderConfig(cfg Config) error {
 }
 
 func cuaWorkdir(cfg Config) (string, error) {
-	workdir := strings.TrimSpace(blank(cfg.Cua.Workdir, core.CuaConfigDefaultWorkdir))
+	workdir := strings.TrimSpace(core.Blank(cfg.Cua.Workdir, core.CuaConfigDefaultWorkdir))
 	if !path.IsAbs(workdir) {
 		return "", exit(2, "%s workdir must be absolute", providerName)
 	}

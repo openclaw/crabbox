@@ -89,7 +89,7 @@ func (b *e2bBackend) bridgeSandboxCoords(ctx context.Context, leaseID string) (s
 	}
 	domain := strings.TrimSpace(sandbox.Domain)
 	if domain == "" {
-		domain = strings.TrimSpace(blank(b.cfg.E2B.Domain, core.E2BConfigDefaultDomain))
+		domain = strings.TrimSpace(core.Blank(b.cfg.E2B.Domain, core.E2BConfigDefaultDomain))
 	}
 	return sandbox.SandboxID, domain, nil
 }

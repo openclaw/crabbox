@@ -223,11 +223,11 @@ func (c *modalPythonClient) runStreamed(ctx context.Context, script string, payl
 }
 
 func (c *modalPythonClient) python() string {
-	return blank(strings.TrimSpace(c.cfg.Modal.Python), core.ModalConfigDefaultPython)
+	return core.Blank(strings.TrimSpace(c.cfg.Modal.Python), core.ModalConfigDefaultPython)
 }
 
 func (c *modalPythonClient) app() string {
-	return blank(strings.TrimSpace(c.cfg.Modal.App), core.ModalConfigDefaultApp)
+	return core.Blank(strings.TrimSpace(c.cfg.Modal.App), core.ModalConfigDefaultApp)
 }
 
 func (c *modalPythonClient) env() []string {

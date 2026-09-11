@@ -311,7 +311,7 @@ func requireExactAppleContainerClaim(leaseID, containerID string) error {
 }
 
 func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
-	return fmt.Sprintf("released lease=%s container=%s", lease.LeaseID, blank(lease.Server.CloudID, lease.Server.Labels["container_id"]))
+	return fmt.Sprintf("released lease=%s container=%s", lease.LeaseID, core.Blank(lease.Server.CloudID, lease.Server.Labels["container_id"]))
 }
 
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
@@ -357,10 +357,10 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			continue
 		}
 		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would remove container id=%s name=%s lease=%s reason=%s\n", server.DisplayID(), server.Name, blank(leaseID, "-"), reason)
+			fmt.Fprintf(b.rt.Stdout, "would remove container id=%s name=%s lease=%s reason=%s\n", server.DisplayID(), server.Name, core.Blank(leaseID, "-"), reason)
 			continue
 		}
-		fmt.Fprintf(b.rt.Stdout, "remove container id=%s name=%s lease=%s reason=%s\n", server.DisplayID(), server.Name, blank(leaseID, "-"), reason)
+		fmt.Fprintf(b.rt.Stdout, "remove container id=%s name=%s lease=%s reason=%s\n", server.DisplayID(), server.Name, core.Blank(leaseID, "-"), reason)
 		if err := b.removeContainer(ctx, c.id()); err != nil {
 			return err
 		}
@@ -771,9 +771,9 @@ func (b *backend) exitedDuringBootstrapError(ctx context.Context, id, status str
 		hint = "; DNS failed during package bootstrap, retry with --apple-container-extra-run-args '--dns <resolver>' or configure appleContainer.extraRunArgs"
 	}
 	if strings.TrimSpace(logs) == "" {
-		return exit(5, "apple-container %s stopped during SSH bootstrap status=%s%s", id, blank(status, "unknown"), hint)
+		return exit(5, "apple-container %s stopped during SSH bootstrap status=%s%s", id, core.Blank(status, "unknown"), hint)
 	}
-	return exit(5, "apple-container %s stopped during SSH bootstrap status=%s%s\ncontainer logs:\n%s", id, blank(status, "unknown"), hint, logs)
+	return exit(5, "apple-container %s stopped during SSH bootstrap status=%s%s\ncontainer logs:\n%s", id, core.Blank(status, "unknown"), hint, logs)
 }
 
 func (b *backend) containerLogTail(ctx context.Context, id string, limit int) string {
@@ -892,7 +892,7 @@ func shouldCleanup(server core.Server, claim core.LeaseClaim, hasClaim bool, now
 		return false, "claim mismatch"
 	}
 	if !strings.EqualFold(server.Status, "running") && server.Status != "ready" {
-		return true, "container state=" + blank(server.Status, "unknown")
+		return true, "container state=" + core.Blank(server.Status, "unknown")
 	}
 	lastUsed, err := time.Parse(time.RFC3339, claim.LastUsedAt)
 	if err != nil || lastUsed.IsZero() {
