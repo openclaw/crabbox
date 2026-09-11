@@ -33,21 +33,6 @@ func configInputEnvInt32(cfg *Config, owner configInputOwner, fallback int32, na
 	return int32(configInputEnvInteger(cfg, owner, int64(fallback), 32, names...))
 }
 
-func configInputEnvInt64(cfg *Config, owner configInputOwner, fallback int64, names ...string) int64 {
-	return configInputEnvInteger(cfg, owner, fallback, 64, names...)
-}
-
-func configInputEnvFloat(cfg *Config, owner configInputOwner, fallback float64, names ...string) float64 {
-	accepted := false
-	for i := len(names) - 1; i >= 0; i-- {
-		if value, ok := lookupEnvFloat(names[i]); ok {
-			fallback, accepted = value, true
-		}
-	}
-	recordConfigInput(cfg, owner, configInputEnvironment, accepted)
-	return fallback
-}
-
 func recordConfigInputIntent(cfg *Config, owner configInputOwner, source configInputSource, applied bool) {
 	if applied {
 		if source == configInputFlag && cfg.synthesizedFlagInputs {
