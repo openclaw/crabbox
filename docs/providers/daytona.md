@@ -301,8 +301,13 @@ Daytona lifetime settings use whole minutes, so positive durations are rounded
 up. Idle auto-stop preserves the sandbox filesystem; native TTL ultimately
 deletes the sandbox. `heartbeat --idle-timeout` changes the provider's auto-stop
 policy as well as Crabbox metadata. Status readiness comes from Daytona's live
-state, never a previously stored `ready` label. Explicit stop and rollback wait
-for confirmed provider deletion, with a bounded cleanup deadline.
+state, never a previously stored `ready` label. Explicit `crabbox stop` (and its
+`release` alias) waits for confirmed provider deletion under the caller's
+cancellation and deadline. The CLI remains interruptible by signal; a supervising
+process owns its command budget. Non-cancelable callers, including detached job
+cleanup, retain the 30-second fallback. Individual control-plane requests retain
+their 60-second limit. Automatic run/watch cleanup and detached rollback keep
+their separate 30-second budget.
 If `stop` cannot resolve the claimed sandbox, it returns the lookup error and
 preserves the local recovery claim. A missing sandbox in the current account or
 API endpoint does not prove deletion in the original scope, even after native TTL.

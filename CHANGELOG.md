@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Daytona: let signal- or deadline-owned `stop` and its `release` alias wait for confirmed deletion without the 30-second automatic-cleanup cap; preserve the bounded fallback for non-cancelable job callers and existing run/watch cleanup and rollback budgets.
 - Discover accepted preflight names, defaults, and target support offline with `crabbox preflight-tools [--json]`; unknown names now point to that installed-binary catalog before lease acquisition. [PR 2081](https://github.com/openclaw/crabbox/pull/2081), [Issue 1589](https://github.com/openclaw/crabbox/issues/1589). Thanks @coygeek.
 - Keep Sprites API, bootstrap, and SSH commands on the configured account and endpoint; validate ownership before reuse, require explicit adoption without a local claim, keep plain status observational, use native tool checks for readiness, and safely recover already-deleted resources. [PR 1776](https://github.com/openclaw/crabbox/pull/1776), [PR 2077](https://github.com/openclaw/crabbox/pull/2077). Thanks @aezell.
 
