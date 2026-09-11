@@ -5291,6 +5291,135 @@ func TestTartConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestCoderOrdinaryFileMetadata(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	wantDefault := CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}
+	if got := baseConfig().Coder; !reflect.DeepEqual(got, wantDefault) {
+		t.Fatalf("defaults=%#v want %#v", got, wantDefault)
+	}
+	for _, tc := range []struct {
+		name        string
+		input, want []string
+	}{{"nil", nil, []string{"prior"}}, {"empty", []string{}, []string{"prior"}}, {"all blank", []string{" ", ""}, []string{}}, {"normalized clone", []string{" a=1 ", " ", "b=2", "a=1"}, []string{"a=1", "b=2", "a=1"}}} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Coder.Parameters = []string{"prior"}
+			generic := cfg.WorkRoot
+			no := false
+			file := fileConfig{Coder: &fileCoderConfig{CLIPath: "~/coder", Template: " template ", Preset: " preset ", WorkspacePrefix: " prefix ", WorkRoot: "~/guest", DeleteOnRelease: &no, Wait: " auto ", UseParameterDefaults: &no, Parameters: tc.input, RichParameterFile: "~/params"}}
+			if err := applyFileConfig(&cfg, file); err != nil {
+				t.Fatal(err)
+			}
+			want := CoderConfig{CLIPath: filepath.Join(home, "coder"), Template: " template ", Preset: " preset ", WorkspacePrefix: " prefix ", WorkRoot: "~/guest", Wait: " auto ", Parameters: tc.want, RichParameterFile: filepath.Join(home, "params")}
+			if !reflect.DeepEqual(cfg.Coder, want) || cfg.WorkRoot != generic {
+				t.Fatalf("file=%#v want %#v", cfg.Coder, want)
+			}
+			if len(tc.input) > 0 && len(tc.want) > 0 {
+				tc.input[0] = "changed"
+				if cfg.Coder.Parameters[0] != "a=1" {
+					t.Fatal("file list not cloned")
+				}
+			}
+		})
+	}
+	for _, input := range []string{"{}", "{cliPath: '', richParameterFile: '', deleteOnRelease: null, useParameterDefaults: null}", "{cliPath: '~/coder', richParameterFile: '~/params', deleteOnRelease: false, useParameterDefaults: false}"} {
+		var file fileConfig
+		if err := yaml.Unmarshal([]byte("coder: "+input), &file); err != nil {
+			t.Fatal(err)
+		}
+		cfg := baseConfig()
+		cfg.Coder.CLIPath = "~/coder"
+		cfg.Coder.RichParameterFile = "~/params"
+		cfg.Coder.DeleteOnRelease = true
+		cfg.Coder.UseParameterDefaults = true
+		if err := applyFileConfig(&cfg, file); err != nil {
+			t.Fatal(err)
+		}
+		accepted := strings.Contains(input, "~/")
+		wantCLI, wantRich := "~/coder", "~/params"
+		if accepted {
+			wantCLI, wantRich = filepath.Join(home, "coder"), filepath.Join(home, "params")
+		}
+		if cfg.Coder.CLIPath != wantCLI || cfg.Coder.RichParameterFile != wantRich || cfg.Coder.DeleteOnRelease == accepted || cfg.Coder.UseParameterDefaults == accepted {
+			t.Fatal("file accepted path/bool presence")
+		}
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Coder.CLIPath != filepath.Join(home, "coder") || cfg.Coder.RichParameterFile != filepath.Join(home, "params") {
+			t.Fatal("env fallback path expansion")
+		}
+	}
+}
+
+func TestCoderOrdinaryEnvMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want []string
+	}{{"", []string{"prior"}}, {" \t ", []string{"prior"}}, {" NoNe ", []string{}}, {", ,", []string{}}, {" a=1, ,b=2,a=1 ", []string{"a=1", "b=2", "a=1"}}} {
+		t.Run(tc.raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			for key, value := range map[string]string{"CLI": "~/coder", "TEMPLATE": " template ", "PRESET": " preset ", "WORKSPACE_PREFIX": " prefix ", "WORK_ROOT": "~/guest", "DELETE_ON_RELEASE": "false", "WAIT": " auto ", "USE_PARAMETER_DEFAULTS": "false", "PARAMETERS": tc.raw, "RICH_PARAMETER_FILE": "~/params"} {
+				t.Setenv("CRABBOX_CODER_"+key, value)
+			}
+			cfg := baseConfig()
+			cfg.Coder.Parameters = []string{"prior"}
+			cfg.Coder.DeleteOnRelease = true
+			cfg.Coder.UseParameterDefaults = true
+			generic := cfg.WorkRoot
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			want := CoderConfig{CLIPath: filepath.Join(home, "coder"), Template: " template ", Preset: " preset ", WorkspacePrefix: " prefix ", WorkRoot: "~/guest", Wait: " auto ", Parameters: tc.want, RichParameterFile: filepath.Join(home, "params")}
+			if !reflect.DeepEqual(cfg.Coder, want) || cfg.WorkRoot != generic {
+				t.Fatalf("env=%#v want %#v", cfg.Coder, want)
+			}
+		})
+	}
+}
+
+func TestCoderOrdinaryCodecAndWriter(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{{"coder: {}\n", "coder: {}\n"}, {"coder: {parameters: [], deleteOnRelease: false, useParameterDefaults: false}\n", "coder: {deleteOnRelease: false, useParameterDefaults: false}\n"}, {"coder: {parameters: [' a=1 ', '', 'a=1']}\n", "coder: {parameters: ['a=1', 'a=1']}\n"}, {"coder: {parameters: [' ', '']}\n", "coder: {}\n"}} {
+		path := isolatedConfigPath(t)
+		if err := os.WriteFile(path, []byte(tc.input), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writeUserFileConfig(file); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got, want map[string]any
+		if err := yaml.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		if err := yaml.Unmarshal([]byte(tc.want), &want); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("writer=%#v want %#v", got, want)
+		}
+	}
+	for _, tc := range []struct{ input, kind string }{{"parameters: a=1", "!!str `a=1`"}, {"parameters: {a: b}", "!!map"}} {
+		file := fileCoderConfig{Template: "prior"}
+		err := yaml.Unmarshal([]byte(tc.input), &file)
+		want := "yaml: unmarshal errors:\n  line 1: cannot unmarshal " + tc.kind + " into []string"
+		if err == nil || err.Error() != want || file.Template != "prior" {
+			t.Fatalf("codec error=%v, want %q; template=%q", err, want, file.Template)
+		}
+	}
+}
+
 func TestCoderConfigDefaultsSetWorkRoot(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()

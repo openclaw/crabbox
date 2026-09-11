@@ -592,6 +592,12 @@ func TestAgentSandboxGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestCoderGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_coder.go", "../../internal/cli/config_coder_generated.go", "CoderConfig", "coder", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
@@ -2002,7 +2008,7 @@ func TestGenerateSourceSpecificLists(t *testing.T) {
 		t.Fatal(err)
 	}
 	getters := ""
-	for _, name := range []string{"getenvList", "splitCommaList", "normalizeList"} {
+	for _, name := range []string{"getenvList", "parseEnvListValue", "splitCommaList", "normalizeList"} {
 		start := strings.Index(string(coreSource), "func "+name+"(")
 		if start < 0 {
 			t.Fatalf("missing core helper%s", name)
@@ -2081,7 +2087,7 @@ func TestGenerateCSVListSourceContract(t *testing.T) {
 	}
 	typecheckGenerated(t, input+"\nfunc splitCSV(string) []string { panic(\"stub\") }", output)
 	helpers := ""
-	for _, item := range []struct{ file, name string }{{"config.go", "splitCommaList"}, {"config.go", "normalizeList"}, {"egress.go", "splitCSV"}} {
+	for _, item := range []struct{ file, name string }{{"config.go", "splitCommaList"}, {"config.go", "normalizeList"}, {"config.go", "parseEnvListValue"}, {"egress.go", "splitCSV"}} {
 		source, err := os.ReadFile("../../internal/cli/" + item.file)
 		if err != nil {
 			t.Fatal(err)
@@ -2113,6 +2119,76 @@ func TestCSVSourceShapes(t *testing.T){
 }
 `
 	runScalarFixture(t, input, output, behavior+helpers)
+
+	const normalizedInput = "package cli\ntype PilotConfig struct { Items []string `sources:\"user,repo,env,flag\" config:\"items\" env:\"ITEMS\" flag:\"items\" help:\"Items\" fileList:\"nonempty-normalized\" fileStorage:\"value\" envList:\"trimmed-nonempty\" flagList:\"csv\"` }"
+	for _, mode := range []struct{ tag, value string }{{"fileList", "nonempty-normalized"}, {"envList", "trimmed-nonempty"}, {"flagList", "csv"}} {
+		for _, bad := range []string{"", "unknown"} {
+			source := strings.Replace(normalizedInput, mode.tag+`:"`+mode.value+`"`, mode.tag+`:"`+bad+`"`, 1)
+			if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), mode.tag+" requires") {
+				t.Fatalf("%s=%q: %v", mode.tag, bad, err)
+			}
+		}
+		source := strings.Replace(sample, `help:"Name"`, `help:"Name" `+mode.tag+`:"`+mode.value+`"`, 1)
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), mode.tag+" requires") {
+			t.Fatalf("wrong kind %s: %v", mode.tag, err)
+		}
+	}
+	for _, source := range []string{
+		"package cli\ntype PilotConfig struct { Items []string `sources:\"flag\" flag:\"items\" help:\"Items\" fileList:\"nonempty-normalized\"` }",
+		"package cli\ntype PilotConfig struct { Items []string `sources:\"flag\" flag:\"items\" help:\"Items\" envList:\"trimmed-nonempty\"` }",
+		"package cli\ntype PilotConfig struct { Items []string `sources:\"user,repo,env\" config:\"items\" env:\"ITEMS\" flagList:\"csv\"` }",
+	} {
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil {
+			t.Fatal("normalized list mode without its source was admitted")
+		}
+	}
+	s, err = parseSchema([]byte(normalizedInput), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err = generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic normalized list modes: %v", err)
+	}
+	for _, want := range []string{`if len(file.Items) > 0 {`, `cfg.Items = normalizeList(file.Items)`, `strings.TrimSpace(value) != ""`, `cfg.Items = parseEnvListValue(value)`, `cfg.Items = splitCSV(*values.Items)`} {
+		if !strings.Contains(string(output), want) {
+			t.Fatalf("missing normalized list binding %q", want)
+		}
+	}
+	typecheckGenerated(t, normalizedInput+"\nfunc splitCSV(string) []string { panic(\"stub\") }\nfunc parseEnvListValue(string) []string { panic(\"stub\") }", output)
+	const normalizedBehavior = `package cli
+import("flag";"reflect";"strings";"testing")
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestNormalizedFileList(t *testing.T){
+ prior:=[]string{"prior"};cfg:=PilotConfig{Items:prior}
+ for _,file:=range []*filePilotConfig{nil,{}, {Items:[]string{}}}{
+  if err:=cfg.applyFile(file);err!=nil||&cfg.Items[0]!=&prior[0]{t.Fatalf("empty file changed prior: %#v %v",cfg.Items,err)}
+ }
+ raw:=[]string{" a ",""," b ","a"};file:=filePilotConfig{Items:raw}
+ if err:=cfg.applyFile(&file);err!=nil||!reflect.DeepEqual(cfg.Items,[]string{"a","b","a"}){t.Fatalf("normalized file: %#v %v",cfg.Items,err)}
+ cfg.Items[0]="mutated";if raw[0]!=" a "{t.Fatal("normalized file shares input")}
+ if err:=cfg.applyFile(&filePilotConfig{Items:[]string{" ",""}});err!=nil||cfg.Items==nil||len(cfg.Items)!=0{t.Fatalf("nonempty blank file shape: %#v %v",cfg.Items,err)}
+}
+func TestTrimmedEnvAndCSVFlags(t *testing.T){
+ for _,tc:=range []struct{raw string;env,flag []string}{
+  {"",[]string{"prior"},nil},{" \t ",[]string{"prior"},nil},{" , , ",[]string{},[]string{}},
+  {" NoNe ",[]string{},[]string{"NoNe"}},{" a , b , a ",[]string{"a","b","a"},[]string{"a","b","a"}},
+ }{
+  cfg:=PilotConfig{Items:[]string{"prior"}};t.Setenv("ITEMS",tc.raw)
+  if err:=cfg.applyEnv();err!=nil||!reflect.DeepEqual(cfg.Items,tc.env){t.Fatalf("env %q: %#v %v",tc.raw,cfg.Items,err)}
+  cfg.Items=[]string{"prior"," raw "};fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+  if fs.Lookup("items").DefValue!="prior, raw "{t.Fatal("joined flag default changed")}
+  values.Apply(&cfg,fs);if !reflect.DeepEqual(cfg.Items,[]string{"prior"," raw "}){t.Fatal("unvisited flags changed config")}
+  if err:=fs.Parse([]string{"--items=ignored","--items="+tc.raw});err!=nil{t.Fatal(err)}
+  values.Apply(&cfg,fs);if !reflect.DeepEqual(cfg.Items,tc.flag){t.Fatalf("flag %q: %#v",tc.raw,cfg.Items)}
+ }
+}
+`
+	runScalarFixture(t, normalizedInput, output, normalizedBehavior+helpers)
 }
 
 func TestSchemaFileIntNonzeroFailsClosed(t *testing.T) {
