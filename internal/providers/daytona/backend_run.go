@@ -300,8 +300,13 @@ func (b *daytonaLeaseBackend) Status(ctx context.Context, req StatusRequest) (st
 }
 
 func (b *daytonaLeaseBackend) Stop(ctx context.Context, req StopRequest) error {
-	ctx, cancel := context.WithTimeout(ctx, daytonaCleanupTimeout)
-	defer cancel()
+	// Detached callers such as job cleanup have no cancellation owner. Keep
+	// their bounded fallback without shortening an owned CLI/controller lifetime.
+	if ctx.Done() == nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, daytonaCleanupTimeout)
+		defer cancel()
+	}
 	if claim, exists, err := resolveLeaseClaimForProvider(req.ID, daytonaProvider); err != nil {
 		return err
 	} else if exists && claim.FixedCreateIntent != nil {
