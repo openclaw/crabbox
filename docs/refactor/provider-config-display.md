@@ -56,6 +56,13 @@ either backend's runtime defaults. MXC retains JSON lists with text counts,
 Docker Sandbox retains JSON lists with comma-joined text and `%g` CPU formatting,
 and nil versus empty lists remain distinct. Internal-only fields stay omitted.
 
+AWS, Azure and GCP own their existing 24 JSON fields and 17 text fields through
+the same capability. Seven fields remain JSON-only rather than gaining new text
+output. AWS's 32-bit and GCP's 64-bit disk sizes, ordered lists and exact text
+slots are preserved. Instance-profile and service-account values remain
+configured references; these projections do not inspect SDK credentials or add
+authentication or readiness facts.
+
 DigitalOcean, Vultr and Linode own all 17 of their existing JSON/text fields.
 Their consecutive sections remain between Azure and GitHub Codespaces. The
 projectors retain raw boot selectors and list shapes without resolving images,
@@ -74,11 +81,11 @@ sections**. They do not complete the migration. Existing provider projections
 also still need to move out of the parallel JSON map and text formatter so
 their field selection and transformations have one owner.
 
-The Multipass/Tart/Lume, local-container and VPS cohorts remove eleven of the original
-49 canonical both-format providers from that legacy implementation, leaving 38
-in that cohort. The local cohort covers five identities through four sections
-because Apple Machine shares Apple Container's values. These migrations do not
-fill any of the missing sections above.
+The Multipass/Tart/Lume, local-container, cloud and VPS cohorts remove fourteen
+of the original 49 canonical both-format providers from that legacy
+implementation, leaving 35 in that cohort. The local cohort covers five
+identities through four sections because Apple Machine shares Apple Container's
+values. These migrations do not fill any of the missing sections above.
 
 For each remaining provider, establish the explicit public field contract
 before implementation. Preserve existing keys, types, null/empty distinctions,
