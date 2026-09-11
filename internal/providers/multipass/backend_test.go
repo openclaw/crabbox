@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -116,6 +117,56 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureCacheVolume} {
 		if !spec.Features.Has(feature) {
 			t.Fatalf("features=%v missing %s", spec.Features, feature)
+		}
+	}
+}
+
+func TestMultipassOrdinaryFlagMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		raw      string
+		duration time.Duration
+		bad      bool
+	}{{"", time.Minute, false}, {"2m", 2 * time.Minute, false}, {"0s", time.Minute, true}, {" 0s ", time.Minute, true}, {"0", time.Minute, true}, {"-1m", time.Minute, true}, {" 2m ", time.Minute, true}, {" ", time.Minute, true}, {"invalid", time.Minute, true}} {
+		t.Run(fmt.Sprintf("%q", tc.raw), func(t *testing.T) {
+			cfg := core.Config{Provider: "unselected-metadata", SSHUser: "generic", WorkRoot: "generic", Multipass: core.MultipassConfig{CLIPath: "prior", Image: "image-example", User: "prior", WorkRoot: "prior", CPUs: 4, Memory: "8G", Disk: "30G", LaunchTimeout: time.Minute}}
+			fs := flag.NewFlagSet("metadata", flag.ContinueOnError)
+			values := (Provider{}).RegisterFlags(fs, cfg)
+			before := cfg
+			if fs.Lookup("multipass-launch-timeout").DefValue != "1m0s" {
+				t.Fatal("string timeout registration")
+			}
+			if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, before) {
+				t.Fatal("unvisited values changed")
+			}
+			if err := fs.Parse([]string{"--multipass-cli=~/literal", "--multipass-image=image-example", "--multipass-user= user ", "--multipass-work-root=~/guest", "--multipass-cpus=-2", "--multipass-memory=4G", "--multipass-disk=20G", "--multipass-launch-timeout=" + tc.raw}); err != nil {
+				t.Fatal(err)
+			}
+			err := (Provider{}).ApplyFlags(&cfg, fs, values)
+			if tc.bad {
+				if err == nil || err.Error() != fmt.Sprintf("invalid duration %q", tc.raw) {
+					t.Fatalf("timeout error=%v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			want := before
+			want.Multipass = core.MultipassConfig{CLIPath: "~/literal", Image: "image-example", User: " user ", WorkRoot: "~/guest", CPUs: -2, Memory: "4G", Disk: "20G", LaunchTimeout: tc.duration}
+			want.SSHUser = " user "
+			want.WorkRoot = "~/guest"
+			core.MarkMultipassImageExplicit(&want)
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("partial values/effects=%#v want %#v", cfg.Multipass, want.Multipass)
+			}
+		})
+	}
+	cfg := core.Config{Provider: "unselected-metadata", Multipass: core.MultipassConfig{Image: "prior"}}
+	before := cfg
+	for _, foreign := range []any{nil, struct{}{}} {
+		if err := (Provider{}).ApplyFlags(&cfg, flag.NewFlagSet("foreign", flag.ContinueOnError), foreign); err != nil || !reflect.DeepEqual(cfg, before) {
+			t.Fatal("foreign values changed config")
 		}
 	}
 }

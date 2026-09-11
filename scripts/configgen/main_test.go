@@ -598,6 +598,12 @@ func TestCoderGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestMultipassGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_multipass.go", "../../internal/cli/config_multipass_generated.go", "MultipassConfig", "multipass", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
@@ -3093,22 +3099,30 @@ func TestAppendTrimmedOccurrences(t *testing.T){
 const rawZeroResetDurationField = "Timeout time.Duration `sources:\"flag\" flag:\"timeout\" help:\"Timeout\" duration:\"positive-overlay\" flagDuration:\"raw-zero-reset\" default:\"17s\"`"
 
 func TestSchemaRawZeroResetDurationFailsClosed(t *testing.T) {
-	const source = "package cli\nimport \"time\"\ntype PilotConfig struct { " + rawZeroResetDurationField + " }"
+	testSchemaRawDurationFailsClosed(t, "raw-zero-reset")
+}
+
+func TestSchemaRawPositiveDurationFailsClosed(t *testing.T) {
+	testSchemaRawDurationFailsClosed(t, "raw-positive")
+}
+
+func testSchemaRawDurationFailsClosed(t *testing.T, mode string) {
+	source := "package cli\nimport \"time\"\ntype PilotConfig struct { " + strings.Replace(rawZeroResetDurationField, "raw-zero-reset", mode, 1) + " }"
 	for _, value := range []string{"", " ", "custom error"} {
 		t.Run("error tag/"+value, func(t *testing.T) {
-			input := strings.Replace(source, `flagDuration:"raw-zero-reset"`, `flagDuration:"raw-zero-reset" flagDurationError:"`+value+`"`, 1)
+			input := strings.Replace(source, `flagDuration:"`+mode+`"`, `flagDuration:"`+mode+`" flagDurationError:"`+value+`"`, 1)
 			_, err := parseSchema([]byte(input), "PilotConfig", "pilot")
-			if err == nil || !strings.Contains(err.Error(), "raw-zero-reset forbids flagDurationError") {
+			if err == nil || !strings.Contains(err.Error(), mode+" forbids flagDurationError") {
 				t.Fatalf("flagDurationError=%q: %v", value, err)
 			}
 		})
 	}
-	for _, mode := range []string{"", "unknown", " raw-zero-reset "} {
-		t.Run("mode/"+mode, func(t *testing.T) {
-			input := strings.Replace(source, `flagDuration:"raw-zero-reset"`, `flagDuration:"`+mode+`"`, 1)
+	for _, invalidMode := range []string{"", "unknown", " " + mode + " "} {
+		t.Run("mode/"+invalidMode, func(t *testing.T) {
+			input := strings.Replace(source, `flagDuration:"`+mode+`"`, `flagDuration:"`+invalidMode+`"`, 1)
 			_, err := parseSchema([]byte(input), "PilotConfig", "pilot")
 			if err == nil || !strings.Contains(err.Error(), "flagDuration requires") {
-				t.Fatalf("mode %q: %v", mode, err)
+				t.Fatalf("mode %q: %v", invalidMode, err)
 			}
 		})
 	}
@@ -3142,14 +3156,24 @@ func TestSchemaRawZeroResetDurationFailsClosed(t *testing.T) {
 }
 
 func TestGenerateRawZeroResetDurationFlags(t *testing.T) {
-	const single = "package cli\nimport \"time\"\ntype PilotConfig struct { " + rawZeroResetDurationField + " }"
-	const tracked = "package cli\nimport \"time\"\ntype PilotConfig struct {\n" +
+	testGenerateRawDurationFlags(t, "raw-zero-reset")
+}
+
+func TestGenerateRawPositiveDurationFlags(t *testing.T) {
+	testGenerateRawDurationFlags(t, "raw-positive")
+}
+
+func testGenerateRawDurationFlags(t *testing.T, mode string) {
+	single := "package cli\nimport \"time\"\ntype PilotConfig struct { " + strings.Replace(rawZeroResetDurationField, "raw-zero-reset", mode, 1) + " }"
+	tracked := "package cli\nimport \"time\"\ntype PilotConfig struct {\n" +
 		"Before string `sources:\"flag\" flag:\"before\" help:\"Before\" reportApplied:\"true\"`\n" + rawZeroResetDurationField + "\n" +
 		"Second time.Duration `sources:\"flag\" flag:\"second\" help:\"Second\" duration:\"positive-overlay\" flagDuration:\"raw-zero-reset\"`\n" +
 		"After string `sources:\"flag\" flag:\"after\" help:\"After\" reportApplied:\"true\"`\n}"
-	var trackedOutput []byte
+	tracked = strings.ReplaceAll(tracked, "raw-zero-reset", mode)
+	var trackedOutput, untrackedOutput []byte
 	withoutDefault := strings.Replace(single, ` default:"17s"`, "", 1)
-	for _, source := range []string{single, tracked, withoutDefault} {
+	untracked := strings.ReplaceAll(tracked, ` reportApplied:"true"`, "")
+	for _, source := range []string{single, tracked, withoutDefault, untracked} {
 		s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
 		if err != nil {
 			t.Fatal(err)
@@ -3164,12 +3188,22 @@ func TestGenerateRawZeroResetDurationFlags(t *testing.T) {
 		}
 		text := strings.Join(strings.Fields(string(output)), " ")
 		for _, want := range []string{
-			`fs.String("timeout", defaults.Timeout.String(), "Timeout")`, `if strings.TrimSpace(*values.Timeout) == "0s" { cfg.Timeout = 0 }`,
+			`fs.String("timeout", defaults.Timeout.String(), "Timeout")`,
 			`ApplyLeaseDuration(&cfg.Timeout, *values.Timeout)`,
 		} {
 			if !strings.Contains(text, want) {
 				t.Fatalf("missing raw-zero-reset binding %q", want)
 			}
+		}
+		if mode == "raw-zero-reset" {
+			if !strings.Contains(text, `if strings.TrimSpace(*values.Timeout) == "0s" { cfg.Timeout = 0 }`) {
+				t.Fatal("missing raw-zero-reset branch")
+			}
+		} else if strings.Contains(text, "TrimSpace") || strings.Contains(text, "cfg.Timeout = 0") || strings.Contains(text, `"strings"`) {
+			t.Fatal("raw-positive introduced trimming or zero reset")
+		}
+		if source == withoutDefault && strings.Contains(text, `"time"`) {
+			t.Fatal("defaultless raw duration imported unused time")
 		}
 		if strings.Contains(text, "time.ParseDuration(") || strings.Contains(text, "exit(") || strings.Contains(text, `"os"`) {
 			t.Fatal("raw-zero-reset introduced a parser, exit wrapper, or unused environment import")
@@ -3178,6 +3212,8 @@ func TestGenerateRawZeroResetDurationFlags(t *testing.T) {
 		if source == tracked {
 			signature = "Apply(cfg *PilotConfig, fs *flag.FlagSet) (PilotConfigApplied, error)"
 			trackedOutput = output
+		} else if source == untracked {
+			untrackedOutput = output
 		}
 		if !strings.Contains(text, signature) {
 			t.Fatalf("missing fallible Apply signature %q", signature)
@@ -3207,6 +3243,7 @@ func TestRawDurationContractAndOrder(t *testing.T){
   {"0",17*time.Second,true},{"0ms",17*time.Second,true},{"0.0s",17*time.Second,true},{"+0s",17*time.Second,true},{"-0s",17*time.Second,true},
   {"-1s",17*time.Second,true},{"invalid",17*time.Second,true},{" \t ",17*time.Second,true},{" 2m ",17*time.Second,true},
  }{
+  if !resetZero && (tc.raw=="0s"||tc.raw==" \t0s\n"||tc.raw=="\u20030s\u2003"){tc.want=17*time.Second;tc.bad=true}
   t.Run(tc.raw,func(t *testing.T){
    cfg:=PilotConfig{Before:"old",Timeout:17*time.Second,Second:19*time.Second,After:"old"}
    fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
@@ -3223,13 +3260,35 @@ func TestRawDurationContractAndOrder(t *testing.T){
  fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
  cfg.Timeout=23*time.Second
  if applied,err:=values.Apply(&cfg,fs);err!=nil||applied!=(PilotConfigApplied{})||cfg.Timeout!=23*time.Second{t.Fatalf("unvisited duration: %+v %+v %v",cfg,applied,err)}
- if err:=fs.Parse([]string{"--timeout=1s","--timeout= 0s ","--second=invalid","--after=later"});err!=nil{t.Fatal(err)}
+ finalRaw:=" 0s ";finalWant:=time.Duration(0);if !resetZero{finalRaw="5s";finalWant=5*time.Second}
+ if err:=fs.Parse([]string{"--timeout=1s","--timeout="+finalRaw,"--second=invalid","--after=later"});err!=nil{t.Fatal(err)}
  applied,err:=values.Apply(&cfg,fs)
- if err==nil||err.Error()!="invalid duration \"invalid\""||cfg.Timeout!=0||cfg.Second!=19*time.Second||cfg.After!="old"||applied.After{t.Fatalf("second duration failure: %+v %+v %v",cfg,applied,err)}
+ if err==nil||err.Error()!="invalid duration \"invalid\""||cfg.Timeout!=finalWant||cfg.Second!=19*time.Second||cfg.After!="old"||applied.After{t.Fatalf("second duration failure: %+v %+v %v",cfg,applied,err)}
  if err:=fs.Set("second","5s");err!=nil{t.Fatal(err)}
  applied,err=values.Apply(&cfg,fs)
- if err!=nil||cfg.Timeout!=0||cfg.Second!=5*time.Second||cfg.After!="later"||!applied.After{t.Fatalf("retry success: %+v %+v %v",cfg,applied,err)}
+ if err!=nil||cfg.Timeout!=finalWant||cfg.Second!=5*time.Second||cfg.After!="later"||!applied.After{t.Fatalf("retry success: %+v %+v %v",cfg,applied,err)}
 }
 `
-	runScalarFixture(t, tracked, trackedOutput, behavior+rest[:end])
+	resetZero := "false"
+	if mode == "raw-zero-reset" {
+		resetZero = "true"
+	}
+	runScalarFixture(t, tracked, trackedOutput, behavior+"\nconst resetZero = "+resetZero+"\n"+rest[:end])
+	const untrackedBehavior = `package cli
+import("flag";"fmt";"testing";"time")
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestUntrackedPartialOrder(t *testing.T){
+ for _,raw:=range []string{"invalid"," 2s "}{
+  cfg:=PilotConfig{Before:"old",Timeout:17*time.Second,Second:19*time.Second,After:"old"}
+  fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+  if err:=fs.Parse([]string{"--before=earlier","--timeout="+raw,"--second=3s","--after=later"});err!=nil{t.Fatal(err)}
+  err:=values.Apply(&cfg,fs)
+  if err==nil||err.Error()!=fmt.Sprintf("invalid duration %q",raw)||cfg.Before!="earlier"||cfg.Timeout!=17*time.Second||cfg.Second!=19*time.Second||cfg.After!="old"{t.Fatalf("partial effects: %+v %v",cfg,err)}
+ }
+ cfg:=PilotConfig{Timeout:17*time.Second,Second:19*time.Second};fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+ if err:=fs.Parse([]string{"--timeout=","--second=3s","--after=later"});err!=nil{t.Fatal(err)}
+ if err:=values.Apply(&cfg,fs);err!=nil||cfg.Timeout!=17*time.Second||cfg.Second!=3*time.Second||cfg.After!="later"{t.Fatalf("empty raw input: %+v %v",cfg,err)}
+}
+`
+	runScalarFixture(t, untracked, untrackedOutput, untrackedBehavior+rest[:end])
 }
