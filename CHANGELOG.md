@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep XFCE desktop components in their session, launch the visible terminal through session autostart, and refresh changed panel CSS through the existing panel owner to prevent duplicate panels and notification-area warnings; preserve released-client resets through a service alias. [PR 2117](https://github.com/openclaw/crabbox/pull/2117). Thanks @steipete.
 - Add `crabbox exec` for byte-preserving commands on completed Daytona fixed-ID leases without workspace sync or hydration, retaining repository ownership through transport cleanup; provide offline capability discovery and `stop --current-repo` cleanup after ownership checks inside the same release fence. [PR 2119](https://github.com/openclaw/crabbox/pull/2119). Thanks @steipete.
 - Daytona: attest API-key cleanup through current-key organization metadata and retire acquired fixed leases after verified native TTL or external deletion; inspection records a terminal tombstone without issuing deletion or reusing the fixed ID. [PR 2111](https://github.com/openclaw/crabbox/pull/2111). Thanks @steipete.
 - Show OpenComputer, OpenSandbox and CUA settings in offline JSON and text, including unselected providers, without discovering credentials, resolving external defaults or executing SDK bridges. [PR 2112](https://github.com/openclaw/crabbox/pull/2112). Thanks @steipete.

@@ -5051,6 +5051,65 @@ func TestLocalContainerReadyCheckReportsFailureDiagnostics(t *testing.T) {
 	}
 }
 
+func TestBootstrapDesktopResetRestoresTerminalInExistingSession(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell")
+	}
+	const marker = "cat >/usr/local/bin/crabbox-start-desktop <<'DESKTOP'\n"
+	start := strings.LastIndex(bootstrapScript, marker)
+	if start < 0 {
+		t.Fatal("bootstrap does not install the desktop startup helper")
+	}
+	start += len(marker)
+	end := strings.Index(bootstrapScript[start:], "\nDESKTOP\n")
+	if end < 0 {
+		t.Fatal("desktop startup helper is incomplete")
+	}
+	fixture := `install() { :; }
+pgrep() { return 0; }
+sleep() { :; }
+ss() { echo '127.0.0.1:5900'; }
+su() {
+  [ "$1" = fixture ] || return 2
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = -c ]; then sh -c "$2"; return; fi
+    shift
+  done
+  return 3
+}
+runuser() {
+  [ "$1" = -u ] && [ "$2" = fixture ] && [ "$3" = -- ] || return 2
+  shift 3
+  "$@"
+}
+`
+	for _, tc := range []struct{ name, mode string }{
+		{name: "saved theme"},
+		{name: "light", mode: "light"},
+		{name: "dark", mode: "dark"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			launcher := filepath.Join(dir, "desktop-session")
+			receipt := filepath.Join(dir, "terminal-restored")
+			if err := os.WriteFile(launcher, []byte("#!/bin/sh\nprintf '%s\\n' \"$DISPLAY\" \"${1:-}\" >\"$RESTORED\"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			command := strings.ReplaceAll(bootstrapScript[start:start+end], "/usr/local/bin/crabbox-desktop-session", launcher)
+			cmd := exec.Command("sh", "-c", fixture+command, "desktop-reset", tc.mode)
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "CRABBOX_SSH_USER=fixture", "RESTORED=" + receipt}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("desktop reset failed: %v: %s", err, out)
+			}
+			got, err := os.ReadFile(receipt)
+			want := ":99\n" + tc.mode + "\n"
+			if err != nil || string(got) != want {
+				t.Fatalf("desktop reset did not restore the terminal with its requested display and theme: got %q, want %q, error %v", got, want, err)
+			}
+		})
+	}
+}
+
 func TestBootstrapScriptUsesAccountHomeDirectory(t *testing.T) {
 	for _, want := range []string{
 		`home_dir="$(getent passwd "$user" | cut -d: -f6)"`,
@@ -5080,7 +5139,7 @@ func TestBootstrapScriptUsesAccountHomeDirectory(t *testing.T) {
 		`chown -R "$user" "$home_dir/.ssh" "$work_root"`,
 		`arc-theme`,
 		`"$config_dir/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml"`,
-		`mode="${CRABBOX_DESKTOP_THEME:-}"`,
+		`requested_mode="${1:-}"`,
 		`"$config_dir/crabbox/desktop-theme"`,
 		`gtk_theme=Adwaita-dark`,
 		`gtk_candidates="Arc-Dark Greybird-dark Adwaita-dark Greybird"`,
@@ -5094,21 +5153,10 @@ func TestBootstrapScriptUsesAccountHomeDirectory(t *testing.T) {
 		`gtk-application-prefer-dark-theme=$gtk_prefer_dark_ini`,
 		`xfconf-query -c xsettings -p /Gtk/ApplicationPreferDarkTheme`,
 		`xfconf-query -c xfwm4 -p /general/theme`,
-		`xfconf-query -c xfwm4 -p /general/box_move`,
-		`xfconf-query -c xfwm4 -p /general/box_resize`,
-		`xfconf-query -c xfwm4 -p /general/move_opacity`,
-		`xfconf-query -c xfwm4 -p /general/resize_opacity`,
-		`xfconf-query -c xfwm4 -p /general/snap_to_border`,
 		`xfconf-query -c xfwm4 -p /general/snap_width`,
-		`xfconf-query -c xfwm4 -p /general/tile_on_move`,
-		`xfconf-query -c xfwm4 -p /general/use_compositing`,
-		`xfconf-query -c xfwm4 -p /general/wrap_windows`,
 		`xfconf-query -c xfce4-panel -p /panels/dark-mode`,
 		`/panels/$panel_id/background-rgba`,
 		`crabbox desktop theme start`,
-		`crabbox-xfce4-panel-$user.log`,
-		`pkill -TERM -x xfce4-panel`,
-		`xfwm4 --replace --compositor=off`,
 		`-wait 16 -defer 8 -nowait_bog`,
 		`wayvnc --config '$home_dir/.config/wayvnc/config' --render-cursor --max-fps=60`,
 		`gsettings set org.gnome.desktop.interface color-scheme '$gsettings_scheme'`,
