@@ -39,6 +39,19 @@ Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.
 
+Firecracker's complete fifteen-field owner is `internal/cli/config_firecracker.go`.
+It uses existing value-string, present-int, tolerant integer environment and
+raw-positive duration modes. Eight file strings remain trusted-user-only;
+the three pointer integers retain explicit signed values and the release bool
+retains explicit false. File duration text stays raw for persistence.
+The initializer preserves the shared WorkRoot default through a typed alias,
+with the remaining thirteen nonzero defaults generated from the declaration.
+The flag wrapper consumes earlier accepted path/user/root effects before a
+timeout error, leaving the later release value, marker, intent and final default
+phase untouched on that error. Environment path expansion remains unconditional
+on the final fallback values. Backend defaults and native operations stay
+outside the generated owner.
+
 Incus uses a complete hybrid owner in `internal/cli/config_incus.go`. The exact
 type-doc directive `//configgen:flag-application manual` generates file/env
 application, flag storage and registration, and a typed raw-visit query for all

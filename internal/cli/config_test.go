@@ -6937,6 +6937,195 @@ func TestLoadConfigIncusSpecificUserAndWorkRootOverrideTopLevel(t *testing.T) {
 	}
 }
 
+func TestFirecrackerOrdinarySources(t *testing.T) {
+	clearConfigEnv(t)
+	wantDefaults := FirecrackerConfig{Binary: "firecracker", Kernel: "/var/lib/crabbox/firecracker/vmlinux", RootFS: "/var/lib/crabbox/firecracker/rootfs.ext4", User: "crabbox", WorkRoot: defaultPOSIXWorkRoot, CPUs: 4, MemoryMiB: 4096, DiskMiB: 16384, Network: "cni", CNINetwork: "crabbox-firecracker", CNIConfDir: "/etc/cni/conf.d", CNIBinDir: "/opt/cni/bin", LaunchTimeout: 2 * time.Minute, DeleteOnRelease: true}
+	if got := baseConfig().Firecracker; got != wantDefaults {
+		t.Fatalf("defaults %#v", got)
+	}
+	fields := []struct {
+		field, key, env string
+		path            bool
+	}{
+		{"Binary", "binary", "BINARY", true}, {"Jailer", "jailer", "JAILER", true}, {"Kernel", "kernel", "KERNEL", true}, {"RootFS", "rootfs", "ROOTFS", true}, {"User", "user", "USER", false}, {"WorkRoot", "workRoot", "WORK_ROOT", false}, {"Network", "network", "NETWORK", false}, {"CNINetwork", "cniNetwork", "CNI_NETWORK", false}, {"CNIConfDir", "cniConfDir", "CNI_CONF_DIR", true}, {"CNIBinDir", "cniBinDir", "CNI_BIN_DIR", true},
+	}
+	for _, source := range []string{"file", "env"} {
+		for _, value := range []string{"", "same", " padded ", "~/ordinary"} {
+			t.Run(source+"/"+value, func(t *testing.T) {
+				clearConfigEnv(t)
+				home := t.TempDir()
+				t.Setenv("HOME", home)
+				cfg := Config{WorkRoot: "/generic", SSHUser: "generic"}
+				for _, f := range fields {
+					prior := "same"
+					if f.path {
+						prior = "~/inherited"
+					}
+					reflect.ValueOf(&cfg.Firecracker).Elem().FieldByName(f.field).SetString(prior)
+				}
+				want := cfg.Firecracker
+				for _, f := range fields {
+					v := reflect.ValueOf(&want).Elem().FieldByName(f.field)
+					if value != "" {
+						v.SetString(value)
+					}
+					if f.path && (source == "env" || value != "") && strings.HasPrefix(v.String(), "~/") {
+						v.SetString(filepath.Join(home, strings.TrimPrefix(v.String(), "~/")))
+					}
+				}
+				inputSource := configInputUser
+				if source == "file" {
+					body := map[string]any{}
+					for _, f := range fields {
+						body[f.key] = value
+					}
+					data, err := yaml.Marshal(map[string]any{"firecracker": body})
+					if err != nil {
+						t.Fatal(err)
+					}
+					var file fileConfig
+					if err := yaml.Unmarshal(data, &file); err != nil {
+						t.Fatal(err)
+					}
+					original := *file.Firecracker
+					if err := applyFileConfig(&cfg, file); err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(*file.Firecracker, original) {
+						t.Fatal("input mutated")
+					}
+				} else {
+					inputSource = configInputEnvironment
+					for _, f := range fields {
+						t.Setenv("CRABBOX_FIRECRACKER_"+f.env, value)
+					}
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var ledger configInputLedger
+				if value != "" {
+					ledger = ledger.withInput("firecracker", inputSource, configInputValue)
+				}
+				if cfg.Firecracker != want || !reflect.DeepEqual(cfg.inputProvenance, ledger) || cfg.WorkRoot != "/generic" || cfg.SSHUser != "generic" {
+					t.Fatalf("source %#v ledger %#v", cfg.Firecracker, cfg.inputProvenance)
+				}
+			})
+		}
+	}
+	for _, source := range []string{"file", "env"} {
+		for _, value := range []string{"null", "0", "-2", "7", "bad", " 7 "} {
+			if source == "file" && (value == "bad" || value == " 7 ") {
+				continue
+			}
+			t.Run(source+"/integers/"+value, func(t *testing.T) {
+				clearConfigEnv(t)
+				cfg := Config{Firecracker: FirecrackerConfig{CPUs: 7, MemoryMiB: 7, DiskMiB: 7}}
+				want := 7
+				accepted := value == "0" || value == "-2" || value == "7"
+				if value == "0" {
+					want = 0
+				}
+				if value == "-2" {
+					want = -2
+				}
+				inputSource := configInputUser
+				if source == "file" {
+					var file fileConfig
+					if err := yaml.Unmarshal([]byte("firecracker: {cpus: "+value+", memoryMiB: "+value+", diskMiB: "+value+"}"), &file); err != nil {
+						t.Fatal(err)
+					}
+					if err := applyFileConfig(&cfg, file); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					inputSource = configInputEnvironment
+					for _, name := range []string{"CPUS", "MEMORY_MIB", "DISK_MIB"} {
+						t.Setenv("CRABBOX_FIRECRACKER_"+name, value)
+					}
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var ledger configInputLedger
+				if accepted {
+					ledger = ledger.withInput("firecracker", inputSource, configInputValue)
+				}
+				if cfg.Firecracker.CPUs != want || cfg.Firecracker.MemoryMiB != want || cfg.Firecracker.DiskMiB != want || !reflect.DeepEqual(cfg.inputProvenance, ledger) {
+					t.Fatalf("integers %#v ledger %#v", cfg.Firecracker, cfg.inputProvenance)
+				}
+			})
+		}
+	}
+}
+
+func TestFirecrackerOrdinaryOptionsAndWriter(t *testing.T) {
+	for _, source := range []string{"file", "env"} {
+		for _, duration := range []string{"", "bad", "0s", "-1s", " 2m ", "2m"} {
+			t.Run(source+"/"+duration, func(t *testing.T) {
+				clearConfigEnv(t)
+				cfg := Config{Firecracker: FirecrackerConfig{LaunchTimeout: time.Minute, DeleteOnRelease: true}}
+				inputSource := configInputUser
+				if source == "file" {
+					v := false
+					if err := applyFileConfig(&cfg, fileConfig{Firecracker: &fileFirecrackerConfig{LaunchTimeout: duration, DeleteOnRelease: &v}}); err != nil {
+						t.Fatal(err)
+					}
+					if v {
+						t.Fatal("bool mutated")
+					}
+				} else {
+					inputSource = configInputEnvironment
+					t.Setenv("CRABBOX_FIRECRACKER_LAUNCH_TIMEOUT", duration)
+					t.Setenv("CRABBOX_FIRECRACKER_DELETE_ON_RELEASE", " false ")
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				}
+				want := time.Minute
+				if duration == "2m" {
+					want = 2 * time.Minute
+				}
+				ledger := configInputLedger(nil).withInput("firecracker", inputSource, configInputValue|configInputIntent)
+				if cfg.Firecracker.LaunchTimeout != want || cfg.Firecracker.DeleteOnRelease || !DeleteOnReleaseExplicit(cfg, "firecracker") || !reflect.DeepEqual(cfg.inputProvenance, ledger) {
+					t.Fatalf("options %#v ledger %#v", cfg.Firecracker, cfg.inputProvenance)
+				}
+			})
+		}
+	}
+	for _, input := range []string{"firecracker: null", "firecracker: {}", "firecracker: {binary: '', cpus: null, memoryMiB: null, diskMiB: null, launchTimeout: '', deleteOnRelease: null}", "firecracker: {binary: '~/ordinary', cpus: 0, memoryMiB: -2, diskMiB: 7, launchTimeout: 'bad', deleteOnRelease: false}"} {
+		path := isolatedConfigPath(t)
+		if err := os.WriteFile(path, []byte(input), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writeUserFileConfig(file); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := yaml.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]any{}
+		if strings.Contains(input, "firecracker: {") {
+			want["firecracker"] = map[string]any{}
+		}
+		if strings.Contains(input, "ordinary") {
+			want["firecracker"] = map[string]any{"binary": "~/ordinary", "cpus": 0, "memoryMiB": -2, "diskMiB": 7, "launchTimeout": "bad", "deleteOnRelease": false}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("writer %#v want %#v", got, want)
+		}
+	}
+}
+
 func TestFirecrackerConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()

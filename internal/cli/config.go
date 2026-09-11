@@ -674,24 +674,6 @@ type ProxmoxConfig struct {
 	InsecureTLS bool
 }
 
-type FirecrackerConfig struct {
-	Binary          string
-	Jailer          string
-	Kernel          string
-	RootFS          string
-	User            string
-	WorkRoot        string
-	CPUs            int
-	MemoryMiB       int
-	DiskMiB         int
-	Network         string
-	CNINetwork      string
-	CNIConfDir      string
-	CNIBinDir       string
-	LaunchTimeout   time.Duration
-	DeleteOnRelease bool
-}
-
 type XCPNgConfig struct {
 	APIURL       string
 	Username     string
@@ -2312,22 +2294,7 @@ func baseConfig() Config {
 			WorkRoot:  defaultPOSIXWorkRoot,
 			FullClone: true,
 		},
-		Firecracker: FirecrackerConfig{
-			Binary:          "firecracker",
-			Kernel:          "/var/lib/crabbox/firecracker/vmlinux",
-			RootFS:          "/var/lib/crabbox/firecracker/rootfs.ext4",
-			User:            "crabbox",
-			WorkRoot:        defaultPOSIXWorkRoot,
-			CPUs:            4,
-			MemoryMiB:       4096,
-			DiskMiB:         16384,
-			Network:         "cni",
-			CNINetwork:      "crabbox-firecracker",
-			CNIConfDir:      "/etc/cni/conf.d",
-			CNIBinDir:       "/opt/cni/bin",
-			LaunchTimeout:   2 * time.Minute,
-			DeleteOnRelease: true,
-		},
+		Firecracker: initialFirecrackerConfig(),
 		XCPNg: XCPNgConfig{
 			User:     "crabbox",
 			WorkRoot: defaultPOSIXWorkRoot,
@@ -2608,24 +2575,6 @@ type fileProxmoxConfig struct {
 	WorkRoot    string `yaml:"workRoot,omitempty"`
 	FullClone   *bool  `yaml:"fullClone,omitempty"`
 	InsecureTLS *bool  `yaml:"insecureTLS,omitempty"`
-}
-
-type fileFirecrackerConfig struct {
-	Binary          string `yaml:"binary,omitempty"`
-	Jailer          string `yaml:"jailer,omitempty"`
-	Kernel          string `yaml:"kernel,omitempty"`
-	RootFS          string `yaml:"rootfs,omitempty"`
-	User            string `yaml:"user,omitempty"`
-	WorkRoot        string `yaml:"workRoot,omitempty"`
-	CPUs            *int   `yaml:"cpus,omitempty"`
-	MemoryMiB       *int   `yaml:"memoryMiB,omitempty"`
-	DiskMiB         *int   `yaml:"diskMiB,omitempty"`
-	Network         string `yaml:"network,omitempty"`
-	CNINetwork      string `yaml:"cniNetwork,omitempty"`
-	CNIConfDir      string `yaml:"cniConfDir,omitempty"`
-	CNIBinDir       string `yaml:"cniBinDir,omitempty"`
-	LaunchTimeout   string `yaml:"launchTimeout,omitempty"`
-	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
 }
 
 type fileXCPNgConfig struct {
@@ -4049,67 +3998,16 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.credentialProvenance.proxmoxInsecureTLS = credentialSource
 		}
 	}
-	if file.Firecracker != nil {
-		if trusted && file.Firecracker.Binary != "" {
-			cfg.Firecracker.Binary = expandUserPath(file.Firecracker.Binary)
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if trusted && file.Firecracker.Jailer != "" {
-			cfg.Firecracker.Jailer = expandUserPath(file.Firecracker.Jailer)
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if trusted && file.Firecracker.Kernel != "" {
-			cfg.Firecracker.Kernel = expandUserPath(file.Firecracker.Kernel)
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if trusted && file.Firecracker.RootFS != "" {
-			cfg.Firecracker.RootFS = expandUserPath(file.Firecracker.RootFS)
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if file.Firecracker.User != "" {
-			cfg.Firecracker.User = file.Firecracker.User
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if file.Firecracker.WorkRoot != "" {
-			cfg.Firecracker.WorkRoot = file.Firecracker.WorkRoot
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if file.Firecracker.CPUs != nil {
-			applyOptional(&cfg.Firecracker.CPUs, file.Firecracker.CPUs)
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if file.Firecracker.MemoryMiB != nil {
-			applyOptional(&cfg.Firecracker.MemoryMiB, file.Firecracker.MemoryMiB)
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if file.Firecracker.DiskMiB != nil {
-			applyOptional(&cfg.Firecracker.DiskMiB, file.Firecracker.DiskMiB)
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if trusted && file.Firecracker.Network != "" {
-			cfg.Firecracker.Network = file.Firecracker.Network
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if trusted && file.Firecracker.CNINetwork != "" {
-			cfg.Firecracker.CNINetwork = file.Firecracker.CNINetwork
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if trusted && file.Firecracker.CNIConfDir != "" {
-			cfg.Firecracker.CNIConfDir = expandUserPath(file.Firecracker.CNIConfDir)
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if trusted && file.Firecracker.CNIBinDir != "" {
-			cfg.Firecracker.CNIBinDir = expandUserPath(file.Firecracker.CNIBinDir)
-			recordConfigInput(cfg, "firecracker", inputSource, true)
-		}
-		if file.Firecracker.LaunchTimeout != "" {
-			recordConfigInput(cfg, "firecracker", inputSource, applyLeaseDuration(&cfg.Firecracker.LaunchTimeout, file.Firecracker.LaunchTimeout))
-		}
-		if file.Firecracker.DeleteOnRelease != nil {
-			cfg.Firecracker.DeleteOnRelease = *file.Firecracker.DeleteOnRelease
-			recordConfigInput(cfg, "firecracker", inputSource, true)
+	{
+		applied, err := cfg.Firecracker.applyFile(file.Firecracker, trusted)
+		recordConfigInput(cfg, "firecracker", inputSource, applied.InputAccepted)
+		cfg.Firecracker.ExpandAppliedLocalPaths(applied)
+		if applied.DeleteOnRelease {
 			MarkDeleteOnReleaseExplicit(cfg, "firecracker")
 			recordConfigInputIntent(cfg, "firecracker", inputSource, true)
+		}
+		if err != nil {
+			return err
 		}
 	}
 	if file.XCPNg != nil {
@@ -6297,27 +6195,22 @@ func applyEnv(cfg *Config) error {
 		recordConfigInput(cfg, "proxmox", configInputEnvironment, true)
 		cfg.credentialProvenance.proxmoxInsecureTLS = credentialSourceEnvironment
 	}
-	cfg.Firecracker.Binary = expandUserPath(configInputEnvString(cfg, "firecracker", cfg.Firecracker.Binary, "CRABBOX_FIRECRACKER_BINARY"))
-	cfg.Firecracker.Jailer = expandUserPath(configInputEnvString(cfg, "firecracker", cfg.Firecracker.Jailer, "CRABBOX_FIRECRACKER_JAILER"))
-	cfg.Firecracker.Kernel = expandUserPath(configInputEnvString(cfg, "firecracker", cfg.Firecracker.Kernel, "CRABBOX_FIRECRACKER_KERNEL"))
-	cfg.Firecracker.RootFS = expandUserPath(configInputEnvString(cfg, "firecracker", cfg.Firecracker.RootFS, "CRABBOX_FIRECRACKER_ROOTFS"))
-	cfg.Firecracker.User = configInputEnvString(cfg, "firecracker", cfg.Firecracker.User, "CRABBOX_FIRECRACKER_USER")
-	cfg.Firecracker.WorkRoot = configInputEnvString(cfg, "firecracker", cfg.Firecracker.WorkRoot, "CRABBOX_FIRECRACKER_WORK_ROOT")
-	cfg.Firecracker.CPUs = configInputEnvInt(cfg, "firecracker", cfg.Firecracker.CPUs, "CRABBOX_FIRECRACKER_CPUS")
-	cfg.Firecracker.MemoryMiB = configInputEnvInt(cfg, "firecracker", cfg.Firecracker.MemoryMiB, "CRABBOX_FIRECRACKER_MEMORY_MIB")
-	cfg.Firecracker.DiskMiB = configInputEnvInt(cfg, "firecracker", cfg.Firecracker.DiskMiB, "CRABBOX_FIRECRACKER_DISK_MIB")
-	cfg.Firecracker.Network = configInputEnvString(cfg, "firecracker", cfg.Firecracker.Network, "CRABBOX_FIRECRACKER_NETWORK")
-	cfg.Firecracker.CNINetwork = configInputEnvString(cfg, "firecracker", cfg.Firecracker.CNINetwork, "CRABBOX_FIRECRACKER_CNI_NETWORK")
-	cfg.Firecracker.CNIConfDir = expandUserPath(configInputEnvString(cfg, "firecracker", cfg.Firecracker.CNIConfDir, "CRABBOX_FIRECRACKER_CNI_CONF_DIR"))
-	cfg.Firecracker.CNIBinDir = expandUserPath(configInputEnvString(cfg, "firecracker", cfg.Firecracker.CNIBinDir, "CRABBOX_FIRECRACKER_CNI_BIN_DIR"))
-	if timeout := os.Getenv("CRABBOX_FIRECRACKER_LAUNCH_TIMEOUT"); timeout != "" {
-		recordConfigInput(cfg, "firecracker", configInputEnvironment, applyLeaseDuration(&cfg.Firecracker.LaunchTimeout, timeout))
-	}
-	if value, ok := getenvBool("CRABBOX_FIRECRACKER_DELETE_ON_RELEASE"); ok {
-		cfg.Firecracker.DeleteOnRelease = value
-		recordConfigInput(cfg, "firecracker", configInputEnvironment, true)
-		MarkDeleteOnReleaseExplicit(cfg, "firecracker")
-		recordConfigInputIntent(cfg, "firecracker", configInputEnvironment, true)
+	{
+		applied, err := cfg.Firecracker.applyEnv()
+		recordConfigInput(cfg, "firecracker", configInputEnvironment, applied.InputAccepted)
+		cfg.Firecracker.Binary = expandUserPath(cfg.Firecracker.Binary)
+		cfg.Firecracker.Jailer = expandUserPath(cfg.Firecracker.Jailer)
+		cfg.Firecracker.Kernel = expandUserPath(cfg.Firecracker.Kernel)
+		cfg.Firecracker.RootFS = expandUserPath(cfg.Firecracker.RootFS)
+		cfg.Firecracker.CNIConfDir = expandUserPath(cfg.Firecracker.CNIConfDir)
+		cfg.Firecracker.CNIBinDir = expandUserPath(cfg.Firecracker.CNIBinDir)
+		if applied.DeleteOnRelease {
+			MarkDeleteOnReleaseExplicit(cfg, "firecracker")
+			recordConfigInputIntent(cfg, "firecracker", configInputEnvironment, true)
+		}
+		if err != nil {
+			return err
+		}
 	}
 	cfg.XCPNg.APIURL = configInputEnvString(cfg, "xcp-ng", cfg.XCPNg.APIURL, "CRABBOX_XCP_NG_API_URL")
 	cfg.XCPNg.Username = configInputEnvString(cfg, "xcp-ng", cfg.XCPNg.Username, "CRABBOX_XCP_NG_USERNAME")

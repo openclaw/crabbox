@@ -880,6 +880,12 @@ const durationSample = "package cli\nimport \"time\"\ntype PilotConfig struct {\
 	" Count int `sources:\"user,repo,env,flag\" config:\"count\" env:\"PILOT_COUNT\" flag:\"pilot-count\" help:\"Count\" nonnegative:\"true\"`\n" +
 	" After bool `sources:\"user,repo,env,flag\" config:\"after\" env:\"PILOT_AFTER\" flag:\"pilot-after\" help:\"After\" reportApplied:\"true\"`\n}"
 
+func TestFirecrackerGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_firecracker.go", "../../internal/cli/config_firecracker_generated.go", "FirecrackerConfig", "firecracker", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestManualFlagApplicationSchema(t *testing.T) {
 	source := strings.Replace(durationSample, "type PilotConfig", "//configgen:flag-application manual\ntype PilotConfig", 1)
 	for _, tc := range []struct{ old, replacement string }{
