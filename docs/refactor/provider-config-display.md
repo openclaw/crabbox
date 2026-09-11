@@ -56,6 +56,12 @@ either backend's runtime defaults. MXC retains JSON lists with text counts,
 Docker Sandbox retains JSON lists with comma-joined text and `%g` CPU formatting,
 and nil versus empty lists remain distinct. Internal-only fields stay omitted.
 
+DigitalOcean, Vultr and Linode own all 17 of their existing JSON/text fields.
+Their consecutive sections remain between Azure and GitHub Codespaces. The
+projectors retain raw boot selectors and list shapes without resolving images,
+applying SSH defaults or discovering authentication. Selected-provider defaults
+and explicit SSH settings remain the existing configuration loader's concern.
+
 ## Remaining migration
 
 The baseline census contains 81 canonical providers: 49 have both value formats,
@@ -68,8 +74,8 @@ sections**. They do not complete the migration. Existing provider projections
 also still need to move out of the parallel JSON map and text formatter so
 their field selection and transformations have one owner.
 
-The Multipass/Tart/Lume and local-container cohorts remove eight of the original
-49 canonical both-format providers from that legacy implementation, leaving 41
+The Multipass/Tart/Lume, local-container and VPS cohorts remove eleven of the original
+49 canonical both-format providers from that legacy implementation, leaving 38
 in that cohort. The local cohort covers five identities through four sections
 because Apple Machine shares Apple Container's values. These migrations do not
 fill any of the missing sections above.

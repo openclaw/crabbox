@@ -235,13 +235,13 @@ func TestConfigShowLegacySlotPositions(t *testing.T) {
 			order = append(order, value)
 		} else if sel.Sel.Name == "Fprintf" {
 			name := strings.SplitN(value, " ", 2)[0]
-			if name == "superserve" || name == "local_container" || name == "apple_container" || name == "mxc" || name == "docker_sandbox" || name == "machine0" || name == "cloudflare" {
+			if name == "superserve" || name == "local_container" || name == "apple_container" || name == "mxc" || name == "docker_sandbox" || name == "machine0" || name == "cloudflare" || name == "azure" || name == "digitalocean" || name == "vultr" || name == "linode" || name == "github_codespaces" {
 				order = append(order, name)
 			}
 		}
 		return true
 	})
-	if got := strings.Join(order, ","); got != "superserve,local_container,apple_container,mxc,docker_sandbox,multipass,machine0,tart,lume,cloudflare" {
+	if got := strings.Join(order, ","); got != "superserve,local_container,apple_container,mxc,docker_sandbox,multipass,machine0,tart,lume,cloudflare,azure,digitalocean,vultr,linode,github_codespaces" {
 		t.Fatalf("legacy text slot positions: %s", got)
 	}
 }
@@ -250,9 +250,9 @@ func TestConfigShowTextLayoutConsumesSlotsOnce(t *testing.T) {
 	section := func(label string) ProviderConfigShowSection {
 		return ProviderConfigShowSection{TextLabel: label, Fields: []ProviderConfigShowField{{TextName: "value", TextValue: label}}}
 	}
-	layout := newConfigShowTextLayout([]ProviderConfigShowSection{section("alpha"), section("lume"), section("multipass"), section("tart"), section("zeta"), section("docker_sandbox"), section("mxc"), section("apple_container"), section("local_container")})
+	layout := newConfigShowTextLayout([]ProviderConfigShowSection{section("alpha"), section("lume"), section("multipass"), section("tart"), section("zeta"), section("docker_sandbox"), section("mxc"), section("apple_container"), section("local_container"), section("digitalocean"), section("vultr"), section("linode")})
 	var out bytes.Buffer
-	for _, label := range []string{"absent", "local_container", "apple_container", "mxc", "docker_sandbox", "local_container", "apple_container", "mxc", "docker_sandbox", "multipass", "multipass", "tart", "lume"} {
+	for _, label := range []string{"absent", "local_container", "apple_container", "mxc", "docker_sandbox", "local_container", "apple_container", "mxc", "docker_sandbox", "multipass", "multipass", "tart", "lume", "digitalocean", "vultr", "linode", "digitalocean", "vultr", "linode"} {
 		if err := layout.writeSlot(&out, label); err != nil {
 			t.Fatal(err)
 		}
@@ -260,7 +260,7 @@ func TestConfigShowTextLayoutConsumesSlotsOnce(t *testing.T) {
 	if err := layout.writeRemaining(&out); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := out.String(), "local_container value=local_container\napple_container value=apple_container\nmxc value=mxc\ndocker_sandbox value=docker_sandbox\nmultipass value=multipass\ntart value=tart\nlume value=lume\nalpha value=alpha\nzeta value=zeta\n"; got != want {
+	if got, want := out.String(), "local_container value=local_container\napple_container value=apple_container\nmxc value=mxc\ndocker_sandbox value=docker_sandbox\nmultipass value=multipass\ntart value=tart\nlume value=lume\ndigitalocean value=digitalocean\nvultr value=vultr\nlinode value=linode\nalpha value=alpha\nzeta value=zeta\n"; got != want {
 		t.Fatalf("slot order/duplication got %q want %q", got, want)
 	}
 	out.Reset()
@@ -359,6 +359,20 @@ func TestConfigShowLocalCohortLegacyOwnershipRetired(t *testing.T) {
 		for _, reserved := range strings.Fields(legacyConfigShowTextLabels) {
 			if reserved == label {
 				t.Errorf("migrated label %s still reserved as legacy", label)
+			}
+		}
+	}
+}
+
+func TestConfigShowVPSCohortLegacyOwnershipRetired(t *testing.T) {
+	view := configShowView(Config{})
+	for _, name := range []string{"digitalocean", "vultr", "linode"} {
+		if _, exists := view[name]; exists {
+			t.Errorf("core still owns %s values", name)
+		}
+		for _, reserved := range strings.Fields(legacyConfigShowTextLabels) {
+			if reserved == name {
+				t.Errorf("migrated label %s still reserved as legacy", name)
 			}
 		}
 	}

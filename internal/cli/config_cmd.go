@@ -240,29 +240,6 @@ func configShowView(cfg Config) map[string]any {
 			"network":       cfg.AzureNetwork,
 			"sshCIDRs":      cfg.AzureSSHCIDRs,
 		},
-		"digitalocean": map[string]any{
-			"region":   cfg.DigitalOcean.Region,
-			"image":    cfg.DigitalOcean.Image,
-			"vpc":      cfg.DigitalOcean.VPCUUID,
-			"sshCIDRs": cfg.DigitalOcean.SSHCIDRs,
-		},
-		"vultr": map[string]any{
-			"region":        cfg.Vultr.Region,
-			"os":            cfg.Vultr.OS,
-			"image":         cfg.Vultr.Image,
-			"snapshot":      cfg.Vultr.Snapshot,
-			"firewallGroup": cfg.Vultr.FirewallGroup,
-			"vpcIds":        cfg.Vultr.VPCIDs,
-			"sshCIDRs":      cfg.Vultr.SSHCIDRs,
-			"userScheme":    cfg.Vultr.UserScheme,
-		},
-		"linode": map[string]any{
-			"region":   cfg.Linode.Region,
-			"image":    cfg.Linode.Image,
-			"type":     cfg.Linode.Type,
-			"firewall": cfg.Linode.FirewallID,
-			"sshCIDRs": cfg.Linode.SSHCIDRs,
-		},
 		"githubCodespaces": map[string]any{
 			"apiUrl":           redactedConfigURL(cfg.GitHubCodespaces.APIURL),
 			"ghPath":           cfg.GitHubCodespaces.GHPath,
@@ -846,9 +823,15 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 	fmt.Fprintf(w, "aws region=%s root_gb=%d ssh_cidrs=%s\n", cfg.AWSRegion, cfg.AWSRootGB, blank(strings.Join(cfg.AWSSSHCIDRs, ","), "-"))
 	fmt.Fprintf(w, "aws_lambda_microvm image=%s image_version=%s workdir=%s forget_missing=%t\n", blank(cfg.AWSLambdaMicroVM.Image, "-"), blank(cfg.AWSLambdaMicroVM.ImageVersion, "latest"), cfg.AWSLambdaMicroVM.Workdir, cfg.AWSLambdaMicroVM.ForgetMissing)
 	fmt.Fprintf(w, "azure location=%s resource_group=%s os_disk=%s snapshot_sku=%s os_disk_sku=%s network=%s ssh_cidrs=%s\n", cfg.AzureLocation, cfg.AzureResourceGroup, cfg.AzureOSDisk, blank(cfg.AzureSnapshotSKU, "-"), blank(cfg.AzureOSDiskSKU, "-"), blank(cfg.AzureNetwork, "-"), blank(strings.Join(cfg.AzureSSHCIDRs, ","), "-"))
-	fmt.Fprintf(w, "digitalocean region=%s image=%s vpc=%s ssh_cidrs=%s\n", cfg.DigitalOcean.Region, cfg.DigitalOcean.Image, blank(cfg.DigitalOcean.VPCUUID, "-"), blank(strings.Join(cfg.DigitalOcean.SSHCIDRs, ","), "-"))
-	fmt.Fprintf(w, "vultr region=%s os=%s image=%s snapshot=%s firewall_group=%s vpc_ids=%s ssh_cidrs=%s user_scheme=%s\n", cfg.Vultr.Region, blank(cfg.Vultr.OS, "-"), blank(cfg.Vultr.Image, "-"), blank(cfg.Vultr.Snapshot, "-"), blank(cfg.Vultr.FirewallGroup, "-"), blank(strings.Join(cfg.Vultr.VPCIDs, ","), "-"), blank(strings.Join(cfg.Vultr.SSHCIDRs, ","), "-"), blank(cfg.Vultr.UserScheme, "-"))
-	fmt.Fprintf(w, "linode region=%s image=%s type=%s firewall=%s ssh_cidrs=%s\n", cfg.Linode.Region, cfg.Linode.Image, cfg.Linode.Type, blank(cfg.Linode.FirewallID, "-"), blank(strings.Join(cfg.Linode.SSHCIDRs, ","), "-"))
+	if err := layout.writeSlot(w, "digitalocean"); err != nil {
+		return err
+	}
+	if err := layout.writeSlot(w, "vultr"); err != nil {
+		return err
+	}
+	if err := layout.writeSlot(w, "linode"); err != nil {
+		return err
+	}
 	fmt.Fprintf(w, "github_codespaces api_url=%s gh_path=%s repo=%s ref=%s machine=%s devcontainer_path=%s working_directory=%s geo=%s idle_timeout=%s retention_period=%s delete_on_release=%t work_root=%s auth_mode=cli auth_status=unchecked readiness=unchecked\n", blank(redactedConfigURL(cfg.GitHubCodespaces.APIURL), "-"), blank(cfg.GitHubCodespaces.GHPath, "-"), blank(cfg.GitHubCodespaces.Repo, "-"), blank(cfg.GitHubCodespaces.Ref, "-"), blank(cfg.GitHubCodespaces.Machine, "-"), blank(cfg.GitHubCodespaces.DevcontainerPath, "-"), blank(cfg.GitHubCodespaces.WorkingDirectory, "-"), blank(cfg.GitHubCodespaces.Geo, "-"), cfg.GitHubCodespaces.IdleTimeout, cfg.GitHubCodespaces.RetentionPeriod, cfg.GitHubCodespaces.DeleteOnRelease, blank(cfg.GitHubCodespaces.WorkRoot, "-"))
 	fmt.Fprintf(w, "lambda region=%s type=%s image=%s image_family=%s firewall_ruleset=%s ssh_cidrs=%s filesystems=%s mounts=%d auth=%s\n", cfg.Lambda.Region, cfg.Lambda.Type, blank(cfg.Lambda.Image, "-"), blank(cfg.Lambda.ImageFamily, "-"), blank(cfg.Lambda.FirewallRuleset, "-"), blank(strings.Join(cfg.Lambda.SSHCIDRs, ","), "-"), blank(strings.Join(cfg.Lambda.FilesystemNames, ","), "-"), len(cfg.Lambda.FilesystemMounts), lambdaAuthState())
 	fmt.Fprintf(w, "vast api_url=%s instance_type=%s gpu_name=%s gpu_count=%d image=%s template_id=%s runtype=%s disk_gb=%d max_dph_total=%.4g min_reliability=%.4g order=%s user=%s work_root=%s release_action=%s auth=%s\n", blank(redactedConfigURL(cfg.Vast.APIURL), "-"), blank(cfg.Vast.InstanceType, "-"), blank(cfg.Vast.GPUName, "-"), cfg.Vast.GPUCount, blank(cfg.Vast.Image, "-"), blank(cfg.Vast.TemplateID, "-"), blank(cfg.Vast.Runtype, "-"), cfg.Vast.DiskGB, cfg.Vast.MaxDphTotal, cfg.Vast.MinReliability, blank(cfg.Vast.Order, "-"), blank(cfg.Vast.User, "-"), blank(cfg.Vast.WorkRoot, "-"), blank(cfg.Vast.ReleaseAction, "-"), tokenState(cfg.Vast.APIKey))

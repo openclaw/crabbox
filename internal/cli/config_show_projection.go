@@ -36,7 +36,7 @@ func ConfigShowSecretState(value string) string { return tokenState(value) }
 
 // Names only: no legacy value projection or environment reads are needed to
 // protect existing text slots. Retire a name only when its legacy row migrates.
-const legacyConfigShowTextLabels = "config provider lease broker access_auth ssh sync env run capacity actions blacksmith agent_sandbox phala namespace namespace_instance morph e2b cubesandbox upstash_box smolvm blaxel nomad ascii_box superserve machine0 cloudflare fastapi_cloud cloudflare_dynamic_workers cloudflare_sandbox static results cache jobs aws aws_lambda_microvm azure digitalocean vultr linode github_codespaces lambda vast nvidia_brev nebius hostinger ovh scaleway tencentcloud azure_dynamic_sessions gcp proxmox firecracker xcp_ng parallels inspection provider_status"
+const legacyConfigShowTextLabels = "config provider lease broker access_auth ssh sync env run capacity actions blacksmith agent_sandbox phala namespace namespace_instance morph e2b cubesandbox upstash_box smolvm blaxel nomad ascii_box superserve machine0 cloudflare fastapi_cloud cloudflare_dynamic_workers cloudflare_sandbox static results cache jobs aws aws_lambda_microvm azure github_codespaces lambda vast nvidia_brev nebius hostinger ovh scaleway tencentcloud azure_dynamic_sessions gcp proxmox firecracker xcp_ng parallels inspection provider_status"
 
 func collectProviderConfigShowSections(cfg Config) ([]ProviderConfigShowSection, error) {
 	return collectProviderConfigShowSectionsFrom(cfg, registeredProviders())
