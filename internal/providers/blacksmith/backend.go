@@ -46,12 +46,14 @@ type timingPhase = core.TimingPhase
 const targetLinux = core.TargetLinux
 
 func RegisterBlacksmithProviderFlags(fs *flag.FlagSet, defaults Config) any {
-	return registerBlacksmithFlags(fs, defaults)
+	return core.RegisterBlacksmithConfigFlags(fs, defaults.Blacksmith)
 }
 
 func ApplyBlacksmithProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	if v, ok := values.(blacksmithFlagValues); ok {
-		applyBlacksmithFlagOverrides(cfg, fs, v)
+	if v, ok := values.(core.BlacksmithConfigFlagValues); ok {
+		applied, err := v.Apply(&cfg.Blacksmith, fs)
+		core.RecordProviderFlagInputs(cfg, applied.InputAccepted, "blacksmith-testbox")
+		return err
 	}
 	return nil
 }

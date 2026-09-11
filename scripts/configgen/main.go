@@ -20,6 +20,7 @@ import (
 )
 
 type field struct {
+	envSplitBefore                                                                                                                                                               bool
 	flagDurationRawPositive                                                                                                                                                      bool
 	fileListNonemptyNormalized, envListTrimmedNonempty, flagListCSV                                                                                                              bool
 	flagDurationRawZeroReset, flagListAppendTrimmed                                                                                                                              bool
@@ -314,10 +315,10 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			}
 			seenFileMembers[binding.member] = true
 		}
-		if f.noFlag && f.kind != "string" && !(tags.Get("sources") == "user,repo,env" && f.kind == "[]string") {
+		if f.noFlag && f.kind != "string" && !(tags.Get("sources") == "user,repo,env" && (f.kind == "[]string" || f.kind == "bool" || f.kind == "time.Duration")) {
 			allowed := "string fields"
 			if tags.Get("sources") == "user,repo,env" {
-				allowed += " or []string fields"
+				allowed += ", []string, bool, or time.Duration fields"
 			}
 			return s, fmt.Errorf("%s: %s sources support only %s", f.name, tags.Get("sources"), allowed)
 		}
@@ -434,6 +435,12 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			}
 			f.fileStorageValue = true
 		}
+		if value, ok := tags.Lookup("envSplitBefore"); ok {
+			if value != "true" || f.noEnv {
+				return s, fmt.Errorf("%s: envSplitBefore requires true on an environment-admitted field", f.name)
+			}
+			f.envSplitBefore = true
+		}
 		s.fields = append(s.fields, f)
 	}
 	if len(s.fields) == 0 {
@@ -447,6 +454,16 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		if !hasFlags {
 			return s, fmt.Errorf("flag-application manual requires flag-admitted fields")
 		}
+	}
+	seenSplit, prefixEnv := false, false
+	for _, f := range s.fields {
+		if f.envSplitBefore {
+			if seenSplit || !prefixEnv {
+				return s, fmt.Errorf("%s: envSplitBefore requires one split with a nonempty environment prefix and suffix", f.name)
+			}
+			seenSplit = true
+		}
+		prefixEnv = prefixEnv || !f.noEnv
 	}
 	return s, nil
 }
@@ -502,7 +519,7 @@ func generate(s schema, source string) ([]byte, error) {
 		needsStrconv = needsStrconv || (f.kind == "int" && !f.noEnv && f.envIntFallback)
 		needsStrings = needsStrings || (!s.manualFlags && (f.flagDurationError != "" || f.flagDurationRawZeroReset))
 		if f.kind == "time.Duration" {
-			needsTime = needsTime || !f.stringDurationFlag() || (!s.manualFlags && f.flagDurationError != "") || f.defaultExpr != ""
+			needsTime = needsTime || (!f.noFlag && !f.stringDurationFlag()) || (!s.manualFlags && f.flagDurationError != "") || f.defaultExpr != ""
 			needsOS = needsOS || !f.noEnv
 		}
 		if f.kind == "[]string" {
@@ -631,76 +648,90 @@ func generate(s schema, source string) ([]byte, error) {
 		}
 	}
 	p("return %snil\n}\n\n", resultPrefix)
-	p("func (cfg *%s) applyEnv() %s {\n%s", s.name, resultType, reportInit)
-	for _, f := range s.fields {
-		if f.noEnv {
-			continue
-		}
-		switch f.kind {
-		case "time.Duration":
-			p("if value := os.Getenv(%q); value != \"\" { if applyLeaseDuration(&cfg.%s, value) { applied.InputAccepted = true } }\n", f.env, f.name)
-		case "string":
-			if f.envAliasAfterConfig {
-				p("if value, ok := firstNonEmptyEnv(%q); ok {\ncfg.%s = value\napplied.InputAccepted = true\n", f.env, f.name)
-				if f.reportApplied {
-					p("applied.%s = true\n", f.name)
-				}
-				p("} else if cfg.%s == \"\" {\nif value, ok := firstNonEmptyEnv(%q); ok {\ncfg.%s = value\napplied.InputAccepted = true\n", f.name, f.envAlias, f.name)
-				if f.reportApplied {
-					p("applied.%s = true\n", f.name)
-				}
-				p("}\n}\n")
+	emitEnv := func(name string, fields []field) {
+		p("func (cfg *%s) %s() %s {\n%s", s.name, name, resultType, reportInit)
+		for _, f := range fields {
+			if f.noEnv {
 				continue
 			}
-			names := strconv.Quote(f.env)
-			if f.envAlias != "" {
-				names += ", " + strconv.Quote(f.envAlias)
-			}
-			if f.envAlias2 != "" {
-				names += ", " + strconv.Quote(f.envAlias2)
-			}
-			p("if value, ok := firstNonEmptyEnv(%s); ok { cfg.%s = value; applied.InputAccepted = true\n", names, f.name)
-			if f.reportApplied {
-				p("applied.%s = true\n", f.name)
-			}
-			p("}\n")
-		case "float64":
-			p("if value, ok := lookupEnvFloat(%q); ok { cfg.%s = value; applied.InputAccepted = true }\n", f.env, f.name)
-		case "int":
-			if f.envIntFallback {
+			switch f.kind {
+			case "time.Duration":
+				p("if value := os.Getenv(%q); value != \"\" { if applyLeaseDuration(&cfg.%s, value) { applied.InputAccepted = true } }\n", f.env, f.name)
+			case "string":
+				if f.envAliasAfterConfig {
+					p("if value, ok := firstNonEmptyEnv(%q); ok {\ncfg.%s = value\napplied.InputAccepted = true\n", f.env, f.name)
+					if f.reportApplied {
+						p("applied.%s = true\n", f.name)
+					}
+					p("} else if cfg.%s == \"\" {\nif value, ok := firstNonEmptyEnv(%q); ok {\ncfg.%s = value\napplied.InputAccepted = true\n", f.name, f.envAlias, f.name)
+					if f.reportApplied {
+						p("applied.%s = true\n", f.name)
+					}
+					p("}\n}\n")
+					continue
+				}
+				names := strconv.Quote(f.env)
 				if f.envAlias != "" {
-					p("{ value, accepted := lookupEnvInteger(%q, strconv.IntSize); if primary, ok := lookupEnvInteger(%q, strconv.IntSize); ok { value, accepted = primary, true }; if accepted { cfg.%s = int(value); applied.InputAccepted = true } }\n", f.envAlias, f.env, f.name)
-				} else {
-					p("if value, ok := lookupEnvInteger(%q, strconv.IntSize); ok { cfg.%s = int(value); applied.InputAccepted = true }\n", f.env, f.name)
+					names += ", " + strconv.Quote(f.envAlias)
 				}
-				continue
+				if f.envAlias2 != "" {
+					names += ", " + strconv.Quote(f.envAlias2)
+				}
+				p("if value, ok := firstNonEmptyEnv(%s); ok { cfg.%s = value; applied.InputAccepted = true\n", names, f.name)
+				if f.reportApplied {
+					p("applied.%s = true\n", f.name)
+				}
+				p("}\n")
+			case "float64":
+				p("if value, ok := lookupEnvFloat(%q); ok { cfg.%s = value; applied.InputAccepted = true }\n", f.env, f.name)
+			case "int":
+				if f.envIntFallback {
+					if f.envAlias != "" {
+						p("{ value, accepted := lookupEnvInteger(%q, strconv.IntSize); if primary, ok := lookupEnvInteger(%q, strconv.IntSize); ok { value, accepted = primary, true }; if accepted { cfg.%s = int(value); applied.InputAccepted = true } }\n", f.envAlias, f.env, f.name)
+					} else {
+						p("if value, ok := lookupEnvInteger(%q, strconv.IntSize); ok { cfg.%s = int(value); applied.InputAccepted = true }\n", f.env, f.name)
+					}
+					continue
+				}
+				p("{ var accepted bool; var err error; cfg.%s, accepted, err = getenvNonNegativeIntAccepted(%q, cfg.%s); if err != nil { return %serr }; if accepted { applied.InputAccepted = true } }\n", f.name, f.env, f.name, resultPrefix)
+			case "int64":
+				p("if value, ok := lookupEnvInteger(%q, 64); ok { cfg.%s = value; applied.InputAccepted = true }\n", f.env, f.name)
+			case "bool":
+				if f.reportApplied {
+					p("if value, ok := getenvBool(%q); ok { cfg.%s = value; applied.InputAccepted = true; applied.%s = true }\n", f.env, f.name, f.name)
+				} else {
+					p("if value, ok := getenvBool(%q); ok { cfg.%s = value; applied.InputAccepted = true }\n", f.env, f.name)
+				}
+			case "[]string":
+				if f.envListTrimmedNonempty {
+					p("if value := os.Getenv(%q); strings.TrimSpace(value) != \"\" { cfg.%s = parseEnvListValue(value); applied.InputAccepted = true }\n", f.env, f.name)
+					continue
+				}
+				if f.envListPresence {
+					p("if value, ok := getenvList(%q); ok { cfg.%s = value; applied.InputAccepted = true }\n", f.env, f.name)
+					continue
+				}
+				parser := "splitCommaList"
+				if f.envListCSV {
+					parser = "splitCSV"
+				}
+				p("if value := os.Getenv(%q); value != \"\" { cfg.%s = %s(value); applied.InputAccepted = true }\n", f.env, f.name, parser)
 			}
-			p("{ var accepted bool; var err error; cfg.%s, accepted, err = getenvNonNegativeIntAccepted(%q, cfg.%s); if err != nil { return %serr }; if accepted { applied.InputAccepted = true } }\n", f.name, f.env, f.name, resultPrefix)
-		case "int64":
-			p("if value, ok := lookupEnvInteger(%q, 64); ok { cfg.%s = value; applied.InputAccepted = true }\n", f.env, f.name)
-		case "bool":
-			if f.reportApplied {
-				p("if value, ok := getenvBool(%q); ok { cfg.%s = value; applied.InputAccepted = true; applied.%s = true }\n", f.env, f.name, f.name)
-			} else {
-				p("if value, ok := getenvBool(%q); ok { cfg.%s = value; applied.InputAccepted = true }\n", f.env, f.name)
-			}
-		case "[]string":
-			if f.envListTrimmedNonempty {
-				p("if value := os.Getenv(%q); strings.TrimSpace(value) != \"\" { cfg.%s = parseEnvListValue(value); applied.InputAccepted = true }\n", f.env, f.name)
-				continue
-			}
-			if f.envListPresence {
-				p("if value, ok := getenvList(%q); ok { cfg.%s = value; applied.InputAccepted = true }\n", f.env, f.name)
-				continue
-			}
-			parser := "splitCommaList"
-			if f.envListCSV {
-				parser = "splitCSV"
-			}
-			p("if value := os.Getenv(%q); value != \"\" { cfg.%s = %s(value); applied.InputAccepted = true }\n", f.env, f.name, parser)
+		}
+		p("return %snil\n}\n\n", resultPrefix)
+	}
+	split := -1
+	for i, f := range s.fields {
+		if f.envSplitBefore {
+			split = i
 		}
 	}
-	p("return %snil\n}\n\n", resultPrefix)
+	if split < 0 {
+		emitEnv("applyEnv", s.fields)
+	} else {
+		emitEnv("applyEnvPrefix", s.fields[:split])
+		emitEnv("applyEnvSuffix", s.fields[split:])
+	}
 	if hasFlags {
 		p("// %sFlagValues holds parsed values; only visited flags are applied.\ntype %sFlagValues struct {\n", s.name, s.name)
 		for _, f := range s.fields {
