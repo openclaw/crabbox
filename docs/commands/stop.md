@@ -157,7 +157,7 @@ Crabbox lease ID and local slug:
 
 The action `stop` takes depends on how the lease was created:
 
-- **Coordinator-backed** (`aws`, `azure`, `daytona`, `gcp`, `hetzner` brokered
+- **Coordinator-backed** (`aws`, `azure`, `daytona`, `gcp`, `hetzner`, `koyeb` brokered
   through a configured broker) — releases the lease through the broker and prints
   `released lease=<id> server=<id>`. If the lease cannot be inspected first,
   `stop` warns and still attempts the release by ID.

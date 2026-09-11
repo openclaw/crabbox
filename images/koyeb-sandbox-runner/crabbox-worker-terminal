@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ "$#" -eq 0 ]] || { echo "crabbox-worker-terminal does not accept arguments" >&2; exit 64; }
+[[ -r /var/lib/crabbox/desktop.env ]] || { echo "Crabbox desktop environment is unavailable" >&2; exit 1; }
+grep -Fx 'CRABBOX_DESKTOP_ENV=xfce' /var/lib/crabbox/desktop.env >/dev/null || {
+  echo "Crabbox desktop environment is not XFCE" >&2
+  exit 1
+}
+grep -Fx 'DISPLAY=:99' /var/lib/crabbox/desktop.env >/dev/null || {
+  echo "Crabbox XFCE display is not :99" >&2
+  exit 1
+}
+
+export DISPLAY=:99
+nohup /usr/bin/xfce4-terminal >/dev/null 2>&1 </dev/null &
+terminal_pid=$!
+sleep 0.2
+if kill -0 "$terminal_pid" 2>/dev/null; then
+  exit 0
+fi
+wait "$terminal_pid"

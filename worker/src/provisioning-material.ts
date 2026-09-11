@@ -15,6 +15,7 @@ export interface ProvisioningMaterialBinding {
 export interface ProvisioningMaterial {
   adminPassword: string;
   bootstrap: string;
+  providerSecret?: string;
 }
 
 export interface SealedProvisioningMaterial {
@@ -51,7 +52,13 @@ export async function sealProvisioningMaterial(
     { name: "AES-GCM", iv, additionalData: aad(binding) },
     key,
     encoder.encode(
-      JSON.stringify({ adminPassword: material.adminPassword, bootstrap: material.bootstrap }),
+      JSON.stringify({
+        adminPassword: material.adminPassword,
+        bootstrap: material.bootstrap,
+        ...(material.providerSecret === undefined
+          ? {}
+          : { providerSecret: material.providerSecret }),
+      }),
     ),
   );
   return { schema: 1, iv: encode(iv), ciphertext: encode(new Uint8Array(ciphertext)) };
@@ -91,12 +98,17 @@ export async function openProvisioningMaterial(
 function validateMaterial(material: ProvisioningMaterial): void {
   if (
     !material ||
-    Object.keys(material).some((key) => key !== "adminPassword" && key !== "bootstrap") ||
+    Object.keys(material).some(
+      (key) => key !== "adminPassword" && key !== "bootstrap" && key !== "providerSecret",
+    ) ||
     typeof material.adminPassword !== "string" ||
     material.adminPassword.length < 16 ||
     material.adminPassword.length > 128 ||
     typeof material.bootstrap !== "string" ||
-    encoder.encode(material.bootstrap).length > maxBootstrapBytes
+    encoder.encode(material.bootstrap).length > maxBootstrapBytes ||
+    (material.providerSecret !== undefined &&
+      (typeof material.providerSecret !== "string" ||
+        !/^[A-Za-z0-9_-]{32,128}$/.test(material.providerSecret)))
   ) {
     throw new ProvisioningMaterialUnavailableError();
   }

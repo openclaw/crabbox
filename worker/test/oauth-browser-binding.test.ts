@@ -59,6 +59,7 @@ const env = {
   CRABBOX_GITHUB_CLIENT_ID: "client-id",
   CRABBOX_GITHUB_CLIENT_SECRET: "client-secret",
   CRABBOX_GITHUB_ALLOWED_ORG: "openclaw",
+  CRABBOX_GITHUB_ALLOWED_OWNERS: "github:12345",
   CRABBOX_DEFAULT_ORG: "openclaw",
   CRABBOX_PUBLIC_URL: "https://broker.test",
   CRABBOX_SESSION_SECRET: "session-secret",
@@ -273,6 +274,28 @@ describe("portal OAuth browser binding", () => {
     );
     expect(replay.status).toBe(400);
     expect(fetchMock).toHaveBeenCalledTimes(calls);
+  });
+
+  it("rejects a disallowed owner during GitHub OAuth admission", async () => {
+    const storage = new MemoryStorage();
+    const login = await startPortalLogin(storage);
+    const fetchMock = stubSuccessfulGitHubOAuth();
+
+    const response = await githubAuthRoute(
+      new Request(
+        `https://broker.test/v1/auth/github/callback?code=code&state=${encodeURIComponent(oauthState(login))}`,
+        { headers: { cookie: portalBindingCookie(login).pair } },
+      ),
+      "callback",
+      testRuntime(storage),
+      { ...env, CRABBOX_GITHUB_ALLOWED_OWNERS: "github:67890" },
+    );
+
+    expect(response.status).toBe(403);
+    expect(await response.text()).toContain("GitHub user alice is not an allowed owner.");
+    expect(fetchCallCount(fetchMock, "https://api.github.com/user/memberships/orgs/openclaw")).toBe(
+      0,
+    );
   });
 
   it("keeps concurrent portal logins independently bound", async () => {

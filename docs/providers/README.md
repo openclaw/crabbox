@@ -23,7 +23,9 @@ Providers also differ by control plane and reachability:
 - **Brokered cloud** — `aws`, `azure`, `daytona`, `gcp`, and `hetzner` can run
   through the Crabbox coordinator on Cloudflare or Node/PostgreSQL. The
   coordinator owns cloud credentials, cost state, cleanup scheduling, and lease
-  accounting. This is the normal shared-team path. Set with `config set-broker`
+  accounting. `koyeb` uses the same brokered control plane but is
+  coordinator-only because its durable journal owns one-call bootstrap
+  material. This is the normal shared-team path. Set with `config set-broker`
   and a broker URL (`CRABBOX_COORDINATOR`).
 - **Direct cloud** — the same five providers without a configured broker, plus
   cloud providers that never broker (e.g. `digitalocean`, `linode`, `vultr`,
@@ -72,7 +74,8 @@ providers such as `railway`, `fastapi-cloud`, and `unikraft-cloud`.
 Brokerable providers (`aws`, `azure`, `daytona`, `gcp`, `hetzner`) can run with
 coordinator-owned credentials, so normal users do not need local cloud secrets.
 When those providers run direct, the CLI uses the provider's documented SDK,
-CLI, or token source.
+CLI, or token source. Koyeb is coordinator-only and likewise keeps its Koyeb
+and Tailscale credentials away from clients and runners.
 
 Keep provider tokens out of repository config and command-line arguments. Prefer
 environment variables, provider CLI login stores, OS keychains, or the Crabbox
@@ -87,7 +90,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 81 providers (46 SSH lease, 31 delegated run, 4 service control).
+Current built-in surface: 82 providers (47 SSH lease, 31 delegated run, 4 service control).
 
 Access terms:
 
@@ -135,6 +138,7 @@ Access terms:
 | [hyperv](hyperv.md) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `windows/normal`; Microsoft Hyper-V VM | `local`; GPU: no | Crabbox; VM delete | Local native Windows VM | Windows host with Hyper-V required |
 | [incus](incus.md) | built-in; `ssh-lease` · self-hosted-virtualization | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `workspace-checkpoint`, `workspace-fork` | `linux`; Incus container or VM | `self-hosted`; GPU: optional | Crabbox; instance delete | Self-hosted Linux containers or VMs | Accessible Incus daemon required; native checkpoints capture container root disks only |
 | [islo](islo.md) | built-in; `delegated-run` · delegated-sandbox | Provider-specific SSH; `provider-owned` · direct only; features: `ssh`, `url-bridge`, `run-session`, `tailscale`, `pause-resume`, `run-downloads` | `linux`; Islo sandbox | `provider-managed`; GPU: unknown | Islo; sandbox delete | Hosted delegated execution with keep, pause, and SSH helper | SSH feature is not Crabbox-managed sync/run |
+| [koyeb](koyeb.md) | built-in; `ssh-lease` · brokerable-cloud | Crabbox-managed SSH; `crabbox-sync` · coordinator optional; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code`, `tailscale` | `linux`; Koyeb Sandbox | `cloud`; GPU: no | Crabbox coordinator and Koyeb; owned Sandbox service delete | Ephemeral Linux desktop, browser, code, and shell sessions on Koyeb | Coordinator-only; requires an immutable runner image and Tailscale OAuth |
 | [kubevirt](kubevirt.md) (`kubernetes-vm`) | built-in; `ssh-lease` · self-hosted-virtualization | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code` | `linux`; KubeVirt VirtualMachine | `self-hosted`; GPU: optional | Crabbox on Kubernetes; VirtualMachine delete | Kubernetes-hosted Linux VM | Needs KubeVirt, virtctl, and an SSH-ready template |
 | [lambda](lambda.md) | built-in; `ssh-lease` · gpu-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; Lambda Cloud on-demand instance | `cloud`; GPU: yes | Crabbox; instance and key termination | Direct GPU-backed Linux workload over SSH | Direct-only; billing, quota, and capacity are account-owned |
 | [linode](linode.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; Linode instance | `cloud`; GPU: optional | Crabbox; instance and key delete | Straightforward direct Linux VM | Direct-only; optional firewall must already exist |

@@ -59,12 +59,13 @@ The CLI picks one of four modes per provider in `loadBackend`
   (`CRABBOX_COORDINATOR` or `config set-broker`). The provider's SSH backend is
   wrapped in a `coordinatorLeaseBackend`: lease lifecycle goes through the
   coordinator over HTTPS, but the CLI still drives SSH, rsync, and command execution
-  **directly** to the runner. The brokered set is exactly the five managed cloud
-  providers: `aws`, `azure`, `daytona`, `gcp`, `hetzner`.
+  **directly** to the runner. The brokered set is `aws`, `azure`, `daytona`,
+  `gcp`, `hetzner`, and coordinator-only `koyeb`.
 - **Direct SSH mode** — the provider returns an SSH lease backend but no broker
   is configured. The CLI provisions and connects against the cloud or host API
-  itself; no coordinator is involved. The five brokerable providers fall back to this
-  when no broker URL is set, and every other SSH-lease provider (`ssh`,
+  itself; no coordinator is involved. The five general brokerable providers
+  fall back to this when no broker URL is set; Koyeb rejects direct lifecycle.
+  Every other SSH-lease provider (`ssh`,
   `parallels`, `proxmox`, `runpod`, and so on) always runs here.
 - **Registered direct mode** — `broker.mode: registered` keeps the same direct
   SSH provider lifecycle but registers lease metadata and heartbeats with the
@@ -176,7 +177,7 @@ One logical `FleetCoordinator` (`worker/src/fleet.ts`) owns:
   run-event subscriptions and lease heartbeats. Cloudflare can hibernate
   sockets; Node keeps them in process and clients reconnect after restarts.
 - **Provider operations** — per-provider adapters (`aws.ts`, `azure.ts`,
-  `daytona.ts`, `gcp.ts`, `hetzner.ts`) handle provision/release and their
+  `daytona.ts`, `gcp.ts`, `hetzner.ts`, `koyeb.ts`) handle provision/release and their
   supported image, identity, and capacity hooks. The core stays provider-neutral
   through hooks such as `prepareLeaseCreate`,
   `createServerWithFallback`, `finalizeLeaseCreate`, and `hourlyPriceUSD`.

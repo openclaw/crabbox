@@ -21,8 +21,8 @@ Crabbox has three implementation surfaces:
   common helpers.
 - **Coordinator** — TypeScript, under `worker/src` and `worker/node`. Shared
   `FleetCoordinator` behavior runs either in a Cloudflare Worker plus one
-  Durable Object or in Node.js backed by PostgreSQL and pg-boss. Only `aws`,
-  `azure`, `daytona`, `gcp`, and `hetzner` can transfer provider lifecycle to it;
+  Durable Object or in Node.js backed by PostgreSQL and pg-boss. `aws`,
+  `azure`, `daytona`, `gcp`, `hetzner`, and `koyeb` can transfer provider lifecycle to it;
   everything else runs direct or delegated from the CLI.
 
 ## CLI Surface
@@ -173,6 +173,7 @@ Shared and registration:
 Coordinator-side provider operations (brokered providers only):
 
 - Hetzner: `worker/src/hetzner.ts`
+- Koyeb Sandbox: `worker/src/koyeb.ts`
 - AWS EC2 (provision, capacity fallback, private SSM workspaces, Mac hosts, orphan sweep): `worker/src/aws.ts`
 - Azure VM provision, canonical resource inventory, and owned-resource cleanup:
   `worker/src/azure.ts`; coordinator lease and sweep orchestration:

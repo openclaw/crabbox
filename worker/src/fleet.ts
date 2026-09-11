@@ -214,6 +214,12 @@ import {
   normalizeImageVariantSelectors,
 } from "./image-capabilities";
 import {
+  KoyebClient,
+  KoyebResumableProvisioning,
+  koyebConfigurationMissing,
+  koyebPrivateMeshAvailable,
+} from "./koyeb";
+import {
   MarketplaceInputError,
   marketplaceQuote,
   marketplaceStatus,
@@ -1173,6 +1179,18 @@ export class FleetCoordinator {
           market: result.market,
           ...(result.server.region ? { region: result.server.region } : {}),
           ...(result.image ? { image: result.image } : {}),
+          ...(result.access
+            ? {
+                sshUser: result.access.sshUser,
+                sshPort: result.access.sshPort,
+                sshFallbackPorts: [...result.access.sshFallbackPorts],
+                workRoot: result.access.workRoot,
+                ...(result.access.sshHostKey ? { sshHostKey: result.access.sshHostKey } : {}),
+                ...(result.access.tailscale
+                  ? { tailscale: structuredClone(result.access.tailscale) }
+                  : {}),
+              }
+            : {}),
         };
         clearProvisioningRecoveryMetadata(completed);
         delete completed.provisioningResourceMayExist;
@@ -3943,6 +3961,16 @@ export class FleetCoordinator {
         { status: 424 },
       );
     }
+    if (config.provider === "koyeb" && this.env.CRABBOX_DURABLE_PROVISIONING_ADMISSION !== "true") {
+      return json(
+        {
+          error: "durable_provisioning_required",
+          provider: "koyeb",
+          message: "Koyeb Sandbox leases require durable provisioning admission",
+        },
+        { status: 424 },
+      );
+    }
     let createAttempt: CreateAttemptRecord | undefined;
     const attemptSource = fixedCreate ?? (ordinaryCreate ? input.createAttemptID : undefined);
     if (attemptSource !== undefined) {
@@ -4049,6 +4077,16 @@ export class FleetCoordinator {
         continuation,
         createAttempt,
         fixedCreate,
+      );
+    }
+    if (config.provider === "koyeb") {
+      return json(
+        {
+          error: "durable_provisioning_required",
+          provider: "koyeb",
+          message: "Koyeb Sandbox leases require an available durable provisioning capability",
+        },
+        { status: 424 },
       );
     }
     const reservation = await this.state.runExclusive(async () => {
@@ -8335,6 +8373,7 @@ export class FleetCoordinator {
               target: normalizeReadinessTarget(url.searchParams.get("target")),
               windowsMode: normalizeReadinessWindowsMode(url.searchParams.get("windowsMode")),
               architecture: url.searchParams.get("architecture") ?? "amd64",
+              sshPublicKey: readinessDummySSHPublicKey,
             },
             {
               allowAzurePromotedImage: true,
@@ -8351,6 +8390,8 @@ export class FleetCoordinator {
         }
         const admissionEnabled = this.env.CRABBOX_DURABLE_PROVISIONING_ADMISSION === "true";
         const materialConfigured = provisioningMaterialConfigured(this.env);
+        const runtimeAvailable = Boolean(this.state.provisioning);
+        const missing = resumableProvisioningMissing(provider, this.env, runtimeAvailable);
         return json({
           ...readiness,
           resumableProvisioning: {
@@ -8361,8 +8402,9 @@ export class FleetCoordinator {
               supported &&
               admissionEnabled &&
               materialConfigured &&
-              Boolean(this.state.provisioning),
-            missing: materialConfigured ? [] : ["CRABBOX_SESSION_SECRET"],
+              runtimeAvailable &&
+              (provider !== "koyeb" || missing.length === 0),
+            missing,
           },
         });
       }
@@ -12567,13 +12609,16 @@ export class FleetCoordinator {
               ? await this.provider("gcp").listCrabboxServers()
               : provider === "daytona"
                 ? await this.provider("daytona").listCrabboxServers()
-                : [
-                    ...(await this.provider("hetzner").listCrabboxServers()),
-                    ...(await this.listProviderMachinesSafe("aws")),
-                    ...(await this.listProviderMachinesSafe("azure")),
-                    ...(await this.listProviderMachinesSafe("gcp")),
-                    ...(await this.listProviderMachinesSafe("daytona")),
-                  ];
+                : provider === "koyeb"
+                  ? await this.provider("koyeb").listCrabboxServers()
+                  : [
+                      ...(await this.provider("hetzner").listCrabboxServers()),
+                      ...(await this.listProviderMachinesSafe("aws")),
+                      ...(await this.listProviderMachinesSafe("azure")),
+                      ...(await this.listProviderMachinesSafe("gcp")),
+                      ...(await this.listProviderMachinesSafe("daytona")),
+                      ...(await this.listProviderMachinesSafe("koyeb")),
+                    ];
     return json({ machines });
   }
 
@@ -18867,6 +18912,9 @@ export class FleetCoordinator {
     if (provider === "daytona") {
       return new DaytonaProvider(this.env);
     }
+    if (provider === "koyeb") {
+      return new KoyebProvider(this.env);
+    }
     return new HetznerProvider(this.env);
   }
 
@@ -19578,6 +19626,18 @@ function providerReadiness(provider: Provider, env: Env, gcpProject?: string): P
           : `${spec.provider} coordinator configuration missing: ${missing.join(", ")}`,
     };
   }
+  if (provider === "koyeb") {
+    const missing = koyebConfigurationMissing(env);
+    return {
+      provider,
+      configured: missing.length === 0,
+      missing,
+      message:
+        missing.length === 0
+          ? "koyeb coordinator configuration is configured"
+          : `koyeb coordinator configuration missing or invalid: ${missing.join(", ")}`,
+    };
+  }
   const missing = providerRequiredSecrets(provider).filter((name) => !nonSecretString(env[name]));
   return {
     provider,
@@ -19588,6 +19648,30 @@ function providerReadiness(provider: Provider, env: Env, gcpProject?: string): P
         ? `${spec.provider} coordinator secrets are configured`
         : `${spec.provider} coordinator secrets missing: ${missing.join(", ")}`,
   };
+}
+
+function resumableProvisioningMissing(
+  provider: Provider,
+  env: Env,
+  runtimeAvailable: boolean,
+): string[] {
+  const missing: string[] = [];
+  if (!provisioningMaterialConfigured(env)) missing.push("CRABBOX_SESSION_SECRET");
+  if (provider !== "koyeb") return missing;
+  if (env.CRABBOX_DURABLE_PROVISIONING_ADMISSION !== "true") {
+    missing.push("CRABBOX_DURABLE_PROVISIONING_ADMISSION");
+  }
+  if (!runtimeAvailable) missing.push("transactional provisioning runtime");
+  if (!koyebPrivateMeshAvailable(env)) {
+    if (env.CRABBOX_TAILSCALE_ENABLED === "0") missing.push("CRABBOX_TAILSCALE_ENABLED");
+    if (!nonSecretString(env.CRABBOX_TAILSCALE_CLIENT_ID)) {
+      missing.push("CRABBOX_TAILSCALE_CLIENT_ID");
+    }
+    if (!nonSecretString(env.CRABBOX_TAILSCALE_CLIENT_SECRET)) {
+      missing.push("CRABBOX_TAILSCALE_CLIENT_SECRET");
+    }
+  }
+  return missing;
 }
 
 const readinessDummySSHPublicKey =
@@ -24718,7 +24802,8 @@ function boundedRunEvent(
     input.provider === "hetzner" ||
     input.provider === "azure" ||
     input.provider === "gcp" ||
-    input.provider === "daytona"
+    input.provider === "daytona" ||
+    input.provider === "koyeb"
   ) {
     event.provider = input.provider;
   }
@@ -27893,6 +27978,85 @@ export class GCPProvider implements CloudProvider {
 
   hourlyPriceUSD(): Promise<number | undefined> {
     return this.client.hourlyPriceUSD();
+  }
+}
+
+export class KoyebProvider implements CloudProvider {
+  private clientValue?: KoyebClient;
+
+  constructor(
+    private readonly env: Env,
+    private readonly fetcher: typeof fetch = fetch,
+  ) {}
+
+  private get client(): KoyebClient {
+    this.clientValue ??= new KoyebClient(this.env, this.fetcher);
+    return this.clientValue;
+  }
+
+  resumableProvisioning(): ProviderResumableProvisioning {
+    return new KoyebResumableProvisioning(this.env, this.fetcher);
+  }
+
+  listCrabboxServers(): Promise<ProviderMachine[]> {
+    return this.client.listCrabboxServers();
+  }
+
+  supportsSSHHostKeyInjection(): boolean {
+    return false;
+  }
+
+  prepareLeaseConfig(
+    config: ReturnType<typeof leaseConfig>,
+  ): Promise<ReturnType<typeof leaseConfig>> {
+    return Promise.resolve({ ...config, serverType: this.client.instanceType });
+  }
+
+  createServerWithFallback(): Promise<never> {
+    throw new ProviderResourceUnresolvedError(
+      "Koyeb Sandbox creation requires durable provisioning admission; no provider mutation attempted",
+    );
+  }
+
+  releaseLease(lease: LeaseRecord): Promise<void> {
+    return this.client.deleteOwnedService(lease);
+  }
+
+  deleteServer(id: string): Promise<void> {
+    throw new ProviderResourceUnresolvedError(
+      `Koyeb Sandbox ${id} requires its retained lease and frozen allocation identity for deletion`,
+    );
+  }
+
+  supportsNativeImages(): boolean {
+    return false;
+  }
+
+  nativeImagesUnsupportedMessage(): string {
+    return "Koyeb Sandbox runner images are selected through coordinator configuration";
+  }
+
+  defaultImageStrategy(): "image" | "disk-snapshot" {
+    return "image";
+  }
+
+  validateLeaseImageStrategy(): string | undefined {
+    return undefined;
+  }
+
+  createLeaseImage = unsupportedProviderImageLifecycle("koyeb");
+  getImage = unsupportedProviderImageLifecycle("koyeb");
+  deleteImage = unsupportedProviderImageLifecycle("koyeb");
+  storedImageMetadata = noStoredImageMetadata;
+  decorateImage = passthroughProviderImage;
+  validateDeleteImage = allowProviderImageDelete;
+
+  deleteSSHKey(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  hourlyPriceUSD(): Promise<number | undefined> {
+    return Promise.resolve(undefined);
   }
 }
 

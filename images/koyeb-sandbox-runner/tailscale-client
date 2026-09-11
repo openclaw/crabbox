@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+socket="${CRABBOX_KOYEB_TAILSCALE_SOCKET:-/run/crabbox-koyeb/tailscaled.sock}"
+for argument in "$@"; do
+  case "$argument" in
+    --socket | --socket=*) exec /usr/local/libexec/crabbox-koyeb-sandbox/tailscale "$@" ;;
+  esac
+done
+
+exec /usr/local/libexec/crabbox-koyeb-sandbox/tailscale --socket="$socket" "$@"

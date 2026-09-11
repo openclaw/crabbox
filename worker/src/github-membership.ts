@@ -40,6 +40,7 @@ export interface GitHubMembershipIdentity {
 export type GitHubMembershipEnv = Pick<
   Env,
   | "CRABBOX_DEFAULT_ORG"
+  | "CRABBOX_GITHUB_ALLOWED_OWNERS"
   | "CRABBOX_GITHUB_ALLOWED_ORG"
   | "CRABBOX_GITHUB_ALLOWED_ORGS"
   | "CRABBOX_GITHUB_ALLOWED_TEAM"
@@ -120,6 +121,11 @@ export function githubMembershipPolicy(
   if (githubUserIsRevoked(identity, env)) {
     throw new GitHubAuthorizationError(`GitHub user ${identity.login} has been revoked.`);
   }
+  const owner = identity.owner.trim().toLowerCase();
+  const allowedOwners = allowedGitHubOwners(env);
+  if (allowedOwners.length > 0 && !allowedOwners.includes(owner)) {
+    throw new GitHubAuthorizationError(`GitHub user ${identity.login} is not an allowed owner.`);
+  }
   const org = identity.org.trim().toLowerCase();
   const allowedOrgs = allowedGitHubOrgs(env);
   if (!allowedOrgs.includes(org)) {
@@ -138,7 +144,11 @@ export function githubMembershipPolicy(
   return {
     org,
     allowedTeams,
-    cacheKey: JSON.stringify([[...new Set(allowedOrgs)].toSorted(), normalizedTeams]),
+    cacheKey: JSON.stringify([
+      [...new Set(allowedOrgs)].toSorted(),
+      allowedOwners,
+      normalizedTeams,
+    ]),
   };
 }
 
@@ -251,6 +261,29 @@ function allowedGitHubOrgs(env: GitHubMembershipEnv): string[] {
   const configured = envList(raw);
   if (configured.length > 0) return configured;
   return envList(env.CRABBOX_DEFAULT_ORG);
+}
+
+function allowedGitHubOwners(
+  env: Pick<GitHubMembershipEnv, "CRABBOX_GITHUB_ALLOWED_OWNERS">,
+): string[] {
+  const raw = env.CRABBOX_GITHUB_ALLOWED_OWNERS;
+  if (raw === undefined || raw.trim() === "") return [];
+  const values = raw.split(",").map((value) => value.trim());
+  if (values.some((value) => !canonicalGitHubOwner(value))) {
+    throw invalidAllowedOwnerConfig();
+  }
+  return [...new Set(values)].toSorted();
+}
+
+function canonicalGitHubOwner(value: string): boolean {
+  const accountID = githubAccountID(value);
+  return accountID !== undefined && value === `github:${accountID}`;
+}
+
+function invalidAllowedOwnerConfig(): GitHubAuthorizationError {
+  return new GitHubAuthorizationError(
+    "CRABBOX_GITHUB_ALLOWED_OWNERS contains a mutable or invalid selector. Use only github:<positive-numeric-id> principals without empty entries.",
+  );
 }
 
 function allowedGitHubTeams(env: GitHubMembershipEnv, defaultOrg: string): AllowedGitHubTeam[] {

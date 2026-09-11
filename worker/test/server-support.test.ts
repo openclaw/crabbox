@@ -15,6 +15,7 @@ import {
   fleetRequestQueue,
   isReadinessRequestMethod,
   isTrustedProxySource,
+  nodeRequestOrigin,
   nodeResponseHeaders,
   nodeRequestAbortSignal,
   readNodeRequestBody,
@@ -207,6 +208,65 @@ describe("Node server support", () => {
     expect(isTrustedProxySource("192.0.2.10", ranges)).toBe(false);
     expect(isTrustedProxySource("10.4.5.6", undefined)).toBe(false);
     expect(isTrustedProxySource("10.4.5.6", "invalid,10.0.0.0/8")).toBe(false);
+  });
+
+  it("uses the configured public origin only for matching direct hosts", () => {
+    expect(
+      nodeRequestOrigin({
+        directHost: "broker.example.com",
+        forwardedHost: "attacker.example",
+        forwardedProtocol: "http",
+        publicURL: "https://broker.example.com",
+        trustedProxy: false,
+      }),
+    ).toBe("https://broker.example.com");
+    expect(
+      nodeRequestOrigin({
+        directHost: "coordinator.internal",
+        forwardedHost: "broker.example.com",
+        forwardedProtocol: "https",
+        publicURL: "https://broker.example.com",
+        trustedProxy: false,
+      }),
+    ).toBe("http://coordinator.internal");
+    expect(
+      nodeRequestOrigin({
+        directHost: "broker.example.com",
+        forwardedHost: "proxy.example.com",
+        forwardedProtocol: "https",
+        publicURL: "https://broker.example.com",
+        trustedProxy: true,
+      }),
+    ).toBe("https://proxy.example.com");
+    expect(
+      nodeRequestOrigin({
+        directHost: "broker.example.com",
+        forwardedHost: "",
+        forwardedProtocol: "",
+        publicURL: "not a URL",
+        trustedProxy: false,
+      }),
+    ).toBe("http://broker.example.com");
+    expect(
+      nodeRequestOrigin({
+        directHost: "broker.example.com:443",
+        forwardedHost: "",
+        forwardedProtocol: "",
+        publicURL: "https://broker.example.com",
+        trustedProxy: false,
+      }),
+    ).toBe("https://broker.example.com");
+    for (const directHost of ["broker.example.com@attacker.example", "broker.example.com/portal"]) {
+      expect(
+        nodeRequestOrigin({
+          directHost,
+          forwardedHost: "broker.example.com",
+          forwardedProtocol: "https",
+          publicURL: "https://broker.example.com",
+          trustedProxy: false,
+        }),
+      ).not.toBe("https://broker.example.com");
+    }
   });
 
   it("fails startup validation on the exact invalid trusted-proxy entry", () => {

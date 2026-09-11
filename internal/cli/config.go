@@ -42,6 +42,9 @@ type Config struct {
 	imageRequirements             imageRequirements
 	Code                          bool
 	Network                       NetworkMode
+	tailscaleExplicit             bool
+	tailscaleDefaultApplied       bool
+	tailscaleDefaultValue         bool
 	Class                         string
 	classFlagExplicit             bool
 	classExplicitOrder            uint64
@@ -1788,6 +1791,11 @@ func prepareProviderDefaults(cfg *Config) {
 
 func resetProviderDerivedDefaults(cfg *Config) {
 	base := baseConfig()
+	reconcileTailscaleDefault(cfg)
+	if cfg.tailscaleDefaultApplied {
+		cfg.Tailscale.Enabled = base.Tailscale.Enabled
+		cfg.tailscaleDefaultApplied = false
+	}
 	if cfg.explicitSSHUser != "" {
 		cfg.SSHUser = cfg.explicitSSHUser
 	} else {
@@ -5381,7 +5389,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 	}
 	if file.Tailscale != nil {
-		applyOptional(&cfg.Tailscale.Enabled, file.Tailscale.Enabled)
+		if file.Tailscale.Enabled != nil {
+			cfg.Tailscale.Enabled = *file.Tailscale.Enabled
+			MarkTailscaleEnabledExplicit(cfg)
+		}
 		if file.Tailscale.Network != "" {
 			cfg.Network = NetworkMode(strings.ToLower(strings.TrimSpace(file.Tailscale.Network)))
 		}
@@ -6883,6 +6894,7 @@ func applyEnv(cfg *Config) error {
 	cfg.WindowsSandbox.MemoryMB = getenvInt("CRABBOX_WINDOWS_SANDBOX_MEMORY_MB", cfg.WindowsSandbox.MemoryMB)
 	if value, ok := getenvBool("CRABBOX_TAILSCALE"); ok {
 		cfg.Tailscale.Enabled = value
+		MarkTailscaleEnabledExplicit(cfg)
 	}
 	if tags := os.Getenv("CRABBOX_TAILSCALE_TAGS"); tags != "" {
 		cfg.Tailscale.Tags = normalizeTailscaleTags(splitCommaList(tags))

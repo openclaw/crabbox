@@ -19,7 +19,7 @@ import {
   leaseConfig,
   serverTypeCandidatesForClass,
   serverTypeForClass,
-  serverTypeForProviderClass,
+  serverTypeForConfig,
   sshPorts,
   validCIDRs,
 } from "../src/config";
@@ -94,7 +94,9 @@ describe("machine class config", () => {
   });
 
   it("maps known classes to preferred AWS candidates", () => {
-    expect(serverTypeForProviderClass("aws", "beast")).toBe("c7a.48xlarge");
+    expect(serverTypeForConfig("aws", "linux", "normal", "beast", "amd64", "managed")).toBe(
+      "c7a.48xlarge",
+    );
     expect(awsInstanceTypeCandidatesForClass("beast")).toEqual([
       "c7a.48xlarge",
       "c7i.48xlarge",
@@ -111,7 +113,9 @@ describe("machine class config", () => {
   });
 
   it("maps known classes to preferred Azure candidates", () => {
-    expect(serverTypeForProviderClass("azure", "standard")).toBe("Standard_D32ads_v6");
+    expect(serverTypeForConfig("azure", "linux", "normal", "standard", "amd64", "managed")).toBe(
+      "Standard_D32ads_v6",
+    );
     expect(azureVMSizeCandidatesForClass("standard")).toEqual([
       "Standard_D32ads_v6",
       "Standard_D32ds_v6",
@@ -137,7 +141,9 @@ describe("machine class config", () => {
   });
 
   it("maps known classes to preferred GCP candidates", () => {
-    expect(serverTypeForProviderClass("gcp", "standard")).toBe("c4-standard-32");
+    expect(serverTypeForConfig("gcp", "linux", "normal", "standard", "amd64", "managed")).toBe(
+      "c4-standard-32",
+    );
     expect(gcpMachineTypeCandidatesForClass("standard")).toEqual([
       "c4-standard-32",
       "c3-standard-22",
@@ -1101,7 +1107,9 @@ describe("lease config", () => {
     expect(config.sshPort).toBe("22");
     expect(config.sshFallbackPorts).toEqual([]);
     expect(config.workRoot).toBe("/home/daytona/crabbox");
-    expect(serverTypeForProviderClass("daytona", "beast")).toBe("snapshot");
+    expect(serverTypeForConfig("daytona", "linux", "normal", "beast", "amd64", "managed")).toBe(
+      "snapshot",
+    );
     expect(() =>
       leaseConfig({
         provider: "daytona",
@@ -1117,6 +1125,41 @@ describe("lease config", () => {
         sshPublicKey: "ssh-ed25519 test",
       }),
     ).toThrow("supports SSH, sync, and run only");
+  });
+
+  it("uses Koyeb Sandbox runner defaults and preserves an explicit private-mesh transport", () => {
+    const config = leaseConfig({
+      provider: "koyeb",
+      sshPublicKey: "ssh-ed25519 test",
+      desktop: true,
+      browser: true,
+      code: true,
+    });
+    expect(config.serverType).toBe("large");
+    expect(serverTypeForConfig("koyeb", "linux", "normal", "standard", "amd64", "managed")).toBe(
+      "large",
+    );
+    expect(config.sshUser).toBe("crabbox");
+    expect(config.sshPort).toBe("22");
+    expect(config.sshFallbackPorts).toEqual([]);
+    expect(config.workRoot).toBe("/workspace/crabbox");
+    expect(config.desktop).toBe(true);
+    expect(config.browser).toBe(true);
+    expect(config.code).toBe(true);
+    expect(config.tailscale).toBe(true);
+    const mesh = leaseConfig({
+      provider: "koyeb",
+      sshPublicKey: "ssh-ed25519 test",
+      tailscale: false,
+    });
+    expect(mesh.tailscale).toBe(false);
+    expect(() =>
+      leaseConfig({
+        provider: "koyeb",
+        architecture: "arm64",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    ).toThrow("architecture=arm64 currently supports provider=azure or provider=aws");
   });
 
   it("validates and normalizes AWS lease regions", () => {

@@ -76,7 +76,7 @@ failure bundles are not automatically scrubbed; review them before sharing. See
 ```text
 your laptop                 coordinator runtime              cloud provider
 -------------               -------------------              --------------
-crabbox CLI    -- HTTPS --> Cloudflare + Durable Object  --> Hetzner / AWS / Azure / GCP / Daytona
+crabbox CLI    -- HTTPS --> Cloudflare + Durable Object  --> Hetzner / AWS / Azure / GCP / Daytona / Koyeb
    |                      or Node.js + PostgreSQL              |
    |                                                           |
    +------------- SSH + rsync to leased runner <---------------+
@@ -105,10 +105,12 @@ the CLI to the runner. A dedicated
 separate SSM-only controller path for API-managed workspaces; it has no public
 instance address or SSH access.
 
-Only `aws`, `azure`, `daytona`, `gcp`, and `hetzner` can transfer provider lifecycle to the
-coordinator, and even those run direct from the CLI when no coordinator URL is
-configured. Every other provider runs direct or delegated. A direct-provider mode
-(`--provider hetzner|aws|azure|daytona|gcp|digitalocean|linode|proxmox` with local
+`aws`, `azure`, `daytona`, `gcp`, and `hetzner` can transfer provider lifecycle
+to the coordinator and otherwise run direct from the CLI. `koyeb` is
+coordinator-only because its durable provisioning journal owns one-call
+bootstrap material and cleanup. Every other provider runs direct or delegated.
+A direct-provider mode (`--provider
+hetzner|aws|azure|daytona|gcp|digitalocean|linode|proxmox` with local
 credentials) exists for debugging the coordinator itself or using private
 infrastructure.
 
@@ -262,9 +264,9 @@ human-readable name.
 
 ## Providers
 
-`Brokered` providers can run through either coordinator runtime (or direct when
-no coordinator is configured); every other provider runs direct or delegated
-from the CLI.
+`Brokered` providers can run through either coordinator runtime. Most also run
+direct when no coordinator is configured; Koyeb is coordinator-only. Every
+other provider runs direct or delegated from the CLI.
 
 ### SSH-lease providers (provision or connect a box, full lifecycle)
 
@@ -274,6 +276,7 @@ from the CLI.
 | [Azure](docs/providers/azure.md) — `azure` | Linux, Windows · brokered | VMs with Tailscale support; native Windows and WSL2. |
 | [Google Cloud](docs/providers/gcp.md) — `gcp` (`google`, `google-cloud`) | Linux · brokered | Compute Engine VMs with Tailscale support. |
 | [Hetzner Cloud](docs/providers/hetzner.md) — `hetzner` | Linux · brokered | VMs with desktop/browser/code and Tailscale. |
+| [Koyeb Sandbox](docs/providers/koyeb.md) — `koyeb` | Linux amd64 · coordinator only | Ephemeral desktop/browser/code/shell Sandbox with tailnet-only SSH and VNC. |
 | [DigitalOcean](docs/providers/digitalocean.md) — `digitalocean` | Linux · direct | Droplets with per-lease SSH keys and Crabbox tags. |
 | [Linode](docs/providers/linode.md) — `linode` | Linux · direct | Linode instances with metadata user-data, optional existing firewall attachment, and Crabbox tags. |
 | [Hostinger](docs/providers/hostinger.md) — `hostinger` | Linux · direct | VPS leases over public SSH; explicit purchase opt-in, stop-only release. |

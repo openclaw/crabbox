@@ -437,7 +437,7 @@ provider. Shared-token automation needs `CRABBOX_SHARED_TOKEN` and
 `CRABBOX_SHARED_OWNER`; browser login needs the GitHub OAuth settings below.
 Provider choices are `HETZNER_TOKEN`, AWS credentials from the default chain or
 an existing static credential contract, an Azure service principal, a GCP
-service account, or `DAYTONA_CRABBOX_KEY`. Node additionally requires
+service account, `DAYTONA_CRABBOX_KEY`, or `KOYEB_API_TOKEN`. Node additionally requires
 `DATABASE_URL`.
 
 GitHub OAuth start routes remain unauthenticated so a new user can bootstrap login.
@@ -472,11 +472,14 @@ CRABBOX_RUNTIME_ADAPTER_OWNER     stable service owner for route-scoped access
 CRABBOX_RUNTIME_ADAPTER_ORG       stable organization for route-scoped access
 DAYTONA_CRABBOX_KEY               required for brokered Daytona leases
 CRABBOX_DAYTONA_*                 optional Daytona API, snapshot, target, user, work-root, and SSH-token settings
+KOYEB_API_TOKEN                   required for brokered Koyeb Sandbox leases
+CRABBOX_KOYEB_*                   Koyeb app, region, instance, immutable image, and optional registry-secret-name settings
 CRABBOX_RUN_RETENTION_DAYS        terminal run history retention; default 30 days, minimum 1
 CRABBOX_GITHUB_CLIENT_ID          required for browser login
 CRABBOX_GITHUB_CLIENT_SECRET      required for browser login
 CRABBOX_SESSION_SECRET            required for browser login; must differ from CRABBOX_SHARED_TOKEN
 CRABBOX_CODE_ORIGIN_TEMPLATE      required for browser Code; per-lease HTTPS origin template
+CRABBOX_GITHUB_ALLOWED_OWNERS     optional canonical github:<positive-numeric-id> admission list; changes apply to existing sessions
 CRABBOX_GITHUB_ALLOWED_ORG or CRABBOX_GITHUB_ALLOWED_ORGS
 CRABBOX_GITHUB_ALLOWED_TEAMS      optional
 CRABBOX_GITHUB_REVOKED_USERS      optional github:<numeric-id> revocation list; mutable entries fail GitHub auth closed
@@ -514,6 +517,15 @@ CRABBOX_AZURE_ORPHAN_SWEEP_DELETE   optional; set 1 to release coordinator-owned
 CRABBOX_AZURE_ORPHAN_SWEEP_INTERVAL_SECONDS optional; default 3600
 CRABBOX_AZURE_ORPHAN_SWEEP_GRACE_SECONDS    optional; default 900
 ```
+
+Koyeb Sandbox leases are intentionally fixed at one running instance. Do not
+enable light sleep, deep sleep, or `min-scale 0`: Tailscale enrollment is
+one-time and the current runner keeps its identity in ephemeral Sandbox state.
+Crabbox bounds cost with the lease TTL, inactivity deletion lifecycle, and
+explicit cleanup instead. The supported desktop baseline is a `large` Sandbox
+running the immutable reviewed image; its only public route is the Koyeb
+API-key-protected management path, which also checks the generated bearer in
+the runner.
 
 Normal SSH-based AWS workspace bridges use a dedicated `crabbox-workspaces`
 security group, separate from ordinary runner ingress. Workers TCP egress has

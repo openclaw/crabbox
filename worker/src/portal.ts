@@ -31,6 +31,7 @@ const providerIcons: Record<string, string> = {
   daytona: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4z"/><path d="M8 10h8M8 14h5"/></svg>`,
   gcp: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 17 3.5 12.5 9.5 2h5L20.5 12.5 18 17z"/><path d="M8.5 17h9.5M9.5 2l3 5.5M14.5 2l-3 5.5"/></svg>`,
   hetzner: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 7.5v9L12 21l-8-4.5v-9z"/><path d="M8 8v8M16 8v8M8 12h8"/></svg>`,
+  koyeb: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v16M7 12l10-8M7 12l10 8"/></svg>`,
 };
 
 function themeToggleButton(): string {
@@ -3438,6 +3439,7 @@ function html(
     .provider-favicon[data-provider="azure"] { color:#7aa7ff; }
     .provider-favicon[data-provider="gcp"] { color:#48b49a; }
     .provider-favicon[data-provider="hetzner"] { color:#e06a4d; }
+    .provider-favicon[data-provider="koyeb"] { color:#b17cff; }
     .provider-status-title { min-width:0; display:grid; gap:1px; }
     .provider-status-title strong,.provider-status-title span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .provider-status-title > span { display:flex; gap:6px; align-items:center; color:var(--muted); font-size:11px; }
@@ -3567,6 +3569,7 @@ function html(
     .icon-label[data-provider="aws"] svg { color:#d97706; }
     .icon-label[data-provider="azure"] svg { color:#7aa7ff; }
     .icon-label[data-provider="hetzner"] svg { color:#e06a4d; }
+    .icon-label[data-provider="koyeb"] svg { color:#b17cff; }
     .icon-label[data-provider="blacksmith-testbox"] svg { color:#9d8cd6; }
     .icon-label[data-target="linux"] svg { color:#48b49a; }
     .icon-label[data-target="windows"] svg { color:#7aa7ff; }

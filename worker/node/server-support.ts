@@ -135,6 +135,26 @@ export function isTrustedProxySource(
   }
 }
 
+export interface NodeRequestOriginOptions {
+  directHost: string | undefined;
+  forwardedHost: string | undefined;
+  forwardedProtocol: string | undefined;
+  publicURL: string | undefined;
+  trustedProxy: boolean;
+}
+
+export function nodeRequestOrigin(options: NodeRequestOriginOptions): string {
+  const directHost = options.directHost?.trim() || "localhost";
+  if (options.trustedProxy) {
+    const protocol = options.forwardedProtocol?.trim() || "http";
+    const host = options.forwardedHost?.trim() || directHost;
+    return `${protocol}://${host}`;
+  }
+
+  const publicOrigin = configuredPublicOriginForHost(options.publicURL, directHost);
+  return publicOrigin ?? `http://${directHost}`;
+}
+
 export function validateTrustedProxyCIDRs(configuredCIDRs: string | undefined): void {
   if (!configuredCIDRs?.trim()) return;
   trustedProxyBlockList(configuredCIDRs);
@@ -199,6 +219,36 @@ function normalizeIPAddress(address: string | undefined): string {
   const value = address?.trim() ?? "";
   const mappedIPv4 = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(value);
   return mappedIPv4?.[1] ?? value;
+}
+
+function configuredPublicOriginForHost(
+  configuredPublicURL: string | undefined,
+  directHost: string,
+): string | undefined {
+  try {
+    const configured = new URL(configuredPublicURL?.trim() ?? "");
+    if (
+      (configured.protocol !== "https:" && configured.protocol !== "http:") ||
+      configured.username ||
+      configured.password
+    ) {
+      return undefined;
+    }
+    const direct = new URL(`${configured.protocol}//${directHost}`);
+    if (
+      direct.username ||
+      direct.password ||
+      direct.pathname !== "/" ||
+      direct.search ||
+      direct.hash ||
+      direct.host !== configured.host
+    ) {
+      return undefined;
+    }
+    return configured.origin;
+  } catch {
+    return undefined;
+  }
 }
 
 function trustedProxyBlockList(configuredCIDRs: string): BlockList {
