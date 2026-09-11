@@ -21,49 +21,84 @@ func defaultVultrConfig() VultrConfig {
 	return VultrConfig{}
 }
 
-func (cfg *VultrConfig) applyFile(file *fileVultrConfig) error {
+// VultrConfigApplied records accepted assignments during one application.
+type VultrConfigApplied struct {
+	InputAccepted bool
+}
+
+func (cfg *VultrConfig) applyFile(file *fileVultrConfig) (VultrConfigApplied, error) {
+	var applied VultrConfigApplied
 	if file == nil {
-		return nil
+		return applied, nil
 	}
 	if file.Region != "" {
 		cfg.Region = file.Region
+		applied.InputAccepted = true
 	}
 	if file.OS != "" {
 		cfg.OS = file.OS
+		applied.InputAccepted = true
 	}
 	if file.Image != "" {
 		cfg.Image = file.Image
+		applied.InputAccepted = true
 	}
 	if file.Snapshot != "" {
 		cfg.Snapshot = file.Snapshot
+		applied.InputAccepted = true
 	}
 	if file.FirewallGroup != "" {
 		cfg.FirewallGroup = file.FirewallGroup
+		applied.InputAccepted = true
 	}
 	if len(file.VPCIDs) > 0 {
 		cfg.VPCIDs = file.VPCIDs
+		applied.InputAccepted = true
 	}
 	if len(file.SSHCIDRs) > 0 {
 		cfg.SSHCIDRs = file.SSHCIDRs
+		applied.InputAccepted = true
 	}
 	if file.UserScheme != "" {
 		cfg.UserScheme = file.UserScheme
+		applied.InputAccepted = true
 	}
-	return nil
+	return applied, nil
 }
 
-func (cfg *VultrConfig) applyEnv() error {
-	cfg.Region = getenv("CRABBOX_VULTR_REGION", cfg.Region)
-	cfg.OS = getenv("CRABBOX_VULTR_OS", cfg.OS)
-	cfg.Image = getenv("CRABBOX_VULTR_IMAGE", cfg.Image)
-	cfg.Snapshot = getenv("CRABBOX_VULTR_SNAPSHOT", cfg.Snapshot)
-	cfg.FirewallGroup = getenv("CRABBOX_VULTR_FIREWALL_GROUP", cfg.FirewallGroup)
+func (cfg *VultrConfig) applyEnv() (VultrConfigApplied, error) {
+	var applied VultrConfigApplied
+	if value, ok := firstNonEmptyEnv("CRABBOX_VULTR_REGION"); ok {
+		cfg.Region = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_VULTR_OS"); ok {
+		cfg.OS = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_VULTR_IMAGE"); ok {
+		cfg.Image = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_VULTR_SNAPSHOT"); ok {
+		cfg.Snapshot = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_VULTR_FIREWALL_GROUP"); ok {
+		cfg.FirewallGroup = value
+		applied.InputAccepted = true
+	}
 	if value := os.Getenv("CRABBOX_VULTR_VPC_IDS"); value != "" {
 		cfg.VPCIDs = splitCommaList(value)
+		applied.InputAccepted = true
 	}
 	if value := os.Getenv("CRABBOX_VULTR_SSH_CIDRS"); value != "" {
 		cfg.SSHCIDRs = splitCommaList(value)
+		applied.InputAccepted = true
 	}
-	cfg.UserScheme = getenv("CRABBOX_VULTR_USER_SCHEME", cfg.UserScheme)
-	return nil
+	if value, ok := firstNonEmptyEnv("CRABBOX_VULTR_USER_SCHEME"); ok {
+		cfg.UserScheme = value
+		applied.InputAccepted = true
+	}
+	return applied, nil
 }

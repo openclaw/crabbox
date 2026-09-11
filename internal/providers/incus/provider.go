@@ -21,6 +21,7 @@ func (Provider) Aliases() []string { return nil }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationNativeConfig),
 		Name:             providerName,
 		Family:           "local-vm",
 		Kind:             core.ProviderKindSSHLease,

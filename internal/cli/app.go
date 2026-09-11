@@ -10,9 +10,10 @@ import (
 )
 
 type App struct {
-	Stdout io.Writer
-	Stderr io.Writer
-	Stdin  io.Reader
+	Stdout                io.Writer
+	Stderr                io.Writer
+	Stdin                 io.Reader
+	synthesizedFlagInputs bool
 
 	runOutcome             *shardRunOutcome
 	workspaceOwnerAcquirer func(context.Context, SSHTarget, string, io.Writer) (*workspaceOwner, error)
@@ -94,6 +95,8 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.syncPlan(ctx, helpArgs), true
 	case "providers":
 		return a.providers(ctx, helpArgs), true
+	case "preflight-tools":
+		return a.preflightTools(helpArgs), true
 	case "history":
 		return a.history(ctx, helpArgs), true
 	case "logs":
@@ -206,6 +209,7 @@ Commands:
   artifacts   Collect, transform, and publish QA artifacts
   sync-plan   Show local sync manifest size hotspots
   providers   Show provider capabilities and recommendations
+  preflight-tools  List accepted preflight names and target support offline
   history     List recorded remote runs
   logs        Print recorded run logs
   events      Print recorded run events

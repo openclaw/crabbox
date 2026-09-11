@@ -19,7 +19,8 @@ func defaultDigitalOceanConfig() DigitalOceanConfig {
 
 // DigitalOceanConfigApplied records accepted assignments during one application.
 type DigitalOceanConfigApplied struct {
-	Image bool
+	InputAccepted bool
+	Image         bool
 }
 
 func (cfg *DigitalOceanConfig) applyFile(file *fileDigitalOceanConfig) (DigitalOceanConfigApplied, error) {
@@ -29,30 +30,42 @@ func (cfg *DigitalOceanConfig) applyFile(file *fileDigitalOceanConfig) (DigitalO
 	}
 	if file.Region != "" {
 		cfg.Region = file.Region
+		applied.InputAccepted = true
 	}
 	if file.Image != "" {
 		cfg.Image = file.Image
+		applied.InputAccepted = true
 		applied.Image = true
 	}
 	if file.VPCUUID != "" {
 		cfg.VPCUUID = file.VPCUUID
+		applied.InputAccepted = true
 	}
 	if len(file.SSHCIDRs) > 0 {
 		cfg.SSHCIDRs = file.SSHCIDRs
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }
 
 func (cfg *DigitalOceanConfig) applyEnv() (DigitalOceanConfigApplied, error) {
 	var applied DigitalOceanConfigApplied
-	cfg.Region = getenv("CRABBOX_DIGITALOCEAN_REGION", cfg.Region)
+	if value, ok := firstNonEmptyEnv("CRABBOX_DIGITALOCEAN_REGION"); ok {
+		cfg.Region = value
+		applied.InputAccepted = true
+	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_DIGITALOCEAN_IMAGE"); ok {
 		cfg.Image = value
+		applied.InputAccepted = true
 		applied.Image = true
 	}
-	cfg.VPCUUID = getenv("CRABBOX_DIGITALOCEAN_VPC", cfg.VPCUUID)
+	if value, ok := firstNonEmptyEnv("CRABBOX_DIGITALOCEAN_VPC"); ok {
+		cfg.VPCUUID = value
+		applied.InputAccepted = true
+	}
 	if value := os.Getenv("CRABBOX_DIGITALOCEAN_SSH_CIDRS"); value != "" {
 		cfg.SSHCIDRs = splitCommaList(value)
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }

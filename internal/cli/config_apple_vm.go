@@ -54,37 +54,51 @@ func ApplyAppleVMImageSHA256(cfg *Config, checksum string) {
 	MarkAppleVMImageSHA256Explicit(cfg)
 }
 
-func applyAppleVMFile(cfg *Config, file *fileAppleVMConfig) {
+type AppleVMConfigApplied struct {
+	InputAccepted bool
+}
+
+func applyAppleVMFile(cfg *Config, file *fileAppleVMConfig) AppleVMConfigApplied {
+	var applied AppleVMConfigApplied
 	if file == nil {
-		return
+		return applied
 	}
 	if file.HelperPath != "" {
 		cfg.AppleVM.HelperPath = file.HelperPath
+		applied.InputAccepted = true
 	}
 	if file.Image != "" {
 		ApplyAppleVMImage(cfg, file.Image)
+		applied.InputAccepted = true
 	}
 	if file.ImageSHA256 != "" {
 		ApplyAppleVMImageSHA256(cfg, file.ImageSHA256)
+		applied.InputAccepted = true
 	}
 	if file.User != "" {
 		cfg.AppleVM.User = file.User
+		applied.InputAccepted = true
 	}
 	if file.WorkRoot != "" {
 		cfg.AppleVM.WorkRoot = file.WorkRoot
+		applied.InputAccepted = true
 	}
 	if file.CPUs != nil {
 		cfg.AppleVM.CPUs = *file.CPUs
 		MarkAppleVMCPUsExplicit(cfg)
+		applied.InputAccepted = true
 	}
 	if file.MemoryMiB != nil {
 		cfg.AppleVM.MemoryMiB = *file.MemoryMiB
 		MarkAppleVMMemoryExplicit(cfg)
+		applied.InputAccepted = true
 	}
 	if file.DiskGiB != nil {
 		cfg.AppleVM.DiskGiB = *file.DiskGiB
 		MarkAppleVMDiskExplicit(cfg)
+		applied.InputAccepted = true
 	}
+	return applied
 }
 
 // appleVMEnv reads a CRABBOX_APPLE_VM_* variable, falling back to the
@@ -96,39 +110,54 @@ func appleVMEnv(name string) string {
 	return os.Getenv("CRABBOX_APPLE_VZ_" + name)
 }
 
-func applyAppleVMEnv(cfg *Config) error {
-	cfg.AppleVM.HelperPath = getenv("CRABBOX_APPLE_VM_HELPER", getenv("CRABBOX_APPLE_VZ_HELPER", cfg.AppleVM.HelperPath))
+func applyAppleVMEnv(cfg *Config) (AppleVMConfigApplied, error) {
+	var applied AppleVMConfigApplied
+	if value := appleVMEnv("HELPER"); value != "" {
+		cfg.AppleVM.HelperPath = value
+		applied.InputAccepted = true
+	}
 	if image := appleVMEnv("IMAGE"); image != "" {
 		ApplyAppleVMImage(cfg, image)
+		applied.InputAccepted = true
 	}
 	if checksum := appleVMEnv("IMAGE_SHA256"); checksum != "" {
 		ApplyAppleVMImageSHA256(cfg, checksum)
+		applied.InputAccepted = true
 	}
-	cfg.AppleVM.User = getenv("CRABBOX_APPLE_VM_USER", getenv("CRABBOX_APPLE_VZ_USER", cfg.AppleVM.User))
-	cfg.AppleVM.WorkRoot = getenv("CRABBOX_APPLE_VM_WORK_ROOT", getenv("CRABBOX_APPLE_VZ_WORK_ROOT", cfg.AppleVM.WorkRoot))
+	if value := appleVMEnv("USER"); value != "" {
+		cfg.AppleVM.User = value
+		applied.InputAccepted = true
+	}
+	if value := appleVMEnv("WORK_ROOT"); value != "" {
+		cfg.AppleVM.WorkRoot = value
+		applied.InputAccepted = true
+	}
 	if rawCPUs := appleVMEnv("CPUS"); rawCPUs != "" {
 		cpus, err := strconv.Atoi(strings.TrimSpace(rawCPUs))
 		if err != nil {
-			return fmt.Errorf("CRABBOX_APPLE_VM_CPUS must be an integer: %w", err)
+			return applied, fmt.Errorf("CRABBOX_APPLE_VM_CPUS must be an integer: %w", err)
 		}
 		cfg.AppleVM.CPUs = cpus
 		MarkAppleVMCPUsExplicit(cfg)
+		applied.InputAccepted = true
 	}
 	if rawMemory := appleVMEnv("MEMORY"); rawMemory != "" {
 		memoryMiB, err := strconv.Atoi(strings.TrimSpace(rawMemory))
 		if err != nil {
-			return fmt.Errorf("CRABBOX_APPLE_VM_MEMORY must be an integer: %w", err)
+			return applied, fmt.Errorf("CRABBOX_APPLE_VM_MEMORY must be an integer: %w", err)
 		}
 		cfg.AppleVM.MemoryMiB = memoryMiB
 		MarkAppleVMMemoryExplicit(cfg)
+		applied.InputAccepted = true
 	}
 	if rawDisk := appleVMEnv("DISK"); rawDisk != "" {
 		diskGiB, err := strconv.Atoi(strings.TrimSpace(rawDisk))
 		if err != nil {
-			return fmt.Errorf("CRABBOX_APPLE_VM_DISK must be an integer: %w", err)
+			return applied, fmt.Errorf("CRABBOX_APPLE_VM_DISK must be an integer: %w", err)
 		}
 		cfg.AppleVM.DiskGiB = diskGiB
 		MarkAppleVMDiskExplicit(cfg)
+		applied.InputAccepted = true
 	}
-	return nil
+	return applied, nil
 }

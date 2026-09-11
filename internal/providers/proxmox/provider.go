@@ -17,6 +17,7 @@ func (Provider) Name() string      { return "proxmox" }
 func (Provider) Aliases() []string { return nil }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPIToken),
 		Name:             "proxmox",
 		Family:           "proxmox",
 		Kind:             core.ProviderKindSSHLease,
@@ -62,36 +63,46 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	}
 	if core.FlagWasSet(fs, "proxmox-api-url") {
 		cfg.Proxmox.APIURL = *v.APIURL
+		core.RecordProviderFlagInputs(cfg, true, "proxmox")
 	}
 	if core.FlagWasSet(fs, "proxmox-node") {
 		cfg.Proxmox.Node = *v.Node
+		core.RecordProviderFlagInputs(cfg, true, "proxmox")
 	}
 	if core.FlagWasSet(fs, "proxmox-template-id") {
 		cfg.Proxmox.TemplateID = *v.TemplateID
+		core.RecordProviderFlagInputs(cfg, true, "proxmox")
 		cfg.ServerType = core.ProxmoxServerTypeForConfig(*cfg)
 	}
 	if core.FlagWasSet(fs, "proxmox-storage") {
 		cfg.Proxmox.Storage = *v.Storage
+		core.RecordProviderFlagInputs(cfg, true, "proxmox")
 	}
 	if core.FlagWasSet(fs, "proxmox-pool") {
 		cfg.Proxmox.Pool = *v.Pool
+		core.RecordProviderFlagInputs(cfg, true, "proxmox")
 	}
 	if core.FlagWasSet(fs, "proxmox-bridge") {
 		cfg.Proxmox.Bridge = *v.Bridge
+		core.RecordProviderFlagInputs(cfg, true, "proxmox")
 	}
 	if core.FlagWasSet(fs, "proxmox-user") {
 		cfg.Proxmox.User = *v.User
+		core.RecordProviderFlagInputs(cfg, true, "proxmox")
 		cfg.SSHUser = *v.User
 	}
 	if core.FlagWasSet(fs, "proxmox-work-root") {
 		cfg.Proxmox.WorkRoot = *v.WorkRoot
+		core.RecordProviderFlagInputs(cfg, true, "proxmox")
 		cfg.WorkRoot = *v.WorkRoot
 	}
 	if core.FlagWasSet(fs, "proxmox-full-clone") {
 		cfg.Proxmox.FullClone = *v.FullClone
+		core.RecordProviderFlagInputs(cfg, true, "proxmox")
 	}
 	if core.FlagWasSet(fs, "proxmox-insecure-tls") {
 		cfg.Proxmox.InsecureTLS = *v.InsecureTLS
+		core.RecordProviderFlagInputs(cfg, true, "proxmox")
 	}
 	return nil
 }

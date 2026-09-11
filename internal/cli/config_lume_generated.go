@@ -28,35 +28,62 @@ func defaultLumeConfig() LumeConfig {
 	}
 }
 
-func (cfg *LumeConfig) applyFile(file *fileLumeConfig, trusted bool) error {
+// LumeConfigApplied records accepted assignments during one application.
+type LumeConfigApplied struct {
+	InputAccepted bool
+}
+
+func (cfg *LumeConfig) applyFile(file *fileLumeConfig, trusted bool) (LumeConfigApplied, error) {
+	var applied LumeConfigApplied
 	if file == nil {
-		return nil
+		return applied, nil
 	}
 	if trusted && file.CLIPath != "" {
 		cfg.CLIPath = file.CLIPath
+		applied.InputAccepted = true
 	}
 	if trusted && file.Base != "" {
 		cfg.Base = file.Base
+		applied.InputAccepted = true
 	}
 	if trusted && file.Storage != "" {
 		cfg.Storage = file.Storage
+		applied.InputAccepted = true
 	}
 	if trusted && file.User != "" {
 		cfg.User = file.User
+		applied.InputAccepted = true
 	}
 	if file.WorkRoot != "" {
 		cfg.WorkRoot = file.WorkRoot
+		applied.InputAccepted = true
 	}
-	return nil
+	return applied, nil
 }
 
-func (cfg *LumeConfig) applyEnv() error {
-	cfg.CLIPath = getenv("CRABBOX_LUME_CLI", cfg.CLIPath)
-	cfg.Base = getenv("CRABBOX_LUME_BASE", cfg.Base)
-	cfg.Storage = getenv("CRABBOX_LUME_STORAGE", cfg.Storage)
-	cfg.User = getenv("CRABBOX_LUME_USER", cfg.User)
-	cfg.WorkRoot = getenv("CRABBOX_LUME_WORK_ROOT", cfg.WorkRoot)
-	return nil
+func (cfg *LumeConfig) applyEnv() (LumeConfigApplied, error) {
+	var applied LumeConfigApplied
+	if value, ok := firstNonEmptyEnv("CRABBOX_LUME_CLI"); ok {
+		cfg.CLIPath = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_LUME_BASE"); ok {
+		cfg.Base = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_LUME_STORAGE"); ok {
+		cfg.Storage = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_LUME_USER"); ok {
+		cfg.User = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_LUME_WORK_ROOT"); ok {
+		cfg.WorkRoot = value
+		applied.InputAccepted = true
+	}
+	return applied, nil
 }
 
 // LumeConfigFlagValues holds parsed values; only visited flags are applied.
@@ -80,20 +107,27 @@ func RegisterLumeConfigFlags(fs *flag.FlagSet, defaults LumeConfig) LumeConfigFl
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values LumeConfigFlagValues) Apply(cfg *LumeConfig, fs *flag.FlagSet) {
+func (values LumeConfigFlagValues) Apply(cfg *LumeConfig, fs *flag.FlagSet) (LumeConfigApplied, error) {
+	var applied LumeConfigApplied
 	if flagWasSet(fs, "lume-cli") {
 		cfg.CLIPath = *values.CLIPath
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "lume-base") {
 		cfg.Base = *values.Base
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "lume-storage") {
 		cfg.Storage = *values.Storage
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "lume-user") {
 		cfg.User = *values.User
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "lume-work-root") {
 		cfg.WorkRoot = *values.WorkRoot
+		applied.InputAccepted = true
 	}
+	return applied, nil
 }

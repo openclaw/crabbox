@@ -25,6 +25,7 @@ func ApplyWandbProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	v.Apply(&cfg.Wandb, fs)
-	return nil
+	applied, err := v.Apply(&cfg.Wandb, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	return err
 }

@@ -21,6 +21,39 @@ import (
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
+func TestManualConfigInputFlags(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "fixture-other"
+	cfg.DockerSandbox.CPUs = 2
+	fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+	values := RegisterDockerSandboxProviderFlags(fs, cfg)
+	before := cfg
+	if err := ApplyDockerSandboxProviderFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+		t.Fatalf("foreign values changed configuration: %v", err)
+	}
+	if err := ApplyDockerSandboxProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	want := cfg
+	core.RecordProviderFlagInputs(&want, true, "docker-sandbox")
+	if reflect.DeepEqual(cfg, want) {
+		t.Fatal("unvisited flags recorded input")
+	}
+	for repeat := 0; repeat < 2; repeat++ {
+		if err := fs.Set("docker-sandbox-clone", "false"); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyDockerSandboxProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want = cfg
+		core.RecordProviderFlagInputs(&want, true, "docker-sandbox")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatal("accepted/equal flag value was not recorded")
+		}
+	}
+}
+
 func TestProviderSpecIsDelegatedLinuxAndAliasFree(t *testing.T) {
 	spec := Provider{}.Spec()
 	if spec.Name != providerName || spec.Family != "docker-sandbox" {

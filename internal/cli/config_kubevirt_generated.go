@@ -43,6 +43,7 @@ func defaultKubeVirtConfig() KubeVirtConfig {
 
 // KubeVirtConfigApplied records accepted assignments during one application.
 type KubeVirtConfigApplied struct {
+	InputAccepted   bool
 	Kubectl         bool
 	Virtctl         bool
 	Kubeconfig      bool
@@ -60,46 +61,58 @@ func (cfg *KubeVirtConfig) applyFile(file *fileKubeVirtConfig, trusted bool) (Ku
 	}
 	if file.Kubectl != "" {
 		cfg.Kubectl = file.Kubectl
+		applied.InputAccepted = true
 		applied.Kubectl = true
 	}
 	if file.Virtctl != "" {
 		cfg.Virtctl = file.Virtctl
+		applied.InputAccepted = true
 		applied.Virtctl = true
 	}
 	if file.Kubeconfig != "" {
 		cfg.Kubeconfig = file.Kubeconfig
+		applied.InputAccepted = true
 		applied.Kubeconfig = true
 	}
 	if file.Context != "" {
 		cfg.Context = file.Context
+		applied.InputAccepted = true
 	}
 	if file.Namespace != "" {
 		cfg.Namespace = file.Namespace
+		applied.InputAccepted = true
 	}
 	if file.Template != "" {
 		cfg.Template = file.Template
+		applied.InputAccepted = true
 		applied.Template = true
 	}
 	if file.SSHUser != "" {
 		cfg.SSHUser = file.SSHUser
+		applied.InputAccepted = true
 	}
 	if trusted && file.SSHKey != "" {
 		cfg.SSHKey = file.SSHKey
+		applied.InputAccepted = true
 		applied.SSHKey = true
 	}
 	if file.SSHPublicKey != "" {
 		cfg.SSHPublicKey = file.SSHPublicKey
+		applied.InputAccepted = true
 		applied.SSHPublicKey = true
 	}
 	if file.SSHPort != "" {
 		cfg.SSHPort = file.SSHPort
+		applied.InputAccepted = true
 	}
 	if file.WorkRoot != "" {
 		cfg.WorkRoot = file.WorkRoot
+		applied.InputAccepted = true
 		applied.WorkRoot = true
 	}
 	if file.DeleteOnRelease != nil {
 		cfg.DeleteOnRelease = *file.DeleteOnRelease
+		applied.InputAccepted = true
 		applied.DeleteOnRelease = true
 	}
 	return applied, nil
@@ -109,38 +122,58 @@ func (cfg *KubeVirtConfig) applyEnv() (KubeVirtConfigApplied, error) {
 	var applied KubeVirtConfigApplied
 	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_KUBECTL"); ok {
 		cfg.Kubectl = value
+		applied.InputAccepted = true
 		applied.Kubectl = true
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_VIRTCTL"); ok {
 		cfg.Virtctl = value
+		applied.InputAccepted = true
 		applied.Virtctl = true
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_KUBECONFIG"); ok {
 		cfg.Kubeconfig = value
+		applied.InputAccepted = true
 		applied.Kubeconfig = true
 	}
-	cfg.Context = getenv("CRABBOX_KUBEVIRT_CONTEXT", cfg.Context)
-	cfg.Namespace = getenv("CRABBOX_KUBEVIRT_NAMESPACE", cfg.Namespace)
+	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_CONTEXT"); ok {
+		cfg.Context = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_NAMESPACE"); ok {
+		cfg.Namespace = value
+		applied.InputAccepted = true
+	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_TEMPLATE"); ok {
 		cfg.Template = value
+		applied.InputAccepted = true
 		applied.Template = true
 	}
-	cfg.SSHUser = getenv("CRABBOX_KUBEVIRT_SSH_USER", cfg.SSHUser)
+	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_SSH_USER"); ok {
+		cfg.SSHUser = value
+		applied.InputAccepted = true
+	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_SSH_KEY"); ok {
 		cfg.SSHKey = value
+		applied.InputAccepted = true
 		applied.SSHKey = true
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_SSH_PUBLIC_KEY"); ok {
 		cfg.SSHPublicKey = value
+		applied.InputAccepted = true
 		applied.SSHPublicKey = true
 	}
-	cfg.SSHPort = getenv("CRABBOX_KUBEVIRT_SSH_PORT", cfg.SSHPort)
+	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_SSH_PORT"); ok {
+		cfg.SSHPort = value
+		applied.InputAccepted = true
+	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_WORK_ROOT"); ok {
 		cfg.WorkRoot = value
+		applied.InputAccepted = true
 		applied.WorkRoot = true
 	}
 	if value, ok := getenvBool("CRABBOX_KUBEVIRT_DELETE_ON_RELEASE"); ok {
 		cfg.DeleteOnRelease = value
+		applied.InputAccepted = true
 		applied.DeleteOnRelease = true
 	}
 	return applied, nil
@@ -207,52 +240,64 @@ func KubeVirtConfigFlagPresence(fs *flag.FlagSet) KubeVirtConfigVisitedFlags {
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values KubeVirtConfigFlagValues) Apply(cfg *KubeVirtConfig, fs *flag.FlagSet) KubeVirtConfigApplied {
+func (values KubeVirtConfigFlagValues) Apply(cfg *KubeVirtConfig, fs *flag.FlagSet) (KubeVirtConfigApplied, error) {
 	var applied KubeVirtConfigApplied
 	visited := KubeVirtConfigFlagPresence(fs)
 	if visited.Kubectl {
 		cfg.Kubectl = *values.Kubectl
+		applied.InputAccepted = true
 		applied.Kubectl = true
 	}
 	if visited.Virtctl {
 		cfg.Virtctl = *values.Virtctl
+		applied.InputAccepted = true
 		applied.Virtctl = true
 	}
 	if visited.Kubeconfig {
 		cfg.Kubeconfig = *values.Kubeconfig
+		applied.InputAccepted = true
 		applied.Kubeconfig = true
 	}
 	if flagWasSet(fs, "kubevirt-context") {
 		cfg.Context = *values.Context
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "kubevirt-namespace") {
 		cfg.Namespace = *values.Namespace
+		applied.InputAccepted = true
 	}
 	if visited.Template {
 		cfg.Template = *values.Template
+		applied.InputAccepted = true
 		applied.Template = true
 	}
 	if flagWasSet(fs, "kubevirt-ssh-user") {
 		cfg.SSHUser = *values.SSHUser
+		applied.InputAccepted = true
 	}
 	if visited.SSHKey {
 		cfg.SSHKey = *values.SSHKey
+		applied.InputAccepted = true
 		applied.SSHKey = true
 	}
 	if visited.SSHPublicKey {
 		cfg.SSHPublicKey = *values.SSHPublicKey
+		applied.InputAccepted = true
 		applied.SSHPublicKey = true
 	}
 	if flagWasSet(fs, "kubevirt-ssh-port") {
 		cfg.SSHPort = *values.SSHPort
+		applied.InputAccepted = true
 	}
 	if visited.WorkRoot {
 		cfg.WorkRoot = *values.WorkRoot
+		applied.InputAccepted = true
 		applied.WorkRoot = true
 	}
 	if visited.DeleteOnRelease {
 		cfg.DeleteOnRelease = *values.DeleteOnRelease
+		applied.InputAccepted = true
 		applied.DeleteOnRelease = true
 	}
-	return applied
+	return applied, nil
 }

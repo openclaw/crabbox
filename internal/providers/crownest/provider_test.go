@@ -4,11 +4,46 @@ import (
 	"context"
 	"flag"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestManualConfigInputFlags(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "fixture-other"
+	cfg.Crownest.APIURL = "https://fixture.invalid"
+	cfg.Crownest.Template = "fixture"
+	fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	before := cfg
+	if err := applyFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+		t.Fatalf("foreign values changed configuration: %v", err)
+	}
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	want := cfg
+	core.RecordProviderFlagInputs(&want, true, "crownest")
+	if reflect.DeepEqual(cfg, want) {
+		t.Fatal("unvisited flags recorded input")
+	}
+	for repeat := 0; repeat < 2; repeat++ {
+		if err := fs.Set("crownest-project-id", "fixture"); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want = cfg
+		core.RecordProviderFlagInputs(&want, true, "crownest")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatal("accepted/equal flag value was not recorded")
+		}
+	}
+}
 
 func TestProviderSpecIsDelegatedLinuxAliasFree(t *testing.T) {
 	provider := Provider{}

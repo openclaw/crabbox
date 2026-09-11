@@ -23,6 +23,10 @@ func ApplyOpenSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) er
 	if !ok {
 		return nil
 	}
-	v.Apply(&cfg.OpenSandbox, fs)
+	applied, err := v.Apply(&cfg.OpenSandbox, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	if err != nil {
+		return err
+	}
 	return validateOpenSandboxConfig(*cfg)
 }

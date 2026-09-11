@@ -35,6 +35,7 @@ func (Provider) Name() string      { return providerName }
 func (Provider) Aliases() []string { return nil }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationSDKCredentials),
 		Name:             providerName,
 		Family:           providerName,
 		Kind:             core.ProviderKindSSHLease,
@@ -58,8 +59,10 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	if !ok {
 		return nil
 	}
-	core.MarkScalewayConfigApplied(cfg, v.Apply(&cfg.Scaleway, fs))
-	return nil
+	applied, err := v.Apply(&cfg.Scaleway, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	core.MarkScalewayConfigApplied(cfg, applied)
+	return err
 }
 
 func (Provider) ValidateConfig(cfg core.Config) error {

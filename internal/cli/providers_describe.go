@@ -13,6 +13,7 @@ import (
 const providerDescriptionSchemaVersion = 2
 
 type providerDescription struct {
+	providerStaticStatus
 	SchemaVersion int                         `json:"schemaVersion"`
 	Provider      providerDescriptionIdentity `json:"provider"`
 	Runnable      bool                        `json:"runnable"`
@@ -184,7 +185,8 @@ func describeProvider(requestedName string) (providerDescription, error) {
 		inputAlias = requested
 	}
 	return providerDescription{
-		SchemaVersion: providerDescriptionSchemaVersion,
+		providerStaticStatus: entry.providerStaticStatus.clone(),
+		SchemaVersion:        providerDescriptionSchemaVersion,
 		Provider: providerDescriptionIdentity{
 			Requested:   requested,
 			Canonical:   canonical,
@@ -305,6 +307,7 @@ func printProviderDescription(out io.Writer, description providerDescription) {
 	} else {
 		fmt.Fprintln(out, identity.Canonical)
 	}
+	writeProviderStaticStatus(out, description.providerStaticStatus)
 	fmt.Fprintf(out, "  kind: %s\n", description.Kind)
 	fmt.Fprintf(out, "  runnable: %t\n", description.Runnable)
 	fmt.Fprintf(out, "  family: %s\n", description.Family)

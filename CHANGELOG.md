@@ -26,11 +26,18 @@
 
 - Contain Linux readiness venv and pip scratch files within the probe's temporary directory, including when dependency checks fail, while preserving the frozen v1 manifest digest. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
 
+- Distinguish explicit provider settings, generic inputs, and defaults in offline `config show` text and JSON; provider catalogs now describe possible authentication methods while clearly leaving authentication and live readiness unchecked. [PR 2090](https://github.com/openclaw/crabbox/pull/2090), [Issue 1465](https://github.com/openclaw/crabbox/issues/1465). Thanks @coygeek.
+- Daytona: let signal- or deadline-owned `stop` and its `release` alias wait for confirmed deletion without the 30-second automatic-cleanup cap; preserve the bounded fallback for non-cancelable job callers and existing run/watch cleanup and rollback budgets.
+- Discover accepted preflight names, defaults, and target support offline with `crabbox preflight-tools [--json]`; unknown names now point to that installed-binary catalog before lease acquisition. [PR 2081](https://github.com/openclaw/crabbox/pull/2081), [Issue 1589](https://github.com/openclaw/crabbox/issues/1589). Thanks @coygeek.
+- Keep Sprites API, bootstrap, and SSH commands on the configured account and endpoint; validate ownership before reuse, require explicit adoption without a local claim, keep plain status observational, use native tool checks for readiness, and safely recover already-deleted resources. [PR 1776](https://github.com/openclaw/crabbox/pull/1776), [PR 2077](https://github.com/openclaw/crabbox/pull/2077). Thanks @aezell.
+
 - Refresh native Windows PowerShell command and readiness PATH from machine/user settings, and verify SSH returns on fresh connections after baseline installation restarts the service. [PR 2074](https://github.com/openclaw/crabbox/pull/2074).
 - Install checksum-pinned Node 24.19.0/npm on managed native Windows leases when missing or broken, require both tools for readiness, and update the developer-image default pin while preserving overrides. [PR 2069](https://github.com/openclaw/crabbox/pull/2069).
 - Add `Start-CrabboxDetachedProcess.ps1` for native Windows daemons that survive command and SSH-session exit with a private hidden console, preserving ordinary command timeouts and workspace ownership. [PR 2069](https://github.com/openclaw/crabbox/pull/2069).
 - Include the resolved `workroot` in SSH-backed inspect/status JSON, including native Windows and WSL2 leases. [PR 2069](https://github.com/openclaw/crabbox/pull/2069).
 - Managed Linux: reuse installed desktop packages and a working package-installed Chrome or Chromium on restored images, avoiding redundant package transactions and browser repository downloads while preserving per-lease configuration and readiness checks. https://github.com/openclaw/crabbox/pull/2073
+- Daytona: support fixed warmup and checkpoint-fork IDs with durable, organization-bound replay and cleanup, preserving original lease deadlines and explicit repository transfers without recreating released operations. [PR 1700](https://github.com/openclaw/crabbox/pull/1700). Thanks @steipete.
+- Daytona: send the organization header exactly once so direct control-plane calls with a Daytona CLI OAuth profile no longer fail with 403 "Invalid authentication context". [PR 1700](https://github.com/openclaw/crabbox/pull/1700). Thanks @steipete.
 
 ## 0.55.0 - 2026-09-09
 

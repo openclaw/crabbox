@@ -4,6 +4,7 @@ package cli
 
 import (
 	"flag"
+	"strconv"
 )
 
 type fileVastConfig struct {
@@ -49,6 +50,7 @@ func defaultVastConfig() VastConfig {
 
 // VastConfigApplied records accepted assignments during one application.
 type VastConfigApplied struct {
+	InputAccepted bool
 	APIKey        bool
 	APIURL        bool
 	InstanceType  bool
@@ -63,48 +65,62 @@ func (cfg *VastConfig) applyFile(file *fileVastConfig) (VastConfigApplied, error
 	}
 	if file.APIURL != "" {
 		cfg.APIURL = file.APIURL
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
 	if file.InstanceType != "" {
 		cfg.InstanceType = file.InstanceType
+		applied.InputAccepted = true
 		applied.InstanceType = true
 	}
 	if file.GPUName != "" {
 		cfg.GPUName = file.GPUName
+		applied.InputAccepted = true
 	}
 	if file.GPUCount != 0 {
 		cfg.GPUCount = file.GPUCount
+		applied.InputAccepted = true
 	}
 	if file.Image != "" {
 		cfg.Image = file.Image
+		applied.InputAccepted = true
 	}
 	if file.TemplateID != "" {
 		cfg.TemplateID = file.TemplateID
+		applied.InputAccepted = true
 	}
 	if file.Runtype != "" {
 		cfg.Runtype = file.Runtype
+		applied.InputAccepted = true
 	}
 	if file.DiskGB != 0 {
 		cfg.DiskGB = file.DiskGB
+		applied.InputAccepted = true
 	}
 	if file.MaxDphTotal != nil {
 		cfg.MaxDphTotal = *file.MaxDphTotal
+		applied.InputAccepted = true
 	}
 	if file.MinReliability != nil {
 		cfg.MinReliability = *file.MinReliability
+		applied.InputAccepted = true
 	}
 	if file.Order != "" {
 		cfg.Order = file.Order
+		applied.InputAccepted = true
 	}
 	if file.User != "" {
 		cfg.User = file.User
+		applied.InputAccepted = true
 	}
 	if file.WorkRoot != "" {
 		cfg.WorkRoot = file.WorkRoot
+		applied.InputAccepted = true
 		applied.WorkRoot = true
 	}
 	if file.ReleaseAction != "" {
 		cfg.ReleaseAction = file.ReleaseAction
+		applied.InputAccepted = true
 		applied.ReleaseAction = true
 	}
 	return applied, nil
@@ -114,32 +130,67 @@ func (cfg *VastConfig) applyEnv() (VastConfigApplied, error) {
 	var applied VastConfigApplied
 	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_API_KEY", "VAST_API_KEY"); ok {
 		cfg.APIKey = value
+		applied.InputAccepted = true
 		applied.APIKey = true
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_API_URL", "VAST_API_URL"); ok {
 		cfg.APIURL = value
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_INSTANCE_TYPE"); ok {
 		cfg.InstanceType = value
+		applied.InputAccepted = true
 		applied.InstanceType = true
 	}
-	cfg.GPUName = getenv("CRABBOX_VAST_GPU_NAME", cfg.GPUName)
-	cfg.GPUCount = getenvInt("CRABBOX_VAST_GPU_COUNT", cfg.GPUCount)
-	cfg.Image = getenv("CRABBOX_VAST_IMAGE", cfg.Image)
-	cfg.TemplateID = getenv("CRABBOX_VAST_TEMPLATE_ID", cfg.TemplateID)
-	cfg.Runtype = getenv("CRABBOX_VAST_RUNTYPE", cfg.Runtype)
-	cfg.DiskGB = getenvInt("CRABBOX_VAST_DISK_GB", cfg.DiskGB)
-	cfg.MaxDphTotal = getenvFloat("CRABBOX_VAST_MAX_DPH_TOTAL", cfg.MaxDphTotal)
-	cfg.MinReliability = getenvFloat("CRABBOX_VAST_MIN_RELIABILITY", cfg.MinReliability)
-	cfg.Order = getenv("CRABBOX_VAST_ORDER", cfg.Order)
-	cfg.User = getenv("CRABBOX_VAST_USER", cfg.User)
+	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_GPU_NAME"); ok {
+		cfg.GPUName = value
+		applied.InputAccepted = true
+	}
+	if value, ok := lookupEnvInteger("CRABBOX_VAST_GPU_COUNT", strconv.IntSize); ok {
+		cfg.GPUCount = int(value)
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_IMAGE"); ok {
+		cfg.Image = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_TEMPLATE_ID"); ok {
+		cfg.TemplateID = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_RUNTYPE"); ok {
+		cfg.Runtype = value
+		applied.InputAccepted = true
+	}
+	if value, ok := lookupEnvInteger("CRABBOX_VAST_DISK_GB", strconv.IntSize); ok {
+		cfg.DiskGB = int(value)
+		applied.InputAccepted = true
+	}
+	if value, ok := lookupEnvFloat("CRABBOX_VAST_MAX_DPH_TOTAL"); ok {
+		cfg.MaxDphTotal = value
+		applied.InputAccepted = true
+	}
+	if value, ok := lookupEnvFloat("CRABBOX_VAST_MIN_RELIABILITY"); ok {
+		cfg.MinReliability = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_ORDER"); ok {
+		cfg.Order = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_USER"); ok {
+		cfg.User = value
+		applied.InputAccepted = true
+	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_WORK_ROOT"); ok {
 		cfg.WorkRoot = value
+		applied.InputAccepted = true
 		applied.WorkRoot = true
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_RELEASE_ACTION"); ok {
 		cfg.ReleaseAction = value
+		applied.InputAccepted = true
 		applied.ReleaseAction = true
 	}
 	return applied, nil
@@ -202,54 +253,68 @@ func VastConfigFlagPresence(fs *flag.FlagSet) VastConfigVisitedFlags {
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values VastConfigFlagValues) Apply(cfg *VastConfig, fs *flag.FlagSet) VastConfigApplied {
+func (values VastConfigFlagValues) Apply(cfg *VastConfig, fs *flag.FlagSet) (VastConfigApplied, error) {
 	var applied VastConfigApplied
 	visited := VastConfigFlagPresence(fs)
 	if visited.APIURL {
 		cfg.APIURL = *values.APIURL
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
 	if visited.InstanceType {
 		cfg.InstanceType = *values.InstanceType
+		applied.InputAccepted = true
 		applied.InstanceType = true
 	}
 	if flagWasSet(fs, "vast-gpu-name") {
 		cfg.GPUName = *values.GPUName
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "vast-gpu-count") {
 		cfg.GPUCount = *values.GPUCount
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "vast-image") {
 		cfg.Image = *values.Image
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "vast-template-id") {
 		cfg.TemplateID = *values.TemplateID
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "vast-runtype") {
 		cfg.Runtype = *values.Runtype
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "vast-disk-gb") {
 		cfg.DiskGB = *values.DiskGB
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "vast-max-dph-total") {
 		cfg.MaxDphTotal = *values.MaxDphTotal
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "vast-min-reliability") {
 		cfg.MinReliability = *values.MinReliability
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "vast-order") {
 		cfg.Order = *values.Order
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "vast-user") {
 		cfg.User = *values.User
+		applied.InputAccepted = true
 	}
 	if visited.WorkRoot {
 		cfg.WorkRoot = *values.WorkRoot
+		applied.InputAccepted = true
 		applied.WorkRoot = true
 	}
 	if visited.ReleaseAction {
 		cfg.ReleaseAction = *values.ReleaseAction
+		applied.InputAccepted = true
 		applied.ReleaseAction = true
 	}
-	return applied
+	return applied, nil
 }

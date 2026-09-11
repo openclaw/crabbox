@@ -81,6 +81,7 @@ func TestUpstashBoxFlagPresenceAndExactGuardOrder(t *testing.T) {
 	if err := ApplyUpstashBoxProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
+	core.RecordProviderFlagInputs(&before, true, "upstash-box")
 	if !reflect.DeepEqual(cfg, before) {
 		t.Fatal("nonempty visited flags not applied")
 	}

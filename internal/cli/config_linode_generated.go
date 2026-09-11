@@ -20,8 +20,9 @@ func defaultLinodeConfig() LinodeConfig {
 
 // LinodeConfigApplied records accepted assignments during one application.
 type LinodeConfigApplied struct {
-	Image bool
-	Type  bool
+	InputAccepted bool
+	Image         bool
+	Type          bool
 }
 
 func (cfg *LinodeConfig) applyFile(file *fileLinodeConfig) (LinodeConfigApplied, error) {
@@ -31,38 +32,52 @@ func (cfg *LinodeConfig) applyFile(file *fileLinodeConfig) (LinodeConfigApplied,
 	}
 	if file.Region != "" {
 		cfg.Region = file.Region
+		applied.InputAccepted = true
 	}
 	if file.Image != "" {
 		cfg.Image = file.Image
+		applied.InputAccepted = true
 		applied.Image = true
 	}
 	if file.Type != "" {
 		cfg.Type = file.Type
+		applied.InputAccepted = true
 		applied.Type = true
 	}
 	if file.FirewallID != "" {
 		cfg.FirewallID = file.FirewallID
+		applied.InputAccepted = true
 	}
 	if len(file.SSHCIDRs) > 0 {
 		cfg.SSHCIDRs = file.SSHCIDRs
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }
 
 func (cfg *LinodeConfig) applyEnv() (LinodeConfigApplied, error) {
 	var applied LinodeConfigApplied
-	cfg.Region = getenv("CRABBOX_LINODE_REGION", cfg.Region)
+	if value, ok := firstNonEmptyEnv("CRABBOX_LINODE_REGION"); ok {
+		cfg.Region = value
+		applied.InputAccepted = true
+	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_LINODE_IMAGE"); ok {
 		cfg.Image = value
+		applied.InputAccepted = true
 		applied.Image = true
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_LINODE_TYPE"); ok {
 		cfg.Type = value
+		applied.InputAccepted = true
 		applied.Type = true
 	}
-	cfg.FirewallID = getenv("CRABBOX_LINODE_FIREWALL", cfg.FirewallID)
+	if value, ok := firstNonEmptyEnv("CRABBOX_LINODE_FIREWALL"); ok {
+		cfg.FirewallID = value
+		applied.InputAccepted = true
+	}
 	if value := os.Getenv("CRABBOX_LINODE_SSH_CIDRS"); value != "" {
 		cfg.SSHCIDRs = splitCommaList(value)
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }

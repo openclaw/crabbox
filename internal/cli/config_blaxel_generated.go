@@ -4,6 +4,7 @@ package cli
 
 import (
 	"flag"
+	"strconv"
 )
 
 type fileBlaxelConfig struct {
@@ -33,70 +34,119 @@ func defaultBlaxelConfig() BlaxelConfig {
 	}
 }
 
-func (cfg *BlaxelConfig) applyFile(file *fileBlaxelConfig, trusted bool) error {
+// BlaxelConfigApplied records accepted assignments during one application.
+type BlaxelConfigApplied struct {
+	InputAccepted bool
+}
+
+func (cfg *BlaxelConfig) applyFile(file *fileBlaxelConfig, trusted bool) (BlaxelConfigApplied, error) {
+	var applied BlaxelConfigApplied
 	if file == nil {
-		return nil
+		return applied, nil
 	}
 	if trusted && file.APIURL != "" {
 		cfg.APIURL = file.APIURL
+		applied.InputAccepted = true
 	}
 	if trusted && file.Workspace != "" {
 		cfg.Workspace = file.Workspace
+		applied.InputAccepted = true
 	}
 	if file.Region != "" {
 		cfg.Region = file.Region
+		applied.InputAccepted = true
 	}
 	if file.Image != nil {
 		cfg.Image = *file.Image
+		applied.InputAccepted = true
 	}
 	if file.MemoryMB != nil {
 		if *file.MemoryMB < 0 {
-			return exit(2, "blaxel memoryMB must be non-negative")
+			return applied, exit(2, "blaxel memoryMB must be non-negative")
 		}
 		cfg.MemoryMB = *file.MemoryMB
+		applied.InputAccepted = true
 	}
 	if file.TTL != "" {
 		cfg.TTL = file.TTL
+		applied.InputAccepted = true
 	}
 	if file.IdleTTL != "" {
 		cfg.IdleTTL = file.IdleTTL
+		applied.InputAccepted = true
 	}
 	if file.Workdir != nil {
 		cfg.Workdir = *file.Workdir
+		applied.InputAccepted = true
 	}
 	if file.ExecTimeoutSecs != nil {
 		if *file.ExecTimeoutSecs < 0 {
-			return exit(2, "blaxel execTimeoutSecs must be non-negative")
+			return applied, exit(2, "blaxel execTimeoutSecs must be non-negative")
 		}
 		cfg.ExecTimeoutSecs = *file.ExecTimeoutSecs
+		applied.InputAccepted = true
 	}
 	if file.ForgetMissing != nil {
 		cfg.ForgetMissing = *file.ForgetMissing
+		applied.InputAccepted = true
 	}
-	return nil
+	return applied, nil
 }
 
-func (cfg *BlaxelConfig) applyEnv() error {
-	cfg.APIKey = getenv("CRABBOX_BLAXEL_API_KEY", getenv("BL_API_KEY", cfg.APIKey))
-	cfg.APIURL = getenv("CRABBOX_BLAXEL_API_URL", cfg.APIURL)
-	cfg.Workspace = getenv("CRABBOX_BLAXEL_WORKSPACE", getenv("BL_WORKSPACE", cfg.Workspace))
-	cfg.Region = getenv("CRABBOX_BLAXEL_REGION", getenv("BL_REGION", cfg.Region))
-	cfg.Image = getenv("CRABBOX_BLAXEL_IMAGE", cfg.Image)
-	cfg.MemoryMB = getenvInt("CRABBOX_BLAXEL_MEMORY_MB", cfg.MemoryMB)
-	cfg.TTL = getenv("CRABBOX_BLAXEL_TTL", cfg.TTL)
-	cfg.IdleTTL = getenv("CRABBOX_BLAXEL_IDLE_TTL", cfg.IdleTTL)
-	cfg.Workdir = getenv("CRABBOX_BLAXEL_WORKDIR", cfg.Workdir)
+func (cfg *BlaxelConfig) applyEnv() (BlaxelConfigApplied, error) {
+	var applied BlaxelConfigApplied
+	if value, ok := firstNonEmptyEnv("CRABBOX_BLAXEL_API_KEY", "BL_API_KEY"); ok {
+		cfg.APIKey = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_BLAXEL_API_URL"); ok {
+		cfg.APIURL = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_BLAXEL_WORKSPACE", "BL_WORKSPACE"); ok {
+		cfg.Workspace = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_BLAXEL_REGION", "BL_REGION"); ok {
+		cfg.Region = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_BLAXEL_IMAGE"); ok {
+		cfg.Image = value
+		applied.InputAccepted = true
+	}
+	if value, ok := lookupEnvInteger("CRABBOX_BLAXEL_MEMORY_MB", strconv.IntSize); ok {
+		cfg.MemoryMB = int(value)
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_BLAXEL_TTL"); ok {
+		cfg.TTL = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_BLAXEL_IDLE_TTL"); ok {
+		cfg.IdleTTL = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_BLAXEL_WORKDIR"); ok {
+		cfg.Workdir = value
+		applied.InputAccepted = true
+	}
 	{
+		var accepted bool
 		var err error
-		cfg.ExecTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_BLAXEL_EXEC_TIMEOUT_SECS", cfg.ExecTimeoutSecs)
+		cfg.ExecTimeoutSecs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_BLAXEL_EXEC_TIMEOUT_SECS", cfg.ExecTimeoutSecs)
 		if err != nil {
-			return err
+			return applied, err
+		}
+		if accepted {
+			applied.InputAccepted = true
 		}
 	}
 	if value, ok := getenvBool("CRABBOX_BLAXEL_FORGET_MISSING"); ok {
 		cfg.ForgetMissing = value
+		applied.InputAccepted = true
 	}
-	return nil
+	return applied, nil
 }
 
 // BlaxelConfigFlagValues holds parsed values; only visited flags are applied.
@@ -130,35 +180,47 @@ func RegisterBlaxelConfigFlags(fs *flag.FlagSet, defaults BlaxelConfig) BlaxelCo
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values BlaxelConfigFlagValues) Apply(cfg *BlaxelConfig, fs *flag.FlagSet) {
+func (values BlaxelConfigFlagValues) Apply(cfg *BlaxelConfig, fs *flag.FlagSet) (BlaxelConfigApplied, error) {
+	var applied BlaxelConfigApplied
 	if flagWasSet(fs, "blaxel-api-url") {
 		cfg.APIURL = *values.APIURL
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "blaxel-workspace") {
 		cfg.Workspace = *values.Workspace
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "blaxel-region") {
 		cfg.Region = *values.Region
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "blaxel-image") {
 		cfg.Image = *values.Image
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "blaxel-memory-mb") {
 		cfg.MemoryMB = *values.MemoryMB
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "blaxel-ttl") {
 		cfg.TTL = *values.TTL
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "blaxel-idle-ttl") {
 		cfg.IdleTTL = *values.IdleTTL
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "blaxel-workdir") {
 		cfg.Workdir = *values.Workdir
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "blaxel-exec-timeout-secs") {
 		cfg.ExecTimeoutSecs = *values.ExecTimeoutSecs
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "blaxel-forget-missing") {
 		cfg.ForgetMissing = *values.ForgetMissing
+		applied.InputAccepted = true
 	}
+	return applied, nil
 }

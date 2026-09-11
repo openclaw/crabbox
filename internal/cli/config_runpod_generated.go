@@ -4,6 +4,7 @@ package cli
 
 import (
 	"flag"
+	"strconv"
 )
 
 type fileRunpodConfig struct {
@@ -35,8 +36,9 @@ func defaultRunpodConfig() RunpodConfig {
 
 // RunpodConfigApplied records accepted assignments during one application.
 type RunpodConfigApplied struct {
-	APIKey bool
-	APIURL bool
+	InputAccepted bool
+	APIKey        bool
+	APIURL        bool
 }
 
 func (cfg *RunpodConfig) applyFile(file *fileRunpodConfig) (RunpodConfigApplied, error) {
@@ -46,28 +48,36 @@ func (cfg *RunpodConfig) applyFile(file *fileRunpodConfig) (RunpodConfigApplied,
 	}
 	if file.APIURL != "" {
 		cfg.APIURL = file.APIURL
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
 	if file.CloudType != "" {
 		cfg.CloudType = file.CloudType
+		applied.InputAccepted = true
 	}
 	if file.InstanceID != "" {
 		cfg.InstanceID = file.InstanceID
+		applied.InputAccepted = true
 	}
 	if file.Image != "" {
 		cfg.Image = file.Image
+		applied.InputAccepted = true
 	}
 	if file.TemplateID != "" {
 		cfg.TemplateID = file.TemplateID
+		applied.InputAccepted = true
 	}
 	if file.DiskGB != 0 {
 		cfg.DiskGB = file.DiskGB
+		applied.InputAccepted = true
 	}
 	if file.User != "" {
 		cfg.User = file.User
+		applied.InputAccepted = true
 	}
 	if file.WorkRoot != "" {
 		cfg.WorkRoot = file.WorkRoot
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }
@@ -76,19 +86,42 @@ func (cfg *RunpodConfig) applyEnv() (RunpodConfigApplied, error) {
 	var applied RunpodConfigApplied
 	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_API_KEY", "RUNPOD_API_KEY"); ok {
 		cfg.APIKey = value
+		applied.InputAccepted = true
 		applied.APIKey = true
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_API_URL", "RUNPOD_API_URL"); ok {
 		cfg.APIURL = value
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
-	cfg.CloudType = getenv("CRABBOX_RUNPOD_CLOUD_TYPE", getenv("RUNPOD_CLOUD_TYPE", cfg.CloudType))
-	cfg.InstanceID = getenv("CRABBOX_RUNPOD_INSTANCE_ID", getenv("RUNPOD_INSTANCE_ID", cfg.InstanceID))
-	cfg.Image = getenv("CRABBOX_RUNPOD_IMAGE", getenv("RUNPOD_IMAGE", cfg.Image))
-	cfg.TemplateID = getenv("CRABBOX_RUNPOD_TEMPLATE_ID", getenv("RUNPOD_TEMPLATE_ID", cfg.TemplateID))
-	cfg.DiskGB = getenvInt("CRABBOX_RUNPOD_DISK_GB", cfg.DiskGB)
-	cfg.User = getenv("CRABBOX_RUNPOD_USER", cfg.User)
-	cfg.WorkRoot = getenv("CRABBOX_RUNPOD_WORK_ROOT", cfg.WorkRoot)
+	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_CLOUD_TYPE", "RUNPOD_CLOUD_TYPE"); ok {
+		cfg.CloudType = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_INSTANCE_ID", "RUNPOD_INSTANCE_ID"); ok {
+		cfg.InstanceID = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_IMAGE", "RUNPOD_IMAGE"); ok {
+		cfg.Image = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_TEMPLATE_ID", "RUNPOD_TEMPLATE_ID"); ok {
+		cfg.TemplateID = value
+		applied.InputAccepted = true
+	}
+	if value, ok := lookupEnvInteger("CRABBOX_RUNPOD_DISK_GB", strconv.IntSize); ok {
+		cfg.DiskGB = int(value)
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_USER"); ok {
+		cfg.User = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_WORK_ROOT"); ok {
+		cfg.WorkRoot = value
+		applied.InputAccepted = true
+	}
 	return applied, nil
 }
 
@@ -131,33 +164,41 @@ func RunpodConfigFlagPresence(fs *flag.FlagSet) RunpodConfigVisitedFlags {
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values RunpodConfigFlagValues) Apply(cfg *RunpodConfig, fs *flag.FlagSet) RunpodConfigApplied {
+func (values RunpodConfigFlagValues) Apply(cfg *RunpodConfig, fs *flag.FlagSet) (RunpodConfigApplied, error) {
 	var applied RunpodConfigApplied
 	visited := RunpodConfigFlagPresence(fs)
 	if visited.APIURL {
 		cfg.APIURL = *values.APIURL
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
 	if flagWasSet(fs, "runpod-cloud-type") {
 		cfg.CloudType = *values.CloudType
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "runpod-instance-id") {
 		cfg.InstanceID = *values.InstanceID
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "runpod-image") {
 		cfg.Image = *values.Image
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "runpod-template-id") {
 		cfg.TemplateID = *values.TemplateID
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "runpod-disk-gb") {
 		cfg.DiskGB = *values.DiskGB
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "runpod-user") {
 		cfg.User = *values.User
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "runpod-work-root") {
 		cfg.WorkRoot = *values.WorkRoot
+		applied.InputAccepted = true
 	}
-	return applied
+	return applied, nil
 }

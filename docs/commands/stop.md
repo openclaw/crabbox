@@ -97,7 +97,10 @@ Crabbox lease ID and local slug:
   fresh matching session ownership metadata before terminating the sandbox.
   Failed termination keeps the claim; claimless sessions require explicit
   `--reclaim` reuse.
-- `daytona` — deletes the Daytona sandbox.
+- `daytona` — deletes the Daytona sandbox and waits for confirmed deletion under
+  the caller's cancellation and deadline. The CLI remains signal-cancelable;
+  the automatic-cleanup timeout does not shorten that lifetime. Non-cancelable
+  callers, including detached job cleanup, retain the 30-second fallback.
 - `coder` — stops the Coder workspace by default and removes the local claim.
   Set `coder.deleteOnRelease` or pass `--coder-delete-on-release` to delete the
   workspace instead.

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -123,6 +124,38 @@ func newTestBlacksmithBackend(cfg Config, runner CommandRunner) *blacksmithBacke
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
 		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: testClock{}, Exec: runner},
+	}
+}
+
+func TestManualConfigInputFlags(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "fixture-other"
+	fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+	values := RegisterBlacksmithProviderFlags(fs, cfg)
+	before := cfg
+	if err := ApplyBlacksmithProviderFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+		t.Fatalf("foreign values changed configuration: %v", err)
+	}
+	if err := ApplyBlacksmithProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	want := cfg
+	core.RecordProviderFlagInputs(&want, true, "blacksmith-testbox")
+	if reflect.DeepEqual(cfg, want) {
+		t.Fatal("unvisited flags recorded input")
+	}
+	for repeat := 0; repeat < 2; repeat++ {
+		if err := fs.Set("blacksmith-org", "fixture"); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyBlacksmithProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want = cfg
+		core.RecordProviderFlagInputs(&want, true, "blacksmith-testbox")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatal("accepted/equal flag value was not recorded")
+		}
 	}
 }
 

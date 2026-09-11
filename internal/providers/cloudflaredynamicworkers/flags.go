@@ -38,7 +38,7 @@ func ApplyProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
 			return err
 		}
-		if flagWasSet(fs, "expose") {
+		if core.FlagWasSet(fs, "expose") {
 			return exit(2, "--expose is not supported for provider=%s", providerName)
 		}
 	}
@@ -46,29 +46,37 @@ func ApplyProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "cloudflare-dynamic-workers-url") {
+	if core.FlagWasSet(fs, "cloudflare-dynamic-workers-url") {
 		cfg.CloudflareDynamicWorkers.LoaderURL = *v.URL
+		core.RecordProviderFlagInputs(cfg, true, "cloudflare-dynamic-workers")
 	}
-	if flagWasSet(fs, "cloudflare-dynamic-workers-compatibility-date") {
+	if core.FlagWasSet(fs, "cloudflare-dynamic-workers-compatibility-date") {
 		cfg.CloudflareDynamicWorkers.CompatibilityDate = *v.CompatibilityDate
+		core.RecordProviderFlagInputs(cfg, true, "cloudflare-dynamic-workers")
 	}
-	if flagWasSet(fs, "cloudflare-dynamic-workers-compatibility-flags") {
+	if core.FlagWasSet(fs, "cloudflare-dynamic-workers-compatibility-flags") {
 		cfg.CloudflareDynamicWorkers.CompatibilityFlags = splitCommaList(*v.CompatibilityFlags)
+		core.RecordProviderFlagInputs(cfg, true, "cloudflare-dynamic-workers")
 	}
-	if flagWasSet(fs, "cloudflare-dynamic-workers-cache") {
+	if core.FlagWasSet(fs, "cloudflare-dynamic-workers-cache") {
 		cfg.CloudflareDynamicWorkers.CacheMode = *v.CacheMode
+		core.RecordProviderFlagInputs(cfg, true, "cloudflare-dynamic-workers")
 	}
-	if flagWasSet(fs, "cloudflare-dynamic-workers-egress") {
+	if core.FlagWasSet(fs, "cloudflare-dynamic-workers-egress") {
 		cfg.CloudflareDynamicWorkers.Egress = *v.Egress
+		core.RecordProviderFlagInputs(cfg, true, "cloudflare-dynamic-workers")
 	}
-	if flagWasSet(fs, "cloudflare-dynamic-workers-cpu-ms") {
+	if core.FlagWasSet(fs, "cloudflare-dynamic-workers-cpu-ms") {
 		cfg.CloudflareDynamicWorkers.CPUMs = *v.CPUMs
+		core.RecordProviderFlagInputs(cfg, true, "cloudflare-dynamic-workers")
 	}
-	if flagWasSet(fs, "cloudflare-dynamic-workers-subrequests") {
+	if core.FlagWasSet(fs, "cloudflare-dynamic-workers-subrequests") {
 		cfg.CloudflareDynamicWorkers.Subrequests = *v.Subrequests
+		core.RecordProviderFlagInputs(cfg, true, "cloudflare-dynamic-workers")
 	}
-	if flagWasSet(fs, "cloudflare-dynamic-workers-timeout-secs") {
+	if core.FlagWasSet(fs, "cloudflare-dynamic-workers-timeout-secs") {
 		cfg.CloudflareDynamicWorkers.TimeoutSecs = *v.TimeoutSecs
+		core.RecordProviderFlagInputs(cfg, true, "cloudflare-dynamic-workers")
 	}
 	return validateProviderConfig(*cfg)
 }

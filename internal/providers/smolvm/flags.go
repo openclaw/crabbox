@@ -22,7 +22,11 @@ func ApplySmolvmProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	v.Apply(&cfg.Smolvm, fs)
+	applied, err := v.Apply(&cfg.Smolvm, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	if err != nil {
+		return err
+	}
 	return validateConfig(*cfg)
 }
 

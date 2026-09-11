@@ -20,6 +20,53 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+func TestConcreteFlagInputAttribution(t *testing.T) {
+	for _, raw := range []string{"unvisited", "helper", ""} {
+		t.Run(raw, func(t *testing.T) {
+			cfg := core.Config{Provider: "other", AppleVM: core.AppleVMConfig{HelperPath: "helper"}}
+			want := cfg
+			fs := flag.NewFlagSet("inputs", flag.ContinueOnError)
+			values := registerFlags(fs, cfg)
+			if raw != "unvisited" {
+				if err := fs.Parse([]string{"--apple-vz-helper", raw}); err != nil {
+					t.Fatal(err)
+				}
+				want.AppleVM.HelperPath = raw
+				core.RecordProviderFlagInputs(&want, true, "apple-vm")
+			}
+			if err := applyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("unexpected applied config: %#v", cfg)
+			}
+		})
+	}
+	for _, earlier := range []bool{false, true} {
+		t.Run(fmt.Sprintf("partial-%t", earlier), func(t *testing.T) {
+			cfg := core.Config{Provider: "other"}
+			want := cfg
+			fs := flag.NewFlagSet("inputs", flag.ContinueOnError)
+			values := registerFlags(fs, cfg)
+			args := []string{"--apple-vm-cpus=0"}
+			if earlier {
+				args = append(args, "--apple-vm-helper=helper")
+				want.AppleVM.HelperPath = "helper"
+				core.RecordProviderFlagInputs(&want, true, "apple-vm")
+			}
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFlags(&cfg, fs, values); err == nil || !strings.Contains(err.Error(), "--apple-vm-cpus must be positive") {
+				t.Fatalf("error=%v", err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("partial acceptance changed: %#v", cfg)
+			}
+		})
+	}
+}
+
 type recordingRunner struct {
 	calls     []core.LocalCommandRequest
 	responses map[string]core.LocalCommandResult
@@ -403,6 +450,7 @@ func TestAppleVMOrdinaryPublicFlags(t *testing.T) {
 				want := initial
 				want.AppleVM = tc.want
 				if tc.visited {
+					core.RecordProviderFlagInputs(&want, true, providerName)
 					want.SSHUser, want.WorkRoot = tc.want.User, tc.want.WorkRoot
 					core.MarkAppleVMImageExplicit(&want)
 					core.MarkAppleVMImageSHA256Explicit(&want)
@@ -467,6 +515,8 @@ func TestAppleVMOrdinaryPublicFlags(t *testing.T) {
 					t.Fatal(err)
 				}
 				want = initial
+				// Earlier accepted image inputs remain recorded on the final no-op step.
+				core.RecordProviderFlagInputs(&want, true, providerName)
 				want.AppleVM.Image, want.AppleVM.ImageSHA256 = step.image, step.checksum
 				if step.imageMarked {
 					core.MarkAppleVMImageExplicit(&want)
@@ -543,6 +593,7 @@ func TestAppleVMOrdinaryPublicFlagNumericErrors(t *testing.T) {
 							t.Fatalf("error=%v, want exit 2: %s", err, message)
 						}
 						want.AppleVM.HelperPath, want.AppleVM.ImageSHA256 = "~/helper", ""
+						core.RecordProviderFlagInputs(&want, true, providerName)
 						want.AppleVM.User, want.SSHUser = "ci", "ci"
 						want.AppleVM.WorkRoot, want.WorkRoot = "/work/ci", "/work/ci"
 						core.MarkAppleVMImageExplicit(&want)

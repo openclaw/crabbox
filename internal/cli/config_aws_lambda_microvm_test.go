@@ -48,3 +48,74 @@ func TestAWSLambdaMicroVMConfigYAMLAndEnv(t *testing.T) {
 		t.Fatalf("env connectors=%#v", cfg.AWSLambdaMicroVM)
 	}
 }
+
+func TestAWSLambdaMicroVMConnectorOverlays(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw string
+		want      []string
+	}{
+		{"empty", "", []string{"inherited"}},
+		{"whitespace", " \t ", nil},
+		{"commas", " , , ", []string{}},
+		{"items", " a , b , a ", []string{"a", "b", "a"}},
+		{"literal-none", "none", []string{"none"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.AWSLambdaMicroVM.IngressConnectors = []string{"inherited"}
+			cfg.AWSLambdaMicroVM.EgressConnectors = []string{"inherited"}
+			t.Setenv("CRABBOX_AWS_LAMBDA_MICROVM_INGRESS_CONNECTORS", tc.raw)
+			t.Setenv("CRABBOX_AWS_LAMBDA_MICROVM_EGRESS_CONNECTORS", tc.raw)
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			for _, got := range [][]string{cfg.AWSLambdaMicroVM.IngressConnectors, cfg.AWSLambdaMicroVM.EgressConnectors} {
+				if !reflect.DeepEqual(got, tc.want) {
+					t.Fatalf("list=%#v, want %#v", got, tc.want)
+				}
+			}
+		})
+	}
+	for _, raw := range []string{"null", "[]", "[' a ', b, ' a ']"} {
+		t.Run("file-"+raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.AWSLambdaMicroVM.IngressConnectors = []string{"inherited"}
+			cfg.AWSLambdaMicroVM.EgressConnectors = []string{"inherited"}
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte("awsLambdaMicroVM:\n  ingressConnectors: "+raw+"\n  egressConnectors: "+raw+"\n  forgetMissing: false\n"), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfig(&cfg, file); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{" a ", "b", " a "}
+			if raw == "null" {
+				want = []string{"inherited"}
+			} else if raw == "[]" {
+				want = nil
+			}
+			for _, got := range [][]string{cfg.AWSLambdaMicroVM.IngressConnectors, cfg.AWSLambdaMicroVM.EgressConnectors} {
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("file list=%#v, want %#v", got, want)
+				}
+			}
+			encoded, err := yaml.Marshal(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var roundtrip fileConfig
+			if err := yaml.Unmarshal(encoded, &roundtrip); err != nil || !reflect.DeepEqual(file.AWSLambdaMicroVM, roundtrip.AWSLambdaMicroVM) {
+				t.Fatalf("raw file roundtrip changed: %s (%v)", encoded, err)
+			}
+			if raw != "null" && raw != "[]" {
+				(*file.AWSLambdaMicroVM.IngressConnectors)[0] = "changed"
+				(*file.AWSLambdaMicroVM.EgressConnectors)[0] = "changed"
+				if cfg.AWSLambdaMicroVM.IngressConnectors[0] != " a " || cfg.AWSLambdaMicroVM.EgressConnectors[0] != " a " {
+					t.Fatal("runtime lists alias the file lists")
+				}
+			}
+		})
+	}
+}

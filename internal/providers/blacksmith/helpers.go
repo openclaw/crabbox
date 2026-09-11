@@ -48,17 +48,21 @@ func registerBlacksmithFlags(fs *flag.FlagSet, defaults Config) blacksmithFlagVa
 }
 
 func applyBlacksmithFlagOverrides(cfg *Config, fs *flag.FlagSet, values blacksmithFlagValues) {
-	if flagWasSet(fs, "blacksmith-org") {
+	if core.FlagWasSet(fs, "blacksmith-org") {
 		cfg.Blacksmith.Org = *values.Org
+		core.RecordProviderFlagInputs(cfg, true, "blacksmith-testbox")
 	}
-	if flagWasSet(fs, "blacksmith-workflow") {
+	if core.FlagWasSet(fs, "blacksmith-workflow") {
 		cfg.Blacksmith.Workflow = *values.Workflow
+		core.RecordProviderFlagInputs(cfg, true, "blacksmith-testbox")
 	}
-	if flagWasSet(fs, "blacksmith-job") {
+	if core.FlagWasSet(fs, "blacksmith-job") {
 		cfg.Blacksmith.Job = *values.Job
+		core.RecordProviderFlagInputs(cfg, true, "blacksmith-testbox")
 	}
-	if flagWasSet(fs, "blacksmith-ref") {
+	if core.FlagWasSet(fs, "blacksmith-ref") {
 		cfg.Blacksmith.Ref = *values.Ref
+		core.RecordProviderFlagInputs(cfg, true, "blacksmith-testbox")
 	}
 }
 
@@ -293,10 +297,6 @@ func isShellEnvAssignment(word string) bool {
 		}
 	}
 	return true
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
 }
 
 func exit(code int, format string, args ...any) core.ExitError {

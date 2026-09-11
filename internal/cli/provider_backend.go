@@ -656,6 +656,7 @@ type CheckpointLeaseIDBackend interface {
 }
 
 type ProviderSpec struct {
+	Authentication   ProviderAuthentication
 	Name             string
 	Family           string
 	Kind             ProviderKind
@@ -1067,7 +1068,10 @@ type AcquireRequest struct {
 	Reclaim               bool
 	RequestedLeaseID      string
 	RequestedCheckpointID string
-	RequestedSlug         string
+	// Native source identity remains available at the allocation owner, which can
+	// distinguish a fresh fork from replay of an already allocated resource.
+	CheckpointSource *NativeCheckpointForkRecord
+	RequestedSlug    string
 	// OnAcquired observes a fully validated raw provider identity before local
 	// routing, readiness, or claim side effects. Returning an error requires the
 	// provider adapter to roll back the acquired resource.

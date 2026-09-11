@@ -58,53 +58,69 @@ func ApplyFirecrackerProviderFlags(cfg *core.Config, fs *flag.FlagSet, values an
 	}
 	if core.FlagWasSet(fs, "firecracker-binary") {
 		cfg.Firecracker.Binary = core.ExpandUserPath(*v.BinaryPath)
+		core.RecordProviderFlagInputs(cfg, true, "firecracker")
 	}
 	if core.FlagWasSet(fs, "firecracker-jailer") {
 		cfg.Firecracker.Jailer = core.ExpandUserPath(*v.JailerPath)
+		core.RecordProviderFlagInputs(cfg, true, "firecracker")
 	}
 	if core.FlagWasSet(fs, "firecracker-kernel") {
 		cfg.Firecracker.Kernel = core.ExpandUserPath(*v.KernelPath)
+		core.RecordProviderFlagInputs(cfg, true, "firecracker")
 	}
 	if core.FlagWasSet(fs, "firecracker-rootfs") {
 		cfg.Firecracker.RootFS = core.ExpandUserPath(*v.RootFSPath)
+		core.RecordProviderFlagInputs(cfg, true, "firecracker")
 	}
 	if core.FlagWasSet(fs, "firecracker-user") {
 		cfg.Firecracker.User = *v.User
+		core.RecordProviderFlagInputs(cfg, true, "firecracker")
 		cfg.SSHUser = *v.User
 	}
 	if core.FlagWasSet(fs, "firecracker-work-root") {
 		cfg.Firecracker.WorkRoot = *v.WorkRoot
+		core.RecordProviderFlagInputs(cfg, true, "firecracker")
 		cfg.WorkRoot = *v.WorkRoot
 	}
 	if core.FlagWasSet(fs, "firecracker-cpus") {
 		cfg.Firecracker.CPUs = *v.VCPUs
+		core.RecordProviderFlagInputs(cfg, true, "firecracker")
 	}
 	if core.FlagWasSet(fs, "firecracker-memory-mib") {
 		cfg.Firecracker.MemoryMiB = *v.MemoryMiB
+		core.RecordProviderFlagInputs(cfg, true, "firecracker")
 	}
 	if core.FlagWasSet(fs, "firecracker-disk-mib") {
 		cfg.Firecracker.DiskMiB = *v.DiskMiB
+		core.RecordProviderFlagInputs(cfg, true, "firecracker")
 	}
 	if core.FlagWasSet(fs, "firecracker-network") {
 		cfg.Firecracker.Network = *v.NetworkMode
+		core.RecordProviderFlagInputs(cfg, true, "firecracker")
 	}
 	if core.FlagWasSet(fs, "firecracker-cni-network") {
 		cfg.Firecracker.CNINetwork = *v.CNINetwork
+		core.RecordProviderFlagInputs(cfg, true, "firecracker")
 	}
 	if core.FlagWasSet(fs, "firecracker-cni-conf-dir") {
 		cfg.Firecracker.CNIConfDir = core.ExpandUserPath(*v.CNIConfDir)
+		core.RecordProviderFlagInputs(cfg, true, "firecracker")
 	}
 	if core.FlagWasSet(fs, "firecracker-cni-bin-dir") {
 		cfg.Firecracker.CNIBinDir = core.ExpandUserPath(*v.CNIBinDir)
+		core.RecordProviderFlagInputs(cfg, true, "firecracker")
 	}
 	if core.FlagWasSet(fs, "firecracker-launch-timeout") {
 		if err := core.ApplyLeaseDuration(&cfg.Firecracker.LaunchTimeout, *v.LaunchTimeout); err != nil {
 			return err
 		}
+		core.RecordProviderFlagInputs(cfg, *v.LaunchTimeout != "", "firecracker")
 	}
 	if core.FlagWasSet(fs, "firecracker-delete-on-release") {
 		cfg.Firecracker.DeleteOnRelease = *v.DeleteOnRelease
+		core.RecordProviderFlagInputs(cfg, true, "firecracker")
 		core.MarkDeleteOnReleaseExplicit(cfg, providerName)
+		core.RecordProviderFlagIntents(cfg, true, "firecracker")
 	}
 	if isFirecrackerProviderName(cfg.Provider) {
 		applyDefaults(cfg)

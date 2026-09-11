@@ -364,6 +364,7 @@ func TestE2BFlagsPreserveExactGuardAndDeferredValidation(t *testing.T) {
 	if err := ApplyE2BProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
+	core.RecordProviderFlagInputs(&before, true, "e2b")
 	if !reflect.DeepEqual(cfg, before) {
 		t.Fatal("positive flags changed binding or marker semantics")
 	}

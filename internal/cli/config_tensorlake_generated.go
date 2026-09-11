@@ -4,6 +4,7 @@ package cli
 
 import (
 	"flag"
+	"strconv"
 )
 
 type fileTensorlakeConfig struct {
@@ -42,8 +43,9 @@ func defaultTensorlakeConfig() TensorlakeConfig {
 
 // TensorlakeConfigApplied records accepted assignments during one application.
 type TensorlakeConfigApplied struct {
-	APIKey bool
-	APIURL bool
+	InputAccepted bool
+	APIKey        bool
+	APIURL        bool
 }
 
 func (cfg *TensorlakeConfig) applyFile(file *fileTensorlakeConfig) (TensorlakeConfigApplied, error) {
@@ -53,43 +55,56 @@ func (cfg *TensorlakeConfig) applyFile(file *fileTensorlakeConfig) (TensorlakeCo
 	}
 	if file.APIURL != "" {
 		cfg.APIURL = file.APIURL
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
 	if file.CLIPath != "" {
 		cfg.CLIPath = file.CLIPath
+		applied.InputAccepted = true
 	}
 	if file.Image != "" {
 		cfg.Image = file.Image
+		applied.InputAccepted = true
 	}
 	if file.Snapshot != "" {
 		cfg.Snapshot = file.Snapshot
+		applied.InputAccepted = true
 	}
 	if file.OrganizationID != "" {
 		cfg.OrganizationID = file.OrganizationID
+		applied.InputAccepted = true
 	}
 	if file.ProjectID != "" {
 		cfg.ProjectID = file.ProjectID
+		applied.InputAccepted = true
 	}
 	if file.Namespace != "" {
 		cfg.Namespace = file.Namespace
+		applied.InputAccepted = true
 	}
 	if file.Workdir != "" {
 		cfg.Workdir = file.Workdir
+		applied.InputAccepted = true
 	}
 	if file.CPUs > 0 {
 		cfg.CPUs = file.CPUs
+		applied.InputAccepted = true
 	}
 	if file.MemoryMB > 0 {
 		cfg.MemoryMB = file.MemoryMB
+		applied.InputAccepted = true
 	}
 	if file.DiskMB > 0 {
 		cfg.DiskMB = file.DiskMB
+		applied.InputAccepted = true
 	}
 	if file.TimeoutSecs > 0 {
 		cfg.TimeoutSecs = file.TimeoutSecs
+		applied.InputAccepted = true
 	}
 	if file.NoInternet != nil {
 		cfg.NoInternet = *file.NoInternet
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }
@@ -98,25 +113,61 @@ func (cfg *TensorlakeConfig) applyEnv() (TensorlakeConfigApplied, error) {
 	var applied TensorlakeConfigApplied
 	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_API_KEY", "TENSORLAKE_API_KEY"); ok {
 		cfg.APIKey = value
+		applied.InputAccepted = true
 		applied.APIKey = true
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_API_URL", "TENSORLAKE_API_URL"); ok {
 		cfg.APIURL = value
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
-	cfg.CLIPath = getenv("CRABBOX_TENSORLAKE_CLI", cfg.CLIPath)
-	cfg.Image = getenv("CRABBOX_TENSORLAKE_IMAGE", cfg.Image)
-	cfg.Snapshot = getenv("CRABBOX_TENSORLAKE_SNAPSHOT", cfg.Snapshot)
-	cfg.OrganizationID = getenv("CRABBOX_TENSORLAKE_ORGANIZATION_ID", getenv("TENSORLAKE_ORGANIZATION_ID", cfg.OrganizationID))
-	cfg.ProjectID = getenv("CRABBOX_TENSORLAKE_PROJECT_ID", getenv("TENSORLAKE_PROJECT_ID", cfg.ProjectID))
-	cfg.Namespace = getenv("CRABBOX_TENSORLAKE_NAMESPACE", getenv("INDEXIFY_NAMESPACE", cfg.Namespace))
-	cfg.Workdir = getenv("CRABBOX_TENSORLAKE_WORKDIR", cfg.Workdir)
-	cfg.CPUs = getenvFloat("CRABBOX_TENSORLAKE_CPUS", cfg.CPUs)
-	cfg.MemoryMB = getenvInt("CRABBOX_TENSORLAKE_MEMORY_MB", cfg.MemoryMB)
-	cfg.DiskMB = getenvInt("CRABBOX_TENSORLAKE_DISK_MB", cfg.DiskMB)
-	cfg.TimeoutSecs = getenvInt("CRABBOX_TENSORLAKE_TIMEOUT_SECS", cfg.TimeoutSecs)
+	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_CLI"); ok {
+		cfg.CLIPath = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_IMAGE"); ok {
+		cfg.Image = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_SNAPSHOT"); ok {
+		cfg.Snapshot = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_ORGANIZATION_ID", "TENSORLAKE_ORGANIZATION_ID"); ok {
+		cfg.OrganizationID = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_PROJECT_ID", "TENSORLAKE_PROJECT_ID"); ok {
+		cfg.ProjectID = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_NAMESPACE", "INDEXIFY_NAMESPACE"); ok {
+		cfg.Namespace = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_WORKDIR"); ok {
+		cfg.Workdir = value
+		applied.InputAccepted = true
+	}
+	if value, ok := lookupEnvFloat("CRABBOX_TENSORLAKE_CPUS"); ok {
+		cfg.CPUs = value
+		applied.InputAccepted = true
+	}
+	if value, ok := lookupEnvInteger("CRABBOX_TENSORLAKE_MEMORY_MB", strconv.IntSize); ok {
+		cfg.MemoryMB = int(value)
+		applied.InputAccepted = true
+	}
+	if value, ok := lookupEnvInteger("CRABBOX_TENSORLAKE_DISK_MB", strconv.IntSize); ok {
+		cfg.DiskMB = int(value)
+		applied.InputAccepted = true
+	}
+	if value, ok := lookupEnvInteger("CRABBOX_TENSORLAKE_TIMEOUT_SECS", strconv.IntSize); ok {
+		cfg.TimeoutSecs = int(value)
+		applied.InputAccepted = true
+	}
 	if value, ok := getenvBool("CRABBOX_TENSORLAKE_NO_INTERNET"); ok {
 		cfg.NoInternet = value
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }
@@ -170,48 +221,61 @@ func TensorlakeConfigFlagPresence(fs *flag.FlagSet) TensorlakeConfigVisitedFlags
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values TensorlakeConfigFlagValues) Apply(cfg *TensorlakeConfig, fs *flag.FlagSet) TensorlakeConfigApplied {
+func (values TensorlakeConfigFlagValues) Apply(cfg *TensorlakeConfig, fs *flag.FlagSet) (TensorlakeConfigApplied, error) {
 	var applied TensorlakeConfigApplied
 	visited := TensorlakeConfigFlagPresence(fs)
 	if visited.APIURL {
 		cfg.APIURL = *values.APIURL
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
 	if flagWasSet(fs, "tensorlake-cli") {
 		cfg.CLIPath = *values.CLIPath
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "tensorlake-image") {
 		cfg.Image = *values.Image
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "tensorlake-snapshot") {
 		cfg.Snapshot = *values.Snapshot
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "tensorlake-organization-id") {
 		cfg.OrganizationID = *values.OrganizationID
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "tensorlake-project-id") {
 		cfg.ProjectID = *values.ProjectID
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "tensorlake-namespace") {
 		cfg.Namespace = *values.Namespace
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "tensorlake-workdir") {
 		cfg.Workdir = *values.Workdir
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "tensorlake-cpus") {
 		cfg.CPUs = *values.CPUs
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "tensorlake-memory-mb") {
 		cfg.MemoryMB = *values.MemoryMB
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "tensorlake-disk-mb") {
 		cfg.DiskMB = *values.DiskMB
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "tensorlake-timeout-secs") {
 		cfg.TimeoutSecs = *values.TimeoutSecs
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "tensorlake-no-internet") {
 		cfg.NoInternet = *values.NoInternet
+		applied.InputAccepted = true
 	}
-	return applied
+	return applied, nil
 }

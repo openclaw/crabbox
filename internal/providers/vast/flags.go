@@ -23,7 +23,8 @@ func ApplyVastProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	applied := v.Apply(&cfg.Vast, fs)
+	applied, err := v.Apply(&cfg.Vast, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
 	if applied.InstanceType {
 		cfg.Vast.InstanceType = normalizeInstanceType(cfg.Vast.InstanceType)
 	}
@@ -32,6 +33,9 @@ func ApplyVastProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	}
 	if applied.ReleaseAction {
 		markReleaseActionExplicit(cfg)
+	}
+	if err != nil {
+		return err
 	}
 	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		return Provider{}.ValidateConfig(*cfg)

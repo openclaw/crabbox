@@ -1,6 +1,9 @@
 package cli
 
-import "os"
+import (
+	"os"
+	"strconv"
+)
 
 type LocalContainerConfig struct {
 	Runtime            string
@@ -37,59 +40,95 @@ func initialLocalContainerConfig(resolvedImage string) LocalContainerConfig {
 	}
 }
 
-func applyLocalContainerFile(cfg *Config, file *fileLocalContainerConfig) {
+type LocalContainerConfigApplied struct {
+	InputAccepted bool
+}
+
+func applyLocalContainerFile(cfg *Config, file *fileLocalContainerConfig) LocalContainerConfigApplied {
+	var applied LocalContainerConfigApplied
 	if file == nil {
-		return
+		return applied
 	}
 	if file.Runtime != "" {
 		ApplyLocalContainerRuntime(cfg, file.Runtime)
+		applied.InputAccepted = true
 	}
 	if file.Image != "" {
 		ApplyLocalContainerImage(cfg, file.Image)
+		applied.InputAccepted = true
 	}
 	if file.User != "" {
 		cfg.LocalContainer.User = file.User
+		applied.InputAccepted = true
 	}
 	if file.WorkRoot != "" {
 		ApplyLocalContainerWorkRoot(cfg, file.WorkRoot)
+		applied.InputAccepted = true
 	}
 	if file.CPUs > 0 {
 		cfg.LocalContainer.CPUs = file.CPUs
+		applied.InputAccepted = true
 	}
 	if file.Memory != "" {
 		cfg.LocalContainer.Memory = file.Memory
+		applied.InputAccepted = true
 	}
 	if file.Network != "" {
 		cfg.LocalContainer.Network = file.Network
+		applied.InputAccepted = true
 	}
-	applyOptional(&cfg.LocalContainer.DockerSocket, file.DockerSocket)
-	applyOptional(&cfg.LocalContainer.NoHostname, file.NoHostname)
+	if applyOptional(&cfg.LocalContainer.DockerSocket, file.DockerSocket) {
+		applied.InputAccepted = true
+	}
+	if applyOptional(&cfg.LocalContainer.NoHostname, file.NoHostname) {
+		applied.InputAccepted = true
+	}
 	// NOTE: localContainer.volumes is intentionally NOT loaded from
 	// repo-local config files. Bind mounts expose host paths and must
 	// be an explicit CLI action (--local-container-volume), not
 	// something an untrusted checkout can request via .crabbox.yaml.
+	return applied
 }
 
-func applyLocalContainerEnv(cfg *Config) {
+func applyLocalContainerEnv(cfg *Config) LocalContainerConfigApplied {
+	var applied LocalContainerConfigApplied
 	if runtimeName := os.Getenv("CRABBOX_LOCAL_CONTAINER_RUNTIME"); runtimeName != "" {
 		ApplyLocalContainerRuntime(cfg, runtimeName)
+		applied.InputAccepted = true
 	}
 	if image := os.Getenv("CRABBOX_LOCAL_CONTAINER_IMAGE"); image != "" {
 		ApplyLocalContainerImage(cfg, image)
+		applied.InputAccepted = true
 	}
-	cfg.LocalContainer.User = getenv("CRABBOX_LOCAL_CONTAINER_USER", cfg.LocalContainer.User)
+	if value := os.Getenv("CRABBOX_LOCAL_CONTAINER_USER"); value != "" {
+		cfg.LocalContainer.User = value
+		applied.InputAccepted = true
+	}
 	if workRoot := os.Getenv("CRABBOX_LOCAL_CONTAINER_WORK_ROOT"); workRoot != "" {
 		ApplyLocalContainerWorkRoot(cfg, workRoot)
+		applied.InputAccepted = true
 	}
-	cfg.LocalContainer.CPUs = getenvInt("CRABBOX_LOCAL_CONTAINER_CPUS", cfg.LocalContainer.CPUs)
-	cfg.LocalContainer.Memory = getenv("CRABBOX_LOCAL_CONTAINER_MEMORY", cfg.LocalContainer.Memory)
-	cfg.LocalContainer.Network = getenv("CRABBOX_LOCAL_CONTAINER_NETWORK", cfg.LocalContainer.Network)
+	if value, ok := lookupEnvInteger("CRABBOX_LOCAL_CONTAINER_CPUS", strconv.IntSize); ok {
+		cfg.LocalContainer.CPUs = int(value)
+		applied.InputAccepted = true
+	}
+	if value := os.Getenv("CRABBOX_LOCAL_CONTAINER_MEMORY"); value != "" {
+		cfg.LocalContainer.Memory = value
+		applied.InputAccepted = true
+	}
+	if value := os.Getenv("CRABBOX_LOCAL_CONTAINER_NETWORK"); value != "" {
+		cfg.LocalContainer.Network = value
+		applied.InputAccepted = true
+	}
 	if value, ok := getenvBool("CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET"); ok {
 		cfg.LocalContainer.DockerSocket = value
+		applied.InputAccepted = true
 	}
 	if value, ok := getenvBool("CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME"); ok {
 		cfg.LocalContainer.NoHostname = value
+		applied.InputAccepted = true
 	}
+	return applied
 }
 
 // ApplyLocalContainerRuntime applies an already-accepted runtime value and sets

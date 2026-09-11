@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -125,6 +126,26 @@ func (f *fakeRunner) Exec(ctx context.Context, _ microVM, command, workdir strin
 		_, _ = io.WriteString(stdout, "runner-ok")
 	}
 	return f.exitCode, f.execErr
+}
+
+func TestAWSLambdaSharedRegionInputTracking(t *testing.T) {
+	for _, raw := range []string{"eu-west-1", " eu-west-1 ", ""} {
+		cfg := core.Config{AWSRegion: "eu-west-1"}
+		fs := flag.NewFlagSet("metadata", flag.ContinueOnError)
+		values := (Provider{}).RegisterFlags(fs, cfg)
+		if err := fs.Parse([]string{"--aws-lambda-microvm-region=" + raw}); err != nil {
+			t.Fatal(err)
+		}
+		// Missing image keeps this at ordinary validation after the region copy.
+		if err := (Provider{}).ApplyFlags(&cfg, fs, values); err == nil {
+			t.Fatal("expected incomplete metadata validation")
+		}
+		want := core.Config{AWSRegion: strings.TrimSpace(raw)}
+		core.RecordProviderFlagInputs(&want, true, "aws", "aws-lambda-microvm")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatal("region was not attributed to both actual owners")
+		}
+	}
 }
 
 func TestRunSyncsExecutesAndTerminatesOneShot(t *testing.T) {
@@ -755,6 +776,65 @@ func TestProviderFlagsAndEndpointValidation(t *testing.T) {
 		if _, err := endpointURL(endpoint, "eu-west-1"); err == nil {
 			t.Fatalf("accepted endpoint %q", endpoint)
 		}
+	}
+}
+
+func TestProviderConfigFlagBindings(t *testing.T) {
+	const connector = "arn:aws:lambda:eu-west-1:aws:network-connector:synthetic"
+	const role = "arn:aws:iam::123456789012:role/Synthetic"
+	newConfig := func() Config {
+		cfg := core.BaseConfig()
+		cfg.AWSRegion = "eu-west-1"
+		cfg.AWSLambdaMicroVM = core.AWSLambdaMicroVMConfig{
+			Image: " " + testImageARN + " ", ImageVersion: " 2 ", ExecutionRoleARN: " " + role + " ",
+			Workdir: " /workspace/synthetic ", IngressConnectors: []string{connector}, EgressConnectors: []string{connector}, ForgetMissing: true,
+		}
+		return cfg
+	}
+	for _, raw := range []string{"", " , , ", " " + connector + " , " + connector + " "} {
+		t.Run("connectors-"+raw, func(t *testing.T) {
+			cfg := newConfig()
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			values := registerFlags(fs, cfg)
+			for _, name := range []string{"ingress-connectors", "egress-connectors"} {
+				if got := fs.Lookup("aws-lambda-microvm-" + name).DefValue; got != connector {
+					t.Fatalf("joined default=%q", got)
+				}
+			}
+			if err := applyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.AWSLambdaMicroVM.Image != " "+testImageARN+" " || cfg.AWSLambdaMicroVM.Workdir != " /workspace/synthetic " {
+				t.Fatal("unvisited strings were normalized")
+			}
+			if err := fs.Parse([]string{"--aws-lambda-microvm-ingress-connectors=" + connector, "--aws-lambda-microvm-ingress-connectors=" + raw, "--aws-lambda-microvm-egress-connectors=" + raw}); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			for _, got := range [][]string{cfg.AWSLambdaMicroVM.IngressConnectors, cfg.AWSLambdaMicroVM.EgressConnectors} {
+				if strings.Contains(raw, connector) {
+					if !slices.Equal(got, []string{connector, connector}) {
+						t.Fatalf("items=%#v", got)
+					}
+				} else if got != nil {
+					t.Fatalf("empty flag must yield nil, got %#v", got)
+				}
+			}
+		})
+	}
+	cfg := newConfig()
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--aws-lambda-microvm-region= eu-west-1 ", "--aws-lambda-microvm-image= " + testImageARN + " ", "--aws-lambda-microvm-image-version= 3 ", "--aws-lambda-microvm-execution-role-arn= " + role + " ", "--aws-lambda-microvm-workdir= /workspace/changed ", "--aws-lambda-microvm-forget-missing=false"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AWSRegion != "eu-west-1" || cfg.AWSLambdaMicroVM.Image != testImageARN || cfg.AWSLambdaMicroVM.ImageVersion != "3" || cfg.AWSLambdaMicroVM.ExecutionRoleARN != role || cfg.AWSLambdaMicroVM.Workdir != "/workspace/changed" || cfg.AWSLambdaMicroVM.ForgetMissing {
+		t.Fatalf("visited bindings=%#v, region=%q", cfg.AWSLambdaMicroVM, cfg.AWSRegion)
 	}
 }
 

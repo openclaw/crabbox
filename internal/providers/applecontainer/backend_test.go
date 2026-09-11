@@ -17,6 +17,34 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+func TestConcreteFlagInputAttribution(t *testing.T) {
+	for _, raw := range []string{"unvisited", "container", ""} {
+		t.Run(raw, func(t *testing.T) {
+			cfg := core.Config{Provider: "other", AppleContainer: core.AppleContainerConfig{CLIPath: "container"}}
+			want := cfg
+			fs := flag.NewFlagSet("inputs", flag.ContinueOnError)
+			values := (Provider{}).RegisterFlags(fs, cfg)
+			if raw != "unvisited" {
+				if err := fs.Parse([]string{"--apple-container-cli", raw}); err != nil {
+					t.Fatal(err)
+				}
+				want.AppleContainer.CLIPath = raw
+				core.RecordProviderFlagInputs(&want, true, "apple-container", "apple-machine")
+			}
+			if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("unexpected applied config: %#v", cfg)
+			}
+			before := cfg
+			if err := (Provider{}).ApplyFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+				t.Fatalf("foreign flag storage changed input: %v", err)
+			}
+		})
+	}
+}
+
 type recordingRunner struct {
 	calls     []core.LocalCommandRequest
 	responses map[string]core.LocalCommandResult

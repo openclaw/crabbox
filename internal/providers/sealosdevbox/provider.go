@@ -32,6 +32,7 @@ func (Provider) Aliases() []string { return []string{"sealos", "sealos-dev"} }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationNativeConfig),
 		Name:             providerName,
 		Family:           familyName,
 		Kind:             core.ProviderKindSSHLease,

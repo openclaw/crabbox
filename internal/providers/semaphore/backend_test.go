@@ -146,6 +146,7 @@ func TestSemaphoreRegistrationOnlyFallbacksAndNoGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	before.Semaphore = core.SemaphoreConfig{Token: "inert"}
+	core.RecordProviderFlagInputs(&before, true, "semaphore")
 	if !reflect.DeepEqual(cfg, before) {
 		t.Fatal("explicit empty flag or central source timing changed")
 	}

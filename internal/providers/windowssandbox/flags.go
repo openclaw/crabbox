@@ -54,9 +54,11 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "windows-sandbox-workdir") {
 		cfg.WindowsSandbox.Workdir = *v.Workdir
+		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")
 	}
 	if core.FlagWasSet(fs, "windows-sandbox-temp-root") {
 		cfg.WindowsSandbox.TempRoot = *v.TempRoot
+		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")
 	}
 	if core.FlagWasSet(fs, "windows-sandbox-networking") {
 		normalized, err := normalizeWSBState(*v.Networking, "windows-sandbox-networking")
@@ -64,6 +66,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 			return err
 		}
 		cfg.WindowsSandbox.Networking = normalized
+		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")
 	}
 	if core.FlagWasSet(fs, "windows-sandbox-vgpu") {
 		normalized, err := normalizeWSBState(*v.VGPU, "windows-sandbox-vgpu")
@@ -71,6 +74,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 			return err
 		}
 		cfg.WindowsSandbox.VGPU = normalized
+		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")
 	}
 	if core.FlagWasSet(fs, "windows-sandbox-clipboard") {
 		normalized, err := normalizeWSBState(*v.Clipboard, "windows-sandbox-clipboard")
@@ -78,6 +82,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 			return err
 		}
 		cfg.WindowsSandbox.Clipboard = normalized
+		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")
 	}
 	if core.FlagWasSet(fs, "windows-sandbox-protected-client") {
 		normalized, err := normalizeWSBState(*v.ProtectedClient, "windows-sandbox-protected-client")
@@ -85,6 +90,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 			return err
 		}
 		cfg.WindowsSandbox.ProtectedClient = normalized
+		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")
 	}
 	if core.FlagWasSet(fs, "windows-sandbox-audio-input") {
 		normalized, err := normalizeWSBState(*v.AudioInput, "windows-sandbox-audio-input")
@@ -92,6 +98,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 			return err
 		}
 		cfg.WindowsSandbox.AudioInput = normalized
+		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")
 	}
 	if core.FlagWasSet(fs, "windows-sandbox-video-input") {
 		normalized, err := normalizeWSBState(*v.VideoInput, "windows-sandbox-video-input")
@@ -99,6 +106,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 			return err
 		}
 		cfg.WindowsSandbox.VideoInput = normalized
+		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")
 	}
 	if core.FlagWasSet(fs, "windows-sandbox-printer-redirection") {
 		normalized, err := normalizeWSBState(*v.PrinterRedirection, "windows-sandbox-printer-redirection")
@@ -106,12 +114,14 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 			return err
 		}
 		cfg.WindowsSandbox.PrinterRedirection = normalized
+		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")
 	}
 	if core.FlagWasSet(fs, "windows-sandbox-memory-mb") {
 		if *v.MemoryMB < 0 {
 			return exit(2, "--windows-sandbox-memory-mb must be non-negative")
 		}
 		cfg.WindowsSandbox.MemoryMB = *v.MemoryMB
+		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")
 	}
 	if selected {
 		applyDefaults(cfg)

@@ -5,7 +5,7 @@ subcommands:
 
 ```text
 crabbox config path
-crabbox config show [--json]
+crabbox config show [--provider <provider>] [--json]
 crabbox config set-broker --url <url> [--provider <provider>] [--mode managed|registered] [--auto-webvnc=false] [--token-stdin] [--admin-token-stdin]
 ```
 
@@ -33,6 +33,7 @@ Prints the merged effective configuration with secret values redacted:
 ```sh
 crabbox config show
 crabbox config show --json
+crabbox config show --provider local-container --json
 ```
 
 The merge combines, in order: the user config file, then any repo-local
@@ -42,8 +43,10 @@ overrides user defaults for that checkout), then environment variables. When
 skipped). This changes selection only: an explicit path inside the active
 repository, or a symlink that resolves into it, still has repository trust.
 `config show` reflects the resulting effective values, including
-provider defaults applied at load time; per-command flags are not part of what
-it reports. The provider line includes `provider_selected` and `provider_source`
+provider defaults applied at load time. Apart from its own provider-selection
+override, it does not replay flags from a previous `run` or another command;
+it does not accept every provider-specific run flag. The provider line includes
+`provider_selected` and `provider_source`
 (JSON: `providerSelected` and `providerSource`). With only compatibility
 metadata, the public `provider` value is the empty string and the state is
 `provider_selected=false provider_source=compiled_default`; it is not an
@@ -54,6 +57,64 @@ Selections in `user_config`, `repo_config`, or
 the `environment` retain the canonical provider name and report selected=true. Passing
 `config show --provider <name>` reports `flag` because that command-scoped
 override wins the merge.
+
+### Offline provider status
+
+JSON adds a `providerStatus` object with `schemaVersion: 1`, `kind: "offline"`,
+and a `providers` map keyed by canonical provider name. Existing effective-value
+and auth-presence fields remain available. Text includes an offline-inspection
+notice and `provider_status` lines describing the same distinctions.
+
+Each entry separates these questions:
+
+| Field | Meaning |
+| --- | --- |
+| `supported` | The provider is registered in this compiled binary, not necessarily available on this host or account. |
+| `selection.selected` / `selection.source` | Whether this load explicitly selects the provider and the selection layer; an unselected entry has a null source. Compiled compatibility defaults alone do not select a provider. |
+| `configuration` | Accepted provider-specific and generic configuration inputs in this load, described below. |
+| `authentication` | Declared possible provider-access interfaces, with status `unchecked`; not credential discovery or a successful login. |
+| `readiness` | Always `unchecked` in this offline report. |
+
+`authentication.scope` is `provider_access`. `authentication.methods` lists
+possible interfaces across the declared routes; `authentication.routes` holds
+objects with `route`, `methods`, and `description` to qualify those interfaces.
+Neither list establishes which route is active or which credentials are
+available. `authentication.status` remains `unchecked`. Guest SSH, desktop,
+bootstrap, registry, and deployment authentication are separate scopes.
+
+`configuration.providerInput` and `configuration.genericInput` each contain
+`state`, `sources`, and `complete`. Input state is `present` when an accepted
+value or explicit intent was recorded, `none` only when complete accounting
+establishes no input, and otherwise `unknown`. Source lists use `user_config`,
+`repo_config`, `environment`, and `flag` in that order. They record contributing
+accepted layers, **not winning field origins**: an equal-value assignment can
+count, an ignored input does not, and a later override does not erase an earlier
+accepted layer. Provider selection by itself is not provider configuration.
+
+The enclosing configuration state follows this contract:
+
+| State | Meaning |
+| --- | --- |
+| `explicit` | Provider-specific input was accepted. It need not be sufficient or valid for execution. |
+| `generic_inputs_present` | Complete accounting establishes no provider-specific input, but generic input was accepted. This does not mean every generic setting applies to that provider. |
+| `defaults_only` | Complete accounting establishes no provider-specific or generic input. Visible values may still come from defaults. |
+| `unknown` | The available input history cannot establish one of the preceding states. |
+
+Input-history completeness is established only after the canonical loader
+successfully accounts for all configuration layers, and only for its audited
+provider roster. Untracked providers, partial overlays, programmatically
+constructed configurations, and snapshots with synthesized job arguments remain
+incomplete. Without complete accounting, absent observed input stays `unknown`
+rather than becoming `defaults_only`. Completeness concerns input history only;
+it is never a readiness or authorization result.
+
+`config show --provider <name>` changes selection and resolves display defaults
+for that provider; it does not test access, replay earlier run flags, or add
+provider configuration merely by selecting it. Use
+`crabbox doctor --provider <name>` for the provider's diagnostic path. Doctor
+may inspect local tooling and use provider authentication or network checks;
+its results apply to the checks it actually performs, not every provider listed
+by this offline report.
 
 The top-level JSON `ttl` and `idleTimeout` fields report the effective generic
 lease durations. Text output reports them on a separate
@@ -134,7 +195,10 @@ Secrets are never printed. Token-bearing fields are reduced to a status word:
 
 The text output labels broker auth as `auth` / `admin_auth`, and Access auth as
 `access_auth`. The `--json` output uses the keys `brokerAuth`, `brokerAdminAuth`,
-`accessAuth`, and `cloudflare.auth` for the same values.
+`accessAuth`, and `cloudflare.auth` for the same values. These legacy
+`configured`/`missing` or method-presence labels retain their existing meaning:
+they are not authentication success or readiness, and are separate from
+`providerStatus` authentication metadata.
 
 ## config set-broker
 

@@ -3,6 +3,7 @@ package cli
 import (
 	"flag"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -29,49 +30,75 @@ func initialAppleContainerConfig(image string) AppleContainerConfig {
 	}
 }
 
-func (cfg *AppleContainerConfig) applyFile(file *fileAppleContainerConfig) (imageApplied bool) {
+func (cfg *AppleContainerConfig) applyFile(file *fileAppleContainerConfig) AppleContainerConfigApplied {
+	var applied AppleContainerConfigApplied
 	if file == nil {
-		return false
+		return applied
 	}
 	if file.CLIPath != "" {
 		cfg.CLIPath = file.CLIPath
+		applied.InputAccepted = true
 	}
 	if file.Image != "" {
 		cfg.Image = file.Image
-		imageApplied = true
+		applied.Image = true
+		applied.InputAccepted = true
 	}
 	if file.User != "" {
 		cfg.User = file.User
+		applied.InputAccepted = true
 	}
 	if file.WorkRoot != "" {
 		cfg.WorkRoot = file.WorkRoot
+		applied.InputAccepted = true
 	}
 	if file.CPUs > 0 {
 		cfg.CPUs = file.CPUs
+		applied.InputAccepted = true
 	}
 	if file.Memory != "" {
 		cfg.Memory = file.Memory
+		applied.InputAccepted = true
 	}
 	if len(file.ExtraRunArgs) > 0 {
 		cfg.ExtraRunArgs = append([]string(nil), file.ExtraRunArgs...)
+		applied.InputAccepted = true
 	}
-	return imageApplied
+	return applied
 }
 
-func (cfg *AppleContainerConfig) applyEnv() (imageApplied bool) {
-	cfg.CLIPath = getenv("CRABBOX_APPLE_CONTAINER_CLI", cfg.CLIPath)
+func (cfg *AppleContainerConfig) applyEnv() AppleContainerConfigApplied {
+	var applied AppleContainerConfigApplied
+	if value := os.Getenv("CRABBOX_APPLE_CONTAINER_CLI"); value != "" {
+		cfg.CLIPath = value
+		applied.InputAccepted = true
+	}
 	if image := os.Getenv("CRABBOX_APPLE_CONTAINER_IMAGE"); image != "" {
 		cfg.Image = image
-		imageApplied = true
+		applied.Image = true
+		applied.InputAccepted = true
 	}
-	cfg.User = getenv("CRABBOX_APPLE_CONTAINER_USER", cfg.User)
-	cfg.WorkRoot = getenv("CRABBOX_APPLE_CONTAINER_WORK_ROOT", cfg.WorkRoot)
-	cfg.CPUs = getenvInt("CRABBOX_APPLE_CONTAINER_CPUS", cfg.CPUs)
-	cfg.Memory = getenv("CRABBOX_APPLE_CONTAINER_MEMORY", cfg.Memory)
+	if value := os.Getenv("CRABBOX_APPLE_CONTAINER_USER"); value != "" {
+		cfg.User = value
+		applied.InputAccepted = true
+	}
+	if value := os.Getenv("CRABBOX_APPLE_CONTAINER_WORK_ROOT"); value != "" {
+		cfg.WorkRoot = value
+		applied.InputAccepted = true
+	}
+	if value, ok := lookupEnvInteger("CRABBOX_APPLE_CONTAINER_CPUS", strconv.IntSize); ok {
+		cfg.CPUs = int(value)
+		applied.InputAccepted = true
+	}
+	if value := os.Getenv("CRABBOX_APPLE_CONTAINER_MEMORY"); value != "" {
+		cfg.Memory = value
+		applied.InputAccepted = true
+	}
 	if extra := strings.Fields(os.Getenv("CRABBOX_APPLE_CONTAINER_EXTRA_RUN_ARGS")); len(extra) > 0 {
 		cfg.ExtraRunArgs = extra
+		applied.InputAccepted = true
 	}
-	return imageApplied
+	return applied
 }
 
 // AppleContainerConfigFlagValues holds the seven Container flags only.
@@ -85,11 +112,12 @@ type AppleContainerConfigFlagValues struct {
 	ExtraRun *string
 }
 
-// AppleContainerConfigApplied reports accepted flag assignments for caller policy.
+// AppleContainerConfigApplied reports accepted input and selective caller policy.
 type AppleContainerConfigApplied struct {
-	Image    bool
-	User     bool
-	WorkRoot bool
+	InputAccepted bool
+	Image         bool
+	User          bool
+	WorkRoot      bool
 }
 
 func RegisterAppleContainerConfigFlags(fs *flag.FlagSet, defaults AppleContainerConfig) AppleContainerConfigFlagValues {
@@ -108,27 +136,34 @@ func (values AppleContainerConfigFlagValues) Apply(cfg *AppleContainerConfig, fs
 	var applied AppleContainerConfigApplied
 	if flagWasSet(fs, "apple-container-cli") {
 		cfg.CLIPath = *values.CLIPath
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "apple-container-image") {
 		cfg.Image = *values.Image
+		applied.InputAccepted = true
 		applied.Image = true
 	}
 	if flagWasSet(fs, "apple-container-user") {
 		cfg.User = *values.User
+		applied.InputAccepted = true
 		applied.User = true
 	}
 	if flagWasSet(fs, "apple-container-work-root") {
 		cfg.WorkRoot = *values.WorkRoot
+		applied.InputAccepted = true
 		applied.WorkRoot = true
 	}
 	if flagWasSet(fs, "apple-container-cpus") {
 		cfg.CPUs = *values.CPUs
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "apple-container-memory") {
 		cfg.Memory = *values.Memory
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "apple-container-extra-run-args") {
 		cfg.ExtraRunArgs = splitAppleContainerExtraArgs(*values.ExtraRun)
+		applied.InputAccepted = true
 	}
 	return applied
 }
@@ -158,19 +193,24 @@ func RegisterAppleMachineConfigFlags(fs *flag.FlagSet, defaults AppleContainerCo
 	}
 }
 
-func (values AppleMachineConfigFlagValues) Apply(cfg *AppleContainerConfig, fs *flag.FlagSet) (imageApplied bool) {
+func (values AppleMachineConfigFlagValues) Apply(cfg *AppleContainerConfig, fs *flag.FlagSet) AppleContainerConfigApplied {
+	var applied AppleContainerConfigApplied
 	if flagWasSet(fs, "apple-machine-cli") {
 		cfg.CLIPath = *values.CLIPath
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "apple-machine-image") {
 		cfg.Image = *values.Image
-		imageApplied = true
+		applied.Image = true
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "apple-machine-cpus") {
 		cfg.CPUs = *values.CPUs
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "apple-machine-memory") {
 		cfg.Memory = *values.Memory
+		applied.InputAccepted = true
 	}
-	return imageApplied
+	return applied
 }

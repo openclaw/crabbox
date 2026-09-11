@@ -2,6 +2,10 @@
 
 Base: Lume user + Remote Login; installer locks auth/pins host key.
 
+Provider control uses the configured Lume CLI in the local process context.
+That describes the control-plane interface, not guest SSH/bootstrap credentials
+or authenticated readiness. Static metadata never checks the CLI or guest login.
+
 Packaged: set `tag="v$(crabbox --version)"`; fetch
 `install-macos-lume-image-hooks.sh`, `macos-lume-firstboot.sh`,
 `macos-lume-firstboot-launchdaemon.plist`, and

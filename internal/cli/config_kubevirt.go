@@ -44,7 +44,7 @@ func (cfg *KubeVirtConfig) ExpandAppliedLocalPaths(applied KubeVirtConfigApplied
 
 // applyKubeVirtFileConfig is the sole file-policy entry to the generated overlay.
 // Filter a snapshot so ignored input remains intact for configuration persistence.
-func applyKubeVirtFileConfig(cfg *Config, file *fileKubeVirtConfig, trusted bool) error {
+func applyKubeVirtFileConfig(cfg *Config, file *fileKubeVirtConfig, trusted bool, source configInputSource) error {
 	if file == nil {
 		return nil
 	}
@@ -53,6 +53,7 @@ func applyKubeVirtFileConfig(cfg *Config, file *fileKubeVirtConfig, trusted bool
 		snapshot.SSHPublicKey = ""
 	}
 	applied, err := cfg.KubeVirt.applyFile(&snapshot, trusted)
+	recordConfigInput(cfg, "kubevirt", source, applied.InputAccepted)
 	cfg.KubeVirt.ExpandAppliedLocalPaths(applied)
 	if applied.DeleteOnRelease {
 		MarkDeleteOnReleaseExplicit(cfg, "kubevirt")

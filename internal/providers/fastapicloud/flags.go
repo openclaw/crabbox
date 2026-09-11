@@ -25,6 +25,7 @@ func ApplyFastAPICloudProviderFlags(cfg *Config, fs *flag.FlagSet, values any) e
 	if !ok {
 		return nil
 	}
-	v.Apply(&cfg.FastAPICloud, fs)
-	return nil
+	applied, err := v.Apply(&cfg.FastAPICloud, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	return err
 }

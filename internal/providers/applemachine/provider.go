@@ -16,6 +16,7 @@ func (Provider) Aliases() []string { return []string{"applemachine"} }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationLocalContext),
 		Name:             providerName,
 		Family:           "container",
 		Kind:             core.ProviderKindDelegatedRun,

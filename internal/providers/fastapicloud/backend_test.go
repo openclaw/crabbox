@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -60,6 +61,7 @@ func TestFastAPICloudBindingFlagsRemainDeferredAndLocal(t *testing.T) {
 			t.Fatalf("wrapper performed deferred client validation: %v", err)
 		}
 		before.FastAPICloud.APIURL, before.FastAPICloud.AppID, before.FastAPICloud.TeamID = "", "", ""
+		core.RecordProviderFlagInputs(&before, true, "fastapi-cloud")
 		if !reflect.DeepEqual(cfg, before) {
 			t.Fatal("wrapper copies or global provenance side effects changed")
 		}

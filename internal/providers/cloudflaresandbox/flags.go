@@ -25,7 +25,11 @@ func ApplyProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	v.Apply(&cfg.CloudflareSandbox, fs)
+	applied, err := v.Apply(&cfg.CloudflareSandbox, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	if err != nil {
+		return err
+	}
 	return validateProviderConfig(*cfg)
 }
 

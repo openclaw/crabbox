@@ -75,6 +75,33 @@ func TestFlagsApplyAgentSandboxConfig(t *testing.T) {
 	}
 }
 
+func TestAgentSandboxFlagDurationAndPathEvents(t *testing.T) {
+	for _, raw := range []string{"0s", "-1s", "250ms"} {
+		t.Run(raw, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.AgentSandbox.Context = "test"
+			cfg.AgentSandbox.WarmPool = "test"
+			cfg.AgentSandbox.Kubeconfig = "~/inherited"
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			values := registerFlags(fs, cfg)
+			if err := fs.Parse([]string{"--agent-sandbox-sandbox-ready-timeout=" + raw, "--agent-sandbox-delete-on-release=false"}); err != nil {
+				t.Fatal(err)
+			}
+			err := applyFlags(&cfg, fs, values)
+			parsed, _ := time.ParseDuration(raw)
+			if cfg.AgentSandbox.SandboxReadyTimeout != parsed || cfg.AgentSandbox.Kubeconfig != "~/inherited" {
+				t.Fatalf("flag state=%#v", cfg.AgentSandbox)
+			}
+			if cfg.AgentSandbox.DeleteOnRelease || !core.DeleteOnReleaseExplicit(cfg, providerName) {
+				t.Fatal("explicit false marker lost before validation")
+			}
+			if (err != nil) != (parsed < 0) {
+				t.Fatalf("validation error=%v for %q", err, raw)
+			}
+		})
+	}
+}
+
 func TestValidateConfigRejectsUnsafeInputs(t *testing.T) {
 	valid := core.BaseConfig()
 	valid.AgentSandbox.Context = "agent-context"

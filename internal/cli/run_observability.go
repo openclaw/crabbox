@@ -700,7 +700,7 @@ func normalizePreflightToolNames(values []string) []string {
 			if name == "" {
 				continue
 			}
-			if name == "default" || name == "defaults" {
+			if name == preflightDefaultSelector || name == preflightDefaultsAlias {
 				out = appendUniqueStrings(out, defaultPreflightToolNames...)
 				continue
 			}
@@ -712,11 +712,11 @@ func normalizePreflightToolNames(values []string) []string {
 
 func validatePreflightTools(tools []string) error {
 	for _, tool := range normalizePreflightToolNames(tools) {
-		if tool == "none" {
+		if tool == preflightNoneSelector {
 			continue
 		}
 		if _, ok := preflightToolRegistry[tool]; !ok {
-			return exit(2, "unknown preflight tool %q", tool)
+			return exit(2, "unknown preflight tool %q; run 'crabbox preflight-tools' to list supported names", tool)
 		}
 	}
 	return nil
@@ -737,7 +737,7 @@ func preflightToolsForTarget(target SSHTarget, configured []string) []string {
 	if configured == nil {
 		tools = defaultPreflightToolNames
 	}
-	if len(tools) == 1 && tools[0] == "none" {
+	if len(tools) == 1 && tools[0] == preflightNoneSelector {
 		return nil
 	}
 	kind := preflightOSKind(target)

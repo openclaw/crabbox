@@ -51,9 +51,13 @@ func ApplyMorphProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	applied := v.Apply(&cfg.Morph, fs)
+	applied, err := v.Apply(&cfg.Morph, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
 	if applied.DeleteOnRelease {
 		markDeleteOnReleaseExplicit(cfg)
+	}
+	if err != nil {
+		return err
 	}
 	if isMorphProviderName(cfg.Provider) {
 		applyMorphDefaults(cfg)

@@ -25,6 +25,52 @@ import (
 
 const testRecoveredContainerID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+func TestConcreteFlagInputAttribution(t *testing.T) {
+	for _, raw := range []string{"unvisited", "bridge", ""} {
+		t.Run(raw, func(t *testing.T) {
+			cfg := core.Config{Provider: "other", LocalContainer: core.LocalContainerConfig{Network: "bridge"}}
+			want := cfg
+			fs := flag.NewFlagSet("inputs", flag.ContinueOnError)
+			values := registerFlags(fs, cfg)
+			if raw != "unvisited" {
+				if err := fs.Parse([]string{"--local-container-network", raw}); err != nil {
+					t.Fatal(err)
+				}
+				want.LocalContainer.Network = raw
+				core.RecordProviderFlagInputs(&want, true, "local-container")
+			}
+			if err := applyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("unexpected applied config: %#v", cfg)
+			}
+		})
+	}
+	for _, supplied := range []bool{false, true} {
+		t.Run(fmt.Sprintf("volume-%t", supplied), func(t *testing.T) {
+			const volume = "/tmp/fixture:/work/fixture"
+			cfg := core.Config{Provider: "other", LocalContainer: core.LocalContainerConfig{Volumes: []string{volume}}}
+			want := cfg
+			fs := flag.NewFlagSet("inputs", flag.ContinueOnError)
+			values := registerFlags(fs, cfg)
+			if supplied {
+				if err := fs.Parse([]string{"--local-container-volume", volume}); err != nil {
+					t.Fatal(err)
+				}
+				want.LocalContainer.Volumes = []string{volume, volume}
+				core.RecordProviderFlagInputs(&want, true, "local-container")
+			}
+			if err := applyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("inherited/explicit volumes changed: %#v", cfg)
+			}
+		})
+	}
+}
+
 type recordingRunner struct {
 	calls     []core.LocalCommandRequest
 	responses map[string]core.LocalCommandResult

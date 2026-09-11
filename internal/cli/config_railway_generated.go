@@ -22,8 +22,9 @@ func defaultRailwayConfig() RailwayConfig {
 
 // RailwayConfigApplied records accepted assignments during one application.
 type RailwayConfigApplied struct {
-	APIToken bool
-	APIURL   bool
+	InputAccepted bool
+	APIToken      bool
+	APIURL        bool
 }
 
 func (cfg *RailwayConfig) applyFile(file *fileRailwayConfig) (RailwayConfigApplied, error) {
@@ -33,13 +34,16 @@ func (cfg *RailwayConfig) applyFile(file *fileRailwayConfig) (RailwayConfigAppli
 	}
 	if file.APIURL != "" {
 		cfg.APIURL = file.APIURL
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
 	if file.ProjectID != "" {
 		cfg.ProjectID = file.ProjectID
+		applied.InputAccepted = true
 	}
 	if file.EnvironmentID != "" {
 		cfg.EnvironmentID = file.EnvironmentID
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }
@@ -48,14 +52,22 @@ func (cfg *RailwayConfig) applyEnv() (RailwayConfigApplied, error) {
 	var applied RailwayConfigApplied
 	if value, ok := firstNonEmptyEnv("CRABBOX_RAILWAY_API_TOKEN", "RAILWAY_API_TOKEN"); ok {
 		cfg.APIToken = value
+		applied.InputAccepted = true
 		applied.APIToken = true
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_RAILWAY_API_URL", "RAILWAY_API_URL"); ok {
 		cfg.APIURL = value
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
-	cfg.ProjectID = getenv("CRABBOX_RAILWAY_PROJECT_ID", getenv("RAILWAY_PROJECT_ID", cfg.ProjectID))
-	cfg.EnvironmentID = getenv("CRABBOX_RAILWAY_ENVIRONMENT_ID", getenv("RAILWAY_ENVIRONMENT_ID", cfg.EnvironmentID))
+	if value, ok := firstNonEmptyEnv("CRABBOX_RAILWAY_PROJECT_ID", "RAILWAY_PROJECT_ID"); ok {
+		cfg.ProjectID = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_RAILWAY_ENVIRONMENT_ID", "RAILWAY_ENVIRONMENT_ID"); ok {
+		cfg.EnvironmentID = value
+		applied.InputAccepted = true
+	}
 	return applied, nil
 }
 
@@ -88,18 +100,21 @@ func RailwayConfigFlagPresence(fs *flag.FlagSet) RailwayConfigVisitedFlags {
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values RailwayConfigFlagValues) Apply(cfg *RailwayConfig, fs *flag.FlagSet) RailwayConfigApplied {
+func (values RailwayConfigFlagValues) Apply(cfg *RailwayConfig, fs *flag.FlagSet) (RailwayConfigApplied, error) {
 	var applied RailwayConfigApplied
 	visited := RailwayConfigFlagPresence(fs)
 	if visited.APIURL {
 		cfg.APIURL = *values.APIURL
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
 	if flagWasSet(fs, "railway-project") {
 		cfg.ProjectID = *values.ProjectID
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "railway-environment") {
 		cfg.EnvironmentID = *values.EnvironmentID
+		applied.InputAccepted = true
 	}
-	return applied
+	return applied, nil
 }

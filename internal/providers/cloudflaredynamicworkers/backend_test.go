@@ -11,12 +11,45 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestManualConfigInputFlags(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "fixture-other"
+	fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+	values := RegisterProviderFlags(fs, cfg)
+	before := cfg
+	if err := ApplyProviderFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+		t.Fatalf("foreign values changed configuration: %v", err)
+	}
+	if err := ApplyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	want := cfg
+	core.RecordProviderFlagInputs(&want, true, "cloudflare-dynamic-workers")
+	if reflect.DeepEqual(cfg, want) {
+		t.Fatal("unvisited flags recorded input")
+	}
+	for repeat := 0; repeat < 2; repeat++ {
+		if err := fs.Set("cloudflare-dynamic-workers-cache", "stable"); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want = cfg
+		core.RecordProviderFlagInputs(&want, true, "cloudflare-dynamic-workers")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatal("accepted/equal flag value was not recorded")
+		}
+	}
+}
 
 func TestProviderSpecAndFlags(t *testing.T) {
 	spec := Provider{}.Spec()

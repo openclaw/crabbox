@@ -33,9 +33,10 @@ type LambdaFilesystemMount struct {
 }
 
 type LambdaConfigApplied struct {
-	Type        bool
-	Image       bool
-	ImageFamily bool
+	InputAccepted bool
+	Type          bool
+	Image         bool
+	ImageFamily   bool
 }
 
 func initialLambdaConfig() LambdaConfig {
@@ -65,17 +66,21 @@ func (cfg *LambdaConfig) applyFile(file *fileLambdaConfig) LambdaConfigApplied {
 	values := LambdaConfig(*file)
 	if values.Region != "" {
 		cfg.Region = values.Region
+		applied.InputAccepted = true
 	}
 	if values.Type != "" {
 		cfg.Type = values.Type
+		applied.InputAccepted = true
 		applied.Type = true
 	}
 	if values.Image != "" {
 		cfg.Image = values.Image
+		applied.InputAccepted = true
 		applied.Image = true
 	}
 	if values.ImageFamily != "" {
 		cfg.ImageFamily = values.ImageFamily
+		applied.InputAccepted = true
 		applied.ImageFamily = true
 	}
 	if applied.Image && !applied.ImageFamily {
@@ -83,45 +88,61 @@ func (cfg *LambdaConfig) applyFile(file *fileLambdaConfig) LambdaConfigApplied {
 	}
 	if values.FirewallRuleset != "" {
 		cfg.FirewallRuleset = values.FirewallRuleset
+		applied.InputAccepted = true
 	}
 	if len(values.SSHCIDRs) > 0 {
 		cfg.SSHCIDRs = values.SSHCIDRs
+		applied.InputAccepted = true
 	}
 	if len(values.FilesystemNames) > 0 {
 		cfg.FilesystemNames = values.FilesystemNames
+		applied.InputAccepted = true
 	}
 	if len(values.FilesystemMounts) > 0 {
 		cfg.FilesystemMounts = values.FilesystemMounts
+		applied.InputAccepted = true
 	}
 	return applied
 }
 
 func (cfg *LambdaConfig) applyEnv() LambdaConfigApplied {
 	var applied LambdaConfigApplied
-	cfg.Region = getenv("CRABBOX_LAMBDA_REGION", cfg.Region)
+	if value := os.Getenv("CRABBOX_LAMBDA_REGION"); value != "" {
+		cfg.Region = value
+		applied.InputAccepted = true
+	}
 	if lambdaType := os.Getenv("CRABBOX_LAMBDA_TYPE"); lambdaType != "" {
 		cfg.Type = lambdaType
+		applied.InputAccepted = true
 		applied.Type = true
 	}
 	if image := os.Getenv("CRABBOX_LAMBDA_IMAGE"); image != "" {
 		cfg.Image = image
+		applied.InputAccepted = true
 		applied.Image = true
 		cfg.ImageFamily = ""
 	}
 	if imageFamily := os.Getenv("CRABBOX_LAMBDA_IMAGE_FAMILY"); imageFamily != "" {
 		cfg.ImageFamily = imageFamily
+		applied.InputAccepted = true
 		applied.ImageFamily = true
 		cfg.Image = ""
 	}
-	cfg.FirewallRuleset = getenv("CRABBOX_LAMBDA_FIREWALL_RULESET", cfg.FirewallRuleset)
+	if value := os.Getenv("CRABBOX_LAMBDA_FIREWALL_RULESET"); value != "" {
+		cfg.FirewallRuleset = value
+		applied.InputAccepted = true
+	}
 	if cidrs := os.Getenv("CRABBOX_LAMBDA_SSH_CIDRS"); cidrs != "" {
 		cfg.SSHCIDRs = splitCommaList(cidrs)
+		applied.InputAccepted = true
 	}
 	if names := os.Getenv("CRABBOX_LAMBDA_FILESYSTEM_NAMES"); names != "" {
 		cfg.FilesystemNames = splitCommaList(names)
+		applied.InputAccepted = true
 	}
 	if mounts := os.Getenv("CRABBOX_LAMBDA_FILESYSTEM_MOUNTS"); mounts != "" {
 		cfg.FilesystemMounts = parseLambdaFilesystemMounts(mounts)
+		applied.InputAccepted = true
 	}
 	return applied
 }

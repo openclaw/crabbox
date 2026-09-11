@@ -94,6 +94,7 @@ All flags:
 		return err
 	}
 	cfg.Profile = strings.TrimSpace(*profile)
+	recordConfigInput(&cfg, configInputGeneric, configInputFlag, flagWasSet(fs, "profile"))
 	if err := applySelectedProfileConfig(&cfg); err != nil {
 		return err
 	}
@@ -103,6 +104,7 @@ All flags:
 			return err
 		}
 		cfg.Pond = pondName
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	resolvedDoctorID := strings.TrimSpace(*id)
 	ok := true

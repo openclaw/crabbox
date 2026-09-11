@@ -42,6 +42,10 @@ func (Provider) Name() string      { return "hetzner" }
 func (Provider) Aliases() []string { return nil }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication: core.ProviderAuthentication{
+			{Route: "direct", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationAPIToken}, Description: "Direct access uses a Hetzner Cloud API token."},
+			{Route: "brokered", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationCoordinator}, Description: "The client authenticates to the coordinator; cloud credentials remain server-side."},
+		},
 		Name:             "hetzner",
 		Family:           "hetzner",
 		Kind:             core.ProviderKindSSHLease,

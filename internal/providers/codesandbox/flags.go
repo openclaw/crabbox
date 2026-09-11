@@ -21,6 +21,10 @@ func ApplyCodeSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) er
 			return err
 		}
 	}
-	v.Apply(&cfg.CodeSandbox, fs)
+	applied, err := v.Apply(&cfg.CodeSandbox, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	if err != nil {
+		return err
+	}
 	return validateCodeSandboxConfig(*cfg)
 }

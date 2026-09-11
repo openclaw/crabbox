@@ -30,8 +30,9 @@ func defaultUpstashBoxConfig() UpstashBoxConfig {
 
 // UpstashBoxConfigApplied records accepted assignments during one application.
 type UpstashBoxConfigApplied struct {
-	APIKey  bool
-	BaseURL bool
+	InputAccepted bool
+	APIKey        bool
+	BaseURL       bool
 }
 
 func (cfg *UpstashBoxConfig) applyFile(file *fileUpstashBoxConfig) (UpstashBoxConfigApplied, error) {
@@ -41,19 +42,24 @@ func (cfg *UpstashBoxConfig) applyFile(file *fileUpstashBoxConfig) (UpstashBoxCo
 	}
 	if file.BaseURL != "" {
 		cfg.BaseURL = file.BaseURL
+		applied.InputAccepted = true
 		applied.BaseURL = true
 	}
 	if file.Runtime != "" {
 		cfg.Runtime = file.Runtime
+		applied.InputAccepted = true
 	}
 	if file.Size != "" {
 		cfg.Size = file.Size
+		applied.InputAccepted = true
 	}
 	if file.Workdir != "" {
 		cfg.Workdir = file.Workdir
+		applied.InputAccepted = true
 	}
 	if file.KeepAlive != nil {
 		cfg.KeepAlive = *file.KeepAlive
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }
@@ -62,17 +68,29 @@ func (cfg *UpstashBoxConfig) applyEnv() (UpstashBoxConfigApplied, error) {
 	var applied UpstashBoxConfigApplied
 	if value, ok := firstNonEmptyEnv("CRABBOX_UPSTASH_BOX_API_KEY", "UPSTASH_BOX_API_KEY"); ok {
 		cfg.APIKey = value
+		applied.InputAccepted = true
 		applied.APIKey = true
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_UPSTASH_BOX_BASE_URL", "UPSTASH_BOX_BASE_URL"); ok {
 		cfg.BaseURL = value
+		applied.InputAccepted = true
 		applied.BaseURL = true
 	}
-	cfg.Runtime = getenv("CRABBOX_UPSTASH_BOX_RUNTIME", cfg.Runtime)
-	cfg.Size = getenv("CRABBOX_UPSTASH_BOX_SIZE", cfg.Size)
-	cfg.Workdir = getenv("CRABBOX_UPSTASH_BOX_WORKDIR", cfg.Workdir)
+	if value, ok := firstNonEmptyEnv("CRABBOX_UPSTASH_BOX_RUNTIME"); ok {
+		cfg.Runtime = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_UPSTASH_BOX_SIZE"); ok {
+		cfg.Size = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_UPSTASH_BOX_WORKDIR"); ok {
+		cfg.Workdir = value
+		applied.InputAccepted = true
+	}
 	if value, ok := getenvBool("CRABBOX_UPSTASH_BOX_KEEP_ALIVE"); ok {
 		cfg.KeepAlive = value
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }
@@ -110,24 +128,29 @@ func UpstashBoxConfigFlagPresence(fs *flag.FlagSet) UpstashBoxConfigVisitedFlags
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values UpstashBoxConfigFlagValues) Apply(cfg *UpstashBoxConfig, fs *flag.FlagSet) UpstashBoxConfigApplied {
+func (values UpstashBoxConfigFlagValues) Apply(cfg *UpstashBoxConfig, fs *flag.FlagSet) (UpstashBoxConfigApplied, error) {
 	var applied UpstashBoxConfigApplied
 	visited := UpstashBoxConfigFlagPresence(fs)
 	if visited.BaseURL {
 		cfg.BaseURL = *values.BaseURL
+		applied.InputAccepted = true
 		applied.BaseURL = true
 	}
 	if flagWasSet(fs, "upstash-box-runtime") {
 		cfg.Runtime = *values.Runtime
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "upstash-box-size") {
 		cfg.Size = *values.Size
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "upstash-box-workdir") {
 		cfg.Workdir = *values.Workdir
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "upstash-box-keep-alive") {
 		cfg.KeepAlive = *values.KeepAlive
+		applied.InputAccepted = true
 	}
-	return applied
+	return applied, nil
 }

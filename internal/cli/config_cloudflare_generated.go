@@ -22,8 +22,9 @@ func defaultCloudflareConfig() CloudflareConfig {
 
 // CloudflareConfigApplied records accepted assignments during one application.
 type CloudflareConfigApplied struct {
-	APIURL bool
-	Token  bool
+	InputAccepted bool
+	APIURL        bool
+	Token         bool
 }
 
 func (cfg *CloudflareConfig) applyFile(file *fileCloudflareConfig) (CloudflareConfigApplied, error) {
@@ -33,14 +34,17 @@ func (cfg *CloudflareConfig) applyFile(file *fileCloudflareConfig) (CloudflareCo
 	}
 	if file.APIURL != "" {
 		cfg.APIURL = file.APIURL
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
 	if file.Token != "" {
 		cfg.Token = file.Token
+		applied.InputAccepted = true
 		applied.Token = true
 	}
 	if file.Workdir != "" {
 		cfg.Workdir = file.Workdir
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }
@@ -49,13 +53,18 @@ func (cfg *CloudflareConfig) applyEnv() (CloudflareConfigApplied, error) {
 	var applied CloudflareConfigApplied
 	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUDFLARE_RUNNER_URL"); ok {
 		cfg.APIURL = value
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUDFLARE_RUNNER_TOKEN"); ok {
 		cfg.Token = value
+		applied.InputAccepted = true
 		applied.Token = true
 	}
-	cfg.Workdir = getenv("CRABBOX_CLOUDFLARE_WORKDIR", cfg.Workdir)
+	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUDFLARE_WORKDIR"); ok {
+		cfg.Workdir = value
+		applied.InputAccepted = true
+	}
 	return applied, nil
 }
 
@@ -86,15 +95,17 @@ func CloudflareConfigFlagPresence(fs *flag.FlagSet) CloudflareConfigVisitedFlags
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values CloudflareConfigFlagValues) Apply(cfg *CloudflareConfig, fs *flag.FlagSet) CloudflareConfigApplied {
+func (values CloudflareConfigFlagValues) Apply(cfg *CloudflareConfig, fs *flag.FlagSet) (CloudflareConfigApplied, error) {
 	var applied CloudflareConfigApplied
 	visited := CloudflareConfigFlagPresence(fs)
 	if visited.APIURL {
 		cfg.APIURL = *values.APIURL
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
 	if flagWasSet(fs, "cloudflare-workdir") {
 		cfg.Workdir = *values.Workdir
+		applied.InputAccepted = true
 	}
-	return applied
+	return applied, nil
 }

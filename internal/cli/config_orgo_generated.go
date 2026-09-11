@@ -4,6 +4,7 @@ package cli
 
 import (
 	"flag"
+	"strconv"
 )
 
 type fileOrgoConfig struct {
@@ -34,8 +35,9 @@ func defaultOrgoConfig() OrgoConfig {
 
 // OrgoConfigApplied records accepted assignments during one application.
 type OrgoConfigApplied struct {
-	APIKey  bool
-	APIBase bool
+	InputAccepted bool
+	APIKey        bool
+	APIBase       bool
 }
 
 func (cfg *OrgoConfig) applyFile(file *fileOrgoConfig, trusted bool) (OrgoConfigApplied, error) {
@@ -45,26 +47,33 @@ func (cfg *OrgoConfig) applyFile(file *fileOrgoConfig, trusted bool) (OrgoConfig
 	}
 	if trusted && file.APIKey != "" {
 		cfg.APIKey = file.APIKey
+		applied.InputAccepted = true
 		applied.APIKey = true
 	}
 	if file.APIBase != "" {
 		cfg.APIBase = file.APIBase
+		applied.InputAccepted = true
 		applied.APIBase = true
 	}
 	if file.WorkspaceID != "" {
 		cfg.WorkspaceID = file.WorkspaceID
+		applied.InputAccepted = true
 	}
 	if file.RAMGB > 0 {
 		cfg.RAMGB = file.RAMGB
+		applied.InputAccepted = true
 	}
 	if file.CPUs > 0 {
 		cfg.CPUs = file.CPUs
+		applied.InputAccepted = true
 	}
 	if file.DiskGB > 0 {
 		cfg.DiskGB = file.DiskGB
+		applied.InputAccepted = true
 	}
 	if file.Resolution != "" {
 		cfg.Resolution = file.Resolution
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }
@@ -73,22 +82,40 @@ func (cfg *OrgoConfig) applyEnv() (OrgoConfigApplied, error) {
 	var applied OrgoConfigApplied
 	if value, ok := firstNonEmptyEnv("CRABBOX_ORGO_API_KEY"); ok {
 		cfg.APIKey = value
+		applied.InputAccepted = true
 		applied.APIKey = true
 	} else if cfg.APIKey == "" {
 		if value, ok := firstNonEmptyEnv("ORGO_API_KEY"); ok {
 			cfg.APIKey = value
+			applied.InputAccepted = true
 			applied.APIKey = true
 		}
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_ORGO_API_BASE", "ORGO_API_BASE_URL"); ok {
 		cfg.APIBase = value
+		applied.InputAccepted = true
 		applied.APIBase = true
 	}
-	cfg.WorkspaceID = getenv("CRABBOX_ORGO_WORKSPACE_ID", getenv("ORGO_WORKSPACE_ID", cfg.WorkspaceID))
-	cfg.RAMGB = getenvInt("CRABBOX_ORGO_RAM_GB", cfg.RAMGB)
-	cfg.CPUs = getenvInt("CRABBOX_ORGO_CPUS", cfg.CPUs)
-	cfg.DiskGB = getenvInt("CRABBOX_ORGO_DISK_GB", cfg.DiskGB)
-	cfg.Resolution = getenv("CRABBOX_ORGO_RESOLUTION", cfg.Resolution)
+	if value, ok := firstNonEmptyEnv("CRABBOX_ORGO_WORKSPACE_ID", "ORGO_WORKSPACE_ID"); ok {
+		cfg.WorkspaceID = value
+		applied.InputAccepted = true
+	}
+	if value, ok := lookupEnvInteger("CRABBOX_ORGO_RAM_GB", strconv.IntSize); ok {
+		cfg.RAMGB = int(value)
+		applied.InputAccepted = true
+	}
+	if value, ok := lookupEnvInteger("CRABBOX_ORGO_CPUS", strconv.IntSize); ok {
+		cfg.CPUs = int(value)
+		applied.InputAccepted = true
+	}
+	if value, ok := lookupEnvInteger("CRABBOX_ORGO_DISK_GB", strconv.IntSize); ok {
+		cfg.DiskGB = int(value)
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_ORGO_RESOLUTION"); ok {
+		cfg.Resolution = value
+		applied.InputAccepted = true
+	}
 	return applied, nil
 }
 
@@ -127,27 +154,33 @@ func OrgoConfigFlagPresence(fs *flag.FlagSet) OrgoConfigVisitedFlags {
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values OrgoConfigFlagValues) Apply(cfg *OrgoConfig, fs *flag.FlagSet) OrgoConfigApplied {
+func (values OrgoConfigFlagValues) Apply(cfg *OrgoConfig, fs *flag.FlagSet) (OrgoConfigApplied, error) {
 	var applied OrgoConfigApplied
 	visited := OrgoConfigFlagPresence(fs)
 	if visited.APIBase {
 		cfg.APIBase = *values.APIBase
+		applied.InputAccepted = true
 		applied.APIBase = true
 	}
 	if flagWasSet(fs, "orgo-workspace-id") {
 		cfg.WorkspaceID = *values.WorkspaceID
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "orgo-ram") {
 		cfg.RAMGB = *values.RAMGB
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "orgo-cpu") {
 		cfg.CPUs = *values.CPUs
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "orgo-disk") {
 		cfg.DiskGB = *values.DiskGB
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "orgo-resolution") {
 		cfg.Resolution = *values.Resolution
+		applied.InputAccepted = true
 	}
-	return applied
+	return applied, nil
 }
