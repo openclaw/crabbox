@@ -35,12 +35,12 @@ func (b *daytonaLeaseBackend) SupportsRequestedCheckpointID() bool {
 
 func fixedDaytonaContext(ctx context.Context, client daytonaAPI) (string, string, error) {
 	identity, ok := client.(interface {
-		fixedOrganization(context.Context) (string, string, error)
+		fixedOrganization(context.Context, bool) (string, string, error)
 	})
 	if !ok {
 		return "", "", exit(4, "Daytona client has no organization identity contract")
 	}
-	endpoint, organization, err := identity.fixedOrganization(ctx)
+	endpoint, organization, err := identity.fixedOrganization(ctx, true)
 	if err != nil {
 		return "", "", err
 	}
