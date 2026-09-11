@@ -33,6 +33,49 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // --- pure-function tests -----------------------------------------------------
 
+func TestOpenComputerConfigShowCompletePassiveSection(t *testing.T) {
+	projector, ok := any(Provider{}).(core.ProviderConfigShowProjector)
+	if !ok {
+		t.Fatal("actual provider has no passive config display section")
+	}
+	for _, selected := range []string{"other", "opencomputer"} {
+		for _, populated := range []bool{false, true} {
+			cfg := core.Config{Provider: selected}
+			want := core.ProviderConfigShowSection{JSONKey: "openComputer", TextLabel: "opencomputer", Providers: []string{"opencomputer"}, Fields: []core.ProviderConfigShowField{
+				{JSONName: "apiUrl", JSONValue: "", TextName: "api_url", TextValue: "-"},
+				{JSONName: "workdir", JSONValue: "", TextName: "workdir", TextValue: ""},
+				{JSONName: "cpu", JSONValue: 0, TextName: "cpu", TextValue: "0"},
+				{JSONName: "memoryMB", JSONValue: 0, TextName: "memory_mb", TextValue: "0"},
+				{JSONName: "timeoutSecs", JSONValue: 0, TextName: "timeout_secs", TextValue: "0"},
+				{JSONName: "execTimeoutSecs", JSONValue: 0, TextName: "exec_timeout_secs", TextValue: "0"},
+				{JSONName: "burst", JSONValue: false, TextName: "burst", TextValue: "false"},
+				{JSONName: "forgetMissing", JSONValue: false, TextName: "forget_missing", TextValue: "false"},
+			}}
+			if populated {
+				cfg.OpenComputer = core.OpenComputerConfig{APIURL: "https://example.invalid/path?view=compact#part", Workdir: " raw-workdir ", CPU: 0, MemoryMB: -2, TimeoutSecs: 7, ExecTimeoutSecs: 0, Burst: true, ForgetMissing: false}
+				want.Fields = []core.ProviderConfigShowField{
+					{JSONName: "apiUrl", JSONValue: "https://example.invalid/path", TextName: "api_url", TextValue: "https://example.invalid/path"},
+					{JSONName: "workdir", JSONValue: " raw-workdir ", TextName: "workdir", TextValue: " raw-workdir "},
+					{JSONName: "cpu", JSONValue: 0, TextName: "cpu", TextValue: "0"},
+					{JSONName: "memoryMB", JSONValue: -2, TextName: "memory_mb", TextValue: "-2"},
+					{JSONName: "timeoutSecs", JSONValue: 7, TextName: "timeout_secs", TextValue: "7"},
+					{JSONName: "execTimeoutSecs", JSONValue: 0, TextName: "exec_timeout_secs", TextValue: "0"},
+					{JSONName: "burst", JSONValue: true, TextName: "burst", TextValue: "true"},
+					{JSONName: "forgetMissing", JSONValue: false, TextName: "forget_missing", TextValue: "false"},
+				}
+			}
+			before := cfg
+			got := projector.ConfigShowSection(cfg)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("passive section got %#v want %#v", got, want)
+			}
+			if !reflect.DeepEqual(cfg, before) {
+				t.Fatal("projection mutated supplied config")
+			}
+		}
+	}
+}
+
 func TestProviderSpec(t *testing.T) {
 	p := Provider{}
 	if p.Name() != "opencomputer" {

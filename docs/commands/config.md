@@ -72,6 +72,15 @@ shows its loaded URL, project, template, timeout and cleanup preference without
 looking up credentials. Zero timeout and explicit false remain visible. URLs
 are redacted; these values are configuration, not live-provider proof.
 
+OpenComputer, OpenSandbox and CUA expose their loaded settings in the JSON
+`openComputer`, `openSandbox` and `cua` sections and corresponding lowercase
+text lines, even when unselected. URLs are redacted; raw zero, false and empty
+values are not replaced with service defaults. These sections do not discover
+credentials or read external CLI configuration. CUA's bridge command and SDK
+package/import names are configured references, not evidence that an executable
+or SDK is installed or working. Displaying them does not execute the bridge or
+enable CUA provisioning.
+
 ### Offline provider status
 
 JSON adds a `providerStatus` object with `schemaVersion: 1`, `kind: "offline"`,
