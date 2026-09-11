@@ -880,6 +880,111 @@ const durationSample = "package cli\nimport \"time\"\ntype PilotConfig struct {\
 	" Count int `sources:\"user,repo,env,flag\" config:\"count\" env:\"PILOT_COUNT\" flag:\"pilot-count\" help:\"Count\" nonnegative:\"true\"`\n" +
 	" After bool `sources:\"user,repo,env,flag\" config:\"after\" env:\"PILOT_AFTER\" flag:\"pilot-after\" help:\"After\" reportApplied:\"true\"`\n}"
 
+func TestManualFlagApplicationSchema(t *testing.T) {
+	source := strings.Replace(durationSample, "type PilotConfig", "//configgen:flag-application manual\ntype PilotConfig", 1)
+	for _, tc := range []struct{ old, replacement string }{
+		{"//configgen:flag-application manual", "//configgen:flag-application"},
+		{"//configgen:flag-application manual", "//configgen:flag-application automatic"},
+		{"//configgen:flag-application manual", "//configgen:flag-application manual\n//configgen:flag-application manual"},
+		{"//configgen:flag-application manual\ntype PilotConfig", "//configgen:flag-application manual\ntype Other string\ntype PilotConfig"},
+		{"//configgen:flag-application manual\ntype PilotConfig", "//configgen:flag-application manual\n\ntype PilotConfig"},
+	} {
+		_, err := parseSchema([]byte(strings.Replace(source, tc.old, tc.replacement, 1)), "PilotConfig", "pilot")
+		if err == nil || !strings.Contains(err.Error(), "flag-application") {
+			t.Fatalf("%q: %v", tc.replacement, err)
+		}
+	}
+	noFlags := "package cli\n//configgen:flag-application manual\ntype PilotConfig struct { Name string `sources:\"env\" env:\"NAME\"` }"
+	if _, err := parseSchema([]byte(noFlags), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "flag-admitted") {
+		t.Fatalf("no flags: %v", err)
+	}
+	for _, tags := range []string{`sources:"runtime"`, `sources:"runtime" yaml:"-"`, `sources:"runtime" json:"-"`, `json:"-" sources:"runtime" yaml:"-"`, `sources:"runtime"  yaml:"-"   json:"-"`} {
+		withRuntime := strings.Replace(source, "type PilotConfig struct {", "type PilotConfig struct {\n Metadata map[string]string `"+tags+"`", 1)
+		if _, err := parseSchema([]byte(withRuntime), "PilotConfig", "pilot"); err != nil {
+			t.Fatalf("%s: %v", tags, err)
+		}
+	}
+	for _, tags := range []string{`sources:"runtime" yaml:"value"`, `sources:"runtime" json:"-,omitempty"`, `sources:"runtime" yaml:"-" yaml:"-"`, `sources:"runtime" json:"-" json:"-"`, `sources:"runtime" sources:"runtime"`, `sources:"runtime" config:"-"`} {
+		withRuntime := strings.Replace(source, "type PilotConfig struct {", "type PilotConfig struct {\n Metadata map[string]string `"+tags+"`", 1)
+		if _, err := parseSchema([]byte(withRuntime), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "runtime fields") {
+			t.Fatalf("%s: %v", tags, err)
+		}
+	}
+	for _, separator := range []string{"\t", "\n", "\r", "\u00a0"} {
+		tags := `sources:"runtime"` + separator + `yaml:"-" json:"-"`
+		withRuntime := strings.Replace(source, "type PilotConfig struct {", "type PilotConfig struct {\n Metadata map[string]string `"+tags+"`", 1)
+		if _, err := parseSchema([]byte(withRuntime), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "runtime fields") {
+			t.Fatalf("runtime separator %q: %v", separator, err)
+		}
+	}
+}
+
+func TestGenerateManualFlagApplication(t *testing.T) {
+	const source = "package cli\nimport \"time\"\n//configgen:flag-application manual\ntype PilotConfig struct {\n" +
+		" Metadata map[string]string `sources:\"runtime\" yaml:\"-\" json:\"-\"`\n" +
+		" Name string `sources:\"user,repo,env,flag\" config:\"name\" env:\"NAME\" flag:\"name\" help:\"Name\"`\n" +
+		" Enabled bool `sources:\"user,repo,env,flag\" config:\"enabled\" env:\"ENABLED\" flag:\"enabled\" help:\"Enabled\" reportApplied:\"true\"`\n" +
+		" Timeout time.Duration `sources:\"user,repo,env,flag\" config:\"timeout\" env:\"TIMEOUT\" flag:\"timeout\" help:\"Timeout\" duration:\"positive-overlay\" fileStorage:\"value\" flagDuration:\"raw-positive\"`\n}"
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatal("nondeterministic manual flags")
+	}
+	for _, absent := range []string{" Apply(", "Metadata", `"time"`, `"strings"`} {
+		if strings.Contains(string(output), absent) {
+			t.Fatalf("unexpected %q", absent)
+		}
+	}
+	for _, field := range []string{"Name", "Enabled", "Timeout"} {
+		if !strings.Contains(string(output), field+":") || !strings.Contains(string(output), "flagWasSet(fs,") {
+			t.Fatalf("missing visit %s", field)
+		}
+	}
+	typecheckGenerated(t, source, output)
+	// Import accounting must follow registration/default use, not suppressed Apply parsing.
+	strict := strings.Replace(source, `flagDuration:"raw-positive"`, `flagDuration:"trim-positive" flagDurationError:"positive required"`, 1)
+	strictSchema, err := parseSchema([]byte(strict), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	strictOutput, err := generate(strictSchema, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	typecheckGenerated(t, strict, strictOutput)
+	const behavior = `package cli
+import("flag";"fmt";"os";"strings";"testing";"time")
+func exit(_ int,pattern string,args ...any)error{return fmt.Errorf(pattern,args...)}
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestMechanicalManualFlags(t *testing.T){
+ cfg:=PilotConfig{Name:"prior",Enabled:true,Timeout:time.Minute,Metadata:map[string]string{"label":"same"}}
+ fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+ if PilotConfigFlagPresence(fs)!=(PilotConfigVisitedFlags{}){t.Fatal("unvisited facts")}
+ if err:=fs.Parse([]string{"--name=", "--enabled=false", "--timeout=invalid"});err!=nil{t.Fatal(err)}
+ visited:=PilotConfigFlagPresence(fs)
+ if !visited.Name||!visited.Enabled||!visited.Timeout||*values.Name!=""||*values.Enabled||*values.Timeout!="invalid"{t.Fatal("raw storage/visits changed")}
+ if cfg.Name!="prior"||!cfg.Enabled||cfg.Timeout!=time.Minute{t.Fatal("registration/visits applied inputs")}
+ no:=false;got,err:=cfg.applyFile(&filePilotConfig{Timeout:"invalid",Enabled:&no});if err!=nil||!got.InputAccepted||!got.Enabled||cfg.Enabled||cfg.Timeout!=time.Minute{t.Fatal("file application")}
+ cfg.Metadata["label"]="retained";t.Setenv("TIMEOUT","2m");t.Setenv("NAME","");t.Setenv("ENABLED","")
+ got,err=cfg.applyEnv();if err!=nil||!got.InputAccepted||cfg.Timeout!=2*time.Minute||cfg.Metadata["label"]!="retained"{t.Fatal("env/runtime state")}
+}
+`
+	runScalarFixture(t, source, output, behavior+applyLeaseDurationFixtureSource(t)+configFixtureFunctions(t, "applyLeaseDuration", "getenvBool"))
+}
+
+func TestIncusGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_incus.go", "../../internal/cli/config_incus_generated.go", "IncusConfig", "incus", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSchemaDurationContract(t *testing.T) {
 	for _, tc := range []struct{ raw, expression string }{
 		{"180s", "180 * time.Second"}, {"250ms", "250 * time.Millisecond"},

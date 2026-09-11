@@ -33,7 +33,7 @@ func (Provider) Spec() core.ProviderSpec {
 }
 
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return registerFlags(fs, defaults)
+	return core.RegisterIncusConfigFlags(fs, defaults.Incus)
 }
 
 func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {

@@ -39,6 +39,23 @@ Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.
 
+Incus uses a complete hybrid owner in `internal/cli/config_incus.go`. The exact
+type-doc directive `//configgen:flag-application manual` generates file/env
+application, flag storage and registration, and a typed raw-visit query for all
+admitted flags, but no flag `Apply` method. Its provider retains the existing
+ordered enum/duration checks, projections, accepted-input records and final
+normalization. Raw visits are not accepted-input facts. The directive must occur
+once on the selected type and requires at least one flag; no callbacks or stages
+are encoded in metadata. Ordinary declarations retain their generated output.
+
+Runtime-only fields may add unique `yaml:"-"` and `json:"-"` omission tags to
+`sources:"runtime"`; other serialization tags and values are rejected. Incus's
+checkpoint metadata remains runtime-only and omitted from both serializations.
+Its initializer retains the shared WorkRoot default through a typed alias;
+generated defaults own the remaining compiled values. File paths expand only
+after accepted assignments, while environment paths expand their final fallback
+values unconditionally. The imperative flag path keeps its original ordering.
+
 Sealos DevBox uses all sixteen bindings together. Its fifteen file strings retain
 value storage and trusted-user admission; the pointer-backed release boolean
 also accepts repository input and preserves explicit false. Applied facts for
