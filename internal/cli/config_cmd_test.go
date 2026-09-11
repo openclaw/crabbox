@@ -565,6 +565,43 @@ func TestConfigShowIncludesCubeSandboxWithoutSecret(t *testing.T) {
 	}
 }
 
+func TestConfigShowIncludesPhalaConfig(t *testing.T) {
+	for _, state := range []string{"default", "true", "false"} {
+		t.Run(state, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Phala = PhalaConfig{CLIPath: "/opt/phala", InstanceType: "tdx.small", WorkRoot: "/work/phala", NodeID: "example-node", Compose: "/tmp/example.yaml"}
+			var wantAttest any
+			if state != "default" {
+				value := state == "true"
+				cfg.Phala.Attest = &value
+				wantAttest = value
+			}
+			before := cfg.Phala
+			encoded, err := json.Marshal(configShowView(cfg))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var view map[string]any
+			if err := json.Unmarshal(encoded, &view); err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]any{"cli": "/opt/phala", "instanceType": "tdx.small", "workRoot": "/work/phala", "nodeId": "example-node", "compose": "/tmp/example.yaml", "attest": wantAttest}
+			if !reflect.DeepEqual(view["phala"], want) {
+				t.Fatalf("phala view = %#v, want %#v", view["phala"], want)
+			}
+			var text bytes.Buffer
+			writeConfigShowText(&text, cfg)
+			wantLine := "phala cli=/opt/phala instance_type=tdx.small work_root=/work/phala node_id=example-node compose=/tmp/example.yaml attest=" + state + "\n"
+			if !strings.Contains(text.String(), wantLine) {
+				t.Fatalf("missing Phala settings line %q", wantLine)
+			}
+			if cfg.Phala != before {
+				t.Fatal("config inspection changed Phala configuration")
+			}
+		})
+	}
+}
+
 func TestConfigShowIncludesFirecrackerConfig(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "firecracker"

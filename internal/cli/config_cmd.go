@@ -429,6 +429,14 @@ func configShowView(cfg Config) map[string]any {
 			"workRoot":    cfg.NamespaceInstance.WorkRoot,
 			"bare":        cfg.NamespaceInstance.Bare,
 		},
+		"phala": map[string]any{
+			"cli":          cfg.Phala.CLIPath,
+			"instanceType": cfg.Phala.InstanceType,
+			"workRoot":     cfg.Phala.WorkRoot,
+			"nodeId":       cfg.Phala.NodeID,
+			"compose":      cfg.Phala.Compose,
+			"attest":       cfg.Phala.Attest,
+		},
 		"morph": map[string]any{
 			"apiUrl":          redactedConfigURL(cfg.Morph.APIURL),
 			"auth":            tokenState(cfg.Morph.APIKey),
@@ -817,6 +825,10 @@ func redactedParallelsHostConfigs(hosts []ParallelsHostConfig) []ParallelsHostCo
 }
 
 func writeConfigShowText(w io.Writer, cfg Config) {
+	phalaAttest := "default"
+	if cfg.Phala.Attest != nil {
+		phalaAttest = fmt.Sprint(*cfg.Phala.Attest)
+	}
 	fmt.Fprintf(w, "config=%s\n", writableConfigPath())
 	provider := cfg.Provider
 	serverType := cfg.ServerType
@@ -837,6 +849,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "actions repo=%s workflow=%s job=%s ref=%s runner_version=%s ephemeral=%t labels=%s\n", blank(cfg.Actions.Repo, "-"), blank(cfg.Actions.Workflow, "-"), blank(cfg.Actions.Job, "-"), blank(cfg.Actions.Ref, "-"), cfg.Actions.RunnerVersion, cfg.Actions.Ephemeral, blank(strings.Join(cfg.Actions.RunnerLabels, ","), "-"))
 	fmt.Fprintf(w, "blacksmith org=%s workflow=%s job=%s ref=%s idle_timeout=%s debug=%t\n", blank(cfg.Blacksmith.Org, "-"), blank(cfg.Blacksmith.Workflow, "-"), blank(cfg.Blacksmith.Job, "-"), blank(cfg.Blacksmith.Ref, "-"), cfg.Blacksmith.IdleTimeout, cfg.Blacksmith.Debug)
 	fmt.Fprintf(w, "agent_sandbox kubectl=%s kubeconfig=%s context=%s namespace=%s warm_pool=%s container=%s workdir=%s sandbox_ready_timeout=%s pod_ready_timeout=%s exec_timeout_secs=%d delete_on_release=%t forget_missing=%t\n", blank(cfg.AgentSandbox.Kubectl, "-"), blank(cfg.AgentSandbox.Kubeconfig, "-"), blank(cfg.AgentSandbox.Context, "-"), blank(cfg.AgentSandbox.Namespace, "-"), blank(cfg.AgentSandbox.WarmPool, "-"), blank(cfg.AgentSandbox.Container, "-"), blank(cfg.AgentSandbox.Workdir, "-"), cfg.AgentSandbox.SandboxReadyTimeout, cfg.AgentSandbox.PodReadyTimeout, cfg.AgentSandbox.ExecTimeoutSecs, cfg.AgentSandbox.DeleteOnRelease, cfg.AgentSandbox.ForgetMissing)
+	fmt.Fprintf(w, "phala cli=%s instance_type=%s work_root=%s node_id=%s compose=%s attest=%s\n", blank(cfg.Phala.CLIPath, "-"), blank(cfg.Phala.InstanceType, "-"), blank(cfg.Phala.WorkRoot, "-"), blank(cfg.Phala.NodeID, "-"), blank(cfg.Phala.Compose, "-"), phalaAttest)
 	fmt.Fprintf(w, "namespace image=%s size=%s repository=%s site=%s volume_size_gb=%d auto_stop_idle_timeout=%s work_root=%s delete_on_release=%t\n", cfg.Namespace.Image, blank(cfg.Namespace.Size, "-"), blank(cfg.Namespace.Repository, "-"), blank(cfg.Namespace.Site, "-"), cfg.Namespace.VolumeSizeGB, cfg.Namespace.AutoStopIdleTimeout, cfg.Namespace.WorkRoot, cfg.Namespace.DeleteOnRelease)
 	fmt.Fprintf(w, "namespace_instance cli=%s machine_type=%s duration=%s region=%s endpoint=%s keychain=%s volumes=%d work_root=%s bare=%t\n", cfg.NamespaceInstance.CLIPath, blank(cfg.NamespaceInstance.MachineType, "-"), cfg.NamespaceInstance.Duration, blank(cfg.NamespaceInstance.Region, "-"), blank(redactedConfigURL(cfg.NamespaceInstance.Endpoint), "-"), blank(cfg.NamespaceInstance.Keychain, "-"), len(cfg.NamespaceInstance.Volumes), cfg.NamespaceInstance.WorkRoot, cfg.NamespaceInstance.Bare)
 	fmt.Fprintf(w, "morph api_url=%s snapshot=%s ssh_gateway_host=%s work_root=%s delete_on_release=%t wake_on_ssh=%t auth=%s\n", blank(redactedConfigURL(cfg.Morph.APIURL), "-"), blank(cfg.Morph.Snapshot, "-"), blank(cfg.Morph.SSHGatewayHost, "-"), blank(cfg.Morph.WorkRoot, "-"), cfg.Morph.DeleteOnRelease, cfg.Morph.WakeOnSSH, tokenState(cfg.Morph.APIKey))
