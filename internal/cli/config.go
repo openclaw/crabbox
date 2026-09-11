@@ -490,19 +490,6 @@ type PhalaConfig struct {
 	Attest *bool
 }
 
-type CoderConfig struct {
-	CLIPath              string
-	Template             string
-	Preset               string
-	WorkspacePrefix      string
-	WorkRoot             string
-	DeleteOnRelease      bool
-	Wait                 string
-	UseParameterDefaults bool
-	Parameters           []string
-	RichParameterFile    string
-}
-
 type DaytonaConfig struct {
 	APIKey           string
 	JWTToken         string
@@ -2341,12 +2328,7 @@ func baseConfig() Config {
 			WorkRoot:        "/home/boxd/crabbox",
 			DeleteOnRelease: true,
 		},
-		Coder: CoderConfig{
-			CLIPath:         "coder",
-			WorkspacePrefix: "crabbox-",
-			WorkRoot:        "/home/coder/crabbox",
-			Wait:            "yes",
-		},
+		Coder: defaultCoderConfig(),
 		Morph: defaultMorphConfig(),
 		Orgo:  defaultOrgoConfig(),
 		Daytona: DaytonaConfig{
@@ -3003,47 +2985,6 @@ type filePhalaConfig struct {
 	NodeID       string `yaml:"nodeId,omitempty"`
 	Compose      string `yaml:"compose,omitempty"`
 	Attest       *bool  `yaml:"attest,omitempty"`
-}
-
-type fileCoderConfig struct {
-	CLIPath              string   `yaml:"cliPath,omitempty"`
-	Template             string   `yaml:"template,omitempty"`
-	Preset               string   `yaml:"preset,omitempty"`
-	WorkspacePrefix      string   `yaml:"workspacePrefix,omitempty"`
-	WorkRoot             string   `yaml:"workRoot,omitempty"`
-	DeleteOnRelease      *bool    `yaml:"deleteOnRelease,omitempty"`
-	Wait                 string   `yaml:"wait,omitempty"`
-	UseParameterDefaults *bool    `yaml:"useParameterDefaults,omitempty"`
-	Parameters           []string `yaml:"parameters,omitempty"`
-	RichParameterFile    string   `yaml:"richParameterFile,omitempty"`
-}
-
-func (c *fileCoderConfig) UnmarshalYAML(node *yaml.Node) error {
-	type plain fileCoderConfig
-	var out plain
-	if err := node.Decode(&out); err != nil {
-		return err
-	}
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		key := node.Content[i].Value
-		value := node.Content[i+1]
-		if key != "parameters" {
-			continue
-		}
-		switch value.Kind {
-		case yaml.SequenceNode:
-			out.Parameters = out.Parameters[:0]
-			for _, item := range value.Content {
-				if strings.TrimSpace(item.Value) != "" {
-					out.Parameters = append(out.Parameters, strings.TrimSpace(item.Value))
-				}
-			}
-		case yaml.ScalarNode:
-			out.Parameters = splitCommaList(value.Value)
-		}
-	}
-	*c = fileCoderConfig(out)
-	return nil
 }
 
 type fileDaytonaConfig struct {
@@ -4779,33 +4720,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			MarkDeleteOnReleaseExplicit(cfg, "boxd")
 		}
 	}
-	if file.Coder != nil {
-		if file.Coder.CLIPath != "" {
-			cfg.Coder.CLIPath = expandUserPath(file.Coder.CLIPath)
-		}
-		if file.Coder.Template != "" {
-			cfg.Coder.Template = file.Coder.Template
-		}
-		if file.Coder.Preset != "" {
-			cfg.Coder.Preset = file.Coder.Preset
-		}
-		if file.Coder.WorkspacePrefix != "" {
-			cfg.Coder.WorkspacePrefix = file.Coder.WorkspacePrefix
-		}
-		if file.Coder.WorkRoot != "" {
-			cfg.Coder.WorkRoot = file.Coder.WorkRoot
-		}
-		applyOptional(&cfg.Coder.DeleteOnRelease, file.Coder.DeleteOnRelease)
-		if file.Coder.Wait != "" {
-			cfg.Coder.Wait = file.Coder.Wait
-		}
-		applyOptional(&cfg.Coder.UseParameterDefaults, file.Coder.UseParameterDefaults)
-		if len(file.Coder.Parameters) > 0 {
-			cfg.Coder.Parameters = normalizeList(file.Coder.Parameters)
-		}
-		if file.Coder.RichParameterFile != "" {
-			cfg.Coder.RichParameterFile = expandUserPath(file.Coder.RichParameterFile)
-		}
+	if err := applyCoderFileConfig(cfg, file.Coder); err != nil {
+		return err
 	}
 	{
 		applied, err := cfg.Morph.applyFile(file.Morph)
@@ -6501,26 +6417,11 @@ func applyEnv(cfg *Config) error {
 		cfg.Boxd.DeleteOnRelease = value
 		MarkDeleteOnReleaseExplicit(cfg, "boxd")
 	}
-	cfg.Coder.CLIPath = expandUserPath(getenv("CRABBOX_CODER_CLI", cfg.Coder.CLIPath))
-	cfg.Coder.Template = getenv("CRABBOX_CODER_TEMPLATE", cfg.Coder.Template)
-	cfg.Coder.Preset = getenv("CRABBOX_CODER_PRESET", cfg.Coder.Preset)
-	cfg.Coder.WorkspacePrefix = getenv("CRABBOX_CODER_WORKSPACE_PREFIX", cfg.Coder.WorkspacePrefix)
-	cfg.Coder.WorkRoot = getenv("CRABBOX_CODER_WORK_ROOT", cfg.Coder.WorkRoot)
-	if value, ok := getenvBool("CRABBOX_CODER_DELETE_ON_RELEASE"); ok {
-		cfg.Coder.DeleteOnRelease = value
+	if _, err := cfg.Coder.applyEnv(); err != nil {
+		return err
 	}
-	cfg.Coder.Wait = getenv("CRABBOX_CODER_WAIT", cfg.Coder.Wait)
-	if value, ok := getenvBool("CRABBOX_CODER_USE_PARAMETER_DEFAULTS"); ok {
-		cfg.Coder.UseParameterDefaults = value
-	}
-	if paramsEnv := os.Getenv("CRABBOX_CODER_PARAMETERS"); strings.TrimSpace(paramsEnv) != "" {
-		params := splitCommaList(paramsEnv)
-		if strings.EqualFold(strings.TrimSpace(paramsEnv), "none") {
-			params = []string{}
-		}
-		cfg.Coder.Parameters = params
-	}
-	cfg.Coder.RichParameterFile = expandUserPath(getenv("CRABBOX_CODER_RICH_PARAMETER_FILE", cfg.Coder.RichParameterFile))
+	cfg.Coder.CLIPath = expandUserPath(cfg.Coder.CLIPath)
+	cfg.Coder.RichParameterFile = expandUserPath(cfg.Coder.RichParameterFile)
 	if value, ok := firstNonEmptyEnv("CRABBOX_DAYTONA_API_KEY", "DAYTONA_API_KEY"); ok {
 		cfg.Daytona.APIKey = value
 		cfg.credentialProvenance.daytonaAPIKey = credentialSourceEnvironment
@@ -7734,10 +7635,14 @@ func getenvList(name string) ([]string, bool) {
 	if !ok {
 		return nil, false
 	}
+	return parseEnvListValue(value), true
+}
+
+func parseEnvListValue(value string) []string {
 	if strings.EqualFold(strings.TrimSpace(value), "none") {
-		return []string{}, true
+		return []string{}
 	}
-	return splitCommaList(value), true
+	return splitCommaList(value)
 }
 
 func splitCommaList(value string) []string {

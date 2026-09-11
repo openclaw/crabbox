@@ -5,7 +5,7 @@ Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
 runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, Semaphore,
 Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, OVHcloud, Lume, Runpod, Vast,
 W&B, Scaleway, Tencent Cloud, DigitalOcean, Vultr, Linode, Sealos DevBox, KubeVirt,
-Agent Sandbox, AWS Lambda MicroVM, Namespace Devbox, and Namespace Instance
+Agent Sandbox, AWS Lambda MicroVM, Namespace Devbox, Namespace Instance, and Coder
 describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
@@ -28,7 +28,7 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_sealos_devbox.go`, and
 `internal/cli/config_kubevirt.go`, `internal/cli/config_agentsandbox.go`, and
 `internal/cli/config_aws_lambda_microvm.go`, `internal/cli/config_namespace.go`, and
-`internal/cli/config_namespace_instance.go`.
+`internal/cli/config_namespace_instance.go`, and `internal/cli/config_coder.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -159,6 +159,34 @@ The two raw-empty native defaults and the exact default-CLI routing comparison
 reuse the same configured constants; no trim or fallback rule changes. The `nsc`
 doctor label remains a tool name, not a configurable default.
 
+Coder declares all ten bindings together. Its distinct file DTO retains seven
+value strings, two pointer booleans and a value parameter list, in the same order.
+The existing `UnmarshalYAML` method stays handwritten beside the declaration,
+unchanged: its plain-DTO decode can reject input before the later scalar branch.
+Generation does not add a new scalar-YAML compatibility promise.
+
+`fileList:"nonempty-normalized"` accepts a nonempty file list and delegates to
+`normalizeList`, preserving fresh storage and a nonnil empty result for all-blank
+input. Nil and empty lists preserve prior configuration; file writer omission
+remains separate from runtime application. `envList:"trimmed-nonempty"` ignores
+wholly blank input, then uses the shared environment-list value parser: a whole
+case-insensitive `none` clears to an empty slice, otherwise ordinary CSV applies.
+The presence-aware environment wrapper uses that same parser without changing
+its existing absent-versus-present behavior. `flagList:"csv"` reuses `splitCSV`,
+retaining scalar last-occurrence-wins parsing, joined defaults, blank-to-nil and
+comma-only-to-empty results. Literal `none` is not a flag selector. The duplicate
+provider-local flag splitter is removed.
+
+File path expansion consumes accepted CLI/RichParameterFile facts after the
+independent, non-fallible overlay. Environment handling still expands both final
+fallback paths unconditionally, and flags keep them raw. The provider wrapper
+retains its selected sizing/target guards before the type assertion, generic
+WorkRoot mirroring after accepted flags, and selected validation after all fields.
+No delete marker or configuration-display surface is added. Four configured
+constants replace equal literals in existing fallback consumers, retaining their
+raw-versus-trimmed predicates and order. Provider names, SSH usernames, enum
+values, native execution and transport remain separate contracts.
+
 ## Why generation
 
 Provider packages already import `internal/cli`, which owns `Config` and file
@@ -261,7 +289,7 @@ handling. An explicitly present empty provider block remains `{}`.
 | Kind | Required file rule |
 | --- | --- |
 | `string` | `fileIgnoreEmpty:"true"` |
-| `[]string` | `fileList:"nonempty-raw"` or nil-presence/cloning `fileList:"raw"` |
+| `[]string` | `fileList:"nonempty-raw"`, `fileList:"nonempty-normalized"`, or nil-presence/cloning `fileList:"raw"` |
 | `int`, `int64` | `fileInt:"positive"` or `fileInt:"nonzero"` |
 | `float64` | `fileFloat:"positive"` |
 | `time.Duration` | raw string with `duration:"positive-overlay"` |
@@ -468,6 +496,8 @@ selection and native Container/Machine behavior remain outside this owner.
    `flagList:"append-trimmed"` instead appends whole trimmed occurrences to the
    inherited snapshot, preserving empty strings and commas as literal values.
    It registers after scalar flags and keeps defensive copy semantics.
+   Coder's `fileList:"nonempty-normalized"`, `envList:"trimmed-nonempty"`, and
+   `flagList:"csv"` preserve the three distinct list contracts described above.
    `flagList:"empty-scalar"` instead registers an empty string independently of
    configured values. Repeated occurrences use the last scalar, and application
    trims comma-separated items, drops blanks, and returns nil when none remain.

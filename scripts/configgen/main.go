@@ -20,6 +20,7 @@ import (
 )
 
 type field struct {
+	fileListNonemptyNormalized, envListTrimmedNonempty, flagListCSV                                                                                                              bool
 	flagDurationRawZeroReset, flagListAppendTrimmed                                                                                                                              bool
 	flagDurationError                                                                                                                                                            string
 	envListCSV, flagListScalarEmptyNil                                                                                                                                           bool
@@ -286,9 +287,9 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			admitted bool
 			values   map[string]*bool
 		}{
-			{"fileList", !f.noFile, map[string]*bool{"raw": &f.fileListRaw, "nonempty-raw": &f.fileListNonemptyRaw}},
-			{"envList", !f.noEnv, map[string]*bool{"presence": &f.envListPresence, "csv": &f.envListCSV}},
-			{"flagList", !f.noFlag, map[string]*bool{"replace-append": &f.flagListReplaceAppend, "append-trimmed": &f.flagListAppendTrimmed, "empty-scalar": &f.flagListEmptyScalar, "scalar-empty-nil": &f.flagListScalarEmptyNil}},
+			{"fileList", !f.noFile, map[string]*bool{"raw": &f.fileListRaw, "nonempty-raw": &f.fileListNonemptyRaw, "nonempty-normalized": &f.fileListNonemptyNormalized}},
+			{"envList", !f.noEnv, map[string]*bool{"presence": &f.envListPresence, "csv": &f.envListCSV, "trimmed-nonempty": &f.envListTrimmedNonempty}},
+			{"flagList", !f.noFlag, map[string]*bool{"replace-append": &f.flagListReplaceAppend, "append-trimmed": &f.flagListAppendTrimmed, "empty-scalar": &f.flagListEmptyScalar, "scalar-empty-nil": &f.flagListScalarEmptyNil, "csv": &f.flagListCSV}},
 		} {
 			if value, ok := tags.Lookup(mode.tag); ok {
 				enabled := mode.values[value]
@@ -378,7 +379,7 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			case "string":
 				eligible = f.fileIgnoreEmpty
 			case "[]string":
-				eligible = f.fileListNonemptyRaw || f.fileListRaw
+				eligible = f.fileListNonemptyRaw || f.fileListRaw || f.fileListNonemptyNormalized
 			case "int", "int64":
 				eligible = f.fileIntPositive || f.fileIntNonzero
 			case "float64":
@@ -454,6 +455,7 @@ func generate(s schema, source string) ([]byte, error) {
 			needsOS = needsOS || !f.noEnv
 		}
 		if f.kind == "[]string" {
+			needsStrings = needsStrings || f.envListTrimmedNonempty
 			needsStrings = needsStrings || (!f.noFlag && !f.flagListReplaceAppend && !f.flagListAppendTrimmed && !f.flagListEmptyScalar)
 			needsOS = needsOS || (!f.noEnv && !f.envListPresence)
 		}
@@ -550,7 +552,7 @@ func generate(s schema, source string) ([]byte, error) {
 			if f.fileIntNonzero {
 				conditions = append(conditions, value+" != 0")
 			}
-			if f.fileListNonemptyRaw {
+			if f.fileListNonemptyRaw || f.fileListNonemptyNormalized {
 				conditions = append(conditions, "len("+value+") > 0")
 			}
 			if f.fileListRaw && f.fileStorageValue {
@@ -640,6 +642,10 @@ func generate(s schema, source string) ([]byte, error) {
 				p("if value, ok := getenvBool(%q); ok { cfg.%s = value }\n", f.env, f.name)
 			}
 		case "[]string":
+			if f.envListTrimmedNonempty {
+				p("if value := os.Getenv(%q); strings.TrimSpace(value) != \"\" { cfg.%s = parseEnvListValue(value) }\n", f.env, f.name)
+				continue
+			}
 			if f.envListPresence {
 				p("if value, ok := getenvList(%q); ok { cfg.%s = value }\n", f.env, f.name)
 				continue
@@ -770,6 +776,10 @@ func generate(s schema, source string) ([]byte, error) {
 			}
 			if f.flagListEmptyScalar || f.flagListScalarEmptyNil {
 				p("if flagWasSet(fs, %q) { cfg.%s = splitCommaList(*values.%s); if len(cfg.%s) == 0 { cfg.%s = nil } }\n", f.flag, f.name, f.name, f.name, f.name)
+				continue
+			}
+			if f.flagListCSV {
+				p("if flagWasSet(fs, %q) { cfg.%s = splitCSV(*values.%s) }\n", f.flag, f.name, f.name)
 				continue
 			}
 			value := "*values." + f.name
