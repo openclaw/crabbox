@@ -11066,6 +11066,103 @@ func TestWindowsWSLWorkRoot(t *testing.T) {
 	}
 }
 
+func envIntegerCases() []struct {
+	name, value    string
+	want32, want64 int64
+	ok32, ok64     bool
+} {
+	return []struct {
+		name, value    string
+		want32, want64 int64
+		ok32, ok64     bool
+	}{
+		{"unset", "", 7, 7, false, false},
+		{"empty", "", 7, 7, false, false},
+		{"same as fallback", "7", 7, 7, true, true},
+		{"zero", "0", 0, 0, true, true},
+		{"plus zero", "+0", 0, 0, true, true},
+		{"negative zero", "-0", 0, 0, true, true},
+		{"negative", "-12", -12, -12, true, true},
+		{"positive sign", "+12", 12, 12, true, true},
+		{"decimal leading zero", "042", 42, 42, true, true},
+		{"padded", " 12 ", 7, 7, false, false},
+		{"newline", "12\n", 7, 7, false, false},
+		{"fractional", "1.5", 7, 7, false, false},
+		{"word", "invalid", 7, 7, false, false},
+		{"hex prefix", "0x10", 7, 7, false, false},
+		{"underscore", "1_000", 7, 7, false, false},
+		{"unicode digit", "１２", 7, 7, false, false},
+		{"only sign", "+", 7, 7, false, false},
+		{"int32 max", "2147483647", 2147483647, 2147483647, true, true},
+		{"int32 min", "-2147483648", -2147483648, -2147483648, true, true},
+		{"int32 positive overflow", "2147483648", 7, 2147483648, false, true},
+		{"int32 negative overflow", "-2147483649", 7, -2147483649, false, true},
+		{"int64 max", "9223372036854775807", 7, 9223372036854775807, false, true},
+		{"int64 min", "-9223372036854775808", 7, -9223372036854775808, false, true},
+		{"int64 positive overflow", "9223372036854775808", 7, 7, false, false},
+		{"int64 negative overflow", "-9223372036854775809", 7, 7, false, false},
+	}
+}
+
+func TestEnvIntegerFallbacks(t *testing.T) {
+	const name = "CRABBOX_TEST_INTEGER"
+	for _, helper := range []struct {
+		name string
+		bits int
+		read func(string) int64
+	}{
+		{"native", strconv.IntSize, func(name string) int64 { return int64(getenvInt(name, 7)) }},
+		{"int32", 32, func(name string) int64 { return int64(getenvInt32(name, 7)) }},
+		{"int64", 64, func(name string) int64 { return getenvInt64(name, 7) }},
+	} {
+		t.Run(helper.name, func(t *testing.T) {
+			for _, tc := range envIntegerCases() {
+				t.Run(tc.name, func(t *testing.T) {
+					t.Setenv(name, tc.value)
+					if tc.name == "unset" {
+						if err := os.Unsetenv(name); err != nil {
+							t.Fatal(err)
+						}
+					}
+					want := tc.want64
+					if helper.bits == 32 {
+						want = tc.want32
+					}
+					if got := helper.read(name); got != want {
+						t.Fatalf("%q at %d bits: got %d, want %d", tc.value, helper.bits, got, want)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestLookupEnvIntegerAcceptance(t *testing.T) {
+	const name = "CRABBOX_TEST_INTEGER"
+	for _, bits := range []int{32, 64} {
+		t.Run(strconv.Itoa(bits), func(t *testing.T) {
+			for _, tc := range envIntegerCases() {
+				t.Run(tc.name, func(t *testing.T) {
+					t.Setenv(name, tc.value)
+					if tc.name == "unset" {
+						if err := os.Unsetenv(name); err != nil {
+							t.Fatal(err)
+						}
+					}
+					want, accepted := tc.want64, tc.ok64
+					if bits == 32 {
+						want, accepted = tc.want32, tc.ok32
+					}
+					got, ok := lookupEnvInteger(name, bits)
+					if ok != accepted || (ok && got != want) {
+						t.Fatalf("%q: got (%d,%v), want (%d,%v)", tc.value, got, ok, want, accepted)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestEnvHelperBranches(t *testing.T) {
 	t.Setenv("CRABBOX_INT", "42")
 	t.Setenv("CRABBOX_BAD_INT", "oops")

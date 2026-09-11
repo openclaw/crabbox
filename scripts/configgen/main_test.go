@@ -1357,23 +1357,7 @@ func TestGenerateEnvIntFallback(t *testing.T) {
 	}
 	typecheckGenerated(t, input+"\nfunc getenvInt(string,int) int { panic(\"stub\") }\n", output)
 	// Execute the existing core helpers verbatim, rather than a test-specific integer parser.
-	coreSource, err := os.ReadFile("../../internal/cli/config.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	helpers := ""
-	for _, name := range []string{"getenvInt", "getenvNonNegativeInt"} {
-		start := strings.Index(string(coreSource), "func "+name+"(")
-		if start < 0 {
-			t.Fatalf("missing core helper %s", name)
-		}
-		rest := string(coreSource)[start:]
-		end := strings.Index(rest, "\nfunc ")
-		if end < 0 {
-			t.Fatalf("missing end for core helper %s", name)
-		}
-		helpers += rest[:end] + "\n"
-	}
+	helpers := configFixtureFunctions(t, "getenvInt", "getenvNonNegativeInt", "lookupEnvInteger")
 	const behavior = `package cli
 import ("flag";"fmt";"os";"strconv";"testing")
 func exit(_ int, pattern string, args ...any) error { return fmt.Errorf(pattern,args...) }
@@ -2237,23 +2221,7 @@ func TestGenerateFileIntNonzero(t *testing.T) {
 		" Positive int `sources:\"user,repo,env,flag\" config:\"positive\" env:\"POSITIVE\" flag:\"positive\" help:\"Positive\" nonnegative:\"true\" fileInt:\"positive\"`\n" +
 		" Present int `sources:\"user,repo,env,flag\" config:\"present\" env:\"PRESENT\" flag:\"present\" help:\"Present\" nonnegative:\"true\" fileInt:\"present\"`\n" +
 		" Strict int `sources:\"user,repo,env,flag\" config:\"strict\" env:\"STRICT\" flag:\"strict\" help:\"Strict\" nonnegative:\"true\"`\n}"
-	coreSource, err := os.ReadFile("../../internal/cli/config.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	helpers := ""
-	for _, name := range []string{"getenvInt", "getenvNonNegativeInt"} {
-		start := strings.Index(string(coreSource), "func "+name+"(")
-		if start < 0 {
-			t.Fatalf("missing helper %s", name)
-		}
-		rest := string(coreSource)[start:]
-		end := strings.Index(rest, "\nfunc ")
-		if end < 0 {
-			t.Fatalf("missing end for %s", name)
-		}
-		helpers += rest[:end] + "\n"
-	}
+	helpers := configFixtureFunctions(t, "getenvInt", "getenvNonNegativeInt", "lookupEnvInteger")
 	for _, fallback := range []bool{false, true} {
 		input := source
 		if fallback {
@@ -2372,19 +2340,7 @@ func TestGenerateFallbackIntAlias(t *testing.T) {
 		t.Fatal("integer alias changed non-env bindings")
 	}
 	typecheckGenerated(t, source+"\nfunc getenvInt(string,int)int{panic(\"stub\")}\n", output)
-	coreSource, err := os.ReadFile("../../internal/cli/config.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	start := strings.Index(string(coreSource), "func getenvInt(")
-	if start < 0 {
-		t.Fatal("missing getenvInt")
-	}
-	rest := string(coreSource)[start:]
-	end := strings.Index(rest, "\nfunc ")
-	if end < 0 {
-		t.Fatal("missing helper end")
-	}
+	helpers := configFixtureFunctions(t, "getenvInt", "lookupEnvInteger")
 	const behavior = `package cli
 import("flag";"os";"strconv";"testing")
 func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
@@ -2399,7 +2355,7 @@ func TestNestedFallback(t *testing.T){
  if err:=fs.Parse([]string{"--count=0"});err!=nil{t.Fatal(err)};values.Apply(&cfg,fs);if cfg.Count!=0{t.Fatal("flag zero changed")}
 }
 `
-	runScalarFixture(t, source, output, behavior+rest[:end])
+	runScalarFixture(t, source, output, behavior+helpers)
 }
 
 func TestSchemaNonemptyRawAndEmptyScalarLists(t *testing.T) {
@@ -2565,19 +2521,7 @@ func TestGenerateInt64Width(t *testing.T) {
 	}
 	typecheckGenerated(t, int64Sample+"\nfunc getenvInt64(string,int64)int64{panic(\"stub\")}\n", output)
 	// Exercise the actual core ParseInt(...,64) helper rather than another parser.
-	coreSource, err := os.ReadFile("../../internal/cli/config.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	start := strings.Index(string(coreSource), "func getenvInt64(")
-	if start < 0 {
-		t.Fatal("missing int64 helper")
-	}
-	rest := string(coreSource)[start:]
-	end := strings.Index(rest, "\nfunc ")
-	if end < 0 {
-		t.Fatal("missing helper end")
-	}
+	helpers := configFixtureFunctions(t, "getenvInt64", "lookupEnvInteger")
 	const behavior = `package cli
 import("flag";"os";"strconv";"testing")
 func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
@@ -2593,7 +2537,7 @@ func TestWidth(t *testing.T){
  for _,raw:=range []string{"0","-9223372036854775808","9223372036854775807"}{cfg:=defaultPilotConfig();fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg);if err:=fs.Parse([]string{"--wide="+raw});err!=nil{t.Fatal(err)};values.Apply(&cfg,fs);want,_:=strconv.ParseInt(raw,10,64);if cfg.Wide!=want{t.Fatalf("flag%q: %+v",raw,cfg)}}
 }
 `
-	runScalarFixture(t, int64Sample, output, behavior+rest[:end])
+	runScalarFixture(t, int64Sample, output, behavior+helpers)
 	for _, mode := range []string{"present", "nonzero"} {
 		input := strings.Replace(int64Sample, `fileInt:"positive"`, `fileInt:"`+mode+`"`, 1)
 		s, err := parseSchema([]byte(input), "PilotConfig", "pilot")
@@ -3285,6 +3229,29 @@ func TestUntrackedPartialOrder(t *testing.T){
 }
 `
 	runScalarFixture(t, untracked, untrackedOutput, untrackedBehavior+helper)
+}
+
+func configFixtureFunctions(t *testing.T, names ...string) string {
+	t.Helper()
+	source, err := os.ReadFile("../../internal/cli/config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var functions strings.Builder
+	for _, name := range names {
+		start := strings.Index(string(source), "func "+name+"(")
+		if start < 0 {
+			t.Fatalf("missing core helper %s", name)
+		}
+		rest := string(source)[start:]
+		end := strings.Index(rest, "\nfunc ")
+		if end < 0 {
+			t.Fatalf("missing end for core helper %s", name)
+		}
+		functions.WriteString(rest[:end])
+		functions.WriteByte('\n')
+	}
+	return functions.String()
 }
 
 func applyLeaseDurationFixtureSource(t *testing.T) string {

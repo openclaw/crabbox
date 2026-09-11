@@ -7425,15 +7425,10 @@ func getenv(name, fallback string) string {
 }
 
 func getenvInt(name string, fallback int) int {
-	v := os.Getenv(name)
-	if v == "" {
-		return fallback
+	if value, ok := lookupEnvInteger(name, strconv.IntSize); ok {
+		return int(value)
 	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return fallback
-	}
-	return n
+	return fallback
 }
 
 func getenvNonNegativeInt(name string, fallback int) (int, error) {
@@ -7452,27 +7447,31 @@ func getenvNonNegativeInt(name string, fallback int) (int, error) {
 }
 
 func getenvInt32(name string, fallback int32) int32 {
-	v := os.Getenv(name)
-	if v == "" {
-		return fallback
+	if value, ok := lookupEnvInteger(name, 32); ok {
+		return int32(value)
 	}
-	n, err := strconv.ParseInt(v, 10, 32)
-	if err != nil {
-		return fallback
-	}
-	return int32(n)
+	return fallback
 }
 
 func getenvInt64(name string, fallback int64) int64 {
-	v := os.Getenv(name)
-	if v == "" {
-		return fallback
+	if value, ok := lookupEnvInteger(name, 64); ok {
+		return value
 	}
-	n, err := strconv.ParseInt(v, 10, 64)
+	return fallback
+}
+
+// lookupEnvInteger reports accepted raw decimal input independently of fallback
+// policy. An explicit zero or a value equal to the fallback still counts.
+func lookupEnvInteger(name string, bitSize int) (int64, bool) {
+	value := os.Getenv(name)
+	if value == "" {
+		return 0, false
+	}
+	parsed, err := strconv.ParseInt(value, 10, bitSize)
 	if err != nil {
-		return fallback
+		return 0, false
 	}
-	return n
+	return parsed, true
 }
 
 func getenvFloat(name string, fallback float64) float64 {
