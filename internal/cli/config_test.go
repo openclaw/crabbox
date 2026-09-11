@@ -10447,6 +10447,41 @@ func TestRepoConfigIsYamlOnly(t *testing.T) {
 	}
 }
 
+func TestLeaseDurationErrorPolicies(t *testing.T) {
+	const prior = 17 * time.Second
+	for _, tc := range []struct {
+		raw  string
+		want time.Duration
+		bad  bool
+	}{
+		{"", prior, false}, {" ", prior, true}, {"invalid", prior, true},
+		{"0", prior, true}, {"0s", prior, true}, {"-1ns", prior, true},
+		{" 2m ", prior, true}, {"999999999999999999h", prior, true},
+		{"2m", 2 * time.Minute, false}, {"125ms", 125 * time.Millisecond, false},
+		{"+1s", time.Second, false},
+	} {
+		t.Run(fmt.Sprintf("%q", tc.raw), func(t *testing.T) {
+			strict, tolerant := prior, prior
+			err := ApplyLeaseDuration(&strict, tc.raw)
+			applyLeaseDuration(&tolerant, tc.raw)
+			if strict != tc.want || tolerant != tc.want {
+				t.Fatalf("strict=%s tolerant=%s want=%s", strict, tolerant, tc.want)
+			}
+			if tc.bad {
+				if err == nil || err.Error() != fmt.Sprintf("invalid duration %q", tc.raw) {
+					t.Fatalf("error=%v", err)
+				}
+				var exitErr ExitError
+				if AsExitError(err, &exitErr) {
+					t.Fatalf("ordinary duration error changed to ExitError: %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestConfigHelperBranches(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

@@ -5916,12 +5916,8 @@ func applyFileJobConfig(job JobConfig, file fileJobConfig) JobConfig {
 }
 
 func applyLeaseDuration(target *time.Duration, value string) {
-	if value == "" {
-		return
-	}
-	if parsed, err := time.ParseDuration(value); err == nil && parsed > 0 {
-		*target = parsed
-	}
+	// File and environment overlays intentionally ignore invalid durations.
+	_ = ApplyLeaseDuration(target, value)
 }
 
 func applyNonNegativeLeaseDuration(target *time.Duration, value string) bool {

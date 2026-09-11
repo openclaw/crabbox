@@ -912,7 +912,7 @@ func TestGenerateDurationBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	helpers := ""
+	helpers := applyLeaseDurationFixtureSource(t)
 	for _, name := range []string{"applyLeaseDuration", "getenvNonNegativeInt", "getenvBool"} {
 		start := strings.Index(string(coreSource), "func "+name+"(")
 		if start < 0 {
@@ -3108,19 +3108,7 @@ func TestGenerateRawZeroResetDurationFlags(t *testing.T) {
 		}
 		typecheckGenerated(t, source+"\nfunc ApplyLeaseDuration(*time.Duration, string) error { panic(\"stub\") }\n", output)
 	}
-	coreSource, err := os.ReadFile("../../internal/cli/provider_exports.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	start := strings.Index(string(coreSource), "func ApplyLeaseDuration(")
-	if start < 0 {
-		t.Fatal("missing core ApplyLeaseDuration")
-	}
-	rest := string(coreSource)[start:]
-	end := strings.Index(rest, "\nfunc ")
-	if end < 0 {
-		t.Fatal("missing end of core ApplyLeaseDuration")
-	}
+	helper := applyLeaseDurationFixtureSource(t)
 	const behavior = `package cli
 import("flag";"fmt";"testing";"time")
 func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
@@ -3155,5 +3143,23 @@ func TestRawDurationContractAndOrder(t *testing.T){
  if err!=nil||cfg.Timeout!=0||cfg.Second!=5*time.Second||cfg.After!="later"||!applied.After{t.Fatalf("retry success: %+v %+v %v",cfg,applied,err)}
 }
 `
-	runScalarFixture(t, tracked, trackedOutput, behavior+rest[:end])
+	runScalarFixture(t, tracked, trackedOutput, behavior+helper)
+}
+
+func applyLeaseDurationFixtureSource(t *testing.T) string {
+	t.Helper()
+	source, err := os.ReadFile("../../internal/cli/provider_exports.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(source), "func ApplyLeaseDuration(")
+	if start < 0 {
+		t.Fatal("missing core ApplyLeaseDuration")
+	}
+	rest := string(source)[start:]
+	end := strings.Index(rest, "\nfunc ")
+	if end < 0 {
+		t.Fatal("missing end of core ApplyLeaseDuration")
+	}
+	return rest[:end] + "\n"
 }

@@ -84,7 +84,10 @@ Duration support is deliberately one fixed mode: canonical standard-library
 `time.Duration` with `duration:"positive-overlay"`. File-admitted fields must
 also declare `fileStorage:"value"`; their YAML fields remain raw strings, not
 parsed durations or pointers. File/env input calls the existing positive,
-tolerant `applyLeaseDuration` helper without trimming. Invalid, zero and negative
+tolerant `applyLeaseDuration` helper without trimming. That wrapper delegates
+parsing and assignment to the strict `ApplyLeaseDuration` helper, discarding its
+error for file/environment overlays; flag callers retain their error policy.
+Invalid, zero and negative
 inputs do not replace the current runtime value, but raw file values survive
 configuration writes. By default, flags use `flag.Duration` and copy explicit
 zero/negative values before provider validation; they do not inherit file/env
