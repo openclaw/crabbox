@@ -68,6 +68,7 @@ type forwardSSHServer struct {
 	release  chan struct{}
 	mu       sync.Mutex
 	conns    []net.Conn
+	users    []string
 	wg       sync.WaitGroup
 	allowed  map[uint32]bool
 	hostKey  string
@@ -93,6 +94,9 @@ func newForwardSSHServer(t *testing.T, user string, allowedPorts ...int) *forwar
 	}
 	var once sync.Once
 	cfg := &ssh.ServerConfig{NoClientAuth: true, NoClientAuthCallback: func(meta ssh.ConnMetadata) (*ssh.Permissions, error) {
+		s.mu.Lock()
+		s.users = append(s.users, meta.User())
+		s.mu.Unlock()
 		if meta.User() != user {
 			return nil, fmt.Errorf("unexpected synthetic SSH user")
 		}

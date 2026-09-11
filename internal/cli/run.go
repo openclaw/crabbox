@@ -4499,6 +4499,7 @@ func (a App) stop(ctx context.Context, args []string) error {
 	id := fs.String("id", "", "lease id or slug")
 	reclaim := fs.Bool("reclaim", false, "adopt an unclaimed provider resource before stopping it")
 	forceRecovery := fs.Bool("force", false, "recover and stop one exactly identified provider resource")
+	currentRepo := fs.Bool("current-repo", false, "stop a fixed-ID lease only while its claim belongs to the current repository")
 	expectedLeaseID := fs.String("expected-provider-lease-id", "", "internal: immutable provider lease identity")
 	expectedAttemptLeaseID := fs.String("expected-provider-attempt-lease-id", "", "internal: immutable provider attempt identity")
 	expectedSlug := fs.String("expected-provider-slug", "", "internal: immutable provider slug identity")
@@ -4544,6 +4545,9 @@ func (a App) stop(ctx context.Context, args []string) error {
 	}
 	if expectedFlagCount != 0 && expectedFlagCount != len(expectedFlagNames) {
 		return exit(2, "internal provider release requires the complete expected identity set")
+	}
+	if *currentRepo && (!isCanonicalLeaseID(*id) || *forceRecovery || *reclaim || expectedFlagCount != 0 || *confirmedAbsentLocalCleanup || flagWasSet(fs, "expected-provider-scope") || flagWasSet(fs, "expected-coordinator-registration-url")) {
+		return exit(2, "stop --current-repo requires a canonical lease ID and cannot combine recovery or controller identity flags")
 	}
 	if *confirmedAbsentLocalCleanup && (expectedFlagCount != len(expectedFlagNames) || !flagWasSet(fs, "expected-provider-scope") || !flagWasSet(fs, "expected-coordinator-registration-url") || !flagWasSet(fs, "provider")) {
 		return exit(2, "confirmed-absence local cleanup requires explicit provider, scope, coordinator binding, and complete expected identity set")
@@ -4636,9 +4640,29 @@ func (a App) stop(ctx context.Context, args []string) error {
 			return exit(4, "coordinator registration binding changed before confirmed-absence cleanup")
 		}
 	}
+	if *currentRepo {
+		capabilities, err := execCapabilitiesForConfig(cfg)
+		if err != nil {
+			return err
+		}
+		if !capabilities.CurrentRepoStop {
+			return exit(2, "provider=%s does not support stop --current-repo", capabilities.Provider)
+		}
+	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
 		return err
+	}
+	if *currentRepo {
+		scoped, ok := backend.(RepositoryScopedStopBackend)
+		if !ok {
+			return exit(2, "provider=%s does not support stop --current-repo", backend.Spec().Name)
+		}
+		boundary, err := findRepositoryBoundary()
+		if err != nil {
+			return err
+		}
+		return scoped.StopForRepository(ctx, StopRequest{Options: leaseOptionsFromConfig(cfg), ID: *id}, boundary.root)
 	}
 	if *confirmedAbsentLocalCleanup {
 		// Validate the immutable local identity before the network mutation, but

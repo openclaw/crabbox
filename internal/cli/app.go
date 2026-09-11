@@ -125,6 +125,8 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.ssh(ctx, helpArgs), true
 	case "connect":
 		return a.connect(ctx, helpArgs), true
+	case "exec":
+		return a.execCommand(ctx, helpArgs), true
 	case "open":
 		return a.open(ctx, helpArgs), true
 	case "ports":
@@ -234,6 +236,7 @@ Commands:
   checkpoint  Create, restore, and fork workspace checkpoints
   ssh         Print the SSH command for a lease
   connect     Open an interactive SSH session to a lease
+  exec        Execute a command under the current lease claim without syncing
   open        Prepare an editor handoff for a lease
   ports       Publish, list, or unpublish provider-native ports
   cp          Copy files between the host and a lease

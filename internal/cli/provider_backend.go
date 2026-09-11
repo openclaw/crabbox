@@ -273,6 +273,7 @@ type SSHLeaseBackend interface {
 
 // SSHRunActivityBackend keeps provider-owned idle activity alive after lease
 // admission, including setup and sync. Stop must cancel and join its work.
+// Calls may hold a shared claim fence and must not reenter or mutate claims.
 type SSHRunActivityBackend interface {
 	BeginSSHRunActivity(context.Context, LeaseTarget) (stop func(), err error)
 }
@@ -718,8 +719,13 @@ const (
 	// FeatureSSHScriptRun routes explicit scripts through the core SSH owner,
 	// while a hybrid backend may delegate ordinary commands.
 	FeatureSSHScriptRun Feature = "ssh-script-run"
-	FeaturePauseResume  Feature = "pause-resume"
-	FeatureMCP          Feature = "mcp-attachments"
+	// FeatureClaimExec requires RunLeaseClaimResolver, private POSIX SSH execution,
+	// and provider-owned idle activity that does not require exclusive claim writes.
+	FeatureClaimExec Feature = "claim-exec"
+	// FeatureFixedCurrentRepoStop requires RepositoryScopedStopBackend for fixed IDs.
+	FeatureFixedCurrentRepoStop Feature = "fixed-current-repo-stop"
+	FeaturePauseResume          Feature = "pause-resume"
+	FeatureMCP                  Feature = "mcp-attachments"
 )
 
 const FeaturePreparedArtifactWorkspace Feature = "prepared-artifact-workspace"
@@ -1282,6 +1288,13 @@ type StatusRequest struct {
 type StopRequest struct {
 	Options LeaseOptions
 	ID      string
+}
+
+// RepositoryScopedStopBackend validates the calling repository under its
+// existing exclusive release fence before native or connection cleanup. It
+// must reject unsupported claim kinds; validated terminal replay may be a no-op.
+type RepositoryScopedStopBackend interface {
+	StopForRepository(context.Context, StopRequest, string) error
 }
 
 type PauseRequest struct {

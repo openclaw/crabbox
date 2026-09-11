@@ -349,7 +349,7 @@ func loadFixedDaytonaSandbox(ctx context.Context, client daytonaAPI, claim core.
 	return sandbox, validateFixedDaytonaSandbox(claim, sandbox)
 }
 
-func (b *daytonaLeaseBackend) releaseFixed(ctx context.Context, expected core.LeaseClaim, checkpointID string, absenceOnly bool) error {
+func (b *daytonaLeaseBackend) releaseFixed(ctx context.Context, expected core.LeaseClaim, checkpointID string, absenceOnly bool, repoRoot string) error {
 	return core.WithDurableLeaseClaimLockContext(ctx, expected.LeaseID, func(claim *LeaseClaim, exists bool, persist func() error) error {
 		if !exists || !reflect.DeepEqual(*claim, expected) {
 			return exit(4, "Daytona fixed lease claim changed before release; retry")
@@ -359,6 +359,14 @@ func (b *daytonaLeaseBackend) releaseFixed(ctx context.Context, expected core.Le
 		}
 		if claim.FixedCreateIntent.State == "released" {
 			return fixedDaytonaLeaseKind.ValidateTerminalClaim(*claim, expected, claim.LeaseID, nil)
+		}
+		if repoRoot != "" {
+			if claim.RepoRoot == "" {
+				return exit(4, "Daytona fixed lease %s has no current repository owner", claim.LeaseID)
+			}
+			if err := core.CheckLeaseClaimRepositoryOwner(claim.LeaseID, *claim, repoRoot, false); err != nil {
+				return err
+			}
 		}
 		if err := core.AuthorizeCheckpointRelease(*claim, checkpointID); err != nil {
 			return err
