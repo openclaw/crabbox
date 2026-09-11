@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Show Freestyle and Crownest settings through a shared offline JSON/text display path, preserving zero and false values while redacting URLs and reporting only loaded key presence. [PR 2104](https://github.com/openclaw/crabbox/pull/2104). Thanks @steipete.
 - Retain recognized workspace-owner protocol states in child and phase-witness inspection errors, improving diagnostics without changing ownership decisions or retry behavior. [PR 2106](https://github.com/openclaw/crabbox/pull/2106). Thanks @steipete.
 
 ## 0.56.0 - 2026-09-11

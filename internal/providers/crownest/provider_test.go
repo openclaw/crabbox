@@ -12,6 +12,32 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+func TestCrownestConfigShowSection(t *testing.T) {
+	for _, selected := range []string{"", "crownest"} {
+		for _, forget := range []bool{false, true} {
+			cfg := Config{Provider: selected, Crownest: core.CrownestConfig{APIURL: "https://api.example.test/path?debug=1#hint", ProjectID: "", Template: " raw-template ", TimeoutSecs: 0, ForgetMissing: forget}}
+			before := cfg.Crownest
+			section := (Provider{}).ConfigShowSection(cfg)
+			values := map[string]any{}
+			var fields []string
+			for _, field := range section.Fields {
+				values[field.JSONName] = field.JSONValue
+				fields = append(fields, field.TextName+"="+field.TextValue)
+			}
+			want := map[string]any{"apiUrl": "https://api.example.test/path", "projectId": "", "template": " raw-template ", "timeoutSecs": 0, "forgetMissing": forget}
+			if section.JSONKey != "crownest" || section.TextLabel != "crownest" || !reflect.DeepEqual(section.Providers, []string{"crownest"}) || !reflect.DeepEqual(values, want) {
+				t.Fatal("unexpected Crownest display projection")
+			}
+			if strings.Join(fields, " ") != "api_url=https://api.example.test/path project_id=- template= raw-template  timeout_secs=0 forget_missing="+strconv.FormatBool(forget) {
+				t.Fatal("text projection changed raw values or field order")
+			}
+			if cfg.Crownest != before {
+				t.Fatal("display mutated configuration")
+			}
+		}
+	}
+}
+
 func TestCrownestOrdinaryFlagOrdering(t *testing.T) {
 	for _, provider := range []string{" CROWNEST ", "other"} {
 		for _, sizing := range []string{"", "class", "type"} {
