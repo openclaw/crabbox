@@ -10,8 +10,9 @@ Read this when you:
 Parallels is a direct SSH-lease provider (it never goes through the broker). To
 acquire a box, Crabbox asks `prlctl` to create a clone from a configured source
 VM and snapshot, starts the clone, discovers the guest IP, injects the per-lease
-SSH key through Parallels Tools, and then uses the normal Crabbox SSH
-sync/run/checkpoint path.
+SSH key, and then uses the normal Crabbox SSH sync/run/checkpoint path. Parallels
+Tools is the default discovery and key-install path. macOS guests can opt into a
+host-side DHCP/SSH fallback when Parallels Tools guest execution is unavailable.
 
 The provider is local-first: by default it drives the `prlctl` on the same Mac
 that runs Crabbox. Set `parallels.host` to drive a Parallels Desktop install on
@@ -81,6 +82,48 @@ For macOS templates, use a user with SSH login permission and a writable
 templates, configure OpenSSH Server and PowerShell. For Windows WSL2 templates,
 make sure `wsl.exe` works for the SSH user.
 
+### macOS desktop credentials
+
+For `--desktop` leases, configure the real macOS guest account password with
+`CRABBOX_PARALLELS_PASSWORD` or `parallels.password` in the mode-0600 user
+configuration printed by `crabbox config path`. Crabbox uses that credential
+locally for Apple/ARD Screen Sharing authentication. It is never written to the
+guest, passed on the command line, or used to reset the macOS account password.
+There is intentionally no password flag.
+
+The Screen Sharing username is the resolved lease SSH user, normally
+`parallels.user`. Automatic login is optional image configuration: it lets a
+desktop lease reach Finder without operator input, while the account password
+continues to protect Screen Sharing. Do not put `parallels.password` in
+repository `crabbox.yaml` or `.crabbox.yaml`; repository configuration is not
+trusted to select this credential.
+
+When no account password is configured, the existing generated legacy VNC
+credential remains available for backward compatibility.
+
+### macOS without Parallels Tools guest execution
+
+Some Apple-silicon macOS guests can boot normally while `prlctl` reports no IP
+and rejects guest execution. Set `parallels.bootstrapKey` to enable the macOS-only
+fallback. Its value is an absolute private-key path **on the Parallels host**.
+The source guest must already authorize that identity for `parallels.user`, and
+that user must have non-interactive `sudo` permission for the one-time guest
+preparation script.
+
+When the normal Tools IP is absent, Crabbox reads
+`/Library/Preferences/Parallels/parallels_dhcp_leases` on the same Parallels
+host, matches an unexpired lease against the clone's exact normalized NIC MAC,
+and confirms that the configured SSH port is reachable. Missing, expired,
+malformed, or ambiguous matches fail closed. Crabbox then SSHes from that host
+with the bootstrap identity, streams the normal preparation script on stdin,
+and adds the generated per-lease key. All later sync/run traffic uses only the
+per-lease key.
+
+`bootstrapKey` is accepted only from trusted user configuration or from the
+explicit `--parallels-bootstrap-key` / `CRABBOX_PARALLELS_BOOTSTRAP_KEY`
+overrides. Repository configuration cannot select a host-side bootstrap
+identity. The fallback does not apply to Linux or Windows guests.
+
 ## Configuration
 
 ```yaml
@@ -92,6 +135,7 @@ parallels:
   source: macOS Tahoe
   sourceSnapshot: fresh
   cloneMode: linked
+  bootstrapKey: /Users/alice/.ssh/crabbox-bootstrap
   user: alice
   workRoot: /Users/alice/crabbox
   startupTimeout: 15m
@@ -195,8 +239,10 @@ CRABBOX_PARALLELS_CLONE_MODE
 CRABBOX_PARALLELS_HOST
 CRABBOX_PARALLELS_HOST_USER
 CRABBOX_PARALLELS_HOST_KEY
+CRABBOX_PARALLELS_BOOTSTRAP_KEY
 CRABBOX_PARALLELS_VM_ROOT
 CRABBOX_PARALLELS_USER
+CRABBOX_PARALLELS_PASSWORD
 CRABBOX_PARALLELS_WORK_ROOT
 CRABBOX_PARALLELS_STARTUP_TIMEOUT
 ```

@@ -2868,9 +2868,11 @@ func TestConfigShowRedactsParallelsSSHKeys(t *testing.T) {
 		topLevelKey = "top-level-private-key-sentinel"
 		templateKey = "template-private-key-sentinel"
 		hostKey     = "host-private-key-sentinel"
+		password    = "guest-account-password-sentinel"
 	)
 	cfg := Config{}
 	cfg.Parallels.HostKey = topLevelKey
+	cfg.Parallels.Password = password
 	cfg.Parallels.Templates = map[string]ParallelsTemplateConfig{
 		"macos": {
 			Source:  "macOS Tahoe",
@@ -2891,7 +2893,7 @@ func TestConfigShowRedactsParallelsSSHKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, output := range map[string]string{"text": text.String(), "json": string(jsonData)} {
-		for _, secret := range []string{topLevelKey, templateKey, hostKey} {
+		for _, secret := range []string{topLevelKey, templateKey, hostKey, password} {
 			if strings.Contains(output, secret) {
 				t.Fatalf("%s config output leaked %q: %s", name, secret, output)
 			}
@@ -2906,6 +2908,9 @@ func TestConfigShowRedactsParallelsSSHKeys(t *testing.T) {
 	if parallels["hostKey"] != "configured" {
 		t.Fatalf("top-level hostKey=%#v, want configured", parallels["hostKey"])
 	}
+	if parallels["auth"] != "configured" {
+		t.Fatalf("parallels auth=%#v, want configured", parallels["auth"])
+	}
 	templates := parallels["templates"].(map[string]any)
 	template := templates["macos"].(map[string]any)
 	if template["HostKey"] != "configured" || template["Source"] != "macOS Tahoe" {
@@ -2917,7 +2922,7 @@ func TestConfigShowRedactsParallelsSSHKeys(t *testing.T) {
 		t.Fatalf("host view=%#v", host)
 	}
 
-	if cfg.Parallels.HostKey != topLevelKey || cfg.Parallels.Templates["macos"].HostKey != templateKey || cfg.Parallels.Hosts[0].Key != hostKey {
+	if cfg.Parallels.HostKey != topLevelKey || cfg.Parallels.Password != password || cfg.Parallels.Templates["macos"].HostKey != templateKey || cfg.Parallels.Hosts[0].Key != hostKey {
 		t.Fatal("config-show redaction mutated the effective Parallels config")
 	}
 	if redactedParallelsTemplateConfigs(nil) != nil || redactedParallelsHostConfigs(nil) != nil {

@@ -6,13 +6,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const parallelsProvider = "parallels"
+const parallelsDHCPLeasesPath = "/Library/Preferences/Parallels/parallels_dhcp_leases"
+
+var errParallelsDHCPLeaseAmbiguous = errors.New("ambiguous Parallels DHCP lease")
 
 type ParallelsClient struct {
 	Cfg    Config
@@ -26,8 +33,16 @@ type ParallelsVM struct {
 	OS           string
 	Home         string
 	IP           string
+	IPSource     string
+	MACs         []string
 	Template     bool
 	SnapshotName string
+}
+
+type parallelsDHCPLease struct {
+	IP        string
+	MAC       string
+	ExpiresAt time.Time
 }
 
 type ParallelsSnapshot struct {
@@ -280,6 +295,24 @@ func (c *ParallelsClient) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+func (c *ParallelsClient) ValidateMacOSBootstrapKey(ctx context.Context) error {
+	key := strings.TrimSpace(c.Cfg.Parallels.BootstrapKey)
+	if key == "" {
+		return nil
+	}
+	if c.Cfg.TargetOS != targetMacOS {
+		return exit(2, "parallels.bootstrapKey is supported only for macOS guests")
+	}
+	if !filepath.IsAbs(key) || strings.ContainsAny(key, "\r\n\x00") {
+		return exit(2, "parallels.bootstrapKey must be an absolute path on the Parallels host")
+	}
+	result, err := c.hostCommand(ctx, nil, "/bin/test", "-f", key, "-a", "-r", key)
+	if err != nil {
+		return commandOutputError("validate Parallels macOS bootstrap key on host", result, err)
+	}
+	return nil
+}
+
 func (c *ParallelsClient) SetLeaseLabels(leaseID string, labels map[string]string) {
 	_ = writeParallelsLeaseLabels(leaseID, labels)
 }
@@ -300,6 +333,56 @@ func (c *ParallelsClient) InstallSSHKey(ctx context.Context, vmID string, cfg Co
 	result, err := c.prlctl(ctx, nil, append([]string{"exec", vmID}, args...)...)
 	if err != nil {
 		return commandOutputError("parallels install ssh key", result, err)
+	}
+	return nil
+}
+
+// BootstrapMacOSOverSSH installs the per-lease key and performs the normal
+// guest preparation through a pre-provisioned host-side identity. The key path
+// belongs to the Parallels host (local or remote), never to the cloned guest.
+func (c *ParallelsClient) BootstrapMacOSOverSSH(ctx context.Context, ip string, cfg Config, publicKey string) error {
+	if cfg.TargetOS != targetMacOS {
+		return exit(2, "Parallels SSH bootstrap fallback is supported only for macOS guests")
+	}
+	bootstrapKey := strings.TrimSpace(cfg.Parallels.BootstrapKey)
+	if !filepath.IsAbs(bootstrapKey) || strings.ContainsAny(bootstrapKey, "\r\n\x00") {
+		return exit(2, "parallels.bootstrapKey must be an absolute path on the Parallels host")
+	}
+	user := strings.TrimSpace(cfg.SSHUser)
+	if user == "" {
+		return exit(2, "parallels guest SSH user is required")
+	}
+	parsedIP := net.ParseIP(strings.TrimSpace(ip))
+	if parsedIP == nil || parsedIP.To4() == nil {
+		return exit(5, "Parallels DHCP fallback returned invalid IPv4 address %q", ip)
+	}
+	port := strings.TrimSpace(cfg.SSHPort)
+	if port == "" {
+		port = "22"
+	}
+	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+		return exit(2, "invalid Parallels guest SSH port %q", port)
+	}
+	script := parallelsPOSIXInstallSSHKeyScript(user, publicKey) + "\n" + parallelsPOSIXEnsureReadyScript(user, cfg.WorkRoot, cfg.Desktop, cfg.Parallels.Password != "")
+	args := []string{
+		"/usr/bin/ssh",
+		"-i", bootstrapKey,
+		"-o", "IdentitiesOnly=yes",
+		"-o", "BatchMode=yes",
+		"-o", "PasswordAuthentication=no",
+		"-o", "KbdInteractiveAuthentication=no",
+		"-o", "ForwardAgent=no",
+		"-o", "ForwardX11=no",
+		"-o", "ConnectTimeout=10",
+		"-o", "ConnectionAttempts=1",
+		"-o", "StrictHostKeyChecking=accept-new",
+		"-p", port,
+		user + "@" + parsedIP.String(),
+		"sudo", "-n", "/bin/sh", "-s",
+	}
+	result, err := c.hostCommand(ctx, strings.NewReader(script), args...)
+	if err != nil {
+		return commandOutputError("parallels macOS SSH bootstrap", result, err)
 	}
 	return nil
 }
@@ -356,7 +439,7 @@ func (c *ParallelsClient) EnsureGuestReady(ctx context.Context, vmID string, cfg
 		workRoot = baseConfig().WorkRoot
 	}
 	desktop := cfg.Desktop
-	result, err := c.prlctl(ctx, nil, "exec", vmID, "/bin/sh", "-lc", parallelsPOSIXEnsureReadyScript(user, workRoot, desktop))
+	result, err := c.prlctl(ctx, nil, "exec", vmID, "/bin/sh", "-lc", parallelsPOSIXEnsureReadyScript(user, workRoot, desktop, cfg.TargetOS == targetMacOS && cfg.Parallels.Password != ""))
 	if err != nil {
 		return commandOutputError("parallels guest prep", result, err)
 	}
@@ -369,15 +452,38 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 	}
 	deadline := time.Now().Add(timeout)
 	var last ParallelsVM
+	var lastDHCPError error
+	useDHCPFallback := c.Cfg.TargetOS == targetMacOS && strings.TrimSpace(c.Cfg.Parallels.BootstrapKey) != ""
 	for {
 		vm, err := c.GetVM(ctx, id)
 		if err == nil {
 			last = vm
 			if vm.IP != "" {
+				vm.IPSource = "tools"
 				return vm, nil
+			}
+			if useDHCPFallback {
+				data, readErr := c.readDHCPLeases(ctx)
+				if readErr != nil {
+					lastDHCPError = readErr
+				} else if ip, resolveErr := resolveParallelsDHCPLeaseIP(data, vm.MACs, time.Now()); resolveErr != nil {
+					lastDHCPError = resolveErr
+					if errors.Is(resolveErr, errParallelsDHCPLeaseAmbiguous) {
+						return ParallelsVM{}, resolveErr
+					}
+				} else if probeErr := c.probeHostTCP(ctx, ip, c.Cfg.SSHPort); probeErr != nil {
+					lastDHCPError = probeErr
+				} else {
+					vm.IP = ip
+					vm.IPSource = "dhcp-mac"
+					return vm, nil
+				}
 			}
 		}
 		if time.Now().After(deadline) {
+			if lastDHCPError != nil {
+				return ParallelsVM{}, exit(5, "timed out waiting for Parallels VM %s IP; last_state=%s; DHCP fallback: %v", id, blank(last.State, "-"), lastDHCPError)
+			}
 			return ParallelsVM{}, exit(5, "timed out waiting for Parallels VM %s IP; last_state=%s", id, blank(last.State, "-"))
 		}
 		select {
@@ -401,11 +507,14 @@ func (c *ParallelsClient) WaitForGuestExec(ctx context.Context, id string, cfg C
 		} else {
 			args = []string{"/bin/sh", "-lc", "true"}
 		}
-		_, err := c.prlctl(ctx, nil, append([]string{"exec", id}, args...)...)
+		result, err := c.prlctl(ctx, nil, append([]string{"exec", id}, args...)...)
 		if err == nil {
 			return nil
 		}
-		lastErr = err
+		lastErr = commandOutputError("parallels guest exec", result, err)
+		if c.Cfg.TargetOS == targetMacOS && strings.TrimSpace(c.Cfg.Parallels.BootstrapKey) != "" && ParallelsGuestToolsUnavailable(lastErr) {
+			return lastErr
+		}
 		if time.Now().After(deadline) {
 			return exit(5, "timed out waiting for Parallels guest exec in %s: %v", id, lastErr)
 		}
@@ -415,6 +524,16 @@ func (c *ParallelsClient) WaitForGuestExec(ctx context.Context, id string, cfg C
 		case <-time.After(5 * time.Second):
 		}
 	}
+}
+
+func ParallelsGuestToolsUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "prl_err_vm_exec_guest_tool_not_available") ||
+		strings.Contains(message, "guest tools are not available") ||
+		strings.Contains(message, "guest tools not available")
 }
 
 func (c *ParallelsClient) WindowsGuestText(ctx context.Context, id, path string) (string, error) {
@@ -526,6 +645,33 @@ func (c *ParallelsClient) DeleteSnapshot(ctx context.Context, vmID, snapshotID s
 	return nil
 }
 
+func (c *ParallelsClient) readDHCPLeases(ctx context.Context) (string, error) {
+	result, err := c.hostCommand(ctx, nil, "/bin/cat", parallelsDHCPLeasesPath)
+	if err != nil {
+		return "", commandOutputError("read Parallels DHCP leases", result, err)
+	}
+	return result.Stdout, nil
+}
+
+func (c *ParallelsClient) probeHostTCP(ctx context.Context, ip, port string) error {
+	parsedIP := net.ParseIP(strings.TrimSpace(ip))
+	if parsedIP == nil || parsedIP.To4() == nil {
+		return exit(5, "Parallels DHCP fallback returned invalid IPv4 address %q", ip)
+	}
+	port = strings.TrimSpace(port)
+	if port == "" {
+		port = "22"
+	}
+	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+		return exit(2, "invalid Parallels guest SSH port %q", port)
+	}
+	result, err := c.hostCommand(ctx, nil, "/usr/bin/nc", "-z", "-w", "2", parsedIP.String(), port)
+	if err != nil {
+		return commandOutputError(fmt.Sprintf("verify Parallels DHCP guest SSH reachability at %s:%s", parsedIP.String(), port), result, err)
+	}
+	return nil
+}
+
 func parallelsPOSIXInstallSSHKeyScript(user, publicKey string) string {
 	return fmt.Sprintf(`set -eu
 user=%s
@@ -549,7 +695,64 @@ printf '%%s\n' "$user" >/var/lib/crabbox/ssh.username 2>/dev/null || true
 `, shellWords([]string{user})[0], shellWords([]string{publicKey})[0])
 }
 
-func parallelsPOSIXEnsureReadyScript(user, workRoot string, desktop bool) string {
+func parallelsMacOSDesktopReadyTest(accountCredentials bool) string {
+	if accountCredentials {
+		return "[ -f /var/db/crabbox/vnc.console ] && nc -z 127.0.0.1 5900"
+	}
+	return "[ -s /var/db/crabbox/vnc.password ] && [ -f /var/db/crabbox/vnc.console ] && nc -z 127.0.0.1 5900"
+}
+
+func parallelsMacOSDesktopSetupScript(accountCredentials bool) string {
+	credentialSetup := ""
+	clientOptions := ""
+	if !accountCredentials {
+		credentialSetup = `    vnc_password=""
+    if [ -s /var/db/crabbox/vnc.password ]; then
+      vnc_password="$(tr -d '\r\n' </var/db/crabbox/vnc.password)"
+    fi
+    case "$vnc_password" in
+      ????????) ;;
+      *) vnc_password="$(/usr/bin/openssl rand -hex 4)" ;;
+    esac
+    case "$vnc_password" in
+      *[!A-Za-z0-9]*) echo "invalid generated VNC password" >&2; exit 1 ;;
+    esac
+    printf '%s\n' "$vnc_password" >/var/db/crabbox/vnc.password
+    chmod 0600 /var/db/crabbox/vnc.password
+    mkdir -p /etc/sudoers.d
+    printf '%s ALL=(root) NOPASSWD: /bin/cat /var/db/crabbox/vnc.password\n' "$user" >/etc/sudoers.d/crabbox-vnc-password
+    chmod 0440 /etc/sudoers.d/crabbox-vnc-password
+    /usr/sbin/visudo -cf /etc/sudoers.d/crabbox-vnc-password >/dev/null
+`
+		clientOptions = `    "$kickstart" -configure -clientopts -setdirlogins -dirlogins no -setvnclegacy -vnclegacy yes -setvncpw -vncpw "$vnc_password" >/dev/null 2>&1
+`
+	}
+	return `    mkdir -p /var/db/crabbox
+` + credentialSetup + `    kickstart=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
+    [ -x "$kickstart" ]
+    /usr/bin/defaults write /Library/Preferences/com.apple.RemoteManagement VNCAlwaysStartOnConsole -bool true
+    "$kickstart" -activate -configure -allowAccessFor -specifiedUsers >/dev/null 2>&1
+    "$kickstart" -configure -access -on -users "$user" -privs -all >/dev/null 2>&1
+` + clientOptions + `    "$kickstart" -restart -agent >/dev/null 2>&1
+    /bin/launchctl enable system/com.apple.screensharing >/dev/null 2>&1 || true
+    /bin/launchctl kickstart -k system/com.apple.screensharing >/dev/null 2>&1 || true
+    vnc_ready=false
+    for _ in $(jot 60 1); do
+      if nc -z 127.0.0.1 5900; then
+        vnc_ready=true
+        break
+      fi
+      sleep 1
+    done
+    if [ "$vnc_ready" != true ]; then
+      echo "macOS Screen Sharing did not start (no VNC listener on 127.0.0.1:5900)" >&2
+      exit 1
+    fi
+    touch /var/db/crabbox/vnc.console
+`
+}
+
+func parallelsPOSIXEnsureReadyScript(user, workRoot string, desktop, macOSAccountCredentials bool) string {
 	return fmt.Sprintf(`set -eu
 user=%s
 work_root=%s
@@ -559,7 +762,7 @@ if [ -x /usr/local/bin/crabbox-ready ] && /usr/local/bin/crabbox-ready >/tmp/cra
     exit 0
   fi
   if command -v sw_vers >/dev/null 2>&1; then
-    if [ -s /var/db/crabbox/vnc.password ] && [ -f /var/db/crabbox/vnc.console ] && nc -z 127.0.0.1 5900; then
+    if %s; then
       exit 0
     fi
   elif command -v websockify >/dev/null 2>&1 && command -v x11vnc >/dev/null 2>&1 && { [ -f /usr/share/novnc/vnc.html ] || [ -f /usr/share/novnc/core/vnc.html ] || [ -f /usr/share/novnc/html/vnc.html ]; } && systemctl is-active --quiet crabbox-x11vnc.service; then
@@ -638,52 +841,14 @@ UNIT
   systemctl restart ssh >/dev/null 2>&1 || systemctl restart ssh.socket >/dev/null 2>&1 || true
 fi
 if command -v sw_vers >/dev/null 2>&1; then
-  remote_login_log=/tmp/crabbox-remote-login.log
+	mkdir -p /usr/local/bin
+	remote_login_log=/tmp/crabbox-remote-login.log
   /bin/launchctl load -w /System/Library/LaunchDaemons/ssh.plist >"$remote_login_log" 2>&1 ||
     /bin/launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist >>"$remote_login_log" 2>&1 || true
   /bin/launchctl enable system/com.openssh.sshd >>"$remote_login_log" 2>&1 || true
   /bin/launchctl kickstart -k system/com.openssh.sshd >>"$remote_login_log" 2>&1 || true
   if [ "$desktop" = true ]; then
-    mkdir -p /var/db/crabbox
-    vnc_password=""
-    if [ -s /var/db/crabbox/vnc.password ]; then
-      vnc_password="$(tr -d '\r\n' </var/db/crabbox/vnc.password)"
-    fi
-    case "$vnc_password" in
-      ????????) ;;
-      *) vnc_password="$(/usr/bin/openssl rand -hex 4)" ;;
-    esac
-    case "$vnc_password" in
-      *[!A-Za-z0-9]*) echo "invalid generated VNC password" >&2; exit 1 ;;
-    esac
-    printf '%%s\n' "$vnc_password" >/var/db/crabbox/vnc.password
-    chmod 0600 /var/db/crabbox/vnc.password
-    mkdir -p /etc/sudoers.d
-    printf '%%s ALL=(root) NOPASSWD: /bin/cat /var/db/crabbox/vnc.password\n' "$user" >/etc/sudoers.d/crabbox-vnc-password
-    chmod 0440 /etc/sudoers.d/crabbox-vnc-password
-    /usr/sbin/visudo -cf /etc/sudoers.d/crabbox-vnc-password >/dev/null
-    kickstart=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
-    [ -x "$kickstart" ]
-    /usr/bin/defaults write /Library/Preferences/com.apple.RemoteManagement VNCAlwaysStartOnConsole -bool true
-    "$kickstart" -activate -configure -allowAccessFor -specifiedUsers >/dev/null 2>&1
-    "$kickstart" -configure -access -on -users "$user" -privs -all >/dev/null 2>&1
-    "$kickstart" -configure -clientopts -setdirlogins -dirlogins no -setvnclegacy -vnclegacy yes -setvncpw -vncpw "$vnc_password" >/dev/null 2>&1
-    "$kickstart" -restart -agent >/dev/null 2>&1
-    /bin/launchctl enable system/com.apple.screensharing >/dev/null 2>&1 || true
-    /bin/launchctl kickstart -k system/com.apple.screensharing >/dev/null 2>&1 || true
-    vnc_ready=false
-    for _ in $(jot 60 1); do
-      if nc -z 127.0.0.1 5900; then
-        vnc_ready=true
-        break
-      fi
-      sleep 1
-    done
-    if [ "$vnc_ready" != true ]; then
-      echo "macOS Screen Sharing did not start (no VNC listener on 127.0.0.1:5900)" >&2
-      exit 1
-    fi
-    touch /var/db/crabbox/vnc.console
+%s
   fi
   cat >/usr/local/bin/crabbox-ready <<'READY'
 #!/bin/sh
@@ -706,7 +871,7 @@ fi
 chmod 0755 /usr/local/bin/crabbox-ready
 touch /var/lib/crabbox/bootstrapped 2>/dev/null || true
 /usr/local/bin/crabbox-ready
-`, shellWords([]string{user})[0], shellWords([]string{workRoot})[0], desktop, shellWords([]string{workRoot})[0], shellWords([]string{workRoot})[0])
+`, shellWords([]string{user})[0], shellWords([]string{workRoot})[0], desktop, parallelsMacOSDesktopReadyTest(macOSAccountCredentials), parallelsMacOSDesktopSetupScript(macOSAccountCredentials), shellWords([]string{workRoot})[0], shellWords([]string{workRoot})[0])
 }
 
 func (c *ParallelsClient) prlctl(ctx context.Context, extraEnv []string, args ...string) (LocalCommandResult, error) {
@@ -724,6 +889,25 @@ func (c *ParallelsClient) prlctl(ctx context.Context, extraEnv []string, args ..
 		return c.Runner.Run(ctx, LocalCommandRequest{Name: directSSHExecutable(), Args: sshArgs, Env: extraEnv})
 	}
 	return c.Runner.Run(ctx, LocalCommandRequest{Name: "prlctl", Args: args, Env: extraEnv})
+}
+
+func (c *ParallelsClient) hostCommand(ctx context.Context, stdin io.Reader, args ...string) (LocalCommandResult, error) {
+	if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
+		return LocalCommandResult{}, exit(2, "Parallels host command is empty")
+	}
+	if c.Cfg.Parallels.Host != "" {
+		sshArgs := []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=10"}
+		if c.Cfg.Parallels.HostKey != "" {
+			sshArgs = append(sshArgs, "-i", c.Cfg.Parallels.HostKey, "-o", "IdentitiesOnly=yes")
+		}
+		host := c.Cfg.Parallels.Host
+		if c.Cfg.Parallels.HostUser != "" {
+			host = c.Cfg.Parallels.HostUser + "@" + host
+		}
+		sshArgs = append(sshArgs, host, strings.Join(shellWords(args), " "))
+		return c.Runner.Run(ctx, LocalCommandRequest{Name: directSSHExecutable(), Args: sshArgs, Stdin: stdin})
+	}
+	return c.Runner.Run(ctx, LocalCommandRequest{Name: args[0], Args: args[1:], Stdin: stdin})
 }
 
 func validateParallelsSnapshotCloneMode(snapshot ParallelsSnapshot, cloneMode string) error {
@@ -761,9 +945,142 @@ func parseParallelsVMs(data string) ([]ParallelsVM, error) {
 				vm.IP = firstParallelsNetworkIP(network)
 			}
 		}
+		vm.MACs = parallelsNetworkMACs(item)
 		out = append(out, vm)
 	}
 	return out, nil
+}
+
+func parallelsNetworkMACs(item map[string]any) []string {
+	hardware, ok := item["Hardware"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	for name, raw := range hardware {
+		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(name)), "net") {
+			continue
+		}
+		adapter, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if enabled, ok := adapter["enabled"].(bool); ok && !enabled {
+			continue
+		}
+		mac, ok := normalizeParallelsMAC(firstJSONField(adapter, "mac", "MAC"))
+		if ok {
+			seen[mac] = struct{}{}
+		}
+	}
+	macs := make([]string, 0, len(seen))
+	for mac := range seen {
+		macs = append(macs, mac)
+	}
+	sort.Strings(macs)
+	return macs
+}
+
+func normalizeParallelsMAC(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	var normalized strings.Builder
+	normalized.Grow(12)
+	for _, r := range value {
+		switch {
+		case r >= '0' && r <= '9':
+			normalized.WriteRune(r)
+		case r >= 'a' && r <= 'f':
+			normalized.WriteRune(r)
+		case r >= 'A' && r <= 'F':
+			normalized.WriteRune(r + ('a' - 'A'))
+		case r == ':' || r == '-' || r == '.':
+		default:
+			return "", false
+		}
+	}
+	if normalized.Len() != 12 {
+		return "", false
+	}
+	return normalized.String(), true
+}
+
+func parseParallelsDHCPLeases(data string) ([]parallelsDHCPLease, error) {
+	var leases []parallelsDHCPLease
+	for index, rawLine := range strings.Split(data, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "[") || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("parse Parallels DHCP leases line %d: missing '='", index+1)
+		}
+		ip := net.ParseIP(strings.TrimSpace(parts[0]))
+		if ip == nil || ip.To4() == nil {
+			return nil, fmt.Errorf("parse Parallels DHCP leases line %d: invalid IPv4 address", index+1)
+		}
+		value := strings.TrimSpace(parts[1])
+		if len(value) < 2 || value[0] != '"' || value[len(value)-1] != '"' {
+			return nil, fmt.Errorf("parse Parallels DHCP leases line %d: invalid quoted record", index+1)
+		}
+		fields := strings.Split(value[1:len(value)-1], ",")
+		if len(fields) < 3 {
+			return nil, fmt.Errorf("parse Parallels DHCP leases line %d: incomplete record", index+1)
+		}
+		expires, err := strconv.ParseInt(strings.TrimSpace(fields[0]), 10, 64)
+		if err != nil || expires <= 0 {
+			return nil, fmt.Errorf("parse Parallels DHCP leases line %d: invalid expiry", index+1)
+		}
+		mac, ok := normalizeParallelsMAC(fields[2])
+		if !ok {
+			return nil, fmt.Errorf("parse Parallels DHCP leases line %d: invalid MAC", index+1)
+		}
+		leases = append(leases, parallelsDHCPLease{IP: ip.String(), MAC: mac, ExpiresAt: time.Unix(expires, 0)})
+	}
+	return leases, nil
+}
+
+func resolveParallelsDHCPLeaseIP(data string, macs []string, now time.Time) (string, error) {
+	wanted := map[string]struct{}{}
+	for _, value := range macs {
+		if mac, ok := normalizeParallelsMAC(value); ok {
+			wanted[mac] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return "", fmt.Errorf("Parallels VM has no usable NIC MAC for DHCP fallback")
+	}
+	leases, err := parseParallelsDHCPLeases(data)
+	if err != nil {
+		return "", err
+	}
+	fresh := map[string]struct{}{}
+	stale := false
+	for _, lease := range leases {
+		if _, ok := wanted[lease.MAC]; !ok {
+			continue
+		}
+		if !lease.ExpiresAt.After(now) {
+			stale = true
+			continue
+		}
+		fresh[lease.IP] = struct{}{}
+	}
+	if len(fresh) > 1 {
+		ips := make([]string, 0, len(fresh))
+		for ip := range fresh {
+			ips = append(ips, ip)
+		}
+		sort.Strings(ips)
+		return "", fmt.Errorf("%w for VM MACs: %s", errParallelsDHCPLeaseAmbiguous, strings.Join(ips, ", "))
+	}
+	for ip := range fresh {
+		return ip, nil
+	}
+	if stale {
+		return "", fmt.Errorf("no fresh Parallels DHCP lease for VM MACs")
+	}
+	return "", fmt.Errorf("no Parallels DHCP lease for VM MACs")
 }
 
 func parseParallelsSnapshots(data string) ([]ParallelsSnapshot, error) {
