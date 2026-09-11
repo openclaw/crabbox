@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Retain recognized workspace-owner protocol states in child and phase-witness inspection errors, improving diagnostics without changing ownership decisions or retry behavior.
+
 ## 0.56.0 - 2026-09-11
 
 ### Highlights
