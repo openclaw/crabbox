@@ -626,16 +626,6 @@ func configShowView(cfg Config) map[string]any {
 			"write":       cfg.CloudRunSandbox.Write,
 			"rootfs":      cfg.CloudRunSandbox.Rootfs,
 		},
-		"multipass": map[string]any{
-			"cliPath":       cfg.Multipass.CLIPath,
-			"image":         cfg.Multipass.Image,
-			"user":          cfg.Multipass.User,
-			"workRoot":      cfg.Multipass.WorkRoot,
-			"cpus":          cfg.Multipass.CPUs,
-			"memory":        cfg.Multipass.Memory,
-			"disk":          cfg.Multipass.Disk,
-			"launchTimeout": cfg.Multipass.LaunchTimeout.String(),
-		},
 		"machine0": map[string]any{
 			"cliPath":       cfg.Machine0.CLIPath,
 			"image":         cfg.Machine0.Image,
@@ -648,21 +638,6 @@ func configShowView(cfg Config) map[string]any {
 			"releasePolicy": cfg.Machine0.ReleasePolicy,
 			"createTimeout": cfg.Machine0.CreateTimeout.String(),
 			"pollInterval":  cfg.Machine0.PollInterval.String(),
-		},
-		"tart": map[string]any{
-			"image":    cfg.Tart.Image,
-			"user":     cfg.Tart.User,
-			"workRoot": cfg.Tart.WorkRoot,
-			"cpus":     cfg.Tart.CPUs,
-			"memory":   cfg.Tart.Memory,
-			"disk":     cfg.Tart.Disk,
-		},
-		"lume": map[string]any{
-			"cliPath":  cfg.Lume.CLIPath,
-			"base":     cfg.Lume.Base,
-			"storage":  cfg.Lume.Storage,
-			"user":     cfg.Lume.User,
-			"workRoot": cfg.Lume.WorkRoot,
 		},
 		"static": map[string]any{
 			"id":       cfg.Static.ID,
@@ -835,6 +810,7 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	layout := newConfigShowTextLayout(sections)
 	output := &configShowWriter{Writer: w}
 	w = output
 	phalaAttest := "default"
@@ -877,10 +853,16 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 	fmt.Fprintf(w, "apple_container cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s\n", cfg.AppleContainer.CLIPath, cfg.AppleContainer.Image, cfg.AppleContainer.User, cfg.AppleContainer.WorkRoot, cfg.AppleContainer.CPUs, blank(cfg.AppleContainer.Memory, "-"))
 	fmt.Fprintf(w, "mxc cli=%s version=%s containment=%s network=%s readonly_paths=%d readwrite_paths=%d allowed_hosts=%d blocked_hosts=%d allow_dacl_mutation=%t allow_windows_ui=%t experimental=%t\n", cfg.MXC.CLIPath, cfg.MXC.Version, cfg.MXC.Containment, cfg.MXC.Network, len(cfg.MXC.ReadOnlyPaths), len(cfg.MXC.ReadWritePaths), len(cfg.MXC.AllowedHosts), len(cfg.MXC.BlockedHosts), cfg.MXC.AllowDACLMutation, cfg.MXC.AllowWindowsUI, cfg.MXC.Experimental)
 	fmt.Fprintf(w, "docker_sandbox cli=%s agent=%s template=%s cpus=%g memory=%s clone=%t workdir=%s extra_workspaces=%s mcp=%s kit=%s\n", cfg.DockerSandbox.CLIPath, cfg.DockerSandbox.Agent, blank(cfg.DockerSandbox.Template, "-"), cfg.DockerSandbox.CPUs, blank(cfg.DockerSandbox.Memory, "-"), cfg.DockerSandbox.Clone, blank(cfg.DockerSandbox.Workdir, "-"), blank(strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ","), "-"), blank(strings.Join(cfg.DockerSandbox.MCP, ","), "-"), blank(strings.Join(cfg.DockerSandbox.Kit, ","), "-"))
-	fmt.Fprintf(w, "multipass cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s disk=%s launch_timeout=%s\n", cfg.Multipass.CLIPath, cfg.Multipass.Image, cfg.Multipass.User, cfg.Multipass.WorkRoot, cfg.Multipass.CPUs, blank(cfg.Multipass.Memory, "-"), blank(cfg.Multipass.Disk, "-"), cfg.Multipass.LaunchTimeout)
+	if err := layout.writeSlot(w, "multipass"); err != nil {
+		return err
+	}
 	fmt.Fprintf(w, "machine0 cli=%s image=%s image_version=%d desktop_image=%s size=%s region=%s key=%s work_root=%s release_policy=%s create_timeout=%s poll_interval=%s auth_mode=cli auth_status=unchecked readiness=unchecked\n", cfg.Machine0.CLIPath, cfg.Machine0.Image, cfg.Machine0.ImageVersion, blank(cfg.Machine0.DesktopImage, "-"), cfg.Machine0.Size, cfg.Machine0.Region, blank(cfg.Machine0.Key, "default"), machine0ConfigWorkRoot(cfg.Machine0.WorkRoot), cfg.Machine0.ReleasePolicy, cfg.Machine0.CreateTimeout, cfg.Machine0.PollInterval)
-	fmt.Fprintf(w, "tart image=%s user=%s work_root=%s cpus=%d memory=%d disk=%d\n", cfg.Tart.Image, cfg.Tart.User, cfg.Tart.WorkRoot, cfg.Tart.CPUs, cfg.Tart.Memory, cfg.Tart.Disk)
-	fmt.Fprintf(w, "lume cli=%s base=%s storage=%s user=%s work_root=%s\n", cfg.Lume.CLIPath, cfg.Lume.Base, blank(cfg.Lume.Storage, "default"), cfg.Lume.User, cfg.Lume.WorkRoot)
+	if err := layout.writeSlot(w, "tart"); err != nil {
+		return err
+	}
+	if err := layout.writeSlot(w, "lume"); err != nil {
+		return err
+	}
 	fmt.Fprintf(w, "cloudflare api_url=%s workdir=%s auth=%s\n", blank(redactedConfigURL(cfg.Cloudflare.APIURL), "-"), cfg.Cloudflare.Workdir, tokenState(cfg.Cloudflare.Token))
 	fmt.Fprintf(w, "fastapi_cloud api_url=%s app_id=%s team_id=%s auth=%s\n", blank(redactedConfigURL(cfg.FastAPICloud.APIURL), "-"), blank(cfg.FastAPICloud.AppID, "-"), blank(cfg.FastAPICloud.TeamID, "-"), tokenState(cfg.FastAPICloud.Token))
 	fmt.Fprintf(w, "cloudflare_dynamic_workers loader_url=%s compatibility_date=%s compatibility_flags=%s cache_mode=%s egress=%s cpu_ms=%d subrequests=%d timeout_secs=%d metadata=%d auth=%s\n", blank(redactedConfigURL(cfg.CloudflareDynamicWorkers.LoaderURL), "-"), blank(cfg.CloudflareDynamicWorkers.CompatibilityDate, "-"), blank(strings.Join(cfg.CloudflareDynamicWorkers.CompatibilityFlags, ","), "-"), cfg.CloudflareDynamicWorkers.CacheMode, cfg.CloudflareDynamicWorkers.Egress, cfg.CloudflareDynamicWorkers.CPUMs, cfg.CloudflareDynamicWorkers.Subrequests, cfg.CloudflareDynamicWorkers.TimeoutSecs, len(cfg.CloudflareDynamicWorkers.Metadata), tokenState(cfg.CloudflareDynamicWorkers.Token))
@@ -917,7 +899,7 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 	fmt.Fprintf(w, "firecracker binary=%s jailer=%s kernel=%s rootfs=%s user=%s work_root=%s cpus=%d memory_mib=%d disk_mib=%d network=%s cni_network=%s cni_conf_dir=%s cni_bin_dir=%s launch_timeout=%s delete_on_release=%t\n", blank(cfg.Firecracker.Binary, "-"), blank(cfg.Firecracker.Jailer, "-"), blank(cfg.Firecracker.Kernel, "-"), blank(cfg.Firecracker.RootFS, "-"), blank(cfg.Firecracker.User, "-"), blank(cfg.Firecracker.WorkRoot, "-"), cfg.Firecracker.CPUs, cfg.Firecracker.MemoryMiB, cfg.Firecracker.DiskMiB, blank(cfg.Firecracker.Network, "-"), blank(cfg.Firecracker.CNINetwork, "-"), blank(cfg.Firecracker.CNIConfDir, "-"), blank(cfg.Firecracker.CNIBinDir, "-"), cfg.Firecracker.LaunchTimeout, cfg.Firecracker.DeleteOnRelease)
 	fmt.Fprintf(w, "xcp_ng api_url=%s username=%s template=%s template_uuid=%s sr=%s sr_uuid=%s network=%s network_uuid=%s host=%s user=%s work_root=%s insecure_tls=%t auth=%s\n", blank(redactedConfigURL(cfg.XCPNg.APIURL), "-"), blank(cfg.XCPNg.Username, "-"), blank(cfg.XCPNg.Template, "-"), blank(cfg.XCPNg.TemplateUUID, "-"), blank(cfg.XCPNg.SR, "-"), blank(cfg.XCPNg.SRUUID, "-"), blank(cfg.XCPNg.Network, "-"), blank(cfg.XCPNg.NetworkUUID, "-"), blank(cfg.XCPNg.Host, "-"), cfg.XCPNg.User, cfg.XCPNg.WorkRoot, cfg.XCPNg.InsecureTLS, tokenState(cfg.XCPNg.Password))
 	fmt.Fprintf(w, "parallels template=%s source=%s source_id=%s snapshot=%s snapshot_id=%s clone_mode=%s host=%s user=%s work_root=%s startup_timeout=%s templates=%d hosts=%d\n", blank(cfg.Parallels.Template, "-"), blank(cfg.Parallels.Source, "-"), blank(cfg.Parallels.SourceID, "-"), blank(cfg.Parallels.SourceSnapshot, "-"), blank(cfg.Parallels.SourceSnapshotID, "-"), cfg.Parallels.CloneMode, blank(cfg.Parallels.Host, "local"), cfg.Parallels.User, cfg.Parallels.WorkRoot, cfg.Parallels.StartupTimeout, len(cfg.Parallels.Templates), len(cfg.Parallels.Hosts))
-	if err := writeProviderConfigShowSections(w, sections); err != nil {
+	if err := layout.writeRemaining(w); err != nil {
 		return err
 	}
 	writeProviderConfigStatus(w, providerConfigStatus(cfg))

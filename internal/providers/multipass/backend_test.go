@@ -96,6 +96,39 @@ func sampleInfoJSON(name string) string {
 	return `{"errors":[],"info":{"` + name + `":{"state":"Running","ipv4":["192.168.64.7"],"release":"Ubuntu 24.04.4 LTS","image_hash":"abc123","image_release":"24.04 LTS"}}}`
 }
 
+func TestMultipassConfigShowSection(t *testing.T) {
+	for _, tc := range []struct {
+		raw, memory, disk string
+		cpus              int
+		timeout           time.Duration
+	}{{"", "", "", 0, 0}, {" raw ", "", " disk ", -2, -time.Second}, {"configured", "8G", "40G", 4, 2 * time.Minute}} {
+		cfg := core.Config{Provider: "other", Multipass: core.MultipassConfig{CLIPath: tc.raw, Image: tc.raw, User: tc.raw, WorkRoot: tc.raw, CPUs: tc.cpus, Memory: tc.memory, Disk: tc.disk, LaunchTimeout: tc.timeout}}
+		before := cfg
+		section := (Provider{}).ConfigShowSection(cfg)
+		got := map[string]any{}
+		var fields []string
+		for _, f := range section.Fields {
+			got[f.JSONName] = f.JSONValue
+			fields = append(fields, f.TextName+"="+f.TextValue)
+		}
+		want := map[string]any{"cliPath": tc.raw, "image": tc.raw, "user": tc.raw, "workRoot": tc.raw, "cpus": tc.cpus, "memory": tc.memory, "disk": tc.disk, "launchTimeout": tc.timeout.String()}
+		memory, disk := tc.memory, tc.disk
+		if memory == "" {
+			memory = "-"
+		}
+		if disk == "" {
+			disk = "-"
+		}
+		text := fmt.Sprintf("cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s disk=%s launch_timeout=%s", tc.raw, tc.raw, tc.raw, tc.raw, tc.cpus, memory, disk, tc.timeout.String())
+		if section.JSONKey != "multipass" || section.TextLabel != "multipass" || !reflect.DeepEqual(section.Providers, []string{"multipass"}) || len(section.Fields) != 8 || !reflect.DeepEqual(got, want) || strings.Join(fields, " ") != text {
+			t.Fatalf("Multipass projection %#v", section)
+		}
+		if !reflect.DeepEqual(cfg, before) {
+			t.Fatal("projection mutated config")
+		}
+	}
+}
+
 func TestProviderSpecAndAliases(t *testing.T) {
 	p := Provider{}
 	if p.Name() != providerName {
