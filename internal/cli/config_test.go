@@ -9813,6 +9813,132 @@ func TestXCPNgHigherPrecedenceNamesClearInheritedUUIDs(t *testing.T) {
 	}
 }
 
+func TestFreestyleOrdinarySources(t *testing.T) {
+	clearConfigEnv(t)
+	if got := baseConfig().Freestyle; got != (FreestyleConfig{APIURL: "https://api.freestyle.sh", Workdir: "crabbox"}) {
+		t.Fatalf("defaults %#v", got)
+	}
+	for _, source := range []string{"file", "env"} {
+		for _, tc := range []struct {
+			raw, num string
+			want     int
+			accepted bool
+		}{{"", "0", 7, false}, {"same", "-2", -2, true}, {" padded ", "7", 7, true}, {"same", "bad", 7, true}, {"same", " 7 ", 7, true}} {
+			if source == "file" && (tc.num == "bad" || tc.num == " 7 ") {
+				continue
+			}
+			t.Run(source+"/"+tc.raw+"/"+tc.num, func(t *testing.T) {
+				clearConfigEnv(t)
+				cfg := Config{Freestyle: FreestyleConfig{APIURL: "same", Workdir: "same", VCPUs: 7, MemoryGB: 7}}
+				want := cfg.Freestyle
+				if tc.raw != "" {
+					want.APIURL, want.Workdir = tc.raw, tc.raw
+				}
+				want.VCPUs, want.MemoryGB = tc.want, tc.want
+				inputSource := configInputUser
+				if source == "file" {
+					if tc.num == "-2" {
+						want.VCPUs, want.MemoryGB = 7, 7
+					}
+					var file fileConfig
+					data := fmt.Sprintf("freestyle: {apiUrl: %q, workdir: %q, vcpus: %s, memoryGB: %s}", tc.raw, tc.raw, tc.num, tc.num)
+					if err := yaml.Unmarshal([]byte(data), &file); err != nil {
+						t.Fatal(err)
+					}
+					original := *file.Freestyle
+					if err := applyFileConfig(&cfg, file); err != nil {
+						t.Fatal(err)
+					}
+					if *file.Freestyle != original {
+						t.Fatal("file input mutated")
+					}
+				} else {
+					inputSource = configInputEnvironment
+					if tc.num == "0" {
+						want.VCPUs, want.MemoryGB = 0, 0
+					}
+					t.Setenv("CRABBOX_FREESTYLE_API_URL", tc.raw)
+					t.Setenv("CRABBOX_FREESTYLE_WORKDIR", tc.raw)
+					t.Setenv("CRABBOX_FREESTYLE_VCPUS", tc.num)
+					t.Setenv("CRABBOX_FREESTYLE_MEMORY_GB", tc.num)
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				}
+				accepted := tc.accepted || source == "env" && tc.num == "0"
+				var ledger configInputLedger
+				if accepted {
+					ledger = ledger.withInput("freestyle", inputSource, configInputValue)
+				}
+				if cfg.Freestyle != want || !reflect.DeepEqual(cfg.inputProvenance, ledger) {
+					t.Fatalf("source %#v ledger %#v want %#v", cfg.Freestyle, cfg.inputProvenance, want)
+				}
+			})
+		}
+	}
+	for _, field := range []struct {
+		name string
+		read func(Config) string
+	}{{"API_KEY", func(c Config) string { return c.Freestyle.APIKey }}, {"API_URL", func(c Config) string { return c.Freestyle.APIURL }}} {
+		for _, tc := range []struct{ primary, alias, want string }{{"", "", ""}, {"", "synthetic-alias", "synthetic-alias"}, {"synthetic-primary", "synthetic-alias", "synthetic-primary"}, {" ", "synthetic-alias", " "}, {"synthetic-equal", "synthetic-equal", "synthetic-equal"}} {
+			clearConfigEnv(t)
+			cfg := Config{}
+			t.Setenv("CRABBOX_FREESTYLE_"+field.name, tc.primary)
+			t.Setenv("FREESTYLE_"+field.name, tc.alias)
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if field.read(cfg) != tc.want {
+				t.Fatalf("%s alias precedence", field.name)
+			}
+			var ledger configInputLedger
+			if tc.want != "" {
+				ledger = ledger.withInput("freestyle", configInputEnvironment, configInputValue)
+			}
+			if !reflect.DeepEqual(cfg.inputProvenance, ledger) {
+				t.Fatal("alias accepted source mismatch")
+			}
+		}
+	}
+}
+
+func TestFreestyleOrdinaryWriter(t *testing.T) {
+	for _, input := range []string{"freestyle: null", "freestyle: {}", "freestyle: {apiUrl: '', workdir: '', vcpus: 0, memoryGB: 0}", "freestyle: {apiUrl: ' padded ', workdir: ' raw ', vcpus: -2, memoryGB: 7}"} {
+		path := isolatedConfigPath(t)
+		if err := os.WriteFile(path, []byte(input), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writeUserFileConfig(file); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := yaml.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]any{}
+		if strings.Contains(input, "freestyle: {") {
+			want["freestyle"] = map[string]any{}
+		}
+		if strings.Contains(input, "padded") {
+			want["freestyle"] = map[string]any{"apiUrl": " padded ", "workdir": " raw ", "vcpus": -2, "memoryGB": 7}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("writer %#v want %#v", got, want)
+		}
+	}
+	if _, present := reflect.TypeOf(fileFreestyleConfig{}).FieldByName("APIKey"); present {
+		t.Fatal("environment-only API key admitted to file DTO")
+	}
+}
+
 func TestRepoConfigCannotOverrideFreestyleAPIURL(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

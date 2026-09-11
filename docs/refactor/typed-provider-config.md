@@ -39,6 +39,16 @@ Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.
 
+Freestyle declares all five fields in `internal/cli/config_freestyle.go`.
+Its API key remains environment-only, and the API URL admits trusted user files
+but not repository files. Enforcing that rule in the file binding removes the
+save-and-restore special case from both configuration loaders. The four file
+fields retain value storage; file sizes accept only positive values, while
+environment and flag integers retain their existing signed values until provider
+validation. Generated constants also own the two configured fallback defaults;
+endpoint validation, workspace containment and lifecycle behavior stay with the
+provider.
+
 Phala's complete six-field hybrid owner is `internal/cli/config_phala.go`.
 Its nullable bool remains nil by default; accepted file, environment and ordinary
 generated flag assignments copy into a fresh pointer, while ignored inputs keep
