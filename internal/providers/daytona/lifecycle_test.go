@@ -47,6 +47,7 @@ type daytonaLifecycleFixture struct {
 	identityOrganization  string
 	hideIdentitySandbox   bool
 	deletionPending       bool
+	currentKeyIdentity    func(map[string]any)
 }
 
 func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *daytonaLeaseBackend, Repo) {
@@ -68,7 +69,21 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 		}
 
 		switch {
+		case r.Method == "GET" && r.URL.Path == "/api-keys/current":
+			identity := map[string]any{
+				"name": "fixture", "value": "masked", "createdAt": "2026-01-01T00:00:00Z",
+				"permissions": []string{}, "lastUsedAt": nil, "expiresAt": nil, "userId": "fixture-user",
+				"organizationId": f.identityOrganization,
+			}
+			if f.currentKeyIdentity != nil {
+				f.currentKeyIdentity(identity)
+			}
+			_ = json.NewEncoder(w).Encode(identity)
 		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/organizations/"):
+			if r.Header.Get("Authorization") != "Bearer synthetic-jwt" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
 			if r.URL.Path != "/organizations/"+f.identityOrganization {
 				w.WriteHeader(http.StatusForbidden)
 				return
