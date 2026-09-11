@@ -177,6 +177,7 @@ Provider flags:
 --daytona-work-root
 --daytona-ssh-gateway-host
 --daytona-ssh-access-minutes
+--daytona-forget-missing # stop only; ordinary local claims only
 ```
 
 The non-auth settings can also be set through environment variables:
@@ -195,6 +196,26 @@ require operator resolution. See [managed Daytona cleanup](../features/lifecycle
 for lifetime, key-rotation, and recovery behavior.
 
 ## Direct lifecycle
+
+### Forgetting an ordinary stale claim
+
+If native TTL or an external deletion removes an ordinary sandbox, normal `stop`
+preserves its claim when the sandbox cannot be resolved. After checking the
+original Daytona account and API endpoint, explicitly forget that local record:
+
+```bash
+crabbox stop --provider daytona --daytona-forget-missing <lease-id-or-local-slug>
+```
+
+This command queries only the claim's exact sandbox ID and removes local state
+only after a structured Daytona 404. It refuses live sandboxes, authorization
+errors, malformed responses, checkpoint-held claims, and coordinator/adapter
+registrations that require normal release reconciliation. It never
+sends DELETE or reports remote release: a 404 can also mean the current credentials
+cannot access the original account, so any remaining sandbox may still be billed.
+The flag is command-only and cannot be enabled in a profile or environment variable.
+Fixed claims cannot be forgotten; use ordinary `stop` to reconcile them and retain
+their terminal replay protection as described below.
 
 ### Fixed operation IDs
 

@@ -19,6 +19,7 @@ const (
 )
 
 type daytonaFlagValues struct {
+	ForgetMissing    *bool
 	APIURL           *string
 	Snapshot         *string
 	Target           *string
@@ -30,6 +31,7 @@ type daytonaFlagValues struct {
 
 func RegisterDaytonaProviderFlags(fs *flag.FlagSet, defaults Config) any {
 	return daytonaFlagValues{
+		ForgetMissing:    fs.Bool("daytona-forget-missing", false, "remove only the local ordinary Daytona claim after a structured missing-sandbox response"),
 		APIURL:           fs.String("daytona-api-url", defaults.Daytona.APIURL, "Daytona API URL"),
 		Snapshot:         fs.String("daytona-snapshot", defaults.Daytona.Snapshot, "Daytona snapshot name"),
 		Target:           fs.String("daytona-target", defaults.Daytona.Target, "Daytona compute target"),
@@ -49,6 +51,13 @@ func ApplyDaytonaProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error 
 	v, ok := values.(daytonaFlagValues)
 	if !ok {
 		return nil
+	}
+	if core.FlagWasSet(fs, "daytona-forget-missing") {
+		if fs.Name() != "stop" {
+			return exit(2, "--daytona-forget-missing is only supported by stop")
+		}
+		cfg.Daytona.ForgetMissing = *v.ForgetMissing
+		core.RecordProviderFlagInputs(cfg, true, "daytona")
 	}
 	if core.FlagWasSet(fs, "daytona-api-url") {
 		cfg.Daytona.APIURL = *v.APIURL

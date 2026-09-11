@@ -313,6 +313,9 @@ func (b *daytonaLeaseBackend) Stop(ctx context.Context, req StopRequest) error {
 		ctx, cancel = context.WithTimeout(ctx, daytonaCleanupTimeout)
 		defer cancel()
 	}
+	if b.cfg.Daytona.ForgetMissing {
+		return b.forgetMissing(ctx, req.ID)
+	}
 	if claim, exists, err := resolveLeaseClaimForProvider(req.ID, daytonaProvider); err != nil {
 		return err
 	} else if exists && claim.FixedCreateIntent != nil {
