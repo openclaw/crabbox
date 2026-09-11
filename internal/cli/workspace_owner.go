@@ -400,11 +400,7 @@ func (o *workspaceOwner) renewLoopWithTicks(ticks <-chan time.Time, callTimeout 
 			if err == nil {
 				err = errors.New("unexpected protocol response")
 			}
-			// Only recognized states are safe to add to transport diagnostics.
-			switch response {
-			case "MISMATCH", "EXPIRED", "AMBIGUOUS":
-				err = fmt.Errorf("protocol state %s: %w", response, err)
-			}
+			err = workspaceOwnerProtocolError(response, err)
 			o.mu.Lock()
 			o.renewErr = exit(7, "remote workspace owner renewal failed closed: %v", err)
 			o.mu.Unlock()
@@ -412,6 +408,15 @@ func (o *workspaceOwner) renewLoopWithTicks(ticks <-chan time.Time, callTimeout 
 			return
 		}
 	}
+}
+
+// Only recognized states are safe to add to transport diagnostics.
+func workspaceOwnerProtocolError(response string, err error) error {
+	switch response {
+	case "MISMATCH", "EXPIRED", "AMBIGUOUS":
+		return fmt.Errorf("protocol state %s: %w", response, err)
+	}
+	return err
 }
 
 func (o *workspaceOwner) Err() error {
@@ -440,6 +445,7 @@ func (o *workspaceOwner) inspectChild(ctx context.Context) (workspaceOwnerInspec
 	}
 	response, err := callWorkspaceOwnerTransport(ctx, o.callTimeout(), o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerInspect, Key: o.key, Token: o.token, TTL: o.ttl})
 	if err != nil {
+		err = workspaceOwnerProtocolError(response, err)
 		return workspaceOwnerQuiescent, exit(7, "confirm remote workspace owner child state: ambiguous remote state: %v", err)
 	}
 	switch response {
@@ -460,6 +466,7 @@ func (o *workspaceOwner) WaitForChild(ctx context.Context, timeout time.Duration
 	for {
 		response, err := callWorkspaceOwnerTransport(ctx, min(o.callTimeout(), time.Until(deadline)), o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerInspect, Key: o.key, Token: o.token, TTL: o.ttl})
 		if err != nil {
+			err = workspaceOwnerProtocolError(response, err)
 			return exit(7, "confirm remote workspace phase witness: ambiguous remote state: %v", err)
 		}
 		switch response {
