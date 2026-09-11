@@ -449,6 +449,7 @@ type ExternalDesktopConfig struct {
 }
 
 type DaytonaConfig struct {
+	ForgetMissing    bool `yaml:"-" json:"-"`
 	APIKey           string
 	JWTToken         string
 	OrganizationID   string

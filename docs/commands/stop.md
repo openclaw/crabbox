@@ -101,6 +101,11 @@ Crabbox lease ID and local slug:
   the caller's cancellation and deadline. The CLI remains signal-cancelable;
   the automatic-cleanup timeout does not shorten that lifetime. Non-cancelable
   callers, including detached job cleanup, retain the 30-second fallback.
+  For an ordinary claim whose sandbox is already missing, explicit
+  `--daytona-forget-missing` queries the exact bound ID and removes only local
+  state after a structured 404. Check the original account and endpoint first:
+  this does not verify remote deletion or stop billing. Live sandboxes and fixed
+  replay-protected claims cannot be forgotten.
 - `coder` — stops the Coder workspace by default and removes the local claim.
   Set `coder.deleteOnRelease` or pass `--coder-delete-on-release` to delete the
   workspace instead.
