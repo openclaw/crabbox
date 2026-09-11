@@ -230,39 +230,6 @@ func configShowView(cfg Config) map[string]any {
 			"runnerVersion": cfg.Actions.RunnerVersion,
 			"ephemeral":     cfg.Actions.Ephemeral,
 		},
-		"azure": map[string]any{
-			"location":      cfg.AzureLocation,
-			"resourceGroup": cfg.AzureResourceGroup,
-			"image":         cfg.AzureImage,
-			"osDisk":        cfg.AzureOSDisk,
-			"snapshotSKU":   cfg.AzureSnapshotSKU,
-			"osDiskSKU":     cfg.AzureOSDiskSKU,
-			"network":       cfg.AzureNetwork,
-			"sshCIDRs":      cfg.AzureSSHCIDRs,
-		},
-		"digitalocean": map[string]any{
-			"region":   cfg.DigitalOcean.Region,
-			"image":    cfg.DigitalOcean.Image,
-			"vpc":      cfg.DigitalOcean.VPCUUID,
-			"sshCIDRs": cfg.DigitalOcean.SSHCIDRs,
-		},
-		"vultr": map[string]any{
-			"region":        cfg.Vultr.Region,
-			"os":            cfg.Vultr.OS,
-			"image":         cfg.Vultr.Image,
-			"snapshot":      cfg.Vultr.Snapshot,
-			"firewallGroup": cfg.Vultr.FirewallGroup,
-			"vpcIds":        cfg.Vultr.VPCIDs,
-			"sshCIDRs":      cfg.Vultr.SSHCIDRs,
-			"userScheme":    cfg.Vultr.UserScheme,
-		},
-		"linode": map[string]any{
-			"region":   cfg.Linode.Region,
-			"image":    cfg.Linode.Image,
-			"type":     cfg.Linode.Type,
-			"firewall": cfg.Linode.FirewallID,
-			"sshCIDRs": cfg.Linode.SSHCIDRs,
-		},
 		"githubCodespaces": map[string]any{
 			"apiUrl":           redactedConfigURL(cfg.GitHubCodespaces.APIURL),
 			"ghPath":           cfg.GitHubCodespaces.GHPath,
@@ -624,15 +591,6 @@ func configShowView(cfg Config) map[string]any {
 			"image":    cfg.Image,
 			"sshKey":   cfg.ProviderKey,
 		},
-		"aws": map[string]any{
-			"region":          cfg.AWSRegion,
-			"ami":             cfg.AWSAMI,
-			"securityGroupId": cfg.AWSSGID,
-			"subnetId":        cfg.AWSSubnetID,
-			"instanceProfile": cfg.AWSProfile,
-			"rootGB":          cfg.AWSRootGB,
-			"sshCIDRs":        cfg.AWSSSHCIDRs,
-		},
 		"awsLambdaMicroVM": map[string]any{
 			"image":             cfg.AWSLambdaMicroVM.Image,
 			"imageVersion":      cfg.AWSLambdaMicroVM.ImageVersion,
@@ -641,17 +599,6 @@ func configShowView(cfg Config) map[string]any {
 			"ingressConnectors": cfg.AWSLambdaMicroVM.IngressConnectors,
 			"egressConnectors":  cfg.AWSLambdaMicroVM.EgressConnectors,
 			"forgetMissing":     cfg.AWSLambdaMicroVM.ForgetMissing,
-		},
-		"gcp": map[string]any{
-			"project":        cfg.GCPProject,
-			"zone":           cfg.GCPZone,
-			"image":          cfg.GCPImage,
-			"network":        cfg.GCPNetwork,
-			"subnet":         cfg.GCPSubnet,
-			"tags":           cfg.GCPTags,
-			"rootGB":         cfg.GCPRootGB,
-			"sshCIDRs":       cfg.GCPSSHCIDRs,
-			"serviceAccount": cfg.GCPServiceAccount,
 		},
 		"proxmox": map[string]any{
 			"apiUrl":      redactedConfigURL(cfg.Proxmox.APIURL),
@@ -843,12 +790,22 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 		sort.Strings(names)
 		fmt.Fprintf(w, "jobs=%s\n", strings.Join(names, ","))
 	}
-	fmt.Fprintf(w, "aws region=%s root_gb=%d ssh_cidrs=%s\n", cfg.AWSRegion, cfg.AWSRootGB, blank(strings.Join(cfg.AWSSSHCIDRs, ","), "-"))
+	if err := layout.writeSlot(w, "aws"); err != nil {
+		return err
+	}
 	fmt.Fprintf(w, "aws_lambda_microvm image=%s image_version=%s workdir=%s forget_missing=%t\n", blank(cfg.AWSLambdaMicroVM.Image, "-"), blank(cfg.AWSLambdaMicroVM.ImageVersion, "latest"), cfg.AWSLambdaMicroVM.Workdir, cfg.AWSLambdaMicroVM.ForgetMissing)
-	fmt.Fprintf(w, "azure location=%s resource_group=%s os_disk=%s snapshot_sku=%s os_disk_sku=%s network=%s ssh_cidrs=%s\n", cfg.AzureLocation, cfg.AzureResourceGroup, cfg.AzureOSDisk, blank(cfg.AzureSnapshotSKU, "-"), blank(cfg.AzureOSDiskSKU, "-"), blank(cfg.AzureNetwork, "-"), blank(strings.Join(cfg.AzureSSHCIDRs, ","), "-"))
-	fmt.Fprintf(w, "digitalocean region=%s image=%s vpc=%s ssh_cidrs=%s\n", cfg.DigitalOcean.Region, cfg.DigitalOcean.Image, blank(cfg.DigitalOcean.VPCUUID, "-"), blank(strings.Join(cfg.DigitalOcean.SSHCIDRs, ","), "-"))
-	fmt.Fprintf(w, "vultr region=%s os=%s image=%s snapshot=%s firewall_group=%s vpc_ids=%s ssh_cidrs=%s user_scheme=%s\n", cfg.Vultr.Region, blank(cfg.Vultr.OS, "-"), blank(cfg.Vultr.Image, "-"), blank(cfg.Vultr.Snapshot, "-"), blank(cfg.Vultr.FirewallGroup, "-"), blank(strings.Join(cfg.Vultr.VPCIDs, ","), "-"), blank(strings.Join(cfg.Vultr.SSHCIDRs, ","), "-"), blank(cfg.Vultr.UserScheme, "-"))
-	fmt.Fprintf(w, "linode region=%s image=%s type=%s firewall=%s ssh_cidrs=%s\n", cfg.Linode.Region, cfg.Linode.Image, cfg.Linode.Type, blank(cfg.Linode.FirewallID, "-"), blank(strings.Join(cfg.Linode.SSHCIDRs, ","), "-"))
+	if err := layout.writeSlot(w, "azure"); err != nil {
+		return err
+	}
+	if err := layout.writeSlot(w, "digitalocean"); err != nil {
+		return err
+	}
+	if err := layout.writeSlot(w, "vultr"); err != nil {
+		return err
+	}
+	if err := layout.writeSlot(w, "linode"); err != nil {
+		return err
+	}
 	fmt.Fprintf(w, "github_codespaces api_url=%s gh_path=%s repo=%s ref=%s machine=%s devcontainer_path=%s working_directory=%s geo=%s idle_timeout=%s retention_period=%s delete_on_release=%t work_root=%s auth_mode=cli auth_status=unchecked readiness=unchecked\n", blank(redactedConfigURL(cfg.GitHubCodespaces.APIURL), "-"), blank(cfg.GitHubCodespaces.GHPath, "-"), blank(cfg.GitHubCodespaces.Repo, "-"), blank(cfg.GitHubCodespaces.Ref, "-"), blank(cfg.GitHubCodespaces.Machine, "-"), blank(cfg.GitHubCodespaces.DevcontainerPath, "-"), blank(cfg.GitHubCodespaces.WorkingDirectory, "-"), blank(cfg.GitHubCodespaces.Geo, "-"), cfg.GitHubCodespaces.IdleTimeout, cfg.GitHubCodespaces.RetentionPeriod, cfg.GitHubCodespaces.DeleteOnRelease, blank(cfg.GitHubCodespaces.WorkRoot, "-"))
 	fmt.Fprintf(w, "lambda region=%s type=%s image=%s image_family=%s firewall_ruleset=%s ssh_cidrs=%s filesystems=%s mounts=%d auth=%s\n", cfg.Lambda.Region, cfg.Lambda.Type, blank(cfg.Lambda.Image, "-"), blank(cfg.Lambda.ImageFamily, "-"), blank(cfg.Lambda.FirewallRuleset, "-"), blank(strings.Join(cfg.Lambda.SSHCIDRs, ","), "-"), blank(strings.Join(cfg.Lambda.FilesystemNames, ","), "-"), len(cfg.Lambda.FilesystemMounts), lambdaAuthState())
 	fmt.Fprintf(w, "vast api_url=%s instance_type=%s gpu_name=%s gpu_count=%d image=%s template_id=%s runtype=%s disk_gb=%d max_dph_total=%.4g min_reliability=%.4g order=%s user=%s work_root=%s release_action=%s auth=%s\n", blank(redactedConfigURL(cfg.Vast.APIURL), "-"), blank(cfg.Vast.InstanceType, "-"), blank(cfg.Vast.GPUName, "-"), cfg.Vast.GPUCount, blank(cfg.Vast.Image, "-"), blank(cfg.Vast.TemplateID, "-"), blank(cfg.Vast.Runtype, "-"), cfg.Vast.DiskGB, cfg.Vast.MaxDphTotal, cfg.Vast.MinReliability, blank(cfg.Vast.Order, "-"), blank(cfg.Vast.User, "-"), blank(cfg.Vast.WorkRoot, "-"), blank(cfg.Vast.ReleaseAction, "-"), tokenState(cfg.Vast.APIKey))
@@ -859,7 +816,9 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 	fmt.Fprintf(w, "scaleway region=%s zone=%s image=%s type=%s project_id=%s organization_id=%s security_group=%s ssh_cidrs=%s auth=%s\n", blank(cfg.Scaleway.Region, "-"), blank(cfg.Scaleway.Zone, "-"), blank(cfg.Scaleway.Image, "-"), blank(cfg.Scaleway.Type, "-"), blank(cfg.Scaleway.ProjectID, "-"), blank(cfg.Scaleway.OrganizationID, "-"), blank(cfg.Scaleway.SecurityGroup, "-"), blank(strings.Join(cfg.Scaleway.SSHCIDRs, ","), "-"), scalewayAuthState())
 	fmt.Fprintf(w, "tencentcloud region=%s zone=%s image=%s type=%s vpc_id=%s subnet_id=%s security_group_id=%s root_gb=%d internet_charge_type=%s internet_max_bandwidth_out=%d ssh_cidrs=%s api_endpoint=%s auth=%s\n", blank(cfg.TencentCloud.Region, "-"), blank(cfg.TencentCloud.Zone, "-"), blank(cfg.TencentCloud.Image, "-"), blank(cfg.TencentCloud.Type, "-"), blank(cfg.TencentCloud.VPCID, "-"), blank(cfg.TencentCloud.SubnetID, "-"), blank(cfg.TencentCloud.SecurityGroupID, "-"), cfg.TencentCloud.RootGB, blank(cfg.TencentCloud.InternetChargeType, "-"), cfg.TencentCloud.InternetMaxBandwidthOut, blank(strings.Join(cfg.TencentCloud.SSHCIDRs, ","), "-"), blank(redactedConfigURL(cfg.TencentCloud.APIEndpoint), "-"), tencentCloudAuthState())
 	fmt.Fprintf(w, "azure_dynamic_sessions endpoint=%s unsupported_pool=%s api_version=%s workdir=%s timeout_secs=%d\n", blank(redactedConfigURL(cfg.AzureDynamicSessions.Endpoint), "-"), blank(cfg.AzureDynamicSessions.Pool, "-"), cfg.AzureDynamicSessions.APIVersion, cfg.AzureDynamicSessions.Workdir, cfg.AzureDynamicSessions.TimeoutSecs)
-	fmt.Fprintf(w, "gcp project=%s zone=%s image=%s network=%s subnet=%s root_gb=%d ssh_cidrs=%s\n", blank(cfg.GCPProject, "-"), cfg.GCPZone, cfg.GCPImage, cfg.GCPNetwork, blank(cfg.GCPSubnet, "-"), cfg.GCPRootGB, blank(strings.Join(cfg.GCPSSHCIDRs, ","), "-"))
+	if err := layout.writeSlot(w, "gcp"); err != nil {
+		return err
+	}
 	fmt.Fprintf(w, "proxmox api_url=%s node=%s template_id=%d storage=%s pool=%s bridge=%s user=%s work_root=%s full_clone=%t auth=%s\n", blank(redactedConfigURL(cfg.Proxmox.APIURL), "-"), blank(cfg.Proxmox.Node, "-"), cfg.Proxmox.TemplateID, blank(cfg.Proxmox.Storage, "-"), blank(cfg.Proxmox.Pool, "-"), blank(cfg.Proxmox.Bridge, "-"), cfg.Proxmox.User, cfg.Proxmox.WorkRoot, cfg.Proxmox.FullClone, tokenState(cfg.Proxmox.TokenSecret))
 	fmt.Fprintf(w, "firecracker binary=%s jailer=%s kernel=%s rootfs=%s user=%s work_root=%s cpus=%d memory_mib=%d disk_mib=%d network=%s cni_network=%s cni_conf_dir=%s cni_bin_dir=%s launch_timeout=%s delete_on_release=%t\n", blank(cfg.Firecracker.Binary, "-"), blank(cfg.Firecracker.Jailer, "-"), blank(cfg.Firecracker.Kernel, "-"), blank(cfg.Firecracker.RootFS, "-"), blank(cfg.Firecracker.User, "-"), blank(cfg.Firecracker.WorkRoot, "-"), cfg.Firecracker.CPUs, cfg.Firecracker.MemoryMiB, cfg.Firecracker.DiskMiB, blank(cfg.Firecracker.Network, "-"), blank(cfg.Firecracker.CNINetwork, "-"), blank(cfg.Firecracker.CNIConfDir, "-"), blank(cfg.Firecracker.CNIBinDir, "-"), cfg.Firecracker.LaunchTimeout, cfg.Firecracker.DeleteOnRelease)
 	fmt.Fprintf(w, "xcp_ng api_url=%s username=%s template=%s template_uuid=%s sr=%s sr_uuid=%s network=%s network_uuid=%s host=%s user=%s work_root=%s insecure_tls=%t auth=%s\n", blank(redactedConfigURL(cfg.XCPNg.APIURL), "-"), blank(cfg.XCPNg.Username, "-"), blank(cfg.XCPNg.Template, "-"), blank(cfg.XCPNg.TemplateUUID, "-"), blank(cfg.XCPNg.SR, "-"), blank(cfg.XCPNg.SRUUID, "-"), blank(cfg.XCPNg.Network, "-"), blank(cfg.XCPNg.NetworkUUID, "-"), blank(cfg.XCPNg.Host, "-"), cfg.XCPNg.User, cfg.XCPNg.WorkRoot, cfg.XCPNg.InsecureTLS, tokenState(cfg.XCPNg.Password))

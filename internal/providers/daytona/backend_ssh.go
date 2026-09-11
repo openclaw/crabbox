@@ -131,6 +131,14 @@ func (b *daytonaLeaseBackend) ResolveRunLeaseUnderClaim(ctx context.Context, req
 	return b.resolve(ctx, req, &original)
 }
 
+func (b *daytonaLeaseBackend) ResolveExecLeaseUnderClaim(ctx context.Context, req ResolveRequest, original core.LeaseClaim) (LeaseTarget, error) {
+	// Only fixed-ID release holds the same exclusive fence through deletion.
+	if !fixedDaytonaLeaseKind.IsFixedClaim(original) || original.FixedCreateIntent.State != "acquired" {
+		return LeaseTarget{}, exit(4, "exec requires a completed fixed-ID Daytona lease; use run for ordinary leases")
+	}
+	return b.resolve(ctx, req, &original)
+}
+
 func (b *daytonaLeaseBackend) resolve(ctx context.Context, req ResolveRequest, original *LeaseClaim) (LeaseTarget, error) {
 	if req.RejectAuthSecret {
 		return LeaseTarget{}, exit(2, "crabbox connect does not support token-as-username SSH targets; use crabbox ssh --show-secret in a trusted terminal")
@@ -277,7 +285,7 @@ func (b *daytonaLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLease
 		if req.Lease.Server.CloudID != "" && claim.CloudID != "" && req.Lease.Server.CloudID != claim.CloudID {
 			return exit(4, "Daytona fixed release resource identity mismatch")
 		}
-		return b.releaseFixed(ctx, claim, req.CheckpointID, false)
+		return b.releaseFixed(ctx, claim, req.CheckpointID, false, "")
 	}
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
