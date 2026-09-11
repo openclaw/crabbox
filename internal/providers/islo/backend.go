@@ -297,7 +297,13 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (result RunResult
 		return result, err
 	}
 	commandStart := b.now()
-	exitCode, runErr := b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, isloWorkloadEnv(req.Env, tailnetReady), workloadUser)
+	var exitCode int
+	var runErr error
+	if req.Script != nil {
+		exitCode, runErr = b.runScript(ctx, client, name, workspace, req, isloWorkloadEnv(req.Env, tailnetReady), workloadUser)
+	} else {
+		exitCode, runErr = b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, isloWorkloadEnv(req.Env, tailnetReady), workloadUser)
+	}
 	commandDuration := b.now().Sub(commandStart)
 	commandRan = true
 	result.Command = commandDuration

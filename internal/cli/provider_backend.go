@@ -724,6 +724,7 @@ const (
 	FeatureRunArtifacts Feature = "run-artifacts"
 	FeatureRunDownloads Feature = "run-downloads"
 	FeatureModuleRun    Feature = "module-run"
+	FeaturePOSIXScript  Feature = "posix-script"
 	// FeatureSSHScriptRun routes explicit scripts through the core SSH owner,
 	// while a hybrid backend may delegate ordinary commands.
 	FeatureSSHScriptRun Feature = "ssh-script-run"
@@ -1971,6 +1972,7 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 	provider := spec.Name
 	archiveSync := featureSetHas(spec.Features, FeatureArchiveSync)
 	moduleRun := featureSetHas(spec.Features, FeatureModuleRun)
+	posixScript := featureSetHas(spec.Features, FeaturePOSIXScript)
 	if req.SyncOnly && !archiveSync {
 		return exit(2, "%s delegates sync; --sync-only is not supported", provider)
 	}
@@ -2022,7 +2024,7 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 	if req.StopAfter != "" {
 		return exit(2, "%s delegates run execution; --stop-after is not supported", provider)
 	}
-	if (req.Script != nil || req.ScriptRequested) && !moduleRun {
+	if (req.Script != nil || req.ScriptRequested) && !moduleRun && !posixScript {
 		return exit(2, "%s delegates run execution; --script is not supported", provider)
 	}
 	if moduleRun && len(req.Command) > 0 {

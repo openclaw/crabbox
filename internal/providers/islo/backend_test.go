@@ -2171,6 +2171,7 @@ type fakeIsloSyncClient struct {
 	execHook                 func(*gosdk.ExecRequest)
 	execDeadlineCommand      string
 	execDeadline             time.Time
+	execCtxStates            map[string]isloExecCtxState
 	rejectCanceledContext    bool
 	closeUploadReader        bool
 	createRequest            *gosdk.CreateSandboxRequest
@@ -2426,6 +2427,8 @@ func (f *fakeIsloSyncClient) UploadArchive(_ context.Context, _ string, targetPa
 }
 
 func (f *fakeIsloSyncClient) ExecStream(ctx context.Context, _ string, req *gosdk.ExecRequest, stdout, _ io.Writer) (int, error) {
+	command := strings.Join(req.GetCommand(), " ")
+	f.recordExecCtx(ctx, command)
 	if f.rejectCanceledContext && ctx.Err() != nil {
 		return 1, ctx.Err()
 	}
@@ -2434,7 +2437,6 @@ func (f *fakeIsloSyncClient) ExecStream(ctx context.Context, _ string, req *gosd
 		f.execHook(req)
 	}
 	callIndex := len(f.execRequests) - 1
-	command := strings.Join(req.GetCommand(), " ")
 	if f.execDeadlineCommand != "" && strings.Contains(command, f.execDeadlineCommand) {
 		f.execDeadline, _ = ctx.Deadline()
 	}
@@ -2490,6 +2492,36 @@ func (f *fakeIsloSyncClient) CreateShare(context.Context, string, int, time.Dura
 
 func (f *fakeIsloSyncClient) ListShares(context.Context, string) ([]IsloShare, error) {
 	return nil, nil
+}
+
+// isloExecCtxState is the state of the context an ExecStream call was handed,
+// captured at entry. Recording it is how a test pins that a call reached the
+// provider on a live context even though its caller's context was already
+// cancelled.
+type isloExecCtxState struct {
+	err         error
+	deadline    time.Time
+	hasDeadline bool
+}
+
+func (f *fakeIsloSyncClient) recordExecCtx(ctx context.Context, command string) {
+	if f.execCtxStates == nil {
+		f.execCtxStates = map[string]isloExecCtxState{}
+	}
+	state := isloExecCtxState{err: ctx.Err()}
+	state.deadline, state.hasDeadline = ctx.Deadline()
+	f.execCtxStates[command] = state
+}
+
+// execCtxStateContaining returns the recorded context state for the single
+// ExecStream call whose command contains value.
+func (f *fakeIsloSyncClient) execCtxStateContaining(value string) (isloExecCtxState, bool) {
+	for command, state := range f.execCtxStates {
+		if strings.Contains(command, value) {
+			return state, true
+		}
+	}
+	return isloExecCtxState{}, false
 }
 
 func (f *fakeIsloSyncClient) commandContains(value string) bool {
