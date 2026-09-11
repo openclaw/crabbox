@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Show Freestyle and Crownest settings through a shared offline JSON/text display path, preserving zero and false values while redacting URLs and reporting only loaded key presence. [PR 2104](https://github.com/openclaw/crabbox/pull/2104). Thanks @steipete.
+
+## 0.56.0 - 2026-09-11
+
 ### Highlights
 
 - **More reliable native Windows runners.** Start with working Node/npm on PATH and launch detached daemons that survive command and SSH-session exit.
@@ -30,7 +34,6 @@
 - Validate sparse-checkout and skip-worktree sync scope before SSH lease work, explain how to materialize or exclude missing tracked files, and rebuild the final manifest after acquisition. [PR 2097](https://github.com/openclaw/crabbox/pull/2097), [Issue 1567](https://github.com/openclaw/crabbox/issues/1567). Thanks @coygeek.
 - Include the resolved `workroot` in SSH-backed inspect/status JSON, including native Windows and WSL2 leases. [PR 2069](https://github.com/openclaw/crabbox/pull/2069). Thanks @steipete.
 - Show Phala settings in offline configuration text and JSON, preserving unset versus explicit attestation settings without invoking the provider CLI. [PR 2099](https://github.com/openclaw/crabbox/pull/2099). Thanks @steipete.
-- Show Freestyle and Crownest settings through a shared offline JSON/text display path, preserving zero and false values while redacting URLs and reporting only loaded key presence.
 
 ### Maintenance
 
