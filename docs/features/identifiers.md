@@ -80,7 +80,10 @@ prevents older clients from treating it as an ordinary lease. Submitted cleanup
 records an exact deletion acknowledgment, then reconciles a scope-attested UUID
 404 against complete failure-inclusive database inventory. Durable cleanup entry
 blocks reuse; unknown UUIDs and an unqualified 404 retain custody. The ordinary
-search index and mutable label filters do not establish absence. See
+search index and mutable label filters do not establish absence. For successfully
+acquired children removed by native TTL or external deletion, `inspect`, `status`,
+and `stop` can publish the same terminal tombstone after verifying the current
+organization and complete failure-inclusive database absence. See
 [Daytona fixed operation IDs](../providers/daytona.md#fixed-operation-ids)
 for organization discovery and recovery limits.
 
@@ -100,7 +103,7 @@ match the persisted attempt exactly. Fixed AWS
 claims use the downgrade-safe local discriminator `aws-fixed-v1`; current
 clients map it to runtime AWS, while older clients skip/refuse it.
 
-Fixed IDs are single-use operation identities. Direct AWS, Machine0, and
+Fixed IDs are single-use operation identities. Direct AWS, Daytona, Machine0, and
 local-container keep a compact terminal claim tombstone after successful
 destroy release or exact missing-resource cleanup. Tombstones contain only the
 ID, slug, provider scope, versioned intent hash, timestamps, and terminal

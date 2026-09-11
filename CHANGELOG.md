@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Daytona: attest API-key cleanup through current-key organization metadata and retire acquired fixed leases after verified native TTL or external deletion; inspection records a terminal tombstone without issuing deletion or reusing the fixed ID.
 - Show Freestyle and Crownest settings through a shared offline JSON/text display path, preserving zero and false values while redacting URLs and reporting only loaded key presence. [PR 2104](https://github.com/openclaw/crabbox/pull/2104). Thanks @steipete.
 
 ## 0.56.0 - 2026-09-11

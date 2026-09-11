@@ -277,7 +277,7 @@ func (b *daytonaLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLease
 		if req.Lease.Server.CloudID != "" && claim.CloudID != "" && req.Lease.Server.CloudID != claim.CloudID {
 			return exit(4, "Daytona fixed release resource identity mismatch")
 		}
-		return b.releaseFixed(ctx, claim, req.CheckpointID)
+		return b.releaseFixed(ctx, claim, req.CheckpointID, false)
 	}
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
