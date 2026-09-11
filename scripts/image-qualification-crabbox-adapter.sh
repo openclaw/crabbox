@@ -41,8 +41,15 @@ fi
 count=0
 [[ -f "$QUALIFICATION_ADAPTER_STATE/launch-count" ]] &&
   read -r count <"$QUALIFICATION_ADAPTER_STATE/launch-count"
-if [[ "$command_name" == run && "$count" -eq 3 && ! -f "$QUALIFICATION_ADAPTER_STATE/injected" ]]; then
-  printf 'after-promoted-smoke\n' >"$QUALIFICATION_ADAPTER_STATE/injected"
-  chmod 600 "$QUALIFICATION_ADAPTER_STATE/injected"
-  exit 86
+if [[ "$command_name" == run && "$count" -eq 3 && "$#" -ge 4 && ! -f "$QUALIFICATION_ADAPTER_STATE/injected" ]]; then
+  # Readiness is a separate run before smoke; inject only after the publisher's
+  # complete shell payload, never after verification or an unrelated command.
+  arguments=("$@")
+  payload="${arguments[$# - 1]%$'\n'}"
+  if [[ "${arguments[$# - 3]}" == --shell && "${arguments[$# - 2]}" == -- &&
+        "${payload##*$'\n'}" == 'echo devtools-smoke-ok' ]]; then
+    printf 'after-promoted-smoke\n' >"$QUALIFICATION_ADAPTER_STATE/injected"
+    chmod 600 "$QUALIFICATION_ADAPTER_STATE/injected"
+    exit 86
+  fi
 fi

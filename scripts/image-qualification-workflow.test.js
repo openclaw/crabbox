@@ -1135,6 +1135,7 @@ test("adapter delegates and injects exit 86 only after the third launch smoke", 
     fs.writeFileSync(
       fake,
       `#!/usr/bin/env bash
+[[ "\${DELEGATE_EXIT:-0}" == 0 ]] || exit "$DELEGATE_EXIT"
 if [[ "\${1:-}" == image && "\${2:-}" == promote ]]; then
   printf '{"image":{"id":"ami-11111111","revision":"revision"},"previous":{"state":"present","imageId":"ami-22222222","revision":"previous"}}\\n'
 else
@@ -1148,27 +1149,52 @@ fi
       QUALIFICATION_REAL_CRABBOX: fake,
       QUALIFICATION_ADAPTER_STATE: path.join(temp, "state"),
     };
+    const adapter = path.join(root, "scripts/image-qualification-crabbox-adapter.sh");
+    const payload = fs.readFileSync(path.join(root, "scripts/devtools-image-smoke-linux.sh"), "utf8");
+    assert.ok(payload.endsWith("\necho devtools-smoke-ok\n"));
+    const smokeArgs = ["run", "--id", "cbx_fixture", "--no-sync", "--shell", "--", payload];
+    const bash = process.platform === "darwin" ? "/bin/bash" : "bash";
+    const run = (args, overrides = {}) => spawnSync(bash, [adapter, ...args], {
+      env: { ...env, ...overrides }, encoding: "utf8",
+    });
+    const injected = path.join(env.QUALIFICATION_ADAPTER_STATE, "injected");
     for (let index = 0; index < 3; index += 1) {
-      assert.equal(
-        spawnSync(path.join(root, "scripts/image-qualification-crabbox-adapter.sh"), ["warmup"], {
-          env,
-        }).status,
-        0,
-      );
+      assert.equal(run(["warmup"]).status, 0);
+      if (index < 2) {
+        assert.equal(run(smokeArgs).status, 0);
+        assert.equal(fs.existsSync(injected), false);
+      }
     }
-    const smoke = spawnSync(
-      path.join(root, "scripts/image-qualification-crabbox-adapter.sh"),
+    for (const args of [
+      ["run", "--script", "linux-readiness.generated.sh", "--", "--verify", "linux-builder"],
+      ["run", "--shell", "--", "printf unrelated"],
+      ["run", "--shell", "--", payload.replace("\necho devtools-smoke-ok\n", "\n")],
+      ["run", "--shell", "--", payload.replace("\necho devtools-smoke-ok\n", "\n# echo devtools-smoke-ok\n")],
+      ["run", "--shell", "--", `${payload}printf after\n`],
+      ["run", "--shell", "--", `${payload}\n`],
       ["run"],
-      { env, encoding: "utf8" },
-    );
+      ["run", "--shell", payload],
+      ["run", "--script", "--", payload],
+      ["run", "--shell", "--", payload, "extra"],
+      ["run", "--shell", "--", "--", payload],
+    ]) {
+      assert.equal(run(args).status, 0, JSON.stringify(args.slice(0, 4)));
+      assert.equal(fs.existsSync(injected), false);
+    }
+    assert.equal(run(smokeArgs, { DELEGATE_EXIT: "47" }).status, 47);
+    assert.equal(fs.existsSync(injected), false);
+    const smoke = run(smokeArgs);
     assert.equal(smoke.status, 86);
     assert.match(smoke.stdout, /delegated run/);
-    assert.equal(
-      spawnSync(path.join(root, "scripts/image-qualification-crabbox-adapter.sh"), ["run"], {
-        env,
-      }).status,
-      0,
-    );
+    assert.equal(fs.readFileSync(injected, "utf8"), "after-promoted-smoke\n");
+    assert.equal(run(smokeArgs).status, 0);
+    const withoutLF = {
+      QUALIFICATION_ADAPTER_STATE: path.join(temp, "without-lf"),
+    };
+    for (let index = 0; index < 3; index += 1) {
+      assert.equal(run(["warmup"], withoutLF).status, 0);
+    }
+    assert.equal(run([...smokeArgs.slice(0, -1), payload.slice(0, -1)], withoutLF).status, 86);
     assert.equal(
       spawnSync(
         path.join(root, "scripts/image-qualification-crabbox-adapter.sh"),

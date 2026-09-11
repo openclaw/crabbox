@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Create private GitHub Runner registration, environment, and wrapper files even under a group-writable shell umask, so owned image tool caches can be seeded without changing existing operator file permissions. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
+
+- Read UTF-8 BOM-prefixed GitHub Runner registration files when seeding and qualifying the owned tool cache, without rewriting registration or accepting malformed settings. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
+
+- Add an opt-in registered-Runner image toolcache qualification job that checks pinned Go setup offline and verifies the Runner-applied environment without changing ordinary hydration. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
+
+- Keep browser timeout handling independent of blocked process-diagnostic reads, retain both timed samples with fault and wait-channel evidence, and bound the complete diagnostic line without changing browser limits. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
+
+- Inject the image-qualification rollback failure only after the complete promoted runtime smoke, not its preceding readiness verification. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
+
+- Use publisher-owned lease-user pnpm activation and resolved-default checks from https://github.com/openclaw/crabbox/pull/2065, preserving opaque selectors and standalone installer behavior; retain bounded browser failure evidence without retries or longer smoke limits. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
+
+- Keep Linux developer-image smoke scripts valid when rendered by Bash 5.2, and link the C++ native-library probe against older libxdo C headers. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
+
+- Expand Linux developer images with native CMake/Ninja and desktop/media build libraries, pinned user-owned Rust and uv toolchains, offline Python wheel checks, and a guarded Go 1.27.0-to-1.27.1 migration. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
+
+- Keep authenticated Linux toolchain archives readable to workload users when owned public cache directories have restrictive modes; reject replaced or foreign-owned directories without widening private ancestors. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
+
+- Identify failed Linux toolchain archive downloads while preserving curl diagnostics and exit status. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
+
+- Require verified builder capabilities for Linux developer images before cleanup and throughout publication, with trusted nonwriting verification and runtime-user functional smokes. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
+
+- Contain Linux readiness venv and pip scratch files within the probe's temporary directory, including when dependency checks fail, while preserving the frozen v1 manifest digest. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
+
 - Add `crabbox exec` for byte-preserving commands on completed Daytona fixed-ID leases without workspace sync or hydration, retaining repository ownership through transport cleanup; provide offline capability discovery and `stop --current-repo` cleanup after ownership checks inside the same release fence. [PR 2119](https://github.com/openclaw/crabbox/pull/2119). Thanks @steipete.
 - Daytona: attest API-key cleanup through current-key organization metadata and retire acquired fixed leases after verified native TTL or external deletion; inspection records a terminal tombstone without issuing deletion or reusing the fixed ID. [PR 2111](https://github.com/openclaw/crabbox/pull/2111). Thanks @steipete.
 - Show OpenComputer, OpenSandbox and CUA settings in offline JSON and text, including unselected providers, without discovering credentials, resolving external defaults or executing SDK bridges. [PR 2112](https://github.com/openclaw/crabbox/pull/2112). Thanks @steipete.

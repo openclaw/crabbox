@@ -27,10 +27,16 @@ node_link_dir="/usr/local/bin"
 pinned_node_version="24.19.0"
 go_toolcache_root="/opt/hostedtoolcache"
 go_link_dir="/usr/local/bin"
-pinned_go_version="1.27.0"
+pinned_go_version="1.27.1"
 bun_bin_dir="/usr/local/bin"
 bun_toolchain_root="/opt/crabbox/toolchains/bun"
 pinned_bun_version="1.4.0"
+pinned_rust_version="1.97.1"
+rust_seed_root="/opt/crabbox/rust/1.97.1"
+rust_user_record="/opt/crabbox/rust/runtime-user.json"
+pinned_uv_version="0.12.11"
+uv_toolchain_root="/opt/crabbox/toolchains/uv"
+uv_bin_dir="/usr/local/bin"
 
 log() {
   printf 'linux-tools: %s\n' "$*" >&2
@@ -244,8 +250,8 @@ EOF
 toolchain_archive_spec() {
   # Digests bind upstream bytes, not a mutable installation or Corepack metadata.
   case "$1" in
-    go1.27.0.linux-amd64.tar.gz)
-      printf '%s\n' "sha256 675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685 https://go.dev/dl/$1" ;;
+    go1.27.1.linux-amd64.tar.gz)
+      printf '%s\n' "sha256 63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445 https://go.dev/dl/$1" ;;
     node-v24.19.0-linux-x64.tar.xz)
       printf '%s\n' "sha256 14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647 https://nodejs.org/dist/v24.19.0/$1" ;;
     pnpm-11.22.0.tgz)
@@ -260,6 +266,20 @@ toolchain_archive_spec() {
       printf '%s\n' "sha256 184fb4595f0d401a217cf7c78c1bc430ba83314dab7a8b94805babbf7fa7097f https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64-baseline.zip" ;;
     bun-v1.4.0-linux-aarch64.zip)
       printf '%s\n' "sha256 4b1a332ee861983eb93bcfe6f770fff94e3e31b2c388bdaea3c8ed35e58eed0e https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-aarch64.zip" ;;
+    uv-0.12.11-x86_64-unknown-linux-gnu.tar.gz)
+      printf '%s\n' "sha256 4ae93e0f148a18434cc094072547cec88912fc4a72b984183c7d0d0e9586cb5e https://github.com/astral-sh/uv/releases/download/0.12.11/uv-x86_64-unknown-linux-gnu.tar.gz" ;;
+    channel-rust-1.97.1.toml)
+      printf '%s\n' "sha256 03569b1886ceb5c05276b50c8431ab111de944cd6140fe1fa7d821dd8e0f29cf https://static.rust-lang.org/dist/$1" ;;
+    rustup-init-1.29.0-x86_64-unknown-linux-gnu)
+      printf '%s\n' "sha256 4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10 https://static.rust-lang.org/rustup/archive/1.29.0/x86_64-unknown-linux-gnu/rustup-init" ;;
+    rustc-1.97.1-x86_64-unknown-linux-gnu.tar.xz)
+      printf '%s\n' "sha256 9819d0a32d56bd339585319c80260e332779f5541fd66838ab7e016d6c814819 https://static.rust-lang.org/dist/2026-07-16/$1" ;;
+    cargo-1.97.1-x86_64-unknown-linux-gnu.tar.xz)
+      printf '%s\n' "sha256 e1be5f5ff7f7f80ca506fb65770b759edbdc6d303781ed71c5de8ec8a8394779 https://static.rust-lang.org/dist/2026-07-16/$1" ;;
+    rust-std-1.97.1-x86_64-unknown-linux-gnu.tar.xz)
+      printf '%s\n' "sha256 1c1e704ae80126b7de34f72ea2825f7fd01736dec20732faed47374b95282fba https://static.rust-lang.org/dist/2026-07-16/$1" ;;
+    rustfmt-1.97.1-x86_64-unknown-linux-gnu.tar.xz)
+      printf '%s\n' "sha256 907fe97d6afbde1eca1b34c992c76e1406d422e2e6f137813d382acec7eb4d14 https://static.rust-lang.org/dist/2026-07-16/$1" ;;
     *) log "no reviewed public toolchain archive: $1"; return 1 ;;
   esac
 }
@@ -281,7 +301,7 @@ PY
 
 stage_toolchain_archive() {
   local name="$1" staging="$2" allow_download="${3:-0}"
-  local algorithm expected url
+  local algorithm expected url status
   read -r algorithm expected url <<<"$(toolchain_archive_spec "$name")"
   [[ -n "$expected" ]] || return 1
   # Hash the private copy that will be extracted; never execute a cached tree.
@@ -296,30 +316,48 @@ stage_toolchain_archive() {
     return 1
   fi
   curl -q --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 300 \
-    --output "$staging/$name" "$url" &&
-    verify_toolchain_archive "$algorithm" "$expected" "$staging/$name"
+    --output "$staging/$name" "$url" || {
+      status=$?
+      log "toolchain archive download failed: $name (curl exit $status)"
+      return "$status"
+    }
+  verify_toolchain_archive "$algorithm" "$expected" "$staging/$name"
+}
+
+prepare_public_toolchain_archive_dir() {
+  local parent directory
+  parent="$(dirname "$public_toolchain_archive_dir")"
+  # Validate both owned public boundaries before changing either; never widen
+  # unrelated ancestors or follow an operator-owned replacement.
+  for directory in "$parent" "$public_toolchain_archive_dir"; do
+    if [[ -L "$directory" || ( -e "$directory" && ( ! -d "$directory" || ! -O "$directory" ) ) ]]; then
+      log "invalid public toolchain archive directory: $directory"
+      return 1
+    fi
+  done
+  install -d -m 0755 "$parent" "$public_toolchain_archive_dir"
 }
 
 cache_public_toolchain_archives() (
   set -euo pipefail
   umask 077
   local staging name pending
-  staging="$(mktemp -d)"
+  # Conditional callers disable errexit; never publish after a failed step.
+  prepare_public_toolchain_archive_dir || return $?
+  staging="$(mktemp -d)" || return $?
   # Bind paths now: Bash can unwind function locals before an EXIT trap on failure.
   # shellcheck disable=SC2064
   trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
-  [[ ! -L "$public_toolchain_archive_dir" ]] || return 1
-  install -d -m 0755 "$public_toolchain_archive_dir"
   if [[ "$#" -eq 0 ]]; then
     set -- node-v24.19.0-linux-x64.tar.xz pnpm-11.22.0.tgz pnpm-12.3.4.tgz exe.linux-x64-12.3.4.tgz
   fi
   for name in "$@"; do
-    stage_toolchain_archive "$name" "$staging" 1
-    pending="$(mktemp "$public_toolchain_archive_dir/.archive.XXXXXX")"
+    stage_toolchain_archive "$name" "$staging" 1 || return $?
+    pending="$(mktemp "$public_toolchain_archive_dir/.archive.XXXXXX")" || return $?
     # shellcheck disable=SC2064
     trap "$(printf 'rm -rf -- %q %q' "$staging" "$pending")" EXIT
-    install -m 0644 "$staging/$name" "$pending"
-    python3 - "$pending" "$public_toolchain_archive_dir/$name" <<'PY'
+    install -m 0644 "$staging/$name" "$pending" || return $?
+    python3 - "$pending" "$public_toolchain_archive_dir/$name" <<'PY' || return $?
 import os
 import sys
 os.replace(sys.argv[1], sys.argv[2])
@@ -329,19 +367,23 @@ PY
 
 check_go_toolchain() (
   set -euo pipefail
-  local distribution="$1" scratch="$2"
-  mkdir -p "$scratch/home" "$scratch/cache" "$scratch/mod" "$scratch/path"
+  local distribution="$1" scratch="$2" version target result
+  mkdir -p "$scratch/home" "$scratch/cache" "$scratch/mod" "$scratch/path" || return $?
   export HOME="$scratch/home" GOROOT="$distribution" GOCACHE="$scratch/cache"
   export GOMODCACHE="$scratch/mod" GOPATH="$scratch/path" GOENV=off GOTOOLCHAIN=local
   export GOPROXY=off GOSUMDB=off GOWORK=off GO111MODULE=off GOFLAGS="" CGO_ENABLED=1 CC=gcc CXX=g++
   unset GOOS GOARCH GOEXPERIMENT
-  [[ "$("$distribution/bin/go" version)" == "go version go$pinned_go_version linux/amd64" ]] || {
+  version="$("$distribution/bin/go" version)" || return $?
+  [[ "$version" == "go version go$pinned_go_version linux/amd64" ]] || {
     log "unexpected Go version or architecture"
     return 1
   }
-  [[ "$("$distribution/bin/go" env GOOS GOARCH)" == $'linux\namd64' ]]
-  cd "$scratch"
-  cat >main.go <<'GO'
+  target="$("$distribution/bin/go" env GOOS GOARCH)" || return $?
+  [[ "$target" == $'linux\namd64' ]] || return 1
+  cd "$scratch" || return $?
+  # Group the heredoc so Bash 3.2 and 5.2 both serialize its failure check safely.
+  {
+    cat >main.go <<'GO'
 package main
 
 // static int answer(void) { return 42; }
@@ -355,39 +397,48 @@ func main() {
 	fmt.Println("go-cgo-ok")
 }
 GO
-  "$distribution/bin/gofmt" main.go >formatted.go
-  mv formatted.go main.go
-  "$distribution/bin/go" test bytes crypto/sha256
-  [[ "$("$distribution/bin/go" run main.go)" == "go-cgo-ok" ]]
+  } || return $?
+  "$distribution/bin/gofmt" main.go >formatted.go || return $?
+  mv formatted.go main.go || return $?
+  "$distribution/bin/go" test bytes crypto/sha256 || return $?
+  result="$("$distribution/bin/go" run main.go)" || return $?
+  [[ "$result" == "go-cgo-ok" ]]
 )
+
+go_public_tool_links() {
+  # Only the previously shipped managed slot may migrate; foreign aliases
+  # still fail closed. Mixed old/new links are safe to resume after interruption.
+  public_tool_links "$1" "$go_link_dir" "$go_toolcache_root/go/$pinned_go_version/x64/bin" \
+    --replace-from "$go_toolcache_root/go/1.27.0/x64/bin" go gofmt
+}
 
 install_pinned_go() (
   set -euo pipefail
   umask 022
   local staging destination
   destination="$go_toolcache_root/go/$pinned_go_version/x64"
-  public_tool_links check "$go_link_dir" "$destination/bin" go gofmt || return $?
-  staging="$(mktemp -d)"
+  go_public_tool_links check || return $?
+  staging="$(mktemp -d)" || return $?
   # shellcheck disable=SC2064
   trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
-  install -d -m 0755 "$(dirname "$destination")"
-  rm -f "$destination.complete"
-  stage_toolchain_archive go1.27.0.linux-amd64.tar.gz "$staging"
-  mkdir "$staging/go"
-  tar --no-same-owner -xzf "$staging/go1.27.0.linux-amd64.tar.gz" -C "$staging/go" --strip-components=1
-  check_go_toolchain "$staging/go" "$staging/check"
+  stage_toolchain_archive "go$pinned_go_version.linux-amd64.tar.gz" "$staging" || return $?
+  mkdir "$staging/go" || return $?
+  tar --no-same-owner -xzf "$staging/go$pinned_go_version.linux-amd64.tar.gz" -C "$staging/go" --strip-components=1 || return $?
+  rm -f "$destination.complete" || return $?
+  check_go_toolchain "$staging/go" "$staging/check" || return $?
+  go_public_tool_links check || return $?
+  install -d -m 0755 "$(dirname "$destination")" "$go_link_dir" || return $?
   # This image-owned slot is always rebuilt from authenticated private bytes.
-  rm -rf "$destination"
-  mv "$staging/go" "$destination"
-  install -d -m 0755 "$go_link_dir"
-  public_tool_links publish "$go_link_dir" "$destination/bin" go gofmt
+  rm -rf "$destination" || return $?
+  mv "$staging/go" "$destination" || return $?
+  go_public_tool_links publish || return $?
   touch "$destination.complete"
 )
 
 install_go_toolchain() {
   if linux_x64_supported; then
-    public_tool_links check "$go_link_dir" "$go_toolcache_root/go/$pinned_go_version/x64/bin" go gofmt || return $?
-    cache_public_toolchain_archives go1.27.0.linux-amd64.tar.gz
+    go_public_tool_links check || return $?
+    cache_public_toolchain_archives "go$pinned_go_version.linux-amd64.tar.gz" || return $?
     install_pinned_go
   fi
 }
@@ -400,9 +451,9 @@ offline_go_probe() (
   staging="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
-  stage_toolchain_archive go1.27.0.linux-amd64.tar.gz "$staging"
+  stage_toolchain_archive "go$pinned_go_version.linux-amd64.tar.gz" "$staging"
   mkdir "$staging/go"
-  tar --no-same-owner -xzf "$staging/go1.27.0.linux-amd64.tar.gz" -C "$staging/go" --strip-components=1
+  tar --no-same-owner -xzf "$staging/go$pinned_go_version.linux-amd64.tar.gz" -C "$staging/go" --strip-components=1
   check_go_toolchain "$staging/go" "$staging/check"
 )
 
@@ -412,7 +463,7 @@ go_smoke_script() {
   declare -f log linux_x64_supported toolchain_archive_spec verify_toolchain_archive stage_toolchain_archive check_go_toolchain offline_go_probe
   # shellcheck disable=SC2016
   printf '%s\n' 'if linux_x64_supported; then' \
-    '  [[ "$(GOTOOLCHAIN=local GOENV=off go version)" == "go version go1.27.0 linux/amd64" ]]' \
+    '  [[ "$(GOTOOLCHAIN=local GOENV=off go version)" == "go version go$pinned_go_version linux/amd64" ]]' \
     '  command -v gofmt' '  offline_go_probe' 'fi'
 }
 
@@ -455,11 +506,18 @@ import tempfile
 action, link_dir, bin_dir, *tools = sys.argv[1:]
 if action not in ("check", "publish") or not os.path.isabs(bin_dir):
     sys.exit("invalid public tool link operation")
+previous_bin = None
+if tools[:1] == ["--replace-from"]:
+    _, previous_bin, *tools = tools
+    if not os.path.isabs(previous_bin):
+        sys.exit("invalid previous public tool directory")
 
 def check(tool):
     link = os.path.join(link_dir, tool)
-    target = os.path.join(bin_dir, tool)
-    if os.path.lexists(link) and (not os.path.islink(link) or os.readlink(link) != target):
+    targets = [os.path.join(bin_dir, tool)]
+    if previous_bin is not None:
+        targets.append(os.path.join(previous_bin, tool))
+    if os.path.lexists(link) and (not os.path.islink(link) or os.readlink(link) not in targets):
         sys.exit("linux-tools: public tool conflict at " + link + "; resolve before rebake")
 
 for tool in tools:
@@ -615,8 +673,8 @@ install_node_runtime() {
       apt_install nodejs || return $?
     fi
   fi
-  command -v npm >/dev/null
-  command -v corepack >/dev/null
+  command -v npm >/dev/null || return $?
+  command -v corepack >/dev/null || return $?
   if [[ "$use_pinned_node" == "0" ]]; then
     corepack enable
   fi
@@ -627,7 +685,7 @@ install_node_pnpm() {
   if pinned_node_supported; then
     cache_public_toolchain_archives || return $?
   fi
-  corepack prepare "pnpm@$pnpm_version" --activate
+  corepack prepare "pnpm@$pnpm_version" --activate || return $?
   command -v pnpm >/dev/null
 }
 
@@ -762,6 +820,7 @@ install_bun() {
     [[ ! -L "$directory" ]] || { log "symlinked Bun managed directory: $directory"; return 1; }
     directory="$(dirname "$directory")" || return $?
   done
+  prepare_public_toolchain_archive_dir || return $?
   (
     set -euo pipefail
     umask 077
@@ -772,7 +831,6 @@ install_bun() {
     for variant in linux-x64-baseline linux-x64; do
       name="bun-v$pinned_bun_version-$variant.zip"
       stage_bun_archive "$name" "$staging" 1 || return $?
-      install -d -m 0755 "$public_toolchain_archive_dir" || return $?
       pending="$(mktemp "$public_toolchain_archive_dir/.bun-archive.XXXXXX")" || return $?
       # shellcheck disable=SC2064
       trap "$(printf 'rm -rf -- %q %q' "$staging" "$pending")" EXIT
@@ -845,6 +903,362 @@ bun_smoke_script() {
   printf 'pinned_bun_version=%q\n' "$pinned_bun_version"
   declare -f log toolchain_archive_spec verify_toolchain_archive stage_toolchain_archive pinned_bun_supported bun_optimized_supported stage_bun_archive extract_bun_archive offline_bun_probe
   printf '%s\n' 'if pinned_bun_supported; then' '  offline_bun_probe' 'fi'
+}
+
+rust_seed_inputs() {
+  printf '%s\n' "channel-rust-$pinned_rust_version.toml" rustup-init-1.29.0-x86_64-unknown-linux-gnu
+  printf '%s\n' {rustc,cargo,rust-std,rustfmt}-"$pinned_rust_version"-x86_64-unknown-linux-gnu.tar.xz
+}
+
+rust_seed_path() {
+  case "$1" in
+    channel-rust-*) printf '%s\n' "$rust_seed_root/dist/channel-rust-stable.toml" ;;
+    rustup-init-*) printf '%s\n' "$rust_seed_root/rustup-init" ;;
+    *) printf '%s\n' "$rust_seed_root/dist/2026-07-16/$1" ;;
+  esac
+}
+
+check_root_owned_path() {
+  python3 - "$1" <<'PY'
+import os
+import pathlib
+import stat
+import sys
+path = pathlib.Path(sys.argv[1])
+for entry in (path, *path.parents):
+    if not os.path.lexists(entry):
+        continue
+    value = entry.lstat()
+    if stat.S_ISLNK(value.st_mode) or value.st_uid != 0 or value.st_mode & 0o022:
+        sys.exit("linux-tools: unsafe root-owned toolchain path: " + str(entry))
+    required = 0o055 if stat.S_ISDIR(value.st_mode) else 0o044
+    if value.st_mode & required != required:
+        sys.exit("linux-tools: public toolchain path is not readable: " + str(entry))
+PY
+}
+
+check_rust_seed() {
+  local name filename algorithm expected url
+  check_root_owned_path "$rust_seed_root" || return $?
+  while IFS= read -r name; do
+    filename="$(rust_seed_path "$name")" || return $?
+    check_root_owned_path "$filename" || return $?
+    read -r algorithm expected url <<<"$(toolchain_archive_spec "$name")"
+    verify_toolchain_archive "$algorithm" "$expected" "$filename" || return $?
+  done < <(rust_seed_inputs)
+  filename="$rust_seed_root/dist/channel-rust-stable.toml.sha256"
+  check_root_owned_path "$filename" || return $?
+  [[ "$(cat "$filename")" == "03569b1886ceb5c05276b50c8431ab111de944cd6140fe1fa7d821dd8e0f29cf  channel-rust-stable.toml" ]]
+}
+
+prepare_rust_seed() (
+  set -euo pipefail
+  local staging name destination relative algorithm expected url
+  check_root_owned_path "$rust_seed_root" || return $?
+  if [[ -e "$rust_seed_root" ]]; then
+    check_rust_seed
+    return $?
+  fi
+  while IFS= read -r name; do
+    cache_public_toolchain_archives "$name" || return $?
+  done < <(rust_seed_inputs)
+  install -d -m 0755 "$(dirname "$rust_seed_root")" || return $?
+  staging="$(mktemp -d "$(dirname "$rust_seed_root")/.rust-seed.XXXXXXXX")" || return $?
+  # shellcheck disable=SC2064
+  trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
+  install -d -m 0755 "$staging/dist/2026-07-16" "$staging/download" || return $?
+  while IFS= read -r name; do
+    stage_toolchain_archive "$name" "$staging/download" || return $?
+    destination="$(rust_seed_path "$name")" || return $?
+    relative="${destination#"$rust_seed_root"/}"
+    install -m 0644 "$staging/download/$name" "$staging/$relative" || return $?
+  done < <(rust_seed_inputs)
+  printf '%s\n' '03569b1886ceb5c05276b50c8431ab111de944cd6140fe1fa7d821dd8e0f29cf  channel-rust-stable.toml' \
+    >"$staging/dist/channel-rust-stable.toml.sha256" || return $?
+  chmod 0644 "$staging/dist/channel-rust-stable.toml.sha256" || return $?
+  chmod 0755 "$staging" "$staging/rustup-init" || return $?
+  rm -rf "$staging/download" || return $?
+  check_root_owned_path "$rust_seed_root" || return $?
+  [[ ! -e "$rust_seed_root" && ! -L "$rust_seed_root" ]] || return 1
+  mv "$staging" "$rust_seed_root" || return $?
+  check_rust_seed
+)
+
+resolve_rust_runtime_user() {
+  local entry password uid gid description shell selected="${SUDO_USER:-${CRABBOX_SSH_USER:-}}"
+  [[ -n "$selected" && "$selected" != root && "$selected" != -* ]] || {
+    log "run from the nonroot runtime account with sudo, or use the container's CRABBOX_SSH_USER"
+    return 1
+  }
+  entry="$(getent passwd "$selected")" || return $?
+  IFS=: read -r runtime_user password uid gid description runtime_home shell <<<"$entry"
+  [[ "$runtime_user" == "$selected" && "$uid" =~ ^[0-9]+$ && "$uid" -ne 0 &&
+    "$runtime_home" == /* && "$runtime_home" != / && "$shell" == /bin/bash ]] || return 1
+}
+
+rust_user_state() {
+  # Root provenance is written only after complete provisioning. Unknown or
+  # interrupted homes are retained, never treated as safe just because -y permits them.
+  python3 - "$1" "$runtime_user" "$runtime_home" "$rust_user_record" "$pinned_rust_version" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import pwd
+import stat
+import sys
+action, user, home, record, version = sys.argv[1:]
+account = pwd.getpwnam(user)
+home, record = pathlib.Path(home), pathlib.Path(record)
+def fail():
+    sys.exit("linux-tools: unknown existing Cargo/Rustup state; refusing to modify runtime user installation")
+if account.pw_uid == 0 or str(home) != account.pw_dir:
+    fail()
+for ancestor in (home, *home.parents):
+    if ancestor.is_symlink() or not ancestor.is_dir():
+        fail()
+if home.stat().st_uid != account.pw_uid:
+    fail()
+startup_files = (".profile", ".bash_profile", ".bash_login", ".bashrc", ".zshenv", ".tcshrc", ".cshrc",
+                 ".config/fish/conf.d/rustup.fish", ".config/nushell/config.nu",
+                 ".config/powershell/profile.ps1", ".config/xonsh/rc.xsh")
+def check_startup_parents(path):
+    for parent in path.parents:
+        if parent == home:
+            break
+        if os.path.lexists(parent):
+            value = parent.lstat()
+            if not stat.S_ISDIR(value.st_mode) or value.st_uid != account.pw_uid or value.st_mode & 0o022:
+                fail()
+def metadata():
+    result = {"user": user, "uid": account.pw_uid, "home": str(home), "version": version, "paths": {}}
+    for name in (".cargo", ".rustup", *startup_files):
+        path = home / name
+        check_startup_parents(path)
+        if not os.path.lexists(path):
+            if name in (".cargo", ".rustup"):
+                fail()
+            continue
+        value = path.lstat()
+        if value.st_uid != account.pw_uid or path.is_symlink() or value.st_mode & 0o022:
+            fail()
+        if name in (".cargo", ".rustup"):
+            if not path.is_dir() or value.st_dev != home.stat().st_dev:
+                fail()
+            result["paths"][name] = value.st_ino
+        else:
+            if not path.is_file():
+                fail()
+            result["paths"][name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return result
+for parent in (record.parent, *record.parent.parents):
+    if os.path.lexists(parent) and (parent.is_symlink() or not parent.is_dir() or
+                                  parent.stat().st_uid != 0 or parent.stat().st_mode & 0o022):
+        fail()
+if os.path.lexists(record):
+    value = record.lstat()
+    if not stat.S_ISREG(value.st_mode) or value.st_uid != 0 or value.st_mode & 0o022:
+        fail()
+    if json.loads(record.read_text()) != metadata():
+        fail()
+    print("reuse")
+elif action == "publish":
+    result = metadata()
+    record.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    with record.open("x") as output:
+        json.dump(result, output, sort_keys=True)
+    record.chmod(0o644)
+elif action == "check":
+    if any(os.path.lexists(home / name) for name in (".cargo", ".rustup")):
+        fail()
+    for name in startup_files:
+        path = home / name
+        check_startup_parents(path)
+        if os.path.lexists(path):
+            value = path.lstat()
+            if (not stat.S_ISREG(value.st_mode) or value.st_uid != account.pw_uid or
+                    value.st_mode & 0o022):
+                fail()
+    for directory in ("/usr/local/bin", "/usr/bin", "/bin"):
+        if any(os.path.lexists(pathlib.Path(directory) / tool) for tool in ("rustup", "rustc", "cargo", "rustfmt")):
+            fail()
+    print("fresh")
+else:
+    fail()
+PY
+}
+
+run_rust_runtime_user() {
+  (cd / && runuser -u "$runtime_user" -- env -i "HOME=$runtime_home" "USER=$runtime_user" "LOGNAME=$runtime_user" \
+    SHELL=/bin/bash PATH=/usr/local/bin:/usr/bin:/bin CI=1 \
+    "RUSTUP_DIST_SERVER=file://$rust_seed_root" "RUSTUP_UPDATE_ROOT=file://$rust_seed_root/disabled-self-update" "$@")
+}
+
+check_rust_zsh_directory() {
+  # Rustup asks zsh for ZDOTDIR even during Bash setup. Resolve it with the
+  # same unprivileged environment before permitting writes outside standard paths.
+  run_rust_runtime_user python3 - <<'PY'
+import os
+import pathlib
+import shutil
+import stat
+import subprocess
+import sys
+if shutil.which("zsh"):
+    value = subprocess.check_output(["zsh", "-c", 'printf "%s" "${ZDOTDIR:-$HOME}"'],
+                                    text=True, timeout=10)
+    home = pathlib.Path.home()
+    if not value or "\n" in value:
+        sys.exit("linux-tools: invalid Rustup ZDOTDIR")
+    directory = pathlib.Path(os.path.abspath(value))
+    try:
+        directory.relative_to(home)
+    except ValueError:
+        sys.exit("linux-tools: Rustup ZDOTDIR must remain inside the runtime home")
+    for entry in (directory / ".zshenv", directory, *directory.parents):
+        if entry == home:
+            break
+        if os.path.lexists(entry):
+            mode = entry.lstat()
+            expected = stat.S_ISREG if entry.name == ".zshenv" else stat.S_ISDIR
+            if not expected(mode.st_mode) or mode.st_uid != os.getuid() or mode.st_mode & 0o022:
+                sys.exit("linux-tools: unsafe Rustup ZDOTDIR startup path")
+PY
+}
+
+rust_runtime_probe() (
+  set -euo pipefail
+  [[ "$(id -u)" -ne 0 ]] || { log "Rust smoke must run as a nonroot user"; return 1; }
+  local staging tool selector version result
+  for tool in rustup rustc cargo rustfmt; do
+    [[ "$(command -v "$tool")" == "$HOME/.cargo/bin/$tool" ]] || {
+      log "normal login PATH does not resolve the runtime user's $tool"; return 1;
+    }
+  done
+  [[ -f "$HOME/.rustup/settings.toml" && ! -L "$HOME/.rustup" &&
+    -d "$HOME/.rustup/toolchains/stable-x86_64-unknown-linux-gnu" &&
+    ! -L "$HOME/.rustup/toolchains/stable-x86_64-unknown-linux-gnu" ]] || {
+    log "baked stable Rust toolchain is missing"; return 1;
+  }
+  check_rust_seed || return $?
+  staging="$(mktemp -d)" || return $?
+  # shellcheck disable=SC2064
+  trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
+  mkdir -p "$staging/src" "$staging/cargo" || return $?
+  printf '%s\n' '[package]' 'name = "crabbox-offline-rust"' 'version = "0.1.0"' 'edition = "2021"' >"$staging/Cargo.toml" || return $?
+  printf '%s\n' 'fn main() { println!("rust-offline-ok"); }' \
+    '#[test] fn answer() { assert_eq!(6 * 7, 42); }' >"$staging/src/main.rs" || return $?
+  local -a offline_env=(env -i "HOME=$HOME" "PATH=$PATH" "TMPDIR=$staging" "CARGO_HOME=$staging/cargo"
+    "CARGO_TARGET_DIR=$staging/target" CARGO_NET_OFFLINE=true RUSTUP_AUTO_INSTALL=0 CI=1
+    "RUSTUP_DIST_SERVER=file://$rust_seed_root" "RUSTUP_UPDATE_ROOT=file://$rust_seed_root/disabled-self-update")
+  cd "$staging" || return $?
+  "${offline_env[@]}" rustfmt src/main.rs || return $?
+  "${offline_env[@]}" cargo generate-lockfile --offline || return $?
+  for selector in "" +stable; do
+    version="$("${offline_env[@]}" rustc ${selector:+"$selector"} --version)" || return $?
+    [[ "$version" == "rustc $pinned_rust_version "* ]] || return 1
+    "${offline_env[@]}" cargo ${selector:+"$selector"} fmt --check || return $?
+    "${offline_env[@]}" cargo ${selector:+"$selector"} check --offline --locked || return $?
+    "${offline_env[@]}" cargo ${selector:+"$selector"} test --offline --locked || return $?
+    result="$("${offline_env[@]}" cargo ${selector:+"$selector"} run --offline --locked --quiet)" || return $?
+    [[ "$result" == rust-offline-ok ]] || return 1
+  done
+  "${offline_env[@]}" cargo install --offline --locked --path . || return $?
+  [[ "$("$staging/cargo/bin/crabbox-offline-rust")" == rust-offline-ok ]]
+)
+
+install_rust() {
+  linux_x64_supported || return 0
+  local runtime_user runtime_home state probe
+  resolve_rust_runtime_user || return $?
+  state="$(rust_user_state check)" || return $?
+  if [[ "$state" == fresh ]]; then
+    check_rust_zsh_directory || return $?
+  fi
+  prepare_rust_seed || return $?
+  if [[ "$state" == fresh ]]; then
+    # Startup commands and seed preparation can outlive the initial preflight.
+    # Never let rustup -y adopt state created while those steps were running.
+    state="$(rust_user_state check)" || return $?
+    [[ "$state" == fresh ]] || { log "Rust runtime state changed during preparation; refusing initialization"; return 1; }
+    run_rust_runtime_user /bin/bash -c 'cd / && exec "$1" -y --default-host x86_64-unknown-linux-gnu --default-toolchain none --profile minimal' _ "$rust_seed_root/rustup-init" || return $?
+    run_rust_runtime_user "$runtime_home/.cargo/bin/rustup" set auto-self-update disable || return $?
+    run_rust_runtime_user "$runtime_home/.cargo/bin/rustup" toolchain install stable --profile minimal --component rustfmt --no-self-update || return $?
+    run_rust_runtime_user "$runtime_home/.cargo/bin/rustup" default stable || return $?
+  fi
+  probe="$(rust_smoke_script)" || return $?
+  run_rust_runtime_user /bin/bash -lc "cd /; $probe" || return $?
+  rust_user_state publish >/dev/null
+}
+
+rust_smoke_script() {
+  printf 'pinned_rust_version=%q\nrust_seed_root=%q\n' "$pinned_rust_version" "$rust_seed_root"
+  declare -f log linux_x64_supported toolchain_archive_spec verify_toolchain_archive check_root_owned_path rust_seed_inputs rust_seed_path check_rust_seed rust_runtime_probe
+  printf '%s\n' 'if linux_x64_supported; then' '  rust_runtime_probe' 'fi'
+}
+
+install_uv() (
+  set -euo pipefail
+  linux_x64_supported || return 0
+  local staging destination="$uv_toolchain_root/$pinned_uv_version" name="uv-$pinned_uv_version-x86_64-unknown-linux-gnu.tar.gz" tool version
+  public_tool_links check "$uv_bin_dir" "$destination" uv uvx || return $?
+  check_root_owned_path "$destination" || return $?
+  cache_public_toolchain_archives "$name" || return $?
+  staging="$(mktemp -d)" || return $?
+  # shellcheck disable=SC2064
+  trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
+  stage_toolchain_archive "$name" "$staging" || return $?
+  tar --no-same-owner -xzf "$staging/$name" -C "$staging" || return $?
+  for tool in uv uvx; do
+    version="$("$staging/uv-x86_64-unknown-linux-gnu/$tool" --version)" || return $?
+    [[ "$version" == "$tool $pinned_uv_version" || "$version" == "$tool $pinned_uv_version ("* ]] || return 1
+  done
+  public_tool_links check "$uv_bin_dir" "$destination" uv uvx || return $?
+  check_root_owned_path "$destination" || return $?
+  install -d -m 0755 "$uv_toolchain_root" "$uv_bin_dir" || return $?
+  chmod 0755 "$staging/uv-x86_64-unknown-linux-gnu" || return $?
+  rm -rf "$destination" || return $?
+  mv "$staging/uv-x86_64-unknown-linux-gnu" "$destination" || return $?
+  public_tool_links publish "$uv_bin_dir" "$destination" uv uvx
+)
+
+offline_uv_probe() (
+  set -euo pipefail
+  [[ "$(id -u)" -ne 0 ]] || { log "uv smoke must run as a nonroot user"; return 1; }
+  local staging name="uv-$pinned_uv_version-x86_64-unknown-linux-gnu.tar.gz" uv_path tool version result
+  staging="$(mktemp -d)" || return $?
+  # shellcheck disable=SC2064
+  trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
+  mkdir "$staging/home" "$staging/project" "$staging/wheels" || return $?
+  printf '%s\n' '[build-system]' 'requires = ["setuptools", "wheel"]' 'build-backend = "setuptools.build_meta"' >"$staging/project/pyproject.toml" || return $?
+  printf '%s\n' '[metadata]' 'name = crabbox-offline-python' 'version = 0.1.0' '[options]' 'py_modules = offline_console' \
+    '[options.entry_points]' 'console_scripts =' '    crabbox-offline-python = offline_console:main' >"$staging/project/setup.cfg" || return $?
+  printf '%s\n' 'def main():' '    print("uv-offline-ok")' >"$staging/project/offline_console.py" || return $?
+  local -a offline_env=(env -i "HOME=$staging/home" "PATH=$PATH" "TMPDIR=$staging" "UV_CACHE_DIR=$staging/cache"
+    "XDG_CACHE_HOME=$staging/home/cache" PYTHONDONTWRITEBYTECODE=1)
+  for tool in uv uvx; do
+    version="$("${offline_env[@]}" "$tool" --version)" || return $?
+    [[ "$version" == "$tool $pinned_uv_version" || "$version" == "$tool $pinned_uv_version ("* ]] || return 1
+  done
+  stage_toolchain_archive "$name" "$staging" || return $?
+  tar --no-same-owner -xzf "$staging/$name" -C "$staging" || return $?
+  cd "$staging" || return $?
+  "${offline_env[@]}" /usr/bin/python3 -I -B -m build --wheel --no-isolation --outdir "$staging/wheels" "$staging/project" || return $?
+  for uv_path in "" "$staging/uv-x86_64-unknown-linux-gnu/"; do
+    "${offline_env[@]}" "${uv_path}uv" --offline --no-config --no-python-downloads venv --python /usr/bin/python3 "$staging/venv" || return $?
+    "${offline_env[@]}" "${uv_path}uv" --offline --no-config --no-python-downloads pip install --python "$staging/venv/bin/python" "$staging"/wheels/*.whl || return $?
+    result="$("${offline_env[@]}" "$staging/venv/bin/crabbox-offline-python")" || return $?
+    [[ "$result" == uv-offline-ok ]] || return 1
+    result="$("${offline_env[@]}" "${uv_path}uvx" --offline --no-config --no-python-downloads --python /usr/bin/python3 --from "$staging"/wheels/*.whl crabbox-offline-python)" || return $?
+    [[ "$result" == uv-offline-ok ]] || return 1
+    rm -rf "$staging/venv" "$staging/cache" || return $?
+  done
+)
+
+uv_smoke_script() {
+  printf 'public_toolchain_archive_dir=%q\npinned_uv_version=%q\n' "$public_toolchain_archive_dir" "$pinned_uv_version"
+  declare -f log linux_x64_supported toolchain_archive_spec verify_toolchain_archive stage_toolchain_archive offline_uv_probe
+  printf '%s\n' 'if linux_x64_supported; then' '  offline_uv_probe' 'fi'
 }
 
 trufflehog_sha256_for_arch() {
@@ -995,7 +1409,8 @@ prepare_fast_boot() {
   local readiness_producer
   readiness_producer="$(readiness_producer_path)" || return 1
   install -d -m 1777 /var/cache/crabbox /var/cache/crabbox/pnpm /var/cache/crabbox/npm /var/cache/crabbox/corepack /var/cache/crabbox/docker
-  "$readiness_producer"
+  "$readiness_producer" || return $?
+  "$readiness_producer" --verify linux-builder || return $?
   systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
   systemctl mask apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
   clean_cloud_init_state || return $?
@@ -1003,6 +1418,7 @@ prepare_fast_boot() {
 }
 
 print_versions() {
+  local runtime_user runtime_home
   # shellcheck disable=SC1091
   . "$os_release_file"
   printf 'os=%s %s\n' "${PRETTY_NAME:-unknown}" "$(uname -m)"
@@ -1018,6 +1434,11 @@ print_versions() {
   pnpm --version
   if linux_x64_supported; then
     "$go_link_dir/go" version
+    uv --version
+    uvx --version
+    resolve_rust_runtime_user || return $?
+    run_rust_runtime_user env RUSTUP_AUTO_INSTALL=0 /bin/bash -lc \
+      'set -e; cd /; rustup --version; rustc --version; cargo --version; rustfmt --version' || return $?
   fi
   if pinned_bun_supported; then
     bun --version
@@ -1074,7 +1495,7 @@ APT
 
   apt_get_base=(apt-transport-https gnupg lsb-release software-properties-common)
   retry apt-get update
-  apt_install "${apt_get_base[@]}" "${readiness_packages[@]}"
+  apt_install "${apt_get_base[@]}" "${readiness_packages[@]}" || return $?
   add_nodesource
   add_docker_repo
   retry apt-get update
@@ -1092,25 +1513,69 @@ APT
     zip \
     shellcheck \
     shfmt \
+    cmake \
+    ninja-build \
+    autoconf \
+    automake \
+    gawk \
+    nasm \
+    yasm \
+    bat \
+    direnv \
+    zoxide \
+    sqlite3 \
     python3-pip \
     python3-dev \
+    python3-build \
+    python3-setuptools \
+    python3-wheel \
     netcat-openbsd \
     iproute2 \
-    openssl
+    openssl \
+    at-spi2-core \
+    dbus-x11 \
+    ffmpeg \
+    file \
+    gir1.2-atspi-2.0 \
+    gstreamer1.0-libav \
+    gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-tools \
+    libatk-adaptor \
+    libayatana-appindicator3-dev \
+    libegl1 \
+    libgles2 \
+    librsvg2-dev \
+    libssl-dev \
+    libwebkit2gtk-4.1-dev \
+    libxdo-dev \
+    mesa-utils \
+    patchelf \
+    pciutils \
+    procps \
+    psmisc \
+    python3-gi \
+    wget \
+    wmctrl \
+    xauth \
+    xdg-utils \
+    xvfb || return $?
 
   if [[ ! -e /usr/local/bin/fd && -x /usr/bin/fdfind ]]; then
     ln -sf /usr/bin/fdfind /usr/local/bin/fd
   fi
 
   if [[ "$install_desktop" == "1" ]]; then
-    apt_install xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation
+    apt_install xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc x11-xserver-utils xterm scrot xdotool xclip xsel fonts-dejavu-core fonts-liberation || return $?
   fi
   if [[ "$install_browser" == "1" ]]; then
     install_chrome_or_chromium
   fi
-  install_node_pnpm
-  install_go_toolchain
+  install_node_pnpm || return $?
+  install_go_toolchain || return $?
   install_bun
+  install_uv || return $?
+  install_rust || return $?
   install_trufflehog
   install_docker
   prepare_fast_boot

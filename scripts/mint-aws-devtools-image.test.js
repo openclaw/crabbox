@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmod,
   copyFile,
+  cp,
   mkdir,
   mkdtemp,
   readFile,
@@ -61,6 +63,10 @@ case "$1" in
     fi
     ;;
   run)
+    if [[ -n "\${CRABBOX_FAKE_READINESS_FAIL_LEASE:-}" && "$*" == *"--id \${CRABBOX_FAKE_READINESS_FAIL_LEASE} "* && "$*" == *"-- --verify linux-builder"* ]]; then
+      printf 'Linux readiness verification: linux-builder manifest required\\n' >&2
+      exit 74
+    fi
     if [[ " $* " == *" --allow-env CRABBOX_LINUX_NODE_MAJOR,CRABBOX_LINUX_PNPM_VERSION "* ]]; then
       printf 'builder overrides node=%s pnpm=%s\\n' "\${CRABBOX_LINUX_NODE_MAJOR:-}" "\${CRABBOX_LINUX_PNPM_VERSION:-}" >>"\${CRABBOX_FAKE_LOG}"
       [[ "\${CRABBOX_FAKE_PREP_EXIT:-0}" == "0" ]] || exit "$CRABBOX_FAKE_PREP_EXIT"
@@ -75,7 +81,7 @@ case "$1" in
     done
     if [[ -n "$capture" ]]; then
       if [[ -n "\${CRABBOX_FAKE_PNPM_RUNNER:-}" ]]; then
-        "$CRABBOX_FAKE_PNPM_RUNNER" "$lease" "\${@: -1}" >"$capture" || exit $?
+        "$CRABBOX_FAKE_PNPM_RUNNER" capture "$lease" "\${@: -1}" >"$capture" || exit $?
       else
         printf '%s\\n' "\${CRABBOX_FAKE_RESOLVED_PNPM:-11.1.0}" >"$capture"
       fi
@@ -85,7 +91,7 @@ case "$1" in
       exit "\${CRABBOX_FAKE_CAPTURE_EXIT:-0}"
     fi
     if [[ -n "\${CRABBOX_FAKE_PNPM_RUNNER:-}" && "\${@: -1}" == *"docker_probe="* ]]; then
-      "$CRABBOX_FAKE_PNPM_RUNNER" "$lease" "\${@: -1}" || exit $?
+      "$CRABBOX_FAKE_PNPM_RUNNER" smoke "$lease" "\${@: -1}" || exit $?
       exit 0
     fi
     if [[ -n "\${CRABBOX_FAKE_SMOKE_FAIL_LEASE:-}" && " $* " == *" --id \${CRABBOX_FAKE_SMOKE_FAIL_LEASE} "* && "\${@: -1}" == *"docker_probe="* ]]; then
@@ -204,6 +210,31 @@ function runScript(args, env, scriptPath = script, onOutput) {
   });
 }
 
+function runtimePnpmCommand(kind, source) {
+  if (typeof source !== "string" || !source.trim()) throw new Error("runtime pnpm command is empty");
+  if (kind === "capture") return source;
+  if (kind !== "smoke") throw new Error(`unknown runtime pnpm command kind: ${kind}`);
+  const marker = source.indexOf("\nsmoke_dir=");
+  if (marker < 0) throw new Error("runtime pnpm smoke boundary is missing");
+  return source.slice(0, marker);
+}
+
+test("runtime pnpm fixture distinguishes capture and smoke command boundaries", () => {
+  const source = "printf before\\n\nsmoke_dir=fixture\nprintf after\\n";
+  assert.equal(runtimePnpmCommand("capture", source), source);
+  assert.equal(runtimePnpmCommand("smoke", source), "printf before\\n");
+});
+
+for (const [name, kind, source, error] of [
+  ["missing smoke boundary", "smoke", "printf unchanged", /smoke boundary is missing/],
+  ["empty capture", "capture", "", /command is empty/],
+  ["unknown kind", "other", "printf unchanged", /unknown runtime pnpm command kind/],
+]) {
+  test(`runtime pnpm fixture rejects ${name}`, () => {
+    assert.throws(() => runtimePnpmCommand(kind, source), error);
+  });
+}
+
 async function runtimePnpmFixture(t, options = {}) {
   const fake = await setupFakeCrabbox();
   t.after(() => rm(fake.dir, { recursive: true, force: true }));
@@ -251,22 +282,37 @@ else
   cat "$HOME/default"
 fi`,
   );
+  if (options.realCorepack) {
+    const assets = process.env.COREPACK_TEST_ROOT;
+    const packageRoot = path.join(assets, "package");
+    assert.equal(JSON.parse(await readFile(path.join(packageRoot, "package.json"))).version, "0.35.0");
+    const cache = path.join(fake.dir, ".cache/node/corepack");
+    await cp(path.join(assets, "home/.cache/node/corepack/v1"), path.join(cache, "v1"), { recursive: true });
+    await writeFile(path.join(cache, "lastKnownGood.json"), JSON.stringify({ pnpm: "12.3.4", yarn: "4.9.1", npm: "11.0.0" }));
+    for (const tool of ["corepack", "pnpm"]) {
+      await writeTool(tool, `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(packageRoot, "dist", `${tool}.js`))} "$@"`);
+    }
+    await writeFile(path.join(fake.dir, ".bashrc"), "# preserve startup bytes\n");
+    await mkdir(path.join(fake.dir, "project"));
+    await writeFile(path.join(fake.dir, "project/package.json"), '{"packageManager":"pnpm@99.99.99"}\n');
+  }
   const runner = path.join(fake.dir, "runtime.cjs");
   await writeFile(
     runner,
     `#!${process.execPath}
 const {spawnSync} = require("node:child_process");
-const [lease, source] = process.argv.slice(2);
+const [kind, lease, source] = process.argv.slice(2);
 const actual = JSON.parse(process.env.FIXTURE_PNPM_VERSIONS)[lease] || "";
-// Keep the real generated tool checks; unrelated machine/artifact checks have separate proof.
-const command = source.replace("test -d /var/cache/crabbox/pnpm", "true")
-  .replace("test -f /var/lib/crabbox-readiness/linux.json", "true")
-  .replace("test -f /var/lib/crabbox/image-ready", "true")
-  .replace(/\\ndeveloper_archive_probe\\n/, "\\n:\\n");
+// Run the real rendered version checks; later native/artifact probes have separate proof.
+${runtimePnpmCommand.toString()}
+const command = runtimePnpmCommand(kind, source);
+const env = {...process.env, PATH: ${JSON.stringify(bin)} + ":" + process.env.PATH,
+  HOME: ${JSON.stringify(fake.dir)}, FIXTURE_ACTUAL_PNPM: actual};
+delete env.COREPACK_HOME;
+delete env.XDG_CACHE_HOME;
 const result = spawnSync("bash", ["-c", command], {
   cwd: ${JSON.stringify(fake.dir)},
-  env: {...process.env, PATH: ${JSON.stringify(bin)} + ":" + process.env.PATH,
-    HOME: ${JSON.stringify(fake.dir)}, FIXTURE_ACTUAL_PNPM: actual},
+  env,
   stdio: "inherit",
 });
 if (result.error) throw result.error;
@@ -365,6 +411,34 @@ test("runtime-user pnpm rejects a shadowing ordinary command before image captur
   assert.match(log, /stop --provider aws --target linux cbx_source/);
 });
 
+test("runtime-user publisher uses real Corepack 0.35.0 without changing project pins or other defaults", {
+  skip: !process.env.COREPACK_TEST_ROOT && "set COREPACK_TEST_ROOT to the isolated, integrity-verified Corepack 0.35.0 and pnpm 11.1.0 fixture",
+}, async (t) => {
+  const metadata = JSON.parse(await readFile(path.join(
+    process.env.COREPACK_TEST_ROOT, "home/.cache/node/corepack/v1/pnpm/11.1.0/.corepack",
+  )));
+  for (const selector of ["11.1.0", "^11.0.0", `11.1.0+${metadata.hash}`]) {
+    const { fake, result, log } = await runtimePnpmFixture(t, {
+      selector, realCorepack: true, env: { COREPACK_ENABLE_NETWORK: "0", COREPACK_ENV_FILE: "0" },
+    });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal((log.match(/--capture-stdout /g) ?? []).length, 1);
+    const defaults = JSON.parse(await readFile(path.join(fake.dir, ".cache/node/corepack/lastKnownGood.json")));
+    assert.match(defaults.pnpm, /^11\.1\.0(?:\+|$)/);
+    assert.equal(defaults.yarn, "4.9.1");
+    assert.equal(defaults.npm, "11.0.0");
+    const project = spawnSync(path.join(fake.dir, "bin/pnpm"), ["--version"], {
+      cwd: path.join(fake.dir, "project"),
+      env: { PATH: process.env.PATH, HOME: fake.dir, COREPACK_ENABLE_NETWORK: "0", COREPACK_ENV_FILE: "0" },
+      encoding: "utf8", timeout: 10_000,
+    });
+    assert.notEqual(project.status, 0);
+    assert.match(project.stderr, /99\.99\.99|Network access disabled/);
+    assert.equal(await readFile(path.join(fake.dir, "project/package.json"), "utf8"), '{"packageManager":"pnpm@99.99.99"}\n');
+    assert.equal(await readFile(path.join(fake.dir, ".bashrc"), "utf8"), "# preserve startup bytes\n");
+  }
+});
+
 async function qualificationFixture(t) {
   const fake = await setupFakeCrabbox();
   t.after(() => rm(fake.dir, { recursive: true, force: true }));
@@ -408,7 +482,7 @@ test("qualification bundle runs the bundled installer and all three Linux smokes
   assert.ok(log.includes(`--script ${path.dirname(fake.script)}/install-linux-developer-tools.sh`));
   assert.equal((log.match(/docker_probe=/g) ?? []).length, 3);
   for (const lease of ["cbx_source", "cbx_candidate", "cbx_promoted"]) {
-    assert.match(log, new RegExp(`run .*--id ${lease} --no-sync --shell -- set -euo pipefail`));
+    assert.match(log, new RegExp(`run .*--id ${lease} --no-sync --shell -- export CRABBOX_LINUX_DESKTOP_TOOLS=1 CRABBOX_LINUX_BROWSER=1\nset -euo pipefail`));
     assert.match(log, new RegExp(`stop --provider aws --target linux ${lease}`));
   }
   assert.match(log, /checkpoint create/);
@@ -472,27 +546,42 @@ test("AWS devtools mint wrapper defaults to dry plan", async () => {
 
 test("AWS developer image smoke executes package managers and requires TruffleHog", async () => {
   const text = await readFile(script, "utf8");
+  const linuxSmoke = await readFile(
+    path.join(scriptDir, "devtools-image-smoke-linux.sh"),
+    "utf8",
+  );
   const windowsSmoke = await readFile(
     path.join(scriptDir, "devtools-image-smoke-windows.ps1"),
     "utf8",
   );
   assert.match(windowsSmoke, /pnpm --version\ntrufflehog --no-update --version\ndocker --version/);
+  assert.match(
+    linuxSmoke,
+    /command -v pnpm\ncommand -v trufflehog\ntrufflehog --no-update --version\ncommand -v docker\nnode --version\nnode -e .*\ncorepack --version\n/,
+  );
+  assert.match(linuxSmoke, /version="\$\(COREPACK_ENABLE_NETWORK=0 pnpm --version\)"/);
+  assert.doesNotMatch(linuxSmoke, /COREPACK_ENABLE_PROJECT_SPEC=0|corepack prepare|corepack install/);
+  assert.match(linuxSmoke, /\(\n  export COREPACK_ENABLE_NETWORK=0 npm_config_offline=true\n  cd "\$smoke_dir"\n  npm --offline run check\n  pnpm run check\n\)/);
+  const smokeStart = linuxSmoke.indexOf("\nsmoke_dir=");
+  assert.ok(smokeStart >= 0, "Linux smoke scratch boundary is missing");
+  assert.doesNotMatch(linuxSmoke.slice(0, smokeStart), /export COREPACK_ENABLE_NETWORK|npm_config_offline/);
   assert.match(windowsSmoke, /docker image inspect .*\nif \(\$LASTEXITCODE -ne 0\).*throw.*\nWrite-Output "devtools-smoke-ok"\n$/);
   assert.match(text, /trap 'exit 130' INT\ntrap 'exit 143' TERM/);
   assert.match(text, /rollback_pending=1\nrun_json_tee "\$promotion_log"/);
   assert.doesNotMatch(text, /\bBASHPID\b/);
 });
 
-test("AWS Linux image production stages and invokes only the generated readiness producer", async () => {
+test("AWS Linux image verification uses trusted source bytes instead of the installed producer", async () => {
   const source = await readFile(script, "utf8");
   const smoke = await readFile(path.join(scriptDir, "devtools-image-smoke-linux.sh"), "utf8");
   assert.match(source, /--script "\$ROOT\/scripts\/linux-readiness\.generated\.sh" -- --install/);
   assert.equal(
     (source.match(/--script "\$ROOT\/scripts\/linux-readiness\.generated\.sh"/g) ?? []).length,
-    1,
+    2,
   );
-  assert.match(source, /--shell -- \/usr\/local\/libexec\/crabbox\/linux-readiness\.generated\.sh/);
-  assert.match(smoke, /test -f \/var\/lib\/crabbox-readiness\/linux\.json/);
+  assert.match(source, /--script "\$ROOT\/scripts\/linux-readiness\.generated\.sh" -- --verify linux-builder/);
+  assert.doesNotMatch(source, /--shell -- \/usr\/local\/libexec\/crabbox\/linux-readiness\.generated\.sh/);
+  assert.doesNotMatch(smoke, /test -f \/var\/lib\/crabbox.*(?:linux\.json|image-ready)/);
   assert.doesNotMatch(source, /sudo tee \/var\/lib\/crabbox\/image-ready/);
   assert.doesNotMatch(source, /printf 'crabbox-devtools-v1/);
 });
@@ -551,14 +640,13 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
   assert.doesNotMatch(log, /warmup .*--region us-west-2/);
   assert.match(log, /run --provider aws --target linux --id cbx_source --no-sync --script/);
   assert.match(log, /linux-readiness\.generated\.sh -- --install/);
-  assert.equal((log.match(/linux-readiness\.generated\.sh/g) ?? []).length, 2);
+  assert.equal((log.match(/linux-readiness\.generated\.sh/g) ?? []).length, 4);
+  for (const phase of ["source", "candidate", "promoted"]) {
+    assert.ok(log.includes(`run --provider aws --target linux --id cbx_${phase} --no-sync --script ${path.join(scriptDir, "linux-readiness.generated.sh")} -- --verify linux-builder`));
+  }
   assert.match(
     log,
-    /run --provider aws --target linux --id cbx_source --no-sync --shell -- \/usr\/local\/libexec\/crabbox\/linux-readiness\.generated\.sh/,
-  );
-  assert.match(
-    log,
-    /run --provider aws --target linux --id cbx_source --no-sync --shell -- set -euo pipefail/,
+    /run --provider aws --target linux --id cbx_source --no-sync --shell -- export CRABBOX_LINUX_DESKTOP_TOOLS=1 CRABBOX_LINUX_BROWSER=1\nset -euo pipefail/,
   );
   assert.equal((log.match(/corepack --version/g) ?? []).length, 3);
   assert.equal(
@@ -569,8 +657,11 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
     (log.match(/\n  offline_go_probe\nfi\npublic_toolchain_archive_dir=/g) ?? []).length,
     3,
   );
-  assert.equal((log.match(/\n  offline_bun_probe\nfi\n}/g) ?? []).length, 3);
+  assert.equal((log.match(/\n  offline_bun_probe\nfi\npinned_rust_version=/g) ?? []).length, 3);
+  assert.equal((log.match(/\n  rust_runtime_probe\nfi\npublic_toolchain_archive_dir=/g) ?? []).length, 3);
+  assert.equal((log.match(/\n  offline_uv_probe\nfi\n}/g) ?? []).length, 3);
   assert.equal((log.match(/\ndeveloper_archive_probe\necho devtools-smoke-ok/g) ?? []).length, 3);
+  assert.equal((log.match(/expected_pnpm_version=11\.1\.0/g) ?? []).length, 3);
   assert.match(log, /docker image inspect hello-world ubuntu:24\.04 node:24-bookworm/);
   assert.match(
     log,
@@ -807,7 +898,7 @@ async function linuxSmokeFixture(t, { major = "24", pnpm = "11.1.0", customPrep 
   const fake = await setupFakeCrabbox();
   t.after(() => rm(fake.dir, { recursive: true, force: true }));
   const captured = path.join(fake.dir, "smoke.sh");
-  const args = ["--target", "linux", "--run", "--no-promote"];
+  const args = ["--target", "linux", "--run", "--no-promote", "--no-browser", "--no-desktop"];
   if (customPrep) args.push("--prep-script", fake.linuxPrep);
   const result = await runScript(args, {
     CRABBOX_BIN: fake.fake, CRABBOX_FAKE_LOG: fake.log, CRABBOX_FAKE_CAPTURE_RUN_SCRIPT: captured,
@@ -827,43 +918,61 @@ async function linuxSmokeFixture(t, { major = "24", pnpm = "11.1.0", customPrep 
   await mkdir(bin);
   const tmp = path.join(fake.dir, "tmp");
   await mkdir(tmp);
+  const caches = path.join(fake.dir, "caches");
+  for (const name of ["pnpm", "npm", "corepack", "docker"]) {
+    await mkdir(path.join(caches, name), { recursive: true });
+  }
   const writeTool = async (name, body) => {
     const file = path.join(bin, name);
     await writeFile(file, `#!/usr/bin/env bash\n${body}\n`);
     await chmod(file, 0o755);
   };
-  for (const name of ["git", "gh", "jq", "rg", "fd", "npm", "trufflehog", "docker"]) {
+  for (const name of ["git", "gh", "jq", "rg", "fd", "npm", "trufflehog", "docker",
+    "autoconf", "automake", "gawk", "nasm", "yasm", "batcat", "direnv", "zoxide", "sqlite3"]) {
     await writeTool(name, "exit 0");
   }
   await writeNodeVersionFixture(bin);
-  await writeTool("go", "printf 'go version go1.27.0 linux/amd64\\n'");
+  await writeTool("cc", 'printf "#!/bin/sh\\nexit 0\\n" >"$3"\nchmod +x "$3"');
+  await writeTool("cmake", `if [[ "$1" == --build ]]; then
+mkdir -p "$2"
+printf '#!/bin/sh\\necho native-build-ok\\n' >"$2/native-smoke"
+chmod +x "$2/native-smoke"
+fi`);
+  await writeTool("timeout", 'shift\nexec "$@"');
+  await writeTool("python3", `if [[ "\${1:-}" == -I ]]; then exit 0; fi\nexec /usr/bin/python3 "$@"`);
+  await writeTool("go", "printf 'go version go1.27.1 linux/amd64\\n'");
   await writeTool("gofmt", "exit 0");
   await writeTool("bun", '[[ "$*" == "--version" ]] && printf "1.4.0\\n" || printf "42\\n"');
   await writeTool("bunx", 'printf "42\\n"');
+  await writeTool("uv", 'printf "uv 0.12.11\\n"');
+  await writeTool("uvx", 'printf "uvx 0.12.11\\n"');
   await writeTool(
     "uname",
     'if [[ "$*" == "-s" ]]; then printf "%s\\n" "${FIXTURE_OS:-Linux}"; else printf "x86_64\\n"; fi',
   );
   await writeTool("getconf", 'printf "%s\\n" "${FIXTURE_LIBC:-glibc 2.39}"');
-  await writeTool(
-    "corepack",
-    '[[ "${FIXTURE_TOOL_EXIT:-0}" == "0" ]] || exit "$FIXTURE_TOOL_EXIT"\nprintf "%s\\n" "$FIXTURE_RESOLVED_PNPM"',
-  );
+  await writeTool("corepack", `[[ "\${FIXTURE_TOOL_EXIT:-0}" == 0 ]] || exit "$FIXTURE_TOOL_EXIT"
+if [[ "$*" == "pnpm --version" ]]; then
+  [[ "$COREPACK_ENABLE_NETWORK" == 0 && "$PWD" == / ]] || exit 66
+  printf '%s\\n' "$FIXTURE_RESOLVED_PNPM"
+fi`);
   await writeTool("id", 'printf "%s\\n" "$FIXTURE_UID"');
   await writeTool("dpkg", '[[ "$*" == "--print-architecture" ]] || exit 65\nprintf "%s\\n" "$FIXTURE_ARCH"');
-  await writeTool(
-    "pnpm",
-    '[[ "$*" == "--version" ]] || exit 65\nprintf "%s\\n" "$HOME" >>"$HOME/normal-pnpm.called"\nprintf "%s\\n" "$FIXTURE_RESOLVED_PNPM"\nexit "${FIXTURE_PNPM_EXIT:-0}"',
-  );
+  await writeTool("pnpm", `if [[ "$*" == --version ]]; then
+  [[ "\${COREPACK_ENABLE_NETWORK:-}" == ${customPrep ? '""' : "0"} && -z "\${COREPACK_ENABLE_PROJECT_SPEC+x}" ]] || exit 66
+  printf "%s\\n" "$HOME" >>"$HOME/normal-pnpm.called"
+  printf '%s\\n' "\${FIXTURE_PNPM_VERSION:-${pnpm}}"
+  exit "\${FIXTURE_PNPM_EXIT:-0}"
+fi
+[[ "$*" == "run check" && "$COREPACK_ENABLE_NETWORK" == 0 && "$npm_config_offline" == true ]]`);
   const generated = (await readFile(captured, "utf8"))
-    .replace("test -d /var/cache/crabbox/pnpm", "true")
-    .replace("test -f /var/lib/crabbox-readiness/linux.json", "true")
-    .replace("test -f /var/lib/crabbox/image-ready", "true")
+    .replaceAll("/var/cache/crabbox", caches)
     .replace(
       /^public_toolchain_archive_dir=.*$/gm,
       'public_toolchain_archive_dir="$HOME/missing-archives"',
     );
-  const execute = (env = {}, source = generated) => spawnSync("bash", ["-c", source], {
+  const execute = (env = {}, source = generated) => {
+    const result = spawnSync("bash", ["-c", source], {
     cwd: fake.dir,
     env: {
       PATH: `${bin}${path.delimiter}${process.env.PATH}`, HOME: fake.dir, TMPDIR: tmp,
@@ -872,7 +981,10 @@ async function linuxSmokeFixture(t, { major = "24", pnpm = "11.1.0", customPrep 
     },
     encoding: "utf8",
     timeout: 10_000,
-  });
+    });
+    assert.ifError(result.error);
+    return result;
+  };
   return { fake, tmp, generated, execute };
 }
 
@@ -903,13 +1015,17 @@ test("generated Linux smoke emits success only after nonroot, tool, and offline 
     generated
       .replace(/\n[ \t]*offline_node_pnpm_probe\n/, "\nprintf 'node-proof-done\\n'\n")
       .replace(/\n[ \t]*offline_go_probe\n/, "\nprintf 'go-proof-done\\n'\n")
-      .replace(/\n[ \t]*offline_bun_probe\n/, "\nprintf 'bun-proof-done\\n'\n"),
+      .replace(/\n[ \t]*offline_bun_probe\n/, "\nprintf 'bun-proof-done\\n'\n")
+      .replace(/\n[ \t]*rust_runtime_probe\n/, "\nprintf 'rust-proof-done\\n'\n")
+      .replace(/\n[ \t]*offline_uv_probe\n/, "\nprintf 'uv-proof-done\\n'\n"),
   );
   assert.equal(successful.status, 0, successful.stderr);
   const orderedMarkers = [
     "node-proof-done\n",
     "go-proof-done\n",
     "bun-proof-done\n",
+    "rust-proof-done\n",
+    "uv-proof-done\n",
     "devtools-smoke-ok\n",
   ].map((marker) => successful.stdout.indexOf(marker));
   assert.ok(orderedMarkers.every((index) => index >= 0), successful.stdout);
@@ -935,11 +1051,11 @@ test("generated Go smoke requires its own archive under an alternate Node major"
   const { fake, execute } = await linuxSmokeFixture(t, { major: "26" });
   const absent = execute();
   assert.notEqual(absent.status, 0);
-  assert.match(absent.stderr, /unavailable offline: go1\.27\.0\.linux-amd64\.tar\.gz/);
+  assert.match(absent.stderr, /unavailable offline: go1\.27\.1\.linux-amd64\.tar\.gz/);
   assert.doesNotMatch(absent.stdout, /devtools-smoke-ok/);
   await mkdir(path.join(fake.dir, "missing-archives"));
   await writeFile(
-    path.join(fake.dir, "missing-archives", "go1.27.0.linux-amd64.tar.gz"),
+    path.join(fake.dir, "missing-archives", "go1.27.1.linux-amd64.tar.gz"),
     "corrupt",
   );
   const corrupt = execute();
@@ -950,7 +1066,10 @@ test("generated Go smoke requires its own archive under an alternate Node major"
 
 test("generated Bun smoke is required independently of Node overrides and cannot be disabled by cache absence", async (t) => {
   const { fake, tmp, generated, execute } = await linuxSmokeFixture(t, { major: "26" });
-  const source = generated.replace(/\n[ \t]*offline_go_probe\n/, "\ntrue\n");
+  // This fixture isolates Bun's libc selection; the other mandatory bundles have separate gates.
+  const source = generated.replace(/\n[ \t]*offline_go_probe\n/, "\ntrue\n")
+    .replace(/\n[ \t]*rust_runtime_probe\n/, "\ntrue\n")
+    .replace(/\n[ \t]*offline_uv_probe\n/, "\ntrue\n");
   const missing = execute({}, source);
   assert.notEqual(missing.status, 0);
   assert.match(missing.stderr, /unavailable offline: bun-v1\.4\.0-linux-x64-baseline\.zip/);
@@ -977,6 +1096,22 @@ test("generated Bun smoke is required independently of Node overrides and cannot
   }
 });
 
+for (const tool of ["Rust", "uv"]) {
+  test(`generated ${tool} smoke cannot skip missing runtime or archive state under an alternate Node major`, async (t) => {
+    const { generated, execute, tmp } = await linuxSmokeFixture(t, { major: "26" });
+    let source = generated.replace(/\n[ \t]*offline_go_probe\n/, "\ntrue\n")
+      .replace(/\n[ \t]*offline_bun_probe\n/, "\ntrue\n");
+    if (tool === "uv") source = source.replace(/\n[ \t]*rust_runtime_probe\n/, "\ntrue\n");
+    const result = execute({}, source);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, tool === "Rust"
+      ? /normal login PATH does not resolve the runtime user's rustup/
+      : /unavailable offline: uv-0\.12\.11-x86_64-unknown-linux-gnu\.tar\.gz/);
+    assert.doesNotMatch(result.stdout, /devtools-smoke-ok/);
+    assert.deepEqual(await readdir(tmp), []);
+  });
+}
+
 test("generated Linux smoke requires the normal nonroot pnpm command even when private probes pass", async (t) => {
   const { fake, generated, execute } = await linuxSmokeFixture(t);
   const result = execute(
@@ -986,6 +1121,27 @@ test("generated Linux smoke requires the normal nonroot pnpm command even when p
   assert.equal(result.status, 48, result.stderr);
   assert.doesNotMatch(result.stdout, /devtools-smoke-ok/);
   assert.equal((await readFile(path.join(fake.dir, "normal-pnpm.called"), "utf8")).trim(), fake.dir);
+});
+
+test("bundled Linux smoke rejects a different ordinary pnpm default without activating it", async (t) => {
+  const { generated, execute } = await linuxSmokeFixture(t);
+  const result = execute({ FIXTURE_PNPM_VERSION: "12.3.4" });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /pnpm default mismatch: expected 11\.1\.0/);
+  const normalStart = generated.indexOf('corepack --version\nif ');
+  assert.ok(normalStart >= 0, "ordinary pnpm version check is missing");
+  const smokeStart = generated.indexOf("\nsmoke_dir=", normalStart);
+  assert.ok(smokeStart > normalStart, "ordinary pnpm version check boundary is missing");
+  const normalCheck = generated.slice(normalStart, smokeStart);
+  assert.match(normalCheck, /COREPACK_ENABLE_NETWORK=0/);
+  assert.doesNotMatch(normalCheck, /corepack prepare|corepack install|COREPACK_ENABLE_PROJECT_SPEC=0/);
+});
+
+test("custom Linux prep does not invent an expected pnpm version", async (t) => {
+  const { generated, execute } = await linuxSmokeFixture(t, { customPrep: true });
+  const result = execute({ FIXTURE_PNPM_VERSION: "12.3.4" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(generated, /expected_pnpm_version=''/);
 });
 
 test("generated Linux smoke keeps required x64 archives under a pnpm override", async (t) => {
@@ -1128,114 +1284,772 @@ test("AWS devtools mint wrapper preserves promotion failure while attempting rec
   assert.match(result.stderr, /transactional promotion receipt is unavailable for rollback/);
 });
 
-test("AWS devtools mint wrapper uses sg for first docker group member", async () => {
-  const fake = await setupFakeCrabbox();
-  const smokeScript = path.join(fake.dir, "smoke.sh");
-  const result = await runScript(
-    ["--target", "linux", "--run", "--no-promote", "--prep-script", fake.linuxPrep],
-    {
-      CRABBOX_BIN: fake.fake,
-      CRABBOX_FAKE_LOG: fake.log,
-      CRABBOX_FAKE_CAPTURE_RUN_SCRIPT: smokeScript,
-    },
-  );
-  assert.equal(result.code, 0, result.stderr);
+test("Linux C++ smoke links the older libxdo C ABI and retains its runtime assertion", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "crabbox-xdo-abi-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const smoke = await readFile(path.join(scriptDir, "devtools-image-smoke-linux.sh"), "utf8");
+  const cpp = smoke.match(/<<'CPP'\n([\s\S]*?)\nCPP/)[1];
+  const headers = {
+    "gtk/gtk.h": "inline int gtk_get_major_version() { return 3; }\n",
+    "webkit2/webkit2.h": "inline int webkit_get_major_version() { return 2; }\n",
+    "libayatana-appindicator/app-indicator.h": "inline int app_indicator_get_type() { return 1; }\n",
+    "librsvg/rsvg.h": "inline int rsvg_handle_get_type() { return 1; }\n",
+    "openssl/ssl.h": "inline int OPENSSL_init_ssl(int, void *) { return 1; }\n",
+    // libxdo 3.20160805.1 declares this C function without C++ linkage guards.
+    "xdo.h": "const char **xdo_get_symbol_map(void);\n",
+  };
+  for (const [name, content] of Object.entries(headers)) {
+    await mkdir(path.dirname(path.join(root, name)), { recursive: true });
+    await writeFile(path.join(root, name), content);
+  }
+  await writeFile(path.join(root, "xdo.c"), '#include "xdo.h"\nconst char **xdo_get_symbol_map(void) { static const char *symbols[] = {"alt", "Alt_L", 0}; return symbols; }\n');
+  const run = (command, args) => {
+    const result = spawnSync(command, args, { cwd: root, encoding: "utf8", timeout: 30_000 });
+    assert.ifError(result.error);
+    return result;
+  };
+  const object = run("cc", ["-c", "xdo.c", "-o", "xdo.o"]);
+  assert.equal(object.status, 0, object.stderr);
+  assert.match(cpp, /xdo_get_symbol_map\(\) == nullptr/);
+  for (const guarded of [false, true]) {
+    const input = guarded ? cpp : cpp.replace(/extern "C" \{\n(#include <xdo.h>)\n\}/, "$1");
+    await writeFile(path.join(root, "main.cpp"), input);
+    const linked = run("c++", ["-std=c++17", "-I.", "main.cpp", "xdo.o", "-o", "native-smoke"]);
+    if (!guarded) {
+      assert.notEqual(linked.status, 0);
+      assert.match(linked.stderr, /xdo_get_symbol_map/);
+    } else {
+      assert.equal(linked.status, 0, linked.stderr);
+      const executed = run(path.join(root, "native-smoke"), []);
+      assert.equal(executed.status, 0, executed.stderr);
+      assert.equal(executed.stdout.trim(), "native-build-ok");
+    }
+  }
+});
 
-  const bin = path.join(fake.dir, "smoke-bin");
-  await mkdir(bin);
-  const sgMarker = path.join(fake.dir, "sg-used");
-  const sudoMarker = path.join(fake.dir, "sudo-used");
+async function runLinuxSmoke(t, options = {}) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "crabbox-linux-smoke-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bin = path.join(root, "bin");
+  const scratch = path.join(root, "scratch");
+  const caches = path.join(root, "caches");
+  const events = path.join(root, "events");
+  const browserPID = path.join(root, "browser.pid");
+  for (const directory of [bin, scratch, ...["pnpm", "npm", "corepack", "docker"].map((name) => path.join(caches, name))]) {
+    await mkdir(directory, { recursive: true });
+  }
+  if (options.fail === "cache") await rm(path.join(caches, "pnpm"), { recursive: true });
   const writeTool = async (name, body) => {
     const file = path.join(bin, name);
-    await writeFile(file, body);
+    await writeFile(file, `#!/usr/bin/env bash
+set -eu
+printf '%s %s\\n' '${name}' "$*" >>${JSON.stringify(events)}
+[[ "\${CRABBOX_SMOKE_FAIL:-}" != '${name}' ]] || exit 37
+${body}
+`);
     await chmod(file, 0o755);
   };
-  for (const name of [
-    "git",
-    "gh",
-    "jq",
-    "rg",
-    "fd",
-    "python3",
-    "npm",
-    "corepack",
-    "pnpm",
-    "trufflehog",
-  ]) {
-    await writeTool(name, "#!/usr/bin/env bash\nexit 0\n");
+  for (const name of ["git", "gh", "jq", "rg", "fd", "trufflehog", "xset",
+    "autoconf", "automake", "gawk", "nasm", "yasm", "batcat", "direnv", "zoxide", "sqlite3"]) {
+    await writeTool(name, "exit 0");
   }
-  await writeTool(
-    "node",
-    '#!/usr/bin/env bash\n[[ "${1:-}" == "--version" ]] && printf \'v24.0.0\\n\'\nexit 0\n',
-  );
-  await writeTool(
-    "id",
-    '#!/usr/bin/env bash\ncase "$*" in -nG) printf \'users\\n\';; -u) printf \'1000\\n\';; esac\n',
-  );
-  await writeTool("whoami", "#!/usr/bin/env bash\nprintf 'alice\\n'\n");
-  await writeTool(
-    "getent",
-    '#!/usr/bin/env bash\n[[ "$*" == "group docker" ]] && printf \'docker:x:999:alice,bob\\n\'\n',
-  );
-  await writeTool(
-    "docker",
-    `#!/usr/bin/env bash
-if [[ "\${CRABBOX_FAKE_IN_SG:-0}" == "1" ]]; then
-  exit 0
+  for (const name of ["npm", "corepack", "pnpm"]) {
+    await writeTool(name, `if [[ "${name}" == corepack && "$*" == "pnpm --version" ]]; then
+  [[ "$COREPACK_ENABLE_NETWORK" == 0 && "$PWD" == / ]]
+  echo 11.1.0
+elif [[ "$*" == --version ]]; then
+  if [[ "${name}" == pnpm ]]; then
+    [[ "$COREPACK_ENABLE_NETWORK" == 0 && -z "\${COREPACK_ENABLE_PROJECT_SPEC+x}" ]]
+    echo 11.1.0
+  else
+    [[ "$COREPACK_ENABLE_NETWORK" == 1 && "$npm_config_offline" == false ]]
+  fi
+else
+  [[ "$COREPACK_ENABLE_NETWORK" == 0 && "$npm_config_offline" == true ]]
+fi`);
+  }
+  await writeTool("node", `exec ${JSON.stringify(process.execPath)} "$@"`);
+  await writeTool("python3", '[[ "$1" != - && "$1" != -c ]] || exec /usr/bin/python3 "$@"');
+  await writeTool("cc", `[[ "$2" == -o ]]
+printf '#!/bin/sh\\nexit 0\\n' >"$3"
+chmod +x "$3"`);
+  await writeTool("cmake", `[[ -z "\${CRABBOX_SMOKE_FAIL+x}" && -z "\${CRABBOX_SMOKE_SECRET+x}" ]]
+[[ "$HOME" == "$TMPDIR/../build-home" || "$HOME" == "\${TMPDIR%/build-tmp}/build-home" ]]
+if [[ "$1" == -S ]]; then
+  [[ "${options.fail ?? ""}" != cmake ]] || exit 37
+  [[ "$3 $5 $6" == "-B -G Ninja" ]]
+  for library in gtk+-3.0 webkit2gtk-4.1 ayatana-appindicator3-0.1 librsvg-2.0 openssl; do
+    grep -Fq "$library" "$2/CMakeLists.txt"
+  done
+  grep -q '#include <xdo.h>' "$2/main.cpp"
+  grep -q 'cxx_std_17' "$2/CMakeLists.txt"
+  mkdir -p "$4"
+else
+  [[ "$1 $3 $4" == "--build --parallel 2" ]]
+  [[ "${options.fail ?? ""}" != native-build ]] || exit 37
+  printf '#!/bin/sh\\n%s\\n' '${options.fail === "native-run" ? "exit 38" : "echo native-build-ok"}' >"$2/native-smoke"
+  chmod +x "$2/native-smoke"
+fi`);
+  await writeTool("id", 'case "$*" in -u) echo 1000 ;; -nG) echo users ;; esac');
+  await writeTool("whoami", "echo alice");
+  await writeTool("getent", `[[ "\${CRABBOX_SMOKE_FAIL:-}" != access ]] || exit 1
+echo 'docker:x:999:alice,bob'`);
+  await writeTool("docker", `if [[ "$1" == version && "\${CRABBOX_SMOKE_REFRESH:-0}" == 1 && "\${CRABBOX_FAKE_IN_SG:-0}" != 1 ]]; then exit 1; fi
+if [[ "\${CRABBOX_SMOKE_FAIL:-}" == access && "$1" == version ]]; then exit 1; fi
+if [[ "\${CRABBOX_SMOKE_FAIL:-}" == buildx && "$1 \${2:-}" == "buildx build" ]]; then exit 37; fi
+if [[ "\${CRABBOX_SMOKE_FAIL:-}" == compose && "$*" == *" run --rm "* ]]; then exit 37; fi
+exit 0`);
+  await writeTool("sg", '[[ "$1 $2" == "docker -c" ]]\nCRABBOX_FAKE_IN_SG=1 sh -c "$3"');
+  await writeTool("sudo", "exit 80");
+  await writeTool("timeout", '[[ "$1" != --kill-after=* ]] || shift\nshift\nexec "$@"');
+  await writeTool("crabbox-browser", `if [[ "$*" == *"--headless"* ]]; then
+  case "\${CRABBOX_SMOKE_FAIL:-}" in
+    missing-dom) exit 0 ;;
+    partial-dom) printf '<p>crabbox-browser-'; exit 0 ;;
+  esac
+  echo '<p>crabbox-browser-smoke</p>'; exit 0
 fi
-exit 1
-`,
-  );
-  await writeTool(
-    "sg",
-    `#!/usr/bin/env bash
-touch "${sgMarker}"
-shift
-[[ "\${1:-}" == "-c" ]] || exit 64
-shift
-CRABBOX_FAKE_IN_SG=1 bash -c "$1"
-`,
-  );
-  await writeTool(
-    "sudo",
-    `#!/usr/bin/env bash
-touch "${sudoMarker}"
-exit 80
-`,
-  );
+[[ "\${CRABBOX_SMOKE_FAIL:-}" != visible-browser ]] || exit 124
+[[ "\${CRABBOX_SMOKE_FAIL:-}" != visible-zero ]] || exit 0
+exec ${JSON.stringify(process.execPath)} -e 'const fs=require("node:fs"); const file=process.env.CRABBOX_SMOKE_BROWSER_PID; process.on("SIGTERM",()=>{fs.unlinkSync(file); process.exit(0)}); fs.writeFileSync(file,String(process.pid)); setInterval(()=>{},1000)'`);
+  await writeTool("xdotool", `if [[ "$1" == search ]]; then
+  [[ "\${CRABBOX_SMOKE_FAIL:-}" != window && -f "$CRABBOX_SMOKE_BROWSER_PID" ]] || exit 1
+  echo 12345
+fi`);
+  await writeTool("ffmpeg", `exec ${JSON.stringify(process.execPath)} -e 'require("node:fs").writeFileSync(process.argv[1],Buffer.alloc(768,Buffer.from(process.env.CRABBOX_SMOKE_FAIL === "render" ? [0,0,0] : [25,163,91])))' "\${*: -1}"`);
+  await writeTool("sleep", "/bin/sleep 0.05");
+  await writeTool("scrot", 'printf png >"$1"');
+  await writeTool("ffprobe", "echo 1280,720");
+  const smoke = path.join(root, "smoke.sh");
+  const source = await readFile(path.join(scriptDir, "devtools-image-smoke-linux.sh"), "utf8");
+  // Archive authentication is covered by the renderer fixtures; this fixture owns runtime capabilities.
+  await writeFile(smoke, `developer_archive_probe() { :; }\n${source.replaceAll("/var/cache/crabbox", caches)}`);
+  const result = await runScript([], {
+    PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+    TMPDIR: scratch,
+    DISPLAY: ":99",
+    expected_node_major: "",
+    expected_pnpm_version: "11.1.0",
+    COREPACK_ENABLE_NETWORK: "1",
+    npm_config_offline: "false",
+    CRABBOX_SMOKE_EVENTS: events,
+    CRABBOX_SMOKE_BROWSER_PID: browserPID,
+    CRABBOX_SMOKE_FAIL: options.fail ?? "",
+    CRABBOX_SMOKE_SECRET: "fixture-only-not-a-credential",
+    CRABBOX_SMOKE_REFRESH: options.refresh ? "1" : "0",
+    CRABBOX_LINUX_BROWSER: options.browser ?? "1",
+    CRABBOX_LINUX_DESKTOP_TOOLS: options.desktop ?? "1",
+  }, smoke);
+  assert.deepEqual(await readdir(scratch), [], "smoke must remove all disposable fixtures");
+  for (const cache of await readdir(caches)) {
+    assert.deepEqual(await readdir(path.join(caches, cache)), [], "cache write probes must be removed");
+  }
+  await assert.rejects(readFile(browserPID), { code: "ENOENT" }, "smoke must stop its own visible browser");
+  return { ...result, events: await readFile(events, "utf8") };
+}
 
-  const generated = (await readFile(smokeScript, "utf8"))
-    .replace("test -d /var/cache/crabbox/pnpm", "true")
-    .replace("test -f /var/lib/crabbox-readiness/linux.json", "true")
-    .replace("test -f /var/lib/crabbox/image-ready", "true")
-    // Artifact consumption has its own real-archive proof; this fixture owns group fallback.
-    .replace(/\noffline_node_pnpm_probe\n/, "\ntrue\n");
-  const smoke = await new Promise((resolve, reject) => {
-    const child = spawn("bash", ["-c", generated], {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ code, stdout, stderr }));
+test("Linux image smoke runs offline functional checks and cleans its fixtures", async (t) => {
+  const result = await runLinuxSmoke(t);
+  assert.equal(result.code, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /devtools-smoke-ok/);
+  assert.match(result.events, /cmake -S .* -B .* -G Ninja/);
+  assert.match(result.events, /cmake --build .* --parallel 2/);
+  assert.match(result.events, /npm --offline run check/);
+  assert.match(result.events, /pnpm run check/);
+  assert.match(result.events, /docker run --rm --pull=never --network=none/);
+  assert.match(result.events, /docker buildx build --builder default --pull=false --network=none/);
+  assert.match(result.events, /docker compose .* run --rm --no-deps --pull never check/);
+  assert.match(result.events, /docker compose .* down --remove-orphans/);
+  assert.match(result.events, /docker image rm crabbox-smoke-/);
+  assert.match(result.events, /crabbox-browser --headless/);
+  assert.match(result.events, /scrot /);
+  assert.match(result.events, /xdotool search --onlyvisible --limit 1 --name crabbox-render-/);
+  assert.match(result.events, /ffmpeg .* -f x11grab -draw_mouse 0 -window_id 12345 -i :99 /);
+  assert.doesNotMatch(result.events, /sudo |docker pull |apt-get |npm install/);
+});
+
+test("Linux image smoke refreshes the first Docker group member without root execution", async (t) => {
+  const result = await runLinuxSmoke(t, { refresh: true });
+  assert.equal(result.code, 0, result.stderr || result.stdout);
+  assert.match(result.events, /sg docker -c/);
+  assert.doesNotMatch(result.events, /sudo /);
+});
+
+test("Linux visible browser preserves its failed child status before removing evidence", async (t) => {
+  const result = await runLinuxSmoke(t, { fail: "visible-browser" });
+  assert.equal(result.code, 124, result.stderr);
+  assert.match(result.stderr, /browser-smoke-evidence .*"commandExit": 124/);
+  assert.doesNotMatch(result.stdout, /devtools-smoke-ok/);
+});
+
+for (const [fail, dom] of [["missing-dom", ""], ["partial-dom", "<p>crabbox-browser-"], ["visible-zero", ""]]) {
+  test(`Linux browser assertion preserves exit-zero evidence: ${fail}`, async (t) => {
+    const result = await runLinuxSmoke(t, { fail });
+    assert.notEqual(result.code, 0, result.stderr);
+    const lines = result.stderr.split("\n").filter((line) => line.startsWith("browser-smoke-evidence "));
+    const evidence = JSON.parse(lines.at(-1).slice("browser-smoke-evidence ".length));
+    assert.equal(evidence.commandExit, 0);
+    assert.equal(evidence.dom, dom);
+    assert.equal(evidence.identity.wrapperSHA256.length, 64);
+    assert.doesNotMatch(result.stdout, /devtools-smoke-ok/);
   });
+}
 
-  assert.equal(smoke.code, 0, smoke.stderr || smoke.stdout);
-  assert.equal(await readFile(sgMarker, "utf8"), "");
-  await assert.rejects(readFile(sudoMarker, "utf8"));
+test("Linux image smoke rejects failed capabilities without success output and cleans fixtures", async (t) => {
+  for (const fail of ["cc", "cmake", "native-build", "native-run", "python3", "npm", "pnpm", "cache", "buildx", "compose", "access", "crabbox-browser", "xset", "ffprobe", "window", "render"]) {
+    await t.test(fail, async (subtest) => {
+      const result = await runLinuxSmoke(subtest, { fail });
+      assert.notEqual(result.code, 0, result.stderr || result.stdout);
+      assert.doesNotMatch(result.stdout, /devtools-smoke-ok/);
+      assert.doesNotMatch(result.events, /sudo /);
+      if (fail === "buildx" || fail === "compose") {
+        assert.equal(result.code, 37, "cleanup must preserve the original failure");
+        assert.match(result.events, /docker image rm crabbox-smoke-/);
+      }
+      if (fail === "window" || fail === "render") {
+        assert.match(result.stderr, /browser did not render the local fixture/);
+        assert.match(result.stderr, /browser-smoke-evidence .*"commandExit": 143/);
+      }
+    });
+  }
+});
+
+test("Linux image smoke respects disabled browser and desktop capabilities", async (t) => {
+  for (const [browser, desktop] of [["0", "0"], ["1", "0"], ["0", "1"]]) {
+    await t.test(`browser=${browser} desktop=${desktop}`, async (subtest) => {
+      const result = await runLinuxSmoke(subtest, { browser, desktop });
+      assert.equal(result.code, 0, result.stderr || result.stdout);
+      if (browser === "0") assert.doesNotMatch(result.events, /crabbox-browser/);
+      if (desktop === "0") assert.doesNotMatch(result.events, /xset|xdotool|scrot|ffprobe/);
+      assert.doesNotMatch(result.events, /ffmpeg |--app=/);
+    });
+  }
+});
+
+test("Linux smoke keeps its quoted Python probe parseable by both Bash interpreters", () => {
+  for (const bash of ["bash", "/bin/bash"]) {
+    const result = spawnSync(bash, ["-n", path.join(scriptDir, "devtools-image-smoke-linux.sh")], { encoding: "utf8" });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+  }
+});
+
+function browserProbeDefinition(raw) {
+  const opener = "browser_probe=\"$(cat <<'PY'\n";
+  const terminator = "\nPY\n)\"";
+  const start = raw.indexOf(opener);
+  assert.ok(start >= 0, "browser probe heredoc opener is missing");
+  const end = raw.indexOf(terminator, start + opener.length);
+  assert.ok(end >= 0, "browser probe heredoc terminator is missing");
+  return raw.slice(start, end + terminator.length);
+}
+
+test("browser probe extraction isolates the complete actual heredoc", async () => {
+  const raw = await readFile(path.join(scriptDir, "devtools-image-smoke-linux.sh"), "utf8");
+  const definition = browserProbeDefinition(raw);
+  assert.ok(definition.startsWith("browser_probe=\"$(cat <<'PY'\n"));
+  assert.ok(definition.endsWith("\nsys.exit(status)\nPY\n)\""));
+  assert.ok(definition.includes('"--kill-after=5", "30"'));
+  assert.ok(definition.includes('"clockTicksPerSecond": os.sysconf("SC_CLK_TCK")'));
+  assert.doesNotMatch(definition, /cmake_minimum_required|docker run|devtools-smoke-ok/);
+});
+
+test("browser probe extraction rejects missing or unterminated heredocs", () => {
+  assert.throws(() => browserProbeDefinition("\nPY\n)\""), /heredoc opener is missing/);
+  assert.throws(
+    () => browserProbeDefinition("\nPY\n)\"\nbrowser_probe=\"$(cat <<'PY'\npass\n"),
+    /heredoc terminator is missing/,
+  );
+});
+
+async function browserProbeUnit(code, root = "", timeoutMs = 5000) {
+  const raw = await readFile(path.join(scriptDir, "devtools-image-smoke-linux.sh"), "utf8");
+  const definition = browserProbeDefinition(raw);
+  const source = definition.slice("browser_probe=\"$(cat <<'PY'\n".length, -"\nPY\n)\"".length);
+  const child = spawn("python3", ["-c", `import ast
+tree = ast.parse(${JSON.stringify(source)})
+# Execute the canonical owners without launching the browser or installing signals.
+exec(compile(ast.Module(body=[node for node in tree.body if isinstance(node,
+    (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.Assign))], type_ignores=[]),
+    "<browser-probe>", "exec"))
+${code}`, root], { detached: true, stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "", stderr = "", expired = false, stopped = false;
+  const stop = () => {
+    if (stopped || !Number.isInteger(child.pid)) return;
+    try { process.kill(-child.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+    stopped = true;
+  };
+  const deadline = setTimeout(() => { expired = true; stop(); }, timeoutMs);
+  for (const stream of [child.stdout, child.stderr]) {
+    stream.on("data", (data) => {
+      if (stream === child.stdout) stdout += data;
+      else stderr += data;
+      if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > 1024 * 1024) stop();
+    });
+  }
+  let result;
+  try {
+    result = await new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (status, signal) => resolve({ status, signal }));
+    });
+  } finally {
+    clearTimeout(deadline);
+    // A failed assertion may leave a forked sampler alive in this exact group.
+    stop();
+  }
+  assert.equal(expired, false, "browser sampler fixture timed out after owned group cleanup");
+  assert.equal(result.status, 0, stderr);
+  return stdout;
+}
+
+test("browser sampler fixture timeout joins an ignoring owner and its owned child", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "crabbox-browser-proc-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await assert.rejects(browserProbeUnit(`
+signal.signal(signal.SIGTERM, lambda *_: None)
+pid = os.fork()
+if pid == 0:
+    time.sleep(60)
+    os._exit(0)
+pathlib.Path(sys.argv[1], "child").write_text(str(pid))
+time.sleep(60)
+`, root, 500), /fixture timed out after owned group cleanup/);
+  const pid = Number(await readFile(path.join(root, "child"), "utf8"));
+  const probe = spawnSync("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8", timeout: 1000 });
+  assert.ok(probe.status !== 0 || probe.stdout.trim().startsWith("Z"), `fixture child survived: ${probe.stdout}`);
+});
+
+test("browser sampler retains two proc snapshots with clock, faults and owned identities", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "crabbox-browser-proc-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await browserProbeUnit(`
+root = pathlib.Path(sys.argv[1])
+entry = root / "101"
+entry.mkdir()
+fields = ["0"] * 22
+fields[0:4] = ["D", "1", "77", "77"]
+for index, value in ((7, 11), (9, 2), (11, 13), (12, 14), (19, 15), (21, 2)):
+    fields[index] = str(value)
+def write_stat():
+    (entry / "stat").write_text("101 (fixture ) name) " + " ".join(fields))
+write_stat()
+(entry / "io").write_text("read_bytes: 94343168\\nwrite_bytes: 4096\\nrchar: 100\\nwchar: 20\\n")
+(entry / "wchan").write_text("folio_wait_bit_common\\n")
+first = sample(root, 77, os.getuid())
+assert len(first) == 1
+assert first[0]["uid"] == os.getuid()
+assert (first[0]["pgid"], first[0]["sid"], first[0]["pid"], first[0]["startTicks"]) == (77, 77, 101, 15)
+assert (first[0]["minorFaults"], first[0]["majorFaults"]) == (11, 2)
+assert first[0]["wchan"] == "folio_wait_bit_common"
+fields[7], fields[9], fields[11] = "21", "5", "18"
+write_stat()
+second = sample(root, 77, os.getuid())
+assert (second[0]["minorFaults"], second[0]["majorFaults"], second[0]["userTicks"]) == (21, 5, 18)
+assert first[0]["minorFaults"] == 11
+assert os.sysconf("SC_CLK_TCK") > 0
+`, root);
+});
+
+test("browser sampler rejects PID races, foreign ownership and malformed proc fields", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "crabbox-browser-proc-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await browserProbeUnit(`
+root = pathlib.Path(sys.argv[1])
+entry = root / "101"
+entry.mkdir()
+fields = ["0"] * 22
+fields[0:4] = ["S", "1", "77", "77"]
+fields[19] = "15"
+def reset():
+    (entry / "stat").write_text("101 (fixture) " + " ".join(fields))
+    (entry / "io").write_text("malformed")
+reset()
+assert sample(root, 77, os.getuid() + 1) == []
+assert sample(root, 78, os.getuid()) == []
+for value in ("0", "", "private/path", "x" * 65, "\\u00e9", "wait\\nsecret"):
+    (entry / "wchan").write_text(value)
+    rows = sample(root, 77, os.getuid())
+    assert len(rows) == 1 and rows[0]["wchan"] is None and "io" not in rows[0]
+(entry / "wchan").unlink()
+assert sample(root, 77, os.getuid())[0]["wchan"] is None
+(entry / "wchan").write_text("w" * 64)
+assert sample(root, 77, os.getuid())[0]["wchan"] == "w" * 64
+for value in ("", "102 (fixture) " + " ".join(fields), "101 (fixture) S",
+              "101 (fixture) " + " ".join(fields[:7] + ["bad"] + fields[8:]),
+              "101 (fixture) " + " ".join(fields[:7] + [str(2 ** 64)] + fields[8:])):
+    (entry / "stat").write_text(value)
+    assert sample(root, 77, os.getuid()) == []
+reset()
+original_stat = proc_stat
+calls = 0
+def raced_stat(item):
+    global calls
+    calls += 1
+    row = original_stat(item)
+    if calls == 2:
+        row["startTicks"] += 1
+    return row
+proc_stat = raced_stat
+assert sample(root, 77, os.getuid()) == []
+`, root);
+});
+
+test("browser sampler records empty, error and timeout outcomes without overlapping children", async () => {
+  await browserProbeUnit(`
+import io
+from types import SimpleNamespace
+child = SimpleNamespace(pid=77, stdout=io.BytesIO(), stderr=io.BytesIO())
+def settle():
+    deadline = time.monotonic() + 1
+    while sampler is not None and time.monotonic() < deadline:
+        poll_sample(time.monotonic())
+        time.sleep(0.005)
+    assert sampler is None
+signal.signal(signal.SIGTERM, lambda *_: None)
+def empty(*_):
+    assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+    assert signal.getsignal(signal.SIGINT) == signal.SIG_DFL
+    return []
+sample = empty
+start_sample(time.monotonic())
+settle()
+assert process_samples[-1]["outcome"] == "empty"
+sample = lambda *_: [{"pid": 101}]
+start_sample(time.monotonic())
+settle()
+assert [item["outcome"] for item in process_samples] == ["empty", "ok"]
+assert all(item["samplerReaped"] for item in process_samples)
+assert process_samples[0]["attemptElapsedMs"] <= process_samples[1]["attemptElapsedMs"]
+assert all(0 <= item["attemptDurationMs"] < 1000 for item in process_samples)
+sample = empty
+start_sample(time.monotonic())
+completed = os.waitpid(sampler["pid"], 0)
+original_waitpid = os.waitpid
+os.waitpid = lambda *_: completed
+poll_sample(time.monotonic(), "browserComplete")
+os.waitpid = original_waitpid
+assert sampler is None and process_samples[-1]["outcome"] == "empty"
+assert process_samples[-1]["samplerReaped"] and "reason" not in process_samples[-1]
+sample = lambda *_: time.sleep(60)
+start_sample(time.monotonic())
+owned = sampler["pid"]
+start_sample(time.monotonic())
+assert sampler["pid"] == owned
+assert process_samples[-1]["reason"] == "previousSamplerUnreaped"
+settle()
+assert process_samples[-2]["outcome"] == "timeout"
+assert process_samples[-2]["samplerReaped"]
+def broken(*_):
+    raise OSError("fixture-only")
+sample = broken
+start_sample(time.monotonic())
+settle()
+assert process_samples[-1]["reason"] == "collector"
+original_dumps = json.dumps
+json.dumps = lambda *_: "not-json"
+sample = empty
+start_sample(time.monotonic())
+settle()
+json.dumps = original_dumps
+assert process_samples[-1]["reason"] == "ipcData"
+sample = lambda *_: time.sleep(60)
+start_sample(time.monotonic())
+original_read = os.read
+os.read = lambda *_: b"x" * (sample_bytes + 1)
+poll_sample(time.monotonic())
+os.read = original_read
+settle()
+assert process_samples[-1]["reason"] == "ipcLimit"
+assert process_samples[-1]["samplerReaped"]
+`);
+});
+
+test("browser evidence caps the entire UTF-8 line and balances retained sample tails", async () => {
+  await browserProbeUnit(`
+import copy
+row = {key: 2 ** 64 - 1 for key in ("pid", "ppid", "uid", "pgid", "sid", "startTicks",
+       "userTicks", "systemTicks", "rssBytes", "minorFaults", "majorFaults")}
+row.update(state="D", wchan="w" * 64,
+           io={key: 2 ** 64 - 1 for key in ("rchar", "wchar", "read_bytes", "write_bytes")})
+records = [{"attemptElapsedMs": moment, "attemptDurationMs": 250, "outcome": "ok", "samplerReaped": True,
+            "processes": [copy.deepcopy(row) for _ in range(8)], "truncatedRows": 0}
+           for moment in (1001, 25003)]
+evidence = {"commandExit": 124, "stderr": "\\U0001f642" * 4096,
+            "identity": {"packages": ["\\U0001f642" * 160] * 2, "wrapperSHA256": "a" * 64},
+            "processSamples": records, "clockTicksPerSecond": os.sysconf("SC_CLK_TCK")}
+line = evidence_line(evidence)
+assert len(line) < 8192 and line.endswith(b"\\n")
+decoded = json.loads(line[len(b"browser-smoke-evidence "):])
+assert decoded["clockTicksPerSecond"] == os.sysconf("SC_CLK_TCK")
+assert decoded["truncatedStderrBytes"] == 4096 * 4
+assert [item["attemptElapsedMs"] for item in decoded["processSamples"]] == [1001, 25003]
+assert len(records) == 2 and all(len(item["processes"]) + item["truncatedRows"] == 8 for item in records)
+assert abs(len(records[0]["processes"]) - len(records[1]["processes"])) <= 1
+assert all(item["processes"] for item in records)
+`);
+});
+
+for (const mode of ["completion", "interrupt", "owner-exit"]) {
+  test(`browser blocked sampler is reaped on ${mode} without changing command status`, async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "crabbox-browser-sampler-"));
+    const samplerReady = path.join(root, "sampler");
+    const browserPID = path.join(root, "browser");
+    const recordIdentity = `def record_identity(filename):
+    pid = os.getpid()
+    metadata = subprocess.check_output(["ps", "-ww", "-p", str(pid),
+        "-o", "pgid=,uid=,lstart=,command="], text=True).strip()
+    pathlib.Path(filename).write_text(json.dumps({"pid": pid, "pgid": os.getpgrp(),
+        "startIdentity": hashlib.sha256(metadata.encode()).hexdigest()}))
+`;
+    for (const [name, content] of [
+      ["timeout", '#!/bin/sh\n[ "$1 $2" = "--kill-after=5 30" ] || exit 91\nshift 2\nexec "$@"\n'],
+      ["crabbox-browser", `#!/usr/bin/env python3
+import hashlib, json, os, pathlib, subprocess, sys, time
+${recordIdentity}
+record_identity(os.environ["BROWSER_PID"])
+print("<p>crabbox-browser-smoke</p>", flush=True)
+${mode === "completion" ? 'while not pathlib.Path(os.environ["SAMPLER_READY"]).exists():\n    time.sleep(0.005)\nsys.exit(37)' : "time.sleep(60)"}
+`],
+    ]) {
+      await writeFile(path.join(root, name), content);
+      await chmod(path.join(root, name), 0o755);
+    }
+    const raw = await readFile(path.join(scriptDir, "devtools-image-smoke-linux.sh"), "utf8");
+    const definition = browserProbeDefinition(raw)
+      .replace("def sample(proc_root, group_id, uid):", `${recordIdentity}
+def sample(proc_root, group_id, uid):
+    record_identity(os.environ["SAMPLER_READY"])
+    time.sleep(60)`);
+    const source = definition.slice("browser_probe=\"$(cat <<'PY'\n".length, -"\nPY\n)\"".length);
+    const child = spawn("python3", ["-c", source, root], {
+      env: { PATH: `${root}:${process.env.PATH}`, HOME: root, LC_ALL: "C", SAMPLER_READY: samplerReady, BROWSER_PID: browserPID },
+      detached: true, stdio: ["ignore", "pipe", "pipe"],
+    });
+    const killed = new Set();
+    const running = (record) => {
+      const probe = spawnSync("ps", ["-ww", "-p", String(record.pid), "-o", "stat=,pgid=,uid=,lstart=,command="],
+        { encoding: "utf8", timeout: 1000, killSignal: "SIGKILL", maxBuffer: 64 * 1024, env: { PATH: process.env.PATH, LC_ALL: "C" } });
+      assert.ifError(probe.error);
+      if (probe.status === 1 && !probe.stdout.trim()) return false;
+      assert.equal(probe.status, 0, probe.stderr);
+      const [, state, identity] = probe.stdout.trim().match(/^(\S+)\s+([\s\S]+)$/) || [];
+      if (state?.startsWith("Z")) return false;
+      assert.ok(identity, "fixture process metadata is missing");
+      assert.equal(createHash("sha256").update(identity).digest("hex"), record.startIdentity, "fixture process identity changed");
+      return true;
+    };
+    let cleanup;
+    const terminateFixture = () => cleanup ||= (async () => {
+      const records = [];
+      for (const [file, group] of [[browserPID, true], [samplerReady, false]]) {
+        const text = await readFile(file, "utf8").catch((error) => { if (error.code !== "ENOENT") throw error; return ""; });
+        if (!text) continue;
+        const record = JSON.parse(text);
+        assert.ok(Number.isInteger(record.pid) && record.pid > 1);
+        assert.equal(record.pgid, group ? record.pid : child.pid);
+        records.push(record);
+        // Parent exit changes PPID, not this start/UID/group/unique-command identity.
+        if (running(record)) {
+          try { process.kill(group ? -record.pgid : record.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+          killed.add(record.pid);
+        }
+      }
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      const until = Date.now() + 1000;
+      for (const record of records) {
+        while (running(record)) {
+          assert.ok(Date.now() < until, `owned fixture process ${record.pid} survived cleanup`);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      }
+    })();
+    t.after(async () => { await terminateFixture(); await rm(root, { recursive: true, force: true }); });
+    let stderr = "";
+    child.stderr.on("data", (data) => { stderr += data; });
+    child.stdout.resume();
+    let expired = false;
+    const deadline = setTimeout(() => {
+      expired = true;
+      void terminateFixture();
+    }, 4000);
+    const done = new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", () => { terminateFixture().catch(reject); });
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    });
+    if (mode !== "completion") {
+      const until = Date.now() + 2000;
+      while (!(await readFile(samplerReady, "utf8").catch(() => "")) && Date.now() < until) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      child.kill(mode === "interrupt" ? "SIGTERM" : "SIGKILL");
+    }
+    const result = await done;
+    await terminateFixture();
+    clearTimeout(deadline);
+    assert.equal(expired, false, "blocked sampler fixture timed out after owned process cleanup");
+    if (mode === "owner-exit") {
+      assert.equal(result.signal, "SIGKILL");
+      for (const file of [browserPID, samplerReady]) {
+        const record = JSON.parse(await readFile(file, "utf8"));
+        assert.ok(killed.has(record.pid), "external owner must clean both reparented processes");
+        assert.equal(running(record), false);
+      }
+      assert.ok((await readdir(root)).includes("browser"), "verify termination before removing fixture records");
+      return;
+    }
+    assert.equal(result.code, mode === "completion" ? 37 : 143, stderr);
+    assert.equal(result.signal, null);
+    const line = stderr.split("\n").find((value) => value.startsWith("browser-smoke-evidence "));
+    assert.ok(line, stderr);
+    const evidence = JSON.parse(line.slice("browser-smoke-evidence ".length));
+    assert.equal(evidence.processSamples.length, 1);
+    const record = evidence.processSamples[0];
+    assert.equal(record.outcome, "error", stderr);
+    assert.equal(record.reason, mode === "completion" ? "browserComplete" : "interrupted");
+    assert.equal(record.samplerReaped, true);
+    assert.throws(() => process.kill(record.samplerPID, 0), { code: "ESRCH" });
+  });
+}
+
+for (const [mode, expected] of [["exit", 37], ["timeout", 124], ["ignore-term", 137], ["interrupt", 143], ["diagnostic-failure", 37], ["two-samples", 124]]) {
+  test(`browser diagnostics preserve ${mode} status and settle only owned descendants`, {
+    skip: process.platform !== "linux" && "native Linux supervision requires GNU timeout and /proc",
+  }, async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "crabbox-browser-evidence-"));
+    const bin = path.join(root, "bin");
+    await mkdir(bin);
+    const pids = path.join(root, "pids");
+    const owner = path.join(root, "owner");
+    t.after(async () => {
+      for (const pid of (await readFile(pids, "utf8").catch(() => "")).trim().split(/\s+/).map(Number)) {
+        if (pid > 1) { try { process.kill(pid, "SIGKILL"); } catch {} }
+      }
+      await rm(root, { recursive: true, force: true });
+    });
+    const timeout = execFileSync("bash", ["-c", "command -v timeout"], { encoding: "utf8" }).trim();
+    const timeoutFile = path.join(bin, "timeout");
+    await writeFile(timeoutFile, `#!/bin/sh
+test "$1 $2" = "--kill-after=5 30" || exit 91
+shift 2
+exec ${JSON.stringify(timeout)} --kill-after=0.1 1.5 "$@"
+`);
+    await chmod(timeoutFile, 0o755);
+    const browser = path.join(bin, "crabbox-browser");
+    await writeFile(browser, `#!${process.execPath}
+const fs = require("node:fs"), cp = require("node:child_process");
+fs.appendFileSync(process.env.PIDS, String(process.pid) + "\\n");
+process.stderr.write("org.freedesktop.UPower /private/sensitive token=fixture-secret\\n".repeat(500));
+process.stdout.write("<p>crabbox-browser-smoke</p>" + "private-dom-token".repeat(500));
+if (["exit", "diagnostic-failure"].includes(process.env.MODE)) process.exit(37);
+const descendant = cp.spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)"], { stdio: "inherit" });
+fs.appendFileSync(process.env.PIDS, String(descendant.pid) + "\\n");
+if (process.env.MODE === "ignore-term") process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+`);
+    await chmod(browser, 0o755);
+    const raw = await readFile(path.join(scriptDir, "devtools-image-smoke-linux.sh"), "utf8");
+    let definition = browserProbeDefinition(raw);
+    assert.ok(definition.includes('"--kill-after=5", "30"'));
+    assert.ok(definition.includes("started + 1, started + 25"));
+    if (mode === "two-samples") definition = definition.replace("started + 1, started + 25", "started + 0.2, started + 0.8");
+    if (mode === "diagnostic-failure") definition = definition.replace("line = evidence_line(", "line = (lambda *_args, **_kwargs: 1 / 0)(");
+    const child = spawn("bash", ["-c", `${definition}
+python3 -c "$browser_probe" --headless --dump-dom 'data:text/html,<p>crabbox-browser-smoke</p>' &
+owner=$!
+printf '%s\\n' "$owner" >"$OWNER"
+wait "$owner"
+`], { env: { PATH: `${bin}:${process.env.PATH}`, HOME: root, OWNER: owner, PIDS: pids, MODE: mode },
+      stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", (data) => { stdout += data; });
+    child.stderr.on("data", (data) => { stderr += data; });
+    const done = new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", (code, signal) => resolve({ code, signal }));
+    });
+    if (mode === "interrupt") {
+      const until = Date.now() + 5000;
+      while (!(await readFile(pids, "utf8").catch(() => "")).includes("\n") && Date.now() < until) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      process.kill(Number((await readFile(owner, "utf8")).trim()), "SIGTERM");
+    }
+    const result = await done;
+    assert.equal(result.code, expected, stderr);
+    assert.equal(result.signal, null);
+    assert.equal(stdout, "");
+    const line = stderr.split("\n").find((value) => value.startsWith("browser-smoke-evidence "));
+    if (mode === "diagnostic-failure") {
+      assert.equal(line, undefined, "diagnostic failure must preserve the original command status");
+      assert.equal(stderr, "");
+      return;
+    }
+    assert.ok(line, stderr);
+    assert.ok(Buffer.byteLength(`${line}\n`, "utf8") < 8192);
+    const evidence = JSON.parse(line.slice("browser-smoke-evidence ".length));
+    assert.equal(evidence.commandExit, expected);
+    assert.equal(evidence.dom, "<p>crabbox-browser-smoke</p>");
+    assert.ok(evidence.stderr.includes("org.freedesktop.UPower"));
+    assert.equal(evidence.identity.wrapperSHA256.length, 64);
+    if (mode === "two-samples") {
+      assert.equal(evidence.processSamples.length, 2);
+      assert.ok(evidence.clockTicksPerSecond > 0);
+      for (const record of evidence.processSamples) {
+        assert.equal(record.outcome, "ok");
+        assert.equal(record.samplerReaped, true);
+        assert.ok(record.processes.length > 0);
+        for (const row of record.processes) {
+          assert.equal(row.uid, process.getuid());
+          assert.equal(row.pgid, row.sid);
+          assert.ok(row.startTicks > 0);
+          assert.ok(Number.isInteger(row.minorFaults) && Number.isInteger(row.majorFaults));
+        }
+      }
+    }
+    assert.doesNotMatch(line, /fixture-secret|private-dom-token|sensitive|cmdline|environ/);
+    const owned = (await readFile(pids, "utf8")).trim().split(/\s+/).map(Number);
+    for (const pid of owned) {
+      // macOS may briefly retain an orphan zombie after group termination.
+      const probe = spawnSync("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8" });
+      assert.ok(probe.status !== 0 || probe.stdout.trim().startsWith("Z"), `owned browser process ${pid} survived: ${probe.stdout}`);
+    }
+  });
+}
+
+test("publisher checks the builder profile in every Linux lifecycle phase", async (t) => {
+  for (const phase of ["source", "candidate", "promoted"]) {
+    await t.test(phase, async (subtest) => {
+      const fake = await setupFakeCrabbox();
+      subtest.after(() => rm(fake.dir, { recursive: true, force: true }));
+      const result = await runScript(["--target", "linux", "--run", "--prep-script", fake.linuxPrep], {
+        CRABBOX_BIN: fake.fake,
+        CRABBOX_FAKE_LOG: fake.log,
+        CRABBOX_IMAGE_LOG_DIR: path.join(fake.dir, "logs"),
+        CRABBOX_FAKE_READINESS_FAIL_LEASE: `cbx_${phase}`,
+      });
+      assert.equal(result.code, 74, result.stderr);
+      const log = await readFile(fake.log, "utf8");
+      assert.match(log, new RegExp(`stop --provider aws --target linux cbx_${phase}`));
+      if (phase === "source") assert.doesNotMatch(log, /checkpoint create/);
+      if (phase === "candidate") assert.doesNotMatch(log, /image promote/);
+      if (phase === "promoted") assert.match(log, /image promote .*--restore-receipt/);
+    });
+  }
+});
+
+test("publisher carries disabled Linux capability flags into every smoke", async (t) => {
+  const fake = await setupFakeCrabbox();
+  t.after(() => rm(fake.dir, { recursive: true, force: true }));
+  const result = await runScript(["--target", "linux", "--run", "--no-browser", "--no-desktop", "--prep-script", fake.linuxPrep], {
+    CRABBOX_BIN: fake.fake,
+    CRABBOX_FAKE_LOG: fake.log,
+    CRABBOX_IMAGE_LOG_DIR: path.join(fake.dir, "logs"),
+  });
+  assert.equal(result.code, 0, result.stderr);
+  const log = await readFile(fake.log, "utf8");
+  assert.equal((log.match(/export CRABBOX_LINUX_DESKTOP_TOOLS=0 CRABBOX_LINUX_BROWSER=0/g) ?? []).length, 3);
 });
 
 test("AWS devtools mint wrapper maps windows flags", async () => {
@@ -1271,6 +2085,7 @@ test("AWS devtools mint wrapper maps windows flags", async () => {
   assert.match(log, /--windows-mode normal/);
   assert.doesNotMatch(log, /--desktop/);
   assert.doesNotMatch(log, /--browser/);
+  assert.doesNotMatch(log, /--capture-stdout|pnpm preparation requires a nonroot user/);
   assert.doesNotMatch(log, /warmup .*--region us-east-1/);
   assert.doesNotMatch(log, /--os /);
   assert.match(
@@ -1594,6 +2409,8 @@ for (const failure of [
   "Node archive probe rendering",
   "Go archive probe rendering",
   "Bun archive probe rendering",
+  "Rust archive probe rendering",
+  "uv archive probe rendering",
 ]) {
   test(`AWS mint stops before capture when ${failure} fails`, async (t) => {
     const fake = await measuredFixture(t);
@@ -1607,6 +2424,10 @@ for (const failure of [
         "Go archive probe rendering": "go_smoke_script() { echo partial-go-probe; return 48; }",
         "Bun archive probe rendering":
           "bun_smoke_script() { echo partial-bun-probe; return 49; }",
+        "Rust archive probe rendering":
+          "rust_smoke_script() { echo partial-rust-probe; return 50; }",
+        "uv archive probe rendering":
+          "uv_smoke_script() { echo partial-uv-probe; return 51; }",
       }[failure];
       await writeFile(
         installer,
@@ -1619,13 +2440,15 @@ for (const failure of [
       "Node archive probe rendering": 47,
       "Go archive probe rendering": 48,
       "Bun archive probe rendering": 49,
+      "Rust archive probe rendering": 50,
+      "uv archive probe rendering": 51,
     }[failure];
     assert.equal(result.code, expected, result.stderr);
     const log = await readFile(fake.log, "utf8");
     assert.match(log, /stop --provider aws --target linux cbx_source/);
     assert.doesNotMatch(
       log,
-      /checkpoint create|image promote|docker_probe=|partial-(?:node|go|bun)-probe/,
+      /checkpoint create|image promote|docker_probe=|partial-(?:node|go|bun|rust|uv)-probe/,
     );
   });
 }

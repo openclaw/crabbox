@@ -3064,7 +3064,8 @@ def seed():
     if not owned(home, True) or not owned(runner, True) or not owned(runner / ".runner"):
         skip("nonowned runner configuration")
         return
-    with (runner / ".runner").open() as configuration:
+    # Runner's IOUtil.SaveObject writes UTF-8 with a BOM.
+    with (runner / ".runner").open(encoding="utf-8-sig") as configuration:
         fcntl.flock(configuration, fcntl.LOCK_EX | fcntl.LOCK_NB)
         settings = json.load(configuration)
         if not isinstance(settings, dict):
@@ -3099,8 +3100,8 @@ def seed():
         slots = (
             ("node", "24.19.0", "node-v24.19.0-linux-x64.tar.xz",
              "14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647"),
-            ("go", "1.27.0", "go1.27.0.linux-amd64.tar.gz",
-             "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685"),
+            ("go", "1.27.1", "go1.27.1.linux-amd64.tar.gz",
+             "63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445"),
         )
         for tool, version, filename, pin in slots:
             source = image / tool / version / "x64"
@@ -3160,6 +3161,7 @@ func githubActionsRunnerInstallScript(version string, ephemeral bool) string {
 		ephemeralArg = "--ephemeral"
 	}
 	return fmt.Sprintf(`set -euo pipefail
+umask 077
 if [ -z "${RUNNER_REPO:-}" ] || [ -z "${RUNNER_NAME:-}" ] || [ -z "${RUNNER_TOKEN:-}" ]; then
   echo "missing runner env" >&2
   exit 2

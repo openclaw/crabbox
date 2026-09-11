@@ -796,14 +796,20 @@ smoke_script() {
         CRABBOX_LINUX_NODE_MAJOR="$linux_node_major" \
           bash -c 'source "$1"; node_pnpm_smoke_script' _ "$ROOT/scripts/install-linux-developer-tools.sh"
       )" || return $?
-      local go_archive_probe bun_archive_probe
+      local go_archive_probe bun_archive_probe rust_archive_probe uv_archive_probe
       go_archive_probe="$(
         bash -c 'source "$1"; go_smoke_script' _ "$ROOT/scripts/install-linux-developer-tools.sh"
       )" || return $?
       bun_archive_probe="$(
         bash -c 'source "$1"; bun_smoke_script' _ "$ROOT/scripts/install-linux-developer-tools.sh"
       )" || return $?
-      archive_probe+=$'\n'"$go_archive_probe"$'\n'"$bun_archive_probe"
+      rust_archive_probe="$(
+        bash -c 'source "$1"; rust_smoke_script' _ "$ROOT/scripts/install-linux-developer-tools.sh"
+      )" || return $?
+      uv_archive_probe="$(
+        bash -c 'source "$1"; uv_smoke_script' _ "$ROOT/scripts/install-linux-developer-tools.sh"
+      )" || return $?
+      archive_probe+=$'\n'"$go_archive_probe"$'\n'"$bun_archive_probe"$'\n'"$rust_archive_probe"$'\n'"$uv_archive_probe"
     fi
     printf -v smoke_script_value 'set -euo pipefail\nexpected_node_major=%q\nexpected_pnpm_version=%q\ndeveloper_archive_probe() {\n%s\n}\n%s' \
       "$expected_node_major" "$linux_pnpm_default" "$archive_probe" "$smoke_script_value"
@@ -812,7 +818,13 @@ smoke_script() {
 
 smoke() {
   local lease="$1"
+  verify_linux_image_readiness "$lease"
   smoke_script || return $?
+  if [[ "$target" == "linux" ]]; then
+    local flags
+    printf -v flags 'export CRABBOX_LINUX_DESKTOP_TOOLS=%q CRABBOX_LINUX_BROWSER=%q\n' "$desktop" "$browser"
+    smoke_script_value="$flags$smoke_script_value"
+  fi
   run_cmd "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync --shell -- "$smoke_script_value"
 }
 
@@ -892,7 +904,7 @@ verify_linux_image_readiness() {
   local lease="$1"
   [[ "$target" == "linux" ]] || return 0
   run_cmd "$CRABBOX_BIN" run --provider aws --target linux --id "$lease" --no-sync \
-    --shell -- /usr/local/libexec/crabbox/linux-readiness.generated.sh
+    --script "$ROOT/scripts/linux-readiness.generated.sh" -- --verify linux-builder
 }
 
 windows_reboot_required() {
@@ -981,7 +993,6 @@ source_lease="$(warmup source)"
 stage_linux_readiness_producer "$source_lease"
 run_prep "$source_lease"
 reboot_windows_source_if_needed "$source_lease"
-verify_linux_image_readiness "$source_lease"
 smoke "$source_lease"
 
 image_env=(env)

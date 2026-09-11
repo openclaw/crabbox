@@ -89,6 +89,19 @@ temporary directory on success or failure. Cold bootstrap installs and claims
 only `linux-minimal`; an image producer claims `linux-builder` only after every
 minimal and builder probe passes.
 
+The standalone script also supports `--verify linux-minimal` and
+`--verify linux-builder`. Verification requires the exact requested profile and
+validates manifest trust and canonical bytes before running probes. It does not
+escalate privileges, install packages, rewrite evidence, or downgrade the profile.
+Developer-image preparation and publication require `linux-builder`.
+
+Scratch containment preserves the original v1 probe bytes and builder manifest
+digest. Existing valid builder images and newly produced manifests therefore
+retain the same canonical-byte contract across older and newer CLI/coordinator
+consumers; each consumer still runs its own probes. This does not add `--verify`
+to older installed scripts. Preparation and publication must use the updated
+standalone script from the same trusted source as the installer and publisher.
+
 Bootstrap skips baseline APT only when the exact canonical manifest bytes,
 root-owned non-symlink path, root group, `0644` file mode, bounded file size,
 non-writable parent directories, and every declared profile probe are verified.

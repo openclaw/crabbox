@@ -382,7 +382,8 @@ scripts/mint-aws-devtools-image.sh \
 ### What the prep scripts install
 
 - **Linux** (`scripts/install-linux-developer-tools.sh`): common CLI/build
-  tooling, GitHub CLI, Node 24.19.0, Go 1.27.0, and Bun 1.4.0 on x86_64,
+  tooling, GitHub CLI, Node 24.19.0, Go 1.27.1, Bun 1.4.0, Rust 1.97.1
+  with Rustup 1.29.0, and uv/uvx 0.12.11 on x86_64,
   corepack/pnpm, TruffleHog 3.95.9, Chrome or
   Chromium for browser lanes, desktop/VNC helpers, Docker Engine, Compose,
   buildx, and a small default Docker image set. TruffleHog archives are pinned
@@ -398,6 +399,14 @@ scripts/mint-aws-devtools-image.sh \
   `python3-venv`). The standalone generated readiness producer verifies every
   functional probe, including creating and checking a disposable pip-enabled
   virtual environment, before atomically emitting the strongest supported profile.
+  Developer-image preparation then requires `linux-builder` verification before
+  cloud-init cleanup. A missing builder capability stops preparation.
+  Full images also include CMake/Ninja, Autoconf/Automake, gawk, NASM/Yasm,
+  bat (`batcat` on Debian/Ubuntu), direnv, zoxide, SQLite, distro Python
+  build/setuptools/wheel, and native GTK/WebKit/AppIndicator, SVG, TLS, X11
+  automation and media development libraries. A nonroot C++ CMake/Ninja
+  compile/link/run probe checks those headers and libraries without fetching
+  project dependencies. This does not change the generic builder-v1 manifest.
 - **Managed WSL2 distro bootstrap**: the Linux installer's `--node-only` entrypoint
   provides the same Node/npm baseline (checksum-pinned Node 24.19.0 on amd64).
   It skips image-only Docker, Go, browser/desktop setup, pnpm activation, and the
@@ -469,11 +478,15 @@ Public archives are retained under `/opt/crabbox/toolchain-archives`:
 | `pnpm-11.22.0.tgz` | pnpm 11.22.0 |
 | `pnpm-12.3.4.tgz` | pnpm 12.3.4 JavaScript wrapper |
 | `exe.linux-x64-12.3.4.tgz` | pnpm 12.3.4 native executable for glibc Linux x64 |
-| `go1.27.0.linux-amd64.tar.gz` | Complete Go 1.27.0 distribution |
+| `go1.27.1.linux-amd64.tar.gz` | Complete Go 1.27.1 distribution |
 | `bun-v1.4.0-linux-x64-baseline.zip` | Original Bun 1.4.0 baseline Linux glibc ZIP |
 | `bun-v1.4.0-linux-x64.zip` | Original Bun 1.4.0 optimized Linux glibc ZIP |
+| `uv-0.12.11-x86_64-unknown-linux-gnu.tar.gz` | Original uv/uvx Linux archive |
+| `channel-rust-1.97.1.toml` | Unchanged pinned Rust distribution manifest |
+| `rustup-init-1.29.0-x86_64-unknown-linux-gnu` | Pinned upstream Rustup initializer |
+| `{rustc,cargo,rust-std,rustfmt}-1.97.1-x86_64-unknown-linux-gnu.tar.xz` | Pinned Rust distribution components |
 
-The SHA-256 Node/Go/Bun pins and SHA-512 pnpm pins live in the installer's
+The SHA-256 Node/Go/Bun/Rust/uv pins and SHA-512 pnpm pins live in the installer's
 `toolchain_archive_spec`. Consumers must carry independently reviewed pins,
 copy archives into private staging, validate those exact bytes, and extract
 fresh trees. Do not authenticate a cached installation by running `--version`,
@@ -490,6 +503,13 @@ installer's pnpm default of 11.1.0. Existing `CRABBOX_LINUX_PNPM_VERSION` and
 `CRABBOX_LINUX_NODE_MAJOR` overrides remain supported. Other Node majors and
 the existing ARM installer route retain the fingerprint-checked NodeSource
 path; this recipe does not add an ARM image.
+
+The privileged installer prepares pnpm in root's Corepack home. Failed activation
+stops it before readiness and fast-boot preparation; it does not configure
+arbitrary runtime accounts. The bundled publisher then activates the same
+selector as the actual lease user and captures its resolved default, as described
+under [Wrapper behavior](#wrapper-behavior). Rust retains its separate nonroot
+Bash-account requirement.
 
 For a nondefault Node major, the installer selects an exact native-architecture
 version from that major's fingerprint-checked NodeSource repository. An explicit
@@ -509,16 +529,16 @@ this does not add packaging for newer Node majors.
 The mint wrapper applies this archive contract only when its selected prep
 script is the bundled Linux builder. It forwards the existing
 `CRABBOX_LINUX_NODE_MAJOR` and `CRABBOX_LINUX_PNPM_VERSION` overrides to that
-builder and freezes the same Node-major declaration into each smoke. The smoke
+builder and freezes the Node major and resolved pnpm default into each smoke. The smoke
 checks the guest's Debian package architecture, not the mint host's architecture.
-Only Node major 24 on guest `amd64` requires the Node/pnpm archives. Go and Bun
+Only Node major 24 on guest `amd64` requires the Node/pnpm archives. Go, Bun, Rust and uv
 have independent Linux `amd64` contracts, including when the Node major is
 overridden. Bun additionally requires glibc. ARM guests and custom prep scripts
 retain the existing normal-tool smoke; their success does not qualify the
 x86_64 archive recipe. Missing or corrupt archives cannot disable any required
 probe for the supported builder.
 
-Go 1.27.0 installs at `/opt/hostedtoolcache/go/1.27.0/x64`, with image-owned
+Go 1.27.1 installs at `/opt/hostedtoolcache/go/1.27.1/x64`, with image-owned
 `/usr/local/bin/go` and `gofmt` links. The installer authenticates a private
 archive copy and freshly extracts the entire distribution; it never executes
 an existing same-version tree to establish trust. The sibling `x64.complete`
@@ -526,15 +546,57 @@ marker is written last, after version/architecture, standard-library tests and
 a CGO compile/link/run assertion pass. Source, candidate and promoted smokes
 repeat those functional checks as nonroot from a new private extraction with
 fresh writable build/module caches, `GOPROXY=off` and `GOTOOLCHAIN=local`.
-Go 1.27.1 or another version does not satisfy the exact 1.27.0 cache slot.
+Go 1.27.0 or another version does not satisfy the exact 1.27.1 cache slot.
 
 Before cache or network preparation, and again before changing the Go slot or
 marker, both public `go` and `gofmt` paths must be absent or exact same-name
-absolute symlinks into the Go 1.27.0 x64 slot. Matching dangling links are
-allowed. Files, directories and other targets require operator resolution
+absolute symlinks into the Go 1.27.1 x64 slot, or the explicitly migrated
+1.27.0 slot. Matching dangling links and interrupted mixed old/new pairs are
+allowed. Both aliases are checked before mutation, and the new compiler is
+validated before publication. Old cached trees and archives remain intact;
+only the two exact old managed aliases are retired. Files, directories and other targets require operator resolution
 before rebaking; a conflict preserves the existing tree, marker and aliases.
 Publication uses the same private temporary-symlink replacement as Node,
 without treating the pair as one atomic transaction.
+
+Rust uses upstream Rustup with user-owned `~/.cargo` and `~/.rustup`, not
+system-wide links into a writable user's installation. Run the full installer
+from the intended Bash runtime account, using its normal sudo escalation.
+Direct-root container entrypoints reuse their existing `CRABBOX_SSH_USER`
+account declaration. A root invocation without a declared nonroot account
+fails; the bootstrap `--node-only` entrypoint remains unchanged.
+
+The authenticated seed at `/opt/crabbox/rust/1.97.1` serves the unchanged pinned
+manifest as `dist/channel-rust-stable.toml` and its dated component archives.
+The initializer and subsequent toolchain commands run after dropping privilege,
+using a clean environment and a command-scoped `file://` distribution server.
+No mirror override is persisted. Upstream configures normal shell PATH;
+owned regular startup files are preserved apart from upstream's Cargo source
+line. Symlinked, foreign-owned or writable-by-others startup paths are rejected.
+An existing Zsh `ZDOTDIR` must resolve inside the runtime home; it is checked
+as that user before upstream initialization.
+Unknown or interrupted Cargo/Rustup state is retained and fails visibly.
+A complete recipe-owned installation can be verified again using root-owned
+provenance at `/opt/crabbox/rust/runtime-user.json`, without reinstalling it.
+
+Every publication phase verifies normal user PATH and default plus `+stable`
+Rust execution, rustfmt, and a dependency-free locked Cargo check/test/run and
+local offline install with an empty disposable dependency cache.
+`RUSTUP_AUTO_INSTALL=0` is scoped to these checks: missing baked toolchains
+cannot hydrate during verification, while ordinary later repository-specific
+toolchain hydration remains available. Frozen native qualification must also
+prove fresh initialization from the public seed with network access denied.
+
+uv and uvx use root-owned versioned binaries and the existing public-alias
+conflict guard. Their smoke builds a tiny wheel with the distro's
+`python3 -m build --wheel --no-isolation`, then checks both normal PATH and a
+fresh authenticated uv extraction. Isolated homes/caches, explicit system
+Python, and `--offline --no-config --no-python-downloads` cover local wheel
+installation and uvx console execution. No repository dependencies or extra
+Python interpreter downloads are baked. Publisher-owned pnpm activation may
+download the selected release. In the bundled publisher, ordinary-default checks
+and named archive probes run offline; this does not make the entire preparation
+workflow network-free.
 
 The bundled builder retains both Bun 1.4.0 x64 ZIPs on glibc Linux `amd64`,
 independently of the Node-major override. Their versioned cache filenames do
@@ -577,7 +639,7 @@ executes a local binary with `--no-install`. A missing cache fails this offline
 proof even though installation supports a pinned download fallback.
 
 Native GitHub runner registration seeds only `node/24.19.0/x64` and
-`go/1.27.0/x64` after configuration and before service start. It reads the
+`go/1.27.1/x64` after configuration and before service start. It reads the
 actual `.runner` work folder and `.env` values, including the precedence of
 `RUNNER_TOOL_CACHE`, `RUNNER_TOOLSDIRECTORY`, `AGENT_TOOLSDIRECTORY` and
 `agent.ToolsDirectory`. Literal `.env` values are not evaluated as shell code.
@@ -599,7 +661,7 @@ tools root and existing Go-on-PATH validation; its shim is not an upstream
 `setup-go` execution.
 
 Qualification must exercise the real pinned `setup-go` action with exact
-`go-version: 1.27.0`, `check-latest: false`, dependency `cache: false` and no
+`go-version: 1.27.1`, `check-latest: false`, dependency `cache: false` and no
 custom download URL, verifying an offline toolchain hit and the native Runner's
 effective cache root. Fixture tests do not replace that Linux proof or imply
 ARM support, another Ubuntu release's ABI, or successful image publication.
@@ -637,18 +699,61 @@ warmup prints its exact `log=` path. Candidate proof requires
 `source=explicit`; final proof requires `source=promoted` with the exact AMI ID
 created by the run. For Linux, the wrapper stages
 `scripts/linux-readiness.generated.sh` before preparation, the installer invokes
-that standalone producer after installing its packages, and the wrapper reruns
-the producer before any image capture. This proves the canonical, root-owned
-`/var/lib/crabbox-readiness/linux.json` manifest and emits the legacy
-`/var/lib/crabbox/image-ready` marker only after all profile probes pass. A
-missing builder capability downgrades the manifest to `linux-minimal`; a missing
-minimal capability stops preparation before AMI capture. The authoritative
-readiness directory is root-owned even when `/var/lib/crabbox` belongs to the
-runtime user; the marker is only a backwards-compatibility hint, written through
-a safe same-filesystem rename and verified before capture. Later managed Linux
-boots independently rerun the declared probes under a sanitized system PATH
-before skipping baseline APT. Use the timing logs to compare provider request,
-network readiness, bootstrap, and end-to-end time before and after each bake.
+that producer after installing its packages, and preparation requires
+`--verify linux-builder` before cloud-init cleanup.
+
+Every Linux source, candidate, and promoted smoke runs the verifier from the
+wrapper's trusted source tree, not the copy installed in the image.
+Verification rejects untrusted paths, noncanonical manifest bytes, and the wrong
+profile before running capability probes. It does not install packages, repair
+evidence, downgrade the profile, or write the manifest or compatibility marker.
+Generic bootstrap still accepts verified `linux-minimal` images and retains its
+normal fallback behavior.
+
+The builder-probe subshell owns and cleans a private `TMPDIR` before Python
+starts, without changing the frozen v1 probe bytes or manifest digest. Old and
+new CLI/coordinator consumers retain the same manifest contract. Verifier
+availability is separate: stage the updated standalone script before preparing
+an image; an older installed producer does not gain `--verify` from its manifest.
+
+The Linux smoke runs as the runtime user. It compiles and executes a small C
+program, checks Python SSL and SQLite, runs Node package scripts offline, and
+tests shared-cache writes. Docker checks use the prebaked images without pulls
+or container networking, exercise Compose, and build a small offline image.
+The smoke refreshes Docker group membership when necessary without running the
+whole script as root. Enabled browser and desktop checks render local HTML and
+capture the active display. When both are enabled, the smoke verifies pixels
+from its own browser window on that display. Cleanup stops only that browser
+and removes disposable files, containers, and the test image on success or failure.
+Browser execution remains a single invocation with a 30-second limit and bounded
+forced termination. Before removing its temporary files, each browser probe
+records its command exit status and elapsed time, a capped static-fixture DOM excerpt,
+redacted stderr diagnostics, wrapper/package identity, and up to two retained
+`processSamples` at one and 25 seconds. Each sample records the sampler attempt's
+actual launch offset and launch-to-observation duration, outcome, and reap status;
+these are attempt windows, not measurements of individual kernel-read latency.
+Owned-process rows include
+PID/start identity, UID/process-group/session identity, CPU ticks with
+`SC_CLK_TCK`, memory, I/O, minor/major faults, and a bounded wait-channel name.
+Zero or unavailable wait channels remain unknown.
+All `/proc` reads run in one owned sampler child at a time with a 250 ms deadline:
+even a small `/proc/PID/io` read can wait on a kernel lock. Nonblocking collection
+and reaping keep that wait out of the browser timeout loop; an unreaped sampler
+is recorded, not reported as settled or replaced by another child. Missed samples
+are not retried. The complete UTF-8 evidence line stays below 8 KiB, including its
+prefix and newline, trimming stderr first and then balanced process-row tails
+while retaining both sample records and truncation counts. It does not dump
+arguments, environments, arbitrary DOM or raw stderr. Failed visible-render
+assertions relay this observation even when the browser exited zero. Diagnostic collection
+does not replace the original timeout, signal or command failure status.
+These diagnostics do not establish or repair the cause of a browser hang.
+
+Later managed Linux boots independently rerun the declared readiness probes
+before skipping baseline APT. A successful post-boot smoke proves current
+capabilities, not pristine image contents before bootstrap or project hydration.
+Keep scenario state out of the source image as described in
+[prebaked images](prebaked-images.md). Use the timing logs to compare provider
+request, network readiness, bootstrap, and end-to-end time before and after each bake.
 
 Linux source, candidate, and promoted smokes require a nonroot user. After
 successful bundled Linux preparation, the wrapper activates the selected pnpm
