@@ -97,12 +97,8 @@ func loadControllerRunnerConfigState(configPath, provider, workDir string) (Conf
 		}
 	}
 	for _, input := range inputs {
-		freestyleAPIURL := cfg.Freestyle.APIURL
 		if err := applyConfigFile(&cfg, input.path, input.trust); err != nil {
 			return Config{}, err
-		}
-		if !input.trust.trusted {
-			cfg.Freestyle.APIURL = freestyleAPIURL
 		}
 	}
 	if err := applyEnv(&cfg); err != nil {

@@ -523,14 +523,6 @@ type IsloConfig struct {
 	DiskGB         int
 }
 
-type FreestyleConfig struct {
-	APIKey   string
-	APIURL   string
-	Workdir  string
-	VCPUs    int
-	MemoryGB int
-}
-
 type TenkiConfig struct {
 	CLIPath   string
 	Endpoint  string
@@ -1043,12 +1035,8 @@ func loadConfigWithOverrides(coordinator, provider string) (Config, error) {
 	cfg := baseConfig()
 	for _, path := range configPaths() {
 		trust := classifyConfigPath(path)
-		freestyleAPIURL := cfg.Freestyle.APIURL
 		if err := applyConfigFile(&cfg, path, trust); err != nil {
 			return Config{}, err
-		}
-		if !trust.trusted {
-			cfg.Freestyle.APIURL = freestyleAPIURL
 		}
 	}
 	if err := applyEnv(&cfg); err != nil {
@@ -2191,11 +2179,8 @@ func baseConfig() Config {
 			MemoryMB: 4096,
 			DiskGB:   20,
 		},
-		Wandb: defaultWandbConfig(),
-		Freestyle: FreestyleConfig{
-			APIURL:  "https://api.freestyle.sh",
-			Workdir: "crabbox",
-		},
+		Wandb:     defaultWandbConfig(),
+		Freestyle: defaultFreestyleConfig(),
 		Tenki: TenkiConfig{
 			CLIPath:  "tenki",
 			WorkRoot: "/home/tenki/crabbox",
@@ -2700,13 +2685,6 @@ type fileCubeSandboxConfig struct {
 	ProxyNodeIP   string `yaml:"proxyNodeIp,omitempty"`
 	ProxyPortHTTP int    `yaml:"proxyPortHttp,omitempty"`
 	ProxyScheme   string `yaml:"proxyScheme,omitempty"`
-}
-
-type fileFreestyleConfig struct {
-	APIURL   string `yaml:"apiUrl,omitempty"`
-	Workdir  string `yaml:"workdir,omitempty"`
-	VCPUs    int    `yaml:"vcpus,omitempty"`
-	MemoryGB int    `yaml:"memoryGB,omitempty"`
 }
 
 type fileUnikraftCloudConfig struct {
@@ -4708,23 +4686,11 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.isloDiskGBExplicit = true
 		}
 	}
-	if file.Freestyle != nil {
-		if file.Freestyle.APIURL != "" {
-			cfg.Freestyle.APIURL = file.Freestyle.APIURL
-			// The canonical loader restores repository URL input after this layer.
-			recordConfigInput(cfg, "freestyle", inputSource, trusted)
-		}
-		if file.Freestyle.Workdir != "" {
-			cfg.Freestyle.Workdir = file.Freestyle.Workdir
-			recordConfigInput(cfg, "freestyle", inputSource, true)
-		}
-		if file.Freestyle.VCPUs > 0 {
-			cfg.Freestyle.VCPUs = file.Freestyle.VCPUs
-			recordConfigInput(cfg, "freestyle", inputSource, true)
-		}
-		if file.Freestyle.MemoryGB > 0 {
-			cfg.Freestyle.MemoryGB = file.Freestyle.MemoryGB
-			recordConfigInput(cfg, "freestyle", inputSource, true)
+	{
+		applied, err := cfg.Freestyle.applyFile(file.Freestyle, trusted)
+		recordConfigInput(cfg, "freestyle", inputSource, applied.InputAccepted)
+		if err != nil {
+			return err
 		}
 	}
 	if file.Tenki != nil {
@@ -6598,11 +6564,13 @@ func applyEnv(cfg *Config) error {
 			cfg.isloDiskGBExplicit = true
 		}
 	}
-	cfg.Freestyle.APIKey = configInputEnvString(cfg, "freestyle", cfg.Freestyle.APIKey, "CRABBOX_FREESTYLE_API_KEY", "FREESTYLE_API_KEY")
-	cfg.Freestyle.APIURL = configInputEnvString(cfg, "freestyle", cfg.Freestyle.APIURL, "CRABBOX_FREESTYLE_API_URL", "FREESTYLE_API_URL")
-	cfg.Freestyle.Workdir = configInputEnvString(cfg, "freestyle", cfg.Freestyle.Workdir, "CRABBOX_FREESTYLE_WORKDIR")
-	cfg.Freestyle.VCPUs = configInputEnvInt(cfg, "freestyle", cfg.Freestyle.VCPUs, "CRABBOX_FREESTYLE_VCPUS")
-	cfg.Freestyle.MemoryGB = configInputEnvInt(cfg, "freestyle", cfg.Freestyle.MemoryGB, "CRABBOX_FREESTYLE_MEMORY_GB")
+	{
+		applied, err := cfg.Freestyle.applyEnv()
+		recordConfigInput(cfg, "freestyle", configInputEnvironment, applied.InputAccepted)
+		if err != nil {
+			return err
+		}
+	}
 	cfg.Tenki.CLIPath = configInputEnvString(cfg, "tenki", cfg.Tenki.CLIPath, "CRABBOX_TENKI_CLI", "TENKI_CLI")
 	if value, ok := firstNonEmptyEnv("CRABBOX_TENKI_ENDPOINT", "TENKI_ENDPOINT"); ok {
 		cfg.Tenki.Endpoint = value

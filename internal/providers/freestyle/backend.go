@@ -49,44 +49,18 @@ const (
 
 var freestyleCleanupTimeout = 30 * time.Second
 
-type freestyleFlagValues struct {
-	APIURL   *string
-	Workdir  *string
-	VCPUs    *int
-	MemoryGB *int
-}
-
 func RegisterFreestyleProviderFlags(fs *flag.FlagSet, defaults Config) any {
-	return freestyleFlagValues{
-		APIURL:   fs.String("freestyle-api-url", defaults.Freestyle.APIURL, "Freestyle API URL"),
-		Workdir:  fs.String("freestyle-workdir", defaults.Freestyle.Workdir, "Freestyle sandbox workdir"),
-		VCPUs:    fs.Int("freestyle-vcpus", defaults.Freestyle.VCPUs, "Freestyle sandbox vCPUs (power of two; omit for plan default)"),
-		MemoryGB: fs.Int("freestyle-memory-gb", defaults.Freestyle.MemoryGB, "Freestyle sandbox memory in GiB (power of two; omit for plan default)"),
-	}
+	return core.RegisterFreestyleConfigFlags(fs, defaults.Freestyle)
 }
 
 func ApplyFreestyleProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(freestyleFlagValues)
+	v, ok := values.(core.FreestyleConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if core.FlagWasSet(fs, "freestyle-api-url") {
-		cfg.Freestyle.APIURL = *v.APIURL
-		core.RecordProviderFlagInputs(cfg, true, freestyleProvider)
-	}
-	if core.FlagWasSet(fs, "freestyle-workdir") {
-		cfg.Freestyle.Workdir = *v.Workdir
-		core.RecordProviderFlagInputs(cfg, true, freestyleProvider)
-	}
-	if core.FlagWasSet(fs, "freestyle-vcpus") {
-		cfg.Freestyle.VCPUs = *v.VCPUs
-		core.RecordProviderFlagInputs(cfg, true, freestyleProvider)
-	}
-	if core.FlagWasSet(fs, "freestyle-memory-gb") {
-		cfg.Freestyle.MemoryGB = *v.MemoryGB
-		core.RecordProviderFlagInputs(cfg, true, freestyleProvider)
-	}
-	return nil
+	applied, err := v.Apply(&cfg.Freestyle, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, freestyleProvider)
+	return err
 }
 
 func NewFreestyleBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {

@@ -158,7 +158,7 @@ func freestyleWorkspacePath(cfg Config) (string, error) {
 func freestyleRelativeWorkdir(cfg Config) (string, error) {
 	workdir := strings.TrimSpace(cfg.Freestyle.Workdir)
 	if workdir == "" {
-		workdir = "crabbox"
+		workdir = core.FreestyleConfigDefaultWorkdir
 	}
 	if strings.HasPrefix(workdir, "/") {
 		return "", exit(2, "freestyle workdir %q must be relative under /workspace", workdir)
