@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Show Phala settings in offline configuration text and JSON, preserving unset versus explicit attestation settings without invoking the provider CLI. [PR 2099](https://github.com/openclaw/crabbox/pull/2099). Thanks @steipete.
 - Distinguish explicit provider settings, generic inputs, and defaults in offline `config show` text and JSON; provider catalogs now describe possible authentication methods while clearly leaving authentication and live readiness unchecked. [PR 2090](https://github.com/openclaw/crabbox/pull/2090), [Issue 1465](https://github.com/openclaw/crabbox/issues/1465). Thanks @coygeek.
 - Validate sparse-checkout and skip-worktree sync scope before SSH lease work, explain how to materialize or exclude missing tracked files, and still rebuild the final manifest after acquisition. [PR 2097](https://github.com/openclaw/crabbox/pull/2097), [Issue 1567](https://github.com/openclaw/crabbox/issues/1567). Thanks @coygeek.
 - Daytona: let signal- or deadline-owned `stop` and its `release` alias wait for confirmed deletion without the 30-second automatic-cleanup cap; preserve the bounded fallback for non-cancelable job callers and existing run/watch cleanup and rollback budgets.

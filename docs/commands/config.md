@@ -58,6 +58,12 @@ the `environment` retain the canonical provider name and report selected=true. P
 `config show --provider <name>` reports `flag` because that command-scoped
 override wins the merge.
 
+Phala settings appear in the JSON `phala` section and the text `phala` line.
+Its `attest` value preserves the configured state: JSON `null` (text `default`)
+means no explicit override; `true` and `false` remain distinct. This is a
+configuration value, not evidence that remote attestation has run or passed.
+Inspection does not read Phala's stored credentials or invoke its CLI.
+
 ### Offline provider status
 
 JSON adds a `providerStatus` object with `schemaVersion: 1`, `kind: "offline"`,
