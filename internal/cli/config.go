@@ -364,25 +364,6 @@ type GitHubCodespacesConfig struct {
 	WorkRoot         string
 }
 
-// NebiusConfig is intentionally non-secret. Authentication stays in the
-// Nebius CLI profile store and is never accepted as Crabbox config or argv.
-type NebiusConfig struct {
-	CLI              string
-	Profile          string
-	ParentID         string
-	SubnetID         string
-	Platform         string
-	Preset           string
-	ImageFamily      string
-	DiskType         string
-	DiskSizeGiB      int
-	User             string
-	PublicIP         string
-	SecurityGroupIDs []string
-	ServiceAccountID string
-	RecoveryPolicy   string
-}
-
 type ActionsConfig struct {
 	Repo          string
 	Workflow      string
@@ -1415,33 +1396,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		return validateTargetConfig(*cfg)
 	}
 	if cfg.Provider == "nebius" {
-		if cfg.Nebius.CLI == "" {
-			cfg.Nebius.CLI = "nebius"
-		}
-		if cfg.Nebius.Platform == "" {
-			cfg.Nebius.Platform = "cpu-d3"
-		}
-		if cfg.Nebius.Preset == "" {
-			cfg.Nebius.Preset = "4vcpu-16gb"
-		}
-		if cfg.Nebius.ImageFamily == "" {
-			cfg.Nebius.ImageFamily = "ubuntu24.04-driverless"
-		}
-		if cfg.Nebius.DiskType == "" {
-			cfg.Nebius.DiskType = "network_ssd"
-		}
-		if cfg.Nebius.DiskSizeGiB == 0 {
-			cfg.Nebius.DiskSizeGiB = 50
-		}
-		if cfg.Nebius.User == "" {
-			cfg.Nebius.User = "crabbox"
-		}
-		if cfg.Nebius.PublicIP == "" {
-			cfg.Nebius.PublicIP = "dynamic"
-		}
-		if cfg.Nebius.RecoveryPolicy == "" {
-			cfg.Nebius.RecoveryPolicy = "fail"
-		}
+		cfg.Nebius = cfg.Nebius.WithRuntimeDefaults()
 		applyLinuxConnectionDefaults(cfg, cfg.Nebius.User, baseConfig().SSHPort)
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
@@ -2340,17 +2295,7 @@ func baseConfig() Config {
 			Target:        "container",
 			WorkRoot:      "/tmp/crabbox",
 		},
-		Nebius: NebiusConfig{
-			CLI:            "nebius",
-			Platform:       "cpu-d3",
-			Preset:         "4vcpu-16gb",
-			ImageFamily:    "ubuntu24.04-driverless",
-			DiskType:       "network_ssd",
-			DiskSizeGiB:    50,
-			User:           "crabbox",
-			PublicIP:       "dynamic",
-			RecoveryPolicy: "fail",
-		},
+		Nebius: (NebiusConfig{}).WithRuntimeDefaults(),
 		Hostinger: HostingerConfig{
 			APIURL:         "https://developers.hostinger.com",
 			HostnamePrefix: "crabbox",
@@ -2674,23 +2619,6 @@ type fileGitHubCodespacesConfig struct {
 	RetentionPeriod  string `yaml:"retentionPeriod,omitempty"`
 	DeleteOnRelease  *bool  `yaml:"deleteOnRelease,omitempty"`
 	WorkRoot         string `yaml:"workRoot,omitempty"`
-}
-
-type fileNebiusConfig struct {
-	CLI              string   `yaml:"cli,omitempty"`
-	Profile          string   `yaml:"profile,omitempty"`
-	ParentID         string   `yaml:"parentId,omitempty"`
-	SubnetID         string   `yaml:"subnetId,omitempty"`
-	Platform         string   `yaml:"platform,omitempty"`
-	Preset           string   `yaml:"preset,omitempty"`
-	ImageFamily      string   `yaml:"imageFamily,omitempty"`
-	DiskType         string   `yaml:"diskType,omitempty"`
-	DiskSizeGiB      int      `yaml:"diskSizeGiB,omitempty"`
-	User             string   `yaml:"user,omitempty"`
-	PublicIP         string   `yaml:"publicIP,omitempty"`
-	SecurityGroupIDs []string `yaml:"securityGroupIds,omitempty"`
-	ServiceAccountID string   `yaml:"serviceAccountId,omitempty"`
-	RecoveryPolicy   string   `yaml:"recoveryPolicy,omitempty"`
 }
 
 type fileAWSConfig struct {
@@ -3973,62 +3901,11 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.lambdaImageFamilyExplicit = true
 		}
 	}
-	if file.Nebius != nil {
-		if trusted && file.Nebius.CLI != "" {
-			cfg.Nebius.CLI = file.Nebius.CLI
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if trusted && file.Nebius.Profile != "" {
-			cfg.Nebius.Profile = file.Nebius.Profile
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if file.Nebius.ParentID != "" {
-			cfg.Nebius.ParentID = file.Nebius.ParentID
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if file.Nebius.SubnetID != "" {
-			cfg.Nebius.SubnetID = file.Nebius.SubnetID
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if file.Nebius.Platform != "" {
-			cfg.Nebius.Platform = file.Nebius.Platform
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if file.Nebius.Preset != "" {
-			cfg.Nebius.Preset = file.Nebius.Preset
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if file.Nebius.ImageFamily != "" {
-			cfg.Nebius.ImageFamily = file.Nebius.ImageFamily
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if file.Nebius.DiskType != "" {
-			cfg.Nebius.DiskType = file.Nebius.DiskType
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if file.Nebius.DiskSizeGiB > 0 {
-			cfg.Nebius.DiskSizeGiB = file.Nebius.DiskSizeGiB
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if file.Nebius.User != "" {
-			cfg.Nebius.User = file.Nebius.User
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if file.Nebius.PublicIP != "" {
-			cfg.Nebius.PublicIP = file.Nebius.PublicIP
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if len(file.Nebius.SecurityGroupIDs) > 0 {
-			cfg.Nebius.SecurityGroupIDs = file.Nebius.SecurityGroupIDs
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if trusted && file.Nebius.ServiceAccountID != "" {
-			cfg.Nebius.ServiceAccountID = file.Nebius.ServiceAccountID
-			recordConfigInput(cfg, "nebius", inputSource, true)
-		}
-		if file.Nebius.RecoveryPolicy != "" {
-			cfg.Nebius.RecoveryPolicy = file.Nebius.RecoveryPolicy
-			recordConfigInput(cfg, "nebius", inputSource, true)
+	{
+		applied, err := cfg.Nebius.applyFile(file.Nebius, trusted)
+		recordConfigInput(cfg, "nebius", inputSource, applied.InputAccepted)
+		if err != nil {
+			return err
 		}
 	}
 	{
@@ -6612,23 +6489,13 @@ func applyEnv(cfg *Config) error {
 			cfg.lambdaImageFamilyExplicit = true
 		}
 	}
-	cfg.Nebius.CLI = configInputEnvString(cfg, "nebius", cfg.Nebius.CLI, "CRABBOX_NEBIUS_CLI")
-	cfg.Nebius.Profile = configInputEnvString(cfg, "nebius", cfg.Nebius.Profile, "CRABBOX_NEBIUS_PROFILE")
-	cfg.Nebius.ParentID = configInputEnvString(cfg, "nebius", cfg.Nebius.ParentID, "CRABBOX_NEBIUS_PARENT_ID")
-	cfg.Nebius.SubnetID = configInputEnvString(cfg, "nebius", cfg.Nebius.SubnetID, "CRABBOX_NEBIUS_SUBNET_ID")
-	cfg.Nebius.Platform = configInputEnvString(cfg, "nebius", cfg.Nebius.Platform, "CRABBOX_NEBIUS_PLATFORM")
-	cfg.Nebius.Preset = configInputEnvString(cfg, "nebius", cfg.Nebius.Preset, "CRABBOX_NEBIUS_PRESET")
-	cfg.Nebius.ImageFamily = configInputEnvString(cfg, "nebius", cfg.Nebius.ImageFamily, "CRABBOX_NEBIUS_IMAGE_FAMILY")
-	cfg.Nebius.DiskType = configInputEnvString(cfg, "nebius", cfg.Nebius.DiskType, "CRABBOX_NEBIUS_DISK_TYPE")
-	cfg.Nebius.DiskSizeGiB = configInputEnvInt(cfg, "nebius", cfg.Nebius.DiskSizeGiB, "CRABBOX_NEBIUS_DISK_SIZE_GIB")
-	cfg.Nebius.User = configInputEnvString(cfg, "nebius", cfg.Nebius.User, "CRABBOX_NEBIUS_USER")
-	cfg.Nebius.PublicIP = configInputEnvString(cfg, "nebius", cfg.Nebius.PublicIP, "CRABBOX_NEBIUS_PUBLIC_IP")
-	if groups := os.Getenv("CRABBOX_NEBIUS_SECURITY_GROUP_IDS"); groups != "" {
-		cfg.Nebius.SecurityGroupIDs = splitCommaList(groups)
-		recordConfigInput(cfg, "nebius", configInputEnvironment, true)
+	{
+		applied, err := cfg.Nebius.applyEnv()
+		recordConfigInput(cfg, "nebius", configInputEnvironment, applied.InputAccepted)
+		if err != nil {
+			return err
+		}
 	}
-	cfg.Nebius.ServiceAccountID = configInputEnvString(cfg, "nebius", cfg.Nebius.ServiceAccountID, "CRABBOX_NEBIUS_SERVICE_ACCOUNT_ID")
-	cfg.Nebius.RecoveryPolicy = configInputEnvString(cfg, "nebius", cfg.Nebius.RecoveryPolicy, "CRABBOX_NEBIUS_RECOVERY_POLICY")
 	{
 		applied, err := cfg.OVH.applyEnv()
 		recordConfigInput(cfg, "ovh", configInputEnvironment, applied.InputAccepted)
