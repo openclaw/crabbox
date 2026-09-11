@@ -97,6 +97,18 @@ Declared defaults must parse to a positive duration and produce typed constants;
 an omitted default remains zero. Arbitrary qualified types, alternate parsers,
 callbacks and additional file/environment duration policies are not supported.
 
+Blacksmith uses all six bindings together, with four string flags and two
+file/environment-only fields: a positive-overlay duration and a pointer-backed
+file boolean. These flagless fields retain zero defaults and do not introduce
+timeout or debug flags. Its four environment coordinates apply earlier than its
+timeout and debug settings. `envSplitBefore:"true"` on the timeout field preserves
+that boundary by generating `applyEnvPrefix` and `applyEnvSuffix` instead of a
+combined `applyEnv`. Both use the same field emitter and return ordinary applied
+reports; the loader records each report at its original position. An intervening
+error therefore cannot apply later fields early. At most one split is allowed,
+on an environment-admitted field with a nonempty environment prefix and suffix.
+The split adds no callbacks, normalization, or provider-specific generation.
+
 AWS Lambda MicroVM uses all seven bindings together. Its four string flags trim
 only accepted values; file/environment strings remain raw. The existing flat
 AWSRegion flag stays in the provider wrapper and applies before generated fields,
@@ -450,15 +462,18 @@ selection and native Container/Machine behavior remain outside this owner.
    primary `env`, allow an existing alias, and omit `config`, `flag`, `help`, and
    `default` tags entirely. This mode retains a zero default and exposes no YAML
    or command-line field; it does not generate credential presentation or policy.
-   An existing string or string list with file/environment input but no flag uses the exact
+   An existing string, string list, boolean, or positive-overlay duration with
+   file/environment input but no flag uses the exact
    `sources:"user,repo,env"` grant: require `config` and primary `env`, and omit
    `flag`, `help`, and `default` tags entirely. It retains a zero default and
    uses existing file predicates and applied reports without adding a flag or
    changing trust policy. This grant does not permit a file input on an
    environment-only field.
-   String lists are admitted only by this untrusted-file-capable no-flag grant,
-   with the same existing file/environment list rules; other no-flag grants remain
-   string-only. A schema with no flag-admitted fields emits no placeholder flag
+   String lists, booleans, and durations are admitted only by this untrusted-file-capable
+   no-flag grant, with their existing file/environment rules; other no-flag grants remain
+   string-only. Duration file storage stays a raw string, boolean file storage
+   stays a pointer, and neither gains a flag. A schema with no flag-admitted
+   fields emits no placeholder flag
    API or flag import. Mixed schemas retain their admitted flag bindings.
    A trusted-file/environment string without a flag uses the exact
    `sources:"user,env"` grant with the same absent flag/help/default requirement;

@@ -375,15 +375,6 @@ type ActionsConfig struct {
 	Ephemeral     bool
 }
 
-type BlacksmithConfig struct {
-	Org         string
-	Workflow    string
-	Job         string
-	Ref         string
-	IdleTimeout time.Duration
-	Debug       bool
-}
-
 type ExternalConfig struct {
 	Command                  string
 	Args                     []string
@@ -2285,8 +2276,9 @@ func baseConfig() Config {
 		UnikraftCloud: UnikraftCloudConfig{
 			Metro: "fra",
 		},
-		Runpod: defaultRunpodConfig(),
-		Vast:   defaultVastConfig(),
+		Runpod:     defaultRunpodConfig(),
+		Vast:       defaultVastConfig(),
+		Blacksmith: defaultBlacksmithConfig(),
 		NvidiaBrev: NvidiaBrevConfig{
 			CLI:           "brev",
 			GPUName:       "A100",
@@ -2829,15 +2821,6 @@ type fileActionsConfig struct {
 	RunnerLabels  []string `yaml:"runnerLabels,omitempty"`
 	RunnerVersion string   `yaml:"runnerVersion,omitempty"`
 	Ephemeral     *bool    `yaml:"ephemeral,omitempty"`
-}
-
-type fileBlacksmithConfig struct {
-	Org         string `yaml:"org,omitempty"`
-	Workflow    string `yaml:"workflow,omitempty"`
-	Job         string `yaml:"job,omitempty"`
-	Ref         string `yaml:"ref,omitempty"`
-	IdleTimeout string `yaml:"idleTimeout,omitempty"`
-	Debug       *bool  `yaml:"debug,omitempty"`
 }
 
 type fileExternalConfig struct {
@@ -4561,27 +4544,11 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Actions.Ephemeral, file.Actions.Ephemeral))
 	}
-	if file.Blacksmith != nil {
-		if file.Blacksmith.Org != "" {
-			cfg.Blacksmith.Org = file.Blacksmith.Org
-			recordConfigInput(cfg, "blacksmith-testbox", inputSource, true)
-		}
-		if file.Blacksmith.Workflow != "" {
-			cfg.Blacksmith.Workflow = file.Blacksmith.Workflow
-			recordConfigInput(cfg, "blacksmith-testbox", inputSource, true)
-		}
-		if file.Blacksmith.Job != "" {
-			cfg.Blacksmith.Job = file.Blacksmith.Job
-			recordConfigInput(cfg, "blacksmith-testbox", inputSource, true)
-		}
-		if file.Blacksmith.Ref != "" {
-			cfg.Blacksmith.Ref = file.Blacksmith.Ref
-			recordConfigInput(cfg, "blacksmith-testbox", inputSource, true)
-		}
-		recordConfigInput(cfg, "blacksmith-testbox", inputSource, applyLeaseDuration(&cfg.Blacksmith.IdleTimeout, file.Blacksmith.IdleTimeout))
-		if file.Blacksmith.Debug != nil {
-			applyOptional(&cfg.Blacksmith.Debug, file.Blacksmith.Debug)
-			recordConfigInput(cfg, "blacksmith-testbox", inputSource, true)
+	{
+		applied, err := cfg.Blacksmith.applyFile(file.Blacksmith)
+		recordConfigInput(cfg, "blacksmith-testbox", inputSource, applied.InputAccepted)
+		if err != nil {
+			return err
 		}
 	}
 	if err := applyKubeVirtFileConfig(cfg, file.KubeVirt, trusted, inputSource); err != nil {
@@ -6668,10 +6635,13 @@ func applyEnv(cfg *Config) error {
 	cfg.Actions.Ref = configInputEnvString(cfg, configInputGeneric, cfg.Actions.Ref, "CRABBOX_ACTIONS_REF")
 	cfg.Actions.Repo = configInputEnvString(cfg, configInputGeneric, cfg.Actions.Repo, "CRABBOX_ACTIONS_REPO")
 	cfg.Actions.RunnerVersion = configInputEnvString(cfg, configInputGeneric, cfg.Actions.RunnerVersion, "CRABBOX_ACTIONS_RUNNER_VERSION")
-	cfg.Blacksmith.Org = configInputEnvString(cfg, "blacksmith-testbox", cfg.Blacksmith.Org, "CRABBOX_BLACKSMITH_ORG")
-	cfg.Blacksmith.Workflow = configInputEnvString(cfg, "blacksmith-testbox", cfg.Blacksmith.Workflow, "CRABBOX_BLACKSMITH_WORKFLOW")
-	cfg.Blacksmith.Job = configInputEnvString(cfg, "blacksmith-testbox", cfg.Blacksmith.Job, "CRABBOX_BLACKSMITH_JOB")
-	cfg.Blacksmith.Ref = configInputEnvString(cfg, "blacksmith-testbox", cfg.Blacksmith.Ref, "CRABBOX_BLACKSMITH_REF")
+	{
+		applied, err := cfg.Blacksmith.applyEnvPrefix()
+		recordConfigInput(cfg, "blacksmith-testbox", configInputEnvironment, applied.InputAccepted)
+		if err != nil {
+			return err
+		}
+	}
 	{
 		applied, err := cfg.KubeVirt.applyEnv()
 		recordConfigInput(cfg, "kubevirt", configInputEnvironment, applied.InputAccepted)
@@ -7560,12 +7530,12 @@ func applyEnv(cfg *Config) error {
 	cfg.Static.User = configInputEnvString(cfg, "ssh", cfg.Static.User, "CRABBOX_STATIC_USER")
 	cfg.Static.Port = configInputEnvString(cfg, "ssh", cfg.Static.Port, "CRABBOX_STATIC_PORT")
 	cfg.Static.WorkRoot = configInputEnvString(cfg, "ssh", cfg.Static.WorkRoot, "CRABBOX_STATIC_WORK_ROOT")
-	if idleTimeout := os.Getenv("CRABBOX_BLACKSMITH_IDLE_TIMEOUT"); idleTimeout != "" {
-		recordConfigInput(cfg, "blacksmith-testbox", configInputEnvironment, applyLeaseDuration(&cfg.Blacksmith.IdleTimeout, idleTimeout))
-	}
-	if value, ok := getenvBool("CRABBOX_BLACKSMITH_DEBUG"); ok {
-		cfg.Blacksmith.Debug = value
-		recordConfigInput(cfg, "blacksmith-testbox", configInputEnvironment, true)
+	{
+		applied, err := cfg.Blacksmith.applyEnvSuffix()
+		recordConfigInput(cfg, "blacksmith-testbox", configInputEnvironment, applied.InputAccepted)
+		if err != nil {
+			return err
+		}
 	}
 	if labels := os.Getenv("CRABBOX_ACTIONS_RUNNER_LABELS"); labels != "" {
 		cfg.Actions.RunnerLabels = splitCommaList(labels)
