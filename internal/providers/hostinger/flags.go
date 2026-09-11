@@ -39,36 +39,46 @@ func ApplyHostingerProviderFlags(cfg *Config, fs *flag.FlagSet, values any) erro
 	}
 	if core.FlagWasSet(fs, "hostinger-url") {
 		cfg.Hostinger.APIURL = *v.APIURL
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "hostinger-item-id") {
 		cfg.Hostinger.ItemID = *v.ItemID
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "hostinger-payment-method-id") {
 		cfg.Hostinger.PaymentMethodID = *v.PaymentMethodID
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "hostinger-template-id") {
 		cfg.Hostinger.TemplateID = *v.TemplateID
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "hostinger-data-center-id") {
 		cfg.Hostinger.DataCenterID = *v.DataCenterID
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "hostinger-hostname-prefix") {
 		cfg.Hostinger.HostnamePrefix = *v.HostnamePrefix
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "hostinger-user") {
 		cfg.Hostinger.User = *v.User
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 		cfg.SSHUser = *v.User
 		markHostingerUserExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "hostinger-work-root") {
 		cfg.Hostinger.WorkRoot = *v.WorkRoot
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 		markHostingerWorkRootExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "hostinger-allow-purchase") {
 		cfg.Hostinger.AllowPurchase = *v.AllowPurchase
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "hostinger-release-action") {
 		cfg.Hostinger.ReleaseAction = *v.ReleaseAction
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if cfg.Provider == providerName {
 		applyDefaults(cfg)

@@ -52,24 +52,31 @@ func ApplyDaytonaProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error 
 	}
 	if core.FlagWasSet(fs, "daytona-api-url") {
 		cfg.Daytona.APIURL = *v.APIURL
+		core.RecordProviderFlagInputs(cfg, true, "daytona")
 	}
 	if core.FlagWasSet(fs, "daytona-snapshot") {
 		cfg.Daytona.Snapshot = *v.Snapshot
+		core.RecordProviderFlagInputs(cfg, true, "daytona")
 	}
 	if core.FlagWasSet(fs, "daytona-target") {
 		cfg.Daytona.Target = *v.Target
+		core.RecordProviderFlagInputs(cfg, true, "daytona")
 	}
 	if core.FlagWasSet(fs, "daytona-user") {
 		cfg.Daytona.User = *v.User
+		core.RecordProviderFlagInputs(cfg, true, "daytona")
 	}
 	if core.FlagWasSet(fs, "daytona-work-root") {
 		cfg.Daytona.WorkRoot = *v.WorkRoot
+		core.RecordProviderFlagInputs(cfg, true, "daytona")
 	}
 	if core.FlagWasSet(fs, "daytona-ssh-gateway-host") {
 		cfg.Daytona.SSHGatewayHost = *v.SSHGatewayHost
+		core.RecordProviderFlagInputs(cfg, true, "daytona")
 	}
 	if core.FlagWasSet(fs, "daytona-ssh-access-minutes") {
 		cfg.Daytona.SSHAccessMinutes = *v.SSHAccessMinutes
+		core.RecordProviderFlagInputs(cfg, true, "daytona")
 	}
 	return nil
 }

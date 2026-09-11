@@ -18,8 +18,9 @@ type NamespaceInstanceConfig struct {
 	Bare        bool          `config:"bare" env:"CRABBOX_NAMESPACE_INSTANCE_BARE" flag:"namespace-instance-bare" sources:"user,repo,env,flag" help:"disable Kubernetes for a smaller instance" default:"true"`
 }
 
-func applyNamespaceInstanceFileConfig(cfg *Config, file *fileNamespaceInstanceConfig, trusted bool) error {
+func applyNamespaceInstanceFileConfig(cfg *Config, file *fileNamespaceInstanceConfig, trusted bool, source configInputSource) error {
 	applied, err := cfg.NamespaceInstance.applyFile(file, trusted)
+	recordConfigInput(cfg, "namespace-instance", source, applied.InputAccepted)
 	// These independent overlays cannot fail or observe the accepted path before expansion.
 	if applied.CLIPath {
 		cfg.NamespaceInstance.CLIPath = expandUserPath(cfg.NamespaceInstance.CLIPath)

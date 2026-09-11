@@ -17,6 +17,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		return nil
 	}
 	applied, err := v.Apply(&cfg.Machine0, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
 	if applied.Size {
 		cfg.Machine0.SizeExplicit = true
 		cfg.ServerType = cfg.Machine0.Size

@@ -50,15 +50,19 @@ func registerBlacksmithFlags(fs *flag.FlagSet, defaults Config) blacksmithFlagVa
 func applyBlacksmithFlagOverrides(cfg *Config, fs *flag.FlagSet, values blacksmithFlagValues) {
 	if core.FlagWasSet(fs, "blacksmith-org") {
 		cfg.Blacksmith.Org = *values.Org
+		core.RecordProviderFlagInputs(cfg, true, "blacksmith-testbox")
 	}
 	if core.FlagWasSet(fs, "blacksmith-workflow") {
 		cfg.Blacksmith.Workflow = *values.Workflow
+		core.RecordProviderFlagInputs(cfg, true, "blacksmith-testbox")
 	}
 	if core.FlagWasSet(fs, "blacksmith-job") {
 		cfg.Blacksmith.Job = *values.Job
+		core.RecordProviderFlagInputs(cfg, true, "blacksmith-testbox")
 	}
 	if core.FlagWasSet(fs, "blacksmith-ref") {
 		cfg.Blacksmith.Ref = *values.Ref
+		core.RecordProviderFlagInputs(cfg, true, "blacksmith-testbox")
 	}
 }
 

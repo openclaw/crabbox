@@ -53,30 +53,39 @@ func ApplySuperserveProviderFlags(cfg *Config, fs *flag.FlagSet, values any) err
 	}
 	if core.FlagWasSet(fs, "superserve-base-url") {
 		cfg.Superserve.BaseURL = *v.BaseURL
+		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
 	if core.FlagWasSet(fs, "superserve-template") {
 		cfg.Superserve.Template = *v.Template
+		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
 	if core.FlagWasSet(fs, "superserve-snapshot") {
 		cfg.Superserve.Snapshot = *v.Snapshot
+		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
 	if core.FlagWasSet(fs, "superserve-workdir") {
 		cfg.Superserve.Workdir = *v.Workdir
+		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
 	if core.FlagWasSet(fs, "superserve-timeout-secs") {
 		cfg.Superserve.TimeoutSecs = *v.TimeoutSecs
+		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
 	if core.FlagWasSet(fs, "superserve-exec-timeout-secs") {
 		cfg.Superserve.ExecTimeoutSecs = *v.ExecTimeoutSecs
+		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
 	if core.FlagWasSet(fs, "superserve-network-allow-out") {
 		cfg.Superserve.NetworkAllowOut = splitSuperserveList(*v.NetworkAllowOut)
+		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
 	if core.FlagWasSet(fs, "superserve-network-deny-out") {
 		cfg.Superserve.NetworkDenyOut = splitSuperserveList(*v.NetworkDenyOut)
+		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
 	if core.FlagWasSet(fs, "superserve-forget-missing") {
 		cfg.Superserve.ForgetMissing = *v.ForgetMissing
+		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
 	return validateSuperserveConfig(*cfg)
 }

@@ -52,27 +52,35 @@ func ApplyCubeSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) er
 	}
 	if core.FlagWasSet(fs, "cubesandbox-api-url") {
 		cfg.CubeSandbox.APIURL = *v.APIURL
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
 	if core.FlagWasSet(fs, "cubesandbox-domain") {
 		cfg.CubeSandbox.Domain = *v.Domain
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
 	if core.FlagWasSet(fs, "cubesandbox-template") {
 		cfg.CubeSandbox.Template = *v.Template
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
 	if core.FlagWasSet(fs, "cubesandbox-workdir") {
 		cfg.CubeSandbox.Workdir = *v.Workdir
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
 	if core.FlagWasSet(fs, "cubesandbox-user") {
 		cfg.CubeSandbox.User = *v.User
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
 	if core.FlagWasSet(fs, "cubesandbox-proxy-node-ip") {
 		cfg.CubeSandbox.ProxyNodeIP = *v.ProxyNodeIP
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
 	if core.FlagWasSet(fs, "cubesandbox-proxy-port-http") {
 		cfg.CubeSandbox.ProxyPortHTTP = *v.ProxyPortHTTP
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
 	if core.FlagWasSet(fs, "cubesandbox-proxy-scheme") {
 		cfg.CubeSandbox.ProxyScheme = *v.ProxyScheme
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
 	return nil
 }

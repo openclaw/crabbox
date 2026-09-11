@@ -58,15 +58,19 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "incus-remote") {
 		cfg.Incus.Remote = *v.Remote
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "incus-project") {
 		cfg.Incus.Project = *v.Project
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "incus-address") {
 		cfg.Incus.Address = *v.Address
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "incus-socket") {
 		cfg.Incus.Socket = core.ExpandUserPath(*v.Socket)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "incus-instance-type") {
 		normalized := normalizeInstanceType(*v.InstanceType)
@@ -74,53 +78,67 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 			return core.Exit(2, "provider=%s: unsupported incus-instance-type %q (use container or vm)", providerName, *v.InstanceType)
 		}
 		cfg.Incus.InstanceType = normalized
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 		cfg.ServerType = core.IncusServerTypeForConfig(*cfg)
 	}
 	if core.FlagWasSet(fs, "incus-image") {
 		cfg.Incus.Image = strings.TrimSpace(*v.Image)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 		cfg.ServerType = core.IncusServerTypeForConfig(*cfg)
 	}
 	if core.FlagWasSet(fs, "incus-profile") {
 		cfg.Incus.Profile = *v.Profile
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "incus-user") {
 		cfg.Incus.User = *v.User
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 		cfg.SSHUser = *v.User
 	}
 	if core.FlagWasSet(fs, "incus-work-root") {
 		cfg.Incus.WorkRoot = *v.WorkRoot
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 		cfg.WorkRoot = *v.WorkRoot
 	}
 	if core.FlagWasSet(fs, "incus-delete-on-release") {
 		cfg.Incus.DeleteOnRelease = *v.DeleteOnRelease
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 		core.MarkDeleteOnReleaseExplicit(cfg, providerName)
 	}
 	if core.FlagWasSet(fs, "incus-start-timeout") {
 		if err := core.ApplyLeaseDuration(&cfg.Incus.StartTimeout, *v.StartTimeout); err != nil {
 			return err
 		}
+		core.RecordProviderFlagInputs(cfg, *v.StartTimeout != "", providerName)
 	}
 	if core.FlagWasSet(fs, "incus-launch-port") {
 		cfg.Incus.LaunchPort = *v.LaunchPort
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "incus-proxy-listen-host") {
 		cfg.Incus.ProxyListenHost = *v.ProxyListenHost
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "incus-proxy-listen-port") {
 		cfg.Incus.ProxyListenPort = *v.ProxyListenPort
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 		cfg.SSHPort = core.Blank(*v.ProxyListenPort, cfg.SSHPort)
 	}
 	if core.FlagWasSet(fs, "incus-proxy-device") {
 		cfg.Incus.ProxyDevice = *v.ProxyDevice
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "incus-tls-server-cert") {
 		cfg.Incus.TLSServerCert = core.ExpandUserPath(*v.TLSServerCert)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "incus-insecure-tls") {
 		cfg.Incus.InsecureTLS = *v.InsecureTLS
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "incus-remote-image-server") {
 		cfg.Incus.RemoteImageServer = *v.RemoteImageServer
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if isIncusProviderName(cfg.Provider) {
 		cfg.Provider = providerName

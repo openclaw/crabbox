@@ -22,8 +22,9 @@ func defaultFastAPICloudConfig() FastAPICloudConfig {
 
 // FastAPICloudConfigApplied records accepted assignments during one application.
 type FastAPICloudConfigApplied struct {
-	Token  bool
-	APIURL bool
+	InputAccepted bool
+	Token         bool
+	APIURL        bool
 }
 
 func (cfg *FastAPICloudConfig) applyFile(file *fileFastAPICloudConfig) (FastAPICloudConfigApplied, error) {
@@ -33,13 +34,16 @@ func (cfg *FastAPICloudConfig) applyFile(file *fileFastAPICloudConfig) (FastAPIC
 	}
 	if file.APIURL != "" {
 		cfg.APIURL = file.APIURL
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
 	if file.AppID != "" {
 		cfg.AppID = file.AppID
+		applied.InputAccepted = true
 	}
 	if file.TeamID != "" {
 		cfg.TeamID = file.TeamID
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }
@@ -48,14 +52,22 @@ func (cfg *FastAPICloudConfig) applyEnv() (FastAPICloudConfigApplied, error) {
 	var applied FastAPICloudConfigApplied
 	if value, ok := firstNonEmptyEnv("CRABBOX_FASTAPI_CLOUD_TOKEN", "FASTAPI_CLOUD_TOKEN"); ok {
 		cfg.Token = value
+		applied.InputAccepted = true
 		applied.Token = true
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_FASTAPI_CLOUD_API_URL", "FASTAPI_CLOUD_API_URL"); ok {
 		cfg.APIURL = value
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
-	cfg.AppID = getenv("CRABBOX_FASTAPI_CLOUD_APP_ID", getenv("FASTAPI_CLOUD_APP_ID", cfg.AppID))
-	cfg.TeamID = getenv("CRABBOX_FASTAPI_CLOUD_TEAM_ID", getenv("FASTAPI_CLOUD_TEAM_ID", cfg.TeamID))
+	if value, ok := firstNonEmptyEnv("CRABBOX_FASTAPI_CLOUD_APP_ID", "FASTAPI_CLOUD_APP_ID"); ok {
+		cfg.AppID = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_FASTAPI_CLOUD_TEAM_ID", "FASTAPI_CLOUD_TEAM_ID"); ok {
+		cfg.TeamID = value
+		applied.InputAccepted = true
+	}
 	return applied, nil
 }
 
@@ -88,18 +100,21 @@ func FastAPICloudConfigFlagPresence(fs *flag.FlagSet) FastAPICloudConfigVisitedF
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values FastAPICloudConfigFlagValues) Apply(cfg *FastAPICloudConfig, fs *flag.FlagSet) FastAPICloudConfigApplied {
+func (values FastAPICloudConfigFlagValues) Apply(cfg *FastAPICloudConfig, fs *flag.FlagSet) (FastAPICloudConfigApplied, error) {
 	var applied FastAPICloudConfigApplied
 	visited := FastAPICloudConfigFlagPresence(fs)
 	if visited.APIURL {
 		cfg.APIURL = *values.APIURL
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
 	if flagWasSet(fs, "fastapi-cloud-app-id") {
 		cfg.AppID = *values.AppID
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "fastapi-cloud-team-id") {
 		cfg.TeamID = *values.TeamID
+		applied.InputAccepted = true
 	}
-	return applied
+	return applied, nil
 }

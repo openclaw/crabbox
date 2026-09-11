@@ -77,33 +77,43 @@ func ApplyDockerSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) 
 	}
 	if core.FlagWasSet(fs, "docker-sandbox-cli") {
 		cfg.DockerSandbox.CLIPath = *v.CLIPath
+		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
 	}
 	if core.FlagWasSet(fs, "docker-sandbox-agent") {
 		cfg.DockerSandbox.Agent = *v.Agent
+		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
 	}
 	if core.FlagWasSet(fs, "docker-sandbox-template") {
 		cfg.DockerSandbox.Template = *v.Template
+		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
 	}
 	if core.FlagWasSet(fs, "docker-sandbox-cpus") {
 		cfg.DockerSandbox.CPUs = *v.CPUs
+		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
 	}
 	if core.FlagWasSet(fs, "docker-sandbox-memory") {
 		cfg.DockerSandbox.Memory = *v.Memory
+		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
 	}
 	if core.FlagWasSet(fs, "docker-sandbox-clone") {
 		cfg.DockerSandbox.Clone = *v.Clone
+		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
 	}
 	if core.FlagWasSet(fs, "docker-sandbox-workdir") {
 		cfg.DockerSandbox.Workdir = *v.Workdir
+		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
 	}
 	if core.FlagWasSet(fs, "docker-sandbox-extra-workspace") {
 		cfg.DockerSandbox.ExtraWorkspaces = append([]string(nil), (*v.ExtraWorkspaces)...)
+		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
 	}
 	if core.FlagWasSet(fs, "docker-sandbox-mcp") {
 		cfg.DockerSandbox.MCP = append([]string(nil), (*v.MCP)...)
+		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
 	}
 	if core.FlagWasSet(fs, "docker-sandbox-kit") {
 		cfg.DockerSandbox.Kit = append([]string(nil), (*v.Kit)...)
+		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
 	}
 	return validateConfig(*cfg)
 }

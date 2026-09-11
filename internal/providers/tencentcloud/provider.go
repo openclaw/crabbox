@@ -26,6 +26,7 @@ func (Provider) Aliases() []string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPICredentials),
 		Name:             providerName,
 		Family:           providerName,
 		Kind:             core.ProviderKindSSHLease,
@@ -62,8 +63,10 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	if !ok {
 		return nil
 	}
-	core.MarkTencentCloudConfigApplied(cfg, v.Apply(&cfg.TencentCloud, fs))
-	return nil
+	applied, err := v.Apply(&cfg.TencentCloud, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	core.MarkTencentCloudConfigApplied(cfg, applied)
+	return err
 }
 
 func (Provider) ServerTypeForConfig(cfg core.Config) string {

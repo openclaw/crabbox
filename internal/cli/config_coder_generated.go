@@ -37,6 +37,7 @@ func defaultCoderConfig() CoderConfig {
 
 // CoderConfigApplied records accepted assignments during one application.
 type CoderConfigApplied struct {
+	InputAccepted     bool
 	CLIPath           bool
 	WorkRoot          bool
 	RichParameterFile bool
@@ -49,35 +50,45 @@ func (cfg *CoderConfig) applyFile(file *fileCoderConfig) (CoderConfigApplied, er
 	}
 	if file.CLIPath != "" {
 		cfg.CLIPath = file.CLIPath
+		applied.InputAccepted = true
 		applied.CLIPath = true
 	}
 	if file.Template != "" {
 		cfg.Template = file.Template
+		applied.InputAccepted = true
 	}
 	if file.Preset != "" {
 		cfg.Preset = file.Preset
+		applied.InputAccepted = true
 	}
 	if file.WorkspacePrefix != "" {
 		cfg.WorkspacePrefix = file.WorkspacePrefix
+		applied.InputAccepted = true
 	}
 	if file.WorkRoot != "" {
 		cfg.WorkRoot = file.WorkRoot
+		applied.InputAccepted = true
 		applied.WorkRoot = true
 	}
 	if file.DeleteOnRelease != nil {
 		cfg.DeleteOnRelease = *file.DeleteOnRelease
+		applied.InputAccepted = true
 	}
 	if file.Wait != "" {
 		cfg.Wait = file.Wait
+		applied.InputAccepted = true
 	}
 	if file.UseParameterDefaults != nil {
 		cfg.UseParameterDefaults = *file.UseParameterDefaults
+		applied.InputAccepted = true
 	}
 	if len(file.Parameters) > 0 {
 		cfg.Parameters = normalizeList(file.Parameters)
+		applied.InputAccepted = true
 	}
 	if file.RichParameterFile != "" {
 		cfg.RichParameterFile = file.RichParameterFile
+		applied.InputAccepted = true
 		applied.RichParameterFile = true
 	}
 	return applied, nil
@@ -87,27 +98,45 @@ func (cfg *CoderConfig) applyEnv() (CoderConfigApplied, error) {
 	var applied CoderConfigApplied
 	if value, ok := firstNonEmptyEnv("CRABBOX_CODER_CLI"); ok {
 		cfg.CLIPath = value
+		applied.InputAccepted = true
 		applied.CLIPath = true
 	}
-	cfg.Template = getenv("CRABBOX_CODER_TEMPLATE", cfg.Template)
-	cfg.Preset = getenv("CRABBOX_CODER_PRESET", cfg.Preset)
-	cfg.WorkspacePrefix = getenv("CRABBOX_CODER_WORKSPACE_PREFIX", cfg.WorkspacePrefix)
+	if value, ok := firstNonEmptyEnv("CRABBOX_CODER_TEMPLATE"); ok {
+		cfg.Template = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CODER_PRESET"); ok {
+		cfg.Preset = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CODER_WORKSPACE_PREFIX"); ok {
+		cfg.WorkspacePrefix = value
+		applied.InputAccepted = true
+	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_CODER_WORK_ROOT"); ok {
 		cfg.WorkRoot = value
+		applied.InputAccepted = true
 		applied.WorkRoot = true
 	}
 	if value, ok := getenvBool("CRABBOX_CODER_DELETE_ON_RELEASE"); ok {
 		cfg.DeleteOnRelease = value
+		applied.InputAccepted = true
 	}
-	cfg.Wait = getenv("CRABBOX_CODER_WAIT", cfg.Wait)
+	if value, ok := firstNonEmptyEnv("CRABBOX_CODER_WAIT"); ok {
+		cfg.Wait = value
+		applied.InputAccepted = true
+	}
 	if value, ok := getenvBool("CRABBOX_CODER_USE_PARAMETER_DEFAULTS"); ok {
 		cfg.UseParameterDefaults = value
+		applied.InputAccepted = true
 	}
 	if value := os.Getenv("CRABBOX_CODER_PARAMETERS"); strings.TrimSpace(value) != "" {
 		cfg.Parameters = parseEnvListValue(value)
+		applied.InputAccepted = true
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_CODER_RICH_PARAMETER_FILE"); ok {
 		cfg.RichParameterFile = value
+		applied.InputAccepted = true
 		applied.RichParameterFile = true
 	}
 	return applied, nil
@@ -160,41 +189,51 @@ func CoderConfigFlagPresence(fs *flag.FlagSet) CoderConfigVisitedFlags {
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values CoderConfigFlagValues) Apply(cfg *CoderConfig, fs *flag.FlagSet) CoderConfigApplied {
+func (values CoderConfigFlagValues) Apply(cfg *CoderConfig, fs *flag.FlagSet) (CoderConfigApplied, error) {
 	var applied CoderConfigApplied
 	visited := CoderConfigFlagPresence(fs)
 	if visited.CLIPath {
 		cfg.CLIPath = *values.CLIPath
+		applied.InputAccepted = true
 		applied.CLIPath = true
 	}
 	if flagWasSet(fs, "coder-template") {
 		cfg.Template = *values.Template
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "coder-preset") {
 		cfg.Preset = *values.Preset
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "coder-workspace-prefix") {
 		cfg.WorkspacePrefix = *values.WorkspacePrefix
+		applied.InputAccepted = true
 	}
 	if visited.WorkRoot {
 		cfg.WorkRoot = *values.WorkRoot
+		applied.InputAccepted = true
 		applied.WorkRoot = true
 	}
 	if flagWasSet(fs, "coder-delete-on-release") {
 		cfg.DeleteOnRelease = *values.DeleteOnRelease
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "coder-wait") {
 		cfg.Wait = *values.Wait
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "coder-use-parameter-defaults") {
 		cfg.UseParameterDefaults = *values.UseParameterDefaults
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "coder-parameter") {
 		cfg.Parameters = splitCSV(*values.Parameters)
+		applied.InputAccepted = true
 	}
 	if visited.RichParameterFile {
 		cfg.RichParameterFile = *values.RichParameterFile
+		applied.InputAccepted = true
 		applied.RichParameterFile = true
 	}
-	return applied
+	return applied, nil
 }

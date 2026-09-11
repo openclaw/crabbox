@@ -12,6 +12,7 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 		return nil
 	}
 	applied := v.Apply(&cfg.AppleContainer, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, "apple-container", "apple-machine")
 	if applied.Image {
 		core.MarkAppleContainerImageExplicit(cfg)
 	}

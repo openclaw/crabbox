@@ -19,6 +19,10 @@ func (Provider) Aliases() []string {
 }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication: core.ProviderAuthentication{
+			{Route: "direct", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationAPIKey, core.ProviderAuthenticationAPIToken}, Description: "Direct API-key or JWT/OAuth access-token credentials may also come from a saved Daytona profile."},
+			{Route: "brokered", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationCoordinator}, Description: "The client authenticates to the coordinator; Daytona credentials remain server-side."},
+		},
 		Name:             "daytona",
 		Family:           "daytona",
 		Kind:             core.ProviderKindSSHLease,

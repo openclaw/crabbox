@@ -51,8 +51,8 @@ func registerActionsHydrateTargetFlags(fs *flag.FlagSet, defaults Config) action
 	}
 }
 
-func (f actionsHydrateTargetFlags) loadConfig(fs *flag.FlagSet, leaseID string) (Config, error) {
-	cfg, err := loadLeaseTargetConfig(fs, *f.provider, f.target, f.network, leaseTargetConfigOptions{LeaseID: leaseID})
+func (f actionsHydrateTargetFlags) loadConfig(fs *flag.FlagSet, leaseID string, synthesized bool) (Config, error) {
+	cfg, err := loadLeaseTargetConfig(fs, *f.provider, f.target, f.network, leaseTargetConfigOptions{LeaseID: leaseID, SynthesizedInputs: synthesized})
 	if err != nil {
 		return Config{}, err
 	}
@@ -104,7 +104,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 		}
 		return nil
 	}
-	cfg, err := connectionFlags.loadConfig(fs, *leaseIDFlag)
+	cfg, err := connectionFlags.loadConfig(fs, *leaseIDFlag, a.synthesizedFlagInputs)
 	if err != nil {
 		return err
 	}
@@ -114,15 +114,19 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 	}
 	if *repoFlag != "" {
 		cfg.Actions.Repo = *repoFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *workflowFlag != "" {
 		cfg.Actions.Workflow = *workflowFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *jobFlag != "" {
 		cfg.Actions.Job = *jobFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *refFlag != "" {
 		cfg.Actions.Ref = *refFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if cfg.Actions.Workflow == "" {
 		return exit(2, "actions hydrate requires --workflow or actions.workflow")
@@ -371,12 +375,15 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	}
 	if *repoFlag != "" {
 		cfg.Actions.Repo = *repoFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *versionFlag != "" {
 		cfg.Actions.RunnerVersion = *versionFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if flagWasSet(fs, "ephemeral") {
 		cfg.Actions.Ephemeral = *ephemeralFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	extraLabels := splitCommaList(*labelsFlag)
 	ghRepo, err := resolveGitHubRepo(repo, cfg.Actions.Repo)
@@ -417,12 +424,15 @@ func (a App) actionsDispatch(ctx context.Context, args []string) error {
 	}
 	if *repoFlag != "" {
 		cfg.Actions.Repo = *repoFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *workflowFlag != "" {
 		cfg.Actions.Workflow = *workflowFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *refFlag != "" {
 		cfg.Actions.Ref = *refFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	ghRepo, err := resolveGitHubRepo(repo, cfg.Actions.Repo)
 	if err != nil {

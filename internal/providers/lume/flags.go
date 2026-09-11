@@ -17,7 +17,11 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	v.Apply(&cfg.Lume, fs)
+	applied, err := v.Apply(&cfg.Lume, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	if err != nil {
+		return err
+	}
 	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		applyDefaults(cfg)
 		return validateConfig(cfg)

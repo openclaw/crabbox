@@ -18,6 +18,120 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestCanonicalInputCoverageBoundary(t *testing.T) {
+	clearConfigEnv(t)
+	path := isolatedConfigPath(t)
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, owner := range canonicalConfigInputOwners {
+		if got := providerConfigurationFor(cfg, owner); got.State != "defaults_only" || !got.ProviderInput.Complete || !got.GenericInput.Complete {
+			t.Fatalf("canonical owner %s: %#v", owner, got)
+		}
+	}
+	if got := providerConfigurationFor(cfg, "future-untracked-provider"); got.State != "unknown" || got.ProviderInput.Complete {
+		t.Fatal("unlisted provider was certified from registration/defaults alone")
+	}
+	if got := providerConfigurationFor(baseConfig(), "machine0"); got.State != "unknown" {
+		t.Fatal("base defaults acquired a complete input history")
+	}
+	partial := baseConfig()
+	if err := applyFileConfig(&partial, fileConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := providerConfigurationFor(partial, "machine0"); got.State != "unknown" {
+		t.Fatal("one partial overlay certified the entire history")
+	}
+	original := cfg
+	markSynthesizedFlagInputs(&cfg, true)
+	completeCanonicalConfigInputs(&cfg)
+	if providerConfigurationFor(cfg, "machine0").State != "unknown" || providerConfigurationFor(original, "machine0").State != "defaults_only" {
+		t.Fatal("derived qualification lost copy isolation or reacquired completeness")
+	}
+	if err := os.WriteFile(path, []byte("provider: nonexistent-provider-for-input-test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := loadConfig()
+	if err == nil || failed.inputProvenance != nil {
+		t.Fatal("failed canonical load retained a completeness certificate")
+	}
+}
+
+func TestProviderConfigurationStatusStates(t *testing.T) {
+	const owner configInputOwner = "machine0"
+	complete := configInputLedger(nil).withCoverage(owner, true).withCoverage(configInputGeneric, true)
+	for _, tc := range []struct {
+		name, want string
+		ledger     configInputLedger
+	}{
+		{"untracked", "unknown", nil},
+		{"provider incomplete", "unknown", configInputLedger(nil).withCoverage(configInputGeneric, true)},
+		{"generic incomplete", "unknown", configInputLedger(nil).withCoverage(owner, true)},
+		{"defaults", "defaults_only", complete},
+		{"generic only", "generic_inputs_present", complete.withInput(configInputGeneric, configInputRepo, configInputValue)},
+		{"direct", "explicit", complete.withInput(owner, configInputUser, configInputValue)},
+		{"intent only", "explicit", complete.withInput(owner, configInputEnvironment, configInputIntent)},
+		{"known partial input", "explicit", configInputLedger(nil).withInput(owner, configInputFlag, configInputValue)},
+		{"unknown provider with generic input", "unknown", configInputLedger(nil).withInput(configInputGeneric, configInputUser, configInputValue)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{inputProvenance: tc.ledger}
+			got := providerConfigurationFor(cfg, owner)
+			if got.State != tc.want {
+				t.Fatalf("state=%s, want %s", got.State, tc.want)
+			}
+			cfg.Machine0.CLIPath = "not-installed"
+			cfg.Machine0.Image = "different-from-default"
+			if !reflect.DeepEqual(got, providerConfigurationFor(cfg, owner)) {
+				t.Fatal("values or executable names were used to infer source state")
+			}
+			if got.ProviderInput.Sources == nil || got.GenericInput.Sources == nil {
+				t.Fatal("source arrays must not be JSON null")
+			}
+		})
+	}
+}
+
+func TestProviderStatusSelectionAndOfflineContract(t *testing.T) {
+	view := providerConfigStatus(Config{})
+	if view.SchemaVersion != 1 || view.Kind != "offline" || len(view.Providers) != len(RegisteredProviderNames()) {
+		t.Fatal("incorrect offline registry projection")
+	}
+	for name, entry := range view.Providers {
+		if !entry.Supported || entry.Selection.Selected || entry.Selection.Source != nil || entry.Configuration.State != "unknown" || entry.Authentication.Status != "unchecked" || entry.Readiness != "unchecked" {
+			t.Fatalf("untracked provider %s acquired a false status: %#v", name, entry)
+		}
+	}
+	for _, provider := range registeredProviders() {
+		for _, alias := range append([]string{provider.Name()}, provider.Aliases()...) {
+			cfg := Config{Provider: alias, providerSelectionSource: providerSelectionFlag}
+			selected := providerConfigStatus(cfg)
+			for name, entry := range selected.Providers {
+				want := name == provider.Name()
+				if entry.Selection.Selected != want || (entry.Selection.Source != nil) != want {
+					t.Fatalf("alias %s selection incorrectly attributed to %s", alias, name)
+				}
+				if want && *entry.Selection.Source != providerSelectionFlag {
+					t.Fatal("selection source changed")
+				}
+			}
+		}
+	}
+	data, err := json.Marshal(view)
+	if err != nil || !bytes.Contains(data, []byte(`"source":null`)) {
+		t.Fatal("unselected source must be explicit JSON null")
+	}
+	var text bytes.Buffer
+	writeProviderConfigStatus(&text, view)
+	if !strings.Contains(text.String(), "inspection=offline") || !strings.Contains(text.String(), "auth_status=unchecked readiness=unchecked") || strings.Contains(text.String(), "configuration=defaults_only") {
+		t.Fatal("text output claimed checked or complete configuration")
+	}
+}
+
 func TestLocalContainerOrdinaryFileRoundTrip(t *testing.T) {
 	for _, tc := range []struct {
 		name, input, wantYAML string
@@ -1808,7 +1922,7 @@ func TestConfigShowIncludesNvidiaBrevWithoutSecretSurface(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := stdout.String()
-	want := "nvidia_brev cli=/usr/local/bin/brev org=example-org type=gpu gpu_name=L40S provider=aws mode=vm launchable=pytorch startup_script=setup.sh release_action=stop target=host user=ubuntu work_root=/work/brev auth=cli"
+	want := "nvidia_brev cli=/usr/local/bin/brev org=example-org type=gpu gpu_name=L40S provider=aws mode=vm launchable=pytorch startup_script=setup.sh release_action=stop target=host user=ubuntu work_root=/work/brev auth_mode=cli auth_status=unchecked readiness=unchecked"
 	if !strings.Contains(text, want) {
 		t.Fatalf("config show missing nvidia-brev summary: %q", text)
 	}
@@ -1991,7 +2105,7 @@ nebius:
 		t.Fatal(err)
 	}
 	text := stdout.String()
-	want := "nebius cli=/usr/local/bin/nebius profile=env-profile parent_id=project-123 subnet_id=subnet-123 platform=cpu-d3 preset=4vcpu-16gb image_family=ubuntu24.04-driverless disk_type=network_ssd disk_size_gib=50 user=crabbox public_ip=dynamic security_group_ids=sg-1,sg-2 service_account_id=sa-123 recovery_policy=fail auth=cli"
+	want := "nebius cli=/usr/local/bin/nebius profile=env-profile parent_id=project-123 subnet_id=subnet-123 platform=cpu-d3 preset=4vcpu-16gb image_family=ubuntu24.04-driverless disk_type=network_ssd disk_size_gib=50 user=crabbox public_ip=dynamic security_group_ids=sg-1,sg-2 service_account_id=sa-123 recovery_policy=fail auth_mode=cli auth_status=unchecked readiness=unchecked"
 	if !strings.Contains(text, want) {
 		t.Fatalf("config show missing nebius summary: %q", text)
 	}

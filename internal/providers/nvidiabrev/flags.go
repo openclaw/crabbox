@@ -53,40 +53,52 @@ func ApplyNvidiaBrevProviderFlags(cfg *Config, fs *flag.FlagSet, values any) err
 	}
 	if core.FlagWasSet(fs, "nvidia-brev-cli") {
 		cfg.NvidiaBrev.CLI = *v.CLI
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nvidia-brev-org") {
 		cfg.NvidiaBrev.Org = *v.Org
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nvidia-brev-type") {
 		cfg.NvidiaBrev.Type = *v.Type
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nvidia-brev-gpu-name") {
 		cfg.NvidiaBrev.GPUName = *v.GPUName
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nvidia-brev-provider") {
 		cfg.NvidiaBrev.Provider = *v.Provider
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nvidia-brev-mode") {
 		cfg.NvidiaBrev.Mode = *v.Mode
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nvidia-brev-launchable") {
 		cfg.NvidiaBrev.Launchable = *v.Launchable
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nvidia-brev-startup-script") {
 		cfg.NvidiaBrev.StartupScript = *v.StartupScript
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nvidia-brev-release-action") {
 		cfg.NvidiaBrev.ReleaseAction = *v.ReleaseAction
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 		markReleaseActionExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "nvidia-brev-target") {
 		cfg.NvidiaBrev.Target = *v.Target
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nvidia-brev-user") {
 		cfg.NvidiaBrev.User = *v.User
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nvidia-brev-work-root") {
 		cfg.NvidiaBrev.WorkRoot = *v.WorkRoot
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 		markNvidiaBrevWorkRootExplicit(cfg)
 	}
 	if core.ProviderNameMatches(cfg.Provider, Provider{}) {

@@ -77,63 +77,83 @@ func ApplyNomadProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "nomad-address") {
 		cfg.Nomad.Address = *v.Address
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-region") {
 		cfg.Nomad.Region = *v.Region
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-namespace") {
 		cfg.Nomad.Namespace = *v.Namespace
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-token-env") {
 		cfg.Nomad.TokenEnv = *v.TokenEnv
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-ca-cert") {
 		cfg.Nomad.CACert = *v.CACert
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-ca-path") {
 		cfg.Nomad.CAPath = *v.CAPath
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-client-cert") {
 		cfg.Nomad.ClientCert = *v.ClientCert
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-client-key") {
 		cfg.Nomad.ClientKey = *v.ClientKey
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-tls-server-name") {
 		cfg.Nomad.TLSServerName = *v.TLSServerName
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-skip-verify") {
 		cfg.Nomad.SkipVerify = *v.SkipVerify
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-task") {
 		cfg.Nomad.Task = *v.Task
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-driver") {
 		cfg.Nomad.Driver = *v.Driver
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-image") {
 		cfg.Nomad.Image = *v.Image
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-workdir") {
 		cfg.Nomad.Workdir = *v.Workdir
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-jobspec-template") {
 		cfg.Nomad.JobSpecTemplate = *v.JobSpecTemplate
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-node-pool") {
 		cfg.Nomad.NodePool = *v.NodePool
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-datacenters") {
 		cfg.Nomad.Datacenters = splitList(*v.Datacenters)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-cpu") {
 		cfg.Nomad.CPU = *v.CPU
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-memory-mb") {
 		cfg.Nomad.MemoryMB = *v.MemoryMB
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-disk-mb") {
 		cfg.Nomad.DiskMB = *v.DiskMB
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-alloc-ready-timeout") {
 		parsed, err := parsePositiveDuration(*v.AllocReadyTimeout, "nomad alloc ready timeout")
@@ -141,6 +161,7 @@ func ApplyNomadProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 			return err
 		}
 		cfg.Nomad.AllocReadyTimeout = parsed
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-eval-timeout") {
 		parsed, err := parsePositiveDuration(*v.EvalTimeout, "nomad eval timeout")
@@ -148,9 +169,11 @@ func ApplyNomadProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 			return err
 		}
 		cfg.Nomad.EvalTimeout = parsed
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "nomad-exec-timeout-secs") {
 		cfg.Nomad.ExecTimeoutSecs = *v.ExecTimeoutSecs
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	return validateConfig(*cfg)
 }

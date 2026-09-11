@@ -27,9 +27,13 @@ func ApplyCoderProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	applied := v.Apply(&cfg.Coder, fs)
+	applied, err := v.Apply(&cfg.Coder, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, coderProvider)
 	if applied.WorkRoot {
 		cfg.WorkRoot = cfg.Coder.WorkRoot
+	}
+	if err != nil {
+		return err
 	}
 	if cfg.Provider == coderProvider {
 		return validateCoderConfig(*cfg)

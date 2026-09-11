@@ -21,6 +21,7 @@ func ApplyAzureDynamicSessionsProviderFlags(cfg *Config, fs *flag.FlagSet, value
 	if !ok {
 		return nil
 	}
-	v.Apply(&cfg.AzureDynamicSessions, fs)
-	return nil
+	applied, err := v.Apply(&cfg.AzureDynamicSessions, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	return err
 }

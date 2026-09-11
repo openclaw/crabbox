@@ -66,36 +66,47 @@ func ApplyTenkiProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "tenki-cli") {
 		cfg.Tenki.CLIPath = *v.CLIPath
+		core.RecordProviderFlagInputs(cfg, true, "tenki")
 	}
 	if core.FlagWasSet(fs, "tenki-endpoint") {
 		cfg.Tenki.Endpoint = *v.Endpoint
+		core.RecordProviderFlagInputs(cfg, true, "tenki")
 	}
 	if core.FlagWasSet(fs, "tenki-gateway") {
 		cfg.Tenki.Gateway = *v.Gateway
+		core.RecordProviderFlagInputs(cfg, true, "tenki")
 	}
 	if core.FlagWasSet(fs, "tenki-workspace") {
 		cfg.Tenki.Workspace = *v.Workspace
+		core.RecordProviderFlagInputs(cfg, true, "tenki")
 	}
 	if core.FlagWasSet(fs, "tenki-project") {
 		cfg.Tenki.Project = *v.Project
+		core.RecordProviderFlagInputs(cfg, true, "tenki")
 	}
 	if core.FlagWasSet(fs, "tenki-image") {
 		cfg.Tenki.Image = *v.Image
+		core.RecordProviderFlagInputs(cfg, true, "tenki")
 	}
 	if core.FlagWasSet(fs, "tenki-snapshot") {
 		cfg.Tenki.Snapshot = *v.Snapshot
+		core.RecordProviderFlagInputs(cfg, true, "tenki")
 	}
 	if core.FlagWasSet(fs, "tenki-work-root") {
 		cfg.Tenki.WorkRoot = *v.WorkRoot
+		core.RecordProviderFlagInputs(cfg, true, "tenki")
 	}
 	if core.FlagWasSet(fs, "tenki-cpus") {
 		cfg.Tenki.CPUs = *v.CPUs
+		core.RecordProviderFlagInputs(cfg, true, "tenki")
 	}
 	if core.FlagWasSet(fs, "tenki-memory-mb") {
 		cfg.Tenki.MemoryMB = *v.MemoryMB
+		core.RecordProviderFlagInputs(cfg, true, "tenki")
 	}
 	if core.FlagWasSet(fs, "tenki-disk-gb") {
 		cfg.Tenki.DiskGB = *v.DiskGB
+		core.RecordProviderFlagInputs(cfg, true, "tenki")
 	}
 	normalizeTenkiProviderConfig(cfg)
 	if cfg.Provider == tenkiProvider {

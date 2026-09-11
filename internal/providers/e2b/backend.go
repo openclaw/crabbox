@@ -29,8 +29,9 @@ func ApplyE2BProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	v.Apply(&cfg.E2B, fs)
-	return nil
+	applied, err := v.Apply(&cfg.E2B, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, e2bProvider)
+	return err
 }
 
 func NewE2BBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {

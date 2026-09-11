@@ -35,12 +35,15 @@ func ApplyAsciiBoxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error
 	}
 	if core.FlagWasSet(fs, "ascii-box-base-url") {
 		cfg.AsciiBox.BaseURL = *v.BaseURL
+		core.RecordProviderFlagInputs(cfg, true, "ascii-box")
 	}
 	if core.FlagWasSet(fs, "ascii-box-cli") {
 		cfg.AsciiBox.CLIPath = *v.CLIPath
+		core.RecordProviderFlagInputs(cfg, true, "ascii-box")
 	}
 	if core.FlagWasSet(fs, "ascii-box-workdir") {
 		cfg.AsciiBox.Workdir = *v.Workdir
+		core.RecordProviderFlagInputs(cfg, true, "ascii-box")
 	}
 	if cfg.Provider == providerName || cfg.Provider == "ascii" || cfg.Provider == "asciibox" || cfg.Provider == "ascii-box" {
 		cleaned, err := cleanWorkdir(workdir(*cfg))

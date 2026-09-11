@@ -22,6 +22,7 @@ func (Provider) Name() string      { return providerName }
 func (Provider) Aliases() []string { return []string{"kubernetes-vm"} }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationNativeConfig),
 		Name:             providerName,
 		Family:           "kubernetes",
 		Kind:             core.ProviderKindSSHLease,

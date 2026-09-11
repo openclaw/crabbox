@@ -201,9 +201,11 @@ func (a App) shard(ctx context.Context, args []string) error {
 	}
 	if *junitResults != "" {
 		cfg.Results.JUnit = splitCommaList(*junitResults)
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if flagWasSet(fs, "results-auto") {
 		cfg.Results.Auto = *resultsAuto
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	mergedPolicy := cfg.Results.FailOnFailures
 	if flagWasSet(fs, "fail-on-test-failures") {

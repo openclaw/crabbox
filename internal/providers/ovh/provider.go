@@ -23,6 +23,7 @@ func (Provider) Name() string      { return providerName }
 func (Provider) Aliases() []string { return nil }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPICredentials),
 		Name:             providerName,
 		Family:           providerName,
 		Kind:             core.ProviderKindSSHLease,
@@ -46,11 +47,12 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	if !ok {
 		return nil
 	}
-	applied := v.Apply(&cfg.OVH, fs)
+	applied, err := v.Apply(&cfg.OVH, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
 	if applied.Image {
 		core.SetOVHImageExplicit(cfg)
 	}
-	return nil
+	return err
 }
 
 func (Provider) ServerTypeForConfig(cfg core.Config) string {

@@ -44,113 +44,180 @@ func defaultCuaConfig() CuaConfig {
 	}
 }
 
-func (cfg *CuaConfig) applyFile(file *fileCuaConfig, trusted bool) error {
+// CuaConfigApplied records accepted assignments during one application.
+type CuaConfigApplied struct {
+	InputAccepted bool
+}
+
+func (cfg *CuaConfig) applyFile(file *fileCuaConfig, trusted bool) (CuaConfigApplied, error) {
+	var applied CuaConfigApplied
 	if file == nil {
-		return nil
+		return applied, nil
 	}
 	if file.Image != nil {
 		cfg.Image = *file.Image
+		applied.InputAccepted = true
 	}
 	if file.Kind != nil {
 		cfg.Kind = *file.Kind
+		applied.InputAccepted = true
 	}
 	if file.Region != nil {
 		cfg.Region = *file.Region
+		applied.InputAccepted = true
 	}
 	if file.Workdir != nil {
 		cfg.Workdir = *file.Workdir
+		applied.InputAccepted = true
 	}
 	if file.VCPUs != nil {
 		if *file.VCPUs < 0 {
-			return exit(2, "cua vcpus must be non-negative")
+			return applied, exit(2, "cua vcpus must be non-negative")
 		}
 		cfg.VCPUs = *file.VCPUs
+		applied.InputAccepted = true
 	}
 	if file.MemoryMB != nil {
 		if *file.MemoryMB < 0 {
-			return exit(2, "cua memoryMB must be non-negative")
+			return applied, exit(2, "cua memoryMB must be non-negative")
 		}
 		cfg.MemoryMB = *file.MemoryMB
+		applied.InputAccepted = true
 	}
 	if file.DiskGB != nil {
 		if *file.DiskGB < 0 {
-			return exit(2, "cua diskGB must be non-negative")
+			return applied, exit(2, "cua diskGB must be non-negative")
 		}
 		cfg.DiskGB = *file.DiskGB
+		applied.InputAccepted = true
 	}
 	if file.StartupTimeoutSecs != nil {
 		if *file.StartupTimeoutSecs < 0 {
-			return exit(2, "cua startupTimeoutSecs must be non-negative")
+			return applied, exit(2, "cua startupTimeoutSecs must be non-negative")
 		}
 		cfg.StartupTimeoutSecs = *file.StartupTimeoutSecs
+		applied.InputAccepted = true
 	}
 	if file.ExecTimeoutSecs != nil {
 		if *file.ExecTimeoutSecs < 0 {
-			return exit(2, "cua execTimeoutSecs must be non-negative")
+			return applied, exit(2, "cua execTimeoutSecs must be non-negative")
 		}
 		cfg.ExecTimeoutSecs = *file.ExecTimeoutSecs
+		applied.InputAccepted = true
 	}
 	if trusted && file.BridgeCommand != nil {
 		cfg.BridgeCommand = *file.BridgeCommand
+		applied.InputAccepted = true
 	}
 	if trusted && file.SDKPackage != nil {
 		cfg.SDKPackage = *file.SDKPackage
+		applied.InputAccepted = true
 	}
 	if trusted && file.SDKImport != nil {
 		cfg.SDKImport = *file.SDKImport
+		applied.InputAccepted = true
 	}
 	if trusted && file.SDKFallbackImport != nil {
 		cfg.SDKFallbackImport = *file.SDKFallbackImport
+		applied.InputAccepted = true
 	}
-	return nil
+	return applied, nil
 }
 
-func (cfg *CuaConfig) applyEnv() error {
-	cfg.APIURL = getenv("CRABBOX_CUA_API_URL", getenv("CUA_BASE_URL", cfg.APIURL))
-	cfg.Image = getenv("CRABBOX_CUA_IMAGE", cfg.Image)
-	cfg.Kind = getenv("CRABBOX_CUA_KIND", cfg.Kind)
-	cfg.Region = getenv("CRABBOX_CUA_REGION", cfg.Region)
-	cfg.Workdir = getenv("CRABBOX_CUA_WORKDIR", cfg.Workdir)
+func (cfg *CuaConfig) applyEnv() (CuaConfigApplied, error) {
+	var applied CuaConfigApplied
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUA_API_URL", "CUA_BASE_URL"); ok {
+		cfg.APIURL = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUA_IMAGE"); ok {
+		cfg.Image = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUA_KIND"); ok {
+		cfg.Kind = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUA_REGION"); ok {
+		cfg.Region = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUA_WORKDIR"); ok {
+		cfg.Workdir = value
+		applied.InputAccepted = true
+	}
 	{
+		var accepted bool
 		var err error
-		cfg.VCPUs, err = getenvNonNegativeInt("CRABBOX_CUA_VCPUS", cfg.VCPUs)
+		cfg.VCPUs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_CUA_VCPUS", cfg.VCPUs)
 		if err != nil {
-			return err
+			return applied, err
+		}
+		if accepted {
+			applied.InputAccepted = true
 		}
 	}
 	{
+		var accepted bool
 		var err error
-		cfg.MemoryMB, err = getenvNonNegativeInt("CRABBOX_CUA_MEMORY_MB", cfg.MemoryMB)
+		cfg.MemoryMB, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_CUA_MEMORY_MB", cfg.MemoryMB)
 		if err != nil {
-			return err
+			return applied, err
+		}
+		if accepted {
+			applied.InputAccepted = true
 		}
 	}
 	{
+		var accepted bool
 		var err error
-		cfg.DiskGB, err = getenvNonNegativeInt("CRABBOX_CUA_DISK_GB", cfg.DiskGB)
+		cfg.DiskGB, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_CUA_DISK_GB", cfg.DiskGB)
 		if err != nil {
-			return err
+			return applied, err
+		}
+		if accepted {
+			applied.InputAccepted = true
 		}
 	}
 	{
+		var accepted bool
 		var err error
-		cfg.StartupTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_CUA_STARTUP_TIMEOUT_SECS", cfg.StartupTimeoutSecs)
+		cfg.StartupTimeoutSecs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_CUA_STARTUP_TIMEOUT_SECS", cfg.StartupTimeoutSecs)
 		if err != nil {
-			return err
+			return applied, err
+		}
+		if accepted {
+			applied.InputAccepted = true
 		}
 	}
 	{
+		var accepted bool
 		var err error
-		cfg.ExecTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_CUA_EXEC_TIMEOUT_SECS", cfg.ExecTimeoutSecs)
+		cfg.ExecTimeoutSecs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_CUA_EXEC_TIMEOUT_SECS", cfg.ExecTimeoutSecs)
 		if err != nil {
-			return err
+			return applied, err
+		}
+		if accepted {
+			applied.InputAccepted = true
 		}
 	}
-	cfg.BridgeCommand = getenv("CRABBOX_CUA_BRIDGE_COMMAND", cfg.BridgeCommand)
-	cfg.SDKPackage = getenv("CRABBOX_CUA_SDK_PACKAGE", cfg.SDKPackage)
-	cfg.SDKImport = getenv("CRABBOX_CUA_SDK_IMPORT", cfg.SDKImport)
-	cfg.SDKFallbackImport = getenv("CRABBOX_CUA_SDK_FALLBACK_IMPORT", cfg.SDKFallbackImport)
-	return nil
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUA_BRIDGE_COMMAND"); ok {
+		cfg.BridgeCommand = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUA_SDK_PACKAGE"); ok {
+		cfg.SDKPackage = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUA_SDK_IMPORT"); ok {
+		cfg.SDKImport = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CUA_SDK_FALLBACK_IMPORT"); ok {
+		cfg.SDKFallbackImport = value
+		applied.InputAccepted = true
+	}
+	return applied, nil
 }
 
 // CuaConfigFlagValues holds parsed values; only visited flags are applied.
@@ -192,47 +259,63 @@ func RegisterCuaConfigFlags(fs *flag.FlagSet, defaults CuaConfig) CuaConfigFlagV
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values CuaConfigFlagValues) Apply(cfg *CuaConfig, fs *flag.FlagSet) {
+func (values CuaConfigFlagValues) Apply(cfg *CuaConfig, fs *flag.FlagSet) (CuaConfigApplied, error) {
+	var applied CuaConfigApplied
 	if flagWasSet(fs, "cua-api-url") {
 		cfg.APIURL = *values.APIURL
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "cua-image") {
 		cfg.Image = *values.Image
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "cua-kind") {
 		cfg.Kind = *values.Kind
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "cua-region") {
 		cfg.Region = *values.Region
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "cua-workdir") {
 		cfg.Workdir = *values.Workdir
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "cua-vcpus") {
 		cfg.VCPUs = *values.VCPUs
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "cua-memory-mb") {
 		cfg.MemoryMB = *values.MemoryMB
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "cua-disk-gb") {
 		cfg.DiskGB = *values.DiskGB
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "cua-startup-timeout-secs") {
 		cfg.StartupTimeoutSecs = *values.StartupTimeoutSecs
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "cua-exec-timeout-secs") {
 		cfg.ExecTimeoutSecs = *values.ExecTimeoutSecs
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "cua-bridge-command") {
 		cfg.BridgeCommand = *values.BridgeCommand
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "cua-sdk-package") {
 		cfg.SDKPackage = *values.SDKPackage
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "cua-sdk-import") {
 		cfg.SDKImport = *values.SDKImport
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "cua-sdk-fallback-import") {
 		cfg.SDKFallbackImport = *values.SDKFallbackImport
+		applied.InputAccepted = true
 	}
+	return applied, nil
 }

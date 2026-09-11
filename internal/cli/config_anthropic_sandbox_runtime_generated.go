@@ -20,29 +20,46 @@ func defaultAnthropicSRTConfig() AnthropicSRTConfig {
 	}
 }
 
-func (cfg *AnthropicSRTConfig) applyFile(file *fileAnthropicSRTConfig) error {
+// AnthropicSRTConfigApplied records accepted assignments during one application.
+type AnthropicSRTConfigApplied struct {
+	InputAccepted bool
+}
+
+func (cfg *AnthropicSRTConfig) applyFile(file *fileAnthropicSRTConfig) (AnthropicSRTConfigApplied, error) {
+	var applied AnthropicSRTConfigApplied
 	if file == nil {
-		return nil
+		return applied, nil
 	}
 	if file.CLIPath != "" {
 		cfg.CLIPath = file.CLIPath
+		applied.InputAccepted = true
 	}
 	if file.Settings != nil {
 		cfg.Settings = *file.Settings
+		applied.InputAccepted = true
 	}
 	if file.Debug != nil {
 		cfg.Debug = *file.Debug
+		applied.InputAccepted = true
 	}
-	return nil
+	return applied, nil
 }
 
-func (cfg *AnthropicSRTConfig) applyEnv() error {
-	cfg.CLIPath = getenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI", cfg.CLIPath)
-	cfg.Settings = getenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS", cfg.Settings)
+func (cfg *AnthropicSRTConfig) applyEnv() (AnthropicSRTConfigApplied, error) {
+	var applied AnthropicSRTConfigApplied
+	if value, ok := firstNonEmptyEnv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI"); ok {
+		cfg.CLIPath = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS"); ok {
+		cfg.Settings = value
+		applied.InputAccepted = true
+	}
 	if value, ok := getenvBool("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_DEBUG"); ok {
 		cfg.Debug = value
+		applied.InputAccepted = true
 	}
-	return nil
+	return applied, nil
 }
 
 // AnthropicSRTConfigFlagValues holds parsed values; only visited flags are applied.
@@ -62,14 +79,19 @@ func RegisterAnthropicSRTConfigFlags(fs *flag.FlagSet, defaults AnthropicSRTConf
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values AnthropicSRTConfigFlagValues) Apply(cfg *AnthropicSRTConfig, fs *flag.FlagSet) {
+func (values AnthropicSRTConfigFlagValues) Apply(cfg *AnthropicSRTConfig, fs *flag.FlagSet) (AnthropicSRTConfigApplied, error) {
+	var applied AnthropicSRTConfigApplied
 	if flagWasSet(fs, "anthropic-sandbox-runtime-cli") {
 		cfg.CLIPath = *values.CLIPath
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "anthropic-sandbox-runtime-settings") {
 		cfg.Settings = *values.Settings
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "anthropic-sandbox-runtime-debug") {
 		cfg.Debug = *values.Debug
+		applied.InputAccepted = true
 	}
+	return applied, nil
 }

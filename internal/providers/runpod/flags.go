@@ -25,7 +25,11 @@ func ApplyRunpodProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	v.Apply(&cfg.Runpod, fs)
+	applied, err := v.Apply(&cfg.Runpod, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	if err != nil {
+		return err
+	}
 	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		applyRunpodDefaults(cfg)
 	}

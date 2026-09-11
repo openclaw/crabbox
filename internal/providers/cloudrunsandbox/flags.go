@@ -21,6 +21,10 @@ func ApplyCloudRunSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any
 	if !ok {
 		return nil
 	}
-	v.Apply(&cfg.CloudRunSandbox, fs)
+	applied, err := v.Apply(&cfg.CloudRunSandbox, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	if err != nil {
+		return err
+	}
 	return validateConfig(*cfg)
 }

@@ -28,7 +28,8 @@ func defaultOVHConfig() OVHConfig {
 
 // OVHConfigApplied records accepted assignments during one application.
 type OVHConfigApplied struct {
-	Image bool
+	InputAccepted bool
+	Image         bool
 }
 
 func (cfg *OVHConfig) applyFile(file *fileOVHConfig, trusted bool) (OVHConfigApplied, error) {
@@ -38,33 +39,51 @@ func (cfg *OVHConfig) applyFile(file *fileOVHConfig, trusted bool) (OVHConfigApp
 	}
 	if trusted && file.Endpoint != "" {
 		cfg.Endpoint = file.Endpoint
+		applied.InputAccepted = true
 	}
 	if file.ProjectID != "" {
 		cfg.ProjectID = file.ProjectID
+		applied.InputAccepted = true
 	}
 	if file.Region != "" {
 		cfg.Region = file.Region
+		applied.InputAccepted = true
 	}
 	if file.Image != "" {
 		cfg.Image = file.Image
+		applied.InputAccepted = true
 		applied.Image = true
 	}
 	if file.Flavor != "" {
 		cfg.Flavor = file.Flavor
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }
 
 func (cfg *OVHConfig) applyEnv() (OVHConfigApplied, error) {
 	var applied OVHConfigApplied
-	cfg.Endpoint = getenv("OVH_ENDPOINT", cfg.Endpoint)
-	cfg.ProjectID = getenv("CRABBOX_OVH_PROJECT_ID", cfg.ProjectID)
-	cfg.Region = getenv("CRABBOX_OVH_REGION", cfg.Region)
+	if value, ok := firstNonEmptyEnv("OVH_ENDPOINT"); ok {
+		cfg.Endpoint = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_OVH_PROJECT_ID"); ok {
+		cfg.ProjectID = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_OVH_REGION"); ok {
+		cfg.Region = value
+		applied.InputAccepted = true
+	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_OVH_IMAGE"); ok {
 		cfg.Image = value
+		applied.InputAccepted = true
 		applied.Image = true
 	}
-	cfg.Flavor = getenv("CRABBOX_OVH_FLAVOR", cfg.Flavor)
+	if value, ok := firstNonEmptyEnv("CRABBOX_OVH_FLAVOR"); ok {
+		cfg.Flavor = value
+		applied.InputAccepted = true
+	}
 	return applied, nil
 }
 
@@ -101,24 +120,29 @@ func OVHConfigFlagPresence(fs *flag.FlagSet) OVHConfigVisitedFlags {
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values OVHConfigFlagValues) Apply(cfg *OVHConfig, fs *flag.FlagSet) OVHConfigApplied {
+func (values OVHConfigFlagValues) Apply(cfg *OVHConfig, fs *flag.FlagSet) (OVHConfigApplied, error) {
 	var applied OVHConfigApplied
 	visited := OVHConfigFlagPresence(fs)
 	if flagWasSet(fs, "ovh-endpoint") {
 		cfg.Endpoint = *values.Endpoint
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "ovh-project-id") {
 		cfg.ProjectID = *values.ProjectID
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "ovh-region") {
 		cfg.Region = *values.Region
+		applied.InputAccepted = true
 	}
 	if visited.Image {
 		cfg.Image = *values.Image
+		applied.InputAccepted = true
 		applied.Image = true
 	}
 	if flagWasSet(fs, "ovh-flavor") {
 		cfg.Flavor = *values.Flavor
+		applied.InputAccepted = true
 	}
-	return applied
+	return applied, nil
 }

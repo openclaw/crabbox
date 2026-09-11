@@ -72,15 +72,19 @@ func ApplyFreestyleProviderFlags(cfg *Config, fs *flag.FlagSet, values any) erro
 	}
 	if core.FlagWasSet(fs, "freestyle-api-url") {
 		cfg.Freestyle.APIURL = *v.APIURL
+		core.RecordProviderFlagInputs(cfg, true, freestyleProvider)
 	}
 	if core.FlagWasSet(fs, "freestyle-workdir") {
 		cfg.Freestyle.Workdir = *v.Workdir
+		core.RecordProviderFlagInputs(cfg, true, freestyleProvider)
 	}
 	if core.FlagWasSet(fs, "freestyle-vcpus") {
 		cfg.Freestyle.VCPUs = *v.VCPUs
+		core.RecordProviderFlagInputs(cfg, true, freestyleProvider)
 	}
 	if core.FlagWasSet(fs, "freestyle-memory-gb") {
 		cfg.Freestyle.MemoryGB = *v.MemoryGB
+		core.RecordProviderFlagInputs(cfg, true, freestyleProvider)
 	}
 	return nil
 }

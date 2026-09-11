@@ -18,6 +18,7 @@ func ApplyNamespaceProviderFlags(cfg *Config, fs *flag.FlagSet, values any) erro
 		return nil
 	}
 	applied, err := v.Apply(&cfg.Namespace, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, namespaceProvider)
 	if applied.Size {
 		cfg.Namespace.Size = strings.ToUpper(strings.TrimSpace(cfg.Namespace.Size))
 		cfg.ServerType = cfg.Namespace.Size

@@ -89,6 +89,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if helper, set := stringFlag(fs, "apple-vm-helper", v.HelperPath, "apple-vz-helper", v.LegacyHelperPath); set {
 		cfg.AppleVM.HelperPath = strings.TrimSpace(helper)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if image, set := stringFlag(fs, "apple-vm-image", v.Image, "apple-vz-image", v.LegacyImage); set {
 		image = strings.TrimSpace(image)
@@ -96,17 +97,21 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 			return exit(2, "--apple-vm-image accepts local paths only; use CRABBOX_APPLE_VM_IMAGE or configuration for remote URLs")
 		}
 		core.ApplyAppleVMImage(cfg, image)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if checksum, set := stringFlag(fs, "apple-vm-image-sha256", v.ImageSHA256, "apple-vz-image-sha256", v.LegacyImageSHA256); set {
 		core.ApplyAppleVMImageSHA256(cfg, strings.TrimSpace(checksum))
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if user, set := stringFlag(fs, "apple-vm-user", v.User, "apple-vz-user", v.LegacyUser); set {
 		cfg.AppleVM.User = strings.TrimSpace(user)
 		cfg.SSHUser = cfg.AppleVM.User
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if workRoot, set := stringFlag(fs, "apple-vm-work-root", v.WorkRoot, "apple-vz-work-root", v.LegacyWorkRoot); set {
 		cfg.AppleVM.WorkRoot = strings.TrimSpace(workRoot)
 		cfg.WorkRoot = cfg.AppleVM.WorkRoot
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if cpus, set := intFlag(fs, "apple-vm-cpus", v.CPUs, "apple-vz-cpus", v.LegacyCPUs); set {
 		if cpus <= 0 {
@@ -114,6 +119,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		}
 		cfg.AppleVM.CPUs = cpus
 		core.MarkAppleVMCPUsExplicit(cfg)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if memoryMiB, set := intFlag(fs, "apple-vm-memory", v.MemoryMiB, "apple-vz-memory", v.LegacyMemoryMiB); set {
 		if memoryMiB < 1024 {
@@ -121,6 +127,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		}
 		cfg.AppleVM.MemoryMiB = memoryMiB
 		core.MarkAppleVMMemoryExplicit(cfg)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if diskGiB, set := intFlag(fs, "apple-vm-disk", v.DiskGiB, "apple-vz-disk", v.LegacyDiskGiB); set {
 		if diskGiB <= 0 {
@@ -128,6 +135,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		}
 		cfg.AppleVM.DiskGiB = diskGiB
 		core.MarkAppleVMDiskExplicit(cfg)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if isAppleVMProviderName(cfg.Provider) {
 		applyDefaults(cfg)

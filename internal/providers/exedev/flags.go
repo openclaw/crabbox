@@ -21,7 +21,11 @@ func ApplyExeDevProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	v.Apply(&cfg.ExeDev, fs)
+	applied, err := v.Apply(&cfg.ExeDev, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	if err != nil {
+		return err
+	}
 	if core.ProviderNameMatchesExact(cfg.Provider, Provider{}) {
 		applyExeDevDefaults(cfg)
 	}

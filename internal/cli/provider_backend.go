@@ -656,6 +656,7 @@ type CheckpointLeaseIDBackend interface {
 }
 
 type ProviderSpec struct {
+	Authentication   ProviderAuthentication
 	Name             string
 	Family           string
 	Kind             ProviderKind

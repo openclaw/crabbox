@@ -40,18 +40,23 @@ func applyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "crownest-url") {
 		cfg.Crownest.APIURL = *v.APIURL
+		core.RecordProviderFlagInputs(cfg, true, "crownest")
 	}
 	if core.FlagWasSet(fs, "crownest-project-id") {
 		cfg.Crownest.ProjectID = *v.ProjectID
+		core.RecordProviderFlagInputs(cfg, true, "crownest")
 	}
 	if core.FlagWasSet(fs, "crownest-template") {
 		cfg.Crownest.Template = *v.Template
+		core.RecordProviderFlagInputs(cfg, true, "crownest")
 	}
 	if core.FlagWasSet(fs, "crownest-timeout-secs") {
 		cfg.Crownest.TimeoutSecs = *v.TimeoutSecs
+		core.RecordProviderFlagInputs(cfg, true, "crownest")
 	}
 	if core.FlagWasSet(fs, "crownest-forget-missing") {
 		cfg.Crownest.ForgetMissing = *v.ForgetMissing
+		core.RecordProviderFlagInputs(cfg, true, "crownest")
 	}
 	return validateConfig(*cfg)
 }

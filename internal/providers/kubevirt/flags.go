@@ -14,13 +14,17 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	if !ok {
 		return nil
 	}
-	applied := v.Apply(&cfg.KubeVirt, fs)
+	applied, err := v.Apply(&cfg.KubeVirt, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
 	cfg.KubeVirt.ExpandAppliedLocalPaths(applied)
 	if applied.WorkRoot {
 		cfg.WorkRoot = cfg.KubeVirt.WorkRoot
 	}
 	if applied.DeleteOnRelease {
 		core.MarkDeleteOnReleaseExplicit(cfg, providerName)
+	}
+	if err != nil {
+		return err
 	}
 	return validateConfig(*cfg)
 }

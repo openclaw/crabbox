@@ -30,9 +30,10 @@ func defaultE2BConfig() E2BConfig {
 
 // E2BConfigApplied records accepted assignments during one application.
 type E2BConfigApplied struct {
-	APIKey bool
-	APIURL bool
-	Domain bool
+	InputAccepted bool
+	APIKey        bool
+	APIURL        bool
+	Domain        bool
 }
 
 func (cfg *E2BConfig) applyFile(file *fileE2BConfig) (E2BConfigApplied, error) {
@@ -42,20 +43,25 @@ func (cfg *E2BConfig) applyFile(file *fileE2BConfig) (E2BConfigApplied, error) {
 	}
 	if file.APIURL != "" {
 		cfg.APIURL = file.APIURL
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
 	if file.Domain != "" {
 		cfg.Domain = file.Domain
+		applied.InputAccepted = true
 		applied.Domain = true
 	}
 	if file.Template != "" {
 		cfg.Template = file.Template
+		applied.InputAccepted = true
 	}
 	if file.Workdir != "" {
 		cfg.Workdir = file.Workdir
+		applied.InputAccepted = true
 	}
 	if file.User != "" {
 		cfg.User = file.User
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }
@@ -64,19 +70,31 @@ func (cfg *E2BConfig) applyEnv() (E2BConfigApplied, error) {
 	var applied E2BConfigApplied
 	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_API_KEY", "E2B_API_KEY"); ok {
 		cfg.APIKey = value
+		applied.InputAccepted = true
 		applied.APIKey = true
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_API_URL", "E2B_API_URL"); ok {
 		cfg.APIURL = value
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_DOMAIN", "E2B_DOMAIN"); ok {
 		cfg.Domain = value
+		applied.InputAccepted = true
 		applied.Domain = true
 	}
-	cfg.Template = getenv("CRABBOX_E2B_TEMPLATE", cfg.Template)
-	cfg.Workdir = getenv("CRABBOX_E2B_WORKDIR", cfg.Workdir)
-	cfg.User = getenv("CRABBOX_E2B_USER", cfg.User)
+	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_TEMPLATE"); ok {
+		cfg.Template = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_WORKDIR"); ok {
+		cfg.Workdir = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_USER"); ok {
+		cfg.User = value
+		applied.InputAccepted = true
+	}
 	return applied, nil
 }
 
@@ -115,25 +133,30 @@ func E2BConfigFlagPresence(fs *flag.FlagSet) E2BConfigVisitedFlags {
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values E2BConfigFlagValues) Apply(cfg *E2BConfig, fs *flag.FlagSet) E2BConfigApplied {
+func (values E2BConfigFlagValues) Apply(cfg *E2BConfig, fs *flag.FlagSet) (E2BConfigApplied, error) {
 	var applied E2BConfigApplied
 	visited := E2BConfigFlagPresence(fs)
 	if visited.APIURL {
 		cfg.APIURL = *values.APIURL
+		applied.InputAccepted = true
 		applied.APIURL = true
 	}
 	if visited.Domain {
 		cfg.Domain = *values.Domain
+		applied.InputAccepted = true
 		applied.Domain = true
 	}
 	if flagWasSet(fs, "e2b-template") {
 		cfg.Template = *values.Template
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "e2b-workdir") {
 		cfg.Workdir = *values.Workdir
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "e2b-user") {
 		cfg.User = *values.User
+		applied.InputAccepted = true
 	}
-	return applied
+	return applied, nil
 }

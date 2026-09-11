@@ -19,6 +19,7 @@ func (Provider) Aliases() []string {
 }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:      core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		Name:                "islo",
 		Family:              "islo",
 		Kind:                core.ProviderKindDelegatedRun,

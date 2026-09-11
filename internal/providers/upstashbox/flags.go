@@ -22,7 +22,11 @@ func ApplyUpstashBoxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) err
 	if !ok {
 		return nil
 	}
-	v.Apply(&cfg.UpstashBox, fs)
+	applied, err := v.Apply(&cfg.UpstashBox, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	if err != nil {
+		return err
+	}
 	return validateConfig(*cfg)
 }
 

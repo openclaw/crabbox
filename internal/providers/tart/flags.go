@@ -34,27 +34,32 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if core.FlagWasSet(fs, "tart-image") {
 		cfg.Tart.Image = *v.Image
 		core.MarkTartImageExplicit(cfg)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "tart-user") {
 		cfg.Tart.User = *v.User
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "tart-cpu") {
 		if *v.CPUs < 4 {
 			return exit(2, "--tart-cpu must be at least 4 (got %d)", *v.CPUs)
 		}
 		cfg.Tart.CPUs = *v.CPUs
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "tart-memory") {
 		if *v.Memory < 4096 {
 			return exit(2, "--tart-memory must be at least 4096 MB (got %d)", *v.Memory)
 		}
 		cfg.Tart.Memory = *v.Memory
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "tart-disk") {
 		if *v.Disk < 0 {
 			return exit(2, "--tart-disk must be non-negative (got %d)", *v.Disk)
 		}
 		cfg.Tart.Disk = *v.Disk
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 		if *v.Disk > 0 {
 			core.MarkTartDiskExplicit(cfg)
 		}

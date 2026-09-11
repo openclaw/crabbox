@@ -27,8 +27,9 @@ func (cfg *AgentSandboxConfig) ExpandAppliedLocalPaths(applied AgentSandboxConfi
 	}
 }
 
-func applyAgentSandboxFileConfig(cfg *Config, file *fileAgentSandboxConfig, trusted bool) error {
+func applyAgentSandboxFileConfig(cfg *Config, file *fileAgentSandboxConfig, trusted bool, source configInputSource) error {
 	applied, err := cfg.AgentSandbox.applyFile(file, trusted)
+	recordConfigInput(cfg, "agent-sandbox", source, applied.InputAccepted)
 	cfg.AgentSandbox.ExpandAppliedLocalPaths(applied)
 	if applied.DeleteOnRelease {
 		MarkDeleteOnReleaseExplicit(cfg, "agent-sandbox")

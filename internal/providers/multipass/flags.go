@@ -16,6 +16,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		return nil
 	}
 	applied, err := v.Apply(&cfg.Multipass, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
 	if applied.Image {
 		core.MarkMultipassImageExplicit(cfg)
 	}

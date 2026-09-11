@@ -24,6 +24,7 @@ func applyCapacityMarketFlag(cfg *Config, fs *flag.FlagSet, market string) error
 	case "spot", "on-demand":
 		cfg.Capacity.Market = market
 		MarkCapacityMarketExplicit(cfg)
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 		return nil
 	default:
 		return exit(2, "--market must be spot or on-demand")
@@ -34,6 +35,7 @@ func applyServerTypeFlagOverrides(cfg *Config, fs *flag.FlagSet, serverType stri
 	if flagWasSet(fs, "type") {
 		cfg.ServerType = serverType
 		cfg.ServerTypeExplicit = true
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 		return
 	}
 	if cfg.ServerTypeExplicit {
@@ -69,6 +71,7 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 	if err != nil {
 		return err
 	}
+	markSynthesizedFlagInputs(&cfg, a.synthesizedFlagInputs)
 	if err := applyLeaseCreateFlags(&cfg, fs, leaseFlags); err != nil {
 		return err
 	}
@@ -327,7 +330,9 @@ func loadRunConfig(fs *flag.FlagSet, flags runFlagValues, target leaseFlagTarget
 	if err != nil {
 		return Config{}, err
 	}
+	markSynthesizedFlagInputs(&cfg, target.SynthesizedInputs)
 	cfg.Profile = *flags.Lease.Profile
+	recordConfigInput(&cfg, configInputGeneric, configInputFlag, flagWasSet(fs, "profile"))
 	if err := applySelectedProfileConfig(&cfg); err != nil {
 		return Config{}, err
 	}
@@ -601,7 +606,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		readyPoolIdentity = &identity
 	}
-	cfg, err := loadRunConfig(fs, runFlags, leaseFlagTarget{ID: *leaseIDFlag, Reuse: *leaseIDFlag != ""}, true, readyPoolIdentity)
+	cfg, err := loadRunConfig(fs, runFlags, leaseFlagTarget{ID: *leaseIDFlag, Reuse: *leaseIDFlag != "", SynthesizedInputs: a.synthesizedFlagInputs}, true, readyPoolIdentity)
 	if err != nil {
 		return err
 	}
@@ -710,6 +715,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	applyRunEnvAllowFlags(&cfg, allowEnvFlags)
 	if *preflightTools != "" {
 		cfg.Run.PreflightTools = parsePreflightToolsOverride(*preflightTools)
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *preflight {
 		if err := validatePreflightTools(cfg.Run.PreflightTools); err != nil {
@@ -718,15 +724,19 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	if flagWasSet(fs, "checksum") {
 		cfg.Sync.Checksum = *checksumSync
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *junitResults != "" {
 		cfg.Results.JUnit = splitCommaList(*junitResults)
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if flagWasSet(fs, "results-auto") {
 		cfg.Results.Auto = *resultsAuto
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if flagWasSet(fs, "fail-on-test-failures") {
 		cfg.Results.FailOnFailures = *failOnTestFailures
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	repo, err := findRepo()
 	if err != nil {
@@ -3009,7 +3019,9 @@ func returnReadyPoolAfterWorkspaceOwner(ctx context.Context, owner **workspaceOw
 
 func applyRunEnvAllowFlags(cfg *Config, values []string) {
 	for _, value := range values {
-		cfg.EnvAllow = appendUniqueStrings(cfg.EnvAllow, splitCommaList(value)...)
+		extra := splitCommaList(value)
+		cfg.EnvAllow = appendUniqueStrings(cfg.EnvAllow, extra...)
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, len(extra) > 0)
 	}
 }
 
@@ -4568,6 +4580,7 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if err := prepareProviderSelection(&cfg, *provider); err != nil {
 		return err
 	}
+	markSynthesizedFlagInputs(&cfg, a.synthesizedFlagInputs)
 	if *confirmedAbsentLocalCleanup {
 		resolvedProvider, err := ProviderFor(cfg.Provider)
 		if err != nil {

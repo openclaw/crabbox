@@ -57,30 +57,38 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "local-container-runtime") {
 		core.ApplyLocalContainerRuntime(cfg, *v.Runtime)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "local-container-image") {
 		core.ApplyLocalContainerImage(cfg, *v.Image)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "local-container-user") {
 		cfg.LocalContainer.User = *v.User
 		cfg.SSHUser = *v.User
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "local-container-work-root") {
 		core.ApplyLocalContainerWorkRoot(cfg, *v.WorkRoot)
 		cfg.WorkRoot = *v.WorkRoot
 		core.MarkWorkRootExplicit(cfg)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "local-container-cpus") {
 		cfg.LocalContainer.CPUs = *v.CPUs
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "local-container-memory") {
 		cfg.LocalContainer.Memory = *v.Memory
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "local-container-network") {
 		cfg.LocalContainer.Network = *v.Network
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "local-container-docker-socket") {
 		cfg.LocalContainer.DockerSocket = *v.DockerSocket
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if v.Volumes != nil && len(*v.Volumes) > 0 {
 		if idFlag := fs.Lookup("id"); idFlag != nil && strings.TrimSpace(idFlag.Value.String()) != "" {
@@ -90,6 +98,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 			return core.Exit(2, "--local-container-volume only applies when creating a new lease; omit --pool or warm a new lease")
 		}
 		cfg.LocalContainer.Volumes = []string(*v.Volumes)
+		core.RecordProviderFlagInputs(cfg, core.FlagWasSet(fs, "local-container-volume"), providerName)
 	}
 	if core.ProviderNameMatchesExact(cfg.Provider, Provider{}) {
 		applyDefaults(cfg)

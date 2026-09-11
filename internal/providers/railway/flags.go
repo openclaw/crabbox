@@ -25,6 +25,7 @@ func ApplyRailwayProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error 
 	if !ok {
 		return nil
 	}
-	v.Apply(&cfg.Railway, fs)
-	return nil
+	applied, err := v.Apply(&cfg.Railway, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	return err
 }

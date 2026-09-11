@@ -5,6 +5,7 @@ package cli
 import (
 	"flag"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -34,6 +35,7 @@ func defaultNamespaceConfig() NamespaceConfig {
 
 // NamespaceConfigApplied records accepted assignments during one application.
 type NamespaceConfigApplied struct {
+	InputAccepted   bool
 	Size            bool
 	WorkRoot        bool
 	DeleteOnRelease bool
@@ -46,29 +48,38 @@ func (cfg *NamespaceConfig) applyFile(file *fileNamespaceConfig) (NamespaceConfi
 	}
 	if file.Image != "" {
 		cfg.Image = file.Image
+		applied.InputAccepted = true
 	}
 	if file.Size != "" {
 		cfg.Size = file.Size
+		applied.InputAccepted = true
 		applied.Size = true
 	}
 	if file.Repository != "" {
 		cfg.Repository = file.Repository
+		applied.InputAccepted = true
 	}
 	if file.Site != "" {
 		cfg.Site = file.Site
+		applied.InputAccepted = true
 	}
 	if file.VolumeSizeGB > 0 {
 		cfg.VolumeSizeGB = file.VolumeSizeGB
+		applied.InputAccepted = true
 	}
 	if file.AutoStopIdleTimeout != "" {
-		applyLeaseDuration(&cfg.AutoStopIdleTimeout, file.AutoStopIdleTimeout)
+		if applyLeaseDuration(&cfg.AutoStopIdleTimeout, file.AutoStopIdleTimeout) {
+			applied.InputAccepted = true
+		}
 	}
 	if file.WorkRoot != "" {
 		cfg.WorkRoot = file.WorkRoot
+		applied.InputAccepted = true
 		applied.WorkRoot = true
 	}
 	if file.DeleteOnRelease != nil {
 		cfg.DeleteOnRelease = *file.DeleteOnRelease
+		applied.InputAccepted = true
 		applied.DeleteOnRelease = true
 	}
 	return applied, nil
@@ -76,23 +87,40 @@ func (cfg *NamespaceConfig) applyFile(file *fileNamespaceConfig) (NamespaceConfi
 
 func (cfg *NamespaceConfig) applyEnv() (NamespaceConfigApplied, error) {
 	var applied NamespaceConfigApplied
-	cfg.Image = getenv("CRABBOX_NAMESPACE_IMAGE", cfg.Image)
+	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_IMAGE"); ok {
+		cfg.Image = value
+		applied.InputAccepted = true
+	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_SIZE"); ok {
 		cfg.Size = value
+		applied.InputAccepted = true
 		applied.Size = true
 	}
-	cfg.Repository = getenv("CRABBOX_NAMESPACE_REPOSITORY", cfg.Repository)
-	cfg.Site = getenv("CRABBOX_NAMESPACE_SITE", cfg.Site)
-	cfg.VolumeSizeGB = getenvInt("CRABBOX_NAMESPACE_VOLUME_SIZE_GB", cfg.VolumeSizeGB)
+	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_REPOSITORY"); ok {
+		cfg.Repository = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_SITE"); ok {
+		cfg.Site = value
+		applied.InputAccepted = true
+	}
+	if value, ok := lookupEnvInteger("CRABBOX_NAMESPACE_VOLUME_SIZE_GB", strconv.IntSize); ok {
+		cfg.VolumeSizeGB = int(value)
+		applied.InputAccepted = true
+	}
 	if value := os.Getenv("CRABBOX_NAMESPACE_AUTO_STOP_IDLE_TIMEOUT"); value != "" {
-		applyLeaseDuration(&cfg.AutoStopIdleTimeout, value)
+		if applyLeaseDuration(&cfg.AutoStopIdleTimeout, value) {
+			applied.InputAccepted = true
+		}
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_WORK_ROOT"); ok {
 		cfg.WorkRoot = value
+		applied.InputAccepted = true
 		applied.WorkRoot = true
 	}
 	if value, ok := getenvBool("CRABBOX_NAMESPACE_DELETE_ON_RELEASE"); ok {
 		cfg.DeleteOnRelease = value
+		applied.InputAccepted = true
 		applied.DeleteOnRelease = true
 	}
 	return applied, nil
@@ -146,19 +174,24 @@ func (values NamespaceConfigFlagValues) Apply(cfg *NamespaceConfig, fs *flag.Fla
 	visited := NamespaceConfigFlagPresence(fs)
 	if flagWasSet(fs, "namespace-image") {
 		cfg.Image = *values.Image
+		applied.InputAccepted = true
 	}
 	if visited.Size {
 		cfg.Size = *values.Size
+		applied.InputAccepted = true
 		applied.Size = true
 	}
 	if flagWasSet(fs, "namespace-repository") {
 		cfg.Repository = *values.Repository
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "namespace-site") {
 		cfg.Site = *values.Site
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "namespace-volume-size-gb") {
 		cfg.VolumeSizeGB = *values.VolumeSizeGB
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "namespace-auto-stop-idle-timeout") {
 		parsed, err := time.ParseDuration(strings.TrimSpace(*values.AutoStopIdleTimeout))
@@ -166,13 +199,16 @@ func (values NamespaceConfigFlagValues) Apply(cfg *NamespaceConfig, fs *flag.Fla
 			return applied, exit(2, "%s", "namespace auto-stop idle timeout must be a positive duration")
 		}
 		cfg.AutoStopIdleTimeout = parsed
+		applied.InputAccepted = true
 	}
 	if visited.WorkRoot {
 		cfg.WorkRoot = *values.WorkRoot
+		applied.InputAccepted = true
 		applied.WorkRoot = true
 	}
 	if visited.DeleteOnRelease {
 		cfg.DeleteOnRelease = *values.DeleteOnRelease
+		applied.InputAccepted = true
 		applied.DeleteOnRelease = true
 	}
 	return applied, nil

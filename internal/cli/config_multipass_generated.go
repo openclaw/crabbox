@@ -5,6 +5,7 @@ package cli
 import (
 	"flag"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -39,9 +40,10 @@ func defaultMultipassConfig() MultipassConfig {
 
 // MultipassConfigApplied records accepted assignments during one application.
 type MultipassConfigApplied struct {
-	Image    bool
-	User     bool
-	WorkRoot bool
+	InputAccepted bool
+	Image         bool
+	User          bool
+	WorkRoot      bool
 }
 
 func (cfg *MultipassConfig) applyFile(file *fileMultipassConfig) (MultipassConfigApplied, error) {
@@ -51,54 +53,80 @@ func (cfg *MultipassConfig) applyFile(file *fileMultipassConfig) (MultipassConfi
 	}
 	if file.CLIPath != "" {
 		cfg.CLIPath = file.CLIPath
+		applied.InputAccepted = true
 	}
 	if file.Image != "" {
 		cfg.Image = file.Image
+		applied.InputAccepted = true
 		applied.Image = true
 	}
 	if file.User != "" {
 		cfg.User = file.User
+		applied.InputAccepted = true
 		applied.User = true
 	}
 	if file.WorkRoot != "" {
 		cfg.WorkRoot = file.WorkRoot
+		applied.InputAccepted = true
 		applied.WorkRoot = true
 	}
 	if file.CPUs > 0 {
 		cfg.CPUs = file.CPUs
+		applied.InputAccepted = true
 	}
 	if file.Memory != "" {
 		cfg.Memory = file.Memory
+		applied.InputAccepted = true
 	}
 	if file.Disk != "" {
 		cfg.Disk = file.Disk
+		applied.InputAccepted = true
 	}
 	if file.LaunchTimeout != "" {
-		applyLeaseDuration(&cfg.LaunchTimeout, file.LaunchTimeout)
+		if applyLeaseDuration(&cfg.LaunchTimeout, file.LaunchTimeout) {
+			applied.InputAccepted = true
+		}
 	}
 	return applied, nil
 }
 
 func (cfg *MultipassConfig) applyEnv() (MultipassConfigApplied, error) {
 	var applied MultipassConfigApplied
-	cfg.CLIPath = getenv("CRABBOX_MULTIPASS_CLI", cfg.CLIPath)
+	if value, ok := firstNonEmptyEnv("CRABBOX_MULTIPASS_CLI"); ok {
+		cfg.CLIPath = value
+		applied.InputAccepted = true
+	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_MULTIPASS_IMAGE"); ok {
 		cfg.Image = value
+		applied.InputAccepted = true
 		applied.Image = true
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_MULTIPASS_USER"); ok {
 		cfg.User = value
+		applied.InputAccepted = true
 		applied.User = true
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_MULTIPASS_WORK_ROOT"); ok {
 		cfg.WorkRoot = value
+		applied.InputAccepted = true
 		applied.WorkRoot = true
 	}
-	cfg.CPUs = getenvInt("CRABBOX_MULTIPASS_CPUS", cfg.CPUs)
-	cfg.Memory = getenv("CRABBOX_MULTIPASS_MEMORY", cfg.Memory)
-	cfg.Disk = getenv("CRABBOX_MULTIPASS_DISK", cfg.Disk)
+	if value, ok := lookupEnvInteger("CRABBOX_MULTIPASS_CPUS", strconv.IntSize); ok {
+		cfg.CPUs = int(value)
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_MULTIPASS_MEMORY"); ok {
+		cfg.Memory = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_MULTIPASS_DISK"); ok {
+		cfg.Disk = value
+		applied.InputAccepted = true
+	}
 	if value := os.Getenv("CRABBOX_MULTIPASS_LAUNCH_TIMEOUT"); value != "" {
-		applyLeaseDuration(&cfg.LaunchTimeout, value)
+		if applyLeaseDuration(&cfg.LaunchTimeout, value) {
+			applied.InputAccepted = true
+		}
 	}
 	return applied, nil
 }
@@ -151,31 +179,40 @@ func (values MultipassConfigFlagValues) Apply(cfg *MultipassConfig, fs *flag.Fla
 	visited := MultipassConfigFlagPresence(fs)
 	if flagWasSet(fs, "multipass-cli") {
 		cfg.CLIPath = *values.CLIPath
+		applied.InputAccepted = true
 	}
 	if visited.Image {
 		cfg.Image = *values.Image
+		applied.InputAccepted = true
 		applied.Image = true
 	}
 	if visited.User {
 		cfg.User = *values.User
+		applied.InputAccepted = true
 		applied.User = true
 	}
 	if visited.WorkRoot {
 		cfg.WorkRoot = *values.WorkRoot
+		applied.InputAccepted = true
 		applied.WorkRoot = true
 	}
 	if flagWasSet(fs, "multipass-cpus") {
 		cfg.CPUs = *values.CPUs
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "multipass-memory") {
 		cfg.Memory = *values.Memory
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "multipass-disk") {
 		cfg.Disk = *values.Disk
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "multipass-launch-timeout") {
 		if err := ApplyLeaseDuration(&cfg.LaunchTimeout, *values.LaunchTimeout); err != nil {
 			return applied, err
+		} else if *values.LaunchTimeout != "" {
+			applied.InputAccepted = true
 		}
 	}
 	return applied, nil

@@ -22,8 +22,9 @@ type CoderConfig struct {
 	RichParameterFile    string   `config:"richParameterFile" env:"CRABBOX_CODER_RICH_PARAMETER_FILE" flag:"coder-rich-parameter-file" sources:"user,repo,env,flag" help:"Coder rich parameter file" fileIgnoreEmpty:"true" fileStorage:"value" reportApplied:"true"`
 }
 
-func applyCoderFileConfig(cfg *Config, file *fileCoderConfig) error {
+func applyCoderFileConfig(cfg *Config, file *fileCoderConfig, source configInputSource) error {
 	applied, err := cfg.Coder.applyFile(file)
+	recordConfigInput(cfg, "coder", source, applied.InputAccepted)
 	// Non-fallible, independent overlays do not observe these paths before expansion.
 	if applied.CLIPath {
 		cfg.Coder.CLIPath = expandUserPath(cfg.Coder.CLIPath)

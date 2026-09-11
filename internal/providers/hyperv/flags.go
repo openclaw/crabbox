@@ -35,24 +35,31 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "hyperv-image") {
 		cfg.HyperV.Image = *v.Image
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "hyperv-user") {
 		cfg.HyperV.User = *v.User
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "hyperv-work-root") {
 		cfg.HyperV.WorkRoot = *v.WorkRoot
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "hyperv-cpu") {
 		cfg.HyperV.CPUs = *v.CPUs
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "hyperv-memory") {
 		cfg.HyperV.Memory = *v.Memory
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "hyperv-switch") {
 		cfg.HyperV.Switch = *v.Switch
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "hyperv-init-password") {
 		cfg.HyperV.InitPassword = *v.InitPassword
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		// Target flags are applied after provider flags on several lifecycle

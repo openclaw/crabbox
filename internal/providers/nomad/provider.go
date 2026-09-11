@@ -21,6 +21,10 @@ func (Provider) ServerTypeForClass(string) string       { return "" }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication: core.ProviderAuthentication{
+			{Route: "acl-enabled", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationAPIToken}, Description: "ACL-enabled clusters use a Nomad ACL token."},
+			{Route: "acl-disabled", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationNone}, Description: "Documented ACL-disabled local or development clusters may omit the token; this does not identify the current cluster's mode."},
+		},
 		SyncGuardrailFullCandidate: true,
 		Name:                       providerName,
 		Family:                     providerName,

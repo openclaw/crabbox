@@ -50,6 +50,7 @@ func ApplyGitHubCodespacesProviderFlags(cfg *Config, fs *flag.FlagSet, values an
 		if core.FlagWasSet(fs, "type") && !core.FlagWasSet(fs, "github-codespaces-machine") {
 			if flag := fs.Lookup("type"); flag != nil {
 				cfg.GitHubCodespaces.Machine = strings.TrimSpace(flag.Value.String())
+				core.RecordProviderFlagInputs(cfg, true, providerName)
 			}
 		}
 	}
@@ -59,40 +60,51 @@ func ApplyGitHubCodespacesProviderFlags(cfg *Config, fs *flag.FlagSet, values an
 	}
 	if core.FlagWasSet(fs, "github-codespaces-repo") {
 		cfg.GitHubCodespaces.Repo = *v.Repo
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "github-codespaces-ref") {
 		cfg.GitHubCodespaces.Ref = *v.Ref
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "github-codespaces-machine") {
 		cfg.GitHubCodespaces.Machine = *v.Machine
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 		cfg.ServerType = strings.TrimSpace(*v.Machine)
 		cfg.ServerTypeExplicit = true
 	}
 	if core.FlagWasSet(fs, "github-codespaces-devcontainer-path") {
 		cfg.GitHubCodespaces.DevcontainerPath = *v.Devcontainer
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "github-codespaces-working-directory") {
 		cfg.GitHubCodespaces.WorkingDirectory = *v.WorkingDir
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "github-codespaces-geo") {
 		cfg.GitHubCodespaces.Geo = *v.Geo
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "github-codespaces-idle-timeout") {
 		cfg.GitHubCodespaces.IdleTimeout = *v.IdleTimeout
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "github-codespaces-retention-period") {
 		cfg.GitHubCodespaces.RetentionPeriod = *v.RetentionPeriod
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 		markRetentionPeriodExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "github-codespaces-delete-on-release") {
 		cfg.GitHubCodespaces.DeleteOnRelease = *v.DeleteOnRelease
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 		markDeleteOnReleaseExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "github-codespaces-gh-path") {
 		cfg.GitHubCodespaces.GHPath = *v.GHPath
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "github-codespaces-work-root") {
 		cfg.GitHubCodespaces.WorkRoot = *v.WorkRoot
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 		cfg.WorkRoot = *v.WorkRoot
 		markWorkRootExplicit(cfg)
 	}

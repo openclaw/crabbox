@@ -25,49 +25,76 @@ func defaultCloudflareSandboxConfig() CloudflareSandboxConfig {
 	}
 }
 
-func (cfg *CloudflareSandboxConfig) applyFile(file *fileCloudflareSandboxConfig, trusted bool) error {
+// CloudflareSandboxConfigApplied records accepted assignments during one application.
+type CloudflareSandboxConfigApplied struct {
+	InputAccepted bool
+}
+
+func (cfg *CloudflareSandboxConfig) applyFile(file *fileCloudflareSandboxConfig, trusted bool) (CloudflareSandboxConfigApplied, error) {
+	var applied CloudflareSandboxConfigApplied
 	if file == nil {
-		return nil
+		return applied, nil
 	}
 	if trusted && file.BridgeURL != nil {
 		cfg.BridgeURL = *file.BridgeURL
+		applied.InputAccepted = true
 	}
 	if trusted && file.BridgeURLConfigAlias != nil {
 		cfg.BridgeURL = *file.BridgeURLConfigAlias
+		applied.InputAccepted = true
 	}
 	if trusted && file.Token != nil {
 		cfg.Token = *file.Token
+		applied.InputAccepted = true
 	}
 	if file.Workdir != nil {
 		cfg.Workdir = *file.Workdir
+		applied.InputAccepted = true
 	}
 	if file.ExecTimeoutSecs != nil {
 		if *file.ExecTimeoutSecs < 0 {
-			return exit(2, "cloudflare-sandbox execTimeoutSecs must be non-negative")
+			return applied, exit(2, "cloudflare-sandbox execTimeoutSecs must be non-negative")
 		}
 		cfg.ExecTimeoutSecs = *file.ExecTimeoutSecs
+		applied.InputAccepted = true
 	}
 	if file.ForgetMissing != nil {
 		cfg.ForgetMissing = *file.ForgetMissing
+		applied.InputAccepted = true
 	}
-	return nil
+	return applied, nil
 }
 
-func (cfg *CloudflareSandboxConfig) applyEnv() error {
-	cfg.BridgeURL = getenv("CRABBOX_CLOUDFLARE_SANDBOX_URL", cfg.BridgeURL)
-	cfg.Token = getenv("CRABBOX_CLOUDFLARE_SANDBOX_TOKEN", cfg.Token)
-	cfg.Workdir = getenv("CRABBOX_CLOUDFLARE_SANDBOX_WORKDIR", cfg.Workdir)
+func (cfg *CloudflareSandboxConfig) applyEnv() (CloudflareSandboxConfigApplied, error) {
+	var applied CloudflareSandboxConfigApplied
+	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUDFLARE_SANDBOX_URL"); ok {
+		cfg.BridgeURL = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUDFLARE_SANDBOX_TOKEN"); ok {
+		cfg.Token = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUDFLARE_SANDBOX_WORKDIR"); ok {
+		cfg.Workdir = value
+		applied.InputAccepted = true
+	}
 	{
+		var accepted bool
 		var err error
-		cfg.ExecTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_CLOUDFLARE_SANDBOX_EXEC_TIMEOUT_SECS", cfg.ExecTimeoutSecs)
+		cfg.ExecTimeoutSecs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_CLOUDFLARE_SANDBOX_EXEC_TIMEOUT_SECS", cfg.ExecTimeoutSecs)
 		if err != nil {
-			return err
+			return applied, err
+		}
+		if accepted {
+			applied.InputAccepted = true
 		}
 	}
 	if value, ok := getenvBool("CRABBOX_CLOUDFLARE_SANDBOX_FORGET_MISSING"); ok {
 		cfg.ForgetMissing = value
+		applied.InputAccepted = true
 	}
-	return nil
+	return applied, nil
 }
 
 // CloudflareSandboxConfigFlagValues holds parsed values; only visited flags are applied.
@@ -89,17 +116,23 @@ func RegisterCloudflareSandboxConfigFlags(fs *flag.FlagSet, defaults CloudflareS
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values CloudflareSandboxConfigFlagValues) Apply(cfg *CloudflareSandboxConfig, fs *flag.FlagSet) {
+func (values CloudflareSandboxConfigFlagValues) Apply(cfg *CloudflareSandboxConfig, fs *flag.FlagSet) (CloudflareSandboxConfigApplied, error) {
+	var applied CloudflareSandboxConfigApplied
 	if flagWasSet(fs, "cloudflare-sandbox-url") {
 		cfg.BridgeURL = *values.BridgeURL
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "cloudflare-sandbox-workdir") {
 		cfg.Workdir = *values.Workdir
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "cloudflare-sandbox-exec-timeout-secs") {
 		cfg.ExecTimeoutSecs = *values.ExecTimeoutSecs
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "cloudflare-sandbox-forget-missing") {
 		cfg.ForgetMissing = *values.ForgetMissing
+		applied.InputAccepted = true
 	}
+	return applied, nil
 }

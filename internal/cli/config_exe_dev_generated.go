@@ -4,6 +4,7 @@ package cli
 
 import (
 	"flag"
+	"strconv"
 )
 
 type fileExeDevConfig struct {
@@ -36,7 +37,8 @@ func defaultExeDevConfig() ExeDevConfig {
 
 // ExeDevConfigApplied records accepted assignments during one application.
 type ExeDevConfigApplied struct {
-	ControlHost bool
+	InputAccepted bool
+	ControlHost   bool
 }
 
 func (cfg *ExeDevConfig) applyFile(file *fileExeDevConfig) (ExeDevConfigApplied, error) {
@@ -46,31 +48,40 @@ func (cfg *ExeDevConfig) applyFile(file *fileExeDevConfig) (ExeDevConfigApplied,
 	}
 	if file.ControlHost != "" {
 		cfg.ControlHost = file.ControlHost
+		applied.InputAccepted = true
 		applied.ControlHost = true
 	}
 	if file.Image != "" {
 		cfg.Image = file.Image
+		applied.InputAccepted = true
 	}
 	if file.CPUs > 0 {
 		cfg.CPUs = file.CPUs
+		applied.InputAccepted = true
 	}
 	if file.Memory != "" {
 		cfg.Memory = file.Memory
+		applied.InputAccepted = true
 	}
 	if file.Disk != "" {
 		cfg.Disk = file.Disk
+		applied.InputAccepted = true
 	}
 	if file.Command != "" {
 		cfg.Command = file.Command
+		applied.InputAccepted = true
 	}
 	if file.User != "" {
 		cfg.User = file.User
+		applied.InputAccepted = true
 	}
 	if file.WorkRoot != "" {
 		cfg.WorkRoot = file.WorkRoot
+		applied.InputAccepted = true
 	}
 	if file.NoEmail != nil {
 		cfg.NoEmail = *file.NoEmail
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }
@@ -79,17 +90,40 @@ func (cfg *ExeDevConfig) applyEnv() (ExeDevConfigApplied, error) {
 	var applied ExeDevConfigApplied
 	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_CONTROL_HOST", "EXE_DEV_CONTROL_HOST"); ok {
 		cfg.ControlHost = value
+		applied.InputAccepted = true
 		applied.ControlHost = true
 	}
-	cfg.Image = getenv("CRABBOX_EXE_DEV_IMAGE", getenv("EXE_DEV_IMAGE", cfg.Image))
-	cfg.CPUs = getenvInt("CRABBOX_EXE_DEV_CPUS", cfg.CPUs)
-	cfg.Memory = getenv("CRABBOX_EXE_DEV_MEMORY", getenv("EXE_DEV_MEMORY", cfg.Memory))
-	cfg.Disk = getenv("CRABBOX_EXE_DEV_DISK", getenv("EXE_DEV_DISK", cfg.Disk))
-	cfg.Command = getenv("CRABBOX_EXE_DEV_COMMAND", cfg.Command)
-	cfg.User = getenv("CRABBOX_EXE_DEV_USER", cfg.User)
-	cfg.WorkRoot = getenv("CRABBOX_EXE_DEV_WORK_ROOT", cfg.WorkRoot)
+	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_IMAGE", "EXE_DEV_IMAGE"); ok {
+		cfg.Image = value
+		applied.InputAccepted = true
+	}
+	if value, ok := lookupEnvInteger("CRABBOX_EXE_DEV_CPUS", strconv.IntSize); ok {
+		cfg.CPUs = int(value)
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_MEMORY", "EXE_DEV_MEMORY"); ok {
+		cfg.Memory = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_DISK", "EXE_DEV_DISK"); ok {
+		cfg.Disk = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_COMMAND"); ok {
+		cfg.Command = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_USER"); ok {
+		cfg.User = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_WORK_ROOT"); ok {
+		cfg.WorkRoot = value
+		applied.InputAccepted = true
+	}
 	if value, ok := getenvBool("CRABBOX_EXE_DEV_NO_EMAIL"); ok {
 		cfg.NoEmail = value
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }
@@ -135,36 +169,45 @@ func ExeDevConfigFlagPresence(fs *flag.FlagSet) ExeDevConfigVisitedFlags {
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values ExeDevConfigFlagValues) Apply(cfg *ExeDevConfig, fs *flag.FlagSet) ExeDevConfigApplied {
+func (values ExeDevConfigFlagValues) Apply(cfg *ExeDevConfig, fs *flag.FlagSet) (ExeDevConfigApplied, error) {
 	var applied ExeDevConfigApplied
 	visited := ExeDevConfigFlagPresence(fs)
 	if visited.ControlHost {
 		cfg.ControlHost = *values.ControlHost
+		applied.InputAccepted = true
 		applied.ControlHost = true
 	}
 	if flagWasSet(fs, "exe-dev-image") {
 		cfg.Image = *values.Image
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "exe-dev-cpus") {
 		cfg.CPUs = *values.CPUs
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "exe-dev-memory") {
 		cfg.Memory = *values.Memory
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "exe-dev-disk") {
 		cfg.Disk = *values.Disk
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "exe-dev-command") {
 		cfg.Command = *values.Command
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "exe-dev-user") {
 		cfg.User = *values.User
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "exe-dev-work-root") {
 		cfg.WorkRoot = *values.WorkRoot
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "exe-dev-no-email") {
 		cfg.NoEmail = *values.NoEmail
+		applied.InputAccepted = true
 	}
-	return applied
+	return applied, nil
 }

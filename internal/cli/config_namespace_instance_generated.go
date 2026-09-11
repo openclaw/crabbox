@@ -34,7 +34,8 @@ func defaultNamespaceInstanceConfig() NamespaceInstanceConfig {
 
 // NamespaceInstanceConfigApplied records accepted assignments during one application.
 type NamespaceInstanceConfigApplied struct {
-	CLIPath bool
+	InputAccepted bool
+	CLIPath       bool
 }
 
 func (cfg *NamespaceInstanceConfig) applyFile(file *fileNamespaceInstanceConfig, trusted bool) (NamespaceInstanceConfigApplied, error) {
@@ -44,31 +45,41 @@ func (cfg *NamespaceInstanceConfig) applyFile(file *fileNamespaceInstanceConfig,
 	}
 	if trusted && file.CLIPath != "" {
 		cfg.CLIPath = file.CLIPath
+		applied.InputAccepted = true
 		applied.CLIPath = true
 	}
 	if file.MachineType != "" {
 		cfg.MachineType = file.MachineType
+		applied.InputAccepted = true
 	}
 	if file.Duration != "" {
-		applyLeaseDuration(&cfg.Duration, file.Duration)
+		if applyLeaseDuration(&cfg.Duration, file.Duration) {
+			applied.InputAccepted = true
+		}
 	}
 	if trusted && file.Region != "" {
 		cfg.Region = file.Region
+		applied.InputAccepted = true
 	}
 	if trusted && file.Endpoint != "" {
 		cfg.Endpoint = file.Endpoint
+		applied.InputAccepted = true
 	}
 	if trusted && file.Keychain != "" {
 		cfg.Keychain = file.Keychain
+		applied.InputAccepted = true
 	}
 	if trusted && file.Volumes != nil {
 		cfg.Volumes = append([]string(nil), (file.Volumes)...)
+		applied.InputAccepted = true
 	}
 	if file.WorkRoot != "" {
 		cfg.WorkRoot = file.WorkRoot
+		applied.InputAccepted = true
 	}
 	if file.Bare != nil {
 		cfg.Bare = *file.Bare
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }
@@ -77,21 +88,41 @@ func (cfg *NamespaceInstanceConfig) applyEnv() (NamespaceInstanceConfigApplied, 
 	var applied NamespaceInstanceConfigApplied
 	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_INSTANCE_CLI"); ok {
 		cfg.CLIPath = value
+		applied.InputAccepted = true
 		applied.CLIPath = true
 	}
-	cfg.MachineType = getenv("CRABBOX_NAMESPACE_INSTANCE_MACHINE_TYPE", cfg.MachineType)
-	if value := os.Getenv("CRABBOX_NAMESPACE_INSTANCE_DURATION"); value != "" {
-		applyLeaseDuration(&cfg.Duration, value)
+	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_INSTANCE_MACHINE_TYPE"); ok {
+		cfg.MachineType = value
+		applied.InputAccepted = true
 	}
-	cfg.Region = getenv("CRABBOX_NAMESPACE_INSTANCE_REGION", cfg.Region)
-	cfg.Endpoint = getenv("CRABBOX_NAMESPACE_INSTANCE_ENDPOINT", cfg.Endpoint)
-	cfg.Keychain = getenv("CRABBOX_NAMESPACE_INSTANCE_KEYCHAIN", cfg.Keychain)
+	if value := os.Getenv("CRABBOX_NAMESPACE_INSTANCE_DURATION"); value != "" {
+		if applyLeaseDuration(&cfg.Duration, value) {
+			applied.InputAccepted = true
+		}
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_INSTANCE_REGION"); ok {
+		cfg.Region = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_INSTANCE_ENDPOINT"); ok {
+		cfg.Endpoint = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_INSTANCE_KEYCHAIN"); ok {
+		cfg.Keychain = value
+		applied.InputAccepted = true
+	}
 	if value, ok := getenvList("CRABBOX_NAMESPACE_INSTANCE_VOLUMES"); ok {
 		cfg.Volumes = value
+		applied.InputAccepted = true
 	}
-	cfg.WorkRoot = getenv("CRABBOX_NAMESPACE_INSTANCE_WORK_ROOT", cfg.WorkRoot)
+	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_INSTANCE_WORK_ROOT"); ok {
+		cfg.WorkRoot = value
+		applied.InputAccepted = true
+	}
 	if value, ok := getenvBool("CRABBOX_NAMESPACE_INSTANCE_BARE"); ok {
 		cfg.Bare = value
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }
@@ -145,35 +176,46 @@ func (values NamespaceInstanceConfigFlagValues) Apply(cfg *NamespaceInstanceConf
 	visited := NamespaceInstanceConfigFlagPresence(fs)
 	if visited.CLIPath {
 		cfg.CLIPath = *values.CLIPath
+		applied.InputAccepted = true
 		applied.CLIPath = true
 	}
 	if flagWasSet(fs, "namespace-instance-machine-type") {
 		cfg.MachineType = *values.MachineType
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "namespace-instance-duration") {
 		if strings.TrimSpace(*values.Duration) == "0s" {
 			cfg.Duration = 0
+			applied.InputAccepted = true
 		} else if err := ApplyLeaseDuration(&cfg.Duration, *values.Duration); err != nil {
 			return applied, err
+		} else if *values.Duration != "" {
+			applied.InputAccepted = true
 		}
 	}
 	if flagWasSet(fs, "namespace-instance-region") {
 		cfg.Region = *values.Region
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "namespace-instance-endpoint") {
 		cfg.Endpoint = *values.Endpoint
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "namespace-instance-keychain") {
 		cfg.Keychain = *values.Keychain
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "namespace-instance-volume") {
 		cfg.Volumes = append([]string(nil), values.Volumes.stringListFlag...)
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "namespace-instance-work-root") {
 		cfg.WorkRoot = *values.WorkRoot
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "namespace-instance-bare") {
 		cfg.Bare = *values.Bare
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }

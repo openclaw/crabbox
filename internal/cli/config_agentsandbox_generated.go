@@ -45,6 +45,7 @@ func defaultAgentSandboxConfig() AgentSandboxConfig {
 
 // AgentSandboxConfigApplied records accepted assignments during one application.
 type AgentSandboxConfigApplied struct {
+	InputAccepted   bool
 	Kubeconfig      bool
 	DeleteOnRelease bool
 }
@@ -56,79 +57,122 @@ func (cfg *AgentSandboxConfig) applyFile(file *fileAgentSandboxConfig, trusted b
 	}
 	if trusted && file.Kubectl != "" {
 		cfg.Kubectl = file.Kubectl
+		applied.InputAccepted = true
 	}
 	if trusted && file.Kubeconfig != "" {
 		cfg.Kubeconfig = file.Kubeconfig
+		applied.InputAccepted = true
 		applied.Kubeconfig = true
 	}
 	if trusted && file.Context != "" {
 		cfg.Context = file.Context
+		applied.InputAccepted = true
 	}
 	if trusted && file.Namespace != "" {
 		cfg.Namespace = file.Namespace
+		applied.InputAccepted = true
 	}
 	if trusted && file.WarmPool != "" {
 		cfg.WarmPool = file.WarmPool
+		applied.InputAccepted = true
 	}
 	if trusted && file.Container != "" {
 		cfg.Container = file.Container
+		applied.InputAccepted = true
 	}
 	if trusted && file.Workdir != "" {
 		cfg.Workdir = file.Workdir
+		applied.InputAccepted = true
 	}
 	if file.SandboxReadyTimeout != "" {
-		applyLeaseDuration(&cfg.SandboxReadyTimeout, file.SandboxReadyTimeout)
+		if applyLeaseDuration(&cfg.SandboxReadyTimeout, file.SandboxReadyTimeout) {
+			applied.InputAccepted = true
+		}
 	}
 	if file.PodReadyTimeout != "" {
-		applyLeaseDuration(&cfg.PodReadyTimeout, file.PodReadyTimeout)
+		if applyLeaseDuration(&cfg.PodReadyTimeout, file.PodReadyTimeout) {
+			applied.InputAccepted = true
+		}
 	}
 	if file.ExecTimeoutSecs != nil {
 		if *file.ExecTimeoutSecs < 0 {
 			return applied, exit(2, "agentSandbox execTimeoutSecs must be non-negative")
 		}
 		cfg.ExecTimeoutSecs = *file.ExecTimeoutSecs
+		applied.InputAccepted = true
 	}
 	if file.DeleteOnRelease != nil {
 		cfg.DeleteOnRelease = *file.DeleteOnRelease
+		applied.InputAccepted = true
 		applied.DeleteOnRelease = true
 	}
 	if file.ForgetMissing != nil {
 		cfg.ForgetMissing = *file.ForgetMissing
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }
 
 func (cfg *AgentSandboxConfig) applyEnv() (AgentSandboxConfigApplied, error) {
 	var applied AgentSandboxConfigApplied
-	cfg.Kubectl = getenv("CRABBOX_AGENT_SANDBOX_KUBECTL", cfg.Kubectl)
+	if value, ok := firstNonEmptyEnv("CRABBOX_AGENT_SANDBOX_KUBECTL"); ok {
+		cfg.Kubectl = value
+		applied.InputAccepted = true
+	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_AGENT_SANDBOX_KUBECONFIG"); ok {
 		cfg.Kubeconfig = value
+		applied.InputAccepted = true
 		applied.Kubeconfig = true
 	}
-	cfg.Context = getenv("CRABBOX_AGENT_SANDBOX_CONTEXT", cfg.Context)
-	cfg.Namespace = getenv("CRABBOX_AGENT_SANDBOX_NAMESPACE", cfg.Namespace)
-	cfg.WarmPool = getenv("CRABBOX_AGENT_SANDBOX_WARM_POOL", cfg.WarmPool)
-	cfg.Container = getenv("CRABBOX_AGENT_SANDBOX_CONTAINER", cfg.Container)
-	cfg.Workdir = getenv("CRABBOX_AGENT_SANDBOX_WORKDIR", cfg.Workdir)
+	if value, ok := firstNonEmptyEnv("CRABBOX_AGENT_SANDBOX_CONTEXT"); ok {
+		cfg.Context = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_AGENT_SANDBOX_NAMESPACE"); ok {
+		cfg.Namespace = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_AGENT_SANDBOX_WARM_POOL"); ok {
+		cfg.WarmPool = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_AGENT_SANDBOX_CONTAINER"); ok {
+		cfg.Container = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_AGENT_SANDBOX_WORKDIR"); ok {
+		cfg.Workdir = value
+		applied.InputAccepted = true
+	}
 	if value := os.Getenv("CRABBOX_AGENT_SANDBOX_SANDBOX_READY_TIMEOUT"); value != "" {
-		applyLeaseDuration(&cfg.SandboxReadyTimeout, value)
+		if applyLeaseDuration(&cfg.SandboxReadyTimeout, value) {
+			applied.InputAccepted = true
+		}
 	}
 	if value := os.Getenv("CRABBOX_AGENT_SANDBOX_POD_READY_TIMEOUT"); value != "" {
-		applyLeaseDuration(&cfg.PodReadyTimeout, value)
+		if applyLeaseDuration(&cfg.PodReadyTimeout, value) {
+			applied.InputAccepted = true
+		}
 	}
 	{
+		var accepted bool
 		var err error
-		cfg.ExecTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_AGENT_SANDBOX_EXEC_TIMEOUT_SECS", cfg.ExecTimeoutSecs)
+		cfg.ExecTimeoutSecs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_AGENT_SANDBOX_EXEC_TIMEOUT_SECS", cfg.ExecTimeoutSecs)
 		if err != nil {
 			return applied, err
+		}
+		if accepted {
+			applied.InputAccepted = true
 		}
 	}
 	if value, ok := getenvBool("CRABBOX_AGENT_SANDBOX_DELETE_ON_RELEASE"); ok {
 		cfg.DeleteOnRelease = value
+		applied.InputAccepted = true
 		applied.DeleteOnRelease = true
 	}
 	if value, ok := getenvBool("CRABBOX_AGENT_SANDBOX_FORGET_MISSING"); ok {
 		cfg.ForgetMissing = value
+		applied.InputAccepted = true
 	}
 	return applied, nil
 }
@@ -182,46 +226,58 @@ func AgentSandboxConfigFlagPresence(fs *flag.FlagSet) AgentSandboxConfigVisitedF
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values AgentSandboxConfigFlagValues) Apply(cfg *AgentSandboxConfig, fs *flag.FlagSet) AgentSandboxConfigApplied {
+func (values AgentSandboxConfigFlagValues) Apply(cfg *AgentSandboxConfig, fs *flag.FlagSet) (AgentSandboxConfigApplied, error) {
 	var applied AgentSandboxConfigApplied
 	visited := AgentSandboxConfigFlagPresence(fs)
 	if flagWasSet(fs, "agent-sandbox-kubectl") {
 		cfg.Kubectl = *values.Kubectl
+		applied.InputAccepted = true
 	}
 	if visited.Kubeconfig {
 		cfg.Kubeconfig = *values.Kubeconfig
+		applied.InputAccepted = true
 		applied.Kubeconfig = true
 	}
 	if flagWasSet(fs, "agent-sandbox-context") {
 		cfg.Context = *values.Context
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "agent-sandbox-namespace") {
 		cfg.Namespace = *values.Namespace
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "agent-sandbox-warm-pool") {
 		cfg.WarmPool = *values.WarmPool
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "agent-sandbox-container") {
 		cfg.Container = *values.Container
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "agent-sandbox-workdir") {
 		cfg.Workdir = *values.Workdir
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "agent-sandbox-sandbox-ready-timeout") {
 		cfg.SandboxReadyTimeout = *values.SandboxReadyTimeout
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "agent-sandbox-pod-ready-timeout") {
 		cfg.PodReadyTimeout = *values.PodReadyTimeout
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "agent-sandbox-exec-timeout-secs") {
 		cfg.ExecTimeoutSecs = *values.ExecTimeoutSecs
+		applied.InputAccepted = true
 	}
 	if visited.DeleteOnRelease {
 		cfg.DeleteOnRelease = *values.DeleteOnRelease
+		applied.InputAccepted = true
 		applied.DeleteOnRelease = true
 	}
 	if flagWasSet(fs, "agent-sandbox-forget-missing") {
 		cfg.ForgetMissing = *values.ForgetMissing
+		applied.InputAccepted = true
 	}
-	return applied
+	return applied, nil
 }

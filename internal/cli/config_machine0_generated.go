@@ -5,6 +5,7 @@ package cli
 import (
 	"flag"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -44,8 +45,9 @@ func defaultMachine0Config() Machine0Config {
 
 // Machine0ConfigApplied records accepted assignments during one application.
 type Machine0ConfigApplied struct {
-	Size     bool
-	WorkRoot bool
+	InputAccepted bool
+	Size          bool
+	WorkRoot      bool
 }
 
 func (cfg *Machine0Config) applyFile(file *fileMachine0Config) (Machine0ConfigApplied, error) {
@@ -55,64 +57,104 @@ func (cfg *Machine0Config) applyFile(file *fileMachine0Config) (Machine0ConfigAp
 	}
 	if file.CLIPath != "" {
 		cfg.CLIPath = file.CLIPath
+		applied.InputAccepted = true
 	}
 	if file.Image != "" {
 		cfg.Image = file.Image
+		applied.InputAccepted = true
 	}
 	if file.ImageVersion != nil {
 		cfg.ImageVersion = *file.ImageVersion
+		applied.InputAccepted = true
 	}
 	if file.DesktopImage != "" {
 		cfg.DesktopImage = file.DesktopImage
+		applied.InputAccepted = true
 	}
 	if file.Size != "" {
 		cfg.Size = file.Size
+		applied.InputAccepted = true
 		applied.Size = true
 	}
 	if file.Region != "" {
 		cfg.Region = file.Region
+		applied.InputAccepted = true
 	}
 	if file.Key != "" {
 		cfg.Key = file.Key
+		applied.InputAccepted = true
 	}
 	if file.WorkRoot != "" {
 		cfg.WorkRoot = file.WorkRoot
+		applied.InputAccepted = true
 		applied.WorkRoot = true
 	}
 	if file.ReleasePolicy != "" {
 		cfg.ReleasePolicy = file.ReleasePolicy
+		applied.InputAccepted = true
 	}
 	if file.CreateTimeout != "" {
-		applyLeaseDuration(&cfg.CreateTimeout, file.CreateTimeout)
+		if applyLeaseDuration(&cfg.CreateTimeout, file.CreateTimeout) {
+			applied.InputAccepted = true
+		}
 	}
 	if file.PollInterval != "" {
-		applyLeaseDuration(&cfg.PollInterval, file.PollInterval)
+		if applyLeaseDuration(&cfg.PollInterval, file.PollInterval) {
+			applied.InputAccepted = true
+		}
 	}
 	return applied, nil
 }
 
 func (cfg *Machine0Config) applyEnv() (Machine0ConfigApplied, error) {
 	var applied Machine0ConfigApplied
-	cfg.CLIPath = getenv("CRABBOX_MACHINE0_CLI", cfg.CLIPath)
-	cfg.Image = getenv("CRABBOX_MACHINE0_IMAGE", cfg.Image)
-	cfg.ImageVersion = getenvInt("CRABBOX_MACHINE0_IMAGE_VERSION", cfg.ImageVersion)
-	cfg.DesktopImage = getenv("CRABBOX_MACHINE0_DESKTOP_IMAGE", cfg.DesktopImage)
+	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_CLI"); ok {
+		cfg.CLIPath = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_IMAGE"); ok {
+		cfg.Image = value
+		applied.InputAccepted = true
+	}
+	if value, ok := lookupEnvInteger("CRABBOX_MACHINE0_IMAGE_VERSION", strconv.IntSize); ok {
+		cfg.ImageVersion = int(value)
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_DESKTOP_IMAGE"); ok {
+		cfg.DesktopImage = value
+		applied.InputAccepted = true
+	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_SIZE"); ok {
 		cfg.Size = value
+		applied.InputAccepted = true
 		applied.Size = true
 	}
-	cfg.Region = getenv("CRABBOX_MACHINE0_REGION", cfg.Region)
-	cfg.Key = getenv("CRABBOX_MACHINE0_KEY", cfg.Key)
+	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_REGION"); ok {
+		cfg.Region = value
+		applied.InputAccepted = true
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_KEY"); ok {
+		cfg.Key = value
+		applied.InputAccepted = true
+	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_WORK_ROOT"); ok {
 		cfg.WorkRoot = value
+		applied.InputAccepted = true
 		applied.WorkRoot = true
 	}
-	cfg.ReleasePolicy = getenv("CRABBOX_MACHINE0_RELEASE_POLICY", cfg.ReleasePolicy)
+	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_RELEASE_POLICY"); ok {
+		cfg.ReleasePolicy = value
+		applied.InputAccepted = true
+	}
 	if value := os.Getenv("CRABBOX_MACHINE0_CREATE_TIMEOUT"); value != "" {
-		applyLeaseDuration(&cfg.CreateTimeout, value)
+		if applyLeaseDuration(&cfg.CreateTimeout, value) {
+			applied.InputAccepted = true
+		}
 	}
 	if value := os.Getenv("CRABBOX_MACHINE0_POLL_INTERVAL"); value != "" {
-		applyLeaseDuration(&cfg.PollInterval, value)
+		if applyLeaseDuration(&cfg.PollInterval, value) {
+			applied.InputAccepted = true
+		}
 	}
 	return applied, nil
 }
@@ -169,41 +211,54 @@ func (values Machine0ConfigFlagValues) Apply(cfg *Machine0Config, fs *flag.FlagS
 	visited := Machine0ConfigFlagPresence(fs)
 	if flagWasSet(fs, "machine0-cli") {
 		cfg.CLIPath = *values.CLIPath
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "machine0-image") {
 		cfg.Image = *values.Image
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "machine0-image-version") {
 		cfg.ImageVersion = *values.ImageVersion
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "machine0-desktop-image") {
 		cfg.DesktopImage = *values.DesktopImage
+		applied.InputAccepted = true
 	}
 	if visited.Size {
 		cfg.Size = *values.Size
+		applied.InputAccepted = true
 		applied.Size = true
 	}
 	if flagWasSet(fs, "machine0-region") {
 		cfg.Region = *values.Region
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "machine0-key") {
 		cfg.Key = *values.Key
+		applied.InputAccepted = true
 	}
 	if visited.WorkRoot {
 		cfg.WorkRoot = *values.WorkRoot
+		applied.InputAccepted = true
 		applied.WorkRoot = true
 	}
 	if flagWasSet(fs, "machine0-release-policy") {
 		cfg.ReleasePolicy = *values.ReleasePolicy
+		applied.InputAccepted = true
 	}
 	if flagWasSet(fs, "machine0-create-timeout") {
 		if err := ApplyLeaseDuration(&cfg.CreateTimeout, *values.CreateTimeout); err != nil {
 			return applied, err
+		} else if *values.CreateTimeout != "" {
+			applied.InputAccepted = true
 		}
 	}
 	if flagWasSet(fs, "machine0-poll-interval") {
 		if err := ApplyLeaseDuration(&cfg.PollInterval, *values.PollInterval); err != nil {
 			return applied, err
+		} else if *values.PollInterval != "" {
+			applied.InputAccepted = true
 		}
 	}
 	return applied, nil

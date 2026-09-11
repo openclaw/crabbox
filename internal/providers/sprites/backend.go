@@ -45,9 +45,11 @@ func ApplySpritesProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error 
 	}
 	if core.FlagWasSet(fs, "sprites-api-url") {
 		cfg.Sprites.APIURL = *v.APIURL
+		core.RecordProviderFlagInputs(cfg, true, "sprites")
 	}
 	if core.FlagWasSet(fs, "sprites-work-root") {
 		cfg.Sprites.WorkRoot = *v.WorkRoot
+		core.RecordProviderFlagInputs(cfg, true, "sprites")
 	}
 	return nil
 }

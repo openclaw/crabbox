@@ -35,19 +35,24 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "phala-cli") {
 		cfg.Phala.CLIPath = *v.CLIPath
+		core.RecordProviderFlagInputs(cfg, true, "phala")
 	}
 	if core.FlagWasSet(fs, "phala-instance-type") {
 		cfg.Phala.InstanceType = *v.InstanceType
+		core.RecordProviderFlagInputs(cfg, true, "phala")
 		core.MarkPhalaInstanceTypeExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "phala-node-id") {
 		cfg.Phala.NodeID = *v.NodeID
+		core.RecordProviderFlagInputs(cfg, true, "phala")
 	}
 	if core.FlagWasSet(fs, "phala-work-root") {
 		cfg.Phala.WorkRoot = *v.WorkRoot
+		core.RecordProviderFlagInputs(cfg, true, "phala")
 	}
 	if core.FlagWasSet(fs, "phala-compose") {
 		cfg.Phala.Compose = *v.Compose
+		core.RecordProviderFlagInputs(cfg, true, "phala")
 	}
 	// --phala-skip-attestation is the explicit opt-out and wins over --phala-attest
 	// when both are set. Either flag, when present, pins cfg.Phala.Attest so the
@@ -55,9 +60,11 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if core.FlagWasSet(fs, "phala-skip-attestation") && *v.SkipAttest {
 		disabled := false
 		cfg.Phala.Attest = &disabled
+		core.RecordProviderFlagInputs(cfg, true, "phala")
 	} else if core.FlagWasSet(fs, "phala-attest") {
 		value := *v.Attest
 		cfg.Phala.Attest = &value
+		core.RecordProviderFlagInputs(cfg, true, "phala")
 	}
 	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		applyDefaults(cfg)
@@ -67,6 +74,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 
 // attestEnabled reports the effective TDX attestation gate setting. The gate is
 // ON by default (nil config => true); only an explicit false value disables it.
+
 func attestEnabled(cfg core.Config) bool {
 	return cfg.Phala.Attest == nil || *cfg.Phala.Attest
 }

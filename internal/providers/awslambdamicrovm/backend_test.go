@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -125,6 +126,26 @@ func (f *fakeRunner) Exec(ctx context.Context, _ microVM, command, workdir strin
 		_, _ = io.WriteString(stdout, "runner-ok")
 	}
 	return f.exitCode, f.execErr
+}
+
+func TestAWSLambdaSharedRegionInputTracking(t *testing.T) {
+	for _, raw := range []string{"eu-west-1", " eu-west-1 ", ""} {
+		cfg := core.Config{AWSRegion: "eu-west-1"}
+		fs := flag.NewFlagSet("metadata", flag.ContinueOnError)
+		values := (Provider{}).RegisterFlags(fs, cfg)
+		if err := fs.Parse([]string{"--aws-lambda-microvm-region=" + raw}); err != nil {
+			t.Fatal(err)
+		}
+		// Missing image keeps this at ordinary validation after the region copy.
+		if err := (Provider{}).ApplyFlags(&cfg, fs, values); err == nil {
+			t.Fatal("expected incomplete metadata validation")
+		}
+		want := core.Config{AWSRegion: strings.TrimSpace(raw)}
+		core.RecordProviderFlagInputs(&want, true, "aws", "aws-lambda-microvm")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatal("region was not attributed to both actual owners")
+		}
+	}
 }
 
 func TestRunSyncsExecutesAndTerminatesOneShot(t *testing.T) {

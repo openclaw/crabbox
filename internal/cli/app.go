@@ -10,9 +10,10 @@ import (
 )
 
 type App struct {
-	Stdout io.Writer
-	Stderr io.Writer
-	Stdin  io.Reader
+	Stdout                io.Writer
+	Stderr                io.Writer
+	Stdin                 io.Reader
+	synthesizedFlagInputs bool
 
 	runOutcome             *shardRunOutcome
 	workspaceOwnerAcquirer func(context.Context, SSHTarget, string, io.Writer) (*workspaceOwner, error)

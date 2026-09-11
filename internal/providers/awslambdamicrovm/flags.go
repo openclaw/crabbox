@@ -32,9 +32,14 @@ func applyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "aws-lambda-microvm-region") {
 		cfg.AWSRegion = strings.TrimSpace(*v.Region)
+		core.RecordProviderFlagInputs(cfg, true, "aws", providerName)
 	}
-	applied := v.Config.Apply(&cfg.AWSLambdaMicroVM, fs)
+	applied, err := v.Config.Apply(&cfg.AWSLambdaMicroVM, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
 	cfg.AWSLambdaMicroVM.NormalizeAppliedFlags(applied)
+	if err != nil {
+		return err
+	}
 	return validateConfig(*cfg)
 }
 
