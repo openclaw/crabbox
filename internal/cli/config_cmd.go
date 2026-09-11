@@ -68,10 +68,16 @@ func (a App) configShow(args []string) error {
 		view["idempotentLeaseId"] = fixedLeaseID
 		view["coordinatorRegistrationUrl"] = redactedConfigURL(coordinatorRegistrationURL)
 		view["webvncAgentBaseUrl"] = agentBaseURL
+		sections, err := collectProviderConfigShowSections(cfg)
+		if err != nil {
+			return err
+		}
+		if err := addProviderConfigShowSections(view, sections); err != nil {
+			return err
+		}
 		return json.NewEncoder(a.Stdout).Encode(view)
 	}
-	writeConfigShowText(a.Stdout, cfg)
-	return nil
+	return writeConfigShowText(a.Stdout, cfg)
 }
 
 func configArchitectureForShow(cfg Config) string {
@@ -824,7 +830,13 @@ func redactedParallelsHostConfigs(hosts []ParallelsHostConfig) []ParallelsHostCo
 	return redacted
 }
 
-func writeConfigShowText(w io.Writer, cfg Config) {
+func writeConfigShowText(w io.Writer, cfg Config) error {
+	sections, err := collectProviderConfigShowSections(cfg)
+	if err != nil {
+		return err
+	}
+	output := &configShowWriter{Writer: w}
+	w = output
 	phalaAttest := "default"
 	if cfg.Phala.Attest != nil {
 		phalaAttest = fmt.Sprint(*cfg.Phala.Attest)
@@ -905,7 +917,11 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "firecracker binary=%s jailer=%s kernel=%s rootfs=%s user=%s work_root=%s cpus=%d memory_mib=%d disk_mib=%d network=%s cni_network=%s cni_conf_dir=%s cni_bin_dir=%s launch_timeout=%s delete_on_release=%t\n", blank(cfg.Firecracker.Binary, "-"), blank(cfg.Firecracker.Jailer, "-"), blank(cfg.Firecracker.Kernel, "-"), blank(cfg.Firecracker.RootFS, "-"), blank(cfg.Firecracker.User, "-"), blank(cfg.Firecracker.WorkRoot, "-"), cfg.Firecracker.CPUs, cfg.Firecracker.MemoryMiB, cfg.Firecracker.DiskMiB, blank(cfg.Firecracker.Network, "-"), blank(cfg.Firecracker.CNINetwork, "-"), blank(cfg.Firecracker.CNIConfDir, "-"), blank(cfg.Firecracker.CNIBinDir, "-"), cfg.Firecracker.LaunchTimeout, cfg.Firecracker.DeleteOnRelease)
 	fmt.Fprintf(w, "xcp_ng api_url=%s username=%s template=%s template_uuid=%s sr=%s sr_uuid=%s network=%s network_uuid=%s host=%s user=%s work_root=%s insecure_tls=%t auth=%s\n", blank(redactedConfigURL(cfg.XCPNg.APIURL), "-"), blank(cfg.XCPNg.Username, "-"), blank(cfg.XCPNg.Template, "-"), blank(cfg.XCPNg.TemplateUUID, "-"), blank(cfg.XCPNg.SR, "-"), blank(cfg.XCPNg.SRUUID, "-"), blank(cfg.XCPNg.Network, "-"), blank(cfg.XCPNg.NetworkUUID, "-"), blank(cfg.XCPNg.Host, "-"), cfg.XCPNg.User, cfg.XCPNg.WorkRoot, cfg.XCPNg.InsecureTLS, tokenState(cfg.XCPNg.Password))
 	fmt.Fprintf(w, "parallels template=%s source=%s source_id=%s snapshot=%s snapshot_id=%s clone_mode=%s host=%s user=%s work_root=%s startup_timeout=%s templates=%d hosts=%d\n", blank(cfg.Parallels.Template, "-"), blank(cfg.Parallels.Source, "-"), blank(cfg.Parallels.SourceID, "-"), blank(cfg.Parallels.SourceSnapshot, "-"), blank(cfg.Parallels.SourceSnapshotID, "-"), cfg.Parallels.CloneMode, blank(cfg.Parallels.Host, "local"), cfg.Parallels.User, cfg.Parallels.WorkRoot, cfg.Parallels.StartupTimeout, len(cfg.Parallels.Templates), len(cfg.Parallels.Hosts))
+	if err := writeProviderConfigShowSections(w, sections); err != nil {
+		return err
+	}
 	writeProviderConfigStatus(w, providerConfigStatus(cfg))
+	return output.err
 }
 
 func redactedConfigURL(value string) string {

@@ -64,6 +64,14 @@ means no explicit override; `true` and `false` remain distinct. This is a
 configuration value, not evidence that remote attestation has run or passed.
 Inspection does not read Phala's stored credentials or invoke its CLI.
 
+Freestyle and Crownest also have value sections in both formats, including
+when unselected. Freestyle shows the loaded URL, relative workdir, CPU/memory
+settings and API-key presence (`auth: configured` or `missing`), never the key.
+Zero sizing remains zero rather than a guessed service-plan default. Crownest
+shows its loaded URL, project, template, timeout and cleanup preference without
+looking up credentials. Zero timeout and explicit false remain visible. URLs
+are redacted; these values are configuration, not live-provider proof.
+
 ### Offline provider status
 
 JSON adds a `providerStatus` object with `schemaVersion: 1`, `kind: "offline"`,

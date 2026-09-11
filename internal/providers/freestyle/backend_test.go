@@ -112,6 +112,36 @@ func TestFreestyleExecForwardsEnvAfterWorkdir(t *testing.T) {
 	}
 }
 
+func TestFreestyleConfigShowSection(t *testing.T) {
+	for _, selected := range []string{"", "freestyle"} {
+		for _, key := range []string{"", "synthetic-test-key"} {
+			cfg := Config{Provider: selected, Freestyle: FreestyleConfig{APIURL: "https://api.example.test/path?debug=1#hint", APIKey: key, Workdir: " raw-workdir ", VCPUs: 0, MemoryGB: -2}}
+			before := cfg.Freestyle
+			section := (Provider{}).ConfigShowSection(cfg)
+			values := map[string]any{}
+			var fields []string
+			for _, field := range section.Fields {
+				values[field.JSONName] = field.JSONValue
+				fields = append(fields, field.TextName+"="+field.TextValue)
+			}
+			auth := "missing"
+			if key != "" {
+				auth = "configured"
+			}
+			want := map[string]any{"apiUrl": "https://api.example.test/path", "workdir": " raw-workdir ", "vcpus": 0, "memoryGB": -2, "auth": auth}
+			if section.JSONKey != "freestyle" || section.TextLabel != "freestyle" || !reflect.DeepEqual(section.Providers, []string{"freestyle"}) || !reflect.DeepEqual(values, want) {
+				t.Fatal("unexpected Freestyle display projection")
+			}
+			if strings.Join(fields, " ") != "api_url=https://api.example.test/path workdir= raw-workdir  vcpus=0 memory_gb=-2 auth="+auth {
+				t.Fatal("text projection changed raw values or field order")
+			}
+			if cfg.Freestyle != before {
+				t.Fatal("display mutated configuration")
+			}
+		}
+	}
+}
+
 func TestFreestyleOrdinaryFlagBindings(t *testing.T) {
 	for _, provider := range []string{"other", "freestyle"} {
 		for _, value := range []string{"", "same", " padded "} {

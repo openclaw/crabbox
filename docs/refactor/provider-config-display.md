@@ -1,0 +1,62 @@
+# Provider configuration display
+
+`ProviderConfigShowProjector` gives a provider one passive, output-only field
+definition for JSON and text. The shared collector and renderers consume
+`ProviderConfigShowSection` and its ordered fields. Providers choose the public
+field names and already-redacted values; the renderer does not inspect runtime
+structs, infer visibility from input tags, or discover credentials or defaults.
+
+Freestyle and Crownest are the first adopters. Both sections appear even when
+another provider is selected. Freestyle reports only presence for an API key
+already loaded into configuration; Crownest does not look up its separate key.
+Zero sizes/timeouts, explicit false, and raw strings retain their configured
+meaning. Neither section establishes authentication or readiness.
+
+## Ownership
+
+- `JSONValue` is an explicitly selected public value, never a runtime-config dump.
+- `TextValue` is the corresponding explicitly formatted, already-redacted value.
+- Format-specific names are independent: published camel-case JSON and
+  snake-case text names need not match. A field may intentionally appear in one
+  format only; each section must provide both formats.
+- `Providers` declares canonical coverage. A shared configuration owner can
+  cover multiple registered providers without emitting duplicate sections.
+- Existing URL redaction and configured/missing formatting are shared through
+  `ConfigShowURL` and `ConfigShowSecretState`; presenters must not introduce
+  new environment, file, SDK, CLI, or network reads.
+
+Collection rejects duplicate keys, labels, field names and coverage. JSON
+insertion also rejects collisions with the existing top-level view before
+adding any section. Text reserves the existing line labels without evaluating
+JSON values, which would repeat legacy environment-presence reads. A source
+test keeps that label inventory aligned with the actual formatters.
+
+New sections have stable text-label order immediately before the existing
+offline inspection/status block. Existing lines and fields keep their current
+order. Output errors, including short writes, propagate from text rendering.
+
+## Remaining migration
+
+The baseline census contains 81 canonical providers: 49 have both value formats,
+three have JSON only, and 29 have neither. Apple Machine shares Apple Container's
+configuration, so complete coverage means **80 distinct sections**, not 81
+duplicate sections.
+
+The first two adopters leave **27 missing sections and three missing text
+sections**. They do not complete the migration. Existing provider projections
+also still need to move out of the parallel JSON map and text formatter so
+their field selection and transformations have one owner.
+
+For each remaining provider, establish the explicit public field contract
+before implementation. Preserve existing keys, types, null/empty distinctions,
+raw-versus-display defaults, redaction, count-versus-list text summaries and
+format-only fields. Keep nested External configuration allowlisted or summarized;
+do not expose opaque maps. Paths and secret names are references, not permission
+to read their contents. Runtime-only state stays omitted.
+
+When migrating an existing text section, render it in its original layout slot
+and retire the corresponding legacy label reservation together. Do not move
+existing sections into registry order. Preserve Apple sharing and the generic
+lines interleaved with provider sections. Built-in coverage is complete only
+when every canonical provider has exactly one intended section; test fixtures
+must not stand in for missing real providers.
