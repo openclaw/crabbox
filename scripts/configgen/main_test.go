@@ -604,6 +604,12 @@ func TestCoderGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestNvidiaBrevGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_nvidia_brev.go", "../../internal/cli/config_nvidia_brev_generated.go", "NvidiaBrevConfig", "nvidia-brev", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMultipassGeneratedConfigIsCurrent(t *testing.T) {
 	if err := run("../../internal/cli/config_multipass.go", "../../internal/cli/config_multipass_generated.go", "MultipassConfig", "multipass", true); err != nil {
 		t.Fatal(err)

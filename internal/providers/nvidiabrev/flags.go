@@ -7,38 +7,10 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type nvidiaBrevFlagValues struct {
-	CLI           *string
-	Org           *string
-	Type          *string
-	GPUName       *string
-	Provider      *string
-	Mode          *string
-	Launchable    *string
-	StartupScript *string
-	ReleaseAction *string
-	Target        *string
-	User          *string
-	WorkRoot      *string
-}
-
 // RegisterNvidiaBrevProviderFlags exposes only non-secret Brev settings.
 // Authentication is owned by the Brev CLI credential store, not Crabbox argv.
 func RegisterNvidiaBrevProviderFlags(fs *flag.FlagSet, defaults Config) any {
-	return nvidiaBrevFlagValues{
-		CLI:           fs.String("nvidia-brev-cli", defaults.NvidiaBrev.CLI, "NVIDIA Brev CLI path"),
-		Org:           fs.String("nvidia-brev-org", defaults.NvidiaBrev.Org, "NVIDIA Brev organization selector"),
-		Type:          fs.String("nvidia-brev-type", defaults.NvidiaBrev.Type, "NVIDIA Brev instance type selector"),
-		GPUName:       fs.String("nvidia-brev-gpu-name", defaults.NvidiaBrev.GPUName, "NVIDIA Brev GPU name selector"),
-		Provider:      fs.String("nvidia-brev-provider", defaults.NvidiaBrev.Provider, "NVIDIA Brev cloud provider selector"),
-		Mode:          fs.String("nvidia-brev-mode", defaults.NvidiaBrev.Mode, "NVIDIA Brev mode: vm"),
-		Launchable:    fs.String("nvidia-brev-launchable", defaults.NvidiaBrev.Launchable, "NVIDIA Brev launchable selector"),
-		StartupScript: fs.String("nvidia-brev-startup-script", defaults.NvidiaBrev.StartupScript, "NVIDIA Brev startup script inline command or @file path"),
-		ReleaseAction: fs.String("nvidia-brev-release-action", defaults.NvidiaBrev.ReleaseAction, "NVIDIA Brev release action: delete or stop"),
-		Target:        fs.String("nvidia-brev-target", defaults.NvidiaBrev.Target, "NVIDIA Brev SSH target: container or host"),
-		User:          fs.String("nvidia-brev-user", defaults.NvidiaBrev.User, "SSH user for NVIDIA Brev workspaces"),
-		WorkRoot:      fs.String("nvidia-brev-work-root", defaults.NvidiaBrev.WorkRoot, "remote Crabbox work root on NVIDIA Brev workspaces"),
-	}
+	return core.RegisterNvidiaBrevConfigFlags(fs, defaults.NvidiaBrev)
 }
 
 func ApplyNvidiaBrevProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
@@ -47,59 +19,20 @@ func ApplyNvidiaBrevProviderFlags(cfg *Config, fs *flag.FlagSet, values any) err
 			return err
 		}
 	}
-	v, ok := values.(nvidiaBrevFlagValues)
+	v, ok := values.(core.NvidiaBrevConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if core.FlagWasSet(fs, "nvidia-brev-cli") {
-		cfg.NvidiaBrev.CLI = *v.CLI
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "nvidia-brev-org") {
-		cfg.NvidiaBrev.Org = *v.Org
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "nvidia-brev-type") {
-		cfg.NvidiaBrev.Type = *v.Type
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "nvidia-brev-gpu-name") {
-		cfg.NvidiaBrev.GPUName = *v.GPUName
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "nvidia-brev-provider") {
-		cfg.NvidiaBrev.Provider = *v.Provider
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "nvidia-brev-mode") {
-		cfg.NvidiaBrev.Mode = *v.Mode
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "nvidia-brev-launchable") {
-		cfg.NvidiaBrev.Launchable = *v.Launchable
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "nvidia-brev-startup-script") {
-		cfg.NvidiaBrev.StartupScript = *v.StartupScript
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "nvidia-brev-release-action") {
-		cfg.NvidiaBrev.ReleaseAction = *v.ReleaseAction
-		core.RecordProviderFlagInputs(cfg, true, providerName)
+	applied, err := v.Apply(&cfg.NvidiaBrev, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	if applied.ReleaseAction {
 		markReleaseActionExplicit(cfg)
 	}
-	if core.FlagWasSet(fs, "nvidia-brev-target") {
-		cfg.NvidiaBrev.Target = *v.Target
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "nvidia-brev-user") {
-		cfg.NvidiaBrev.User = *v.User
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "nvidia-brev-work-root") {
-		cfg.NvidiaBrev.WorkRoot = *v.WorkRoot
-		core.RecordProviderFlagInputs(cfg, true, providerName)
+	if applied.WorkRoot {
 		markNvidiaBrevWorkRootExplicit(cfg)
+	}
+	if err != nil {
+		return err
 	}
 	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		applyNvidiaBrevDefaults(cfg)

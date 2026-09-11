@@ -513,24 +513,6 @@ type UnikraftCloudConfig struct {
 	MemoryMB int
 }
 
-// NvidiaBrevConfig is intentionally non-secret. Authentication stays in the
-// NVIDIA Brev CLI's own credential store and is never accepted as Crabbox
-// config or argv.
-type NvidiaBrevConfig struct {
-	CLI           string
-	Org           string
-	Type          string
-	GPUName       string
-	Provider      string
-	Mode          string
-	Launchable    string
-	StartupScript string
-	ReleaseAction string
-	Target        string
-	User          string
-	WorkRoot      string
-}
-
 type HostingerConfig struct {
 	APIToken        string
 	APIURL          string
@@ -2082,7 +2064,7 @@ func normalizeVastInstanceType(value string) string {
 }
 
 func EffectiveNvidiaBrevWorkRoot(cfg Config) string {
-	return resolveExplicitProviderWorkRoot(cfg.NvidiaBrev.WorkRoot, "/tmp/crabbox", cfg.explicitWorkRoot, IsNvidiaBrevWorkRootExplicit(&cfg))
+	return resolveExplicitProviderWorkRoot(cfg.NvidiaBrev.WorkRoot, NvidiaBrevConfigDefaultWorkRoot, cfg.explicitWorkRoot, IsNvidiaBrevWorkRootExplicit(&cfg))
 }
 
 func resolveExplicitProviderWorkRoot(providerRoot, providerFallback, explicitGenericRoot string, providerExplicit bool) string {
@@ -2279,15 +2261,8 @@ func baseConfig() Config {
 		Runpod:     defaultRunpodConfig(),
 		Vast:       defaultVastConfig(),
 		Blacksmith: defaultBlacksmithConfig(),
-		NvidiaBrev: NvidiaBrevConfig{
-			CLI:           "brev",
-			GPUName:       "A100",
-			Mode:          "vm",
-			ReleaseAction: "delete",
-			Target:        "container",
-			WorkRoot:      "/tmp/crabbox",
-		},
-		Nebius: (NebiusConfig{}).WithRuntimeDefaults(),
+		NvidiaBrev: defaultNvidiaBrevConfig(),
+		Nebius:     (NebiusConfig{}).WithRuntimeDefaults(),
 		Hostinger: HostingerConfig{
 			APIURL:         "https://developers.hostinger.com",
 			HostnamePrefix: "crabbox",
@@ -2893,21 +2868,6 @@ type fileUnikraftCloudConfig struct {
 	Metro    string `yaml:"metro,omitempty"`
 	Image    string `yaml:"image,omitempty"`
 	MemoryMB int    `yaml:"memoryMB,omitempty"`
-}
-
-type fileNvidiaBrevConfig struct {
-	CLI           string `yaml:"cli,omitempty"`
-	Org           string `yaml:"org,omitempty"`
-	Type          string `yaml:"type,omitempty"`
-	GPUName       string `yaml:"gpuName,omitempty"`
-	Provider      string `yaml:"provider,omitempty"`
-	Mode          string `yaml:"mode,omitempty"`
-	Launchable    string `yaml:"launchable,omitempty"`
-	StartupScript string `yaml:"startupScript,omitempty"`
-	ReleaseAction string `yaml:"releaseAction,omitempty"`
-	Target        string `yaml:"target,omitempty"`
-	User          string `yaml:"user,omitempty"`
-	WorkRoot      string `yaml:"workRoot,omitempty"`
 }
 
 type fileHostingerConfig struct {
@@ -4944,58 +4904,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.NvidiaBrev != nil {
-		if trusted && file.NvidiaBrev.CLI != "" {
-			cfg.NvidiaBrev.CLI = file.NvidiaBrev.CLI
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-		}
-		if file.NvidiaBrev.Org != "" {
-			cfg.NvidiaBrev.Org = file.NvidiaBrev.Org
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-		}
-		if file.NvidiaBrev.Type != "" {
-			cfg.NvidiaBrev.Type = file.NvidiaBrev.Type
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-		}
-		if file.NvidiaBrev.GPUName != "" {
-			cfg.NvidiaBrev.GPUName = file.NvidiaBrev.GPUName
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-		}
-		if file.NvidiaBrev.Provider != "" {
-			cfg.NvidiaBrev.Provider = file.NvidiaBrev.Provider
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-		}
-		if file.NvidiaBrev.Mode != "" {
-			cfg.NvidiaBrev.Mode = file.NvidiaBrev.Mode
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-		}
-		if file.NvidiaBrev.Launchable != "" {
-			cfg.NvidiaBrev.Launchable = file.NvidiaBrev.Launchable
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-		}
-		if file.NvidiaBrev.StartupScript != "" &&
-			(trusted || !strings.HasPrefix(strings.TrimSpace(file.NvidiaBrev.StartupScript), "@")) {
-			cfg.NvidiaBrev.StartupScript = file.NvidiaBrev.StartupScript
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-		}
-		if file.NvidiaBrev.ReleaseAction != "" {
-			cfg.NvidiaBrev.ReleaseAction = file.NvidiaBrev.ReleaseAction
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-			MarkDeleteOnReleaseExplicit(cfg, "nvidia-brev")
-		}
-		if file.NvidiaBrev.Target != "" {
-			cfg.NvidiaBrev.Target = file.NvidiaBrev.Target
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-		}
-		if file.NvidiaBrev.User != "" {
-			cfg.NvidiaBrev.User = file.NvidiaBrev.User
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-		}
-		if file.NvidiaBrev.WorkRoot != "" {
-			cfg.NvidiaBrev.WorkRoot = file.NvidiaBrev.WorkRoot
-			recordConfigInput(cfg, "nvidia-brev", inputSource, true)
-			MarkNvidiaBrevWorkRootExplicit(cfg)
-		}
+	if err := applyNvidiaBrevFileConfig(cfg, file.NvidiaBrev, trusted, inputSource); err != nil {
+		return err
 	}
 	if file.Hostinger != nil {
 		if trusted && file.Hostinger.APIToken != "" {
@@ -6946,25 +6856,18 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	cfg.NvidiaBrev.CLI = configInputEnvString(cfg, "nvidia-brev", cfg.NvidiaBrev.CLI, "CRABBOX_NVIDIA_BREV_CLI")
-	cfg.NvidiaBrev.Org = configInputEnvString(cfg, "nvidia-brev", cfg.NvidiaBrev.Org, "CRABBOX_NVIDIA_BREV_ORG")
-	cfg.NvidiaBrev.Type = configInputEnvString(cfg, "nvidia-brev", cfg.NvidiaBrev.Type, "CRABBOX_NVIDIA_BREV_TYPE")
-	cfg.NvidiaBrev.GPUName = configInputEnvString(cfg, "nvidia-brev", cfg.NvidiaBrev.GPUName, "CRABBOX_NVIDIA_BREV_GPU_NAME")
-	cfg.NvidiaBrev.Provider = configInputEnvString(cfg, "nvidia-brev", cfg.NvidiaBrev.Provider, "CRABBOX_NVIDIA_BREV_PROVIDER")
-	cfg.NvidiaBrev.Mode = configInputEnvString(cfg, "nvidia-brev", cfg.NvidiaBrev.Mode, "CRABBOX_NVIDIA_BREV_MODE")
-	cfg.NvidiaBrev.Launchable = configInputEnvString(cfg, "nvidia-brev", cfg.NvidiaBrev.Launchable, "CRABBOX_NVIDIA_BREV_LAUNCHABLE")
-	cfg.NvidiaBrev.StartupScript = configInputEnvString(cfg, "nvidia-brev", cfg.NvidiaBrev.StartupScript, "CRABBOX_NVIDIA_BREV_STARTUP_SCRIPT")
-	if value := os.Getenv("CRABBOX_NVIDIA_BREV_RELEASE_ACTION"); value != "" {
-		cfg.NvidiaBrev.ReleaseAction = value
-		recordConfigInput(cfg, "nvidia-brev", configInputEnvironment, true)
-		MarkDeleteOnReleaseExplicit(cfg, "nvidia-brev")
-	}
-	cfg.NvidiaBrev.Target = configInputEnvString(cfg, "nvidia-brev", cfg.NvidiaBrev.Target, "CRABBOX_NVIDIA_BREV_TARGET")
-	cfg.NvidiaBrev.User = configInputEnvString(cfg, "nvidia-brev", cfg.NvidiaBrev.User, "CRABBOX_NVIDIA_BREV_USER")
-	if value := os.Getenv("CRABBOX_NVIDIA_BREV_WORK_ROOT"); value != "" {
-		cfg.NvidiaBrev.WorkRoot = value
-		recordConfigInput(cfg, "nvidia-brev", configInputEnvironment, true)
-		MarkNvidiaBrevWorkRootExplicit(cfg)
+	{
+		applied, err := cfg.NvidiaBrev.applyEnv()
+		recordConfigInput(cfg, "nvidia-brev", configInputEnvironment, applied.InputAccepted)
+		if applied.ReleaseAction {
+			MarkDeleteOnReleaseExplicit(cfg, "nvidia-brev")
+		}
+		if applied.WorkRoot {
+			MarkNvidiaBrevWorkRootExplicit(cfg)
+		}
+		if err != nil {
+			return err
+		}
 	}
 	cfg.Hostinger.APIToken = configInputEnvString(cfg, "hostinger", cfg.Hostinger.APIToken, "CRABBOX_HOSTINGER_API_TOKEN", "HOSTINGER_API_TOKEN")
 	cfg.Hostinger.APIURL = configInputEnvString(cfg, "hostinger", cfg.Hostinger.APIURL, "CRABBOX_HOSTINGER_API_URL", "HOSTINGER_API_URL")

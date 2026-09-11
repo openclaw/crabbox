@@ -1521,6 +1521,129 @@ func TestBlacksmithOrdinaryWriter(t *testing.T) {
 	}
 }
 
+func TestNvidiaBrevOrdinarySourcesAndWriter(t *testing.T) {
+	clearConfigEnv(t)
+	wantDefaults := NvidiaBrevConfig{CLI: "brev", GPUName: "A100", Mode: "vm", ReleaseAction: "delete", Target: "container", WorkRoot: "/tmp/crabbox"}
+	if got := baseConfig().NvidiaBrev; got != wantDefaults {
+		t.Fatalf("initial defaults: %#v want %#v", got, wantDefaults)
+	}
+	fields := []struct{ field, key, env string }{
+		{"CLI", "cli", "CLI"}, {"Org", "org", "ORG"}, {"Type", "type", "TYPE"},
+		{"GPUName", "gpuName", "GPU_NAME"}, {"Provider", "provider", "PROVIDER"},
+		{"Mode", "mode", "MODE"}, {"Launchable", "launchable", "LAUNCHABLE"},
+		{"StartupScript", "startupScript", "STARTUP_SCRIPT"}, {"ReleaseAction", "releaseAction", "RELEASE_ACTION"},
+		{"Target", "target", "TARGET"}, {"User", "user", "USER"}, {"WorkRoot", "workRoot", "WORK_ROOT"},
+	}
+	for _, source := range []string{"file", "env"} {
+		for _, value := range []string{"", "same", " padded "} {
+			t.Run(source+"/"+value, func(t *testing.T) {
+				clearConfigEnv(t)
+				cfg := Config{Provider: "other", WorkRoot: "/generic", SSHUser: "generic"}
+				for _, field := range fields {
+					reflect.ValueOf(&cfg.NvidiaBrev).Elem().FieldByName(field.field).SetString("same")
+				}
+				want := cfg.NvidiaBrev
+				if value != "" {
+					for _, field := range fields {
+						reflect.ValueOf(&want).Elem().FieldByName(field.field).SetString(value)
+					}
+				}
+				input := map[string]string{}
+				for _, field := range fields {
+					input[field.key] = value
+				}
+				data, err := yaml.Marshal(map[string]any{"nvidiaBrev": input})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var file fileConfig
+				if err := yaml.Unmarshal(data, &file); err != nil {
+					t.Fatal(err)
+				}
+				original := *file.NvidiaBrev
+				inputSource := configInputUser
+				if source == "file" {
+					if err := applyFileConfig(&cfg, file); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					inputSource = configInputEnvironment
+					for _, field := range fields {
+						t.Setenv("CRABBOX_NVIDIA_BREV_"+field.env, value)
+					}
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if cfg.NvidiaBrev != want || *file.NvidiaBrev != original {
+					t.Fatalf("raw values or input changed: got %#v want %#v", cfg.NvidiaBrev, want)
+				}
+				accepted := value != ""
+				if DeleteOnReleaseExplicit(cfg, "nvidia-brev") != accepted || IsNvidiaBrevWorkRootExplicit(&cfg) != accepted {
+					t.Fatal("accepted marker mismatch")
+				}
+				var expected configInputLedger
+				if accepted {
+					expected = expected.withInput("nvidia-brev", inputSource, configInputValue)
+				}
+				if !reflect.DeepEqual(cfg.inputProvenance, expected) {
+					t.Fatalf("accepted input: %#v want %#v", cfg.inputProvenance, expected)
+				}
+				if cfg.WorkRoot != "/generic" || cfg.SSHUser != "generic" || IsWorkRootExplicit(&cfg) || IsSSHUserExplicit(&cfg) {
+					t.Fatal("provider input changed generic state")
+				}
+			})
+		}
+	}
+	for _, shape := range []string{"absent", "null", "empty", "zeros", "raw"} {
+		t.Run("writer/"+shape, func(t *testing.T) {
+			path := isolatedConfigPath(t)
+			input := map[string]any{}
+			want := map[string]any{}
+			switch shape {
+			case "null":
+				input["nvidiaBrev"] = nil
+			case "empty", "zeros", "raw":
+				fieldsIn, fieldsOut := map[string]any{}, map[string]any{}
+				for _, field := range fields {
+					if shape == "zeros" {
+						fieldsIn[field.key] = ""
+					}
+					if shape == "raw" {
+						fieldsIn[field.key], fieldsOut[field.key] = " padded ", " padded "
+					}
+				}
+				input["nvidiaBrev"], want["nvidiaBrev"] = fieldsIn, fieldsOut
+			}
+			data, err := yaml.Marshal(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			file, err := readFileConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := writeUserFileConfig(file); err != nil {
+				t.Fatal(err)
+			}
+			data, err = os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			if err := yaml.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("writer got %#v want %#v", got, want)
+			}
+		})
+	}
+}
+
 func TestNvidiaBrevConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
