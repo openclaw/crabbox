@@ -40,6 +40,7 @@ func TestOrdinaryScalarFlagsUnselected(t *testing.T) {
 			}
 			want := cfg
 			want.LocalContainer = tc.want
+			core.RecordProviderFlagInputs(&want, len(tc.args) > 0, providerName)
 			if tc.runtime {
 				core.MarkLocalContainerRuntimeExplicit(&want)
 			}

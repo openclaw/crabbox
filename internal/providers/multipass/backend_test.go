@@ -157,6 +157,7 @@ func TestMultipassOrdinaryFlagMetadata(t *testing.T) {
 			want.SSHUser = " user "
 			want.WorkRoot = "~/guest"
 			core.MarkMultipassImageExplicit(&want)
+			core.RecordProviderFlagInputs(&want, true, providerName)
 			if !reflect.DeepEqual(cfg, want) {
 				t.Fatalf("partial values/effects=%#v want %#v", cfg.Multipass, want.Multipass)
 			}
