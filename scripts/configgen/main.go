@@ -20,6 +20,7 @@ import (
 )
 
 type field struct {
+	flagDurationRawPositive                                                                                                                                                      bool
 	fileListNonemptyNormalized, envListTrimmedNonempty, flagListCSV                                                                                                              bool
 	flagDurationRawZeroReset, flagListAppendTrimmed                                                                                                                              bool
 	flagDurationError                                                                                                                                                            string
@@ -30,6 +31,10 @@ type field struct {
 	fileListRaw, envListPresence, flagListReplaceAppend                                                                                                                          bool
 	name, kind, key, configAlias, env, envAlias, envAlias2, flag, help, defaultExpr, flagFallbackExpr                                                                            string
 	nonnegative, trustedFileOnly, noFile, noEnv, noFlag, fileIgnoreEmpty, reportApplied, envIntFallback, fileIntPositive, fileIntPresent, fileFloatPositive, envAliasAfterConfig bool
+}
+
+func (f field) stringDurationFlag() bool {
+	return f.flagDurationError != "" || f.flagDurationRawZeroReset || f.flagDurationRawPositive
 }
 
 type fileBinding struct {
@@ -250,14 +255,15 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		flagDuration, hasFlagDuration := tags.Lookup("flagDuration")
 		flagDurationError, hasFlagDurationError := tags.Lookup("flagDurationError")
 		if hasFlagDuration {
-			if f.kind != "time.Duration" || f.noFlag || (flagDuration != "trim-positive" && flagDuration != "raw-zero-reset") {
-				return s, fmt.Errorf("%s: flagDuration requires trim-positive or raw-zero-reset on a flag-admitted time.Duration", f.name)
+			if f.kind != "time.Duration" || f.noFlag || (flagDuration != "trim-positive" && flagDuration != "raw-zero-reset" && flagDuration != "raw-positive") {
+				return s, fmt.Errorf("%s: flagDuration requires trim-positive, raw-zero-reset, or raw-positive on a flag-admitted time.Duration", f.name)
 			}
-			if flagDuration == "raw-zero-reset" {
+			if flagDuration == "raw-zero-reset" || flagDuration == "raw-positive" {
 				if hasFlagDurationError {
-					return s, fmt.Errorf("%s: raw-zero-reset forbids flagDurationError", f.name)
+					return s, fmt.Errorf("%s: %s forbids flagDurationError", f.name, flagDuration)
 				}
-				f.flagDurationRawZeroReset = true
+				f.flagDurationRawZeroReset = flagDuration == "raw-zero-reset"
+				f.flagDurationRawPositive = flagDuration == "raw-positive"
 			} else if !hasFlagDurationError || strings.TrimSpace(flagDurationError) == "" {
 				return s, fmt.Errorf("%s: flagDuration requires a nonempty flagDurationError", f.name)
 			} else {
@@ -448,10 +454,10 @@ func generate(s schema, source string) ([]byte, error) {
 	hasFlags, needsOS, needsStrings, needsTime, flagsCanFail := false, false, false, false, false
 	for _, f := range s.fields {
 		hasFlags = hasFlags || !f.noFlag
-		flagsCanFail = flagsCanFail || f.flagDurationError != "" || f.flagDurationRawZeroReset
+		flagsCanFail = flagsCanFail || f.stringDurationFlag()
 		needsStrings = needsStrings || f.flagDurationError != "" || f.flagDurationRawZeroReset
 		if f.kind == "time.Duration" {
-			needsTime = needsTime || !f.flagDurationRawZeroReset || f.defaultExpr != ""
+			needsTime = needsTime || !f.stringDurationFlag() || f.flagDurationError != "" || f.defaultExpr != ""
 			needsOS = needsOS || !f.noEnv
 		}
 		if f.kind == "[]string" {
@@ -665,7 +671,7 @@ func generate(s schema, source string) ([]byte, error) {
 				continue
 			}
 			kind := f.kind
-			if f.flagDurationError != "" || f.flagDurationRawZeroReset {
+			if f.stringDurationFlag() {
 				kind = "string"
 			}
 			if kind == "[]string" {
@@ -706,7 +712,7 @@ func generate(s schema, source string) ([]byte, error) {
 			}
 			method := map[string]string{"string": "String", "int": "Int", "int64": "Int64", "float64": "Float64", "bool": "Bool", "[]string": "String", "time.Duration": "Duration"}[f.kind]
 			value := "defaults." + f.name
-			if f.flagDurationError != "" || f.flagDurationRawZeroReset {
+			if f.stringDurationFlag() {
 				method = "String"
 				value += ".String()"
 			}
@@ -768,6 +774,10 @@ func generate(s schema, source string) ([]byte, error) {
 			}
 			if f.flagDurationRawZeroReset {
 				p("if flagWasSet(fs, %q) { if strings.TrimSpace(*values.%s) == \"0s\" { cfg.%s = 0 } else if err := ApplyLeaseDuration(&cfg.%s, *values.%s); err != nil { return %serr } }\n", f.flag, f.name, f.name, f.name, f.name, resultPrefix)
+				continue
+			}
+			if f.flagDurationRawPositive {
+				p("if flagWasSet(fs, %q) { if err := ApplyLeaseDuration(&cfg.%s, *values.%s); err != nil { return %serr } }\n", f.flag, f.name, f.name, resultPrefix)
 				continue
 			}
 			if f.flagDurationError != "" {

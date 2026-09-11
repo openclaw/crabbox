@@ -5,7 +5,7 @@ Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
 runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, Semaphore,
 Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, OVHcloud, Lume, Runpod, Vast,
 W&B, Scaleway, Tencent Cloud, DigitalOcean, Vultr, Linode, Sealos DevBox, KubeVirt,
-Agent Sandbox, AWS Lambda MicroVM, Namespace Devbox, Namespace Instance, and Coder
+Agent Sandbox, AWS Lambda MicroVM, Namespace Devbox, Namespace Instance, Coder, and Multipass
 describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
@@ -28,7 +28,8 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_sealos_devbox.go`, and
 `internal/cli/config_kubevirt.go`, `internal/cli/config_agentsandbox.go`, and
 `internal/cli/config_aws_lambda_microvm.go`, `internal/cli/config_namespace.go`, and
-`internal/cli/config_namespace_instance.go`, and `internal/cli/config_coder.go`.
+`internal/cli/config_namespace_instance.go`, `internal/cli/config_coder.go`, and
+`internal/cli/config_multipass.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -189,6 +190,31 @@ No delete marker or configuration-display surface is added. Four configured
 constants replace equal literals in existing fallback consumers, retaining their
 raw-versus-trimmed predicates and order. Provider names, SSH usernames, enum
 values, native execution and transport remain separate contracts.
+
+Multipass declares all eight input fields together, retaining six value strings,
+a value integer and a raw duration string in its file DTO. Strings stay raw and
+nonempty-only, including CLIPath: no local path expansion is added. File CPUs
+apply only when positive; environment CPUs retain tolerant parsing with accepted
+zero/negative values, and flags retain their existing unrestricted integer input.
+File/environment durations keep the tolerant positive-only overlay.
+
+Its `flagDuration:"raw-positive"` mode registers a string and calls the existing
+`ApplyLeaseDuration` helper at the field's original position. Raw empty input is
+a no-op, positive input assigns, and padded/nonpositive/invalid input returns
+the existing ordinary error. It neither trims nor treats `0s` as a reset, and
+rejects `flagDurationError`. Partial applied facts let the provider preserve
+earlier explicit-image and generic user/root effects before returning a timeout
+error. Only successful application reaches its existing selected-default phase.
+
+`initialMultipassConfig` combines six generated fixed defaults with the supplied
+OS-derived image and the existing shared POSIX work-root constant. The named
+work-root default aliases that constant instead of duplicating its literal, and
+initialization does not mark the image explicit. File/env wrappers consume only
+accepted Image facts, not flag-only generic user/root effects. The pure runtime
+default function shares four configured fallbacks but keeps its existing
+predicates and inherited-root resolution; it does not reset CPU, memory or disk.
+Its lower `26.04` image fallback remains separate from portable OS selection.
+Native VM lifecycle, mounts and commands are unchanged.
 
 ## Why generation
 

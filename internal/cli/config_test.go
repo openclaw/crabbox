@@ -5120,6 +5120,104 @@ func TestAppleVMConfigDefaultsRedactSignedImageServerType(t *testing.T) {
 	}
 }
 
+func TestMultipassOrdinarySourceMetadata(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	image, err := osImageDefaultMultipassImage(cfg.OSImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDefault := MultipassConfig{CLIPath: "multipass", Image: image, User: "crabbox", WorkRoot: "/work/crabbox", CPUs: 4, Memory: "8G", Disk: "30G", LaunchTimeout: 20 * time.Minute}
+	if cfg.Multipass != wantDefault || cfg.multipassImageExplicit {
+		t.Fatalf("defaults=%#v want %#v", cfg.Multipass, wantDefault)
+	}
+	for _, source := range []string{"file", "env"} {
+		for _, tc := range []struct {
+			text, cpu, duration string
+			fileCPU, envCPU     int
+			wantDuration        time.Duration
+		}{{"", "0", "", 5, 0, time.Minute}, {"~/literal", "-2", "0s", 5, -2, time.Minute}, {" ", "3", " 2m ", 3, 3, time.Minute}, {"same", "bad", "invalid", 5, 5, time.Minute}, {"same", "6", "2m", 6, 6, 2 * time.Minute}} {
+			t.Run(source+"/"+tc.text+"/"+tc.duration, func(t *testing.T) {
+				clearConfigEnv(t)
+				cfg := baseConfig()
+				cfg.Multipass = MultipassConfig{CLIPath: "same", Image: "same", User: "same", WorkRoot: "same", CPUs: 5, Memory: "same", Disk: "same", LaunchTimeout: time.Minute}
+				genericRoot, genericUser := cfg.WorkRoot, cfg.SSHUser
+				wantCPU := tc.fileCPU
+				if source == "file" {
+					cpu, _ := strconv.Atoi(tc.cpu)
+					if err := applyFileConfig(&cfg, fileConfig{Multipass: &fileMultipassConfig{CLIPath: tc.text, Image: tc.text, User: tc.text, WorkRoot: tc.text, CPUs: cpu, Memory: tc.text, Disk: tc.text, LaunchTimeout: tc.duration}}); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					wantCPU = tc.envCPU
+					for key, value := range map[string]string{"CLI": tc.text, "IMAGE": tc.text, "USER": tc.text, "WORK_ROOT": tc.text, "CPUS": tc.cpu, "MEMORY": tc.text, "DISK": tc.text, "LAUNCH_TIMEOUT": tc.duration} {
+						t.Setenv("CRABBOX_MULTIPASS_"+key, value)
+					}
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				}
+				text := tc.text
+				if text == "" {
+					text = "same"
+				}
+				want := MultipassConfig{CLIPath: text, Image: text, User: text, WorkRoot: text, CPUs: wantCPU, Memory: text, Disk: text, LaunchTimeout: tc.wantDuration}
+				if cfg.Multipass != want || cfg.multipassImageExplicit != (tc.text != "") || cfg.WorkRoot != genericRoot || cfg.SSHUser != genericUser {
+					t.Fatalf("source=%#v want %#v", cfg.Multipass, want)
+				}
+			})
+		}
+	}
+}
+
+func TestMultipassOrdinaryWriterMetadata(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{{"multipass: null", "{}"}, {"multipass: {}", "multipass: {}"}, {"multipass: {cliPath: '', image: '', user: '', workRoot: '', cpus: 0, memory: '', disk: '', launchTimeout: ''}", "multipass: {}"}, {"multipass: {cliPath: '~/literal', image: custom-image, user: example, workRoot: '~/guest', cpus: -2, memory: 4G, disk: 20G, launchTimeout: 0s}", "multipass: {cliPath: '~/literal', image: custom-image, user: example, workRoot: '~/guest', cpus: -2, memory: 4G, disk: 20G, launchTimeout: 0s}"}} {
+		path := isolatedConfigPath(t)
+		if err := os.WriteFile(path, []byte(tc.input), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := yaml.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := baseConfig()
+		if err := applyFileConfig(&cfg, file); err != nil {
+			t.Fatal(err)
+		}
+		after, err := yaml.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Fatal("source overlay changed file DTO")
+		}
+		if _, err := writeUserFileConfig(file); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got, want map[string]any
+		if err := yaml.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		if err := yaml.Unmarshal([]byte(tc.want), &want); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("writer=%#v want %#v", got, want)
+		}
+	}
+	if reflect.TypeOf(fileMultipassConfig{}).Name() != "fileMultipassConfig" {
+		t.Fatal("file DTO identity")
+	}
+}
+
 func TestMultipassConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()

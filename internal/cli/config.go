@@ -852,17 +852,6 @@ type MXCConfig struct {
 	Experimental      bool
 }
 
-type MultipassConfig struct {
-	CLIPath       string
-	Image         string
-	User          string
-	WorkRoot      string
-	CPUs          int
-	Memory        string
-	Disk          string
-	LaunchTimeout time.Duration
-}
-
 type Machine0Config struct {
 	CLIPath       string
 	Image         string
@@ -2494,16 +2483,7 @@ func baseConfig() Config {
 			Containment: "processcontainer",
 			Network:     "block",
 		},
-		Multipass: MultipassConfig{
-			CLIPath:       "multipass",
-			Image:         multipassImage,
-			User:          "crabbox",
-			WorkRoot:      defaultPOSIXWorkRoot,
-			CPUs:          4,
-			Memory:        "8G",
-			Disk:          "30G",
-			LaunchTimeout: 20 * time.Minute,
-		},
+		Multipass: initialMultipassConfig(multipassImage),
 		Machine0: Machine0Config{
 			CLIPath:       "machine0",
 			Image:         "ubuntu-24-04-loaded",
@@ -3289,17 +3269,6 @@ type fileMXCConfig struct {
 	AllowDACLMutation *bool    `yaml:"allowDaclMutation,omitempty"`
 	AllowWindowsUI    *bool    `yaml:"allowWindowsUI,omitempty"`
 	Experimental      *bool    `yaml:"experimental,omitempty"`
-}
-
-type fileMultipassConfig struct {
-	CLIPath       string `yaml:"cliPath,omitempty"`
-	Image         string `yaml:"image,omitempty"`
-	User          string `yaml:"user,omitempty"`
-	WorkRoot      string `yaml:"workRoot,omitempty"`
-	CPUs          int    `yaml:"cpus,omitempty"`
-	Memory        string `yaml:"memory,omitempty"`
-	Disk          string `yaml:"disk,omitempty"`
-	LaunchTimeout string `yaml:"launchTimeout,omitempty"`
 }
 
 type fileMachine0Config struct {
@@ -5342,31 +5311,13 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		applyOptional(&cfg.MXC.AllowWindowsUI, file.MXC.AllowWindowsUI)
 		applyOptional(&cfg.MXC.Experimental, file.MXC.Experimental)
 	}
-	if file.Multipass != nil {
-		if file.Multipass.CLIPath != "" {
-			cfg.Multipass.CLIPath = file.Multipass.CLIPath
+	{
+		applied, err := cfg.Multipass.applyFile(file.Multipass)
+		if applied.Image {
+			MarkMultipassImageExplicit(cfg)
 		}
-		if file.Multipass.Image != "" {
-			cfg.Multipass.Image = file.Multipass.Image
-			cfg.multipassImageExplicit = true
-		}
-		if file.Multipass.User != "" {
-			cfg.Multipass.User = file.Multipass.User
-		}
-		if file.Multipass.WorkRoot != "" {
-			cfg.Multipass.WorkRoot = file.Multipass.WorkRoot
-		}
-		if file.Multipass.CPUs > 0 {
-			cfg.Multipass.CPUs = file.Multipass.CPUs
-		}
-		if file.Multipass.Memory != "" {
-			cfg.Multipass.Memory = file.Multipass.Memory
-		}
-		if file.Multipass.Disk != "" {
-			cfg.Multipass.Disk = file.Multipass.Disk
-		}
-		if file.Multipass.LaunchTimeout != "" {
-			applyLeaseDuration(&cfg.Multipass.LaunchTimeout, file.Multipass.LaunchTimeout)
+		if err != nil {
+			return err
 		}
 	}
 	if file.Machine0 != nil {
@@ -6932,18 +6883,14 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_MXC_EXPERIMENTAL"); ok {
 		cfg.MXC.Experimental = value
 	}
-	cfg.Multipass.CLIPath = getenv("CRABBOX_MULTIPASS_CLI", cfg.Multipass.CLIPath)
-	if image := os.Getenv("CRABBOX_MULTIPASS_IMAGE"); image != "" {
-		cfg.Multipass.Image = image
-		cfg.multipassImageExplicit = true
-	}
-	cfg.Multipass.User = getenv("CRABBOX_MULTIPASS_USER", cfg.Multipass.User)
-	cfg.Multipass.WorkRoot = getenv("CRABBOX_MULTIPASS_WORK_ROOT", cfg.Multipass.WorkRoot)
-	cfg.Multipass.CPUs = getenvInt("CRABBOX_MULTIPASS_CPUS", cfg.Multipass.CPUs)
-	cfg.Multipass.Memory = getenv("CRABBOX_MULTIPASS_MEMORY", cfg.Multipass.Memory)
-	cfg.Multipass.Disk = getenv("CRABBOX_MULTIPASS_DISK", cfg.Multipass.Disk)
-	if timeout := os.Getenv("CRABBOX_MULTIPASS_LAUNCH_TIMEOUT"); timeout != "" {
-		applyLeaseDuration(&cfg.Multipass.LaunchTimeout, timeout)
+	{
+		applied, err := cfg.Multipass.applyEnv()
+		if applied.Image {
+			MarkMultipassImageExplicit(cfg)
+		}
+		if err != nil {
+			return err
+		}
 	}
 	cfg.Machine0.CLIPath = getenv("CRABBOX_MACHINE0_CLI", cfg.Machine0.CLIPath)
 	cfg.Machine0.Image = getenv("CRABBOX_MACHINE0_IMAGE", cfg.Machine0.Image)
