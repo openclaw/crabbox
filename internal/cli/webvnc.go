@@ -3643,7 +3643,9 @@ func directSSHWebVNCURL(localPort, password string) string {
 	values.Set("port", localPort)
 	values.Set("path", "websockify")
 	values.Set("autoconnect", "1")
-	values.Set("resize", "remote")
+	// noVNC's remote mode disables local scaling even when the server cannot resize.
+	// Keep fixed-size desktops visible; supported servers can opt in through Settings.
+	values.Set("resize", "scale")
 	values.Set("compression", "0")
 	values.Set("quality", "6")
 	if strings.TrimSpace(password) != "" {

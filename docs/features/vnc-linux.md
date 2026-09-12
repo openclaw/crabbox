@@ -82,9 +82,12 @@ takeover, close the previous sizing viewer, then reconnect the new controller.
 The portal shows this reminder independently of connection-status messages.
 GNOME applications use Xwayland inside labwc, not a full GNOME Shell session.
 
-Direct Linux SSH viewers request remote resizing through noVNC. Generic local
-handoff viewers, macOS, and Windows keep **Fit desktop** as the default; their
-**Match window** option also requires server support.
+Direct Linux SSH viewers keep noVNC's **Local scaling** default so fixed-size
+desktops still fit the browser. For a supported server, select **Settings >
+Scaling mode > Remote resizing**; return to **Local scaling** if the server
+cannot resize. Generic local handoff viewers, macOS, and Windows keep **Fit
+desktop** as the default; their **Match window** option also requires server
+support.
 
 ### Injected environment
 
