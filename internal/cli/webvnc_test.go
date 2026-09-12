@@ -61,7 +61,7 @@ func TestWebVNCURLs(t *testing.T) {
 			t.Fatalf("validWebVNCCredentialHandoffTicket(%q) = %t, want %t", value, got, valid)
 		}
 	}
-	if got := directSSHWebVNCURL("5901", "p+a ss"); got != "http://127.0.0.1:5901/vnc.html?autoconnect=1&compression=0&host=127.0.0.1&password=p%2Ba+ss&path=websockify&port=5901&quality=6&resize=remote" {
+	if got := directSSHWebVNCURL("5901", "p+a ss"); got != "http://127.0.0.1:5901/vnc.html?autoconnect=1&compression=0&host=127.0.0.1&password=p%2Ba+ss&path=websockify&port=5901&quality=6&resize=scale" {
 		t.Fatalf("local container WebVNC URL=%q", got)
 	}
 	if !isLocalContainerProvider("docker") || !isLocalContainerProvider("local-container") {
