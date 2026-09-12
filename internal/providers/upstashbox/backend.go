@@ -170,32 +170,31 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	if err != nil {
 		return StatusView{}, err
 	}
+	leaseID, boxID, slug, err := b.resolveBoxID(ctx, client, req.ID, "", false)
+	if err != nil {
+		return StatusView{}, err
+	}
 	return shared.PollDelegatedStatus(ctx, shared.DelegatedStatusRequest{
-		ID:          req.ID,
-		Provider:    providerName,
-		TargetOS:    targetLinux,
-		Network:     networkPublic,
 		Wait:        req.Wait,
 		WaitTimeout: req.WaitTimeout,
 		Now:         func() time.Time { return core.ClockNow(b.rt.Clock) },
-		Resolve: func(id string) (string, string, string, error) {
-			return b.resolveBoxID(ctx, client, id, "", false)
-		},
-		Get: func(getCtx context.Context, boxID string) (shared.DelegatedStatusResource, error) {
+		Observe: func(getCtx context.Context) (StatusView, bool, error) {
 			box, err := client.GetBox(getCtx, boxID)
 			if err != nil {
-				return shared.DelegatedStatusResource{}, err
+				return StatusView{}, false, err
 			}
 			server := boxToServer(b.cfg, box)
-			return shared.DelegatedStatusResource{
+			return StatusView{
+				ID: leaseID, Slug: core.Blank(slug, server.Labels["slug"]),
+				Provider: providerName, TargetOS: targetLinux, Network: networkPublic,
 				State:      box.Status,
 				ServerID:   box.ID,
 				ServerType: server.ServerType.Name,
 				Ready:      statusReady(box.Status),
 				Labels:     server.Labels,
-			}, nil
+			}, false, nil
 		},
-		TimeoutError: func(boxID string) error {
+		TimeoutError: func() error {
 			return exit(5, "timed out waiting for upstash-box %s to become ready", boxID)
 		},
 	})

@@ -1928,6 +1928,32 @@ func TestStatusAllowsUnclaimedRunID(t *testing.T) {
 	}
 }
 
+func TestStatusWaitReturnsMissingAndTerminalObservations(t *testing.T) {
+	for _, state := range []string{"missing", "failed", "succeeded"} {
+		t.Run(state, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/runs/cfdw_unclaimed" {
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(400)
+					return
+				}
+				if state == "missing" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(runStatus{ID: "cfdw_unclaimed", Status: state})
+			}))
+			defer server.Close()
+			b := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
+			view, err := b.Status(t.Context(), StatusRequest{ID: "cfdw_unclaimed", Wait: true, WaitTimeout: time.Nanosecond})
+			if err != nil || view.ID != "cfdw_unclaimed" || view.State != state {
+				t.Fatalf("view=%#v err=%v", view, err)
+			}
+		})
+	}
+}
+
 func TestStopPreservesConcurrentlyReplacedClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

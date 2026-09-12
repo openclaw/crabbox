@@ -196,31 +196,21 @@ func (b *cloudflareBackend) Status(ctx context.Context, req StatusRequest) (Stat
 		return StatusView{}, err
 	}
 	client.useInstanceType(cloudflareClaimInstanceType(claim))
-	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = core.ClockNow(b.rt.Clock).Add(5 * time.Minute)
-	}
-	for {
-		sandbox, err := client.getSandbox(ctx, claim.LeaseID)
-		if err != nil {
-			return StatusView{}, err
-		}
-		view := sandboxStatusView(claim.LeaseID, claim.Slug, sandbox)
-		if cloudflareTerminalState(view.State) {
-			return view, nil
-		}
-		if !req.Wait || view.Ready {
-			return view, nil
-		}
-		if core.ClockNow(b.rt.Clock).After(deadline) {
-			return StatusView{}, exit(5, "timed out waiting for %s container %s to become ready", providerName, claim.LeaseID)
-		}
-		select {
-		case <-ctx.Done():
-			return StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
+	return shared.PollDelegatedStatus(ctx, shared.DelegatedStatusRequest{
+		Wait: req.Wait, WaitTimeout: req.WaitTimeout,
+		Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
+		Observe: func(ctx context.Context) (StatusView, bool, error) {
+			sandbox, err := client.getSandbox(ctx, claim.LeaseID)
+			if err != nil {
+				return StatusView{}, false, err
+			}
+			view := sandboxStatusView(claim.LeaseID, claim.Slug, sandbox)
+			return view, cloudflareTerminalState(view.State), nil
+		},
+		TimeoutError: func() error {
+			return exit(5, "timed out waiting for %s container %s to become ready", providerName, claim.LeaseID)
+		},
+	})
 }
 
 func (b *cloudflareBackend) Stop(ctx context.Context, req StopRequest) error {

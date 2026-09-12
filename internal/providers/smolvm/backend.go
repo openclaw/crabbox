@@ -184,32 +184,31 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	if err != nil {
 		return StatusView{}, err
 	}
+	leaseID, machineID, slug, err := b.resolveMachineID(ctx, client, req.ID)
+	if err != nil {
+		return StatusView{}, err
+	}
 	return shared.PollDelegatedStatus(ctx, shared.DelegatedStatusRequest{
-		ID:          req.ID,
-		Provider:    providerName,
-		TargetOS:    targetLinux,
-		Network:     networkPublic,
 		Wait:        req.Wait,
 		WaitTimeout: req.WaitTimeout,
 		Now:         b.now,
-		Resolve: func(id string) (string, string, string, error) {
-			return b.resolveMachineID(ctx, client, id)
-		},
-		Get: func(getCtx context.Context, machineID string) (shared.DelegatedStatusResource, error) {
+		Observe: func(getCtx context.Context) (StatusView, bool, error) {
 			machine, err := client.GetMachine(getCtx, machineID)
 			if err != nil {
-				return shared.DelegatedStatusResource{}, err
+				return StatusView{}, false, err
 			}
 			server := machineToServer(b.cfg, machine)
-			return shared.DelegatedStatusResource{
+			return StatusView{
+				ID: leaseID, Slug: core.Blank(slug, server.Labels["slug"]),
+				Provider: providerName, TargetOS: targetLinux, Network: networkPublic,
 				State:      machine.State,
 				ServerID:   machine.ID,
 				ServerType: server.ServerType.Name,
 				Ready:      statusReady(machine.State),
 				Labels:     server.Labels,
-			}, nil
+			}, false, nil
 		},
-		TimeoutError: func(machineID string) error {
+		TimeoutError: func() error {
 			return exit(5, "timed out waiting for smolvm %s to become ready", machineID)
 		},
 	})
