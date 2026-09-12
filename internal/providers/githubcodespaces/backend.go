@@ -443,7 +443,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 			}
 			server = b.mergeLiveServer(server, item)
 		}
-		repo := firstNonEmpty(server.Labels[labelRepository], item.Repository.FullName)
+		repo := shared.FirstNonBlankTrimmed(server.Labels[labelRepository], item.Repository.FullName)
 		cfg := b.repoConfig(repo)
 		if server.Labels == nil {
 			server.Labels = map[string]string{}
@@ -556,7 +556,7 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	if codespaceStopped(state) || codespaceTerminal(state) || state == "paused" || state == "deleting" || state == "deleted" {
 		return core.Server{}, core.Exit(4, "github-codespaces lease %s is not active (state=%s)", leaseID, state)
 	}
-	requestedName := firstNonEmpty(req.Lease.Server.CloudID, req.Lease.Server.Name, req.Lease.Server.Labels[labelCodespaceName])
+	requestedName := shared.FirstNonBlankTrimmed(req.Lease.Server.CloudID, req.Lease.Server.Name, req.Lease.Server.Labels[labelCodespaceName])
 	if requestedName != "" && requestedName != claim.CloudID {
 		return core.Server{}, core.Exit(3, "github-codespaces touch resource mismatch: claim=%s request=%s", claim.CloudID, requestedName)
 	}
@@ -612,14 +612,14 @@ func (b *backend) releaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 			return err
 		}
 	}
-	if requestedName := firstNonEmpty(requestedServer.CloudID, requestedServer.Name, requestedServer.Labels[labelCodespaceName]); requestedName != "" && requestedName != claim.CloudID {
+	if requestedName := shared.FirstNonBlankTrimmed(requestedServer.CloudID, requestedServer.Name, requestedServer.Labels[labelCodespaceName]); requestedName != "" && requestedName != claim.CloudID {
 		return core.Exit(3, "github-codespaces release resource mismatch: claim=%s request=%s", claim.CloudID, requestedName)
 	}
 	server := serverFromClaim(claim)
 	if err := b.validateClaimForServer(claim, server, user); err != nil {
 		return err
 	}
-	name := firstNonEmpty(server.CloudID, server.Name, server.Labels[labelCodespaceName])
+	name := shared.FirstNonBlankTrimmed(server.CloudID, server.Name, server.Labels[labelCodespaceName])
 	if name == "" {
 		return core.Exit(2, "github-codespaces release requires a claim-backed codespace name")
 	}
@@ -776,12 +776,12 @@ func (b *backend) deleteClaimedCodespaceWithOutcome(ctx context.Context, api cod
 
 func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	if githubCodespacesClaimRelease(lease.LeaseID) == releaseStop {
-		return fmt.Sprintf("stopped github-codespaces lease=%s codespace=%s retained=true", lease.LeaseID, firstNonEmpty(lease.Server.CloudID, lease.Server.Name))
+		return fmt.Sprintf("stopped github-codespaces lease=%s codespace=%s retained=true", lease.LeaseID, shared.FirstNonBlankTrimmed(lease.Server.CloudID, lease.Server.Name))
 	}
 	if githubCodespacesDeleteOnRelease(lease, b.cfg) {
-		return fmt.Sprintf("deleted github-codespaces lease=%s codespace=%s", lease.LeaseID, firstNonEmpty(lease.Server.CloudID, lease.Server.Name))
+		return fmt.Sprintf("deleted github-codespaces lease=%s codespace=%s", lease.LeaseID, shared.FirstNonBlankTrimmed(lease.Server.CloudID, lease.Server.Name))
 	}
-	return fmt.Sprintf("stopped github-codespaces lease=%s codespace=%s retained=true", lease.LeaseID, firstNonEmpty(lease.Server.CloudID, lease.Server.Name))
+	return fmt.Sprintf("stopped github-codespaces lease=%s codespace=%s retained=true", lease.LeaseID, shared.FirstNonBlankTrimmed(lease.Server.CloudID, lease.Server.Name))
 }
 
 func (b *backend) RetainLeaseClaimAfterRelease(lease core.LeaseTarget) bool {
@@ -1317,7 +1317,7 @@ func (b *backend) effectiveMachine() string {
 	if b.cfg.ServerTypeExplicit && strings.TrimSpace(b.cfg.ServerType) != "" {
 		return strings.TrimSpace(b.cfg.ServerType)
 	}
-	return firstNonEmpty(strings.TrimSpace(b.cfg.GitHubCodespaces.Machine), defaultCodespaceMachine)
+	return shared.FirstNonBlankTrimmed(strings.TrimSpace(b.cfg.GitHubCodespaces.Machine), defaultCodespaceMachine)
 }
 
 func (b *backend) effectiveWorkRoot(repo string) string {
@@ -1398,12 +1398,12 @@ func (b *backend) labelsFor(leaseID, slug, repo, login string, keep bool, releas
 	if item.Owner.ID > 0 {
 		labels[labelOwnerID] = strconv.FormatInt(item.Owner.ID, 10)
 	}
-	labels[labelRepository] = firstNonEmpty(item.Repository.FullName, repo)
+	labels[labelRepository] = shared.FirstNonBlankTrimmed(item.Repository.FullName, repo)
 	if item.Repository.ID > 0 {
 		labels[labelRepositoryID] = strconv.FormatInt(item.Repository.ID, 10)
 	}
 	labels[labelRef] = strings.TrimSpace(b.cfg.GitHubCodespaces.Ref)
-	labels[labelMachine] = firstNonEmpty(item.Machine.Name, b.effectiveMachine())
+	labels[labelMachine] = shared.FirstNonBlankTrimmed(item.Machine.Name, b.effectiveMachine())
 	labels[labelLogin] = strings.TrimSpace(user.Login)
 	if user.ID > 0 {
 		labels[labelUserID] = strconv.FormatInt(user.ID, 10)
@@ -1420,7 +1420,7 @@ func (b *backend) serverFromCodespace(item codespace, labels map[string]string) 
 		Status:   item.State,
 		Labels:   cloneLabels(labels),
 	}
-	server.ServerType.Name = firstNonEmpty(item.Machine.Name, b.effectiveMachine())
+	server.ServerType.Name = shared.FirstNonBlankTrimmed(item.Machine.Name, b.effectiveMachine())
 	return server
 }
 
@@ -1469,9 +1469,9 @@ func (b *backend) serversFromCodespaces(items []codespace) ([]core.LeaseView, er
 		}
 		server := b.serverFromCodespace(item, cloneLabels(claim.Labels))
 		server.Labels[labelCodespaceName] = item.Name
-		server.Labels[labelEnvironmentID] = firstNonEmpty(item.EnvironmentID, server.Labels[labelEnvironmentID])
-		server.Labels[labelRepository] = firstNonEmpty(item.Repository.FullName, server.Labels[labelRepository])
-		server.Labels[labelMachine] = firstNonEmpty(item.Machine.Name, server.Labels[labelMachine])
+		server.Labels[labelEnvironmentID] = shared.FirstNonBlankTrimmed(item.EnvironmentID, server.Labels[labelEnvironmentID])
+		server.Labels[labelRepository] = shared.FirstNonBlankTrimmed(item.Repository.FullName, server.Labels[labelRepository])
+		server.Labels[labelMachine] = shared.FirstNonBlankTrimmed(item.Machine.Name, server.Labels[labelMachine])
 		servers = append(servers, server)
 	}
 	return servers, nil
@@ -1494,7 +1494,7 @@ func (b *backend) resolveServer(items []codespace, id string) (core.Server, stri
 		return core.Server{}, "", err
 	}
 	if ok {
-		name := firstNonEmpty(claim.CloudID, claim.Labels[labelCodespaceName])
+		name := shared.FirstNonBlankTrimmed(claim.CloudID, claim.Labels[labelCodespaceName])
 		for _, item := range items {
 			if item.Name == name {
 				return b.serverFromCodespace(item, cloneLabels(claim.Labels)), claim.LeaseID, nil
@@ -1531,16 +1531,16 @@ func (b *backend) mergeLiveServer(server core.Server, item codespace) core.Serve
 	if item.ID > 0 {
 		server.Labels[labelCodespaceID] = strconv.FormatInt(item.ID, 10)
 	}
-	server.Labels[labelEnvironmentID] = firstNonEmpty(item.EnvironmentID, server.Labels[labelEnvironmentID])
+	server.Labels[labelEnvironmentID] = shared.FirstNonBlankTrimmed(item.EnvironmentID, server.Labels[labelEnvironmentID])
 	if item.Owner.ID > 0 {
 		server.Labels[labelOwnerID] = strconv.FormatInt(item.Owner.ID, 10)
 	}
-	server.Labels[labelRepository] = firstNonEmpty(item.Repository.FullName, server.Labels[labelRepository])
+	server.Labels[labelRepository] = shared.FirstNonBlankTrimmed(item.Repository.FullName, server.Labels[labelRepository])
 	if item.Repository.ID > 0 {
 		server.Labels[labelRepositoryID] = strconv.FormatInt(item.Repository.ID, 10)
 	}
-	server.Labels[labelMachine] = firstNonEmpty(item.Machine.Name, server.Labels[labelMachine])
-	server.ServerType.Name = firstNonEmpty(item.Machine.Name, server.ServerType.Name)
+	server.Labels[labelMachine] = shared.FirstNonBlankTrimmed(item.Machine.Name, server.Labels[labelMachine])
+	server.ServerType.Name = shared.FirstNonBlankTrimmed(item.Machine.Name, server.ServerType.Name)
 	return server
 }
 
@@ -1667,9 +1667,9 @@ func validateCodespaceClaimResource(claim core.LeaseClaim, item codespace) error
 
 func serverFromClaim(claim core.LeaseClaim) core.Server {
 	server := core.Server{
-		CloudID:  firstNonEmpty(claim.CloudID, claim.Labels[labelCodespaceName]),
+		CloudID:  shared.FirstNonBlankTrimmed(claim.CloudID, claim.Labels[labelCodespaceName]),
 		Provider: providerName,
-		Name:     firstNonEmpty(claim.CloudID, claim.Labels[labelCodespaceName]),
+		Name:     shared.FirstNonBlankTrimmed(claim.CloudID, claim.Labels[labelCodespaceName]),
 		Status:   claim.Labels[labelState],
 		Labels:   cloneLabels(claim.Labels),
 	}

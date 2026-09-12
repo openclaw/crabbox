@@ -548,6 +548,12 @@ credential admission. Exact forwarding functions and type aliases only add a
 second name for an existing owner; use the core definition at the call site.
 Mutable injection hooks retain their explicit adapter boundary.
 
+Generated SSH configuration shares a connection-record parser in
+`shared.ParseGeneratedSSHConfig`. Adapters supply their generated format's
+comment and directive rules and keep host selection, proxy rewriting, and
+credential validation. The shared scanner reads connection fields; it is not a
+general OpenSSH configuration resolver.
+
 ## Acquisition stays adapter-owned
 
 SSH lease acquisition is a provider-owned transaction, not a shared sequence of
