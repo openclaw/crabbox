@@ -13,6 +13,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 	"google.golang.org/api/googleapi"
 )
 
@@ -704,5 +705,31 @@ func TestGCPAcquireRetainsCleanupClientFailureDespiteFallbackSuccess(t *testing.
 	_, err := b.Acquire(context.Background(), core.AcquireRequest{})
 	if fake.createCalls != 1 || len(fake.deleted) != 1 || !errors.Is(err, primary) || !errors.Is(err, debt) {
 		t.Fatalf("creates=%d deletes=%v error=%v", fake.createCalls, fake.deleted, err)
+	}
+}
+
+func TestGCPResolvedEndpointDirectAndAlias(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	server := canonicalGCPTestServer("cbx_123456abcdef", "example")
+	server.PublicNet.IPv4.IP = "192.0.2.10"
+	fake := &fakeGCPDoctorClient{servers: []core.Server{server}, get: map[string]core.Server{server.CloudID: server}}
+	old := newGCPClient
+	newGCPClient = func(context.Context, core.Config) (gcpClient, error) { return fake, nil }
+	t.Cleanup(func() { newGCPClient = old })
+	for _, id := range []string{server.CloudID, "example"} {
+		for _, releaseOnly := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/release=%t", id, releaseOnly), func(t *testing.T) {
+				cfg := core.Config{SSHUser: "alice", SSHPort: "2222", SSHKey: "configured-key", TargetOS: "linux"}
+				backend := NewGCPLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{}).(*gcpLeaseBackend)
+				got, err := backend.Resolve(t.Context(), core.ResolveRequest{ID: id, ReleaseOnly: releaseOnly})
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantHost := "192.0.2.10"
+				if got.Server.CloudID != server.CloudID || got.LeaseID != "cbx_123456abcdef" || got.SSH.Host != wantHost || got.SSH.User != "alice" || got.SSH.Port != "2222" || got.SSH.Key != "configured-key" {
+					t.Fatalf("resolved target: %#v", got)
+				}
+			})
+		}
 	}
 }

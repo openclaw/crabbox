@@ -148,12 +148,7 @@ func (b *azureLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest
 		}
 		leaseID := server.Labels["lease"]
 		target := core.SSHTargetFromConfig(b.Cfg, core.AzureServerHost(server, b.Cfg.AzureNetwork))
-		if !req.ReleaseOnly {
-			if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
-				return core.LeaseTarget{}, err
-			}
-		}
-		return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+		return b.ResolvedLeaseTarget(server, target, leaseID, req.ReleaseOnly)
 	}
 	servers, err := listOwnedAzureServers(ctx, client)
 	if err != nil {
@@ -163,12 +158,7 @@ func (b *azureLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest
 		return core.LeaseTarget{}, err
 	} else if leaseID != "" {
 		target := core.SSHTargetFromConfig(b.Cfg, core.AzureServerHost(server, b.Cfg.AzureNetwork))
-		if !req.ReleaseOnly {
-			if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
-				return core.LeaseTarget{}, err
-			}
-		}
-		return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+		return b.ResolvedLeaseTarget(server, target, leaseID, req.ReleaseOnly)
 	}
 	if req.ReleaseOnly {
 		return resolveMissingAzureReleaseClaim(req.ID, client.LeaseClaimScope())

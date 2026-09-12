@@ -16,6 +16,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 type fakeAzureClient struct {
@@ -1040,6 +1041,38 @@ func TestAzureConfigShowCompletePassiveSection(t *testing.T) {
 					t.Fatal("projection mutated supplied configuration")
 				}
 			})
+		}
+	}
+}
+
+func TestAzureResolvedEndpointDirectAndAlias(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	server := azureTestServer("crabbox-example", "cbx_123456abcdef", "example")
+	server.PublicNet.IPv4.IP = "192.0.2.10"
+	server.PrivateNet.IPv4.IP = "10.0.0.10"
+	fake := &fakeAzureClient{servers: []core.Server{server}, get: map[string]core.Server{server.CloudID: server}}
+	old := newAzureClient
+	newAzureClient = func(context.Context, core.Config) (azureClient, error) { return fake, nil }
+	t.Cleanup(func() { newAzureClient = old })
+	for _, network := range []string{"public", "private"} {
+		for _, id := range []string{server.CloudID, "example"} {
+			for _, releaseOnly := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/release=%t", network, id, releaseOnly), func(t *testing.T) {
+					cfg := core.Config{SSHUser: "alice", SSHPort: "2222", SSHKey: "configured-key", TargetOS: "linux", AzureNetwork: network}
+					backend := NewAzureLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{}).(*azureLeaseBackend)
+					got, err := backend.Resolve(t.Context(), core.ResolveRequest{ID: id, ReleaseOnly: releaseOnly})
+					if err != nil {
+						t.Fatal(err)
+					}
+					wantHost := "192.0.2.10"
+					if network == "private" {
+						wantHost = "10.0.0.10"
+					}
+					if got.Server.CloudID != server.CloudID || got.LeaseID != "cbx_123456abcdef" || got.SSH.Host != wantHost || got.SSH.User != "alice" || got.SSH.Port != "2222" || got.SSH.Key != "configured-key" {
+						t.Fatalf("resolved target: %#v", got)
+					}
+				})
+			}
 		}
 	}
 }

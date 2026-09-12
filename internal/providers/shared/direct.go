@@ -24,6 +24,17 @@ const CleanupSkipNoExactLocalClaim CleanupSkipReason = "no-exact-local-claim"
 
 func (b *DirectSSHBackend) Spec() core.ProviderSpec { return b.SpecValue }
 
+// ResolvedLeaseTarget preserves the adapter's endpoint and skips stored-key lookup for release-only resolution.
+func (b *DirectSSHBackend) ResolvedLeaseTarget(server core.Server, target core.SSHTarget, leaseID string, releaseOnly bool) (core.LeaseTarget, error) {
+	lease := core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+	if !releaseOnly {
+		if err := b.RebindResolvedLeaseTarget(&lease, leaseID); err != nil {
+			return core.LeaseTarget{}, err
+		}
+	}
+	return lease, nil
+}
+
 func (b *DirectSSHBackend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
 	if b.StoredLeaseKeys {
 		if err := core.UseStoredTestboxKey(&target.SSH, leaseID); err != nil {

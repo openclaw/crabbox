@@ -561,7 +561,7 @@ create, claim, bootstrap, and cleanup steps. Similar-looking acquisition bodies
 protect different ownership windows, credential dependencies, failure policies,
 and security boundaries. Share small primitives without centralizing their order.
 
-Acquisition already shares the mechanics that have provider-neutral contracts:
+Acquisition and resolution share mechanics with provider-neutral contracts:
 
 - `shared.AcquireAttemptsRetry` retries eligible fresh acquisitions outside the
   individual provider transaction and preserves bootstrap-failure/keep policy.
@@ -573,6 +573,10 @@ Acquisition already shares the mechanics that have provider-neutral contracts:
   identity checks, side effects, timeouts, and diagnostics.
 - `core.SSHTargetFromConfig` constructs conventional SSH endpoints, and
   `core.WaitForSSHReady` proves the common SSH bootstrap contract.
+- `shared.DirectSSHBackend.ResolvedLeaseTarget` packages an adapter-built endpoint
+  and reuses stored-key rebinding for ordinary resolution. Release-only resolution
+  skips stored-key lookup while preserving the configured endpoint. Adapters retain
+  ownership of region selection, host selection, and resource validation.
 - `shared.ClaimBinding`, `shared.ValidateClaimBinding`,
   `shared.ResolveProviderClaimStrict`, and `shared.ErrStrictClaimMismatch`
   validate structural identity and exact provider/scope-bound claim lookup;

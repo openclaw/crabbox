@@ -1565,7 +1565,7 @@ func TestAWSResolveAndReleaseUseFallbackRegion(t *testing.T) {
 	}
 	t.Cleanup(func() { newAWSClient = oldClient })
 
-	cfg := core.Config{Provider: "aws", AWSRegion: "us-east-1"}
+	cfg := core.Config{Provider: "aws", AWSRegion: "us-east-1", SSHUser: "alice", SSHPort: "2222", SSHKey: "configured-key"}
 	cfg.Capacity.Regions = []string{"us-east-1", "us-west-2"}
 	backend := NewAWSLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
 	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "west"})
@@ -1574,6 +1574,9 @@ func TestAWSResolveAndReleaseUseFallbackRegion(t *testing.T) {
 	}
 	if lease.Server.CloudID != "i-west" || lease.Server.Labels["aws_region"] != "us-west-2" {
 		t.Fatalf("lease=%#v, want west-region server", lease.Server)
+	}
+	if lease.SSH.User != "alice" || lease.SSH.Port != "2222" || lease.SSH.Key != "configured-key" {
+		t.Fatalf("resolved SSH target: %#v", lease.SSH)
 	}
 	if err := core.ClaimLeaseTargetForConfig(lease.LeaseID, lease.Server.Labels["slug"], cfg, lease.Server, core.SSHTarget{}, time.Hour); err != nil {
 		t.Fatal(err)
