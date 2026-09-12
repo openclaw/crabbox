@@ -38,7 +38,7 @@ func tagsFromLabels(labels map[string]string) []string {
 			tags = append(tags, encodeTagKV(key, value))
 		}
 	}
-	return normalizeTags(tags)
+	return shared.NormalizeTags(tags)
 }
 
 func tagLabelKeys() []string {
@@ -86,21 +86,6 @@ func exactTagValueKey(key string) bool {
 func versionedExactTagValueKey(key string) (string, bool) {
 	logical := strings.TrimSuffix(key, "_v1")
 	return logical, logical != key && exactTagValueKey(logical)
-}
-
-func normalizeTags(tags []string) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0, len(tags))
-	for _, tag := range tags {
-		tag = strings.TrimSpace(tag)
-		if tag == "" || seen[tag] {
-			continue
-		}
-		seen[tag] = true
-		out = append(out, tag)
-	}
-	sort.Strings(out)
-	return out
 }
 
 func labelsFromTags(tags []string) map[string]string {

@@ -579,7 +579,7 @@ func (c *vultrClient) DeleteSSHKey(ctx context.Context, id string) error {
 }
 
 func (c *vultrClient) UpdateInstanceTags(ctx context.Context, id string, tags []string) error {
-	body := map[string]any{"tags": normalizeTags(tags)}
+	body := map[string]any{"tags": shared.NormalizeTags(tags)}
 	return c.do(ctx, http.MethodPatch, "/instances/"+url.PathEscape(id), body, nil)
 }
 

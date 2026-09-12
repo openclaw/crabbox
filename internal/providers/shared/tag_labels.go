@@ -6,6 +6,23 @@ import (
 	"strings"
 )
 
+// NormalizeTags returns a sorted, case-sensitive set of trimmed nonempty tags.
+// It does not validate wire formats or interpret ownership metadata.
+func NormalizeTags(tags []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" || seen[tag] {
+			continue
+		}
+		seen[tag] = true
+		out = append(out, tag)
+	}
+	sort.Strings(out)
+	return out
+}
+
 type tagMerge uint8
 
 const (

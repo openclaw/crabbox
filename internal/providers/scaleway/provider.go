@@ -1174,7 +1174,7 @@ func replaceCrabboxTags(existing, desired []string) []string {
 		}
 		tags = append(tags, tag)
 	}
-	return normalizeTags(tags)
+	return shared.NormalizeTags(tags)
 }
 
 func publicIPv4(item *instance.Server) string {

@@ -2,7 +2,6 @@ package vultr
 
 import (
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -36,7 +35,7 @@ func leaseTags(cfg core.Config, leaseID, slug, state string, keep bool, now time
 			tags = append(tags, encodeTagKV(key, value))
 		}
 	}
-	return normalizeTags(tags)
+	return shared.NormalizeTags(tags)
 }
 
 func tagsFromLabels(labels map[string]string) []string {
@@ -50,7 +49,7 @@ func tagsFromLabels(labels map[string]string) []string {
 			tags = append(tags, encodeTagKV(key, value))
 		}
 	}
-	return normalizeTags(tags)
+	return shared.NormalizeTags(tags)
 }
 
 func encodeTagKV(key, value string) string {
@@ -68,21 +67,6 @@ func sanitizeTagPart(value string) string {
 		return value[:64]
 	}
 	return value
-}
-
-func normalizeTags(tags []string) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0, len(tags))
-	for _, tag := range tags {
-		tag = strings.TrimSpace(tag)
-		if tag == "" || seen[tag] {
-			continue
-		}
-		seen[tag] = true
-		out = append(out, tag)
-	}
-	sort.Strings(out)
-	return out
 }
 
 func labelsFromTags(tags []string) map[string]string {
