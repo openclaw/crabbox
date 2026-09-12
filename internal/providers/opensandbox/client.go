@@ -188,7 +188,7 @@ func validateOpenSandboxAPIURL(raw string) (string, error) {
 	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
 		return "", exit(2, "provider=opensandbox API URL must use HTTPS except for loopback development endpoints")
 	}
-	host := canonicalOpenSandboxHostname(parsed.Hostname())
+	host := shared.LowercaseHostname(parsed.Hostname())
 	port := parsed.Port()
 	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
 		port = ""
@@ -206,13 +206,6 @@ func validateOpenSandboxAPIURL(raw string) (string, error) {
 	}
 	parsed.RawPath = ""
 	return strings.TrimRight(parsed.String(), "/"), nil
-}
-
-func canonicalOpenSandboxHostname(host string) string {
-	if zoneAt := strings.Index(host, "%"); zoneAt > 0 && strings.Contains(host[:zoneAt], ":") {
-		return strings.ToLower(host[:zoneAt]) + host[zoneAt:]
-	}
-	return strings.ToLower(host)
 }
 
 func isLoopbackHost(host string) bool {

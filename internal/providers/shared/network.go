@@ -12,6 +12,15 @@ type EndpointURLErrors struct {
 	Insecure   error
 }
 
+// LowercaseHostname preserves an IPv6 zone identifier's case. It does not
+// normalize IP spelling, strip a trailing dot, or trim whitespace.
+func LowercaseHostname(host string) string {
+	if zoneAt := strings.Index(host, "%"); zoneAt > 0 && strings.Contains(host[:zoneAt], ":") {
+		return strings.ToLower(host[:zoneAt]) + host[zoneAt:]
+	}
+	return strings.ToLower(host)
+}
+
 func NormalizeHTTPSURL(raw string, errs EndpointURLErrors) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {

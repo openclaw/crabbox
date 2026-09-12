@@ -163,7 +163,7 @@ func ValidateAPIURL(raw string) (string, error) {
 	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
 		return "", exit(2, "provider=blaxel API URL must use HTTPS except for loopback development endpoints")
 	}
-	host := canonicalHostname(parsed.Hostname())
+	host := shared.LowercaseHostname(parsed.Hostname())
 	port := parsed.Port()
 	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
 		port = ""
@@ -194,7 +194,7 @@ func validateSandboxEndpoint(raw, managementBase string) (string, error) {
 		return "", exit(5, "blaxel sandbox metadata.url must not contain userinfo, query parameters, or a fragment")
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	host := canonicalHostname(parsed.Hostname())
+	host := shared.LowercaseHostname(parsed.Hostname())
 	if parsed.Scheme == "http" {
 		management, _ := url.Parse(managementBase)
 		if management == nil || !isLoopbackHost(management.Hostname()) || !isLoopbackHost(host) {
@@ -223,7 +223,7 @@ func validateSandboxEndpoint(raw, managementBase string) (string, error) {
 }
 
 func isBlaxelDataPlaneHost(host string) bool {
-	host = strings.TrimSuffix(canonicalHostname(host), ".")
+	host = strings.TrimSuffix(shared.LowercaseHostname(host), ".")
 	return host == "bl.run" ||
 		strings.HasSuffix(host, ".bl.run") ||
 		host == "blaxel.ai" ||
@@ -248,13 +248,6 @@ func validateBlaxelConfig(cfg Config) error {
 
 func isLoopbackHost(host string) bool {
 	return shared.IsLoopbackHost(host)
-}
-
-func canonicalHostname(host string) string {
-	if zoneAt := strings.Index(host, "%"); zoneAt > 0 && strings.Contains(host[:zoneAt], ":") {
-		return strings.ToLower(host[:zoneAt]) + host[zoneAt:]
-	}
-	return strings.ToLower(host)
 }
 
 func secureHTTPClient(source *http.Client) *http.Client {
