@@ -1912,3 +1912,108 @@ func TestJSONRequestAdoptionEnvelope(t *testing.T) {
 		})
 	}
 }
+
+type responseCloseObserver struct {
+	io.Reader
+	close func() error
+}
+
+func (b responseCloseObserver) Close() error { return b.close() }
+
+func TestRawJSONResponseContract(t *testing.T) {
+	readFailure := errors.New("synthetic response read failure")
+	closeFailure := errors.New("synthetic ignored close failure")
+	for _, tc := range []struct {
+		name, data        string
+		status            int
+		nilOut, readError bool
+		wantError         string
+		wantValue         int
+	}{
+		{name: "nil output still reads invalid JSON", data: "not JSON", nilOut: true, wantValue: 99},
+		{name: "raw empty", wantValue: 99},
+		{name: "whitespace with output", data: " \t\n", wantError: "syntax", wantValue: 99},
+		{name: "whitespace without output", data: " \t\n", nilOut: true, wantValue: 99},
+		{name: "JSON object", data: `{"value":12}`, wantValue: 12},
+		{name: "JSON null", data: "null", wantValue: 99},
+		{name: "JSON trailing whitespace", data: "{\"value\":12}\n \t", wantValue: 12},
+		{name: "trailing JSON value", data: `{"value":12}{"value":13}`, wantError: "syntax", wantValue: 99},
+		{name: "wrong JSON field type", data: `{"value":"bad"}`, wantError: "type", wantValue: 99},
+		{name: "status error", data: "  unavailable \n", status: 503, wantError: "status", wantValue: 99},
+		{name: "status error with nil output", data: "  unavailable \n", status: 503, nilOut: true, wantError: "status", wantValue: 99},
+		{name: "read error beats success", data: `{"value":12}`, readError: true, wantError: "read", wantValue: 99},
+		{name: "read error beats status and nil output", data: "partial body", status: 503, nilOut: true, readError: true, wantError: "read", wantValue: 99},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := bytes.NewReader([]byte(tc.data))
+			var reader io.Reader = payload
+			if tc.readError {
+				reader = io.MultiReader(payload, iotest.ErrReader(readFailure))
+			}
+			closed, calls := 0, 0
+			responseHeaders := http.Header{"X-Trace": []string{"before-close", "second"}}
+			body := responseCloseObserver{Reader: reader, close: func() error { closed++; responseHeaders["X-Trace"][0] = "after-close"; return closeFailure }}
+			status := tc.status
+			if status == 0 {
+				status = 200
+			}
+			const base = "https://api.example.test"
+			httpClient := &http.Client{Transport: cubesandboxRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				return &http.Response{StatusCode: status, Status: strconv.Itoa(status) + " Synthetic", Header: responseHeaders, Body: body, Request: req}, nil
+			})}
+			client := &cubesandboxClient{apiURL: base, apiKey: "synthetic-token", httpClient: httpClient}
+			out := struct {
+				Value int `json:"value"`
+			}{Value: 99}
+			var destination any = &out
+			if tc.nilOut {
+				destination = nil
+			}
+			headers, err := client.doJSONWithHeaders(context.Background(), http.MethodGet, "/records", nil, nil, destination)
+			if calls != 1 || closed != 1 || payload.Len() != 0 {
+				t.Fatalf("calls=%d closes=%d unread=%d", calls, closed, payload.Len())
+			}
+			if out.Value != tc.wantValue {
+				t.Fatalf("value=%d want%d", out.Value, tc.wantValue)
+			}
+			switch tc.wantError {
+			case "":
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "read":
+				if err != readFailure {
+					t.Fatalf("read error=%T %v want exact sentinel", err, err)
+				}
+			case "syntax":
+				if _, ok := err.(*json.SyntaxError); !ok {
+					t.Fatalf("decode error=%T %v want unwrapped SyntaxError", err, err)
+				}
+			case "type":
+				if _, ok := err.(*json.UnmarshalTypeError); !ok {
+					t.Fatalf("decode error=%T %v want unwrapped UnmarshalTypeError", err, err)
+				}
+			case "status":
+				api, ok := err.(*cubesandboxAPIError)
+				if !ok || api.StatusCode != 503 || api.Status != "503 Synthetic" || api.Body != "unavailable" {
+					t.Fatalf("status error=%T %#v", err, err)
+				}
+			}
+			if tc.wantError != "" {
+				if headers != nil {
+					t.Fatalf("error headers=%v", headers)
+				}
+			} else {
+				want := http.Header{"X-Trace": []string{"before-close", "second"}}
+				if !reflect.DeepEqual(headers, want) {
+					t.Fatalf("headers=%v want pre-close clone%v", headers, want)
+				}
+				headers["X-Trace"][0] = "caller-change"
+				if responseHeaders["X-Trace"][0] != "after-close" {
+					t.Fatal("returned headers share backing values")
+				}
+			}
+		})
+	}
+}

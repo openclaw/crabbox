@@ -39,3 +39,21 @@ existing error boundaries. Later failures return previously accumulated pages,
 but never partially decoded current-page data. Ordering, duplicates and nil
 results are preserved. Empty data and the reported result count do not stop
 traversal; only the existing page-count rule does.
+
+## Compact JSON requests
+
+`shared.NewCompactJSONRequest` owns the separate Marshal-based envelope used by
+Hostinger, Vast, Morph, Upstash Box, Railway and Cloud Run Sandbox. It preserves
+compact bytes without an Encoder newline, default HTML escaping, context,
+content length and body replay. A nil interface leaves the body absent; a
+typed-nil value still produces `null`.
+
+URL construction and context lifetime remain caller-owned. Morph still reports
+its URL parsing failures before encoding. Cloud Run still establishes and
+cancels its timeout outside the constructor, and a typed-nil map remains a JSON
+body. Headers, transport, retries and response handling do not move.
+
+Stage-specific error labels, fallible checks between encoding and construction,
+signed payloads, distinct empty-reader contracts and streaming readers remain
+separate. The two named constructors describe different wire contracts, not a
+configurable provider-client framework.

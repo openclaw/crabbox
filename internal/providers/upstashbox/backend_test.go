@@ -22,6 +22,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestProviderSpecAndAliases(t *testing.T) {
@@ -2119,5 +2120,58 @@ func TestRunSourceIntentSurvivesNativeShell(t *testing.T) {
 				t.Fatalf("literal created sentinel: %v", err)
 			}
 		})
+	}
+}
+
+func TestCompactJSONRequestEnvelope(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "ctx")
+	const base = "https://api.example.test/base"
+	var ptr *string
+	var slice []string
+	for _, tc := range []struct {
+		name string
+		body any
+		want string
+	}{
+		{name: "nil"}, {name: "typed nil pointer", body: ptr, want: "null"}, {name: "typed nil slice", body: slice, want: "null"}, {name: "compact escaped JSON", body: map[string]string{"message": "<&>"}, want: "{\"message\":\"\\u003c\\u0026\\u003e\"}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			path := "/records"
+			endpoint := base + path
+			headers := http.Header{}
+			headers.Set("X-Box-Api-Key", "synthetic-token")
+			if tc.body != nil {
+				headers.Set("Content-Type", "application/json")
+			}
+			httpClient := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, endpoint, tc.want, headers)
+				return nil, errors.New("synthetic-transport-stop")
+			})}
+			c := &client{base: base, apiKey: "synthetic-token", http: httpClient}
+			err := c.doJSON(ctx, http.MethodPost, path, nil, tc.body, nil)
+			if err == nil || !strings.Contains(err.Error(), "synthetic-transport-stop") || calls != 1 {
+				t.Fatalf("error=%v calls=%d", err, calls)
+			}
+		})
+	}
+}
+
+func TestCompactJSONExecStreamEnvelope(t *testing.T) {
+	ctx := context.Background()
+	calls := 0
+	headers := http.Header{}
+	headers.Set("X-Box-Api-Key", "synthetic-token")
+	headers.Set("Content-Type", "application/json")
+	c := &client{base: "https://api.example.test/base", apiKey: "synthetic-token", http: &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, "https://api.example.test/base/v2/box/box%20one/exec-stream", `{"command":["sh","-c","\u003c\u0026\u003e"],"folder":"/work"}`, headers)
+		return nil, errors.New("synthetic-transport-stop")
+	})}}
+	code, err := c.ExecStream(ctx, "box one", "<&>", " /work ", io.Discard)
+	if code != 0 || err == nil || !strings.Contains(err.Error(), "synthetic-transport-stop") || calls != 1 {
+		t.Fatalf("code=%d error=%v calls=%d", code, err, calls)
 	}
 }
