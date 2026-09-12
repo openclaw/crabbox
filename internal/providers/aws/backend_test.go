@@ -194,6 +194,77 @@ func (c *fakeAWSClient) SpotPlacementScores(context.Context, Config) ([]ec2types
 	return nil, nil
 }
 
+func TestLeaseSSHAWSInvalidStateRootPreventsAcquireAndFallback(t *testing.T) {
+	for _, fixed := range []bool{false, true} {
+		mode := "ordinary"
+		if fixed {
+			mode = "fixed"
+		}
+		for _, rootKind := range []string{"relative", "regular-file"} {
+			t.Run(mode+"/"+rootKind, func(t *testing.T) {
+				dirs := testutil.IsolateUserDirs(t)
+				t.Chdir(dirs.Root)
+				selected := "relative-state"
+				wantError := "must be absolute"
+				if rootKind == "regular-file" {
+					selected = filepath.Join(dirs.Root, "state-file")
+					if err := os.WriteFile(selected, []byte("benign state-root marker\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					wantError = selected
+				}
+				t.Setenv("XDG_STATE_HOME", selected)
+				before := snapshotAWSStateFixture(t, dirs.Root)
+				fake := &fakeAWSClient{}
+				oldClient := newAWSClient
+				newAWSClient = func(context.Context, Config) (awsClient, error) { return fake, nil }
+				t.Cleanup(func() { newAWSClient = oldClient })
+				backend := NewAWSLeaseBackend(ProviderSpec{}, fixedAWSTestConfig(), Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+				req := AcquireRequest{Repo: core.Repo{Root: dirs.Root}}
+				if fixed {
+					req.RequestedLeaseID = "cbx_abcdef151607"
+				}
+				lease, err := backend.Acquire(t.Context(), req)
+				if err == nil || !strings.Contains(err.Error(), wantError) {
+					t.Fatalf("acquisition error=%v, want selected-root rejection containing %q", err, wantError)
+				}
+				if !reflect.DeepEqual(lease, LeaseTarget{}) {
+					t.Fatal("invalid state root returned an acquired lease")
+				}
+				// Both fake create entrypoints encompass instance/key provisioning;
+				// inventory/account reads are permitted but no mutation may begin.
+				if fake.createCalls != 0 || len(fake.deletedInstances) != 0 || len(fake.deletedKeys) != 0 || len(fake.tagged) != 0 || len(fake.validatedKeys) != 0 {
+					t.Fatal("invalid state root reached provider provisioning or cleanup")
+				}
+				if !reflect.DeepEqual(snapshotAWSStateFixture(t, dirs.Root), before) {
+					t.Fatal("invalid state root changed isolated state, default config/home, or relative fallback paths")
+				}
+			})
+		}
+	}
+}
+
+type awsStateFixtureMetadata struct {
+	Mode    os.FileMode
+	Size    int64
+	ModTime int64
+}
+
+func snapshotAWSStateFixture(t *testing.T, root string) map[string]awsStateFixtureMetadata {
+	t.Helper()
+	snapshot := make(map[string]awsStateFixtureMetadata)
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		snapshot[path] = awsStateFixtureMetadata{info.Mode(), info.Size(), info.ModTime().UnixNano()}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
 func TestAWSAcquireCleansUpCreatedServerAndKeyOnIPFailure(t *testing.T) {
 	testutil.IsolateUserDirs(t)
 	ipErr := errors.New("ip unavailable")

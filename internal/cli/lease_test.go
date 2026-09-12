@@ -222,6 +222,35 @@ func TestLeaseSSHImportedFilePrivacy(t *testing.T) {
 func TestSelectedLeaseSSHRootReuseAndCleanup(t *testing.T) {
 	dirs := isolateTestUserDirs(t)
 	prepareLeaseSSHTestStateRoot(t, dirs.StateHome)
+	externalPaths := []string{
+		filepath.Join(dirs.Root, "operator-key"),
+		filepath.Join(dirs.Root, "provider-managed-key"),
+	}
+	externalInfo := make([]os.FileInfo, len(externalPaths))
+	for i, path := range externalPaths {
+		if err := os.WriteFile(path, []byte("synthetic external identity\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		externalInfo[i] = info
+	}
+	checkExternalUnchanged := func() {
+		t.Helper()
+		for i, path := range externalPaths {
+			data, err := os.ReadFile(path)
+			if err != nil || string(data) != "synthetic external identity\n" {
+				t.Fatalf("external identity contents changed: %s: %v", path, err)
+			}
+			info, err := os.Stat(path)
+			before := externalInfo[i]
+			if err != nil || !os.SameFile(before, info) || info.Mode() != before.Mode() || info.Size() != before.Size() || !info.ModTime().Equal(before.ModTime()) {
+				t.Fatalf("external identity metadata changed: %s: %v", path, err)
+			}
+		}
+	}
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		t.Fatal(err)
@@ -256,7 +285,8 @@ func TestSelectedLeaseSSHRootReuseAndCleanup(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(configDir, "crabbox")); !os.IsNotExist(err) {
 		t.Fatalf("default key tree was touched: %v", err)
 	}
-	t.Setenv("XDG_STATE_HOME", filepath.Join(dirs.Root, "other-state"))
+	otherState := filepath.Join(dirs.Root, "other-state")
+	t.Setenv("XDG_STATE_HOME", otherState)
 	external := SSHTarget{Key: "external-key"}
 	if err := useStoredTestboxKey(&external, leaseID); err != nil || external.Key != "external-key" {
 		t.Fatalf("root switch adopted an alternate key: %+v %v", external, err)
@@ -264,6 +294,22 @@ func TestSelectedLeaseSSHRootReuseAndCleanup(t *testing.T) {
 	if _, err := os.Stat(key); err != nil {
 		t.Fatal("root switch changed the original key")
 	}
+	for _, path := range externalPaths {
+		target := SSHTarget{Key: path}
+		if err := UseStoredTestboxKey(&target, leaseID); err != nil || target.Key != path {
+			t.Fatalf("selected-root lookup replaced external identity %s: %+v %v", path, target, err)
+		}
+	}
+	if err := RemoveStoredTestboxConnectionArtifacts(leaseID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(otherState, "crabbox", "testboxes")); !os.IsNotExist(err) {
+		t.Fatalf("root switch copied or created a key namespace: %v", err)
+	}
+	if data, err := os.ReadFile(key); err != nil || string(data) != string(before) {
+		t.Fatalf("cleanup under the other root changed the original key: %v", err)
+	}
+	checkExternalUnchanged()
 	t.Setenv("XDG_STATE_HOME", dirs.StateHome)
 	if err := RemoveStoredTestboxConnectionArtifacts(leaseID); err != nil {
 		t.Fatal(err)
@@ -271,6 +317,7 @@ func TestSelectedLeaseSSHRootReuseAndCleanup(t *testing.T) {
 	if _, err := os.Lstat(filepath.Dir(key)); !os.IsNotExist(err) {
 		t.Fatalf("selected lease directory remains: %v", err)
 	}
+	checkExternalUnchanged()
 	checkConfigUnchanged()
 }
 

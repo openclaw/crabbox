@@ -8,9 +8,43 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestClaimLockDirectoryUsesActualAbsoluteScope(t *testing.T) {
+	dirs := isolateTestUserDirs(t)
+	t.Chdir(dirs.Root)
+	t.Setenv("XDG_STATE_HOME", "unrelated-relative-state")
+	called := false
+	err := withLeaseClaimLock(filepath.Join("relative-scope", "claims", "claim.json"), func() error {
+		called = true
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "must be absolute") || called {
+		t.Fatalf("relative lock scope: callback=%t error=%v", called, err)
+	}
+	if _, err := os.Stat("relative-scope"); !os.IsNotExist(err) {
+		t.Fatalf("relative lock scope was created: %v", err)
+	}
+	scope := filepath.Join(dirs.Root, "absolute-scope")
+	if err := withLeaseClaimLock(filepath.Join(scope, "claims", "claim.json"), func() error {
+		called = true
+		return nil
+	}); err != nil || !called {
+		t.Fatalf("absolute explicit lock scope: callback=%t error=%v", called, err)
+	}
+	if _, err := os.Stat(filepath.Join(scope, "claim-locks")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(scope, "claims")); !os.IsNotExist(err) {
+		t.Fatalf("lock-only operation created claims: %v", err)
+	}
+	if _, err := os.Stat("unrelated-relative-state"); !os.IsNotExist(err) {
+		t.Fatalf("explicit lock path consulted global state: %v", err)
+	}
+}
 
 func waitClaimWriter(t *testing.T, path string) {
 	t.Helper()

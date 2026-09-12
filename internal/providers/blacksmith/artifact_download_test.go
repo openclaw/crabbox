@@ -24,6 +24,12 @@ func TestBlacksmithDownloadArtifactValidation(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			fixture := newBlacksmithInstalledHelperFixture(t)
 			repoRoot, tempParent := fixture.repo, fixture.temp
+			if kind == "valid" {
+				t.Setenv("XDG_STATE_HOME", filepath.Join(repoRoot, "nested-state"))
+				if err := validateBlacksmithNativeSyncScope(repoRoot); err == nil {
+					t.Fatal("inbound fixture must overlap a rejected outgoing source scope")
+				}
+			}
 			var physicalTempParent string
 			if kind == "relative-tmp" {
 				t.Chdir(t.TempDir())

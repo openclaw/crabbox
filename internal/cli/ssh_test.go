@@ -2673,6 +2673,23 @@ func TestSSHControlPathIsScopedByKey(t *testing.T) {
 	if !strings.HasPrefix(filepath.Base(left), "crabbox-ssh-") || !strings.HasSuffix(left, "-%C") {
 		t.Fatalf("unexpected control path %q", left)
 	}
+	t.Run("selected roots with the same endpoint", func(t *testing.T) {
+		dirs := isolateTestUserDirs(t)
+		keyA, err := testboxKeyPath("cbx_1516")
+		if err != nil {
+			t.Fatal(err)
+		}
+		left := sshControlPath(SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "2222", Key: keyA})
+		t.Setenv("XDG_STATE_HOME", filepath.Join(dirs.Root, "other-state"))
+		keyB, err := testboxKeyPath("cbx_1516")
+		if err != nil || keyA == keyB {
+			t.Fatalf("selected roots did not resolve distinct keys: %q %q %v", keyA, keyB, err)
+		}
+		right := sshControlPath(SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "2222", Key: keyB})
+		if left == right {
+			t.Fatalf("selected roots shared a control path for the same endpoint: %q", left)
+		}
+	})
 }
 
 func TestSSHControlPathIsScopedByProxyAndCertificate(t *testing.T) {

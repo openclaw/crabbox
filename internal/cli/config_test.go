@@ -12488,6 +12488,9 @@ func TestAccessAuthState(t *testing.T) {
 
 func TestRepoConfigIsYamlOnly(t *testing.T) {
 	clearConfigEnv(t)
+	dirs := isolateTestUserDirs(t)
+	selectedState := dirs.StateHome
+	repositorySelectedState := filepath.Join(dirs.Root, "repository-selected-state")
 	dir := t.TempDir()
 	oldwd, err := os.Getwd()
 	if err != nil {
@@ -12507,7 +12510,7 @@ func TestRepoConfigIsYamlOnly(t *testing.T) {
 	if err := os.WriteFile(".crabbox.json", []byte(`{"profile":"json-profile","provider":"aws"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(".crabbox.yaml", []byte("profile: yaml-profile\nprovider: aws\n"), 0o600); err != nil {
+	if err := os.WriteFile(".crabbox.yaml", []byte("profile: yaml-profile\nprovider: aws\nXDG_STATE_HOME: "+strconv.Quote(repositorySelectedState)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -12517,6 +12520,14 @@ func TestRepoConfigIsYamlOnly(t *testing.T) {
 	}
 	if cfg.Profile != "yaml-profile" || cfg.Provider != "aws" {
 		t.Fatalf("unexpected config: profile=%s provider=%s", cfg.Profile, cfg.Provider)
+	}
+	keyPath, err := testboxKeyPath("cbx_1516")
+	wantKeyPath := filepath.Join(selectedState, "crabbox", "testboxes", "cbx_1516", "id_ed25519")
+	if err != nil || keyPath != wantKeyPath || os.Getenv("XDG_STATE_HOME") != selectedState {
+		t.Fatalf("repository YAML changed generated-key root: path=%q env=%q err=%v", keyPath, os.Getenv("XDG_STATE_HOME"), err)
+	}
+	if _, err := os.Lstat(repositorySelectedState); !os.IsNotExist(err) {
+		t.Fatalf("repository-selected root was materialized: %v", err)
 	}
 }
 

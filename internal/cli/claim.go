@@ -1031,7 +1031,7 @@ func withLeaseIDOperationLock(leaseID string, action func() error) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := makePrivateClaimDirectories(filepath.Dir(path)); err != nil {
 		return exit(2, "create claim directory: %v", err)
 	}
 	return withLeaseClaimLock(path, action)
@@ -1051,7 +1051,7 @@ func withDurableLeaseClaimLockContext(ctx context.Context, leaseID string, actio
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := makePrivateClaimDirectories(dir); err != nil {
 		return exit(2, "create claim directory: %v", err)
 	}
 	return withLeaseClaimLockContext(ctx, path, false, func() error {
@@ -1089,10 +1089,17 @@ func withDurableLeaseClaimLockContext(ctx context.Context, leaseID string, actio
 
 func leaseClaimLockPath(path string) (string, error) {
 	dir := filepath.Join(filepath.Dir(filepath.Dir(path)), "claim-locks")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := makePrivateClaimDirectories(dir); err != nil {
 		return "", exit(2, "create claim lock directory: %v", err)
 	}
 	return filepath.Join(dir, filepath.Base(path)+".lock"), nil
+}
+
+func makePrivateClaimDirectories(dir string) error {
+	if !filepath.IsAbs(dir) {
+		return exit(2, "claim directory must be absolute: %s", dir)
+	}
+	return makePrivateDurableDirectories(dir)
 }
 
 func writeLeaseClaimAtomic(path string, claim leaseClaim) error {
