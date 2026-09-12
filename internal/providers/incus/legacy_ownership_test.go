@@ -67,7 +67,7 @@ func claimDurableFixture(t *testing.T, fake *fakeClient, name string) core.Lease
 	return claim
 }
 
-func legacyOwnershipFixture(t *testing.T, claimed bool) (*backend, *fakeClient, LeaseTarget) {
+func legacyOwnershipFixture(t *testing.T, claimed bool) (*backend, *fakeClient, core.LeaseTarget) {
 	t.Helper()
 	b, fake, req := lifecycleFixture(t)
 	const name = "crabbox-legacy"
@@ -91,7 +91,7 @@ func legacyOwnershipFixture(t *testing.T, claimed bool) (*backend, *fakeClient, 
 	if _, _, err := core.EnsureTestboxKeyForConfig(b.cfg, req.RequestedLeaseID); err != nil {
 		t.Fatal(err)
 	}
-	return b, fake, LeaseTarget{LeaseID: req.RequestedLeaseID, Server: server}
+	return b, fake, core.LeaseTarget{LeaseID: req.RequestedLeaseID, Server: server}
 }
 
 func TestLegacyOwnershipReleaseRefusesStopAndDelete(t *testing.T) {
@@ -105,7 +105,7 @@ func TestLegacyOwnershipReleaseRefusesStopAndDelete(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true}); err == nil {
+				if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err == nil {
 					t.Fatal("legacy release accepted without durable ownership")
 				}
 				assertLegacyOwnershipUnchanged(t, fake, lease.LeaseID, before, exists)
@@ -122,7 +122,7 @@ func TestLegacyOwnershipCleanupPreservesInstanceClaimAndKey(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+			if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 				t.Fatal(err)
 			}
 			assertLegacyOwnershipUnchanged(t, fake, lease.LeaseID, before, exists)
@@ -132,7 +132,7 @@ func TestLegacyOwnershipCleanupPreservesInstanceClaimAndKey(t *testing.T) {
 
 func TestLegacyOwnershipCannotBeAdoptedByReuse(t *testing.T) {
 	b, fake, lease := legacyOwnershipFixture(t, false)
-	if _, err := b.Resolve(context.Background(), ResolveRequest{ID: lease.Server.Name, Repo: core.Repo{Root: t.TempDir()}, Reclaim: true}); err == nil {
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: lease.Server.Name, Repo: core.Repo{Root: t.TempDir()}, Reclaim: true}); err == nil {
 		t.Fatal("claimless reuse implicitly adopted a legacy instance")
 	}
 	assertLegacyOwnershipUnchanged(t, fake, lease.LeaseID, core.LeaseClaim{}, false)
@@ -141,7 +141,7 @@ func TestLegacyOwnershipCannotBeAdoptedByReuse(t *testing.T) {
 func TestLegacyOwnershipStatusIsReadOnlyWithRepoRoot(t *testing.T) {
 	b, fake, lease := legacyOwnershipFixture(t, false)
 	before := maps.Clone(fake.instances[lease.Server.Name].Config)
-	if _, err := b.Resolve(context.Background(), ResolveRequest{ID: lease.Server.Name, StatusOnly: true, Repo: core.Repo{Root: t.TempDir()}}); err != nil {
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: lease.Server.Name, StatusOnly: true, Repo: core.Repo{Root: t.TempDir()}}); err != nil {
 		t.Fatal(err)
 	}
 	assertLegacyOwnershipUnchanged(t, fake, lease.LeaseID, core.LeaseClaim{}, false)
@@ -179,9 +179,9 @@ func TestDurableOwnershipRecheckedAfterStop(t *testing.T) {
 			b.cfg.Incus.DeleteOnRelease = remove
 			core.MarkDeleteOnReleaseExplicit(&b.cfg, providerName)
 			client := &replaceAfterStopClient{fakeClient: fake}
-			newClient = func(Config) (instanceClient, error) { return client, nil }
+			newClient = func(core.Config) (instanceClient, error) { return client, nil }
 			updatesBefore := len(fake.updated)
-			if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true}); err == nil {
+			if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err == nil {
 				t.Fatal("replacement after stop was accepted")
 			}
 			if len(fake.deleted) != 0 || len(fake.updated) != updatesBefore {
@@ -223,10 +223,10 @@ func TestDurableOwnershipRejectsConflictingProviderLabel(t *testing.T) {
 				}
 				fake.updated, fake.stateUpdates = nil, nil
 				if operation == "release" {
-					if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true}); err == nil {
+					if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err == nil {
 						t.Fatal("release accepted conflicting provider label")
 					}
-				} else if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+				} else if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 					t.Fatal(err)
 				}
 				assertLegacyOwnershipUnchanged(t, fake, lease.LeaseID, before, true)

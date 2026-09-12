@@ -16,10 +16,10 @@ type cloudInitPayload struct {
 
 type fatFile = shared.FATFile
 
-func buildCloudInitPayload(cfg Config, leaseID, slug, publicKey string) (cloudInitPayload, error) {
+func buildCloudInitPayload(cfg core.Config, leaseID, slug, publicKey string) (cloudInitPayload, error) {
 	publicKey = strings.TrimSpace(publicKey)
 	if publicKey == "" {
-		return cloudInitPayload{}, exit(2, "firecracker cloud-init public key is required")
+		return cloudInitPayload{}, core.Exit(2, "firecracker cloud-init public key is required")
 	}
 	userData := core.CloudInitUserData(cfg, publicKey)
 	metaData := fmt.Sprintf("instance-id: %s\nlocal-hostname: crabbox-%s\n", leaseID, slug)
@@ -35,7 +35,7 @@ func writeCloudInitDrive(path string, payload cloudInitPayload) error {
 		return err
 	}
 	if err := os.WriteFile(path, image, 0o600); err != nil {
-		return exit(2, "write firecracker cloud-init drive %s: %v", path, err)
+		return core.Exit(2, "write firecracker cloud-init drive %s: %v", path, err)
 	}
 	return nil
 }

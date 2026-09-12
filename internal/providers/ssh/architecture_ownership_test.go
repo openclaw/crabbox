@@ -14,7 +14,7 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func staticOwnershipCacheSnapshot(b *staticLeaseBackend) LeaseTarget {
+func staticOwnershipCacheSnapshot(b *staticLeaseBackend) core.LeaseTarget {
 	lease := b.acquired
 	lease.Server.Labels = maps.Clone(lease.Server.Labels)
 	return lease
@@ -35,12 +35,12 @@ func trackStaticOwnershipPreparation(t *testing.T, b *staticLeaseBackend, expect
 	}
 	readiness, probes := 0, 0
 	ready := waitForSSH
-	waitForSSH = func(ctx context.Context, target *SSHTarget, log io.Writer) error {
+	waitForSSH = func(ctx context.Context, target *core.SSHTarget, log io.Writer) error {
 		readiness++
 		checkUnpublished()
 		return ready(ctx, target, log)
 	}
-	runArchitectureProbe = func(context.Context, SSHTarget, string, int) (string, error) {
+	runArchitectureProbe = func(context.Context, core.SSHTarget, string, int) (string, error) {
 		probes++
 		checkUnpublished()
 		return output, nil
@@ -63,7 +63,7 @@ func TestStaticSSHArchitecturePrepareDefersOwnershipPublication(t *testing.T) {
 		} {
 			t.Run(map[bool]string{false: "claimed", true: "cached"}[cached]+"/"+tc.name, func(t *testing.T) {
 				b, _, repoA := staticArchitectureFixture(t, "linux", "normal", "")
-				lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repoA}})
+				lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repoA}})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -81,7 +81,7 @@ func TestStaticSSHArchitecturePrepareDefersOwnershipPublication(t *testing.T) {
 					core.MarkArchitectureExplicit(&b.Cfg)
 				}
 				readiness, probes := trackStaticOwnershipPreparation(t, b, initial, true, "v1|amd64|-|-|-")
-				prepared, err := b.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID, Repo: core.Repo{Root: repoB}, Reclaim: tc.reclaim, Prepare: true})
+				prepared, err := b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, Repo: core.Repo{Root: repoB}, Reclaim: tc.reclaim, Prepare: true})
 				after, _, _ := core.ReadLeaseClaimWithPresence(lease.LeaseID)
 				if !reflect.DeepEqual(after, initial) {
 					t.Error("Prepare mutated the claim before repository authorization")
@@ -114,7 +114,7 @@ func TestStaticSSHArchitecturePrepareDefersOwnershipPublication(t *testing.T) {
 				if prepared.Server.ServerType.Architecture != "amd64" {
 					t.Fatal("Prepare did not return fresh evidence")
 				}
-				published, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(lease.LeaseID, serverSlug(prepared.Server), b.Cfg, prepared.Server, prepared.SSH, repoB, b.Cfg.IdleTimeout, tc.reclaim, expected, exists)
+				published, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(lease.LeaseID, core.ServerSlug(prepared.Server), b.Cfg, prepared.Server, prepared.SSH, repoB, b.Cfg.IdleTimeout, tc.reclaim, expected, exists)
 				if err != nil {
 					t.Fatalf("authorized publication failed: %v", err)
 				}
@@ -151,7 +151,7 @@ func TestStaticSSHArchitectureRunOwnershipPublication(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repoA}})
+			lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repoA}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -191,14 +191,14 @@ func TestStaticSSHArchitectureRunOwnershipPublication(t *testing.T) {
 				host = "other.example.test"
 			}
 			ready := waitForSSH
-			waitForSSH = func(ctx context.Context, target *SSHTarget, log io.Writer) error {
+			waitForSSH = func(ctx context.Context, target *core.SSHTarget, log io.Writer) error {
 				if target.Host != host {
 					t.Fatalf("readiness used %q instead of selected host %q", target.Host, host)
 				}
 				return ready(ctx, target, log)
 			}
 			probe := runArchitectureProbe
-			runArchitectureProbe = func(ctx context.Context, target SSHTarget, command string, limit int) (string, error) {
+			runArchitectureProbe = func(ctx context.Context, target core.SSHTarget, command string, limit int) (string, error) {
 				if target.Host != host {
 					t.Fatalf("probe used %q instead of selected host %q", target.Host, host)
 				}
@@ -273,7 +273,7 @@ func TestStaticSSHArchitectureConfiguredHostOwnershipPreflight(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			b, _, repoA := staticArchitectureFixture(t, "linux", "normal", "")
 			if !tc.missing {
-				if _, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repoA}}); err != nil {
+				if _, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repoA}}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -294,7 +294,7 @@ func TestStaticSSHArchitectureConfiguredHostOwnershipPreflight(t *testing.T) {
 			if tc.byHost {
 				id = b.Cfg.Static.Host
 			}
-			offline, err := b.Resolve(context.Background(), ResolveRequest{ID: id})
+			offline, err := b.Resolve(context.Background(), core.ResolveRequest{ID: id})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -305,7 +305,7 @@ func TestStaticSSHArchitectureConfiguredHostOwnershipPreflight(t *testing.T) {
 			readiness, probes := trackStaticOwnershipPreparation(t, b, initial, exists, "v1|amd64|-|-|-")
 			wantClaim, wantPresent := initial, exists
 			probe := runArchitectureProbe
-			runArchitectureProbe = func(ctx context.Context, target SSHTarget, command string, limit int) (string, error) {
+			runArchitectureProbe = func(ctx context.Context, target core.SSHTarget, command string, limit int) (string, error) {
 				if target.Host != b.Cfg.Static.Host {
 					t.Fatalf("probe ignored configured host: %q", target.Host)
 				}
@@ -329,7 +329,7 @@ func TestStaticSSHArchitectureConfiguredHostOwnershipPreflight(t *testing.T) {
 				}
 				return output, err
 			}
-			prepared, err := b.Resolve(context.Background(), ResolveRequest{ID: id, Repo: core.Repo{Root: repo}, Reclaim: tc.reclaim, Prepare: true})
+			prepared, err := b.Resolve(context.Background(), core.ResolveRequest{ID: id, Repo: core.Repo{Root: repo}, Reclaim: tc.reclaim, Prepare: true})
 			after, present, readErr := core.ReadLeaseClaimWithPresence(b.Cfg.Static.ID)
 			if readErr != nil || !reflect.DeepEqual(b.acquired, cacheBefore) {
 				t.Fatalf("preparation changed cache or claim became unreadable: %v", readErr)
@@ -367,7 +367,7 @@ func TestStaticSSHArchitecturePrepareWithoutRepository(t *testing.T) {
 	for _, legacy := range []bool{false, true} {
 		t.Run(map[bool]string{false: "owned", true: "legacy-unowned"}[legacy], func(t *testing.T) {
 			b, _, repo := staticArchitectureFixture(t, "linux", "normal", "")
-			lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+			lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -383,7 +383,7 @@ func TestStaticSSHArchitecturePrepareWithoutRepository(t *testing.T) {
 			}
 			cacheBefore := staticOwnershipCacheSnapshot(b)
 			readiness, probes := trackStaticOwnershipPreparation(t, b, initial, true, "v1|amd64|-|-|-")
-			prepared, err := b.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID, Prepare: true, NoLocalStateMutations: true})
+			prepared, err := b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, Prepare: true, NoLocalStateMutations: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -412,7 +412,7 @@ func TestStaticSSHArchitecturePrepareRejectsStaleCachedClaim(t *testing.T) {
 		for _, caller := range []string{"same-owner", "reclaim", "admin"} {
 			t.Run(change+"/"+caller, func(t *testing.T) {
 				b, _, repo := staticArchitectureFixture(t, "linux", "normal", "")
-				lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+				lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -439,7 +439,7 @@ func TestStaticSSHArchitecturePrepareRejectsStaleCachedClaim(t *testing.T) {
 				}
 				cacheBefore := staticOwnershipCacheSnapshot(b)
 				readiness, probes := trackStaticOwnershipPreparation(t, b, current, exists, "v1|amd64|-|-|-")
-				req := ResolveRequest{ID: lease.LeaseID, Repo: core.Repo{Root: repo}, Prepare: true}
+				req := core.ResolveRequest{ID: lease.LeaseID, Repo: core.Repo{Root: repo}, Prepare: true}
 				if caller == "reclaim" {
 					req.Reclaim = true
 				} else if caller == "admin" {
@@ -479,7 +479,7 @@ func TestStaticSSHArchitectureAcquireOwnershipPreflight(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			b, _, repoA := staticArchitectureFixture(t, "linux", "normal", "")
 			if !tc.unclaimed {
-				if _, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repoA}}); err != nil {
+				if _, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repoA}}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -499,7 +499,7 @@ func TestStaticSSHArchitectureAcquireOwnershipPreflight(t *testing.T) {
 			}
 			cacheBefore := staticOwnershipCacheSnapshot(b)
 			readiness, probes := trackStaticOwnershipPreparation(t, b, initial, exists, "v1|amd64|-|-|-")
-			lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}, Reclaim: tc.reclaim})
+			lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}, Reclaim: tc.reclaim})
 			after, present, readErr := core.ReadLeaseClaimWithPresence(b.Cfg.Static.ID)
 			if readErr != nil {
 				t.Fatal(readErr)
@@ -544,20 +544,20 @@ func TestStaticSSHArchitectureTouchRetainsPublishedEvidence(t *testing.T) {
 	for _, publishedArchitecture := range []string{"arm64", "unknown"} {
 		t.Run(publishedArchitecture, func(t *testing.T) {
 			b, _, repo := staticArchitectureFixture(t, "linux", "normal", "")
-			runArchitectureProbe = func(context.Context, SSHTarget, string, int) (string, error) {
+			runArchitectureProbe = func(context.Context, core.SSHTarget, string, int) (string, error) {
 				return "v1|" + publishedArchitecture + "|-|-|-", nil
 			}
-			lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+			lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 			if err != nil {
 				t.Fatal(err)
 			}
 			initial, _, _ := core.ReadLeaseClaimWithPresence(lease.LeaseID)
-			runArchitectureProbe = func(context.Context, SSHTarget, string, int) (string, error) { return "v1|amd64|-|-|-", nil }
-			prepared, err := b.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID, Prepare: true})
+			runArchitectureProbe = func(context.Context, core.SSHTarget, string, int) (string, error) { return "v1|amd64|-|-|-", nil }
+			prepared, err := b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, Prepare: true})
 			if err != nil {
 				t.Fatal(err)
 			}
-			touched, err := b.Touch(context.Background(), TouchRequest{Lease: prepared, State: "busy"})
+			touched, err := b.Touch(context.Background(), core.TouchRequest{Lease: prepared, State: "busy"})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -28,7 +28,7 @@ type xcpNgWindowsAutounattendPayload struct {
 	Username            string
 }
 
-func newCloudInitPayload(cfg Config, leaseID, slug, publicKey string) (xcpNgCloudInitPayload, error) {
+func newCloudInitPayload(cfg core.Config, leaseID, slug, publicKey string) (xcpNgCloudInitPayload, error) {
 	user := strings.TrimSpace(core.Blank(cfg.XCPNg.User, cfg.SSHUser))
 	if user == "" {
 		return xcpNgCloudInitPayload{}, exit(2, "xcp-ng cloud-init user is required")
@@ -93,7 +93,7 @@ func newCloudInitPayload(cfg Config, leaseID, slug, publicKey string) (xcpNgClou
 	return xcpNgCloudInitPayload{UserData: userData.String(), MetaData: metaData}, nil
 }
 
-func newLinuxAutoinstallPayload(cfg Config, leaseID, slug, publicKey string) (xcpNgLinuxAutoinstallPayload, error) {
+func newLinuxAutoinstallPayload(cfg core.Config, leaseID, slug, publicKey string) (xcpNgLinuxAutoinstallPayload, error) {
 	user := strings.TrimSpace(core.Blank(cfg.XCPNg.User, cfg.SSHUser))
 	if user == "" {
 		return xcpNgLinuxAutoinstallPayload{}, exit(2, "xcp-ng linux autoinstall user is required")
@@ -160,7 +160,7 @@ func newLinuxAutoinstallPayload(cfg Config, leaseID, slug, publicKey string) (xc
 	return xcpNgLinuxAutoinstallPayload{UserData: userData.String(), MetaData: metaData}, nil
 }
 
-func newWindowsAutounattendPayload(cfg Config, leaseID, slug, publicKey, initialPassword string) (xcpNgWindowsAutounattendPayload, error) {
+func newWindowsAutounattendPayload(cfg core.Config, leaseID, slug, publicKey, initialPassword string) (xcpNgWindowsAutounattendPayload, error) {
 	rawUser := strings.TrimSpace(core.Blank(cfg.XCPNg.User, cfg.SSHUser))
 	if rawUser == "" {
 		return xcpNgWindowsAutounattendPayload{}, exit(2, "xcp-ng windows autounattend user is required")
@@ -300,7 +300,7 @@ if (-not (Test-Path -LiteralPath $scriptPath)) { throw "Crabbox bootstrap script
 	}, nil
 }
 
-func cloudInitSSHPortConfig(cfg Config) string {
+func cloudInitSSHPortConfig(cfg core.Config) string {
 	portLines := ""
 	for _, port := range xcpNgSSHPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts) {
 		portLines += fmt.Sprintf("      Port %s\n", port)

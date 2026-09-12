@@ -81,11 +81,11 @@ func (b *backend) firecrackerStateRoot() (string, error) {
 	}
 	root := filepath.Join(stateDir, providerName)
 	if err := ensurePrivateDir(root); err != nil {
-		return "", exit(2, "create firecracker state directory: %v", err)
+		return "", core.Exit(2, "create firecracker state directory: %v", err)
 	}
 	leasesDir := filepath.Join(root, firecrackerLeasesDirName)
 	if err := ensurePrivateDir(leasesDir); err != nil {
-		return "", exit(2, "create firecracker leases directory: %v", err)
+		return "", core.Exit(2, "create firecracker leases directory: %v", err)
 	}
 	return root, nil
 }
@@ -97,7 +97,7 @@ func (b *backend) leasePaths(leaseID string) (leaseStatePaths, error) {
 	}
 	leasesDir := filepath.Join(root, firecrackerLeasesDirName)
 	if err := ensurePrivateDir(leasesDir); err != nil {
-		return leaseStatePaths{}, exit(2, "create firecracker leases directory: %v", err)
+		return leaseStatePaths{}, core.Exit(2, "create firecracker leases directory: %v", err)
 	}
 	dir := filepath.Join(leasesDir, leaseID)
 	return leaseStatePaths{
@@ -118,14 +118,14 @@ func (b *backend) ensureLeaseDir(leaseID string) (leaseStatePaths, error) {
 		return leaseStatePaths{}, err
 	}
 	if err := ensurePrivateDir(paths.Dir); err != nil {
-		return leaseStatePaths{}, exit(2, "create firecracker lease directory %s: %v", paths.Dir, err)
+		return leaseStatePaths{}, core.Exit(2, "create firecracker lease directory %s: %v", paths.Dir, err)
 	}
 	return paths, nil
 }
 
 func (b *backend) writeStateRecord(record leaseStateRecord) error {
 	if strings.TrimSpace(record.LeaseID) == "" {
-		return exit(2, "write firecracker state requires a lease id")
+		return core.Exit(2, "write firecracker state requires a lease id")
 	}
 	paths, err := b.ensureLeaseDir(record.LeaseID)
 	if err != nil {
@@ -145,27 +145,27 @@ func (b *backend) writeStateRecord(record leaseStateRecord) error {
 	}
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
-		return exit(2, "encode firecracker state for %s: %v", record.LeaseID, err)
+		return core.Exit(2, "encode firecracker state for %s: %v", record.LeaseID, err)
 	}
 	tmp, err := os.CreateTemp(paths.Dir, ".metadata-*.tmp")
 	if err != nil {
-		return exit(2, "create firecracker state temp file for %s: %v", record.LeaseID, err)
+		return core.Exit(2, "create firecracker state temp file for %s: %v", record.LeaseID, err)
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
 	if _, err := tmp.Write(append(data, '\n')); err != nil {
 		tmp.Close()
-		return exit(2, "write firecracker state for %s: %v", record.LeaseID, err)
+		return core.Exit(2, "write firecracker state for %s: %v", record.LeaseID, err)
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
-		return exit(2, "sync firecracker state for %s: %v", record.LeaseID, err)
+		return core.Exit(2, "sync firecracker state for %s: %v", record.LeaseID, err)
 	}
 	if err := tmp.Close(); err != nil {
-		return exit(2, "close firecracker state temp file for %s: %v", record.LeaseID, err)
+		return core.Exit(2, "close firecracker state temp file for %s: %v", record.LeaseID, err)
 	}
 	if err := os.Rename(tmpPath, paths.Metadata); err != nil {
-		return exit(2, "install firecracker state for %s: %v", record.LeaseID, err)
+		return core.Exit(2, "install firecracker state for %s: %v", record.LeaseID, err)
 	}
 	return nil
 }
@@ -218,7 +218,7 @@ func (b *backend) listStateRecords() ([]leaseStateRecord, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, exit(2, "read firecracker leases directory: %v", err)
+		return nil, core.Exit(2, "read firecracker leases directory: %v", err)
 	}
 	records := make([]leaseStateRecord, 0, len(entries))
 	for _, entry := range entries {
@@ -229,11 +229,11 @@ func (b *backend) listStateRecords() ([]leaseStateRecord, error) {
 		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 			continue
 		} else if err != nil {
-			return nil, exit(2, "stat firecracker state for %s: %v", entry.Name(), err)
+			return nil, core.Exit(2, "stat firecracker state for %s: %v", entry.Name(), err)
 		}
 		record, err := readStateRecordFile(path)
 		if err != nil {
-			return nil, exit(2, "read firecracker state for %s: %v", entry.Name(), err)
+			return nil, core.Exit(2, "read firecracker state for %s: %v", entry.Name(), err)
 		}
 		records = append(records, record)
 	}
@@ -245,14 +245,14 @@ func (b *backend) listStateRecords() ([]leaseStateRecord, error) {
 
 func (b *backend) removeStateDir(record leaseStateRecord) error {
 	if strings.TrimSpace(record.LeaseID) == "" {
-		return exit(2, "remove firecracker state requires a lease id")
+		return core.Exit(2, "remove firecracker state requires a lease id")
 	}
 	paths, err := b.leasePaths(record.LeaseID)
 	if err != nil {
 		return err
 	}
 	if err := os.RemoveAll(paths.Dir); err != nil {
-		return exit(2, "remove firecracker state for %s: %v", record.LeaseID, err)
+		return core.Exit(2, "remove firecracker state for %s: %v", record.LeaseID, err)
 	}
 	return nil
 }

@@ -120,19 +120,19 @@ func cloneFiles(files map[string][]byte) map[string][]byte {
 	return result
 }
 
-func lifecycleFixture(t *testing.T) (*backend, *fakeClient, AcquireRequest) {
+func lifecycleFixture(t *testing.T) (*backend, *fakeClient, core.AcquireRequest) {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 	fake := &fakeClient{instances: map[string]*api.Instance{}, states: map[string]*api.InstanceState{}}
 	oldClient, oldWait := newClient, waitForSSHReady
-	newClient = func(Config) (instanceClient, error) { return fake, nil }
+	newClient = func(core.Config) (instanceClient, error) { return fake, nil }
 	waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
 	t.Cleanup(func() { newClient, waitForSSHReady = oldClient, oldWait })
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
-	return b, fake, AcquireRequest{RequestedLeaseID: "cbx_123456789abc", RequestedSlug: "quiet-lobster", Repo: core.Repo{Root: t.TempDir()}, Keep: true}
+	return b, fake, core.AcquireRequest{RequestedLeaseID: "cbx_123456789abc", RequestedSlug: "quiet-lobster", Repo: core.Repo{Root: t.TempDir()}, Keep: true}
 }
 
 func TestFixedIncusLostResponseConcurrentReplayAndConflicts(t *testing.T) {
@@ -207,7 +207,7 @@ func TestIncusCheckpointSurvivesSourceAndForkReplacesIdentity(t *testing.T) {
 	if len(fake.snapshots) != 0 {
 		t.Fatal("temporary capture snapshot leaked")
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: source, Force: true}); err != nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: source, Force: true}); err != nil {
 		t.Fatal(err)
 	}
 	resource := core.NativeCheckpointResourceRequest{Persist: (&checkpointRecorder{}).persist, Image: checkpoint.Image, Metadata: checkpoint.Metadata}
@@ -256,7 +256,7 @@ func TestIncusCheckpointSurvivesSourceAndForkReplacesIdentity(t *testing.T) {
 	if len(fake.images) != 0 || fake.instances[fork.Server.Name] == nil {
 		t.Fatal("checkpoint deletion did not preserve fork")
 	}
-	if err := forkBackend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: fork, Force: true}); err != nil {
+	if err := forkBackend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: fork, Force: true}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := forkBackend.Acquire(context.Background(), forkReq); err == nil {
@@ -342,16 +342,16 @@ func TestIncusCheckpointFailuresKeepOwnershipAndCleanupIdentity(t *testing.T) {
 						t.Chdir(req.Repo.Root)
 						err = (core.App{Stdout: io.Discard, Stderr: io.Discard}).Run(context.Background(), []string{"run", "--provider", "incus", "--id", forkReq.RequestedLeaseID, "--no-sync", "--", "true"})
 					} else {
-						_, err = fb.Resolve(context.Background(), ResolveRequest{ID: forkReq.RequestedLeaseID})
+						_, err = fb.Resolve(context.Background(), core.ResolveRequest{ID: forkReq.RequestedLeaseID})
 					}
 					if err == nil || !strings.Contains(err.Error(), "incomplete") || len(fake.stateUpdates) != starts {
 						t.Fatalf("incomplete fork operational reuse cli=%v: %v; state updates %v", cliRun, err, fake.stateUpdates)
 					}
 				}
-				if _, err := fb.Resolve(context.Background(), ResolveRequest{ID: forkReq.RequestedLeaseID, StatusOnly: true}); err != nil {
+				if _, err := fb.Resolve(context.Background(), core.ResolveRequest{ID: forkReq.RequestedLeaseID, StatusOnly: true}); err != nil {
 					t.Fatalf("inspect incomplete fork: %v", err)
 				}
-				if _, err := fb.Resolve(context.Background(), ResolveRequest{ID: forkReq.RequestedLeaseID, ReleaseOnly: true}); err != nil {
+				if _, err := fb.Resolve(context.Background(), core.ResolveRequest{ID: forkReq.RequestedLeaseID, ReleaseOnly: true}); err != nil {
 					t.Fatalf("stop incomplete fork: %v", err)
 				}
 				fake.writeFileErr = nil
@@ -398,13 +398,13 @@ func TestIncusCopiedIdentityCannotReleaseOrCleanup(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true}); err == nil {
+			if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err == nil {
 				t.Fatal("stale claim released another resource")
 			}
 			labels := fake.instances[lease.Server.Name].Config
 			labels[labelKey("keep")] = "false"
 			labels[labelKey("expires_at")] = "1"
-			_ = b.Cleanup(context.Background(), CleanupRequest{})
+			_ = b.Cleanup(context.Background(), core.CleanupRequest{})
 			if len(fake.deleted) != 0 {
 				t.Fatal("cleanup deleted a conflicting resource")
 			}
@@ -506,11 +506,11 @@ func TestIncusInterruptedIntentAndLostDeletionReconcile(t *testing.T) {
 	if err := fake.DeleteInstance(lease.Server.Name); err != nil {
 		t.Fatal(err)
 	}
-	target, err := b.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true})
+	target, err := b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true})
 	if err != nil {
 		t.Fatalf("reconcile lost delete: %v", err)
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: target, Force: true}); err != nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: target, Force: true}); err != nil {
 		t.Fatal(err)
 	}
 	after, err := core.ReadLeaseClaim(lease.LeaseID)
@@ -531,7 +531,7 @@ func TestIncusLostPublishResponseFindsIndependentImage(t *testing.T) {
 	if err == nil || !strings.HasPrefix(checkpoint.Image.ID, "pending:") {
 		t.Fatalf("lost publish not recorded: %+v %v", checkpoint, err)
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
 		t.Fatal(err)
 	}
 	resource := core.NativeCheckpointResourceRequest{Persist: (&checkpointRecorder{}).persist, Image: checkpoint.Image, Metadata: checkpoint.Metadata}

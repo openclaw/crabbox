@@ -16,7 +16,7 @@ import (
 )
 
 type ISOE2EOptions struct {
-	Config      Config
+	Config      core.Config
 	Mode        string
 	OS          string
 	ISO         string
@@ -84,7 +84,7 @@ var (
 	isoE2ERunSSHQuiet = func(ctx context.Context, target core.SSHTarget, remote string) error {
 		return core.RunSSHQuiet(ctx, target, remote)
 	}
-	isoE2EEnsureTestboxKey = func(cfg Config, leaseID string) (string, string, error) {
+	isoE2EEnsureTestboxKey = func(cfg core.Config, leaseID string) (string, string, error) {
 		return core.EnsureTestboxKeyForConfig(cfg, leaseID)
 	}
 	isoE2EStoredTestboxKeyExists  = storedISOE2ETestboxKeyExists
@@ -1068,7 +1068,7 @@ func (r *isoE2ERuntime) cleanupLocalArtifacts() error {
 	return cleanupErr
 }
 
-func resolveISOE2EPlacement(ctx context.Context, client lifecycleClient, cfg Config) (xcpNgPlacement, error) {
+func resolveISOE2EPlacement(ctx context.Context, client lifecycleClient, cfg core.Config) (xcpNgPlacement, error) {
 	xcfg := xcpNgProviderConfig(cfg)
 	if err := validateXCPNgConfig(xcfg); err != nil {
 		return xcpNgPlacement{}, err

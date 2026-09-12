@@ -121,7 +121,7 @@ func TestResolveReportsPartialFleetInventory(t *testing.T) {
 	backend := &leaseBackend{
 		DirectSSHBackend: sharedBackend(testParallelsFleetConfig(), &parallelsFleetRunner{}),
 	}
-	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: "missing-lease"})
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "missing-lease"})
 	if err == nil {
 		t.Fatal("Resolve err=nil, want partial fleet inventory error")
 	}
@@ -139,7 +139,7 @@ func TestListReportsPartialFleetInventory(t *testing.T) {
 	backend := &leaseBackend{
 		DirectSSHBackend: sharedBackend(testParallelsFleetConfig(), &parallelsFleetRunner{}),
 	}
-	leases, err := backend.List(context.Background(), ListRequest{})
+	leases, err := backend.List(context.Background(), core.ListRequest{})
 	if err == nil {
 		t.Fatalf("List err=nil leases=%#v, want partial fleet inventory error", leases)
 	}
@@ -180,7 +180,7 @@ func TestCleanupStopsOnPartialFleetInventory(t *testing.T) {
 	backend := &leaseBackend{
 		DirectSSHBackend: sharedBackend(testParallelsFleetConfig(), runner),
 	}
-	err := backend.Cleanup(context.Background(), CleanupRequest{})
+	err := backend.Cleanup(context.Background(), core.CleanupRequest{})
 	if err == nil {
 		t.Fatal("Cleanup err=nil, want partial fleet inventory error")
 	}
@@ -196,7 +196,7 @@ func TestCleanupRemovesClaimAndStoredKeyAfterDelete(t *testing.T) {
 		DirectSSHBackend: sharedBackend(testParallelsCleanupConfig(), runner),
 	}
 
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if runner.deleteCalls != 1 {
@@ -219,7 +219,7 @@ func TestCleanupKeepsClaimAndStoredKeyWhenDeleteFails(t *testing.T) {
 		DirectSSHBackend: sharedBackend(testParallelsCleanupConfig(), runner),
 	}
 
-	err := backend.Cleanup(context.Background(), CleanupRequest{})
+	err := backend.Cleanup(context.Background(), core.CleanupRequest{})
 	if err == nil || !strings.Contains(err.Error(), "delete failed") {
 		t.Fatalf("Cleanup err=%v, want delete failure", err)
 	}
@@ -242,7 +242,7 @@ func TestReleaseRequiresExactClaim(t *testing.T) {
 	backend := &leaseBackend{
 		DirectSSHBackend: sharedBackend(testParallelsCleanupConfig(), runner),
 	}
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		LeaseID: "cbx_unclaimed",
 		Server: core.Server{
 			CloudID: "vm-good",
@@ -250,7 +250,7 @@ func TestReleaseRequiresExactClaim(t *testing.T) {
 			Labels:  map[string]string{"lease": "cbx_unclaimed", "host": "local"},
 		},
 	}
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "no exact local claim") {
 		t.Fatalf("ReleaseLease unclaimed err=%v", err)
 	}
 	if runner.deleteCalls != 0 {
@@ -261,13 +261,13 @@ func TestReleaseRequiresExactClaim(t *testing.T) {
 func TestResolveUnclaimedVMRequiresExplicitAdoption(t *testing.T) {
 	tests := []struct {
 		name    string
-		request ResolveRequest
+		request core.ResolveRequest
 		wantErr string
 	}{
-		{name: "reuse", request: ResolveRequest{ID: "vm-good", Repo: core.Repo{Root: "/repo"}}, wantErr: "explicit --reclaim"},
-		{name: "status", request: ResolveRequest{ID: "vm-good", StatusOnly: true}},
-		{name: "reclaim", request: ResolveRequest{ID: "vm-good", Repo: core.Repo{Root: "/repo"}, Reclaim: true}},
-		{name: "release", request: ResolveRequest{ID: "vm-good", ReleaseOnly: true}, wantErr: "no exact local claim"},
+		{name: "reuse", request: core.ResolveRequest{ID: "vm-good", Repo: core.Repo{Root: "/repo"}}, wantErr: "explicit --reclaim"},
+		{name: "status", request: core.ResolveRequest{ID: "vm-good", StatusOnly: true}},
+		{name: "reclaim", request: core.ResolveRequest{ID: "vm-good", Repo: core.Repo{Root: "/repo"}, Reclaim: true}},
+		{name: "release", request: core.ResolveRequest{ID: "vm-good", ReleaseOnly: true}, wantErr: "no exact local claim"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -383,7 +383,7 @@ func storedTestboxKeyMatches(t *testing.T) []string {
 }
 
 func sharedBackend(cfg core.Config, runner core.CommandRunner) shared.DirectSSHBackend {
-	return shared.DirectSSHBackend{Cfg: cfg, RT: Runtime{Exec: runner, Stderr: io.Discard}}
+	return shared.DirectSSHBackend{Cfg: cfg, RT: core.Runtime{Exec: runner, Stderr: io.Discard}}
 }
 
 func testParallelsFleetConfig() core.Config {

@@ -648,7 +648,7 @@ func TestDoctorReportsSocketModeWithoutMutation(t *testing.T) {
 		},
 		states: map[string]*api.InstanceState{},
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
@@ -711,7 +711,7 @@ func TestDoctorReportsSocketModeForDefaultLocalRemote(t *testing.T) {
 		instances: map[string]*api.Instance{},
 		states:    map[string]*api.InstanceState{},
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
@@ -762,11 +762,11 @@ func TestAcquireResolveListTouchReleaseAndCleanup(t *testing.T) {
 			},
 		},
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
-	waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+	waitForSSHReady = func(ctx context.Context, target *core.SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 		_ = ctx
 		_ = stderr
 		_ = phase
@@ -808,7 +808,7 @@ func TestAcquireResolveListTouchReleaseAndCleanup(t *testing.T) {
 		t.Fatalf("proxy device listen=%q", got)
 	}
 
-	views, err := b.List(context.Background(), ListRequest{})
+	views, err := b.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -816,7 +816,7 @@ func TestAcquireResolveListTouchReleaseAndCleanup(t *testing.T) {
 		t.Fatalf("views=%#v", views)
 	}
 
-	resolved, err := b.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID})
+	resolved, err := b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -886,11 +886,11 @@ func TestAcquireCleansUpPartialInstanceEvenWhenDeleteOnReleaseFalse(t *testing.T
 		instances:          map[string]*api.Instance{},
 		states:             map[string]*api.InstanceState{},
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
-	waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+	waitForSSHReady = func(ctx context.Context, target *core.SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 		_ = ctx
 		_ = target
 		_ = stderr
@@ -932,11 +932,11 @@ func TestAcquireKeepFailurePreservesStoredKey(t *testing.T) {
 		instances: map[string]*api.Instance{},
 		states:    map[string]*api.InstanceState{},
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
-	waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+	waitForSSHReady = func(ctx context.Context, target *core.SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 		_ = ctx
 		_ = target
 		_ = stderr
@@ -997,11 +997,11 @@ func TestAcquireKeepBootstrapRetryCleansRetainedAttempt(t *testing.T) {
 		states:    map[string]*api.InstanceState{},
 	}
 	waitCalls := 0
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
-	waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+	waitForSSHReady = func(ctx context.Context, target *core.SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 		_ = ctx
 		_ = target
 		_ = stderr
@@ -1077,11 +1077,11 @@ func TestAcquireUsesProxyHostWhenGuestAddressUnavailable(t *testing.T) {
 		states:               map[string]*api.InstanceState{},
 		preserveEmptyNetwork: true,
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
-	waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+	waitForSSHReady = func(ctx context.Context, target *core.SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 		_ = ctx
 		_ = stderr
 		_ = phase
@@ -1151,11 +1151,11 @@ func TestResolveUsesPersistedProxyEndpointWhenFlagsAreOmitted(t *testing.T) {
 			"crabbox-retained": {Status: "Stopped", StatusCode: api.Stopped},
 		},
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
-	waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+	waitForSSHReady = func(ctx context.Context, target *core.SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 		_ = ctx
 		_ = stderr
 		_ = phase
@@ -1178,7 +1178,7 @@ func TestResolveUsesPersistedProxyEndpointWhenFlagsAreOmitted(t *testing.T) {
 	claimLegacyFixture(t, fake, "crabbox-retained", t.TempDir())
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_abcd12345678"})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_abcd12345678"})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -1217,11 +1217,11 @@ func TestResolveStartsStoppedInstanceAndPersistsReadyLabels(t *testing.T) {
 			"crabbox-retained": {Status: "Stopped", StatusCode: api.Stopped},
 		},
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
-	waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+	waitForSSHReady = func(ctx context.Context, target *core.SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 		_ = ctx
 		_ = stderr
 		_ = phase
@@ -1244,7 +1244,7 @@ func TestResolveStartsStoppedInstanceAndPersistsReadyLabels(t *testing.T) {
 	claimLegacyFixture(t, fake, "crabbox-retained", t.TempDir())
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_deadbeefcafe"})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_deadbeefcafe"})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -1286,7 +1286,7 @@ func TestResolveChecksRepoClaimBeforeStartingInstance(t *testing.T) {
 			"crabbox-retained": {Status: "Stopped", StatusCode: api.Stopped},
 		},
 	}
-	newClient = func(Config) (instanceClient, error) { return fake, nil }
+	newClient = func(core.Config) (instanceClient, error) { return fake, nil }
 	t.Cleanup(func() { newClient = oldNewClient })
 
 	cfg := core.BaseConfig()
@@ -1296,7 +1296,7 @@ func TestResolveChecksRepoClaimBeforeStartingInstance(t *testing.T) {
 	}
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
-	_, err := b.Resolve(context.Background(), ResolveRequest{
+	_, err := b.Resolve(context.Background(), core.ResolveRequest{
 		ID:   "crabbox-retained",
 		Repo: core.Repo{Root: t.TempDir()},
 	})
@@ -1335,7 +1335,7 @@ func TestResolveRestoresRepoClaimWhenStartFails(t *testing.T) {
 		},
 		stateErr: io.ErrUnexpectedEOF,
 	}
-	newClient = func(Config) (instanceClient, error) { return fake, nil }
+	newClient = func(core.Config) (instanceClient, error) { return fake, nil }
 	t.Cleanup(func() { newClient = oldNewClient })
 
 	cfg := core.BaseConfig()
@@ -1343,7 +1343,7 @@ func TestResolveRestoresRepoClaimWhenStartFails(t *testing.T) {
 	repoRoot := t.TempDir()
 	previous := claimLegacyFixture(t, fake, "crabbox-failing", repoRoot)
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
-	_, err := b.Resolve(context.Background(), ResolveRequest{
+	_, err := b.Resolve(context.Background(), core.ResolveRequest{
 		ID:   "crabbox-failing",
 		Repo: core.Repo{Root: repoRoot},
 	})
@@ -1384,11 +1384,11 @@ func TestResolveFallsBackToConfiguredKeyWhenStoredKeyIsMissing(t *testing.T) {
 			}},
 		},
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
-	waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+	waitForSSHReady = func(ctx context.Context, target *core.SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 		_ = ctx
 		_ = stderr
 		_ = phase
@@ -1409,7 +1409,7 @@ func TestResolveFallsBackToConfiguredKeyWhenStoredKeyIsMissing(t *testing.T) {
 	claimLegacyFixture(t, fake, "crabbox-nokey", t.TempDir())
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_a1b2c3d4e5f6"})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_a1b2c3d4e5f6"})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -1449,11 +1449,11 @@ func TestResolveUsesLeaseLabelsForSSHUserAndPort(t *testing.T) {
 			}},
 		},
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
-	waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+	waitForSSHReady = func(ctx context.Context, target *core.SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 		_ = ctx
 		_ = stderr
 		_ = phase
@@ -1470,7 +1470,7 @@ func TestResolveUsesLeaseLabelsForSSHUserAndPort(t *testing.T) {
 	claimLegacyFixture(t, fake, "crabbox-label", t.TempDir())
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_1abe1e55f00d"})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_1abe1e55f00d"})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -1522,11 +1522,11 @@ func TestResolveIgnoresStaleHostLabelWhileWaitingForLiveAddress(t *testing.T) {
 			}
 		}
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return counting, nil
 	}
-	waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+	waitForSSHReady = func(ctx context.Context, target *core.SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 		_ = ctx
 		_ = stderr
 		_ = phase
@@ -1550,7 +1550,7 @@ func TestResolveIgnoresStaleHostLabelWhileWaitingForLiveAddress(t *testing.T) {
 	claimLegacyFixture(t, fake, "crabbox-stale-host", t.TempDir())
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_deadbeefcafe"})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_deadbeefcafe"})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -1596,11 +1596,11 @@ func TestResolvePrefersLiveAddressOverStoredHost(t *testing.T) {
 			},
 		},
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
-	waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+	waitForSSHReady = func(ctx context.Context, target *core.SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 		_ = ctx
 		_ = stderr
 		_ = phase
@@ -1623,7 +1623,7 @@ func TestResolvePrefersLiveAddressOverStoredHost(t *testing.T) {
 	claimLegacyFixture(t, fake, "crabbox-running", t.TempDir())
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_feedfaceb00c"})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_feedfaceb00c"})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -1664,7 +1664,7 @@ func TestResolveStatusOnlyUsesLiveStoppedState(t *testing.T) {
 			"crabbox-status": {Status: "Stopped", StatusCode: api.Stopped},
 		},
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
@@ -1674,7 +1674,7 @@ func TestResolveStatusOnlyUsesLiveStoppedState(t *testing.T) {
 	cfg.Provider = providerName
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_0badf00dbeef", StatusOnly: true})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_0badf00dbeef", StatusOnly: true})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -1712,7 +1712,7 @@ func TestResolveStatusOnlyPromotesRunningStateWhenStoredLabelIsStale(t *testing.
 			"crabbox-status": {Status: "Running", StatusCode: api.Running},
 		},
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
@@ -1722,7 +1722,7 @@ func TestResolveStatusOnlyPromotesRunningStateWhenStoredLabelIsStale(t *testing.
 	cfg.Provider = providerName
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_feedfacebead", StatusOnly: true})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_feedfacebead", StatusOnly: true})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -1759,7 +1759,7 @@ func TestReleaseLeaseRetainsStoppedInstanceWhenDeleteOnReleaseFalse(t *testing.T
 			"crabbox-retained": {Status: "Running", StatusCode: api.Running},
 		},
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
@@ -1846,7 +1846,7 @@ func TestReleaseLeaseRetainIsIdempotentWhenInstanceAlreadyStopped(t *testing.T) 
 			"crabbox-retained": {Status: "Stopped", StatusCode: api.Stopped},
 		},
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
@@ -1895,7 +1895,7 @@ func TestReleaseLeaseDeleteOnReleaseFinalizesClaimAndRemovesKey(t *testing.T) {
 			"crabbox-delete": {Status: "Running", StatusCode: api.Running},
 		},
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
@@ -1967,7 +1967,7 @@ func TestListSkipsForeignInstancesBeforeManagedOnes(t *testing.T) {
 		},
 		listOrder: []string{"foreign", "crabbox-managed"},
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
@@ -1977,7 +1977,7 @@ func TestListSkipsForeignInstancesBeforeManagedOnes(t *testing.T) {
 	cfg.Provider = providerName
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
-	views, err := b.List(context.Background(), ListRequest{})
+	views, err := b.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -2014,7 +2014,7 @@ func TestResolveSkipsForeignInstancesBeforeManagedOnes(t *testing.T) {
 		},
 		listOrder: []string{"foreign", "crabbox-managed"},
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
@@ -2024,7 +2024,7 @@ func TestResolveSkipsForeignInstancesBeforeManagedOnes(t *testing.T) {
 	cfg.Provider = providerName
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_abcd1234ef56", StatusOnly: true})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_abcd1234ef56", StatusOnly: true})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -2087,7 +2087,7 @@ func TestCleanupContinuesPastForeignAndFreshInstances(t *testing.T) {
 		},
 		listOrder: []string{"foreign", "crabbox-fresh", "crabbox-stale"},
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
@@ -2098,7 +2098,7 @@ func TestCleanupContinuesPastForeignAndFreshInstances(t *testing.T) {
 	claimDurableFixture(t, fake, "crabbox-stale")
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
 	if len(fake.deleted) != 1 || fake.deleted[0] != "crabbox-stale" {
@@ -2135,7 +2135,7 @@ func TestCleanupStopsRunningStaleInstancesBeforeDelete(t *testing.T) {
 			"crabbox-stale": {Status: "Running", StatusCode: api.Running},
 		},
 	}
-	newClient = func(cfg Config) (instanceClient, error) {
+	newClient = func(cfg core.Config) (instanceClient, error) {
 		_ = cfg
 		return fake, nil
 	}
@@ -2146,7 +2146,7 @@ func TestCleanupStopsRunningStaleInstancesBeforeDelete(t *testing.T) {
 	claimDurableFixture(t, fake, "crabbox-stale")
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
 	if len(fake.deleted) != 1 || fake.deleted[0] != "crabbox-stale" {

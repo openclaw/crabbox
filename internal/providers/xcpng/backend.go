@@ -12,27 +12,12 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type Config = core.Config
-type Runtime = core.Runtime
-type ProviderSpec = core.ProviderSpec
-type Backend = core.Backend
-type AcquireRequest = core.AcquireRequest
-type ResolveRequest = core.ResolveRequest
-type ListRequest = core.ListRequest
-type LeaseView = core.LeaseView
-type ReleaseLeaseRequest = core.ReleaseLeaseRequest
-type TouchRequest = core.TouchRequest
-type CleanupRequest = core.CleanupRequest
-type LeaseTarget = core.LeaseTarget
-type Server = core.Server
-type SSHTarget = core.SSHTarget
-
 type leaseBackend struct{ shared.DirectSSHBackend }
 
 type lifecycleClient interface {
 	Close(context.Context) error
-	DoctorInventory(context.Context, xcpNgConfig) ([]Server, error)
-	ListCrabboxServers(context.Context) ([]Server, error)
+	DoctorInventory(context.Context, xcpNgConfig) ([]core.Server, error)
+	ListCrabboxServers(context.Context) ([]core.Server, error)
 	ResolveTemplate(context.Context, xcpNgConfig) (xapiRef, error)
 	ResolveSR(context.Context, xcpNgConfig) (xapiRef, error)
 	ResolveNetwork(context.Context, xcpNgConfig) (xapiRef, error)
@@ -48,7 +33,7 @@ type lifecycleClient interface {
 	StartVM(context.Context, xapiRef) error
 	GuestIPv4(context.Context, xapiRef) (string, error)
 	GuestIPv4ForID(context.Context, string) (string, error)
-	GetServer(context.Context, string) (Server, error)
+	GetServer(context.Context, string) (core.Server, error)
 	SetLabels(context.Context, string, map[string]string) error
 	DeleteServer(context.Context, string) error
 	DeleteFreshServer(context.Context, string, string) error
@@ -76,7 +61,7 @@ type xcpNgConfig struct {
 }
 
 type xcpNgCloneRequest struct {
-	Config      Config
+	Config      core.Config
 	TemplateRef xapiRef
 	SRRef       xapiRef
 	NetworkRef  xapiRef
@@ -119,36 +104,36 @@ func NewLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) c
 	return &leaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, StoredLeaseKeys: true}}
 }
 
-func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
-	return shared.AcquireAttemptsRetry(b.RT, req.Keep, func() (LeaseTarget, error) {
+func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	return shared.AcquireAttemptsRetry(b.RT, req.Keep, func() (core.LeaseTarget, error) {
 		return b.acquireOnce(ctx, req)
 	})
 }
 
-func (b *leaseBackend) acquireOnce(ctx context.Context, req AcquireRequest) (lease LeaseTarget, err error) {
+func (b *leaseBackend) acquireOnce(ctx context.Context, req core.AcquireRequest) (lease core.LeaseTarget, err error) {
 	keep := req.Keep
 	if err := validateXCPNgProvisioningConfig(xcpNgProviderConfig(b.Cfg)); err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	client, err := newLifecycleClient(ctx, b.Cfg)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	defer closeClient(ctx, client, b.RT.Stderr)
 
 	leaseID := newLeaseID()
 	servers, err := client.ListCrabboxServers(ctx)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	slug, err := allocateDirectLeaseSlug(leaseID, req.RequestedSlug, servers)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	cfg := b.Cfg
 	keyPath, publicKey, err := ensureTestboxKeyForConfig(cfg, leaseID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	retainKey := false
 	defer func() {
@@ -165,7 +150,7 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, req AcquireRequest) (lea
 
 	resolved, err := b.resolvePlacement(ctx, client)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	fmt.Fprintf(b.RT.Stderr, "provisioning provider=xcp-ng lease=%s slug=%s template=%s keep=%v\n",
 		leaseID, slug, resolved.templateRef.value(), keep)
@@ -173,18 +158,18 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, req AcquireRequest) (lea
 	if err != nil {
 		retainKey = server.CloudID != ""
 		if retainKey {
-			return LeaseTarget{}, fmt.Errorf("%w; retained xcp-ng VM requires manual cleanup: %s", err, server.CloudID)
+			return core.LeaseTarget{}, fmt.Errorf("%w; retained xcp-ng VM requires manual cleanup: %s", err, server.CloudID)
 		}
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	ip, err := b.waitForGuestIPv4(ctx, client, vmRef, bootstrapWaitTimeout(cfg))
 	if err != nil {
 		vmRetained, cleanupErr := b.cleanupFailedLease(ctx, client, server.CloudID, configDrive)
 		retainKey = vmRetained
 		if vmRetained {
-			return LeaseTarget{}, fmt.Errorf("xcp-ng VM retained after guest IP failure; manual cleanup required for %s: %v; cleanup: %v", server.CloudID, err, cleanupErr)
+			return core.LeaseTarget{}, fmt.Errorf("xcp-ng VM retained after guest IP failure; manual cleanup required for %s: %v; cleanup: %v", server.CloudID, err, cleanupErr)
 		}
-		return LeaseTarget{}, errors.Join(err, cleanupErr)
+		return core.LeaseTarget{}, errors.Join(err, cleanupErr)
 	}
 	server.PublicNet.IPv4.IP = ip
 	target := sshTargetFromConfig(cfg, ip)
@@ -192,9 +177,9 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, req AcquireRequest) (lea
 		vmRetained, cleanupErr := b.cleanupFailedLease(ctx, client, server.CloudID, configDrive)
 		retainKey = vmRetained
 		if vmRetained {
-			return LeaseTarget{}, fmt.Errorf("xcp-ng VM retained after SSH bootstrap failure; manual cleanup required for %s: %v; cleanup: %v", server.CloudID, err, cleanupErr)
+			return core.LeaseTarget{}, fmt.Errorf("xcp-ng VM retained after SSH bootstrap failure; manual cleanup required for %s: %v; cleanup: %v", server.CloudID, err, cleanupErr)
 		}
-		return LeaseTarget{}, errors.Join(err, cleanupErr)
+		return core.LeaseTarget{}, errors.Join(err, cleanupErr)
 	}
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", currentTime(b.RT).UTC())
 	if err := client.SetLabels(ctx, server.CloudID, server.Labels); err != nil {
@@ -208,13 +193,13 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, req AcquireRequest) (lea
 		vmRetained, cleanupErr := b.cleanupFailedLease(ctx, client, server.CloudID, configDrive)
 		retainKey = vmRetained
 		if vmRetained {
-			return LeaseTarget{}, fmt.Errorf("xcp-ng VM retained after ownership claim failure; manual cleanup required for %s: %v; cleanup: %v", server.CloudID, err, cleanupErr)
+			return core.LeaseTarget{}, fmt.Errorf("xcp-ng VM retained after ownership claim failure; manual cleanup required for %s: %v; cleanup: %v", server.CloudID, err, cleanupErr)
 		}
-		return LeaseTarget{}, errors.Join(fmt.Errorf("persist exact xcp-ng VM ownership claim: %w", err), cleanupErr)
+		return core.LeaseTarget{}, errors.Join(fmt.Errorf("persist exact xcp-ng VM ownership claim: %w", err), cleanupErr)
 	}
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s server=%s ip=%s\n", leaseID, server.DisplayID(), ip)
 	retainKey = true
-	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
 type xcpNgPlacement struct {
@@ -248,7 +233,7 @@ func (b *leaseBackend) resolvePlacement(ctx context.Context, client lifecycleCli
 	return xcpNgPlacement{templateRef: templateRef, srRef: srRef, networkRef: networkRef, hostRef: hostRef}, nil
 }
 
-func (b *leaseBackend) createAndBoot(ctx context.Context, client lifecycleClient, cfg Config, placement xcpNgPlacement, leaseID, slug, publicKey string, keep bool, labels map[string]string) (Server, xcpNgConfigDrive, xapiRef, error) {
+func (b *leaseBackend) createAndBoot(ctx context.Context, client lifecycleClient, cfg core.Config, placement xcpNgPlacement, leaseID, slug, publicKey string, keep bool, labels map[string]string) (core.Server, xcpNgConfigDrive, xapiRef, error) {
 	vm, err := client.CloneVM(ctx, xcpNgCloneRequest{
 		Config:      cfg,
 		TemplateRef: placement.templateRef,
@@ -265,7 +250,7 @@ func (b *leaseBackend) createAndBoot(ctx context.Context, client lifecycleClient
 		if vm.Ref != "" {
 			return xcpNgVMToServer(vm, labels, ""), xcpNgConfigDrive{}, xapiRef(vm.Ref), err
 		}
-		return Server{}, xcpNgConfigDrive{}, "", err
+		return core.Server{}, xcpNgConfigDrive{}, "", err
 	}
 	server := xcpNgVMToServer(vm, labels, "")
 	payload, err := newCloudInitPayload(cfg, leaseID, slug, publicKey)
@@ -274,7 +259,7 @@ func (b *leaseBackend) createAndBoot(ctx context.Context, client lifecycleClient
 		if vmRetained {
 			return server, xcpNgConfigDrive{}, xapiRef(vm.Ref), errors.Join(err, cleanupErr)
 		}
-		return Server{}, xcpNgConfigDrive{}, "", errors.Join(err, cleanupErr)
+		return core.Server{}, xcpNgConfigDrive{}, "", errors.Join(err, cleanupErr)
 	}
 	configDrive, err := client.AttachConfigDrive(ctx, xcpNgConfigDriveRequest{VMRef: xapiRef(vm.Ref), SRRef: placement.srRef, LeaseID: leaseID, Slug: slug, Payload: payload, Labels: labels})
 	if err != nil {
@@ -282,14 +267,14 @@ func (b *leaseBackend) createAndBoot(ctx context.Context, client lifecycleClient
 		if vmRetained {
 			return server, xcpNgConfigDrive{}, xapiRef(vm.Ref), errors.Join(err, cleanupErr)
 		}
-		return Server{}, xcpNgConfigDrive{}, "", errors.Join(err, cleanupErr)
+		return core.Server{}, xcpNgConfigDrive{}, "", errors.Join(err, cleanupErr)
 	}
 	if err := client.StartVM(ctx, xapiRef(vm.Ref)); err != nil {
 		vmRetained, cleanupErr := b.cleanupFailedLease(ctx, client, server.CloudID, configDrive)
 		if vmRetained {
 			return server, configDrive, xapiRef(vm.Ref), errors.Join(err, cleanupErr)
 		}
-		return Server{}, xcpNgConfigDrive{}, "", errors.Join(err, cleanupErr)
+		return core.Server{}, xcpNgConfigDrive{}, "", errors.Join(err, cleanupErr)
 	}
 	return server, configDrive, xapiRef(vm.Ref), nil
 }
@@ -357,66 +342,66 @@ func (b *leaseBackend) cleanupFailedLease(ctx context.Context, client lifecycleC
 	return false, cleanupErr
 }
 
-func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
 	client, err := newLifecycleClient(ctx, b.Cfg)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	defer closeClient(ctx, client, b.RT.Stderr)
 	if req.ID != "" {
 		server, err := client.GetServer(ctx, req.ID)
 		if err == nil {
 			if !isCrabboxLease(server) {
-				return LeaseTarget{}, exit(4, "lease/server not found: %s (VM exists but is not Crabbox-managed)", req.ID)
+				return core.LeaseTarget{}, exit(4, "lease/server not found: %s (VM exists but is not Crabbox-managed)", req.ID)
 			}
 			if req.StatusOnly && !req.ReadyProbe {
 				return b.targetForServer(b.resolveStatusServer(ctx, client, server), req.ReleaseOnly)
 			}
 			server, err = b.ensureServerIP(ctx, client, server, req.ReleaseOnly)
 			if err != nil {
-				return LeaseTarget{}, err
+				return core.LeaseTarget{}, err
 			}
 			return b.targetForServer(server, req.ReleaseOnly)
 		}
 		if !isNotFound(err) {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 	}
 	servers, err := client.ListCrabboxServers(ctx)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if server, leaseID, err := findServerByAlias(servers, req.ID); err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	} else if leaseID != "" {
 		if refreshed, err := client.GetServer(ctx, server.CloudID); err == nil {
 			server = refreshed
 		} else if !req.ReleaseOnly {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		if req.StatusOnly && !req.ReadyProbe {
 			target, err := b.targetForServer(b.resolveStatusServer(ctx, client, server), req.ReleaseOnly)
 			if err != nil {
-				return LeaseTarget{}, err
+				return core.LeaseTarget{}, err
 			}
 			target.LeaseID = leaseID
 			return target, nil
 		}
 		server, err = b.ensureServerIP(ctx, client, server, req.ReleaseOnly)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		target, err := b.targetForServer(server, req.ReleaseOnly)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		target.LeaseID = leaseID
 		return target, nil
 	}
-	return LeaseTarget{}, exit(4, "lease/server not found: %s", req.ID)
+	return core.LeaseTarget{}, exit(4, "lease/server not found: %s", req.ID)
 }
 
-func (b *leaseBackend) resolveStatusServer(ctx context.Context, client lifecycleClient, server Server) Server {
+func (b *leaseBackend) resolveStatusServer(ctx context.Context, client lifecycleClient, server core.Server) core.Server {
 	server = reconcileXCPNgServerState(server)
 	if !strings.EqualFold(strings.TrimSpace(server.Status), "running") || firstNonBlank(server.PublicNet.IPv4.IP, server.PrivateNet.IPv4.IP) != "" {
 		return server
@@ -436,7 +421,7 @@ func (b *leaseBackend) resolveStatusServer(ctx context.Context, client lifecycle
 	return server
 }
 
-func reconcileXCPNgServerState(server Server) Server {
+func reconcileXCPNgServerState(server core.Server) core.Server {
 	liveState := strings.ToLower(strings.TrimSpace(server.Status))
 	if liveState == "" {
 		return server
@@ -452,7 +437,7 @@ func reconcileXCPNgServerState(server Server) Server {
 	return server
 }
 
-func (b *leaseBackend) ensureServerIP(ctx context.Context, client lifecycleClient, server Server, releaseOnly bool) (Server, error) {
+func (b *leaseBackend) ensureServerIP(ctx context.Context, client lifecycleClient, server core.Server, releaseOnly bool) (core.Server, error) {
 	if firstNonBlank(server.PublicNet.IPv4.IP, server.PrivateNet.IPv4.IP) != "" || releaseOnly {
 		return server, nil
 	}
@@ -466,22 +451,22 @@ func (b *leaseBackend) ensureServerIP(ctx context.Context, client lifecycleClien
 				if guestErr == nil {
 					guestErr = errors.New("no guest ipv4 address reported by XCP-ng guest metrics")
 				}
-				return Server{}, errors.Join(guestErr, discoverErr)
+				return core.Server{}, errors.Join(guestErr, discoverErr)
 			}
 		}
 	}
 	if ip == "" {
 		if guestErr != nil {
-			return Server{}, guestErr
+			return core.Server{}, guestErr
 		}
-		return Server{}, errors.New("no guest ipv4 address reported by XCP-ng guest metrics")
+		return core.Server{}, errors.New("no guest ipv4 address reported by XCP-ng guest metrics")
 	}
 	server.PublicNet.IPv4.IP = ip
 	server.PrivateNet.IPv4.IP = ip
 	return server, nil
 }
 
-func (b *leaseBackend) targetForServer(server Server, releaseOnly bool) (LeaseTarget, error) {
+func (b *leaseBackend) targetForServer(server core.Server, releaseOnly bool) (core.LeaseTarget, error) {
 	cfg := b.Cfg
 	if storedTarget := strings.TrimSpace(server.Labels["target"]); storedTarget != "" {
 		cfg.TargetOS = storedTarget
@@ -498,14 +483,14 @@ func (b *leaseBackend) targetForServer(server Server, releaseOnly bool) (LeaseTa
 	target := sshTargetFromConfig(cfg, firstNonBlank(server.PublicNet.IPv4.IP, server.PrivateNet.IPv4.IP))
 	leaseID := core.Blank(server.Labels["lease"], server.CloudID)
 	if !releaseOnly {
-		if err := useStoredTestboxKey(&target, leaseID); err != nil {
-			return LeaseTarget{}, err
+		if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
+			return core.LeaseTarget{}, err
 		}
 	}
-	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
-func (b *leaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *leaseBackend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	_ = req
 	client, err := newLifecycleClient(ctx, b.Cfg)
 	if err != nil {
@@ -515,7 +500,7 @@ func (b *leaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, 
 	return client.ListCrabboxServers(ctx)
 }
 
-func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+func (b *leaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
 	client, err := newLifecycleClient(ctx, b.Cfg)
 	if err != nil {
 		return err
@@ -531,7 +516,7 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 	return nil
 }
 
-func (b *leaseBackend) claimBinding(server Server, leaseID string) shared.ClaimBinding {
+func (b *leaseBackend) claimBinding(server core.Server, leaseID string) shared.ClaimBinding {
 	return shared.ClaimBinding{
 		Provider:           "xcp-ng",
 		ProviderScope:      core.ProviderClaimScope("xcp-ng", b.Cfg),
@@ -546,7 +531,7 @@ func (b *leaseBackend) claimBinding(server Server, leaseID string) shared.ClaimB
 	}
 }
 
-func (b *leaseBackend) deleteClaimedServer(ctx context.Context, client lifecycleClient, server Server, leaseID string) error {
+func (b *leaseBackend) deleteClaimedServer(ctx context.Context, client lifecycleClient, server core.Server, leaseID string) error {
 	binding := b.claimBinding(server, leaseID)
 	claim, err := shared.RequireExactClaim(binding)
 	if err != nil {
@@ -568,25 +553,25 @@ func (b *leaseBackend) deleteClaimedServer(ctx context.Context, client lifecycle
 	return nil
 }
 
-func (b *leaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
+func (b *leaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	client, err := newLifecycleClient(ctx, b.Cfg)
 	if err != nil {
-		return Server{}, err
+		return core.Server{}, err
 	}
 	defer closeClient(ctx, client, b.RT.Stderr)
 	server := req.Lease.Server
 	if !isCrabboxLease(server) {
-		return Server{}, exit(4, "refusing to touch non-Crabbox xcp-ng VM: %s", server.DisplayID())
+		return core.Server{}, exit(4, "refusing to touch non-Crabbox xcp-ng VM: %s", server.DisplayID())
 	}
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.Cfg, req.State, currentTime(b.RT).UTC())
 	if err := client.SetLabels(ctx, server.CloudID, server.Labels); err != nil {
-		return Server{}, err
+		return core.Server{}, err
 	}
 	return server, nil
 }
 
-func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
-	servers, err := b.List(ctx, ListRequest{Options: req.Options})
+func (b *leaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
+	servers, err := b.List(ctx, core.ListRequest{Options: req.Options})
 	if err != nil {
 		return err
 	}
@@ -715,7 +700,7 @@ func xcpNgServerTypeForConfig(cfg core.Config) string {
 	return "template"
 }
 
-func xcpNgProviderConfig(cfg Config) xcpNgConfig {
+func xcpNgProviderConfig(cfg core.Config) xcpNgConfig {
 	return xcpNgConfig{
 		APIURL:       cfg.XCPNg.APIURL,
 		Username:     cfg.XCPNg.Username,
@@ -764,14 +749,14 @@ func validateXCPNgProvisioningConfig(cfg xcpNgConfig) error {
 	return nil
 }
 
-func xcpNgVMToServer(vm xapiVM, labels map[string]string, ip string) Server {
+func xcpNgVMToServer(vm xapiVM, labels map[string]string, ip string) core.Server {
 	if labels == nil {
 		labels = vm.Labels
 	}
 	if labels == nil {
 		labels = map[string]string{}
 	}
-	server := Server{
+	server := core.Server{
 		Provider: "xcp-ng",
 		CloudID:  firstNonBlank(vm.UUID, vm.Ref),
 		Name:     vm.Name,
@@ -784,7 +769,7 @@ func xcpNgVMToServer(vm xapiVM, labels map[string]string, ip string) Server {
 	return server
 }
 
-func isCrabboxLease(server Server) bool {
+func isCrabboxLease(server core.Server) bool {
 	if server.Labels == nil {
 		return false
 	}
@@ -820,40 +805,36 @@ func firstNonBlank(values ...string) string {
 	return shared.FirstNonBlank(values...)
 }
 
-func currentTime(rt Runtime) time.Time {
+func currentTime(rt core.Runtime) time.Time {
 	if rt.Clock != nil {
 		return rt.Clock.Now()
 	}
 	return time.Now()
 }
 
-var newLifecycleClient = func(ctx context.Context, cfg Config) (lifecycleClient, error) {
+var newLifecycleClient = func(ctx context.Context, cfg core.Config) (lifecycleClient, error) {
 	return newXAPIClient(ctx, cfg)
 }
 
 var newLeaseID = func() string { return core.NewLeaseID() }
-var allocateDirectLeaseSlug = func(id, requested string, servers []Server) (string, error) {
+var allocateDirectLeaseSlug = func(id, requested string, servers []core.Server) (string, error) {
 	return core.AllocateDirectLeaseSlug(id, requested, servers)
 }
-var ensureTestboxKeyForConfig = func(cfg Config, leaseID string) (string, string, error) {
+var ensureTestboxKeyForConfig = func(cfg core.Config, leaseID string) (string, string, error) {
 	return core.EnsureTestboxKeyForConfig(cfg, leaseID)
 }
 var providerKeyForLease = func(leaseID string) string { return core.ProviderKeyForLease(leaseID) }
-var sshTargetFromConfig = func(cfg Config, host string) SSHTarget { return core.SSHTargetFromConfig(cfg, host) }
-var waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+var sshTargetFromConfig = func(cfg core.Config, host string) core.SSHTarget { return core.SSHTargetFromConfig(cfg, host) }
+var waitForSSHReady = func(ctx context.Context, target *core.SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 	return core.WaitForSSHReady(ctx, target, stderr, phase, timeout)
 }
-var bootstrapWaitTimeout = func(cfg Config) time.Duration { return core.BootstrapWaitTimeout(cfg) }
+var bootstrapWaitTimeout = func(cfg core.Config) time.Duration { return core.BootstrapWaitTimeout(cfg) }
 var guestIPPollInterval = 5 * time.Second
 var guestIPDiscoverInterval = 15 * time.Second
 var xcpNgRollbackCleanupTimeout = 11 * time.Minute
 var xcpNgPartialRollbackTimeout = 30 * time.Second
-var findServerByAlias = func(servers []Server, id string) (Server, string, error) {
+var findServerByAlias = func(servers []core.Server, id string) (core.Server, string, error) {
 	return core.FindServerByAlias(servers, id)
 }
 var removeStoredTestboxKey = func(leaseID string) { core.RemoveStoredTestboxKey(leaseID) }
 var exit = func(code int, format string, args ...any) core.ExitError { return core.Exit(code, format, args...) }
-
-func useStoredTestboxKey(target *SSHTarget, leaseID string) error {
-	return core.UseStoredTestboxKey(target, leaseID)
-}

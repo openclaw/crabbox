@@ -62,7 +62,7 @@ var (
 	}
 )
 
-func newXAPIClient(ctx context.Context, cfg Config) (*xapiClient, error) {
+func newXAPIClient(ctx context.Context, cfg core.Config) (*xapiClient, error) {
 	xcfg := xcpNgProviderConfig(cfg)
 	if err := validateXCPNgConfig(xcfg); err != nil {
 		return nil, err
@@ -130,17 +130,17 @@ func (c *xapiClient) Close(ctx context.Context) error {
 	return nil
 }
 
-func (c *xapiClient) DoctorInventory(ctx context.Context, cfg xcpNgConfig) ([]Server, error) {
+func (c *xapiClient) DoctorInventory(ctx context.Context, cfg xcpNgConfig) ([]core.Server, error) {
 	_ = cfg
 	return c.ListCrabboxServers(ctx)
 }
 
-func (c *xapiClient) ListCrabboxServers(ctx context.Context) ([]Server, error) {
+func (c *xapiClient) ListCrabboxServers(ctx context.Context) ([]core.Server, error) {
 	vms, err := c.vmRecords(ctx)
 	if err != nil {
 		return nil, err
 	}
-	servers := make([]Server, 0, len(vms))
+	servers := make([]core.Server, 0, len(vms))
 	for _, vm := range vms {
 		server := xcpNgVMToServer(vm, vm.Labels, "")
 		if isCrabboxLease(server) {
@@ -812,14 +812,14 @@ func (c *xapiClient) GuestIPv4ForID(ctx context.Context, id string) (string, err
 	return c.GuestIPv4(ctx, xapiRef(ref))
 }
 
-func (c *xapiClient) GetServer(ctx context.Context, id string) (Server, error) {
+func (c *xapiClient) GetServer(ctx context.Context, id string) (core.Server, error) {
 	ref, err := c.vmRefForID(ctx, id)
 	if err != nil {
-		return Server{}, err
+		return core.Server{}, err
 	}
 	record, err := c.vmRecord(ctx, ref)
 	if err != nil {
-		return Server{}, err
+		return core.Server{}, err
 	}
 	return xcpNgVMToServer(record, record.Labels, ""), nil
 }
