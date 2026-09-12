@@ -732,13 +732,35 @@ preparation state, which older workers reject safely.
 
 Trusted operators can use `crabbox admin release` or `crabbox admin delete --force` for stuck leases.
 
-After AWS credential or account rotation, scan old provider accounts directly for Crabbox-tagged EC2 instances that the current coordinator can no longer see:
+Direct AWS cleanup uses one immutable credential snapshot for STS identity, EC2
+observation, termination confirmation, and owned SSH-key deletion. The separate
+image-qualification authority binds a fixed account and Region policy and runs
+immediate STS checks around protected operations; its signer may refresh
+credentials between operations. Empty inventory can complete direct cleanup
+only for leases that persisted the matching 12-digit account scope and explicit
+Region. Historical unbound leases remain cleanupable when the instance is still
+present with exact Crabbox lease labels, but an empty lookup is intentionally
+inconclusive. There is no override that turns missing account or Region evidence
+into proof of deletion.
+
+After AWS credential or account rotation, scan old provider accounts directly
+for Crabbox-tagged EC2 instances that the current coordinator can no longer see:
 
 ```sh
 scripts/aws-crabbox-orphan-audit.sh --profile old-crabbox-account
 ```
 
-The audit is read-only. It skips `keep=true` instances, protects active coordinator leases by lease tag or EC2 instance ID, and applies the same grace window as the broker sweep before reporting stale labels. The script intentionally refuses `--terminate`: a local AWS scan cannot atomically lock coordinator lease state before deleting an instance. For broker-owned accounts, use the coordinator AWS orphan sweep below. For rotated legacy accounts, treat the JSON output as investigation evidence and delete through an explicit operator or infrastructure workflow only after confirming no active coordinator can still claim the instance.
+The audit is read-only. It skips `keep=true` instances, protects active
+coordinator leases by lease tag or EC2 instance ID, and applies the same grace
+window as the broker sweep before reporting stale labels. The script
+intentionally refuses `--terminate`: a local AWS scan cannot atomically lock
+coordinator lease state before deleting an instance. For broker-owned accounts,
+restore the lease's original account and Region credentials and retry
+coordinator cleanup. For rotated legacy accounts, treat the JSON output as
+investigation evidence and delete through an explicit operator or infrastructure
+workflow only after confirming no active coordinator can still claim the
+instance. Do not clear the retained cleanup fields or local access evidence to
+force completion.
 
 Direct-provider cleanup is only for debug mode without a coordinator:
 

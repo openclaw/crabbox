@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { EC2SpotClient } from "../src/aws";
+import { AWSLeaseAuthorityError, AWSLeaseObservationError, EC2SpotClient } from "../src/aws";
 
 const leaseID = "cbx_abcdef123456";
 const region = "eu-west-1";
@@ -12,6 +12,19 @@ const inventoryFilters = {
   "Filter.2.Value.2": "running",
   "Filter.2.Value.3": "stopping",
   "Filter.2.Value.4": "stopped",
+};
+const leaseFilters = {
+  "Filter.1.Name": "tag:crabbox",
+  "Filter.1.Value.1": "true",
+  "Filter.2.Name": "tag:created_by",
+  "Filter.2.Value.1": "crabbox",
+  "Filter.3.Name": "tag:lease",
+  "Filter.3.Value.1": leaseID,
+  "Filter.4.Name": "instance-state-name",
+  "Filter.4.Value.1": "pending",
+  "Filter.4.Value.2": "running",
+  "Filter.4.Value.3": "stopping",
+  "Filter.4.Value.4": "stopped",
 };
 const workspaceFilters = {
   "Filter.1.Name": "tag:crabbox",
@@ -35,11 +48,13 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe.each([
   { lookup: "inventory", filters: inventoryFilters },
+  { lookup: "lease", filters: leaseFilters },
   { lookup: "workspace", filters: workspaceFilters },
 ])("AWS $lookup pagination", ({ lookup, filters }) => {
   function read(client: EC2SpotClient) {
-    return lookup === "inventory"
-      ? client.listCrabboxServers()
+    if (lookup === "inventory") return client.listCrabboxServers();
+    return lookup === "lease"
+      ? client.findCrabboxServerByLease(leaseID)
       : client.findWorkspaceServerByLease(leaseID);
   }
 
@@ -98,9 +113,11 @@ describe.each([
 
       const result = await read(createClient()).catch((error: unknown) => error);
       expect(result).toEqual(
-        lookup === "workspace"
-          ? new Error(`AWS private workspace recovery is ambiguous for lease ${leaseID}`)
-          : expected(["i-first", secondID]),
+        lookup === "inventory"
+          ? expected(["i-first", secondID])
+          : new AWSLeaseAuthorityError(
+              `AWS ${lookup === "workspace" ? "private workspace " : ""}recovery is ambiguous for lease ${leaseID}`,
+            ),
       );
       expect(fetchMock).toHaveBeenCalledTimes(2);
     },
@@ -134,7 +151,7 @@ describe.each([
     const result = await read(createClient()).catch((error: unknown) => error);
     expect(result).toEqual(
       morePages
-        ? new Error(
+        ? new AWSLeaseObservationError(
             `aws DescribeInstances inventory incomplete in ${region}: pagination exceeded 100 pages`,
           )
         : expected(["i-last"]),
@@ -162,7 +179,9 @@ describe.each([
       vi.stubGlobal("fetch", fetchMock);
 
       await expect(read(createClient())).rejects.toEqual(
-        new Error(`aws DescribeInstances inventory incomplete in ${region}: page 2 request failed`),
+        new AWSLeaseObservationError(
+          `aws DescribeInstances inventory incomplete in ${region}: page 2 request failed`,
+        ),
       );
       expect(fetchMock).toHaveBeenCalledTimes(2);
     },
@@ -178,7 +197,8 @@ function instancePage(ids: string[], nextToken?: string): Response {
     </item></instancesSet></item>`,
   );
   return new Response(
-    `<DescribeInstancesResponse><reservationSet>${reservations.join("")}</reservationSet>
+    `<DescribeInstancesResponse><requestId>req-inventory</requestId>
+      <reservationSet>${reservations.join("")}</reservationSet>
       ${nextToken ? `<nextToken>${nextToken}</nextToken>` : ""}
     </DescribeInstancesResponse>`,
     { headers: { "content-type": "text/xml" } },

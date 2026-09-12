@@ -4,7 +4,33 @@ import {
   currentAWSTransportObserver,
   type AWSTransportObservation,
 } from "./aws-provisioning-diagnostics";
-import type { AWSCredentialProvider } from "./types";
+import type { AWSCredentials, AWSCredentialProvider } from "./types";
+
+export interface ResolvedAWSCredentials {
+  readonly accessKeyId: string;
+  readonly secretAccessKey: string;
+  readonly sessionToken?: string;
+  readonly expirationMs?: number;
+}
+
+export function resolvedAWSCredentials(credentials: AWSCredentials): ResolvedAWSCredentials {
+  const accessKeyId = credentials.accessKeyId?.trim();
+  const secretAccessKey = credentials.secretAccessKey?.trim();
+  if (!accessKeyId || !secretAccessKey) {
+    throw new Error("AWS credential provider returned incomplete credentials");
+  }
+  const sessionToken = credentials.sessionToken?.trim();
+  const expirationMs = credentials.expiration?.getTime();
+  if (expirationMs !== undefined && !Number.isFinite(expirationMs)) {
+    throw new Error("AWS credential provider returned an invalid expiration");
+  }
+  return {
+    accessKeyId,
+    secretAccessKey,
+    ...(sessionToken ? { sessionToken } : {}),
+    ...(expirationMs === undefined ? {} : { expirationMs }),
+  };
+}
 
 type StopAWSResponseRetry = (response: Response) => Promise<boolean>;
 
@@ -66,15 +92,13 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
     const startedAt = Date.now();
     let requestStartedAt: number | undefined;
     try {
-      const credentials = await this.credentials();
-      const accessKeyId = credentials.accessKeyId?.trim();
-      const secretAccessKey = credentials.secretAccessKey?.trim();
-      if (!accessKeyId || !secretAccessKey) {
-        throw new Error("AWS credential provider returned incomplete credentials");
+      const credentials = resolvedAWSCredentials(await this.credentials());
+      if (credentials.expirationMs !== undefined && credentials.expirationMs <= Date.now()) {
+        throw new Error("AWS credential snapshot expired");
       }
       const options: ConstructorParameters<typeof AwsClient>[0] = {
-        accessKeyId,
-        secretAccessKey,
+        accessKeyId: credentials.accessKeyId,
+        secretAccessKey: credentials.secretAccessKey,
         service: this.service,
         region: this.region,
       };
@@ -112,5 +136,24 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
       else observation.requestMs = Math.max(0, Date.now() - requestStartedAt);
       observe?.(observation);
     }
+  }
+}
+
+// Regional operations must retain the exact identity verified before their first mutation.
+// Reuse the transport owner so fixed credentials preserve diagnostics and response retry policy.
+export class FixedAWSFetchClient extends RefreshingAWSFetchClient {
+  constructor(credentials: ResolvedAWSCredentials, service: string, region: string) {
+    super(
+      async () => ({
+        accessKeyId: credentials.accessKeyId,
+        secretAccessKey: credentials.secretAccessKey,
+        ...(credentials.sessionToken ? { sessionToken: credentials.sessionToken } : {}),
+        ...(credentials.expirationMs === undefined
+          ? {}
+          : { expiration: new Date(credentials.expirationMs) }),
+      }),
+      service,
+      region,
+    );
   }
 }
