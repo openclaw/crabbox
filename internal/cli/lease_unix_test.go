@@ -17,6 +17,10 @@ func TestManagedStateTransferAliasesAndDanglingLinks(t *testing.T) {
 	if err := os.Mkdir(source, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	canonicalSource, err := filepath.EvalSymlinks(source)
+	if err != nil {
+		t.Fatal(err)
+	}
 	alias := filepath.Join(root, "source-alias")
 	if err := os.Symlink(source, alias); err != nil {
 		t.Fatal(err)
@@ -25,7 +29,7 @@ func TestManagedStateTransferAliasesAndDanglingLinks(t *testing.T) {
 	if err := ValidateManagedStateTransferScope("fixture mount", alias); err == nil {
 		t.Fatal("source alias missed managed namespace")
 	}
-	if got, err := NormalizeManagedStateTransferRoot(filepath.Join(alias, "absent", "leaf")); err != nil || got != filepath.Join(source, "absent", "leaf") {
+	if got, err := NormalizeManagedStateTransferRoot(filepath.Join(alias, "absent", "leaf")); err != nil || got != filepath.Join(canonicalSource, "absent", "leaf") {
 		t.Fatalf("missing suffix normalization=%q %v", got, err)
 	}
 	if err := os.Symlink("absent-target", filepath.Join(source, "ordinary-link")); err != nil {

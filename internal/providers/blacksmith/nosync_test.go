@@ -53,6 +53,7 @@ func TestBlacksmithRunNoSyncContract(t *testing.T) {
 						t.Fatalf("fixture must allow delegated sync: hidden=%t err=%v", hidden, err)
 					}
 					if tc.id != "" {
+						prepareBlacksmithGuestKey(t, leaseID)
 						testOwnedBlacksmithClaim(t, leaseID, firstNonBlank(tc.slug, "jade-krill"), repo.Root)
 					}
 					before, err := readLeaseClaim(leaseID)

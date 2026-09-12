@@ -165,6 +165,7 @@ func TestBlacksmithArtifactRunShellAndTerminalExit(t *testing.T) {
 					testWriteBlacksmithFile(t, repo, "transport-input", "uploaded")
 				}
 				const id = "tbx_supervisor"
+				prepareBlacksmithGuestKey(t, id)
 				testOwnedBlacksmithClaim(t, id, "jade-krill", repo)
 				runs := 0
 				runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
@@ -240,6 +241,7 @@ func TestBlacksmithArtifactPreflightsSCPBeforeWorkload(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			isolateArtifactOwnership(t)
 			childPATH := os.Getenv("PATH")
+			prepareBlacksmithGuestKey(t, "tbx_preflight")
 			parentBin := t.TempDir()
 			for _, name := range []string{"blacksmith", "ps"} {
 				path, err := exec.LookPath(name)
@@ -255,8 +257,20 @@ func TestBlacksmithArtifactPreflightsSCPBeforeWorkload(t *testing.T) {
 				if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 99\n"), 0o700); err != nil {
 					t.Fatal(err)
 				}
+				if tc.mode&os.ModeSetgid != 0 {
+					if err := os.Chown(path, -1, os.Getegid()); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if err := os.Chmod(path, tc.mode); err != nil {
 					t.Fatal(err)
+				}
+				info, err := os.Lstat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if info.Mode()&(os.ModePerm|os.ModeSetuid|os.ModeSetgid) != tc.mode {
+					t.Fatalf("fixture mode=%v, want %v", info.Mode(), tc.mode)
 				}
 			}
 			t.Setenv("PATH", parentBin)
@@ -371,6 +385,7 @@ func TestBlacksmithArtifactWorkspaceBinding(t *testing.T) {
 				return runSyntheticBlacksmithCommand(t, ctx, req)
 			})
 			backend := newTestBlacksmithBackend(baseConfig(), runner)
+			prepareBlacksmithGuestKey(t, "tbx_workspace")
 			code, ended, result, err := backend.runArtifactTestbox(t.Context(), RunRequest{Repo: Repo{Root: repo}, Command: []string{command}, ShellMode: true, ArtifactGlobs: []string{"report"}, RequiredArtifactGlobs: []string{"report"}}, "tbx_workspace", nil, nil, nil, time.Second)
 			if invalid {
 				if code != 7 || err == nil || !ended.IsZero() || len(result) != 0 {
@@ -400,6 +415,7 @@ func TestBlacksmithArtifactRunCollectionFailurePreservesWorkload(t *testing.T) {
 				repo := t.TempDir()
 				t.Chdir(repo)
 				const id = "tbx_collectfailure"
+				prepareBlacksmithGuestKey(t, id)
 				testOwnedBlacksmithClaim(t, id, "jade-krill", repo)
 				req := RunRequest{ID: id, Repo: Repo{Root: repo}, Command: []string{fmt.Sprintf("exit %d", code)}, ArtifactGlobs: []string{"reports/**"}}
 				switch kind {
@@ -562,6 +578,7 @@ func TestBlacksmithArtifactReceiptAdversarial(t *testing.T) {
 			})
 			backend := newTestBlacksmithBackend(baseConfig(), runner)
 			backend.rt.Stdout, backend.rt.Stderr = &stdout, &stderr
+			prepareBlacksmithGuestKey(t, "tbx_receipt")
 			code, _, collected, err := backend.runArtifactTestbox(ctx, RunRequest{Repo: Repo{Root: repo}, Command: []string{"true"}, ArtifactGlobs: []string{"report"}}, "tbx_receipt", nil, nil, nil, time.Second)
 			if kind == "valid" {
 				if err != nil || code != 0 || len(collected) != 1 {
@@ -650,6 +667,7 @@ func TestBlacksmithArtifactRunBudgets(t *testing.T) {
 					runReq.Command = []string{fmt.Sprintf("printf started > workload-started; exit %d", code)}
 					runReq.ShellMode = true
 				}
+				prepareBlacksmithGuestKey(t, "tbx_budget")
 				got, ended, artifacts, err := backend.runArtifactTestbox(t.Context(), runReq, "tbx_budget", nil, nil, nil, budget)
 				if kind == "unsupported-timeout" {
 					if got != 7 || !ended.IsZero() {
@@ -719,6 +737,7 @@ func TestBlacksmithArtifactCollectionTimeoutReceipt(t *testing.T) {
 				repo := t.TempDir()
 				t.Chdir(repo)
 				const id = "tbx_collecttimeout"
+				prepareBlacksmithGuestKey(t, id)
 				if boundary == "public" {
 					testOwnedBlacksmithClaim(t, id, "jade-krill", repo)
 				}
@@ -774,6 +793,7 @@ func TestBlacksmithArtifactRunInitialSourceAndTiming(t *testing.T) {
 	repo := t.TempDir()
 	t.Chdir(repo)
 	const id = "tbx_source"
+	prepareBlacksmithGuestKey(t, id)
 	testOwnedBlacksmithClaim(t, id, "jade-krill", repo)
 	runs := 0
 	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
@@ -821,6 +841,7 @@ func TestBlacksmithArtifactRunProtectedAndRequiredPaths(t *testing.T) {
 				return runSyntheticBlacksmithCommand(t, ctx, req)
 			})
 			backend := newTestBlacksmithBackend(baseConfig(), runner)
+			prepareBlacksmithGuestKey(t, "tbx_protected")
 			_, _, result, err := backend.runArtifactTestbox(t.Context(), RunRequest{Repo: Repo{Root: repo}, Command: []string{"true"}, ArtifactGlobs: []string{"**"}, RequiredArtifactGlobs: []string{required}}, "tbx_protected", nil, nil, nil, time.Second)
 			if required != "report" {
 				if err == nil || len(result) != 0 {
@@ -851,6 +872,7 @@ func TestBlacksmithArtifactRunClaimFence(t *testing.T) {
 			repo := t.TempDir()
 			t.Chdir(repo)
 			const id = "tbx_artifactfence"
+			prepareBlacksmithGuestKey(t, id)
 			claim := testOwnedBlacksmithClaim(t, id, "jade-krill", repo)
 			route, _, _ := blacksmithClaimBinding(claim)
 			entered, release, stopped := make(chan struct{}), make(chan struct{}), make(chan struct{})

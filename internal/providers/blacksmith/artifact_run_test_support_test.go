@@ -33,6 +33,27 @@ func isolateArtifactOwnership(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 }
 
+// Fake guest runners do not parse keys, but reuse still requires the private
+// canonical file that a successful warmup would have published.
+func prepareBlacksmithGuestKey(t *testing.T, id string) {
+	t.Helper()
+	path, err := core.PrepareStoredTestboxKeyPath(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := core.SecureCreatedLeaseSSHFile(f); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Intercept only capability discovery and the bounded download argv. Never run
 // either native binary, and preserve the exclusively precreated destination.
 func testBlacksmithArtifactTransfer(req LocalCommandRequest) (bool, LocalCommandResult, error) {

@@ -26,6 +26,7 @@ func TestBlacksmithArtifactProtocolCancellation(t *testing.T) {
 					repo := t.TempDir()
 					t.Chdir(repo)
 					const id = "tbx_protocol_cancel"
+					prepareBlacksmithGuestKey(t, id)
 					if boundary == "public" {
 						testOwnedBlacksmithClaim(t, id, "jade-krill", repo)
 					}

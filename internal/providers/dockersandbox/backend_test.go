@@ -1045,11 +1045,14 @@ func TestCreateSandboxRemovesSandboxWhenClaimSetupFails(t *testing.T) {
 			name:          "slug allocation",
 			requestedSlug: "wanted",
 			setupState: func(t *testing.T) {
-				stateFile := filepathJoin(t.TempDir(), "state-file")
-				if err := os.WriteFile(stateFile, []byte("not a directory"), 0o600); err != nil {
+				stateDir := t.TempDir()
+				if err := os.Mkdir(filepathJoin(stateDir, "crabbox"), 0o700); err != nil {
 					t.Fatal(err)
 				}
-				t.Setenv("XDG_STATE_HOME", stateFile)
+				if err := os.WriteFile(filepathJoin(stateDir, "crabbox", "claims"), []byte("not a directory"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("XDG_STATE_HOME", stateDir)
 			},
 			want: "read claims directory",
 		},

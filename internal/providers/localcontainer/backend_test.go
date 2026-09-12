@@ -5929,11 +5929,9 @@ func TestFindContainerForClaimRejectsSlugOnlyMatch(t *testing.T) {
 
 func TestReleaseLeaseRemovesStoredKey(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	keyPath, err := core.TestboxKeyPath("cbx_release")
+	writeLocalContainerReleaseClaim(t, "cbx_release", "container123")
+	keyPath, err := core.PrepareStoredTestboxKeyPath("cbx_release")
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
@@ -5945,7 +5943,6 @@ func TestReleaseLeaseRemovesStoredKey(t *testing.T) {
 		},
 	}
 	addDefaultLocalContainerScopeResponses(runner)
-	writeLocalContainerReleaseClaim(t, "cbx_release", "container123")
 	b := testBackend(runner)
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_release", Server: core.Server{CloudID: "container123"}}}); err != nil {
 		t.Fatal(err)
@@ -6259,7 +6256,7 @@ func TestLegacyLocalContainerClaimRequiresReclaimBeforeStop(t *testing.T) {
 	if err := core.ReplaceLeaseClaimIfUnchanged(leaseID, legacy, replacement); err != nil {
 		t.Fatal(err)
 	}
-	inspectJSON := `[{"Id":"legacy-container","Name":"/legacy-container","Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_legacy_local","slug":"legacy-local","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox","runtime":"docker","docker_context":"stale-context","docker_endpoint":"unix:///stale.sock","docker_daemon_id":"stale-daemon"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49160"}]}}}]`
+	inspectJSON := `[{"Id":"legacy-container","Name":"/legacy-container","Mounts":[],"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_legacy_local","slug":"legacy-local","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox","runtime":"docker","docker_context":"stale-context","docker_endpoint":"unix:///stale.sock","docker_daemon_id":"stale-daemon"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49160"}]}}}]`
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
 		commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {Stdout: "legacy-container\n"},
 		commandKey([]string{"inspect", "legacy-container"}):  {Stdout: inspectJSON},
@@ -7614,14 +7611,22 @@ func writeLocalContainerClaimAndKey(t *testing.T, leaseID, slug string, scopes .
 func createLocalContainerTouchClaim(t *testing.T, idleTimeout time.Duration) (string, string, core.LeaseClaim, *recordingRunner) {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	mountRoot := t.TempDir()
+	bootstrapRoot := filepath.Join(mountRoot, "bootstrap touch")
+	hostRoot := filepath.Join(mountRoot, "work root touch")
+	for _, root := range []string{bootstrapRoot, hostRoot} {
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	leaseID := "cbx_local_touch"
 	containerID := strings.Repeat("a", 64)
 	labels := testCapturedScopeLabels(map[string]string{
-		"bootstrap_dir":   filepath.Join(os.TempDir(), "crabbox-bootstrap-touch test"),
+		"bootstrap_dir":   bootstrapRoot,
 		"container_id":    containerID[:12],
 		"crabbox":         "true",
 		"docker_socket":   "1",
-		"host_work_root":  filepath.Join(os.TempDir(), "crabbox local touch"),
+		"host_work_root":  hostRoot,
 		"image":           "ubuntu:24.04",
 		"lease":           leaseID,
 		"provider":        providerName,
@@ -7662,6 +7667,10 @@ func createLocalContainerTouchClaim(t *testing.T, idleTimeout time.Duration) (st
 
 func localContainerTouchRunner(t *testing.T, leaseID, containerID string) *recordingRunner {
 	t.Helper()
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	container := inspectContainer{
 		ID:   containerID,
 		Name: "/crabbox-local-touch",
@@ -7669,7 +7678,8 @@ func localContainerTouchRunner(t *testing.T, leaseID, containerID string) *recor
 			"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": "local-touch",
 			"state": "ready", "server_type": "ubuntu:24.04", "ssh_user": "runner", "work_root": "/workspace/crabbox touch",
 		}},
-		State: inspectState{Status: "running", Running: true},
+		State:  inspectState{Status: "running", Running: true},
+		Mounts: testLocalContainerBindMounts(t, claim.Labels["bootstrap_dir"], claim.Labels["host_work_root"]),
 		NetworkSettings: inspectNetworking{Ports: map[string][]inspectPort{
 			sshPort + "/tcp": {{HostIP: "127.0.0.1", HostPort: "49153"}},
 		}},
@@ -7757,14 +7767,11 @@ func writeLocalContainerClaimAndKeyAt(t *testing.T, leaseID, slug, scope string,
 	if err := writeLocalContainerClaim(t, leaseID, slug, scope, lastUsed, idle); err != nil {
 		t.Fatal(err)
 	}
-	keyPath, err := core.TestboxKeyPath(leaseID)
+	keyPath, err := core.PrepareStoredTestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
+	if err := core.WritePreparedLeaseSSHKeyFile(keyPath, []byte("private")); err != nil {
 		t.Fatal(err)
 	}
 	return keyPath

@@ -689,6 +689,7 @@ func TestBlacksmithReconciliationRespectsKeepAndReuse(t *testing.T) {
 			req := RunRequest{Repo: Repo{Root: repo}, Command: []string{"false"}, Keep: mode == "keep", KeepOnFailure: mode == "keep-on-failure"}
 			if mode == "reuse" {
 				req.ID = id
+				prepareBlacksmithGuestKey(t, id)
 				testOwnedBlacksmithClaim(t, id, "kept", repo)
 			}
 			backend := newTestBlacksmithBackend(cfg, runner)
@@ -798,7 +799,7 @@ func TestBlacksmithStopArtifactFinalization(t *testing.T) {
 					t.Fatalf("missing directory cleanup: err=%v claim=%+v", err, got)
 				}
 			} else {
-				if err == nil || !strings.Contains(err.Error(), "local connection artifacts") || !strings.Contains(err.Error(), "non-directory") {
+				if err == nil || !strings.Contains(err.Error(), "local connection artifacts") || !strings.Contains(err.Error(), "lease SSH directory has an unsafe path component") {
 					t.Errorf("artifact failure hidden: %v", err)
 				}
 				if !reflect.DeepEqual(got, claim) {

@@ -814,6 +814,7 @@ func TestBlacksmithReusedRunWritesLeaseOutput(t *testing.T) {
 
 	cfg := baseConfig()
 	testOwnedBlacksmithClaim(t, "tbx_reuse123", "jade-krill", "/repo")
+	prepareBlacksmithGuestKey(t, "tbx_reuse123")
 	backend := newTestBlacksmithBackend(cfg, runner)
 	result, err := backend.Run(context.Background(), RunRequest{
 		Repo:    Repo{Root: "/repo"},
@@ -909,6 +910,7 @@ func TestBlacksmithRunFailureStagesLocalCommand(t *testing.T) {
 			repo := t.TempDir()
 			t.Chdir(repo)
 			const id = "tbx_stages"
+			prepareBlacksmithGuestKey(t, id)
 			testOwnedBlacksmithClaim(t, id, "stage-check", repo)
 			var script, wantStdout, wantStderr strings.Builder
 			var wantPhases = []string{"user-command"}

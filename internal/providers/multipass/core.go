@@ -94,10 +94,6 @@ func ensureTestboxKeyForConfig(cfg Config, leaseID string) (string, string, erro
 	return core.EnsureTestboxKeyForConfig(cfg, leaseID)
 }
 
-func testboxKeyPath(leaseID string) (string, error) {
-	return core.TestboxKeyPath(leaseID)
-}
-
 func removeStoredTestboxKey(leaseID string) {
 	core.RemoveStoredTestboxKey(leaseID)
 }

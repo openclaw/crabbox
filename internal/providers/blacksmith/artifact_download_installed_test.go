@@ -154,9 +154,20 @@ func TestBlacksmithDownloadInstalledHelperDrift(t *testing.T) {
 				bit := os.ModeSetuid
 				if kind == "setgid-before" {
 					bit = os.ModeSetgid
+					// A temp directory may inherit a group the caller cannot setgid.
+					if err := os.Chown(f.scp, -1, os.Getegid()); err != nil {
+						t.Fatal(err)
+					}
 				}
 				if err := os.Chmod(f.scp, 0o700|bit); err != nil {
 					t.Fatal(err)
+				}
+				changed, err := os.Lstat(f.scp)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if changed.Mode()&bit == 0 {
+					t.Fatalf("fixture did not retain requested special mode %v: got %v", bit, changed.Mode())
 				}
 			}
 			ctx, cancel := context.WithCancelCause(t.Context())
