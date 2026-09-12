@@ -3,10 +3,34 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
-	"golang.org/x/sys/unix"
 	"os"
+
+	"golang.org/x/sys/unix"
 )
+
+func localHistoryCreateDirectory(root *os.Root, name string) (bool, error) {
+	err := root.Mkdir(name, 0o700)
+	created := err == nil
+	if err != nil && !errors.Is(err, os.ErrExist) {
+		return false, err
+	}
+	file, err := root.OpenFile(name, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return created, err
+	}
+	defer file.Close()
+	if created {
+		if err := securePrivateRunOutputDirFD(int(file.Fd())); err != nil {
+			return created, err
+		}
+	}
+	if err := localHistoryPrivate(file, true); err != nil {
+		return created, err
+	}
+	return created, nil
+}
 
 func localHistoryOpen(root *os.Root, name string, writable bool) (*os.File, error) {
 	flags := os.O_RDONLY

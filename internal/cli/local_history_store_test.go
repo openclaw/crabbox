@@ -161,6 +161,17 @@ func TestLocalHistoryStoreLifecycle(t *testing.T) {
 	if got.RecordingState != "terminal" || log != "out\nerr\n" || results.Tests != 7 || results.Failures != 2 || got.LogSHA256 == "" || got.ResultsSHA256 == "" {
 		t.Fatalf("terminal %+v %q %+v", got, log, results)
 	}
+	duplicate, err := beginLocalHistory(record)
+	if duplicate != nil {
+		duplicate.Close()
+		t.Fatal("duplicate run ID admitted")
+	}
+	if !errors.Is(err, os.ErrExist) {
+		t.Fatalf("duplicate admission=%v, want os.ErrExist", err)
+	}
+	if retained, text, _, err := readLocalHistory(record.ID); err != nil || retained.RecordingState != "terminal" || text != log {
+		t.Fatalf("duplicate admission changed record=%+v log=%q err=%v", retained, text, err)
+	}
 	if err := deleteLocalHistory(record.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +449,12 @@ func TestLocalHistoryStoreMissingMetadataPrunesAsIncomplete(t *testing.T) {
 		t.Fatal(err)
 	}
 	orphan := filepath.Join(path, "runs", localHistoryTestRecord(601).ID)
-	if err := os.Mkdir(orphan, 0o700); err != nil {
+	runs, err := os.OpenRoot(filepath.Join(path, "runs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runs.Close()
+	if err := localHistoryMkdir(runs, localHistoryTestRecord(601).ID); err != nil {
 		t.Fatal(err)
 	}
 	old := time.Now().Add(-31 * 24 * time.Hour)

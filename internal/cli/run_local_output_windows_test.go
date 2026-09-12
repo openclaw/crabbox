@@ -463,6 +463,39 @@ func TestManagedAttestKeyWindowsRepairsPermissiveDACL(t *testing.T) {
 	})
 }
 
+func TestLocalHistoryStoreWindowsPrivateDirectoryCreation(t *testing.T) {
+	dir := t.TempDir()
+	testSID := makeWindowsTestParentPermissive(t, dir)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	created, err := localHistoryCreateDirectory(root, "initial")
+	if err != nil || !created {
+		t.Fatalf("create=%t err=%v", created, err)
+	}
+	// Inspect immediately: no later checkpoint or securing call may establish privacy.
+	assertWindowsPathPrivateFromSID(t, filepath.Join(dir, "initial"), true, testSID)
+	entries, err := os.ReadDir(filepath.Join(dir, "initial"))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("initial directory entries=%v err=%v", entries, err)
+	}
+	created, err = localHistoryCreateDirectory(root, "initial")
+	if err != nil || created {
+		t.Fatalf("existing private directory create=%t err=%v", created, err)
+	}
+	if err := root.Mkdir("existing", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	existing := filepath.Join(dir, "existing")
+	assertWindowsPathGrantsSID(t, existing, testSID)
+	if created, err := localHistoryCreateDirectory(root, "existing"); err == nil || created {
+		t.Fatalf("nonprivate existing directory create=%t err=%v", created, err)
+	}
+	assertWindowsPathGrantsSID(t, existing, testSID)
+}
+
 func TestArtifactOutputWindowsPrivacyFollowsSignedURLs(t *testing.T) {
 	signedFile := artifactFile{
 		Kind:          "proof",

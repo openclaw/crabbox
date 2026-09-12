@@ -124,15 +124,8 @@ func localHistoryRoot(create bool) (*os.Root, error) {
 }
 
 func localHistoryMkdir(root *os.Root, name string) error {
-	err := root.Mkdir(name, 0o700)
-	if err != nil && !errors.Is(err, os.ErrExist) {
+	if _, err := localHistoryCreateDirectory(root, name); err != nil {
 		return err
-	}
-	// Windows private directories need a non-inheriting DACL at creation.
-	if err == nil {
-		if err := ensurePrivateRunOutputDir(filepath.Join(root.Name(), name)); err != nil {
-			return err
-		}
 	}
 	child, err := localHistoryChild(root, name)
 	if err != nil {
@@ -245,17 +238,18 @@ func beginLocalHistory(record localHistoryRecord) (*localHistoryWriter, error) {
 		return nil, err
 	}
 	defer runs.Close()
-	if err := runs.Mkdir(record.ID, 0o700); err != nil {
-		return nil, err
-	}
-	cleanup := true
+	created, err := localHistoryCreateDirectory(runs, record.ID)
+	cleanup := created
 	defer func() {
 		if cleanup {
 			_ = runs.RemoveAll(record.ID)
 		}
 	}()
-	if err := ensurePrivateRunOutputDir(filepath.Join(runs.Name(), record.ID)); err != nil {
+	if err != nil {
 		return nil, err
+	}
+	if !created {
+		return nil, &os.PathError{Op: "mkdir", Path: record.ID, Err: os.ErrExist}
 	}
 	dir, err := localHistoryChild(runs, record.ID)
 	if err != nil {
