@@ -13,6 +13,44 @@ import (
 	"time"
 )
 
+func TestLeaseClaimImageEvidenceIdentity(t *testing.T) {
+	for _, mode := range []leaseClaimEndpointMode{claimEndpointUpdate, claimEndpointReplace} {
+		for _, tc := range []struct {
+			name     string
+			server   Server
+			preserve bool
+		}{
+			{"metadata-only", Server{Labels: map[string]string{"state": "ready"}}, true},
+			{"same-identity", Server{CloudID: "resource-a", ID: 1, ImmutableID: "immutable-a"}, true},
+			{"cloud-replaced", Server{CloudID: "resource-b"}, false},
+			{"numeric-replaced", Server{ID: 2}, false},
+			{"immutable-replaced", Server{ImmutableID: "immutable-b"}, false},
+			{"replacement-observed", Server{CloudID: "resource-b", ImageEvidence: &ImageEvidence{ConfiguredReference: "new:tag", RuntimeImageID: "same-image", RepositoryDigests: []string{"reported-digest"}}}, false},
+		} {
+			t.Run(fmt.Sprintf("%d/%s", mode, tc.name), func(t *testing.T) {
+				old := &ImageEvidence{ConfiguredReference: "old:tag", RuntimeImageID: "same-image", RepositoryDigests: []string{}}
+				claim := leaseClaim{CloudID: "resource-a", CloudNumericID: 1, CloudImmutableID: "immutable-a", ImageEvidence: old}
+				applyLeaseClaimEndpoint(&claim, tc.server, SSHTarget{}, mode)
+				if tc.server.ImageEvidence != nil {
+					if !reflect.DeepEqual(claim.ImageEvidence, tc.server.ImageEvidence) {
+						t.Fatal("new observation lost")
+					}
+					claim.ImageEvidence.RepositoryDigests[0] = "changed"
+					if tc.server.ImageEvidence.RepositoryDigests[0] == "changed" {
+						t.Fatal("new observation was not cloned")
+					}
+				} else if tc.preserve {
+					if !reflect.DeepEqual(claim.ImageEvidence, old) {
+						t.Fatal("same-identity observation lost")
+					}
+				} else if claim.ImageEvidence != nil {
+					t.Fatal("replacement retained stale observation")
+				}
+			})
+		}
+	}
+}
+
 func TestFixedAWSClaimProviderCanonicalizesWithoutOverwritingMarker(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const leaseID = "cbx_abcdef123464"

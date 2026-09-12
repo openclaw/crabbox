@@ -8,6 +8,7 @@ type fileLocalHistoryPolicy struct {
 
 // Local history is self-recorded evidence, never coordinator attestation.
 type localHistoryRecord struct {
+	ImageEvidence           *ImageEvidence     `json:"imageEvidence,omitempty"`
 	Version                 int                `json:"schemaVersion"`
 	ID                      string             `json:"id"`
 	RecordingState          string             `json:"recordingState"`

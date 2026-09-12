@@ -43,6 +43,12 @@ An unavailable final write warns without changing the command's existing exit,
 timing, or receipt. An interrupted or uncommitted record is marked incomplete,
 not successful; its output may be unavailable.
 
+When a provider supplies initial image evidence, the local record includes its
+`imageEvidence` snapshot, including after the lease is removed. Local history
+text and JSON expose it without querying a runtime. See
+[local-container image evidence](../providers/local-container.md#initial-image-evidence)
+for the image ID, digest availability, and unsigned-observation contract.
+
 The log uses the same 8 MiB UTF-8 tail and capture-omission policy described
 below. Metadata is capped at 256 KiB and serialized parsed results at 1 MiB.
 Result totals remain intact when detailed entries are omitted or clipped; local

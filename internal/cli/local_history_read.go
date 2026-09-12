@@ -147,6 +147,7 @@ func (a App) historyFromSources(ctx context.Context, source string, coord *Coord
 		for _, row := range e.Records {
 			if r := row.Local; r != nil {
 				fmt.Fprintf(a.Stdout, "source=%s provenance=%s coordinator=%s %s lease=%s state=%s phase=%s exit=%s duration=%s started=%s command=%s\n", row.Source, terminalSafeResultField(r.Source), terminalSafeResultField(r.CoordinatorState), terminalSafeResultField(r.ID), terminalSafeResultField(blank(r.LeaseID, "-")), r.RecordingState, r.Phase, formatRunExit(r.ExitCode), formatMs(r.TotalMs), r.StartedAt, terminalSafeResultField(r.CommandDisplay))
+				printImageEvidence(a.Stdout, r.ImageEvidence)
 			} else {
 				r := row.Coordinator
 				fmt.Fprintf(a.Stdout, "source=coordinator %s lease=%s state=%s phase=%s exit=%s duration=%s started=%s\n", r.ID, blank(r.LeaseID, "-"), r.State, r.Phase, formatRunExit(r.ExitCode), formatMs(r.DurationMs), r.StartedAt)

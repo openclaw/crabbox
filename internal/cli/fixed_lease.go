@@ -126,8 +126,7 @@ func AcquireFixedLease(
 		if err != nil {
 			return err
 		}
-		claim.CloudID = acquired.Server.CloudID
-		claim.CloudImmutableID = acquired.Server.ImmutableID
+		SetLeaseClaimResourceIdentity(claim, acquired.Server.CloudID, claim.CloudNumericID, acquired.Server.ImmutableID, acquired.Server.ImageEvidence)
 		claim.Slug = intent.Slug
 		claim.Provider = opts.Kind.ClaimProvider
 		claim.Labels = maps.Clone(acquired.Server.Labels)

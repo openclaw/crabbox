@@ -20,6 +20,44 @@ type fixedAcquisitionTestBackend struct {
 	pause bool
 }
 
+func TestFixedAcquisitionImageEvidenceIdentity(t *testing.T) {
+	isolateTestUserDirs(t)
+	opts := FixedAcquireOptions{Kind: FixedLeaseKind{ClaimProvider: FixedAWSClaimProvider, IntentVersion: 1}, LeaseID: "cbx_image_identity", RepoRoot: t.TempDir()}
+	prepare := func(context.Context, *LeaseClaim, bool) (FixedLeaseBinding, error) {
+		return FixedLeaseBinding{ProviderScope: "fixture", Fingerprint: "fixed-intent", Slug: "image-identity"}, nil
+	}
+	for _, tc := range []struct {
+		id, reference          string
+		observed, wantEvidence bool
+	}{
+		{"resource-a", "old:tag", true, true},
+		{"resource-a", "old:tag", false, true},
+		{"resource-b", "", false, false},
+		{"resource-c", "new:tag", true, true},
+	} {
+		server := Server{CloudID: tc.id}
+		if tc.observed {
+			server.ImageEvidence = &ImageEvidence{ConfiguredReference: tc.reference, RuntimeImageID: "same-image", RepositoryDigests: []string{"reported-digest"}}
+		}
+		_, err := AcquireFixedLease(opts, prepare, func(context.Context, *LeaseClaim, *FixedCreateIntent, func() error) (LeaseTarget, error) {
+			return LeaseTarget{Server: server, LeaseID: opts.LeaseID}, nil
+		}, t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if server.ImageEvidence != nil {
+			server.ImageEvidence.RepositoryDigests[0] = "changed-after-publication"
+		}
+		claim, err := readLeaseClaim(opts.LeaseID)
+		if err != nil || claim.CloudID != tc.id || (claim.ImageEvidence != nil) != tc.wantEvidence {
+			t.Fatalf("claim=%+v err=%v", claim, err)
+		}
+		if tc.wantEvidence && (claim.ImageEvidence.ConfiguredReference != tc.reference || claim.ImageEvidence.RepositoryDigests[0] == "changed-after-publication") {
+			t.Fatal("stored snapshot changed identity or shares observation storage")
+		}
+	}
+}
+
 func (b *fixedAcquisitionTestBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
 	lease, err := AcquireFixedLease(FixedAcquireOptions{
 		Kind:    FixedLeaseKind{ClaimProvider: FixedAWSClaimProvider, IntentVersion: 1},

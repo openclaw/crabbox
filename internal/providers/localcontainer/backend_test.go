@@ -22,6 +22,7 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	shared "github.com/openclaw/crabbox/internal/providers/shared"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 const testRecoveredContainerID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -76,6 +77,275 @@ type recordingRunner struct {
 	calls     []core.LocalCommandRequest
 	responses map[string]core.LocalCommandResult
 	run       func(core.LocalCommandRequest) (core.LocalCommandResult, error)
+}
+
+func TestLocalContainerImageEvidence(t *testing.T) {
+	digestA := "example.invalid/base@sha256:" + strings.Repeat("a", 64)
+	digestB := "example.invalid/base@sha256:" + strings.Repeat("b", 64)
+	for _, runtimeName := range []string{"docker", "podman"} {
+		for _, tc := range []struct {
+			name, output, status string
+			digests              []string
+			err                  error
+		}{
+			{"available", fmt.Sprintf("[%q,%q,%q]", digestB, digestA, digestA), "available", []string{digestA, digestB}, nil},
+			{"empty", "[]", "unavailable", []string{}, nil},
+			{"null", "null", "unavailable", []string{}, nil},
+			{"query-failure", "", "unknown", []string{}, errors.New("ordinary metadata failure")},
+			{"own-timeout", "", "unknown", []string{}, context.DeadlineExceeded},
+		} {
+			t.Run(runtimeName+"/"+tc.name, func(t *testing.T) {
+				var warning strings.Builder
+				runner := &recordingRunner{run: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					return core.LocalCommandResult{Stdout: tc.output}, tc.err
+				}}
+				cfg := core.Config{LocalContainer: core.LocalContainerConfig{Runtime: runtimeName, Image: "later:override", CheckpointMetadata: map[string]string{checkpointMetadataRuntime: runtimeName, checkpointMetadataContext: "captured-context"}}}
+				b := &backend{rt: core.Runtime{Exec: runner, Stderr: &warning}}
+				container := inspectContainer{ID: "owned-container", Image: "sha256:runtime-image", Config: inspectConfig{Image: "runtime:reference", Labels: map[string]string{"image": "created:reference"}}}
+				got, err := b.observeImageEvidence(t.Context(), cfg, container, core.LeaseClaim{})
+				if err != nil || got.ConfiguredReference != "created:reference" || got.RuntimeImageID != container.Image || got.RepositoryDigestStatus != tc.status || !reflect.DeepEqual(got.RepositoryDigests, tc.digests) {
+					t.Fatalf("evidence=%+v err=%v", got, err)
+				}
+				wantArgs := []string{"image", "inspect", container.Image, "--format", "{{json .RepoDigests}}"}
+				flag := "--context"
+				if runtimeName == "podman" {
+					flag = "--connection"
+				}
+				wantArgs = append([]string{flag, "captured-context"}, wantArgs...)
+				if len(runner.calls) != 1 || runner.calls[0].Name != runtimeName || !reflect.DeepEqual(runner.calls[0].Args, wantArgs) || runner.calls[0].MaxCapturedOutputBytes != imageEvidenceOutputLimit {
+					t.Fatalf("unexpected metadata command: %+v", runner.commandSummary())
+				}
+				if (warning.Len() > 0) != (tc.status == "unknown") {
+					t.Fatalf("warning=%q", warning.String())
+				}
+			})
+		}
+	}
+}
+
+func TestLocalContainerImageEvidenceSnapshotAndCancellation(t *testing.T) {
+	runner := &recordingRunner{}
+	b := &backend{rt: core.Runtime{Exec: runner}}
+	container := inspectContainer{ID: "container", Image: "image"}
+	claim := core.LeaseClaim{CloudID: container.ID, ImageEvidence: &core.ImageEvidence{ConfiguredReference: "original:tag", RuntimeImageID: "image", RepositoryDigests: []string{"example.invalid/a@sha256:" + strings.Repeat("a", 64)}, RepositoryDigestStatus: "available"}}
+	evidence, err := b.observeImageEvidence(t.Context(), core.Config{}, container, claim)
+	if err != nil || len(runner.calls) != 0 || evidence.ConfiguredReference != "original:tag" {
+		t.Fatalf("snapshot=%+v error=%v calls=%d", evidence, err, len(runner.calls))
+	}
+	evidence.RepositoryDigests[0] = "changed"
+	if claim.ImageEvidence.RepositoryDigests[0] == "changed" {
+		t.Fatal("snapshot shares digest storage")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := b.observeImageEvidence(ctx, core.Config{}, container, claim); !errors.Is(err, context.Canceled) || len(runner.calls) != 0 {
+		t.Fatalf("cancelled snapshot lookup: %v", err)
+	}
+	ctx, cancel = context.WithCancel(t.Context())
+	runner.run = func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		cancel()
+		return core.LocalCommandResult{Stdout: "[]"}, nil
+	}
+	if _, err := b.observeImageEvidence(ctx, core.Config{}, container, core.LeaseClaim{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("parent cancellation was swallowed: %v", err)
+	}
+}
+
+func TestLocalContainerImageEvidenceIdentity(t *testing.T) {
+	pinned := "example.invalid/base@sha256:" + strings.Repeat("a", 64)
+	for _, tc := range []struct{ name, containerID, imageID string }{
+		{"different-container", "new-container", "old-image"},
+		{"different-image", "old-container", "new-image"},
+		{"missing-image", "old-container", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &recordingRunner{run: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				return core.LocalCommandResult{Stdout: "[]"}, nil
+			}}
+			b := &backend{rt: core.Runtime{Exec: runner}}
+			container := inspectContainer{ID: tc.containerID, Image: tc.imageID, Config: inspectConfig{Image: pinned}}
+			claim := core.LeaseClaim{CloudID: "old-container", ImageEvidence: &core.ImageEvidence{ConfiguredReference: "stale:tag", RuntimeImageID: "old-image"}}
+			got, err := b.observeImageEvidence(t.Context(), core.Config{}, container, claim)
+			if err != nil || got.ConfiguredReference != pinned || got.RuntimeImageID != tc.imageID || got.RepositoryDigests == nil || len(got.RepositoryDigests) != 0 {
+				t.Fatalf("observation=%+v error=%v", got, err)
+			}
+			wantQueries, wantStatus := 1, "unavailable"
+			if tc.imageID == "" {
+				wantQueries, wantStatus = 0, "unknown"
+			}
+			if len(runner.calls) != wantQueries || got.RepositoryDigestStatus != wantStatus {
+				t.Fatalf("calls=%d status=%q", len(runner.calls), got.RepositoryDigestStatus)
+			}
+		})
+	}
+}
+
+func TestLocalContainerImageEvidenceProvisioningSnapshot(t *testing.T) {
+	for _, mode := range []string{"normal", "fixed", "prepare-recovery"} {
+		t.Run(mode, func(t *testing.T) {
+			b, runner, _, leaseID, _, _ := pendingAcquireBackend(t)
+			testutil.IsolateUserDirs(t)
+			original := runner.run
+			imageID := "sha256:" + strings.Repeat("a", 64)
+			initial := []string{"example.invalid/a@" + imageID, "example.invalid/b@" + imageID}
+			digests := append([]string{}, initial...)
+			queries, waits := 0, 0
+			readStatus := func() (core.LeaseTarget, error) {
+				return testBackend(runner).Resolve(t.Context(), core.ResolveRequest{ID: *leaseID, StatusOnly: true, NoLocalStateMutations: true})
+			}
+			runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				if firstArg(req.Args) == "image" {
+					queries++
+					if queries == 1 {
+						before, err := core.ReadLeaseClaim(*leaseID)
+						if err != nil {
+							return core.LocalCommandResult{}, err
+						}
+						status, err := readStatus()
+						if err != nil || status.Server.ImageEvidence != nil {
+							return core.LocalCommandResult{}, fmt.Errorf("pre-publication status exposed transient evidence: %+v: %v", status.Server.ImageEvidence, err)
+						}
+						after, err := core.ReadLeaseClaim(*leaseID)
+						if err != nil || !reflect.DeepEqual(before, after) {
+							return core.LocalCommandResult{}, fmt.Errorf("status mutated pending claim: %v", err)
+						}
+					}
+					data, err := json.Marshal(digests)
+					return core.LocalCommandResult{Stdout: string(data)}, err
+				}
+				result, err := original(req)
+				if err == nil && firstArg(req.Args) == "inspect" {
+					var containers []inspectContainer
+					if err := json.Unmarshal([]byte(result.Stdout), &containers); err != nil {
+						return result, err
+					}
+					for i := range containers {
+						containers[i].Image = imageID
+					}
+					data, err := json.Marshal(containers)
+					result.Stdout = string(data)
+					return result, err
+				}
+				return result, err
+			}
+			b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
+				waits++
+				digests = initial[:1]
+				claim, err := core.ReadLeaseClaim(*leaseID)
+				if err != nil || claim.ImageEvidence == nil || !reflect.DeepEqual(claim.ImageEvidence.RepositoryDigests, initial) {
+					return fmt.Errorf("snapshot not durable before SSH wait: %+v: %v", claim.ImageEvidence, err)
+				}
+				status, err := readStatus()
+				if err != nil || status.Server.ImageEvidence == nil || !reflect.DeepEqual(status.Server.ImageEvidence.RepositoryDigests, initial) {
+					return fmt.Errorf("provisioning snapshot changed: %+v: %v", status.Server.ImageEvidence, err)
+				}
+				if mode == "prepare-recovery" && waits == 1 {
+					return context.Canceled
+				}
+				return nil
+			}
+			req := core.AcquireRequest{Keep: true, Repo: core.Repo{Root: t.TempDir()}}
+			if mode == "fixed" {
+				req.RequestedLeaseID = "cbx_abcdef160100"
+			}
+			lease, err := b.Acquire(t.Context(), req)
+			if mode == "prepare-recovery" {
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("first readiness error=%v", err)
+				}
+				lease, err = b.Resolve(t.Context(), core.ResolveRequest{ID: *leaseID, Prepare: true})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if queries != 1 || lease.Server.ImageEvidence == nil || !reflect.DeepEqual(lease.Server.ImageEvidence.RepositoryDigests, initial) {
+				t.Fatalf("final snapshot=%+v queries=%d", lease.Server.ImageEvidence, queries)
+			}
+			if err := b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+				t.Fatal(err)
+			}
+			if queries != 1 || !reflect.DeepEqual(lease.Server.ImageEvidence.RepositoryDigests, initial) {
+				t.Fatal("cleanup changed initial snapshot")
+			}
+		})
+	}
+}
+
+func TestLocalContainerImageEvidenceLifecycle(t *testing.T) {
+	b, runner, _, _, _, present := pendingAcquireBackend(t)
+	testutil.IsolateUserDirs(t)
+	repo := core.Repo{Root: t.TempDir()}
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	b.cfg.LocalContainer.Image = "fixture:mutable"
+	imageID := "sha256:" + strings.Repeat("a", 64)
+	original := runner.run
+	queries := 0
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if firstArg(req.Args) == "image" {
+			queries++
+			if !reflect.DeepEqual(req.Args, []string{"image", "inspect", imageID, "--format", "{{json .RepoDigests}}"}) {
+				t.Fatalf("image query did not use observed ID: %v", req.Args)
+			}
+			return core.LocalCommandResult{Stdout: "[]"}, nil
+		}
+		result, err := original(req)
+		if err == nil && firstArg(req.Args) == "inspect" {
+			var containers []inspectContainer
+			if err := json.Unmarshal([]byte(result.Stdout), &containers); err != nil {
+				t.Fatal(err)
+			}
+			for i := range containers {
+				containers[i].Image = imageID
+			}
+			data, err := json.Marshal(containers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result.Stdout = string(data)
+		}
+		return result, err
+	}
+	first, err := b.Acquire(t.Context(), core.AcquireRequest{Keep: true, Repo: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queries != 1 || first.Server.ServerType.Name != "ubuntu:24.04" || first.Server.ImageEvidence == nil || first.Server.ImageEvidence.RuntimeImageID != imageID {
+		t.Fatalf("acquired image=%+v queries=%d", first.Server.ImageEvidence, queries)
+	}
+	claim, err := core.ReadLeaseClaim(first.LeaseID)
+	if err != nil || claim.CloudID != first.Server.CloudID || !reflect.DeepEqual(claim.ImageEvidence, first.Server.ImageEvidence) {
+		t.Fatalf("captured claim=%+v error=%v", claim.ImageEvidence, err)
+	}
+	b.cfg.LocalContainer.Image = "later:override"
+	reused, err := b.Resolve(t.Context(), core.ResolveRequest{ID: first.LeaseID, StatusOnly: true, NoLocalStateMutations: true})
+	if err != nil || queries != 1 || !reflect.DeepEqual(reused.Server.ImageEvidence, first.Server.ImageEvidence) {
+		t.Fatalf("retained image=%+v queries=%d error=%v", reused.Server.ImageEvidence, queries, err)
+	}
+	if err := b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: first}); err != nil {
+		t.Fatal(err)
+	}
+	if *present || queries != 1 {
+		t.Fatal("cleanup queried image metadata or retained container")
+	}
+	firstEvidence := core.CloneImageEvidence(first.Server.ImageEvidence)
+	imageID = "sha256:" + strings.Repeat("b", 64)
+	// A fresh invocation does not inherit the resolved lease's runtime metadata.
+	b = testBackend(runner)
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	b.cfg.LocalContainer.Image = "fixture:mutable"
+	second, err := b.Acquire(t.Context(), core.AcquireRequest{Repo: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Server.ImageEvidence.ConfiguredReference != firstEvidence.ConfiguredReference || second.Server.ImageEvidence.RuntimeImageID == firstEvidence.RuntimeImageID || queries != 2 {
+		t.Fatal("same-tag different-image runs are indistinguishable")
+	}
+	if err := b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: second}); err != nil {
+		t.Fatal(err)
+	}
+	if *present || queries != 2 || firstEvidence.RuntimeImageID == imageID {
+		t.Fatal("cleanup changed retained evidence or queried image metadata")
+	}
 }
 
 type recordedCommandSummary struct {

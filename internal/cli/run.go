@@ -2920,20 +2920,21 @@ afterSync:
 	if strings.TrimSpace(*emitProof) != "" && code == 0 {
 		template := cfg.ProofTemplates[strings.TrimSpace(*proofTemplate)]
 		proof, err := writeRunProof(strings.TrimSpace(*emitProof), strings.TrimSpace(*proofTemplate), proofRenderInput{
-			Template:    template,
-			Provider:    cfg.Provider,
-			LeaseID:     leaseID,
-			Slug:        serverSlug(server),
-			RunID:       executionRunID,
-			Command:     commandDisplay,
-			LogExcerpt:  selectProofLogExcerpt(logBuffer.String()),
-			Captures:    streamCaptures.metadata(),
-			ActionsURL:  actionsURL,
-			Artifacts:   runArtifacts,
-			Variables:   expansion.Variables,
-			CommandMs:   report.CommandMs,
-			ExitCode:    code,
-			GeneratedAt: time.Now(),
+			Template:      template,
+			ImageEvidence: CloneImageEvidence(server.ImageEvidence),
+			Provider:      cfg.Provider,
+			LeaseID:       leaseID,
+			Slug:          serverSlug(server),
+			RunID:         executionRunID,
+			Command:       commandDisplay,
+			LogExcerpt:    selectProofLogExcerpt(logBuffer.String()),
+			Captures:      streamCaptures.metadata(),
+			ActionsURL:    actionsURL,
+			Artifacts:     runArtifacts,
+			Variables:     expansion.Variables,
+			CommandMs:     report.CommandMs,
+			ExitCode:      code,
+			GeneratedAt:   time.Now(),
 		})
 		if err != nil {
 			return recordFailure(err)
@@ -3160,6 +3161,7 @@ func shouldReleaseRunLease(acquired, keep, keepFailedLease bool, stopAfter strin
 
 func populateRunTimingMetadata(report *timingReport, cfg Config, repo Repo, server Server, leaseID, runID, workdir string, artifacts []runArtifact) {
 	report.RunID = runID
+	report.ImageEvidence = CloneImageEvidence(server.ImageEvidence)
 	report.MachineType = server.ServerType.Name
 	report.RepoPath = repo.Root
 	report.Workdir = workdir

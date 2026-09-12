@@ -168,6 +168,7 @@ func (o *RunObservation) finish(report timingReport, hasReport bool, err error, 
 	o.record.EndedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	o.record.UpdatedAt = o.record.EndedAt
 	if hasReport {
+		o.record.ImageEvidence = CloneImageEvidence(report.ImageEvidence)
 		if report.Provider != "" {
 			o.record.Provider = report.Provider
 		}

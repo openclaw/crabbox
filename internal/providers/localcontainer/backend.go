@@ -60,6 +60,7 @@ var _ core.StatusTouchClaimAuthorizer = (*backend)(nil)
 
 type inspectContainer struct {
 	ID              string            `json:"Id"`
+	Image           string            `json:"Image"`
 	Name            string            `json:"Name"`
 	Created         string            `json:"Created"`
 	Config          inspectConfig     `json:"Config"`
@@ -322,6 +323,14 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 		return core.LeaseTarget{}, errors.Join(err, reconcileErr)
 	}
+	lease.Server.ImageEvidence, err = b.observeImageEvidence(ctx, cfg, container, pendingClaim)
+	if err != nil {
+		retained, reconcileErr := b.reconcileReadinessFailure(req.Keep, pendingClaim, lease, bootstrapDir, err)
+		if retained {
+			b.printPendingRecovery(leaseID, slug, pendingClaim, err)
+		}
+		return core.LeaseTarget{}, errors.Join(err, reconcileErr)
+	}
 	markPendingLease(&lease.Server)
 	updatedPendingClaim, err := core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, pendingClaim, lease.Server, lease.SSH)
 	if err != nil {
@@ -341,6 +350,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		return core.LeaseTarget{}, errors.Join(err, reconcileErr)
 	}
 	markPendingLease(&lease.Server)
+	lease.Server.ImageEvidence = core.CloneImageEvidence(pendingClaim.ImageEvidence)
 	updatedPendingClaim, err = core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, pendingClaim, lease.Server, lease.SSH)
 	if err != nil {
 		retained, reconcileErr := b.reconcileChangedClaim(lease, bootstrapDir)
@@ -791,6 +801,14 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		if req.Prepare {
 			keep := strings.EqualFold(exactClaim.Labels["keep"], "true")
 			bootstrapDir := strings.TrimSpace(exactClaim.Labels["bootstrap_dir"])
+			imageEvidence, observationErr := b.observeImageEvidence(ctx, cfg, container, exactClaim)
+			if observationErr != nil {
+				retained, reconcileErr := b.reconcileReadinessFailure(keep, exactClaim, lease, bootstrapDir, observationErr)
+				if retained {
+					b.printPendingRecovery(leaseID, slug, exactClaim, observationErr)
+				}
+				return core.LeaseTarget{}, errors.Join(observationErr, reconcileErr)
+			}
 			lease, err = b.waitForContainerEndpoint(ctx, cfg, container.ID, leaseID, slug)
 			if err != nil {
 				retained, reconcileErr := b.reconcileReadinessFailure(keep, exactClaim, lease, bootstrapDir, err)
@@ -800,6 +818,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 				return core.LeaseTarget{}, errors.Join(err, reconcileErr)
 			}
 			markPendingLease(&lease.Server)
+			lease.Server.ImageEvidence = imageEvidence
 			updatedClaim, updateErr := core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, exactClaim, lease.Server, lease.SSH)
 			err = updateErr
 			if err != nil {
@@ -846,6 +865,18 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if owned {
 		lease.Server = mergeLocalContainerClaim(lease.Server, exactClaim)
 		core.SetServerLeaseClaimSnapshot(&lease.Server, exactClaim, true)
+	}
+	if isPendingLocalContainerClaim(exactClaim) {
+		// Until acquisition publishes its first snapshot, status must not expose
+		// a transient observation that can disagree with the completed run.
+		if exactClaim.ImageEvidence != nil && exactClaim.ImageEvidence.RuntimeImageID == container.Image {
+			lease.Server.ImageEvidence = core.CloneImageEvidence(exactClaim.ImageEvidence)
+		}
+	} else {
+		lease.Server.ImageEvidence, err = b.observeImageEvidence(ctx, cfg, container, exactClaim)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
 	}
 	if req.Reclaim && (!owned || !hasCompleteCapturedRuntimeScope(exactClaim.Labels)) {
 		scope, scopeErr := b.captureRuntimeScope(ctx, cfg)

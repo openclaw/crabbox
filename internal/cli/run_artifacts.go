@@ -390,20 +390,21 @@ func artifactGlobRegex(glob string) string {
 }
 
 type proofRenderInput struct {
-	Template    ProofTemplateConfig
-	Provider    string
-	LeaseID     string
-	Slug        string
-	RunID       string
-	Command     string
-	LogExcerpt  string
-	Captures    []streamCaptureMetadata
-	ActionsURL  string
-	Artifacts   []runArtifact
-	Variables   map[string]string
-	CommandMs   int64
-	ExitCode    int
-	GeneratedAt time.Time
+	ImageEvidence *ImageEvidence
+	Template      ProofTemplateConfig
+	Provider      string
+	LeaseID       string
+	Slug          string
+	RunID         string
+	Command       string
+	LogExcerpt    string
+	Captures      []streamCaptureMetadata
+	ActionsURL    string
+	Artifacts     []runArtifact
+	Variables     map[string]string
+	CommandMs     int64
+	ExitCode      int
+	GeneratedAt   time.Time
 }
 
 func writeRunProof(path, templateName string, input proofRenderInput) (runArtifact, error) {
@@ -450,6 +451,9 @@ func renderRunProof(input proofRenderInput) (string, error) {
 	b.WriteString("## Real behavior proof\n\n")
 	b.WriteString("Behavior addressed: " + behavior + "\n\n")
 	b.WriteString("Real environment tested: " + environment + "\n\n")
+	if input.ImageEvidence != nil {
+		b.WriteString(imageEvidenceSummary(input.ImageEvidence) + "\n\n")
+	}
 	stepsOpenFence, stepsCloseFence := markdownFence("sh", steps)
 	b.WriteString("Exact steps or command run:\n\n" + stepsOpenFence + "\n")
 	b.WriteString(steps)
@@ -529,6 +533,12 @@ func proofTemplateValues(input proofRenderInput) map[string]string {
 		"command":    input.Command,
 		"logExcerpt": input.LogExcerpt,
 		"actionsUrl": input.ActionsURL,
+	}
+	if input.ImageEvidence != nil {
+		builtins["imageConfiguredReference"] = input.ImageEvidence.ConfiguredReference
+		builtins["runtimeImageId"] = input.ImageEvidence.RuntimeImageID
+		builtins["repositoryDigests"] = strings.Join(input.ImageEvidence.RepositoryDigests, ",")
+		builtins["repositoryDigestStatus"] = input.ImageEvidence.RepositoryDigestStatus
 	}
 	for key, value := range builtins {
 		values[key] = value

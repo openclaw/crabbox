@@ -14,6 +14,22 @@ import (
 	"testing"
 )
 
+func TestImageEvidenceLocalHistoryRoundTrip(t *testing.T) {
+	isolateTestUserDirs(t)
+	id := "run_" + strings.Repeat("1", 32)
+	o, err := beginRunObservation(Config{RecordLocal: true, Provider: "fixture", TargetOS: "linux"}, id, []string{"true"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := &ImageEvidence{ConfiguredReference: "created:tag", RuntimeImageID: "image-id", RepositoryDigests: []string{}, RepositoryDigestStatus: "unavailable"}
+	o.finish(finalizeTimingReport(TimingReport{Provider: "fixture", LeaseID: "cbx_image1601", ImageEvidence: evidence}), true, nil, nil)
+	evidence.RuntimeImageID = "changed-after-finalization"
+	record, _, _, err := readLocalHistory(id)
+	if err != nil || record.ImageEvidence == nil || record.ImageEvidence.RuntimeImageID != "image-id" || record.ImageEvidence.RepositoryDigestStatus != "unavailable" {
+		t.Fatalf("history did not preserve captured image: %+v %v", record.ImageEvidence, err)
+	}
+}
+
 func TestRunObservationDelegatedAppRoundTrip(t *testing.T) {
 	clearConfigEnv(t)
 	isolateRunTestUserDirs(t, t.TempDir())

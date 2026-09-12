@@ -830,6 +830,13 @@ Before sync, `run` prints a compact context block with run ID, portal/log URLs,
 lease ID, slug, provider, SSH target, remote workdir, and whether the workspace
 is raw or Actions-hydrated.
 
+When available, an additional image line separates the configured reference,
+runtime image ID, and reported repository digests. The same optional
+`imageEvidence` object is retained in timing JSON and opt-in local history and
+included in `--emit-proof` output. These initial image observations are unsigned;
+they do not change signed receipt or checkpoint identities. See
+[local-container image evidence](../providers/local-container.md#initial-image-evidence).
+
 For newly created brokered leases, `run` also prints the exact selected image
 ID/source and provider-side request, network-readiness, bootstrap, and total
 startup timings when the provider reports them.

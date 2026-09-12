@@ -18,6 +18,7 @@ import (
 )
 
 type leaseClaim struct {
+	ImageEvidence     *ImageEvidence            `json:"imageEvidence,omitempty"`
 	LeaseID           string                    `json:"leaseID"`
 	Revision          string                    `json:"revision,omitempty"`
 	CheckpointCapture *CheckpointCaptureBinding `json:"checkpointCapture,omitempty"`
@@ -804,6 +805,7 @@ func updateLeaseClaimLabelsIfUnchangedAfter(leaseID string, expected leaseClaim,
 }
 
 func cloneLeaseClaim(claim leaseClaim) leaseClaim {
+	claim.ImageEvidence = CloneImageEvidence(claim.ImageEvidence)
 	if claim.CheckpointCapture != nil {
 		binding := *claim.CheckpointCapture
 		claim.CheckpointCapture = &binding
@@ -850,20 +852,33 @@ func endpointClaimGuard(leaseID string, next func(leaseClaim, bool) error) func(
 	}
 }
 
+// SetLeaseClaimResourceIdentity updates an in-memory claim's exact resource
+// identity. Callers retain their existing publication and identity-admission policy.
+func SetLeaseClaimResourceIdentity(claim *LeaseClaim, cloudID string, numericID int64, immutableID string, evidence *ImageEvidence) {
+	if evidence != nil {
+		claim.ImageEvidence = CloneImageEvidence(evidence)
+	} else if claim.CloudID != cloudID || claim.CloudNumericID != numericID || claim.CloudImmutableID != immutableID {
+		claim.ImageEvidence = nil
+	}
+	claim.CloudID, claim.CloudNumericID, claim.CloudImmutableID = cloudID, numericID, immutableID
+}
+
 func applyLeaseClaimEndpoint(claim *leaseClaim, server Server, target SSHTarget, mode leaseClaimEndpointMode) {
 	if mode == claimEndpointReplace {
 		clearLeaseClaimTailscaleFields(claim)
 		claim.BridgeURL = ""
 	}
+	cloudID, numericID, immutableID := claim.CloudID, claim.CloudNumericID, claim.CloudImmutableID
 	if server.CloudID != "" {
-		claim.CloudID = server.CloudID
+		cloudID = server.CloudID
 	}
 	if server.ID != 0 {
-		claim.CloudNumericID = server.ID
+		numericID = server.ID
 	}
 	if server.ImmutableID != "" {
-		claim.CloudImmutableID = server.ImmutableID
+		immutableID = server.ImmutableID
 	}
+	SetLeaseClaimResourceIdentity(claim, cloudID, numericID, immutableID, server.ImageEvidence)
 	if len(server.Labels) > 0 {
 		claim.Labels = cloneStringMap(server.Labels)
 	}

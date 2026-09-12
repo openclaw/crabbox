@@ -208,7 +208,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 			}
 			pending := createdPendingLease(cfg, containerID, leaseID, intent.Slug, bootstrapDir, req.Keep)
 			pending.Server.Labels["fixed_intent_sha256"] = fingerprint
-			claim.CloudID = containerID
+			core.SetLeaseClaimResourceIdentity(claim, containerID, claim.CloudNumericID, claim.CloudImmutableID, nil)
 			claim.Labels = cloneLabels(pending.Server.Labels)
 			intent.Attempt["container_id"] = containerID
 			if err := persist(); err != nil {
@@ -233,7 +233,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 		if claim.CloudID == "" {
 			pending := createdPendingLease(cfg, container.ID, leaseID, intent.Slug, container.Config.Labels["bootstrap_dir"], req.Keep)
 			pending.Server.Labels["fixed_intent_sha256"] = fingerprint
-			claim.CloudID = container.ID
+			core.SetLeaseClaimResourceIdentity(claim, container.ID, claim.CloudNumericID, claim.CloudImmutableID, nil)
 			claim.Labels = cloneLabels(pending.Server.Labels)
 			intent.Attempt["container_id"] = container.ID
 			if err := persist(); err != nil {
@@ -259,11 +259,17 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 			}
 			return core.LeaseTarget{}, notRunning
 		}
+		imageEvidence, err := b.observeImageEvidence(ctx, cfg, container, *claim)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
 		lease, err := b.waitForContainerEndpoint(ctx, cfg, containerID, leaseID, intent.Slug)
 		if err != nil {
 			return core.LeaseTarget{}, err
 		}
+		lease.Server.ImageEvidence = imageEvidence
 		if isPendingLocalContainerClaim(*claim) {
+			claim.ImageEvidence = core.CloneImageEvidence(imageEvidence)
 			claim.SSHHost = lease.SSH.Host
 			if port, parseErr := strconv.Atoi(strings.TrimSpace(lease.SSH.Port)); parseErr == nil && port > 0 {
 				claim.SSHPort = port
