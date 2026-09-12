@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/openclaw/crabbox/internal/atomicfile"
 	"github.com/openclaw/crabbox/internal/prefixbuffer"
 )
 
@@ -1425,28 +1426,7 @@ func writeControllerChildIdentity(path string, identity controllerChildIdentity)
 	}
 	data = append(data, '\n')
 	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".controller-child-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := replaceControllerFile(tmpPath, path); err != nil {
+	if err := atomicfile.WritePrivate(path, ".controller-child-*.tmp", data, replaceControllerFile); err != nil {
 		return err
 	}
 	if err := syncControllerDirectory(dir); err != nil {

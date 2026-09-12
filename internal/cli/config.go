@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/openclaw/crabbox/internal/atomicfile"
 	"gopkg.in/yaml.v3"
 )
 
@@ -3260,38 +3261,10 @@ func writeUserFileConfigAtomic(path string, data []byte, replaceFile func(string
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(writePath)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
-	if err != nil {
+	if err := atomicfile.WritePrivate(writePath, "."+filepath.Base(path)+".tmp-*", data, replaceFile); err != nil {
 		return err
 	}
-	tmpPath := tmp.Name()
-	removeTemp := true
-	defer func() {
-		if removeTemp {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := replaceFile(tmpPath, writePath); err != nil {
-		return err
-	}
-	removeTemp = false
-	syncDirectory(dir)
+	syncDirectory(filepath.Dir(writePath))
 	return nil
 }
 

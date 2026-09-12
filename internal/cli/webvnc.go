@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/openclaw/crabbox/internal/atomicfile"
 	"nhooyr.io/websocket"
 )
 
@@ -2470,28 +2471,7 @@ func writeWebVNCDaemonIdentity(pidPath string, identity webVNCDaemonIdentity) er
 		return err
 	}
 	data = append(data, '\n')
-	tmp, err := os.CreateTemp(filepath.Dir(pidPath), ".webvnc-identity-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := replaceControllerFile(tmpPath, pidPath); err != nil {
+	if err := atomicfile.WritePrivate(pidPath, ".webvnc-identity-*.tmp", data, replaceControllerFile); err != nil {
 		return err
 	}
 	if err := syncControllerDirectory(filepath.Dir(pidPath)); err != nil {

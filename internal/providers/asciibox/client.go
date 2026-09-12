@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/openclaw/crabbox/internal/atomicfile"
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
@@ -582,38 +583,7 @@ func writePrivateFileAtomic(path string, data []byte) error {
 		return err
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	keep := false
-	defer func() {
-		if !keep {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return err
-	}
-	keep = true
-	return nil
+	return atomicfile.WritePrivate(path, "."+filepath.Base(path)+".tmp-", data, os.Rename)
 }
 
 func (c *client) waitForBoxReady(ctx context.Context, box boxData) (boxData, error) {

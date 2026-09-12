@@ -1015,6 +1015,10 @@ Blacksmith does) when the config type is not ready to export cleanly.
 If a provider needs durable config, add typed config fields in `Config` and env
 overrides in `config.go`.
 
+`internal/atomicfile.WritePrivate` shares private-file staging, file syncing,
+and replacement. Callers retain path admission, directory creation, their
+platform-specific atomic replacement, and directory-sync/error policy.
+
 `cli.ResolveInheritedWorkRoot` shares the raw work-root decision used by exe.dev
 (core loading and backend defaults), Runpod, Multipass, Hyper-V, and Tart. A
 nonempty provider root wins; otherwise a generic root that is not an exact
