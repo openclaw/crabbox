@@ -2440,7 +2440,7 @@ func TestNativeVNCFallbackCommandCarriesNetworkOverride(t *testing.T) {
 }
 
 func TestResolvedWebVNCCommandConfigPrefersResolvedLeaseProvider(t *testing.T) {
-	cfg := resolvedWebVNCCommandConfig(
+	cfg := desktopConfigForResolvedLease(
 		Config{Provider: "azure", TargetOS: targetLinux},
 		Server{Provider: "aws"},
 		SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2},
@@ -2458,7 +2458,7 @@ func TestResolvedWebVNCCommandConfigPrefersResolvedLeaseProvider(t *testing.T) {
 		t.Fatalf("bridge args=%q", bridge)
 	}
 
-	legacyMac := resolvedWebVNCCommandConfig(Config{Provider: "external"}, Server{Provider: "static"}, SSHTarget{TargetOS: targetMacOS})
+	legacyMac := desktopConfigForResolvedLease(Config{Provider: "external"}, Server{Provider: "static"}, SSHTarget{TargetOS: targetMacOS})
 	username, password := webVNCPortalCredentialsForDaemon(
 		legacyMac.Provider,
 		SSHTarget{TargetOS: targetMacOS},
@@ -2470,7 +2470,7 @@ func TestResolvedWebVNCCommandConfigPrefersResolvedLeaseProvider(t *testing.T) {
 	if username != "screen-user" || password != "screen-secret" {
 		t.Fatalf("persisted static provider lost legacy portal credentials=(%q,%q)", username, password)
 	}
-	externalMac := resolvedWebVNCCommandConfig(Config{Provider: "static"}, Server{Provider: "external"}, SSHTarget{TargetOS: targetMacOS})
+	externalMac := desktopConfigForResolvedLease(Config{Provider: "static"}, Server{Provider: "external"}, SSHTarget{TargetOS: targetMacOS})
 	username, password = webVNCPortalCredentialsForDaemon(
 		externalMac.Provider,
 		SSHTarget{TargetOS: targetMacOS},

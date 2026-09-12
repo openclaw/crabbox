@@ -49,7 +49,7 @@ func applyKubeVirtFileConfig(cfg *Config, file *fileKubeVirtConfig, trusted bool
 		return nil
 	}
 	snapshot := *file
-	if snapshot.SSHPublicKey != "" && !(trusted || inlineSSHPublicKey(snapshot.SSHPublicKey)) {
+	if snapshot.SSHPublicKey != "" && !(trusted || LooksLikeInlineSSHPublicKey(snapshot.SSHPublicKey)) {
 		snapshot.SSHPublicKey = ""
 	}
 	applied, err := cfg.KubeVirt.applyFile(&snapshot, trusted)

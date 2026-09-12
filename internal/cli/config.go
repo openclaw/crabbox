@@ -3406,19 +3406,6 @@ func pathWithinRoot(path, root string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
-func inlineSSHPublicKey(value string) bool {
-	fields := strings.Fields(value)
-	if len(fields) < 2 {
-		return false
-	}
-	switch fields[0] {
-	case "ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com":
-		return true
-	default:
-		return false
-	}
-}
-
 func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error {
 	source := providerSelectionRepoConfig
 	if trusted {

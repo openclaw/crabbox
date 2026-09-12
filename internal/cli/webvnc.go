@@ -1037,7 +1037,7 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	if err := validateWebVNCResolvedProviderIdentity(cfg, server, target, leaseID, expectedIdentity); err != nil {
 		return err
 	}
-	commandCfg := resolvedWebVNCCommandConfig(cfg, server, target)
+	commandCfg := desktopConfigForResolvedLease(cfg, server, target)
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
 	}
@@ -1181,7 +1181,7 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
 	}
-	commandCfg := resolvedWebVNCCommandConfig(cfg, server, target)
+	commandCfg := desktopConfigForResolvedLease(cfg, server, target)
 	// Resolve credentials before any portal, daemon, or remote reset mutation.
 	// A missing External desktop secret must not tear down a working bridge.
 	resetEndpoint := vncEndpoint{Managed: true}
@@ -2537,19 +2537,6 @@ func nativeVNCOpenCommand(cfg Config, target SSHTarget, leaseID string) string {
 	routing := leaseCommandRouting(cfg, target, leaseID, CommandRoutingReconnect)
 	args := append(append([]string{"crabbox", "vnc"}, routing.Args...), "--open")
 	return routing.ShellCommand(args)
-}
-
-func resolvedWebVNCCommandConfig(cfg Config, server Server, target SSHTarget) Config {
-	if provider := strings.TrimSpace(server.Provider); provider != "" {
-		cfg.Provider = provider
-	}
-	if targetOS := strings.TrimSpace(target.TargetOS); targetOS != "" {
-		cfg.TargetOS = targetOS
-	}
-	if windowsMode := strings.TrimSpace(target.WindowsMode); windowsMode != "" {
-		cfg.WindowsMode = windowsMode
-	}
-	return cfg
 }
 
 func stripLegacyWebVNCDaemonFlags(args []string) []string {
