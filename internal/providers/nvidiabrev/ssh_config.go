@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type brevSSHConfigEntry struct {
@@ -131,10 +133,10 @@ func unquoteSSHConfigValue(value string) string {
 	return value
 }
 
-func selectBrevSSHTarget(cfg Config, data, alias string) (SSHTarget, error) {
+func selectBrevSSHTarget(cfg core.Config, data, alias string) (core.SSHTarget, error) {
 	entries, err := parseBrevSSHConfig(data)
 	if err != nil {
-		return SSHTarget{}, err
+		return core.SSHTarget{}, err
 	}
 	var matches []brevSSHConfigEntry
 	for _, entry := range entries {
@@ -146,26 +148,26 @@ func selectBrevSSHTarget(cfg Config, data, alias string) (SSHTarget, error) {
 		}
 	}
 	if len(matches) == 0 {
-		return SSHTarget{}, exit(4, "nvidia-brev SSH config entry not found for host %q", alias)
+		return core.SSHTarget{}, core.Exit(4, "nvidia-brev SSH config entry not found for host %q", alias)
 	}
 	if len(matches) > 1 {
-		return SSHTarget{}, exit(2, "nvidia-brev SSH config entry for host %q is ambiguous", alias)
+		return core.SSHTarget{}, core.Exit(2, "nvidia-brev SSH config entry for host %q is ambiguous", alias)
 	}
 	entry := matches[0]
 	user := firstNonEmpty(cfg.NvidiaBrev.User, entry.User, cfg.SSHUser)
 	if strings.TrimSpace(user) == "" {
-		return SSHTarget{}, exit(2, "nvidia-brev SSH config entry %q is missing User", alias)
+		return core.SSHTarget{}, core.Exit(2, "nvidia-brev SSH config entry %q is missing User", alias)
 	}
 	if !validBrevSSHUser(user) {
-		return SSHTarget{}, exit(2, "nvidia-brev SSH config entry %q has invalid User %q", alias, user)
+		return core.SSHTarget{}, core.Exit(2, "nvidia-brev SSH config entry %q has invalid User %q", alias, user)
 	}
 	if strings.TrimSpace(entry.IdentityFile) == "" {
-		return SSHTarget{}, exit(2, "nvidia-brev SSH config entry %q is missing IdentityFile", alias)
+		return core.SSHTarget{}, core.Exit(2, "nvidia-brev SSH config entry %q is missing IdentityFile", alias)
 	}
 	host := strings.TrimSpace(entry.HostName)
 	proxy := strings.TrimSpace(entry.ProxyCommand)
 	if host == "" && proxy == "" {
-		return SSHTarget{}, exit(2, "nvidia-brev SSH config entry %q is missing HostName or ProxyCommand", alias)
+		return core.SSHTarget{}, core.Exit(2, "nvidia-brev SSH config entry %q is missing HostName or ProxyCommand", alias)
 	}
 	if host == "" {
 		host = alias
@@ -175,9 +177,9 @@ func selectBrevSSHTarget(cfg Config, data, alias string) (SSHTarget, error) {
 		port = defaultSSHPort
 	}
 	if _, err := strconv.Atoi(port); err != nil {
-		return SSHTarget{}, exit(2, "nvidia-brev SSH config entry %q has invalid Port %q", alias, port)
+		return core.SSHTarget{}, core.Exit(2, "nvidia-brev SSH config entry %q has invalid Port %q", alias, port)
 	}
-	target := SSHTarget{
+	target := core.SSHTarget{
 		User:           user,
 		Host:           host,
 		Key:            entry.IdentityFile,

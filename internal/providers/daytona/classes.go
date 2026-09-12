@@ -51,12 +51,12 @@ func (Provider) ServerTypeForClass(class string) string {
 
 // Configured snapshots retain precedence over configured classes. Only an
 // actual CLI class request constrains an already selected snapshot.
-func classSnapshotRequested(cfg Config) bool {
+func classSnapshotRequested(cfg core.Config) bool {
 	return core.ClassWasExplicit(cfg) && (core.ClassFlagWasExplicit(cfg) ||
 		core.IsCanonicalProviderClass(cfg.Class) && strings.TrimSpace(cfg.Daytona.Snapshot) == "")
 }
 
-func (p Provider) ServerTypeForConfig(cfg Config) string {
+func (p Provider) ServerTypeForConfig(cfg core.Config) string {
 	if core.ShouldUseCoordinator(cfg, p.Spec()) || !classSnapshotRequested(cfg) {
 		return "snapshot"
 	}
@@ -68,18 +68,18 @@ func (p Provider) ServerTypeForConfig(cfg Config) string {
 
 func (b *daytonaLeaseBackend) ValidateCoordinatorAcquire() error {
 	if core.ClassFlagWasExplicit(b.cfg) {
-		return exit(2, "provider=daytona class selection requires direct mode; the coordinator selects its configured snapshot")
+		return core.Exit(2, "provider=daytona class selection requires direct mode; the coordinator selects its configured snapshot")
 	}
 	return nil
 }
 
-func selectClassSnapshot(ctx context.Context, client daytonaAPI, cfg Config) (*api.SnapshotDto, error) {
+func selectClassSnapshot(ctx context.Context, client daytonaAPI, cfg core.Config) (*api.SnapshotDto, error) {
 	if !classSnapshotRequested(cfg) {
 		return nil, nil
 	}
 	candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg)
 	if !matched {
-		return nil, exit(2, "provider=daytona has no class profile for class=%s target=%s architecture=%s", cfg.Class, cfg.TargetOS, cfg.Architecture)
+		return nil, core.Exit(2, "provider=daytona has no class profile for class=%s target=%s architecture=%s", cfg.Class, cfg.TargetOS, cfg.Architecture)
 	}
 	var shape snapshotShape
 	for _, candidate := range classShapes {
@@ -87,17 +87,17 @@ func selectClassSnapshot(ctx context.Context, client daytonaAPI, cfg Config) (*a
 			shape = candidate
 		}
 	}
-	selected := blank(strings.TrimSpace(cfg.Daytona.Snapshot), shape.name)
+	selected := core.Blank(strings.TrimSpace(cfg.Daytona.Snapshot), shape.name)
 	snapshot, err := client.GetSnapshot(ctx, selected)
 	if err != nil {
 		return nil, daytonaError("resolve class snapshot", err)
 	}
 	if snapshot == nil || snapshot.GetId() == "" || selected != snapshot.GetId() && selected != snapshot.GetName() {
-		return nil, exit(4, "Daytona class snapshot identity does not match %s", selected)
+		return nil, core.Exit(4, "Daytona class snapshot identity does not match %s", selected)
 	}
 	if snapshot.GetState() != api.SNAPSHOTSTATE_ACTIVE || snapshot.GetSandboxClass() != "container" ||
 		snapshot.GetCpu() != shape.cpu || snapshot.GetMem() != shape.memory || snapshot.GetDisk() != shape.disk || snapshot.GetGpu() != 0 {
-		return nil, exit(2, "Daytona snapshot %s must be active container with %g CPU, %g GiB memory, %g GiB disk and no GPU for class=%s", selected, shape.cpu, shape.memory, shape.disk, cfg.Class)
+		return nil, core.Exit(2, "Daytona snapshot %s must be active container with %g CPU, %g GiB memory, %g GiB disk and no GPU for class=%s", selected, shape.cpu, shape.memory, shape.disk, cfg.Class)
 	}
 	return snapshot, nil
 }
@@ -113,7 +113,7 @@ func validateClassSandbox(sandbox *api.Sandbox, snapshot *api.SnapshotDto) error
 		(sandbox.HasSandboxClass() && sandbox.GetSandboxClass() != snapshot.GetSandboxClass()) ||
 		(sandbox.GetSnapshot() != snapshot.GetId() && sandbox.GetSnapshot() != snapshot.GetName()) ||
 		!slices.Contains(snapshot.GetRegionIds(), sandbox.GetTarget()) {
-		return exit(4, "Daytona sandbox %s does not match the selected class snapshot", sandbox.GetId())
+		return core.Exit(4, "Daytona sandbox %s does not match the selected class snapshot", sandbox.GetId())
 	}
 	return nil
 }

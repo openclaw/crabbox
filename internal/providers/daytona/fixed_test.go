@@ -19,7 +19,7 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func newFixedDaytonaFixture(t *testing.T) (*daytonaLifecycleFixture, *daytonaLeaseBackend, AcquireRequest) {
+func newFixedDaytonaFixture(t *testing.T) (*daytonaLifecycleFixture, *daytonaLeaseBackend, core.AcquireRequest) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("uses a POSIX SSH executable fixture")
@@ -45,7 +45,7 @@ func newFixedDaytonaFixture(t *testing.T) (*daytonaLifecycleFixture, *daytonaLea
 		}
 		original.ServeHTTP(w, r)
 	})
-	return f, b, AcquireRequest{Repo: repo, Keep: true, RequestedLeaseID: "cbx_012345abcdef", RequestedSlug: "fixed-project"}
+	return f, b, core.AcquireRequest{Repo: repo, Keep: true, RequestedLeaseID: "cbx_012345abcdef", RequestedSlug: "fixed-project"}
 }
 
 func TestDaytonaFixedReplayAndTerminalOwnership(t *testing.T) {
@@ -56,7 +56,7 @@ func TestDaytonaFixedReplayAndTerminalOwnership(t *testing.T) {
 	}
 	beforeNonce, beforeFingerprint := f.sandbox.Labels["fixed_attempt"], f.sandbox.Labels["fixed_intent_sha256"]
 	idle := 90 * time.Minute
-	touched, err := b.Touch(t.Context(), TouchRequest{Lease: first, State: "ready", IdleTimeoutOverride: &idle})
+	touched, err := b.Touch(t.Context(), core.TouchRequest{Lease: first, State: "ready", IdleTimeoutOverride: &idle})
 	if err != nil || touched.Labels["fixed_attempt"] != beforeNonce || touched.Labels["fixed_intent_sha256"] != beforeFingerprint {
 		t.Fatalf("heartbeat changed fixed ownership labels: %v", err)
 	}
@@ -74,10 +74,10 @@ func TestDaytonaFixedReplayAndTerminalOwnership(t *testing.T) {
 	if strings.Contains(string(data), "synthetic-ssh-token") || strings.Contains(string(data), "credential") {
 		t.Fatal("credential persisted in fixed claim")
 	}
-	if err := b.ReleaseLease(t.Context(), ReleaseLeaseRequest{Lease: second}); err != nil {
+	if err := b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: second}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err != nil {
+	if err := b.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err != nil {
 		t.Fatal(err)
 	}
 	requestsAfterStop := len(f.paths)
@@ -117,7 +117,7 @@ func TestDaytonaFixedPreparedReplayRechecksShape(t *testing.T) {
 			}
 			if cleanupBound {
 				f.deleteError = true
-				if err := b.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err == nil {
+				if err := b.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err == nil {
 					t.Fatal("failed deletion unexpectedly succeeded")
 				}
 			}
@@ -197,7 +197,7 @@ func TestDaytonaFixedInterruptedAcquisitionNeedsPinnedSource(t *testing.T) {
 			if f.sandboxCreates != 1 {
 				t.Fatal("interrupted acquisition submitted another create")
 			}
-			if err := b.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err != nil {
+			if err := b.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err != nil {
 				t.Fatalf("incomplete acquisition could not be cleaned up: %v", err)
 			}
 		})
@@ -232,7 +232,7 @@ func TestDaytonaFixedAPIKeyScopeAdmissionPreservesOrdinaryMode(t *testing.T) {
 					t.Fatalf("authenticated empty organization could not allocate: %v", err)
 				}
 				if scenario == "legacy identity" {
-					if err := b.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err == nil || !strings.Contains(err.Error(), "does not expose organizationId") || f.deletes != 0 {
+					if err := b.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err == nil || !strings.Contains(err.Error(), "does not expose organizationId") || f.deletes != 0 {
 						t.Fatalf("legacy resource admission incorrectly authorized absence: %v", err)
 					}
 				}
@@ -280,14 +280,14 @@ func TestDaytonaFixedPreparedIntentRecoveryBeforeSubmission(t *testing.T) {
 				TargetOS: targetLinux, TTL: b.cfg.TTL, IdleTimeout: b.cfg.IdleTimeout, Now: func() time.Time { return createdAt },
 			}, func(context.Context, *core.LeaseClaim, bool) (core.FixedLeaseBinding, error) {
 				return core.FixedLeaseBinding{ProviderScope: scope, Fingerprint: fingerprint, Slug: req.RequestedSlug}, nil
-			}, func(_ context.Context, _ *core.LeaseClaim, intent *core.FixedCreateIntent, persist func() error) (LeaseTarget, error) {
+			}, func(_ context.Context, _ *core.LeaseClaim, intent *core.FixedCreateIntent, persist func() error) (core.LeaseTarget, error) {
 				if scenario == "submitted attempt" {
 					intent.Attempt = map[string]string{"organization": organization, "nonce": "submitted-but-unconfirmed"}
 					if err := persist(); err != nil {
-						return LeaseTarget{}, err
+						return core.LeaseTarget{}, err
 					}
 				}
-				return LeaseTarget{}, interrupted
+				return core.LeaseTarget{}, interrupted
 			}, t.Context())
 			if !errors.Is(err, interrupted) {
 				t.Fatal(err)
@@ -449,7 +449,7 @@ func TestDaytonaFixedLastSandboxDeletionReconcilesAfterRestart(t *testing.T) {
 	f.hideIdentitySandbox = true
 	f.deletionPending = true
 	if err := interruptDaytonaFixedCleanup(t, f, req.RequestedLeaseID, func(ctx context.Context) error {
-		return b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease})
+		return b.ReleaseLease(ctx, core.ReleaseLeaseRequest{Lease: lease})
 	}); err == nil {
 		t.Fatal("deletion acknowledgment alone retired the claim")
 	}
@@ -464,7 +464,7 @@ func TestDaytonaFixedLastSandboxDeletionReconcilesAfterRestart(t *testing.T) {
 	f.sandbox.SetState(api.SANDBOXSTATE_DESTROYED)
 	b.cfg.Daytona.APIKey = "rotated-synthetic-credential"
 	restarted := &daytonaLeaseBackend{cfg: b.cfg, rt: b.rt}
-	if err := restarted.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err != nil {
+	if err := restarted.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err != nil {
 		t.Fatal(err)
 	}
 	claim, exists, err = core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
@@ -484,7 +484,7 @@ func TestDaytonaFixedCleanupPersistsUUIDBeforeLostDeleteResponse(t *testing.T) {
 			f.hideIdentitySandbox = true
 			f.deleteErrorAfterApply = true
 			f.deletionPending = remainsVisible
-			if err := b.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err == nil {
+			if err := b.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err == nil {
 				t.Fatal("lost deletion response must remain unresolved")
 			}
 			claim, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
@@ -495,10 +495,10 @@ func TestDaytonaFixedCleanupPersistsUUIDBeforeLostDeleteResponse(t *testing.T) {
 			restarted := &daytonaLeaseBackend{cfg: b.cfg, rt: b.rt}
 			if remainsVisible {
 				err = interruptDaytonaFixedCleanup(t, f, req.RequestedLeaseID, func(ctx context.Context) error {
-					return restarted.Stop(ctx, StopRequest{ID: req.RequestedLeaseID})
+					return restarted.Stop(ctx, core.StopRequest{ID: req.RequestedLeaseID})
 				})
 			} else {
-				err = restarted.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID})
+				err = restarted.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID})
 			}
 			claim, exists, readErr := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
 			if err == nil || readErr != nil || !exists || claim.FixedCreateIntent.State == "released" || f.deletes != 1 {
@@ -509,7 +509,7 @@ func TestDaytonaFixedCleanupPersistsUUIDBeforeLostDeleteResponse(t *testing.T) {
 					t.Fatal("exact positive desired-destruction observation was not recorded")
 				}
 				f.sandbox.SetState(api.SANDBOXSTATE_DESTROYED)
-				if err := restarted.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err != nil || f.deletes != 1 {
+				if err := restarted.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err != nil || f.deletes != 1 {
 					t.Fatalf("observed acknowledgment did not reconcile: %v", err)
 				}
 			} else if claim.FixedCreateIntent.Attempt["deletion_acknowledged_id"] != "" {
@@ -528,7 +528,7 @@ func TestDaytonaFixedUncertainDeleteBlocksReuse(t *testing.T) {
 	// A failed DELETE response does not establish whether the provider queued
 	// deletion. The native resource can still report its original ready state.
 	f.deleteError = true
-	if err := b.ReleaseLease(t.Context(), ReleaseLeaseRequest{Lease: lease}); err == nil {
+	if err := b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err == nil {
 		t.Fatal("uncertain deletion unexpectedly completed")
 	}
 	claim, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
@@ -540,14 +540,14 @@ func TestDaytonaFixedUncertainDeleteBlocksReuse(t *testing.T) {
 	if _, err := b.Acquire(t.Context(), req); err == nil {
 		t.Fatal("fixed replay exposed a sandbox after an uncertain DELETE")
 	}
-	if _, err := b.Resolve(t.Context(), ResolveRequest{ID: req.RequestedLeaseID, Repo: req.Repo}); err == nil {
+	if _, err := b.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID, Repo: req.Repo}); err == nil {
 		t.Fatal("execution resolution exposed a sandbox after an uncertain DELETE")
 	}
 	if len(f.paths) != requests || f.sandboxCreates != 1 {
 		t.Fatal("cleanup-only reuse contacted the provider or created another sandbox")
 	}
 	f.deleteError = false
-	if err := b.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err != nil {
+	if err := b.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err != nil {
 		t.Fatalf("cleanup-only claim lost its stop recovery path: %v", err)
 	}
 	claim, exists, err = core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
@@ -573,7 +573,7 @@ func TestDaytonaFixedNativeDeletionRetiresOnlyAcquiredLease(t *testing.T) {
 				f.sandbox.SetName("DESTROYED_" + f.sandbox.GetName())
 				f.hideIdentitySandbox = true
 				if operation == "stop" {
-					err = b.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID})
+					err = b.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID})
 				} else {
 					config := filepath.Join(t.TempDir(), "config.yaml")
 					if err := os.WriteFile(config, []byte(fmt.Sprintf("provider: daytona\nnetwork: public\ndaytona:\n  apiUrl: %q\n", b.cfg.Daytona.APIURL)), 0600); err != nil {
@@ -630,7 +630,7 @@ func TestDaytonaFixedCleanupFailureInclusiveInventory(t *testing.T) {
 					wantDeletes = 1
 					f.deletionPending = true
 					err = interruptDaytonaFixedCleanup(t, f, req.RequestedLeaseID, func(ctx context.Context) error {
-						return b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease})
+						return b.ReleaseLease(ctx, core.ReleaseLeaseRequest{Lease: lease})
 					})
 					if err == nil || f.deletes != 1 {
 						t.Fatalf("missing interrupted deletion: %v", err)
@@ -725,15 +725,15 @@ func TestDaytonaFixedCleanupFailureInclusiveInventory(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(body)
 				})
 				if nativeExpiry {
-					var view statusView
-					view, err = b.Status(t.Context(), StatusRequest{ID: req.RequestedLeaseID})
+					var view core.StatusView
+					view, err = b.Status(t.Context(), core.StatusRequest{ID: req.RequestedLeaseID})
 					if err == nil && (view.State != "released" || view.Ready) {
 						t.Fatalf("expiry observation reported usable lease: %+v", view)
 					}
 				} else if scenario == "stale" {
-					err = interruptDaytonaFixedCleanup(t, f, req.RequestedLeaseID, func(ctx context.Context) error { return b.Stop(ctx, StopRequest{ID: req.RequestedLeaseID}) })
+					err = interruptDaytonaFixedCleanup(t, f, req.RequestedLeaseID, func(ctx context.Context) error { return b.Stop(ctx, core.StopRequest{ID: req.RequestedLeaseID}) })
 				} else {
-					err = b.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID})
+					err = b.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID})
 				}
 				claim, exists, readErr := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
 				wantReleased := scenario == "absent" || scenario == "prefix neighbor" || scenario == "later page absent"
@@ -763,11 +763,11 @@ func TestDaytonaFixedCleanupRequiresDatabaseIdentity(t *testing.T) {
 		}
 		original.ServeHTTP(w, r)
 	})
-	if err := b.ReleaseLease(t.Context(), ReleaseLeaseRequest{Lease: lease}); err == nil || f.deletes != 0 {
+	if err := b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err == nil || f.deletes != 0 {
 		t.Fatalf("unobserved child reached deletion: %v", err)
 	}
 	f.server.Config.Handler = original
-	if err := b.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err != nil || f.deletes != 1 {
+	if err := b.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err != nil || f.deletes != 1 {
 		t.Fatalf("database-visible child failed cleanup: %v", err)
 	}
 }
@@ -778,21 +778,21 @@ func TestDaytonaFixedReleasedStatusIsLocal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ReleaseLease(t.Context(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+	if err := b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatal(err)
 	}
 	requests := len(f.paths)
 	for _, wait := range []bool{false, true} {
-		view, err := b.Status(t.Context(), StatusRequest{ID: req.RequestedLeaseID, Wait: wait})
+		view, err := b.Status(t.Context(), core.StatusRequest{ID: req.RequestedLeaseID, Wait: wait})
 		if err != nil || view.ID != req.RequestedLeaseID || view.State != "released" || view.Ready || view.HasHost || view.ServerID != "" || view.Host != "" {
 			t.Fatalf("terminal status lost identity or advertised access: %+v %v", view, err)
 		}
 	}
-	terminal, err := b.Resolve(t.Context(), ResolveRequest{ID: req.RequestedLeaseID, StatusOnly: true, NoLocalStateMutations: true})
+	terminal, err := b.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID, StatusOnly: true, NoLocalStateMutations: true})
 	if err != nil || terminal.Server.Status != "released" || terminal.Server.CloudID != "" || terminal.SSH.Host != "" {
 		t.Fatalf("terminal status-only resolution failed: %+v %v", terminal, err)
 	}
-	if _, err := b.Resolve(t.Context(), ResolveRequest{ID: req.RequestedLeaseID}); err == nil {
+	if _, err := b.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID}); err == nil {
 		t.Fatal("released lease admitted execution")
 	}
 	config := filepath.Join(t.TempDir(), "config.yaml")
@@ -826,13 +826,13 @@ func TestDaytonaFixedNativeLabelsCannotRecreateLostClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	core.RemoveLeaseClaim(req.RequestedLeaseID)
-	if _, err := b.Touch(t.Context(), TouchRequest{Lease: lease, State: "ready"}); err == nil {
+	if _, err := b.Touch(t.Context(), core.TouchRequest{Lease: lease, State: "ready"}); err == nil {
 		t.Fatal("native labels authorized touch without a durable owner")
 	}
-	if _, err := b.Resolve(t.Context(), ResolveRequest{ID: req.RequestedLeaseID, Repo: req.Repo, Reclaim: true}); err == nil {
+	if _, err := b.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID, Repo: req.Repo, Reclaim: true}); err == nil {
 		t.Fatal("ordinary reclaim recreated a fixed owner from native labels")
 	}
-	if err := b.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err == nil {
+	if err := b.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err == nil {
 		t.Fatal("native labels authorized deletion without a durable owner")
 	}
 	if _, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID); err != nil || exists || f.deletes != 0 || f.activity != 0 {
@@ -852,13 +852,13 @@ func TestDaytonaFixedReclaimPublishesRepositoryBeforeUse(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			nextRepo := Repo{Root: t.TempDir(), Name: "another-project"}
-			use := func(repo Repo, reclaim bool) error {
+			nextRepo := core.Repo{Root: t.TempDir(), Name: "another-project"}
+			use := func(repo core.Repo, reclaim bool) error {
 				if caller == "ssh" {
-					_, err := b.Resolve(t.Context(), ResolveRequest{ID: req.RequestedLeaseID, Repo: repo, Reclaim: reclaim})
+					_, err := b.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID, Repo: repo, Reclaim: reclaim})
 					return err
 				}
-				_, err := b.Run(t.Context(), RunRequest{ID: req.RequestedLeaseID, Repo: repo, Reclaim: reclaim, NoSync: true, Command: []string{"true"}})
+				_, err := b.Run(t.Context(), core.RunRequest{ID: req.RequestedLeaseID, Repo: repo, Reclaim: reclaim, NoSync: true, Command: []string{"true"}})
 				return err
 			}
 			if err := use(nextRepo, false); err == nil {
@@ -913,7 +913,7 @@ func TestDaytonaFixedHeartbeatDoesNotRequireExecutionRepository(t *testing.T) {
 	if string(a) != string(z) {
 		t.Fatal("heartbeat changed fixed intent")
 	}
-	if _, err := b.Resolve(t.Context(), ResolveRequest{ID: req.RequestedLeaseID}); err == nil {
+	if _, err := b.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID}); err == nil {
 		t.Fatal("repository-less execution resolution was admitted")
 	}
 }
@@ -941,10 +941,10 @@ func TestDaytonaFixedScopeAndResourceDriftPreserveClaim(t *testing.T) {
 			}
 			if drift == "unverified deletion" {
 				err = interruptDaytonaFixedCleanup(t, f, req.RequestedLeaseID, func(ctx context.Context) error {
-					return b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease})
+					return b.ReleaseLease(ctx, core.ReleaseLeaseRequest{Lease: lease})
 				})
 			} else {
-				err = b.ReleaseLease(t.Context(), ReleaseLeaseRequest{Lease: lease})
+				err = b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease})
 			}
 			if err == nil {
 				t.Fatal("unverified release succeeded")

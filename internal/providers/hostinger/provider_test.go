@@ -651,7 +651,7 @@ func TestHostingerResolveBootstrapsOnlyWhenPrepareRequested(t *testing.T) {
 
 	oldRunSSHQuiet := hostingerRunSSHQuiet
 	calls := 0
-	hostingerRunSSHQuiet = func(_ context.Context, _ SSHTarget, remote string) error {
+	hostingerRunSSHQuiet = func(_ context.Context, _ core.SSHTarget, remote string) error {
 		calls++
 		if !strings.Contains(remote, "crabbox-ready") {
 			t.Fatalf("bootstrap command missing ready helper: %s", remote)
@@ -692,11 +692,11 @@ func TestHostingerAcquireBootstrapsBeforeSSHReady(t *testing.T) {
 	oldRunSSHQuiet := hostingerRunSSHQuiet
 	oldWaitForSSHReady := hostingerWaitForSSHReady
 	var calls []string
-	hostingerRunSSHQuiet = func(_ context.Context, _ SSHTarget, _ string) error {
+	hostingerRunSSHQuiet = func(_ context.Context, _ core.SSHTarget, _ string) error {
 		calls = append(calls, "bootstrap")
 		return nil
 	}
-	hostingerWaitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+	hostingerWaitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
 		calls = append(calls, "ready")
 		return nil
 	}
@@ -718,7 +718,7 @@ func TestEnsureBootstrapHonorsCancelDuringWait(t *testing.T) {
 	backend := NewLeaseBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
 	oldRunSSHQuiet := hostingerRunSSHQuiet
 	probed := make(chan struct{}, 1)
-	hostingerRunSSHQuiet = func(context.Context, SSHTarget, string) error {
+	hostingerRunSSHQuiet = func(context.Context, core.SSHTarget, string) error {
 		select {
 		case probed <- struct{}{}:
 		default:
@@ -732,7 +732,7 @@ func TestEnsureBootstrapHonorsCancelDuringWait(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		errCh <- backend.ensureBootstrap(ctx, core.Config{}, LeaseTarget{
+		errCh <- backend.ensureBootstrap(ctx, core.Config{}, core.LeaseTarget{
 			LeaseID: "lease-wait",
 			Server:  core.Server{CloudID: "vm-wait"},
 		}, "bootstrap")
@@ -1083,10 +1083,10 @@ func TestAcquireRecoversAfterPendingClaimWriteFailure(t *testing.T) {
 
 	oldClaim := claimLeaseTargetForRepoConfigIfUnchanged
 	claimCalls := 0
-	claimLeaseTargetForRepoConfigIfUnchanged = func(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
+	claimLeaseTargetForRepoConfigIfUnchanged = func(leaseID, slug string, cfg core.Config, server core.Server, target core.SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected core.LeaseClaim, expectedExists bool) (core.LeaseClaim, error) {
 		claimCalls++
 		if claimCalls == 1 {
-			return LeaseClaim{}, errors.New("claim storage unavailable")
+			return core.LeaseClaim{}, errors.New("claim storage unavailable")
 		}
 		return oldClaim(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
 	}
@@ -1128,8 +1128,8 @@ func TestAcquireClaimFailureRetainsRecoverableLeaseKeyMapping(t *testing.T) {
 	backend.skipSSHWait = true
 
 	oldClaim := claimLeaseTargetForRepoConfigIfUnchanged
-	claimLeaseTargetForRepoConfigIfUnchanged = func(string, string, Config, Server, SSHTarget, string, time.Duration, bool, LeaseClaim, bool) (LeaseClaim, error) {
-		return LeaseClaim{}, errors.New("claim storage unavailable")
+	claimLeaseTargetForRepoConfigIfUnchanged = func(string, string, core.Config, core.Server, core.SSHTarget, string, time.Duration, bool, core.LeaseClaim, bool) (core.LeaseClaim, error) {
+		return core.LeaseClaim{}, errors.New("claim storage unavailable")
 	}
 	_, err := backend.Acquire(context.Background(), core.AcquireRequest{
 		Repo:          core.Repo{Root: t.TempDir()},
@@ -1216,8 +1216,8 @@ func TestAcquireRetainsKeyWhenPendingClaimAndRecoveryFail(t *testing.T) {
 	backend.client = api
 
 	oldClaim := claimLeaseTargetForRepoConfigIfUnchanged
-	claimLeaseTargetForRepoConfigIfUnchanged = func(string, string, Config, Server, SSHTarget, string, time.Duration, bool, LeaseClaim, bool) (LeaseClaim, error) {
-		return LeaseClaim{}, errors.New("claim storage unavailable")
+	claimLeaseTargetForRepoConfigIfUnchanged = func(string, string, core.Config, core.Server, core.SSHTarget, string, time.Duration, bool, core.LeaseClaim, bool) (core.LeaseClaim, error) {
+		return core.LeaseClaim{}, errors.New("claim storage unavailable")
 	}
 	t.Cleanup(func() { claimLeaseTargetForRepoConfigIfUnchanged = oldClaim })
 	oldTimeout := hostingerPurchaseRecoveryTimeout
@@ -1261,7 +1261,7 @@ func TestAcquireFailureStopsPaidVPSButRetainsRecoveryState(t *testing.T) {
 
 	oldRunSSHQuiet := hostingerRunSSHQuiet
 	oldSleep := hostingerSleep
-	hostingerRunSSHQuiet = func(context.Context, SSHTarget, string) error {
+	hostingerRunSSHQuiet = func(context.Context, core.SSHTarget, string) error {
 		cancel()
 		return errors.New("ssh unavailable")
 	}
@@ -1316,7 +1316,7 @@ func TestAcquireFailureDoesNotStopPaidVPSWhenClaimDisappears(t *testing.T) {
 
 	oldRunSSHQuiet := hostingerRunSSHQuiet
 	oldSleep := hostingerSleep
-	hostingerRunSSHQuiet = func(context.Context, SSHTarget, string) error {
+	hostingerRunSSHQuiet = func(context.Context, core.SSHTarget, string) error {
 		claims, err := core.ListLeaseClaims()
 		if err != nil {
 			return err
@@ -1359,14 +1359,14 @@ func TestResolveStartsStoppedHostingerVMForSSHCommands(t *testing.T) {
 	oldWaitForSSHReady := hostingerWaitForSSHReady
 	oldRunSSHQuiet := hostingerRunSSHQuiet
 	waitCalls := 0
-	hostingerWaitForSSHReady = func(_ context.Context, target *SSHTarget, _ io.Writer, phase string, _ time.Duration) error {
+	hostingerWaitForSSHReady = func(_ context.Context, target *core.SSHTarget, _ io.Writer, phase string, _ time.Duration) error {
 		waitCalls++
 		if phase != "restart" || target.ReadyCheck != "true" {
 			t.Fatalf("restart wait phase=%q readyCheck=%q", phase, target.ReadyCheck)
 		}
 		return nil
 	}
-	hostingerRunSSHQuiet = func(context.Context, SSHTarget, string) error { return nil }
+	hostingerRunSSHQuiet = func(context.Context, core.SSHTarget, string) error { return nil }
 	t.Cleanup(func() {
 		hostingerWaitForSSHReady = oldWaitForSSHReady
 		hostingerRunSSHQuiet = oldRunSSHQuiet
@@ -1551,9 +1551,9 @@ func TestResolveRestoresStoredSSHConfiguration(t *testing.T) {
 	backend.client = api
 
 	oldRunSSHQuiet := hostingerRunSSHQuiet
-	var bootstrapTarget SSHTarget
+	var bootstrapTarget core.SSHTarget
 	var bootstrapCommand string
-	hostingerRunSSHQuiet = func(_ context.Context, target SSHTarget, command string) error {
+	hostingerRunSSHQuiet = func(_ context.Context, target core.SSHTarget, command string) error {
 		bootstrapTarget = target
 		bootstrapCommand = command
 		return nil
@@ -1650,10 +1650,10 @@ func TestResolveRollsBackRestartWhenPreparationFails(t *testing.T) {
 	oldRunSSHQuiet := hostingerRunSSHQuiet
 	oldWaitForSSHReady := hostingerWaitForSSHReady
 	oldSleep := hostingerSleep
-	hostingerWaitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+	hostingerWaitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
 		return nil
 	}
-	hostingerRunSSHQuiet = func(context.Context, SSHTarget, string) error {
+	hostingerRunSSHQuiet = func(context.Context, core.SSHTarget, string) error {
 		cancel()
 		return errors.New("bootstrap failed")
 	}
@@ -1700,10 +1700,10 @@ func TestResolveDoesNotRollbackRestartAfterClaimChanges(t *testing.T) {
 	oldRunSSHQuiet := hostingerRunSSHQuiet
 	oldWaitForSSHReady := hostingerWaitForSSHReady
 	oldSleep := hostingerSleep
-	hostingerWaitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+	hostingerWaitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
 		return nil
 	}
-	hostingerRunSSHQuiet = func(context.Context, SSHTarget, string) error {
+	hostingerRunSSHQuiet = func(context.Context, core.SSHTarget, string) error {
 		claims, err := core.ListLeaseClaims()
 		if err != nil || len(claims) != 1 {
 			return fmt.Errorf("claims=%#v err=%v", claims, err)
@@ -1773,10 +1773,10 @@ func TestResolvePreservesProvisioningClaimWhenRestartStopFails(t *testing.T) {
 	oldRunSSHQuiet := hostingerRunSSHQuiet
 	oldWaitForSSHReady := hostingerWaitForSSHReady
 	oldSleep := hostingerSleep
-	hostingerWaitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+	hostingerWaitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
 		return nil
 	}
-	hostingerRunSSHQuiet = func(context.Context, SSHTarget, string) error {
+	hostingerRunSSHQuiet = func(context.Context, core.SSHTarget, string) error {
 		cancel()
 		return errors.New("bootstrap failed")
 	}
@@ -1835,10 +1835,10 @@ func TestResolveRestoresOwnershipWithoutStaleRunningState(t *testing.T) {
 	oldRunSSHQuiet := hostingerRunSSHQuiet
 	oldWaitForSSHReady := hostingerWaitForSSHReady
 	oldSleep := hostingerSleep
-	hostingerWaitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+	hostingerWaitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
 		return nil
 	}
-	hostingerRunSSHQuiet = func(context.Context, SSHTarget, string) error {
+	hostingerRunSSHQuiet = func(context.Context, core.SSHTarget, string) error {
 		cancel()
 		return errors.New("bootstrap failed")
 	}
@@ -2211,7 +2211,7 @@ func TestFailedHostingerAdoptionRemainsNonDestructiveUntilSSHValidation(t *testi
 	oldRunSSHQuiet := hostingerRunSSHQuiet
 	oldSleep := hostingerSleep
 	ctx, cancel := context.WithCancel(context.Background())
-	hostingerRunSSHQuiet = func(context.Context, SSHTarget, string) error {
+	hostingerRunSSHQuiet = func(context.Context, core.SSHTarget, string) error {
 		cancel()
 		return errors.New("ssh validation failed")
 	}
@@ -2251,7 +2251,7 @@ func TestFailedHostingerAdoptionRemainsNonDestructiveUntilSSHValidation(t *testi
 		t.Fatalf("failed adoption stopped VPS: %v", api.stopped)
 	}
 
-	hostingerRunSSHQuiet = func(context.Context, SSHTarget, string) error { return nil }
+	hostingerRunSSHQuiet = func(context.Context, core.SSHTarget, string) error { return nil }
 	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{
 		ID:      "crabbox-blue-abcdef123456",
 		Repo:    core.Repo{Root: repoRoot},
@@ -2684,7 +2684,7 @@ func (f *fakeAPI) GetVM(ctx context.Context, id string) (hostingerVM, error) {
 			return vm, nil
 		}
 	}
-	return hostingerVM{}, exit(4, "not found")
+	return hostingerVM{}, core.Exit(4, "not found")
 }
 
 func (f *fakeAPI) PurchaseVM(_ context.Context, input hostingerPurchaseInput) (hostingerVM, error) {
@@ -2711,7 +2711,7 @@ func (f *fakeAPI) SetupVM(_ context.Context, id string, input hostingerSetupInpu
 			return f.vms[i], nil
 		}
 	}
-	return hostingerVM{}, exit(4, "not found")
+	return hostingerVM{}, core.Exit(4, "not found")
 }
 
 func (f *fakeAPI) StartVM(_ context.Context, id string) error {
@@ -2726,7 +2726,7 @@ func (f *fakeAPI) StartVM(_ context.Context, id string) error {
 			return nil
 		}
 	}
-	return exit(4, "not found")
+	return core.Exit(4, "not found")
 }
 
 func (f *fakeAPI) StopVM(_ context.Context, id string) error {

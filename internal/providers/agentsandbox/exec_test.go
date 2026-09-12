@@ -71,7 +71,7 @@ func TestRunLiteralArgumentsSurviveNativeStdinTransport(t *testing.T) {
 				want = "literal:argument"
 				wantCode = 42
 			}
-			_, err = b.runCommand(t.Context(), fake, ready, RunRequest{Command: command, CommandLiteralArgs: literal}, workdir)
+			_, err = b.runCommand(t.Context(), fake, ready, core.RunRequest{Command: command, CommandLiteralArgs: literal}, workdir)
 			if err != nil {
 				t.Fatal(err)
 			}

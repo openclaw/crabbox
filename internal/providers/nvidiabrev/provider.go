@@ -47,10 +47,10 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 		return nil, err
 	}
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
-		return nil, exit(2, "provider=%s supports target=linux only", providerName)
+		return nil, core.Exit(2, "provider=%s supports target=linux only", providerName)
 	}
 	if cfg.Tailscale.Enabled || string(cfg.Network) == "tailscale" {
-		return nil, exit(2, "--tailscale is not supported for provider=%s; NVIDIA Brev uses CLI-managed SSH access", providerName)
+		return nil, core.Exit(2, "--tailscale is not supported for provider=%s; NVIDIA Brev uses CLI-managed SSH access", providerName)
 	}
 	return NewNvidiaBrevBackend(p.Spec(), cfg, rt), nil
 }
@@ -64,14 +64,14 @@ func (Provider) ValidateConfig(cfg core.Config) error {
 	switch releaseAction {
 	case "", "delete", "stop":
 	default:
-		return exit(2, "nvidiaBrev.releaseAction must be delete or stop")
+		return core.Exit(2, "nvidiaBrev.releaseAction must be delete or stop")
 	}
 
 	target := strings.ToLower(strings.TrimSpace(cfg.NvidiaBrev.Target))
 	switch target {
 	case "", "container", "host":
 	default:
-		return exit(2, "nvidiaBrev.target must be container or host")
+		return core.Exit(2, "nvidiaBrev.target must be container or host")
 	}
 	return nil
 }

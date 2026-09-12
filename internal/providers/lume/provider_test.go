@@ -18,21 +18,17 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-type cmdRes = core.LocalCommandResult
-type claim = core.LeaseClaim
 type labels = map[string]string
-type results = map[string]cmdRes
+type results = map[string]core.LocalCommandResult
 
 var bg = context.Background()
 var join = filepath.Join
-
-func base() core.Config { return core.BaseConfig() }
 
 type fake struct {
 	calls     []core.LocalCommandRequest
 	responses results
 	errors    map[string]error
-	hook      func(core.LocalCommandRequest) (cmdRes, error, bool)
+	hook      func(core.LocalCommandRequest) (core.LocalCommandResult, error, bool)
 }
 
 const hostKey = "AAAAC3NzaC1lZDI1NTE5AAAAIOCh4W5YA0Lp2pvT+yWIG/tC7BrQalNUIHSqfjYkJei6"
@@ -72,7 +68,7 @@ func writeLumeKnownHost(t *testing.T, leaseID, name, key string) {
 	must(t, os.WriteFile(target.KnownHostsFile, []byte(lumeHostKeyAlias(name)+" ssh-ed25519 "+key+"\n"), 0o600))
 }
 
-func (r *fake) Run(_ context.Context, req core.LocalCommandRequest) (cmdRes, error) {
+func (r *fake) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
 	if r.hook != nil {
 		if result, err, handled := r.hook(req); handled {
@@ -91,7 +87,7 @@ func (r *fake) Run(_ context.Context, req core.LocalCommandRequest) (cmdRes, err
 			return result, nil
 		}
 	}
-	return cmdRes{}, nil
+	return core.LocalCommandResult{}, nil
 }
 
 func applyTestFlags(t *testing.T, cfg core.Config, args ...string) (core.Config, error) {
@@ -109,7 +105,7 @@ func backendFor(cfg core.Config, runner core.CommandRunner) *backend {
 }
 
 func configFor() core.Config {
-	cfg := base()
+	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	return cfg
 }
@@ -199,18 +195,18 @@ func TestSpecAndAliases(t *testing.T) {
 
 func TestCleanupExpiry(t *testing.T) {
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
-	server := Server{Status: "running", Labels: labels{
+	server := core.Server{Status: "running", Labels: labels{
 		"state":      "ready",
 		"expires_at": core.LeaseLabelTime(now),
 	}}
-	if cleanup, reason := shouldCleanup(server, claim{}, now.Add(time.Second)); !cleanup || !strings.Contains(reason, "expired") {
+	if cleanup, reason := shouldCleanup(server, core.LeaseClaim{}, now.Add(time.Second)); !cleanup || !strings.Contains(reason, "expired") {
 		t.Fatalf("shouldCleanup=%v, %q; want expired ready lease cleanup", cleanup, reason)
 	}
-	if cleanup, reason := shouldCleanup(server, claim{}, now.Add(-time.Second)); cleanup {
+	if cleanup, reason := shouldCleanup(server, core.LeaseClaim{}, now.Add(-time.Second)); cleanup {
 		t.Fatalf("shouldCleanup=%v, %q; want unexpired ready lease retained", cleanup, reason)
 	}
 	server.Labels["expires_at"] = core.LeaseLabelTime(now.Add(time.Hour))
-	claim := claim{LastUsedAt: now.Add(-14 * time.Hour).Format(time.RFC3339), IdleTimeoutSeconds: 3600}
+	claim := core.LeaseClaim{LastUsedAt: now.Add(-14 * time.Hour).Format(time.RFC3339), IdleTimeoutSeconds: 3600}
 	if cleanup, reason := shouldCleanup(server, claim, now); !cleanup || reason != "claim expired" {
 		t.Fatalf("shouldCleanup=%v, %q; want stale claim fallback cleanup", cleanup, reason)
 	}
@@ -223,15 +219,15 @@ func TestCleanupExpiry(t *testing.T) {
 
 func TestCleanupKeepsStartup(t *testing.T) {
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
-	server := Server{Status: "starting", Labels: labels{"state": "starting", "expires_at": core.LeaseLabelTime(now.Add(time.Hour))}}
-	if cleanup, reason := shouldCleanup(server, claim{}, now); cleanup {
+	server := core.Server{Status: "starting", Labels: labels{"state": "starting", "expires_at": core.LeaseLabelTime(now.Add(time.Hour))}}
+	if cleanup, reason := shouldCleanup(server, core.LeaseClaim{}, now); cleanup {
 		t.Fatalf("active startup cleanup=%v reason=%q", cleanup, reason)
 	}
-	if cleanup, reason := shouldCleanup(server, claim{}, now.Add(2*time.Hour)); !cleanup || !strings.Contains(reason, "expired") {
+	if cleanup, reason := shouldCleanup(server, core.LeaseClaim{}, now.Add(2*time.Hour)); !cleanup || !strings.Contains(reason, "expired") {
 		t.Fatalf("expired startup cleanup=%v reason=%q", cleanup, reason)
 	}
 	server.Status = "provisioning (stale)"
-	if cleanup, reason := shouldCleanup(server, claim{}, now); !cleanup || reason != "provisioning stale" {
+	if cleanup, reason := shouldCleanup(server, core.LeaseClaim{}, now); !cleanup || reason != "provisioning stale" {
 		t.Fatalf("stale startup cleanup=%v reason=%q", cleanup, reason)
 	}
 }
@@ -244,7 +240,7 @@ func TestDefaults(t *testing.T) {
 	if got.TargetOS != core.TargetMacOS || got.Lume.User != "lume" || got.Lume.Base != "crabbox-macos-golden" {
 		t.Fatalf("unexpected defaults: %#v", got.Lume)
 	}
-	cfg = base()
+	cfg = core.BaseConfig()
 	cfg.Lume.User = "builder"
 	cfg.Lume.WorkRoot = "/Users/lume/crabbox"
 	cfg.WorkRoot = "/Users/lume/crabbox"
@@ -255,7 +251,7 @@ func TestDefaults(t *testing.T) {
 }
 
 func TestRejectsNonMacOS(t *testing.T) {
-	cfg := base()
+	cfg := core.BaseConfig()
 	cfg.Provider, cfg.TargetOS = providerName, core.TargetLinux
 	core.MarkTargetExplicit(&cfg)
 	cfg, err := applyTestFlags(t, cfg)
@@ -297,7 +293,7 @@ func TestDoctorStoppedBase(t *testing.T) {
 		t.Fatalf("base VM must not be counted as a lease: %q", result.Message)
 	}
 
-	runner.responses["ls"] = cmdRes{Stdout: `[{"name":"crabbox-macos-golden","os":"macOS","status":"running","locationName":"home"}]`}
+	runner.responses["ls"] = core.LocalCommandResult{Stdout: `[{"name":"crabbox-macos-golden","os":"macOS","status":"running","locationName":"home"}]`}
 	_, err = b.Doctor(bg, core.DoctorRequest{})
 	want(t, err, "must be stopped")
 }
@@ -357,35 +353,35 @@ func TestAmbiguousCloneRetainsVM(t *testing.T) {
 	acquireCtx, cancelAcquire := context.WithCancel(bg)
 	defer cancelAcquire()
 	runner := &fake{}
-	runner.hook = func(req core.LocalCommandRequest) (cmdRes, error, bool) {
+	runner.hook = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
 		if len(req.Args) == 0 {
-			return cmdRes{}, nil, false
+			return core.LocalCommandResult{}, nil, false
 		}
 		switch req.Args[0] {
 		case "ls":
 			if vmExists {
-				return cmdRes{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped"}]`, name)}, nil, true
+				return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped"}]`, name)}, nil, true
 			}
-			return cmdRes{Stdout: `[]`}, nil, true
+			return core.LocalCommandResult{Stdout: `[]`}, nil, true
 		case "clone":
 			name = req.Args[2]
 			vmExists = true
 			putVM(t, home, name, "YW1iaWd1b3VzLWNsb25l")
 			cancelAcquire()
-			return cmdRes{ExitCode: 1, Stderr: "partial clone failure"}, errors.New("exit status 1"), true
+			return core.LocalCommandResult{ExitCode: 1, Stderr: "partial clone failure"}, errors.New("exit status 1"), true
 		case "stop":
-			return cmdRes{}, nil, true
+			return core.LocalCommandResult{}, nil, true
 		case "get":
 			if vmExists {
-				return cmdRes{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped"}]`, name)}, nil, true
+				return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped"}]`, name)}, nil, true
 			}
-			return cmdRes{ExitCode: 1, Stderr: "Error: Virtual machine not found: " + name}, errors.New("exit status 1"), true
+			return core.LocalCommandResult{ExitCode: 1, Stderr: "Error: Virtual machine not found: " + name}, errors.New("exit status 1"), true
 		case "delete":
 			deleteCalled = true
 			vmExists = false
-			return cmdRes{}, nil, true
+			return core.LocalCommandResult{}, nil, true
 		default:
-			return cmdRes{}, nil, false
+			return core.LocalCommandResult{}, nil, false
 		}
 	}
 	cfg := configFor()
@@ -422,7 +418,7 @@ func TestAmbiguousCloneRetainsVM(t *testing.T) {
 	if recovery.Labels["recovery"] != "clone-ambiguous" || recovery.Labels["state"] != "error" || recovery.Labels["instance"] != name || recovery.Labels["storage_id"] == "" || recovery.CloudImmutableID == "" {
 		t.Fatalf("recovery claim=%#v", recovery)
 	}
-	keyPath, keyErr := testboxKeyPath(leaseID)
+	keyPath, keyErr := core.TestboxKeyPath(leaseID)
 	if keyErr != nil {
 		t.Fatal(keyErr)
 	}
@@ -449,21 +445,21 @@ func TestAcquireControllerAcceptancePrecedesNormalClaimPublication(t *testing.T)
 	must(t, os.MkdirAll(storage, 0o700))
 	const leaseID = "cbx_controller_acceptance"
 	name := ""
-	runner := &fake{hook: func(req core.LocalCommandRequest) (cmdRes, error, bool) {
+	runner := &fake{hook: func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
 		if len(req.Args) == 0 {
-			return cmdRes{}, nil, false
+			return core.LocalCommandResult{}, nil, false
 		}
 		switch req.Args[0] {
 		case "ls":
-			return cmdRes{Stdout: `[]`}, nil, true
+			return core.LocalCommandResult{Stdout: `[]`}, nil, true
 		case "clone":
 			name = req.Args[2]
 			putVMAt(t, storage, name, "Y29udHJvbGxlci1hY2NlcHRhbmNl")
-			return cmdRes{}, nil, true
+			return core.LocalCommandResult{}, nil, true
 		case "get":
-			return cmdRes{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped","locationName":%q}]`, name, storage)}, nil, true
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped","locationName":%q}]`, name, storage)}, nil, true
 		default:
-			return cmdRes{}, nil, false
+			return core.LocalCommandResult{}, nil, false
 		}
 	}}
 	accepted := false
@@ -503,20 +499,20 @@ func TestAmbiguousCloneRetainsPendingClaimWhenStorageChanges(t *testing.T) {
 	storage := join(home, ".lume")
 	must(t, os.MkdirAll(storage, 0o700))
 	const leaseID = "cbx_clone_storage_swap"
-	runner := &fake{hook: func(req core.LocalCommandRequest) (cmdRes, error, bool) {
+	runner := &fake{hook: func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
 		if len(req.Args) == 0 {
-			return cmdRes{}, nil, false
+			return core.LocalCommandResult{}, nil, false
 		}
 		switch req.Args[0] {
 		case "ls":
-			return cmdRes{Stdout: `[]`}, nil, true
+			return core.LocalCommandResult{Stdout: `[]`}, nil, true
 		case "clone":
 			must(t, os.WriteFile(join(storage, lumeStorageIdentityFile), []byte(strings.Repeat("b", 64)+"\n"), 0o600))
-			return cmdRes{ExitCode: 1, Stderr: "storage switched"}, errors.New("exit status 1"), true
+			return core.LocalCommandResult{ExitCode: 1, Stderr: "storage switched"}, errors.New("exit status 1"), true
 		case "get":
-			return cmdRes{ExitCode: 1, Stderr: "Error: Virtual machine not found: crabbox-clone-storage-swap"}, errors.New("exit status 1"), true
+			return core.LocalCommandResult{ExitCode: 1, Stderr: "Error: Virtual machine not found: crabbox-clone-storage-swap"}, errors.New("exit status 1"), true
 		default:
-			return cmdRes{}, nil, false
+			return core.LocalCommandResult{}, nil, false
 		}
 	}}
 	_, err := backendFor(configFor(), runner).Acquire(bg, core.AcquireRequest{
@@ -529,7 +525,7 @@ func TestAmbiguousCloneRetainsPendingClaimWhenStorageChanges(t *testing.T) {
 	if claimErr != nil || !ok || recovery.Labels["recovery"] != "clone-pending" || recovery.Labels["storage_id"] == strings.Repeat("b", 64) {
 		t.Fatalf("pending recovery claim=%#v ok=%v err=%v", recovery, ok, claimErr)
 	}
-	keyPath, keyErr := testboxKeyPath(leaseID)
+	keyPath, keyErr := core.TestboxKeyPath(leaseID)
 	if keyErr != nil {
 		t.Fatal(keyErr)
 	}
@@ -545,19 +541,19 @@ func TestAmbiguousCloneRetainsPendingClaimUntilIdentityAvailable(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", join(home, ".local", "state"))
 	must(t, os.MkdirAll(join(home, ".lume"), 0o700))
 	const leaseID = "cbx_clone_identity_pending"
-	runner := &fake{hook: func(req core.LocalCommandRequest) (cmdRes, error, bool) {
+	runner := &fake{hook: func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
 		if len(req.Args) == 0 {
-			return cmdRes{}, nil, false
+			return core.LocalCommandResult{}, nil, false
 		}
 		switch req.Args[0] {
 		case "ls":
-			return cmdRes{Stdout: `[]`}, nil, true
+			return core.LocalCommandResult{Stdout: `[]`}, nil, true
 		case "clone":
-			return cmdRes{ExitCode: 1, Stderr: "partial clone failure"}, errors.New("exit status 1"), true
+			return core.LocalCommandResult{ExitCode: 1, Stderr: "partial clone failure"}, errors.New("exit status 1"), true
 		case "get":
-			return cmdRes{ExitCode: 1, Stderr: "Error: Virtual machine not found"}, errors.New("exit status 1"), true
+			return core.LocalCommandResult{ExitCode: 1, Stderr: "Error: Virtual machine not found"}, errors.New("exit status 1"), true
 		default:
-			return cmdRes{}, nil, false
+			return core.LocalCommandResult{}, nil, false
 		}
 	}}
 	_, err := backendFor(configFor(), runner).Acquire(bg, core.AcquireRequest{
@@ -570,7 +566,7 @@ func TestAmbiguousCloneRetainsPendingClaimUntilIdentityAvailable(t *testing.T) {
 	if claimErr != nil || !ok || recovery.Labels["recovery"] != "clone-pending" || recovery.CloudImmutableID != "" {
 		t.Fatalf("pending recovery claim=%#v ok=%v err=%v", recovery, ok, claimErr)
 	}
-	keyPath, keyErr := testboxKeyPath(leaseID)
+	keyPath, keyErr := core.TestboxKeyPath(leaseID)
 	if keyErr != nil {
 		t.Fatal(keyErr)
 	}
@@ -644,7 +640,7 @@ func TestStorageExactGet(t *testing.T) {
 }
 
 func TestStorageMustExist(t *testing.T) {
-	cfg := base()
+	cfg := core.BaseConfig()
 	cfg.Lume.Storage = join(t.TempDir(), "unmounted")
 	runner := &fake{}
 	b := backendFor(cfg, runner)
@@ -703,7 +699,7 @@ func TestCleanupRetainsClaimWhenStorageMountVanishes(t *testing.T) {
 	putVMAt(t, storage, name, "bW91bnRlZC12bQ==")
 	storageID := strings.Repeat("a", 64)
 	must(t, os.WriteFile(join(storage, ".crabbox-lume-storage-id"), []byte(storageID+"\n"), 0o600))
-	cfg := base()
+	cfg := core.BaseConfig()
 	cfg.Lume.Storage = storage
 	immutableID, err := lumeVMImmutableID(cfg, lumeVM{Name: name, LocationName: storage})
 	must(t, err)
@@ -711,19 +707,19 @@ func TestCleanupRetainsClaimWhenStorageMountVanishes(t *testing.T) {
 		"instance": name, "storage": storage, "storage_exact": "true", "storage_id": storageID, "state": "ready",
 	}}
 	must(t, core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "mount-vanished", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, server, core.SSHTarget{}))
-	keyPath, _, err := ensureTestboxKeyForConfig(cfg, leaseID)
+	keyPath, _, err := core.EnsureTestboxKeyForConfig(cfg, leaseID)
 	must(t, err)
 
 	backing := storage + ".backing"
 	must(t, os.Rename(storage, backing))
 	must(t, os.Mkdir(storage, 0o700))
-	runner := &fake{hook: func(req core.LocalCommandRequest) (cmdRes, error, bool) {
+	runner := &fake{hook: func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
 		if len(req.Args) > 0 && req.Args[0] == "get" {
-			return cmdRes{ExitCode: 1, Stderr: "Error: Virtual machine not found: " + name}, errors.New("exit status 1"), true
+			return core.LocalCommandResult{ExitCode: 1, Stderr: "Error: Virtual machine not found: " + name}, errors.New("exit status 1"), true
 		}
-		return cmdRes{}, nil, false
+		return core.LocalCommandResult{}, nil, false
 	}}
-	err = backendFor(base(), runner).Cleanup(bg, core.CleanupRequest{})
+	err = backendFor(core.BaseConfig(), runner).Cleanup(bg, core.CleanupRequest{})
 	want(t, err, "storage identity")
 	if current, ok, claimErr := resolveLeaseClaimForProvider(leaseID); claimErr != nil || !ok || current.CloudImmutableID != immutableID {
 		t.Fatalf("claim after vanished mount=%#v ok=%v err=%v", current, ok, claimErr)
@@ -754,14 +750,14 @@ func TestCleanupBindsPendingCloneIdentityBeforeDelete(t *testing.T) {
 		"state": "provisioning", "recovery": "clone-pending", "run_owner_expected": "false",
 	}}
 	must(t, core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "pending-clone-vm", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, server, core.SSHTarget{}))
-	cfg := base()
+	cfg := core.BaseConfig()
 	cfg.Lume.Storage = storage
-	keyPath, _, err := ensureTestboxKeyForConfig(cfg, leaseID)
+	keyPath, _, err := core.EnsureTestboxKeyForConfig(cfg, leaseID)
 	must(t, err)
 	runner := &fake{responses: results{
 		"get": {Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped","locationName":%q}]`, name, storage)},
 	}}
-	must(t, backendFor(base(), runner).Cleanup(bg, core.CleanupRequest{}))
+	must(t, backendFor(core.BaseConfig(), runner).Cleanup(bg, core.CleanupRequest{}))
 	if _, statErr := os.Stat(join(storage, name)); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("pending clone VM remains after identity-bound cleanup: %v", statErr)
 	}
@@ -788,22 +784,22 @@ func TestCleanupRetainsPendingCloneWhenStorageChangesDuringIdentityBind(t *testi
 		"state": "provisioning", "recovery": "clone-pending", "run_owner_expected": "false",
 	}}
 	must(t, core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "pending-clone-swap", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, server, core.SSHTarget{}))
-	cfg := base()
+	cfg := core.BaseConfig()
 	cfg.Lume.Storage = storage
-	keyPath, _, err := ensureTestboxKeyForConfig(cfg, leaseID)
+	keyPath, _, err := core.EnsureTestboxKeyForConfig(cfg, leaseID)
 	must(t, err)
 	getCalls := 0
-	runner := &fake{hook: func(req core.LocalCommandRequest) (cmdRes, error, bool) {
+	runner := &fake{hook: func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
 		if len(req.Args) == 0 || req.Args[0] != "get" {
-			return cmdRes{}, nil, false
+			return core.LocalCommandResult{}, nil, false
 		}
 		getCalls++
 		if getCalls == 2 {
 			must(t, os.WriteFile(join(storage, lumeStorageIdentityFile), []byte(strings.Repeat("b", 64)+"\n"), 0o600))
 		}
-		return cmdRes{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped","locationName":%q}]`, name, storage)}, nil, true
+		return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped","locationName":%q}]`, name, storage)}, nil, true
 	}}
-	err = backendFor(base(), runner).Cleanup(bg, core.CleanupRequest{})
+	err = backendFor(core.BaseConfig(), runner).Cleanup(bg, core.CleanupRequest{})
 	want(t, err, "storage identity changed")
 	if current, ok, claimErr := resolveLeaseClaimForProvider(leaseID); claimErr != nil || !ok || current.Labels["recovery"] != "clone-pending" || current.CloudImmutableID != "" {
 		t.Fatalf("pending claim after storage swap=%#v ok=%v err=%v", current, ok, claimErr)
@@ -840,17 +836,17 @@ func TestCleanupRetainsMissingPendingCloneRegardlessOfAge(t *testing.T) {
 	if cleanup, reason := shouldCleanup(server, stored, time.Now().UTC()); !cleanup || reason != "clone pending stale" {
 		t.Fatalf("old present pending clone cleanup=%v reason=%q", cleanup, reason)
 	}
-	cfg := base()
+	cfg := core.BaseConfig()
 	cfg.Lume.Storage = storage
-	keyPath, _, err := ensureTestboxKeyForConfig(cfg, leaseID)
+	keyPath, _, err := core.EnsureTestboxKeyForConfig(cfg, leaseID)
 	must(t, err)
-	runner := &fake{hook: func(req core.LocalCommandRequest) (cmdRes, error, bool) {
+	runner := &fake{hook: func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
 		if len(req.Args) > 0 && req.Args[0] == "get" {
-			return cmdRes{ExitCode: 1, Stderr: "Error: Virtual machine not found: " + name}, errors.New("exit status 1"), true
+			return core.LocalCommandResult{ExitCode: 1, Stderr: "Error: Virtual machine not found: " + name}, errors.New("exit status 1"), true
 		}
-		return cmdRes{}, nil, false
+		return core.LocalCommandResult{}, nil, false
 	}}
-	must(t, backendFor(base(), runner).Cleanup(bg, core.CleanupRequest{}))
+	must(t, backendFor(core.BaseConfig(), runner).Cleanup(bg, core.CleanupRequest{}))
 	if current, ok, claimErr := resolveLeaseClaimForProvider(leaseID); claimErr != nil || !ok || current.Labels["recovery"] != "clone-pending" {
 		t.Fatalf("fresh pending claim=%#v ok=%v err=%v", current, ok, claimErr)
 	}
@@ -869,7 +865,7 @@ func TestCleanupRetainsClaimWhenStorageChangesAfterMissingObservation(t *testing
 	putVMAt(t, storage, name, "bGF0ZS1tb3VudC1jaGFuZ2U=")
 	storageID := strings.Repeat("a", 64)
 	must(t, os.WriteFile(join(storage, lumeStorageIdentityFile), []byte(storageID+"\n"), 0o600))
-	cfg := base()
+	cfg := core.BaseConfig()
 	cfg.Lume.Storage = storage
 	immutableID, err := lumeVMImmutableID(cfg, lumeVM{Name: name, LocationName: storage})
 	must(t, err)
@@ -877,21 +873,21 @@ func TestCleanupRetainsClaimWhenStorageChangesAfterMissingObservation(t *testing
 		"instance": name, "storage": storage, "storage_exact": "true", "storage_id": storageID, "state": "stopped",
 	}}
 	must(t, core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "mount-changed-late", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, server, core.SSHTarget{}))
-	keyPath, _, err := ensureTestboxKeyForConfig(cfg, leaseID)
+	keyPath, _, err := core.EnsureTestboxKeyForConfig(cfg, leaseID)
 	must(t, err)
 	getCalls := 0
-	runner := &fake{hook: func(req core.LocalCommandRequest) (cmdRes, error, bool) {
+	runner := &fake{hook: func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
 		if len(req.Args) == 0 || req.Args[0] != "get" {
-			return cmdRes{}, nil, false
+			return core.LocalCommandResult{}, nil, false
 		}
 		getCalls++
 		if getCalls < 3 {
-			return cmdRes{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped","locationName":%q}]`, name, storage)}, nil, true
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped","locationName":%q}]`, name, storage)}, nil, true
 		}
 		must(t, os.WriteFile(join(storage, lumeStorageIdentityFile), []byte(strings.Repeat("b", 64)+"\n"), 0o600))
-		return cmdRes{ExitCode: 1, Stderr: "Error: Virtual machine not found: " + name}, errors.New("exit status 1"), true
+		return core.LocalCommandResult{ExitCode: 1, Stderr: "Error: Virtual machine not found: " + name}, errors.New("exit status 1"), true
 	}}
-	err = backendFor(base(), runner).Cleanup(bg, core.CleanupRequest{})
+	err = backendFor(core.BaseConfig(), runner).Cleanup(bg, core.CleanupRequest{})
 	want(t, err, "storage identity changed")
 	if current, ok, claimErr := resolveLeaseClaimForProvider(leaseID); claimErr != nil || !ok || current.CloudImmutableID != immutableID {
 		t.Fatalf("claim after late storage change=%#v ok=%v err=%v", current, ok, claimErr)
@@ -909,7 +905,7 @@ func TestDeleteVMRevalidatesStorageIdentityImmediatelyBeforeDelete(t *testing.T)
 	putVMAt(t, storage, name, "ZGVsZXRlLXN0b3JhZ2Utc3dhcA==")
 	storageID := strings.Repeat("a", 64)
 	must(t, os.WriteFile(join(storage, lumeStorageIdentityFile), []byte(storageID+"\n"), 0o600))
-	cfg := base()
+	cfg := core.BaseConfig()
 	cfg.Lume.Storage = storage
 	immutableID, err := lumeVMImmutableID(cfg, lumeVM{Name: name, LocationName: storage})
 	must(t, err)
@@ -917,7 +913,7 @@ func TestDeleteVMRevalidatesStorageIdentityImmediatelyBeforeDelete(t *testing.T)
 		"instance": name, "storage": storage, "storage_exact": "true", "storage_id": storageID,
 	}}
 	must(t, os.WriteFile(join(storage, lumeStorageIdentityFile), []byte(strings.Repeat("b", 64)+"\n"), 0o600))
-	err = backendFor(base(), &fake{}).deleteVM(cfg, name, claim, lumeRunOwner{})
+	err = backendFor(core.BaseConfig(), &fake{}).deleteVM(cfg, name, claim, lumeRunOwner{})
 	want(t, err, "storage identity changed")
 	if _, statErr := os.Stat(join(storage, name, "config.json")); statErr != nil {
 		t.Fatalf("VM deleted from unconfirmed storage: %v", statErr)
@@ -936,7 +932,7 @@ func TestListUsesClaimStorage(t *testing.T) {
 		"ls": {Stdout: `[]`},
 		"get\x00" + name + "\x00--format\x00json\x00--storage\x00" + storage: {Stdout: `[{"name":"crabbox-prior-storage","status":"running","ipAddress":"192.0.2.12"}]`},
 	}}
-	views, err := backendFor(base(), runner).List(bg, core.ListRequest{})
+	views, err := backendFor(core.BaseConfig(), runner).List(bg, core.ListRequest{})
 	must(t, err)
 	if len(views) != 1 || views[0].CloudID != name || views[0].Status != "ready" {
 		t.Fatalf("views=%#v", views)
@@ -951,18 +947,18 @@ func TestLumeNotFoundIsSpecific(t *testing.T) {
 		t.Fatal("missing CLI was classified as a missing VM")
 	}
 	runner := &fake{responses: results{"ls": {Stdout: `[]`}}, errors: map[string]error{"get\x00worker\x00--format\x00json": errors.New("transient get failure")}}
-	b := newBackend((Provider{}).Spec(), base(), core.Runtime{Exec: runner}).(*backend)
+	b := newBackend((Provider{}).Spec(), core.BaseConfig(), core.Runtime{Exec: runner}).(*backend)
 	if _, _, err := b.observeVMState(bg, b.configForRun(), "worker"); err == nil {
 		t.Fatal("observe converted transient get failure to missing")
 	}
-	claim := claim{LeaseID: "cbx_transient", Labels: labels{"instance": "worker"}}
+	claim := core.LeaseClaim{LeaseID: "cbx_transient", Labels: labels{"instance": "worker"}}
 	if _, _, err := b.resolveClaimedInstance(bg, claim); err == nil {
 		t.Fatal("resolve converted transient get failure to missing")
 	}
 }
 
 func TestRejectsUnresolvedOwner(t *testing.T) {
-	claim := claim{LeaseID: "cbx_pending", Labels: labels{
+	claim := core.LeaseClaim{LeaseID: "cbx_pending", Labels: labels{
 		"run_owner_expected": "true",
 		"run_owner_pending":  "true",
 	}}
@@ -983,7 +979,7 @@ func TestRecoversPendingOwner(t *testing.T) {
 	must(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(handoff.Dir) })
 	must(t, os.WriteFile(handoff.OwnerPath, []byte("99999999\n"), 0o600))
-	claim := claim{LeaseID: "cbx_stale_pending", Labels: labels{
+	claim := core.LeaseClaim{LeaseID: "cbx_stale_pending", Labels: labels{
 		"run_owner_expected": "true",
 		"run_owner_pending":  "true",
 		"run_launch_token":   token,
@@ -995,12 +991,12 @@ func TestRecoversPendingOwner(t *testing.T) {
 }
 
 func TestClaimPinsLifecycle(t *testing.T) {
-	cfg := base()
+	cfg := core.BaseConfig()
 	cfg.Lume.Base = "current-base"
 	cfg.Lume.Storage = "current-storage"
 	cfg.Lume.User = "current-user"
 	cfg.Lume.WorkRoot = "/Users/current-user/work"
-	claim := claim{Labels: labels{
+	claim := core.LeaseClaim{Labels: labels{
 		"base":      "lease-base",
 		"storage":   "lease-storage",
 		"ssh_user":  "lease-user",
@@ -1014,14 +1010,14 @@ func TestClaimPinsLifecycle(t *testing.T) {
 
 func TestClaimConfigPinsStorage(t *testing.T) {
 	for _, tc := range []struct{ label, exact, want string }{{"home", "", ""}, {"home", "true", "home"}, {"Home", "", "Home"}, {"unknown", "", ""}} {
-		cfg := base()
+		cfg := core.BaseConfig()
 		cfg.Lume.Storage = "current-storage"
-		claim := claim{Labels: labels{"storage": tc.label, "storage_exact": tc.exact}}
+		claim := core.LeaseClaim{Labels: labels{"storage": tc.label, "storage_exact": tc.exact}}
 		if got := configForClaim(cfg, claim).Lume.Storage; got != tc.want {
 			t.Fatalf("storage label %q exact=%q resolved to %q, want %q", tc.label, tc.exact, got, tc.want)
 		}
 	}
-	labels := (&backend{}).serverFromInstance(lumeVM{LocationName: "home"}, claim{}, base()).Labels
+	labels := (&backend{}).serverFromInstance(lumeVM{LocationName: "home"}, core.LeaseClaim{}, core.BaseConfig()).Labels
 	if labels["storage"] != "home" || labels["storage_exact"] != "true" {
 		t.Fatal(labels)
 	}
@@ -1075,29 +1071,29 @@ func TestReleaseClaim(t *testing.T) {
 		return fmt.Sprintf(`[{"name":"crabbox-release-1234","os":"macOS","status":%q,"locationName":"home"}]`, vmState)
 	}
 	runner := &fake{}
-	runner.hook = func(req core.LocalCommandRequest) (cmdRes, error, bool) {
+	runner.hook = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
 		if len(req.Args) == 0 {
-			return cmdRes{}, nil, false
+			return core.LocalCommandResult{}, nil, false
 		}
 		switch req.Args[0] {
 		case "ls":
 			if vmExists {
-				return cmdRes{Stdout: vmJSON()}, nil, true
+				return core.LocalCommandResult{Stdout: vmJSON()}, nil, true
 			}
-			return cmdRes{Stdout: `[]`}, nil, true
+			return core.LocalCommandResult{Stdout: `[]`}, nil, true
 		case "get":
 			if vmExists {
-				return cmdRes{Stdout: vmJSON()}, nil, true
+				return core.LocalCommandResult{Stdout: vmJSON()}, nil, true
 			}
-			return cmdRes{ExitCode: 1, Stderr: "Error: Virtual machine not found: crabbox-release-1234"}, errors.New("exit status 1"), true
+			return core.LocalCommandResult{ExitCode: 1, Stderr: "Error: Virtual machine not found: crabbox-release-1234"}, errors.New("exit status 1"), true
 		case "stop":
 			vmState = "stopped"
-			return cmdRes{}, nil, true
+			return core.LocalCommandResult{}, nil, true
 		case "delete":
 			vmExists = false
-			return cmdRes{}, nil, true
+			return core.LocalCommandResult{}, nil, true
 		default:
-			return cmdRes{}, nil, false
+			return core.LocalCommandResult{}, nil, false
 		}
 	}
 	cfg := configFor()
@@ -1150,7 +1146,7 @@ func TestPrepareLeaseUsesKnownHosts(t *testing.T) {
 	cfg := configFor()
 	leaseID := "cbx_00000000-0000-0000-0000-000000000001"
 	writeLumeKnownHost(t, leaseID, "worker-1", hostKey)
-	claim := claim{LeaseID: leaseID, Labels: labels{"instance": "worker-1", "state": "ready"}}
+	claim := core.LeaseClaim{LeaseID: leaseID, Labels: labels{"instance": "worker-1", "state": "ready"}}
 	b := backendFor(cfg, &fake{})
 	lease, err := b.prepareLease(bg, b.configForRun(), lumeVM{Name: "worker-1", Status: "running", IPAddress: "192.0.2.10"}, claim, false)
 	must(t, err)
@@ -1196,7 +1192,7 @@ func TestImmutableID(t *testing.T) {
 	t.Setenv("HOME", home)
 	const name = "worker-identity"
 	putVM(t, home, name, "bHVtZS1tYWNoaW5lLW9uZQ==")
-	cfg := base()
+	cfg := core.BaseConfig()
 	first, err := lumeVMImmutableID(cfg, lumeVM{Name: name, LocationName: "home"})
 	must(t, err)
 	putVM(t, home, name, "bHVtZS1tYWNoaW5lLXR3bw==")
@@ -1214,7 +1210,7 @@ func TestImmutableIDStorage(t *testing.T) {
 	writeLumeSettings(t, home, fmt.Sprintf("defaultLocationName: fast\nvmLocations:\n  - name: fast\n    path: %q\n", storageRoot))
 	const name = "worker-fast"
 	putVMAt(t, storageRoot, name, "bHVtZS1mYXN0")
-	if _, err := lumeVMImmutableID(base(), lumeVM{Name: name, LocationName: "fast"}); err != nil {
+	if _, err := lumeVMImmutableID(core.BaseConfig(), lumeVM{Name: name, LocationName: "fast"}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1224,7 +1220,7 @@ func TestImmutableIDHome(t *testing.T) {
 	t.Setenv("HOME", home)
 	writeLumeSettings(t, home, "telemetryEnabled: false\n")
 	putVM(t, home, "worker-home-default", "bHVtZS1ob21lLWRlZmF1bHQ=")
-	if _, err := lumeVMImmutableID(base(), lumeVM{Name: "worker-home-default", LocationName: "home"}); err != nil {
+	if _, err := lumeVMImmutableID(core.BaseConfig(), lumeVM{Name: "worker-home-default", LocationName: "home"}); err != nil {
 		t.Fatal(err)
 	}
 }

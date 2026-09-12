@@ -13,6 +13,7 @@ import (
 
 	apidaytona "github.com/daytonaio/daytona/libs/api-client-go"
 	sdkdaytona "github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func (b *daytonaLeaseBackend) uploadDaytonaArchive(ctx context.Context, sandboxID, archivePath string, archive *os.File) error {
@@ -54,7 +55,7 @@ func daytonaToolboxUploadURL(sandbox *apidaytona.Sandbox, sandboxID, remotePath 
 	return u.String(), nil
 }
 
-func daytonaToolboxHeaders(cfg Config) (map[string]string, error) {
+func daytonaToolboxHeaders(cfg core.Config) (map[string]string, error) {
 	auth, err := daytonaAuthConfig(cfg)
 	if err != nil {
 		return nil, err
