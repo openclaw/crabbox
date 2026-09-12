@@ -230,7 +230,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		SourceMeta: map[string]string{
 			"repo": repoName(req.Repo),
 		},
-	}, idempotencyKey("create", randomSuffix()))
+	}, idempotencyKey("create", shared.RandomSuffix()))
 	if err != nil {
 		if acquired && workspaceRun.SandboxID != "" {
 			return RunResult{}, b.cleanupCreateFailure(ctx, api, workspaceRun.SandboxID, err)
@@ -954,8 +954,4 @@ func repoName(repo Repo) string {
 		return repo.Name
 	}
 	return repo.Root
-}
-
-func randomSuffix() string {
-	return shared.RandomSuffix()
 }

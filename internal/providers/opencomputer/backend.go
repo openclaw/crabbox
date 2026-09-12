@@ -495,7 +495,7 @@ func newSandboxName(repo Repo) string {
 	if base == "" {
 		base = "crabbox"
 	}
-	return namePrefix + base + "-" + randomSuffix()
+	return namePrefix + base + "-" + shared.RandomSuffix()
 }
 
 func isReadyState(state string) bool {
@@ -516,10 +516,6 @@ func isTerminalState(state string) bool {
 	default:
 		return false
 	}
-}
-
-func randomSuffix() string {
-	return shared.RandomSuffix()
 }
 
 // openComputerWorkdir returns the configured absolute workspace path inside the

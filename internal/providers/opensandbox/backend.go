@@ -1011,11 +1011,7 @@ func newSandboxName(repo Repo) string {
 	if base == "" {
 		base = "crabbox"
 	}
-	return namePrefix + base + "-" + randomSuffix()
-}
-
-func randomSuffix() string {
-	return shared.RandomSuffix()
+	return namePrefix + base + "-" + shared.RandomSuffix()
 }
 
 func (b *openSandboxBackend) cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {

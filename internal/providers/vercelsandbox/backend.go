@@ -802,7 +802,7 @@ func newSandboxName(repo Repo) string {
 	if len(base) > 40 {
 		base = strings.Trim(base[:40], "-")
 	}
-	return "crabbox-" + base + "-" + randomSuffix()
+	return "crabbox-" + base + "-" + shared.RandomSuffix()
 }
 
 func repoScope(repo Repo) string {
@@ -812,10 +812,6 @@ func repoScope(repo Repo) string {
 	}
 	sum := sha256.Sum256([]byte(value))
 	return "repo-sha256:" + hex.EncodeToString(sum[:8])
-}
-
-func randomSuffix() string {
-	return shared.RandomSuffix()
 }
 
 func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
