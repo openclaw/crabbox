@@ -1419,20 +1419,9 @@ func proxyCommand(cfg core.Config, cvmID, gatewayHost string) string {
 	}
 	words = append(words, cvmID)
 	for i := range words {
-		words[i] = quoteProxyWord(words[i])
+		words[i] = shared.QuoteSSHProxyCommandWord(words[i])
 	}
 	return strings.Join(words, " ")
-}
-
-func quoteProxyWord(word string) string {
-	word = strings.ReplaceAll(word, "%", "%%")
-	if word != "" && strings.IndexFunc(word, func(r rune) bool {
-		return !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') ||
-			strings.ContainsRune("_-./:,@%+=", r))
-	}) == -1 {
-		return word
-	}
-	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, "$", `\$`, "`", "\\`").Replace(word) + `"`
 }
 
 // missingCVMResponse reports whether the phala CLI's stdout/stderr unambiguously
