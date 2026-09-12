@@ -559,20 +559,7 @@ func (c *restClient) doAt(ctx context.Context, httpClient *http.Client, baseURL,
 	if err != nil {
 		return nil, redactError(err)
 	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, apiError{StatusCode: resp.StatusCode, Body: redactString(string(data))}
-	}
-	if response != nil && len(bytes.TrimSpace(data)) > 0 {
-		if err := json.Unmarshal(data, response); err != nil {
-			return nil, err
-		}
-	}
-	return data, nil
+	return decodeBlaxelResponse(resp, response)
 }
 
 func (c *restClient) sandboxBaseURL(ctx context.Context, sandbox string) (string, error) {
@@ -645,6 +632,11 @@ func (c *restClient) doMultipartAt(ctx context.Context, baseURL, method, endpoin
 	if err != nil {
 		return nil, redactError(err)
 	}
+	return decodeBlaxelResponse(resp, response)
+}
+
+// decodeBlaxelResponse consumes buffered JSON and multipart responses alike.
+func decodeBlaxelResponse(resp *http.Response, response any) ([]byte, error) {
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {

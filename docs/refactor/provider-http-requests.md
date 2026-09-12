@@ -57,3 +57,13 @@ Stage-specific error labels, fallible checks between encoding and construction,
 signed payloads, distinct empty-reader contracts and streaming readers remain
 separate. The two named constructors describe different wire contracts, not a
 configurable provider-client framework.
+
+## Blaxel buffered responses
+
+Blaxel's JSON and multipart request paths share a private response decoder. It
+reads and closes the response body, preserves read-error precedence over HTTP
+status, and keeps Blaxel's typed API error and redaction policy. Successful
+whitespace-only bodies skip JSON decoding while retaining their original bytes;
+JSON errors remain unwrapped. Request construction, client selection, multipart
+uploads and transport-error handling stay in their existing callers. This is a
+provider-local contract, not an option added to the shared response helpers.
