@@ -1,7 +1,6 @@
 package sprites
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -240,19 +239,11 @@ func (c *spritesClient) DeleteSprite(ctx context.Context, name string) error {
 }
 
 func (c *spritesClient) doJSON(ctx context.Context, method, requestPath string, query url.Values, body any, out any) error {
-	var r io.Reader
-	if body != nil {
-		var buf bytes.Buffer
-		if err := json.NewEncoder(&buf).Encode(body); err != nil {
-			return err
-		}
-		r = &buf
-	}
 	endpoint := c.apiURL + requestPath
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, r)
+	req, err := shared.NewJSONRequest(ctx, method, endpoint, body)
 	if err != nil {
 		return err
 	}

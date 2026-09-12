@@ -238,11 +238,7 @@ func (c *azureDynamicSessionsClient) UploadFile(ctx context.Context, identifier,
 }
 
 func (c *azureDynamicSessionsClient) ExecStream(ctx context.Context, identifier string, execReq azureDynamicSessionsExecRequest, stdout, stderr io.Writer) (int, error) {
-	var body bytes.Buffer
-	if err := json.NewEncoder(&body).Encode(execReq); err != nil {
-		return 0, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url("/v1/exec", c.sessionQuery(identifier)), &body)
+	req, err := shared.NewJSONRequest(ctx, http.MethodPost, c.url("/v1/exec", c.sessionQuery(identifier)), execReq)
 	if err != nil {
 		return 0, err
 	}
@@ -373,15 +369,7 @@ func (c *azureDynamicSessionsClient) doJSON(ctx context.Context, method, path st
 }
 
 func (c *azureDynamicSessionsClient) doJSONURL(ctx context.Context, method, endpoint string, body any, out any) error {
-	var r io.Reader
-	if body != nil {
-		var buf bytes.Buffer
-		if err := json.NewEncoder(&buf).Encode(body); err != nil {
-			return err
-		}
-		r = &buf
-	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, r)
+	req, err := shared.NewJSONRequest(ctx, method, endpoint, body)
 	if err != nil {
 		return err
 	}
