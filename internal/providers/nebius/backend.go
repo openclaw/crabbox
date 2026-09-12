@@ -187,7 +187,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	ssh := core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
 	if !req.ReleaseOnly {
 		if err := core.UseStoredTestboxKey(&ssh, leaseID); err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 	}
 	if req.Repo.Root != "" && !req.NoLocalStateMutations {
