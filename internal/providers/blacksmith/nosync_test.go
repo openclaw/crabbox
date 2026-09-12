@@ -41,7 +41,7 @@ func TestBlacksmithRunNoSyncContract(t *testing.T) {
 					t.Setenv("CRABBOX_BLACKSMITH_SYNC_TIMEOUT_MS", "0")
 					t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 					t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
-					repo := Repo{Name: "my-app", Root: t.TempDir()}
+					repo := core.Repo{Name: "my-app", Root: t.TempDir()}
 					t.Chdir(repo.Root)
 					if output, err := exec.Command("git", "init", "--quiet").CombinedOutput(); err != nil {
 						t.Fatalf("git init: %v\n%s", err, output)
@@ -56,7 +56,7 @@ func TestBlacksmithRunNoSyncContract(t *testing.T) {
 						prepareBlacksmithGuestKey(t, leaseID)
 						testOwnedBlacksmithClaim(t, leaseID, firstNonBlank(tc.slug, "jade-krill"), repo.Root)
 					}
-					before, err := readLeaseClaim(leaseID)
+					before, err := core.ReadLeaseClaim(leaseID)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -64,35 +64,35 @@ func TestBlacksmithRunNoSyncContract(t *testing.T) {
 					var stderr bytes.Buffer
 					var operations []string
 					var claimDuringRun core.LeaseClaim
-					runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+					runner := &blacksmithFuncRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 						if req.Name != "blacksmith" || len(req.Args) < 2 || req.Args[0] != "testbox" {
 							t.Fatalf("unexpected fake command: %s %v", req.Name, req.Args)
 						}
 						operations = append(operations, req.Args[1])
 						switch req.Args[1] {
 						case "warmup":
-							return LocalCommandResult{Stdout: leaseID + "\n"}, nil
+							return core.LocalCommandResult{Stdout: leaseID + "\n"}, nil
 						case "run":
 							var err error
-							claimDuringRun, err = readLeaseClaim(leaseID)
+							claimDuringRun, err = core.ReadLeaseClaim(leaseID)
 							if err != nil {
 								t.Fatal(err)
 							}
 						}
-						return LocalCommandResult{}, nil
+						return core.LocalCommandResult{}, nil
 					}}
-					cfg := baseConfig()
+					cfg := core.BaseConfig()
 					cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
-					backend, err := (Provider{}).Configure(cfg, Runtime{
+					backend, err := (Provider{}).Configure(cfg, core.Runtime{
 						Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner,
 					})
 					if err != nil {
 						t.Fatal(err)
 					}
-					result, runErr := backend.(core.DelegatedRunBackend).Run(context.Background(), RunRequest{
+					result, runErr := backend.(core.DelegatedRunBackend).Run(context.Background(), core.RunRequest{
 						Repo: repo, ID: tc.id, Command: []string{"true"}, NoSync: mode.noSync,
 					})
-					after, err := readLeaseClaim(leaseID)
+					after, err := core.ReadLeaseClaim(leaseID)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -120,7 +120,7 @@ func TestBlacksmithRunNoSyncContract(t *testing.T) {
 						return
 					}
 
-					var exitErr ExitError
+					var exitErr core.ExitError
 					if !core.AsExitError(runErr, &exitErr) || exitErr.Code != 2 {
 						t.Errorf("Run error=%v result.ExitCode=%d, want exit 2", runErr, result.ExitCode)
 					}

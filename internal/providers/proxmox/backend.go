@@ -13,41 +13,26 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type Config = core.Config
-type Runtime = core.Runtime
-type ProviderSpec = core.ProviderSpec
-type Backend = core.Backend
-type AcquireRequest = core.AcquireRequest
-type ResolveRequest = core.ResolveRequest
-type ListRequest = core.ListRequest
-type LeaseView = core.LeaseView
-type ReleaseLeaseRequest = core.ReleaseLeaseRequest
-type TouchRequest = core.TouchRequest
-type CleanupRequest = core.CleanupRequest
-type LeaseTarget = core.LeaseTarget
-type Server = core.Server
-type SSHTarget = core.SSHTarget
-
 type leaseBackend struct{ shared.DirectSSHBackend }
 
 const proxmoxReleaseAbsentMarker = "proxmox-release-absent"
 
 type proxmoxClient interface {
-	DoctorReadiness(context.Context, Config) ([]core.ProxmoxReadinessCheck, error)
-	ListCrabboxServers(context.Context) ([]Server, error)
-	ListCrabboxServersCluster(context.Context) ([]Server, error)
-	CreateServer(context.Context, Config, string, string, string, bool) (Server, error)
-	GetServer(context.Context, string) (Server, error)
-	GetServerOnNode(context.Context, string, string) (Server, error)
+	DoctorReadiness(context.Context, core.Config) ([]core.ProxmoxReadinessCheck, error)
+	ListCrabboxServers(context.Context) ([]core.Server, error)
+	ListCrabboxServersCluster(context.Context) ([]core.Server, error)
+	CreateServer(context.Context, core.Config, string, string, string, bool) (core.Server, error)
+	GetServer(context.Context, string) (core.Server, error)
+	GetServerOnNode(context.Context, string, string) (core.Server, error)
 	VMExistsInCluster(context.Context, string) (bool, error)
 	DeleteServer(context.Context, string) error
 	DeleteServerOnNode(context.Context, string, string) error
-	DeleteServerOnNodeChecked(context.Context, string, string, func(Server) error) error
+	DeleteServerOnNodeChecked(context.Context, string, string, func(core.Server) error) error
 	SetLabels(context.Context, string, map[string]string) error
 	SetLabelsOnNode(context.Context, string, string, map[string]string) error
 }
 
-func NewLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+func NewLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = "proxmox"
 	if cfg.Proxmox.User != "" {
 		cfg.SSHUser = cfg.Proxmox.User
@@ -58,56 +43,56 @@ func NewLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	return &leaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, StoredLeaseKeys: true}}
 }
 
-func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
-	return shared.AcquireAttemptsRetry(b.RT, req.Keep, func() (LeaseTarget, error) {
+func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	return shared.AcquireAttemptsRetry(b.RT, req.Keep, func() (core.LeaseTarget, error) {
 		return b.acquireOnce(ctx, req.Keep, req.RequestedSlug)
 	})
 }
 
-func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (LeaseTarget, error) {
+func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (core.LeaseTarget, error) {
 	if b.Cfg.Proxmox.TemplateID <= 0 {
-		return LeaseTarget{}, exit(3, "proxmox templateId is required (set proxmox.templateId or CRABBOX_PROXMOX_TEMPLATE_ID)")
+		return core.LeaseTarget{}, core.Exit(3, "proxmox templateId is required (set proxmox.templateId or CRABBOX_PROXMOX_TEMPLATE_ID)")
 	}
 	client, err := newClient(b.Cfg)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	servers, err := client.ListCrabboxServersCluster(ctx)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
-	slug, err := allocateDirectLeaseSlug(leaseID, requestedSlug, servers)
+	slug, err := core.AllocateDirectLeaseSlug(leaseID, requestedSlug, servers)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	cfg := b.Cfg
-	keyPath, publicKey, err := ensureTestboxKeyForConfig(cfg, leaseID)
+	keyPath, publicKey, err := core.EnsureTestboxKeyForConfig(cfg, leaseID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	cfg.SSHKey = keyPath
-	cfg.ProviderKey = providerKeyForLease(leaseID)
-	cfg.ServerType = proxmoxServerTypeForConfig(cfg)
+	cfg.ProviderKey = core.ProviderKeyForLease(leaseID)
+	cfg.ServerType = core.ProxmoxServerTypeForConfig(cfg)
 	fmt.Fprintf(b.RT.Stderr, "provisioning provider=proxmox lease=%s slug=%s node=%s template=%d keep=%v\n",
 		leaseID, slug, cfg.Proxmox.Node, cfg.Proxmox.TemplateID, keep)
 	server, err := client.CreateServer(ctx, cfg, publicKey, leaseID, slug, keep)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if server.PublicNet.IPv4.IP == "" {
 		cloudID := server.CloudID
 		hostID := server.HostID
-		server, err = b.waitForServerIP(ctx, client, cloudID, bootstrapWaitTimeout(cfg))
+		server, err = b.waitForServerIP(ctx, client, cloudID, core.BootstrapWaitTimeout(cfg))
 		if err != nil {
-			b.cleanupFailedAcquire(client, Server{CloudID: cloudID, HostID: hostID}, leaseID)
-			return LeaseTarget{}, err
+			b.cleanupFailedAcquire(client, core.Server{CloudID: cloudID, HostID: hostID}, leaseID)
+			return core.LeaseTarget{}, err
 		}
 	}
-	target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
-	if err := waitForSSHReadyFunc(ctx, &target, b.RT.Stderr, "bootstrap", bootstrapWaitTimeout(cfg)); err != nil {
+	target := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
+	if err := waitForSSHReadyFunc(ctx, &target, b.RT.Stderr, "bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
 		b.cleanupFailedAcquire(client, server, leaseID)
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if server.Labels == nil {
 		server.Labels = map[string]string{}
@@ -117,10 +102,10 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 		fmt.Fprintf(b.RT.Stderr, "warning: set proxmox labels: %v\n", err)
 	}
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s server=%s node=%s ip=%s\n", leaseID, server.DisplayID(), cfg.Proxmox.Node, server.PublicNet.IPv4.IP)
-	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
-func (b *leaseBackend) cleanupFailedAcquire(client proxmoxClient, server Server, leaseID string) {
+func (b *leaseBackend) cleanupFailedAcquire(client proxmoxClient, server core.Server, leaseID string) {
 	node := core.Blank(server.HostID, b.Cfg.Proxmox.Node)
 	if err := client.DeleteServerOnNode(context.Background(), node, server.CloudID); err != nil && !core.IsProxmoxNotFound(err) {
 		fmt.Fprintf(b.RT.Stderr, "warning: preserve failed Proxmox acquire residue lease=%s reason=delete_failed error=%v\n", leaseID, err)
@@ -138,7 +123,7 @@ func (b *leaseBackend) cleanupFailedAcquire(client proxmoxClient, server Server,
 	removeLocalLeaseResidue(leaseID)
 }
 
-func (b *leaseBackend) waitForServerIP(ctx context.Context, client proxmoxClient, cloudID string, timeout time.Duration) (Server, error) {
+func (b *leaseBackend) waitForServerIP(ctx context.Context, client proxmoxClient, cloudID string, timeout time.Duration) (core.Server, error) {
 	deadlineCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	ticker := time.NewTicker(proxmoxIPPollInterval)
@@ -152,34 +137,34 @@ func (b *leaseBackend) waitForServerIP(ctx context.Context, client proxmoxClient
 				return nil
 			}
 		},
-		func(ctx context.Context) (Server, error) { return client.GetServer(ctx, cloudID) },
-		func(_ context.Context, server Server, fetchErr error) (bool, error) {
+		func(ctx context.Context) (core.Server, error) { return client.GetServer(ctx, cloudID) },
+		func(_ context.Context, server core.Server, fetchErr error) (bool, error) {
 			return server.PublicNet.IPv4.IP != "", fetchErr
 		}, nil)
 	if err != nil {
 		if result.Err == nil && context.Cause(deadlineCtx) != nil && errors.Is(err, context.Cause(deadlineCtx)) {
-			return Server{}, deadlineCtx.Err()
+			return core.Server{}, deadlineCtx.Err()
 		}
-		return Server{}, err
+		return core.Server{}, err
 	}
 	return result.Value, nil
 }
 
-func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
 	client, err := newClient(b.Cfg)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if req.ID != "" {
 		if _, err := strconv.Atoi(req.ID); err == nil || strings.HasPrefix(req.ID, "crabbox-") {
 			server, err := client.GetServer(ctx, req.ID)
 			if err != nil {
 				if !core.IsProxmoxNotFound(err) && !req.ReleaseOnly {
-					return LeaseTarget{}, err
+					return core.LeaseTarget{}, err
 				}
 			} else {
-				if !isCrabboxLease(server) {
-					return LeaseTarget{}, exit(4, "lease/server not found: %s (VM exists but is not Crabbox-managed)", req.ID)
+				if !core.IsCrabboxProxmoxLease(server) {
+					return core.LeaseTarget{}, core.Exit(4, "lease/server not found: %s (VM exists but is not Crabbox-managed)", req.ID)
 				}
 				return b.targetForServer(server, req.ReleaseOnly)
 			}
@@ -187,14 +172,14 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 	}
 	servers, err := client.ListCrabboxServersCluster(ctx)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
-	if server, leaseID, err := findServerByAlias(servers, req.ID); err != nil {
-		return LeaseTarget{}, err
+	if server, leaseID, err := core.FindServerByAlias(servers, req.ID); err != nil {
+		return core.LeaseTarget{}, err
 	} else if leaseID != "" {
 		target, err := b.targetForServer(server, req.ReleaseOnly)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		target.LeaseID = leaseID
 		return target, nil
@@ -202,10 +187,10 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 	if req.ReleaseOnly {
 		return b.releaseTargetFromClaim(ctx, client, req.ID)
 	}
-	return LeaseTarget{}, exit(4, "lease/server not found: %s", req.ID)
+	return core.LeaseTarget{}, core.Exit(4, "lease/server not found: %s", req.ID)
 }
 
-func (b *leaseBackend) releaseTargetFromClaim(ctx context.Context, client proxmoxClient, id string) (LeaseTarget, error) {
+func (b *leaseBackend) releaseTargetFromClaim(ctx context.Context, client proxmoxClient, id string) (core.LeaseTarget, error) {
 	var (
 		claim core.LeaseClaim
 		ok    bool
@@ -217,63 +202,63 @@ func (b *leaseBackend) releaseTargetFromClaim(ctx context.Context, client proxmo
 		var exact bool
 		claim, ok, exact, err = core.ResolveLeaseClaimForProviderWithExact(id, "proxmox")
 		if err == nil && exact && (!ok || claim.LeaseID != id) {
-			return LeaseTarget{}, exit(2, "proxmox exact lease identifier %q does not match a valid Proxmox claim", id)
+			return core.LeaseTarget{}, core.Exit(2, "proxmox exact lease identifier %q does not match a valid Proxmox claim", id)
 		}
 	}
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if !ok || claim.LeaseID == "" || !core.LeaseClaimMatchesIdentifier(claim, id) {
-		return LeaseTarget{}, exit(4, "lease/server not found: %s", id)
+		return core.LeaseTarget{}, core.Exit(4, "lease/server not found: %s", id)
 	}
 	cloudID := strings.TrimSpace(claim.CloudID)
 	vmid, err := strconv.ParseInt(cloudID, 10, 64)
 	if err != nil || vmid <= 0 {
-		return LeaseTarget{}, exit(2, "proxmox lease claim has invalid VM identity for lease=%s", claim.LeaseID)
+		return core.LeaseTarget{}, core.Exit(2, "proxmox lease claim has invalid VM identity for lease=%s", claim.LeaseID)
 	}
 	if server, err := client.GetServer(ctx, cloudID); err == nil {
-		if !isCrabboxLease(server) || strings.TrimSpace(server.Labels["lease"]) != claim.LeaseID {
-			return LeaseTarget{}, exit(2, "refusing to release Proxmox VM %s from stale local claim lease=%s", cloudID, claim.LeaseID)
+		if !core.IsCrabboxProxmoxLease(server) || strings.TrimSpace(server.Labels["lease"]) != claim.LeaseID {
+			return core.LeaseTarget{}, core.Exit(2, "refusing to release Proxmox VM %s from stale local claim lease=%s", cloudID, claim.LeaseID)
 		}
-		return LeaseTarget{LeaseID: claim.LeaseID, Server: server}, nil
+		return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server}, nil
 	}
 	claimScope := strings.TrimSpace(claim.ProviderScope)
 	currentScope := strings.TrimSpace(core.ProviderClaimScope("proxmox", b.Cfg))
 	if claimScope == "" || currentScope == "" || claimScope != currentScope {
-		return LeaseTarget{}, exit(2, "refusing to accept missing Proxmox VM %s from lease=%s with unverified cluster scope", cloudID, claim.LeaseID)
+		return core.LeaseTarget{}, core.Exit(2, "refusing to accept missing Proxmox VM %s from lease=%s with unverified cluster scope", cloudID, claim.LeaseID)
 	}
 	clusterServers, err := client.ListCrabboxServersCluster(ctx)
 	if err != nil {
-		return LeaseTarget{}, fmt.Errorf("locate Proxmox VM %s across cluster: %w", cloudID, err)
+		return core.LeaseTarget{}, fmt.Errorf("locate Proxmox VM %s across cluster: %w", cloudID, err)
 	}
 	for _, server := range clusterServers {
 		if server.CloudID != cloudID {
 			continue
 		}
-		if !isCrabboxLease(server) || strings.TrimSpace(server.Labels["lease"]) != claim.LeaseID {
-			return LeaseTarget{}, exit(2, "refusing to release Proxmox VM %s from stale local claim lease=%s", cloudID, claim.LeaseID)
+		if !core.IsCrabboxProxmoxLease(server) || strings.TrimSpace(server.Labels["lease"]) != claim.LeaseID {
+			return core.LeaseTarget{}, core.Exit(2, "refusing to release Proxmox VM %s from stale local claim lease=%s", cloudID, claim.LeaseID)
 		}
-		return LeaseTarget{LeaseID: claim.LeaseID, Server: server}, nil
+		return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server}, nil
 	}
 	exists, err := client.VMExistsInCluster(ctx, cloudID)
 	if err != nil {
-		return LeaseTarget{}, fmt.Errorf("verify Proxmox VM %s cluster absence: %w", cloudID, err)
+		return core.LeaseTarget{}, fmt.Errorf("verify Proxmox VM %s cluster absence: %w", cloudID, err)
 	}
 	if exists {
-		return LeaseTarget{}, exit(2, "refusing to accept missing Proxmox VM %s from lease=%s because it still exists in the cluster", cloudID, claim.LeaseID)
+		return core.LeaseTarget{}, core.Exit(2, "refusing to accept missing Proxmox VM %s from lease=%s because it still exists in the cluster", cloudID, claim.LeaseID)
 	}
 	labels := shared.CloneLabels(claim.Labels)
 	if leaseLabel := strings.TrimSpace(labels["lease"]); leaseLabel != "" && leaseLabel != claim.LeaseID {
-		return LeaseTarget{}, exit(2, "proxmox lease claim label mismatch for lease=%s", claim.LeaseID)
+		return core.LeaseTarget{}, core.Exit(2, "proxmox lease claim label mismatch for lease=%s", claim.LeaseID)
 	}
 	if providerLabel := strings.TrimSpace(labels["provider"]); providerLabel != "" && providerLabel != "proxmox" {
-		return LeaseTarget{}, exit(2, "proxmox lease claim provider label mismatch for lease=%s", claim.LeaseID)
+		return core.LeaseTarget{}, core.Exit(2, "proxmox lease claim provider label mismatch for lease=%s", claim.LeaseID)
 	}
 	labels["lease"] = claim.LeaseID
 	labels["provider"] = "proxmox"
-	return LeaseTarget{
+	return core.LeaseTarget{
 		LeaseID: claim.LeaseID,
-		Server: Server{
+		Server: core.Server{
 			CloudID:  cloudID,
 			Provider: "proxmox",
 			HostID:   proxmoxReleaseAbsentMarker,
@@ -304,13 +289,13 @@ func (b *leaseBackend) resolveNumericClaim(cloudID string) (core.LeaseClaim, boo
 		}
 	}
 	if len(scoped) > 1 {
-		return core.LeaseClaim{}, false, exit(2, "multiple provider=proxmox claims in the current scope match cloud id %s", cloudID)
+		return core.LeaseClaim{}, false, core.Exit(2, "multiple provider=proxmox claims in the current scope match cloud id %s", cloudID)
 	}
 	if len(scoped) == 1 {
 		return scoped[0], true, nil
 	}
 	if len(legacy) > 1 {
-		return core.LeaseClaim{}, false, exit(2, "multiple unscoped provider=proxmox claims match cloud id %s", cloudID)
+		return core.LeaseClaim{}, false, core.Exit(2, "multiple unscoped provider=proxmox claims match cloud id %s", cloudID)
 	}
 	if len(legacy) == 1 {
 		return legacy[0], true, nil
@@ -318,19 +303,19 @@ func (b *leaseBackend) resolveNumericClaim(cloudID string) (core.LeaseClaim, boo
 	return core.LeaseClaim{}, false, nil
 }
 
-func (b *leaseBackend) targetForServer(server Server, releaseOnly bool) (LeaseTarget, error) {
+func (b *leaseBackend) targetForServer(server core.Server, releaseOnly bool) (core.LeaseTarget, error) {
 	cfg := b.Cfg
-	target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
+	target := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
 	leaseID := core.Blank(server.Labels["lease"], server.CloudID)
 	if !releaseOnly {
-		if err := useStoredTestboxKey(&target, leaseID); err != nil {
-			return LeaseTarget{}, err
+		if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
+			return core.LeaseTarget{}, err
 		}
 	}
-	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
-func (b *leaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *leaseBackend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	_ = req
 	client, err := newClient(b.Cfg)
 	if err != nil {
@@ -360,7 +345,7 @@ func (b *leaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.D
 	return result, nil
 }
 
-func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+func (b *leaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
 	client, err := newClient(b.Cfg)
 	if err != nil {
 		return err
@@ -395,7 +380,7 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 	return removeCleanupLeaseResidue(ctx, client, deleted, remaining, b.Cfg, b.RT.Stderr)
 }
 
-func (b *leaseBackend) backfillReleaseClaimScope(leaseID, cloudID string, server Server) error {
+func (b *leaseBackend) backfillReleaseClaimScope(leaseID, cloudID string, server core.Server) error {
 	if leaseID == "" || proxmoxClaimLabelLeaseID(server) != leaseID {
 		return nil
 	}
@@ -411,7 +396,7 @@ func (b *leaseBackend) backfillReleaseClaimScope(leaseID, cloudID string, server
 	}
 	scope := strings.TrimSpace(core.ProviderClaimScope("proxmox", b.Cfg))
 	if scope == "" {
-		return exit(2, "cannot safely release legacy Proxmox claim lease=%s without configured cluster scope", leaseID)
+		return core.Exit(2, "cannot safely release legacy Proxmox claim lease=%s without configured cluster scope", leaseID)
 	}
 	replacement := claim
 	replacement.ProviderScope = scope
@@ -421,21 +406,21 @@ func (b *leaseBackend) backfillReleaseClaimScope(leaseID, cloudID string, server
 	return core.ReplaceLeaseClaimIfUnchanged(leaseID, claim, replacement)
 }
 
-func (b *leaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
+func (b *leaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	client, err := newClient(b.Cfg)
 	if err != nil {
-		return Server{}, err
+		return core.Server{}, err
 	}
 	server := req.Lease.Server
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.Cfg, req.State, time.Now().UTC())
 	node := core.Blank(server.HostID, b.Cfg.Proxmox.Node)
 	if err := client.SetLabelsOnNode(ctx, node, server.CloudID, server.Labels); err != nil {
-		return Server{}, err
+		return core.Server{}, err
 	}
 	return server, nil
 }
 
-func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
+func (b *leaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return err
@@ -472,7 +457,7 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	return nil
 }
 
-func (b *leaseBackend) cleanupClaimedServer(ctx context.Context, client proxmoxClient, server Server, claim core.LeaseClaim, binding shared.ClaimBinding) error {
+func (b *leaseBackend) cleanupClaimedServer(ctx context.Context, client proxmoxClient, server core.Server, claim core.LeaseClaim, binding shared.ClaimBinding) error {
 	var deleteErr error
 	err := shared.RemoveExactClaimAfter(claim, binding, func() error {
 		// Inventory is discovery only. Revalidate its node, lifecycle and native
@@ -485,7 +470,7 @@ func (b *leaseBackend) cleanupClaimedServer(ctx context.Context, client proxmoxC
 		if err != nil {
 			return err
 		}
-		var fresh Server
+		var fresh core.Server
 		for _, candidate := range current {
 			if candidate.CloudID == server.CloudID {
 				fresh = candidate
@@ -498,7 +483,7 @@ func (b *leaseBackend) cleanupClaimedServer(ctx context.Context, client proxmoxC
 		if _, _, err := b.cleanupClaim(fresh, current, currentClaims); err != nil {
 			return err
 		}
-		check := func(live Server) error {
+		check := func(live core.Server) error {
 			if live.HostID != fresh.HostID {
 				return fmt.Errorf("Proxmox VM %s changed node during cleanup", server.CloudID)
 			}
@@ -555,13 +540,13 @@ func waitForProxmoxCleanupAbsence(ctx context.Context, client proxmoxClient, clo
 	return err
 }
 
-func removeCleanupLeaseResidue(ctx context.Context, client proxmoxClient, deleted Server, inventory []Server, cfg Config, stderr io.Writer) error {
+func removeCleanupLeaseResidue(ctx context.Context, client proxmoxClient, deleted core.Server, inventory []core.Server, cfg core.Config, stderr io.Writer) error {
 	leaseID := proxmoxClaimLabelLeaseID(deleted)
 	if leaseID == "" {
 		return nil
 	}
 	missingCloudIDs := map[string]bool{deleted.CloudID: true}
-	var survivors []Server
+	var survivors []core.Server
 	for _, server := range inventory {
 		if proxmoxClaimLabelLeaseID(server) == leaseID {
 			survivors = append(survivors, server)
@@ -609,7 +594,7 @@ func removeCleanupLeaseResidue(ctx context.Context, client proxmoxClient, delete
 				}
 			}
 			if canRetarget {
-				target := sshTargetFromConfig(cfg, survivors[0].PublicNet.IPv4.IP)
+				target := core.SSHTargetFromConfig(cfg, survivors[0].PublicNet.IPv4.IP)
 				if target.Port == "" && claim.SSHPort > 0 {
 					target.Port = strconv.Itoa(claim.SSHPort)
 				}
@@ -623,7 +608,7 @@ func removeCleanupLeaseResidue(ctx context.Context, client proxmoxClient, delete
 		return fmt.Errorf("Proxmox lease %s still has %d surviving VM(s)", leaseID, len(survivors))
 	}
 	if !found {
-		removeStoredTestboxKey(leaseID)
+		core.RemoveStoredTestboxKey(leaseID)
 		return nil
 	}
 	if claim.Provider != "proxmox" {
@@ -645,18 +630,18 @@ func removeCleanupLeaseResidue(ctx context.Context, client proxmoxClient, delete
 		fmt.Fprintf(stderr, "warning: preserve local lease residue lease=%s reason=claim_changed error=%v\n", leaseID, err)
 		return nil
 	}
-	removeStoredTestboxKey(leaseID)
+	core.RemoveStoredTestboxKey(leaseID)
 	return nil
 }
 
-func proxmoxClaimLeaseID(server Server, fallback string) string {
+func proxmoxClaimLeaseID(server core.Server, fallback string) string {
 	if leaseID := proxmoxClaimLabelLeaseID(server); leaseID != "" {
 		return leaseID
 	}
 	return strings.TrimSpace(fallback)
 }
 
-func proxmoxClaimLabelLeaseID(server Server) string {
+func proxmoxClaimLabelLeaseID(server core.Server) string {
 	if server.Labels != nil {
 		if leaseID := strings.TrimSpace(server.Labels["lease"]); leaseID != "" {
 			return leaseID
@@ -665,50 +650,15 @@ func proxmoxClaimLabelLeaseID(server Server) string {
 	return ""
 }
 
-var newClient = func(cfg Config) (proxmoxClient, error) { return core.NewProxmoxClient(cfg) }
+var newClient = func(cfg core.Config) (proxmoxClient, error) { return core.NewProxmoxClient(cfg) }
 
-func newLeaseID() string { return core.NewLeaseID() }
-func allocateDirectLeaseSlug(id, requested string, servers []Server) (string, error) {
-	return core.AllocateDirectLeaseSlug(id, requested, servers)
-}
-func ensureTestboxKeyForConfig(cfg Config, leaseID string) (string, string, error) {
-	return core.EnsureTestboxKeyForConfig(cfg, leaseID)
-}
-func providerKeyForLease(leaseID string) string { return core.ProviderKeyForLease(leaseID) }
-func proxmoxServerTypeForConfig(cfg Config) string {
-	return core.ProxmoxServerTypeForConfig(cfg)
-}
-func sshTargetFromConfig(cfg Config, host string) SSHTarget {
-	return core.SSHTargetFromConfig(cfg, host)
-}
-func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
-	return core.WaitForSSHReady(ctx, target, stderr, phase, timeout)
-}
-
-var waitForSSHReadyFunc = waitForSSHReady
+var waitForSSHReadyFunc = core.WaitForSSHReady
 
 var proxmoxIPPollInterval = 2 * time.Second
 var proxmoxDeleteVerifyPollInterval = time.Second
 var proxmoxDeleteVerifyTimeout = 30 * time.Second
 
-func bootstrapWaitTimeout(cfg Config) time.Duration { return core.BootstrapWaitTimeout(cfg) }
-func findServerByAlias(servers []Server, id string) (Server, string, error) {
-	return core.FindServerByAlias(servers, id)
-}
-func isCrabboxLease(server Server) bool { return core.IsCrabboxProxmoxLease(server) }
-func removeLeaseClaim(leaseID string)   { core.RemoveLeaseClaim(leaseID) }
-func removeStoredTestboxKey(leaseID string) {
-	core.RemoveStoredTestboxKey(leaseID)
-}
-
 func removeLocalLeaseResidue(leaseID string) {
-	removeLeaseClaim(leaseID)
-	removeStoredTestboxKey(leaseID)
-}
-func exit(code int, format string, args ...any) core.ExitError {
-	return core.Exit(code, format, args...)
-}
-
-func useStoredTestboxKey(target *SSHTarget, leaseID string) error {
-	return core.UseStoredTestboxKey(target, leaseID)
+	core.RemoveLeaseClaim(leaseID)
+	core.RemoveStoredTestboxKey(leaseID)
 }

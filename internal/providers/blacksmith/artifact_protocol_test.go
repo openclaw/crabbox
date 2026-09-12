@@ -40,8 +40,8 @@ func TestBlacksmithArtifactProtocolCancellation(t *testing.T) {
 						runs := 0
 						const privatePayload = "synthetic-private-collection-payload"
 						runner := &blacksmithFuncRunner{
-							onRequest: func(runCtx context.Context, req LocalCommandRequest) { nativeCtx = runCtx },
-							fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+							onRequest: func(runCtx context.Context, req core.LocalCommandRequest) { nativeCtx = runCtx },
+							fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 								runs++
 								start, workloadExit, _ := testBlacksmithReceiptFrames(t, syntheticBlacksmithCommand(t, req), workloadCode)
 								_, _ = io.WriteString(req.Stdout, start+"ordinary workload output\n"+workloadExit+privatePayload)
@@ -52,12 +52,12 @@ func TestBlacksmithArtifactProtocolCancellation(t *testing.T) {
 								// process or wall-clock timeout is needed for this protocol edge.
 								<-nativeCtx.Done()
 								observedCause = context.Cause(nativeCtx)
-								return LocalCommandResult{ExitCode: 1}, nativeCtx.Err()
+								return core.LocalCommandResult{ExitCode: 1}, nativeCtx.Err()
 							},
 						}
-						backend := newTestBlacksmithBackend(baseConfig(), runner)
+						backend := newTestBlacksmithBackend(core.BaseConfig(), runner)
 						backend.rt.Stdout, backend.rt.Stderr = &stdout, &stderr
-						req := RunRequest{ID: id, Repo: Repo{Root: repo}, Command: []string{"synthetic workload"}, ArtifactGlobs: []string{"report"}}
+						req := core.RunRequest{ID: id, Repo: core.Repo{Root: repo}, Command: []string{"synthetic workload"}, ArtifactGlobs: []string{"report"}}
 						wantCode := workloadCode
 						if wantCode == 0 {
 							wantCode = 1 // Preserve the native cancellation result after exit 0.

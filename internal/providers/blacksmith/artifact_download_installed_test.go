@@ -54,7 +54,7 @@ func TestBlacksmithDownloadInstalledHelperExecution(t *testing.T) {
 	// Both executables are test-owned scripts. Only the final Go fixture reads
 	// kernel limits and writes the tiny expected destination.
 	native := "#!/bin/sh\nfor arg do destination=$arg; done\nexec scp 'one argument with spaces' '*' '' \"$destination\"\n"
-	scp := "#!/bin/sh\nexec " + shellQuote(os.Args[0]) + " -test.run=^TestBlacksmithInstalledHelperChild$ -- \"$0\" \"$@\"\n"
+	scp := "#!/bin/sh\nexec " + core.ShellQuote(os.Args[0]) + " -test.run=^TestBlacksmithInstalledHelperChild$ -- \"$0\" \"$@\"\n"
 	for name, script := range map[string]string{filepath.Join(f.tools, "blacksmith"): native, f.scp: scp} {
 		if err := os.WriteFile(name, []byte(script), 0o700); err != nil {
 			t.Fatal(err)
@@ -68,9 +68,9 @@ func TestBlacksmithDownloadInstalledHelperExecution(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	realRunner := core.RuntimeForProviderOperation(io.Discard).Exec
-	var nativeResult LocalCommandResult
+	var nativeResult core.LocalCommandResult
 	var stage string
-	backend := newTestBlacksmithBackend(baseConfig(), ownershipRunner(func(runCtx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	backend := newTestBlacksmithBackend(core.BaseConfig(), ownershipRunner(func(runCtx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if runCtx != ctx || !req.RequireProcessGroupJoin || req.MaxCapturedOutputBytes != int(blacksmithArtifactDiagnosticCaptureBytes) {
 			t.Fatal("fixture lost its bounded original command owner")
 		}
@@ -177,7 +177,7 @@ func TestBlacksmithDownloadInstalledHelperDrift(t *testing.T) {
 			var stage string
 			calls := 0
 			const stdout, stderr = "SYNTHETIC_NATIVE_STDOUT", "SYNTHETIC_NATIVE_STDERR"
-			backend := newTestBlacksmithBackend(baseConfig(), ownershipRunner(func(runCtx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+			backend := newTestBlacksmithBackend(core.BaseConfig(), ownershipRunner(func(runCtx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				calls++
 				destination := req.Args[len(req.Args)-1]
 				stage = filepath.Dir(destination)
@@ -221,7 +221,7 @@ func TestBlacksmithDownloadInstalledHelperDrift(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				result := LocalCommandResult{Stdout: stdout, Stderr: stderr}
+				result := core.LocalCommandResult{Stdout: stdout, Stderr: stderr}
 				if kind == "inode-native-failure" {
 					result.ExitCode = 23
 					return result, nativeFailure

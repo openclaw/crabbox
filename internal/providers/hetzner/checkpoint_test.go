@@ -111,7 +111,7 @@ func TestHetznerCheckpointCLIWithMalformedUnrelatedConfig(t *testing.T) {
 }
 
 type fakeHetznerSnapshotClient struct {
-	server            Server
+	server            core.Server
 	serverErr         error
 	created           core.HetznerImage
 	createErr         error
@@ -127,7 +127,7 @@ type fakeHetznerSnapshotClient struct {
 	events            []string
 }
 
-func (f *fakeHetznerSnapshotClient) GetServer(context.Context, int64) (Server, error) {
+func (f *fakeHetznerSnapshotClient) GetServer(context.Context, int64) (core.Server, error) {
 	f.events = append(f.events, "get-server")
 	return f.server, f.serverErr
 }
@@ -195,7 +195,7 @@ func TestHetznerNativeCheckpointCapabilityMatrix(t *testing.T) {
 	provider := Provider{}
 	base := core.NativeCheckpointRequest{
 		Config:   core.Config{TargetOS: core.TargetLinux},
-		Server:   Server{CloudID: "42"},
+		Server:   core.Server{CloudID: "42"},
 		Target:   core.SSHTarget{TargetOS: core.TargetLinux},
 		Strategy: core.CheckpointStrategyDiskSnapshot,
 	}
@@ -301,12 +301,12 @@ func TestCreateHetznerCheckpointWaitFalseRecordsBinding(t *testing.T) {
 
 func TestCreateHetznerCheckpointRejectsOwnershipBeforeGuestReset(t *testing.T) {
 	for name, tc := range map[string]struct {
-		mutate func(*Server)
+		mutate func(*core.Server)
 		seed   bool
 	}{
-		"missing canonical label": {mutate: func(server *Server) { delete(server.Labels, "created_by") }, seed: true},
-		"source lease mismatch":   {mutate: func(server *Server) { server.Labels["lease"] = "cbx_other123456" }, seed: true},
-		"missing exact claim":     {mutate: func(*Server) {}, seed: false},
+		"missing canonical label": {mutate: func(server *core.Server) { delete(server.Labels, "created_by") }, seed: true},
+		"source lease mismatch":   {mutate: func(server *core.Server) { server.Labels["lease"] = "cbx_other123456" }, seed: true},
+		"missing exact claim":     {mutate: func(*core.Server) {}, seed: false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			installHetznerClaimState(t)
@@ -608,7 +608,7 @@ func TestCreateHetznerCheckpointRejectsImageStrategyClearly(t *testing.T) {
 	}
 }
 
-func checkpointHetznerServer() Server {
+func checkpointHetznerServer() core.Server {
 	server := crabboxHetznerServer(42, "cbx_abcdef123456")
 	server.Location = &core.ServerLocationInfo{Name: "fsn1"}
 	server.Image = &core.ServerImageInfo{Architecture: "x86"}

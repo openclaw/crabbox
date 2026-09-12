@@ -23,7 +23,7 @@ const (
 )
 
 type hetznerSnapshotClient interface {
-	GetServer(context.Context, int64) (Server, error)
+	GetServer(context.Context, int64) (core.Server, error)
 	CreateServerSnapshot(context.Context, int64, string, map[string]string) (core.HetznerImage, error)
 	GetImage(context.Context, int64) (core.HetznerImage, error)
 	DeleteImage(context.Context, int64) error
@@ -392,7 +392,7 @@ func failedHetznerSnapshotState(state string) bool {
 	}
 }
 
-func hetznerServerArchitecture(server Server) (string, error) {
+func hetznerServerArchitecture(server core.Server) (string, error) {
 	imageArchitecture := ""
 	if server.Image != nil {
 		imageArchitecture = server.Image.Architecture
