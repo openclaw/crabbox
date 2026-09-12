@@ -31,6 +31,7 @@ import {
   provisioningMaterialKey,
   sealProvisioningMaterial,
 } from "./provisioning-material";
+import { coordinatorStorageEntries } from "./storage-scan";
 
 const { Client: SSHClientConstructor, utils: sshUtils } = ssh2;
 
@@ -18209,32 +18210,13 @@ export class FleetCoordinator {
     prefix: string,
     visitor: (record: T, key: string) => Promise<boolean | void> | boolean | void,
   ): Promise<void> {
-    let startAfter: string | undefined;
-    for (;;) {
-      // oxlint-disable-next-line eslint/no-await-in-loop -- each bounded page starts after the previous page.
-      const page = await this.state.storage.list<T>({
-        prefix,
-        limit: storageRecordScanBatchSize,
-        noCache: true,
-        ...(startAfter ? { startAfter } : {}),
-      });
-      if (page.size === 0) {
-        break;
-      }
-      for (const [key, record] of page) {
-        // oxlint-disable-next-line eslint/no-await-in-loop -- sequential visits bound legacy record hydration.
-        const shouldContinue = await visitor(record, key);
-        if (shouldContinue === false) {
-          return;
-        }
-      }
-      const nextStartAfter = [...page.keys()].at(-1);
-      if (!nextStartAfter || nextStartAfter === startAfter) {
-        throw new Error(`${prefix} record scan did not advance`);
-      }
-      startAfter = nextStartAfter;
-      if (page.size < storageRecordScanBatchSize) {
-        break;
+    for await (const [key, record] of coordinatorStorageEntries<T>(this.state.storage, {
+      prefix,
+      limit: storageRecordScanBatchSize,
+      noCache: true,
+    })) {
+      if ((await visitor(record, key)) === false) {
+        return;
       }
     }
   }

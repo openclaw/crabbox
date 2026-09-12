@@ -189,6 +189,13 @@ global nor persisted, and do not fall back to expired credentials.
 
 Runtime-specific persistence and scheduling stay behind `CoordinatorRuntime`:
 
+Fleet, host-reservation, and checkpoint scans share the ordered, bounded
+`coordinatorStorageEntries` iterator in `worker/src/storage-scan.ts`. It fetches
+the next page only after the current page is consumed. Callers retain their
+page sizes, cache policy, transaction scope, and early-exit conditions;
+checkpoint claim expiry still applies each transition sequentially. Destructive
+first-page draining and maintenance with persisted cursors remain separate.
+
 | Runtime    | Durable state               | Scheduling                                     | WebSockets                               |
 | ---------- | --------------------------- | ---------------------------------------------- | ---------------------------------------- |
 | Cloudflare | Durable Object storage      | DO alarms plus scheduled Worker reconciliation | Hibernating WebSockets                   |

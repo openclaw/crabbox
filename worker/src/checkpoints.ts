@@ -1,6 +1,7 @@
 import { sha256Hex } from "./auth";
 import type { CoordinatorStorage, CoordinatorStorageView } from "./coordinator-runtime";
 import { orgMatchesForAccounting, sameOrgIdentityKey } from "./org-identity";
+import { coordinatorStorageEntries } from "./storage-scan";
 import type {
   CoordinatorCheckpointCreateClaim,
   CoordinatorCheckpointDeleteClaim,
@@ -443,20 +444,12 @@ async function scanCheckpointRecords(
   batchSize: number,
   visit: (record: CoordinatorCheckpointRecord) => boolean,
 ): Promise<void> {
-  const scan = async (startAfter?: string): Promise<void> => {
-    const records = await transaction.list<CoordinatorCheckpointRecord>({
-      prefix: "checkpoint:",
-      limit: batchSize,
-      ...(startAfter ? { startAfter } : {}),
-    });
-    let lastKey: string | undefined;
-    for (const [key, record] of records) {
-      if (visit(record)) return;
-      lastKey = key;
-    }
-    if (records.size === batchSize && lastKey) await scan(lastKey);
-  };
-  await scan();
+  for await (const [, record] of coordinatorStorageEntries<CoordinatorCheckpointRecord>(
+    transaction,
+    { prefix: "checkpoint:", limit: batchSize },
+  )) {
+    if (visit(record)) return;
+  }
 }
 
 export async function backfillFailedCheckpointCreateRecovery(
@@ -1146,31 +1139,22 @@ async function expireAvailableCheckpointClaims(
   limits: CheckpointLimits,
 ): Promise<CoordinatorCheckpointRecord> {
   const batchSize = Math.min(limits.useClaimsPerCheckpoint, limits.useClaimsTotal);
-  const expirePage = async (
-    current: CoordinatorCheckpointRecord,
-    startAfter?: string,
-  ): Promise<CoordinatorCheckpointRecord> => {
-    const claims = await transaction.list<CoordinatorCheckpointUseClaim>({
-      prefix: `checkpoint-use:${checkpoint.id}:`,
-      limit: batchSize,
-      ...(startAfter ? { startAfter } : {}),
-    });
-    const updated = await [...claims].reduce(async (pending, [key, claim]) => {
-      const record = await pending;
-      if (claim.state === "provisioning" || Date.parse(claim.expiresAt) > now) return record;
-      await transaction.delete(key);
-      return await writeCheckpointTransition(
-        transaction,
-        record,
-        { ...record, activeUseCount: Math.max(0, record.activeUseCount - 1) },
-        "checkpoint.use.expired",
-        "system",
-      );
-    }, Promise.resolve(current));
-    const lastKey = [...claims.keys()].at(-1);
-    return claims.size === batchSize && lastKey ? await expirePage(updated, lastKey) : updated;
-  };
-  return await expirePage(checkpoint);
+  let current = checkpoint;
+  for await (const [key, claim] of coordinatorStorageEntries<CoordinatorCheckpointUseClaim>(
+    transaction,
+    { prefix: `checkpoint-use:${checkpoint.id}:`, limit: batchSize },
+  )) {
+    if (claim.state === "provisioning" || Date.parse(claim.expiresAt) > now) continue;
+    await transaction.delete(key);
+    current = await writeCheckpointTransition(
+      transaction,
+      current,
+      { ...current, activeUseCount: Math.max(0, current.activeUseCount - 1) },
+      "checkpoint.use.expired",
+      "system",
+    );
+  }
+  return current;
 }
 
 async function validatedUseClaim(
