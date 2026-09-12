@@ -317,7 +317,7 @@ func (b *backend) Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, 
 	script := `(Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V).State`
 	result, err := b.powershell(ctx, script)
 	if err != nil {
-		return DoctorResult{}, commandError("hyperv feature check", result, err)
+		return DoctorResult{}, shared.LocalCommandError("hyperv feature check", result, err)
 	}
 	state := strings.TrimSpace(result.Stdout)
 	instances, err := b.listInstances(ctx)
@@ -486,7 +486,7 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name string) error {
 	)
 	result, err := b.powershell(ctx, switchCheck)
 	if err != nil {
-		return commandError("switch validation", result, err)
+		return shared.LocalCommandError("switch validation", result, err)
 	}
 
 	memBytes := int64(cfg.HyperV.Memory) * 1024 * 1024
@@ -504,7 +504,7 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name string) error {
 	result, err = b.powershell(ctx, diffScript)
 	if err != nil {
 		os.Remove(vhdPath) //nolint:errcheck
-		return commandError("create differencing disk", result, err)
+		return shared.LocalCommandError("create differencing disk", result, err)
 	}
 
 	if cfg.HyperV.InitPassword {
@@ -521,7 +521,7 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name string) error {
 	result, err = b.powershell(ctx, createScript)
 	if err != nil {
 		os.Remove(vhdPath) //nolint:errcheck
-		return commandError("New-VM", result, err)
+		return shared.LocalCommandError("New-VM", result, err)
 	}
 
 	// Disable automatic checkpoints: client Hyper-V enables them by default, which
@@ -532,13 +532,13 @@ func (b *backend) createVM(ctx context.Context, cfg Config, name string) error {
 	cpuScript := fmt.Sprintf(`Set-VM -Name '%s' -ProcessorCount %d -AutomaticCheckpointsEnabled $false`, escapePSString(name), cfg.HyperV.CPUs)
 	result, err = b.powershell(ctx, cpuScript)
 	if err != nil {
-		return commandError("Set-VM", result, err)
+		return shared.LocalCommandError("Set-VM", result, err)
 	}
 
 	startScript := fmt.Sprintf(`Start-VM -Name '%s'`, escapePSString(name))
 	result, err = b.powershell(ctx, startScript)
 	if err != nil {
-		return commandError("Start-VM", result, err)
+		return shared.LocalCommandError("Start-VM", result, err)
 	}
 
 	return nil
@@ -551,7 +551,7 @@ func (b *backend) connectVMNetwork(ctx context.Context, name, switchName string)
 	)
 	result, err := b.powershell(ctx, script)
 	if err != nil {
-		return commandError("Connect-VMNetworkAdapter", result, err)
+		return shared.LocalCommandError("Connect-VMNetworkAdapter", result, err)
 	}
 	return nil
 }
@@ -595,7 +595,7 @@ func (b *backend) injectInitPassword(ctx context.Context, vhdPath, user string) 
 	env := append(os.Environ(), "_CRABBOX_GP="+b.guestPassword())
 	result, err := b.powershellWithEnv(ctx, script, env)
 	if err != nil {
-		return commandError("init-password injection", result, err)
+		return shared.LocalCommandError("init-password injection", result, err)
 	}
 	return nil
 }
@@ -632,7 +632,7 @@ func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error
 		func(context.Context) (struct{}, error) {
 			result, err := b.invokeGuestScript(budgetCtx, script, env, b.guestReadyProbeTimeout)
 			if err != nil {
-				return struct{}{}, commandError("guest readiness probe", result, err)
+				return struct{}{}, shared.LocalCommandError("guest readiness probe", result, err)
 			}
 			return struct{}{}, nil
 		},
@@ -689,7 +689,7 @@ func (b *backend) invokeInGuest(ctx context.Context, vmName, user, scriptBlock, 
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		lastErr = commandError(label, result, err)
+		lastErr = shared.LocalCommandError(label, result, err)
 	}
 	return lastErr
 }
@@ -921,7 +921,7 @@ func (b *backend) listInstances(ctx context.Context) ([]hypervVM, error) {
 	script := `Get-VM | Where-Object { $_.Name -like 'crabbox-*' } | Select-Object Name, State | ConvertTo-Json -Compress`
 	result, err := b.powershell(ctx, script)
 	if err != nil {
-		return nil, commandError("Get-VM list", result, err)
+		return nil, shared.LocalCommandError("Get-VM list", result, err)
 	}
 	stdout := strings.TrimSpace(result.Stdout)
 	if stdout == "" || stdout == "null" {
@@ -1019,7 +1019,7 @@ func (b *backend) removeVM(ctx context.Context, name string) error {
 		removeScript := fmt.Sprintf(`Remove-VM -Name '%s' -Force -Confirm:$false`, escapePSString(name))
 		result, removeErr := b.powershell(ctx, removeScript)
 		if removeErr != nil {
-			return commandError("Remove-VM", result, removeErr)
+			return shared.LocalCommandError("Remove-VM", result, removeErr)
 		}
 	}
 	return b.removeVMStorage(name, vhdPaths)
@@ -1168,7 +1168,7 @@ func (b *backend) queryVM(ctx context.Context, name string) (hypervVM, error) {
 	script := fmt.Sprintf(`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq '%s' } | Select-Object Name, State | ConvertTo-Json -Compress`, escapePSString(name))
 	result, err := b.powershell(ctx, script)
 	if err != nil {
-		return hypervVM{}, commandError("Get-VM query", result, err)
+		return hypervVM{}, shared.LocalCommandError("Get-VM query", result, err)
 	}
 	stdout := strings.TrimSpace(result.Stdout)
 	if stdout == "" || stdout == "null" {
@@ -1485,21 +1485,6 @@ func isUsableIPv4(s string) bool {
 
 func escapePSString(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
-}
-
-func commandError(action string, result LocalCommandResult, err error) error {
-	code := result.ExitCode
-	if code == 0 {
-		code = 1
-	}
-	detail := strings.TrimSpace(result.Stderr)
-	if detail == "" {
-		detail = strings.TrimSpace(result.Stdout)
-	}
-	if detail != "" {
-		return exit(code, "%s failed: %v: %s", action, err, detail)
-	}
-	return exit(code, "%s failed: %v", action, err)
 }
 
 func firstLine(value string) string {

@@ -478,7 +478,7 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 
 	result, err := b.container(ctx, args, nil, b.rt.Stderr)
 	if err != nil {
-		return "", commandError("container run", result, err)
+		return "", shared.LocalCommandError("container run", result, err)
 	}
 	id := strings.TrimSpace(result.Stdout)
 	if id == "" {
@@ -540,7 +540,7 @@ func appleContainerCacheVolumeName(key string) string {
 func (b *backend) listContainers(ctx context.Context) ([]inspectContainer, error) {
 	result, err := b.container(ctx, []string{"ls", "--all", "--format", "json"}, nil, nil)
 	if err != nil {
-		return nil, commandError("container ls", result, err)
+		return nil, shared.LocalCommandError("container ls", result, err)
 	}
 	all, err := decodeInspect([]byte(result.Stdout))
 	if err != nil {
@@ -559,7 +559,7 @@ func (b *backend) listContainers(ctx context.Context) ([]inspectContainer, error
 func (b *backend) inspectContainer(ctx context.Context, id string) (inspectContainer, error) {
 	result, err := b.container(ctx, []string{"inspect", id}, nil, nil)
 	if err != nil {
-		return inspectContainer{}, commandError("container inspect", result, err)
+		return inspectContainer{}, shared.LocalCommandError("container inspect", result, err)
 	}
 	containers, err := decodeInspect([]byte(result.Stdout))
 	if err != nil {
@@ -698,7 +698,7 @@ func (b *backend) removeContainer(ctx context.Context, id string) error {
 	// `container delete --force <id>` removes a running or stopped container.
 	result, err := b.container(ctx, []string{"delete", "--force", id}, nil, b.rt.Stderr)
 	if err != nil {
-		return commandError("container delete", result, err)
+		return shared.LocalCommandError("container delete", result, err)
 	}
 	return nil
 }
@@ -920,14 +920,6 @@ func readyCheck(cfg core.Config) string {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
-}
-
-func commandError(action string, result core.LocalCommandResult, err error) error {
-	code := result.ExitCode
-	if code == 0 {
-		code = 1
-	}
-	return exit(code, "%s failed: %s", action, commandDetail(result, err))
 }
 
 func commandDetail(result core.LocalCommandResult, err error) string {

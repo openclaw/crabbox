@@ -280,7 +280,7 @@ func (b *backend) Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, 
 	cfg := b.configForRun()
 	version, err := b.tart(ctx, []string{"--version"}, nil, nil)
 	if err != nil {
-		return DoctorResult{}, commandError("tart --version", version, err)
+		return DoctorResult{}, shared.LocalCommandError("tart --version", version, err)
 	}
 	instances, err := b.listInstances(ctx)
 	if err != nil {
@@ -497,7 +497,7 @@ func (b *backend) cloneVM(ctx context.Context, cfg Config, name string) error {
 	args := []string{"clone", cfg.Tart.Image, name}
 	result, err := b.tart(ctx, args, nil, b.rt.Stderr)
 	if err != nil {
-		return commandError("tart clone", result, err)
+		return shared.LocalCommandError("tart clone", result, err)
 	}
 	return nil
 }
@@ -588,7 +588,7 @@ func (b *backend) injectSSHKey(ctx context.Context, name string, user string, pu
 	)
 	injectResult, err := b.tart(ctx, []string{"exec", name, "bash", "-c", injectScript}, nil, b.rt.Stderr)
 	if err != nil {
-		return commandError("ssh key injection", injectResult, err)
+		return shared.LocalCommandError("ssh key injection", injectResult, err)
 	}
 	return nil
 }
@@ -618,7 +618,7 @@ func (b *backend) waitForGuestAgent(ctx context.Context, name string) error {
 			if strings.Contains(detail, "GRPCConnectionPoolError") || strings.Contains(detail, "is the Tart Guest Agent running?") {
 				return false, nil
 			}
-			return false, commandError("Tart Guest Agent readiness", current.result, current.err)
+			return false, shared.LocalCommandError("Tart Guest Agent readiness", current.result, current.err)
 		},
 		func(result shared.PollResult[observation]) {
 			if result.Attempt == 1 {
@@ -651,7 +651,7 @@ echo 'macOS Screen Sharing did not start (no VNC listener on 127.0.0.1:5900)' >&
 exit 1`
 	result, err := b.tart(ctx, []string{"exec", name, "bash", "-c", script}, nil, b.rt.Stderr)
 	if err != nil {
-		return commandError("enable screen sharing", result, err)
+		return shared.LocalCommandError("enable screen sharing", result, err)
 	}
 	return nil
 }
@@ -660,7 +660,7 @@ exit 1`
 func (b *backend) stopVM(ctx context.Context, name string) error {
 	result, err := b.tart(ctx, []string{"stop", name}, nil, b.rt.Stderr)
 	if err != nil {
-		return commandError("tart stop", result, err)
+		return shared.LocalCommandError("tart stop", result, err)
 	}
 	return nil
 }
@@ -669,7 +669,7 @@ func (b *backend) stopVM(ctx context.Context, name string) error {
 func (b *backend) deleteVM(ctx context.Context, name string) error {
 	result, err := b.tart(ctx, []string{"delete", name}, nil, b.rt.Stderr)
 	if err != nil {
-		return commandError("tart delete", result, err)
+		return shared.LocalCommandError("tart delete", result, err)
 	}
 	return nil
 }
@@ -677,7 +677,7 @@ func (b *backend) deleteVM(ctx context.Context, name string) error {
 func (b *backend) listInstances(ctx context.Context) ([]tartInstance, error) {
 	result, err := b.tart(ctx, []string{"list", "--source", "local", "--format", "json"}, nil, nil)
 	if err != nil {
-		return nil, commandError("tart list", result, err)
+		return nil, shared.LocalCommandError("tart list", result, err)
 	}
 	var instances []tartInstance
 	if err := json.Unmarshal([]byte(result.Stdout), &instances); err != nil {
@@ -930,21 +930,6 @@ func instanceRunning(state string) bool {
 
 func tartState(state string) string {
 	return strings.ToLower(strings.TrimSpace(state))
-}
-
-func commandError(action string, result LocalCommandResult, err error) error {
-	code := result.ExitCode
-	if code == 0 {
-		code = 1
-	}
-	detail := strings.TrimSpace(result.Stderr)
-	if detail == "" {
-		detail = strings.TrimSpace(result.Stdout)
-	}
-	if detail != "" {
-		return exit(code, "%s failed: %v: %s", action, err, detail)
-	}
-	return exit(code, "%s failed: %v", action, err)
 }
 
 func firstLine(value string) string {

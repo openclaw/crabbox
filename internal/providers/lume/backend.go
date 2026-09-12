@@ -508,7 +508,7 @@ func (b *backend) Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, 
 	cfg := b.configForRun()
 	version, err := b.lume(ctx, cfg, []string{"--version"}, nil, nil)
 	if err != nil {
-		return DoctorResult{}, commandError("lume --version", version, err)
+		return DoctorResult{}, shared.LocalCommandError("lume --version", version, err)
 	}
 	instances, err := b.listInstances(ctx)
 	if err != nil {
@@ -755,7 +755,7 @@ func (b *backend) cloneVM(ctx context.Context, cfg Config, name string) error {
 	}
 	result, err := b.lume(ctx, cfg, args, nil, b.rt.Stderr)
 	if err != nil {
-		return commandError("lume clone", result, err)
+		return shared.LocalCommandError("lume clone", result, err)
 	}
 	return nil
 }
@@ -1305,7 +1305,7 @@ func (b *backend) listInstancesForConfig(ctx context.Context, cfg Config) ([]lum
 	}
 	result, err := b.lume(ctx, cfg, args, nil, nil)
 	if err != nil {
-		return nil, commandError("lume ls", result, err)
+		return nil, shared.LocalCommandError("lume ls", result, err)
 	}
 	instances, err := parseLumeVMs(result.Stdout)
 	if err != nil {
@@ -1497,7 +1497,7 @@ func (b *backend) getInstance(ctx context.Context, cfg Config, name string) (lum
 	}
 	result, err := b.lume(ctx, cfg, args, nil, nil)
 	if err != nil {
-		return lumeVM{}, commandError("lume get", result, err)
+		return lumeVM{}, shared.LocalCommandError("lume get", result, err)
 	}
 	instances, err := parseLumeVMs(result.Stdout)
 	if err != nil {
@@ -1959,21 +1959,6 @@ func inactiveLumeState(state string) bool {
 }
 
 func normalizedState(state string) string { return strings.ToLower(strings.TrimSpace(state)) }
-
-func commandError(action string, result LocalCommandResult, err error) error {
-	code := result.ExitCode
-	if code == 0 {
-		code = 1
-	}
-	detail := strings.TrimSpace(result.Stderr)
-	if detail == "" {
-		detail = strings.TrimSpace(result.Stdout)
-	}
-	if detail != "" {
-		return exit(code, "%s failed: %v: %s", action, err, detail)
-	}
-	return exit(code, "%s failed: %v", action, err)
-}
 
 func firstLine(value string) string {
 	value = strings.TrimSpace(value)

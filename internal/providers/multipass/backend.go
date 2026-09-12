@@ -239,7 +239,7 @@ func (b *backend) Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, 
 	cfg := b.configForRun()
 	version, err := b.multipass(ctx, []string{"version"}, nil, nil)
 	if err != nil {
-		return DoctorResult{}, commandError("multipass version", version, err)
+		return DoctorResult{}, shared.LocalCommandError("multipass version", version, err)
 	}
 	instances, err := b.listInstances(ctx)
 	if err != nil {
@@ -414,7 +414,7 @@ func (b *backend) createInstance(ctx context.Context, cfg Config, name, leaseID,
 	args = append(args, cfg.Multipass.Image)
 	result, err := b.multipass(ctx, args, nil, b.rt.Stderr)
 	if err != nil {
-		return commandError("multipass launch", result, err)
+		return shared.LocalCommandError("multipass launch", result, err)
 	}
 	if useNativeMounts {
 		if err := b.attachNativeMounts(ctx, name, mounts); err != nil {
@@ -450,17 +450,17 @@ func (b *backend) attachNativeMounts(ctx context.Context, name string, mounts []
 	}
 	result, err := b.multipass(ctx, []string{"stop", name}, nil, b.rt.Stderr)
 	if err != nil {
-		return commandError("multipass stop", result, err)
+		return shared.LocalCommandError("multipass stop", result, err)
 	}
 	for _, mount := range mounts {
 		result, err := b.multipass(ctx, []string{"mount", "--type", "native", mount.hostPath, name + ":" + mount.guestPath}, nil, b.rt.Stderr)
 		if err != nil {
-			return commandError("multipass mount", result, err)
+			return shared.LocalCommandError("multipass mount", result, err)
 		}
 	}
 	result, err = b.multipass(ctx, []string{"start", name}, nil, b.rt.Stderr)
 	if err != nil {
-		return commandError("multipass start", result, err)
+		return shared.LocalCommandError("multipass start", result, err)
 	}
 	return nil
 }
@@ -516,7 +516,7 @@ func multipassCacheVolumeName(key string) string {
 func (b *backend) listInstances(ctx context.Context) ([]multipassInstance, error) {
 	result, err := b.multipass(ctx, []string{"list", "--format", "json"}, nil, nil)
 	if err != nil {
-		return nil, commandError("multipass list", result, err)
+		return nil, shared.LocalCommandError("multipass list", result, err)
 	}
 	var out listResponse
 	if err := json.Unmarshal([]byte(result.Stdout), &out); err != nil {
@@ -528,7 +528,7 @@ func (b *backend) listInstances(ctx context.Context) ([]multipassInstance, error
 func (b *backend) inspectInstance(ctx context.Context, name string) (multipassInfoEntry, error) {
 	result, err := b.multipass(ctx, []string{"info", "--format", "json", name}, nil, nil)
 	if err != nil {
-		return multipassInfoEntry{}, commandError("multipass info", result, err)
+		return multipassInfoEntry{}, shared.LocalCommandError("multipass info", result, err)
 	}
 	var out infoResponse
 	if err := json.Unmarshal([]byte(result.Stdout), &out); err != nil {
@@ -622,7 +622,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst multipassIn
 func (b *backend) removeInstance(ctx context.Context, name string) error {
 	result, err := b.multipass(ctx, []string{"delete", "--purge", name}, nil, b.rt.Stderr)
 	if err != nil {
-		return commandError("multipass delete", result, err)
+		return shared.LocalCommandError("multipass delete", result, err)
 	}
 	return nil
 }
@@ -804,21 +804,6 @@ func instanceRunning(state string) bool {
 
 func multipassState(state string) string {
 	return strings.ToLower(strings.TrimSpace(state))
-}
-
-func commandError(action string, result LocalCommandResult, err error) error {
-	code := result.ExitCode
-	if code == 0 {
-		code = 1
-	}
-	detail := strings.TrimSpace(result.Stderr)
-	if detail == "" {
-		detail = strings.TrimSpace(result.Stdout)
-	}
-	if detail != "" {
-		return exit(code, "%s failed: %v: %s", action, err, detail)
-	}
-	return exit(code, "%s failed: %v", action, err)
 }
 
 func durationSecondsCeil(duration time.Duration) int {

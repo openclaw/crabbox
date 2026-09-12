@@ -2146,34 +2146,6 @@ func TestFirstNonBlank(t *testing.T) {
 	}
 }
 
-func TestCommandError(t *testing.T) {
-	err := commandError("tart stop", core.LocalCommandResult{ExitCode: 1, Stderr: "VM not running"}, fmt.Errorf("exit status 1"))
-	if !strings.Contains(err.Error(), "VM not running") {
-		t.Fatalf("commandError should include stderr: %v", err)
-	}
-	if !strings.Contains(err.Error(), "tart stop") {
-		t.Fatalf("commandError should include action: %v", err)
-	}
-}
-
-func TestCommandErrorFallsBackToStdout(t *testing.T) {
-	err := commandError("tart stop", core.LocalCommandResult{ExitCode: 1, Stdout: "some output"}, fmt.Errorf("exit status 1"))
-	if !strings.Contains(err.Error(), "some output") {
-		t.Fatalf("commandError should fall back to stdout: %v", err)
-	}
-}
-
-func TestCommandErrorMinimalExitCode(t *testing.T) {
-	err := commandError("tart stop", core.LocalCommandResult{ExitCode: 0}, fmt.Errorf("exit status 1"))
-	var exitErr core.ExitError
-	if !core.AsExitError(err, &exitErr) {
-		t.Fatalf("expected ExitError, got %T", err)
-	}
-	if exitErr.Code != 1 {
-		t.Fatalf("exit code = %d, want 1 (minimum)", exitErr.Code)
-	}
-}
-
 func TestIsTartProviderName(t *testing.T) {
 	selected := func(name string) bool {
 		cfg := core.BaseConfig()
@@ -3327,60 +3299,6 @@ func TestInjectSSHKeyExecError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ssh key injection") {
 		t.Fatalf("error should mention ssh key injection: %v", err)
-	}
-}
-
-func TestCommandErrorWithStderr(t *testing.T) {
-	result := core.LocalCommandResult{ExitCode: 5, Stderr: "some detail\n"}
-	err := commandError("test-action", result, fmt.Errorf("wrapped"))
-	if err == nil {
-		t.Fatal("commandError should return non-nil")
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "test-action failed") {
-		t.Fatalf("should mention action: %s", msg)
-	}
-	if !strings.Contains(msg, "some detail") {
-		t.Fatalf("should include stderr detail: %s", msg)
-	}
-}
-
-func TestCommandErrorWithStdoutFallback(t *testing.T) {
-	result := core.LocalCommandResult{ExitCode: 0, Stderr: "", Stdout: "stdout detail\n"}
-	err := commandError("test-action", result, fmt.Errorf("wrapped"))
-	if err == nil {
-		t.Fatal("commandError should return non-nil")
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "stdout detail") {
-		t.Fatalf("should fallback to stdout: %s", msg)
-	}
-}
-
-func TestCommandErrorNoDetail(t *testing.T) {
-	result := core.LocalCommandResult{ExitCode: 0, Stderr: "", Stdout: ""}
-	err := commandError("test-action", result, fmt.Errorf("original"))
-	if err == nil {
-		t.Fatal("commandError should return non-nil")
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "test-action failed") {
-		t.Fatalf("should mention action: %s", msg)
-	}
-	if !strings.Contains(msg, "original") {
-		t.Fatalf("should include original error: %s", msg)
-	}
-}
-
-func TestCommandErrorZeroExitCodeBecomesOne(t *testing.T) {
-	result := core.LocalCommandResult{ExitCode: 0}
-	err := commandError("action", result, fmt.Errorf("err"))
-	var exitErr core.ExitError
-	if !core.AsExitError(err, &exitErr) {
-		t.Fatalf("expected ExitError, got %T", err)
-	}
-	if exitErr.Code == 0 {
-		t.Fatal("exit code 0 should become non-zero")
 	}
 }
 

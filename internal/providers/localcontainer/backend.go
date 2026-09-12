@@ -1654,7 +1654,7 @@ func (b *backend) ValidateCheckpointForkWorkdir(ctx context.Context, lease core.
 	}
 	result, err := b.docker(ctx, args, nil, nil)
 	if err != nil {
-		return commandError("validate local-container checkpoint fork workdir", result, err)
+		return shared.LocalCommandError("validate local-container checkpoint fork workdir", result, err)
 	}
 	return nil
 }
@@ -1885,14 +1885,14 @@ func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.C
 		containerID, owned, inspectErr := b.ownedContainerID(cleanupCtx, leaseID, bootstrapDir)
 		if owned {
 			cleanupHostLeaseWorkRoot = false
-			return containerID, bootstrapDir, commandError("container run", result, err)
+			return containerID, bootstrapDir, shared.LocalCommandError("container run", result, err)
 		}
 		if inspectErr == nil {
 			os.RemoveAll(bootstrapDir)
 		} else {
 			cleanupHostLeaseWorkRoot = false
 		}
-		return "", "", commandError("container run", result, err)
+		return "", "", shared.LocalCommandError("container run", result, err)
 	}
 	id := strings.TrimSpace(result.Stdout)
 	if id == "" {
@@ -2107,7 +2107,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, container i
 func (b *backend) listContainers(ctx context.Context) ([]inspectContainer, error) {
 	result, err := b.docker(ctx, []string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=" + providerName, "--format", "{{.ID}}"}, nil, nil)
 	if err != nil {
-		return nil, commandError("container list", result, err)
+		return nil, shared.LocalCommandError("container list", result, err)
 	}
 	ids := strings.Fields(result.Stdout)
 	containers := make([]inspectContainer, 0, len(ids))
@@ -2128,7 +2128,7 @@ func (b *backend) inspectContainer(ctx context.Context, id string) (inspectConta
 func inspectRuntimeContainer(ctx context.Context, run containerObservationCommand, id string) (inspectContainer, error) {
 	result, err := run(ctx, []string{"inspect", id})
 	if err != nil {
-		return inspectContainer{}, commandError("container inspect", result, err)
+		return inspectContainer{}, shared.LocalCommandError("container inspect", result, err)
 	}
 	var containers []inspectContainer
 	if err := json.Unmarshal([]byte(result.Stdout), &containers); err != nil {
@@ -2147,7 +2147,7 @@ func (b *backend) exactContainerAbsent(ctx context.Context, id string) (bool, er
 	}
 	detail := strings.ToLower(strings.TrimSpace(firstNonBlank(result.Stderr, result.Stdout)))
 	if localContainerRouteFailure(detail) {
-		return false, commandError("confirm local-container absence", result, err)
+		return false, shared.LocalCommandError("confirm local-container absence", result, err)
 	}
 	containerID := strings.ToLower(strings.TrimSpace(id))
 	// Accept Podman's quoted-ID spelling only as the complete diagnostic.
@@ -2168,7 +2168,7 @@ func (b *backend) exactContainerAbsent(ctx context.Context, id string) (bool, er
 			return true, nil
 		}
 	}
-	return false, commandError("confirm local-container absence", result, err)
+	return false, shared.LocalCommandError("confirm local-container absence", result, err)
 }
 
 func localContainerRouteFailure(detail string) bool {
@@ -2344,7 +2344,7 @@ func (b *backend) findContainerForClaim(ctx context.Context, claim core.LeaseCla
 func (b *backend) removeContainer(ctx context.Context, id string) error {
 	result, err := b.docker(ctx, []string{"rm", "-f", id}, nil, b.rt.Stderr)
 	if err != nil {
-		return commandError("container remove", result, err)
+		return shared.LocalCommandError("container remove", result, err)
 	}
 	return nil
 }
@@ -2529,7 +2529,7 @@ func (b *backend) assertRequestedArchitecture(ctx context.Context, cfg core.Conf
 	}
 	result, runErr := b.containerRuntime(ctx, cfg, []string{"info", "--format", format}, nil, nil)
 	if runErr != nil {
-		return "", core.Exit(2, "local-container architecture assertion failed: requested=%s available=unknown: query %s daemon architecture: %v", requested, runtimeLabel, commandError("container runtime info", result, runErr))
+		return "", core.Exit(2, "local-container architecture assertion failed: requested=%s available=unknown: query %s daemon architecture: %v", requested, runtimeLabel, shared.LocalCommandError("container runtime info", result, runErr))
 	}
 	raw := strings.TrimSpace(result.Stdout)
 	available, normalizeErr := core.NormalizeArchitecture(raw)
@@ -2658,21 +2658,6 @@ func containerSSHHostPort(container inspectContainer) (string, string, error) {
 		host = "127.0.0.1"
 	}
 	return host, strings.TrimSpace(ports[0].HostPort), nil
-}
-
-func commandError(action string, result core.LocalCommandResult, err error) error {
-	code := result.ExitCode
-	if code == 0 {
-		code = 1
-	}
-	detail := strings.TrimSpace(result.Stderr)
-	if detail == "" {
-		detail = strings.TrimSpace(result.Stdout)
-	}
-	if detail != "" {
-		return core.Exit(code, "%s failed: %v: %s", action, err, detail)
-	}
-	return core.Exit(code, "%s failed: %v", action, err)
 }
 
 func isPodmanRuntime(runtimeName string) bool {

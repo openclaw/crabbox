@@ -554,6 +554,9 @@ Rules:
   tests can pass a fake clock for deterministic timing assertions.
 - Use `rt.Stdout` and `rt.Stderr` for streaming and warnings. Do not write
   directly to `os.Stdout` / `os.Stderr`.
+- Use `shared.LocalCommandError` when a failed tool keeps its nonzero exit code
+  (zero becomes one) and reports trimmed stderr before stdout. Providers with
+  different exit, redaction, or cause-wrapping contracts retain their own policy.
 - Use `rt.HTTP` for outbound HTTP when the provider has a JSON API. Tests can
   inject a stubbed transport.
 
