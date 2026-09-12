@@ -938,6 +938,15 @@ logs <run-id>`](logs.md) prints retained remote output (retention is bounded so
 a noisy command cannot fill storage). See
 [history and logs](../features/history-logs.md).
 
+Use `--record-local` to retain private, bounded local history for this run,
+including coordinator-free and delegated execution. Trusted user configuration
+can enable `history.local.enabled`; an explicit `--record-local=false` disables
+it for one run. Repository policy cannot silently enable this storage. The
+printed run ID works with local history/logs/results after lease cleanup.
+Local history finalization runs after the existing timing/receipt operations;
+failure warns and leaves incomplete metadata without changing their result or
+the original process exit. It never uploads a direct run or creates attestation.
+
 ## Pond
 
 Use `--pond <name>` to tag a new lease into a named pond. Pond is a reserved
@@ -1066,4 +1075,5 @@ Run-specific flags:
 --label <text>
 --timing-json
 --timing-record default|off|path
+--record-local
 ```

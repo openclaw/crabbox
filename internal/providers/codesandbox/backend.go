@@ -128,8 +128,8 @@ func (b *codeSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 			}
 			return shared.DelegatedSandboxCommand{
 				Text: strings.Join(command, " "),
-				Run: func(ctx context.Context) (int, error) {
-					return b.execCommand(ctx, api, sandboxID, workdir, command, req.Env)
+				Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
+					return b.execCommand(ctx, api, sandboxID, workdir, command, req.Env, stdout, stderr)
 				},
 			}, nil
 		},
@@ -480,7 +480,7 @@ func (b *codeSandboxBackend) Doctor(ctx context.Context, _ DoctorRequest) (Docto
 	return result, nil
 }
 
-func (b *codeSandboxBackend) execCommand(ctx context.Context, api codeSandboxAPI, sandboxID, workdir string, command []string, env map[string]string) (int, error) {
+func (b *codeSandboxBackend) execCommand(ctx context.Context, api codeSandboxAPI, sandboxID, workdir string, command []string, env map[string]string, stdout, stderr io.Writer) (int, error) {
 	if len(command) == 0 {
 		return 2, errors.New("missing command")
 	}
@@ -494,10 +494,10 @@ func (b *codeSandboxBackend) execCommand(ctx context.Context, api codeSandboxAPI
 		return 1, err
 	}
 	if res.Stdout != "" {
-		_, _ = io.WriteString(b.rt.Stdout, res.Stdout)
+		_, _ = io.WriteString(stdout, res.Stdout)
 	}
 	if res.Stderr != "" {
-		_, _ = io.WriteString(b.rt.Stderr, res.Stderr)
+		_, _ = io.WriteString(stderr, res.Stderr)
 	}
 	return res.ExitCode, nil
 }

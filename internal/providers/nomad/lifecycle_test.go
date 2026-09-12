@@ -1166,7 +1166,7 @@ func TestRunLiteralArgumentsSurviveNativeStdinTransport(t *testing.T) {
 	b, _, _ := testBackend(t, fake)
 	workdir := t.TempDir()
 	marker := filepath.Join(workdir, "must-not-exist")
-	_, err = b.runCommand(context.Background(), fake, allocationReadiness{JobID: "job", AllocationID: "alloc", Task: "task"}, RunRequest{Command: []string{"printf", "%s", ";", "touch", marker}, CommandLiteralArgs: map[int]bool{2: true}}, workdir)
+	_, err = b.runCommand(context.Background(), fake, allocationReadiness{JobID: "job", AllocationID: "alloc", Task: "task"}, RunRequest{Command: []string{"printf", "%s", ";", "touch", marker}, CommandLiteralArgs: map[int]bool{2: true}}, workdir, b.rt.Stdout, b.rt.Stderr)
 	if err != nil {
 		t.Fatal(err)
 	}

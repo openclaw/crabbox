@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"path"
 	"strings"
 	"time"
@@ -137,11 +138,11 @@ func (b *e2bBackend) Run(ctx context.Context, req RunRequest) (RunResult, error)
 				return shared.DelegatedSandboxCommand{}, exit(2, "%v", err)
 			}
 			command := intent.ShellSource()
-			return shared.DelegatedSandboxCommand{Run: func(ctx context.Context) (int, error) {
+			return shared.DelegatedSandboxCommand{Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
 				fmt.Fprintf(b.rt.Stderr, "running on e2b %s\n", strings.Join(req.Command, " "))
 				return client.StartProcess(ctx, session, e2bProcessRequest{
 					Command: command, CWD: workspace, Env: req.Env, User: processUser,
-					Timeout: e2bTimeoutDuration(b.cfg.TTL), Stdout: b.rt.Stdout, Stderr: b.rt.Stderr,
+					Timeout: e2bTimeoutDuration(b.cfg.TTL), Stdout: stdout, Stderr: stderr,
 				})
 			}}, nil
 		},

@@ -204,7 +204,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		printEnvForwardingSummary(b.rt.Stderr, req.Options.EnvAllow, req.Env)
 	}
 	commandStarted := core.ClockNow(b.rt.Clock)
-	exitCode, commandErr := runner.Exec(ctx, vm, command, b.cfg.AWSLambdaMicroVM.Workdir, req.Env, b.rt.Stdout, b.rt.Stderr)
+	req.Observation.Phase(core.RunPhaseCommand)
+	stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, core.RunOutputWorkload)
+	exitCode, commandErr := runner.Exec(ctx, vm, command, b.cfg.AWSLambdaMicroVM.Workdir, req.Env, stdout, stderr)
 	result.Command = core.ClockNow(b.rt.Clock).Sub(commandStarted)
 	result.CommandText = strings.Join(req.Command, " ")
 	commandRan = true

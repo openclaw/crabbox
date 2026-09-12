@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"path"
 	"slices"
 	"strings"
@@ -199,10 +200,10 @@ func (b *cubesandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 			}
 			return shared.DelegatedSandboxCommand{
 				Text: strings.Join(req.Command, " "),
-				Run: func(ctx context.Context) (int, error) {
+				Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
 					return client.StartProcess(ctx, session, cubesandboxProcessRequest{
 						Command: command, CWD: workspace, Env: commandEnv, User: processUser,
-						Timeout: cubesandboxTimeoutDuration(b.cfg.TTL), Stdout: b.rt.Stdout, Stderr: b.rt.Stderr,
+						Timeout: cubesandboxTimeoutDuration(b.cfg.TTL), Stdout: stdout, Stderr: stderr,
 					})
 				},
 			}, nil

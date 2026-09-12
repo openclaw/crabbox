@@ -1336,7 +1336,7 @@ func TestBlacksmithRunTerminatesSyncStall(t *testing.T) {
 			Exec:   blockingSyncRunner{},
 		},
 	}
-	code := backend.runTestbox(context.Background(), "tbx_syncstall", []string{"pnpm", "test"}, false, false, nil, nil, nil)
+	code := backend.runTestbox(context.Background(), "tbx_syncstall", []string{"pnpm", "test"}, false, false, nil, nil, nil, nil)
 	if code != 124 {
 		t.Fatalf("exit=%d want 124", code)
 	}

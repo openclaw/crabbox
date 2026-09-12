@@ -1968,7 +1968,7 @@ func TestIsloExecForwardsEnv(t *testing.T) {
 	code, err := backend.exec(context.Background(), client, "crabbox-test", "/workspace/repo", []string{"env"}, false, map[string]string{
 		"API_TOKEN": "secret",
 		"CI":        "1",
-	}, "")
+	}, "", backend.rt.Stdout, backend.rt.Stderr)
 	if err != nil || code != 0 {
 		t.Fatalf("exec code=%d err=%v", code, err)
 	}

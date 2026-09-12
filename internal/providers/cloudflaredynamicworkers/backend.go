@@ -101,6 +101,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
 	commandStarted := core.ClockNow(b.rt.Clock)
+	req.Observation.Phase(core.RunPhaseCommand)
 	run, err := client.Run(ctx, loaderReq)
 	commandDuration := core.ClockNow(b.rt.Clock).Sub(commandStarted)
 	if err != nil {
@@ -214,7 +215,8 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if cacheMode == "explicit" {
 		fmt.Fprintf(b.rt.Stderr, "dynamic worker run=%s worker=%s\n", leaseID, run.WorkerID)
 	}
-	writeRunOutput(b.rt.Stdout, b.rt.Stderr, run)
+	stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, core.RunOutputWorkload)
+	writeRunOutput(stdout, stderr, run)
 	claimStatus := runStatus{
 		ID:       leaseID,
 		WorkerID: run.WorkerID,

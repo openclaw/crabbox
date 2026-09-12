@@ -1480,12 +1480,13 @@ func (runModuleRuntimeTestProvider) RegisterFlags(*flag.FlagSet, Config) any {
 func (runModuleRuntimeTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
-func (p runModuleRuntimeTestProvider) Configure(Config, Runtime) (Backend, error) {
-	return runModuleRuntimeTestBackend{spec: p.Spec()}, nil
+func (p runModuleRuntimeTestProvider) Configure(_ Config, rt Runtime) (Backend, error) {
+	return runModuleRuntimeTestBackend{spec: p.Spec(), rt: rt}, nil
 }
 
 type runModuleRuntimeTestBackend struct {
 	spec ProviderSpec
+	rt   Runtime
 }
 
 var runModuleRuntimeTestRequests []RunRequest
@@ -1511,6 +1512,13 @@ func (b runModuleRuntimeTestBackend) Warmup(context.Context, WarmupRequest) erro
 }
 func (b runModuleRuntimeTestBackend) Run(_ context.Context, req RunRequest) (RunResult, error) {
 	runModuleRuntimeTestRequests = append(runModuleRuntimeTestRequests, req)
+	if req.Observation != nil {
+		fmt.Fprintln(b.rt.Stderr, "fixture provider planning")
+		req.Observation.Phase(RunPhaseCommand)
+		stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, RunOutputProvider)
+		fmt.Fprintln(stdout, "fixture command stdout")
+		fmt.Fprintln(stderr, "fixture command stderr")
+	}
 	return RunResult{Provider: b.spec.Name, LeaseID: "mod_test", Slug: "module-runtime-test"}, nil
 }
 func (b runModuleRuntimeTestBackend) List(context.Context, ListRequest) ([]LeaseView, error) {

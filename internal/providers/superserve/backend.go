@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strings"
@@ -207,10 +208,10 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			}
 			return shared.DelegatedSandboxCommand{
 				Text: commandText,
-				Run: func(ctx context.Context) (int, error) {
+				Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
 					res, err := api.Exec(ctx, &access, execRequest{
 						Command: commandText, WorkingDir: workdir, Env: commandEnv, TimeoutSecs: b.execTimeoutSecs(),
-					}, b.rt.Stdout, b.rt.Stderr)
+					}, stdout, stderr)
 					return res.ExitCode, err
 				},
 			}, nil

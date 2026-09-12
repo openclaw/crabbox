@@ -164,7 +164,9 @@ func TestDelegatedSandboxSecondaryDiagnosticsKeepSafeMessages(t *testing.T) {
 		NoSync:   func(context.Context) error { return nil },
 		Command: func(context.Context) (DelegatedSandboxCommand, error) {
 			return DelegatedSandboxCommand{
-				Run:   func(context.Context) (int, error) { return 1, ExitErrorWithCause(1, "safe execution", primary) },
+				Run: func(context.Context, io.Writer, io.Writer) (int, error) {
+					return 1, ExitErrorWithCause(1, "safe execution", primary)
+				},
 				Close: func(context.Context) error { return ExitErrorWithCause(5, "safe cleanup", secondary) },
 			}, nil
 		},
@@ -311,7 +313,7 @@ func TestDelegatedSandboxLifecycle(t *testing.T) {
 				},
 				NoSync: func(context.Context) error { return step("workspace") },
 				Command: func(context.Context) (DelegatedSandboxCommand, error) {
-					return DelegatedSandboxCommand{Text: "true", Run: func(context.Context) (int, error) {
+					return DelegatedSandboxCommand{Text: "true", Run: func(context.Context, io.Writer, io.Writer) (int, error) {
 						if !locked {
 							t.Fatal("command without lock")
 						}
@@ -457,7 +459,7 @@ func TestDelegatedSandboxSequence(t *testing.T) {
 		},
 		Command: func(context.Context) (DelegatedSandboxCommand, error) {
 			add("command")
-			return DelegatedSandboxCommand{Run: func(context.Context) (int, error) { add("exec"); return 0, nil }, Close: func(context.Context) error { add("close-command"); return nil }}, nil
+			return DelegatedSandboxCommand{Run: func(context.Context, io.Writer, io.Writer) (int, error) { add("exec"); return 0, nil }, Close: func(context.Context) error { add("close-command"); return nil }}, nil
 		},
 		Cleanup: func(context.Context) error { add("cleanup"); return nil },
 	}
@@ -541,7 +543,7 @@ func TestDelegatedSandboxAcquisitionRecovery(t *testing.T) {
 				Acquire: acquire, Resolve: acquire, Setup: step("setup"), NoSync: step("workspace"),
 				Command: func(context.Context) (DelegatedSandboxCommand, error) {
 					calls = append(calls, "command")
-					return DelegatedSandboxCommand{Run: func(context.Context) (int, error) { calls = append(calls, "run"); return 0, nil }}, nil
+					return DelegatedSandboxCommand{Run: func(context.Context, io.Writer, io.Writer) (int, error) { calls = append(calls, "run"); return 0, nil }}, nil
 				},
 				Cleanup: step("cleanup"), Retained: step("retained"),
 			})
@@ -629,7 +631,7 @@ func TestDelegatedSandboxTimingWriterFailureDoesNotSkipCleanupOrMaskExit(t *test
 				Acquire: func(context.Context) (DelegatedSandbox, error) { return DelegatedSandbox{LeaseID: "lease"}, nil },
 				NoSync:  func(context.Context) error { return nil },
 				Command: func(context.Context) (DelegatedSandboxCommand, error) {
-					return DelegatedSandboxCommand{Run: func(context.Context) (int, error) { return code, nil }}, nil
+					return DelegatedSandboxCommand{Run: func(context.Context, io.Writer, io.Writer) (int, error) { return code, nil }}, nil
 				},
 				Cleanup: func(context.Context) error { calls++; return nil },
 			})
@@ -679,7 +681,10 @@ func TestDelegatedSandboxCancellationBetweenPhases(t *testing.T) {
 				},
 				Command: func(context.Context) (DelegatedSandboxCommand, error) {
 					step("command")
-					return DelegatedSandboxCommand{Run: func(context.Context) (int, error) { t.Fatal("command ran after cancellation"); return 0, nil }}, nil
+					return DelegatedSandboxCommand{Run: func(context.Context, io.Writer, io.Writer) (int, error) {
+						t.Fatal("command ran after cancellation")
+						return 0, nil
+					}}, nil
 				},
 				Cleanup: func(ctx context.Context) error {
 					if ctx.Err() != nil {

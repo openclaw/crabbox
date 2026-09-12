@@ -179,6 +179,9 @@ jobs:
       - name: Test native Windows archive preparation ownership
         run: go test ./internal/providers/blaxel -run '^TestRunPreparesArchiveBeforeCreate$' -count=1 -v
 
+      - name: Test native Windows local history store, readers, and observation
+        run: go test ./internal/cli/ -run '^(TestLocalHistory|TestRunObservation(DelegatedAppRoundTrip|DisabledHasNoLedger|CapturesOnlyCommandWriters|AdoptsExistingCaptureOmissions|FinalFailureOnlyWarns|NeverEntersWireRequest|CoordinatorReferenceExcludesCredentials|CoordinatorTerminalAcknowledgment|PolicyIgnoresRepositoryFiles)$)' -count=1 -timeout=5m -v
+
       - name: Test concurrent claim discovery and ownership
         run: go test ./internal/cli/ -run '^Test(ClaimMetadata|ClaimTransaction|RemoveControllerFile|ConfirmedAbsentStateCleanup|PrivateRunOutput)' -count=1 -v
 

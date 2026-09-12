@@ -279,6 +279,12 @@ permissions are broader than that.
 
 ## Repo-local config
 
+Private local run recording is off by default. Set `history.local.enabled: true`
+only in your user config to enable it for runs; repository files cannot change
+this policy. An explicit `run --record-local=false` overrides the user setting.
+See [local history](../features/history-logs.md#private-local-history) for storage
+bounds, output scope, and offline readers.
+
 User config holds machine-wide defaults and secrets; repo-local config holds
 project-specific, checkout-shareable settings. Keep sync rules, environment
 allow-lists, capacity policy, and Actions hydration settings in repo config so

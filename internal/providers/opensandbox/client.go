@@ -68,6 +68,8 @@ type sandboxInfo struct {
 }
 
 type runCommandRequest struct {
+	Stdout      io.Writer `json:"-"`
+	Stderr      io.Writer `json:"-"`
 	Command     string
 	Workdir     string
 	Env         map[string]string
@@ -575,6 +577,14 @@ func (c *sdkOpenSandboxClient) UploadFile(ctx context.Context, sandboxID, remote
 }
 
 func (c *sdkOpenSandboxClient) RunCommand(ctx context.Context, sandboxID string, req runCommandRequest) (int, error) {
+	commandClient := *c
+	if req.Stdout != nil {
+		commandClient.rt.Stdout = req.Stdout
+	}
+	if req.Stderr != nil {
+		commandClient.rt.Stderr = req.Stderr
+	}
+	c = &commandClient
 	if timeout := c.execRequestTimeout(req.TimeoutSecs); timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)

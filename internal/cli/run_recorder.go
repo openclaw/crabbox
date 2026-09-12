@@ -40,6 +40,7 @@ type runRecorder struct {
 	leaseSlug          string
 	leaseProvider      string
 	finished           bool
+	terminalConfirmed  bool
 	warned             bool
 	warnMu             sync.Mutex
 	publisher          *runEventPublisher
@@ -276,6 +277,7 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 		_, finishErr := r.coord.FinishRun(ctx, r.runID, exitCode, sync, command, log, truncated, results, telemetry, classification, receipt)
 		if finishErr == nil && receipt == nil {
 			r.finished = true
+			r.terminalConfirmed = true
 			return nil
 		}
 		lastErr = nil
@@ -288,6 +290,7 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 			if receiptErr == nil {
 				if committed == *receipt {
 					r.finished = true
+					r.terminalConfirmed = true
 					return nil
 				}
 				lastErr = fmt.Errorf("stored terminal receipt differs from the signed finish payload")

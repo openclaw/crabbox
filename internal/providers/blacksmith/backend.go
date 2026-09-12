@@ -217,6 +217,7 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (runResult 
 	stdoutProof := newBlacksmithProofTailBuffer()
 	stderrProof := newBlacksmithProofTailBuffer()
 	commandStart := b.rt.Clock.Now()
+	req.Observation.Phase(core.RunPhaseCommand)
 	phaseTracker := core.NewCommandPhaseTracker(commandStart)
 	code := 0
 	var commandEnd time.Time
@@ -237,6 +238,7 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (runResult 
 			phaseTracker,
 			mergeWriters(stdoutCapture, stdoutProof),
 			mergeWriters(stderrCapture, stderrProof),
+			req.Observation,
 		)
 		return nil
 	}); err != nil {
@@ -814,15 +816,16 @@ func (b *blacksmithBackend) openFailureStreamCapture(label string) (io.WriteClos
 	return core.NewCappedFailureBundleStream(file), path, cleanup, nil
 }
 
-func (b *blacksmithBackend) runTestbox(ctx context.Context, leaseID string, command []string, debug, shellMode bool, phaseTracker *core.CommandPhaseTracker, stdoutExtra, stderrExtra io.Writer) int {
+func (b *blacksmithBackend) runTestbox(ctx context.Context, leaseID string, command []string, debug, shellMode bool, phaseTracker *core.CommandPhaseTracker, stdoutExtra, stderrExtra io.Writer, observation *core.RunObservation) int {
 	keyPath, err := testboxKeyPath(leaseID)
 	if err != nil {
 		fmt.Fprintf(b.rt.Stderr, "blacksmith key path failed: %v\n", err)
 		return 2
 	}
 	args := blacksmithRunArgs(b.cfg, leaseID, keyPath, command, debug || b.cfg.Blacksmith.Debug, shellMode)
-	stdout, stdoutPhaseWriter := commandPhaseWriter(mergeWriters(b.rt.Stdout, stdoutExtra), phaseTracker)
-	stderr, stderrPhaseWriter := commandPhaseWriter(mergeWriters(b.rt.Stderr, stderrExtra), phaseTracker)
+	stdoutTarget, stderrTarget := observation.CommandWriters(mergeWriters(b.rt.Stdout, stdoutExtra), mergeWriters(b.rt.Stderr, stderrExtra), core.RunOutputProvider)
+	stdout, stdoutPhaseWriter := commandPhaseWriter(stdoutTarget, phaseTracker)
+	stderr, stderrPhaseWriter := commandPhaseWriter(stderrTarget, phaseTracker)
 	result, timedOut, err := b.runCommandWithSyncGuard(ctx, args, stdout, stderr)
 	stdoutPhaseWriter.Flush()
 	stderrPhaseWriter.Flush()

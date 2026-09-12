@@ -45,7 +45,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	}
 	fmt.Fprintf(b.rt.Stderr, "provider=%s cli=%s sync_delegated=true lifecycle=one-shot\n", providerName, cli.binary())
 	commandStart := time.Now()
-	exitCode, runErr := cli.runCommand(ctx, req.Repo.Root, commandText, req.Env, b.rt.Stdout, b.rt.Stderr)
+	req.Observation.Phase(core.RunPhaseCommand)
+	stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, core.RunOutputProvider)
+	exitCode, runErr := cli.runCommand(ctx, req.Repo.Root, commandText, req.Env, stdout, stderr)
 	commandDuration := time.Since(commandStart)
 	result := RunResult{
 		ExitCode:      exitCode,

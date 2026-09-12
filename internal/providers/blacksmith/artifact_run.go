@@ -336,6 +336,8 @@ func (b *blacksmithBackend) runArtifactTestbox(ctx context.Context, req RunReque
 	var out, diagnostic *blacksmithControlDemux
 	var outGuard, errGuard *blacksmithArchiveGuard
 	filter := func(stdout, stderr io.Writer) (io.Writer, io.Writer) {
+		// Both native streams may include provider diagnostics even with control framing.
+		stdout, stderr = req.Observation.CommandWriters(stdout, stderr, core.RunOutputProvider)
 		outGuard, errGuard = &blacksmithArchiveGuard{output: stdout}, &blacksmithArchiveGuard{output: stderr}
 		r.output = outGuard
 		out = &blacksmithControlDemux{data: r.data, record: r.record, cancel: cancel}

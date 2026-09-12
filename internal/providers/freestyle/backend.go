@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strings"
@@ -162,8 +163,8 @@ func (b *freestyleBackend) Run(ctx context.Context, req RunRequest) (RunResult, 
 			if req.EnvSummary {
 				printEnvForwardingSummary(b.rt.Stderr, freestyleProvider, "forwarded", req.Options.EnvAllow, req.Env)
 			}
-			return shared.DelegatedSandboxCommand{Run: func(ctx context.Context) (int, error) {
-				return b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, req.Env)
+			return shared.DelegatedSandboxCommand{Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
+				return b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, req.Env, stdout, stderr)
 			}}, nil
 		},
 		Cleanup: func(ctx context.Context) error {
@@ -321,7 +322,7 @@ func freestyleCleanupCommand(leaseID string) string {
 	return fmt.Sprintf("crabbox stop --provider %s --id %s", freestyleProvider, shellQuote(leaseID))
 }
 
-func (b *freestyleBackend) exec(ctx context.Context, client freestyleAPI, id, workdir string, command []string, shellMode bool, env map[string]string) (int, error) {
+func (b *freestyleBackend) exec(ctx context.Context, client freestyleAPI, id, workdir string, command []string, shellMode bool, env map[string]string, stdout, stderr io.Writer) (int, error) {
 	execCommand := freestyleExecCommand(command, shellMode)
 	parts := make([]string, 0, 3)
 	if workdir != "" {
@@ -332,7 +333,7 @@ func (b *freestyleBackend) exec(ctx context.Context, client freestyleAPI, id, wo
 	}
 	parts = append(parts, execCommand)
 	fullCommand := strings.Join(parts, " && ")
-	return client.Exec(ctx, id, "bash -lc "+shellQuote(fullCommand), b.rt.Stdout, b.rt.Stderr)
+	return client.Exec(ctx, id, "bash -lc "+shellQuote(fullCommand), stdout, stderr)
 }
 
 func freestyleEnvExportCommand(env map[string]string) string {

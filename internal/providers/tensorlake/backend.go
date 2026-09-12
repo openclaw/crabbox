@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"strings"
@@ -126,7 +127,7 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 			if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
 				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
-			var command shared.DelegatedSandboxCommand
+			command := shared.DelegatedSandboxCommand{OutputScope: core.RunOutputProvider}
 			if len(req.Env) > 0 {
 				envPath, cleanup, err := b.uploadEnvProfile(ctx, cli, claim, req.Env)
 				if cleanup != nil {
@@ -140,8 +141,8 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 				}
 				args = shared.WrapCommandWithShellEnvProfile(args, envPath)
 			}
-			command.Run = func(ctx context.Context) (int, error) {
-				code, err := cli.execStream(ctx, claim.CloudID, workdir, args, b.rt.Stdout, b.rt.Stderr)
+			command.Run = func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
+				code, err := cli.execStream(ctx, claim.CloudID, workdir, args, stdout, stderr)
 				if err != nil {
 					return code, shared.ExitErrorWithCause(1, shared.RedactErrorSecrets(err.Error(), b.cfg.Tensorlake.APIKey), err)
 				}

@@ -239,10 +239,11 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 			}
 			text := intent.ShellCommand("bash", "-lc")
 			return shared.DelegatedSandboxCommand{
-				Text: text,
-				Run: func(ctx context.Context) (int, error) {
+				Text: text, OutputScope: core.RunOutputProvider,
+				Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
 					return api.RunCommand(ctx, sandboxID, runCommandRequest{
 						Command: text, Workdir: workdir, Env: req.Env, TimeoutSecs: b.execTimeoutSecs(),
+						Stdout: stdout, Stderr: stderr,
 					})
 				},
 			}, nil

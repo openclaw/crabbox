@@ -231,7 +231,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (finalResult RunResul
 				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
 			commandStart := core.ClockNow(b.rt.Clock)
-			exitCode, runErr := b.execCommand(ctx, transport, sandboxID, workdir, command, req.Env, b.rt.Stdout, b.rt.Stderr)
+			req.Observation.Phase(core.RunPhaseCommand)
+			stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, core.RunOutputProvider)
+			exitCode, runErr := b.execCommand(ctx, transport, sandboxID, workdir, command, req.Env, stdout, stderr)
 			commandDuration := core.ClockNow(b.rt.Clock).Sub(commandStart)
 			commandRan = true
 			outcome := shared.FinalizeDelegatedCommandOutcome(exitCode, runErr)

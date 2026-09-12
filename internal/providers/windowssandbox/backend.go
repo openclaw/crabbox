@@ -121,11 +121,13 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	fmt.Fprintf(b.rt.Stderr, "provider=%s workdir=%s host_workspace=%s networking=%s vgpu=%s\n", providerName, cfg.WindowsSandbox.Workdir, run.hostWorkspace, cfg.WindowsSandbox.Networking, cfg.WindowsSandbox.VGPU)
 
 	commandStarted := core.ClockNow(b.rt.Clock)
+	req.Observation.Phase(core.RunPhaseCommand)
+	stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, core.RunOutputProvider)
 	execResult, execErr := b.runHostRunner(ctx, LocalCommandRequest{
 		Name:                 "powershell.exe",
 		Args:                 hostRunnerArgs(run, cfg, req),
-		Stdout:               b.rt.Stdout,
-		Stderr:               b.rt.Stderr,
+		Stdout:               stdout,
+		Stderr:               stderr,
 		DisableOutputCapture: true,
 	}, filepath.Join(run.hostControl, "cancel.txt"), req.Keep || req.KeepOnFailure)
 	commandDuration := core.ClockNow(b.rt.Clock).Sub(commandStarted)

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -297,7 +298,9 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (result RunResult
 		return result, err
 	}
 	commandStart := b.now()
-	exitCode, runErr := b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, isloWorkloadEnv(req.Env, tailnetReady), workloadUser)
+	req.Observation.Phase(core.RunPhaseCommand)
+	stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, core.RunOutputWorkload)
+	exitCode, runErr := b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, isloWorkloadEnv(req.Env, tailnetReady), workloadUser, stdout, stderr)
 	commandDuration := b.now().Sub(commandStart)
 	commandRan = true
 	result.Command = commandDuration
@@ -728,7 +731,7 @@ func (b *isloBackend) cleanupCreatedIsloSandbox(client isloAPI, identity isloIde
 	return nil
 }
 
-func (b *isloBackend) exec(ctx context.Context, client isloAPI, name, workdir string, command []string, shellMode bool, env map[string]string, user string) (int, error) {
+func (b *isloBackend) exec(ctx context.Context, client isloAPI, name, workdir string, command []string, shellMode bool, env map[string]string, user string, stdout, stderr io.Writer) (int, error) {
 	execCommand, err := isloExecCommand(command, shellMode)
 	if err != nil {
 		return 2, err
@@ -747,7 +750,7 @@ func (b *isloBackend) exec(ctx context.Context, client isloAPI, name, workdir st
 			req.Env[name] = &value
 		}
 	}
-	return client.ExecStream(ctx, name, req, b.rt.Stdout, b.rt.Stderr)
+	return client.ExecStream(ctx, name, req, stdout, stderr)
 }
 
 func isloExecCommand(command []string, shellMode bool) ([]string, error) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"strings"
@@ -192,8 +193,8 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
 			return shared.DelegatedSandboxCommand{
 				Text: strings.Join(req.Command, " "),
-				Run: func(ctx context.Context) (int, error) {
-					return b.runCommand(ctx, client, ready, req, workdir)
+				Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
+					return b.runCommand(ctx, client, ready, req, workdir, stdout, stderr)
 				},
 			}, nil
 		},

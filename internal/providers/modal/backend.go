@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"strings"
 	"time"
@@ -154,13 +155,13 @@ func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 				}
 				command = shared.WrapCommandWithShellEnvProfile(command, envPath)
 			}
-			return shared.DelegatedSandboxCommand{Close: closeCommand, Run: func(ctx context.Context) (int, error) {
+			return shared.DelegatedSandboxCommand{OutputScope: core.RunOutputProvider, Close: closeCommand, Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
 				var code int
 				err := fenced(func() error {
 					var err error
 					code, err = client.Exec(ctx, modalExecRequest{
 						SandboxID: sandboxID, Command: command,
-						Timeout: durationSecondsCeil(modalTimeoutDuration(b.cfg.TTL)), Stdout: b.rt.Stdout, Stderr: b.rt.Stderr,
+						Timeout: durationSecondsCeil(modalTimeoutDuration(b.cfg.TTL)), Stdout: stdout, Stderr: stderr,
 					})
 					return err
 				})

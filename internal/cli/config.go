@@ -16,6 +16,7 @@ import (
 )
 
 type Config struct {
+	RecordLocal                   bool `json:"-" yaml:"-"`
 	Profile                       string
 	Provider                      string
 	providerSelectionSource       providerSelectionSource
@@ -2307,6 +2308,7 @@ func baseConfig() Config {
 }
 
 type fileConfig struct {
+	History                  *fileLocalHistoryPolicy             `yaml:"history,omitempty"`
 	Profile                  string                              `yaml:"profile,omitempty"`
 	Provider                 string                              `yaml:"provider,omitempty"`
 	Target                   string                              `yaml:"target,omitempty"`
@@ -3426,6 +3428,9 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 }
 
 func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, trusted bool, providerSource providerSelectionSource) error {
+	if trusted && file.History != nil && file.History.Local != nil && file.History.Local.Enabled != nil {
+		cfg.RecordLocal = *file.History.Local.Enabled
+	}
 	credentialSource := credentialSourceForFile(trusted)
 	inputSource := configInputSourceForFile(providerSource)
 	if !trusted && cfg.credentialProvenance.repositoryRoot == "" {

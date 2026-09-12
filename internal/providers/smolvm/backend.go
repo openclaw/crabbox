@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"path"
 	"regexp"
@@ -139,8 +140,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			return shared.DelegatedSandboxCommand{
 				Text:  strings.Join(req.Command, " "),
 				Close: closeCommand,
-				Run: func(ctx context.Context) (int, error) {
-					return client.ExecStream(ctx, claim.CloudID, command, folder, b.rt.Stdout)
+				Run: func(ctx context.Context, stdout, _ io.Writer) (int, error) {
+					req.Observation.OmitStream("stderr", "provider-combines-output")
+					return client.ExecStream(ctx, claim.CloudID, command, folder, stdout)
 				},
 			}, nil
 		},

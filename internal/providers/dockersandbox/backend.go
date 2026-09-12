@@ -162,7 +162,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	}
 	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s sync_delegated=true\n", providerName, leaseID, sandboxName, workdir)
 	commandStart := core.ClockNow(b.rt.Clock)
-	exitCode, runErr := cli.execStream(ctx, sandboxName, workdir, envFile, command, b.rt.Stdout, b.rt.Stderr)
+	req.Observation.Phase(core.RunPhaseCommand)
+	stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, core.RunOutputProvider)
+	exitCode, runErr := cli.execStream(ctx, sandboxName, workdir, envFile, command, stdout, stderr)
 	result.Command = core.ClockNow(b.rt.Clock).Sub(commandStart)
 	result.CommandText = strings.Join(req.Command, " ")
 	commandRan = true

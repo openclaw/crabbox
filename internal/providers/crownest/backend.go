@@ -283,7 +283,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	commandStart := core.ClockNow(b.rt.Clock)
 	commandRan, cancelActiveRun = true, true
 	cancelRunID = workspaceRun.ID
-	terminal, streamErr := b.streamRun(ctx, api, workspaceRun.ID)
+	req.Observation.Phase(core.RunPhaseCommand)
+	stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, core.RunOutputWorkload)
+	terminal, streamErr := b.streamRun(ctx, api, workspaceRun.ID, stdout, stderr)
 	commandDuration := core.ClockNow(b.rt.Clock).Sub(commandStart)
 	if terminal.ID == "" && ctx.Err() == nil {
 		if latest, getErr := api.GetWorkspaceRun(ctx, workspaceRun.ID); getErr == nil {
@@ -716,7 +718,7 @@ func hashArchive(file *os.File) (string, int64, error) {
 	return hex.EncodeToString(h.Sum(nil)), size, nil
 }
 
-func (b *backend) streamRun(ctx context.Context, api client, workspaceRunID string) (workspaceRun, error) {
+func (b *backend) streamRun(ctx context.Context, api client, workspaceRunID string, stdout, stderr io.Writer) (workspaceRun, error) {
 	var afterSeq int64
 	for attempts := 0; attempts < 3; attempts++ {
 		body, err := api.StreamWorkspaceRunEvents(ctx, workspaceRunID, afterSeq)
@@ -730,9 +732,9 @@ func (b *backend) streamRun(ctx context.Context, api client, workspaceRunID stri
 			}
 			switch event.Type {
 			case "stdout":
-				_, _ = io.WriteString(b.rt.Stdout, event.Data)
+				_, _ = io.WriteString(stdout, event.Data)
 			case "stderr":
-				_, _ = io.WriteString(b.rt.Stderr, event.Data)
+				_, _ = io.WriteString(stderr, event.Data)
 			case "terminal":
 				terminal = event.WorkspaceRun
 			case "error":

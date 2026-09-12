@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -123,12 +124,12 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req RunRequest) (
 			if req.EnvSummary {
 				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
-			return shared.DelegatedSandboxCommand{Text: command, Run: func(ctx context.Context) (int, error) {
+			return shared.DelegatedSandboxCommand{Text: command, Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
 				fmt.Fprintf(b.rt.Stderr, "running on %s %s\n", providerName, strings.Join(req.Command, " "))
 				return client.ExecStream(ctx, leaseID, azureDynamicSessionsExecRequest{
 					Command: command, Cwd: workspace, Env: req.Env,
 					TimeoutMS: durationMillisecondsCeil(azureDynamicSessionsTimeout(b.cfg)),
-				}, b.rt.Stdout, b.rt.Stderr)
+				}, stdout, stderr)
 			}}, nil
 		},
 		Cleanup: func(ctx context.Context) error {

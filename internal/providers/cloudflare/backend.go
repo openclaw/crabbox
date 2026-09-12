@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"path"
 	"strings"
@@ -135,8 +136,8 @@ func (b *cloudflareBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 			if req.EnvSummary {
 				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
-			return shared.DelegatedSandboxCommand{Text: command, Run: func(ctx context.Context) (int, error) {
-				return client.execStream(ctx, claim.LeaseID, execStreamRequest{Command: command, Cwd: workdir, Env: req.Env, TimeoutMS: durationMillisecondsCeil(b.cfg.TTL)}, b.rt.Stdout, b.rt.Stderr)
+			return shared.DelegatedSandboxCommand{Text: command, Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
+				return client.execStream(ctx, claim.LeaseID, execStreamRequest{Command: command, Cwd: workdir, Env: req.Env, TimeoutMS: durationMillisecondsCeil(b.cfg.TTL)}, stdout, stderr)
 			}}, nil
 		},
 		Cleanup: func(ctx context.Context) error { _, err := destroyClaimedSandbox(ctx, client, claim); return err },

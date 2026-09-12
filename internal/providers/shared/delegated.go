@@ -39,9 +39,11 @@ type DelegatedSandboxRecovery struct {
 // Adapters may return a mandatory cleanup failure, or warn and return nil for
 // best-effort cleanup. An explicit ExitError preserves its cleanup-only code.
 type DelegatedSandboxCommand struct {
-	Text  string
-	Run   func(context.Context) (int, error)
-	Close func(context.Context) error
+	Text string
+	// OutputScope names the adapter's actual stream boundary, not inferred workload purity.
+	OutputScope core.RunOutputScope
+	Run         func(context.Context, io.Writer, io.Writer) (int, error)
+	Close       func(context.Context) error
 }
 
 type observedProcessEndError struct{ message string }
@@ -191,6 +193,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 			result.Session.Kept = true
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 			if shouldStop {
+				req.Observation.Phase(core.RunPhaseCleanup)
 				if err := lifecycle.Cleanup(cleanupCtx); err != nil {
 					appendFailure(fmt.Errorf("%s cleanup failed: %w", lifecycle.Provider, err), 1)
 				} else {
@@ -245,14 +248,17 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 		return result, err
 	}
 	if acquired {
+		req.Observation.Phase(core.RunPhaseAcquire)
 		sandbox, err = lifecycle.Acquire(ctx)
 	} else {
+		req.Observation.Phase(core.RunPhaseResolve)
 		sandbox, err = lifecycle.Resolve(ctx)
 	}
 	if err != nil {
 		acquireFailed = acquired
 		if recovery := sandbox.Recovery; acquired && recovery != nil && recovery.LeaseID != "" {
 			result.LeaseID, result.Slug = recovery.LeaseID, recovery.Slug
+			req.Observation.BindLease(recovery.LeaseID, recovery.Slug)
 			result.Session = &core.RunSessionHandle{
 				Provider: lifecycle.Provider, LeaseID: recovery.LeaseID, Slug: recovery.Slug,
 				Kept: true, CleanupCommand: recovery.CleanupCommand,
@@ -261,6 +267,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 		return result, err
 	}
 	result.LeaseID, result.Slug = sandbox.LeaseID, sandbox.Slug
+	req.Observation.BindLease(sandbox.LeaseID, sandbox.Slug)
 	result.Session = &core.RunSessionHandle{
 		Provider: lifecycle.Provider, LeaseID: sandbox.LeaseID, Slug: sandbox.Slug,
 		Reused: !acquired, CleanupCommand: sandbox.CleanupCommand,
@@ -278,6 +285,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 		return result, err
 	}
 	if lifecycle.Setup != nil {
+		req.Observation.Phase(core.RunPhaseSetup)
 		if err := lifecycle.Setup(ctx); err != nil {
 			return result, err
 		}
@@ -285,6 +293,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
+	req.Observation.Phase(core.RunPhaseSync)
 	if req.NoSync {
 		if err := lifecycle.NoSync(ctx); err != nil {
 			return result, err
@@ -311,8 +320,14 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 		return result, err
 	}
 	result.CommandText = command.Text
+	req.Observation.Phase(core.RunPhaseCommand)
+	scope := command.OutputScope
+	if scope == "" {
+		scope = core.RunOutputWorkload
+	}
+	commandStdout, commandStderr := req.Observation.CommandWriters(stdout, stderr, scope)
 	commandStarted := now()
-	result.ExitCode, err = command.Run(ctx)
+	result.ExitCode, err = command.Run(ctx, commandStdout, commandStderr)
 	result.Command = now().Sub(commandStarted)
 	commandRan = true
 	outcome := FinalizeDelegatedCommandOutcome(result.ExitCode, err)

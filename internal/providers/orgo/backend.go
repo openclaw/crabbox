@@ -145,7 +145,9 @@ func (b *orgoBackend) Run(ctx context.Context, req RunRequest) (result RunResult
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
 	commandStarted := core.ClockNow(b.rt.Clock)
-	exitCode, runErr := client.RunBash(ctx, lease.Computer.ID, command, b.rt.Stdout, b.rt.Stderr)
+	req.Observation.Phase(core.RunPhaseCommand)
+	stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, core.RunOutputWorkload)
+	exitCode, runErr := client.RunBash(ctx, lease.Computer.ID, command, stdout, stderr)
 	result.Command = core.ClockNow(b.rt.Clock).Sub(commandStarted)
 	commandRan = true
 	if runErr != nil {

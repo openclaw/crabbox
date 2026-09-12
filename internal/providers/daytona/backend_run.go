@@ -201,6 +201,9 @@ func (b *daytonaLeaseBackend) run(ctx context.Context, req RunRequest, original 
 		return RunResult{}, exit(2, "missing command")
 	}
 	commandStarted := time.Now()
+	req.Observation.Phase(core.RunPhaseCommand)
+	req.Observation.OmitStream("stderr", "provider-combines-output")
+	stdout, _ := req.Observation.CommandWriters(b.rt.Stdout, nil, core.RunOutputWorkload)
 	fmt.Fprintf(b.rt.Stderr, "running on daytona %s\n", strings.Join(req.Command, " "))
 	execOpts := []func(*sdkoptions.ExecuteCommand){sdkoptions.WithCwd(workdir)}
 	if env := req.Env; len(env) > 0 {
@@ -215,9 +218,9 @@ func (b *daytonaLeaseBackend) run(ctx context.Context, req RunRequest, original 
 		SyncDelegated: true,
 	}
 	if response != nil && response.Result != "" {
-		fmt.Fprint(b.rt.Stdout, response.Result)
+		fmt.Fprint(stdout, response.Result)
 		if !strings.HasSuffix(response.Result, "\n") {
-			fmt.Fprintln(b.rt.Stdout)
+			fmt.Fprintln(stdout)
 		}
 	}
 	fmt.Fprintf(b.rt.Stderr, "daytona run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)

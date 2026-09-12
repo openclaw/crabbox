@@ -3,6 +3,7 @@ package upstashbox
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/url"
 	"path"
 	"regexp"
@@ -128,8 +129,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 				command = shared.ShellScriptWithEnvProfile(command, envPath)
 			}
 			return shared.DelegatedSandboxCommand{Text: strings.Join(req.Command, " "), Close: closeCommand,
-				Run: func(ctx context.Context) (int, error) {
-					return client.ExecStream(ctx, boxID, command, folder, b.rt.Stdout)
+				Run: func(ctx context.Context, stdout, _ io.Writer) (int, error) {
+					req.Observation.OmitStream("stderr", "provider-combines-output")
+					return client.ExecStream(ctx, boxID, command, folder, stdout)
 				}}, nil
 		},
 		Cleanup: func(ctx context.Context) error {

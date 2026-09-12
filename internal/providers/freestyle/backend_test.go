@@ -92,7 +92,7 @@ func TestFreestyleExecForwardsEnvAfterWorkdir(t *testing.T) {
 	backend := &freestyleBackend{rt: Runtime{Stderr: io.Discard}}
 	code, err := backend.exec(context.Background(), client, "vm123", "/workspace/repo", []string{`echo "$GREETING"`}, false, map[string]string{
 		"GREETING": "hello world",
-	})
+	}, backend.rt.Stdout, backend.rt.Stderr)
 	if err != nil {
 		t.Fatal(err)
 	}

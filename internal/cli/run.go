@@ -260,6 +260,7 @@ type runFlagValues struct {
 	Reclaim                *bool
 	TimingJSON             *bool
 	TimingRecord           *string
+	RecordLocal            *bool
 }
 
 func registerRunFlags(fs *flag.FlagSet, defaults Config, options leaseCreateFlagRegistrationOptions) runFlagValues {
@@ -322,6 +323,7 @@ func registerRunFlags(fs *flag.FlagSet, defaults Config, options leaseCreateFlag
 	values.Reclaim = fs.Bool("reclaim", false, "claim this lease for the current repo")
 	values.TimingJSON = fs.Bool("timing-json", false, "print final timing as JSON")
 	values.TimingRecord = fs.String("timing-record", "", "append final timing to benchmark JSONL store: default, off, or path")
+	values.RecordLocal = fs.Bool("record-local", false, "retain private bounded local run history")
 	return values
 }
 
@@ -348,6 +350,9 @@ func loadRunConfig(fs *flag.FlagSet, flags runFlagValues, target leaseFlagTarget
 		if err := validateReadyPoolIdentityProviderConfig(cfg, *identity); err != nil {
 			return Config{}, err
 		}
+	}
+	if flagWasSet(fs, "record-local") {
+		cfg.RecordLocal = *flags.RecordLocal
 	}
 	return cfg, nil
 }
@@ -483,6 +488,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var runFailure error
 	returnedRunError := &err
 	recorder := &runRecorder{}
+	var observation *RunObservation
 	var prepareTerminalRun func()
 	var finalizeTerminalRun func()
 	var finalTimingReport *timingReport
@@ -565,6 +571,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			finalizeTerminalRun()
 		}
 		recorder.Failed(runFailure)
+		if observation != nil {
+			localReport, localHasReport := snapshotFinalTimingReport(frozenAt)
+			observation.finish(localReport, localHasReport, err, recorder)
+		}
 	}()
 	command := fs.Args()
 	if len(command) > 0 && command[0] == "--" {
@@ -873,6 +883,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		// The borrowed pool owns its proven endpoint, including before Resolve.
 		cfg.explicitSSHPort = ""
 	}
+	observation, err = beginRunObservation(cfg, executionRunID, runScriptRecordCommand(script, command), a.Stderr)
+	if err != nil {
+		return err
+	}
+	runReq.Observation = observation
 	backendRuntime := runtimeForApp(a)
 	if timingRecordEnabled || *timingJSON {
 		delegatedTimingCapture = &capturedTimingReportWriter{writer: a.Stderr}
@@ -911,6 +926,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return
 		}
 		cleanupStartedAt := time.Now()
+		observation.Phase(RunPhaseCleanup)
 		defer func() {
 			cleanup.Duration += time.Since(cleanupStartedAt)
 		}()
@@ -1031,6 +1047,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok && !sshScriptRun {
 		delegatedRoute = true
+		if cfg.Results.Auto || len(cfg.Results.JUnit) > 0 {
+			observation.Results(nil, "unsupported")
+		}
 		if err := validateDelegatedRunRouting(backend.Spec(), runReq, *readyPool, len(requiredArtifactSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
 			return err
 		}
@@ -1065,9 +1084,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			}
 		}
 		runnerObservedStartedAt = time.Now()
+		observation.Phase(RunPhaseOpaque)
 		result, runErr := delegated.Run(ctx, runReq)
+		observation.BindLease(result.LeaseID, result.Slug)
 		delegatedProviderEndedAt = time.Now()
-		if *timingJSON || timingRecordEnabled {
+		if *timingJSON || timingRecordEnabled || observation != nil {
 			report := timingReportFromDelegatedRunResult(runReq, result, backend.Spec().Name, runErr)
 			if delegatedTimingCapture != nil && delegatedTimingCapture.report != nil {
 				report = *delegatedTimingCapture.report
@@ -1259,6 +1280,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if !releaseResolvedLease || (!releaseUnreportedLease && !shouldReleaseRunLease(acquired, *keep, keepFailedLease, *stopAfter, runFailure)) {
 			return
 		}
+		observation.Phase(RunPhaseCleanup)
 		cleanupStartedAt := time.Now()
 		defer func() {
 			cleanup.Duration += time.Since(cleanupStartedAt)
@@ -1306,6 +1328,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}()
 	admitLease := func(lease *LeaseTarget) error {
 		server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
+		observation.BindLease(leaseID, serverSlug(server))
 		applyResolvedServerConfig(&cfg, server)
 		stripTargetCredentialsFromRunEnv(&envSelection, target)
 		if borrowedPool != nil && strings.TrimSpace(borrowedPool.Entry.WorkRoot) != "" {
@@ -1389,6 +1412,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	if *leaseIDFlag != "" {
 		leasePhase = "provider.resolve"
+		observation.Phase(RunPhaseResolve)
 		var lease LeaseTarget
 		req := ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim, Prepare: true}
 		if borrowedPool == nil {
@@ -1413,6 +1437,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 
 	} else {
 		var lease LeaseTarget
+		observation.Phase(RunPhaseAcquire)
 		lease, err = sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim, RequestedSlug: requestedSlug})
 		if err == nil {
 			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
@@ -1425,6 +1450,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	releaseResolvedLease = true
 	releaseUnreportedLease = acquired && leaseOutputPath != ""
+	observation.BindLease(leaseID, serverSlug(server))
+	observation.Phase(RunPhaseSetup)
 
 	leaseDuration := time.Since(leaseStartedAt)
 	if timingRecordEnabled {
@@ -1582,7 +1609,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	profileEnvFile := ""
 	actionsURL := ""
 	defer func() {
-		if finalTimingReport != nil || (!*timingJSON && !timingRecordEnabled) {
+		if finalTimingReport != nil || (!*timingJSON && !timingRecordEnabled && observation == nil) {
 			return
 		}
 		report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, time.Since(timings.started), ExitCodeForError(err, 7), actionsURL)
@@ -1871,6 +1898,7 @@ retrySync:
 	}
 	if !*noSync {
 		syncStart := time.Now()
+		observation.Phase(RunPhaseSync)
 		if freshPR.Empty() {
 			fmt.Fprintf(a.Stderr, "syncing %s -> %s:%s\n", repo.Root, target.Host, workdir)
 		} else {
@@ -2329,7 +2357,7 @@ afterSync:
 		printPreflight(target)
 		fmt.Fprintf(a.Stdout, "synced %s\n", workdir)
 		fmt.Fprintln(a.Stderr, formatRunSummary(timings, time.Since(timings.started), 0))
-		if *timingJSON || timingRecordEnabled {
+		if *timingJSON || timingRecordEnabled || observation != nil {
 			total := time.Since(timings.started)
 			report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, total, 0, actionsURL)
 			populateRunTimingMetadata(&report, cfg, repo, server, leaseID, executionRunID, workdir, nil)
@@ -2545,6 +2573,8 @@ afterSync:
 		stderrEvents = nil
 		stderr = io.MultiWriter(stderr, capturedRunLogWriter{&logBuffer})
 	}
+	observation.adoptDirectLog(&logBuffer, stdoutCaptured, stderrCaptured)
+	observation.Phase(RunPhaseCommand)
 	resultsMarker := ""
 	if cfg.Results.Auto {
 		resultsMarker = remoteResultsMarker
@@ -2765,6 +2795,11 @@ afterSync:
 	}
 	if cfg.Results.Auto || len(cfg.Results.JUnit) > 0 {
 		results, err = collectRemoteJUnitResults(ctx, target, workdir, cfg.Results, resultsMarker)
+		if results != nil {
+			observation.Results(results, "collected")
+		} else if err != nil {
+			observation.Results(nil, "unavailable")
+		}
 		if err != nil {
 			fmt.Fprintf(a.Stderr, "warning: collect test results incomplete: %v\n", err)
 		}
@@ -2920,7 +2955,7 @@ afterSync:
 		labelField = fmt.Sprintf(" label=%q", runLabelValue)
 	}
 	fmt.Fprintf(a.Stderr, "run details provider=%s lease=%s slug=%s run=%s%s type=%s repo=%s workdir=%s actions=%s stop_command=%q idle_timeout=%s\n", cfg.Provider, leaseID, blank(serverSlug(server), "-"), executionRunID, labelField, blank(server.ServerType.Name, "-"), repo.Root, workdir, blank(actionsURL, "-"), report.StopCommand, cfg.IdleTimeout)
-	if *timingJSON || timingRecordEnabled {
+	if *timingJSON || timingRecordEnabled || observation != nil {
 		finalTimingReport = &report
 	}
 	if code != 0 {

@@ -1230,6 +1230,7 @@ type ListRequest struct {
 }
 
 type RunRequest struct {
+	Observation           *RunObservation `json:"-" yaml:"-"`
 	Repo                  Repo
 	ID                    string
 	ReuseLease            bool // Planned reuse without an ID; a nonempty ID also implies reuse.

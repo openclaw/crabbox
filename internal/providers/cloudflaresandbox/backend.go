@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"slices"
@@ -186,10 +187,10 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
 				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, commandEnv)
 			}
-			return shared.DelegatedSandboxCommand{Text: commandText, Run: func(ctx context.Context) (int, error) {
+			return shared.DelegatedSandboxCommand{Text: commandText, Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
 				res, err := api.Exec(ctx, sandboxID, execRequest{
 					Command: commandText, WorkingDir: workdir, Env: commandEnv, TimeoutSecs: b.execTimeoutSecs(),
-				}, b.rt.Stdout, b.rt.Stderr)
+				}, stdout, stderr)
 				return res.ExitCode, err
 			}}, nil
 		},

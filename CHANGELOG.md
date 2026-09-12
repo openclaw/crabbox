@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add opt-in private local run history with bounded logs and parsed results, offline readback after lease cleanup, explicit provenance, and bounded pruning. [Issue 1515](https://github.com/openclaw/crabbox/issues/1515). Thanks @coygeek.
 - Bound Nomad's finite control-plane requests while retaining durable recovery identity for uncertain registration, preserving caller cancellation and keeping established exec streams outside the request ceiling. [PR 1916](https://github.com/openclaw/crabbox/pull/1916). Thanks @SebTardif.
 - Preserve GCP capacity fallback when a bounded error summary omits retry evidence, while keeping user-visible diagnostics redacted and bounded. [PR 1987](https://github.com/openclaw/crabbox/pull/1987). Thanks @steipete.
 - AWS: add administrator-only legacy cleanup recovery backed by authenticated original CloudTrail allocation evidence, preserving remaining key and access cleanup and recording an atomic scope-recovery audit without force-success. [PR 1975](https://github.com/openclaw/crabbox/pull/1975).

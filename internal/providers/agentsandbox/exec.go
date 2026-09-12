@@ -40,6 +40,8 @@ func (b *backend) execShell(ctx context.Context, client kubernetesClient, ready 
 }
 
 func (b *backend) runCommand(ctx context.Context, client kubernetesClient, ready sandboxReadiness, req RunRequest, workdir string) (int, error) {
+	req.Observation.Phase(core.RunPhaseCommand)
+	stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, core.RunOutputProvider)
 	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 	if err != nil {
 		return 0, err
@@ -53,8 +55,8 @@ func (b *backend) runCommand(ctx context.Context, client kubernetesClient, ready
 	err = b.execPod(execCtx, client, ready, podExecRequest{
 		Command: []string{"sh", "-s"},
 		Stdin:   strings.NewReader(script),
-		Stdout:  b.rt.Stdout,
-		Stderr:  b.rt.Stderr,
+		Stdout:  stdout,
+		Stderr:  stderr,
 	})
 	if err == nil {
 		return 0, nil

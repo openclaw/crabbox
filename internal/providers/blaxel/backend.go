@@ -125,8 +125,8 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			}
 			return shared.DelegatedSandboxCommand{
 				Text: strings.Join(req.Command, " "),
-				Run: func(ctx context.Context) (int, error) {
-					return b.execCommand(ctx, client, sandboxID, workdir, command, req.Env)
+				Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
+					return b.execCommand(ctx, client, sandboxID, workdir, command, req.Env, stdout, stderr)
 				},
 			}, nil
 		},
@@ -576,7 +576,7 @@ func (b *backend) waitSandboxReady(ctx context.Context, client Client, sandboxID
 	return result.Value, nil
 }
 
-func (b *backend) execCommand(ctx context.Context, client Client, sandboxID, workdir string, command []string, env map[string]string) (int, error) {
+func (b *backend) execCommand(ctx context.Context, client Client, sandboxID, workdir string, command []string, env map[string]string, stdout, stderr io.Writer) (int, error) {
 	if len(command) == 0 {
 		return 2, errors.New("missing command")
 	}
@@ -602,10 +602,10 @@ func (b *backend) execCommand(ctx context.Context, client Client, sandboxID, wor
 		return 1, err
 	}
 	if logs.Stdout != "" {
-		_, _ = io.WriteString(b.rt.Stdout, logs.Stdout)
+		_, _ = io.WriteString(stdout, logs.Stdout)
 	}
 	if logs.Stderr != "" {
-		_, _ = io.WriteString(b.rt.Stderr, logs.Stderr)
+		_, _ = io.WriteString(stderr, logs.Stderr)
 	}
 	if process.ExitCode == nil {
 		return 1, fmt.Errorf("blaxel process %s completed without an exit code", process.ID)

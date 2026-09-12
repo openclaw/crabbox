@@ -151,6 +151,8 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (result RunResul
 	}()
 
 	commandStarted := core.ClockNow(b.rt.Clock)
+	req.Observation.Phase(core.RunPhaseCommand)
+	stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, core.RunOutputWorkload)
 	var exitCode int
 	var execErr error
 	if err := verifyWandbClaim(claim); err != nil {
@@ -159,8 +161,8 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (result RunResul
 		exitCode, execErr = client.Exec(ctx, wandbExecRequest{
 			SandboxID: sandboxID,
 			Command:   req.Command,
-			Stdout:    b.rt.Stdout,
-			Stderr:    b.rt.Stderr,
+			Stdout:    stdout,
+			Stderr:    stderr,
 		})
 	}
 

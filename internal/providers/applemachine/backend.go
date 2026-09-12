@@ -139,7 +139,10 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	}
 	args = append(args, command...)
 	commandStarted := time.Now()
-	native, runErr := b.command(ctx, args, req.Repo.Root)
+	req.Observation.Phase(core.RunPhaseCommand)
+	commandBackend := *b
+	commandBackend.rt.Stdout, commandBackend.rt.Stderr = req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, core.RunOutputProvider)
+	native, runErr := commandBackend.command(ctx, args, req.Repo.Root)
 	result.Command = time.Since(commandStarted)
 	result.CommandText = strings.Join(req.Command, " ")
 	classificationErr := runErr

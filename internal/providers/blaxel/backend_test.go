@@ -626,7 +626,7 @@ func TestRunSyncOnlyUploadsArchiveAndSkipsUserCommand(t *testing.T) {
 func TestExecCommandReturnsWhenTerminalProcessOmitsExitCode(t *testing.T) {
 	backend, fake, _, _, _ := newLifecycleBackend(t)
 	fake.omitExitCode = true
-	code, err := backend.execCommand(context.Background(), fake, "sbx_1", "/workspace/crabbox", []string{"true"}, nil)
+	code, err := backend.execCommand(context.Background(), fake, "sbx_1", "/workspace/crabbox", []string{"true"}, nil, backend.rt.Stdout, backend.rt.Stderr)
 	if err == nil || !strings.Contains(err.Error(), "without an exit code") {
 		t.Fatalf("execCommand code=%d err=%v, want missing exit code error", code, err)
 	}
@@ -655,7 +655,7 @@ func TestExecCommandEnforcesLocalProcessWaitTimeout(t *testing.T) {
 	backend.cfg.Blaxel.ExecTimeoutSecs = 1
 	fake.processStatus = "running"
 	fake.omitExitCode = true
-	code, err := backend.execCommand(context.Background(), fake, "sbx_1", "/workspace/crabbox", []string{"sleep", "600"}, nil)
+	code, err := backend.execCommand(context.Background(), fake, "sbx_1", "/workspace/crabbox", []string{"sleep", "600"}, nil, backend.rt.Stdout, backend.rt.Stderr)
 	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("execCommand code=%d err=%v, want deadline exceeded", code, err)
 	}

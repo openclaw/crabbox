@@ -12,6 +12,7 @@ import (
 func (a App) results(ctx context.Context, args []string) error {
 	args, jsonAnywhere := extractBoolFlag(args, "json")
 	fs := newFlagSet("results", a.Stderr)
+	source := fs.String("source", "", "record source: local, coordinator, or all")
 	runIDValue, args := popLeadingRunID(args)
 	runID := fs.String("id", runIDValue, "run id")
 	failedOnly := fs.Bool("failed-only", false, "print only failed test cases")
@@ -28,9 +29,12 @@ func (a App) results(ctx context.Context, args []string) error {
 	if jsonAnywhere {
 		*jsonOut = true
 	}
-	coord, err := configuredCoordinator()
-	if err != nil {
+	sourceName, coord, err := resolveHistorySource(*source)
+	if err != nil && sourceName != "all" {
 		return err
+	}
+	if sourceName != "" {
+		return a.localHistoryRead(ctx, sourceName, coord, *runID, "results", 0, *failedOnly, *jsonOut, err)
 	}
 	run, err := coord.Run(ctx, *runID)
 	if err != nil {
