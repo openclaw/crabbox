@@ -845,5 +845,5 @@ var removeStoredTestboxKey = func(leaseID string) { core.RemoveStoredTestboxKey(
 var exit = func(code int, format string, args ...any) core.ExitError { return core.Exit(code, format, args...) }
 
 func useStoredTestboxKey(target *SSHTarget, leaseID string) {
-	shared.UseStoredTestboxKey(target, leaseID)
+	core.UseStoredTestboxKey(target, leaseID)
 }

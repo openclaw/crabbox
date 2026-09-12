@@ -703,5 +703,5 @@ func exit(code int, format string, args ...any) core.ExitError {
 }
 
 func useStoredTestboxKey(target *SSHTarget, leaseID string) {
-	shared.UseStoredTestboxKey(target, leaseID)
+	core.UseStoredTestboxKey(target, leaseID)
 }

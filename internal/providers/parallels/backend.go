@@ -448,7 +448,7 @@ func blank(value, fallback string) string {
 }
 
 func useStoredTestboxKey(target *SSHTarget, leaseID string) {
-	shared.UseStoredTestboxKey(target, leaseID)
+	core.UseStoredTestboxKey(target, leaseID)
 }
 
 func parallelsLeaseFromVMName(name string) (string, string) {

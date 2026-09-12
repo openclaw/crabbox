@@ -533,7 +533,7 @@ func rollbackHetznerAcquire(client hetznerClient, server Server, serverCreated b
 func parseServerID(s string) (int64, bool) { return core.ParseServerID(s) }
 
 func useStoredTestboxKey(target *SSHTarget, leaseID string) {
-	shared.UseStoredTestboxKey(target, leaseID)
+	core.UseStoredTestboxKey(target, leaseID)
 }
 func findServerByAlias(servers []Server, id string) (Server, string, error) {
 	return core.FindServerByAlias(servers, id)
