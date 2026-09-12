@@ -90,72 +90,14 @@ type TencentCloudConfigVisitedFlags struct {
 
 // TencentCloudConfigFlagPresence reports visits for tracked flag bindings.
 func TencentCloudConfigFlagPresence(fs *flag.FlagSet) TencentCloudConfigVisitedFlags {
-	return TencentCloudConfigVisitedFlags{
-		Region: flagWasSet(fs, "tencentcloud-region"),
-		Zone:   flagWasSet(fs, "tencentcloud-zone"),
-		Image:  flagWasSet(fs, "tencentcloud-image"),
-		Type:   flagWasSet(fs, "tencentcloud-type"),
-	}
+	var visited TencentCloudConfigVisitedFlags
+	recordConfigFlagVisits[TencentCloudConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values TencentCloudConfigFlagValues) Apply(cfg *TencentCloudConfig, fs *flag.FlagSet) (TencentCloudConfigApplied, error) {
 	var applied TencentCloudConfigApplied
-	visited := TencentCloudConfigFlagPresence(fs)
-	if visited.Region {
-		cfg.Region = *values.Region
-		applied.InputAccepted = true
-		applied.Region = true
-	}
-	if visited.Zone {
-		cfg.Zone = *values.Zone
-		applied.InputAccepted = true
-		applied.Zone = true
-	}
-	if visited.Image {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if visited.Type {
-		cfg.Type = *values.Type
-		applied.InputAccepted = true
-		applied.Type = true
-	}
-	if flagWasSet(fs, "tencentcloud-vpc-id") {
-		cfg.VPCID = *values.VPCID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tencentcloud-subnet-id") {
-		cfg.SubnetID = *values.SubnetID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tencentcloud-security-group-id") {
-		cfg.SecurityGroupID = *values.SecurityGroupID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tencentcloud-ssh-cidrs") {
-		cfg.SSHCIDRs = splitCommaList(*values.SSHCIDRs)
-		if len(cfg.SSHCIDRs) == 0 {
-			cfg.SSHCIDRs = nil
-		}
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tencentcloud-root-gb") {
-		cfg.RootGB = *values.RootGB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tencentcloud-internet-charge-type") {
-		cfg.InternetChargeType = *values.InternetChargeType
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tencentcloud-internet-max-bandwidth-out") {
-		cfg.InternetMaxBandwidthOut = *values.InternetMaxBandwidthOut
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tencentcloud-api-endpoint") {
-		cfg.APIEndpoint = *values.APIEndpoint
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

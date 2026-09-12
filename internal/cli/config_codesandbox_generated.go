@@ -92,49 +92,6 @@ func RegisterCodeSandboxConfigFlags(fs *flag.FlagSet, defaults CodeSandboxConfig
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values CodeSandboxConfigFlagValues) Apply(cfg *CodeSandboxConfig, fs *flag.FlagSet) (CodeSandboxConfigApplied, error) {
 	var applied CodeSandboxConfigApplied
-	if flagWasSet(fs, "codesandbox-template-id") {
-		cfg.TemplateID = *values.TemplateID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "codesandbox-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "codesandbox-vm-tier") {
-		cfg.VMTier = *values.VMTier
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "codesandbox-privacy") {
-		cfg.Privacy = *values.Privacy
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "codesandbox-hibernation-timeout-secs") {
-		cfg.HibernationTimeoutSecs = *values.HibernationTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "codesandbox-automatic-wakeup-http") {
-		cfg.AutomaticWakeupHTTP = *values.AutomaticWakeupHTTP
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "codesandbox-automatic-wakeup-websocket") {
-		cfg.AutomaticWakeupWebSocket = *values.AutomaticWakeupWebSocket
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "codesandbox-bridge-command") {
-		cfg.BridgeCommand = *values.BridgeCommand
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "codesandbox-sdk-package") {
-		cfg.SDKPackage = *values.SDKPackage
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "codesandbox-doctor-list-limit") {
-		cfg.DoctorListLimit = *values.DoctorListLimit
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "codesandbox-operation-timeout-secs") {
-		cfg.OperationTimeoutSecs = *values.OperationTimeoutSecs
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

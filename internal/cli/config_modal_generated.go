@@ -73,29 +73,6 @@ func RegisterModalConfigFlags(fs *flag.FlagSet, defaults ModalConfig) ModalConfi
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values ModalConfigFlagValues) Apply(cfg *ModalConfig, fs *flag.FlagSet) (ModalConfigApplied, error) {
 	var applied ModalConfigApplied
-	if flagWasSet(fs, "modal-app") {
-		cfg.App = *values.App
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "modal-image") {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "modal-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "modal-python") {
-		cfg.Python = *values.Python
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "modal-environment") {
-		cfg.Environment = *values.Environment
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "modal-secret") {
-		cfg.Secrets = append([]string(nil), values.Secrets.values...)
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

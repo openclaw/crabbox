@@ -60,23 +60,14 @@ type CloudflareConfigVisitedFlags struct {
 
 // CloudflareConfigFlagPresence reports visits for tracked flag bindings.
 func CloudflareConfigFlagPresence(fs *flag.FlagSet) CloudflareConfigVisitedFlags {
-	return CloudflareConfigVisitedFlags{
-		APIURL: flagWasSet(fs, "cloudflare-url"),
-	}
+	var visited CloudflareConfigVisitedFlags
+	recordConfigFlagVisits[CloudflareConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values CloudflareConfigFlagValues) Apply(cfg *CloudflareConfig, fs *flag.FlagSet) (CloudflareConfigApplied, error) {
 	var applied CloudflareConfigApplied
-	visited := CloudflareConfigFlagPresence(fs)
-	if visited.APIURL {
-		cfg.APIURL = *values.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if flagWasSet(fs, "cloudflare-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

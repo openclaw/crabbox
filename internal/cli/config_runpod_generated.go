@@ -85,47 +85,14 @@ type RunpodConfigVisitedFlags struct {
 
 // RunpodConfigFlagPresence reports visits for tracked flag bindings.
 func RunpodConfigFlagPresence(fs *flag.FlagSet) RunpodConfigVisitedFlags {
-	return RunpodConfigVisitedFlags{
-		APIURL: flagWasSet(fs, "runpod-url"),
-	}
+	var visited RunpodConfigVisitedFlags
+	recordConfigFlagVisits[RunpodConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values RunpodConfigFlagValues) Apply(cfg *RunpodConfig, fs *flag.FlagSet) (RunpodConfigApplied, error) {
 	var applied RunpodConfigApplied
-	visited := RunpodConfigFlagPresence(fs)
-	if visited.APIURL {
-		cfg.APIURL = *values.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if flagWasSet(fs, "runpod-cloud-type") {
-		cfg.CloudType = *values.CloudType
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "runpod-instance-id") {
-		cfg.InstanceID = *values.InstanceID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "runpod-image") {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "runpod-template-id") {
-		cfg.TemplateID = *values.TemplateID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "runpod-disk-gb") {
-		cfg.DiskGB = *values.DiskGB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "runpod-user") {
-		cfg.User = *values.User
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "runpod-work-root") {
-		cfg.WorkRoot = *values.WorkRoot
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

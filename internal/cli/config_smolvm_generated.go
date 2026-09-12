@@ -84,43 +84,14 @@ type SmolvmConfigVisitedFlags struct {
 
 // SmolvmConfigFlagPresence reports visits for tracked flag bindings.
 func SmolvmConfigFlagPresence(fs *flag.FlagSet) SmolvmConfigVisitedFlags {
-	return SmolvmConfigVisitedFlags{
-		BaseURL: flagWasSet(fs, "smolvm-base-url"),
-	}
+	var visited SmolvmConfigVisitedFlags
+	recordConfigFlagVisits[SmolvmConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values SmolvmConfigFlagValues) Apply(cfg *SmolvmConfig, fs *flag.FlagSet) (SmolvmConfigApplied, error) {
 	var applied SmolvmConfigApplied
-	visited := SmolvmConfigFlagPresence(fs)
-	if visited.BaseURL {
-		cfg.BaseURL = *values.BaseURL
-		applied.InputAccepted = true
-		applied.BaseURL = true
-	}
-	if flagWasSet(fs, "smolvm-image") {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "smolvm-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "smolvm-cpus") {
-		cfg.CPUs = *values.CPUs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "smolvm-memory-mb") {
-		cfg.MemoryMB = *values.MemoryMB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "smolvm-network") {
-		cfg.Network = *values.Network
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "smolvm-keep") {
-		cfg.Keep = *values.Keep
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

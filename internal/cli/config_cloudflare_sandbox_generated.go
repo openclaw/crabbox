@@ -63,21 +63,6 @@ func RegisterCloudflareSandboxConfigFlags(fs *flag.FlagSet, defaults CloudflareS
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values CloudflareSandboxConfigFlagValues) Apply(cfg *CloudflareSandboxConfig, fs *flag.FlagSet) (CloudflareSandboxConfigApplied, error) {
 	var applied CloudflareSandboxConfigApplied
-	if flagWasSet(fs, "cloudflare-sandbox-url") {
-		cfg.BridgeURL = *values.BridgeURL
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cloudflare-sandbox-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cloudflare-sandbox-exec-timeout-secs") {
-		cfg.ExecTimeoutSecs = *values.ExecTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cloudflare-sandbox-forget-missing") {
-		cfg.ForgetMissing = *values.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

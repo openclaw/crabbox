@@ -81,12 +81,7 @@ type PhalaConfigVisitedFlags struct {
 
 // PhalaConfigFlagPresence reports visits for tracked flag bindings.
 func PhalaConfigFlagPresence(fs *flag.FlagSet) PhalaConfigVisitedFlags {
-	return PhalaConfigVisitedFlags{
-		CLIPath:      flagWasSet(fs, "phala-cli"),
-		InstanceType: flagWasSet(fs, "phala-instance-type"),
-		WorkRoot:     flagWasSet(fs, "phala-work-root"),
-		NodeID:       flagWasSet(fs, "phala-node-id"),
-		Compose:      flagWasSet(fs, "phala-compose"),
-		Attest:       flagWasSet(fs, "phala-attest"),
-	}
+	var visited PhalaConfigVisitedFlags
+	recordConfigFlagVisits[PhalaConfig](fs, &visited)
+	return visited
 }

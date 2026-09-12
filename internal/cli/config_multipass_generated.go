@@ -91,54 +91,14 @@ type MultipassConfigVisitedFlags struct {
 
 // MultipassConfigFlagPresence reports visits for tracked flag bindings.
 func MultipassConfigFlagPresence(fs *flag.FlagSet) MultipassConfigVisitedFlags {
-	return MultipassConfigVisitedFlags{
-		Image:    flagWasSet(fs, "multipass-image"),
-		User:     flagWasSet(fs, "multipass-user"),
-		WorkRoot: flagWasSet(fs, "multipass-work-root"),
-	}
+	var visited MultipassConfigVisitedFlags
+	recordConfigFlagVisits[MultipassConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values MultipassConfigFlagValues) Apply(cfg *MultipassConfig, fs *flag.FlagSet) (MultipassConfigApplied, error) {
 	var applied MultipassConfigApplied
-	visited := MultipassConfigFlagPresence(fs)
-	if flagWasSet(fs, "multipass-cli") {
-		cfg.CLIPath = *values.CLIPath
-		applied.InputAccepted = true
-	}
-	if visited.Image {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if visited.User {
-		cfg.User = *values.User
-		applied.InputAccepted = true
-		applied.User = true
-	}
-	if visited.WorkRoot {
-		cfg.WorkRoot = *values.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if flagWasSet(fs, "multipass-cpus") {
-		cfg.CPUs = *values.CPUs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "multipass-memory") {
-		cfg.Memory = *values.Memory
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "multipass-disk") {
-		cfg.Disk = *values.Disk
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "multipass-launch-timeout") {
-		if err := ApplyLeaseDuration(&cfg.LaunchTimeout, *values.LaunchTimeout); err != nil {
-			return applied, err
-		} else if *values.LaunchTimeout != "" {
-			applied.InputAccepted = true
-		}
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

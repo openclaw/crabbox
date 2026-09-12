@@ -56,17 +56,6 @@ func RegisterAnthropicSRTConfigFlags(fs *flag.FlagSet, defaults AnthropicSRTConf
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values AnthropicSRTConfigFlagValues) Apply(cfg *AnthropicSRTConfig, fs *flag.FlagSet) (AnthropicSRTConfigApplied, error) {
 	var applied AnthropicSRTConfigApplied
-	if flagWasSet(fs, "anthropic-sandbox-runtime-cli") {
-		cfg.CLIPath = *values.CLIPath
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "anthropic-sandbox-runtime-settings") {
-		cfg.Settings = *values.Settings
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "anthropic-sandbox-runtime-debug") {
-		cfg.Debug = *values.Debug
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

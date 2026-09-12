@@ -102,67 +102,14 @@ type TensorlakeConfigVisitedFlags struct {
 
 // TensorlakeConfigFlagPresence reports visits for tracked flag bindings.
 func TensorlakeConfigFlagPresence(fs *flag.FlagSet) TensorlakeConfigVisitedFlags {
-	return TensorlakeConfigVisitedFlags{
-		APIURL: flagWasSet(fs, "tensorlake-api-url"),
-	}
+	var visited TensorlakeConfigVisitedFlags
+	recordConfigFlagVisits[TensorlakeConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values TensorlakeConfigFlagValues) Apply(cfg *TensorlakeConfig, fs *flag.FlagSet) (TensorlakeConfigApplied, error) {
 	var applied TensorlakeConfigApplied
-	visited := TensorlakeConfigFlagPresence(fs)
-	if visited.APIURL {
-		cfg.APIURL = *values.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if flagWasSet(fs, "tensorlake-cli") {
-		cfg.CLIPath = *values.CLIPath
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tensorlake-image") {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tensorlake-snapshot") {
-		cfg.Snapshot = *values.Snapshot
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tensorlake-organization-id") {
-		cfg.OrganizationID = *values.OrganizationID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tensorlake-project-id") {
-		cfg.ProjectID = *values.ProjectID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tensorlake-namespace") {
-		cfg.Namespace = *values.Namespace
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tensorlake-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tensorlake-cpus") {
-		cfg.CPUs = *values.CPUs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tensorlake-memory-mb") {
-		cfg.MemoryMB = *values.MemoryMB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tensorlake-disk-mb") {
-		cfg.DiskMB = *values.DiskMB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tensorlake-timeout-secs") {
-		cfg.TimeoutSecs = *values.TimeoutSecs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tensorlake-no-internet") {
-		cfg.NoInternet = *values.NoInternet
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

@@ -105,64 +105,6 @@ func RegisterNebiusConfigFlags(fs *flag.FlagSet, defaults NebiusConfig) NebiusCo
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values NebiusConfigFlagValues) Apply(cfg *NebiusConfig, fs *flag.FlagSet) (NebiusConfigApplied, error) {
 	var applied NebiusConfigApplied
-	if flagWasSet(fs, "nebius-cli") {
-		cfg.CLI = *values.CLI
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-profile") {
-		cfg.Profile = *values.Profile
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-parent-id") {
-		cfg.ParentID = *values.ParentID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-subnet-id") {
-		cfg.SubnetID = *values.SubnetID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-platform") {
-		cfg.Platform = *values.Platform
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-preset") {
-		cfg.Preset = *values.Preset
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-image-family") {
-		cfg.ImageFamily = *values.ImageFamily
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-disk-type") {
-		cfg.DiskType = *values.DiskType
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-disk-size-gib") {
-		cfg.DiskSizeGiB = *values.DiskSizeGiB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-user") {
-		cfg.User = *values.User
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-public-ip") {
-		cfg.PublicIP = *values.PublicIP
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-security-group-ids") {
-		cfg.SecurityGroupIDs = splitCommaList(*values.SecurityGroupIDs)
-		if len(cfg.SecurityGroupIDs) == 0 {
-			cfg.SecurityGroupIDs = nil
-		}
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-service-account-id") {
-		cfg.ServiceAccountID = *values.ServiceAccountID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-recovery-policy") {
-		cfg.RecoveryPolicy = *values.RecoveryPolicy
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

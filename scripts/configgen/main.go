@@ -523,9 +523,8 @@ func generate(s schema, source string) ([]byte, error) {
 	hasFlags, needsStrings, needsTime := false, false, false
 	for _, f := range s.fields {
 		hasFlags = hasFlags || !f.noFlag
-		needsStrings = needsStrings || (!s.manualFlags && (f.flagDurationError != "" || f.flagDurationRawZeroReset))
 		if f.kind == "time.Duration" {
-			needsTime = needsTime || (!f.noFlag && !f.stringDurationFlag()) || (!s.manualFlags && f.flagDurationError != "") || f.defaultExpr != ""
+			needsTime = needsTime || (!f.noFlag && !f.stringDurationFlag()) || f.defaultExpr != ""
 		}
 		if f.kind == "[]string" {
 			needsStrings = needsStrings || (!f.noFlag && !f.flagListReplaceAppend && !f.flagListAppendTrimmed && !f.flagListEmptyScalar)
@@ -588,7 +587,6 @@ func generate(s schema, source string) ([]byte, error) {
 	}
 	p("}\n\n")
 	resultType := "(" + s.name + "Applied, error)"
-	resultPrefix := "applied, "
 	reportInit := "var applied " + s.name + "Applied\n"
 	trustedParameter := ""
 	for _, f := range s.fields {
@@ -707,63 +705,11 @@ func generate(s schema, source string) ([]byte, error) {
 				}
 			}
 			p("}\n\n")
-			p("// %sFlagPresence reports visits for tracked flag bindings.\nfunc %sFlagPresence(fs *flag.FlagSet) %sVisitedFlags {\nreturn %sVisitedFlags{\n", s.name, s.name, s.name, s.name)
-			for _, f := range s.fields {
-				if (f.reportApplied || s.manualFlags) && !f.noFlag {
-					p("%s: flagWasSet(fs, %q),\n", f.name, f.flag)
-				}
-			}
-			p("}\n}\n\n")
+			p("// %sFlagPresence reports visits for tracked flag bindings.\nfunc %sFlagPresence(fs *flag.FlagSet) %sVisitedFlags {\nvar visited %sVisitedFlags\nrecordConfigFlagVisits[%s](fs, &visited)\nreturn visited\n}\n\n", s.name, s.name, s.name, s.name, s.name)
 		}
 		if !s.manualFlags {
 			p("// Apply copies explicit flag values. Provider validation must run afterward.\nfunc (values %sFlagValues) Apply(cfg *%s, fs *flag.FlagSet) %s {\n%s", s.name, s.name, resultType, reportInit)
-			if trackedFlags {
-				p("visited := %sFlagPresence(fs)\n", s.name)
-			}
-			for _, f := range s.fields {
-				if f.noFlag {
-					continue
-				}
-				if f.flagDurationRawZeroReset {
-					p("if flagWasSet(fs, %q) { if strings.TrimSpace(*values.%s) == \"0s\" { cfg.%s = 0; applied.InputAccepted = true } else if err := ApplyLeaseDuration(&cfg.%s, *values.%s); err != nil { return %serr } else if *values.%s != \"\" { applied.InputAccepted = true } }\n", f.flag, f.name, f.name, f.name, f.name, resultPrefix, f.name)
-					continue
-				}
-				if f.flagDurationRawPositive {
-					p("if flagWasSet(fs, %q) { if err := ApplyLeaseDuration(&cfg.%s, *values.%s); err != nil { return %serr } else if *values.%s != \"\" { applied.InputAccepted = true } }\n", f.flag, f.name, f.name, resultPrefix, f.name)
-					continue
-				}
-				if f.flagDurationError != "" {
-					p("if flagWasSet(fs, %q) { parsed, err := time.ParseDuration(strings.TrimSpace(*values.%s)); if err != nil || parsed <= 0 { return %sexit(2, \"%%s\", %q) }; cfg.%s = parsed; applied.InputAccepted = true }\n", f.flag, f.name, resultPrefix, f.flagDurationError, f.name)
-					continue
-				}
-				if f.flagListEmptyScalar || f.flagListScalarEmptyNil {
-					p("if flagWasSet(fs, %q) { cfg.%s = splitCommaList(*values.%s); if len(cfg.%s) == 0 { cfg.%s = nil }; applied.InputAccepted = true }\n", f.flag, f.name, f.name, f.name, f.name)
-					continue
-				}
-				if f.flagListCSV {
-					p("if flagWasSet(fs, %q) { cfg.%s = splitCSV(*values.%s); applied.InputAccepted = true }\n", f.flag, f.name, f.name)
-					continue
-				}
-				value := "*values." + f.name
-				if f.kind == "[]string" {
-					if f.flagListReplaceAppend {
-						value = "append([]string(nil), values." + f.name + ".values...)"
-					} else if f.flagListAppendTrimmed {
-						value = "append([]string(nil), values." + f.name + ".stringListFlag...)"
-					} else {
-						value = "splitCommaList(" + value + ")"
-					}
-				}
-				if f.kind == "*bool" {
-					p("if flagWasSet(fs, %q) { value := %s; cfg.%s = &value; applied.InputAccepted = true }\n", f.flag, value, f.name)
-				} else if f.reportApplied {
-					p("if visited.%s { cfg.%s = %s; applied.InputAccepted = true; applied.%s = true }\n", f.name, f.name, value, f.name)
-				} else {
-					p("if flagWasSet(fs, %q) { cfg.%s = %s; applied.InputAccepted = true }\n", f.flag, f.name, value)
-				}
-			}
-			p("return %snil\n", resultPrefix)
-			p("}\n")
+			p("err := applyConfigFlags(cfg, values, &applied, fs)\nreturn applied, err\n}\n")
 		}
 	}
 	formatted, err := format.Source(out.Bytes())

@@ -82,43 +82,14 @@ type MorphConfigVisitedFlags struct {
 
 // MorphConfigFlagPresence reports visits for tracked flag bindings.
 func MorphConfigFlagPresence(fs *flag.FlagSet) MorphConfigVisitedFlags {
-	return MorphConfigVisitedFlags{
-		APIURL:          flagWasSet(fs, "morph-api-url"),
-		SSHGatewayHost:  flagWasSet(fs, "morph-ssh-gateway-host"),
-		DeleteOnRelease: flagWasSet(fs, "morph-delete-on-release"),
-	}
+	var visited MorphConfigVisitedFlags
+	recordConfigFlagVisits[MorphConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values MorphConfigFlagValues) Apply(cfg *MorphConfig, fs *flag.FlagSet) (MorphConfigApplied, error) {
 	var applied MorphConfigApplied
-	visited := MorphConfigFlagPresence(fs)
-	if visited.APIURL {
-		cfg.APIURL = *values.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if flagWasSet(fs, "morph-snapshot") {
-		cfg.Snapshot = *values.Snapshot
-		applied.InputAccepted = true
-	}
-	if visited.SSHGatewayHost {
-		cfg.SSHGatewayHost = *values.SSHGatewayHost
-		applied.InputAccepted = true
-		applied.SSHGatewayHost = true
-	}
-	if flagWasSet(fs, "morph-work-root") {
-		cfg.WorkRoot = *values.WorkRoot
-		applied.InputAccepted = true
-	}
-	if visited.DeleteOnRelease {
-		cfg.DeleteOnRelease = *values.DeleteOnRelease
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	if flagWasSet(fs, "morph-wake-on-ssh") {
-		cfg.WakeOnSSH = *values.WakeOnSSH
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

@@ -142,24 +142,7 @@ type IncusConfigVisitedFlags struct {
 
 // IncusConfigFlagPresence reports visits for tracked flag bindings.
 func IncusConfigFlagPresence(fs *flag.FlagSet) IncusConfigVisitedFlags {
-	return IncusConfigVisitedFlags{
-		Remote:            flagWasSet(fs, "incus-remote"),
-		Project:           flagWasSet(fs, "incus-project"),
-		Address:           flagWasSet(fs, "incus-address"),
-		Socket:            flagWasSet(fs, "incus-socket"),
-		InstanceType:      flagWasSet(fs, "incus-instance-type"),
-		Image:             flagWasSet(fs, "incus-image"),
-		Profile:           flagWasSet(fs, "incus-profile"),
-		User:              flagWasSet(fs, "incus-user"),
-		WorkRoot:          flagWasSet(fs, "incus-work-root"),
-		DeleteOnRelease:   flagWasSet(fs, "incus-delete-on-release"),
-		StartTimeout:      flagWasSet(fs, "incus-start-timeout"),
-		LaunchPort:        flagWasSet(fs, "incus-launch-port"),
-		ProxyListenHost:   flagWasSet(fs, "incus-proxy-listen-host"),
-		ProxyListenPort:   flagWasSet(fs, "incus-proxy-listen-port"),
-		ProxyDevice:       flagWasSet(fs, "incus-proxy-device"),
-		TLSServerCert:     flagWasSet(fs, "incus-tls-server-cert"),
-		InsecureTLS:       flagWasSet(fs, "incus-insecure-tls"),
-		RemoteImageServer: flagWasSet(fs, "incus-remote-image-server"),
-	}
+	var visited IncusConfigVisitedFlags
+	recordConfigFlagVisits[IncusConfig](fs, &visited)
+	return visited
 }

@@ -69,31 +69,14 @@ type AzureDynamicSessionsConfigVisitedFlags struct {
 
 // AzureDynamicSessionsConfigFlagPresence reports visits for tracked flag bindings.
 func AzureDynamicSessionsConfigFlagPresence(fs *flag.FlagSet) AzureDynamicSessionsConfigVisitedFlags {
-	return AzureDynamicSessionsConfigVisitedFlags{
-		Endpoint: flagWasSet(fs, "azure-dynamic-sessions-endpoint"),
-	}
+	var visited AzureDynamicSessionsConfigVisitedFlags
+	recordConfigFlagVisits[AzureDynamicSessionsConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values AzureDynamicSessionsConfigFlagValues) Apply(cfg *AzureDynamicSessionsConfig, fs *flag.FlagSet) (AzureDynamicSessionsConfigApplied, error) {
 	var applied AzureDynamicSessionsConfigApplied
-	visited := AzureDynamicSessionsConfigFlagPresence(fs)
-	if visited.Endpoint {
-		cfg.Endpoint = *values.Endpoint
-		applied.InputAccepted = true
-		applied.Endpoint = true
-	}
-	if flagWasSet(fs, "azure-dynamic-sessions-api-version") {
-		cfg.APIVersion = *values.APIVersion
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "azure-dynamic-sessions-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "azure-dynamic-sessions-timeout-secs") {
-		cfg.TimeoutSecs = *values.TimeoutSecs
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

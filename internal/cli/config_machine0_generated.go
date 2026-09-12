@@ -100,67 +100,14 @@ type Machine0ConfigVisitedFlags struct {
 
 // Machine0ConfigFlagPresence reports visits for tracked flag bindings.
 func Machine0ConfigFlagPresence(fs *flag.FlagSet) Machine0ConfigVisitedFlags {
-	return Machine0ConfigVisitedFlags{
-		Size:     flagWasSet(fs, "machine0-size"),
-		WorkRoot: flagWasSet(fs, "machine0-work-root"),
-	}
+	var visited Machine0ConfigVisitedFlags
+	recordConfigFlagVisits[Machine0Config](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values Machine0ConfigFlagValues) Apply(cfg *Machine0Config, fs *flag.FlagSet) (Machine0ConfigApplied, error) {
 	var applied Machine0ConfigApplied
-	visited := Machine0ConfigFlagPresence(fs)
-	if flagWasSet(fs, "machine0-cli") {
-		cfg.CLIPath = *values.CLIPath
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "machine0-image") {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "machine0-image-version") {
-		cfg.ImageVersion = *values.ImageVersion
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "machine0-desktop-image") {
-		cfg.DesktopImage = *values.DesktopImage
-		applied.InputAccepted = true
-	}
-	if visited.Size {
-		cfg.Size = *values.Size
-		applied.InputAccepted = true
-		applied.Size = true
-	}
-	if flagWasSet(fs, "machine0-region") {
-		cfg.Region = *values.Region
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "machine0-key") {
-		cfg.Key = *values.Key
-		applied.InputAccepted = true
-	}
-	if visited.WorkRoot {
-		cfg.WorkRoot = *values.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if flagWasSet(fs, "machine0-release-policy") {
-		cfg.ReleasePolicy = *values.ReleasePolicy
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "machine0-create-timeout") {
-		if err := ApplyLeaseDuration(&cfg.CreateTimeout, *values.CreateTimeout); err != nil {
-			return applied, err
-		} else if *values.CreateTimeout != "" {
-			applied.InputAccepted = true
-		}
-	}
-	if flagWasSet(fs, "machine0-poll-interval") {
-		if err := ApplyLeaseDuration(&cfg.PollInterval, *values.PollInterval); err != nil {
-			return applied, err
-		} else if *values.PollInterval != "" {
-			applied.InputAccepted = true
-		}
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

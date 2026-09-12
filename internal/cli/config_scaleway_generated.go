@@ -88,56 +88,14 @@ type ScalewayConfigVisitedFlags struct {
 
 // ScalewayConfigFlagPresence reports visits for tracked flag bindings.
 func ScalewayConfigFlagPresence(fs *flag.FlagSet) ScalewayConfigVisitedFlags {
-	return ScalewayConfigVisitedFlags{
-		Region: flagWasSet(fs, "scaleway-region"),
-		Zone:   flagWasSet(fs, "scaleway-zone"),
-		Image:  flagWasSet(fs, "scaleway-image"),
-		Type:   flagWasSet(fs, "scaleway-type"),
-	}
+	var visited ScalewayConfigVisitedFlags
+	recordConfigFlagVisits[ScalewayConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values ScalewayConfigFlagValues) Apply(cfg *ScalewayConfig, fs *flag.FlagSet) (ScalewayConfigApplied, error) {
 	var applied ScalewayConfigApplied
-	visited := ScalewayConfigFlagPresence(fs)
-	if visited.Region {
-		cfg.Region = *values.Region
-		applied.InputAccepted = true
-		applied.Region = true
-	}
-	if visited.Zone {
-		cfg.Zone = *values.Zone
-		applied.InputAccepted = true
-		applied.Zone = true
-	}
-	if visited.Image {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if visited.Type {
-		cfg.Type = *values.Type
-		applied.InputAccepted = true
-		applied.Type = true
-	}
-	if flagWasSet(fs, "scaleway-project-id") {
-		cfg.ProjectID = *values.ProjectID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "scaleway-organization-id") {
-		cfg.OrganizationID = *values.OrganizationID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "scaleway-security-group") {
-		cfg.SecurityGroup = *values.SecurityGroup
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "scaleway-ssh-cidrs") {
-		cfg.SSHCIDRs = splitCommaList(*values.SSHCIDRs)
-		if len(cfg.SSHCIDRs) == 0 {
-			cfg.SSHCIDRs = nil
-		}
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

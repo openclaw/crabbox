@@ -122,85 +122,14 @@ type SealosDevboxConfigVisitedFlags struct {
 
 // SealosDevboxConfigFlagPresence reports visits for tracked flag bindings.
 func SealosDevboxConfigFlagPresence(fs *flag.FlagSet) SealosDevboxConfigVisitedFlags {
-	return SealosDevboxConfigVisitedFlags{
-		Kubectl:         flagWasSet(fs, "sealos-devbox-kubectl"),
-		Kubeconfig:      flagWasSet(fs, "sealos-devbox-kubeconfig"),
-		WorkRoot:        flagWasSet(fs, "sealos-devbox-work-root"),
-		DeleteOnRelease: flagWasSet(fs, "sealos-devbox-delete-on-release"),
-	}
+	var visited SealosDevboxConfigVisitedFlags
+	recordConfigFlagVisits[SealosDevboxConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values SealosDevboxConfigFlagValues) Apply(cfg *SealosDevboxConfig, fs *flag.FlagSet) (SealosDevboxConfigApplied, error) {
 	var applied SealosDevboxConfigApplied
-	visited := SealosDevboxConfigFlagPresence(fs)
-	if visited.Kubectl {
-		cfg.Kubectl = *values.Kubectl
-		applied.InputAccepted = true
-		applied.Kubectl = true
-	}
-	if visited.Kubeconfig {
-		cfg.Kubeconfig = *values.Kubeconfig
-		applied.InputAccepted = true
-		applied.Kubeconfig = true
-	}
-	if flagWasSet(fs, "sealos-devbox-context") {
-		cfg.Context = *values.Context
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "sealos-devbox-namespace") {
-		cfg.Namespace = *values.Namespace
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "sealos-devbox-image") {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "sealos-devbox-template-id") {
-		cfg.TemplateID = *values.TemplateID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "sealos-devbox-cpu") {
-		cfg.CPU = *values.CPU
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "sealos-devbox-memory") {
-		cfg.Memory = *values.Memory
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "sealos-devbox-storage-limit") {
-		cfg.StorageLimit = *values.StorageLimit
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "sealos-devbox-network") {
-		cfg.Network = *values.Network
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "sealos-devbox-ssh-gateway-host") {
-		cfg.SSHGatewayHost = *values.SSHGatewayHost
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "sealos-devbox-ssh-gateway-port") {
-		cfg.SSHGatewayPort = *values.SSHGatewayPort
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "sealos-devbox-ssh-user") {
-		cfg.SSHUser = *values.SSHUser
-		applied.InputAccepted = true
-	}
-	if visited.WorkRoot {
-		cfg.WorkRoot = *values.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if flagWasSet(fs, "sealos-devbox-node-host") {
-		cfg.NodeHost = *values.NodeHost
-		applied.InputAccepted = true
-	}
-	if visited.DeleteOnRelease {
-		cfg.DeleteOnRelease = *values.DeleteOnRelease
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

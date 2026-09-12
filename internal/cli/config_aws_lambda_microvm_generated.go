@@ -80,55 +80,14 @@ type AWSLambdaMicroVMConfigVisitedFlags struct {
 
 // AWSLambdaMicroVMConfigFlagPresence reports visits for tracked flag bindings.
 func AWSLambdaMicroVMConfigFlagPresence(fs *flag.FlagSet) AWSLambdaMicroVMConfigVisitedFlags {
-	return AWSLambdaMicroVMConfigVisitedFlags{
-		Image:            flagWasSet(fs, "aws-lambda-microvm-image"),
-		ImageVersion:     flagWasSet(fs, "aws-lambda-microvm-image-version"),
-		ExecutionRoleARN: flagWasSet(fs, "aws-lambda-microvm-execution-role-arn"),
-		Workdir:          flagWasSet(fs, "aws-lambda-microvm-workdir"),
-	}
+	var visited AWSLambdaMicroVMConfigVisitedFlags
+	recordConfigFlagVisits[AWSLambdaMicroVMConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values AWSLambdaMicroVMConfigFlagValues) Apply(cfg *AWSLambdaMicroVMConfig, fs *flag.FlagSet) (AWSLambdaMicroVMConfigApplied, error) {
 	var applied AWSLambdaMicroVMConfigApplied
-	visited := AWSLambdaMicroVMConfigFlagPresence(fs)
-	if visited.Image {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if visited.ImageVersion {
-		cfg.ImageVersion = *values.ImageVersion
-		applied.InputAccepted = true
-		applied.ImageVersion = true
-	}
-	if visited.ExecutionRoleARN {
-		cfg.ExecutionRoleARN = *values.ExecutionRoleARN
-		applied.InputAccepted = true
-		applied.ExecutionRoleARN = true
-	}
-	if visited.Workdir {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-		applied.Workdir = true
-	}
-	if flagWasSet(fs, "aws-lambda-microvm-ingress-connectors") {
-		cfg.IngressConnectors = splitCommaList(*values.IngressConnectors)
-		if len(cfg.IngressConnectors) == 0 {
-			cfg.IngressConnectors = nil
-		}
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "aws-lambda-microvm-egress-connectors") {
-		cfg.EgressConnectors = splitCommaList(*values.EgressConnectors)
-		if len(cfg.EgressConnectors) == 0 {
-			cfg.EgressConnectors = nil
-		}
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "aws-lambda-microvm-forget-missing") {
-		cfg.ForgetMissing = *values.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

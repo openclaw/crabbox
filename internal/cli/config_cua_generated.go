@@ -102,61 +102,6 @@ func RegisterCuaConfigFlags(fs *flag.FlagSet, defaults CuaConfig) CuaConfigFlagV
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values CuaConfigFlagValues) Apply(cfg *CuaConfig, fs *flag.FlagSet) (CuaConfigApplied, error) {
 	var applied CuaConfigApplied
-	if flagWasSet(fs, "cua-api-url") {
-		cfg.APIURL = *values.APIURL
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cua-image") {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cua-kind") {
-		cfg.Kind = *values.Kind
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cua-region") {
-		cfg.Region = *values.Region
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cua-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cua-vcpus") {
-		cfg.VCPUs = *values.VCPUs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cua-memory-mb") {
-		cfg.MemoryMB = *values.MemoryMB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cua-disk-gb") {
-		cfg.DiskGB = *values.DiskGB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cua-startup-timeout-secs") {
-		cfg.StartupTimeoutSecs = *values.StartupTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cua-exec-timeout-secs") {
-		cfg.ExecTimeoutSecs = *values.ExecTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cua-bridge-command") {
-		cfg.BridgeCommand = *values.BridgeCommand
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cua-sdk-package") {
-		cfg.SDKPackage = *values.SDKPackage
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cua-sdk-import") {
-		cfg.SDKImport = *values.SDKImport
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cua-sdk-fallback-import") {
-		cfg.SDKFallbackImport = *values.SDKFallbackImport
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

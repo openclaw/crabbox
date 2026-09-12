@@ -50,13 +50,6 @@ func RegisterWandbConfigFlags(fs *flag.FlagSet, defaults WandbConfig) WandbConfi
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values WandbConfigFlagValues) Apply(cfg *WandbConfig, fs *flag.FlagSet) (WandbConfigApplied, error) {
 	var applied WandbConfigApplied
-	if flagWasSet(fs, "wandb-image") {
-		cfg.DefaultImage = *values.DefaultImage
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "wandb-max-lifetime") {
-		cfg.MaxLifetimeSeconds = *values.MaxLifetimeSeconds
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

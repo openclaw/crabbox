@@ -61,21 +61,6 @@ func RegisterFreestyleConfigFlags(fs *flag.FlagSet, defaults FreestyleConfig) Fr
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values FreestyleConfigFlagValues) Apply(cfg *FreestyleConfig, fs *flag.FlagSet) (FreestyleConfigApplied, error) {
 	var applied FreestyleConfigApplied
-	if flagWasSet(fs, "freestyle-api-url") {
-		cfg.APIURL = *values.APIURL
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "freestyle-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "freestyle-vcpus") {
-		cfg.VCPUs = *values.VCPUs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "freestyle-memory-gb") {
-		cfg.MemoryGB = *values.MemoryGB
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

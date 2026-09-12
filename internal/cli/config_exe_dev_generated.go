@@ -87,51 +87,14 @@ type ExeDevConfigVisitedFlags struct {
 
 // ExeDevConfigFlagPresence reports visits for tracked flag bindings.
 func ExeDevConfigFlagPresence(fs *flag.FlagSet) ExeDevConfigVisitedFlags {
-	return ExeDevConfigVisitedFlags{
-		ControlHost: flagWasSet(fs, "exe-dev-control-host"),
-	}
+	var visited ExeDevConfigVisitedFlags
+	recordConfigFlagVisits[ExeDevConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values ExeDevConfigFlagValues) Apply(cfg *ExeDevConfig, fs *flag.FlagSet) (ExeDevConfigApplied, error) {
 	var applied ExeDevConfigApplied
-	visited := ExeDevConfigFlagPresence(fs)
-	if visited.ControlHost {
-		cfg.ControlHost = *values.ControlHost
-		applied.InputAccepted = true
-		applied.ControlHost = true
-	}
-	if flagWasSet(fs, "exe-dev-image") {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "exe-dev-cpus") {
-		cfg.CPUs = *values.CPUs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "exe-dev-memory") {
-		cfg.Memory = *values.Memory
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "exe-dev-disk") {
-		cfg.Disk = *values.Disk
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "exe-dev-command") {
-		cfg.Command = *values.Command
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "exe-dev-user") {
-		cfg.User = *values.User
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "exe-dev-work-root") {
-		cfg.WorkRoot = *values.WorkRoot
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "exe-dev-no-email") {
-		cfg.NoEmail = *values.NoEmail
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

@@ -117,77 +117,14 @@ type VastConfigVisitedFlags struct {
 
 // VastConfigFlagPresence reports visits for tracked flag bindings.
 func VastConfigFlagPresence(fs *flag.FlagSet) VastConfigVisitedFlags {
-	return VastConfigVisitedFlags{
-		APIURL:        flagWasSet(fs, "vast-api-url"),
-		InstanceType:  flagWasSet(fs, "vast-instance-type"),
-		WorkRoot:      flagWasSet(fs, "vast-work-root"),
-		ReleaseAction: flagWasSet(fs, "vast-release-action"),
-	}
+	var visited VastConfigVisitedFlags
+	recordConfigFlagVisits[VastConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values VastConfigFlagValues) Apply(cfg *VastConfig, fs *flag.FlagSet) (VastConfigApplied, error) {
 	var applied VastConfigApplied
-	visited := VastConfigFlagPresence(fs)
-	if visited.APIURL {
-		cfg.APIURL = *values.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if visited.InstanceType {
-		cfg.InstanceType = *values.InstanceType
-		applied.InputAccepted = true
-		applied.InstanceType = true
-	}
-	if flagWasSet(fs, "vast-gpu-name") {
-		cfg.GPUName = *values.GPUName
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vast-gpu-count") {
-		cfg.GPUCount = *values.GPUCount
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vast-image") {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vast-template-id") {
-		cfg.TemplateID = *values.TemplateID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vast-runtype") {
-		cfg.Runtype = *values.Runtype
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vast-disk-gb") {
-		cfg.DiskGB = *values.DiskGB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vast-max-dph-total") {
-		cfg.MaxDphTotal = *values.MaxDphTotal
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vast-min-reliability") {
-		cfg.MinReliability = *values.MinReliability
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vast-order") {
-		cfg.Order = *values.Order
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vast-user") {
-		cfg.User = *values.User
-		applied.InputAccepted = true
-	}
-	if visited.WorkRoot {
-		cfg.WorkRoot = *values.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if visited.ReleaseAction {
-		cfg.ReleaseAction = *values.ReleaseAction
-		applied.InputAccepted = true
-		applied.ReleaseAction = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

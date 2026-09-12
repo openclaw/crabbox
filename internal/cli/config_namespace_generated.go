@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"strings"
 	"time"
 )
 
@@ -86,55 +85,14 @@ type NamespaceConfigVisitedFlags struct {
 
 // NamespaceConfigFlagPresence reports visits for tracked flag bindings.
 func NamespaceConfigFlagPresence(fs *flag.FlagSet) NamespaceConfigVisitedFlags {
-	return NamespaceConfigVisitedFlags{
-		Size:            flagWasSet(fs, "namespace-size"),
-		WorkRoot:        flagWasSet(fs, "namespace-work-root"),
-		DeleteOnRelease: flagWasSet(fs, "namespace-delete-on-release"),
-	}
+	var visited NamespaceConfigVisitedFlags
+	recordConfigFlagVisits[NamespaceConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values NamespaceConfigFlagValues) Apply(cfg *NamespaceConfig, fs *flag.FlagSet) (NamespaceConfigApplied, error) {
 	var applied NamespaceConfigApplied
-	visited := NamespaceConfigFlagPresence(fs)
-	if flagWasSet(fs, "namespace-image") {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-	}
-	if visited.Size {
-		cfg.Size = *values.Size
-		applied.InputAccepted = true
-		applied.Size = true
-	}
-	if flagWasSet(fs, "namespace-repository") {
-		cfg.Repository = *values.Repository
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "namespace-site") {
-		cfg.Site = *values.Site
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "namespace-volume-size-gb") {
-		cfg.VolumeSizeGB = *values.VolumeSizeGB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "namespace-auto-stop-idle-timeout") {
-		parsed, err := time.ParseDuration(strings.TrimSpace(*values.AutoStopIdleTimeout))
-		if err != nil || parsed <= 0 {
-			return applied, exit(2, "%s", "namespace auto-stop idle timeout must be a positive duration")
-		}
-		cfg.AutoStopIdleTimeout = parsed
-		applied.InputAccepted = true
-	}
-	if visited.WorkRoot {
-		cfg.WorkRoot = *values.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if visited.DeleteOnRelease {
-		cfg.DeleteOnRelease = *values.DeleteOnRelease
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

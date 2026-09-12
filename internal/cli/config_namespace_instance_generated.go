@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"strings"
 )
 
 type fileNamespaceInstanceConfig struct {
@@ -87,57 +86,14 @@ type NamespaceInstanceConfigVisitedFlags struct {
 
 // NamespaceInstanceConfigFlagPresence reports visits for tracked flag bindings.
 func NamespaceInstanceConfigFlagPresence(fs *flag.FlagSet) NamespaceInstanceConfigVisitedFlags {
-	return NamespaceInstanceConfigVisitedFlags{
-		CLIPath: flagWasSet(fs, "namespace-instance-cli"),
-	}
+	var visited NamespaceInstanceConfigVisitedFlags
+	recordConfigFlagVisits[NamespaceInstanceConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values NamespaceInstanceConfigFlagValues) Apply(cfg *NamespaceInstanceConfig, fs *flag.FlagSet) (NamespaceInstanceConfigApplied, error) {
 	var applied NamespaceInstanceConfigApplied
-	visited := NamespaceInstanceConfigFlagPresence(fs)
-	if visited.CLIPath {
-		cfg.CLIPath = *values.CLIPath
-		applied.InputAccepted = true
-		applied.CLIPath = true
-	}
-	if flagWasSet(fs, "namespace-instance-machine-type") {
-		cfg.MachineType = *values.MachineType
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "namespace-instance-duration") {
-		if strings.TrimSpace(*values.Duration) == "0s" {
-			cfg.Duration = 0
-			applied.InputAccepted = true
-		} else if err := ApplyLeaseDuration(&cfg.Duration, *values.Duration); err != nil {
-			return applied, err
-		} else if *values.Duration != "" {
-			applied.InputAccepted = true
-		}
-	}
-	if flagWasSet(fs, "namespace-instance-region") {
-		cfg.Region = *values.Region
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "namespace-instance-endpoint") {
-		cfg.Endpoint = *values.Endpoint
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "namespace-instance-keychain") {
-		cfg.Keychain = *values.Keychain
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "namespace-instance-volume") {
-		cfg.Volumes = append([]string(nil), values.Volumes.stringListFlag...)
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "namespace-instance-work-root") {
-		cfg.WorkRoot = *values.WorkRoot
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "namespace-instance-bare") {
-		cfg.Bare = *values.Bare
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

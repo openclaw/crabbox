@@ -100,65 +100,14 @@ type NvidiaBrevConfigVisitedFlags struct {
 
 // NvidiaBrevConfigFlagPresence reports visits for tracked flag bindings.
 func NvidiaBrevConfigFlagPresence(fs *flag.FlagSet) NvidiaBrevConfigVisitedFlags {
-	return NvidiaBrevConfigVisitedFlags{
-		ReleaseAction: flagWasSet(fs, "nvidia-brev-release-action"),
-		WorkRoot:      flagWasSet(fs, "nvidia-brev-work-root"),
-	}
+	var visited NvidiaBrevConfigVisitedFlags
+	recordConfigFlagVisits[NvidiaBrevConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values NvidiaBrevConfigFlagValues) Apply(cfg *NvidiaBrevConfig, fs *flag.FlagSet) (NvidiaBrevConfigApplied, error) {
 	var applied NvidiaBrevConfigApplied
-	visited := NvidiaBrevConfigFlagPresence(fs)
-	if flagWasSet(fs, "nvidia-brev-cli") {
-		cfg.CLI = *values.CLI
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nvidia-brev-org") {
-		cfg.Org = *values.Org
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nvidia-brev-type") {
-		cfg.Type = *values.Type
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nvidia-brev-gpu-name") {
-		cfg.GPUName = *values.GPUName
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nvidia-brev-provider") {
-		cfg.Provider = *values.Provider
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nvidia-brev-mode") {
-		cfg.Mode = *values.Mode
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nvidia-brev-launchable") {
-		cfg.Launchable = *values.Launchable
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nvidia-brev-startup-script") {
-		cfg.StartupScript = *values.StartupScript
-		applied.InputAccepted = true
-	}
-	if visited.ReleaseAction {
-		cfg.ReleaseAction = *values.ReleaseAction
-		applied.InputAccepted = true
-		applied.ReleaseAction = true
-	}
-	if flagWasSet(fs, "nvidia-brev-target") {
-		cfg.Target = *values.Target
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nvidia-brev-user") {
-		cfg.User = *values.User
-		applied.InputAccepted = true
-	}
-	if visited.WorkRoot {
-		cfg.WorkRoot = *values.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

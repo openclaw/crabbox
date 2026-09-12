@@ -76,37 +76,14 @@ type E2BConfigVisitedFlags struct {
 
 // E2BConfigFlagPresence reports visits for tracked flag bindings.
 func E2BConfigFlagPresence(fs *flag.FlagSet) E2BConfigVisitedFlags {
-	return E2BConfigVisitedFlags{
-		APIURL: flagWasSet(fs, "e2b-api-url"),
-		Domain: flagWasSet(fs, "e2b-domain"),
-	}
+	var visited E2BConfigVisitedFlags
+	recordConfigFlagVisits[E2BConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values E2BConfigFlagValues) Apply(cfg *E2BConfig, fs *flag.FlagSet) (E2BConfigApplied, error) {
 	var applied E2BConfigApplied
-	visited := E2BConfigFlagPresence(fs)
-	if visited.APIURL {
-		cfg.APIURL = *values.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if visited.Domain {
-		cfg.Domain = *values.Domain
-		applied.InputAccepted = true
-		applied.Domain = true
-	}
-	if flagWasSet(fs, "e2b-template") {
-		cfg.Template = *values.Template
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "e2b-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "e2b-user") {
-		cfg.User = *values.User
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

@@ -80,39 +80,14 @@ type OrgoConfigVisitedFlags struct {
 
 // OrgoConfigFlagPresence reports visits for tracked flag bindings.
 func OrgoConfigFlagPresence(fs *flag.FlagSet) OrgoConfigVisitedFlags {
-	return OrgoConfigVisitedFlags{
-		APIBase: flagWasSet(fs, "orgo-api-base"),
-	}
+	var visited OrgoConfigVisitedFlags
+	recordConfigFlagVisits[OrgoConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values OrgoConfigFlagValues) Apply(cfg *OrgoConfig, fs *flag.FlagSet) (OrgoConfigApplied, error) {
 	var applied OrgoConfigApplied
-	visited := OrgoConfigFlagPresence(fs)
-	if visited.APIBase {
-		cfg.APIBase = *values.APIBase
-		applied.InputAccepted = true
-		applied.APIBase = true
-	}
-	if flagWasSet(fs, "orgo-workspace-id") {
-		cfg.WorkspaceID = *values.WorkspaceID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "orgo-ram") {
-		cfg.RAMGB = *values.RAMGB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "orgo-cpu") {
-		cfg.CPUs = *values.CPUs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "orgo-disk") {
-		cfg.DiskGB = *values.DiskGB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "orgo-resolution") {
-		cfg.Resolution = *values.Resolution
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

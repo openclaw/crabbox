@@ -69,35 +69,14 @@ type SemaphoreConfigVisitedFlags struct {
 
 // SemaphoreConfigFlagPresence reports visits for tracked flag bindings.
 func SemaphoreConfigFlagPresence(fs *flag.FlagSet) SemaphoreConfigVisitedFlags {
-	return SemaphoreConfigVisitedFlags{
-		Host: flagWasSet(fs, "semaphore-host"),
-	}
+	var visited SemaphoreConfigVisitedFlags
+	recordConfigFlagVisits[SemaphoreConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values SemaphoreConfigFlagValues) Apply(cfg *SemaphoreConfig, fs *flag.FlagSet) (SemaphoreConfigApplied, error) {
 	var applied SemaphoreConfigApplied
-	visited := SemaphoreConfigFlagPresence(fs)
-	if visited.Host {
-		cfg.Host = *values.Host
-		applied.InputAccepted = true
-		applied.Host = true
-	}
-	if flagWasSet(fs, "semaphore-project") {
-		cfg.Project = *values.Project
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "semaphore-machine") {
-		cfg.Machine = *values.Machine
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "semaphore-os-image") {
-		cfg.OSImage = *values.OSImage
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "semaphore-idle-timeout") {
-		cfg.IdleTimeout = *values.IdleTimeout
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

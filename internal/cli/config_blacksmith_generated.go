@@ -63,21 +63,6 @@ func RegisterBlacksmithConfigFlags(fs *flag.FlagSet, defaults BlacksmithConfig) 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values BlacksmithConfigFlagValues) Apply(cfg *BlacksmithConfig, fs *flag.FlagSet) (BlacksmithConfigApplied, error) {
 	var applied BlacksmithConfigApplied
-	if flagWasSet(fs, "blacksmith-org") {
-		cfg.Org = *values.Org
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "blacksmith-workflow") {
-		cfg.Workflow = *values.Workflow
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "blacksmith-job") {
-		cfg.Job = *values.Job
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "blacksmith-ref") {
-		cfg.Ref = *values.Ref
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

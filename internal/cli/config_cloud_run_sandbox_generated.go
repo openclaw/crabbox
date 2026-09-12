@@ -70,29 +70,6 @@ func RegisterCloudRunSandboxConfigFlags(fs *flag.FlagSet, defaults CloudRunSandb
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values CloudRunSandboxConfigFlagValues) Apply(cfg *CloudRunSandboxConfig, fs *flag.FlagSet) (CloudRunSandboxConfigApplied, error) {
 	var applied CloudRunSandboxConfigApplied
-	if flagWasSet(fs, "cloud-run-sandbox-gateway-url") {
-		cfg.GatewayURL = *values.GatewayURL
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cloud-run-sandbox-cli") {
-		cfg.CLIPath = *values.CLIPath
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cloud-run-sandbox-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cloud-run-sandbox-allow-egress") {
-		cfg.AllowEgress = *values.AllowEgress
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cloud-run-sandbox-write") {
-		cfg.Write = *values.Write
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cloud-run-sandbox-rootfs") {
-		cfg.Rootfs = *values.Rootfs
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

@@ -103,65 +103,14 @@ type AgentSandboxConfigVisitedFlags struct {
 
 // AgentSandboxConfigFlagPresence reports visits for tracked flag bindings.
 func AgentSandboxConfigFlagPresence(fs *flag.FlagSet) AgentSandboxConfigVisitedFlags {
-	return AgentSandboxConfigVisitedFlags{
-		Kubeconfig:      flagWasSet(fs, "agent-sandbox-kubeconfig"),
-		DeleteOnRelease: flagWasSet(fs, "agent-sandbox-delete-on-release"),
-	}
+	var visited AgentSandboxConfigVisitedFlags
+	recordConfigFlagVisits[AgentSandboxConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values AgentSandboxConfigFlagValues) Apply(cfg *AgentSandboxConfig, fs *flag.FlagSet) (AgentSandboxConfigApplied, error) {
 	var applied AgentSandboxConfigApplied
-	visited := AgentSandboxConfigFlagPresence(fs)
-	if flagWasSet(fs, "agent-sandbox-kubectl") {
-		cfg.Kubectl = *values.Kubectl
-		applied.InputAccepted = true
-	}
-	if visited.Kubeconfig {
-		cfg.Kubeconfig = *values.Kubeconfig
-		applied.InputAccepted = true
-		applied.Kubeconfig = true
-	}
-	if flagWasSet(fs, "agent-sandbox-context") {
-		cfg.Context = *values.Context
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "agent-sandbox-namespace") {
-		cfg.Namespace = *values.Namespace
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "agent-sandbox-warm-pool") {
-		cfg.WarmPool = *values.WarmPool
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "agent-sandbox-container") {
-		cfg.Container = *values.Container
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "agent-sandbox-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "agent-sandbox-sandbox-ready-timeout") {
-		cfg.SandboxReadyTimeout = *values.SandboxReadyTimeout
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "agent-sandbox-pod-ready-timeout") {
-		cfg.PodReadyTimeout = *values.PodReadyTimeout
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "agent-sandbox-exec-timeout-secs") {
-		cfg.ExecTimeoutSecs = *values.ExecTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if visited.DeleteOnRelease {
-		cfg.DeleteOnRelease = *values.DeleteOnRelease
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	if flagWasSet(fs, "agent-sandbox-forget-missing") {
-		cfg.ForgetMissing = *values.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

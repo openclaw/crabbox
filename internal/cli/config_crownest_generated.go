@@ -66,25 +66,6 @@ func RegisterCrownestConfigFlags(fs *flag.FlagSet, defaults CrownestConfig) Crow
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values CrownestConfigFlagValues) Apply(cfg *CrownestConfig, fs *flag.FlagSet) (CrownestConfigApplied, error) {
 	var applied CrownestConfigApplied
-	if flagWasSet(fs, "crownest-url") {
-		cfg.APIURL = *values.APIURL
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "crownest-project-id") {
-		cfg.ProjectID = *values.ProjectID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "crownest-template") {
-		cfg.Template = *values.Template
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "crownest-timeout-secs") {
-		cfg.TimeoutSecs = *values.TimeoutSecs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "crownest-forget-missing") {
-		cfg.ForgetMissing = *values.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

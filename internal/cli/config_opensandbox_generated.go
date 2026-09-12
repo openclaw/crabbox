@@ -93,53 +93,6 @@ func RegisterOpenSandboxConfigFlags(fs *flag.FlagSet, defaults OpenSandboxConfig
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values OpenSandboxConfigFlagValues) Apply(cfg *OpenSandboxConfig, fs *flag.FlagSet) (OpenSandboxConfigApplied, error) {
 	var applied OpenSandboxConfigApplied
-	if flagWasSet(fs, "opensandbox-api-url") {
-		cfg.APIURL = *values.APIURL
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-image") {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-cpu") {
-		cfg.CPU = *values.CPU
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-memory") {
-		cfg.Memory = *values.Memory
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-timeout-secs") {
-		cfg.TimeoutSecs = *values.TimeoutSecs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-exec-timeout-secs") {
-		cfg.ExecTimeoutSecs = *values.ExecTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-platform-os") {
-		cfg.PlatformOS = *values.PlatformOS
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-platform-arch") {
-		cfg.PlatformArch = *values.PlatformArch
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-secure-access") {
-		cfg.SecureAccess = *values.SecureAccess
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-use-server-proxy") {
-		cfg.UseServerProxy = *values.UseServerProxy
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-forget-missing") {
-		cfg.ForgetMissing = *values.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

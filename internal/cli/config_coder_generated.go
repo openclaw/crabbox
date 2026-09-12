@@ -93,59 +93,14 @@ type CoderConfigVisitedFlags struct {
 
 // CoderConfigFlagPresence reports visits for tracked flag bindings.
 func CoderConfigFlagPresence(fs *flag.FlagSet) CoderConfigVisitedFlags {
-	return CoderConfigVisitedFlags{
-		CLIPath:           flagWasSet(fs, "coder-cli"),
-		WorkRoot:          flagWasSet(fs, "coder-work-root"),
-		RichParameterFile: flagWasSet(fs, "coder-rich-parameter-file"),
-	}
+	var visited CoderConfigVisitedFlags
+	recordConfigFlagVisits[CoderConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values CoderConfigFlagValues) Apply(cfg *CoderConfig, fs *flag.FlagSet) (CoderConfigApplied, error) {
 	var applied CoderConfigApplied
-	visited := CoderConfigFlagPresence(fs)
-	if visited.CLIPath {
-		cfg.CLIPath = *values.CLIPath
-		applied.InputAccepted = true
-		applied.CLIPath = true
-	}
-	if flagWasSet(fs, "coder-template") {
-		cfg.Template = *values.Template
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "coder-preset") {
-		cfg.Preset = *values.Preset
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "coder-workspace-prefix") {
-		cfg.WorkspacePrefix = *values.WorkspacePrefix
-		applied.InputAccepted = true
-	}
-	if visited.WorkRoot {
-		cfg.WorkRoot = *values.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if flagWasSet(fs, "coder-delete-on-release") {
-		cfg.DeleteOnRelease = *values.DeleteOnRelease
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "coder-wait") {
-		cfg.Wait = *values.Wait
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "coder-use-parameter-defaults") {
-		cfg.UseParameterDefaults = *values.UseParameterDefaults
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "coder-parameter") {
-		cfg.Parameters = splitCSV(*values.Parameters)
-		applied.InputAccepted = true
-	}
-	if visited.RichParameterFile {
-		cfg.RichParameterFile = *values.RichParameterFile
-		applied.InputAccepted = true
-		applied.RichParameterFile = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

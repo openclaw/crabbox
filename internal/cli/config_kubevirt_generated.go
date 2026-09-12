@@ -114,77 +114,14 @@ type KubeVirtConfigVisitedFlags struct {
 
 // KubeVirtConfigFlagPresence reports visits for tracked flag bindings.
 func KubeVirtConfigFlagPresence(fs *flag.FlagSet) KubeVirtConfigVisitedFlags {
-	return KubeVirtConfigVisitedFlags{
-		Kubectl:         flagWasSet(fs, "kubevirt-kubectl"),
-		Virtctl:         flagWasSet(fs, "kubevirt-virtctl"),
-		Kubeconfig:      flagWasSet(fs, "kubevirt-kubeconfig"),
-		Template:        flagWasSet(fs, "kubevirt-template"),
-		SSHKey:          flagWasSet(fs, "kubevirt-ssh-key"),
-		SSHPublicKey:    flagWasSet(fs, "kubevirt-ssh-public-key"),
-		WorkRoot:        flagWasSet(fs, "kubevirt-work-root"),
-		DeleteOnRelease: flagWasSet(fs, "kubevirt-delete-on-release"),
-	}
+	var visited KubeVirtConfigVisitedFlags
+	recordConfigFlagVisits[KubeVirtConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values KubeVirtConfigFlagValues) Apply(cfg *KubeVirtConfig, fs *flag.FlagSet) (KubeVirtConfigApplied, error) {
 	var applied KubeVirtConfigApplied
-	visited := KubeVirtConfigFlagPresence(fs)
-	if visited.Kubectl {
-		cfg.Kubectl = *values.Kubectl
-		applied.InputAccepted = true
-		applied.Kubectl = true
-	}
-	if visited.Virtctl {
-		cfg.Virtctl = *values.Virtctl
-		applied.InputAccepted = true
-		applied.Virtctl = true
-	}
-	if visited.Kubeconfig {
-		cfg.Kubeconfig = *values.Kubeconfig
-		applied.InputAccepted = true
-		applied.Kubeconfig = true
-	}
-	if flagWasSet(fs, "kubevirt-context") {
-		cfg.Context = *values.Context
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "kubevirt-namespace") {
-		cfg.Namespace = *values.Namespace
-		applied.InputAccepted = true
-	}
-	if visited.Template {
-		cfg.Template = *values.Template
-		applied.InputAccepted = true
-		applied.Template = true
-	}
-	if flagWasSet(fs, "kubevirt-ssh-user") {
-		cfg.SSHUser = *values.SSHUser
-		applied.InputAccepted = true
-	}
-	if visited.SSHKey {
-		cfg.SSHKey = *values.SSHKey
-		applied.InputAccepted = true
-		applied.SSHKey = true
-	}
-	if visited.SSHPublicKey {
-		cfg.SSHPublicKey = *values.SSHPublicKey
-		applied.InputAccepted = true
-		applied.SSHPublicKey = true
-	}
-	if flagWasSet(fs, "kubevirt-ssh-port") {
-		cfg.SSHPort = *values.SSHPort
-		applied.InputAccepted = true
-	}
-	if visited.WorkRoot {
-		cfg.WorkRoot = *values.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if visited.DeleteOnRelease {
-		cfg.DeleteOnRelease = *values.DeleteOnRelease
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

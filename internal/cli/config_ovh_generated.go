@@ -71,35 +71,14 @@ type OVHConfigVisitedFlags struct {
 
 // OVHConfigFlagPresence reports visits for tracked flag bindings.
 func OVHConfigFlagPresence(fs *flag.FlagSet) OVHConfigVisitedFlags {
-	return OVHConfigVisitedFlags{
-		Image: flagWasSet(fs, "ovh-image"),
-	}
+	var visited OVHConfigVisitedFlags
+	recordConfigFlagVisits[OVHConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values OVHConfigFlagValues) Apply(cfg *OVHConfig, fs *flag.FlagSet) (OVHConfigApplied, error) {
 	var applied OVHConfigApplied
-	visited := OVHConfigFlagPresence(fs)
-	if flagWasSet(fs, "ovh-endpoint") {
-		cfg.Endpoint = *values.Endpoint
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "ovh-project-id") {
-		cfg.ProjectID = *values.ProjectID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "ovh-region") {
-		cfg.Region = *values.Region
-		applied.InputAccepted = true
-	}
-	if visited.Image {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if flagWasSet(fs, "ovh-flavor") {
-		cfg.Flavor = *values.Flavor
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

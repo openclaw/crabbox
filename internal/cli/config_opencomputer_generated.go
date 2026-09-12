@@ -71,37 +71,6 @@ func RegisterOpenComputerConfigFlags(fs *flag.FlagSet, defaults OpenComputerConf
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values OpenComputerConfigFlagValues) Apply(cfg *OpenComputerConfig, fs *flag.FlagSet) (OpenComputerConfigApplied, error) {
 	var applied OpenComputerConfigApplied
-	if flagWasSet(fs, "opencomputer-api-url") {
-		cfg.APIURL = *values.APIURL
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opencomputer-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opencomputer-cpu") {
-		cfg.CPU = *values.CPU
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opencomputer-memory-mb") {
-		cfg.MemoryMB = *values.MemoryMB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opencomputer-timeout-secs") {
-		cfg.TimeoutSecs = *values.TimeoutSecs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opencomputer-exec-timeout-secs") {
-		cfg.ExecTimeoutSecs = *values.ExecTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opencomputer-burst") {
-		cfg.Burst = *values.Burst
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opencomputer-forget-missing") {
-		cfg.ForgetMissing = *values.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

@@ -83,45 +83,6 @@ func RegisterBlaxelConfigFlags(fs *flag.FlagSet, defaults BlaxelConfig) BlaxelCo
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values BlaxelConfigFlagValues) Apply(cfg *BlaxelConfig, fs *flag.FlagSet) (BlaxelConfigApplied, error) {
 	var applied BlaxelConfigApplied
-	if flagWasSet(fs, "blaxel-api-url") {
-		cfg.APIURL = *values.APIURL
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "blaxel-workspace") {
-		cfg.Workspace = *values.Workspace
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "blaxel-region") {
-		cfg.Region = *values.Region
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "blaxel-image") {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "blaxel-memory-mb") {
-		cfg.MemoryMB = *values.MemoryMB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "blaxel-ttl") {
-		cfg.TTL = *values.TTL
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "blaxel-idle-ttl") {
-		cfg.IdleTTL = *values.IdleTTL
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "blaxel-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "blaxel-exec-timeout-secs") {
-		cfg.ExecTimeoutSecs = *values.ExecTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "blaxel-forget-missing") {
-		cfg.ForgetMissing = *values.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

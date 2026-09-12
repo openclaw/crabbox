@@ -62,27 +62,14 @@ type RailwayConfigVisitedFlags struct {
 
 // RailwayConfigFlagPresence reports visits for tracked flag bindings.
 func RailwayConfigFlagPresence(fs *flag.FlagSet) RailwayConfigVisitedFlags {
-	return RailwayConfigVisitedFlags{
-		APIURL: flagWasSet(fs, "railway-url"),
-	}
+	var visited RailwayConfigVisitedFlags
+	recordConfigFlagVisits[RailwayConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values RailwayConfigFlagValues) Apply(cfg *RailwayConfig, fs *flag.FlagSet) (RailwayConfigApplied, error) {
 	var applied RailwayConfigApplied
-	visited := RailwayConfigFlagPresence(fs)
-	if visited.APIURL {
-		cfg.APIURL = *values.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if flagWasSet(fs, "railway-project") {
-		cfg.ProjectID = *values.ProjectID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "railway-environment") {
-		cfg.EnvironmentID = *values.EnvironmentID
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

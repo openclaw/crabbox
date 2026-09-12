@@ -36,10 +36,7 @@ func applyConfigFileOverlay(config, input, report any, trusted bool, provider st
 				return err
 			}
 			if accepted {
-				applied.FieldByName("InputAccepted").SetBool(true)
-				if field.Tag.Get("reportApplied") == "true" {
-					applied.FieldByName(field.Name).SetBool(true)
-				}
+				recordConfigApplied(applied, field)
 			}
 		}
 	}

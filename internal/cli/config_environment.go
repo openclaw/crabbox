@@ -32,13 +32,17 @@ func applyConfigEnvironment(config, report any, start, end int) error {
 			return err
 		}
 		if accepted {
-			applied.FieldByName("InputAccepted").SetBool(true)
-			if field.Tag.Get("reportApplied") == "true" {
-				applied.FieldByName(field.Name).SetBool(true)
-			}
+			recordConfigApplied(applied, field)
 		}
 	}
 	return nil
+}
+
+func recordConfigApplied(report reflect.Value, field reflect.StructField) {
+	report.FieldByName("InputAccepted").SetBool(true)
+	if field.Tag.Get("reportApplied") == "true" {
+		report.FieldByName(field.Name).SetBool(true)
+	}
 }
 
 func applyConfigEnvironmentField(dst reflect.Value, tags reflect.StructTag) (bool, error) {

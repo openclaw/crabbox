@@ -74,35 +74,14 @@ type UpstashBoxConfigVisitedFlags struct {
 
 // UpstashBoxConfigFlagPresence reports visits for tracked flag bindings.
 func UpstashBoxConfigFlagPresence(fs *flag.FlagSet) UpstashBoxConfigVisitedFlags {
-	return UpstashBoxConfigVisitedFlags{
-		BaseURL: flagWasSet(fs, "upstash-box-base-url"),
-	}
+	var visited UpstashBoxConfigVisitedFlags
+	recordConfigFlagVisits[UpstashBoxConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values UpstashBoxConfigFlagValues) Apply(cfg *UpstashBoxConfig, fs *flag.FlagSet) (UpstashBoxConfigApplied, error) {
 	var applied UpstashBoxConfigApplied
-	visited := UpstashBoxConfigFlagPresence(fs)
-	if visited.BaseURL {
-		cfg.BaseURL = *values.BaseURL
-		applied.InputAccepted = true
-		applied.BaseURL = true
-	}
-	if flagWasSet(fs, "upstash-box-runtime") {
-		cfg.Runtime = *values.Runtime
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "upstash-box-size") {
-		cfg.Size = *values.Size
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "upstash-box-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "upstash-box-keep-alive") {
-		cfg.KeepAlive = *values.KeepAlive
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

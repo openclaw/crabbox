@@ -51,6 +51,13 @@ It returns accepted fields before the first error without modifying the DTO.
 Provider-specific admission wrappers still run before this mechanical overlay;
 path expansion and credential selection still run in their existing order.
 
+`internal/cli/config_flag_application.go` owns ordinary visited-flag application
+and raw-presence queries. Typed flag storage and registration remain generated.
+The engine applies fields in schema order, reports earlier accepted values when
+a duration fails, and preserves each list and nullable-bool copy policy. Schemas
+with manual flag application expose presence queries without gaining an `Apply`
+method; provider validation continues to own that path.
+
 Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.
