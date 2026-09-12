@@ -77,19 +77,9 @@ type Machine0ConfigFlagValues struct {
 
 // RegisterMachine0ConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterMachine0ConfigFlags(fs *flag.FlagSet, defaults Machine0Config) Machine0ConfigFlagValues {
-	return Machine0ConfigFlagValues{
-		CLIPath:       fs.String("machine0-cli", defaults.CLIPath, "Machine0 CLI path"),
-		Image:         fs.String("machine0-image", defaults.Image, "Machine0 image name"),
-		ImageVersion:  fs.Int("machine0-image-version", defaults.ImageVersion, "Machine0 image version; 0 uses the active version"),
-		DesktopImage:  fs.String("machine0-desktop-image", defaults.DesktopImage, "optional prepared Machine0 image for --desktop leases"),
-		Size:          fs.String("machine0-size", defaults.Size, "Machine0 live-catalog size slug"),
-		Region:        fs.String("machine0-region", defaults.Region, "Machine0 region"),
-		Key:           fs.String("machine0-key", defaults.Key, "Machine0 registered SSH key name; empty uses the Machine0 default"),
-		WorkRoot:      fs.String("machine0-work-root", defaults.WorkRoot, "remote Crabbox work root"),
-		ReleasePolicy: fs.String("machine0-release-policy", defaults.ReleasePolicy, "release policy: destroy or explicit suspend"),
-		CreateTimeout: fs.String("machine0-create-timeout", defaults.CreateTimeout.String(), "Machine0 creation timeout"),
-		PollInterval:  fs.String("machine0-poll-interval", defaults.PollInterval.String(), "Machine0 status polling interval"),
-	}
+	var values Machine0ConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Machine0ConfigVisitedFlags records raw flag visits, independently of application.

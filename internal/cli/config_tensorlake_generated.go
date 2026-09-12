@@ -78,21 +78,9 @@ type TensorlakeConfigFlagValues struct {
 
 // RegisterTensorlakeConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterTensorlakeConfigFlags(fs *flag.FlagSet, defaults TensorlakeConfig) TensorlakeConfigFlagValues {
-	return TensorlakeConfigFlagValues{
-		APIURL:         fs.String("tensorlake-api-url", defaults.APIURL, "Tensorlake API base URL"),
-		CLIPath:        fs.String("tensorlake-cli", defaults.CLIPath, "Path to the tensorlake CLI binary"),
-		Image:          fs.String("tensorlake-image", defaults.Image, "Tensorlake sandbox image name"),
-		Snapshot:       fs.String("tensorlake-snapshot", defaults.Snapshot, "Tensorlake snapshot ID to restore from"),
-		OrganizationID: fs.String("tensorlake-organization-id", defaults.OrganizationID, "Tensorlake organization ID"),
-		ProjectID:      fs.String("tensorlake-project-id", defaults.ProjectID, "Tensorlake project ID"),
-		Namespace:      fs.String("tensorlake-namespace", defaults.Namespace, "Tensorlake namespace"),
-		Workdir:        fs.String("tensorlake-workdir", defaults.Workdir, "Absolute working directory inside the sandbox (also used as sync target)"),
-		CPUs:           fs.Float64("tensorlake-cpus", defaults.CPUs, "Tensorlake sandbox CPU count"),
-		MemoryMB:       fs.Int("tensorlake-memory-mb", defaults.MemoryMB, "Tensorlake sandbox memory in MB"),
-		DiskMB:         fs.Int("tensorlake-disk-mb", defaults.DiskMB, "Tensorlake sandbox root disk in MB"),
-		TimeoutSecs:    fs.Int("tensorlake-timeout-secs", defaults.TimeoutSecs, "Tensorlake sandbox lifetime timeout in seconds"),
-		NoInternet:     fs.Bool("tensorlake-no-internet", defaults.NoInternet, "Block outbound internet from the sandbox"),
-	}
+	var values TensorlakeConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // TensorlakeConfigVisitedFlags records raw flag visits, independently of application.

@@ -59,13 +59,9 @@ type E2BConfigFlagValues struct {
 
 // RegisterE2BConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterE2BConfigFlags(fs *flag.FlagSet, defaults E2BConfig) E2BConfigFlagValues {
-	return E2BConfigFlagValues{
-		APIURL:   fs.String("e2b-api-url", defaults.APIURL, "E2B API URL"),
-		Domain:   fs.String("e2b-domain", defaults.Domain, "E2B sandbox domain"),
-		Template: fs.String("e2b-template", defaults.Template, "E2B sandbox template ID"),
-		Workdir:  fs.String("e2b-workdir", defaults.Workdir, "E2B sandbox working directory"),
-		User:     fs.String("e2b-user", defaults.User, "E2B sandbox user for command and file ownership"),
-	}
+	var values E2BConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // E2BConfigVisitedFlags records raw flag visits, independently of application.

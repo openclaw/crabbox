@@ -56,16 +56,9 @@ type OpenComputerConfigFlagValues struct {
 
 // RegisterOpenComputerConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterOpenComputerConfigFlags(fs *flag.FlagSet, defaults OpenComputerConfig) OpenComputerConfigFlagValues {
-	return OpenComputerConfigFlagValues{
-		APIURL:          fs.String("opencomputer-api-url", defaults.APIURL, "Trusted OpenComputer API base URL; not accepted from repository config"),
-		Workdir:         fs.String("opencomputer-workdir", defaults.Workdir, "Absolute working directory inside the sandbox (also used as sync target)"),
-		CPU:             fs.Int("opencomputer-cpu", defaults.CPU, "OpenComputer sandbox vCPU count (0 = service default; the service infers memory when omitted)"),
-		MemoryMB:        fs.Int("opencomputer-memory-mb", defaults.MemoryMB, "OpenComputer sandbox memory in MB (0 = service default; the service infers CPU when omitted)"),
-		TimeoutSecs:     fs.Int("opencomputer-timeout-secs", defaults.TimeoutSecs, "OpenComputer sandbox idle timeout in seconds (0 = service default)"),
-		ExecTimeoutSecs: fs.Int("opencomputer-exec-timeout-secs", defaults.ExecTimeoutSecs, "OpenComputer command timeout in seconds (0 = Crabbox default 3600)"),
-		Burst:           fs.Bool("opencomputer-burst", defaults.Burst, "use alpha best-effort burst capacity; filesystem persists but processes may restart"),
-		ForgetMissing:   fs.Bool("opencomputer-forget-missing", defaults.ForgetMissing, "remove the local claim when stop gets 404 (explicit stale-claim cleanup)"),
-	}
+	var values OpenComputerConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.

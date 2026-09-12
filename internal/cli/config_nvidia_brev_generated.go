@@ -76,20 +76,9 @@ type NvidiaBrevConfigFlagValues struct {
 
 // RegisterNvidiaBrevConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterNvidiaBrevConfigFlags(fs *flag.FlagSet, defaults NvidiaBrevConfig) NvidiaBrevConfigFlagValues {
-	return NvidiaBrevConfigFlagValues{
-		CLI:           fs.String("nvidia-brev-cli", defaults.CLI, "NVIDIA Brev CLI path"),
-		Org:           fs.String("nvidia-brev-org", defaults.Org, "NVIDIA Brev organization selector"),
-		Type:          fs.String("nvidia-brev-type", defaults.Type, "NVIDIA Brev instance type selector"),
-		GPUName:       fs.String("nvidia-brev-gpu-name", defaults.GPUName, "NVIDIA Brev GPU name selector"),
-		Provider:      fs.String("nvidia-brev-provider", defaults.Provider, "NVIDIA Brev cloud provider selector"),
-		Mode:          fs.String("nvidia-brev-mode", defaults.Mode, "NVIDIA Brev mode: vm"),
-		Launchable:    fs.String("nvidia-brev-launchable", defaults.Launchable, "NVIDIA Brev launchable selector"),
-		StartupScript: fs.String("nvidia-brev-startup-script", defaults.StartupScript, "NVIDIA Brev startup script inline command or @file path"),
-		ReleaseAction: fs.String("nvidia-brev-release-action", defaults.ReleaseAction, "NVIDIA Brev release action: delete or stop"),
-		Target:        fs.String("nvidia-brev-target", defaults.Target, "NVIDIA Brev SSH target: container or host"),
-		User:          fs.String("nvidia-brev-user", defaults.User, "SSH user for NVIDIA Brev workspaces"),
-		WorkRoot:      fs.String("nvidia-brev-work-root", defaults.WorkRoot, "remote Crabbox work root on NVIDIA Brev workspaces"),
-	}
+	var values NvidiaBrevConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // NvidiaBrevConfigVisitedFlags records raw flag visits, independently of application.

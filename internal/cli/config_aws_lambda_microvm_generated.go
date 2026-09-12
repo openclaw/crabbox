@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"strings"
 )
 
 type fileAWSLambdaMicroVMConfig struct {
@@ -59,15 +58,9 @@ type AWSLambdaMicroVMConfigFlagValues struct {
 
 // RegisterAWSLambdaMicroVMConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterAWSLambdaMicroVMConfigFlags(fs *flag.FlagSet, defaults AWSLambdaMicroVMConfig) AWSLambdaMicroVMConfigFlagValues {
-	return AWSLambdaMicroVMConfigFlagValues{
-		Image:             fs.String("aws-lambda-microvm-image", defaults.Image, "Lambda MicroVM image ARN"),
-		ImageVersion:      fs.String("aws-lambda-microvm-image-version", defaults.ImageVersion, "Lambda MicroVM image version (default latest active)"),
-		ExecutionRoleARN:  fs.String("aws-lambda-microvm-execution-role-arn", defaults.ExecutionRoleARN, "optional IAM execution role ARN"),
-		Workdir:           fs.String("aws-lambda-microvm-workdir", defaults.Workdir, "absolute runner workdir"),
-		IngressConnectors: fs.String("aws-lambda-microvm-ingress-connectors", strings.Join(defaults.IngressConnectors, ","), "comma-separated ingress connector ARNs"),
-		EgressConnectors:  fs.String("aws-lambda-microvm-egress-connectors", strings.Join(defaults.EgressConnectors, ","), "comma-separated egress connector ARNs"),
-		ForgetMissing:     fs.Bool("aws-lambda-microvm-forget-missing", defaults.ForgetMissing, "remove local claim when the MicroVM is already missing"),
-	}
+	var values AWSLambdaMicroVMConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // AWSLambdaMicroVMConfigVisitedFlags records raw flag visits, independently of application.

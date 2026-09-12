@@ -52,12 +52,9 @@ type BlacksmithConfigFlagValues struct {
 
 // RegisterBlacksmithConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterBlacksmithConfigFlags(fs *flag.FlagSet, defaults BlacksmithConfig) BlacksmithConfigFlagValues {
-	return BlacksmithConfigFlagValues{
-		Org:      fs.String("blacksmith-org", defaults.Org, "Blacksmith organization"),
-		Workflow: fs.String("blacksmith-workflow", defaults.Workflow, "Blacksmith Testbox workflow file, name, or id"),
-		Job:      fs.String("blacksmith-job", defaults.Job, "Blacksmith Testbox workflow job"),
-		Ref:      fs.String("blacksmith-ref", defaults.Ref, "Blacksmith Testbox git ref"),
-	}
+	var values BlacksmithConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.

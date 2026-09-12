@@ -33,7 +33,7 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, overlay entry points,
-and storage, registration, and presence-based application for admitted flags.
+and typed flag storage with registration, application, and presence entry points.
 
 Environment application has one runtime owner in
 `internal/cli/config_environment.go`. Generated methods pass their typed config
@@ -52,11 +52,18 @@ Provider-specific admission wrappers still run before this mechanical overlay;
 path expansion and credential selection still run in their existing order.
 
 `internal/cli/config_flag_application.go` owns ordinary visited-flag application
-and raw-presence queries. Typed flag storage and registration remain generated.
+and raw-presence queries. Typed flag storage remains generated.
 The engine applies fields in schema order, reports earlier accepted values when
 a duration fails, and preserves each list and nullable-bool copy policy. Schemas
 with manual flag application expose presence queries without gaining an `Apply`
 method; provider validation continues to own that path.
+
+`internal/cli/config_flag_registration.go` registers the typed storage from the
+same schema, using the standard flag constructors and existing list flag types.
+It preserves default snapshots, fallback strings, nullable bools, and duration
+representation. Replacing lists register before ordinary flags, and appending
+lists register afterward. Registration neither applies values to configuration
+nor records source provenance.
 
 Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config

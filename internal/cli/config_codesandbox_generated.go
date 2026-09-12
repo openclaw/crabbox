@@ -74,19 +74,9 @@ type CodeSandboxConfigFlagValues struct {
 
 // RegisterCodeSandboxConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterCodeSandboxConfigFlags(fs *flag.FlagSet, defaults CodeSandboxConfig) CodeSandboxConfigFlagValues {
-	return CodeSandboxConfigFlagValues{
-		TemplateID:               fs.String("codesandbox-template-id", defaults.TemplateID, "CodeSandbox template ID used by later lifecycle operations"),
-		Workdir:                  fs.String("codesandbox-workdir", defaults.Workdir, "Absolute working directory inside the sandbox; must be under /project/workspace"),
-		VMTier:                   fs.String("codesandbox-vm-tier", defaults.VMTier, "CodeSandbox VM tier for later create operations (empty = workspace default)"),
-		Privacy:                  fs.String("codesandbox-privacy", defaults.Privacy, "CodeSandbox sandbox privacy for later create operations"),
-		HibernationTimeoutSecs:   fs.Int("codesandbox-hibernation-timeout-secs", defaults.HibernationTimeoutSecs, "CodeSandbox hibernation timeout in seconds (0 = service default)"),
-		AutomaticWakeupHTTP:      fs.Bool("codesandbox-automatic-wakeup-http", defaults.AutomaticWakeupHTTP, "allow automatic wakeup on HTTP requests"),
-		AutomaticWakeupWebSocket: fs.Bool("codesandbox-automatic-wakeup-websocket", defaults.AutomaticWakeupWebSocket, "allow automatic wakeup on WebSocket connections"),
-		BridgeCommand:            fs.String("codesandbox-bridge-command", defaults.BridgeCommand, "local Node-compatible command used for the CodeSandbox SDK bridge"),
-		SDKPackage:               fs.String("codesandbox-sdk-package", defaults.SDKPackage, "Node package spec imported by the CodeSandbox SDK bridge"),
-		DoctorListLimit:          fs.Int("codesandbox-doctor-list-limit", defaults.DoctorListLimit, "maximum sandboxes read by non-mutating doctor readiness"),
-		OperationTimeoutSecs:     fs.Int("codesandbox-operation-timeout-secs", defaults.OperationTimeoutSecs, "SDK bridge operation timeout in seconds"),
-	}
+	var values CodeSandboxConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.

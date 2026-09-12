@@ -66,15 +66,9 @@ type SmolvmConfigFlagValues struct {
 
 // RegisterSmolvmConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterSmolvmConfigFlags(fs *flag.FlagSet, defaults SmolvmConfig) SmolvmConfigFlagValues {
-	return SmolvmConfigFlagValues{
-		BaseURL:  fs.String("smolvm-base-url", defaults.BaseURL, "SmolVM / SmolFleet API base URL"),
-		Image:    fs.String("smolvm-image", defaults.Image, "source image for smolvm machines (e.g. ubuntu:24.04)"),
-		Workdir:  fs.String("smolvm-workdir", defaults.Workdir, "absolute working directory inside the smolvm machine"),
-		CPUs:     fs.Int("smolvm-cpus", defaults.CPUs, "number of vCPUs for the smolvm machine"),
-		MemoryMB: fs.Int("smolvm-memory-mb", defaults.MemoryMB, "memory in MiB for the smolvm machine"),
-		Network:  fs.String("smolvm-network", defaults.Network, "network mode: open or blocked"),
-		Keep:     fs.Bool("smolvm-keep", defaults.Keep, "keep the smolvm machine after run (do not auto-delete)"),
-	}
+	var values SmolvmConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // SmolvmConfigVisitedFlags records raw flag visits, independently of application.

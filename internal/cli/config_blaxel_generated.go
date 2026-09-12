@@ -66,18 +66,9 @@ type BlaxelConfigFlagValues struct {
 
 // RegisterBlaxelConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterBlaxelConfigFlags(fs *flag.FlagSet, defaults BlaxelConfig) BlaxelConfigFlagValues {
-	return BlaxelConfigFlagValues{
-		APIURL:          fs.String("blaxel-api-url", defaults.APIURL, "Trusted Blaxel API base URL; not accepted from repository config"),
-		Workspace:       fs.String("blaxel-workspace", defaults.Workspace, "Blaxel workspace name or ID"),
-		Region:          fs.String("blaxel-region", defaults.Region, "Blaxel deployment region (empty = service default/policy)"),
-		Image:           fs.String("blaxel-image", defaults.Image, "Blaxel sandbox image"),
-		MemoryMB:        fs.Int("blaxel-memory-mb", defaults.MemoryMB, "Blaxel sandbox memory in MB (0 = service default)"),
-		TTL:             fs.String("blaxel-ttl", defaults.TTL, "Blaxel sandbox lifetime duration (empty = service default)"),
-		IdleTTL:         fs.String("blaxel-idle-ttl", defaults.IdleTTL, "Blaxel sandbox idle timeout duration (empty = service default)"),
-		Workdir:         fs.String("blaxel-workdir", defaults.Workdir, "absolute working directory inside the Blaxel sandbox"),
-		ExecTimeoutSecs: fs.Int("blaxel-exec-timeout-secs", defaults.ExecTimeoutSecs, "Blaxel command timeout in seconds (0 = Crabbox default 600)"),
-		ForgetMissing:   fs.Bool("blaxel-forget-missing", defaults.ForgetMissing, "remove the local claim when stop gets 404 (explicit stale-claim cleanup)"),
-	}
+	var values BlaxelConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.

@@ -41,7 +41,7 @@ func TestGenerateDeterministicTypedBindings(t *testing.T) {
 		"func (cfg *PilotConfig) applyFile(file *filePilotConfig) (PilotConfigApplied, error)",
 		`applyConfigFileOverlay(cfg, file, &applied, true, "pilot")`,
 		`applyConfigEnvironment(cfg, &applied, 0, 5)`,
-		`fs.String("pilot-ports", strings.Join(defaults.Ports, ","), "Ports")`,
+		`registerConfigFlags(fs, defaults, &values)`,
 		`applyConfigFlags(cfg, values, &applied, fs)`,
 	} {
 		if !strings.Contains(string(first), want) {
@@ -150,7 +150,7 @@ func TestGenerateEnvironmentOnlyAliasBindings(t *testing.T) {
 			for _, want := range []string{
 				`const PilotConfigDefaultName string = "test"`,
 				`applyConfigEnvironment(cfg, &applied, 0, 5)`,
-				`fs.String("pilot-name", defaults.Name, "Name")`,
+				`registerConfigFlags(fs, defaults, &values)`,
 				`applyConfigFlags(cfg, values, &applied, fs)`,
 			} {
 				if !strings.Contains(text, want) {
@@ -219,7 +219,7 @@ func TestGenerateFlagOnlyBindings(t *testing.T) {
 				t.Fatalf("nondeterministic output: %v", err)
 			}
 			text := string(output)
-			if strings.Contains(text, `"os"`) || !strings.Contains(text, `"strings"`) {
+			if strings.Contains(text, `"os"`) || strings.Contains(text, `"strings"`) {
 				t.Fatal("imports do not match list source grants")
 			}
 			fileType := strings.SplitN(strings.SplitN(text, "type filePilotConfig struct {", 2)[1], "}", 2)[0]
@@ -240,7 +240,7 @@ func TestGenerateFlagOnlyBindings(t *testing.T) {
 				`const PilotConfigDefaultCount int = 7`,
 				`const PilotConfigDefaultCPUs float64 = 0.5`,
 				`const PilotConfigDefaultEnabled bool = true`,
-				`fs.String("pilot-ports", strings.Join(defaults.Ports, ","), "Ports")`,
+				`registerConfigFlags(fs, defaults, &values)`,
 				`applyConfigFlags(cfg, values, &applied, fs)`,
 			} {
 				if !strings.Contains(text, want) {
@@ -683,6 +683,7 @@ func applyConfigEnvironment(any, any, int, int) error { panic("stub") }
 func applyConfigFileOverlay(any, any, any, bool, string) error { panic("stub") }
 func applyConfigFlags(any, any, any, *flag.FlagSet) error { panic("stub") }
 func recordConfigFlagVisits[Config any](*flag.FlagSet, any) { panic("stub") }
+func registerConfigFlags(*flag.FlagSet, any, any) { panic("stub") }
 func applyLeaseDuration(*time.Duration, string) bool { panic("stub") }
 func flagWasSet(*flag.FlagSet, string) bool { panic("stub") }
 func exit(int, string, ...any) error { panic("stub") }
@@ -705,14 +706,14 @@ func splitCommaList(string) []string { panic("stub") }
 		}
 	}
 	dir := t.TempDir()
-	for _, input := range []struct{ name, source string }{{"source.go", source}, {"generated.go", string(output)}, {"helpers.go", helpers}} {
+	for _, input := range []struct{ name, source string }{{"source.go", source}, {"generated.go", string(output)}, {"helpers.go", helpers}, {"list_support.go", listSupportFixtureSource(t)}} {
 		if err := os.WriteFile(filepath.Join(dir, input.name), []byte(input.source), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// A trimpath test binary may have no GOROOT for an in-process importer.
 	// The Go command discovers its own standard library; compile, never run, the fixture.
-	command := exec.Command("go", "build", "source.go", "generated.go", "helpers.go")
+	command := exec.Command("go", "build", "source.go", "generated.go", "helpers.go", "list_support.go")
 	command.Dir = dir
 	command.Env = []string{"GOTOOLCHAIN=local", "GOWORK=off", "GOPROXY=off", "GOSUMDB=off", "GOENV=off"}
 	for _, name := range []string{"PATH", "HOME", "USERPROFILE", "LOCALAPPDATA", "SystemRoot", "WINDIR", "TMPDIR", "TEMP", "TMP", "GOCACHE", "GOROOT", "GOFLAGS"} {
@@ -848,6 +849,34 @@ func TestAcceptedAssignments(t *testing.T) {
 	runScalarFixture(t, source, generated, behavior+extraTests)
 }
 
+// All generated fixtures use the actual core flag types, including scalar-list
+// behavior inherited by appendTrimmedListFlag.
+func listSupportFixtureSource(t *testing.T) string {
+	t.Helper()
+	support, err := os.ReadFile("../../internal/cli/config_list_flag.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.ReadFile("../../internal/cli/actions.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(source), "type stringListFlag []string")
+	if start < 0 {
+		t.Fatal("missing core stringListFlag")
+	}
+	list := string(source)[start:]
+	getter := strings.Index(list, "func (f *stringListFlag) Get() any {")
+	if getter < 0 {
+		t.Fatal("missing core stringListFlag.Get")
+	}
+	end := strings.Index(list[getter:], "\n}")
+	if end < 0 {
+		t.Fatal("missing end of core stringListFlag.Get")
+	}
+	return string(support) + "\n" + list[:getter+end+2] + "\n"
+}
+
 func runScalarFixture(t *testing.T, source string, generated []byte, behavior string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -863,13 +892,17 @@ func runScalarFixture(t *testing.T, source string, generated []byte, behavior st
 	if err != nil {
 		t.Fatal(err)
 	}
-	acceptance := acceptanceFixtureSource(t, source+behavior, string(generated)+string(environment)+string(fileOverlay)+string(flags))
-	for _, file := range []struct{ name, content string }{{"source.go", source}, {"generated.go", string(generated)}, {"behavior_test.go", behavior}, {"acceptance.go", acceptance}, {"environment.go", string(environment)}, {"file_overlay.go", string(fileOverlay)}, {"flags.go", string(flags)}} {
+	registration, err := os.ReadFile("../../internal/cli/config_flag_registration.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptance := acceptanceFixtureSource(t, source+behavior, string(generated)+string(environment)+string(fileOverlay)+string(flags)+string(registration))
+	for _, file := range []struct{ name, content string }{{"source.go", source}, {"generated.go", string(generated)}, {"behavior_test.go", behavior}, {"acceptance.go", acceptance}, {"environment.go", string(environment)}, {"file_overlay.go", string(fileOverlay)}, {"flags.go", string(flags)}, {"registration.go", string(registration)}, {"list_support.go", listSupportFixtureSource(t)}} {
 		if err := os.WriteFile(filepath.Join(dir, file.name), []byte(file.content), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	command := exec.Command("go", "test", "source.go", "generated.go", "behavior_test.go", "acceptance.go", "environment.go", "file_overlay.go", "flags.go")
+	command := exec.Command("go", "test", "source.go", "generated.go", "behavior_test.go", "acceptance.go", "environment.go", "file_overlay.go", "flags.go", "registration.go", "list_support.go")
 	command.Dir = dir
 	command.Env = []string{"GOTOOLCHAIN=local", "GOWORK=off", "GOPROXY=off", "GOSUMDB=off", "GOENV=off"}
 	for _, name := range []string{"PATH", "HOME", "USERPROFILE", "LOCALAPPDATA", "SystemRoot", "WINDIR", "TMPDIR", "TEMP", "TMP", "GOCACHE", "GOROOT", "GOFLAGS"} {
@@ -956,7 +989,7 @@ func TestGenerateManualFlagApplication(t *testing.T) {
 		}
 	}
 	for _, field := range []string{"Name", "Enabled", "Timeout"} {
-		if !strings.Contains(string(output), field+":") || !strings.Contains(string(output), "recordConfigFlagVisits[PilotConfig](fs, &visited)") {
+		if !strings.Contains(strings.Join(strings.Fields(string(output)), " "), field+" *") || !strings.Contains(string(output), "recordConfigFlagVisits[PilotConfig](fs, &visited)") {
 			t.Fatalf("missing visit %s", field)
 		}
 	}
@@ -1144,7 +1177,7 @@ func TestGenerateNullableBool(t *testing.T) {
 	if err != nil || !bytes.Equal(output, again) {
 		t.Fatal("nondeterministic nullable bool")
 	}
-	if strings.Contains(string(output), "**bool") || !strings.Contains(string(output), `defaults.Enabled != nil && *defaults.Enabled`) {
+	if strings.Contains(string(output), "**bool") || !strings.Contains(string(output), `registerConfigFlags(fs, defaults, &values)`) {
 		t.Fatal("nullable storage/default shape")
 	}
 	typecheckGenerated(t, nullableBoolSample, output)
@@ -1330,7 +1363,7 @@ func TestGenerateDurationBindings(t *testing.T) {
 	if err != nil || !bytes.Equal(output, again) {
 		t.Fatal("nondeterministic duration output")
 	}
-	for _, want := range []string{`Timeout string ` + "`yaml:\"timeout,omitempty\"`", "const PilotConfigDefaultTimeout time.Duration = 180 * time.Second", `applyConfigFileOverlay(cfg, file, &applied, true, "pilot")`, `fs.Duration("pilot-timeout", defaults.Timeout, "Timeout")`} {
+	for _, want := range []string{`Timeout string ` + "`yaml:\"timeout,omitempty\"`", "const PilotConfigDefaultTimeout time.Duration = 180 * time.Second", `applyConfigFileOverlay(cfg, file, &applied, true, "pilot")`, `registerConfigFlags(fs, defaults, &values)`} {
 		if !strings.Contains(string(output), want) {
 			t.Fatalf("missing duration binding %q", want)
 		}
@@ -1424,7 +1457,7 @@ func TestGenerateStrictDurationFlags(t *testing.T) {
 			compileSource += "\nfunc firstNonEmptyEnv(...string) (string, bool) { panic(\"stub\") }"
 		}
 		typecheckGenerated(t, compileSource, output)
-		if strings.Contains(string(output), `"os"`) || !strings.Contains(string(output), `fs.String("timeout", defaults.Timeout.String(), "Timeout")`) {
+		if strings.Contains(string(output), `"os"`) || !strings.Contains(string(output), `registerConfigFlags(fs, defaults, &values)`) {
 			t.Fatal("strict duration imports/registration changed")
 		}
 		if source == envReport && strings.Contains(string(output), "visited :=") {
@@ -2033,7 +2066,7 @@ func TestGenerateRawEmptyFlagFallback(t *testing.T) {
 	if err != nil || !bytes.Equal(output, again) {
 		t.Fatalf("nondeterministic flag fallback: %v", err)
 	}
-	for _, want := range []string{`const PilotConfigFlagFallbackName string = "fallback"`, `fs.String("name", blank(defaults.Name, PilotConfigFlagFallbackName), "Name help")`} {
+	for _, want := range []string{`const PilotConfigFlagFallbackName string = "fallback"`, `registerConfigFlags(fs, defaults, &values)`} {
 		if !strings.Contains(string(output), want) {
 			t.Fatalf("missing registration fallback %q", want)
 		}
@@ -2382,7 +2415,7 @@ func TestGenerateSourceSpecificLists(t *testing.T) {
 		t.Fatalf("nondeterministic source lists: %v", err)
 	}
 	text := string(output)
-	for _, want := range []string{`applyConfigFileOverlay(cfg, file, &applied, trusted, "pilot")`, `applyConfigEnvironment(cfg, &applied,`, `newReplaceAppendListFlag(defaults.Items)`, `applyConfigFlags(cfg, values, &applied, fs)`} {
+	for _, want := range []string{`applyConfigFileOverlay(cfg, file, &applied, trusted, "pilot")`, `applyConfigEnvironment(cfg, &applied,`, `registerConfigFlags(fs, defaults, &values)`, `applyConfigFlags(cfg, values, &applied, fs)`} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing list binding %q", want)
 		}
@@ -2390,34 +2423,8 @@ func TestGenerateSourceSpecificLists(t *testing.T) {
 	if strings.Contains(text, `"os"`) || strings.Contains(text, `"strings"`) {
 		t.Fatal("unused list helper imports emitted")
 	}
-	if strings.Index(text, `fs.Var(listItems`) > strings.Index(text, `fs.String("name"`) {
-		t.Fatal("repeatable list registered after scalar")
-	}
 	// Reuse the actual shared core flag value in both compilation and execution fixtures.
-	helperSource, err := os.ReadFile("../../internal/cli/config_list_flag.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	helper := strings.SplitN(string(helperSource), "import \"strings\"", 2)[1]
-	actionsSource, err := os.ReadFile("../../internal/cli/actions.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	start := strings.Index(string(actionsSource), "type stringListFlag []string")
-	if start < 0 {
-		t.Fatal("missing core stringListFlag")
-	}
-	listSource := string(actionsSource)[start:]
-	getStart := strings.Index(listSource, "func (f *stringListFlag) Get() any {")
-	if getStart < 0 {
-		t.Fatal("missing core stringListFlag.Get")
-	}
-	getEnd := strings.Index(listSource[getStart:], "\n}")
-	if getEnd < 0 {
-		t.Fatal("missing end of core stringListFlag.Get")
-	}
-	helper += "\n" + listSource[:getStart+getEnd+2] + "\n"
-	compileSource := strings.Replace(sourceListSample, "package cli", "package cli\nimport \"strings\"", 1) + helper + "\nfunc getenvList(string)([]string,bool){panic(\"stub\")}\n"
+	compileSource := sourceListSample + "\nfunc getenvList(string)([]string,bool){panic(\"stub\")}\n"
 	typecheckGenerated(t, compileSource, output)
 	coreSource, err := os.ReadFile("../../internal/cli/config.go")
 	if err != nil {
@@ -2440,6 +2447,12 @@ func TestGenerateSourceSpecificLists(t *testing.T) {
 import("flag";"os";"reflect";"strings";"testing")
 func getenv(_ string,prior string)string{return prior}
 func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestListRegistrationOrder(t *testing.T){
+ fs:=flag.NewFlagSet("order",flag.ContinueOnError)
+ fs.String("name","","existing scalar");fs.String("item","","existing list")
+ defer func(){message,ok:=recover().(string);if !ok||!strings.Contains(message,"flag redefined: item"){t.Fatalf("wrong first registration: %q",message)}}()
+ RegisterPilotConfigFlags(fs,PilotConfig{})
+}
 func TestListSources(t *testing.T){
  prior:=[]string{"prior"};cfg:=PilotConfig{Items:prior}
  if _, err := cfg.applyFile(nil,true);err!=nil||!reflect.DeepEqual(cfg.Items,prior){t.Fatal("nil file changed config")}
@@ -2468,7 +2481,7 @@ func TestListSources(t *testing.T){
  if got,err:=values2.Apply(&cfg,fs2);err!=nil||!got.InputAccepted||cfg.Items!=nil{t.Fatalf("Apply empty shape %#v",cfg.Items)}
 }
 `
-	runScalarFixture(t, sourceListSample, output, behavior+helper+getters)
+	runScalarFixture(t, sourceListSample, output, behavior+getters)
 }
 
 func TestGenerateCSVListSourceContract(t *testing.T) {
@@ -2826,7 +2839,7 @@ func TestGenerateNonemptyRawAndEmptyScalarLists(t *testing.T) {
 		t.Fatalf("nondeterministic lists: %v", err)
 	}
 	text := string(output)
-	for _, want := range []string{`applyConfigFileOverlay(cfg, file, &applied, true, "pilot")`, `fs.String("item", "", "Items")`, `applyConfigEnvironment(cfg, &applied,`, `applyConfigFlags(cfg, values, &applied, fs)`} {
+	for _, want := range []string{`applyConfigFileOverlay(cfg, file, &applied, true, "pilot")`, `registerConfigFlags(fs, defaults, &values)`, `applyConfigEnvironment(cfg, &applied,`, `applyConfigFlags(cfg, values, &applied, fs)`} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing fixed list binding %q", want)
 		}
@@ -2938,7 +2951,7 @@ func TestGenerateInt64Width(t *testing.T) {
 	if err != nil || !bytes.Equal(output, again) {
 		t.Fatalf("nondeterministic int64: %v", err)
 	}
-	for _, want := range []string{"Wide *int64", `const PilotConfigDefaultWide int64 = 4294967296`, `applyConfigEnvironment(cfg, &applied,`, `fs.Int64("wide", defaults.Wide, "Wide")`} {
+	for _, want := range []string{"Wide *int64", `const PilotConfigDefaultWide int64 = 4294967296`, `applyConfigEnvironment(cfg, &applied,`, `registerConfigFlags(fs, defaults, &values)`} {
 		if !strings.Contains(string(output), want) {
 			t.Fatalf("missing width binding%q", want)
 		}
@@ -3370,7 +3383,7 @@ func TestGenerateRawValueAndAppendTrimmedLists(t *testing.T) {
 	text := strings.Join(strings.Fields(string(output)), " ")
 	for _, want := range []string{
 		"Items []string `yaml:\"items,omitempty\"`", `applyConfigFileOverlay(cfg, file, &applied, true, "pilot")`,
-		"Items *appendTrimmedListFlag", "listItems := newAppendTrimmedListFlag(defaults.Items)", `fs.Var(listItems, "item", "Items")`,
+		"Items *appendTrimmedListFlag", `registerConfigFlags(fs, defaults, &values)`,
 		`applyConfigFlags(cfg, values, &applied, fs)`,
 	} {
 		if !strings.Contains(text, want) {
@@ -3382,30 +3395,7 @@ func TestGenerateRawValueAndAppendTrimmedLists(t *testing.T) {
 			t.Fatalf("unexpected list binding %q", bad)
 		}
 	}
-	helperSource, err := os.ReadFile("../../internal/cli/config_list_flag.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	helper := strings.SplitN(string(helperSource), "import \"strings\"", 2)[1]
-	actionsSource, err := os.ReadFile("../../internal/cli/actions.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	start := strings.Index(string(actionsSource), "type stringListFlag []string")
-	if start < 0 {
-		t.Fatal("missing core stringListFlag")
-	}
-	listSource := string(actionsSource)[start:]
-	getStart := strings.Index(listSource, "func (f *stringListFlag) Get() any {")
-	if getStart < 0 {
-		t.Fatal("missing core stringListFlag.Get")
-	}
-	getEnd := strings.Index(listSource[getStart:], "\n}")
-	if getEnd < 0 {
-		t.Fatal("missing end of core stringListFlag.Get")
-	}
-	helper += "\n" + listSource[:getStart+getEnd+2] + "\n"
-	compileSource := strings.Replace(rawValueAppendListSample, "package cli", "package cli\nimport \"strings\"", 1) + helper
+	compileSource := rawValueAppendListSample
 	typecheckGenerated(t, compileSource, output)
 	coreSource, err := os.ReadFile("../../internal/cli/config.go")
 	if err != nil {
@@ -3464,7 +3454,7 @@ func TestAppendTrimmedOccurrences(t *testing.T){
  }
 }
 `
-	runScalarFixture(t, rawValueAppendListSample, output, behavior+helper+getters)
+	runScalarFixture(t, rawValueAppendListSample, output, behavior+getters)
 }
 
 const rawZeroResetDurationField = "Timeout time.Duration `sources:\"flag\" flag:\"timeout\" help:\"Timeout\" duration:\"positive-overlay\" flagDuration:\"raw-zero-reset\" default:\"17s\"`"
@@ -3559,7 +3549,7 @@ func testGenerateRawDurationFlags(t *testing.T, mode string) {
 		}
 		text := strings.Join(strings.Fields(string(output)), " ")
 		for _, want := range []string{
-			`fs.String("timeout", defaults.Timeout.String(), "Timeout")`,
+			`registerConfigFlags(fs, defaults, &values)`,
 			`applyConfigFlags(cfg, values, &applied, fs)`,
 		} {
 			if !strings.Contains(text, want) {
@@ -3807,6 +3797,7 @@ func acceptanceFixtureSource(t *testing.T, existing, generated string) string {
 		{"config.go", "normalizeList"},
 		{"config.go", "applyLeaseDuration"},
 		{"flags.go", "flagWasSet"},
+		{"config_cmd.go", "blank"},
 	} {
 		if strings.Contains(generated+existing+functions, helper.name+"(") && !strings.Contains(existing+functions, "func "+helper.name+"(") {
 			functions += sourceFixtureFunctions(t, helper.file, helper.name)

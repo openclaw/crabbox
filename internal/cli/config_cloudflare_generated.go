@@ -47,10 +47,9 @@ type CloudflareConfigFlagValues struct {
 
 // RegisterCloudflareConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterCloudflareConfigFlags(fs *flag.FlagSet, defaults CloudflareConfig) CloudflareConfigFlagValues {
-	return CloudflareConfigFlagValues{
-		APIURL:  fs.String("cloudflare-url", defaults.APIURL, "Cloudflare runner API URL"),
-		Workdir: fs.String("cloudflare-workdir", defaults.Workdir, "Absolute working directory inside the Cloudflare workspace"),
-	}
+	var values CloudflareConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // CloudflareConfigVisitedFlags records raw flag visits, independently of application.

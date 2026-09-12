@@ -54,13 +54,9 @@ type CrownestConfigFlagValues struct {
 
 // RegisterCrownestConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterCrownestConfigFlags(fs *flag.FlagSet, defaults CrownestConfig) CrownestConfigFlagValues {
-	return CrownestConfigFlagValues{
-		APIURL:        fs.String("crownest-url", defaults.APIURL, "Trusted CrowNest API base URL"),
-		ProjectID:     fs.String("crownest-project-id", defaults.ProjectID, "CrowNest project ID"),
-		Template:      fs.String("crownest-template", defaults.Template, "CrowNest Workspace Run template"),
-		TimeoutSecs:   fs.Int("crownest-timeout-secs", defaults.TimeoutSecs, "CrowNest Workspace Run timeout in seconds"),
-		ForgetMissing: fs.Bool("crownest-forget-missing", defaults.ForgetMissing, "remove the local claim when stop gets 404"),
-	}
+	var values CrownestConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.

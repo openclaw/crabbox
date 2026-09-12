@@ -58,13 +58,9 @@ type UpstashBoxConfigFlagValues struct {
 
 // RegisterUpstashBoxConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterUpstashBoxConfigFlags(fs *flag.FlagSet, defaults UpstashBoxConfig) UpstashBoxConfigFlagValues {
-	return UpstashBoxConfigFlagValues{
-		BaseURL:   fs.String("upstash-box-base-url", defaults.BaseURL, "Upstash Box API base URL"),
-		Runtime:   fs.String("upstash-box-runtime", defaults.Runtime, "Upstash Box runtime: node, python, golang, ruby, or rust"),
-		Size:      fs.String("upstash-box-size", defaults.Size, "Upstash Box size: small, medium, or large"),
-		Workdir:   fs.String("upstash-box-workdir", defaults.Workdir, "absolute working directory inside the Upstash Box"),
-		KeepAlive: fs.Bool("upstash-box-keep-alive", defaults.KeepAlive, "create Upstash boxes with keepAlive enabled"),
-	}
+	var values UpstashBoxConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // UpstashBoxConfigVisitedFlags records raw flag visits, independently of application.

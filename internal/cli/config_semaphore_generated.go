@@ -53,13 +53,9 @@ type SemaphoreConfigFlagValues struct {
 
 // RegisterSemaphoreConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterSemaphoreConfigFlags(fs *flag.FlagSet, defaults SemaphoreConfig) SemaphoreConfigFlagValues {
-	return SemaphoreConfigFlagValues{
-		Host:        fs.String("semaphore-host", defaults.Host, "Semaphore host (e.g. myorg.semaphoreci.com)"),
-		Project:     fs.String("semaphore-project", defaults.Project, "Semaphore project name"),
-		Machine:     fs.String("semaphore-machine", blank(defaults.Machine, SemaphoreConfigFlagFallbackMachine), "Machine type"),
-		OSImage:     fs.String("semaphore-os-image", blank(defaults.OSImage, SemaphoreConfigFlagFallbackOSImage), "OS image"),
-		IdleTimeout: fs.String("semaphore-idle-timeout", blank(defaults.IdleTimeout, SemaphoreConfigFlagFallbackIdleTimeout), "Idle timeout"),
-	}
+	var values SemaphoreConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // SemaphoreConfigVisitedFlags records raw flag visits, independently of application.

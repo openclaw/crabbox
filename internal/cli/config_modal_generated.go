@@ -58,16 +58,9 @@ type ModalConfigFlagValues struct {
 
 // RegisterModalConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterModalConfigFlags(fs *flag.FlagSet, defaults ModalConfig) ModalConfigFlagValues {
-	listSecrets := newReplaceAppendListFlag(defaults.Secrets)
-	fs.Var(listSecrets, "modal-secret", "named Modal Secret to inject into the sandbox; repeatable or comma-separated")
-	return ModalConfigFlagValues{
-		App:         fs.String("modal-app", defaults.App, "Modal app name for Crabbox sandboxes"),
-		Image:       fs.String("modal-image", defaults.Image, "Modal sandbox image, as a registry reference"),
-		Workdir:     fs.String("modal-workdir", defaults.Workdir, "Absolute working directory inside the Modal sandbox"),
-		Python:      fs.String("modal-python", defaults.Python, "Python binary used to run the local Modal client"),
-		Environment: fs.String("modal-environment", defaults.Environment, "Modal environment for the sandbox and named Secrets"),
-		Secrets:     listSecrets,
-	}
+	var values ModalConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.

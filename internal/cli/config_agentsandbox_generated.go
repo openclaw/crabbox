@@ -79,20 +79,9 @@ type AgentSandboxConfigFlagValues struct {
 
 // RegisterAgentSandboxConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterAgentSandboxConfigFlags(fs *flag.FlagSet, defaults AgentSandboxConfig) AgentSandboxConfigFlagValues {
-	return AgentSandboxConfigFlagValues{
-		Kubectl:             fs.String("agent-sandbox-kubectl", defaults.Kubectl, "kubectl binary or path"),
-		Kubeconfig:          fs.String("agent-sandbox-kubeconfig", defaults.Kubeconfig, "Kubernetes kubeconfig path"),
-		Context:             fs.String("agent-sandbox-context", defaults.Context, "Kubernetes context"),
-		Namespace:           fs.String("agent-sandbox-namespace", defaults.Namespace, "Kubernetes namespace"),
-		WarmPool:            fs.String("agent-sandbox-warm-pool", defaults.WarmPool, "Agent Sandbox SandboxWarmPool name"),
-		Container:           fs.String("agent-sandbox-container", defaults.Container, "container name for exec/tar operations (empty = default container)"),
-		Workdir:             fs.String("agent-sandbox-workdir", defaults.Workdir, "absolute working directory inside the sandbox"),
-		SandboxReadyTimeout: fs.Duration("agent-sandbox-sandbox-ready-timeout", defaults.SandboxReadyTimeout, "SandboxClaim/Sandbox readiness timeout"),
-		PodReadyTimeout:     fs.Duration("agent-sandbox-pod-ready-timeout", defaults.PodReadyTimeout, "sandbox pod readiness timeout"),
-		ExecTimeoutSecs:     fs.Int("agent-sandbox-exec-timeout-secs", defaults.ExecTimeoutSecs, "command timeout in seconds (0 = no provider deadline)"),
-		DeleteOnRelease:     fs.Bool("agent-sandbox-delete-on-release", defaults.DeleteOnRelease, "delete the SandboxClaim on release"),
-		ForgetMissing:       fs.Bool("agent-sandbox-forget-missing", defaults.ForgetMissing, "remove the local claim when stop sees a missing Kubernetes claim"),
-	}
+	var values AgentSandboxConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // AgentSandboxConfigVisitedFlags records raw flag visits, independently of application.

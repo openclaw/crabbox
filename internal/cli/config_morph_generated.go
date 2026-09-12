@@ -63,14 +63,9 @@ type MorphConfigFlagValues struct {
 
 // RegisterMorphConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterMorphConfigFlags(fs *flag.FlagSet, defaults MorphConfig) MorphConfigFlagValues {
-	return MorphConfigFlagValues{
-		APIURL:          fs.String("morph-api-url", defaults.APIURL, "Morph API URL"),
-		Snapshot:        fs.String("morph-snapshot", defaults.Snapshot, "Morph snapshot ID"),
-		SSHGatewayHost:  fs.String("morph-ssh-gateway-host", defaults.SSHGatewayHost, "Morph SSH gateway host"),
-		WorkRoot:        fs.String("morph-work-root", defaults.WorkRoot, "Morph remote Crabbox work root"),
-		DeleteOnRelease: fs.Bool("morph-delete-on-release", defaults.DeleteOnRelease, "Delete Morph instances instead of pausing them on release"),
-		WakeOnSSH:       fs.Bool("morph-wake-on-ssh", defaults.WakeOnSSH, "Enable Morph wake-on-ssh for paused instances"),
-	}
+	var values MorphConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // MorphConfigVisitedFlags records raw flag visits, independently of application.

@@ -48,11 +48,9 @@ type RailwayConfigFlagValues struct {
 
 // RegisterRailwayConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterRailwayConfigFlags(fs *flag.FlagSet, defaults RailwayConfig) RailwayConfigFlagValues {
-	return RailwayConfigFlagValues{
-		APIURL:        fs.String("railway-url", defaults.APIURL, "Railway GraphQL API URL"),
-		ProjectID:     fs.String("railway-project", defaults.ProjectID, "Railway project ID containing the target service"),
-		EnvironmentID: fs.String("railway-environment", defaults.EnvironmentID, "Railway environment ID to deploy into"),
-	}
+	var values RailwayConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // RailwayConfigVisitedFlags records raw flag visits, independently of application.

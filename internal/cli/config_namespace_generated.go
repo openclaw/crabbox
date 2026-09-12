@@ -64,16 +64,9 @@ type NamespaceConfigFlagValues struct {
 
 // RegisterNamespaceConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterNamespaceConfigFlags(fs *flag.FlagSet, defaults NamespaceConfig) NamespaceConfigFlagValues {
-	return NamespaceConfigFlagValues{
-		Image:               fs.String("namespace-image", defaults.Image, "Namespace Devbox image"),
-		Size:                fs.String("namespace-size", defaults.Size, "Namespace Devbox size: S, M, L, or XL"),
-		Repository:          fs.String("namespace-repository", defaults.Repository, "Namespace Devbox repository checkout"),
-		Site:                fs.String("namespace-site", defaults.Site, "Namespace Devbox site"),
-		VolumeSizeGB:        fs.Int("namespace-volume-size-gb", defaults.VolumeSizeGB, "Namespace Devbox persistent volume size in GiB"),
-		AutoStopIdleTimeout: fs.String("namespace-auto-stop-idle-timeout", defaults.AutoStopIdleTimeout.String(), "Namespace Devbox idle auto-stop timeout"),
-		WorkRoot:            fs.String("namespace-work-root", defaults.WorkRoot, "Namespace Devbox Crabbox work root"),
-		DeleteOnRelease:     fs.Bool("namespace-delete-on-release", defaults.DeleteOnRelease, "delete Namespace Devbox on release instead of shutting it down"),
-	}
+	var values NamespaceConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // NamespaceConfigVisitedFlags records raw flag visits, independently of application.

@@ -63,14 +63,9 @@ type OrgoConfigFlagValues struct {
 
 // RegisterOrgoConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterOrgoConfigFlags(fs *flag.FlagSet, defaults OrgoConfig) OrgoConfigFlagValues {
-	return OrgoConfigFlagValues{
-		APIBase:     fs.String("orgo-api-base", defaults.APIBase, "Orgo API base URL"),
-		WorkspaceID: fs.String("orgo-workspace-id", defaults.WorkspaceID, "Existing Orgo workspace ID to create computers in"),
-		RAMGB:       fs.Int("orgo-ram", defaults.RAMGB, "Orgo computer RAM in GB"),
-		CPUs:        fs.Int("orgo-cpu", defaults.CPUs, "Orgo computer CPU count"),
-		DiskGB:      fs.Int("orgo-disk", defaults.DiskGB, "Orgo computer disk size in GB"),
-		Resolution:  fs.String("orgo-resolution", defaults.Resolution, "Orgo desktop resolution, for example 1280x720x24"),
-	}
+	var values OrgoConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // OrgoConfigVisitedFlags records raw flag visits, independently of application.

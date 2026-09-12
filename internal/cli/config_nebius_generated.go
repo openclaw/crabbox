@@ -84,22 +84,9 @@ type NebiusConfigFlagValues struct {
 
 // RegisterNebiusConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterNebiusConfigFlags(fs *flag.FlagSet, defaults NebiusConfig) NebiusConfigFlagValues {
-	return NebiusConfigFlagValues{
-		CLI:              fs.String("nebius-cli", defaults.CLI, "Nebius CLI path"),
-		Profile:          fs.String("nebius-profile", defaults.Profile, "Nebius CLI profile name"),
-		ParentID:         fs.String("nebius-parent-id", defaults.ParentID, "Nebius parent/project ID"),
-		SubnetID:         fs.String("nebius-subnet-id", defaults.SubnetID, "Nebius subnet ID"),
-		Platform:         fs.String("nebius-platform", defaults.Platform, "Nebius compute platform"),
-		Preset:           fs.String("nebius-preset", defaults.Preset, "Nebius compute preset"),
-		ImageFamily:      fs.String("nebius-image-family", defaults.ImageFamily, "Nebius boot image family"),
-		DiskType:         fs.String("nebius-disk-type", defaults.DiskType, "Nebius boot disk type"),
-		DiskSizeGiB:      fs.Int("nebius-disk-size-gib", defaults.DiskSizeGiB, "Nebius boot disk size in GiB"),
-		User:             fs.String("nebius-user", defaults.User, "SSH user for Nebius VMs"),
-		PublicIP:         fs.String("nebius-public-ip", defaults.PublicIP, "Nebius public IP mode: dynamic or none"),
-		SecurityGroupIDs: fs.String("nebius-security-group-ids", "", "comma-separated Nebius security group IDs"),
-		ServiceAccountID: fs.String("nebius-service-account-id", defaults.ServiceAccountID, "Nebius service account ID for VMs"),
-		RecoveryPolicy:   fs.String("nebius-recovery-policy", defaults.RecoveryPolicy, "Nebius create recovery policy: fail"),
-	}
+	var values NebiusConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.

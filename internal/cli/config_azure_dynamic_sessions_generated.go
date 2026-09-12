@@ -54,12 +54,9 @@ type AzureDynamicSessionsConfigFlagValues struct {
 
 // RegisterAzureDynamicSessionsConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterAzureDynamicSessionsConfigFlags(fs *flag.FlagSet, defaults AzureDynamicSessionsConfig) AzureDynamicSessionsConfigFlagValues {
-	return AzureDynamicSessionsConfigFlagValues{
-		Endpoint:    fs.String("azure-dynamic-sessions-endpoint", defaults.Endpoint, "Azure Container Apps Dynamic Sessions pool management endpoint"),
-		APIVersion:  fs.String("azure-dynamic-sessions-api-version", defaults.APIVersion, "Azure Dynamic Sessions management API version"),
-		Workdir:     fs.String("azure-dynamic-sessions-workdir", defaults.Workdir, "Absolute working directory inside the Dynamic Sessions sandbox"),
-		TimeoutSecs: fs.Int("azure-dynamic-sessions-timeout-secs", defaults.TimeoutSecs, "Command timeout in seconds"),
-	}
+	var values AzureDynamicSessionsConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // AzureDynamicSessionsConfigVisitedFlags records raw flag visits, independently of application.

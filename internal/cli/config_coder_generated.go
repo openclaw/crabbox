@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"strings"
 )
 
 type fileCoderConfig struct {
@@ -70,18 +69,9 @@ type CoderConfigFlagValues struct {
 
 // RegisterCoderConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterCoderConfigFlags(fs *flag.FlagSet, defaults CoderConfig) CoderConfigFlagValues {
-	return CoderConfigFlagValues{
-		CLIPath:              fs.String("coder-cli", defaults.CLIPath, "Coder CLI path"),
-		Template:             fs.String("coder-template", defaults.Template, "Coder template for new workspaces"),
-		Preset:               fs.String("coder-preset", defaults.Preset, "Coder template preset"),
-		WorkspacePrefix:      fs.String("coder-workspace-prefix", defaults.WorkspacePrefix, "prefix for Crabbox-managed Coder workspace names"),
-		WorkRoot:             fs.String("coder-work-root", defaults.WorkRoot, "Coder workspace Crabbox work root"),
-		DeleteOnRelease:      fs.Bool("coder-delete-on-release", defaults.DeleteOnRelease, "delete Coder workspace on release instead of stopping it"),
-		Wait:                 fs.String("coder-wait", defaults.Wait, "Coder SSH startup wait mode: yes, no, or auto"),
-		UseParameterDefaults: fs.Bool("coder-use-parameter-defaults", defaults.UseParameterDefaults, "pass --use-parameter-defaults to coder create"),
-		Parameters:           fs.String("coder-parameter", strings.Join(defaults.Parameters, ","), "comma-separated Coder parameter values name=value"),
-		RichParameterFile:    fs.String("coder-rich-parameter-file", defaults.RichParameterFile, "Coder rich parameter file"),
-	}
+	var values CoderConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // CoderConfigVisitedFlags records raw flag visits, independently of application.

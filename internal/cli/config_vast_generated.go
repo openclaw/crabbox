@@ -89,22 +89,9 @@ type VastConfigFlagValues struct {
 
 // RegisterVastConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterVastConfigFlags(fs *flag.FlagSet, defaults VastConfig) VastConfigFlagValues {
-	return VastConfigFlagValues{
-		APIURL:         fs.String("vast-api-url", defaults.APIURL, "Vast.ai REST API URL"),
-		InstanceType:   fs.String("vast-instance-type", defaults.InstanceType, "Vast.ai offer type: ondemand or interruptible"),
-		GPUName:        fs.String("vast-gpu-name", defaults.GPUName, "Vast.ai GPU name selector"),
-		GPUCount:       fs.Int("vast-gpu-count", defaults.GPUCount, "Vast.ai minimum GPU count"),
-		Image:          fs.String("vast-image", defaults.Image, "Docker image to deploy on the instance"),
-		TemplateID:     fs.String("vast-template-id", defaults.TemplateID, "Optional Vast.ai template ID"),
-		Runtype:        fs.String("vast-runtype", defaults.Runtype, "Vast.ai runtime type: ssh_direct"),
-		DiskGB:         fs.Int("vast-disk-gb", defaults.DiskGB, "Instance disk size in GB"),
-		MaxDphTotal:    fs.Float64("vast-max-dph-total", defaults.MaxDphTotal, "Maximum total dollars per hour"),
-		MinReliability: fs.Float64("vast-min-reliability", defaults.MinReliability, "Minimum reliability score from 0 to 1"),
-		Order:          fs.String("vast-order", defaults.Order, "Vast.ai offer ordering expression"),
-		User:           fs.String("vast-user", defaults.User, "SSH user for Vast.ai instances"),
-		WorkRoot:       fs.String("vast-work-root", defaults.WorkRoot, "remote Crabbox work root on Vast.ai instances"),
-		ReleaseAction:  fs.String("vast-release-action", defaults.ReleaseAction, "Vast.ai release action: destroy, stop, or keep"),
-	}
+	var values VastConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // VastConfigVisitedFlags records raw flag visits, independently of application.
