@@ -7,13 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	core "github.com/openclaw/crabbox/internal/cli"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
@@ -101,14 +102,14 @@ type apiError struct {
 func (e *apiError) Error() string { return e.err.Error() }
 func (e *apiError) Unwrap() error { return e.err }
 
-func newClient(cfg Config, rt Runtime) (client, error) {
+func newClient(cfg core.Config, rt core.Runtime) (client, error) {
 	baseURL, err := validateBaseURL(cfg.Crownest.APIURL)
 	if err != nil {
 		return nil, err
 	}
 	apiKey := firstNonEmpty(os.Getenv("CRABBOX_CROWNEST_API_KEY"), os.Getenv("CROWNEST_API_KEY"))
 	if apiKey == "" {
-		return nil, exit(2, "provider=crownest needs an API key; load CRABBOX_CROWNEST_API_KEY or CROWNEST_API_KEY from a secret manager")
+		return nil, core.Exit(2, "provider=crownest needs an API key; load CRABBOX_CROWNEST_API_KEY or CROWNEST_API_KEY from a secret manager")
 	}
 	rawHTTPClient := rt.HTTP
 	if rawHTTPClient == nil {
@@ -120,10 +121,6 @@ func newClient(cfg Config, rt Runtime) (client, error) {
 
 func crownestRedirectError(destination *url.URL) error {
 	return fmt.Errorf("crownest refused cross-origin redirect to %s", destination.Redacted())
-}
-
-func sameOrigin(a, b *url.URL) bool {
-	return core.SameHTTPOrigin(a, b)
 }
 
 func (c *httpClient) BaseURL() string { return c.baseURL }
@@ -140,7 +137,7 @@ func (c *httpClient) CreateSandbox(ctx context.Context, req createSandboxRequest
 		return sandbox{}, err
 	}
 	if out.Sandbox.ID == "" {
-		return sandbox{}, exit(5, "crownest create sandbox returned no sandbox id")
+		return sandbox{}, core.Exit(5, "crownest create sandbox returned no sandbox id")
 	}
 	return out.Sandbox, nil
 }
@@ -167,7 +164,7 @@ func (c *httpClient) CreateWorkspaceRun(ctx context.Context, req createWorkspace
 		return workspaceRun{}, err
 	}
 	if out.WorkspaceRun.ID == "" {
-		return out.WorkspaceRun, exit(5, "crownest create workspace run returned no id")
+		return out.WorkspaceRun, core.Exit(5, "crownest create workspace run returned no id")
 	}
 	return out.WorkspaceRun, nil
 }
@@ -180,7 +177,7 @@ func (c *httpClient) CreateArchiveTransfer(ctx context.Context, workspaceRunID s
 		return archiveTransfer{}, err
 	}
 	if out.Transfer.ID == "" || out.Transfer.UploadURL == "" {
-		return archiveTransfer{}, exit(5, "crownest archive transfer returned incomplete upload target")
+		return archiveTransfer{}, core.Exit(5, "crownest archive transfer returned incomplete upload target")
 	}
 	return out.Transfer, nil
 }
@@ -245,7 +242,7 @@ func sanitizeUploadTransportError(err error, target *url.URL) string {
 
 func (c *httpClient) sameOrigin(target *url.URL) bool {
 	base, err := url.Parse(c.baseURL)
-	return err == nil && sameOrigin(base, target)
+	return err == nil && core.SameHTTPOrigin(base, target)
 }
 
 func (c *httpClient) FinalizeArchive(ctx context.Context, workspaceRunID string, req finalizeArchiveRequest, key string) (workspaceRun, error) {
@@ -382,7 +379,7 @@ func (c *httpClient) apiError(method, apiPath string, resp *http.Response) error
 	msg = redactSecrets(msg, c.apiKey)
 	return &apiError{
 		StatusCode: resp.StatusCode,
-		err:        exit(5, "crownest %s %s failed: %s: %s", method, apiPath, resp.Status, msg),
+		err:        core.Exit(5, "crownest %s %s failed: %s: %s", method, apiPath, resp.Status, msg),
 	}
 }
 

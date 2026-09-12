@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"os"
 	"strings"
 )
 
@@ -48,163 +47,14 @@ type VercelSandboxConfigApplied struct {
 
 func (cfg *VercelSandboxConfig) applyFile(file *fileVercelSandboxConfig) (VercelSandboxConfigApplied, error) {
 	var applied VercelSandboxConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Runtime != nil {
-		cfg.Runtime = *file.Runtime
-		applied.InputAccepted = true
-	}
-	if file.Workdir != nil {
-		cfg.Workdir = *file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.ProjectID != nil {
-		cfg.ProjectID = *file.ProjectID
-		applied.InputAccepted = true
-	}
-	if file.TeamID != nil {
-		cfg.TeamID = *file.TeamID
-		applied.InputAccepted = true
-	}
-	if file.Scope != nil {
-		cfg.Scope = *file.Scope
-		applied.InputAccepted = true
-	}
-	if file.VCPUs != nil {
-		cfg.VCPUs = *file.VCPUs
-		applied.InputAccepted = true
-	}
-	if file.TimeoutSecs != nil {
-		if *file.TimeoutSecs < 0 {
-			return applied, exit(2, "vercel-sandbox timeoutSecs must be non-negative")
-		}
-		cfg.TimeoutSecs = *file.TimeoutSecs
-		applied.InputAccepted = true
-	}
-	if file.ExecTimeoutSecs != nil {
-		if *file.ExecTimeoutSecs < 0 {
-			return applied, exit(2, "vercel-sandbox execTimeoutSecs must be non-negative")
-		}
-		cfg.ExecTimeoutSecs = *file.ExecTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if file.Persistent != nil {
-		cfg.Persistent = *file.Persistent
-		applied.InputAccepted = true
-	}
-	if file.Snapshot != nil {
-		cfg.Snapshot = *file.Snapshot
-		applied.InputAccepted = true
-	}
-	if file.SnapshotMode != nil {
-		cfg.SnapshotMode = *file.SnapshotMode
-		applied.InputAccepted = true
-	}
-	if file.NetworkPolicy != nil {
-		cfg.NetworkPolicy = *file.NetworkPolicy
-		applied.InputAccepted = true
-	}
-	if file.NetworkAllow != nil {
-		cfg.NetworkAllow = normalizeList(*file.NetworkAllow)
-		applied.InputAccepted = true
-	}
-	if file.NetworkDeny != nil {
-		cfg.NetworkDeny = normalizeList(*file.NetworkDeny)
-		applied.InputAccepted = true
-	}
-	if file.Ports != nil {
-		cfg.Ports = normalizeList(*file.Ports)
-		applied.InputAccepted = true
-	}
-	if file.ForgetMissing != nil {
-		cfg.ForgetMissing = *file.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "vercel-sandbox")
+	return applied, err
 }
 
 func (cfg *VercelSandboxConfig) applyEnv() (VercelSandboxConfigApplied, error) {
 	var applied VercelSandboxConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_VERCEL_SANDBOX_RUNTIME"); ok {
-		cfg.Runtime = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VERCEL_SANDBOX_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VERCEL_SANDBOX_PROJECT_ID"); ok {
-		cfg.ProjectID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VERCEL_SANDBOX_TEAM_ID"); ok {
-		cfg.TeamID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VERCEL_SANDBOX_SCOPE"); ok {
-		cfg.Scope = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvFloat("CRABBOX_VERCEL_SANDBOX_VCPUS"); ok {
-		cfg.VCPUs = value
-		applied.InputAccepted = true
-	}
-	{
-		var accepted bool
-		var err error
-		cfg.TimeoutSecs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_VERCEL_SANDBOX_TIMEOUT_SECS", cfg.TimeoutSecs)
-		if err != nil {
-			return applied, err
-		}
-		if accepted {
-			applied.InputAccepted = true
-		}
-	}
-	{
-		var accepted bool
-		var err error
-		cfg.ExecTimeoutSecs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_VERCEL_SANDBOX_EXEC_TIMEOUT_SECS", cfg.ExecTimeoutSecs)
-		if err != nil {
-			return applied, err
-		}
-		if accepted {
-			applied.InputAccepted = true
-		}
-	}
-	if value, ok := getenvBool("CRABBOX_VERCEL_SANDBOX_PERSISTENT"); ok {
-		cfg.Persistent = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VERCEL_SANDBOX_SNAPSHOT"); ok {
-		cfg.Snapshot = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VERCEL_SANDBOX_SNAPSHOT_MODE"); ok {
-		cfg.SnapshotMode = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VERCEL_SANDBOX_NETWORK_POLICY"); ok {
-		cfg.NetworkPolicy = value
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_VERCEL_SANDBOX_NETWORK_ALLOW"); value != "" {
-		cfg.NetworkAllow = splitCommaList(value)
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_VERCEL_SANDBOX_NETWORK_DENY"); value != "" {
-		cfg.NetworkDeny = splitCommaList(value)
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_VERCEL_SANDBOX_PORTS"); value != "" {
-		cfg.Ports = splitCommaList(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_VERCEL_SANDBOX_FORGET_MISSING"); ok {
-		cfg.ForgetMissing = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 16)
+	return applied, err
 }
 
 // VercelSandboxConfigFlagValues holds parsed values; only visited flags are applied.
@@ -252,69 +102,6 @@ func RegisterVercelSandboxConfigFlags(fs *flag.FlagSet, defaults VercelSandboxCo
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values VercelSandboxConfigFlagValues) Apply(cfg *VercelSandboxConfig, fs *flag.FlagSet) (VercelSandboxConfigApplied, error) {
 	var applied VercelSandboxConfigApplied
-	if flagWasSet(fs, "vercel-sandbox-runtime") {
-		cfg.Runtime = *values.Runtime
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vercel-sandbox-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vercel-sandbox-project-id") {
-		cfg.ProjectID = *values.ProjectID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vercel-sandbox-team-id") {
-		cfg.TeamID = *values.TeamID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vercel-sandbox-scope") {
-		cfg.Scope = *values.Scope
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vercel-sandbox-vcpus") {
-		cfg.VCPUs = *values.VCPUs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vercel-sandbox-timeout-secs") {
-		cfg.TimeoutSecs = *values.TimeoutSecs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vercel-sandbox-exec-timeout-secs") {
-		cfg.ExecTimeoutSecs = *values.ExecTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vercel-sandbox-persistent") {
-		cfg.Persistent = *values.Persistent
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vercel-sandbox-snapshot") {
-		cfg.Snapshot = *values.Snapshot
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vercel-sandbox-snapshot-mode") {
-		cfg.SnapshotMode = *values.SnapshotMode
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vercel-sandbox-network-policy") {
-		cfg.NetworkPolicy = *values.NetworkPolicy
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vercel-sandbox-network-allow") {
-		cfg.NetworkAllow = splitCommaList(*values.NetworkAllow)
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vercel-sandbox-network-deny") {
-		cfg.NetworkDeny = splitCommaList(*values.NetworkDeny)
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vercel-sandbox-ports") {
-		cfg.Ports = splitCommaList(*values.Ports)
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "vercel-sandbox-forget-missing") {
-		cfg.ForgetMissing = *values.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

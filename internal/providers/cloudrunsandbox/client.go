@@ -51,7 +51,7 @@ type execOptions struct {
 var errSandboxNotFound = errors.New("cloud-run-sandbox sandbox not found")
 var errSandboxAlreadyExists = errors.New("cloud-run-sandbox sandbox already exists")
 
-var newTransport = func(cfg Config, rt Runtime) (sandboxTransport, error) {
+var newTransport = func(cfg core.Config, rt core.Runtime) (sandboxTransport, error) {
 	// GatewayURL is deliberately absent from fileCloudRunSandboxConfig. Only an
 	// operator-supplied flag or environment value can select the origin that
 	// receives the environment-only gateway credentials below.
@@ -62,7 +62,7 @@ var newTransport = func(cfg Config, rt Runtime) (sandboxTransport, error) {
 	)
 	if gatewayURL != "" {
 		if secret == "" {
-			return nil, exit(2, "provider=cloud-run-sandbox remote mode requires CLOUD_RUN_SANDBOX_SECRET or CRABBOX_CLOUD_RUN_SANDBOX_SECRET")
+			return nil, core.Exit(2, "provider=cloud-run-sandbox remote mode requires CLOUD_RUN_SANDBOX_SECRET or CRABBOX_CLOUD_RUN_SANDBOX_SECRET")
 		}
 		validated, err := validateGatewayURL(gatewayURL)
 		if err != nil {
@@ -82,7 +82,7 @@ var newTransport = func(cfg Config, rt Runtime) (sandboxTransport, error) {
 		}, nil
 	}
 	if rt.Exec == nil {
-		return nil, exit(2, "provider=cloud-run-sandbox direct mode requires Runtime.Exec")
+		return nil, core.Exit(2, "provider=cloud-run-sandbox direct mode requires Runtime.Exec")
 	}
 	return &directTransport{
 		cfg: cfg,
@@ -101,9 +101,9 @@ func firstNonEmpty(values ...string) string {
 
 func validateGatewayURL(raw string) (string, error) {
 	return shared.NormalizeHTTPSURL(raw, shared.EndpointURLErrors{
-		Invalid:    exit(2, "provider=cloud-run-sandbox gateway URL must be an absolute HTTPS URL"),
-		Components: exit(2, "provider=cloud-run-sandbox gateway URL must not contain userinfo, query parameters, or a fragment"),
-		Insecure:   exit(2, "provider=cloud-run-sandbox gateway URL must use HTTPS except for loopback development endpoints"),
+		Invalid:    core.Exit(2, "provider=cloud-run-sandbox gateway URL must be an absolute HTTPS URL"),
+		Components: core.Exit(2, "provider=cloud-run-sandbox gateway URL must not contain userinfo, query parameters, or a fragment"),
+		Insecure:   core.Exit(2, "provider=cloud-run-sandbox gateway URL must use HTTPS except for loopback development endpoints"),
 	})
 }
 
@@ -117,7 +117,7 @@ func cloudRunSandboxRedirectError(destination *url.URL) error {
 
 func validateSandboxID(id string) error {
 	if !regexp.MustCompile(`^[A-Za-z0-9_-]+$`).MatchString(id) {
-		return exit(2, "invalid cloud-run-sandbox id %q", id)
+		return core.Exit(2, "invalid cloud-run-sandbox id %q", id)
 	}
 	return nil
 }
@@ -125,7 +125,7 @@ func validateSandboxID(id string) error {
 func validateEnv(env map[string]string) error {
 	for key := range env {
 		if !core.ValidShellEnvName(key) {
-			return exit(2, "invalid environment variable name %q", key)
+			return core.Exit(2, "invalid environment variable name %q", key)
 		}
 	}
 	return nil
@@ -137,7 +137,7 @@ type remoteTransport struct {
 	baseURL   string
 	secret    string
 	authToken string
-	cfg       Config
+	cfg       core.Config
 	http      *http.Client
 }
 
@@ -227,7 +227,7 @@ func (t *remoteTransport) request(ctx context.Context, path string, body map[str
 		return nil, err
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, exit(2, "cloud-run-sandbox gateway unauthorized; check CLOUD_RUN_SANDBOX_SECRET")
+		return nil, core.Exit(2, "cloud-run-sandbox gateway unauthorized; check CLOUD_RUN_SANDBOX_SECRET")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var errBody struct {
@@ -301,7 +301,7 @@ func (t *remoteTransport) Health(ctx context.Context) error {
 		return err
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return exit(2, "cloud-run-sandbox gateway unauthorized; check gateway secret and Cloud Run IAM token")
+		return core.Exit(2, "cloud-run-sandbox gateway unauthorized; check gateway secret and Cloud Run IAM token")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("cloud-run-sandbox gateway health returned %s", resp.Status)
@@ -389,7 +389,7 @@ func (t *remoteTransport) Exec(ctx context.Context, sandboxID, command string, o
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return 1, exit(2, "cloud-run-sandbox gateway unauthorized; check gateway credentials")
+		return 1, core.Exit(2, "cloud-run-sandbox gateway unauthorized; check gateway credentials")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -503,8 +503,8 @@ func (t *remoteTransport) WriteFile(ctx context.Context, sandboxID, path, conten
 // --- direct in-container sandbox CLI transport ---
 
 type directTransport struct {
-	cfg Config
-	rt  Runtime
+	cfg core.Config
+	rt  core.Runtime
 }
 
 func (t *directTransport) Mode() string { return "direct" }
@@ -540,14 +540,14 @@ func (t *directTransport) pushExecArgs(args []string, opts execOptions) []string
 	return args
 }
 
-func (t *directTransport) runCLI(ctx context.Context, args []string, stdout, stderr io.Writer) (LocalCommandResult, error) {
+func (t *directTransport) runCLI(ctx context.Context, args []string, stdout, stderr io.Writer) (core.LocalCommandResult, error) {
 	return t.runCLIWithStdin(ctx, args, nil, stdout, stderr)
 }
 
-func (t *directTransport) runCLIWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (LocalCommandResult, error) {
+func (t *directTransport) runCLIWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (core.LocalCommandResult, error) {
 	ctx, cancel := contextWithDefaultTimeout(ctx, defaultExecTimeout)
 	defer cancel()
-	result, err := t.rt.Exec.Run(ctx, LocalCommandRequest{
+	result, err := t.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:                 t.binary(),
 		Args:                 args,
 		Stdin:                stdin,
@@ -566,10 +566,10 @@ func (t *directTransport) Health(ctx context.Context) error {
 	var stdout, stderr bytes.Buffer
 	result, err := t.runCLI(ctx, append(t.baseArgs(), "--help"), &stdout, &stderr)
 	if err != nil {
-		return exit(2, "cloud-run-sandbox CLI %q not usable: %v (%s)", t.binary(), err, strings.TrimSpace(stderr.String()))
+		return core.Exit(2, "cloud-run-sandbox CLI %q not usable: %v (%s)", t.binary(), err, strings.TrimSpace(stderr.String()))
 	}
 	if result.ExitCode != 0 {
-		return exit(2, "cloud-run-sandbox CLI %q --help exited %d: %s", t.binary(), result.ExitCode, strings.TrimSpace(stderr.String()+stdout.String()))
+		return core.Exit(2, "cloud-run-sandbox CLI %q --help exited %d: %s", t.binary(), result.ExitCode, strings.TrimSpace(stderr.String()+stdout.String()))
 	}
 	return nil
 }
@@ -608,7 +608,7 @@ func (t *directTransport) Create(ctx context.Context, sandboxID string, opts run
 		return errors.New("cloud-run-sandbox direct create requires the sandbox ID as its ownership token")
 	}
 	if len(opts.Env) > 0 {
-		return exit(2, "cloud-run-sandbox direct create does not accept environment values; pass them to exec so they stay off argv")
+		return core.Exit(2, "cloud-run-sandbox direct create does not accept environment values; pass them to exec so they stay off argv")
 	}
 	args := append(t.baseArgs(), "run", sandboxID, "--detach")
 	createOpts := opts
@@ -617,7 +617,7 @@ func (t *directTransport) Create(ctx context.Context, sandboxID string, opts run
 	createOpts.Workdir = ""
 	createOpts.OmitWorkdir = true
 	args = t.pushRunArgs(args, createOpts)
-	keeper := "PATH=" + shellQuote(defaultSandboxPath) + "; export PATH; while :; do /bin/sleep 3600; done"
+	keeper := "PATH=" + core.ShellQuote(defaultSandboxPath) + "; export PATH; while :; do /bin/sleep 3600; done"
 	args = append(args, "--", "/bin/sh", "-c", keeper)
 	var stdout, stderr bytes.Buffer
 	result, err := t.runCLI(ctx, args, &stdout, &stderr)
@@ -651,12 +651,12 @@ func (t *directTransport) Exec(ctx context.Context, sandboxID, command string, o
 	sort.Strings(keys)
 	var script strings.Builder
 	if _, hasPath := opts.Env["PATH"]; !hasPath {
-		fmt.Fprintf(&script, "export PATH=%s\n", shellQuote(defaultSandboxPath))
+		fmt.Fprintf(&script, "export PATH=%s\n", core.ShellQuote(defaultSandboxPath))
 	}
 	for _, key := range keys {
-		fmt.Fprintf(&script, "export %s=%s\n", key, shellQuote(opts.Env[key]))
+		fmt.Fprintf(&script, "export %s=%s\n", key, core.ShellQuote(opts.Env[key]))
 	}
-	fmt.Fprintf(&script, "exec /bin/sh -c %s\n", shellQuote(command))
+	fmt.Fprintf(&script, "exec /bin/sh -c %s\n", core.ShellQuote(command))
 	if opts.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
@@ -706,12 +706,12 @@ func (t *directTransport) WriteFile(ctx context.Context, sandboxID, path, conten
 	// Stream content over stdin so workspace data never appears in host process
 	// arguments. The first chunk is atomically published; later chunks append to
 	// that unique per-sync temporary archive.
-	command := fmt.Sprintf("mkdir -p \"$(dirname %s)\" && cat >> %s", shellQuote(path), shellQuote(path))
+	command := fmt.Sprintf("mkdir -p \"$(dirname %s)\" && cat >> %s", core.ShellQuote(path), core.ShellQuote(path))
 	if !appendContent {
 		tempPath := path + ".crabbox-upload"
-		command = fmt.Sprintf("mkdir -p \"$(dirname %s)\" && cat > %s && mv -f %s %s", shellQuote(path), shellQuote(tempPath), shellQuote(tempPath), shellQuote(path))
+		command = fmt.Sprintf("mkdir -p \"$(dirname %s)\" && cat > %s && mv -f %s %s", core.ShellQuote(path), core.ShellQuote(tempPath), core.ShellQuote(tempPath), core.ShellQuote(path))
 	}
-	command = "PATH=" + shellQuote(defaultSandboxPath) + "; export PATH; " + command
+	command = "PATH=" + core.ShellQuote(defaultSandboxPath) + "; export PATH; " + command
 	args := append(t.baseArgs(), "exec", sandboxID, "--workdir", "/", "--", "/bin/sh", "-c", command)
 	var stdout, stderr bytes.Buffer
 	result, err := t.runCLIWithStdin(ctx, args, strings.NewReader(content), &stdout, &stderr)

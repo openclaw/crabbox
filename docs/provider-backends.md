@@ -541,6 +541,13 @@ the adapter. Only a zero-length body skips decoding; nonempty whitespace is
 decoded, and JSON errors remain unwrapped. This separate contract adds no
 response limit and does not apply to streams or alter the bounded decoder.
 
+Provider adapters refer to core types and primitives directly, for example
+`core.Config`, `core.RunRequest`, and `core.ShellQuote`. Local helpers own
+provider-specific decisions such as claim scopes, recovery prefixes, and
+credential admission. Exact forwarding functions and type aliases only add a
+second name for an existing owner; use the core definition at the call site.
+Mutable injection hooks retain their explicit adapter boundary.
+
 ## Acquisition stays adapter-owned
 
 SSH lease acquisition is a provider-owned transaction, not a shared sequence of

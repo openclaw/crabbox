@@ -63,8 +63,8 @@ func (f *fakeClient) GetDirectoryTree(context.Context, string, string) (Director
 func TestBlaxelDoctorEndpointDefaultPredicate(t *testing.T) {
 	for _, raw := range []string{"", "  ", "https://example.invalid/api"} {
 		fake := &fakeClient{}
-		b := &backend{spec: Provider{}.Spec(), cfg: Config{Blaxel: BlaxelConfig{APIURL: raw, APIKey: "inert"}}, clientFactory: func(Config, Runtime) (Client, error) { return fake, nil }}
-		_, err := b.Doctor(context.Background(), DoctorRequest{})
+		b := &backend{spec: Provider{}.Spec(), cfg: core.Config{Blaxel: core.BlaxelConfig{APIURL: raw, APIKey: "inert"}}, clientFactory: func(core.Config, core.Runtime) (Client, error) { return fake, nil }}
+		_, err := b.Doctor(context.Background(), core.DoctorRequest{})
 		if raw == "  " {
 			if err == nil || fake.probeCalls != 0 || fake.listCalls != 0 {
 				t.Fatal("doctor whitespace endpoint defaulted")
@@ -80,11 +80,11 @@ func TestDoctorMissingCredentialsIsRedactedAndNonMutating(t *testing.T) {
 	backend := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  core.Config{Blaxel: core.BlaxelConfig{APIURL: "https://api.blaxel.ai"}},
-		clientFactory: func(Config, Runtime) (Client, error) {
+		clientFactory: func(core.Config, core.Runtime) (Client, error) {
 			return fake, nil
 		},
 	}
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err == nil {
 		t.Fatal("Doctor succeeded without credentials")
 	}
@@ -105,11 +105,11 @@ func TestDoctorUsesOnlyProbeAndList(t *testing.T) {
 			APIKey:    "test-key",
 			Workspace: "workspace-test",
 		}},
-		clientFactory: func(Config, Runtime) (Client, error) {
+		clientFactory: func(core.Config, core.Runtime) (Client, error) {
 			return fake, nil
 		},
 	}
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}

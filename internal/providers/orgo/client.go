@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -105,7 +106,7 @@ func (e *orgoHTTPError) Error() string {
 }
 
 func (e *orgoHTTPError) As(target any) bool {
-	t, ok := target.(*ExitError)
+	t, ok := target.(*core.ExitError)
 	if !ok {
 		return false
 	}
@@ -118,11 +119,11 @@ func (e *orgoHTTPError) As(target any) bool {
 	case e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= 500:
 		code = 69
 	}
-	*t = ExitError{Code: code, Message: e.Error()}
+	*t = core.ExitError{Code: code, Message: e.Error()}
 	return true
 }
 
-func newOrgoClient(cfg Config, rt Runtime) (orgoAPI, error) {
+func newOrgoClient(cfg core.Config, rt core.Runtime) (orgoAPI, error) {
 	apiKey := strings.TrimSpace(os.Getenv("CRABBOX_ORGO_API_KEY"))
 	if apiKey == "" {
 		apiKey = strings.TrimSpace(cfg.Orgo.APIKey)
@@ -131,19 +132,19 @@ func newOrgoClient(cfg Config, rt Runtime) (orgoAPI, error) {
 		apiKey = strings.TrimSpace(os.Getenv("ORGO_API_KEY"))
 	}
 	if apiKey == "" {
-		return nil, exit(2, "provider=%s requires CRABBOX_ORGO_API_KEY, orgo.apiKey, or ORGO_API_KEY", providerName)
+		return nil, core.Exit(2, "provider=%s requires CRABBOX_ORGO_API_KEY, orgo.apiKey, or ORGO_API_KEY", providerName)
 	}
 	// The backend resolves APIBase before constructing its lazy client.
 	baseURL := strings.TrimSpace(cfg.Orgo.APIBase)
 	parsed, err := url.Parse(baseURL)
 	if err != nil {
-		return nil, exit(2, "provider=%s invalid Orgo API base URL %q: %v", providerName, baseURL, err)
+		return nil, core.Exit(2, "provider=%s invalid Orgo API base URL %q: %v", providerName, baseURL, err)
 	}
 	if parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return nil, exit(2, "provider=%s invalid Orgo API base URL %q", providerName, baseURL)
+		return nil, core.Exit(2, "provider=%s invalid Orgo API base URL %q", providerName, baseURL)
 	}
 	if parsed.Scheme != "https" && !isOrgoLoopbackHTTP(parsed) {
-		return nil, exit(2, "provider=%s API base URL %q must use https unless it targets localhost", providerName, baseURL)
+		return nil, core.Exit(2, "provider=%s API base URL %q must use https unless it targets localhost", providerName, baseURL)
 	}
 	client, dataClient := shared.ControlAndDataHTTPClients(rt.HTTP, orgoControlTimeout)
 	return &orgoHTTPClient{

@@ -89,7 +89,7 @@ func TestDaytonaOrdinaryStopRemainsRepositoryIndependent(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(t.TempDir())
-	if err := b.Stop(t.Context(), StopRequest{ID: lease.LeaseID}); err != nil {
+	if err := b.Stop(t.Context(), core.StopRequest{ID: lease.LeaseID}); err != nil {
 		t.Fatal(err)
 	}
 	if f.deletes != 1 {

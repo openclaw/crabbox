@@ -15,13 +15,13 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func ownedModalFixture(t *testing.T) (*modalBackend, *fakeModalAPI, core.LeaseClaim, Repo) {
+func ownedModalFixture(t *testing.T) (*modalBackend, *fakeModalAPI, core.LeaseClaim, core.Repo) {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := &fakeModalAPI{}
 	withFakeModalAPI(t, fake)
 	b := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
-	repo := Repo{Name: "repo", Root: t.TempDir()}
+	repo := core.Repo{Name: "repo", Root: t.TempDir()}
 	claim, _, err := b.createSandbox(t.Context(), fake, repo, true, false, "")
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +57,7 @@ func TestModalStopRequiresExactClaimBeforeProviderAccess(t *testing.T) {
 			fake := &fakeModalAPI{}
 			withFakeModalAPI(t, fake)
 			b := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
-			if err := b.Stop(t.Context(), StopRequest{ID: id}); err == nil || len(fake.verbs) != 0 {
+			if err := b.Stop(t.Context(), core.StopRequest{ID: id}); err == nil || len(fake.verbs) != 0 {
 				t.Fatalf("claimless stop err=%v verbs=%v", err, fake.verbs)
 			}
 		})
@@ -80,7 +80,7 @@ func TestModalCreatedClaimAndStopBindExactResource(t *testing.T) {
 				return nil
 			}
 			id := map[string]string{"lease": claim.LeaseID, "slug": claim.Slug, "raw": claim.CloudID}[idKind]
-			if err := b.Stop(t.Context(), StopRequest{ID: id}); err != nil {
+			if err := b.Stop(t.Context(), core.StopRequest{ID: id}); err != nil {
 				t.Fatal(err)
 			}
 			if fake.terminateRemaining < 90*time.Second || fake.terminateRemaining > modalCleanupTimeout {
@@ -97,11 +97,11 @@ func TestModalRawIDRejectsDuplicateClaims(t *testing.T) {
 	b, fake, claim, _ := ownedModalFixture(t)
 	labels := maps.Clone(claim.Labels)
 	labels["lease"], labels["slug"] = "cbx_0123456789ab", "duplicate-crab"
-	server := Server{Provider: providerName, CloudID: claim.CloudID, Labels: labels}
+	server := core.Server{Provider: providerName, CloudID: claim.CloudID, Labels: labels}
 	if _, err := core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(labels["lease"], labels["slug"], b.cfg, claim.ProviderScope, server, core.SSHTarget{}, t.TempDir(), 0, false, core.LeaseClaim{}, false, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Stop(t.Context(), StopRequest{ID: claim.CloudID}); err == nil || !strings.Contains(err.Error(), "ambiguous") || len(fake.verbs) != 0 {
+	if err := b.Stop(t.Context(), core.StopRequest{ID: claim.CloudID}); err == nil || !strings.Contains(err.Error(), "ambiguous") || len(fake.verbs) != 0 {
 		t.Fatalf("duplicate sandbox claims accepted: err=%v verbs=%v", err, fake.verbs)
 	}
 	assertModalClaim(t, claim)
@@ -129,7 +129,7 @@ func TestModalStopRejectsIncompleteAndConflictingClaims(t *testing.T) {
 				t.Fatal(err)
 			}
 			changed, _, _ = core.ReadLeaseClaimWithPresence(claim.LeaseID)
-			if err := b.Stop(t.Context(), StopRequest{ID: claim.LeaseID}); err == nil || len(fake.verbs) != 0 {
+			if err := b.Stop(t.Context(), core.StopRequest{ID: claim.LeaseID}); err == nil || len(fake.verbs) != 0 {
 				t.Fatalf("invalid claim accepted: err=%v verbs=%v", err, fake.verbs)
 			}
 			assertModalClaim(t, changed)
@@ -156,7 +156,7 @@ func TestModalTerminationFailureRetainsExactClaim(t *testing.T) {
 		t.Run(failure.Error(), func(t *testing.T) {
 			b, fake, claim, _ := ownedModalFixture(t)
 			fake.terminateErr = failure
-			if err := b.Stop(t.Context(), StopRequest{ID: claim.LeaseID}); err == nil {
+			if err := b.Stop(t.Context(), core.StopRequest{ID: claim.LeaseID}); err == nil {
 				t.Fatal("uncertain termination accepted")
 			}
 			assertModalClaim(t, claim)
@@ -187,7 +187,7 @@ func TestModalRollbackPreservesAppearingClaim(t *testing.T) {
 	b := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
 	old := publishModalClaim
 	var successor core.LeaseClaim
-	publishModalClaim = func(_ *modalBackend, _ context.Context, _ modalAPI, binding modalBinding, _ modalSandbox, repo Repo, _ bool) (core.LeaseClaim, error) {
+	publishModalClaim = func(_ *modalBackend, _ context.Context, _ modalAPI, binding modalBinding, _ modalSandbox, repo core.Repo, _ bool) (core.LeaseClaim, error) {
 		if err := core.ClaimLeaseForRepoProvider(binding.LeaseID, binding.Slug, "other", repo.Root, 0, false); err != nil {
 			t.Fatal(err)
 		}
@@ -195,7 +195,7 @@ func TestModalRollbackPreservesAppearingClaim(t *testing.T) {
 		return core.LeaseClaim{}, errors.New("claim publication failed")
 	}
 	t.Cleanup(func() { publishModalClaim = old })
-	_, _, err := b.createSandbox(t.Context(), fake, Repo{Name: "repo", Root: t.TempDir()}, true, false, "")
+	_, _, err := b.createSandbox(t.Context(), fake, core.Repo{Name: "repo", Root: t.TempDir()}, true, false, "")
 	if err == nil || containsVerb(fake.verbs, "terminate") {
 		t.Fatalf("rollback destroyed a newly claimed resource: err=%v verbs=%v", err, fake.verbs)
 	}
@@ -215,7 +215,7 @@ func TestModalClaimPublicationAndAbsentRollbackAreFenced(t *testing.T) {
 		assertModalFence(t, binding.LeaseID)
 		return nil
 	}
-	_, _, err := b.createSandbox(t.Context(), fake, Repo{Name: "repo", Root: t.TempDir()}, false, false, "")
+	_, _, err := b.createSandbox(t.Context(), fake, core.Repo{Name: "repo", Root: t.TempDir()}, false, false, "")
 	if err == nil || !strings.Contains(err.Error(), "inspection failed") || !reflect.DeepEqual(fake.verbs, []string{"create", "inspect", "terminate"}) {
 		t.Fatalf("rollback err=%v verbs=%v", err, fake.verbs)
 	}

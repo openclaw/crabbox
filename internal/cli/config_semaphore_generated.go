@@ -32,67 +32,14 @@ type SemaphoreConfigApplied struct {
 
 func (cfg *SemaphoreConfig) applyFile(file *fileSemaphoreConfig) (SemaphoreConfigApplied, error) {
 	var applied SemaphoreConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Host != "" {
-		cfg.Host = file.Host
-		applied.InputAccepted = true
-		applied.Host = true
-	}
-	if file.Token != "" {
-		cfg.Token = file.Token
-		applied.InputAccepted = true
-		applied.Token = true
-	}
-	if file.Project != "" {
-		cfg.Project = file.Project
-		applied.InputAccepted = true
-	}
-	if file.Machine != "" {
-		cfg.Machine = file.Machine
-		applied.InputAccepted = true
-	}
-	if file.OSImage != "" {
-		cfg.OSImage = file.OSImage
-		applied.InputAccepted = true
-	}
-	if file.IdleTimeout != "" {
-		cfg.IdleTimeout = file.IdleTimeout
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "semaphore")
+	return applied, err
 }
 
 func (cfg *SemaphoreConfig) applyEnv() (SemaphoreConfigApplied, error) {
 	var applied SemaphoreConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEMAPHORE_HOST", "SEMAPHORE_HOST"); ok {
-		cfg.Host = value
-		applied.InputAccepted = true
-		applied.Host = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEMAPHORE_TOKEN", "SEMAPHORE_API_TOKEN"); ok {
-		cfg.Token = value
-		applied.InputAccepted = true
-		applied.Token = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEMAPHORE_PROJECT", "SEMAPHORE_PROJECT"); ok {
-		cfg.Project = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEMAPHORE_MACHINE"); ok {
-		cfg.Machine = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEMAPHORE_OS_IMAGE"); ok {
-		cfg.OSImage = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEMAPHORE_IDLE_TIMEOUT"); ok {
-		cfg.IdleTimeout = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 6)
+	return applied, err
 }
 
 // SemaphoreConfigFlagValues holds parsed values; only visited flags are applied.
@@ -122,35 +69,14 @@ type SemaphoreConfigVisitedFlags struct {
 
 // SemaphoreConfigFlagPresence reports visits for tracked flag bindings.
 func SemaphoreConfigFlagPresence(fs *flag.FlagSet) SemaphoreConfigVisitedFlags {
-	return SemaphoreConfigVisitedFlags{
-		Host: flagWasSet(fs, "semaphore-host"),
-	}
+	var visited SemaphoreConfigVisitedFlags
+	recordConfigFlagVisits[SemaphoreConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values SemaphoreConfigFlagValues) Apply(cfg *SemaphoreConfig, fs *flag.FlagSet) (SemaphoreConfigApplied, error) {
 	var applied SemaphoreConfigApplied
-	visited := SemaphoreConfigFlagPresence(fs)
-	if visited.Host {
-		cfg.Host = *values.Host
-		applied.InputAccepted = true
-		applied.Host = true
-	}
-	if flagWasSet(fs, "semaphore-project") {
-		cfg.Project = *values.Project
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "semaphore-machine") {
-		cfg.Machine = *values.Machine
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "semaphore-os-image") {
-		cfg.OSImage = *values.OSImage
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "semaphore-idle-timeout") {
-		cfg.IdleTimeout = *values.IdleTimeout
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

@@ -109,7 +109,7 @@ func TestBlaxelFlagPresenceAndValidationOrder(t *testing.T) {
 		t.Fatal("explicit zeros not copied")
 	}
 	for _, name := range []string{"blaxel", " Blaxel "} {
-		cfg := Config{Provider: name}
+		cfg := core.Config{Provider: name}
 		fs := flag.NewFlagSet("guard", flag.ContinueOnError)
 		fs.String("class", "", "")
 		fs.String("type", "", "")
@@ -130,7 +130,7 @@ func TestBlaxelFlagPresenceAndValidationOrder(t *testing.T) {
 			}
 		}
 	}
-	cfg = Config{Blaxel: BlaxelConfig{APIURL: " ", MemoryMB: -1, ExecTimeoutSecs: -1, Workdir: "relative"}}
+	cfg = core.Config{Blaxel: core.BlaxelConfig{APIURL: " ", MemoryMB: -1, ExecTimeoutSecs: -1, Workdir: "relative"}}
 	if err := ApplyBlaxelProviderFlags(&cfg, flag.NewFlagSet("foreign", flag.ContinueOnError), struct{}{}); err != nil {
 		t.Fatal("foreign values reached validation")
 	}

@@ -90,10 +90,10 @@ func (e *e2bAPIError) Error() string {
 	return e.Status + ": " + e.Body
 }
 
-var newE2BClient = func(cfg Config, rt Runtime) (e2bAPI, error) {
+var newE2BClient = func(cfg core.Config, rt core.Runtime) (e2bAPI, error) {
 	apiKey := strings.TrimSpace(cfg.E2B.APIKey)
 	if apiKey == "" {
-		return nil, exit(2, "provider=e2b requires E2B_API_KEY")
+		return nil, core.Exit(2, "provider=e2b requires E2B_API_KEY")
 	}
 	httpClient, envdClient := shared.ControlAndDataHTTPClients(rt.HTTP, e2bControlTimeout)
 	apiURL, err := validateE2BAPIURL(core.Blank(cfg.E2B.APIURL, core.E2BConfigDefaultAPIURL))
@@ -113,9 +113,9 @@ var newE2BClient = func(cfg Config, rt Runtime) (e2bAPI, error) {
 
 func validateE2BAPIURL(raw string) (string, error) {
 	return shared.NormalizeHTTPSURL(raw, shared.EndpointURLErrors{
-		Invalid:    exit(2, "provider=e2b API URL must be an absolute HTTPS URL"),
-		Components: exit(2, "provider=e2b API URL must not contain userinfo, query parameters, or a fragment"),
-		Insecure:   exit(2, "provider=e2b API URL must use HTTPS except for loopback development endpoints"),
+		Invalid:    core.Exit(2, "provider=e2b API URL must be an absolute HTTPS URL"),
+		Components: core.Exit(2, "provider=e2b API URL must not contain userinfo, query parameters, or a fragment"),
+		Insecure:   core.Exit(2, "provider=e2b API URL must use HTTPS except for loopback development endpoints"),
 	})
 }
 
@@ -222,7 +222,7 @@ func (c *e2bClient) UploadFile(ctx context.Context, session e2bSession, targetPa
 		HTTPClient:     c.dataPlaneHTTPClient(),
 		SetHeaders:     func(req *http.Request) { c.setEnvdHeaders(req, session) },
 		RedirectError:  e2bRedirectError,
-		SummarizeError: summarizeJSON,
+		SummarizeError: core.SummarizeJSON,
 		APIError: func(statusCode int, status, body string) error {
 			return &e2bAPIError{StatusCode: statusCode, Status: status, Body: body}
 		},
@@ -245,7 +245,7 @@ func (c *e2bClient) StartProcess(ctx context.Context, session e2bSession, req e2
 		RedirectError:  e2bRedirectError,
 		Provider:       "e2b",
 		InterpretEnd:   interpretE2BProcessEnd,
-		SummarizeError: summarizeJSON,
+		SummarizeError: core.SummarizeJSON,
 		APIError: func(statusCode int, status, body string) error {
 			return &e2bAPIError{StatusCode: statusCode, Status: status, Body: body}
 		},
@@ -277,7 +277,7 @@ func (c *e2bClient) doJSONWithHeaders(ctx context.Context, method, path string, 
 	}
 	defer resp.Body.Close()
 	if err := shared.DecodeUnboundedJSONResponse(resp, out, func(statusCode int, status string, data []byte) error {
-		return &e2bAPIError{StatusCode: statusCode, Status: status, Body: shared.RedactErrorSecrets(summarizeJSON(data), c.apiKey)}
+		return &e2bAPIError{StatusCode: statusCode, Status: status, Body: shared.RedactErrorSecrets(core.SummarizeJSON(data), c.apiKey)}
 	}); err != nil {
 		return nil, err
 	}

@@ -14,7 +14,7 @@ import (
 
 const archiveUploadChunkSize = 3 << 20
 
-func (b *backend) syncWorkspace(ctx context.Context, transport sandboxTransport, sandboxID string, req RunRequest, workdir string, prepared ...*core.PreparedArchive) ([]timingPhase, time.Duration, error) {
+func (b *backend) syncWorkspace(ctx context.Context, transport sandboxTransport, sandboxID string, req core.RunRequest, workdir string, prepared ...*core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
 	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
 		Config:              b.cfg,
 		Repo:                req.Repo,
@@ -57,7 +57,7 @@ func (b *backend) uploadArchive(ctx context.Context, transport sandboxTransport,
 	if err := errors.Join(copyErr, encodeErr, flushErr); err != nil {
 		return fmt.Errorf("cloud-run-sandbox upload archive: %w", err)
 	}
-	decode := fmt.Sprintf("base64 -d %s > %s && rm -f %s", shellQuote(b64Path), shellQuote(remoteArchive), shellQuote(b64Path))
+	decode := fmt.Sprintf("base64 -d %s > %s && rm -f %s", core.ShellQuote(b64Path), core.ShellQuote(remoteArchive), core.ShellQuote(b64Path))
 	return b.execShell(ctx, transport, sandboxID, decode)
 }
 
@@ -114,21 +114,21 @@ func (b *backend) execShell(ctx context.Context, transport sandboxTransport, san
 		return err
 	}
 	if code != 0 {
-		return exit(code, "cloud-run-sandbox exec %q exited %d", command, code)
+		return core.Exit(code, "cloud-run-sandbox exec %q exited %d", command, code)
 	}
 	return nil
 }
 
 func (b *backend) ensureWorkspace(ctx context.Context, transport sandboxTransport, sandboxID, workdir string) error {
-	return b.execShell(ctx, transport, sandboxID, "mkdir -p "+shellQuote(workdir))
+	return b.execShell(ctx, transport, sandboxID, "mkdir -p "+core.ShellQuote(workdir))
 }
 
 func (b *backend) execCommand(ctx context.Context, transport sandboxTransport, sandboxID, workdir string, command []string, env map[string]string, stdout, stderr io.Writer) (int, error) {
 	if len(command) == 0 {
-		return 2, exit(2, "missing command")
+		return 2, core.Exit(2, "missing command")
 	}
-	commandText := shellScriptFromArgv(command)
-	if len(command) == 1 && shouldUseShell(command) {
+	commandText := core.ShellScriptFromArgv(command)
+	if len(command) == 1 && core.ShouldUseShell(command) {
 		commandText = command[0]
 	}
 	return transport.Exec(ctx, sandboxID, commandText, execOptions{
@@ -140,7 +140,7 @@ func (b *backend) execCommand(ctx context.Context, transport sandboxTransport, s
 
 func buildCommand(command []string, shellMode bool) ([]string, error) {
 	if len(command) == 0 {
-		return nil, exit(2, "missing command")
+		return nil, core.Exit(2, "missing command")
 	}
 	if shellMode {
 		return []string{strings.Join(command, " ")}, nil

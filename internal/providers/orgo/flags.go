@@ -9,11 +9,11 @@ import (
 
 // RegisterOrgoProviderFlags exposes non-secret Orgo settings. The API key is
 // intentionally not a flag; secrets are read from env/config only.
-func RegisterOrgoProviderFlags(fs *flag.FlagSet, defaults Config) any {
+func RegisterOrgoProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return core.RegisterOrgoConfigFlags(fs, defaults.Orgo)
 }
 
-func ApplyOrgoProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+func ApplyOrgoProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
 			return err

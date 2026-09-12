@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"strconv"
 )
 
 type fileOrgoConfig struct {
@@ -42,81 +41,14 @@ type OrgoConfigApplied struct {
 
 func (cfg *OrgoConfig) applyFile(file *fileOrgoConfig, trusted bool) (OrgoConfigApplied, error) {
 	var applied OrgoConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.APIKey != "" {
-		cfg.APIKey = file.APIKey
-		applied.InputAccepted = true
-		applied.APIKey = true
-	}
-	if file.APIBase != "" {
-		cfg.APIBase = file.APIBase
-		applied.InputAccepted = true
-		applied.APIBase = true
-	}
-	if file.WorkspaceID != "" {
-		cfg.WorkspaceID = file.WorkspaceID
-		applied.InputAccepted = true
-	}
-	if file.RAMGB > 0 {
-		cfg.RAMGB = file.RAMGB
-		applied.InputAccepted = true
-	}
-	if file.CPUs > 0 {
-		cfg.CPUs = file.CPUs
-		applied.InputAccepted = true
-	}
-	if file.DiskGB > 0 {
-		cfg.DiskGB = file.DiskGB
-		applied.InputAccepted = true
-	}
-	if file.Resolution != "" {
-		cfg.Resolution = file.Resolution
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "orgo")
+	return applied, err
 }
 
 func (cfg *OrgoConfig) applyEnv() (OrgoConfigApplied, error) {
 	var applied OrgoConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_ORGO_API_KEY"); ok {
-		cfg.APIKey = value
-		applied.InputAccepted = true
-		applied.APIKey = true
-	} else if cfg.APIKey == "" {
-		if value, ok := firstNonEmptyEnv("ORGO_API_KEY"); ok {
-			cfg.APIKey = value
-			applied.InputAccepted = true
-			applied.APIKey = true
-		}
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_ORGO_API_BASE", "ORGO_API_BASE_URL"); ok {
-		cfg.APIBase = value
-		applied.InputAccepted = true
-		applied.APIBase = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_ORGO_WORKSPACE_ID", "ORGO_WORKSPACE_ID"); ok {
-		cfg.WorkspaceID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_ORGO_RAM_GB", strconv.IntSize); ok {
-		cfg.RAMGB = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_ORGO_CPUS", strconv.IntSize); ok {
-		cfg.CPUs = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_ORGO_DISK_GB", strconv.IntSize); ok {
-		cfg.DiskGB = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_ORGO_RESOLUTION"); ok {
-		cfg.Resolution = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 7)
+	return applied, err
 }
 
 // OrgoConfigFlagValues holds parsed values; only visited flags are applied.
@@ -148,39 +80,14 @@ type OrgoConfigVisitedFlags struct {
 
 // OrgoConfigFlagPresence reports visits for tracked flag bindings.
 func OrgoConfigFlagPresence(fs *flag.FlagSet) OrgoConfigVisitedFlags {
-	return OrgoConfigVisitedFlags{
-		APIBase: flagWasSet(fs, "orgo-api-base"),
-	}
+	var visited OrgoConfigVisitedFlags
+	recordConfigFlagVisits[OrgoConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values OrgoConfigFlagValues) Apply(cfg *OrgoConfig, fs *flag.FlagSet) (OrgoConfigApplied, error) {
 	var applied OrgoConfigApplied
-	visited := OrgoConfigFlagPresence(fs)
-	if visited.APIBase {
-		cfg.APIBase = *values.APIBase
-		applied.InputAccepted = true
-		applied.APIBase = true
-	}
-	if flagWasSet(fs, "orgo-workspace-id") {
-		cfg.WorkspaceID = *values.WorkspaceID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "orgo-ram") {
-		cfg.RAMGB = *values.RAMGB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "orgo-cpu") {
-		cfg.CPUs = *values.CPUs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "orgo-disk") {
-		cfg.DiskGB = *values.DiskGB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "orgo-resolution") {
-		cfg.Resolution = *values.Resolution
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

@@ -54,6 +54,15 @@ func normalizeManagedTransferPath(path string, depth int) (string, error) {
 		return "", parentErr
 	}
 	name := filepath.Base(path)
+	if err == nil && runtime.GOOS == "windows" {
+		// Directory entries use long names even when the input uses an 8.3
+		// alias. Keep the original identity for the comparison below.
+		resolved, err := filepath.EvalSymlinks(filepath.Join(resolvedParent, name))
+		if err != nil {
+			return "", err
+		}
+		name = filepath.Base(resolved)
+	}
 	if err == nil && (runtime.GOOS == "darwin" || runtime.GOOS == "windows") {
 		// Stat alone does not reveal the real spelling on case-insensitive
 		// filesystems. Bound this directory-metadata lookup; never read data.

@@ -29,46 +29,14 @@ type RailwayConfigApplied struct {
 
 func (cfg *RailwayConfig) applyFile(file *fileRailwayConfig) (RailwayConfigApplied, error) {
 	var applied RailwayConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.APIURL != "" {
-		cfg.APIURL = file.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if file.ProjectID != "" {
-		cfg.ProjectID = file.ProjectID
-		applied.InputAccepted = true
-	}
-	if file.EnvironmentID != "" {
-		cfg.EnvironmentID = file.EnvironmentID
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "railway")
+	return applied, err
 }
 
 func (cfg *RailwayConfig) applyEnv() (RailwayConfigApplied, error) {
 	var applied RailwayConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_RAILWAY_API_TOKEN", "RAILWAY_API_TOKEN"); ok {
-		cfg.APIToken = value
-		applied.InputAccepted = true
-		applied.APIToken = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_RAILWAY_API_URL", "RAILWAY_API_URL"); ok {
-		cfg.APIURL = value
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_RAILWAY_PROJECT_ID", "RAILWAY_PROJECT_ID"); ok {
-		cfg.ProjectID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_RAILWAY_ENVIRONMENT_ID", "RAILWAY_ENVIRONMENT_ID"); ok {
-		cfg.EnvironmentID = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 4)
+	return applied, err
 }
 
 // RailwayConfigFlagValues holds parsed values; only visited flags are applied.
@@ -94,27 +62,14 @@ type RailwayConfigVisitedFlags struct {
 
 // RailwayConfigFlagPresence reports visits for tracked flag bindings.
 func RailwayConfigFlagPresence(fs *flag.FlagSet) RailwayConfigVisitedFlags {
-	return RailwayConfigVisitedFlags{
-		APIURL: flagWasSet(fs, "railway-url"),
-	}
+	var visited RailwayConfigVisitedFlags
+	recordConfigFlagVisits[RailwayConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values RailwayConfigFlagValues) Apply(cfg *RailwayConfig, fs *flag.FlagSet) (RailwayConfigApplied, error) {
 	var applied RailwayConfigApplied
-	visited := RailwayConfigFlagPresence(fs)
-	if visited.APIURL {
-		cfg.APIURL = *values.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if flagWasSet(fs, "railway-project") {
-		cfg.ProjectID = *values.ProjectID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "railway-environment") {
-		cfg.EnvironmentID = *values.EnvironmentID
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

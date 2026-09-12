@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"io"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type SandboxSummary struct {
@@ -68,13 +70,13 @@ type codeSandboxAPI interface {
 }
 
 type codeSandboxClient struct {
-	cfg    CodeSandboxConfig
-	rt     Runtime
+	cfg    core.CodeSandboxConfig
+	rt     core.Runtime
 	bridge *SDKBridge
 	token  string
 }
 
-var newCodeSandboxClient = func(cfg Config, rt Runtime) (codeSandboxAPI, error) {
+var newCodeSandboxClient = func(cfg core.Config, rt core.Runtime) (codeSandboxAPI, error) {
 	token, _, ok := authFromEnv()
 	if !ok {
 		return nil, missingAuthError{}

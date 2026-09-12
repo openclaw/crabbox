@@ -35,55 +35,14 @@ type LumeConfigApplied struct {
 
 func (cfg *LumeConfig) applyFile(file *fileLumeConfig, trusted bool) (LumeConfigApplied, error) {
 	var applied LumeConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.CLIPath != "" {
-		cfg.CLIPath = file.CLIPath
-		applied.InputAccepted = true
-	}
-	if trusted && file.Base != "" {
-		cfg.Base = file.Base
-		applied.InputAccepted = true
-	}
-	if trusted && file.Storage != "" {
-		cfg.Storage = file.Storage
-		applied.InputAccepted = true
-	}
-	if trusted && file.User != "" {
-		cfg.User = file.User
-		applied.InputAccepted = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "lume")
+	return applied, err
 }
 
 func (cfg *LumeConfig) applyEnv() (LumeConfigApplied, error) {
 	var applied LumeConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_LUME_CLI"); ok {
-		cfg.CLIPath = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_LUME_BASE"); ok {
-		cfg.Base = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_LUME_STORAGE"); ok {
-		cfg.Storage = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_LUME_USER"); ok {
-		cfg.User = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_LUME_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 5)
+	return applied, err
 }
 
 // LumeConfigFlagValues holds parsed values; only visited flags are applied.
@@ -109,25 +68,6 @@ func RegisterLumeConfigFlags(fs *flag.FlagSet, defaults LumeConfig) LumeConfigFl
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values LumeConfigFlagValues) Apply(cfg *LumeConfig, fs *flag.FlagSet) (LumeConfigApplied, error) {
 	var applied LumeConfigApplied
-	if flagWasSet(fs, "lume-cli") {
-		cfg.CLIPath = *values.CLIPath
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "lume-base") {
-		cfg.Base = *values.Base
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "lume-storage") {
-		cfg.Storage = *values.Storage
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "lume-user") {
-		cfg.User = *values.User
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "lume-work-root") {
-		cfg.WorkRoot = *values.WorkRoot
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

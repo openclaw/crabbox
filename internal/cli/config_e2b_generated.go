@@ -38,64 +38,14 @@ type E2BConfigApplied struct {
 
 func (cfg *E2BConfig) applyFile(file *fileE2BConfig) (E2BConfigApplied, error) {
 	var applied E2BConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.APIURL != "" {
-		cfg.APIURL = file.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if file.Domain != "" {
-		cfg.Domain = file.Domain
-		applied.InputAccepted = true
-		applied.Domain = true
-	}
-	if file.Template != "" {
-		cfg.Template = file.Template
-		applied.InputAccepted = true
-	}
-	if file.Workdir != "" {
-		cfg.Workdir = file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.User != "" {
-		cfg.User = file.User
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "e2b")
+	return applied, err
 }
 
 func (cfg *E2BConfig) applyEnv() (E2BConfigApplied, error) {
 	var applied E2BConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_API_KEY", "E2B_API_KEY"); ok {
-		cfg.APIKey = value
-		applied.InputAccepted = true
-		applied.APIKey = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_API_URL", "E2B_API_URL"); ok {
-		cfg.APIURL = value
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_DOMAIN", "E2B_DOMAIN"); ok {
-		cfg.Domain = value
-		applied.InputAccepted = true
-		applied.Domain = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_TEMPLATE"); ok {
-		cfg.Template = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_USER"); ok {
-		cfg.User = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 6)
+	return applied, err
 }
 
 // E2BConfigFlagValues holds parsed values; only visited flags are applied.
@@ -126,37 +76,14 @@ type E2BConfigVisitedFlags struct {
 
 // E2BConfigFlagPresence reports visits for tracked flag bindings.
 func E2BConfigFlagPresence(fs *flag.FlagSet) E2BConfigVisitedFlags {
-	return E2BConfigVisitedFlags{
-		APIURL: flagWasSet(fs, "e2b-api-url"),
-		Domain: flagWasSet(fs, "e2b-domain"),
-	}
+	var visited E2BConfigVisitedFlags
+	recordConfigFlagVisits[E2BConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values E2BConfigFlagValues) Apply(cfg *E2BConfig, fs *flag.FlagSet) (E2BConfigApplied, error) {
 	var applied E2BConfigApplied
-	visited := E2BConfigFlagPresence(fs)
-	if visited.APIURL {
-		cfg.APIURL = *values.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if visited.Domain {
-		cfg.Domain = *values.Domain
-		applied.InputAccepted = true
-		applied.Domain = true
-	}
-	if flagWasSet(fs, "e2b-template") {
-		cfg.Template = *values.Template
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "e2b-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "e2b-user") {
-		cfg.User = *values.User
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

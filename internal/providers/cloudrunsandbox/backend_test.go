@@ -51,15 +51,15 @@ func TestCloudRunEffectiveDefaultConsumersRecorded(t *testing.T) {
 		{"custom", " /opt/example-sandbox ", " /tmp/example ", "/opt/example-sandbox", "/tmp/example"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: tc.cli, Workdir: tc.workdir}}
+			cfg := core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: tc.cli, Workdir: tc.workdir}}
 			before := cfg.CloudRunSandbox
-			var calls []LocalCommandRequest
-			rt := Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: recordingLocalExec{handler: func(req LocalCommandRequest) (LocalCommandResult, error) {
+			var calls []core.LocalCommandRequest
+			rt := core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: recordingLocalExec{handler: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				calls = append(calls, req)
-				return LocalCommandResult{}, nil
+				return core.LocalCommandResult{}, nil
 			}}}
 			b := NewBackend(Provider{}.Spec(), cfg, rt).(*backend)
-			doctor, err := b.Doctor(context.Background(), DoctorRequest{})
+			doctor, err := b.Doctor(context.Background(), core.DoctorRequest{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -97,7 +97,7 @@ func TestCloudRunEffectiveDefaultConsumersRecorded(t *testing.T) {
 			}
 		})
 	}
-	cfg := Config{CloudRunSandbox: CloudRunSandboxConfig{GatewayURL: " https://example.invalid/gateway ", CLIPath: "/opt/custom"}}
+	cfg := core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{GatewayURL: " https://example.invalid/gateway ", CLIPath: "/opt/custom"}}
 	if got := cleanupCommand(cfg, "example"); got != "crabbox stop --provider cloud-run-sandbox --cloud-run-sandbox-gateway-url 'https://example.invalid/gateway' --id 'example'" {
 		t.Fatalf("gateway cleanup precedence=%q", got)
 	}
@@ -153,8 +153,8 @@ func TestCloudRunSandboxTerminalOutcome(t *testing.T) {
 				}
 				clock.now = clock.now.Add(time.Second)
 				if tc.native {
-					native := &directTransport{rt: Runtime{Exec: recordingLocalExec{handler: func(LocalCommandRequest) (LocalCommandResult, error) {
-						return LocalCommandResult{ExitCode: 23}, plain
+					native := &directTransport{rt: core.Runtime{Exec: recordingLocalExec{handler: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+						return core.LocalCommandResult{ExitCode: 23}, plain
 					}}}}
 					code, err := native.Exec(t.Context(), "fixture", command, execOptions{}, io.Discard, io.Discard)
 					return code, "", "", err
@@ -172,11 +172,11 @@ func TestCloudRunSandboxTerminalOutcome(t *testing.T) {
 				return nil
 			}}
 			previous := newTransport
-			newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
+			newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return transport, nil }
 			t.Cleanup(func() { newTransport = previous })
-			b := NewBackend(Provider{}.Spec(), Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"}, IdleTimeout: time.Minute}, Runtime{Stdout: io.Discard, Stderr: writer, Clock: clock}).(*backend)
-			repo := Repo{Root: t.TempDir()}
-			req := RunRequest{Repo: repo, Command: []string{"fixture-command"}, NoSync: true, TimingJSON: true, KeepOnFailure: tc.keepFailure}
+			b := NewBackend(Provider{}.Spec(), core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"}, IdleTimeout: time.Minute}, core.Runtime{Stdout: io.Discard, Stderr: writer, Clock: clock}).(*backend)
+			repo := core.Repo{Root: t.TempDir()}
+			req := core.RunRequest{Repo: repo, Command: []string{"fixture-command"}, NoSync: true, TimingJSON: true, KeepOnFailure: tc.keepFailure}
 			if tc.reuse {
 				id, _, _, _, err := b.createSandbox(t.Context(), transport, repo, false, "fixture")
 				if err != nil {
@@ -192,7 +192,7 @@ func TestCloudRunSandboxTerminalOutcome(t *testing.T) {
 					wantStatus = core.RunStatusFailed
 				}
 			}
-			var public ExitError
+			var public core.ExitError
 			hasPublic := errors.As(err, &public)
 			if result.ExitCode != tc.want || result.Status != wantStatus || result.ErrorKind != tc.kind || tc.want != 0 && (!hasPublic || public.Code != tc.want) || tc.want == 0 && err != nil {
 				t.Errorf("outcome result=%+v publicCode=%d err=%v", result, public.Code, err)
@@ -217,7 +217,7 @@ func TestCloudRunSandboxTerminalOutcome(t *testing.T) {
 			if deletes != boolInt(wantDelete) || result.Session == nil || result.Session.Kept != wantKept || result.Session.Reused != tc.reuse {
 				t.Errorf("deletes=%d session=%+v", deletes, result.Session)
 			}
-			_, exists, claimErr := readLeaseClaimWithPresence(result.LeaseID)
+			_, exists, claimErr := core.ReadLeaseClaimWithPresence(result.LeaseID)
 			if claimErr != nil || exists != wantKept {
 				t.Errorf("claim exists=%v err=%v", exists, claimErr)
 			}
@@ -233,7 +233,7 @@ func TestCloudRunSandboxTerminalOutcome(t *testing.T) {
 			}
 			if !tc.writer {
 				lines := strings.Split(strings.TrimSpace(writer.String()), "\n")
-				var report timingReport
+				var report core.TimingReport
 				if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
 					t.Fatal(err)
 				}
@@ -279,12 +279,12 @@ func TestCloudRunSandboxClaimReadFailurePreservesPublicCode(t *testing.T) {
 					return code, "", "", nil
 				}, onDestroy: func(string) error { deletes++; return nil }}
 				previous := newTransport
-				newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
+				newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return transport, nil }
 				t.Cleanup(func() { newTransport = previous })
-				b := NewBackend(Provider{}.Spec(), Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"}, IdleTimeout: time.Minute}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: clock}).(*backend)
-				result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir()}, Command: []string{"fixture-command"}, NoSync: true, Keep: keep})
-				_, _, readErr := readLeaseClaimWithPresence(result.LeaseID)
-				var readPublic, public ExitError
+				b := NewBackend(Provider{}.Spec(), core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"}, IdleTimeout: time.Minute}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: clock}).(*backend)
+				result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: t.TempDir()}, Command: []string{"fixture-command"}, NoSync: true, Keep: keep})
+				_, _, readErr := core.ReadLeaseClaimWithPresence(result.LeaseID)
+				var readPublic, public core.ExitError
 				if !errors.As(readErr, &readPublic) || readPublic.Code != 2 {
 					t.Fatalf("real claim read code=%d err=%v", readPublic.Code, readErr)
 				}
@@ -345,11 +345,11 @@ func TestCloudRunSandboxClaimRemovalFailurePreservesPublicCode(t *testing.T) {
 				return nil
 			}}
 			previous := newTransport
-			newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
+			newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return transport, nil }
 			t.Cleanup(func() { newTransport = previous })
-			b := NewBackend(Provider{}.Spec(), Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"}, IdleTimeout: time.Minute}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: clock}).(*backend)
-			result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir()}, Command: []string{"fixture-command"}, NoSync: true})
-			var public ExitError
+			b := NewBackend(Provider{}.Spec(), core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"}, IdleTimeout: time.Minute}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: clock}).(*backend)
+			result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: t.TempDir()}, Command: []string{"fixture-command"}, NoSync: true})
+			var public core.ExitError
 			hasPublic := errors.As(err, &public)
 			want := code
 			if want == 0 {
@@ -383,19 +383,19 @@ func TestCloudRunSandboxCreateTimeoutRetainsRecoveryClaim(t *testing.T) {
 			return createErr
 		},
 	}
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
+	b := NewBackend(Provider{}.Spec(), core.Config{
+		CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Minute,
-	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
-	_, _, _, _, err := b.createSandbox(context.Background(), transport, Repo{Root: t.TempDir()}, false, "timeout-recovery")
+	_, _, _, _, err := b.createSandbox(context.Background(), transport, core.Repo{Root: t.TempDir()}, false, "timeout-recovery")
 	if !errors.Is(err, createErr) || !strings.Contains(err.Error(), "recovery claim retained") {
 		t.Fatalf("create error=%v, want indeterminate recovery", err)
 	}
 	if sandboxID == "" {
 		t.Fatal("create did not receive a sandbox id")
 	}
-	claim, readErr := readLeaseClaim(leasePrefix + sandboxID)
+	claim, readErr := core.ReadLeaseClaim(leasePrefix + sandboxID)
 	if readErr != nil {
 		t.Fatalf("read recovery claim: %v", readErr)
 	}
@@ -405,18 +405,18 @@ func TestCloudRunSandboxCreateTimeoutRetainsRecoveryClaim(t *testing.T) {
 	if claim.Labels[claimStateLabel] != "recovery" {
 		t.Fatalf("recovery state=%q", claim.Labels[claimStateLabel])
 	}
-	status, statusErr := b.Status(context.Background(), StatusRequest{ID: claim.LeaseID})
+	status, statusErr := b.Status(context.Background(), core.StatusRequest{ID: claim.LeaseID})
 	if statusErr != nil || status.Ready || status.State != "recovery" {
 		t.Fatalf("recovery status=%#v err=%v", status, statusErr)
 	}
-	leases, listErr := b.List(context.Background(), ListRequest{})
+	leases, listErr := b.List(context.Background(), core.ListRequest{})
 	if listErr != nil || len(leases) != 1 || leases[0].Status != "recovery" {
 		t.Fatalf("recovery list=%#v err=%v", leases, listErr)
 	}
 	previousTransport := newTransport
-	newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
+	newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return transport, nil }
 	t.Cleanup(func() { newTransport = previousTransport })
-	if _, runErr := b.Run(context.Background(), RunRequest{ID: claim.LeaseID, Repo: Repo{Root: claim.RepoRoot}, Command: []string{"true"}, NoSync: true}); runErr == nil || !strings.Contains(runErr.Error(), "not ready") {
+	if _, runErr := b.Run(context.Background(), core.RunRequest{ID: claim.LeaseID, Repo: core.Repo{Root: claim.RepoRoot}, Command: []string{"true"}, NoSync: true}); runErr == nil || !strings.Contains(runErr.Error(), "not ready") {
 		t.Fatalf("recovery run error=%v", runErr)
 	}
 }
@@ -427,12 +427,12 @@ func TestCloudRunSandboxStatusProbesProviderLiveness(t *testing.T) {
 		return errSandboxNotFound
 	}}
 	previousTransport := newTransport
-	newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
+	newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return transport, nil }
 	t.Cleanup(func() { newTransport = previousTransport })
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
+	b := NewBackend(Provider{}.Spec(), core.Config{
+		CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Minute,
-	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	scope, err := b.claimScope()
 	if err != nil {
 		t.Fatal(err)
@@ -441,11 +441,11 @@ func TestCloudRunSandboxStatusProbesProviderLiveness(t *testing.T) {
 	if err := claimTestCloudRunSandboxLease(leaseID, "missing", scope, t.TempDir(), time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	status, err := b.Status(context.Background(), StatusRequest{ID: leaseID})
+	status, err := b.Status(context.Background(), core.StatusRequest{ID: leaseID})
 	if err != nil || status.Ready || status.State != "missing" {
 		t.Fatalf("status=%#v err=%v", status, err)
 	}
-	leases, err := b.List(context.Background(), ListRequest{})
+	leases, err := b.List(context.Background(), core.ListRequest{})
 	if err != nil || len(leases) != 1 || leases[0].Status != "missing" {
 		t.Fatalf("leases=%#v err=%v", leases, err)
 	}
@@ -463,21 +463,21 @@ func TestCloudRunSandboxRunPreservesCancellation(t *testing.T) {
 		},
 	}
 	previousTransport := newTransport
-	newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
+	newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return transport, nil }
 	t.Cleanup(func() { newTransport = previousTransport })
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
+	b := NewBackend(Provider{}.Spec(), core.Config{
+		CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Minute,
-	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
-	_, err := b.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: t.TempDir()},
+	}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	_, err := b.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: t.TempDir()},
 		Command: []string{"cancel-me"},
 		NoSync:  true,
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("run err=%v", err)
 	}
-	var exitErr ExitError
+	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 130 {
 		t.Fatalf("exit err=%#v err=%v", exitErr, err)
 	}
@@ -490,16 +490,16 @@ func TestCloudRunSandboxCreateConflictDropsProvisionalClaim(t *testing.T) {
 		sandboxID = id
 		return errSandboxAlreadyExists
 	}}
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
+	b := NewBackend(Provider{}.Spec(), core.Config{
+		CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Minute,
-	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
-	_, _, _, _, err := b.createSandbox(context.Background(), transport, Repo{Root: t.TempDir()}, false, "conflict")
+	_, _, _, _, err := b.createSandbox(context.Background(), transport, core.Repo{Root: t.TempDir()}, false, "conflict")
 	if !errors.Is(err, errSandboxAlreadyExists) || !strings.Contains(err.Error(), "without taking ownership") {
 		t.Fatalf("create error=%v", err)
 	}
-	if _, exists, readErr := readLeaseClaimWithPresence(leasePrefix + sandboxID); readErr != nil || exists {
+	if _, exists, readErr := core.ReadLeaseClaimWithPresence(leasePrefix + sandboxID); readErr != nil || exists {
 		t.Fatal("definitive conflict retained a destructive ownership claim")
 	}
 }
@@ -522,20 +522,20 @@ func TestCloudRunSandboxCreateConflictRemovalPrecedesWaitingStop(t *testing.T) {
 		},
 	}
 	previousTransport := newTransport
-	newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
+	newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return transport, nil }
 	t.Cleanup(func() { newTransport = previousTransport })
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
+	b := NewBackend(Provider{}.Spec(), core.Config{
+		CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Minute,
-	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	createDone := make(chan error, 1)
 	go func() {
-		_, _, _, _, err := b.createSandbox(context.Background(), transport, Repo{Root: t.TempDir()}, false, "conflict-race")
+		_, _, _, _, err := b.createSandbox(context.Background(), transport, core.Repo{Root: t.TempDir()}, false, "conflict-race")
 		createDone <- err
 	}()
 	sandboxID := <-createStarted
 	stopDone := make(chan error, 1)
-	go func() { stopDone <- b.Stop(context.Background(), StopRequest{ID: leasePrefix + sandboxID}) }()
+	go func() { stopDone <- b.Stop(context.Background(), core.StopRequest{ID: leasePrefix + sandboxID}) }()
 	select {
 	case err := <-stopDone:
 		t.Fatalf("stop bypassed create claim lock: %v", err)
@@ -593,13 +593,13 @@ func TestCloudRunSandboxCleanupSkipsInFlightThenDeletesIdle(t *testing.T) {
 				},
 			}
 			previousTransport := newTransport
-			newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
+			newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return transport, nil }
 			t.Cleanup(func() { newTransport = previousTransport })
-			b := NewBackend(Provider{}.Spec(), Config{
-				CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
+			b := NewBackend(Provider{}.Spec(), core.Config{
+				CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 				IdleTimeout:     time.Second,
-			}, Runtime{Clock: cloudRunSandboxFixedClock{now: now}, Stdout: io.Discard, Stderr: io.Discard}).(*backend)
-			repo := Repo{Root: t.TempDir()}
+			}, core.Runtime{Clock: cloudRunSandboxFixedClock{now: now}, Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+			repo := core.Repo{Root: t.TempDir()}
 			action := func() error {
 				_, _, _, _, err := b.createSandbox(context.Background(), transport, repo, false, state)
 				return err
@@ -610,7 +610,7 @@ func TestCloudRunSandboxCleanupSkipsInFlightThenDeletesIdle(t *testing.T) {
 					t.Fatal(err)
 				}
 				action = func() error {
-					result, err := b.Run(context.Background(), RunRequest{
+					result, err := b.Run(context.Background(), core.RunRequest{
 						ID: leaseID, Repo: repo, Command: []string{"echo", "active"}, NoSync: true,
 					})
 					if err == nil && (result.Session == nil || !result.Session.Reused || !result.Session.Kept) {
@@ -659,7 +659,7 @@ func TestCloudRunSandboxCleanupSkipsInFlightThenDeletesIdle(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var snapshot LeaseClaim
+			var snapshot core.LeaseClaim
 			if err := json.Unmarshal(before, &snapshot); err != nil {
 				t.Fatal(err)
 			}
@@ -683,7 +683,7 @@ func TestCloudRunSandboxCleanupSkipsInFlightThenDeletesIdle(t *testing.T) {
 			var cleanupErr error
 			go func() {
 				defer close(cleanupDone)
-				cleanupErr = cleanup.Cleanup(context.Background(), CleanupRequest{})
+				cleanupErr = cleanup.Cleanup(context.Background(), core.CleanupRequest{})
 			}()
 			if !wait(cleanupDone, "in-flight cleanup without releasing provider action") {
 				t.FailNow()
@@ -702,7 +702,7 @@ func TestCloudRunSandboxCleanupSkipsInFlightThenDeletesIdle(t *testing.T) {
 			if actionErr != nil {
 				t.Fatal(actionErr)
 			}
-			completed, err := readLeaseClaim(leaseID)
+			completed, err := core.ReadLeaseClaim(leaseID)
 			if err != nil || completed.Revision == snapshot.Revision || completed.Labels[claimStateLabel] != "" || completed.Labels[claimActiveUntilLabel] != "" {
 				t.Fatalf("completed claim=%#v err=%v", completed, err)
 			}
@@ -722,7 +722,7 @@ func TestCloudRunSandboxCleanupSkipsInFlightThenDeletesIdle(t *testing.T) {
 				cleanup.rt.Clock = cloudRunSandboxFixedClock{now: cleanupNow}
 				stdout.Reset()
 				stderr.Reset()
-				if err := cleanup.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+				if err := cleanup.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 					t.Fatal(err)
 				}
 				if !idleExpired {
@@ -735,7 +735,7 @@ func TestCloudRunSandboxCleanupSkipsInFlightThenDeletesIdle(t *testing.T) {
 			if !strings.Contains(stdout.String(), "delete sandbox="+sandboxID+" lease="+leaseID+" reason=idle-timeout-expired\n") {
 				t.Fatalf("expired cleanup stdout=%q", stdout.String())
 			}
-			if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+			if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
 				t.Fatalf("deleted claim exists=%v err=%v", exists, err)
 			}
 			if owner != "" || len(destroys) != 1 || destroys[0] != [2]string{sandboxID, snapshot.Labels[claimOwnershipLabel]} {
@@ -749,16 +749,16 @@ func TestCloudRunSandboxCleanupReconcilesOnlyOwnedStaleCreate(t *testing.T) {
 	t.Run("owned", func(t *testing.T) {
 		isolateLeaseHome(t)
 		now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
-		b := NewBackend(Provider{}.Spec(), Config{
-			CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
+		b := NewBackend(Provider{}.Spec(), core.Config{
+			CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 			IdleTimeout:     time.Hour,
-		}, Runtime{Clock: cloudRunSandboxFixedClock{now: now}, Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+		}, core.Runtime{Clock: cloudRunSandboxFixedClock{now: now}, Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 		scope, err := b.claimScope()
 		if err != nil {
 			t.Fatal(err)
 		}
 		const sandboxID = "crabbox-stale-owned"
-		claim, err := claimLeaseForRepoProviderScopePondWithLabels(leasePrefix+sandboxID, "stale-owned", providerName, scope, "", t.TempDir(), time.Hour, map[string]string{
+		claim, err := core.ClaimLeaseForRepoProviderScopePondWithLabels(leasePrefix+sandboxID, "stale-owned", providerName, scope, "", t.TempDir(), time.Hour, map[string]string{
 			claimStateLabel:       "creating",
 			claimActiveUntilLabel: now.Add(-time.Minute).Format(time.RFC3339Nano),
 			claimOwnershipLabel:   sandboxID,
@@ -775,15 +775,15 @@ func TestCloudRunSandboxCleanupReconcilesOnlyOwnedStaleCreate(t *testing.T) {
 			return nil
 		}}
 		previousTransport := newTransport
-		newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
+		newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return transport, nil }
 		t.Cleanup(func() { newTransport = previousTransport })
-		if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 			t.Fatal(err)
 		}
 		if !destroyed {
 			t.Fatal("stale owned create was not destroyed")
 		}
-		if _, exists, err := readLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
+		if _, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
 			t.Fatalf("claim exists=%v err=%v", exists, err)
 		}
 	})
@@ -791,15 +791,15 @@ func TestCloudRunSandboxCleanupReconcilesOnlyOwnedStaleCreate(t *testing.T) {
 	t.Run("missing-token-fails-closed", func(t *testing.T) {
 		isolateLeaseHome(t)
 		now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
-		b := NewBackend(Provider{}.Spec(), Config{
-			CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
+		b := NewBackend(Provider{}.Spec(), core.Config{
+			CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 			IdleTimeout:     time.Hour,
-		}, Runtime{Clock: cloudRunSandboxFixedClock{now: now}, Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+		}, core.Runtime{Clock: cloudRunSandboxFixedClock{now: now}, Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 		scope, err := b.claimScope()
 		if err != nil {
 			t.Fatal(err)
 		}
-		claim, err := claimLeaseForRepoProviderScopePondWithLabels(leasePrefix+"crabbox-stale-unknown", "stale-unknown", providerName, scope, "", t.TempDir(), time.Hour, map[string]string{
+		claim, err := core.ClaimLeaseForRepoProviderScopePondWithLabels(leasePrefix+"crabbox-stale-unknown", "stale-unknown", providerName, scope, "", t.TempDir(), time.Hour, map[string]string{
 			claimStateLabel:       "creating",
 			claimActiveUntilLabel: now.Add(-time.Minute).Format(time.RFC3339Nano),
 		})
@@ -812,15 +812,15 @@ func TestCloudRunSandboxCleanupReconcilesOnlyOwnedStaleCreate(t *testing.T) {
 			return nil
 		}}
 		previousTransport := newTransport
-		newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
+		newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return transport, nil }
 		t.Cleanup(func() { newTransport = previousTransport })
-		if err := b.Cleanup(context.Background(), CleanupRequest{}); err == nil || !strings.Contains(err.Error(), "no ownership token") {
+		if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err == nil || !strings.Contains(err.Error(), "no ownership token") {
 			t.Fatalf("cleanup err=%v", err)
 		}
 		if destroyed {
 			t.Fatal("cleanup destroyed a sandbox without ownership proof")
 		}
-		if _, exists, err := readLeaseClaimWithPresence(claim.LeaseID); err != nil || !exists {
+		if _, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID); err != nil || !exists {
 			t.Fatalf("claim exists=%v err=%v", exists, err)
 		}
 	})
@@ -830,22 +830,22 @@ func TestCloudRunSandboxCleanupDryRunNeedsNoTransportCredentials(t *testing.T) {
 	isolateLeaseHome(t)
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	var stdout bytes.Buffer
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
+	b := NewBackend(Provider{}.Spec(), core.Config{
+		CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Hour,
-	}, Runtime{Clock: cloudRunSandboxFixedClock{now: now}, Stdout: &stdout, Stderr: io.Discard}).(*backend)
+	}, core.Runtime{Clock: cloudRunSandboxFixedClock{now: now}, Stdout: &stdout, Stderr: io.Discard}).(*backend)
 	scope, err := b.claimScope()
 	if err != nil {
 		t.Fatal(err)
 	}
 	const sandboxID = "crabbox-dry-run"
-	if _, err := claimLeaseForRepoProviderScopePondWithLabels(leasePrefix+sandboxID, "dry-run", providerName, scope, "", t.TempDir(), time.Hour, map[string]string{
+	if _, err := core.ClaimLeaseForRepoProviderScopePondWithLabels(leasePrefix+sandboxID, "dry-run", providerName, scope, "", t.TempDir(), time.Hour, map[string]string{
 		claimOwnershipLabel: sandboxID,
 		claimExpiresAtLabel: now.Add(-time.Minute).Format(time.RFC3339Nano),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(stdout.String(), "would delete sandbox="+sandboxID) {
@@ -855,12 +855,12 @@ func TestCloudRunSandboxCleanupDryRunNeedsNoTransportCredentials(t *testing.T) {
 
 func TestCloudRunSandboxCreatePersistsTTL(t *testing.T) {
 	isolateLeaseHome(t)
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
+	b := NewBackend(Provider{}.Spec(), core.Config{
+		CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Hour,
 		TTL:             10 * time.Minute,
-	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
-	_, _, _, claim, err := b.createSandbox(context.Background(), &fakeTransport{mode: "direct"}, Repo{Root: t.TempDir()}, false, "ttl")
+	}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	_, _, _, claim, err := b.createSandbox(context.Background(), &fakeTransport{mode: "direct"}, core.Repo{Root: t.TempDir()}, false, "ttl")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -879,15 +879,15 @@ func TestCloudRunSandboxCreatePersistsTTL(t *testing.T) {
 func TestRunMissingCommandHasNoSideEffects(t *testing.T) {
 	transportCalls := 0
 	previousTransport := newTransport
-	newTransport = func(Config, Runtime) (sandboxTransport, error) {
+	newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) {
 		transportCalls++
 		return &fakeTransport{mode: "direct"}, nil
 	}
 	t.Cleanup(func() { newTransport = previousTransport })
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
-	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
-	_, err := b.Run(context.Background(), RunRequest{Repo: Repo{Root: t.TempDir()}})
+	b := NewBackend(Provider{}.Spec(), core.Config{
+		CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
+	}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	_, err := b.Run(context.Background(), core.RunRequest{Repo: core.Repo{Root: t.TempDir()}})
 	if err == nil || !strings.Contains(err.Error(), "missing command") {
 		t.Fatalf("run error=%v", err)
 	}
@@ -900,10 +900,10 @@ func TestCloudRunSandboxCleanupSkipsClaimReclaimedAfterSnapshot(t *testing.T) {
 	isolateLeaseHome(t)
 	const sandboxID = "crabbox-reclaimed-123456"
 	leaseID := leasePrefix + sandboxID
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
+	b := NewBackend(Provider{}.Spec(), core.Config{
+		CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Minute,
-	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	scope, err := b.claimScope()
 	if err != nil {
 		t.Fatal(err)
@@ -911,12 +911,12 @@ func TestCloudRunSandboxCleanupSkipsClaimReclaimedAfterSnapshot(t *testing.T) {
 	if err := claimTestCloudRunSandboxLease(leaseID, "reclaimed", scope, t.TempDir(), time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := readLeaseClaim(leaseID)
+	snapshot, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	newRepo := t.TempDir()
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "reclaimed", providerName, scope, "", newRepo, time.Minute, true); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "reclaimed", providerName, scope, "", newRepo, time.Minute, true); err != nil {
 		t.Fatalf("reclaim: %v", err)
 	}
 	destroyed := false
@@ -935,7 +935,7 @@ func TestCloudRunSandboxCleanupSkipsClaimReclaimedAfterSnapshot(t *testing.T) {
 	if destroyed {
 		t.Fatal("cleanup destroyed a sandbox reclaimed after its snapshot")
 	}
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil || claim.RepoRoot != newRepo {
 		t.Fatalf("reclaimed claim not preserved: claim=%#v err=%v", claim, err)
 	}
@@ -945,10 +945,10 @@ func TestCloudRunSandboxCleanupDestroyFailureRetainsClaim(t *testing.T) {
 	isolateLeaseHome(t)
 	const sandboxID = "crabbox-destroy-failure-123456"
 	leaseID := leasePrefix + sandboxID
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
+	b := NewBackend(Provider{}.Spec(), core.Config{
+		CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Minute,
-	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	scope, err := b.claimScope()
 	if err != nil {
 		t.Fatal(err)
@@ -956,7 +956,7 @@ func TestCloudRunSandboxCleanupDestroyFailureRetainsClaim(t *testing.T) {
 	if err := claimTestCloudRunSandboxLease(leaseID, "destroy-failure", scope, t.TempDir(), time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -970,7 +970,7 @@ func TestCloudRunSandboxCleanupDestroyFailureRetainsClaim(t *testing.T) {
 	if removed {
 		t.Fatal("cleanup reported a failed destroy removed")
 	}
-	retained, err := readLeaseClaim(leaseID)
+	retained, err := core.ReadLeaseClaim(leaseID)
 	if err != nil || retained.LeaseID != leaseID {
 		t.Fatalf("failed destroy lost claim: claim=%#v err=%v", retained, err)
 	}
@@ -989,12 +989,12 @@ func TestCloudRunSandboxCleanupContinuesAfterDestroyFailure(t *testing.T) {
 		return nil
 	}}
 	previousTransport := newTransport
-	newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
+	newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return transport, nil }
 	t.Cleanup(func() { newTransport = previousTransport })
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
+	b := NewBackend(Provider{}.Spec(), core.Config{
+		CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Second,
-	}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: cloudRunSandboxFixedClock{now: now}}).(*backend)
+	}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: cloudRunSandboxFixedClock{now: now}}).(*backend)
 	scope, err := b.claimScope()
 	if err != nil {
 		t.Fatal(err)
@@ -1004,16 +1004,16 @@ func TestCloudRunSandboxCleanupContinuesAfterDestroyFailure(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); !errors.Is(err, destroyErr) {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); !errors.Is(err, destroyErr) {
 		t.Fatalf("cleanup err=%v, want %v", err, destroyErr)
 	}
 	if len(destroyed) != 2 {
 		t.Fatalf("destroyed=%v", destroyed)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(leasePrefix + "crabbox-a-fail"); err != nil || !exists {
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leasePrefix + "crabbox-a-fail"); err != nil || !exists {
 		t.Fatalf("failed claim exists=%v err=%v", exists, err)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(leasePrefix + "crabbox-z-success"); err != nil || exists {
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leasePrefix + "crabbox-z-success"); err != nil || exists {
 		t.Fatalf("successful claim exists=%v err=%v", exists, err)
 	}
 }
@@ -1027,15 +1027,15 @@ func TestCloudRunSandboxRunPropagatesAutomaticTeardownFailure(t *testing.T) {
 		onDestroy: func(string) error { return destroyErr },
 	}
 	previousTransport := newTransport
-	newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
+	newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return transport, nil }
 	t.Cleanup(func() { newTransport = previousTransport })
 	var stderr bytes.Buffer
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
+	b := NewBackend(Provider{}.Spec(), core.Config{
+		CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Minute,
-	}, Runtime{Stdout: io.Discard, Stderr: &stderr}).(*backend)
-	result, err := b.Run(context.Background(), RunRequest{
-		Repo:       Repo{Root: t.TempDir()},
+	}, core.Runtime{Stdout: io.Discard, Stderr: &stderr}).(*backend)
+	result, err := b.Run(context.Background(), core.RunRequest{
+		Repo:       core.Repo{Root: t.TempDir()},
 		Command:    []string{"true"},
 		NoSync:     true,
 		TimingJSON: true,
@@ -1043,7 +1043,7 @@ func TestCloudRunSandboxRunPropagatesAutomaticTeardownFailure(t *testing.T) {
 	if !errors.Is(err, destroyErr) || result.Session == nil || !result.Session.Kept {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
-	if _, exists, readErr := readLeaseClaimWithPresence(result.LeaseID); readErr != nil || !exists {
+	if _, exists, readErr := core.ReadLeaseClaimWithPresence(result.LeaseID); readErr != nil || !exists {
 		t.Fatalf("recovery claim exists=%v err=%v", exists, readErr)
 	}
 	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
@@ -1069,15 +1069,15 @@ func TestCloudRunSandboxRunEmitsTimingJSONOnWorkspaceSetupFailure(t *testing.T) 
 		},
 	}
 	previousTransport := newTransport
-	newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
+	newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return transport, nil }
 	t.Cleanup(func() { newTransport = previousTransport })
 	var stderr bytes.Buffer
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
+	b := NewBackend(Provider{}.Spec(), core.Config{
+		CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Minute,
-	}, Runtime{Stdout: io.Discard, Stderr: &stderr}).(*backend)
-	_, err := b.Run(context.Background(), RunRequest{
-		Repo:       Repo{Root: t.TempDir()},
+	}, core.Runtime{Stdout: io.Discard, Stderr: &stderr}).(*backend)
+	_, err := b.Run(context.Background(), core.RunRequest{
+		Repo:       core.Repo{Root: t.TempDir()},
 		Command:    []string{"true"},
 		NoSync:     true,
 		TimingJSON: true,
@@ -1098,9 +1098,9 @@ func TestCloudRunSandboxRunEmitsTimingJSONOnWorkspaceSetupFailure(t *testing.T) 
 func TestCloudRunSandboxStatusReportsExpiredClaim(t *testing.T) {
 	isolateLeaseHome(t)
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
-	}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: cloudRunSandboxFixedClock{now: now}}).(*backend)
+	b := NewBackend(Provider{}.Spec(), core.Config{
+		CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
+	}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: cloudRunSandboxFixedClock{now: now}}).(*backend)
 	scope, err := b.claimScope()
 	if err != nil {
 		t.Fatal(err)
@@ -1109,20 +1109,20 @@ func TestCloudRunSandboxStatusReportsExpiredClaim(t *testing.T) {
 	if err := claimTestCloudRunSandboxLease(leaseID, "expired", scope, t.TempDir(), time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	labels := cloneLabels(claim.Labels)
 	labels[claimExpiresAtLabel] = now.Add(-time.Second).Format(time.RFC3339Nano)
-	if _, err := updateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels); err != nil {
+	if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels); err != nil {
 		t.Fatal(err)
 	}
-	status, err := b.Status(context.Background(), StatusRequest{ID: leaseID})
+	status, err := b.Status(context.Background(), core.StatusRequest{ID: leaseID})
 	if err != nil || status.Ready || status.State != "expired" {
 		t.Fatalf("status=%#v err=%v", status, err)
 	}
-	leases, err := b.List(context.Background(), ListRequest{})
+	leases, err := b.List(context.Background(), core.ListRequest{})
 	if err != nil || len(leases) != 1 || leases[0].Status != "expired" {
 		t.Fatalf("expired list=%#v err=%v", leases, err)
 	}
@@ -1131,10 +1131,10 @@ func TestCloudRunSandboxStatusReportsExpiredClaim(t *testing.T) {
 func TestCloudRunSandboxClearActivityTouchesLastUsed(t *testing.T) {
 	isolateLeaseHome(t)
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
+	b := NewBackend(Provider{}.Spec(), core.Config{
+		CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Minute,
-	}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: cloudRunSandboxFixedClock{now: now}}).(*backend)
+	}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: cloudRunSandboxFixedClock{now: now}}).(*backend)
 	scope, err := b.claimScope()
 	if err != nil {
 		t.Fatal(err)
@@ -1143,7 +1143,7 @@ func TestCloudRunSandboxClearActivityTouchesLastUsed(t *testing.T) {
 	if err := claimTestCloudRunSandboxLease(leaseID, "touch", scope, t.TempDir(), time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1175,13 +1175,13 @@ func TestCloudRunSandboxReclaimCannotRepublishAfterCleanupWins(t *testing.T) {
 		return nil
 	}}
 	previousTransport := newTransport
-	newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
+	newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return transport, nil }
 	t.Cleanup(func() { newTransport = previousTransport })
 
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
+	b := NewBackend(Provider{}.Spec(), core.Config{
+		CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Second,
-	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	scope, err := b.claimScope()
 	if err != nil {
 		t.Fatal(err)
@@ -1189,7 +1189,7 @@ func TestCloudRunSandboxReclaimCannotRepublishAfterCleanupWins(t *testing.T) {
 	if err := claimTestCloudRunSandboxLease(leaseID, "cleanup-wins", scope, t.TempDir(), time.Second); err != nil {
 		t.Fatal(err)
 	}
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1200,7 +1200,7 @@ func TestCloudRunSandboxReclaimCannotRepublishAfterCleanupWins(t *testing.T) {
 	}
 
 	cleanupDone := make(chan error, 1)
-	go func() { cleanupDone <- b.Cleanup(context.Background(), CleanupRequest{}) }()
+	go func() { cleanupDone <- b.Cleanup(context.Background(), core.CleanupRequest{}) }()
 	<-destroyStarted
 
 	reclaimDone := make(chan error, 1)
@@ -1221,7 +1221,7 @@ func TestCloudRunSandboxReclaimCannotRepublishAfterCleanupWins(t *testing.T) {
 	if err := <-reclaimDone; err == nil || (!strings.Contains(err.Error(), "claim changed") && !strings.Contains(err.Error(), "not claimed by Crabbox")) {
 		t.Fatalf("reclaim error=%v, want guarded missing-claim failure", err)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
 		t.Fatalf("reclaim republished deleted sandbox claim: exists=%v err=%v", exists, err)
 	}
 }
@@ -1273,7 +1273,7 @@ func TestRunWithFakeTransport(t *testing.T) {
 		},
 	}
 	prev := newTransport
-	newTransport = func(Config, Runtime) (sandboxTransport, error) { return fake, nil }
+	newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return fake, nil }
 	t.Cleanup(func() { newTransport = prev })
 
 	// Isolate lease claims to a temp dir.
@@ -1287,20 +1287,20 @@ func TestRunWithFakeTransport(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{
+	b := NewBackend(Provider{}.Spec(), core.Config{
+		CloudRunSandbox: core.CloudRunSandboxConfig{
 			CLIPath: "/usr/local/gcp/bin/sandbox",
 			Workdir: "/tmp/crabbox",
 			Write:   true,
 		},
 		IdleTimeout: 30 * time.Minute,
-	}, Runtime{
+	}, core.Runtime{
 		Stdout: &stdout,
 		Stderr: &stderr,
 	}).(*backend)
 
-	result, err := b.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: root},
+	result, err := b.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: root},
 		Command: []string{"echo", "hello"},
 		NoSync:  true,
 		Keep:    false,
@@ -1324,7 +1324,7 @@ func TestRunWithFakeTransport(t *testing.T) {
 
 func TestValidateConfig(t *testing.T) {
 	t.Parallel()
-	cfg := Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"}}
+	cfg := core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"}}
 	if err := validateConfig(cfg); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
@@ -1350,7 +1350,7 @@ type fakeTransport struct {
 }
 
 func claimTestCloudRunSandboxLease(leaseID, slug, scope, repoRoot string, idleTimeout time.Duration) error {
-	_, err := claimLeaseForRepoProviderScopePondWithLabels(leaseID, slug, providerName, scope, "", repoRoot, idleTimeout, map[string]string{
+	_, err := core.ClaimLeaseForRepoProviderScopePondWithLabels(leaseID, slug, providerName, scope, "", repoRoot, idleTimeout, map[string]string{
 		claimOwnershipLabel: strings.TrimPrefix(leaseID, leasePrefix),
 	})
 	return err

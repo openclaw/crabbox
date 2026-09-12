@@ -95,7 +95,7 @@ func (e *ocAPIError) Unwrap() error { return e.err }
 // newOCAPIClient resolves the API URL and key. Key precedence:
 // CRABBOX_OPENCOMPUTER_API_KEY, OPENCOMPUTER_API_KEY, then the `oc` CLI config
 // (~/.oc/config.json). Returns an error when no key can be found.
-func newOCAPIClient(cfg Config, rt Runtime) (*ocAPIClient, error) {
+func newOCAPIClient(cfg core.Config, rt core.Runtime) (*ocAPIClient, error) {
 	fileCfg := readOCFileConfig()
 	// API URL precedence: an explicit trusted Crabbox setting, then the `oc` CLI
 	// config file's api_url, then the built-in default. Repository YAML cannot
@@ -110,7 +110,7 @@ func newOCAPIClient(cfg Config, rt Runtime) (*ocAPIClient, error) {
 		fileCfg.APIKey,
 	)
 	if apiKey == "" {
-		return nil, exit(2, "provider=opencomputer needs an API key; load CRABBOX_OPENCOMPUTER_API_KEY from a secret manager or configure an existing oc CLI credential")
+		return nil, core.Exit(2, "provider=opencomputer needs an API key; load CRABBOX_OPENCOMPUTER_API_KEY from a secret manager or configure an existing oc CLI credential")
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
@@ -123,14 +123,14 @@ func newOCAPIClient(cfg Config, rt Runtime) (*ocAPIClient, error) {
 func validateOCAPIURL(raw string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
-		return "", exit(2, "provider=opencomputer API URL must be an absolute HTTPS URL")
+		return "", core.Exit(2, "provider=opencomputer API URL must be an absolute HTTPS URL")
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", exit(2, "provider=opencomputer API URL must not contain userinfo, query parameters, or a fragment")
+		return "", core.Exit(2, "provider=opencomputer API URL must not contain userinfo, query parameters, or a fragment")
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
 	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
-		return "", exit(2, "provider=opencomputer API URL must use HTTPS except for loopback development endpoints")
+		return "", core.Exit(2, "provider=opencomputer API URL must use HTTPS except for loopback development endpoints")
 	}
 	host := shared.LowercaseHostname(parsed.Hostname())
 	port := parsed.Port()
@@ -218,7 +218,7 @@ func (c *ocAPIClient) createSandbox(ctx context.Context, req createSandboxReques
 		return sandbox{}, err
 	}
 	if sb.ID == "" {
-		return sandbox{}, exit(5, "opencomputer create returned no sandbox id")
+		return sandbox{}, core.Exit(5, "opencomputer create returned no sandbox id")
 	}
 	return sb, nil
 }
@@ -310,7 +310,7 @@ func (c *ocAPIClient) apiError(method, path string, resp *http.Response) error {
 	path = redactOCSecrets(path, c.apiKey)
 	return &ocAPIError{
 		StatusCode: resp.StatusCode,
-		err:        exit(5, "opencomputer %s %s failed: %s: %s", method, path, resp.Status, msg),
+		err:        core.Exit(5, "opencomputer %s %s failed: %s: %s", method, path, resp.Status, msg),
 	}
 }
 

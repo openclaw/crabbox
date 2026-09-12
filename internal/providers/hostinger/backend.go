@@ -16,17 +16,17 @@ import (
 )
 
 type leaseBackend struct {
-	spec   ProviderSpec
-	cfg    Config
-	rt     Runtime
+	spec   core.ProviderSpec
+	cfg    core.Config
+	rt     core.Runtime
 	client hostingerAPI
 
 	skipSSHWait bool
 }
 
 var (
-	hostingerRunSSHQuiet             = runSSHQuiet
-	hostingerWaitForSSHReady         = waitForSSHReady
+	hostingerRunSSHQuiet             = core.RunSSHQuiet
+	hostingerWaitForSSHReady         = core.WaitForSSHReady
 	hostingerLookPath                = exec.LookPath
 	hostingerSleep                   = time.Sleep
 	hostingerPurchaseRecoveryTimeout = time.Minute
@@ -40,76 +40,76 @@ const (
 	hostingerAdoptionPendingLabel  = "hostinger_adoption_pending"
 )
 
-func NewLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+func NewLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	applyDefaults(&cfg)
 	return &leaseBackend{spec: spec, cfg: cfg, rt: rt}
 }
 
-func (b *leaseBackend) Spec() ProviderSpec { return b.spec }
+func (b *leaseBackend) Spec() core.ProviderSpec { return b.spec }
 
-func (b *leaseBackend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
-	return useStoredTestboxKey(&target.SSH, leaseID, sshKeyExplicit(&b.cfg))
+func (b *leaseBackend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
+	return useStoredTestboxKey(&target.SSH, leaseID, core.IsSSHKeyExplicit(&b.cfg))
 }
 
-func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (lease LeaseTarget, err error) {
+func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (lease core.LeaseTarget, err error) {
 	cfg := b.configForRun()
 	if err := validateHostingerWorkRoot(cfg); err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if err := validateHostingerReleaseAction(cfg); err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if !cfg.Hostinger.AllowPurchase {
-		return LeaseTarget{}, exit(2, "provider=%s requires --hostinger-allow-purchase, CRABBOX_HOSTINGER_ALLOW_PURCHASE=true, or hostinger.allowPurchase=true in private user config before billable VPS purchase/setup", providerName)
+		return core.LeaseTarget{}, core.Exit(2, "provider=%s requires --hostinger-allow-purchase, CRABBOX_HOSTINGER_ALLOW_PURCHASE=true, or hostinger.allowPurchase=true in private user config before billable VPS purchase/setup", providerName)
 	}
 	if strings.TrimSpace(cfg.Hostinger.ItemID) == "" {
-		return LeaseTarget{}, exit(2, "provider=%s requires hostinger item id", providerName)
+		return core.LeaseTarget{}, core.Exit(2, "provider=%s requires hostinger item id", providerName)
 	}
 	if strings.TrimSpace(cfg.Hostinger.TemplateID) == "" {
-		return LeaseTarget{}, exit(2, "provider=%s requires hostinger template id", providerName)
+		return core.LeaseTarget{}, core.Exit(2, "provider=%s requires hostinger template id", providerName)
 	}
 	if strings.TrimSpace(cfg.Hostinger.DataCenterID) == "" {
-		return LeaseTarget{}, exit(2, "provider=%s requires hostinger data center id", providerName)
+		return core.LeaseTarget{}, core.Exit(2, "provider=%s requires hostinger data center id", providerName)
 	}
 	templateID, err := hostingerIntegerID("template id", cfg.Hostinger.TemplateID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	dataCenterID, err := hostingerIntegerID("data center id", cfg.Hostinger.DataCenterID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if err := validateHostingerLocalTools(); err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	client, err := b.api()
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	options, err := loadHostingerPurchaseOptions(ctx, client)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	paymentMethodID, err := validateHostingerPurchaseOptions(cfg, options)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	leaseID := core.NewLeaseID()
 	servers, err := b.listServers(ctx, client, true)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
-	slug, err := allocateDirectLeaseSlug(leaseID, req.RequestedSlug, servers)
+	slug, err := core.AllocateDirectLeaseSlug(leaseID, req.RequestedSlug, servers)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	hostname := hostingerHostname(cfg, leaseID, slug)
 	if err := validateHostingerHostname(hostname); err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
-	keyPath, publicKey, err := ensureTestboxKeyForConfig(cfg, leaseID)
+	keyPath, publicKey, err := core.EnsureTestboxKeyForConfig(cfg, leaseID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	recovery := hostingerRecoveryRecord{
 		LeaseID:  leaseID,
@@ -117,12 +117,12 @@ func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (lease L
 		Hostname: hostname,
 	}
 	if err := writeHostingerRecoveryRecord(recovery); err != nil {
-		removeStoredTestboxKey(leaseID)
-		return LeaseTarget{}, exit(1, "persist hostinger purchase recovery record: %v", err)
+		core.RemoveStoredTestboxKey(leaseID)
+		return core.LeaseTarget{}, core.Exit(1, "persist hostinger purchase recovery record: %v", err)
 	}
 	purchasedVMID := ""
 	claimPersisted := false
-	var rollbackClaim LeaseClaim
+	var rollbackClaim core.LeaseClaim
 	retainRecoveryKey := false
 	defer func() {
 		if err == nil {
@@ -131,7 +131,7 @@ func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (lease L
 		if purchasedVMID == "" {
 			if !claimPersisted && !retainRecoveryKey {
 				removeHostingerRecoveryRecord(leaseID)
-				removeStoredTestboxKey(leaseID)
+				core.RemoveStoredTestboxKey(leaseID)
 			}
 			return
 		}
@@ -150,7 +150,7 @@ func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (lease L
 				rollback = "retained; claim-snapshot-unavailable"
 			} else {
 				stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				server := Server{
+				server := core.Server{
 					CloudID:  purchasedVMID,
 					Provider: providerName,
 					Name:     hostname,
@@ -166,7 +166,7 @@ func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (lease L
 				}
 			}
 		}
-		err = exit(1, "hostinger VPS provisioning failed after purchase: lease=%s vm=%s rollback=%s billing=still-owned: %v", leaseID, purchasedVMID, rollback, err)
+		err = core.Exit(1, "hostinger VPS provisioning failed after purchase: lease=%s vm=%s rollback=%s billing=still-owned: %v", leaseID, purchasedVMID, rollback, err)
 	}()
 	cfg.SSHKey = keyPath
 	keyName := fmt.Sprintf("crabbox-%s", leaseID)
@@ -177,9 +177,9 @@ func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (lease L
 		server := hostingerServer(hostingerVM{Hostname: hostname, State: "provisioning"}, leaseID, slug, cfg, req.Keep)
 		server.Labels[hostingerRecoveryLabel] = hostingerRecoveryAmbiguous
 		server.Labels[hostingerRecoveryHostnameLabel] = hostname
-		claim, err := claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, LeaseClaim{}, false)
+		claim, err := claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, core.SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, core.LeaseClaim{}, false)
 		if err != nil {
-			return exit(1, "persist hostinger ambiguous purchase recovery claim: %v", err)
+			return core.Exit(1, "persist hostinger ambiguous purchase recovery claim: %v", err)
 		}
 		claimPersisted = true
 		rollbackClaim = claim
@@ -203,7 +203,7 @@ func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (lease L
 	})
 	if err != nil {
 		if !hostingerPurchaseMayHaveSucceeded(err) {
-			return LeaseTarget{}, exit(1, "hostinger purchase vps failed: %v", err)
+			return core.LeaseTarget{}, core.Exit(1, "hostinger purchase vps failed: %v", err)
 		}
 		retainRecoveryKey = true
 		purchaseErr := err
@@ -213,15 +213,15 @@ func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (lease L
 		cancel()
 		if recoveryErr != nil {
 			if pendingClaimErr != nil {
-				return LeaseTarget{}, exit(1, "hostinger purchase outcome is unknown; recovery claim failed and key retained for lease=%s hostname=%s key=%s: purchase_error=%v claim_error=%v recovery_error=%v", leaseID, hostname, keyPath, purchaseErr, pendingClaimErr, recoveryErr)
+				return core.LeaseTarget{}, core.Exit(1, "hostinger purchase outcome is unknown; recovery claim failed and key retained for lease=%s hostname=%s key=%s: purchase_error=%v claim_error=%v recovery_error=%v", leaseID, hostname, keyPath, purchaseErr, pendingClaimErr, recoveryErr)
 			}
-			return LeaseTarget{}, exit(1, "hostinger purchase outcome is unknown; recovery claim retained for lease=%s hostname=%s: purchase_error=%v recovery_error=%v", leaseID, hostname, purchaseErr, recoveryErr)
+			return core.LeaseTarget{}, core.Exit(1, "hostinger purchase outcome is unknown; recovery claim retained for lease=%s hostname=%s: purchase_error=%v recovery_error=%v", leaseID, hostname, purchaseErr, recoveryErr)
 		}
 		if !found {
 			if pendingClaimErr != nil {
-				return LeaseTarget{}, exit(1, "hostinger purchase outcome is unknown; recovery claim failed and key retained for lease=%s hostname=%s key=%s: purchase_error=%v claim_error=%v", leaseID, hostname, keyPath, purchaseErr, pendingClaimErr)
+				return core.LeaseTarget{}, core.Exit(1, "hostinger purchase outcome is unknown; recovery claim failed and key retained for lease=%s hostname=%s key=%s: purchase_error=%v claim_error=%v", leaseID, hostname, keyPath, purchaseErr, pendingClaimErr)
 			}
-			return LeaseTarget{}, exit(1, "hostinger purchase outcome is unknown; recovery claim retained for lease=%s hostname=%s: %v", leaseID, hostname, purchaseErr)
+			return core.LeaseTarget{}, core.Exit(1, "hostinger purchase outcome is unknown; recovery claim retained for lease=%s hostname=%s: %v", leaseID, hostname, purchaseErr)
 		}
 		vm = recovered
 		fmt.Fprintf(b.rt.Stderr, "recovered ambiguous hostinger purchase lease=%s vm=%s hostname=%s\n", leaseID, vm.IDString(), hostname)
@@ -234,34 +234,34 @@ func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (lease L
 		cancel()
 		if recoveryErr != nil {
 			if pendingClaimErr != nil {
-				return LeaseTarget{}, exit(1, "hostinger purchase returned no vm id; recovery claim failed and key retained for lease=%s hostname=%s key=%s: claim_error=%v recovery_error=%v", leaseID, hostname, keyPath, pendingClaimErr, recoveryErr)
+				return core.LeaseTarget{}, core.Exit(1, "hostinger purchase returned no vm id; recovery claim failed and key retained for lease=%s hostname=%s key=%s: claim_error=%v recovery_error=%v", leaseID, hostname, keyPath, pendingClaimErr, recoveryErr)
 			}
-			return LeaseTarget{}, exit(1, "hostinger purchase returned no vm id; recovery claim retained for lease=%s hostname=%s: %v", leaseID, hostname, recoveryErr)
+			return core.LeaseTarget{}, core.Exit(1, "hostinger purchase returned no vm id; recovery claim retained for lease=%s hostname=%s: %v", leaseID, hostname, recoveryErr)
 		}
 		if !found {
 			if pendingClaimErr != nil {
-				return LeaseTarget{}, exit(1, "hostinger purchase returned no vm id; recovery claim failed and key retained for lease=%s hostname=%s key=%s: claim_error=%v", leaseID, hostname, keyPath, pendingClaimErr)
+				return core.LeaseTarget{}, core.Exit(1, "hostinger purchase returned no vm id; recovery claim failed and key retained for lease=%s hostname=%s key=%s: claim_error=%v", leaseID, hostname, keyPath, pendingClaimErr)
 			}
-			return LeaseTarget{}, exit(1, "hostinger purchase returned no vm id; recovery claim retained for lease=%s hostname=%s", leaseID, hostname)
+			return core.LeaseTarget{}, core.Exit(1, "hostinger purchase returned no vm id; recovery claim retained for lease=%s hostname=%s", leaseID, hostname)
 		}
 		vm = recovered
 	}
 	purchasedVMID = vm.IDString()
 	recovery.VMID = purchasedVMID
 	if err := writeHostingerRecoveryRecord(recovery); err != nil {
-		return LeaseTarget{}, exit(1, "bind hostinger purchase recovery record lease=%s vm=%s key=%s: %v", leaseID, purchasedVMID, keyPath, err)
+		return core.LeaseTarget{}, core.Exit(1, "bind hostinger purchase recovery record lease=%s vm=%s key=%s: %v", leaseID, purchasedVMID, keyPath, err)
 	}
 	server := hostingerServer(vm, leaseID, slug, cfg, req.Keep)
 	if claimPersisted {
-		updated, updateErr := updateLeaseClaimEndpointIfUnchanged(leaseID, rollbackClaim, server, SSHTarget{})
+		updated, updateErr := core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, rollbackClaim, server, core.SSHTarget{})
 		if updateErr != nil {
-			return LeaseTarget{}, exit(1, "bind hostinger recovered VPS claim: %v", updateErr)
+			return core.LeaseTarget{}, core.Exit(1, "bind hostinger recovered VPS claim: %v", updateErr)
 		}
 		rollbackClaim = updated
 	} else {
-		claim, claimErr := claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, LeaseClaim{}, false)
+		claim, claimErr := claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, core.SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, core.LeaseClaim{}, false)
 		if claimErr != nil {
-			return LeaseTarget{}, exit(1, "persist hostinger paid VPS claim: %v", claimErr)
+			return core.LeaseTarget{}, core.Exit(1, "persist hostinger paid VPS claim: %v", claimErr)
 		}
 		claimPersisted = true
 		rollbackClaim = claim
@@ -269,79 +269,79 @@ func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (lease L
 	removeHostingerRecoveryRecord(leaseID)
 	ready, waitErr := b.waitForVM(ctx, client, vm.IDString())
 	if waitErr != nil {
-		return LeaseTarget{}, waitErr
+		return core.LeaseTarget{}, waitErr
 	}
 	vm = ready
 	lease, err = b.leaseFromVM(cfg, vm, leaseID, slug, req.Keep)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
-	updated, updateErr := updateLeaseClaimEndpointIfUnchanged(leaseID, rollbackClaim, lease.Server, lease.SSH)
+	updated, updateErr := core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, rollbackClaim, lease.Server, lease.SSH)
 	if updateErr != nil {
-		return LeaseTarget{}, exit(1, "persist hostinger VPS endpoint: %v", updateErr)
+		return core.LeaseTarget{}, core.Exit(1, "persist hostinger VPS endpoint: %v", updateErr)
 	}
 	rollbackClaim = updated
 	if !b.skipSSHWait {
 		if err := b.ensureBootstrap(ctx, cfg, lease, "bootstrap"); err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
-		if err := hostingerWaitForSSHReady(ctx, &lease.SSH, b.rt.Stderr, "bootstrap", bootstrapWaitTimeout(cfg)); err != nil {
-			return LeaseTarget{}, err
+		if err := hostingerWaitForSSHReady(ctx, &lease.SSH, b.rt.Stderr, "bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
+			return core.LeaseTarget{}, err
 		}
 	}
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s vm=%s state=ready\n", leaseID, vm.IDString())
 	return lease, nil
 }
 
-func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (lease LeaseTarget, err error) {
+func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (lease core.LeaseTarget, err error) {
 	cfg := b.configForRun()
 	if err := validateHostingerWorkRoot(cfg); err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if err := validateHostingerReleaseAction(cfg); err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	client, err := b.api()
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	vm, leaseID, slug, err := b.resolveVM(ctx, client, req.ID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	cfg, err = b.configForLeaseClaim(cfg, leaseID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if req.ReleaseOnly {
 		server, err := b.serverFromVMWithClaim(vm, leaseID, slug, cfg, true)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		owned, err := hostingerReleaseOwned(vm)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		if !owned {
-			return LeaseTarget{}, exit(2, "refusing to stop unowned hostinger vps %s; a matching local Crabbox lease claim is required", vm.IDString())
+			return core.LeaseTarget{}, core.Exit(2, "refusing to stop unowned hostinger vps %s; a matching local Crabbox lease claim is required", vm.IDString())
 		}
-		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
+		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	if req.StatusOnly && (!req.ReadyProbe || !vm.Ready() || vm.Host() == "") {
 		server, err := b.serverFromVMWithClaim(vm, leaseID, slug, cfg, true)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
-		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
+		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	if vm.Stopped() && req.Repo.Root == "" && !req.Prepare {
 		server, err := b.serverFromVMWithClaim(vm, leaseID, slug, cfg, true)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
-		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
+		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
-	var previousClaim, repoClaim, rollbackExpectedClaim LeaseClaim
+	var previousClaim, repoClaim, rollbackExpectedClaim core.LeaseClaim
 	var rollbackRepoClaim bool
 	adoptionPending := false
 	defer func() {
@@ -356,31 +356,31 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (lease L
 	if req.Repo.Root != "" {
 		claimServer, err := b.serverFromVMWithClaim(vm, leaseID, slug, cfg, true)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
-		expected, expectedExists, err := resolveLeaseClaimForProvider(leaseID, providerName)
+		expected, expectedExists, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		previousClaim = expected
 		adoptionPending = !hostingerClaimOwned(expected, expectedExists, vm.IDString())
 		if adoptionPending {
 			claimServer.Labels[hostingerAdoptionPendingLabel] = "true"
 		}
-		repoClaim, err = claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, claimServer, SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, expected, expectedExists)
+		repoClaim, err = claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, claimServer, core.SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, expected, expectedExists)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		rollbackExpectedClaim = repoClaim
 		rollbackRepoClaim = !adoptionPending
 		removeHostingerRecoveryRecord(leaseID)
 		vm, err = client.GetVM(ctx, vm.IDString())
 		if err != nil {
-			return LeaseTarget{}, exit(1, "hostinger refresh claimed vps %s failed: %v", claimServer.CloudID, err)
+			return core.LeaseTarget{}, core.Exit(1, "hostinger refresh claimed vps %s failed: %v", claimServer.CloudID, err)
 		}
 	}
 	started := false
-	var restartClaim LeaseClaim
+	var restartClaim core.LeaseClaim
 	rollbackStarted := func(id string, cause error) error {
 		stoppedClaim, rollbackErr := b.rollbackStartedVM(client, id, restartClaim, cfg, cause)
 		if rollbackRepoClaim {
@@ -396,7 +396,7 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (lease L
 		vmID := vm.IDString()
 		restartClaim, err = b.updateClaimState(leaseID, cfg, "provisioning", true)
 		if err != nil {
-			return LeaseTarget{}, fmt.Errorf("prepare hostinger restart lease=%s: %w", leaseID, err)
+			return core.LeaseTarget{}, fmt.Errorf("prepare hostinger restart lease=%s: %w", leaseID, err)
 		}
 		if rollbackRepoClaim {
 			rollbackExpectedClaim = restartClaim
@@ -404,54 +404,54 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (lease L
 		if err := client.StartVM(ctx, vmID); err != nil {
 			stoppedClaim, claimErr := b.updateClaimStateIfUnchanged(restartClaim, cfg, "stopped", false)
 			if claimErr != nil {
-				return LeaseTarget{}, exit(1, "hostinger start vps %s failed: %v; claim update failed: %v", vmID, err, claimErr)
+				return core.LeaseTarget{}, core.Exit(1, "hostinger start vps %s failed: %v; claim update failed: %v", vmID, err, claimErr)
 			}
 			if rollbackRepoClaim {
 				rollbackExpectedClaim = stoppedClaim
 			}
-			return LeaseTarget{}, exit(1, "hostinger start vps %s failed: %v", vmID, err)
+			return core.LeaseTarget{}, core.Exit(1, "hostinger start vps %s failed: %v", vmID, err)
 		}
 		started = true
 		vm, err = b.waitForVM(ctx, client, vmID)
 		if err != nil {
-			return LeaseTarget{}, rollbackStarted(vmID, err)
+			return core.LeaseTarget{}, rollbackStarted(vmID, err)
 		}
 	} else if !vm.Ready() {
-		return LeaseTarget{}, exit(5, "hostinger vps %s is not runnable; state=%s", vm.IDString(), firstNonBlank(vm.State, vm.Status, "unknown"))
+		return core.LeaseTarget{}, core.Exit(5, "hostinger vps %s is not runnable; state=%s", vm.IDString(), firstNonBlank(vm.State, vm.Status, "unknown"))
 	}
 	lease, err = b.leaseFromVM(cfg, vm, leaseID, slug, true)
 	if err != nil {
 		if started {
-			return LeaseTarget{}, rollbackStarted(vm.IDString(), err)
+			return core.LeaseTarget{}, rollbackStarted(vm.IDString(), err)
 		}
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	sshValidated := b.skipSSHWait
 	if started && !b.skipSSHWait {
 		transport := lease.SSH
 		transport.ReadyCheck = "true"
-		if err := hostingerWaitForSSHReady(ctx, &transport, b.rt.Stderr, "restart", bootstrapWaitTimeout(cfg)); err != nil {
-			return LeaseTarget{}, rollbackStarted(vm.IDString(), err)
+		if err := hostingerWaitForSSHReady(ctx, &transport, b.rt.Stderr, "restart", core.BootstrapWaitTimeout(cfg)); err != nil {
+			return core.LeaseTarget{}, rollbackStarted(vm.IDString(), err)
 		}
 		sshValidated = true
 	}
 	if req.Prepare && !b.skipSSHWait {
 		if err := b.ensureBootstrap(ctx, cfg, lease, "resolve"); err != nil {
 			if started {
-				return LeaseTarget{}, rollbackStarted(vm.IDString(), err)
+				return core.LeaseTarget{}, rollbackStarted(vm.IDString(), err)
 			}
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		sshValidated = true
 	}
 	if adoptionPending && !sshValidated {
 		transport := lease.SSH
 		transport.ReadyCheck = "true"
-		if err := hostingerWaitForSSHReady(ctx, &transport, b.rt.Stderr, "adoption", bootstrapWaitTimeout(cfg)); err != nil {
+		if err := hostingerWaitForSSHReady(ctx, &transport, b.rt.Stderr, "adoption", core.BootstrapWaitTimeout(cfg)); err != nil {
 			if started {
-				return LeaseTarget{}, rollbackStarted(vm.IDString(), err)
+				return core.LeaseTarget{}, rollbackStarted(vm.IDString(), err)
 			}
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		sshValidated = true
 	}
@@ -461,22 +461,22 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (lease L
 			expected = restartClaim
 		}
 		server := lease.Server
-		server.Labels = touchDirectLeaseLabels(expected.Labels, cfg, "running", time.Now().UTC())
+		server.Labels = core.TouchDirectLeaseLabels(expected.Labels, cfg, "running", time.Now().UTC())
 		if adoptionPending {
 			delete(server.Labels, hostingerAdoptionPendingLabel)
 		}
-		if _, err := updateLeaseClaimEndpointIfUnchanged(expected.LeaseID, expected, server, lease.SSH); err != nil {
+		if _, err := core.UpdateLeaseClaimEndpointIfUnchanged(expected.LeaseID, expected, server, lease.SSH); err != nil {
 			if started {
-				return LeaseTarget{}, rollbackStarted(vm.IDString(), err)
+				return core.LeaseTarget{}, rollbackStarted(vm.IDString(), err)
 			}
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		rollbackRepoClaim = false
 	}
 	return lease, nil
 }
 
-func hostingerOwnershipRollbackClaim(current, previous LeaseClaim) LeaseClaim {
+func hostingerOwnershipRollbackClaim(current, previous core.LeaseClaim) core.LeaseClaim {
 	restored := previous
 	restored.Labels = make(map[string]string, len(previous.Labels))
 	for key, value := range previous.Labels {
@@ -502,7 +502,7 @@ func hostingerOwnershipRollbackClaim(current, previous LeaseClaim) LeaseClaim {
 	return restored
 }
 
-func (b *leaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *leaseBackend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	client, err := b.api()
 	if err != nil {
 		return nil, err
@@ -510,11 +510,11 @@ func (b *leaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, 
 	return b.listServers(ctx, client, req.All)
 }
 
-func (b *leaseBackend) ReleaseLeaseWithOutcome(ctx context.Context, req ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+func (b *leaseBackend) ReleaseLeaseWithOutcome(ctx context.Context, req core.ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
 	return core.ReleaseLeaseOutcome{}, b.ReleaseLease(ctx, req)
 }
 
-func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+func (b *leaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
 	if err := validateHostingerReleaseAction(b.configForRun()); err != nil {
 		return err
 	}
@@ -533,25 +533,25 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 	} else {
 		vm, err = client.GetVM(ctx, vmID)
 		if err != nil {
-			return exit(1, "hostinger get vps %s before release failed: %v", vmID, err)
+			return core.Exit(1, "hostinger get vps %s before release failed: %v", vmID, err)
 		}
 	}
 	if vmID == "" {
-		return exit(2, "provider=%s release requires a vm id", providerName)
+		return core.Exit(2, "provider=%s release requires a vm id", providerName)
 	}
 	owned, err := hostingerReleaseOwned(vm)
 	if err != nil {
 		return err
 	}
 	if !owned {
-		return exit(2, "refusing to stop unowned hostinger vps %s; a matching local Crabbox lease claim is required", vmID)
+		return core.Exit(2, "refusing to stop unowned hostinger vps %s; a matching local Crabbox lease claim is required", vmID)
 	}
-	claim, claimOK, err := resolveLeaseClaimForProviderCloudID(vmID, providerName)
+	claim, claimOK, err := core.ResolveLeaseClaimForProviderCloudID(vmID, providerName)
 	if err != nil {
 		return err
 	}
 	if !claimOK && req.Lease.LeaseID != "" {
-		candidate, ok, resolveErr := resolveLeaseClaimForProvider(req.Lease.LeaseID, providerName)
+		candidate, ok, resolveErr := core.ResolveLeaseClaimForProvider(req.Lease.LeaseID, providerName)
 		if resolveErr != nil {
 			return resolveErr
 		}
@@ -571,20 +571,20 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 		}
 		return nil
 	}
-	return exit(2, "refusing to stop unowned hostinger vps %s; a matching local Crabbox lease claim is required", vmID)
+	return core.Exit(2, "refusing to stop unowned hostinger vps %s; a matching local Crabbox lease claim is required", vmID)
 }
 
-func (b *leaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
+func (b *leaseBackend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	return fmt.Sprintf("stopped lease=%s vm=%s name=%s billing=still-owned", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
 }
 
-func (b *leaseBackend) RetainLeaseClaimAfterRelease(LeaseTarget) bool {
+func (b *leaseBackend) RetainLeaseClaimAfterRelease(core.LeaseTarget) bool {
 	return true
 }
 
-func validateHostingerReleaseAction(cfg Config) error {
+func validateHostingerReleaseAction(cfg core.Config) error {
 	if strings.ToLower(strings.TrimSpace(cfg.Hostinger.ReleaseAction)) != "stop" {
-		return exit(2, "provider=%s release action must be stop", providerName)
+		return core.Exit(2, "provider=%s release action must be stop", providerName)
 	}
 	return nil
 }
@@ -592,7 +592,7 @@ func validateHostingerReleaseAction(cfg Config) error {
 func validateHostingerLocalTools() error {
 	for _, tool := range []string{"ssh", "ssh-keygen", "rsync"} {
 		if _, err := hostingerLookPath(tool); err != nil {
-			return exit(2, "provider=%s requires local %s before billable VPS purchase/setup", providerName, tool)
+			return core.Exit(2, "provider=%s requires local %s before billable VPS purchase/setup", providerName, tool)
 		}
 	}
 	return nil
@@ -600,15 +600,15 @@ func validateHostingerLocalTools() error {
 
 var hostingerSSHUserPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9._-]{0,31}$`)
 
-func validateHostingerWorkRoot(cfg Config) error {
+func validateHostingerWorkRoot(cfg core.Config) error {
 	workRoot := strings.TrimSpace(cfg.WorkRoot)
 	if workRoot != cfg.WorkRoot || workRoot == "" || !strings.HasPrefix(workRoot, "/") || path.Clean(workRoot) != workRoot {
-		return exit(2, "provider=%s work root must be a canonical absolute Linux path, got %q", providerName, cfg.WorkRoot)
+		return core.Exit(2, "provider=%s work root must be a canonical absolute Linux path, got %q", providerName, cfg.WorkRoot)
 	}
 	roots := []string{"/work/crabbox", "/workspaces/crabbox", "/var/lib/crabbox/work", "/opt/crabbox"}
 	user := strings.TrimSpace(cfg.SSHUser)
 	if user != cfg.SSHUser || !hostingerSSHUserPattern.MatchString(user) {
-		return exit(2, "provider=%s SSH user must be a valid Linux login name, got %q", providerName, cfg.SSHUser)
+		return core.Exit(2, "provider=%s SSH user must be a valid Linux login name, got %q", providerName, cfg.SSHUser)
 	}
 	roots = append(roots, "/home/"+user+"/crabbox")
 	for _, root := range roots {
@@ -616,7 +616,7 @@ func validateHostingerWorkRoot(cfg Config) error {
 			return nil
 		}
 	}
-	return exit(2, "provider=%s work root %q is outside approved Crabbox roots", providerName, workRoot)
+	return core.Exit(2, "provider=%s work root %q is outside approved Crabbox roots", providerName, workRoot)
 }
 
 func hostingerStoppedClaimLabels(labels map[string]string) map[string]string {
@@ -628,29 +628,29 @@ func hostingerStoppedClaimLabels(labels map[string]string) map[string]string {
 	return stopped
 }
 
-func (b *leaseBackend) stopClaimedVM(ctx context.Context, client hostingerAPI, claim LeaseClaim, vmID string, server Server) (LeaseClaim, error) {
+func (b *leaseBackend) stopClaimedVM(ctx context.Context, client hostingerAPI, claim core.LeaseClaim, vmID string, server core.Server) (core.LeaseClaim, error) {
 	server.CloudID = vmID
 	server.Provider = providerName
 	server.Status = "stopped"
 	server.Labels = hostingerStoppedClaimLabels(server.Labels)
-	return updateLeaseClaimEndpointIfUnchangedAfter(claim.LeaseID, claim, server, SSHTarget{}, func() error {
+	return updateLeaseClaimEndpointIfUnchangedAfter(claim.LeaseID, claim, server, core.SSHTarget{}, func() error {
 		return b.stopVMAndWait(ctx, client, vmID)
 	})
 }
 
-func (b *leaseBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
+func (b *leaseBackend) Touch(_ context.Context, req core.TouchRequest) (core.Server, error) {
 	server := req.Lease.Server
 	if server.Labels == nil {
 		server.Labels = map[string]string{}
 	}
-	server.Labels = touchDirectLeaseLabels(server.Labels, b.configForRun(), req.State, time.Now().UTC())
-	if err := updateLeaseClaimEndpoint(req.Lease.LeaseID, server, req.Lease.SSH); err != nil {
-		return Server{}, err
+	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.configForRun(), req.State, time.Now().UTC())
+	if err := core.UpdateLeaseClaimEndpoint(req.Lease.LeaseID, server, req.Lease.SSH); err != nil {
+		return core.Server{}, err
 	}
 	return server, nil
 }
 
-func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
+func (b *leaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	client, err := b.api()
 	if err != nil {
 		return err
@@ -675,7 +675,7 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stderr, "skip server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
 			continue
 		}
-		claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+		claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 		if err != nil {
 			return err
 		}
@@ -696,7 +696,7 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			continue
 		}
 		server.Labels = claim.Labels
-		ok, reason := shouldCleanupServer(server, now)
+		ok, reason := core.ShouldCleanupServer(server, now)
 		if !ok {
 			fmt.Fprintf(b.rt.Stderr, "skip server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
 			continue
@@ -713,23 +713,23 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	return nil
 }
 
-func (b *leaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+func (b *leaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	if strings.TrimSpace(b.cfg.Hostinger.APIToken) == "" {
-		return DoctorResult{}, exit(2, "provider=%s requires HOSTINGER_API_TOKEN (CRABBOX_HOSTINGER_API_TOKEN also accepted)", providerName)
+		return core.DoctorResult{}, core.Exit(2, "provider=%s requires HOSTINGER_API_TOKEN (CRABBOX_HOSTINGER_API_TOKEN also accepted)", providerName)
 	}
 	client, err := b.api()
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
 	vms, err := client.ListVMs(ctx)
 	if err != nil {
-		return DoctorResult{}, exit(1, "hostinger list vms failed: %v", err)
+		return core.DoctorResult{}, core.Exit(1, "hostinger list vms failed: %v", err)
 	}
 	options, err := loadHostingerPurchaseOptions(ctx, client)
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
-	result := inventoryDoctorResult(providerName, len(vms))
+	result := core.InventoryDoctorResult(providerName, len(vms))
 	result.Message += " purchase=explicit release=stop"
 	purchaseStatus := "ok"
 	purchaseMessage := fmt.Sprintf("priced_items=%d payment_methods=%d templates=%d data_centers=%d", hostingerCatalogPriceCount(options.catalog), len(options.paymentMethods), len(options.templates), len(options.dataCenters))
@@ -754,11 +754,11 @@ func (b *leaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResul
 		purchaseStatus = "failed"
 		purchaseMessage = err.Error()
 	}
-	result.Checks = append(result.Checks, DoctorCheck{
+	result.Checks = append(result.Checks, core.DoctorCheck{
 		Status:  "ok",
 		Check:   "provider",
 		Message: result.Message,
-	}, DoctorCheck{
+	}, core.DoctorCheck{
 		Status:  purchaseStatus,
 		Check:   "purchase-options",
 		Message: purchaseMessage,
@@ -783,13 +783,13 @@ func (b *leaseBackend) api() (hostingerAPI, error) {
 	return newClient(b.cfg, b.rt)
 }
 
-func (b *leaseBackend) configForRun() Config {
+func (b *leaseBackend) configForRun() core.Config {
 	cfg := b.cfg
 	applyDefaults(&cfg)
 	return cfg
 }
 
-func applyDefaults(cfg *Config) {
+func applyDefaults(cfg *core.Config) {
 	cfg.Provider = providerName
 	if cfg.TargetOS == "" {
 		cfg.TargetOS = targetLinux
@@ -804,7 +804,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Hostinger.User = "root"
 	}
 	if cfg.Hostinger.WorkRoot == "" {
-		cfg.Hostinger.WorkRoot = effectiveHostingerWorkRoot(*cfg)
+		cfg.Hostinger.WorkRoot = core.EffectiveHostingerWorkRoot(*cfg)
 	}
 	if cfg.Hostinger.ReleaseAction == "" {
 		cfg.Hostinger.ReleaseAction = "stop"
@@ -815,7 +815,7 @@ func applyDefaults(cfg *Config) {
 	cfg.WorkRoot = cfg.Hostinger.WorkRoot
 }
 
-func hostingerHostname(cfg Config, leaseID, slug string) string {
+func hostingerHostname(cfg core.Config, leaseID, slug string) string {
 	prefix := strings.Trim(strings.ToLower(cfg.Hostinger.HostnamePrefix), "- ")
 	if prefix == "" {
 		prefix = "crabbox"
@@ -825,27 +825,27 @@ func hostingerHostname(cfg Config, leaseID, slug string) string {
 
 func validateHostingerHostname(hostname string) error {
 	if len(hostname) == 0 || len(hostname) > 63 {
-		return exit(2, "provider=%s generated hostname must contain 1-63 characters, got %q", providerName, hostname)
+		return core.Exit(2, "provider=%s generated hostname must contain 1-63 characters, got %q", providerName, hostname)
 	}
 	for i, r := range hostname {
 		valid := r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-'
 		if !valid {
-			return exit(2, "provider=%s generated hostname contains invalid character %q in %q", providerName, r, hostname)
+			return core.Exit(2, "provider=%s generated hostname contains invalid character %q in %q", providerName, r, hostname)
 		}
 		if (i == 0 || i == len(hostname)-1) && r == '-' {
-			return exit(2, "provider=%s generated hostname must start and end with a letter or number, got %q", providerName, hostname)
+			return core.Exit(2, "provider=%s generated hostname must start and end with a letter or number, got %q", providerName, hostname)
 		}
 	}
 	return nil
 }
 
-func (b *leaseBackend) listServers(ctx context.Context, client hostingerAPI, all bool) ([]Server, error) {
+func (b *leaseBackend) listServers(ctx context.Context, client hostingerAPI, all bool) ([]core.Server, error) {
 	vms, err := client.ListVMs(ctx)
 	if err != nil {
 		return nil, err
 	}
 	cfg := b.configForRun()
-	servers := make([]Server, 0, len(vms))
+	servers := make([]core.Server, 0, len(vms))
 	for _, vm := range vms {
 		leaseID, slug, claimed, err := hostingerLeaseIdentityWithClaim(vm, cfg)
 		if err != nil {
@@ -895,40 +895,40 @@ func loadHostingerPurchaseOptions(ctx context.Context, client hostingerAPI) (hos
 	var err error
 	options.catalog, err = client.ListCatalog(ctx)
 	if err != nil {
-		return hostingerPurchaseOptions{}, exit(1, "hostinger list catalog failed: %v", err)
+		return hostingerPurchaseOptions{}, core.Exit(1, "hostinger list catalog failed: %v", err)
 	}
 	options.paymentMethods, err = client.ListPaymentMethods(ctx)
 	if err != nil {
-		return hostingerPurchaseOptions{}, exit(1, "hostinger list payment methods failed: %v", err)
+		return hostingerPurchaseOptions{}, core.Exit(1, "hostinger list payment methods failed: %v", err)
 	}
 	options.templates, err = client.ListTemplates(ctx)
 	if err != nil {
-		return hostingerPurchaseOptions{}, exit(1, "hostinger list templates failed: %v", err)
+		return hostingerPurchaseOptions{}, core.Exit(1, "hostinger list templates failed: %v", err)
 	}
 	options.dataCenters, err = client.ListDataCenters(ctx)
 	if err != nil {
-		return hostingerPurchaseOptions{}, exit(1, "hostinger list data centers failed: %v", err)
+		return hostingerPurchaseOptions{}, core.Exit(1, "hostinger list data centers failed: %v", err)
 	}
 	return options, nil
 }
 
-func validateHostingerPurchaseOptions(cfg Config, options hostingerPurchaseOptions) (int64, error) {
+func validateHostingerPurchaseOptions(cfg core.Config, options hostingerPurchaseOptions) (int64, error) {
 	if err := validateHostingerConfiguredPurchaseOptions(cfg, options); err != nil {
 		return 0, err
 	}
 	itemID := strings.TrimSpace(cfg.Hostinger.ItemID)
 	if itemID == "" {
-		return 0, exit(2, "provider=%s configured item id %q is not a current priced VPS item; available=%s", providerName, core.Blank(itemID, "missing"), core.Blank(summarizeHostingerCatalog(options.catalog), "none"))
+		return 0, core.Exit(2, "provider=%s configured item id %q is not a current priced VPS item; available=%s", providerName, core.Blank(itemID, "missing"), core.Blank(summarizeHostingerCatalog(options.catalog), "none"))
 	}
 
 	templateID := strings.TrimSpace(cfg.Hostinger.TemplateID)
 	if templateID == "" {
-		return 0, exit(2, "provider=%s configured template id %q is unavailable; available=%s", providerName, core.Blank(templateID, "missing"), core.Blank(summarizeHostingerTemplates(options.templates), "none"))
+		return 0, core.Exit(2, "provider=%s configured template id %q is unavailable; available=%s", providerName, core.Blank(templateID, "missing"), core.Blank(summarizeHostingerTemplates(options.templates), "none"))
 	}
 
 	dataCenterID := strings.TrimSpace(cfg.Hostinger.DataCenterID)
 	if dataCenterID == "" {
-		return 0, exit(2, "provider=%s configured data center id %q is unavailable; available=%s", providerName, core.Blank(dataCenterID, "missing"), core.Blank(summarizeHostingerDataCenters(options.dataCenters), "none"))
+		return 0, core.Exit(2, "provider=%s configured data center id %q is unavailable; available=%s", providerName, core.Blank(dataCenterID, "missing"), core.Blank(summarizeHostingerDataCenters(options.dataCenters), "none"))
 	}
 
 	configuredPaymentID := strings.TrimSpace(cfg.Hostinger.PaymentMethodID)
@@ -945,17 +945,17 @@ func validateHostingerPurchaseOptions(cfg Config, options hostingerPurchaseOptio
 			continue
 		}
 		if selected != "" {
-			return 0, exit(2, "provider=%s has multiple active default payment methods; set --hostinger-payment-method-id explicitly", providerName)
+			return 0, core.Exit(2, "provider=%s has multiple active default payment methods; set --hostinger-payment-method-id explicitly", providerName)
 		}
 		selected = id
 	}
 	if selected == "" {
-		return 0, exit(2, "provider=%s requires an active default Hostinger payment method or --hostinger-payment-method-id; available=%s", providerName, core.Blank(summarizeHostingerPaymentMethods(options.paymentMethods), "none"))
+		return 0, core.Exit(2, "provider=%s requires an active default Hostinger payment method or --hostinger-payment-method-id; available=%s", providerName, core.Blank(summarizeHostingerPaymentMethods(options.paymentMethods), "none"))
 	}
 	return hostingerIntegerID("payment method id", selected)
 }
 
-func validateHostingerConfiguredPurchaseOptions(cfg Config, options hostingerPurchaseOptions) error {
+func validateHostingerConfiguredPurchaseOptions(cfg core.Config, options hostingerPurchaseOptions) error {
 	itemID := strings.TrimSpace(cfg.Hostinger.ItemID)
 	if itemID != "" {
 		found := false
@@ -968,7 +968,7 @@ func validateHostingerConfiguredPurchaseOptions(cfg Config, options hostingerPur
 			}
 		}
 		if !found {
-			return exit(2, "provider=%s configured item id %q is not a current priced VPS item; available=%s", providerName, itemID, core.Blank(summarizeHostingerCatalog(options.catalog), "none"))
+			return core.Exit(2, "provider=%s configured item id %q is not a current priced VPS item; available=%s", providerName, itemID, core.Blank(summarizeHostingerCatalog(options.catalog), "none"))
 		}
 	}
 
@@ -982,10 +982,10 @@ func validateHostingerConfiguredPurchaseOptions(cfg Config, options hostingerPur
 			}
 		}
 		if hostingerIDString(selected.ID) == "" {
-			return exit(2, "provider=%s configured template id %q is unavailable; available=%s", providerName, templateID, core.Blank(summarizeHostingerTemplates(options.templates), "none"))
+			return core.Exit(2, "provider=%s configured template id %q is unavailable; available=%s", providerName, templateID, core.Blank(summarizeHostingerTemplates(options.templates), "none"))
 		}
 		if !hostingerTemplateSupported(selected) {
-			return exit(2, "provider=%s template %s=%s is unsupported; choose an Ubuntu or Debian template so Crabbox can install required SSH tools before readiness", providerName, templateID, firstNonBlank(selected.Name, selected.OS))
+			return core.Exit(2, "provider=%s template %s=%s is unsupported; choose an Ubuntu or Debian template so Crabbox can install required SSH tools before readiness", providerName, templateID, firstNonBlank(selected.Name, selected.OS))
 		}
 	}
 
@@ -999,7 +999,7 @@ func validateHostingerConfiguredPurchaseOptions(cfg Config, options hostingerPur
 			}
 		}
 		if !found {
-			return exit(2, "provider=%s configured data center id %q is unavailable; available=%s", providerName, dataCenterID, core.Blank(summarizeHostingerDataCenters(options.dataCenters), "none"))
+			return core.Exit(2, "provider=%s configured data center id %q is unavailable; available=%s", providerName, dataCenterID, core.Blank(summarizeHostingerDataCenters(options.dataCenters), "none"))
 		}
 	}
 
@@ -1015,11 +1015,11 @@ func validateHostingerConfiguredPurchaseOptions(cfg Config, options hostingerPur
 			continue
 		}
 		if method.IsExpired || method.IsSuspended {
-			return exit(2, "provider=%s configured payment method id %q is not active; available=%s", providerName, paymentID, core.Blank(summarizeHostingerPaymentMethods(options.paymentMethods), "none"))
+			return core.Exit(2, "provider=%s configured payment method id %q is not active; available=%s", providerName, paymentID, core.Blank(summarizeHostingerPaymentMethods(options.paymentMethods), "none"))
 		}
 		return nil
 	}
-	return exit(2, "provider=%s configured payment method id %q is unavailable; available=%s", providerName, paymentID, core.Blank(summarizeHostingerPaymentMethods(options.paymentMethods), "none"))
+	return core.Exit(2, "provider=%s configured payment method id %q is unavailable; available=%s", providerName, paymentID, core.Blank(summarizeHostingerPaymentMethods(options.paymentMethods), "none"))
 }
 
 func hostingerTemplateSupported(template hostingerTemplate) bool {
@@ -1127,7 +1127,7 @@ func summarizeHostingerDataCenters(dataCenters []hostingerDataCenter) string {
 
 func (b *leaseBackend) resolveVM(ctx context.Context, client hostingerAPI, id string) (hostingerVM, string, string, error) {
 	id = strings.TrimSpace(id)
-	claim, claimOK, err := resolveLeaseClaimForProvider(id, providerName)
+	claim, claimOK, err := core.ResolveLeaseClaimForProvider(id, providerName)
 	if err != nil {
 		return hostingerVM{}, "", "", err
 	}
@@ -1135,7 +1135,7 @@ func (b *leaseBackend) resolveVM(ctx context.Context, client hostingerAPI, id st
 		if strings.TrimSpace(claim.CloudID) != "" {
 			vm, getErr := client.GetVM(ctx, claim.CloudID)
 			if getErr != nil {
-				return hostingerVM{}, "", "", exit(1, "hostinger get claimed vps %s failed: %v", claim.CloudID, getErr)
+				return hostingerVM{}, "", "", core.Exit(1, "hostinger get claimed vps %s failed: %v", claim.CloudID, getErr)
 			}
 			return vm, claim.LeaseID, firstNonBlank(claim.Slug, hostingerLeaseIdentitySlug(vm, b.configForRun())), nil
 		}
@@ -1164,10 +1164,10 @@ func (b *leaseBackend) resolveVM(ctx context.Context, client hostingerAPI, id st
 			}
 		}
 		if len(matches) > 1 {
-			return hostingerVM{}, "", "", exit(4, "multiple Hostinger VPSs match pending recovery hostname %s; refusing to bind lease %s", hostname, claim.LeaseID)
+			return hostingerVM{}, "", "", core.Exit(4, "multiple Hostinger VPSs match pending recovery hostname %s; refusing to bind lease %s", hostname, claim.LeaseID)
 		}
 		if len(matches) == 0 {
-			return hostingerVM{}, "", "", exit(4, "pending hostinger purchase not found: lease=%s hostname=%s", claim.LeaseID, hostname)
+			return hostingerVM{}, "", "", core.Exit(4, "pending hostinger purchase not found: lease=%s hostname=%s", claim.LeaseID, hostname)
 		}
 		vm := matches[0]
 		leaseID := claim.LeaseID
@@ -1178,13 +1178,13 @@ func (b *leaseBackend) resolveVM(ctx context.Context, client hostingerAPI, id st
 		}
 		delete(server.Labels, hostingerRecoveryLabel)
 		delete(server.Labels, hostingerRecoveryHostnameLabel)
-		if updateErr := updateLeaseClaimEndpoint(leaseID, server, SSHTarget{}); updateErr != nil {
-			return hostingerVM{}, "", "", exit(1, "persist recovered hostinger VPS %s: %v", vm.IDString(), updateErr)
+		if updateErr := core.UpdateLeaseClaimEndpoint(leaseID, server, core.SSHTarget{}); updateErr != nil {
+			return hostingerVM{}, "", "", core.Exit(1, "persist recovered hostinger VPS %s: %v", vm.IDString(), updateErr)
 		}
 		removeHostingerRecoveryRecord(leaseID)
 		return vm, leaseID, slug, nil
 	}
-	servers := make([]Server, 0, len(vms))
+	servers := make([]core.Server, 0, len(vms))
 	vmsByID := make(map[string]hostingerVM, len(vms))
 	for _, vm := range vms {
 		leaseID, slug, _, identityErr := hostingerLeaseIdentityWithClaim(vm, b.configForRun())
@@ -1194,29 +1194,29 @@ func (b *leaseBackend) resolveVM(ctx context.Context, client hostingerAPI, id st
 		servers = append(servers, hostingerServer(vm, leaseID, slug, b.configForRun(), true))
 		vmsByID[vm.IDString()] = vm
 	}
-	server, leaseID, err := findServerByAlias(servers, id)
+	server, leaseID, err := core.FindServerByAlias(servers, id)
 	if err != nil {
 		return hostingerVM{}, "", "", err
 	}
 	if server.CloudID != "" {
 		return vmsByID[server.CloudID], leaseID, server.Labels["slug"], nil
 	}
-	return hostingerVM{}, "", "", exit(4, "lease/vm not found: %s", id)
+	return hostingerVM{}, "", "", core.Exit(4, "lease/vm not found: %s", id)
 }
 
 func hostingerReleaseOwned(vm hostingerVM) (bool, error) {
-	claim, claimed, err := resolveLeaseClaimForProviderCloudID(vm.IDString(), providerName)
+	claim, claimed, err := core.ResolveLeaseClaimForProviderCloudID(vm.IDString(), providerName)
 	if err != nil {
 		return false, err
 	}
 	return claimed && !hostingerAdoptionPending(claim), nil
 }
 
-func hostingerClaimOwned(claim LeaseClaim, exists bool, vmID string) bool {
+func hostingerClaimOwned(claim core.LeaseClaim, exists bool, vmID string) bool {
 	return exists && claim.CloudID == vmID && !hostingerAdoptionPending(claim)
 }
 
-func hostingerAdoptionPending(claim LeaseClaim) bool {
+func hostingerAdoptionPending(claim core.LeaseClaim) bool {
 	return strings.EqualFold(strings.TrimSpace(claim.Labels[hostingerAdoptionPendingLabel]), "true")
 }
 
@@ -1241,16 +1241,16 @@ func (b *leaseBackend) waitForVM(ctx context.Context, client hostingerAPI, id st
 				if contextDoneBeforeFetch {
 					return false, fetchErr
 				}
-				return false, exit(1, "hostinger get vps %s failed: %v", id, fetchErr)
+				return false, core.Exit(1, "hostinger get vps %s failed: %v", id, fetchErr)
 			}
 			if vm.Host() != "" && vm.Ready() {
 				return true, nil
 			}
 			if vm.Terminal() {
-				return false, exit(5, "hostinger vps %s entered terminal state=%s", id, firstNonBlank(vm.State, vm.Status, "unknown"))
+				return false, core.Exit(5, "hostinger vps %s entered terminal state=%s", id, firstNonBlank(vm.State, vm.Status, "unknown"))
 			}
 			if time.Now().After(deadline) {
-				return false, exit(5, "timed out waiting for hostinger vps %s to expose a public IP; last_state=%s", id, firstNonBlank(vm.State, vm.Status))
+				return false, core.Exit(5, "timed out waiting for hostinger vps %s to expose a public IP; last_state=%s", id, firstNonBlank(vm.State, vm.Status))
 			}
 			return false, nil
 		}, nil)
@@ -1264,7 +1264,7 @@ func (b *leaseBackend) stopVMAndWait(ctx context.Context, client hostingerAPI, i
 	stopCtx, cancel := context.WithTimeout(ctx, hostingerStopWaitTimeout)
 	defer cancel()
 	if err := client.StopVM(stopCtx, id); err != nil {
-		return exit(1, "hostinger stop vps %s failed: %v", id, err)
+		return core.Exit(1, "hostinger stop vps %s failed: %v", id, err)
 	}
 	lastState := "unknown"
 	_, err := shared.Poll(context.WithoutCancel(stopCtx), 0, 2*time.Second,
@@ -1276,34 +1276,34 @@ func (b *leaseBackend) stopVMAndWait(ctx context.Context, client hostingerAPI, i
 		func(_ context.Context, vm hostingerVM, fetchErr error) (bool, error) {
 			if fetchErr != nil {
 				if errors.Is(stopCtx.Err(), context.DeadlineExceeded) {
-					return false, exit(5, "timed out waiting for hostinger vps %s to stop; last_state=%s", id, lastState)
+					return false, core.Exit(5, "timed out waiting for hostinger vps %s to stop; last_state=%s", id, lastState)
 				}
-				return false, exit(1, "hostinger confirm stopped vps %s failed: %v", id, fetchErr)
+				return false, core.Exit(1, "hostinger confirm stopped vps %s failed: %v", id, fetchErr)
 			}
 			lastState = firstNonBlank(vm.State, vm.Status, "unknown")
 			if vm.Stopped() {
 				return true, nil
 			}
 			if stopCtx.Err() != nil {
-				return false, exit(5, "timed out waiting for hostinger vps %s to stop; last_state=%s", id, lastState)
+				return false, core.Exit(5, "timed out waiting for hostinger vps %s to stop; last_state=%s", id, lastState)
 			}
 			return false, nil
 		}, nil)
 	return err
 }
 
-func (b *leaseBackend) updateClaimState(leaseID string, cfg Config, state string, resetLifetime bool) (LeaseClaim, error) {
-	claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+func (b *leaseBackend) updateClaimState(leaseID string, cfg core.Config, state string, resetLifetime bool) (core.LeaseClaim, error) {
+	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 	if err != nil {
-		return LeaseClaim{}, err
+		return core.LeaseClaim{}, err
 	}
 	if !ok {
-		return LeaseClaim{}, exit(2, "hostinger lease %s has no local claim", leaseID)
+		return core.LeaseClaim{}, core.Exit(2, "hostinger lease %s has no local claim", leaseID)
 	}
 	return b.updateClaimStateIfUnchanged(claim, cfg, state, resetLifetime)
 }
 
-func (b *leaseBackend) updateClaimStateIfUnchanged(claim LeaseClaim, cfg Config, state string, resetLifetime bool) (LeaseClaim, error) {
+func (b *leaseBackend) updateClaimStateIfUnchanged(claim core.LeaseClaim, cfg core.Config, state string, resetLifetime bool) (core.LeaseClaim, error) {
 	labels := claim.Labels
 	if resetLifetime {
 		labels = make(map[string]string, len(claim.Labels))
@@ -1313,16 +1313,16 @@ func (b *leaseBackend) updateClaimStateIfUnchanged(claim LeaseClaim, cfg Config,
 		delete(labels, "created_at")
 		delete(labels, "expires_at")
 	}
-	labels = touchDirectLeaseLabels(labels, cfg, state, time.Now().UTC())
-	return updateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
+	labels = core.TouchDirectLeaseLabels(labels, cfg, state, time.Now().UTC())
+	return core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
 }
 
-func (b *leaseBackend) configForLeaseClaim(cfg Config, leaseID string) (Config, error) {
-	claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+func (b *leaseBackend) configForLeaseClaim(cfg core.Config, leaseID string) (core.Config, error) {
+	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 	if err != nil || !ok {
 		return cfg, err
 	}
-	userExplicit := hostingerUserExplicit(&cfg)
+	userExplicit := core.IsHostingerUserExplicit(&cfg)
 	storedUser := strings.TrimSpace(claim.Labels["ssh_user"])
 	if storedUser != "" && !userExplicit {
 		cfg.Hostinger.User = storedUser
@@ -1334,26 +1334,26 @@ func (b *leaseBackend) configForLeaseClaim(cfg Config, leaseID string) (Config, 
 		cfg.WorkRoot = workRoot
 	}
 	if err := validateHostingerWorkRoot(cfg); err != nil {
-		return Config{}, exit(2, "hostinger lease %s has invalid stored SSH configuration: %v", leaseID, err)
+		return core.Config{}, core.Exit(2, "hostinger lease %s has invalid stored SSH configuration: %v", leaseID, err)
 	}
 	return cfg, nil
 }
 
-func (b *leaseBackend) rollbackStartedVM(client hostingerAPI, id string, claim LeaseClaim, cfg Config, cause error) (LeaseClaim, error) {
+func (b *leaseBackend) rollbackStartedVM(client hostingerAPI, id string, claim core.LeaseClaim, cfg core.Config, cause error) (core.LeaseClaim, error) {
 	rollbackCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	labels := touchDirectLeaseLabels(claim.Labels, cfg, "stopped", time.Now().UTC())
-	server := Server{CloudID: id, Provider: providerName, Status: "stopped", Labels: labels}
+	labels := core.TouchDirectLeaseLabels(claim.Labels, cfg, "stopped", time.Now().UTC())
+	server := core.Server{CloudID: id, Provider: providerName, Status: "stopped", Labels: labels}
 	updated, err := b.stopClaimedVM(rollbackCtx, client, claim, id, server)
 	if err != nil {
-		return LeaseClaim{}, fmt.Errorf("%w; restart rollback skipped: %v", cause, err)
+		return core.LeaseClaim{}, fmt.Errorf("%w; restart rollback skipped: %v", cause, err)
 	}
 	return updated, fmt.Errorf("%w; restart rollback=stopped", cause)
 }
 
-func (b *leaseBackend) ensureBootstrap(ctx context.Context, cfg Config, lease LeaseTarget, phase string) error {
-	deadline := time.Now().Add(bootstrapWaitTimeout(cfg))
-	remote := "bash -lc " + shellQuote(hostingerBootstrapScript(cfg))
+func (b *leaseBackend) ensureBootstrap(ctx context.Context, cfg core.Config, lease core.LeaseTarget, phase string) error {
+	deadline := time.Now().Add(core.BootstrapWaitTimeout(cfg))
+	remote := "bash -lc " + core.ShellQuote(hostingerBootstrapScript(cfg))
 	for {
 		if ctx.Err() != nil {
 			return context.Cause(ctx)
@@ -1361,7 +1361,7 @@ func (b *leaseBackend) ensureBootstrap(ctx context.Context, cfg Config, lease Le
 		if err := hostingerRunSSHQuiet(ctx, lease.SSH, remote); err == nil {
 			return nil
 		} else if time.Now().After(deadline) {
-			return exit(5, "timed out bootstrapping hostinger vps %s during %s: %v", lease.Server.DisplayID(), phase, err)
+			return core.Exit(5, "timed out bootstrapping hostinger vps %s during %s: %v", lease.Server.DisplayID(), phase, err)
 		}
 		fmt.Fprintf(b.rt.Stderr, "waiting for hostinger bootstrap lease=%s vm=%s phase=%s\n", lease.LeaseID, lease.Server.DisplayID(), phase)
 		if err := shared.SleepContext(ctx, 5*time.Second); err != nil {
@@ -1370,9 +1370,9 @@ func (b *leaseBackend) ensureBootstrap(ctx context.Context, cfg Config, lease Le
 	}
 }
 
-func hostingerBootstrapScript(cfg Config) string {
-	workRoot := shellQuote(cfg.WorkRoot)
-	user := shellQuote(cfg.SSHUser)
+func hostingerBootstrapScript(cfg core.Config) string {
+	workRoot := core.ShellQuote(cfg.WorkRoot)
+	user := core.ShellQuote(cfg.SSHUser)
 	return fmt.Sprintf(`set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 work_root=%s
@@ -1473,43 +1473,43 @@ test -w "$work_root"
 `, workRoot, user, workRoot)
 }
 
-func hostingerReadyCheck(cfg Config) string {
+func hostingerReadyCheck(cfg core.Config) string {
 	return strings.Join([]string{
 		"git --version >/dev/null 2>&1",
 		"rsync --version >/dev/null 2>&1",
 		"curl --version >/dev/null 2>&1",
 		"jq --version >/dev/null 2>&1",
-		"test -w " + shellQuote(cfg.WorkRoot),
+		"test -w " + core.ShellQuote(cfg.WorkRoot),
 	}, " && ")
 }
 
-func (b *leaseBackend) leaseFromVM(cfg Config, vm hostingerVM, leaseID, slug string, keep bool) (LeaseTarget, error) {
+func (b *leaseBackend) leaseFromVM(cfg core.Config, vm hostingerVM, leaseID, slug string, keep bool) (core.LeaseTarget, error) {
 	host := vm.Host()
 	if host == "" {
-		return LeaseTarget{}, exit(5, "hostinger vps %s has no public ip", vm.IDString())
+		return core.LeaseTarget{}, core.Exit(5, "hostinger vps %s has no public ip", vm.IDString())
 	}
 	server, err := b.serverFromVMWithClaim(vm, leaseID, slug, cfg, keep)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
-	target := sshTargetFromConfig(cfg, host)
-	if err := useStoredTestboxKey(&target, leaseID, sshKeyExplicit(&cfg)); err != nil {
-		return LeaseTarget{}, err
+	target := core.SSHTargetFromConfig(cfg, host)
+	if err := useStoredTestboxKey(&target, leaseID, core.IsSSHKeyExplicit(&cfg)); err != nil {
+		return core.LeaseTarget{}, err
 	}
 	target.NetworkKind = networkPublic
 	target.ReadyCheck = hostingerReadyCheck(cfg)
-	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
-func hostingerServer(vm hostingerVM, leaseID, slug string, cfg Config, keep bool) Server {
-	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
+func hostingerServer(vm hostingerVM, leaseID, slug string, cfg core.Config, keep bool) core.Server {
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
 	labels["release"] = "stop"
 	labels["ssh_user"] = cfg.SSHUser
 	labels["work_root"] = cfg.WorkRoot
 	if state := strings.ToLower(firstNonBlank(vm.State, vm.Status)); state != "" {
 		labels["state"] = state
 	}
-	server := Server{
+	server := core.Server{
 		CloudID:  vm.IDString(),
 		Provider: providerName,
 		Name:     vm.NameValue(),
@@ -1523,17 +1523,17 @@ func hostingerServer(vm hostingerVM, leaseID, slug string, cfg Config, keep bool
 	return server
 }
 
-func (b *leaseBackend) serverFromVMWithClaim(vm hostingerVM, leaseID, slug string, cfg Config, keep bool) (Server, error) {
+func (b *leaseBackend) serverFromVMWithClaim(vm hostingerVM, leaseID, slug string, cfg core.Config, keep bool) (core.Server, error) {
 	server := hostingerServer(vm, leaseID, slug, cfg, keep)
-	claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 	if err != nil {
-		return Server{}, err
+		return core.Server{}, err
 	}
 	if !ok {
 		return server, nil
 	}
 	if claim.CloudID != "" && claim.CloudID != vm.IDString() {
-		return Server{}, exit(2, "hostinger lease %s is bound to vps %s, not %s", claim.LeaseID, claim.CloudID, vm.IDString())
+		return core.Server{}, core.Exit(2, "hostinger lease %s is bound to vps %s, not %s", claim.LeaseID, claim.CloudID, vm.IDString())
 	}
 	if len(claim.Labels) == 0 {
 		return server, nil
@@ -1555,11 +1555,11 @@ func (b *leaseBackend) serverFromVMWithClaim(vm hostingerVM, leaseID, slug strin
 	return server, nil
 }
 
-func hostingerOwnedServer(server Server, cfg Config) bool {
+func hostingerOwnedServer(server core.Server, cfg core.Config) bool {
 	return server.Provider == providerName && hostingerOwnedName(server.Name, cfg)
 }
 
-func hostingerLeaseIdentity(vm hostingerVM, cfg Config) (string, string) {
+func hostingerLeaseIdentity(vm hostingerVM, cfg core.Config) (string, string) {
 	name := vm.NameValue()
 	if hostingerOwnedName(name, cfg) {
 		rest := strings.TrimPrefix(name, hostingerHostnamePrefix(cfg))
@@ -1575,13 +1575,13 @@ func hostingerLeaseIdentity(vm hostingerVM, cfg Config) (string, string) {
 	return "cbx_hostinger_" + id, firstNonBlank(name, "manual")
 }
 
-func hostingerLeaseIdentitySlug(vm hostingerVM, cfg Config) string {
+func hostingerLeaseIdentitySlug(vm hostingerVM, cfg core.Config) string {
 	_, slug := hostingerLeaseIdentity(vm, cfg)
 	return slug
 }
 
-func hostingerLeaseIdentityWithClaim(vm hostingerVM, cfg Config) (string, string, bool, error) {
-	claim, ok, err := resolveLeaseClaimForProviderCloudID(vm.IDString(), providerName)
+func hostingerLeaseIdentityWithClaim(vm hostingerVM, cfg core.Config) (string, string, bool, error) {
+	claim, ok, err := core.ResolveLeaseClaimForProviderCloudID(vm.IDString(), providerName)
 	if err != nil {
 		return "", "", false, err
 	}
@@ -1602,7 +1602,7 @@ func hostingerLeaseIdentityWithClaim(vm hostingerVM, cfg Config) (string, string
 	return "cbx_hostinger_" + id, firstNonBlank(hostingerLeaseIdentitySlug(vm, cfg), vm.NameValue(), "manual"), false, nil
 }
 
-func hostingerOwnedName(name string, cfg Config) bool {
+func hostingerOwnedName(name string, cfg core.Config) bool {
 	if !strings.HasPrefix(name, hostingerHostnamePrefix(cfg)) {
 		return false
 	}
@@ -1611,7 +1611,7 @@ func hostingerOwnedName(name string, cfg Config) bool {
 	return len(parts) >= 2 && validHostingerLeaseSuffix(parts[len(parts)-1])
 }
 
-func hostingerHostnamePrefix(cfg Config) string {
+func hostingerHostnamePrefix(cfg core.Config) string {
 	prefix := strings.Trim(strings.ToLower(cfg.Hostinger.HostnamePrefix), "- ")
 	if prefix == "" {
 		prefix = "crabbox"

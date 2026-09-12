@@ -2,10 +2,6 @@
 
 package cli
 
-import (
-	"os"
-)
-
 type fileVultrConfig struct {
 	Region        string   `yaml:"region,omitempty"`
 	OS            string   `yaml:"os,omitempty"`
@@ -28,77 +24,12 @@ type VultrConfigApplied struct {
 
 func (cfg *VultrConfig) applyFile(file *fileVultrConfig) (VultrConfigApplied, error) {
 	var applied VultrConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Region != "" {
-		cfg.Region = file.Region
-		applied.InputAccepted = true
-	}
-	if file.OS != "" {
-		cfg.OS = file.OS
-		applied.InputAccepted = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-	}
-	if file.Snapshot != "" {
-		cfg.Snapshot = file.Snapshot
-		applied.InputAccepted = true
-	}
-	if file.FirewallGroup != "" {
-		cfg.FirewallGroup = file.FirewallGroup
-		applied.InputAccepted = true
-	}
-	if len(file.VPCIDs) > 0 {
-		cfg.VPCIDs = file.VPCIDs
-		applied.InputAccepted = true
-	}
-	if len(file.SSHCIDRs) > 0 {
-		cfg.SSHCIDRs = file.SSHCIDRs
-		applied.InputAccepted = true
-	}
-	if file.UserScheme != "" {
-		cfg.UserScheme = file.UserScheme
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "vultr")
+	return applied, err
 }
 
 func (cfg *VultrConfig) applyEnv() (VultrConfigApplied, error) {
 	var applied VultrConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_VULTR_REGION"); ok {
-		cfg.Region = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VULTR_OS"); ok {
-		cfg.OS = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VULTR_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VULTR_SNAPSHOT"); ok {
-		cfg.Snapshot = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VULTR_FIREWALL_GROUP"); ok {
-		cfg.FirewallGroup = value
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_VULTR_VPC_IDS"); value != "" {
-		cfg.VPCIDs = splitCommaList(value)
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_VULTR_SSH_CIDRS"); value != "" {
-		cfg.SSHCIDRs = splitCommaList(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VULTR_USER_SCHEME"); ok {
-		cfg.UserScheme = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 8)
+	return applied, err
 }

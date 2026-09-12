@@ -38,7 +38,7 @@ func fixedDaytonaContext(ctx context.Context, client daytonaAPI) (string, string
 		fixedOrganization(context.Context, bool) (string, string, error)
 	})
 	if !ok {
-		return "", "", exit(4, "Daytona client has no organization identity contract")
+		return "", "", core.Exit(4, "Daytona client has no organization identity contract")
 	}
 	endpoint, organization, err := identity.fixedOrganization(ctx, true)
 	if err != nil {
@@ -50,18 +50,18 @@ func fixedDaytonaContext(ctx context.Context, client daytonaAPI) (string, string
 func fixedDaytonaResourceContext(client daytonaAPI, organization string) (string, string, error) {
 	identity, ok := client.(interface{ fixedSelection() (string, string) })
 	if !ok {
-		return "", "", exit(4, "Daytona client has no frozen selection identity")
+		return "", "", core.Exit(4, "Daytona client has no frozen selection identity")
 	}
 	endpoint, selected := identity.fixedSelection()
 	if selected != "" && selected != organization {
-		return "", "", exit(4, "Daytona resource organization differs from the selected organization")
+		return "", "", core.Exit(4, "Daytona resource organization differs from the selected organization")
 	}
 	return fixedDaytonaScope(endpoint, organization)
 }
 
 func fixedDaytonaScope(endpoint, organization string) (string, string, error) {
 	if endpoint == "" || organization == "" {
-		return "", "", exit(4, "Daytona fixed leases require an identified organization")
+		return "", "", core.Exit(4, "Daytona fixed leases require an identified organization")
 	}
 	data, err := json.Marshal([]string{endpoint, organization})
 	if err != nil {
@@ -70,22 +70,22 @@ func fixedDaytonaScope(endpoint, organization string) (string, string, error) {
 	return fmt.Sprintf("daytona:organization:v1:%x", sha256.Sum256(data)), organization, nil
 }
 
-func fixedDaytonaFingerprint(cfg Config, req AcquireRequest, snapshotID string) (string, error) {
+func fixedDaytonaFingerprint(cfg core.Config, req core.AcquireRequest, snapshotID string) (string, error) {
 	data, err := json.Marshal(struct {
 		Snapshot, Selector, User, Target, WorkRoot, Slug, Class, Architecture string
 		Keep                                                                  bool
 		TTL, Idle                                                             time.Duration
-	}{snapshotID, cfg.Daytona.Snapshot, daytonaUser(cfg), cfg.Daytona.Target, daytonaWorkRoot(cfg), normalizeLeaseSlug(req.RequestedSlug), cfg.Class, cfg.Architecture, req.Keep, cfg.TTL, cfg.IdleTimeout})
+	}{snapshotID, cfg.Daytona.Snapshot, daytonaUser(cfg), cfg.Daytona.Target, daytonaWorkRoot(cfg), core.NormalizeLeaseSlug(req.RequestedSlug), cfg.Class, cfg.Architecture, req.Keep, cfg.TTL, cfg.IdleTimeout})
 	if err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("%x", sha256.Sum256(data)), nil
 }
 
-func (b *daytonaLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
+func (b *daytonaLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	cfg := b.cfg
 	if err := validateDaytonaCreateConfig(cfg); err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	var client daytonaAPI
 	var snapshot *api.SnapshotDto
@@ -132,7 +132,7 @@ func (b *daytonaLeaseBackend) acquireFixed(ctx context.Context, req AcquireReque
 		}
 		if exists && (claim.Provider != core.FixedDaytonaClaimProvider || claim.ProviderScope != scope || claim.FixedCreateIntent == nil ||
 			(len(claim.FixedCreateIntent.Attempt) != 0 && organization != claim.FixedCreateIntent.Attempt["organization"])) {
-			return core.FixedLeaseBinding{}, exit(4, "lease_id_conflict: Daytona API, organization, or credential context changed")
+			return core.FixedLeaseBinding{}, core.Exit(4, "lease_id_conflict: Daytona API, organization, or credential context changed")
 		}
 		snapshotID := ""
 		if exists {
@@ -142,7 +142,7 @@ func (b *daytonaLeaseBackend) acquireFixed(ctx context.Context, req AcquireReque
 			if source := req.CheckpointSource; source != nil && snapshotID != "" {
 				attempt := claim.FixedCreateIntent.Attempt
 				if snapshotID != source.ImageID || attempt["snapshot"] != source.Name || attempt["organization"] != source.Metadata["organization"] {
-					return core.FixedLeaseBinding{}, exit(4, "Daytona checkpoint source differs from the fixed create attempt")
+					return core.FixedLeaseBinding{}, core.Exit(4, "Daytona checkpoint source differs from the fixed create attempt")
 				}
 			}
 		}
@@ -166,13 +166,13 @@ func (b *daytonaLeaseBackend) acquireFixed(ctx context.Context, req AcquireReque
 				return core.FixedLeaseBinding{}, err
 			}
 			if snapshot == nil || snapshot.GetId() == "" || snapshot.GetName() == "" || snapshot.GetState() != api.SNAPSHOTSTATE_ACTIVE {
-				return core.FixedLeaseBinding{}, exit(4, "Daytona fixed acquisition requires an active, identified snapshot")
+				return core.FixedLeaseBinding{}, core.Exit(4, "Daytona fixed acquisition requires an active, identified snapshot")
 			}
 			if snapshotID != "" && (snapshot.GetId() != snapshotID || snapshot.GetName() != claim.FixedCreateIntent.Attempt["snapshot"]) {
-				return core.FixedLeaseBinding{}, exit(4, "Daytona incomplete acquisition source differs from its fixed create attempt")
+				return core.FixedLeaseBinding{}, core.Exit(4, "Daytona incomplete acquisition source differs from its fixed create attempt")
 			}
 			if organization != "" && !snapshot.GetGeneral() && snapshot.GetOrganizationId() != organization {
-				return core.FixedLeaseBinding{}, exit(4, "Daytona snapshot organization mismatch")
+				return core.FixedLeaseBinding{}, core.Exit(4, "Daytona snapshot organization mismatch")
 			}
 			if req.CheckpointSource != nil {
 				if err := validateDaytonaForkSnapshot(snapshot, req.CheckpointSource); err != nil {
@@ -193,30 +193,30 @@ func (b *daytonaLeaseBackend) acquireFixed(ctx context.Context, req AcquireReque
 			}
 			for i := range sandboxes {
 				if id, owned := daytonaSandboxOwnership(&sandboxes[i]); owned && id == req.RequestedLeaseID {
-					return binding, exit(4, "lease_id_conflict: Daytona lease already exists without its create intent")
+					return binding, core.Exit(4, "lease_id_conflict: Daytona lease already exists without its create intent")
 				}
 			}
-			binding.Slug, err = allocateDirectLeaseSlug(req.RequestedLeaseID, req.RequestedSlug, daytonaSandboxesToServers(sandboxes))
+			binding.Slug, err = core.AllocateDirectLeaseSlug(req.RequestedLeaseID, req.RequestedSlug, daytonaSandboxesToServers(sandboxes))
 			if err != nil {
 				return binding, err
 			}
 		}
 		return binding, nil
-	}, func(ctx context.Context, claim *core.LeaseClaim, intent *core.FixedCreateIntent, persist func() error) (LeaseTarget, error) {
+	}, func(ctx context.Context, claim *core.LeaseClaim, intent *core.FixedCreateIntent, persist func() error) (core.LeaseTarget, error) {
 		if err := core.AuthorizeCheckpointRelease(*claim, ""); err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		var sandbox *api.Sandbox
 		if fresh {
 			createdAt, _ := time.Parse(time.RFC3339Nano, intent.CreatedAt)
 			remaining := time.Until(createdAt.Add(cfg.TTL))
 			if remaining <= 0 {
-				return LeaseTarget{}, exit(4, "Daytona fixed create intent expired before submission")
+				return core.LeaseTarget{}, core.Exit(4, "Daytona fixed create intent expired before submission")
 			}
 			cfg.Daytona.Snapshot = snapshot.GetId()
 			body := daytonaCreateBody(cfg, req.RequestedLeaseID, intent.Slug, req.Keep, createdAt)
 			// Replay retains the original lease deadline, including native TTL.
-			body.AdditionalProperties["ttlMinutes"] = durationMinutesCeil(remaining)
+			body.AdditionalProperties["ttlMinutes"] = core.DurationMinutesCeil(remaining)
 			labels := body.GetLabels()
 			labels["fixed_claim_provider"] = core.FixedDaytonaClaimProvider
 			labels["fixed_intent_sha256"], labels["fixed_attempt"] = intent.Fingerprint, rand.Text()
@@ -225,12 +225,12 @@ func (b *daytonaLeaseBackend) acquireFixed(ctx context.Context, req AcquireReque
 			claim.Labels = maps.Clone(labels)
 			// Persist before POST; a missing response never authorizes another create.
 			if err := persist(); err != nil {
-				return LeaseTarget{}, err
+				return core.LeaseTarget{}, err
 			}
 			var err error
 			sandbox, err = client.CreateSandbox(ctx, *body)
 			if err != nil {
-				return LeaseTarget{}, fmt.Errorf("Daytona create outcome uncertain; replay or stop fixed lease %s: %w", claim.LeaseID, err)
+				return core.LeaseTarget{}, fmt.Errorf("Daytona create outcome uncertain; replay or stop fixed lease %s: %w", claim.LeaseID, err)
 			}
 
 			// Pin an observed UUID before attestation so a rejected response cannot
@@ -238,18 +238,18 @@ func (b *daytonaLeaseBackend) acquireFixed(ctx context.Context, req AcquireReque
 			if sandbox != nil && sandbox.GetId() != "" {
 				claim.CloudID = sandbox.GetId()
 				if err := persist(); err != nil {
-					return LeaseTarget{}, err
+					return core.LeaseTarget{}, err
 				}
 			}
 		} else {
 			sandbox = observed
 		}
 		if err := validateFixedDaytonaSandbox(*claim, sandbox); err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		if intent.State == "prepared" {
 			if err := validateClassSandbox(sandbox, snapshot); err != nil {
-				return LeaseTarget{}, err
+				return core.LeaseTarget{}, err
 			}
 		}
 		if intent.Attempt["resolved_target"] == "" {
@@ -260,40 +260,40 @@ func (b *daytonaLeaseBackend) acquireFixed(ctx context.Context, req AcquireReque
 		claim.CloudID, claim.CloudImmutableID = sandbox.GetId(), sandbox.GetId()
 		intent.Attempt["organization"] = sandbox.GetOrganizationId()
 		if err := persist(); err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		if !daytonaStateReady(daytonaSandboxState(sandbox)) {
 			if sandbox.GetState() == api.SANDBOXSTATE_STOPPED || sandbox.GetState() == api.SANDBOXSTATE_ARCHIVED {
 				if _, err := client.StartSandbox(ctx, sandbox.GetId()); err != nil {
-					return LeaseTarget{}, err
+					return core.LeaseTarget{}, err
 				}
 			}
 			var err error
 			sandbox, err = waitForDaytonaReady(ctx, client, sandbox.GetId(), 5*time.Minute)
 			if err != nil {
-				return LeaseTarget{}, err
+				return core.LeaseTarget{}, err
 			}
 			if err := validateFixedDaytonaSandbox(*claim, sandbox); err != nil {
-				return LeaseTarget{}, err
+				return core.LeaseTarget{}, err
 			}
 		}
 		server := daytonaSandboxToServer(sandbox)
 		server.ImmutableID = sandbox.GetId()
 		target, err := daytonaSSHTargetFor(ctx, client, cfg, server)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
-		if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "daytona ssh", bootstrapWaitTimeout(cfg)); err != nil {
-			return LeaseTarget{}, err
+		if err := core.WaitForSSHReady(ctx, &target, b.rt.Stderr, "daytona ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
+			return core.LeaseTarget{}, err
 		}
-		return LeaseTarget{Server: server, SSH: target, LeaseID: claim.LeaseID}, nil
+		return core.LeaseTarget{Server: server, SSH: target, LeaseID: claim.LeaseID}, nil
 	}, ctx)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if req.OnAcquired != nil {
 		if err := req.OnAcquired(lease); err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 	}
 	return lease, nil
@@ -302,7 +302,7 @@ func (b *daytonaLeaseBackend) acquireFixed(ctx context.Context, req AcquireReque
 func validateFixedDaytonaSandbox(claim core.LeaseClaim, sandbox *api.Sandbox) error {
 	intent := claim.FixedCreateIntent
 	if intent == nil || intent.Version != 1 || intent.Fingerprint == "" || (intent.State != "prepared" && intent.State != "acquired") || claim.Provider != core.FixedDaytonaClaimProvider || claim.ProviderScope != intent.ProviderScope || claim.Slug != intent.Slug || sandbox == nil {
-		return exit(4, "Daytona fixed lease has an invalid ownership claim")
+		return core.Exit(4, "Daytona fixed lease has an invalid ownership claim")
 	}
 	attempt := intent.Attempt
 	id, owned := daytonaSandboxOwnership(sandbox)
@@ -313,19 +313,19 @@ func validateFixedDaytonaSandbox(claim core.LeaseClaim, sandbox *api.Sandbox) er
 		(sandbox.GetSnapshot() != attempt["snapshot"] && sandbox.GetSnapshot() != attempt["snapshot_id"]) || sandbox.GetUser() != attempt["user"] ||
 		(attempt["organization"] != "" && sandbox.GetOrganizationId() != attempt["organization"]) || sandbox.GetTarget() == "" ||
 		(attempt["resolved_target"] != "" && sandbox.GetTarget() != attempt["resolved_target"]) {
-		return exit(4, "lease_id_conflict: Daytona sandbox does not match the exact fixed create attempt")
+		return core.Exit(4, "lease_id_conflict: Daytona sandbox does not match the exact fixed create attempt")
 	}
 	return nil
 }
 
 func loadFixedDaytonaSandbox(ctx context.Context, client daytonaAPI, claim core.LeaseClaim) (*api.Sandbox, error) {
 	if claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State == "released" || claim.FixedCreateIntent.Attempt["name"] == "" {
-		return nil, exit(4, "Daytona fixed lease has no active create attempt; it cannot allocate a replacement")
+		return nil, core.Exit(4, "Daytona fixed lease has no active create attempt; it cannot allocate a replacement")
 	}
 	// The indexed marker is persisted before DELETE admission. A lost response
 	// may leave the native sandbox looking ready while deletion is still queued.
 	if claim.FixedCreateIntent.Attempt["deletion_indexed_id"] != "" || claim.FixedCreateIntent.Attempt["deletion_acknowledged_id"] != "" {
-		return nil, exit(4, "Daytona fixed lease %s has entered cleanup and cannot be reused; retry stop to reconcile deletion", claim.LeaseID)
+		return nil, core.Exit(4, "Daytona fixed lease %s has entered cleanup and cannot be reused; retry stop to reconcile deletion", claim.LeaseID)
 	}
 
 	lookup := claim.CloudID
@@ -337,32 +337,32 @@ func loadFixedDaytonaSandbox(ctx context.Context, client daytonaAPI, claim core.
 		return nil, fmt.Errorf("Daytona fixed lease %s remains unresolved; no replacement allocated: %w", claim.LeaseID, err)
 	}
 	if sandbox == nil {
-		return nil, exit(4, "Daytona fixed resource was not returned")
+		return nil, core.Exit(4, "Daytona fixed resource was not returned")
 	}
 	scope, organization, err := fixedDaytonaResourceContext(client, sandbox.GetOrganizationId())
 	if err != nil {
 		return nil, err
 	}
 	if claim.ProviderScope != scope || organization != claim.FixedCreateIntent.Attempt["organization"] {
-		return nil, exit(4, "Daytona fixed lease API or organization changed")
+		return nil, core.Exit(4, "Daytona fixed lease API or organization changed")
 	}
 	return sandbox, validateFixedDaytonaSandbox(claim, sandbox)
 }
 
 func (b *daytonaLeaseBackend) releaseFixed(ctx context.Context, expected core.LeaseClaim, checkpointID string, absenceOnly bool, repoRoot string) error {
-	return core.WithDurableLeaseClaimLockContext(ctx, expected.LeaseID, func(claim *LeaseClaim, exists bool, persist func() error) error {
+	return core.WithDurableLeaseClaimLockContext(ctx, expected.LeaseID, func(claim *core.LeaseClaim, exists bool, persist func() error) error {
 		if !exists || !reflect.DeepEqual(*claim, expected) {
-			return exit(4, "Daytona fixed lease claim changed before release; retry")
+			return core.Exit(4, "Daytona fixed lease claim changed before release; retry")
 		}
 		if !fixedDaytonaLeaseKind.IsFixedClaim(*claim) || claim.FixedCreateIntent.Version != fixedDaytonaLeaseKind.IntentVersion {
-			return exit(4, "Daytona fixed lease format is not recognized; retain its ownership record for reconciliation")
+			return core.Exit(4, "Daytona fixed lease format is not recognized; retain its ownership record for reconciliation")
 		}
 		if claim.FixedCreateIntent.State == "released" {
 			return fixedDaytonaLeaseKind.ValidateTerminalClaim(*claim, expected, claim.LeaseID, nil)
 		}
 		if repoRoot != "" {
 			if claim.RepoRoot == "" {
-				return exit(4, "Daytona fixed lease %s has no current repository owner", claim.LeaseID)
+				return core.Exit(4, "Daytona fixed lease %s has no current repository owner", claim.LeaseID)
 			}
 			if err := core.CheckLeaseClaimRepositoryOwner(claim.LeaseID, *claim, repoRoot, false); err != nil {
 				return err
@@ -372,7 +372,7 @@ func (b *daytonaLeaseBackend) releaseFixed(ctx context.Context, expected core.Le
 			return err
 		}
 		if absenceOnly && claim.FixedCreateIntent.State != "acquired" {
-			return exit(4, "Daytona absence reconciliation requires a completed fixed acquisition")
+			return core.Exit(4, "Daytona absence reconciliation requires a completed fixed acquisition")
 		}
 		if !neverSubmittedDaytonaClaim(*claim) {
 			apiClient, err := newDaytonaClient(b.cfg, b.rt)
@@ -381,7 +381,7 @@ func (b *daytonaLeaseBackend) releaseFixed(ctx context.Context, expected core.Le
 			}
 			client, ok := apiClient.(fixedDaytonaDeletionAPI)
 			if !ok {
-				return exit(4, "Daytona client cannot attest fixed resource deletion")
+				return core.Exit(4, "Daytona client cannot attest fixed resource deletion")
 			}
 			if claim.CloudID == "" {
 				sandbox, err := loadFixedDaytonaSandbox(ctx, client, *claim)
@@ -404,12 +404,12 @@ func (b *daytonaLeaseBackend) releaseFixed(ctx context.Context, expected core.Le
 	})
 }
 
-func (b *daytonaLeaseBackend) reclaimFixed(ctx context.Context, claim LeaseClaim, repoRoot string, reclaim bool) (LeaseClaim, error) {
+func (b *daytonaLeaseBackend) reclaimFixed(ctx context.Context, claim core.LeaseClaim, repoRoot string, reclaim bool) (core.LeaseClaim, error) {
 	if !reclaim {
 		return claim, nil
 	}
 	if repoRoot == "" {
-		return claim, exit(2, "Daytona fixed reclaim requires the current repository")
+		return claim, core.Exit(2, "Daytona fixed reclaim requires the current repository")
 	}
 	if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
 		return claim, err
@@ -426,8 +426,7 @@ func (b *daytonaLeaseBackend) reclaimFixed(ctx context.Context, claim LeaseClaim
 	// The original claim CAS prevents an awaited native read from stealing a
 	// lease whose owner changed while the request was being validated.
 	return core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfterContext(
-		ctx, claim.LeaseID, claim.Slug, b.cfg, claim.ProviderScope, daytonaSandboxToServer(sandbox), SSHTarget{},
-		repoRoot, b.cfg.IdleTimeout, true, claim, true,
+		ctx, claim.LeaseID, claim.Slug, b.cfg, claim.ProviderScope, daytonaSandboxToServer(sandbox), core.SSHTarget{}, repoRoot, b.cfg.IdleTimeout, true, claim, true,
 		func() error { return core.AuthorizeCheckpointRelease(claim, "") },
 	)
 }
@@ -440,7 +439,7 @@ type fixedDaytonaDeletionAPI interface {
 	requestSandboxDeletion(context.Context, string) (*api.Sandbox, error)
 }
 
-func validateFixedDaytonaDeletionIdentity(client fixedDaytonaDeletionAPI, claim LeaseClaim, sandbox *api.Sandbox) error {
+func validateFixedDaytonaDeletionIdentity(client fixedDaytonaDeletionAPI, claim core.LeaseClaim, sandbox *api.Sandbox) error {
 	endpoint, selectedOrganization := client.fixedSelection()
 	attempt := claim.FixedCreateIntent.Attempt
 	if claim.ProviderScope != claim.FixedCreateIntent.ProviderScope || claim.Slug != claim.FixedCreateIntent.Slug ||
@@ -450,38 +449,38 @@ func validateFixedDaytonaDeletionIdentity(client fixedDaytonaDeletionAPI, claim 
 		sandbox.GetLabels()["fixed_claim_provider"] != core.FixedDaytonaClaimProvider ||
 		sandbox.GetLabels()["lease"] != claim.LeaseID || sandbox.GetLabels()["fixed_intent_sha256"] != claim.FixedCreateIntent.Fingerprint ||
 		attempt["nonce"] == "" || sandbox.GetLabels()["fixed_attempt"] != attempt["nonce"] {
-		return exit(4, "Daytona deletion response does not match the exact fixed resource")
+		return core.Exit(4, "Daytona deletion response does not match the exact fixed resource")
 	}
 	if leaseID, owned := daytonaSandboxOwnership(sandbox); !owned || leaseID != claim.LeaseID {
-		return exit(4, "Daytona deletion response lost fixed lease ownership")
+		return core.Exit(4, "Daytona deletion response lost fixed lease ownership")
 	}
 	data, err := json.Marshal([]string{endpoint, sandbox.GetOrganizationId()})
 	if err != nil {
 		return err
 	}
 	if claim.ProviderScope != fmt.Sprintf("daytona:organization:v1:%x", sha256.Sum256(data)) {
-		return exit(4, "Daytona deletion endpoint or organization changed")
+		return core.Exit(4, "Daytona deletion endpoint or organization changed")
 	}
 	return nil
 }
 
-func deleteFixedDaytonaSandbox(ctx context.Context, client fixedDaytonaDeletionAPI, claim *LeaseClaim, persist func() error, absenceOnly bool) error {
+func deleteFixedDaytonaSandbox(ctx context.Context, client fixedDaytonaDeletionAPI, claim *core.LeaseClaim, persist func() error, absenceOnly bool) error {
 	intent := claim.FixedCreateIntent
 	if claim.CloudID == "" || intent == nil || (intent.State != "prepared" && intent.State != "acquired") {
-		return exit(4, "Daytona fixed cleanup requires its durably observed resource UUID")
+		return core.Exit(4, "Daytona fixed cleanup requires its durably observed resource UUID")
 	}
 	if claim.ProviderScope != intent.ProviderScope || claim.Slug != intent.Slug || intent.Fingerprint == "" || intent.Attempt["nonce"] == "" {
-		return exit(4, "Daytona fixed cleanup has an invalid ownership claim")
+		return core.Exit(4, "Daytona fixed cleanup has an invalid ownership claim")
 	}
 	for _, key := range []string{"deletion_indexed_id", "deletion_acknowledged_id"} {
 		if value := intent.Attempt[key]; value != "" && value != claim.CloudID {
-			return exit(4, "Daytona deletion witness does not match the fixed resource UUID")
+			return core.Exit(4, "Daytona deletion witness does not match the fixed resource UUID")
 		}
 	}
 	endpoint, selected := client.fixedSelection()
 	scope, _, err := fixedDaytonaScope(endpoint, intent.Attempt["organization"])
 	if err != nil || scope != claim.ProviderScope || selected != "" && selected != intent.Attempt["organization"] {
-		return exit(4, "Daytona deletion endpoint or organization changed")
+		return core.Exit(4, "Daytona deletion endpoint or organization changed")
 	}
 	if err := client.attestDeletionOrganization(ctx, intent.Attempt["organization"]); err != nil {
 		return err
@@ -503,12 +502,12 @@ func deleteFixedDaytonaSandbox(ctx context.Context, client fixedDaytonaDeletionA
 				if pending == nil {
 					return nil
 				}
-				return exit(4, "Daytona fixed resource remains in database inventory; retain its claim")
+				return core.Exit(4, "Daytona fixed resource remains in database inventory; retain its claim")
 			}
 			return fmt.Errorf("Daytona fixed deletion has no acknowledged outcome; retain lease %s: %w", claim.LeaseID, err)
 		}
 		if absenceOnly {
-			return exit(4, "Daytona fixed resource is still present; inspection cannot delete it")
+			return core.Exit(4, "Daytona fixed resource is still present; inspection cannot delete it")
 		}
 		if err := validateFixedDaytonaDeletionIdentity(client, *claim, sandbox); err != nil {
 			return err
@@ -520,7 +519,7 @@ func deleteFixedDaytonaSandbox(ctx context.Context, client fixedDaytonaDeletionA
 			return err
 		}
 		if indexed == nil {
-			return exit(4, "Daytona fixed resource is missing from database inventory; retain its claim and retry stop")
+			return core.Exit(4, "Daytona fixed resource is missing from database inventory; retain its claim and retry stop")
 		}
 		if err := validateFixedDaytonaDeletionIdentity(client, *claim, indexed); err != nil {
 			return err
@@ -542,7 +541,7 @@ func deleteFixedDaytonaSandbox(ctx context.Context, client fixedDaytonaDeletionA
 			}
 		}
 		if sandbox.GetDesiredState() != api.SANDBOXDESIREDSTATE_DESTROYED {
-			return exit(4, "Daytona did not acknowledge destruction of the fixed resource")
+			return core.Exit(4, "Daytona did not acknowledge destruction of the fixed resource")
 		}
 		intent.Attempt["deletion_acknowledged_id"] = claim.CloudID
 		if err := persist(); err != nil {
@@ -550,7 +549,7 @@ func deleteFixedDaytonaSandbox(ctx context.Context, client fixedDaytonaDeletionA
 		}
 	}
 	if intent.Attempt["deletion_indexed_id"] != claim.CloudID {
-		return exit(4, "Daytona fixed deletion has no prior inventory identity; retain its claim")
+		return core.Exit(4, "Daytona fixed deletion has no prior inventory identity; retain its claim")
 	}
 	for {
 		sandbox, err := client.GetSandbox(ctx, claim.CloudID)
@@ -580,7 +579,7 @@ func deleteFixedDaytonaSandbox(ctx context.Context, client fixedDaytonaDeletionA
 			}
 		}
 		if sandbox.GetState() == api.SANDBOXSTATE_ERROR || sandbox.GetState() == api.SANDBOXSTATE_BUILD_FAILED {
-			return exit(4, "Daytona fixed deletion failed with state=%s; retain lease %s for reconciliation", sandbox.GetState(), claim.LeaseID)
+			return core.Exit(4, "Daytona fixed deletion failed with state=%s; retain lease %s for reconciliation", sandbox.GetState(), claim.LeaseID)
 		}
 		if err := shared.SleepContext(ctx, time.Second); err != nil {
 			return err
@@ -591,7 +590,7 @@ func deleteFixedDaytonaSandbox(ctx context.Context, client fixedDaytonaDeletionA
 func neverSubmittedDaytonaClaim(claim core.LeaseClaim) bool {
 	intent := claim.FixedCreateIntent
 	if !fixedDaytonaLeaseKind.IsFixedClaim(claim) || intent.Version != 1 || intent.State != "prepared" ||
-		!isCanonicalLeaseID(claim.LeaseID) || intent.Slug == "" || claim.Slug != intent.Slug || claim.ProviderScope != intent.ProviderScope ||
+		!core.IsCanonicalLeaseID(claim.LeaseID) || intent.Slug == "" || claim.Slug != intent.Slug || claim.ProviderScope != intent.ProviderScope ||
 		len(intent.Attempt) != 0 || len(intent.FailedAttempts) != 0 || len(claim.Labels) != 0 ||
 		claim.CloudID != "" || claim.CloudImmutableID != "" || claim.CloudNumericID != 0 || claim.SSHHost != "" || claim.SSHPort != 0 ||
 		claim.StaticHost != "" || claim.StaticUser != "" || claim.StaticPort != "" || claim.StaticWorkRoot != "" {
@@ -604,29 +603,29 @@ func neverSubmittedDaytonaClaim(claim core.LeaseClaim) bool {
 	return ok && scopeErr == nil && len(scopeHash) == sha256.Size && fingerprintErr == nil && len(fingerprint) == sha256.Size && timeErr == nil
 }
 
-func (b *daytonaLeaseBackend) RetainLeaseClaimAfterReleaseWithClaim(lease LeaseTarget, previous core.LeaseClaim) (bool, error) {
+func (b *daytonaLeaseBackend) RetainLeaseClaimAfterReleaseWithClaim(lease core.LeaseTarget, previous core.LeaseClaim) (bool, error) {
 	return fixedDaytonaLeaseKind.RetainClaimAfterRelease(lease.LeaseID, previous, hasFixedDaytonaOwnershipLabels(lease.Server.Labels), nil, nil)
 }
 
 func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, slug string, server core.Server, _ bool) (core.Server, error) {
 	if existing.FixedCreateIntent != nil {
 		if err := core.AuthorizeCheckpointRelease(existing, ""); err != nil {
-			return Server{}, err
+			return core.Server{}, err
 		}
 		if !fixedDaytonaLeaseKind.IsFixedClaim(existing) || provider != daytonaProvider || slug != existing.Slug || existing.FixedCreateIntent.State != "acquired" || server.CloudID != existing.CloudID || server.Labels["fixed_claim_provider"] != core.FixedDaytonaClaimProvider || server.Labels["fixed_intent_sha256"] != existing.FixedCreateIntent.Fingerprint || server.Labels["fixed_attempt"] != existing.FixedCreateIntent.Attempt["nonce"] {
-			return Server{}, exit(4, "refusing to rewrite Daytona fixed lease identity")
+			return core.Server{}, core.Exit(4, "refusing to rewrite Daytona fixed lease identity")
 		}
 	}
 	return server, nil
 }
 
-func (b *daytonaLeaseBackend) AuthorizeStatusTouchClaim(ctx context.Context, lease LeaseTarget, claim core.LeaseClaim) error {
+func (b *daytonaLeaseBackend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
 	if claim.LeaseID != lease.LeaseID || (claim.Provider != daytonaProvider && claim.Provider != core.FixedDaytonaClaimProvider) || lease.Server.CloudID == "" || lease.Server.CloudID != claim.CloudID {
-		return exit(4, "Daytona lifecycle touch requires an exact source lease claim")
+		return core.Exit(4, "Daytona lifecycle touch requires an exact source lease claim")
 	}
 	if claim.FixedCreateIntent == nil {
 		if claim.ProviderScope != core.ProviderClaimScope(daytonaProvider, b.cfg) {
-			return exit(4, "Daytona lifecycle touch provider scope mismatch")
+			return core.Exit(4, "Daytona lifecycle touch provider scope mismatch")
 		}
 		return nil
 	}

@@ -36,63 +36,14 @@ type ModalConfigApplied struct {
 
 func (cfg *ModalConfig) applyFile(file *fileModalConfig, trusted bool) (ModalConfigApplied, error) {
 	var applied ModalConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.App != "" {
-		cfg.App = file.App
-		applied.InputAccepted = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-	}
-	if file.Workdir != "" {
-		cfg.Workdir = file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.Python != "" {
-		cfg.Python = file.Python
-		applied.InputAccepted = true
-	}
-	if trusted && file.Environment != "" {
-		cfg.Environment = file.Environment
-		applied.InputAccepted = true
-	}
-	if trusted && file.Secrets != nil {
-		cfg.Secrets = append([]string(nil), (*file.Secrets)...)
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "modal")
+	return applied, err
 }
 
 func (cfg *ModalConfig) applyEnv() (ModalConfigApplied, error) {
 	var applied ModalConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_MODAL_APP"); ok {
-		cfg.App = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MODAL_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MODAL_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MODAL_PYTHON"); ok {
-		cfg.Python = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MODAL_ENVIRONMENT"); ok {
-		cfg.Environment = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvList("CRABBOX_MODAL_SECRETS"); ok {
-		cfg.Secrets = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 6)
+	return applied, err
 }
 
 // ModalConfigFlagValues holds parsed values; only visited flags are applied.
@@ -122,29 +73,6 @@ func RegisterModalConfigFlags(fs *flag.FlagSet, defaults ModalConfig) ModalConfi
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values ModalConfigFlagValues) Apply(cfg *ModalConfig, fs *flag.FlagSet) (ModalConfigApplied, error) {
 	var applied ModalConfigApplied
-	if flagWasSet(fs, "modal-app") {
-		cfg.App = *values.App
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "modal-image") {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "modal-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "modal-python") {
-		cfg.Python = *values.Python
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "modal-environment") {
-		cfg.Environment = *values.Environment
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "modal-secret") {
-		cfg.Secrets = append([]string(nil), values.Secrets.values...)
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

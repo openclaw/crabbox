@@ -6,7 +6,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	core "github.com/openclaw/crabbox/internal/cli"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestNvidiaBrevProviderSpec(t *testing.T) {
@@ -24,7 +25,7 @@ func TestNvidiaBrevProviderSpec(t *testing.T) {
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != targetLinux {
 		t.Fatalf("targets=%#v, want linux only", spec.Targets)
 	}
-	for _, feature := range []Feature{"ssh", "crabbox-sync", "cleanup"} {
+	for _, feature := range []core.Feature{"ssh", "crabbox-sync", "cleanup"} {
 		if !spec.Features.Has(feature) {
 			t.Fatalf("missing feature %q in %#v", feature, spec.Features)
 		}
@@ -42,7 +43,7 @@ func TestNvidiaBrevOrdinaryFlagMetadata(t *testing.T) {
 		{"Target", "target"}, {"User", "user"}, {"WorkRoot", "work-root"},
 	}
 	for _, value := range []string{"", "same", " padded "} {
-		cfg := Config{Provider: "other", WorkRoot: "/generic", SSHUser: "generic"}
+		cfg := core.Config{Provider: "other", WorkRoot: "/generic", SSHUser: "generic"}
 		for _, field := range fields {
 			reflect.ValueOf(&cfg.NvidiaBrev).Elem().FieldByName(field.field).SetString("same")
 		}
@@ -72,14 +73,14 @@ func TestNvidiaBrevOrdinaryFlagMetadata(t *testing.T) {
 		}
 		core.RecordProviderFlagInputs(&want, true, "nvidia-brev")
 		markReleaseActionExplicit(&want)
-		markNvidiaBrevWorkRootExplicit(&want)
+		core.MarkNvidiaBrevWorkRootExplicit(&want)
 		if !reflect.DeepEqual(cfg, want) {
 			t.Fatalf("visited %q: got %#v want %#v", value, cfg, want)
 		}
 	}
 	for _, provider := range []string{"nvidia-brev", " BREV ", "NVIDIA", "other"} {
 		for _, sizing := range []string{"", "class", "type"} {
-			cfg := Config{Provider: provider}
+			cfg := core.Config{Provider: provider}
 			before := cfg
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			fs.String("class", "", "")
@@ -102,7 +103,7 @@ func TestNvidiaBrevOrdinaryFlagMetadata(t *testing.T) {
 
 func TestNvidiaBrevOrdinaryRawDefaults(t *testing.T) {
 	for _, value := range []string{"", "custom", " padded "} {
-		cfg := Config{SSHUser: "generic", SSHPort: "2200", SSHFallbackPorts: []string{"22"}, NvidiaBrev: NvidiaBrevConfig{
+		cfg := core.Config{SSHUser: "generic", SSHPort: "2200", SSHFallbackPorts: []string{"22"}, NvidiaBrev: core.NvidiaBrevConfig{
 			CLI: value, GPUName: value, Mode: value, ReleaseAction: value, Target: value,
 			Org: "org", Type: "type", Provider: "cloud", Launchable: "launchable", StartupScript: "inline", User: "runner", WorkRoot: "/work/brev",
 		}}
@@ -123,7 +124,7 @@ func TestNvidiaBrevOrdinaryRawDefaults(t *testing.T) {
 }
 
 func TestNvidiaBrevProviderDefaults(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	applyNvidiaBrevDefaults(&cfg)
 	if cfg.NvidiaBrev.CLI != "brev" ||
 		cfg.NvidiaBrev.GPUName != "A100" ||
@@ -159,13 +160,13 @@ func TestNormalizeBrevState(t *testing.T) {
 }
 
 func TestNvidiaBrevDefaultsPreserveExplicitGenericWorkRoot(t *testing.T) {
-	cfg := Config{
+	cfg := core.Config{
 		WorkRoot: "/srv/crabbox",
-		NvidiaBrev: NvidiaBrevConfig{
+		NvidiaBrev: core.NvidiaBrevConfig{
 			WorkRoot: "/tmp/crabbox",
 		},
 	}
-	markWorkRootExplicit(&cfg)
+	core.MarkWorkRootExplicit(&cfg)
 	applyNvidiaBrevDefaults(&cfg)
 	if cfg.WorkRoot != "/srv/crabbox" || cfg.NvidiaBrev.WorkRoot != "/srv/crabbox" {
 		t.Fatalf("workRoot=%q nvidiaBrev.workRoot=%q", cfg.WorkRoot, cfg.NvidiaBrev.WorkRoot)
@@ -173,13 +174,13 @@ func TestNvidiaBrevDefaultsPreserveExplicitGenericWorkRoot(t *testing.T) {
 }
 
 func TestNvidiaBrevDefaultsPreserveExplicitProviderWorkRoot(t *testing.T) {
-	cfg := Config{
+	cfg := core.Config{
 		WorkRoot: "/srv/crabbox",
-		NvidiaBrev: NvidiaBrevConfig{
+		NvidiaBrev: core.NvidiaBrevConfig{
 			WorkRoot: "/tmp/crabbox",
 		},
 	}
-	markNvidiaBrevWorkRootExplicit(&cfg)
+	core.MarkNvidiaBrevWorkRootExplicit(&cfg)
 	applyNvidiaBrevDefaults(&cfg)
 	if cfg.WorkRoot != "/tmp/crabbox" || cfg.NvidiaBrev.WorkRoot != "/tmp/crabbox" {
 		t.Fatalf("workRoot=%q nvidiaBrev.workRoot=%q", cfg.WorkRoot, cfg.NvidiaBrev.WorkRoot)
@@ -188,7 +189,7 @@ func TestNvidiaBrevDefaultsPreserveExplicitProviderWorkRoot(t *testing.T) {
 
 func TestNvidiaBrevSecretFlagsAreNotRegistered(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	RegisterNvidiaBrevProviderFlags(fs, Config{})
+	RegisterNvidiaBrevProviderFlags(fs, core.Config{})
 	for _, name := range []string{
 		"nvidia-brev-token",
 		"nvidia-brev-api-key",
@@ -229,11 +230,11 @@ func TestNvidiaBrevApplyFlagsRejectsGenericClassAndType(t *testing.T) {
 		fs.SetOutput(io.Discard)
 		fs.String("class", "", "")
 		fs.String("type", "", "")
-		values := RegisterNvidiaBrevProviderFlags(fs, Config{})
+		values := RegisterNvidiaBrevProviderFlags(fs, core.Config{})
 		if err := fs.Parse(args); err != nil {
 			t.Fatal(err)
 		}
-		cfg := Config{Provider: providerName}
+		cfg := core.Config{Provider: providerName}
 		err := ApplyNvidiaBrevProviderFlags(&cfg, fs, values)
 		if err == nil || !strings.Contains(err.Error(), "not supported for provider=nvidia-brev") {
 			t.Fatalf("args=%v err=%v", args, err)
@@ -243,39 +244,39 @@ func TestNvidiaBrevApplyFlagsRejectsGenericClassAndType(t *testing.T) {
 
 func TestNvidiaBrevApplyFlagsMarksExplicitSettings(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	values := RegisterNvidiaBrevProviderFlags(fs, Config{})
+	values := RegisterNvidiaBrevProviderFlags(fs, core.Config{})
 	if err := fs.Parse([]string{"--nvidia-brev-release-action", "stop", "--nvidia-brev-work-root", "/work/brev"}); err != nil {
 		t.Fatal(err)
 	}
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	if err := ApplyNvidiaBrevProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.NvidiaBrev.ReleaseAction != "stop" || !releaseActionExplicit(cfg) || cfg.NvidiaBrev.WorkRoot != "/work/brev" || !nvidiaBrevWorkRootExplicit(&cfg) {
+	if cfg.NvidiaBrev.ReleaseAction != "stop" || !releaseActionExplicit(cfg) || cfg.NvidiaBrev.WorkRoot != "/work/brev" || !core.IsNvidiaBrevWorkRootExplicit(&cfg) {
 		t.Fatalf("release action not marked explicit: %#v", cfg.NvidiaBrev)
 	}
 }
 
 func TestNvidiaBrevValidateConfigRejectsInvalidEnums(t *testing.T) {
-	if err := (Provider{}).ValidateConfig(Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "archive"}}); err == nil {
+	if err := (Provider{}).ValidateConfig(core.Config{NvidiaBrev: core.NvidiaBrevConfig{ReleaseAction: "archive"}}); err == nil {
 		t.Fatal("invalid release action accepted")
 	}
-	if err := (Provider{}).ValidateConfig(Config{NvidiaBrev: NvidiaBrevConfig{Target: "desktop"}}); err == nil {
+	if err := (Provider{}).ValidateConfig(core.Config{NvidiaBrev: core.NvidiaBrevConfig{Target: "desktop"}}); err == nil {
 		t.Fatal("invalid target accepted")
 	}
-	if err := (Provider{}).ValidateConfig(Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop", Target: "host"}}); err != nil {
+	if err := (Provider{}).ValidateConfig(core.Config{NvidiaBrev: core.NvidiaBrevConfig{ReleaseAction: "stop", Target: "host"}}); err != nil {
 		t.Fatalf("valid enum values rejected: %v", err)
 	}
 }
 
 func TestNvidiaBrevConfigureRejectsUnsupportedTargetAndTailscale(t *testing.T) {
-	for name, cfg := range map[string]Config{
+	for name, cfg := range map[string]core.Config{
 		"macos target": {TargetOS: "macos"},
-		"tailscale":    {TargetOS: targetLinux, Tailscale: TailscaleConfig{Enabled: true}},
+		"tailscale":    {TargetOS: targetLinux, Tailscale: core.TailscaleConfig{Enabled: true}},
 		"network":      {TargetOS: targetLinux, Network: "tailscale"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := Provider{}.Configure(cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard})
+			_, err := Provider{}.Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -285,24 +286,24 @@ func TestNvidiaBrevConfigureRejectsUnsupportedTargetAndTailscale(t *testing.T) {
 
 func TestNvidiaBrevDoctorRunsReadOnlyCommands(t *testing.T) {
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		runner.calls = append(runner.calls, req)
 		assertReadOnlyBrevCommand(t, req)
 		switch strings.Join(req.Args, " ") {
 		case "--version":
-			return LocalCommandResult{Stdout: "brev version 1.0.0\n"}, nil
+			return core.LocalCommandResult{Stdout: "brev version 1.0.0\n"}, nil
 		case "ls --json":
-			return LocalCommandResult{Stdout: `{"workspaces":[{"id":"workspace-1"},{"id":"workspace-2"}]}`}, nil
+			return core.LocalCommandResult{Stdout: `{"workspaces":[{"id":"workspace-1"},{"id":"workspace-2"}]}`}, nil
 		default:
 			t.Fatalf("unexpected command: %s %s", req.Name, strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	doctor, err := Provider{}.ConfigureDoctor(Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
+	doctor, err := Provider{}.ConfigureDoctor(core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := doctor.Doctor(context.Background(), DoctorRequest{})
+	result, err := doctor.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,20 +317,20 @@ func TestNvidiaBrevDoctorRunsReadOnlyCommands(t *testing.T) {
 
 func TestNvidiaBrevDoctorAcceptsEmptyWorkspaceList(t *testing.T) {
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		runner.calls = append(runner.calls, req)
 		assertReadOnlyBrevCommand(t, req)
 		if strings.Join(req.Args, " ") == "--version" {
-			return LocalCommandResult{Stdout: "brev version 1.0.0\n"}, nil
+			return core.LocalCommandResult{Stdout: "brev version 1.0.0\n"}, nil
 		}
-		return LocalCommandResult{Stdout: `{"workspaces": null}`}, nil
+		return core.LocalCommandResult{Stdout: `{"workspaces": null}`}, nil
 	}
 	backend := &nvidiaBrevBackend{
 		spec: Provider{}.Spec(),
-		cfg:  Config{NvidiaBrev: NvidiaBrevConfig{CLI: "brev"}},
-		rt:   Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+		cfg:  core.Config{NvidiaBrev: core.NvidiaBrevConfig{CLI: "brev"}},
+		rt:   core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
 	}
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,25 +341,25 @@ func TestNvidiaBrevDoctorAcceptsEmptyWorkspaceList(t *testing.T) {
 
 func TestNvidiaBrevDoctorHonorsConfiguredOrgForReadOnlyInventory(t *testing.T) {
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		runner.calls = append(runner.calls, req)
 		assertReadOnlyBrevCommand(t, req)
 		switch strings.Join(req.Args, " ") {
 		case "--version":
-			return LocalCommandResult{Stdout: "brev version 1.0.0\n"}, nil
+			return core.LocalCommandResult{Stdout: "brev version 1.0.0\n"}, nil
 		case "ls --json --org example-org":
-			return LocalCommandResult{Stdout: `{"workspaces":[{"id":"workspace-1"}]}`}, nil
+			return core.LocalCommandResult{Stdout: `{"workspaces":[{"id":"workspace-1"}]}`}, nil
 		default:
 			t.Fatalf("unexpected command: %s %s", req.Name, strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
 	backend := &nvidiaBrevBackend{
 		spec: Provider{}.Spec(),
-		cfg:  Config{NvidiaBrev: NvidiaBrevConfig{CLI: "brev", Org: "example-org"}},
-		rt:   Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+		cfg:  core.Config{NvidiaBrev: core.NvidiaBrevConfig{CLI: "brev", Org: "example-org"}},
+		rt:   core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
 	}
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,20 +370,20 @@ func TestNvidiaBrevDoctorHonorsConfiguredOrgForReadOnlyInventory(t *testing.T) {
 
 func TestNvidiaBrevDoctorRejectsMalformedInventoryJSON(t *testing.T) {
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		runner.calls = append(runner.calls, req)
 		assertReadOnlyBrevCommand(t, req)
 		if strings.Join(req.Args, " ") == "--version" {
-			return LocalCommandResult{Stdout: "brev version 1.0.0\n"}, nil
+			return core.LocalCommandResult{Stdout: "brev version 1.0.0\n"}, nil
 		}
-		return LocalCommandResult{Stdout: `{"items":[]}`}, nil
+		return core.LocalCommandResult{Stdout: `{"items":[]}`}, nil
 	}
 	backend := &nvidiaBrevBackend{
 		spec: Provider{}.Spec(),
-		cfg:  Config{NvidiaBrev: NvidiaBrevConfig{CLI: "brev"}},
-		rt:   Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+		cfg:  core.Config{NvidiaBrev: core.NvidiaBrevConfig{CLI: "brev"}},
+		rt:   core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
 	}
-	if _, err := backend.Doctor(context.Background(), DoctorRequest{}); err == nil || !strings.Contains(err.Error(), "missing workspaces field") {
+	if _, err := backend.Doctor(context.Background(), core.DoctorRequest{}); err == nil || !strings.Contains(err.Error(), "missing workspaces field") {
 		t.Fatalf("Doctor err=%v, want missing workspaces field", err)
 	}
 }
@@ -409,8 +410,8 @@ func TestNvidiaBrevAcquireCreatesRefreshesParsesSSHAndClaims(t *testing.T) {
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-123","name":"{createdName}","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY","instance_type":"gpu-a100","gpu":"A100"}]}`},
 		{args: "refresh"},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{NvidiaBrev: NvidiaBrevConfig{GPUName: "A100", Mode: "vm", ReleaseAction: "stop"}}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	lease, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}, RequestedSlug: "demo"})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{NvidiaBrev: core.NvidiaBrevConfig{GPUName: "A100", Mode: "vm", ReleaseAction: "stop"}}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "demo"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,15 +442,15 @@ func TestNvidiaBrevResolveSSHTargetRejectsOrganizationChangeDuringRefresh(t *tes
   IdentityFile "`+filepath.Join(home, ".brev", "brev.pem")+`"
 `)
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		runner.calls = append(runner.calls, req)
 		if strings.Join(req.Args, " ") != "refresh" {
-			return LocalCommandResult{}, fmt.Errorf("unexpected command: %s", strings.Join(req.Args, " "))
+			return core.LocalCommandResult{}, fmt.Errorf("unexpected command: %s", strings.Join(req.Args, " "))
 		}
 		writeBrevActiveOrg(t, "org-other")
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
 	client, err := backend.client()
 	if err != nil {
 		t.Fatal(err)
@@ -466,24 +467,24 @@ func TestNvidiaBrevAcquireRevalidatesOrganizationAfterCreate(t *testing.T) {
 	defer restoreID()
 	listCalls := 0
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		runner.calls = append(runner.calls, req)
 		switch {
 		case len(req.Args) > 0 && req.Args[0] == "create":
 			writeBrevActiveOrg(t, "org-other")
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		case strings.Join(req.Args, " ") == "ls --json --all":
 			listCalls++
 			if listCalls == 1 {
-				return LocalCommandResult{Stdout: `{"workspaces":[]}`}, nil
+				return core.LocalCommandResult{Stdout: `{"workspaces":[]}`}, nil
 			}
-			return LocalCommandResult{Stdout: `{"workspaces":[{"id":"ws-org-switch","name":"crabbox-org-switch-123456789abc","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY"}]}`}, nil
+			return core.LocalCommandResult{Stdout: `{"workspaces":[{"id":"ws-org-switch","name":"crabbox-org-switch-123456789abc","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY"}]}`}, nil
 		default:
-			return LocalCommandResult{}, fmt.Errorf("unexpected command: %s", strings.Join(req.Args, " "))
+			return core.LocalCommandResult{}, fmt.Errorf("unexpected command: %s", strings.Join(req.Args, " "))
 		}
 	}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}, RequestedSlug: "org-switch"})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "org-switch"})
 	if err == nil || !strings.Contains(err.Error(), "active Brev organization changed") {
 		t.Fatalf("err=%v, want organization change rejection", err)
 	}
@@ -505,7 +506,7 @@ func TestNvidiaBrevAcquireRevalidatesOrganizationAfterCreate(t *testing.T) {
 			t.Fatalf("organization switch executed ambiguous rollback: %#v", call.Args)
 		}
 	}
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: claim.LeaseID}}); err == nil || !strings.Contains(err.Error(), "manual reconciliation") {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: claim.LeaseID}}); err == nil || !strings.Contains(err.Error(), "manual reconciliation") {
 		t.Fatalf("ambiguous recovery err=%v", err)
 	}
 }
@@ -516,24 +517,24 @@ func TestNvidiaBrevAcquireRetainsOrganizationChangeRecoveryWhenKeepIsEnabled(t *
 	defer restoreID()
 	listCalls := 0
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		runner.calls = append(runner.calls, req)
 		switch {
 		case len(req.Args) > 0 && req.Args[0] == "create":
 			writeBrevActiveOrg(t, "org-other")
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		case strings.Join(req.Args, " ") == "ls --json --all":
 			listCalls++
 			if listCalls == 1 {
-				return LocalCommandResult{Stdout: `{"workspaces":[]}`}, nil
+				return core.LocalCommandResult{Stdout: `{"workspaces":[]}`}, nil
 			}
-			return LocalCommandResult{Stdout: `{"workspaces":[{"id":"ws-org-keep","name":"crabbox-org-keep-123456789abc","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY"}]}`}, nil
+			return core.LocalCommandResult{Stdout: `{"workspaces":[{"id":"ws-org-keep","name":"crabbox-org-keep-123456789abc","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY"}]}`}, nil
 		default:
-			return LocalCommandResult{}, fmt.Errorf("unexpected command: %s", strings.Join(req.Args, " "))
+			return core.LocalCommandResult{}, fmt.Errorf("unexpected command: %s", strings.Join(req.Args, " "))
 		}
 	}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}, RequestedSlug: "org-keep", Keep: true})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "org-keep", Keep: true})
 	if err == nil || !strings.Contains(err.Error(), "active Brev organization changed") {
 		t.Fatalf("err=%v, want organization change rejection", err)
 	}
@@ -552,24 +553,24 @@ func TestNvidiaBrevAcquireRetainsOrganizationChangeDuringReadyCheck(t *testing.T
 	defer restoreID()
 	listCalls := 0
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		runner.calls = append(runner.calls, req)
 		switch {
 		case len(req.Args) > 0 && req.Args[0] == "create":
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		case strings.Join(req.Args, " ") == "ls --json --all":
 			listCalls++
 			if listCalls == 1 {
-				return LocalCommandResult{Stdout: `{"workspaces":[]}`}, nil
+				return core.LocalCommandResult{Stdout: `{"workspaces":[]}`}, nil
 			}
 			writeBrevActiveOrg(t, "org-other")
-			return LocalCommandResult{Stdout: `{"workspaces":[{"id":"ws-org-race","name":"crabbox-org-race-123456789abc","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY"}]}`}, nil
+			return core.LocalCommandResult{Stdout: `{"workspaces":[{"id":"ws-org-race","name":"crabbox-org-race-123456789abc","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY"}]}`}, nil
 		default:
-			return LocalCommandResult{}, fmt.Errorf("unexpected command: %s", strings.Join(req.Args, " "))
+			return core.LocalCommandResult{}, fmt.Errorf("unexpected command: %s", strings.Join(req.Args, " "))
 		}
 	}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}, RequestedSlug: "org-race"})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "org-race"})
 	if err == nil || !strings.Contains(err.Error(), "active Brev organization changed") {
 		t.Fatalf("err=%v, want organization change rejection", err)
 	}
@@ -605,8 +606,8 @@ func TestNvidiaBrevAcquireRollsBackCreatedWorkspaceOnPostCreateFailure(t *testin
 		{args: "delete ws-rollback"},
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{NvidiaBrev: NvidiaBrevConfig{GPUName: "A100", Mode: "vm"}}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}, RequestedSlug: "rollback"})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{NvidiaBrev: core.NvidiaBrevConfig{GPUName: "A100", Mode: "vm"}}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "rollback"})
 	if err == nil || !strings.Contains(err.Error(), "read nvidia-brev SSH config") {
 		t.Fatalf("err=%v, want SSH config failure", err)
 	}
@@ -629,9 +630,9 @@ func TestNvidiaBrevAcquireRollbackDeletesEvenWhenReleaseActionStops(t *testing.T
 		{args: "delete ws-rollback"},
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 	}}
-	cfg := Config{NvidiaBrev: NvidiaBrevConfig{GPUName: "A100", Mode: "vm", ReleaseAction: "stop"}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), cfg, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}, RequestedSlug: "rollback"})
+	cfg := core.Config{NvidiaBrev: core.NvidiaBrevConfig{GPUName: "A100", Mode: "vm", ReleaseAction: "stop"}}
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), cfg, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "rollback"})
 	if err == nil || !strings.Contains(err.Error(), "read nvidia-brev SSH config") {
 		t.Fatalf("err=%v, want SSH config failure", err)
 	}
@@ -649,8 +650,8 @@ func TestNvidiaBrevAcquireRetainsNameOnlyClaimAfterAmbiguousCreateFailure(t *tes
 		{args: "create crabbox-create-error-* --detached --gpu-name A100 --mode vm", err: errors.New("connection reset after request")},
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}, RequestedSlug: "create-error"})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "create-error"})
 	if err == nil || !strings.Contains(err.Error(), "connection reset after request") {
 		t.Fatalf("err=%v, want create failure", err)
 	}
@@ -677,8 +678,8 @@ func TestNvidiaBrevAcquireDoesNotClaimLocallyRejectedCreate(t *testing.T) {
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls --json --org example-org --all", stdout: `{"workspaces":[]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{NvidiaBrev: NvidiaBrevConfig{Org: "example-org"}}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}, RequestedSlug: "preflight"})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{NvidiaBrev: core.NvidiaBrevConfig{Org: "example-org"}}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "preflight"})
 	if err == nil || !strings.Contains(err.Error(), "does not support --org") {
 		t.Fatalf("err=%v, want local mutation rejection", err)
 	}
@@ -699,8 +700,8 @@ func TestNvidiaBrevKeptAmbiguousCreateCanReleaseByLeaseIDAfterWorkspaceAppears(t
 		{args: "create crabbox-create-keep-* --detached --gpu-name A100 --mode vm", err: errors.New("connection reset after request")},
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}, RequestedSlug: "create-keep", Keep: true})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "create-keep", Keep: true})
 	if err == nil || !strings.Contains(err.Error(), "connection reset after request") {
 		t.Fatalf("err=%v, want create failure", err)
 	}
@@ -712,7 +713,7 @@ func TestNvidiaBrevKeptAmbiguousCreateCanReleaseByLeaseIDAfterWorkspaceAppears(t
 		t.Fatalf("recovery claim=%#v", claim)
 	}
 	runner.responses = append(runner.responses, scriptedBrevResponse{args: "ls --json --all", stdout: `{"workspaces":[]}`})
-	statusTarget, err := backend.Resolve(context.Background(), ResolveRequest{ID: claim.LeaseID, StatusOnly: true})
+	statusTarget, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: claim.LeaseID, StatusOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -724,7 +725,7 @@ func TestNvidiaBrevKeptAmbiguousCreateCanReleaseByLeaseIDAfterWorkspaceAppears(t
 		scriptedBrevResponse{args: "delete ws-create-keep"},
 		scriptedBrevResponse{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 	)
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: claim.LeaseID}}); err != nil {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: claim.LeaseID}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, claimErr := resolveLeaseClaimForProvider(claim.LeaseID); claimErr != nil || ok {
@@ -736,12 +737,12 @@ func TestNvidiaBrevNameOnlyRecoveryStatusReportsWorkspaceThatAppeared(t *testing
 	isolateNvidiaBrevState(t)
 	leaseID := "cbx_123456789abd"
 	workspace := brevWorkspace{Name: "crabbox-delayed-123456789abd", Status: "CREATING"}
-	server := workspaceToServer(Config{}, workspace, leaseID, "delayed", true)
+	server := workspaceToServer(core.Config{}, workspace, leaseID, "delayed", true)
 	server.Status = "failed"
 	server.Labels["state"] = "failed"
 	server.Labels["keep"] = "true"
 	server.Labels["brev_recovery"] = "create_unknown"
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "delayed", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "delayed", core.Config{Provider: providerName}, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	live := `{"workspaces":[{"id":"ws-delayed","name":"crabbox-delayed-123456789abd","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY"}]}`
@@ -749,8 +750,8 @@ func TestNvidiaBrevNameOnlyRecoveryStatusReportsWorkspaceThatAppeared(t *testing
 		{args: "ls --json --all", stdout: live},
 		{args: "ls --json --all", stdout: live},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	target, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, StatusOnly: true})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	target, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, StatusOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -768,9 +769,9 @@ func TestNvidiaBrevKeptAmbiguousCreateHonorsStopPolicy(t *testing.T) {
 		{args: "create crabbox-create-stop-* --detached --stoppable --gpu-name A100 --mode vm", err: errors.New("connection reset after request")},
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 	}}
-	cfg := Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), cfg, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}, RequestedSlug: "create-stop", Keep: true})
+	cfg := core.Config{NvidiaBrev: core.NvidiaBrevConfig{ReleaseAction: "stop"}}
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), cfg, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "create-stop", Keep: true})
 	if err == nil {
 		t.Fatal("expected create failure")
 	}
@@ -778,7 +779,7 @@ func TestNvidiaBrevKeptAmbiguousCreateHonorsStopPolicy(t *testing.T) {
 		scriptedBrevResponse{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-create-stop","name":"crabbox-create-stop-123456789abc","status":"RUNNING"}]}`},
 		scriptedBrevResponse{args: "stop ws-create-stop"},
 	)
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: "cbx_123456789abc"}}); err != nil {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_123456789abc"}}); err != nil {
 		t.Fatal(err)
 	}
 	claim, ok, claimErr := resolveLeaseClaimForProvider("cbx_123456789abc")
@@ -802,8 +803,8 @@ func TestNvidiaBrevKeptAmbiguousCreateClaimExpiresOnExplicitRelease(t *testing.T
 		{args: "create crabbox-create-expired-* --detached --stoppable --gpu-name A100 --mode vm", err: errors.New("connection reset after request")},
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}, RequestedSlug: "create-expired", Keep: true})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{NvidiaBrev: core.NvidiaBrevConfig{ReleaseAction: "stop"}}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "create-expired", Keep: true})
 	if err == nil {
 		t.Fatal("expected create failure")
 	}
@@ -812,14 +813,14 @@ func TestNvidiaBrevKeptAmbiguousCreateClaimExpiresOnExplicitRelease(t *testing.T
 		labels["created_at"] = fmt.Sprint(time.Now().Add(-brevCreateRecoveryGrace - time.Minute).Unix())
 	})
 	runner.responses = append(runner.responses, scriptedBrevResponse{args: "ls --json --all", stdout: `{"workspaces":[]}`})
-	releaseTarget, err := backend.Resolve(context.Background(), ResolveRequest{ID: "cbx_123456789abc", ReleaseOnly: true})
+	releaseTarget, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_123456789abc", ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if releaseTarget.LeaseID != "cbx_123456789abc" {
 		t.Fatalf("release target=%#v", releaseTarget)
 	}
-	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: releaseTarget}); err != nil || !outcome.Terminal {
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: releaseTarget}); err != nil || !outcome.Terminal {
 		t.Fatalf("absent resource under stop policy: outcome=%+v err=%v", outcome, err)
 	}
 	if _, ok, claimErr := resolveLeaseClaimForProvider("cbx_123456789abc"); claimErr != nil || ok {
@@ -837,12 +838,12 @@ func TestNvidiaBrevNameOnlyReadinessFailureClaimExpiresOnExplicitRelease(t *test
 	state, _ := isolateNvidiaBrevState(t)
 	leaseID := "cbx_123456789abd"
 	workspace := brevWorkspace{Name: "crabbox-readiness-failed-123456789abd", Status: "CREATING"}
-	server := workspaceToServer(Config{}, workspace, leaseID, "readiness-failed", true)
+	server := workspaceToServer(core.Config{}, workspace, leaseID, "readiness-failed", true)
 	server.Status = "failed"
 	server.Labels["state"] = "failed"
 	server.Labels["keep"] = "true"
 	server.Labels["brev_recovery"] = "kept_acquire_failed"
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "readiness-failed", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "readiness-failed", core.Config{Provider: providerName}, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	updateNvidiaBrevClaim(t, state, leaseID, func(claim map[string]any) {
@@ -852,12 +853,12 @@ func TestNvidiaBrevNameOnlyReadinessFailureClaimExpiresOnExplicitRelease(t *test
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	releaseTarget, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	releaseTarget, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: releaseTarget}); err != nil {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: releaseTarget}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, claimErr := resolveLeaseClaimForProvider(leaseID); claimErr != nil || ok {
@@ -869,12 +870,12 @@ func TestNvidiaBrevKnownIDReadinessFailureClaimExpiresOnExplicitRelease(t *testi
 	state, _ := isolateNvidiaBrevState(t)
 	leaseID := "cbx_123456789abe"
 	workspace := brevWorkspace{ID: "ws-readiness-gone", Name: "crabbox-readiness-gone-123456789abe", Status: "RUNNING"}
-	server := workspaceToServer(Config{}, workspace, leaseID, "readiness-gone", true)
+	server := workspaceToServer(core.Config{}, workspace, leaseID, "readiness-gone", true)
 	server.Status = "failed"
 	server.Labels["state"] = "failed"
 	server.Labels["keep"] = "true"
 	server.Labels["brev_recovery"] = "kept_acquire_failed"
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "readiness-gone", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "readiness-gone", core.Config{Provider: providerName}, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	updateNvidiaBrevClaim(t, state, leaseID, func(claim map[string]any) {
@@ -884,12 +885,12 @@ func TestNvidiaBrevKnownIDReadinessFailureClaimExpiresOnExplicitRelease(t *testi
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	releaseTarget, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	releaseTarget, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: releaseTarget}); err != nil {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: releaseTarget}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, claimErr := resolveLeaseClaimForProvider(leaseID); claimErr != nil || ok {
@@ -908,8 +909,8 @@ func TestNvidiaBrevAcquireRollsBackWorkspaceObservedAfterCreateFailure(t *testin
 		{args: "delete ws-create-observed"},
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}, RequestedSlug: "create-observed"})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "create-observed"})
 	if err == nil || !strings.Contains(err.Error(), "response lost") {
 		t.Fatalf("err=%v, want create failure", err)
 	}
@@ -933,7 +934,7 @@ func TestNvidiaBrevAcquireRollbackDeletesKnownWorkspaceWhenClaimPersistenceFails
   IdentityFile "`+filepath.Join(home, ".brev", "brev.pem")+`"
 `)
 	oldPersist := persistLeaseTargetForRepoConfig
-	persistLeaseTargetForRepoConfig = func(string, string, Config, Server, SSHTarget, string, bool) error {
+	persistLeaseTargetForRepoConfig = func(string, string, core.Config, core.Server, core.SSHTarget, string, bool) error {
 		return errors.New("state disk full")
 	}
 	defer func() { persistLeaseTargetForRepoConfig = oldPersist }()
@@ -945,8 +946,8 @@ func TestNvidiaBrevAcquireRollbackDeletesKnownWorkspaceWhenClaimPersistenceFails
 		{args: "delete ws-persist-fail"},
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}, RequestedSlug: "persist-fail"})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "persist-fail"})
 	if err == nil || !strings.Contains(err.Error(), "state disk full") {
 		t.Fatalf("err=%v, want persistence failure", err)
 	}
@@ -968,8 +969,8 @@ func TestNvidiaBrevResolveStartsStoppedWorkspaceBeforeSSH(t *testing.T) {
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop","name":"crabbox-stopped-cbx123456789","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY"}]}`},
 		{args: "refresh"},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "ws-stop"})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "ws-stop"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -985,13 +986,13 @@ func TestNvidiaBrevResolveDoesNotStartStoppedWorkspaceForStaleClaim(t *testing.T
 	state, _ := isolateNvidiaBrevState(t)
 	leaseID := "cbx_555566667777"
 	workspace := brevWorkspace{ID: "ws-stale-start", Name: "crabbox-stale-start-555566667777", Status: "STOPPED"}
-	server := workspaceToServer(Config{}, workspace, leaseID, "stale-start", false)
+	server := workspaceToServer(core.Config{}, workspace, leaseID, "stale-start", false)
 	repoRoot := t.TempDir()
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "stale-start", Config{Provider: providerName}, server, SSHTarget{}, repoRoot, false); err != nil {
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "stale-start", core.Config{Provider: providerName}, server, core.SSHTarget{}, repoRoot, false); err != nil {
 		t.Fatal(err)
 	}
 	started := false
-	runner := &fakeRunner{run: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &fakeRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "ls --json --all":
 			updateNvidiaBrevClaim(t, state, leaseID, func(claim map[string]any) {
@@ -999,16 +1000,16 @@ func TestNvidiaBrevResolveDoesNotStartStoppedWorkspaceForStaleClaim(t *testing.T
 				labels["last_touched_at"] = "1800000000"
 				labels["expires_at"] = "1800000300"
 			})
-			return LocalCommandResult{Stdout: `{"workspaces":[{"id":"ws-stale-start","name":"crabbox-stale-start-555566667777","status":"STOPPED"}]}`}, nil
+			return core.LocalCommandResult{Stdout: `{"workspaces":[{"id":"ws-stale-start","name":"crabbox-stale-start-555566667777","status":"STOPPED"}]}`}, nil
 		case "start ws-stale-start --detached":
 			started = true
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		default:
-			return LocalCommandResult{}, fmt.Errorf("unexpected command: %s", strings.Join(req.Args, " "))
+			return core.LocalCommandResult{}, fmt.Errorf("unexpected command: %s", strings.Join(req.Args, " "))
 		}
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, Repo: Repo{Root: repoRoot}})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: repoRoot}})
 	if err == nil || !strings.Contains(err.Error(), "claim changed; retry") {
 		t.Fatalf("err=%v, want stale claim conflict", err)
 	}
@@ -1022,7 +1023,7 @@ func TestNvidiaBrevResolvePreservesClaimLabels(t *testing.T) {
 	leaseID := "cbx_123456789abc"
 	slug := "preserved"
 	repoRoot := t.TempDir()
-	cfg := Config{Provider: providerName, IdleTimeout: 45 * time.Minute, TTL: 3 * time.Hour}
+	cfg := core.Config{Provider: providerName, IdleTimeout: 45 * time.Minute, TTL: 3 * time.Hour}
 	workspace := brevWorkspace{
 		ID:           "ws-preserved",
 		Name:         "crabbox-preserved-123456789abc",
@@ -1035,7 +1036,7 @@ func TestNvidiaBrevResolvePreservesClaimLabels(t *testing.T) {
 		GPU:          "L40S",
 	}
 	server := workspaceToServer(cfg, workspace, leaseID, slug, true)
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, slug, cfg, server, SSHTarget{}, repoRoot, false); err != nil {
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{}, repoRoot, false); err != nil {
 		t.Fatal(err)
 	}
 	updateNvidiaBrevClaim(t, state, leaseID, func(claim map[string]any) {
@@ -1053,8 +1054,8 @@ func TestNvidiaBrevResolvePreservesClaimLabels(t *testing.T) {
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-preserved","name":"crabbox-preserved-123456789abc","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY"}]}`},
 		{args: "refresh"},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, Repo: Repo{Root: repoRoot}})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: repoRoot}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1093,8 +1094,8 @@ func TestNvidiaBrevResolveDoesNotOverwriteConcurrentTouch(t *testing.T) {
 		ShellStatus:  "READY",
 		HealthStatus: "HEALTHY",
 	}
-	server := workspaceToServer(Config{}, workspace, leaseID, slug, true)
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, slug, Config{Provider: providerName}, server, SSHTarget{}, repoRoot, false); err != nil {
+	server := workspaceToServer(core.Config{}, workspace, leaseID, slug, true)
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, slug, core.Config{Provider: providerName}, server, core.SSHTarget{}, repoRoot, false); err != nil {
 		t.Fatal(err)
 	}
 	writeBrevSSHConfig(t, home, `Host crabbox-concurrent-abcdef123456
@@ -1102,23 +1103,23 @@ func TestNvidiaBrevResolveDoesNotOverwriteConcurrentTouch(t *testing.T) {
   User brev
   IdentityFile "`+filepath.Join(home, ".brev", "brev.pem")+`"
 `)
-	runner := &fakeRunner{run: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &fakeRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "ls --json --all":
-			return LocalCommandResult{Stdout: `{"workspaces":[{"id":"ws-concurrent","name":"crabbox-concurrent-abcdef123456","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY"}]}`}, nil
+			return core.LocalCommandResult{Stdout: `{"workspaces":[{"id":"ws-concurrent","name":"crabbox-concurrent-abcdef123456","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY"}]}`}, nil
 		case "refresh":
 			updateNvidiaBrevClaim(t, state, leaseID, func(claim map[string]any) {
 				labels := claim["labels"].(map[string]any)
 				labels["last_touched_at"] = "1800000000"
 				labels["expires_at"] = "1800000300"
 			})
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		default:
-			return LocalCommandResult{}, fmt.Errorf("unexpected command: %s", strings.Join(req.Args, " "))
+			return core.LocalCommandResult{}, fmt.Errorf("unexpected command: %s", strings.Join(req.Args, " "))
 		}
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, Repo: Repo{Root: repoRoot}})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: repoRoot}})
 	if err == nil || !strings.Contains(err.Error(), "claim changed; retry") {
 		t.Fatalf("err=%v, want concurrent claim conflict", err)
 	}
@@ -1135,17 +1136,17 @@ func TestNvidiaBrevClaimedLifecycleRejectsOrganizationMismatchBeforeInventory(t 
 	isolateNvidiaBrevState(t)
 	leaseID := "cbx_123456789ac3"
 	workspace := brevWorkspace{ID: "ws-org-mismatch", Name: "crabbox-org-mismatch-123456789ac3", Status: "RUNNING"}
-	server := workspaceToServer(Config{}, workspace, leaseID, "org-mismatch", false)
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "org-mismatch", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
+	server := workspaceToServer(core.Config{}, workspace, leaseID, "org-mismatch", false)
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "org-mismatch", core.Config{Provider: providerName}, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	writeBrevActiveOrg(t, "org-other")
 	runner := &scriptedBrevRunner{}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	if _, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID}); err == nil || !strings.Contains(err.Error(), "active Brev organization changed") {
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	if _, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID}); err == nil || !strings.Contains(err.Error(), "active Brev organization changed") {
 		t.Fatalf("resolve err=%v, want organization mismatch", err)
 	}
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID}}); err == nil || !strings.Contains(err.Error(), "active Brev organization changed") {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID}}); err == nil || !strings.Contains(err.Error(), "active Brev organization changed") {
 		t.Fatalf("release err=%v, want organization mismatch", err)
 	}
 	if got := runner.joinedCalls(); got != "" {
@@ -1163,8 +1164,8 @@ func TestNvidiaBrevAcquireKeepSkipsRollback(t *testing.T) {
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-keep","name":"{createdName}","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY"}]}`},
 		{args: "refresh"},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{NvidiaBrev: NvidiaBrevConfig{GPUName: "A100", Mode: "vm"}}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}, RequestedSlug: "keep", Keep: true})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{NvidiaBrev: core.NvidiaBrevConfig{GPUName: "A100", Mode: "vm"}}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "keep", Keep: true})
 	if err == nil {
 		t.Fatal("expected acquire failure")
 	}
@@ -1196,8 +1197,8 @@ func TestNvidiaBrevResolveParsesProxySSHConfig(t *testing.T) {
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-proxy","name":"crabbox-proxy-cbx123456789","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY"}]}`},
 		{args: "refresh"},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "ws-proxy"})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "ws-proxy"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1211,8 +1212,8 @@ func TestNvidiaBrevResolveRejectsConfiguredOrgForSSHConfigSafety(t *testing.T) {
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls --json --org example-org --all", stdout: `{"workspaces":[{"id":"ws-proxy","name":"crabbox-proxy-cbx123456789","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY"}]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{NvidiaBrev: NvidiaBrevConfig{Org: "example-org"}}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: "ws-proxy"})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{NvidiaBrev: core.NvidiaBrevConfig{Org: "example-org"}}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "ws-proxy"})
 	if err == nil || !strings.Contains(err.Error(), "brev refresh does not support --org") || strings.Contains(err.Error(), "example-org") {
 		t.Fatalf("err=%v, want safe org-scoped SSH rejection without org value", err)
 	}
@@ -1227,15 +1228,15 @@ func TestNvidiaBrevListFiltersOwnedByDefault(t *testing.T) {
 		{args: "ls --json", stdout: `{"workspaces":[{"id":"ws-owned","name":"crabbox-owned-cbx123456789","status":"RUNNING"},{"id":"ws-manual","name":"manual-workspace","status":"RUNNING"}]}`},
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-owned","name":"crabbox-owned-cbx123456789","status":"RUNNING"},{"id":"ws-manual","name":"manual-workspace","status":"RUNNING"}]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	owned, err := backend.List(context.Background(), ListRequest{})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	owned, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(owned) != 1 || owned[0].CloudID != "ws-owned" {
 		t.Fatalf("owned list=%#v", owned)
 	}
-	all, err := backend.List(context.Background(), ListRequest{All: true})
+	all, err := backend.List(context.Background(), core.ListRequest{All: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1248,19 +1249,19 @@ func TestNvidiaBrevListAssociatesDelayedWorkspaceWithNameOnlyRecoveryClaim(t *te
 	isolateNvidiaBrevState(t)
 	leaseID := "cbx_123456789abc"
 	workspace := brevWorkspace{Name: "crabbox-delayed-list-123456789abc", Status: "CREATING"}
-	server := workspaceToServer(Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}, workspace, leaseID, "delayed-list", true)
+	server := workspaceToServer(core.Config{NvidiaBrev: core.NvidiaBrevConfig{ReleaseAction: "stop"}}, workspace, leaseID, "delayed-list", true)
 	server.Status = "failed"
 	server.Labels["state"] = "failed"
 	server.Labels["keep"] = "true"
 	server.Labels["brev_recovery"] = "create_unknown"
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "delayed-list", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "delayed-list", core.Config{Provider: providerName}, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls --json", stdout: `{"workspaces":[{"id":"ws-delayed-list","name":"crabbox-delayed-list-123456789abc","status":"RUNNING"}]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	servers, err := backend.List(context.Background(), ListRequest{})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	servers, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1276,8 +1277,8 @@ func TestNvidiaBrevListAssociatesDelayedWorkspaceWithNameOnlyRecoveryClaim(t *te
 func TestNvidiaBrevReleaseDeleteRemovesClaimAfterProviderSuccess(t *testing.T) {
 	isolateNvidiaBrevState(t)
 	leaseID := "cbx_123456789abc"
-	server := workspaceToServer(Config{}, brevWorkspace{ID: "ws-delete", Name: "crabbox-delete-123456789abc", Status: "RUNNING"}, leaseID, "delete", false)
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "delete", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
+	server := workspaceToServer(core.Config{}, brevWorkspace{ID: "ws-delete", Name: "crabbox-delete-123456789abc", Status: "RUNNING"}, leaseID, "delete", false)
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "delete", core.Config{Provider: providerName}, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
@@ -1285,8 +1286,8 @@ func TestNvidiaBrevReleaseDeleteRemovesClaimAfterProviderSuccess(t *testing.T) {
 		{args: "delete ws-delete"},
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil || !outcome.Terminal {
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil || !outcome.Terminal {
 		t.Fatalf("deletion outcome=%+v err=%v", outcome, err)
 	}
 	if _, ok, err := resolveLeaseClaimForProvider(leaseID); err != nil || ok {
@@ -1298,8 +1299,8 @@ func TestNvidiaBrevReleaseDeleteRetainsClaimUntilWorkspaceDisappears(t *testing.
 	isolateNvidiaBrevState(t)
 	leaseID := "cbx_123456789abd"
 	workspace := brevWorkspace{ID: "ws-delete-pending", Name: "crabbox-delete-pending-123456789abd", Status: "DELETING"}
-	server := workspaceToServer(Config{}, workspace, leaseID, "delete-pending", false)
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "delete-pending", Config{Provider: providerName}, server, SSHTarget{Host: "203.0.113.9", Port: "22", User: "brev"}, t.TempDir(), false); err != nil {
+	server := workspaceToServer(core.Config{}, workspace, leaseID, "delete-pending", false)
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "delete-pending", core.Config{Provider: providerName}, server, core.SSHTarget{Host: "203.0.113.9", Port: "22", User: "brev"}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	claim, ok, err := resolveLeaseClaimForProvider(leaseID)
@@ -1310,7 +1311,7 @@ func TestNvidiaBrevReleaseDeleteRetainsClaimUntilWorkspaceDisappears(t *testing.
 		{args: "delete ws-delete-pending"},
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-delete-pending","name":"crabbox-delete-pending-123456789abd","status":"DELETING"}]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
 	client, err := backend.client()
 	if err != nil {
 		t.Fatal(err)
@@ -1331,12 +1332,12 @@ func TestNvidiaBrevReleaseDeleteRetainsClaimUntilWorkspaceDisappears(t *testing.
 		t.Fatalf("pending deletion org=%q want org-test", pending.Labels["brev_org_id"])
 	}
 	for _, identifier := range []string{leaseID, "delete-pending", workspace.ID, workspace.Name} {
-		if _, err := backend.Resolve(context.Background(), ResolveRequest{ID: identifier}); err == nil || !strings.Contains(err.Error(), "is deleting") {
+		if _, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: identifier}); err == nil || !strings.Contains(err.Error(), "is deleting") {
 			t.Fatalf("normal resolve id=%q err=%v, want deleting rejection", identifier, err)
 		}
 	}
 	writeBrevActiveOrg(t, "org-other")
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{Server: Server{CloudID: workspace.ID}}}); err == nil || !strings.Contains(err.Error(), "active Brev organization changed") {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{Server: core.Server{CloudID: workspace.ID}}}); err == nil || !strings.Contains(err.Error(), "active Brev organization changed") {
 		t.Fatalf("cross-org release err=%v, want scope rejection", err)
 	}
 	if _, ok, err := resolveLeaseClaimForProvider(leaseID); err != nil || !ok {
@@ -1344,14 +1345,14 @@ func TestNvidiaBrevReleaseDeleteRetainsClaimUntilWorkspaceDisappears(t *testing.
 	}
 	writeBrevActiveOrg(t, "org-test")
 	runner.responses = append(runner.responses, scriptedBrevResponse{args: "ls --json --all", stdout: `{"workspaces":[]}`})
-	releaseTarget, err := backend.Resolve(context.Background(), ResolveRequest{ID: workspace.Name, StatusOnly: true})
+	releaseTarget, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: workspace.Name, StatusOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if releaseTarget.Server.Status != "deleting" || releaseTarget.Server.CloudID != "ws-delete-pending" {
 		t.Fatalf("release target=%#v", releaseTarget)
 	}
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{Server: Server{CloudID: workspace.ID}}}); err != nil {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{Server: core.Server{CloudID: workspace.ID}}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := resolveLeaseClaimForProvider(leaseID); err != nil || ok {
@@ -1366,16 +1367,16 @@ func TestNvidiaBrevReleaseDeletePersistsRecoveryBeforeProviderCommand(t *testing
 	isolateNvidiaBrevState(t)
 	leaseID := "cbx_123456789ac0"
 	workspace := brevWorkspace{ID: "ws-delete-retry", Name: "crabbox-delete-retry-123456789ac0", Status: "RUNNING"}
-	server := workspaceToServer(Config{}, workspace, leaseID, "delete-retry", false)
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "delete-retry", Config{Provider: providerName}, server, SSHTarget{Host: "203.0.113.9", Port: "22", User: "brev"}, t.TempDir(), false); err != nil {
+	server := workspaceToServer(core.Config{}, workspace, leaseID, "delete-retry", false)
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "delete-retry", core.Config{Provider: providerName}, server, core.SSHTarget{Host: "203.0.113.9", Port: "22", User: "brev"}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-delete-retry","name":"crabbox-delete-retry-123456789ac0","status":"RUNNING"}]}`},
 		{args: "delete ws-delete-retry", err: errors.New("provider delete interrupted")},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID}})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID}})
 	if err == nil || !strings.Contains(err.Error(), "provider delete interrupted") {
 		t.Fatalf("release err=%v, want provider delete failure", err)
 	}
@@ -1391,7 +1392,7 @@ func TestNvidiaBrevReleaseDeletePersistsRecoveryBeforeProviderCommand(t *testing
 		scriptedBrevResponse{args: "delete ws-delete-retry"},
 		scriptedBrevResponse{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 	)
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID}}); err != nil {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := resolveLeaseClaimForProvider(leaseID); err != nil || ok {
@@ -1406,8 +1407,8 @@ func TestNvidiaBrevReleaseBackfillsLegacyClaimOrganizationScope(t *testing.T) {
 	state, _ := isolateNvidiaBrevState(t)
 	leaseID := "cbx_123456789ac1"
 	workspace := brevWorkspace{ID: "ws-delete-legacy", Name: "crabbox-delete-legacy-123456789ac1", Status: "RUNNING"}
-	server := workspaceToServer(Config{}, workspace, leaseID, "delete-legacy", false)
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "delete-legacy", Config{Provider: providerName}, server, SSHTarget{Host: "203.0.113.9", Port: "22", User: "brev"}, t.TempDir(), false); err != nil {
+	server := workspaceToServer(core.Config{}, workspace, leaseID, "delete-legacy", false)
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "delete-legacy", core.Config{Provider: providerName}, server, core.SSHTarget{Host: "203.0.113.9", Port: "22", User: "brev"}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	updateNvidiaBrevClaim(t, state, leaseID, func(claim map[string]any) {
@@ -1420,8 +1421,8 @@ func TestNvidiaBrevReleaseBackfillsLegacyClaimOrganizationScope(t *testing.T) {
 		{args: "delete ws-delete-legacy"},
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID}}); err != nil {
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := resolveLeaseClaimForProvider(leaseID); err != nil || ok {
@@ -1436,19 +1437,19 @@ func TestNvidiaBrevAmbiguousCreateRecoveryRetainsNameOnlyClaimDuringGrace(t *tes
 	state, _ := isolateNvidiaBrevState(t)
 	leaseID := "cbx_123456789ac2"
 	workspace := brevWorkspace{Name: "crabbox-create-unknown-123456789ac2", Status: "CREATING"}
-	server := workspaceToServer(Config{}, workspace, leaseID, "create-unknown", false)
+	server := workspaceToServer(core.Config{}, workspace, leaseID, "create-unknown", false)
 	server.Status = "deleting"
 	server.Labels["state"] = "deleting"
 	server.Labels["brev_recovery"] = "create_unknown"
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "create-unknown", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "create-unknown", core.Config{Provider: providerName}, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID}})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID}})
 	if err == nil || !strings.Contains(err.Error(), "ambiguous create recovery claim retained") {
 		t.Fatalf("release err=%v, want grace retention", err)
 	}
@@ -1459,7 +1460,7 @@ func TestNvidiaBrevAmbiguousCreateRecoveryRetainsNameOnlyClaimDuringGrace(t *tes
 		labels := claim["labels"].(map[string]any)
 		labels["created_at"] = fmt.Sprint(time.Now().Add(-brevCreateRecoveryGrace - time.Minute).Unix())
 	})
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID}}); err != nil {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := resolveLeaseClaimForProvider(leaseID); err != nil || ok {
@@ -1471,8 +1472,8 @@ func TestNvidiaBrevCleanupReconcilesDeletingClaimAfterWorkspaceDisappears(t *tes
 	state, _ := isolateNvidiaBrevState(t)
 	leaseID := "cbx_123456789abe"
 	workspace := brevWorkspace{ID: "ws-delete-gone", Name: "crabbox-delete-gone-123456789abe", Status: "RUNNING"}
-	server := workspaceToServer(Config{}, workspace, leaseID, "delete-gone", false)
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "delete-gone", Config{Provider: providerName}, server, SSHTarget{Host: "203.0.113.9", Port: "22", User: "brev"}, t.TempDir(), false); err != nil {
+	server := workspaceToServer(core.Config{}, workspace, leaseID, "delete-gone", false)
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "delete-gone", core.Config{Provider: providerName}, server, core.SSHTarget{Host: "203.0.113.9", Port: "22", User: "brev"}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	updateNvidiaBrevClaim(t, state, leaseID, func(claim map[string]any) {
@@ -1487,8 +1488,8 @@ func TestNvidiaBrevCleanupReconcilesDeletingClaimAfterWorkspaceDisappears(t *tes
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 	}}
 	var stderr strings.Builder
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*nvidiaBrevBackend)
-	if err := backend.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*nvidiaBrevBackend)
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := resolveLeaseClaimForProvider(leaseID); err != nil || !ok {
@@ -1497,7 +1498,7 @@ func TestNvidiaBrevCleanupReconcilesDeletingClaimAfterWorkspaceDisappears(t *tes
 	if !strings.Contains(stderr.String(), "state=deleting present=false") {
 		t.Fatalf("cleanup stderr=%q", stderr.String())
 	}
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := resolveLeaseClaimForProvider(leaseID); err != nil || ok {
@@ -1512,8 +1513,8 @@ func TestNvidiaBrevDeletingClaimRejectsOrgScopedLifecycle(t *testing.T) {
 	state, _ := isolateNvidiaBrevState(t)
 	leaseID := "cbx_123456789abf"
 	workspace := brevWorkspace{ID: "ws-delete-org", Name: "crabbox-delete-org-123456789abf", Status: "RUNNING"}
-	server := workspaceToServer(Config{}, workspace, leaseID, "delete-org", false)
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "delete-org", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
+	server := workspaceToServer(core.Config{}, workspace, leaseID, "delete-org", false)
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "delete-org", core.Config{Provider: providerName}, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	updateNvidiaBrevClaim(t, state, leaseID, func(claim map[string]any) {
@@ -1523,19 +1524,19 @@ func TestNvidiaBrevDeletingClaimRejectsOrgScopedLifecycle(t *testing.T) {
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls --json --org example-org --all", stdout: `{"workspaces":[{"id":"ws-delete-org","name":"crabbox-delete-org-123456789abf","status":"DELETING"}]}`},
 	}}
-	cfg := Config{NvidiaBrev: NvidiaBrevConfig{Org: "example-org"}}
+	cfg := core.Config{NvidiaBrev: core.NvidiaBrevConfig{Org: "example-org"}}
 	var stderr strings.Builder
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), cfg, Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*nvidiaBrevBackend)
-	if err := backend.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), cfg, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*nvidiaBrevBackend)
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatalf("org-scoped dry-run err=%v", err)
 	}
 	if !strings.Contains(stderr.String(), "state=deleting present=true") {
 		t.Fatalf("org-scoped dry-run stderr=%q", stderr.String())
 	}
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err == nil || !strings.Contains(err.Error(), "scopes read-only Brev inventory") {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err == nil || !strings.Contains(err.Error(), "scopes read-only Brev inventory") {
 		t.Fatalf("cleanup err=%v, want org-scoped lifecycle rejection", err)
 	}
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID}}); err == nil || !strings.Contains(err.Error(), "scopes read-only Brev inventory") {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID}}); err == nil || !strings.Contains(err.Error(), "scopes read-only Brev inventory") {
 		t.Fatalf("release err=%v, want org-scoped lifecycle rejection", err)
 	}
 	if _, ok, err := resolveLeaseClaimForProvider(leaseID); err != nil || !ok {
@@ -1549,16 +1550,16 @@ func TestNvidiaBrevDeletingClaimRejectsOrgScopedLifecycle(t *testing.T) {
 func TestNvidiaBrevReleaseStopRetainsClaimOnProviderFailure(t *testing.T) {
 	isolateNvidiaBrevState(t)
 	leaseID := "cbx_abcdef123456"
-	server := workspaceToServer(Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}, brevWorkspace{ID: "ws-stop", Name: "crabbox-stop-abcdef123456", Status: "RUNNING"}, leaseID, "stop", false)
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "stop", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
+	server := workspaceToServer(core.Config{NvidiaBrev: core.NvidiaBrevConfig{ReleaseAction: "stop"}}, brevWorkspace{ID: "ws-stop", Name: "crabbox-stop-abcdef123456", Status: "RUNNING"}, leaseID, "stop", false)
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "stop", core.Config{Provider: providerName}, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop","name":"crabbox-stop-abcdef123456","status":"RUNNING"}]}`},
 		{args: "stop ws-stop", err: errors.New("provider refused stop")},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err == nil {
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err == nil {
 		t.Fatal("expected release failure")
 	}
 	if _, ok, err := resolveLeaseClaimForProvider(leaseID); err != nil || !ok {
@@ -1570,8 +1571,8 @@ func TestNvidiaBrevStopDoesNotMutateProviderForStaleClaim(t *testing.T) {
 	state, _ := isolateNvidiaBrevState(t)
 	leaseID := "cbx_999900001111"
 	workspace := brevWorkspace{ID: "ws-stale", Name: "crabbox-stale-999900001111", Status: "RUNNING"}
-	server := workspaceToServer(Config{}, workspace, leaseID, "stale", false)
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "stale", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
+	server := workspaceToServer(core.Config{}, workspace, leaseID, "stale", false)
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "stale", core.Config{Provider: providerName}, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	stale, ok, err := resolveLeaseClaimForProvider(leaseID)
@@ -1584,7 +1585,7 @@ func TestNvidiaBrevStopDoesNotMutateProviderForStaleClaim(t *testing.T) {
 		labels["expires_at"] = "1800000300"
 	})
 	runner := &scriptedBrevRunner{}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{NvidiaBrev: core.NvidiaBrevConfig{ReleaseAction: "stop"}}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
 	client, err := backend.client()
 	if err != nil {
 		t.Fatal(err)
@@ -1602,8 +1603,8 @@ func TestNvidiaBrevDeleteDoesNotMutateProviderForStaleClaim(t *testing.T) {
 	state, _ := isolateNvidiaBrevState(t)
 	leaseID := "cbx_999900002222"
 	workspace := brevWorkspace{ID: "ws-stale-delete", Name: "crabbox-stale-delete-999900002222", Status: "RUNNING"}
-	server := workspaceToServer(Config{}, workspace, leaseID, "stale-delete", false)
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "stale-delete", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
+	server := workspaceToServer(core.Config{}, workspace, leaseID, "stale-delete", false)
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "stale-delete", core.Config{Provider: providerName}, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	stale, ok, err := resolveLeaseClaimForProvider(leaseID)
@@ -1615,7 +1616,7 @@ func TestNvidiaBrevDeleteDoesNotMutateProviderForStaleClaim(t *testing.T) {
 		labels["last_touched_at"] = "1800000000"
 	})
 	runner := &scriptedBrevRunner{}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
 	client, err := backend.client()
 	if err != nil {
 		t.Fatal(err)
@@ -1632,8 +1633,8 @@ func TestNvidiaBrevDeleteDoesNotMutateProviderForStaleClaim(t *testing.T) {
 func TestNvidiaBrevReleaseStopRetainsStoppedClaimOnSuccess(t *testing.T) {
 	state, _ := isolateNvidiaBrevState(t)
 	leaseID := "cbx_111122223333"
-	server := workspaceToServer(Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}, brevWorkspace{ID: "ws-stop", Name: "crabbox-stop-111122223333", Status: "RUNNING"}, leaseID, "stop", true)
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "stop", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
+	server := workspaceToServer(core.Config{NvidiaBrev: core.NvidiaBrevConfig{ReleaseAction: "stop"}}, brevWorkspace{ID: "ws-stop", Name: "crabbox-stop-111122223333", Status: "RUNNING"}, leaseID, "stop", true)
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "stop", core.Config{Provider: providerName}, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	updateNvidiaBrevClaim(t, state, leaseID, func(claim map[string]any) {
@@ -1645,8 +1646,8 @@ func TestNvidiaBrevReleaseStopRetainsStoppedClaimOnSuccess(t *testing.T) {
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop","name":"crabbox-stop-111122223333","status":"RUNNING"}]}`},
 		{args: "stop ws-stop"},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil || outcome.Terminal {
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil || outcome.Terminal {
 		t.Fatalf("stop outcome=%+v err=%v", outcome, err)
 	}
 	claim, ok, err := resolveLeaseClaimForProvider(leaseID)
@@ -1661,8 +1662,8 @@ func TestNvidiaBrevReleaseStopRetainsStoppedClaimOnSuccess(t *testing.T) {
 func TestNvidiaBrevExplicitDeleteOverridesStoredStopPolicy(t *testing.T) {
 	isolateNvidiaBrevState(t)
 	leaseID := "cbx_444455556666"
-	server := workspaceToServer(Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}, brevWorkspace{ID: "ws-override", Name: "crabbox-override-444455556666", Status: "RUNNING"}, leaseID, "override", false)
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "override", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
+	server := workspaceToServer(core.Config{NvidiaBrev: core.NvidiaBrevConfig{ReleaseAction: "stop"}}, brevWorkspace{ID: "ws-override", Name: "crabbox-override-444455556666", Status: "RUNNING"}, leaseID, "override", false)
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "override", core.Config{Provider: providerName}, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
@@ -1670,10 +1671,10 @@ func TestNvidiaBrevExplicitDeleteOverridesStoredStopPolicy(t *testing.T) {
 		{args: "delete ws-override"},
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 	}}
-	cfg := Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "delete"}}
+	cfg := core.Config{NvidiaBrev: core.NvidiaBrevConfig{ReleaseAction: "delete"}}
 	markReleaseActionExplicit(&cfg)
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), cfg, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), cfg, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := resolveLeaseClaimForProvider(leaseID); err != nil || ok {
@@ -1684,18 +1685,18 @@ func TestNvidiaBrevExplicitDeleteOverridesStoredStopPolicy(t *testing.T) {
 func TestNvidiaBrevExplicitStopOverridesAndReplacesStoredDeletePolicy(t *testing.T) {
 	isolateNvidiaBrevState(t)
 	leaseID := "cbx_555566667777"
-	server := workspaceToServer(Config{}, brevWorkspace{ID: "ws-stop-override", Name: "crabbox-stop-override-555566667777", Status: "RUNNING"}, leaseID, "stop-override", false)
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "stop-override", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
+	server := workspaceToServer(core.Config{}, brevWorkspace{ID: "ws-stop-override", Name: "crabbox-stop-override-555566667777", Status: "RUNNING"}, leaseID, "stop-override", false)
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "stop-override", core.Config{Provider: providerName}, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop-override","name":"crabbox-stop-override-555566667777","status":"RUNNING"}]}`},
 		{args: "stop ws-stop-override"},
 	}}
-	cfg := Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}
+	cfg := core.Config{NvidiaBrev: core.NvidiaBrevConfig{ReleaseAction: "stop"}}
 	markReleaseActionExplicit(&cfg)
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), cfg, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), cfg, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
 		t.Fatal(err)
 	}
 	claim, ok, err := resolveLeaseClaimForProvider(leaseID)
@@ -1708,35 +1709,35 @@ func TestNvidiaBrevExplicitStopOverridesAndReplacesStoredDeletePolicy(t *testing
 }
 
 func TestNvidiaBrevRetainLeaseClaimAfterReleaseUsesStoredPolicy(t *testing.T) {
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{}).(*nvidiaBrevBackend)
-	if !backend.RetainLeaseClaimAfterRelease(LeaseTarget{Server: Server{Labels: map[string]string{"release": "stop"}}}) {
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{}).(*nvidiaBrevBackend)
+	if !backend.RetainLeaseClaimAfterRelease(core.LeaseTarget{Server: core.Server{Labels: map[string]string{"release": "stop"}}}) {
 		t.Fatal("stored stop policy did not retain claim")
 	}
-	if backend.RetainLeaseClaimAfterRelease(LeaseTarget{Server: Server{Labels: map[string]string{"release": "delete"}}}) {
+	if backend.RetainLeaseClaimAfterRelease(core.LeaseTarget{Server: core.Server{Labels: map[string]string{"release": "delete"}}}) {
 		t.Fatal("stored delete policy retained claim")
 	}
-	cfg := Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "delete"}}
+	cfg := core.Config{NvidiaBrev: core.NvidiaBrevConfig{ReleaseAction: "delete"}}
 	markReleaseActionExplicit(&cfg)
-	backend = NewNvidiaBrevBackend(Provider{}.Spec(), cfg, Runtime{}).(*nvidiaBrevBackend)
-	if backend.RetainLeaseClaimAfterRelease(LeaseTarget{Server: Server{Labels: map[string]string{"release": "stop"}}}) {
+	backend = NewNvidiaBrevBackend(Provider{}.Spec(), cfg, core.Runtime{}).(*nvidiaBrevBackend)
+	if backend.RetainLeaseClaimAfterRelease(core.LeaseTarget{Server: core.Server{Labels: map[string]string{"release": "stop"}}}) {
 		t.Fatal("explicit delete policy did not override stored stop policy")
 	}
 	cfg.NvidiaBrev.ReleaseAction = "stop"
-	backend = NewNvidiaBrevBackend(Provider{}.Spec(), cfg, Runtime{}).(*nvidiaBrevBackend)
-	if backend.RetainLeaseClaimAfterRelease(LeaseTarget{Server: Server{Labels: map[string]string{"state": "deleting", "release": "delete"}}}) {
+	backend = NewNvidiaBrevBackend(Provider{}.Spec(), cfg, core.Runtime{}).(*nvidiaBrevBackend)
+	if backend.RetainLeaseClaimAfterRelease(core.LeaseTarget{Server: core.Server{Labels: map[string]string{"state": "deleting", "release": "delete"}}}) {
 		t.Fatal("deleting claim retained under explicit stop override")
 	}
 }
 
 func TestNvidiaBrevReleaseLeaseMessageUsesEffectivePolicy(t *testing.T) {
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		LeaseID: "cbx_123456789abc",
-		Server: Server{
+		Server: core.Server{
 			CloudID: "ws-message",
 			Labels:  map[string]string{"release": "stop"},
 		},
 	}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{}).(*nvidiaBrevBackend)
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{}).(*nvidiaBrevBackend)
 	if got := backend.ReleaseLeaseMessage(lease); got != "stopped lease=cbx_123456789abc workspace=ws-message retained=true" {
 		t.Fatalf("stop message=%q", got)
 	}
@@ -1744,9 +1745,9 @@ func TestNvidiaBrevReleaseLeaseMessageUsesEffectivePolicy(t *testing.T) {
 	if got := backend.ReleaseLeaseMessage(lease); got != "deleted lease=cbx_123456789abc workspace=ws-message" {
 		t.Fatalf("delete message=%q", got)
 	}
-	cfg := Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}
+	cfg := core.Config{NvidiaBrev: core.NvidiaBrevConfig{ReleaseAction: "stop"}}
 	markReleaseActionExplicit(&cfg)
-	backend = NewNvidiaBrevBackend(Provider{}.Spec(), cfg, Runtime{}).(*nvidiaBrevBackend)
+	backend = NewNvidiaBrevBackend(Provider{}.Spec(), cfg, core.Runtime{}).(*nvidiaBrevBackend)
 	if got := backend.ReleaseLeaseMessage(lease); got != "stopped lease=cbx_123456789abc workspace=ws-message retained=true" {
 		t.Fatalf("explicit stop message=%q", got)
 	}
@@ -1761,8 +1762,8 @@ func TestNvidiaBrevReleaseRefusesUnclaimedWorkspace(t *testing.T) {
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-manual","name":"manual-workspace","status":"RUNNING"}]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: "ws-manual"}})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "ws-manual"}})
 	if err == nil || !strings.Contains(err.Error(), "without a local Crabbox claim") {
 		t.Fatalf("err=%v", err)
 	}
@@ -1777,8 +1778,8 @@ func TestNvidiaBrevCleanupDryRunSkipsUnclaimedManualWorkspace(t *testing.T) {
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-owned","name":"crabbox-owned-123456789abc","status":"RUNNING"},{"id":"ws-manual","name":"manual-workspace","status":"RUNNING"}]}`},
 	}}
 	var stderr strings.Builder
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*nvidiaBrevBackend)
-	if err := backend.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*nvidiaBrevBackend)
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(runner.joinedCalls(), "delete") || strings.Contains(runner.joinedCalls(), "stop") {
@@ -1792,9 +1793,9 @@ func TestNvidiaBrevCleanupDryRunSkipsUnclaimedManualWorkspace(t *testing.T) {
 func TestNvidiaBrevCleanupDeletesOnlyCrabboxOwnedWorkspaces(t *testing.T) {
 	state, _ := isolateNvidiaBrevState(t)
 	leaseID := "cbx_123456789abc"
-	server := workspaceToServer(Config{}, brevWorkspace{ID: "ws-owned", Name: "crabbox-owned-123456789abc", Status: "RUNNING"}, leaseID, "owned", false)
-	cfg := Config{Provider: providerName, IdleTimeout: time.Hour, TTL: 24 * time.Hour}
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "owned", cfg, server, SSHTarget{}, t.TempDir(), false); err != nil {
+	server := workspaceToServer(core.Config{}, brevWorkspace{ID: "ws-owned", Name: "crabbox-owned-123456789abc", Status: "RUNNING"}, leaseID, "owned", false)
+	cfg := core.Config{Provider: providerName, IdleTimeout: time.Hour, TTL: 24 * time.Hour}
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "owned", cfg, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	markNvidiaBrevClaimLastUsed(t, state, leaseID, time.Now().Add(-2*time.Hour))
@@ -1803,8 +1804,8 @@ func TestNvidiaBrevCleanupDeletesOnlyCrabboxOwnedWorkspaces(t *testing.T) {
 		{args: "delete ws-owned"},
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := runner.joinedCalls(); !strings.Contains(got, "delete ws-owned") || strings.Contains(got, "delete ws-manual") {
@@ -1815,9 +1816,9 @@ func TestNvidiaBrevCleanupDeletesOnlyCrabboxOwnedWorkspaces(t *testing.T) {
 func TestNvidiaBrevCleanupStopRetainsStoppedClaim(t *testing.T) {
 	state, _ := isolateNvidiaBrevState(t)
 	leaseID := "cbx_777788889999"
-	server := workspaceToServer(Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}, brevWorkspace{ID: "ws-stop-cleanup", Name: "crabbox-stop-cleanup-777788889999", Status: "RUNNING"}, leaseID, "stop-cleanup", false)
-	cfg := Config{Provider: providerName, IdleTimeout: time.Hour, TTL: 24 * time.Hour}
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "stop-cleanup", cfg, server, SSHTarget{}, t.TempDir(), false); err != nil {
+	server := workspaceToServer(core.Config{NvidiaBrev: core.NvidiaBrevConfig{ReleaseAction: "stop"}}, brevWorkspace{ID: "ws-stop-cleanup", Name: "crabbox-stop-cleanup-777788889999", Status: "RUNNING"}, leaseID, "stop-cleanup", false)
+	cfg := core.Config{Provider: providerName, IdleTimeout: time.Hour, TTL: 24 * time.Hour}
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "stop-cleanup", cfg, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	markNvidiaBrevClaimLastUsed(t, state, leaseID, time.Now().Add(-2*time.Hour))
@@ -1827,8 +1828,8 @@ func TestNvidiaBrevCleanupStopRetainsStoppedClaim(t *testing.T) {
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop-cleanup","name":"crabbox-stop-cleanup-777788889999","status":"STOPPED"}]}`},
 	}}
 	var stderr strings.Builder
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*nvidiaBrevBackend)
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*nvidiaBrevBackend)
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	claim, ok, err := resolveLeaseClaimForProvider(leaseID)
@@ -1838,7 +1839,7 @@ func TestNvidiaBrevCleanupStopRetainsStoppedClaim(t *testing.T) {
 	if claim.Labels["state"] != "stopped" {
 		t.Fatalf("claim state=%q want stopped: %#v", claim.Labels["state"], claim)
 	}
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := runner.joinedCalls(); strings.Count(got, "stop ws-stop-cleanup") != 1 {
@@ -1853,16 +1854,16 @@ func TestNvidiaBrevCleanupReconcilesAlreadyStoppedClaim(t *testing.T) {
 	isolateNvidiaBrevState(t)
 	leaseID := "cbx_222233334444"
 	workspace := brevWorkspace{ID: "ws-external-stop", Name: "crabbox-external-stop-222233334444", Status: "STOPPED"}
-	server := workspaceToServer(Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}, brevWorkspace{ID: workspace.ID, Name: workspace.Name, Status: "RUNNING"}, leaseID, "external-stop", false)
-	cfg := Config{Provider: providerName, IdleTimeout: time.Hour}
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "external-stop", cfg, server, SSHTarget{Host: "203.0.113.8", Port: "22", User: "brev"}, t.TempDir(), false); err != nil {
+	server := workspaceToServer(core.Config{NvidiaBrev: core.NvidiaBrevConfig{ReleaseAction: "stop"}}, brevWorkspace{ID: workspace.ID, Name: workspace.Name, Status: "RUNNING"}, leaseID, "external-stop", false)
+	cfg := core.Config{Provider: providerName, IdleTimeout: time.Hour}
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "external-stop", cfg, server, core.SSHTarget{Host: "203.0.113.8", Port: "22", User: "brev"}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-external-stop","name":"crabbox-external-stop-222233334444","status":"STOPPED"}]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(runner.joinedCalls(), "stop ws-external-stop") {
@@ -1880,9 +1881,9 @@ func TestNvidiaBrevCleanupReconcilesAlreadyStoppedClaim(t *testing.T) {
 func TestNvidiaBrevCleanupHonorsExpiredTTLLabel(t *testing.T) {
 	state, _ := isolateNvidiaBrevState(t)
 	leaseID := "cbx_aaaabbbbcccc"
-	server := workspaceToServer(Config{}, brevWorkspace{ID: "ws-ttl", Name: "crabbox-ttl-aaaabbbbcccc", Status: "RUNNING"}, leaseID, "ttl", false)
-	cfg := Config{Provider: providerName, IdleTimeout: 24 * time.Hour, TTL: time.Hour}
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "ttl", cfg, server, SSHTarget{}, t.TempDir(), false); err != nil {
+	server := workspaceToServer(core.Config{}, brevWorkspace{ID: "ws-ttl", Name: "crabbox-ttl-aaaabbbbcccc", Status: "RUNNING"}, leaseID, "ttl", false)
+	cfg := core.Config{Provider: providerName, IdleTimeout: 24 * time.Hour, TTL: time.Hour}
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "ttl", cfg, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	updateNvidiaBrevClaim(t, state, leaseID, func(claim map[string]any) {
@@ -1895,8 +1896,8 @@ func TestNvidiaBrevCleanupHonorsExpiredTTLLabel(t *testing.T) {
 		{args: "delete ws-ttl"},
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := runner.joinedCalls(); !strings.Contains(got, "delete ws-ttl") {
@@ -1908,13 +1909,13 @@ func TestNvidiaBrevCleanupPreservesActiveAndKeepClaims(t *testing.T) {
 	state, _ := isolateNvidiaBrevState(t)
 	activeID := "cbx_aabbccddeeff"
 	keepID := "cbx_ffeeccbbaa00"
-	cfg := Config{Provider: providerName, IdleTimeout: time.Hour, TTL: 24 * time.Hour}
+	cfg := core.Config{Provider: providerName, IdleTimeout: time.Hour, TTL: 24 * time.Hour}
 	activeServer := workspaceToServer(cfg, brevWorkspace{ID: "ws-active", Name: "crabbox-active-aabbccddeeff", Status: "RUNNING"}, activeID, "active", false)
 	keepServer := workspaceToServer(cfg, brevWorkspace{ID: "ws-keep", Name: "crabbox-keep-ffeeccbbaa00", Status: "RUNNING"}, keepID, "keep", true)
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(activeID, "active", cfg, activeServer, SSHTarget{}, t.TempDir(), false); err != nil {
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(activeID, "active", cfg, activeServer, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(keepID, "keep", cfg, keepServer, SSHTarget{}, t.TempDir(), false); err != nil {
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(keepID, "keep", cfg, keepServer, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	markNvidiaBrevClaimLastUsed(t, state, activeID, time.Now())
@@ -1923,8 +1924,8 @@ func TestNvidiaBrevCleanupPreservesActiveAndKeepClaims(t *testing.T) {
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-active","name":"crabbox-active-aabbccddeeff","status":"RUNNING"},{"id":"ws-keep","name":"crabbox-keep-ffeeccbbaa00","status":"RUNNING"}]}`},
 	}}
 	var stderr strings.Builder
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*nvidiaBrevBackend)
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*nvidiaBrevBackend)
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := runner.joinedCalls(); strings.Contains(got, "delete") || strings.Contains(got, "stop") {
@@ -1938,9 +1939,9 @@ func TestNvidiaBrevCleanupPreservesActiveAndKeepClaims(t *testing.T) {
 func TestNvidiaBrevTouchRefreshesClaimBeforeCleanup(t *testing.T) {
 	state, _ := isolateNvidiaBrevState(t)
 	leaseID := "cbx_444455556666"
-	server := workspaceToServer(Config{}, brevWorkspace{ID: "ws-touch", Name: "crabbox-touch-444455556666", Status: "RUNNING"}, leaseID, "touch", false)
-	cfg := Config{Provider: providerName, IdleTimeout: time.Hour}
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "touch", cfg, server, SSHTarget{Host: "203.0.113.8", Port: "22", User: "brev"}, t.TempDir(), false); err != nil {
+	server := workspaceToServer(core.Config{}, brevWorkspace{ID: "ws-touch", Name: "crabbox-touch-444455556666", Status: "RUNNING"}, leaseID, "touch", false)
+	cfg := core.Config{Provider: providerName, IdleTimeout: time.Hour}
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "touch", cfg, server, core.SSHTarget{Host: "203.0.113.8", Port: "22", User: "brev"}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	markNvidiaBrevClaimLastUsed(t, state, leaseID, time.Now().Add(-2*time.Hour))
@@ -1948,8 +1949,8 @@ func TestNvidiaBrevTouchRefreshesClaimBeforeCleanup(t *testing.T) {
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-touch","name":"crabbox-touch-444455556666","status":"RUNNING"}]}`},
 	}}
 	var stderr strings.Builder
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*nvidiaBrevBackend)
-	if _, err := backend.Touch(context.Background(), TouchRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server, SSH: SSHTarget{Host: "203.0.113.8", Port: "22", User: "brev"}}, State: "ready", IdleTimeout: 3 * time.Hour}); err != nil {
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*nvidiaBrevBackend)
+	if _, err := backend.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server, SSH: core.SSHTarget{Host: "203.0.113.8", Port: "22", User: "brev"}}, State: "ready", IdleTimeout: 3 * time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 	claim, ok, err := resolveLeaseClaimForProvider(leaseID)
@@ -1959,7 +1960,7 @@ func TestNvidiaBrevTouchRefreshesClaimBeforeCleanup(t *testing.T) {
 	if claim.IdleTimeoutSeconds != int((3 * time.Hour).Seconds()) {
 		t.Fatalf("idle timeout seconds=%d", claim.IdleTimeoutSeconds)
 	}
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := runner.joinedCalls(); strings.Contains(got, "delete ws-touch") || strings.Contains(got, "stop ws-touch") {
@@ -1973,9 +1974,9 @@ func TestNvidiaBrevTouchRefreshesClaimBeforeCleanup(t *testing.T) {
 func TestNvidiaBrevTouchRefusesStoppedClaim(t *testing.T) {
 	state, _ := isolateNvidiaBrevState(t)
 	leaseID := "cbx_888899990000"
-	server := workspaceToServer(Config{}, brevWorkspace{ID: "ws-touch-stopped", Name: "crabbox-touch-stopped-888899990000", Status: "RUNNING"}, leaseID, "touch-stopped", false)
-	cfg := Config{Provider: providerName, IdleTimeout: time.Hour}
-	target := SSHTarget{Host: "203.0.113.8", Port: "22", User: "brev"}
+	server := workspaceToServer(core.Config{}, brevWorkspace{ID: "ws-touch-stopped", Name: "crabbox-touch-stopped-888899990000", Status: "RUNNING"}, leaseID, "touch-stopped", false)
+	cfg := core.Config{Provider: providerName, IdleTimeout: time.Hour}
+	target := core.SSHTarget{Host: "203.0.113.8", Port: "22", User: "brev"}
 	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "touch-stopped", cfg, server, target, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
@@ -1983,8 +1984,8 @@ func TestNvidiaBrevTouchRefusesStoppedClaim(t *testing.T) {
 		labels := claim["labels"].(map[string]any)
 		labels["state"] = "stopped"
 	})
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: &scriptedBrevRunner{}, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	_, err := backend.Touch(context.Background(), TouchRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server, SSH: target}, State: "ready"})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: &scriptedBrevRunner{}, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	_, err := backend.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server, SSH: target}, State: "ready"})
 	if err == nil || !strings.Contains(err.Error(), "is stopped") {
 		t.Fatalf("err=%v, want stopped claim rejection", err)
 	}
@@ -2000,17 +2001,17 @@ func TestNvidiaBrevTouchRefusesStoppedClaim(t *testing.T) {
 func TestNvidiaBrevTouchRefusesDeletingClaim(t *testing.T) {
 	state, _ := isolateNvidiaBrevState(t)
 	leaseID := "cbx_888899990001"
-	server := workspaceToServer(Config{}, brevWorkspace{ID: "ws-touch-deleting", Name: "crabbox-touch-deleting-888899990001", Status: "DELETING"}, leaseID, "touch-deleting", false)
-	cfg := Config{Provider: providerName, IdleTimeout: time.Hour}
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "touch-deleting", cfg, server, SSHTarget{}, t.TempDir(), false); err != nil {
+	server := workspaceToServer(core.Config{}, brevWorkspace{ID: "ws-touch-deleting", Name: "crabbox-touch-deleting-888899990001", Status: "DELETING"}, leaseID, "touch-deleting", false)
+	cfg := core.Config{Provider: providerName, IdleTimeout: time.Hour}
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "touch-deleting", cfg, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	updateNvidiaBrevClaim(t, state, leaseID, func(claim map[string]any) {
 		labels := claim["labels"].(map[string]any)
 		labels["state"] = "deleting"
 	})
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: &scriptedBrevRunner{}, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	_, err := backend.Touch(context.Background(), TouchRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}, State: "ready"})
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: &scriptedBrevRunner{}, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	_, err := backend.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}, State: "ready"})
 	if err == nil || !strings.Contains(err.Error(), "is deleting") {
 		t.Fatalf("err=%v, want deleting claim rejection", err)
 	}
@@ -2019,11 +2020,11 @@ func TestNvidiaBrevTouchRefusesDeletingClaim(t *testing.T) {
 func TestNvidiaBrevSlugAllocationIncludesLocalClaims(t *testing.T) {
 	isolateNvidiaBrevState(t)
 	leaseID := "cbx_123456789abc"
-	server := workspaceToServer(Config{}, brevWorkspace{ID: "ws-shared", Name: "crabbox-shared-123456789abc", Status: "RUNNING"}, leaseID, "shared", false)
-	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "shared", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
+	server := workspaceToServer(core.Config{}, brevWorkspace{ID: "ws-shared", Name: "crabbox-shared-123456789abc", Status: "RUNNING"}, leaseID, "shared", false)
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "shared", core.Config{Provider: providerName}, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
-	claims, err := listLeaseClaims()
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2035,7 +2036,7 @@ func TestNvidiaBrevSlugAllocationIncludesLocalClaims(t *testing.T) {
 func TestNvidiaBrevCollisionSlugFitsWorkspaceNameLimit(t *testing.T) {
 	leaseID := "cbx_123456789abc"
 	first := allocateBrevLeaseSlug(leaseID, strings.Repeat("a", 80), nil, nil)
-	servers := []LeaseView{{Labels: map[string]string{"slug": first}}}
+	servers := []core.LeaseView{{Labels: map[string]string{"slug": first}}}
 	second := allocateBrevLeaseSlug(leaseID, strings.Repeat("a", 80), servers, nil)
 	if first == second || !strings.HasSuffix(second, "-01") {
 		t.Fatalf("collision slug first=%q second=%q", first, second)
@@ -2045,7 +2046,7 @@ func TestNvidiaBrevCollisionSlugFitsWorkspaceNameLimit(t *testing.T) {
 	}
 }
 
-func assertReadOnlyBrevCommand(t *testing.T, req LocalCommandRequest) {
+func assertReadOnlyBrevCommand(t *testing.T, req core.LocalCommandRequest) {
 	t.Helper()
 	if req.Name != "brev" {
 		t.Fatalf("command name=%q, want brev", req.Name)
@@ -2059,16 +2060,16 @@ func assertReadOnlyBrevCommand(t *testing.T, req LocalCommandRequest) {
 }
 
 type fakeRunner struct {
-	calls []LocalCommandRequest
-	run   func(LocalCommandRequest) (LocalCommandResult, error)
+	calls []core.LocalCommandRequest
+	run   func(core.LocalCommandRequest) (core.LocalCommandResult, error)
 }
 
-func (r *fakeRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *fakeRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	if r.run != nil {
 		return r.run(req)
 	}
 	r.calls = append(r.calls, req)
-	return LocalCommandResult{}, nil
+	return core.LocalCommandResult{}, nil
 }
 
 type scriptedBrevResponse struct {
@@ -2079,18 +2080,18 @@ type scriptedBrevResponse struct {
 }
 
 type scriptedBrevRunner struct {
-	calls       []LocalCommandRequest
+	calls       []core.LocalCommandRequest
 	responses   []scriptedBrevResponse
 	createdName string
 }
 
-func (r *scriptedBrevRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *scriptedBrevRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
 	if req.Name != "brev" {
-		return LocalCommandResult{}, errors.New("unexpected command name " + req.Name)
+		return core.LocalCommandResult{}, errors.New("unexpected command name " + req.Name)
 	}
 	if len(r.responses) == 0 {
-		return LocalCommandResult{}, errors.New("unexpected command: " + strings.Join(req.Args, " "))
+		return core.LocalCommandResult{}, errors.New("unexpected command: " + strings.Join(req.Args, " "))
 	}
 	next := r.responses[0]
 	r.responses = r.responses[1:]
@@ -2098,16 +2099,16 @@ func (r *scriptedBrevRunner) Run(_ context.Context, req LocalCommandRequest) (Lo
 	if strings.Contains(next.args, "*") {
 		prefix, suffix, _ := strings.Cut(next.args, "*")
 		if !strings.HasPrefix(got, prefix) || !strings.HasSuffix(got, suffix) {
-			return LocalCommandResult{}, errors.New("got command " + got + ", want " + next.args)
+			return core.LocalCommandResult{}, errors.New("got command " + got + ", want " + next.args)
 		}
 	} else if got != next.args {
-		return LocalCommandResult{}, errors.New("got command " + got + ", want " + next.args)
+		return core.LocalCommandResult{}, errors.New("got command " + got + ", want " + next.args)
 	}
 	if len(req.Args) >= 2 && req.Args[0] == "create" {
 		r.createdName = req.Args[1]
 	}
 	stdout := strings.ReplaceAll(next.stdout, "{createdName}", r.createdName)
-	return LocalCommandResult{Stdout: stdout, Stderr: next.stderr}, next.err
+	return core.LocalCommandResult{Stdout: stdout, Stderr: next.stderr}, next.err
 }
 
 func (r *scriptedBrevRunner) joinedCalls() string {
@@ -2129,7 +2130,7 @@ func isolateNvidiaBrevState(t *testing.T) (string, string) {
 	return state, home
 }
 
-func claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, reclaim bool) error {
+func claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, slug string, cfg core.Config, server core.Server, target core.SSHTarget, repoRoot string, reclaim bool) error {
 	labels := make(map[string]string, len(server.Labels)+1)
 	for key, value := range server.Labels {
 		labels[key] = value
@@ -2170,7 +2171,7 @@ func writeBrevSSHConfig(t *testing.T, home, data string) {
 func stubNvidiaBrevWaitForSSH(t *testing.T, err error) func() {
 	t.Helper()
 	old := waitForSSH
-	waitForSSH = func(context.Context, *SSHTarget, io.Writer) error { return err }
+	waitForSSH = func(context.Context, *core.SSHTarget, io.Writer) error { return err }
 	return func() { waitForSSH = old }
 }
 
@@ -2208,7 +2209,7 @@ func updateNvidiaBrevClaim(t *testing.T, stateDir, leaseID string, update func(m
 	}
 }
 
-func assertNoNvidiaBrevSecretArgs(t *testing.T, calls []LocalCommandRequest) {
+func assertNoNvidiaBrevSecretArgs(t *testing.T, calls []core.LocalCommandRequest) {
 	t.Helper()
 	for _, call := range calls {
 		for _, arg := range call.Args {

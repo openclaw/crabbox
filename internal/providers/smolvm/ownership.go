@@ -15,7 +15,7 @@ const machineCreatedLabel = "smolvm_created_at"
 func validateMachineIdentity(actual, expected machineData) error {
 	if strings.TrimSpace(expected.ID) == "" || expected.Name == "" || strings.TrimSpace(expected.CreatedAt) == "" ||
 		actual.ID != expected.ID || actual.Name != expected.Name || actual.CreatedAt != expected.CreatedAt {
-		return exit(2, "smolvm machine %q identity is missing or changed; retaining machine and claim", expected.ID)
+		return core.Exit(2, "smolvm machine %q identity is missing or changed; retaining machine and claim", expected.ID)
 	}
 	return nil
 }
@@ -26,7 +26,7 @@ func (b *backend) claimBinding(claim core.LeaseClaim) (shared.ClaimBinding, erro
 		return shared.ClaimBinding{}, err
 	}
 	if !core.IsCanonicalLeaseID(claim.LeaseID) || claim.Slug == "" || strings.TrimSpace(claim.CloudID) == "" || claim.Revision == "" || strings.TrimSpace(claim.Labels[machineCreatedLabel]) == "" {
-		return shared.ClaimBinding{}, exit(2, "smolvm lease %q requires an exact local ownership claim; legacy or unclaimed machines are retained", claim.LeaseID)
+		return shared.ClaimBinding{}, core.Exit(2, "smolvm lease %q requires an exact local ownership claim; legacy or unclaimed machines are retained", claim.LeaseID)
 	}
 	want := shared.ClaimBinding{
 		Provider: providerName, ProviderScope: scope, ExactProviderScope: true,
@@ -37,7 +37,7 @@ func (b *backend) claimBinding(claim core.LeaseClaim) (shared.ClaimBinding, erro
 		},
 	}
 	if err := shared.ValidateClaimBinding(claim, want); err != nil {
-		return shared.ClaimBinding{}, exit(2, "smolvm exact local ownership claim mismatch: %v", err)
+		return shared.ClaimBinding{}, core.Exit(2, "smolvm exact local ownership claim mismatch: %v", err)
 	}
 	return want, nil
 }
@@ -50,7 +50,7 @@ func machineFromClaim(claim core.LeaseClaim) machineData {
 func (b *backend) resolveOwnedMachine(id string) (core.LeaseClaim, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return core.LeaseClaim{}, exit(2, "smolvm requires a lease id, slug, or machine id/name")
+		return core.LeaseClaim{}, core.Exit(2, "smolvm requires a lease id, slug, or machine id/name")
 	}
 	if core.IsCanonicalLeaseID(id) {
 		claim, exists, err := core.ReadLeaseClaimWithPresence(id)
@@ -58,7 +58,7 @@ func (b *backend) resolveOwnedMachine(id string) (core.LeaseClaim, error) {
 			return core.LeaseClaim{}, err
 		}
 		if !exists {
-			return core.LeaseClaim{}, exit(2, "smolvm %q has no exact local ownership claim", id)
+			return core.LeaseClaim{}, core.Exit(2, "smolvm %q has no exact local ownership claim", id)
 		}
 		_, err = b.claimBinding(claim)
 		return claim, err
@@ -74,13 +74,13 @@ func (b *backend) resolveOwnedMachine(id string) (core.LeaseClaim, error) {
 		}
 	}
 	if len(matches) != 1 {
-		return core.LeaseClaim{}, exit(2, "smolvm %q requires one unambiguous exact local ownership claim (found %d)", id, len(matches))
+		return core.LeaseClaim{}, core.Exit(2, "smolvm %q requires one unambiguous exact local ownership claim (found %d)", id, len(matches))
 	}
 	_, err = b.claimBinding(matches[0])
 	return matches[0], err
 }
 
-func (b *backend) publishMachineClaim(ctx context.Context, leaseID, slug string, machine machineData, repo Repo) (core.LeaseClaim, error) {
+func (b *backend) publishMachineClaim(ctx context.Context, leaseID, slug string, machine machineData, repo core.Repo) (core.LeaseClaim, error) {
 	scope, err := smolvmEndpoint(b.cfg)
 	if err != nil {
 		return core.LeaseClaim{}, err
@@ -88,7 +88,7 @@ func (b *backend) publishMachineClaim(ctx context.Context, leaseID, slug string,
 	var published core.LeaseClaim
 	err = core.WithDurableLeaseClaimLockContext(ctx, leaseID, func(claim *core.LeaseClaim, exists bool, persist func() error) error {
 		if exists {
-			return exit(2, "smolvm lease %s acquired a claim during creation; retaining machine", leaseID)
+			return core.Exit(2, "smolvm lease %s acquired a claim during creation; retaining machine", leaseID)
 		}
 		now := time.Now().UTC().Format(time.RFC3339)
 		*claim = core.LeaseClaim{
@@ -112,9 +112,9 @@ func (b *backend) reuseMachine(ctx context.Context, client api, id, repoRoot str
 		return core.LeaseClaim{}, err
 	}
 	if repoRoot == "" {
-		return core.LeaseClaim{}, exit(2, "smolvm reuse requires repository context")
+		return core.LeaseClaim{}, core.Exit(2, "smolvm reuse requires repository context")
 	}
-	server := Server{Provider: providerName, CloudID: claim.CloudID, Labels: claim.Labels}
+	server := core.Server{Provider: providerName, CloudID: claim.CloudID, Labels: claim.Labels}
 	return core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfterContext(ctx, claim.LeaseID, claim.Slug, b.cfg, claim.ProviderScope, server, core.SSHTarget{}, repoRoot, b.cfg.IdleTimeout, reclaim, claim, true, func() error {
 		machine, err := client.GetMachine(ctx, claim.CloudID)
 		if err != nil {

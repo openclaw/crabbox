@@ -168,6 +168,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Go
+        id: windows_go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
@@ -183,6 +184,8 @@ jobs:
         run: go test ./internal/cli/ -run '^(TestLocalHistory|TestRunObservation(DelegatedAppRoundTrip|DisabledHasNoLedger|CapturesOnlyCommandWriters|AdoptsExistingCaptureOmissions|FinalFailureOnlyWarns|NeverEntersWireRequest|CoordinatorReferenceExcludesCredentials|CoordinatorTerminalAcknowledgment|PolicyIgnoresRepositoryFiles)$)' -count=1 -timeout=5m -v
 
       - name: Require native Windows lease SSH root and managed-state contracts
+        # Keep independent contract evidence available after another test fails.
+        if: ${{ !cancelled() && steps.windows_go.outcome == 'success' }}
         shell: pwsh
         run: |
           $required = @(
@@ -191,6 +194,7 @@ jobs:
             'TestManagedStateTransferCaseSpelling',
             'TestManagedStateArchiveRejectsSuppliedMarker',
             'TestManagedStateTransferWindowsDirectoryAlias',
+            'TestManagedStateTransferWindowsShortName',
             'TestLeaseSSHRootSelection',
             'TestLeaseSSHOptionalDefaultCompatibility',
             'TestLeaseSSHImportedFilePrivacy',

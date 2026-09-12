@@ -38,8 +38,8 @@ func TestRunStopsNewSessionByDefault(t *testing.T) {
 	restoreAzureDynamicSessionsClient(t, fake)
 	backend := testAzureDynamicSessionsBackend()
 
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: repo, Name: "repo"},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: repo, Name: "repo"},
 		NoSync:  true,
 		Command: []string{"printf", "ok"},
 	})
@@ -67,7 +67,7 @@ func TestRunStopsNewSessionByDefault(t *testing.T) {
 	if len(fake.deleted) != 1 || fake.deleted[0] != result.LeaseID {
 		t.Fatalf("deleted sessions = %#v, want %s", fake.deleted, result.LeaseID)
 	}
-	if _, ok, err := resolveLeaseClaimForProvider(result.LeaseID, providerName); err != nil || ok {
+	if _, ok, err := core.ResolveLeaseClaimForProvider(result.LeaseID, providerName); err != nil || ok {
 		t.Fatalf("claim after cleanup ok=%t err=%v", ok, err)
 	}
 }
@@ -82,8 +82,8 @@ func TestRunCleanupUsesBoundedContext(t *testing.T) {
 	backend := testAzureDynamicSessionsBackend()
 
 	started := time.Now()
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:       Repo{Root: t.TempDir(), Name: "repo"},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:       core.Repo{Root: t.TempDir(), Name: "repo"},
 		NoSync:     true,
 		Command:    []string{"printf", "ok"},
 		TimingJSON: true,
@@ -115,19 +115,19 @@ func TestRunCleanupPreservesReplacedSessionClaim(t *testing.T) {
 		if strings.HasPrefix(req.Command, "mkdir -p ") {
 			return
 		}
-		claims, err := listLeaseClaims()
+		claims, err := core.ListLeaseClaims()
 		if err != nil || len(claims) != 1 {
 			t.Fatalf("claims=%#v err=%v", claims, err)
 		}
 		claim := claims[0]
-		if err := claimLeaseForRepoProviderScope(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, replacementRepo, time.Minute, true); err != nil {
+		if err := core.ClaimLeaseForRepoProviderScope(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, replacementRepo, time.Minute, true); err != nil {
 			t.Fatal(err)
 		}
 	}
 	restoreAzureDynamicSessionsClient(t, fake)
 	backend := testAzureDynamicSessionsBackend()
-	result, err := backend.Run(t.Context(), RunRequest{
-		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
+	result, err := backend.Run(t.Context(), core.RunRequest{
+		Repo:    core.Repo{Root: t.TempDir(), Name: "repo"},
 		NoSync:  true,
 		Command: []string{"printf", "ok"},
 	})
@@ -137,7 +137,7 @@ func TestRunCleanupPreservesReplacedSessionClaim(t *testing.T) {
 	if len(fake.deleted) != 0 {
 		t.Fatalf("deleted=%#v, want replaced session claim protected", fake.deleted)
 	}
-	claim, ok, err := resolveLeaseClaimForProvider(result.LeaseID, providerName)
+	claim, ok, err := core.ResolveLeaseClaimForProvider(result.LeaseID, providerName)
 	if err != nil || !ok || claim.RepoRoot != replacementRepo {
 		t.Fatalf("replacement claim=%#v ok=%t err=%v", claim, ok, err)
 	}
@@ -152,7 +152,7 @@ func TestCreateSessionRollbackReportsDeleteFailure(t *testing.T) {
 	backend := testAzureDynamicSessionsBackend()
 	backend.cfg.AzureDynamicSessions.Endpoint = ""
 
-	_, _, err := backend.createSession(context.Background(), fake, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	_, _, err := backend.createSession(context.Background(), fake, core.Repo{Root: t.TempDir(), Name: "repo"}, false, "")
 	if err == nil || !strings.Contains(err.Error(), "requires azureDynamicSessions.endpoint") || !strings.Contains(err.Error(), "cleanup azure-dynamic-sessions session") || !strings.Contains(err.Error(), "delete failed") {
 		t.Fatalf("err = %v, want claim-scope and cleanup errors", err)
 	}
@@ -168,14 +168,14 @@ func TestRunKeepOnFailureRetainsNewSession(t *testing.T) {
 	restoreAzureDynamicSessionsClient(t, fake)
 	backend := testAzureDynamicSessionsBackend()
 
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:          Repo{Root: repo, Name: "repo"},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:          core.Repo{Root: repo, Name: "repo"},
 		NoSync:        true,
 		KeepOnFailure: true,
 		Command:       []string{"false"},
 		TimingJSON:    true,
 	})
-	var exitErr ExitError
+	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
 		t.Fatalf("err = %v, want exit 7", err)
 	}
@@ -188,7 +188,7 @@ func TestRunKeepOnFailureRetainsNewSession(t *testing.T) {
 	if len(fake.deleted) != 0 {
 		t.Fatalf("deleted sessions = %#v, want retained session", fake.deleted)
 	}
-	if claim, ok, err := resolveLeaseClaimForProvider(result.LeaseID, providerName); err != nil || !ok || claim.RepoRoot != repo {
+	if claim, ok, err := core.ResolveLeaseClaimForProvider(result.LeaseID, providerName); err != nil || !ok || claim.RepoRoot != repo {
 		t.Fatalf("retained claim ok=%t claim=%#v err=%v", ok, claim, err)
 	}
 	var report core.TimingReport
@@ -231,8 +231,8 @@ func TestRunKeepOnFailureRetainsNewSessionAfterSetupFailure(t *testing.T) {
 			backend := testAzureDynamicSessionsBackend()
 			repo := newAzureDynamicSessionsSyncTestRepo(t)
 
-			result, err := backend.Run(t.Context(), RunRequest{
-				Repo:          Repo{Root: repo, Name: "repo"},
+			result, err := backend.Run(t.Context(), core.RunRequest{
+				Repo:          core.Repo{Root: repo, Name: "repo"},
 				NoSync:        tc.noSync,
 				KeepOnFailure: true,
 				Command:       []string{"true"},
@@ -246,7 +246,7 @@ func TestRunKeepOnFailureRetainsNewSessionAfterSetupFailure(t *testing.T) {
 			if len(fake.deleted) != 0 {
 				t.Fatalf("deleted sessions=%v, want retained session", fake.deleted)
 			}
-			if claim, ok, claimErr := resolveLeaseClaimForProvider(result.LeaseID, providerName); claimErr != nil || !ok || claim.RepoRoot != repo {
+			if claim, ok, claimErr := core.ResolveLeaseClaimForProvider(result.LeaseID, providerName); claimErr != nil || !ok || claim.RepoRoot != repo {
 				t.Fatalf("retained claim ok=%t claim=%#v err=%v", ok, claim, claimErr)
 			}
 			if !strings.Contains(backend.rt.Stderr.(*bytes.Buffer).String(), "keep-on-failure") {
@@ -282,8 +282,8 @@ func TestSyncDeletePreservesWorkspaceWhenReplacementFails(t *testing.T) {
 			backend := testAzureDynamicSessionsBackend()
 			backend.cfg.Sync.Delete = true
 
-			_, _, err := backend.syncWorkspace(t.Context(), fake, "azds-session", RunRequest{
-				Repo: Repo{Root: newAzureDynamicSessionsSyncTestRepo(t), Name: "repo"},
+			_, _, err := backend.syncWorkspace(t.Context(), fake, "azds-session", core.RunRequest{
+				Repo: core.Repo{Root: newAzureDynamicSessionsSyncTestRepo(t), Name: "repo"},
 			}, workspace)
 			if err == nil {
 				t.Fatal("sync unexpectedly succeeded")
@@ -307,10 +307,10 @@ func TestStatusWaitBoundsInFlightSessionLookup(t *testing.T) {
 	backend := testAzureDynamicSessionsBackend()
 	started := time.Now()
 
-	_, err := backend.Status(t.Context(), StatusRequest{
+	_, err := backend.Status(t.Context(), core.StatusRequest{
 		ID: "waiting-session", Wait: true, WaitTimeout: 30 * time.Millisecond,
 	})
-	var exitErr ExitError
+	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 5 || !strings.Contains(err.Error(), "timed out waiting for session azds-wait") {
 		t.Fatalf("status err=%v, want session wait timeout with exit code 5", err)
 	}
@@ -327,8 +327,8 @@ func TestRunReusesClaimWithoutStoppingSession(t *testing.T) {
 	restoreAzureDynamicSessionsClient(t, fake)
 	backend := testAzureDynamicSessionsBackend()
 
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: repo, Name: "repo"},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: repo, Name: "repo"},
 		ID:      "kept-session",
 		NoSync:  true,
 		Command: []string{"printf", "ok"},
@@ -356,8 +356,8 @@ func TestWarmupRejectsActionsRunner(t *testing.T) {
 	restoreAzureDynamicSessionsClient(t, fake)
 	backend := testAzureDynamicSessionsBackend()
 
-	err := backend.Warmup(context.Background(), WarmupRequest{
-		Repo:          Repo{Root: t.TempDir(), Name: "repo"},
+	err := backend.Warmup(context.Background(), core.WarmupRequest{
+		Repo:          core.Repo{Root: t.TempDir(), Name: "repo"},
 		ActionsRunner: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "--actions-runner is not supported") {
@@ -377,10 +377,10 @@ func TestStopRemovesStaleClaimWhenSessionIsGone(t *testing.T) {
 	restoreAzureDynamicSessionsClient(t, fake)
 	backend := testAzureDynamicSessionsBackend()
 
-	if err := backend.Stop(context.Background(), StopRequest{ID: "stale-session"}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: "stale-session"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := resolveLeaseClaimForProvider("stale-session", providerName); err != nil || ok {
+	if _, ok, err := core.ResolveLeaseClaimForProvider("stale-session", providerName); err != nil || ok {
 		t.Fatalf("claim after stale stop ok=%t err=%v", ok, err)
 	}
 }
@@ -398,10 +398,10 @@ func TestStopRemovesStaleClaimOnAzureMissingSessionCode(t *testing.T) {
 	restoreAzureDynamicSessionsClient(t, fake)
 	backend := testAzureDynamicSessionsBackend()
 
-	if err := backend.Stop(context.Background(), StopRequest{ID: "stale-session-400"}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: "stale-session-400"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := resolveLeaseClaimForProvider("stale-session-400", providerName); err != nil || ok {
+	if _, ok, err := core.ResolveLeaseClaimForProvider("stale-session-400", providerName); err != nil || ok {
 		t.Fatalf("claim after stale stop ok=%t err=%v", ok, err)
 	}
 }
@@ -445,7 +445,7 @@ func TestResolveSessionIDUsesClaimedSlug(t *testing.T) {
 
 func TestResolveSessionIDRejectsClaimFromDifferentEndpoint(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if err := claimLeaseForRepoProviderScope("azds-other-pool", "other-pool", providerName, "endpoint:http://127.0.0.1:8788", t.TempDir(), time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScope("azds-other-pool", "other-pool", providerName, "endpoint:http://127.0.0.1:8788", t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	backend := testAzureDynamicSessionsBackend()
@@ -462,7 +462,7 @@ func TestResolveSessionIDRejectsClaimFromDifferentEndpoint(t *testing.T) {
 func claimAzureDynamicSessionsLease(t *testing.T, leaseID, slug, repoRoot string, idleTimeout time.Duration) {
 	t.Helper()
 	scope := "endpoint:" + testAzureDynamicSessionsEndpoint
-	if err := claimLeaseForRepoProviderScope(leaseID, slug, providerName, scope, repoRoot, idleTimeout, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScope(leaseID, slug, providerName, scope, repoRoot, idleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -549,8 +549,8 @@ func TestRunPreservesPrimaryFailureThroughCleanupAndTimingWrite(t *testing.T) {
 			restoreAzureDynamicSessionsClient(t, fake)
 			b := testAzureDynamicSessionsBackend()
 			b.rt.Stderr = azureLifecycleFailingWriter{writerErr}
-			result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, Command: []string{"workload"}, TimingJSON: true})
-			var exitErr ExitError
+			result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, Command: []string{"workload"}, TimingJSON: true})
+			var exitErr core.ExitError
 			if !errors.As(err, &exitErr) || exitErr.Code != wantCode || result.ExitCode != wantCode {
 				t.Fatalf("primary exit lost: result=%#v err=%v", result, err)
 			}
@@ -563,7 +563,7 @@ func TestRunPreservesPrimaryFailureThroughCleanupAndTimingWrite(t *testing.T) {
 			if len(fake.deleted) != 1 || result.Session == nil || !result.Session.Kept {
 				t.Fatalf("cleanup/session=%v/%#v", fake.deleted, result.Session)
 			}
-			if _, ok, err := resolveLeaseClaimForProvider(result.LeaseID, providerName); err != nil || !ok {
+			if _, ok, err := core.ResolveLeaseClaimForProvider(result.LeaseID, providerName); err != nil || !ok {
 				t.Fatalf("failed cleanup removed claim: %v", err)
 			}
 		})
@@ -593,7 +593,7 @@ func (r *recordingAzureDynamicSessionsAPI) DeleteSession(ctx context.Context, id
 func restoreAzureDynamicSessionsClient(t *testing.T, api azureDynamicSessionsAPI) {
 	t.Helper()
 	previous := newAzureDynamicSessionsClient
-	newAzureDynamicSessionsClient = func(context.Context, Config, Runtime) (azureDynamicSessionsAPI, error) {
+	newAzureDynamicSessionsClient = func(context.Context, core.Config, core.Runtime) (azureDynamicSessionsAPI, error) {
 		return api, nil
 	}
 	t.Cleanup(func() {
@@ -604,8 +604,8 @@ func restoreAzureDynamicSessionsClient(t *testing.T, api azureDynamicSessionsAPI
 func testAzureDynamicSessionsBackend() *azureDynamicSessionsBackend {
 	return &azureDynamicSessionsBackend{
 		spec: Provider{}.Spec(),
-		cfg:  Config{AzureDynamicSessions: AzureDynamicSessionsConfig{Endpoint: testAzureDynamicSessionsEndpoint}},
-		rt: Runtime{
+		cfg:  core.Config{AzureDynamicSessions: core.AzureDynamicSessionsConfig{Endpoint: testAzureDynamicSessionsEndpoint}},
+		rt: core.Runtime{
 			Stdout: &bytes.Buffer{},
 			Stderr: &bytes.Buffer{},
 		},
@@ -648,7 +648,7 @@ func TestRunCleanupBoundsClaimFenceWait(t *testing.T) {
 		if strings.HasPrefix(req.Command, "mkdir -p ") {
 			return
 		}
-		claims, err := listLeaseClaims()
+		claims, err := core.ListLeaseClaims()
 		if err != nil || len(claims) != 1 {
 			t.Fatalf("claims=%v err=%v", claims, err)
 		}
@@ -671,7 +671,7 @@ func TestRunCleanupBoundsClaimFenceWait(t *testing.T) {
 			t.Fatal("claim fence was not acquired")
 		}
 	}
-	result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, Command: []string{"true"}, TimingJSON: true})
+	result, err := backend.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, Command: []string{"true"}, TimingJSON: true})
 	if !errors.Is(err, context.DeadlineExceeded) || result.ExitCode != 1 || result.ErrorKind != core.RunErrorProvider || len(fake.deleted) != 0 {
 		t.Fatalf("cleanup escaped bounded claim fence: result=%#v err=%v deletes=%v", result, err, fake.deleted)
 	}

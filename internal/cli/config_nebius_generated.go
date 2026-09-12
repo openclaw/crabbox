@@ -4,8 +4,6 @@ package cli
 
 import (
 	"flag"
-	"os"
-	"strconv"
 )
 
 type fileNebiusConfig struct {
@@ -56,127 +54,14 @@ type NebiusConfigApplied struct {
 
 func (cfg *NebiusConfig) applyFile(file *fileNebiusConfig, trusted bool) (NebiusConfigApplied, error) {
 	var applied NebiusConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.CLI != "" {
-		cfg.CLI = file.CLI
-		applied.InputAccepted = true
-	}
-	if trusted && file.Profile != "" {
-		cfg.Profile = file.Profile
-		applied.InputAccepted = true
-	}
-	if file.ParentID != "" {
-		cfg.ParentID = file.ParentID
-		applied.InputAccepted = true
-	}
-	if file.SubnetID != "" {
-		cfg.SubnetID = file.SubnetID
-		applied.InputAccepted = true
-	}
-	if file.Platform != "" {
-		cfg.Platform = file.Platform
-		applied.InputAccepted = true
-	}
-	if file.Preset != "" {
-		cfg.Preset = file.Preset
-		applied.InputAccepted = true
-	}
-	if file.ImageFamily != "" {
-		cfg.ImageFamily = file.ImageFamily
-		applied.InputAccepted = true
-	}
-	if file.DiskType != "" {
-		cfg.DiskType = file.DiskType
-		applied.InputAccepted = true
-	}
-	if file.DiskSizeGiB > 0 {
-		cfg.DiskSizeGiB = file.DiskSizeGiB
-		applied.InputAccepted = true
-	}
-	if file.User != "" {
-		cfg.User = file.User
-		applied.InputAccepted = true
-	}
-	if file.PublicIP != "" {
-		cfg.PublicIP = file.PublicIP
-		applied.InputAccepted = true
-	}
-	if len(file.SecurityGroupIDs) > 0 {
-		cfg.SecurityGroupIDs = file.SecurityGroupIDs
-		applied.InputAccepted = true
-	}
-	if trusted && file.ServiceAccountID != "" {
-		cfg.ServiceAccountID = file.ServiceAccountID
-		applied.InputAccepted = true
-	}
-	if file.RecoveryPolicy != "" {
-		cfg.RecoveryPolicy = file.RecoveryPolicy
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "nebius")
+	return applied, err
 }
 
 func (cfg *NebiusConfig) applyEnv() (NebiusConfigApplied, error) {
 	var applied NebiusConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_NEBIUS_CLI"); ok {
-		cfg.CLI = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NEBIUS_PROFILE"); ok {
-		cfg.Profile = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NEBIUS_PARENT_ID"); ok {
-		cfg.ParentID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NEBIUS_SUBNET_ID"); ok {
-		cfg.SubnetID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NEBIUS_PLATFORM"); ok {
-		cfg.Platform = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NEBIUS_PRESET"); ok {
-		cfg.Preset = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NEBIUS_IMAGE_FAMILY"); ok {
-		cfg.ImageFamily = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NEBIUS_DISK_TYPE"); ok {
-		cfg.DiskType = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_NEBIUS_DISK_SIZE_GIB", strconv.IntSize); ok {
-		cfg.DiskSizeGiB = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NEBIUS_USER"); ok {
-		cfg.User = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NEBIUS_PUBLIC_IP"); ok {
-		cfg.PublicIP = value
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_NEBIUS_SECURITY_GROUP_IDS"); value != "" {
-		cfg.SecurityGroupIDs = splitCommaList(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NEBIUS_SERVICE_ACCOUNT_ID"); ok {
-		cfg.ServiceAccountID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NEBIUS_RECOVERY_POLICY"); ok {
-		cfg.RecoveryPolicy = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 14)
+	return applied, err
 }
 
 // NebiusConfigFlagValues holds parsed values; only visited flags are applied.
@@ -220,64 +105,6 @@ func RegisterNebiusConfigFlags(fs *flag.FlagSet, defaults NebiusConfig) NebiusCo
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values NebiusConfigFlagValues) Apply(cfg *NebiusConfig, fs *flag.FlagSet) (NebiusConfigApplied, error) {
 	var applied NebiusConfigApplied
-	if flagWasSet(fs, "nebius-cli") {
-		cfg.CLI = *values.CLI
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-profile") {
-		cfg.Profile = *values.Profile
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-parent-id") {
-		cfg.ParentID = *values.ParentID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-subnet-id") {
-		cfg.SubnetID = *values.SubnetID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-platform") {
-		cfg.Platform = *values.Platform
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-preset") {
-		cfg.Preset = *values.Preset
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-image-family") {
-		cfg.ImageFamily = *values.ImageFamily
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-disk-type") {
-		cfg.DiskType = *values.DiskType
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-disk-size-gib") {
-		cfg.DiskSizeGiB = *values.DiskSizeGiB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-user") {
-		cfg.User = *values.User
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-public-ip") {
-		cfg.PublicIP = *values.PublicIP
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-security-group-ids") {
-		cfg.SecurityGroupIDs = splitCommaList(*values.SecurityGroupIDs)
-		if len(cfg.SecurityGroupIDs) == 0 {
-			cfg.SecurityGroupIDs = nil
-		}
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-service-account-id") {
-		cfg.ServiceAccountID = *values.ServiceAccountID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nebius-recovery-policy") {
-		cfg.RecoveryPolicy = *values.RecoveryPolicy
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

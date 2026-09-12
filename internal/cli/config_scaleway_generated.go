@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"os"
 )
 
 type fileScalewayConfig struct {
@@ -43,87 +42,14 @@ type ScalewayConfigApplied struct {
 
 func (cfg *ScalewayConfig) applyFile(file *fileScalewayConfig) (ScalewayConfigApplied, error) {
 	var applied ScalewayConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Region != "" {
-		cfg.Region = file.Region
-		applied.InputAccepted = true
-		applied.Region = true
-	}
-	if file.Zone != "" {
-		cfg.Zone = file.Zone
-		applied.InputAccepted = true
-		applied.Zone = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if file.Type != "" {
-		cfg.Type = file.Type
-		applied.InputAccepted = true
-		applied.Type = true
-	}
-	if file.ProjectID != "" {
-		cfg.ProjectID = file.ProjectID
-		applied.InputAccepted = true
-	}
-	if file.OrganizationID != "" {
-		cfg.OrganizationID = file.OrganizationID
-		applied.InputAccepted = true
-	}
-	if file.SecurityGroup != "" {
-		cfg.SecurityGroup = file.SecurityGroup
-		applied.InputAccepted = true
-	}
-	if len(file.SSHCIDRs) > 0 {
-		cfg.SSHCIDRs = file.SSHCIDRs
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "scaleway")
+	return applied, err
 }
 
 func (cfg *ScalewayConfig) applyEnv() (ScalewayConfigApplied, error) {
 	var applied ScalewayConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_SCALEWAY_REGION"); ok {
-		cfg.Region = value
-		applied.InputAccepted = true
-		applied.Region = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SCALEWAY_ZONE"); ok {
-		cfg.Zone = value
-		applied.InputAccepted = true
-		applied.Zone = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SCALEWAY_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SCALEWAY_TYPE"); ok {
-		cfg.Type = value
-		applied.InputAccepted = true
-		applied.Type = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SCALEWAY_PROJECT_ID"); ok {
-		cfg.ProjectID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SCALEWAY_ORGANIZATION_ID"); ok {
-		cfg.OrganizationID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SCALEWAY_SECURITY_GROUP"); ok {
-		cfg.SecurityGroup = value
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_SCALEWAY_SSH_CIDRS"); value != "" {
-		cfg.SSHCIDRs = splitCommaList(value)
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 8)
+	return applied, err
 }
 
 // ScalewayConfigFlagValues holds parsed values; only visited flags are applied.
@@ -162,56 +88,14 @@ type ScalewayConfigVisitedFlags struct {
 
 // ScalewayConfigFlagPresence reports visits for tracked flag bindings.
 func ScalewayConfigFlagPresence(fs *flag.FlagSet) ScalewayConfigVisitedFlags {
-	return ScalewayConfigVisitedFlags{
-		Region: flagWasSet(fs, "scaleway-region"),
-		Zone:   flagWasSet(fs, "scaleway-zone"),
-		Image:  flagWasSet(fs, "scaleway-image"),
-		Type:   flagWasSet(fs, "scaleway-type"),
-	}
+	var visited ScalewayConfigVisitedFlags
+	recordConfigFlagVisits[ScalewayConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values ScalewayConfigFlagValues) Apply(cfg *ScalewayConfig, fs *flag.FlagSet) (ScalewayConfigApplied, error) {
 	var applied ScalewayConfigApplied
-	visited := ScalewayConfigFlagPresence(fs)
-	if visited.Region {
-		cfg.Region = *values.Region
-		applied.InputAccepted = true
-		applied.Region = true
-	}
-	if visited.Zone {
-		cfg.Zone = *values.Zone
-		applied.InputAccepted = true
-		applied.Zone = true
-	}
-	if visited.Image {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if visited.Type {
-		cfg.Type = *values.Type
-		applied.InputAccepted = true
-		applied.Type = true
-	}
-	if flagWasSet(fs, "scaleway-project-id") {
-		cfg.ProjectID = *values.ProjectID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "scaleway-organization-id") {
-		cfg.OrganizationID = *values.OrganizationID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "scaleway-security-group") {
-		cfg.SecurityGroup = *values.SecurityGroup
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "scaleway-ssh-cidrs") {
-		cfg.SSHCIDRs = splitCommaList(*values.SSHCIDRs)
-		if len(cfg.SSHCIDRs) == 0 {
-			cfg.SSHCIDRs = nil
-		}
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

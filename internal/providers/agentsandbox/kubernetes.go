@@ -146,7 +146,7 @@ type kubernetesClient interface {
 }
 
 type kubectlKubernetesClient struct {
-	runner   CommandRunner
+	runner   core.CommandRunner
 	kubectl  string
 	baseArgs []string
 }
@@ -173,7 +173,7 @@ func createMayHaveSucceeded(err error) bool {
 	return true
 }
 
-func newKubernetesClient(ctx context.Context, cfg Config, rt Runtime) (kubernetesClient, error) {
+func newKubernetesClient(ctx context.Context, cfg core.Config, rt core.Runtime) (kubernetesClient, error) {
 	_ = ctx
 	if rt.Exec == nil {
 		return nil, fmt.Errorf("agent-sandbox provider requires a command runner")
@@ -222,7 +222,7 @@ func expandHomePath(path string) string {
 func validateKubeconfigInputs(configured string) error {
 	if kubeconfig := expandHomePath(configured); kubeconfig != "" {
 		if !filepath.IsAbs(kubeconfig) {
-			return exit(2, "agent-sandbox kubeconfig %q must be absolute after home expansion", configured)
+			return core.Exit(2, "agent-sandbox kubeconfig %q must be absolute after home expansion", configured)
 		}
 		return nil
 	}
@@ -235,7 +235,7 @@ func validateKubeconfigInputs(configured string) error {
 			continue
 		}
 		if !filepath.IsAbs(kubeconfig) {
-			return exit(2, "agent-sandbox KUBECONFIG entry %q must be absolute", kubeconfig)
+			return core.Exit(2, "agent-sandbox KUBECONFIG entry %q must be absolute", kubeconfig)
 		}
 	}
 	return nil
@@ -246,7 +246,7 @@ func (c *kubectlKubernetesClient) CheckResource(ctx context.Context, groupVersio
 	if !found || group == "" || version == "" {
 		return fmt.Errorf("agent-sandbox API version must be group/version, got %q", groupVersion)
 	}
-	result, err := c.run(ctx, LocalCommandRequest{}, "get", "--raw", "/apis/"+group+"/"+version)
+	result, err := c.run(ctx, core.LocalCommandRequest{}, "get", "--raw", "/apis/"+group+"/"+version)
 	if err != nil {
 		return c.commandError("discover "+groupVersion, result, err)
 	}
@@ -272,9 +272,7 @@ func (c *kubectlKubernetesClient) Get(
 		return nil, err
 	}
 	result, err := c.run(
-		ctx,
-		LocalCommandRequest{},
-		"get", ref.qualifiedResource()+"/"+name,
+		ctx, core.LocalCommandRequest{}, "get", ref.qualifiedResource()+"/"+name,
 		"--namespace="+namespace,
 		"--ignore-not-found=true",
 		"-o", "json",
@@ -311,9 +309,7 @@ func (c *kubectlKubernetesClient) Create(
 	}
 
 	result, err := c.run(
-		ctx,
-		LocalCommandRequest{Stdin: bytes.NewReader(manifest)},
-		"create", "--namespace="+namespace, "-f", "-", "-o", "json",
+		ctx, core.LocalCommandRequest{Stdin: bytes.NewReader(manifest)}, "create", "--namespace="+namespace, "-f", "-", "-o", "json",
 	)
 	if err != nil {
 		return nil, &kubernetesCreateError{
@@ -332,7 +328,7 @@ func (c *kubectlKubernetesClient) Create(
 	return &created, nil
 }
 
-func kubectlCreateMayHaveSucceeded(result LocalCommandResult, err error) bool {
+func kubectlCreateMayHaveSucceeded(result core.LocalCommandResult, err error) bool {
 	detail := strings.ToLower(strings.Join([]string{result.Stderr, result.Stdout, err.Error()}, "\n"))
 	if strings.Contains(detail, "alreadyexists") || strings.Contains(detail, "already exists") {
 		return true
@@ -385,9 +381,7 @@ func (c *kubectlKubernetesClient) Delete(
 		return fmt.Errorf("encode delete options for %s/%s: %w", ref.qualifiedResource(), name, err)
 	}
 	result, err := c.run(
-		ctx,
-		LocalCommandRequest{Stdin: bytes.NewReader(options)},
-		"delete", "--raw", resourceURL(ref, namespace, name), "-f", "-",
+		ctx, core.LocalCommandRequest{Stdin: bytes.NewReader(options)}, "delete", "--raw", resourceURL(ref, namespace, name), "-f", "-",
 	)
 	if err != nil {
 		if kubectlNotFound(result) {
@@ -407,7 +401,7 @@ func resourceURL(ref resourceRef, namespace, name string) string {
 	return prefix + "/namespaces/" + url.PathEscape(namespace) + "/" + url.PathEscape(ref.Resource) + "/" + url.PathEscape(name)
 }
 
-func kubectlNotFound(result LocalCommandResult) bool {
+func kubectlNotFound(result core.LocalCommandResult) bool {
 	detail := strings.ToLower(result.Stderr + "\n" + result.Stdout)
 	return strings.Contains(detail, "(notfound)") ||
 		strings.Contains(detail, "\"code\":404") ||
@@ -424,7 +418,7 @@ func (c *kubectlKubernetesClient) CanI(ctx context.Context, rule rbacRule) (bool
 		if strings.TrimSpace(rule.Subresource) != "" {
 			args = append(args, "--subresource="+rule.Subresource)
 		}
-		result, err := c.run(ctx, LocalCommandRequest{}, args...)
+		result, err := c.run(ctx, core.LocalCommandRequest{}, args...)
 		allowed, recognized := parseKubectlCanI(result.Stdout)
 		if err != nil {
 			if result.ExitCode == 1 && recognized && !allowed {
@@ -471,9 +465,7 @@ func (c *kubectlKubernetesClient) ListPods(
 	namespace, selector string,
 ) ([]podState, error) {
 	result, err := c.run(
-		ctx,
-		LocalCommandRequest{},
-		"get", "pods",
+		ctx, core.LocalCommandRequest{}, "get", "pods",
 		"--namespace="+namespace,
 		"--selector="+selector,
 		"-o", "json",
@@ -526,7 +518,7 @@ func (c *kubectlKubernetesClient) Exec(ctx context.Context, req podExecRequest) 
 	if req.Stderr != nil {
 		stderr = io.MultiWriter(req.Stderr, &stderrTail)
 	}
-	result, err := c.run(ctx, LocalCommandRequest{
+	result, err := c.run(ctx, core.LocalCommandRequest{
 		Stdin:                req.Stdin,
 		Stdout:               req.Stdout,
 		Stderr:               stderr,
@@ -535,7 +527,7 @@ func (c *kubectlKubernetesClient) Exec(ctx context.Context, req podExecRequest) 
 	if err == nil {
 		return nil
 	}
-	commandErr := c.commandError("exec in pod "+req.Pod, LocalCommandResult{
+	commandErr := c.commandError("exec in pod "+req.Pod, core.LocalCommandResult{
 		ExitCode: result.ExitCode,
 		Stderr:   stderrTail.String(),
 	}, err)
@@ -547,9 +539,9 @@ func (c *kubectlKubernetesClient) Exec(ctx context.Context, req podExecRequest) 
 
 func (c *kubectlKubernetesClient) run(
 	ctx context.Context,
-	req LocalCommandRequest,
+	req core.LocalCommandRequest,
 	args ...string,
-) (LocalCommandResult, error) {
+) (core.LocalCommandResult, error) {
 	req.Name = c.kubectl
 	req.Args = append(append([]string(nil), c.baseArgs...), args...)
 	if !req.DisableOutputCapture && req.MaxCapturedOutputBytes == 0 {
@@ -558,7 +550,7 @@ func (c *kubectlKubernetesClient) run(
 	return c.runner.Run(ctx, req)
 }
 
-func (c *kubectlKubernetesClient) commandError(operation string, result LocalCommandResult, err error) error {
+func (c *kubectlKubernetesClient) commandError(operation string, result core.LocalCommandResult, err error) error {
 	detail := strings.TrimSpace(result.Stderr)
 	if detail == "" {
 		detail = strings.TrimSpace(result.Stdout)
@@ -690,11 +682,11 @@ func claimSandboxName(claim *kubernetesObject) (string, error) {
 
 func validateKubernetesObjectName(resource, name string) error {
 	if name != strings.TrimSpace(name) || name == "" || len(name) > 253 {
-		return resourceIdentityError{err: exit(4, "agent-sandbox %s name %q is invalid", resource, name)}
+		return resourceIdentityError{err: core.Exit(4, "agent-sandbox %s name %q is invalid", resource, name)}
 	}
 	for _, label := range strings.Split(name, ".") {
 		if !isKubernetesDNSLabel(label) {
-			return resourceIdentityError{err: exit(4, "agent-sandbox %s name %q is invalid", resource, name)}
+			return resourceIdentityError{err: core.Exit(4, "agent-sandbox %s name %q is invalid", resource, name)}
 		}
 	}
 	return nil
@@ -709,7 +701,7 @@ func sandboxReady(sandbox *kubernetesObject) error {
 		if condition.Type == "Ready" &&
 			condition.Status != "True" &&
 			strings.EqualFold(strings.TrimSpace(condition.Reason), "SandboxExpired") {
-			return sandboxExpiredError{err: exit(
+			return sandboxExpiredError{err: core.Exit(
 				4,
 				"agent-sandbox Sandbox %s expired reason=%s message=%s",
 				sandbox.Metadata.Name,
@@ -720,7 +712,7 @@ func sandboxReady(sandbox *kubernetesObject) error {
 	}
 	for _, condition := range sandbox.Status.Conditions {
 		if condition.Type == "Finished" && condition.Status == "True" {
-			return resourceTerminalError{err: exit(
+			return resourceTerminalError{err: core.Exit(
 				4,
 				"agent-sandbox Sandbox %s finished reason=%s message=%s",
 				sandbox.Metadata.Name,
@@ -879,7 +871,7 @@ func sandboxPodReadinessOnce(ctx context.Context, client kubernetesClient, names
 		err = validateSandboxClaimBinding(currentSandbox, claimName, identity)
 	}
 	if err == nil && currentSandbox.Metadata.UID != sandbox.Metadata.UID {
-		err = resourceIdentityError{err: exit(
+		err = resourceIdentityError{err: core.Exit(
 			4,
 			"agent-sandbox Sandbox identity changed from %s UID %s to %s UID %s",
 			sandbox.Metadata.Name,
@@ -919,7 +911,7 @@ func sandboxResourceReadinessOnce(ctx context.Context, client kubernetesClient, 
 		return sandboxResourceReadiness{}, err
 	}
 	if reason, expired := sandboxClaimControllerExpiry(claim); expired {
-		return sandboxResourceReadiness{}, sandboxExpiredError{err: exit(
+		return sandboxResourceReadiness{}, sandboxExpiredError{err: core.Exit(
 			4,
 			"agent-sandbox SandboxClaim %s expired reason=%s",
 			claim.Metadata.Name,
@@ -968,7 +960,7 @@ func sandboxReadinessOnce(ctx context.Context, client kubernetesClient, namespac
 func podReady(pod podState) error {
 	switch strings.ToLower(strings.TrimSpace(pod.Phase)) {
 	case "succeeded", "failed":
-		return resourceTerminalError{err: exit(
+		return resourceTerminalError{err: core.Exit(
 			4,
 			"agent-sandbox pod %s reached terminal phase=%s conditions=%s",
 			pod.Name,
@@ -991,14 +983,14 @@ func resolvePodContainer(pod podState, pinned string) (string, error) {
 		selected = pod.Containers[0]
 	}
 	if selected == "" {
-		return "", resourceIdentityError{err: exit(4, "agent-sandbox pod %s has no selectable container", pod.Name)}
+		return "", resourceIdentityError{err: core.Exit(4, "agent-sandbox pod %s has no selectable container", pod.Name)}
 	}
 	for _, container := range pod.Containers {
 		if container == selected {
 			return selected, nil
 		}
 	}
-	return "", resourceIdentityError{err: exit(4, "agent-sandbox pod %s does not contain pinned container %s", pod.Name, selected)}
+	return "", resourceIdentityError{err: core.Exit(4, "agent-sandbox pod %s does not contain pinned container %s", pod.Name, selected)}
 }
 
 func newSandboxReadiness(resource sandboxResourceReadiness, pod podState, identity claimIdentity, container string) sandboxReadiness {
@@ -1021,7 +1013,7 @@ func revalidateSandboxReadiness(ctx context.Context, client kubernetesClient, na
 		return err
 	}
 	if current.SandboxName != expected.SandboxName || current.SandboxUID != expected.SandboxUID {
-		return resourceIdentityError{err: exit(
+		return resourceIdentityError{err: core.Exit(
 			4,
 			"agent-sandbox Sandbox identity changed from %s UID %s to %s UID %s",
 			expected.SandboxName,
@@ -1031,7 +1023,7 @@ func revalidateSandboxReadiness(ctx context.Context, client kubernetesClient, na
 		)}
 	}
 	if current.PodName != expected.PodName || current.PodUID != expected.PodUID {
-		return resourceIdentityError{err: exit(
+		return resourceIdentityError{err: core.Exit(
 			4,
 			"agent-sandbox pod identity changed from %s UID %s to %s UID %s",
 			expected.PodName,
@@ -1041,7 +1033,7 @@ func revalidateSandboxReadiness(ctx context.Context, client kubernetesClient, na
 		)}
 	}
 	if current.Container != expected.Container {
-		return resourceIdentityError{err: exit(
+		return resourceIdentityError{err: core.Exit(
 			4,
 			"agent-sandbox pod container changed from %s to %s",
 			expected.Container,
@@ -1053,10 +1045,10 @@ func revalidateSandboxReadiness(ctx context.Context, client kubernetesClient, na
 
 func validateSandboxClaimBinding(sandbox *kubernetesObject, claimName string, identity claimIdentity) error {
 	if sandbox == nil {
-		return resourceIdentityError{err: exit(4, "agent-sandbox Sandbox identity is missing")}
+		return resourceIdentityError{err: core.Exit(4, "agent-sandbox Sandbox identity is missing")}
 	}
 	if got := strings.TrimSpace(sandbox.Metadata.Labels[agentSandboxClaimUIDLabel]); got != identity.UID {
-		return resourceIdentityError{err: exit(4, "agent-sandbox Sandbox %s claim UID label changed from %s to %s", sandbox.Metadata.Name, identity.UID, core.Blank(got, "<empty>"))}
+		return resourceIdentityError{err: core.Exit(4, "agent-sandbox Sandbox %s claim UID label changed from %s to %s", sandbox.Metadata.Name, identity.UID, core.Blank(got, "<empty>"))}
 	}
 	ref, ok := controllerOwnerReference(sandbox.Metadata.OwnerReferences)
 	if !ok ||
@@ -1064,23 +1056,23 @@ func validateSandboxClaimBinding(sandbox *kubernetesObject, claimName string, id
 		ref.Kind != "SandboxClaim" ||
 		ref.Name != claimName ||
 		ref.UID != identity.UID {
-		return resourceIdentityError{err: exit(4, "agent-sandbox Sandbox %s is not controller-owned by SandboxClaim %s UID %s", sandbox.Metadata.Name, claimName, identity.UID)}
+		return resourceIdentityError{err: core.Exit(4, "agent-sandbox Sandbox %s is not controller-owned by SandboxClaim %s UID %s", sandbox.Metadata.Name, claimName, identity.UID)}
 	}
 	if strings.TrimSpace(sandbox.Metadata.UID) == "" {
-		return resourceIdentityError{err: exit(4, "agent-sandbox Sandbox %s has no Kubernetes UID", sandbox.Metadata.Name)}
+		return resourceIdentityError{err: core.Exit(4, "agent-sandbox Sandbox %s has no Kubernetes UID", sandbox.Metadata.Name)}
 	}
 	return nil
 }
 
 func validatePodSandboxBinding(pod podState, sandbox *kubernetesObject, identity claimIdentity) error {
 	if sandbox == nil {
-		return resourceIdentityError{err: exit(4, "agent-sandbox Sandbox identity is missing")}
+		return resourceIdentityError{err: core.Exit(4, "agent-sandbox Sandbox identity is missing")}
 	}
 	if got := strings.TrimSpace(pod.Labels[agentSandboxClaimUIDLabel]); got != "" && got != identity.UID {
-		return resourceIdentityError{err: exit(4, "agent-sandbox pod %s claim UID label changed from %s to %s", pod.Name, identity.UID, got)}
+		return resourceIdentityError{err: core.Exit(4, "agent-sandbox pod %s claim UID label changed from %s to %s", pod.Name, identity.UID, got)}
 	}
 	if strings.TrimSpace(pod.UID) == "" {
-		return resourceIdentityError{err: exit(4, "agent-sandbox pod %s has no Kubernetes UID", pod.Name)}
+		return resourceIdentityError{err: core.Exit(4, "agent-sandbox pod %s has no Kubernetes UID", pod.Name)}
 	}
 	ref, ok := controllerOwnerReference(pod.OwnerReferences)
 	if !ok ||
@@ -1088,7 +1080,7 @@ func validatePodSandboxBinding(pod podState, sandbox *kubernetesObject, identity
 		ref.Kind != "Sandbox" ||
 		ref.Name != sandbox.Metadata.Name ||
 		ref.UID != sandbox.Metadata.UID {
-		return resourceIdentityError{err: exit(4, "agent-sandbox pod %s is not controller-owned by Sandbox %s UID %s", pod.Name, sandbox.Metadata.Name, sandbox.Metadata.UID)}
+		return resourceIdentityError{err: core.Exit(4, "agent-sandbox pod %s is not controller-owned by Sandbox %s UID %s", pod.Name, sandbox.Metadata.Name, sandbox.Metadata.UID)}
 	}
 	return nil
 }
@@ -1138,7 +1130,7 @@ func podConditionSummary(conditions []conditionState) string {
 	return strings.Join(parts, ",")
 }
 
-func effectiveKubeconfigIdentity(cfg AgentSandboxConfig) string {
+func effectiveKubeconfigIdentity(cfg core.AgentSandboxConfig) string {
 	if path := strings.TrimSpace(cfg.Kubeconfig); path != "" {
 		return expandHomePath(path)
 	}

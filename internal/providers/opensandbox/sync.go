@@ -8,7 +8,7 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func (b *openSandboxBackend) syncWorkspace(ctx context.Context, api openSandboxClient, sandboxID string, req RunRequest, workdir string, prepared ...*core.PreparedArchive) ([]timingPhase, time.Duration, error) {
+func (b *openSandboxBackend) syncWorkspace(ctx context.Context, api openSandboxClient, sandboxID string, req core.RunRequest, workdir string, prepared ...*core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
 	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
 		Config:              b.cfg,
 		Repo:                req.Repo,
@@ -32,18 +32,18 @@ func (b *openSandboxBackend) syncWorkspace(ctx context.Context, api openSandboxC
 
 func (b *openSandboxBackend) execShell(ctx context.Context, api openSandboxClient, sandboxID, command string) error {
 	exitCode, err := api.RunCommand(ctx, sandboxID, runCommandRequest{
-		Command:     "sh -lc " + shellQuote(command),
+		Command:     "sh -lc " + core.ShellQuote(command),
 		TimeoutSecs: b.execTimeoutSecs(),
 	})
 	if err != nil {
 		return err
 	}
 	if exitCode != 0 {
-		return exit(exitCode, "opensandbox exec %q exited %d", command, exitCode)
+		return core.Exit(exitCode, "opensandbox exec %q exited %d", command, exitCode)
 	}
 	return nil
 }
 
 func (b *openSandboxBackend) ensureWorkspace(ctx context.Context, api openSandboxClient, sandboxID, workdir string) error {
-	return b.execShell(ctx, api, sandboxID, "mkdir -p "+shellQuote(workdir))
+	return b.execShell(ctx, api, sandboxID, "mkdir -p "+core.ShellQuote(workdir))
 }

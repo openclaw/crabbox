@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"strconv"
 )
 
 type fileAzureDynamicSessionsConfig struct {
@@ -35,57 +34,14 @@ type AzureDynamicSessionsConfigApplied struct {
 
 func (cfg *AzureDynamicSessionsConfig) applyFile(file *fileAzureDynamicSessionsConfig) (AzureDynamicSessionsConfigApplied, error) {
 	var applied AzureDynamicSessionsConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Endpoint != "" {
-		cfg.Endpoint = file.Endpoint
-		applied.InputAccepted = true
-		applied.Endpoint = true
-	}
-	if file.Pool != "" {
-		cfg.Pool = file.Pool
-		applied.InputAccepted = true
-	}
-	if file.APIVersion != "" {
-		cfg.APIVersion = file.APIVersion
-		applied.InputAccepted = true
-	}
-	if file.Workdir != "" {
-		cfg.Workdir = file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.TimeoutSecs > 0 {
-		cfg.TimeoutSecs = file.TimeoutSecs
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "azure-dynamic-sessions")
+	return applied, err
 }
 
 func (cfg *AzureDynamicSessionsConfig) applyEnv() (AzureDynamicSessionsConfigApplied, error) {
 	var applied AzureDynamicSessionsConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT"); ok {
-		cfg.Endpoint = value
-		applied.InputAccepted = true
-		applied.Endpoint = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_AZURE_DYNAMIC_SESSIONS_POOL"); ok {
-		cfg.Pool = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_AZURE_DYNAMIC_SESSIONS_API_VERSION"); ok {
-		cfg.APIVersion = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_AZURE_DYNAMIC_SESSIONS_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_AZURE_DYNAMIC_SESSIONS_TIMEOUT_SECS", strconv.IntSize); ok {
-		cfg.TimeoutSecs = int(value)
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 5)
+	return applied, err
 }
 
 // AzureDynamicSessionsConfigFlagValues holds parsed values; only visited flags are applied.
@@ -113,31 +69,14 @@ type AzureDynamicSessionsConfigVisitedFlags struct {
 
 // AzureDynamicSessionsConfigFlagPresence reports visits for tracked flag bindings.
 func AzureDynamicSessionsConfigFlagPresence(fs *flag.FlagSet) AzureDynamicSessionsConfigVisitedFlags {
-	return AzureDynamicSessionsConfigVisitedFlags{
-		Endpoint: flagWasSet(fs, "azure-dynamic-sessions-endpoint"),
-	}
+	var visited AzureDynamicSessionsConfigVisitedFlags
+	recordConfigFlagVisits[AzureDynamicSessionsConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values AzureDynamicSessionsConfigFlagValues) Apply(cfg *AzureDynamicSessionsConfig, fs *flag.FlagSet) (AzureDynamicSessionsConfigApplied, error) {
 	var applied AzureDynamicSessionsConfigApplied
-	visited := AzureDynamicSessionsConfigFlagPresence(fs)
-	if visited.Endpoint {
-		cfg.Endpoint = *values.Endpoint
-		applied.InputAccepted = true
-		applied.Endpoint = true
-	}
-	if flagWasSet(fs, "azure-dynamic-sessions-api-version") {
-		cfg.APIVersion = *values.APIVersion
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "azure-dynamic-sessions-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "azure-dynamic-sessions-timeout-secs") {
-		cfg.TimeoutSecs = *values.TimeoutSecs
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

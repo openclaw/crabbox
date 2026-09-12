@@ -24,12 +24,12 @@ const (
 var coderWorkspaceUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 type coderLeaseBackend struct {
-	spec ProviderSpec
-	cfg  Config
-	rt   Runtime
+	spec core.ProviderSpec
+	cfg  core.Config
+	rt   core.Runtime
 }
 
-func NewCoderLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) (Backend, error) {
+func NewCoderLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if strings.TrimSpace(cfg.Coder.CLIPath) == "" {
 		cfg.Coder.CLIPath = core.CoderConfigDefaultCLIPath
 	}
@@ -55,67 +55,67 @@ func NewCoderLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) (Backend, e
 	return &coderLeaseBackend{spec: spec, cfg: cfg, rt: rt}, nil
 }
 
-func (b *coderLeaseBackend) Spec() ProviderSpec { return b.spec }
+func (b *coderLeaseBackend) Spec() core.ProviderSpec { return b.spec }
 
-func (b *coderLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
+func (b *coderLeaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	if strings.TrimSpace(b.cfg.Coder.Template) == "" {
-		return LeaseTarget{}, exit(2, "provider=coder requires --coder-template or coder.template to create a workspace")
+		return core.LeaseTarget{}, core.Exit(2, "provider=coder requires --coder-template or coder.template to create a workspace")
 	}
 	client, err := newCoderClient(b.cfg, b.rt)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	existing, err := client.list(ctx)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	leaseID := core.NewLeaseID()
-	slug, err := allocateDirectLeaseSlug(leaseID, req.RequestedSlug, coderWorkspacesToServers(existing, b.cfg))
+	slug, err := core.AllocateDirectLeaseSlug(leaseID, req.RequestedSlug, coderWorkspacesToServers(existing, b.cfg))
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	slug, workspaceName, err := coderUniqueWorkspaceName(existing, b.cfg.Coder.WorkspacePrefix, slug, leaseID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
-	if err := claimLeaseForRepoProvider(leaseID, slug, coderProvider, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
-		return LeaseTarget{}, err
+	if err := core.ClaimLeaseForRepoProvider(leaseID, slug, coderProvider, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
+		return core.LeaseTarget{}, err
 	}
-	_ = updateLeaseClaimEndpoint(leaseID, coderWorkspaceToServer(coderWorkspace{Name: workspaceName}, b.cfg, leaseID, slug, req.Keep), SSHTarget{})
+	_ = core.UpdateLeaseClaimEndpoint(leaseID, coderWorkspaceToServer(coderWorkspace{Name: workspaceName}, b.cfg, leaseID, slug, req.Keep), core.SSHTarget{})
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=coder lease=%s slug=%s workspace=%s template=%s keep=%v\n", leaseID, slug, workspaceName, b.cfg.Coder.Template, req.Keep)
 	if err := client.create(ctx, b.cfg, workspaceName); err != nil {
 		if !req.Keep {
 			err = b.rollbackCreateError(workspaceName, leaseID, client, err)
 		}
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	workspaces, err := client.list(ctx)
 	if err != nil {
 		if !req.Keep {
 			err = b.rollbackCreatedWorkspace(workspaceName, leaseID, client, err)
 		}
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	workspace, ok := findCoderWorkspace(workspaces, workspaceName)
 	if !ok {
 		if !req.Keep {
-			err = b.rollbackCreatedWorkspace(workspaceName, leaseID, client, exit(5, "coder workspace %s was created but not found in coder list", workspaceName))
-			return LeaseTarget{}, err
+			err = b.rollbackCreatedWorkspace(workspaceName, leaseID, client, core.Exit(5, "coder workspace %s was created but not found in coder list", workspaceName))
+			return core.LeaseTarget{}, err
 		}
-		return LeaseTarget{}, exit(5, "coder workspace %s was created but not found in coder list", workspaceName)
+		return core.LeaseTarget{}, core.Exit(5, "coder workspace %s was created but not found in coder list", workspaceName)
 	}
 	server := coderWorkspaceToServer(workspace, b.cfg, leaseID, slug, req.Keep)
 	target := coderSSHTarget(b.cfg, workspaceName, workspace.ID)
-	if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "coder ssh", bootstrapWaitTimeout(b.cfg)); err != nil {
+	if err := core.WaitForSSHReady(ctx, &target, b.rt.Stderr, "coder ssh", core.BootstrapWaitTimeout(b.cfg)); err != nil {
 		if !req.Keep {
 			err = b.rollbackCreatedWorkspace(workspaceName, leaseID, client, err)
 		}
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	server.Status = "ready"
 	server.Labels["state"] = "ready"
-	_ = updateLeaseClaimEndpoint(leaseID, server, target)
-	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+	_ = core.UpdateLeaseClaimEndpoint(leaseID, server, target)
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
 func (b *coderLeaseBackend) rollbackCreateError(name, leaseID string, client *coderClient, cause error) error {
@@ -128,7 +128,7 @@ func (b *coderLeaseBackend) rollbackCreateError(name, leaseID string, client *co
 	if _, ok := findCoderWorkspace(workspaces, name); ok {
 		return b.rollbackCreatedWorkspace(name, leaseID, client, cause)
 	}
-	removeLeaseClaim(leaseID)
+	core.RemoveLeaseClaim(leaseID)
 	return cause
 }
 
@@ -136,9 +136,9 @@ func (b *coderLeaseBackend) rollbackCreatedWorkspace(name, leaseID string, clien
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := b.releaseWorkspace(cleanupCtx, client, name); err != nil {
-		return exit(core.ExitCodeForError(cause, 1), "%v; coder rollback %s failed for workspace %s; manual cleanup: %s: %v", cause, coderReleaseActionFromConfig(b.cfg), name, coderManualCleanupCommand(b.cfg, name), err)
+		return core.Exit(core.ExitCodeForError(cause, 1), "%v; coder rollback %s failed for workspace %s; manual cleanup: %s: %v", cause, coderReleaseActionFromConfig(b.cfg), name, coderManualCleanupCommand(b.cfg, name), err)
 	}
-	removeLeaseClaim(leaseID)
+	core.RemoveLeaseClaim(leaseID)
 	return cause
 }
 
@@ -149,18 +149,18 @@ func (b *coderLeaseBackend) releaseWorkspace(ctx context.Context, client *coderC
 	return client.stop(ctx, name)
 }
 
-func (b *coderLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+func (b *coderLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
 	client, err := newCoderClient(b.cfg, b.rt)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	useListAll, err := b.resolveNeedsListAll(req.ID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	claims, err := listCoderClaimsByWorkspace(b.cfg)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if coderClaimsNeedListAllForIdentifier(claims, req.ID) {
 		useListAll = true
@@ -171,7 +171,7 @@ func (b *coderLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 	}
 	workspaces, err := listFn(ctx)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	nameCounts := coderWorkspaceNameCounts(workspaces)
 	workspace, leaseID, slug, err := b.resolveWorkspace(req.ID, workspaces, claims, nameCounts)
@@ -181,20 +181,20 @@ func (b *coderLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 				return coderStaleClaimLeaseTarget(b.cfg, claim), nil
 			}
 		}
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	keep, err := b.resolveKeepLabel(leaseID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	claim, hasClaim := coderClaimForWorkspaceInInventory(claims, workspace, nameCounts)
 	if req.ReleaseOnly && (!hasClaim || claim.LeaseID != leaseID) {
-		return LeaseTarget{}, exit(2, "provider=coder refuses to release workspace %s without an exact local ownership claim", coderWorkspaceCommandName(workspace))
+		return core.LeaseTarget{}, core.Exit(2, "provider=coder refuses to release workspace %s without an exact local ownership claim", coderWorkspaceCommandName(workspace))
 	}
 	server := coderWorkspaceToServerWithClaim(workspace, b.cfg, leaseID, slug, keep, claim, hasClaim)
 	workspaceRef := coderWorkspaceCommandName(workspace)
 	if req.ReleaseOnly || req.StatusOnly {
-		lease := LeaseTarget{Server: server, LeaseID: leaseID}
+		lease := core.LeaseTarget{Server: server, LeaseID: leaseID}
 		if coderWorkspaceReady(workspace) {
 			lease.SSH = coderSSHTarget(b.cfg, workspaceRef, workspace.ID)
 		}
@@ -202,7 +202,7 @@ func (b *coderLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 	}
 	if !coderWorkspaceReady(workspace) {
 		if err := client.start(ctx, workspaceRef); err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		refreshList := client.list
 		if useListAll {
@@ -210,7 +210,7 @@ func (b *coderLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 		}
 		workspaces, err = refreshList(ctx)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		if refreshed, found := findCoderWorkspace(workspaces, workspaceRef); found {
 			workspace = refreshed
@@ -221,16 +221,16 @@ func (b *coderLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 		}
 	}
 	target := coderSSHTarget(b.cfg, workspaceRef, workspace.ID)
-	if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "coder ssh", bootstrapWaitTimeout(b.cfg)); err != nil {
-		return LeaseTarget{}, err
+	if err := core.WaitForSSHReady(ctx, &target, b.rt.Stderr, "coder ssh", core.BootstrapWaitTimeout(b.cfg)); err != nil {
+		return core.LeaseTarget{}, err
 	}
 	if req.Repo.Root != "" && leaseID != "" {
-		if err := claimLeaseForRepoProvider(leaseID, slug, coderProvider, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
-			return LeaseTarget{}, err
+		if err := core.ClaimLeaseForRepoProvider(leaseID, slug, coderProvider, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
+			return core.LeaseTarget{}, err
 		}
-		_ = updateLeaseClaimEndpoint(leaseID, server, target)
+		_ = core.UpdateLeaseClaimEndpoint(leaseID, server, target)
 	}
-	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
 func (b *coderLeaseBackend) resolveNeedsListAll(identifier string) (bool, error) {
@@ -238,7 +238,7 @@ func (b *coderLeaseBackend) resolveNeedsListAll(identifier string) (bool, error)
 	if strings.Contains(identifier, "/") {
 		return true, nil
 	}
-	claim, ok, err := resolveLeaseClaimForProvider(identifier, coderProvider)
+	claim, ok, err := core.ResolveLeaseClaimForProvider(identifier, coderProvider)
 	if err != nil || !ok {
 		return false, err
 	}
@@ -249,14 +249,14 @@ func (b *coderLeaseBackend) resolveKeepLabel(leaseID string) (bool, error) {
 	if leaseID == "" {
 		return false, nil
 	}
-	claim, ok, err := resolveLeaseClaimForProvider(leaseID, coderProvider)
+	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, coderProvider)
 	if err != nil || !ok {
 		return false, err
 	}
 	return coderClaimKeep(claim), nil
 }
 
-func (b *coderLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *coderLeaseBackend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	client, err := newCoderClient(b.cfg, b.rt)
 	if err != nil {
 		return nil, err
@@ -273,7 +273,7 @@ func (b *coderLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseV
 	if err != nil {
 		return nil, err
 	}
-	servers := make([]Server, 0, len(workspaces))
+	servers := make([]core.Server, 0, len(workspaces))
 	nameCounts := coderWorkspaceNameCounts(workspaces)
 	for _, workspace := range workspaces {
 		leaseID, slug, owned := coderWorkspaceLeaseMetadata(workspace, b.cfg)
@@ -294,17 +294,17 @@ func (b *coderLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseV
 	return servers, nil
 }
 
-func (b *coderLeaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+func (b *coderLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	client, err := newCoderClient(b.cfg, b.rt)
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
-	checks := []DoctorCheck{}
+	checks := []core.DoctorCheck{}
 	if err := client.version(ctx); err != nil {
-		checks = append(checks, DoctorCheck{Status: "fail", Check: "cli", Message: err.Error(), Details: map[string]string{"mutation": "false"}})
-		return DoctorResult{Provider: coderProvider, Status: "fail", Message: "cli=missing auth=unchecked inventory=unchecked mutation=false", Checks: checks}, err
+		checks = append(checks, core.DoctorCheck{Status: "fail", Check: "cli", Message: err.Error(), Details: map[string]string{"mutation": "false"}})
+		return core.DoctorResult{Provider: coderProvider, Status: "fail", Message: "cli=missing auth=unchecked inventory=unchecked mutation=false", Checks: checks}, err
 	}
-	checks = append(checks, DoctorCheck{Status: "pass", Check: "cli", Message: "coder CLI available", Details: map[string]string{"mutation": "false"}})
+	checks = append(checks, core.DoctorCheck{Status: "pass", Check: "cli", Message: "coder CLI available", Details: map[string]string{"mutation": "false"}})
 	if err := client.whoami(ctx); err != nil {
 		authStatus := "failed"
 		classification := "auth_failed"
@@ -312,20 +312,20 @@ func (b *coderLeaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (Doctor
 			authStatus = "missing_login"
 			classification = "missing_login"
 		}
-		checks = append(checks, DoctorCheck{Status: "fail", Check: "auth", Message: err.Error(), Details: map[string]string{"mutation": "false", "classification": classification}})
-		return DoctorResult{Provider: coderProvider, Status: "fail", Message: fmt.Sprintf("cli=ready auth=%s inventory=unchecked mutation=false", authStatus), Checks: checks}, err
+		checks = append(checks, core.DoctorCheck{Status: "fail", Check: "auth", Message: err.Error(), Details: map[string]string{"mutation": "false", "classification": classification}})
+		return core.DoctorResult{Provider: coderProvider, Status: "fail", Message: fmt.Sprintf("cli=ready auth=%s inventory=unchecked mutation=false", authStatus), Checks: checks}, err
 	}
-	checks = append(checks, DoctorCheck{Status: "pass", Check: "auth", Message: "coder login ready", Details: map[string]string{"mutation": "false"}})
-	servers, err := b.List(ctx, ListRequest{})
+	checks = append(checks, core.DoctorCheck{Status: "pass", Check: "auth", Message: "coder login ready", Details: map[string]string{"mutation": "false"}})
+	servers, err := b.List(ctx, core.ListRequest{})
 	if err != nil {
-		checks = append(checks, DoctorCheck{Status: "fail", Check: "inventory", Message: err.Error(), Details: map[string]string{"mutation": "false"}})
-		return DoctorResult{Provider: coderProvider, Status: "fail", Message: "cli=ready auth=ready inventory=failed mutation=false", Checks: checks}, err
+		checks = append(checks, core.DoctorCheck{Status: "fail", Check: "inventory", Message: err.Error(), Details: map[string]string{"mutation": "false"}})
+		return core.DoctorResult{Provider: coderProvider, Status: "fail", Message: "cli=ready auth=ready inventory=failed mutation=false", Checks: checks}, err
 	}
-	checks = append(checks, DoctorCheck{Status: "pass", Check: "inventory", Message: fmt.Sprintf("listed %d Crabbox-owned Coder workspaces", len(servers)), Details: map[string]string{"mutation": "false"}})
-	return DoctorResult{Provider: coderProvider, Status: "pass", Message: fmt.Sprintf("cli=ready auth=ready inventory=ready api=list mutation=false leases=%d runtime=unchecked", len(servers)), Checks: checks}, nil
+	checks = append(checks, core.DoctorCheck{Status: "pass", Check: "inventory", Message: fmt.Sprintf("listed %d Crabbox-owned Coder workspaces", len(servers)), Details: map[string]string{"mutation": "false"}})
+	return core.DoctorResult{Provider: coderProvider, Status: "pass", Message: fmt.Sprintf("cli=ready auth=ready inventory=ready api=list mutation=false leases=%d runtime=unchecked", len(servers)), Checks: checks}, nil
 }
 
-func (b *coderLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+func (b *coderLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
 	name := strings.TrimSpace(req.Lease.Server.Labels["coder_workspace_ref"])
 	if name == "" {
 		name = strings.TrimSpace(req.Lease.Server.Labels["coder_workspace"])
@@ -337,7 +337,7 @@ func (b *coderLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 		name = strings.TrimSpace(req.Lease.Server.CloudID)
 	}
 	if name == "" {
-		return exit(2, "coder release requires a workspace name")
+		return core.Exit(2, "coder release requires a workspace name")
 	}
 	requiredLabels := map[string]string{"coder_workspace_ref": name}
 	if workspaceID := strings.TrimSpace(req.Lease.Server.Labels["coder_workspace_id"]); workspaceID != "" {
@@ -357,7 +357,7 @@ func (b *coderLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 	return shared.RemoveExactClaimAfter(claim, binding, func() error {
 		expected := strings.TrimSpace(claim.Labels["coder_workspace_id"])
 		if !coderWorkspaceUUID.MatchString(expected) {
-			return exit(2, "coder workspace %s has no canonical immutable workspace ID in its exact local ownership claim", name)
+			return core.Exit(2, "coder workspace %s has no canonical immutable workspace ID in its exact local ownership claim", name)
 		}
 		client, err := newCoderClient(b.cfg, b.rt)
 		if err != nil {
@@ -390,7 +390,7 @@ func (b *coderLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 	})
 }
 
-func (b *coderLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
+func (b *coderLeaseBackend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	action := "stopped"
 	if b.cfg.Coder.DeleteOnRelease {
 		action = "deleted"
@@ -398,16 +398,16 @@ func (b *coderLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
 	return fmt.Sprintf("%s coder workspace lease=%s workspace=%s", action, lease.LeaseID, lease.Server.Name)
 }
 
-func (b *coderLeaseBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
+func (b *coderLeaseBackend) Touch(_ context.Context, req core.TouchRequest) (core.Server, error) {
 	server := req.Lease.Server
 	if server.Labels == nil {
 		server.Labels = map[string]string{}
 	}
-	server.Labels = touchDirectLeaseLabels(server.Labels, b.cfg, req.State, time.Now().UTC())
+	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.cfg, req.State, time.Now().UTC())
 	return server, nil
 }
 
-func (b *coderLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
+func (b *coderLeaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	client, err := newCoderClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -457,8 +457,8 @@ func (b *coderLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 		}
 		releaseBackend := *b
 		releaseBackend.cfg.Coder.DeleteOnRelease = action == coderReleaseActionDelete
-		if err := releaseBackend.ReleaseLease(ctx, ReleaseLeaseRequest{
-			Lease: LeaseTarget{LeaseID: leaseID, Server: server},
+		if err := releaseBackend.ReleaseLease(ctx, core.ReleaseLeaseRequest{
+			Lease: core.LeaseTarget{LeaseID: leaseID, Server: server},
 		}); err != nil {
 			return err
 		}
@@ -466,12 +466,12 @@ func (b *coderLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 	return nil
 }
 
-func listCoderClaimsByWorkspace(cfg Config) (map[string]LeaseClaim, error) {
-	claims, err := listLeaseClaims()
+func listCoderClaimsByWorkspace(cfg core.Config) (map[string]core.LeaseClaim, error) {
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]LeaseClaim{}
+	out := map[string]core.LeaseClaim{}
 	for _, claim := range claims {
 		if claim.Provider != coderProvider {
 			continue
@@ -490,30 +490,30 @@ func listCoderClaimsByWorkspace(cfg Config) (map[string]LeaseClaim, error) {
 	return out, nil
 }
 
-func coderClaimForWorkspace(claims map[string]LeaseClaim, workspace coderWorkspace) (LeaseClaim, bool) {
+func coderClaimForWorkspace(claims map[string]core.LeaseClaim, workspace coderWorkspace) (core.LeaseClaim, bool) {
 	return coderClaimForWorkspaceInInventory(claims, workspace, nil)
 }
 
-func coderClaimForWorkspaceInInventory(claims map[string]LeaseClaim, workspace coderWorkspace, nameCounts map[string]int) (LeaseClaim, bool) {
+func coderClaimForWorkspaceInInventory(claims map[string]core.LeaseClaim, workspace coderWorkspace, nameCounts map[string]int) (core.LeaseClaim, bool) {
 	if claim, ok := claims[coderClaimKey(coderWorkspaceCommandName(workspace))]; ok {
 		return claim, true
 	}
 	if strings.TrimSpace(workspace.Owner) != "" {
 		if nameCounts == nil || nameCounts[coderClaimKey(workspace.Name)] != 1 {
-			return LeaseClaim{}, false
+			return core.LeaseClaim{}, false
 		}
 	}
 	if claim, ok := claims[coderClaimKey(workspace.Name)]; ok {
 		return claim, true
 	}
-	return LeaseClaim{}, false
+	return core.LeaseClaim{}, false
 }
 
 func coderClaimKey(ref string) string {
 	return normalizeCoderWorkspaceIdentifier(strings.TrimSpace(ref))
 }
 
-func coderClaimsNeedListAll(claims map[string]LeaseClaim) bool {
+func coderClaimsNeedListAll(claims map[string]core.LeaseClaim) bool {
 	for key := range claims {
 		if strings.Contains(key, "/") {
 			return true
@@ -522,10 +522,10 @@ func coderClaimsNeedListAll(claims map[string]LeaseClaim) bool {
 	return false
 }
 
-func coderClaimsNeedListAllForIdentifier(claims map[string]LeaseClaim, identifier string) bool {
+func coderClaimsNeedListAllForIdentifier(claims map[string]core.LeaseClaim, identifier string) bool {
 	identifier = strings.TrimSpace(identifier)
 	normalized := normalizeCoderWorkspaceIdentifier(identifier)
-	normalizedSlug := normalizeLeaseSlug(identifier)
+	normalizedSlug := core.NormalizeLeaseSlug(identifier)
 	for _, claim := range claims {
 		ref := coderClaimWorkspaceRef(claim)
 		if !strings.Contains(ref, "/") {
@@ -537,7 +537,7 @@ func coderClaimsNeedListAllForIdentifier(claims map[string]LeaseClaim, identifie
 		if claim.LeaseID == identifier {
 			return true
 		}
-		if normalizedSlug != "" && normalizeLeaseSlug(claim.Slug) == normalizedSlug {
+		if normalizedSlug != "" && core.NormalizeLeaseSlug(claim.Slug) == normalizedSlug {
 			return true
 		}
 	}
@@ -552,7 +552,7 @@ func coderWorkspaceNameCounts(workspaces []coderWorkspace) map[string]int {
 	return counts
 }
 
-func shouldCleanupCoder(server Server, claim LeaseClaim, hasClaim bool, now time.Time) (bool, string) {
+func shouldCleanupCoder(server core.Server, claim core.LeaseClaim, hasClaim bool, now time.Time) (bool, string) {
 	if strings.EqualFold(server.Labels["keep"], "true") || (hasClaim && coderClaimKeep(claim)) {
 		return false, "keep=true"
 	}
@@ -580,10 +580,10 @@ func coderWorkspaceHasCrabboxLabel(workspace coderWorkspace) bool {
 	return strings.EqualFold(strings.TrimSpace(workspace.Labels["created_by"]), "crabbox")
 }
 
-func (b *coderLeaseBackend) resolveWorkspace(identifier string, workspaces []coderWorkspace, claims map[string]LeaseClaim, nameCounts map[string]int) (coderWorkspace, string, string, error) {
+func (b *coderLeaseBackend) resolveWorkspace(identifier string, workspaces []coderWorkspace, claims map[string]core.LeaseClaim, nameCounts map[string]int) (coderWorkspace, string, string, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
-		return coderWorkspace{}, "", "", exit(2, "coder resolve requires a lease id, slug, workspace, or owner/workspace")
+		return coderWorkspace{}, "", "", core.Exit(2, "coder resolve requires a lease id, slug, workspace, or owner/workspace")
 	}
 	if claim, ok := coderClaimByLeaseID(claims, identifier); ok {
 		if workspace, found, err := b.resolveClaimWorkspace(claim, workspaces, nameCounts); err != nil {
@@ -592,7 +592,7 @@ func (b *coderLeaseBackend) resolveWorkspace(identifier string, workspaces []cod
 			return workspace, claim.LeaseID, claim.Slug, nil
 		}
 	}
-	if claim, ok, err := resolveLeaseClaimForProvider(identifier, coderProvider); err != nil {
+	if claim, ok, err := core.ResolveLeaseClaimForProvider(identifier, coderProvider); err != nil {
 		return coderWorkspace{}, "", "", err
 	} else if ok {
 		if workspace, found, err := b.resolveClaimWorkspace(claim, workspaces, nameCounts); err != nil {
@@ -602,7 +602,7 @@ func (b *coderLeaseBackend) resolveWorkspace(identifier string, workspaces []cod
 		}
 	}
 	normalized := normalizeCoderWorkspaceIdentifier(identifier)
-	normalizedSlug := normalizeLeaseSlug(identifier)
+	normalizedSlug := core.NormalizeLeaseSlug(identifier)
 	exactMatches := []coderWorkspace{}
 	for _, workspace := range workspaces {
 		if normalizeCoderWorkspaceIdentifier(workspace.Name) == normalized || normalizeCoderWorkspaceIdentifier(coderOwnerWorkspace(workspace)) == normalized {
@@ -610,7 +610,7 @@ func (b *coderLeaseBackend) resolveWorkspace(identifier string, workspaces []cod
 		}
 	}
 	if len(exactMatches) > 1 {
-		return coderWorkspace{}, "", "", exit(5, "coder workspace %q is ambiguous", identifier)
+		return coderWorkspace{}, "", "", core.Exit(5, "coder workspace %q is ambiguous", identifier)
 	}
 	if len(exactMatches) == 1 {
 		workspace := exactMatches[0]
@@ -627,15 +627,15 @@ func (b *coderLeaseBackend) resolveWorkspace(identifier string, workspaces []cod
 			matches = append(matches, workspace)
 			continue
 		}
-		if owned && normalizedSlug != "" && normalizeLeaseSlug(slug) == normalizedSlug {
+		if owned && normalizedSlug != "" && core.NormalizeLeaseSlug(slug) == normalizedSlug {
 			matches = append(matches, workspace)
 		}
 	}
 	if len(matches) == 0 {
-		return coderWorkspace{}, "", "", exit(5, "coder workspace %q not found", identifier)
+		return coderWorkspace{}, "", "", core.Exit(5, "coder workspace %q not found", identifier)
 	}
 	if len(matches) > 1 {
-		return coderWorkspace{}, "", "", exit(5, "coder workspace %q is ambiguous", identifier)
+		return coderWorkspace{}, "", "", core.Exit(5, "coder workspace %q is ambiguous", identifier)
 	}
 	if claim, ok := coderClaimForWorkspaceInInventory(claims, matches[0], nameCounts); ok {
 		return matches[0], claim.LeaseID, claim.Slug, nil
@@ -644,7 +644,7 @@ func (b *coderLeaseBackend) resolveWorkspace(identifier string, workspaces []cod
 	return matches[0], leaseID, slug, nil
 }
 
-func (b *coderLeaseBackend) resolveClaimWorkspace(claim LeaseClaim, workspaces []coderWorkspace, nameCounts map[string]int) (coderWorkspace, bool, error) {
+func (b *coderLeaseBackend) resolveClaimWorkspace(claim core.LeaseClaim, workspaces []coderWorkspace, nameCounts map[string]int) (coderWorkspace, bool, error) {
 	name := coderClaimWorkspaceRef(claim)
 	if name == "" {
 		var err error
@@ -659,44 +659,44 @@ func (b *coderLeaseBackend) resolveClaimWorkspace(claim LeaseClaim, workspaces [
 			counts = coderWorkspaceNameCounts(workspaces)
 		}
 		if counts[coderClaimKey(name)] > 1 {
-			return coderWorkspace{}, false, exit(5, "coder workspace %q is ambiguous", name)
+			return coderWorkspace{}, false, core.Exit(5, "coder workspace %q is ambiguous", name)
 		}
 	}
 	workspace, found := findCoderWorkspace(workspaces, name)
 	return workspace, found, nil
 }
 
-func coderClaimByLeaseID(claims map[string]LeaseClaim, leaseID string) (LeaseClaim, bool) {
+func coderClaimByLeaseID(claims map[string]core.LeaseClaim, leaseID string) (core.LeaseClaim, bool) {
 	for _, claim := range claims {
 		if claim.LeaseID == leaseID {
 			return claim, true
 		}
 	}
-	return LeaseClaim{}, false
+	return core.LeaseClaim{}, false
 }
 
-func coderClaimForIdentifier(claims map[string]LeaseClaim, identifier string) (LeaseClaim, bool) {
+func coderClaimForIdentifier(claims map[string]core.LeaseClaim, identifier string) (core.LeaseClaim, bool) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
-		return LeaseClaim{}, false
+		return core.LeaseClaim{}, false
 	}
 	if claim, ok := coderClaimByLeaseID(claims, identifier); ok {
 		return claim, true
 	}
 	normalized := normalizeCoderWorkspaceIdentifier(identifier)
-	normalizedSlug := normalizeLeaseSlug(identifier)
+	normalizedSlug := core.NormalizeLeaseSlug(identifier)
 	for _, claim := range claims {
 		if normalizeCoderWorkspaceIdentifier(coderClaimWorkspaceRef(claim)) == normalized {
 			return claim, true
 		}
-		if normalizedSlug != "" && normalizeLeaseSlug(claim.Slug) == normalizedSlug {
+		if normalizedSlug != "" && core.NormalizeLeaseSlug(claim.Slug) == normalizedSlug {
 			return claim, true
 		}
 	}
-	return LeaseClaim{}, false
+	return core.LeaseClaim{}, false
 }
 
-func coderStaleClaimLeaseTarget(cfg Config, claim LeaseClaim) LeaseTarget {
+func coderStaleClaimLeaseTarget(cfg core.Config, claim core.LeaseClaim) core.LeaseTarget {
 	name := coderClaimWorkspaceRef(claim)
 	if name == "" {
 		generated, err := coderWorkspaceName(cfg.Coder.WorkspacePrefix, claim.Slug, claim.LeaseID)
@@ -718,13 +718,13 @@ func coderStaleClaimLeaseTarget(cfg Config, claim LeaseClaim) LeaseTarget {
 	if claim.LeaseID != "" {
 		labels["lease"] = claim.LeaseID
 	}
-	return LeaseTarget{
-		Server:  Server{CloudID: name, Provider: coderProvider, Name: coderWorkspaceNameFromRef(name), Status: "missing", Labels: labels},
+	return core.LeaseTarget{
+		Server:  core.Server{CloudID: name, Provider: coderProvider, Name: coderWorkspaceNameFromRef(name), Status: "missing", Labels: labels},
 		LeaseID: claim.LeaseID,
 	}
 }
 
-func coderClaimWorkspaceRef(claim LeaseClaim) string {
+func coderClaimWorkspaceRef(claim core.LeaseClaim) string {
 	name := strings.TrimSpace(claim.Labels["coder_workspace_ref"])
 	if name == "" {
 		name = strings.TrimSpace(claim.Labels["coder_workspace"])
@@ -732,22 +732,22 @@ func coderClaimWorkspaceRef(claim LeaseClaim) string {
 	return name
 }
 
-func coderClaimWorkspaceName(cfg Config, claim LeaseClaim) (string, error) {
+func coderClaimWorkspaceName(cfg core.Config, claim core.LeaseClaim) (string, error) {
 	return coderWorkspaceName(cfg.Coder.WorkspacePrefix, coderCollisionSlug(claim.Slug, claim.LeaseID), claim.LeaseID)
 }
 
-func coderClaimKeep(claim LeaseClaim) bool {
+func coderClaimKeep(claim core.LeaseClaim) bool {
 	return strings.EqualFold(claim.Labels["keep"], "true")
 }
 
-func coderReleaseActionFromConfig(cfg Config) string {
+func coderReleaseActionFromConfig(cfg core.Config) string {
 	if cfg.Coder.DeleteOnRelease {
 		return coderReleaseActionDelete
 	}
 	return coderReleaseActionStop
 }
 
-func coderManualCleanupCommand(cfg Config, name string) string {
+func coderManualCleanupCommand(cfg core.Config, name string) string {
 	if cfg.Coder.DeleteOnRelease {
 		return fmt.Sprintf("crabbox stop --provider coder --coder-delete-on-release --id %s", name)
 	}
@@ -765,7 +765,7 @@ func coderReleaseAction(value string) (string, bool) {
 	}
 }
 
-func coderCleanupReleaseAction(claim LeaseClaim, hasClaim bool) string {
+func coderCleanupReleaseAction(claim core.LeaseClaim, hasClaim bool) string {
 	if hasClaim {
 		if action, ok := coderReleaseAction(claim.Labels[coderReleaseActionLabel]); ok {
 			return action
@@ -774,8 +774,8 @@ func coderCleanupReleaseAction(claim LeaseClaim, hasClaim bool) string {
 	return coderReleaseActionStop
 }
 
-func coderWorkspacesToServers(workspaces []coderWorkspace, cfg Config) []Server {
-	servers := make([]Server, 0, len(workspaces))
+func coderWorkspacesToServers(workspaces []coderWorkspace, cfg core.Config) []core.Server {
+	servers := make([]core.Server, 0, len(workspaces))
 	for _, workspace := range workspaces {
 		leaseID, slug, owned := coderWorkspaceLeaseMetadata(workspace, cfg)
 		if !owned {
@@ -786,15 +786,15 @@ func coderWorkspacesToServers(workspaces []coderWorkspace, cfg Config) []Server 
 	return servers
 }
 
-func coderWorkspaceToServer(workspace coderWorkspace, cfg Config, leaseID, slug string, keep bool) Server {
-	return coderWorkspaceToServerWithClaim(workspace, cfg, leaseID, slug, keep, LeaseClaim{}, false)
+func coderWorkspaceToServer(workspace coderWorkspace, cfg core.Config, leaseID, slug string, keep bool) core.Server {
+	return coderWorkspaceToServerWithClaim(workspace, cfg, leaseID, slug, keep, core.LeaseClaim{}, false)
 }
 
-func coderWorkspaceToServerWithClaim(workspace coderWorkspace, cfg Config, leaseID, slug string, keep bool, claim LeaseClaim, hasClaim bool) Server {
+func coderWorkspaceToServerWithClaim(workspace coderWorkspace, cfg core.Config, leaseID, slug string, keep bool, claim core.LeaseClaim, hasClaim bool) core.Server {
 	if slug == "" {
 		slug = coderSlugFromWorkspace(workspace.Name, cfg.Coder.WorkspacePrefix)
 	}
-	labels := directLeaseLabels(cfg, leaseID, slug, coderProvider, "", keep, time.Now().UTC())
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, coderProvider, "", keep, time.Now().UTC())
 	if labels == nil {
 		labels = map[string]string{}
 	}
@@ -824,21 +824,21 @@ func coderWorkspaceToServerWithClaim(workspace coderWorkspace, cfg Config, lease
 	}
 	labels["work_root"] = coderWorkRoot(cfg)
 	labels["state"] = coderWorkspaceState(workspace)
-	server := Server{CloudID: coderWorkspaceCommandName(workspace), Provider: coderProvider, Name: workspace.Name, Status: labels["state"], Labels: labels}
+	server := core.Server{CloudID: coderWorkspaceCommandName(workspace), Provider: coderProvider, Name: workspace.Name, Status: labels["state"], Labels: labels}
 	server.ServerType.Name = core.Blank(workspace.Template, "coder-workspace")
 	return server
 }
 
-func coderWorkspaceLeaseMetadata(workspace coderWorkspace, cfg Config) (string, string, bool) {
+func coderWorkspaceLeaseMetadata(workspace coderWorkspace, cfg core.Config) (string, string, bool) {
 	hasCrabboxLabel := coderWorkspaceHasCrabboxLabel(workspace)
 	leaseID := strings.TrimSpace(workspace.Labels["crabbox_lease_id"])
-	slug := normalizeLeaseSlug(workspace.Labels["crabbox_slug"])
+	slug := core.NormalizeLeaseSlug(workspace.Labels["crabbox_slug"])
 	if leaseID != "" || slug != "" {
 		if leaseID == "" {
 			leaseID = strings.TrimSpace(workspace.Labels["lease"])
 		}
 		if slug == "" {
-			slug = normalizeLeaseSlug(workspace.Labels["slug"])
+			slug = core.NormalizeLeaseSlug(workspace.Labels["slug"])
 		}
 		if leaseID == "" {
 			leaseID = coderAdoptedWorkspaceLeaseID(workspace)
@@ -846,7 +846,7 @@ func coderWorkspaceLeaseMetadata(workspace coderWorkspace, cfg Config) (string, 
 		return leaseID, slug, true
 	}
 	leaseID = strings.TrimSpace(workspace.Labels["lease"])
-	slug = normalizeLeaseSlug(workspace.Labels["slug"])
+	slug = core.NormalizeLeaseSlug(workspace.Labels["slug"])
 	if leaseID != "" || slug != "" {
 		if hasCrabboxLabel {
 			if leaseID == "" {
@@ -879,12 +879,12 @@ func coderSlugFromWorkspace(name, prefix string) string {
 	if !strings.HasPrefix(name, cleanPrefix) {
 		return ""
 	}
-	return normalizeLeaseSlug(strings.TrimPrefix(name, cleanPrefix))
+	return core.NormalizeLeaseSlug(strings.TrimPrefix(name, cleanPrefix))
 }
 
-func coderSSHTarget(cfg Config, workspaceName, workspaceID string) SSHTarget {
+func coderSSHTarget(cfg core.Config, workspaceName, workspaceID string) core.SSHTarget {
 	host := coderWorkspaceSSHHost(workspaceName)
-	return SSHTarget{
+	return core.SSHTarget{
 		User:           "coder",
 		Host:           host,
 		Port:           "22",
@@ -893,7 +893,7 @@ func coderSSHTarget(cfg Config, workspaceName, workspaceID string) SSHTarget {
 		NetworkKind:    networkPublic,
 		ReadyCheck:     "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null",
 		SSHConfigProxy: true,
-		ProxyCommand:   shellQuote(cfg.Coder.CLIPath) + " ssh --stdio --wait " + shellQuote(core.Blank(cfg.Coder.Wait, core.CoderConfigDefaultWait)) + " " + shellQuote(workspaceName),
+		ProxyCommand:   core.ShellQuote(cfg.Coder.CLIPath) + " ssh --stdio --wait " + core.ShellQuote(core.Blank(cfg.Coder.Wait, core.CoderConfigDefaultWait)) + " " + core.ShellQuote(workspaceName),
 	}
 }
 
@@ -917,7 +917,7 @@ func coderWorkspaceSSHHost(ref string) string {
 	if !strings.Contains(ref, "/") {
 		return core.Blank(coderWorkspaceNameFromRef(ref), "coder-workspace")
 	}
-	base := normalizeLeaseSlug(ref)
+	base := core.NormalizeLeaseSlug(ref)
 	hash := coderWorkspaceHash(ref)
 	maxBase := 63 - len("coder-") - len(hash) - 1
 	if maxBase < 1 {
@@ -1012,7 +1012,7 @@ func coderUniqueWorkspaceName(workspaces []coderWorkspace, prefix, slug, leaseID
 		return "", "", err
 	}
 	if coderWorkspaceNameExists(workspaces, name) {
-		return "", "", exit(5, "coder workspace name %q collides with existing inventory", name)
+		return "", "", core.Exit(5, "coder workspace name %q collides with existing inventory", name)
 	}
 	return slug, name, nil
 }
@@ -1031,7 +1031,7 @@ func coderWorkspaceName(prefix, slug, leaseID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	base := strings.ToLower(normalizeLeaseSlug(slug))
+	base := strings.ToLower(core.NormalizeLeaseSlug(slug))
 	base = coderWorkspaceInvalidChars.ReplaceAllString(base, "-")
 	base = strings.Trim(base, "-")
 	if base == "" {
@@ -1042,7 +1042,7 @@ func coderWorkspaceName(prefix, slug, leaseID string) (string, error) {
 	}
 	maxBase := 32 - len(cleanPrefix)
 	if maxBase < 1 {
-		return "", exit(2, "coder.workspacePrefix %q leaves no room for a workspace name", cleanPrefix)
+		return "", core.Exit(2, "coder.workspacePrefix %q leaves no room for a workspace name", cleanPrefix)
 	}
 	if len(base) > maxBase {
 		hash := coderWorkspaceHash(base)
@@ -1059,19 +1059,19 @@ func coderWorkspaceName(prefix, slug, leaseID string) (string, error) {
 	}
 	name := strings.Trim(cleanPrefix+base, "-")
 	if len(name) < 1 || len(name) > 32 {
-		return "", exit(2, "coder workspace name %q must be 1-32 characters", name)
+		return "", core.Exit(2, "coder workspace name %q must be 1-32 characters", name)
 	}
 	if name == "new" || name == "create" {
 		name = "cbx-" + name
 	}
 	if name[0] == '-' || name[len(name)-1] == '-' {
-		return "", exit(2, "coder workspace name %q must start and end with a letter or number", name)
+		return "", core.Exit(2, "coder workspace name %q must start and end with a letter or number", name)
 	}
 	return name, nil
 }
 
 func coderCollisionSlug(slug, leaseID string) string {
-	slug = normalizeLeaseSlug(slug)
+	slug = core.NormalizeLeaseSlug(slug)
 	suffix := coderWorkspaceHash(leaseID)
 	maxBase := coderMaxRequestedSlugLength - len(suffix) - 1
 	if maxBase < 1 {

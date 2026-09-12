@@ -29,43 +29,14 @@ type CloudflareConfigApplied struct {
 
 func (cfg *CloudflareConfig) applyFile(file *fileCloudflareConfig) (CloudflareConfigApplied, error) {
 	var applied CloudflareConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.APIURL != "" {
-		cfg.APIURL = file.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if file.Token != "" {
-		cfg.Token = file.Token
-		applied.InputAccepted = true
-		applied.Token = true
-	}
-	if file.Workdir != "" {
-		cfg.Workdir = file.Workdir
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "cloudflare")
+	return applied, err
 }
 
 func (cfg *CloudflareConfig) applyEnv() (CloudflareConfigApplied, error) {
 	var applied CloudflareConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUDFLARE_RUNNER_URL"); ok {
-		cfg.APIURL = value
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUDFLARE_RUNNER_TOKEN"); ok {
-		cfg.Token = value
-		applied.InputAccepted = true
-		applied.Token = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUDFLARE_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 3)
+	return applied, err
 }
 
 // CloudflareConfigFlagValues holds parsed values; only visited flags are applied.
@@ -89,23 +60,14 @@ type CloudflareConfigVisitedFlags struct {
 
 // CloudflareConfigFlagPresence reports visits for tracked flag bindings.
 func CloudflareConfigFlagPresence(fs *flag.FlagSet) CloudflareConfigVisitedFlags {
-	return CloudflareConfigVisitedFlags{
-		APIURL: flagWasSet(fs, "cloudflare-url"),
-	}
+	var visited CloudflareConfigVisitedFlags
+	recordConfigFlagVisits[CloudflareConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values CloudflareConfigFlagValues) Apply(cfg *CloudflareConfig, fs *flag.FlagSet) (CloudflareConfigApplied, error) {
 	var applied CloudflareConfigApplied
-	visited := CloudflareConfigFlagPresence(fs)
-	if visited.APIURL {
-		cfg.APIURL = *values.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if flagWasSet(fs, "cloudflare-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

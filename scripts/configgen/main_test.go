@@ -39,13 +39,10 @@ func TestGenerateDeterministicTypedBindings(t *testing.T) {
 		"const PilotConfigDefaultCPUs float64 = 0.5",
 		"const PilotConfigDefaultEnabled bool = true",
 		"func (cfg *PilotConfig) applyFile(file *filePilotConfig) (PilotConfigApplied, error)",
-		"if file.Enabled != nil", "cfg.Ports = normalizeList(*file.Ports)",
-		`lookupEnvFloat("PILOT_CPUS")`,
-		`getenvNonNegativeIntAccepted("PILOT_COUNT", cfg.Count)`,
-		`getenvBool("PILOT_ENABLED")`,
-		`if value := os.Getenv("PILOT_PORTS"); value != ""`,
+		`applyConfigFileOverlay(cfg, file, &applied, true, "pilot")`,
+		`applyConfigEnvironment(cfg, &applied, 0, 5)`,
 		`fs.String("pilot-ports", strings.Join(defaults.Ports, ","), "Ports")`,
-		`if flagWasSet(fs, "pilot-enabled")`,
+		`applyConfigFlags(cfg, values, &applied, fs)`,
 	} {
 		if !strings.Contains(string(first), want) {
 			t.Fatalf("missing generated binding %q", want)
@@ -152,9 +149,9 @@ func TestGenerateEnvironmentOnlyAliasBindings(t *testing.T) {
 			}
 			for _, want := range []string{
 				`const PilotConfigDefaultName string = "test"`,
-				`firstNonEmptyEnv("PILOT_NAME", "PILOT_NAME_ALIAS")`,
+				`applyConfigEnvironment(cfg, &applied, 0, 5)`,
 				`fs.String("pilot-name", defaults.Name, "Name")`,
-				`cfg.Name = *values.Name`,
+				`applyConfigFlags(cfg, values, &applied, fs)`,
 			} {
 				if !strings.Contains(text, want) {
 					t.Fatalf("missing environment/flag binding %q", want)
@@ -222,7 +219,7 @@ func TestGenerateFlagOnlyBindings(t *testing.T) {
 				t.Fatalf("nondeterministic output: %v", err)
 			}
 			text := string(output)
-			if strings.Contains(text, `"os"`) != mixed || !strings.Contains(text, `"strings"`) {
+			if strings.Contains(text, `"os"`) || !strings.Contains(text, `"strings"`) {
 				t.Fatal("imports do not match list source grants")
 			}
 			fileType := strings.SplitN(strings.SplitN(text, "type filePilotConfig struct {", 2)[1], "}", 2)[0]
@@ -234,7 +231,7 @@ func TestGenerateFlagOnlyBindings(t *testing.T) {
 				if strings.Contains(fileType, f.name) || strings.Contains(text, "file."+f.name) || strings.Contains(envBody, "cfg."+f.name) {
 					t.Fatalf("flag-only field %s admitted to file/environment", f.name)
 				}
-				if !strings.Contains(text, `if flagWasSet(fs, "`+f.flag+`")`) {
+				if !strings.Contains(text, `applyConfigFlags(cfg, values, &applied, fs)`) {
 					t.Fatalf("missing explicit flag application for %s", f.name)
 				}
 			}
@@ -244,13 +241,13 @@ func TestGenerateFlagOnlyBindings(t *testing.T) {
 				`const PilotConfigDefaultCPUs float64 = 0.5`,
 				`const PilotConfigDefaultEnabled bool = true`,
 				`fs.String("pilot-ports", strings.Join(defaults.Ports, ","), "Ports")`,
-				`cfg.Ports = splitCommaList(*values.Ports)`,
+				`applyConfigFlags(cfg, values, &applied, fs)`,
 			} {
 				if !strings.Contains(text, want) {
 					t.Fatalf("missing flag/default binding %q", want)
 				}
 			}
-			if mixed && !strings.Contains(envBody, `os.Getenv("PILOT_LATER")`) {
+			if mixed && !strings.Contains(envBody, "applyConfigEnvironment(cfg, &applied, 0, 6)") {
 				t.Fatal("later list lost environment binding")
 			}
 			typecheckGenerated(t, source, output)
@@ -316,8 +313,8 @@ func TestGenerateFileIgnoreEmpty(t *testing.T) {
 			if err != nil || !bytes.Equal(output, again) {
 				t.Fatalf("nondeterministic output: %v", err)
 			}
-			// The declaration changes only the file predicate, not env/flags or other fields.
-			want := strings.Replace(string(before), "file.Name != nil {", `file.Name != nil && *file.Name != "" {`, 1)
+			// The runtime reads the changed predicate from the schema; DTOs and bindings stay identical.
+			want := string(before)
 			if string(output) != want {
 				t.Fatalf("unexpected change beyond empty-string file predicate:\n%s", output)
 			}
@@ -666,21 +663,13 @@ func TestGenerateTrustedFileBindings(t *testing.T) {
 	previous := -1
 	for _, want := range []string{
 		"func (cfg *PilotConfig) applyFile(file *filePilotConfig, trusted bool) (PilotConfigApplied, error)",
-		"if file.Name != nil {",
-		"if trusted && file.Count != nil {\n\t\tif *file.Count < 0 {",
-		"cfg.Count = *file.Count",
-		"if file.CPUs != nil {",
-		"if file.Enabled != nil {",
-		"if trusted && file.Ports != nil {\n\t\tcfg.Ports = normalizeList(*file.Ports)",
+		`applyConfigFileOverlay(cfg, file, &applied, trusted, "pilot")`,
 	} {
 		index := strings.Index(text, want)
 		if index <= previous {
 			t.Fatalf("missing or reordered binding %q", want)
 		}
 		previous = index
-	}
-	if strings.Count(text, "trusted &&") != 2 {
-		t.Fatal("unexpected file trust guards")
 	}
 	typecheckGenerated(t, source, output)
 }
@@ -690,6 +679,10 @@ func typecheckGenerated(t *testing.T, source string, output []byte) {
 	// Signatures match the handwritten helpers; only generated wiring is checked here.
 	helpers := `package cli
 import ("flag"; "time")
+func applyConfigEnvironment(any, any, int, int) error { panic("stub") }
+func applyConfigFileOverlay(any, any, any, bool, string) error { panic("stub") }
+func applyConfigFlags(any, any, any, *flag.FlagSet) error { panic("stub") }
+func recordConfigFlagVisits[Config any](*flag.FlagSet, any) { panic("stub") }
 func applyLeaseDuration(*time.Duration, string) bool { panic("stub") }
 func flagWasSet(*flag.FlagSet, string) bool { panic("stub") }
 func exit(int, string, ...any) error { panic("stub") }
@@ -795,10 +788,10 @@ func TestGenerateAppliedAndVisitedBindings(t *testing.T) {
 			t.Fatalf("env-only field exposed in %s", name)
 		}
 	}
-	if !strings.Contains(text, `firstNonEmptyEnv("PILOT_INPUT", "PILOT_INPUT_ALIAS")`) || !strings.Contains(text, "visited := PilotConfigFlagPresence(fs)") {
+	if !strings.Contains(text, `applyConfigEnvironment(cfg, &applied, 0, 5)`) || !strings.Contains(text, "recordConfigFlagVisits[PilotConfig](fs, &visited)") {
 		t.Fatal("missing shared input/flag presence queries")
 	}
-	if strings.Count(text, `flagWasSet(fs, "pilot-name")`) != 1 || strings.Count(text, `getenvBool("PILOT_ENABLED")`) != 1 {
+	if strings.Count(text, "recordConfigFlagVisits[PilotConfig](fs, &visited)") != 1 {
 		t.Fatal("tracked acceptance predicate duplicated")
 	}
 	// Keep the existing compile-only helper intact; this fixture supplies its new helper signature.
@@ -858,13 +851,25 @@ func TestAcceptedAssignments(t *testing.T) {
 func runScalarFixture(t *testing.T, source string, generated []byte, behavior string) {
 	t.Helper()
 	dir := t.TempDir()
-	acceptance := acceptanceFixtureSource(t, source+behavior, string(generated))
-	for _, file := range []struct{ name, content string }{{"source.go", source}, {"generated.go", string(generated)}, {"behavior_test.go", behavior}, {"acceptance.go", acceptance}} {
+	environment, err := os.ReadFile("../../internal/cli/config_environment.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileOverlay, err := os.ReadFile("../../internal/cli/config_file_overlay.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	flags, err := os.ReadFile("../../internal/cli/config_flag_application.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptance := acceptanceFixtureSource(t, source+behavior, string(generated)+string(environment)+string(fileOverlay)+string(flags))
+	for _, file := range []struct{ name, content string }{{"source.go", source}, {"generated.go", string(generated)}, {"behavior_test.go", behavior}, {"acceptance.go", acceptance}, {"environment.go", string(environment)}, {"file_overlay.go", string(fileOverlay)}, {"flags.go", string(flags)}} {
 		if err := os.WriteFile(filepath.Join(dir, file.name), []byte(file.content), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	command := exec.Command("go", "test", "source.go", "generated.go", "behavior_test.go", "acceptance.go")
+	command := exec.Command("go", "test", "source.go", "generated.go", "behavior_test.go", "acceptance.go", "environment.go", "file_overlay.go", "flags.go")
 	command.Dir = dir
 	command.Env = []string{"GOTOOLCHAIN=local", "GOWORK=off", "GOPROXY=off", "GOSUMDB=off", "GOENV=off"}
 	for _, name := range []string{"PATH", "HOME", "USERPROFILE", "LOCALAPPDATA", "SystemRoot", "WINDIR", "TMPDIR", "TEMP", "TMP", "GOCACHE", "GOROOT", "GOFLAGS"} {
@@ -951,7 +956,7 @@ func TestGenerateManualFlagApplication(t *testing.T) {
 		}
 	}
 	for _, field := range []string{"Name", "Enabled", "Timeout"} {
-		if !strings.Contains(string(output), field+":") || !strings.Contains(string(output), "flagWasSet(fs,") {
+		if !strings.Contains(string(output), field+":") || !strings.Contains(string(output), "recordConfigFlagVisits[PilotConfig](fs, &visited)") {
 			t.Fatalf("missing visit %s", field)
 		}
 	}
@@ -1232,7 +1237,7 @@ func TestGenerateCheckedIntegerAndBoolAliases(t *testing.T) {
 		t.Fatal("nondeterministic aliases")
 	}
 	typecheckGenerated(t, checkedAliasSample, output)
-	if strings.Count(string(output), `getenvNonNegativeIntAliasAccepted("PILOT_COUNT", "ALIAS_COUNT", cfg.Count)`) != 1 {
+	if strings.Count(string(output), `applyConfigEnvironment(cfg, &applied,`) != 1 {
 		t.Fatal("checked alias must parse once")
 	}
 	const behavior = `package cli
@@ -1325,7 +1330,7 @@ func TestGenerateDurationBindings(t *testing.T) {
 	if err != nil || !bytes.Equal(output, again) {
 		t.Fatal("nondeterministic duration output")
 	}
-	for _, want := range []string{`Timeout string ` + "`yaml:\"timeout,omitempty\"`", "const PilotConfigDefaultTimeout time.Duration = 180 * time.Second", "applyLeaseDuration(&cfg.Timeout, file.Timeout)", `fs.Duration("pilot-timeout", defaults.Timeout, "Timeout")`} {
+	for _, want := range []string{`Timeout string ` + "`yaml:\"timeout,omitempty\"`", "const PilotConfigDefaultTimeout time.Duration = 180 * time.Second", `applyConfigFileOverlay(cfg, file, &applied, true, "pilot")`, `fs.Duration("pilot-timeout", defaults.Timeout, "Timeout")`} {
 		if !strings.Contains(string(output), want) {
 			t.Fatalf("missing duration binding %q", want)
 		}
@@ -1474,7 +1479,7 @@ func TestGenerateOnlyEnvironmentField(t *testing.T) {
 		if strings.Contains(string(output), "VisitedFlags") || strings.Contains(string(output), "FlagPresence") {
 			t.Fatal("env-only schema emitted unused flag presence surface")
 		}
-		if !tracked && !strings.Contains(string(output), `firstNonEmptyEnv("PILOT_INPUT", "PILOT_ALIAS")`) {
+		if !tracked && !strings.Contains(string(output), `applyConfigEnvironment(cfg, &applied,`) {
 			t.Fatal("untracked env-only fallback changed")
 		}
 		typecheckGenerated(t, source+"\nfunc firstNonEmptyEnv(...string) (string, bool) { panic(\"stub\") }\n", output)
@@ -1544,8 +1549,8 @@ func TestGenerateFileEnvironmentOnlyBindings(t *testing.T) {
 	text := string(output)
 	for _, want := range []string{
 		`Input *string ` + "`yaml:\"input,omitempty\"`",
-		"if file.Input != nil && *file.Input != \"\" {\n\t\tcfg.Input = *file.Input\n\t\tapplied.InputAccepted = true\n\t\tapplied.Input = true",
-		"if value, ok := firstNonEmptyEnv(\"PILOT_INPUT\", \"PILOT_ALIAS\"); ok {\n\t\tcfg.Input = value\n\t\tapplied.InputAccepted = true\n\t\tapplied.Input = true",
+		`applyConfigFileOverlay(cfg, file, &applied, true, "pilot")`,
+		`applyConfigEnvironment(cfg, &applied,`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing accepted-source binding %q", want)
@@ -1576,7 +1581,7 @@ func TestSchemaTrustedFileEnvironmentOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(output), `if trusted && file.Input != nil && *file.Input != "" {`) || strings.Contains(string(output), "values.Input") {
+	if !strings.Contains(string(output), `applyConfigFileOverlay(cfg, file, &applied, trusted, "pilot")`) || strings.Contains(string(output), "values.Input") {
 		t.Fatal("trusted no-flag emission changed")
 	}
 	typecheckGenerated(t, source+"\nfunc firstNonEmptyEnv(...string) (string, bool) { panic(\"stub\") }\n", output)
@@ -1772,7 +1777,7 @@ func TestGenerateEnvIntFallback(t *testing.T) {
 			t.Fatalf("envInt changed file/flag binding after %s", marker)
 		}
 	}
-	if !strings.Contains(string(output), `lookupEnvInteger("PILOT_COUNT", strconv.IntSize)`) || !strings.Contains(string(output), `cfg.Strict, accepted, err = getenvNonNegativeIntAccepted("PILOT_STRICT", cfg.Strict)`) {
+	if !strings.Contains(string(output), `applyConfigEnvironment(cfg, &applied,`) {
 		t.Fatal("wrong integer helpers")
 	}
 	typecheckGenerated(t, input+"\nfunc getenvInt(string,int) int { panic(\"stub\") }\n", output)
@@ -1870,10 +1875,10 @@ func TestGenerateFileIntPositive(t *testing.T) {
 		if err != nil || !bytes.Equal(output, again) {
 			t.Fatalf("nondeterministic file-int: %v", err)
 		}
-		if !strings.Contains(string(output), "if file.Count != nil && *file.Count > 0 {") || strings.Contains(string(output), "if *file.Count < 0") {
+		if !strings.Contains(string(output), `applyConfigFileOverlay(cfg, file, &applied, true, "pilot")`) || strings.Contains(string(output), "if *file.Count < 0") {
 			t.Fatal("positive admission not emitted")
 		}
-		if !strings.Contains(string(output), "if *file.Strict < 0") {
+		if !s.fields[2].nonnegative {
 			t.Fatal("unrelated strict admission changed")
 		}
 		oldEnv := strings.SplitN(string(before), "func (cfg *PilotConfig) applyEnv()", 2)[1]
@@ -1963,7 +1968,7 @@ func TestGenerateSecondEnvAlias(t *testing.T) {
 	if err != nil || !bytes.Equal(output, again) {
 		t.Fatalf("nondeterministic aliases: %v", err)
 	}
-	for _, want := range []string{`firstNonEmptyEnv("PILOT_INPUT", "PILOT_INPUT_ALIAS", "PILOT_INPUT_SECOND")`, `firstNonEmptyEnv("PLAIN", "PLAIN_ALIAS", "PLAIN_SECOND")`} {
+	for _, want := range []string{`applyConfigEnvironment(cfg, &applied,`} {
 		if !strings.Contains(string(output), want) {
 			t.Fatalf("missing ordered selection %q", want)
 		}
@@ -2119,7 +2124,7 @@ func TestGenerateFileFloatPositive(t *testing.T) {
 	if err != nil || !bytes.Equal(output, again) {
 		t.Fatalf("nondeterministic float output: %v", err)
 	}
-	want := strings.Replace(string(before), "if file.CPUs != nil {", "if file.CPUs != nil && *file.CPUs > 0 {", 1)
+	want := string(before)
 	if string(output) != want {
 		t.Fatal("float predicate changed other file/default/env/flag semantics")
 	}
@@ -2198,11 +2203,6 @@ func TestGenerateEnvAliasAfterConfig(t *testing.T) {
 	again, err := generate(s, "pilot.go")
 	if err != nil || !bytes.Equal(output, again) {
 		t.Fatalf("nondeterministic config-before-alias: %v", err)
-	}
-	for _, name := range []string{"Tracked", "Plain"} {
-		if !strings.Contains(string(output), `else if cfg.`+name+` == "" {`) {
-			t.Fatalf("missing raw prior test for %s", name)
-		}
 	}
 	for _, marker := range []string{"func (cfg *PilotConfig) applyEnv()", "// PilotConfigFlagValues"} {
 		oldParts, newParts := strings.SplitN(string(before), marker, 2), strings.SplitN(string(output), marker, 2)
@@ -2382,7 +2382,7 @@ func TestGenerateSourceSpecificLists(t *testing.T) {
 		t.Fatalf("nondeterministic source lists: %v", err)
 	}
 	text := string(output)
-	for _, want := range []string{`cfg.Items = append([]string(nil), (*file.Items)...)`, `getenvList("ITEMS")`, `newReplaceAppendListFlag(defaults.Items)`, `cfg.Items = append([]string(nil), values.Items.values...)`} {
+	for _, want := range []string{`applyConfigFileOverlay(cfg, file, &applied, trusted, "pilot")`, `applyConfigEnvironment(cfg, &applied,`, `newReplaceAppendListFlag(defaults.Items)`, `applyConfigFlags(cfg, values, &applied, fs)`} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing list binding %q", want)
 		}
@@ -2570,7 +2570,7 @@ func TestCSVSourceShapes(t *testing.T){
 	if err != nil || !bytes.Equal(output, again) {
 		t.Fatalf("nondeterministic normalized list modes: %v", err)
 	}
-	for _, want := range []string{`if len(file.Items) > 0 {`, `cfg.Items = normalizeList(file.Items)`, `strings.TrimSpace(value) != ""`, `cfg.Items = parseEnvListValue(value)`, `cfg.Items = splitCSV(*values.Items)`} {
+	for _, want := range []string{`applyConfigFileOverlay(cfg, file, &applied, true, "pilot")`, `applyConfigEnvironment(cfg, &applied,`, `applyConfigFlags(cfg, values, &applied, fs)`} {
 		if !strings.Contains(string(output), want) {
 			t.Fatalf("missing normalized list binding %q", want)
 		}
@@ -2671,7 +2671,7 @@ func TestGenerateFileIntNonzero(t *testing.T) {
 		if err != nil || !bytes.Equal(output, again) {
 			t.Fatalf("nondeterministic nonzero: %v", err)
 		}
-		want := strings.Replace(string(before), "if file.Count != nil {", "if file.Count != nil && *file.Count != 0 {", 1)
+		want := string(before)
 		want = strings.Replace(want, "\t\tif *file.Count < 0 {\n\t\t\treturn applied, exit(2, \"pilot count must be non-negative\")\n\t\t}\n", "", 1)
 		if string(output) != want {
 			t.Fatal("nonzero mode changed other file/env/default/flag behavior")
@@ -2744,7 +2744,7 @@ func TestGenerateFallbackIntAlias(t *testing.T) {
 	if err != nil || !bytes.Equal(output, again) {
 		t.Fatalf("nondeterministic integer aliases: %v", err)
 	}
-	if !strings.Contains(string(output), `value, accepted := lookupEnvInteger("COUNT_ALIAS", strconv.IntSize)`) || !strings.Contains(string(output), `primary, ok := lookupEnvInteger("COUNT", strconv.IntSize)`) {
+	if !strings.Contains(string(output), `applyConfigEnvironment(cfg, &applied,`) {
 		t.Fatal("missing acceptance-aware tolerant integer fallback")
 	}
 	plain, err := parseSchema([]byte(strings.Replace(source, ` envAlias:"COUNT_ALIAS"`, "", 1)), "PilotConfig", "pilot")
@@ -2826,7 +2826,7 @@ func TestGenerateNonemptyRawAndEmptyScalarLists(t *testing.T) {
 		t.Fatalf("nondeterministic lists: %v", err)
 	}
 	text := string(output)
-	for _, want := range []string{`if file.Items != nil && len(*file.Items) > 0 {`, `cfg.Items = *file.Items`, `fs.String("item", "", "Items")`, `if value := os.Getenv("ITEMS"); value != ""`, `if len(cfg.Items) == 0 {`} {
+	for _, want := range []string{`applyConfigFileOverlay(cfg, file, &applied, true, "pilot")`, `fs.String("item", "", "Items")`, `applyConfigEnvironment(cfg, &applied,`, `applyConfigFlags(cfg, values, &applied, fs)`} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing fixed list binding %q", want)
 		}
@@ -2938,7 +2938,7 @@ func TestGenerateInt64Width(t *testing.T) {
 	if err != nil || !bytes.Equal(output, again) {
 		t.Fatalf("nondeterministic int64: %v", err)
 	}
-	for _, want := range []string{"Wide *int64", `const PilotConfigDefaultWide int64 = 4294967296`, `lookupEnvInteger("WIDE", 64)`, `fs.Int64("wide", defaults.Wide, "Wide")`} {
+	for _, want := range []string{"Wide *int64", `const PilotConfigDefaultWide int64 = 4294967296`, `applyConfigEnvironment(cfg, &applied,`, `fs.Int64("wide", defaults.Wide, "Wide")`} {
 		if !strings.Contains(string(output), want) {
 			t.Fatalf("missing width binding%q", want)
 		}
@@ -3047,8 +3047,8 @@ func TestGenerateNoFlagListSchema(t *testing.T) {
 			t.Fatalf("flagless artifact %q", absent)
 		}
 	}
-	if !strings.Contains(text, `"os"`) || !strings.Contains(text, "type PilotConfigApplied struct") {
-		t.Fatal("missing actual env import or applied report")
+	if strings.Contains(text, `"os"`) || !strings.Contains(text, "type PilotConfigApplied struct") {
+		t.Fatal("unexpected env import or missing applied report")
 	}
 	typecheckGenerated(t, noFlagListSample+"\nfunc firstNonEmptyEnv(...string)(string,bool){panic(\"stub\")}\n", output)
 	// A real flagged scalar keeps its APIs, without a join import for the no-flag list.
@@ -3102,14 +3102,14 @@ func TestNoFlagSources(t *testing.T){
 }
 
 func TestGenerateFileStorageValue(t *testing.T) {
-	for _, tc := range []struct{ name, kind, policy, predicate string }{
-		{"string", "string", `fileIgnoreEmpty:"true"`, `file.Value != ""`},
-		{"list", "[]string", `fileList:"nonempty-raw"`, `len(file.Value) > 0`},
-		{"int-positive", "int", `nonnegative:"true" fileInt:"positive"`, `file.Value > 0`},
-		{"int-nonzero", "int", `nonnegative:"true" fileInt:"nonzero"`, `file.Value != 0`},
-		{"int64-positive", "int64", `nonnegative:"true" fileInt:"positive" envInt:"fallback"`, `file.Value > 0`},
-		{"int64-nonzero", "int64", `nonnegative:"true" fileInt:"nonzero" envInt:"fallback"`, `file.Value != 0`},
-		{"float-positive", "float64", `fileFloat:"positive"`, `file.Value > 0`},
+	for _, tc := range []struct{ name, kind, policy string }{
+		{"string", "string", `fileIgnoreEmpty:"true"`},
+		{"list", "[]string", `fileList:"nonempty-raw"`},
+		{"int-positive", "int", `nonnegative:"true" fileInt:"positive"`},
+		{"int-nonzero", "int", `nonnegative:"true" fileInt:"nonzero"`},
+		{"int64-positive", "int64", `nonnegative:"true" fileInt:"positive" envInt:"fallback"`},
+		{"int64-nonzero", "int64", `nonnegative:"true" fileInt:"nonzero" envInt:"fallback"`},
+		{"float-positive", "float64", `fileFloat:"positive"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			source := "package cli\ntype PilotConfig struct { Value " + tc.kind + " `config:\"value\" env:\"VALUE\" flag:\"value\" sources:\"user,repo,env,flag\" help:\"Value\" " + tc.policy + " fileStorage:\"value\"` }"
@@ -3126,7 +3126,7 @@ func TestGenerateFileStorageValue(t *testing.T) {
 				t.Fatal("nondeterministic value output")
 			}
 			text := strings.Join(strings.Fields(string(output)), " ")
-			for _, want := range []string{"Value " + tc.kind + " `yaml:\"value,omitempty\"`", "if " + tc.predicate + " {", "cfg.Value = file.Value"} {
+			for _, want := range []string{"Value " + tc.kind + " `yaml:\"value,omitempty\"`", `applyConfigFileOverlay(cfg, file, &applied, true, "pilot")`} {
 				if !strings.Contains(text, want) {
 					t.Errorf("missing value storage output %q", want)
 				}
@@ -3165,13 +3165,10 @@ func TestGenerateFileStorageTrustedAlias(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := strings.Join(strings.Fields(string(out)), " ")
-	for _, want := range []string{`Name string ` + "`yaml:\"name,omitempty\"`", `NameConfigAlias string ` + "`yaml:\"nickname,omitempty\"`", `if trusted && file.Name != "" {`, `if trusted && file.NameConfigAlias != "" {`, `cfg.Name = file.Name`, `cfg.Name = file.NameConfigAlias`, `Count *int ` + "`yaml:\"count,omitempty\"`", `Enabled *bool ` + "`yaml:\"enabled,omitempty\"`"} {
+	for _, want := range []string{`Name string ` + "`yaml:\"name,omitempty\"`", `NameConfigAlias string ` + "`yaml:\"nickname,omitempty\"`", `applyConfigFileOverlay(cfg, file, &applied, trusted, "pilot")`, `Count *int ` + "`yaml:\"count,omitempty\"`", `Enabled *bool ` + "`yaml:\"enabled,omitempty\"`"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing trusted/alias/control output %q", want)
 		}
-	}
-	if strings.Index(text, "cfg.Name = file.NameConfigAlias") < strings.Index(text, "cfg.Name = file.Name ") {
-		t.Error("alias precedes primary")
 	}
 	pointerSource := strings.Replace(source, ` fileStorage:"value"`, "", 1)
 	ps, err := parseSchema([]byte(pointerSource), "PilotConfig", "pilot")
@@ -3372,9 +3369,9 @@ func TestGenerateRawValueAndAppendTrimmedLists(t *testing.T) {
 	}
 	text := strings.Join(strings.Fields(string(output)), " ")
 	for _, want := range []string{
-		"Items []string `yaml:\"items,omitempty\"`", "if file.Items != nil {", "cfg.Items = append([]string(nil), (file.Items)...)",
+		"Items []string `yaml:\"items,omitempty\"`", `applyConfigFileOverlay(cfg, file, &applied, true, "pilot")`,
 		"Items *appendTrimmedListFlag", "listItems := newAppendTrimmedListFlag(defaults.Items)", `fs.Var(listItems, "item", "Items")`,
-		`if flagWasSet(fs, "item") {`, "cfg.Items = append([]string(nil), values.Items.stringListFlag...)",
+		`applyConfigFlags(cfg, values, &applied, fs)`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing list binding %q", want)
@@ -3563,18 +3560,11 @@ func testGenerateRawDurationFlags(t *testing.T, mode string) {
 		text := strings.Join(strings.Fields(string(output)), " ")
 		for _, want := range []string{
 			`fs.String("timeout", defaults.Timeout.String(), "Timeout")`,
-			`ApplyLeaseDuration(&cfg.Timeout, *values.Timeout)`,
+			`applyConfigFlags(cfg, values, &applied, fs)`,
 		} {
 			if !strings.Contains(text, want) {
 				t.Fatalf("missing raw-zero-reset binding %q", want)
 			}
-		}
-		if mode == "raw-zero-reset" {
-			if !strings.Contains(text, `if strings.TrimSpace(*values.Timeout) == "0s" { cfg.Timeout = 0 applied.InputAccepted = true }`) {
-				t.Fatal("missing raw-zero-reset branch")
-			}
-		} else if strings.Contains(text, "TrimSpace") || strings.Contains(text, "cfg.Timeout = 0") || strings.Contains(text, `"strings"`) {
-			t.Fatal("raw-positive introduced trimming or zero reset")
 		}
 		if source == withoutDefault && strings.Contains(text, `"time"`) {
 			t.Fatal("defaultless raw duration imported unused time")
@@ -3809,13 +3799,27 @@ func acceptanceFixtureSource(t *testing.T, existing, generated string) string {
 		{"config.go", "getenvNonNegativeIntAccepted"},
 		{"config.go", "getenvNonNegativeIntAliasAccepted"},
 		{"config.go", "parseNonNegativeIntAccepted"},
+		{"config.go", "getenvBool"},
+		{"config.go", "getenvList"},
+		{"config.go", "parseEnvListValue"},
+		{"egress.go", "splitCSV"},
+		{"config.go", "splitCommaList"},
+		{"config.go", "normalizeList"},
+		{"config.go", "applyLeaseDuration"},
+		{"flags.go", "flagWasSet"},
 	} {
 		if strings.Contains(generated+existing+functions, helper.name+"(") && !strings.Contains(existing+functions, "func "+helper.name+"(") {
 			functions += sourceFixtureFunctions(t, helper.file, helper.name)
 		}
 	}
+	if strings.Contains(generated+functions, "ApplyLeaseDuration(") && !strings.Contains(existing+functions, "func ApplyLeaseDuration(") {
+		functions += applyLeaseDurationFixtureSource(t)
+	}
+	if strings.Contains(functions, "exit(") && !strings.Contains(existing+functions, "func exit(") {
+		functions += "func exit(_ int, pattern string, args ...any) error { return fmt.Errorf(pattern, args...) }\n"
+	}
 	imports := ""
-	for _, name := range []string{"os", "strconv"} {
+	for _, name := range []string{"os", "strconv", "strings", "time", "fmt", "flag"} {
 		if strings.Contains(functions, name+".") {
 			imports += "import \"" + name + "\"\n"
 		}

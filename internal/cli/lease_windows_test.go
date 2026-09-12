@@ -7,10 +7,61 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
 )
+
+func TestManagedStateTransferWindowsShortName(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "ordinary source directory")
+	state := filepath.Join(source, "selected state directory")
+	marker := filepath.Join(state, "crabbox", "marker.txt")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("benign marker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	name, err := windows.UTF16PtrFromString(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]uint16, 32768)
+	n, err := windows.GetShortPathName(name, &buffer[0], uint32(len(buffer)))
+	if err != nil || n == 0 || n >= uint32(len(buffer)) {
+		t.Fatalf("read owned short-path metadata: length=%d error=%v", n, err)
+	}
+	short := windows.UTF16ToString(buffer[:n])
+	want, err := filepath.EvalSymlinks(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.EqualFold(short, want) {
+		t.Fatal("Windows fixture volume did not expose a distinct short-name alias")
+	}
+	got, err := NormalizeManagedStateTransferRoot(short)
+	if err != nil || got != want {
+		t.Fatalf("short-name normalization=%q want=%q error=%v", got, want, err)
+	}
+	missing := filepath.Join("missing directory", "leaf")
+	got, err = NormalizeManagedStateTransferRoot(filepath.Join(short, missing))
+	if err != nil || got != filepath.Join(want, missing) {
+		t.Fatalf("short-name missing suffix=%q error=%v", got, err)
+	}
+	t.Setenv("XDG_STATE_HOME", state)
+	if err := ValidateManagedStateTransferScope("owned short-name fixture", short); err == nil {
+		t.Fatal("short-name scope admitted the overlapping managed namespace")
+	}
+	if err := ValidateManagedStateTransferScope("ordinary unrelated fixture", filepath.Join(root, "unrelated")); err != nil {
+		t.Fatalf("unrelated scope rejected: %v", err)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil || string(data) != "benign marker\n" {
+		t.Fatal("metadata checks changed the benign marker")
+	}
+}
 
 func TestManagedStateTransferWindowsDirectoryAlias(t *testing.T) {
 	root := t.TempDir()
@@ -209,6 +260,15 @@ func TestSelectedLeaseSSHRootWindowsACLContract(t *testing.T) {
 			}
 		})
 	}
+	t.Run("different owner", func(t *testing.T) {
+		descriptor, err := windows.SecurityDescriptorFromString("O:S-1-5-21-101-202-303-1002D:P(A;;GA;;;" + user.String() + ")")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateSelectedLeaseSSHRootDescriptor(descriptor, user); err == nil {
+			t.Fatal("accepted a root owned by a different user")
+		}
+	})
 }
 
 func TestSelectedLeaseSSHRootWindowsPrivateComponents(t *testing.T) {

@@ -37,70 +37,14 @@ type PhalaConfigApplied struct {
 
 func (cfg *PhalaConfig) applyFile(file *filePhalaConfig, trusted bool) (PhalaConfigApplied, error) {
 	var applied PhalaConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.CLIPath != "" {
-		cfg.CLIPath = file.CLIPath
-		applied.InputAccepted = true
-		applied.CLIPath = true
-	}
-	if file.InstanceType != "" {
-		cfg.InstanceType = file.InstanceType
-		applied.InputAccepted = true
-		applied.InstanceType = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-	}
-	if trusted && file.NodeID != "" {
-		cfg.NodeID = file.NodeID
-		applied.InputAccepted = true
-	}
-	if trusted && file.Compose != "" {
-		cfg.Compose = file.Compose
-		applied.InputAccepted = true
-		applied.Compose = true
-	}
-	if file.Attest != nil {
-		value := *file.Attest
-		cfg.Attest = &value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "phala")
+	return applied, err
 }
 
 func (cfg *PhalaConfig) applyEnv() (PhalaConfigApplied, error) {
 	var applied PhalaConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_PHALA_CLI"); ok {
-		cfg.CLIPath = value
-		applied.InputAccepted = true
-		applied.CLIPath = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_PHALA_INSTANCE_TYPE"); ok {
-		cfg.InstanceType = value
-		applied.InputAccepted = true
-		applied.InstanceType = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_PHALA_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_PHALA_NODE_ID"); ok {
-		cfg.NodeID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_PHALA_COMPOSE"); ok {
-		cfg.Compose = value
-		applied.InputAccepted = true
-		applied.Compose = true
-	}
-	if value, ok := getenvBool("CRABBOX_PHALA_ATTEST"); ok {
-		cfg.Attest = &value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 6)
+	return applied, err
 }
 
 // PhalaConfigFlagValues holds parsed values; only visited flags are applied.
@@ -137,12 +81,7 @@ type PhalaConfigVisitedFlags struct {
 
 // PhalaConfigFlagPresence reports visits for tracked flag bindings.
 func PhalaConfigFlagPresence(fs *flag.FlagSet) PhalaConfigVisitedFlags {
-	return PhalaConfigVisitedFlags{
-		CLIPath:      flagWasSet(fs, "phala-cli"),
-		InstanceType: flagWasSet(fs, "phala-instance-type"),
-		WorkRoot:     flagWasSet(fs, "phala-work-root"),
-		NodeID:       flagWasSet(fs, "phala-node-id"),
-		Compose:      flagWasSet(fs, "phala-compose"),
-		Attest:       flagWasSet(fs, "phala-attest"),
-	}
+	var visited PhalaConfigVisitedFlags
+	recordConfigFlagVisits[PhalaConfig](fs, &visited)
+	return visited
 }

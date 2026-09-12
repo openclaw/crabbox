@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"os"
 	"strings"
 )
 
@@ -37,79 +36,14 @@ type AWSLambdaMicroVMConfigApplied struct {
 
 func (cfg *AWSLambdaMicroVMConfig) applyFile(file *fileAWSLambdaMicroVMConfig) (AWSLambdaMicroVMConfigApplied, error) {
 	var applied AWSLambdaMicroVMConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if file.ImageVersion != "" {
-		cfg.ImageVersion = file.ImageVersion
-		applied.InputAccepted = true
-		applied.ImageVersion = true
-	}
-	if file.ExecutionRoleARN != "" {
-		cfg.ExecutionRoleARN = file.ExecutionRoleARN
-		applied.InputAccepted = true
-		applied.ExecutionRoleARN = true
-	}
-	if file.Workdir != "" {
-		cfg.Workdir = file.Workdir
-		applied.InputAccepted = true
-		applied.Workdir = true
-	}
-	if file.IngressConnectors != nil {
-		cfg.IngressConnectors = append([]string(nil), (*file.IngressConnectors)...)
-		applied.InputAccepted = true
-	}
-	if file.EgressConnectors != nil {
-		cfg.EgressConnectors = append([]string(nil), (*file.EgressConnectors)...)
-		applied.InputAccepted = true
-	}
-	if file.ForgetMissing != nil {
-		cfg.ForgetMissing = *file.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "awsLambdaMicroVM")
+	return applied, err
 }
 
 func (cfg *AWSLambdaMicroVMConfig) applyEnv() (AWSLambdaMicroVMConfigApplied, error) {
 	var applied AWSLambdaMicroVMConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_AWS_LAMBDA_MICROVM_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_AWS_LAMBDA_MICROVM_IMAGE_VERSION"); ok {
-		cfg.ImageVersion = value
-		applied.InputAccepted = true
-		applied.ImageVersion = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_AWS_LAMBDA_MICROVM_EXECUTION_ROLE_ARN"); ok {
-		cfg.ExecutionRoleARN = value
-		applied.InputAccepted = true
-		applied.ExecutionRoleARN = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_AWS_LAMBDA_MICROVM_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-		applied.Workdir = true
-	}
-	if value := os.Getenv("CRABBOX_AWS_LAMBDA_MICROVM_INGRESS_CONNECTORS"); value != "" {
-		cfg.IngressConnectors = splitCSV(value)
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_AWS_LAMBDA_MICROVM_EGRESS_CONNECTORS"); value != "" {
-		cfg.EgressConnectors = splitCSV(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_AWS_LAMBDA_MICROVM_FORGET_MISSING"); ok {
-		cfg.ForgetMissing = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 7)
+	return applied, err
 }
 
 // AWSLambdaMicroVMConfigFlagValues holds parsed values; only visited flags are applied.
@@ -146,55 +80,14 @@ type AWSLambdaMicroVMConfigVisitedFlags struct {
 
 // AWSLambdaMicroVMConfigFlagPresence reports visits for tracked flag bindings.
 func AWSLambdaMicroVMConfigFlagPresence(fs *flag.FlagSet) AWSLambdaMicroVMConfigVisitedFlags {
-	return AWSLambdaMicroVMConfigVisitedFlags{
-		Image:            flagWasSet(fs, "aws-lambda-microvm-image"),
-		ImageVersion:     flagWasSet(fs, "aws-lambda-microvm-image-version"),
-		ExecutionRoleARN: flagWasSet(fs, "aws-lambda-microvm-execution-role-arn"),
-		Workdir:          flagWasSet(fs, "aws-lambda-microvm-workdir"),
-	}
+	var visited AWSLambdaMicroVMConfigVisitedFlags
+	recordConfigFlagVisits[AWSLambdaMicroVMConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values AWSLambdaMicroVMConfigFlagValues) Apply(cfg *AWSLambdaMicroVMConfig, fs *flag.FlagSet) (AWSLambdaMicroVMConfigApplied, error) {
 	var applied AWSLambdaMicroVMConfigApplied
-	visited := AWSLambdaMicroVMConfigFlagPresence(fs)
-	if visited.Image {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if visited.ImageVersion {
-		cfg.ImageVersion = *values.ImageVersion
-		applied.InputAccepted = true
-		applied.ImageVersion = true
-	}
-	if visited.ExecutionRoleARN {
-		cfg.ExecutionRoleARN = *values.ExecutionRoleARN
-		applied.InputAccepted = true
-		applied.ExecutionRoleARN = true
-	}
-	if visited.Workdir {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-		applied.Workdir = true
-	}
-	if flagWasSet(fs, "aws-lambda-microvm-ingress-connectors") {
-		cfg.IngressConnectors = splitCommaList(*values.IngressConnectors)
-		if len(cfg.IngressConnectors) == 0 {
-			cfg.IngressConnectors = nil
-		}
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "aws-lambda-microvm-egress-connectors") {
-		cfg.EgressConnectors = splitCommaList(*values.EgressConnectors)
-		if len(cfg.EgressConnectors) == 0 {
-			cfg.EgressConnectors = nil
-		}
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "aws-lambda-microvm-forget-missing") {
-		cfg.ForgetMissing = *values.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

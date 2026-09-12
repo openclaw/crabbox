@@ -3,10 +3,12 @@ package blaxel
 import (
 	"strings"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestNewSandboxNameFitsBlaxelLimit(t *testing.T) {
-	name := newSandboxName(Repo{Name: "this-is-a-very-long-repository-name-that-would-exceed-the-blaxel-sandbox-name-limit"})
+	name := newSandboxName(core.Repo{Name: "this-is-a-very-long-repository-name-that-would-exceed-the-blaxel-sandbox-name-limit"})
 	if len(name) > sandboxNameMaxLen {
 		t.Fatalf("name length=%d name=%q, want <= %d", len(name), name, sandboxNameMaxLen)
 	}
