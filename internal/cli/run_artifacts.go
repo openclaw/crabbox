@@ -198,7 +198,19 @@ func writeArtifactGlobEnumeration(b *strings.Builder, glob, addFunction string) 
 	if !strings.ContainsAny(glob, "*?") {
 		depth = " -mindepth 1 -maxdepth 1"
 	}
-	b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; artifact_root=" + shellQuote(artifactGlobSearchRoot(glob)) + "; if artifact_safe_search_root \"$artifact_root\"; then while IFS= read -r -d '' f; do rel=$(artifact_rel_path \"$f\") || continue; if [[ \"$rel\" =~ $artifact_regex || \"./$rel\" =~ $artifact_regex ]]; then " + addFunction + " \"$f\"; fi; done < <(find \"$artifact_root\"" + depth + " \\( -name .git -o -name .crabbox \\) -prune -o \\( -type f -o -type l \\) -print0); fi\n")
+	b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; artifact_root=" + shellQuote(artifactGlobSearchRoot(glob)) + "\n")
+	if candidate := artifactGlobNarrowSearchRoot(glob); candidate != "" {
+		// A successful directory lookup alone can hide spelling differences on
+		// case-insensitive filesystems. Match an actual entry before narrowing.
+		b.WriteString("artifact_candidate=" + shellQuote(candidate) + "\n")
+		b.WriteString(`if ! shopt -q nocasematch && artifact_safe_search_root "$artifact_root" && artifact_safe_search_root "$artifact_candidate"; then
+  while IFS= read -r -d '' artifact_entry; do
+    if [ "$artifact_entry" = "$artifact_candidate" ]; then artifact_root=$artifact_candidate; break; fi
+  done < <(find "$artifact_root" -mindepth 1 -maxdepth 1 -type d -print0)
+fi
+`)
+	}
+	b.WriteString("if artifact_safe_search_root \"$artifact_root\"; then while IFS= read -r -d '' f; do rel=$(artifact_rel_path \"$f\") || continue; if [[ \"$rel\" =~ $artifact_regex || \"./$rel\" =~ $artifact_regex ]]; then " + addFunction + " \"$f\"; fi; done < <(find \"$artifact_root\"" + depth + " \\( -name .git -o -name .crabbox \\) -prune -o \\( -type f -o -type l \\) -print0); fi\n")
 }
 
 func runArtifactRequireScript(workdir string, globs []string) string {
@@ -332,6 +344,22 @@ func artifactGlobSearchRoot(glob string) string {
 		return "."
 	}
 	return dir
+}
+
+func artifactGlobNarrowSearchRoot(glob string) string {
+	if glob != strings.TrimSpace(glob) || !safeArtifactGlob(glob) {
+		return ""
+	}
+	firstMeta := strings.IndexAny(glob, "*?")
+	if firstMeta <= 0 || glob[firstMeta-1] != '/' {
+		return ""
+	}
+	candidate := strings.TrimPrefix(glob[:firstMeta-1], "./")
+	root := artifactGlobSearchRoot(glob)
+	if candidate != filepath.ToSlash(filepath.Clean(candidate)) || candidate != root+"/"+filepath.Base(candidate) {
+		return ""
+	}
+	return candidate
 }
 
 func artifactGlobRegex(glob string) string {
