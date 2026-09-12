@@ -24,6 +24,12 @@ func NormalizeHTTPSURL(raw string, errs EndpointURLErrors) (string, error) {
 	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && IsLoopbackHost(parsed.Hostname())) {
 		return "", errs.Insecure
 	}
+	return canonicalEndpointAddress(parsed), nil
+}
+
+// Callers own scheme admission and URL-component policy before canonicalizing
+// the lowercased scheme's address. Claim keys and live endpoints differ there.
+func canonicalEndpointAddress(parsed *url.URL) string {
 	host := strings.ToLower(parsed.Hostname())
 	port := parsed.Port()
 	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
@@ -38,7 +44,7 @@ func NormalizeHTTPSURL(raw string, errs EndpointURLErrors) (string, error) {
 	}
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	parsed.RawPath = ""
-	return strings.TrimRight(parsed.String(), "/"), nil
+	return strings.TrimRight(parsed.String(), "/")
 }
 
 func IsLoopbackHost(host string) bool {
