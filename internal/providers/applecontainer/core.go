@@ -4,7 +4,6 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-
 const (
 	providerName = "apple-container"
 	targetLinux  = core.TargetLinux
