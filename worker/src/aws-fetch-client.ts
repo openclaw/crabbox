@@ -4,7 +4,33 @@ import {
   currentAWSTransportObserver,
   type AWSTransportObservation,
 } from "./aws-provisioning-diagnostics";
-import type { AWSCredentialProvider } from "./types";
+import type { AWSCredentials, AWSCredentialProvider } from "./types";
+
+export interface ResolvedAWSCredentials {
+  readonly accessKeyId: string;
+  readonly secretAccessKey: string;
+  readonly sessionToken?: string;
+  readonly expirationMs?: number;
+}
+
+export function resolvedAWSCredentials(credentials: AWSCredentials): ResolvedAWSCredentials {
+  const accessKeyId = credentials.accessKeyId?.trim();
+  const secretAccessKey = credentials.secretAccessKey?.trim();
+  if (!accessKeyId || !secretAccessKey) {
+    throw new Error("AWS credential provider returned incomplete credentials");
+  }
+  const sessionToken = credentials.sessionToken?.trim();
+  const expirationMs = credentials.expiration?.getTime();
+  if (expirationMs !== undefined && !Number.isFinite(expirationMs)) {
+    throw new Error("AWS credential provider returned an invalid expiration");
+  }
+  return {
+    accessKeyId,
+    secretAccessKey,
+    ...(sessionToken ? { sessionToken } : {}),
+    ...(expirationMs === undefined ? {} : { expirationMs }),
+  };
+}
 
 type StopAWSResponseRetry = (response: Response) => Promise<boolean>;
 
@@ -68,16 +94,15 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
     const startedAt = Date.now();
     let requestStartedAt: number | undefined;
     try {
-      const credentials = await this.credentials();
+      const providedCredentials = await this.credentials();
       this.signal?.throwIfAborted();
-      const accessKeyId = credentials.accessKeyId?.trim();
-      const secretAccessKey = credentials.secretAccessKey?.trim();
-      if (!accessKeyId || !secretAccessKey) {
-        throw new Error("AWS credential provider returned incomplete credentials");
+      const credentials = resolvedAWSCredentials(providedCredentials);
+      if (credentials.expirationMs !== undefined && credentials.expirationMs <= Date.now()) {
+        throw new Error("AWS credential snapshot expired");
       }
       const options: ConstructorParameters<typeof AwsClient>[0] = {
-        accessKeyId,
-        secretAccessKey,
+        accessKeyId: credentials.accessKeyId,
+        secretAccessKey: credentials.secretAccessKey,
         service: this.service,
         region: this.region,
         ...(this.signal ? { retries: 0 } : {}),
@@ -88,7 +113,12 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
       const client = observe ? new ObservedAwsClient(options, observation) : new AwsClient(options);
       requestStartedAt = Date.now();
       observation.credentialsMs = Math.max(0, requestStartedAt - startedAt);
-      if (this.signal) init = { ...init, signal: this.signal };
+      if (this.signal) {
+        const request = await client.sign(input, { ...init, signal: this.signal });
+        this.signal.throwIfAborted();
+        // Keep the quote's owning signal through signing and response-body consumption.
+        return await fetch(request, { signal: this.signal });
+      }
       if (!stopRetrying) return await client.fetch(input, init);
       // aws4fetch has no response-policy hook. Preserve its budget, jitter, signing and
       // thrown errors while allowing the operation owner to handle a definitive rejection.
@@ -117,5 +147,30 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
       else observation.requestMs = Math.max(0, Date.now() - requestStartedAt);
       observe?.(observation);
     }
+  }
+}
+
+// Regional operations must retain the exact identity verified before their first mutation.
+// Reuse the transport owner so fixed credentials preserve diagnostics and response retry policy.
+export class FixedAWSFetchClient extends RefreshingAWSFetchClient {
+  constructor(
+    credentials: ResolvedAWSCredentials,
+    service: string,
+    region: string,
+    signal?: AbortSignal,
+  ) {
+    super(
+      async () => ({
+        accessKeyId: credentials.accessKeyId,
+        secretAccessKey: credentials.secretAccessKey,
+        ...(credentials.sessionToken ? { sessionToken: credentials.sessionToken } : {}),
+        ...(credentials.expirationMs === undefined
+          ? {}
+          : { expiration: new Date(credentials.expirationMs) }),
+      }),
+      service,
+      region,
+      signal,
+    );
   }
 }

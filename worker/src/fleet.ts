@@ -51,6 +51,7 @@ import {
 } from "./auth";
 import {
   EC2SpotClient,
+  AWSLeaseAuthorityError,
   awsAutomaticProbesConfigured,
   awsCredentialsConfigured,
   awsConfiguredSecurityGroupID,
@@ -62,7 +63,6 @@ import {
   awsProvisioningErrorCategory,
   awsRegionCandidates,
   awsLeaseImageIdentity,
-  isAWSInstanceNotFoundError,
   isAWSRunInstancesOutcomeUncertain,
   isRetryableAWSProvisioningError,
   isAWSSecurityGroupRuleLimitError,
@@ -3547,7 +3547,7 @@ export class FleetCoordinator {
         released.provisioningResourceMayExist = true;
         released.provisioningFailureRetryable = true;
       }
-      if (shouldDelete) {
+      if (shouldDelete && !canceledBeforeProviderIdentity) {
         const cleanupStarted = new Date();
         released.cleanupStartedAt = cleanupStarted.toISOString();
         released.cleanupClaimExpiresAt = new Date(
@@ -3555,6 +3555,8 @@ export class FleetCoordinator {
         ).toISOString();
         released.releaseDeletesServer = true;
         clearLeaseCleanupCompletion(released);
+      } else if (shouldDelete) {
+        released.cleanupRetryAt = now;
       } else if (leaseHasConfirmedNoProviderResource(released)) {
         completeLeaseProviderCleanup(released, released.updatedAt);
       }
@@ -4400,17 +4402,18 @@ export class FleetCoordinator {
                 : undefined;
               if (
                 !current ||
+                !sameLeaseReleaseIdentity(current, record) ||
                 current.state !== "provisioning" ||
-                (createAttempt && !currentAttempt)
+                (createAttempt &&
+                  (!currentAttempt || !createAttemptMatchesLease(currentAttempt, current)))
               ) {
-                return;
+                throw new ProviderDispatchFenceError(current);
               }
+              current.region = region;
+              current.updatedAt = new Date().toISOString();
+              await this.putLease(current);
               if (record.provider === "aws") {
-                await this.markAWSIngressReconcilePending({ ...current, region });
-              } else {
-                current.region = region;
-                current.updatedAt = new Date().toISOString();
-                await this.putLease(current);
+                await this.markAWSIngressReconcilePending(current);
               }
               await this.scheduleAlarm();
             });
@@ -4471,6 +4474,57 @@ export class FleetCoordinator {
     const provisioning: ProviderProvisioningContext = {
       ...targetProvisioning,
       ...(dispatched.providerScope ? { providerScope: dispatched.providerScope } : {}),
+      onProviderKeyCleanupPending: async (existingKey) => {
+        const active = await this.state.runExclusive(async () => {
+          const current = await this.getLease(dispatched.id);
+          const attempt = createAttempt
+            ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
+            : undefined;
+          const sameIncarnation =
+            current &&
+            sameLeaseReleaseIdentity(current, dispatched) &&
+            current.provisioningRequestStartedAt === dispatched.provisioningRequestStartedAt &&
+            current.provider === "aws" &&
+            current.providerKey === providerKeyForLease(current.id);
+          if (!sameIncarnation) {
+            return false;
+          }
+          const canContinue =
+            current.state === "provisioning" &&
+            Date.parse(current.expiresAt) > Date.now() &&
+            (!createAttempt || (attempt && createAttemptMatchesLease(attempt, current)));
+          if (!canContinue && !existingKey) {
+            return false;
+          }
+          current.providerKeyCleanupOwned = true;
+          current.providerKeyCleanupPending = true;
+          current.updatedAt = new Date().toISOString();
+          clearLeaseCleanupCompletion(current);
+          await this.putLease(current);
+          return Boolean(canContinue);
+        });
+        if (!active) {
+          throw new CreateAttemptCanceledError();
+        }
+      },
+      onProviderKeyCleanupComplete: async (target) => {
+        await this.state.runExclusive(async () => {
+          const current = await this.getLease(dispatched.id);
+          if (
+            !current ||
+            !sameLeaseReleaseIdentity(current, dispatched) ||
+            current.provisioningRequestStartedAt !== dispatched.provisioningRequestStartedAt ||
+            current.provider !== "aws" ||
+            current.region !== target.region
+          ) {
+            return;
+          }
+          delete current.providerKeyCleanupPending;
+          delete current.providerKeyCleanupID;
+          current.updatedAt = new Date().toISOString();
+          await this.putLease(current);
+        });
+      },
       onResourceCreated: (claim) => this.recordCreatedProviderResource(dispatched, claim),
       // Queued regional attempts must not restore access from their pre-provisioning snapshot.
       withLeaseAccess: (target, operation, observe) => {
@@ -4511,6 +4565,17 @@ export class FleetCoordinator {
     const provisioned = await provider
       .createServerWithFallback(config, leaseID, slug, owner, provisioning)
       .catch(async (error: unknown) => {
+        if (error instanceof ProviderDispatchFenceError) {
+          if (createAttempt && !fixedCreate) return createCanceledResponse();
+          return json(
+            {
+              error: "lease_state_changed",
+              message: error.message,
+              ...(error.current ? { lease: publicLeaseRecord(error.current) } : {}),
+            },
+            { status: 409 },
+          );
+        }
         const cleanupClaim = validatedProviderProvisioningCleanupClaim(error, config.provider);
         await this.state.runExclusive(async () => {
           if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
@@ -5568,7 +5633,7 @@ export class FleetCoordinator {
       );
       return;
     }
-    if (lease?.providerKeyCleanupPending) {
+    if (lease && providerKeyCleanupBlocksProvisioningRecovery(lease)) {
       return;
     }
     if (!lease && workspaceProvisionDeadline(workspace) <= Date.now()) {
@@ -6969,7 +7034,7 @@ export class FleetCoordinator {
         currentWorkspace.leaseID !== workspace.leaseID ||
         currentWorkspace.releaseRequestedAt ||
         !currentLease ||
-        currentLease.providerKeyCleanupPending ||
+        providerKeyCleanupBlocksProvisioningRecovery(currentLease) ||
         !workspaceOwnsLease(currentWorkspace, currentLease) ||
         !(
           (currentLease.state === "provisioning" && !currentLease.provisioningRequestStartedAt) ||
@@ -16693,6 +16758,17 @@ export class FleetCoordinator {
         // deletes belong to actual candidates, including persisted egress left by a restart.
         if (!needsCleanup && !closeBridges) return;
         if (await provisioningOwnsLease(this.state.storage, stored.id)) return;
+        if (
+          stored.provider === "aws" &&
+          leaseUsesCanonicalProviderKey(stored) &&
+          stored.providerKeyCleanupPending &&
+          !stored.cloudID &&
+          stored.provisioningRequestStartedAt &&
+          !stored.provisioningRequestSettledAt &&
+          !interruptedProvisioningVersionMismatch(stored, this.coordinatorGeneration)
+        ) {
+          return;
+        }
         if (closeBridges) {
           await this.closeLeaseBridges(stored.id, 1008, "lease ended");
         }
@@ -19517,6 +19593,12 @@ class CreateAttemptCanceledError extends Error {
   }
 }
 
+class ProviderDispatchFenceError extends Error {
+  constructor(readonly current: LeaseRecord | undefined) {
+    super("lease changed state before provider mutation");
+  }
+}
+
 interface ProviderReadiness {
   provider: Provider;
   configured: boolean;
@@ -21991,7 +22073,7 @@ function workspaceProvisioningNeedsRecovery(
   lease: LeaseRecord,
   now = Date.now(),
 ): boolean {
-  if (lease.providerKeyCleanupPending) {
+  if (providerKeyCleanupBlocksProvisioningRecovery(lease)) {
     return false;
   }
   if (lease.cloudID) {
@@ -22023,7 +22105,7 @@ function workspaceNextReconcileAt(
   if (lease?.state === "released" && lease.releaseDeletesServer === false) {
     return undefined;
   }
-  if (lease?.providerKeyCleanupPending) {
+  if (lease && providerKeyCleanupBlocksProvisioningRecovery(lease)) {
     const claimDeadline = cleanupClaimDeadline(lease);
     if (lease.cleanupStartedAt && Number.isFinite(claimDeadline)) {
       return claimDeadline;
@@ -23514,6 +23596,13 @@ function leaseUsesCanonicalProviderKey(
     lease.providerKeyCleanupOwned === true &&
     validLeaseID(lease.id) &&
     lease.providerKey === providerKeyForLease(lease.id)
+  );
+}
+
+function providerKeyCleanupBlocksProvisioningRecovery(lease: LeaseRecord): boolean {
+  return Boolean(
+    lease.providerKeyCleanupPending &&
+    !(lease.provider === "aws" && leaseUsesCanonicalProviderKey(lease)),
   );
 }
 
@@ -25243,7 +25332,7 @@ function legacyCleanupIdentityCaptureEligible(lease: LeaseRecord): boolean {
     Number.isFinite(cleanupClaimExpiresAt) &&
     cleanupClaimExpiresAt >= cleanupStartedAt &&
     deletionIntended &&
-    !lease.providerKeyCleanupPending &&
+    !providerKeyCleanupBlocksProvisioningRecovery(lease) &&
     lease.state !== "provisioning" &&
     lease.provisioningResourceMayExist === undefined &&
     lease.provisioningFailureRetryable === undefined &&
@@ -25453,12 +25542,16 @@ function mergeProvisioningFailureMetadata(
     config.provider === "hetzner" ? hetznerProvisioningResourceID(error) : undefined;
   const providerKeyCleanupID =
     error instanceof HetznerProvisioningError ? error.providerKeyCleanupID : undefined;
+  const awsPreInstanceCancellation =
+    config.provider === "aws" && error instanceof CreateAttemptCanceledError && !lease.cloudID;
   const resourceMayExist = Boolean(
     cleanupClaim ||
     awsOutcomeUncertain ||
     providerOutcomeUncertain ||
     hetznerResourceMayExist ||
-    (lease.provisioningResourceMayExist && !hetznerDefiniteKeyOnlyFailure(lease, error)),
+    (lease.provisioningResourceMayExist &&
+      !hetznerDefiniteKeyOnlyFailure(lease, error) &&
+      !awsPreInstanceCancellation),
   );
 
   lease.updatedAt = failedAt;
@@ -25516,9 +25609,24 @@ function mergeProvisioningFailureMetadata(
     cleanupClaim ||
     failedHetznerServerID !== undefined ||
     providerKeyCleanupID !== undefined ||
+    lease.providerKeyCleanupPending ||
     (lease.cloudID && lease.releaseDeletesServer === true)
   ) {
-    lease.cleanupRetryAt = new Date(Date.parse(failedAt) + leaseCleanupRetryDelayMs).toISOString();
+    const retryDelay =
+      config.provider === "aws" &&
+      lease.providerKeyCleanupPending &&
+      leaseUsesCanonicalProviderKey(lease)
+        ? 0
+        : leaseCleanupRetryDelayMs;
+    lease.cleanupRetryAt = new Date(Date.parse(failedAt) + retryDelay).toISOString();
+  }
+  if (awsPreInstanceCancellation && !lease.providerKeyCleanupPending) {
+    clearLeaseCleanupMetadata(lease);
+    delete lease.cleanupStartedAt;
+    delete lease.cleanupClaimExpiresAt;
+    delete lease.failureError;
+    completeLeaseProviderCleanup(lease, failedAt);
+    return;
   }
   if (lease.provisioningResourceMayExist || lease.provisioningFailureRetryable) {
     delete lease.failureError;
@@ -25629,7 +25737,8 @@ function sameProvisioningAttempt(
     current.provisioningRequestSettledAt === expected.provisioningRequestSettledAt &&
     current.provisioningCoordinatorVersion === expected.provisioningCoordinatorVersion &&
     current.provisioningRecoveryObservedAt === expected.provisioningRecoveryObservedAt &&
-    current.provisioningRecoveryMissingSince === expected.provisioningRecoveryMissingSince,
+    current.provisioningRecoveryMissingSince === expected.provisioningRecoveryMissingSince &&
+    current.region === expected.region,
   );
 }
 
@@ -25672,7 +25781,7 @@ function unboundProvisioningRecoveryEligible(
     lease.host === "" &&
     !lease.cleanupStartedAt &&
     !lease.cleanupClaimExpiresAt &&
-    !lease.providerKeyCleanupPending &&
+    !providerKeyCleanupBlocksProvisioningRecovery(lease) &&
     validCreateAttemptID(lease.createAttemptID) &&
     Boolean(lease.createAttemptGeneration?.trim()) &&
     attempt &&
@@ -26160,6 +26269,7 @@ function leaseHasPublishedAWSAccess(lease: LeaseRecord): boolean {
 
 function awsIngressReconcileTargetKey(lease: LeaseRecord): string {
   return [
+    lease.providerScope ?? "",
     lease.region ?? "",
     lease.network?.awsSecurityGroupID ?? "",
     lease.network?.awsSecurityGroupName ?? "",
@@ -26174,6 +26284,7 @@ function awsIngressAccessTargetKey(
   region: string,
   ports: string[],
   env: Env,
+  providerScope = lease.providerScope,
 ): string {
   const workspaceManaged = lease.providerKey.startsWith(workspaceProviderKeyPrefix);
   const securityGroupID =
@@ -26186,7 +26297,7 @@ function awsIngressAccessTargetKey(
     : securityGroupName
       ? `managed:${subnetID}:${securityGroupName}`
       : `auto:${subnetID}:${awsManagedSecurityGroupName({ providerKey: lease.providerKey })}`;
-  return [region, group, ...ports.toSorted()].join("\u0000");
+  return [providerScope ?? "", region, group, ...ports.toSorted()].join("\u0000");
 }
 
 function awsIngressGroupMetadataUnknown(lease: LeaseRecord, env: Env): boolean {
@@ -26197,8 +26308,16 @@ function awsIngressGroupMetadataUnknown(lease: LeaseRecord, env: Env): boolean {
   );
 }
 
-function awsIngressPortScopeKey(region: string, port: string): string {
-  return [region, port].join("\u0000");
+function awsIngressPortScopeKey(
+  providerScope: string | undefined,
+  region: string,
+  port: string,
+): string {
+  return [providerScope ?? "", region, port].join("\u0000");
+}
+
+function awsIngressOperationScopeKey(providerScope: string | undefined, region: string): string {
+  return [providerScope ?? "", region].join("\u0000");
 }
 
 function awsLeaseSSHPorts(lease: LeaseRecord): string[] {
@@ -26633,6 +26752,8 @@ interface ProviderProvisioningContext {
   allowEmptySSHIngress?: boolean;
   publishAccessBeforeProvisioning?: boolean;
   onTargetAttempt?: (target: ProviderProvisioningTarget) => Promise<void>;
+  onProviderKeyCleanupPending?: (existingKey: boolean) => Promise<void>;
+  onProviderKeyCleanupComplete?: (target: ProviderProvisioningTarget) => Promise<void>;
   onResourceCreated?: (claim: ProviderProvisioningCleanupClaim) => Promise<boolean>;
   withLeaseAccess?: <T>(
     target: ProviderProvisioningTarget,
@@ -28125,6 +28246,24 @@ function awsCheckpointResourceAbsent(message: string, resourceID: string): boole
   );
 }
 
+function awsProviderScopeAccount(providerScope: string | undefined): string | undefined {
+  if (providerScope === undefined) return undefined;
+  const match = /^aws:account:(\d{12})$/.exec(providerScope);
+  if (!match) {
+    throw new Error("malformed AWS provider scope: expected aws:account:<12-digit-account-id>");
+  }
+  return match[1]!;
+}
+
+function authenticatedAWSAccount(account: string): string {
+  if (!/^\d{12}$/.test(account)) {
+    throw new Error("authenticated AWS identity did not return a 12-digit account ID");
+  }
+  return account;
+}
+
+type AWSLeaseOperationSession = Parameters<Parameters<EC2SpotClient["withLeaseOperation"]>[0]>[0];
+
 interface AWSMacHostAllocation {
   version: 1;
   hostID: string;
@@ -28154,6 +28293,8 @@ async function recordAWSMacHostAllocations(
 }
 
 export class AWSProvider implements CloudProvider {
+  readonly recoveryIsAuthoritative = true;
+
   private clientValue?: EC2SpotClient;
   private readonly region: string;
 
@@ -28268,18 +28409,102 @@ export class AWSProvider implements CloudProvider {
     return this.client.findServer(id);
   }
 
-  async recoverServer(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
-    if (lease.network?.awsPrivate) {
-      if (lease.cloudID) {
-        const server = await this.findServer(lease.cloudID);
-        return server && providerMachineOwnedByLease(server, lease, "aws") ? server : undefined;
-      }
-      const server = await this.client.findWorkspaceServerByLease(lease.id);
-      return server && providerLabelsOwnedByLease(server.labels, lease, "aws") ? server : undefined;
+  private async verifyLeaseOperationAuthority(
+    lease: LeaseRecord,
+    session: AWSLeaseOperationSession,
+  ): Promise<string | undefined> {
+    const leaseRegion = lease.region?.trim();
+    if (!leaseRegion || leaseRegion !== session.region) {
+      throw new ProviderResourceUnresolvedError(
+        `AWS lease region does not match the cleanup session: recorded ${leaseRegion || "missing"}, session ${session.region}`,
+      );
     }
-    if (!lease.cloudID) return undefined;
-    const server = await this.findServer(lease.cloudID);
-    return server && providerMachineOwnedByLease(server, lease, "aws") ? server : undefined;
+    let recordedAccount: string | undefined;
+    try {
+      recordedAccount = awsProviderScopeAccount(lease.providerScope);
+    } catch (error) {
+      throw new ProviderResourceUnresolvedError(
+        error instanceof Error ? error.message : "malformed AWS provider scope",
+        { cause: error },
+      );
+    }
+    const authenticatedAccount = authenticatedAWSAccount(
+      (await session.verifiedIdentity()).account,
+    );
+    if (recordedAccount && recordedAccount !== authenticatedAccount) {
+      throw new ProviderResourceUnresolvedError(
+        `AWS lease account scope does not match the authenticated account: recorded ${recordedAccount}, authenticated ${authenticatedAccount}`,
+      );
+    }
+    return recordedAccount;
+  }
+
+  private async observeLeaseServer(
+    lease: LeaseRecord,
+    session: AWSLeaseOperationSession,
+    observe: () => Promise<ProviderMachine | undefined>,
+    ownership?: "machine" | "labels",
+  ): Promise<ProviderMachine | undefined> {
+    const recordedAccount = await this.verifyLeaseOperationAuthority(lease, session);
+    let server: ProviderMachine | undefined;
+    try {
+      server = await observe();
+    } catch (error) {
+      if (!(error instanceof AWSLeaseAuthorityError)) {
+        throw error;
+      }
+      throw new ProviderResourceUnresolvedError(error.message, { cause: error });
+    }
+    if (!server && !recordedAccount) {
+      throw new ProviderResourceUnresolvedError(
+        "AWS lease account scope was not persisted; refusing to confirm instance absence",
+      );
+    }
+    if (
+      server &&
+      ((ownership === "machine" && !providerMachineOwnedByLease(server, lease, "aws")) ||
+        (ownership === "labels" && !providerLabelsOwnedByLease(server.labels, lease, "aws")))
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        `AWS recovery resource ${server.cloudID} ownership does not match lease ${lease.id}`,
+      );
+    }
+    return server;
+  }
+
+  private async withLeaseOperation<T>(
+    operation: (session: AWSLeaseOperationSession) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await this.client.withLeaseOperation(operation);
+    } catch (error) {
+      if (!(error instanceof AWSLeaseAuthorityError)) {
+        throw error;
+      }
+      throw new ProviderResourceUnresolvedError(error.message, { cause: error });
+    }
+  }
+
+  async recoverServer(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
+    return await this.withLeaseOperation(async (session) => {
+      if (!lease.cloudID) {
+        return await this.observeLeaseServer(
+          lease,
+          session,
+          () =>
+            lease.network?.awsPrivate
+              ? session.findWorkspaceServerByLease(lease.id)
+              : session.findCrabboxServerByLease(lease.id),
+          "labels",
+        );
+      }
+      return await this.observeLeaseServer(
+        lease,
+        session,
+        () => session.findServer(lease.cloudID),
+        "machine",
+      );
+    });
   }
 
   async resumeRecoveredServer(
@@ -28414,12 +28639,17 @@ export class AWSProvider implements CloudProvider {
     lease: LeaseRecord,
     context: ProviderAccessContext,
   ): Promise<ProviderLeaseCreatePreparation> {
-    if (config.target === "macos") {
-      const identity = await this.client.verifiedIdentity();
-      if (!/^\d{12}$/.test(identity.account)) {
-        throw new Error("AWS Mac host ownership requires an authenticated 12-digit account ID");
-      }
-      lease = { ...lease, providerScope: `aws:account:${identity.account}` };
+    const recordedAccount = awsProviderScopeAccount(lease.providerScope);
+    const authenticatedAccount = authenticatedAWSAccount(
+      (await this.client.verifiedIdentity()).account,
+    );
+    if (recordedAccount && recordedAccount !== authenticatedAccount) {
+      throw new Error(
+        `AWS provider scope conflicts with authenticated account: recorded ${recordedAccount}, authenticated ${authenticatedAccount}`,
+      );
+    }
+    if (!recordedAccount) {
+      lease = { ...lease, providerScope: `aws:account:${authenticatedAccount}` };
     }
     if (config.awsPrivate) {
       const policy = awsPrivateWorkspaceConfig(this.env);
@@ -28480,6 +28710,11 @@ export class AWSProvider implements CloudProvider {
     ).slice(0, 12)}`;
     const nextLease: LeaseRecord = {
       ...nextLeaseWithSources,
+      ...(lease.providerKey === providerKeyForLease(lease.id)
+        ? {
+            providerKeyCleanupOwned: true,
+          }
+        : {}),
       network: {
         ...nextLeaseWithSources.network,
         ...(config.awsSSHCIDRsPinned ? { sshPinnedSourceCIDRs: config.awsSSHCIDRs } : {}),
@@ -28530,8 +28765,75 @@ export class AWSProvider implements CloudProvider {
 
   async reconcileLeaseAccess(lease: LeaseRecord, context: ProviderAccessContext): Promise<void> {
     if (lease.network?.awsPrivate) return;
+    let recordedAccount: string | undefined;
+    try {
+      recordedAccount = awsProviderScopeAccount(lease.providerScope);
+    } catch (error) {
+      throw new AWSLeaseAuthorityError(
+        error instanceof Error ? error.message : "malformed AWS provider scope",
+        { cause: error },
+      );
+    }
+    const ingressLeases = [lease, ...context.activeLeases.filter(leaseOwnsAWSSSHAccess)];
+    if (!ingressLeases.some((candidate) => awsLeaseSSHPorts(candidate).length > 0)) return;
+    const clients = new Map<string, EC2SpotClient>();
+    let authorityScope = lease.providerScope;
+    const verifyRegion = async (region: string): Promise<void> => {
+      const regionalClient =
+        region === this.region ? this.client : new EC2SpotClient(this.env, region);
+      const operationClient = await regionalClient.withLeaseOperation(async (session) => {
+        const authenticatedAccount = authenticatedAWSAccount(
+          (await session.verifiedIdentity()).account,
+        );
+        if (recordedAccount && authenticatedAccount !== recordedAccount) {
+          throw new AWSLeaseAuthorityError(
+            `AWS provider scope conflicts with authenticated account: recorded ${recordedAccount}, authenticated ${authenticatedAccount}`,
+          );
+        }
+        const verifiedScope = `aws:account:${authenticatedAccount}`;
+        if (authorityScope && authorityScope !== verifiedScope) {
+          throw new AWSLeaseAuthorityError(
+            `AWS ingress reconciliation account changed between Regions: recorded ${authorityScope}, authenticated ${verifiedScope}`,
+          );
+        }
+        authorityScope = verifiedScope;
+        return session.client;
+      });
+      clients.set(awsIngressOperationScopeKey(authorityScope, region), operationClient);
+    };
+
+    await verifyRegion(lease.region || this.region);
+    const accessLeases = context.activeLeases.filter(
+      (candidate) =>
+        leaseOwnsAWSSSHAccess(candidate) &&
+        (!candidate.providerScope || candidate.providerScope === authorityScope),
+    );
+    const regions = uniqueNonEmpty(
+      [lease, ...accessLeases].flatMap((candidate) =>
+        awsLeaseSSHPorts(candidate).length > 0 ? [candidate.region || this.region] : [],
+      ),
+    );
+    for (const region of regions) {
+      if (clients.has(awsIngressOperationScopeKey(authorityScope, region))) continue;
+      // oxlint-disable-next-line eslint/no-await-in-loop -- all account scopes are verified before ingress mutates.
+      await verifyRegion(region);
+    }
+    await this.reconcileLeaseAccessWithClients(lease, context, clients, authorityScope);
+  }
+
+  private async reconcileLeaseAccessWithClients(
+    lease: LeaseRecord,
+    context: ProviderAccessContext,
+    clients = new Map<string, EC2SpotClient>(),
+    authorityScope = lease.providerScope,
+  ): Promise<void> {
+    if (lease.network?.awsPrivate) return;
     const globalCIDRs = awsGlobalSSHSourceCIDRs(this.env);
-    const accessLeases = context.activeLeases.filter(leaseOwnsAWSSSHAccess);
+    const accessLeases = context.activeLeases.filter(
+      (candidate) =>
+        leaseOwnsAWSSSHAccess(candidate) &&
+        (!candidate.providerScope || candidate.providerScope === authorityScope),
+    );
     const targets = new Map<
       string,
       { lease: LeaseRecord; port: string; region: string; leases: LeaseRecord[] }
@@ -28540,12 +28842,18 @@ export class AWSProvider implements CloudProvider {
     for (const [index, candidate] of [lease, ...accessLeases].entries()) {
       const region = candidate.region || this.region;
       for (const port of awsLeaseSSHPorts(candidate)) {
-        const key = awsIngressAccessTargetKey(candidate, region, [port], this.env);
+        const key = awsIngressAccessTargetKey(
+          candidate,
+          region,
+          [port],
+          this.env,
+          candidate.providerScope ?? authorityScope,
+        );
         const target = targets.get(key) ?? { lease: candidate, port, region, leases: [] };
         // The anchor identifies cleanup scope; only the access snapshot grants sources.
         if (index > 0) target.leases.push(candidate);
         targets.set(key, target);
-        const scopeKey = awsIngressPortScopeKey(region, port);
+        const scopeKey = awsIngressPortScopeKey(authorityScope, region, port);
         const scope = targetScopes.get(scopeKey) ?? {
           identities: new Set<string>(),
           hasUnknownGroup: false,
@@ -28568,14 +28876,24 @@ export class AWSProvider implements CloudProvider {
       const targetLease = target.lease;
       const cidrs = activeAWSSSHSourceCIDRs(target.leases, globalCIDRs);
       const reconcile =
-        ambiguousTargetScopes.has(awsIngressPortScopeKey(target.region, target.port)) ||
+        ambiguousTargetScopes.has(
+          awsIngressPortScopeKey(authorityScope, target.region, target.port),
+        ) ||
+        !targetLease.providerScope ||
+        target.leases.some((candidate) => !candidate.providerScope) ||
         hasUnknownActiveAWSSSHSource(target.leases)
           ? "additive"
           : "authoritative";
       // Sharing a read is safe only when every grouped port has the same policy.
       // Unioning distinct CIDRs or modes would widen access or prune retained rules.
       const key = JSON.stringify([
-        awsIngressAccessTargetKey(targetLease, target.region, [], this.env),
+        awsIngressAccessTargetKey(
+          targetLease,
+          target.region,
+          [],
+          this.env,
+          targetLease.providerScope ?? authorityScope,
+        ),
         reconcile,
         cidrs.toSorted(),
       ]);
@@ -28599,9 +28917,13 @@ export class AWSProvider implements CloudProvider {
     }
     for (const { config, reconcile } of refreshes.values()) {
       const region = config.awsRegion;
-      const client = region === this.region ? this.client : new EC2SpotClient(this.env, region);
+      const client = clients.get(awsIngressOperationScopeKey(authorityScope, region));
+      // A provisioning retry may only repair the region owned by its verified credential session.
+      if (clients.size > 0 && !client) continue;
+      const regionalClient =
+        client ?? (region === this.region ? this.client : new EC2SpotClient(this.env, region));
       // oxlint-disable-next-line eslint/no-await-in-loop -- distinct policies can share a group, so keep their mutation passes ordered.
-      await client.refreshSSHIngress(config, { reconcile, allowEmpty: true });
+      await regionalClient.refreshSSHIngress(config, { reconcile, allowEmpty: true });
     }
   }
 
@@ -28621,6 +28943,11 @@ export class AWSProvider implements CloudProvider {
   }> {
     const regions = awsRegionCandidates(config, this.env, this.region);
     const withLeaseAccess = provisioning?.withLeaseAccess;
+    const providerScope = provisioning?.providerScope;
+    const recordedAccount = awsProviderScopeAccount(providerScope);
+    if (!provisioning || !providerScope || !recordedAccount) {
+      throw new Error("AWS provisioning requires a persisted account scope");
+    }
     const totalStartedAt = Date.now();
     const history = new ProvisioningAttemptHistory();
     const ingressOptions =
@@ -28634,6 +28961,7 @@ export class AWSProvider implements CloudProvider {
           };
     for (const region of regions) {
       const client = region === this.region ? this.client : new EC2SpotClient(this.env, region);
+      let cleanupRegionalKey: (() => Promise<void>) | undefined;
       let allocated:
         | {
             serverType: string;
@@ -28642,194 +28970,239 @@ export class AWSProvider implements CloudProvider {
           }
         | undefined;
       try {
-        // Record only regions whose provisioning path is about to mutate provider state.
-        // oxlint-disable-next-line eslint/no-await-in-loop -- region fallback is intentionally ordered.
-        await provisioning?.onTargetAttempt?.({ region });
-        const requestStartedAt = Date.now();
-        const { server, serverType, market, attempts, imageID } =
-          // oxlint-disable-next-line eslint/no-await-in-loop -- region fallback must preserve ordered capacity preference.
-          await client.createServerWithFallback(
-            { ...config, awsRegion: region },
-            leaseID,
-            slug,
-            owner,
-            {
-              ...ingressOptions,
-              // Only ingress writes hold the fence; image, instance and address waits do not.
-              ...(!config.awsPrivate && withLeaseAccess
-                ? {
-                    withIngress: (
-                      apply: (cidrs: string[]) => Promise<string>,
-                      observe: ProviderAccessTimingObserver,
-                    ) =>
-                      withLeaseAccess(
-                        { region },
-                        async (lease, context) => {
-                          const cidrs = awsCreateSSHSourceCIDRs(
-                            { ...config, awsRegion: region },
-                            lease,
-                            context,
-                            this.env,
-                            this.region,
-                          );
-                          try {
-                            return await apply(cidrs);
-                          } catch (error) {
-                            if (
-                              !isAWSSecurityGroupRuleLimitError(
-                                coordinatorErrorMessage(this.env, error),
-                              )
-                            ) {
-                              throw error;
-                            }
-                            await this.reconcileLeaseAccess(lease, context);
-                            return apply(cidrs);
-                          }
-                        },
-                        observe,
-                      ),
-                  }
-                : {}),
-            },
+        // oxlint-disable-next-line eslint/no-await-in-loop -- each region gets a distinct authority snapshot.
+        const regionalResult = await client.withLeaseOperation(async (session) => {
+          const authenticatedAccount = authenticatedAWSAccount(
+            (await session.verifiedIdentity()).account,
           );
-        allocated = { serverType, market, attempts };
-        const requestMs = Date.now() - requestStartedAt;
-        const networkReadyStartedAt = Date.now();
-        let bootstrapMs = 0;
-        const claim: ProviderProvisioningCleanupClaim = {
-          provider: "aws",
-          cloudID: server.cloudID,
-          serverID: server.id,
-          region,
-          ...(provisioning?.providerScope ? { providerScope: provisioning.providerScope } : {}),
-        };
-        const onResourceCreated = provisioning?.onResourceCreated;
-        const publishResource = onResourceCreated
-          ? async (readinessError?: unknown) => {
-              try {
-                return await onResourceCreated(claim);
-              } catch (error) {
-                if (error instanceof ProviderResourceUnresolvedError) throw error;
-                const message = coordinatorErrorMessage(this.env, error);
-                const cause =
-                  readinessError === undefined
-                    ? error
-                    : new AggregateError([readinessError, error], message, {
-                        cause: readinessError,
-                      });
-                throw new ProviderProvisioningCleanupError(message, claim, cause);
-              }
-            }
-          : undefined;
-        const checkReadiness = publishResource
-          ? async () => {
-              if (!(await publishResource())) throw new CreateAttemptCanceledError();
-            }
-          : undefined;
-        let readyServer = server;
-        try {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- publish the allocation before readiness can perform provider I/O.
-          await checkReadiness?.();
-          // oxlint-disable-next-line eslint/no-await-in-loop -- wait on the region that created the instance.
-          readyServer = await client.waitForServerIP(
-            server.cloudID,
-            config.awsPrivate,
-            checkReadiness,
-          );
-          if (config.awsRequireSSM) {
-            // oxlint-disable-next-line eslint/no-await-in-loop -- private readiness belongs to the selected region.
-            await client.waitForSSMOnline(server.cloudID, checkReadiness);
-            const bootstrapStartedAt = Date.now();
-            // oxlint-disable-next-line eslint/no-await-in-loop -- bootstrap must finish before the lease becomes active.
-            const bootstrap = await client.runSSMBootstrap(
-              server.cloudID,
+          if (authenticatedAccount !== recordedAccount) {
+            throw new AWSLeaseAuthorityError(
+              `AWS provider scope conflicts with authenticated account: recorded ${recordedAccount}, authenticated ${authenticatedAccount}`,
+            );
+          }
+          // Persist the target only after its fixed credential snapshot proves the recorded account.
+          await provisioning?.onTargetAttempt?.({ region });
+          const operationClient = session.client;
+          let ownedKeyRequiresCleanup = false;
+          cleanupRegionalKey = async () => {
+            if (!ownedKeyRequiresCleanup) return;
+            await operationClient.deleteSSHKey(config.providerKey, leaseID);
+            await provisioning.onProviderKeyCleanupComplete?.({ region });
+            ownedKeyRequiresCleanup = false;
+          };
+          const requestStartedAt = Date.now();
+          const { server, serverType, market, attempts, imageID } =
+            await operationClient.createServerWithFallback(
+              { ...config, awsRegion: region },
               leaseID,
-              config.awsSSMBootstrapCommand,
-              config.awsSSMLogGroup,
+              slug,
+              owner,
+              {
+                ...ingressOptions,
+                onOwnedKeyCleanupRequired: async (existingKey: boolean) => {
+                  await provisioning.onProviderKeyCleanupPending?.(existingKey);
+                  ownedKeyRequiresCleanup = true;
+                },
+                // Only ingress writes hold the fence; image, instance and address waits do not.
+                ...(!config.awsPrivate && withLeaseAccess
+                  ? {
+                      withIngress: (
+                        apply: (cidrs: string[]) => Promise<string>,
+                        observe: ProviderAccessTimingObserver,
+                      ) =>
+                        withLeaseAccess(
+                          { region },
+                          async (lease, context) => {
+                            const cidrs = awsCreateSSHSourceCIDRs(
+                              { ...config, awsRegion: region },
+                              lease,
+                              context,
+                              this.env,
+                              this.region,
+                            );
+                            try {
+                              return await apply(cidrs);
+                            } catch (error) {
+                              if (
+                                !isAWSSecurityGroupRuleLimitError(
+                                  coordinatorErrorMessage(this.env, error),
+                                )
+                              ) {
+                                throw error;
+                              }
+                              await this.reconcileLeaseAccessWithClients(
+                                lease,
+                                context,
+                                new Map([
+                                  [
+                                    awsIngressOperationScopeKey(providerScope, region),
+                                    operationClient,
+                                  ],
+                                ]),
+                              );
+                              return apply(cidrs);
+                            }
+                          },
+                          observe,
+                        ),
+                    }
+                  : {}),
+              },
+            );
+          allocated = { serverType, market, attempts };
+          const requestMs = Date.now() - requestStartedAt;
+          const networkReadyStartedAt = Date.now();
+          let bootstrapMs = 0;
+          const claim: ProviderProvisioningCleanupClaim = {
+            provider: "aws",
+            cloudID: server.cloudID,
+            serverID: server.id,
+            region,
+            providerScope,
+          };
+          const onResourceCreated = provisioning.onResourceCreated;
+          const publishResource = onResourceCreated
+            ? async (readinessError?: unknown) => {
+                try {
+                  return await onResourceCreated(claim);
+                } catch (error) {
+                  if (error instanceof ProviderResourceUnresolvedError) throw error;
+                  const message = coordinatorErrorMessage(this.env, error);
+                  const cause =
+                    readinessError === undefined
+                      ? error
+                      : new AggregateError([readinessError, error], message, {
+                          cause: readinessError,
+                        });
+                  throw new ProviderProvisioningCleanupError(message, claim, cause);
+                }
+              }
+            : undefined;
+          const checkReadiness = publishResource
+            ? async () => {
+                if (!(await publishResource())) throw new CreateAttemptCanceledError();
+              }
+            : undefined;
+          let readyServer = server;
+          try {
+            await checkReadiness?.();
+            readyServer = await operationClient.waitForServerIP(
+              server.cloudID,
+              config.awsPrivate,
               checkReadiness,
             );
-            bootstrapMs = Date.now() - bootstrapStartedAt;
-            readyServer = {
-              ...readyServer,
-              host: "",
-              awsSSMCommandID: bootstrap.commandID,
-              awsSSMCommandStatus: bootstrap.status,
-            };
-          }
-        } catch (error) {
-          if (error instanceof ProviderResourceUnresolvedError) throw error;
-          // Publication failures already carry the allocation; retrying publication could lose that evidence.
-          if (providerProvisioningCleanupClaim(error)) throw error;
-          const waitMessage = error instanceof Error ? error.message : String(error);
-          if (publishResource) {
-            // The published owner decides current retain/delete intent; readiness never deletes behind it.
-            if (
-              !(error instanceof CreateAttemptCanceledError) &&
-              // oxlint-disable-next-line eslint/no-await-in-loop -- revalidate retain/delete intent after the failed provider read.
-              (await publishResource(error))
-            ) {
-              throw new ProviderProvisioningCleanupError(waitMessage, claim, error);
+            if (config.awsRequireSSM) {
+              await operationClient.waitForSSMOnline(server.cloudID, checkReadiness);
+              const bootstrapStartedAt = Date.now();
+              const bootstrap = await operationClient.runSSMBootstrap(
+                server.cloudID,
+                leaseID,
+                config.awsSSMBootstrapCommand,
+                config.awsSSMLogGroup,
+                checkReadiness,
+              );
+              bootstrapMs = Date.now() - bootstrapStartedAt;
+              readyServer = {
+                ...readyServer,
+                host: "",
+                awsSSMCommandID: bootstrap.commandID,
+                awsSSMCommandStatus: bootstrap.status,
+              };
             }
-            readyServer = server;
-          } else {
-            try {
-              if (config.awsPrivate) {
-                // oxlint-disable-next-line eslint/no-await-in-loop -- clean up the exact instance before any fallback.
-                await client.terminateServerAndWait(server.cloudID);
-              } else {
-                // oxlint-disable-next-line eslint/no-await-in-loop -- clean up the exact instance before any fallback.
-                await client.deleteServer(server.cloudID);
+          } catch (error) {
+            if (error instanceof ProviderResourceUnresolvedError) throw error;
+            // Publication failures already carry the allocation; retrying publication could lose that evidence.
+            if (providerProvisioningCleanupClaim(error)) throw error;
+            const waitMessage = error instanceof Error ? error.message : String(error);
+            if (publishResource) {
+              // The published owner decides current retain/delete intent; readiness never deletes behind it.
+              if (
+                !(error instanceof CreateAttemptCanceledError) &&
+                (await publishResource(error))
+              ) {
+                throw new ProviderProvisioningCleanupError(waitMessage, claim, error);
               }
-            } catch (deleteError) {
-              const deleteMessage =
-                deleteError instanceof Error ? deleteError.message : String(deleteError);
-              throw new ProviderProvisioningCleanupError(
-                `${waitMessage}; cleanup failed for AWS instance ${server.cloudID}: ${deleteMessage}`,
-                claim,
-                deleteError,
+              readyServer = server;
+            } else {
+              try {
+                if (config.awsPrivate) {
+                  await operationClient.terminateServerAndWait(server.cloudID);
+                } else {
+                  await operationClient.deleteServer(server.cloudID);
+                }
+              } catch (deleteError) {
+                const deleteMessage =
+                  deleteError instanceof Error ? deleteError.message : String(deleteError);
+                throw new ProviderProvisioningCleanupError(
+                  `${waitMessage}; cleanup failed for AWS instance ${server.cloudID}: ${deleteMessage}`,
+                  claim,
+                  deleteError,
+                );
+              }
+              throw new Error(
+                `${waitMessage}; crabbox_aws_stale_instance_cleaned; deleted AWS instance ${server.cloudID} after readiness failure`,
+                { cause: error },
               );
             }
-            throw new Error(
-              `${waitMessage}; crabbox_aws_stale_instance_cleaned; deleted AWS instance ${server.cloudID} after readiness failure`,
-              { cause: error },
-            );
           }
-        }
-        const result: {
-          server: ProviderMachine;
-          serverType: string;
-          market?: string;
-          attempts?: ProvisioningAttempt[];
-          image?: LeaseImageIdentity;
-          provisioningTiming?: LeaseProvisioningTiming;
-        } = {
-          server: { ...readyServer, region },
-          serverType,
-          image: awsLeaseImageIdentity(config, imageID, region),
-          provisioningTiming: withProvisioningPhases({
-            requestMs,
-            networkReadyMs: Date.now() - networkReadyStartedAt - bootstrapMs,
-            ...(bootstrapMs > 0 ? { bootstrapMs } : {}),
-            totalMs: Date.now() - totalStartedAt,
-          }),
-        };
-        if (market) {
-          result.market = market;
-        }
-        return { ...result, ...history.result(attempts) };
+          const result: {
+            server: ProviderMachine;
+            serverType: string;
+            market?: string;
+            attempts?: ProvisioningAttempt[];
+            image?: LeaseImageIdentity;
+            provisioningTiming?: LeaseProvisioningTiming;
+          } = {
+            server: { ...readyServer, region },
+            serverType,
+            image: awsLeaseImageIdentity(config, imageID, region),
+            provisioningTiming: withProvisioningPhases({
+              requestMs,
+              networkReadyMs: Date.now() - networkReadyStartedAt - bootstrapMs,
+              ...(bootstrapMs > 0 ? { bootstrapMs } : {}),
+              totalMs: Date.now() - totalStartedAt,
+            }),
+          };
+          if (market) {
+            result.market = market;
+          }
+          return { ...result, ...history.result(attempts) };
+        });
+        return regionalResult;
       } catch (error) {
-        // Keep cancellation typed so the create owner records cleanup debt before
-        // returning its terminal response, even after an earlier regional failure.
+        // Preserve owner fence types: cancellation after dispatch records cleanup
+        // debt, while a pre-mutation fence bypasses failure bookkeeping entirely.
         if (
           error instanceof CreateAttemptCanceledError ||
+          error instanceof ProviderDispatchFenceError ||
+          error instanceof AWSLeaseAuthorityError ||
           providerProvisioningCleanupClaim(error) ||
           error instanceof ProviderResourceUnresolvedError
         ) {
           throw error;
         }
-        const message = error instanceof Error ? error.message : String(error);
+        let regionError = error;
+        let message = error instanceof Error ? error.message : String(error);
+        const retryableRegionFailure = isRetryableAWSRegionProvisioningError(message);
+        if (retryableRegionFailure && cleanupRegionalKey) {
+          try {
+            // Region-scoped key pairs must not survive a failed attempt when fallback advances.
+            // oxlint-disable-next-line eslint/no-await-in-loop -- cleanup must finish before the next Region owns the lease.
+            await cleanupRegionalKey();
+          } catch (cleanupError) {
+            if (cleanupError instanceof AWSLeaseAuthorityError) {
+              throw new ProviderResourceUnresolvedError(cleanupError.message, {
+                cause: cleanupError,
+              });
+            }
+            const cleanupMessage =
+              cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+            message = `${message}; failed to clean AWS SSH key in ${region}: ${cleanupMessage}`;
+            regionError = new AggregateError([error, cleanupError], message, { cause: error });
+          }
+        }
         history.recordFailure(
-          error,
+          regionError,
           {
             region,
             serverType: allocated?.serverType ?? config.serverType,
@@ -28840,7 +29213,7 @@ export class AWSProvider implements CloudProvider {
           `${region}: ${message}`,
           allocated?.attempts,
         );
-        if (!isRetryableAWSRegionProvisioningError(message)) {
+        if (!retryableRegionFailure || regionError !== error) {
           break;
         }
       }
@@ -28867,6 +29240,8 @@ export class AWSProvider implements CloudProvider {
       ...(server.awsSSMCommandStatus ? { awsSSMCommandStatus: server.awsSSMCommandStatus } : {}),
       ...(config.awsPrivate ? { awsSSMLogGroup: config.awsSSMLogGroup } : {}),
     };
+    delete nextLease.providerKeyCleanupPending;
+    delete nextLease.providerKeyCleanupID;
     const hints = capacityHints(this.env, nextConfig, nextLease, attempts);
     if (hints.length > 0) {
       nextLease.capacityHints = hints;
@@ -28875,36 +29250,42 @@ export class AWSProvider implements CloudProvider {
   }
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
-    const unsettledAllocation = Boolean(
-      lease.provisioningRequestStartedAt || lease.provisioningResourceMayExist,
-    );
-    // A new EC2 allocation can be absent from reads before its ID propagates.
-    const server = await ownedProviderMachineForRelease("aws", lease, (id) =>
-      unsettledAllocation ? this.client.waitForServerVisibility(id) : this.findServer(id),
-    );
-    try {
-      if (server) {
-        await this.client.terminateServerAndWait(lease.cloudID);
-      }
-    } catch (error) {
-      const message = coordinatorErrorMessage(this.env, error);
-      if (unsettledAllocation || !isAWSInstanceNotFoundError(message)) {
-        throw error;
-      }
-      console.warn(
-        `AWS lease cleanup found missing instance lease=${lease.id} cloud=${lease.cloudID}: ${message}`,
+    await this.withLeaseOperation(async (session) => {
+      const recordedAccount = await this.verifyLeaseOperationAuthority(lease, session);
+      const unsettledAllocation = Boolean(
+        lease.provisioningRequestStartedAt || lease.provisioningResourceMayExist,
       );
-    }
-    if (lease.network?.awsPrivate) {
-      privateAWSWorkspaceLifecycleLog("terminated", {
-        lease_id: lease.id,
-        cloud_id: lease.cloudID,
-        region: lease.region,
-      });
-    }
-    if (leaseUsesCanonicalProviderKey(lease)) {
-      await this.deleteSSHKey(lease.providerKey, lease.id);
-    }
+      // A new EC2 allocation can be absent from reads before its ID propagates.
+      const server = lease.cloudID
+        ? await ownedProviderMachineForRelease("aws", lease, (id) =>
+            this.observeLeaseServer(
+              lease,
+              session,
+              () =>
+                unsettledAllocation ? session.waitForServerVisibility(id) : session.findServer(id),
+              "machine",
+            ),
+          )
+        : undefined;
+      if (server) {
+        await session.terminateServerAndWait(lease.cloudID);
+      }
+      if (lease.network?.awsPrivate) {
+        privateAWSWorkspaceLifecycleLog("terminated", {
+          lease_id: lease.id,
+          cloud_id: lease.cloudID,
+          region: lease.region,
+        });
+      }
+      if (leaseUsesCanonicalProviderKey(lease)) {
+        if (!lease.cloudID && !recordedAccount) {
+          throw new ProviderResourceUnresolvedError(
+            "AWS lease account scope was not persisted; refusing key-only cleanup",
+          );
+        }
+        await session.deleteSSHKey(lease.providerKey, lease.id);
+      }
+    });
   }
 
   supportsNativeImages(): boolean {

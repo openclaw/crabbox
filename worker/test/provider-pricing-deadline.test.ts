@@ -30,6 +30,80 @@ afterEach(() => {
 });
 
 describe("optional provider pricing", () => {
+  it("retains the supplied credential snapshot for a pricing quote", async () => {
+    const credentials = vi.fn<() => Promise<{ accessKeyId: string; secretAccessKey: string }>>();
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response(spotXML));
+    vi.stubGlobal("fetch", fetchImpl);
+    const client = new EC2SpotClient({ awsCredentialProvider: credentials } as Env, region, {
+      accessKeyId: "snapshot-test",
+      secretAccessKey: "snapshot-secret",
+      sessionToken: "snapshot-session",
+      expirationMs: Date.now() + 60_000,
+    });
+    await expect(client.hourlySpotPriceUSD("t3.small")).resolves.toBe(0.125);
+    expect(credentials).not.toHaveBeenCalled();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const request = fetchImpl.mock.calls[0]![0] as Request;
+    expect(request.headers.get("authorization")).toContain("Credential=snapshot-test/");
+    expect(request.headers.get("x-amz-security-token")).toBe("snapshot-session");
+  });
+
+  it("rejects an expired pricing snapshot without resolving ambient credentials", async () => {
+    const credentials = vi.fn<() => Promise<{ accessKeyId: string; secretAccessKey: string }>>();
+    const fetchImpl = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchImpl);
+    const client = new EC2SpotClient({ awsCredentialProvider: credentials } as Env, region, {
+      accessKeyId: "snapshot-test",
+      secretAccessKey: "snapshot-secret",
+      expirationMs: Date.now() - 1,
+    });
+    await expect(client.hourlySpotPriceUSD("t3.small")).rejects.toThrow(
+      "AWS credential snapshot expired",
+    );
+    expect(credentials).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("aborts a fixed-snapshot quote without retrying a late response", async () => {
+    vi.useFakeTimers();
+    const credentials = vi.fn<() => Promise<{ accessKeyId: string; secretAccessKey: string }>>();
+    const started = Promise.withResolvers<void>();
+    const response = Promise.withResolvers<Response>();
+    let signal: AbortSignal | undefined;
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      signal = (input instanceof Request ? input : new Request(input, init)).signal;
+      started.resolve();
+      return await response.promise;
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+    const client = new EC2SpotClient({ awsCredentialProvider: credentials } as Env, region, {
+      accessKeyId: "snapshot-test",
+      secretAccessKey: "snapshot-secret",
+      expirationMs: Date.now() + 60_000,
+    });
+    let settled = false;
+    const price = client.hourlySpotPriceUSD("t3.small").catch((error) => {
+      settled = true;
+      return error;
+    });
+    try {
+      await started.promise;
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+      expect(signal?.aborted).toBe(true);
+      await expect(price).resolves.toMatchObject({ name: "TimeoutError" });
+    } finally {
+      response.resolve(new Response("unavailable", { status: 503 }));
+      await price;
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(credentials).not.toHaveBeenCalled();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each([
     { provider: "aws", phase: "fetch" },
     { provider: "aws", phase: "body" },
@@ -480,7 +554,12 @@ describe("optional provider pricing", () => {
       const address = server.address();
       if (!address || typeof address === "string") throw new Error("missing local HTTP address");
       vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
-        const signal = input instanceof Request ? input.signal : init?.signal;
+        const signal =
+          init?.signal !== undefined
+            ? init.signal
+            : input instanceof Request
+              ? input.signal
+              : undefined;
         const request = input instanceof Request ? input : new Request(input, init);
         // Preserve the caller's signal when redirecting the request to loopback.
         return nativeFetch(new Request(`http://127.0.0.1:${address.port}/`, request), { signal });

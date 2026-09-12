@@ -1,9 +1,14 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
+import { AwsClient } from "aws4fetch";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { EC2SpotClient } from "../src/aws";
-import { RefreshingAWSFetchClient } from "../src/aws-fetch-client";
+import {
+  FixedAWSFetchClient,
+  RefreshingAWSFetchClient,
+  resolvedAWSCredentials,
+} from "../src/aws-fetch-client";
 import { createAWSProvisioningDiagnostics } from "../src/aws-provisioning-diagnostics";
 import { leaseConfig, type LeaseConfig } from "../src/config";
 import type { Env } from "../src/types";
@@ -39,14 +44,20 @@ const credentials = async () => ({
   sessionToken: "fixture-session-canary",
 });
 
-it.each([500, 503])(
-  "hands a parsed HTTP %i capacity rejection to the next configured type without retrying it",
-  async (status) => {
-    const { launch, requests } = await capacityTransport({
+it.each(
+  [500, 503].flatMap((status) =>
+    [false, true].map((fixedOperation) => ({ status, fixedOperation })),
+  ),
+)(
+  "hands a parsed HTTP $status capacity rejection to the next configured type without retrying it (fixed operation=$fixedOperation)",
+  async ({ status, fixedOperation }) => {
+    const { launch, requests, credentialProvider } = await capacityTransport({
       status,
+      fixedOperation,
       reject: (request) => request.get("InstanceType") === "t3.small",
     });
     const result = await launch();
+    expect(credentialProvider.mock.calls.length === 1).toBe(fixedOperation);
     expect(requests.map((request) => request.get("InstanceType"))).toEqual([
       "t3.small",
       "t3.medium",
@@ -345,7 +356,16 @@ async function capacityTransport(options: {
   errorBody?: string;
   writeError?: (response: ServerResponse) => void;
   quotas?: { spot: number; onDemand: number };
+  fixedOperation?: boolean;
 }) {
+  const credentialProvider = vi.fn<typeof credentials>(credentials);
+  if (options.fixedOperation) {
+    credentialProvider.mockImplementationOnce(credentials).mockImplementation(async () => ({
+      accessKeyId: "fixture-rotated-access",
+      secretAccessKey: "fixture-rotated-secret",
+      sessionToken: "fixture-rotated-session",
+    }));
+  }
   vi.spyOn(Math, "random").mockReturnValue(0);
   vi.spyOn(console, "info").mockImplementation(() => {});
   const requests: URLSearchParams[] = [];
@@ -371,6 +391,10 @@ async function capacityTransport(options: {
         const quota = options.quotas?.[QuotaCode === "L-34B43A08" ? "spot" : "onDemand"] ?? 999;
         response.setHeader("content-type", "application/json");
         response.end(JSON.stringify({ Quota: { Value: quota } }));
+      } else if (action === "GetCallerIdentity") {
+        response.end(
+          "<GetCallerIdentityResponse><GetCallerIdentityResult><Account>123456789012</Account><Arn>arn:aws:iam::123456789012:user/fixture</Arn></GetCallerIdentityResult></GetCallerIdentityResponse>",
+        );
       } else if (action === "DescribeKeyPairs") {
         response.end(
           "<DescribeKeyPairsResponse><keySet><item><keyName>test-key</keyName><publicKey>ssh-ed25519 test</publicKey></item></keySet></DescribeKeyPairsResponse>",
@@ -414,7 +438,7 @@ async function capacityTransport(options: {
       /^AWS4-HMAC-SHA256 Credential=fixture-access-canary\//,
     );
     expect(new URL(request.url).hostname).toMatch(
-      /^(ec2|servicequotas)\.eu-west-1\.amazonaws\.com$/,
+      /^(ec2|servicequotas|sts)\.eu-west-1\.amazonaws\.com$/,
     );
     // The real signer, fetch implementation and HTTP response handling still run; only the destination is local.
     const body = await request.text();
@@ -431,7 +455,7 @@ async function capacityTransport(options: {
   });
   const client = new EC2SpotClient(
     {
-      awsCredentialProvider: credentials,
+      awsCredentialProvider: credentialProvider,
       CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
       CRABBOX_AWS_SSH_CIDRS: "203.0.113.7/32",
       CRABBOX_AWS_AMI: "ami-test",
@@ -451,14 +475,23 @@ async function capacityTransport(options: {
     requests,
     quotaRequests,
     responses,
+    credentialProvider,
     firstResponse: firstResponse.promise,
-    launch: (overrides: Partial<LeaseConfig> = {}) =>
-      client.createServerWithFallback(
-        { ...config, ...overrides },
-        "cbx_000000000001",
-        "violet-prawn",
-        "alice@example.com",
-      ),
+    launch: (overrides: Partial<LeaseConfig> = {}) => {
+      const create = (operationClient: EC2SpotClient) =>
+        operationClient.createServerWithFallback(
+          { ...config, ...overrides },
+          "cbx_000000000001",
+          "violet-prawn",
+          "alice@example.com",
+        );
+      return options.fixedOperation
+        ? client.withLeaseOperation(async (session) => {
+            await session.verifiedIdentity();
+            return create(session.client);
+          })
+        : create(client);
+    },
   };
 }
 
@@ -508,41 +541,48 @@ function observe() {
   };
 }
 
-it.each([
-  { name: "normal success", statuses: [200], attempts: 1 },
-  { name: "original SDK retries 503 and 429", statuses: [503, 429, 200], attempts: 3 },
-  { name: "original SDK returns 400 without retry", statuses: [400], attempts: 1 },
-])("observes $name without changing request bytes or response", async ({ statuses, attempts }) => {
-  const bodies: string[] = [];
-  const url = await localTransport((request, response) => {
-    let body = "";
-    request.setEncoding("utf8");
-    request.on("data", (chunk: string) => {
-      body += chunk;
+it.each(
+  [
+    { name: "normal success", statuses: [200], attempts: 1 },
+    { name: "original SDK retries 503 and 429", statuses: [503, 429, 200], attempts: 3 },
+    { name: "original SDK returns 400 without retry", statuses: [400], attempts: 1 },
+  ].flatMap((scenario) => [false, true].map((fixed) => ({ ...scenario, fixed }))),
+)(
+  "observes $name without changing request bytes or response (fixed=$fixed)",
+  async ({ statuses, attempts, fixed }) => {
+    const bodies: string[] = [];
+    const url = await localTransport((request, response) => {
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk: string) => {
+        body += chunk;
+      });
+      request.on("end", () => {
+        bodies.push(body);
+        response.statusCode = statuses[bodies.length - 1] ?? 500;
+        response.end("response-canary");
+      });
     });
-    request.on("end", () => {
-      bodies.push(body);
-      response.statusCode = statuses[bodies.length - 1] ?? 500;
-      response.end("response-canary");
+    const { diagnostics, finish } = observe();
+    const client = fixed
+      ? new FixedAWSFetchClient(resolvedAWSCredentials(await credentials()), "ec2", "eu-west-1")
+      : new RefreshingAWSFetchClient(credentials, "ec2", "eu-west-1");
+    const result = await diagnostics.measure("key_pair", () =>
+      client.fetch(url, { method: "POST", body: "payload-canary" }),
+    );
+    expect(result.status).toBe(statuses.at(-1));
+    expect(await result.text()).toBe("response-canary");
+    expect(bodies).toEqual(Array(attempts).fill("payload-canary"));
+    expect(finish("success")).toMatchObject({
+      requests: 1,
+      credentialFailures: 0,
+      signInvocations: attempts,
+      signCompletions: attempts,
+      signFailures: 0,
+      requestFailures: 0,
     });
-  });
-  const { diagnostics, finish } = observe();
-  const client = new RefreshingAWSFetchClient(credentials, "ec2", "eu-west-1");
-  const result = await diagnostics.measure("key_pair", () =>
-    client.fetch(url, { method: "POST", body: "payload-canary" }),
-  );
-  expect(result.status).toBe(statuses.at(-1));
-  expect(await result.text()).toBe("response-canary");
-  expect(bodies).toEqual(Array(attempts).fill("payload-canary"));
-  expect(finish("success")).toMatchObject({
-    requests: 1,
-    credentialFailures: 0,
-    signInvocations: attempts,
-    signCompletions: attempts,
-    signFailures: 0,
-    requestFailures: 0,
-  });
-});
+  },
+);
 
 it("records credential failure before signing and preserves the original error", async () => {
   let requests = 0;
@@ -687,3 +727,69 @@ it("attributes interleaved shared-client requests to their deepest operation and
   expect(await (await client.fetch(url)).text()).toBe("fast");
   expect(log.mock.calls).toHaveLength(count);
 });
+
+it.each([false, true])("passes the quote's owning signal to fetch (fixed=%s)", async (fixed) => {
+  const controller = new AbortController();
+  const response = new Response("unavailable", { status: 503 });
+  const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response);
+  vi.stubGlobal("fetch", fetchImpl);
+  const client = fixed
+    ? new FixedAWSFetchClient(
+        resolvedAWSCredentials(await credentials()),
+        "ec2",
+        "eu-west-1",
+        controller.signal,
+      )
+    : new RefreshingAWSFetchClient(credentials, "ec2", "eu-west-1", controller.signal);
+  await expect(
+    client.fetch("https://ec2.eu-west-1.amazonaws.com/", { method: "POST", body: "quote=fixture" }),
+  ).resolves.toBe(response);
+  expect(fetchImpl).toHaveBeenCalledTimes(1);
+  const [input, init] = fetchImpl.mock.calls[0]!;
+  expect(init?.signal).toBe(controller.signal);
+  expect(input).toBeInstanceOf(Request);
+  const request = input as Request;
+  expect(request.method).toBe("POST");
+  expect(await request.text()).toBe("quote=fixture");
+  expect(request.headers.has("authorization")).toBe(true);
+});
+
+it.each([false, true])(
+  "does not dispatch a quote after delayed signing and abort (fixed=%s)",
+  async (fixed) => {
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const originalSign = AwsClient.prototype.sign;
+    vi.spyOn(AwsClient.prototype, "sign").mockImplementation(async function (
+      this: AwsClient,
+      ...args: Parameters<AwsClient["sign"]>
+    ) {
+      started.resolve();
+      await release.promise;
+      return await originalSign.apply(this, args);
+    });
+    const fetchImpl = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchImpl);
+    const client = fixed
+      ? new FixedAWSFetchClient(
+          resolvedAWSCredentials(await credentials()),
+          "ec2",
+          "eu-west-1",
+          controller.signal,
+        )
+      : new RefreshingAWSFetchClient(credentials, "ec2", "eu-west-1", controller.signal);
+    const failure = new DOMException("quote deadline", "TimeoutError");
+    const pending = client
+      .fetch("https://ec2.eu-west-1.amazonaws.com/", { method: "POST", body: "quote=fixture" })
+      .catch((error) => error);
+    try {
+      await started.promise;
+      controller.abort(failure);
+    } finally {
+      release.resolve();
+    }
+    await expect(pending).resolves.toBe(failure);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  },
+);

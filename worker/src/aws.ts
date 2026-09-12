@@ -1,6 +1,12 @@
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 
-import { RefreshingAWSFetchClient, type AWSFetchClient } from "./aws-fetch-client";
+import {
+  FixedAWSFetchClient,
+  RefreshingAWSFetchClient,
+  resolvedAWSCredentials,
+  type AWSFetchClient,
+  type ResolvedAWSCredentials,
+} from "./aws-fetch-client";
 import {
   createAWSProvisioningDiagnostics,
   type AWSProvisioningDiagnostics,
@@ -56,6 +62,24 @@ const awsSpotQuotaCode = "L-34B43A08";
 const awsOnDemandQuotaCode = "L-1216C47A";
 const awsSSHIngressDescription = "Crabbox SSH";
 const awsRunInstancesOutcomeUncertain = "crabbox_aws_run_instances_outcome_uncertain";
+type AWSInstanceLookup = { kind: "absent" } | { kind: "present"; server: ProviderMachine };
+type AWSDescribeInstancesResult = {
+  root: Record<string, unknown>;
+  reservations: Record<string, unknown>[];
+};
+
+function malformedAWSDescribeInstances(detail: string): never {
+  throw new AWSLeaseObservationError(`malformed AWS DescribeInstances response: ${detail}`);
+}
+
+export class AWSLeaseAuthorityError extends Error {
+  override name = "AWSLeaseAuthorityError";
+}
+
+export class AWSLeaseObservationError extends Error {
+  override name = "AWSLeaseObservationError";
+}
+
 const awsCapacityErrorMaxBytes = 64 * 1024;
 const awsCapacityErrorReadTimeoutMs = 1_000;
 const awsMacHostQuotaSpecs: Record<string, { quotaCode: string; quotaName: string }> = {
@@ -307,6 +331,26 @@ function assertPrivateWorkspaceSecurityGroupShape(group: Record<string, unknown>
       "AWS private workspace security group must have exactly one IPv4 TCP 443 egress rule",
     );
   }
+}
+
+interface AWSQueryOptions {
+  exactResponseEnvelope?: boolean;
+  capacityHandoff?: (() => Promise<boolean>) | undefined;
+  client?: AWSFetchClient;
+  expectedAccount?: string;
+  skipExpectedIdentity?: boolean;
+}
+
+interface AWSLeaseOperation {
+  readonly region: string;
+  readonly client: EC2SpotClient;
+  verifiedIdentity(): Promise<AWSIdentity>;
+  findServer(instanceID: string): Promise<ProviderMachine | undefined>;
+  waitForServerVisibility(instanceID: string): Promise<ProviderMachine>;
+  findCrabboxServerByLease(leaseID: string): Promise<ProviderMachine | undefined>;
+  findWorkspaceServerByLease(leaseID: string): Promise<ProviderMachine | undefined>;
+  terminateServerAndWait(instanceID: string): Promise<void>;
+  deleteSSHKey(name: string, leaseID: string): Promise<void>;
 }
 
 class QualificationAWSFetchClient implements AWSFetchClient {
@@ -672,6 +716,7 @@ export type AWSIngressConfig = Pick<
 interface AWSIngressOptions {
   reconcile?: "authoritative" | "additive";
   allowEmpty?: boolean;
+  onOwnedKeyCleanupRequired?: (existingKey: boolean) => Promise<void>;
   withIngress?: (
     apply: (cidrs: string[]) => Promise<string>,
     observe: ProviderAccessTimingObserver,
@@ -708,18 +753,28 @@ export class EC2SpotClient {
   private readonly stsEndpoint: string;
   private readonly ssmEndpoint: string;
   private readonly region: string;
-  private readonly parser = new XMLParser({ ignoreAttributes: false });
+  private readonly parser = new XMLParser({
+    ignoreAttributes: false,
+    // AWS account IDs are decimal-looking identifiers. Undefined preserves their lexical form.
+    tagValueProcessor: (_tagName, _value, jPath) =>
+      jPath === "GetCallerIdentityResponse.GetCallerIdentityResult.Account" ||
+      jPath === "DescribeInstancesResponse.reservationSet.item.ownerId"
+        ? undefined
+        : _value,
+  });
+  private readonly credentialProvider?: AWSCredentialProvider;
   private expectedIdentity?: Promise<AWSIdentity>;
 
   constructor(
     private readonly env: Env,
     region: string,
+    private readonly credentialSnapshot?: ResolvedAWSCredentials,
     requestSignal?: AbortSignal,
   ) {
     this.region = requireAWSRegion(region || env.CRABBOX_AWS_REGION || "eu-west-1");
     const expected = awsExpectedIdentityConfig(env);
     if (expected && expected.region !== this.region) {
-      throw new Error(
+      throw new AWSLeaseAuthorityError(
         `AWS region mismatch: expected ${expected.region}, configured ${this.region}`,
       );
     }
@@ -743,8 +798,29 @@ export class EC2SpotClient {
         requestSignal,
       );
       this.ssmClient = new RejectedQualificationFetchClient();
+    } else if (credentialSnapshot) {
+      this.aws = new FixedAWSFetchClient(credentialSnapshot, "ec2", this.region, requestSignal);
+      this.serviceQuotas = new FixedAWSFetchClient(
+        credentialSnapshot,
+        "servicequotas",
+        this.region,
+        requestSignal,
+      );
+      this.stsClient = new FixedAWSFetchClient(
+        credentialSnapshot,
+        "sts",
+        this.region,
+        requestSignal,
+      );
+      this.ssmClient = new FixedAWSFetchClient(
+        credentialSnapshot,
+        "ssm",
+        this.region,
+        requestSignal,
+      );
     } else {
       const credentials = awsCredentialProvider(env);
+      this.credentialProvider = credentials;
       this.aws = new RefreshingAWSFetchClient(credentials, "ec2", this.region, requestSignal);
       this.serviceQuotas = new RefreshingAWSFetchClient(
         credentials,
@@ -755,6 +831,50 @@ export class EC2SpotClient {
       this.stsClient = new RefreshingAWSFetchClient(credentials, "sts", this.region, requestSignal);
       this.ssmClient = new RefreshingAWSFetchClient(credentials, "ssm", this.region, requestSignal);
     }
+  }
+
+  async withLeaseOperation<T>(operation: (session: AWSLeaseOperation) => Promise<T>): Promise<T> {
+    // One snapshot owns the full regional operation, including quota and SSM calls.
+    const snapshot = this.credentialProvider
+      ? resolvedAWSCredentials(await this.credentialProvider())
+      : undefined;
+    const client = snapshot ? new EC2SpotClient(this.env, this.region, snapshot) : this;
+    const ec2 = client.aws;
+    const sts = client.stsClient;
+    let identity: Promise<AWSIdentity> | undefined;
+    const verifiedIdentity = (): Promise<AWSIdentity> => {
+      identity ??= client.identityWith(sts).then((value) => client.verifyExpectedIdentity(value));
+      return identity;
+    };
+    const withAccount = async <R>(run: (account: string) => Promise<R>): Promise<R> => {
+      const account = (await verifiedIdentity()).account;
+      if (!/^\d{12}$/.test(account)) {
+        throw new Error("authenticated AWS identity did not return a 12-digit account ID");
+      }
+      return await run(account);
+    };
+    const query = (account: string): AWSQueryOptions => ({
+      client: ec2,
+      expectedAccount: account,
+      skipExpectedIdentity: true,
+    });
+    return await operation({
+      region: this.region,
+      client,
+      verifiedIdentity,
+      findServer: (instanceID) =>
+        withAccount((account) => client.findServerWith(instanceID, query(account))),
+      waitForServerVisibility: (instanceID) =>
+        withAccount((account) => client.waitForServerVisibilityWith(instanceID, query(account))),
+      findCrabboxServerByLease: (leaseID) =>
+        withAccount((account) => client.findLeaseServer(leaseID, false, query(account))),
+      findWorkspaceServerByLease: (leaseID) =>
+        withAccount((account) => client.findLeaseServer(leaseID, true, query(account))),
+      terminateServerAndWait: (instanceID) =>
+        withAccount((account) => client.terminateServerAndWaitWith(instanceID, query(account))),
+      deleteSSHKey: (name, leaseID) =>
+        withAccount((account) => client.deleteSSHKeyWith(name, leaseID, query(account))),
+    });
   }
 
   async capacityReadinessChecks(config: LeaseConfig): Promise<AWSCapacityReadinessCheck[]> {
@@ -771,7 +891,11 @@ export class EC2SpotClient {
   }
 
   async identity(): Promise<AWSIdentity> {
-    const root = await this.sts("GetCallerIdentity", {});
+    return await this.identityWith(this.stsClient);
+  }
+
+  private async identityWith(client: AWSFetchClient): Promise<AWSIdentity> {
+    const root = await this.sts("GetCallerIdentity", {}, client);
     const result = record(root["GetCallerIdentityResult"] ?? root);
     const arn = asString(result["Arn"]);
     const identity: AWSIdentity = {
@@ -787,27 +911,32 @@ export class EC2SpotClient {
     return identity;
   }
 
+  private verifyExpectedIdentity(identity: AWSIdentity): AWSIdentity {
+    const expected = awsExpectedIdentityConfig(this.env);
+    if (!expected) return identity;
+    if (identity.account !== expected.accountID) {
+      throw new AWSLeaseAuthorityError(
+        `AWS account mismatch: expected ${expected.accountID}, authenticated ${identity.account || "unknown"}`,
+      );
+    }
+    if (
+      expected.taskRoleName &&
+      (identity.policyTarget?.source !== "assumed-role" ||
+        identity.policyTarget.name !== expected.taskRoleName)
+    ) {
+      throw new AWSLeaseAuthorityError("AWS task role mismatch");
+    }
+    return identity;
+  }
+
+  async freshVerifiedIdentity(): Promise<AWSIdentity> {
+    return this.verifyExpectedIdentity(await this.identity());
+  }
+
   async verifiedIdentity(): Promise<AWSIdentity> {
     const expected = awsExpectedIdentityConfig(this.env);
     if (!expected) return await this.identity();
-    const verification =
-      this.expectedIdentity ??
-      (async () => {
-        const identity = await this.identity();
-        if (identity.account !== expected.accountID) {
-          throw new Error(
-            `AWS account mismatch: expected ${expected.accountID}, authenticated ${identity.account || "unknown"}`,
-          );
-        }
-        if (
-          expected.taskRoleName &&
-          (identity.policyTarget?.source !== "assumed-role" ||
-            identity.policyTarget.name !== expected.taskRoleName)
-        ) {
-          throw new Error("AWS task role mismatch");
-        }
-        return identity;
-      })();
+    const verification = this.expectedIdentity ?? this.freshVerifiedIdentity();
     this.expectedIdentity = verification;
     try {
       return await verification;
@@ -1006,63 +1135,100 @@ export class EC2SpotClient {
     });
   }
 
+  async findCrabboxServerByLease(leaseID: string): Promise<ProviderMachine | undefined> {
+    return await this.findLeaseServer(leaseID, false, {});
+  }
+
   async findWorkspaceServerByLease(leaseID: string): Promise<ProviderMachine | undefined> {
-    const matches = await this.describeAllInstances({
-      "Filter.1.Name": "tag:crabbox",
-      "Filter.1.Value.1": "true",
-      "Filter.2.Name": "tag:created_by",
-      "Filter.2.Value.1": "crabbox",
-      "Filter.3.Name": "tag:crabbox_workspace",
-      "Filter.3.Value.1": "true",
-      "Filter.4.Name": "tag:access_mode",
-      "Filter.4.Value.1": "ssm",
-      "Filter.5.Name": "tag:lease",
-      "Filter.5.Value.1": leaseID,
-      "Filter.6.Name": "instance-state-name",
-      "Filter.6.Value.1": "pending",
-      "Filter.6.Value.2": "running",
-      "Filter.6.Value.3": "stopping",
-      "Filter.6.Value.4": "stopped",
-    });
+    return await this.findLeaseServer(leaseID, true, {});
+  }
+
+  private async findLeaseServer(
+    leaseID: string,
+    privateWorkspace: boolean,
+    options: AWSQueryOptions,
+  ): Promise<ProviderMachine | undefined> {
+    const matches = await this.describeAllInstances(
+      privateWorkspace
+        ? {
+            "Filter.1.Name": "tag:crabbox",
+            "Filter.1.Value.1": "true",
+            "Filter.2.Name": "tag:created_by",
+            "Filter.2.Value.1": "crabbox",
+            "Filter.3.Name": "tag:crabbox_workspace",
+            "Filter.3.Value.1": "true",
+            "Filter.4.Name": "tag:access_mode",
+            "Filter.4.Value.1": "ssm",
+            "Filter.5.Name": "tag:lease",
+            "Filter.5.Value.1": leaseID,
+            "Filter.6.Name": "instance-state-name",
+            "Filter.6.Value.1": "pending",
+            "Filter.6.Value.2": "running",
+            "Filter.6.Value.3": "stopping",
+            "Filter.6.Value.4": "stopped",
+          }
+        : {
+            "Filter.1.Name": "tag:crabbox",
+            "Filter.1.Value.1": "true",
+            "Filter.2.Name": "tag:created_by",
+            "Filter.2.Value.1": "crabbox",
+            "Filter.3.Name": "tag:lease",
+            "Filter.3.Value.1": leaseID,
+            "Filter.4.Name": "instance-state-name",
+            "Filter.4.Value.1": "pending",
+            "Filter.4.Value.2": "running",
+            "Filter.4.Value.3": "stopping",
+            "Filter.4.Value.4": "stopped",
+          },
+      options,
+    );
     if (matches.length > 1) {
-      throw new Error(`AWS private workspace recovery is ambiguous for lease ${leaseID}`);
+      const kind = privateWorkspace ? "private workspace " : "";
+      throw new AWSLeaseAuthorityError(`AWS ${kind}recovery is ambiguous for lease ${leaseID}`);
     }
     return matches[0];
   }
 
-  private async describeAllInstances(params: Record<string, string>): Promise<ProviderMachine[]> {
+  private async describeAllInstances(
+    params: Record<string, string>,
+    options: AWSQueryOptions = {},
+  ): Promise<ProviderMachine[]> {
     const machines: ProviderMachine[] = [];
     const seenTokens = new Set<string>();
     let nextToken = "";
     const incomplete = `aws DescribeInstances inventory incomplete in ${this.region}`;
     for (let page = 0; page < awsDescribeInstancesMaxPages; page++) {
-      let root: Record<string, unknown>;
+      let described: AWSDescribeInstancesResult;
       try {
         // oxlint-disable-next-line eslint/no-await-in-loop -- EC2 pagination depends on the previous token.
-        root = await this.ec2("DescribeInstances", {
-          ...params,
-          ...(nextToken ? { NextToken: nextToken } : {}),
-        });
+        described = await this.describeInstances(
+          {
+            ...params,
+            ...(nextToken ? { NextToken: nextToken } : {}),
+          },
+          options,
+        );
       } catch (error) {
         if (page === 0) throw error;
-        // oxlint-disable-next-line eslint/preserve-caught-error -- Upstream causes can expose opaque tokens or credentials.
-        throw new Error(`${incomplete}: page ${page + 1} request failed`);
+        throw new AWSLeaseObservationError(`${incomplete}: page ${page + 1} request failed`);
       }
       machines.push(
-        ...reservations(root).flatMap((reservation) =>
+        ...described.reservations.flatMap((reservation) =>
           items(record(reservation["instancesSet"])["item"]).map((instance) =>
             this.withRegion(instanceToMachine(instance)),
           ),
         ),
       );
-      nextToken = asString(root["nextToken"]);
+      nextToken = asString(described.root["nextToken"]);
       if (!nextToken) return machines;
       if (seenTokens.has(nextToken)) {
-        throw new Error(`${incomplete}: repeated pagination token`);
+        throw new AWSLeaseObservationError(`${incomplete}: repeated pagination token`);
       }
       seenTokens.add(nextToken);
     }
-    throw new Error(`${incomplete}: pagination exceeded ${awsDescribeInstancesMaxPages} pages`);
+    throw new AWSLeaseObservationError(
+      `${incomplete}: pagination exceeded ${awsDescribeInstancesMaxPages} pages`,
+    );
   }
 
   async refreshSSHIngress(
@@ -1092,7 +1258,12 @@ export class EC2SpotClient {
     try {
       if (!config.awsPrivate) {
         await diagnostics.measure("key_pair", () =>
-          this.ensureSSHKey(config.providerKey, config.sshPublicKey, leaseID),
+          this.ensureSSHKey(
+            config.providerKey,
+            config.sshPublicKey,
+            leaseID,
+            options.onOwnedKeyCleanupRequired,
+          ),
         );
       }
       const capabilityImageRequired = hasImageRequirements(config.imageRequirements);
@@ -1363,21 +1534,139 @@ export class EC2SpotClient {
     }
   }
 
-  async getServer(instanceID: string): Promise<ProviderMachine> {
-    const root = await this.ec2("DescribeInstances", {
-      "InstanceId.1": instanceID,
+  private async describeInstances(
+    params: Record<string, string>,
+    options: AWSQueryOptions = {},
+  ): Promise<AWSDescribeInstancesResult> {
+    const root = await this.ec2("DescribeInstances", params, {
+      ...options,
+      exactResponseEnvelope: true,
     });
-    for (const reservation of reservations(root)) {
-      for (const instance of items(record(record(reservation)["instancesSet"])["item"])) {
-        return this.withRegion(instanceToMachine(instance));
+    if (!asString(root["requestId"]).trim()) {
+      malformedAWSDescribeInstances("requestId is missing");
+    }
+    if (!Object.hasOwn(root, "reservationSet")) {
+      malformedAWSDescribeInstances("reservationSet is missing");
+    }
+    const reservationSetValue = root["reservationSet"];
+    if (reservationSetValue === "") {
+      return { root, reservations: [] };
+    }
+    if (
+      !reservationSetValue ||
+      typeof reservationSetValue !== "object" ||
+      Array.isArray(reservationSetValue)
+    ) {
+      malformedAWSDescribeInstances("reservationSet is invalid");
+    }
+    const reservationSet = reservationSetValue as Record<string, unknown>;
+    if (!Object.hasOwn(reservationSet, "item")) {
+      malformedAWSDescribeInstances("reservationSet items are missing");
+    }
+    const reservationValues = items(reservationSet["item"]);
+    if (reservationValues.length === 0) {
+      malformedAWSDescribeInstances("reservationSet items are empty");
+    }
+    const validatedReservations: Record<string, unknown>[] = [];
+    for (const reservationValue of reservationValues) {
+      if (
+        !reservationValue ||
+        typeof reservationValue !== "object" ||
+        Array.isArray(reservationValue)
+      ) {
+        malformedAWSDescribeInstances("reservation item is invalid");
+      }
+      const reservation = reservationValue as Record<string, unknown>;
+      if (Object.hasOwn(reservation, "ownerId")) {
+        const ownerID = asString(reservation["ownerId"]).trim();
+        if (!/^\d{12}$/.test(ownerID)) {
+          malformedAWSDescribeInstances("ownerId is invalid");
+        }
+        if (options.expectedAccount && ownerID !== options.expectedAccount) {
+          throw new AWSLeaseAuthorityError(
+            `ownerId ${ownerID} does not match authenticated account ${options.expectedAccount}`,
+          );
+        }
+      }
+      if (!Object.hasOwn(reservation, "instancesSet")) {
+        malformedAWSDescribeInstances("instancesSet is missing");
+      }
+      const instancesSetValue = reservation["instancesSet"];
+      if (
+        !instancesSetValue ||
+        typeof instancesSetValue !== "object" ||
+        Array.isArray(instancesSetValue)
+      ) {
+        malformedAWSDescribeInstances("instancesSet is invalid");
+      }
+      const instancesSet = instancesSetValue as Record<string, unknown>;
+      if (!Object.hasOwn(instancesSet, "item")) {
+        malformedAWSDescribeInstances("instance items are missing");
+      }
+      const instanceValues = items(instancesSet["item"]);
+      if (instanceValues.length === 0) {
+        malformedAWSDescribeInstances("instance items are empty");
+      }
+      for (const instanceValue of instanceValues) {
+        if (!instanceValue || typeof instanceValue !== "object" || Array.isArray(instanceValue)) {
+          malformedAWSDescribeInstances("instance item is invalid");
+        }
+        const instance = instanceValue as Record<string, unknown>;
+        if (!asString(instance["instanceId"]).trim()) {
+          malformedAWSDescribeInstances("instanceId is missing");
+        }
+      }
+      validatedReservations.push(reservation);
+    }
+    return { root, reservations: validatedReservations };
+  }
+
+  private async describeServer(
+    instanceID: string,
+    options: AWSQueryOptions = {},
+  ): Promise<AWSInstanceLookup> {
+    const described = await this.describeInstances({ "InstanceId.1": instanceID }, options);
+    if (described.reservations.length === 0) {
+      return { kind: "absent" };
+    }
+    const instances: ProviderMachine[] = [];
+    for (const reservation of described.reservations) {
+      for (const instanceValue of items(record(reservation["instancesSet"])["item"])) {
+        const instance = record(instanceValue);
+        const returnedID = asString(instance["instanceId"]).trim();
+        if (returnedID !== instanceID) {
+          throw new AWSLeaseAuthorityError(
+            `AWS DescribeInstances returned instance ${returnedID} for ${instanceID}`,
+          );
+        }
+        instances.push(this.withRegion(instanceToMachine(instance)));
       }
     }
-    throw new Error(`aws instance not found: ${instanceID}`);
+    if (instances.length !== 1) {
+      throw new AWSLeaseAuthorityError(
+        `AWS DescribeInstances returned ${instances.length} instances for ${instanceID}`,
+      );
+    }
+    return { kind: "present", server: instances[0]! };
+  }
+
+  async getServer(instanceID: string): Promise<ProviderMachine> {
+    const lookup = await this.describeServer(instanceID);
+    if (lookup.kind === "present") return lookup.server;
+    throw new AWSLeaseObservationError(`aws instance not found: ${instanceID}`);
   }
 
   async findServer(instanceID: string): Promise<ProviderMachine | undefined> {
+    return await this.findServerWith(instanceID, {});
+  }
+
+  private async findServerWith(
+    instanceID: string,
+    options: AWSQueryOptions,
+  ): Promise<ProviderMachine | undefined> {
     try {
-      return await this.getServer(instanceID);
+      const lookup = await this.describeServer(instanceID, options);
+      return lookup.kind === "present" ? lookup.server : undefined;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (isAWSInstanceNotFoundError(message)) return undefined;
@@ -1386,18 +1675,23 @@ export class EC2SpotClient {
   }
 
   async waitForServerVisibility(instanceID: string): Promise<ProviderMachine> {
+    return await this.waitForServerVisibilityWith(instanceID, {});
+  }
+
+  private async waitForServerVisibilityWith(
+    instanceID: string,
+    options: AWSQueryOptions,
+  ): Promise<ProviderMachine> {
     for (const delay of awsInstanceVisibilityBackoffMs) {
-      try {
-        // oxlint-disable-next-line eslint/no-await-in-loop -- newly allocated IDs propagate through EC2 reads.
-        return await this.getServer(instanceID);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (!isAWSInstanceNotFoundError(message)) throw error;
-      }
+      // oxlint-disable-next-line eslint/no-await-in-loop -- newly allocated IDs propagate through EC2 reads.
+      const server = await this.findServerWith(instanceID, options);
+      if (server) return server;
       // oxlint-disable-next-line eslint/no-await-in-loop -- reuse the existing bounded EC2 observation schedule.
       await sleep(delay);
     }
-    return this.getServer(instanceID);
+    const server = await this.findServerWith(instanceID, options);
+    if (server) return server;
+    throw new AWSLeaseObservationError(`aws instance not found: ${instanceID}`);
   }
 
   async waitForServerIP(
@@ -1409,15 +1703,7 @@ export class EC2SpotClient {
     /* oxlint-disable eslint/no-await-in-loop -- Polling serially revalidates lease authority around each provider read. */
     while (Date.now() < deadline) {
       await checkReadiness?.();
-      let server: ProviderMachine | undefined;
-      try {
-        server = await this.getServer(instanceID);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (!isAWSInstanceNotFoundError(message)) {
-          throw error;
-        }
-      }
+      const server = await this.findServer(instanceID);
       await checkReadiness?.();
       const address = server?.host || (allowPrivateAddress ? server?.privateHost : "");
       if (server && address) {
@@ -1559,7 +1845,7 @@ export class EC2SpotClient {
     return await withPricingDeadline(async (signal) => {
       // The quote owns its identity check; its deadline must not abort another
       // operation's cached verification or inherit aws4fetch retry backoff.
-      const client = new EC2SpotClient(this.env, this.region, signal);
+      const client = new EC2SpotClient(this.env, this.region, this.credentialSnapshot, signal);
       const root = await client.ec2("DescribeSpotPriceHistory", {
         "InstanceType.1": instanceType,
         MaxResults: "1",
@@ -1580,36 +1866,44 @@ export class EC2SpotClient {
   }
 
   async terminateServerAndWait(instanceID: string): Promise<void> {
+    await this.terminateServerAndWaitWith(instanceID, {});
+  }
+
+  private async terminateServerAndWaitWith(
+    instanceID: string,
+    options: AWSQueryOptions,
+  ): Promise<void> {
     // NotFound before acknowledgement can be creation propagation, not termination.
-    const terminated = await this.ec2("TerminateInstances", { "InstanceId.1": instanceID });
+    let terminated: Record<string, unknown>;
+    try {
+      terminated = await this.ec2("TerminateInstances", { "InstanceId.1": instanceID }, options);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isAWSInstanceNotFoundError(message)) {
+        throw new AWSLeaseObservationError(message, { cause: error });
+      }
+      throw error;
+    }
     const returnedIDs = items(record(terminated["instancesSet"])["item"])
       .map((item) => asString(record(item)["instanceId"]))
       .filter(Boolean);
     if (!returnedIDs.includes(instanceID)) {
-      throw new Error(`AWS TerminateInstances did not confirm instance ${instanceID}`);
+      throw new AWSLeaseObservationError(
+        `AWS TerminateInstances did not confirm instance ${instanceID}`,
+      );
     }
     for (const delay of awsInstanceVisibilityBackoffMs) {
-      try {
-        // oxlint-disable-next-line eslint/no-await-in-loop -- termination confirmation is ordered.
-        const server = await this.getServer(instanceID);
-        if (server.status === "terminated") return;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (isAWSInstanceNotFoundError(message)) return;
-        throw error;
-      }
+      // oxlint-disable-next-line eslint/no-await-in-loop -- termination confirmation is ordered.
+      const server = await this.findServerWith(instanceID, options);
+      if (!server || server.status === "terminated") return;
       // oxlint-disable-next-line eslint/no-await-in-loop -- wait between termination reads.
       await sleep(delay);
     }
-    try {
-      const server = await this.getServer(instanceID);
-      if (server.status === "terminated") return;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (isAWSInstanceNotFoundError(message)) return;
-      throw error;
-    }
-    throw new Error(`timed out confirming AWS instance termination: ${instanceID}`);
+    const server = await this.findServerWith(instanceID, options);
+    if (!server || server.status === "terminated") return;
+    throw new AWSLeaseObservationError(
+      `timed out confirming AWS instance termination: ${instanceID}`,
+    );
   }
 
   async createDiskSnapshot(
@@ -2088,10 +2382,10 @@ export class EC2SpotClient {
     rootDeviceName: string;
     architecture: string;
   }> {
-    const root = await this.ec2("DescribeInstances", {
+    const described = await this.describeInstances({
       "InstanceId.1": instanceID,
     });
-    for (const reservation of reservations(root)) {
+    for (const reservation of described.reservations) {
       for (const instance of items(record(record(reservation)["instancesSet"])["item"])) {
         const inst = record(instance);
         const rootDevice = asString(inst["rootDeviceName"]) || "/dev/sda1";
@@ -2199,12 +2493,20 @@ export class EC2SpotClient {
   }
 
   async deleteSSHKey(name: string, leaseID: string): Promise<void> {
+    await this.deleteSSHKeyWith(name, leaseID, {});
+  }
+
+  private async deleteSSHKeyWith(
+    name: string,
+    leaseID: string,
+    options: AWSQueryOptions,
+  ): Promise<void> {
     if (name !== providerKeyForLease(leaseID)) {
       return;
     }
     let described: Record<string, unknown>;
     try {
-      described = await this.ec2("DescribeKeyPairs", { "KeyName.1": name });
+      described = await this.ec2("DescribeKeyPairs", { "KeyName.1": name }, options);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes("InvalidKeyPair.NotFound")) {
@@ -2214,14 +2516,15 @@ export class EC2SpotClient {
     }
     const existing = items(record(described["keySet"])["item"]).map(record)[0];
     if (!existing || !providerKeyOwnedByLease(tagMap(existing["tagSet"]), leaseID)) {
-      console.warn(`AWS SSH key cleanup skipped unowned key lease=${leaseID} key=${name}`);
-      return;
+      throw new AWSLeaseAuthorityError(
+        `AWS SSH key ${name} ownership does not match lease ${leaseID}`,
+      );
     }
     const keyPairID = asString(existing["keyPairId"]);
     if (!keyPairID) {
-      throw new Error(`AWS SSH key ${name} is missing its immutable key pair ID`);
+      throw new AWSLeaseAuthorityError(`AWS SSH key ${name} is missing its immutable key pair ID`);
     }
-    await this.ec2("DeleteKeyPair", { KeyPairId: keyPairID }).catch((error: unknown) => {
+    await this.ec2("DeleteKeyPair", { KeyPairId: keyPairID }, options).catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       if (!message.includes("InvalidKeyPair.NotFound")) {
         throw error;
@@ -2235,7 +2538,12 @@ export class EC2SpotClient {
     await this.ec2("CreateTags", params);
   }
 
-  private async ensureSSHKey(name: string, publicKey: string, leaseID: string): Promise<void> {
+  private async ensureSSHKey(
+    name: string,
+    publicKey: string,
+    leaseID: string,
+    onOwnedKeyCleanupRequired?: (existingKey: boolean) => Promise<void>,
+  ): Promise<void> {
     const keyLeaseID = leaseIDForProviderKey(name);
     if (keyLeaseID && keyLeaseID !== leaseID) {
       throw new Error(`aws ssh key ${name} is reserved for lease ${keyLeaseID}`);
@@ -2268,6 +2576,9 @@ export class EC2SpotClient {
       if (leaseOwned && !providerKeyOwnedByLease(tagMap(existing["tagSet"]), leaseID)) {
         throw new Error(`aws ssh key ${name} is not owned by lease ${leaseID}`);
       }
+      if (leaseOwned) {
+        await onOwnedKeyCleanupRequired?.(true);
+      }
       return;
     }
     const params: Record<string, string> = {
@@ -2282,6 +2593,7 @@ export class EC2SpotClient {
     if (leaseOwned) {
       params["TagSpecification.1.Tag.3.Key"] = "lease";
       params["TagSpecification.1.Tag.3.Value"] = leaseID;
+      await onOwnedKeyCleanupRequired?.(false);
     }
     await this.ec2("ImportKeyPair", params);
   }
@@ -2354,7 +2666,7 @@ export class EC2SpotClient {
       }
       let root: Record<string, unknown>;
       try {
-        root = await this.ec2("RunInstances", params, capacityHandoff);
+        root = await this.ec2("RunInstances", params, { capacityHandoff });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (!config.awsPrivate || message.includes("aws RunInstances: http 4")) {
@@ -2899,11 +3211,14 @@ export class EC2SpotClient {
   private async ec2(
     action: string,
     params: Record<string, string>,
-    capacityHandoff?: () => Promise<boolean>,
+    options: AWSQueryOptions = {},
   ): Promise<Record<string, unknown>> {
-    await this.ensureExpectedIdentity();
+    if (!options.skipExpectedIdentity) {
+      await this.ensureExpectedIdentity();
+    }
     const body = new URLSearchParams({ Action: action, Version: ec2Version, ...params });
-    const response = await this.aws.fetch(
+    const { capacityHandoff } = options;
+    const response = await (options.client ?? this.aws).fetch(
       this.endpoint,
       {
         method: "POST",
@@ -2933,8 +3248,36 @@ export class EC2SpotClient {
     if (!response.ok) {
       throw this.awsQueryError(action, response.status, text);
     }
-    const parsed = this.parser.parse(text) as unknown;
+    let parsed: unknown;
+    try {
+      parsed = options.exactResponseEnvelope
+        ? (this.parser.parse(text, true) as unknown)
+        : (this.parser.parse(text) as unknown);
+    } catch (error) {
+      if (options.exactResponseEnvelope) {
+        throw new AWSLeaseObservationError(`malformed AWS ${action} response: invalid XML`, {
+          cause: error,
+        });
+      }
+      throw error;
+    }
     const parsedRecord = record(parsed);
+    if (options.exactResponseEnvelope) {
+      const envelope = `${action}Response`;
+      const payloadRoots = Object.keys(parsedRecord).filter((key) => key !== "?xml");
+      if (payloadRoots.length !== 1 || payloadRoots[0] !== envelope) {
+        throw new AWSLeaseObservationError(
+          `malformed AWS ${action} response: ${envelope} envelope is missing`,
+        );
+      }
+      const root = parsedRecord[envelope];
+      if (!root || typeof root !== "object" || Array.isArray(root)) {
+        throw new AWSLeaseObservationError(
+          `malformed AWS ${action} response: ${envelope} envelope is invalid`,
+        );
+      }
+      return root as Record<string, unknown>;
+    }
     const root = parsedRecord[`${action}Response`] ?? parsedRecord["Response"] ?? parsedRecord;
     return record(root);
   }
@@ -2942,9 +3285,10 @@ export class EC2SpotClient {
   private async sts(
     action: string,
     params: Record<string, string>,
+    client = this.stsClient,
   ): Promise<Record<string, unknown>> {
     const body = new URLSearchParams({ Action: action, Version: stsVersion, ...params });
-    const response = await this.stsClient.fetch(this.stsEndpoint, {
+    const response = await client.fetch(this.stsEndpoint, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded; charset=utf-8" },
       body: body.toString(),
@@ -3142,10 +3486,6 @@ function awsSSHCIDRs(
     );
   }
   return uniqueStrings(cidrs); // Access snapshots can already contain global CIDRs.
-}
-
-function reservations(root: Record<string, unknown>): Record<string, unknown>[] {
-  return items(record(root["reservationSet"])["item"]).map(record);
 }
 
 function instanceToMachine(input: unknown): ProviderMachine {
