@@ -485,49 +485,6 @@ func TestNamespaceInstanceConfigShowRedactsEndpointCredentials(t *testing.T) {
 	}
 }
 
-func TestConfigShowIncludesAgentSandboxRoute(t *testing.T) {
-	cfg := baseConfig()
-	cfg.AgentSandbox.Kubectl = "/opt/bin/kubectl"
-	cfg.AgentSandbox.Kubeconfig = "/tmp/agent-kubeconfig"
-	cfg.AgentSandbox.Context = "agent-context"
-	cfg.AgentSandbox.Namespace = "sandboxes"
-	cfg.AgentSandbox.WarmPool = "linux-pool"
-	cfg.AgentSandbox.Container = "worker"
-	cfg.AgentSandbox.Workdir = "/workspace/my-app"
-	cfg.AgentSandbox.SandboxReadyTimeout = 2 * time.Minute
-	cfg.AgentSandbox.PodReadyTimeout = 45 * time.Second
-	cfg.AgentSandbox.ExecTimeoutSecs = 42
-	cfg.AgentSandbox.DeleteOnRelease = false
-	cfg.AgentSandbox.ForgetMissing = true
-
-	view := configShowView(cfg)
-	agent, ok := view["agentSandbox"].(map[string]any)
-	if !ok || agent["kubeconfig"] != "/tmp/agent-kubeconfig" || agent["warmPool"] != "linux-pool" ||
-		agent["sandboxReadyTimeout"] != "2m0s" || agent["deleteOnRelease"] != false || agent["forgetMissing"] != true {
-		t.Fatalf("agentSandbox view=%#v", agent)
-	}
-	var text bytes.Buffer
-	writeConfigShowText(&text, cfg)
-	for _, want := range []string{
-		"agent_sandbox kubectl=/opt/bin/kubectl",
-		"kubeconfig=/tmp/agent-kubeconfig",
-		"context=agent-context",
-		"namespace=sandboxes",
-		"warm_pool=linux-pool",
-		"container=worker",
-		"workdir=/workspace/my-app",
-		"sandbox_ready_timeout=2m0s",
-		"pod_ready_timeout=45s",
-		"exec_timeout_secs=42",
-		"delete_on_release=false",
-		"forget_missing=true",
-	} {
-		if !strings.Contains(text.String(), want) {
-			t.Fatalf("config show missing %q: %q", want, text.String())
-		}
-	}
-}
-
 func TestConfigShowIncludesCubeSandboxWithoutSecret(t *testing.T) {
 	const secret = "cubesandbox-secret"
 	cfg := baseConfig()
@@ -602,7 +559,7 @@ func TestConfigShowIncludesPhalaConfig(t *testing.T) {
 	}
 }
 
-func TestConfigShowIncludesFirecrackerConfig(t *testing.T) {
+func TestFirecrackerConfigDefaultsPreserveConfiguredValues(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "firecracker"
 	cfg.Firecracker.Binary = "/opt/bin/firecracker"
@@ -620,42 +577,12 @@ func TestConfigShowIncludesFirecrackerConfig(t *testing.T) {
 	cfg.Firecracker.CNIBinDir = "/opt/cni/lab"
 	cfg.Firecracker.LaunchTimeout = 3 * time.Minute
 	cfg.Firecracker.DeleteOnRelease = false
+	before := cfg.Firecracker
 	if err := applyProviderConfigDefaults(&cfg); err != nil {
 		t.Fatal(err)
 	}
-
-	view := configShowView(cfg)
-	firecracker, ok := view["firecracker"].(map[string]any)
-	if !ok || firecracker["binary"] != "/opt/bin/firecracker" || firecracker["jailer"] != "/opt/bin/jailer" ||
-		firecracker["kernel"] != "/var/lib/firecracker/vmlinux" || firecracker["rootfs"] != "/var/lib/firecracker/rootfs.ext4" ||
-		firecracker["workRoot"] != "/workspace/firecracker" || firecracker["cpus"] != 6 ||
-		firecracker["memoryMiB"] != 12288 || firecracker["diskMiB"] != 32768 ||
-		firecracker["cniNetwork"] != "lab-firecracker" || firecracker["launchTimeout"] != "3m0s" ||
-		firecracker["deleteOnRelease"] != false {
-		t.Fatalf("firecracker view=%#v", firecracker)
-	}
-	var text bytes.Buffer
-	writeConfigShowText(&text, cfg)
-	for _, want := range []string{
-		"firecracker binary=/opt/bin/firecracker",
-		"jailer=/opt/bin/jailer",
-		"kernel=/var/lib/firecracker/vmlinux",
-		"rootfs=/var/lib/firecracker/rootfs.ext4",
-		"user=runner",
-		"work_root=/workspace/firecracker",
-		"cpus=6",
-		"memory_mib=12288",
-		"disk_mib=32768",
-		"network=cni",
-		"cni_network=lab-firecracker",
-		"cni_conf_dir=/etc/cni/lab",
-		"cni_bin_dir=/opt/cni/lab",
-		"launch_timeout=3m0s",
-		"delete_on_release=false",
-	} {
-		if !strings.Contains(text.String(), want) {
-			t.Fatalf("config show missing %q: %q", want, text.String())
-		}
+	if cfg.Firecracker != before {
+		t.Fatalf("defaults changed explicitly configured Firecracker values: got %#v, want %#v", cfg.Firecracker, before)
 	}
 }
 

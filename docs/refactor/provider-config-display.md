@@ -69,6 +69,12 @@ projectors retain raw boot selectors and list shapes without resolving images,
 applying SSH defaults or discovering authentication. Selected-provider defaults
 and explicit SSH settings remain the existing configuration loader's concern.
 
+Blacksmith Testbox, Agent Sandbox and Firecracker own all 33 of their existing
+JSON/text fields. Their sections retain the original text positions. Workflow,
+tool and path values remain references only; projection does not consult a CLI,
+cluster or guest assets. Raw JSON strings, empty-only text dashes, duration
+strings, integer sizes/timeouts and explicit booleans keep their existing forms.
+
 ## Remaining migration
 
 The baseline census contains 81 canonical providers: 49 have both value formats,
@@ -81,9 +87,9 @@ sections**. They do not complete the migration. Existing provider projections
 also still need to move out of the parallel JSON map and text formatter so
 their field selection and transformations have one owner.
 
-The Multipass/Tart/Lume, local-container, cloud and VPS cohorts remove fourteen
+The Multipass/Tart/Lume, local-container, cloud, VPS and runtime cohorts remove seventeen
 of the original 49 canonical both-format providers from that legacy
-implementation, leaving 35 in that cohort. The local cohort covers five
+implementation, leaving 32 in that cohort. The local cohort covers five
 identities through four sections because Apple Machine shares Apple Container's
 values. These migrations do not fill any of the missing sections above.
 
