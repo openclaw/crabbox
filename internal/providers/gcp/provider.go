@@ -252,7 +252,7 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 	if req.Config.Coordinator == "" || req.Server.CloudID == "" {
 		return core.NativeCheckpointCapability{}, false
 	}
-	if firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != core.TargetLinux {
+	if shared.FirstNonEmpty(req.Target.TargetOS, req.Config.TargetOS) != core.TargetLinux {
 		return core.NativeCheckpointCapability{}, false
 	}
 	if core.NormalizeCheckpointStrategy(req.Strategy) == core.CheckpointStrategyImage {
@@ -261,17 +261,13 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 	return core.NativeCheckpointCapability{Kind: core.CheckpointKindGCPDisk, RetireSource: true}, true
 }
 
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonEmpty(values...)
-}
-
 func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkRequest) error {
 	cfg := req.Config
 	switch req.Record.Kind {
 	case core.CheckpointKindGCP:
-		cfg.GCPMachineImage = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+		cfg.GCPMachineImage = shared.FirstNonEmpty(req.Record.Resource, req.Record.ImageID)
 	case core.CheckpointKindGCPDisk:
-		cfg.GCPSnapshot = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+		cfg.GCPSnapshot = shared.FirstNonEmpty(req.Record.Resource, req.Record.ImageID)
 	default:
 		return core.Exit(2, "provider=gcp does not support checkpoint kind=%s", req.Record.Kind)
 	}
