@@ -1162,6 +1162,11 @@ own the remote workflow.
 `List` and `Status` should return normalized views. If the provider only offers a
 table or lossy native status shape, keep that parsing inside the backend.
 
+Providers that bound in-flight status requests use `shared.StatusWait` for the
+wait context, deadline, and cancellation precedence. Construct it at the
+adapter's existing resolution boundary; keep ownership validation, readiness,
+terminal states, retry policy, and status-view fields in the adapter.
+
 `Stop` should stop the provider resource, remove local claims, and remove local
 per-resource keys if the backend created them.
 

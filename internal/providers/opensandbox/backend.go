@@ -345,25 +345,15 @@ func (b *openSandboxBackend) Status(ctx context.Context, req core.StatusRequest)
 	if !ok {
 		return core.StatusView{}, core.Exit(4, "opensandbox sandbox %q is not claimed by Crabbox", req.ID)
 	}
-	waitTimeout := req.WaitTimeout
-	if waitTimeout <= 0 {
-		waitTimeout = 5 * time.Minute
-	}
-	deadline := core.ClockNow(b.rt.Clock).Add(waitTimeout)
-	pollCtx := ctx
-	cancel := func() {}
-	if req.Wait {
-		pollCtx, cancel = context.WithTimeout(ctx, waitTimeout)
-	}
-	defer cancel()
+	wait := shared.NewStatusWait(ctx, req, b.rt.Clock, func(id string) error {
+		return core.Exit(5, "timed out waiting for opensandbox sandbox %s to become ready", id)
+	})
+	defer wait.Close()
 	for {
-		sb, getErr := api.GetSandbox(pollCtx, sandboxID)
+		sb, getErr := api.GetSandbox(wait.Context(), sandboxID)
 		if getErr != nil {
-			if req.Wait && errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return core.StatusView{}, core.Exit(5, "timed out waiting for opensandbox sandbox %s to become ready", sandboxID)
-			}
-			if ctx.Err() != nil {
-				return core.StatusView{}, ctx.Err()
+			if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
+				return core.StatusView{}, ctxErr
 			}
 			return core.StatusView{}, getErr
 		}
@@ -373,15 +363,14 @@ func (b *openSandboxBackend) Status(ctx context.Context, req core.StatusRequest)
 		state := strings.ToLower(strings.TrimSpace(sb.State))
 		ready := false
 		if isReadyState(state) {
-			probeCtx, probeCancel := context.WithTimeout(pollCtx, b.statusProbeTimeout())
+			probeCtx, probeCancel := context.WithTimeout(wait.Context(), b.statusProbeTimeout())
 			pingErr := api.PingSandbox(probeCtx, sandboxID)
 			probeCancel()
 			ready = pingErr == nil
-			if pingErr != nil && pollCtx.Err() != nil {
-				if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-					return core.StatusView{}, core.Exit(5, "timed out waiting for opensandbox sandbox %s to become ready", sandboxID)
+			if pingErr != nil {
+				if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
+					return core.StatusView{}, ctxErr
 				}
-				return core.StatusView{}, pollCtx.Err()
 			}
 			if pingErr != nil && !isOpenSandboxReadinessPending(pingErr) {
 				return core.StatusView{}, fmt.Errorf("opensandbox status execd health: %w", pingErr)
@@ -410,16 +399,8 @@ func (b *openSandboxBackend) Status(ctx context.Context, req core.StatusRequest)
 		if isTerminalState(state) {
 			return core.StatusView{}, core.Exit(5, "opensandbox sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
-		if core.ClockNow(b.rt.Clock).After(deadline) {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for opensandbox sandbox %s to become ready", sandboxID)
-		}
-		select {
-		case <-pollCtx.Done():
-			if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return core.StatusView{}, core.Exit(5, "timed out waiting for opensandbox sandbox %s to become ready", sandboxID)
-			}
-			return core.StatusView{}, pollCtx.Err()
-		case <-time.After(b.statusPollInterval()):
+		if err := wait.Next(sandboxID, b.statusPollInterval()); err != nil {
+			return core.StatusView{}, err
 		}
 	}
 }

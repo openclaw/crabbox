@@ -81,30 +81,7 @@ func resolveLeaseID(id string) (string, string, string, core.LeaseClaim, error) 
 }
 
 func resolveCodeSandboxLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
-	claims, err := listCodeSandboxLeaseClaims()
-	if err != nil {
-		return core.LeaseClaim{}, false, err
-	}
-	for _, claim := range claims {
-		if claim.Provider == providerName && claim.LeaseID == identifier {
-			if err := validateCodeSandboxClaimScope(claim); err != nil {
-				return core.LeaseClaim{}, false, err
-			}
-			return claim, true, nil
-		}
-	}
-	slug := core.NormalizeLeaseSlug(identifier)
-	if slug != "" {
-		for _, claim := range claims {
-			if claim.Provider == providerName && core.NormalizeLeaseSlug(claim.Slug) == slug {
-				if err := validateCodeSandboxClaimScope(claim); err != nil {
-					return core.LeaseClaim{}, false, err
-				}
-				return claim, true, nil
-			}
-		}
-	}
-	return core.LeaseClaim{}, false, nil
+	return shared.ResolveScopedLeaseClaim(identifier, providerName, listCodeSandboxLeaseClaims, validateCodeSandboxClaimScope)
 }
 
 func finishResolvedLease(claim core.LeaseClaim) (string, string, string, core.LeaseClaim, error) {
