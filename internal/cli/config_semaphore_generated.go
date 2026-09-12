@@ -32,36 +32,8 @@ type SemaphoreConfigApplied struct {
 
 func (cfg *SemaphoreConfig) applyFile(file *fileSemaphoreConfig) (SemaphoreConfigApplied, error) {
 	var applied SemaphoreConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Host != "" {
-		cfg.Host = file.Host
-		applied.InputAccepted = true
-		applied.Host = true
-	}
-	if file.Token != "" {
-		cfg.Token = file.Token
-		applied.InputAccepted = true
-		applied.Token = true
-	}
-	if file.Project != "" {
-		cfg.Project = file.Project
-		applied.InputAccepted = true
-	}
-	if file.Machine != "" {
-		cfg.Machine = file.Machine
-		applied.InputAccepted = true
-	}
-	if file.OSImage != "" {
-		cfg.OSImage = file.OSImage
-		applied.InputAccepted = true
-	}
-	if file.IdleTimeout != "" {
-		cfg.IdleTimeout = file.IdleTimeout
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "semaphore")
+	return applied, err
 }
 
 func (cfg *SemaphoreConfig) applyEnv() (SemaphoreConfigApplied, error) {

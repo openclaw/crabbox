@@ -46,56 +46,8 @@ type OpenSandboxConfigApplied struct {
 
 func (cfg *OpenSandboxConfig) applyFile(file *fileOpenSandboxConfig) (OpenSandboxConfigApplied, error) {
 	var applied OpenSandboxConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Image != nil {
-		cfg.Image = *file.Image
-		applied.InputAccepted = true
-	}
-	if file.Workdir != nil {
-		cfg.Workdir = *file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.CPU != nil {
-		cfg.CPU = *file.CPU
-		applied.InputAccepted = true
-	}
-	if file.Memory != nil {
-		cfg.Memory = *file.Memory
-		applied.InputAccepted = true
-	}
-	if file.TimeoutSecs != nil {
-		if *file.TimeoutSecs < 0 {
-			return applied, exit(2, "opensandbox timeoutSecs must be non-negative")
-		}
-		cfg.TimeoutSecs = *file.TimeoutSecs
-		applied.InputAccepted = true
-	}
-	if file.ExecTimeoutSecs != nil {
-		if *file.ExecTimeoutSecs < 0 {
-			return applied, exit(2, "opensandbox execTimeoutSecs must be non-negative")
-		}
-		cfg.ExecTimeoutSecs = *file.ExecTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if file.PlatformOS != nil {
-		cfg.PlatformOS = *file.PlatformOS
-		applied.InputAccepted = true
-	}
-	if file.PlatformArch != nil {
-		cfg.PlatformArch = *file.PlatformArch
-		applied.InputAccepted = true
-	}
-	if file.SecureAccess != nil {
-		cfg.SecureAccess = *file.SecureAccess
-		applied.InputAccepted = true
-	}
-	if file.UseServerProxy != nil {
-		cfg.UseServerProxy = *file.UseServerProxy
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "opensandbox")
+	return applied, err
 }
 
 func (cfg *OpenSandboxConfig) applyEnv() (OpenSandboxConfigApplied, error) {

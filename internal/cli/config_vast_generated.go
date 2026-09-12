@@ -59,70 +59,8 @@ type VastConfigApplied struct {
 
 func (cfg *VastConfig) applyFile(file *fileVastConfig) (VastConfigApplied, error) {
 	var applied VastConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.APIURL != "" {
-		cfg.APIURL = file.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if file.InstanceType != "" {
-		cfg.InstanceType = file.InstanceType
-		applied.InputAccepted = true
-		applied.InstanceType = true
-	}
-	if file.GPUName != "" {
-		cfg.GPUName = file.GPUName
-		applied.InputAccepted = true
-	}
-	if file.GPUCount != 0 {
-		cfg.GPUCount = file.GPUCount
-		applied.InputAccepted = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-	}
-	if file.TemplateID != "" {
-		cfg.TemplateID = file.TemplateID
-		applied.InputAccepted = true
-	}
-	if file.Runtype != "" {
-		cfg.Runtype = file.Runtype
-		applied.InputAccepted = true
-	}
-	if file.DiskGB != 0 {
-		cfg.DiskGB = file.DiskGB
-		applied.InputAccepted = true
-	}
-	if file.MaxDphTotal != nil {
-		cfg.MaxDphTotal = *file.MaxDphTotal
-		applied.InputAccepted = true
-	}
-	if file.MinReliability != nil {
-		cfg.MinReliability = *file.MinReliability
-		applied.InputAccepted = true
-	}
-	if file.Order != "" {
-		cfg.Order = file.Order
-		applied.InputAccepted = true
-	}
-	if file.User != "" {
-		cfg.User = file.User
-		applied.InputAccepted = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if file.ReleaseAction != "" {
-		cfg.ReleaseAction = file.ReleaseAction
-		applied.InputAccepted = true
-		applied.ReleaseAction = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "vast")
+	return applied, err
 }
 
 func (cfg *VastConfig) applyEnv() (VastConfigApplied, error) {

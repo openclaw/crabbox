@@ -39,48 +39,8 @@ type NamespaceInstanceConfigApplied struct {
 
 func (cfg *NamespaceInstanceConfig) applyFile(file *fileNamespaceInstanceConfig, trusted bool) (NamespaceInstanceConfigApplied, error) {
 	var applied NamespaceInstanceConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.CLIPath != "" {
-		cfg.CLIPath = file.CLIPath
-		applied.InputAccepted = true
-		applied.CLIPath = true
-	}
-	if file.MachineType != "" {
-		cfg.MachineType = file.MachineType
-		applied.InputAccepted = true
-	}
-	if file.Duration != "" {
-		if applyLeaseDuration(&cfg.Duration, file.Duration) {
-			applied.InputAccepted = true
-		}
-	}
-	if trusted && file.Region != "" {
-		cfg.Region = file.Region
-		applied.InputAccepted = true
-	}
-	if trusted && file.Endpoint != "" {
-		cfg.Endpoint = file.Endpoint
-		applied.InputAccepted = true
-	}
-	if trusted && file.Keychain != "" {
-		cfg.Keychain = file.Keychain
-		applied.InputAccepted = true
-	}
-	if trusted && file.Volumes != nil {
-		cfg.Volumes = append([]string(nil), (file.Volumes)...)
-		applied.InputAccepted = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-	}
-	if file.Bare != nil {
-		cfg.Bare = *file.Bare
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "namespaceInstance")
+	return applied, err
 }
 
 func (cfg *NamespaceInstanceConfig) applyEnv() (NamespaceInstanceConfigApplied, error) {

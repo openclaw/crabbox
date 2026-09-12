@@ -40,56 +40,8 @@ type BlaxelConfigApplied struct {
 
 func (cfg *BlaxelConfig) applyFile(file *fileBlaxelConfig, trusted bool) (BlaxelConfigApplied, error) {
 	var applied BlaxelConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.APIURL != "" {
-		cfg.APIURL = file.APIURL
-		applied.InputAccepted = true
-	}
-	if trusted && file.Workspace != "" {
-		cfg.Workspace = file.Workspace
-		applied.InputAccepted = true
-	}
-	if file.Region != "" {
-		cfg.Region = file.Region
-		applied.InputAccepted = true
-	}
-	if file.Image != nil {
-		cfg.Image = *file.Image
-		applied.InputAccepted = true
-	}
-	if file.MemoryMB != nil {
-		if *file.MemoryMB < 0 {
-			return applied, exit(2, "blaxel memoryMB must be non-negative")
-		}
-		cfg.MemoryMB = *file.MemoryMB
-		applied.InputAccepted = true
-	}
-	if file.TTL != "" {
-		cfg.TTL = file.TTL
-		applied.InputAccepted = true
-	}
-	if file.IdleTTL != "" {
-		cfg.IdleTTL = file.IdleTTL
-		applied.InputAccepted = true
-	}
-	if file.Workdir != nil {
-		cfg.Workdir = *file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.ExecTimeoutSecs != nil {
-		if *file.ExecTimeoutSecs < 0 {
-			return applied, exit(2, "blaxel execTimeoutSecs must be non-negative")
-		}
-		cfg.ExecTimeoutSecs = *file.ExecTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if file.ForgetMissing != nil {
-		cfg.ForgetMissing = *file.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "blaxel")
+	return applied, err
 }
 
 func (cfg *BlaxelConfig) applyEnv() (BlaxelConfigApplied, error) {

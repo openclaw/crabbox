@@ -56,66 +56,8 @@ type KubeVirtConfigApplied struct {
 
 func (cfg *KubeVirtConfig) applyFile(file *fileKubeVirtConfig, trusted bool) (KubeVirtConfigApplied, error) {
 	var applied KubeVirtConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Kubectl != "" {
-		cfg.Kubectl = file.Kubectl
-		applied.InputAccepted = true
-		applied.Kubectl = true
-	}
-	if file.Virtctl != "" {
-		cfg.Virtctl = file.Virtctl
-		applied.InputAccepted = true
-		applied.Virtctl = true
-	}
-	if file.Kubeconfig != "" {
-		cfg.Kubeconfig = file.Kubeconfig
-		applied.InputAccepted = true
-		applied.Kubeconfig = true
-	}
-	if file.Context != "" {
-		cfg.Context = file.Context
-		applied.InputAccepted = true
-	}
-	if file.Namespace != "" {
-		cfg.Namespace = file.Namespace
-		applied.InputAccepted = true
-	}
-	if file.Template != "" {
-		cfg.Template = file.Template
-		applied.InputAccepted = true
-		applied.Template = true
-	}
-	if file.SSHUser != "" {
-		cfg.SSHUser = file.SSHUser
-		applied.InputAccepted = true
-	}
-	if trusted && file.SSHKey != "" {
-		cfg.SSHKey = file.SSHKey
-		applied.InputAccepted = true
-		applied.SSHKey = true
-	}
-	if file.SSHPublicKey != "" {
-		cfg.SSHPublicKey = file.SSHPublicKey
-		applied.InputAccepted = true
-		applied.SSHPublicKey = true
-	}
-	if file.SSHPort != "" {
-		cfg.SSHPort = file.SSHPort
-		applied.InputAccepted = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if file.DeleteOnRelease != nil {
-		cfg.DeleteOnRelease = *file.DeleteOnRelease
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "kubevirt")
+	return applied, err
 }
 
 func (cfg *KubeVirtConfig) applyEnv() (KubeVirtConfigApplied, error) {

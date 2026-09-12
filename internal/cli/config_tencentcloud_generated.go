@@ -36,62 +36,8 @@ type TencentCloudConfigApplied struct {
 
 func (cfg *TencentCloudConfig) applyFile(file *fileTencentCloudConfig, trusted bool) (TencentCloudConfigApplied, error) {
 	var applied TencentCloudConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Region != "" {
-		cfg.Region = file.Region
-		applied.InputAccepted = true
-		applied.Region = true
-	}
-	if file.Zone != "" {
-		cfg.Zone = file.Zone
-		applied.InputAccepted = true
-		applied.Zone = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if file.Type != "" {
-		cfg.Type = file.Type
-		applied.InputAccepted = true
-		applied.Type = true
-	}
-	if file.VPCID != "" {
-		cfg.VPCID = file.VPCID
-		applied.InputAccepted = true
-	}
-	if file.SubnetID != "" {
-		cfg.SubnetID = file.SubnetID
-		applied.InputAccepted = true
-	}
-	if file.SecurityGroupID != "" {
-		cfg.SecurityGroupID = file.SecurityGroupID
-		applied.InputAccepted = true
-	}
-	if len(file.SSHCIDRs) > 0 {
-		cfg.SSHCIDRs = file.SSHCIDRs
-		applied.InputAccepted = true
-	}
-	if file.RootGB > 0 {
-		cfg.RootGB = file.RootGB
-		applied.InputAccepted = true
-	}
-	if file.InternetChargeType != "" {
-		cfg.InternetChargeType = file.InternetChargeType
-		applied.InputAccepted = true
-	}
-	if file.InternetMaxBandwidthOut > 0 {
-		cfg.InternetMaxBandwidthOut = file.InternetMaxBandwidthOut
-		applied.InputAccepted = true
-	}
-	if trusted && file.APIEndpoint != "" {
-		cfg.APIEndpoint = file.APIEndpoint
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "tencentcloud")
+	return applied, err
 }
 
 func (cfg *TencentCloudConfig) applyEnv() (TencentCloudConfigApplied, error) {

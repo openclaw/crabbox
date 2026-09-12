@@ -73,80 +73,8 @@ type FirecrackerConfigApplied struct {
 
 func (cfg *FirecrackerConfig) applyFile(file *fileFirecrackerConfig, trusted bool) (FirecrackerConfigApplied, error) {
 	var applied FirecrackerConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.Binary != "" {
-		cfg.Binary = file.Binary
-		applied.InputAccepted = true
-		applied.Binary = true
-	}
-	if trusted && file.Jailer != "" {
-		cfg.Jailer = file.Jailer
-		applied.InputAccepted = true
-		applied.Jailer = true
-	}
-	if trusted && file.Kernel != "" {
-		cfg.Kernel = file.Kernel
-		applied.InputAccepted = true
-		applied.Kernel = true
-	}
-	if trusted && file.RootFS != "" {
-		cfg.RootFS = file.RootFS
-		applied.InputAccepted = true
-		applied.RootFS = true
-	}
-	if file.User != "" {
-		cfg.User = file.User
-		applied.InputAccepted = true
-		applied.User = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if file.CPUs != nil {
-		cfg.CPUs = *file.CPUs
-		applied.InputAccepted = true
-	}
-	if file.MemoryMiB != nil {
-		cfg.MemoryMiB = *file.MemoryMiB
-		applied.InputAccepted = true
-	}
-	if file.DiskMiB != nil {
-		cfg.DiskMiB = *file.DiskMiB
-		applied.InputAccepted = true
-	}
-	if trusted && file.Network != "" {
-		cfg.Network = file.Network
-		applied.InputAccepted = true
-	}
-	if trusted && file.CNINetwork != "" {
-		cfg.CNINetwork = file.CNINetwork
-		applied.InputAccepted = true
-	}
-	if trusted && file.CNIConfDir != "" {
-		cfg.CNIConfDir = file.CNIConfDir
-		applied.InputAccepted = true
-		applied.CNIConfDir = true
-	}
-	if trusted && file.CNIBinDir != "" {
-		cfg.CNIBinDir = file.CNIBinDir
-		applied.InputAccepted = true
-		applied.CNIBinDir = true
-	}
-	if file.LaunchTimeout != "" {
-		if applyLeaseDuration(&cfg.LaunchTimeout, file.LaunchTimeout) {
-			applied.InputAccepted = true
-		}
-	}
-	if file.DeleteOnRelease != nil {
-		cfg.DeleteOnRelease = *file.DeleteOnRelease
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "firecracker")
+	return applied, err
 }
 
 func (cfg *FirecrackerConfig) applyEnv() (FirecrackerConfigApplied, error) {

@@ -60,78 +60,8 @@ type SealosDevboxConfigApplied struct {
 
 func (cfg *SealosDevboxConfig) applyFile(file *fileSealosDevboxConfig, trusted bool) (SealosDevboxConfigApplied, error) {
 	var applied SealosDevboxConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.Kubectl != "" {
-		cfg.Kubectl = file.Kubectl
-		applied.InputAccepted = true
-		applied.Kubectl = true
-	}
-	if trusted && file.Kubeconfig != "" {
-		cfg.Kubeconfig = file.Kubeconfig
-		applied.InputAccepted = true
-		applied.Kubeconfig = true
-	}
-	if trusted && file.Context != "" {
-		cfg.Context = file.Context
-		applied.InputAccepted = true
-	}
-	if trusted && file.Namespace != "" {
-		cfg.Namespace = file.Namespace
-		applied.InputAccepted = true
-	}
-	if trusted && file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-	}
-	if trusted && file.TemplateID != "" {
-		cfg.TemplateID = file.TemplateID
-		applied.InputAccepted = true
-	}
-	if trusted && file.CPU != "" {
-		cfg.CPU = file.CPU
-		applied.InputAccepted = true
-	}
-	if trusted && file.Memory != "" {
-		cfg.Memory = file.Memory
-		applied.InputAccepted = true
-	}
-	if trusted && file.StorageLimit != "" {
-		cfg.StorageLimit = file.StorageLimit
-		applied.InputAccepted = true
-	}
-	if trusted && file.Network != "" {
-		cfg.Network = file.Network
-		applied.InputAccepted = true
-	}
-	if trusted && file.SSHGatewayHost != "" {
-		cfg.SSHGatewayHost = file.SSHGatewayHost
-		applied.InputAccepted = true
-	}
-	if trusted && file.SSHGatewayPort != "" {
-		cfg.SSHGatewayPort = file.SSHGatewayPort
-		applied.InputAccepted = true
-	}
-	if trusted && file.SSHUser != "" {
-		cfg.SSHUser = file.SSHUser
-		applied.InputAccepted = true
-	}
-	if trusted && file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if trusted && file.NodeHost != "" {
-		cfg.NodeHost = file.NodeHost
-		applied.InputAccepted = true
-	}
-	if file.DeleteOnRelease != nil {
-		cfg.DeleteOnRelease = *file.DeleteOnRelease
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "sealos-devbox")
+	return applied, err
 }
 
 func (cfg *SealosDevboxConfig) applyEnv() (SealosDevboxConfigApplied, error) {

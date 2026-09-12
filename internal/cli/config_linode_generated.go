@@ -23,32 +23,8 @@ type LinodeConfigApplied struct {
 
 func (cfg *LinodeConfig) applyFile(file *fileLinodeConfig) (LinodeConfigApplied, error) {
 	var applied LinodeConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Region != "" {
-		cfg.Region = file.Region
-		applied.InputAccepted = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if file.Type != "" {
-		cfg.Type = file.Type
-		applied.InputAccepted = true
-		applied.Type = true
-	}
-	if file.FirewallID != "" {
-		cfg.FirewallID = file.FirewallID
-		applied.InputAccepted = true
-	}
-	if len(file.SSHCIDRs) > 0 {
-		cfg.SSHCIDRs = file.SSHCIDRs
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "linode")
+	return applied, err
 }
 
 func (cfg *LinodeConfig) applyEnv() (LinodeConfigApplied, error) {

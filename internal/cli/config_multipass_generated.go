@@ -46,46 +46,8 @@ type MultipassConfigApplied struct {
 
 func (cfg *MultipassConfig) applyFile(file *fileMultipassConfig) (MultipassConfigApplied, error) {
 	var applied MultipassConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.CLIPath != "" {
-		cfg.CLIPath = file.CLIPath
-		applied.InputAccepted = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if file.User != "" {
-		cfg.User = file.User
-		applied.InputAccepted = true
-		applied.User = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if file.CPUs > 0 {
-		cfg.CPUs = file.CPUs
-		applied.InputAccepted = true
-	}
-	if file.Memory != "" {
-		cfg.Memory = file.Memory
-		applied.InputAccepted = true
-	}
-	if file.Disk != "" {
-		cfg.Disk = file.Disk
-		applied.InputAccepted = true
-	}
-	if file.LaunchTimeout != "" {
-		if applyLeaseDuration(&cfg.LaunchTimeout, file.LaunchTimeout) {
-			applied.InputAccepted = true
-		}
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "multipass")
+	return applied, err
 }
 
 func (cfg *MultipassConfig) applyEnv() (MultipassConfigApplied, error) {

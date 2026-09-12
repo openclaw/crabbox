@@ -38,32 +38,8 @@ type E2BConfigApplied struct {
 
 func (cfg *E2BConfig) applyFile(file *fileE2BConfig) (E2BConfigApplied, error) {
 	var applied E2BConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.APIURL != "" {
-		cfg.APIURL = file.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if file.Domain != "" {
-		cfg.Domain = file.Domain
-		applied.InputAccepted = true
-		applied.Domain = true
-	}
-	if file.Template != "" {
-		cfg.Template = file.Template
-		applied.InputAccepted = true
-	}
-	if file.Workdir != "" {
-		cfg.Workdir = file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.User != "" {
-		cfg.User = file.User
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "e2b")
+	return applied, err
 }
 
 func (cfg *E2BConfig) applyEnv() (E2BConfigApplied, error) {

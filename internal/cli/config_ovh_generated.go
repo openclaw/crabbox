@@ -34,31 +34,8 @@ type OVHConfigApplied struct {
 
 func (cfg *OVHConfig) applyFile(file *fileOVHConfig, trusted bool) (OVHConfigApplied, error) {
 	var applied OVHConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.Endpoint != "" {
-		cfg.Endpoint = file.Endpoint
-		applied.InputAccepted = true
-	}
-	if file.ProjectID != "" {
-		cfg.ProjectID = file.ProjectID
-		applied.InputAccepted = true
-	}
-	if file.Region != "" {
-		cfg.Region = file.Region
-		applied.InputAccepted = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if file.Flavor != "" {
-		cfg.Flavor = file.Flavor
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "ovh")
+	return applied, err
 }
 
 func (cfg *OVHConfig) applyEnv() (OVHConfigApplied, error) {

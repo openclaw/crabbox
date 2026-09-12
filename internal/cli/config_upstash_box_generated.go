@@ -37,31 +37,8 @@ type UpstashBoxConfigApplied struct {
 
 func (cfg *UpstashBoxConfig) applyFile(file *fileUpstashBoxConfig) (UpstashBoxConfigApplied, error) {
 	var applied UpstashBoxConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.BaseURL != "" {
-		cfg.BaseURL = file.BaseURL
-		applied.InputAccepted = true
-		applied.BaseURL = true
-	}
-	if file.Runtime != "" {
-		cfg.Runtime = file.Runtime
-		applied.InputAccepted = true
-	}
-	if file.Size != "" {
-		cfg.Size = file.Size
-		applied.InputAccepted = true
-	}
-	if file.Workdir != "" {
-		cfg.Workdir = file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.KeepAlive != nil {
-		cfg.KeepAlive = *file.KeepAlive
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "upstash-box")
+	return applied, err
 }
 
 func (cfg *UpstashBoxConfig) applyEnv() (UpstashBoxConfigApplied, error) {

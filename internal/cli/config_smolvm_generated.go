@@ -43,39 +43,8 @@ type SmolvmConfigApplied struct {
 
 func (cfg *SmolvmConfig) applyFile(file *fileSmolvmConfig) (SmolvmConfigApplied, error) {
 	var applied SmolvmConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.BaseURL != "" {
-		cfg.BaseURL = file.BaseURL
-		applied.InputAccepted = true
-		applied.BaseURL = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-	}
-	if file.Workdir != "" {
-		cfg.Workdir = file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.CPUs > 0 {
-		cfg.CPUs = file.CPUs
-		applied.InputAccepted = true
-	}
-	if file.MemoryMB > 0 {
-		cfg.MemoryMB = file.MemoryMB
-		applied.InputAccepted = true
-	}
-	if file.Network != "" {
-		cfg.Network = file.Network
-		applied.InputAccepted = true
-	}
-	if file.Keep != nil {
-		cfg.Keep = *file.Keep
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "smolvm")
+	return applied, err
 }
 
 func (cfg *SmolvmConfig) applyEnv() (SmolvmConfigApplied, error) {

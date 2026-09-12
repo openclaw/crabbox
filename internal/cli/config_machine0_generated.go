@@ -50,58 +50,8 @@ type Machine0ConfigApplied struct {
 
 func (cfg *Machine0Config) applyFile(file *fileMachine0Config) (Machine0ConfigApplied, error) {
 	var applied Machine0ConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.CLIPath != "" {
-		cfg.CLIPath = file.CLIPath
-		applied.InputAccepted = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-	}
-	if file.ImageVersion != nil {
-		cfg.ImageVersion = *file.ImageVersion
-		applied.InputAccepted = true
-	}
-	if file.DesktopImage != "" {
-		cfg.DesktopImage = file.DesktopImage
-		applied.InputAccepted = true
-	}
-	if file.Size != "" {
-		cfg.Size = file.Size
-		applied.InputAccepted = true
-		applied.Size = true
-	}
-	if file.Region != "" {
-		cfg.Region = file.Region
-		applied.InputAccepted = true
-	}
-	if file.Key != "" {
-		cfg.Key = file.Key
-		applied.InputAccepted = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if file.ReleasePolicy != "" {
-		cfg.ReleasePolicy = file.ReleasePolicy
-		applied.InputAccepted = true
-	}
-	if file.CreateTimeout != "" {
-		if applyLeaseDuration(&cfg.CreateTimeout, file.CreateTimeout) {
-			applied.InputAccepted = true
-		}
-	}
-	if file.PollInterval != "" {
-		if applyLeaseDuration(&cfg.PollInterval, file.PollInterval) {
-			applied.InputAccepted = true
-		}
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "machine0")
+	return applied, err
 }
 
 func (cfg *Machine0Config) applyEnv() (Machine0ConfigApplied, error) {

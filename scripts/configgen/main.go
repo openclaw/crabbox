@@ -597,59 +597,12 @@ func generate(s schema, source string) ([]byte, error) {
 			break
 		}
 	}
-	p("func (cfg *%s) applyFile(file *file%s%s) %s {\n%sif file == nil { return %snil }\n", s.name, s.name, trustedParameter, resultType, reportInit, resultPrefix)
-	for _, f := range s.fields {
-		for _, binding := range f.fileBindings() {
-			member := "file." + binding.member
-			value := member
-			var conditions []string
-			if f.trustedFileOnly {
-				conditions = append(conditions, "trusted")
-			}
-			if !f.fileStorageValue {
-				conditions = append(conditions, member+" != nil")
-				value = "*" + member
-			}
-			if f.fileIgnoreEmpty || f.kind == "time.Duration" {
-				conditions = append(conditions, value+" != \"\"")
-			}
-			if f.fileIntPositive || f.fileFloatPositive {
-				conditions = append(conditions, value+" > 0")
-			}
-			if f.fileIntNonzero {
-				conditions = append(conditions, value+" != 0")
-			}
-			if f.fileListNonemptyRaw || f.fileListNonemptyNormalized {
-				conditions = append(conditions, "len("+value+") > 0")
-			}
-			if f.fileListRaw && f.fileStorageValue {
-				conditions = append(conditions, value+" != nil")
-			}
-			p("if %s {\n", strings.Join(conditions, " && "))
-			if f.nonnegative && !f.fileIntPositive && !f.fileIntPresent && !f.fileIntNonzero {
-				p("if %s < 0 { return %sexit(2, %q) }\n", value, resultPrefix, s.provider+" "+f.key+" must be non-negative")
-			}
-			if f.kind == "[]string" {
-				if f.fileListRaw {
-					value = "append([]string(nil), (" + value + ")...)"
-				} else if !f.fileListNonemptyRaw {
-					value = "normalizeList(" + value + ")"
-				}
-			}
-			if f.kind == "time.Duration" {
-				p("if applyLeaseDuration(&cfg.%s, %s) { applied.InputAccepted = true }\n", f.name, value)
-			} else if f.kind == "*bool" {
-				p("value := %s\ncfg.%s = &value\napplied.InputAccepted = true\n", value, f.name)
-			} else {
-				p("cfg.%s = %s\napplied.InputAccepted = true\n", f.name, value)
-			}
-			if f.reportApplied {
-				p("applied.%s = true\n", f.name)
-			}
-			p("}\n")
-		}
+	fileTrust := "true"
+	if trustedParameter != "" {
+		fileTrust = "trusted"
 	}
-	p("return %snil\n}\n\n", resultPrefix)
+	p("func (cfg *%s) applyFile(file *file%s%s) %s {\n%s", s.name, s.name, trustedParameter, resultType, reportInit)
+	p("err := applyConfigFileOverlay(cfg, file, &applied, %s, %q)\nreturn applied, err\n}\n\n", fileTrust, s.provider)
 	emitEnv := func(name string, start, end int) {
 		p("func (cfg *%s) %s() %s {\n%s", s.name, name, resultType, reportInit)
 		p("err := applyConfigEnvironment(cfg, &applied, %d, %d)\nreturn applied, err\n}\n\n", start, end)

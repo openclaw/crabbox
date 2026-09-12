@@ -36,34 +36,8 @@ type ModalConfigApplied struct {
 
 func (cfg *ModalConfig) applyFile(file *fileModalConfig, trusted bool) (ModalConfigApplied, error) {
 	var applied ModalConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.App != "" {
-		cfg.App = file.App
-		applied.InputAccepted = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-	}
-	if file.Workdir != "" {
-		cfg.Workdir = file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.Python != "" {
-		cfg.Python = file.Python
-		applied.InputAccepted = true
-	}
-	if trusted && file.Environment != "" {
-		cfg.Environment = file.Environment
-		applied.InputAccepted = true
-	}
-	if trusted && file.Secrets != nil {
-		cfg.Secrets = append([]string(nil), (*file.Secrets)...)
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "modal")
+	return applied, err
 }
 
 func (cfg *ModalConfig) applyEnv() (ModalConfigApplied, error) {

@@ -32,37 +32,8 @@ type CloudflareSandboxConfigApplied struct {
 
 func (cfg *CloudflareSandboxConfig) applyFile(file *fileCloudflareSandboxConfig, trusted bool) (CloudflareSandboxConfigApplied, error) {
 	var applied CloudflareSandboxConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.BridgeURL != nil {
-		cfg.BridgeURL = *file.BridgeURL
-		applied.InputAccepted = true
-	}
-	if trusted && file.BridgeURLConfigAlias != nil {
-		cfg.BridgeURL = *file.BridgeURLConfigAlias
-		applied.InputAccepted = true
-	}
-	if trusted && file.Token != nil {
-		cfg.Token = *file.Token
-		applied.InputAccepted = true
-	}
-	if file.Workdir != nil {
-		cfg.Workdir = *file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.ExecTimeoutSecs != nil {
-		if *file.ExecTimeoutSecs < 0 {
-			return applied, exit(2, "cloudflare-sandbox execTimeoutSecs must be non-negative")
-		}
-		cfg.ExecTimeoutSecs = *file.ExecTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if file.ForgetMissing != nil {
-		cfg.ForgetMissing = *file.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "cloudflare-sandbox")
+	return applied, err
 }
 
 func (cfg *CloudflareSandboxConfig) applyEnv() (CloudflareSandboxConfigApplied, error) {

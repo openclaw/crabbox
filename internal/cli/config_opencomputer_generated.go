@@ -32,34 +32,8 @@ type OpenComputerConfigApplied struct {
 
 func (cfg *OpenComputerConfig) applyFile(file *fileOpenComputerConfig) (OpenComputerConfigApplied, error) {
 	var applied OpenComputerConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Workdir != "" {
-		cfg.Workdir = file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.CPU != nil {
-		cfg.CPU = *file.CPU
-		applied.InputAccepted = true
-	}
-	if file.MemoryMB != nil {
-		cfg.MemoryMB = *file.MemoryMB
-		applied.InputAccepted = true
-	}
-	if file.TimeoutSecs != nil {
-		cfg.TimeoutSecs = *file.TimeoutSecs
-		applied.InputAccepted = true
-	}
-	if file.ExecTimeoutSecs != nil {
-		cfg.ExecTimeoutSecs = *file.ExecTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if file.Burst != nil {
-		cfg.Burst = *file.Burst
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "opencomputer")
+	return applied, err
 }
 
 func (cfg *OpenComputerConfig) applyEnv() (OpenComputerConfigApplied, error) {

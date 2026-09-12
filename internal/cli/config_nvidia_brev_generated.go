@@ -48,60 +48,8 @@ type NvidiaBrevConfigApplied struct {
 
 func (cfg *NvidiaBrevConfig) applyFile(file *fileNvidiaBrevConfig, trusted bool) (NvidiaBrevConfigApplied, error) {
 	var applied NvidiaBrevConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.CLI != "" {
-		cfg.CLI = file.CLI
-		applied.InputAccepted = true
-	}
-	if file.Org != "" {
-		cfg.Org = file.Org
-		applied.InputAccepted = true
-	}
-	if file.Type != "" {
-		cfg.Type = file.Type
-		applied.InputAccepted = true
-	}
-	if file.GPUName != "" {
-		cfg.GPUName = file.GPUName
-		applied.InputAccepted = true
-	}
-	if file.Provider != "" {
-		cfg.Provider = file.Provider
-		applied.InputAccepted = true
-	}
-	if file.Mode != "" {
-		cfg.Mode = file.Mode
-		applied.InputAccepted = true
-	}
-	if file.Launchable != "" {
-		cfg.Launchable = file.Launchable
-		applied.InputAccepted = true
-	}
-	if file.StartupScript != "" {
-		cfg.StartupScript = file.StartupScript
-		applied.InputAccepted = true
-	}
-	if file.ReleaseAction != "" {
-		cfg.ReleaseAction = file.ReleaseAction
-		applied.InputAccepted = true
-		applied.ReleaseAction = true
-	}
-	if file.Target != "" {
-		cfg.Target = file.Target
-		applied.InputAccepted = true
-	}
-	if file.User != "" {
-		cfg.User = file.User
-		applied.InputAccepted = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "nvidia-brev")
+	return applied, err
 }
 
 func (cfg *NvidiaBrevConfig) applyEnv() (NvidiaBrevConfigApplied, error) {

@@ -29,23 +29,8 @@ type RailwayConfigApplied struct {
 
 func (cfg *RailwayConfig) applyFile(file *fileRailwayConfig) (RailwayConfigApplied, error) {
 	var applied RailwayConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.APIURL != "" {
-		cfg.APIURL = file.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if file.ProjectID != "" {
-		cfg.ProjectID = file.ProjectID
-		applied.InputAccepted = true
-	}
-	if file.EnvironmentID != "" {
-		cfg.EnvironmentID = file.EnvironmentID
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "railway")
+	return applied, err
 }
 
 func (cfg *RailwayConfig) applyEnv() (RailwayConfigApplied, error) {

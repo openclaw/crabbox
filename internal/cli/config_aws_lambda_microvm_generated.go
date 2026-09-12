@@ -36,42 +36,8 @@ type AWSLambdaMicroVMConfigApplied struct {
 
 func (cfg *AWSLambdaMicroVMConfig) applyFile(file *fileAWSLambdaMicroVMConfig) (AWSLambdaMicroVMConfigApplied, error) {
 	var applied AWSLambdaMicroVMConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if file.ImageVersion != "" {
-		cfg.ImageVersion = file.ImageVersion
-		applied.InputAccepted = true
-		applied.ImageVersion = true
-	}
-	if file.ExecutionRoleARN != "" {
-		cfg.ExecutionRoleARN = file.ExecutionRoleARN
-		applied.InputAccepted = true
-		applied.ExecutionRoleARN = true
-	}
-	if file.Workdir != "" {
-		cfg.Workdir = file.Workdir
-		applied.InputAccepted = true
-		applied.Workdir = true
-	}
-	if file.IngressConnectors != nil {
-		cfg.IngressConnectors = append([]string(nil), (*file.IngressConnectors)...)
-		applied.InputAccepted = true
-	}
-	if file.EgressConnectors != nil {
-		cfg.EgressConnectors = append([]string(nil), (*file.EgressConnectors)...)
-		applied.InputAccepted = true
-	}
-	if file.ForgetMissing != nil {
-		cfg.ForgetMissing = *file.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "awsLambdaMicroVM")
+	return applied, err
 }
 
 func (cfg *AWSLambdaMicroVMConfig) applyEnv() (AWSLambdaMicroVMConfigApplied, error) {

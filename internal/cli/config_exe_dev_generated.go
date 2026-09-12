@@ -42,47 +42,8 @@ type ExeDevConfigApplied struct {
 
 func (cfg *ExeDevConfig) applyFile(file *fileExeDevConfig) (ExeDevConfigApplied, error) {
 	var applied ExeDevConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.ControlHost != "" {
-		cfg.ControlHost = file.ControlHost
-		applied.InputAccepted = true
-		applied.ControlHost = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-	}
-	if file.CPUs > 0 {
-		cfg.CPUs = file.CPUs
-		applied.InputAccepted = true
-	}
-	if file.Memory != "" {
-		cfg.Memory = file.Memory
-		applied.InputAccepted = true
-	}
-	if file.Disk != "" {
-		cfg.Disk = file.Disk
-		applied.InputAccepted = true
-	}
-	if file.Command != "" {
-		cfg.Command = file.Command
-		applied.InputAccepted = true
-	}
-	if file.User != "" {
-		cfg.User = file.User
-		applied.InputAccepted = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-	}
-	if file.NoEmail != nil {
-		cfg.NoEmail = *file.NoEmail
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "exe-dev")
+	return applied, err
 }
 
 func (cfg *ExeDevConfig) applyEnv() (ExeDevConfigApplied, error) {

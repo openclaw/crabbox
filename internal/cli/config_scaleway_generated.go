@@ -42,46 +42,8 @@ type ScalewayConfigApplied struct {
 
 func (cfg *ScalewayConfig) applyFile(file *fileScalewayConfig) (ScalewayConfigApplied, error) {
 	var applied ScalewayConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Region != "" {
-		cfg.Region = file.Region
-		applied.InputAccepted = true
-		applied.Region = true
-	}
-	if file.Zone != "" {
-		cfg.Zone = file.Zone
-		applied.InputAccepted = true
-		applied.Zone = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if file.Type != "" {
-		cfg.Type = file.Type
-		applied.InputAccepted = true
-		applied.Type = true
-	}
-	if file.ProjectID != "" {
-		cfg.ProjectID = file.ProjectID
-		applied.InputAccepted = true
-	}
-	if file.OrganizationID != "" {
-		cfg.OrganizationID = file.OrganizationID
-		applied.InputAccepted = true
-	}
-	if file.SecurityGroup != "" {
-		cfg.SecurityGroup = file.SecurityGroup
-		applied.InputAccepted = true
-	}
-	if len(file.SSHCIDRs) > 0 {
-		cfg.SSHCIDRs = file.SSHCIDRs
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "scaleway")
+	return applied, err
 }
 
 func (cfg *ScalewayConfig) applyEnv() (ScalewayConfigApplied, error) {

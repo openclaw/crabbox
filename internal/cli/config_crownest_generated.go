@@ -33,33 +33,8 @@ type CrownestConfigApplied struct {
 
 func (cfg *CrownestConfig) applyFile(file *fileCrownestConfig, trusted bool) (CrownestConfigApplied, error) {
 	var applied CrownestConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.APIURL != "" {
-		cfg.APIURL = file.APIURL
-		applied.InputAccepted = true
-	}
-	if file.ProjectID != nil {
-		cfg.ProjectID = *file.ProjectID
-		applied.InputAccepted = true
-	}
-	if file.Template != nil {
-		cfg.Template = *file.Template
-		applied.InputAccepted = true
-	}
-	if file.TimeoutSecs != nil {
-		if *file.TimeoutSecs < 0 {
-			return applied, exit(2, "crownest timeoutSecs must be non-negative")
-		}
-		cfg.TimeoutSecs = *file.TimeoutSecs
-		applied.InputAccepted = true
-	}
-	if file.ForgetMissing != nil {
-		cfg.ForgetMissing = *file.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "crownest")
+	return applied, err
 }
 
 func (cfg *CrownestConfig) applyEnv() (CrownestConfigApplied, error) {

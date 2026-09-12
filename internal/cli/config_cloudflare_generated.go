@@ -29,24 +29,8 @@ type CloudflareConfigApplied struct {
 
 func (cfg *CloudflareConfig) applyFile(file *fileCloudflareConfig) (CloudflareConfigApplied, error) {
 	var applied CloudflareConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.APIURL != "" {
-		cfg.APIURL = file.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if file.Token != "" {
-		cfg.Token = file.Token
-		applied.InputAccepted = true
-		applied.Token = true
-	}
-	if file.Workdir != "" {
-		cfg.Workdir = file.Workdir
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "cloudflare")
+	return applied, err
 }
 
 func (cfg *CloudflareConfig) applyEnv() (CloudflareConfigApplied, error) {

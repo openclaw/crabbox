@@ -41,40 +41,8 @@ type OrgoConfigApplied struct {
 
 func (cfg *OrgoConfig) applyFile(file *fileOrgoConfig, trusted bool) (OrgoConfigApplied, error) {
 	var applied OrgoConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.APIKey != "" {
-		cfg.APIKey = file.APIKey
-		applied.InputAccepted = true
-		applied.APIKey = true
-	}
-	if file.APIBase != "" {
-		cfg.APIBase = file.APIBase
-		applied.InputAccepted = true
-		applied.APIBase = true
-	}
-	if file.WorkspaceID != "" {
-		cfg.WorkspaceID = file.WorkspaceID
-		applied.InputAccepted = true
-	}
-	if file.RAMGB > 0 {
-		cfg.RAMGB = file.RAMGB
-		applied.InputAccepted = true
-	}
-	if file.CPUs > 0 {
-		cfg.CPUs = file.CPUs
-		applied.InputAccepted = true
-	}
-	if file.DiskGB > 0 {
-		cfg.DiskGB = file.DiskGB
-		applied.InputAccepted = true
-	}
-	if file.Resolution != "" {
-		cfg.Resolution = file.Resolution
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "orgo")
+	return applied, err
 }
 
 func (cfg *OrgoConfig) applyEnv() (OrgoConfigApplied, error) {

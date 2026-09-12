@@ -41,42 +41,8 @@ type MorphConfigApplied struct {
 
 func (cfg *MorphConfig) applyFile(file *fileMorphConfig) (MorphConfigApplied, error) {
 	var applied MorphConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.APIKey != "" {
-		cfg.APIKey = file.APIKey
-		applied.InputAccepted = true
-		applied.APIKey = true
-	}
-	if file.APIURL != "" {
-		cfg.APIURL = file.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if file.Snapshot != "" {
-		cfg.Snapshot = file.Snapshot
-		applied.InputAccepted = true
-	}
-	if file.SSHGatewayHost != "" {
-		cfg.SSHGatewayHost = file.SSHGatewayHost
-		applied.InputAccepted = true
-		applied.SSHGatewayHost = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-	}
-	if file.DeleteOnRelease != nil {
-		cfg.DeleteOnRelease = *file.DeleteOnRelease
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	if file.WakeOnSSH != nil {
-		cfg.WakeOnSSH = *file.WakeOnSSH
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "morph")
+	return applied, err
 }
 
 func (cfg *MorphConfig) applyEnv() (MorphConfigApplied, error) {

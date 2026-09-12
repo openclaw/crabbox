@@ -49,63 +49,8 @@ type TensorlakeConfigApplied struct {
 
 func (cfg *TensorlakeConfig) applyFile(file *fileTensorlakeConfig) (TensorlakeConfigApplied, error) {
 	var applied TensorlakeConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.APIURL != "" {
-		cfg.APIURL = file.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if file.CLIPath != "" {
-		cfg.CLIPath = file.CLIPath
-		applied.InputAccepted = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-	}
-	if file.Snapshot != "" {
-		cfg.Snapshot = file.Snapshot
-		applied.InputAccepted = true
-	}
-	if file.OrganizationID != "" {
-		cfg.OrganizationID = file.OrganizationID
-		applied.InputAccepted = true
-	}
-	if file.ProjectID != "" {
-		cfg.ProjectID = file.ProjectID
-		applied.InputAccepted = true
-	}
-	if file.Namespace != "" {
-		cfg.Namespace = file.Namespace
-		applied.InputAccepted = true
-	}
-	if file.Workdir != "" {
-		cfg.Workdir = file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.CPUs > 0 {
-		cfg.CPUs = file.CPUs
-		applied.InputAccepted = true
-	}
-	if file.MemoryMB > 0 {
-		cfg.MemoryMB = file.MemoryMB
-		applied.InputAccepted = true
-	}
-	if file.DiskMB > 0 {
-		cfg.DiskMB = file.DiskMB
-		applied.InputAccepted = true
-	}
-	if file.TimeoutSecs > 0 {
-		cfg.TimeoutSecs = file.TimeoutSecs
-		applied.InputAccepted = true
-	}
-	if file.NoInternet != nil {
-		cfg.NoInternet = *file.NoInternet
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "tensorlake")
+	return applied, err
 }
 
 func (cfg *TensorlakeConfig) applyEnv() (TensorlakeConfigApplied, error) {

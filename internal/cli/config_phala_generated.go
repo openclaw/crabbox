@@ -37,38 +37,8 @@ type PhalaConfigApplied struct {
 
 func (cfg *PhalaConfig) applyFile(file *filePhalaConfig, trusted bool) (PhalaConfigApplied, error) {
 	var applied PhalaConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.CLIPath != "" {
-		cfg.CLIPath = file.CLIPath
-		applied.InputAccepted = true
-		applied.CLIPath = true
-	}
-	if file.InstanceType != "" {
-		cfg.InstanceType = file.InstanceType
-		applied.InputAccepted = true
-		applied.InstanceType = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-	}
-	if trusted && file.NodeID != "" {
-		cfg.NodeID = file.NodeID
-		applied.InputAccepted = true
-	}
-	if trusted && file.Compose != "" {
-		cfg.Compose = file.Compose
-		applied.InputAccepted = true
-		applied.Compose = true
-	}
-	if file.Attest != nil {
-		value := *file.Attest
-		cfg.Attest = &value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "phala")
+	return applied, err
 }
 
 func (cfg *PhalaConfig) applyEnv() (PhalaConfigApplied, error) {

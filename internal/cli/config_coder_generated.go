@@ -44,53 +44,8 @@ type CoderConfigApplied struct {
 
 func (cfg *CoderConfig) applyFile(file *fileCoderConfig) (CoderConfigApplied, error) {
 	var applied CoderConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.CLIPath != "" {
-		cfg.CLIPath = file.CLIPath
-		applied.InputAccepted = true
-		applied.CLIPath = true
-	}
-	if file.Template != "" {
-		cfg.Template = file.Template
-		applied.InputAccepted = true
-	}
-	if file.Preset != "" {
-		cfg.Preset = file.Preset
-		applied.InputAccepted = true
-	}
-	if file.WorkspacePrefix != "" {
-		cfg.WorkspacePrefix = file.WorkspacePrefix
-		applied.InputAccepted = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if file.DeleteOnRelease != nil {
-		cfg.DeleteOnRelease = *file.DeleteOnRelease
-		applied.InputAccepted = true
-	}
-	if file.Wait != "" {
-		cfg.Wait = file.Wait
-		applied.InputAccepted = true
-	}
-	if file.UseParameterDefaults != nil {
-		cfg.UseParameterDefaults = *file.UseParameterDefaults
-		applied.InputAccepted = true
-	}
-	if len(file.Parameters) > 0 {
-		cfg.Parameters = normalizeList(file.Parameters)
-		applied.InputAccepted = true
-	}
-	if file.RichParameterFile != "" {
-		cfg.RichParameterFile = file.RichParameterFile
-		applied.InputAccepted = true
-		applied.RichParameterFile = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "coder")
+	return applied, err
 }
 
 func (cfg *CoderConfig) applyEnv() (CoderConfigApplied, error) {

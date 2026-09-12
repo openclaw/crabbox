@@ -30,26 +30,8 @@ type FreestyleConfigApplied struct {
 
 func (cfg *FreestyleConfig) applyFile(file *fileFreestyleConfig, trusted bool) (FreestyleConfigApplied, error) {
 	var applied FreestyleConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.APIURL != "" {
-		cfg.APIURL = file.APIURL
-		applied.InputAccepted = true
-	}
-	if file.Workdir != "" {
-		cfg.Workdir = file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.VCPUs > 0 {
-		cfg.VCPUs = file.VCPUs
-		applied.InputAccepted = true
-	}
-	if file.MemoryGB > 0 {
-		cfg.MemoryGB = file.MemoryGB
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "freestyle")
+	return applied, err
 }
 
 func (cfg *FreestyleConfig) applyEnv() (FreestyleConfigApplied, error) {

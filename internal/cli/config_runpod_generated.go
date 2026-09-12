@@ -42,43 +42,8 @@ type RunpodConfigApplied struct {
 
 func (cfg *RunpodConfig) applyFile(file *fileRunpodConfig) (RunpodConfigApplied, error) {
 	var applied RunpodConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.APIURL != "" {
-		cfg.APIURL = file.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if file.CloudType != "" {
-		cfg.CloudType = file.CloudType
-		applied.InputAccepted = true
-	}
-	if file.InstanceID != "" {
-		cfg.InstanceID = file.InstanceID
-		applied.InputAccepted = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-	}
-	if file.TemplateID != "" {
-		cfg.TemplateID = file.TemplateID
-		applied.InputAccepted = true
-	}
-	if file.DiskGB != 0 {
-		cfg.DiskGB = file.DiskGB
-		applied.InputAccepted = true
-	}
-	if file.User != "" {
-		cfg.User = file.User
-		applied.InputAccepted = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "runpod")
+	return applied, err
 }
 
 func (cfg *RunpodConfig) applyEnv() (RunpodConfigApplied, error) {

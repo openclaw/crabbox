@@ -47,63 +47,8 @@ type CodeSandboxConfigApplied struct {
 
 func (cfg *CodeSandboxConfig) applyFile(file *fileCodeSandboxConfig, trusted bool) (CodeSandboxConfigApplied, error) {
 	var applied CodeSandboxConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.TemplateID != nil {
-		cfg.TemplateID = *file.TemplateID
-		applied.InputAccepted = true
-	}
-	if file.Workdir != nil {
-		cfg.Workdir = *file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.VMTier != nil {
-		cfg.VMTier = *file.VMTier
-		applied.InputAccepted = true
-	}
-	if file.Privacy != nil {
-		cfg.Privacy = *file.Privacy
-		applied.InputAccepted = true
-	}
-	if file.HibernationTimeoutSecs != nil {
-		if *file.HibernationTimeoutSecs < 0 {
-			return applied, exit(2, "codesandbox hibernationTimeoutSecs must be non-negative")
-		}
-		cfg.HibernationTimeoutSecs = *file.HibernationTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if file.AutomaticWakeupHTTP != nil {
-		cfg.AutomaticWakeupHTTP = *file.AutomaticWakeupHTTP
-		applied.InputAccepted = true
-	}
-	if file.AutomaticWakeupWebSocket != nil {
-		cfg.AutomaticWakeupWebSocket = *file.AutomaticWakeupWebSocket
-		applied.InputAccepted = true
-	}
-	if trusted && file.BridgeCommand != nil {
-		cfg.BridgeCommand = *file.BridgeCommand
-		applied.InputAccepted = true
-	}
-	if trusted && file.SDKPackage != nil {
-		cfg.SDKPackage = *file.SDKPackage
-		applied.InputAccepted = true
-	}
-	if file.DoctorListLimit != nil {
-		if *file.DoctorListLimit < 0 {
-			return applied, exit(2, "codesandbox doctorListLimit must be non-negative")
-		}
-		cfg.DoctorListLimit = *file.DoctorListLimit
-		applied.InputAccepted = true
-	}
-	if file.OperationTimeoutSecs != nil {
-		if *file.OperationTimeoutSecs < 0 {
-			return applied, exit(2, "codesandbox operationTimeoutSecs must be non-negative")
-		}
-		cfg.OperationTimeoutSecs = *file.OperationTimeoutSecs
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "codesandbox")
+	return applied, err
 }
 
 func (cfg *CodeSandboxConfig) applyEnv() (CodeSandboxConfigApplied, error) {

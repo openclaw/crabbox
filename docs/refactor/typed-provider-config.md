@@ -32,7 +32,7 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_multipass.go`, and `internal/cli/config_machine0.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
-source-admitted YAML input fields, compiled defaults, file overlays,
+source-admitted YAML input fields, compiled defaults, overlay entry points,
 and storage, registration, and presence-based application for admitted flags.
 
 Environment application has one runtime owner in
@@ -43,6 +43,13 @@ and partial results on errors. Split environment passes count schema fields,
 excluding runtime-only state, so provider normalization between passes stays
 in place. The generator still rejects unsupported field types and tag modes;
 the engine does not infer additional sources or normalize provider values.
+
+File overlays similarly use `internal/cli/config_file_overlay.go`. The engine
+applies the schema's trust grants before reading each admitted DTO field, then
+preserves its empty-value, numeric, duration, list-copy and alias-order rules.
+It returns accepted fields before the first error without modifying the DTO.
+Provider-specific admission wrappers still run before this mechanical overlay;
+path expansion and credential selection still run in their existing order.
 
 Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config

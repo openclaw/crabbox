@@ -51,65 +51,8 @@ type AgentSandboxConfigApplied struct {
 
 func (cfg *AgentSandboxConfig) applyFile(file *fileAgentSandboxConfig, trusted bool) (AgentSandboxConfigApplied, error) {
 	var applied AgentSandboxConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.Kubectl != "" {
-		cfg.Kubectl = file.Kubectl
-		applied.InputAccepted = true
-	}
-	if trusted && file.Kubeconfig != "" {
-		cfg.Kubeconfig = file.Kubeconfig
-		applied.InputAccepted = true
-		applied.Kubeconfig = true
-	}
-	if trusted && file.Context != "" {
-		cfg.Context = file.Context
-		applied.InputAccepted = true
-	}
-	if trusted && file.Namespace != "" {
-		cfg.Namespace = file.Namespace
-		applied.InputAccepted = true
-	}
-	if trusted && file.WarmPool != "" {
-		cfg.WarmPool = file.WarmPool
-		applied.InputAccepted = true
-	}
-	if trusted && file.Container != "" {
-		cfg.Container = file.Container
-		applied.InputAccepted = true
-	}
-	if trusted && file.Workdir != "" {
-		cfg.Workdir = file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.SandboxReadyTimeout != "" {
-		if applyLeaseDuration(&cfg.SandboxReadyTimeout, file.SandboxReadyTimeout) {
-			applied.InputAccepted = true
-		}
-	}
-	if file.PodReadyTimeout != "" {
-		if applyLeaseDuration(&cfg.PodReadyTimeout, file.PodReadyTimeout) {
-			applied.InputAccepted = true
-		}
-	}
-	if file.ExecTimeoutSecs != nil {
-		if *file.ExecTimeoutSecs < 0 {
-			return applied, exit(2, "agentSandbox execTimeoutSecs must be non-negative")
-		}
-		cfg.ExecTimeoutSecs = *file.ExecTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if file.DeleteOnRelease != nil {
-		cfg.DeleteOnRelease = *file.DeleteOnRelease
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	if file.ForgetMissing != nil {
-		cfg.ForgetMissing = *file.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "agentSandbox")
+	return applied, err
 }
 
 func (cfg *AgentSandboxConfig) applyEnv() (AgentSandboxConfigApplied, error) {

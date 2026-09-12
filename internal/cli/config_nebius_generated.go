@@ -54,66 +54,8 @@ type NebiusConfigApplied struct {
 
 func (cfg *NebiusConfig) applyFile(file *fileNebiusConfig, trusted bool) (NebiusConfigApplied, error) {
 	var applied NebiusConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.CLI != "" {
-		cfg.CLI = file.CLI
-		applied.InputAccepted = true
-	}
-	if trusted && file.Profile != "" {
-		cfg.Profile = file.Profile
-		applied.InputAccepted = true
-	}
-	if file.ParentID != "" {
-		cfg.ParentID = file.ParentID
-		applied.InputAccepted = true
-	}
-	if file.SubnetID != "" {
-		cfg.SubnetID = file.SubnetID
-		applied.InputAccepted = true
-	}
-	if file.Platform != "" {
-		cfg.Platform = file.Platform
-		applied.InputAccepted = true
-	}
-	if file.Preset != "" {
-		cfg.Preset = file.Preset
-		applied.InputAccepted = true
-	}
-	if file.ImageFamily != "" {
-		cfg.ImageFamily = file.ImageFamily
-		applied.InputAccepted = true
-	}
-	if file.DiskType != "" {
-		cfg.DiskType = file.DiskType
-		applied.InputAccepted = true
-	}
-	if file.DiskSizeGiB > 0 {
-		cfg.DiskSizeGiB = file.DiskSizeGiB
-		applied.InputAccepted = true
-	}
-	if file.User != "" {
-		cfg.User = file.User
-		applied.InputAccepted = true
-	}
-	if file.PublicIP != "" {
-		cfg.PublicIP = file.PublicIP
-		applied.InputAccepted = true
-	}
-	if len(file.SecurityGroupIDs) > 0 {
-		cfg.SecurityGroupIDs = file.SecurityGroupIDs
-		applied.InputAccepted = true
-	}
-	if trusted && file.ServiceAccountID != "" {
-		cfg.ServiceAccountID = file.ServiceAccountID
-		applied.InputAccepted = true
-	}
-	if file.RecoveryPolicy != "" {
-		cfg.RecoveryPolicy = file.RecoveryPolicy
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "nebius")
+	return applied, err
 }
 
 func (cfg *NebiusConfig) applyEnv() (NebiusConfigApplied, error) {

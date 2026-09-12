@@ -35,30 +35,8 @@ type LumeConfigApplied struct {
 
 func (cfg *LumeConfig) applyFile(file *fileLumeConfig, trusted bool) (LumeConfigApplied, error) {
 	var applied LumeConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.CLIPath != "" {
-		cfg.CLIPath = file.CLIPath
-		applied.InputAccepted = true
-	}
-	if trusted && file.Base != "" {
-		cfg.Base = file.Base
-		applied.InputAccepted = true
-	}
-	if trusted && file.Storage != "" {
-		cfg.Storage = file.Storage
-		applied.InputAccepted = true
-	}
-	if trusted && file.User != "" {
-		cfg.User = file.User
-		applied.InputAccepted = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "lume")
+	return applied, err
 }
 
 func (cfg *LumeConfig) applyEnv() (LumeConfigApplied, error) {

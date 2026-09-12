@@ -62,86 +62,8 @@ type IncusConfigApplied struct {
 
 func (cfg *IncusConfig) applyFile(file *fileIncusConfig) (IncusConfigApplied, error) {
 	var applied IncusConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Remote != "" {
-		cfg.Remote = file.Remote
-		applied.InputAccepted = true
-	}
-	if file.Project != "" {
-		cfg.Project = file.Project
-		applied.InputAccepted = true
-	}
-	if file.Address != "" {
-		cfg.Address = file.Address
-		applied.InputAccepted = true
-	}
-	if file.Socket != "" {
-		cfg.Socket = file.Socket
-		applied.InputAccepted = true
-		applied.Socket = true
-	}
-	if file.InstanceType != "" {
-		cfg.InstanceType = file.InstanceType
-		applied.InputAccepted = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-	}
-	if file.Profile != "" {
-		cfg.Profile = file.Profile
-		applied.InputAccepted = true
-	}
-	if file.User != "" {
-		cfg.User = file.User
-		applied.InputAccepted = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-	}
-	if file.DeleteOnRelease != nil {
-		cfg.DeleteOnRelease = *file.DeleteOnRelease
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	if file.StartTimeout != "" {
-		if applyLeaseDuration(&cfg.StartTimeout, file.StartTimeout) {
-			applied.InputAccepted = true
-		}
-	}
-	if file.LaunchPort != "" {
-		cfg.LaunchPort = file.LaunchPort
-		applied.InputAccepted = true
-	}
-	if file.ProxyListenHost != "" {
-		cfg.ProxyListenHost = file.ProxyListenHost
-		applied.InputAccepted = true
-	}
-	if file.ProxyListenPort != "" {
-		cfg.ProxyListenPort = file.ProxyListenPort
-		applied.InputAccepted = true
-	}
-	if file.ProxyDevice != "" {
-		cfg.ProxyDevice = file.ProxyDevice
-		applied.InputAccepted = true
-	}
-	if file.TLSServerCert != "" {
-		cfg.TLSServerCert = file.TLSServerCert
-		applied.InputAccepted = true
-		applied.TLSServerCert = true
-	}
-	if file.InsecureTLS != nil {
-		cfg.InsecureTLS = *file.InsecureTLS
-		applied.InputAccepted = true
-	}
-	if file.RemoteImageServer != "" {
-		cfg.RemoteImageServer = file.RemoteImageServer
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "incus")
+	return applied, err
 }
 
 func (cfg *IncusConfig) applyEnv() (IncusConfigApplied, error) {

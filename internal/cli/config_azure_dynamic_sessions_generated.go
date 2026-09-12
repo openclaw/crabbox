@@ -34,31 +34,8 @@ type AzureDynamicSessionsConfigApplied struct {
 
 func (cfg *AzureDynamicSessionsConfig) applyFile(file *fileAzureDynamicSessionsConfig) (AzureDynamicSessionsConfigApplied, error) {
 	var applied AzureDynamicSessionsConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Endpoint != "" {
-		cfg.Endpoint = file.Endpoint
-		applied.InputAccepted = true
-		applied.Endpoint = true
-	}
-	if file.Pool != "" {
-		cfg.Pool = file.Pool
-		applied.InputAccepted = true
-	}
-	if file.APIVersion != "" {
-		cfg.APIVersion = file.APIVersion
-		applied.InputAccepted = true
-	}
-	if file.Workdir != "" {
-		cfg.Workdir = file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.TimeoutSecs > 0 {
-		cfg.TimeoutSecs = file.TimeoutSecs
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "azure-dynamic-sessions")
+	return applied, err
 }
 
 func (cfg *AzureDynamicSessionsConfig) applyEnv() (AzureDynamicSessionsConfigApplied, error) {

@@ -27,22 +27,8 @@ type AnthropicSRTConfigApplied struct {
 
 func (cfg *AnthropicSRTConfig) applyFile(file *fileAnthropicSRTConfig) (AnthropicSRTConfigApplied, error) {
 	var applied AnthropicSRTConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.CLIPath != "" {
-		cfg.CLIPath = file.CLIPath
-		applied.InputAccepted = true
-	}
-	if file.Settings != nil {
-		cfg.Settings = *file.Settings
-		applied.InputAccepted = true
-	}
-	if file.Debug != nil {
-		cfg.Debug = *file.Debug
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "anthropic-sandbox-runtime")
+	return applied, err
 }
 
 func (cfg *AnthropicSRTConfig) applyEnv() (AnthropicSRTConfigApplied, error) {

@@ -47,80 +47,8 @@ type VercelSandboxConfigApplied struct {
 
 func (cfg *VercelSandboxConfig) applyFile(file *fileVercelSandboxConfig) (VercelSandboxConfigApplied, error) {
 	var applied VercelSandboxConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Runtime != nil {
-		cfg.Runtime = *file.Runtime
-		applied.InputAccepted = true
-	}
-	if file.Workdir != nil {
-		cfg.Workdir = *file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.ProjectID != nil {
-		cfg.ProjectID = *file.ProjectID
-		applied.InputAccepted = true
-	}
-	if file.TeamID != nil {
-		cfg.TeamID = *file.TeamID
-		applied.InputAccepted = true
-	}
-	if file.Scope != nil {
-		cfg.Scope = *file.Scope
-		applied.InputAccepted = true
-	}
-	if file.VCPUs != nil {
-		cfg.VCPUs = *file.VCPUs
-		applied.InputAccepted = true
-	}
-	if file.TimeoutSecs != nil {
-		if *file.TimeoutSecs < 0 {
-			return applied, exit(2, "vercel-sandbox timeoutSecs must be non-negative")
-		}
-		cfg.TimeoutSecs = *file.TimeoutSecs
-		applied.InputAccepted = true
-	}
-	if file.ExecTimeoutSecs != nil {
-		if *file.ExecTimeoutSecs < 0 {
-			return applied, exit(2, "vercel-sandbox execTimeoutSecs must be non-negative")
-		}
-		cfg.ExecTimeoutSecs = *file.ExecTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if file.Persistent != nil {
-		cfg.Persistent = *file.Persistent
-		applied.InputAccepted = true
-	}
-	if file.Snapshot != nil {
-		cfg.Snapshot = *file.Snapshot
-		applied.InputAccepted = true
-	}
-	if file.SnapshotMode != nil {
-		cfg.SnapshotMode = *file.SnapshotMode
-		applied.InputAccepted = true
-	}
-	if file.NetworkPolicy != nil {
-		cfg.NetworkPolicy = *file.NetworkPolicy
-		applied.InputAccepted = true
-	}
-	if file.NetworkAllow != nil {
-		cfg.NetworkAllow = normalizeList(*file.NetworkAllow)
-		applied.InputAccepted = true
-	}
-	if file.NetworkDeny != nil {
-		cfg.NetworkDeny = normalizeList(*file.NetworkDeny)
-		applied.InputAccepted = true
-	}
-	if file.Ports != nil {
-		cfg.Ports = normalizeList(*file.Ports)
-		applied.InputAccepted = true
-	}
-	if file.ForgetMissing != nil {
-		cfg.ForgetMissing = *file.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "vercel-sandbox")
+	return applied, err
 }
 
 func (cfg *VercelSandboxConfig) applyEnv() (VercelSandboxConfigApplied, error) {

@@ -21,27 +21,8 @@ type DigitalOceanConfigApplied struct {
 
 func (cfg *DigitalOceanConfig) applyFile(file *fileDigitalOceanConfig) (DigitalOceanConfigApplied, error) {
 	var applied DigitalOceanConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Region != "" {
-		cfg.Region = file.Region
-		applied.InputAccepted = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if file.VPCUUID != "" {
-		cfg.VPCUUID = file.VPCUUID
-		applied.InputAccepted = true
-	}
-	if len(file.SSHCIDRs) > 0 {
-		cfg.SSHCIDRs = file.SSHCIDRs
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "digitalocean")
+	return applied, err
 }
 
 func (cfg *DigitalOceanConfig) applyEnv() (DigitalOceanConfigApplied, error) {

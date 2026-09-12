@@ -35,30 +35,8 @@ type CloudRunSandboxConfigApplied struct {
 
 func (cfg *CloudRunSandboxConfig) applyFile(file *fileCloudRunSandboxConfig) (CloudRunSandboxConfigApplied, error) {
 	var applied CloudRunSandboxConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.CLIPath != "" {
-		cfg.CLIPath = file.CLIPath
-		applied.InputAccepted = true
-	}
-	if file.Workdir != "" {
-		cfg.Workdir = file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.AllowEgress != nil {
-		cfg.AllowEgress = *file.AllowEgress
-		applied.InputAccepted = true
-	}
-	if file.Write != nil {
-		cfg.Write = *file.Write
-		applied.InputAccepted = true
-	}
-	if file.Rootfs != "" {
-		cfg.Rootfs = file.Rootfs
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "cloud-run-sandbox")
+	return applied, err
 }
 
 func (cfg *CloudRunSandboxConfig) applyEnv() (CloudRunSandboxConfigApplied, error) {

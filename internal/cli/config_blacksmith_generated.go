@@ -26,35 +26,8 @@ type BlacksmithConfigApplied struct {
 
 func (cfg *BlacksmithConfig) applyFile(file *fileBlacksmithConfig) (BlacksmithConfigApplied, error) {
 	var applied BlacksmithConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Org != "" {
-		cfg.Org = file.Org
-		applied.InputAccepted = true
-	}
-	if file.Workflow != "" {
-		cfg.Workflow = file.Workflow
-		applied.InputAccepted = true
-	}
-	if file.Job != "" {
-		cfg.Job = file.Job
-		applied.InputAccepted = true
-	}
-	if file.Ref != "" {
-		cfg.Ref = file.Ref
-		applied.InputAccepted = true
-	}
-	if file.IdleTimeout != "" {
-		if applyLeaseDuration(&cfg.IdleTimeout, file.IdleTimeout) {
-			applied.InputAccepted = true
-		}
-	}
-	if file.Debug != nil {
-		cfg.Debug = *file.Debug
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "blacksmith-testbox")
+	return applied, err
 }
 
 func (cfg *BlacksmithConfig) applyEnvPrefix() (BlacksmithConfigApplied, error) {

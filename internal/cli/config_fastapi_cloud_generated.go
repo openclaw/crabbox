@@ -29,23 +29,8 @@ type FastAPICloudConfigApplied struct {
 
 func (cfg *FastAPICloudConfig) applyFile(file *fileFastAPICloudConfig) (FastAPICloudConfigApplied, error) {
 	var applied FastAPICloudConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.APIURL != "" {
-		cfg.APIURL = file.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if file.AppID != "" {
-		cfg.AppID = file.AppID
-		applied.InputAccepted = true
-	}
-	if file.TeamID != "" {
-		cfg.TeamID = file.TeamID
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "fastapi-cloud")
+	return applied, err
 }
 
 func (cfg *FastAPICloudConfig) applyEnv() (FastAPICloudConfigApplied, error) {

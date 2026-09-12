@@ -41,46 +41,8 @@ type NamespaceConfigApplied struct {
 
 func (cfg *NamespaceConfig) applyFile(file *fileNamespaceConfig) (NamespaceConfigApplied, error) {
 	var applied NamespaceConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-	}
-	if file.Size != "" {
-		cfg.Size = file.Size
-		applied.InputAccepted = true
-		applied.Size = true
-	}
-	if file.Repository != "" {
-		cfg.Repository = file.Repository
-		applied.InputAccepted = true
-	}
-	if file.Site != "" {
-		cfg.Site = file.Site
-		applied.InputAccepted = true
-	}
-	if file.VolumeSizeGB > 0 {
-		cfg.VolumeSizeGB = file.VolumeSizeGB
-		applied.InputAccepted = true
-	}
-	if file.AutoStopIdleTimeout != "" {
-		if applyLeaseDuration(&cfg.AutoStopIdleTimeout, file.AutoStopIdleTimeout) {
-			applied.InputAccepted = true
-		}
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if file.DeleteOnRelease != nil {
-		cfg.DeleteOnRelease = *file.DeleteOnRelease
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "namespace")
+	return applied, err
 }
 
 func (cfg *NamespaceConfig) applyEnv() (NamespaceConfigApplied, error) {

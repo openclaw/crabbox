@@ -51,77 +51,8 @@ type CuaConfigApplied struct {
 
 func (cfg *CuaConfig) applyFile(file *fileCuaConfig, trusted bool) (CuaConfigApplied, error) {
 	var applied CuaConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Image != nil {
-		cfg.Image = *file.Image
-		applied.InputAccepted = true
-	}
-	if file.Kind != nil {
-		cfg.Kind = *file.Kind
-		applied.InputAccepted = true
-	}
-	if file.Region != nil {
-		cfg.Region = *file.Region
-		applied.InputAccepted = true
-	}
-	if file.Workdir != nil {
-		cfg.Workdir = *file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.VCPUs != nil {
-		if *file.VCPUs < 0 {
-			return applied, exit(2, "cua vcpus must be non-negative")
-		}
-		cfg.VCPUs = *file.VCPUs
-		applied.InputAccepted = true
-	}
-	if file.MemoryMB != nil {
-		if *file.MemoryMB < 0 {
-			return applied, exit(2, "cua memoryMB must be non-negative")
-		}
-		cfg.MemoryMB = *file.MemoryMB
-		applied.InputAccepted = true
-	}
-	if file.DiskGB != nil {
-		if *file.DiskGB < 0 {
-			return applied, exit(2, "cua diskGB must be non-negative")
-		}
-		cfg.DiskGB = *file.DiskGB
-		applied.InputAccepted = true
-	}
-	if file.StartupTimeoutSecs != nil {
-		if *file.StartupTimeoutSecs < 0 {
-			return applied, exit(2, "cua startupTimeoutSecs must be non-negative")
-		}
-		cfg.StartupTimeoutSecs = *file.StartupTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if file.ExecTimeoutSecs != nil {
-		if *file.ExecTimeoutSecs < 0 {
-			return applied, exit(2, "cua execTimeoutSecs must be non-negative")
-		}
-		cfg.ExecTimeoutSecs = *file.ExecTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if trusted && file.BridgeCommand != nil {
-		cfg.BridgeCommand = *file.BridgeCommand
-		applied.InputAccepted = true
-	}
-	if trusted && file.SDKPackage != nil {
-		cfg.SDKPackage = *file.SDKPackage
-		applied.InputAccepted = true
-	}
-	if trusted && file.SDKImport != nil {
-		cfg.SDKImport = *file.SDKImport
-		applied.InputAccepted = true
-	}
-	if trusted && file.SDKFallbackImport != nil {
-		cfg.SDKFallbackImport = *file.SDKFallbackImport
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "cua")
+	return applied, err
 }
 
 func (cfg *CuaConfig) applyEnv() (CuaConfigApplied, error) {

@@ -23,22 +23,8 @@ type WandbConfigApplied struct {
 
 func (cfg *WandbConfig) applyFile(file *fileWandbConfig) (WandbConfigApplied, error) {
 	var applied WandbConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.APIKey != "" {
-		cfg.APIKey = file.APIKey
-		applied.InputAccepted = true
-	}
-	if file.DefaultImage != "" {
-		cfg.DefaultImage = file.DefaultImage
-		applied.InputAccepted = true
-	}
-	if file.MaxLifetimeSeconds > 0 {
-		cfg.MaxLifetimeSeconds = file.MaxLifetimeSeconds
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "wandb")
+	return applied, err
 }
 
 func (cfg *WandbConfig) applyEnv() (WandbConfigApplied, error) {
