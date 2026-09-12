@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -30,6 +31,101 @@ func TestFastAPICloudProviderSpec(t *testing.T) {
 	aliases := Provider{}.Aliases()
 	if len(aliases) != 2 || aliases[0] != "fastapicloud" || aliases[1] != "fastapi" {
 		t.Fatalf("aliases = %#v, want [fastapicloud fastapi]", aliases)
+	}
+}
+
+func TestFastAPICloudBindingFlagsRemainDeferredAndLocal(t *testing.T) {
+	for _, name := range []string{"fastapi-cloud", "fastapicloud", "fastapi", " FastAPI "} {
+		cfg := Config{Provider: name, FastAPICloud: FastAPICloudConfig{APIURL: "https://example.invalid/prior", AppID: "prior-app", TeamID: "prior-team"}}
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.String("class", "", "")
+		fs.String("type", "", "")
+		values := RegisterFastAPICloudProviderFlags(fs, cfg)
+		fs.VisitAll(func(f *flag.Flag) {
+			if strings.Contains(f.Name, "token") {
+				t.Fatal("token flag registered")
+			}
+		})
+		cfg.FastAPICloud.AppID = "later-app"
+		before := cfg
+		if err := ApplyFastAPICloudProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(cfg, before) {
+			t.Fatal("unvisited flags changed config")
+		}
+		if err := fs.Parse([]string{"--fastapi-cloud-url=", "--fastapi-cloud-app-id=", "--fastapi-cloud-team-id="}); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyFastAPICloudProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatalf("wrapper performed deferred client validation: %v", err)
+		}
+		before.FastAPICloud.APIURL, before.FastAPICloud.AppID, before.FastAPICloud.TeamID = "", "", ""
+		core.RecordProviderFlagInputs(&before, true, "fastapi-cloud")
+		if !reflect.DeepEqual(cfg, before) {
+			t.Fatal("wrapper copies or global provenance side effects changed")
+		}
+		if _, err := (Provider{}).Configure(cfg, Runtime{}); err != nil {
+			t.Fatalf("Configure performed client validation: %v", err)
+		}
+		if err := ApplyFastAPICloudProviderFlags(&cfg, fs, struct{}{}); err != nil {
+			t.Fatal(err)
+		}
+		for _, args := range [][]string{{"--type=vm"}, {"--type=vm", "--class=large"}} {
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			want := "--type"
+			if len(args) == 2 {
+				want = "--class"
+			}
+			for _, v := range []any{nil, struct{}{}, values} {
+				before := cfg
+				err := ApplyFastAPICloudProviderFlags(&cfg, fs, v)
+				if err == nil || err.Error() != want+" is not supported for provider=fastapi-cloud" {
+					t.Fatalf("alias %q guard=%v", name, err)
+				}
+				if !reflect.DeepEqual(cfg, before) {
+					t.Fatal("guard applied values or provenance")
+				}
+			}
+		}
+	}
+}
+
+func TestFastAPICloudClientDefaultAndValidationOrder(t *testing.T) {
+	for _, rawToken := range []string{"", "  "} {
+		cfg := Config{FastAPICloud: FastAPICloudConfig{Token: rawToken, APIURL: "relative"}}
+		if _, err := newFastAPICloudClient(cfg, Runtime{}); err == nil || err.Error() != "provider=fastapi-cloud requires FASTAPI_CLOUD_TOKEN" {
+			t.Fatalf("token validation order=%v", err)
+		}
+	}
+	for _, tc := range []struct {
+		raw, want string
+		invalid   bool
+	}{
+		{raw: "", want: "https://api.fastapicloud.com/api/v1"},
+		{raw: "  ", invalid: true},
+		{raw: " https://example.invalid/api/ ", want: "https://example.invalid/api"},
+	} {
+		cfg := Config{FastAPICloud: FastAPICloudConfig{Token: "inert-constructor-only", APIURL: tc.raw}}
+		before := cfg.FastAPICloud
+		api, err := newFastAPICloudClient(cfg, Runtime{})
+		if tc.invalid {
+			if err == nil || err.Error() != "provider=fastapi-cloud API URL must be an absolute HTTPS URL" {
+				t.Fatalf("whitespace endpoint=%v", err)
+			}
+		} else {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if api.(*fastAPICloudClient).apiURL != tc.want {
+				t.Fatalf("endpoint=%q want=%q", api.(*fastAPICloudClient).apiURL, tc.want)
+			}
+		}
+		if cfg.FastAPICloud != before {
+			t.Fatal("constructor changed raw config")
+		}
 	}
 }
 

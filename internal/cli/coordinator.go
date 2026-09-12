@@ -71,6 +71,7 @@ type CoordinatorLease struct {
 	DesktopEnv                   string                         `json:"desktopEnv,omitempty"`
 	Browser                      bool                           `json:"browser,omitempty"`
 	Code                         bool                           `json:"code,omitempty"`
+	Network                      *LeaseNetworkDiagnostics       `json:"network,omitempty"`
 	Tailscale                    *TailscaleMetadata             `json:"tailscale,omitempty"`
 	Region                       string                         `json:"region,omitempty"`
 	ProviderProject              string                         `json:"providerProject,omitempty"`
@@ -122,6 +123,18 @@ type CoordinatorLease struct {
 	ProvisioningResourceMayExist *bool                          `json:"provisioningResourceMayExist,omitempty"`
 	ProvisioningFailureRetryable *bool                          `json:"provisioningFailureRetryable,omitempty"`
 	ProviderMetadata             map[string]any                 `json:"providerMetadata,omitempty"`
+}
+
+// LeaseNetworkDiagnostics retains broker records, not live ingress observations.
+// Pointers preserve unknown fields separately from explicit false or empty values.
+type LeaseNetworkDiagnostics struct {
+	SSHSourceCIDRs         *[]string `json:"sshSourceCIDRs,omitempty"`
+	SSHPinnedSourceCIDRs   *[]string `json:"sshPinnedSourceCIDRs,omitempty"`
+	SSHSourceCIDRsComplete *bool     `json:"sshSourceCIDRsComplete,omitempty"`
+	AWSSecurityGroupID     *string   `json:"awsSecurityGroupID,omitempty"`
+	AWSSecurityGroupName   *string   `json:"awsSecurityGroupName,omitempty"`
+	AWSSubnetID            *string   `json:"awsSubnetID,omitempty"`
+	AWSPrivate             *bool     `json:"awsPrivate,omitempty"`
 }
 
 // ProviderCleanupEvidence is recorded broker evidence, not a live provider observation.
@@ -1008,7 +1021,9 @@ func newCoordinatorClient(cfg Config) (*CoordinatorClient, bool, error) {
 					Timeout:   5 * time.Second,
 					KeepAlive: 30 * time.Second,
 				}).DialContext,
-				TLSHandshakeTimeout:   10 * time.Second,
+				TLSHandshakeTimeout: 10 * time.Second,
+				// Custom dialing otherwise disables HTTP/2 and its independent streams.
+				ForceAttemptHTTP2:     true,
 				ResponseHeaderTimeout: coordinatorHTTPTimeout,
 				IdleConnTimeout:       90 * time.Second,
 			},
@@ -1459,10 +1474,20 @@ func (c *CoordinatorClient) Pool(ctx context.Context, cfg Config) ([]Coordinator
 }
 
 func (c *CoordinatorClient) Leases(ctx context.Context, state string, limit int) ([]CoordinatorLease, error) {
+	return c.listLeases(ctx, state, limit, "", "")
+}
+
+func (c *CoordinatorClient) listLeases(ctx context.Context, state string, limit int, view, provider string) ([]CoordinatorLease, error) {
 	var res struct {
 		Leases []CoordinatorLease `json:"leases"`
 	}
 	values := url.Values{}
+	if view != "" {
+		values.Set("view", view)
+	}
+	if provider != "" {
+		values.Set("provider", provider)
+	}
 	if state != "" {
 		values.Set("state", state)
 	}
@@ -1885,6 +1910,23 @@ func (c *CoordinatorClient) AdminDeleteLease(ctx context.Context, id string) (Co
 	}
 	err := c.do(ctx, http.MethodPost, "/v1/admin/leases/"+url.PathEscape(id)+"/delete", map[string]any{}, &res)
 	return res.Lease, err
+}
+
+// AdminHostReservation reads or clears coordinator host associations without changing provider resources.
+func (c *CoordinatorClient) AdminHostReservation(ctx context.Context, region, hostID string, clear, force bool) (json.RawMessage, error) {
+	values := adminHostScopeValues(region, "")
+	if clear && force {
+		values.Set("force", "true")
+	}
+	method := http.MethodGet
+	if clear {
+		// Older coordinators dispatch any host DELETE suffix as a Dedicated Host release.
+		method = http.MethodPost
+	}
+	path := "/v1/admin/hosts/" + url.PathEscape(hostID) + "/reservation?" + values.Encode()
+	var result json.RawMessage
+	err := c.do(ctx, method, path, nil, &result)
+	return result, err
 }
 
 func (c *CoordinatorClient) AdminMacHosts(ctx context.Context, region, serverType, state string) ([]CoordinatorMacHost, error) {
@@ -2453,7 +2495,7 @@ func (c *CoordinatorClient) doWithHeaders(ctx context.Context, method, path stri
 		}
 	}
 	err = c.doHTTPWithHeaders(ctx, method, path, data, body != nil, out, headers)
-	if err == nil || !shouldUseCoordinatorCurlFallback(method, body != nil, err) {
+	if err == nil || !shouldUseCoordinatorCurlFallback(ctx, method, body != nil, err) {
 		return err
 	}
 	if curlErr := c.doCurl(ctx, method, path, data, body != nil, out); curlErr == nil {
@@ -2714,16 +2756,23 @@ func isCoordinatorTransportError(err error) bool {
 	return errors.As(err, &urlErr)
 }
 
-func shouldUseCoordinatorCurlFallback(method string, hasBody bool, err error) bool {
-	if hasBody {
+func shouldUseCoordinatorCurlFallback(ctx context.Context, method string, hasBody bool, err error) bool {
+	if ctx.Err() != nil || hasBody || errors.Is(err, context.Canceled) {
 		return false
 	}
 	switch method {
 	case http.MethodGet, http.MethodHead:
-		return isCoordinatorTransportError(err)
 	default:
 		return false
 	}
+	if isCoordinatorTransportError(err) {
+		return true
+	}
+	// A dial timeout can match DeadlineExceeded while the request budget is live.
+	var urlErr *url.Error
+	var dialErr *net.OpError
+	return errors.As(err, &urlErr) && errors.As(urlErr.Err, &dialErr) &&
+		dialErr.Op == "dial" && dialErr.Timeout()
 }
 
 func (c *CoordinatorClient) applyChildEnvironment(cmd *exec.Cmd) {

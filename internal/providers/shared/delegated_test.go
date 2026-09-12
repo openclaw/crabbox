@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -628,6 +629,42 @@ func TestDelegatedSandboxReuseAdmission(t *testing.T) {
 			}
 			if strings.Contains(stage, "admission") && stage != "admission error" && !errors.Is(err, context.Canceled) {
 				t.Fatalf("lost cancellation cause: %v", err)
+			}
+		})
+	}
+}
+
+func TestRejectExplicitMachineSizingFlagsContract(t *testing.T) {
+	for _, tc := range []struct {
+		name                        string
+		args                        []string
+		classGuide, typeGuide, want string
+	}{
+		{"absent", nil, "", "", ""},
+		{"class", []string{"--class=large"}, "", "", "--class is not supported for provider=fixture"},
+		{"type", []string{"--type=machine"}, "", "", "--type is not supported for provider=fixture"},
+		{"class-first", []string{"--class=large", "--type=machine"}, "class guide", "type guide", "--class is not supported for provider=fixture; class guide"},
+		{"type-first", []string{"--type=machine", "--class=large"}, "class guide", "type guide", "--class is not supported for provider=fixture; class guide"},
+		{"empty-class", []string{"--class="}, " literal ", "", "--class is not supported for provider=fixture;  literal "},
+		{"empty-type", []string{"--type="}, "", "type guide", "--type is not supported for provider=fixture; type guide"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+			fs.String("class", "inherited-class", "")
+			fs.String("type", "inherited-type", "")
+			if err := fs.Parse(tc.args); err != nil {
+				t.Fatal(err)
+			}
+			err := RejectExplicitMachineSizingFlags(fs, "fixture", tc.classGuide, tc.typeGuide)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			var exitErr core.ExitError
+			if err == nil || err.Error() != tc.want || !errors.As(err, &exitErr) || exitErr.Code != 2 {
+				t.Fatalf("error=%v exit=%#v want=%q", err, exitErr, tc.want)
 			}
 		})
 	}

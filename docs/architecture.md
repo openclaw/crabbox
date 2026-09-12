@@ -199,6 +199,15 @@ serialization and live bridge ownership are process-local. PostgreSQL and
 pg-boss are durable, but horizontal replicas need distributed locking and
 bridge routing first.
 
+Maintenance selects bridge cleanup from live bridge owners and existing persisted
+egress records, so ended leases with no bridge state require no repeated deletes,
+including after coordinator restarts. Failed deletes retain their cleanup evidence.
+Ready-pool maintenance reads only the leases referenced by its entries, and
+interrupted-provisioning checks read journals only for recovery candidates.
+Each maintenance pass collects candidate lease IDs once, then rereads their
+current records at the owning phase. Final alarm selection still scans current
+state so work admitted during provider I/O keeps its wakeup.
+
 ## Coordinator HTTP API
 
 Lease lifecycle:
@@ -300,6 +309,12 @@ commands can read it back:
   (chunked at 64 KiB, capped at 8 MiB), and parsed [results](features/test-results.md).
   The coordinator computes `durationMs`, sets state `succeeded`/`failed`, and records
   classification (`blockedStage`, `retryLikely`).
+
+Coordinator API requests negotiate HTTP/2 over TLS when the server supports it,
+so independent requests can share a connection. HTTP/1 coordinators and the
+HTTP/1 WebSocket upgrade remain supported; both use the coordinator's same-origin
+redirect guard. An ended control owner closes and
+joins its local connection without waiting for a peer close handshake.
 
 The command itself, file sync, and I/O streaming all happen **directly
 CLI → runner over SSH** and never traverse the broker.

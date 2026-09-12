@@ -44,7 +44,8 @@ crabbox stop --provider tensorlake blue-lobster
 
 Tensorlake publishes a Crabbox-ready public image, `tl-crabbox`
 (`--tensorlake-image tl-crabbox`): the standard Ubuntu base plus a writable
-`/workspace` (Crabbox's default workdir) and pnpm preinstalled. On the stock
+`/workspace` parent for Crabbox's default `/workspace/crabbox` workdir and pnpm
+preinstalled. On the stock
 Tensorlake images, commands run as `tl-user`, which cannot create `/workspace`;
 either pin `tl-crabbox` or set `tensorlake.workdir` to a user-writable path such
 as `/home/tl-user/crabbox`.
@@ -63,6 +64,8 @@ export TENSORLAKE_API_KEY=tl_apiKey_...
 ```
 
 The API key is read from `CRABBOX_TENSORLAKE_API_KEY` or `TENSORLAKE_API_KEY`.
+It remains environment-only in Crabbox configuration, with no YAML field or
+key flag. The first raw nonempty primary or fallback environment value wins.
 `TENSORLAKE_API_URL` (or `tensorlake.apiUrl`) overrides the default
 `https://api.tensorlake.ai`. `TENSORLAKE_ORGANIZATION_ID` and
 `TENSORLAKE_PROJECT_ID` select the org and project when your account spans more
@@ -121,6 +124,21 @@ example `CRABBOX_TENSORLAKE_IMAGE`, `CRABBOX_TENSORLAKE_CPUS`,
 `CRABBOX_TENSORLAKE_NO_INTERNET`). The API URL, organization, project, and
 namespace are passed to the CLI as `--api-url`, `--organization`, `--project`,
 and `--namespace`.
+
+All fourteen configuration bindings share one typed declaration. Nonempty YAML
+strings override earlier values without trimming; omitted, null, and empty
+strings preserve them. YAML CPU, memory, disk, and timeout values apply only
+when positive. Environment numeric parsers retain the earlier value on malformed
+input but accept parsed zero/negative values, as do explicit flags. Existing
+native creation omits nonpositive sizing/timeouts; configuration loading does
+not add a new rejection. Explicit `noInternet: false` remains meaningful.
+
+The API URL, native CLI binary, and workdir helpers share their compiled defaults
+while retaining their different trimming rules. Empty image/snapshot values still
+leave the choice to Tensorlake. The native namespace fallback to `default` is
+scope-pinning policy, not a nonempty config default. Credential-source tracking,
+the later explicit-API-URL flag phase, native environment binding, and ownership
+checks remain unchanged.
 
 ### Runtime environment forwarding
 

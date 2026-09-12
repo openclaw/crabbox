@@ -22,8 +22,6 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-const defaultEndpoint = "https://api.us.ovhcloud.com/1.0"
-
 var (
 	errOVHCrossOriginRedirect = errors.New("ovh refused cross-origin redirect")
 	errOVHInvalidRedirect     = errors.New("ovh refused invalid redirect")
@@ -202,7 +200,7 @@ type InstanceCreateRequest struct {
 func newClient(cfg core.Config, rt core.Runtime) (*Client, error) {
 	endpoint := strings.TrimSpace(cfg.OVH.Endpoint)
 	if endpoint == "" {
-		endpoint = defaultEndpoint
+		endpoint = core.OVHConfigDefaultEndpoint
 	}
 	return newClientWithConfig(clientConfig{
 		Endpoint:          endpoint,
@@ -560,7 +558,7 @@ func isOVHEndpointHost(host string) bool {
 func normalizeEndpointAlias(endpoint string) string {
 	switch strings.ToLower(strings.TrimSpace(endpoint)) {
 	case "":
-		return defaultEndpoint
+		return core.OVHConfigDefaultEndpoint
 	case "ovh-us":
 		return "https://api.us.ovhcloud.com/1.0"
 	case "ovh-ca":

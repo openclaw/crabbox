@@ -26,6 +26,12 @@ slug selects its recorded provider before provider initialization. An explicit
 lease ID or `--provider`, while missing claims keep the configured-provider
 fallback.
 
+For an acquired fixed Daytona lease removed by native TTL or external deletion,
+inspection can persist its terminal tombstone after verifying the original
+organization and complete provider database absence. It reports `released` and
+never deletes a provider resource. Unverified absence retains the claim and
+returns an error; see [Daytona fixed lifecycle](../providers/daytona.md#fixed-operation-ids).
+
 ## Output
 
 Human output prints one `key=value` line per field, followed by any Tailscale
@@ -62,8 +68,25 @@ key path, port, user, and host). Empty fields render as `-`.
 
 `--json` prints the structured status record (the same shape returned by
 [`status`](status.md)), including non-secret Tailscale metadata and the full
-label map. Secrets such as broker tokens, provider keys, and VNC passwords are
+label map. SSH-backed records include `workroot`, resolved from the lease's
+recorded work root or its target defaults (including native Windows and WSL2).
+Secrets such as broker tokens, provider keys, and VNC passwords are
 never included in either output mode.
+
+Brokered JSON records may also include `networkDiagnostics`, retaining the
+coordinator's recorded SSH source CIDRs (`sshSourceCIDRs`), pinned source CIDRs
+(`sshPinnedSourceCIDRs`), and completeness flag (`sshSourceCIDRsComplete`).
+AWS records may include `awsSecurityGroupID`, `awsSecurityGroupName`,
+`awsSubnetID`, and `awsPrivate`. The existing `network` field remains the resolved
+connection-mode string; these diagnostics do not change route selection.
+
+Omitted fields mean no value was recorded, including on older brokers. Explicit
+`false`, empty arrays, and empty strings remain distinct from omission. These
+are stored lease facts, also available on released records, not a fresh provider
+or security-group read, the complete effective ingress rule set, or proof that
+SSH is reachable. The diagnostic pass-through makes no additional request.
+Treat CIDRs and placement identifiers as private operational data and redact
+them before sharing output publicly.
 
 Brokered Hetzner leases may include versioned `providerCleanup` in JSON output.
 It binds the provider, lease ID and numeric server ID, retains dispatch and
@@ -226,6 +249,53 @@ cleanup claim and remains available through the cleanup diagnostic.
 claim; consult `recoveryAudit` for its basis. It is still not deletion authority.
 Orphan/provisioning continuation paths cannot replace the recovered baseline;
 only ordinary release consumes this recovery.
+
+### Audited legacy AWS cleanup recovery
+
+An administrator can recover the original account scope of an expired, released
+AWS lease whose instance is already absent. Use the existing authenticated
+`GET /v1/leases/{id}/cleanup` and `POST /v1/leases/{id}/cleanup` API, with the
+canonical lease ID. Ordinary owners, shares, and device credentials cannot use
+AWS scope recovery. This does not add a CLI flag or a force-success override.
+
+Recovery requires explicit `releaseDeletesServer: true`. The acquisition's
+`keep` default can remain true after an explicit delete request; recovery does
+not change that flag. A retained disposition (`releaseDeletesServer: false`) or
+missing delete intent refuses recovery, including if it changes during inspection.
+
+Inspection requires a retained instance ID, Region, creation and release times,
+and the canonical owned SSH key. It reads CloudTrail `LookupEvents` in that
+Region using the same fixed credentials as STS and the exact EC2 observation.
+One successful original `RunInstances` event must bind the instance to the
+recorded lease labels, owner, slug, and key. Both its `keyName` request field
+and creation-time `provider_key` instance tag must match the canonical key.
+Its recipient account and Region must match the authenticated observation. Current credentials or an empty EC2
+lookup alone do not establish the original account.
+
+CloudTrail event history is limited to 90 days. Lookup is bounded to ten pages
+and 2 MiB, and incomplete pagination, malformed or truncated events, conflicting
+identities, missing evidence, denied permissions, and transport failures all
+refuse recovery. Crabbox does not add IAM permissions, accept pasted event
+JSON, or fall back to inference. The response contains only the proposed scope,
+event ID and time, an unchanged-binding indicator, and a claim fingerprint;
+raw event bodies and bootstrap data are never returned or retained.
+
+After reviewing an inspection with `claimUnchanged: true`, send the same
+`acknowledge-missing-resource` request shown above with its `claimFingerprint`.
+The administrator acknowledgement selects the recovery; it is not evidence.
+Crabbox rereads authoritative allocation evidence and confirms exact current
+instance absence. Immediately before committing, it rechecks administrator
+access, the unchanged lease binding, and the absence of active cleanup or
+provisioning owners.
+
+One existing-store transaction restores `providerScope`, records a bounded
+provider-specific audit, resolves only the proven instance-existence uncertainty,
+and schedules ordinary cleanup. It does not record `cleanupCompletedAt`, erase
+errors or access evidence, or delete resources. Normal cleanup still verifies
+the bound account and Region and must finish remaining owned-key and access
+cleanup before reporting completion. Failed key deletion retains the lease and
+local recovery artifacts. Repeating an acknowledged fingerprint returns its
+existing audit rather than rewriting the original allocation evidence.
 
 ### Additional provider metadata
 

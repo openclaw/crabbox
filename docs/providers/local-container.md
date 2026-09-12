@@ -246,6 +246,18 @@ CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET
 CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME
 ```
 
+File strings only replace earlier values when nonempty, and file CPU values
+apply only when positive. Environment CPU parsing preserves the earlier value
+on malformed input; an explicit environment zero still applies. The two boolean
+settings distinguish omission/null from explicit `false`, so false can override
+an earlier true value. Source overlays keep string text unchanged; later
+provider defaults and runtime normalization remain separate.
+
+Explicit runtime, image and work-root input remains explicit even when it equals
+the existing value. The raw initial work root is empty; the effective
+`/work/crabbox` default is applied later. `noHostname` has no provider CLI flag,
+and volumes and checkpoint metadata are not file/environment settings.
+
 Set `localContainer.noHostname: true` or
 `CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME=1` when the runtime rejects an explicit
 hostname, such as when it shares the host UTS namespace. By default Crabbox

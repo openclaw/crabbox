@@ -1,7 +1,6 @@
 package cloudflaresandbox
 
 import (
-	"flag"
 	"io"
 	"time"
 
@@ -36,17 +35,12 @@ const (
 	providerName   = "cloudflare-sandbox"
 	providerFamily = "cloudflare"
 	leasePrefix    = "cfsbx_"
-	defaultWorkdir = "/workspace/crabbox"
 	targetLinux    = core.TargetLinux
 	NetworkPublic  = "public"
 )
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
 }
 
 func newLeaseSlug(leaseID string) string {

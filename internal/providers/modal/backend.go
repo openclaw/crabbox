@@ -442,15 +442,15 @@ func isCrabboxModalSandbox(sandbox modalSandbox) bool {
 }
 
 func modalApp(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Modal.App), "crabbox")
+	return blank(strings.TrimSpace(cfg.Modal.App), core.ModalConfigDefaultApp)
 }
 
 func modalImage(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Modal.Image), "python:3.13-slim")
+	return blank(strings.TrimSpace(cfg.Modal.Image), core.ModalConfigDefaultImage)
 }
 
 func modalWorkdir(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Modal.Workdir), "/workspace/crabbox")
+	return blank(strings.TrimSpace(cfg.Modal.Workdir), core.ModalConfigDefaultWorkdir)
 }
 
 func cleanModalWorkdir(workdir string) (string, error) {

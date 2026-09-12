@@ -67,6 +67,10 @@ Config keys under `vultr:`:
 | `sshCIDRs` | `cfg.Vultr.SSHCIDRs` | empty | Reserved for firewall-aware follow-up work; Phase 1 does not create firewall rules. |
 | `userScheme` | `cfg.Vultr.UserScheme` | `root` | Vultr instance user scheme: `root` or `limited`. |
 
+The table describes effective runtime values. Raw provider configuration starts
+empty/nil, and Vultr adds no provider-specific flags. Use YAML or the environment
+for these settings; generic command flags remain separate.
+
 Set exactly one boot source: `vultr.os`, `vultr.image`, or `vultr.snapshot`.
 When no boot source is configured, Crabbox queries Vultr's OS catalog and
 selects a portable Ubuntu 24.04 Linux OS id. If that lookup cannot find a
@@ -95,6 +99,22 @@ CRABBOX_VULTR_USER_SCHEME       Override the user scheme (`root` or `limited`)
 
 Do not pass the Vultr API key as a command-line argument. Keep it in the
 environment or in a local secret manager.
+
+### Input semantics
+
+All eight settings use shared typed file/environment bindings. Nonempty strings
+retain their raw spelling, including whitespace. The OS value remains a string at
+this stage; native boot-source parsing and catalog lookup are unchanged, and
+setting one boot-source field does not clear its siblings.
+
+Nonempty YAML VPC/CIDR lists assign raw without copying, trimming, or deduplication;
+omitted, null, and empty lists preserve prior values. Nonempty environment text is
+comma-split and trimmed, with empty items dropped and order/duplicates retained.
+Delimiter-only input yields a nonnil empty list, exact empty input preserves the
+prior value, and `none` is an ordinary item. Region and user-scheme defaulting use
+one typed transformation at their existing runtime phases. It fills only raw-empty
+fields, without trimming custom values, selecting a boot source, or choosing the
+SSH user. No firewall or authentication behavior is added.
 
 ## Token Permissions
 

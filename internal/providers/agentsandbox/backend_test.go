@@ -1419,7 +1419,6 @@ func TestRunReportsAndReleasesClaimThatExpiresDuringCommand(t *testing.T) {
 func TestRunExistingLeaseRetainsClaimWhenOnlyDownstreamResourceIsMissing(t *testing.T) {
 	cfg := testAgentSandboxConfig(t)
 	cfg.AgentSandbox.ForgetMissing = true
-	cfg.AgentSandbox.SandboxReadyTimeout = 20 * time.Millisecond
 	fake := readyFakeClient(cfg)
 	backend := testBackend(cfg, fake, nil, nil)
 	repo := testGitRepo(t)
@@ -1436,6 +1435,7 @@ func TestRunExistingLeaseRetainsClaimWhenOnlyDownstreamResourceIsMissing(t *test
 	}
 	sandboxName := claim.Labels[claimLabelSandboxName]
 	delete(fake.objects, sandboxResource+"/"+cfg.AgentSandbox.Namespace+"/"+sandboxName)
+	backend.cfg.AgentSandbox.SandboxReadyTimeout = 20 * time.Millisecond
 
 	result, err := backend.Run(context.Background(), RunRequest{Repo: repo, ID: claim.LeaseID, NoSync: true, Command: []string{"true"}})
 	if err == nil || !strings.Contains(err.Error(), "readiness timed out") {
@@ -2094,7 +2094,6 @@ func TestBoundRunUnadmittedCustodyAndTiming(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := testAgentSandboxConfig(t)
-			cfg.AgentSandbox.SandboxReadyTimeout = time.Millisecond
 			cfg.AgentSandbox.ForgetMissing = tc.forget
 			fake := readyFakeClient(cfg)
 			b := testBackend(cfg, fake, nil, nil)
@@ -2111,6 +2110,8 @@ func TestBoundRunUnadmittedCustodyAndTiming(t *testing.T) {
 			if tc.missing {
 				fake.getErrs = []error{nil, errKubernetesNotFound, errKubernetesNotFound}
 			} else {
+				// Only the timeout case needs a short deadline; missing-root cases must observe the fake response.
+				b.cfg.AgentSandbox.SandboxReadyTimeout = time.Millisecond
 				fake.objects[sandboxClaimResource+"/"+cfg.AgentSandbox.Namespace+"/"+claimNameFromLocalClaim(claim)].Status.Sandbox.Name = ""
 			}
 			forgetErr := errors.New("fixture forget failed")

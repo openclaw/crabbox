@@ -74,7 +74,7 @@ func encodeChunkedTagKV(key, value string) []string {
 	if chunkSize <= 0 {
 		return nil
 	}
-	encoded := encodeExactTagValue(value, maxEncodedTagValueLength)
+	encoded := shared.EncodeExactTagValue(value, maxEncodedTagValueLength)
 	chunkCount := (len(encoded) + chunkSize - 1) / chunkSize
 	if chunkCount == 0 {
 		chunkCount = 1
@@ -119,14 +119,6 @@ func legacyEncodedExactTagValueKey(key string) bool {
 	}
 }
 
-func encodeExactTagValue(value string, maxLen int) string {
-	return shared.EncodeExactTagValue(value, maxLen)
-}
-
-func decodeExactTagValue(value string) string {
-	return shared.DecodeExactTagValue(value)
-}
-
 func normalizeTags(tags []string) []string {
 	seen := map[string]bool{}
 	out := make([]string, 0, len(tags))
@@ -168,13 +160,13 @@ func labelsFromTags(tags []string) map[string]string {
 				continue
 			}
 			if logical, ok := versionedExactTagValueKey(key); ok {
-				versionedExact.Record(logical, decodeExactTagValue(parts[1]))
+				versionedExact.Record(logical, shared.DecodeExactTagValue(parts[1]))
 				continue
 			}
 			if tagSchema.Exact(key) {
 				value := parts[1]
 				if legacyEncodedExactTagValueKey(key) {
-					value = decodeExactTagValue(value)
+					value = shared.DecodeExactTagValue(value)
 				}
 				legacyExact.Record(key, value)
 				continue
@@ -197,7 +189,7 @@ func labelsFromTags(tags []string) map[string]string {
 			encoded.WriteString(part)
 		}
 		if _, _, conflict := versionedExact.Get(key); !conflict {
-			versionedExact.Record(key, decodeExactTagValue(encoded.String()))
+			versionedExact.Record(key, shared.DecodeExactTagValue(encoded.String()))
 		}
 	}
 	for _, key := range tagSchema.Keys() {

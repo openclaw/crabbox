@@ -24,6 +24,7 @@ func applyCapacityMarketFlag(cfg *Config, fs *flag.FlagSet, market string) error
 	case "spot", "on-demand":
 		cfg.Capacity.Market = market
 		MarkCapacityMarketExplicit(cfg)
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 		return nil
 	default:
 		return exit(2, "--market must be spot or on-demand")
@@ -34,6 +35,7 @@ func applyServerTypeFlagOverrides(cfg *Config, fs *flag.FlagSet, serverType stri
 	if flagWasSet(fs, "type") {
 		cfg.ServerType = serverType
 		cfg.ServerTypeExplicit = true
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 		return
 	}
 	if cfg.ServerTypeExplicit {
@@ -69,6 +71,7 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 	if err != nil {
 		return err
 	}
+	markSynthesizedFlagInputs(&cfg, a.synthesizedFlagInputs)
 	if err := applyLeaseCreateFlags(&cfg, fs, leaseFlags); err != nil {
 		return err
 	}
@@ -95,7 +98,8 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 		defer unlock()
 	}
 	options := leaseOptionsFromConfig(cfg)
-	if delegated, ok := backend.(DelegatedRunBackend); ok {
+	// Fixed IDs must reach Acquire; delegated warmup has no durable-ID request.
+	if delegated, ok := backend.(DelegatedRunBackend); ok && strings.TrimSpace(*requestedLeaseID) == "" {
 		return delegated.Warmup(ctx, WarmupRequest{
 			Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim,
 			ActionsRunner: *actionsRunner, RequestedSlug: requestedSlug, TimingJSON: *timingJSON,
@@ -281,7 +285,7 @@ func registerRunFlags(fs *flag.FlagSet, defaults Config, options leaseCreateFlag
 		CaptureStderr:          fs.String("capture-stderr", "", "write remote stderr to a local file instead of the terminal"),
 		CaptureOnFail:          fs.Bool("capture-on-fail", false, "compatibility alias; failure bundles are saved by default on non-zero exit"),
 		Preflight:              fs.Bool("preflight", false, "print remote capability preflight before running the command"),
-		PreflightTools:         fs.String("preflight-tools", "", "comma-separated preflight tools to probe; overrides run.preflightTools"),
+		PreflightTools:         fs.String("preflight-tools", "", "comma-separated preflight tools to probe; overrides run.preflightTools; list names with 'crabbox preflight-tools'"),
 		ScriptPath:             fs.String("script", "", "on POSIX SSH leases, upload and run a standalone content-hashed copy under .crabbox/scripts/; delegated module runtimes use source input"),
 		ScriptStdin:            fs.Bool("script-stdin", false, "read a script from stdin, upload it, and run it"),
 		FreshPR:                fs.String("fresh-pr", "", "run from a fresh remote checkout of a GitHub PR: owner/repo#123, URL, or number"),
@@ -326,7 +330,9 @@ func loadRunConfig(fs *flag.FlagSet, flags runFlagValues, target leaseFlagTarget
 	if err != nil {
 		return Config{}, err
 	}
+	markSynthesizedFlagInputs(&cfg, target.SynthesizedInputs)
 	cfg.Profile = *flags.Lease.Profile
+	recordConfigInput(&cfg, configInputGeneric, configInputFlag, flagWasSet(fs, "profile"))
 	if err := applySelectedProfileConfig(&cfg); err != nil {
 		return Config{}, err
 	}
@@ -600,7 +606,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		readyPoolIdentity = &identity
 	}
-	cfg, err := loadRunConfig(fs, runFlags, leaseFlagTarget{ID: *leaseIDFlag, Reuse: *leaseIDFlag != ""}, true, readyPoolIdentity)
+	cfg, err := loadRunConfig(fs, runFlags, leaseFlagTarget{ID: *leaseIDFlag, Reuse: *leaseIDFlag != "", SynthesizedInputs: a.synthesizedFlagInputs}, true, readyPoolIdentity)
 	if err != nil {
 		return err
 	}
@@ -709,6 +715,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	applyRunEnvAllowFlags(&cfg, allowEnvFlags)
 	if *preflightTools != "" {
 		cfg.Run.PreflightTools = parsePreflightToolsOverride(*preflightTools)
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *preflight {
 		if err := validatePreflightTools(cfg.Run.PreflightTools); err != nil {
@@ -717,15 +724,19 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	if flagWasSet(fs, "checksum") {
 		cfg.Sync.Checksum = *checksumSync
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *junitResults != "" {
 		cfg.Results.JUnit = splitCommaList(*junitResults)
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if flagWasSet(fs, "results-auto") {
 		cfg.Results.Auto = *resultsAuto
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if flagWasSet(fs, "fail-on-test-failures") {
 		cfg.Results.FailOnFailures = *failOnTestFailures
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	repo, err := findRepo()
 	if err != nil {
@@ -1154,7 +1165,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 	}
 	if !*noSync && freshPR.Empty() {
-		if err := validateLocalWorkspaceSyncSource(repo); err != nil {
+		if err := validateLocalWorkspaceSyncScope(repo, cfg); err != nil {
 			return err
 		}
 	}
@@ -3008,7 +3019,9 @@ func returnReadyPoolAfterWorkspaceOwner(ctx context.Context, owner **workspaceOw
 
 func applyRunEnvAllowFlags(cfg *Config, values []string) {
 	for _, value := range values {
-		cfg.EnvAllow = appendUniqueStrings(cfg.EnvAllow, splitCommaList(value)...)
+		extra := splitCommaList(value)
+		cfg.EnvAllow = appendUniqueStrings(cfg.EnvAllow, extra...)
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, len(extra) > 0)
 	}
 }
 
@@ -4486,6 +4499,7 @@ func (a App) stop(ctx context.Context, args []string) error {
 	id := fs.String("id", "", "lease id or slug")
 	reclaim := fs.Bool("reclaim", false, "adopt an unclaimed provider resource before stopping it")
 	forceRecovery := fs.Bool("force", false, "recover and stop one exactly identified provider resource")
+	currentRepo := fs.Bool("current-repo", false, "stop a fixed-ID lease only while its claim belongs to the current repository")
 	expectedLeaseID := fs.String("expected-provider-lease-id", "", "internal: immutable provider lease identity")
 	expectedAttemptLeaseID := fs.String("expected-provider-attempt-lease-id", "", "internal: immutable provider attempt identity")
 	expectedSlug := fs.String("expected-provider-slug", "", "internal: immutable provider slug identity")
@@ -4532,6 +4546,9 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if expectedFlagCount != 0 && expectedFlagCount != len(expectedFlagNames) {
 		return exit(2, "internal provider release requires the complete expected identity set")
 	}
+	if *currentRepo && (!isCanonicalLeaseID(*id) || *forceRecovery || *reclaim || expectedFlagCount != 0 || *confirmedAbsentLocalCleanup || flagWasSet(fs, "expected-provider-scope") || flagWasSet(fs, "expected-coordinator-registration-url")) {
+		return exit(2, "stop --current-repo requires a canonical lease ID and cannot combine recovery or controller identity flags")
+	}
 	if *confirmedAbsentLocalCleanup && (expectedFlagCount != len(expectedFlagNames) || !flagWasSet(fs, "expected-provider-scope") || !flagWasSet(fs, "expected-coordinator-registration-url") || !flagWasSet(fs, "provider")) {
 		return exit(2, "confirmed-absence local cleanup requires explicit provider, scope, coordinator binding, and complete expected identity set")
 	}
@@ -4567,6 +4584,7 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if err := prepareProviderSelection(&cfg, *provider); err != nil {
 		return err
 	}
+	markSynthesizedFlagInputs(&cfg, a.synthesizedFlagInputs)
 	if *confirmedAbsentLocalCleanup {
 		resolvedProvider, err := ProviderFor(cfg.Provider)
 		if err != nil {
@@ -4622,9 +4640,29 @@ func (a App) stop(ctx context.Context, args []string) error {
 			return exit(4, "coordinator registration binding changed before confirmed-absence cleanup")
 		}
 	}
+	if *currentRepo {
+		capabilities, err := execCapabilitiesForConfig(cfg)
+		if err != nil {
+			return err
+		}
+		if !capabilities.CurrentRepoStop {
+			return exit(2, "provider=%s does not support stop --current-repo", capabilities.Provider)
+		}
+	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
 		return err
+	}
+	if *currentRepo {
+		scoped, ok := backend.(RepositoryScopedStopBackend)
+		if !ok {
+			return exit(2, "provider=%s does not support stop --current-repo", backend.Spec().Name)
+		}
+		boundary, err := findRepositoryBoundary()
+		if err != nil {
+			return err
+		}
+		return scoped.StopForRepository(ctx, StopRequest{Options: leaseOptionsFromConfig(cfg), ID: *id}, boundary.root)
 	}
 	if *confirmedAbsentLocalCleanup {
 		// Validate the immutable local identity before the network mutation, but

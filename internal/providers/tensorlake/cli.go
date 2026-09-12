@@ -24,7 +24,7 @@ func newTensorlakeCLI(cfg Config, rt Runtime) (*tensorlakeCLI, error) {
 	if rt.Exec == nil {
 		return nil, exit(2, "provider=tensorlake requires Runtime.Exec")
 	}
-	apiURL, err := canonicalTensorlakeURL(blank(cfg.Tensorlake.APIURL, defaultAPIURL))
+	apiURL, err := canonicalTensorlakeURL(blank(cfg.Tensorlake.APIURL, core.TensorlakeConfigDefaultAPIURL))
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +37,7 @@ func newTensorlakeCLI(cfg Config, rt Runtime) (*tensorlakeCLI, error) {
 }
 
 func (c *tensorlakeCLI) binary() string {
-	return blank(strings.TrimSpace(c.cfg.Tensorlake.CLIPath), defaultCLIPath)
+	return blank(strings.TrimSpace(c.cfg.Tensorlake.CLIPath), core.TensorlakeConfigDefaultCLIPath)
 }
 
 func (c *tensorlakeCLI) globalArgs() []string {

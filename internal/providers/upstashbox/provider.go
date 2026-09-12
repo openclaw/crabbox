@@ -23,6 +23,7 @@ func (Provider) ClaimScope(cfg core.Config) string { return upstashBoxClaimScope
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:             core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		SyncGuardrailFullCandidate: true,
 		Name:                       providerName,
 		Family:                     "upstash",

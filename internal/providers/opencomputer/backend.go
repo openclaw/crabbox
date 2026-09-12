@@ -18,9 +18,8 @@ import (
 )
 
 const (
-	openComputerCleanupTimeout  = 15 * time.Second
-	openComputerExecTimeoutSecs = 3600
-	openComputerClaimTagKey     = "crabbox.claim"
+	openComputerCleanupTimeout = 15 * time.Second
+	openComputerClaimTagKey    = "crabbox.claim"
 )
 
 func NewOpenComputerBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
@@ -528,7 +527,7 @@ func randomSuffix() string {
 func openComputerWorkdir(cfg Config) (string, error) {
 	workdir := strings.TrimSpace(cfg.OpenComputer.Workdir)
 	if workdir == "" {
-		workdir = defaultWorkdir
+		workdir = core.OpenComputerConfigDefaultWorkdir
 	}
 	clean := path.Clean(workdir)
 	if !strings.HasPrefix(clean, "/") {
@@ -568,5 +567,5 @@ func (b *openComputerBackend) execTimeoutSecs() int {
 	if b.cfg.OpenComputer.ExecTimeoutSecs > 0 {
 		return b.cfg.OpenComputer.ExecTimeoutSecs
 	}
-	return openComputerExecTimeoutSecs
+	return core.OpenComputerConfigDefaultExecTimeoutSecs
 }

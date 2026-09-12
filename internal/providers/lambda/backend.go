@@ -66,15 +66,7 @@ func (b *backend) initDirect() {
 	if b.cfg.ServerType == "" {
 		b.cfg.ServerType = typeForConfig(b.cfg)
 	}
-	if b.cfg.Lambda.Region == "" {
-		b.cfg.Lambda.Region = defaultRegion
-	}
-	if b.cfg.Lambda.Type == "" {
-		b.cfg.Lambda.Type = defaultType
-	}
-	if b.cfg.Lambda.Image == "" && b.cfg.Lambda.ImageFamily == "" {
-		b.cfg.Lambda.ImageFamily = defaultImageFamily
-	}
+	b.cfg.Lambda = b.cfg.Lambda.WithRuntimeDefaults()
 	b.DirectSSHBackend = shared.DirectSSHBackend{
 		SpecValue:       b.spec,
 		Cfg:             b.cfg,

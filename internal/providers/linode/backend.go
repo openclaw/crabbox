@@ -1077,10 +1077,10 @@ func applyLinodeDefaults(cfg *core.Config) {
 		cfg.TargetOS = core.TargetLinux
 	}
 	if cfg.Linode.Region == "" {
-		cfg.Linode.Region = defaultRegion
+		cfg.Linode.Region = core.LinodeConfiguredRegionDefault
 	}
 	if cfg.Linode.Image == "" {
-		cfg.Linode.Image = defaultImage
+		cfg.Linode.Image = core.LinodeImageFallback
 	}
 	if cfg.Linode.Type == "" {
 		cfg.Linode.Type = linodeServerTypeForClass(cfg.Class)

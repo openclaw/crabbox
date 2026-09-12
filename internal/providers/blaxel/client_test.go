@@ -19,7 +19,117 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 
 	"github.com/openclaw/crabbox/internal/providers/shared"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
+
+type blaxelResponseBody struct {
+	*strings.Reader
+	readErr error
+	close   func() error
+}
+
+func (b *blaxelResponseBody) Read(p []byte) (int, error) {
+	n, err := b.Reader.Read(p)
+	if err == io.EOF && b.readErr != nil {
+		return n, b.readErr
+	}
+	return n, err
+}
+
+func (b *blaxelResponseBody) Close() error { return b.close() }
+
+func TestBlaxelBufferedResponseContract(t *testing.T) {
+	t.Setenv("CRABBOX_BLAXEL_API_KEY", "synthetic-first-key")
+	t.Setenv("BL_API_KEY", "synthetic-second-key")
+	readErr := errors.New("synthetic read failure")
+	for _, path := range []string{"json", "multipart"} {
+		t.Run(path, func(t *testing.T) {
+			for _, tc := range []struct {
+				name, body, kind, wantValue, wantErrorBody string
+				status                                     int
+				nilOutput, failRead                        bool
+			}{
+				{name: "empty", status: 200, wantValue: "initial"},
+				{name: "no-content", status: 204, wantValue: "initial"},
+				{name: "whitespace", status: 200, body: " \t\n", wantValue: "initial"},
+				{name: "nil-output-non-json", status: 200, body: "ordinary text", nilOutput: true, wantValue: "initial"},
+				{name: "raw-json", status: 200, body: " {\"value\":\"ok\"}\n", wantValue: "ok"},
+				{name: "null", status: 200, body: "null", wantValue: "initial"},
+				{name: "syntax", status: 200, body: "{", kind: "syntax", wantValue: "initial"},
+				{name: "trailing-data", status: 200, body: "{} {}", kind: "syntax", wantValue: "initial"},
+				{name: "type", status: 200, body: "{\"value\":3}", kind: "type", wantValue: "initial"},
+				{name: "read", status: 200, body: "partial", failRead: true, kind: "read", wantValue: "initial"},
+				{name: "read-before-status", status: 503, body: "partial", failRead: true, nilOutput: true, kind: "read", wantValue: "initial"},
+				{name: "status", status: 503, body: " unavailable \n", kind: "status", wantErrorBody: " unavailable \n", wantValue: "initial"},
+				{name: "status-nil-output", status: 503, body: " unavailable \n", nilOutput: true, kind: "status", wantErrorBody: " unavailable \n", wantValue: "initial"},
+				{name: "status-redaction", status: 503, body: " synthetic-first-key/synthetic-second-key \n", kind: "status", wantErrorBody: " <redacted>/<redacted> \n", wantValue: "initial"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					out := struct {
+						Value string `json:"value"`
+					}{Value: "initial"}
+					closes, calls := 0, 0
+					body := &blaxelResponseBody{Reader: strings.NewReader(tc.body)}
+					if tc.failRead {
+						body.readErr = readErr
+					}
+					body.close = func() error {
+						closes++
+						if body.Len() != 0 || out.Value != tc.wantValue {
+							t.Errorf("close before consumption/decode: remaining=%d value=%q", body.Len(), out.Value)
+						}
+						return errors.New("ignored synthetic close failure")
+					}
+					httpClient := &http.Client{Transport: testutil.RoundTripFunc(func(*http.Request) (*http.Response, error) {
+						calls++
+						return &http.Response{StatusCode: tc.status, Body: body, Header: make(http.Header)}, nil
+					})}
+					client := &restClient{http: httpClient, dataHTTP: httpClient}
+					var target any = &out
+					if tc.nilOutput {
+						target = nil
+					}
+					var data []byte
+					var err error
+					if path == "json" {
+						data, err = client.doAt(context.Background(), httpClient, "https://example.test", http.MethodGet, "/fixture", nil, nil, target)
+					} else {
+						data, err = client.doMultipartAt(context.Background(), "https://example.test", http.MethodPut, "/fixture", nil, "application/octet-stream", strings.NewReader("fixture"), target)
+					}
+					switch tc.kind {
+					case "":
+						if err != nil || data == nil || string(data) != tc.body {
+							t.Fatalf("data=%q nil=%v error=%v", data, data == nil, err)
+						}
+					case "read":
+						if err != readErr {
+							t.Fatalf("error=%v, want exact read error", err)
+						}
+					case "syntax":
+						if _, ok := err.(*json.SyntaxError); !ok {
+							t.Fatalf("error=%T %v, want unwrapped syntax error", err, err)
+						}
+					case "type":
+						if _, ok := err.(*json.UnmarshalTypeError); !ok {
+							t.Fatalf("error=%T %v, want unwrapped type error", err, err)
+						}
+					case "status":
+						got, ok := err.(apiError)
+						if !ok || got.StatusCode != tc.status || got.Body != tc.wantErrorBody {
+							t.Fatalf("error=%T %#v", err, err)
+						}
+					}
+					if tc.kind != "" && data != nil {
+						t.Fatalf("error returned bytes %q", data)
+					}
+					if calls != 1 || closes != 1 || out.Value != tc.wantValue {
+						t.Fatalf("calls=%d closes=%d value=%q", calls, closes, out.Value)
+					}
+				})
+			}
+		})
+	}
+}
 
 func TestRedactErrorPreservesCauseAndSafeFormatting(t *testing.T) {
 	if err := redactError(nil); err != nil {

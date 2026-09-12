@@ -4045,7 +4045,7 @@ func TestRunMissingOriginReplacementLeaseStaysPlainManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	remoteRoot := filepath.Join(testRoot, "remote")
-	leaseIDs := []string{"cbx_missing_first", "cbx_missing_replacement"}
+	var leaseIDs [2]string
 	providerName := runReadyPoolPreflightTestProvider{}.Name()
 	var (
 		acquires atomic.Int32
@@ -4096,12 +4096,22 @@ func TestRunMissingOriginReplacementLeaseStaysPlainManifest(t *testing.T) {
 			mu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{"receipt": stored})
 		case request.Method == http.MethodPost && request.URL.Path == "/v1/leases":
+			var body struct {
+				ID string `json:"leaseID"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil || body.ID == "" {
+				http.Error(w, "missing requested lease ID", http.StatusBadRequest)
+				return
+			}
 			index := int(acquires.Add(1)) - 1
 			if index >= len(leaseIDs) {
 				http.Error(w, "unexpected acquisition", http.StatusInternalServerError)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease(leaseIDs[index], "active")})
+			mu.Lock()
+			leaseIDs[index] = body.ID
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease(body.ID, "active")})
 		case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/leases/"):
 			id := strings.TrimPrefix(request.URL.Path, "/v1/leases/")
 			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease(id, "active")})
@@ -4198,7 +4208,13 @@ done <"$tmp"
 			t.Fatalf("replacement plain manifest ran forbidden Git path %q:\n%s", forbidden, commands)
 		}
 	}
-	for _, id := range leaseIDs {
+	mu.Lock()
+	createdIDs := leaseIDs
+	mu.Unlock()
+	if createdIDs[0] == createdIDs[1] {
+		t.Fatal("replacement reused the original lease ID")
+	}
+	for _, id := range createdIDs {
 		metaDir := filepath.Join(remoteRoot, id, repo.Name, ".crabbox")
 		if _, err := os.Stat(filepath.Join(metaDir, "sync-manifest")); err != nil {
 			t.Fatalf("%s manifest: %v", id, err)

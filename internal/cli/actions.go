@@ -51,8 +51,8 @@ func registerActionsHydrateTargetFlags(fs *flag.FlagSet, defaults Config) action
 	}
 }
 
-func (f actionsHydrateTargetFlags) loadConfig(fs *flag.FlagSet, leaseID string) (Config, error) {
-	cfg, err := loadLeaseTargetConfig(fs, *f.provider, f.target, f.network, leaseTargetConfigOptions{LeaseID: leaseID})
+func (f actionsHydrateTargetFlags) loadConfig(fs *flag.FlagSet, leaseID string, synthesized bool) (Config, error) {
+	cfg, err := loadLeaseTargetConfig(fs, *f.provider, f.target, f.network, leaseTargetConfigOptions{LeaseID: leaseID, SynthesizedInputs: synthesized})
 	if err != nil {
 		return Config{}, err
 	}
@@ -104,7 +104,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 		}
 		return nil
 	}
-	cfg, err := connectionFlags.loadConfig(fs, *leaseIDFlag)
+	cfg, err := connectionFlags.loadConfig(fs, *leaseIDFlag, a.synthesizedFlagInputs)
 	if err != nil {
 		return err
 	}
@@ -114,15 +114,19 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 	}
 	if *repoFlag != "" {
 		cfg.Actions.Repo = *repoFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *workflowFlag != "" {
 		cfg.Actions.Workflow = *workflowFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *jobFlag != "" {
 		cfg.Actions.Job = *jobFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *refFlag != "" {
 		cfg.Actions.Ref = *refFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if cfg.Actions.Workflow == "" {
 		return exit(2, "actions hydrate requires --workflow or actions.workflow")
@@ -371,12 +375,15 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	}
 	if *repoFlag != "" {
 		cfg.Actions.Repo = *repoFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *versionFlag != "" {
 		cfg.Actions.RunnerVersion = *versionFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if flagWasSet(fs, "ephemeral") {
 		cfg.Actions.Ephemeral = *ephemeralFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	extraLabels := splitCommaList(*labelsFlag)
 	ghRepo, err := resolveGitHubRepo(repo, cfg.Actions.Repo)
@@ -417,12 +424,15 @@ func (a App) actionsDispatch(ctx context.Context, args []string) error {
 	}
 	if *repoFlag != "" {
 		cfg.Actions.Repo = *repoFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *workflowFlag != "" {
 		cfg.Actions.Workflow = *workflowFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *refFlag != "" {
 		cfg.Actions.Ref = *refFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	ghRepo, err := resolveGitHubRepo(repo, cfg.Actions.Repo)
 	if err != nil {
@@ -2930,6 +2940,217 @@ exit 0
 	return remoteWriteActionsHydrationStop(leaseID)
 }
 
+func githubActionsRunnerToolCacheSeedScript() string {
+	return `if [ "$runner_arch" = x64 ] && command -v python3 >/dev/null 2>&1; then
+python3 - "$runner_dir" <<'CRABBOX_TOOLCACHE'
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+
+image = Path("/opt/hostedtoolcache")
+archives = Path("/opt/crabbox/toolchain-archives")
+home = Path(os.environ["HOME"])
+runner = Path(sys.argv[1])
+cache = runner / "_work" / "_tool"
+uid = os.getuid()
+cache_keys = ("RUNNER_TOOL_CACHE", "RUNNER_TOOLSDIRECTORY", "AGENT_TOOLSDIRECTORY", "agent.ToolsDirectory")
+
+def skip(reason):
+    print("runner-toolcache: skipped " + reason)
+
+def owned(path, directory=False):
+    info = path.lstat()
+    kind = stat.S_ISDIR if directory else stat.S_ISREG
+    return kind(info.st_mode) and info.st_uid == uid and not info.st_mode & 0o022
+
+def directory(path):
+    if not path.exists() and not path.is_symlink():
+        path.mkdir(mode=0o755)
+    if not owned(path, True):
+        raise ValueError("nonowned cache path")
+
+def quiescent():
+    # Unknown state is not evidence that no Runner can mutate the cache.
+    unit = subprocess.run(
+        ["systemctl", "show", "crabbox-actions-runner.service",
+         "--property=LoadState,ActiveState,Environment,EnvironmentFiles,PassEnvironment,DropInPaths"],
+        capture_output=True, text=True, timeout=10)
+    values = dict(line.split("=", 1) for line in unit.stdout.splitlines() if "=" in line)
+    if unit.returncode not in (0, 1) or values.get("LoadState") not in ("loaded", "not-found"):
+        return False
+    if values.get("ActiveState") not in ("inactive", "failed"):
+        return False
+    if any(values.get(key) for key in ("Environment", "EnvironmentFiles", "PassEnvironment", "DropInPaths")):
+        return False
+    manager = subprocess.run(
+        ["systemctl", "show", "--property=Environment"],
+        capture_output=True, text=True, timeout=10)
+    if manager.returncode != 0 or not manager.stdout.startswith("Environment="):
+        return False
+    if any(value.partition("=")[0] in cache_keys for value in shlex.split(manager.stdout.partition("=")[2])):
+        return False
+    processes = subprocess.run(
+        ["pgrep", "-f", r"(^|/|[[:space:]])Runner\.(Listener|Worker)([[:space:]]|$)"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    return processes.returncode == 1
+
+def digest(stream):
+    value = hashlib.sha256()
+    for block in iter(lambda: stream.read(1024 * 1024), b""):
+        value.update(block)
+    return value.digest()
+
+def verify_copy(tree, archive, tool):
+    # Authenticate copied files, modes and links, not a version command or marker.
+    expected = set()
+    size = 0
+    with tarfile.open(archive, "r:*") as packed:
+        for member in packed:
+            parts = member.name.rstrip("/").split("/")
+            if any(part in ("", ".", "..") for part in parts):
+                raise ValueError("unsafe archive path")
+            if len(parts) == 1:
+                if not member.isdir() or stat.S_IMODE(tree.lstat().st_mode) != member.mode & 0o777:
+                    raise ValueError("invalid archive root")
+                continue
+            name = "/".join(parts[1:])
+            if name in expected:
+                raise ValueError("duplicate archive path")
+            expected.add(name)
+            target = tree / name
+            info = target.lstat()
+            if member.isdir():
+                valid = stat.S_ISDIR(info.st_mode)
+            elif member.issym():
+                valid = stat.S_ISLNK(info.st_mode) and os.readlink(target) == member.linkname
+            elif member.isfile():
+                valid = stat.S_ISREG(info.st_mode) and info.st_size == member.size
+                if valid:
+                    with target.open("rb") as copied, packed.extractfile(member) as original:
+                        valid = digest(copied) == digest(original)
+                size += member.size
+            else:
+                valid = False
+            if not valid or (not member.issym() and stat.S_IMODE(info.st_mode) != member.mode & 0o777):
+                raise ValueError("image bytes or mode mismatch")
+    if tool == "node":
+        # Private corepack enable adds exactly these four relative links to the upstream tree.
+        for name in ("pnpm", "pnpx", "yarn", "yarnpkg"):
+            target = tree / "bin" / name
+            if not target.is_symlink() or os.readlink(target) != "../lib/node_modules/corepack/dist/" + name + ".js":
+                raise ValueError("image Corepack link mismatch")
+            expected.add("bin/" + name)
+    actual = set()
+    for root, dirs, files in os.walk(tree, followlinks=False):
+        actual.update(str((Path(root) / name).relative_to(tree)) for name in dirs + files)
+    if actual != expected:
+        raise ValueError("image file inventory mismatch")
+    return size
+
+def seed():
+    if home.resolve() != home or runner != home / "actions-runner":
+        skip("custom runner root")
+        return
+    if not owned(home, True) or not owned(runner, True) or not owned(runner / ".runner"):
+        skip("nonowned runner configuration")
+        return
+    with (runner / ".runner").open() as configuration:
+        fcntl.flock(configuration, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        settings = json.load(configuration)
+        if not isinstance(settings, dict):
+            raise ValueError("invalid runner settings")
+        work = settings.get("workFolder")
+        if not isinstance(work, str) or os.path.abspath(runner / work) != str(runner / "_work"):
+            skip("custom work folder")
+            return
+        environment = dict(os.environ)
+        dotenv = runner / ".env"
+        if dotenv.exists() or dotenv.is_symlink():
+            if not owned(dotenv):
+                skip("nonowned runner environment")
+                return
+            # Runner.Listener loads literal key/value lines, not a shell script.
+            for line in dotenv.read_text(encoding="utf-8-sig").split("\n"):
+                key, separator, value = line.partition("=")
+                if key and separator:
+                    if value:
+                        environment[key] = value
+                    else:
+                        environment.pop(key, None)
+        selected = next((environment[key] for key in cache_keys if key in environment), "")
+        if selected and selected != str(cache):
+            skip("custom cache root")
+            return
+        if not quiescent():
+            skip("busy or externally configured runner")
+            return
+        directory(runner / "_work")
+        directory(cache)
+        slots = (
+            ("node", "24.19.0", "node-v24.19.0-linux-x64.tar.xz",
+             "14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647"),
+            ("go", "1.27.0", "go1.27.0.linux-amd64.tar.gz",
+             "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685"),
+        )
+        for tool, version, filename, pin in slots:
+            source = image / tool / version / "x64"
+            destination = cache / tool / version / "x64"
+            marker = destination.with_name("x64.complete")
+            if os.path.lexists(destination) or os.path.lexists(marker):
+                skip(tool + " existing slot")
+                continue
+            try:
+                if not source.is_dir() or source.is_symlink() or not stat.S_ISREG(source.with_name("x64.complete").lstat().st_mode):
+                    raise ValueError("incomplete image slot")
+                raw = archives / filename
+                if not stat.S_ISREG(raw.lstat().st_mode):
+                    raise ValueError("invalid public archive")
+                with tempfile.TemporaryDirectory(prefix=".crabbox-toolcache-", dir=cache) as scratch:
+                    seed_started = time.monotonic()
+                    scratch = Path(scratch)
+                    archive = scratch / filename
+                    shutil.copyfile(raw, archive)
+                    with archive.open("rb") as stream:
+                        if digest(stream).hex() != pin:
+                            raise ValueError("public archive checksum mismatch")
+                    pending = scratch / "x64"
+                    started = time.monotonic()
+                    shutil.copytree(source, pending, symlinks=True)
+                    copy_ms = (time.monotonic() - started) * 1000
+                    size = verify_copy(pending, archive, tool)
+                    if not quiescent():
+                        skip("runner became busy")
+                        return
+                    directory(cache / tool)
+                    directory(cache / tool / version)
+                    if os.path.lexists(destination) or os.path.lexists(marker):
+                        skip(tool + " slot appeared during copy")
+                        continue
+                    pending.rename(destination)
+                    os.close(os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+                    seed_ms = (time.monotonic() - seed_started) * 1000
+                    print("runner-toolcache: seeded " + tool + "/" + version + "/x64 bytes=" + str(size) + " copy_ms=" + str(round(copy_ms, 3)) + " seed_ms=" + str(round(seed_ms, 3)))
+            except (OSError, ValueError, tarfile.TarError):
+                skip(tool + " unavailable or unauthenticated image slot")
+
+try:
+    seed()
+except (OSError, ValueError, subprocess.SubprocessError):
+    skip("unverified cache ownership or runner state")
+CRABBOX_TOOLCACHE
+fi`
+}
+
 func githubActionsRunnerInstallScript(version string, ephemeral bool) string {
 	if version == "" {
 		version = "latest"
@@ -2997,6 +3218,7 @@ sudo ./bin/installdependencies.sh >/tmp/crabbox-actions-runner-deps.log 2>&1 || 
 sudo mkdir -p "$HOME/.cache/node/corepack/v1"
 sudo chown -R "$(id -u):$(id -g)" "$HOME/.cache" 2>/dev/null || true
 ./config.sh --unattended --replace %s --url "https://github.com/${RUNNER_REPO}" --token "$RUNNER_TOKEN" --name "$RUNNER_NAME" --labels "$RUNNER_LABELS"
+%s
 cat >"$HOME/actions-runner/run-crabbox.sh" <<'RUNNER'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -3024,7 +3246,7 @@ WantedBy=multi-user.target
 SERVICE
 sudo systemctl daemon-reload
 sudo systemctl enable --now crabbox-actions-runner.service
-`, shellQuote(version), ephemeralArg)
+`, shellQuote(version), ephemeralArg, githubActionsRunnerToolCacheSeedScript())
 }
 
 func githubActionsRunnerInstallScriptForTarget(version string, ephemeral bool, target SSHTarget) string {

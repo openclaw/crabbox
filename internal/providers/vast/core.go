@@ -1,9 +1,6 @@
 package vast
 
 import (
-	"flag"
-	"strings"
-
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
@@ -32,10 +29,6 @@ func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
 }
 
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
-}
-
 func markVastWorkRootExplicit(cfg *Config) {
 	core.MarkVastWorkRootExplicit(cfg)
 }
@@ -46,13 +39,4 @@ func markReleaseActionExplicit(cfg *Config) {
 
 func normalizeInstanceType(value string) string {
 	return core.NormalizeVastInstanceType(value)
-}
-
-func isVastProviderName(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case providerName, "vast-ai", "vastai":
-		return true
-	default:
-		return false
-	}
 }

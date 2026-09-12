@@ -496,12 +496,12 @@ func (b *backend) createSandbox(ctx context.Context, client Client, repo Repo, r
 	slug := ""
 	req := CreateSandboxRequest{
 		Name:       newSandboxName(repo),
-		Image:      blank(b.cfg.Blaxel.Image, defaultImage),
+		Image:      blank(b.cfg.Blaxel.Image, core.BlaxelConfigDefaultImage),
 		Region:     b.cfg.Blaxel.Region,
 		MemoryMB:   b.cfg.Blaxel.MemoryMB,
 		TTL:        b.cfg.Blaxel.TTL,
 		IdleTTL:    b.cfg.Blaxel.IdleTTL,
-		WorkingDir: blank(b.cfg.Blaxel.Workdir, defaultWorkdir),
+		WorkingDir: blank(b.cfg.Blaxel.Workdir, core.BlaxelConfigDefaultWorkdir),
 		Labels: map[string]string{
 			"crabbox":          "true",
 			"crabbox.provider": providerName,
@@ -693,7 +693,7 @@ func (b *backend) execTimeoutSecs() int {
 	if b.cfg.Blaxel.ExecTimeoutSecs > 0 {
 		return b.cfg.Blaxel.ExecTimeoutSecs
 	}
-	return blaxelExecTimeout
+	return core.BlaxelConfigDefaultExecTimeoutSecs
 }
 
 func buildCommand(command []string, shellMode bool) ([]string, error) {
@@ -710,7 +710,7 @@ func buildCommand(command []string, shellMode bool) ([]string, error) {
 }
 
 func blaxelWorkdir(cfg Config) (string, error) {
-	workdir := strings.TrimSpace(blank(cfg.Blaxel.Workdir, defaultWorkdir))
+	workdir := strings.TrimSpace(blank(cfg.Blaxel.Workdir, core.BlaxelConfigDefaultWorkdir))
 	clean := path.Clean(workdir)
 	if workdir == "" || !strings.HasPrefix(clean, "/") || strings.Contains(workdir, "\x00") {
 		return "", exit(2, "blaxel workdir %q must be an absolute path", workdir)

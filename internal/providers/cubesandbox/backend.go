@@ -42,40 +42,45 @@ func RegisterCubeSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyCubeSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == providerName {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=cubesandbox")
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=cubesandbox")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(cubesandboxFlagValues)
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "cubesandbox-api-url") {
+	if core.FlagWasSet(fs, "cubesandbox-api-url") {
 		cfg.CubeSandbox.APIURL = *v.APIURL
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
-	if flagWasSet(fs, "cubesandbox-domain") {
+	if core.FlagWasSet(fs, "cubesandbox-domain") {
 		cfg.CubeSandbox.Domain = *v.Domain
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
-	if flagWasSet(fs, "cubesandbox-template") {
+	if core.FlagWasSet(fs, "cubesandbox-template") {
 		cfg.CubeSandbox.Template = *v.Template
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
-	if flagWasSet(fs, "cubesandbox-workdir") {
+	if core.FlagWasSet(fs, "cubesandbox-workdir") {
 		cfg.CubeSandbox.Workdir = *v.Workdir
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
-	if flagWasSet(fs, "cubesandbox-user") {
+	if core.FlagWasSet(fs, "cubesandbox-user") {
 		cfg.CubeSandbox.User = *v.User
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
-	if flagWasSet(fs, "cubesandbox-proxy-node-ip") {
+	if core.FlagWasSet(fs, "cubesandbox-proxy-node-ip") {
 		cfg.CubeSandbox.ProxyNodeIP = *v.ProxyNodeIP
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
-	if flagWasSet(fs, "cubesandbox-proxy-port-http") {
+	if core.FlagWasSet(fs, "cubesandbox-proxy-port-http") {
 		cfg.CubeSandbox.ProxyPortHTTP = *v.ProxyPortHTTP
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
-	if flagWasSet(fs, "cubesandbox-proxy-scheme") {
+	if core.FlagWasSet(fs, "cubesandbox-proxy-scheme") {
 		cfg.CubeSandbox.ProxyScheme = *v.ProxyScheme
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
 	return nil
 }

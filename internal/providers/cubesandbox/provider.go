@@ -18,6 +18,7 @@ func (Provider) Aliases() []string { return nil }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:             core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		SyncGuardrailFullCandidate: true,
 		Name:                       providerName,
 		Family:                     "cubesandbox",

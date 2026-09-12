@@ -140,21 +140,26 @@ func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values lea
 
 // Reuse with no ID projects a future follow-up without consulting lease claims.
 type leaseFlagTarget struct {
-	ID    string
-	Reuse bool
+	ID                string
+	Reuse             bool
+	SynthesizedInputs bool
 }
 
 func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseCreateFlagValues, target leaseFlagTarget, mutateExternal bool) error {
+	markSynthesizedFlagInputs(cfg, target.SynthesizedInputs)
 	cfg.Provider = *values.Provider
 	prepareProviderDefaults(cfg)
 	cfg.Profile = *values.Profile
+	recordConfigInput(cfg, configInputGeneric, configInputFlag, flagWasSet(fs, "profile"))
 	cfg.Class = *values.Class
+	recordConfigInput(cfg, configInputGeneric, configInputFlag, flagWasSet(fs, "class"))
 	if flagWasSet(fs, "ssh-port") {
 		cfg.SSHPort = strings.TrimSpace(*values.SSHPort)
 		if cfg.SSHPort == "" {
 			return exit(2, "--ssh-port must not be empty")
 		}
 		MarkSSHPortExplicit(cfg)
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 	}
 	cfg.classFlagExplicit = flagWasSet(fs, "class")
 	if cfg.classFlagExplicit {
@@ -167,6 +172,7 @@ func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseC
 		}
 		cfg.Architecture = arch
 		cfg.architectureExplicit = true
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 	}
 	if flagWasSet(fs, "pond") {
 		pond, err := requestedPondName(*values.Pond)
@@ -174,6 +180,7 @@ func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseC
 			return err
 		}
 		cfg.Pond = pond
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 	} else if cfg.Pond != "" {
 		pond, err := requestedPondName(cfg.Pond)
 		if err != nil {
@@ -182,6 +189,7 @@ func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseC
 		cfg.Pond = pond
 	}
 	applyCapabilityFlags(cfg, *values.Desktop, *values.Browser, *values.Code)
+	recordConfigInput(cfg, configInputGeneric, configInputFlag, flagWasSet(fs, "desktop") || flagWasSet(fs, "browser") || flagWasSet(fs, "code"))
 	if err := validateImageVersion(strings.TrimSpace(*values.ImageMinOS), "image-min-os"); err != nil {
 		return err
 	}
@@ -201,7 +209,11 @@ func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseC
 		WebView2: *values.ImageWebView2,
 		Desktop:  *values.ImageDesktop,
 	}
+	recordConfigInput(cfg, configInputGeneric, configInputFlag,
+		flagWasSet(fs, "image-min-os") || flagWasSet(fs, "image-sdk") || flagWasSet(fs, "image-runtime") ||
+			flagWasSet(fs, "image-require-browser") || flagWasSet(fs, "image-require-webview2") || flagWasSet(fs, "image-require-desktop"))
 	cfg.DesktopEnv = *values.DesktopEnv
+	recordConfigInput(cfg, configInputGeneric, configInputFlag, flagWasSet(fs, "desktop-env"))
 	if err := applyTargetFlagOverrides(cfg, fs, values.Target); err != nil {
 		return err
 	}
@@ -216,6 +228,7 @@ func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseC
 		}
 		cfg.OSImage = osImage
 		cfg.osImageExplicit = true
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 		applyOSImageProviderDefaults(cfg, false)
 	}
 	if err := applyNetworkFlagOverrides(cfg, fs, values.Network); err != nil {
@@ -235,9 +248,11 @@ func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseC
 	}
 	if flagWasSet(fs, "ttl") {
 		cfg.TTL = *values.TTL
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 	}
 	if flagWasSet(fs, "idle-timeout") {
 		cfg.IdleTimeout = *values.Idle
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 	}
 	if err := applyProviderFlags(cfg, fs, values.ProviderFlags); err != nil {
 		return err
@@ -255,6 +270,7 @@ func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseC
 			volumes[i].Required = true
 		}
 		cfg.Cache.Volumes = mergeCacheVolumes(cfg.Cache.Volumes, volumes)
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, len(volumes) > 0)
 	}
 	if err := validateCacheVolumesForLeaseReuse(*cfg, target.ID); err != nil {
 		return err
@@ -280,6 +296,7 @@ func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseC
 			return err
 		}
 		cfg.ExposedPorts = ports
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 	}
 	if err := validateLeaseDurations(*cfg); err != nil {
 		return err
@@ -439,7 +456,8 @@ func truthyEnv(value string) bool {
 }
 
 type leaseTargetConfigOptions struct {
-	Desktop bool
+	Desktop           bool
+	SynthesizedInputs bool
 	// LeaseID is the resolved lease id/slug from the command's --id flag (or
 	// equivalent positional). When set, `static_<host>` ids auto-route to the
 	// ssh provider so callers don't have to re-pass --provider / --static-host
@@ -457,6 +475,7 @@ func loadLeaseTargetConfig(fs *flag.FlagSet, provider string, targetFlags target
 	if err != nil {
 		return Config{}, err
 	}
+	markSynthesizedFlagInputs(&cfg, opts.SynthesizedInputs)
 	if flagWasSet(fs, "provider") {
 		setProviderSelection(&cfg, provider, providerSelectionFlag)
 	} else {

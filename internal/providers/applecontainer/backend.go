@@ -28,15 +28,6 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 	return &backend{spec: spec, cfg: cfg, rt: rt}
 }
 
-func isAppleContainerProvider(name string) bool {
-	switch name {
-	case providerName, "apple", "applecontainer":
-		return true
-	default:
-		return false
-	}
-}
-
 func applyDefaults(cfg *core.Config) {
 	cfg.Provider = providerName
 	if cfg.TargetOS == "" {

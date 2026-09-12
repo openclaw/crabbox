@@ -514,7 +514,9 @@ describe("aws provider", () => {
     ).resolves.toBeUndefined();
 
     owned = false;
-    await client.deleteSSHKey("crabbox-cbx-abcdef123456", "cbx_abcdef123456");
+    await expect(
+      client.deleteSSHKey("crabbox-cbx-abcdef123456", "cbx_abcdef123456"),
+    ).rejects.toThrow("ownership does not match lease cbx_abcdef123456");
     owned = true;
     await client.deleteSSHKey("crabbox-cbx-abcdef123456", "cbx_abcdef123456");
     expect(actions).toEqual([
@@ -927,6 +929,183 @@ describe("aws provider", () => {
     await expect(client.findServer("i-abcdef123456")).rejects.toThrow("AuthFailure");
   });
 
+  it("treats an empty successful DescribeInstances response as an absent optional lookup", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        ec2XMLResponse(
+          "<DescribeInstancesResponse><requestId>req-empty</requestId><reservationSet /></DescribeInstancesResponse>",
+        ),
+      ),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "us-east-1",
+    );
+
+    await expect(client.findServer("i-abcdef123456")).resolves.toBeUndefined();
+    await expect(client.getServer("i-abcdef123456")).rejects.toThrow(
+      "aws instance not found: i-abcdef123456",
+    );
+  });
+
+  it("preserves a leading-zero AWS account ID", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        ec2XMLResponse(`<GetCallerIdentityResponse><GetCallerIdentityResult>
+          <Account>001234567890</Account>
+          <Arn>arn:aws:iam::001234567890:user/crabbox</Arn>
+          <UserId>AIDAEXAMPLE</UserId>
+        </GetCallerIdentityResult></GetCallerIdentityResponse>`),
+      ),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "us-east-1",
+    );
+
+    await expect(client.identity()).resolves.toMatchObject({ account: "001234567890" });
+  });
+
+  it.each([
+    {
+      name: "generic Response envelope",
+      response: "<Response><requestId>req-generic</requestId><reservationSet /></Response>",
+    },
+    {
+      name: "missing requestId",
+      response: "<DescribeInstancesResponse><reservationSet /></DescribeInstancesResponse>",
+    },
+    {
+      name: "empty requestId",
+      response:
+        "<DescribeInstancesResponse><requestId> </requestId><reservationSet /></DescribeInstancesResponse>",
+    },
+    {
+      name: "sibling fallback root",
+      response:
+        "<DescribeInstancesResponse><requestId>req-extra</requestId><reservationSet /></DescribeInstancesResponse><Response />",
+    },
+    { name: "HTML", response: "<html><body>ok</body></html>" },
+    { name: "empty body", response: "" },
+    { name: "malformed XML", response: "<DescribeInstancesResponse>" },
+    {
+      name: "mismatched closing tag",
+      response:
+        "<DescribeInstancesResponse><requestId>req-mismatch</requestId><reservationSet /></Response>",
+    },
+  ])(
+    "rejects a noncanonical successful DescribeInstances response: $name",
+    async ({ response }) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => ec2XMLResponse(response)),
+      );
+      const client = new EC2SpotClient(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+        "us-east-1",
+      );
+
+      await expect(client.findServer("i-abcdef123456")).rejects.toThrow(
+        "malformed AWS DescribeInstances response",
+      );
+    },
+  );
+
+  it("rejects a malformed optional DescribeInstances ownerId", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        ec2XMLResponse(`<DescribeInstancesResponse><requestId>req-owner</requestId>
+          <reservationSet><item><ownerId>not-an-account</ownerId><instancesSet><item>
+            <instanceId>i-abcdef123456</instanceId>
+            <instanceState><name>running</name></instanceState>
+          </item></instancesSet></item></reservationSet>
+        </DescribeInstancesResponse>`),
+      ),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "us-east-1",
+    );
+
+    await expect(client.findServer("i-abcdef123456")).rejects.toThrow(
+      "malformed AWS DescribeInstances response: ownerId is invalid",
+    );
+  });
+
+  it.each([
+    {
+      name: "missing reservationSet",
+      response:
+        "<DescribeInstancesResponse><requestId>req-missing</requestId></DescribeInstancesResponse>",
+    },
+    {
+      name: "reservationSet without items",
+      response:
+        "<DescribeInstancesResponse><requestId>req-items</requestId><reservationSet><nextToken>next</nextToken></reservationSet></DescribeInstancesResponse>",
+    },
+    {
+      name: "empty reservation item",
+      response:
+        "<DescribeInstancesResponse><requestId>req-reservation</requestId><reservationSet><item /></reservationSet></DescribeInstancesResponse>",
+    },
+    {
+      name: "reservation without instancesSet",
+      response:
+        "<DescribeInstancesResponse><requestId>req-instances</requestId><reservationSet><item><ownerId>123456789012</ownerId></item></reservationSet></DescribeInstancesResponse>",
+    },
+    {
+      name: "empty instancesSet",
+      response:
+        "<DescribeInstancesResponse><requestId>req-empty-instances</requestId><reservationSet><item><instancesSet /></item></reservationSet></DescribeInstancesResponse>",
+    },
+    {
+      name: "instancesSet without items",
+      response:
+        "<DescribeInstancesResponse><requestId>req-instance-items</requestId><reservationSet><item><instancesSet><nextToken>next</nextToken></instancesSet></item></reservationSet></DescribeInstancesResponse>",
+    },
+    {
+      name: "empty instance item",
+      response:
+        "<DescribeInstancesResponse><requestId>req-instance</requestId><reservationSet><item><instancesSet><item /></instancesSet></item></reservationSet></DescribeInstancesResponse>",
+    },
+  ])("rejects malformed successful DescribeInstances XML: $name", async ({ response }) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ec2XMLResponse(response)),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "us-east-1",
+    );
+
+    await expect(client.findServer("i-abcdef123456")).rejects.toThrow(
+      "malformed AWS DescribeInstances response",
+    );
+  });
+
+  it("rejects a successful DescribeInstances response for a different instance", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        ec2XMLResponse(`<DescribeInstancesResponse><requestId>req-wrong</requestId>
+          <reservationSet><item><instancesSet><item>
+          <instanceId>i-different123456</instanceId><instanceState><name>running</name></instanceState>
+        </item></instancesSet></item></reservationSet></DescribeInstancesResponse>`),
+      ),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "us-east-1",
+    );
+
+    await expect(client.findServer("i-abcdef123456")).rejects.toThrow(
+      "returned instance i-different123456 for i-abcdef123456",
+    );
+  });
+
   it.each([
     { attached: false, profileXML: "" },
     {
@@ -940,7 +1119,8 @@ describe("aws provider", () => {
       vi.stubGlobal(
         "fetch",
         vi.fn(async () =>
-          ec2XMLResponse(`<DescribeInstancesResponse><reservationSet><item><instancesSet><item>
+          ec2XMLResponse(`<DescribeInstancesResponse><requestId>req-profile</requestId>
+          <reservationSet><item><instancesSet><item>
           <instanceId>i-abcdef123456</instanceId>
           <instanceState><name>running</name></instanceState>
           <instanceType>c7a.8xlarge</instanceType>
@@ -1006,26 +1186,11 @@ describe("aws provider", () => {
     const client = new EC2SpotClient(
       { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
       "us-east-1",
-    ) as EC2SpotClient & {
-      getServer: (instanceID: string) => Promise<{
-        id: string;
-        name: string;
-        provider: "aws";
-        cloudID: string;
-        host: string;
-        status: string;
-        serverType: string;
-      }>;
-    };
-    let calls = 0;
-    client.getServer = async () => {
-      calls += 1;
-      if (calls === 1) {
-        throw new Error(
-          "aws DescribeInstances: http 400: InvalidInstanceID.NotFound: The instance ID 'i-1' does not exist",
-        );
-      }
-      return {
+    );
+    const findServer = vi
+      .spyOn(client, "findServer")
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
         id: "i-1",
         name: "blue-lobster",
         provider: "aws",
@@ -1033,13 +1198,38 @@ describe("aws provider", () => {
         host: "203.0.113.10",
         status: "running",
         serverType: "m7i.large",
-      };
-    };
+        labels: {},
+      });
 
     const resultPromise = client.waitForServerIP("i-1");
     await vi.advanceTimersByTimeAsync(5_000);
     await expect(resultPromise).resolves.toMatchObject({ host: "203.0.113.10" });
-    expect(calls).toBe(2);
+    expect(findServer).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps empty visibility reads bounded and fails closed", async () => {
+    const delays: number[] = [];
+    const fetchMock = vi.fn<() => Promise<Response>>(async () =>
+      ec2XMLResponse(
+        "<DescribeInstancesResponse><requestId>req-visibility</requestId><reservationSet /></DescribeInstancesResponse>",
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("setTimeout", ((callback: () => void, delay?: number) => {
+      delays.push(delay ?? 0);
+      queueMicrotask(callback);
+      return 0;
+    }) as typeof setTimeout);
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "us-east-1",
+    );
+
+    await expect(client.waitForServerVisibility("i-abcdef123456")).rejects.toThrow(
+      "aws instance not found: i-abcdef123456",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(7);
+    expect(delays).toEqual([1_000, 2_000, 4_000, 8_000, 15_000, 30_000]);
   });
 
   it("turns low AWS vCPU quota into a doctor readiness warning", () => {
@@ -3323,10 +3513,12 @@ describe("aws provider", () => {
     client.ec2 = async (action, params = {}) => {
       if (action === "DescribeInstances") {
         return {
+          requestId: "req-snapshot-source",
           reservationSet: {
             item: {
               instancesSet: {
                 item: {
+                  instanceId: "i-000000000001",
                   rootDeviceName: "/dev/xvda",
                   architecture: "arm64",
                   blockDeviceMapping: {

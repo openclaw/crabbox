@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 	"github.com/openclaw/crabbox/internal/tailbuffer"
 )
@@ -184,7 +185,7 @@ func newKubernetesClient(ctx context.Context, cfg Config, rt Runtime) (kubernete
 	}
 	kubectl := strings.TrimSpace(values.Kubectl)
 	if kubectl == "" {
-		kubectl = "kubectl"
+		kubectl = core.AgentSandboxConfigDefaultKubectl
 	}
 
 	baseArgs := make([]string, 0, 4)

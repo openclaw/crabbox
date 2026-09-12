@@ -19,19 +19,9 @@ import (
 )
 
 const morphReadyCheck = "command -v bash >/dev/null && command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && (command -v python3 >/dev/null || command -v python >/dev/null || command -v perl >/dev/null)"
-const defaultMorphWorkRoot = "/tmp/crabbox"
 const morphAcquireRollbackTimeout = 30 * time.Second
 
 var waitForMorphSSHReady = waitForSSHReady
-
-type morphFlagValues struct {
-	APIURL          *string
-	Snapshot        *string
-	SSHGatewayHost  *string
-	WorkRoot        *string
-	DeleteOnRelease *bool
-	WakeOnSSH       *bool
-}
 
 type morphLeaseBackend struct {
 	spec              ProviderSpec
@@ -45,50 +35,29 @@ type morphLeaseBackend struct {
 }
 
 func RegisterMorphProviderFlags(fs *flag.FlagSet, defaults Config) any {
-	return morphFlagValues{
-		APIURL:          fs.String("morph-api-url", defaults.Morph.APIURL, "Morph API URL"),
-		Snapshot:        fs.String("morph-snapshot", defaults.Morph.Snapshot, "Morph snapshot ID"),
-		SSHGatewayHost:  fs.String("morph-ssh-gateway-host", defaults.Morph.SSHGatewayHost, "Morph SSH gateway host"),
-		WorkRoot:        fs.String("morph-work-root", defaults.Morph.WorkRoot, "Morph remote Crabbox work root"),
-		DeleteOnRelease: fs.Bool("morph-delete-on-release", defaults.Morph.DeleteOnRelease, "Delete Morph instances instead of pausing them on release"),
-		WakeOnSSH:       fs.Bool("morph-wake-on-ssh", defaults.Morph.WakeOnSSH, "Enable Morph wake-on-ssh for paused instances"),
-	}
+	return core.RegisterMorphConfigFlags(fs, defaults.Morph)
 }
 
 func ApplyMorphProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if isMorphProviderName(cfg.Provider) {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=morph")
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=morph; use --morph-snapshot")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", "use --morph-snapshot"); err != nil {
+			return err
 		}
 		if cfg.TargetOS != "" && cfg.TargetOS != targetLinux {
 			return exit(2, "provider=morph supports target=linux only")
 		}
 	}
-	v, ok := values.(morphFlagValues)
+	v, ok := values.(core.MorphConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "morph-api-url") {
-		cfg.Morph.APIURL = *v.APIURL
-	}
-	if flagWasSet(fs, "morph-snapshot") {
-		cfg.Morph.Snapshot = *v.Snapshot
-	}
-	if flagWasSet(fs, "morph-ssh-gateway-host") {
-		cfg.Morph.SSHGatewayHost = *v.SSHGatewayHost
-	}
-	if flagWasSet(fs, "morph-work-root") {
-		cfg.Morph.WorkRoot = *v.WorkRoot
-	}
-	if flagWasSet(fs, "morph-delete-on-release") {
-		cfg.Morph.DeleteOnRelease = *v.DeleteOnRelease
+	applied, err := v.Apply(&cfg.Morph, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	if applied.DeleteOnRelease {
 		markDeleteOnReleaseExplicit(cfg)
 	}
-	if flagWasSet(fs, "morph-wake-on-ssh") {
-		cfg.Morph.WakeOnSSH = *v.WakeOnSSH
+	if err != nil {
+		return err
 	}
 	if isMorphProviderName(cfg.Provider) {
 		applyMorphDefaults(cfg)
@@ -752,14 +721,14 @@ func applyMorphDefaults(cfg *Config) {
 		cfg.TargetOS = targetLinux
 	}
 	if strings.TrimSpace(cfg.Morph.APIURL) == "" {
-		cfg.Morph.APIURL = "https://cloud.morph.so"
+		cfg.Morph.APIURL = core.MorphConfigDefaultAPIURL
 	}
 	if strings.TrimSpace(cfg.Morph.SSHGatewayHost) == "" {
-		cfg.Morph.SSHGatewayHost = "ssh.cloud.morph.so"
+		cfg.Morph.SSHGatewayHost = core.MorphConfigDefaultSSHGatewayHost
 	}
 	if strings.TrimSpace(cfg.Morph.WorkRoot) == "" {
 		if isDefaultWorkRoot(cfg.WorkRoot) || strings.TrimSpace(cfg.WorkRoot) == "" {
-			cfg.Morph.WorkRoot = defaultMorphWorkRoot
+			cfg.Morph.WorkRoot = core.MorphConfigDefaultWorkRoot
 		} else {
 			cfg.Morph.WorkRoot = cfg.WorkRoot
 		}
@@ -921,13 +890,13 @@ func morphServer(instance morphInstance, cfg Config, leaseID, slug string) Serve
 		Labels:   labels,
 	}
 	server.ServerType.Name = blank(labels["server_type"], blank(labels["snapshot_id"], blank(cfg.ServerType, "snapshot")))
-	server.PublicNet.IPv4.IP = blank(strings.TrimSpace(cfg.Morph.SSHGatewayHost), "ssh.cloud.morph.so")
+	server.PublicNet.IPv4.IP = blank(strings.TrimSpace(cfg.Morph.SSHGatewayHost), core.MorphConfigDefaultSSHGatewayHost)
 	return server
 }
 
 func morphSSHTarget(cfg Config, instance morphInstance, keyPath, knownHostsPath string) SSHTarget {
-	target := sshTargetFromConfig(cfg, blank(strings.TrimSpace(cfg.Morph.SSHGatewayHost), "ssh.cloud.morph.so"))
-	target.Host = blank(strings.TrimSpace(cfg.Morph.SSHGatewayHost), "ssh.cloud.morph.so")
+	target := sshTargetFromConfig(cfg, blank(strings.TrimSpace(cfg.Morph.SSHGatewayHost), core.MorphConfigDefaultSSHGatewayHost))
+	target.Host = blank(strings.TrimSpace(cfg.Morph.SSHGatewayHost), core.MorphConfigDefaultSSHGatewayHost)
 	target.Port = "22"
 	target.User = instance.ID
 	target.Key = keyPath
@@ -1110,5 +1079,5 @@ func boolPtr(value bool) *bool {
 
 func isDefaultMorphWorkRoot(value string) bool {
 	value = strings.TrimSpace(value)
-	return value == "" || value == defaultMorphWorkRoot || isDefaultWorkRoot(value)
+	return value == "" || value == core.MorphConfigDefaultWorkRoot || isDefaultWorkRoot(value)
 }

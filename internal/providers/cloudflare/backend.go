@@ -404,7 +404,7 @@ func rejectCloudflareSyncOptions(req RunRequest) error {
 }
 
 func cloudflareWorkdir(cfg Config) (string, error) {
-	workdir := blank(strings.TrimSpace(cfg.Cloudflare.Workdir), "/workspace/crabbox")
+	workdir := blank(strings.TrimSpace(cfg.Cloudflare.Workdir), core.CloudflareConfigDefaultWorkdir)
 	clean := path.Clean(workdir)
 	if !strings.HasPrefix(clean, "/") {
 		return "", exit(2, "%s workdir %q must resolve to an absolute path", providerName, workdir)

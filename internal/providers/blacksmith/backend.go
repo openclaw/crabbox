@@ -3,13 +3,11 @@ package blacksmith
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -48,12 +46,14 @@ type timingPhase = core.TimingPhase
 const targetLinux = core.TargetLinux
 
 func RegisterBlacksmithProviderFlags(fs *flag.FlagSet, defaults Config) any {
-	return registerBlacksmithFlags(fs, defaults)
+	return core.RegisterBlacksmithConfigFlags(fs, defaults.Blacksmith)
 }
 
 func ApplyBlacksmithProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	if v, ok := values.(blacksmithFlagValues); ok {
-		applyBlacksmithFlagOverrides(cfg, fs, v)
+	if v, ok := values.(core.BlacksmithConfigFlagValues); ok {
+		applied, err := v.Apply(&cfg.Blacksmith, fs)
+		core.RecordProviderFlagInputs(cfg, applied.InputAccepted, "blacksmith-testbox")
+		return err
 	}
 	return nil
 }
@@ -108,6 +108,11 @@ func (b *blacksmithBackend) ValidateRunOptions(req RunRequest) error {
 func validateBlacksmithRunOptions(spec ProviderSpec, req RunRequest) error {
 	if req.NoSync {
 		return core.Exit(2, "%s delegates sync; --no-sync is not supported", blacksmithTestboxProvider)
+	}
+	if len(req.ArtifactGlobs) > 0 || len(req.RequiredArtifactGlobs) > 0 {
+		if err := core.ValidateLocalCommandProcessGroupJoin(context.Background()); err != nil {
+			return core.Exit(2, "Blacksmith artifact command ownership: %v", err)
+		}
 	}
 	return core.RejectDelegatedSyncOptionsForSpec(spec, req)
 }
@@ -371,63 +376,6 @@ func printBlacksmithOneShotActionsWarning(w io.Writer, actionsURL string) {
 	fmt.Fprintln(w)
 }
 
-func blacksmithExtractArtifactArchive(output string, maxBytes int64) ([]byte, string, error) {
-	begin := blacksmithArtifactMarkerLineIndex(output, core.DelegatedRunArtifactBeginMarker, 0)
-	end := -1
-	if begin >= 0 {
-		end = blacksmithArtifactMarkerLineIndex(output, core.DelegatedRunArtifactEndMarker, begin+len(core.DelegatedRunArtifactBeginMarker))
-	}
-	if begin < 0 || end < 0 {
-		return nil, output, exit(7, "blacksmith artifact retrieval did not return a bounded artifact archive")
-	}
-	before := strings.TrimSpace(output[:begin])
-	encodedStart := begin + len(core.DelegatedRunArtifactBeginMarker)
-	encoded := output[encodedStart:end]
-	after := strings.TrimSpace(output[end+len(core.DelegatedRunArtifactEndMarker):])
-	compact := strings.NewReplacer("\n", "", "\r", "", "\t", "", " ", "").Replace(encoded)
-	if maxBytes <= 0 {
-		maxBytes = core.DelegatedRunArtifactDefaultMaxBytes
-	}
-	decodedLen := int64(base64.StdEncoding.DecodedLen(len(compact)))
-	if strings.HasSuffix(compact, "==") {
-		decodedLen -= 2
-	} else if strings.HasSuffix(compact, "=") {
-		decodedLen--
-	}
-	if decodedLen > maxBytes {
-		return nil, "", exit(7, "blacksmith artifact archive too large: decoded output exceeds %d bytes", maxBytes)
-	}
-	archive, err := base64.StdEncoding.DecodeString(compact)
-	if err != nil {
-		return nil, "", exit(7, "blacksmith artifact archive decode failed: %v", err)
-	}
-	if int64(len(archive)) > maxBytes {
-		return nil, "", exit(7, "blacksmith artifact archive too large: %d > %d bytes", len(archive), maxBytes)
-	}
-	return archive, strings.TrimSpace(strings.TrimSpace(before) + "\n" + strings.TrimSpace(after)), nil
-}
-
-func blacksmithArtifactMarkerLineIndex(output, marker string, start int) int {
-	if start < 0 {
-		start = 0
-	}
-	for offset := start; offset < len(output); {
-		idx := strings.Index(output[offset:], marker)
-		if idx < 0 {
-			return -1
-		}
-		pos := offset + idx
-		beforeLine := pos == 0 || output[pos-1] == '\n'
-		after := pos + len(marker)
-		afterLine := after == len(output) || output[after] == '\n' || output[after] == '\r'
-		if beforeLine && afterLine {
-			return pos
-		}
-		offset = after
-	}
-	return -1
-}
-
 var githubActionsRunURLPattern = regexp.MustCompile(`https://github\.com/[^\s"'<>]+/actions/runs/[0-9]+[^\s"'<>]*`)
 
 func blacksmithEnvForwardingRequested(req RunRequest) bool {
@@ -440,16 +388,6 @@ const (
 	blacksmithCleanupTimeout                       = 30 * time.Second
 	blacksmithArtifactDiagnosticCaptureBytes int64 = 64 * 1024
 )
-
-func blacksmithArtifactOutputCaptureLimit(maxBytes int64) int64 {
-	if maxBytes <= 0 {
-		maxBytes = core.DelegatedRunArtifactDefaultMaxBytes
-	}
-	if maxBytes > (math.MaxInt64-blacksmithArtifactDiagnosticCaptureBytes-4096)/2 {
-		return math.MaxInt64
-	}
-	return maxBytes*2 + blacksmithArtifactDiagnosticCaptureBytes + 4096
-}
 
 type blacksmithProofTailBuffer struct {
 	mu         sync.Mutex
@@ -951,6 +889,20 @@ func (b *blacksmithBackend) runCommandCaptureInDir(ctx context.Context, args []s
 	if dir != "" {
 		// Artifact supervision must also bound local pipe draining on cancel.
 		request.CancelGracePeriod = time.Second
+		request.Env = append(os.Environ(), "BLACKSMITH_DISABLE_AUTO_UPDATE=1")
+		request.RequireProcessGroupJoin = true
+		output := stderr
+		if output == nil {
+			output = b.rt.Stderr
+		}
+		if output == nil {
+			output = io.Discard
+		}
+		progress := &blacksmithArtifactProgressWriter{output: output}
+		request.Stderr = progress
+		request.OnCleanupPending = func(err error) {
+			fmt.Fprintf(progress, "blacksmith command cleanup pending: %v\n", err)
+		}
 	}
 	if !disableOutputCapture {
 		request.MaxCapturedOutputBytes = blacksmithCommandCaptureBytes
@@ -960,6 +912,18 @@ func (b *blacksmithBackend) runCommandCaptureInDir(ctx context.Context, args []s
 		return result, blacksmithCommandError{ExitError: ExitError{Code: result.ExitCode, Message: fmt.Sprintf("blacksmith failed: %v", err)}, cause: err}
 	}
 	return result, nil
+}
+
+// Cleanup notification may arrive while native stderr is still draining.
+type blacksmithArtifactProgressWriter struct {
+	mu     sync.Mutex
+	output io.Writer
+}
+
+func (w *blacksmithArtifactProgressWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.output.Write(p)
 }
 
 func (b *blacksmithBackend) runCommandWithSyncGuard(ctx context.Context, args []string, stdout, stderr io.Writer) (LocalCommandResult, bool, error) {

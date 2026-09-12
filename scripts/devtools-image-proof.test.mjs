@@ -5,8 +5,11 @@ import test from "node:test";
 import {
   measurementPolicy,
   observedSelection,
+  partialCohort,
   projectManifest,
+  projectOutcome,
   validateCohort,
+  validateOutcome,
   validatePromotionReceipt,
 } from "./devtools-image-proof.mjs";
 
@@ -109,7 +112,7 @@ function cohort(offset = 0) {
       promotedAt: "2026-09-01T00:00:00Z",
     },
   }));
-  return {
+  const result = {
     records,
     report,
     check,
@@ -124,6 +127,8 @@ function cohort(offset = 0) {
     })),
     cleanupIds: records.map((record) => record.timing.leaseId),
   };
+  if (offset === 0) delete result.check;
+  return result;
 }
 
 test("measured policy requires an explicit positive threshold and names 12 planned leases", () => {
@@ -167,15 +172,6 @@ test("cohorts accept measured zero-duration sync but reject missing, mixed, or r
       value.report.groups.push(value.report.groups[0]);
     },
     (value) => {
-      value.check.passed = false;
-    },
-    (value) => {
-      value.check.policy.maxP95RunnerTotal = "1h0m0s";
-    },
-    (value) => {
-      value.check.groups[0].runnerTotalN = 2;
-    },
-    (value) => {
       value.handles[0].kept = false;
     },
     (value) => {
@@ -197,6 +193,23 @@ test("cohorts accept measured zero-duration sync but reject missing, mixed, or r
     const mutated = structuredClone(input);
     mutate(mutated);
     assert.throws(() => validateCohort(policy, "baseline", mutated));
+  }
+  for (const mutate of [
+    (value) => {
+      value.check.passed = false;
+    },
+    (value) => {
+      value.check.policy.maxP95RunnerTotal = "1h0m0s";
+    },
+    (value) => {
+      value.check.groups[0].runnerTotalN = 2;
+    },
+  ]) {
+    const candidate = cohort(3);
+    mutate(candidate);
+    assert.throws(() =>
+      validateCohort(policy, "candidate", candidate, [input], "ami-candidate"),
+    );
   }
   assert.throws(() => validateCohort(policy, "baseline", input, [input]), /reused/);
   const mixed = cohort(3);
@@ -263,7 +276,7 @@ test("selection must be an actual unambiguous observation, not requested values"
 test("baseline selection reconciles with the original promotion receipt", () => {
   const baseline = cohort().selections[0];
   const receipt = {
-    image: { id: "ami-candidate", region: policy.region },
+    image: { id: "ami-candidate", region: policy.region, revision: "revision-1" },
     previous: {
       state: "present",
       imageId: baseline.image.id,
@@ -313,25 +326,157 @@ test("public proof is an allowlisted projection, not raw reports or arbitrary st
     input.report.storePath = poison;
     input.report.groups[0].providerFamily = poison;
     input.report.groups[0].runnerPhases = [{ name: poison, ms: 1000 }];
-    input.check.groups[0].providerCategory = poison;
+    if (input.check) input.check.groups[0].providerCategory = poison;
     input.records[0].benchmark.commandDisplay = poison;
     input.records[0].timing.repoPath = poison;
     return validateCohort(policy, phase, input, [], "ami-candidate");
   });
-  const manifest = projectManifest(policy, inputs);
+  const receipt = {
+    image: { id: "ami-candidate", revision: "revision-1" },
+  };
+  const manifest = projectManifest(policy, inputs, receipt);
   assert.doesNotMatch(JSON.stringify(manifest), new RegExp(poison));
+  assert.deepEqual(Object.keys(manifest), [
+    "schema",
+    "status",
+    "stage",
+    "sourceRevision",
+    "recipeDigest",
+    "policyDigest",
+    "plannedLeaseCount",
+    "maxP95RunnerTotalMs",
+    "promotionBindingDigest",
+    "cohorts",
+    "comparison",
+    "candidateSelection",
+    "promotedSelection",
+    "rollbackStatus",
+    "cleanupStatus",
+    "exitCode",
+  ]);
+  assert.deepEqual(Object.keys(manifest.cohorts[0]), [
+    "phase",
+    "observations",
+    "successfulSamples",
+    "runnerTotalN",
+    "p95RunnerTotalMs",
+    "medianRunnerTotalMs",
+    "medianSyncMs",
+    "policyApplied",
+    "policyPassed",
+  ]);
+  assert.equal(manifest.schema, "crabbox-devtools-image-proof/v2");
   assert.equal(manifest.comparison.kind, "descriptive_only");
-  assert.equal(manifest.rollback, "not_needed");
+  assert.equal(manifest.rollbackStatus, "not_required");
+  assert.equal(
+    manifest.promotionBindingDigest,
+    fingerprint(["aws-image-promotion", "ami-candidate", "revision-1"]),
+  );
   assert.equal(manifest.plannedLeaseCount, 12);
   assert.throws(() => projectManifest(policy, inputs.slice(0, 2)));
-  const bad = cohort();
-  bad.check.reasons = [poison];
-  assert.throws(() => validateCohort(policy, "baseline", bad));
   assert.throws(() => validateCohort(policy, poison, cohort()));
   assert.throws(() =>
-    projectManifest(
-      policy,
-      inputs.map((input) => ({ ...input, checkReasons: [poison] })),
-    ),
+    projectManifest(policy, inputs.map((input) => ({ ...input, poison })), receipt),
   );
+  assert.throws(() => validateOutcome({ ...manifest, poison }));
+  assert.throws(() =>
+    validateOutcome({
+      ...manifest,
+      comparison: { ...manifest.comparison, candidateP95RunnerTotalMs: 999 },
+    }),
+  );
+  assert.throws(() => validateOutcome({ ...manifest, candidateSelection: "not_observed" }));
+  assert.throws(() => validateOutcome({ ...manifest, stage: "candidate_measure" }));
+  assert.throws(() =>
+    validateOutcome({
+      ...manifest,
+      cohorts: manifest.cohorts.map((value, index) =>
+        index === 1 ? { ...value, medianSyncMs: null } : value,
+      ),
+    }),
+  );
+  assert.doesNotMatch(JSON.stringify(manifest), /ami-candidate|revision-1/);
+});
+
+test("failed outcomes retain only validated partial cohorts", () => {
+  const early = projectOutcome(policy, {
+    status: "failed",
+    stage: "baseline",
+    exitCode: 41,
+    cleanupStatus: "succeeded",
+    cohorts: [partialCohort(policy, "baseline", cohort().records.slice(0, 2))],
+  });
+  assert.equal(early.cohorts[0].observations, 2);
+  const baseline = validateCohort(policy, "baseline", cohort(), [], "ami-candidate");
+  const candidate = partialCohort(policy, "candidate", cohort(3).records.slice(0, 1));
+  const outcome = projectOutcome(policy, {
+    status: "failed",
+    stage: "candidate_measure",
+    exitCode: 41,
+    cleanupStatus: "succeeded",
+    cohorts: [baseline, candidate],
+  });
+  assert.equal(outcome.cohorts[0].policyApplied, false);
+  assert.equal(outcome.cohorts[0].policyPassed, null);
+  assert.equal(outcome.cohorts[1].policyApplied, true);
+  assert.equal(outcome.cohorts[1].policyPassed, false);
+  assert.equal(outcome.cohorts[1].observations, 1);
+  assert.equal(outcome.comparison.candidateP95RunnerTotalMs, null);
+  assert.throws(() => validateOutcome({ ...outcome, stage: "unknown" }));
+  assert.throws(() => validateOutcome({ ...outcome, rollbackStatus: "maybe" }));
+  assert.throws(() => validateOutcome({ ...outcome, promotionBindingDigest: fingerprint("early") }));
+  assert.throws(() => validateOutcome({ ...outcome, cleanupStatus: "not_started" }));
+  assert.throws(() =>
+    validateOutcome({
+      ...outcome,
+      policyDigest: "sha256:not-a-digest",
+    }),
+  );
+});
+
+test("promotion-stage failures retain bound rollback outcomes", () => {
+  const baselineInput = cohort();
+  const candidateInput = cohort(3);
+  const baseline = validateCohort(policy, "baseline", baselineInput, [], "ami-candidate");
+  const candidate = validateCohort(
+    policy,
+    "candidate",
+    candidateInput,
+    [baselineInput],
+    "ami-candidate",
+  );
+  const receipt = {
+    image: { id: "ami-candidate", region: policy.region, revision: "revision-1" },
+  };
+  const outcome = projectOutcome(policy, {
+    status: "failed",
+    stage: "promotion",
+    exitCode: 1,
+    rollbackStatus: "succeeded",
+    cleanupStatus: "succeeded",
+    cohorts: [baseline, candidate],
+    promotionReceipt: receipt,
+  });
+  assert.equal(outcome.rollbackStatus, "succeeded");
+  assert.equal(
+    outcome.promotionBindingDigest,
+    fingerprint(["aws-image-promotion", "ami-candidate", "revision-1"]),
+  );
+  assert.throws(() =>
+    validateOutcome({
+      ...outcome,
+      promotionBindingDigest: null,
+    }),
+  );
+  const receiptUnavailable = projectOutcome(policy, {
+    status: "failed",
+    stage: "promotion",
+    exitCode: 55,
+    rollbackStatus: "failed",
+    cleanupStatus: "succeeded",
+    cohorts: [baseline, candidate],
+  });
+  assert.equal(receiptUnavailable.promotionBindingDigest, null);
+  assert.throws(() => validateOutcome({ ...receiptUnavailable, stage: "promoted_smoke" }));
+  assert.throws(() => validateOutcome({ ...receiptUnavailable, status: "passed", exitCode: 0 }));
 });

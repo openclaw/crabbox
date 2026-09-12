@@ -488,7 +488,7 @@ func (b *orgoBackend) claimLease(repo Repo, lease orgoLease, reclaim bool) error
 }
 
 func orgoClaimScope(cfg Config, workspaceID string) string {
-	endpoint := strings.TrimRight(strings.TrimSpace(blank(cfg.Orgo.APIBase, defaultAPIBase)), "/")
+	endpoint := strings.TrimRight(strings.TrimSpace(blank(cfg.Orgo.APIBase, core.OrgoConfigDefaultAPIBase)), "/")
 	if parsed, err := url.Parse(endpoint); err == nil && parsed.Host != "" {
 		parsed.Scheme = strings.ToLower(parsed.Scheme)
 		parsed.Host = strings.ToLower(parsed.Host)
@@ -795,18 +795,18 @@ func applyOrgoDefaults(cfg *Config) {
 		cfg.TargetOS = targetLinux
 	}
 	if strings.TrimSpace(cfg.Orgo.APIBase) == "" {
-		cfg.Orgo.APIBase = defaultAPIBase
+		cfg.Orgo.APIBase = core.OrgoConfigDefaultAPIBase
 	}
 	if cfg.Orgo.RAMGB <= 0 {
-		cfg.Orgo.RAMGB = 4
+		cfg.Orgo.RAMGB = core.OrgoConfigDefaultRAMGB
 	}
 	if cfg.Orgo.CPUs <= 0 {
-		cfg.Orgo.CPUs = 1
+		cfg.Orgo.CPUs = core.OrgoConfigDefaultCPUs
 	}
 	if cfg.Orgo.DiskGB <= 0 {
-		cfg.Orgo.DiskGB = 8
+		cfg.Orgo.DiskGB = core.OrgoConfigDefaultDiskGB
 	}
 	if strings.TrimSpace(cfg.Orgo.Resolution) == "" {
-		cfg.Orgo.Resolution = "1280x720x24"
+		cfg.Orgo.Resolution = core.OrgoConfigDefaultResolution
 	}
 }

@@ -23,6 +23,7 @@ func (Provider) Name() string      { return providerName }
 func (Provider) Aliases() []string { return nil }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPICredentials),
 		Name:             providerName,
 		Family:           providerName,
 		Kind:             core.ProviderKindSSHLease,
@@ -37,46 +38,21 @@ func (Provider) ClassProfiles() []core.ProviderClassProfile {
 	return classProfiles
 }
 
-type flagValues struct {
-	Endpoint  *string
-	ProjectID *string
-	Region    *string
-	Image     *string
-	Flavor    *string
-}
-
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return flagValues{
-		Endpoint:  fs.String("ovh-endpoint", defaults.OVH.Endpoint, "OVHcloud API endpoint"),
-		ProjectID: fs.String("ovh-project-id", defaults.OVH.ProjectID, "OVHcloud Public Cloud project ID"),
-		Region:    fs.String("ovh-region", defaults.OVH.Region, "OVHcloud Public Cloud region"),
-		Image:     fs.String("ovh-image", defaults.OVH.Image, "OVHcloud Public Cloud image name or ID"),
-		Flavor:    fs.String("ovh-flavor", defaults.OVH.Flavor, "OVHcloud Public Cloud flavor name or ID"),
-	}
+	return core.RegisterOVHConfigFlags(fs, defaults.OVH)
 }
 
 func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(flagValues)
+	v, ok := values.(core.OVHConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if core.FlagWasSet(fs, "ovh-endpoint") {
-		cfg.OVH.Endpoint = *v.Endpoint
-	}
-	if core.FlagWasSet(fs, "ovh-project-id") {
-		cfg.OVH.ProjectID = *v.ProjectID
-	}
-	if core.FlagWasSet(fs, "ovh-region") {
-		cfg.OVH.Region = *v.Region
-	}
-	if core.FlagWasSet(fs, "ovh-image") {
-		cfg.OVH.Image = *v.Image
+	applied, err := v.Apply(&cfg.OVH, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	if applied.Image {
 		core.SetOVHImageExplicit(cfg)
 	}
-	if core.FlagWasSet(fs, "ovh-flavor") {
-		cfg.OVH.Flavor = *v.Flavor
-	}
-	return nil
+	return err
 }
 
 func (Provider) ServerTypeForConfig(cfg core.Config) string {

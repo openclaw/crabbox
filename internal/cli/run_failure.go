@@ -360,7 +360,7 @@ func printRunFailureDigest(w io.Writer, input runFailureDigestInput) {
 	printFailureDigestPhases(w, input.Phases)
 	printFailureDigestShellChain(w, input)
 	printFailureDigestResults(w, input.Results)
-	for _, command := range failureDigestNextCommands(input, retry) {
+	for _, command := range classifiedFailureDigestNextCommands(input, retry) {
 		fmt.Fprintf(w, "  next: %s\n", command)
 	}
 }
@@ -463,6 +463,13 @@ func failureDigestNextCommands(input runFailureDigestInput, retry string) []stri
 		commands = append(commands, firstNonBlank(input.StopCommand, stopRouting.ShellCommand(append(append([]string{"crabbox", "stop"}, stopRouting.Args...), leaseRef))))
 	}
 	return commands
+}
+
+func classifiedFailureDigestNextCommands(input runFailureDigestInput, retry string) []string {
+	if retry != "true" {
+		retry = "false"
+	}
+	return failureDigestNextCommands(input, retry)
 }
 
 func failureDigestRetryCommand(input runFailureDigestInput) string {

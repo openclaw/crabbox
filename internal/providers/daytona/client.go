@@ -39,9 +39,11 @@ type daytonaSSHAccess struct {
 }
 
 type daytonaSDKClient struct {
-	api   *daytona.APIClient
-	token string
-	orgID string
+	api    *daytona.APIClient
+	token  string
+	orgID  string
+	apiURL string
+	apiKey bool
 }
 
 const defaultDaytonaAPIURL = "https://app.daytona.io/api"
@@ -55,6 +57,8 @@ var newDaytonaClient = func(cfg Config, rt Runtime) (daytonaAPI, error) {
 	apiURL := daytonaAPIURL(cfg, auth)
 	apiCfg := daytona.NewConfiguration()
 	apiCfg.Servers = daytona.ServerConfigurations{{URL: apiURL}}
+	// Request builders own this header. A default adds a second literal-key
+	// copy beside Go's canonical key, which Daytona rejects for OAuth profiles.
 	controlClient := rt.HTTP
 	if controlClient == nil {
 		controlClient = &http.Client{Timeout: daytonaControlTimeout}
@@ -63,7 +67,74 @@ var newDaytonaClient = func(cfg Config, rt Runtime) (daytonaAPI, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &daytonaSDKClient{api: daytona.NewAPIClient(apiCfg), token: auth.token(), orgID: auth.OrganizationID}, nil
+	return &daytonaSDKClient{api: daytona.NewAPIClient(apiCfg), token: auth.token(), orgID: auth.OrganizationID, apiURL: apiURL, apiKey: auth.APIKey != ""}, nil
+}
+
+// Resolve native organization identity using the same authenticated client.
+// An API key's optional organization header is not an attestation: Daytona
+// derives its organization from the key and ignores that header.
+func (c *daytonaSDKClient) fixedOrganization(ctx context.Context, allowResourceIdentity bool) (string, string, error) {
+	if !c.apiKey {
+		if c.orgID == "" {
+			return "", "", exit(4, "Daytona fixed leases require a selected organization")
+		}
+		organization, _, err := c.api.OrganizationsAPI.GetOrganization(c.ctx(ctx), c.orgID).Execute()
+		if err != nil {
+			return "", "", c.redactError(err)
+		}
+		if organization == nil || organization.GetId() != c.orgID {
+			return "", "", exit(4, "Daytona authenticated organization does not match the selected organization")
+		}
+		return c.apiURL, organization.GetId(), nil
+	}
+	key, _, err := c.api.ApiKeysAPI.GetCurrentApiKey(c.ctx(ctx)).Execute()
+	if err != nil {
+		return "", "", c.redactError(err)
+	}
+	if key == nil {
+		return "", "", exit(4, "Daytona current API-key response is missing its identity")
+	}
+	// Deployed Daytona supplies this field; the pinned SDK retains it as an
+	// additional property. Never persist or report the other key metadata.
+	if value, present := key.AdditionalProperties["organizationId"]; present {
+		organization, valid := value.(string)
+		if !valid || strings.TrimSpace(organization) == "" || organization != strings.TrimSpace(organization) {
+			return "", "", exit(4, "Daytona current API-key response has an invalid organization identity")
+		}
+		if c.orgID != "" && c.orgID != organization {
+			return "", "", exit(4, "Daytona authenticated API-key organization differs from the selected organization")
+		}
+		return c.apiURL, organization, nil
+	}
+	if !allowResourceIdentity {
+		return "", "", exit(4, "Daytona current API-key response does not expose organizationId; this API deployment cannot attest fixed cleanup with an API key; use an OAuth organization profile")
+	}
+	// The public v0.190.0 server omits organizationId from current-key metadata.
+	// Preserve its resource-backed acquisition contract, never absence proof.
+	identity := c.api.SandboxAPI.ListSandboxes(c.ctx(ctx)).Limit(1)
+	if c.orgID != "" {
+		identity = identity.XDaytonaOrganizationID(c.orgID)
+	}
+	items, _, err := identity.Execute()
+	if err != nil {
+		return "", "", c.redactError(err)
+	}
+	if items == nil || len(items.GetItems()) != 1 {
+		return "", "", exit(4, "Daytona API-key fixed leases need an existing sandbox to establish organization identity; use an authenticated Daytona CLI organization profile, or ordinary warmup without --lease-id")
+	}
+	item := items.GetItems()[0]
+	if item.GetId() == "" || item.GetOrganizationId() == "" {
+		return "", "", exit(4, "Daytona sandbox inventory did not establish organization identity")
+	}
+	sandbox, err := c.GetSandbox(ctx, item.GetId())
+	if err != nil {
+		return "", "", err
+	}
+	if sandbox == nil || sandbox.GetId() != item.GetId() || sandbox.GetOrganizationId() != item.GetOrganizationId() ||
+		(c.orgID != "" && c.orgID != sandbox.GetOrganizationId()) {
+		return "", "", exit(4, "Daytona authenticated sandbox organization does not match its selected scope")
+	}
+	return c.apiURL, sandbox.GetOrganizationId(), nil
 }
 
 type daytonaAuth struct {
@@ -400,12 +471,95 @@ func (c *daytonaSDKClient) StartSandbox(ctx context.Context, id string) (*dayton
 }
 
 func (c *daytonaSDKClient) DeleteSandbox(ctx context.Context, id string) error {
+	_, err := c.requestSandboxDeletion(ctx, id)
+	return err
+}
+
+func (c *daytonaSDKClient) requestSandboxDeletion(ctx context.Context, id string) (*daytona.Sandbox, error) {
 	req := c.api.SandboxAPI.DeleteSandbox(c.ctx(ctx), id)
 	if c.orgID != "" {
 		req = req.XDaytonaOrganizationID(c.orgID)
 	}
-	_, _, err := req.Execute()
-	return c.redactError(err)
+	out, _, err := req.Execute()
+	return out, c.redactError(err)
+}
+
+func (c *daytonaSDKClient) fixedSelection() (string, string) { return c.apiURL, c.orgID }
+
+// This released endpoint reads the sandbox table directly. Do not substitute
+// the search-index list or filter mutable labels: neither can attest absence.
+func (c *daytonaSDKClient) findPendingDeletion(ctx context.Context, id string) (*daytona.Sandbox, error) {
+	const limit int64 = 100
+	previousTotal := int64(-1)
+	seen := map[string]bool{}
+	for page := int64(1); ; page++ {
+		if float64(float32(page)) != float64(page) {
+			return nil, exit(4, "Daytona deletion inventory page is not representable by the SDK")
+		}
+		req := c.api.SandboxAPI.ListSandboxesPaginatedDeprecated(c.ctx(ctx)).Id(id).IncludeErroredDeleted(true).Page(float32(page)).Limit(float32(limit))
+		if c.orgID != "" {
+			req = req.XDaytonaOrganizationID(c.orgID)
+		}
+		out, response, err := req.Execute()
+		if err != nil {
+			return nil, c.redactError(err)
+		}
+		if out == nil || out.Items == nil || response == nil || response.Body == nil {
+			return nil, exit(4, "Daytona deletion database inventory response is incomplete")
+		}
+		// The SDK coerces null numeric fields to zero. Validate its retained
+		// response body so null/rounded metadata cannot establish empty custody.
+		var metadata struct {
+			Total      *int64 `json:"total"`
+			Page       *int64 `json:"page"`
+			TotalPages *int64 `json:"totalPages"`
+		}
+		decodeErr := json.NewDecoder(response.Body).Decode(&metadata)
+		_ = response.Body.Close()
+		if decodeErr != nil || metadata.Total == nil || metadata.Page == nil || metadata.TotalPages == nil {
+			return nil, exit(4, "Daytona deletion database inventory metadata is incomplete or invalid")
+		}
+		total, returnedPage, totalPages := *metadata.Total, *metadata.Page, *metadata.TotalPages
+		expectedPages := total / limit
+		if total%limit != 0 {
+			expectedPages++
+		}
+		if total < 0 || returnedPage != page || totalPages != expectedPages ||
+			(page > totalPages && !(page == 1 && total == 0)) || (previousTotal >= 0 && total != previousTotal) {
+			return nil, exit(4, "Daytona deletion database inventory pagination is inconsistent")
+		}
+		expectedItems := min(limit, total-(page-1)*limit)
+		if int64(len(out.Items)) != expectedItems {
+			return nil, exit(4, "Daytona deletion database inventory page is incomplete")
+		}
+		previousTotal = total
+		for _, item := range out.Items {
+			if item.GetId() == "" || seen[item.GetId()] {
+				return nil, exit(4, "Daytona deletion database inventory contains an invalid or repeated resource")
+			}
+			seen[item.GetId()] = true
+			if item.GetId() == id {
+				return &item, nil
+			}
+		}
+		if page >= totalPages {
+			return nil, nil
+		}
+	}
+}
+
+func (c *daytonaSDKClient) attestDeletionOrganization(ctx context.Context, expected string) error {
+	if expected == "" || c.orgID != "" && c.orgID != expected {
+		return exit(4, "Daytona deletion organization differs from the selected organization")
+	}
+	_, organization, err := c.fixedOrganization(ctx, false)
+	if err != nil {
+		return err
+	}
+	if organization != expected {
+		return exit(4, "Daytona deletion organization could not be attested")
+	}
+	return nil
 }
 
 func (c *daytonaSDKClient) ReplaceLabels(ctx context.Context, id string, labels map[string]string) error {
