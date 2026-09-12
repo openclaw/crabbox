@@ -2,7 +2,7 @@ package githubcodespaces
 
 import (
 	"context"
-	"flag"
+
 	"io"
 	"time"
 
@@ -51,10 +51,6 @@ func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
 }
 
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
-}
-
 func markDeleteOnReleaseExplicit(cfg *Config) {
 	core.MarkDeleteOnReleaseExplicit(cfg, providerName)
 }
@@ -77,10 +73,6 @@ func workRootExplicit(cfg *Config) bool {
 
 func markWorkRootExplicit(cfg *Config) {
 	core.MarkWorkRootExplicit(cfg)
-}
-
-func newLeaseID() string {
-	return core.NewLeaseID()
 }
 
 func allocateDirectLeaseSlug(leaseID, requested string, servers []Server) (string, error) {

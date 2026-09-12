@@ -1,8 +1,6 @@
 package unikraftcloud
 
 import (
-	"flag"
-	"io"
 	"strings"
 	"time"
 
@@ -40,14 +38,6 @@ const (
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
-}
-
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
 }
 
 func inventoryDoctorResult(provider string, leases int) DoctorResult {
@@ -99,9 +89,3 @@ var replaceLeaseClaimIfUnchangedDurable = core.ReplaceLeaseClaimIfUnchangedDurab
 func shouldCleanupServer(server Server, now time.Time) (bool, string) {
 	return core.ShouldCleanupServer(server, now)
 }
-
-func writeTimingJSON(w io.Writer, report core.TimingReport) error {
-	return core.WriteTimingJSON(w, report)
-}
-
-type timingReport = core.TimingReport

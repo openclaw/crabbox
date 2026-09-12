@@ -2,7 +2,7 @@ package agentsandbox
 
 import (
 	"context"
-	"flag"
+
 	"fmt"
 	"io"
 	"os"
@@ -66,18 +66,6 @@ func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
 }
 
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
-}
-
-func expandUserPath(path string) string {
-	return core.ExpandUserPath(path)
-}
-
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
-}
-
 func newLeaseSlug(leaseID string) string {
 	return core.NewLeaseSlug(leaseID)
 }
@@ -98,12 +86,6 @@ func timingReportWithRunResult(report core.TimingReport, result RunResult, err e
 	return core.TimingReportWithRunResult(report, result, err)
 }
 
-func timingReportWithProviderError(report core.TimingReport) core.TimingReport {
-	report.RunStatus = core.RunStatusFailed
-	report.ErrorKind = core.RunErrorProvider
-	return report
-}
-
 func handleDelegatedRunFailure(w io.Writer, cfg Config, req RunRequest, leaseID, slug string, acquired bool, shouldStop *bool) {
 	if !req.KeepOnFailure {
 		return
@@ -115,7 +97,7 @@ func handleDelegatedRunFailure(w io.Writer, cfg Config, req RunRequest, leaseID,
 	if id == "" {
 		id = leaseID
 	}
-	fmt.Fprintf(w, "keep-on-failure: kept lease=%s slug=%s expires=idle/ttl idle_timeout=%s ttl=%s\n", leaseID, blank(slug, "-"), cfg.IdleTimeout, cfg.TTL)
+	fmt.Fprintf(w, "keep-on-failure: kept lease=%s slug=%s expires=idle/ttl idle_timeout=%s ttl=%s\n", leaseID, core.Blank(slug, "-"), cfg.IdleTimeout, cfg.TTL)
 	fmt.Fprintf(w, "rerun: %s --id %s -- <command>\n", agentSandboxRecoveryCommand(cfg, "run"), shellQuote(id))
 	fmt.Fprintf(w, "stop: %s %s\n", agentSandboxRecoveryCommand(cfg, "stop"), shellQuote(id))
 }

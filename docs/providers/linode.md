@@ -68,6 +68,15 @@ Validation occurs when Crabbox acquires a new Linode, after CLI overrides;
 `config show`, provider overrides, and cleanup commands remain available when
 the configured portable selector is unsupported.
 
+The five file/environment bindings are declared together in
+`internal/cli/config_linode.go`; this adds no provider-specific flags. Raw
+initial configuration keeps the image selected by the portable-OS mapping,
+including an empty unsupported image. Later effective defaults remain separate
+from acquisition validation. Empty scalar input leaves the prior value intact;
+accepted image/type input remains explicit even when equal to its default.
+Nonempty YAML CIDR lists retain their entries as written, while environment
+lists trim entries and discard blanks.
+
 Linode leases default to `root` on SSH port `22` with no fallback port. Explicit
 generic `ssh.user` and `ssh.port` values remain authoritative. The effective
 values appear in `crabbox config show` without retaining defaults from another

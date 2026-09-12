@@ -730,3 +730,46 @@ func TestRunCleansPartialEnvUploadBeforeRetainingSandbox(t *testing.T) {
 		t.Fatalf("partial environment profile not removed: %v", fake.execCommands)
 	}
 }
+
+func TestModalConfigEffectiveFallbacksAndDisplay(t *testing.T) {
+	for _, tc := range []struct{ raw, app, image, workdir, python string }{{"", "crabbox", "python:3.13-slim", "/workspace/crabbox", "python3"}, {"  ", "crabbox", "python:3.13-slim", "/workspace/crabbox", "python3"}, {" custom ", "custom", "custom", "custom", "custom"}} {
+		cfg := Config{Modal: ModalConfig{App: tc.raw, Image: tc.raw, Workdir: tc.raw, Python: tc.raw}}
+		client := &modalPythonClient{cfg: cfg}
+		if modalApp(cfg) != tc.app || modalImage(cfg) != tc.image || modalWorkdir(cfg) != tc.workdir || client.app() != tc.app || client.python() != tc.python {
+			t.Fatalf("effective fallback mismatch for %q", tc.raw)
+		}
+	}
+	for _, tc := range []struct{ label, want string }{{"", "python:3.13-slim"}, {"remote-image", "remote-image"}, {"  ", "  "}} {
+		sandbox := modalSandbox{ID: "sb-fixture", Tags: map[string]string{"lease": "cbx_fixture", "slug": "fixture", "image": tc.label}}
+		if got := modalSandboxToServer(sandbox).ServerType.Name; got != tc.want {
+			t.Fatalf("remote display=%q want=%q", got, tc.want)
+		}
+	}
+}
+
+func TestModalConfigCreateImageBridgePayload(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{{"", "python:3.13-slim"}, {"  ", "python:3.13-slim"}, {" custom-image ", "custom-image"}} {
+		t.Run(tc.want+tc.raw, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cfg := newTestConfig()
+			cfg.Modal.Image = tc.raw
+			fake := &fakeModalAPI{}
+			backend := NewModalBackend(Provider{}.Spec(), cfg, testRuntime()).(*modalBackend)
+			if _, _, err := backend.createSandbox(t.Context(), fake, Repo{Name: "fixture", Root: t.TempDir()}, true, false, ""); err != nil {
+				t.Fatal(err)
+			}
+			if fake.createReq.Image != tc.want || fake.createReq.Image == "" {
+				t.Fatalf("production create image=%q want=%q", fake.createReq.Image, tc.want)
+			}
+			runner := &modalClientRunner{stdout: "{}"}
+			client := &modalPythonClient{cfg: cfg, rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+			if _, err := client.CreateSandbox(t.Context(), fake.createReq); err != nil {
+				t.Fatal(err)
+			}
+			if runner.payload["image"] != tc.want {
+				t.Fatalf("recorded bridge image=%#v want=%q", runner.payload["image"], tc.want)
+			}
+		})
+	}
+}

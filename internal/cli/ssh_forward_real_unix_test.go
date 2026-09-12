@@ -68,6 +68,7 @@ type forwardSSHServer struct {
 	release  chan struct{}
 	mu       sync.Mutex
 	conns    []net.Conn
+	users    []string
 	wg       sync.WaitGroup
 	allowed  map[uint32]bool
 	hostKey  string
@@ -93,6 +94,9 @@ func newForwardSSHServer(t *testing.T, user string, allowedPorts ...int) *forwar
 	}
 	var once sync.Once
 	cfg := &ssh.ServerConfig{NoClientAuth: true, NoClientAuthCallback: func(meta ssh.ConnMetadata) (*ssh.Permissions, error) {
+		s.mu.Lock()
+		s.users = append(s.users, meta.User())
+		s.mu.Unlock()
 		if meta.User() != user {
 			return nil, fmt.Errorf("unexpected synthetic SSH user")
 		}
@@ -792,6 +796,9 @@ func TestSSHForwardRealPondWaitsForEveryGroup(t *testing.T) {
 			other.SSHHostKey = second.hostKey
 			members = append(members, pondMember{Lease: "second", SSH: other})
 			local, _ := strconv.Atoi(boundaryPort(t))
+			for local == summary.Forwards[0].LocalPort || local == summary.Forwards[1].LocalPort {
+				local, _ = strconv.Atoi(boundaryPort(t))
+			}
 			summary.Forwards = append(summary.Forwards, pondMeshForward{Peer: "second", LeaseID: "second", LocalPort: local, RemotePort: echo})
 			for i := range summary.Forwards {
 				summary.Forwards[i].RemotePort = echo

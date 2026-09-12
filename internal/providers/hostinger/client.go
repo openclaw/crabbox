@@ -1,17 +1,16 @@
 package hostinger
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -161,7 +160,7 @@ func newClient(cfg Config, rt Runtime) (hostingerAPI, error) {
 	if token == "" {
 		return nil, exit(2, "provider=%s requires HOSTINGER_API_TOKEN (CRABBOX_HOSTINGER_API_TOKEN also accepted)", providerName)
 	}
-	apiURL := strings.TrimRight(strings.TrimSpace(blank(cfg.Hostinger.APIURL, "https://developers.hostinger.com")), "/")
+	apiURL := strings.TrimRight(strings.TrimSpace(core.Blank(cfg.Hostinger.APIURL, "https://developers.hostinger.com")), "/")
 	parsed, err := url.Parse(apiURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return nil, exit(2, "%s url %q is invalid", providerName, apiURL)
@@ -190,15 +189,7 @@ func hostingerRedirectError(destination *url.URL) error {
 }
 
 func (c *hostingerClient) do(ctx context.Context, method, path string, body any, out any) error {
-	var reader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		reader = bytes.NewReader(data)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.apiURL+path, reader)
+	req, err := shared.NewCompactJSONRequest(ctx, method, c.apiURL+path, body)
 	if err != nil {
 		return err
 	}

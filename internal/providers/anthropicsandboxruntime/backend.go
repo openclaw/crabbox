@@ -101,7 +101,7 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	help, helpErr := cli.help(ctx)
 	helpDetails := map[string]string{
 		"cli":      cli.binary(),
-		"settings": blank(strings.TrimSpace(b.cfg.AnthropicSRT.Settings), "srt default"),
+		"settings": core.Blank(strings.TrimSpace(b.cfg.AnthropicSRT.Settings), "srt default"),
 		"debug":    fmt.Sprint(b.cfg.AnthropicSRT.Debug),
 		"mutation": "false",
 	}

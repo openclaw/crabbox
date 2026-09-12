@@ -30,7 +30,7 @@ func (b *azureDynamicSessionsBackend) Warmup(ctx context.Context, req WarmupRequ
 	if req.ActionsRunner {
 		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	client, err := newAzureDynamicSessionsClient(ctx, b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -52,18 +52,13 @@ func (b *azureDynamicSessionsBackend) Warmup(ctx context.Context, req WarmupRequ
 		}
 		fmt.Fprintf(b.rt.Stderr, "released lease=%s session=%s\n", leaseID, leaseID)
 	}
-	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  leaseID,
-			Slug:     slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	total := core.ClockNow(b.rt.Clock).Sub(started)
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
 
 func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
@@ -91,7 +86,7 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req RunRequest) (
 		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
 			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-azds-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+				TempPattern: "crabbox-azds-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 			})
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
@@ -199,7 +194,7 @@ func (b *azureDynamicSessionsBackend) Status(ctx context.Context, req StatusRequ
 	if waitTimeout <= 0 {
 		waitTimeout = 5 * time.Minute
 	}
-	deadline := b.now().Add(waitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(waitTimeout)
 	pollCtx := ctx
 	cancel := func() {}
 	if req.Wait {
@@ -217,7 +212,7 @@ func (b *azureDynamicSessionsBackend) Status(ctx context.Context, req StatusRequ
 			if !req.Wait || view.Ready {
 				return view, nil
 			}
-			if b.now().After(deadline) {
+			if core.ClockNow(b.rt.Clock).After(deadline) {
 				return statusView{}, exit(5, "timed out waiting for session %s to become ready", leaseID)
 			}
 			select {
@@ -239,7 +234,7 @@ func (b *azureDynamicSessionsBackend) Status(ctx context.Context, req StatusRequ
 		if !isNotFoundError(err) || !req.Wait {
 			return statusView{}, providerError("get session", err)
 		}
-		if b.now().After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return statusView{}, exit(5, "timed out waiting for session %s to become ready", leaseID)
 		}
 		select {
@@ -400,7 +395,7 @@ func (b *azureDynamicSessionsBackend) sessionToServer(session azureDynamicSessio
 		"lease":    identifier,
 		"slug":     normalizeLeaseSlug(slug),
 		"target":   targetLinux,
-		"state":    blank(status, "ready"),
+		"state":    core.Blank(status, "ready"),
 	}
 	if claim.RepoRoot != "" {
 		labels["claimed"] = "true"
@@ -412,7 +407,7 @@ func (b *azureDynamicSessionsBackend) sessionToServer(session azureDynamicSessio
 		Provider: providerName,
 		CloudID:  identifier,
 		Name:     identifier,
-		Status:   blank(status, "ready"),
+		Status:   core.Blank(status, "ready"),
 		Labels:   labels,
 	}
 	server.ServerType.Name = "custom-container"
@@ -426,7 +421,7 @@ func (b *azureDynamicSessionsBackend) statusView(leaseID, slug string, session a
 		Slug:       slug,
 		Provider:   providerName,
 		TargetOS:   targetLinux,
-		State:      blank(status, "ready"),
+		State:      core.Blank(status, "ready"),
 		ServerID:   leaseID,
 		ServerType: "custom-container",
 		Network:    networkPublic,
@@ -477,11 +472,4 @@ func isNotFoundError(err error) bool {
 	}
 	return strings.Contains(apiErr.Body, "SessionWithIdentifierNotFound") ||
 		strings.Contains(apiErr.Body, "SessionNotFound")
-}
-
-func (b *azureDynamicSessionsBackend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }

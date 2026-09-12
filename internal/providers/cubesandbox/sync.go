@@ -27,7 +27,7 @@ func (b *cubesandboxBackend) syncWorkspace(ctx context.Context, client cubesandb
 		PhaseName:           "cubesandbox_sync",
 		Provider:            providerName,
 		Stderr:              b.rt.Stderr,
-		Now:                 b.now,
+		Now:                 func() time.Time { return core.ClockNow(b.rt.Clock) },
 		Upload: func(uploadCtx context.Context, remoteArchive string, body io.Reader) error {
 			if err := client.UploadFile(uploadCtx, session, remoteArchive, body); err != nil {
 				return cubesandboxError("upload archive", err)

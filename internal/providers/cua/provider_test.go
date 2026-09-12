@@ -4,11 +4,67 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestCuaConfigShowCompletePassiveSection(t *testing.T) {
+	projector, ok := any(Provider{}).(core.ProviderConfigShowProjector)
+	if !ok {
+		t.Fatal("actual provider has no passive config display section")
+	}
+	for _, selected := range []string{"other", "cua"} {
+		for _, populated := range []bool{false, true} {
+			cfg := core.Config{Provider: selected}
+			want := core.ProviderConfigShowSection{JSONKey: "cua", TextLabel: "cua", Providers: []string{"cua"}, Fields: []core.ProviderConfigShowField{
+				{JSONName: "apiUrl", JSONValue: "", TextName: "api_url", TextValue: "-"},
+				{JSONName: "image", JSONValue: "", TextName: "image", TextValue: ""},
+				{JSONName: "kind", JSONValue: "", TextName: "kind", TextValue: ""},
+				{JSONName: "region", JSONValue: "", TextName: "region", TextValue: ""},
+				{JSONName: "workdir", JSONValue: "", TextName: "workdir", TextValue: ""},
+				{JSONName: "vcpus", JSONValue: 0, TextName: "vcpus", TextValue: "0"},
+				{JSONName: "memoryMB", JSONValue: 0, TextName: "memory_mb", TextValue: "0"},
+				{JSONName: "diskGB", JSONValue: 0, TextName: "disk_gb", TextValue: "0"},
+				{JSONName: "startupTimeoutSecs", JSONValue: 0, TextName: "startup_timeout_secs", TextValue: "0"},
+				{JSONName: "execTimeoutSecs", JSONValue: 0, TextName: "exec_timeout_secs", TextValue: "0"},
+				{JSONName: "bridgeCommand", JSONValue: "", TextName: "bridge_command", TextValue: ""},
+				{JSONName: "sdkPackage", JSONValue: "", TextName: "sdk_package", TextValue: ""},
+				{JSONName: "sdkImport", JSONValue: "", TextName: "sdk_import", TextValue: ""},
+				{JSONName: "sdkFallbackImport", JSONValue: "", TextName: "sdk_fallback_import", TextValue: ""},
+			}}
+			if populated {
+				cfg.Cua = core.CuaConfig{APIURL: "https://example.invalid/path?view=compact#part", Image: " raw-image ", Kind: " raw-kind ", Region: "", Workdir: " raw-workdir ", VCPUs: 0, MemoryMB: -2, DiskGB: 7, StartupTimeoutSecs: 0, ExecTimeoutSecs: 13, BridgeCommand: " ordinary-bridge ", SDKPackage: " ordinary-package ", SDKImport: " ordinary.import ", SDKFallbackImport: " ordinary.fallback "}
+				want.Fields = []core.ProviderConfigShowField{
+					{JSONName: "apiUrl", JSONValue: "https://example.invalid/path", TextName: "api_url", TextValue: "https://example.invalid/path"},
+					{JSONName: "image", JSONValue: " raw-image ", TextName: "image", TextValue: " raw-image "},
+					{JSONName: "kind", JSONValue: " raw-kind ", TextName: "kind", TextValue: " raw-kind "},
+					{JSONName: "region", JSONValue: "", TextName: "region", TextValue: ""},
+					{JSONName: "workdir", JSONValue: " raw-workdir ", TextName: "workdir", TextValue: " raw-workdir "},
+					{JSONName: "vcpus", JSONValue: 0, TextName: "vcpus", TextValue: "0"},
+					{JSONName: "memoryMB", JSONValue: -2, TextName: "memory_mb", TextValue: "-2"},
+					{JSONName: "diskGB", JSONValue: 7, TextName: "disk_gb", TextValue: "7"},
+					{JSONName: "startupTimeoutSecs", JSONValue: 0, TextName: "startup_timeout_secs", TextValue: "0"},
+					{JSONName: "execTimeoutSecs", JSONValue: 13, TextName: "exec_timeout_secs", TextValue: "13"},
+					{JSONName: "bridgeCommand", JSONValue: " ordinary-bridge ", TextName: "bridge_command", TextValue: " ordinary-bridge "},
+					{JSONName: "sdkPackage", JSONValue: " ordinary-package ", TextName: "sdk_package", TextValue: " ordinary-package "},
+					{JSONName: "sdkImport", JSONValue: " ordinary.import ", TextName: "sdk_import", TextValue: " ordinary.import "},
+					{JSONName: "sdkFallbackImport", JSONValue: " ordinary.fallback ", TextName: "sdk_fallback_import", TextValue: " ordinary.fallback "},
+				}
+			}
+			before := cfg
+			got := projector.ConfigShowSection(cfg)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("passive section got %#v want %#v", got, want)
+			}
+			if !reflect.DeepEqual(cfg, before) {
+				t.Fatal("projection mutated supplied config")
+			}
+		}
+	}
+}
 
 func TestProviderSpecAndRegistration(t *testing.T) {
 	p := Provider{}

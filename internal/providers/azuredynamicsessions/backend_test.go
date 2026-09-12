@@ -100,7 +100,7 @@ func TestRunCleanupUsesBoundedContext(t *testing.T) {
 	if len(fake.deleted) != 1 || fake.deleted[0] != result.LeaseID {
 		t.Fatalf("deleted sessions = %#v, want %s", fake.deleted, result.LeaseID)
 	}
-	var report timingReport
+	var report core.TimingReport
 	lines := strings.Split(strings.TrimSpace(backend.rt.Stderr.(*bytes.Buffer).String()), "\n")
 	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil || report.ExitCode != 1 || report.ErrorKind != core.RunErrorProvider {
 		t.Fatalf("final cleanup timing=%#v err=%v", report, err)
@@ -191,7 +191,7 @@ func TestRunKeepOnFailureRetainsNewSession(t *testing.T) {
 	if claim, ok, err := resolveLeaseClaimForProvider(result.LeaseID, providerName); err != nil || !ok || claim.RepoRoot != repo {
 		t.Fatalf("retained claim ok=%t claim=%#v err=%v", ok, claim, err)
 	}
-	var report timingReport
+	var report core.TimingReport
 	found := false
 	for _, line := range strings.Split(strings.TrimSpace(backend.rt.Stderr.(*bytes.Buffer).String()), "\n") {
 		if !strings.HasPrefix(line, "{") {

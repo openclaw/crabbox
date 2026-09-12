@@ -6,7 +6,29 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 )
+
+type sshReadinessProbeStopped struct {
+	probe string
+	cause error
+}
+
+func (e *sshReadinessProbeStopped) Error() string { return e.cause.Error() }
+func (e *sshReadinessProbeStopped) Unwrap() error { return e.cause }
+
+// The stage names the local invocation, not evidence that remote code started.
+func sshReadinessProbeContextError(ctx context.Context, probe string) *sshReadinessProbeStopped {
+	cause := context.Cause(ctx)
+	if cause == nil {
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > 0 {
+			return nil
+		}
+		cause = context.DeadlineExceeded
+	}
+	return &sshReadinessProbeStopped{probe: probe, cause: cause}
+}
 
 var errSSHHostKeyVerification = errors.New("SSH host-key verification failed; verify the lease identity and its SSH host trust before reconnecting")
 

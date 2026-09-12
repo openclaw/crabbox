@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -330,7 +331,7 @@ func (c *httpSuperserveClient) postAccess(ctx context.Context, apiPath string) (
 	if err := c.doJSON(ctx, http.MethodPost, apiPath, nil, &raw); err != nil {
 		return sandboxAccess{}, err
 	}
-	token := blank(raw.AccessToken, raw.Token)
+	token := core.Blank(raw.AccessToken, raw.Token)
 	if token == "" {
 		return sandboxAccess{}, exit(5, "superserve %s returned no access token", apiPath)
 	}
@@ -641,10 +642,10 @@ func (c *httpSuperserveClient) apiError(method, apiPath string, resp *http.Respo
 	if json.Unmarshal(body, &wrapped) == nil {
 		switch value := wrapped.Error.(type) {
 		case string:
-			msg = blank(value, blank(wrapped.Message, msg))
+			msg = core.Blank(value, core.Blank(wrapped.Message, msg))
 		case map[string]any:
 			if message, ok := value["message"].(string); ok {
-				msg = blank(message, blank(wrapped.Message, msg))
+				msg = core.Blank(message, core.Blank(wrapped.Message, msg))
 			}
 		}
 	}

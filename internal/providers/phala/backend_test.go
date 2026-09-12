@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -187,13 +188,13 @@ func TestClassFlagOverridesInheritedPhalaInstanceType(t *testing.T) {
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	class := fs.String("class", cfg.Class, "machine class")
-	values := registerFlags(fs, cfg)
+	values := (Provider{}).RegisterFlags(fs, cfg)
 	if err := fs.Parse([]string{"--class", "fast"}); err != nil {
 		t.Fatal(err)
 	}
 	cfg.Class = *class
 	core.MarkClassExplicit(&cfg)
-	if err := applyFlags(&cfg, fs, values); err != nil {
+	if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
 	if got := (Provider{}).ServerTypeForConfig(cfg); got != "tdx.medium" {
@@ -233,12 +234,100 @@ func TestServerTypeForConfigUsesExplicitFileAndEnvironmentClass(t *testing.T) {
 	}
 }
 
+func TestPhalaOrdinaryFlagMetadataAndPointers(t *testing.T) {
+	for _, priorName := range []string{"nil", "false", "true"} {
+		cfg := core.Config{Provider: "other", Phala: core.PhalaConfig{CLIPath: "same", InstanceType: "same", WorkRoot: "same", NodeID: "same", Compose: "same"}}
+		if priorName != "nil" {
+			v := priorName == "true"
+			cfg.Phala.Attest = &v
+		}
+		before := cfg
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		values := (Provider{}).RegisterFlags(fs, cfg)
+		if !reflect.DeepEqual(cfg, before) || cfg.Phala.Attest != before.Phala.Attest {
+			t.Fatal("registration changed defaults")
+		}
+		var names []string
+		fs.VisitAll(func(f *flag.Flag) { names = append(names, f.Name) })
+		if strings.Join(names, ",") != "phala-attest,phala-cli,phala-compose,phala-instance-type,phala-node-id,phala-skip-attestation,phala-work-root" {
+			t.Fatalf("metadata names %v", names)
+		}
+		if fs.Lookup("phala-attest").DefValue != strconv.FormatBool(priorName != "false") || fs.Lookup("phala-skip-attestation").DefValue != "false" {
+			t.Fatal("effective registration defaults")
+		}
+		for _, foreign := range []any{nil, struct{}{}} {
+			if err := (Provider{}).ApplyFlags(&cfg, fs, foreign); err != nil || !reflect.DeepEqual(cfg, before) {
+				t.Fatal("foreign mutation")
+			}
+		}
+		if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil || !reflect.DeepEqual(cfg, before) || cfg.Phala.Attest != before.Phala.Attest {
+			t.Fatal("unvisited pointer changed")
+		}
+		for _, args := range [][]string{{"--phala-attest=true"}, {"--phala-attest=false"}, {"--phala-skip-attestation=false"}, {"--phala-attest=true", "--phala-skip-attestation=true"}} {
+			cfg = before
+			fs = flag.NewFlagSet("test", flag.ContinueOnError)
+			values = (Provider{}).RegisterFlags(fs, cfg)
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			want := before
+			ignored := len(args) == 1 && args[0] == "--phala-skip-attestation=false"
+			if !ignored {
+				v := len(args) == 1 && args[0] == "--phala-attest=true"
+				want.Phala.Attest = &v
+				core.RecordProviderFlagInputs(&want, true, "phala")
+				if cfg.Phala.Attest == before.Phala.Attest {
+					t.Fatal("accepted pointer reused")
+				}
+			} else if cfg.Phala.Attest != before.Phala.Attest {
+				t.Fatal("ignored pointer changed")
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("flags %v got %#v want %#v", args, cfg, want)
+			}
+			if !ignored {
+				stored := *cfg.Phala.Attest
+				if err := fs.Set("phala-attest", strconv.FormatBool(!stored)); err != nil {
+					t.Fatal(err)
+				}
+				if *cfg.Phala.Attest != stored {
+					t.Fatal("runtime aliases parsed flag storage")
+				}
+			}
+		}
+	}
+	for _, raw := range []string{"", "same", "~/ordinary"} {
+		cfg := core.Config{Provider: "other"}
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		values := (Provider{}).RegisterFlags(fs, cfg)
+		args := []string{}
+		for _, name := range []string{"cli", "instance-type", "node-id", "work-root", "compose"} {
+			args = append(args, "--phala-"+name+"=first", "--phala-"+name+"="+raw)
+		}
+		if err := fs.Parse(args); err != nil {
+			t.Fatal(err)
+		}
+		if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want := core.Config{Provider: "other", Phala: core.PhalaConfig{CLIPath: raw, InstanceType: raw, NodeID: raw, WorkRoot: raw, Compose: raw}}
+		core.MarkPhalaInstanceTypeExplicit(&want)
+		core.RecordProviderFlagInputs(&want, true, "phala")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatalf("raw flags %#v", cfg)
+		}
+	}
+}
+
 func TestFlagsApplyPhalaOptions(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	class := fs.String("class", cfg.Class, "machine class")
-	values := registerFlags(fs, cfg)
+	values := (Provider{}).RegisterFlags(fs, cfg)
 	if err := fs.Parse([]string{
 		"--class", "fast",
 		"--phala-cli", "/opt/phala",
@@ -250,7 +339,7 @@ func TestFlagsApplyPhalaOptions(t *testing.T) {
 	}
 	cfg.Class = *class
 	core.MarkClassExplicit(&cfg)
-	if err := applyFlags(&cfg, fs, values); err != nil {
+	if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Phala.CLIPath != "/opt/phala" || cfg.ServerType != "tdx.medium" ||

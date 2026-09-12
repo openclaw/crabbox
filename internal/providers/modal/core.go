@@ -1,7 +1,6 @@
 package modal
 
 import (
-	"flag"
 	"io"
 	"time"
 
@@ -28,7 +27,6 @@ type Server = core.Server
 type Repo = core.Repo
 type ExitError = core.ExitError
 type LocalCommandRequest = core.LocalCommandRequest
-type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 
 const (
@@ -40,18 +38,6 @@ const (
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
-}
-
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
-}
-
-func newLeaseID() string {
-	return core.NewLeaseID()
 }
 
 func newLeaseSlug(leaseID string) string {
@@ -68,10 +54,6 @@ func directLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep 
 
 func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
-}
-
-func writeTimingJSON(w io.Writer, report timingReport) error {
-	return core.WriteTimingJSON(w, report)
 }
 
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {

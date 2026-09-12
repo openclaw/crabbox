@@ -1,11 +1,7 @@
 package e2b
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
-	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -99,11 +96,11 @@ var newE2BClient = func(cfg Config, rt Runtime) (e2bAPI, error) {
 		return nil, exit(2, "provider=e2b requires E2B_API_KEY")
 	}
 	httpClient, envdClient := shared.ControlAndDataHTTPClients(rt.HTTP, e2bControlTimeout)
-	apiURL, err := validateE2BAPIURL(blank(cfg.E2B.APIURL, "https://api.e2b.app"))
+	apiURL, err := validateE2BAPIURL(core.Blank(cfg.E2B.APIURL, core.E2BConfigDefaultAPIURL))
 	if err != nil {
 		return nil, err
 	}
-	domain := strings.TrimSpace(blank(cfg.E2B.Domain, "e2b.app"))
+	domain := strings.TrimSpace(core.Blank(cfg.E2B.Domain, core.E2BConfigDefaultDomain))
 	return &e2bClient{
 		apiKey:     apiKey,
 		apiURL:     apiURL,
@@ -246,8 +243,8 @@ func (c *e2bClient) StartProcess(ctx context.Context, session e2bSession, req e2
 		HTTPClient:     c.dataPlaneHTTPClient(),
 		SetHeaders:     func(httpReq *http.Request) { c.setEnvdHeaders(httpReq, session) },
 		RedirectError:  e2bRedirectError,
-		EncodeEnvelope: encodeConnectJSONEnvelope,
-		ParseStream:    parseE2BProcessStream,
+		Provider:       "e2b",
+		InterpretEnd:   interpretE2BProcessEnd,
 		SummarizeError: summarizeJSON,
 		APIError: func(statusCode int, status, body string) error {
 			return &e2bAPIError{StatusCode: statusCode, Status: status, Body: body}
@@ -261,19 +258,11 @@ func (c *e2bClient) doJSON(ctx context.Context, method, path string, query url.V
 }
 
 func (c *e2bClient) doJSONWithHeaders(ctx context.Context, method, path string, query url.Values, body any, out any) (http.Header, error) {
-	var r io.Reader
-	if body != nil {
-		var buf bytes.Buffer
-		if err := json.NewEncoder(&buf).Encode(body); err != nil {
-			return nil, err
-		}
-		r = &buf
-	}
 	endpoint := c.apiURL + path
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, r)
+	req, err := shared.NewJSONRequest(ctx, method, endpoint, body)
 	if err != nil {
 		return nil, err
 	}
@@ -287,17 +276,10 @@ func (c *e2bClient) doJSONWithHeaders(ctx context.Context, method, path string, 
 		return nil, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
+	if err := shared.DecodeUnboundedJSONResponse(resp, out, func(statusCode int, status string, data []byte) error {
+		return &e2bAPIError{StatusCode: statusCode, Status: status, Body: shared.RedactErrorSecrets(summarizeJSON(data), c.apiKey)}
+	}); err != nil {
 		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &e2bAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(summarizeJSON(data), c.apiKey)}
-	}
-	if out != nil && len(data) > 0 {
-		if err := json.Unmarshal(data, out); err != nil {
-			return nil, err
-		}
 	}
 	return resp.Header.Clone(), nil
 }
@@ -336,113 +318,9 @@ func (c *e2bClient) dataPlaneHTTPClient() *http.Client {
 	return &http.Client{Timeout: 0}
 }
 
-type e2bStartResponse struct {
-	Event struct {
-		Start *struct {
-			PID uint32 `json:"pid"`
-		} `json:"start,omitempty"`
-		Data *struct {
-			Stdout string `json:"stdout,omitempty"`
-			Stderr string `json:"stderr,omitempty"`
-			PTY    string `json:"pty,omitempty"`
-		} `json:"data,omitempty"`
-		End *struct {
-			ExitCode int    `json:"exitCode"`
-			Exited   bool   `json:"exited"`
-			Status   string `json:"status"`
-			Error    string `json:"error,omitempty"`
-		} `json:"end,omitempty"`
-		Keepalive map[string]any `json:"keepalive,omitempty"`
-	} `json:"event"`
-}
-
-type e2bEndStream struct {
-	Error *struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error,omitempty"`
-}
-
-func encodeConnectJSONEnvelope(v any) ([]byte, error) {
-	data, err := json.Marshal(v)
-	if err != nil {
-		return nil, err
+func interpretE2BProcessEnd(end shared.EnvdProcessEnd, stderr io.Writer, secrets ...string) (int, error) {
+	if !end.Exited && end.Error != "" {
+		fmt.Fprintln(stderr, shared.RedactErrorSecrets(end.Error, secrets...))
 	}
-	var out bytes.Buffer
-	out.WriteByte(0)
-	var size [4]byte
-	binary.BigEndian.PutUint32(size[:], uint32(len(data)))
-	out.Write(size[:])
-	out.Write(data)
-	return out.Bytes(), nil
-}
-
-func parseE2BProcessStream(r io.Reader, stdout, stderr io.Writer, secrets ...string) (int, error) {
-	exitCode := 0
-	seenEnd := false
-	for {
-		var header [5]byte
-		if _, err := io.ReadFull(r, header[:]); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return 1, err
-		}
-		flags := header[0]
-		size := binary.BigEndian.Uint32(header[1:])
-		if flags&1 != 0 {
-			return 1, fmt.Errorf("compressed connect envelopes are not supported")
-		}
-		data := make([]byte, size)
-		if _, err := io.ReadFull(r, data); err != nil {
-			return 1, err
-		}
-		if flags&2 != 0 {
-			var end e2bEndStream
-			if len(data) > 0 {
-				if err := json.Unmarshal(data, &end); err != nil {
-					return 1, err
-				}
-			}
-			if end.Error != nil {
-				return 1, errors.New(shared.RedactErrorSecrets(end.Error.Code+": "+end.Error.Message, secrets...))
-			}
-			break
-		}
-		var event e2bStartResponse
-		if err := json.Unmarshal(data, &event); err != nil {
-			return 1, err
-		}
-		if event.Event.Data != nil {
-			if err := writeBase64(event.Event.Data.Stdout, stdout); err != nil {
-				return 1, err
-			}
-			if err := writeBase64(event.Event.Data.Stderr, stderr); err != nil {
-				return 1, err
-			}
-		}
-		if event.Event.End != nil {
-			exitCode = event.Event.End.ExitCode
-			seenEnd = true
-			if !event.Event.End.Exited && event.Event.End.Error != "" {
-				fmt.Fprintln(stderr, shared.RedactErrorSecrets(event.Event.End.Error, secrets...))
-			}
-		}
-	}
-	if !seenEnd {
-		return 1, fmt.Errorf("e2b process stream ended without end event")
-	}
-	return exitCode, nil
-}
-
-func writeBase64(value string, w io.Writer) error {
-	if value == "" {
-		return nil
-	}
-	data, err := base64.StdEncoding.DecodeString(value)
-	if err != nil {
-		return err
-	}
-	_, err = w.Write(data)
-	return err
+	return end.ExitCode, nil
 }

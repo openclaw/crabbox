@@ -34,7 +34,7 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	if err := requireHost(); err != nil {
 		return DoctorResult{}, err
 	}
-	result, err := b.rt.Exec.Run(ctx, LocalCommandRequest{Name: blank(b.cfg.AppleContainer.CLIPath, "container"), Args: []string{"--version"}})
+	result, err := b.rt.Exec.Run(ctx, LocalCommandRequest{Name: core.Blank(b.cfg.AppleContainer.CLIPath, "container"), Args: []string{"--version"}})
 	if err != nil {
 		return DoctorResult{}, exit(3, "Apple container CLI unavailable: %s", failureDetail(result, err))
 	}
@@ -54,11 +54,12 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	leaseID, slug, name := claim.LeaseID, claim.Slug, claim.CloudID
 	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s machine=%s\n", leaseID, slug, providerName, name)
 	total := time.Since(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{Provider: providerName, LeaseID: leaseID, Slug: slug, TotalMs: total.Milliseconds(), ExitCode: 0})
-	}
-	return nil
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
 
 func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
@@ -289,7 +290,7 @@ func (b *backend) createLease(ctx context.Context, repo Repo, reclaim bool, requ
 	if strings.TrimSpace(repo.Root) == "" {
 		return core.LeaseClaim{}, exit(2, "apple-machine acquisition requires a repository root for durable ownership")
 	}
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return core.LeaseClaim{}, err
@@ -306,11 +307,7 @@ func (b *backend) createLease(ctx context.Context, repo Repo, reclaim bool, requ
 		return core.LeaseClaim{}, fmt.Errorf("%w; retained machine=%s lease=%s: inspect container machine inspect %s before manual cleanup", err, name, leaseID, shellQuote(name))
 	}
 	retainedAfterRollback := func(primary, cleanup error) (core.LeaseClaim, error) {
-		code := 1
-		var public core.ExitError
-		if errors.As(primary, &public) && public.Code != 0 {
-			code = public.Code
-		}
+		code := core.ExitCodeForError(primary, 1)
 		_, combined := retained(errors.Join(primary, cleanup))
 		return core.LeaseClaim{}, shared.ExitErrorWithCause(code, combined.Error(), combined)
 	}
@@ -421,7 +418,7 @@ func machineName(leaseID string) string {
 func machineServer(item machine, leaseID, slug string, cfg Config) Server {
 	labels := map[string]string{"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": slug, "target": targetLinux}
 	server := Server{Provider: providerName, CloudID: item.ID, Name: item.ID, Status: item.Status, Labels: labels}
-	server.ServerType.Name = blank(cfg.AppleContainer.Image, "ubuntu:26.04")
+	server.ServerType.Name = core.Blank(cfg.AppleContainer.Image, "ubuntu:26.04")
 	return server
 }
 

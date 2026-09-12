@@ -94,6 +94,7 @@ All flags:
 		return err
 	}
 	cfg.Profile = strings.TrimSpace(*profile)
+	recordConfigInput(&cfg, configInputGeneric, configInputFlag, flagWasSet(fs, "profile"))
 	if err := applySelectedProfileConfig(&cfg); err != nil {
 		return err
 	}
@@ -103,6 +104,7 @@ All flags:
 			return err
 		}
 		cfg.Pond = pondName
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	resolvedDoctorID := strings.TrimSpace(*id)
 	ok := true
@@ -642,6 +644,20 @@ func doctorProviderMessage(provider, message string) string {
 		fields = append(fields[:insert], append([]string{timeoutField}, fields[insert:]...)...)
 	}
 	return strings.Join(fields, " ")
+}
+
+// DoctorChecksStatus returns failed, warning, or ok without modifying checks or their details.
+func DoctorChecksStatus(checks []DoctorCheck) string {
+	status := "ok"
+	for _, check := range checks {
+		if doctorStatusFails(check.Status) {
+			return "failed"
+		}
+		if strings.TrimSpace(strings.ToLower(check.Status)) == "warning" {
+			status = "warning"
+		}
+	}
+	return status
 }
 
 func doctorStatusFails(status string) bool {

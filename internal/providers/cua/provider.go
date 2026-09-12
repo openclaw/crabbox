@@ -21,9 +21,10 @@ func (Provider) ServerTypeForClass(string) string       { return "" }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:   providerName,
-		Family: providerName,
-		Kind:   core.ProviderKindServiceControl,
+		Authentication: core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
+		Name:           providerName,
+		Family:         providerName,
+		Kind:           core.ProviderKindServiceControl,
 		Targets: []core.TargetSpec{
 			{OS: core.TargetLinux},
 			{OS: core.TargetMacOS},

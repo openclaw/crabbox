@@ -2,7 +2,6 @@ package exedev
 
 import (
 	"context"
-	"flag"
 	"io"
 	"time"
 
@@ -43,18 +42,6 @@ const (
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
-}
-
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
-}
-
-func newLeaseID() string {
-	return core.NewLeaseID()
 }
 
 func newLeaseSlug(leaseID string) string {
@@ -119,10 +106,6 @@ func touchDirectLeaseLabels(labels map[string]string, cfg Config, state string, 
 
 func sshTargetFromConfig(cfg Config, host string) SSHTarget {
 	return core.SSHTargetFromConfig(cfg, host)
-}
-
-func isDefaultWorkRoot(value string) bool {
-	return core.IsDefaultWorkRoot(value)
 }
 
 var waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {

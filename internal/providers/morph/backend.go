@@ -19,19 +19,9 @@ import (
 )
 
 const morphReadyCheck = "command -v bash >/dev/null && command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && (command -v python3 >/dev/null || command -v python >/dev/null || command -v perl >/dev/null)"
-const defaultMorphWorkRoot = "/tmp/crabbox"
 const morphAcquireRollbackTimeout = 30 * time.Second
 
 var waitForMorphSSHReady = waitForSSHReady
-
-type morphFlagValues struct {
-	APIURL          *string
-	Snapshot        *string
-	SSHGatewayHost  *string
-	WorkRoot        *string
-	DeleteOnRelease *bool
-	WakeOnSSH       *bool
-}
 
 type morphLeaseBackend struct {
 	spec              ProviderSpec
@@ -45,50 +35,29 @@ type morphLeaseBackend struct {
 }
 
 func RegisterMorphProviderFlags(fs *flag.FlagSet, defaults Config) any {
-	return morphFlagValues{
-		APIURL:          fs.String("morph-api-url", defaults.Morph.APIURL, "Morph API URL"),
-		Snapshot:        fs.String("morph-snapshot", defaults.Morph.Snapshot, "Morph snapshot ID"),
-		SSHGatewayHost:  fs.String("morph-ssh-gateway-host", defaults.Morph.SSHGatewayHost, "Morph SSH gateway host"),
-		WorkRoot:        fs.String("morph-work-root", defaults.Morph.WorkRoot, "Morph remote Crabbox work root"),
-		DeleteOnRelease: fs.Bool("morph-delete-on-release", defaults.Morph.DeleteOnRelease, "Delete Morph instances instead of pausing them on release"),
-		WakeOnSSH:       fs.Bool("morph-wake-on-ssh", defaults.Morph.WakeOnSSH, "Enable Morph wake-on-ssh for paused instances"),
-	}
+	return core.RegisterMorphConfigFlags(fs, defaults.Morph)
 }
 
 func ApplyMorphProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if isMorphProviderName(cfg.Provider) {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=morph")
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=morph; use --morph-snapshot")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", "use --morph-snapshot"); err != nil {
+			return err
 		}
 		if cfg.TargetOS != "" && cfg.TargetOS != targetLinux {
 			return exit(2, "provider=morph supports target=linux only")
 		}
 	}
-	v, ok := values.(morphFlagValues)
+	v, ok := values.(core.MorphConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "morph-api-url") {
-		cfg.Morph.APIURL = *v.APIURL
-	}
-	if flagWasSet(fs, "morph-snapshot") {
-		cfg.Morph.Snapshot = *v.Snapshot
-	}
-	if flagWasSet(fs, "morph-ssh-gateway-host") {
-		cfg.Morph.SSHGatewayHost = *v.SSHGatewayHost
-	}
-	if flagWasSet(fs, "morph-work-root") {
-		cfg.Morph.WorkRoot = *v.WorkRoot
-	}
-	if flagWasSet(fs, "morph-delete-on-release") {
-		cfg.Morph.DeleteOnRelease = *v.DeleteOnRelease
+	applied, err := v.Apply(&cfg.Morph, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	if applied.DeleteOnRelease {
 		markDeleteOnReleaseExplicit(cfg)
 	}
-	if flagWasSet(fs, "morph-wake-on-ssh") {
-		cfg.Morph.WakeOnSSH = *v.WakeOnSSH
+	if err != nil {
+		return err
 	}
 	if isMorphProviderName(cfg.Provider) {
 		applyMorphDefaults(cfg)
@@ -179,7 +148,7 @@ func (b *morphLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	slug, err := allocateDirectLeaseSlug(leaseID, req.RequestedSlug, serversFromLeaseViews(instances, cfg))
 	if err != nil {
 		return LeaseTarget{}, err
@@ -361,8 +330,8 @@ func (b *morphLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseV
 		views = append(views, morphServer(instance, cfg, leaseID, slug))
 	}
 	sort.Slice(views, func(i, j int) bool {
-		left := blank(views[i].Labels["lease"], views[i].CloudID)
-		right := blank(views[j].Labels["lease"], views[j].CloudID)
+		left := core.Blank(views[i].Labels["lease"], views[i].CloudID)
+		right := core.Blank(views[j].Labels["lease"], views[j].CloudID)
 		return left < right
 	})
 	return views, nil
@@ -391,7 +360,7 @@ func (b *morphLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRe
 		instanceID = strings.TrimSpace(req.Lease.Server.Labels["instance_id"])
 	}
 	removeMissingInstance := func() error {
-		claim, ok, claimErr := resolveLeaseClaimForProvider(blank(leaseID, instanceID), providerName)
+		claim, ok, claimErr := resolveLeaseClaimForProvider(core.Blank(leaseID, instanceID), providerName)
 		if claimErr != nil {
 			return claimErr
 		}
@@ -400,7 +369,7 @@ func (b *morphLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRe
 		}
 		binding := shared.ClaimBinding{
 			Provider: providerName, ProviderScope: Provider{}.ClaimScope(cfg), ExactProviderScope: true,
-			LeaseID: claim.LeaseID, CloudID: blank(instanceID, claim.CloudID),
+			LeaseID: claim.LeaseID, CloudID: core.Blank(instanceID, claim.CloudID),
 		}
 		exact, claimErr := shared.RequireExactClaim(binding)
 		if claimErr != nil {
@@ -426,7 +395,7 @@ func (b *morphLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRe
 		}
 	}
 	if instance.ID == "" {
-		resolveID := blank(leaseID, instanceID)
+		resolveID := core.Blank(leaseID, instanceID)
 		if resolveID != "" {
 			resolved, resolvedLeaseID, _, resolveErr := b.resolveInstance(ctx, client, resolveID)
 			if resolveErr != nil {
@@ -514,7 +483,7 @@ func (b *morphLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRe
 		}); err != nil {
 			return err
 		}
-		removeStoredTestboxKey(blank(leaseID, instance.ID))
+		removeStoredTestboxKey(core.Blank(leaseID, instance.ID))
 		return nil
 	}
 	wasPaused := morphInstancePaused(instance)
@@ -542,7 +511,7 @@ func (b *morphLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRe
 }
 
 func (b *morphLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
-	instance := blank(blank(lease.Server.CloudID, lease.Server.Labels["instance_id"]), "-")
+	instance := core.Blank(core.Blank(lease.Server.CloudID, lease.Server.Labels["instance_id"]), "-")
 	if morphDeleteOnRelease(lease, b.configForRun()) {
 		return fmt.Sprintf("deleted lease=%s instance=%s", lease.LeaseID, instance)
 	}
@@ -570,7 +539,7 @@ func (b *morphLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server
 		instance, err = client.GetInstance(ctx, instanceID)
 		if err != nil {
 			if isMorphNotFound(err) {
-				return Server{}, exit(4, "lease %s not found for provider=%s", blank(leaseID, instanceID), providerName)
+				return Server{}, exit(4, "lease %s not found for provider=%s", core.Blank(leaseID, instanceID), providerName)
 			}
 			return Server{}, exit(1, "morph get instance %s failed: %v", instanceID, err)
 		}
@@ -578,7 +547,7 @@ func (b *morphLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server
 			return Server{}, exit(4, "morph instance %s is not managed by Crabbox", instance.ID)
 		}
 	} else {
-		instance, leaseID, slug, err = b.resolveInstance(ctx, client, blank(leaseID, slug))
+		instance, leaseID, slug, err = b.resolveInstance(ctx, client, core.Blank(leaseID, slug))
 		if err != nil {
 			return Server{}, err
 		}
@@ -590,7 +559,7 @@ func (b *morphLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server
 		instance.Metadata["idle_timeout"] = strconv.Itoa(int(req.IdleTimeout.Seconds()))
 		instance.Metadata["idle_timeout_secs"] = strconv.Itoa(int(req.IdleTimeout.Seconds()))
 	}
-	labels := morphLeaseMetadata(cfg, instance, blank(leaseID, instance.ID), slug, req.State, false, b.now().UTC(), true)
+	labels := morphLeaseMetadata(cfg, instance, core.Blank(leaseID, instance.ID), slug, req.State, false, b.now().UTC(), true)
 	if err := client.SetInstanceMetadata(ctx, instance.ID, labels); err != nil {
 		return Server{}, exit(1, "morph set metadata for %s failed: %v", instance.ID, err)
 	}
@@ -603,7 +572,7 @@ func (b *morphLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server
 		return Server{}, exit(1, "morph update wake-on for %s failed: %v", instance.ID, err)
 	}
 	instance.Metadata = labels
-	return morphServer(instance, cfg, blank(leaseID, instance.ID), slug), nil
+	return morphServer(instance, cfg, core.Blank(leaseID, instance.ID), slug), nil
 }
 
 func (b *morphLeaseBackend) api() (morphAPI, error) {
@@ -708,7 +677,7 @@ func (b *morphLeaseBackend) waitForInstanceReady(ctx context.Context, client mor
 			case morphInstanceReady(instance) || allowPaused && morphInstancePaused(instance):
 				return true, nil
 			case morphInstanceTerminal(instance):
-				return false, exit(1, "morph instance %s entered terminal state %q", instanceID, blank(instance.Status, "unknown"))
+				return false, exit(1, "morph instance %s entered terminal state %q", instanceID, core.Blank(instance.Status, "unknown"))
 			}
 			return false, nil
 		}, nil)
@@ -752,14 +721,14 @@ func applyMorphDefaults(cfg *Config) {
 		cfg.TargetOS = targetLinux
 	}
 	if strings.TrimSpace(cfg.Morph.APIURL) == "" {
-		cfg.Morph.APIURL = "https://cloud.morph.so"
+		cfg.Morph.APIURL = core.MorphConfigDefaultAPIURL
 	}
 	if strings.TrimSpace(cfg.Morph.SSHGatewayHost) == "" {
-		cfg.Morph.SSHGatewayHost = "ssh.cloud.morph.so"
+		cfg.Morph.SSHGatewayHost = core.MorphConfigDefaultSSHGatewayHost
 	}
 	if strings.TrimSpace(cfg.Morph.WorkRoot) == "" {
 		if isDefaultWorkRoot(cfg.WorkRoot) || strings.TrimSpace(cfg.WorkRoot) == "" {
-			cfg.Morph.WorkRoot = defaultMorphWorkRoot
+			cfg.Morph.WorkRoot = core.MorphConfigDefaultWorkRoot
 		} else {
 			cfg.Morph.WorkRoot = cfg.WorkRoot
 		}
@@ -770,7 +739,7 @@ func applyMorphDefaults(cfg *Config) {
 	}
 	cfg.SSHPort = "22"
 	cfg.SSHFallbackPorts = nil
-	cfg.ServerType = blank(strings.TrimSpace(cfg.Morph.Snapshot), "snapshot")
+	cfg.ServerType = core.Blank(strings.TrimSpace(cfg.Morph.Snapshot), "snapshot")
 }
 
 func validateMorphConfig(cfg Config) error {
@@ -859,7 +828,7 @@ func morphLeaseMetadata(cfg Config, instance morphInstance, leaseID, slug, state
 	} else if strings.TrimSpace(labels["server_type"]) == "" && snapshotID != "" {
 		labels["server_type"] = snapshotID
 	}
-	if name := leaseProviderName(blank(leaseID, instance.ID), slug); name != "" {
+	if name := leaseProviderName(core.Blank(leaseID, instance.ID), slug); name != "" {
 		labels["lease_name"] = name
 	}
 	if strings.TrimSpace(labels["release"]) == "" {
@@ -871,7 +840,7 @@ func morphLeaseMetadata(cfg Config, instance morphInstance, leaseID, slug, state
 func morphServer(instance morphInstance, cfg Config, leaseID, slug string) Server {
 	labels := instance.Metadata.Clone()
 	if leaseID == "" {
-		leaseID = blank(strings.TrimSpace(labels["lease"]), instance.ID)
+		leaseID = core.Blank(strings.TrimSpace(labels["lease"]), instance.ID)
 	}
 	if slug == "" {
 		slug = strings.TrimSpace(labels["slug"])
@@ -916,18 +885,18 @@ func morphServer(instance morphInstance, cfg Config, leaseID, slug string) Serve
 	server := Server{
 		CloudID:  instance.ID,
 		Provider: providerName,
-		Name:     blank(labels["lease_name"], instance.ID),
+		Name:     core.Blank(labels["lease_name"], instance.ID),
 		Status:   state,
 		Labels:   labels,
 	}
-	server.ServerType.Name = blank(labels["server_type"], blank(labels["snapshot_id"], blank(cfg.ServerType, "snapshot")))
-	server.PublicNet.IPv4.IP = blank(strings.TrimSpace(cfg.Morph.SSHGatewayHost), "ssh.cloud.morph.so")
+	server.ServerType.Name = core.Blank(labels["server_type"], core.Blank(labels["snapshot_id"], core.Blank(cfg.ServerType, "snapshot")))
+	server.PublicNet.IPv4.IP = core.Blank(strings.TrimSpace(cfg.Morph.SSHGatewayHost), core.MorphConfigDefaultSSHGatewayHost)
 	return server
 }
 
 func morphSSHTarget(cfg Config, instance morphInstance, keyPath, knownHostsPath string) SSHTarget {
-	target := sshTargetFromConfig(cfg, blank(strings.TrimSpace(cfg.Morph.SSHGatewayHost), "ssh.cloud.morph.so"))
-	target.Host = blank(strings.TrimSpace(cfg.Morph.SSHGatewayHost), "ssh.cloud.morph.so")
+	target := sshTargetFromConfig(cfg, core.Blank(strings.TrimSpace(cfg.Morph.SSHGatewayHost), core.MorphConfigDefaultSSHGatewayHost))
+	target.Host = core.Blank(strings.TrimSpace(cfg.Morph.SSHGatewayHost), core.MorphConfigDefaultSSHGatewayHost)
 	target.Port = "22"
 	target.User = instance.ID
 	target.Key = keyPath
@@ -1110,5 +1079,5 @@ func boolPtr(value bool) *bool {
 
 func isDefaultMorphWorkRoot(value string) bool {
 	value = strings.TrimSpace(value)
-	return value == "" || value == defaultMorphWorkRoot || isDefaultWorkRoot(value)
+	return value == "" || value == core.MorphConfigDefaultWorkRoot || isDefaultWorkRoot(value)
 }

@@ -223,11 +223,11 @@ func (c *modalPythonClient) runStreamed(ctx context.Context, script string, payl
 }
 
 func (c *modalPythonClient) python() string {
-	return blank(strings.TrimSpace(c.cfg.Modal.Python), "python3")
+	return core.Blank(strings.TrimSpace(c.cfg.Modal.Python), core.ModalConfigDefaultPython)
 }
 
 func (c *modalPythonClient) app() string {
-	return blank(strings.TrimSpace(c.cfg.Modal.App), "crabbox")
+	return core.Blank(strings.TrimSpace(c.cfg.Modal.App), core.ModalConfigDefaultApp)
 }
 
 func (c *modalPythonClient) env() []string {
@@ -376,7 +376,7 @@ try:
     req = load_payload()
     import modal
     client, app, scope = modal_context(req, create=True)
-    image_name = req.get("image") or "python:3.13-slim"
+    image_name = req["image"]
     image = modal.Image.from_registry(image_name)
     kwargs = {
         "app": app,

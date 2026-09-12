@@ -21,7 +21,7 @@ func (b *backend) syncWorkspace(ctx context.Context, api bridgeClient, sandboxID
 		PhaseName:           "cloudflare_sandbox_sync",
 		Provider:            providerName,
 		Stderr:              b.rt.Stderr,
-		Now:                 b.now,
+		Now:                 func() time.Time { return core.ClockNow(b.rt.Clock) },
 		CleanupContext:      b.cleanupContext,
 		Upload: func(uploadCtx context.Context, remoteArchive string, body io.Reader) error {
 			return api.UploadFile(uploadCtx, sandboxID, remoteArchive, body)

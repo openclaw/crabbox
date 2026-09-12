@@ -42,6 +42,57 @@ func newOpenSandboxTestClient(t *testing.T, server *httptest.Server) openSandbox
 	return client
 }
 
+func TestOpenSandboxConfigShowCompletePassiveSection(t *testing.T) {
+	projector, ok := any(Provider{}).(core.ProviderConfigShowProjector)
+	if !ok {
+		t.Fatal("actual provider has no passive config display section")
+	}
+	for _, selected := range []string{"other", "opensandbox"} {
+		for _, populated := range []bool{false, true} {
+			cfg := core.Config{Provider: selected}
+			want := core.ProviderConfigShowSection{JSONKey: "openSandbox", TextLabel: "opensandbox", Providers: []string{"opensandbox"}, Fields: []core.ProviderConfigShowField{
+				{JSONName: "apiUrl", JSONValue: "", TextName: "api_url", TextValue: "-"},
+				{JSONName: "image", JSONValue: "", TextName: "image", TextValue: ""},
+				{JSONName: "workdir", JSONValue: "", TextName: "workdir", TextValue: ""},
+				{JSONName: "cpu", JSONValue: "", TextName: "cpu", TextValue: ""},
+				{JSONName: "memory", JSONValue: "", TextName: "memory", TextValue: ""},
+				{JSONName: "timeoutSecs", JSONValue: 0, TextName: "timeout_secs", TextValue: "0"},
+				{JSONName: "execTimeoutSecs", JSONValue: 0, TextName: "exec_timeout_secs", TextValue: "0"},
+				{JSONName: "platformOS", JSONValue: "", TextName: "platform_os", TextValue: ""},
+				{JSONName: "platformArch", JSONValue: "", TextName: "platform_arch", TextValue: ""},
+				{JSONName: "secureAccess", JSONValue: false, TextName: "secure_access", TextValue: "false"},
+				{JSONName: "useServerProxy", JSONValue: false, TextName: "use_server_proxy", TextValue: "false"},
+				{JSONName: "forgetMissing", JSONValue: false, TextName: "forget_missing", TextValue: "false"},
+			}}
+			if populated {
+				cfg.OpenSandbox = core.OpenSandboxConfig{APIURL: "https://example.invalid/path?view=compact#part", Image: " raw-image ", Workdir: " raw-workdir ", CPU: " 2 ", Memory: "", TimeoutSecs: 0, ExecTimeoutSecs: -2, PlatformOS: " raw-os ", PlatformArch: " raw-arch ", SecureAccess: false, UseServerProxy: true, ForgetMissing: true}
+				want.Fields = []core.ProviderConfigShowField{
+					{JSONName: "apiUrl", JSONValue: "https://example.invalid/path", TextName: "api_url", TextValue: "https://example.invalid/path"},
+					{JSONName: "image", JSONValue: " raw-image ", TextName: "image", TextValue: " raw-image "},
+					{JSONName: "workdir", JSONValue: " raw-workdir ", TextName: "workdir", TextValue: " raw-workdir "},
+					{JSONName: "cpu", JSONValue: " 2 ", TextName: "cpu", TextValue: " 2 "},
+					{JSONName: "memory", JSONValue: "", TextName: "memory", TextValue: ""},
+					{JSONName: "timeoutSecs", JSONValue: 0, TextName: "timeout_secs", TextValue: "0"},
+					{JSONName: "execTimeoutSecs", JSONValue: -2, TextName: "exec_timeout_secs", TextValue: "-2"},
+					{JSONName: "platformOS", JSONValue: " raw-os ", TextName: "platform_os", TextValue: " raw-os "},
+					{JSONName: "platformArch", JSONValue: " raw-arch ", TextName: "platform_arch", TextValue: " raw-arch "},
+					{JSONName: "secureAccess", JSONValue: false, TextName: "secure_access", TextValue: "false"},
+					{JSONName: "useServerProxy", JSONValue: true, TextName: "use_server_proxy", TextValue: "true"},
+					{JSONName: "forgetMissing", JSONValue: true, TextName: "forget_missing", TextValue: "true"},
+				}
+			}
+			before := cfg
+			got := projector.ConfigShowSection(cfg)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("passive section got %#v want %#v", got, want)
+			}
+			if !reflect.DeepEqual(cfg, before) {
+				t.Fatal("projection mutated supplied config")
+			}
+		}
+	}
+}
+
 func TestProviderSpec(t *testing.T) {
 	p := Provider{}
 	if p.Name() != "opensandbox" {
@@ -86,6 +137,87 @@ func TestProviderForResolvesNameOnly(t *testing.T) {
 	}
 }
 
+func TestOpenSandboxFlagPresence(t *testing.T) {
+	cfg := testConfig()
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := RegisterOpenSandboxProviderFlags(fs, cfg)
+	cfg.OpenSandbox = core.OpenSandboxConfig{APIURL: "https://example.invalid/later", Image: "later", Workdir: "/workspace/later", CPU: "2", Memory: "4Gi", TimeoutSecs: 30, ExecTimeoutSecs: 20, PlatformOS: "linux", PlatformArch: "arm64", SecureAccess: true, UseServerProxy: true, ForgetMissing: true}
+	before := cfg.OpenSandbox
+	if err := ApplyOpenSandboxProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OpenSandbox != before {
+		t.Fatalf("unvisited flags changed config: %#v", cfg.OpenSandbox)
+	}
+	if err := fs.Parse([]string{"--opensandbox-api-url=https://example.invalid/later", "--opensandbox-image=later", "--opensandbox-workdir=/workspace/later", "--opensandbox-cpu=2", "--opensandbox-memory=4Gi", "--opensandbox-timeout-secs=30", "--opensandbox-exec-timeout-secs=20", "--opensandbox-platform-os=linux", "--opensandbox-platform-arch=arm64", "--opensandbox-secure-access=true", "--opensandbox-use-server-proxy=true", "--opensandbox-forget-missing=true"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.OpenSandbox = core.OpenSandboxConfig{}
+	if err := ApplyOpenSandboxProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OpenSandbox != before {
+		t.Fatalf("nonzero flags=%#v, want %#v", cfg.OpenSandbox, before)
+	}
+	if err := fs.Parse([]string{"--opensandbox-api-url=", "--opensandbox-image=", "--opensandbox-workdir=", "--opensandbox-cpu=", "--opensandbox-memory=", "--opensandbox-timeout-secs=0", "--opensandbox-exec-timeout-secs=0", "--opensandbox-platform-os=", "--opensandbox-platform-arch=", "--opensandbox-secure-access=false", "--opensandbox-use-server-proxy=false", "--opensandbox-forget-missing=false"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyOpenSandboxProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OpenSandbox != (core.OpenSandboxConfig{}) {
+		t.Fatalf("explicit zero flags not applied: %#v", cfg.OpenSandbox)
+	}
+	if err := fs.Parse([]string{"--opensandbox-forget-missing=true"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyOpenSandboxProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.OpenSandbox.ForgetMissing {
+		t.Fatal("explicit true flag not applied")
+	}
+}
+
+func TestOpenSandboxSizingGuardBeforeValuesAssertion(t *testing.T) {
+	for _, provider := range []string{"opensandbox", " OpenSandbox ", "osb", "open-sandbox"} {
+		for _, args := range [][]string{{"--class=large"}, {"--type=vm"}, {"--type=vm", "--class=large"}} {
+			cfg := testConfig()
+			cfg.Provider = provider
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.String("class", "", "")
+			fs.String("type", "", "")
+			registered := RegisterOpenSandboxProviderFlags(fs, cfg)
+			if err := fs.Parse(append(args, "--opensandbox-image=changed")); err != nil {
+				t.Fatal(err)
+			}
+			for _, values := range []any{nil, struct{}{}, registered} {
+				before := cfg.OpenSandbox
+				err := ApplyOpenSandboxProviderFlags(&cfg, fs, values)
+				canonical := provider == "opensandbox" || provider == " OpenSandbox "
+				if canonical {
+					flagName := "--class"
+					if len(args) == 1 && args[0] == "--type=vm" {
+						flagName = "--type"
+					}
+					want := flagName + " is not supported for provider=opensandbox; use --opensandbox-cpu and --opensandbox-memory"
+					if err == nil || err.Error() != want {
+						t.Fatalf("provider=%q values=%T error=%v, want %q", provider, values, err, want)
+					}
+				} else if err != nil {
+					t.Fatalf("noncanonical provider guard: %v", err)
+				}
+				if !canonical && values == registered {
+					before.Image = "changed"
+				}
+				if cfg.OpenSandbox != before {
+					t.Fatalf("unexpected copies: %#v, want %#v", cfg.OpenSandbox, before)
+				}
+			}
+		}
+	}
+}
+
 func TestOpenSandboxFlagsRejectNegativeTimeouts(t *testing.T) {
 	for _, flagName := range []string{"opensandbox-timeout-secs", "opensandbox-exec-timeout-secs"} {
 		t.Run(flagName, func(t *testing.T) {
@@ -93,10 +225,13 @@ func TestOpenSandboxFlagsRejectNegativeTimeouts(t *testing.T) {
 			cfg.Provider = providerName
 			fs := flag.NewFlagSet(flagName, flag.ContinueOnError)
 			values := RegisterOpenSandboxProviderFlags(fs, cfg)
-			if err := fs.Parse([]string{"--" + flagName, "-1"}); err != nil {
+			if err := fs.Parse([]string{"--" + flagName, "-1", "--opensandbox-image=changed", "--opensandbox-forget-missing=true"}); err != nil {
 				t.Fatal(err)
 			}
 			err := ApplyOpenSandboxProviderFlags(&cfg, fs, values)
+			if cfg.OpenSandbox.Image != "changed" || !cfg.OpenSandbox.ForgetMissing {
+				t.Fatal("explicit flags must all apply before timeout validation")
+			}
 			if err == nil || !strings.Contains(err.Error(), "must be non-negative") {
 				t.Fatalf("err=%v, want non-negative timeout rejection", err)
 			}
@@ -562,13 +697,15 @@ func TestRunDoesNotPublishClaimWhenCreationLockIsCanceled(t *testing.T) {
 	}
 	defer unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
+	// Cancellation must follow creation so this case reaches unpublished-sandbox rollback.
+	fake.afterCreate = cancel
 	_, err = backend.Run(ctx, RunRequest{
 		Repo: Repo{Name: "my-app", Root: tempGitRepo(t)}, NoSync: true, Command: []string{"true"},
 	})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err=%v, want operation lock deadline", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v, want operation lock cancellation", err)
 	}
 	if len(fake.deleted) != 1 || fake.deleted[0] != fake.sandbox.ID {
 		t.Fatalf("deleted=%#v want unpublished sandbox rollback", fake.deleted)
@@ -2842,6 +2979,7 @@ type fakeOpenSandboxClient struct {
 	listEmptyCount       int
 	listErr              error
 	listErrCount         int
+	afterCreate          func()
 	afterResume          func()
 	afterRun             func(runCommandRequest)
 	runStarted           chan struct{}
@@ -2880,6 +3018,9 @@ func (f *fakeOpenSandboxClient) CreateSandbox(_ context.Context, req createSandb
 	}
 	if f.createErr != nil {
 		return sandboxInfo{}, f.createErr
+	}
+	if f.afterCreate != nil {
+		f.afterCreate()
 	}
 	return created, nil
 }
@@ -3022,4 +3163,151 @@ func TestRunCancellationAfterResumeDoesNotReclaim(t *testing.T) {
 	if len(fake.resumed) != 1 || len(fake.runs) != 0 || len(fake.deleted) != 0 || strings.Contains(stderr.String(), "rerun:") {
 		t.Fatalf("resumed=%v runs=%v deletes=%v stderr=%s", fake.resumed, fake.runs, fake.deleted, stderr.String())
 	}
+}
+
+func TestSDKClientPollingTerminationPreservesCause(t *testing.T) {
+	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+	for _, readiness := range []bool{false, true} {
+		name := "running"
+		if readiness {
+			name = "execd-ready"
+		}
+		for _, termination := range []string{"deadline", "cancel", "custom-deadline", "custom-cancel"} {
+			t.Run(name+"/"+termination, func(t *testing.T) {
+				const id = "sb-poll-cause"
+				pending := sdk.ErrorResponse{Code: "PENDING", Message: "fixture pending"}
+				var server *httptest.Server
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					switch r.URL.Path {
+					case "/v1/sandboxes/" + id:
+						_, _ = io.WriteString(w, `{"id":"sb-poll-cause","status":{"state":"Pending"},"createdAt":"2026-06-11T00:00:00Z"}`)
+					case "/v1/sandboxes/" + id + "/endpoints/44772":
+						_ = json.NewEncoder(w).Encode(map[string]string{"endpoint": server.URL})
+					case "/ping":
+						w.WriteHeader(http.StatusTooEarly)
+						_ = json.NewEncoder(w).Encode(pending)
+					default:
+						t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+						http.NotFound(w, r)
+					}
+				}))
+				defer server.Close()
+
+				customCause := core.ExitError{Code: 7, Message: "fixture custom poll cause"}
+				var ctx context.Context
+				var stop, endObservation func()
+				var wantContext, wantCause error
+				wantStatus, wantKind := core.RunStatusCanceled, core.RunErrorCanceled
+				switch termination {
+				case "deadline":
+					ctx, stop = context.WithTimeout(t.Context(), time.Second)
+					wantContext = context.DeadlineExceeded
+				case "custom-deadline":
+					ctx, stop = context.WithTimeoutCause(t.Context(), time.Second, customCause)
+					wantContext, wantCause = context.DeadlineExceeded, customCause
+				case "cancel":
+					ctx, stop = context.WithCancel(t.Context())
+					endObservation = stop
+					wantContext = context.Canceled
+				case "custom-cancel":
+					var cancel context.CancelCauseFunc
+					ctx, cancel = context.WithCancelCause(t.Context())
+					stop = func() { cancel(nil) }
+					endObservation = func() { cancel(customCause) }
+					wantContext, wantCause = context.Canceled, customCause
+				}
+				defer stop()
+				if wantContext == context.DeadlineExceeded {
+					wantStatus, wantKind = core.RunStatusTimedOut, core.RunErrorTimeout
+					endObservation = func() { <-ctx.Done() }
+				}
+				responsePath := "/v1/sandboxes/" + id
+				if readiness {
+					responsePath = "/ping"
+				}
+				var observations atomic.Int32
+				transport := server.Client().Transport
+				server.Client().Transport = openSandboxObservationCloseTransport{
+					base: transport, path: responsePath, afterClose: func() {
+						observations.Add(1)
+						endObservation()
+					},
+				}
+				client := newOpenSandboxTestClient(t, server).(*sdkOpenSandboxClient)
+				var err error
+				if readiness {
+					err = client.waitUntilReady(ctx, id)
+				} else {
+					_, err = client.waitForRunning(ctx, id)
+				}
+				if got := observations.Load(); got != 1 {
+					t.Fatalf("completed pending HTTP observations=%d, want exactly one before termination", got)
+				}
+				if !errors.Is(err, wantContext) {
+					t.Errorf("lost terminal context %v: %v", wantContext, err)
+				}
+				if wantCause != nil && !errors.Is(err, wantCause) {
+					t.Errorf("lost custom cancellation/deadline cause: %v", err)
+				}
+				result := core.FinalizeRunResult(core.RunResult{}, err)
+				if result.Status != wantStatus || result.ErrorKind != wantKind {
+					t.Errorf("classification=%s/%s, want %s/%s: %v", result.Status, result.ErrorKind, wantStatus, wantKind, err)
+				}
+				if code := core.ExitCodeForError(err, 1); code != 1 {
+					t.Errorf("public code=%d, want legacy fallback 1 despite custom cause code 7", code)
+				}
+				prefix := "sandbox " + id + " did not reach Running state"
+				if readiness {
+					prefix = "sandbox " + id + " did not become ready"
+				}
+				wantDisplay := regexp.QuoteMeta(prefix + ": " + wantContext.Error())
+				if wantContext == context.DeadlineExceeded && (readiness || wantCause == nil) {
+					wantDisplay = regexp.QuoteMeta(prefix+" within ") + `[0-9.]+(?:ns|µs|ms|s)`
+					if readiness {
+						observation := &sdk.APIError{StatusCode: http.StatusTooEarly, Response: pending}
+						wantDisplay += regexp.QuoteMeta(": " + observation.Error())
+					}
+				}
+				if err == nil || !regexp.MustCompile("^"+wantDisplay+"$").MatchString(err.Error()) {
+					t.Errorf("display=%v, want legacy pattern %s", err, wantDisplay)
+				}
+				t.Logf("public=%d outcome=%s/%s display=%v", core.ExitCodeForError(err, 1), result.Status, result.ErrorKind, err)
+			})
+		}
+	}
+}
+
+// End the caller context only after the real SDK has decoded and closed a
+// pending loopback response; do not accidentally test an interrupted request.
+type openSandboxObservationCloseTransport struct {
+	base       http.RoundTripper
+	path       string
+	afterClose func()
+}
+
+func (t openSandboxObservationCloseTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	response, err := t.base.RoundTrip(r)
+	if err == nil && r.URL.Path == t.path {
+		response.Body = &openSandboxObservationCloseBody{ReadCloser: response.Body, afterClose: t.afterClose}
+	}
+	return response, err
+}
+
+func (t openSandboxObservationCloseTransport) CloseIdleConnections() {
+	if closer, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
+type openSandboxObservationCloseBody struct {
+	io.ReadCloser
+	afterClose func()
+	once       sync.Once
+}
+
+func (b *openSandboxObservationCloseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(b.afterClose)
+	return err
 }

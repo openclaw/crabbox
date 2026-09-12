@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -427,7 +428,7 @@ func (c *unikraftCloudClient) doInstances(ctx context.Context, method, apiPath s
 		return nil, c.unikraftCloudResponseError(envelope.Errors[0], unikraftCloudEnvelopeMessage(envelope))
 	}
 	if status == "partial_success" {
-		message := blank(strings.TrimSpace(envelope.Message), "instance operation only partially succeeded")
+		message := core.Blank(strings.TrimSpace(envelope.Message), "instance operation only partially succeeded")
 		return nil, &unikraftCloudAPIError{StatusCode: http.StatusInternalServerError, Message: redactSecret(message, c.apiKey)}
 	}
 	return envelope.Data.Instances, nil
@@ -519,7 +520,7 @@ func (c *unikraftCloudClient) unikraftCloudInstanceError(envelope ukcResponse) e
 		status := strings.ToLower(strings.TrimSpace(instance.ItemStatus))
 		if status == "error" || instance.ItemError != 0 {
 			statusCode := unikraftCloudHTTPStatus(instance.ItemError)
-			return &unikraftCloudAPIError{StatusCode: statusCode, Message: redactSecret(blank(instance.ItemMessage, "instance operation failed"), c.apiKey)}
+			return &unikraftCloudAPIError{StatusCode: statusCode, Message: redactSecret(core.Blank(instance.ItemMessage, "instance operation failed"), c.apiKey)}
 		}
 		if status != "" && status != "success" {
 			return fmt.Errorf("%s instance result has invalid status %q", providerName, redactSecret(instance.ItemStatus, c.apiKey))
@@ -533,7 +534,7 @@ func (c *unikraftCloudClient) unikraftCloudQuotaError(envelope ukcQuotasResponse
 		status := strings.ToLower(strings.TrimSpace(quota.ItemStatus))
 		if status == "error" || quota.ItemError != 0 {
 			statusCode := unikraftCloudHTTPStatus(quota.ItemError)
-			return &unikraftCloudAPIError{StatusCode: statusCode, Message: redactSecret(blank(quota.ItemMessage, "quota lookup failed"), c.apiKey)}
+			return &unikraftCloudAPIError{StatusCode: statusCode, Message: redactSecret(core.Blank(quota.ItemMessage, "quota lookup failed"), c.apiKey)}
 		}
 		if status != "" && status != "success" {
 			return fmt.Errorf("%s quota result has invalid status %q", providerName, redactSecret(quota.ItemStatus, c.apiKey))
@@ -543,7 +544,7 @@ func (c *unikraftCloudClient) unikraftCloudQuotaError(envelope ukcQuotasResponse
 }
 
 func (c *unikraftCloudClient) unikraftCloudResponseError(responseErr ukcResponseError, fallback string) error {
-	message := blank(strings.TrimSpace(responseErr.Message), fallback)
+	message := core.Blank(strings.TrimSpace(responseErr.Message), fallback)
 	return &unikraftCloudAPIError{
 		StatusCode: unikraftCloudHTTPStatus(responseErr.Status),
 		Message:    redactSecret(message, c.apiKey),

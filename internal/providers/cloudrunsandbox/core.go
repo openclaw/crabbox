@@ -1,7 +1,6 @@
 package cloudrunsandbox
 
 import (
-	"flag"
 	"io"
 	"time"
 
@@ -40,8 +39,6 @@ const (
 	providerFamily        = "cloud-run-sandbox"
 	leasePrefix           = "gcrs_"
 	namePrefix            = "crabbox-"
-	defaultCLIPath        = "/usr/local/gcp/bin/sandbox"
-	defaultWorkdir        = "/tmp/crabbox"
 	defaultSandboxPath    = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 	targetLinux           = core.TargetLinux
 	NetworkPublic         = core.NetworkPublic
@@ -61,10 +58,6 @@ func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
 }
 
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
-}
-
 func writeTimingJSON(w io.Writer, report timingReport) error {
 	return core.WriteTimingJSON(w, report)
 }
@@ -79,10 +72,6 @@ func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, s
 
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
-}
-
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
 }
 
 func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {

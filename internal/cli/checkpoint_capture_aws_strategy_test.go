@@ -176,3 +176,135 @@ esac
 		})
 	}
 }
+
+func runCheckpointAWSNonSubmissionContract(t *testing.T, repo, binary string) {
+	for _, scenario := range []string{"source", "preparation", "account-before-submit", "submission", "retained-preparation", "retained-account-before-submit"} {
+		t.Run(scenario, func(t *testing.T) {
+			retained := strings.HasPrefix(scenario, "retained-")
+			phase := strings.TrimPrefix(scenario, "retained-")
+			f := newCheckpointCaptureFixture(t, repo, binary)
+			const instanceID, accountID = "i-0123456789abcdef0", "123456789012"
+			var mu sync.Mutex
+			creates := 0
+			prepared := filepath.Join(f.root, "prepared-source")
+			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				if err := r.ParseForm(); err != nil {
+					t.Error(err)
+					http.Error(w, "bad request", 400)
+					return
+				}
+				switch action := r.Form.Get("Action"); action {
+				case "GetCallerIdentity":
+					_, preparedErr := os.Stat(prepared)
+					if phase == "account-before-submit" && preparedErr == nil {
+						writeEC2Error(w, "AccessDenied", "fixture account lookup failed", http.StatusForbidden)
+						return
+					}
+					writeSTSXML(w, `<GetCallerIdentityResponse><GetCallerIdentityResult><Account>`+accountID+`</Account></GetCallerIdentityResult></GetCallerIdentityResponse>`)
+				case "DescribeInstances":
+					reservations, _ := filepath.Glob(filepath.Join(f.root, "state", "crabbox", "checkpoints", "*", checkpointMetaFile))
+					if phase == "source" && len(reservations) > 0 {
+						writeEC2XML(w, `<DescribeInstancesResponse><reservationSet/></DescribeInstancesResponse>`)
+						return
+					}
+					fmt.Fprintf(w, `<DescribeInstancesResponse><reservationSet><item><instancesSet><item><instanceId>%s</instanceId><instanceType>t3.medium</instanceType><ipAddress>127.0.0.1</ipAddress><instanceState><name>running</name></instanceState><tagSet>`, instanceID)
+					for key, value := range map[string]string{"Name": "aws-source-proof", "crabbox": "true", "created_by": "crabbox", "provider": "aws", "lease": captureFixtureLease, "slug": "aws-source-proof", "provider_key": providerKeyForLease(captureFixtureLease)} {
+						fmt.Fprintf(w, "<item><key>%s</key><value>%s</value></item>", key, value)
+					}
+					fmt.Fprint(w, `</tagSet></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`)
+				case "CreateImage":
+					creates++
+					writeEC2Error(w, "InvalidParameterValue", "fixture image request uncertain", http.StatusBadRequest)
+				default:
+					t.Errorf("unexpected AWS request: %s", action)
+					http.Error(w, "unexpected request", 400)
+				}
+			}))
+			t.Cleanup(endpoint.Close)
+			if err := os.WriteFile(filepath.Join(f.root, "config.yaml"), []byte("provider: aws\nnetwork: public\naws:\n  region: us-east-1\ntargetOS: linux\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			sshFixture := `#!/bin/sh
+for arg do remote=$arg; done
+case "$remote" in
+  'exit 0') exit 0;;
+  ` + shellQuote("bash -lc "+shellQuote(remotePrepareNativeImageCommand())) + `) printf 'prepare\n' >> "$CAPTURE_AWS_PREPARED"; if [ "$CAPTURE_AWS_FAILURE" = preparation ]; then echo 'fixture pre-clean failure' >&2; exit 1; fi;;
+  *) echo 'unexpected SSH command' >&2; exit 97;;
+esac
+`
+			if err := os.WriteFile(filepath.Join(f.root, "bin", "ssh"), []byte(sshFixture), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			f.env = append(f.env, "AWS_ENDPOINT_URL="+endpoint.URL, "AWS_ACCESS_KEY_ID=fixture", "AWS_SECRET_ACCESS_KEY=fixture", "AWS_EC2_METADATA_DISABLED=true", "AWS_REGION=us-east-1", "CAPTURE_AWS_FAILURE="+phase, "CAPTURE_AWS_PREPARED="+prepared)
+			claim := f.claim()
+			claim.Provider, claim.CloudID, claim.ProviderScope, claim.Slug = "aws", instanceID, "", "aws-source-proof"
+			claim.FixedCreateIntent = nil
+			claim.Labels = map[string]string{"aws_region": "us-east-1", "aws_account_id": accountID, "provider_key": providerKeyForLease(captureFixtureLease)}
+			f.writeJSON(filepath.Join(f.root, "state", "crabbox", "claims", captureFixtureLease+".json"), claim)
+			args := []string{"checkpoint", "create", "--provider", "aws", "--id", captureFixtureLease, "--mode", "native", "--strategy", "image", "--json"}
+			if retained {
+				args = append(args, "--checkpoint-id", captureFixtureCheckpoint, "--retire-source", "--wait=false")
+			}
+			result := f.run(args...)
+			if result.err == nil {
+				t.Fatal("fixture failure unexpectedly succeeded")
+			}
+			records, err := filepath.Glob(filepath.Join(f.root, "state", "crabbox", "checkpoints", "*", checkpointMetaFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			createCount := creates
+			mu.Unlock()
+			if retained {
+				if createCount != 0 || len(records) != 1 || len(result.stdout) != 0 {
+					t.Fatalf("retained source failure erased uncertainty: creates=%d records=%v stdout=%s", createCount, records, result.stdout)
+				}
+				record := f.record(captureFixtureCheckpoint)
+				if record.Capture == nil || record.Capture.Phase != "submitting" || record.Native.ImageID != "" {
+					t.Fatalf("wrong retained journal: %+v", record)
+				}
+				before, err := os.ReadFile(prepared)
+				if err != nil {
+					t.Fatal(err)
+				}
+				replay := f.run(args...)
+				after, err := os.ReadFile(prepared)
+				if err != nil || !bytes.Equal(before, after) {
+					t.Fatalf("replay retried source preparation: before=%q after=%q err=%v", before, after, err)
+				}
+				record = f.record(captureFixtureCheckpoint)
+				if record.Capture.Phase != "submitting" || record.Native.ImageID != "" {
+					t.Fatalf("replay erased uncertain journal: %+v stderr=%s", record, replay.stderr)
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if creates != 0 {
+					t.Fatalf("retained replay submitted %d images", creates)
+				}
+				return
+			}
+			if phase == "submission" {
+				if createCount == 0 || len(records) != 1 || len(result.stdout) != 0 {
+					t.Fatalf("uncertain submission lost reservation: creates=%d records=%v stdout=%s stderr=%s", createCount, records, result.stdout, result.stderr)
+				}
+				return
+			}
+			if createCount != 0 {
+				t.Fatalf("pre-submit failure created %d images", createCount)
+			}
+			var outcome map[string]string
+			if err := json.Unmarshal(result.stdout, &outcome); err != nil || len(outcome) != 6 || outcome["schema"] != "crabbox.checkpoint.create.failure.v1" || outcome["outcome"] != "not_submitted" || outcome["provider"] != "aws" || outcome["leaseId"] != captureFixtureLease || outcome["localReservation"] != "removed" {
+				t.Fatalf("missing non-submission receipt: outcome=%v parse=%v stderr=%s", outcome, err, result.stderr)
+			}
+			if len(records) != 0 {
+				t.Fatalf("known non-submission retained reservations: %v", records)
+			}
+			if _, err := os.Lstat(filepath.Join(f.root, "state", "crabbox", "checkpoints", outcome["checkpointId"])); !os.IsNotExist(err) {
+				t.Fatalf("reservation directory remains: %v", err)
+			}
+		})
+	}
+}

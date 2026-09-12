@@ -1,5 +1,7 @@
 package superserve
 
+import core "github.com/openclaw/crabbox/internal/cli"
+
 import (
 	"flag"
 	"net"
@@ -41,43 +43,49 @@ func RegisterSuperserveProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplySuperserveProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if strings.EqualFold(strings.TrimSpace(cfg.Provider), providerName) {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=superserve; use --superserve-template or --superserve-snapshot")
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=superserve; use --superserve-template or --superserve-snapshot")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --superserve-template or --superserve-snapshot", "use --superserve-template or --superserve-snapshot"); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(superserveFlagValues)
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "superserve-base-url") {
+	if core.FlagWasSet(fs, "superserve-base-url") {
 		cfg.Superserve.BaseURL = *v.BaseURL
+		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
-	if flagWasSet(fs, "superserve-template") {
+	if core.FlagWasSet(fs, "superserve-template") {
 		cfg.Superserve.Template = *v.Template
+		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
-	if flagWasSet(fs, "superserve-snapshot") {
+	if core.FlagWasSet(fs, "superserve-snapshot") {
 		cfg.Superserve.Snapshot = *v.Snapshot
+		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
-	if flagWasSet(fs, "superserve-workdir") {
+	if core.FlagWasSet(fs, "superserve-workdir") {
 		cfg.Superserve.Workdir = *v.Workdir
+		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
-	if flagWasSet(fs, "superserve-timeout-secs") {
+	if core.FlagWasSet(fs, "superserve-timeout-secs") {
 		cfg.Superserve.TimeoutSecs = *v.TimeoutSecs
+		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
-	if flagWasSet(fs, "superserve-exec-timeout-secs") {
+	if core.FlagWasSet(fs, "superserve-exec-timeout-secs") {
 		cfg.Superserve.ExecTimeoutSecs = *v.ExecTimeoutSecs
+		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
-	if flagWasSet(fs, "superserve-network-allow-out") {
+	if core.FlagWasSet(fs, "superserve-network-allow-out") {
 		cfg.Superserve.NetworkAllowOut = splitSuperserveList(*v.NetworkAllowOut)
+		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
-	if flagWasSet(fs, "superserve-network-deny-out") {
+	if core.FlagWasSet(fs, "superserve-network-deny-out") {
 		cfg.Superserve.NetworkDenyOut = splitSuperserveList(*v.NetworkDenyOut)
+		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
-	if flagWasSet(fs, "superserve-forget-missing") {
+	if core.FlagWasSet(fs, "superserve-forget-missing") {
 		cfg.Superserve.ForgetMissing = *v.ForgetMissing
+		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
 	return validateSuperserveConfig(*cfg)
 }

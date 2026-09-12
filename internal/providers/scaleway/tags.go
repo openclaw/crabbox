@@ -56,7 +56,7 @@ func encodeTagKV(key, value string) string {
 	key = sanitizeTagPart(key)
 	if exactTagValueKey(key) {
 		key += "_v1"
-		return tagPrefix + key + ":" + encodeExactTagValue(value, 255-len(tagPrefix)-len(key)-1)
+		return tagPrefix + key + ":" + shared.EncodeExactTagValue(value, 255-len(tagPrefix)-len(key)-1)
 	}
 	return tagPrefix + key + ":" + sanitizeTagPart(value)
 }
@@ -86,14 +86,6 @@ func exactTagValueKey(key string) bool {
 func versionedExactTagValueKey(key string) (string, bool) {
 	logical := strings.TrimSuffix(key, "_v1")
 	return logical, logical != key && exactTagValueKey(logical)
-}
-
-func encodeExactTagValue(value string, maxLen int) string {
-	return shared.EncodeExactTagValue(value, maxLen)
-}
-
-func decodeExactTagValue(value string) string {
-	return shared.DecodeExactTagValue(value)
 }
 
 func normalizeTags(tags []string) []string {
@@ -128,7 +120,7 @@ func labelsFromTags(tags []string) map[string]string {
 			key := strings.ToLower(parts[0])
 			value := parts[1]
 			if logical, ok := versionedExactTagValueKey(key); ok {
-				labels[logical] = decodeExactTagValue(value)
+				labels[logical] = shared.DecodeExactTagValue(value)
 				continue
 			}
 			switch key {

@@ -40,13 +40,19 @@ func (Provider) NativeCheckpointWorkdir(req core.NativeCheckpointWorkdirRequest)
 	return core.RemoteJoin(cfg, req.LeaseID, req.RepoName)
 }
 
-func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheckpointCreateRequest) (core.NativeCheckpointCreateResult, error) {
+func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheckpointCreateRequest) (_ core.NativeCheckpointCreateResult, err error) {
 	if req.Capture != nil {
 		return core.NativeCheckpointCreateResult{}, core.Exit(2, "%s", hetznerRetirementUnsupported)
 	}
 	if strings.TrimSpace(req.Config.Coordinator) != "" {
 		return core.NativeCheckpointCreateResult{}, core.Exit(2, "brokered Hetzner leases use archive checkpoints")
 	}
+	submissionStarted := false
+	defer func() {
+		if err != nil && !submissionStarted {
+			err = core.NativeCheckpointNotSubmittedError{Cause: err}
+		}
+	}()
 	if firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != core.TargetLinux {
 		return core.NativeCheckpointCreateResult{}, core.Exit(2, "Hetzner native checkpoints require a Linux lease")
 	}
@@ -83,11 +89,6 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	if err != nil {
 		return core.NativeCheckpointCreateResult{}, err
 	}
-	if req.Capture != nil {
-		if err := core.ValidateCheckpointCaptureClaim(claim, req.CheckpointID, req.Capture); err != nil {
-			return core.NativeCheckpointCreateResult{}, err
-		}
-	}
 	location := ""
 	if source.Location != nil {
 		location = strings.TrimSpace(source.Location.Name)
@@ -117,6 +118,8 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 		if err := prepareHetznerCheckpointSource(ctx, req.Target); err != nil {
 			return err
 		}
+		// From this call onward, even a lost or empty response retains custody.
+		submissionStarted = true
 		created, err := client.CreateServerSnapshot(ctx, serverID, description, labels)
 		if err != nil {
 			return err
@@ -173,7 +176,7 @@ func (Provider) VerifyNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	} else if failedHetznerSnapshotState(state) {
 		next = "delete"
 	}
-	return core.NativeCheckpointVerifyResult{ProviderState: blank(state, "unknown"), NextAction: next}, nil
+	return core.NativeCheckpointVerifyResult{ProviderState: core.Blank(state, "unknown"), NextAction: next}, nil
 }
 
 func (Provider) DeleteNativeCheckpoint(ctx context.Context, req core.NativeCheckpointResourceRequest) error {
@@ -217,7 +220,7 @@ func validateHetznerSnapshot(req core.NativeCheckpointResourceRequest, snapshot 
 		return core.Exit(2, "refusing to operate on a non-direct Hetzner checkpoint record")
 	}
 	if snapshot.Type != "snapshot" {
-		return core.Exit(2, "refusing to operate on Hetzner image %d with type=%s", snapshot.ID, blank(snapshot.Type, "unknown"))
+		return core.Exit(2, "refusing to operate on Hetzner image %d with type=%s", snapshot.ID, core.Blank(snapshot.Type, "unknown"))
 	}
 	if strconv.FormatInt(snapshot.ID, 10) != strings.TrimSpace(req.Image.ID) {
 		return core.Exit(2, "refusing to operate on a mismatched Hetzner snapshot identity")
@@ -284,7 +287,7 @@ func waitForHetznerSnapshot(ctx context.Context, client hetznerSnapshotClient, i
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	timeoutError := func() error {
-		return core.Exit(5, "timed out waiting for Hetzner snapshot %d; last state=%s", last.ID, blank(last.Status, "unknown"))
+		return core.Exit(5, "timed out waiting for Hetzner snapshot %d; last state=%s", last.ID, core.Blank(last.Status, "unknown"))
 	}
 	waitError := func(err error) error {
 		if parentErr := ctx.Err(); parentErr != nil {
@@ -344,7 +347,7 @@ func waitForHetznerSnapshot(ctx context.Context, client hetznerSnapshotClient, i
 				return true, nil
 			}
 			if failedHetznerSnapshotState(state) {
-				return false, core.Exit(5, "Hetzner snapshot %d failed; last state=%s", last.ID, blank(last.Status, "unknown"))
+				return false, core.Exit(5, "Hetzner snapshot %d failed; last state=%s", last.ID, core.Blank(last.Status, "unknown"))
 			}
 			if parentErr := ctx.Err(); parentErr != nil {
 				return false, parentErr
@@ -361,7 +364,7 @@ func waitForHetznerSnapshot(ctx context.Context, client hetznerSnapshotClient, i
 		},
 		func(shared.PollResult[core.HetznerImage]) {
 			if stderr != nil {
-				fmt.Fprintf(stderr, "waiting image=%d state=%s\n", last.ID, blank(last.Status, "creating"))
+				fmt.Fprintf(stderr, "waiting image=%d state=%s\n", last.ID, core.Blank(last.Status, "creating"))
 			}
 		})
 	if err != nil {
@@ -375,7 +378,7 @@ func validateCreatedHetznerSnapshot(snapshot core.HetznerImage, expectedArchitec
 		return core.Exit(5, "Hetzner returned image %d with unexpected type=%s", snapshot.ID, snapshot.Type)
 	}
 	if snapshot.Architecture != expectedArchitecture {
-		return core.Exit(5, "Hetzner snapshot %d architecture=%s does not match source architecture=%s", snapshot.ID, blank(snapshot.Architecture, "unknown"), expectedArchitecture)
+		return core.Exit(5, "Hetzner snapshot %d architecture=%s does not match source architecture=%s", snapshot.ID, core.Blank(snapshot.Architecture, "unknown"), expectedArchitecture)
 	}
 	return nil
 }
@@ -401,7 +404,7 @@ func hetznerServerArchitecture(server Server) (string, error) {
 	case "arm", "arm64", "aarch64":
 		return "arm", nil
 	default:
-		return "", core.Exit(2, "Hetzner source server %s has unsupported architecture=%s", server.DisplayID(), blank(value, "unknown"))
+		return "", core.Exit(2, "Hetzner source server %s has unsupported architecture=%s", server.DisplayID(), core.Blank(value, "unknown"))
 	}
 }
 
@@ -412,7 +415,7 @@ func coreArchitectureFromHetzner(value string) (string, error) {
 	case "arm":
 		return core.ArchitectureARM64, nil
 	default:
-		return "", core.Exit(2, "unsupported Hetzner snapshot architecture=%s", blank(value, "unknown"))
+		return "", core.Exit(2, "unsupported Hetzner snapshot architecture=%s", core.Blank(value, "unknown"))
 	}
 }
 

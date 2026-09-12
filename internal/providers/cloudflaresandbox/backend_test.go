@@ -669,11 +669,42 @@ func TestAbortedSandboxStateIsTerminal(t *testing.T) {
 	}
 }
 
+func TestCloudflareSandboxCreateKeepsRawConfiguredWorkdir(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	for _, raw := range []string{"", "  ", "/workspace/custom"} {
+		fake := newLifecycleFakeClient()
+		b := testBackend(fake, io.Discard, io.Discard)
+		b.cfg.CloudflareSandbox.Workdir = raw
+		root := t.TempDir()
+		_, _, _, release, err := b.createSandbox(context.Background(), fake, Repo{Name: "example", Root: root}, false, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if release != nil {
+			release()
+		}
+		if len(fake.creates) != 1 || fake.creates[0].Workdir != raw {
+			t.Fatal("create request replaced raw workdir with resolved default")
+		}
+		resolved, err := cloudflareSandboxWorkdir(b.cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "/workspace/crabbox"
+		if strings.TrimSpace(raw) != "" {
+			want = raw
+		}
+		if resolved != want {
+			t.Fatalf("resolved=%q want=%q", resolved, want)
+		}
+	}
+}
+
 func testBackend(fake *lifecycleFakeClient, stdout, stderr io.Writer) *backend {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.CloudflareSandbox.BridgeURL = "https://bridge.example.test"
-	cfg.CloudflareSandbox.Workdir = defaultWorkdir
+	cfg.CloudflareSandbox.Workdir = "/workspace/crabbox"
 	cfg.CloudflareSandbox.ExecTimeoutSecs = 600
 	cfg.IdleTimeout = time.Hour
 	return &backend{

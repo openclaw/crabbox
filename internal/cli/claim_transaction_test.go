@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -149,6 +150,44 @@ func TestClaimTransactionContractActionFailureAndRevision(t *testing.T) {
 					t.Fatalf("revision did not advance: %#v", updated)
 				}
 				assertClaimContractStored(t, expected.LeaseID, updated)
+			})
+		}
+	}
+}
+
+func TestClaimTransactionDurableReplacementContext(t *testing.T) {
+	for _, contextual := range []bool{false, true} {
+		for _, stale := range []bool{false, true} {
+			t.Run(fmt.Sprintf("context=%t/stale=%t", contextual, stale), func(t *testing.T) {
+				stored := seedClaimContract(t)
+				expected := cloneLeaseClaim(stored)
+				if stale {
+					expected.Revision = "older"
+				}
+				replacement := cloneLeaseClaim(stored)
+				replacement.Labels = map[string]string{"state": "submitting"}
+				var updated leaseClaim
+				var err error
+				if contextual {
+					updated, err = ReplaceLeaseClaimIfUnchangedDurableReturningContext(t.Context(), stored.LeaseID, expected, replacement)
+				} else {
+					updated, err = ReplaceLeaseClaimIfUnchangedDurableReturning(stored.LeaseID, expected, replacement)
+				}
+				if stale {
+					if err == nil || !strings.Contains(err.Error(), "claim changed") {
+						t.Fatalf("stale replacement err=%v", err)
+					}
+					assertClaimContractStored(t, stored.LeaseID, stored)
+					return
+				}
+				if err != nil || updated.Revision == "" || updated.Revision == stored.Revision {
+					t.Fatalf("updated=%#v err=%v", updated, err)
+				}
+				replacement.Revision = updated.Revision
+				if !reflect.DeepEqual(updated, replacement) {
+					t.Fatalf("replacement policy changed: got=%#v want=%#v", updated, replacement)
+				}
+				assertClaimContractStored(t, stored.LeaseID, updated)
 			})
 		}
 	}

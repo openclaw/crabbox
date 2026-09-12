@@ -53,6 +53,12 @@ the ready lease; it does not allocate again or stop the Testbox.
 Warmup records a local claim binding the lease to the current repo checkout. Use
 `--reclaim` to overwrite an existing claim for that lease.
 
+If a coordinator lease ends while provisioning, warmup reports the lease ID,
+terminal state, and recorded failure cause. When the coordinator retains the
+cause in cleanup metadata because a resource may still exist, warmup includes
+that diagnostic. Use `crabbox inspect --id <lease>` to check the retained
+provisioning and cleanup evidence before recovery.
+
 Warmup requires an explicit provider selection from `--provider`,
 `CRABBOX_PROVIDER`, user or repository config, broker config, or an applicable
 recorded lease route. With no selection it exits before provider initialization
@@ -79,15 +85,19 @@ attempt so an interrupted operation can be safely replayed.
 it and may append a short suffix if an active lease already uses that slug.
 
 `--lease-id cbx_<12 lowercase hex>` is the automation idempotency contract for
-providers that explicitly support fixed identities. Direct AWS, Machine0, Incus,
+providers that explicitly support fixed identities. Direct AWS, Machine0, Daytona, Incus,
 and local-container leases, managed coordinator leases, and explicitly capable
 external providers accept it. Replaying the same normalized create intent
 returns or joins the same live lease, including after the creating process loses
 its response. A managed coordinator reports `fixed_lease_terminal` when that
 same intent has already ended. Reusing the ID with a different provider, slug
 request, SSH key, machine or container shape, capabilities, lifetime, or other
-immutable create input fails with `lease_id_conflict` before another provider create. Slugs
-remain display aliases and are never used as the idempotency key.
+immutable create input fails with `lease_id_conflict` before another provider
+create. Slugs remain display aliases and are never used as the idempotency key.
+
+Daytona binds the native organization before allocation and preserves that scope
+across credential rotation. See [Daytona fixed operation IDs](../providers/daytona.md#fixed-operation-ids)
+for API-key organization discovery and positive cleanup-witness requirements.
 
 Concurrent fixed-ID warmup and fork commands sharing a local state directory
 wait for the current acquisition to finish registration and preparation. A
@@ -107,7 +117,7 @@ create is confirmed, readiness uses the remaining original creation budget and
 honors caller cancellation. Fixed-ID leases remain available for explicit recovery
 or stop; ordinary creates keep their token-bound cancellation cleanup.
 
-A fixed lease ID is single-use. Direct AWS, Machine0, Incus, and local-container
+A fixed lease ID is single-use. Direct AWS, Machine0, Daytona, Incus, and local-container
 acquisitions fail closed if their bound resource later disappears. Successful
 stop and missing-resource cleanup replace the live local claim with a compact
 terminal tombstone, so the ID remains rejected after release. Use a new
@@ -297,9 +307,10 @@ hydration.
 already allocated Dedicated Host. Crabbox can discover an available host in the
 selected region, or pin one with `CRABBOX_HOST_ID` / `hostId`
 (`CRABBOX_AWS_MAC_HOST_ID` and `aws.macHostId` remain AWS compatibility
-aliases). Brokered host pinning requires admin authentication unless the host
-has a retained instance from the same owner and organization's released lease;
-other users rely on automatic available-host discovery. Use `--market on-demand`, and
+aliases). Org-member broker requests can pin a host only when the coordinator
+has an exact allocation record for that host, the current org, and the requested
+region. Historical leases do not grant pin access; other explicit host pins
+require admin authentication. Use `--market on-demand`, and
 expect EC2 Mac host lifecycle rules to dominate cleanup and cost. Warmup never
 allocates a Dedicated Host implicitly; trusted operators manage host lifecycle with
 `crabbox admin hosts offerings|quota|list|allocate|release --provider aws --target macos`.
@@ -312,6 +323,12 @@ per-lease macOS account password set by bootstrap.
 self-hosted GitHub Actions runner for the current repository. Most projects
 should instead prefer [`crabbox actions hydrate --id <lease>`](actions.md) after
 warmup, because it also dispatches the workflow and waits for the ready marker.
+
+A new warmup does not adopt an existing lease by slug or pinned host. An occupied
+host returns a conflict identifying its lease; inspect or explicitly stop that
+lease before requesting a new one. `--lease-id` replays only the same fixed ID
+and create intent. If a coordinator returns another ID, the CLI stops before
+bootstrap, key migration, or failure cleanup.
 
 ## Flags
 

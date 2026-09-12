@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type backend struct {
@@ -54,7 +56,7 @@ func (b backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) {
 	views := make([]LeaseView, 0, len(sandboxes)+len(claimsBySandbox))
 	seen := make(map[string]bool, len(sandboxes))
 	for _, sb := range sandboxes {
-		sandboxName := strings.TrimSpace(blank(sb.Name, sb.ID))
+		sandboxName := strings.TrimSpace(core.Blank(sb.Name, sb.ID))
 		if sandboxName == "" {
 			continue
 		}
@@ -115,7 +117,7 @@ func (b backend) Status(ctx context.Context, req StatusRequest) (StatusView, err
 		pollCtx, cancel = context.WithTimeout(ctx, waitTimeout)
 	}
 	defer cancel()
-	deadline := b.now().Add(waitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(waitTimeout)
 	for {
 		sb, getErr := b.client().GetSandbox(pollCtx, sandboxID)
 		if getErr == nil && claimed {
@@ -131,7 +133,7 @@ func (b backend) Status(ctx context.Context, req StatusRequest) (StatusView, err
 		leaseID, slug, pond := sandboxID, "", ""
 		if claimed {
 			leaseID = claim.LeaseID
-			slug = blank(claim.Slug, newLeaseSlug(claim.LeaseID))
+			slug = core.Blank(claim.Slug, newLeaseSlug(claim.LeaseID))
 			pond = claim.Pond
 		}
 		view := StatusView{
@@ -160,7 +162,7 @@ func (b backend) Status(ctx context.Context, req StatusRequest) (StatusView, err
 		if isTerminalState(state) {
 			return StatusView{}, exit(5, "CUA sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
-		if b.now().After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return StatusView{}, exit(5, "timed out waiting for CUA sandbox %s to become ready", sandboxID)
 		}
 		select {
@@ -184,7 +186,7 @@ func (b backend) Cleanup(context.Context, CleanupRequest) error {
 
 func (b backend) serverFromSandbox(claim LeaseClaim, sb bridgeSandboxSummary) Server {
 	state := normalizedSandboxState(sb)
-	sandboxName := strings.TrimSpace(blank(sb.Name, sb.ID))
+	sandboxName := strings.TrimSpace(core.Blank(sb.Name, sb.ID))
 	if sandboxName == "" {
 		sandboxName = claimSandboxName(claim)
 	}
@@ -209,15 +211,8 @@ func (b backend) claimMatchesActiveScope(claim LeaseClaim) bool {
 	return err == nil && claim.ProviderScope == scope
 }
 
-func (b backend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
-}
-
 func normalizedSandboxState(sb bridgeSandboxSummary) string {
-	return strings.ToLower(blank(strings.TrimSpace(blank(sb.Status, sb.State)), "unknown"))
+	return strings.ToLower(core.Blank(strings.TrimSpace(core.Blank(sb.Status, sb.State)), "unknown"))
 }
 
 func isReadyState(state string) bool {
@@ -239,7 +234,7 @@ func isTerminalState(state string) bool {
 }
 
 func sandboxTargetOS(claim LeaseClaim, sb bridgeSandboxSummary) string {
-	value := strings.ToLower(strings.TrimSpace(blank(sb.OSType, sb.Metadata["osType"])))
+	value := strings.ToLower(strings.TrimSpace(core.Blank(sb.OSType, sb.Metadata["osType"])))
 	if value == "" {
 		value = strings.ToLower(strings.TrimSpace(claim.TargetOS))
 	}

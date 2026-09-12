@@ -1,7 +1,6 @@
 package dockersandbox
 
 import (
-	"flag"
 	"io"
 	"time"
 
@@ -53,10 +52,6 @@ func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
 }
 
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
-}
-
 func writeTimingJSON(w io.Writer, report timingReport) error {
 	return core.WriteTimingJSON(w, report)
 }
@@ -95,8 +90,4 @@ func resolveLeaseClaimForProvider(identifier, provider string) (core.LeaseClaim,
 
 func listLeaseClaims() ([]core.LeaseClaim, error) {
 	return core.ListLeaseClaims()
-}
-
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
 }

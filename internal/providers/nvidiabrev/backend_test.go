@@ -6,9 +6,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	core "github.com/openclaw/crabbox/internal/cli"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +31,94 @@ func TestNvidiaBrevProviderSpec(t *testing.T) {
 	}
 	if got := strings.Join(Provider{}.Aliases(), ","); got != "brev,nvidia" {
 		t.Fatalf("aliases=%q", got)
+	}
+}
+
+func TestNvidiaBrevOrdinaryFlagMetadata(t *testing.T) {
+	fields := []struct{ field, flag string }{
+		{"CLI", "cli"}, {"Org", "org"}, {"Type", "type"}, {"GPUName", "gpu-name"},
+		{"Provider", "provider"}, {"Mode", "mode"}, {"Launchable", "launchable"},
+		{"StartupScript", "startup-script"}, {"ReleaseAction", "release-action"},
+		{"Target", "target"}, {"User", "user"}, {"WorkRoot", "work-root"},
+	}
+	for _, value := range []string{"", "same", " padded "} {
+		cfg := Config{Provider: "other", WorkRoot: "/generic", SSHUser: "generic"}
+		for _, field := range fields {
+			reflect.ValueOf(&cfg.NvidiaBrev).Elem().FieldByName(field.field).SetString("same")
+		}
+		before := cfg
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		values := (Provider{}).RegisterFlags(fs, cfg)
+		if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil || !reflect.DeepEqual(cfg, before) {
+			t.Fatalf("unvisited values changed: %v", err)
+		}
+		args := []string{}
+		for _, field := range fields {
+			name := "nvidia-brev-" + field.flag
+			if fs.Lookup(name).DefValue != "same" {
+				t.Fatalf("--%s inherited default", name)
+			}
+			args = append(args, "--"+name+"=first", "--"+name+"="+value)
+		}
+		if err := fs.Parse(args); err != nil {
+			t.Fatal(err)
+		}
+		if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want := before
+		for _, field := range fields {
+			reflect.ValueOf(&want.NvidiaBrev).Elem().FieldByName(field.field).SetString(value)
+		}
+		core.RecordProviderFlagInputs(&want, true, "nvidia-brev")
+		markReleaseActionExplicit(&want)
+		markNvidiaBrevWorkRootExplicit(&want)
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatalf("visited %q: got %#v want %#v", value, cfg, want)
+		}
+	}
+	for _, provider := range []string{"nvidia-brev", " BREV ", "NVIDIA", "other"} {
+		for _, sizing := range []string{"", "class", "type"} {
+			cfg := Config{Provider: provider}
+			before := cfg
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.String("class", "", "")
+			fs.String("type", "", "")
+			if sizing != "" {
+				if err := fs.Parse([]string{"--" + sizing + "=ordinary"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, values := range []any{nil, struct{}{}} {
+				err := (Provider{}).ApplyFlags(&cfg, fs, values)
+				wantError := provider != "other" && sizing != ""
+				if (err != nil) != wantError || (err != nil && !strings.Contains(err.Error(), "not supported for provider=nvidia-brev")) || !reflect.DeepEqual(cfg, before) {
+					t.Fatalf("provider=%q sizing=%q: %v", provider, sizing, err)
+				}
+			}
+		}
+	}
+}
+
+func TestNvidiaBrevOrdinaryRawDefaults(t *testing.T) {
+	for _, value := range []string{"", "custom", " padded "} {
+		cfg := Config{SSHUser: "generic", SSHPort: "2200", SSHFallbackPorts: []string{"22"}, NvidiaBrev: NvidiaBrevConfig{
+			CLI: value, GPUName: value, Mode: value, ReleaseAction: value, Target: value,
+			Org: "org", Type: "type", Provider: "cloud", Launchable: "launchable", StartupScript: "inline", User: "runner", WorkRoot: "/work/brev",
+		}}
+		want := cfg.NvidiaBrev
+		if value == "" {
+			want.CLI, want.GPUName, want.Mode, want.ReleaseAction, want.Target = "brev", "A100", "vm", "delete", "container"
+		}
+		applyNvidiaBrevDefaults(&cfg)
+		if cfg.NvidiaBrev != want || cfg.Provider != "nvidia-brev" || cfg.TargetOS != "linux" || cfg.SSHUser != "runner" || cfg.WorkRoot != "/work/brev" || cfg.SSHPort != "" || cfg.SSHFallbackPorts != nil {
+			t.Fatalf("raw defaults/projection: %#v", cfg)
+		}
+		once := cfg
+		applyNvidiaBrevDefaults(&cfg)
+		if !reflect.DeepEqual(cfg, once) {
+			t.Fatal("defaults not idempotent")
+		}
 	}
 }
 

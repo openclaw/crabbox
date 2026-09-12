@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type exeDevLeaseBackend struct {
@@ -36,7 +38,7 @@ func NewExeDevLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 func (b *exeDevLeaseBackend) Spec() ProviderSpec { return b.spec }
 
 func (b *exeDevLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	servers, err := b.listServers(ctx, false)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -47,7 +49,7 @@ func (b *exeDevLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 	}
 	cfg := b.configForRun()
 	name := leaseProviderName(leaseID, slug)
-	generation := newLeaseID()
+	generation := core.NewLeaseID()
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s name=%s image=%s cpus=%d memory=%s disk=%s keep=%v\n", providerName, leaseID, slug, name, exeDevImage(cfg), cfg.ExeDev.CPUs, cfg.ExeDev.Memory, cfg.ExeDev.Disk, req.Keep)
 	vm, err := b.createVM(ctx, cfg, name, leaseID, slug, generation)
 	if err != nil {
@@ -377,28 +379,22 @@ func applyExeDevDefaults(cfg *Config) {
 	cfg.SSHPort = "22"
 	cfg.SSHFallbackPorts = nil
 	if cfg.ExeDev.ControlHost == "" {
-		cfg.ExeDev.ControlHost = "exe.dev"
+		cfg.ExeDev.ControlHost = core.ExeDevConfigDefaultControlHost
 	}
 	if cfg.ExeDev.CPUs <= 0 {
-		cfg.ExeDev.CPUs = 2
+		cfg.ExeDev.CPUs = core.ExeDevConfigDefaultCPUs
 	}
 	if cfg.ExeDev.Memory == "" {
-		cfg.ExeDev.Memory = "4GB"
+		cfg.ExeDev.Memory = core.ExeDevConfigDefaultMemory
 	}
 	if cfg.ExeDev.Disk == "" {
-		cfg.ExeDev.Disk = "10GB"
+		cfg.ExeDev.Disk = core.ExeDevConfigDefaultDisk
 	}
-	if cfg.ExeDev.WorkRoot == "" {
-		if !isDefaultWorkRoot(cfg.WorkRoot) {
-			cfg.ExeDev.WorkRoot = cfg.WorkRoot
-		} else {
-			cfg.ExeDev.WorkRoot = "/tmp/crabbox"
-		}
-	}
+	cfg.ExeDev.WorkRoot = core.ResolveInheritedWorkRoot(cfg.ExeDev.WorkRoot, cfg.WorkRoot, core.ExeDevWorkRootFallback)
 	if cfg.ExeDev.User != "" {
 		cfg.SSHUser = cfg.ExeDev.User
 	} else if cfg.SSHUser == "" || cfg.SSHUser == "crabbox" {
-		cfg.SSHUser = blank(os.Getenv("USER"), "root")
+		cfg.SSHUser = core.Blank(os.Getenv("USER"), "root")
 	}
 	if cfg.ExeDev.WorkRoot != "" {
 		cfg.WorkRoot = cfg.ExeDev.WorkRoot
@@ -492,7 +488,7 @@ func (b *exeDevLeaseBackend) claimResolvedVM(ctx context.Context, lease LeaseTar
 		}
 	}
 	if generation == "" {
-		generation = newLeaseID()
+		generation = core.NewLeaseID()
 	}
 	lease.Server.Labels[exeDevClaimGenerationLabel] = generation
 	claim, err := claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, providerScope, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, previous, exists)
@@ -683,7 +679,7 @@ func (b *exeDevLeaseBackend) resolveVM(ctx context.Context, identifier string) (
 	if claim, ok, err := resolveLeaseClaimForProvider(identifier, providerName); err != nil {
 		return exeDevVM{}, "", "", err
 	} else if ok {
-		slug := blank(claim.Slug, newLeaseSlug(claim.LeaseID))
+		slug := core.Blank(claim.Slug, newLeaseSlug(claim.LeaseID))
 		name := leaseProviderName(claim.LeaseID, slug)
 		vm, err := b.findVM(ctx, name)
 		return vm, claim.LeaseID, slug, err
@@ -855,16 +851,16 @@ func (b *exeDevLeaseBackend) rollbackCreatedVM(name, leaseID, slug, generation s
 	defer cancel()
 	vm, err := b.findVMByExactName(cleanupCtx, name)
 	if err != nil {
-		return exit(exitCodeForError(cause), "%v; exe.dev cleanup could not verify VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
+		return exit(core.ExitCodeForError(cause, 1), "%v; exe.dev cleanup could not verify VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
 	}
 	if err := validateExeDevVMOwnership(vm, leaseID, slug, "provisioning rollback"); err != nil {
-		return exit(exitCodeForError(cause), "%v; exe.dev cleanup refused unverified VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
+		return exit(core.ExitCodeForError(cause, 1), "%v; exe.dev cleanup refused unverified VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
 	}
 	if err := validateExeDevClaimGeneration(vm, generation); err != nil {
-		return exit(exitCodeForError(cause), "%v; exe.dev cleanup refused replacement VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
+		return exit(core.ExitCodeForError(cause, 1), "%v; exe.dev cleanup refused replacement VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
 	}
 	if err := b.deleteVM(cleanupCtx, name); err != nil {
-		return exit(exitCodeForError(cause), "%v; exe.dev cleanup failed for VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
+		return exit(core.ExitCodeForError(cause, 1), "%v; exe.dev cleanup failed for VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
 	}
 	return cause
 }
@@ -879,14 +875,6 @@ func (b *exeDevLeaseBackend) manualDeleteCommand(name string) string {
 		args = append(args, "-p", port)
 	}
 	return shellQuoteArgs(append(args, dest, "rm", name))
-}
-
-func exitCodeForError(err error) int {
-	var exitErr ExitError
-	if errors.As(err, &exitErr) && exitErr.Code != 0 {
-		return exitErr.Code
-	}
-	return 1
 }
 
 func exeDevControlDestination(value string) (string, string, error) {
@@ -1016,13 +1004,13 @@ func exeDevControlScope(cfg Config, accountFingerprint string) (string, error) {
 	if accountFingerprint == "" {
 		return "", exit(2, "exe.dev account fingerprint is empty")
 	}
-	return "ssh:" + destination + "|port:" + blank(port, "default") + "|account:sha256:" + accountFingerprint, nil
+	return "ssh:" + destination + "|port:" + core.Blank(port, "default") + "|account:sha256:" + accountFingerprint, nil
 }
 
 func exeDevServer(vm exeDevVM, leaseID, slug string, cfg Config, keep bool) Server {
 	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
 	labels["name"] = vm.Name()
-	labels["state"] = blank(vm.Status, "unknown")
+	labels["state"] = core.Blank(vm.Status, "unknown")
 	labels["work_root"] = cfg.WorkRoot
 	if vm.Region != "" {
 		labels["region"] = vm.Region
@@ -1097,7 +1085,7 @@ func (b *exeDevLeaseBackend) leaseIdentityForVM(vm exeDevVM) (string, string, er
 		if claim, ok, err := resolveLeaseClaimForProvider(slug, providerName); err != nil {
 			return "", "", err
 		} else if ok {
-			claimSlug := blank(claim.Slug, newLeaseSlug(claim.LeaseID))
+			claimSlug := core.Blank(claim.Slug, newLeaseSlug(claim.LeaseID))
 			if leaseProviderName(claim.LeaseID, claimSlug) == vm.Name() {
 				return claim.LeaseID, claimSlug, nil
 			}
@@ -1203,5 +1191,5 @@ func isLowerHex(value string) bool {
 }
 
 func exeDevImage(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.ExeDev.Image), "default")
+	return core.Blank(strings.TrimSpace(cfg.ExeDev.Image), core.ExeDevDefaultImageLabel)
 }

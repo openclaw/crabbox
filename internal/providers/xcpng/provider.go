@@ -49,6 +49,7 @@ func (Provider) ClaimScope(cfg core.Config) string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationUsernamePassword),
 		Name:             "xcp-ng",
 		Family:           "xcp-ng",
 		Kind:             core.ProviderKindSSHLease,
@@ -98,49 +99,67 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	}
 	if core.FlagWasSet(fs, "xcp-ng-api-url") {
 		cfg.XCPNg.APIURL = *v.APIURL
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 	}
 	if core.FlagWasSet(fs, "xcp-ng-username") {
 		cfg.XCPNg.Username = *v.Username
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 	}
 	if core.FlagWasSet(fs, "xcp-ng-template") {
 		cfg.XCPNg.Template = *v.Template
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 		cfg.XCPNg.TemplateUUID = ""
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 		cfg.ServerType = xcpNgServerTypeForConfig(*cfg)
 	}
 	if core.FlagWasSet(fs, "xcp-ng-template-uuid") {
 		cfg.XCPNg.TemplateUUID = *v.TemplateUUID
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 		cfg.XCPNg.Template = ""
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 		cfg.ServerType = xcpNgServerTypeForConfig(*cfg)
 	}
 	if core.FlagWasSet(fs, "xcp-ng-sr") {
 		cfg.XCPNg.SR = *v.SR
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 		cfg.XCPNg.SRUUID = ""
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 	}
 	if core.FlagWasSet(fs, "xcp-ng-sr-uuid") {
 		cfg.XCPNg.SRUUID = *v.SRUUID
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 		cfg.XCPNg.SR = ""
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 	}
 	if core.FlagWasSet(fs, "xcp-ng-network") {
 		cfg.XCPNg.Network = *v.Network
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 		cfg.XCPNg.NetworkUUID = ""
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 	}
 	if core.FlagWasSet(fs, "xcp-ng-network-uuid") {
 		cfg.XCPNg.NetworkUUID = *v.NetworkUUID
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 		cfg.XCPNg.Network = ""
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 	}
 	if core.FlagWasSet(fs, "xcp-ng-host") {
 		cfg.XCPNg.Host = *v.Host
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 	}
 	if core.FlagWasSet(fs, "xcp-ng-user") {
 		cfg.XCPNg.User = *v.User
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 		cfg.SSHUser = *v.User
 	}
 	if core.FlagWasSet(fs, "xcp-ng-work-root") {
 		cfg.XCPNg.WorkRoot = *v.WorkRoot
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 		cfg.WorkRoot = *v.WorkRoot
 	}
 	if core.FlagWasSet(fs, "xcp-ng-insecure-tls") {
 		cfg.XCPNg.InsecureTLS = *v.InsecureTLS
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 	}
 	return nil
 }

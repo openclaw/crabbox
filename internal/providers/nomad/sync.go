@@ -20,7 +20,7 @@ func (b *backend) syncWorkspace(ctx context.Context, client Client, ready alloca
 		PhaseName:           "nomad_sync",
 		Provider:            providerName,
 		Stderr:              b.rt.Stderr,
-		Now:                 b.now,
+		Now:                 func() time.Time { return core.ClockNow(b.rt.Clock) },
 		CleanupContext:      b.cleanupContext,
 		Upload: func(uploadCtx context.Context, remoteArchive string, body io.Reader) error {
 			return b.uploadArchive(uploadCtx, client, ready, remoteArchive, body)

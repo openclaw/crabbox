@@ -68,7 +68,7 @@ func TestCoordinatorListUsesUserLeasesWithoutAdminProbe(t *testing.T) {
 			t.Error("ordinary list must not probe the admin pool")
 			http.Error(w, "unexpected admin probe", http.StatusInternalServerError)
 		case "/v1/leases":
-			if got := r.URL.Query().Get("state"); got != "active" {
+			if got := r.URL.Query().Get("state"); got != "" {
 				t.Fatalf("leases state=%q", got)
 			}
 			if got := r.Header.Get("Authorization"); got != "Bearer user-token" {
@@ -175,7 +175,7 @@ func TestCoordinatorListJSONUsesUserLeasesWhenAdminTokenMissing(t *testing.T) {
 		if r.URL.Path != "/v1/leases" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
-		if got := r.URL.Query().Get("state"); got != "active" {
+		if got := r.URL.Query().Get("state"); got != "" {
 			t.Fatalf("leases state=%q", got)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"leases": []CoordinatorLease{
@@ -318,6 +318,39 @@ func TestCoordinatorStatusKeepsFourSecondWindowsSSHProbe(t *testing.T) {
 	assertSSHOption(t, args, "ConnectionAttempts", "3")
 }
 
+func TestCoordinatorWSL2StatusAllowsCompleteProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	isolateTestUserDirs(t)
+	installSSHArgsRecorder(t)
+	t.Setenv("CRABBOX_FAKE_SSH_DELAY", "2.1")
+	previous := probeWSLSFTPSubsystem
+	probeWSLSFTPSubsystem = func(context.Context, SSHTarget, string, string, io.Writer) error { return nil }
+	t.Cleanup(func() { probeWSLSFTPSubsystem = previous })
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_0123456789ab" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+			ID: "cbx_0123456789ab", Provider: "aws", State: "active",
+			TargetOS: targetWindows, WindowsMode: windowsModeWSL2,
+			Host: "example.test", SSHUser: "runner", SSHPort: "22",
+		}})
+	}))
+	defer server.Close()
+	cfg := baseConfig()
+	cfg.Provider, cfg.Coordinator, cfg.CoordToken = "aws", server.URL, "user-token"
+	cfg.Network = NetworkPublic
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: mustNewCoordinatorClient(t, cfg)}
+	view, err := backend.Status(t.Context(), StatusRequest{ID: "cbx_0123456789ab"})
+	if err != nil || !view.Ready {
+		t.Fatalf("ready=%t err=%v; brokered WSL readiness must allow the complete probe", view.Ready, err)
+	}
+}
+
 func TestCoordinatorInspectJSONIncludesOptionalSSHHostKey(t *testing.T) {
 	isolateTestUserDirs(t)
 	sshHostKey := testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 47))
@@ -409,6 +442,141 @@ func TestCoordinatorInspectJSONIncludesOptionalSSHHostKey(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCoordinatorInspectJSONPreservesNetworkDiagnostics(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	for _, test := range []struct {
+		name    string
+		network string
+	}{
+		{name: "older broker omits network"},
+		{name: "empty object", network: `{}`},
+		{
+			name: "recorded ingress and placement",
+			network: `{
+				"sshSourceCIDRs": ["192.0.2.24/32", "2001:db8::24/128"],
+				"sshPinnedSourceCIDRs": ["203.0.113.0/24"],
+				"sshSourceCIDRsComplete": true,
+				"awsSecurityGroupID": "sg-example",
+				"awsSecurityGroupName": "crabbox-example",
+				"awsSubnetID": "subnet-example",
+				"awsPrivate": true
+			}`,
+		},
+		{
+			name: "explicit false and empty values",
+			network: `{
+				"sshSourceCIDRs": [],
+				"sshPinnedSourceCIDRs": [],
+				"sshSourceCIDRsComplete": false,
+				"awsSecurityGroupID": "",
+				"awsSecurityGroupName": "",
+				"awsSubnetID": "",
+				"awsPrivate": false
+			}`,
+		},
+		{name: "partial historical record", network: `{"sshSourceCIDRs": ["2001:db8::24/128"]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_network" ||
+					r.URL.RawQuery != "providerMetadata=authoritative" ||
+					r.Header.Get("Authorization") != "Bearer user-token" {
+					t.Errorf("unexpected inspect request: %s %s", r.Method, r.URL.Path)
+					http.Error(w, "unexpected request", http.StatusBadRequest)
+					return
+				}
+				lease := map[string]any{
+					"id": "cbx_network", "provider": "aws", "target": "linux",
+					"state": "released", "host": "", "cleanupStatus": "complete",
+					"cloudID": "i-example", "sshPort": "2222",
+				}
+				if test.network != "" {
+					lease["network"] = json.RawMessage(test.network)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+			}))
+			defer server.Close()
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_TOKEN", "user-token")
+
+			var stdout bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+			if err := app.inspect(t.Context(), []string{"--provider", "aws", "--id", "cbx_network", "--json"}); err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got["network"] != "public" {
+				t.Fatalf("network=%#v, want existing public string", got["network"])
+			}
+			for field, want := range map[string]string{
+				"id": "cbx_network", "provider": "aws", "serverId": "i-example",
+				"sshPort": "2222", "cleanupStatus": "complete",
+			} {
+				if got[field] != want {
+					t.Fatalf("%s=%#v, want %q", field, got[field], want)
+				}
+			}
+			if got["state"] != "released" || got["hasHost"] != false || got["ready"] != false {
+				t.Fatalf("released hostless state changed: state=%v hasHost=%v ready=%v", got["state"], got["hasHost"], got["ready"])
+			}
+			if requests.Load() != 1 {
+				t.Fatalf("inspect made %d requests, want one existing lease GET", requests.Load())
+			}
+			keyPath, err := testboxKeyPath("cbx_network")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(filepath.Dir(keyPath)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("hostless inspect created local SSH state: %v", err)
+			}
+			diagnostics, present := got["networkDiagnostics"]
+			if test.network == "" {
+				if present {
+					t.Fatalf("networkDiagnostics=%#v, want omitted", diagnostics)
+				}
+				return
+			}
+			var want map[string]any
+			if err := json.Unmarshal([]byte(test.network), &want); err != nil {
+				t.Fatal(err)
+			}
+			if !present || !reflect.DeepEqual(diagnostics, want) {
+				t.Fatalf("networkDiagnostics=%#v present=%t, want %#v", diagnostics, present, want)
+			}
+		})
+	}
+
+	t.Run("direct provider omits broker diagnostics", func(t *testing.T) {
+		view, err := statusViewFromLeaseTarget(t.Context(), Config{Provider: "hetzner", Network: NetworkPublic}, LeaseTarget{
+			LeaseID: "cbx_direct",
+			Server:  Server{Provider: "hetzner", Status: "released"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(view)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got["network"] != "public" {
+			t.Fatalf("network=%#v, want existing public string", got["network"])
+		}
+		if diagnostics, present := got["networkDiagnostics"]; present {
+			t.Fatalf("networkDiagnostics=%#v, want omitted for direct provider", diagnostics)
+		}
+	})
 }
 
 func TestCoordinatorInspectJSONPreservesCleanupState(t *testing.T) {
@@ -869,54 +1037,6 @@ func TestCoordinatorAcquireRetainsCurrentProvisioningTiming(t *testing.T) {
 	want := coordinatorRunnerTiming(lease)
 	if !reflect.DeepEqual(acquired.runnerTiming, want) {
 		t.Fatalf("runner timing=%#v want current provisioning timing %#v", acquired.runnerTiming, want)
-	}
-}
-
-func TestCoordinatorAcquirePollsCanonicalIDFromProvisioningReplay(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	oldInterval := coordinatorCreateLeaseRecoveryInterval
-	coordinatorCreateLeaseRecoveryInterval = time.Millisecond
-	defer func() { coordinatorCreateLeaseRecoveryInterval = oldInterval }()
-
-	const requestedID = "cbx_abcdef123456"
-	const canonicalID = "cbx_abcdef123457"
-	gets := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases":
-			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
-				ID: canonicalID, Slug: "retained-canonical", Provider: "aws", TargetOS: targetLinux, State: "provisioning",
-			}})
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+canonicalID:
-			gets++
-			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
-				ID: canonicalID, Slug: "retained-canonical", Provider: "aws", TargetOS: targetLinux,
-				State: "active", CloudID: "i-retained", Host: "203.0.113.10", SSHUser: "crabbox", SSHPort: "2222", WorkRoot: defaultPOSIXWorkRoot,
-			}})
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+requestedID:
-			t.Fatalf("polled provisional ID instead of canonical ID")
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	cfg := baseConfig()
-	cfg.Provider = "aws"
-	cfg.TargetOS = targetLinux
-	cfg.Coordinator = server.URL
-	cfg.CoordToken = "user-token"
-	coord := mustNewCoordinatorClient(t, cfg)
-	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
-	lease, err := backend.createCoordinatorLeaseWithProgressMode(
-		context.Background(), cfg, "ssh-ed25519 test", true, requestedID, "retained-canonical", false,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lease.ID != canonicalID || lease.CloudID != "i-retained" || gets == 0 {
-		t.Fatalf("lease=%#v gets=%d", lease, gets)
 	}
 }
 
@@ -1938,7 +2058,7 @@ func TestCoordinatorCreateLeaseRecoversWithSameTokenBoundPost(t *testing.T) {
 	}()
 
 	var createdLeaseID string
-	const canonicalLeaseID = "cbx_recovered_canonical"
+	const canonicalLeaseID = "cbx_recover"
 	var createAttemptID string
 	posts := 0
 	gets := 0
@@ -2213,7 +2333,7 @@ func TestCoordinatorRecoveredProvisioningKeepsCreationLifetime(t *testing.T) {
 			t.Run(fmt.Sprintf("fixed=%v/%s", fixed, test.name), func(t *testing.T) {
 				synctest.Test(t, func(t *testing.T) {
 					const requestedID = "cbx_abcdef123463"
-					canonicalID := "cbx_abcdef123464"
+					canonicalID := requestedID
 					target := targetMacOS
 					createMethod, createPath := http.MethodPost, "/v1/leases"
 					if fixed {
@@ -2621,6 +2741,50 @@ func TestCoordinatorResolveDropsHistoricalProvisioningTiming(t *testing.T) {
 	}
 }
 
+func TestCoordinatorResolveRejectsConfirmedReleasedExecution(t *testing.T) {
+	for _, admin := range []bool{false, true} {
+		t.Run(fmt.Sprintf("admin-fallback=%t", admin), func(t *testing.T) {
+			isolateTestUserDirs(t)
+			const leaseID = "cbx_0123456789ab"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/"+leaseID {
+					http.NotFound(w, r)
+					return
+				}
+				if admin && r.Header.Get("Authorization") != "Bearer admin-token" {
+					http.NotFound(w, r)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+					ID: leaseID, Provider: "aws", TargetOS: targetLinux,
+					State: "released", CleanupStatus: "complete",
+					CleanupCompletedAt: time.Now().UTC().Format(time.RFC3339),
+				}})
+			}))
+			defer server.Close()
+			adminToken := ""
+			if admin {
+				adminToken = "admin-token"
+			}
+			backend := newCoordinatorIdentityTestBackend(t, server.URL, adminToken)
+			_, err := backend.Resolve(t.Context(), ResolveRequest{ID: leaseID, Prepare: true})
+			if err == nil || !strings.Contains(err.Error(), leaseID) || !strings.Contains(err.Error(), "released") {
+				t.Fatalf("released execution should fail before SSH preparation: %v", err)
+			}
+			for _, req := range []ResolveRequest{
+				{ID: leaseID},
+				{ID: leaseID, ReleaseOnly: true},
+				{ID: leaseID, ReleaseOnly: true, Prepare: true},
+			} {
+				resolved, err := backend.Resolve(t.Context(), req)
+				if err != nil || resolved.LeaseID != leaseID || resolved.Server.Status != "released" {
+					t.Fatalf("released metadata must remain available for inspection and cleanup: lease=%#v err=%v", resolved, err)
+				}
+			}
+		})
+	}
+}
+
 func TestCoordinatorProviderIdentityValidationCanonicalizesAliases(t *testing.T) {
 	backend := &coordinatorLeaseBackend{
 		spec: ProviderSpec{Name: "gcp"},
@@ -2653,7 +2817,7 @@ func TestCoordinatorCreateCanonicalProviderMatching(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			lease := base
 			lease.Provider = test.provider
-			if got := backend.validateCoordinatorLeaseCreateResult(cfg, lease, lease.ID, false) == nil; got != test.want {
+			if got := backend.validateCoordinatorLeaseCreateResult(cfg, lease, lease.ID) == nil; got != test.want {
 				t.Fatalf("recovered=%t want %t for provider=%q", got, test.want, test.provider)
 			}
 		})
@@ -2960,7 +3124,7 @@ func TestCoordinatorAcquireProviderMismatchCleanupPolicy(t *testing.T) {
 					capturedRequestedID, _ = body["leaseID"].(string)
 					createAttemptID, _ = body["createAttemptID"].(string)
 					_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
-						ID: test.wantLease, Provider: "external", TargetOS: targetLinux, State: "active",
+						ID: capturedRequestedID, Provider: "external", TargetOS: targetLinux, State: "active",
 					}})
 				case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+capturedRequestedID+"/cancel-create":
 					cancellations++
@@ -2983,7 +3147,7 @@ func TestCoordinatorAcquireProviderMismatchCleanupPolicy(t *testing.T) {
 				operationID = test.wantLease
 			}
 			_, err := backend.acquireOnceWithLeaseID(context.Background(), false, operationID, "identity-fence")
-			assertCoordinatorProviderIdentityError(t, err, "external", test.wantLease)
+			assertCoordinatorProviderIdentityError(t, err, "external", capturedRequestedID)
 			if cancellations != test.wantCancels {
 				t.Fatalf("cancel-create requests=%d want %d", cancellations, test.wantCancels)
 			}

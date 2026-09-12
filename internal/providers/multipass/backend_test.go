@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -94,6 +96,39 @@ func sampleInfoJSON(name string) string {
 	return `{"errors":[],"info":{"` + name + `":{"state":"Running","ipv4":["192.168.64.7"],"release":"Ubuntu 24.04.4 LTS","image_hash":"abc123","image_release":"24.04 LTS"}}}`
 }
 
+func TestMultipassConfigShowSection(t *testing.T) {
+	for _, tc := range []struct {
+		raw, memory, disk string
+		cpus              int
+		timeout           time.Duration
+	}{{"", "", "", 0, 0}, {" raw ", "", " disk ", -2, -time.Second}, {"configured", "8G", "40G", 4, 2 * time.Minute}} {
+		cfg := core.Config{Provider: "other", Multipass: core.MultipassConfig{CLIPath: tc.raw, Image: tc.raw, User: tc.raw, WorkRoot: tc.raw, CPUs: tc.cpus, Memory: tc.memory, Disk: tc.disk, LaunchTimeout: tc.timeout}}
+		before := cfg
+		section := (Provider{}).ConfigShowSection(cfg)
+		got := map[string]any{}
+		var fields []string
+		for _, f := range section.Fields {
+			got[f.JSONName] = f.JSONValue
+			fields = append(fields, f.TextName+"="+f.TextValue)
+		}
+		want := map[string]any{"cliPath": tc.raw, "image": tc.raw, "user": tc.raw, "workRoot": tc.raw, "cpus": tc.cpus, "memory": tc.memory, "disk": tc.disk, "launchTimeout": tc.timeout.String()}
+		memory, disk := tc.memory, tc.disk
+		if memory == "" {
+			memory = "-"
+		}
+		if disk == "" {
+			disk = "-"
+		}
+		text := fmt.Sprintf("cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s disk=%s launch_timeout=%s", tc.raw, tc.raw, tc.raw, tc.raw, tc.cpus, memory, disk, tc.timeout.String())
+		if section.JSONKey != "multipass" || section.TextLabel != "multipass" || !reflect.DeepEqual(section.Providers, []string{"multipass"}) || len(section.Fields) != 8 || !reflect.DeepEqual(got, want) || strings.Join(fields, " ") != text {
+			t.Fatalf("Multipass projection %#v", section)
+		}
+		if !reflect.DeepEqual(cfg, before) {
+			t.Fatal("projection mutated config")
+		}
+	}
+}
+
 func TestProviderSpecAndAliases(t *testing.T) {
 	p := Provider{}
 	if p.Name() != providerName {
@@ -115,6 +150,57 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureCacheVolume} {
 		if !spec.Features.Has(feature) {
 			t.Fatalf("features=%v missing %s", spec.Features, feature)
+		}
+	}
+}
+
+func TestMultipassOrdinaryFlagMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		raw      string
+		duration time.Duration
+		bad      bool
+	}{{"", time.Minute, false}, {"2m", 2 * time.Minute, false}, {"0s", time.Minute, true}, {" 0s ", time.Minute, true}, {"0", time.Minute, true}, {"-1m", time.Minute, true}, {" 2m ", time.Minute, true}, {" ", time.Minute, true}, {"invalid", time.Minute, true}} {
+		t.Run(fmt.Sprintf("%q", tc.raw), func(t *testing.T) {
+			cfg := core.Config{Provider: "unselected-metadata", SSHUser: "generic", WorkRoot: "generic", Multipass: core.MultipassConfig{CLIPath: "prior", Image: "image-example", User: "prior", WorkRoot: "prior", CPUs: 4, Memory: "8G", Disk: "30G", LaunchTimeout: time.Minute}}
+			fs := flag.NewFlagSet("metadata", flag.ContinueOnError)
+			values := (Provider{}).RegisterFlags(fs, cfg)
+			before := cfg
+			if fs.Lookup("multipass-launch-timeout").DefValue != "1m0s" {
+				t.Fatal("string timeout registration")
+			}
+			if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, before) {
+				t.Fatal("unvisited values changed")
+			}
+			if err := fs.Parse([]string{"--multipass-cli=~/literal", "--multipass-image=image-example", "--multipass-user= user ", "--multipass-work-root=~/guest", "--multipass-cpus=-2", "--multipass-memory=4G", "--multipass-disk=20G", "--multipass-launch-timeout=" + tc.raw}); err != nil {
+				t.Fatal(err)
+			}
+			err := (Provider{}).ApplyFlags(&cfg, fs, values)
+			if tc.bad {
+				if err == nil || err.Error() != fmt.Sprintf("invalid duration %q", tc.raw) {
+					t.Fatalf("timeout error=%v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			want := before
+			want.Multipass = core.MultipassConfig{CLIPath: "~/literal", Image: "image-example", User: " user ", WorkRoot: "~/guest", CPUs: -2, Memory: "4G", Disk: "20G", LaunchTimeout: tc.duration}
+			want.SSHUser = " user "
+			want.WorkRoot = "~/guest"
+			core.MarkMultipassImageExplicit(&want)
+			core.RecordProviderFlagInputs(&want, true, providerName)
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("partial values/effects=%#v want %#v", cfg.Multipass, want.Multipass)
+			}
+		})
+	}
+	cfg := core.Config{Provider: "unselected-metadata", Multipass: core.MultipassConfig{Image: "prior"}}
+	before := cfg
+	for _, foreign := range []any{nil, struct{}{}} {
+		if err := (Provider{}).ApplyFlags(&cfg, flag.NewFlagSet("foreign", flag.ContinueOnError), foreign); err != nil || !reflect.DeepEqual(cfg, before) {
+			t.Fatal("foreign values changed config")
 		}
 	}
 }
@@ -733,5 +819,61 @@ func TestReleaseRequiresExactClaim(t *testing.T) {
 func TestLaunchArgTimeoutValueIsNumeric(t *testing.T) {
 	if _, err := strconv.Atoi(strconv.Itoa(durationSecondsCeil(10 * time.Minute))); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestInheritedWorkRootCallerContract(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USER", "fixture-user")
+	for _, tc := range []struct{ providerRoot, genericRoot, want string }{
+		{"", "", "/work/crabbox"},
+		{"", "/work/crabbox", "/work/crabbox"},
+		{"", "/Users/ec2-user/crabbox", "/work/crabbox"},
+		{"", "C:\\crabbox", "/work/crabbox"},
+		{"", " /work/crabbox ", " /work/crabbox "},
+		{"", "/WORK/crabbox", "/WORK/crabbox"},
+		{"", "c:\\crabbox", "c:\\crabbox"},
+		{"", "/srv/custom", "/srv/custom"},
+		{"", "/Users/alice/custom", "/Users/alice/custom"},
+		{"", "D:\\custom", "D:\\custom"},
+		{"", "  ", "  "},
+		{" ", "/srv/custom", " "},
+		{"/work/crabbox", "/srv/custom", "/work/crabbox"},
+		{"relative", "/srv/custom", "relative"},
+		{"/provider/root", "/srv/custom", "/provider/root"},
+	} {
+		for _, explicit := range []bool{false, true} {
+			cfg := Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
+			if explicit {
+				core.MarkWorkRootExplicit(&cfg)
+				cfg.TargetOS = "existing-target"
+				cfg.WindowsMode = "prior-mode"
+			}
+			cfg.WorkRoot = tc.genericRoot
+			cfg.Multipass.WorkRoot = tc.providerRoot
+
+			want := cfg
+			want.Provider = "multipass"
+			if !explicit {
+				want.TargetOS = "linux"
+			}
+			want.Multipass.WorkRoot = tc.want
+			want.WorkRoot = tc.want
+			want.Multipass.CLIPath = "multipass"
+			want.Multipass.Image = "26.04"
+			want.Multipass.User = "crabbox"
+			want.Multipass.LaunchTimeout = 20 * time.Minute
+			want.SSHUser = "crabbox"
+			want.SSHPort = "22"
+			want.SSHFallbackPorts = []string{}
+			want.ServerType = "26.04"
+			if !explicit {
+				want.WindowsMode = ""
+			}
+			applyDefaults(&cfg)
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("whole config differs for roots=%q/%q explicit=%t: got=%#v want=%#v", tc.providerRoot, tc.genericRoot, explicit, cfg, want)
+			}
+		}
 	}
 }

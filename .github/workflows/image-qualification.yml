@@ -109,6 +109,7 @@ jobs:
               --outdir "$ARTIFACT/worker" --config wrangler.jsonc
           )
           cp candidate/scripts/mint-aws-devtools-image.sh \
+            candidate/scripts/devtools-image-smoke-linux.sh \
             candidate/scripts/install-linux-developer-tools.sh \
             candidate/scripts/linux-readiness.generated.sh \
             "$ARTIFACT/candidate/scripts/"

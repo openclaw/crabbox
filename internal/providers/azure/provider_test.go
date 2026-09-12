@@ -2,11 +2,63 @@ package azure
 
 import (
 	"flag"
+	"reflect"
 	"strings"
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestAzureFlatInputTracking(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw     string
+		accepted, bad bool
+	}{{"azure-backend", "vm", true, false}, {"azure-backend", "dynamic-sessions", true, false}, {"azure-backend", "invalid", false, true}, {"azure-os-disk", "managed", true, false}, {"azure-os-disk", "invalid", false, true}, {"azure-snapshot-sku", "Standard_LRS", true, false}, {"azure-snapshot-sku", "invalid", true, true}, {"azure-os-disk-sku", "Standard_LRS", true, false}, {"azure-os-disk-sku", "invalid", true, true}} {
+		t.Run(tc.name+"/"+tc.raw, func(t *testing.T) {
+			cfg := core.Config{Provider: "azure", AzureBackend: "vm"}
+			fs := flag.NewFlagSet("metadata", flag.ContinueOnError)
+			v := (Provider{}).RegisterFlags(fs, cfg)
+			if err := fs.Parse([]string{"--" + tc.name + "=" + tc.raw}); err != nil {
+				t.Fatal(err)
+			}
+			err := (Provider{}).ApplyFlags(&cfg, fs, v)
+			if (err != nil) != tc.bad {
+				t.Fatalf("unexpected validation outcome: %v", err)
+			}
+			want := core.Config{Provider: "azure", AzureBackend: "vm"}
+			if tc.accepted {
+				core.RecordProviderFlagInputs(&want, true, "azure")
+				switch tc.name {
+				case "azure-backend":
+					want.AzureBackend = tc.raw
+					if tc.raw == "dynamic-sessions" {
+						want.Provider = "azure-dynamic-sessions"
+					}
+				case "azure-os-disk":
+					want.AzureOSDisk = tc.raw
+					want.AzureOSDiskExplicit = true
+				case "azure-snapshot-sku":
+					want.AzureSnapshotSKU = tc.raw
+				case "azure-os-disk-sku":
+					want.AzureOSDiskSKU = tc.raw
+				}
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatal("accepted flat flags or partial state attributed incorrectly")
+			}
+		})
+	}
+	cfg := core.Config{Provider: "azure", AzureBackend: "vm"}
+	fs := flag.NewFlagSet("wrong", flag.ContinueOnError)
+	(Provider{}).RegisterFlags(fs, cfg)
+	if err := fs.Parse([]string{"--azure-backend=vm"}); err != nil {
+		t.Fatal(err)
+	}
+	before := cfg
+	if err := (Provider{}).ApplyFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+		t.Fatal("wrong values object counted as input")
+	}
+}
 
 func TestPrepareLeaseClaimEndpointPreservesExactAzureIdentity(t *testing.T) {
 	provider := Provider{}

@@ -41,17 +41,6 @@ func claimScope(cfg Config) string {
 	}, "|")
 }
 
-func writeNomadClaim(cfg Config, leaseID, slug string, repo Repo, reclaim bool, ready allocationReadiness, expiresAt time.Time) (LeaseClaim, error) {
-	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope(cfg), cfg.Pond, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
-		return LeaseClaim{}, err
-	}
-	claim, err := readLeaseClaim(leaseID)
-	if err != nil {
-		return LeaseClaim{}, err
-	}
-	return updateLeaseClaimLabelsIfUnchanged(leaseID, claim, claimLabels(cfg, leaseID, slug, ready, expiresAt))
-}
-
 func claimLabels(cfg Config, leaseID, slug string, ready allocationReadiness, expiresAt time.Time) map[string]string {
 	labels := map[string]string{
 		"provider":                providerName,
@@ -96,6 +85,9 @@ func resolveNomadClaim(cfg Config, id string) (LeaseClaim, error) {
 }
 
 func authorizeClaimScope(cfg Config, claim LeaseClaim) error {
+	if _, err := registrationState(claim); err != nil {
+		return err
+	}
 	if claim.Provider != "" && claim.Provider != providerName {
 		return exit(2, "lease %s belongs to provider=%s, not %s", claim.LeaseID, claim.Provider, providerName)
 	}
@@ -118,6 +110,9 @@ func listNomadLeaseClaims() ([]LeaseClaim, error) {
 }
 
 func validateRemoteOwnership(cfg Config, claim LeaseClaim, job *nomadapi.Job) error {
+	if _, err := registrationState(claim); err != nil {
+		return err
+	}
 	if job == nil {
 		return exit(4, "nomad job for lease %s is missing or inaccessible", claim.LeaseID)
 	}

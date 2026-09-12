@@ -25,6 +25,7 @@ func (Provider) Aliases() []string { return []string{"applevm", "apple-vz", "app
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationLocalContext),
 		Name:             providerName,
 		Family:           "local-vm",
 		Kind:             core.ProviderKindSSHLease,

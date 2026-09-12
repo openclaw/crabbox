@@ -269,7 +269,7 @@ func TestClaimSharedFinalizationPreservesReplacement(t *testing.T) {
 }
 
 func TestClaimFenceContextCancelsPublicationWithoutMutation(t *testing.T) {
-	for _, operation := range []string{"reuse", "publish", "finalize", "shared"} {
+	for _, operation := range []string{"reuse", "publish", "finalize", "shared", "durable replacement"} {
 		t.Run(operation, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			const id = "cbx_shared_publication"
@@ -300,6 +300,11 @@ func TestClaimFenceContextCancelsPublicationWithoutMutation(t *testing.T) {
 					return WithDurableLeaseClaimLockContext(ctx, id, func(*LeaseClaim, bool, func() error) error { return action() })
 				case "finalize":
 					return CleanupLeaseClaimIfUnchangedAfterContext(ctx, id, claim, true, action)
+				case "durable replacement":
+					replacement := cloneLeaseClaim(claim)
+					replacement.Labels = map[string]string{"state": "submitting"}
+					_, err := ReplaceLeaseClaimIfUnchangedDurableReturningContext(ctx, id, claim, replacement)
+					return err
 				default:
 					return WithLeaseClaimUnchangedShared(ctx, id, claim, action)
 				}

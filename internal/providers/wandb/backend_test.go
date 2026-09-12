@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"google.golang.org/grpc/codes"
 )
 
@@ -39,13 +42,32 @@ func TestWandbProviderSpec(t *testing.T) {
 }
 
 func TestWandbIsProviderName(t *testing.T) {
+	selected := func(name string) bool {
+		cfg := core.BaseConfig()
+		cfg.Provider = name
+		fs := flag.NewFlagSet("name-contract", flag.ContinueOnError)
+		fs.String("class", "", "")
+		p := Provider{}
+		values := p.RegisterFlags(fs, cfg)
+		if err := fs.Parse([]string{"--class=standard"}); err != nil {
+			t.Fatal(err)
+		}
+		err := p.ApplyFlags(&cfg, fs, values)
+		if err == nil {
+			return false
+		}
+		if err.Error() != "--class is not supported for provider=wandb" {
+			t.Fatalf("unexpected selection error: %v", err)
+		}
+		return true
+	}
 	for _, name := range []string{"wandb", "WANDB", "  wandb  ", "weights-and-biases"} {
-		if !isWandbProviderName(name) {
+		if !selected(name) {
 			t.Fatalf("isWandbProviderName(%q) = false, want true", name)
 		}
 	}
 	for _, name := range []string{"", "railway", "wandbx"} {
-		if isWandbProviderName(name) {
+		if selected(name) {
 			t.Fatalf("isWandbProviderName(%q) = true, want false", name)
 		}
 	}
@@ -200,6 +222,7 @@ type fakeWandbAPI struct {
 	stopID           string
 	stopMissingOK    bool
 	stopErr          error
+	stopCalls        int
 	listValue        []wandbSandbox
 	listErr          error
 	listTags         []string
@@ -238,6 +261,7 @@ func (f *fakeWandbAPI) Exec(_ context.Context, req wandbExecRequest) (int, error
 }
 
 func (f *fakeWandbAPI) Stop(_ context.Context, id string, _ int, missingOK bool) error {
+	f.stopCalls++
 	f.stopID = id
 	f.stopMissingOK = missingOK
 	return f.stopErr
@@ -365,6 +389,7 @@ func TestWandbRunClosesCachedClientAfterOperation(t *testing.T) {
 			acquired: wandbSandbox{ID: "sb-abc", Status: "RUNNING"},
 			execCode: 0,
 		},
+		closeErr: errors.New("connection close failed"),
 	}
 	backend := newWandbBackendForTest(t, api)
 	if _, err := backend.Run(context.Background(), RunRequest{NoSync: true, Command: []string{"echo", "hello"}}); err != nil {
@@ -396,7 +421,7 @@ func TestWandbRunWithExistingIDSkipsAcquireAndStop(t *testing.T) {
 		ID:      "sb-supplied",
 		NoSync:  true,
 		Command: []string{"echo"},
-		Env:     map[string]string{"CI": "true"},
+		Env:     map[string]string{"CI": "true", "CRABBOX_LEASE_ID": "sb-supplied", "CRABBOX_RUN_ID": "run-fixture", "CRABBOX_SLUG": "fixture"},
 	})
 	if err != nil {
 		t.Fatalf("Run err: %v", err)
@@ -937,7 +962,7 @@ func TestWandbRunTimingJSONUsesExecErrorCode(t *testing.T) {
 	if report.ExitCode != 69 {
 		t.Fatalf("timing exit = %d, want 69; stderr=%s", report.ExitCode, stderr.String())
 	}
-	if report.RunStatus != "failed" || report.ErrorKind != "command-exit" {
+	if report.RunStatus != "failed" || report.ErrorKind != "provider-error" {
 		t.Fatalf("timing outcome status=%q kind=%q", report.RunStatus, report.ErrorKind)
 	}
 }
@@ -971,4 +996,255 @@ func contains(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// Fail only the timing record, so provisioning and recovery diagnostics remain observable.
+type wandbTimingWriter struct {
+	bytes.Buffer
+	err error
+}
+
+func (w *wandbTimingWriter) Write(p []byte) (int, error) {
+	if w.err != nil && bytes.HasPrefix(p, []byte("{")) {
+		return 0, w.err
+	}
+	return w.Buffer.Write(p)
+}
+
+func TestWandbRunTerminalFailures(t *testing.T) {
+	cleanupErr := errors.New("owned stop failed")
+	writerErr := errors.New("timing output failed")
+	transportErr := errors.New("exec transport failed")
+	for _, tc := range []struct {
+		name                     string
+		commandCode              int
+		execErr                  error
+		cleanupErr               error
+		writerErr                error
+		keep, keepFailure, reuse bool
+		wantCode                 int
+		wantKind                 core.RunErrorKind
+		wantKept                 bool
+		wantStops                int
+	}{
+		{name: "success", wantKind: core.RunErrorNone, wantStops: 1},
+		{name: "success cleanup fails", cleanupErr: cleanupErr, wantCode: 1, wantKind: core.RunErrorProvider, wantKept: true, wantStops: 1},
+		{name: "command cleanup fails", commandCode: 7, cleanupErr: cleanupErr, wantCode: 7, wantKind: core.RunErrorCommandExit, wantKept: true, wantStops: 1},
+		{name: "command writer fails", commandCode: 7, writerErr: writerErr, wantCode: 7, wantKind: core.RunErrorCommandExit, wantStops: 1},
+		{name: "command cleanup and writer fail", commandCode: 7, cleanupErr: cleanupErr, writerErr: writerErr, wantCode: 7, wantKind: core.RunErrorCommandExit, wantKept: true, wantStops: 1},
+		{name: "failure retention survives writer", commandCode: 7, writerErr: writerErr, keepFailure: true, wantCode: 7, wantKind: core.RunErrorCommandExit, wantKept: true},
+		{name: "success writer fails after deletion", writerErr: writerErr, wantCode: 1, wantKind: core.RunErrorProvider, wantStops: 1},
+		{name: "transport cleanup and writer fail", execErr: transportErr, cleanupErr: cleanupErr, writerErr: writerErr, wantCode: 1, wantKind: core.RunErrorProvider, wantKept: true, wantStops: 1},
+		{name: "cancellation writer fails", execErr: context.Canceled, writerErr: writerErr, keepFailure: true, wantCode: 1, wantKind: core.RunErrorCanceled, wantKept: true},
+		{name: "deadline writer fails", execErr: context.DeadlineExceeded, writerErr: writerErr, keepFailure: true, wantCode: 1, wantKind: core.RunErrorTimeout, wantKept: true},
+		{name: "keep success", keep: true, wantKind: core.RunErrorNone, wantKept: true},
+		{name: "reuse failure", reuse: true, commandCode: 7, wantCode: 7, wantKind: core.RunErrorCommandExit, wantKept: true},
+		{name: "grpc unavailable", execErr: &wandbAPIError{ExitCode: 69, Code: codes.Unavailable}, writerErr: writerErr, keepFailure: true, wantCode: 69, wantKind: core.RunErrorProvider, wantKept: true},
+		{name: "grpc permission", execErr: &wandbAPIError{ExitCode: 77, Code: codes.PermissionDenied}, cleanupErr: cleanupErr, wantCode: 77, wantKind: core.RunErrorProvider, wantKept: true, wantStops: 1},
+		{name: "grpc deadline", execErr: &wandbAPIError{ExitCode: 124, Code: codes.DeadlineExceeded}, cleanupErr: cleanupErr, wantCode: 124, wantKind: core.RunErrorProvider, wantKept: true, wantStops: 1},
+		{name: "grpc missing", execErr: &wandbAPIError{ExitCode: 4, Code: codes.NotFound}, cleanupErr: cleanupErr, wantCode: 4, wantKind: core.RunErrorProvider, wantKept: true, wantStops: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &fakeWandbAPI{acquired: wandbSandbox{ID: "sb-terminal", Status: "running"}, execCode: tc.commandCode, execErr: tc.execErr, stopErr: tc.cleanupErr}
+			b := newWandbBackendForTest(t, api)
+			writer := &wandbTimingWriter{err: tc.writerErr}
+			b.rt.Stderr = writer
+			req := RunRequest{NoSync: true, TimingJSON: true, Command: []string{"true"}, Keep: tc.keep, KeepOnFailure: tc.keepFailure}
+			if tc.reuse {
+				seedWandbClaim(t, b, "sb-terminal")
+				req.ID = "sb-terminal"
+				api.listValue = []wandbSandbox{{ID: "sb-terminal", Status: "running"}}
+			}
+			result, err := b.Run(context.Background(), req)
+			// Match core's public normalization boundary for baseline controls.
+			result = core.FinalizeRunResult(result, err)
+			if result.ExitCode != tc.wantCode || result.ErrorKind != tc.wantKind {
+				t.Errorf("outcome code=%d kind=%q want code=%d kind=%q; err=%v", result.ExitCode, result.ErrorKind, tc.wantCode, tc.wantKind, err)
+			}
+			if result.Session == nil || result.Session.Kept != tc.wantKept || result.Session.Reused != tc.reuse {
+				t.Errorf("session=%+v want kept=%v reused=%v", result.Session, tc.wantKept, tc.reuse)
+			}
+			if api.stopCalls != tc.wantStops {
+				t.Errorf("stop calls=%d want=%d", api.stopCalls, tc.wantStops)
+			}
+			_, exists, claimErr := resolveWandbClaim("sb-terminal")
+			if claimErr != nil || exists != tc.wantKept {
+				t.Errorf("claim exists=%v err=%v want=%v", exists, claimErr, tc.wantKept)
+			}
+			if tc.wantCode == 0 {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			} else {
+				var public ExitError
+				if !errors.As(err, &public) || public.Code != tc.wantCode {
+					t.Errorf("public=%+v err=%v want code=%d", public, err, tc.wantCode)
+				}
+				for _, cause := range []error{tc.execErr, tc.cleanupErr, tc.writerErr} {
+					if cause != nil && (!errors.Is(err, cause) || !strings.Contains(public.Message, cause.Error())) {
+						t.Errorf("missing cause/display %q: public=%q err=%v", cause, public.Message, err)
+					}
+				}
+				if tc.commandCode != 0 && !strings.Contains(public.Message, "sandbox exit=7") {
+					t.Errorf("primary command diagnostic missing: %q", public.Message)
+				}
+			}
+			if tc.writerErr == nil {
+				var report timingReport
+				found := false
+				for _, line := range strings.Split(writer.String(), "\n") {
+					if strings.HasPrefix(line, "{") {
+						if decodeErr := json.Unmarshal([]byte(line), &report); decodeErr != nil {
+							t.Fatal(decodeErr)
+						}
+						found = true
+					}
+				}
+				if !found || report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind {
+					t.Errorf("timing found=%v report=%+v result=%+v", found, report, result)
+				}
+			}
+		})
+	}
+}
+
+func TestWandbRunTypedTimingWriterPreservesPublicCode(t *testing.T) {
+	writerErr := ExitError{Code: 69, Message: "custom timing writer unavailable"}
+	api := &fakeWandbAPI{acquired: wandbSandbox{ID: "sb-writer", Status: "running"}}
+	b := newWandbBackendForTest(t, api)
+	b.rt.Stderr = &wandbTimingWriter{err: writerErr}
+	result, err := b.Run(context.Background(), RunRequest{NoSync: true, TimingJSON: true, Command: []string{"true"}})
+	var public ExitError
+	if !errors.As(err, &public) || public.Code != 69 || !errors.Is(err, writerErr) {
+		t.Fatalf("publicCode=%d err=%v; want original writer code69 and cause", public.Code, err)
+	}
+	if result.Session == nil || result.Session.Kept || api.stopCalls != 1 {
+		t.Fatalf("typed writer changed actual deletion: session=%+v stops=%d", result.Session, api.stopCalls)
+	}
+}
+
+func TestWandbExistingIDEnvironmentPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		env            map[string]string
+		explicit, want bool
+	}{
+		{name: "reserved-only", env: map[string]string{"CRABBOX_LEASE_ID": "sb", "CRABBOX_RUN_ID": "run", "CRABBOX_SLUG": "slug"}, want: true},
+		{name: "reserved-only-summary", env: map[string]string{"CRABBOX_RUN_ID": "run"}, explicit: true, want: true},
+		{name: "reserved-casefold", env: map[string]string{"CrAbBoX_SlUg": "slug"}, want: true},
+		{name: "implicit-defaults", env: map[string]string{"CI": "true", "NODE_OPTIONS": "fixture"}, want: true},
+		{name: "reserved-plus-implicit-defaults", env: map[string]string{"CRABBOX_RUN_ID": "run", "CI": "true", "NODE_OPTIONS": "fixture"}, want: true},
+		{name: "explicit-ci", env: map[string]string{"CRABBOX_RUN_ID": "run", "CI": "true"}, explicit: true},
+		{name: "explicit-node", env: map[string]string{"NODE_OPTIONS": "fixture"}, explicit: true},
+		{name: "custom", env: map[string]string{"CUSTOM": "fixture"}},
+		{name: "prefix-lookalike", env: map[string]string{"CRABBOX_RUN_ID_EXTRA": "fixture"}},
+		{name: "suffix-lookalike", env: map[string]string{"PREFIX_CRABBOX_RUN_ID": "fixture"}},
+		{name: "padded-lookalike", env: map[string]string{" CRABBOX_RUN_ID": "fixture"}},
+		{name: "lowercase-default-not-exception", env: map[string]string{"ci": "true"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := wandbExistingIDEnvCanBeOmitted(RunRequest{Env: tc.env, EnvSummary: tc.explicit})
+			t.Logf("actual=%t desired=%t explicit=%t", got, tc.want, tc.explicit)
+			if got != tc.want {
+				t.Errorf("reuse environment accepted=%t want=%t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWandbBindingFlagContract(t *testing.T) {
+	for _, selector := range []string{"wandb", " WEIGHTS-AND-BIASES ", "aws"} {
+		for _, life := range []int{-2, 0, 45} {
+			cfg := core.BaseConfig()
+			cfg.Provider = selector
+			fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+			values := RegisterWandbProviderFlags(fs, cfg)
+			count := 0
+			fs.VisitAll(func(*flag.Flag) { count++ })
+			if count != 2 || fs.Lookup("wandb-image").DefValue != "" || fs.Lookup("wandb-max-lifetime").DefValue != "0" {
+				t.Fatal("raw registration defaults changed")
+			}
+			cfg.Wandb.DefaultImage = "layered-image"
+			cfg.Wandb.MaxLifetimeSeconds = 37
+			before := cfg.Wandb
+			if err := ApplyWandbProviderFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Wandb != before {
+				t.Fatal("unvisited flags changed config")
+			}
+			if err := fs.Parse([]string{"--wandb-image=", fmt.Sprintf("--wandb-max-lifetime=%d", life)}); err != nil {
+				t.Fatal(err)
+			}
+			snapshot := fmt.Sprintf("%#v", cfg)
+			if err := ApplyWandbProviderFlags(&cfg, fs, struct{}{}); err != nil {
+				t.Fatal(err)
+			}
+			if fmt.Sprintf("%#v", cfg) != snapshot {
+				t.Fatal("wrong values type changed config")
+			}
+			if err := ApplyWandbProviderFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Wandb.DefaultImage != "" || cfg.Wandb.MaxLifetimeSeconds != life {
+				t.Fatal("flag application introduced defaults/validation")
+			}
+		}
+	}
+	for _, args := range [][]string{{"--type=fixture", "--class="}, {"--type="}} {
+		cfg := core.BaseConfig()
+		cfg.Provider = " WEIGHTS-AND-BIASES "
+		fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+		fs.String("class", "", "")
+		fs.String("type", "", "")
+		RegisterWandbProviderFlags(fs, cfg)
+		if err := fs.Parse(args); err != nil {
+			t.Fatal(err)
+		}
+		err := ApplyWandbProviderFlags(&cfg, fs, struct{}{})
+		want := "--type is not supported for provider=wandb"
+		if len(args) == 2 {
+			want = "--class is not supported for provider=wandb"
+		}
+		var exitErr core.ExitError
+		if err == nil || err.Error() != want || !errors.As(err, &exitErr) || exitErr.Code != 2 {
+			t.Fatalf("guard err=%v want=%q", err, want)
+		}
+	}
+}
+
+func TestWandbBindingRuntimeDefaultsContract(t *testing.T) {
+	for _, image := range []string{"", "  ", " image "} {
+		for _, life := range []int{-2, 0, 37} {
+			cfg := Config{Provider: "prior", WorkRoot: "/fixture/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, Wandb: core.WandbConfig{APIKey: "inert-configured", DefaultImage: image, MaxLifetimeSeconds: life}}
+			want := cfg
+			want.Provider = "wandb"
+			want.TargetOS = "linux"
+			if image == "" {
+				want.Wandb.DefaultImage = "ubuntu:24.04"
+			}
+			if life <= 0 {
+				want.Wandb.MaxLifetimeSeconds = 1800
+			}
+			applyWandbDefaults(&cfg)
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("runtime defaults image=%q life=%d got=%#v want=%#v", image, life, cfg, want)
+			}
+		}
+	}
+	cfg := Config{TargetOS: "macos"}
+	applyWandbDefaults(&cfg)
+	if cfg.TargetOS != "macos" {
+		t.Fatal("nonempty target changed")
+	}
+	for _, tc := range []struct {
+		life int
+		ttl  time.Duration
+		want int
+	}{{0, 0, 1800}, {-2, -time.Second, 1800}, {37, 0, 37}, {0, time.Nanosecond, 1}, {0, 999 * time.Millisecond, 1}, {0, time.Second, 1}, {0, 1001 * time.Millisecond, 2}, {1, 1500 * time.Millisecond, 1}, {37, 36100 * time.Millisecond, 37}, {37, 35100 * time.Millisecond, 36}, {0, time.Hour, 1800}, {-2, time.Minute, 60}} {
+		cfg := Config{TTL: tc.ttl, Wandb: core.WandbConfig{MaxLifetimeSeconds: tc.life}}
+		if got := wandbMaxLifetimeSeconds(cfg); got != tc.want {
+			t.Fatalf("life=%d ttl=%s got=%d want=%d", tc.life, tc.ttl, got, tc.want)
+		}
+	}
 }

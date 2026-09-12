@@ -22,7 +22,7 @@ func (b *codeSandboxBackend) syncWorkspace(ctx context.Context, api codeSandboxA
 		PhaseName:           "codesandbox_sync",
 		Provider:            providerName,
 		Stderr:              b.rt.Stderr,
-		Now:                 b.now,
+		Now:                 func() time.Time { return core.ClockNow(b.rt.Clock) },
 		CleanupContext:      b.cleanupContext,
 		Upload: func(uploadCtx context.Context, remoteArchive string, body io.Reader) error {
 			return api.UploadFile(uploadCtx, sandboxID, remoteArchive, body)

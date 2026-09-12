@@ -34,6 +34,7 @@ func applyTargetFlagOverrides(cfg *Config, fs *flag.FlagSet, values targetFlagVa
 		cfg.targetExplicit = true
 		cfg.targetFlagExplicit = true
 		cfg.credentialProvenance.externalDesktopTarget = credentialSourceFlag
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 		if normalizeTargetOS(cfg.TargetOS) != targetWindows && !flagWasSet(fs, "windows-mode") {
 			cfg.WindowsMode = windowsModeNormal
 			cfg.explicitWindowsMode = ""
@@ -44,20 +45,25 @@ func applyTargetFlagOverrides(cfg *Config, fs *flag.FlagSet, values targetFlagVa
 		cfg.WindowsMode = *values.WindowsMode
 		cfg.explicitWindowsMode = *values.WindowsMode
 		cfg.windowsModeFlagExplicit = true
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 		cfg.credentialProvenance.externalDesktopMode = credentialSourceFlag
 	}
 	if flagWasSet(fs, "static-host") {
 		cfg.Static.Host = *values.StaticHost
+		recordConfigInput(cfg, "ssh", configInputFlag, true)
 		cfg.credentialProvenance.staticHost = credentialSourceFlag
 	}
 	if flagWasSet(fs, "static-user") {
 		cfg.Static.User = *values.StaticUser
+		recordConfigInput(cfg, "ssh", configInputFlag, true)
 	}
 	if flagWasSet(fs, "static-port") {
 		cfg.Static.Port = *values.StaticPort
+		recordConfigInput(cfg, "ssh", configInputFlag, true)
 	}
 	if flagWasSet(fs, "static-work-root") {
 		cfg.Static.WorkRoot = *values.StaticRoot
+		recordConfigInput(cfg, "ssh", configInputFlag, true)
 	}
 	normalizeTargetConfig(cfg)
 	return validateTargetConfig(*cfg)

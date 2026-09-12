@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -30,6 +32,49 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 // --- pure-function tests -----------------------------------------------------
+
+func TestOpenComputerConfigShowCompletePassiveSection(t *testing.T) {
+	projector, ok := any(Provider{}).(core.ProviderConfigShowProjector)
+	if !ok {
+		t.Fatal("actual provider has no passive config display section")
+	}
+	for _, selected := range []string{"other", "opencomputer"} {
+		for _, populated := range []bool{false, true} {
+			cfg := core.Config{Provider: selected}
+			want := core.ProviderConfigShowSection{JSONKey: "openComputer", TextLabel: "opencomputer", Providers: []string{"opencomputer"}, Fields: []core.ProviderConfigShowField{
+				{JSONName: "apiUrl", JSONValue: "", TextName: "api_url", TextValue: "-"},
+				{JSONName: "workdir", JSONValue: "", TextName: "workdir", TextValue: ""},
+				{JSONName: "cpu", JSONValue: 0, TextName: "cpu", TextValue: "0"},
+				{JSONName: "memoryMB", JSONValue: 0, TextName: "memory_mb", TextValue: "0"},
+				{JSONName: "timeoutSecs", JSONValue: 0, TextName: "timeout_secs", TextValue: "0"},
+				{JSONName: "execTimeoutSecs", JSONValue: 0, TextName: "exec_timeout_secs", TextValue: "0"},
+				{JSONName: "burst", JSONValue: false, TextName: "burst", TextValue: "false"},
+				{JSONName: "forgetMissing", JSONValue: false, TextName: "forget_missing", TextValue: "false"},
+			}}
+			if populated {
+				cfg.OpenComputer = core.OpenComputerConfig{APIURL: "https://example.invalid/path?view=compact#part", Workdir: " raw-workdir ", CPU: 0, MemoryMB: -2, TimeoutSecs: 7, ExecTimeoutSecs: 0, Burst: true, ForgetMissing: false}
+				want.Fields = []core.ProviderConfigShowField{
+					{JSONName: "apiUrl", JSONValue: "https://example.invalid/path", TextName: "api_url", TextValue: "https://example.invalid/path"},
+					{JSONName: "workdir", JSONValue: " raw-workdir ", TextName: "workdir", TextValue: " raw-workdir "},
+					{JSONName: "cpu", JSONValue: 0, TextName: "cpu", TextValue: "0"},
+					{JSONName: "memoryMB", JSONValue: -2, TextName: "memory_mb", TextValue: "-2"},
+					{JSONName: "timeoutSecs", JSONValue: 7, TextName: "timeout_secs", TextValue: "7"},
+					{JSONName: "execTimeoutSecs", JSONValue: 0, TextName: "exec_timeout_secs", TextValue: "0"},
+					{JSONName: "burst", JSONValue: true, TextName: "burst", TextValue: "true"},
+					{JSONName: "forgetMissing", JSONValue: false, TextName: "forget_missing", TextValue: "false"},
+				}
+			}
+			before := cfg
+			got := projector.ConfigShowSection(cfg)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("passive section got %#v want %#v", got, want)
+			}
+			if !reflect.DeepEqual(cfg, before) {
+				t.Fatal("projection mutated supplied config")
+			}
+		}
+	}
+}
 
 func TestProviderSpec(t *testing.T) {
 	p := Provider{}
@@ -518,8 +563,8 @@ func TestRunCreatesExecsAndKillsEphemeral(t *testing.T) {
 	if last.Cwd != "/workspace/crabbox" {
 		t.Fatalf("user exec cwd=%q", last.Cwd)
 	}
-	if last.Timeout != openComputerExecTimeoutSecs {
-		t.Fatalf("user exec timeout=%d want %d", last.Timeout, openComputerExecTimeoutSecs)
+	if last.Timeout != 3600 {
+		t.Fatalf("user exec timeout=%d want %d", last.Timeout, 3600)
 	}
 }
 
@@ -1668,41 +1713,25 @@ func newGitRepo(t *testing.T) string {
 }
 
 func TestRunCommandIntentReachesNativeRequest(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		command []string
-		literal map[int]bool
-		shell   bool
-		want    []string
-	}{
-		{"empty explicit source", []string{""}, nil, true, []string{"bash", "-lc", ""}},
-		{"ordinary", []string{"printf", "%s", "hello"}, nil, false, []string{"printf", "%s", "hello"}},
-		{"literal separator", []string{"printf", "%s", ";", "touch", "sentinel"}, map[int]bool{2: true}, false, []string{"printf", "%s", ";", "touch", "sentinel"}},
-		{"literal assignment executable", []string{"FOO=x", "argument"}, map[int]bool{0: true}, false, []string{"FOO=x", "argument"}},
-		{"literal singleton", []string{"literal command $(echo x)"}, map[int]bool{0: true}, false, []string{"literal command $(echo x)"}},
-		{"invalid assignment executable", []string{"bad-name=x", "argument"}, nil, false, []string{"bad-name=x", "argument"}},
-		{"mixed operators", []string{"printf", "%s", ";", "&&", "printf", "%s", "done"}, map[int]bool{2: true}, false, []string{"bash", "-lc", "'printf' '%s' ';' && 'printf' '%s' 'done'"}},
-		{"inferred source", []string{"printf one && printf two"}, nil, false, []string{"bash", "-lc", "printf one && printf two"}},
-		{"explicit source", []string{"printf one; exit 7"}, nil, true, []string{"bash", "-lc", "printf one; exit 7"}},
-		{"leading assignment", []string{"GREETING=hello world", "printf", "%s", "$GREETING"}, nil, false, []string{"bash", "-lc", "GREETING='hello world' 'printf' '%s' '$GREETING'"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fake := newFakeAPI(t)
-			backend := newAPIBackend(t, fake)
-			_, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, NoSync: true, Command: tc.command, ShellMode: tc.shell, CommandLiteralArgs: tc.literal})
-			if err != nil {
-				t.Fatal(err)
-			}
-			calls := fake.allExecs()
-			if len(calls) != 2 {
-				t.Fatalf("execs=%#v", calls)
-			}
-			got := append([]string{calls[1].req.Cmd}, calls[1].req.Args...)
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("native command=%#v want %#v", got, tc.want)
-			}
+	testutil.VerifyNativeCommandIntent(t, "bash", true, func(t *testing.T, intent testutil.CommandIntent) []string {
+		fake := newFakeAPI(t)
+		backend := newAPIBackend(t, fake)
+		_, err := backend.Run(t.Context(), RunRequest{
+			Repo:               Repo{Name: "my-app", Root: t.TempDir()},
+			NoSync:             true,
+			Command:            intent.Command,
+			ShellMode:          intent.ShellMode,
+			CommandLiteralArgs: intent.LiteralArgs,
 		})
-	}
+		if err != nil {
+			t.Fatal(err)
+		}
+		calls := fake.allExecs()
+		if len(calls) != 2 {
+			t.Fatalf("execs=%#v", calls)
+		}
+		return append([]string{calls[1].req.Cmd}, calls[1].req.Args...)
+	})
 }
 
 func TestRunMissingCommandRetainsCleanup(t *testing.T) {
@@ -1717,5 +1746,140 @@ func TestRunMissingCommandRetainsCleanup(t *testing.T) {
 	}
 	if calls := fake.allExecs(); len(calls) != 1 {
 		t.Fatalf("expected only workspace setup, got %#v", calls)
+	}
+}
+
+func TestOpenComputerConfigFlagContract(t *testing.T) {
+	for _, provider := range []string{"opencomputer", " OC ", "open-computer", "aws"} {
+		cfg := Config{Provider: provider, OpenComputer: core.OpenComputerConfig{APIURL: "prior-url", Workdir: "/workspace/prior", CPU: 8, MemoryMB: 1024, TimeoutSecs: 45, ExecTimeoutSecs: 90, Burst: true, ForgetMissing: true}}
+		fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+		values := RegisterOpenComputerProviderFlags(fs, cfg)
+		count := 0
+		fs.VisitAll(func(*flag.Flag) { count++ })
+		if count != 8 || fs.Lookup("opencomputer-api-key") != nil {
+			t.Fatalf("flag count=%d", count)
+		}
+		original := cfg.OpenComputer
+		if err := ApplyOpenComputerProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.OpenComputer != original {
+			t.Fatal("unvisited changed config")
+		}
+		if err := fs.Parse([]string{"--opencomputer-api-url=", "--opencomputer-workdir=  ", "--opencomputer-cpu=0", "--opencomputer-memory-mb=-2", "--opencomputer-timeout-secs=-3", "--opencomputer-exec-timeout-secs=-4", "--opencomputer-burst=false", "--opencomputer-forget-missing=false"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyOpenComputerProviderFlags(&cfg, fs, struct{}{}); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.OpenComputer != original {
+			t.Fatal("wrong values type changed config")
+		}
+		if err := ApplyOpenComputerProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want := core.OpenComputerConfig{Workdir: "  ", MemoryMB: -2, TimeoutSecs: -3, ExecTimeoutSecs: -4}
+		if cfg.OpenComputer != want {
+			t.Fatalf("flags=%#v want=%#v", cfg.OpenComputer, want)
+		}
+		if err := fs.Set("opencomputer-forget-missing", "true"); err != nil {
+			t.Fatal(err)
+		}
+		if err := fs.Set("opencomputer-burst", "true"); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyOpenComputerProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want.ForgetMissing = true
+		want.Burst = true
+		if cfg.OpenComputer != want {
+			t.Fatal("explicit true flags lost")
+		}
+	}
+}
+
+func TestOpenComputerConfigMachineFlagOrder(t *testing.T) {
+	for _, provider := range []string{"opencomputer", " OC ", "open-computer", "aws"} {
+		for _, args := range [][]string{{"--class=large", "--type=machine"}, {"--type=machine"}} {
+			cfg := Config{Provider: provider}
+			fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+			fs.String("class", "", "")
+			fs.String("type", "", "")
+			RegisterOpenComputerProviderFlags(fs, cfg)
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			err := ApplyOpenComputerProviderFlags(&cfg, fs, struct{}{})
+			if provider == "aws" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				continue
+			}
+			want := "--type is not supported"
+			if len(args) == 2 {
+				want = "--class is not supported"
+			}
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("provider=%q err=%v want=%s", provider, err, want)
+			}
+		}
+	}
+}
+
+func TestOpenComputerConfigEffectiveDefaults(t *testing.T) {
+	for _, tc := range []struct{ workdir, want string }{{"", "/workspace/crabbox"}, {"  ", "/workspace/crabbox"}, {" /workspace/example/ ", "/workspace/example"}} {
+		cfg := Config{OpenComputer: core.OpenComputerConfig{Workdir: tc.workdir}}
+		got, err := openComputerWorkdir(cfg)
+		if err != nil || got != tc.want {
+			t.Fatalf("workdir=%q err=%v want=%q", got, err, tc.want)
+		}
+	}
+	for _, n := range []int{-2, 0, 45} {
+		cfg := Config{OpenComputer: core.OpenComputerConfig{ExecTimeoutSecs: n}}
+		backend := NewOpenComputerBackend(Provider{}.Spec(), cfg, Runtime{}).(*openComputerBackend)
+		want := 3600
+		if n > 0 {
+			want = n
+		}
+		if got := backend.execTimeoutSecs(); got != want {
+			t.Fatalf("timeout=%d want=%d", got, want)
+		}
+		if backend.cfg.OpenComputer != cfg.OpenComputer {
+			t.Fatal("effective defaults mutated raw config")
+		}
+	}
+}
+
+func TestOpenComputerConfigClientFallbackContract(t *testing.T) {
+	for _, tc := range []struct{ name, primary, vendor, fileURL, wantKey, wantURL string }{
+		{"default-url", "", "", "", "inert-file", "https://app.opencomputer.dev"},
+		{"primary-key", " inert-primary ", "inert-vendor", "https://fixture.example", "inert-primary", "https://fixture.example"},
+		{"vendor-key", "", " inert-vendor ", "https://fixture.example", "inert-vendor", "https://fixture.example"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", tc.primary)
+			t.Setenv("OPENCOMPUTER_API_KEY", tc.vendor)
+			if err := os.MkdirAll(home+"/.oc", 0700); err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(ocFileConfig{APIURL: tc.fileURL, APIKey: "inert-file"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(home+"/.oc/config.json", data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			api, err := newOCAPIClient(Config{}, Runtime{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if api.apiKey != tc.wantKey || api.baseURL != tc.wantURL {
+				t.Fatalf("normal source resolution changed for %s", tc.name)
+			}
+		})
 	}
 }

@@ -47,7 +47,7 @@ func TestProviderSpecAndRegistration(t *testing.T) {
 }
 
 func TestProviderFlagsApplyAndValidate(t *testing.T) {
-	cfg := core.Config{Provider: providerName, Blaxel: core.BlaxelConfig{APIURL: defaultAPIURL, Workdir: defaultWorkdir}}
+	cfg := core.Config{Provider: providerName, Blaxel: core.BlaxelConfig{APIURL: "https://api.blaxel.ai", Workdir: "/workspace/crabbox"}}
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	values := Provider{}.RegisterFlags(fs, cfg)
 	if err := fs.Parse([]string{
@@ -81,15 +81,85 @@ func TestProviderFlagsApplyAndValidate(t *testing.T) {
 	}
 }
 
+func TestBlaxelFlagPresenceAndValidationOrder(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "blaxel"
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := RegisterBlaxelProviderFlags(fs, cfg)
+	fs.VisitAll(func(f *flag.Flag) {
+		if strings.Contains(f.Name, "key") {
+			t.Fatal("API key flag introduced")
+		}
+	})
+	cfg.Blaxel = core.BlaxelConfig{APIURL: "https://example.invalid/api", Workspace: "workspace", Region: "region", Image: "image", MemoryMB: 20, TTL: "30m", IdleTTL: "5m", Workdir: "/workspace/app", ExecTimeoutSecs: 30, ForgetMissing: true}
+	before := cfg.Blaxel
+	if err := ApplyBlaxelProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Blaxel != before {
+		t.Fatal("unvisited flags changed config")
+	}
+	if err := fs.Parse([]string{"--blaxel-api-url=", "--blaxel-workspace=", "--blaxel-region=", "--blaxel-image=", "--blaxel-memory-mb=0", "--blaxel-ttl=", "--blaxel-idle-ttl=", "--blaxel-workdir=", "--blaxel-exec-timeout-secs=0", "--blaxel-forget-missing=false"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyBlaxelProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Blaxel != (core.BlaxelConfig{}) {
+		t.Fatal("explicit zeros not copied")
+	}
+	for _, name := range []string{"blaxel", " Blaxel "} {
+		cfg := Config{Provider: name}
+		fs := flag.NewFlagSet("guard", flag.ContinueOnError)
+		fs.String("class", "", "")
+		fs.String("type", "", "")
+		values := RegisterBlaxelProviderFlags(fs, cfg)
+		for _, args := range [][]string{{"--type=vm"}, {"--type=vm", "--class=large"}} {
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			want := "--type is not supported for provider=blaxel; use --blaxel-image"
+			if len(args) == 2 {
+				want = "--class is not supported for provider=blaxel; use --blaxel-memory-mb"
+			}
+			for _, v := range []any{nil, struct{}{}, values} {
+				err := ApplyBlaxelProviderFlags(&cfg, fs, v)
+				if err == nil || err.Error() != want {
+					t.Fatalf("guard=%v", err)
+				}
+			}
+		}
+	}
+	cfg = Config{Blaxel: BlaxelConfig{APIURL: " ", MemoryMB: -1, ExecTimeoutSecs: -1, Workdir: "relative"}}
+	if err := ApplyBlaxelProviderFlags(&cfg, flag.NewFlagSet("foreign", flag.ContinueOnError), struct{}{}); err != nil {
+		t.Fatal("foreign values reached validation")
+	}
+	if err := validateBlaxelConfig(cfg); err == nil || err.Error() != "provider=blaxel API URL must be an absolute HTTP(S) URL" {
+		t.Fatalf("endpoint order=%v", err)
+	}
+	cfg.Blaxel.APIURL = "https://example.invalid/api"
+	if err := validateBlaxelConfig(cfg); err == nil || err.Error() != "blaxel memory-mb must be >= 0" {
+		t.Fatalf("memory order=%v", err)
+	}
+	cfg.Blaxel.MemoryMB = 0
+	if err := validateBlaxelConfig(cfg); err == nil || err.Error() != "blaxel execTimeoutSecs must be non-negative" {
+		t.Fatalf("timeout order=%v", err)
+	}
+	cfg.Blaxel.ExecTimeoutSecs = 0
+	if err := validateBlaxelConfig(cfg); err == nil || !strings.Contains(err.Error(), "absolute path") {
+		t.Fatalf("workdir order=%v", err)
+	}
+}
+
 func TestValidateBlaxelConfigRejectsUnsafeValues(t *testing.T) {
 	tests := []core.BlaxelConfig{
 		{APIURL: "https://token@example.test"},
 		{APIURL: "https://api.example.test?token=abc"},
 		{APIURL: "https://api.example.test/#frag"},
 		{APIURL: "http://api.example.test"},
-		{APIURL: defaultAPIURL, MemoryMB: -1},
-		{APIURL: defaultAPIURL, ExecTimeoutSecs: -1},
-		{APIURL: defaultAPIURL, Workdir: "relative"},
+		{APIURL: "https://api.blaxel.ai", MemoryMB: -1},
+		{APIURL: "https://api.blaxel.ai", ExecTimeoutSecs: -1},
+		{APIURL: "https://api.blaxel.ai", Workdir: "relative"},
 	}
 	for _, tc := range tests {
 		err := validateBlaxelConfig(core.Config{Blaxel: tc})

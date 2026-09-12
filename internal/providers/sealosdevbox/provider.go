@@ -32,6 +32,7 @@ func (Provider) Aliases() []string { return []string{"sealos", "sealos-dev"} }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationNativeConfig),
 		Name:             providerName,
 		Family:           familyName,
 		Kind:             core.ProviderKindSSHLease,
@@ -43,7 +44,7 @@ func (Provider) Spec() core.ProviderSpec {
 }
 
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return registerFlags(fs, defaults)
+	return core.RegisterSealosDevboxConfigFlags(fs, defaults.SealosDevbox)
 }
 
 func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {

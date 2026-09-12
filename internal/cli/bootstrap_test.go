@@ -148,7 +148,7 @@ func TestCloudInitStartsSSHBeforeOptionalDesktopBootstrap(t *testing.T) {
 	cfg.Desktop = true
 	got := cloudInit(cfg, "ssh-ed25519 test")
 	sshIndex := strings.Index(got, "timeout 30s systemctl restart ssh")
-	desktopIndex := strings.Index(got, "retry apt-get install -y --no-install-recommends tigervnc-standalone-server")
+	desktopIndex := strings.Index(got, "crabbox_install_packages tigervnc-standalone-server")
 	bootstrappedIndex := strings.Index(got, "touch /var/lib/crabbox/bootstrapped")
 	if sshIndex < 0 || desktopIndex < 0 || bootstrappedIndex < 0 {
 		t.Fatalf("cloudInit(desktop) missing expected bootstrap markers")
@@ -176,15 +176,14 @@ func TestCloudInitDesktopProfile(t *testing.T) {
 		"/usr/local/bin/crabbox-configure-desktop-theme",
 		"/etc/systemd/system/crabbox-desktop.service",
 		"/usr/local/bin/crabbox-desktop-session",
-		"/etc/systemd/system/crabbox-desktop-session.service",
+		"/etc/xdg/autostart/crabbox-desktop.desktop",
 		"ExecStart=/usr/bin/Xtigervnc :99",
 		"-AcceptSetDesktopSize",
 		"-localhost yes",
 		"-SecurityTypes VncAuth",
 		"ExecStart=/usr/bin/startxfce4",
 		"systemctl is-active --quiet crabbox-desktop.service",
-		"systemctl is-active --quiet crabbox-desktop-session.service",
-		`requested_mode="${1:-${CRABBOX_DESKTOP_THEME:-}}"`,
+		`requested_mode="${1:-}"`,
 		`"$config_dir/crabbox/desktop-theme"`,
 		"gtk_theme=Adwaita-dark",
 		`gtk_candidates="Arc-Dark Greybird-dark Adwaita-dark Greybird"`,
@@ -208,22 +207,10 @@ func TestCloudInitDesktopProfile(t *testing.T) {
 		"mkdir -p \"$config_dir/xfce4/xfconf/xfce-perchannel-xml\"",
 		"xfconf-query -c xsettings -p /Gtk/ApplicationPreferDarkTheme",
 		"xfconf-query -c xfwm4 -p /general/theme",
-		"xfconf-query -c xfwm4 -p /general/box_move",
-		"xfconf-query -c xfwm4 -p /general/box_resize",
-		"xfconf-query -c xfwm4 -p /general/move_opacity",
-		"xfconf-query -c xfwm4 -p /general/resize_opacity",
-		"xfconf-query -c xfwm4 -p /general/snap_to_border",
 		"xfconf-query -c xfwm4 -p /general/snap_width",
-		"xfconf-query -c xfwm4 -p /general/tile_on_move",
-		"xfconf-query -c xfwm4 -p /general/use_compositing",
-		"xfconf-query -c xfwm4 -p /general/wrap_windows",
 		"xfconf-query -c xfce4-panel -p /panels/dark-mode",
 		"/panels/$panel_id/background-rgba",
 		"crabbox desktop theme start",
-		"crabbox-xfce4-panel-$user.log",
-		"pkill -USR1 -x xfce4-panel",
-		"xfwm4 --replace --compositor=off",
-		`xsetroot -solid "$root_color"`,
 		`gsettings set org.gnome.desktop.interface color-scheme "$gsettings_scheme"`,
 		"CRABBOX_DESKTOP_USER=crabbox /usr/local/bin/crabbox-configure-desktop-theme",
 		"CRABBOX_DESKTOP_USER=\"$(id -un)\" /usr/local/bin/crabbox-configure-desktop-theme",
@@ -233,8 +220,8 @@ func TestCloudInitDesktopProfile(t *testing.T) {
 		"tigervncpasswd -f > /var/lib/crabbox/vnc.pass",
 		"ss -ltn | grep -q '127.0.0.1:5900'",
 		"systemctl disable --now crabbox-wayvnc.service crabbox-x11vnc.service 2>/dev/null || true",
-		"systemctl enable crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service",
-		"systemctl restart crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service",
+		"systemctl enable crabbox-xvfb.service crabbox-desktop.service",
+		"systemctl restart crabbox-xvfb.service crabbox-desktop.service",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("cloudInit(desktop) missing %q", want)
@@ -242,6 +229,40 @@ func TestCloudInitDesktopProfile(t *testing.T) {
 	}
 	if strings.Contains(got, "/etc/systemd/system/crabbox-x11vnc.service") {
 		t.Fatal("cloudInit(desktop) should not install the fixed-size x11vnc service")
+	}
+}
+
+func TestCloudInitDesktopRetainsReleasedResetAlias(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Desktop = true
+	var document struct {
+		Files []struct{ Path, Content string } `yaml:"write_files"`
+	}
+	if err := yaml.Unmarshal([]byte(cloudInit(cfg, "ssh-ed25519 fixture")), &document); err != nil {
+		t.Fatal(err)
+	}
+	var desktop string
+	for _, file := range document.Files {
+		if file.Path == "/etc/systemd/system/crabbox-desktop-session.service" {
+			t.Fatal("legacy reset name must not install an independent service")
+		}
+		if file.Path == "/etc/systemd/system/crabbox-desktop.service" {
+			desktop = file.Content
+		}
+	}
+	section, executable, alias := "", "", ""
+	for _, line := range strings.Split(desktop, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = strings.Trim(line, "[]")
+		} else if section == "Service" && strings.HasPrefix(line, "ExecStart=") {
+			executable = strings.TrimPrefix(line, "ExecStart=")
+		} else if section == "Install" && strings.HasPrefix(line, "Alias=") {
+			alias = strings.TrimPrefix(line, "Alias=")
+		}
+	}
+	if executable != "/usr/bin/startxfce4" || alias != "crabbox-desktop-session.service" {
+		t.Fatalf("released reset name must alias the XFCE owner: executable=%q alias=%q", executable, alias)
 	}
 }
 
@@ -863,7 +884,7 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 		`$wslSetup = "C:\ProgramData\crabbox\wsl\linux-setup.sh"`,
 		"WriteAllText($wslSetup",
 		"wsl.exe -d $wslDistro --user root --exec bash /mnt/c/ProgramData/crabbox/wsl/linux-setup.sh",
-		"apt-get install -y --no-install-recommends ca-certificates curl git jq python3-minimal rsync",
+		"apt-get install -y --no-install-recommends ca-certificates curl git jq python3 rsync sudo",
 		"trufflehog_version='3.95.9'",
 		"trufflehog_${trufflehog_version}_linux_amd64.tar.gz",
 		wslTruffleHogAMD64SHA256,
@@ -901,6 +922,66 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 	}
 	if sftpIndex, readyIndex := strings.Index(got, "Subsystem sftp internal-sftp"), strings.Index(got, "crabbox-ready"); sftpIndex < 0 || readyIndex < 0 || sftpIndex > readyIndex {
 		t.Fatalf("windows WSL2 bootstrap must configure SFTP before checking WSL readiness")
+	}
+}
+
+func TestManagedWindowsWSL2BootstrapInstallsNodeBeforeReadiness(t *testing.T) {
+	for _, mode := range []string{windowsModeNormal, windowsModeWSL2} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.TargetOS, cfg.WindowsMode = targetWindows, mode
+			script := windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+			install := "bash /var/lib/crabbox/install-linux-developer-tools.sh --node-only"
+			if mode == windowsModeNormal {
+				if strings.Contains(script, install) {
+					t.Fatal("native Windows unexpectedly installs a Linux runtime")
+				}
+				return
+			}
+			setupStart := strings.Index(script, "$linuxSetup = @'")
+			installIndex := strings.Index(script, install)
+			readyIndex := strings.Index(script, "cat >/usr/local/bin/crabbox-ready <<'READY'")
+			if setupStart < 0 || installIndex <= setupStart || readyIndex <= installIndex {
+				t.Fatal("WSL distro must install the shared Node baseline before readiness")
+			}
+			ready := script[readyIndex:]
+			for _, probe := range []string{"node --version >/dev/null", "npm --version >/dev/null"} {
+				if !strings.Contains(ready, probe) {
+					t.Errorf("WSL readiness missing %s", probe)
+				}
+			}
+		})
+	}
+}
+
+func TestManagedWindowsWSL2BootstrapOwnsDistroInitialization(t *testing.T) {
+	for _, mode := range []string{windowsModeNormal, windowsModeWSL2} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.TargetOS, cfg.WindowsMode = targetWindows, mode
+			script := windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+			steps := []string{
+				"touch /etc/cloud/cloud-init.disabled",
+				"wsl.exe --terminate $wslDistro",
+				"wsl.exe -d $wslDistro --exec /usr/local/bin/crabbox-ready",
+				"WSL cold-start readiness failed with exit $LASTEXITCODE",
+				"Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath",
+			}
+			last := -1
+			for _, step := range steps {
+				index := strings.Index(script, step)
+				if mode == windowsModeNormal {
+					if index >= 0 && step != steps[len(steps)-1] {
+						t.Fatalf("native Windows unexpectedly configures WSL: %s", step)
+					}
+					continue
+				}
+				if index <= last {
+					t.Fatalf("missing or out-of-order WSL initialization step: %s", step)
+				}
+				last = index
+			}
+		})
 	}
 }
 

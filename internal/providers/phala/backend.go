@@ -39,14 +39,14 @@ const phalaListPageSize = 100
 
 // defaultInstanceType is the smallest confidential TDX shape Phala Cloud
 // advertises. dstack provisions Intel TDX CVMs; tdx.small is the cheapest.
-const defaultInstanceType = "tdx.small"
+const defaultInstanceType = core.PhalaConfigDefaultInstanceType
 
 // defaultWorkRoot is the remote crabbox work root on a leased CVM. The dstack
 // --dev-os guest mounts its root as a read-only squashfs, so the work root must
 // live on a writable mount; /var/volatile is a writable tmpfs present on every
 // dstack guest. The earlier /work/crabbox default sat on the read-only root and
 // failed live at "write sync manifests: exit status 1" (the manifest mkdir).
-const defaultWorkRoot = "/var/volatile/crabbox"
+const defaultWorkRoot = core.PhalaConfigDefaultWorkRoot
 
 // crabboxCVMNamePrefix marks Phala CVMs created by crabbox. Phala's deploy CLI
 // has no arbitrary label facility, so ownership is carried by the CVM name and
@@ -209,7 +209,7 @@ func applyDefaults(cfg *core.Config) {
 	cfg.SSHPort = "22"
 	cfg.SSHFallbackPorts = nil
 	if cfg.Phala.CLIPath == "" {
-		cfg.Phala.CLIPath = "phala"
+		cfg.Phala.CLIPath = core.PhalaConfigDefaultCLIPath
 	}
 	if cfg.Phala.InstanceType == "" {
 		cfg.Phala.InstanceType = defaultInstanceType
@@ -296,7 +296,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 	}()
 
-	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, b.now())
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, core.ClockNow(b.rt.Clock).UTC())
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s instance_type=%s keep=%v\n", providerName, leaseID, slug, cfg.ServerType, req.Keep)
 	composePath, err := composeFileForDeploy(cfg, keyPath+".pub")
 	if err != nil {
@@ -601,7 +601,7 @@ func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 
 func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	cfg := b.configForRun()
-	now := b.now()
+	now := core.ClockNow(b.rt.Clock).UTC()
 	server := req.Lease.Server
 	gatewayHost := strings.TrimSpace(server.Labels["gateway_host"])
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, req.State, now)
@@ -677,8 +677,8 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		}
 		server := b.server(item, cfg)
 		mergeClaimLabels(&server, claim)
-		remove, reason := core.ShouldCleanupServer(server, b.now())
-		if recoveryRemove, recoveryReason, handled := phalaRecoveryCleanup(claim, b.now()); handled {
+		remove, reason := core.ShouldCleanupServer(server, core.ClockNow(b.rt.Clock).UTC())
+		if recoveryRemove, recoveryReason, handled := phalaRecoveryCleanup(claim, core.ClockNow(b.rt.Clock).UTC()); handled {
 			remove, reason = recoveryRemove, recoveryReason
 		}
 		if !remove {
@@ -740,7 +740,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		if _, ok := live[leaseID]; ok || claim.LeaseID == "" {
 			continue
 		}
-		if claim.Labels["recovery"] == "ambiguous-create" && phalaRecoveryPending(claim, b.now()) {
+		if claim.Labels["recovery"] == "ambiguous-create" && phalaRecoveryPending(claim, core.ClockNow(b.rt.Clock).UTC()) {
 			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s reason=ambiguous create recovery pending\n", claim.LeaseID)
 			continue
 		}
@@ -1683,13 +1683,6 @@ func (b *backend) phala(ctx context.Context, cfg core.Config, args []string, std
 		Args:   append([]string(nil), args...),
 		Stderr: stderr,
 	})
-}
-
-func (b *backend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now().UTC()
-	}
-	return time.Now().UTC()
 }
 
 func commandError(action string, result core.LocalCommandResult, err error) error {

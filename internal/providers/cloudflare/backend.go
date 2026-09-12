@@ -57,7 +57,7 @@ func (b *cloudflareBackend) Warmup(ctx context.Context, req WarmupRequest) error
 	if req.ActionsRunner {
 		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	client, err := newCloudflareClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -70,18 +70,13 @@ func (b *cloudflareBackend) Warmup(ctx context.Context, req WarmupRequest) error
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: %s warmup keeps the container until explicit stop\n", providerName)
 	}
-	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  claim.LeaseID,
-			Slug:     claim.Slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	total := core.ClockNow(b.rt.Clock).Sub(started)
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  claim.LeaseID,
+		Slug:     claim.Slug,
+		Total:    total,
+	})
 }
 
 func (b *cloudflareBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
@@ -93,7 +88,7 @@ func (b *cloudflareBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 	var claim LeaseClaim
 	var command string
 	bound := func() shared.DelegatedSandbox {
-		return shared.DelegatedSandbox{LeaseID: claim.LeaseID, Slug: blank(claim.Slug, newLeaseSlug(claim.LeaseID)), CleanupCommand: cloudflareCleanupCommand(claim.LeaseID)}
+		return shared.DelegatedSandbox{LeaseID: claim.LeaseID, Slug: core.Blank(claim.Slug, newLeaseSlug(claim.LeaseID)), CleanupCommand: cloudflareCleanupCommand(claim.LeaseID)}
 	}
 	return shared.RunDelegatedSandbox(ctx, req, shared.DelegatedSandboxLifecycle{
 		Provider: providerName, Runtime: b.rt, Workdir: workdir,
@@ -201,9 +196,9 @@ func (b *cloudflareBackend) Status(ctx context.Context, req StatusRequest) (Stat
 		return StatusView{}, err
 	}
 	client.useInstanceType(cloudflareClaimInstanceType(claim))
-	deadline := b.now().Add(req.WaitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
 	if req.WaitTimeout <= 0 {
-		deadline = b.now().Add(5 * time.Minute)
+		deadline = core.ClockNow(b.rt.Clock).Add(5 * time.Minute)
 	}
 	for {
 		sandbox, err := client.getSandbox(ctx, claim.LeaseID)
@@ -217,7 +212,7 @@ func (b *cloudflareBackend) Status(ctx context.Context, req StatusRequest) (Stat
 		if !req.Wait || view.Ready {
 			return view, nil
 		}
-		if b.now().After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return StatusView{}, exit(5, "timed out waiting for %s container %s to become ready", providerName, claim.LeaseID)
 		}
 		select {
@@ -283,14 +278,14 @@ func (b *cloudflareBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 		if err != nil {
 			if cloudflareNotFoundError(err) {
 				if req.DryRun {
-					fmt.Fprintf(b.rt.Stdout, "would remove stale %s claim %s slug=%s reason=not-found\n", providerName, claim.LeaseID, blank(claim.Slug, "-"))
+					fmt.Fprintf(b.rt.Stdout, "would remove stale %s claim %s slug=%s reason=not-found\n", providerName, claim.LeaseID, core.Blank(claim.Slug, "-"))
 					continue
 				}
 				if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 					return err
 				}
 				removed++
-				fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s slug=%s reason=not-found\n", providerName, claim.LeaseID, blank(claim.Slug, "-"))
+				fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s slug=%s reason=not-found\n", providerName, claim.LeaseID, core.Blank(claim.Slug, "-"))
 				continue
 			}
 			fmt.Fprintf(b.rt.Stderr, "warning: %s status failed for %s: %v\n", providerName, claim.LeaseID, err)
@@ -300,14 +295,14 @@ func (b *cloudflareBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 			continue
 		}
 		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would confirm cleanup of %s claim %s slug=%s state=%s\n", providerName, claim.LeaseID, blank(claim.Slug, "-"), sandbox.State)
+			fmt.Fprintf(b.rt.Stdout, "would confirm cleanup of %s claim %s slug=%s state=%s\n", providerName, claim.LeaseID, core.Blank(claim.Slug, "-"), sandbox.State)
 			continue
 		}
 		if _, err := destroyClaimedSandbox(ctx, client, claim); err != nil {
 			return err
 		}
 		removed++
-		fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s slug=%s state=%s\n", providerName, claim.LeaseID, blank(claim.Slug, "-"), sandbox.State)
+		fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s slug=%s state=%s\n", providerName, claim.LeaseID, core.Blank(claim.Slug, "-"), sandbox.State)
 	}
 	if !req.DryRun {
 		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d checked=%d\n", providerName, removed, len(claims))
@@ -328,7 +323,7 @@ func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflar
 	if strings.TrimSpace(repo.Root) == "" {
 		return LeaseClaim{}, cloudflareContainer{}, exit(2, "cloudflare creation requires a repository root for the recovery claim")
 	}
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return LeaseClaim{}, cloudflareContainer{}, err
@@ -409,7 +404,7 @@ func rejectCloudflareSyncOptions(req RunRequest) error {
 }
 
 func cloudflareWorkdir(cfg Config) (string, error) {
-	workdir := blank(strings.TrimSpace(cfg.Cloudflare.Workdir), "/workspace/crabbox")
+	workdir := core.Blank(strings.TrimSpace(cfg.Cloudflare.Workdir), core.CloudflareConfigDefaultWorkdir)
 	clean := path.Clean(workdir)
 	if !strings.HasPrefix(clean, "/") {
 		return "", exit(2, "%s workdir %q must resolve to an absolute path", providerName, workdir)
@@ -425,7 +420,7 @@ func sandboxStatusView(leaseID, slug string, sandbox cloudflareContainer) Status
 	server := sandboxToServer(leaseID, slug, sandbox)
 	return StatusView{
 		ID:         leaseID,
-		Slug:       blank(slug, newLeaseSlug(leaseID)),
+		Slug:       core.Blank(slug, newLeaseSlug(leaseID)),
 		Provider:   providerName,
 		TargetOS:   targetLinux,
 		State:      server.Status,
@@ -444,10 +439,10 @@ func sandboxToServer(leaseID, slug string, sandbox cloudflareContainer) Server {
 	}
 	labels["provider"] = providerName
 	labels["lease"] = leaseID
-	labels["slug"] = blank(slug, newLeaseSlug(leaseID))
+	labels["slug"] = core.Blank(slug, newLeaseSlug(leaseID))
 	labels["target"] = targetLinux
-	state := blank(sandbox.State, "running")
-	instanceType := blank(sandbox.InstanceType, providerName)
+	state := core.Blank(sandbox.State, "running")
+	instanceType := core.Blank(sandbox.InstanceType, providerName)
 	labels["state"] = state
 	labels["instance_type"] = instanceType
 	server := Server{
@@ -465,7 +460,7 @@ func claimToServer(claim LeaseClaim, state string) Server {
 	labels := map[string]string{
 		"provider": providerName,
 		"lease":    claim.LeaseID,
-		"slug":     blank(claim.Slug, newLeaseSlug(claim.LeaseID)),
+		"slug":     core.Blank(claim.Slug, newLeaseSlug(claim.LeaseID)),
 		"target":   targetLinux,
 		"state":    state,
 	}
@@ -506,13 +501,6 @@ func durationMillisecondsCeil(duration time.Duration) int64 {
 		return 0
 	}
 	return int64((duration + time.Millisecond - 1) / time.Millisecond)
-}
-
-func (b *cloudflareBackend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }
 
 func cloudflareClaimInstanceType(claim LeaseClaim) string {

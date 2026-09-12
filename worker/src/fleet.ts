@@ -2,6 +2,13 @@ import ssh2, { type Client as SSHClient, type ClientChannel } from "ssh2";
 
 import { AzureResumableProvisioning } from "./azure-provisioning";
 import {
+  clearHostReservations,
+  logClearedHostReservations,
+  publicHostReservation,
+  readHostReservations,
+  type HostScope,
+} from "./host-reservations";
+import {
   clearLeaseCleanupCompletion,
   completeLeaseProviderCleanup,
   leaseHasConfirmedNoProviderResource,
@@ -44,6 +51,7 @@ import {
 } from "./auth";
 import {
   EC2SpotClient,
+  AWSLeaseAuthorityError,
   awsAutomaticProbesConfigured,
   awsCredentialsConfigured,
   awsConfiguredSecurityGroupID,
@@ -55,13 +63,21 @@ import {
   awsProvisioningErrorCategory,
   awsRegionCandidates,
   awsLeaseImageIdentity,
-  isAWSInstanceNotFoundError,
   isAWSRunInstancesOutcomeUncertain,
   isRetryableAWSProvisioningError,
   isAWSSecurityGroupRuleLimitError,
   type AWSMacHost,
+  type AWSIngressConfig,
   type AWSPrivateWorkspaceConfig,
 } from "./aws";
+import {
+  awsCleanupAuditMatchesLease,
+  awsCleanupAuditView,
+  awsCleanupRecoveryAuditKey,
+  awsCleanupRecoveryFingerprint,
+  requireAWSLegacyCleanupLease,
+  type AWSLegacyCleanupAudit,
+} from "./aws-cleanup-recovery";
 import { InvalidAWSRegionError, sanitizeAWSRegion } from "./aws-region";
 import {
   AzureClient,
@@ -134,6 +150,7 @@ import {
   leaseConfig,
   normalizeArchitecture,
   validCIDRs,
+  validatedCIDRs,
   workspaceProviderKeyPrefix,
   type LeaseConfig,
   type LeaseConfigDefaults,
@@ -347,6 +364,7 @@ import {
   tailscaleTagOwnershipErrorMessage,
   validateTailscaleTags,
 } from "./tailscale";
+import { orderedTelemetrySamples } from "./telemetry";
 import { timingSafeEqual } from "./timing-safe";
 import type {
   CapacityHint,
@@ -379,6 +397,7 @@ import type {
   LeaseProvisioningTiming,
   ProviderImage,
   ProviderMachine,
+  ProviderAccessTimingObserver,
   ProvisioningAttempt,
   ReadyPoolBorrowRequest,
   ReadyPoolBorrowHeartbeatRequest,
@@ -470,6 +489,8 @@ const terminalRunPruneBatchSize = 16;
 const runtimeAdapterDeleteBatchSize = 16;
 const defaultTerminalRunRetentionDays = 30;
 const runPruneCursorKey = "maintenance:run-prune-cursor";
+const activeEgressSessionPrefix = "active-egress-session:";
+const replacedEgressSessionsPrefix = "replaced-egress-sessions:";
 const providerAccessReservationTTLMS = 15 * 60 * 1000;
 const maxPendingWebVNCBytes = 1024 * 1024;
 const maxCodeWebSocketFrameChunkBytes = 15 * 1024;
@@ -484,6 +505,7 @@ const azureOrphanSweepFirstAlarmKey = "azure-orphan-sweep:first-alarm";
 const providerReconciliationCandidatePrefix = "provider-reconciliation:";
 const providerReconciliationCircuitPrefix = "provider-reconciliation-circuit:";
 const awsIngressReconcileRecordKey = "aws-ingress-reconcile:pending";
+const awsIngressReconcileMinDelayMs = 1000;
 const azureDeferredCleanupPrefix = "azure-cleanup:";
 const readyPoolPrefix = "ready-pool:";
 const readyPoolDesiredPrefix = "ready-pool-desired:";
@@ -1303,10 +1325,12 @@ export class FleetCoordinator {
         return await this.adminTailscalePreflight();
       }
       if (parts[0] === "v1" && parts[1] === "admin" && parts[2] === "hosts") {
-        return await this.adminHostsRoute(request, parts[3]);
+        if (parts.length > 5) return notFound();
+        return await this.adminHostsRoute(request, parts[3], parts[4]);
       }
       if (parts[0] === "v1" && parts[1] === "admin" && parts[2] === "mac-hosts") {
-        return await this.adminMacHostsRoute(request, parts[3]);
+        if (parts.length > 5) return notFound();
+        return await this.adminMacHostsRoute(request, parts[3], parts[4]);
       }
       if (
         (method === "GET" || method === "POST") &&
@@ -2328,7 +2352,7 @@ export class FleetCoordinator {
     }
   }
 
-  private adminBridgeSockets(): Set<WebSocket> {
+  private bridgeSockets(): Set<WebSocket> {
     const sockets = new Set<WebSocket>([
       ...this.controlSockets.values(),
       ...this.codeAgents.values(),
@@ -2351,7 +2375,7 @@ export class FleetCoordinator {
 
   private async reconcileAdminBridgeSockets(validation: AdminGrantValidation): Promise<void> {
     const revokedEgressSessions = new Map<string, { leaseID: string; sessionID: string }>();
-    for (const socket of this.adminBridgeSockets()) {
+    for (const socket of this.bridgeSockets()) {
       const attachment = this.bridgeAttachment(socket);
       if (
         !attachment ||
@@ -3168,11 +3192,28 @@ export class FleetCoordinator {
     }
     await this.reconcileScheduledAdminGrants(forwardedAdminGrantVersion, preserveForwardedVersion);
     await this.quarantineLegacyWorkspaces();
-    await this.reconcileInterruptedLeaseProvisioning();
-    await this.expireLeases();
+    // Retain only candidate IDs while provider I/O yields. Each phase reads them anew;
+    // final scheduling still discovers work admitted during the pass.
+    const leaseIDs = await this.state.runExclusive(async () => {
+      const candidates = await this.leaseBridgeOwners();
+      const now = Date.now();
+      await this.visitLeaseRecords((lease) => {
+        if (
+          leaseIsLive(lease) ||
+          leaseNeedsCleanup(lease, now) ||
+          leaseMayNeedInterruptedProvisioningRecovery(lease) ||
+          lease.runtimeAdapterDeleteRequestedAt
+        ) {
+          candidates.add(lease.id);
+        }
+      });
+      return candidates;
+    });
+    await this.reconcileInterruptedLeaseProvisioning(leaseIDs);
+    await this.expireLeases(leaseIDs);
     await this.webVNCCredentialHandoffs.cleanupExpired();
     await this.cleanupExpiredWebVNCPortalViewerAuth();
-    await this.reconcileRuntimeAdapterDeletes();
+    await this.reconcileRuntimeAdapterDeletes(leaseIDs);
     await this.withReadyPoolBorrowLock(() =>
       this.state.runExclusive(() => this.maintainReadyPools(Date.now())),
     );
@@ -3514,7 +3555,7 @@ export class FleetCoordinator {
         released.provisioningResourceMayExist = true;
         released.provisioningFailureRetryable = true;
       }
-      if (shouldDelete) {
+      if (shouldDelete && !canceledBeforeProviderIdentity) {
         const cleanupStarted = new Date();
         released.cleanupStartedAt = cleanupStarted.toISOString();
         released.cleanupClaimExpiresAt = new Date(
@@ -3522,6 +3563,8 @@ export class FleetCoordinator {
         ).toISOString();
         released.releaseDeletesServer = true;
         clearLeaseCleanupCompletion(released);
+      } else if (shouldDelete) {
+        released.cleanupRetryAt = now;
       } else if (leaseHasConfirmedNoProviderResource(released)) {
         completeLeaseProviderCleanup(released, released.updatedAt);
       }
@@ -3545,12 +3588,7 @@ export class FleetCoordinator {
       released = cancellation.lease;
       await this.closeLeaseBridges(cancellation.lease.id, 1008, "lease ended");
       if ("cleanup" in cancellation && cancellation.cleanup) {
-        const cleanup = () => this.finishLeaseCleanupClaim(cancellation.cleanup!);
-        released =
-          managedLeaseProvider(cancellation.cleanup.lease) === "aws" &&
-          !cancellation.cleanup.lease.network?.awsPrivate
-            ? await this.withAWSIngressOperationLock(cleanup)
-            : await cleanup();
+        released = await this.finishLeaseCleanupClaim(cancellation.cleanup);
       }
     }
     if (!released?.provisioningResourceMayExist && !released?.cleanupStartedAt) {
@@ -3866,64 +3904,15 @@ export class FleetCoordinator {
       );
     }
     const requestedHostID = config.hostID || config.awsMacHostID;
-    const retainedMacHostLease =
-      !fixedLeaseID && requestedHostID && config.provider === "aws" && config.target === "macos"
-        ? await this.retainedMacHostLease(
-            owner,
-            org,
-            requestedHostID,
-            config.serverTypeExplicit ? config.serverType : undefined,
-          )
-        : undefined;
-    const reusesOwnedReleasedMacHost = Boolean(retainedMacHostLease);
-    if (
-      !isAdminRequest(request) &&
-      requestedHostID &&
-      !reusesOwnedReleasedMacHost &&
-      requestedHostID !== checkpointAuthorization?.checkpoint.hostID
-    ) {
-      return json(
-        {
-          error: "admin_required",
-          message: "provider host pinning requires admin-token auth",
-        },
-        { status: 403 },
-      );
-    }
-    if (retainedMacHostLease) {
-      if (hasImageRequirements(config.imageRequirements)) {
-        return json(
-          {
-            error: "image_capability_mismatch",
-            message: "image capability requirements cannot be verified when reusing an instance",
-          },
-          { status: 409 },
-        );
-      }
-      const missingCapabilities = [
-        config.desktop && !retainedMacHostLease.desktop ? "desktop" : "",
-        config.browser && !retainedMacHostLease.browser ? "browser" : "",
-        config.code && !retainedMacHostLease.code ? "code" : "",
-      ].filter(Boolean);
-      if (missingCapabilities.length > 0) {
-        return json(
-          {
-            error: "retained_instance_capability_mismatch",
-            message: `retained EC2 Mac instance lacks requested capabilities: ${missingCapabilities.join(", ")}`,
-          },
-          { status: 409 },
-        );
-      }
-    }
-    if (retainedMacHostLease && !config.serverTypeExplicit) {
-      config = { ...config, serverType: retainedMacHostLease.serverType };
-    }
-    if (retainedMacHostLease) {
-      config = { ...config, providerKey: retainedMacHostLease.providerKey };
-    }
+    const hostPinError = await this.validateHostPin(
+      request,
+      config,
+      checkpointAuthorization?.checkpoint.hostID,
+    );
+    if (hostPinError) return hostPinError;
     const canonicalProviderKey = providerKeyForLease(leaseID);
     const providerKeyLeaseID = leaseIDForProviderKey(config.providerKey);
-    if (!retainedMacHostLease && providerKeyLeaseID && providerKeyLeaseID !== leaseID) {
+    if (providerKeyLeaseID && providerKeyLeaseID !== leaseID) {
       return json(
         {
           error: "reserved_provider_key",
@@ -3934,7 +3923,6 @@ export class FleetCoordinator {
     }
     if (
       !workspaceID &&
-      !retainedMacHostLease &&
       !isAdminRequest(request) &&
       config.providerKey &&
       config.providerKey !== canonicalProviderKey
@@ -4073,230 +4061,6 @@ export class FleetCoordinator {
         fixedCreate,
       );
     }
-    if (!workspaceID && retainedMacHostLease) {
-      const reactivation = await this.state.runExclusive(async () => {
-        const reservedAttempt = await this.getCreateAttempt(leaseID);
-        const currentAttempt = createAttempt
-          ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
-          : undefined;
-        if (currentAttempt?.canonicalLeaseID) {
-          const replayLease = await this.getLease(currentAttempt.canonicalLeaseID);
-          if (!replayLease || !createAttemptMatchesLease(currentAttempt, replayLease)) {
-            return createAttemptBindingConflictResponse();
-          }
-          return createAttemptReplayResponse(replayLease);
-        }
-        if (createAttempt && !currentAttempt) {
-          return createCanceledResponse();
-        }
-        if (!createAttempt && reservedAttempt) {
-          return createAttemptIDConflictResponse();
-        }
-        const current = await this.getLease(retainedMacHostLease.id);
-        if (
-          !current ||
-          current.state !== "released" ||
-          current.releaseDeletesServer !== false ||
-          !current.cloudID ||
-          current.owner !== owner ||
-          current.org !== org ||
-          current.provider !== "aws" ||
-          current.target !== "macos" ||
-          leaseHostID(current) !== requestedHostID ||
-          current.serverType !== config.serverType
-        ) {
-          return undefined;
-        }
-        if (
-          (await this.getLease(leaseID)) ||
-          (await this.state.storage.get(workspaceLeaseReservationKey(leaseID)))
-        ) {
-          return createAttemptIDConflictResponse();
-        }
-        const blocked = await reservationGuard?.();
-        if (blocked) {
-          return blocked;
-        }
-        const now = new Date();
-        const admission = await this.leaseAdmissionState({ owner, org }, now, current.id);
-        const createAttemptGeneration = newCreateAttemptGeneration();
-        const boundAttempt: CreateAttemptRecord | undefined = currentAttempt
-          ? {
-              ...currentAttempt,
-              canonicalLeaseID: current.id,
-              cloudID: current.cloudID,
-              generation: createAttemptGeneration!,
-              updatedAt: now.toISOString(),
-            }
-          : undefined;
-        let reactivated: LeaseRecord = {
-          ...current,
-          ...(checkpointAuthorization
-            ? { checkpointID: checkpointAuthorization.checkpoint.id }
-            : {}),
-          createAttemptGeneration,
-          ...(boundAttempt
-            ? {
-                createAttemptID: boundAttempt.token,
-              }
-            : {}),
-          profile: config.profile,
-          class: config.class,
-          requestedServerType: config.serverType,
-          keep: config.keep,
-          ttlSeconds: config.ttlSeconds,
-          idleTimeoutSeconds: config.idleTimeoutSeconds,
-          estimatedHourlyUSD: cost.hourlyUSD,
-          maxEstimatedUSD: cost.maxUSD,
-          state: "provisioning",
-          createdAt: now.toISOString(),
-          updatedAt: now.toISOString(),
-          lastTouchedAt: now.toISOString(),
-          expiresAt: leaseExpiresAt(
-            now,
-            now,
-            config.ttlSeconds,
-            config.idleTimeoutSeconds,
-          ).toISOString(),
-        };
-        if (!boundAttempt) {
-          delete reactivated.createAttemptID;
-        }
-        const sourceCIDRs = awsLeaseSSHSourceCIDRs(
-          config,
-          providerAccessContext(requestSourceCIDRs(request), admission.accessLeases),
-        );
-        reactivated = withLeaseSSHSourceCIDRs(
-          reactivated,
-          sourceCIDRs,
-          sourceCIDRs.length > 0 || awsGlobalSSHSourceCIDRs(this.env).length > 0,
-        );
-        if (config.awsSSHCIDRsPinned) {
-          reactivated.network = {
-            ...reactivated.network,
-            sshPinnedSourceCIDRs: sourceCIDRs,
-          };
-        } else if (reactivated.network) {
-          delete reactivated.network.sshPinnedSourceCIDRs;
-        }
-        delete reactivated.releasedAt;
-        delete reactivated.endedAt;
-        delete reactivated.releaseDeletesServer;
-        delete reactivated.failureError;
-        delete reactivated.provisioningRequestStartedAt;
-        delete reactivated.provisioningCoordinatorVersion;
-        delete reactivated.provisioningRequestSettledAt;
-        delete reactivated.provisioningRecoveryObservedAt;
-        delete reactivated.provisioningRecoveryMissingSince;
-        clearLeaseCleanupMetadata(reactivated);
-        clearLeaseCleanupCompletion(reactivated);
-        const limitError = enforceCostLimitUsage(
-          admission.costUsage,
-          reactivated,
-          costLimits(this.env),
-        );
-        if (limitError) {
-          return json({ error: "cost_limit_exceeded", message: limitError }, { status: 429 });
-        }
-        if (boundAttempt) {
-          await this.putCreateAttempt(boundAttempt);
-        }
-        await this.putLease(reactivated);
-        await this.markAWSIngressReconcilePending(reactivated);
-        await this.scheduleAlarm();
-        return {
-          previous: structuredClone(current),
-          previousAttempt: currentAttempt ? structuredClone(currentAttempt) : undefined,
-          boundAttempt: boundAttempt ? structuredClone(boundAttempt) : undefined,
-          reactivated,
-        };
-      });
-      if (reactivation instanceof Response) {
-        return reactivation;
-      }
-      if (reactivation) {
-        try {
-          if (provider.reconcileLeaseAccess) {
-            const accessLeases = await this.providerAccessLeaseRecords();
-            await this.withAWSIngressOperationLock(() =>
-              provider.reconcileLeaseAccess!(
-                reactivation.reactivated,
-                providerAccessContext(requestSourceCIDRs(request), accessLeases),
-              ),
-            );
-          }
-        } catch (error) {
-          await this.state.runExclusive(async () => {
-            const current = await this.getLease(reactivation.reactivated.id);
-            if (
-              current?.state === "provisioning" &&
-              sameLeaseReleaseIdentity(current, reactivation.reactivated)
-            ) {
-              await this.putLease(reactivation.previous);
-              if (reactivation.boundAttempt) {
-                const currentAttempt = await this.getCreateAttempt(
-                  reactivation.boundAttempt.requestedLeaseID,
-                );
-                if (
-                  currentAttempt &&
-                  sameCreateAttempt(currentAttempt, reactivation.boundAttempt)
-                ) {
-                  if (reactivation.previousAttempt) {
-                    await this.putCreateAttempt(reactivation.previousAttempt);
-                  } else {
-                    await this.state.storage.delete(
-                      createAttemptKey(reactivation.boundAttempt.requestedLeaseID),
-                    );
-                  }
-                }
-              }
-              await this.scheduleAlarm();
-            }
-          });
-          throw error;
-        }
-        const activation = await this.state.runExclusive(async () => {
-          const current = await this.getLease(reactivation.reactivated.id);
-          const pending = createAttempt
-            ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
-            : undefined;
-          if (
-            !current ||
-            current.state !== "provisioning" ||
-            !sameLeaseReleaseIdentity(current, reactivation.reactivated) ||
-            (createAttempt && (!pending || !createAttemptMatchesLease(pending, current)))
-          ) {
-            return { committed: false as const, current, pending };
-          }
-          current.state = "active";
-          current.updatedAt = new Date().toISOString();
-          await this.putLease(current);
-          await this.scheduleAlarm();
-          return { committed: true as const, current };
-        });
-        if (!activation.committed) {
-          if (createAttempt && !activation.pending) {
-            return createCanceledResponse();
-          }
-          return json(
-            {
-              error: "lease_state_changed",
-              message: "retained lease changed state while access reconciliation was in progress",
-              lease: activation.current ? publicLeaseRecord(activation.current) : undefined,
-            },
-            { status: 409 },
-          );
-        }
-        return json({ lease: publicLeaseRecord(activation.current) }, { status: 201 });
-      }
-      return json(
-        {
-          error: "retained_instance_unavailable",
-          message: "retained EC2 Mac instance is no longer available for reactivation",
-        },
-        { status: 409 },
-      );
-    }
     const reservation = await this.state.runExclusive(async () => {
       const reservedAttempt = await this.getCreateAttempt(leaseID);
       const currentAttempt = createAttempt
@@ -4344,6 +4108,13 @@ export class FleetCoordinator {
           { status: 409 },
         );
       }
+      const reservationHostError = await this.validateHostPin(
+        request,
+        config,
+        checkpointAuthorization?.checkpoint.hostID,
+        true,
+      );
+      if (reservationHostError) return reservationHostError;
       const now = new Date();
       const createAttemptGeneration = currentAttempt ? newCreateAttemptGeneration() : undefined;
       const admission = await this.leaseAdmissionState({ owner, org }, now);
@@ -4639,17 +4410,18 @@ export class FleetCoordinator {
                 : undefined;
               if (
                 !current ||
+                !sameLeaseReleaseIdentity(current, record) ||
                 current.state !== "provisioning" ||
-                (createAttempt && !currentAttempt)
+                (createAttempt &&
+                  (!currentAttempt || !createAttemptMatchesLease(currentAttempt, current)))
               ) {
-                return;
+                throw new ProviderDispatchFenceError(current);
               }
+              current.region = region;
+              current.updatedAt = new Date().toISOString();
+              await this.putLease(current);
               if (record.provider === "aws") {
-                await this.markAWSIngressReconcilePending({ ...current, region });
-              } else {
-                current.region = region;
-                current.updatedAt = new Date().toISOString();
-                await this.putLease(current);
+                await this.markAWSIngressReconcilePending(current);
               }
               await this.scheduleAlarm();
             });
@@ -4710,36 +4482,108 @@ export class FleetCoordinator {
     const provisioning: ProviderProvisioningContext = {
       ...targetProvisioning,
       ...(dispatched.providerScope ? { providerScope: dispatched.providerScope } : {}),
+      onProviderKeyCleanupPending: async (existingKey) => {
+        const active = await this.state.runExclusive(async () => {
+          const current = await this.getLease(dispatched.id);
+          const attempt = createAttempt
+            ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
+            : undefined;
+          const sameIncarnation =
+            current &&
+            sameLeaseReleaseIdentity(current, dispatched) &&
+            current.provisioningRequestStartedAt === dispatched.provisioningRequestStartedAt &&
+            current.provider === "aws" &&
+            current.providerKey === providerKeyForLease(current.id);
+          if (!sameIncarnation) {
+            return false;
+          }
+          const canContinue =
+            current.state === "provisioning" &&
+            Date.parse(current.expiresAt) > Date.now() &&
+            (!createAttempt || (attempt && createAttemptMatchesLease(attempt, current)));
+          if (!canContinue && !existingKey) {
+            return false;
+          }
+          current.providerKeyCleanupOwned = true;
+          current.providerKeyCleanupPending = true;
+          current.updatedAt = new Date().toISOString();
+          clearLeaseCleanupCompletion(current);
+          await this.putLease(current);
+          return Boolean(canContinue);
+        });
+        if (!active) {
+          throw new CreateAttemptCanceledError();
+        }
+      },
+      onProviderKeyCleanupComplete: async (target) => {
+        await this.state.runExclusive(async () => {
+          const current = await this.getLease(dispatched.id);
+          if (
+            !current ||
+            !sameLeaseReleaseIdentity(current, dispatched) ||
+            current.provisioningRequestStartedAt !== dispatched.provisioningRequestStartedAt ||
+            current.provider !== "aws" ||
+            current.region !== target.region
+          ) {
+            return;
+          }
+          delete current.providerKeyCleanupPending;
+          delete current.providerKeyCleanupID;
+          current.updatedAt = new Date().toISOString();
+          await this.putLease(current);
+        });
+      },
       onResourceCreated: (claim) => this.recordCreatedProviderResource(dispatched, claim),
       // Queued regional attempts must not restore access from their pre-provisioning snapshot.
-      withLeaseAccess: (target, operation) =>
-        this.withAWSIngressOperationLock(async () => {
+      withLeaseAccess: (target, operation, observe) => {
+        const ingressQueuedAt = Date.now();
+        return this.withAWSIngressOperationLock(async () => {
+          observe?.("ingress_wait", Date.now() - ingressQueuedAt);
+          const lifecycleQueuedAt = Date.now();
           const access = await this.state.runExclusive(async () => {
-            const current = await this.getLease(dispatched.id);
-            const attempt = createAttempt
-              ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
-              : undefined;
-            if (
-              !current ||
-              !sameLeaseReleaseIdentity(current, dispatched) ||
-              current.state !== "provisioning" ||
-              current.provisioningRequestStartedAt !== dispatched.provisioningRequestStartedAt ||
-              Date.parse(current.expiresAt) <= Date.now() ||
-              (createAttempt && (!attempt || !createAttemptMatchesLease(attempt, current)))
-            ) {
-              throw new CreateAttemptCanceledError();
+            const snapshotStartedAt = Date.now();
+            observe?.("lifecycle_wait", snapshotStartedAt - lifecycleQueuedAt);
+            try {
+              const current = await this.getLease(dispatched.id);
+              const attempt = createAttempt
+                ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
+                : undefined;
+              if (
+                !current ||
+                !sameLeaseReleaseIdentity(current, dispatched) ||
+                current.state !== "provisioning" ||
+                current.provisioningRequestStartedAt !== dispatched.provisioningRequestStartedAt ||
+                Date.parse(current.expiresAt) <= Date.now() ||
+                (createAttempt && (!attempt || !createAttemptMatchesLease(attempt, current)))
+              ) {
+                throw new CreateAttemptCanceledError();
+              }
+              return {
+                lease: { ...current, ...(target.region ? { region: target.region } : {}) },
+                context: providerAccessContext([], await this.providerAccessLeaseRecords()),
+              };
+            } finally {
+              observe?.("access_snapshot", Date.now() - snapshotStartedAt);
             }
-            return {
-              lease: { ...current, ...(target.region ? { region: target.region } : {}) },
-              context: providerAccessContext([], await this.providerAccessLeaseRecords()),
-            };
           });
           return operation(access.lease, access.context);
-        }),
+        });
+      },
     };
     const provisioned = await provider
       .createServerWithFallback(config, leaseID, slug, owner, provisioning)
       .catch(async (error: unknown) => {
+        if (error instanceof ProviderDispatchFenceError) {
+          if (createAttempt && !fixedCreate) return createCanceledResponse();
+          return json(
+            {
+              error: "lease_state_changed",
+              message: error.message,
+              ...(error.current ? { lease: publicLeaseRecord(error.current) } : {}),
+            },
+            { status: 409 },
+          );
+        }
         const cleanupClaim = validatedProviderProvisioningCleanupClaim(error, config.provider);
         await this.state.runExclusive(async () => {
           if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
@@ -4998,6 +4842,9 @@ export class FleetCoordinator {
         serverID: 0,
         serverName: "",
         host: "",
+        ...(config.hostID || config.awsMacHostID
+          ? { hostId: config.hostID || config.awsMacHostID }
+          : {}),
         providerKey: config.providerKey,
         sshUser: config.sshUser,
         sshPort: config.sshPort,
@@ -5083,6 +4930,23 @@ export class FleetCoordinator {
       const storedLeases = [
         ...(await transaction.list<LeaseRecord>({ prefix: "lease:" })).values(),
       ];
+      const hostID = config.hostID || config.awsMacHostID;
+      const scope: HostScope = {
+        provider: config.provider,
+        hostID: hostID || "",
+        region: providerRegionForConfig(config),
+      };
+      const hostReservations = hostID ? await readHostReservations(transaction, scope) : [];
+      const hostConflict = pinnedHostConflict(
+        config,
+        hostReservations
+          .filter((reservation) => !reservation.staleReason && reservation.lease)
+          .map((reservation) => reservation.lease!),
+      );
+      if (hostConflict) return hostConflict;
+      const clearedHostReservations = hostReservations.filter(
+        (reservation) => reservation.staleReason,
+      );
       const providerAccess = [
         ...(await transaction.list<LeaseRecord>({ prefix: providerAccessPrefix() })).values(),
       ];
@@ -5105,6 +4969,7 @@ export class FleetCoordinator {
       for (const lease of merged.values()) addLeaseToCostLimitUsage(usage, lease, now);
       const limit = enforceCostLimitUsage(usage, record, costLimits(this.env));
       if (limit) return json({ error: "cost_limit_exceeded", message: limit }, { status: 429 });
+      await clearHostReservations(transaction, clearedHostReservations);
       if (currentAttempt && attempt)
         await transaction.put(createAttemptKey(leaseID), {
           ...currentAttempt,
@@ -5116,9 +4981,11 @@ export class FleetCoordinator {
       await transaction.put(provisioningPlanKey(operationID), prepared.plan);
       await transaction.put(provisioningMaterialKey(operationID), sealed);
       await putProvisioningOperation(transaction, operation);
-      return { lease: record, replay: false };
+      return { lease: record, replay: false, clearedHostReservations, hostScope: scope };
     });
     if (admission instanceof Response) return admission;
+    if (admission.hostScope && admission.clearedHostReservations)
+      logClearedHostReservations(admission.hostScope, admission.clearedHostReservations);
     if (admission.replay) {
       // A concurrent release may commit before admission's acknowledgement returns.
       // Replay must observe the current attempt rather than its earlier lease snapshot.
@@ -5783,7 +5650,7 @@ export class FleetCoordinator {
       );
       return;
     }
-    if (lease?.providerKeyCleanupPending) {
+    if (lease && providerKeyCleanupBlocksProvisioningRecovery(lease)) {
       return;
     }
     if (!lease && workspaceProvisionDeadline(workspace) <= Date.now()) {
@@ -7184,7 +7051,7 @@ export class FleetCoordinator {
         currentWorkspace.leaseID !== workspace.leaseID ||
         currentWorkspace.releaseRequestedAt ||
         !currentLease ||
-        currentLease.providerKeyCleanupPending ||
+        providerKeyCleanupBlocksProvisioningRecovery(currentLease) ||
         !workspaceOwnsLease(currentWorkspace, currentLease) ||
         !(
           (currentLease.state === "provisioning" && !currentLease.provisioningRequestStartedAt) ||
@@ -7344,7 +7211,61 @@ export class FleetCoordinator {
       lease.createAttemptID,
       lease.createAttemptGeneration,
       lease.lifecycle,
+      lease.slug,
+      lease.providerOwner,
+      lease.providerKey,
+      lease.providerKeyCleanupOwned,
+      lease.hostId,
+      lease.hostID,
     ]);
+  }
+
+  private async commitRecoveredLeaseScope<T>(
+    request: Request,
+    leaseID: string,
+    expectedBinding: string,
+    observation: { providerScope: string; resourceAbsent: true },
+    persistAudit: (transaction: CoordinatorStorageView) => Promise<T>,
+  ): Promise<T> {
+    const runtime = this.state.provisioning;
+    if (!runtime)
+      throw new ProviderResourceUnresolvedError("Atomic cleanup recovery is unavailable");
+    return this.state.runExclusive(() =>
+      runtime.commitAndWake(async (transaction) => {
+        const current = await transaction.get<LeaseRecord>(leaseKey(leaseID));
+        if (
+          !isAdminRequest(request) ||
+          requestAuthType(request) === "device" ||
+          !current ||
+          this.cleanupRecoveryLeaseBinding(current) !== expectedBinding ||
+          !this.cleanupRecoveryLeaseEligible(current) ||
+          current.providerScope != null ||
+          current.provisioningRequestStartedAt ||
+          current.cleanupCompletedAt ||
+          !current.cleanupError ||
+          current.state !== "released" ||
+          current.releaseDeletesServer !== true ||
+          (await provisioningOwnsLease(transaction, leaseID))
+        ) {
+          throw new ProviderResourceUnresolvedError(
+            "Cleanup recovery lease or administrator authority changed before commit",
+          );
+        }
+        const audit = await persistAudit(transaction);
+        const now = Date.now();
+        await transaction.put(leaseKey(leaseID), {
+          ...current,
+          providerScope: observation.providerScope,
+          provisioningResourceMayExist: false,
+          cleanupRetryAt: new Date(now).toISOString(),
+          updatedAt: new Date(now).toISOString(),
+        });
+        // This records the next cleanup wake, not provider cleanup completion.
+        const previousWake = await transaction.get<number | null>(legacyAlarmKey);
+        await setLegacyWake(transaction, Math.min(previousWake ?? now, now));
+        return audit;
+      }),
+    );
   }
 
   private async leaseRoute(request: Request, leaseID: string, action?: string): Promise<Response> {
@@ -7384,10 +7305,29 @@ export class FleetCoordinator {
           : undefined;
       if (!provider?.recoverCleanup)
         return json({ error: "cleanup_recovery_unsupported" }, { status: 501 });
-      if (!this.cleanupRecoveryLeaseEligible(lease)) {
+      if (provider.supportsCleanupScopeRecovery && !admin) {
+        return json(
+          { error: "forbidden", message: "administrator cleanup recovery required" },
+          { status: 403 },
+        );
+      }
+      if (
+        !this.cleanupRecoveryLeaseEligible(lease) ||
+        (await provisioningOwnsLease(this.state.storage, lease.id))
+      ) {
         return json({ error: "cleanup_recovery_requires_expired_blocked_lease" }, { status: 409 });
       }
       const expectedBinding = this.cleanupRecoveryLeaseBinding(lease);
+      const commitScopeRecovery: ProviderScopeRecoveryCommit = (observation, persistAudit) =>
+        this.commitRecoveredLeaseScope(
+          request,
+          lease.id,
+          expectedBinding,
+          observation,
+          persistAudit,
+        );
+      const scopeRecoveryArgs: [] | [ProviderScopeRecoveryCommit] =
+        provider.supportsCleanupScopeRecovery ? [commitScopeRecovery] : [];
       try {
         const recovery = await provider.recoverCleanup(
           lease,
@@ -7407,6 +7347,7 @@ export class FleetCoordinator {
               }
               return await commit();
             }),
+          ...scopeRecoveryArgs,
         );
         return json({ leaseID: lease.id, provider: providerID, recovery });
       } catch (error) {
@@ -7439,6 +7380,12 @@ export class FleetCoordinator {
           : undefined;
       if (!provider?.inspectCleanup) {
         return json({ error: "cleanup_inspection_unsupported" }, { status: 501 });
+      }
+      if (provider.supportsCleanupScopeRecovery && !admin) {
+        return json(
+          { error: "forbidden", message: "administrator cleanup inspection required" },
+          { status: 403 },
+        );
       }
       return json({
         leaseID: lease.id,
@@ -7877,10 +7824,14 @@ export class FleetCoordinator {
         }
         const merged = applyLeaseRecordChanges(latest, snapshot.lease, refreshed);
         await this.putLease(merged);
-        if (managedProvider === "aws") {
+        if (managedProvider === "aws" && leaseHasPublishedAWSAccess(merged)) {
           await this.markAWSIngressReconcilePending(merged);
+          // This write makes ingress reconciliation due. Preserve its scheduling floor
+          // without scanning unrelated fleet state while holding the ingress fence.
+          await this.armAlarmNoLaterThan(Date.now() + awsIngressReconcileMinDelayMs);
+        } else {
+          await this.scheduleAlarm();
         }
-        await this.scheduleAlarm();
         return merged;
       });
     };
@@ -10107,7 +10058,7 @@ export class FleetCoordinator {
     });
   }
 
-  private async reconcileRuntimeAdapterDeletes(): Promise<void> {
+  private async reconcileRuntimeAdapterDeletes(leaseIDs: ReadonlySet<string>): Promise<void> {
     const pending = await this.state.runExclusive(async () => {
       const now = Date.now();
       const due: LeaseRecord[] = [];
@@ -10129,7 +10080,7 @@ export class FleetCoordinator {
           }
         }
         return true;
-      });
+      }, leaseIDs);
       return due;
     });
     await Promise.all(pending.map((lease) => this.reconcileRuntimeAdapterDelete(lease)));
@@ -13774,10 +13725,12 @@ export class FleetCoordinator {
       this.visitStorageRecords<ReadyPoolEntry>(typedReadyPoolPrefix, async (entry) => {
         typedEntries.push(entry);
       }),
-      this.visitLeaseRecords(async (lease) => {
-        leases.set(lease.id, lease);
-      }),
     ]);
+    for (const leaseID of new Set([...entries, ...typedEntries].map((entry) => entry.leaseID))) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- bound retained-pool hydration to one referenced lease at a time.
+      const lease = await this.getLease(leaseID, { noCache: true });
+      if (lease) leases.set(leaseID, lease);
+    }
     await this.maintainReadyPoolEntries(entries, leases, nowMs);
     await this.maintainReadyPoolEntries(typedEntries, leases, nowMs, true);
     await this.visitStorageRecords<ReadyPoolFillClaim>(readyPoolFillClaimPrefix, async (claim) => {
@@ -14166,7 +14119,11 @@ export class FleetCoordinator {
     return json({ tailscale: await tailscalePreflight(this.env) });
   }
 
-  private async adminHostsRoute(request: Request, hostID?: string): Promise<Response> {
+  private async adminHostsRoute(
+    request: Request,
+    hostID?: string,
+    action?: string,
+  ): Promise<Response> {
     const url = new URL(request.url);
     const provider = (url.searchParams.get("provider") ?? "aws").trim().toLowerCase();
     const target = (url.searchParams.get("target") ?? "macos").trim().toLowerCase();
@@ -14179,10 +14136,14 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
-    return await this.adminMacHostsRoute(request, hostID);
+    return await this.adminMacHostsRoute(request, hostID, action);
   }
 
-  private async adminMacHostsRoute(request: Request, hostID?: string): Promise<Response> {
+  private async adminMacHostsRoute(
+    request: Request,
+    hostID?: string,
+    action?: string,
+  ): Promise<Response> {
     const method = request.method.toUpperCase();
     const url = new URL(request.url);
     const queryRegion = url.searchParams.get("region") ?? this.env.CRABBOX_AWS_REGION ?? "";
@@ -14193,6 +14154,41 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
+    if (action === "reservation" && hostID) {
+      if (!/^h-[a-f0-9]+$/.test(hostID)) return json({ error: "invalid_host_id" }, { status: 400 });
+      if (method !== "GET" && method !== "POST") return notFound();
+      const scope: HostScope = { provider: "aws", hostID, region };
+      const force = url.searchParams.get("force") === "true";
+      return this.state.runExclusive(async () => {
+        const result = await this.state.storage.transaction(async (storage) => {
+          const reservations = await readHostReservations(storage, scope);
+          const blocked = reservations.some((reservation) => !reservation.staleReason);
+          if (method === "POST" && blocked && !force) {
+            return json(
+              {
+                error: "host_in_use",
+                message:
+                  "host reservation references a live or potentially retained instance; use --force only after inspecting it",
+                ...scope,
+                reservations: reservations.map(publicHostReservation),
+              },
+              { status: 409 },
+            );
+          }
+          if (method === "POST") await clearHostReservations(storage, reservations);
+          return reservations;
+        });
+        if (result instanceof Response) return result;
+        if (method === "POST")
+          logClearedHostReservations(scope, result, "admin_reservation_cleared");
+        return json({
+          ...scope,
+          reservations: result.map(publicHostReservation),
+          ...(method === "POST" ? { cleared: result.length } : {}),
+        });
+      });
+    }
+    if (action) return notFound();
     const client = new EC2SpotClient(this.env, region);
     if (method === "GET" && hostID === "offerings") {
       const serverType = (url.searchParams.get("type") ?? "mac2.metal").trim();
@@ -14230,7 +14226,15 @@ export class FleetCoordinator {
       const serverType = (url.searchParams.get("type") ?? "").trim();
       const state = (url.searchParams.get("state") ?? "").trim();
       const hosts = await client.listMacHosts(serverType, state);
-      return json({ hosts });
+      const allocatedHosts = await Promise.all(
+        hosts.map(async (host) => {
+          const allocation = await this.state.storage.get<AWSMacHostAllocation>(
+            awsMacHostAllocationKey(region, host.id),
+          );
+          return { ...host, ...(allocation ? { org: orgLabelForDisplay(allocation.org) } : {}) };
+        }),
+      );
+      return json({ hosts: allocatedHosts });
     }
     if (method === "POST" && hostID === "dry-run") {
       const input = await readJson<{
@@ -14323,9 +14327,16 @@ export class FleetCoordinator {
               offering.availabilityZone,
               `${clientToken}-${offering.availabilityZone.replaceAll("-", "")}`,
             );
-            return json(
-              { hosts, availabilityZone: offering.availabilityZone, offerings },
-              { status: 201 },
+            // Return the persistence promise without catching failures as AWS capacity failures.
+            return recordAWSMacHostAllocations(
+              this.state.storage,
+              hosts,
+              requestOrg(request, this.env),
+            ).then(() =>
+              json(
+                { hosts, availabilityZone: offering.availabilityZone, offerings },
+                { status: 201 },
+              ),
             );
           } catch (error) {
             const message = coordinatorErrorMessage(this.env, error);
@@ -14342,6 +14353,7 @@ export class FleetCoordinator {
         );
       }
       const hosts = await client.allocateMacHost(serverType, availabilityZone, clientToken);
+      await recordAWSMacHostAllocations(this.state.storage, hosts, requestOrg(request, this.env));
       return json({ hosts }, { status: 201 });
     }
     if (method === "DELETE" && hostID) {
@@ -14629,11 +14641,19 @@ export class FleetCoordinator {
   private filterLeasesWithoutLimit(leases: LeaseRecord[], request: Request): LeaseRecord[] {
     const url = new URL(request.url);
     const state = url.searchParams.get("state") ?? "";
+    const current = url.searchParams.get("view") === "current";
     const provider = url.searchParams.get("provider") ?? "";
     const owner = url.searchParams.get("owner") ?? "";
     const org = orgFilterKey(url);
     if (org === null) return [];
     return leases
+      .filter(
+        (lease) =>
+          !current ||
+          leaseIsLive(lease) ||
+          ((lease.keep || lease.releaseDeletesServer === false) &&
+            !leaseProviderCleanupConfirmed(lease)),
+      )
       .filter((lease) => !state || lease.state === state)
       .filter((lease) => !provider || lease.provider === provider)
       .filter((lease) => !owner || lease.owner === owner)
@@ -14641,7 +14661,10 @@ export class FleetCoordinator {
       .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
-  private async createRun(request: Request): Promise<Response> {
+  private async createRun(request: Request, requestedRunID?: string): Promise<Response> {
+    if (requestedRunID !== undefined && !/^run_[a-f0-9]{32}$/.test(requestedRunID)) {
+      return json({ error: "invalid_run_id" }, { status: 400 });
+    }
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
     const input = await readJson<RunCreateRequest>(request);
@@ -14649,48 +14672,89 @@ export class FleetCoordinator {
     if (leaseID && !validLeaseID(leaseID)) {
       return json({ error: "invalid_lease_id" }, { status: 400 });
     }
-    const lease = leaseID ? await this.getLease(leaseID) : undefined;
-    if (lease && !this.leaseVisibleToRequest(lease, request, false)) {
-      return json({ error: "not_found" }, { status: 404 });
-    }
-    const now = new Date().toISOString();
-    const run: RunRecord = {
-      id: newRunID(),
-      leaseID,
-      leaseIDs: [],
-      owner,
-      org,
-      leaseOwners: [],
-      provider: lease?.provider ?? input.provider ?? "hetzner",
-      target: lease?.target ?? input.target ?? "linux",
-      class: lease?.class ?? input.class ?? "",
-      serverType: lease?.serverType ?? input.serverType ?? "",
-      command: Array.isArray(input.command) ? input.command.map(String) : [],
-      state: "running",
-      phase: "starting",
-      logBytes: 0,
-      logTruncated: false,
-      startedAt: now,
-      lastEventAt: now,
-      eventCount: 0,
-    };
-    if (lease) {
-      this.setRunLeaseAttribution(run, lease);
-    }
-    const windowsMode = lease?.windowsMode ?? input.windowsMode;
-    if (windowsMode) {
-      run.windowsMode = windowsMode;
-    }
-    if (lease?.slug) {
-      run.slug = lease.slug;
-    }
+    const command = Array.isArray(input.command) ? input.command.map(String) : [];
     const label = sanitizeRunLabel(input.label);
-    if (label) {
-      run.label = label;
+    // Bind the original request, not mutable lease attribution or provider-resolved fields.
+    const createRequestSHA256 = requestedRunID
+      ? await sha256Hex(
+          JSON.stringify([
+            "run-create-v1",
+            leaseID,
+            input.provider ?? "hetzner",
+            input.target ?? "linux",
+            input.windowsMode ?? "",
+            input.class ?? "",
+            input.serverType ?? "",
+            command,
+            label ?? "",
+          ]),
+        )
+      : undefined;
+    const id = requestedRunID ?? newRunID();
+    const now = new Date().toISOString();
+    const committed = await this.state.storage.transaction(async (storage) => {
+      const existing = await storage.get<RunRecord>(runKey(id));
+      if (existing) {
+        if (existing.owner !== owner || existing.org !== org) return { kind: "missing" as const };
+        if (!createRequestSHA256 || existing.createRequestSHA256 !== createRequestSHA256) {
+          return { kind: "conflict" as const };
+        }
+        return { kind: "replay" as const, run: existing };
+      }
+      const lease = leaseID ? await storage.get<LeaseRecord>(leaseKey(leaseID)) : undefined;
+      if (lease && !this.leaseVisibleToRequest(lease, request, false)) {
+        return { kind: "missing" as const };
+      }
+      const run: RunRecord = {
+        id,
+        leaseID,
+        leaseIDs: [],
+        owner,
+        org,
+        leaseOwners: [],
+        provider: lease?.provider ?? input.provider ?? "hetzner",
+        target: lease?.target ?? input.target ?? "linux",
+        class: lease?.class ?? input.class ?? "",
+        serverType: lease?.serverType ?? input.serverType ?? "",
+        command,
+        state: "running",
+        phase: "starting",
+        logBytes: 0,
+        logTruncated: false,
+        startedAt: now,
+        lastEventAt: now,
+        eventCount: 1,
+      };
+      if (lease) {
+        this.setRunLeaseAttribution(run, lease);
+      }
+      const windowsMode = lease?.windowsMode ?? input.windowsMode;
+      if (windowsMode) {
+        run.windowsMode = windowsMode;
+      }
+      if (lease?.slug) {
+        run.slug = lease.slug;
+      }
+      if (label) {
+        run.label = label;
+      }
+      if (createRequestSHA256) run.createRequestSHA256 = createRequestSHA256;
+      const event = boundedRunEvent(id, 1, now, { type: "run.started", phase: "starting" });
+      await storage.put(runKey(id), run);
+      await storage.put(runEventKey(id, 1), event);
+      return { kind: "created" as const, run, event };
+    });
+    if (committed.kind === "missing") return notFound();
+    if (committed.kind === "conflict") {
+      return json({ error: "run_id_conflict" }, { status: 409 });
     }
-    await this.putRun(run);
-    await this.appendRunEventRecord(run, { type: "run.started", phase: "starting" });
-    return json({ run: publicRunRecord(run) }, { status: 201 });
+    if (committed.kind === "created") await this.broadcastRunEvent(committed.run, committed.event);
+    return json(
+      { run: publicRunRecord(committed.run) },
+      {
+        status: committed.kind === "created" ? 201 : 200,
+      },
+    );
   }
 
   private async createArtifactUploads(request: Request): Promise<Response> {
@@ -14722,6 +14786,9 @@ export class FleetCoordinator {
 
   private async runRoute(request: Request, runID: string, action?: string): Promise<Response> {
     const method = request.method.toUpperCase();
+    if (method === "PUT" && action === undefined) {
+      return this.createRun(request, runID);
+    }
     if (method === "GET" && action === undefined) {
       const run = await this.getRun(runID);
       const lease = run ? await this.ensureRunLeaseAttribution(run) : undefined;
@@ -16466,7 +16533,9 @@ export class FleetCoordinator {
     return json({ error: "not_found" }, { status: 404 });
   }
 
-  private async reconcileInterruptedLeaseProvisioning(): Promise<void> {
+  private async reconcileInterruptedLeaseProvisioning(
+    leaseIDs: ReadonlySet<string>,
+  ): Promise<void> {
     const now = Date.now();
     const candidates = await this.state.runExclusive(async () => {
       const due: LeaseRecord[] = [];
@@ -16474,13 +16543,15 @@ export class FleetCoordinator {
         if (due.length >= interruptedProvisioningRecoveryBatchSize) {
           return;
         }
-        if (await provisioningOwnsLease(this.state.storage, lease.id)) return;
         const recoveryAt = interruptedProvisioningRecoveryAt(
           lease,
           this.coordinatorGeneration,
           now,
         );
-        if (recoveryAt === undefined) {
+        if (
+          recoveryAt === undefined ||
+          (await provisioningOwnsLease(this.state.storage, lease.id))
+        ) {
           return;
         }
         if (!Number.isFinite(Date.parse(lease.provisioningRecoveryObservedAt ?? ""))) {
@@ -16498,7 +16569,7 @@ export class FleetCoordinator {
         if (recoveryAt <= now) {
           due.push(structuredClone(lease));
         }
-      });
+      }, leaseIDs);
       return due;
     });
     await Promise.all(candidates.map((lease) => this.reconcileInterruptedLease(lease)));
@@ -16752,13 +16823,50 @@ export class FleetCoordinator {
     return Boolean(attempt && sameCreateAttempt(attempt, fence.attempt));
   }
 
-  private async expireLeases(): Promise<void> {
+  private async leaseBridgeOwners(): Promise<Set<string>> {
+    const owners = new Set([
+      ...this.egressSessions.keys(),
+      ...this.replacedEgressSessions.keys(),
+      ...[...this.pendingCodeRequests.values()].map((pending) => pending.leaseID),
+      ...[...this.pendingCodeFrames.values()].map((pending) => pending.leaseID),
+    ]);
+    for (const socket of this.bridgeSockets()) {
+      const attachment = this.bridgeAttachment(socket);
+      if (attachment && "leaseID" in attachment) owners.add(attachment.leaseID);
+    }
+    for (const prefix of [activeEgressSessionPrefix, replacedEgressSessionsPrefix]) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- bounded pages find persisted egress owners after a restart.
+      await this.visitStorageRecords<unknown>(prefix, (_value, key) => {
+        owners.add(key.slice(prefix.length));
+      });
+    }
+    return owners;
+  }
+
+  private async expireLeases(leaseIDs: ReadonlySet<string>): Promise<void> {
     const claims = await this.state.runExclusive(async () => {
       const now = Date.now();
       const claimed: Array<{ claim: string; lease: LeaseRecord }> = [];
+      const bridgeOwners = await this.leaseBridgeOwners();
       await this.visitLeaseRecords(async (stored) => {
+        const needsCleanup = leaseNeedsCleanup(stored, now);
+        const closeBridges = !leaseIsLive(stored) && bridgeOwners.has(stored.id);
+        // Most history has neither due provider work nor bridge state. Journal reads and
+        // deletes belong to actual candidates, including persisted egress left by a restart.
+        if (!needsCleanup && !closeBridges) return;
         if (await provisioningOwnsLease(this.state.storage, stored.id)) return;
-        if (!leaseIsLive(stored)) {
+        if (
+          stored.provider === "aws" &&
+          leaseUsesCanonicalProviderKey(stored) &&
+          stored.providerKeyCleanupPending &&
+          !stored.cloudID &&
+          stored.provisioningRequestStartedAt &&
+          !stored.provisioningRequestSettledAt &&
+          !interruptedProvisioningVersionMismatch(stored, this.coordinatorGeneration)
+        ) {
+          return;
+        }
+        if (closeBridges) {
           await this.closeLeaseBridges(stored.id, 1008, "lease ended");
         }
         const workspace = stored.workspaceID
@@ -16774,7 +16882,7 @@ export class FleetCoordinator {
         ) {
           return;
         }
-        if (!leaseNeedsCleanup(stored, now)) {
+        if (!needsCleanup) {
           return;
         }
         const lease = structuredClone(stored);
@@ -16833,64 +16941,57 @@ export class FleetCoordinator {
         lease.updatedAt = nowISO;
         await this.putLease(lease, { noCache: true });
         claimed.push({ claim: nowISO, lease });
-      });
+      }, leaseIDs);
       return claimed;
     });
     await Promise.all(
       claims.map(async ({ claim, lease }) => {
-        const cleanup = async () => {
-          let failure: { error: unknown; message: string } | undefined;
-          try {
-            await this.deleteLeaseServer(lease);
-          } catch (error) {
-            failure = { error, message: coordinatorErrorMessage(this.env, error) };
-          }
-          await this.state.runExclusive(async () => {
-            const current = await this.getLease(lease.id);
-            if (
-              !current ||
-              current.cleanupStartedAt !== claim ||
-              !sameLeaseCleanupClaim(current, lease) ||
-              (await provisioningOwnsLease(this.state.storage, lease.id))
-            ) {
-              return;
-            }
-            const nowDate = new Date();
-            const nowISO = nowDate.toISOString();
-            if (failure) {
-              recordLeaseCleanupFailure(current, failure.error, failure.message, nowISO);
-              await this.putLease(current);
-              console.warn(
-                `lease cleanup failed lease=${current.id} provider=${current.provider} cloud=${current.cloudID}: ${failure.message}`,
-              );
-              return;
-            }
-            current.state = leaseIsLive(current) ? "expired" : current.state;
-            current.updatedAt = nowISO;
-            current.endedAt = nowISO;
-            if (current.provisioningResourceMayExist) {
-              if (!current.failureError && current.cleanupError) {
-                current.failureError = current.cleanupError;
-              }
-            }
-            clearProvisioningRecoveryMetadata(current);
-            delete current.releaseDeletesServer;
-            clearLeaseCleanupMetadata(current);
-            delete current.providerKeyCleanupPending;
-            delete current.providerKeyCleanupID;
-            delete current.cleanupStartedAt;
-            delete current.cleanupClaimExpiresAt;
-            completeLeaseProviderCleanup(current, nowISO);
-            await this.putLease(current);
-            await this.clearWorkspaceReleaseError(current);
-            await this.markAWSIngressReconcilePending(current);
-          });
-        };
-        if (managedLeaseProvider(lease) === "aws" && !lease.network?.awsPrivate) {
-          await this.withAWSIngressOperationLock(cleanup);
-        } else {
-          await cleanup();
+        let failure: { error: unknown; message: string } | undefined;
+        try {
+          await this.deleteLeaseServer(lease);
+        } catch (error) {
+          failure = { error, message: coordinatorErrorMessage(this.env, error) };
         }
+        await this.withLeaseCleanupState(lease, async () => {
+          const current = await this.getLease(lease.id);
+          if (
+            !current ||
+            current.cleanupStartedAt !== claim ||
+            !sameLeaseCleanupClaim(current, lease) ||
+            (await provisioningOwnsLease(this.state.storage, lease.id))
+          ) {
+            return;
+          }
+          const nowDate = new Date();
+          const nowISO = nowDate.toISOString();
+          if (failure) {
+            recordLeaseCleanupFailure(current, failure.error, failure.message, nowISO);
+            await this.putLease(current);
+            console.warn(
+              `lease cleanup failed lease=${current.id} provider=${current.provider} cloud=${current.cloudID}: ${failure.message}`,
+            );
+            return;
+          }
+          current.state = leaseIsLive(current) ? "expired" : current.state;
+          current.updatedAt = nowISO;
+          current.endedAt = nowISO;
+          if (current.provisioningResourceMayExist) {
+            if (!current.failureError && current.cleanupError) {
+              current.failureError = current.cleanupError;
+            }
+          }
+          clearProvisioningRecoveryMetadata(current);
+          delete current.releaseDeletesServer;
+          clearLeaseCleanupMetadata(current);
+          delete current.providerKeyCleanupPending;
+          delete current.providerKeyCleanupID;
+          delete current.cleanupStartedAt;
+          delete current.cleanupClaimExpiresAt;
+          completeLeaseProviderCleanup(current, nowISO);
+          await this.putLease(current);
+          await this.clearWorkspaceReleaseError(current);
+          await this.markAWSIngressReconcilePending(current);
+        });
       }),
     );
   }
@@ -17059,7 +17160,9 @@ export class FleetCoordinator {
     const retryTimes = awsIngressReconcileTargets(record)
       .map((target) => Date.parse(target.retryAt))
       .filter((time) => Number.isFinite(time));
-    return retryTimes.length > 0 ? Math.max(Date.now() + 1000, Math.min(...retryTimes)) : undefined;
+    return retryTimes.length > 0
+      ? Math.max(Date.now() + awsIngressReconcileMinDelayMs, Math.min(...retryTimes))
+      : undefined;
   }
 
   private async markAWSIngressReconcilePending(anchor: LeaseRecord): Promise<void> {
@@ -17949,31 +18052,54 @@ export class FleetCoordinator {
     return [...leases.values()];
   }
 
-  private async retainedMacHostLease(
-    owner: string,
-    org: string,
-    hostID: string,
-    serverType?: string,
-  ): Promise<LeaseRecord | undefined> {
-    let retained: LeaseRecord | undefined;
-    await this.visitLeaseRecords((lease) => {
-      if (
-        lease.state !== "released" ||
-        lease.releaseDeletesServer !== false ||
-        !lease.cloudID ||
-        lease.owner !== owner ||
-        lease.org !== org ||
-        lease.provider !== "aws" ||
-        lease.target !== "macos" ||
-        leaseHostID(lease) !== hostID ||
-        (serverType !== undefined && lease.serverType !== serverType) ||
-        (retained !== undefined && retained.updatedAt >= lease.updatedAt)
-      ) {
-        return;
-      }
-      retained = lease;
-    });
-    return retained;
+  private async validateHostPin(
+    request: Request,
+    config: LeaseConfig,
+    authorizedHostID?: string,
+    repair = false,
+  ): Promise<Response | undefined> {
+    const hostID = config.hostID || config.awsMacHostID;
+    if (!hostID) return undefined;
+    const provider = this.provider(
+      config.provider,
+      providerRegionForConfig(config),
+      providerProjectForConfig(config),
+    );
+    if (
+      !isAdminRequest(request) &&
+      hostID !== authorizedHostID &&
+      !(await provider.authorizeHostPin?.(config, requestOrg(request, this.env)))
+    ) {
+      return json(
+        {
+          error: "admin_required",
+          message:
+            "provider host pinning requires admin-token auth or a coordinator allocation for your organization",
+        },
+        { status: 403 },
+      );
+    }
+    const scope: HostScope = {
+      provider: config.provider,
+      hostID,
+      region: providerRegionForConfig(config),
+    };
+    const inspect = async (storage: CoordinatorStorageView) => {
+      const reservations = await readHostReservations(storage, scope);
+      const stale = reservations.filter((reservation) => reservation.staleReason);
+      if (repair) await clearHostReservations(storage, stale);
+      return {
+        stale,
+        leases: reservations
+          .filter((reservation) => !reservation.staleReason && reservation.lease)
+          .map((reservation) => reservation.lease!),
+      };
+    };
+    const result = repair
+      ? await this.state.storage.transaction(inspect)
+      : await inspect(this.state.storage);
+    if (repair) logClearedHostReservations(scope, result.stale);
+    return pinnedHostConflict(config, result.leases);
   }
 
   private async leaseAdmissionState(
@@ -18031,8 +18157,15 @@ export class FleetCoordinator {
 
   private async visitLeaseRecords(
     visitor: (lease: LeaseRecord) => Promise<boolean | void> | boolean | void,
+    leaseIDs?: ReadonlySet<string>,
   ): Promise<void> {
-    await this.visitStorageRecords("lease:", visitor);
+    if (leaseIDs === undefined) return this.visitStorageRecords("lease:", visitor);
+    for (const id of [...leaseIDs].toSorted()) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- hydrate one current candidate at a time in storage-key order.
+      const lease = await this.getLease(id, { noCache: true });
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each owner completes before advancing to the next candidate.
+      if (lease && (await visitor(lease)) === false) return;
+    }
   }
 
   private async observeStoredProviderReconciliationCandidate(input: {
@@ -18397,8 +18530,9 @@ export class FleetCoordinator {
   }
 
   private filterLeasesForRequest(leases: LeaseRecord[], request: Request): LeaseRecord[] {
-    return this.filterLeases(leases, request).filter((lease) =>
-      this.leaseVisibleToRequest(lease, request, false),
+    return this.filterLeases(
+      leases.filter((lease) => this.leaseVisibleToRequest(lease, request, false)),
+      request,
     );
   }
 
@@ -19288,12 +19422,7 @@ export class FleetCoordinator {
       await this.state.runExclusive(() => this.scheduleAlarm());
       return current;
     }
-    const release = () => this.releaseResolvedLeaseOperation(current, options);
-    return managedLeaseProvider(current) === "aws" &&
-      !current.network?.awsPrivate &&
-      (current.state === "active" || Boolean(current.cloudID))
-      ? this.withAWSIngressOperationLock(release)
-      : release();
+    return this.releaseResolvedLeaseOperation(current, options);
   }
 
   private async markWorkspaceReleaseRequested(lease: LeaseRecord): Promise<void> {
@@ -19327,7 +19456,7 @@ export class FleetCoordinator {
       expectedProvider?: string;
     },
   ): Promise<LeaseRecord> {
-    const preparation = await this.state.runExclusive(async () => {
+    const prepare = async () => {
       const stored = await this.getLease(lease.id);
       if (
         stored &&
@@ -19427,7 +19556,10 @@ export class FleetCoordinator {
         claim: claimed.cleanupStartedAt,
         lease: structuredClone(claimed),
       };
-    });
+    };
+    const preparation = await (lease.state === "active" || lease.cloudID
+      ? this.withLeaseCleanupState(lease, prepare)
+      : this.state.runExclusive(prepare));
     if (preparation.blocked) {
       return preparation.lease;
     }
@@ -19442,6 +19574,15 @@ export class FleetCoordinator {
     });
   }
 
+  // Provider I/O stays outside ingress serialization; state changes still wait for
+  // active ingress writers and revalidate their cleanup claim before committing.
+  private withLeaseCleanupState<T>(lease: LeaseRecord, operation: () => Promise<T>): Promise<T> {
+    const commit = () => this.state.runExclusive(operation);
+    return managedLeaseProvider(lease) === "aws" && !lease.network?.awsPrivate
+      ? this.withAWSIngressOperationLock(commit)
+      : commit();
+  }
+
   private async finishLeaseCleanupClaim(preparation: {
     lease: LeaseRecord;
     claim: string;
@@ -19452,7 +19593,7 @@ export class FleetCoordinator {
     try {
       await this.deleteLeaseServer(preparation.lease);
     } catch (error) {
-      await this.state.runExclusive(async () => {
+      await this.withLeaseCleanupState(preparation.lease, async () => {
         const current = await this.getLease(preparation.lease.id);
         if (
           !current ||
@@ -19474,7 +19615,7 @@ export class FleetCoordinator {
       });
       throw error;
     }
-    return await this.state.runExclusive(async () => {
+    return await this.withLeaseCleanupState(preparation.lease, async () => {
       const current = await this.getLease(preparation.lease.id);
       if (
         !current ||
@@ -19546,6 +19687,12 @@ const createAttemptCanceledMessage = "create attempt was canceled before complet
 class CreateAttemptCanceledError extends Error {
   constructor() {
     super(createAttemptCanceledMessage);
+  }
+}
+
+class ProviderDispatchFenceError extends Error {
+  constructor(readonly current: LeaseRecord | undefined) {
+    super("lease changed state before provider mutation");
   }
 }
 
@@ -21076,11 +21223,11 @@ function codeViewerSessionRevocationKey(portalSessionHash: string): string {
 }
 
 function activeEgressSessionKey(leaseID: string): string {
-  return `active-egress-session:${leaseID}`;
+  return `${activeEgressSessionPrefix}${leaseID}`;
 }
 
 function replacedEgressSessionsKey(leaseID: string): string {
-  return `replaced-egress-sessions:${leaseID}`;
+  return `${replacedEgressSessionsPrefix}${leaseID}`;
 }
 
 function runtimeAdapterTicketPrefix(): string {
@@ -21554,8 +21701,7 @@ function createAttemptMatchesLease(attempt: CreateAttemptRecord, lease: LeaseRec
         attempt.fixedCreate.hash === lease.fixedCreateIntentHash &&
         attempt.fixedCreate.provider === lease.provider)) &&
     createAttemptMatchesCheckpoint(attempt, lease.checkpointID, attempt.checkpointUseClaimHash) &&
-    (attempt.requestedLeaseID === lease.id ||
-      (lease.provider === "aws" && lease.target === "macos")) &&
+    attempt.requestedLeaseID === lease.id &&
     !lease.workspaceID &&
     !isRegisteredLease(lease)
   );
@@ -22024,7 +22170,7 @@ function workspaceProvisioningNeedsRecovery(
   lease: LeaseRecord,
   now = Date.now(),
 ): boolean {
-  if (lease.providerKeyCleanupPending) {
+  if (providerKeyCleanupBlocksProvisioningRecovery(lease)) {
     return false;
   }
   if (lease.cloudID) {
@@ -22056,7 +22202,7 @@ function workspaceNextReconcileAt(
   if (lease?.state === "released" && lease.releaseDeletesServer === false) {
     return undefined;
   }
-  if (lease?.providerKeyCleanupPending) {
+  if (lease && providerKeyCleanupBlocksProvisioningRecovery(lease)) {
     const claimDeadline = cleanupClaimDeadline(lease);
     if (lease.cleanupStartedAt && Number.isFinite(claimDeadline)) {
       return claimDeadline;
@@ -23547,6 +23693,13 @@ function leaseUsesCanonicalProviderKey(
     lease.providerKeyCleanupOwned === true &&
     validLeaseID(lease.id) &&
     lease.providerKey === providerKeyForLease(lease.id)
+  );
+}
+
+function providerKeyCleanupBlocksProvisioningRecovery(lease: LeaseRecord): boolean {
+  return Boolean(
+    lease.providerKeyCleanupPending &&
+    !(lease.provider === "aws" && leaseUsesCanonicalProviderKey(lease)),
   );
 }
 
@@ -25099,15 +25252,7 @@ function appendLeaseTelemetryHistory(
 }
 
 function boundedTelemetrySamples(samples: LeaseTelemetry[], max: number): LeaseTelemetry[] {
-  const byTime = new Map<string, LeaseTelemetry>();
-  for (const sample of samples) {
-    if (sample?.capturedAt) {
-      byTime.set(sample.capturedAt, sample);
-    }
-  }
-  return [...byTime.values()]
-    .toSorted((left, right) => left.capturedAt.localeCompare(right.capturedAt))
-    .slice(-max);
+  return orderedTelemetrySamples(samples).slice(-max);
 }
 
 const fixedLeaseCreateIntentVersion = 2;
@@ -25212,6 +25357,31 @@ function isActiveProviderAccessRecord(lease: LeaseRecord, now: number): boolean 
   return leaseIsLive(lease) && Date.parse(lease.expiresAt) > now;
 }
 
+function pinnedHostConflict(config: LeaseConfig, leases: LeaseRecord[]): Response | undefined {
+  const hostID = config.hostID || config.awsMacHostID;
+  if (!hostID) return undefined;
+  const occupied = leases.find(
+    (lease) =>
+      lease.provider === config.provider &&
+      leaseHostID(lease) === hostID &&
+      (!lease.region || lease.region === providerRegionForConfig(config)) &&
+      (leaseIsLive(lease) ||
+        (!leaseProviderCleanupConfirmed(lease) &&
+          (lease.keep ||
+            lease.releaseDeletesServer === false ||
+            Boolean(lease.cloudID) ||
+            lease.provisioningResourceMayExist === true))),
+  );
+  if (!occupied) return undefined;
+  return json(
+    {
+      error: "host_in_use",
+      message: `host ${hostID} is occupied by lease ${occupied.id} (slug ${occupied.slug || "-"}); inspect or explicitly stop that lease before creating another`,
+    },
+    { status: 409 },
+  );
+}
+
 function leaseIsLive(lease: LeaseRecord): boolean {
   return lease.state === "active" || lease.state === "provisioning";
 }
@@ -25259,7 +25429,7 @@ function legacyCleanupIdentityCaptureEligible(lease: LeaseRecord): boolean {
     Number.isFinite(cleanupClaimExpiresAt) &&
     cleanupClaimExpiresAt >= cleanupStartedAt &&
     deletionIntended &&
-    !lease.providerKeyCleanupPending &&
+    !providerKeyCleanupBlocksProvisioningRecovery(lease) &&
     lease.state !== "provisioning" &&
     lease.provisioningResourceMayExist === undefined &&
     lease.provisioningFailureRetryable === undefined &&
@@ -25469,12 +25639,16 @@ function mergeProvisioningFailureMetadata(
     config.provider === "hetzner" ? hetznerProvisioningResourceID(error) : undefined;
   const providerKeyCleanupID =
     error instanceof HetznerProvisioningError ? error.providerKeyCleanupID : undefined;
+  const awsPreInstanceCancellation =
+    config.provider === "aws" && error instanceof CreateAttemptCanceledError && !lease.cloudID;
   const resourceMayExist = Boolean(
     cleanupClaim ||
     awsOutcomeUncertain ||
     providerOutcomeUncertain ||
     hetznerResourceMayExist ||
-    (lease.provisioningResourceMayExist && !hetznerDefiniteKeyOnlyFailure(lease, error)),
+    (lease.provisioningResourceMayExist &&
+      !hetznerDefiniteKeyOnlyFailure(lease, error) &&
+      !awsPreInstanceCancellation),
   );
 
   lease.updatedAt = failedAt;
@@ -25532,9 +25706,24 @@ function mergeProvisioningFailureMetadata(
     cleanupClaim ||
     failedHetznerServerID !== undefined ||
     providerKeyCleanupID !== undefined ||
+    lease.providerKeyCleanupPending ||
     (lease.cloudID && lease.releaseDeletesServer === true)
   ) {
-    lease.cleanupRetryAt = new Date(Date.parse(failedAt) + leaseCleanupRetryDelayMs).toISOString();
+    const retryDelay =
+      config.provider === "aws" &&
+      lease.providerKeyCleanupPending &&
+      leaseUsesCanonicalProviderKey(lease)
+        ? 0
+        : leaseCleanupRetryDelayMs;
+    lease.cleanupRetryAt = new Date(Date.parse(failedAt) + retryDelay).toISOString();
+  }
+  if (awsPreInstanceCancellation && !lease.providerKeyCleanupPending) {
+    clearLeaseCleanupMetadata(lease);
+    delete lease.cleanupStartedAt;
+    delete lease.cleanupClaimExpiresAt;
+    delete lease.failureError;
+    completeLeaseProviderCleanup(lease, failedAt);
+    return;
   }
   if (lease.provisioningResourceMayExist || lease.provisioningFailureRetryable) {
     delete lease.failureError;
@@ -25645,7 +25834,8 @@ function sameProvisioningAttempt(
     current.provisioningRequestSettledAt === expected.provisioningRequestSettledAt &&
     current.provisioningCoordinatorVersion === expected.provisioningCoordinatorVersion &&
     current.provisioningRecoveryObservedAt === expected.provisioningRecoveryObservedAt &&
-    current.provisioningRecoveryMissingSince === expected.provisioningRecoveryMissingSince,
+    current.provisioningRecoveryMissingSince === expected.provisioningRecoveryMissingSince &&
+    current.region === expected.region,
   );
 }
 
@@ -25688,7 +25878,7 @@ function unboundProvisioningRecoveryEligible(
     lease.host === "" &&
     !lease.cleanupStartedAt &&
     !lease.cleanupClaimExpiresAt &&
-    !lease.providerKeyCleanupPending &&
+    !providerKeyCleanupBlocksProvisioningRecovery(lease) &&
     validCreateAttemptID(lease.createAttemptID) &&
     Boolean(lease.createAttemptGeneration?.trim()) &&
     attempt &&
@@ -26176,6 +26366,7 @@ function leaseHasPublishedAWSAccess(lease: LeaseRecord): boolean {
 
 function awsIngressReconcileTargetKey(lease: LeaseRecord): string {
   return [
+    lease.providerScope ?? "",
     lease.region ?? "",
     lease.network?.awsSecurityGroupID ?? "",
     lease.network?.awsSecurityGroupName ?? "",
@@ -26190,6 +26381,7 @@ function awsIngressAccessTargetKey(
   region: string,
   ports: string[],
   env: Env,
+  providerScope = lease.providerScope,
 ): string {
   const workspaceManaged = lease.providerKey.startsWith(workspaceProviderKeyPrefix);
   const securityGroupID =
@@ -26201,8 +26393,8 @@ function awsIngressAccessTargetKey(
     ? `sg:${securityGroupID}`
     : securityGroupName
       ? `managed:${subnetID}:${securityGroupName}`
-      : `auto:${subnetID}`;
-  return [region, group, ...ports.toSorted()].join("\u0000");
+      : `auto:${subnetID}:${awsManagedSecurityGroupName({ providerKey: lease.providerKey })}`;
+  return [providerScope ?? "", region, group, ...ports.toSorted()].join("\u0000");
 }
 
 function awsIngressGroupMetadataUnknown(lease: LeaseRecord, env: Env): boolean {
@@ -26213,8 +26405,16 @@ function awsIngressGroupMetadataUnknown(lease: LeaseRecord, env: Env): boolean {
   );
 }
 
-function awsIngressPortScopeKey(region: string, port: string): string {
-  return [region, port].join("\u0000");
+function awsIngressPortScopeKey(
+  providerScope: string | undefined,
+  region: string,
+  port: string,
+): string {
+  return [providerScope ?? "", region, port].join("\u0000");
+}
+
+function awsIngressOperationScopeKey(providerScope: string | undefined, region: string): string {
+  return [providerScope ?? "", region].join("\u0000");
 }
 
 function awsLeaseSSHPorts(lease: LeaseRecord): string[] {
@@ -26462,6 +26662,7 @@ interface CloudProvider {
   ): ProviderWorkspaceCapability | undefined;
   supportsSSHHostKeyInjection(config: ReturnType<typeof leaseConfig>): boolean;
   restrictedLeaseRequestFields?(input: LeaseRequest): string[];
+  authorizeHostPin?(config: LeaseConfig, org: string): Promise<boolean>;
   ownershipLabelValue?(value: string): string;
   recoveryIsAuthoritative?: true;
   recoverUnboundProvisioningResource?(lease: LeaseRecord): Promise<ProviderMachine | undefined>;
@@ -26515,12 +26716,15 @@ interface CloudProvider {
   deleteServer(id: string): Promise<void>;
   deleteOwnedServer?(lease: LeaseRecord): Promise<void>;
   inspectCleanup?(lease: LeaseRecord): Promise<unknown>;
+  // Scope repair requires admin authorization and its own lifecycle commit capability.
+  supportsCleanupScopeRecovery?: true;
   // Revalidate the lease after provider reads, before committing any recovery writes.
   recoverCleanup?(
     lease: LeaseRecord,
     expectedClaimFingerprint: string,
     actor: string,
     commitGuard: <T>(commit: () => Promise<T>) => Promise<T>,
+    commitScopeRecovery?: ProviderScopeRecoveryCommit,
   ): Promise<unknown>;
   supportsNativeImages(): boolean;
   nativeImagesUnsupportedMessage(): string;
@@ -26620,6 +26824,12 @@ interface ProviderWorkspaceCapability {
 type ProviderStateStorage = CoordinatorStorage;
 type ProviderStateStorageView = CoordinatorStorageView;
 
+// The lifecycle owner accepts a proved scope binding, never an arbitrary lease patch.
+type ProviderScopeRecoveryCommit = <T>(
+  observation: { providerScope: string; resourceAbsent: true },
+  persistAudit: (transaction: CoordinatorStorageView) => Promise<T>,
+) => Promise<T>;
+
 interface ProviderAccessContext {
   requestSourceCIDRs: string[];
   activeLeases: LeaseRecord[];
@@ -26648,10 +26858,13 @@ interface ProviderProvisioningContext {
   allowEmptySSHIngress?: boolean;
   publishAccessBeforeProvisioning?: boolean;
   onTargetAttempt?: (target: ProviderProvisioningTarget) => Promise<void>;
+  onProviderKeyCleanupPending?: (existingKey: boolean) => Promise<void>;
+  onProviderKeyCleanupComplete?: (target: ProviderProvisioningTarget) => Promise<void>;
   onResourceCreated?: (claim: ProviderProvisioningCleanupClaim) => Promise<boolean>;
   withLeaseAccess?: <T>(
     target: ProviderProvisioningTarget,
     operation: (lease: LeaseRecord, context: ProviderAccessContext) => Promise<T>,
+    observe?: ProviderAccessTimingObserver,
   ) => Promise<T>;
 }
 
@@ -28139,7 +28352,56 @@ function awsCheckpointResourceAbsent(message: string, resourceID: string): boole
   );
 }
 
+function awsProviderScopeAccount(providerScope: string | undefined): string | undefined {
+  if (providerScope === undefined) return undefined;
+  const match = /^aws:account:(\d{12})$/.exec(providerScope);
+  if (!match) {
+    throw new Error("malformed AWS provider scope: expected aws:account:<12-digit-account-id>");
+  }
+  return match[1]!;
+}
+
+function authenticatedAWSAccount(account: string): string {
+  if (!/^\d{12}$/.test(account)) {
+    throw new Error("authenticated AWS identity did not return a 12-digit account ID");
+  }
+  return account;
+}
+
+type AWSLeaseOperationSession = Parameters<Parameters<EC2SpotClient["withLeaseOperation"]>[0]>[0];
+
+interface AWSMacHostAllocation {
+  version: 1;
+  hostID: string;
+  region: string;
+  org: string;
+}
+
+function awsMacHostAllocationKey(region: string, hostID: string): string {
+  return `aws-mac-host-allocation:${region}:${hostID}`;
+}
+
+async function recordAWSMacHostAllocations(
+  storage: CoordinatorStorage,
+  hosts: AWSMacHost[],
+  org: string,
+): Promise<void> {
+  await Promise.all(
+    hosts.map((host) =>
+      storage.put(awsMacHostAllocationKey(host.region, host.id), {
+        version: 1,
+        hostID: host.id,
+        region: host.region,
+        org,
+      } satisfies AWSMacHostAllocation),
+    ),
+  );
+}
+
 export class AWSProvider implements CloudProvider {
+  readonly recoveryIsAuthoritative = true;
+  readonly supportsCleanupScopeRecovery = true;
+
   private clientValue?: EC2SpotClient;
   private readonly region: string;
 
@@ -28154,6 +28416,21 @@ export class AWSProvider implements CloudProvider {
   private get client(): EC2SpotClient {
     this.clientValue ??= new EC2SpotClient(this.env, this.region);
     return this.clientValue;
+  }
+
+  async authorizeHostPin(config: LeaseConfig, org: string): Promise<boolean> {
+    const hostID = config.hostID || config.awsMacHostID;
+    if (config.target !== "macos" || !hostID || org === MISSING_ORG_KEY || !isCurrentOrgKey(org))
+      return false;
+    const allocation = await this.storage.get<AWSMacHostAllocation>(
+      awsMacHostAllocationKey(this.region, hostID),
+    );
+    return (
+      allocation?.version === 1 &&
+      allocation.region === this.region &&
+      allocation.hostID === hostID &&
+      sameOrgIdentityKey(allocation.org, org)
+    );
   }
 
   readyPoolImageIdentity(lease: LeaseRecord): ReadyPoolImageIdentity | undefined {
@@ -28239,18 +28516,209 @@ export class AWSProvider implements CloudProvider {
     return this.client.findServer(id);
   }
 
-  async recoverServer(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
-    if (lease.network?.awsPrivate) {
-      if (lease.cloudID) {
-        const server = await this.findServer(lease.cloudID);
-        return server && providerMachineOwnedByLease(server, lease, "aws") ? server : undefined;
-      }
-      const server = await this.client.findWorkspaceServerByLease(lease.id);
-      return server && providerLabelsOwnedByLease(server.labels, lease, "aws") ? server : undefined;
+  private async recordedCleanupRecovery(
+    lease: LeaseRecord,
+  ): Promise<AWSLegacyCleanupAudit | undefined> {
+    const audit = await this.storage.get<AWSLegacyCleanupAudit>(
+      awsCleanupRecoveryAuditKey(lease.id),
+    );
+    if (audit && !(await awsCleanupAuditMatchesLease(audit, lease))) {
+      throw new ProviderResourceUnresolvedError(
+        "AWS cleanup recovery audit does not match the retained lease",
+      );
     }
-    if (!lease.cloudID) return undefined;
-    const server = await this.findServer(lease.cloudID);
-    return server && providerMachineOwnedByLease(server, lease, "aws") ? server : undefined;
+    return audit ? awsCleanupAuditView(audit) : undefined;
+  }
+
+  private async observeLegacyCleanupScope(lease: LeaseRecord) {
+    requireAWSLegacyCleanupLease(lease);
+    return this.withLeaseOperation(async (session) => {
+      if (session.region !== lease.region) {
+        throw new ProviderResourceUnresolvedError(
+          "AWS recovery Region does not match the retained lease",
+        );
+      }
+      const identity = await session.verifiedIdentity();
+      const evidence = await session.client.legacyAllocationEvidence(lease, identity.account);
+      if (await session.findServer(lease.cloudID)) {
+        throw new ProviderResourceUnresolvedError(
+          "AWS instance is still visible; use normal owned-resource cleanup instead of scope recovery",
+        );
+      }
+      return evidence;
+    });
+  }
+
+  async inspectCleanup(lease: LeaseRecord): Promise<unknown> {
+    const recoveryAudit = await this.recordedCleanupRecovery(lease);
+    if (recoveryAudit) return { recoveryAudit };
+    const claimFingerprint = await awsCleanupRecoveryFingerprint(lease);
+    const evidence = await this.observeLegacyCleanupScope(lease);
+    const current = await this.storage.get<LeaseRecord>(leaseKey(lease.id));
+    const claimUnchanged = Boolean(
+      current &&
+      current.providerScope == null &&
+      !current.cleanupStartedAt &&
+      !current.provisioningRequestStartedAt &&
+      (await awsCleanupRecoveryFingerprint(current)) === claimFingerprint,
+    );
+    return {
+      basis: "aws-cloudtrail-run-instances",
+      ...evidence,
+      resourceAbsent: true,
+      remainingCleanup: ["owned-key", "provider-access"],
+      claimUnchanged,
+      ...(claimUnchanged ? { claimFingerprint } : {}),
+    };
+  }
+
+  async recoverCleanup(
+    lease: LeaseRecord,
+    expectedClaimFingerprint: string,
+    actor: string,
+    commitGuard: <T>(commit: () => Promise<T>) => Promise<T>,
+    commitScopeRecovery?: ProviderScopeRecoveryCommit,
+  ): Promise<AWSLegacyCleanupAudit> {
+    const existing = await this.recordedCleanupRecovery(lease);
+    if (existing) {
+      if (existing.claimFingerprint !== expectedClaimFingerprint) {
+        throw new ProviderResourceUnresolvedError(
+          "AWS cleanup recovery was recorded for another binding",
+        );
+      }
+      return commitGuard(async () => existing);
+    }
+    if (
+      !commitScopeRecovery ||
+      !actor.trim() ||
+      actor.length > 256 ||
+      (await awsCleanupRecoveryFingerprint(lease)) !== expectedClaimFingerprint
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        "AWS recovery binding changed; inspect cleanup again",
+      );
+    }
+    const evidence = await this.observeLegacyCleanupScope(lease);
+    const audit: AWSLegacyCleanupAudit = {
+      leaseID: lease.id,
+      region: evidence.region,
+      providerScope: evidence.providerScope,
+      cloudID: lease.cloudID,
+      eventID: evidence.eventID,
+      eventTime: evidence.eventTime,
+      actor,
+      recoveredAt: new Date().toISOString(),
+      claimFingerprint: expectedClaimFingerprint,
+    };
+    return commitScopeRecovery(
+      { providerScope: evidence.providerScope, resourceAbsent: true },
+      async (transaction) => {
+        const key = awsCleanupRecoveryAuditKey(lease.id);
+        if (await transaction.get(key)) {
+          throw new ProviderResourceUnresolvedError("AWS recovery evidence changed before commit");
+        }
+        await transaction.put(key, audit);
+        return audit;
+      },
+    );
+  }
+
+  private async verifyLeaseOperationAuthority(
+    lease: LeaseRecord,
+    session: AWSLeaseOperationSession,
+  ): Promise<string | undefined> {
+    const leaseRegion = lease.region?.trim();
+    if (!leaseRegion || leaseRegion !== session.region) {
+      throw new ProviderResourceUnresolvedError(
+        `AWS lease region does not match the cleanup session: recorded ${leaseRegion || "missing"}, session ${session.region}`,
+      );
+    }
+    let recordedAccount: string | undefined;
+    try {
+      recordedAccount = awsProviderScopeAccount(lease.providerScope);
+    } catch (error) {
+      throw new ProviderResourceUnresolvedError(
+        error instanceof Error ? error.message : "malformed AWS provider scope",
+        { cause: error },
+      );
+    }
+    const authenticatedAccount = authenticatedAWSAccount(
+      (await session.verifiedIdentity()).account,
+    );
+    if (recordedAccount && recordedAccount !== authenticatedAccount) {
+      throw new ProviderResourceUnresolvedError(
+        `AWS lease account scope does not match the authenticated account: recorded ${recordedAccount}, authenticated ${authenticatedAccount}`,
+      );
+    }
+    return recordedAccount;
+  }
+
+  private async observeLeaseServer(
+    lease: LeaseRecord,
+    session: AWSLeaseOperationSession,
+    observe: () => Promise<ProviderMachine | undefined>,
+    ownership?: "machine" | "labels",
+  ): Promise<ProviderMachine | undefined> {
+    const recordedAccount = await this.verifyLeaseOperationAuthority(lease, session);
+    let server: ProviderMachine | undefined;
+    try {
+      server = await observe();
+    } catch (error) {
+      if (!(error instanceof AWSLeaseAuthorityError)) {
+        throw error;
+      }
+      throw new ProviderResourceUnresolvedError(error.message, { cause: error });
+    }
+    if (!server && !recordedAccount) {
+      throw new ProviderResourceUnresolvedError(
+        "AWS lease account scope was not persisted; refusing to confirm instance absence",
+      );
+    }
+    if (
+      server &&
+      ((ownership === "machine" && !providerMachineOwnedByLease(server, lease, "aws")) ||
+        (ownership === "labels" && !providerLabelsOwnedByLease(server.labels, lease, "aws")))
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        `AWS recovery resource ${server.cloudID} ownership does not match lease ${lease.id}`,
+      );
+    }
+    return server;
+  }
+
+  private async withLeaseOperation<T>(
+    operation: (session: AWSLeaseOperationSession) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await this.client.withLeaseOperation(operation);
+    } catch (error) {
+      if (!(error instanceof AWSLeaseAuthorityError)) {
+        throw error;
+      }
+      throw new ProviderResourceUnresolvedError(error.message, { cause: error });
+    }
+  }
+
+  async recoverServer(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
+    return await this.withLeaseOperation(async (session) => {
+      if (!lease.cloudID) {
+        return await this.observeLeaseServer(
+          lease,
+          session,
+          () =>
+            lease.network?.awsPrivate
+              ? session.findWorkspaceServerByLease(lease.id)
+              : session.findCrabboxServerByLease(lease.id),
+          "labels",
+        );
+      }
+      return await this.observeLeaseServer(
+        lease,
+        session,
+        () => session.findServer(lease.cloudID),
+        "machine",
+      );
+    });
   }
 
   async resumeRecoveredServer(
@@ -28385,12 +28853,17 @@ export class AWSProvider implements CloudProvider {
     lease: LeaseRecord,
     context: ProviderAccessContext,
   ): Promise<ProviderLeaseCreatePreparation> {
-    if (config.target === "macos") {
-      const identity = await this.client.verifiedIdentity();
-      if (!/^\d{12}$/.test(identity.account)) {
-        throw new Error("AWS Mac host ownership requires an authenticated 12-digit account ID");
-      }
-      lease = { ...lease, providerScope: `aws:account:${identity.account}` };
+    const recordedAccount = awsProviderScopeAccount(lease.providerScope);
+    const authenticatedAccount = authenticatedAWSAccount(
+      (await this.client.verifiedIdentity()).account,
+    );
+    if (recordedAccount && recordedAccount !== authenticatedAccount) {
+      throw new Error(
+        `AWS provider scope conflicts with authenticated account: recorded ${recordedAccount}, authenticated ${authenticatedAccount}`,
+      );
+    }
+    if (!recordedAccount) {
+      lease = { ...lease, providerScope: `aws:account:${authenticatedAccount}` };
     }
     if (config.awsPrivate) {
       const policy = awsPrivateWorkspaceConfig(this.env);
@@ -28451,6 +28924,11 @@ export class AWSProvider implements CloudProvider {
     ).slice(0, 12)}`;
     const nextLease: LeaseRecord = {
       ...nextLeaseWithSources,
+      ...(lease.providerKey === providerKeyForLease(lease.id)
+        ? {
+            providerKeyCleanupOwned: true,
+          }
+        : {}),
       network: {
         ...nextLeaseWithSources.network,
         ...(config.awsSSHCIDRsPinned ? { sshPinnedSourceCIDRs: config.awsSSHCIDRs } : {}),
@@ -28501,18 +28979,95 @@ export class AWSProvider implements CloudProvider {
 
   async reconcileLeaseAccess(lease: LeaseRecord, context: ProviderAccessContext): Promise<void> {
     if (lease.network?.awsPrivate) return;
+    let recordedAccount: string | undefined;
+    try {
+      recordedAccount = awsProviderScopeAccount(lease.providerScope);
+    } catch (error) {
+      throw new AWSLeaseAuthorityError(
+        error instanceof Error ? error.message : "malformed AWS provider scope",
+        { cause: error },
+      );
+    }
+    const ingressLeases = [lease, ...context.activeLeases.filter(leaseOwnsAWSSSHAccess)];
+    if (!ingressLeases.some((candidate) => awsLeaseSSHPorts(candidate).length > 0)) return;
+    const clients = new Map<string, EC2SpotClient>();
+    let authorityScope = lease.providerScope;
+    const verifyRegion = async (region: string): Promise<void> => {
+      const regionalClient =
+        region === this.region ? this.client : new EC2SpotClient(this.env, region);
+      const operationClient = await regionalClient.withLeaseOperation(async (session) => {
+        const authenticatedAccount = authenticatedAWSAccount(
+          (await session.verifiedIdentity()).account,
+        );
+        if (recordedAccount && authenticatedAccount !== recordedAccount) {
+          throw new AWSLeaseAuthorityError(
+            `AWS provider scope conflicts with authenticated account: recorded ${recordedAccount}, authenticated ${authenticatedAccount}`,
+          );
+        }
+        const verifiedScope = `aws:account:${authenticatedAccount}`;
+        if (authorityScope && authorityScope !== verifiedScope) {
+          throw new AWSLeaseAuthorityError(
+            `AWS ingress reconciliation account changed between Regions: recorded ${authorityScope}, authenticated ${verifiedScope}`,
+          );
+        }
+        authorityScope = verifiedScope;
+        return session.client;
+      });
+      clients.set(awsIngressOperationScopeKey(authorityScope, region), operationClient);
+    };
+
+    await verifyRegion(lease.region || this.region);
+    const accessLeases = context.activeLeases.filter(
+      (candidate) =>
+        leaseOwnsAWSSSHAccess(candidate) &&
+        (!candidate.providerScope || candidate.providerScope === authorityScope),
+    );
+    const regions = uniqueNonEmpty(
+      [lease, ...accessLeases].flatMap((candidate) =>
+        awsLeaseSSHPorts(candidate).length > 0 ? [candidate.region || this.region] : [],
+      ),
+    );
+    for (const region of regions) {
+      if (clients.has(awsIngressOperationScopeKey(authorityScope, region))) continue;
+      // oxlint-disable-next-line eslint/no-await-in-loop -- all account scopes are verified before ingress mutates.
+      await verifyRegion(region);
+    }
+    await this.reconcileLeaseAccessWithClients(lease, context, clients, authorityScope);
+  }
+
+  private async reconcileLeaseAccessWithClients(
+    lease: LeaseRecord,
+    context: ProviderAccessContext,
+    clients = new Map<string, EC2SpotClient>(),
+    authorityScope = lease.providerScope,
+  ): Promise<void> {
+    if (lease.network?.awsPrivate) return;
     const globalCIDRs = awsGlobalSSHSourceCIDRs(this.env);
-    const accessLeases = context.activeLeases.filter(leaseOwnsAWSSSHAccess);
-    const targets = new Map<string, { lease: LeaseRecord; port: string; region: string }>();
+    const accessLeases = context.activeLeases.filter(
+      (candidate) =>
+        leaseOwnsAWSSSHAccess(candidate) &&
+        (!candidate.providerScope || candidate.providerScope === authorityScope),
+    );
+    const targets = new Map<
+      string,
+      { lease: LeaseRecord; port: string; region: string; leases: LeaseRecord[] }
+    >();
     const targetScopes = new Map<string, { identities: Set<string>; hasUnknownGroup: boolean }>();
-    for (const candidate of [lease, ...accessLeases]) {
+    for (const [index, candidate] of [lease, ...accessLeases].entries()) {
       const region = candidate.region || this.region;
       for (const port of awsLeaseSSHPorts(candidate)) {
-        const key = awsIngressAccessTargetKey(candidate, region, [port], this.env);
-        if (!targets.has(key)) {
-          targets.set(key, { lease: candidate, port, region });
-        }
-        const scopeKey = awsIngressPortScopeKey(region, port);
+        const key = awsIngressAccessTargetKey(
+          candidate,
+          region,
+          [port],
+          this.env,
+          candidate.providerScope ?? authorityScope,
+        );
+        const target = targets.get(key) ?? { lease: candidate, port, region, leases: [] };
+        // The anchor identifies cleanup scope; only the access snapshot grants sources.
+        if (index > 0) target.leases.push(candidate);
+        targets.set(key, target);
+        const scopeKey = awsIngressPortScopeKey(authorityScope, region, port);
         const scope = targetScopes.get(scopeKey) ?? {
           identities: new Set<string>(),
           hasUnknownGroup: false,
@@ -28527,55 +29082,62 @@ export class AWSProvider implements CloudProvider {
         .filter(([, scope]) => scope.hasUnknownGroup && scope.identities.size > 1)
         .map(([scopeKey]) => scopeKey),
     );
-    for (const [targetKey, target] of targets) {
+    const refreshes = new Map<
+      string,
+      { config: AWSIngressConfig; reconcile: "additive" | "authoritative" }
+    >();
+    for (const target of targets.values()) {
       const targetLease = target.lease;
-      const targetLeases = accessLeases.filter((candidate) => {
-        const region = candidate.region || this.region;
-        return (
-          awsLeaseSSHPorts(candidate).includes(target.port) &&
-          awsIngressAccessTargetKey(candidate, region, [target.port], this.env) === targetKey
-        );
-      });
-      const cidrs = activeAWSSSHSourceCIDRs(targetLeases, globalCIDRs);
+      const cidrs = activeAWSSSHSourceCIDRs(target.leases, globalCIDRs);
       const reconcile =
-        ambiguousTargetScopes.has(awsIngressPortScopeKey(target.region, target.port)) ||
-        hasUnknownActiveAWSSSHSource(targetLeases)
+        ambiguousTargetScopes.has(
+          awsIngressPortScopeKey(authorityScope, target.region, target.port),
+        ) ||
+        !targetLease.providerScope ||
+        target.leases.some((candidate) => !candidate.providerScope) ||
+        hasUnknownActiveAWSSSHSource(target.leases)
           ? "additive"
           : "authoritative";
-      const config = {
-        ...leaseConfig({
-          provider: "aws",
-          target: targetLease.target,
-          windowsMode: targetLease.windowsMode ?? "normal",
-          class: targetLease.class,
-          serverType: targetLease.serverType,
-          awsSSHCIDRs: cidrs,
-          ...(targetLease.network?.awsSecurityGroupID
-            ? { awsSGID: targetLease.network.awsSecurityGroupID }
-            : {}),
-          ...(targetLease.network?.awsSubnetID
-            ? { awsSubnetID: targetLease.network.awsSubnetID }
-            : {}),
-          capacity: { market: targetLease.market === "spot" ? "spot" : "on-demand" },
-          providerKey: targetLease.providerKey,
-          sshUser: targetLease.sshUser,
-          sshPort: target.port,
-          sshFallbackPorts: [],
-          sshPublicKey: "ssh-ed25519 ingress-reconcile",
-          workRoot: targetLease.workRoot,
-          ...(targetLease.hostId || targetLease.hostID
-            ? { hostId: targetLease.hostId || targetLease.hostID }
-            : {}),
-        }),
+      // Sharing a read is safe only when every grouped port has the same policy.
+      // Unioning distinct CIDRs or modes would widen access or prune retained rules.
+      const key = JSON.stringify([
+        awsIngressAccessTargetKey(
+          targetLease,
+          target.region,
+          [],
+          this.env,
+          targetLease.providerScope ?? authorityScope,
+        ),
+        reconcile,
+        cidrs.toSorted(),
+      ]);
+      const existing = refreshes.get(key);
+      if (existing) {
+        existing.config.sshFallbackPorts.push(target.port);
+        continue;
+      }
+      const config: AWSIngressConfig = {
+        awsPrivate: false,
+        awsRegion: target.region,
+        awsSSHCIDRs: validatedCIDRs(cidrs, "awsSSHCIDRs"),
+        awsSGID: targetLease.network?.awsSecurityGroupID ?? "",
         awsSGName: targetLease.network?.awsSecurityGroupName ?? "",
+        awsSubnetID: targetLease.network?.awsSubnetID ?? "",
+        providerKey: targetLease.providerKey.trim(),
+        sshPort: target.port,
+        sshFallbackPorts: [],
       };
-      const { region } = target;
-      const client = region === this.region ? this.client : new EC2SpotClient(this.env, region);
-      // oxlint-disable-next-line eslint/no-await-in-loop -- each regional shared group is distinct.
-      await client.refreshSSHIngress(
-        { ...config, awsRegion: region },
-        { reconcile, allowEmpty: true },
-      );
+      refreshes.set(key, { config, reconcile });
+    }
+    for (const { config, reconcile } of refreshes.values()) {
+      const region = config.awsRegion;
+      const client = clients.get(awsIngressOperationScopeKey(authorityScope, region));
+      // A provisioning retry may only repair the region owned by its verified credential session.
+      if (clients.size > 0 && !client) continue;
+      const regionalClient =
+        client ?? (region === this.region ? this.client : new EC2SpotClient(this.env, region));
+      // oxlint-disable-next-line eslint/no-await-in-loop -- distinct policies can share a group, so keep their mutation passes ordered.
+      await regionalClient.refreshSSHIngress(config, { reconcile, allowEmpty: true });
     }
   }
 
@@ -28595,6 +29157,11 @@ export class AWSProvider implements CloudProvider {
   }> {
     const regions = awsRegionCandidates(config, this.env, this.region);
     const withLeaseAccess = provisioning?.withLeaseAccess;
+    const providerScope = provisioning?.providerScope;
+    const recordedAccount = awsProviderScopeAccount(providerScope);
+    if (!provisioning || !providerScope || !recordedAccount) {
+      throw new Error("AWS provisioning requires a persisted account scope");
+    }
     const totalStartedAt = Date.now();
     const history = new ProvisioningAttemptHistory();
     const ingressOptions =
@@ -28608,6 +29175,7 @@ export class AWSProvider implements CloudProvider {
           };
     for (const region of regions) {
       const client = region === this.region ? this.client : new EC2SpotClient(this.env, region);
+      let cleanupRegionalKey: (() => Promise<void>) | undefined;
       let allocated:
         | {
             serverType: string;
@@ -28616,187 +29184,239 @@ export class AWSProvider implements CloudProvider {
           }
         | undefined;
       try {
-        // Record only regions whose provisioning path is about to mutate provider state.
-        // oxlint-disable-next-line eslint/no-await-in-loop -- region fallback is intentionally ordered.
-        await provisioning?.onTargetAttempt?.({ region });
-        const requestStartedAt = Date.now();
-        const { server, serverType, market, attempts, imageID } =
-          // oxlint-disable-next-line eslint/no-await-in-loop -- region fallback must preserve ordered capacity preference.
-          await client.createServerWithFallback(
-            { ...config, awsRegion: region },
-            leaseID,
-            slug,
-            owner,
-            {
-              ...ingressOptions,
-              // Only ingress writes hold the fence; image, instance and address waits do not.
-              ...(!config.awsPrivate && withLeaseAccess
-                ? {
-                    withIngress: (apply: (cidrs: string[]) => Promise<string>) =>
-                      withLeaseAccess({ region }, async (lease, context) => {
-                        const cidrs = awsCreateSSHSourceCIDRs(
-                          { ...config, awsRegion: region },
-                          lease,
-                          context,
-                          this.env,
-                          this.region,
-                        );
-                        try {
-                          return await apply(cidrs);
-                        } catch (error) {
-                          if (
-                            !isAWSSecurityGroupRuleLimitError(
-                              coordinatorErrorMessage(this.env, error),
-                            )
-                          ) {
-                            throw error;
-                          }
-                          await this.reconcileLeaseAccess(lease, context);
-                          return apply(cidrs);
-                        }
-                      }),
-                  }
-                : {}),
-            },
+        // oxlint-disable-next-line eslint/no-await-in-loop -- each region gets a distinct authority snapshot.
+        const regionalResult = await client.withLeaseOperation(async (session) => {
+          const authenticatedAccount = authenticatedAWSAccount(
+            (await session.verifiedIdentity()).account,
           );
-        allocated = { serverType, market, attempts };
-        const requestMs = Date.now() - requestStartedAt;
-        const networkReadyStartedAt = Date.now();
-        let bootstrapMs = 0;
-        const claim: ProviderProvisioningCleanupClaim = {
-          provider: "aws",
-          cloudID: server.cloudID,
-          serverID: server.id,
-          region,
-          ...(provisioning?.providerScope ? { providerScope: provisioning.providerScope } : {}),
-        };
-        const onResourceCreated = provisioning?.onResourceCreated;
-        const publishResource = onResourceCreated
-          ? async (readinessError?: unknown) => {
-              try {
-                return await onResourceCreated(claim);
-              } catch (error) {
-                if (error instanceof ProviderResourceUnresolvedError) throw error;
-                const message = coordinatorErrorMessage(this.env, error);
-                const cause =
-                  readinessError === undefined
-                    ? error
-                    : new AggregateError([readinessError, error], message, {
-                        cause: readinessError,
-                      });
-                throw new ProviderProvisioningCleanupError(message, claim, cause);
-              }
-            }
-          : undefined;
-        const checkReadiness = publishResource
-          ? async () => {
-              if (!(await publishResource())) throw new CreateAttemptCanceledError();
-            }
-          : undefined;
-        let readyServer = server;
-        try {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- publish the allocation before readiness can perform provider I/O.
-          await checkReadiness?.();
-          // oxlint-disable-next-line eslint/no-await-in-loop -- wait on the region that created the instance.
-          readyServer = await client.waitForServerIP(
-            server.cloudID,
-            config.awsPrivate,
-            checkReadiness,
-          );
-          if (config.awsRequireSSM) {
-            // oxlint-disable-next-line eslint/no-await-in-loop -- private readiness belongs to the selected region.
-            await client.waitForSSMOnline(server.cloudID, checkReadiness);
-            const bootstrapStartedAt = Date.now();
-            // oxlint-disable-next-line eslint/no-await-in-loop -- bootstrap must finish before the lease becomes active.
-            const bootstrap = await client.runSSMBootstrap(
-              server.cloudID,
+          if (authenticatedAccount !== recordedAccount) {
+            throw new AWSLeaseAuthorityError(
+              `AWS provider scope conflicts with authenticated account: recorded ${recordedAccount}, authenticated ${authenticatedAccount}`,
+            );
+          }
+          // Persist the target only after its fixed credential snapshot proves the recorded account.
+          await provisioning?.onTargetAttempt?.({ region });
+          const operationClient = session.client;
+          let ownedKeyRequiresCleanup = false;
+          cleanupRegionalKey = async () => {
+            if (!ownedKeyRequiresCleanup) return;
+            await operationClient.deleteSSHKey(config.providerKey, leaseID);
+            await provisioning.onProviderKeyCleanupComplete?.({ region });
+            ownedKeyRequiresCleanup = false;
+          };
+          const requestStartedAt = Date.now();
+          const { server, serverType, market, attempts, imageID } =
+            await operationClient.createServerWithFallback(
+              { ...config, awsRegion: region },
               leaseID,
-              config.awsSSMBootstrapCommand,
-              config.awsSSMLogGroup,
+              slug,
+              owner,
+              {
+                ...ingressOptions,
+                onOwnedKeyCleanupRequired: async (existingKey: boolean) => {
+                  await provisioning.onProviderKeyCleanupPending?.(existingKey);
+                  ownedKeyRequiresCleanup = true;
+                },
+                // Only ingress writes hold the fence; image, instance and address waits do not.
+                ...(!config.awsPrivate && withLeaseAccess
+                  ? {
+                      withIngress: (
+                        apply: (cidrs: string[]) => Promise<string>,
+                        observe: ProviderAccessTimingObserver,
+                      ) =>
+                        withLeaseAccess(
+                          { region },
+                          async (lease, context) => {
+                            const cidrs = awsCreateSSHSourceCIDRs(
+                              { ...config, awsRegion: region },
+                              lease,
+                              context,
+                              this.env,
+                              this.region,
+                            );
+                            try {
+                              return await apply(cidrs);
+                            } catch (error) {
+                              if (
+                                !isAWSSecurityGroupRuleLimitError(
+                                  coordinatorErrorMessage(this.env, error),
+                                )
+                              ) {
+                                throw error;
+                              }
+                              await this.reconcileLeaseAccessWithClients(
+                                lease,
+                                context,
+                                new Map([
+                                  [
+                                    awsIngressOperationScopeKey(providerScope, region),
+                                    operationClient,
+                                  ],
+                                ]),
+                              );
+                              return apply(cidrs);
+                            }
+                          },
+                          observe,
+                        ),
+                    }
+                  : {}),
+              },
+            );
+          allocated = { serverType, market, attempts };
+          const requestMs = Date.now() - requestStartedAt;
+          const networkReadyStartedAt = Date.now();
+          let bootstrapMs = 0;
+          const claim: ProviderProvisioningCleanupClaim = {
+            provider: "aws",
+            cloudID: server.cloudID,
+            serverID: server.id,
+            region,
+            providerScope,
+          };
+          const onResourceCreated = provisioning.onResourceCreated;
+          const publishResource = onResourceCreated
+            ? async (readinessError?: unknown) => {
+                try {
+                  return await onResourceCreated(claim);
+                } catch (error) {
+                  if (error instanceof ProviderResourceUnresolvedError) throw error;
+                  const message = coordinatorErrorMessage(this.env, error);
+                  const cause =
+                    readinessError === undefined
+                      ? error
+                      : new AggregateError([readinessError, error], message, {
+                          cause: readinessError,
+                        });
+                  throw new ProviderProvisioningCleanupError(message, claim, cause);
+                }
+              }
+            : undefined;
+          const checkReadiness = publishResource
+            ? async () => {
+                if (!(await publishResource())) throw new CreateAttemptCanceledError();
+              }
+            : undefined;
+          let readyServer = server;
+          try {
+            await checkReadiness?.();
+            readyServer = await operationClient.waitForServerIP(
+              server.cloudID,
+              config.awsPrivate,
               checkReadiness,
             );
-            bootstrapMs = Date.now() - bootstrapStartedAt;
-            readyServer = {
-              ...readyServer,
-              host: "",
-              awsSSMCommandID: bootstrap.commandID,
-              awsSSMCommandStatus: bootstrap.status,
-            };
-          }
-        } catch (error) {
-          if (error instanceof ProviderResourceUnresolvedError) throw error;
-          // Publication failures already carry the allocation; retrying publication could lose that evidence.
-          if (providerProvisioningCleanupClaim(error)) throw error;
-          const waitMessage = error instanceof Error ? error.message : String(error);
-          if (publishResource) {
-            // The published owner decides current retain/delete intent; readiness never deletes behind it.
-            if (
-              !(error instanceof CreateAttemptCanceledError) &&
-              // oxlint-disable-next-line eslint/no-await-in-loop -- revalidate retain/delete intent after the failed provider read.
-              (await publishResource(error))
-            ) {
-              throw new ProviderProvisioningCleanupError(waitMessage, claim, error);
+            if (config.awsRequireSSM) {
+              await operationClient.waitForSSMOnline(server.cloudID, checkReadiness);
+              const bootstrapStartedAt = Date.now();
+              const bootstrap = await operationClient.runSSMBootstrap(
+                server.cloudID,
+                leaseID,
+                config.awsSSMBootstrapCommand,
+                config.awsSSMLogGroup,
+                checkReadiness,
+              );
+              bootstrapMs = Date.now() - bootstrapStartedAt;
+              readyServer = {
+                ...readyServer,
+                host: "",
+                awsSSMCommandID: bootstrap.commandID,
+                awsSSMCommandStatus: bootstrap.status,
+              };
             }
-            readyServer = server;
-          } else {
-            try {
-              if (config.awsPrivate) {
-                // oxlint-disable-next-line eslint/no-await-in-loop -- clean up the exact instance before any fallback.
-                await client.terminateServerAndWait(server.cloudID);
-              } else {
-                // oxlint-disable-next-line eslint/no-await-in-loop -- clean up the exact instance before any fallback.
-                await client.deleteServer(server.cloudID);
+          } catch (error) {
+            if (error instanceof ProviderResourceUnresolvedError) throw error;
+            // Publication failures already carry the allocation; retrying publication could lose that evidence.
+            if (providerProvisioningCleanupClaim(error)) throw error;
+            const waitMessage = error instanceof Error ? error.message : String(error);
+            if (publishResource) {
+              // The published owner decides current retain/delete intent; readiness never deletes behind it.
+              if (
+                !(error instanceof CreateAttemptCanceledError) &&
+                (await publishResource(error))
+              ) {
+                throw new ProviderProvisioningCleanupError(waitMessage, claim, error);
               }
-            } catch (deleteError) {
-              const deleteMessage =
-                deleteError instanceof Error ? deleteError.message : String(deleteError);
-              throw new ProviderProvisioningCleanupError(
-                `${waitMessage}; cleanup failed for AWS instance ${server.cloudID}: ${deleteMessage}`,
-                claim,
-                deleteError,
+              readyServer = server;
+            } else {
+              try {
+                if (config.awsPrivate) {
+                  await operationClient.terminateServerAndWait(server.cloudID);
+                } else {
+                  await operationClient.deleteServer(server.cloudID);
+                }
+              } catch (deleteError) {
+                const deleteMessage =
+                  deleteError instanceof Error ? deleteError.message : String(deleteError);
+                throw new ProviderProvisioningCleanupError(
+                  `${waitMessage}; cleanup failed for AWS instance ${server.cloudID}: ${deleteMessage}`,
+                  claim,
+                  deleteError,
+                );
+              }
+              throw new Error(
+                `${waitMessage}; crabbox_aws_stale_instance_cleaned; deleted AWS instance ${server.cloudID} after readiness failure`,
+                { cause: error },
               );
             }
-            throw new Error(
-              `${waitMessage}; crabbox_aws_stale_instance_cleaned; deleted AWS instance ${server.cloudID} after readiness failure`,
-              { cause: error },
-            );
           }
-        }
-        const result: {
-          server: ProviderMachine;
-          serverType: string;
-          market?: string;
-          attempts?: ProvisioningAttempt[];
-          image?: LeaseImageIdentity;
-          provisioningTiming?: LeaseProvisioningTiming;
-        } = {
-          server: { ...readyServer, region },
-          serverType,
-          image: awsLeaseImageIdentity(config, imageID, region),
-          provisioningTiming: withProvisioningPhases({
-            requestMs,
-            networkReadyMs: Date.now() - networkReadyStartedAt - bootstrapMs,
-            ...(bootstrapMs > 0 ? { bootstrapMs } : {}),
-            totalMs: Date.now() - totalStartedAt,
-          }),
-        };
-        if (market) {
-          result.market = market;
-        }
-        return { ...result, ...history.result(attempts) };
+          const result: {
+            server: ProviderMachine;
+            serverType: string;
+            market?: string;
+            attempts?: ProvisioningAttempt[];
+            image?: LeaseImageIdentity;
+            provisioningTiming?: LeaseProvisioningTiming;
+          } = {
+            server: { ...readyServer, region },
+            serverType,
+            image: awsLeaseImageIdentity(config, imageID, region),
+            provisioningTiming: withProvisioningPhases({
+              requestMs,
+              networkReadyMs: Date.now() - networkReadyStartedAt - bootstrapMs,
+              ...(bootstrapMs > 0 ? { bootstrapMs } : {}),
+              totalMs: Date.now() - totalStartedAt,
+            }),
+          };
+          if (market) {
+            result.market = market;
+          }
+          return { ...result, ...history.result(attempts) };
+        });
+        return regionalResult;
       } catch (error) {
-        // Keep cancellation typed so the create owner records cleanup debt before
-        // returning its terminal response, even after an earlier regional failure.
+        // Preserve owner fence types: cancellation after dispatch records cleanup
+        // debt, while a pre-mutation fence bypasses failure bookkeeping entirely.
         if (
           error instanceof CreateAttemptCanceledError ||
+          error instanceof ProviderDispatchFenceError ||
+          error instanceof AWSLeaseAuthorityError ||
           providerProvisioningCleanupClaim(error) ||
           error instanceof ProviderResourceUnresolvedError
         ) {
           throw error;
         }
-        const message = error instanceof Error ? error.message : String(error);
+        let regionError = error;
+        let message = error instanceof Error ? error.message : String(error);
+        const retryableRegionFailure = isRetryableAWSRegionProvisioningError(message);
+        if (retryableRegionFailure && cleanupRegionalKey) {
+          try {
+            // Region-scoped key pairs must not survive a failed attempt when fallback advances.
+            // oxlint-disable-next-line eslint/no-await-in-loop -- cleanup must finish before the next Region owns the lease.
+            await cleanupRegionalKey();
+          } catch (cleanupError) {
+            if (cleanupError instanceof AWSLeaseAuthorityError) {
+              throw new ProviderResourceUnresolvedError(cleanupError.message, {
+                cause: cleanupError,
+              });
+            }
+            const cleanupMessage =
+              cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+            message = `${message}; failed to clean AWS SSH key in ${region}: ${cleanupMessage}`;
+            regionError = new AggregateError([error, cleanupError], message, { cause: error });
+          }
+        }
         history.recordFailure(
-          error,
+          regionError,
           {
             region,
             serverType: allocated?.serverType ?? config.serverType,
@@ -28807,7 +29427,7 @@ export class AWSProvider implements CloudProvider {
           `${region}: ${message}`,
           allocated?.attempts,
         );
-        if (!isRetryableAWSRegionProvisioningError(message)) {
+        if (!retryableRegionFailure || regionError !== error) {
           break;
         }
       }
@@ -28834,6 +29454,8 @@ export class AWSProvider implements CloudProvider {
       ...(server.awsSSMCommandStatus ? { awsSSMCommandStatus: server.awsSSMCommandStatus } : {}),
       ...(config.awsPrivate ? { awsSSMLogGroup: config.awsSSMLogGroup } : {}),
     };
+    delete nextLease.providerKeyCleanupPending;
+    delete nextLease.providerKeyCleanupID;
     const hints = capacityHints(this.env, nextConfig, nextLease, attempts);
     if (hints.length > 0) {
       nextLease.capacityHints = hints;
@@ -28842,36 +29464,42 @@ export class AWSProvider implements CloudProvider {
   }
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
-    const unsettledAllocation = Boolean(
-      lease.provisioningRequestStartedAt || lease.provisioningResourceMayExist,
-    );
-    // A new EC2 allocation can be absent from reads before its ID propagates.
-    const server = await ownedProviderMachineForRelease("aws", lease, (id) =>
-      unsettledAllocation ? this.client.waitForServerVisibility(id) : this.findServer(id),
-    );
-    try {
-      if (server) {
-        await this.client.terminateServerAndWait(lease.cloudID);
-      }
-    } catch (error) {
-      const message = coordinatorErrorMessage(this.env, error);
-      if (unsettledAllocation || !isAWSInstanceNotFoundError(message)) {
-        throw error;
-      }
-      console.warn(
-        `AWS lease cleanup found missing instance lease=${lease.id} cloud=${lease.cloudID}: ${message}`,
+    await this.withLeaseOperation(async (session) => {
+      const recordedAccount = await this.verifyLeaseOperationAuthority(lease, session);
+      const unsettledAllocation = Boolean(
+        lease.provisioningRequestStartedAt || lease.provisioningResourceMayExist,
       );
-    }
-    if (lease.network?.awsPrivate) {
-      privateAWSWorkspaceLifecycleLog("terminated", {
-        lease_id: lease.id,
-        cloud_id: lease.cloudID,
-        region: lease.region,
-      });
-    }
-    if (leaseUsesCanonicalProviderKey(lease)) {
-      await this.deleteSSHKey(lease.providerKey, lease.id);
-    }
+      // A new EC2 allocation can be absent from reads before its ID propagates.
+      const server = lease.cloudID
+        ? await ownedProviderMachineForRelease("aws", lease, (id) =>
+            this.observeLeaseServer(
+              lease,
+              session,
+              () =>
+                unsettledAllocation ? session.waitForServerVisibility(id) : session.findServer(id),
+              "machine",
+            ),
+          )
+        : undefined;
+      if (server) {
+        await session.terminateServerAndWait(lease.cloudID);
+      }
+      if (lease.network?.awsPrivate) {
+        privateAWSWorkspaceLifecycleLog("terminated", {
+          lease_id: lease.id,
+          cloud_id: lease.cloudID,
+          region: lease.region,
+        });
+      }
+      if (leaseUsesCanonicalProviderKey(lease)) {
+        if (!lease.cloudID && !recordedAccount) {
+          throw new ProviderResourceUnresolvedError(
+            "AWS lease account scope was not persisted; refusing key-only cleanup",
+          );
+        }
+        await session.deleteSSHKey(lease.providerKey, lease.id);
+      }
+    });
   }
 
   supportsNativeImages(): boolean {

@@ -41,17 +41,23 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "boxd-api-url") {
 		cfg.Boxd.APIURL = *v.APIURL
+		core.RecordProviderFlagInputs(cfg, true, "boxd")
 	}
 	if core.FlagWasSet(fs, "boxd-org") {
 		cfg.Boxd.Org = *v.Org
+		core.RecordProviderFlagInputs(cfg, true, "boxd")
 	}
 	if core.FlagWasSet(fs, "boxd-work-root") {
 		cfg.Boxd.WorkRoot = *v.WorkRoot
+		core.RecordProviderFlagInputs(cfg, true, "boxd")
 		core.MarkBoxdWorkRootExplicit(cfg)
+		core.RecordProviderFlagIntents(cfg, true, "boxd")
 	}
 	if core.FlagWasSet(fs, "boxd-delete-on-release") {
 		cfg.Boxd.DeleteOnRelease = *v.DeleteOnRelease
+		core.RecordProviderFlagInputs(cfg, true, "boxd")
 		core.MarkDeleteOnReleaseExplicit(cfg, providerName)
+		core.RecordProviderFlagIntents(cfg, true, "boxd")
 	}
 	if isProviderName(cfg.Provider) {
 		applyDefaults(cfg)

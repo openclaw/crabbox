@@ -119,7 +119,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	}
 	leaseID := strings.TrimSpace(req.RequestedLeaseID)
 	if leaseID == "" {
-		leaseID = newLeaseID()
+		leaseID = core.NewLeaseID()
 	}
 	unlockLease, err := lockGitHubCodespacesLeaseOperation(ctx, leaseID)
 	if err != nil {

@@ -1,7 +1,6 @@
 package codesandbox
 
 import (
-	"flag"
 	"io"
 	"os"
 	"strings"
@@ -34,7 +33,6 @@ type Server = core.Server
 type Repo = core.Repo
 type LeaseClaim = core.LeaseClaim
 type ExitError = core.ExitError
-type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 type LocalCommandRequest = core.LocalCommandRequest
 
@@ -56,20 +54,12 @@ func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
 }
 
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
-}
-
 func inventoryDoctorResult(provider string, leases int) DoctorResult {
 	return core.InventoryDoctorResult(provider, leases)
 }
 
 func delegatedSyncOptionsError(spec ProviderSpec, req RunRequest) error {
 	return core.RejectDelegatedSyncOptionsForSpec(spec, req)
-}
-
-func writeTimingJSON(w io.Writer, report timingReport) error {
-	return core.WriteTimingJSON(w, report)
 }
 
 func newLeaseSlug(leaseID string) string {

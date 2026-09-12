@@ -24,12 +24,12 @@ func newTensorlakeCLI(cfg Config, rt Runtime) (*tensorlakeCLI, error) {
 	if rt.Exec == nil {
 		return nil, exit(2, "provider=tensorlake requires Runtime.Exec")
 	}
-	apiURL, err := canonicalTensorlakeURL(blank(cfg.Tensorlake.APIURL, defaultAPIURL))
+	apiURL, err := canonicalTensorlakeURL(core.Blank(cfg.Tensorlake.APIURL, core.TensorlakeConfigDefaultAPIURL))
 	if err != nil {
 		return nil, err
 	}
 	cfg.Tensorlake.APIURL = apiURL
-	cfg.Tensorlake.Namespace = blank(strings.TrimSpace(cfg.Tensorlake.Namespace), "default")
+	cfg.Tensorlake.Namespace = core.Blank(strings.TrimSpace(cfg.Tensorlake.Namespace), "default")
 	if !validScopeValue(cfg.Tensorlake.Namespace) {
 		return nil, exit(2, "invalid Tensorlake namespace")
 	}
@@ -37,7 +37,7 @@ func newTensorlakeCLI(cfg Config, rt Runtime) (*tensorlakeCLI, error) {
 }
 
 func (c *tensorlakeCLI) binary() string {
-	return blank(strings.TrimSpace(c.cfg.Tensorlake.CLIPath), defaultCLIPath)
+	return core.Blank(strings.TrimSpace(c.cfg.Tensorlake.CLIPath), core.TensorlakeConfigDefaultCLIPath)
 }
 
 func (c *tensorlakeCLI) globalArgs() []string {

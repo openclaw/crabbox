@@ -732,13 +732,38 @@ preparation state, which older workers reject safely.
 
 Trusted operators can use `crabbox admin release` or `crabbox admin delete --force` for stuck leases.
 
-After AWS credential or account rotation, scan old provider accounts directly for Crabbox-tagged EC2 instances that the current coordinator can no longer see:
+Direct AWS cleanup uses one immutable credential snapshot for STS identity, EC2
+observation, termination confirmation, and owned SSH-key deletion. The separate
+image-qualification authority binds a fixed account and Region policy and runs
+immediate STS checks around protected operations; its signer may refresh
+credentials between operations. Empty inventory can complete direct cleanup
+only for leases that persisted the matching 12-digit account scope and explicit
+Region. Historical unbound leases remain cleanupable when the instance is still
+present with exact Crabbox lease labels, but an empty lookup is intentionally
+inconclusive. Administrators can use [audited legacy AWS recovery](commands/inspect.md#audited-legacy-aws-cleanup-recovery)
+when authenticated CloudTrail allocation evidence proves the original scope and
+an exact current read confirms absence. It restores scope and schedules normal
+remaining cleanup, not a deletion receipt. There is no override that turns
+missing account or Region evidence into proof of deletion.
+
+After AWS credential or account rotation, scan old provider accounts directly
+for Crabbox-tagged EC2 instances that the current coordinator can no longer see:
 
 ```sh
 scripts/aws-crabbox-orphan-audit.sh --profile old-crabbox-account
 ```
 
-The audit is read-only. It skips `keep=true` instances, protects active coordinator leases by lease tag or EC2 instance ID, and applies the same grace window as the broker sweep before reporting stale labels. The script intentionally refuses `--terminate`: a local AWS scan cannot atomically lock coordinator lease state before deleting an instance. For broker-owned accounts, use the coordinator AWS orphan sweep below. For rotated legacy accounts, treat the JSON output as investigation evidence and delete through an explicit operator or infrastructure workflow only after confirming no active coordinator can still claim the instance.
+The audit is read-only. It skips `keep=true` instances, protects active
+coordinator leases by lease tag or EC2 instance ID, and applies the same grace
+window as the broker sweep before reporting stale labels. The script
+intentionally refuses `--terminate`: a local AWS scan cannot atomically lock
+coordinator lease state before deleting an instance. For broker-owned accounts,
+restore the lease's original account and Region credentials and retry
+coordinator cleanup. For rotated legacy accounts, treat the JSON output as
+investigation evidence and delete through an explicit operator or infrastructure
+workflow only after confirming no active coordinator can still claim the
+instance. Do not clear the retained cleanup fields or local access evidence to
+force completion.
 
 Direct-provider cleanup is only for debug mode without a coordinator:
 
@@ -1036,4 +1061,38 @@ Nonsecret plan/attempt histories and exact completed Azure deletion claims are
 retained alongside lease history without automatic pruning. Do not remove
 retained or unresolved histories to clear a cleanup incident. The shared Azure
 scope lock is released after settled terminal/retained completion; an unresolved
-shared-infrastructure write intentionally keeps its lock pending resolution.
+shared-infrastructure write retains its lock. A retained legacy fence is resolved
+automatically on the next lease once the resource group, location's vnet, and NSG
+read back as absent or in a settled provisioning state (`Succeeded`, `Failed`, or
+`Canceled`). A durable provisioning operation's fence is never taken over.
+
+### AWS provisioning timing logs
+
+Each regional AWS create attempt emits one `crabbox_aws_provisioning` coordinator
+log on completion or failure. Correlate it with the lease ID and region in an
+authenticated coordinator log capture. It records total elapsed milliseconds and
+fixed step buckets with call counts, elapsed totals and error counts. No API
+payloads, credentials, addresses or exception text are included. These logs do
+not change lease timing fields or persist additional coordinator state.
+
+`ingress_wait` measures admission to the shared ingress queue; `lifecycle_wait`
+measures the subsequent lifecycle lock wait; `access_snapshot` measures the
+authoritative lease/access reread. `security_group` starts after those waits and
+contains lookup, creation, stale-rule pruning, world-rule revocation, ingress
+authorization and compaction buckets. Duplicate authorizations and absent world
+rules have separate counters, so expected API errors remain distinguishable from
+failed provisioning. Key-pair preparation, image selection, quota checks and
+instance creation have separate buckets.
+
+The initial quota lookup overlaps security-group preparation within one regional
+create attempt. Its result is reused only by that attempt; every candidate still
+passes its market's quota check before launch. Both preparations settle before
+launch or failure cleanup. The quota bucket counts actual lookups, including a
+separate on-demand lookup only when that fallback is needed.
+
+Durations include each operation's awaited work, including its transport and
+retries; they are not AWS service-side timings. Nested buckets overlap and must
+not be added to their parent. Missing buckets mean the step was not observed,
+and uninstrumented work can remain between steps. An interrupted request may
+not emit a completion log; use the existing lease lifecycle outcome as the
+authority for resource state.

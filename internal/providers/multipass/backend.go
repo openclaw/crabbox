@@ -64,23 +64,17 @@ func applyDefaults(cfg *Config) {
 	}
 	cfg.SSHFallbackPorts = []string{}
 	if cfg.Multipass.CLIPath == "" {
-		cfg.Multipass.CLIPath = "multipass"
+		cfg.Multipass.CLIPath = core.MultipassConfigDefaultCLIPath
 	}
 	if cfg.Multipass.Image == "" {
 		cfg.Multipass.Image = "26.04"
 	}
 	if cfg.Multipass.User == "" {
-		cfg.Multipass.User = "crabbox"
+		cfg.Multipass.User = core.MultipassConfigDefaultUser
 	}
-	if cfg.Multipass.WorkRoot == "" {
-		if !core.IsDefaultWorkRoot(cfg.WorkRoot) {
-			cfg.Multipass.WorkRoot = cfg.WorkRoot
-		} else {
-			cfg.Multipass.WorkRoot = "/work/crabbox"
-		}
-	}
+	cfg.Multipass.WorkRoot = core.ResolveInheritedWorkRoot(cfg.Multipass.WorkRoot, cfg.WorkRoot, core.MultipassConfigDefaultWorkRoot)
 	if cfg.Multipass.LaunchTimeout <= 0 {
-		cfg.Multipass.LaunchTimeout = 20 * time.Minute
+		cfg.Multipass.LaunchTimeout = core.MultipassConfigDefaultLaunchTimeout
 	}
 	cfg.SSHUser = cfg.Multipass.User
 	cfg.SSHPort = sshPort
@@ -103,7 +97,7 @@ func (b *backend) configForRun() Config {
 
 func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
 	cfg := b.configForRun()
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	instances, err := b.listInstances(ctx)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -132,7 +126,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	}()
 	cfg.SSHKey = keyPath
 	name := leaseProviderName(leaseID, slug)
-	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%s disk=%s keep=%v\n", providerName, leaseID, slug, cfg.Multipass.Image, cfg.Multipass.CPUs, blank(cfg.Multipass.Memory, "-"), blank(cfg.Multipass.Disk, "-"), req.Keep)
+	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%s disk=%s keep=%v\n", providerName, leaseID, slug, cfg.Multipass.Image, cfg.Multipass.CPUs, core.Blank(cfg.Multipass.Memory, "-"), core.Blank(cfg.Multipass.Disk, "-"), req.Keep)
 	if err := b.createInstance(ctx, cfg, name, leaseID, slug, publicKey); err != nil {
 		_ = b.removeInstance(context.Background(), name)
 		return LeaseTarget{}, err
@@ -292,7 +286,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 }
 
 func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
-	return fmt.Sprintf("released lease=%s instance=%s", lease.LeaseID, blank(firstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]), "-"))
+	return fmt.Sprintf("released lease=%s instance=%s", lease.LeaseID, core.Blank(firstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]), "-"))
 }
 
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
@@ -328,10 +322,10 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			continue
 		}
 		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would remove instance name=%s lease=%s reason=%s\n", inst.Name, blank(claim.LeaseID, "-"), reason)
+			fmt.Fprintf(b.rt.Stdout, "would remove instance name=%s lease=%s reason=%s\n", inst.Name, core.Blank(claim.LeaseID, "-"), reason)
 			continue
 		}
-		fmt.Fprintf(b.rt.Stdout, "remove instance name=%s lease=%s reason=%s\n", inst.Name, blank(claim.LeaseID, "-"), reason)
+		fmt.Fprintf(b.rt.Stdout, "remove instance name=%s lease=%s reason=%s\n", inst.Name, core.Blank(claim.LeaseID, "-"), reason)
 		if err := b.removeInstance(ctx, inst.Name); err != nil {
 			return err
 		}
@@ -350,10 +344,10 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			continue
 		}
 		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing instance\n", claim.LeaseID, blank(claim.Slug, "-"))
+			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing instance\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 			continue
 		}
-		fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing instance\n", claim.LeaseID, blank(claim.Slug, "-"))
+		fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing instance\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 		removeLeaseClaim(claim.LeaseID)
 		removeStoredTestboxKey(claim.LeaseID)
 		claimsRemoved++
@@ -733,7 +727,7 @@ func shouldCleanup(server Server, claim core.LeaseClaim, hasClaim bool, now time
 		return false, "missing claim"
 	}
 	if !instanceRunning(server.Status) && server.Status != "ready" {
-		return true, "instance state=" + blank(server.Status, "unknown")
+		return true, "instance state=" + core.Blank(server.Status, "unknown")
 	}
 	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
 	if err != nil || lastUsed.IsZero() {

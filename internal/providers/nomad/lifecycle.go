@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -48,32 +49,28 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if req.Options.Tailscale.Enabled {
 		return exit(2, "provider=%s is delegated-run only and does not support Tailscale options", providerName)
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	client, err := b.client()
 	if err != nil {
 		return err
 	}
-	leaseID, slug, ready, _, err := b.createJob(ctx, client, req.Repo, req.RequestedSlug, req.Reclaim)
+	ready, claim, _, err := b.createJob(ctx, client, req.Repo, req.RequestedSlug)
 	if err != nil {
 		return err
 	}
+	leaseID, slug := claim.LeaseID, claim.Slug
 	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s job=%s allocation=%s task=%s workdir=%s\n", leaseID, slug, providerName, ready.JobID, ready.AllocationID, b.cfg.Nomad.Task, b.cfg.Nomad.Workdir)
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: nomad warmup keeps the job until explicit stop\n")
 	}
-	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  leaseID,
-			Slug:     slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-			Workdir:  b.cfg.Nomad.Workdir,
-		})
-	}
-	return nil
+	total := core.ClockNow(b.rt.Clock).Sub(started)
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Workdir:  b.cfg.Nomad.Workdir,
+		Total:    total,
+	})
 }
 
 func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
@@ -108,14 +105,15 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
 			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-nomad-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+				TempPattern: "crabbox-nomad-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 			})
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var err error
-			_, _, ready, claim, err = b.createJob(ctx, client, req.Repo, req.RequestedSlug, req.Reclaim)
+			var recovery *shared.DelegatedSandboxRecovery
+			ready, claim, recovery, err = b.createJob(ctx, client, req.Repo, req.RequestedSlug)
 			if err != nil {
-				return shared.DelegatedSandbox{}, err
+				return shared.DelegatedSandbox{Recovery: recovery}, err
 			}
 			fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s job=%s allocation=%s task=%s\n", claim.LeaseID, claim.Slug, providerName, ready.JobID, ready.AllocationID, ready.Task)
 			return bound(), nil
@@ -126,13 +124,31 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			if err != nil {
 				return shared.DelegatedSandbox{}, err
 			}
+			state, err := registrationState(claim)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			if state == registrationPrepared {
+				return shared.DelegatedSandbox{}, registrationRecoveryError(claim, exit(4, "registration was not submitted"))
+			}
 			jobID := claim.Labels[claimLabelJobID]
 			job, err := client.JobInfo(ctx, jobID)
 			if err != nil {
+				if state == registrationSubmitting && isNotFoundError(err) {
+					return shared.DelegatedSandbox{}, unresolvedRegistrationError(claim)
+				}
 				return shared.DelegatedSandbox{}, err
 			}
 			if err := validateRemoteOwnership(b.cfg, claim, job); err != nil {
 				return shared.DelegatedSandbox{}, err
+			}
+			if err := validateRegistrationMetadata(claim, job); err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			if state == registrationSubmitting {
+				if err := advanceRegistration(ctx, &claim, registrationConfirmed, "", nil); err != nil {
+					return shared.DelegatedSandbox{}, err
+				}
 			}
 			claimedWorkdir := strings.TrimSpace(claim.Labels[claimLabelWorkdir])
 			if claimedWorkdir != "" && claimedWorkdir != workdir {
@@ -150,8 +166,14 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 				if err != nil {
 					return shared.DelegatedSandbox{}, err
 				}
-				claim, err = updateLeaseClaimLabelsIfUnchanged(claim.LeaseID, updated, claimLabels(b.cfg, claim.LeaseID, claim.Slug, ready, claimExpiresAt(claim)))
+				labels := maps.Clone(updated.Labels)
+				maps.Copy(labels, claimLabels(b.cfg, claim.LeaseID, claim.Slug, ready, claimExpiresAt(claim)))
+				claim, err = updateLeaseClaimLabelsIfUnchanged(claim.LeaseID, updated, labels)
 				if err != nil {
+					return shared.DelegatedSandbox{}, err
+				}
+			} else if registrationAwaitingReadiness(claim) {
+				if err := advanceRegistration(ctx, &claim, registrationConfirmed, "", &ready); err != nil {
 					return shared.DelegatedSandbox{}, err
 				}
 			}
@@ -187,69 +209,39 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	})
 }
 
-func (b *backend) createJob(ctx context.Context, client Client, repo Repo, requestedSlug string, reclaim bool) (string, string, allocationReadiness, LeaseClaim, error) {
-	leaseID, err := newLeaseID()
+func (b *backend) createJob(ctx context.Context, client Client, repo Repo, requestedSlug string) (allocationReadiness, LeaseClaim, *shared.DelegatedSandboxRecovery, error) {
+	// Fresh acquisition always uses an absent random identity. Reclaim stays in Resolve.
+	prepared, err := b.prepareRegistration(ctx, repo, requestedSlug)
 	if err != nil {
-		return "", "", allocationReadiness{}, LeaseClaim{}, err
+		return allocationReadiness{}, LeaseClaim{}, nil, err
 	}
-	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
+	ready, err := b.submitRegistration(ctx, client, prepared)
 	if err != nil {
-		return "", "", allocationReadiness{}, LeaseClaim{}, err
-	}
-	expiresAt := time.Time{}
-	if b.cfg.TTL > 0 {
-		expiresAt = b.now().UTC().Add(b.cfg.TTL)
-	}
-	jobID := jobIDForLease(leaseID)
-	job, err := buildJobSpec(b.cfg, jobSpecInput{LeaseID: leaseID, Slug: slug, JobID: jobID, ExpiresAt: expiresAt})
-	if err != nil {
-		return "", "", allocationReadiness{}, LeaseClaim{}, err
-	}
-	evalID, err := client.RegisterJob(ctx, job)
-	if err != nil {
-		return "", "", allocationReadiness{}, LeaseClaim{}, err
-	}
-	if evalID != "" {
-		if err := b.waitForEvaluation(ctx, client, evalID); err != nil {
-			return "", "", allocationReadiness{}, LeaseClaim{}, b.cleanupUnclaimedJob(ctx, client, job, err)
+		recovery, failure := b.rollbackRegistration(ctx, client, prepared.claim, err)
+		if recovery != nil {
+			return allocationReadiness{}, prepared.claim, recovery, registrationRecoveryError(prepared.claim, failure)
 		}
+		return allocationReadiness{}, LeaseClaim{}, nil, failure
 	}
-	ready, err := b.waitForAllocation(ctx, client, jobID, b.allocReadyTimeout())
-	if err != nil {
-		return "", "", allocationReadiness{}, LeaseClaim{}, b.cleanupUnclaimedJob(ctx, client, job, err)
-	}
-	claim, err := writeNomadClaim(b.cfg, leaseID, slug, repo, reclaim, ready, expiresAt)
-	if err != nil {
-		return "", "", allocationReadiness{}, LeaseClaim{}, b.cleanupUnclaimedJob(ctx, client, job, err)
-	}
-	return leaseID, slug, ready, claim, nil
+	return ready, prepared.claim, nil, nil
 }
 
-func (b *backend) cleanupUnclaimedJob(ctx context.Context, client Client, expected *nomadapi.Job, cause error) error {
+func (b *backend) rollbackRegistration(ctx context.Context, client Client, claim LeaseClaim, cause error) (*shared.DelegatedSandboxRecovery, error) {
 	cleanupCtx, cancel := b.cleanupContext(ctx)
 	defer cancel()
-	jobID := stringValue(expected.ID)
-	leaseID := expected.Meta[metadataLeaseID]
-	cleanupErr := core.CleanupLeaseClaimIfUnchangedAfter(leaseID, LeaseClaim{}, false, func() error {
-		if err := cleanupCtx.Err(); err != nil {
-			return err
-		}
-		job, err := client.JobInfo(cleanupCtx, jobID)
-		if err != nil {
-			if isNotFoundError(err) {
-				return nil
-			}
-			return fmt.Errorf("inspect nomad job %s before setup cleanup: %w", jobID, err)
-		}
-		if job == nil || stringValue(job.ID) != jobID || !metadataMatches(job.Meta, expected.Meta) {
-			return exit(4, "refusing cleanup of nomad job %s after setup failure: ownership changed", jobID)
-		}
-		return b.deregisterJobAndConfirmAbsent(cleanupCtx, client, jobID)
-	})
+	_, cleanupErr := b.removeOwnedJob(cleanupCtx, client, claim, false)
 	if cleanupErr != nil {
-		return errors.Join(cause, fmt.Errorf("cleanup nomad job %s after unclaimed setup failure: %w", jobID, cleanupErr))
+		failure := errors.Join(cause, fmt.Errorf("cleanup nomad job %s after setup failure: %w", claim.Labels[claimLabelJobID], cleanupErr))
+		recovery, err := registrationRecovery(cleanupCtx, claim)
+		if err != nil {
+			failure = errors.Join(failure, fmt.Errorf("verify retained nomad registration lease=%s: %w", claim.LeaseID, err))
+			message := fmt.Sprintf("nomad setup lease=%s job=%s scope=%q: %v; recovery claim could not be verified", claim.LeaseID, claim.Labels[claimLabelJobID], claim.ProviderScope, failure)
+			return nil, shared.ExitErrorWithCause(core.ExitCodeForError(cause, 1), message, failure)
+		}
+		return recovery, shared.ExitErrorWithCause(core.ExitCodeForError(cause, 1), failure.Error(), failure)
 	}
-	return cause
+	message := fmt.Sprintf("nomad setup lease=%s job=%s rolled back: %v", claim.LeaseID, claim.Labels[claimLabelJobID], cause)
+	return nil, shared.ExitErrorWithCause(core.ExitCodeForError(cause, 1), message, cause)
 }
 
 func (b *backend) deregisterJobAndConfirmAbsent(ctx context.Context, client Client, jobID string) error {
@@ -298,13 +290,19 @@ func (b *backend) removeOwnedJob(ctx context.Context, client Client, expected Le
 	ctx, cancel := context.WithTimeout(ctx, b.evalTimeout())
 	defer cancel()
 	missing := false
-	err := core.RemoveLeaseClaimIfUnchangedAfter(expected.LeaseID, expected, func() error {
-		// Lock admission is not cancelable; an expired waiter must do no work.
+	err := core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, expected.LeaseID, expected, true, func() error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if err := authorizeClaimScope(b.cfg, expected); err != nil {
 			return err
+		}
+		state, err := registrationState(expected)
+		if err != nil {
+			return err
+		}
+		if state == registrationPrepared {
+			return nil // Exact durable prepared state proves dispatch never began.
 		}
 		jobID := expected.Labels[claimLabelJobID]
 		if strings.TrimSpace(jobID) == "" {
@@ -313,6 +311,9 @@ func (b *backend) removeOwnedJob(ctx context.Context, client Client, expected Le
 		job, err := client.JobInfo(ctx, jobID)
 		if err != nil {
 			if isNotFoundError(err) {
+				if state == registrationSubmitting {
+					return unresolvedRegistrationError(expected)
+				}
 				missing = true
 				return nil
 			}
@@ -320,6 +321,9 @@ func (b *backend) removeOwnedJob(ctx context.Context, client Client, expected Le
 		}
 		if requireMissing {
 			return exit(4, "refusing removal of nomad claim %s: job %s reappeared", expected.LeaseID, jobID)
+		}
+		if err := validateRegistrationMetadata(expected, job); err != nil {
+			return err
 		}
 		if err := validateRemoteOwnership(b.cfg, expected, job); err != nil {
 			return err
@@ -456,7 +460,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	if err != nil {
 		return err
 	}
-	now := b.now().UTC()
+	now := core.ClockNow(b.rt.Clock).UTC()
 	checked, removed := 0, 0
 	for _, listed := range claims {
 		if listed.Provider != providerName || listed.ProviderScope != claimScope(b.cfg) {
@@ -473,11 +477,32 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			return err
 		}
 		checked++
+		state, err := registrationState(claim)
+		if err != nil {
+			return err
+		}
 		jobID := claim.Labels[claimLabelJobID]
+		if state == registrationPrepared {
+			if req.DryRun {
+				if err := core.VerifyLeaseClaimUnchanged(claim.LeaseID, claim); err != nil {
+					return err
+				}
+				fmt.Fprintf(b.rt.Stdout, "would remove nomad claim lease=%s job=%s reason=registration_not_submitted\n", claim.LeaseID, jobID)
+				continue
+			}
+			if _, err := b.removeOwnedJob(ctx, client, claim, false); err != nil {
+				return err
+			}
+			removed++
+			continue
+		}
 		job, err := client.JobInfo(ctx, jobID)
 		if err != nil {
 			if !isNotFoundError(err) {
 				return err
+			}
+			if state == registrationSubmitting {
+				return unresolvedRegistrationError(claim)
 			}
 			if req.DryRun {
 				if err := core.VerifyLeaseClaimUnchanged(claim.LeaseID, claim); err != nil {
@@ -499,6 +524,9 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			continue
 		}
 		if err := validateRemoteOwnership(b.cfg, claim, job); err != nil {
+			return err
+		}
+		if err := validateRegistrationMetadata(claim, job); err != nil {
 			return err
 		}
 		if req.DryRun {
@@ -525,6 +553,10 @@ func (b *backend) statusFromClaim(ctx context.Context, client Client, claim Leas
 		return StatusView{}, err
 	}
 	jobID := claim.Labels[claimLabelJobID]
+	state, err := registrationState(claim)
+	if err != nil {
+		return StatusView{}, err
+	}
 	base := StatusView{
 		ID:       claim.LeaseID,
 		Slug:     claim.Slug,
@@ -535,10 +567,18 @@ func (b *backend) statusFromClaim(ctx context.Context, client Client, claim Leas
 		Network:  networkPublic,
 		Labels:   baseStatusLabels(b.cfg, claim, "not-ready"),
 	}
+	if state == registrationPrepared {
+		base.State = "registration-prepared"
+		base.Labels[claimLabelState] = base.State
+		return base, nil
+	}
 	job, err := client.JobInfo(ctx, jobID)
 	if err != nil {
 		if isNotFoundError(err) {
 			base.State = "missing"
+			if state == registrationSubmitting {
+				base.State = "registration-pending"
+			}
 			base.Labels[claimLabelState] = base.State
 			base.Labels["reason"] = err.Error()
 			return base, nil
@@ -546,6 +586,9 @@ func (b *backend) statusFromClaim(ctx context.Context, client Client, claim Leas
 		return StatusView{}, err
 	}
 	if err := validateRemoteOwnership(b.cfg, claim, job); err != nil {
+		return StatusView{}, err
+	}
+	if err := validateRegistrationMetadata(claim, job); err != nil {
 		return StatusView{}, err
 	}
 	ready, err := b.currentAllocation(ctx, client, jobID)
@@ -698,6 +741,10 @@ func baseStatusLabels(cfg Config, claim LeaseClaim, state string) map[string]str
 	if expiresAt := strings.TrimSpace(claim.Labels[claimLabelExpiresAt]); expiresAt != "" {
 		labels[claimLabelExpiresAt] = expiresAt
 	}
+	if version, exists := claim.Labels[registrationVersionLabel]; exists {
+		labels[registrationVersionLabel] = version
+		labels[registrationStateLabel] = claim.Labels[registrationStateLabel]
+	}
 	return labels
 }
 
@@ -717,13 +764,6 @@ func (b *backend) client() (Client, error) {
 		return b.clientFactory(b.cfg, b.rt)
 	}
 	return newNomadClient(b.cfg, b.rt)
-}
-
-func (b *backend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }
 
 func (b *backend) allocReadyTimeout() time.Duration {

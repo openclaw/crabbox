@@ -3,6 +3,8 @@ package blaxel
 import (
 	"context"
 	"errors"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
@@ -15,7 +17,7 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 			Details: map[string]string{"provider": providerName},
 		})
 	}
-	if _, err := ValidateAPIURL(blank(b.cfg.Blaxel.APIURL, defaultAPIURL)); err != nil {
+	if _, err := ValidateAPIURL(core.Blank(b.cfg.Blaxel.APIURL, core.BlaxelConfigDefaultAPIURL)); err != nil {
 		record("failed", "api_url", err.Error())
 		return DoctorResult{Provider: providerName, Status: "failed", Message: "api_url=failed mutation=false", Checks: checks}, err
 	}

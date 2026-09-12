@@ -69,7 +69,7 @@ func (b *azureLeaseBackend) acquireOnce(ctx context.Context, keep bool, requeste
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	servers, err := client.ListCrabboxServers(ctx)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -437,7 +437,6 @@ var newAzureClient = func(ctx context.Context, cfg Config) (azureClient, error) 
 
 var validateAzureSSHCIDRsForAcquire = core.ValidateAzureSSHCIDRsForAcquire
 
-func newLeaseID() string { return core.NewLeaseID() }
 func allocateDirectLeaseSlug(id, requested string, servers []Server) (string, error) {
 	return core.AllocateDirectLeaseSlug(id, requested, servers)
 }

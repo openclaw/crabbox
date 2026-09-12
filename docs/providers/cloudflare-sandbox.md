@@ -120,6 +120,19 @@ Repository-local config may set `workdir`, `execTimeoutSecs`, and
 `forgetMissing`, but bridge connection values belong in trusted user config or
 environment.
 
+All five fields share one typed declaration. Within each trusted file layer,
+`bridgeUrl` applies first and `url` applies afterward, regardless of their order
+in the YAML document. An explicitly empty `url` clears `bridgeUrl`; an omitted
+or null alias leaves it unchanged. The same trusted-file gate covers both URL
+spellings and the optional token. Repository files cannot replace or clear those
+connection values.
+
+Allowed YAML strings retain pointer-presence behavior: explicit empty values
+apply, while omitted/null values do not. Environment strings retain raw nonempty
+fallback. Timeout zero and explicit false remain meaningful values; a later
+timeout parsing error does not undo earlier accepted fields. No token flag is
+introduced, and client authentication remains optional.
+
 | Setting | Config key | Environment variable | Flag |
 | --- | --- | --- | --- |
 | Bridge URL | `url` / `bridgeUrl` | `CRABBOX_CLOUDFLARE_SANDBOX_URL` | `--cloudflare-sandbox-url` |
@@ -133,10 +146,15 @@ forget-missing disabled.
 
 The bridge URL must be HTTPS unless it targets a loopback host for local fake
 bridge tests. It must not contain userinfo, query parameters, or fragments.
-`workdir` must be an absolute dedicated directory and cannot be broad system
-paths such as `/`, `/tmp`, `/usr`, `/var`, `/home`, or `/workspace`.
+`workdir` must resolve to a dedicated descendant of `/workspace`; `/workspace`
+itself and paths outside that subtree are rejected.
 `execTimeoutSecs` must be non-negative; `0` delegates timeout behavior to the
 bridge.
+
+The Go workdir helper shares the compiled default, but raw create requests keep
+their existing configured value. Timeout zero is not replaced with 600. This
+provider's external bridge contract is separate from the bundled Cloudflare
+container runner and its omitted-field HTTP defaults.
 
 `--class` and `--type` are rejected for this provider because Cloudflare
 Sandbox sizing is not exposed through Crabbox's v1 bridge contract.

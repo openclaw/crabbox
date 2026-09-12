@@ -3,6 +3,8 @@ package cua
 import (
 	"context"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func (b backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
@@ -42,7 +44,7 @@ func (b backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, err
 		}
 		checks = append(checks, DoctorCheck{
 			Status:  status,
-			Check:   strings.TrimSpace(blank(item.Check, "bridge")),
+			Check:   strings.TrimSpace(core.Blank(item.Check, "bridge")),
 			Message: redactSecrets(item.Message),
 			Details: details,
 		})
@@ -50,12 +52,12 @@ func (b backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, err
 	if resp.Error != nil {
 		checks = append(checks, DoctorCheck{
 			Status:  "failed",
-			Check:   strings.TrimSpace(blank(resp.Error.Code, "bridge")),
+			Check:   strings.TrimSpace(core.Blank(resp.Error.Code, "bridge")),
 			Message: redactSecrets(resp.Error.Message),
-			Details: map[string]string{"provider": providerName, "class": blank(resp.Error.Class, "environment_blocked"), "mutation": "false"},
+			Details: map[string]string{"provider": providerName, "class": core.Blank(resp.Error.Class, "environment_blocked"), "mutation": "false"},
 		})
 	}
-	status := aggregateStatus(checks)
+	status := core.DoctorChecksStatus(checks)
 	message := "bridge=ready mutation=false"
 	if status != "ok" {
 		message = "bridge=classified mutation=false"

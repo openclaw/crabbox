@@ -1,7 +1,6 @@
 package railway
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -159,7 +159,7 @@ func newRailwayClient(cfg Config, rt Runtime) (railwayAPI, error) {
 	if apiToken == "" {
 		return nil, exit(2, "provider=%s requires RAILWAY_API_TOKEN", providerName)
 	}
-	apiURL := strings.TrimRight(strings.TrimSpace(blank(cfg.Railway.APIURL, "https://backboard.railway.com/graphql/v2")), "/")
+	apiURL := strings.TrimRight(strings.TrimSpace(core.Blank(cfg.Railway.APIURL, core.RailwayConfigDefaultAPIURL)), "/")
 	parsed, err := url.Parse(apiURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return nil, exit(2, "%s url %q is invalid", providerName, apiURL)
@@ -208,11 +208,7 @@ type graphqlResponse struct {
 }
 
 func (c *railwayClient) do(ctx context.Context, query string, vars map[string]any, out any) error {
-	body, err := json.Marshal(graphqlRequest{Query: query, Variables: vars})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiURL, bytes.NewReader(body))
+	req, err := shared.NewCompactJSONRequest(ctx, http.MethodPost, c.apiURL, graphqlRequest{Query: query, Variables: vars})
 	if err != nil {
 		return err
 	}

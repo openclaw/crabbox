@@ -33,9 +33,10 @@ func (Provider) Aliases() []string {
 }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:   "ssh",
-		Family: "ssh",
-		Kind:   core.ProviderKindSSHLease,
+		Authentication: core.DirectProviderAuthentication(core.ProviderAuthenticationSSH),
+		Name:           "ssh",
+		Family:         "ssh",
+		Kind:           core.ProviderKindSSHLease,
 		Targets: []core.TargetSpec{
 			{OS: core.TargetLinux},
 			{OS: core.TargetWindows, WindowsMode: "normal"},

@@ -2,6 +2,8 @@ package vercelsandbox
 
 import (
 	"context"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
@@ -37,19 +39,5 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 		result := inventoryDoctorResult(providerName, len(sandboxes))
 		checks = append(checks, DoctorCheck{Status: "ok", Check: "inventory", Message: result.Message, Details: map[string]string{"mutation": "false"}})
 	}
-	return DoctorResult{Provider: providerName, Status: aggregateStatus(checks), Checks: checks}, nil
-}
-
-func aggregateStatus(checks []DoctorCheck) string {
-	for _, check := range checks {
-		if check.Status == "failed" {
-			return "failed"
-		}
-	}
-	for _, check := range checks {
-		if check.Status == "warning" {
-			return "warning"
-		}
-	}
-	return "ok"
+	return DoctorResult{Provider: providerName, Status: core.DoctorChecksStatus(checks), Checks: checks}, nil
 }

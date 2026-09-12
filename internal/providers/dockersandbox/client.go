@@ -27,7 +27,7 @@ func newSBXCLI(cfg Config, rt Runtime) (*sbxCLI, error) {
 }
 
 func (c *sbxCLI) binary() string {
-	return blank(strings.TrimSpace(c.cfg.DockerSandbox.CLIPath), defaultCLIPath)
+	return core.Blank(strings.TrimSpace(c.cfg.DockerSandbox.CLIPath), defaultCLIPath)
 }
 
 func (c *sbxCLI) env() []string {

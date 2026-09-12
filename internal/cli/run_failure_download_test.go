@@ -210,7 +210,7 @@ func TestFailureDownloadPreflight(t *testing.T) {
 			t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
 			args := append(append([]string{}, flags...), "--download-on-failure", "proof=out", "--", "true")
 			err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(context.Background(), args)
-			if exitCodeForError(err, 0) != 2 || acquired {
+			if ExitCodeForError(err, 0) != 2 || acquired {
 				t.Fatalf("preflight err=%v acquired=%t", err, acquired)
 			}
 		})
@@ -295,7 +295,7 @@ exit 0
 			command := fmt.Sprintf("mkdir -p reports; printf first > reports/first.json; printf second > reports/second.json; printf output; printf diagnostic >&2; exit %d", workloadCode)
 			var stdout, stderr bytes.Buffer
 			err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{"--provider", "run-env-profile-test", "--no-sync", "--stop-after", "always", "--download-on-failure", "reports/first.json=" + first, "--download-on-failure", "reports/missing.json=" + missing, "--download-on-failure", "reports/second.json=" + second, "--download", "reports/first.json=" + success, "--shell", "--", command})
-			if exitCodeForError(err, 0) != tc.code {
+			if ExitCodeForError(err, 0) != tc.code {
 				t.Fatalf("err=%v stderr=%s", err, stderr.String())
 			}
 			for file, want := range map[string]string{first: "first", second: "second"} {

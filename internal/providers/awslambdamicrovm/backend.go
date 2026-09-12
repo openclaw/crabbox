@@ -49,7 +49,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if req.ActionsRunner {
 		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
 	}
-	started := now(b.rt)
+	started := core.ClockNow(b.rt.Clock)
 	control, runner, err := b.clients(ctx)
 	if err != nil {
 		return err
@@ -62,19 +62,20 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: %s warmup keeps the MicroVM until explicit stop\n", providerName)
 	}
-	total := now(b.rt).Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{Provider: providerName, LeaseID: leaseID, Slug: slug, TotalMs: total.Milliseconds(), ExitCode: 0})
-	}
-	return nil
+	total := core.ClockNow(b.rt.Clock).Sub(started)
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
 
 func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
 	if err := delegatedSyncOptionsError(b.spec, req); err != nil {
 		return RunResult{}, err
 	}
-	started := now(b.rt)
+	started := core.ClockNow(b.rt.Clock)
 	control, runner, err := b.clients(ctx)
 	if err != nil {
 		return RunResult{}, err
@@ -84,7 +85,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		prepared, err = core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 			Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
 			TempPattern: "crabbox-aws-lambda-microvm-sync-*.tgz", Stderr: b.rt.Stderr,
-			Now: func() time.Time { return now(b.rt) },
+			Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 		})
 		if err != nil {
 			return RunResult{}, err
@@ -122,7 +123,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			return RunResult{}, exit(4, "%s image identity mismatch for lease %s", providerName, claim.LeaseID)
 		}
 		leaseID, slug = claim.LeaseID, claim.Slug
-		server.Labels = touchLeaseLabels(server.Labels, b.cfg, strings.ToLower(vm.State), now(b.rt))
+		server.Labels = touchLeaseLabels(server.Labels, b.cfg, strings.ToLower(vm.State), core.ClockNow(b.rt.Clock))
 		if err := claimLease(leaseID, slug, b.scope(), req.Options.Pond, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim, server); err != nil {
 			return RunResult{}, err
 		}
@@ -159,7 +160,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		} else {
 			session.Kept = true
 		}
-		result.Total = now(b.rt).Sub(started)
+		result.Total = core.ClockNow(b.rt.Clock).Sub(started)
 		result = core.FinalizeRunResult(result, retErr)
 		if commandRan {
 			fmt.Fprintf(b.rt.Stderr, "%s run summary sync=%s command=%s total=%s exit=%d\n", providerName, syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
@@ -202,9 +203,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	if req.EnvSummary {
 		printEnvForwardingSummary(b.rt.Stderr, req.Options.EnvAllow, req.Env)
 	}
-	commandStarted := now(b.rt)
+	commandStarted := core.ClockNow(b.rt.Clock)
 	exitCode, commandErr := runner.Exec(ctx, vm, command, b.cfg.AWSLambdaMicroVM.Workdir, req.Env, b.rt.Stdout, b.rt.Stderr)
-	result.Command = now(b.rt).Sub(commandStarted)
+	result.Command = core.ClockNow(b.rt.Clock).Sub(commandStarted)
 	result.CommandText = strings.Join(req.Command, " ")
 	commandRan = true
 	outcome := shared.FinalizeDelegatedCommandOutcome(exitCode, commandErr)
@@ -217,7 +218,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		handleDelegatedRunFailure(b.rt.Stderr, req, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("%s run exited %d", providerName, exitCode)}
 	}
-	server.Labels = touchLeaseLabels(server.Labels, b.cfg, strings.ToLower(vm.State), now(b.rt))
+	server.Labels = touchLeaseLabels(server.Labels, b.cfg, strings.ToLower(vm.State), core.ClockNow(b.rt.Clock))
 	if err := claimLease(leaseID, slug, b.scope(), req.Options.Pond, req.Repo.Root, b.cfg.IdleTimeout, true, server); err != nil {
 		failure, failureErr := shared.PinDelegatedRunFailure(RunResult{}, err)
 		result.ExitCode, result.Status, result.ErrorKind = failure.ExitCode, failure.Status, failure.ErrorKind
@@ -265,15 +266,15 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	if err != nil {
 		return StatusView{}, err
 	}
-	deadline := now(b.rt).Add(req.WaitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
 	if req.WaitTimeout <= 0 {
-		deadline = now(b.rt).Add(lifecycleWaitTimeout)
+		deadline = core.ClockNow(b.rt.Clock).Add(lifecycleWaitTimeout)
 	}
 	for req.Wait && !microVMReady(vm.State) {
 		if microVMTerminal(vm.State) {
 			break
 		}
-		if now(b.rt).After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return StatusView{}, exit(5, "timed out waiting for AWS Lambda MicroVM %s", vm.ID)
 		}
 		if err := sleepContext(ctx, 2*time.Second); err != nil {
@@ -336,7 +337,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		return err
 	}
 	for _, server := range servers {
-		shouldDelete, reason := shouldCleanupServer(server, now(b.rt))
+		shouldDelete, reason := shouldCleanupServer(server, core.ClockNow(b.rt.Clock))
 		if !shouldDelete {
 			fmt.Fprintf(b.rt.Stderr, "skip microvm id=%s reason=%s\n", server.CloudID, reason)
 			continue
@@ -392,7 +393,7 @@ func (b *backend) clients(ctx context.Context) (controlPlane, runnerAPI, error) 
 }
 
 func (b *backend) create(ctx context.Context, control controlPlane, runner runnerAPI, repo Repo, requestedSlug string, keep, reclaim bool) (leaseID, slug string, vm microVM, retErr error) {
-	leaseID = newLeaseID()
+	leaseID = core.NewLeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return "", "", microVM{}, err
@@ -452,7 +453,7 @@ func (b *backend) resolve(ctx context.Context, control controlPlane, identifier 
 }
 
 func (b *backend) waitReady(ctx context.Context, control controlPlane, runner runnerAPI, vm microVM) (microVM, error) {
-	deadline := now(b.rt).Add(lifecycleWaitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(lifecycleWaitTimeout)
 	result, err := shared.Poll(context.WithoutCancel(ctx), 0, 2*time.Second,
 		func(context.Context, time.Duration) error { return sleepContext(ctx, 2*time.Second) },
 		func(context.Context) (microVM, error) { return control.Get(ctx, vm.ID) },
@@ -472,7 +473,7 @@ func (b *backend) waitReady(ctx context.Context, control controlPlane, runner ru
 					return true, nil
 				}
 			}
-			if now(b.rt).After(deadline) {
+			if core.ClockNow(b.rt.Clock).After(deadline) {
 				return false, exit(5, "timed out waiting for AWS Lambda MicroVM %s runner readiness", vm.ID)
 			}
 			return false, nil
@@ -512,7 +513,7 @@ func (b *backend) changeState(ctx context.Context, identifier, target string) er
 	if err != nil {
 		return err
 	}
-	deadline := now(b.rt).Add(lifecycleWaitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(lifecycleWaitTimeout)
 	for {
 		vm, err = control.Get(ctx, vm.ID)
 		if err != nil {
@@ -522,7 +523,7 @@ func (b *backend) changeState(ctx context.Context, identifier, target string) er
 			fmt.Fprintf(b.rt.Stderr, "%s lease=%s microvm=%s\n", strings.ToLower(target), claim.LeaseID, vm.ID)
 			return nil
 		}
-		if microVMTerminal(vm.State) || now(b.rt).After(deadline) {
+		if microVMTerminal(vm.State) || core.ClockNow(b.rt.Clock).After(deadline) {
 			return exit(5, "AWS Lambda MicroVM %s did not reach %s (state=%s)", vm.ID, target, vm.State)
 		}
 		if err := sleepContext(ctx, 2*time.Second); err != nil {
@@ -557,7 +558,7 @@ func (b *backend) scope() string {
 }
 
 func (b *backend) server(vm microVM, leaseID, slug string, keep bool, existing map[string]string) Server {
-	labels := directLeaseLabels(b.cfg, leaseID, slug, keep, now(b.rt))
+	labels := directLeaseLabels(b.cfg, leaseID, slug, keep, core.ClockNow(b.rt.Clock))
 	for key, value := range existing {
 		labels[key] = value
 	}

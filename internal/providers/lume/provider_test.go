@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -117,6 +118,54 @@ func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestConfigShowIncludesLume(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Lume.CLIPath = "/opt/homebrew/bin/lume"
+	cfg.Lume.Base = "macos-golden"
+	cfg.Lume.Storage = "fast"
+	cfg.Lume.User = "builder"
+	cfg.Lume.WorkRoot = "/Users/builder/work"
+	before := cfg.Lume
+	for _, storage := range []string{"fast", "", " padded "} {
+		cfg.Lume.Storage = storage
+		section := (Provider{}).ConfigShowSection(cfg)
+		view := map[string]any{}
+		var fields []string
+		for _, f := range section.Fields {
+			view[f.JSONName] = f.JSONValue
+			fields = append(fields, f.TextName+"="+f.TextValue)
+		}
+		want := map[string]any{"cliPath": "/opt/homebrew/bin/lume", "base": "macos-golden", "storage": storage, "user": "builder", "workRoot": "/Users/builder/work"}
+		if section.JSONKey != "lume" || section.TextLabel != "lume" || !reflect.DeepEqual(section.Providers, []string{"lume"}) || len(section.Fields) != 5 || !reflect.DeepEqual(view, want) {
+			t.Fatalf("lume view=%#v", view)
+		}
+		shown := storage
+		if storage == "" {
+			shown = "default"
+		}
+		text := section.TextLabel + " " + strings.Join(fields, " ")
+		if text != "lume cli=/opt/homebrew/bin/lume base=macos-golden storage="+shown+" user=builder work_root=/Users/builder/work" {
+			t.Fatalf("config show missing Lume settings: %q", text)
+		}
+		wantConfig := before
+		wantConfig.Storage = storage
+		if cfg.Lume != wantConfig {
+			t.Fatal("projection mutated Lume")
+		}
+	}
+	section := (Provider{}).ConfigShowSection(core.Config{})
+	var fields []string
+	for _, f := range section.Fields {
+		fields = append(fields, f.TextName+"="+f.TextValue)
+		if f.JSONValue != "" {
+			t.Fatal("raw empty JSON changed")
+		}
+	}
+	if strings.Join(fields, " ") != "cli= base= storage=default user= work_root=" {
+		t.Fatal("empty Lume text changed")
 	}
 }
 
@@ -1279,4 +1328,128 @@ func TestWaitOwnerExit(t *testing.T) {
 	b := backendFor(cfg, runner)
 	_, err := b.waitForRunningVM(bg, b.configForRun(), "worker-1", lumeRunOwner{PID: 2147483647, StartIdentity: "missing", LogPath: logPath}, func() {})
 	want(t, err, "owner exited during startup: capacity unavailable")
+}
+
+func TestLumeBindingFlagsContract(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, selector := range []string{"lume", "local-lume", "lume-macos", " LOCAL-LUME ", "aws"} {
+		for _, mode := range []string{"empty", "whitespace", "value"} {
+			cfg := core.BaseConfig()
+			cfg.Provider = selector
+			p := Provider{}
+			fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+			values := p.RegisterFlags(fs, cfg)
+			count := 0
+			fs.VisitAll(func(*flag.Flag) { count++ })
+			if count != 5 {
+				t.Fatal("flag count changed")
+			}
+			for _, tc := range []struct{ name, def, help string }{{"lume-cli", "lume", "path to the Lume CLI"}, {"lume-base", "crabbox-macos-golden", "stopped Lume VM to clone for each lease"}, {"lume-storage", "", "optional Lume storage location"}, {"lume-user", "lume", "guest account prepared for SSH"}, {"lume-work-root", "/Users/lume/crabbox", "guest work root"}} {
+				f := fs.Lookup(tc.name)
+				if f == nil || f.DefValue != tc.def || f.Usage != tc.help {
+					t.Fatalf("flag %s changed", tc.name)
+				}
+			}
+			fs.String("class", "", "")
+			fs.String("type", "", "")
+			args := []string{"--class=standard", "--type=fixture"}
+			expected := core.LumeConfig{}
+			for _, f := range []struct {
+				name, value string
+				dst         *string
+			}{{"lume-cli", "lume-fixture", &expected.CLIPath}, {"lume-base", "fixture-base", &expected.Base}, {"lume-storage", "fixture-storage", &expected.Storage}, {"lume-user", "alice", &expected.User}, {"lume-work-root", " /Users/alice/work/ ", &expected.WorkRoot}} {
+				raw := ""
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = f.value
+				}
+				args = append(args, "--"+f.name+"="+raw)
+				*f.dst = raw
+			}
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			before := fmt.Sprintf("%#v", cfg)
+			if err := p.ApplyFlags(&cfg, fs, struct{}{}); err != nil {
+				t.Fatal(err)
+			}
+			if fmt.Sprintf("%#v", cfg) != before {
+				t.Fatal("wrong type changed config")
+			}
+			if selector != "aws" {
+				if mode == "value" {
+					expected.WorkRoot = "/Users/alice/work"
+				} else {
+					expected.CLIPath = "lume"
+					expected.Base = "crabbox-macos-golden"
+					expected.User = "lume"
+					expected.WorkRoot = "/Users/lume/crabbox"
+				}
+			}
+			if err := p.ApplyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Lume != expected {
+				t.Fatalf("selector=%q mode=%s got=%#v want=%#v", selector, mode, cfg.Lume, expected)
+			}
+			if selector != "aws" && (cfg.Provider != "lume" || cfg.TargetOS != "macos" || cfg.WorkRoot != expected.WorkRoot || cfg.SSHUser != expected.User) {
+				t.Fatal("selected projection changed")
+			}
+		}
+	}
+	for _, selector := range []string{"lume", "aws"} {
+		cfg := core.BaseConfig()
+		cfg.Provider = selector
+		p := Provider{}
+		fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+		values := p.RegisterFlags(fs, cfg)
+		cfg.Lume = core.LumeConfig{CLIPath: "layered-lume", Base: "layered-base", Storage: "layered-storage", User: "alice", WorkRoot: "/Users/alice/layered"}
+		expected := cfg.Lume
+		if err := p.ApplyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Lume != expected {
+			t.Fatal("unvisited flags overwrote layered values")
+		}
+	}
+}
+
+func TestLumeBindingDerivedDefaultsContract(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, tc := range []struct{ user, providerRoot, genericRoot, wantUser, wantRoot string }{
+		{"", "", "", "lume", "/Users/lume/crabbox"}, {"  ", "  ", "  ", "lume", "/Users/lume/crabbox"},
+		{"alice", "/Users/lume/crabbox", "/work/crabbox", "alice", "/Users/alice/crabbox"},
+		{"alice", "/Users/lume/crabbox", "/Users/lume/crabbox", "alice", "/Users/alice/crabbox"},
+		{"alice", "", "/Users/ec2-user/crabbox", "alice", "/Users/alice/crabbox"},
+		{"alice", "", `C:\crabbox`, "alice", "/Users/alice/crabbox"},
+		{"alice", "", "/Users/alice/shared", "alice", "/Users/alice/shared"},
+		{"alice", "/Users/lume/crabbox", "/Users/alice/shared", "alice", "/Users/alice/shared"},
+		{"alice", "/Users/alice/provider", "/Users/alice/shared", "alice", "/Users/alice/provider"},
+		{"lume", "/Users/lume/crabbox", "/Users/lume/shared", "lume", "/Users/lume/crabbox"},
+		{"alice", "", " /Users/alice/shared ", "alice", " /Users/alice/shared "},
+	} {
+		cfg := core.Config{Provider: "prior", TargetOS: "linux", WindowsMode: "prior-mode", SSHUser: "prior-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, WorkRoot: tc.genericRoot, Lume: core.LumeConfig{CLIPath: "  ", Base: "  ", User: tc.user, WorkRoot: tc.providerRoot}}
+		expected := cfg
+		expected.Provider = "lume"
+		expected.TargetOS = "macos"
+		expected.WindowsMode = ""
+		expected.SSHFallbackPorts = nil
+		expected.SSHUser = tc.wantUser
+		expected.SSHPort = "22"
+		expected.WorkRoot = tc.wantRoot
+		expected.ServerType = "crabbox-macos-golden"
+		expected.Lume = core.LumeConfig{CLIPath: "lume", Base: "crabbox-macos-golden", User: tc.wantUser, WorkRoot: tc.wantRoot}
+		applyDefaults(&cfg)
+		if !reflect.DeepEqual(cfg, expected) {
+			t.Fatalf("defaults for user=%q roots=%q/%q got=%#v want=%#v", tc.user, tc.providerRoot, tc.genericRoot, cfg, expected)
+		}
+	}
+	cfg := core.Config{Lume: core.LumeConfig{CLIPath: "lume-fixture", Base: "fixture-base", Storage: "archive", User: "alice", WorkRoot: "/Users/lume/crabbox"}}
+	b := backend{cfg: cfg}
+	effective := b.configForRun()
+	if effective.Lume.WorkRoot != "/Users/alice/crabbox" || b.cfg.Lume != cfg.Lume || effective.Lume.Storage != "archive" {
+		t.Fatal("repeated defaulting lost copy/user root/storage behavior")
+	}
 }

@@ -3472,310 +3472,38 @@ DESKTOP
   printf 'CRABBOX_DESKTOP_ENV=xfce\nDISPLAY=:99\n' >/var/lib/crabbox/desktop.env
   chown "$user" /var/lib/crabbox/desktop.env
   chmod 0644 /var/lib/crabbox/desktop.env
-  config_dir="$home_dir/.config"
-  mode="${CRABBOX_DESKTOP_THEME:-}"
-  if [ -z "$mode" ] && [ -f "$config_dir/crabbox/desktop-theme" ]; then
-    mode="$(cat "$config_dir/crabbox/desktop-theme" 2>/dev/null || true)"
-  fi
-  case "$mode" in
-    light|dark) ;;
-    *) mode=dark ;;
-  esac
-  if [ "$mode" = "light" ]; then
-    gtk_theme=Adwaita
-    gtk_prefer_dark=false
-    gtk_prefer_dark_ini=0
-    panel_rgba="0.94 0.95 0.97 1"
-    panel_css_bg="#eef2f7"
-    panel_css_fg="#111827"
-    gtk_candidates="Arc Greybird Adwaita"
-    xfwm_candidates="Arc Greybird Daloa Default"
-  else
-    gtk_theme=Adwaita-dark
-    gtk_prefer_dark=true
-    gtk_prefer_dark_ini=1
-    panel_rgba="0.12 0.13 0.15 1"
-    panel_css_bg="#20242b"
-    panel_css_fg="#e5e7eb"
-    gtk_candidates="Arc-Dark Greybird-dark Adwaita-dark Greybird"
-    xfwm_candidates="Arc-Dark Greybird-dark Daloa Default"
-  fi
-  for candidate in $gtk_candidates; do
-    if [ -d "/usr/share/themes/$candidate/gtk-3.0" ]; then
-      gtk_theme="$candidate"
-      break
-    fi
-  done
-  xfwm_theme=Default
-  for candidate in $xfwm_candidates; do
-    if [ -d "/usr/share/themes/$candidate/xfwm4" ]; then
-      xfwm_theme="$candidate"
-      break
-    fi
-  done
-  install -d -m 0700 -o "$user" "$config_dir/xfce4/xfconf/xfce-perchannel-xml" "$config_dir/xfce4/terminal" "$config_dir/gtk-3.0" "$config_dir/crabbox"
-  printf '%s\n' "$mode" > "$config_dir/crabbox/desktop-theme"
-  cat > "$config_dir/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml" <<XML
-<?xml version="1.0" encoding="UTF-8"?>
-<channel name="xsettings" version="1.0">
-  <property name="Net" type="empty">
-    <property name="ThemeName" type="string" value="$gtk_theme"/>
-    <property name="IconThemeName" type="string" value="Adwaita"/>
-  </property>
-  <property name="Gtk" type="empty">
-    <property name="ApplicationPreferDarkTheme" type="bool" value="$gtk_prefer_dark"/>
-  </property>
-</channel>
-XML
-  if [ ! -s "$config_dir/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml" ]; then
-    cat > "$config_dir/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml" <<XML
-<?xml version="1.0" encoding="UTF-8"?>
-<channel name="xfwm4" version="1.0">
-  <property name="general" type="empty">
-    <property name="theme" type="string" value="$xfwm_theme"/>
-    <property name="box_move" type="bool" value="false"/>
-    <property name="box_resize" type="bool" value="false"/>
-    <property name="move_opacity" type="int" value="100"/>
-    <property name="resize_opacity" type="int" value="100"/>
-    <property name="snap_resist" type="bool" value="false"/>
-    <property name="snap_to_border" type="bool" value="false"/>
-    <property name="snap_to_windows" type="bool" value="false"/>
-    <property name="snap_width" type="int" value="0"/>
-    <property name="tile_on_move" type="bool" value="false"/>
-    <property name="use_compositing" type="bool" value="false"/>
-    <property name="wrap_windows" type="bool" value="false"/>
-  </property>
-</channel>
-XML
-  fi
-  if [ "$mode" = "light" ]; then
-    terminal_fg="#1f2937"
-    terminal_bg="#f8fafc"
-    terminal_cursor="#111827"
-  else
-    terminal_fg="#e5e7eb"
-    terminal_bg="#111827"
-    terminal_cursor="#f3f4f6"
-  fi
-  cat > "$config_dir/xfce4/terminal/terminalrc" <<EOF
-[Configuration]
-ColorForeground=$terminal_fg
-ColorBackground=$terminal_bg
-ColorCursor=$terminal_cursor
-MiscBell=FALSE
-EOF
-  cat > "$config_dir/gtk-3.0/settings.ini" <<EOF
-[Settings]
-gtk-theme-name=$gtk_theme
-gtk-icon-theme-name=Adwaita
-gtk-application-prefer-dark-theme=$gtk_prefer_dark_ini
-EOF
-  cat > "$home_dir/.gtkrc-2.0" <<EOF
-gtk-theme-name="$gtk_theme"
-gtk-icon-theme-name="Adwaita"
-gtk-application-prefer-dark-theme=$gtk_prefer_dark_ini
-EOF
-  css_file="$config_dir/gtk-3.0/gtk.css"
-  css_tmp="$(mktemp)"
-  if [ -f "$css_file" ]; then
-    sed '/^[/][*] crabbox desktop theme start [*][/]$/,/^[/][*] crabbox desktop theme end [*][/]$/d' "$css_file" > "$css_tmp" || true
-  fi
-  cat >> "$css_tmp" <<EOF
-/* crabbox desktop theme start */
-.xfce4-panel { background: $panel_css_bg; background-color: $panel_css_bg; color: $panel_css_fg; }
-.xfce4-panel * { color: $panel_css_fg; text-shadow: none; -gtk-icon-shadow: none; }
-.xfce4-panel button,
-.xfce4-panel button.flat,
-.xfce4-panel button:hover,
-.xfce4-panel button:active,
-.xfce4-panel button:checked,
-.xfce4-panel button:focus,
-.xfce4-panel button:backdrop,
-.xfce4-panel .tasklist button,
-.xfce4-panel .tasklist button:hover,
-.xfce4-panel .tasklist button:active,
-.xfce4-panel .tasklist button:checked,
-.xfce4-panel .tasklist button:checked:hover,
-.xfce4-panel .tasklist button:focus,
-.xfce4-panel .tasklist button:backdrop,
-.xfce4-panel .tasklist .toggle,
-.xfce4-panel .tasklist .toggle:hover,
-.xfce4-panel .tasklist .toggle:checked,
-.xfce4-panel .tasklist .toggle:checked:hover,
-.xfce4-panel .tasklist button:checked,
-.xfce4-panel .tasklist button:active {
-  background: $panel_css_bg;
-  background-image: none;
-  background-color: $panel_css_bg;
-  border-image: none;
-  border-color: $panel_css_fg;
-  box-shadow: none;
-  color: $panel_css_fg;
-  outline-color: transparent;
-  text-shadow: none;
-  -gtk-icon-shadow: none;
-}
-.xfce4-panel .tasklist button label,
-.xfce4-panel .tasklist .toggle label {
-  color: $panel_css_fg;
-  text-shadow: none;
-}
-/* crabbox desktop theme end */
-EOF
-  mv "$css_tmp" "$css_file"
-  chown -R "$user" "$config_dir" "$home_dir/.gtkrc-2.0"
+  install -d -m 0755 /usr/local/lib/crabbox
+  cat >/usr/local/lib/crabbox/xfce-session.sh <<'SESSION_ENV'
+` + core.XfceSessionEnvironmentScript() + `SESSION_ENV
+  chmod 0644 /usr/local/lib/crabbox/xfce-session.sh
+  cat >/usr/local/bin/crabbox-configure-desktop-theme <<'THEME'
+` + core.XfceDesktopThemeScript() + `THEME
+  cat >/usr/local/bin/crabbox-desktop-session <<'SESSION'
+` + core.XfceDesktopSessionScript() + `SESSION
+  mkdir -p /etc/xdg/autostart
+  cat >/etc/xdg/autostart/crabbox-desktop.desktop <<'AUTOSTART'
+[Desktop Entry]
+Type=Application
+Name=Crabbox Desktop
+Exec=/usr/local/bin/crabbox-desktop-session
+OnlyShowIn=XFCE;
+AUTOSTART
+  chmod 0755 /usr/local/bin/crabbox-configure-desktop-theme /usr/local/bin/crabbox-desktop-session
   cat >/usr/local/bin/crabbox-start-desktop <<'DESKTOP'
 #!/bin/sh
 set -eu
 user="${CRABBOX_SSH_USER:-crabbox}"
 runtime="/tmp/crabbox-runtime-$user"
-requested_mode="${1:-${CRABBOX_DESKTOP_THEME:-}}"
-home_dir="$(getent passwd "$user" | cut -d: -f6)"
-if [ -z "$home_dir" ]; then
-  home_dir="/home/$user"
-fi
-config_dir="$home_dir/.config"
-mode="$requested_mode"
-if [ -z "$mode" ] && [ -f "$config_dir/crabbox/desktop-theme" ]; then
-  mode="$(cat "$config_dir/crabbox/desktop-theme" 2>/dev/null || true)"
-fi
-case "$mode" in
-  light|dark) ;;
-  *) mode=dark ;;
-esac
-if [ "$mode" = "light" ]; then
-  gtk_theme=Adwaita
-  gtk_prefer_dark=false
-  gsettings_scheme=prefer-light
-  root_color="#f4f6f8"
-  terminal_fg="#1f2937"
-  terminal_bg="#f8fafc"
-  panel_rgba="0.94 0.95 0.97 1"
-  panel_css_bg="#eef2f7"
-  panel_css_fg="#111827"
-  gtk_candidates="Arc Greybird Adwaita"
-  xfwm_candidates="Arc Greybird Daloa Default"
-else
-  gtk_theme=Adwaita-dark
-  gtk_prefer_dark=true
-  gsettings_scheme=prefer-dark
-  root_color="#20242b"
-  terminal_fg="#e5e7eb"
-  terminal_bg="#111827"
-  panel_rgba="0.12 0.13 0.15 1"
-  panel_css_bg="#20242b"
-  panel_css_fg="#e5e7eb"
-  gtk_candidates="Arc-Dark Greybird-dark Adwaita-dark Greybird"
-  xfwm_candidates="Arc-Dark Greybird-dark Daloa Default"
-fi
-for candidate in $gtk_candidates; do
-  if [ -d "/usr/share/themes/$candidate/gtk-3.0" ]; then
-    gtk_theme="$candidate"
-    break
-  fi
-done
-xfwm_theme=Default
-for candidate in $xfwm_candidates; do
-  if [ -d "/usr/share/themes/$candidate/xfwm4" ]; then
-    xfwm_theme="$candidate"
-    break
-  fi
-done
-install -d -m 0700 -o "$user" "$config_dir/gtk-3.0" "$config_dir/crabbox"
-printf '%s\n' "$mode" > "$config_dir/crabbox/desktop-theme"
-css_file="$config_dir/gtk-3.0/gtk.css"
-css_tmp="$(mktemp)"
-if [ -f "$css_file" ]; then
-  sed '/^[/][*] crabbox desktop theme start [*][/]$/,/^[/][*] crabbox desktop theme end [*][/]$/d' "$css_file" > "$css_tmp" || true
-fi
-cat >> "$css_tmp" <<EOF
-/* crabbox desktop theme start */
-.xfce4-panel { background: $panel_css_bg; background-color: $panel_css_bg; color: $panel_css_fg; }
-.xfce4-panel * { color: $panel_css_fg; text-shadow: none; -gtk-icon-shadow: none; }
-.xfce4-panel button,
-.xfce4-panel button.flat,
-.xfce4-panel button:hover,
-.xfce4-panel button:active,
-.xfce4-panel button:checked,
-.xfce4-panel button:focus,
-.xfce4-panel button:backdrop,
-.xfce4-panel .tasklist button,
-.xfce4-panel .tasklist button:hover,
-.xfce4-panel .tasklist button:active,
-.xfce4-panel .tasklist button:checked,
-.xfce4-panel .tasklist button:checked:hover,
-.xfce4-panel .tasklist button:focus,
-.xfce4-panel .tasklist button:backdrop,
-.xfce4-panel .tasklist .toggle,
-.xfce4-panel .tasklist .toggle:hover,
-.xfce4-panel .tasklist .toggle:checked,
-.xfce4-panel .tasklist .toggle:checked:hover,
-.xfce4-panel .tasklist button:checked,
-.xfce4-panel .tasklist button:active {
-  background: $panel_css_bg;
-  background-image: none;
-  background-color: $panel_css_bg;
-  border-image: none;
-  border-color: $panel_css_fg;
-  box-shadow: none;
-  color: $panel_css_fg;
-  outline-color: transparent;
-  text-shadow: none;
-  -gtk-icon-shadow: none;
-}
-.xfce4-panel .tasklist button label,
-.xfce4-panel .tasklist .toggle label {
-  color: $panel_css_fg;
-  text-shadow: none;
-}
-/* crabbox desktop theme end */
-EOF
-mv "$css_tmp" "$css_file"
-chown -R "$user" "$config_dir/gtk-3.0" "$config_dir/crabbox"
 install -d -m 0700 -o "$user" "$runtime"
 if ! pgrep -u "$user" -f 'Xvfb :99' >/dev/null 2>&1; then
   su "$user" -s /bin/sh -c "XDG_RUNTIME_DIR='$runtime' Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac >/tmp/crabbox-xvfb.log 2>&1 &"
 fi
 sleep 1
-if ! pgrep -u "$user" -f 'xfce4-session|startxfce4' >/dev/null 2>&1; then
+if ! pgrep -u "$user" -x xfce4-session >/dev/null 2>&1; then
+  env -u DISPLAY CRABBOX_DESKTOP_USER="$user" /usr/local/bin/crabbox-configure-desktop-theme "${1:-}"
   su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' dbus-launch startxfce4 >/tmp/crabbox-desktop.log 2>&1 &"
-fi
-sleep 2
-if command -v xfconf-query >/dev/null 2>&1; then
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xsettings -p /Net/ThemeName -n -t string -s '$gtk_theme' >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xsettings -p /Net/IconThemeName -n -t string -s Adwaita >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xsettings -p /Gtk/ApplicationPreferDarkTheme -n -t bool -s '$gtk_prefer_dark' >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/theme -n -t string -s '$xfwm_theme' >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/box_move -n -t bool -s false >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/box_resize -n -t bool -s false >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/move_opacity -n -t int -s 100 >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/resize_opacity -n -t int -s 100 >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/snap_resist -n -t bool -s false >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/snap_to_border -n -t bool -s false >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/snap_to_windows -n -t bool -s false >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/snap_width -n -t int -s 0 >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/tile_on_move -n -t bool -s false >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/use_compositing -n -t bool -s false >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/wrap_windows -n -t bool -s false >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfce4-panel -p /panels/dark-mode -n -t bool -s '$gtk_prefer_dark' >/dev/null 2>&1 || true"
-  set -- $panel_rgba
-  for panel_id in panel-1 panel-2; do
-    su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfce4-panel -p /panels/$panel_id/background-style -n -t int -s 1 >/dev/null 2>&1 || true"
-    su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfce4-panel -p /panels/$panel_id/background-rgba -n -a -t double -s '$1' -t double -s '$2' -t double -s '$3' -t double -s '$4' >/dev/null 2>&1 || true"
-  done
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' pkill -TERM -x xfce4-panel >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' sh -c 'sleep 0.4; xfce4-panel >/tmp/crabbox-xfce4-panel-$user.log 2>&1 &' >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfwm4 --replace --compositor=off >/tmp/crabbox-xfwm4-replace-'$user'.log 2>&1 &"
-fi
-su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xsetroot -solid '$root_color' >/dev/null 2>&1 || true"
-if command -v gsettings >/dev/null 2>&1; then
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' gsettings set org.gnome.desktop.interface color-scheme '$gsettings_scheme' >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' gsettings set org.gnome.desktop.interface gtk-theme '$gtk_theme' >/dev/null 2>&1 || true"
-fi
-if command -v xfce4-terminal >/dev/null 2>&1 && ! pgrep -u "$user" -f 'xfce4-terminal.*Crabbox Desktop' >/dev/null 2>&1; then
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfce4-terminal --title='Crabbox Desktop' --geometry=110x32+48+48 >/tmp/crabbox-terminal.log 2>&1 &" || true
-elif command -v xterm >/dev/null 2>&1 && ! pgrep -u "$user" -f 'xterm -title Crabbox Desktop' >/dev/null 2>&1; then
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xterm -title 'Crabbox Desktop' -geometry 110x32+48+48 -bg '$terminal_bg' -fg '$terminal_fg' >/tmp/crabbox-terminal.log 2>&1 &" || true
+else
+  runuser -u "$user" -- env DISPLAY=:99 /usr/local/bin/crabbox-desktop-session "${1:-}"
 fi
 if ! ss -ltn | grep -q '127.0.0.1:5900'; then
   su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' x11vnc -display :99 -localhost -rfbport 5900 -forever -shared -rfbauth /var/lib/crabbox/vnc.pass -wait 16 -defer 8 -nowait_bog -o /tmp/crabbox-x11vnc.log >/tmp/crabbox-x11vnc.stdout.log 2>&1 &"

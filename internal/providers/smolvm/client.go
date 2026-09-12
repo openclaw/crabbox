@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -159,7 +160,7 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 }
 
 func smolvmEndpoint(cfg Config) (string, error) {
-	base := blank(strings.TrimSpace(cfg.Smolvm.BaseURL), "https://api.smolmachines.com")
+	base := core.Blank(strings.TrimSpace(cfg.Smolvm.BaseURL), core.SmolvmConfigDefaultBaseURL)
 	parsed, err := url.Parse(base)
 	if err != nil {
 		return "", exit(2, "%s url %q is invalid", providerName, base)

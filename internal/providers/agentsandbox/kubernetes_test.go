@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -1162,13 +1163,21 @@ func TestKubectlExecOnlyMapsProvenRemoteExitStatus(t *testing.T) {
 				errors:  []error{errors.New("kubectl failed")},
 			}
 			client := &kubectlKubernetesClient{runner: runner, kubectl: "kubectl"}
+			var delivered bytes.Buffer
 			err := client.Exec(context.Background(), podExecRequest{
 				Namespace: "sandboxes",
 				Pod:       "sandbox-a",
 				Command:   []string{"false"},
+				Stderr:    &delivered,
 			})
 			if err == nil {
 				t.Fatal("exec unexpectedly succeeded")
+			}
+			if delivered.String() != tt.result.Stderr || !strings.Contains(err.Error(), strings.TrimSpace(tt.result.Stderr)) {
+				t.Fatalf("stderr delivery/capture changed: delivered=%q error=%v", delivered.String(), err)
+			}
+			if !runner.requests[0].DisableOutputCapture {
+				t.Fatal("exec unexpectedly requested runner output capture")
 			}
 			_, remote := remoteExitStatus(err)
 			if remote != tt.wantRemote {
@@ -1256,4 +1265,81 @@ func testPodContainer(configured string) string {
 
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
+}
+
+func TestSandboxReadinessPollingPreservesTerminalCause(t *testing.T) {
+	for _, stage := range []string{"resource", "pod"} {
+		for _, scenario := range []string{"pending then deadline", "deadline during fetch", "stale attempt deadline then cancellation"} {
+			t.Run(stage+"/"+scenario, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					cfg := core.BaseConfig()
+					cfg.AgentSandbox.Context = "agent-context"
+					cfg.AgentSandbox.Namespace = "sandboxes"
+					cfg.AgentSandbox.WarmPool = "linux-pool"
+					fake := readyFakeClient(cfg)
+					sandbox := cloneKubernetesObject(fake.objects[sandboxResource+"/sandboxes/sandbox-a"])
+					ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+					defer cancel()
+					wantCause := error(context.DeadlineExceeded)
+					wantStatus, wantKind := core.RunStatusTimedOut, core.RunErrorTimeout
+					wantCode, detail := 1, "ProbePending"
+					switch scenario {
+					case "pending then deadline":
+						if stage == "resource" {
+							fake.objects[sandboxResource+"/sandboxes/sandbox-a"].Status.Conditions = []conditionState{{Type: "Ready", Status: "False", Reason: detail}}
+						} else {
+							pod := fake.pods["sandboxes/app=agent-sandbox"][0]
+							pod.Ready, pod.Phase = false, "Pending"
+							pod.Conditions = []conditionState{{Type: "Ready", Status: "False", Reason: detail}}
+							fake.pods["sandboxes/app=agent-sandbox"] = []podState{pod}
+						}
+					case "deadline during fetch":
+						fake.getStarted = make(chan struct{}, 1)
+						fake.getRelease = make(chan struct{})
+						detail = context.DeadlineExceeded.Error()
+					case "stale attempt deadline then cancellation":
+						wantCause, wantStatus, wantKind = context.Canceled, core.RunStatusCanceled, core.RunErrorCanceled
+						wantCode, detail = 6, "pending Kubernetes read"
+						last := errors.Join(core.Exit(6, "%s", detail), context.DeadlineExceeded, errKubernetesNotFound)
+						if stage == "resource" {
+							// Keep the root claim present; only its downstream Sandbox read is missing.
+							fake.getErrs = []error{nil, last}
+						} else {
+							fake.getErrs = []error{last}
+						}
+						time.AfterFunc(50*time.Millisecond, cancel)
+					}
+					var err error
+					if stage == "resource" {
+						_, err = waitForSandboxResourceReadiness(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), time.Hour)
+					} else {
+						_, err = waitForSandboxPodReadiness(ctx, fake, "sandboxes", "claim-a", sandbox, fakeClaimIdentity(cfg), time.Hour)
+					}
+					prefix := "agent-sandbox readiness timed out for claim claim-a:"
+					if stage == "pod" {
+						prefix = "agent-sandbox pod readiness timed out for sandbox sandbox-a:"
+					}
+					if err == nil || !strings.HasPrefix(err.Error(), prefix) || !strings.Contains(err.Error(), detail) || core.ExitCodeForError(err, 1) != wantCode {
+						t.Fatalf("readiness diagnostic/code changed: err=%v want prefix=%q detail=%q code=%d", err, prefix, detail, wantCode)
+					}
+					if !errors.Is(err, wantCause) || core.RunStatusForResult(core.RunResult{}, err) != wantStatus || core.RunErrorKindForResult(core.RunResult{}, err) != wantKind {
+						t.Errorf("poll termination lost: err=%v cause=%v status=%s kind=%s; want %v/%s/%s", err, errors.Is(err, wantCause), core.RunStatusForResult(core.RunResult{}, err), core.RunErrorKindForResult(core.RunResult{}, err), wantCause, wantStatus, wantKind)
+					}
+					if scenario == "stale attempt deadline then cancellation" {
+						// Diagnostic history remains reachable; terminal classification is separate.
+						if !errors.Is(err, context.DeadlineExceeded) {
+							t.Error("stale attempt deadline was removed from diagnostic history")
+						}
+						var failure core.ExitError
+						if !core.AsExitError(err, &failure) || failure.Code != 6 || failure.Message != detail {
+							t.Errorf("first typed observation changed: %#v", failure)
+						}
+						if !errors.Is(err, errKubernetesNotFound) || !isNotFound(err) {
+							t.Error("downstream not-found identity lost before exact-root recheck")
+						}
+					}
+				})
+			})
+		}
+	}
 }

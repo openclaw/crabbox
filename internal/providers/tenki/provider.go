@@ -30,6 +30,7 @@ func (Provider) ClaimScope(cfg core.Config) string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationCLI),
 		Name:             tenkiProvider,
 		Family:           tenkiProvider,
 		Kind:             core.ProviderKindSSHLease,

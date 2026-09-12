@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -20,7 +21,7 @@ type machine struct {
 
 func (b *backend) command(ctx context.Context, args []string, dir string) (LocalCommandResult, error) {
 	return b.rt.Exec.Run(ctx, LocalCommandRequest{
-		Name:   blank(strings.TrimSpace(b.cfg.AppleContainer.CLIPath), "container"),
+		Name:   core.Blank(strings.TrimSpace(b.cfg.AppleContainer.CLIPath), "container"),
 		Args:   args,
 		Dir:    dir,
 		Stdout: b.rt.Stdout,
@@ -36,7 +37,7 @@ func (b *backend) createMachine(ctx context.Context, name string) error {
 	if memory := strings.TrimSpace(b.cfg.AppleContainer.Memory); memory != "" {
 		args = append(args, "--memory", memory)
 	}
-	args = append(args, blank(strings.TrimSpace(b.cfg.AppleContainer.Image), "ubuntu:26.04"))
+	args = append(args, core.Blank(strings.TrimSpace(b.cfg.AppleContainer.Image), "ubuntu:26.04"))
 	result, err := b.command(ctx, args, "")
 	if err != nil {
 		return shared.ExitErrorWithCause(5, fmt.Sprintf("create Apple container machine: %s", failureDetail(result, err)), err)
@@ -92,7 +93,7 @@ func (b *backend) control(ctx context.Context, args []string) (LocalCommandResul
 	defer cancel()
 	const limit = 1024 * 1024
 	result, err := b.rt.Exec.Run(ctx, LocalCommandRequest{
-		Name: blank(strings.TrimSpace(b.cfg.AppleContainer.CLIPath), "container"), Args: args,
+		Name: core.Blank(strings.TrimSpace(b.cfg.AppleContainer.CLIPath), "container"), Args: args,
 		MaxCapturedOutputBytes: limit, CancelGracePeriod: time.Second,
 	})
 	if ctx.Err() != nil {

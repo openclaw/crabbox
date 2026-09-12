@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -91,7 +92,7 @@ var newFreestyleClient = func(cfg Config, rt Runtime) (freestyleAPI, error) {
 	if apiKey == "" {
 		return nil, exit(2, "provider=freestyle requires FREESTYLE_API_KEY")
 	}
-	apiURL, err := validateFreestyleAPIURL(blank(cfg.Freestyle.APIURL, "https://api.freestyle.sh"))
+	apiURL, err := validateFreestyleAPIURL(core.Blank(cfg.Freestyle.APIURL, core.FreestyleConfigDefaultAPIURL))
 	if err != nil {
 		return nil, err
 	}

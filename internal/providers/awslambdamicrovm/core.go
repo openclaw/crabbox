@@ -1,7 +1,6 @@
 package awslambdamicrovm
 
 import (
-	"flag"
 	"io"
 	"time"
 
@@ -43,14 +42,6 @@ func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
 }
 
-func flagWasSet(fs *flag.FlagSet, name string) bool { return core.FlagWasSet(fs, name) }
-func newLeaseID() string                            { return core.NewLeaseID() }
-func now(rt Runtime) time.Time {
-	if rt.Clock != nil {
-		return rt.Clock.Now()
-	}
-	return time.Now()
-}
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
 }

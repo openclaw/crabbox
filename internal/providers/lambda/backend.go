@@ -66,15 +66,7 @@ func (b *backend) initDirect() {
 	if b.cfg.ServerType == "" {
 		b.cfg.ServerType = typeForConfig(b.cfg)
 	}
-	if b.cfg.Lambda.Region == "" {
-		b.cfg.Lambda.Region = defaultRegion
-	}
-	if b.cfg.Lambda.Type == "" {
-		b.cfg.Lambda.Type = defaultType
-	}
-	if b.cfg.Lambda.Image == "" && b.cfg.Lambda.ImageFamily == "" {
-		b.cfg.Lambda.ImageFamily = defaultImageFamily
-	}
+	b.cfg.Lambda = b.cfg.Lambda.WithRuntimeDefaults()
 	b.DirectSSHBackend = shared.DirectSSHBackend{
 		SpecValue:       b.spec,
 		Cfg:             b.cfg,
@@ -142,7 +134,7 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
 	}
-	now := b.now()
+	now := core.ClockNow(b.rt.Clock).UTC()
 	var (
 		key        lambdaSSHKeyIdentity
 		instanceID string
@@ -295,7 +287,7 @@ func (b *backend) ensureSSHKey(ctx context.Context, client lambdaAPI, name, publ
 }
 
 func (b *backend) waitForInstanceReady(ctx context.Context, client lambdaAPI, id string) (Instance, error) {
-	deadline := b.now().Add(5 * time.Minute)
+	deadline := core.ClockNow(b.rt.Clock).UTC().Add(5 * time.Minute)
 	result, err := shared.Poll(context.WithoutCancel(ctx), 0, 3*time.Second,
 		func(context.Context, time.Duration) error {
 			if err := shared.SleepContext(ctx, 3*time.Second); err != nil {
@@ -314,7 +306,7 @@ func (b *backend) waitForInstanceReady(ctx context.Context, client lambdaAPI, id
 			if isTerminalInstanceStatus(item.Status) {
 				return false, core.Exit(5, "lambda instance %s reached terminal status %s", id, item.Status)
 			}
-			if b.now().After(deadline) {
+			if core.ClockNow(b.rt.Clock).UTC().After(deadline) {
 				return false, core.Exit(5, "timed out waiting for Lambda instance %s to become active with public IP", id)
 			}
 			return false, nil
@@ -471,7 +463,7 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	if req.IdleTimeout > 0 {
 		cfg.IdleTimeout = req.IdleTimeout
 	}
-	labels := core.TouchDirectLeaseLabels(server.Labels, cfg, req.State, b.now())
+	labels := core.TouchDirectLeaseLabels(server.Labels, cfg, req.State, core.ClockNow(b.rt.Clock).UTC())
 	labels[lambdaTouchLocalLabel] = "true"
 	server.Labels = labels
 	updated, err := core.UpdateLeaseClaimLabelsIfUnchanged(req.Lease.LeaseID, claim, labels)
@@ -928,11 +920,4 @@ func providerKeyForLease(leaseID string) string {
 		key = key[:64]
 	}
 	return strings.TrimRight(key, "-")
-}
-
-func (b *backend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now().UTC()
-	}
-	return time.Now().UTC()
 }

@@ -6,7 +6,148 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
+
+func TestNamespaceInstanceOrdinaryFileMetadata(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	wantDefault := NamespaceInstanceConfig{CLIPath: "nsc", WorkRoot: "/work/crabbox", Bare: true}
+	if got := baseConfig().NamespaceInstance; !reflect.DeepEqual(got, wantDefault) {
+		t.Fatalf("defaults=%#v want %#v", got, wantDefault)
+	}
+	if reflect.TypeOf(fileNamespaceInstanceConfig{}).Name() != "fileNamespaceInstanceConfig" {
+		t.Fatal("file DTO name")
+	}
+	for _, tc := range []struct {
+		name, list string
+		want       []string
+	}{{"absent", "", []string{"prior"}}, {"null", "  volumes: null\n", []string{"prior"}}, {"empty", "  volumes: []\n", nil}, {"raw clone", "  volumes: [' a ', a, a]\n", []string{" a ", "a", "a"}}} {
+		t.Run(tc.name, func(t *testing.T) {
+			document := "namespaceInstance:\n  cli: '~/nsc'\n  machineType: ' 4x8 '\n  duration: 20m\n  region: ' eu '\n  endpoint: https://example.invalid\n  keychain: fixture\n  workRoot: '~/guest'\n  bare: false\n" + tc.list
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte(document), &file); err != nil {
+				t.Fatal(err)
+			}
+			cfg := baseConfig()
+			cfg.NamespaceInstance.TenantID = "tenant-sentinel"
+			cfg.NamespaceInstance.Volumes = []string{"prior"}
+			generic := cfg.WorkRoot
+			if err := applyFileConfig(&cfg, file); err != nil {
+				t.Fatal(err)
+			}
+			want := NamespaceInstanceConfig{CLIPath: filepath.Join(home, "nsc"), MachineType: " 4x8 ", Duration: 20 * time.Minute, Region: " eu ", Endpoint: "https://example.invalid", Keychain: "fixture", TenantID: "tenant-sentinel", Volumes: tc.want, WorkRoot: "~/guest", Bare: false}
+			if !reflect.DeepEqual(cfg.NamespaceInstance, want) || cfg.WorkRoot != generic {
+				t.Fatalf("file metadata=%#v want %#v", cfg.NamespaceInstance, want)
+			}
+			if len(file.NamespaceInstance.Volumes) > 0 {
+				file.NamespaceInstance.Volumes[0] = "changed"
+				if cfg.NamespaceInstance.Volumes[0] != " a " {
+					t.Fatal("file list was not cloned")
+				}
+			}
+		})
+	}
+	for _, raw := range []string{"", "0s", "-1m", " 2m ", "invalid", "2m"} {
+		cfg := baseConfig()
+		cfg.NamespaceInstance.Duration = time.Minute
+		cfg.NamespaceInstance.CLIPath = "~/prior"
+		cfg.NamespaceInstance.TenantID = "tenant-sentinel"
+		if err := applyFileConfig(&cfg, fileConfig{NamespaceInstance: &fileNamespaceInstanceConfig{Duration: raw}}); err != nil {
+			t.Fatal(err)
+		}
+		want := time.Minute
+		if raw == "2m" {
+			want = 2 * time.Minute
+		}
+		if cfg.NamespaceInstance.Duration != want || cfg.NamespaceInstance.CLIPath != "~/prior" || cfg.NamespaceInstance.TenantID != "tenant-sentinel" {
+			t.Fatal("tolerant file duration/path absence")
+		}
+	}
+	path := isolatedConfigPath(t)
+	input := "namespaceInstance: {duration: 0s, volumes: [], bare: false}\n"
+	if err := os.WriteFile(path, []byte(input), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := readFileConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeUserFileConfig(file); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := yaml.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"namespaceInstance": map[string]any{"duration": "0s", "bare": false}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("file DTO serialization=%#v", got)
+	}
+}
+
+func TestNamespaceInstanceOrdinaryEnvMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  bool
+		raw  string
+		want []string
+	}{{"absent", false, "", []string{"prior"}}, {"empty", true, "", []string{}}, {"spaces", true, "  ", []string{}}, {"commas", true, ", ,", []string{}}, {"none", true, " NoNe ", []string{}}, {"csv", true, " a, ,b,a ", []string{"a", "b", "a"}}} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("CRABBOX_NAMESPACE_INSTANCE_VOLUMES", "")
+			if err := os.Unsetenv("CRABBOX_NAMESPACE_INSTANCE_VOLUMES"); err != nil {
+				t.Fatal(err)
+			}
+			if tc.set {
+				t.Setenv("CRABBOX_NAMESPACE_INSTANCE_VOLUMES", tc.raw)
+			}
+			for key, value := range map[string]string{"MACHINE_TYPE": " 8x16 ", "DURATION": "3m", "REGION": " us ", "ENDPOINT": "https://example.invalid", "KEYCHAIN": "fixture", "WORK_ROOT": "~/guest", "BARE": "false"} {
+				t.Setenv("CRABBOX_NAMESPACE_INSTANCE_"+key, value)
+			}
+			cfg := baseConfig()
+			cfg.NamespaceInstance.CLIPath = "~/prior"
+			cfg.NamespaceInstance.TenantID = "tenant-sentinel"
+			cfg.NamespaceInstance.Volumes = []string{"prior"}
+			generic := cfg.WorkRoot
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			want := NamespaceInstanceConfig{CLIPath: filepath.Join(home, "prior"), MachineType: " 8x16 ", Duration: 3 * time.Minute, Region: " us ", Endpoint: "https://example.invalid", Keychain: "fixture", TenantID: "tenant-sentinel", Volumes: tc.want, WorkRoot: "~/guest", Bare: false}
+			if !reflect.DeepEqual(cfg.NamespaceInstance, want) || cfg.WorkRoot != generic {
+				t.Fatalf("env metadata=%#v want %#v", cfg.NamespaceInstance, want)
+			}
+		})
+	}
+	for _, raw := range []string{"", "0s", "-1m", " 2m ", "invalid", "2m"} {
+		t.Run("duration-"+raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_NAMESPACE_INSTANCE_DURATION", raw)
+			t.Setenv("CRABBOX_NAMESPACE_INSTANCE_BARE", "invalid")
+			cfg := baseConfig()
+			cfg.NamespaceInstance.Duration = time.Minute
+			cfg.NamespaceInstance.TenantID = "tenant-sentinel"
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			want := time.Minute
+			if raw == "2m" {
+				want = 2 * time.Minute
+			}
+			if cfg.NamespaceInstance.Duration != want || !cfg.NamespaceInstance.Bare || cfg.NamespaceInstance.TenantID != "tenant-sentinel" {
+				t.Fatal("env tolerant duration/bool")
+			}
+		})
+	}
+}
 
 func TestNamespaceInstanceFileConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
