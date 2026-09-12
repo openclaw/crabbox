@@ -627,47 +627,7 @@ func configShowView(cfg Config) map[string]any {
 			"workRoot":     cfg.XCPNg.WorkRoot,
 			"insecureTLS":  cfg.XCPNg.InsecureTLS,
 		},
-		"parallels": map[string]any{
-			"template":         cfg.Parallels.Template,
-			"source":           cfg.Parallels.Source,
-			"sourceId":         cfg.Parallels.SourceID,
-			"sourceSnapshot":   cfg.Parallels.SourceSnapshot,
-			"sourceSnapshotId": cfg.Parallels.SourceSnapshotID,
-			"cloneMode":        cfg.Parallels.CloneMode,
-			"host":             cfg.Parallels.Host,
-			"hostUser":         cfg.Parallels.HostUser,
-			"hostKey":          tokenState(cfg.Parallels.HostKey),
-			"vmRoot":           cfg.Parallels.VMRoot,
-			"user":             cfg.Parallels.User,
-			"workRoot":         cfg.Parallels.WorkRoot,
-			"startupTimeout":   cfg.Parallels.StartupTimeout.String(),
-			"templates":        redactedParallelsTemplateConfigs(cfg.Parallels.Templates),
-			"hosts":            redactedParallelsHostConfigs(cfg.Parallels.Hosts),
-		},
 	}
-}
-
-func redactedParallelsTemplateConfigs(templates map[string]ParallelsTemplateConfig) map[string]ParallelsTemplateConfig {
-	if templates == nil {
-		return nil
-	}
-	redacted := make(map[string]ParallelsTemplateConfig, len(templates))
-	for name, template := range templates {
-		template.HostKey = tokenState(template.HostKey)
-		redacted[name] = template
-	}
-	return redacted
-}
-
-func redactedParallelsHostConfigs(hosts []ParallelsHostConfig) []ParallelsHostConfig {
-	if hosts == nil {
-		return nil
-	}
-	redacted := append(make([]ParallelsHostConfig, 0, len(hosts)), hosts...)
-	for i := range redacted {
-		redacted[i].Key = tokenState(redacted[i].Key)
-	}
-	return redacted
 }
 
 func writeConfigShowText(w io.Writer, cfg Config) error {
@@ -789,7 +749,9 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 		return err
 	}
 	fmt.Fprintf(w, "xcp_ng api_url=%s username=%s template=%s template_uuid=%s sr=%s sr_uuid=%s network=%s network_uuid=%s host=%s user=%s work_root=%s insecure_tls=%t auth=%s\n", blank(redactedConfigURL(cfg.XCPNg.APIURL), "-"), blank(cfg.XCPNg.Username, "-"), blank(cfg.XCPNg.Template, "-"), blank(cfg.XCPNg.TemplateUUID, "-"), blank(cfg.XCPNg.SR, "-"), blank(cfg.XCPNg.SRUUID, "-"), blank(cfg.XCPNg.Network, "-"), blank(cfg.XCPNg.NetworkUUID, "-"), blank(cfg.XCPNg.Host, "-"), cfg.XCPNg.User, cfg.XCPNg.WorkRoot, cfg.XCPNg.InsecureTLS, tokenState(cfg.XCPNg.Password))
-	fmt.Fprintf(w, "parallels template=%s source=%s source_id=%s snapshot=%s snapshot_id=%s clone_mode=%s host=%s user=%s work_root=%s startup_timeout=%s templates=%d hosts=%d\n", blank(cfg.Parallels.Template, "-"), blank(cfg.Parallels.Source, "-"), blank(cfg.Parallels.SourceID, "-"), blank(cfg.Parallels.SourceSnapshot, "-"), blank(cfg.Parallels.SourceSnapshotID, "-"), cfg.Parallels.CloneMode, blank(cfg.Parallels.Host, "local"), cfg.Parallels.User, cfg.Parallels.WorkRoot, cfg.Parallels.StartupTimeout, len(cfg.Parallels.Templates), len(cfg.Parallels.Hosts))
+	if err := layout.writeSlot(w, "parallels"); err != nil {
+		return err
+	}
 	if err := layout.writeRemaining(w); err != nil {
 		return err
 	}

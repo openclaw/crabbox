@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- AWS: complete cleanup after a verified empty instance response without skipping owned keys, bind new leases to the original account and Region, and retain unresolved historical cleanup when that authority is missing. [PR 1904](https://github.com/openclaw/crabbox/pull/1904). Thanks @vincentkoc.
+
+## 0.57.0 - 2026-09-11
+
 ### Highlights
 
 - **Run commands on existing Daytona fixed-ID leases.** The new `crabbox exec` streams commands without workspace sync or hydration and keeps repository ownership protected until transport cleanup finishes.
@@ -18,7 +22,6 @@
 
 ### Changes
 
-- AWS: complete cleanup after a verified empty instance response without skipping owned keys, bind new leases to the original account and Region, and retain unresolved historical cleanup when that authority is missing. [PR 1904](https://github.com/openclaw/crabbox/pull/1904). Thanks @vincentkoc.
 - Add `crabbox exec` for commands on completed Daytona fixed-ID leases without workspace sync or hydration. Forward non-PTY streams without rewriting their bytes, resolve fresh SSH access, and retain the repository claim through command execution and local transport cleanup. [PR 2119](https://github.com/openclaw/crabbox/pull/2119). Thanks @steipete.
 - Add offline `exec --check` capability discovery and `stop --current-repo` cleanup for supported fixed-ID leases. Validate repository ownership under the same lock used for deletion, so cleanup waits for active `exec` commands and a previous owner cannot delete a lease after another repository reclaims it. [PR 2119](https://github.com/openclaw/crabbox/pull/2119). Thanks @steipete.
 - Let XFCE own its panel, window manager, desktop renderer, and visible-terminal autostart. Apply theme changes through the matching user session, restart only the existing panel when its CSS changes, and leave unchanged styling alone to prevent duplicate components and notification-area warnings. [PR 2117](https://github.com/openclaw/crabbox/pull/2117). Thanks @steipete.
@@ -29,11 +32,12 @@
 ### Maintenance
 
 - Go installation verification: retry recognized checksum-service and module-ZIP HTTP/2 interruptions once during dependency download, retaining checksum enforcement and the unchanged offline install checks. [PR 2113](https://github.com/openclaw/crabbox/pull/2113), [PR 2118](https://github.com/openclaw/crabbox/pull/2118). Thanks @steipete.
-- Move existing local, cloud, and VPS configuration displays into provider adapters while preserving published fields, text positions, redaction, and zero/false/null/empty values. [PR 2110](https://github.com/openclaw/crabbox/pull/2110), [PR 2116](https://github.com/openclaw/crabbox/pull/2116), [PR 2120](https://github.com/openclaw/crabbox/pull/2120), [PR 2121](https://github.com/openclaw/crabbox/pull/2121). Thanks @steipete.
+- Move existing local, cloud, VPS, and runtime configuration displays into provider adapters while preserving published fields, text positions, redaction, and zero/false/null/empty values. [PR 2110](https://github.com/openclaw/crabbox/pull/2110), [PR 2116](https://github.com/openclaw/crabbox/pull/2116), [PR 2120](https://github.com/openclaw/crabbox/pull/2120), [PR 2121](https://github.com/openclaw/crabbox/pull/2121), [PR 2127](https://github.com/openclaw/crabbox/pull/2127). Thanks @steipete.
 - Share default and compact JSON request construction across provider adapters while retaining exact wire formats, nil-body handling, request replay, and provider-owned authentication, timeout, and retry policies. [PR 2122](https://github.com/openclaw/crabbox/pull/2122), [PR 2124](https://github.com/openclaw/crabbox/pull/2124), [PR 2125](https://github.com/openclaw/crabbox/pull/2125). Thanks @steipete.
 - Share buffered JSON response decoding for E2B, CubeSandbox, and Azure Dynamic Sessions while keeping body closing, successful header copies, and typed API errors in their adapters. [PR 2126](https://github.com/openclaw/crabbox/pull/2126). Thanks @steipete.
 - Reuse the shared exact tag codecs in DigitalOcean, Linode, and Scaleway without changing their tag formats. [PR 2091](https://github.com/openclaw/crabbox/pull/2091). Thanks @vincentkoc.
 - Select Linode paginated resource types at their call sites, preserving page traversal, ordering, duplicates, and results collected before a later page fails. [PR 2123](https://github.com/openclaw/crabbox/pull/2123). Thanks @steipete.
+- Reuse shared loopback-host validation and request-envelope test assertions while preserving URL validation errors and exact wire checks. [PR 2129](https://github.com/openclaw/crabbox/pull/2129), [PR 2130](https://github.com/openclaw/crabbox/pull/2130). Thanks @vincentkoc and @steipete.
 
 ## 0.56.0 - 2026-09-11
 

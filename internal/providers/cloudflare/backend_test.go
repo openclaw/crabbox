@@ -20,6 +20,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestCloudflareProviderSpec(t *testing.T) {
@@ -2141,51 +2142,6 @@ func TestCloudflareStreamCancellationAtCleanEOF(t *testing.T) {
 	}
 }
 
-type adoptionRoundTripper func(*http.Request) (*http.Response, error)
-
-func (f adoptionRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
-func assertAdoptionRequest(t *testing.T, req *http.Request, ctx context.Context, endpoint, body string, headers http.Header) {
-	t.Helper()
-	if req.Context() != ctx || req.Method != http.MethodPost || req.URL.String() != endpoint {
-		t.Fatalf("request context/method/URL mismatch: %s %s", req.Method, req.URL)
-	}
-	if !reflect.DeepEqual(req.Header, headers) {
-		t.Fatalf("headers=%v want %v", req.Header, headers)
-	}
-	if req.ContentLength != int64(len(body)) || (req.Body == nil) != (body == "") {
-		t.Fatalf("body metadata length=%d nil=%v want length=%d", req.ContentLength, req.Body == nil, len(body))
-	}
-	if body == "" {
-		if req.GetBody != nil {
-			t.Fatal("nil body gained replay")
-		}
-		return
-	}
-	data, err := io.ReadAll(req.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != body {
-		t.Fatalf("body=%q want %q", data, body)
-	}
-	if req.GetBody == nil {
-		t.Fatal("encoded body lost replay")
-	}
-	replay, err := req.GetBody()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer replay.Close()
-	data, err = io.ReadAll(replay)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != body {
-		t.Fatalf("replay=%q want %q", data, body)
-	}
-}
-
 func TestJSONRequestAdoptionEnvelope(t *testing.T) {
 	type key struct{}
 	ctx := context.WithValue(context.Background(), key{}, "capture")
@@ -2216,9 +2172,9 @@ func TestJSONRequestAdoptionEnvelope(t *testing.T) {
 			if tc.body != nil {
 				headers.Set("Content-Type", "application/json")
 			}
-			transport := &http.Client{Transport: adoptionRoundTripper(func(req *http.Request) (*http.Response, error) {
+			transport := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
 				calls++
-				assertAdoptionRequest(t, req, ctx, base+endpoint, tc.want, headers)
+				testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, base+endpoint, tc.want, headers)
 				if tc.fail {
 					return nil, sentinel
 				}
@@ -2247,9 +2203,9 @@ func TestJSONRequestAdoptionConcreteEnvelope(t *testing.T) {
 	sentinel := errors.New("synthetic captured concrete request")
 	calls := 0
 	headers := http.Header{"Authorization": []string{"Bearer synthetic-token"}, "Content-Type": []string{"application/json"}}
-	transport := &http.Client{Transport: adoptionRoundTripper(func(req *http.Request) (*http.Response, error) {
+	transport := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		calls++
-		assertAdoptionRequest(t, req, ctx, "https://api.example.test/base/v1/sandboxes/sandbox%20one/exec-stream?instanceType=large+size", "{\"command\":\"\\u003c\\u0026\\u003e\",\"cwd\":\"/work\",\"env\":{\"A\":\"B\"},\"timeoutMs\":7}\n", headers)
+		testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, "https://api.example.test/base/v1/sandboxes/sandbox%20one/exec-stream?instanceType=large+size", "{\"command\":\"\\u003c\\u0026\\u003e\",\"cwd\":\"/work\",\"env\":{\"A\":\"B\"},\"timeoutMs\":7}\n", headers)
 		return nil, sentinel
 	})}
 	c := &cloudflareClient{baseURL: "https://api.example.test/base", token: "synthetic-token", instanceType: "large size", http: transport}
