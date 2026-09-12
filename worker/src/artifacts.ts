@@ -1,6 +1,6 @@
 import { AwsClient } from "aws4fetch";
 
-import { base64URL } from "./auth";
+import { base64URL } from "./encoding";
 import type { Env } from "./types";
 
 export interface ArtifactUploadRequest {

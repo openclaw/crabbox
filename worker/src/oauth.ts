@@ -4,12 +4,12 @@ import {
   openPendingGitHubCredential,
   portalTokenExpiresAt,
   sealPendingGitHubCredential,
-  sha256Hex,
   userTokenExpiresAt,
   userTokenSigningConfigurationError,
 } from "./auth";
 import { legacyPortalSessionCookieName, portalSessionCookieName } from "./cookies";
 import type { CoordinatorRuntime, CoordinatorStorage } from "./coordinator-runtime";
+import { bytesToHex, sha256Hex } from "./encoding";
 import {
   GitHubAuthorizationError,
   GitHubTransientError,
@@ -858,7 +858,7 @@ function oauthStateKey(state: string): string {
 function randomID(prefix: string): string {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
-  return `${prefix}_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  return `${prefix}_${bytesToHex(bytes)}`;
 }
 
 function html(

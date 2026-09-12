@@ -1,5 +1,5 @@
-import { sha256Hex } from "./auth";
 import type { LeaseConfig } from "./config";
+import { sha256Hex } from "./encoding";
 import { redactDiagnosticSecrets } from "./http";
 import { leaseProviderLabels, providerMachineOwnedByLease } from "./provider-labels";
 import {

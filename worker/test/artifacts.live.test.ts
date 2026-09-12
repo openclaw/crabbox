@@ -2,7 +2,7 @@ import { AwsClient } from "aws4fetch";
 import { describe, expect, it } from "vitest";
 
 import { artifactUploadResponse } from "../src/artifacts";
-import { sha256Hex } from "../src/auth";
+import { sha256Hex } from "../src/encoding";
 import type { Env } from "../src/types";
 
 const liveAccessKeyID = process.env.CRABBOX_ARTIFACTS_ACCESS_KEY_ID;

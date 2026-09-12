@@ -1,5 +1,5 @@
-import { sha256Hex } from "./auth";
 import type { CoordinatorStorage, CoordinatorStorageView } from "./coordinator-runtime";
+import { sha256Hex } from "./encoding";
 import { orgMatchesForAccounting, sameOrgIdentityKey } from "./org-identity";
 import type {
   CoordinatorCheckpointCreateClaim,

@@ -4,7 +4,7 @@ import { Script, createContext } from "node:vm";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { adminGrantVersion, issueUserToken, sha256Hex } from "../src/auth";
+import { adminGrantVersion, issueUserToken } from "../src/auth";
 import { EC2SpotClient, AWSLeaseAuthorityError } from "../src/aws";
 import { AzureClient, azureOwnedDeleteClaimKey } from "../src/azure";
 import { codeOriginForLease } from "../src/code-origin";
@@ -26,6 +26,7 @@ import {
   type CoordinatorStorageView,
   type CoordinatorWebSocketUpgradeOptions,
 } from "../src/coordinator-runtime";
+import { sha256Hex } from "../src/encoding";
 import {
   AWSProvider,
   AzureProvider,

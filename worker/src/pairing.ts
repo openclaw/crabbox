@@ -1,4 +1,5 @@
-import { base64URL, sha256Hex, type GitHubUserGrant } from "./auth";
+import type { GitHubUserGrant } from "./auth";
+import { base64URL, sha256Hex } from "./encoding";
 import { bearerToken, pathParts } from "./http";
 import { timingSafeEqual } from "./timing-safe";
 import type { Env } from "./types";

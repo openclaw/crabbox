@@ -42,7 +42,6 @@ import {
   githubUserIsAdmin,
   isAdminRequest,
   requestWithAuthContext,
-  sha256Hex,
   verifiedPortalTokenExpiresAtForRevocation,
   verifiedUserTokenExpiresAtForRevocation,
   type AuthContext,
@@ -178,6 +177,7 @@ import {
   isDaytonaNotFound,
   type DaytonaSSHEndpoint,
 } from "./daytona";
+import { base64ToBytes, bytesToBase64, bytesToHex, sha256Hex } from "./encoding";
 import {
   GCPClient,
   gcpMachineImageNotFound,
@@ -19961,8 +19961,7 @@ async function readyPoolTaggedDigest(
     payload.set(field.encoded, offset);
     offset += field.encoded.byteLength;
   }
-  const digest = await crypto.subtle.digest("SHA-256", payload);
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return sha256Hex(payload);
 }
 
 function validUnicodeScalarString(value: string): boolean {
@@ -21346,7 +21345,7 @@ function runtimeAdapterLegacyDeleteCompletion(
 function newLeaseID(): string {
   const bytes = new Uint8Array(6);
   crypto.getRandomValues(bytes);
-  return `cbx_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  return `cbx_${bytesToHex(bytes)}`;
 }
 
 function newCreateAttemptGeneration(): string {
@@ -22848,13 +22847,13 @@ async function workspaceResponseError(response: Response, fallback: string): Pro
 function newRunID(): string {
   const bytes = new Uint8Array(6);
   crypto.getRandomValues(bytes);
-  return `run_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  return `run_${bytesToHex(bytes)}`;
 }
 
 function newWebVNCSessionID(prefix: "agent" | "viewer"): string {
   const bytes = new Uint8Array(8);
   crypto.getRandomValues(bytes);
-  return `${prefix}_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  return `${prefix}_${bytesToHex(bytes)}`;
 }
 
 function newWebVNCPortalViewerTicket(): string {
@@ -22868,7 +22867,7 @@ function newWebVNCPortalViewerSession(): string {
 function newRuntimeAdapterTicket(): string {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
-  return `adapter_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  return `adapter_${bytesToHex(bytes)}`;
 }
 
 function newNativeVNCTicket(): string {
@@ -22890,13 +22889,13 @@ function newCodeViewerSession(): string {
 function randomHexToken(prefix: string): string {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
-  return `${prefix}${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  return `${prefix}${bytesToHex(bytes)}`;
 }
 
 function newEgressSessionID(): string {
   const bytes = new Uint8Array(6);
   crypto.getRandomValues(bytes);
-  return `egress_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  return `egress_${bytesToHex(bytes)}`;
 }
 
 function egressSocketKey(leaseID: string, sessionID: string): string {
@@ -24510,23 +24509,6 @@ function sendControl(socket: WebSocket, payload: unknown): void {
   }
 }
 
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary);
-}
-
-function base64ToBytes(value: string): Uint8Array {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
 function identifierMatchesLease(identifier: string, lease: LeaseRecord): boolean {
   return (
     identifier === lease.id || normalizeLeaseSlug(identifier) === normalizeLeaseSlug(lease.slug)
@@ -24704,8 +24686,7 @@ async function workspaceSSHHostKeyFingerprint(publicKey: string): Promise<string
     throw new Error("workspace SSH host public key is invalid");
   }
   const raw = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
-  const digest = await crypto.subtle.digest("SHA-256", raw);
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return sha256Hex(raw);
 }
 
 function requestSourceCIDRs(request: Request): string[] {

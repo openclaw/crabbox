@@ -1,3 +1,4 @@
+import { base64ToBytes, bytesToBase64 } from "./encoding";
 import type { Env } from "./types";
 
 const encoder = new TextEncoder();
@@ -54,7 +55,11 @@ export async function sealProvisioningMaterial(
       JSON.stringify({ adminPassword: material.adminPassword, bootstrap: material.bootstrap }),
     ),
   );
-  return { schema: 1, iv: encode(iv), ciphertext: encode(new Uint8Array(ciphertext)) };
+  return {
+    schema: 1,
+    iv: bytesToBase64(iv),
+    ciphertext: bytesToBase64(new Uint8Array(ciphertext)),
+  };
 }
 
 export async function openProvisioningMaterial(
@@ -73,9 +78,9 @@ export async function openProvisioningMaterial(
     }
     const key = await encryptionKey(env, ["decrypt"]);
     const plaintext = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: decode(sealed.iv), additionalData: aad(binding) },
+      { name: "AES-GCM", iv: base64ToBytes(sealed.iv), additionalData: aad(binding) },
       key,
-      decode(sealed.ciphertext),
+      base64ToBytes(sealed.ciphertext),
     );
     const material: ProvisioningMaterial = JSON.parse(
       new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(plaintext),
@@ -122,12 +127,4 @@ async function encryptionKey(env: Env, usages: ("encrypt" | "decrypt")[]): Promi
     encoder.encode(`crabbox/provisioning/aes-gcm/v1\0${env.CRABBOX_SESSION_SECRET}`),
   );
   return crypto.subtle.importKey("raw", material, "AES-GCM", false, usages);
-}
-
-function encode(bytes: Uint8Array): string {
-  return btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join(""));
-}
-
-function decode(value: string): Uint8Array<ArrayBuffer> {
-  return Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
 }

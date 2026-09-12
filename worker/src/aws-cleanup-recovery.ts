@@ -1,5 +1,5 @@
-import { sha256Hex } from "./auth";
 import { sanitizeAWSRegion } from "./aws-region";
+import { sha256Hex } from "./encoding";
 import { providerKeyForLease } from "./provider-key";
 import { providerLabelsOwnedByLease } from "./provider-labels";
 import { ProviderResourceUnresolvedError } from "./provider-provisioning";

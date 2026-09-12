@@ -4,13 +4,13 @@ import coordinator, { isAuthorized } from "../src";
 import {
   adminGrantVersion,
   authenticateRequest,
-  base64URL,
   githubUserGrantIsCurrent,
   issueUserToken,
   requestWithAuthContext,
 } from "../src/auth";
 import { codeOriginForLease } from "../src/code-origin";
 import { prepareCoordinatorRequest } from "../src/coordinator-entry";
+import { base64URL } from "../src/encoding";
 import { errorMessage, json, redactDiagnosticSecrets, requestOwner } from "../src/http";
 import { MISSING_ORG_KEY, requestOrg, requestOrgLabel } from "../src/org-identity";
 import type { Env } from "../src/types";

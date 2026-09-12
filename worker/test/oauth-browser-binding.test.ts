@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { sha256Hex } from "../src/auth";
 import type { CoordinatorStorage, CoordinatorStorageView } from "../src/coordinator-runtime";
+import { sha256Hex } from "../src/encoding";
 import { githubAuthRoute, githubPortalLogin } from "../src/oauth";
 import type { Env } from "../src/types";
 

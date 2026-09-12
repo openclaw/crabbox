@@ -1,4 +1,4 @@
-import { sha256Hex } from "./auth";
+import { sha256Hex } from "./encoding";
 import type { Env } from "./types";
 
 const placeholder = "{lease}";

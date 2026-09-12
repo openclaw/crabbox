@@ -2,7 +2,6 @@ import { AwsClient } from "aws4fetch";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { XMLParser } from "fast-xml-parser";
 
-import { sha256Hex } from "./auth";
 import {
   awsQualificationAttestationVersion,
   awsQualificationInstanceTypes,
@@ -19,6 +18,7 @@ import {
   type AWSQualificationService,
 } from "./aws-qualification-contract";
 import { requireAWSRegion } from "./aws-region";
+import { sha256Hex } from "./encoding";
 import type { AWSCredentials } from "./types";
 
 const ec2Version = "2016-11-15";

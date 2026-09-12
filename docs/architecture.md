@@ -187,6 +187,11 @@ later request can retry. Token acquisition, refresh margins, expiry calculation,
 and metadata-server trust/retry rules remain adapter-owned. Caches are neither
 global nor persisted, and do not fall back to expired credentials.
 
+Binary hex/base64 encoding and SHA-256 formatting live in `worker/src/encoding.ts`,
+independent of authentication. Text digests use UTF-8; binary digests preserve
+the supplied view and byte offsets. Token formats, validation, signing, and
+encryption key derivation remain with the protocols that own them.
+
 Runtime-specific persistence and scheduling stay behind `CoordinatorRuntime`:
 
 | Runtime    | Durable state               | Scheduling                                     | WebSockets                               |
