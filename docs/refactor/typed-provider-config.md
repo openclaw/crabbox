@@ -735,6 +735,16 @@ infer trust from filenames. The other nine fields retain repository support.
 CodeSandbox's provider aliases, generic sizing rejection, and semantic validation
 remain in the provider wrapper, including their existing order.
 
+Its runtime fallback helpers also use the generated bridge-command, SDK-package,
+operation-timeout, doctor-list-limit, and workdir defaults. The provider still
+owns when to apply them: strings are trimmed before falling back, and the two
+integer helpers fall back for nonpositive values. The fixed SDK workspace mount
+`/project/workspace` is a separate platform boundary, not a configurable default;
+changing the default workdir must not move archive staging or mount-replacement
+behavior. Cleanup budgets and command-timeout extensions remain independent.
+The Go list producer sends the resolved positive limit to the embedded bridge;
+the bridge does not choose a second list default.
+
 CUA's fourteen runtime/flag fields include thirteen YAML fields. Its `APIURL`
 retains environment/flag-only input and is absent even from trusted user YAML.
 `CRABBOX_CUA_API_URL` retains precedence over `CUA_BASE_URL`. The four bridge/SDK

@@ -547,7 +547,7 @@ try {
     const { CodeSandbox, VMTier } = sdkModule;
     const sdk = new CodeSandbox(token);
     if (req.operation === "list_sandboxes") {
-      const listed = await callAny(sdk.sandboxes || sdk, ["list", "listSandboxes"], { limit: Number(req.limit || 1) });
+      const listed = await callAny(sdk.sandboxes || sdk, ["list", "listSandboxes"], { limit: Number(req.limit) });
       const items = listed.sandboxes || listed.items || listed.results || listed || [];
       const runningIDs = await runningSandboxIDs(sdk);
       const sandboxes = Array.from(items).map((sandbox) => normalizeSandbox(sandbox, runningIDs.has(String(sandbox && sandbox.id || "")) ? "running" : ""));

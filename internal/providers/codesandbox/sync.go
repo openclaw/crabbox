@@ -17,7 +17,7 @@ func (b *codeSandboxBackend) syncWorkspace(ctx context.Context, api codeSandboxA
 		ForceSyncLarge:      req.ForceSyncLarge,
 		Workdir:             workdir,
 		TempPattern:         "crabbox-codesandbox-sync-*.tgz",
-		RemoteArchiveDir:    defaultWorkdir,
+		RemoteArchiveDir:    codeSandboxWorkspaceRoot,
 		RemoteArchivePrefix: ".crabbox-codesandbox-sync-",
 		PhaseName:           "codesandbox_sync",
 		Provider:            providerName,
@@ -31,7 +31,7 @@ func (b *codeSandboxBackend) syncWorkspace(ctx context.Context, api codeSandboxA
 			return b.execShell(execCtx, api, sandboxID, command)
 		},
 	}
-	if workdir == defaultWorkdir {
+	if workdir == codeSandboxWorkspaceRoot {
 		syncReq.Replace = func(replaceCtx context.Context, stagingDir, workdir string) error {
 			return b.execShell(replaceCtx, api, sandboxID, codeSandboxMountReplaceCommand(stagingDir, workdir))
 		}

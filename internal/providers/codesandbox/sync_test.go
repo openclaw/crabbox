@@ -63,7 +63,7 @@ func TestSpecAllowsArchiveSyncOptionsButRejectsUnsupportedDelegatedOptions(t *te
 }
 
 func TestCodeSandboxMountReplaceCommandReplacesContentsNotMount(t *testing.T) {
-	command := codeSandboxMountReplaceCommand("/project/.workspace.crabbox-sync-fixed", defaultWorkdir)
+	command := codeSandboxMountReplaceCommand("/project/.workspace.crabbox-sync-fixed", codeSandboxWorkspaceRoot)
 	for _, want := range []string{
 		"rollback()",
 		"mv -- \"$entry\" '/project/workspace/.workspace.crabbox-sync-fixed.previous/'",

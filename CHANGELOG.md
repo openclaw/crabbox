@@ -200,6 +200,8 @@
 - Consolidate generated CodeSandbox, CUA, and OpenSandbox configuration bindings while preserving defaults, precedence, validation timing, trusted-only bridge settings, API URL restrictions, and CLI-only stale-claim cleanup. [PR 1988](https://github.com/openclaw/crabbox/pull/1988), [PR 1989](https://github.com/openclaw/crabbox/pull/1989), [PR 1990](https://github.com/openclaw/crabbox/pull/1990). Thanks @steipete.
 - Keep CUA runtime and Python bridge defaults aligned with declared configuration, preserving custom SDK imports, whitespace fallback behavior, and read-only diagnostics. [PR 1992](https://github.com/openclaw/crabbox/pull/1992). Thanks @steipete.
 
+- Keep CodeSandbox runtime fallback defaults aligned with declared configuration while preserving the fixed SDK workspace boundary and operation-specific budgets. [PR 1991](https://github.com/openclaw/crabbox/pull/1991). Thanks @steipete.
+
 ## 0.52.0 - 2026-09-07
 
 ### Highlights

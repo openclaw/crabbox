@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -192,7 +193,7 @@ func newSandboxTitle(repo Repo) string {
 func codeSandboxWorkdir(cfg Config) (string, error) {
 	workdir := strings.TrimSpace(cfg.CodeSandbox.Workdir)
 	if workdir == "" {
-		workdir = defaultWorkdir
+		workdir = core.CodeSandboxConfigDefaultWorkdir
 	}
 	if strings.IndexFunc(workdir, func(r rune) bool { return r == 0 || (!utf8.ValidRune(r)) || (r < 0x20) }) >= 0 {
 		return "", exit(2, "codesandbox workdir contains control characters")
@@ -203,10 +204,10 @@ func codeSandboxWorkdir(cfg Config) (string, error) {
 	}
 	switch clean {
 	case "/", "/project":
-		return "", exit(2, "codesandbox workdir %q is too broad; choose a path under %s", clean, defaultWorkdir)
+		return "", exit(2, "codesandbox workdir %q is too broad; choose a path under %s", clean, codeSandboxWorkspaceRoot)
 	}
-	if clean != defaultWorkdir && !strings.HasPrefix(clean, defaultWorkdir+"/") {
-		return "", exit(2, "codesandbox workdir %q must be under %s", clean, defaultWorkdir)
+	if clean != codeSandboxWorkspaceRoot && !strings.HasPrefix(clean, codeSandboxWorkspaceRoot+"/") {
+		return "", exit(2, "codesandbox workdir %q must be under %s", clean, codeSandboxWorkspaceRoot)
 	}
 	return clean, nil
 }
