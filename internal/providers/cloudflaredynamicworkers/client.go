@@ -170,7 +170,7 @@ func loaderURL(cfg core.Config) (string, error) {
 	if parsed.User != nil {
 		return "", core.Exit(2, "%s loader URL must not include userinfo", providerName)
 	}
-	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
+	if parsed.Scheme != "https" && !shared.IsLoopbackHTTPURL(parsed) {
 		return "", core.Exit(2, "%s loader URL %q must use https unless it targets localhost", providerName, shared.EndpointURLForError(raw))
 	}
 	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
@@ -271,10 +271,6 @@ func asciiUpperHex(value byte) byte {
 		return value - ('a' - 'A')
 	}
 	return value
-}
-
-func isLoopbackHTTPURL(parsed *url.URL) bool {
-	return shared.IsLoopbackHTTPURL(parsed)
 }
 
 func defaultHTTPClient(cfg core.Config) (*http.Client, error) {
@@ -538,7 +534,7 @@ func (c *client) doJSON(ctx context.Context, method, endpoint string, input any,
 		}
 		if method == http.MethodGet && retryableReadStatus(resp.StatusCode) && attempt < len(c.readRetryDelays) {
 			_ = resp.Body.Close()
-			if err := waitForRetry(ctx, c.readRetryDelays[attempt]); err != nil {
+			if err := core.SleepContext(ctx, c.readRetryDelays[attempt]); err != nil {
 				return err
 			}
 			continue
@@ -560,17 +556,6 @@ func retryableReadStatus(statusCode int) bool {
 		return true
 	default:
 		return false
-	}
-}
-
-func waitForRetry(ctx context.Context, delay time.Duration) error {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
 	}
 }
 

@@ -2,8 +2,6 @@ package freestyle
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -534,19 +532,11 @@ func newFreestyleSandboxName(repo core.Repo) string {
 		base = "crabbox"
 	}
 	base = strings.TrimPrefix(base, freestyleNamePrefix)
-	return freestyleNamePrefix + base + "-" + freestyleRandomSuffix()
+	return freestyleNamePrefix + base + "-" + shared.RandomSuffix()
 }
 
 func isCrabboxFreestyleSandboxName(name string) bool {
 	return name == core.NormalizeLeaseSlug(name) && strings.HasPrefix(name, freestyleNamePrefix)
-}
-
-func freestyleRandomSuffix() string {
-	var b [3]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("%x", time.Now().UnixNano())[:6]
-	}
-	return hex.EncodeToString(b[:])
 }
 
 func (b *freestyleBackend) now() time.Time {

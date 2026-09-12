@@ -158,7 +158,7 @@ func newOpenSandboxClient(cfg core.Config, rt core.Runtime) (openSandboxClient, 
 	if err != nil {
 		return nil, err
 	}
-	apiKey := firstNonEmpty(
+	apiKey := shared.FirstNonBlankTrimmed(
 		os.Getenv("CRABBOX_OPENSANDBOX_API_KEY"),
 		os.Getenv("OPEN_SANDBOX_API_KEY"),
 	)
@@ -187,7 +187,7 @@ func validateOpenSandboxAPIURL(raw string) (string, error) {
 		return "", core.Exit(2, "provider=opensandbox API URL must not contain userinfo, query parameters, or a fragment")
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && shared.IsLoopbackHost(parsed.Hostname())) {
 		return "", core.Exit(2, "provider=opensandbox API URL must use HTTPS except for loopback development endpoints")
 	}
 	host := shared.LowercaseHostname(parsed.Hostname())
@@ -208,10 +208,6 @@ func validateOpenSandboxAPIURL(raw string) (string, error) {
 	}
 	parsed.RawPath = ""
 	return strings.TrimRight(parsed.String(), "/"), nil
-}
-
-func isLoopbackHost(host string) bool {
-	return shared.IsLoopbackHost(host)
 }
 
 func secureOpenSandboxHTTPClient(source *http.Client) *http.Client {
@@ -986,7 +982,7 @@ func validateOpenSandboxExecdURL(raw, defaultProtocol string) (string, string, e
 	if parsed.User != nil || parsed.Fragment != "" {
 		return "", "", core.Exit(5, "opensandbox execd endpoint must not contain userinfo or a fragment")
 	}
-	if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
+	if parsed.Scheme == "http" && !shared.IsLoopbackHost(parsed.Hostname()) {
 		return "", "", core.Exit(5, "opensandbox execd endpoint host %q must use HTTPS unless it is loopback", parsed.Host)
 	}
 	rawQuery := parsed.RawQuery
@@ -1029,15 +1025,6 @@ func sdkSandboxInfo(info *sdk.SandboxInfo) sandboxInfo {
 func isOpenSandboxNotFound(err error) bool {
 	var apiErr *sdk.APIError
 	return errors.Is(err, errOpenSandboxNotFound) || (errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound)
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
 }
 
 func cloneStringMap(in map[string]string) map[string]string {

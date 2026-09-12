@@ -87,7 +87,7 @@ func newSandboxName(repo core.Repo) string {
 	if base == "" {
 		base = "crabbox"
 	}
-	return namePrefix + base + "-" + randomSuffix()
+	return namePrefix + base + "-" + shared.RandomSuffix()
 }
 
 func resolveLeaseID(identifier, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL, workspace string) (string, string, string, error) {
@@ -198,8 +198,4 @@ func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
 		return primary
 	}
 	return fallback
-}
-
-func randomSuffix() string {
-	return shared.RandomSuffix()
 }

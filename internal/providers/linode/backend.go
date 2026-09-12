@@ -469,7 +469,7 @@ func (b *linodeLeaseBackend) targetFromLinode(item linodeInstance, req core.Reso
 		if expectedAccountID != accountID {
 			return core.LeaseTarget{}, core.Exit(3, "linode account mismatch: current account %s does not match lease account %s", accountID, expectedAccountID)
 		}
-		liveCloudID := firstNonBlank(server.CloudID, strconv.FormatInt(server.ID, 10))
+		liveCloudID := shared.FirstNonBlank(server.CloudID, strconv.FormatInt(server.ID, 10))
 		if claim.CloudID != "" && claim.CloudID != liveCloudID {
 			return core.LeaseTarget{}, core.Exit(2, "refusing to resolve Linode instance %d from stale local claim", server.ID)
 		}
@@ -647,7 +647,7 @@ func (b *linodeLeaseBackend) updateFencedLinodeMetadata(ctx context.Context, lea
 				labels[key] = value
 			}
 		} else {
-			applyTailscaleMetadata(labels, *meta)
+			shared.ApplyTailscaleMetadata(labels, *meta)
 		}
 		labels[linodeAccountLabel] = accountID
 		if err := client.UpdateLinodeTags(providerCtx, server.ID, replaceCrabboxTags(item.Tags, tagsFromLabels(labels))); err != nil {
@@ -819,7 +819,7 @@ func validateCleanupClaim(server core.Server, claim core.LeaseClaim, liveLinodeV
 	if claim.LeaseID != leaseID || claim.Provider == "" {
 		return core.Exit(2, "linode lease claim is incomplete for lease=%s", leaseID)
 	}
-	cloudID := firstNonBlank(server.CloudID, strconv.FormatInt(server.ID, 10))
+	cloudID := shared.FirstNonBlank(server.CloudID, strconv.FormatInt(server.ID, 10))
 	if claim.Provider == providerName && claim.CloudID != "" && claim.CloudID != cloudID {
 		return core.Exit(2, "refusing to release Linode instance %d from stale local claim", server.ID)
 	}
@@ -927,10 +927,6 @@ func appendLinodeIfMissing(linodes []linodeInstance, item linodeInstance) []lino
 	return append(linodes, item)
 }
 
-func applyTailscaleMetadata(labels map[string]string, meta core.TailscaleMetadata) {
-	shared.ApplyTailscaleMetadata(labels, meta)
-}
-
 func (b *linodeLeaseBackend) waitForLinodeIP(ctx context.Context, client linodeAPI, id int64, timeout time.Duration) (linodeInstance, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -987,7 +983,7 @@ func serverFromLinode(item linodeInstance, cfg core.Config) core.Server {
 		Labels:   labels,
 	}
 	server.PublicNet.IPv4.IP = publicIPv4(item)
-	server.ServerType.Name = firstNonBlank(item.Type, cfg.ServerType)
+	server.ServerType.Name = shared.FirstNonBlank(item.Type, cfg.ServerType)
 	return server
 }
 
@@ -1093,10 +1089,6 @@ func applyLinodeDefaults(cfg *core.Config) {
 		cfg.SSHPort = "22"
 	}
 	cfg.SSHFallbackPorts = nil
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlank(values...)
 }
 
 func isLinodeNotFound(err error) bool {

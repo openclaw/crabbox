@@ -670,7 +670,7 @@ func (b *backend) cleanupCreateFailure(ctx context.Context, client Client, sandb
 		if strings.TrimSpace(localLeaseID) != "" {
 			return errors.Join(cause, fmt.Errorf("blaxel cleanup failed for sandbox %s; local claim %s remains for cleanup: %w", sandboxID, localLeaseID, cleanupErr))
 		}
-		recoveryID := recoveryPrefix + randomSuffix()
+		recoveryID := recoveryPrefix + shared.RandomSuffix()
 		if claimErr := core.ClaimLeaseForRepoProviderScopePond(recoveryID, "", providerName, claimScope, "", repo.Root, blaxelRecoveryLifetime(b.cfg), true); claimErr != nil {
 			return errors.Join(cause, fmt.Errorf("blaxel cleanup failed for sandbox %s and recovery claim failed: %v; delete it in the Blaxel console: %w", sandboxID, claimErr, cleanupErr))
 		}

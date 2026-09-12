@@ -162,7 +162,7 @@ func validateFastAPICloudAPIURL(raw string) (string, error) {
 		return "", core.Exit(2, "provider=%s API URL must not contain userinfo, query parameters, or a fragment", providerName)
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
+	if parsed.Scheme != "https" && !shared.IsLoopbackHTTPURL(parsed) {
 		return "", core.Exit(2, "provider=%s API URL must use HTTPS except for loopback development endpoints", providerName)
 	}
 	return apiURL, nil
@@ -334,8 +334,4 @@ func (c *fastAPICloudClient) endpoint(apiPath string, params url.Values) (string
 		parsed.RawQuery = params.Encode()
 	}
 	return parsed.String(), nil
-}
-
-func isLoopbackHTTPURL(parsed *url.URL) bool {
-	return shared.IsLoopbackHTTPURL(parsed)
 }

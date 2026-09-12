@@ -425,7 +425,7 @@ func (b *Backend) UpdateTailscaleMetadata(ctx context.Context, lease core.LeaseT
 	if accountID := strings.TrimSpace(server.Labels[accountLabel]); accountID != "" {
 		labels[accountLabel] = accountID
 	}
-	applyTailscaleMetadata(labels, meta)
+	shared.ApplyTailscaleMetadata(labels, meta)
 	if err := client.ReplaceInstanceTags(ctx, server.CloudID, item.Tags, tagsFromLabels(labels)); err != nil {
 		return core.Server{}, err
 	}
@@ -556,7 +556,7 @@ func serverFromInstance(item instance, cfg core.Config) core.Server {
 		Labels:   labels,
 	}
 	server.PublicNet.IPv4.IP = publicIPv4(item)
-	server.ServerType.Name = firstNonBlank(item.InstanceType, cfg.ServerType, serverTypeForConfig(cfg))
+	server.ServerType.Name = shared.FirstNonBlankTrimmed(item.InstanceType, cfg.ServerType, serverTypeForConfig(cfg))
 	return server
 }
 

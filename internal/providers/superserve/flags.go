@@ -143,7 +143,7 @@ func validateSuperserveBaseURL(raw string) (string, error) {
 		return "", core.Exit(2, "provider=superserve base URL must not contain userinfo, query parameters, or a fragment")
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && shared.IsLoopbackHost(parsed.Hostname())) {
 		return "", core.Exit(2, "provider=superserve base URL must use HTTPS except for loopback development endpoints")
 	}
 	parsed.Host = shared.CanonicalHostPort(parsed)
@@ -165,10 +165,6 @@ func superserveWorkdir(cfg core.Config) (string, error) {
 		return "", core.Exit(2, "superserve workdir %q is too broad; choose a dedicated subdirectory", clean)
 	}
 	return clean, nil
-}
-
-func isLoopbackHost(host string) bool {
-	return shared.IsLoopbackHost(host)
 }
 
 func splitSuperserveList(value string) []string {

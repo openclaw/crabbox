@@ -132,7 +132,7 @@ func (i *instance) UnmarshalJSON(data []byte) error {
 // app_id is preferred (confirmed working against live `cvms get/delete
 // --cvm-id`); vm_uuid, instance_id, and name are accepted fallbacks.
 func (i instance) cloudID() string {
-	return firstNonBlank(i.AppID, i.VMUUID, i.ID, i.InstanceID, i.Name)
+	return shared.FirstNonBlankTrimmed(i.AppID, i.VMUUID, i.ID, i.InstanceID, i.Name)
 }
 
 // matchesID reports whether identifier names this CVM under any of the handles
@@ -498,7 +498,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		// stored one. b.lease()/mergeClaimLabels surfaced the authoritative claim.Slug
 		// onto lease.Server.Labels["slug"], so prefer that, and never overwrite a
 		// non-empty stored slug with a blank.
-		slug := firstNonBlank(lease.Server.Labels["slug"], item.Labels["slug"])
+		slug := shared.FirstNonBlankTrimmed(lease.Server.Labels["slug"], item.Labels["slug"])
 		if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 			return core.LeaseTarget{}, err
 		}
@@ -623,7 +623,7 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 		// a blank server.Labels["slug"] (e.g. a lease target whose labels lost it)
 		// would WIPE the stored slug on every idle keepalive. Prefer the existing
 		// claim's slug so Touch never blanks it.
-		slug := firstNonBlank(server.Labels["slug"], claim.Slug)
+		slug := shared.FirstNonBlankTrimmed(server.Labels["slug"], claim.Slug)
 		if ok {
 			if claim.RepoRoot != "" {
 				_, err = core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, req.Lease.SSH, claim.RepoRoot, idleTimeout, false, claim, true)
@@ -1179,11 +1179,11 @@ func (b *backend) server(item instance, cfg core.Config) core.Server {
 	if labels["state"] == "" {
 		labels["state"] = phalaState(item.Status)
 	}
-	labels["server_type"] = firstNonBlank(labels["server_type"], item.InstanceType, cfg.ServerType)
+	labels["server_type"] = shared.FirstNonBlankTrimmed(labels["server_type"], item.InstanceType, cfg.ServerType)
 	server := core.Server{
 		CloudID:  item.cloudID(),
 		Provider: providerName,
-		Name:     firstNonBlank(labels["slug"], item.Name, item.cloudID()),
+		Name:     shared.FirstNonBlankTrimmed(labels["slug"], item.Name, item.cloudID()),
 		Status:   labels["state"],
 		Labels:   labels,
 	}
@@ -1579,7 +1579,7 @@ func (g *gatewayGetOutput) UnmarshalJSON(data []byte) error {
 // phalaCVM.appID() EXACTLY so the cached host and the proxy-resolved fallback
 // host are identical (the gateway domain preference already matches).
 func (g *gatewayGetOutput) appID() string {
-	id := firstNonBlank(g.AppID, g.AppIDAlt, g.ID, g.InstanceID)
+	id := shared.FirstNonBlankTrimmed(g.AppID, g.AppIDAlt, g.ID, g.InstanceID)
 	if id == "" && g.CVM != nil {
 		id = g.CVM.appID()
 	}
@@ -1590,7 +1590,7 @@ func (g *gatewayGetOutput) appID() string {
 // the nested base_domain/domain, then a top-level gateway_domain, falling
 // through to the nested cvm object. This preference matches resolvePhalaProxyHost.
 func (g *gatewayGetOutput) gatewayDomain() string {
-	domain := firstNonBlank(g.GatewayDomain, g.BaseDomain, g.Domain, g.TopGateway)
+	domain := shared.FirstNonBlankTrimmed(g.GatewayDomain, g.BaseDomain, g.Domain, g.TopGateway)
 	if domain == "" && g.CVM != nil {
 		domain = g.CVM.gatewayDomain()
 	}
@@ -1639,7 +1639,7 @@ func (b *backend) validateDestroyTarget(ctx context.Context, cfg core.Config, id
 	if !ok {
 		return false, core.Exit(4, "refusing to destroy Phala CVM %s: no local claim for lease %s", id, leaseID)
 	}
-	claimedID := firstNonBlank(claim.CloudID, claim.Labels["phala_cvm"])
+	claimedID := shared.FirstNonBlankTrimmed(claim.CloudID, claim.Labels["phala_cvm"])
 	if claimedID != "" && strings.TrimSpace(claimedID) != strings.TrimSpace(id) {
 		return false, core.Exit(4, "refusing to destroy Phala CVM %s: local claim for lease %s points to %s", id, leaseID, claimedID)
 	}
@@ -1684,10 +1684,6 @@ func commandError(action string, result core.LocalCommandResult, err error) erro
 		return core.Exit(result.ExitCode, "%s failed: %v: %s", action, err, detail)
 	}
 	return core.Exit(result.ExitCode, "%s failed: %v", action, err)
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlankTrimmed(values...)
 }
 
 // jsonObjectPrefix returns the first top-level JSON object/array embedded in a

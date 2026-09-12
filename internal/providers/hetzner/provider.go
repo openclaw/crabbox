@@ -57,7 +57,7 @@ func (Provider) Spec() core.ProviderSpec {
 }
 
 func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (core.NativeCheckpointCapability, bool) {
-	if strings.TrimSpace(req.Config.Coordinator) != "" || firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != core.TargetLinux {
+	if strings.TrimSpace(req.Config.Coordinator) != "" || shared.FirstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != core.TargetLinux {
 		return core.NativeCheckpointCapability{}, false
 	}
 	serverID, err := strconv.ParseInt(strings.TrimSpace(req.Server.CloudID), 10, 64)

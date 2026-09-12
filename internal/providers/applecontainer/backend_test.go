@@ -18,6 +18,7 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	_ "github.com/openclaw/crabbox/internal/providers/applemachine"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func TestConcreteFlagInputAttribution(t *testing.T) {
@@ -516,7 +517,7 @@ func TestCreateContainerMountsCacheVolumes(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, volume := range cfg.Cache.Volumes {
-		want := "--volume\n" + filepath.Join(root, appleContainerCacheVolumeName(volume.Key)) + ":" + volume.Path
+		want := "--volume\n" + filepath.Join(root, shared.CacheVolumeName(volume.Key)) + ":" + volume.Path
 		if !strings.Contains(args, want) {
 			t.Fatalf("cache volume mount missing %q:\n%s", want, args)
 		}
@@ -530,8 +531,8 @@ func TestCreateContainerMountsCacheVolumes(t *testing.T) {
 }
 
 func TestAppleContainerCacheVolumeNameIsStableAndFilesystemSafe(t *testing.T) {
-	got := appleContainerCacheVolumeName("My App/linux node24 lock")
-	again := appleContainerCacheVolumeName("My App/linux node24 lock")
+	got := shared.CacheVolumeName("My App/linux node24 lock")
+	again := shared.CacheVolumeName("My App/linux node24 lock")
 	if got != again {
 		t.Fatalf("cache volume name unstable: %q then %q", got, again)
 	}

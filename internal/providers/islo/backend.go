@@ -3,9 +3,7 @@ package islo
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -1061,19 +1059,11 @@ func newIsloSandboxName(repo core.Repo) string {
 		base = "crabbox"
 	}
 	base = strings.TrimPrefix(base, strings.TrimSuffix(isloNamePrefix, "-")+"-")
-	return isloNamePrefix + base + "-" + isloRandomSuffix()
+	return isloNamePrefix + base + "-" + shared.RandomSuffix()
 }
 
 func isCrabboxIsloSandboxName(name string) bool {
 	return name == core.NormalizeLeaseSlug(name) && strings.HasPrefix(name, isloNamePrefix)
-}
-
-func isloRandomSuffix() string {
-	var b [3]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("%x", time.Now().UnixNano())[:6]
-	}
-	return hex.EncodeToString(b[:])
 }
 
 func leadingEnvAssignment(command []string) bool {

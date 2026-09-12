@@ -127,7 +127,7 @@ func newRunpodClient(cfg core.Config, rt core.Runtime) (runpodAPI, error) {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return nil, core.Exit(2, "%s url %q is invalid", providerName, apiURL)
 	}
-	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
+	if parsed.Scheme != "https" && !shared.IsLoopbackHTTPURL(parsed) {
 		return nil, core.Exit(2, "%s url %q must use https unless it targets localhost", providerName, apiURL)
 	}
 	httpClient := rt.HTTP
@@ -371,8 +371,4 @@ func (p *runpodPod) UnmarshalJSON(data []byte) error {
 	}
 	p.PortMappings = decodePortMappings(aux.PortMappings)
 	return nil
-}
-
-func isLoopbackHTTPURL(parsed *url.URL) bool {
-	return shared.IsLoopbackHTTPURL(parsed)
 }

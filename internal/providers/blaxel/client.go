@@ -160,7 +160,7 @@ func ValidateAPIURL(raw string) (string, error) {
 		return "", core.Exit(2, "provider=blaxel API URL must not contain userinfo, query parameters, or a fragment")
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && shared.IsLoopbackHost(parsed.Hostname())) {
 		return "", core.Exit(2, "provider=blaxel API URL must use HTTPS except for loopback development endpoints")
 	}
 	host := shared.LowercaseHostname(parsed.Hostname())
@@ -197,13 +197,13 @@ func validateSandboxEndpoint(raw, managementBase string) (string, error) {
 	host := shared.LowercaseHostname(parsed.Hostname())
 	if parsed.Scheme == "http" {
 		management, _ := url.Parse(managementBase)
-		if management == nil || !isLoopbackHost(management.Hostname()) || !isLoopbackHost(host) {
+		if management == nil || !shared.IsLoopbackHost(management.Hostname()) || !shared.IsLoopbackHost(host) {
 			return "", core.Exit(5, "blaxel sandbox metadata.url must use HTTPS except for loopback development endpoints")
 		}
 	} else if parsed.Scheme != "https" {
 		return "", core.Exit(5, "blaxel sandbox metadata.url must use HTTPS")
 	}
-	if !isLoopbackHost(host) && !isBlaxelDataPlaneHost(host) {
+	if !shared.IsLoopbackHost(host) && !isBlaxelDataPlaneHost(host) {
 		return "", core.Exit(5, "blaxel sandbox metadata.url host %q is not a trusted Blaxel data-plane origin", host)
 	}
 	port := parsed.Port()
@@ -244,10 +244,6 @@ func validateBlaxelConfig(cfg core.Config) error {
 		return err
 	}
 	return nil
-}
-
-func isLoopbackHost(host string) bool {
-	return shared.IsLoopbackHost(host)
 }
 
 func secureHTTPClient(source *http.Client) *http.Client {

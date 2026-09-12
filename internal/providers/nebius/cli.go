@@ -73,7 +73,7 @@ func (c cliRunner) run(ctx context.Context, args ...string) (cliResult, error) {
 		Args: commandArgs,
 	})
 	if err != nil {
-		return cliResult{Stdout: result.Stdout, Stderr: result.Stderr}, fmt.Errorf("nebius cli %s failed: %s", strings.Join(redactNebiusArgs(commandArgs), " "), redactNebiusText(firstNonBlank(result.Stderr, err.Error())))
+		return cliResult{Stdout: result.Stdout, Stderr: result.Stderr}, fmt.Errorf("nebius cli %s failed: %s", strings.Join(redactNebiusArgs(commandArgs), " "), redactNebiusText(shared.FirstNonBlankTrimmed(result.Stderr, err.Error())))
 	}
 	return cliResult{Stdout: result.Stdout, Stderr: result.Stderr}, nil
 }
@@ -147,7 +147,7 @@ func (c *nebiusClient) CreateInstance(ctx context.Context, req nebiusCreateReque
 		"--boot-disk-attach-mode", "read_write",
 		"--cloud-init-user-data", req.UserData,
 		"--network-interfaces", renderNetworkInterfaces(c.cfg),
-		"--recovery-policy", firstNonBlank(c.cfg.RecoveryPolicy, "fail"),
+		"--recovery-policy", shared.FirstNonBlankTrimmed(c.cfg.RecoveryPolicy, "fail"),
 	}
 	if strings.TrimSpace(c.cfg.ServiceAccountID) != "" {
 		args = append(args, "--service-account-id", strings.TrimSpace(c.cfg.ServiceAccountID))
@@ -287,7 +287,7 @@ func serverFromInstance(item nebiusInstance, cfg core.Config) core.Server {
 	server := core.Server{
 		CloudID:  item.ID,
 		Provider: providerName,
-		Name:     firstNonBlank(item.Name, labels["slug"]),
+		Name:     shared.FirstNonBlankTrimmed(item.Name, labels["slug"]),
 		Status:   normalizeNebiusState(item.Status),
 		Labels:   labels,
 	}
@@ -471,10 +471,6 @@ func mapFromAny(value any) map[string]string {
 func redactNebiusText(text string) string {
 	text = tokenLikePattern.ReplaceAllString(text, "[REDACTED]")
 	return strings.TrimSpace(text)
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlankTrimmed(values...)
 }
 
 func isJSON(output string) bool {

@@ -308,7 +308,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		pruneLeaseState(lease.LeaseID)
 		return nil
 	}
-	name := strings.TrimSpace(firstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]))
+	name := strings.TrimSpace(shared.FirstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]))
 	if name == "" && lease.LeaseID != "" {
 		inst, _, claim, err := b.resolveInstance(ctx, lease.LeaseID)
 		if err != nil {
@@ -342,7 +342,7 @@ func pruneLeaseState(leaseID string) {
 }
 
 func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
-	return fmt.Sprintf("released lease=%s instance=%s", lease.LeaseID, core.Blank(firstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]), "-"))
+	return fmt.Sprintf("released lease=%s instance=%s", lease.LeaseID, core.Blank(shared.FirstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]), "-"))
 }
 
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
@@ -808,7 +808,7 @@ func (b *backend) serverFromInstance(inst tartInstance, claim core.LeaseClaim, c
 		labels["state"] = tartState(inst.State)
 	}
 	if labels["server_type"] == "" {
-		labels["server_type"] = firstNonBlank(inst.Source, cfg.Tart.Image)
+		labels["server_type"] = shared.FirstNonBlank(inst.Source, cfg.Tart.Image)
 	}
 	// Native inventory's Source is a storage kind, not an image identity.
 	// Only acquisition records image provenance in the claim.
@@ -833,7 +833,7 @@ func (b *backend) serverFromInstance(inst tartInstance, claim core.LeaseClaim, c
 		Status:      status,
 		Labels:      labels,
 	}
-	server.ServerType.Name = firstNonBlank(labels["server_type"], cfg.Tart.Image)
+	server.ServerType.Name = shared.FirstNonBlank(labels["server_type"], cfg.Tart.Image)
 	return server
 }
 
@@ -942,8 +942,4 @@ func firstLine(value string) string {
 		value = value[:idx]
 	}
 	return strings.TrimSpace(value)
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlank(values...)
 }

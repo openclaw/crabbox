@@ -21,6 +21,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const testRecoveredContainerID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -1797,7 +1798,7 @@ func TestResolveContainerHydratesCustomRuntimeRouteBeforeLookup(t *testing.T) {
 			t.Setenv("DOCKER_HOST", "unix:///ambient.sock")
 			leaseID := "cbx_hydrated_route"
 			labels := checkpointScopeMetadata(checkpointScope{
-				Runtime: tc.runtime, Context: tc.context, Host: tc.host, Endpoint: firstNonBlank(tc.host, "connection://captured-podman"), DaemonID: "daemon-captured",
+				Runtime: tc.runtime, Context: tc.context, Host: tc.host, Endpoint: shared.FirstNonBlank(tc.host, "connection://captured-podman"), DaemonID: "daemon-captured",
 			})
 			labels["provider"] = providerName
 			labels["lease"] = leaseID
@@ -3482,7 +3483,7 @@ func TestPendingRecoveryCommandsUseSafeExactRoute(t *testing.T) {
 			var stderr strings.Builder
 			b.rt.Stderr = &stderr
 			labels := checkpointScopeMetadata(checkpointScope{
-				Runtime: tc.runtime, Context: tc.context, Host: tc.host, Config: tc.config, Endpoint: firstNonBlank(tc.host, "local"), DaemonID: "daemon-test",
+				Runtime: tc.runtime, Context: tc.context, Host: tc.host, Config: tc.config, Endpoint: shared.FirstNonBlank(tc.host, "local"), DaemonID: "daemon-test",
 			})
 			labels["runtime"] = tc.runtime
 			claim := core.LeaseClaim{LeaseID: "cbx_recovery_route", Provider: providerName, CloudID: "container-route", Labels: labels}
@@ -4579,7 +4580,7 @@ func TestCreateContainerMountsCacheVolumes(t *testing.T) {
 	}
 	args := recordedArgsForCommand(t, runner, "run")
 	for _, volume := range cfg.Cache.Volumes {
-		want := "-v\n" + localContainerCacheVolumeName(volume.Key) + ":" + volume.Path
+		want := "-v\n" + shared.CacheVolumeName(volume.Key) + ":" + volume.Path
 		if !strings.Contains(args, want) {
 			t.Fatalf("cache volume mount missing %q:\n%s", want, args)
 		}
@@ -4593,8 +4594,8 @@ func TestCreateContainerMountsCacheVolumes(t *testing.T) {
 }
 
 func TestLocalContainerCacheVolumeNameIsStableAndDockerSafe(t *testing.T) {
-	got := localContainerCacheVolumeName("My App/linux node24 lock")
-	again := localContainerCacheVolumeName("My App/linux node24 lock")
+	got := shared.CacheVolumeName("My App/linux node24 lock")
+	again := shared.CacheVolumeName("My App/linux node24 lock")
 	if got != again {
 		t.Fatalf("cache volume name unstable: %q then %q", got, again)
 	}

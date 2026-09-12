@@ -53,7 +53,7 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 			err = core.NativeCheckpointNotSubmittedError{Cause: err}
 		}
 	}()
-	if firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != core.TargetLinux {
+	if shared.FirstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != core.TargetLinux {
 		return core.NativeCheckpointCreateResult{}, core.Exit(2, "Hetzner native checkpoints require a Linux lease")
 	}
 	if core.NormalizeCheckpointStrategy(req.Strategy) == core.CheckpointStrategyImage {
@@ -268,7 +268,7 @@ func hetznerCheckpointResult(snapshot core.HetznerImage, location string, metada
 	return core.NativeCheckpointCreateResult{
 		Image: core.NativeCheckpointImage{
 			ID:           strconv.FormatInt(snapshot.ID, 10),
-			Name:         firstNonBlank(snapshot.Description, snapshot.Name),
+			Name:         shared.FirstNonBlank(snapshot.Description, snapshot.Name),
 			State:        snapshot.Status,
 			Provider:     providerName,
 			Kind:         core.CheckpointKindHetzner,
@@ -397,7 +397,7 @@ func hetznerServerArchitecture(server core.Server) (string, error) {
 	if server.Image != nil {
 		imageArchitecture = server.Image.Architecture
 	}
-	value := firstNonBlank(imageArchitecture, server.ServerType.Architecture, server.Labels["architecture"])
+	value := shared.FirstNonBlank(imageArchitecture, server.ServerType.Architecture, server.Labels["architecture"])
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "x86", "amd64", "x86_64":
 		return "x86", nil
@@ -445,10 +445,6 @@ func cloneMetadata(values map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlank(values...)
 }
 
 var (

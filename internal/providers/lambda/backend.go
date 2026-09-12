@@ -283,7 +283,7 @@ func (b *backend) ensureSSHKey(ctx context.Context, client lambdaAPI, name, publ
 	if err != nil {
 		return lambdaSSHKeyIdentity{Name: name, Created: isAmbiguousLambdaMutationError(err)}, err
 	}
-	return lambdaSSHKeyIdentity{ID: key.ID, Name: firstNonBlank(key.Name, name), Created: true}, nil
+	return lambdaSSHKeyIdentity{ID: key.ID, Name: shared.FirstNonBlankTrimmed(key.Name, name), Created: true}, nil
 }
 
 func (b *backend) waitForInstanceReady(ctx context.Context, client lambdaAPI, id string) (Instance, error) {
@@ -507,7 +507,7 @@ func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 	if err != nil {
 		return err
 	}
-	instanceID := firstNonBlank(server.CloudID, claim.CloudID)
+	instanceID := shared.FirstNonBlankTrimmed(server.CloudID, claim.CloudID)
 	if claim.CloudID == "" {
 		switch claim.Labels[lambdaRecoveryKeyLabel] {
 		case "rollback-cleanup", "ambiguous-key-create":
@@ -639,7 +639,7 @@ func (b *backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, re
 	labels := leaseTags(cfg, leaseID, slug, "provisioning", keep, now)
 	labels[lambdaRecoveryKeyLabel] = recovery
 	labels[lambdaKeyIDLabel] = key.ID
-	labels[lambdaKeyNameLabel] = firstNonBlank(key.Name, cfg.ProviderKey)
+	labels[lambdaKeyNameLabel] = shared.FirstNonBlankTrimmed(key.Name, cfg.ProviderKey)
 	labels[lambdaKeyOwnedLabel] = fmt.Sprint(key.Created)
 	if repoRoot == "" {
 		var err error
@@ -779,12 +779,12 @@ func serverFromInstance(item Instance, cfg core.Config) core.Server {
 	server := core.Server{
 		CloudID:  item.ID,
 		Provider: providerName,
-		Name:     firstNonBlank(item.Name, item.Hostname, item.ID),
+		Name:     shared.FirstNonBlankTrimmed(item.Name, item.Hostname, item.ID),
 		Status:   normalizeInstanceStatus(item.Status),
 		Labels:   labels,
 	}
 	server.PublicNet.IPv4.IP = strings.TrimSpace(item.IP)
-	server.ServerType.Name = firstNonBlank(item.Type, cfg.ServerType, typeForConfig(cfg))
+	server.ServerType.Name = shared.FirstNonBlankTrimmed(item.Type, cfg.ServerType, typeForConfig(cfg))
 	return server
 }
 

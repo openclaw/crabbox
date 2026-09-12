@@ -687,7 +687,7 @@ func (b *backend) deleteServerWithOutcome(ctx context.Context, server core.Serve
 		claim = snapshot
 	}
 	leaseID := binding.LeaseID
-	instanceID, ok := parseVastInstanceID(firstNonBlank(server.CloudID, claim.CloudID))
+	instanceID, ok := parseVastInstanceID(shared.FirstNonBlankTrimmed(server.CloudID, claim.CloudID))
 	if !ok {
 		return core.Exit(2, "provider=%s release requires a Vast instance id", providerName)
 	}
@@ -825,12 +825,12 @@ func serverFromInstance(item vastInstance, cfg core.Config) core.Server {
 	server := core.Server{
 		CloudID:  strconv.Itoa(item.ID),
 		Provider: providerName,
-		Name:     firstNonBlank(labels["slug"], item.Label, strconv.Itoa(item.ID)),
+		Name:     shared.FirstNonBlankTrimmed(labels["slug"], item.Label, strconv.Itoa(item.ID)),
 		Status:   normalizeVastStatus(item.Status),
 		Labels:   labels,
 	}
 	server.PublicNet.IPv4.IP = strings.TrimSpace(item.SSHHost)
-	server.ServerType.Name = firstNonBlank(item.GPUName, cfg.ServerType)
+	server.ServerType.Name = shared.FirstNonBlankTrimmed(item.GPUName, cfg.ServerType)
 	return server
 }
 
@@ -921,7 +921,7 @@ func sshTargetFromInstance(cfg core.Config, item vastInstance) (core.SSHTarget, 
 	}
 	ssh := core.SSHTargetFromConfig(cfg, host)
 	ssh.Port = strconv.Itoa(item.SSHPort)
-	ssh.User = firstNonBlank(cfg.SSHUser, cfg.Vast.User, "root")
+	ssh.User = shared.FirstNonBlankTrimmed(cfg.SSHUser, cfg.Vast.User, "root")
 	ssh.TargetOS = core.TargetLinux
 	ssh.ReadyCheck = vastReadyCheck
 	return ssh, nil
@@ -970,16 +970,12 @@ func effectiveVastReleaseAction(cfg core.Config, labels map[string]string) strin
 	if core.DeleteOnReleaseExplicit(cfg, providerName) {
 		return normalizeVastReleaseAction(cfg.Vast.ReleaseAction)
 	}
-	return normalizeVastReleaseAction(firstNonBlank(labels[vastReleaseActionLabel], cfg.Vast.ReleaseAction))
+	return normalizeVastReleaseAction(shared.FirstNonBlankTrimmed(labels[vastReleaseActionLabel], cfg.Vast.ReleaseAction))
 }
 
 func parseVastInstanceID(value string) (int, bool) {
 	id, err := strconv.Atoi(strings.TrimSpace(value))
 	return id, err == nil && id > 0
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlankTrimmed(values...)
 }
 
 func claimTarget(claim core.LeaseClaim) (core.LeaseTarget, error) {

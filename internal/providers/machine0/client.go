@@ -182,7 +182,7 @@ func (c *client) runRead(ctx context.Context, args ...string) (core.LocalCommand
 	delay := machine0ReadRetryDelay(c.cfg.PollInterval)
 	sleep := c.sleep
 	if sleep == nil {
-		sleep = sleepContext
+		sleep = core.SleepContext
 	}
 	warned := false
 	for {

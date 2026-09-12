@@ -50,7 +50,7 @@ func (b *awsLeaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) 
 	if strings.TrimSpace(req.RequestedLeaseID) != "" {
 		return b.acquireFixed(ctx, req)
 	}
-	return acquireAttemptsRetry(b.RT, req.Keep, func() (core.LeaseTarget, error) {
+	return shared.AcquireAttemptsRetry(b.RT, req.Keep, func() (core.LeaseTarget, error) {
 		return b.acquireOnce(ctx, req.Keep, req.RequestedSlug)
 	})
 }
@@ -785,10 +785,6 @@ func (b *awsLeaseBackend) listAcrossRegions(ctx context.Context) ([]core.LeaseVi
 		}
 	}
 	return all, nil
-}
-
-func acquireAttemptsRetry(rt core.Runtime, keep bool, acquire func() (core.LeaseTarget, error)) (core.LeaseTarget, error) {
-	return shared.AcquireAttemptsRetry(rt, keep, acquire)
 }
 
 func chooseAWSRegion(ctx context.Context, cfg core.Config, stderr io.Writer) core.Config {

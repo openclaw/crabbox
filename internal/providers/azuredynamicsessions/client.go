@@ -122,7 +122,7 @@ func azureDynamicSessionsEndpoint(cfg core.Config) (string, error) {
 	if parsed.User != nil {
 		return "", core.Exit(2, "%s endpoint must not include userinfo", providerName)
 	}
-	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
+	if parsed.Scheme != "https" && !shared.IsLoopbackHTTPURL(parsed) {
 		return "", core.Exit(2, "%s endpoint %q must use https unless it targets localhost", providerName, endpoint)
 	}
 	if !isAzureDynamicSessionsTrustedEndpointURL(parsed) {
@@ -135,7 +135,7 @@ func azureDynamicSessionsEndpoint(cfg core.Config) (string, error) {
 }
 
 func isAzureDynamicSessionsTrustedEndpointURL(parsed *url.URL) bool {
-	if isLoopbackHTTPURL(parsed) {
+	if shared.IsLoopbackHTTPURL(parsed) {
 		return true
 	}
 	if parsed.Scheme != "https" {
@@ -143,10 +143,6 @@ func isAzureDynamicSessionsTrustedEndpointURL(parsed *url.URL) bool {
 	}
 	host := strings.ToLower(parsed.Hostname())
 	return host == "azurecontainerapps.io" || strings.HasSuffix(host, ".azurecontainerapps.io")
-}
-
-func isLoopbackHTTPURL(parsed *url.URL) bool {
-	return shared.IsLoopbackHTTPURL(parsed)
 }
 
 func azureDynamicSessionsAccessToken(ctx context.Context, cfg core.Config, rt core.Runtime) (string, error) {

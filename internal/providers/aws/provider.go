@@ -313,7 +313,7 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 	if req.Server.CloudID == "" {
 		return core.NativeCheckpointCapability{}, false
 	}
-	targetOS := firstNonBlank(req.Target.TargetOS, req.Config.TargetOS)
+	targetOS := shared.FirstNonEmpty(req.Target.TargetOS, req.Config.TargetOS)
 	strategy := core.NormalizeCheckpointStrategy(req.Strategy)
 	if isWindowsNativeTarget(req) {
 		if req.StrategyExplicit && strategy != core.CheckpointStrategyImage {
@@ -340,13 +340,8 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 	return core.NativeCheckpointCapability{Kind: core.CheckpointKindAWSEBS, RetireSource: true}, true
 }
 
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonEmpty(values...)
-}
-
 func isWindowsNativeTarget(req core.NativeCheckpointRequest) bool {
-	return firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) == core.TargetWindows &&
-		firstNonBlank(req.Target.WindowsMode, req.Config.WindowsMode) == core.WindowsModeNormal
+	return shared.FirstNonEmpty(req.Target.TargetOS, req.Config.TargetOS) == core.TargetWindows && shared.FirstNonEmpty(req.Target.WindowsMode, req.Config.WindowsMode) == core.WindowsModeNormal
 }
 
 func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkRequest) error {

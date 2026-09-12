@@ -512,7 +512,7 @@ func appleContainerCacheVolumeMounts(volumes []core.CacheVolumeConfig) ([]string
 		if !strings.HasPrefix(path, "/") {
 			return nil, core.Exit(2, "cache volume path %q must be absolute", path)
 		}
-		hostPath := filepath.Join(root, appleContainerCacheVolumeName(key))
+		hostPath := filepath.Join(root, shared.CacheVolumeName(key))
 		if err := os.MkdirAll(hostPath, 0o777); err != nil {
 			return nil, core.Exit(2, "create apple-container cache volume %s: %v", hostPath, err)
 		}
@@ -530,10 +530,6 @@ func appleContainerCacheRoot() (string, error) {
 		return "", core.Exit(2, "user cache directory is unavailable")
 	}
 	return filepath.Join(dir, "crabbox", "apple-container-cache"), nil
-}
-
-func appleContainerCacheVolumeName(key string) string {
-	return shared.CacheVolumeName(key)
 }
 
 func (b *backend) listContainers(ctx context.Context) ([]inspectContainer, error) {
@@ -652,7 +648,7 @@ func (b *backend) resolveContainer(ctx context.Context, identifier string) (insp
 		for _, c := range containers {
 			if c.id() == boundID {
 				labels := c.labels()
-				return c, firstNonBlank(resolvedClaim.LeaseID, labels["lease"]), firstNonBlank(resolvedClaim.Slug, labels["slug"]), nil
+				return c, shared.FirstNonBlank(resolvedClaim.LeaseID, labels["lease"]), shared.FirstNonBlank(resolvedClaim.Slug, labels["slug"]), nil
 			}
 		}
 		return inspectContainer{}, "", "", core.Exit(4, "apple-container lease not found: %s", identifier)
@@ -824,7 +820,7 @@ func (b *backend) serverFromContainer(c inspectContainer, cfg core.Config) core.
 		labels["provider"] = providerName
 	}
 	if labels["server_type"] == "" {
-		labels["server_type"] = firstNonBlank(c.image(), cfg.AppleContainer.Image)
+		labels["server_type"] = shared.FirstNonBlank(c.image(), cfg.AppleContainer.Image)
 	}
 	if labels["state"] == "" {
 		labels["state"] = c.status()
@@ -842,7 +838,7 @@ func (b *backend) serverFromContainer(c inspectContainer, cfg core.Config) core.
 		Labels:   labels,
 	}
 	server.PublicNet.IPv4.IP = c.ip()
-	server.ServerType.Name = firstNonBlank(labels["server_type"], cfg.AppleContainer.Image)
+	server.ServerType.Name = shared.FirstNonBlank(labels["server_type"], cfg.AppleContainer.Image)
 	return server
 }
 
@@ -991,10 +987,6 @@ func uniqueAppleContainerDNSServers(servers []string, limit int) []string {
 		}
 	}
 	return unique
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlank(values...)
 }
 
 // bootstrapScript provisions sshd, the Crabbox SSH user and work root inside a

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
@@ -54,7 +55,7 @@ func TestBlacksmithRunNoSyncContract(t *testing.T) {
 					}
 					if tc.id != "" {
 						prepareBlacksmithGuestKey(t, leaseID)
-						testOwnedBlacksmithClaim(t, leaseID, firstNonBlank(tc.slug, "jade-krill"), repo.Root)
+						testOwnedBlacksmithClaim(t, leaseID, shared.FirstNonBlank(tc.slug, "jade-krill"), repo.Root)
 					}
 					before, err := core.ReadLeaseClaim(leaseID)
 					if err != nil {

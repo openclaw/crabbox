@@ -22,6 +22,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -69,7 +70,7 @@ func (f *fakeAPI) AccountID(ctx context.Context) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	return firstNonBlank(f.accountID, "fixture-account"), f.accountErr
+	return shared.FirstNonBlankTrimmed(f.accountID, "fixture-account"), f.accountErr
 }
 
 func (f *fakeAPI) Version(ctx context.Context) (string, error) {
@@ -1586,7 +1587,7 @@ func TestWaitForSuspendedHonorsContextAndTimeout(t *testing.T) {
 			item := readyMachine("203.0.113.10")
 			item.Status = "SUSPENDING"
 			b := testBackendWithAPI(&fakeAPI{machine: item})
-			b.sleep = sleepContext
+			b.sleep = core.SleepContext
 			_, err := b.waitForSuspended(tc.ctx(), item.Name, tc.timeout)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err=%v", err)
@@ -2270,7 +2271,7 @@ func TestCreateNativeCheckpointRestartsAfterSnapshotTimeout(t *testing.T) {
 	b, api, _, claim, req := checkpointCreateFixture(t)
 	req.Wait = false
 	req.WaitTimeout = 10 * time.Millisecond
-	b.sleep = sleepContext
+	b.sleep = core.SleepContext
 	api.imageDetail = checkpointImageSnapshotState(req, claim, 1, "CREATING")
 	api.getSequence = []machine{
 		checkpointSource(req, "203.0.113.10"),
@@ -2293,7 +2294,7 @@ func TestCreateNativeCheckpointRestartsAfterSnapshotTimeout(t *testing.T) {
 
 func TestCreateNativeCheckpointRestartsAfterCallerCancellation(t *testing.T) {
 	b, api, _, claim, req := checkpointCreateFixture(t)
-	b.sleep = sleepContext
+	b.sleep = core.SleepContext
 	api.imageDetail = checkpointImageSnapshotState(req, claim, 1, "CREATING")
 	api.getSequence = []machine{
 		checkpointSource(req, "203.0.113.10"),
@@ -2328,7 +2329,7 @@ func TestMachine0CheckpointSnapshotTimeoutPrecedence(t *testing.T) {
 func TestCreateNativeCheckpointStopTimeoutRestartsWithoutSaving(t *testing.T) {
 	b, api, _, claim, req := checkpointCreateFixture(t)
 	b.cfg.Machine0.CreateTimeout = time.Nanosecond
-	b.sleep = sleepContext
+	b.sleep = core.SleepContext
 	stopping := checkpointSource(req, "203.0.113.10")
 	stopping.Status = "STOPPING"
 	api.getSequence = []machine{checkpointSource(req, "203.0.113.10"), checkpointSource(req, "203.0.113.10"), stopping, checkpointSource(req, "203.0.113.10")}
@@ -2433,7 +2434,7 @@ func TestWaitForStoppedRequiresExactStoppedState(t *testing.T) {
 			stopping := readyMachine("203.0.113.10")
 			stopping.Status = "STOPPING"
 			b := testBackendWithAPI(&fakeAPI{machine: stopping})
-			b.sleep = sleepContext
+			b.sleep = core.SleepContext
 			_, err := b.waitForStopped(tc.ctx(), stopping.Name, tc.timeout)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err=%v", err)
@@ -2548,7 +2549,7 @@ func TestImageWaitKeepsObservedVersionOnTimeoutAndError(t *testing.T) {
 
 	t.Run("timeout retains observed identity", func(t *testing.T) {
 		b := testBackendWithAPI(&fakeAPI{imageDetail: pending})
-		b.sleep = sleepContext
+		b.sleep = core.SleepContext
 		detail, version, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, 10*time.Millisecond, io.Discard)
 		if err == nil || !strings.Contains(err.Error(), "timed out") {
 			t.Fatalf("err=%v", err)

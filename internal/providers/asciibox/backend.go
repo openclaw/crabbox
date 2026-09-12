@@ -539,7 +539,7 @@ func boxSSHTarget(cfg core.Config, box boxData) (core.SSHTarget, error) {
 }
 
 func boxSSHConnection(box boxData) (string, string, error) {
-	if endpoint := strings.TrimSpace(firstNonBlank(box.SSHEndpoint, box.SSHEndpointAlt)); endpoint != "" {
+	if endpoint := strings.TrimSpace(shared.FirstNonBlankTrimmed(box.SSHEndpoint, box.SSHEndpointAlt)); endpoint != "" {
 		host, port, err := net.SplitHostPort(endpoint)
 		if err != nil || strings.TrimSpace(host) == "" || strings.TrimSpace(port) == "" {
 			return "", "", core.Exit(5, "ascii-box %s has invalid SSH endpoint %q", box.ID, endpoint)
@@ -558,15 +558,15 @@ func boxSSHKey(cfg core.Config) string {
 }
 
 func boxHost(box boxData) string {
-	return firstNonBlank(box.IP, box.MachineIP, box.MachineIPAlt, box.PublicIP)
+	return shared.FirstNonBlankTrimmed(box.IP, box.MachineIP, box.MachineIPAlt, box.PublicIP)
 }
 
 func boxSSHUser(box boxData) string {
-	return firstNonBlank(box.SSHUser, box.SSHUserAlt, "user")
+	return shared.FirstNonBlankTrimmed(box.SSHUser, box.SSHUserAlt, "user")
 }
 
 func boxState(box boxData) string {
-	return strings.ToLower(core.Blank(firstNonBlank(box.Status, box.State), "provisioning"))
+	return strings.ToLower(core.Blank(shared.FirstNonBlankTrimmed(box.Status, box.State), "provisioning"))
 }
 
 func boxExpiresAt(box boxData) string {
@@ -693,10 +693,6 @@ func cleanWorkdir(workdir string) (string, error) {
 		return "", core.Exit(2, "ascii-box workdir %q is too broad; choose a dedicated subdirectory", clean)
 	}
 	return clean, nil
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlankTrimmed(values...)
 }
 
 var waitForSSHReadyFunc = core.WaitForSSHReady

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
@@ -2135,13 +2136,13 @@ func TestInstanceNameFromClaim(t *testing.T) {
 }
 
 func TestFirstNonBlank(t *testing.T) {
-	if got := firstNonBlank("", "  ", "hello", "world"); got != "hello" {
+	if got := shared.FirstNonBlank("", "  ", "hello", "world"); got != "hello" {
 		t.Fatalf("firstNonBlank = %q, want hello", got)
 	}
-	if got := firstNonBlank("", "", ""); got != "" {
+	if got := shared.FirstNonBlank("", "", ""); got != "" {
 		t.Fatalf("firstNonBlank all blank = %q", got)
 	}
-	if got := firstNonBlank("first"); got != "first" {
+	if got := shared.FirstNonBlank("first"); got != "first" {
 		t.Fatalf("firstNonBlank single = %q", got)
 	}
 }
@@ -3324,19 +3325,19 @@ func TestFirstLineMultiLine(t *testing.T) {
 }
 
 func TestFirstNonBlankAllEmpty(t *testing.T) {
-	if got := firstNonBlank("", "  ", "\t"); got != "" {
+	if got := shared.FirstNonBlank("", "  ", "\t"); got != "" {
 		t.Fatalf("firstNonBlank all empty = %q, want \"\"", got)
 	}
 }
 
 func TestFirstNonBlankFindsFirst(t *testing.T) {
-	if got := firstNonBlank("", "hello", "world"); got != "hello" {
+	if got := shared.FirstNonBlank("", "hello", "world"); got != "hello" {
 		t.Fatalf("firstNonBlank = %q, want \"hello\"", got)
 	}
 }
 
 func TestFirstNonBlankSingleValue(t *testing.T) {
-	if got := firstNonBlank("only"); got != "only" {
+	if got := shared.FirstNonBlank("only"); got != "only" {
 		t.Fatalf("firstNonBlank(\"only\") = %q", got)
 	}
 }

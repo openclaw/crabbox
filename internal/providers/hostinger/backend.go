@@ -417,7 +417,7 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (le
 			return core.LeaseTarget{}, rollbackStarted(vmID, err)
 		}
 	} else if !vm.Ready() {
-		return core.LeaseTarget{}, core.Exit(5, "hostinger vps %s is not runnable; state=%s", vm.IDString(), firstNonBlank(vm.State, vm.Status, "unknown"))
+		return core.LeaseTarget{}, core.Exit(5, "hostinger vps %s is not runnable; state=%s", vm.IDString(), shared.FirstNonBlankTrimmed(vm.State, vm.Status, "unknown"))
 	}
 	lease, err = b.leaseFromVM(cfg, vm, leaseID, slug, true)
 	if err != nil {
@@ -985,7 +985,7 @@ func validateHostingerConfiguredPurchaseOptions(cfg core.Config, options hosting
 			return core.Exit(2, "provider=%s configured template id %q is unavailable; available=%s", providerName, templateID, core.Blank(summarizeHostingerTemplates(options.templates), "none"))
 		}
 		if !hostingerTemplateSupported(selected) {
-			return core.Exit(2, "provider=%s template %s=%s is unsupported; choose an Ubuntu or Debian template so Crabbox can install required SSH tools before readiness", providerName, templateID, firstNonBlank(selected.Name, selected.OS))
+			return core.Exit(2, "provider=%s template %s=%s is unsupported; choose an Ubuntu or Debian template so Crabbox can install required SSH tools before readiness", providerName, templateID, shared.FirstNonBlankTrimmed(selected.Name, selected.OS))
 		}
 	}
 
@@ -1096,7 +1096,7 @@ func summarizeHostingerPaymentMethods(methods []hostingerPaymentMethod) string {
 		if method.IsDefault {
 			state += "+default"
 		}
-		values = append(values, fmt.Sprintf("%s=%s(%s)", hostingerIDString(method.ID), firstNonBlank(method.Name, method.PaymentMethod, "payment-method"), state))
+		values = append(values, fmt.Sprintf("%s=%s(%s)", hostingerIDString(method.ID), shared.FirstNonBlankTrimmed(method.Name, method.PaymentMethod, "payment-method"), state))
 	}
 	return strings.Join(values, ",")
 }
@@ -1108,7 +1108,7 @@ func summarizeHostingerTemplates(templates []hostingerTemplate) string {
 		if len(values) == limit {
 			break
 		}
-		values = append(values, fmt.Sprintf("%s=%s", hostingerIDString(template.ID), firstNonBlank(template.Name, template.OS)))
+		values = append(values, fmt.Sprintf("%s=%s", hostingerIDString(template.ID), shared.FirstNonBlankTrimmed(template.Name, template.OS)))
 	}
 	return strings.Join(values, ",")
 }
@@ -1120,7 +1120,7 @@ func summarizeHostingerDataCenters(dataCenters []hostingerDataCenter) string {
 		if len(values) == limit {
 			break
 		}
-		values = append(values, fmt.Sprintf("%s=%s", hostingerIDString(dataCenter.ID), firstNonBlank(dataCenter.Name, dataCenter.Location)))
+		values = append(values, fmt.Sprintf("%s=%s", hostingerIDString(dataCenter.ID), shared.FirstNonBlankTrimmed(dataCenter.Name, dataCenter.Location)))
 	}
 	return strings.Join(values, ",")
 }
@@ -1137,9 +1137,9 @@ func (b *leaseBackend) resolveVM(ctx context.Context, client hostingerAPI, id st
 			if getErr != nil {
 				return hostingerVM{}, "", "", core.Exit(1, "hostinger get claimed vps %s failed: %v", claim.CloudID, getErr)
 			}
-			return vm, claim.LeaseID, firstNonBlank(claim.Slug, hostingerLeaseIdentitySlug(vm, b.configForRun())), nil
+			return vm, claim.LeaseID, shared.FirstNonBlankTrimmed(claim.Slug, hostingerLeaseIdentitySlug(vm, b.configForRun())), nil
 		}
-		id = firstNonBlank(claim.LeaseID, claim.Slug, id)
+		id = shared.FirstNonBlankTrimmed(claim.LeaseID, claim.Slug, id)
 	}
 	if id != "" && !strings.HasPrefix(id, "cbx_") {
 		vm, err := client.GetVM(ctx, id)
@@ -1171,7 +1171,7 @@ func (b *leaseBackend) resolveVM(ctx context.Context, client hostingerAPI, id st
 		}
 		vm := matches[0]
 		leaseID := claim.LeaseID
-		slug := firstNonBlank(claim.Slug, hostingerLeaseIdentitySlug(vm, b.configForRun()))
+		slug := shared.FirstNonBlankTrimmed(claim.Slug, hostingerLeaseIdentitySlug(vm, b.configForRun()))
 		server, serverErr := b.serverFromVMWithClaim(vm, leaseID, slug, b.configForRun(), true)
 		if serverErr != nil {
 			return hostingerVM{}, "", "", serverErr
@@ -1247,10 +1247,10 @@ func (b *leaseBackend) waitForVM(ctx context.Context, client hostingerAPI, id st
 				return true, nil
 			}
 			if vm.Terminal() {
-				return false, core.Exit(5, "hostinger vps %s entered terminal state=%s", id, firstNonBlank(vm.State, vm.Status, "unknown"))
+				return false, core.Exit(5, "hostinger vps %s entered terminal state=%s", id, shared.FirstNonBlankTrimmed(vm.State, vm.Status, "unknown"))
 			}
 			if time.Now().After(deadline) {
-				return false, core.Exit(5, "timed out waiting for hostinger vps %s to expose a public IP; last_state=%s", id, firstNonBlank(vm.State, vm.Status))
+				return false, core.Exit(5, "timed out waiting for hostinger vps %s to expose a public IP; last_state=%s", id, shared.FirstNonBlankTrimmed(vm.State, vm.Status))
 			}
 			return false, nil
 		}, nil)
@@ -1280,7 +1280,7 @@ func (b *leaseBackend) stopVMAndWait(ctx context.Context, client hostingerAPI, i
 				}
 				return false, core.Exit(1, "hostinger confirm stopped vps %s failed: %v", id, fetchErr)
 			}
-			lastState = firstNonBlank(vm.State, vm.Status, "unknown")
+			lastState = shared.FirstNonBlankTrimmed(vm.State, vm.Status, "unknown")
 			if vm.Stopped() {
 				return true, nil
 			}
@@ -1506,14 +1506,14 @@ func hostingerServer(vm hostingerVM, leaseID, slug string, cfg core.Config, keep
 	labels["release"] = "stop"
 	labels["ssh_user"] = cfg.SSHUser
 	labels["work_root"] = cfg.WorkRoot
-	if state := strings.ToLower(firstNonBlank(vm.State, vm.Status)); state != "" {
+	if state := strings.ToLower(shared.FirstNonBlankTrimmed(vm.State, vm.Status)); state != "" {
 		labels["state"] = state
 	}
 	server := core.Server{
 		CloudID:  vm.IDString(),
 		Provider: providerName,
 		Name:     vm.NameValue(),
-		Status:   firstNonBlank(vm.State, vm.Status),
+		Status:   shared.FirstNonBlankTrimmed(vm.State, vm.Status),
 		Labels:   labels,
 	}
 	if server.Name == "" {
@@ -1548,7 +1548,7 @@ func (b *leaseBackend) serverFromVMWithClaim(vm hostingerVM, leaseID, slug strin
 	labels["release"] = "stop"
 	labels["ssh_user"] = cfg.SSHUser
 	labels["work_root"] = cfg.WorkRoot
-	if state := strings.ToLower(firstNonBlank(vm.State, vm.Status)); state != "" {
+	if state := strings.ToLower(shared.FirstNonBlankTrimmed(vm.State, vm.Status)); state != "" {
 		labels["state"] = state
 	}
 	server.Labels = labels
@@ -1572,7 +1572,7 @@ func hostingerLeaseIdentity(vm hostingerVM, cfg core.Config) (string, string) {
 	if id == "" {
 		id = "manual"
 	}
-	return "cbx_hostinger_" + id, firstNonBlank(name, "manual")
+	return "cbx_hostinger_" + id, shared.FirstNonBlankTrimmed(name, "manual")
 }
 
 func hostingerLeaseIdentitySlug(vm hostingerVM, cfg core.Config) string {
@@ -1586,20 +1586,20 @@ func hostingerLeaseIdentityWithClaim(vm hostingerVM, cfg core.Config) (string, s
 		return "", "", false, err
 	}
 	if ok && claim.LeaseID != "" {
-		return claim.LeaseID, firstNonBlank(claim.Slug, hostingerLeaseIdentitySlug(vm, cfg)), !hostingerAdoptionPending(claim), nil
+		return claim.LeaseID, shared.FirstNonBlankTrimmed(claim.Slug, hostingerLeaseIdentitySlug(vm, cfg)), !hostingerAdoptionPending(claim), nil
 	}
 	recovery, recovered, err := findHostingerRecoveryRecord(vm)
 	if err != nil {
 		return "", "", false, err
 	}
 	if recovered {
-		return recovery.LeaseID, firstNonBlank(recovery.Slug, hostingerLeaseIdentitySlug(vm, cfg)), false, nil
+		return recovery.LeaseID, shared.FirstNonBlankTrimmed(recovery.Slug, hostingerLeaseIdentitySlug(vm, cfg)), false, nil
 	}
 	id := vm.IDString()
 	if id == "" {
 		id = "manual"
 	}
-	return "cbx_hostinger_" + id, firstNonBlank(hostingerLeaseIdentitySlug(vm, cfg), vm.NameValue(), "manual"), false, nil
+	return "cbx_hostinger_" + id, shared.FirstNonBlankTrimmed(hostingerLeaseIdentitySlug(vm, cfg), vm.NameValue(), "manual"), false, nil
 }
 
 func hostingerOwnedName(name string, cfg core.Config) bool {
@@ -1636,7 +1636,7 @@ func (vm hostingerVM) IDString() string {
 }
 
 func (vm hostingerVM) NameValue() string {
-	return firstNonBlank(vm.Hostname, vm.Name)
+	return shared.FirstNonBlankTrimmed(vm.Hostname, vm.Name)
 }
 
 func (vm hostingerVM) Host() string {
@@ -1656,24 +1656,20 @@ func (vm hostingerVM) Host() string {
 }
 
 func (vm hostingerVM) Ready() bool {
-	state := strings.ToLower(firstNonBlank(vm.State, vm.Status))
+	state := strings.ToLower(shared.FirstNonBlankTrimmed(vm.State, vm.Status))
 	return state == "" || strings.Contains(state, "running") || strings.Contains(state, "active") || strings.Contains(state, "ready")
 }
 
 func (vm hostingerVM) Stopped() bool {
-	state := strings.ToLower(firstNonBlank(vm.State, vm.Status))
+	state := strings.ToLower(shared.FirstNonBlankTrimmed(vm.State, vm.Status))
 	return state == "stopped" || state == "off" || state == "powered_off"
 }
 
 func (vm hostingerVM) Terminal() bool {
-	switch strings.ToLower(firstNonBlank(vm.State, vm.Status)) {
+	switch strings.ToLower(shared.FirstNonBlankTrimmed(vm.State, vm.Status)) {
 	case "error", "suspended", "destroyed":
 		return true
 	default:
 		return false
 	}
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlankTrimmed(values...)
 }

@@ -103,7 +103,7 @@ func (c *client) AccountID(ctx context.Context) (string, error) {
 	if err := c.do(ctx, stsService, c.stsEndpoint, "GetCallerIdentity", stsVersion, c.region, map[string]any{}, &out); err != nil {
 		return "", err
 	}
-	c.accountID = firstNonBlank(out.AccountID, out.UIN)
+	c.accountID = shared.FirstNonBlankTrimmed(out.AccountID, out.UIN)
 	if c.accountID == "" {
 		return "", core.Exit(3, "tencentcloud GetCallerIdentity response did not include AccountId or Uin")
 	}
@@ -338,10 +338,6 @@ func hmacSHA256(key []byte, value string) []byte {
 
 func resourceName(region, accountID, instanceID string) string {
 	return fmt.Sprintf("qcs::cvm:%s:uin/%s:instance/%s", region, accountID, instanceID)
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlankTrimmed(values...)
 }
 
 func isNotFound(err error) bool {

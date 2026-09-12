@@ -791,7 +791,7 @@ func serverFromInstance(item vultrInstance, cfg core.Config) core.Server {
 		Labels:   labels,
 	}
 	server.PublicNet.IPv4.IP = item.MainIP
-	server.ServerType.Name = firstNonBlank(item.Plan, cfg.ServerType)
+	server.ServerType.Name = shared.FirstNonBlank(item.Plan, cfg.ServerType)
 	return server
 }
 
@@ -909,8 +909,4 @@ func applyVultrDefaults(cfg *core.Config) {
 func isVultrInstanceID(value string) bool {
 	value = strings.TrimSpace(value)
 	return vultrInstanceIDRe.MatchString(value)
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlank(values...)
 }

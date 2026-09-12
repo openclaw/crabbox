@@ -16,6 +16,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type recordingRunner struct {
@@ -267,7 +268,7 @@ func TestCreateInstanceBuildsLaunchArgsAndCloudInit(t *testing.T) {
 		t.Fatalf("darwin qemu launch should not include --mount:\n%s", args)
 	}
 	mountArgs := recordedArgsForCommand(t, runner, "mount")
-	for _, want := range []string{"mount\n--type\nnative", filepath.Join(root, multipassCacheVolumeName("my-app/linux node24 lock")), "crabbox-blue-1234abcd:/var/cache/crabbox/pnpm"} {
+	for _, want := range []string{"mount\n--type\nnative", filepath.Join(root, shared.CacheVolumeName("my-app/linux node24 lock")), "crabbox-blue-1234abcd:/var/cache/crabbox/pnpm"} {
 		if !strings.Contains(mountArgs, want) {
 			t.Fatalf("native mount args missing %q:\n%s", want, mountArgs)
 		}
@@ -308,7 +309,7 @@ func TestCreateInstanceFallsBackToClassicMountsForDarwinVirtualBox(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mountArg := filepath.Join(root, multipassCacheVolumeName("gomod")) + ":/var/cache/crabbox/go"
+	mountArg := filepath.Join(root, shared.CacheVolumeName("gomod")) + ":/var/cache/crabbox/go"
 	if !strings.Contains(args, "--mount\n"+mountArg) {
 		t.Fatalf("virtualbox launch args missing classic mount %q:\n%s", mountArg, args)
 	}
@@ -642,8 +643,8 @@ func TestDurationSecondsCeil(t *testing.T) {
 }
 
 func TestCacheVolumeNameIsStableAndFilesystemSafe(t *testing.T) {
-	got := multipassCacheVolumeName("My App/linux node24 lock")
-	again := multipassCacheVolumeName("My App/linux node24 lock")
+	got := shared.CacheVolumeName("My App/linux node24 lock")
+	again := shared.CacheVolumeName("My App/linux node24 lock")
 	if got != again {
 		t.Fatalf("cache volume name unstable: %q then %q", got, again)
 	}
