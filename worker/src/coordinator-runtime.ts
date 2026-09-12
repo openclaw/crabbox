@@ -1,3 +1,4 @@
+import { AsyncMutex } from "./async-mutex";
 export interface CoordinatorStorageView {
   get<T>(key: string, options?: { noCache?: boolean }): Promise<T | undefined>;
   put<T>(key: string, value: T, options?: { noCache?: boolean }): Promise<void>;
@@ -275,24 +276,14 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
   readonly storage: CoordinatorStorage;
   readonly ephemeralWebSocketMaxPayloadBytes = 32 * 1024 * 1024;
   private readonly attachments = new WeakMap<WebSocket, unknown>();
-  private exclusiveTail = Promise.resolve();
+  private readonly exclusive = new AsyncMutex();
 
   constructor(private readonly state: DurableObjectState) {
     this.storage = state.storage;
   }
 
-  async runExclusive<T>(callback: () => Promise<T>): Promise<T> {
-    const predecessor = this.exclusiveTail;
-    let release!: () => void;
-    this.exclusiveTail = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await predecessor;
-    try {
-      return await callback();
-    } finally {
-      release();
-    }
+  runExclusive<T>(callback: () => Promise<T>): Promise<T> {
+    return this.exclusive.run(callback);
   }
 
   createWebSocketUpgrade(

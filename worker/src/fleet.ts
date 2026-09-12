@@ -1,5 +1,6 @@
 import ssh2, { type Client as SSHClient, type ClientChannel } from "ssh2";
 
+import { AsyncMutex, KeyedAsyncMutex } from "./async-mutex";
 import { AzureResumableProvisioning } from "./azure-provisioning";
 import {
   clearHostReservations,
@@ -1136,8 +1137,9 @@ export class FleetCoordinator {
   private readonly egressSessionStateHydrations = new Map<string, Promise<void>>();
   private readonly runtimeAdapterAgents = new Map<string, WebSocket>();
   private readonly runtimeAdapterPending = new Map<string, RuntimeAdapterPendingRequest>();
-  private readonly runtimeAdapterDeleteQueues = new Map<string, Promise<void>>();
-  private readonly daytonaSnapshotBootstrapQueues = new Map<string, Promise<void>>();
+  private readonly runtimeAdapterDeleteLocks = new KeyedAsyncMutex<string>();
+  // Same-name bootstraps must not observe another request's active snapshot.
+  private readonly daytonaSnapshotBootstrapLocks = new KeyedAsyncMutex<string>();
   private readonly controlSockets = new Map<string, WebSocket>();
   private readonly failedControlSockets = new WeakSet<WebSocket>();
   private readonly workspaceTerminals = new Map<string, Set<WebSocket>>();
@@ -1148,11 +1150,11 @@ export class FleetCoordinator {
   private readonly deviceMembershipCache = new Map<string, DeviceMembershipCacheEntry>();
   private currentAdminGrantVersion: string | undefined;
   private bridgeRestoreReady: Promise<boolean> | undefined;
-  private readyPoolBorrowQueue: Promise<void> = Promise.resolve();
-  private bridgeTicketQueue: Promise<void> = Promise.resolve();
+  private readonly readyPoolBorrowLock = new AsyncMutex();
+  private readonly bridgeTicketLock = new AsyncMutex();
   private readonly bridgeTickets: BridgeTickets;
-  private awsIngressBarrier: Promise<void> = Promise.resolve();
-  private providerMaintenanceQueue: Promise<void> = Promise.resolve();
+  private readonly awsIngressOperationLock = new AsyncMutex();
+  private readonly providerMaintenanceLock = new AsyncMutex();
   private readonly webVNCCredentialHandoffs: WebVNCCredentialHandoffs;
   private readonly leaseProvisioning: LeaseProvisioningController;
   private maintenanceRun: Promise<void> | undefined;
@@ -1204,7 +1206,7 @@ export class FleetCoordinator {
     );
     state.provisioning?.registerProvisioningTick(() => this.leaseProvisioning.tick());
     this.bridgeTickets = new BridgeTickets(state.storage, {
-      withLock: (operation) => this.withBridgeTicketLock(operation),
+      withLock: (operation) => this.bridgeTicketLock.run(operation),
       getLease: (id) => this.getLease(id),
       identifierMatchesLease,
       currentTicket: (ticket, lease) => this.currentLeaseBridgeTicket(ticket, lease),
@@ -3216,7 +3218,7 @@ export class FleetCoordinator {
     await this.webVNCCredentialHandoffs.cleanupExpired();
     await this.cleanupExpiredWebVNCPortalViewerAuth();
     await this.reconcileRuntimeAdapterDeletes(leaseIDs);
-    await this.withReadyPoolBorrowLock(() =>
+    await this.readyPoolBorrowLock.run(() =>
       this.state.runExclusive(() => this.maintainReadyPools(Date.now())),
     );
     await this.maintainWorkspacePrewarm();
@@ -4539,7 +4541,7 @@ export class FleetCoordinator {
       // Queued regional attempts must not restore access from their pre-provisioning snapshot.
       withLeaseAccess: (target, operation, observe) => {
         const ingressQueuedAt = Date.now();
-        return this.withAWSIngressOperationLock(async () => {
+        return this.awsIngressOperationLock.run(async () => {
           observe?.("ingress_wait", Date.now() - ingressQueuedAt);
           const lifecycleQueuedAt = Date.now();
           const access = await this.state.runExclusive(async () => {
@@ -7839,7 +7841,7 @@ export class FleetCoordinator {
     };
     const lease =
       managedProvider === "aws" && !committed.network?.awsPrivate
-        ? await this.withAWSIngressOperationLock(refresh)
+        ? await this.awsIngressOperationLock.run(refresh)
         : await refresh();
     return json({ lease: this.leaseForRequest(lease, request, isAdminRequest(request)) });
   }
@@ -8213,7 +8215,7 @@ export class FleetCoordinator {
         { status: 403 },
       );
     }
-    return await this.serializeRuntimeAdapterDelete(lease.id, async () => {
+    return await this.runtimeAdapterDeleteLocks.run(lease.id, async () => {
       const result = await this.finalizeRuntimeAdapterDeleteCompletion(
         lease,
         completion,
@@ -8274,7 +8276,7 @@ export class FleetCoordinator {
         { status: 403 },
       );
     }
-    return await this.serializeRuntimeAdapterDelete(lease.id, async () => {
+    return await this.runtimeAdapterDeleteLocks.run(lease.id, async () => {
       const result = await this.finalizeLegacyRuntimeAdapterDelete(
         lease,
         completion,
@@ -8349,7 +8351,7 @@ export class FleetCoordinator {
     lease: LeaseRecord,
     previousShare: NormalizedLeaseShare,
   ): Promise<void> {
-    await this.withBridgeTicketLock(async () => {
+    await this.bridgeTicketLock.run(async () => {
       await this.putLease(lease);
       if (leaseShareAccessShrank(previousShare, normalizedLeaseShare(lease.share))) {
         await this.revokeUnauthorizedLeaseBridges(lease);
@@ -9299,7 +9301,7 @@ export class FleetCoordinator {
         409,
       );
     }
-    return await this.serializeRuntimeAdapterDelete(lease.id, async () => {
+    return await this.runtimeAdapterDeleteLocks.run(lease.id, async () => {
       const current = await this.state.runExclusive(() => this.getLease(lease.id));
       if (!current || !leaseIsLive(current)) {
         return runtimeAdapterWorkspaceDeleteError(
@@ -9462,28 +9464,6 @@ export class FleetCoordinator {
         { status: 202 },
       );
     });
-  }
-
-  private async serializeRuntimeAdapterDelete<T>(
-    leaseID: string,
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    const previous = this.runtimeAdapterDeleteQueues.get(leaseID) ?? Promise.resolve();
-    let release!: () => void;
-    const turn = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const tail = previous.then(() => turn);
-    this.runtimeAdapterDeleteQueues.set(leaseID, tail);
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-      if (this.runtimeAdapterDeleteQueues.get(leaseID) === tail) {
-        this.runtimeAdapterDeleteQueues.delete(leaseID);
-      }
-    }
   }
 
   private async markRuntimeAdapterDeletePending(
@@ -10089,7 +10069,7 @@ export class FleetCoordinator {
   }
 
   private async reconcileRuntimeAdapterDelete(lease: LeaseRecord): Promise<void> {
-    await this.serializeRuntimeAdapterDelete(lease.id, async () => {
+    await this.runtimeAdapterDeleteLocks.run(lease.id, async () => {
       const requestedAt = lease.runtimeAdapterDeleteRequestedAt;
       const adapterID = lease.runtimeAdapterID;
       const workspaceID = lease.runtimeAdapterWorkspaceID;
@@ -10934,7 +10914,7 @@ export class FleetCoordinator {
     if (!validWebVNCPortalViewerTicket(value)) {
       return undefined;
     }
-    return await this.withBridgeTicketLock(async () => {
+    return await this.bridgeTicketLock.run(async () => {
       const key = webVNCPortalViewerTicketKey(value);
       const ticket = await this.state.storage.get<WebVNCPortalViewerTicketRecord>(key);
       if (!ticket || ticket.ticket !== value) {
@@ -11059,7 +11039,7 @@ export class FleetCoordinator {
   private async consumeWebVNCPortalViewerCredentials(
     session: WebVNCPortalViewerSessionRecord,
   ): Promise<WebVNCCredentialHandoffResult> {
-    return await this.withBridgeTicketLock(async () => {
+    return await this.bridgeTicketLock.run(async () => {
       const key = webVNCPortalViewerSessionKey(session.session);
       const current = await this.state.storage.get<WebVNCPortalViewerSessionRecord>(key);
       const handoff = current?.credentialHandoffTicket;
@@ -11738,7 +11718,7 @@ export class FleetCoordinator {
     if (!validCodeViewerTicket(value)) {
       return undefined;
     }
-    return await this.withBridgeTicketLock(async () => {
+    return await this.bridgeTicketLock.run(async () => {
       const key = codeViewerTicketKey(value);
       const ticket = await this.state.storage.get<CodeViewerTicketRecord>(key);
       if (
@@ -11843,7 +11823,7 @@ export class FleetCoordinator {
         const expiresAt = Number.isFinite(tokenExpiresAt)
           ? Math.min(revocationExpiresAt, tokenExpiresAt)
           : revocationExpiresAt;
-        await this.withBridgeTicketLock(async () => {
+        await this.bridgeTicketLock.run(async () => {
           await this.state.storage.put<CodeViewerSessionRevocationRecord>(
             codeViewerSessionRevocationKey(portalSessionHash),
             {
@@ -11937,7 +11917,7 @@ export class FleetCoordinator {
     agent: WebSocket,
     bridgeGrant: CachedBridgeGrant,
   ): Promise<Response> {
-    return await this.withBridgeTicketLock(async () => {
+    return await this.bridgeTicketLock.run(async () => {
       const currentLease = await this.resolvePortalLease(lease.id, request);
       if (!currentLease) {
         return notFound();
@@ -12331,7 +12311,7 @@ export class FleetCoordinator {
         { status: 426 },
       );
     }
-    return await this.withBridgeTicketLock(async () => {
+    return await this.bridgeTicketLock.run(async () => {
       const lease = await this.resolvePortalLease(identifier, request);
       if (!lease) {
         return notFound();
@@ -12566,7 +12546,7 @@ export class FleetCoordinator {
     if (!validRuntimeAdapterTicket(value)) {
       return { status: "invalid" };
     }
-    return this.withBridgeTicketLock(async () => {
+    return this.bridgeTicketLock.run(async () => {
       const key = runtimeAdapterTicketKey(value);
       const ticket = await this.state.storage.get<RuntimeAdapterTicketRecord>(key);
       if (!ticket || ticket.ticket !== value || !isCurrentOrgKey(ticket.org)) {
@@ -12818,13 +12798,13 @@ export class FleetCoordinator {
     request: Request,
     typed = false,
   ): Promise<ReadyPoolEntry[]> {
-    return await this.withReadyPoolBorrowLock(() =>
+    return await this.readyPoolBorrowLock.run(() =>
       this.state.runExclusive(() => this.readyPoolStatusSnapshot(request, key, typed)),
     );
   }
 
   private async allReadyPoolStatus(request: Request): Promise<ReadyPoolEntry[]> {
-    return await this.withReadyPoolBorrowLock(() =>
+    return await this.readyPoolBorrowLock.run(() =>
       this.state.runExclusive(() => this.readyPoolStatusSnapshot(request)),
     );
   }
@@ -12972,7 +12952,7 @@ export class FleetCoordinator {
         { status: 409 },
       );
     }
-    return await this.withReadyPoolBorrowLock(() =>
+    return await this.readyPoolBorrowLock.run(() =>
       this.state.runExclusive(async () => {
         const lease = await this.getLease(leaseID);
         if (!lease) return notFound();
@@ -13131,7 +13111,7 @@ export class FleetCoordinator {
     } else {
       delete input.compatibilityKey;
     }
-    return await this.withReadyPoolBorrowLock(async () => {
+    return await this.readyPoolBorrowLock.run(async () => {
       return await this.state.runExclusive(async () => {
         await this.incrementReadyPoolCounters(request, key, { borrowRequests: 1 }, typed);
         const entries = (await this.readyPoolStatusSnapshot(request, key, typed)).filter((entry) =>
@@ -13234,7 +13214,7 @@ export class FleetCoordinator {
     if (!borrowToken) {
       return json({ error: "borrow_token_required" }, { status: 400 });
     }
-    return await this.withReadyPoolBorrowLock(() =>
+    return await this.readyPoolBorrowLock.run(() =>
       this.state.runExclusive(async () => {
         const current = await this.getReadyPoolEntry(key, leaseID, typed);
         const lease = await this.getLease(leaseID);
@@ -13349,7 +13329,7 @@ export class FleetCoordinator {
       ...(compatibilityKey ? { compatibilityKey } : {}),
     });
     const nowMs = Date.now();
-    return await this.withReadyPoolBorrowLock(() =>
+    return await this.readyPoolBorrowLock.run(() =>
       this.state.runExclusive(async () => {
         await this.maintainReadyPools(nowMs);
         const owner = requestOwner(request);
@@ -13502,7 +13482,7 @@ export class FleetCoordinator {
     if (!token) {
       return json({ error: "fill_claim_token_required" }, { status: 400 });
     }
-    return await this.withReadyPoolBorrowLock(() =>
+    return await this.readyPoolBorrowLock.run(() =>
       this.state.runExclusive(async () => {
         const claim = await this.state.storage.get<ReadyPoolFillClaim>(
           readyPoolFillClaimKey(token, typed),
@@ -13523,7 +13503,7 @@ export class FleetCoordinator {
   }
 
   private async readyPoolMetrics(request: Request, key: string): Promise<Response> {
-    return await this.withReadyPoolBorrowLock(() =>
+    return await this.readyPoolBorrowLock.run(() =>
       this.state.runExclusive(async () => {
         await this.maintainReadyPools(Date.now());
         const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
@@ -13559,7 +13539,7 @@ export class FleetCoordinator {
     if (!validLeaseID(leaseID)) {
       return json({ error: "invalid_lease_id" }, { status: 400 });
     }
-    return await this.withReadyPoolBorrowLock(async () => {
+    return await this.readyPoolBorrowLock.run(async () => {
       const current = await this.getReadyPoolEntry(key, leaseID, typed);
       if (!current) {
         return notFound();
@@ -14105,7 +14085,7 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
-    return await this.withDaytonaSnapshotBootstrapLock(name, async () => {
+    return await this.daytonaSnapshotBootstrapLocks.run(name, async () => {
       const result = await new DaytonaClient(this.env).bootstrapSnapshot(
         name,
         cpu,
@@ -17235,7 +17215,7 @@ export class FleetCoordinator {
     }
     for (const target of work) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- one fence protects all shared AWS ingress mutations.
-      await this.withAWSIngressOperationLock(async () => {
+      await this.awsIngressOperationLock.run(async () => {
         const fresh = await this.state.runExclusive(async () => {
           const stored = await this.state.storage.get<StoredAWSIngressReconcileRecord>(
             awsIngressReconcileRecordKey,
@@ -17429,7 +17409,7 @@ export class FleetCoordinator {
     trigger: "alarm" | "admin",
     requestedConfig?: AWSOrphanSweepConfig,
   ): Promise<AWSOrphanSweepRecord | undefined> {
-    return this.withProviderMaintenanceLock(async () => {
+    return this.providerMaintenanceLock.run(async () => {
       const config = requestedConfig ?? this.awsOrphanSweepConfig();
       if (!config.enabled) {
         return undefined;
@@ -17730,7 +17710,7 @@ export class FleetCoordinator {
     trigger: "alarm" | "admin",
     requestedConfig?: AzureOrphanSweepConfig,
   ): Promise<AzureOrphanSweepRecord | undefined> {
-    return this.withProviderMaintenanceLock(async () => {
+    return this.providerMaintenanceLock.run(async () => {
       const config = requestedConfig ?? this.azureOrphanSweepConfig();
       if (!config.enabled) {
         return undefined;
@@ -18329,91 +18309,6 @@ export class FleetCoordinator {
 
   private async deleteReadyPoolEntry(entry: ReadyPoolEntry, typed = false): Promise<void> {
     await this.state.storage.delete(readyPoolKey(entry.key, entry.leaseID, typed));
-  }
-
-  private async withReadyPoolBorrowLock<T>(operation: () => Promise<T>): Promise<T> {
-    let release!: () => void;
-    const previous = this.readyPoolBorrowQueue.catch(() => {});
-    const next = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    this.readyPoolBorrowQueue = previous.then(() => next);
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-    }
-  }
-
-  private async withBridgeTicketLock<T>(operation: () => Promise<T>): Promise<T> {
-    let release!: () => void;
-    const previous = this.bridgeTicketQueue.catch(() => {});
-    const next = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    this.bridgeTicketQueue = previous.then(() => next);
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-    }
-  }
-
-  private async withAWSIngressOperationLock<T>(operation: () => Promise<T>): Promise<T> {
-    let release!: () => void;
-    const previous = this.awsIngressBarrier.catch(() => {});
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    this.awsIngressBarrier = previous.then(() => gate);
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-    }
-  }
-
-  private async withProviderMaintenanceLock<T>(operation: () => Promise<T>): Promise<T> {
-    let release!: () => void;
-    const previous = this.providerMaintenanceQueue.catch(() => {});
-    const next = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    this.providerMaintenanceQueue = previous.then(() => next);
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-    }
-  }
-
-  private async withDaytonaSnapshotBootstrapLock<T>(
-    name: string,
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    let release!: () => void;
-    const previous =
-      this.daytonaSnapshotBootstrapQueues.get(name)?.catch(() => {}) ?? Promise.resolve();
-    const next = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const tail = previous.then(() => next);
-    this.daytonaSnapshotBootstrapQueues.set(name, tail);
-    await previous;
-    try {
-      // Daytona exposes async snapshot completion by name, so same-name
-      // bootstraps must not overlap and observe another request's active row.
-      return await operation();
-    } finally {
-      release();
-      if (this.daytonaSnapshotBootstrapQueues.get(name) === tail) {
-        this.daytonaSnapshotBootstrapQueues.delete(name);
-      }
-    }
   }
 
   private async recentRuns(
@@ -19562,7 +19457,7 @@ export class FleetCoordinator {
   private withLeaseCleanupState<T>(lease: LeaseRecord, operation: () => Promise<T>): Promise<T> {
     const commit = () => this.state.runExclusive(operation);
     return managedLeaseProvider(lease) === "aws" && !lease.network?.awsPrivate
-      ? this.withAWSIngressOperationLock(commit)
+      ? this.awsIngressOperationLock.run(commit)
       : commit();
   }
 

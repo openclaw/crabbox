@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 
 import { NodeCoordinatorRuntime } from "../node/node-runtime";
-import { AsyncMutex } from "../node/server-support";
+import { AsyncMutex } from "../src/async-mutex";
 import type { AWSLegacyCleanupAudit } from "../src/aws-cleanup-recovery";
 import type { CoordinatorStorageView } from "../src/coordinator-runtime";
 import { AWSProvider, FleetCoordinator } from "../src/fleet";
