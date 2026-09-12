@@ -2,8 +2,8 @@
 
 ## Unreleased
 
+- Record local-container creation references, runtime image IDs, and reported repository digests in run evidence and retained inspection for Docker and Podman, preserving saved observations through bootstrap and cleanup. [PR 2202](https://github.com/openclaw/crabbox/pull/2202). Thanks @coygeek.
 - Keep portable workspace ownership exclusive when a runner's mkdir reports success after losing a directory-creation race. [PR 2201](https://github.com/openclaw/crabbox/pull/2201).
-- Record local-container creation references, runtime image IDs, and reported repository digests in run evidence and retained inspection for Docker and Podman, preserving saved observations after cleanup. [Issue 1601](https://github.com/openclaw/crabbox/issues/1601).
 
 - Resolve macOS managed-state path spelling without scanning unrelated sibling files, so crowded temporary directories do not block sync preparation. [PR 2187](https://github.com/openclaw/crabbox/pull/2187).
 - Keep Linode lease metadata consistent with the created instance type when an explicit type contains only whitespace. [PR 2186](https://github.com/openclaw/crabbox/pull/2186).
