@@ -884,7 +884,7 @@ func sshTargetForBootstrap(cfg Config, publicIP, leaseID, slug string) SSHTarget
 var bootstrapAWSWindowsDesktop = core.BootstrapAWSWindowsDesktop
 
 func useStoredTestboxKey(target *SSHTarget, leaseID string) error {
-	return shared.UseStoredTestboxKey(target, leaseID)
+	return core.UseStoredTestboxKey(target, leaseID)
 }
 func findServerByAlias(servers []Server, id string) (Server, string, error) {
 	return core.FindServerByAlias(servers, id)

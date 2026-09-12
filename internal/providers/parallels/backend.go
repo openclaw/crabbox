@@ -452,7 +452,7 @@ func blank(value, fallback string) string {
 }
 
 func useStoredTestboxKey(target *SSHTarget, leaseID string) error {
-	return shared.UseStoredTestboxKey(target, leaseID)
+	return core.UseStoredTestboxKey(target, leaseID)
 }
 
 func parallelsLeaseFromVMName(name string) (string, string) {

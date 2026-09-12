@@ -2,8 +2,6 @@ package shared
 
 import (
 	"strings"
-
-	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 // QuoteSSHProxyCommandWord encodes a literal argument for OpenSSH's percent
@@ -18,8 +16,4 @@ func QuoteSSHProxyCommandWord(word string) string {
 		return word
 	}
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, "$", `\$`, "`", "\\`").Replace(word) + `"`
-}
-
-func UseStoredTestboxKey(target *core.SSHTarget, leaseID string) error {
-	return core.UseStoredTestboxKey(target, leaseID)
 }

@@ -5,12 +5,15 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -1261,6 +1264,350 @@ func TestArtifactGlobSearchRootUsesLiteralPrefix(t *testing.T) {
 		if got := artifactGlobSearchRoot(glob); got != want {
 			t.Fatalf("artifactGlobSearchRoot(%q)=%q, want %q", glob, got, want)
 		}
+	}
+}
+
+func TestRunArtifactNestedGlobAvoidsSiblingEnumeration(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("artifact glob scripts require a POSIX target")
+	}
+	for _, mode := range []string{"required", "collect", "delegated", "delegated-file"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, name := range []string{
+				"reports/data/proof.txt",
+				"reports/data/nested/result.txt",
+				"reports/sibling/unrelated.txt",
+			} {
+				writeFile(t, filepath.Join(dir, name), name)
+			}
+			globs := []string{"reports/data/**/*.txt"}
+			script := runArtifactRequireScript(dir, globs)
+			archive := filepath.Join(t.TempDir(), "archive.tgz")
+			args := []string(nil)
+			switch mode {
+			case "collect":
+				archive = filepath.Join(dir, ".crabbox", "artifacts.tgz")
+				script = runArtifactCollectScript(dir, ".crabbox/artifacts.tgz", globs)
+			case "delegated":
+				script = DelegatedRunArtifactScript(globs, globs, 2, 1024*1024)
+			case "delegated-file":
+				parent, err := filepath.EvalSymlinks(filepath.Dir(archive))
+				if err != nil {
+					t.Fatal(err)
+				}
+				archive = filepath.Join(parent, "archive.tgz")
+				script = DelegatedRunArtifactFileScript(globs, globs, 2, 1024*1024)
+				args = []string{archive}
+			}
+			trace := filepath.Join(t.TempDir(), "enumerated")
+			prefix := "find() { command find \"$@\" | tee -a " + shellQuote(trace) + "; }\n"
+			cmd := exec.CommandContext(t.Context(), "bash", append([]string{"-c", prefix + script, "--"}, args...)...)
+			cmd.Dir = dir
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + t.TempDir()}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("generated %s script failed: %v\n%s", mode, err, out)
+			}
+			if mode != "collect" && !strings.Contains(string(out), "required artifact reports/data/**/*.txt matched=2") {
+				t.Fatalf("required membership changed: %s", out)
+			}
+			if mode == "delegated" {
+				_, encoded, begin := strings.Cut(string(out), DelegatedRunArtifactBeginMarker+"\n")
+				encoded, _, end := strings.Cut(encoded, DelegatedRunArtifactEndMarker+"\n")
+				if !begin || !end {
+					t.Fatalf("missing archive framing: %s", out)
+				}
+				data, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(encoded), ""))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(archive, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode != "required" {
+				names := tarGzNames(t, archive)
+				slices.Sort(names)
+				want := []string{"reports/data/nested/result.txt", "reports/data/proof.txt"}
+				if !slices.Equal(names, want) {
+					t.Fatalf("archive membership=%q, want %q", names, want)
+				}
+			}
+			enumerated, err := os.ReadFile(trace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(enumerated, []byte("reports/data/proof.txt\x00")) {
+				t.Fatalf("real find did not enumerate the selected file: %q", enumerated)
+			}
+			if bytes.Contains(enumerated, []byte("reports/sibling/unrelated.txt\x00")) {
+				t.Fatalf("generated %s script unnecessarily enumerated sibling file; selected membership is correct; find output=%q", mode, enumerated)
+			}
+		})
+	}
+}
+
+func TestRunArtifactNestedGlobRequiresExactDirectoryEntry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("artifact glob scripts require a POSIX target")
+	}
+	for _, tt := range []struct {
+		name, entry, wantRoot string
+	}{
+		{name: "mismatched spelling", entry: "reports/DATA", wantRoot: "reports"},
+		{name: "exact spelling", entry: "reports/data", wantRoot: "reports/data"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, filepath.Join(dir, "reports/data/proof.txt"), "selected")
+			writeFile(t, filepath.Join(dir, "reports/sibling/unrelated.txt"), "unrelated")
+			traceDir := t.TempDir()
+			probe := filepath.Join(traceDir, "probe")
+			roots := filepath.Join(traceDir, "roots")
+			enumerated := filepath.Join(traceDir, "enumerated")
+			// Only the shallow entry spelling is controlled. Both directories and
+			// recursive discovery are real; this is not a case-insensitive volume.
+			prefix := `find() {
+  if [ "$#" -eq 8 ] && [ "$*" = 'reports -mindepth 1 -maxdepth 1 -type d -print0' ]; then
+    printf 'probe\n' >> ` + shellQuote(probe) + `
+    printf '%s\0' ` + shellQuote(tt.entry) + `
+  else
+    printf '%s\n' "$1" >> ` + shellQuote(roots) + `
+    command find "$@" | tee -a ` + shellQuote(enumerated) + `
+  fi
+}
+`
+			script := runArtifactCollectScript(dir, ".crabbox/artifacts.tgz", []string{"reports/data/**/*.txt"})
+			cmd := exec.CommandContext(t.Context(), "bash", "-c", prefix+script)
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + t.TempDir()}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("controlled entry probe failed: %v\n%s", err, out)
+			}
+			probeCalls, err := os.ReadFile(probe)
+			if err != nil || string(probeCalls) != "probe\n" {
+				t.Fatalf("real candidate safety checks did not reach one shallow probe: %q, %v", probeCalls, err)
+			}
+			archive := filepath.Join(dir, ".crabbox", "artifacts.tgz")
+			if names := tarGzNames(t, archive); !slices.Equal(names, []string{"reports/data/proof.txt"}) {
+				t.Fatalf("controlled probe changed membership: %q", names)
+			}
+			if got := readTarGzContents(t, archive)["reports/data/proof.txt"]; string(got) != "selected" {
+				t.Fatalf("selected file content changed: %q", got)
+			}
+			actualRoots, err := os.ReadFile(roots)
+			if err != nil || string(actualRoots) != tt.wantRoot+"\n" {
+				t.Fatalf("recursive find root=%q, want %q; error=%v", actualRoots, tt.wantRoot+"\n", err)
+			}
+			paths, err := os.ReadFile(enumerated)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(paths, []byte("reports/data/proof.txt\x00")) {
+				t.Fatalf("selected file was not discovered by real find: %q", paths)
+			}
+			if got := bytes.Contains(paths, []byte("reports/sibling/unrelated.txt\x00")); got != (tt.wantRoot == "reports") {
+				t.Fatalf("real sibling discovery=%t, want legacy traversal=%t: %q", got, tt.wantRoot == "reports", paths)
+			}
+		})
+	}
+}
+
+func TestArtifactGlobNarrowSearchRootAddsOneLiteralDirectory(t *testing.T) {
+	for glob, want := range map[string]string{
+		"reports/data/**/*.txt":       "reports/data",
+		"./reports/data/*.txt":        "reports/data",
+		".artifacts/run/**":           ".artifacts/run",
+		"reports/data/nested/?.txt":   "reports/data/nested",
+		"reports/**":                  "",
+		"**/*.txt":                    "",
+		"reports/da*/**/*.txt":        "",
+		"reports/data/pro*.txt":       "",
+		"reports/data/proof.txt":      "",
+		"reports/data//**/*.txt":      "",
+		"reports/./data/**/*.txt":     "",
+		"reports/data/./*.txt":        "",
+		" reports/data/**/*.txt":      "",
+		"reports/data/**/*.txt ":      "",
+		"reports/../data/**/*.txt":    "",
+		"reports/\u00a0data/**/*.txt": "",
+	} {
+		if got := artifactGlobNarrowSearchRoot(glob); got != want {
+			t.Errorf("artifactGlobNarrowSearchRoot(%q)=%q, want %q", glob, got, want)
+		}
+	}
+}
+
+func TestRunArtifactNestedGlobPreservesSelection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("artifact glob scripts require a POSIX target")
+	}
+	dir := t.TempDir()
+	for _, name := range []string{
+		"reports/data/proof.txt",
+		"reports/data/nested/result.txt",
+		"reports/data/UPPER.TXT",
+		"reports/Mixed/proof.txt",
+		"reports/sibling/unrelated.txt",
+		"reports/data/.git/private.txt",
+		"reports/data/.crabbox/private.txt",
+	} {
+		writeFile(t, filepath.Join(dir, name), name)
+	}
+	for link, target := range map[string]string{
+		"reports/data/leaf.txt":     "proof.txt",
+		"reports/data/dangling.txt": "missing.txt",
+		"reports/link":              "data",
+	} {
+		if err := os.Symlink(target, filepath.Join(dir, link)); err != nil {
+			t.Fatalf("symlink fixture unavailable: %v", err)
+		}
+	}
+	recursive := []string{"reports/data/leaf.txt", "reports/data/nested/result.txt", "reports/data/proof.txt"}
+	for _, tt := range []struct {
+		name, glob, setup, fallbackRoot string
+		want                            []string
+	}{
+		{name: "recursive", glob: "reports/data/**/*.txt", want: recursive},
+		{name: "relative prefix", glob: "./reports/data/**/*.txt", want: recursive},
+		{name: "single level", glob: "reports/data/*.txt", want: []string{"reports/data/leaf.txt", "reports/data/proof.txt"}},
+		{name: "partial filename", glob: "reports/data/pro*.txt", fallbackRoot: "reports/data", want: []string{"reports/data/proof.txt"}},
+		{name: "partial directory", glob: "reports/da*/**/*.txt", fallbackRoot: "reports", want: recursive},
+		{name: "double slash", glob: "reports/data//**/*.txt", fallbackRoot: "reports"},
+		{name: "dot component", glob: "reports/./data/**/*.txt", fallbackRoot: "reports"},
+		{name: "leading space", glob: " reports/data/**/*.txt", fallbackRoot: "reports"},
+		{name: "case different directory", glob: "reports/mixed/**/*.txt", fallbackRoot: "reports"},
+		{name: "case folded directory", glob: "reports/mixed/**/*.txt", setup: "shopt -s nocasematch\n", fallbackRoot: "reports", want: []string{"reports/Mixed/proof.txt"}},
+		{name: "case folded filenames", glob: "reports/data/**/*.txt", setup: "shopt -s nocasematch\n", fallbackRoot: "reports", want: []string{"reports/data/UPPER.TXT", "reports/data/leaf.txt", "reports/data/nested/result.txt", "reports/data/proof.txt"}},
+		{name: "shell glob settings", glob: "reports/data/**/*.txt", setup: "GLOBIGNORE='data:*.txt'\nshopt -s nocaseglob\nset -f\n", want: recursive},
+		{name: "directory symlink", glob: "reports/link/**/*.txt", fallbackRoot: "reports"},
+		{name: "missing directory", glob: "reports/absent/**/*.txt", fallbackRoot: "reports"},
+		{name: "git component", glob: "reports/data/.git/**/*.txt", fallbackRoot: "reports/data"},
+		{name: "control component", glob: "reports/data/.crabbox/**/*.txt", fallbackRoot: "reports/data"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			trace := filepath.Join(t.TempDir(), "roots")
+			prefix := tt.setup + "find() { printf '%s\\n' \"$1\" >> " + shellQuote(trace) + "; command find \"$@\"; }\n"
+			globs := []string{tt.glob, tt.glob}
+			archive := filepath.Join(dir, ".crabbox", "artifacts.tgz")
+			cmd := exec.CommandContext(t.Context(), "bash", "-c", prefix+runArtifactCollectScript(dir, ".crabbox/artifacts.tgz", globs))
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + t.TempDir()}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("collect failed: %v\n%s", err, out)
+			}
+			names := tarGzNames(t, archive)
+			slices.Sort(names)
+			if !slices.Equal(names, tt.want) {
+				t.Fatalf("archive membership=%q, want %q", names, tt.want)
+			}
+			if slices.Contains(names, "reports/data/leaf.txt") {
+				header := readTarGzHeaders(t, archive)["reports/data/leaf.txt"]
+				if header.Typeflag != tar.TypeSymlink || header.Linkname != "proof.txt" {
+					t.Fatalf("leaf symlink changed: %+v", header)
+				}
+				if got := readTarGzContents(t, archive)["reports/data/proof.txt"]; string(got) != "reports/data/proof.txt" {
+					t.Fatalf("selected contents changed: %q", got)
+				}
+			}
+			if tt.fallbackRoot != "" {
+				roots, err := os.ReadFile(trace)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, root := range strings.Split(strings.TrimSpace(string(roots)), "\n") {
+					if root != tt.fallbackRoot {
+						t.Fatalf("legacy search root changed: %q, want %q", root, tt.fallbackRoot)
+					}
+				}
+			}
+			cmd = exec.CommandContext(t.Context(), "bash", "-c", tt.setup+runArtifactRequireScript(dir, globs))
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + t.TempDir()}
+			out, err = cmd.CombinedOutput()
+			if len(tt.want) > 0 {
+				want := fmt.Sprintf("required artifact %s matched=%d", tt.glob, len(tt.want))
+				if err != nil || strings.Count(string(out), want) != 2 {
+					t.Fatalf("required membership changed: %v\n%s", err, out)
+				}
+			} else {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) || exitErr.ExitCode() != 8 {
+					t.Fatalf("missing required artifact: error=%v, want exit 8; output=%s", err, out)
+				}
+			}
+		})
+	}
+}
+
+func TestRunArtifactNestedGlobKeepsFilenameNormalization(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("artifact glob scripts require a POSIX target")
+	}
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "reports/data/proof.txt\n"), "proof")
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", runArtifactRequireScript(dir, []string{"reports/data/*.txt"}))
+	cmd.Env = []string{"PATH=/usr/bin:/bin"}
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "required artifact reports/data/*.txt matched=1") {
+		t.Fatalf("required filename normalization changed: %v\n%s", err, out)
+	}
+}
+
+func TestRunArtifactNestedGlobPreservesDelegatedLimits(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("artifact glob scripts require a POSIX target")
+	}
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "reports/data/a.txt"), "first")
+	writeFile(t, filepath.Join(dir, "reports/data/b.txt"), "second")
+	globs := []string{"reports/data/**/*.txt", "reports/data/*.txt"}
+	for _, tt := range []struct {
+		name     string
+		required []string
+		maxFiles int
+		maxBytes int64
+		wantCode int
+	}{
+		{name: "deduplicated at file cap", maxFiles: 2, maxBytes: 1024 * 1024},
+		{name: "file cap", maxFiles: 1, maxBytes: 1024 * 1024, wantCode: 9},
+		{name: "byte cap", maxFiles: 2, maxBytes: 1, wantCode: 9},
+		{name: "required missing", required: []string{"reports/absent/**/*.txt"}, maxFiles: 2, maxBytes: 1024 * 1024, wantCode: 8},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, fileMode := range []bool{false, true} {
+				script := DelegatedRunArtifactScript(tt.required, globs, tt.maxFiles, tt.maxBytes)
+				args := []string(nil)
+				directory, err := filepath.EvalSymlinks(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				archive := filepath.Join(directory, "archive.tgz")
+				if fileMode {
+					script = DelegatedRunArtifactFileScript(tt.required, globs, tt.maxFiles, tt.maxBytes)
+					args = []string{archive}
+				}
+				cmd := exec.CommandContext(t.Context(), "bash", append([]string{"-c", script, "--"}, args...)...)
+				cmd.Dir = dir
+				cmd.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + t.TempDir()}
+				out, err := cmd.CombinedOutput()
+				code := 0
+				if err != nil {
+					var exitErr *exec.ExitError
+					if !errors.As(err, &exitErr) {
+						t.Fatal(err)
+					}
+					code = exitErr.ExitCode()
+				}
+				if code != tt.wantCode {
+					t.Fatalf("file mode=%t: exit=%d want=%d; output=%s", fileMode, code, tt.wantCode, out)
+				}
+				if code != 0 {
+					if _, err := os.Stat(archive); !errors.Is(err, os.ErrNotExist) || strings.Contains(string(out), DelegatedRunArtifactBeginMarker) {
+						t.Fatalf("failed collection published an archive: file mode=%t stat=%v output=%s", fileMode, err, out)
+					}
+				}
+			}
+		})
 	}
 }
 
