@@ -1893,7 +1893,7 @@ func webVNCDaemonLogHasReady(path string) bool {
 
 func webVNCDaemonCredentialName(args []string) string {
 	credentialName := webVNCDaemonStringArg(args, "external-desktop-password-env")
-	if !validEnvName(credentialName) || normalizeTargetOS(webVNCDaemonStringArg(args, "target")) != targetMacOS {
+	if !ValidShellEnvName(credentialName) || normalizeTargetOS(webVNCDaemonStringArg(args, "target")) != targetMacOS {
 		return ""
 	}
 	return credentialName
@@ -2580,7 +2580,7 @@ func readableShellCommand(words []string) string {
 	out := make([]string, 0, len(words))
 	seenCommand := false
 	for _, word := range words {
-		if !seenCommand && isShellEnvAssignment(word) {
+		if !seenCommand && IsShellEnvAssignment(word) {
 			key, value, _ := strings.Cut(word, "=")
 			out = append(out, key+"="+shellQuote(value))
 			continue

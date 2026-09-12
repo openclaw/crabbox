@@ -226,7 +226,7 @@ func blacksmithCommandString(command []string, shellMode bool) string {
 	parts := make([]string, 0, len(command))
 	seenCommand := false
 	for _, word := range command {
-		if !seenCommand && isShellEnvAssignment(word) {
+		if !seenCommand && core.IsShellEnvAssignment(word) {
 			key, value, _ := strings.Cut(word, "=")
 			parts = append(parts, key+"="+shellQuote(value))
 			continue
@@ -239,28 +239,6 @@ func blacksmithCommandString(command []string, shellMode bool) string {
 
 func trimBlacksmithShellCommand(command string) string {
 	return strings.TrimRight(command, " \t\r\n")
-}
-
-func isShellEnvAssignment(word string) bool {
-	if word == "" {
-		return false
-	}
-	idx := strings.IndexByte(word, '=')
-	if idx <= 0 {
-		return false
-	}
-	for i, r := range word[:idx] {
-		if i == 0 {
-			if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || r == '_') {
-				return false
-			}
-			continue
-		}
-		if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_') {
-			return false
-		}
-	}
-	return true
 }
 
 func exit(code int, format string, args ...any) core.ExitError {

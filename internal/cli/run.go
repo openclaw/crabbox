@@ -3846,7 +3846,7 @@ func ShouldUseShell(command []string) bool {
 }
 
 func leadingEnvAssignment(command []string) bool {
-	return len(command) > 1 && isShellEnvAssignment(command[0])
+	return len(command) > 1 && IsShellEnvAssignment(command[0])
 }
 
 func LeadingEnvAssignment(command []string) bool {
@@ -3864,7 +3864,7 @@ func shellScriptFromArgvWithLiteralArgs(command []string, literalArgs map[int]bo
 			}
 			continue
 		}
-		if !literalArgs[idx] && !seenCommand && isShellEnvAssignment(word) {
+		if !literalArgs[idx] && !seenCommand && IsShellEnvAssignment(word) {
 			key, value, _ := strings.Cut(word, "=")
 			parts = append(parts, key+"="+shellQuote(value))
 			continue

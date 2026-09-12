@@ -777,7 +777,7 @@ func allowedEnv(allow []string) map[string]string {
 		if !ok {
 			continue
 		}
-		if !validEnvName(k) {
+		if !ValidShellEnvName(k) {
 			continue
 		}
 		if envAllowed(k, allow) {

@@ -697,9 +697,6 @@ func TestFormatDockerSandboxEnvFile(t *testing.T) {
 	if _, err := formatDockerSandboxEnvFile(map[string]string{"SECRET_TOKEN": "carriage\rreturn"}); err == nil || !strings.Contains(err.Error(), "newlines") {
 		t.Fatalf("carriage return err=%v", err)
 	}
-	if !validDockerSandboxEnvName("_OK_1") || validDockerSandboxEnvName("1_BAD") || validDockerSandboxEnvName("BAD.NAME") || validDockerSandboxEnvName("") {
-		t.Fatal("validDockerSandboxEnvName accepted or rejected the wrong names")
-	}
 }
 
 func TestWriteDockerSandboxEnvFileCreatesAndCleansUpFile(t *testing.T) {

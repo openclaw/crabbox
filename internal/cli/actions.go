@@ -1052,7 +1052,7 @@ func appendLocalHydrateSteps(b *strings.Builder, steps []localHydrateStep, ctx l
 			return err
 		}
 		for _, key := range sortedKeys(step.Env) {
-			if !validShellEnvName(key) {
+			if !ValidShellEnvName(key) {
 				return exit(2, "local Actions hydration does not support env name %q", key)
 			}
 			value, err := interpolateLocalActionsValue(stepEnv[key], ctx.Inputs, stepEnv, ctx.Workdir, ctx.RepoRoot, ctx.StepOutputs)
@@ -1881,23 +1881,6 @@ func copyStringMap(values map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
-}
-
-func validShellEnvName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for i, r := range name {
-		switch {
-		case r == '_':
-		case r >= 'A' && r <= 'Z':
-		case r >= 'a' && r <= 'z':
-		case i > 0 && r >= '0' && r <= '9':
-		default:
-			return false
-		}
-	}
-	return true
 }
 
 func localActionsRuntimeShell() string {

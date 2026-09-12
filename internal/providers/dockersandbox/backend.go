@@ -732,7 +732,7 @@ func writeDockerSandboxEnvFile(env map[string]string) (string, func(), error) {
 func formatDockerSandboxEnvFile(env map[string]string) (string, error) {
 	keys := make([]string, 0, len(env))
 	for key := range env {
-		if !validDockerSandboxEnvName(key) {
+		if !core.ValidShellEnvName(key) {
 			return "", exit(2, "docker-sandbox env name %q is not a valid shell environment name", key)
 		}
 		keys = append(keys, key)
@@ -747,17 +747,4 @@ func formatDockerSandboxEnvFile(env map[string]string) (string, error) {
 		fmt.Fprintf(&b, "%s=%s\n", key, value)
 	}
 	return b.String(), nil
-}
-
-func validDockerSandboxEnvName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for i, r := range name {
-		if r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (i > 0 && r >= '0' && r <= '9') {
-			continue
-		}
-		return false
-	}
-	return true
 }

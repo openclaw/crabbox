@@ -31,7 +31,7 @@ func loadEnvProfiles(paths []string) (map[string]string, error) {
 func allowedEnvFromProfiles(allow []string, profileEnv map[string]string) map[string]string {
 	out := allowedEnv(allow)
 	for key, value := range profileEnv {
-		if validEnvName(key) && envAllowed(key, allow) {
+		if ValidShellEnvName(key) && envAllowed(key, allow) {
 			out[key] = value
 		}
 	}
@@ -41,7 +41,7 @@ func allowedEnvFromProfiles(allow []string, profileEnv map[string]string) map[st
 func allowedProfileEnv(allow []string, profileEnv map[string]string) map[string]string {
 	out := map[string]string{}
 	for key, value := range profileEnv {
-		if validEnvName(key) && envAllowed(key, allow) {
+		if ValidShellEnvName(key) && envAllowed(key, allow) {
 			out[key] = value
 		}
 	}
@@ -184,7 +184,7 @@ func parseEnvProfile(data []byte) map[string]string {
 			continue
 		}
 		key = strings.TrimSpace(key)
-		if !validEnvName(key) {
+		if !ValidShellEnvName(key) {
 			continue
 		}
 		value = strings.TrimSpace(value)
@@ -370,7 +370,7 @@ func remoteProbeRunEnvProfileCommand(workdir, remotePath string, names []string)
 	b.WriteString(shellQuote(remotePath))
 	b.WriteByte('\n')
 	for _, name := range names {
-		if !validEnvName(name) {
+		if !ValidShellEnvName(name) {
 			continue
 		}
 		secret := "false"
@@ -452,7 +452,7 @@ func formatShellEnvFile(env map[string]string) string {
 	keys := sortedEnvNames(env)
 	var b strings.Builder
 	for _, key := range keys {
-		if !validEnvName(key) {
+		if !ValidShellEnvName(key) {
 			continue
 		}
 		fmt.Fprintf(&b, "export %s=%s\n", key, shellQuote(env[key]))
@@ -464,7 +464,7 @@ func formatPlainEnvFile(env map[string]string) string {
 	keys := sortedEnvNames(env)
 	var b strings.Builder
 	for _, key := range keys {
-		if !validEnvName(key) {
+		if !ValidShellEnvName(key) {
 			continue
 		}
 		fmt.Fprintf(&b, "%s=%s\n", key, strings.NewReplacer("\r", "", "\n", "").Replace(env[key]))
@@ -497,7 +497,7 @@ Get-Content -Encoding UTF8 -LiteralPath $profilePath | ForEach-Object {
 }
 `
 	for _, name := range names {
-		if !validEnvName(name) {
+		if !ValidShellEnvName(name) {
 			continue
 		}
 		secret := envNameLooksSecret(name)
@@ -561,22 +561,4 @@ func shellDir(path string) string {
 		return path[:idx]
 	}
 	return "."
-}
-
-func validEnvName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for i, r := range name {
-		if i == 0 {
-			if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || r == '_') {
-				return false
-			}
-			continue
-		}
-		if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_') {
-			return false
-		}
-	}
-	return true
 }

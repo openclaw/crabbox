@@ -523,6 +523,11 @@ boundary intact across those flows.
 
 ## Step 7. Use The Runtime
 
+Use `core.ValidShellEnvName` for the portable ASCII environment-name grammar
+and `core.IsShellEnvAssignment` to recognize a leading `NAME=value` argument.
+These helpers do not trim names or validate values. Keep the adapter's policy
+for invalid names, value restrictions, allowlists, quoting, and transport local.
+
 Backends receive a narrow runtime instead of touching package-level state:
 
 ```go

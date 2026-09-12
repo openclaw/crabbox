@@ -604,7 +604,7 @@ func powershellEnvLines(env map[string]string) (string, error) {
 	}
 	keys := make([]string, 0, len(env))
 	for key := range env {
-		if !validEnvName(key) {
+		if !core.ValidShellEnvName(key) {
 			return "", exit(2, "invalid environment variable name %q for provider=%s", key, providerName)
 		}
 		keys = append(keys, key)
@@ -886,19 +886,6 @@ func psBool(value bool) string {
 		return "$true"
 	}
 	return "$false"
-}
-
-func validEnvName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for i, r := range name {
-		ok := r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || i > 0 && r >= '0' && r <= '9'
-		if !ok {
-			return false
-		}
-	}
-	return true
 }
 
 func windowsSandboxCommandText(req RunRequest) string {

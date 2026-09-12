@@ -213,7 +213,7 @@ func isPresetPlaceholderWord(word string) bool {
 
 func validateProfileEnvNames(label string, env map[string]string) error {
 	for key := range env {
-		if !validEnvName(strings.TrimSpace(key)) {
+		if !ValidShellEnvName(strings.TrimSpace(key)) {
 			return exit(2, "%s env key %q is not a valid shell environment name", label, key)
 		}
 	}

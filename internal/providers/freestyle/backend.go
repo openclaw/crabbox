@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -342,7 +341,7 @@ func freestyleEnvExportCommand(env map[string]string) string {
 	}
 	keys := make([]string, 0, len(env))
 	for name := range env {
-		if validFreestyleEnvName(name) {
+		if core.ValidShellEnvName(name) {
 			keys = append(keys, name)
 		}
 	}
@@ -359,12 +358,6 @@ func freestyleEnvExportCommand(env map[string]string) string {
 		b.WriteString(shellQuote(env[name]))
 	}
 	return b.String()
-}
-
-var freestyleEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
-func validFreestyleEnvName(name string) bool {
-	return freestyleEnvNameRE.MatchString(name)
 }
 
 func freestyleExecCommand(command []string, shellMode bool) string {

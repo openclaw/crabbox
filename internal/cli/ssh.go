@@ -202,7 +202,7 @@ func applyTargetChildEnvironment(cmd *exec.Cmd, target SSHTarget) {
 	}
 	overrideNames := make([]string, 0, len(target.ChildEnv))
 	for name := range target.ChildEnv {
-		if validEnvName(name) {
+		if ValidShellEnvName(name) {
 			overrideNames = append(overrideNames, name)
 		}
 	}
@@ -1889,7 +1889,7 @@ func shellScriptFromArgv(command []string) string {
 			}
 			continue
 		}
-		if !seenCommand && isShellEnvAssignment(word) {
+		if !seenCommand && IsShellEnvAssignment(word) {
 			key, value, _ := strings.Cut(word, "=")
 			parts = append(parts, key+"="+shellQuote(value))
 			continue
@@ -1902,28 +1902,6 @@ func shellScriptFromArgv(command []string) string {
 
 func ShellScriptFromArgv(command []string) string {
 	return shellScriptFromArgv(command)
-}
-
-func isShellEnvAssignment(word string) bool {
-	if word == "" {
-		return false
-	}
-	idx := strings.IndexByte(word, '=')
-	if idx <= 0 {
-		return false
-	}
-	for i, r := range word[:idx] {
-		if i == 0 {
-			if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || r == '_') {
-				return false
-			}
-			continue
-		}
-		if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_') {
-			return false
-		}
-	}
-	return true
 }
 
 func isShellControlOperator(word string) bool {
@@ -1960,7 +1938,7 @@ func writeRemoteCommandPrefix(b *strings.Builder, workdir string, env map[string
 		b.WriteString("; fi && ")
 	}
 	for k, v := range env {
-		if !validEnvName(k) {
+		if !ValidShellEnvName(k) {
 			continue
 		}
 		b.WriteString(k)

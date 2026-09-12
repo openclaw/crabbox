@@ -51,8 +51,6 @@ type execOptions struct {
 var errSandboxNotFound = errors.New("cloud-run-sandbox sandbox not found")
 var errSandboxAlreadyExists = errors.New("cloud-run-sandbox sandbox already exists")
 
-var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
 var newTransport = func(cfg Config, rt Runtime) (sandboxTransport, error) {
 	// GatewayURL is deliberately absent from fileCloudRunSandboxConfig. Only an
 	// operator-supplied flag or environment value can select the origin that
@@ -126,7 +124,7 @@ func validateSandboxID(id string) error {
 
 func validateEnv(env map[string]string) error {
 	for key := range env {
-		if !envNamePattern.MatchString(key) {
+		if !core.ValidShellEnvName(key) {
 			return exit(2, "invalid environment variable name %q", key)
 		}
 	}
