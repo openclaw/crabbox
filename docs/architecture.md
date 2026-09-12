@@ -162,6 +162,10 @@ One logical `FleetCoordinator` (`worker/src/fleet.ts`) owns:
   `cost_limit_exceeded`. Cost = hourly rate × TTL, where the rate comes from a
   `CRABBOX_COST_RATES_JSON` override, then a provider live price, then built-in
   defaults.
+  Shared predicates in `worker/src/lease-state.ts` keep accounting, host
+  reservations, and lifecycle handling aligned: active/provisioning rows remain
+  live until a terminal transition, even after a heartbeat deadline, and
+  registered inventory stays outside managed usage.
 - **Usage accounting** — `usageSummary` aggregates leases per
   owner/org/provider/server type for the month; served at `GET /v1/usage`.
 - **Cleanup and expiry** — runtime alarms/jobs and reconciliation run maintenance:

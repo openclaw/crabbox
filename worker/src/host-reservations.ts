@@ -1,5 +1,6 @@
 import type { CoordinatorStorageView } from "./coordinator-runtime";
 import { leaseProviderCleanupConfirmed } from "./lease-cleanup";
+import { leaseIsLive } from "./lease-state";
 import { publicLeaseRecord } from "./org-records";
 import type { LeaseRecord, Provider } from "./types";
 
@@ -36,7 +37,7 @@ export function hostReservationStaleReason(
   if (!lease) return "lease_missing";
   if (!matchesHost(lease, scope)) return "host_changed";
   // A create owns its host before a provider instance ID has been committed.
-  if (lease.state === "active" || lease.state === "provisioning") return undefined;
+  if (leaseIsLive(lease)) return undefined;
   if (leaseProviderCleanupConfirmed(lease)) return "cleanup_complete";
   if (
     lease.state === "expired" &&

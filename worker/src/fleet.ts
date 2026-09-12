@@ -24,6 +24,7 @@ import {
   validateProvisioningRecord,
   type LeaseProvisioningOperation,
 } from "./lease-provisioning";
+import { isRegisteredLease, leaseIsLive } from "./lease-state";
 import type { ProviderResumableProvisioning } from "./provider-provisioning";
 import { ProvisioningAttemptHistory } from "./provisioning-attempts";
 import {
@@ -25382,10 +25383,6 @@ function pinnedHostConflict(config: LeaseConfig, leases: LeaseRecord[]): Respons
   );
 }
 
-function leaseIsLive(lease: LeaseRecord): boolean {
-  return lease.state === "active" || lease.state === "provisioning";
-}
-
 function leaseHeartbeatStateError(
   lease: LeaseRecord,
   now = Date.now(),
@@ -25398,10 +25395,6 @@ function leaseHeartbeatStateError(
     return "lease_expired";
   }
   return undefined;
-}
-
-function isRegisteredLease(lease: LeaseRecord): boolean {
-  return lease.lifecycle === "registered";
 }
 
 function managedLeaseProvider(lease: LeaseRecord): Provider | undefined {
