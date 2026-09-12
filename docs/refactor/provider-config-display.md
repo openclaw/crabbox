@@ -75,6 +75,13 @@ tool and path values remain references only; projection does not consult a CLI,
 cluster or guest assets. Raw JSON strings, empty-only text dashes, duration
 strings, integer sizes/timeouts and explicit booleans keep their existing forms.
 
+Parallels owns its existing 15 JSON fields and 12 text fields, retaining its
+original text position. Its typed template map and host list are copied before
+loaded key values become presence markers; nested JSON names, nil/empty shapes
+and host order stay unchanged. Text retains collection counts and its existing
+raw strings and empty-only fallbacks. Projection does not select templates,
+resolve hosts or read key files, and runtime-only selected-host state stays omitted.
+
 ## Remaining migration
 
 The baseline census contains 81 canonical providers: 49 have both value formats,
@@ -87,9 +94,9 @@ sections**. They do not complete the migration. Existing provider projections
 also still need to move out of the parallel JSON map and text formatter so
 their field selection and transformations have one owner.
 
-The Multipass/Tart/Lume, local-container, cloud, VPS and runtime cohorts remove seventeen
+The Multipass/Tart/Lume, local-container, cloud, VPS, runtime and Parallels cohorts remove eighteen
 of the original 49 canonical both-format providers from that legacy
-implementation, leaving 32 in that cohort. The local cohort covers five
+implementation, leaving 31 in that cohort. The local cohort covers five
 identities through four sections because Apple Machine shares Apple Container's
 values. These migrations do not fill any of the missing sections above.
 
