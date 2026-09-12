@@ -155,15 +155,13 @@ func (b *linodeLeaseBackend) acquireOnce(ctx context.Context, req core.AcquireRe
 	}()
 	cfg.SSHKey = keyPath
 	cfg.ProviderKey = providerKeyForLease(leaseID)
-	if !cfg.ServerTypeExplicit || cfg.ServerType == "" {
-		cfg.ServerType = linodeServerTypeForConfig(cfg)
-	}
+	cfg.ServerType = linodeServerTypeForConfig(cfg)
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
 	}
 	createReq := createLinodeRequest{
 		Region:         linodeRegionForConfig(cfg),
-		Type:           linodeServerTypeForConfig(cfg),
+		Type:           cfg.ServerType,
 		Image:          linodeImageForConfig(cfg),
 		Label:          core.LeaseProviderName(leaseID, slug),
 		Tags:           leaseTags(cfg, leaseID, slug, "provisioning", req.Keep, now),

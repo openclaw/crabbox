@@ -287,26 +287,41 @@ func TestAcquireCreatesLinodeClaimsLeaseAndMarksReady(t *testing.T) {
 }
 
 func TestAcquireRecordsConfiguredLinodeTypeInMetadata(t *testing.T) {
-	api := &fakeLinodeAPI{}
-	backend := newTestBackend(t, api)
-	backend.Cfg.Linode.Type = "g6-standard-2"
-
-	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "custom-type"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(api.createRequests) != 1 || api.createRequests[0].Type != "g6-standard-2" {
-		t.Fatalf("createRequests=%#v", api.createRequests)
-	}
-	if lease.Server.ServerType.Name != "g6-standard-2" || lease.Server.Labels["server_type"] != "g6-standard-2" {
-		t.Fatalf("lease server type=%#v labels=%v", lease.Server.ServerType, lease.Server.Labels)
-	}
-	claim, ok, err := core.ResolveLeaseClaimForProvider("custom-type", providerName)
-	if err != nil || !ok {
-		t.Fatalf("claim ok=%v err=%v", ok, err)
-	}
-	if claim.Labels["server_type"] != "g6-standard-2" {
-		t.Fatalf("claim labels=%v", claim.Labels)
+	for _, tc := range []struct {
+		name, providerType, explicitType, want string
+	}{
+		{"provider type", "g6-standard-2", "", "g6-standard-2"},
+		{"explicit override", "g6-standard-2", "g6-nanode-1", "g6-nanode-1"},
+		{"padded explicit override", "g6-standard-2", " g6-nanode-1 ", "g6-nanode-1"},
+		{"blank explicit uses provider type", "g6-standard-2", " \t ", "g6-standard-2"},
+		{"blank explicit uses default", "", " ", defaultType},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &fakeLinodeAPI{}
+			backend := newTestBackend(t, api)
+			backend.Cfg.Linode.Type = tc.providerType
+			if tc.explicitType != "" {
+				backend.Cfg.ServerType = tc.explicitType
+				backend.Cfg.ServerTypeExplicit = true
+			}
+			lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "custom-type"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(api.createRequests) != 1 || api.createRequests[0].Type != tc.want {
+				t.Fatalf("createRequests=%#v", api.createRequests)
+			}
+			if lease.Server.ServerType.Name != tc.want || lease.Server.Labels["server_type"] != tc.want {
+				t.Fatalf("lease server type=%#v labels=%v", lease.Server.ServerType, lease.Server.Labels)
+			}
+			claim, ok, err := core.ResolveLeaseClaimForProvider("custom-type", providerName)
+			if err != nil || !ok {
+				t.Fatalf("claim ok=%v err=%v", ok, err)
+			}
+			if claim.Labels["server_type"] != tc.want {
+				t.Fatalf("claim labels=%v", claim.Labels)
+			}
+		})
 	}
 }
 

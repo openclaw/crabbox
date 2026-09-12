@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep Linode lease metadata consistent with the created instance type when an explicit type contains only whitespace.
 - Avoid unnecessary sibling traversal for nested artifact globs with an exact, safe literal directory prefix, preserving matching, archive membership, and collection limits. [PR 2162](https://github.com/openclaw/crabbox/pull/2162). Thanks @vincentkoc.
 - Add opt-in private local run history with bounded logs and parsed results, offline readback after lease cleanup, explicit provenance, and bounded pruning. [PR 2141](https://github.com/openclaw/crabbox/pull/2141). Thanks @coygeek.
 - Honor an explicit `XDG_STATE_HOME` for generated lease SSH keys and host trust, preserving default paths and isolated-root reuse and cleanup. [PR 2164](https://github.com/openclaw/crabbox/pull/2164). Thanks @coygeek.
