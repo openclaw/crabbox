@@ -212,31 +212,21 @@ func (b *freestyleBackend) Status(ctx context.Context, req StatusRequest) (statu
 	if err != nil {
 		return statusView{}, err
 	}
-	deadline := b.now().Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = b.now().Add(5 * time.Minute)
-	}
-	for {
-		vm, err := client.GetVM(ctx, id)
-		if err != nil {
-			return statusView{}, freestyleError("get vm", err)
-		}
-		view := freestyleStatusView(leaseID, vm)
-		if !req.Wait || view.Ready {
-			return view, nil
-		}
-		if freestyleStatusTerminal(view.State) {
-			return statusView{}, exit(5, "freestyle vm %s entered terminal state %q before becoming ready", id, view.State)
-		}
-		if b.now().After(deadline) {
-			return statusView{}, exit(5, "timed out waiting for vm %s to become ready", id)
-		}
-		select {
-		case <-ctx.Done():
-			return statusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
+	return shared.PollDelegatedStatus(ctx, shared.DelegatedStatusRequest{
+		Wait: req.Wait, WaitTimeout: req.WaitTimeout, Now: b.now,
+		Observe: func(ctx context.Context) (statusView, bool, error) {
+			vm, err := client.GetVM(ctx, id)
+			if err != nil {
+				return statusView{}, false, freestyleError("get vm", err)
+			}
+			view := freestyleStatusView(leaseID, vm)
+			if req.Wait && !view.Ready && freestyleStatusTerminal(view.State) {
+				return statusView{}, false, exit(5, "freestyle vm %s entered terminal state %q before becoming ready", id, view.State)
+			}
+			return view, false, nil
+		},
+		TimeoutError: func() error { return exit(5, "timed out waiting for vm %s to become ready", id) },
+	})
 }
 
 func (b *freestyleBackend) Stop(ctx context.Context, req StopRequest) error {

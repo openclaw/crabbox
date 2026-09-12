@@ -207,28 +207,19 @@ func (b *modalBackend) Status(ctx context.Context, req StatusRequest) (StatusVie
 	if err != nil {
 		return StatusView{}, err
 	}
-	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = core.ClockNow(b.rt.Clock).Add(5 * time.Minute)
-	}
-	for {
-		sandbox, err := client.GetSandbox(ctx, sandboxID)
-		if err != nil {
-			return StatusView{}, modalError("get sandbox", err)
-		}
-		view := modalStatusView(leaseID, slug, sandbox)
-		if !req.Wait || view.Ready {
-			return view, nil
-		}
-		if core.ClockNow(b.rt.Clock).After(deadline) {
-			return StatusView{}, exit(5, "timed out waiting for modal sandbox %s to become ready", sandboxID)
-		}
-		select {
-		case <-ctx.Done():
-			return StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
+	return shared.PollDelegatedStatus(ctx, shared.DelegatedStatusRequest{
+		Wait: req.Wait, WaitTimeout: req.WaitTimeout,
+		Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
+		Observe: func(ctx context.Context) (StatusView, bool, error) {
+			sandbox, err := client.GetSandbox(ctx, sandboxID)
+			if err != nil {
+				return StatusView{}, false, modalError("get sandbox", err)
+			}
+			view := modalStatusView(leaseID, slug, sandbox)
+			return view, false, nil
+		},
+		TimeoutError: func() error { return exit(5, "timed out waiting for modal sandbox %s to become ready", sandboxID) },
+	})
 }
 
 func (b *modalBackend) Stop(ctx context.Context, req StopRequest) error {

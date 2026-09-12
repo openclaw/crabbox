@@ -7,54 +7,31 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-type DelegatedStatusResource struct {
-	State, ServerID, ServerType string
-	Ready                       bool
-	Labels                      map[string]string
-}
-
 type DelegatedStatusRequest struct {
-	ID, Provider, TargetOS string
-	Network                core.NetworkMode
-	Wait                   bool
-	WaitTimeout            time.Duration
-	Now                    func() time.Time
-	Resolve                func(string) (string, string, string, error)
-	Get                    func(context.Context, string) (DelegatedStatusResource, error)
-	TimeoutError           func(string) error
+	Wait         bool
+	WaitTimeout  time.Duration
+	Now          func() time.Time
+	Observe      func(context.Context) (core.StatusView, bool, error)
+	TimeoutError func() error
 }
 
+// PollDelegatedStatus keeps complete views and terminal decisions with the
+// provider. Observe's stop result ends polling without changing view.Ready.
 func PollDelegatedStatus(ctx context.Context, req DelegatedStatusRequest) (core.StatusView, error) {
-	leaseID, resourceID, slug, err := req.Resolve(req.ID)
-	if err != nil {
-		return core.StatusView{}, err
-	}
 	deadline := req.Now().Add(req.WaitTimeout)
 	if req.WaitTimeout <= 0 {
 		deadline = req.Now().Add(5 * time.Minute)
 	}
 	for {
-		resource, err := req.Get(ctx, resourceID)
+		view, stop, err := req.Observe(ctx)
 		if err != nil {
 			return core.StatusView{}, err
 		}
-		view := core.StatusView{
-			ID:         leaseID,
-			Slug:       core.Blank(slug, resource.Labels["slug"]),
-			Provider:   req.Provider,
-			TargetOS:   req.TargetOS,
-			State:      resource.State,
-			ServerID:   resource.ServerID,
-			ServerType: resource.ServerType,
-			Network:    req.Network,
-			Ready:      resource.Ready,
-			Labels:     resource.Labels,
-		}
-		if !req.Wait || view.Ready {
+		if !req.Wait || view.Ready || stop {
 			return view, nil
 		}
 		if req.Now().After(deadline) {
-			return core.StatusView{}, req.TimeoutError(resourceID)
+			return core.StatusView{}, req.TimeoutError()
 		}
 		select {
 		case <-ctx.Done():
