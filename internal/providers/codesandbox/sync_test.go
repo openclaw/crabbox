@@ -48,16 +48,16 @@ func TestCodeSandboxWorkdirValidation(t *testing.T) {
 
 func TestSpecAllowsArchiveSyncOptionsButRejectsUnsupportedDelegatedOptions(t *testing.T) {
 	spec := Provider{}.Spec()
-	if err := core.RejectDelegatedSyncOptionsForSpec(spec, RunRequest{SyncOnly: true}); err != nil {
+	if err := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{SyncOnly: true}); err != nil {
 		t.Fatalf("--sync-only should be allowed: %v", err)
 	}
-	if err := core.RejectDelegatedSyncOptionsForSpec(spec, RunRequest{ForceSyncLarge: true}); err != nil {
+	if err := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{ForceSyncLarge: true}); err != nil {
 		t.Fatalf("--force-sync-large should be allowed: %v", err)
 	}
-	if err := core.RejectDelegatedSyncOptionsForSpec(spec, RunRequest{ChecksumSync: true}); err == nil {
+	if err := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{ChecksumSync: true}); err == nil {
 		t.Fatal("--checksum should be rejected for delegated archive sync")
 	}
-	if err := core.RejectDelegatedSyncOptionsForSpec(spec, RunRequest{FullResync: true}); err == nil {
+	if err := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{FullResync: true}); err == nil {
 		t.Fatal("--full-resync should be rejected for delegated archive sync")
 	}
 }

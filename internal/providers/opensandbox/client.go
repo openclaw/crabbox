@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	core "github.com/openclaw/crabbox/internal/cli"
 	"io"
 	"net"
 	"net/http"
@@ -16,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 
 	sdk "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
 	"github.com/openclaw/crabbox/internal/providers/shared"
@@ -117,7 +118,7 @@ func (t openSandboxRedirectTransport) RoundTrip(req *http.Request) (*http.Respon
 		response.Body.Close()
 		return nil, errors.New("opensandbox received an invalid redirect location")
 	}
-	if sameOpenSandboxOrigin(req.URL, destination) {
+	if core.SameHTTPOrigin(req.URL, destination) {
 		return response, nil
 	}
 	response.Body.Close()
@@ -139,8 +140,8 @@ func (t openSandboxQueryTransport) RoundTrip(req *http.Request) (*http.Response,
 var errOpenSandboxNotFound = errors.New("opensandbox not found")
 
 type sdkOpenSandboxClient struct {
-	cfg                    Config
-	rt                     Runtime
+	cfg                    core.Config
+	rt                     core.Runtime
 	base                   string
 	key                    string
 	client                 *http.Client
@@ -148,10 +149,10 @@ type sdkOpenSandboxClient struct {
 	execTimeoutOverride    time.Duration
 }
 
-func newOpenSandboxClient(cfg Config, rt Runtime) (openSandboxClient, error) {
+func newOpenSandboxClient(cfg core.Config, rt core.Runtime) (openSandboxClient, error) {
 	rawURL := strings.TrimSpace(cfg.OpenSandbox.APIURL)
 	if rawURL == "" {
-		return nil, exit(2, "provider=opensandbox needs a trusted API URL; set --opensandbox-api-url, CRABBOX_OPENSANDBOX_API_URL, or OPEN_SANDBOX_API_URL")
+		return nil, core.Exit(2, "provider=opensandbox needs a trusted API URL; set --opensandbox-api-url, CRABBOX_OPENSANDBOX_API_URL, or OPEN_SANDBOX_API_URL")
 	}
 	baseURL, err := validateOpenSandboxAPIURL(rawURL)
 	if err != nil {
@@ -162,7 +163,7 @@ func newOpenSandboxClient(cfg Config, rt Runtime) (openSandboxClient, error) {
 		os.Getenv("OPEN_SANDBOX_API_KEY"),
 	)
 	if apiKey == "" {
-		return nil, exit(2, "provider=opensandbox needs an API key; load CRABBOX_OPENSANDBOX_API_KEY or OPEN_SANDBOX_API_KEY from a secret manager")
+		return nil, core.Exit(2, "provider=opensandbox needs an API key; load CRABBOX_OPENSANDBOX_API_KEY or OPEN_SANDBOX_API_KEY from a secret manager")
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
@@ -180,14 +181,14 @@ func newOpenSandboxClient(cfg Config, rt Runtime) (openSandboxClient, error) {
 func validateOpenSandboxAPIURL(raw string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
-		return "", exit(2, "provider=opensandbox API URL must be an absolute HTTP(S) URL")
+		return "", core.Exit(2, "provider=opensandbox API URL must be an absolute HTTP(S) URL")
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", exit(2, "provider=opensandbox API URL must not contain userinfo, query parameters, or a fragment")
+		return "", core.Exit(2, "provider=opensandbox API URL must not contain userinfo, query parameters, or a fragment")
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
 	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
-		return "", exit(2, "provider=opensandbox API URL must use HTTPS except for loopback development endpoints")
+		return "", core.Exit(2, "provider=opensandbox API URL must use HTTPS except for loopback development endpoints")
 	}
 	host := shared.LowercaseHostname(parsed.Hostname())
 	port := parsed.Port()
@@ -230,10 +231,6 @@ func secureOpenSandboxHTTPClient(source *http.Client) *http.Client {
 		return nil
 	}
 	return &client
-}
-
-func sameOpenSandboxOrigin(a, b *url.URL) bool {
-	return core.SameHTTPOrigin(a, b)
 }
 
 func (c *sdkOpenSandboxClient) BaseURL() string { return c.base }
@@ -963,10 +960,10 @@ func normalizeOpenSandboxEndpointHeaders(values map[string]string) (map[string]s
 	for key, value := range values {
 		canonical := http.CanonicalHeaderKey(strings.TrimSpace(key))
 		if canonical == "" {
-			return nil, exit(5, "opensandbox execd endpoint returned an invalid empty header name")
+			return nil, core.Exit(5, "opensandbox execd endpoint returned an invalid empty header name")
 		}
 		if existing, ok := headers[canonical]; ok && existing != value {
-			return nil, exit(5, "opensandbox execd endpoint returned conflicting values for header %s", canonical)
+			return nil, core.Exit(5, "opensandbox execd endpoint returned conflicting values for header %s", canonical)
 		}
 		headers[canonical] = value
 	}
@@ -980,17 +977,17 @@ func validateOpenSandboxExecdURL(raw, defaultProtocol string) (string, string, e
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
-		return "", "", exit(5, "opensandbox execd endpoint must be an absolute HTTP(S) URL")
+		return "", "", core.Exit(5, "opensandbox execd endpoint must be an absolute HTTP(S) URL")
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", "", exit(5, "opensandbox execd endpoint must use HTTP(S)")
+		return "", "", core.Exit(5, "opensandbox execd endpoint must use HTTP(S)")
 	}
 	if parsed.User != nil || parsed.Fragment != "" {
-		return "", "", exit(5, "opensandbox execd endpoint must not contain userinfo or a fragment")
+		return "", "", core.Exit(5, "opensandbox execd endpoint must not contain userinfo or a fragment")
 	}
 	if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
-		return "", "", exit(5, "opensandbox execd endpoint host %q must use HTTPS unless it is loopback", parsed.Host)
+		return "", "", core.Exit(5, "opensandbox execd endpoint host %q must use HTTPS unless it is loopback", parsed.Host)
 	}
 	rawQuery := parsed.RawQuery
 	parsed.RawQuery = ""

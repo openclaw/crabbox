@@ -26,11 +26,11 @@ func (f *fakeBridgeAPI) ListSandboxes(_ context.Context, _ map[string]string) ([
 func newBridgeBackend(t *testing.T, fake *fakeBridgeAPI) *e2bBackend {
 	t.Helper()
 	prev := newE2BClient
-	newE2BClient = func(Config, Runtime) (e2bAPI, error) { return fake, nil }
+	newE2BClient = func(core.Config, core.Runtime) (e2bAPI, error) { return fake, nil }
 	t.Cleanup(func() { newE2BClient = prev })
 	return &e2bBackend{
-		cfg: Config{Provider: e2bProvider, E2B: E2BConfig{APIKey: "key", Domain: "e2b.app"}},
-		rt:  Runtime{},
+		cfg: core.Config{Provider: e2bProvider, E2B: core.E2BConfig{APIKey: "key", Domain: "e2b.app"}},
+		rt:  core.Runtime{},
 	}
 }
 

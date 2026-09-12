@@ -139,8 +139,8 @@ func TestRunCreatesExecsAndTerminatesEphemeralSandbox(t *testing.T) {
 	cfg.Modal.Environment = "my-app-dev"
 	cfg.Modal.Secrets = []string{"example", "sample"}
 	backend := NewModalBackend(Provider{}.Spec(), cfg, testRuntime()).(*modalBackend)
-	req := RunRequest{
-		Repo:    Repo{Name: "repo", Root: t.TempDir()},
+	req := core.RunRequest{
+		Repo:    core.Repo{Name: "repo", Root: t.TempDir()},
 		Command: []string{"echo", "hello"},
 		NoSync:  true,
 	}
@@ -176,11 +176,11 @@ func TestRunNoSyncDoesNotDeleteExistingWorkspace(t *testing.T) {
 	cfg := newTestConfig()
 	cfg.Sync.Delete = true
 	backend := NewModalBackend(Provider{}.Spec(), cfg, testRuntime()).(*modalBackend)
-	repo := Repo{Name: "repo", Root: t.TempDir()}
+	repo := core.Repo{Name: "repo", Root: t.TempDir()}
 	if _, _, err := backend.createSandbox(t.Context(), fake, repo, true, false, ""); err != nil {
 		t.Fatal(err)
 	}
-	req := RunRequest{
+	req := core.RunRequest{
 		ID:      "sb-123",
 		Repo:    repo,
 		Command: []string{"test", "-f", "kept.txt"},
@@ -206,8 +206,8 @@ func TestRunReturnsSessionHandleForKeptSandbox(t *testing.T) {
 	fake := &fakeModalAPI{}
 	withFakeModalAPI(t, fake)
 	backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "repo", Root: t.TempDir()},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Name: "repo", Root: t.TempDir()},
 		Command: []string{"true"},
 		Keep:    true,
 		NoSync:  true,
@@ -222,7 +222,7 @@ func TestRunReturnsSessionHandleForKeptSandbox(t *testing.T) {
 	if got.Provider != providerName || got.LeaseID == "" || got.Slug == "" || got.Reused || !got.Kept {
 		t.Fatalf("session=%#v", got)
 	}
-	if got.CleanupCommand != "crabbox stop --provider modal --id "+shellQuote(got.LeaseID) {
+	if got.CleanupCommand != "crabbox stop --provider modal --id "+core.ShellQuote(got.LeaseID) {
 		t.Fatalf("cleanup command=%q", got.CleanupCommand)
 	}
 	if containsVerb(fake.verbs, "terminate") {
@@ -257,9 +257,9 @@ func TestRunByRemoteIdentifierRejectsForeignClaimEvenWithReclaim(t *testing.T) {
 			}}
 			withFakeModalAPI(t, fake)
 			backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
-			_, err := backend.Run(context.Background(), RunRequest{
+			_, err := backend.Run(context.Background(), core.RunRequest{
 				ID:      tt.id,
-				Repo:    Repo{Name: "new", Root: newRepo},
+				Repo:    core.Repo{Name: "new", Root: newRepo},
 				Command: []string{"true"},
 				NoSync:  true,
 			})
@@ -270,9 +270,9 @@ func TestRunByRemoteIdentifierRejectsForeignClaimEvenWithReclaim(t *testing.T) {
 				t.Fatalf("run executed despite claim rejection: %v", fake.verbs)
 			}
 
-			if _, err := backend.Run(context.Background(), RunRequest{
+			if _, err := backend.Run(context.Background(), core.RunRequest{
 				ID:      tt.id,
-				Repo:    Repo{Name: "new", Root: newRepo},
+				Repo:    core.Repo{Name: "new", Root: newRepo},
 				Command: []string{"true"},
 				NoSync:  true,
 				Reclaim: true,
@@ -294,7 +294,7 @@ func TestCreateSandboxReportsCleanupFailureAfterClaimFailure(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	claimErr := errors.New("claim write failed")
 	oldClaim := publishModalClaim
-	publishModalClaim = func(*modalBackend, context.Context, modalAPI, modalBinding, modalSandbox, Repo, bool) (core.LeaseClaim, error) {
+	publishModalClaim = func(*modalBackend, context.Context, modalAPI, modalBinding, modalSandbox, core.Repo, bool) (core.LeaseClaim, error) {
 		return core.LeaseClaim{}, claimErr
 	}
 	t.Cleanup(func() { publishModalClaim = oldClaim })
@@ -305,7 +305,7 @@ func TestCreateSandboxReportsCleanupFailureAfterClaimFailure(t *testing.T) {
 	rt.Stderr = &stderr
 	backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), rt).(*modalBackend)
 
-	_, _, err := backend.createSandbox(context.Background(), fake, Repo{Name: "repo", Root: t.TempDir()}, false, false, "")
+	_, _, err := backend.createSandbox(context.Background(), fake, core.Repo{Name: "repo", Root: t.TempDir()}, false, false, "")
 	if err == nil {
 		t.Fatal("createSandbox err=nil, want claim and cleanup failure")
 	}
@@ -327,8 +327,8 @@ func TestSyncWorkspaceCleansRemoteArchiveWhenExtractFails(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repoRoot, "hello.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := backend.syncWorkspace(context.Background(), fake, "sb-123", RunRequest{
-		Repo: Repo{Name: "repo", Root: repoRoot},
+	_, _, err := backend.syncWorkspace(context.Background(), fake, "sb-123", core.RunRequest{
+		Repo: core.Repo{Name: "repo", Root: repoRoot},
 	}, "/workspace/crabbox")
 	if err == nil {
 		t.Fatalf("expected extract failure")
@@ -352,8 +352,8 @@ func TestKeepOnFailureRetainsSandbox(t *testing.T) {
 	rt := testRuntime()
 	rt.Stderr = &stderr
 	backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), rt).(*modalBackend)
-	req := RunRequest{
-		Repo:          Repo{Name: "repo", Root: t.TempDir()},
+	req := core.RunRequest{
+		Repo:          core.Repo{Name: "repo", Root: t.TempDir()},
 		Command:       []string{"false"},
 		NoSync:        true,
 		KeepOnFailure: true,
@@ -363,7 +363,7 @@ func TestKeepOnFailureRetainsSandbox(t *testing.T) {
 	if result.ExitCode != 7 {
 		t.Fatalf("exit=%d want 7", result.ExitCode)
 	}
-	var ee ExitError
+	var ee core.ExitError
 	if !errors.As(err, &ee) || ee.Code != 7 {
 		t.Fatalf("err=%v want ExitError code 7", err)
 	}
@@ -406,7 +406,7 @@ func TestStatusMapsSandboxTags(t *testing.T) {
 		},
 	}
 	withFakeModalAPI(t, fake)
-	view, err := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend).Status(context.Background(), StatusRequest{ID: "cbx_123"})
+	view, err := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend).Status(context.Background(), core.StatusRequest{ID: "cbx_123"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,12 +415,12 @@ func TestStatusMapsSandboxTags(t *testing.T) {
 	}
 }
 
-func newTestConfig() Config {
-	return Config{
+func newTestConfig() core.Config {
+	return core.Config{
 		Provider:    providerName,
 		TTL:         90 * time.Minute,
 		IdleTimeout: 30 * time.Minute,
-		Modal: ModalConfig{
+		Modal: core.ModalConfig{
 			App:     "crabbox",
 			Image:   "python:3.13-slim",
 			Workdir: "/workspace/crabbox",
@@ -429,14 +429,14 @@ func newTestConfig() Config {
 	}
 }
 
-func testRuntime() Runtime {
-	return Runtime{Stdout: io.Discard, Stderr: io.Discard}
+func testRuntime() core.Runtime {
+	return core.Runtime{Stdout: io.Discard, Stderr: io.Discard}
 }
 
 func withFakeModalAPI(t *testing.T, fake *fakeModalAPI) {
 	t.Helper()
 	old := newModalAPI
-	newModalAPI = func(Config, Runtime) (modalAPI, error) { return fake, nil }
+	newModalAPI = func(core.Config, core.Runtime) (modalAPI, error) { return fake, nil }
 	t.Cleanup(func() { newModalAPI = old })
 }
 
@@ -591,8 +591,8 @@ func TestRunLifecycleRetainsSetupFailure(t *testing.T) {
 	fake := &fakeModalAPI{execCodes: []int{7}}
 	withFakeModalAPI(t, fake)
 	backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
-	result, err := backend.Run(t.Context(), RunRequest{
-		Repo: Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"},
+	result, err := backend.Run(t.Context(), core.RunRequest{
+		Repo: core.Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"},
 		NoSync: true, KeepOnFailure: true,
 	})
 	if err == nil || result.Session == nil || !result.Session.Kept || containsVerb(fake.verbs, "terminate") {
@@ -605,8 +605,8 @@ func TestRunLifecycleReportsCleanupFailure(t *testing.T) {
 	fake := &fakeModalAPI{terminateErr: errors.New("terminate unavailable")}
 	withFakeModalAPI(t, fake)
 	backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
-	result, err := backend.Run(t.Context(), RunRequest{
-		Repo: Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true,
+	result, err := backend.Run(t.Context(), core.RunRequest{
+		Repo: core.Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true,
 	})
 	if err == nil || result.ExitCode != 1 || result.Session == nil || !result.Session.Kept {
 		t.Fatalf("cleanup failure must fail with retained handle: result=%#v session=%#v err=%v", result, result.Session, err)
@@ -624,8 +624,8 @@ func TestRunLifecycleArchiveGuardrailBeforeCreation(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend := NewModalBackend(Provider{}.Spec(), cfg, testRuntime()).(*modalBackend)
-	result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "repo", Root: repo}, Command: []string{"true"}})
-	var ee ExitError
+	result, err := backend.Run(t.Context(), core.RunRequest{Repo: core.Repo{Name: "repo", Root: repo}, Command: []string{"true"}})
+	var ee core.ExitError
 	if !errors.As(err, &ee) || ee.Code != 6 || result.ExitCode != 6 || containsVerb(fake.verbs, "create") || result.Session != nil {
 		t.Fatalf("result=%#v err=%v verbs=%v", result, err, fake.verbs)
 	}
@@ -636,7 +636,7 @@ func TestRunLifecycleRetainsSyncFailure(t *testing.T) {
 	fake := &fakeModalAPI{uploadErr: errors.New("upload unavailable")}
 	withFakeModalAPI(t, fake)
 	backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
-	result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "repo", Root: newGitRepo(t)}, Command: []string{"true"}, KeepOnFailure: true})
+	result, err := backend.Run(t.Context(), core.RunRequest{Repo: core.Repo{Name: "repo", Root: newGitRepo(t)}, Command: []string{"true"}, KeepOnFailure: true})
 	if err == nil || result.Session == nil || !result.Session.Kept || containsVerb(fake.verbs, "terminate") || !fake.cleanupDeadlineSet {
 		t.Fatalf("result=%#v err=%v verbs=%v cleanupBounded=%t", result, err, fake.verbs, fake.cleanupDeadlineSet)
 	}
@@ -649,15 +649,15 @@ func TestRunLifecycleCleanupOutcomeAndTiming(t *testing.T) {
 			fake := &fakeModalAPI{execCodes: []int{0, code}, terminateErr: errors.New("terminate unavailable")}
 			withFakeModalAPI(t, fake)
 			var stderr bytes.Buffer
-			backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), Runtime{Stdout: io.Discard, Stderr: &stderr}).(*modalBackend)
-			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true, TimingJSON: true})
+			backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), core.Runtime{Stdout: io.Discard, Stderr: &stderr}).(*modalBackend)
+			result, err := backend.Run(t.Context(), core.RunRequest{Repo: core.Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true, TimingJSON: true})
 			wantCode := code
 			wantKind := "command-exit"
 			if code == 0 {
 				wantCode = 1
 				wantKind = "provider-error"
 			}
-			var ee ExitError
+			var ee core.ExitError
 			if !errors.As(err, &ee) || ee.Code != wantCode || result.ExitCode != wantCode || !fake.terminateDeadlineSet || result.Session == nil || !result.Session.Kept {
 				t.Fatalf("result=%#v err=%v bounded=%t", result, err, fake.terminateDeadlineSet)
 			}
@@ -679,7 +679,7 @@ func TestRunLifecycleCleanupOutcomeAndTiming(t *testing.T) {
 func TestSyncWorkspaceUsesSharedTimeoutAndStaging(t *testing.T) {
 	fake := &fakeModalAPI{uploadWaitForCancel: true}
 	cfg := newTestConfig()
-	repo := Repo{Name: "repo", Root: newGitRepo(t)}
+	repo := core.Repo{Name: "repo", Root: newGitRepo(t)}
 	prepared, err := core.PrepareDelegatedArchive(t.Context(), core.DelegatedArchivePreparationRequest{Config: cfg, Repo: repo})
 	if err != nil {
 		t.Fatal(err)
@@ -690,7 +690,7 @@ func TestSyncWorkspaceUsesSharedTimeoutAndStaging(t *testing.T) {
 	cfg.Sync.Timeout = time.Millisecond
 	cfg.Sync.Delete = true
 	backend := NewModalBackend(Provider{}.Spec(), cfg, testRuntime()).(*modalBackend)
-	_, _, err = backend.syncWorkspace(t.Context(), fake, "sb-123", RunRequest{Repo: repo}, "/workspace/crabbox", prepared)
+	_, _, err = backend.syncWorkspace(t.Context(), fake, "sb-123", core.RunRequest{Repo: repo}, "/workspace/crabbox", prepared)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected transfer timeout, got %v", err)
 	}
@@ -709,7 +709,7 @@ func TestRunEnvCleanupPrecedesSandboxTermination(t *testing.T) {
 	fake := &fakeModalAPI{}
 	withFakeModalAPI(t, fake)
 	backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
-	_, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true, Env: map[string]string{"EXAMPLE": "value"}})
+	_, err := backend.Run(t.Context(), core.RunRequest{Repo: core.Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true, Env: map[string]string{"EXAMPLE": "value"}})
 	want := []string{"create", "inspect", "exec", "upload", "exec", "exec", "terminate"}
 	if err != nil || !reflect.DeepEqual(fake.verbs, want) || !fake.cleanupDeadlineSet {
 		t.Fatalf("err=%v verbs=%v bounded=%t", err, fake.verbs, fake.cleanupDeadlineSet)
@@ -721,7 +721,7 @@ func TestRunCleansPartialEnvUploadBeforeRetainingSandbox(t *testing.T) {
 	fake := &fakeModalAPI{uploadErr: errors.New("partial upload failed")}
 	withFakeModalAPI(t, fake)
 	backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
-	result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true, KeepOnFailure: true, Env: map[string]string{"EXAMPLE": "value"}})
+	result, err := backend.Run(t.Context(), core.RunRequest{Repo: core.Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true, KeepOnFailure: true, Env: map[string]string{"EXAMPLE": "value"}})
 	want := []string{"create", "inspect", "exec", "upload", "exec"}
 	if err == nil || result.Session == nil || !result.Session.Kept || !reflect.DeepEqual(fake.verbs, want) || !fake.cleanupDeadlineSet {
 		t.Fatalf("result=%#v err=%v verbs=%v bounded=%t", result, err, fake.verbs, fake.cleanupDeadlineSet)
@@ -733,7 +733,7 @@ func TestRunCleansPartialEnvUploadBeforeRetainingSandbox(t *testing.T) {
 
 func TestModalConfigEffectiveFallbacksAndDisplay(t *testing.T) {
 	for _, tc := range []struct{ raw, app, image, workdir, python string }{{"", "crabbox", "python:3.13-slim", "/workspace/crabbox", "python3"}, {"  ", "crabbox", "python:3.13-slim", "/workspace/crabbox", "python3"}, {" custom ", "custom", "custom", "custom", "custom"}} {
-		cfg := Config{Modal: ModalConfig{App: tc.raw, Image: tc.raw, Workdir: tc.raw, Python: tc.raw}}
+		cfg := core.Config{Modal: core.ModalConfig{App: tc.raw, Image: tc.raw, Workdir: tc.raw, Python: tc.raw}}
 		client := &modalPythonClient{cfg: cfg}
 		if modalApp(cfg) != tc.app || modalImage(cfg) != tc.image || modalWorkdir(cfg) != tc.workdir || client.app() != tc.app || client.python() != tc.python {
 			t.Fatalf("effective fallback mismatch for %q", tc.raw)
@@ -756,14 +756,14 @@ func TestModalConfigCreateImageBridgePayload(t *testing.T) {
 			cfg.Modal.Image = tc.raw
 			fake := &fakeModalAPI{}
 			backend := NewModalBackend(Provider{}.Spec(), cfg, testRuntime()).(*modalBackend)
-			if _, _, err := backend.createSandbox(t.Context(), fake, Repo{Name: "fixture", Root: t.TempDir()}, true, false, ""); err != nil {
+			if _, _, err := backend.createSandbox(t.Context(), fake, core.Repo{Name: "fixture", Root: t.TempDir()}, true, false, ""); err != nil {
 				t.Fatal(err)
 			}
 			if fake.createReq.Image != tc.want || fake.createReq.Image == "" {
 				t.Fatalf("production create image=%q want=%q", fake.createReq.Image, tc.want)
 			}
 			runner := &modalClientRunner{stdout: "{}"}
-			client := &modalPythonClient{cfg: cfg, rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+			client := &modalPythonClient{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
 			if _, err := client.CreateSandbox(t.Context(), fake.createReq); err != nil {
 				t.Fatal(err)
 			}

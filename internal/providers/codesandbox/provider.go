@@ -51,42 +51,42 @@ func (Provider) ValidateConfig(cfg core.Config) error {
 	return validateCodeSandboxConfig(cfg)
 }
 
-func validateCodeSandboxConfig(cfg Config) error {
+func validateCodeSandboxConfig(cfg core.Config) error {
 	csb := cfg.CodeSandbox
 	if strings.TrimSpace(csb.Workdir) == "" {
-		return exit(2, "codesandbox workdir must not be empty")
+		return core.Exit(2, "codesandbox workdir must not be empty")
 	}
 	cfg.Provider = providerName
 	if _, err := codeSandboxWorkdir(cfg); err != nil {
 		return err
 	}
 	if strings.TrimSpace(csb.BridgeCommand) == "" {
-		return exit(2, "codesandbox bridgeCommand must not be empty")
+		return core.Exit(2, "codesandbox bridgeCommand must not be empty")
 	}
 	if strings.TrimSpace(csb.SDKPackage) == "" {
-		return exit(2, "codesandbox sdkPackage must not be empty")
+		return core.Exit(2, "codesandbox sdkPackage must not be empty")
 	}
 	if csb.HibernationTimeoutSecs < 0 {
-		return exit(2, "codesandbox hibernationTimeoutSecs must be non-negative")
+		return core.Exit(2, "codesandbox hibernationTimeoutSecs must be non-negative")
 	}
 	if csb.DoctorListLimit < 0 {
-		return exit(2, "codesandbox doctorListLimit must be non-negative")
+		return core.Exit(2, "codesandbox doctorListLimit must be non-negative")
 	}
 	if csb.OperationTimeoutSecs < 0 {
-		return exit(2, "codesandbox operationTimeoutSecs must be non-negative")
+		return core.Exit(2, "codesandbox operationTimeoutSecs must be non-negative")
 	}
 	if privacy := strings.ToLower(strings.TrimSpace(csb.Privacy)); privacy != "" {
 		switch privacy {
 		case "public", "unlisted", "private", "public-hosts":
 		default:
-			return exit(2, "codesandbox privacy must be public, unlisted, private, or public-hosts")
+			return core.Exit(2, "codesandbox privacy must be public, unlisted, private, or public-hosts")
 		}
 	}
 	if tier := strings.ToLower(strings.TrimSpace(csb.VMTier)); tier != "" {
 		switch tier {
 		case "pico", "nano", "micro", "small", "medium", "large", "xlarge":
 		default:
-			return exit(2, "codesandbox vmTier must be pico, nano, micro, small, medium, large, or xlarge")
+			return core.Exit(2, "codesandbox vmTier must be pico, nano, micro, small, medium, large, or xlarge")
 		}
 	}
 	return nil

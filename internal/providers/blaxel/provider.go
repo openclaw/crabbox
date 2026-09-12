@@ -58,10 +58,10 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 }
 
 type backend struct {
-	spec          ProviderSpec
-	cfg           Config
-	rt            Runtime
-	clientFactory func(Config, Runtime) (Client, error)
+	spec          core.ProviderSpec
+	cfg           core.Config
+	rt            core.Runtime
+	clientFactory func(core.Config, core.Runtime) (Client, error)
 }
 
-func (b *backend) Spec() ProviderSpec { return b.spec }
+func (b *backend) Spec() core.ProviderSpec { return b.spec }

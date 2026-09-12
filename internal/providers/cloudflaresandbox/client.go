@@ -102,7 +102,7 @@ type warmPoolResponse struct {
 	Total int `json:"total,omitempty"`
 }
 
-func newBridgeClient(cfg Config, rt Runtime) (bridgeClient, error) {
+func newBridgeClient(cfg core.Config, rt core.Runtime) (bridgeClient, error) {
 	baseURL, err := bridgeURL(cfg)
 	if err != nil {
 		return nil, err

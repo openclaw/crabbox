@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared/procjson"
 )
 
@@ -58,17 +59,17 @@ type BridgeError struct {
 }
 
 type SDKBridge struct {
-	cfg CodeSandboxConfig
-	rt  Runtime
+	cfg core.CodeSandboxConfig
+	rt  core.Runtime
 }
 
-func NewSDKBridge(cfg CodeSandboxConfig, rt Runtime) *SDKBridge {
+func NewSDKBridge(cfg core.CodeSandboxConfig, rt core.Runtime) *SDKBridge {
 	return &SDKBridge{cfg: cfg, rt: rt}
 }
 
 func (b *SDKBridge) RoundTrip(ctx context.Context, token string, req BridgeRequest) (BridgeResponse, error) {
 	if b.rt.Exec == nil {
-		return BridgeResponse{}, exit(2, "codesandbox bridge requires Runtime.Exec")
+		return BridgeResponse{}, core.Exit(2, "codesandbox bridge requires Runtime.Exec")
 	}
 	dir, err := bridgeWorkingDir()
 	if err != nil {
@@ -88,7 +89,7 @@ func (b *SDKBridge) RoundTrip(ctx context.Context, token string, req BridgeReque
 	if req.Operation == "run_command" {
 		limit = codeSandboxRunCommandOutputLimit
 	}
-	command := LocalCommandRequest{Name: bridgeCommand(b.cfg), Args: []string{"--input-type=module", "-e", codeSandboxBridgeScript}, Env: bridgeEnv(b.cfg, token, spec.ImportSpec), Dir: dir}
+	command := core.LocalCommandRequest{Name: bridgeCommand(b.cfg), Args: []string{"--input-type=module", "-e", codeSandboxBridgeScript}, Env: bridgeEnv(b.cfg, token, spec.ImportSpec), Dir: dir}
 	resp, result, err := procjson.Exchange[BridgeRequest, BridgeResponse](ctx, b.rt.Exec, command, req, procjson.Limits{MaxBytesPerStream: limit, CancelGrace: 2 * time.Second})
 	if err != nil {
 		failure, _ := err.(*procjson.Failure)
@@ -119,7 +120,7 @@ func (b *SDKBridge) ensureBridgeSDK(ctx context.Context, dir string, spec bridge
 	setupCtx, cancel := context.WithTimeout(ctx, operationTimeout(b.cfg))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
-	result, runErr := b.rt.Exec.Run(setupCtx, LocalCommandRequest{
+	result, runErr := b.rt.Exec.Run(setupCtx, core.LocalCommandRequest{
 		Name:                   "npm",
 		Args:                   []string{"install", "--no-audit", "--no-fund", "--ignore-scripts", "--omit=optional", "--save-exact", "--loglevel=error", spec.InstallSpec},
 		Env:                    bridgeSetupEnv(),
@@ -141,7 +142,7 @@ func (b *SDKBridge) ensureBridgeSDK(ctx context.Context, dir string, spec bridge
 	return nil
 }
 
-func bridgeEnv(cfg CodeSandboxConfig, token, importSpec string) []string {
+func bridgeEnv(cfg core.CodeSandboxConfig, token, importSpec string) []string {
 	env := make([]string, 0, 8)
 	for _, key := range []string{"PATH", "HOME", "TMPDIR", "TEMP", "TMP", "SystemRoot", "SYSTEMROOT", "COMSPEC", "PATHEXT"} {
 		if value := os.Getenv(key); value != "" {
@@ -188,7 +189,7 @@ type bridgeSDKSpec struct {
 	Install         bool
 }
 
-func bridgeSDKSpecFor(cfg CodeSandboxConfig) bridgeSDKSpec {
+func bridgeSDKSpecFor(cfg core.CodeSandboxConfig) bridgeSDKSpec {
 	installSpec := sdkPackage(cfg)
 	importSpec, ok := npmPackageName(installSpec)
 	if !ok {

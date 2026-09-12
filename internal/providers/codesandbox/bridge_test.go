@@ -19,13 +19,11 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-type LocalCommandResult = core.LocalCommandResult
-
 func TestSDKBridgeSendsJSONOnStdinAndTokenOnlyInEnv(t *testing.T) {
 	setBridgeTestCacheDir(t)
 	secret := "csb-secret-value"
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "ambient-secret")
-	runner := &recordingBridgeRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &recordingBridgeRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		for _, arg := range req.Args {
 			if strings.Contains(arg, secret) {
 				t.Fatalf("secret leaked into argv: %#v", req.Args)
@@ -54,9 +52,9 @@ func TestSDKBridgeSendsJSONOnStdinAndTokenOnlyInEnv(t *testing.T) {
 			t.Fatalf("payload=%#v", payload)
 		}
 		_, _ = io.WriteString(req.Stdout, `{"ok":true,"sandboxes":[{"id":"csb_1","title":"my-app","privacy":"private","tags":["crabbox"]}],"totalCount":1}`)
-		return LocalCommandResult{ExitCode: 0}, nil
+		return core.LocalCommandResult{ExitCode: 0}, nil
 	}}
-	bridge := NewSDKBridge(newTestConfig().CodeSandbox, Runtime{Exec: runner})
+	bridge := NewSDKBridge(newTestConfig().CodeSandbox, core.Runtime{Exec: runner})
 	resp, err := bridge.RoundTrip(context.Background(), secret, BridgeRequest{Operation: "list_sandboxes", Limit: 2})
 	if err != nil {
 		t.Fatalf("RoundTrip err=%v", err)
@@ -85,8 +83,8 @@ func TestSDKBridgeSendsJSONOnStdinAndTokenOnlyInEnv(t *testing.T) {
 }
 
 func TestSDKBridgeRequiresRunnerBeforeSDKSetup(t *testing.T) {
-	var exitErr ExitError
-	_, err := NewSDKBridge(newTestConfig().CodeSandbox, Runtime{}).RoundTrip(context.Background(), "secret", BridgeRequest{Operation: "list_sandboxes"})
+	var exitErr core.ExitError
+	_, err := NewSDKBridge(newTestConfig().CodeSandbox, core.Runtime{}).RoundTrip(context.Background(), "secret", BridgeRequest{Operation: "list_sandboxes"})
 	if !errors.As(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "requires Runtime.Exec") {
 		t.Fatalf("RoundTrip error=%v", err)
 	}
@@ -95,13 +93,13 @@ func TestSDKBridgeRequiresRunnerBeforeSDKSetup(t *testing.T) {
 func TestSDKBridgeRunCommandUsesCommandTimeoutAndLargerCaptureLimit(t *testing.T) {
 	setBridgeTestCacheDir(t)
 	secret := "csb-secret-value"
-	runner := &recordingBridgeRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &recordingBridgeRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		_, _ = io.WriteString(req.Stdout, `{"ok":true,"command":{"exitCode":0}}`)
-		return LocalCommandResult{ExitCode: 0}, nil
+		return core.LocalCommandResult{ExitCode: 0}, nil
 	}}
 	cfg := newTestConfig().CodeSandbox
 	cfg.OperationTimeoutSecs = 30
-	bridge := NewSDKBridge(cfg, Runtime{Exec: runner})
+	bridge := NewSDKBridge(cfg, core.Runtime{Exec: runner})
 	if _, err := bridge.RoundTrip(context.Background(), secret, BridgeRequest{
 		Operation: "run_command",
 		SandboxID: "sb_1",
@@ -126,11 +124,11 @@ func TestSDKBridgeRunCommandUsesCommandTimeoutAndLargerCaptureLimit(t *testing.T
 func TestSDKBridgeRedactsTokenFromCommandFailures(t *testing.T) {
 	setBridgeTestCacheDir(t)
 	secret := "csb-secret-value"
-	runner := &recordingBridgeRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &recordingBridgeRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		_, _ = io.WriteString(req.Stderr, "denied "+secret)
-		return LocalCommandResult{ExitCode: 1}, errors.New("exit status 1")
+		return core.LocalCommandResult{ExitCode: 1}, errors.New("exit status 1")
 	}}
-	bridge := NewSDKBridge(newTestConfig().CodeSandbox, Runtime{Exec: runner})
+	bridge := NewSDKBridge(newTestConfig().CodeSandbox, core.Runtime{Exec: runner})
 	_, err := bridge.RoundTrip(context.Background(), secret, BridgeRequest{Operation: "list_sandboxes"})
 	if err == nil {
 		t.Fatal("expected bridge failure")
@@ -144,10 +142,10 @@ func TestSDKBridgeRedactsTokenFromRunnerError(t *testing.T) {
 	setBridgeTestCacheDir(t)
 	secret := "csb-secret-value"
 	cause := errors.New("denied " + secret)
-	runner := &recordingBridgeRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
-		return LocalCommandResult{ExitCode: 1}, cause
+	runner := &recordingBridgeRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		return core.LocalCommandResult{ExitCode: 1}, cause
 	}}
-	_, err := NewSDKBridge(newTestConfig().CodeSandbox, Runtime{Exec: runner}).RoundTrip(context.Background(), secret, BridgeRequest{Operation: "list_sandboxes"})
+	_, err := NewSDKBridge(newTestConfig().CodeSandbox, core.Runtime{Exec: runner}).RoundTrip(context.Background(), secret, BridgeRequest{Operation: "list_sandboxes"})
 	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") || !errors.Is(err, cause) {
 		t.Fatalf("runner error was not redacted: %v", err)
 	}
@@ -156,11 +154,11 @@ func TestSDKBridgeRedactsTokenFromRunnerError(t *testing.T) {
 func TestSDKBridgeRedactsTokenFromBridgeErrorResponse(t *testing.T) {
 	setBridgeTestCacheDir(t)
 	secret := "csb-secret-value"
-	runner := &recordingBridgeRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &recordingBridgeRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		_, _ = io.WriteString(req.Stdout, `{"ok":false,"error":{"code":"auth_denied","message":"bad `+secret+`"}}`)
-		return LocalCommandResult{ExitCode: 0}, nil
+		return core.LocalCommandResult{ExitCode: 0}, nil
 	}}
-	bridge := NewSDKBridge(newTestConfig().CodeSandbox, Runtime{Exec: runner})
+	bridge := NewSDKBridge(newTestConfig().CodeSandbox, core.Runtime{Exec: runner})
 	_, err := bridge.RoundTrip(context.Background(), secret, BridgeRequest{Operation: "list_sandboxes"})
 	if err == nil {
 		t.Fatal("expected bridge error response")
@@ -302,7 +300,7 @@ export class CodeSandbox {
 	}
 	cfg := newTestConfig().CodeSandbox
 	cfg.SDKPackage = (&url.URL{Scheme: "file", Path: modulePath}).String()
-	bridge := NewSDKBridge(cfg, Runtime{Exec: actualBridgeRunner{}})
+	bridge := NewSDKBridge(cfg, core.Runtime{Exec: actualBridgeRunner{}})
 
 	created, err := bridge.RoundTrip(context.Background(), "secret", BridgeRequest{Operation: "create_sandbox", VMTier: "micro"})
 	if err != nil {
@@ -362,7 +360,7 @@ export class CodeSandbox {
 
 func TestBridgeSDKInstalledRejectsWrongPinnedVersion(t *testing.T) {
 	dir := t.TempDir()
-	spec := bridgeSDKSpecFor(CodeSandboxConfig{SDKPackage: "@codesandbox/sdk@2.4.2"})
+	spec := bridgeSDKSpecFor(core.CodeSandboxConfig{SDKPackage: "@codesandbox/sdk@2.4.2"})
 	packageDir := filepath.Join(dir, "node_modules", "@codesandbox", "sdk")
 	if err := os.MkdirAll(packageDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -386,11 +384,11 @@ func TestBridgeSDKInstalledRejectsWrongPinnedVersion(t *testing.T) {
 
 func TestSDKBridgeClassifiesMalformedJSON(t *testing.T) {
 	setBridgeTestCacheDir(t)
-	runner := &recordingBridgeRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &recordingBridgeRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		_, _ = io.WriteString(req.Stdout, `not-json`)
-		return LocalCommandResult{ExitCode: 0}, nil
+		return core.LocalCommandResult{ExitCode: 0}, nil
 	}}
-	bridge := NewSDKBridge(newTestConfig().CodeSandbox, Runtime{Exec: runner})
+	bridge := NewSDKBridge(newTestConfig().CodeSandbox, core.Runtime{Exec: runner})
 	_, err := bridge.RoundTrip(context.Background(), "secret", BridgeRequest{Operation: "list_sandboxes"})
 	if err == nil || !strings.Contains(err.Error(), "decode codesandbox bridge JSON") {
 		t.Fatalf("RoundTrip err=%v", err)
@@ -400,14 +398,14 @@ func TestSDKBridgeClassifiesMalformedJSON(t *testing.T) {
 func TestCodeSandboxClientListsThroughBridge(t *testing.T) {
 	setBridgeTestCacheDir(t)
 	secret := "csb-secret-value"
-	runner := &recordingBridgeRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &recordingBridgeRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		_, _ = io.WriteString(req.Stdout, `{"ok":true,"sandboxes":[{"id":"csb_1"}],"totalCount":7}`)
-		return LocalCommandResult{ExitCode: 0}, nil
+		return core.LocalCommandResult{ExitCode: 0}, nil
 	}}
 	client := &codeSandboxClient{
 		cfg:    newTestConfig().CodeSandbox,
-		rt:     Runtime{Exec: runner},
-		bridge: NewSDKBridge(newTestConfig().CodeSandbox, Runtime{Exec: runner}),
+		rt:     core.Runtime{Exec: runner},
+		bridge: NewSDKBridge(newTestConfig().CodeSandbox, core.Runtime{Exec: runner}),
 		token:  secret,
 	}
 	result, err := client.ListSandboxes(context.Background(), ListSandboxesRequest{Limit: 3})
@@ -422,7 +420,7 @@ func TestCodeSandboxClientListsThroughBridge(t *testing.T) {
 func TestCodeSandboxClientLifecycleOperationsUseBridgePayloads(t *testing.T) {
 	setBridgeTestCacheDir(t)
 	seen := []BridgeRequest{}
-	runner := &recordingBridgeRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &recordingBridgeRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		var payload BridgeRequest
 		if err := json.Unmarshal([]byte(readRequestBody(req)), &payload); err != nil {
 			t.Fatalf("stdin payload: %v", err)
@@ -453,12 +451,12 @@ func TestCodeSandboxClientLifecycleOperationsUseBridgePayloads(t *testing.T) {
 		default:
 			t.Fatalf("unexpected operation %q", payload.Operation)
 		}
-		return LocalCommandResult{ExitCode: 0}, nil
+		return core.LocalCommandResult{ExitCode: 0}, nil
 	}}
 	client := &codeSandboxClient{
 		cfg:    newTestConfig().CodeSandbox,
-		rt:     Runtime{Exec: runner},
-		bridge: NewSDKBridge(newTestConfig().CodeSandbox, Runtime{Exec: runner}),
+		rt:     core.Runtime{Exec: runner},
+		bridge: NewSDKBridge(newTestConfig().CodeSandbox, core.Runtime{Exec: runner}),
 		token:  "secret",
 	}
 
@@ -522,12 +520,12 @@ func TestCodeSandboxClientLifecycleOperationsUseBridgePayloads(t *testing.T) {
 }
 
 type recordingBridgeRunner struct {
-	calls     []LocalCommandRequest
+	calls     []core.LocalCommandRequest
 	deadlines []time.Time
-	fn        func(LocalCommandRequest) (LocalCommandResult, error)
+	fn        func(core.LocalCommandRequest) (core.LocalCommandResult, error)
 }
 
-func (r *recordingBridgeRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *recordingBridgeRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
 	if deadline, ok := ctx.Deadline(); ok {
 		r.deadlines = append(r.deadlines, deadline)
@@ -536,17 +534,17 @@ func (r *recordingBridgeRunner) Run(ctx context.Context, req LocalCommandRequest
 		spec := req.Args[len(req.Args)-1]
 		name, ok := npmPackageName(spec)
 		if !ok {
-			return LocalCommandResult{ExitCode: 1}, errors.New("invalid package spec")
+			return core.LocalCommandResult{ExitCode: 1}, errors.New("invalid package spec")
 		}
 		version, _ := npmExactPackageVersion(spec, name)
 		packageDir := filepath.Join(req.Dir, "node_modules", filepath.FromSlash(name))
 		if err := os.MkdirAll(packageDir, 0o700); err != nil {
-			return LocalCommandResult{ExitCode: 1}, err
+			return core.LocalCommandResult{ExitCode: 1}, err
 		}
 		if err := os.WriteFile(filepath.Join(packageDir, "package.json"), []byte(`{"version":"`+version+`"}`), 0o600); err != nil {
-			return LocalCommandResult{ExitCode: 1}, err
+			return core.LocalCommandResult{ExitCode: 1}, err
 		}
-		return LocalCommandResult{ExitCode: 0}, nil
+		return core.LocalCommandResult{ExitCode: 0}, nil
 	}
 	if r.fn != nil {
 		var stdout, stderr bytes.Buffer
@@ -560,12 +558,12 @@ func (r *recordingBridgeRunner) Run(ctx context.Context, req LocalCommandRequest
 		}
 		return result, err
 	}
-	return LocalCommandResult{ExitCode: 0}, nil
+	return core.LocalCommandResult{ExitCode: 0}, nil
 }
 
 type actualBridgeRunner struct{}
 
-func (actualBridgeRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (actualBridgeRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	cmd := exec.CommandContext(ctx, req.Name, req.Args...)
 	cmd.Dir = req.Dir
 	cmd.Env = req.Env
@@ -574,14 +572,14 @@ func (actualBridgeRunner) Run(ctx context.Context, req LocalCommandRequest) (Loc
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
-	result := LocalCommandResult{Stdout: stdout.String(), Stderr: stderr.String()}
+	result := core.LocalCommandResult{Stdout: stdout.String(), Stderr: stderr.String()}
 	if cmd.ProcessState != nil {
 		result.ExitCode = cmd.ProcessState.ExitCode()
 	}
 	return result, err
 }
 
-func (r *recordingBridgeRunner) onlyCall(t *testing.T) LocalCommandRequest {
+func (r *recordingBridgeRunner) onlyCall(t *testing.T) core.LocalCommandRequest {
 	t.Helper()
 	calls := r.bridgeCalls()
 	if len(calls) != 1 {
@@ -590,7 +588,7 @@ func (r *recordingBridgeRunner) onlyCall(t *testing.T) LocalCommandRequest {
 	return calls[0]
 }
 
-func (r *recordingBridgeRunner) onlySetupCall(t *testing.T) LocalCommandRequest {
+func (r *recordingBridgeRunner) onlySetupCall(t *testing.T) core.LocalCommandRequest {
 	t.Helper()
 	calls := r.setupCalls()
 	if len(calls) != 1 {
@@ -599,8 +597,8 @@ func (r *recordingBridgeRunner) onlySetupCall(t *testing.T) LocalCommandRequest 
 	return calls[0]
 }
 
-func (r *recordingBridgeRunner) bridgeCalls() []LocalCommandRequest {
-	var calls []LocalCommandRequest
+func (r *recordingBridgeRunner) bridgeCalls() []core.LocalCommandRequest {
+	var calls []core.LocalCommandRequest
 	for _, call := range r.calls {
 		if call.Stdin != nil {
 			calls = append(calls, call)
@@ -609,8 +607,8 @@ func (r *recordingBridgeRunner) bridgeCalls() []LocalCommandRequest {
 	return calls
 }
 
-func (r *recordingBridgeRunner) setupCalls() []LocalCommandRequest {
-	var calls []LocalCommandRequest
+func (r *recordingBridgeRunner) setupCalls() []core.LocalCommandRequest {
+	var calls []core.LocalCommandRequest
 	for _, call := range r.calls {
 		if call.Name == "npm" {
 			calls = append(calls, call)
@@ -619,7 +617,7 @@ func (r *recordingBridgeRunner) setupCalls() []LocalCommandRequest {
 	return calls
 }
 
-func readRequestBody(req LocalCommandRequest) string {
+func readRequestBody(req core.LocalCommandRequest) string {
 	if req.Stdin == nil {
 		return ""
 	}

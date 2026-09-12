@@ -10,7 +10,7 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func (b *backend) syncWorkspace(ctx context.Context, client Client, sandboxID string, req RunRequest, workdir string, prepared *core.PreparedArchive) ([]timingPhase, time.Duration, error) {
+func (b *backend) syncWorkspace(ctx context.Context, client Client, sandboxID string, req core.RunRequest, workdir string, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
 	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
 		Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
 		Workdir: workdir, TempPattern: "crabbox-blaxel-sync-*.tgz",
@@ -30,7 +30,7 @@ func (b *backend) syncWorkspace(ctx context.Context, client Client, sandboxID st
 }
 
 func (b *backend) ensureWorkspace(ctx context.Context, client Client, sandboxID, workdir string) error {
-	return b.execShell(ctx, client, sandboxID, "mkdir -p "+shellQuote(workdir))
+	return b.execShell(ctx, client, sandboxID, "mkdir -p "+core.ShellQuote(workdir))
 }
 
 func (b *backend) execShell(ctx context.Context, client Client, sandboxID, command string) error {
@@ -57,5 +57,5 @@ func (b *backend) execShell(ctx context.Context, client Client, sandboxID, comma
 	if res.ExitCode != nil {
 		code = *res.ExitCode
 	}
-	return exit(code, "blaxel exec %q exited %d: %s", command, code, strings.TrimSpace(logs.Stderr))
+	return core.Exit(code, "blaxel exec %q exited %d: %s", command, code, strings.TrimSpace(logs.Stderr))
 }

@@ -11,7 +11,7 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func (b *e2bBackend) syncWorkspace(ctx context.Context, client e2bAPI, session e2bSession, req RunRequest, workspace string, prepared ...*core.PreparedArchive) ([]timingPhase, time.Duration, error) {
+func (b *e2bBackend) syncWorkspace(ctx context.Context, client e2bAPI, session e2bSession, req core.RunRequest, workspace string, prepared ...*core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
 	workspace, err := cleanE2BWorkspacePath(workspace)
 	if err != nil {
 		return nil, 0, err
@@ -41,21 +41,21 @@ func (b *e2bBackend) prepareWorkspace(ctx context.Context, client e2bAPI, sessio
 	if err != nil {
 		return err
 	}
-	return b.execShell(ctx, client, session, "mkdir -p "+shellQuote(workspace), io.Discard)
+	return b.execShell(ctx, client, session, "mkdir -p "+core.ShellQuote(workspace), io.Discard)
 }
 
 func cleanE2BWorkspacePath(workspace string) (string, error) {
 	trimmed := strings.TrimSpace(workspace)
 	if trimmed == "" {
-		return "", exit(2, "e2b workspace path is empty")
+		return "", core.Exit(2, "e2b workspace path is empty")
 	}
 	clean := path.Clean(trimmed)
 	if !strings.HasPrefix(clean, "/") {
-		return "", exit(2, "e2b workspace path %q must resolve to an absolute path", workspace)
+		return "", core.Exit(2, "e2b workspace path %q must resolve to an absolute path", workspace)
 	}
 	switch clean {
 	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var":
-		return "", exit(2, "e2b workspace path %q is too broad; choose a dedicated subdirectory", clean)
+		return "", core.Exit(2, "e2b workspace path %q is too broad; choose a dedicated subdirectory", clean)
 	}
 	return clean, nil
 }
@@ -76,7 +76,7 @@ func (b *e2bBackend) execShell(ctx context.Context, client e2bAPI, session e2bSe
 		return fmt.Errorf("e2b exec %q: %w", command, err)
 	}
 	if code != 0 {
-		return exit(code, "e2b exec %q exited %d", command, code)
+		return core.Exit(code, "e2b exec %q exited %d", command, code)
 	}
 	return nil
 }
