@@ -4,8 +4,6 @@ package cli
 
 import (
 	"flag"
-	"os"
-	"strconv"
 	"time"
 )
 
@@ -153,77 +151,8 @@ func (cfg *FirecrackerConfig) applyFile(file *fileFirecrackerConfig, trusted boo
 
 func (cfg *FirecrackerConfig) applyEnv() (FirecrackerConfigApplied, error) {
 	var applied FirecrackerConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_FIRECRACKER_BINARY"); ok {
-		cfg.Binary = value
-		applied.InputAccepted = true
-		applied.Binary = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FIRECRACKER_JAILER"); ok {
-		cfg.Jailer = value
-		applied.InputAccepted = true
-		applied.Jailer = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FIRECRACKER_KERNEL"); ok {
-		cfg.Kernel = value
-		applied.InputAccepted = true
-		applied.Kernel = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FIRECRACKER_ROOTFS"); ok {
-		cfg.RootFS = value
-		applied.InputAccepted = true
-		applied.RootFS = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FIRECRACKER_USER"); ok {
-		cfg.User = value
-		applied.InputAccepted = true
-		applied.User = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FIRECRACKER_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_FIRECRACKER_CPUS", strconv.IntSize); ok {
-		cfg.CPUs = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_FIRECRACKER_MEMORY_MIB", strconv.IntSize); ok {
-		cfg.MemoryMiB = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_FIRECRACKER_DISK_MIB", strconv.IntSize); ok {
-		cfg.DiskMiB = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FIRECRACKER_NETWORK"); ok {
-		cfg.Network = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FIRECRACKER_CNI_NETWORK"); ok {
-		cfg.CNINetwork = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FIRECRACKER_CNI_CONF_DIR"); ok {
-		cfg.CNIConfDir = value
-		applied.InputAccepted = true
-		applied.CNIConfDir = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FIRECRACKER_CNI_BIN_DIR"); ok {
-		cfg.CNIBinDir = value
-		applied.InputAccepted = true
-		applied.CNIBinDir = true
-	}
-	if value := os.Getenv("CRABBOX_FIRECRACKER_LAUNCH_TIMEOUT"); value != "" {
-		if applyLeaseDuration(&cfg.LaunchTimeout, value) {
-			applied.InputAccepted = true
-		}
-	}
-	if value, ok := getenvBool("CRABBOX_FIRECRACKER_DELETE_ON_RELEASE"); ok {
-		cfg.DeleteOnRelease = value
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 15)
+	return applied, err
 }
 
 // FirecrackerConfigFlagValues holds parsed values; only visited flags are applied.

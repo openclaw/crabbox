@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"os"
 	"strings"
 )
 
@@ -86,45 +85,8 @@ func (cfg *NamespaceInstanceConfig) applyFile(file *fileNamespaceInstanceConfig,
 
 func (cfg *NamespaceInstanceConfig) applyEnv() (NamespaceInstanceConfigApplied, error) {
 	var applied NamespaceInstanceConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_INSTANCE_CLI"); ok {
-		cfg.CLIPath = value
-		applied.InputAccepted = true
-		applied.CLIPath = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_INSTANCE_MACHINE_TYPE"); ok {
-		cfg.MachineType = value
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_NAMESPACE_INSTANCE_DURATION"); value != "" {
-		if applyLeaseDuration(&cfg.Duration, value) {
-			applied.InputAccepted = true
-		}
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_INSTANCE_REGION"); ok {
-		cfg.Region = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_INSTANCE_ENDPOINT"); ok {
-		cfg.Endpoint = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_INSTANCE_KEYCHAIN"); ok {
-		cfg.Keychain = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvList("CRABBOX_NAMESPACE_INSTANCE_VOLUMES"); ok {
-		cfg.Volumes = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_INSTANCE_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_NAMESPACE_INSTANCE_BARE"); ok {
-		cfg.Bare = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 9)
+	return applied, err
 }
 
 // NamespaceInstanceConfigFlagValues holds parsed values; only visited flags are applied.

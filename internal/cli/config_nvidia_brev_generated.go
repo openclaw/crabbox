@@ -106,57 +106,8 @@ func (cfg *NvidiaBrevConfig) applyFile(file *fileNvidiaBrevConfig, trusted bool)
 
 func (cfg *NvidiaBrevConfig) applyEnv() (NvidiaBrevConfigApplied, error) {
 	var applied NvidiaBrevConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_CLI"); ok {
-		cfg.CLI = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_ORG"); ok {
-		cfg.Org = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_TYPE"); ok {
-		cfg.Type = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_GPU_NAME"); ok {
-		cfg.GPUName = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_PROVIDER"); ok {
-		cfg.Provider = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_MODE"); ok {
-		cfg.Mode = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_LAUNCHABLE"); ok {
-		cfg.Launchable = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_STARTUP_SCRIPT"); ok {
-		cfg.StartupScript = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_RELEASE_ACTION"); ok {
-		cfg.ReleaseAction = value
-		applied.InputAccepted = true
-		applied.ReleaseAction = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_TARGET"); ok {
-		cfg.Target = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_USER"); ok {
-		cfg.User = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 12)
+	return applied, err
 }
 
 // NvidiaBrevConfigFlagValues holds parsed values; only visited flags are applied.

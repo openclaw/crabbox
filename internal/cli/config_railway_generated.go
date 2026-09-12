@@ -50,25 +50,8 @@ func (cfg *RailwayConfig) applyFile(file *fileRailwayConfig) (RailwayConfigAppli
 
 func (cfg *RailwayConfig) applyEnv() (RailwayConfigApplied, error) {
 	var applied RailwayConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_RAILWAY_API_TOKEN", "RAILWAY_API_TOKEN"); ok {
-		cfg.APIToken = value
-		applied.InputAccepted = true
-		applied.APIToken = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_RAILWAY_API_URL", "RAILWAY_API_URL"); ok {
-		cfg.APIURL = value
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_RAILWAY_PROJECT_ID", "RAILWAY_PROJECT_ID"); ok {
-		cfg.ProjectID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_RAILWAY_ENVIRONMENT_ID", "RAILWAY_ENVIRONMENT_ID"); ok {
-		cfg.EnvironmentID = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 4)
+	return applied, err
 }
 
 // RailwayConfigFlagValues holds parsed values; only visited flags are applied.

@@ -51,21 +51,8 @@ func (cfg *CloudflareConfig) applyFile(file *fileCloudflareConfig) (CloudflareCo
 
 func (cfg *CloudflareConfig) applyEnv() (CloudflareConfigApplied, error) {
 	var applied CloudflareConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUDFLARE_RUNNER_URL"); ok {
-		cfg.APIURL = value
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUDFLARE_RUNNER_TOKEN"); ok {
-		cfg.Token = value
-		applied.InputAccepted = true
-		applied.Token = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUDFLARE_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 3)
+	return applied, err
 }
 
 // CloudflareConfigFlagValues holds parsed values; only visited flags are applied.

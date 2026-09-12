@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"os"
 )
 
 type fileBlacksmithConfig struct {
@@ -60,37 +59,14 @@ func (cfg *BlacksmithConfig) applyFile(file *fileBlacksmithConfig) (BlacksmithCo
 
 func (cfg *BlacksmithConfig) applyEnvPrefix() (BlacksmithConfigApplied, error) {
 	var applied BlacksmithConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_BLACKSMITH_ORG"); ok {
-		cfg.Org = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_BLACKSMITH_WORKFLOW"); ok {
-		cfg.Workflow = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_BLACKSMITH_JOB"); ok {
-		cfg.Job = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_BLACKSMITH_REF"); ok {
-		cfg.Ref = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 4)
+	return applied, err
 }
 
 func (cfg *BlacksmithConfig) applyEnvSuffix() (BlacksmithConfigApplied, error) {
 	var applied BlacksmithConfigApplied
-	if value := os.Getenv("CRABBOX_BLACKSMITH_IDLE_TIMEOUT"); value != "" {
-		if applyLeaseDuration(&cfg.IdleTimeout, value) {
-			applied.InputAccepted = true
-		}
-	}
-	if value, ok := getenvBool("CRABBOX_BLACKSMITH_DEBUG"); ok {
-		cfg.Debug = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 4, 6)
+	return applied, err
 }
 
 // BlacksmithConfigFlagValues holds parsed values; only visited flags are applied.

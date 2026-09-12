@@ -47,19 +47,8 @@ func (cfg *AnthropicSRTConfig) applyFile(file *fileAnthropicSRTConfig) (Anthropi
 
 func (cfg *AnthropicSRTConfig) applyEnv() (AnthropicSRTConfigApplied, error) {
 	var applied AnthropicSRTConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI"); ok {
-		cfg.CLIPath = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS"); ok {
-		cfg.Settings = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_DEBUG"); ok {
-		cfg.Debug = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 3)
+	return applied, err
 }
 
 // AnthropicSRTConfigFlagValues holds parsed values; only visited flags are applied.

@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"strconv"
 )
 
 type fileSmolvmConfig struct {
@@ -81,41 +80,8 @@ func (cfg *SmolvmConfig) applyFile(file *fileSmolvmConfig) (SmolvmConfigApplied,
 
 func (cfg *SmolvmConfig) applyEnv() (SmolvmConfigApplied, error) {
 	var applied SmolvmConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_SMOLVM_API_KEY", "SMOLMACHINES_API_KEY", "SMK_API_KEY"); ok {
-		cfg.APIKey = value
-		applied.InputAccepted = true
-		applied.APIKey = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SMOLVM_BASE_URL"); ok {
-		cfg.BaseURL = value
-		applied.InputAccepted = true
-		applied.BaseURL = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SMOLVM_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SMOLVM_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_SMOLVM_CPUS", strconv.IntSize); ok {
-		cfg.CPUs = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_SMOLVM_MEMORY_MB", strconv.IntSize); ok {
-		cfg.MemoryMB = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SMOLVM_NETWORK"); ok {
-		cfg.Network = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_SMOLVM_KEEP"); ok {
-		cfg.Keep = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 8)
+	return applied, err
 }
 
 // SmolvmConfigFlagValues holds parsed values; only visited flags are applied.

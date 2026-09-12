@@ -40,10 +40,7 @@ func TestGenerateDeterministicTypedBindings(t *testing.T) {
 		"const PilotConfigDefaultEnabled bool = true",
 		"func (cfg *PilotConfig) applyFile(file *filePilotConfig) (PilotConfigApplied, error)",
 		"if file.Enabled != nil", "cfg.Ports = normalizeList(*file.Ports)",
-		`lookupEnvFloat("PILOT_CPUS")`,
-		`getenvNonNegativeIntAccepted("PILOT_COUNT", cfg.Count)`,
-		`getenvBool("PILOT_ENABLED")`,
-		`if value := os.Getenv("PILOT_PORTS"); value != ""`,
+		`applyConfigEnvironment(cfg, &applied, 0, 5)`,
 		`fs.String("pilot-ports", strings.Join(defaults.Ports, ","), "Ports")`,
 		`if flagWasSet(fs, "pilot-enabled")`,
 	} {
@@ -152,7 +149,7 @@ func TestGenerateEnvironmentOnlyAliasBindings(t *testing.T) {
 			}
 			for _, want := range []string{
 				`const PilotConfigDefaultName string = "test"`,
-				`firstNonEmptyEnv("PILOT_NAME", "PILOT_NAME_ALIAS")`,
+				`applyConfigEnvironment(cfg, &applied, 0, 5)`,
 				`fs.String("pilot-name", defaults.Name, "Name")`,
 				`cfg.Name = *values.Name`,
 			} {
@@ -222,7 +219,7 @@ func TestGenerateFlagOnlyBindings(t *testing.T) {
 				t.Fatalf("nondeterministic output: %v", err)
 			}
 			text := string(output)
-			if strings.Contains(text, `"os"`) != mixed || !strings.Contains(text, `"strings"`) {
+			if strings.Contains(text, `"os"`) || !strings.Contains(text, `"strings"`) {
 				t.Fatal("imports do not match list source grants")
 			}
 			fileType := strings.SplitN(strings.SplitN(text, "type filePilotConfig struct {", 2)[1], "}", 2)[0]
@@ -250,7 +247,7 @@ func TestGenerateFlagOnlyBindings(t *testing.T) {
 					t.Fatalf("missing flag/default binding %q", want)
 				}
 			}
-			if mixed && !strings.Contains(envBody, `os.Getenv("PILOT_LATER")`) {
+			if mixed && !strings.Contains(envBody, "applyConfigEnvironment(cfg, &applied, 0, 6)") {
 				t.Fatal("later list lost environment binding")
 			}
 			typecheckGenerated(t, source, output)
@@ -690,6 +687,7 @@ func typecheckGenerated(t *testing.T, source string, output []byte) {
 	// Signatures match the handwritten helpers; only generated wiring is checked here.
 	helpers := `package cli
 import ("flag"; "time")
+func applyConfigEnvironment(any, any, int, int) error { panic("stub") }
 func applyLeaseDuration(*time.Duration, string) bool { panic("stub") }
 func flagWasSet(*flag.FlagSet, string) bool { panic("stub") }
 func exit(int, string, ...any) error { panic("stub") }
@@ -795,10 +793,10 @@ func TestGenerateAppliedAndVisitedBindings(t *testing.T) {
 			t.Fatalf("env-only field exposed in %s", name)
 		}
 	}
-	if !strings.Contains(text, `firstNonEmptyEnv("PILOT_INPUT", "PILOT_INPUT_ALIAS")`) || !strings.Contains(text, "visited := PilotConfigFlagPresence(fs)") {
+	if !strings.Contains(text, `applyConfigEnvironment(cfg, &applied, 0, 5)`) || !strings.Contains(text, "visited := PilotConfigFlagPresence(fs)") {
 		t.Fatal("missing shared input/flag presence queries")
 	}
-	if strings.Count(text, `flagWasSet(fs, "pilot-name")`) != 1 || strings.Count(text, `getenvBool("PILOT_ENABLED")`) != 1 {
+	if strings.Count(text, `flagWasSet(fs, "pilot-name")`) != 1 {
 		t.Fatal("tracked acceptance predicate duplicated")
 	}
 	// Keep the existing compile-only helper intact; this fixture supplies its new helper signature.
@@ -858,13 +856,17 @@ func TestAcceptedAssignments(t *testing.T) {
 func runScalarFixture(t *testing.T, source string, generated []byte, behavior string) {
 	t.Helper()
 	dir := t.TempDir()
-	acceptance := acceptanceFixtureSource(t, source+behavior, string(generated))
-	for _, file := range []struct{ name, content string }{{"source.go", source}, {"generated.go", string(generated)}, {"behavior_test.go", behavior}, {"acceptance.go", acceptance}} {
+	environment, err := os.ReadFile("../../internal/cli/config_environment.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptance := acceptanceFixtureSource(t, source+behavior, string(generated)+string(environment))
+	for _, file := range []struct{ name, content string }{{"source.go", source}, {"generated.go", string(generated)}, {"behavior_test.go", behavior}, {"acceptance.go", acceptance}, {"environment.go", string(environment)}} {
 		if err := os.WriteFile(filepath.Join(dir, file.name), []byte(file.content), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	command := exec.Command("go", "test", "source.go", "generated.go", "behavior_test.go", "acceptance.go")
+	command := exec.Command("go", "test", "source.go", "generated.go", "behavior_test.go", "acceptance.go", "environment.go")
 	command.Dir = dir
 	command.Env = []string{"GOTOOLCHAIN=local", "GOWORK=off", "GOPROXY=off", "GOSUMDB=off", "GOENV=off"}
 	for _, name := range []string{"PATH", "HOME", "USERPROFILE", "LOCALAPPDATA", "SystemRoot", "WINDIR", "TMPDIR", "TEMP", "TMP", "GOCACHE", "GOROOT", "GOFLAGS"} {
@@ -1232,7 +1234,7 @@ func TestGenerateCheckedIntegerAndBoolAliases(t *testing.T) {
 		t.Fatal("nondeterministic aliases")
 	}
 	typecheckGenerated(t, checkedAliasSample, output)
-	if strings.Count(string(output), `getenvNonNegativeIntAliasAccepted("PILOT_COUNT", "ALIAS_COUNT", cfg.Count)`) != 1 {
+	if strings.Count(string(output), `applyConfigEnvironment(cfg, &applied,`) != 1 {
 		t.Fatal("checked alias must parse once")
 	}
 	const behavior = `package cli
@@ -1474,7 +1476,7 @@ func TestGenerateOnlyEnvironmentField(t *testing.T) {
 		if strings.Contains(string(output), "VisitedFlags") || strings.Contains(string(output), "FlagPresence") {
 			t.Fatal("env-only schema emitted unused flag presence surface")
 		}
-		if !tracked && !strings.Contains(string(output), `firstNonEmptyEnv("PILOT_INPUT", "PILOT_ALIAS")`) {
+		if !tracked && !strings.Contains(string(output), `applyConfigEnvironment(cfg, &applied,`) {
 			t.Fatal("untracked env-only fallback changed")
 		}
 		typecheckGenerated(t, source+"\nfunc firstNonEmptyEnv(...string) (string, bool) { panic(\"stub\") }\n", output)
@@ -1545,7 +1547,7 @@ func TestGenerateFileEnvironmentOnlyBindings(t *testing.T) {
 	for _, want := range []string{
 		`Input *string ` + "`yaml:\"input,omitempty\"`",
 		"if file.Input != nil && *file.Input != \"\" {\n\t\tcfg.Input = *file.Input\n\t\tapplied.InputAccepted = true\n\t\tapplied.Input = true",
-		"if value, ok := firstNonEmptyEnv(\"PILOT_INPUT\", \"PILOT_ALIAS\"); ok {\n\t\tcfg.Input = value\n\t\tapplied.InputAccepted = true\n\t\tapplied.Input = true",
+		`applyConfigEnvironment(cfg, &applied,`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing accepted-source binding %q", want)
@@ -1772,7 +1774,7 @@ func TestGenerateEnvIntFallback(t *testing.T) {
 			t.Fatalf("envInt changed file/flag binding after %s", marker)
 		}
 	}
-	if !strings.Contains(string(output), `lookupEnvInteger("PILOT_COUNT", strconv.IntSize)`) || !strings.Contains(string(output), `cfg.Strict, accepted, err = getenvNonNegativeIntAccepted("PILOT_STRICT", cfg.Strict)`) {
+	if !strings.Contains(string(output), `applyConfigEnvironment(cfg, &applied,`) {
 		t.Fatal("wrong integer helpers")
 	}
 	typecheckGenerated(t, input+"\nfunc getenvInt(string,int) int { panic(\"stub\") }\n", output)
@@ -1963,7 +1965,7 @@ func TestGenerateSecondEnvAlias(t *testing.T) {
 	if err != nil || !bytes.Equal(output, again) {
 		t.Fatalf("nondeterministic aliases: %v", err)
 	}
-	for _, want := range []string{`firstNonEmptyEnv("PILOT_INPUT", "PILOT_INPUT_ALIAS", "PILOT_INPUT_SECOND")`, `firstNonEmptyEnv("PLAIN", "PLAIN_ALIAS", "PLAIN_SECOND")`} {
+	for _, want := range []string{`applyConfigEnvironment(cfg, &applied,`} {
 		if !strings.Contains(string(output), want) {
 			t.Fatalf("missing ordered selection %q", want)
 		}
@@ -2199,11 +2201,6 @@ func TestGenerateEnvAliasAfterConfig(t *testing.T) {
 	if err != nil || !bytes.Equal(output, again) {
 		t.Fatalf("nondeterministic config-before-alias: %v", err)
 	}
-	for _, name := range []string{"Tracked", "Plain"} {
-		if !strings.Contains(string(output), `else if cfg.`+name+` == "" {`) {
-			t.Fatalf("missing raw prior test for %s", name)
-		}
-	}
 	for _, marker := range []string{"func (cfg *PilotConfig) applyEnv()", "// PilotConfigFlagValues"} {
 		oldParts, newParts := strings.SplitN(string(before), marker, 2), strings.SplitN(string(output), marker, 2)
 		index := 0
@@ -2382,7 +2379,7 @@ func TestGenerateSourceSpecificLists(t *testing.T) {
 		t.Fatalf("nondeterministic source lists: %v", err)
 	}
 	text := string(output)
-	for _, want := range []string{`cfg.Items = append([]string(nil), (*file.Items)...)`, `getenvList("ITEMS")`, `newReplaceAppendListFlag(defaults.Items)`, `cfg.Items = append([]string(nil), values.Items.values...)`} {
+	for _, want := range []string{`cfg.Items = append([]string(nil), (*file.Items)...)`, `applyConfigEnvironment(cfg, &applied,`, `newReplaceAppendListFlag(defaults.Items)`, `cfg.Items = append([]string(nil), values.Items.values...)`} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing list binding %q", want)
 		}
@@ -2570,7 +2567,7 @@ func TestCSVSourceShapes(t *testing.T){
 	if err != nil || !bytes.Equal(output, again) {
 		t.Fatalf("nondeterministic normalized list modes: %v", err)
 	}
-	for _, want := range []string{`if len(file.Items) > 0 {`, `cfg.Items = normalizeList(file.Items)`, `strings.TrimSpace(value) != ""`, `cfg.Items = parseEnvListValue(value)`, `cfg.Items = splitCSV(*values.Items)`} {
+	for _, want := range []string{`if len(file.Items) > 0 {`, `cfg.Items = normalizeList(file.Items)`, `applyConfigEnvironment(cfg, &applied,`, `cfg.Items = splitCSV(*values.Items)`} {
 		if !strings.Contains(string(output), want) {
 			t.Fatalf("missing normalized list binding %q", want)
 		}
@@ -2744,7 +2741,7 @@ func TestGenerateFallbackIntAlias(t *testing.T) {
 	if err != nil || !bytes.Equal(output, again) {
 		t.Fatalf("nondeterministic integer aliases: %v", err)
 	}
-	if !strings.Contains(string(output), `value, accepted := lookupEnvInteger("COUNT_ALIAS", strconv.IntSize)`) || !strings.Contains(string(output), `primary, ok := lookupEnvInteger("COUNT", strconv.IntSize)`) {
+	if !strings.Contains(string(output), `applyConfigEnvironment(cfg, &applied,`) {
 		t.Fatal("missing acceptance-aware tolerant integer fallback")
 	}
 	plain, err := parseSchema([]byte(strings.Replace(source, ` envAlias:"COUNT_ALIAS"`, "", 1)), "PilotConfig", "pilot")
@@ -2826,7 +2823,7 @@ func TestGenerateNonemptyRawAndEmptyScalarLists(t *testing.T) {
 		t.Fatalf("nondeterministic lists: %v", err)
 	}
 	text := string(output)
-	for _, want := range []string{`if file.Items != nil && len(*file.Items) > 0 {`, `cfg.Items = *file.Items`, `fs.String("item", "", "Items")`, `if value := os.Getenv("ITEMS"); value != ""`, `if len(cfg.Items) == 0 {`} {
+	for _, want := range []string{`if file.Items != nil && len(*file.Items) > 0 {`, `cfg.Items = *file.Items`, `fs.String("item", "", "Items")`, `applyConfigEnvironment(cfg, &applied,`, `if len(cfg.Items) == 0 {`} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing fixed list binding %q", want)
 		}
@@ -2938,7 +2935,7 @@ func TestGenerateInt64Width(t *testing.T) {
 	if err != nil || !bytes.Equal(output, again) {
 		t.Fatalf("nondeterministic int64: %v", err)
 	}
-	for _, want := range []string{"Wide *int64", `const PilotConfigDefaultWide int64 = 4294967296`, `lookupEnvInteger("WIDE", 64)`, `fs.Int64("wide", defaults.Wide, "Wide")`} {
+	for _, want := range []string{"Wide *int64", `const PilotConfigDefaultWide int64 = 4294967296`, `applyConfigEnvironment(cfg, &applied,`, `fs.Int64("wide", defaults.Wide, "Wide")`} {
 		if !strings.Contains(string(output), want) {
 			t.Fatalf("missing width binding%q", want)
 		}
@@ -3047,8 +3044,8 @@ func TestGenerateNoFlagListSchema(t *testing.T) {
 			t.Fatalf("flagless artifact %q", absent)
 		}
 	}
-	if !strings.Contains(text, `"os"`) || !strings.Contains(text, "type PilotConfigApplied struct") {
-		t.Fatal("missing actual env import or applied report")
+	if strings.Contains(text, `"os"`) || !strings.Contains(text, "type PilotConfigApplied struct") {
+		t.Fatal("unexpected env import or missing applied report")
 	}
 	typecheckGenerated(t, noFlagListSample+"\nfunc firstNonEmptyEnv(...string)(string,bool){panic(\"stub\")}\n", output)
 	// A real flagged scalar keeps its APIs, without a join import for the no-flag list.
@@ -3809,13 +3806,26 @@ func acceptanceFixtureSource(t *testing.T, existing, generated string) string {
 		{"config.go", "getenvNonNegativeIntAccepted"},
 		{"config.go", "getenvNonNegativeIntAliasAccepted"},
 		{"config.go", "parseNonNegativeIntAccepted"},
+		{"config.go", "getenvBool"},
+		{"config.go", "getenvList"},
+		{"config.go", "parseEnvListValue"},
+		{"egress.go", "splitCSV"},
+		{"config.go", "splitCommaList"},
+		{"config.go", "normalizeList"},
+		{"config.go", "applyLeaseDuration"},
 	} {
 		if strings.Contains(generated+existing+functions, helper.name+"(") && !strings.Contains(existing+functions, "func "+helper.name+"(") {
 			functions += sourceFixtureFunctions(t, helper.file, helper.name)
 		}
 	}
+	if strings.Contains(functions, "ApplyLeaseDuration(") && !strings.Contains(existing+functions, "func ApplyLeaseDuration(") {
+		functions += applyLeaseDurationFixtureSource(t)
+	}
+	if strings.Contains(functions, "exit(") && !strings.Contains(existing+functions, "func exit(") {
+		functions += "func exit(_ int, pattern string, args ...any) error { return fmt.Errorf(pattern, args...) }\n"
+	}
 	imports := ""
-	for _, name := range []string{"os", "strconv"} {
+	for _, name := range []string{"os", "strconv", "strings", "time", "fmt"} {
 		if strings.Contains(functions, name+".") {
 			imports += "import \"" + name + "\"\n"
 		}

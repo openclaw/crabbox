@@ -66,33 +66,8 @@ func (cfg *UpstashBoxConfig) applyFile(file *fileUpstashBoxConfig) (UpstashBoxCo
 
 func (cfg *UpstashBoxConfig) applyEnv() (UpstashBoxConfigApplied, error) {
 	var applied UpstashBoxConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_UPSTASH_BOX_API_KEY", "UPSTASH_BOX_API_KEY"); ok {
-		cfg.APIKey = value
-		applied.InputAccepted = true
-		applied.APIKey = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_UPSTASH_BOX_BASE_URL", "UPSTASH_BOX_BASE_URL"); ok {
-		cfg.BaseURL = value
-		applied.InputAccepted = true
-		applied.BaseURL = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_UPSTASH_BOX_RUNTIME"); ok {
-		cfg.Runtime = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_UPSTASH_BOX_SIZE"); ok {
-		cfg.Size = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_UPSTASH_BOX_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_UPSTASH_BOX_KEEP_ALIVE"); ok {
-		cfg.KeepAlive = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 6)
+	return applied, err
 }
 
 // UpstashBoxConfigFlagValues holds parsed values; only visited flags are applied.

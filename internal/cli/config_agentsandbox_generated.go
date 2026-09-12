@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"os"
 	"time"
 )
 
@@ -115,66 +114,8 @@ func (cfg *AgentSandboxConfig) applyFile(file *fileAgentSandboxConfig, trusted b
 
 func (cfg *AgentSandboxConfig) applyEnv() (AgentSandboxConfigApplied, error) {
 	var applied AgentSandboxConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_AGENT_SANDBOX_KUBECTL"); ok {
-		cfg.Kubectl = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_AGENT_SANDBOX_KUBECONFIG"); ok {
-		cfg.Kubeconfig = value
-		applied.InputAccepted = true
-		applied.Kubeconfig = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_AGENT_SANDBOX_CONTEXT"); ok {
-		cfg.Context = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_AGENT_SANDBOX_NAMESPACE"); ok {
-		cfg.Namespace = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_AGENT_SANDBOX_WARM_POOL"); ok {
-		cfg.WarmPool = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_AGENT_SANDBOX_CONTAINER"); ok {
-		cfg.Container = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_AGENT_SANDBOX_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_AGENT_SANDBOX_SANDBOX_READY_TIMEOUT"); value != "" {
-		if applyLeaseDuration(&cfg.SandboxReadyTimeout, value) {
-			applied.InputAccepted = true
-		}
-	}
-	if value := os.Getenv("CRABBOX_AGENT_SANDBOX_POD_READY_TIMEOUT"); value != "" {
-		if applyLeaseDuration(&cfg.PodReadyTimeout, value) {
-			applied.InputAccepted = true
-		}
-	}
-	{
-		var accepted bool
-		var err error
-		cfg.ExecTimeoutSecs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_AGENT_SANDBOX_EXEC_TIMEOUT_SECS", cfg.ExecTimeoutSecs)
-		if err != nil {
-			return applied, err
-		}
-		if accepted {
-			applied.InputAccepted = true
-		}
-	}
-	if value, ok := getenvBool("CRABBOX_AGENT_SANDBOX_DELETE_ON_RELEASE"); ok {
-		cfg.DeleteOnRelease = value
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	if value, ok := getenvBool("CRABBOX_AGENT_SANDBOX_FORGET_MISSING"); ok {
-		cfg.ForgetMissing = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 12)
+	return applied, err
 }
 
 // AgentSandboxConfigFlagValues holds parsed values; only visited flags are applied.

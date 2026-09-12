@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"strconv"
 )
 
 type fileWandbConfig struct {
@@ -44,25 +43,8 @@ func (cfg *WandbConfig) applyFile(file *fileWandbConfig) (WandbConfigApplied, er
 
 func (cfg *WandbConfig) applyEnv() (WandbConfigApplied, error) {
 	var applied WandbConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_WANDB_API_KEY"); ok {
-		cfg.APIKey = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_WANDB_DEFAULT_IMAGE", "WANDB_DEFAULT_IMAGE"); ok {
-		cfg.DefaultImage = value
-		applied.InputAccepted = true
-	}
-	{
-		value, accepted := lookupEnvInteger("WANDB_MAX_LIFETIME_SECONDS", strconv.IntSize)
-		if primary, ok := lookupEnvInteger("CRABBOX_WANDB_MAX_LIFETIME_SECONDS", strconv.IntSize); ok {
-			value, accepted = primary, true
-		}
-		if accepted {
-			cfg.MaxLifetimeSeconds = int(value)
-			applied.InputAccepted = true
-		}
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 3)
+	return applied, err
 }
 
 // WandbConfigFlagValues holds parsed values; only visited flags are applied.

@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"os"
 )
 
 type fileTencentCloudConfig struct {
@@ -97,59 +96,8 @@ func (cfg *TencentCloudConfig) applyFile(file *fileTencentCloudConfig, trusted b
 
 func (cfg *TencentCloudConfig) applyEnv() (TencentCloudConfigApplied, error) {
 	var applied TencentCloudConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENCENTCLOUD_REGION"); ok {
-		cfg.Region = value
-		applied.InputAccepted = true
-		applied.Region = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENCENTCLOUD_ZONE"); ok {
-		cfg.Zone = value
-		applied.InputAccepted = true
-		applied.Zone = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENCENTCLOUD_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENCENTCLOUD_TYPE"); ok {
-		cfg.Type = value
-		applied.InputAccepted = true
-		applied.Type = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENCENTCLOUD_VPC_ID"); ok {
-		cfg.VPCID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENCENTCLOUD_SUBNET_ID"); ok {
-		cfg.SubnetID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENCENTCLOUD_SECURITY_GROUP_ID"); ok {
-		cfg.SecurityGroupID = value
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_TENCENTCLOUD_SSH_CIDRS"); value != "" {
-		cfg.SSHCIDRs = splitCommaList(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_TENCENTCLOUD_ROOT_GB", 64); ok {
-		cfg.RootGB = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENCENTCLOUD_INTERNET_CHARGE_TYPE"); ok {
-		cfg.InternetChargeType = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_TENCENTCLOUD_INTERNET_MAX_BANDWIDTH_OUT", 64); ok {
-		cfg.InternetMaxBandwidthOut = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENCENTCLOUD_API_ENDPOINT"); ok {
-		cfg.APIEndpoint = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 12)
+	return applied, err
 }
 
 // TencentCloudConfigFlagValues holds parsed values; only visited flags are applied.

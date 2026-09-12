@@ -108,72 +108,8 @@ func (cfg *CodeSandboxConfig) applyFile(file *fileCodeSandboxConfig, trusted boo
 
 func (cfg *CodeSandboxConfig) applyEnv() (CodeSandboxConfigApplied, error) {
 	var applied CodeSandboxConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_CODESANDBOX_TEMPLATE_ID"); ok {
-		cfg.TemplateID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CODESANDBOX_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CODESANDBOX_VM_TIER"); ok {
-		cfg.VMTier = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CODESANDBOX_PRIVACY"); ok {
-		cfg.Privacy = value
-		applied.InputAccepted = true
-	}
-	{
-		var accepted bool
-		var err error
-		cfg.HibernationTimeoutSecs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_CODESANDBOX_HIBERNATION_TIMEOUT_SECS", cfg.HibernationTimeoutSecs)
-		if err != nil {
-			return applied, err
-		}
-		if accepted {
-			applied.InputAccepted = true
-		}
-	}
-	if value, ok := getenvBool("CRABBOX_CODESANDBOX_AUTOMATIC_WAKEUP_HTTP"); ok {
-		cfg.AutomaticWakeupHTTP = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_CODESANDBOX_AUTOMATIC_WAKEUP_WEBSOCKET"); ok {
-		cfg.AutomaticWakeupWebSocket = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CODESANDBOX_BRIDGE_COMMAND"); ok {
-		cfg.BridgeCommand = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CODESANDBOX_SDK_PACKAGE"); ok {
-		cfg.SDKPackage = value
-		applied.InputAccepted = true
-	}
-	{
-		var accepted bool
-		var err error
-		cfg.DoctorListLimit, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_CODESANDBOX_DOCTOR_LIST_LIMIT", cfg.DoctorListLimit)
-		if err != nil {
-			return applied, err
-		}
-		if accepted {
-			applied.InputAccepted = true
-		}
-	}
-	{
-		var accepted bool
-		var err error
-		cfg.OperationTimeoutSecs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_CODESANDBOX_OPERATION_TIMEOUT_SECS", cfg.OperationTimeoutSecs)
-		if err != nil {
-			return applied, err
-		}
-		if accepted {
-			applied.InputAccepted = true
-		}
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 11)
+	return applied, err
 }
 
 // CodeSandboxConfigFlagValues holds parsed values; only visited flags are applied.

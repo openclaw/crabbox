@@ -4,8 +4,6 @@ package cli
 
 import (
 	"flag"
-	"os"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -87,43 +85,8 @@ func (cfg *NamespaceConfig) applyFile(file *fileNamespaceConfig) (NamespaceConfi
 
 func (cfg *NamespaceConfig) applyEnv() (NamespaceConfigApplied, error) {
 	var applied NamespaceConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_SIZE"); ok {
-		cfg.Size = value
-		applied.InputAccepted = true
-		applied.Size = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_REPOSITORY"); ok {
-		cfg.Repository = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_SITE"); ok {
-		cfg.Site = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_NAMESPACE_VOLUME_SIZE_GB", strconv.IntSize); ok {
-		cfg.VolumeSizeGB = int(value)
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_NAMESPACE_AUTO_STOP_IDLE_TIMEOUT"); value != "" {
-		if applyLeaseDuration(&cfg.AutoStopIdleTimeout, value) {
-			applied.InputAccepted = true
-		}
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NAMESPACE_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if value, ok := getenvBool("CRABBOX_NAMESPACE_DELETE_ON_RELEASE"); ok {
-		cfg.DeleteOnRelease = value
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 8)
+	return applied, err
 }
 
 // NamespaceConfigFlagValues holds parsed values; only visited flags are applied.

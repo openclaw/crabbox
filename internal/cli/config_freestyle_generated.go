@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"strconv"
 )
 
 type fileFreestyleConfig struct {
@@ -55,27 +54,8 @@ func (cfg *FreestyleConfig) applyFile(file *fileFreestyleConfig, trusted bool) (
 
 func (cfg *FreestyleConfig) applyEnv() (FreestyleConfigApplied, error) {
 	var applied FreestyleConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_FREESTYLE_API_KEY", "FREESTYLE_API_KEY"); ok {
-		cfg.APIKey = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FREESTYLE_API_URL", "FREESTYLE_API_URL"); ok {
-		cfg.APIURL = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FREESTYLE_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_FREESTYLE_VCPUS", strconv.IntSize); ok {
-		cfg.VCPUs = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_FREESTYLE_MEMORY_GB", strconv.IntSize); ok {
-		cfg.MemoryGB = int(value)
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 5)
+	return applied, err
 }
 
 // FreestyleConfigFlagValues holds parsed values; only visited flags are applied.

@@ -136,75 +136,8 @@ func (cfg *SealosDevboxConfig) applyFile(file *fileSealosDevboxConfig, trusted b
 
 func (cfg *SealosDevboxConfig) applyEnv() (SealosDevboxConfigApplied, error) {
 	var applied SealosDevboxConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEALOS_DEVBOX_KUBECTL"); ok {
-		cfg.Kubectl = value
-		applied.InputAccepted = true
-		applied.Kubectl = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEALOS_DEVBOX_KUBECONFIG"); ok {
-		cfg.Kubeconfig = value
-		applied.InputAccepted = true
-		applied.Kubeconfig = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEALOS_DEVBOX_CONTEXT"); ok {
-		cfg.Context = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEALOS_DEVBOX_NAMESPACE"); ok {
-		cfg.Namespace = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEALOS_DEVBOX_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEALOS_DEVBOX_TEMPLATE_ID"); ok {
-		cfg.TemplateID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEALOS_DEVBOX_CPU"); ok {
-		cfg.CPU = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEALOS_DEVBOX_MEMORY"); ok {
-		cfg.Memory = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEALOS_DEVBOX_STORAGE_LIMIT"); ok {
-		cfg.StorageLimit = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEALOS_DEVBOX_NETWORK"); ok {
-		cfg.Network = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEALOS_DEVBOX_SSH_GATEWAY_HOST"); ok {
-		cfg.SSHGatewayHost = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEALOS_DEVBOX_SSH_GATEWAY_PORT"); ok {
-		cfg.SSHGatewayPort = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEALOS_DEVBOX_SSH_USER"); ok {
-		cfg.SSHUser = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEALOS_DEVBOX_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEALOS_DEVBOX_NODE_HOST"); ok {
-		cfg.NodeHost = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_SEALOS_DEVBOX_DELETE_ON_RELEASE"); ok {
-		cfg.DeleteOnRelease = value
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 16)
+	return applied, err
 }
 
 // SealosDevboxConfigFlagValues holds parsed values; only visited flags are applied.

@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"strconv"
 )
 
 type fileOpenComputerConfig struct {
@@ -65,35 +64,8 @@ func (cfg *OpenComputerConfig) applyFile(file *fileOpenComputerConfig) (OpenComp
 
 func (cfg *OpenComputerConfig) applyEnv() (OpenComputerConfigApplied, error) {
 	var applied OpenComputerConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_OPENCOMPUTER_API_URL", "OPENCOMPUTER_API_URL"); ok {
-		cfg.APIURL = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_OPENCOMPUTER_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_OPENCOMPUTER_CPU", strconv.IntSize); ok {
-		cfg.CPU = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_OPENCOMPUTER_MEMORY_MB", strconv.IntSize); ok {
-		cfg.MemoryMB = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_OPENCOMPUTER_TIMEOUT_SECS", strconv.IntSize); ok {
-		cfg.TimeoutSecs = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS", strconv.IntSize); ok {
-		cfg.ExecTimeoutSecs = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_OPENCOMPUTER_BURST"); ok {
-		cfg.Burst = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 8)
+	return applied, err
 }
 
 // OpenComputerConfigFlagValues holds parsed values; only visited flags are applied.

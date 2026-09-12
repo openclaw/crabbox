@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"os"
 	"strings"
 )
 
@@ -96,50 +95,8 @@ func (cfg *CoderConfig) applyFile(file *fileCoderConfig) (CoderConfigApplied, er
 
 func (cfg *CoderConfig) applyEnv() (CoderConfigApplied, error) {
 	var applied CoderConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_CODER_CLI"); ok {
-		cfg.CLIPath = value
-		applied.InputAccepted = true
-		applied.CLIPath = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CODER_TEMPLATE"); ok {
-		cfg.Template = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CODER_PRESET"); ok {
-		cfg.Preset = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CODER_WORKSPACE_PREFIX"); ok {
-		cfg.WorkspacePrefix = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CODER_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if value, ok := getenvBool("CRABBOX_CODER_DELETE_ON_RELEASE"); ok {
-		cfg.DeleteOnRelease = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CODER_WAIT"); ok {
-		cfg.Wait = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_CODER_USE_PARAMETER_DEFAULTS"); ok {
-		cfg.UseParameterDefaults = value
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_CODER_PARAMETERS"); strings.TrimSpace(value) != "" {
-		cfg.Parameters = parseEnvListValue(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CODER_RICH_PARAMETER_FILE"); ok {
-		cfg.RichParameterFile = value
-		applied.InputAccepted = true
-		applied.RichParameterFile = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 10)
+	return applied, err
 }
 
 // CoderConfigFlagValues holds parsed values; only visited flags are applied.

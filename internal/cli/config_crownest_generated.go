@@ -64,39 +64,8 @@ func (cfg *CrownestConfig) applyFile(file *fileCrownestConfig, trusted bool) (Cr
 
 func (cfg *CrownestConfig) applyEnv() (CrownestConfigApplied, error) {
 	var applied CrownestConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_CROWNEST_API_URL", "CROWNEST_API_URL"); ok {
-		cfg.APIURL = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CROWNEST_PROJECT_ID", "CROWNEST_PROJECT_ID"); ok {
-		cfg.ProjectID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CROWNEST_TEMPLATE", "CROWNEST_TEMPLATE"); ok {
-		cfg.Template = value
-		applied.InputAccepted = true
-	}
-	{
-		value, accepted, err := getenvNonNegativeIntAliasAccepted("CRABBOX_CROWNEST_TIMEOUT_SECS", "CROWNEST_TIMEOUT_SECS", cfg.TimeoutSecs)
-		if err != nil {
-			return applied, err
-		}
-		if accepted {
-			cfg.TimeoutSecs = value
-			applied.InputAccepted = true
-		}
-	}
-	{
-		value, accepted := getenvBool("CRABBOX_CROWNEST_FORGET_MISSING")
-		if !accepted {
-			value, accepted = getenvBool("CROWNEST_FORGET_MISSING")
-		}
-		if accepted {
-			cfg.ForgetMissing = value
-			applied.InputAccepted = true
-		}
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 5)
+	return applied, err
 }
 
 // CrownestConfigFlagValues holds parsed values; only visited flags are applied.

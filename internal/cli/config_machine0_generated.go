@@ -4,8 +4,6 @@ package cli
 
 import (
 	"flag"
-	"os"
-	"strconv"
 	"time"
 )
 
@@ -108,55 +106,8 @@ func (cfg *Machine0Config) applyFile(file *fileMachine0Config) (Machine0ConfigAp
 
 func (cfg *Machine0Config) applyEnv() (Machine0ConfigApplied, error) {
 	var applied Machine0ConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_CLI"); ok {
-		cfg.CLIPath = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_MACHINE0_IMAGE_VERSION", strconv.IntSize); ok {
-		cfg.ImageVersion = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_DESKTOP_IMAGE"); ok {
-		cfg.DesktopImage = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_SIZE"); ok {
-		cfg.Size = value
-		applied.InputAccepted = true
-		applied.Size = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_REGION"); ok {
-		cfg.Region = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_KEY"); ok {
-		cfg.Key = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_RELEASE_POLICY"); ok {
-		cfg.ReleasePolicy = value
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_MACHINE0_CREATE_TIMEOUT"); value != "" {
-		if applyLeaseDuration(&cfg.CreateTimeout, value) {
-			applied.InputAccepted = true
-		}
-	}
-	if value := os.Getenv("CRABBOX_MACHINE0_POLL_INTERVAL"); value != "" {
-		if applyLeaseDuration(&cfg.PollInterval, value) {
-			applied.InputAccepted = true
-		}
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 11)
+	return applied, err
 }
 
 // Machine0ConfigFlagValues holds parsed values; only visited flags are applied.

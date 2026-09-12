@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"strconv"
 )
 
 type fileRunpodConfig struct {
@@ -84,45 +83,8 @@ func (cfg *RunpodConfig) applyFile(file *fileRunpodConfig) (RunpodConfigApplied,
 
 func (cfg *RunpodConfig) applyEnv() (RunpodConfigApplied, error) {
 	var applied RunpodConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_API_KEY", "RUNPOD_API_KEY"); ok {
-		cfg.APIKey = value
-		applied.InputAccepted = true
-		applied.APIKey = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_API_URL", "RUNPOD_API_URL"); ok {
-		cfg.APIURL = value
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_CLOUD_TYPE", "RUNPOD_CLOUD_TYPE"); ok {
-		cfg.CloudType = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_INSTANCE_ID", "RUNPOD_INSTANCE_ID"); ok {
-		cfg.InstanceID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_IMAGE", "RUNPOD_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_TEMPLATE_ID", "RUNPOD_TEMPLATE_ID"); ok {
-		cfg.TemplateID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_RUNPOD_DISK_GB", strconv.IntSize); ok {
-		cfg.DiskGB = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_USER"); ok {
-		cfg.User = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 9)
+	return applied, err
 }
 
 // RunpodConfigFlagValues holds parsed values; only visited flags are applied.

@@ -63,27 +63,8 @@ func (cfg *LumeConfig) applyFile(file *fileLumeConfig, trusted bool) (LumeConfig
 
 func (cfg *LumeConfig) applyEnv() (LumeConfigApplied, error) {
 	var applied LumeConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_LUME_CLI"); ok {
-		cfg.CLIPath = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_LUME_BASE"); ok {
-		cfg.Base = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_LUME_STORAGE"); ok {
-		cfg.Storage = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_LUME_USER"); ok {
-		cfg.User = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_LUME_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 5)
+	return applied, err
 }
 
 // LumeConfigFlagValues holds parsed values; only visited flags are applied.

@@ -67,34 +67,8 @@ func (cfg *CloudflareSandboxConfig) applyFile(file *fileCloudflareSandboxConfig,
 
 func (cfg *CloudflareSandboxConfig) applyEnv() (CloudflareSandboxConfigApplied, error) {
 	var applied CloudflareSandboxConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUDFLARE_SANDBOX_URL"); ok {
-		cfg.BridgeURL = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUDFLARE_SANDBOX_TOKEN"); ok {
-		cfg.Token = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUDFLARE_SANDBOX_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	{
-		var accepted bool
-		var err error
-		cfg.ExecTimeoutSecs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_CLOUDFLARE_SANDBOX_EXEC_TIMEOUT_SECS", cfg.ExecTimeoutSecs)
-		if err != nil {
-			return applied, err
-		}
-		if accepted {
-			applied.InputAccepted = true
-		}
-	}
-	if value, ok := getenvBool("CRABBOX_CLOUDFLARE_SANDBOX_FORGET_MISSING"); ok {
-		cfg.ForgetMissing = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 5)
+	return applied, err
 }
 
 // CloudflareSandboxConfigFlagValues holds parsed values; only visited flags are applied.

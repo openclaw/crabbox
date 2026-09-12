@@ -73,34 +73,8 @@ func (cfg *PhalaConfig) applyFile(file *filePhalaConfig, trusted bool) (PhalaCon
 
 func (cfg *PhalaConfig) applyEnv() (PhalaConfigApplied, error) {
 	var applied PhalaConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_PHALA_CLI"); ok {
-		cfg.CLIPath = value
-		applied.InputAccepted = true
-		applied.CLIPath = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_PHALA_INSTANCE_TYPE"); ok {
-		cfg.InstanceType = value
-		applied.InputAccepted = true
-		applied.InstanceType = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_PHALA_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_PHALA_NODE_ID"); ok {
-		cfg.NodeID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_PHALA_COMPOSE"); ok {
-		cfg.Compose = value
-		applied.InputAccepted = true
-		applied.Compose = true
-	}
-	if value, ok := getenvBool("CRABBOX_PHALA_ATTEST"); ok {
-		cfg.Attest = &value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 6)
+	return applied, err
 }
 
 // PhalaConfigFlagValues holds parsed values; only visited flags are applied.

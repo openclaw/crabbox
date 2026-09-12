@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"os"
 	"strings"
 )
 
@@ -77,39 +76,8 @@ func (cfg *AWSLambdaMicroVMConfig) applyFile(file *fileAWSLambdaMicroVMConfig) (
 
 func (cfg *AWSLambdaMicroVMConfig) applyEnv() (AWSLambdaMicroVMConfigApplied, error) {
 	var applied AWSLambdaMicroVMConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_AWS_LAMBDA_MICROVM_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_AWS_LAMBDA_MICROVM_IMAGE_VERSION"); ok {
-		cfg.ImageVersion = value
-		applied.InputAccepted = true
-		applied.ImageVersion = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_AWS_LAMBDA_MICROVM_EXECUTION_ROLE_ARN"); ok {
-		cfg.ExecutionRoleARN = value
-		applied.InputAccepted = true
-		applied.ExecutionRoleARN = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_AWS_LAMBDA_MICROVM_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-		applied.Workdir = true
-	}
-	if value := os.Getenv("CRABBOX_AWS_LAMBDA_MICROVM_INGRESS_CONNECTORS"); value != "" {
-		cfg.IngressConnectors = splitCSV(value)
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_AWS_LAMBDA_MICROVM_EGRESS_CONNECTORS"); value != "" {
-		cfg.EgressConnectors = splitCSV(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_AWS_LAMBDA_MICROVM_FORGET_MISSING"); ok {
-		cfg.ForgetMissing = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 7)
+	return applied, err
 }
 
 // AWSLambdaMicroVMConfigFlagValues holds parsed values; only visited flags are applied.

@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"strconv"
 )
 
 type fileTensorlakeConfig struct {
@@ -111,65 +110,8 @@ func (cfg *TensorlakeConfig) applyFile(file *fileTensorlakeConfig) (TensorlakeCo
 
 func (cfg *TensorlakeConfig) applyEnv() (TensorlakeConfigApplied, error) {
 	var applied TensorlakeConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_API_KEY", "TENSORLAKE_API_KEY"); ok {
-		cfg.APIKey = value
-		applied.InputAccepted = true
-		applied.APIKey = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_API_URL", "TENSORLAKE_API_URL"); ok {
-		cfg.APIURL = value
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_CLI"); ok {
-		cfg.CLIPath = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_SNAPSHOT"); ok {
-		cfg.Snapshot = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_ORGANIZATION_ID", "TENSORLAKE_ORGANIZATION_ID"); ok {
-		cfg.OrganizationID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_PROJECT_ID", "TENSORLAKE_PROJECT_ID"); ok {
-		cfg.ProjectID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_NAMESPACE", "INDEXIFY_NAMESPACE"); ok {
-		cfg.Namespace = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvFloat("CRABBOX_TENSORLAKE_CPUS"); ok {
-		cfg.CPUs = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_TENSORLAKE_MEMORY_MB", strconv.IntSize); ok {
-		cfg.MemoryMB = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_TENSORLAKE_DISK_MB", strconv.IntSize); ok {
-		cfg.DiskMB = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_TENSORLAKE_TIMEOUT_SECS", strconv.IntSize); ok {
-		cfg.TimeoutSecs = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_TENSORLAKE_NO_INTERNET"); ok {
-		cfg.NoInternet = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 14)
+	return applied, err
 }
 
 // TensorlakeConfigFlagValues holds parsed values; only visited flags are applied.

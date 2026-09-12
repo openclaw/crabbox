@@ -50,25 +50,8 @@ func (cfg *FastAPICloudConfig) applyFile(file *fileFastAPICloudConfig) (FastAPIC
 
 func (cfg *FastAPICloudConfig) applyEnv() (FastAPICloudConfigApplied, error) {
 	var applied FastAPICloudConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_FASTAPI_CLOUD_TOKEN", "FASTAPI_CLOUD_TOKEN"); ok {
-		cfg.Token = value
-		applied.InputAccepted = true
-		applied.Token = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FASTAPI_CLOUD_API_URL", "FASTAPI_CLOUD_API_URL"); ok {
-		cfg.APIURL = value
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FASTAPI_CLOUD_APP_ID", "FASTAPI_CLOUD_APP_ID"); ok {
-		cfg.AppID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FASTAPI_CLOUD_TEAM_ID", "FASTAPI_CLOUD_TEAM_ID"); ok {
-		cfg.TeamID = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 4)
+	return applied, err
 }
 
 // FastAPICloudConfigFlagValues holds parsed values; only visited flags are applied.

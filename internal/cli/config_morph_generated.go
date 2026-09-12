@@ -81,39 +81,8 @@ func (cfg *MorphConfig) applyFile(file *fileMorphConfig) (MorphConfigApplied, er
 
 func (cfg *MorphConfig) applyEnv() (MorphConfigApplied, error) {
 	var applied MorphConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_MORPH_API_KEY", "MORPH_API_KEY"); ok {
-		cfg.APIKey = value
-		applied.InputAccepted = true
-		applied.APIKey = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MORPH_API_URL"); ok {
-		cfg.APIURL = value
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MORPH_SNAPSHOT"); ok {
-		cfg.Snapshot = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MORPH_SSH_GATEWAY_HOST"); ok {
-		cfg.SSHGatewayHost = value
-		applied.InputAccepted = true
-		applied.SSHGatewayHost = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MORPH_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_MORPH_DELETE_ON_RELEASE"); ok {
-		cfg.DeleteOnRelease = value
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	if value, ok := getenvBool("CRABBOX_MORPH_WAKE_ON_SSH"); ok {
-		cfg.WakeOnSSH = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 7)
+	return applied, err
 }
 
 // MorphConfigFlagValues holds parsed values; only visited flags are applied.

@@ -2,10 +2,6 @@
 
 package cli
 
-import (
-	"os"
-)
-
 type fileLinodeConfig struct {
 	Region     string   `yaml:"region,omitempty"`
 	Image      string   `yaml:"image,omitempty"`
@@ -57,27 +53,6 @@ func (cfg *LinodeConfig) applyFile(file *fileLinodeConfig) (LinodeConfigApplied,
 
 func (cfg *LinodeConfig) applyEnv() (LinodeConfigApplied, error) {
 	var applied LinodeConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_LINODE_REGION"); ok {
-		cfg.Region = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_LINODE_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_LINODE_TYPE"); ok {
-		cfg.Type = value
-		applied.InputAccepted = true
-		applied.Type = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_LINODE_FIREWALL"); ok {
-		cfg.FirewallID = value
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_LINODE_SSH_CIDRS"); value != "" {
-		cfg.SSHCIDRs = splitCommaList(value)
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 5)
+	return applied, err
 }

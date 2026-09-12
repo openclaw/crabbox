@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"strconv"
 )
 
 type fileVastConfig struct {
@@ -128,72 +127,8 @@ func (cfg *VastConfig) applyFile(file *fileVastConfig) (VastConfigApplied, error
 
 func (cfg *VastConfig) applyEnv() (VastConfigApplied, error) {
 	var applied VastConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_API_KEY", "VAST_API_KEY"); ok {
-		cfg.APIKey = value
-		applied.InputAccepted = true
-		applied.APIKey = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_API_URL", "VAST_API_URL"); ok {
-		cfg.APIURL = value
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_INSTANCE_TYPE"); ok {
-		cfg.InstanceType = value
-		applied.InputAccepted = true
-		applied.InstanceType = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_GPU_NAME"); ok {
-		cfg.GPUName = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_VAST_GPU_COUNT", strconv.IntSize); ok {
-		cfg.GPUCount = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_TEMPLATE_ID"); ok {
-		cfg.TemplateID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_RUNTYPE"); ok {
-		cfg.Runtype = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_VAST_DISK_GB", strconv.IntSize); ok {
-		cfg.DiskGB = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvFloat("CRABBOX_VAST_MAX_DPH_TOTAL"); ok {
-		cfg.MaxDphTotal = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvFloat("CRABBOX_VAST_MIN_RELIABILITY"); ok {
-		cfg.MinReliability = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_ORDER"); ok {
-		cfg.Order = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_USER"); ok {
-		cfg.User = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_RELEASE_ACTION"); ok {
-		cfg.ReleaseAction = value
-		applied.InputAccepted = true
-		applied.ReleaseAction = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 15)
+	return applied, err
 }
 
 // VastConfigFlagValues holds parsed values; only visited flags are applied.

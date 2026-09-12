@@ -2,10 +2,6 @@
 
 package cli
 
-import (
-	"os"
-)
-
 type fileDigitalOceanConfig struct {
 	Region   string   `yaml:"region,omitempty"`
 	Image    string   `yaml:"image,omitempty"`
@@ -50,22 +46,6 @@ func (cfg *DigitalOceanConfig) applyFile(file *fileDigitalOceanConfig) (DigitalO
 
 func (cfg *DigitalOceanConfig) applyEnv() (DigitalOceanConfigApplied, error) {
 	var applied DigitalOceanConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_DIGITALOCEAN_REGION"); ok {
-		cfg.Region = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_DIGITALOCEAN_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_DIGITALOCEAN_VPC"); ok {
-		cfg.VPCUUID = value
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_DIGITALOCEAN_SSH_CIDRS"); value != "" {
-		cfg.SSHCIDRs = splitCommaList(value)
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 4)
+	return applied, err
 }

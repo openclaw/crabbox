@@ -66,33 +66,8 @@ func (cfg *SemaphoreConfig) applyFile(file *fileSemaphoreConfig) (SemaphoreConfi
 
 func (cfg *SemaphoreConfig) applyEnv() (SemaphoreConfigApplied, error) {
 	var applied SemaphoreConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEMAPHORE_HOST", "SEMAPHORE_HOST"); ok {
-		cfg.Host = value
-		applied.InputAccepted = true
-		applied.Host = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEMAPHORE_TOKEN", "SEMAPHORE_API_TOKEN"); ok {
-		cfg.Token = value
-		applied.InputAccepted = true
-		applied.Token = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEMAPHORE_PROJECT", "SEMAPHORE_PROJECT"); ok {
-		cfg.Project = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEMAPHORE_MACHINE"); ok {
-		cfg.Machine = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEMAPHORE_OS_IMAGE"); ok {
-		cfg.OSImage = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEMAPHORE_IDLE_TIMEOUT"); ok {
-		cfg.IdleTimeout = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 6)
+	return applied, err
 }
 
 // SemaphoreConfigFlagValues holds parsed values; only visited flags are applied.

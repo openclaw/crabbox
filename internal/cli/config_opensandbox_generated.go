@@ -100,65 +100,8 @@ func (cfg *OpenSandboxConfig) applyFile(file *fileOpenSandboxConfig) (OpenSandbo
 
 func (cfg *OpenSandboxConfig) applyEnv() (OpenSandboxConfigApplied, error) {
 	var applied OpenSandboxConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_OPENSANDBOX_API_URL", "OPEN_SANDBOX_API_URL"); ok {
-		cfg.APIURL = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_OPENSANDBOX_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_OPENSANDBOX_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_OPENSANDBOX_CPU"); ok {
-		cfg.CPU = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_OPENSANDBOX_MEMORY"); ok {
-		cfg.Memory = value
-		applied.InputAccepted = true
-	}
-	{
-		var accepted bool
-		var err error
-		cfg.TimeoutSecs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_OPENSANDBOX_TIMEOUT_SECS", cfg.TimeoutSecs)
-		if err != nil {
-			return applied, err
-		}
-		if accepted {
-			applied.InputAccepted = true
-		}
-	}
-	{
-		var accepted bool
-		var err error
-		cfg.ExecTimeoutSecs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_OPENSANDBOX_EXEC_TIMEOUT_SECS", cfg.ExecTimeoutSecs)
-		if err != nil {
-			return applied, err
-		}
-		if accepted {
-			applied.InputAccepted = true
-		}
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_OPENSANDBOX_PLATFORM_OS"); ok {
-		cfg.PlatformOS = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_OPENSANDBOX_PLATFORM_ARCH"); ok {
-		cfg.PlatformArch = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_OPENSANDBOX_SECURE_ACCESS"); ok {
-		cfg.SecureAccess = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_OPENSANDBOX_USE_SERVER_PROXY"); ok {
-		cfg.UseServerProxy = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 12)
+	return applied, err
 }
 
 // OpenSandboxConfigFlagValues holds parsed values; only visited flags are applied.

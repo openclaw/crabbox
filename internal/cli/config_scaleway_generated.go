@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"os"
 )
 
 type fileScalewayConfig struct {
@@ -87,43 +86,8 @@ func (cfg *ScalewayConfig) applyFile(file *fileScalewayConfig) (ScalewayConfigAp
 
 func (cfg *ScalewayConfig) applyEnv() (ScalewayConfigApplied, error) {
 	var applied ScalewayConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_SCALEWAY_REGION"); ok {
-		cfg.Region = value
-		applied.InputAccepted = true
-		applied.Region = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SCALEWAY_ZONE"); ok {
-		cfg.Zone = value
-		applied.InputAccepted = true
-		applied.Zone = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SCALEWAY_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SCALEWAY_TYPE"); ok {
-		cfg.Type = value
-		applied.InputAccepted = true
-		applied.Type = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SCALEWAY_PROJECT_ID"); ok {
-		cfg.ProjectID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SCALEWAY_ORGANIZATION_ID"); ok {
-		cfg.OrganizationID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SCALEWAY_SECURITY_GROUP"); ok {
-		cfg.SecurityGroup = value
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_SCALEWAY_SSH_CIDRS"); value != "" {
-		cfg.SSHCIDRs = splitCommaList(value)
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 8)
+	return applied, err
 }
 
 // ScalewayConfigFlagValues holds parsed values; only visited flags are applied.

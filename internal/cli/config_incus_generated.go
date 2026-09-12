@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"os"
 	"time"
 )
 
@@ -147,83 +146,8 @@ func (cfg *IncusConfig) applyFile(file *fileIncusConfig) (IncusConfigApplied, er
 
 func (cfg *IncusConfig) applyEnv() (IncusConfigApplied, error) {
 	var applied IncusConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_INCUS_REMOTE"); ok {
-		cfg.Remote = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_INCUS_PROJECT"); ok {
-		cfg.Project = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_INCUS_ADDRESS"); ok {
-		cfg.Address = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_INCUS_SOCKET"); ok {
-		cfg.Socket = value
-		applied.InputAccepted = true
-		applied.Socket = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_INCUS_INSTANCE_TYPE"); ok {
-		cfg.InstanceType = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_INCUS_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_INCUS_PROFILE"); ok {
-		cfg.Profile = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_INCUS_USER"); ok {
-		cfg.User = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_INCUS_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_INCUS_DELETE_ON_RELEASE"); ok {
-		cfg.DeleteOnRelease = value
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	if value := os.Getenv("CRABBOX_INCUS_START_TIMEOUT"); value != "" {
-		if applyLeaseDuration(&cfg.StartTimeout, value) {
-			applied.InputAccepted = true
-		}
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_INCUS_LAUNCH_PORT"); ok {
-		cfg.LaunchPort = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_INCUS_PROXY_LISTEN_HOST"); ok {
-		cfg.ProxyListenHost = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_INCUS_PROXY_LISTEN_PORT"); ok {
-		cfg.ProxyListenPort = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_INCUS_PROXY_DEVICE"); ok {
-		cfg.ProxyDevice = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_INCUS_TLS_SERVER_CERT"); ok {
-		cfg.TLSServerCert = value
-		applied.InputAccepted = true
-		applied.TLSServerCert = true
-	}
-	if value, ok := getenvBool("CRABBOX_INCUS_INSECURE_TLS"); ok {
-		cfg.InsecureTLS = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_INCUS_REMOTE_IMAGE_SERVER"); ok {
-		cfg.RemoteImageServer = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 18)
+	return applied, err
 }
 
 // IncusConfigFlagValues holds parsed values; only visited flags are applied.

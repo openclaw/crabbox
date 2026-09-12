@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"strconv"
 )
 
 type fileAzureDynamicSessionsConfig struct {
@@ -64,28 +63,8 @@ func (cfg *AzureDynamicSessionsConfig) applyFile(file *fileAzureDynamicSessionsC
 
 func (cfg *AzureDynamicSessionsConfig) applyEnv() (AzureDynamicSessionsConfigApplied, error) {
 	var applied AzureDynamicSessionsConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT"); ok {
-		cfg.Endpoint = value
-		applied.InputAccepted = true
-		applied.Endpoint = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_AZURE_DYNAMIC_SESSIONS_POOL"); ok {
-		cfg.Pool = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_AZURE_DYNAMIC_SESSIONS_API_VERSION"); ok {
-		cfg.APIVersion = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_AZURE_DYNAMIC_SESSIONS_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_AZURE_DYNAMIC_SESSIONS_TIMEOUT_SECS", strconv.IntSize); ok {
-		cfg.TimeoutSecs = int(value)
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 5)
+	return applied, err
 }
 
 // AzureDynamicSessionsConfigFlagValues holds parsed values; only visited flags are applied.

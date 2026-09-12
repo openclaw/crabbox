@@ -68,31 +68,8 @@ func (cfg *ModalConfig) applyFile(file *fileModalConfig, trusted bool) (ModalCon
 
 func (cfg *ModalConfig) applyEnv() (ModalConfigApplied, error) {
 	var applied ModalConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_MODAL_APP"); ok {
-		cfg.App = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MODAL_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MODAL_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MODAL_PYTHON"); ok {
-		cfg.Python = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MODAL_ENVIRONMENT"); ok {
-		cfg.Environment = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvList("CRABBOX_MODAL_SECRETS"); ok {
-		cfg.Secrets = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 6)
+	return applied, err
 }
 
 // ModalConfigFlagValues holds parsed values; only visited flags are applied.

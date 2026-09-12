@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"strconv"
 )
 
 type fileExeDevConfig struct {
@@ -88,44 +87,8 @@ func (cfg *ExeDevConfig) applyFile(file *fileExeDevConfig) (ExeDevConfigApplied,
 
 func (cfg *ExeDevConfig) applyEnv() (ExeDevConfigApplied, error) {
 	var applied ExeDevConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_CONTROL_HOST", "EXE_DEV_CONTROL_HOST"); ok {
-		cfg.ControlHost = value
-		applied.InputAccepted = true
-		applied.ControlHost = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_IMAGE", "EXE_DEV_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_EXE_DEV_CPUS", strconv.IntSize); ok {
-		cfg.CPUs = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_MEMORY", "EXE_DEV_MEMORY"); ok {
-		cfg.Memory = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_DISK", "EXE_DEV_DISK"); ok {
-		cfg.Disk = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_COMMAND"); ok {
-		cfg.Command = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_USER"); ok {
-		cfg.User = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_EXE_DEV_NO_EMAIL"); ok {
-		cfg.NoEmail = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 9)
+	return applied, err
 }
 
 // ExeDevConfigFlagValues holds parsed values; only visited flags are applied.

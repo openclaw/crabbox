@@ -120,63 +120,8 @@ func (cfg *KubeVirtConfig) applyFile(file *fileKubeVirtConfig, trusted bool) (Ku
 
 func (cfg *KubeVirtConfig) applyEnv() (KubeVirtConfigApplied, error) {
 	var applied KubeVirtConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_KUBECTL"); ok {
-		cfg.Kubectl = value
-		applied.InputAccepted = true
-		applied.Kubectl = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_VIRTCTL"); ok {
-		cfg.Virtctl = value
-		applied.InputAccepted = true
-		applied.Virtctl = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_KUBECONFIG"); ok {
-		cfg.Kubeconfig = value
-		applied.InputAccepted = true
-		applied.Kubeconfig = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_CONTEXT"); ok {
-		cfg.Context = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_NAMESPACE"); ok {
-		cfg.Namespace = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_TEMPLATE"); ok {
-		cfg.Template = value
-		applied.InputAccepted = true
-		applied.Template = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_SSH_USER"); ok {
-		cfg.SSHUser = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_SSH_KEY"); ok {
-		cfg.SSHKey = value
-		applied.InputAccepted = true
-		applied.SSHKey = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_SSH_PUBLIC_KEY"); ok {
-		cfg.SSHPublicKey = value
-		applied.InputAccepted = true
-		applied.SSHPublicKey = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_SSH_PORT"); ok {
-		cfg.SSHPort = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if value, ok := getenvBool("CRABBOX_KUBEVIRT_DELETE_ON_RELEASE"); ok {
-		cfg.DeleteOnRelease = value
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 12)
+	return applied, err
 }
 
 // KubeVirtConfigFlagValues holds parsed values; only visited flags are applied.

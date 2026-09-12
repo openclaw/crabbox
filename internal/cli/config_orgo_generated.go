@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"strconv"
 )
 
 type fileOrgoConfig struct {
@@ -80,43 +79,8 @@ func (cfg *OrgoConfig) applyFile(file *fileOrgoConfig, trusted bool) (OrgoConfig
 
 func (cfg *OrgoConfig) applyEnv() (OrgoConfigApplied, error) {
 	var applied OrgoConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_ORGO_API_KEY"); ok {
-		cfg.APIKey = value
-		applied.InputAccepted = true
-		applied.APIKey = true
-	} else if cfg.APIKey == "" {
-		if value, ok := firstNonEmptyEnv("ORGO_API_KEY"); ok {
-			cfg.APIKey = value
-			applied.InputAccepted = true
-			applied.APIKey = true
-		}
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_ORGO_API_BASE", "ORGO_API_BASE_URL"); ok {
-		cfg.APIBase = value
-		applied.InputAccepted = true
-		applied.APIBase = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_ORGO_WORKSPACE_ID", "ORGO_WORKSPACE_ID"); ok {
-		cfg.WorkspaceID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_ORGO_RAM_GB", strconv.IntSize); ok {
-		cfg.RAMGB = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_ORGO_CPUS", strconv.IntSize); ok {
-		cfg.CPUs = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_ORGO_DISK_GB", strconv.IntSize); ok {
-		cfg.DiskGB = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_ORGO_RESOLUTION"); ok {
-		cfg.Resolution = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 7)
+	return applied, err
 }
 
 // OrgoConfigFlagValues holds parsed values; only visited flags are applied.

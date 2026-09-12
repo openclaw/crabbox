@@ -63,28 +63,8 @@ func (cfg *OVHConfig) applyFile(file *fileOVHConfig, trusted bool) (OVHConfigApp
 
 func (cfg *OVHConfig) applyEnv() (OVHConfigApplied, error) {
 	var applied OVHConfigApplied
-	if value, ok := firstNonEmptyEnv("OVH_ENDPOINT"); ok {
-		cfg.Endpoint = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_OVH_PROJECT_ID"); ok {
-		cfg.ProjectID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_OVH_REGION"); ok {
-		cfg.Region = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_OVH_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_OVH_FLAVOR"); ok {
-		cfg.Flavor = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 5)
+	return applied, err
 }
 
 // OVHConfigFlagValues holds parsed values; only visited flags are applied.

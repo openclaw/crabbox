@@ -4,8 +4,6 @@ package cli
 
 import (
 	"flag"
-	"os"
-	"strconv"
 	"time"
 )
 
@@ -92,43 +90,8 @@ func (cfg *MultipassConfig) applyFile(file *fileMultipassConfig) (MultipassConfi
 
 func (cfg *MultipassConfig) applyEnv() (MultipassConfigApplied, error) {
 	var applied MultipassConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_MULTIPASS_CLI"); ok {
-		cfg.CLIPath = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MULTIPASS_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MULTIPASS_USER"); ok {
-		cfg.User = value
-		applied.InputAccepted = true
-		applied.User = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MULTIPASS_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_MULTIPASS_CPUS", strconv.IntSize); ok {
-		cfg.CPUs = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MULTIPASS_MEMORY"); ok {
-		cfg.Memory = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MULTIPASS_DISK"); ok {
-		cfg.Disk = value
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_MULTIPASS_LAUNCH_TIMEOUT"); value != "" {
-		if applyLeaseDuration(&cfg.LaunchTimeout, value) {
-			applied.InputAccepted = true
-		}
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 8)
+	return applied, err
 }
 
 // MultipassConfigFlagValues holds parsed values; only visited flags are applied.

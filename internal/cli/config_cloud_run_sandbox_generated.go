@@ -63,31 +63,8 @@ func (cfg *CloudRunSandboxConfig) applyFile(file *fileCloudRunSandboxConfig) (Cl
 
 func (cfg *CloudRunSandboxConfig) applyEnv() (CloudRunSandboxConfigApplied, error) {
 	var applied CloudRunSandboxConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUD_RUN_SANDBOX_GATEWAY_URL", "CLOUD_RUN_SANDBOX_URL"); ok {
-		cfg.GatewayURL = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUD_RUN_SANDBOX_CLI", "CLOUD_RUN_SANDBOX_BINARY"); ok {
-		cfg.CLIPath = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUD_RUN_SANDBOX_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_CLOUD_RUN_SANDBOX_ALLOW_EGRESS"); ok {
-		cfg.AllowEgress = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_CLOUD_RUN_SANDBOX_WRITE"); ok {
-		cfg.Write = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUD_RUN_SANDBOX_ROOTFS"); ok {
-		cfg.Rootfs = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 6)
+	return applied, err
 }
 
 // CloudRunSandboxConfigFlagValues holds parsed values; only visited flags are applied.
