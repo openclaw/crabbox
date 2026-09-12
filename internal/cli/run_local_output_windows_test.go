@@ -494,6 +494,24 @@ func TestArtifactOutputWindowsPrivacyFollowsSignedURLs(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer file.Close()
+		if _, err := file.WriteString("ordinary fixture\n"); err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		duplicate, err := openArtifactBundleTemp(root, ".private.crabbox-test", privateRunOutputFileMode, true)
+		if duplicate != nil {
+			duplicate.Close()
+			t.Fatal("exclusive creation returned an existing file")
+		}
+		if !errors.Is(err, os.ErrExist) {
+			t.Fatalf("duplicate creation error=%v, want os.ErrExist", err)
+		}
+		data, err := root.ReadFile(".private.crabbox-test")
+		if err != nil || string(data) != "ordinary fixture\n" {
+			t.Fatalf("duplicate creation changed bytes: %q, %v", data, err)
+		}
 		assertWindowsPathPrivateFromSID(t, filepath.Join(dir, ".private.crabbox-test"), false, testSID)
 	})
 
