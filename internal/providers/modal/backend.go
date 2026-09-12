@@ -255,7 +255,7 @@ func (b *modalBackend) createSandbox(ctx context.Context, client modalAPI, repo 
 	if err != nil {
 		return core.LeaseClaim{}, modalSandbox{}, err
 	}
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return core.LeaseClaim{}, modalSandbox{}, err

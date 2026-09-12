@@ -145,7 +145,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	for _, item := range machines {
 		servers = append(servers, b.serverFromMachine(item, claims[item.ID], cfg))
 	}
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	slug, err := allocateDirectLeaseSlug(leaseID, req.RequestedSlug, servers)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -440,7 +440,7 @@ func (b *backend) resolve(ctx context.Context, req ResolveRequest, original *Lea
 		if req.Repo.Root == "" {
 			return LeaseTarget{}, exit(2, "machine0 --reclaim requires repository context")
 		}
-		leaseID = newLeaseID()
+		leaseID = core.NewLeaseID()
 		slug = core.NormalizeLeaseSlug(item.Name)
 		if slug == "" {
 			slug = core.NewLeaseSlug(leaseID)

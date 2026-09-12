@@ -36,7 +36,7 @@ func NewNamespaceLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend
 func (b *namespaceLeaseBackend) Spec() ProviderSpec { return b.spec }
 
 func (b *namespaceLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
 	if err != nil {
 		return LeaseTarget{}, err

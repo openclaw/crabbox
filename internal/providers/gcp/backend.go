@@ -56,7 +56,7 @@ func (b *gcpLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	servers, err := client.ListCrabboxServers(ctx)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -460,7 +460,6 @@ var newGCPClient = func(ctx context.Context, cfg Config) (gcpClient, error) {
 	return core.NewGCPClient(ctx, cfg)
 }
 
-func newLeaseID() string { return core.NewLeaseID() }
 func allocateDirectLeaseSlug(id, requested string, servers []Server) (string, error) {
 	return core.AllocateDirectLeaseSlug(id, requested, servers)
 }

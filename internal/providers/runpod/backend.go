@@ -78,7 +78,7 @@ func (b *runpodLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	cfg := b.configForRun()
 	servers, err := b.listServersFromClient(ctx, client, true)
 	if err != nil {

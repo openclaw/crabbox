@@ -234,7 +234,7 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 }
 
 func (b *backend) createMachine(ctx context.Context, client api, repo Repo, keep bool, requestedSlug string) (claim core.LeaseClaim, machine machineData, resultErr error) {
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return core.LeaseClaim{}, machineData{}, err

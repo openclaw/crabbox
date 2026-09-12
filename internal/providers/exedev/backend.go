@@ -38,7 +38,7 @@ func NewExeDevLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 func (b *exeDevLeaseBackend) Spec() ProviderSpec { return b.spec }
 
 func (b *exeDevLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	servers, err := b.listServers(ctx, false)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -49,7 +49,7 @@ func (b *exeDevLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 	}
 	cfg := b.configForRun()
 	name := leaseProviderName(leaseID, slug)
-	generation := newLeaseID()
+	generation := core.NewLeaseID()
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s name=%s image=%s cpus=%d memory=%s disk=%s keep=%v\n", providerName, leaseID, slug, name, exeDevImage(cfg), cfg.ExeDev.CPUs, cfg.ExeDev.Memory, cfg.ExeDev.Disk, req.Keep)
 	vm, err := b.createVM(ctx, cfg, name, leaseID, slug, generation)
 	if err != nil {
@@ -488,7 +488,7 @@ func (b *exeDevLeaseBackend) claimResolvedVM(ctx context.Context, lease LeaseTar
 		}
 	}
 	if generation == "" {
-		generation = newLeaseID()
+		generation = core.NewLeaseID()
 	}
 	lease.Server.Labels[exeDevClaimGenerationLabel] = generation
 	claim, err := claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, providerScope, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, previous, exists)

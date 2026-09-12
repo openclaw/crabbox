@@ -290,7 +290,7 @@ func (b *backend) createLease(ctx context.Context, repo Repo, reclaim bool, requ
 	if strings.TrimSpace(repo.Root) == "" {
 		return core.LeaseClaim{}, exit(2, "apple-machine acquisition requires a repository root for durable ownership")
 	}
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return core.LeaseClaim{}, err

@@ -391,7 +391,7 @@ func (b *cubesandboxBackend) ReclaimAndStop(ctx context.Context, req StopRequest
 }
 
 func (b *cubesandboxBackend) createSandbox(ctx context.Context, client cubesandboxAPI, repo Repo, keep, reclaim bool, requestedSlug string) (string, cubesandboxSandbox, string, error) {
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return "", cubesandboxSandbox{}, "", err

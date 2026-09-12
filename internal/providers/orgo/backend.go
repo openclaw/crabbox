@@ -340,7 +340,7 @@ func (b *orgoBackend) api() (orgoAPI, error) {
 }
 
 func (b *orgoBackend) createComputer(ctx context.Context, client orgoAPI, repo Repo, requestedSlug string, reclaim bool) (orgoLease, error) {
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return orgoLease{}, err

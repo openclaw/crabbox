@@ -90,7 +90,7 @@ func (b *backend) configForRun() Config {
 
 func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (target LeaseTarget, acquireErr error) {
 	cfg := b.configForRun()
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	instances, err := b.listInstances(ctx)
 	if err != nil {
 		return LeaseTarget{}, err

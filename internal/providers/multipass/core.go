@@ -38,10 +38,6 @@ func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
 }
 
-func newLeaseID() string {
-	return core.NewLeaseID()
-}
-
 func leaseProviderName(leaseID, slug string) string {
 	return core.LeaseProviderName(leaseID, slug)
 }

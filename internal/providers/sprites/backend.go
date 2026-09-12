@@ -105,7 +105,7 @@ func (b *spritesBackend) Acquire(ctx context.Context, req AcquireRequest) (Lease
 	if err := b.ensureCLI(ctx); err != nil {
 		return LeaseTarget{}, err
 	}
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
 	if err != nil {
 		return LeaseTarget{}, err

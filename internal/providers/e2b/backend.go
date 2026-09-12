@@ -340,7 +340,7 @@ func (b *e2bBackend) ReclaimAndStop(ctx context.Context, req StopRequest) error 
 }
 
 func (b *e2bBackend) createSandbox(ctx context.Context, client e2bAPI, repo Repo, keep, reclaim bool, requestedSlug string) (string, e2bSandbox, string, error) {
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return "", e2bSandbox{}, "", err

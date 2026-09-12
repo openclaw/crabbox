@@ -730,7 +730,7 @@ func (b *blacksmithBackend) warmupLease(ctx context.Context, repo Repo, reclaim 
 		return core.LeaseClaim{}, err
 	}
 	b = bound
-	pendingID := "tbx_pending_" + strings.TrimPrefix(newLeaseID(), "cbx_")
+	pendingID := "tbx_pending_" + strings.TrimPrefix(core.NewLeaseID(), "cbx_")
 	_, publicKey, err := ensureTestboxKey(pendingID)
 	if err != nil {
 		return core.LeaseClaim{}, err
@@ -1116,10 +1116,6 @@ type statusView = core.StatusView
 
 func writeTimingJSON(w io.Writer, report timingReport) error {
 	return core.WriteTimingJSON(w, report)
-}
-
-func newLeaseID() string {
-	return core.NewLeaseID()
 }
 
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {

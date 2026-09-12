@@ -69,7 +69,7 @@ func (b *coderLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	slug, err := allocateDirectLeaseSlug(leaseID, req.RequestedSlug, coderWorkspacesToServers(existing, b.cfg))
 	if err != nil {
 		return LeaseTarget{}, err

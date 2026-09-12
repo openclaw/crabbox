@@ -79,7 +79,7 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	servers, err := b.listAcrossRegions(ctx)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -838,7 +838,6 @@ var newAWSClient = func(ctx context.Context, cfg Config) (awsClient, error) {
 	return core.NewAWSClient(ctx, cfg)
 }
 
-func newLeaseID() string { return core.NewLeaseID() }
 func allocateDirectLeaseSlug(id, requested string, servers []Server) (string, error) {
 	return core.AllocateDirectLeaseSlug(id, requested, servers)
 }

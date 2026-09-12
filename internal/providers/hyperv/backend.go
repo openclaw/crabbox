@@ -133,7 +133,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	if strings.TrimSpace(req.Repo.Root) == "" {
 		return LeaseTarget{}, exit(2, "provider=%s requires a repository root so the VM claim can be persisted before bootstrap", providerName)
 	}
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	instances, err := b.listInstances(ctx)
 	if err != nil {
 		return LeaseTarget{}, err

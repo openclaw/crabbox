@@ -246,7 +246,7 @@ func (b *backend) deleteClaimedBox(ctx context.Context, client api, leaseID, box
 }
 
 func (b *backend) createBox(ctx context.Context, client api, repo Repo, keep, reclaim bool, requestedSlug string) (string, boxData, string, error) {
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return "", boxData{}, "", err

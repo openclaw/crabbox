@@ -393,7 +393,7 @@ func (b *backend) clients(ctx context.Context) (controlPlane, runnerAPI, error) 
 }
 
 func (b *backend) create(ctx context.Context, control controlPlane, runner runnerAPI, repo Repo, requestedSlug string, keep, reclaim bool) (leaseID, slug string, vm microVM, retErr error) {
-	leaseID = newLeaseID()
+	leaseID = core.NewLeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return "", "", microVM{}, err

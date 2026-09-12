@@ -323,7 +323,7 @@ func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflar
 	if strings.TrimSpace(repo.Root) == "" {
 		return LeaseClaim{}, cloudflareContainer{}, exit(2, "cloudflare creation requires a repository root for the recovery claim")
 	}
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return LeaseClaim{}, cloudflareContainer{}, err

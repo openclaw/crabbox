@@ -44,10 +44,6 @@ func blank(value, fallback string) string {
 	return core.Blank(value, fallback)
 }
 
-func newLeaseID() string {
-	return core.NewLeaseID()
-}
-
 func newLeaseSlug(leaseID string) string {
 	return core.NewLeaseSlug(leaseID)
 }

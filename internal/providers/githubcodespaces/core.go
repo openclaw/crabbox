@@ -75,10 +75,6 @@ func markWorkRootExplicit(cfg *Config) {
 	core.MarkWorkRootExplicit(cfg)
 }
 
-func newLeaseID() string {
-	return core.NewLeaseID()
-}
-
 func allocateDirectLeaseSlug(leaseID, requested string, servers []Server) (string, error) {
 	return core.AllocateDirectLeaseSlug(leaseID, requested, servers)
 }

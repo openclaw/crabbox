@@ -45,10 +45,6 @@ func asExitError(err error, target *ExitError) bool {
 	return core.AsExitError(err, target)
 }
 
-func newLeaseID() string {
-	return core.NewLeaseID()
-}
-
 func normalizeLeaseSlug(value string) string {
 	return core.NormalizeLeaseSlug(value)
 }

@@ -475,7 +475,7 @@ func (b *backend) runIdentity(req RunRequest, cacheMode string) (string, string,
 		if strings.TrimSpace(req.ID) == "" {
 			return "", "", "", false, exit(2, "%s cache=explicit requires --id", providerName)
 		}
-		leaseID := newLeaseID()
+		leaseID := core.NewLeaseID()
 		slug, err := allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
 		if err != nil {
 			return "", "", "", false, err
@@ -486,7 +486,7 @@ func (b *backend) runIdentity(req RunRequest, cacheMode string) (string, string,
 		return "", "", "", false, exit(2, "%s --id requires cache=explicit", providerName)
 	}
 	if cacheMode == "stable" {
-		leaseID := newLeaseID()
+		leaseID := core.NewLeaseID()
 		workerID := stableRunID(workerModuleName(req.Script), req.Script.Data, b.cfg.CloudflareDynamicWorkers, req.Env)
 		slug := newLeaseSlug(leaseID)
 		if req.Keep || req.KeepOnFailure {
@@ -501,7 +501,7 @@ func (b *backend) runIdentity(req RunRequest, cacheMode string) (string, string,
 	leaseID := ""
 	slug := ""
 	if req.Keep || req.KeepOnFailure {
-		leaseID = newLeaseID()
+		leaseID = core.NewLeaseID()
 		var err error
 		slug, err = allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
 		if err != nil {

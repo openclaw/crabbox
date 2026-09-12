@@ -94,7 +94,7 @@ func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (lease L
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	servers, err := b.listServers(ctx, client, true)
 	if err != nil {
 		return LeaseTarget{}, err

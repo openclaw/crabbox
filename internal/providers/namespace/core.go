@@ -49,10 +49,6 @@ func markDeleteOnReleaseExplicit(cfg *Config) {
 	core.MarkDeleteOnReleaseExplicit(cfg, namespaceProvider)
 }
 
-func newLeaseID() string {
-	return core.NewLeaseID()
-}
-
 func newLeaseSlug(leaseID string) string {
 	return core.NewLeaseSlug(leaseID)
 }

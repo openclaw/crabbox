@@ -37,10 +37,6 @@ func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
 }
 
-func newLeaseID() string {
-	return core.NewLeaseID()
-}
-
 func publicKeyFor(privatePath string) (string, error) {
 	return core.PublicKeyFor(privatePath)
 }
