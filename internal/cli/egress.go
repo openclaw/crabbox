@@ -127,7 +127,7 @@ func (a App) egressHostWithConnectHook(ctx context.Context, args []string, onCon
 	if len(allow) == 0 {
 		return exit(2, "egress host requires --profile or --allow; refusing to start an open proxy")
 	}
-	coord, leaseID, err := a.egressCoordinatorAndLease(ctx, *provider, *coordinatorURL, *id, *ticket)
+	coord, leaseID, err := a.egressCoordinatorAndLease(ctx, *provider, *coordinatorURL, *id, *ticket, flagWasSet(fs, "coordinator"))
 	if err != nil {
 		return err
 	}
@@ -191,7 +191,7 @@ func (a App) egressClient(ctx context.Context, args []string) error {
 	if bootstrap {
 		return a.startEgressClientProcess(args, *ticket)
 	}
-	coord, leaseID, err := a.egressCoordinatorAndLease(ctx, *provider, *coordinatorURL, *id, *ticket)
+	coord, leaseID, err := a.egressCoordinatorAndLease(ctx, *provider, *coordinatorURL, *id, *ticket, flagWasSet(fs, "coordinator"))
 	if err != nil {
 		return err
 	}
@@ -327,7 +327,7 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 	if err := validateEgressListen(*listen); err != nil {
 		return err
 	}
-	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, SynthesizedInputs: a.synthesizedFlagInputs})
 	if err != nil {
 		return err
 	}
@@ -335,6 +335,7 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	recordConfigInput(&cfg, configInputGeneric, configInputFlag, flagWasSet(fs, "coordinator") && strings.TrimSpace(*coordinatorURL) != "")
 	coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
 	if err != nil {
 		return err
@@ -441,7 +442,7 @@ func (a App) egressStatus(ctx context.Context, args []string) error {
 	if *id == "" {
 		return exit(2, "usage: crabbox egress status --id <lease-id-or-slug>")
 	}
-	coord, leaseID, err := a.egressCoordinatorAndLease(ctx, *provider, *coordinatorURL, *id, "")
+	coord, leaseID, err := a.egressCoordinatorAndLease(ctx, *provider, *coordinatorURL, *id, "", flagWasSet(fs, "coordinator"))
 	if err != nil {
 		return err
 	}
@@ -513,15 +514,17 @@ func (a App) egressStop(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (a App) egressCoordinatorAndLease(ctx context.Context, provider, coordinatorURL, id, ticket string) (*CoordinatorClient, string, error) {
+func (a App) egressCoordinatorAndLease(ctx context.Context, provider, coordinatorURL, id, ticket string, coordinatorFlag bool) (*CoordinatorClient, string, error) {
 	cfg, err := loadConfig()
 	if err != nil {
 		return nil, "", err
 	}
 	cfg.Provider = provider
+	markSynthesizedFlagInputs(&cfg, a.synthesizedFlagInputs)
 	if strings.TrimSpace(coordinatorURL) != "" {
 		cfg.Coordinator = strings.TrimRight(strings.TrimSpace(coordinatorURL), "/")
 		markCoordinatorDestinationExplicit(&cfg)
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, coordinatorFlag)
 	}
 	coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
 	if err != nil {

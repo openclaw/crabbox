@@ -1,8 +1,6 @@
 package e2b
 
 import (
-	"flag"
-	"io"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -29,7 +27,6 @@ type Server = core.Server
 type SSHTarget = core.SSHTarget
 type Repo = core.Repo
 type ExitError = core.ExitError
-type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 
 const (
@@ -43,10 +40,6 @@ type statusView = core.StatusView
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
 }
 
 func blank(value, fallback string) string {
@@ -103,10 +96,6 @@ func isCanonicalLeaseID(value string) bool {
 
 func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
-}
-
-func writeTimingJSON(w io.Writer, report timingReport) error {
-	return core.WriteTimingJSON(w, report)
 }
 
 func shellQuote(s string) string {

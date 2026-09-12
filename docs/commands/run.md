@@ -61,6 +61,31 @@ policy; Crabbox's staged scripts, input, and workspace-owner state remain privat
 Keeping or reusing a POSIX SSH lease also preserves the remote caller's SIGINT
 and SIGQUIT dispositions, including intentionally ignored signals.
 
+POSIX workspace ownership uses `flock`, BSD `lockf`, or an atomic directory gate
+when neither tool is available. Acquire, renewal, release, and foreground-child
+registration share the same gate. The directory fallback never steals a gate
+based on elapsed time: an interrupted helper may still have a writer in flight.
+Stop and replace a managed lease if that gate remains ambiguous. Normal owner
+expiry recovery still requires proof that the recorded foreground child exited.
+Detached daemons should redirect stdin, stdout, and stderr explicitly (for
+example, `nohup sleep 600 </dev/null >daemon.log 2>&1 &`) so they do not keep an
+SSH command's streams open after its foreground shell exits.
+On macOS, the command handoff also closes inherited internal descriptors left
+by the system shell, preventing background processes from retaining its witness
+pipe after the foreground command finishes.
+
+Managed WSL2 commands, sync/copy, readiness checks, and workspace-owner helpers
+run as the non-root `crabbox` distro user with `HOME=/home/crabbox`, passwordless
+sudo, and a writable work root and caches. Node and npm remain on the default
+PATH. Bootstrap alone runs as root; the Windows SSH account is unchanged.
+
+Managed WSL2 leases disable WSL's distribution idle shutdown with
+`[general] instanceIdleTimeout=-1` in the bootstrap user's `.wslconfig`.
+Detached Linux daemons can therefore outlive individual commands until the
+lease is stopped. This does not change command deadlines, workspace ownership,
+or lease expiration. Headless leases also disable WSLg; other WSL settings,
+including the separate VM idle policy, are preserved.
+
 Local Ctrl+C cancels the CLI's non-interactive SSH connection; it does not
 guarantee that the remote foreground process has stopped. A retained lease can
 therefore remain busy until that process exits. Crabbox preserves child
@@ -105,6 +130,18 @@ provider is configured. Exact lease IDs take precedence. Slug matches may span
 multiple scopes of one canonical provider, which that provider resolves; claims
 from different providers require a canonical ID or explicit provider. An
 explicit `--provider` remains authoritative.
+
+For coordinator-backed preparation of an exact lease ID, an initial lease-read
+HTTP 5xx response is retried once within the original 30-second control budget;
+shorter HTTP-client and caller deadlines still win.
+Authentication, absence, conflict, identity mismatch, cancellation and timeout
+failures are not retried. This repeats only the observation before SSH and script
+admission; it never reruns a script. Plain status and Stop retain their existing
+observation behavior.
+
+If the coordinator has confirmed a lease's provider cleanup, `run --id` fails
+immediately instead of waiting for SSH on the deleted machine. `status` and
+`stop` remain available to inspect the outcome and finish local cleanup.
 
 For an ordinary reused coordinator lease, `--ssh-port <port>` pins one of the
 lease's advertised primary or fallback SSH ports before workspace ownership or
@@ -305,9 +342,13 @@ concurrent checkout. POSIX, WSL2, and native Windows targets implement the same
 protocol; the small sync-finalization lock remains nested inside it.
 
 Renewal errors retain recognized `MISMATCH`, `EXPIRED`, and `AMBIGUOUS` protocol
-states alongside transport errors. Unrecognized response text is omitted. These
-diagnostics do not retry renewal or permit collection or cleanup after ownership
-fails closed.
+states alongside transport errors. Unrecognized response text is omitted.
+WSL2 renewal uses a compact marker-only helper with a 60-second execution
+allowance for CPU and disk contention. It retries confirmed lock contention at
+most twice within the original bounded call deadline; that deadline is included
+in the owner expiry window. A transport failure or rejected/ambiguous owner
+state is never retried. Collection and cleanup remain blocked after ownership
+fails closed. Linux and native Windows renewal behavior is unchanged.
 
 Native Windows stages owner scripts and witnessed command input with exact byte
 counts and asynchronous pipe reads. Empty frames complete without initializing
@@ -430,6 +471,40 @@ writes uploaded Windows scripts as UTF-8 with a BOM when the input has none, so
 Windows PowerShell 5.1 does not treat non-ASCII source as the system ANSI code
 page.
 
+### Native Windows background processes
+
+Managed native Windows leases install Node 24.19.0 and npm when either runtime
+is missing or broken. The checksum-pinned x64 or ARM64 runtime lives in
+`C:\Program Files\nodejs` on the machine PATH; working existing installations
+are retained. Readiness requires both version commands to succeed.
+
+To launch a native Windows daemon that survives the command and SSH session,
+use the managed lease's explicit detached launcher from a PowerShell script:
+
+```powershell
+$daemonPid = Start-CrabboxDetachedProcess.ps1 -FilePath powershell.exe `
+  -ArgumentList '-NoProfile -Command "Start-Sleep 600"' `
+  -WorkingDirectory $PWD.Path
+Write-Output "daemon_pid=$daemonPid"
+```
+
+Check it from a later `run` with `Get-Process -Id <daemon_pid>`. For a real
+service, pass its executable and a single Windows command-line argument string;
+quote paths containing spaces inside that string. The launcher inherits the
+calling user's identity and environment, returns the child PID, and gives it a
+private hidden console without inheriting SSH input/output/error handles. Have the service write its own log
+files. It lives until it exits, you stop it, or the managed lease is destroyed;
+keep daemon files outside a workspace you intend to replace with `--full-resync`.
+
+`Start-Process -WindowStyle Hidden` alone does not escape OpenSSH's Windows
+session job, which kills its descendants when the session closes. The launcher
+uses Windows' explicit job-breakaway flag, permitted by managed OpenSSH, without
+changing session policy. A host that denies breakaway returns an error. Ordinary
+commands, command timeouts, workspace-owner renewal, and result collection keep
+their existing supervision. The launcher is installed at
+`C:\Program Files\Crabbox\bin\Start-CrabboxDetachedProcess.ps1`; stock leases
+created before this bootstrap change need to be recreated.
+
 ## Scripts
 
 Use `--script <file>` or `--script-stdin` for multi-line remote commands. On
@@ -496,13 +571,10 @@ belongs in Actions hydration, a prebaked image, a devcontainer, Nix/mise/asdf,
 or the command/script you run.
 
 By default it probes common language and infrastructure tools plus OS-specific
-basics. Default generic probes are `git`, `tar`, `node`, `npm`, `corepack`,
-`pnpm`, `yarn`, `bun`, and `docker`. Additional opt-in built-ins are `go`,
-`cargo`, `cmake`, `uv`, `python`, and `python3` on POSIX, WSL2, and native
-Windows targets, plus `make` on POSIX and WSL2. Linux and WSL2 also support the
-opt-in `raw_socket` capability probe. POSIX/Linux/WSL probes include `sudo`,
-`apt`, and `bubblewrap`; native Windows probes include `powershell`,
-`execution_policy`, `longpaths`, `temp`, and `pwsh`.
+basics. Run [`crabbox preflight-tools`](preflight-tools.md), or add `--json`, to
+inspect every accepted name, aliases, default membership, and target support
+from the installed binary. Discovery works offline without configuration or a
+provider and does not run probes.
 
 Use `--preflight-tools` to replace the default tool list for one run:
 
@@ -515,9 +587,10 @@ crabbox run --preflight --preflight-tools raw_socket -- ./packet-tests
 crabbox run --preflight --preflight-tools none -- ./smoke.sh
 ```
 
-`default` expands to the default probe list; `none` keeps only the workspace
-summary. Unknown tool names fail before leasing so typos do not hide missing
-diagnostics. Unsupported OS-specific probes are skipped for the current target.
+`default` (alias `defaults`) expands to the default probe list; `none` alone keeps
+only the workspace summary, while mixed `none,git` still selects `git`. Unknown
+tool names fail before leasing and point to `crabbox preflight-tools` so typos do
+not hide missing diagnostics. Unsupported OS-specific probes are skipped for the current target.
 The CMake probe invokes the literal `cmake --version` command on POSIX, WSL2,
 and native Windows targets. It prints only the first output line when CMake is
 present or `cmake=missing` when it is unavailable; either result is diagnostic
@@ -607,7 +680,15 @@ proof file, manifest, report, or other evidence artifact. Required artifact glob
 are checked after the remote command exits 0 and before `--download` files are
 written locally. They are also collected into the run artifact tarball. If any
 required glob matches nothing, the run fails even though the command itself
-succeeded. Matches must resolve to regular files, so dangling symlinks and
+succeeded. On SSH-backed runs, required-glob, required-change, and artifact-schema
+validation failures
+retain exit 7 and report `blockedStage=artifacts` with `errorKind=provider-error`,
+so they are distinct from a workload that exits 7 (`command-exit`). The failure
+digest identifies the artifacts phase and area. Cancellation or deadline
+observed when validation fails retains its normalized outcome; positive memory
+exhaustion evidence keeps priority. Artifact classification alone does not
+change retry eligibility. Matches must resolve to regular files, so dangling
+symlinks and
 symlinks to directories do not satisfy the proof gate. The same SSH-run target
 limits as `--artifact-glob` apply. Delegated providers that support bounded run
 artifact retrieval enforce provider-owned file and byte limits before returning
@@ -655,6 +736,16 @@ before acquisition, including canonical aliases and existing hardlinks. On
 Unix-like hosts, Crabbox-created download, capture, proof,
 and failure-bundle files use owner-only permissions (`0600`), and newly created
 output directories use `0700`.
+
+SSH downloads stream into a private temporary file and publish atomically only
+after the remote command and advertised byte count pass. Ordinary downloads
+intentionally enforce a 1 GiB per-file limit and retain at least 1 GiB of local
+free space as an upgrade safety boundary. A failed, canceled, oversized, or
+size-mismatched transfer leaves an existing destination unchanged. Automatic
+remote failure-capture payloads use a tighter 64 MiB limit; their scratch
+manifests and file lists live outside the tested checkout and are removed on
+every exit. Failed or canceled capture preparation also removes its partial
+remote archive with bounded cleanup that does not inherit caller cancellation.
 
 Use repeatable `--download-on-failure remote=local` to retrieve explicitly
 selected evidence after a nonzero workload exit on ordinary Linux SSH runs.
@@ -757,8 +848,14 @@ its status before reuse, or retry the printed stop command to finish cleanup.
 The digest includes the failed phase when phase markers are known, a
 likely area (provider auth, SSH/connectivity, sync, install/setup, user command,
 model/tool/provider limit, or resource exhaustion), retryability when inferable, next commands
-(`logs`, `events`, `doctor --from-run`, `ssh`, retrying with `--fresh-sync`, and
-`stop`). After failure-bundle information and command hints, each stream has one
+(`logs`, `events`, `doctor --from-run`, `ssh`, retrying, and `stop`). Unknown
+failures stop at the run-scoped diagnostic commands instead of advertising a
+full rerun. A retry is printed only when the failure is classified as retryable
+and preserves an explicitly requested `--no-sync`, so it does not reset the
+retained workspace. Other retries retain the `--fresh-sync` guidance above. Each original
+`--require-artifact` glob is retained in the retry, so missing required evidence
+still fails the rerun. After failure-bundle information and command hints, each
+stream has one
 redacted tail section of up to 40 lines, or its capture path when explicitly
 captured. Live output and failure-bundle contents are unchanged. The digest does
 not reconstruct secrets or hidden local shell state. Short-circuit explanations are limited to simple

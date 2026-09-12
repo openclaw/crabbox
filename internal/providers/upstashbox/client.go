@@ -78,7 +78,7 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 			return nil, fmt.Errorf("%s HTTP client setup: %w", providerName, err)
 		}
 	}
-	base := strings.TrimRight(blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), "https://us-east-1.box.upstash.com"), "/")
+	base := strings.TrimRight(blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), core.UpstashBoxConfigDefaultBaseURL), "/")
 	trusted, _ := url.Parse(base)
 	return &client{apiKey: apiKey, base: base, http: shared.SecureHTTPClient(httpClient, trusted, upstashBoxRedirectError)}, nil
 }
@@ -203,11 +203,7 @@ func (c *client) ExecStream(ctx context.Context, boxID, command, folder string, 
 	if strings.TrimSpace(folder) != "" {
 		body["folder"] = strings.TrimSpace(folder)
 	}
-	data, err := json.Marshal(body)
-	if err != nil {
-		return 0, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/v2/box/"+url.PathEscape(boxID)+"/exec-stream", bytes.NewReader(data))
+	req, err := shared.NewCompactJSONRequest(ctx, http.MethodPost, c.base+"/v2/box/"+url.PathEscape(boxID)+"/exec-stream", body)
 	if err != nil {
 		return 0, err
 	}
@@ -282,19 +278,11 @@ func (c *client) UploadFile(ctx context.Context, boxID, localPath, remotePath st
 }
 
 func (c *client) doJSON(ctx context.Context, method, path string, query url.Values, body any, out any) error {
-	var input io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		input = bytes.NewReader(data)
-	}
 	u := c.base + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, method, u, input)
+	req, err := shared.NewCompactJSONRequest(ctx, method, u, body)
 	if err != nil {
 		return err
 	}

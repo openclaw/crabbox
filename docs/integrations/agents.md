@@ -91,8 +91,7 @@ instructions; they do not grant credentials or bypass the agent host's command
 approval and sandbox policy. See [`crabbox init`](../commands/init.md) and
 [Repository Onboarding](../features/repository-onboarding.md).
 
-The standards-compliant generated metadata is scheduled for Crabbox 0.40.0.
-Released 0.39.0 binaries still emit a body-only skill; until upgrading, add the
+If an older Crabbox CLI emits a body-only skill, upgrade the CLI or add the
 required `name` and `description` frontmatter manually.
 
 ### Install through ecosystem skill managers
@@ -100,7 +99,7 @@ required `name` and `description` frontmatter manually.
 Crabbox also publishes its generic Skills at the non-hidden
 `skills/<name>/SKILL.md` ecosystem installer convention. This makes the
 authoritative generic Skills visible to installers instead of requiring them to
-search Crabbox's repo-local `.agents` projection. Two ship today:
+search Crabbox's repo-local `.agents` projection. Two are included:
 
 - **`crabbox`** (`skills/crabbox`): run repository commands in sandbox
   environments, reuse remote machines, and collect execution evidence.
@@ -140,8 +139,9 @@ projection are byte-identical and CI rejects drift. Use `crabbox init` when the
 repository also needs Crabbox configuration, Actions hydration, and detected
 project-job instructions; use a skill manager when only agent discovery is
 missing.
-`--pin refs/heads/main` selects this unreleased branch explicitly; after 0.40.0
-is tagged, omit it to follow GitHub CLI's latest-release resolution.
+Keep `--pin refs/heads/main` until the chosen release contains the requested
+skill. Omit it only when GitHub CLI's latest-release resolution includes that
+skill.
 
 ### Discover from crabbox.sh
 

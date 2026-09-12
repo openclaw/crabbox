@@ -5,6 +5,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type flagValues struct {
@@ -38,16 +40,17 @@ func RegisterGitHubCodespacesProviderFlags(fs *flag.FlagSet, defaults Config) an
 }
 
 func ApplyGitHubCodespacesProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	if isGitHubCodespacesProviderName(cfg.Provider) {
-		if flagWasSet(fs, "class") {
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
+		if core.FlagWasSet(fs, "class") {
 			return exit(2, "--class is not supported for provider=github-codespaces; use --type or --github-codespaces-machine for a Codespaces machine slug")
 		}
 		if cfg.TargetOS != "" && strings.ToLower(strings.TrimSpace(cfg.TargetOS)) != targetLinux {
 			return exit(2, "provider=github-codespaces supports target=linux only")
 		}
-		if flagWasSet(fs, "type") && !flagWasSet(fs, "github-codespaces-machine") {
+		if core.FlagWasSet(fs, "type") && !core.FlagWasSet(fs, "github-codespaces-machine") {
 			if flag := fs.Lookup("type"); flag != nil {
 				cfg.GitHubCodespaces.Machine = strings.TrimSpace(flag.Value.String())
+				core.RecordProviderFlagInputs(cfg, true, providerName)
 			}
 		}
 	}
@@ -55,42 +58,53 @@ func ApplyGitHubCodespacesProviderFlags(cfg *Config, fs *flag.FlagSet, values an
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "github-codespaces-repo") {
+	if core.FlagWasSet(fs, "github-codespaces-repo") {
 		cfg.GitHubCodespaces.Repo = *v.Repo
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if flagWasSet(fs, "github-codespaces-ref") {
+	if core.FlagWasSet(fs, "github-codespaces-ref") {
 		cfg.GitHubCodespaces.Ref = *v.Ref
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if flagWasSet(fs, "github-codespaces-machine") {
+	if core.FlagWasSet(fs, "github-codespaces-machine") {
 		cfg.GitHubCodespaces.Machine = *v.Machine
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 		cfg.ServerType = strings.TrimSpace(*v.Machine)
 		cfg.ServerTypeExplicit = true
 	}
-	if flagWasSet(fs, "github-codespaces-devcontainer-path") {
+	if core.FlagWasSet(fs, "github-codespaces-devcontainer-path") {
 		cfg.GitHubCodespaces.DevcontainerPath = *v.Devcontainer
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if flagWasSet(fs, "github-codespaces-working-directory") {
+	if core.FlagWasSet(fs, "github-codespaces-working-directory") {
 		cfg.GitHubCodespaces.WorkingDirectory = *v.WorkingDir
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if flagWasSet(fs, "github-codespaces-geo") {
+	if core.FlagWasSet(fs, "github-codespaces-geo") {
 		cfg.GitHubCodespaces.Geo = *v.Geo
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if flagWasSet(fs, "github-codespaces-idle-timeout") {
+	if core.FlagWasSet(fs, "github-codespaces-idle-timeout") {
 		cfg.GitHubCodespaces.IdleTimeout = *v.IdleTimeout
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if flagWasSet(fs, "github-codespaces-retention-period") {
+	if core.FlagWasSet(fs, "github-codespaces-retention-period") {
 		cfg.GitHubCodespaces.RetentionPeriod = *v.RetentionPeriod
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 		markRetentionPeriodExplicit(cfg)
 	}
-	if flagWasSet(fs, "github-codespaces-delete-on-release") {
+	if core.FlagWasSet(fs, "github-codespaces-delete-on-release") {
 		cfg.GitHubCodespaces.DeleteOnRelease = *v.DeleteOnRelease
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 		markDeleteOnReleaseExplicit(cfg)
 	}
-	if flagWasSet(fs, "github-codespaces-gh-path") {
+	if core.FlagWasSet(fs, "github-codespaces-gh-path") {
 		cfg.GitHubCodespaces.GHPath = *v.GHPath
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if flagWasSet(fs, "github-codespaces-work-root") {
+	if core.FlagWasSet(fs, "github-codespaces-work-root") {
 		cfg.GitHubCodespaces.WorkRoot = *v.WorkRoot
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 		cfg.WorkRoot = *v.WorkRoot
 		markWorkRootExplicit(cfg)
 	}
@@ -98,7 +112,7 @@ func ApplyGitHubCodespacesProviderFlags(cfg *Config, fs *flag.FlagSet, values an
 }
 
 func ValidateGitHubCodespacesConfig(cfg Config) error {
-	if isGitHubCodespacesProviderName(cfg.Provider) && strings.TrimSpace(cfg.TargetOS) != "" && strings.ToLower(strings.TrimSpace(cfg.TargetOS)) != targetLinux {
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) && strings.TrimSpace(cfg.TargetOS) != "" && strings.ToLower(strings.TrimSpace(cfg.TargetOS)) != targetLinux {
 		return exit(2, "provider=github-codespaces supports target=linux only")
 	}
 	c := cfg.GitHubCodespaces
@@ -151,15 +165,6 @@ func validateGitHubCodespacesWorkRoot(label, value string) error {
 func validRepo(repo string) bool {
 	owner, name, ok := strings.Cut(strings.TrimSpace(repo), "/")
 	return ok && validRepoOwner(owner) && validRepoName(name)
-}
-
-func isGitHubCodespacesProviderName(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case providerName, "codespaces", "gh-codespaces":
-		return true
-	default:
-		return false
-	}
 }
 
 func validRepoOwner(value string) bool {

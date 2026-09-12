@@ -18,7 +18,41 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
+
+func TestManualConfigInputFlags(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "fixture-other"
+	cfg.DockerSandbox.CPUs = 2
+	fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+	values := RegisterDockerSandboxProviderFlags(fs, cfg)
+	before := cfg
+	if err := ApplyDockerSandboxProviderFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+		t.Fatalf("foreign values changed configuration: %v", err)
+	}
+	if err := ApplyDockerSandboxProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	want := cfg
+	core.RecordProviderFlagInputs(&want, true, "docker-sandbox")
+	if reflect.DeepEqual(cfg, want) {
+		t.Fatal("unvisited flags recorded input")
+	}
+	for repeat := 0; repeat < 2; repeat++ {
+		if err := fs.Set("docker-sandbox-clone", "false"); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyDockerSandboxProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want = cfg
+		core.RecordProviderFlagInputs(&want, true, "docker-sandbox")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatal("accepted/equal flag value was not recorded")
+		}
+	}
+}
 
 func TestProviderSpecIsDelegatedLinuxAndAliasFree(t *testing.T) {
 	spec := Provider{}.Spec()
@@ -1864,39 +1898,72 @@ func TestRunTimingFailureDoesNotReportSuccess(t *testing.T) {
 }
 
 func TestRunCommandIntentReachesNativeRequest(t *testing.T) {
+	testutil.VerifyNativeCommandIntent(t, "sh", true, func(t *testing.T, intent testutil.CommandIntent) []string {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		runner := newRunner(nil, nil)
+		backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
+		_, err := backend.Run(t.Context(), RunRequest{
+			Repo:               Repo{Name: "my-app", Root: t.TempDir()},
+			Command:            intent.Command,
+			ShellMode:          intent.ShellMode,
+			CommandLiteralArgs: intent.LiteralArgs,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		call := findCall(runner, "exec")
+		if call == nil || len(call.Args) < 5 || call.Args[1] != "--workdir" {
+			t.Fatalf("exec=%#v", call)
+		}
+		return call.Args[4:]
+	})
+}
+
+func TestDockerSandboxConfigShowSection(t *testing.T) {
+	projector, ok := any(Provider{}).(core.ProviderConfigShowProjector)
+	if !ok {
+		t.Fatal("real provider is missing passive config-show ownership")
+	}
 	for _, tc := range []struct {
-		name    string
-		command []string
-		literal map[int]bool
-		shell   bool
-		want    []string
+		name string
+		cfg  core.DockerSandboxConfig
+		want map[string]any
+		text string
 	}{
-		{"empty explicit source", []string{""}, nil, true, []string{"sh", "-lc", ""}},
-		{"ordinary", []string{"printf", "%s", "hello"}, nil, false, []string{"printf", "%s", "hello"}},
-		{"literal separator", []string{"printf", "%s", ";", "touch", "sentinel"}, map[int]bool{2: true}, false, []string{"printf", "%s", ";", "touch", "sentinel"}},
-		{"literal assignment executable", []string{"FOO=x", "argument"}, map[int]bool{0: true}, false, []string{"FOO=x", "argument"}},
-		{"literal singleton", []string{"literal command $(echo x)"}, map[int]bool{0: true}, false, []string{"literal command $(echo x)"}},
-		{"invalid assignment executable", []string{"bad-name=x", "argument"}, nil, false, []string{"bad-name=x", "argument"}},
-		{"mixed operators", []string{"printf", "%s", ";", "&&", "printf", "%s", "done"}, map[int]bool{2: true}, false, []string{"sh", "-lc", "'printf' '%s' ';' && 'printf' '%s' 'done'"}},
-		{"inferred source", []string{"printf one && printf two"}, nil, false, []string{"sh", "-lc", "printf one && printf two"}},
-		{"explicit source", []string{"printf one; exit 7"}, nil, true, []string{"sh", "-lc", "printf one; exit 7"}},
-		{"leading assignment", []string{"GREETING=hello world", "printf", "%s", "$GREETING"}, nil, false, []string{"sh", "-lc", "GREETING='hello world' 'printf' '%s' '$GREETING'"}},
+		{name: "nil lists", cfg: core.DockerSandboxConfig{CLIPath: "", Agent: "", Template: "", CPUs: float64(0), Memory: "", Clone: false, Workdir: "", ExtraWorkspaces: []string(nil), MCP: []string(nil), Kit: []string(nil)}, want: map[string]any{"cliPath": "", "agent": "", "template": "", "cpus": float64(0), "memory": "", "clone": false, "workdir": "", "extraWorkspaces": []string(nil), "mcp": []string(nil), "kit": []string(nil)}, text: "docker_sandbox cli= agent= template=- cpus=0 memory=- clone=false workdir=- extra_workspaces=- mcp=- kit=-\n"},
+		{name: "empty lists", cfg: core.DockerSandboxConfig{CLIPath: "", Agent: "", Template: "", CPUs: float64(0), Memory: "", Clone: false, Workdir: "", ExtraWorkspaces: []string{}, MCP: []string{}, Kit: []string{}}, want: map[string]any{"cliPath": "", "agent": "", "template": "", "cpus": float64(0), "memory": "", "clone": false, "workdir": "", "extraWorkspaces": []string{}, "mcp": []string{}, "kit": []string{}}, text: "docker_sandbox cli= agent= template=- cpus=0 memory=- clone=false workdir=- extra_workspaces=- mcp=- kit=-\n"},
+		{name: "fractional raw ordered", cfg: core.DockerSandboxConfig{CLIPath: " raw-cli ", Agent: " raw-agent ", Template: "", CPUs: float64(2.5), Memory: "   ", Clone: true, Workdir: "", ExtraWorkspaces: []string{"/example/a", " /example/b ", "/example/a"}, MCP: []string{"one", "one", " two "}, Kit: []string{""}}, want: map[string]any{"cliPath": " raw-cli ", "agent": " raw-agent ", "template": "", "cpus": float64(2.5), "memory": "   ", "clone": true, "workdir": "", "extraWorkspaces": []string{"/example/a", " /example/b ", "/example/a"}, "mcp": []string{"one", "one", " two "}, "kit": []string{""}}, text: "docker_sandbox cli= raw-cli  agent= raw-agent  template=- cpus=2.5 memory=    clone=true workdir=- extra_workspaces=/example/a, /example/b ,/example/a mcp=one,one, two  kit=-\n"},
+		{name: "large float", cfg: core.DockerSandboxConfig{CLIPath: "", Agent: "", Template: "", CPUs: float64(1e+20), Memory: "", Clone: false, Workdir: "", ExtraWorkspaces: []string(nil), MCP: []string(nil), Kit: []string(nil)}, want: map[string]any{"cliPath": "", "agent": "", "template": "", "cpus": float64(1e+20), "memory": "", "clone": false, "workdir": "", "extraWorkspaces": []string(nil), "mcp": []string(nil), "kit": []string(nil)}, text: "docker_sandbox cli= agent= template=- cpus=1e+20 memory=- clone=false workdir=- extra_workspaces=- mcp=- kit=-\n"},
+		{name: "small float", cfg: core.DockerSandboxConfig{CLIPath: "", Agent: "", Template: "", CPUs: float64(1e-09), Memory: "", Clone: false, Workdir: "", ExtraWorkspaces: []string(nil), MCP: []string(nil), Kit: []string(nil)}, want: map[string]any{"cliPath": "", "agent": "", "template": "", "cpus": float64(1e-09), "memory": "", "clone": false, "workdir": "", "extraWorkspaces": []string(nil), "mcp": []string(nil), "kit": []string(nil)}, text: "docker_sandbox cli= agent= template=- cpus=1e-09 memory=- clone=false workdir=- extra_workspaces=- mcp=- kit=-\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("XDG_STATE_HOME", t.TempDir())
-			runner := newRunner(nil, nil)
-			backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
-			_, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, Command: tc.command, ShellMode: tc.shell, CommandLiteralArgs: tc.literal})
+			cfg := core.Config{Provider: "unselected-display-test", DockerSandbox: tc.cfg}
+			before, err := json.Marshal(cfg.DockerSandbox)
 			if err != nil {
 				t.Fatal(err)
 			}
-			call := findCall(runner, "exec")
-			if call == nil || len(call.Args) < 5 || call.Args[1] != "--workdir" {
-				t.Fatalf("exec=%#v", call)
+			section := projector.ConfigShowSection(cfg)
+			got := map[string]any{}
+			var fields []string
+			for _, field := range section.Fields {
+				got[field.JSONName] = field.JSONValue
+				fields = append(fields, field.TextName+"="+field.TextValue)
 			}
-			got := call.Args[4:]
+			if section.JSONKey != "dockerSandbox" || section.TextLabel != "docker_sandbox" || !reflect.DeepEqual(section.Providers, []string{"docker-sandbox"}) || len(section.Fields) != 10 {
+				t.Fatalf("section metadata=%#v", section)
+			}
 			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("native command=%#v want %#v", got, tc.want)
+				t.Fatalf("public fields=%#v want %#v", got, tc.want)
+			}
+			if line := section.TextLabel + " " + strings.Join(fields, " ") + "\n"; line != tc.text {
+				t.Fatalf("text=%q want %q", line, tc.text)
+			}
+			after, err := json.Marshal(cfg.DockerSandbox)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("projection mutated original config or slice contents")
 			}
 		})
 	}

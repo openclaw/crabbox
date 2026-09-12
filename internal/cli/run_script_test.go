@@ -343,7 +343,7 @@ exec sh -c "$cmd"
 			if mode == "failed-upload" {
 				wantCode = 7
 			}
-			if exitCodeForError(runErr, 0) != wantCode || releases != 0 {
+			if ExitCodeForError(runErr, 0) != wantCode || releases != 0 {
 				t.Fatalf("failure=%v releases=%d\n%s", runErr, releases, stderr.String())
 			}
 			bundles, err := filepath.Glob(filepath.Join(".crabbox", "captures", "*.tar.gz"))

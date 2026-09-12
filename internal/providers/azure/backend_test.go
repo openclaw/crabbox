@@ -9,6 +9,8 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -976,5 +978,61 @@ func TestAzureAcquireRollbackKeepsOriginalBindingAndRefusesUnpreparedDelete(t *t
 				t.Fatal("prepared companion evidence lost")
 			}
 		})
+	}
+}
+
+func TestAzureConfigShowCompletePassiveSection(t *testing.T) {
+	projector, ok := any(Provider{}).(core.ProviderConfigShowProjector)
+	if !ok {
+		t.Fatal("actual provider has no passive config-show projector")
+	}
+	for _, tc := range []struct {
+		name  string
+		input core.Config
+		want  map[string]any
+		text  string
+	}{
+		{name: "nil", input: core.Config{}, want: map[string]any{"location": "", "resourceGroup": "", "image": "", "osDisk": "", "snapshotSKU": "", "osDiskSKU": "", "network": "", "sshCIDRs": []string(nil)}, text: "azure location= resource_group= os_disk= snapshot_sku=- os_disk_sku=- network=- ssh_cidrs=-\n"},
+		{name: "empty", input: core.Config{AzureSSHCIDRs: []string{}}, want: map[string]any{"location": "", "resourceGroup": "", "image": "", "osDisk": "", "snapshotSKU": "", "osDiskSKU": "", "network": "", "sshCIDRs": []string{}}, text: "azure location= resource_group= os_disk= snapshot_sku=- os_disk_sku=- network=- ssh_cidrs=-\n"},
+		{name: "raw-references-list", input: core.Config{AzureLocation: "raw-location", AzureResourceGroup: "group-reference", AzureImage: "image-reference", AzureOSDisk: "raw-disk", AzureSnapshotSKU: "raw-snapshot-sku", AzureOSDiskSKU: "raw-disk-sku", AzureNetwork: "network-reference", AzureSSHCIDRs: []string{"second", "first", "second", " "}}, want: map[string]any{"location": "raw-location", "resourceGroup": "group-reference", "image": "image-reference", "osDisk": "raw-disk", "snapshotSKU": "raw-snapshot-sku", "osDiskSKU": "raw-disk-sku", "network": "network-reference", "sshCIDRs": []string{"second", "first", "second", " "}}, text: "azure location=raw-location resource_group=group-reference os_disk=raw-disk snapshot_sku=raw-snapshot-sku os_disk_sku=raw-disk-sku network=network-reference ssh_cidrs=second,first,second, \n"},
+		{name: "whitespace-empty-elements", input: core.Config{AzureLocation: " ", AzureResourceGroup: " ", AzureImage: " ", AzureOSDisk: " ", AzureSnapshotSKU: " ", AzureOSDiskSKU: " ", AzureNetwork: " ", AzureSSHCIDRs: []string{"", ""}}, want: map[string]any{"location": " ", "resourceGroup": " ", "image": " ", "osDisk": " ", "snapshotSKU": " ", "osDiskSKU": " ", "network": " ", "sshCIDRs": []string{"", ""}}, text: "azure location=  resource_group=  os_disk=  snapshot_sku=  os_disk_sku=  network=  ssh_cidrs=,\n"},
+	} {
+		for _, selected := range []string{"azure", "static"} {
+			t.Run(tc.name+"/"+selected, func(t *testing.T) {
+				cfg := tc.input
+				cfg.Provider = selected
+				before := cfg
+				before.AzureSSHCIDRs = slices.Clone(cfg.AzureSSHCIDRs)
+				section := projector.ConfigShowSection(cfg)
+				if section.JSONKey != "azure" || section.TextLabel != "azure" || !reflect.DeepEqual(section.Providers, []string{"azure"}) {
+					t.Fatalf("section metadata=%#v", section)
+				}
+				wantOrder := []string{"location", "resourceGroup", "image", "osDisk", "snapshotSKU", "osDiskSKU", "network", "sshCIDRs"}
+				if len(section.Fields) != len(wantOrder) {
+					t.Fatalf("field count=%d want %d", len(section.Fields), len(wantOrder))
+				}
+				got := map[string]any{}
+				line := section.TextLabel
+				for i, field := range section.Fields {
+					if field.JSONName != wantOrder[i] {
+						t.Fatalf("field %d name=%q want %q", i, field.JSONName, wantOrder[i])
+					}
+					got[field.JSONName] = field.JSONValue
+					if field.TextName != "" {
+						line += " " + field.TextName + "=" + field.TextValue
+					}
+				}
+				line += "\n"
+				if !reflect.DeepEqual(got, tc.want) {
+					t.Fatalf("public fields=%#v want %#v", got, tc.want)
+				}
+				if line != tc.text {
+					t.Fatalf("text=%q want %q", line, tc.text)
+				}
+				if !reflect.DeepEqual(cfg, before) {
+					t.Fatal("projection mutated supplied configuration")
+				}
+			})
+		}
 	}
 }

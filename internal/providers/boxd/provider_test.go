@@ -4,9 +4,42 @@ import (
 	"flag"
 	core "github.com/openclaw/crabbox/internal/cli"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestManualConfigInputFlags(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "fixture-other"
+	fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	before := cfg
+	if err := applyFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+		t.Fatalf("foreign values changed configuration: %v", err)
+	}
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	want := cfg
+	core.RecordProviderFlagInputs(&want, true, "boxd")
+	if reflect.DeepEqual(cfg, want) {
+		t.Fatal("unvisited flags recorded input")
+	}
+	for repeat := 0; repeat < 2; repeat++ {
+		if err := fs.Set("boxd-org", ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want = cfg
+		core.RecordProviderFlagInputs(&want, true, "boxd")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatal("accepted/equal flag value was not recorded")
+		}
+	}
+}
 
 func TestProviderContractAndFlags(t *testing.T) {
 	p := Provider{}

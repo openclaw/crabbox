@@ -26,8 +26,9 @@ func (Provider) ClaimScope(cfg Config) string {
 
 func (Provider) Spec() ProviderSpec {
 	return ProviderSpec{
-		Name: providerName,
-		Kind: core.ProviderKindSSHLease,
+		Authentication: core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
+		Name:           providerName,
+		Kind:           core.ProviderKindSSHLease,
 		Targets: []core.TargetSpec{{
 			OS: targetLinux,
 		}},

@@ -703,6 +703,18 @@ func PowershellCommand(script string) string {
 	return powershellCommand(script)
 }
 
+func XfceDesktopThemeScript() string {
+	return sharedXfceDesktopTheme("classic")
+}
+
+func XfceSessionEnvironmentScript() string {
+	return sharedXfceSessionEnvironment()
+}
+
+func XfceDesktopSessionScript() string {
+	return sharedXfceDesktopSession()
+}
+
 func GnomeDesktopThemeScript() string {
 	return sharedGnomeDesktopTheme()
 }

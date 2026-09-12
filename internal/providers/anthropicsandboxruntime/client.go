@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type srtCLI struct {
@@ -22,7 +24,7 @@ func newSRTCLI(cfg Config, rt Runtime) (*srtCLI, error) {
 }
 
 func (c *srtCLI) binary() string {
-	return blank(strings.TrimSpace(c.cfg.AnthropicSRT.CLIPath), defaultCLIPath)
+	return blank(strings.TrimSpace(c.cfg.AnthropicSRT.CLIPath), core.AnthropicSRTConfigDefaultCLIPath)
 }
 
 func (c *srtCLI) baseArgs() []string {

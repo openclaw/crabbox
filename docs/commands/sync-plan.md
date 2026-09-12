@@ -39,6 +39,10 @@ The same preflight rejects tracked non-gitlink paths hidden by sparse-checkout
 or `skip-worktree` state only when they remain in the effective manifest after
 `sync.include` and ordered excludes. On Git older than 2.41, an ambiguous
 missing in-scope path fails closed; out-of-scope paths do not affect the plan.
+Materialize the checkout, or intentionally adjust `sync.include`, ordered
+`sync.exclude`, or `.crabboxignore`; later reinclusion rules still determine
+effective scope. Ordinary SSH runs perform this scope check before lease work
+and independently rebuild the final manifest after acquisition.
 
 ## Output
 

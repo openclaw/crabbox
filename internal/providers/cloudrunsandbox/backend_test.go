@@ -3,8 +3,11 @@ package cloudrunsandbox
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,11 +17,360 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type cloudRunSandboxFixedClock struct{ now time.Time }
 
 func (c cloudRunSandboxFixedClock) Now() time.Time { return c.now }
+
+type cloudRunTerminalClock struct{ now time.Time }
+
+func (c *cloudRunTerminalClock) Now() time.Time { return c.now }
+
+type cloudRunTerminalWriter struct {
+	bytes.Buffer
+	fail error
+}
+
+func (w *cloudRunTerminalWriter) Write(p []byte) (int, error) {
+	if w.fail != nil && bytes.HasPrefix(p, []byte(`{"provider":`)) {
+		return 0, w.fail
+	}
+	return w.Buffer.Write(p)
+}
+
+func TestCloudRunEffectiveDefaultConsumersRecorded(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(tmp, "state"))
+	for _, tc := range []struct{ name, cli, workdir, wantCLI, wantWorkdir string }{
+		{"zero", "", "", "/usr/local/gcp/bin/sandbox", "/tmp/crabbox"},
+		{"whitespace", " \t", " \t", "/usr/local/gcp/bin/sandbox", "/tmp/crabbox"},
+		{"custom", " /opt/example-sandbox ", " /tmp/example ", "/opt/example-sandbox", "/tmp/example"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: tc.cli, Workdir: tc.workdir}}
+			before := cfg.CloudRunSandbox
+			var calls []LocalCommandRequest
+			rt := Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: recordingLocalExec{handler: func(req LocalCommandRequest) (LocalCommandResult, error) {
+				calls = append(calls, req)
+				return LocalCommandResult{}, nil
+			}}}
+			b := NewBackend(Provider{}.Spec(), cfg, rt).(*backend)
+			doctor, err := b.Doctor(context.Background(), DoctorRequest{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(calls) != 1 || calls[0].Name != tc.wantCLI || strings.Join(calls[0].Args, " ") != "--help" {
+				t.Fatalf("recorded doctor calls=%v", calls)
+			}
+			if doctor.Checks[0].Details["cli"] != tc.wantCLI || doctor.Checks[0].Details["workdir"] != tc.wantWorkdir {
+				t.Fatalf("doctor details=%v", doctor.Checks[0].Details)
+			}
+			workdir, err := cloudRunSandboxWorkdir(cfg)
+			if err != nil || workdir != tc.wantWorkdir {
+				t.Fatalf("workdir=%q error=%v", workdir, err)
+			}
+			scope, err := b.claimScope()
+			sum := sha256.Sum256([]byte("direct:" + tc.wantCLI))
+			if err != nil || scope != "direct:"+hex.EncodeToString(sum[:8]) {
+				t.Fatalf("scope=%q error=%v", scope, err)
+			}
+			wantHint := "crabbox stop --provider cloud-run-sandbox"
+			if tc.name == "custom" {
+				wantHint += " --cloud-run-sandbox-cli '/opt/example-sandbox'"
+			}
+			wantHint += " --id 'example'"
+			if got := cleanupCommand(cfg, "example"); got != wantHint {
+				t.Fatalf("cleanup hint=%q want=%q", got, wantHint)
+			}
+			if cfg.CloudRunSandbox != before {
+				t.Fatal("effective reads changed input config")
+			}
+			if tc.name != "custom" {
+				defaults := core.BaseConfig().CloudRunSandbox
+				if tc.wantCLI != defaults.CLIPath || tc.wantWorkdir != defaults.Workdir {
+					t.Fatal("effective fallback differs from base defaults")
+				}
+			}
+		})
+	}
+	cfg := Config{CloudRunSandbox: CloudRunSandboxConfig{GatewayURL: " https://example.invalid/gateway ", CLIPath: "/opt/custom"}}
+	if got := cleanupCommand(cfg, "example"); got != "crabbox stop --provider cloud-run-sandbox --cloud-run-sandbox-gateway-url 'https://example.invalid/gateway' --id 'example'" {
+		t.Fatalf("gateway cleanup precedence=%q", got)
+	}
+}
+
+func TestCloudRunSandboxTerminalOutcome(t *testing.T) {
+	plain := cloudRunNativeExit(t, 23)
+	for _, tc := range []struct {
+		name                                                              string
+		code, want                                                        int
+		cause                                                             error
+		cleanup, writer, setup, native, keepFailure, reuse, opaqueCleanup bool
+		kind                                                              core.RunErrorKind
+		status                                                            core.RunStatus
+	}{
+		{name: "success"},
+		{name: "native command exit", code: 23, want: 23, native: true, kind: core.RunErrorCommandExit},
+		{name: "typed cleanup after success", cleanup: true, want: 9, kind: core.RunErrorTimeout, status: core.RunStatusTimedOut},
+		{name: "opaque cleanup after success", cleanup: true, opaqueCleanup: true, want: 1, kind: core.RunErrorProvider},
+		{name: "command cleanup writer", code: 23, cleanup: true, writer: true, want: 23, kind: core.RunErrorCommandExit},
+		{name: "nonzero transport cleanup", code: 23, cause: io.ErrUnexpectedEOF, cleanup: true, want: 1, kind: core.RunErrorProvider},
+		{name: "cancel cleanup", cause: context.Canceled, cleanup: true, want: 130, kind: core.RunErrorCanceled, status: core.RunStatusCanceled},
+		{name: "deadline cleanup", cause: context.DeadlineExceeded, cleanup: true, want: 124, kind: core.RunErrorTimeout, status: core.RunStatusTimedOut},
+		{name: "setup typed cleanup", setup: true, cleanup: true, want: 6, kind: core.RunErrorProvider},
+		{name: "writer after deletion", writer: true, keepFailure: true, want: 1, kind: core.RunErrorProvider},
+		{name: "kept command writer", code: 23, keepFailure: true, writer: true, want: 23, kind: core.RunErrorCommandExit},
+		{name: "reused success", reuse: true},
+		{name: "reused writer", reuse: true, writer: true, want: 1, kind: core.RunErrorProvider},
+		{name: "safe cause cleanup", cause: shared.ExitErrorWithCause(7, "safe command diagnostic", errors.New("hidden native detail")), cleanup: true, want: 1, kind: core.RunErrorProvider},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateLeaseHome(t)
+			clock := &cloudRunTerminalClock{now: time.Unix(1700000000, 0)}
+			writerCause := errors.New("synthetic timing failure")
+			cleanupCause := errors.Join(errors.New("hidden cleanup detail"), context.DeadlineExceeded)
+			cleanupErr := shared.ExitErrorWithCause(9, "safe cleanup diagnostic", cleanupCause)
+			if tc.opaqueCleanup {
+				cleanupCause = errors.New("safe cleanup diagnostic")
+				cleanupErr = cleanupCause
+			}
+			setupErr := shared.ExitErrorWithCause(6, "safe setup diagnostic", errors.New("hidden setup detail"))
+			writer := &cloudRunTerminalWriter{}
+			if tc.writer {
+				writer.fail = writerCause
+			}
+			deletes := 0
+			transport := &fakeTransport{mode: "direct", onExec: func(_ string, command string) (int, string, string, error) {
+				if strings.HasPrefix(command, "mkdir -p") {
+					if tc.setup {
+						return 0, "", "", setupErr
+					}
+					return 0, "", "", nil
+				}
+				clock.now = clock.now.Add(time.Second)
+				if tc.native {
+					native := &directTransport{rt: Runtime{Exec: recordingLocalExec{handler: func(LocalCommandRequest) (LocalCommandResult, error) {
+						return LocalCommandResult{ExitCode: 23}, plain
+					}}}}
+					code, err := native.Exec(t.Context(), "fixture", command, execOptions{}, io.Discard, io.Discard)
+					return code, "", "", err
+				}
+				return tc.code, "", "", tc.cause
+			}, onDestroyOwned: func(id, token string) error {
+				if id != token {
+					t.Errorf("direct ownership changed: id=%s token=%s", id, token)
+				}
+				deletes++
+				clock.now = clock.now.Add(2 * time.Second)
+				if tc.cleanup {
+					return cleanupErr
+				}
+				return nil
+			}}
+			previous := newTransport
+			newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
+			t.Cleanup(func() { newTransport = previous })
+			b := NewBackend(Provider{}.Spec(), Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"}, IdleTimeout: time.Minute}, Runtime{Stdout: io.Discard, Stderr: writer, Clock: clock}).(*backend)
+			repo := Repo{Root: t.TempDir()}
+			req := RunRequest{Repo: repo, Command: []string{"fixture-command"}, NoSync: true, TimingJSON: true, KeepOnFailure: tc.keepFailure}
+			if tc.reuse {
+				id, _, _, _, err := b.createSandbox(t.Context(), transport, repo, false, "fixture")
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.ID = id
+			}
+			result, err := b.Run(t.Context(), req)
+			wantStatus := tc.status
+			if wantStatus == "" {
+				wantStatus = core.RunStatusSucceeded
+				if tc.want != 0 {
+					wantStatus = core.RunStatusFailed
+				}
+			}
+			var public ExitError
+			hasPublic := errors.As(err, &public)
+			if result.ExitCode != tc.want || result.Status != wantStatus || result.ErrorKind != tc.kind || tc.want != 0 && (!hasPublic || public.Code != tc.want) || tc.want == 0 && err != nil {
+				t.Errorf("outcome result=%+v publicCode=%d err=%v", result, public.Code, err)
+			}
+			if tc.cause != nil && !errors.Is(err, tc.cause) {
+				t.Error("primary cause lost")
+			}
+			if tc.setup && !errors.Is(err, setupErr) {
+				t.Error("setup cause lost")
+			}
+			if tc.cleanup && (!errors.Is(err, cleanupCause) || !strings.Contains(public.Message, "safe cleanup diagnostic")) {
+				t.Error("cleanup cause/message lost")
+			}
+			if tc.writer && (!errors.Is(err, writerCause) || !strings.Contains(public.Message, writerCause.Error())) {
+				t.Error("writer cause/message lost")
+			}
+			if strings.Contains(fmt.Sprint(err), "hidden") {
+				t.Errorf("hidden cause exposed: %v", err)
+			}
+			wantDelete := !tc.reuse && !(tc.keepFailure && (tc.code != 0 || tc.cause != nil || tc.setup))
+			wantKept := !wantDelete || tc.cleanup
+			if deletes != boolInt(wantDelete) || result.Session == nil || result.Session.Kept != wantKept || result.Session.Reused != tc.reuse {
+				t.Errorf("deletes=%d session=%+v", deletes, result.Session)
+			}
+			_, exists, claimErr := readLeaseClaimWithPresence(result.LeaseID)
+			if claimErr != nil || exists != wantKept {
+				t.Errorf("claim exists=%v err=%v", exists, claimErr)
+			}
+			wantTotal := time.Second
+			if tc.setup {
+				wantTotal = 0
+			}
+			if wantDelete {
+				wantTotal += 2 * time.Second
+			}
+			if result.Total != wantTotal {
+				t.Errorf("total=%s want=%s", result.Total, wantTotal)
+			}
+			if !tc.writer {
+				lines := strings.Split(strings.TrimSpace(writer.String()), "\n")
+				var report timingReport
+				if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
+					t.Fatal(err)
+				}
+				if report.ExitCode != tc.want || report.RunStatus != wantStatus || report.ErrorKind != tc.kind || report.TotalMs != wantTotal.Milliseconds() {
+					t.Errorf("timing=%+v", report)
+				}
+			}
+		})
+	}
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func TestCloudRunSandboxClaimReadFailurePreservesPublicCode(t *testing.T) {
+	for _, code := range []int{0, 23} {
+		for _, keep := range []bool{false, true} {
+			t.Run(fmt.Sprintf("command%d_keep%t", code, keep), func(t *testing.T) {
+				isolateLeaseHome(t)
+				clock := &cloudRunTerminalClock{now: time.Unix(1700000000, 0)}
+				var claimPath string
+				deletes := 0
+				transport := &fakeTransport{mode: "direct", onExec: func(id, command string) (int, string, string, error) {
+					if strings.HasPrefix(command, "mkdir -p") {
+						return 0, "", "", nil
+					}
+					// Model a damaged owned claim while command execution holds its fence.
+					// The next real guarded read is clearClaimActivity after execution.
+					claimPath = filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims", leasePrefix+id+".json")
+					original, err := os.ReadFile(claimPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = os.WriteFile(claimPath, original, 0o600) })
+					if err := os.WriteFile(claimPath, []byte("{"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					clock.now = clock.now.Add(time.Second)
+					return code, "", "", nil
+				}, onDestroy: func(string) error { deletes++; return nil }}
+				previous := newTransport
+				newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
+				t.Cleanup(func() { newTransport = previous })
+				b := NewBackend(Provider{}.Spec(), Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"}, IdleTimeout: time.Minute}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: clock}).(*backend)
+				result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir()}, Command: []string{"fixture-command"}, NoSync: true, Keep: keep})
+				_, _, readErr := readLeaseClaimWithPresence(result.LeaseID)
+				var readPublic, public ExitError
+				if !errors.As(readErr, &readPublic) || readPublic.Code != 2 {
+					t.Fatalf("real claim read code=%d err=%v", readPublic.Code, readErr)
+				}
+				want := code
+				if want == 0 {
+					want = 2
+				}
+				hasPublic := errors.As(err, &public)
+				t.Logf("command=%d keep=%t claimReadCode=%d publicCode=%d resultCode=%d", code, keep, readPublic.Code, public.Code, result.ExitCode)
+				if !hasPublic || public.Code != want {
+					t.Errorf("public code=%d want=%d err=%v", public.Code, want, err)
+				}
+				if !strings.Contains(err.Error(), "clear cloud-run-sandbox active claim") || !strings.Contains(err.Error(), "parse claim") {
+					t.Errorf("claim error context lost: %v", err)
+				}
+				if result.Command != time.Second || result.Total != time.Second || result.Session == nil || !result.Session.Kept || result.LeaseID == "" || deletes != 0 {
+					t.Errorf("result=%+v deletes=%d", result, deletes)
+				}
+				if data, readErr := os.ReadFile(claimPath); readErr != nil || string(data) != "{" {
+					t.Errorf("claim unexpectedly changed: %q %v", data, readErr)
+				}
+			})
+		}
+	}
+}
+
+func TestCloudRunSandboxClaimRemovalFailurePreservesPublicCode(t *testing.T) {
+	for _, code := range []int{0, 23} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			isolateLeaseHome(t)
+			clock := &cloudRunTerminalClock{now: time.Unix(1700000000, 0)}
+			var claimPath string
+			deletes := 0
+			transport := &fakeTransport{mode: "direct", onExec: func(_ string, command string) (int, string, string, error) {
+				if strings.HasPrefix(command, "mkdir -p") {
+					return 0, "", "", nil
+				}
+				clock.now = clock.now.Add(time.Second)
+				return code, "", "", nil
+			}, onDestroy: func(id string) error {
+				deletes++
+				claimPath = filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims", leasePrefix+id+".json")
+				original, err := os.ReadFile(claimPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.RemoveAll(claimPath); _ = os.WriteFile(claimPath, original, 0o600) })
+				// Force the real post-destroy claim removal to fail, without a fake ExitError.
+				if err := os.Remove(claimPath); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(claimPath, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(claimPath, "owned-fixture"), []byte("fixture"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return nil
+			}}
+			previous := newTransport
+			newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
+			t.Cleanup(func() { newTransport = previous })
+			b := NewBackend(Provider{}.Spec(), Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"}, IdleTimeout: time.Minute}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: clock}).(*backend)
+			result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir()}, Command: []string{"fixture-command"}, NoSync: true})
+			var public ExitError
+			hasPublic := errors.As(err, &public)
+			want := code
+			if want == 0 {
+				want = 2
+			}
+			t.Logf("command=%d publicCode=%d resultCode=%d", code, public.Code, result.ExitCode)
+			if !hasPublic || public.Code != want {
+				t.Errorf("public code=%d want=%d err=%v", public.Code, want, err)
+			}
+			if !strings.Contains(err.Error(), "remove claim") {
+				t.Errorf("real removal error absent: %v", err)
+			}
+			if result.Command != time.Second || result.Total != time.Second || result.Session == nil || !result.Session.Kept || deletes != 1 {
+				t.Errorf("result=%+v deletes=%d", result, deletes)
+			}
+			if _, err := os.Stat(filepath.Join(claimPath, "owned-fixture")); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
 
 func TestCloudRunSandboxCreateTimeoutRetainsRecoveryClaim(t *testing.T) {
 	isolateLeaseHome(t)
@@ -32,7 +384,7 @@ func TestCloudRunSandboxCreateTimeoutRetainsRecoveryClaim(t *testing.T) {
 		},
 	}
 	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Minute,
 	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
@@ -78,7 +430,7 @@ func TestCloudRunSandboxStatusProbesProviderLiveness(t *testing.T) {
 	newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
 	t.Cleanup(func() { newTransport = previousTransport })
 	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Minute,
 	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	scope, err := b.claimScope()
@@ -114,7 +466,7 @@ func TestCloudRunSandboxRunPreservesCancellation(t *testing.T) {
 	newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
 	t.Cleanup(func() { newTransport = previousTransport })
 	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Minute,
 	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	_, err := b.Run(context.Background(), RunRequest{
@@ -139,7 +491,7 @@ func TestCloudRunSandboxCreateConflictDropsProvisionalClaim(t *testing.T) {
 		return errSandboxAlreadyExists
 	}}
 	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Minute,
 	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
@@ -173,7 +525,7 @@ func TestCloudRunSandboxCreateConflictRemovalPrecedesWaitingStop(t *testing.T) {
 	newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
 	t.Cleanup(func() { newTransport = previousTransport })
 	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Minute,
 	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	createDone := make(chan error, 1)
@@ -244,7 +596,7 @@ func TestCloudRunSandboxCleanupSkipsInFlightThenDeletesIdle(t *testing.T) {
 			newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
 			t.Cleanup(func() { newTransport = previousTransport })
 			b := NewBackend(Provider{}.Spec(), Config{
-				CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+				CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 				IdleTimeout:     time.Second,
 			}, Runtime{Clock: cloudRunSandboxFixedClock{now: now}, Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 			repo := Repo{Root: t.TempDir()}
@@ -398,7 +750,7 @@ func TestCloudRunSandboxCleanupReconcilesOnlyOwnedStaleCreate(t *testing.T) {
 		isolateLeaseHome(t)
 		now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 		b := NewBackend(Provider{}.Spec(), Config{
-			CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+			CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 			IdleTimeout:     time.Hour,
 		}, Runtime{Clock: cloudRunSandboxFixedClock{now: now}, Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 		scope, err := b.claimScope()
@@ -440,7 +792,7 @@ func TestCloudRunSandboxCleanupReconcilesOnlyOwnedStaleCreate(t *testing.T) {
 		isolateLeaseHome(t)
 		now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 		b := NewBackend(Provider{}.Spec(), Config{
-			CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+			CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 			IdleTimeout:     time.Hour,
 		}, Runtime{Clock: cloudRunSandboxFixedClock{now: now}, Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 		scope, err := b.claimScope()
@@ -479,7 +831,7 @@ func TestCloudRunSandboxCleanupDryRunNeedsNoTransportCredentials(t *testing.T) {
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	var stdout bytes.Buffer
 	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Hour,
 	}, Runtime{Clock: cloudRunSandboxFixedClock{now: now}, Stdout: &stdout, Stderr: io.Discard}).(*backend)
 	scope, err := b.claimScope()
@@ -504,7 +856,7 @@ func TestCloudRunSandboxCleanupDryRunNeedsNoTransportCredentials(t *testing.T) {
 func TestCloudRunSandboxCreatePersistsTTL(t *testing.T) {
 	isolateLeaseHome(t)
 	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Hour,
 		TTL:             10 * time.Minute,
 	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
@@ -533,7 +885,7 @@ func TestRunMissingCommandHasNoSideEffects(t *testing.T) {
 	}
 	t.Cleanup(func() { newTransport = previousTransport })
 	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	_, err := b.Run(context.Background(), RunRequest{Repo: Repo{Root: t.TempDir()}})
 	if err == nil || !strings.Contains(err.Error(), "missing command") {
@@ -549,7 +901,7 @@ func TestCloudRunSandboxCleanupSkipsClaimReclaimedAfterSnapshot(t *testing.T) {
 	const sandboxID = "crabbox-reclaimed-123456"
 	leaseID := leasePrefix + sandboxID
 	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Minute,
 	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	scope, err := b.claimScope()
@@ -594,7 +946,7 @@ func TestCloudRunSandboxCleanupDestroyFailureRetainsClaim(t *testing.T) {
 	const sandboxID = "crabbox-destroy-failure-123456"
 	leaseID := leasePrefix + sandboxID
 	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Minute,
 	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	scope, err := b.claimScope()
@@ -640,7 +992,7 @@ func TestCloudRunSandboxCleanupContinuesAfterDestroyFailure(t *testing.T) {
 	newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
 	t.Cleanup(func() { newTransport = previousTransport })
 	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Second,
 	}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: cloudRunSandboxFixedClock{now: now}}).(*backend)
 	scope, err := b.claimScope()
@@ -679,7 +1031,7 @@ func TestCloudRunSandboxRunPropagatesAutomaticTeardownFailure(t *testing.T) {
 	t.Cleanup(func() { newTransport = previousTransport })
 	var stderr bytes.Buffer
 	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Minute,
 	}, Runtime{Stdout: io.Discard, Stderr: &stderr}).(*backend)
 	result, err := b.Run(context.Background(), RunRequest{
@@ -721,7 +1073,7 @@ func TestCloudRunSandboxRunEmitsTimingJSONOnWorkspaceSetupFailure(t *testing.T) 
 	t.Cleanup(func() { newTransport = previousTransport })
 	var stderr bytes.Buffer
 	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Minute,
 	}, Runtime{Stdout: io.Discard, Stderr: &stderr}).(*backend)
 	_, err := b.Run(context.Background(), RunRequest{
@@ -747,7 +1099,7 @@ func TestCloudRunSandboxStatusReportsExpiredClaim(t *testing.T) {
 	isolateLeaseHome(t)
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 	}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: cloudRunSandboxFixedClock{now: now}}).(*backend)
 	scope, err := b.claimScope()
 	if err != nil {
@@ -780,7 +1132,7 @@ func TestCloudRunSandboxClearActivityTouchesLastUsed(t *testing.T) {
 	isolateLeaseHome(t)
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Minute,
 	}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: cloudRunSandboxFixedClock{now: now}}).(*backend)
 	scope, err := b.claimScope()
@@ -827,7 +1179,7 @@ func TestCloudRunSandboxReclaimCannotRepublishAfterCleanupWins(t *testing.T) {
 	t.Cleanup(func() { newTransport = previousTransport })
 
 	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 		IdleTimeout:     time.Second,
 	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	scope, err := b.claimScope()
@@ -937,8 +1289,8 @@ func TestRunWithFakeTransport(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	b := NewBackend(Provider{}.Spec(), Config{
 		CloudRunSandbox: CloudRunSandboxConfig{
-			CLIPath: defaultCLIPath,
-			Workdir: defaultWorkdir,
+			CLIPath: "/usr/local/gcp/bin/sandbox",
+			Workdir: "/tmp/crabbox",
 			Write:   true,
 		},
 		IdleTimeout: 30 * time.Minute,
@@ -972,7 +1324,7 @@ func TestRunWithFakeTransport(t *testing.T) {
 
 func TestValidateConfig(t *testing.T) {
 	t.Parallel()
-	cfg := Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir}}
+	cfg := Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"}}
 	if err := validateConfig(cfg); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
@@ -980,7 +1332,7 @@ func TestValidateConfig(t *testing.T) {
 	if err := validateConfig(cfg); err == nil {
 		t.Fatal("expected relative workdir rejection")
 	}
-	cfg.CloudRunSandbox.Workdir = defaultWorkdir
+	cfg.CloudRunSandbox.Workdir = "/tmp/crabbox"
 	cfg.CloudRunSandbox.CLIPath = ""
 	if err := validateConfig(cfg); err == nil {
 		t.Fatal("expected empty cliPath rejection")

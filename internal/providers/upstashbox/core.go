@@ -1,7 +1,6 @@
 package upstashbox
 
 import (
-	"flag"
 	"io"
 	"time"
 
@@ -26,7 +25,6 @@ type StopRequest = core.StopRequest
 type Server = core.Server
 type Repo = core.Repo
 type ExitError = core.ExitError
-type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 
 const (
@@ -38,10 +36,6 @@ const (
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
 }
 
 func blank(value, fallback string) string {
@@ -72,10 +66,6 @@ func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
 }
 
-func writeTimingJSON(w io.Writer, report timingReport) error {
-	return core.WriteTimingJSON(w, report)
-}
-
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
 	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
 }
@@ -90,11 +80,4 @@ func upstashBoxCleanupCommand(leaseID string) string {
 
 func inventoryDoctorResult(provider string, leases int) DoctorResult {
 	return core.InventoryDoctorResult(provider, leases)
-}
-
-func now(rt Runtime) time.Time {
-	if rt.Clock != nil {
-		return rt.Clock.Now()
-	}
-	return time.Now()
 }

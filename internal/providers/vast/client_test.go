@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/openclaw/crabbox/internal/testutil"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -345,5 +346,47 @@ func writeJSON(t *testing.T, w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(value); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCompactJSONRequestEnvelope(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "ctx")
+	const base = "https://api.example.test/base"
+	var ptr *string
+	var slice []string
+	for _, tc := range []struct {
+		name     string
+		body     any
+		want     string
+		absolute bool
+	}{
+		{name: "nil"}, {name: "typed nil pointer", body: ptr, want: "null"}, {name: "typed nil slice", body: slice, want: "null"}, {name: "compact escaped JSON", body: map[string]string{"message": "<&>"}, want: "{\"message\":\"\\u003c\\u0026\\u003e\"}"}, {name: "absolute URL", absolute: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			path := "/records"
+			endpoint := base + path
+			if tc.absolute {
+				path = "https://api.example.test/absolute?limit=2"
+				endpoint = path
+			}
+			headers := http.Header{}
+			headers.Set("Authorization", "Bearer synthetic-token")
+			headers.Set("Accept", "application/json")
+			if tc.body != nil {
+				headers.Set("Content-Type", "application/json")
+			}
+			httpClient := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, endpoint, tc.want, headers)
+				return nil, errors.New("synthetic-transport-stop")
+			})}
+			c := &vastClient{apiURL: base, apiKey: "synthetic-token", httpClient: httpClient}
+			err := c.do(ctx, http.MethodPost, path, tc.body, nil)
+			if err == nil || !strings.Contains(err.Error(), "synthetic-transport-stop") || calls != 1 {
+				t.Fatalf("error=%v calls=%d", err, calls)
+			}
+		})
 	}
 }

@@ -74,6 +74,7 @@ func applyNetworkModeFlagOverride(cfg *Config, fs *flag.FlagSet, values networkM
 			return err
 		}
 		cfg.Network = mode
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 	}
 	if _, err := parseNetworkMode(string(cfg.Network)); err != nil {
 		return err
@@ -100,25 +101,32 @@ func applyNetworkFlagOverrides(cfg *Config, fs *flag.FlagSet, values networkFlag
 			return err
 		}
 		cfg.Network = mode
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 	}
 	if flagWasSet(fs, "tailscale") {
 		cfg.Tailscale.Enabled = *values.Tailscale
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 	}
 	if flagWasSet(fs, "tailscale-tags") {
 		cfg.Tailscale.Tags = normalizeTailscaleTags(splitCommaList(*values.TailscaleTags))
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 	}
 	if flagWasSet(fs, "tailscale-hostname-template") {
 		cfg.Tailscale.HostnameTemplate = strings.TrimSpace(*values.TailscaleHost)
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 	}
 	if flagWasSet(fs, "tailscale-auth-key-env") {
 		cfg.Tailscale.AuthKeyEnv = strings.TrimSpace(*values.TailscaleKeyEnv)
-		cfg.Tailscale.AuthKey = getenv(cfg.Tailscale.AuthKeyEnv, "")
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
+		cfg.Tailscale.AuthKey = configInputEnvString(cfg, configInputGeneric, "", cfg.Tailscale.AuthKeyEnv)
 	}
 	if flagWasSet(fs, "tailscale-exit-node") {
 		cfg.Tailscale.ExitNode = strings.TrimSpace(*values.TailscaleExitNode)
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 	}
 	if flagWasSet(fs, "tailscale-exit-node-allow-lan-access") {
 		cfg.Tailscale.ExitNodeAllowLANAccess = *values.TailscaleExitNodeAllowLAN
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 	}
 	return validateNetworkConfig(*cfg)
 }

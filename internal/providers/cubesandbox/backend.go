@@ -42,40 +42,45 @@ func RegisterCubeSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyCubeSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == providerName {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=cubesandbox")
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=cubesandbox")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(cubesandboxFlagValues)
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "cubesandbox-api-url") {
+	if core.FlagWasSet(fs, "cubesandbox-api-url") {
 		cfg.CubeSandbox.APIURL = *v.APIURL
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
-	if flagWasSet(fs, "cubesandbox-domain") {
+	if core.FlagWasSet(fs, "cubesandbox-domain") {
 		cfg.CubeSandbox.Domain = *v.Domain
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
-	if flagWasSet(fs, "cubesandbox-template") {
+	if core.FlagWasSet(fs, "cubesandbox-template") {
 		cfg.CubeSandbox.Template = *v.Template
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
-	if flagWasSet(fs, "cubesandbox-workdir") {
+	if core.FlagWasSet(fs, "cubesandbox-workdir") {
 		cfg.CubeSandbox.Workdir = *v.Workdir
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
-	if flagWasSet(fs, "cubesandbox-user") {
+	if core.FlagWasSet(fs, "cubesandbox-user") {
 		cfg.CubeSandbox.User = *v.User
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
-	if flagWasSet(fs, "cubesandbox-proxy-node-ip") {
+	if core.FlagWasSet(fs, "cubesandbox-proxy-node-ip") {
 		cfg.CubeSandbox.ProxyNodeIP = *v.ProxyNodeIP
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
-	if flagWasSet(fs, "cubesandbox-proxy-port-http") {
+	if core.FlagWasSet(fs, "cubesandbox-proxy-port-http") {
 		cfg.CubeSandbox.ProxyPortHTTP = *v.ProxyPortHTTP
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
-	if flagWasSet(fs, "cubesandbox-proxy-scheme") {
+	if core.FlagWasSet(fs, "cubesandbox-proxy-scheme") {
 		cfg.CubeSandbox.ProxyScheme = *v.ProxyScheme
+		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
 	}
 	return nil
 }
@@ -97,7 +102,7 @@ func (b *cubesandboxBackend) Warmup(ctx context.Context, req WarmupRequest) erro
 	if err := validateCubeSandboxUser(b.cfg.CubeSandbox.User); err != nil {
 		return err
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	client, err := newCubeSandboxClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -110,18 +115,13 @@ func (b *cubesandboxBackend) Warmup(ctx context.Context, req WarmupRequest) erro
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: cubesandbox warmup keeps the sandbox until explicit stop\n")
 	}
-	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  leaseID,
-			Slug:     slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	total := core.ClockNow(b.rt.Clock).Sub(started)
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
 
 func (b *cubesandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
@@ -150,7 +150,7 @@ func (b *cubesandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
 			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-cubesandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+				TempPattern: "crabbox-cubesandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 			})
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
@@ -265,9 +265,9 @@ func (b *cubesandboxBackend) Status(ctx context.Context, req StatusRequest) (sta
 	if err != nil {
 		return statusView{}, err
 	}
-	deadline := b.now().Add(req.WaitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
 	if req.WaitTimeout <= 0 {
-		deadline = b.now().Add(5 * time.Minute)
+		deadline = core.ClockNow(b.rt.Clock).Add(5 * time.Minute)
 	}
 	for {
 		sandbox, err := client.GetSandbox(ctx, sandboxID)
@@ -278,7 +278,7 @@ func (b *cubesandboxBackend) Status(ctx context.Context, req StatusRequest) (sta
 		if !req.Wait || view.Ready {
 			return view, nil
 		}
-		if b.now().After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return statusView{}, exit(5, "timed out waiting for sandbox %s to become ready", sandboxID)
 		}
 		select {
@@ -407,7 +407,7 @@ func (b *cubesandboxBackend) createSandbox(ctx context.Context, client cubesandb
 	}
 	cfg.TTL = cubesandboxTimeoutDuration(cfg.TTL)
 	cfg.ServerType = template
-	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", keep, b.now().UTC())
+	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", keep, core.ClockNow(b.rt.Clock).UTC())
 	labels["state"] = "ready"
 	labels["workdir"] = workspace
 	labels["template"] = template
@@ -801,11 +801,4 @@ func cubesandboxError(action string, err error) error {
 		return nil
 	}
 	return fmt.Errorf("cubesandbox %s: %w", action, err)
-}
-
-func (b *cubesandboxBackend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }

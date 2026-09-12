@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -72,6 +73,39 @@ func envContains(env []string, entry string) bool {
 		}
 	}
 	return false
+}
+
+func TestManualConfigInputFlags(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "fixture-other"
+	cfg.External.Command = "fixture-tool"
+	fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	before := cfg
+	if err := applyFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+		t.Fatalf("foreign values changed configuration: %v", err)
+	}
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	want := cfg
+	core.RecordProviderFlagInputs(&want, true, "external")
+	if reflect.DeepEqual(cfg, want) {
+		t.Fatal("unvisited flags recorded input")
+	}
+	for repeat := 0; repeat < 2; repeat++ {
+		if err := fs.Set("external-work-root", "/work/fixture"); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want = cfg
+		core.RecordProviderFlagInputs(&want, true, "external")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatal("accepted/equal flag value was not recorded")
+		}
+	}
 }
 
 func TestProviderSpec(t *testing.T) {

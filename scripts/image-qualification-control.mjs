@@ -533,22 +533,84 @@ export function verifyPublisherContract(source) {
   if (requiredPatterns.some((pattern) => !pattern.test(source))) {
     throw new Error("candidate publisher lacks the transactional rollback contract");
   }
-  const ordered = [
+  // Admission checks the audited publisher layout, not arbitrary shell semantics.
+  // Keep failure handling inside cleanup: promotion stays armed through teardown.
+  const cleanup = source.match(/^cleanup\(\) \{\n([\s\S]*?)^\}\ntrap cleanup EXIT$/m);
+  if (!cleanup) {
+    throw new Error("candidate publisher cleanup contract is missing");
+  }
+  const main = source.slice(cleanup.index + cleanup[0].length);
+  const rollback = `  if [[ "$rollback_pending" == "1" && "$exit_status" != "0" ]]; then
+    rollback_pending=0
+    if rollback_promoted_image "$promotion_log"; then
+      rollback_status="succeeded"
+    else
+      rollback_status="failed"
+      finalizer_status=1
+    fi
+  fi`;
+  const cleanupOrdered = [
+    "  local exit_status=$?\n  trap - EXIT",
+    rollback,
+    '  if [[ "$keep_lease" != "1" ]]; then',
+    '    cleanup_leases=("$measurement_lease" "$promoted_lease" "$candidate_lease" "$source_lease")',
+    `      if ! "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease"; then
+        cleanup_status="failed"
+        finalizer_status=1
+      fi`,
+    `  if [[ "$exit_status" == "0" && "$finalizer_status" != "0" ]]; then
+    exit_status="$finalizer_status"
+  fi`,
+    rollback,
+    '  if [[ "$measured" == "1" && -n "$measurement_dir" && -n "$public_outcome" ]]; then',
+    '    outcome_candidate="$(mktemp "${public_outcome}.candidate.XXXXXX")" || proof_status=$?',
+    `    node "$ROOT/scripts/devtools-image-proof.mjs" finalize \\
+      "$outcome_candidate" "$measurement_dir/policy.json" "$measurement_dir" \\
+      "$outcome_stage" "$exit_status" "$rollback_status" "$cleanup_status" "$receipt_path" ||
+      proof_status=$?`,
+    '      mv -f "$outcome_candidate" "$public_outcome" || proof_status=$?',
+    '    if [[ "$proof_status" != "0" ]]; then',
+    `      if [[ "$exit_status" == "0" ]]; then
+        exit_status="$proof_status"
+      fi`,
+    `      if [[ "$rollback_pending" == "1" ]]; then
+        rollback_pending=0
+        if rollback_promoted_image "$promotion_log"; then
+          rollback_status="succeeded"
+        else
+          rollback_status="failed"
+          finalizer_status=1
+        fi
+      fi`,
+    '    elif [[ "$exit_status" == "0" ]]; then\n      rollback_pending=0',
+    '  exit "$exit_status"\n',
+  ];
+  const mainOrdered = [
     'run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$candidate_lease"',
     'candidate_lease=""',
     "rollback_pending=1",
     'run_json_tee "$promotion_log" "$CRABBOX_BIN" "${promote_args[@]}"',
     'promoted_lease="$(warmup promoted)"',
     'smoke "$promoted_lease"',
-    "rollback_pending=0",
   ];
-  let cursor = 0;
-  for (const marker of ordered) {
-    const next = source.indexOf(marker, cursor);
-    if (next === -1) {
-      throw new Error("candidate publisher rollback ordering is not admissible");
+  for (const [text, ordered] of [
+    [cleanup[1], cleanupOrdered],
+    [main, mainOrdered],
+  ]) {
+    let cursor = 0;
+    for (const marker of ordered) {
+      const next = text.indexOf(marker, cursor);
+      if (next === -1) {
+        throw new Error("candidate publisher rollback ordering is not admissible");
+      }
+      cursor = next + marker.length;
     }
-    cursor = next + marker.length;
+  }
+  if (
+    (cleanup[1].match(/^\s*rollback_pending=0$/gm) ?? []).length !== 4 ||
+    /^\s*rollback_pending=0$/m.test(main.slice(main.indexOf("rollback_pending=1")))
+  ) {
+    throw new Error("candidate publisher disarms rollback outside cleanup outcomes");
   }
 }
 
@@ -574,6 +636,9 @@ class Cloudflare {
     }
     if (!response.ok || parsed.success === false) {
       throw new Error(`Cloudflare API ${pathname} returned ${response.status}`);
+    }
+    if (allow404 && (init.method ?? "GET") === "GET" && parsed.result === undefined) {
+      throw new Error(`Cloudflare API ${pathname} did not confirm existence or absence`);
     }
     return parsed.result;
   }
@@ -1387,6 +1452,96 @@ async function qualificationRelays(cf) {
   return relays;
 }
 
+function discoveredRun(value) {
+  const response = objectAt(value, "authority registry discovery");
+  if (Object.keys(response).length !== 1 || !Object.hasOwn(response, "run")) {
+    throw new Error("authority registry discovery is invalid");
+  }
+  if (response.run === null) return null;
+  const run = objectAt(response.run, "authority registry run");
+  if (
+    !runIdPattern.test(run.runId ?? "") ||
+    !workerNamePattern.test(run.candidateWorker ?? "") ||
+    !sha64.test(run.deploymentHash ?? "")
+  ) {
+    throw new Error("authority registry run identity is invalid");
+  }
+  return run;
+}
+
+async function requireControllerAbsent(cf) {
+  const settings = await cf.request(
+    `/workers/scripts/${controllerName}/settings`,
+    {},
+    { allow404: true },
+  );
+  if (settings !== undefined) {
+    throw new Error("qualification controller exists; refusing to replace it");
+  }
+}
+
+async function discoveryControllerVersion(cf, metadata, expectedVersion) {
+  const version = await cf.latestVersion(controllerName);
+  const settings = await cf.settings(controllerName);
+  if (
+    (expectedVersion !== undefined && version !== expectedVersion) ||
+    canonical(settings.tags) !== canonical(metadata.tags) ||
+    canonical(publicBindingShape(settings.bindings ?? [])) !==
+      canonical(publicBindingShape(metadata.bindings)) ||
+    (await cf.latestVersion(controllerName)) !== version
+  ) {
+    throw new Error("discovery controller ownership changed or is unverified");
+  }
+  return version;
+}
+
+async function discoverWithOwnedController(cf, deploymentHash, token, { idleOnly = false } = {}) {
+  const metadata = {
+    ...controllerMetadata(deploymentHash, token),
+    tags: [`qualification-discovery-${crypto.randomUUID()}`],
+  };
+  await requireControllerAbsent(cf);
+  let version;
+  let failure;
+  let controllerURL;
+  let discovered;
+  let retainForFinalization = false;
+  // Arm cleanup before upload: an API response can be lost after deployment.
+  try {
+    await cf.upload(controllerName, controllerSource, metadata);
+    version = await discoveryControllerVersion(cf, metadata);
+    controllerURL = await cf.enableSubdomain(controllerName);
+    await discoveryControllerVersion(cf, metadata, version);
+    discovered = await controllerCall(controllerURL, token, "discover");
+    const run = discoveredRun(discovered);
+    if (idleOnly && run !== null) {
+      throw new Error("idle discovery found an active authority registry run");
+    }
+    retainForFinalization = !idleOnly;
+  } catch (error) {
+    failure = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (!retainForFinalization) {
+      try {
+        const settings = await cf.request(
+          `/workers/scripts/${controllerName}/settings`,
+          {},
+          { allow404: true },
+        );
+        if (settings !== undefined) {
+          await discoveryControllerVersion(cf, metadata, version);
+          await cf.deleteScript(controllerName);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        failure = failure ? `${failure}; probe cleanup: ${message}` : `probe cleanup: ${message}`;
+      }
+    }
+  }
+  if (failure) throw new Error(failure);
+  return { controllerURL, discovered };
+}
+
 async function cleanupRun({
   reaper = false,
   requireProof = false,
@@ -1397,42 +1552,76 @@ async function cleanupRun({
   const token = required("QUALIFICATION_CONTROLLER_TOKEN");
   let controllerURL;
   let discovered;
+  let idleProbe = false;
   try {
-    controllerURL = await cf.enableSubdomain(controllerName);
-    discovered = await controllerCall(controllerURL, token, "discover");
-  } catch {
-    controllerURL = undefined;
-  }
-  if (!controllerURL || !discovered) {
-    if (!reaper) throw new Error("qualification controller is unavailable");
-    const candidates = await qualificationCandidates(cf);
-    for (const candidate of candidates) {
-      if (sha64.test(candidate.deploymentHash)) {
-        const candidateControllerURL = await deployController(cf, candidate.deploymentHash, token);
+    const settings = await cf.request(
+      `/workers/scripts/${controllerName}/settings`,
+      {},
+      { allow404: true },
+    );
+    if (settings !== undefined) {
+      controllerURL = await cf.enableSubdomain(controllerName);
+      discovered = await controllerCall(controllerURL, token, "discover");
+    } else {
+      if (!reaper) throw new Error("qualification controller is unavailable");
+      const candidates = await qualificationCandidates(cf);
+      for (const candidate of candidates) {
         try {
-          discovered = await controllerCall(candidateControllerURL, token, "discover");
-          controllerURL = candidateControllerURL;
+          ({ controllerURL, discovered } = await discoverWithOwnedController(
+            cf,
+            candidate.deploymentHash,
+            token,
+          ));
           break;
-        } catch {
-          // Try the next isolated candidate. Registry validation rejects the wrong hash.
+        } catch (error) {
+          // A failed recovery may have left a controller. Do not overwrite it
+          // with another candidate or an idle probe without confirmed absence.
+          try {
+            await requireControllerAbsent(cf);
+          } catch (ownershipError) {
+            throw new Error(`${error.message}; recovery: ${ownershipError.message}`);
+          }
+          if (candidate === candidates.at(-1)) throw error;
         }
       }
+      if (candidates.length === 0) {
+        // A shape-valid controller can discover only an empty registry. Never
+        // use this domain-separated hash to finalize an active run.
+        ({ discovered } = await discoverWithOwnedController(
+          cf,
+          digest("crabbox/image-qualification/idle-discovery/v1"),
+          token,
+          { idleOnly: true },
+        ));
+        idleProbe = true;
+      }
     }
-    if (!discovered) {
+    discoveredRun(discovered);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      result: "failed",
+      failure: initialQualificationFailure
+        ? `${initialQualificationFailure}; discovery: ${message}`
+        : message,
+    };
+  }
+  if (discovered.run === null) {
+    try {
+      for (const relay of await qualificationRelays(cf)) {
+        await deleteRelay(cf, relay.worker);
+      }
+      for (const candidate of await qualificationCandidates(cf)) {
+        await deleteCandidate(cf, candidate.worker);
+      }
+      if (!idleProbe) await cf.deleteScript(controllerName);
+    } catch (error) {
+      const message = `idle cleanup: ${error instanceof Error ? error.message : String(error)}`;
       return {
         result: "failed",
-        failure: "authority registry could not be queried with any verified candidate binding",
+        failure: initialQualificationFailure ? `${initialQualificationFailure}; ${message}` : message,
       };
     }
-  }
-  if (!discovered.run) {
-    for (const relay of await qualificationRelays(cf)) {
-      await deleteRelay(cf, relay.worker);
-    }
-    for (const candidate of await qualificationCandidates(cf)) {
-      await deleteCandidate(cf, candidate.worker);
-    }
-    await cf.deleteScript(controllerName);
     if (initialQualificationFailure || requireProof) {
       return {
         result: "failed",

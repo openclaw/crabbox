@@ -112,7 +112,11 @@ Config keys under `tencentcloud:`:
 | `internetChargeType` | `cfg.TencentCloud.InternetChargeType` | `TRAFFIC_POSTPAID_BY_HOUR` | Public bandwidth charge type passed to CVM. |
 | `internetMaxBandwidthOut` | `cfg.TencentCloud.InternetMaxBandwidthOut` | `5` | Public outbound bandwidth in Mbps. |
 | `sshCIDRs` | `cfg.TencentCloud.SSHCIDRs` | empty | Reserved for future security-group mutation. Non-empty values fail fast. |
-| `apiEndpoint` | `cfg.TencentCloud.APIEndpoint` | `https://cvm.tencentcloudapi.com` | Optional CVM API endpoint override. Use `*.intl.tencentcloudapi.com` for international endpoint families when needed. |
+| `apiEndpoint` | `cfg.TencentCloud.APIEndpoint` | `https://cvm.tencentcloudapi.com` | Optional CVM API endpoint override from trusted user config, environment, or a flag; repository files cannot set it. Use `*.intl.tencentcloudapi.com` for international endpoint families when needed. |
+
+These are effective runtime defaults. The raw base configuration is empty/zero/nil;
+flag registration uses configured values without inserting runtime defaults.
+Defaulting remains in the existing later phases, and no image ID is invented.
 
 Provider-specific flags:
 
@@ -124,6 +128,7 @@ Provider-specific flags:
 --tencentcloud-vpc-id <vpc-id>
 --tencentcloud-subnet-id <subnet-id>
 --tencentcloud-security-group-id <security-group-id>
+--tencentcloud-ssh-cidrs <cidr[,cidr...]>
 --tencentcloud-root-gb <gib>
 --tencentcloud-internet-charge-type <charge-type>
 --tencentcloud-internet-max-bandwidth-out <mbps>
@@ -149,6 +154,7 @@ CRABBOX_TENCENTCLOUD_TYPE                   Override the CVM instance type
 CRABBOX_TENCENTCLOUD_VPC_ID                 Override the VPC ID
 CRABBOX_TENCENTCLOUD_SUBNET_ID              Override the subnet ID
 CRABBOX_TENCENTCLOUD_SECURITY_GROUP_ID      Override the security group ID
+CRABBOX_TENCENTCLOUD_SSH_CIDRS              Comma-separated SSH CIDRs; non-empty lists remain unsupported
 CRABBOX_TENCENTCLOUD_ROOT_GB                Override the system disk size
 CRABBOX_TENCENTCLOUD_INTERNET_CHARGE_TYPE   Override the public bandwidth charge type
 CRABBOX_TENCENTCLOUD_INTERNET_MAX_BANDWIDTH_OUT
@@ -157,6 +163,26 @@ CRABBOX_TENCENTCLOUD_API_ENDPOINT           Override the CVM API endpoint
 
 Do not pass Tencent Cloud secrets as command-line arguments. Keep them in the
 environment, a local shell profile, or a secret manager.
+
+### Input semantics
+
+The twelve settings use shared typed bindings. Accepted region, zone, image, and
+type inputs retain explicit-source markers even when equal to defaults or supplied
+as empty flags; class and generic type precedence remain provider policy.
+
+`rootGB` and `internetMaxBandwidthOut` remain signed 64-bit integers throughout
+file, environment, and flag handling. File values assign only when positive.
+Environment parsing preserves the prior value on empty, malformed, padded, or
+out-of-range input, while parsed zero or negative values assign. Flags retain
+their signed 64-bit range. Runtime defaulting fills zero with 50 GiB or 5 Mbps;
+negative values remain for the existing later validation rather than being repaired.
+
+A nonempty file CIDR list assigns raw; an omitted, null, or empty list leaves prior
+values intact. Environment comma parsing trims items and drops blanks, producing a
+nonnil empty list when nonempty delimiter-only text is applied. Flags register an
+independent empty scalar, use the last occurrence, and produce nil for an empty
+result. Order and duplicates remain; `none` is an ordinary item. This preserves
+configuration behavior and does not enable ingress-rule management.
 
 ## Required Tencent Cloud Permissions
 

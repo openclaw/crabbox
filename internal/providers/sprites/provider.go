@@ -26,6 +26,7 @@ func (Provider) ClaimScope(cfg core.Config) string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPIToken),
 		Name:             spritesProvider,
 		Family:           "sprites",
 		Kind:             core.ProviderKindSSHLease,

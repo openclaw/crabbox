@@ -1,5 +1,5 @@
 name: Publish Developer Image
-run-name: Publish ${{ inputs.target }} developer image in ${{ inputs.region }}
+run-name: Publish developer image
 
 on:
   workflow_dispatch:
@@ -21,6 +21,23 @@ on:
         description: Linux source instance type
         required: true
         default: m7i.large
+        type: string
+      linux_os:
+        description: Linux image OS selector
+        required: true
+        default: ubuntu:26.04
+        type: choice
+        options:
+          - ubuntu:26.04
+          - ubuntu:24.04
+      measured:
+        description: Linux only - 12 planned leases instead of 3; provider retries can add attempts
+        required: false
+        type: boolean
+        default: false
+      max_p95_runner_total_ms:
+        description: Required positive millisecond cap for every measured cohort
+        required: false
         type: string
       windows_type:
         description: Windows source instance type
@@ -77,17 +94,31 @@ jobs:
           TARGET: ${{ inputs.target }}
           REGION: ${{ inputs.region }}
           LINUX_TYPE: ${{ inputs.linux_type }}
+          LINUX_OS: ${{ inputs.linux_os }}
           WINDOWS_TYPE: ${{ inputs.windows_type }}
           MACOS_TYPE: ${{ inputs.macos_type }}
           MACOS_HOST: ${{ inputs.macos_host }}
+          MEASURED: ${{ inputs.measured }}
+          MAX_P95_RUNNER_TOTAL_MS: ${{ inputs.max_p95_runner_total_ms }}
         run: |
           set -euo pipefail
           [[ "$TARGET" =~ ^(linux|windows|macos)$ ]]
           [[ "$REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]]
           [[ "$LINUX_TYPE" =~ ^[A-Za-z0-9.-]+$ ]]
+          [[ "$LINUX_OS" == ubuntu:26.04 || "$LINUX_OS" == ubuntu:24.04 ]] || {
+            printf '%s\n' 'linux_os must be ubuntu:26.04 or ubuntu:24.04' >&2
+            exit 2
+          }
           [[ "$WINDOWS_TYPE" =~ ^[A-Za-z0-9.-]+$ ]]
           [[ "$MACOS_TYPE" =~ ^[A-Za-z0-9.-]+$ ]]
           [[ "$MACOS_HOST" =~ ^(use-existing|allocate)$ ]]
+          if [[ "$MEASURED" == true ]]; then
+            [[ "$TARGET" == linux ]]
+            [[ "$MAX_P95_RUNNER_TOTAL_MS" =~ ^[1-9][0-9]*$ ]]
+            echo "Measured campaign: 12 planned leases; no hard launch-attempt or dollar cap."
+          else
+            [[ -z "$MAX_P95_RUNNER_TOTAL_MS" ]]
+          fi
 
   publish:
     name: Build, smoke, and promote
@@ -106,10 +137,32 @@ jobs:
       TARGET: ${{ inputs.target }}
       REGION: ${{ inputs.region }}
       LINUX_TYPE: ${{ inputs.linux_type }}
+      LINUX_OS: ${{ inputs.linux_os }}
       WINDOWS_TYPE: ${{ inputs.windows_type }}
       MACOS_TYPE: ${{ inputs.macos_type }}
       MACOS_HOST: ${{ inputs.macos_host }}
+      MEASURED: ${{ inputs.measured }}
+      MAX_P95_RUNNER_TOTAL_MS: ${{ inputs.max_p95_runner_total_ms }}
     steps:
+      - name: Check out protected source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Initialize measured publication outcome
+        if: inputs.measured
+        shell: bash
+        run: |
+          set -euo pipefail
+          public_outcome="$RUNNER_TEMP/devtools-image-proof/manifest.json"
+          mkdir -p "$(dirname "$public_outcome")"
+          node scripts/devtools-image-proof.mjs initialize \
+            "$public_outcome" \
+            scripts/install-linux-developer-tools.sh \
+            "$REGION" "$LINUX_TYPE" standard "$MAX_P95_RUNNER_TOTAL_MS" \
+            1 1 1 0 0 2h 30m
+
       - name: Verify publisher configuration
         shell: bash
         run: |
@@ -122,12 +175,6 @@ jobs:
             echo "::error::Set the CRABBOX_COORDINATOR_ADMIN_TOKEN secret on the image-publisher environment."
             exit 1
           fi
-
-      - name: Check out protected source
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          ref: ${{ github.workflow_sha }}
-          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
@@ -150,6 +197,7 @@ jobs:
           case "$TARGET" in
             linux)
               command=(
+                env CRABBOX_OS="$LINUX_OS"
                 scripts/mint-aws-devtools-image.sh
                 --target linux
                 --region "$REGION"
@@ -157,6 +205,9 @@ jobs:
                 --type "$LINUX_TYPE"
                 --run
               )
+              if [[ "$MEASURED" == true ]]; then
+                command+=(--measured --max-p95-runner-total-ms "$MAX_P95_RUNNER_TOTAL_MS")
+              fi
               ;;
             windows)
               command=(
@@ -178,16 +229,60 @@ jobs:
               )
               ;;
           esac
-          printf 'Publishing from protected commit %s\n' "$GITHUB_SHA"
-          printf 'Command:'
-          printf ' %q' "${command[@]}"
-          printf '\n'
-          "${command[@]}" 2>&1 | tee "$proof_dir/publish.log"
+          if [[ "$MEASURED" == true ]]; then
+            umask 077
+            private_dir="$(mktemp -d "$RUNNER_TEMP/devtools-image-private.XXXXXX")"
+            export CRABBOX_IMAGE_LOG_DIR="$private_dir"
+            export CRABBOX_IMAGE_PUBLIC_OUTCOME="$proof_dir/manifest.json"
+            status=0
+            "${command[@]}" >"$private_dir/publish.log" 2>&1 || status=$?
+            proof_status=0
+            node scripts/devtools-image-proof.mjs validate \
+              "$CRABBOX_IMAGE_PUBLIC_OUTCOME" >/dev/null || proof_status=$?
+            if [[ "$status" != 0 ]]; then
+              echo "::error::Measured publication failed (exit $status)."
+              exit "$status"
+            fi
+            if [[ "$proof_status" != 0 ]]; then
+              echo "::error::Measured publication outcome validation failed (exit $proof_status)."
+              exit "$proof_status"
+            fi
+          else
+            printf 'Publishing from protected commit %s\n' "$GITHUB_SHA"
+            printf 'Command:'
+            printf ' %q' "${command[@]}"
+            printf '\n'
+            "${command[@]}" 2>&1 | tee "$proof_dir/publish.log"
+          fi
 
       - name: Summarize publication
         if: always()
         shell: bash
         run: |
+          if [[ "$MEASURED" == true ]]; then
+            public_outcome="$RUNNER_TEMP/devtools-image-proof/manifest.json"
+            {
+              echo "## Measured developer image publication"
+              echo
+              if node scripts/devtools-image-proof.mjs validate \
+                "$public_outcome" >/dev/null 2>&1; then
+                jq -r '
+                  "- Status: `\(.status)`",
+                  "- Stage: `\(.stage)`",
+                  "- Source revision: `\(.sourceRevision)`",
+                  "- Baseline p95 runner total: `\(.comparison.baselineP95RunnerTotalMs // "unavailable")`",
+                  "- Candidate p95 runner total: `\(.comparison.candidateP95RunnerTotalMs // "unavailable")`",
+                  "- Promoted p95 runner total: `\(.comparison.promotedP95RunnerTotalMs // "unavailable")`",
+                  "- Rollback: `\(.rollbackStatus)`",
+                  "- Cleanup: `\(.cleanupStatus)`",
+                  "- Exit code: `\(.exitCode // "unavailable")`"
+                ' "$public_outcome"
+              else
+                echo '- Status: `outcome_unavailable`'
+              fi
+            } >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           {
             echo "## Developer image publication"
             echo
@@ -202,11 +297,20 @@ jobs:
             fi
           } >>"$GITHUB_STEP_SUMMARY"
 
-      - name: Upload publication proof
-        if: always()
+      - name: Upload publication diagnostics
+        if: always() && !inputs.measured
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: devtools-image-${{ inputs.target }}-${{ github.run_id }}
           path: ${{ runner.temp }}/devtools-image-proof
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload allowlisted measurement manifest
+        if: always() && inputs.measured
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: devtools-image-measurement-${{ github.run_id }}
+          path: ${{ runner.temp }}/devtools-image-proof/manifest.json
           if-no-files-found: error
           retention-days: 30

@@ -3,6 +3,7 @@ import {
   defaultTailscaleAMD64SHA256,
   defaultTailscaleARM64SHA256,
 } from "./bootstrap.generated";
+import { errorMessage } from "./http";
 import type { Env } from "./types";
 
 export interface TailscaleKeyRequest {
@@ -49,13 +50,31 @@ export interface TailscalePreflightResult {
 type TailscaleAPIOperation = "oauth token" | "create auth key";
 
 class TailscaleAPIError extends Error {
+  // Provider diagnostics are classification-only, never public error fields.
+  readonly #responseBody: string;
+
   constructor(
     readonly operation: TailscaleAPIOperation,
     readonly status: number,
-    readonly responseBody: string,
+    responseBody: string,
   ) {
-    super(`tailscale ${operation}: http ${status}: ${responseBody}`);
+    super(`tailscale ${operation} failed: http ${status}`);
     this.name = "TailscaleAPIError";
+    this.#responseBody = trimBody(responseBody);
+  }
+
+  isTagOwnershipError(): boolean {
+    if (this.status !== 400 && this.status !== 403) {
+      return false;
+    }
+    const body = this.#responseBody.toLowerCase();
+    return (
+      (body.includes("requested tags") &&
+        (body.includes("invalid or not permitted") ||
+          body.includes("invalid or not allowed") ||
+          body.includes("not owned"))) ||
+      body.includes("tailnet-owned auth key must have tags set")
+    );
   }
 }
 
@@ -131,35 +150,46 @@ export async function createTailscaleAuthKey(
     tags: request.tags,
   });
   const tailnet = env.CRABBOX_TAILSCALE_TAILNET?.trim() || "-";
-  const response = await fetch(
-    `https://api.tailscale.com/api/v2/tailnet/${encodeURIComponent(tailnet)}/keys`,
-    {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${token}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        capabilities: {
-          devices: {
-            create: {
-              reusable: false,
-              ephemeral: true,
-              preauthorized: true,
-              tags: request.tags,
+  let data: { key?: string };
+  try {
+    const response = await fetch(
+      `https://api.tailscale.com/api/v2/tailnet/${encodeURIComponent(tailnet)}/keys`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          capabilities: {
+            devices: {
+              create: {
+                reusable: false,
+                ephemeral: true,
+                preauthorized: true,
+                tags: request.tags,
+              },
             },
           },
-        },
-        expirySeconds: 600,
-        description: request.description,
-      }),
-    },
-  );
-  const text = await response.text();
-  if (!response.ok) {
-    throw tailscaleAPIError("create auth key", response.status, text);
+          expirySeconds: 600,
+          description: request.description,
+        }),
+      },
+    );
+    const text = await response.text();
+    if (!response.ok) {
+      throw new TailscaleAPIError("create auth key", response.status, text);
+    }
+    data = JSON.parse(text) as { key?: string };
+  } catch (error) {
+    if (error instanceof TailscaleAPIError) {
+      throw error;
+    }
+    // oxlint-disable-next-line eslint/preserve-caught-error -- Upstream causes can expose OAuth credentials.
+    throw new Error(
+      `tailscale create auth key failed: ${errorMessage(error, [clientSecret, token])}`,
+    );
   }
-  const data = JSON.parse(text) as { key?: string };
   if (!data.key) {
     throw new Error("tailscale create auth key returned no key");
   }
@@ -199,7 +229,7 @@ export async function tailscalePreflight(env: Env): Promise<TailscalePreflightRe
       tailnet,
       tags: [],
       install,
-      message: errorMessage(error),
+      message: errorMessage(error, [env.CRABBOX_TAILSCALE_CLIENT_SECRET]),
     };
   }
   try {
@@ -219,7 +249,7 @@ export async function tailscalePreflight(env: Env): Promise<TailscalePreflightRe
       tailnet,
       tags,
       install,
-      message: errorMessage(error),
+      message: errorMessage(error, [env.CRABBOX_TAILSCALE_CLIENT_SECRET]),
     };
   }
   return {
@@ -244,16 +274,25 @@ async function tailscaleOAuthToken(
   if (request.tags && request.tags.length > 0) {
     body.set("tags", request.tags.join(" "));
   }
-  const response = await fetch("https://api.tailscale.com/api/v2/oauth/token", {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body,
-  });
-  const text = await response.text();
-  if (!response.ok) {
-    throw tailscaleAPIError("oauth token", response.status, text);
+  let data: { access_token?: string };
+  try {
+    const response = await fetch("https://api.tailscale.com/api/v2/oauth/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body,
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      throw new TailscaleAPIError("oauth token", response.status, text);
+    }
+    data = JSON.parse(text) as { access_token?: string };
+  } catch (error) {
+    if (error instanceof TailscaleAPIError) {
+      throw error;
+    }
+    // oxlint-disable-next-line eslint/preserve-caught-error -- Upstream causes can expose OAuth credentials.
+    throw new Error(`tailscale oauth token failed: ${errorMessage(error, [clientSecret])}`);
   }
-  const data = JSON.parse(text) as { access_token?: string };
   if (!data.access_token) {
     throw new Error("tailscale oauth token returned no access token");
   }
@@ -261,37 +300,15 @@ async function tailscaleOAuthToken(
 }
 
 export function tailscaleTagOwnershipErrorMessage(error: unknown): string | undefined {
-  if (!(error instanceof TailscaleAPIError) || !isTailscaleTagOwnershipError(error)) {
+  if (!(error instanceof TailscaleAPIError) || !error.isTagOwnershipError()) {
     return undefined;
   }
   return [
     "Tailscale rejected the requested tags.",
     "The requested tag set must exactly match the OAuth client's tags, or every requested tag must be owned by one of the OAuth client tags in tagOwners.",
     "For multi-tag allowlists, configure self-ownership for subset requests or use a dedicated deployment-owner tag.",
-    `Raw Tailscale error: ${error.message}`,
+    error.message,
   ].join(" ");
-}
-
-function tailscaleAPIError(
-  operation: TailscaleAPIOperation,
-  status: number,
-  responseBody: string,
-): TailscaleAPIError {
-  return new TailscaleAPIError(operation, status, trimBody(responseBody));
-}
-
-function isTailscaleTagOwnershipError(error: TailscaleAPIError): boolean {
-  if (error.status !== 400 && error.status !== 403) {
-    return false;
-  }
-  const body = error.responseBody.toLowerCase();
-  return (
-    (body.includes("requested tags") &&
-      (body.includes("invalid or not permitted") ||
-        body.includes("invalid or not allowed") ||
-        body.includes("not owned"))) ||
-    body.includes("tailnet-owned auth key must have tags set")
-  );
 }
 
 function normalizeTags(values: string[]): string[] {
@@ -302,10 +319,6 @@ function normalizeTags(values: string[]): string[] {
 
 function trimBody(value: string): string {
   return value.replaceAll(/\s+/g, " ").trim().slice(0, 500);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function sanitizeDNSLabel(value: string): string {

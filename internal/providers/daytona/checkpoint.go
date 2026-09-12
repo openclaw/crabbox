@@ -19,11 +19,11 @@ var checkpointIDPattern = regexp.MustCompile(`^chk_[a-f0-9]{16}$`)
 var checkpointNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
 func (Provider) NativeCheckpointSourceStatusOnly(cfg Config) bool {
-	return cfg.Coordinator == "" && cfg.TargetOS == core.TargetLinux
+	return !core.ShouldUseCoordinator(cfg, (Provider{}).Spec()) && cfg.TargetOS == core.TargetLinux
 }
 
 func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (core.NativeCheckpointCapability, bool) {
-	if req.Config.Coordinator != "" || req.Config.TargetOS != core.TargetLinux || req.Server.CloudID == "" {
+	if core.ShouldUseCoordinator(req.Config, (Provider{}).Spec()) || req.Config.TargetOS != core.TargetLinux || req.Server.CloudID == "" {
 		return core.NativeCheckpointCapability{}, false
 	}
 	return core.NativeCheckpointCapability{Kind: core.CheckpointKindDaytona, Direct: true}, true
@@ -93,6 +93,11 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 		}
 		if lease, owned := daytonaSandboxOwnership(source); !owned || lease != req.LeaseID || source.GetId() != claim.CloudID {
 			return exit(4, "Daytona checkpoint source ownership mismatch")
+		}
+		if claim.FixedCreateIntent != nil {
+			if _, err := loadFixedDaytonaSandbox(waitCtx, client, claim); err != nil {
+				return err
+			}
 		}
 		org := source.GetOrganizationId()
 		if org == "" || auth.OrganizationID != "" && auth.OrganizationID != org {
@@ -343,24 +348,21 @@ func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkReq
 	if err != nil {
 		return err
 	}
-	client, err := snapshotClient(cfg, core.RuntimeForProviderOperation(nil))
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	snap, err := loadDaytonaCheckpoint(ctx, client, resource)
-	if err != nil {
-		return err
-	}
-	if snap.GetState() != api.SNAPSHOTSTATE_ACTIVE {
-		return exit(2, "Daytona snapshot %s is not active: state=%s", snap.GetName(), snap.GetState())
-	}
-	cfg.Daytona.Snapshot = snap.GetId()
+	// Acquire verifies fresh and incomplete forks. Successfully acquired children
+	// remain replayable after their source image has been retired.
+	cfg.Daytona.Snapshot = req.Record.ImageID
 	cfg.Daytona.Target = req.Record.Metadata["target"]
 	cfg.Daytona.User = req.Record.Metadata["user"]
 	cfg.Daytona.WorkRoot = req.Record.Metadata["work_root"]
 	cfg.WorkRoot = daytonaWorkRoot(cfg)
 	*req.Config = cfg
+	return nil
+}
+
+func validateDaytonaForkSnapshot(snapshot *api.SnapshotDto, source *core.NativeCheckpointForkRecord) error {
+	if snapshot == nil || snapshot.GetId() != source.ImageID || snapshot.GetName() != source.Name ||
+		snapshot.GetOrganizationId() != source.Metadata["organization"] || snapshot.GetGeneral() || snapshot.GetState() != api.SNAPSHOTSTATE_ACTIVE {
+		return exit(4, "Daytona checkpoint source does not match its exact native snapshot")
+	}
 	return nil
 }

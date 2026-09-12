@@ -59,6 +59,7 @@ export FASTAPI_CLOUD_TEAM_ID=...    # optional team for list/doctor
 `CRABBOX_FASTAPI_CLOUD_TOKEN` is also accepted and wins over
 `FASTAPI_CLOUD_TOKEN`. The token is read from the environment only; the provider
 does not register a CLI flag for it, so it is never passed on the command line.
+Neither trusted user YAML nor repository YAML can supply the token.
 
 The provider sends REST requests to `https://api.fastapicloud.com/api/v1` with
 `Authorization: Bearer <token>` and `Accept: application/json`.
@@ -92,6 +93,14 @@ CRABBOX_FASTAPI_CLOUD_API_URL  (or FASTAPI_CLOUD_API_URL)
 CRABBOX_FASTAPI_CLOUD_APP_ID   (or FASTAPI_CLOUD_APP_ID)
 CRABBOX_FASTAPI_CLOUD_TEAM_ID  (or FASTAPI_CLOUD_TEAM_ID)
 ```
+
+Omitted, null, or empty YAML values keep inherited settings. Empty environment
+values fall through to the alias or prior value; nonempty input is copied
+without trimming at load time. An ignored layer does not change the recorded
+source. Endpoint overrides remain subject to the existing credential-destination
+policy; accepting a config value does not authorize forwarding an inherited
+token to it. Client validation remains deferred, with the token requirement
+checked before the endpoint.
 
 The API URL must use `https` unless it targets localhost for tests. The loopback
 exception (`localhost`, `127.0.0.1`, `::1`) is matched on the parsed hostname, so

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -99,7 +100,7 @@ var newAzureDynamicSessionsClient = func(ctx context.Context, cfg Config, rt Run
 	httpClient, dataHTTPClient := shared.ControlAndDataHTTPClients(rt.HTTP, azureDynamicSessionsControlTimeout)
 	return &azureDynamicSessionsClient{
 		endpoint:             endpoint,
-		managementAPIVersion: blank(strings.TrimSpace(cfg.AzureDynamicSessions.APIVersion), "2025-02-02-preview"),
+		managementAPIVersion: blank(strings.TrimSpace(cfg.AzureDynamicSessions.APIVersion), core.AzureDynamicSessionsConfigDefaultAPIVersion),
 		token:                token,
 		httpClient:           httpClient,
 		dataHTTPClient:       dataHTTPClient,
@@ -237,11 +238,7 @@ func (c *azureDynamicSessionsClient) UploadFile(ctx context.Context, identifier,
 }
 
 func (c *azureDynamicSessionsClient) ExecStream(ctx context.Context, identifier string, execReq azureDynamicSessionsExecRequest, stdout, stderr io.Writer) (int, error) {
-	var body bytes.Buffer
-	if err := json.NewEncoder(&body).Encode(execReq); err != nil {
-		return 0, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url("/v1/exec", c.sessionQuery(identifier)), &body)
+	req, err := shared.NewJSONRequest(ctx, http.MethodPost, c.url("/v1/exec", c.sessionQuery(identifier)), execReq)
 	if err != nil {
 		return 0, err
 	}
@@ -372,15 +369,7 @@ func (c *azureDynamicSessionsClient) doJSON(ctx context.Context, method, path st
 }
 
 func (c *azureDynamicSessionsClient) doJSONURL(ctx context.Context, method, endpoint string, body any, out any) error {
-	var r io.Reader
-	if body != nil {
-		var buf bytes.Buffer
-		if err := json.NewEncoder(&buf).Encode(body); err != nil {
-			return err
-		}
-		r = &buf
-	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, r)
+	req, err := shared.NewJSONRequest(ctx, method, endpoint, body)
 	if err != nil {
 		return err
 	}
@@ -393,19 +382,9 @@ func (c *azureDynamicSessionsClient) doJSONURL(ctx context.Context, method, endp
 		return err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &azureDynamicSessionsAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(summarizeJSON(data), c.token)}
-	}
-	if out != nil && len(data) > 0 {
-		if err := json.Unmarshal(data, out); err != nil {
-			return err
-		}
-	}
-	return nil
+	return shared.DecodeUnboundedJSONResponse(resp, out, func(statusCode int, status string, data []byte) error {
+		return &azureDynamicSessionsAPIError{StatusCode: statusCode, Status: status, Body: shared.RedactErrorSecrets(summarizeJSON(data), c.token)}
+	})
 }
 
 func (c *azureDynamicSessionsClient) responseError(resp *http.Response) error {
@@ -538,7 +517,7 @@ func azureDynamicSessionsTimeoutSeconds(cfg Config) int {
 		if cfg.TTL > 0 {
 			return durationSecondsCeil(cfg.TTL)
 		}
-		return 1800
+		return core.AzureDynamicSessionsConfigDefaultTimeoutSecs
 	}
 	return timeout
 }

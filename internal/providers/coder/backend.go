@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -31,16 +31,16 @@ type coderLeaseBackend struct {
 
 func NewCoderLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) (Backend, error) {
 	if strings.TrimSpace(cfg.Coder.CLIPath) == "" {
-		cfg.Coder.CLIPath = "coder"
+		cfg.Coder.CLIPath = core.CoderConfigDefaultCLIPath
 	}
 	if strings.TrimSpace(cfg.Coder.WorkspacePrefix) == "" {
-		cfg.Coder.WorkspacePrefix = "crabbox-"
+		cfg.Coder.WorkspacePrefix = core.CoderConfigDefaultWorkspacePrefix
 	}
 	if strings.TrimSpace(cfg.Coder.WorkRoot) == "" {
-		cfg.Coder.WorkRoot = "/home/coder/crabbox"
+		cfg.Coder.WorkRoot = core.CoderConfigDefaultWorkRoot
 	}
 	if strings.TrimSpace(cfg.Coder.Wait) == "" {
-		cfg.Coder.Wait = "yes"
+		cfg.Coder.Wait = core.CoderConfigDefaultWait
 	}
 	cfg.Provider = coderProvider
 	cfg.TargetOS = targetLinux
@@ -136,7 +136,7 @@ func (b *coderLeaseBackend) rollbackCreatedWorkspace(name, leaseID string, clien
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := b.releaseWorkspace(cleanupCtx, client, name); err != nil {
-		return exit(coderExitCode(cause), "%v; coder rollback %s failed for workspace %s; manual cleanup: %s: %v", cause, coderReleaseActionFromConfig(b.cfg), name, coderManualCleanupCommand(b.cfg, name), err)
+		return exit(core.ExitCodeForError(cause, 1), "%v; coder rollback %s failed for workspace %s; manual cleanup: %s: %v", cause, coderReleaseActionFromConfig(b.cfg), name, coderManualCleanupCommand(b.cfg, name), err)
 	}
 	removeLeaseClaim(leaseID)
 	return cause
@@ -147,14 +147,6 @@ func (b *coderLeaseBackend) releaseWorkspace(ctx context.Context, client *coderC
 		return client.delete(ctx, name)
 	}
 	return client.stop(ctx, name)
-}
-
-func coderExitCode(err error) int {
-	var exitErr ExitError
-	if errors.As(err, &exitErr) && exitErr.Code != 0 {
-		return exitErr.Code
-	}
-	return 1
 }
 
 func (b *coderLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
@@ -901,7 +893,7 @@ func coderSSHTarget(cfg Config, workspaceName, workspaceID string) SSHTarget {
 		NetworkKind:    networkPublic,
 		ReadyCheck:     "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null",
 		SSHConfigProxy: true,
-		ProxyCommand:   shellQuote(cfg.Coder.CLIPath) + " ssh --stdio --wait " + shellQuote(blank(cfg.Coder.Wait, "yes")) + " " + shellQuote(workspaceName),
+		ProxyCommand:   shellQuote(cfg.Coder.CLIPath) + " ssh --stdio --wait " + shellQuote(blank(cfg.Coder.Wait, core.CoderConfigDefaultWait)) + " " + shellQuote(workspaceName),
 	}
 }
 

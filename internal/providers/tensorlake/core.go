@@ -1,7 +1,6 @@
 package tensorlake
 
 import (
-	"flag"
 	"io"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -25,18 +24,15 @@ type StopRequest = core.StopRequest
 type Server = core.Server
 type Repo = core.Repo
 type ExitError = core.ExitError
-type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 type LocalCommandRequest = core.LocalCommandRequest
 
 const (
-	providerName   = "tensorlake"
-	leasePrefix    = "tlsbx_"
-	namePrefix     = "crabbox-"
-	defaultAPIURL  = "https://api.tensorlake.ai"
-	defaultCLIPath = "tensorlake"
-	targetLinux    = core.TargetLinux
-	NetworkPublic  = core.NetworkPublic
+	providerName  = "tensorlake"
+	leasePrefix   = "tlsbx_"
+	namePrefix    = "crabbox-"
+	targetLinux   = core.TargetLinux
+	NetworkPublic = core.NetworkPublic
 
 	maxSandboxNameLen    = 63
 	sandboxNameSuffixLen = 6
@@ -44,14 +40,6 @@ const (
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
-}
-
-func writeTimingJSON(w io.Writer, report timingReport) error {
-	return core.WriteTimingJSON(w, report)
 }
 
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {

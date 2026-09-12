@@ -10,9 +10,15 @@ import (
 )
 
 func TestNewRunIDUsesCanonicalFormatAndIsUnique(t *testing.T) {
-	first := newRunID()
-	second := newRunID()
-	pattern := regexp.MustCompile(`^run_[a-f0-9]{12}$`)
+	first, err := newRunID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := newRunID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pattern := regexp.MustCompile(`^run_[a-f0-9]{32}$`)
 	if !pattern.MatchString(first) || !pattern.MatchString(second) {
 		t.Fatalf("run IDs must use canonical format: first=%q second=%q", first, second)
 	}

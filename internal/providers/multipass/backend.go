@@ -64,23 +64,17 @@ func applyDefaults(cfg *Config) {
 	}
 	cfg.SSHFallbackPorts = []string{}
 	if cfg.Multipass.CLIPath == "" {
-		cfg.Multipass.CLIPath = "multipass"
+		cfg.Multipass.CLIPath = core.MultipassConfigDefaultCLIPath
 	}
 	if cfg.Multipass.Image == "" {
 		cfg.Multipass.Image = "26.04"
 	}
 	if cfg.Multipass.User == "" {
-		cfg.Multipass.User = "crabbox"
+		cfg.Multipass.User = core.MultipassConfigDefaultUser
 	}
-	if cfg.Multipass.WorkRoot == "" {
-		if !core.IsDefaultWorkRoot(cfg.WorkRoot) {
-			cfg.Multipass.WorkRoot = cfg.WorkRoot
-		} else {
-			cfg.Multipass.WorkRoot = "/work/crabbox"
-		}
-	}
+	cfg.Multipass.WorkRoot = core.ResolveInheritedWorkRoot(cfg.Multipass.WorkRoot, cfg.WorkRoot, core.MultipassConfigDefaultWorkRoot)
 	if cfg.Multipass.LaunchTimeout <= 0 {
-		cfg.Multipass.LaunchTimeout = 20 * time.Minute
+		cfg.Multipass.LaunchTimeout = core.MultipassConfigDefaultLaunchTimeout
 	}
 	cfg.SSHUser = cfg.Multipass.User
 	cfg.SSHPort = sshPort

@@ -34,6 +34,37 @@ func newBridgeBackend(t *testing.T, fake *fakeBridgeAPI) *e2bBackend {
 	}
 }
 
+func TestE2BBridgeDomainAndPreviewDefaultPredicates(t *testing.T) {
+	for _, raw := range []string{"", "  ", " sandbox.example.invalid "} {
+		fake := &fakeBridgeAPI{fakeE2BSyncClient: fakeE2BSyncClient{sandbox: e2bSandbox{SandboxID: "example", Metadata: map[string]string{"provider": "e2b", "crabbox": "true"}}}}
+		b := newBridgeBackend(t, fake)
+		b.cfg.E2B.Domain = raw
+		id, domain, err := b.bridgeSandboxCoords(context.Background(), "e2b_example")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := strings.TrimSpace(raw)
+		if raw == "" {
+			want = "e2b.app"
+		}
+		if id != "example" || domain != want {
+			t.Fatalf("bridge coordinates domain=%q want=%q", domain, want)
+		}
+		previewDomain := want
+		if previewDomain == "" {
+			previewDomain = "e2b.app"
+		}
+		if got := e2bPreviewURL(domain, id, 3000); got != "https://3000-example."+previewDomain {
+			t.Fatalf("preview=%q", got)
+		}
+		fake.sandbox.Domain = " remote.example.invalid "
+		_, domain, err = b.bridgeSandboxCoords(context.Background(), "e2b_example")
+		if err != nil || domain != "remote.example.invalid" {
+			t.Fatalf("remote domain precedence=%q error=%v", domain, err)
+		}
+	}
+}
+
 func TestE2BPublishPeerReturnsCanonicalURL(t *testing.T) {
 	fake := &fakeBridgeAPI{
 		listed: []e2bSandbox{{

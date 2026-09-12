@@ -5,9 +5,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"text/tabwriter"
 	"time"
@@ -37,6 +38,9 @@ func (r *blacksmithFuncRunner) Run(ctx context.Context, req LocalCommandRequest)
 	r.calls = append(r.calls, append([]string(nil), req.Args...))
 	if r.onRequest != nil {
 		r.onRequest(ctx, req)
+	}
+	if handled, result, err := testBlacksmithArtifactTransfer(req); handled {
+		return result, err
 	}
 	if len(req.Args) >= 2 && req.Args[0] == "auth" && req.Args[1] == "status" {
 		return LocalCommandResult{Stdout: "Authenticated organizations:\n  * example-org (current)\n"}, nil
@@ -120,6 +124,84 @@ func newTestBlacksmithBackend(cfg Config, runner CommandRunner) *blacksmithBacke
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
 		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: testClock{}, Exec: runner},
+	}
+}
+
+func TestBlacksmithOrdinaryFlagMetadata(t *testing.T) {
+	for _, provider := range []string{"other", "blacksmith-testbox", " BLACKSMITH "} {
+		for _, value := range []string{"", "same", " padded "} {
+			cfg := Config{Provider: provider, Blacksmith: BlacksmithConfig{Org: "same", Workflow: "same", Job: "same", Ref: "same", IdleTimeout: time.Minute, Debug: true}}
+			before := cfg
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			values := RegisterBlacksmithProviderFlags(fs, cfg)
+			if fs.NFlag() != 0 {
+				t.Fatal("registration visited flags")
+			}
+			for _, name := range []string{"blacksmith-idle-timeout", "blacksmith-debug"} {
+				if fs.Lookup(name) != nil {
+					t.Fatalf("unexpected --%s", name)
+				}
+			}
+			for _, foreign := range []any{nil, struct{}{}} {
+				if err := ApplyBlacksmithProviderFlags(&cfg, fs, foreign); err != nil || !reflect.DeepEqual(cfg, before) {
+					t.Fatalf("foreign values: %v", err)
+				}
+			}
+			if err := ApplyBlacksmithProviderFlags(&cfg, fs, values); err != nil || !reflect.DeepEqual(cfg, before) {
+				t.Fatalf("unvisited: %v", err)
+			}
+			args := []string{}
+			for _, name := range []string{"org", "workflow", "job", "ref"} {
+				if fs.Lookup("blacksmith-"+name).DefValue != "same" {
+					t.Fatal("inherited default changed")
+				}
+				args = append(args, "--blacksmith-"+name+"=first", "--blacksmith-"+name+"="+value)
+			}
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			if err := ApplyBlacksmithProviderFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			want := before
+			want.Blacksmith.Org, want.Blacksmith.Workflow, want.Blacksmith.Job, want.Blacksmith.Ref = value, value, value, value
+			core.RecordProviderFlagInputs(&want, true, "blacksmith-testbox")
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("flags: %#v want %#v", cfg, want)
+			}
+		}
+	}
+}
+
+func TestManualConfigInputFlags(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "fixture-other"
+	fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+	values := RegisterBlacksmithProviderFlags(fs, cfg)
+	before := cfg
+	if err := ApplyBlacksmithProviderFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+		t.Fatalf("foreign values changed configuration: %v", err)
+	}
+	if err := ApplyBlacksmithProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	want := cfg
+	core.RecordProviderFlagInputs(&want, true, "blacksmith-testbox")
+	if reflect.DeepEqual(cfg, want) {
+		t.Fatal("unvisited flags recorded input")
+	}
+	for repeat := 0; repeat < 2; repeat++ {
+		if err := fs.Set("blacksmith-org", "fixture"); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyBlacksmithProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want = cfg
+		core.RecordProviderFlagInputs(&want, true, "blacksmith-testbox")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatal("accepted/equal flag value was not recorded")
+		}
 	}
 }
 
@@ -892,6 +974,60 @@ func TestBlacksmithRunFailureStagesLocalCommand(t *testing.T) {
 	}
 }
 
+func TestBlacksmithProofTailPreservesRawBytesURLAndSnapshots(t *testing.T) {
+	b := newBlacksmithProofTailBuffer()
+	var expected []byte
+	for _, chunk := range [][]byte{
+		{}, []byte(strings.Repeat("setup\n", 350)),
+		[]byte("https://github.com/example-org/my-app/actions/"),
+		[]byte("runs/123\n"), {'x', 0xff, '\n'},
+		[]byte("https://github.com/example-org/my-app/actions/runs/456\n"),
+	} {
+		n, err := b.Write(chunk)
+		if n != len(chunk) || err != nil {
+			t.Fatalf("write=%d/%v, want %d/nil", n, err, len(chunk))
+		}
+		expected = append(expected, chunk...)
+		if got := b.Bytes(); !bytes.Equal(got, expected) {
+			t.Fatalf("raw snapshot=%q want=%q", got, expected)
+		}
+	}
+	if got := b.ActionsURL(); got != "https://github.com/example-org/my-app/actions/runs/123" {
+		t.Fatalf("first split URL=%q", got)
+	}
+	snapshot := b.Bytes()
+	snapshot[0] = '!'
+	if !bytes.Equal(b.Bytes(), expected) {
+		t.Fatal("returned snapshot aliases retained bytes")
+	}
+	if _, err := b.Write([]byte("later")); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot) != len(expected) || string(snapshot[len(snapshot)-4:]) != "456\n" {
+		t.Fatal("later write changed the earlier snapshot")
+	}
+}
+
+func TestBlacksmithProofTailSerializesSmallWritesAndSnapshots(t *testing.T) {
+	b := newBlacksmithProofTailBuffer()
+	var group sync.WaitGroup
+	for range 2 {
+		group.Go(func() {
+			for range 8 {
+				if n, err := b.Write([]byte("line\n")); err != nil || n != 5 {
+					t.Errorf("write=%d/%v", n, err)
+				}
+				_ = b.Bytes()
+				_ = b.ActionsURL()
+			}
+		})
+	}
+	group.Wait()
+	if got := b.Bytes(); !bytes.Equal(got, []byte(strings.Repeat("line\n", 16))) {
+		t.Fatalf("serialized output=%q", got)
+	}
+}
+
 func TestBlacksmithRunProofArtifactsPersistSuccessStreams(t *testing.T) {
 	home := t.TempDir()
 	repo := t.TempDir()
@@ -962,8 +1098,10 @@ func TestBlacksmithRunProofArtifactsPersistSuccessStreams(t *testing.T) {
 
 func TestBlacksmithRunCollectsArtifactsBeforeOneShotCleanup(t *testing.T) {
 	requireBlacksmithArtifactShell(t)
+	isolateArtifactOwnership(t)
 	home := t.TempDir()
 	repo := t.TempDir()
+	t.Chdir(repo)
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
@@ -997,16 +1135,18 @@ func TestBlacksmithRunCollectsArtifactsBeforeOneShotCleanup(t *testing.T) {
 	if len(result.Artifacts) != 1 {
 		t.Fatalf("artifacts=%#v", result.Artifacts)
 	}
-	if len(runner.calls) != 9 || runCalls != 1 {
+	if len(runner.calls) != 11 || runCalls != 1 {
 		t.Fatalf("calls=%d, want scoped artifact retrieval and terminal finalization", len(runner.calls))
 	}
-	if runner.calls[1][1] != "warmup" || runner.calls[4][1] != "run" || runner.calls[6][1] != "stop" {
+	if runner.calls[1][1] != "warmup" || runner.calls[5][1] != "run" || runner.calls[8][1] != "stop" {
 		t.Fatalf("unexpected call order: %#v", runner.calls)
 	}
+	assertArtifactTransferCalls(t, runner.calls, 1)
 }
 
 func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
 	requireBlacksmithArtifactShell(t)
+	isolateArtifactOwnership(t)
 	home := t.TempDir()
 	repo := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1046,9 +1186,10 @@ func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
 		t.Fatalf("err=%v want artifact exit 7", err)
 	}
-	if len(runner.calls) != 5 || runCalls != 1 {
+	if len(runner.calls) != 6 || runCalls != 1 {
 		t.Fatalf("blacksmith calls=%d want one warmup/run without stop: %#v", len(runner.calls), runner.calls)
 	}
+	assertArtifactTransferCalls(t, runner.calls, 0)
 	if result.Session == nil || !result.Session.Kept {
 		t.Fatalf("session=%#v, want kept after artifact failure", result.Session)
 	}
@@ -1057,55 +1198,6 @@ func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stderr missing %q in:\n%s", want, got)
 		}
-	}
-}
-
-func TestBlacksmithExtractArtifactArchiveRejectsMissingEnvelope(t *testing.T) {
-	_, _, err := blacksmithExtractArtifactArchive("no marker", core.DelegatedRunArtifactDefaultMaxBytes)
-	if err == nil || !strings.Contains(err.Error(), "did not return a bounded artifact archive") {
-		t.Fatalf("err=%v, want missing envelope", err)
-	}
-}
-
-func TestBlacksmithExtractArtifactArchiveIgnoresPreambleMarkerText(t *testing.T) {
-	archive := makeTarGz(t, map[string]string{"reports/manifest.json": `{"ok":true}`})
-	output := strings.Join([]string{
-		"required artifact " + core.DelegatedRunArtifactBeginMarker + " matched=1",
-		"required artifact " + core.DelegatedRunArtifactEndMarker + " matched=1",
-		core.DelegatedRunArtifactBeginMarker,
-		base64.StdEncoding.EncodeToString(archive),
-		core.DelegatedRunArtifactEndMarker,
-	}, "\n")
-	got, clean, err := blacksmithExtractArtifactArchive(output, core.DelegatedRunArtifactDefaultMaxBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, archive) {
-		t.Fatalf("archive mismatch bytes=%d want=%d", len(got), len(archive))
-	}
-	for _, want := range []string{
-		"required artifact " + core.DelegatedRunArtifactBeginMarker + " matched=1",
-		"required artifact " + core.DelegatedRunArtifactEndMarker + " matched=1",
-	} {
-		if !strings.Contains(clean, want) {
-			t.Fatalf("clean output missing %q:\n%s", want, clean)
-		}
-	}
-}
-
-func TestBlacksmithExtractArtifactArchiveAllowsExactMaxWithPadding(t *testing.T) {
-	archive := bytes.Repeat([]byte("x"), 64)
-	output := strings.Join([]string{
-		core.DelegatedRunArtifactBeginMarker,
-		base64.StdEncoding.EncodeToString(archive),
-		core.DelegatedRunArtifactEndMarker,
-	}, "\n")
-	got, _, err := blacksmithExtractArtifactArchive(output, int64(len(archive)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, archive) {
-		t.Fatalf("archive mismatch bytes=%d want=%d", len(got), len(archive))
 	}
 }
 
@@ -1440,7 +1532,7 @@ func TestApplyBlacksmithFlagOverrides(t *testing.T) {
 	}
 	cfg := Config{}
 	fs := newFlagSet("test", io.Discard)
-	values := registerBlacksmithFlags(fs, defaults)
+	values := RegisterBlacksmithProviderFlags(fs, defaults)
 	if err := parseFlags(fs, []string{
 		"--blacksmith-org", "openclaw",
 		"--blacksmith-workflow", ".github/workflows/testbox.yml",
@@ -1449,7 +1541,9 @@ func TestApplyBlacksmithFlagOverrides(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	applyBlacksmithFlagOverrides(&cfg, fs, values)
+	if err := ApplyBlacksmithProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
 	if cfg.Blacksmith.Org != "openclaw" || cfg.Blacksmith.Workflow != ".github/workflows/testbox.yml" || cfg.Blacksmith.Job != "test" || cfg.Blacksmith.Ref != "feature" {
 		t.Fatalf("blacksmith flags not applied: %#v", cfg.Blacksmith)
 	}
@@ -1567,5 +1661,32 @@ func TestResolveBlacksmithDiscoveryID(t *testing.T) {
 	}
 	if got, err := resolveBlacksmithDiscoveryID("blue-lobster"); err != nil || got != "tbx_abc123" {
 		t.Fatalf("slug read-only discovery=%q err=%v", got, err)
+	}
+}
+
+func TestConfigShowCompleteRawContract(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config core.BlacksmithConfig
+		fields []core.ProviderConfigShowField
+	}{{name: "zero", config: core.BlacksmithConfig{Org: "", Workflow: "", Job: "", Ref: "", IdleTimeout: 0, Debug: false}, fields: []core.ProviderConfigShowField{{JSONName: "org", JSONValue: "", TextName: "org", TextValue: "-"}, {JSONName: "workflow", JSONValue: "", TextName: "workflow", TextValue: "-"}, {JSONName: "job", JSONValue: "", TextName: "job", TextValue: "-"}, {JSONName: "ref", JSONValue: "", TextName: "ref", TextValue: "-"}, {JSONName: "idleTimeout", JSONValue: "0s", TextName: "idle_timeout", TextValue: "0s"}, {JSONName: "debug", JSONValue: false, TextName: "debug", TextValue: "false"}}},
+		{name: "raw", config: core.BlacksmithConfig{Org: " Org reference ", Workflow: " Workflow reference ", Job: " Job reference ", Ref: " Ref reference ", IdleTimeout: -1500 * time.Millisecond, Debug: true}, fields: []core.ProviderConfigShowField{{JSONName: "org", JSONValue: " Org reference ", TextName: "org", TextValue: " Org reference "}, {JSONName: "workflow", JSONValue: " Workflow reference ", TextName: "workflow", TextValue: " Workflow reference "}, {JSONName: "job", JSONValue: " Job reference ", TextName: "job", TextValue: " Job reference "}, {JSONName: "ref", JSONValue: " Ref reference ", TextName: "ref", TextValue: " Ref reference "}, {JSONName: "idleTimeout", JSONValue: "-1.5s", TextName: "idle_timeout", TextValue: "-1.5s"}, {JSONName: "debug", JSONValue: true, TextName: "debug", TextValue: "true"}}},
+		{name: "whitespace", config: core.BlacksmithConfig{Org: " \t ", Workflow: " \t ", Job: " \t ", Ref: " \t ", IdleTimeout: -1500 * time.Millisecond, Debug: true}, fields: []core.ProviderConfigShowField{{JSONName: "org", JSONValue: " \t ", TextName: "org", TextValue: " \t "}, {JSONName: "workflow", JSONValue: " \t ", TextName: "workflow", TextValue: " \t "}, {JSONName: "job", JSONValue: " \t ", TextName: "job", TextValue: " \t "}, {JSONName: "ref", JSONValue: " \t ", TextName: "ref", TextValue: " \t "}, {JSONName: "idleTimeout", JSONValue: "-1.5s", TextName: "idle_timeout", TextValue: "-1.5s"}, {JSONName: "debug", JSONValue: true, TextName: "debug", TextValue: "true"}}}} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.Config{Provider: "unselected-display"}
+			cfg.Blacksmith = tc.config
+			want := core.ProviderConfigShowSection{JSONKey: "blacksmith", TextLabel: "blacksmith", Providers: []string{"blacksmith-testbox"}, Fields: tc.fields}
+			for _, selection := range []string{"unselected-display", "blacksmith-testbox"} {
+				cfg.Provider = selection
+				before := cfg
+				got := (Provider{}).ConfigShowSection(cfg)
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("selection=%s section=%#v want%#v", selection, got, want)
+				}
+				if !reflect.DeepEqual(cfg, before) {
+					t.Fatal("passive projector mutated config")
+				}
+			}
+		})
 	}
 }

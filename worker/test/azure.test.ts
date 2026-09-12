@@ -5215,6 +5215,218 @@ describe("azure provider", () => {
     expect(nsgWrites).toEqual([]);
   });
 
+  describe("legacy shared infrastructure fence resolution", () => {
+    function fixture() {
+      const { storage, records } = memoryAzureDeleteClaimStorage();
+      const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
+      const key = `provisioning-lock:${client.providerScope().toLowerCase()}`;
+      const staleOwner = "legacy:stale-operation";
+      records.set(key, staleOwner);
+      const paths = [
+        "/subscriptions/sub/resourceGroups/crabbox-leases",
+        "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/virtualNetworks/crabbox-vnet",
+        "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkSecurityGroups/crabbox-nsg",
+      ];
+      const resources = new Map(
+        paths.map((path) => [
+          path,
+          {
+            location: "eastus",
+            tags: { managed_by: "crabbox" },
+            properties: { provisioningState: "Succeeded" as string | undefined, securityRules: [] },
+          },
+        ]),
+      );
+      const reads: string[] = [];
+      const writes: Array<{ path: string; body: unknown }> = [];
+      let inTransaction = false;
+      const transaction = storage.transaction!;
+      storage.transaction = (callback) =>
+        transaction(async (tx) => {
+          inTransaction = true;
+          try {
+            return await callback(tx);
+          } finally {
+            inTransaction = false;
+          }
+        });
+      const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+        expect(inTransaction).toBe(false);
+        const url = String(input);
+        if (isAzureLoginURL(url)) {
+          return Response.json({ access_token: "tkn", expires_in: 3600 });
+        }
+        const path = new URL(url).pathname;
+        if (init?.method === "GET") {
+          reads.push(path);
+          const resource = resources.get(path);
+          return resource
+            ? Response.json(resource)
+            : Response.json({ error: "missing" }, { status: 404 });
+        }
+        expect(init?.method).toBe("PUT");
+        writes.push({ path, body: JSON.parse(String(init?.body)) });
+        return Response.json({});
+      });
+      client.fetcher = fetcher;
+      return {
+        client,
+        key,
+        staleOwner,
+        storage,
+        records,
+        paths,
+        resources,
+        reads,
+        writes,
+        fetcher,
+      };
+    }
+
+    it.each(["Succeeded", "sUcCeEdEd", "Failed", "cAnCeLeD", "absent"])(
+      "resolves a retained legacy fence when all resources are %s",
+      async (state) => {
+        const f = fixture();
+        for (const resource of f.resources.values()) resource.properties.provisioningState = state;
+        if (state === "absent") f.resources.clear();
+
+        await expect(f.client.ensureSharedInfra("eastus", testLeaseConfig())).resolves.toEqual({
+          vnet: "crabbox-vnet",
+          nsg: "crabbox-nsg",
+        });
+
+        expect(f.reads).toEqual(expect.arrayContaining(f.paths));
+        expect(f.writes).toContainEqual({
+          path: f.paths[2],
+          body: expect.objectContaining({
+            properties: {
+              securityRules: [
+                expect.objectContaining({ name: "crabbox-ssh-2222-0" }),
+                expect.objectContaining({ name: "crabbox-ssh-22-0" }),
+              ],
+            },
+          }),
+        });
+        expect(f.records.has(f.key)).toBe(false);
+      },
+    );
+
+    it.each(["Updating", "Creating", "Deleting", "Accepted", "unknown", undefined])(
+      "retains a legacy fence while the NSG state is %s",
+      async (state) => {
+        const f = fixture();
+        f.resources.get(f.paths[2]!)!.properties.provisioningState = state;
+
+        await expect(f.client.ensureSharedInfra("eastus", testLeaseConfig())).rejects.toThrow(
+          "Azure shared infrastructure has an unresolved operation",
+        );
+
+        expect(f.writes).toEqual([]);
+        expect(f.records.get(f.key)).toBe(f.staleOwner);
+      },
+    );
+
+    it.each([0, 1])("retains a legacy fence while resource %i is Updating", async (index) => {
+      const f = fixture();
+      f.resources.get(f.paths[index]!)!.properties.provisioningState = "Updating";
+
+      await expect(f.client.ensureSharedInfra("eastus", testLeaseConfig())).rejects.toThrow(
+        "Azure shared infrastructure has an unresolved operation",
+      );
+
+      expect(f.writes).toEqual([]);
+      expect(f.records.get(f.key)).toBe(f.staleOwner);
+    });
+
+    it("never probes or takes over a durable operation fence", async () => {
+      const f = fixture();
+      f.records.set(f.key, "provisioning-operation-id");
+
+      await expect(f.client.ensureSharedInfra("eastus", testLeaseConfig())).rejects.toThrow(
+        "Azure shared infrastructure has an unresolved operation",
+      );
+
+      expect(f.fetcher).not.toHaveBeenCalled();
+      expect(f.records.get(f.key)).toBe("provisioning-operation-id");
+    });
+
+    it.each([0, 1, 2])("retains a legacy fence when resource %i cannot be read", async (index) => {
+      const f = fixture();
+      f.client.fetcher = async (input, init) => {
+        if (init?.method === "GET" && new URL(String(input)).pathname === f.paths[index]) {
+          return Response.json({ error: { code: "ResourceNotFound" } }, { status: 500 });
+        }
+        return f.fetcher(input, init);
+      };
+
+      await expect(f.client.ensureSharedInfra("eastus", testLeaseConfig())).rejects.toThrow(
+        "Azure shared infrastructure has an unresolved operation",
+      );
+
+      expect(f.writes).toEqual([]);
+      expect(f.records.get(f.key)).toBe(f.staleOwner);
+    });
+
+    it("probes the location's settled regional network resources", async () => {
+      const f = fixture();
+      for (const path of f.paths.slice(1)) {
+        f.resources.set(`${path}-westus3`, {
+          location: "westus3",
+          tags: { managed_by: "crabbox" },
+          properties: { provisioningState: "Succeeded", securityRules: [] },
+        });
+      }
+
+      await expect(f.client.ensureSharedInfra("westus3", testLeaseConfig())).resolves.toEqual({
+        vnet: "crabbox-vnet-westus3",
+        nsg: "crabbox-nsg-westus3",
+      });
+
+      expect(f.writes.map((write) => write.path)).toEqual([`${f.paths[2]}-westus3`]);
+      expect(f.records.has(f.key)).toBe(false);
+      expect(f.reads).toEqual(
+        expect.arrayContaining(f.paths.slice(1).map((path) => `${path}-westus3`)),
+      );
+    });
+
+    it("retains the new legacy fence after a failed write and resolves it on retry", async () => {
+      const f = fixture();
+      f.client.fetcher = async (input, init) => {
+        if (init?.method === "PUT") throw new Error("synthetic ARM write failure");
+        return f.fetcher(input, init);
+      };
+
+      await expect(f.client.ensureSharedInfra("eastus", testLeaseConfig())).rejects.toThrow(
+        "synthetic ARM write failure",
+      );
+
+      expect(f.records.get(f.key)).toMatch(/^legacy:[\da-f-]{36}$/);
+      expect(f.records.get(f.key)).not.toBe(f.staleOwner);
+      f.client.fetcher = f.fetcher;
+      await f.client.ensureSharedInfra("eastus", testLeaseConfig());
+      expect(f.records.has(f.key)).toBe(false);
+    });
+
+    it("preserves a newer fence owner when takeover loses the CAS race", async () => {
+      const f = fixture();
+      const transaction = f.storage.transaction!;
+      f.storage.transaction = (callback) => {
+        if (f.paths.every((path) => f.reads.includes(path))) {
+          f.records.set(f.key, "legacy:newer-operation");
+        }
+        return transaction(callback);
+      };
+
+      await expect(f.client.ensureSharedInfra("eastus", testLeaseConfig())).rejects.toThrow(
+        "Azure shared infrastructure has an unresolved operation",
+      );
+
+      expect(f.reads).toEqual(expect.arrayContaining(f.paths));
+      expect(f.writes).toEqual([]);
+      expect(f.records.get(f.key)).toBe("legacy:newer-operation");
+    });
+  });
+
   it("uses regional shared network names when defaults already exist elsewhere", async () => {
     const client = new AzureClient({ ...baseEnv, CRABBOX_AZURE_LOCATION: "westus3" });
     let puts: string[] = [];

@@ -57,7 +57,7 @@ func (b *cloudflareBackend) Warmup(ctx context.Context, req WarmupRequest) error
 	if req.ActionsRunner {
 		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	client, err := newCloudflareClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -70,18 +70,13 @@ func (b *cloudflareBackend) Warmup(ctx context.Context, req WarmupRequest) error
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: %s warmup keeps the container until explicit stop\n", providerName)
 	}
-	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  claim.LeaseID,
-			Slug:     claim.Slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	total := core.ClockNow(b.rt.Clock).Sub(started)
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  claim.LeaseID,
+		Slug:     claim.Slug,
+		Total:    total,
+	})
 }
 
 func (b *cloudflareBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
@@ -201,9 +196,9 @@ func (b *cloudflareBackend) Status(ctx context.Context, req StatusRequest) (Stat
 		return StatusView{}, err
 	}
 	client.useInstanceType(cloudflareClaimInstanceType(claim))
-	deadline := b.now().Add(req.WaitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
 	if req.WaitTimeout <= 0 {
-		deadline = b.now().Add(5 * time.Minute)
+		deadline = core.ClockNow(b.rt.Clock).Add(5 * time.Minute)
 	}
 	for {
 		sandbox, err := client.getSandbox(ctx, claim.LeaseID)
@@ -217,7 +212,7 @@ func (b *cloudflareBackend) Status(ctx context.Context, req StatusRequest) (Stat
 		if !req.Wait || view.Ready {
 			return view, nil
 		}
-		if b.now().After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return StatusView{}, exit(5, "timed out waiting for %s container %s to become ready", providerName, claim.LeaseID)
 		}
 		select {
@@ -409,7 +404,7 @@ func rejectCloudflareSyncOptions(req RunRequest) error {
 }
 
 func cloudflareWorkdir(cfg Config) (string, error) {
-	workdir := blank(strings.TrimSpace(cfg.Cloudflare.Workdir), "/workspace/crabbox")
+	workdir := blank(strings.TrimSpace(cfg.Cloudflare.Workdir), core.CloudflareConfigDefaultWorkdir)
 	clean := path.Clean(workdir)
 	if !strings.HasPrefix(clean, "/") {
 		return "", exit(2, "%s workdir %q must resolve to an absolute path", providerName, workdir)
@@ -506,13 +501,6 @@ func durationMillisecondsCeil(duration time.Duration) int64 {
 		return 0
 	}
 	return int64((duration + time.Millisecond - 1) / time.Millisecond)
-}
-
-func (b *cloudflareBackend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }
 
 func cloudflareClaimInstanceType(claim LeaseClaim) string {

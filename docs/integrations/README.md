@@ -35,9 +35,9 @@ Status labels are deliberate:
 - **Package available** means source and validation exist, but installation may
   still use the host's development flow.
 
-Catalog status tracks repository state, not the latest release archive. The
-standards-compliant Agent Skill metadata is scheduled for 0.40.0; released
-0.39.0 binaries still generate a body-only `SKILL.md`.
+Catalog status tracks repository state, not the latest release archive. If an
+older CLI generates a body-only `SKILL.md`, upgrade it or add the required
+`name` and `description` frontmatter manually.
 
 ## Local control surfaces
 

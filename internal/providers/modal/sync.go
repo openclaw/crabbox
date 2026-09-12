@@ -19,7 +19,7 @@ func (b *modalBackend) syncWorkspace(ctx context.Context, client modalAPI, sandb
 	return shared.RunSandboxArchiveSync(ctx, shared.SandboxArchiveSyncRequest{
 		Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge, Workdir: workdir,
 		TempPattern: "crabbox-modal-sync-*.tgz", RemoteArchivePrefix: "crabbox-modal-sync-",
-		PhaseName: "modal_sync", Provider: providerName, Stderr: b.rt.Stderr, Now: b.now,
+		PhaseName: "modal_sync", Provider: providerName, Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 		Upload: func(ctx context.Context, remoteArchive string, archive io.Reader) error {
 			// The Modal SDK upload requires a local path. The shared archive
 			// transport owns this file and keeps it open until upload completes.

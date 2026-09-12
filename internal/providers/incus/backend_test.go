@@ -6,7 +6,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -224,6 +226,97 @@ func (c *stateCountingClient) GetInstanceState(name string) (*api.InstanceState,
 	return state, etag, err
 }
 
+func TestIncusOrdinaryFlagStages(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, bad := range []string{"type", "bad", "0s", "-1s", " 2m ", "", "2m"} {
+		t.Run(bad, func(t *testing.T) {
+			cfg := core.Config{Provider: " INCUS ", TargetOS: " Linux ", ServerType: "generic", SSHUser: "generic", WorkRoot: "/generic", SSHPort: "2200", Incus: core.IncusConfig{InstanceType: "container", Image: "old", StartTimeout: time.Minute, DeleteOnRelease: true, LaunchPort: "old", ProxyListenHost: "old", ProxyListenPort: "old", ProxyDevice: "old", TLSServerCert: "old", InsecureTLS: true, RemoteImageServer: "old"}}
+			before := cfg
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			values := (Provider{}).RegisterFlags(fs, cfg)
+			for _, foreign := range []any{nil, struct{}{}} {
+				if err := (Provider{}).ApplyFlags(&cfg, fs, foreign); err != nil || !reflect.DeepEqual(cfg, before) {
+					t.Fatalf("foreign %v", err)
+				}
+			}
+			typeValue := "vm"
+			duration := bad
+			if bad == "type" {
+				typeValue = "ordinary-invalid"
+				duration = "2m"
+			}
+			args := []string{"--incus-remote=next", "--incus-project=next", "--incus-address=next", "--incus-socket=~/ordinary", "--incus-instance-type=" + typeValue, "--incus-image= padded-image ", "--incus-profile=next", "--incus-user=runner", "--incus-work-root=/work/ordinary", "--incus-delete-on-release=false", "--incus-start-timeout=" + duration, "--incus-launch-port=2222", "--incus-proxy-listen-host=next", "--incus-proxy-listen-port=2223", "--incus-proxy-device=next", "--incus-tls-server-cert=~/ordinary", "--incus-insecure-tls=false", "--incus-remote-image-server=next"}
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			err := (Provider{}).ApplyFlags(&cfg, fs, values)
+			want := before
+			want.Incus.Remote, want.Incus.Project, want.Incus.Address, want.Incus.Socket = "next", "next", "next", filepath.Join(home, "ordinary")
+			core.RecordProviderFlagInputs(&want, true, "incus")
+			if bad != "type" {
+				want.Incus.InstanceType, want.Incus.Image, want.Incus.Profile = "virtual-machine", "padded-image", "next"
+				want.ServerType = "virtual-machine:padded-image"
+				want.Incus.User, want.SSHUser, want.Incus.WorkRoot, want.WorkRoot = "runner", "runner", "/work/ordinary", "/work/ordinary"
+				want.Incus.DeleteOnRelease = false
+				core.MarkDeleteOnReleaseExplicit(&want, "incus")
+			}
+			if bad == "" || bad == "2m" {
+				if bad == "2m" {
+					want.Incus.StartTimeout = 2 * time.Minute
+				}
+				want.Incus.LaunchPort, want.Incus.ProxyListenHost, want.Incus.ProxyListenPort, want.Incus.ProxyDevice = "2222", "next", "2223", "next"
+				want.SSHPort = "2223"
+				want.Incus.TLSServerCert = filepath.Join(home, "ordinary")
+				want.Incus.InsecureTLS = false
+				want.Incus.RemoteImageServer = "next"
+				want.Provider, want.TargetOS, want.WindowsMode = "incus", "linux", "normal"
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if bad == "type" {
+				if err == nil || err.Error() != `provider=incus: unsupported incus-instance-type "ordinary-invalid" (use container or vm)` {
+					t.Fatalf("type error %v", err)
+				}
+			} else {
+				if err == nil || err.Error() != "invalid duration "+strconv.Quote(bad) {
+					t.Fatalf("duration error %v", err)
+				}
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("stage %q got %#v want %#v", bad, cfg, want)
+			}
+		})
+	}
+}
+
+func TestIncusOrdinaryFlagPresence(t *testing.T) {
+	for _, value := range []string{"", "same", " padded "} {
+		cfg := core.Config{Provider: "other", WorkRoot: "/generic", SSHUser: "generic", SSHPort: "2200", Incus: core.IncusConfig{Remote: "same", Project: "same", StartTimeout: time.Minute}}
+		before := cfg
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		values := (Provider{}).RegisterFlags(fs, cfg)
+		if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil || !reflect.DeepEqual(cfg, before) {
+			t.Fatalf("unvisited %v", err)
+		}
+		if err := fs.Parse([]string{"--incus-remote=first", "--incus-remote=" + value, "--incus-start-timeout=", "--incus-proxy-listen-port=" + value}); err != nil {
+			t.Fatal(err)
+		}
+		if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want := before
+		want.Incus.Remote, want.Incus.ProxyListenPort = value, value
+		if value != "" {
+			want.SSHPort = value
+		}
+		core.RecordProviderFlagInputs(&want, true, "incus")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatalf("presence %#v want %#v", cfg, want)
+		}
+	}
+}
+
 func TestProviderSpecAndFlags(t *testing.T) {
 	p := Provider{}
 	if p.Name() != providerName {
@@ -253,7 +346,7 @@ func TestProviderSpecAndFlags(t *testing.T) {
 	defaults.Provider = providerName
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	values := registerFlags(fs, defaults)
+	values := (Provider{}).RegisterFlags(fs, defaults)
 	if err := fs.Parse([]string{
 		"--incus-instance-type", "vm",
 		"--incus-image", "images:ubuntu/24.04/cloud",
@@ -264,7 +357,7 @@ func TestProviderSpecAndFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := defaults
-	if err := applyFlags(&cfg, fs, values); err != nil {
+	if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
 	applyDefaults(&cfg)
@@ -281,12 +374,12 @@ func TestApplyFlagsRejectsInvalidInstanceType(t *testing.T) {
 	defaults.Provider = providerName
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	values := registerFlags(fs, defaults)
+	values := (Provider{}).RegisterFlags(fs, defaults)
 	if err := fs.Parse([]string{"--incus-instance-type", "vmm"}); err != nil {
 		t.Fatal(err)
 	}
 	cfg := defaults
-	err := applyFlags(&cfg, fs, values)
+	err := (Provider{}).ApplyFlags(&cfg, fs, values)
 	if err == nil {
 		t.Fatal("expected error for invalid instance-type")
 	}

@@ -27,6 +27,7 @@ func (Provider) DiagnosticSecrets(core.Config) []string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:             core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		SyncGuardrailFullCandidate: true,
 		Name:                       providerName,
 		Family:                     providerFamily,

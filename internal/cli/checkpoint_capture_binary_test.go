@@ -63,6 +63,8 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 		{"review", runCheckpointCaptureReviewContract},
 		{"local-container", runCheckpointContainerReviewContract},
 		{"aws", runCheckpointAWSStrategyContract},
+		{"aws-non-submission", runCheckpointAWSNonSubmissionContract},
+		{"coordinator-non-submission", runCheckpointCoordinatorNonSubmissionContract},
 		{"machine0-strategy", runCheckpointMachine0StrategyContract},
 		{"native-lifetime", runCheckpointNativeLifetimeContract},
 	} {
@@ -117,14 +119,29 @@ func runCheckpointCaptureRollbackContract(t *testing.T, repo, binary string) {
 func runCheckpointCaptureContract(t *testing.T, repo, binary string) {
 	t.Parallel()
 
-	for _, boundary := range []string{"flush", "stopped"} {
-		t.Run("ordinary failure before submission releases reservation after "+boundary, func(t *testing.T) {
+	for _, scenario := range []string{"flush", "stopped", "stopped-cleanup-failure"} {
+		boundary := strings.TrimSuffix(scenario, "-cleanup-failure")
+		t.Run("ordinary failure before submission releases reservation after "+scenario, func(t *testing.T) {
 			f := newCheckpointCaptureFixture(t, repo, binary)
 			s := f.state()
 			s.Pause, s.StartRunning = boundary, true
 			f.writeState(s)
 			p := f.start("", "checkpoint", "create", "--provider", "machine0", "--id", captureFixtureLease, "--mode", "native", "--wait=false", "--json")
 			f.waitEvent(p, boundary)
+			checkpointsRoot := filepath.Join(f.root, "state", "crabbox", "checkpoints")
+			if scenario == "stopped-cleanup-failure" {
+				retained := checkpointsRoot + "-retained"
+				if err := os.Rename(checkpointsRoot, retained); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					_ = os.Remove(checkpointsRoot)
+					_ = os.Rename(retained, checkpointsRoot)
+				})
+				if err := os.WriteFile(checkpointsRoot, []byte("cleanup obstruction"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			s = f.state()
 			s.Pause, s.Machine["status"] = "", "ERRORED"
 			f.writeState(s)
@@ -145,6 +162,22 @@ func runCheckpointCaptureContract(t *testing.T, repo, binary string) {
 			}
 			if p.err == nil || s.Saves != 0 || s.Stops != wantTransitions || s.Starts != wantTransitions || s.Removes != 0 {
 				t.Fatalf("did not reproduce failure before image submission: err=%v stderr=%s state=%+v", p.err, p.output.stderr.String(), s)
+			}
+			if scenario == "stopped-cleanup-failure" {
+				if p.output.stdout.Len() != 0 || !strings.Contains(p.output.stderr.String(), "remove incomplete checkpoint reservation") {
+					t.Fatalf("failed reservation cleanup emitted a receipt or hid its failure: stdout=%s stderr=%s", p.output.stdout.String(), p.output.stderr.String())
+				}
+				return
+			}
+			var outcome map[string]string
+			if err := json.Unmarshal(p.output.stdout.Bytes(), &outcome); err != nil {
+				t.Fatalf("unsubmitted checkpoint failure JSON: %v\n%s", err, p.output.stdout.String())
+			}
+			if len(outcome) != 6 || outcome["schema"] != "crabbox.checkpoint.create.failure.v1" || outcome["outcome"] != "not_submitted" || outcome["provider"] != "machine0" || outcome["leaseId"] != captureFixtureLease || outcome["localReservation"] != "removed" || !strings.HasPrefix(outcome["checkpointId"], checkpointIDPrefix) {
+				t.Fatalf("unsubmitted checkpoint failure lost its exact operation: %+v", outcome)
+			}
+			if _, err := os.Lstat(filepath.Join(f.root, "state", "crabbox", "checkpoints", outcome["checkpointId"])); !os.IsNotExist(err) {
+				t.Fatalf("unsubmitted checkpoint reservation was not removed: %v", err)
 			}
 			result := f.run("stop", "--provider", "machine0", captureFixtureLease)
 			if result.err != nil || f.state().Machine != nil || f.state().Removes != 1 {

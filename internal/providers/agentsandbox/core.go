@@ -2,7 +2,7 @@ package agentsandbox
 
 import (
 	"context"
-	"flag"
+
 	"fmt"
 	"io"
 	"os"
@@ -66,14 +66,6 @@ func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
 }
 
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
-}
-
-func expandUserPath(path string) string {
-	return core.ExpandUserPath(path)
-}
-
 func blank(value, fallback string) string {
 	return core.Blank(value, fallback)
 }
@@ -96,12 +88,6 @@ func writeTimingJSON(w io.Writer, report core.TimingReport) error {
 
 func timingReportWithRunResult(report core.TimingReport, result RunResult, err error) core.TimingReport {
 	return core.TimingReportWithRunResult(report, result, err)
-}
-
-func timingReportWithProviderError(report core.TimingReport) core.TimingReport {
-	report.RunStatus = core.RunStatusFailed
-	report.ErrorKind = core.RunErrorProvider
-	return report
 }
 
 func handleDelegatedRunFailure(w io.Writer, cfg Config, req RunRequest, leaseID, slug string, acquired bool, shouldStop *bool) {

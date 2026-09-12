@@ -1,7 +1,6 @@
 package cloudflaresandbox
 
 import (
-	"flag"
 	"io"
 	"time"
 
@@ -30,28 +29,18 @@ type Server = core.Server
 type Repo = core.Repo
 type LeaseClaim = core.LeaseClaim
 type ExitError = core.ExitError
-type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 
 const (
 	providerName   = "cloudflare-sandbox"
 	providerFamily = "cloudflare"
 	leasePrefix    = "cfsbx_"
-	defaultWorkdir = "/workspace/crabbox"
 	targetLinux    = core.TargetLinux
 	NetworkPublic  = "public"
 )
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
-}
-
-func writeTimingJSON(w io.Writer, report core.TimingReport) error {
-	return core.WriteTimingJSON(w, report)
 }
 
 func newLeaseSlug(leaseID string) string {

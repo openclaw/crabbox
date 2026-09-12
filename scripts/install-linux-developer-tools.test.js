@@ -6,11 +6,53 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 import { loadRecipes } from "./generate-linux-readiness.mjs";
+import { writeExecutable } from "./test-support/smoke-fixtures.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const nodesourceSigningKeyFingerprint = "6F71F525282841EEDAF851B42F59B5F99B1BE0B4";
 const dockerSigningKeyFingerprint = "9DC858229FC7DD38854AE2D88D81803C0EBFCD88";
 const googleLinuxSigningKeyFingerprint = "EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796";
+
+for (const [platform, arch, major, expected] of [
+  ["Linux", "amd64", "24", true],
+  ["Linux", "amd64", "22", true],
+  ["Linux", "arm64", "24", false],
+  ["Darwin", "amd64", "24", false],
+]) {
+  test(`Go bake routing is independent of Node ${major} on ${platform}/${arch}`, (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-go-route-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const result = spawnSync(
+      "bash",
+      [
+        "-c",
+        `
+source scripts/install-linux-developer-tools.sh
+uname() { printf '%s\\n' "$FIXTURE_PLATFORM"; }
+dpkg() { printf '%s\\n' "$FIXTURE_ARCH"; }
+cache_public_toolchain_archives() { printf 'archive=%s\\n' "$@"; }
+install_pinned_go() { echo go-installed; }
+install_go_toolchain
+`,
+      ],
+      {
+        cwd: repoRoot,
+        env: {
+          PATH: process.env.PATH,
+          HOME: root,
+          TMPDIR: root,
+          CRABBOX_LINUX_NODE_MAJOR: major,
+          FIXTURE_ARCH: arch,
+          FIXTURE_PLATFORM: platform,
+        },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.includes("go-installed"), expected);
+    assert.equal(result.stdout.includes("archive=go1.27.0.linux-amd64.tar.gz"), expected);
+  });
+}
 
 test("linux developer image installs every readiness package from the generated effective builder profile", async () => {
   const { minimal, builder } = await loadRecipes();
@@ -28,12 +70,17 @@ test("linux developer image installs every readiness package from the generated 
   assert.doesNotMatch(source, /(?:>|tee\s+).*\/var\/lib\/crabbox(?:\/image-ready|-readiness\/linux\.json)/);
 });
 
-test("linux developer image executes the standalone producer and stops when capability proof fails", () => {
+test("linux developer image executes the standalone producer and stops when capability proof fails", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-readiness-installer-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const scriptRoot = path.join(root, "scripts");
   const marker = path.join(root, "producer.called");
+  const cleaned = path.join(root, "cleanup.called");
   fs.mkdirSync(scriptRoot);
-  fs.copyFileSync(path.join(repoRoot, "scripts/install-linux-developer-tools.sh"), path.join(scriptRoot, "install.sh"));
+  fs.copyFileSync(
+    path.join(repoRoot, "scripts/install-linux-developer-tools.sh"),
+    path.join(scriptRoot, "install.sh"),
+  );
   writeExecutable(
     path.join(scriptRoot, "linux-readiness.generated.sh"),
     `#!/usr/bin/env bash\nprintf 'verified\\n' >${JSON.stringify(marker)}\nexit \"\${CRABBOX_FAKE_PRODUCER_EXIT:-0}\"\n`,
@@ -42,24 +89,274 @@ test("linux developer image executes the standalone producer and stops when capa
 source ${JSON.stringify(path.join(scriptRoot, "install.sh"))}
 install() { return 0; }
 systemctl() { return 0; }
-cloud-init() { return 0; }
+clean_cloud_init_state() { printf 'cleaned\\n' >${JSON.stringify(cleaned)}; }
 sync() { return 0; }
 prepare_fast_boot`;
   const successful = spawnSync("bash", ["-c", shell], { cwd: repoRoot, encoding: "utf8" });
   assert.equal(successful.status, 0, successful.stderr || successful.stdout);
   assert.equal(fs.readFileSync(marker, "utf8"), "verified\n");
+  assert.equal(fs.readFileSync(cleaned, "utf8"), "cleaned\n");
+  fs.unlinkSync(cleaned);
   const failed = spawnSync("bash", ["-c", shell], {
     cwd: repoRoot,
     encoding: "utf8",
     env: { ...process.env, CRABBOX_FAKE_PRODUCER_EXIT: "73" },
   });
   assert.equal(failed.status, 73, failed.stderr || failed.stdout);
+  assert.equal(fs.existsSync(cleaned), false);
 });
 
-function writeExecutable(file, body) {
-	fs.writeFileSync(file, body, "utf8");
-	fs.chmodSync(file, 0o755);
-}
+test("linux developer image cloud-init cleanup preserves current-boot facts", async (t) => {
+  const python = spawnSync("python3", ["-c", "import sys; print(sys.executable)"], {
+    encoding: "utf8",
+  });
+  assert.equal(python.status, 0, python.stderr);
+  const source = fs.readFileSync(
+    path.join(repoRoot, "scripts/install-linux-developer-tools.sh"),
+    "utf8",
+  );
+  assert.equal(source.split("/usr/bin/python3").length, 2, "one distro Python invocation");
+  for (const scenario of [
+    { name: "completed boot survives cache and seed cleanup", cleaned: true },
+    { name: "cleanup failure after cache deletion", failure: "clean", cleaned: true },
+    { name: "completion status changes after cleanup", failure: "after-clean", cleaned: true },
+    { name: "initialization still running", failure: "running" },
+    { name: "initialization not started", failure: "notstarted" },
+    { name: "cloud-init disabled", failure: "disabled" },
+    { name: "status command fails", failure: "status" },
+    { name: "malformed status", failure: "malformed" },
+    { name: "persistent runtime filesystem", failure: "disk" },
+    { name: "filesystem inspection fails", failure: "stat" },
+    { name: "runtime inside cleaned cache", failure: "overlap" },
+    { name: "runtime symlink inside cleaned cache", failure: "overlap-link" },
+    { name: "second completion copy fails", failure: "copy" },
+    { name: "cloud-init absent", failure: "absent" },
+    { name: "hostile fixture paths preserve completed boot", cleaned: true, hostilePath: true },
+    {
+      name: "hostile fixture paths stop after failed cleanup",
+      failure: "clean",
+      cleaned: true,
+      hostilePath: true,
+    },
+  ]) {
+    await t.test(scenario.name, (t) => {
+      const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-cloud-init-")));
+      t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+      // Substitutions may only create file canaries in this fixture's working directory.
+      const root = scenario.hostilePath
+        ? path.join(cwd, "spaces $(>dollar-canary) `>backtick-canary` ' \" quotes")
+        : cwd;
+      const assertNoSubstitution = () => {
+        for (const name of ["dollar-canary", "backtick-canary"]) {
+          assert.equal(
+            fs.existsSync(path.join(cwd, name)),
+            false,
+            `fixture paths must not execute shell substitutions: ${name}`,
+          );
+        }
+      };
+      const bin = path.join(root, "bin");
+      const cache = path.join(root, "cloud");
+      const data = path.join(cache, "data");
+      const seed = path.join(cache, "seed");
+      const runtime =
+        scenario.failure === "overlap"
+          ? path.join(cache, "runtime")
+          : path.join(root, "run", "cloud-init");
+      for (const directory of [bin, data, seed, runtime])
+        fs.mkdirSync(directory, { recursive: true });
+      const interpreter = scenario.hostilePath ? path.join(root, "python") : python.stdout.trim();
+      if (scenario.hostilePath) fs.symlinkSync(python.stdout.trim(), interpreter);
+      fs.writeFileSync(path.join(seed, "user-data"), "synthetic seed\n");
+      let configuredRuntime = runtime;
+      if (scenario.failure === "overlap-link") {
+        configuredRuntime = path.join(cache, "runtime-link");
+        fs.symlinkSync(runtime, configuredRuntime);
+      }
+      const facts = {
+        "status.json": '{"v1":{"modules-final":{"finished":123}}}\n',
+        "result.json": '{"v1":{"errors":[]}}\n',
+      };
+      const originals = {};
+      for (const [name, contents] of Object.entries(facts)) {
+        const target = path.join(data, name);
+        fs.writeFileSync(target, contents);
+        fs.chmodSync(target, name === "status.json" ? 0o644 : 0o640);
+        originals[name] = fs.statSync(target);
+        fs.symlinkSync(path.relative(runtime, target), path.join(runtime, name));
+      }
+      const events = path.join(root, "events");
+      const cloudInit = path.join(bin, "cloud-init");
+      const cli = path.join(root, "cloud-init.py");
+      fs.writeFileSync(
+        cli,
+        `import json, os, pathlib, shutil, sys
+args = sys.argv[1:]
+runtime = pathlib.Path(os.environ["FIXTURE_RUN"])
+failure = os.environ["FIXTURE_FAILURE"]
+if args == ["status", "--format=json"]:
+    if failure == "status":
+        sys.exit(4)
+    if failure == "malformed":
+        print("not json")
+        sys.exit(0)
+    status = failure if failure in ("running", "notstarted", "disabled") else "done"
+    if failure == "after-clean" and "clean\\n" in pathlib.Path(os.environ["FIXTURE_EVENTS"]).read_text():
+        status = "notstarted"
+    if not all((runtime / name).is_file() for name in ("status.json", "result.json")):
+        status = "notstarted"
+    print(json.dumps({"status": status}))
+elif args == ["clean", "--logs", "--seed"]:
+    with open(os.environ["FIXTURE_EVENTS"], "a") as log:
+        log.write("clean\\n")
+    shutil.rmtree(os.environ["FIXTURE_DATA"], ignore_errors=True)
+    shutil.rmtree(os.environ["FIXTURE_SEED"], ignore_errors=True)
+    if failure == "clean":
+        sys.exit(7)
+else:
+    sys.exit("unexpected cloud-init arguments")
+`,
+      );
+      if (scenario.failure !== "absent") {
+        writeExecutable(
+          cloudInit,
+          '#!/bin/sh\nexec "$FIXTURE_PYTHON" -I "$FIXTURE_CLOUD_INIT_SCRIPT" "$@"\n',
+        );
+      }
+      // Exercise the installer body with the existing checkpoint fixture's distro-module boundary.
+      const fixture = path.join(root, "fixture.py");
+      fs.writeFileSync(
+        fixture,
+        `import os, shutil, subprocess, sys, types
+module = types.ModuleType("cloudinit.cmd.devel")
+module.read_cfg_paths = lambda: types.SimpleNamespace(run_dir=os.environ["FIXTURE_RUN"], cloud_dir=os.environ["FIXTURE_CACHE"])
+sys.modules["cloudinit.cmd.devel"] = module
+run = subprocess.run
+def fixture_run(args, **kwargs):
+    if args[:4] == [sys.executable, "-I", "-m", "cloudinit.cmd.main"]:
+        args = [os.environ["FIXTURE_CLI"]] + args[4:]
+    return run(args, **kwargs)
+subprocess.run = fixture_run
+copy = shutil.copy2
+def fixture_copy(source, target):
+    if os.environ["FIXTURE_FAILURE"] == "copy" and source.name == "result.json":
+        raise OSError("injected second-copy failure")
+    return copy(source, target)
+shutil.copy2 = fixture_copy
+assert sys.argv[1:] == ["-I", "-"]
+exec(compile(sys.stdin.read(), "installer-cloud-init-preparation", "exec"))
+`,
+      );
+      const wrapper = path.join(bin, "python-wrapper");
+      writeExecutable(
+        wrapper,
+        '#!/bin/sh\nexec "$FIXTURE_PYTHON" -I "$FIXTURE_MODULE_SCRIPT" "$@"\n',
+      );
+      writeExecutable(
+        path.join(bin, "stat"),
+        `#!/bin/sh
+if [ "$FIXTURE_FAILURE" = stat ]; then exit 9; fi
+if [ "$FIXTURE_FAILURE" = disk ]; then printf 'ext4\\n'; else printf 'tmpfs\\n'; fi
+`,
+      );
+      const producer = path.join(bin, "producer");
+      writeExecutable(producer, "#!/bin/sh\nexit 0\n");
+      const installer = path.join(root, "install.sh");
+      fs.writeFileSync(installer, source.replace("/usr/bin/python3", '"$FIXTURE_PYTHON_WRAPPER"'));
+      const shell = `set -euo pipefail
+source "$1"
+readiness_producer_path() { printf '%s\\n' "$FIXTURE_PRODUCER"; }
+install() { return 0; }
+systemctl() { return 0; }
+sync() { printf 'sync\\n' >>"$FIXTURE_EVENTS"; }
+print_versions() { printf 'versions\\n' >>"$FIXTURE_EVENTS"; }
+prepare_fast_boot
+print_versions`;
+      const env = {
+        PATH: bin,
+        HOME: root,
+        FIXTURE_FAILURE: scenario.failure ?? "",
+        FIXTURE_RUN: configuredRuntime,
+        FIXTURE_CACHE: cache,
+        FIXTURE_DATA: data,
+        FIXTURE_SEED: seed,
+        FIXTURE_CLI: cloudInit,
+        FIXTURE_EVENTS: events,
+        FIXTURE_PRODUCER: producer,
+        FIXTURE_PYTHON: interpreter,
+        FIXTURE_CLOUD_INIT_SCRIPT: cli,
+        FIXTURE_MODULE_SCRIPT: fixture,
+        FIXTURE_PYTHON_WRAPPER: wrapper,
+      };
+      const fails = Boolean(scenario.failure && scenario.failure !== "absent");
+      for (let attempt = 0; attempt < 2; attempt++) {
+        fs.writeFileSync(events, "");
+        const result = spawnSync("/bin/bash", ["-c", shell, "installer-fixture", installer], {
+          cwd,
+          env,
+          encoding: "utf8",
+          timeout: 10000,
+        });
+        assertNoSubstitution();
+        assert.equal(result.error, undefined);
+        assert.equal(result.signal, null);
+        if (fails) assert.notEqual(result.status, 0, `${scenario.name}: cleanup must fail closed`);
+        else assert.equal(result.status, 0, result.stderr || result.stdout);
+        if (scenario.cleaned) {
+          const status = spawnSync(cloudInit, ["status", "--format=json"], {
+            cwd,
+            env: { ...env, FIXTURE_FAILURE: "" },
+            encoding: "utf8",
+            timeout: 10000,
+          });
+          assertNoSubstitution();
+          assert.equal(status.status, 0, status.stderr);
+          assert.equal(
+            JSON.parse(status.stdout).status,
+            "done",
+            "clean must not leave dangling current-boot completion records",
+          );
+        }
+        for (const [name, contents] of Object.entries(facts)) {
+          const file = path.join(runtime, name);
+          assert.equal(fs.readFileSync(file, "utf8"), contents);
+          const original = originals[name];
+          const actual = fs.statSync(file);
+          assert.equal(actual.mode & 0o777, original.mode & 0o777);
+          assert.equal(actual.uid, original.uid);
+          assert.equal(actual.gid, original.gid);
+          if (scenario.cleaned)
+            assert.ok(fs.lstatSync(file).isFile(), "preserved facts must be regular runtime files");
+        }
+        assert.equal(fs.existsSync(data), !scenario.cleaned, "disk completion cache cleanup");
+        assert.equal(fs.existsSync(seed), !scenario.cleaned, "seed cleanup");
+        assert.deepEqual(
+          fs.readFileSync(events, "utf8").trim().split("\n").filter(Boolean),
+          [...(scenario.cleaned ? ["clean"] : []), ...(!fails ? ["sync", "versions"] : [])],
+          "failed preparation must not sync or print success versions",
+        );
+        assert.deepEqual(
+          fs.readdirSync(runtime).sort(),
+          Object.keys(facts).sort(),
+          "no temporary completion copies may remain",
+        );
+      }
+      if (scenario.cleaned) {
+        // A new boot does not inherit tmpfs facts or the cleaned disk cache/seed.
+        for (const name of Object.keys(facts)) fs.unlinkSync(path.join(runtime, name));
+        const nextBoot = spawnSync(cloudInit, ["status", "--format=json"], {
+          cwd,
+          env: { ...env, FIXTURE_FAILURE: "" },
+          encoding: "utf8",
+          timeout: 10000,
+        });
+        assertNoSubstitution();
+        assert.equal(nextBoot.status, 0, nextBoot.stderr);
+        assert.equal(JSON.parse(nextBoot.stdout).status, "notstarted");
+      }
+    });
+  }
+});
 
 function writeFakeGPG(bin) {
 	writeExecutable(
@@ -302,6 +599,7 @@ exit 1
 				...process.env,
 				PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
 				CRABBOX_FAKE_GPG_LOG: log,
+				CRABBOX_LINUX_NODE_MAJOR: "22",
 				CRABBOX_LINUX_APT_KEYRINGS_DIR: keyrings,
 				CRABBOX_LINUX_APT_SOURCES_DIR: sources,
 				CRABBOX_LINUX_APT_CONF_DIR: aptConf,
@@ -354,7 +652,7 @@ exit 1
 for (const repository of [
 	{
 		name: "NodeSource",
-		functionCall: "node_toolchain_ready() { return 0; }; add_nodesource",
+		functionCall: "add_nodesource",
 		keyring: "nodesource.gpg",
 		source: "nodesource.list",
 		expectedFingerprint: nodesourceSigningKeyFingerprint,
@@ -408,6 +706,7 @@ printf 'unexpected-key\n'
 					PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
 					CRABBOX_FAKE_GPG_FINGERPRINT: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 					CRABBOX_FAKE_GPG_LOG: log,
+					CRABBOX_LINUX_NODE_MAJOR: "22",
 					CRABBOX_LINUX_APT_KEYRINGS_DIR: keyrings,
 					CRABBOX_LINUX_APT_SOURCES_DIR: sources,
 					CRABBOX_LINUX_OS_RELEASE_FILE: osRelease,
@@ -467,6 +766,7 @@ printf 'reviewed-key\n'
 					...process.env,
 					PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
 					CRABBOX_FAKE_GPG_LOG: log,
+					CRABBOX_LINUX_NODE_MAJOR: "22",
 					CRABBOX_LINUX_APT_KEYRINGS_DIR: keyrings,
 					CRABBOX_LINUX_APT_SOURCES_DIR: sources,
 					CRABBOX_LINUX_OS_RELEASE_FILE: osRelease,
@@ -762,21 +1062,54 @@ test("linux developer image keeps the existing TruffleHog binary when candidate 
 test("linux developer image reports TruffleHog from the configured install directory", () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-trufflehog-version-"));
 	const fixture = installTruffleHogFixture(dir);
+	const goLinkDir = path.join(dir, "go-links");
 	const osRelease = path.join(dir, "os-release");
+	fs.mkdirSync(goLinkDir);
 	fs.writeFileSync(osRelease, "PRETTY_NAME='Test Linux'\n", "utf8");
 	writeExecutable(
 		path.join(fixture.targetBin, "trufflehog"),
 		"#!/usr/bin/env bash\nprintf 'trufflehog 3.95.9\\n'\n",
 	);
-	for (const command of ["git", "gh", "jq", "rg", "fd", "python3", "node", "npm", "corepack", "pnpm", "docker"]) {
+	writeExecutable(
+		path.join(goLinkDir, "go"),
+		"#!/usr/bin/env bash\nprintf 'go version go1.27.0 linux/amd64\\n'\n",
+	);
+	for (const command of [
+		"git",
+		"gh",
+		"jq",
+		"rg",
+		"fd",
+		"python3",
+		"node",
+		"npm",
+		"corepack",
+		"pnpm",
+		"bun",
+		"docker",
+	]) {
 		writeExecutable(
 			path.join(fixture.bin, command),
 			`#!/usr/bin/env bash\nprintf '${command} test-version\\n'\n`,
 		);
 	}
+	writeExecutable(path.join(fixture.bin, "bunx"), "#!/usr/bin/env bash\nexit 0\n");
+	writeExecutable(
+		path.join(fixture.bin, "getconf"),
+		"#!/usr/bin/env bash\n[[ \"$*\" == \"GNU_LIBC_VERSION\" ]] && printf 'glibc 2.39\\n'\n",
+	);
+	writeExecutable(
+		path.join(fixture.bin, "uname"),
+		"#!/usr/bin/env bash\ncase \"${1:-}\" in\n  -s) printf 'Linux\\n' ;;\n  -m) printf 'x86_64\\n' ;;\nesac\n",
+	);
 	const result = spawnSync(
 		"bash",
-		["-c", "set -euo pipefail\nsource scripts/install-linux-developer-tools.sh\nprint_versions"],
+		[
+			"-c",
+			'set -euo pipefail\nsource scripts/install-linux-developer-tools.sh\ngo_link_dir="$1"\nprint_versions',
+			"bash",
+			goLinkDir,
+		],
 		{
 			cwd: repoRoot,
 			env: {
@@ -790,6 +1123,9 @@ test("linux developer image reports TruffleHog from the configured install direc
 	);
 
 	assert.equal(result.status, 0, result.stderr || result.stdout);
+	assert.match(result.stdout, /go version go1\.27\.0 linux\/amd64/);
+	assert.match(result.stdout, /bun test-version/);
+	assert.match(result.stdout, new RegExp(`${fixture.bin}/bunx`));
 	assert.match(result.stdout, /trufflehog 3\.95\.9/);
 });
 
@@ -797,4 +1133,50 @@ test("linux developer image keeps pinned TruffleHog probes update-free", () => {
 	const script = fs.readFileSync(path.join(repoRoot, "scripts/install-linux-developer-tools.sh"), "utf8");
 	assert.match(script, /"\$binary" --no-update --version/);
 	assert.match(script, /"\$trufflehog_bin_dir\/trufflehog" --no-update --version/);
+});
+
+for (const major of ["24", "22"]) {
+  test(`Node-only bootstrap uses the shared Node ${major} route without image extras`, () => {
+    const result = spawnSync("bash", ["-c", `
+source scripts/install-linux-developer-tools.sh
+need_root() { :; }
+retry() { printf 'retry=%s\\n' "$*"; }
+apt_install() { printf 'packages=%s\\n' "$*"; }
+dpkg() { echo amd64; }
+public_tool_links() { :; }
+add_nodesource() { echo repository; }
+cache_public_toolchain_archives() { printf 'archives=%s\\n' "$*"; }
+install_pinned_node() { echo pinned-node; }
+install_requested_node() { echo requested-node; }
+node() { printf 'v%s.0.0\\n' "$node_major"; }
+npm() { echo npm-version; }
+corepack() { printf 'corepack=%s\\n' "$*"; }
+main --node-only
+main --node-only
+`], { cwd: repoRoot, env: { PATH: process.env.PATH, CRABBOX_LINUX_NODE_MAJOR: major }, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.split("npm-version").length - 1, 2);
+    assert.match(result.stdout, /packages=ca-certificates curl gnupg python3-minimal xz-utils/);
+    if (major === "24") {
+      assert.equal(result.stdout.split("pinned-node").length - 1, 2);
+      assert.match(result.stdout, /archives=node-v24\.19\.0-linux-x64\.tar\.xz/);
+    } else {
+      assert.equal(result.stdout.split("requested-node").length - 1, 2);
+    }
+    assert.doesNotMatch(result.stdout, /pnpm-.*tgz|corepack=prepare|docker|chrome|go1\./);
+    assert.match(result.stderr, /Node baseline installed in \d+s/);
+  });
+}
+
+test("Node runtime stops before installation when archive caching fails", () => {
+  const result = spawnSync("bash", ["-c", `
+source scripts/install-linux-developer-tools.sh
+dpkg() { echo amd64; }
+public_tool_links() { :; }
+cache_public_toolchain_archives() { return 41; }
+install_pinned_node() { echo unexpected-install; }
+install_node_runtime || exit $?
+`], { cwd: repoRoot, env: { PATH: process.env.PATH }, encoding: "utf8" });
+  assert.equal(result.status, 41, result.stderr);
+  assert.doesNotMatch(result.stdout, /unexpected-install/);
 });

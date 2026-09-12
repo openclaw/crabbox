@@ -996,7 +996,7 @@ func createClaim(t *testing.T, b *backend, leaseID, slug, jobID, allocID string)
 		DesiredStatus: nomadapi.AllocDesiredStatusRun,
 		TaskState:     "running",
 	}
-	expiresAt := b.now().Add(time.Hour)
+	expiresAt := core.ClockNow(b.rt.Clock).Add(time.Hour)
 	claim, err := writeNomadClaim(b.cfg, leaseID, slug, Repo{Root: filepath.Join(t.TempDir(), "repo"), Name: "repo"}, false, ready, expiresAt)
 	if err != nil {
 		t.Fatal(err)

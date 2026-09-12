@@ -104,6 +104,25 @@ Trusted local config may also set `apiUrl` and `workspace`. Repository config ma
 set only non-secret runtime settings such as region, image, memory, lifetimes,
 workdir, exec timeout, and `forgetMissing`.
 
+All eleven bindings share one typed declaration. The API key remains
+environment-only, with no YAML or flag field. API URL and workspace retain their
+trusted-file gate. Empty YAML strings preserve earlier URL/workspace/region/TTL
+values; explicit empty image and workdir values still apply. Environment strings
+retain raw nonempty primary/alias precedence.
+
+Memory uses the existing source-specific rules: negative YAML is rejected
+immediately, but malformed, padded, or out-of-range `CRABBOX_BLAXEL_MEMORY_MB`
+input retains the earlier value. A parsed negative environment value continues
+to the existing later provider validation. Exec-timeout environment input stays
+strict and can fail before later boolean application. Flags retain their existing
+opportunity to override earlier values before semantic validation.
+
+The client, validator, doctor, create request, workdir, and exec-timeout helpers
+share the compiled defaults while retaining their raw-empty/trimmed-empty and
+zero-value distinctions. Memory zero remains a service default; exec-timeout zero
+retains its Crabbox fallback. Upload, retry, lifetime, and cleanup policy are
+unchanged.
+
 Provider flags:
 
 ```text
@@ -173,10 +192,19 @@ claim and remote ownership validation. `--no-sync` creates no archive.
    retains it. `stop` deletes a retained sandbox only after the local claim and
    remote ownership labels match.
 
+Run finalization is shared with other delegated sandboxes. Automatic sandbox
+deletion failures fail an otherwise successful run and retain a recovery
+session; later cleanup or timing-report errors cannot replace a primary
+command failure. Early setup failures also honor `--keep-on-failure` and retain
+their session metadata. Cleanup compares the original local claim and remote
+ownership labels before deletion, with its timeout covering the claim-lock wait.
+These run changes do not change explicit stop's `forgetMissing` policy.
+
 Sync timing counts preparation once and excludes provisioning wait. Archive
 construction uses `sync.timeout`; a prepared archive's construction time reduces
 the subsequent transfer budget. Manifest/preflight checks are outside that
-budget. Cleanup failures are warnings and preserve the primary sync error.
+budget. Archive temporary-file cleanup failures are warnings and preserve the
+primary sync error.
 
 Cancellation during process polling attempts to stop the original process with a bounded
 cleanup context, even when the interrupted HTTP request failed before response

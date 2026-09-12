@@ -89,7 +89,16 @@ Supported `uses:` steps:
   `persist-credentials`, `set-safe-directory`, and disabled `submodules`/`lfs`
   are accepted, anything else needs `--github-runner`);
 - `actions/setup-node@*`, `actions/setup-go@*`, `actions/setup-python@*` —
-  honoring `*-version` / `*-version-file`;
+  honoring `*-version` / `*-version-file`; setup-node also accepts `cache: pnpm`
+  but explicitly skips cache restore/save (local hydration runs uncached);
+- `pnpm/action-setup@*` — requires an explicit exact `version` (`major.minor.patch`,
+  including simple expressions). Installs that pnpm version into the managed
+  tool cache using npm, without lifecycle scripts. If Node or npm is absent,
+  bootstraps Node 24 so this step can precede setup-node; a later setup-node
+  still selects the requested project runtime. The selected pnpm stays on PATH
+  for hydration and subsequent commands. Version inference/ranges, custom
+  destinations, standalone mode, dependency installation, and caching inputs
+  are not supported; use a separate `run: pnpm install` step;
 - `actions/cache/restore@*` — reports a cache miss;
 - `actions/cache/save@*` — skipped;
 - repo-local composite actions (`./...`).

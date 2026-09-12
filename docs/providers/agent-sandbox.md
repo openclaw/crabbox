@@ -238,6 +238,39 @@ Retained claims whose pinned TTL elapsed, or whose controller condition reports
 `ClaimExpired` or `SandboxExpired`, return the terminal `expired` state without
 waiting for missing downstream resources.
 
+### Bound run outcomes
+
+Once a fresh claim is ready, or reuse has positively matched the live claim's
+identity, one finalization path reports its final code, status, retention and
+timing. Reuse that fails readiness retains the bound handle without a final
+activity refresh or keep-on-failure rerun hint. Explicit missing-root forgetting
+removes only local recovery state; it is not proof of controller or pod deletion.
+Creation/readiness rollback before a fresh run binds remains part of acquisition.
+
+Readiness deadlines and cancellation determine the reported run outcome even
+when the last probe returned a different error. The last diagnostic and its
+public exit code remain available; a stage timeout alone does not authorize
+TTL cleanup or missing-root forgetting.
+
+TTL expiry still forces one UID-checked release attempt even for reused or kept
+claims and when `deleteOnRelease` is false. Expiry before command admission keeps
+exit 4. Expiry after a successful command fails with code 1; an earlier command
+exit or cancellation remains primary, with expiry and cleanup errors added as
+diagnostics. Ordinary cleanup failure keeps a recovery handle and fails the run;
+it does not refresh an expired or already-released claim. A failed local claim
+removal after Kubernetes accepted deletion also retains the local recovery handle.
+
+Requested timing is attempted once for every positively bound outcome, including
+early readiness/setup failures, after resource finalization while the operation
+lock is held. Result and timing share the same primary classification and include
+release duration. A timing-writer error is terminal: its first nonzero typed code
+(or fallback 1) is retained, while an earlier primary error wins. The failed
+record is not retried or claimed as emitted, and reporting failure does not
+retroactively retain an otherwise released one-shot claim. Typed setup/transport
+errors retain the public CLI error code without being labeled workload exits. A first
+activity-refresh failure after an ordinary command also retains its nonzero typed
+public code; sync-only activity failures retain their existing exit-1 contract.
+
 ## Claim Scope And Cleanup Safety
 
 Local claim IDs use the `asbx_` prefix. The provider scope includes the

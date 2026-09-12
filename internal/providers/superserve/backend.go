@@ -76,7 +76,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if _, err := superserveWorkdir(b.cfg); err != nil {
 		return err
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	api, err := b.client()
 	if err != nil {
 		return err
@@ -90,18 +90,13 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: superserve warmup keeps the sandbox until explicit stop\n")
 	}
-	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  leaseID,
-			Slug:     slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	total := core.ClockNow(b.rt.Clock).Sub(started)
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
 
 func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
@@ -145,7 +140,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
 			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-superserve-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+				TempPattern: "crabbox-superserve-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 			})
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
@@ -288,7 +283,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	if waitTimeout <= 0 {
 		waitTimeout = 5 * time.Minute
 	}
-	deadline := b.now().Add(waitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(waitTimeout)
 	pollCtx := ctx
 	cancel := func() {}
 	if req.Wait {
@@ -334,7 +329,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		if isTerminalState(state) {
 			return StatusView{}, exit(5, "superserve sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
-		if b.now().After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return StatusView{}, exit(5, "timed out waiting for superserve sandbox %s to become ready", sandboxID)
 		}
 		select {
@@ -394,7 +389,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	if err != nil {
 		return err
 	}
-	now := b.now().UTC()
+	now := core.ClockNow(b.rt.Clock).UTC()
 	checked := 0
 	removed := 0
 	claimsRemoved := 0
@@ -772,13 +767,6 @@ func superserveCommandEnv(env map[string]string) (map[string]string, []string) {
 	}
 	slices.Sort(stripped)
 	return out, stripped
-}
-
-func (b *backend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }
 
 func normalizedSandboxState(sb superserveSandbox) string {

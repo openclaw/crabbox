@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -36,7 +35,6 @@ type LocalCommandRequest = core.LocalCommandRequest
 type LocalCommandResult = core.LocalCommandResult
 type ExitError = core.ExitError
 type LeaseClaim = core.LeaseClaim
-type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 
 const (
@@ -54,10 +52,6 @@ type statusView = core.StatusView
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
 }
 
 func validateNativeCredentialDestination(cfg Config) error {
@@ -102,10 +96,6 @@ func removeLeaseClaimIfUnchangedAfter(leaseID string, claim LeaseClaim, action f
 
 func listLeaseClaims() ([]core.LeaseClaim, error) {
 	return core.ListLeaseClaims()
-}
-
-func writeTimingJSON(w io.Writer, report timingReport) error {
-	return core.WriteTimingJSON(w, report)
 }
 
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {

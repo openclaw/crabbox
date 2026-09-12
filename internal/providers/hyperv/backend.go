@@ -72,13 +72,7 @@ func applyDefaults(cfg *Config) {
 			cfg.HyperV.User = "crabbox"
 		}
 	}
-	if cfg.HyperV.WorkRoot == "" {
-		if !core.IsDefaultWorkRoot(cfg.WorkRoot) {
-			cfg.HyperV.WorkRoot = cfg.WorkRoot
-		} else {
-			cfg.HyperV.WorkRoot = `C:\crabbox`
-		}
-	}
+	cfg.HyperV.WorkRoot = core.ResolveInheritedWorkRoot(cfg.HyperV.WorkRoot, cfg.WorkRoot, `C:\crabbox`)
 	if cfg.HyperV.CPUs <= 0 {
 		cfg.HyperV.CPUs = 4
 	}
@@ -662,7 +656,8 @@ func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error
 		if lastErr == nil {
 			lastErr = budgetCtx.Err()
 		}
-		return fmt.Errorf("guest %s did not accept PowerShell Direct within %s: %w", vmName, b.guestReadyBudget, lastErr)
+		diagnostic := fmt.Errorf("guest %s did not accept PowerShell Direct within %s: %w", vmName, b.guestReadyBudget, lastErr)
+		return shared.PollTerminationError(budgetCtx, err, diagnostic)
 	}
 	return err
 }

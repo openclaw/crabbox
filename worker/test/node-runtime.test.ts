@@ -1,9 +1,14 @@
 import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
+import { createServer } from "node:http";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { WebSocket as NodeWebSocket } from "ws";
 
+import { routeCoordinatorRequest } from "../src/coordinator-entry";
 import type { CoordinatorStorageView } from "../src/coordinator-runtime";
+import { FleetCoordinator } from "../src/fleet";
+import type { Env } from "../src/types";
 import { ProvisioningTestStorage } from "./provisioning-fixtures";
 
 type OperationRunner = <T>(callback: () => Promise<T>) => Promise<T>;
@@ -56,7 +61,7 @@ vi.mock("../node/postgres-storage", () => ({
 }));
 
 import { NodeCoordinatorRuntime } from "../node/node-runtime";
-import { AsyncMutex } from "../node/server-support";
+import { AsyncMutex, fleetRequestQueue } from "../node/server-support";
 
 describe("NodeCoordinatorRuntime", () => {
   beforeEach(() => {
@@ -69,6 +74,79 @@ describe("NodeCoordinatorRuntime", () => {
     mocks.storage.list.mockImplementation((options) =>
       storage.list(options as Parameters<CoordinatorStorageView["list"]>[0]),
     );
+  });
+
+  it("accepts a control handshake during unrelated lifecycle work and still queues messages", async () => {
+    const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
+    const mutex = new AsyncMutex();
+    runtime.setOperationRunner((callback) => mutex.run(callback));
+    const env = {
+      CRABBOX_SHARED_TOKEN: "synthetic-control-token",
+      CRABBOX_SHARED_OWNER: "alice@example.com",
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env;
+    const fleet = new FleetCoordinator(runtime, env);
+    const server = createServer();
+    const upgrades: Promise<unknown>[] = [];
+    server.on("upgrade", (request, socket, head) => {
+      const headers = new Headers();
+      for (let index = 0; index < request.rawHeaders.length; index += 2) {
+        headers.append(request.rawHeaders[index]!, request.rawHeaders[index + 1]!);
+      }
+      const context = { request, socket, head, upgraded: false };
+      upgrades.push(
+        runtime.runWithUpgrade(context, () =>
+          routeCoordinatorRequest(
+            new Request(`http://localhost${request.url}`, { headers }),
+            env,
+            (prepared) =>
+              fleetRequestQueue(prepared) === "direct"
+                ? fleet.fetch(prepared)
+                : mutex.run(() => fleet.fetch(prepared)),
+          ),
+        ),
+      );
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("missing fixture listener");
+    const release = deferred<void>();
+    const entered = deferred<void>();
+    const lifecycle = runtime.runExclusive(async () => {
+      entered.resolve();
+      await release.promise;
+    });
+    await entered.promise;
+    const client = new NodeWebSocket(`ws://127.0.0.1:${address.port}/v1/control`, {
+      headers: { authorization: "Bearer synthetic-control-token" },
+    });
+    const opened = new Promise<void>((resolve, reject) => {
+      client.once("open", resolve);
+      client.once("error", reject);
+    });
+    const messages: unknown[] = [];
+    client.on("message", (data) => messages.push(JSON.parse(data.toString())));
+    try {
+      await vi.waitFor(() =>
+        expect(messages).toEqual([expect.objectContaining({ type: "hello" })]),
+      );
+      client.send(JSON.stringify({ type: "ping" }));
+      const transportPong = new Promise<void>((resolve) => client.once("pong", resolve));
+      client.ping();
+      await transportPong;
+      expect(messages).toHaveLength(1);
+      release.resolve();
+      await lifecycle;
+      await vi.waitFor(() => expect(messages.at(-1)).toEqual({ type: "pong" }));
+    } finally {
+      release.resolve();
+      await lifecycle;
+      await Promise.all(upgrades);
+      await opened;
+      client.terminate();
+      await runtime.stop();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("allows an active alarm to enqueue one successor", async () => {

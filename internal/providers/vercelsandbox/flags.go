@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func RegisterVercelSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any {
@@ -17,18 +18,19 @@ func RegisterVercelSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyVercelSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if strings.EqualFold(strings.TrimSpace(cfg.Provider), providerName) {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=vercel-sandbox; use --vercel-sandbox-vcpus")
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=vercel-sandbox; use --vercel-sandbox-runtime or --vercel-sandbox-vcpus")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --vercel-sandbox-vcpus", "use --vercel-sandbox-runtime or --vercel-sandbox-vcpus"); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(core.VercelSandboxConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	v.Apply(&cfg.VercelSandbox, fs)
+	applied, err := v.Apply(&cfg.VercelSandbox, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	if err != nil {
+		return err
+	}
 	return validateVercelSandboxConfig(*cfg)
 }
 

@@ -21,6 +21,7 @@ func (Provider) Aliases() []string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationLocalContext),
 		Name:             providerName,
 		Family:           "local-sandbox",
 		Kind:             core.ProviderKindDelegatedRun,

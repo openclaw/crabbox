@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -1775,4 +1776,108 @@ func containsEnv(env []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestTensorlakeConfigFlagContract(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.Provider = "aws"
+	cfg.Tensorlake.NoInternet = true
+	fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+	values := RegisterTensorlakeProviderFlags(fs, cfg)
+	count := 0
+	fs.VisitAll(func(*flag.Flag) { count++ })
+	if count != 13 || fs.Lookup("tensorlake-api-key") != nil {
+		t.Fatalf("flag count=%d", count)
+	}
+	original := cfg.Tensorlake
+	if err := ApplyTensorlakeProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tensorlake != original {
+		t.Fatal("unvisited changed")
+	}
+	args := []string{"--tensorlake-api-url=", "--tensorlake-cli=  ", "--tensorlake-image=image", "--tensorlake-snapshot=snapshot", "--tensorlake-organization-id=org", "--tensorlake-project-id=project", "--tensorlake-namespace=namespace", "--tensorlake-workdir=/workspace/test", "--tensorlake-cpus=-0.25", "--tensorlake-memory-mb=0", "--tensorlake-disk-mb=-2", "--tensorlake-timeout-secs=-3", "--tensorlake-no-internet=false"}
+	if err := fs.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyTensorlakeProviderFlags(&cfg, fs, struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tensorlake != original {
+		t.Fatal("wrong values type changed config")
+	}
+	if err := ApplyTensorlakeProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	want := core.TensorlakeConfig{APIKey: original.APIKey, CLIPath: "  ", Image: "image", Snapshot: "snapshot", OrganizationID: "org", ProjectID: "project", Namespace: "namespace", Workdir: "/workspace/test", CPUs: -0.25, MemoryMB: 0, DiskMB: -2, TimeoutSecs: -3}
+	if cfg.Tensorlake != want {
+		t.Fatalf("flags=%#v want=%#v", cfg.Tensorlake, want)
+	}
+}
+
+func TestTensorlakeConfigConstructorAndFallbacks(t *testing.T) {
+	runner := newRunner(nil, nil)
+	cfg := newTestConfig()
+	cfg.Tensorlake.APIKey = "  "
+	cfg.Tensorlake.APIURL = ":invalid"
+	if _, err := newTensorlakeCLI(cfg, Runtime{}); err == nil || !strings.Contains(err.Error(), "requires TENSORLAKE_API_KEY") {
+		t.Fatalf("key order: %v", err)
+	}
+	cfg.Tensorlake.APIKey = "inert-key"
+	if _, err := newTensorlakeCLI(cfg, Runtime{}); err == nil || !strings.Contains(err.Error(), "requires Runtime.Exec") {
+		t.Fatalf("exec order: %v", err)
+	}
+	if _, err := newTensorlakeCLI(cfg, newTestRuntime(runner)); err == nil {
+		t.Fatal("invalid URL accepted")
+	}
+	for _, raw := range []string{"", "  "} {
+		cfg.Tensorlake.APIURL = ""
+		cfg.Tensorlake.CLIPath = raw
+		cfg.Tensorlake.Workdir = raw
+		cfg.Tensorlake.Namespace = raw
+		cli, err := newTensorlakeCLI(cfg, newTestRuntime(runner))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cli.cfg.Tensorlake.APIURL != "https://api.tensorlake.ai" || cli.cfg.Tensorlake.Namespace != "default" || cli.binary() != "tensorlake" {
+			t.Fatal("effective fallback changed")
+		}
+		wd, err := tensorlakeWorkdir(cfg)
+		if err != nil || wd != "/workspace/crabbox" {
+			t.Fatalf("workdir=%q err=%v", wd, err)
+		}
+	}
+	cfg.Tensorlake.APIURL = "  "
+	if _, err := newTensorlakeCLI(cfg, newTestRuntime(runner)); err == nil {
+		t.Fatal("raw whitespace APIURL must not receive empty-string default")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatal("constructor unexpectedly executed runner")
+	}
+}
+
+func TestTensorlakeConfigCreateArgvContract(t *testing.T) {
+	for _, sizing := range []int{-2, 0, 2} {
+		runner := newRunner(map[string]scriptedReply{"sbx create": {stdout: "sizingid0123456789000\n"}}, nil)
+		cfg := newTestConfig()
+		cfg.Tensorlake.CPUs = float64(sizing) / 2
+		cfg.Tensorlake.MemoryMB = sizing
+		cfg.Tensorlake.DiskMB = sizing
+		cfg.Tensorlake.TimeoutSecs = sizing
+		cli, err := newTensorlakeCLI(cfg, newTestRuntime(runner))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cli.createSandbox(context.Background(), "example"); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"--api-url", "https://api.tensorlake.ai", "--namespace", "default", "sbx", "create"}
+		if sizing > 0 {
+			want = append(want, "-c", "1", "-m", "2", "--disk_mb", "2", "-t", "2")
+		}
+		want = append(want, "example")
+		if len(runner.calls) != 1 || !reflect.DeepEqual(runner.calls[0].Args, want) {
+			t.Fatalf("sizing=%d calls=%#v want=%v", sizing, runner.calls, want)
+		}
+	}
 }

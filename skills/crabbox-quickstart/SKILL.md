@@ -65,7 +65,8 @@ crabbox run --provider local-container --id <slug> -- \
   sudo apt-get install -y make
 ```
 
-Your argv runs through a shell on the box, so `&&`, pipes, and redirects work.
+Commands after `--` are literal argv. For `&&`, pipes, or redirects, add
+`--shell` before `--` and pass the shell source as one quoted argument.
 Making the setup permanent is a `.crabbox.yaml` job — that is the `crabbox`
 skill, not this page.
 
@@ -133,7 +134,7 @@ If nothing writes a JUnit file the flag is a silent no-op.
 Boxes from `warmup` outlive the command; so do runs given `--keep`. Stop them:
 
 ```sh
-crabbox stop <slug>
+crabbox stop --provider local-container <slug>
 crabbox list --provider local-container
 ```
 

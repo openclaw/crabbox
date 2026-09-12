@@ -122,6 +122,7 @@ func (a App) watch(ctx context.Context, args []string) error {
 		return err
 	}
 	cfg.Profile = *leaseFlags.Profile
+	recordConfigInput(&cfg, configInputGeneric, configInputFlag, flagWasSet(fs, "profile"))
 	if err := applySelectedProfileConfig(&cfg); err != nil {
 		return err
 	}

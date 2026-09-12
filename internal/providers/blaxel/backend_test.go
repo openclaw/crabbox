@@ -51,9 +51,86 @@ type lifecycleFakeClient struct {
 	onExec         func(context.Context, ExecuteProcessRequest) (Process, error)
 }
 
+func TestBlaxelConfiguredDefaultPredicates(t *testing.T) {
+	for _, raw := range []string{"", "  ", " https://example.invalid/api/ "} {
+		cfg := Config{Blaxel: BlaxelConfig{APIKey: "inert", APIURL: raw}}
+		api, err := newBlaxelClient(cfg, Runtime{HTTP: &http.Client{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "https://api.blaxel.ai"
+		if strings.TrimSpace(raw) != "" {
+			want = "https://example.invalid/api"
+		}
+		if api.(*restClient).base != want {
+			t.Fatal("client trim-before-default changed")
+		}
+		err = validateBlaxelConfig(cfg)
+		if (err != nil) != (raw == "  ") {
+			t.Fatalf("validation blank-before-trim=%v", err)
+		}
+	}
+	for _, seconds := range []int{-1, 0, 17} {
+		b := backend{cfg: Config{Blaxel: BlaxelConfig{ExecTimeoutSecs: seconds}}}
+		want := 600
+		if seconds > 0 {
+			want = seconds
+		}
+		if b.execTimeoutSecs() != want {
+			t.Fatal("exec timeout fallback changed")
+		}
+	}
+	for _, raw := range []string{"", "  ", " /workspace/app/ "} {
+		cfg := Config{Blaxel: BlaxelConfig{Workdir: raw}}
+		got, err := blaxelWorkdir(cfg)
+		if raw == "  " {
+			if err == nil {
+				t.Fatal("whitespace workdir unexpectedly defaulted")
+			}
+			continue
+		}
+		want := "/workspace/crabbox"
+		if raw != "" {
+			want = "/workspace/app"
+		}
+		if err != nil || got != want {
+			t.Fatalf("workdir=%q error=%v", got, err)
+		}
+	}
+}
+
+func TestBlaxelCreatePreservesRawDefaultPredicates(t *testing.T) {
+	for _, raw := range []string{"", "  ", "custom"} {
+		t.Run(fmt.Sprintf("raw=%q", raw), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cfg := core.BaseConfig()
+			cfg.Blaxel.Image = raw
+			cfg.Blaxel.Workdir = raw
+			if raw == "custom" {
+				cfg.Blaxel.Workdir = "/workspace/custom"
+			}
+			fake := newLifecycleFakeClient()
+			b := &backend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+			if _, _, _, err := b.createSandbox(context.Background(), fake, Repo{Name: "example", Root: t.TempDir()}, false, ""); err != nil {
+				t.Fatal(err)
+			}
+			image, dir := raw, raw
+			if raw == "custom" {
+				dir = "/workspace/custom"
+			}
+			if raw == "" {
+				image, dir = "ubuntu:24.04", "/workspace/crabbox"
+			}
+			if len(fake.createReqs) != 1 || fake.createReqs[0].Image != image || fake.createReqs[0].WorkingDir != dir {
+				t.Fatal("create raw-empty defaults changed")
+			}
+		})
+	}
+}
+
 func newLifecycleFakeClient() *lifecycleFakeClient {
 	return &lifecycleFakeClient{
-		baseURL:       defaultAPIURL,
+		baseURL:       "https://api.blaxel.ai",
 		sandboxes:     map[string]Sandbox{},
 		nextSandboxID: "sbx_1",
 		logs:          ProcessLogs{Stdout: "ok\n", Stderr: "warn\n"},
@@ -960,3 +1037,105 @@ func cloneLabels(in map[string]string) map[string]string {
 }
 
 func intPtr(v int) *int { return &v }
+
+func TestRunFinalizesCleanupFailure(t *testing.T) {
+	for _, commandExit := range []int{0, 7} {
+		t.Run(fmt.Sprint(commandExit), func(t *testing.T) {
+			b, fake, _, _, stderr := newLifecycleBackend(t)
+			fake.deleteErr = errors.New("synthetic delete failure")
+			fake.onExec = func(_ context.Context, req ExecuteProcessRequest) (Process, error) {
+				code := 0
+				if req.Command == "fixture-user" {
+					code = commandExit
+				}
+				return Process{ID: "proc_1", Status: "completed", ExitCode: intPtr(code)}, nil
+			}
+			result, err := b.Run(t.Context(), RunRequest{Repo: testRepo(t), NoSync: true, TimingJSON: true, Command: []string{"fixture-user"}})
+			wantCode, wantKind := commandExit, core.RunErrorCommandExit
+			if commandExit == 0 {
+				wantCode, wantKind = 1, core.RunErrorProvider
+			}
+			if err == nil || !strings.Contains(err.Error(), "synthetic delete failure") || result.ExitCode != wantCode || result.Status != core.RunStatusFailed || result.ErrorKind != wantKind {
+				t.Errorf("result=%+v err=%v", result, err)
+			}
+			if result.Session == nil || !result.Session.Kept {
+				t.Errorf("session=%+v", result.Session)
+			}
+			if claim, err := readLeaseClaim(leasePrefix + "sbx_1"); err != nil || claim.LeaseID == "" {
+				t.Fatalf("claim=%+v err=%v", claim, err)
+			}
+			var report core.TimingReport
+			found := false
+			for _, line := range strings.Split(stderr.String(), "\n") {
+				if strings.HasPrefix(line, "{") && json.Unmarshal([]byte(line), &report) == nil {
+					found = true
+				}
+			}
+			if !found || report.ExitCode != wantCode || report.RunStatus != core.RunStatusFailed || report.ErrorKind != wantKind {
+				t.Errorf("timing=%+v stderr=%s", report, stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunSetupFailureKeepsRecoverableSession(t *testing.T) {
+	b, fake, _, _, stderr := newLifecycleBackend(t)
+	fake.processErr = errors.New("synthetic setup failure")
+	result, err := b.Run(t.Context(), RunRequest{Repo: testRepo(t), NoSync: true, KeepOnFailure: true, TimingJSON: true, Command: []string{"fixture-user"}})
+	if err == nil || result.Provider != providerName || result.LeaseID != leasePrefix+"sbx_1" || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider {
+		t.Errorf("result=%+v err=%v", result, err)
+	}
+	if result.Session == nil || !result.Session.Kept || result.Session.CleanupCommand == "" || len(fake.deleted) != 0 {
+		t.Errorf("session=%+v deletes=%v", result.Session, fake.deleted)
+	}
+	if !strings.Contains(stderr.String(), `"exitCode":1`) {
+		t.Errorf("missing failed timing: %s", stderr.String())
+	}
+}
+
+func TestRunCleanupPreservesChangedOwnership(t *testing.T) {
+	for _, change := range []string{"local-claim", "remote-labels", "missing"} {
+		t.Run(change, func(t *testing.T) {
+			b, fake, _, _, _ := newLifecycleBackend(t)
+			replacementRepo := t.TempDir()
+			fake.onExec = func(_ context.Context, req ExecuteProcessRequest) (Process, error) {
+				if req.Command == "fixture-user" {
+					switch change {
+					case "local-claim":
+						claim, err := readLeaseClaim(leasePrefix + "sbx_1")
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err := claimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, replacementRepo, time.Minute, true); err != nil {
+							t.Fatal(err)
+						}
+					case "remote-labels":
+						sb := fake.sandboxes["sbx_1"]
+						sb.Labels[blaxelClaimKey] = "successor-owner"
+						fake.sandboxes["sbx_1"] = sb
+					case "missing":
+						delete(fake.sandboxes, "sbx_1")
+					}
+				}
+				return Process{ID: "proc_1", Status: "completed", ExitCode: intPtr(0)}, nil
+			}
+			result, err := b.Run(t.Context(), RunRequest{Repo: testRepo(t), NoSync: true, Command: []string{"fixture-user"}})
+			claim, claimErr := readLeaseClaim(leasePrefix + "sbx_1")
+			if claimErr != nil {
+				t.Fatal(claimErr)
+			}
+			if change == "missing" {
+				if err != nil || result.Session == nil || result.Session.Kept || claim.LeaseID != "" {
+					t.Fatalf("result=%+v claim=%+v err=%v", result, claim, err)
+				}
+				return
+			}
+			if err == nil || result.Session == nil || !result.Session.Kept || len(fake.deleted) != 0 || claim.LeaseID == "" {
+				t.Fatalf("result=%+v claim=%+v deleted=%v err=%v", result, claim, fake.deleted, err)
+			}
+			if change == "local-claim" && claim.RepoRoot != replacementRepo {
+				t.Fatalf("successor claim lost: %+v", claim)
+			}
+		})
+	}
+}

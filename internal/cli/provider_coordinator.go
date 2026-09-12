@@ -276,11 +276,6 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 		}
 		return LeaseTarget{}, err
 	}
-	if lease.ID != "" && lease.ID != leaseID {
-		if err := moveStoredTestboxKey(leaseID, lease.ID); err != nil {
-			fmt.Fprintf(b.rt.Stderr, "warning: could not move local key from %s to %s: %v\n", leaseID, lease.ID, err)
-		}
-	}
 	if err := validateCoordinatorLeaseCapabilities(cfg, lease); err != nil {
 		if requestedLeaseID == "" {
 			cleanupLeaseID := blank(lease.ID, leaseID)
@@ -509,9 +504,14 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 		}
 	}()
 	cancelOnError := false
+	identityMismatch := false
 	defer func() {
 		stopProgress()
 		<-progressDone
+		if identityMismatch {
+			lease = CoordinatorLease{}
+			return
+		}
 		if ctx.Err() != nil {
 			lease = CoordinatorLease{}
 			err = b.canceledCoordinatorLeaseCreateError(ctx, leaseID, slug, createAttemptID, fixed, err)
@@ -550,16 +550,22 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 			return CoordinatorLease{}, err
 		}
 	}
+	identityMismatch = lease.ID != leaseID
+	if identityMismatch {
+		return CoordinatorLease{}, b.validateCoordinatorLeaseCreateResult(cfg, lease, leaseID)
+	}
 	if err := createCtx.Err(); err != nil {
 		return CoordinatorLease{}, err
 	}
 	cancelOnError = true
-	if err := b.validateCoordinatorLeaseCreateResult(cfg, lease, leaseID, fixed); err != nil {
+	if err := b.validateCoordinatorLeaseCreateResult(cfg, lease, leaseID); err != nil {
 		return CoordinatorLease{}, err
 	}
 	if lease.State == "provisioning" {
 		// Rebinding only confirms the operation. Readiness uses the original deadline.
-		return b.waitForCoordinatorLeaseActivation(createCtx, cfg, lease.ID, lease)
+		lease, err = b.waitForCoordinatorLeaseActivation(createCtx, cfg, lease.ID, lease)
+		identityMismatch = isCoordinatorLeaseIDConflict(err)
+		return lease, err
 	}
 	if rebound && lease.State == "active" && lease.Host == "" {
 		return CoordinatorLease{}, fmt.Errorf("coordinator replay returned active lease %s without an endpoint", lease.ID)
@@ -567,9 +573,18 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 	return lease, coordinatorLeaseProvisioningError(lease)
 }
 
-func (b *coordinatorLeaseBackend) validateCoordinatorLeaseCreateResult(cfg Config, lease CoordinatorLease, requestedLeaseID string, fixed bool) error {
-	if fixed && lease.ID != requestedLeaseID {
-		return exit(4, "lease_id_conflict: coordinator returned lease %s for operation %s", blank(lease.ID, "<empty>"), requestedLeaseID)
+type coordinatorLeaseIDConflict struct{ err error }
+
+func (e coordinatorLeaseIDConflict) Error() string { return e.err.Error() }
+func (e coordinatorLeaseIDConflict) Unwrap() error { return e.err }
+func isCoordinatorLeaseIDConflict(err error) bool {
+	var conflict coordinatorLeaseIDConflict
+	return errors.As(err, &conflict)
+}
+
+func (b *coordinatorLeaseBackend) validateCoordinatorLeaseCreateResult(cfg Config, lease CoordinatorLease, requestedLeaseID string) error {
+	if lease.ID != requestedLeaseID {
+		return coordinatorLeaseIDConflict{err: exit(4, "lease_id_conflict: coordinator returned lease %s (slug %s) for operation %s; no bootstrap or cleanup was attempted", blank(lease.ID, "<empty>"), blank(lease.Slug, "-"), requestedLeaseID)}
 	}
 	if strings.TrimSpace(lease.ID) == "" {
 		return exit(4, "coordinator create returned an empty canonical lease id for operation %s", requestedLeaseID)
@@ -728,7 +743,7 @@ func (b *coordinatorLeaseBackend) waitForCoordinatorLeaseActivation(ctx context.
 				continue
 			}
 			// GET observes the confirmed canonical lease; it cannot remap identity.
-			if err := b.validateCoordinatorLeaseCreateResult(cfg, lease, leaseID, true); err != nil {
+			if err := b.validateCoordinatorLeaseCreateResult(cfg, lease, leaseID); err != nil {
 				return CoordinatorLease{}, err
 			}
 			current = lease
@@ -749,7 +764,12 @@ func coordinatorLeaseProvisioningError(lease CoordinatorLease) error {
 	case "active", "provisioning":
 		return nil
 	case "failed", "released", "expired":
-		return coordinatorLeaseProvisioningStateError{message: fmt.Sprintf("coordinator lease %s ended while provisioning: state=%s error=%s", lease.ID, lease.State, lease.FailureError)}
+		message := fmt.Sprintf("coordinator lease %s ended while provisioning: state=%s", lease.ID, lease.State)
+		// Provisioning failures retain their cause in cleanupError while a resource may still exist.
+		if cause := blank(lease.FailureError, lease.CleanupError); cause != "" {
+			message += " error=" + cause
+		}
+		return coordinatorLeaseProvisioningStateError{message: message}
 	default:
 		return coordinatorLeaseProvisioningStateError{message: fmt.Sprintf("coordinator lease %s returned unexpected provisioning state %q", lease.ID, lease.State)}
 	}
@@ -819,6 +839,7 @@ const coordinatorReleaseResolveTimeout = 10 * time.Second
 
 func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
 	cfg := b.cfg
+	prepare := req.Prepare && !req.ReleaseOnly && isCanonicalLeaseID(req.ID)
 	if req.ReleaseOnly {
 		// Provider cleanup must not depend on an optional guest route selection.
 		cfg.explicitSSHPort = ""
@@ -826,8 +847,29 @@ func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveReques
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, coordinatorReleaseResolveTimeout)
 		defer cancel()
+	} else if prepare {
+		// GetLease owns a control deadline beneath the HTTP-client timeout.
+		// Share that original budget across both observations, including auth/curl.
+		timeout := coordinatorControlTimeout
+		if httpTimeout := b.coord.secureHTTPClient().Timeout; httpTimeout > 0 {
+			timeout = min(timeout, httpTimeout)
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
-	lease, err := b.coord.GetLease(ctx, req.ID)
+	coord := b.coord
+	lease, err := coord.GetLease(ctx, req.ID)
+	var serviceError CoordinatorHTTPError
+	if prepare && ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) &&
+		errors.As(err, &serviceError) && serviceError.StatusCode >= 500 && serviceError.StatusCode < 600 {
+		// Only repeat the exact read before run preparation; never replay SSH or
+		// infer lease absence from a failed coordinator observation.
+		lease, err = b.coord.GetLease(ctx, req.ID)
+	}
+	if prepare && ctx.Err() != nil {
+		return LeaseTarget{}, errors.Join(err, ctx.Err())
+	}
 	if err != nil {
 		if b.cfg.CoordAdminToken != "" && (isCoordinatorNotFoundError(err) || isCoordinatorUnauthorized(err)) {
 			adminCoord, adminErr := b.adminCoordinatorClient()
@@ -836,12 +878,29 @@ func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveReques
 			}
 			lease, adminErr = adminCoord.GetLease(ctx, req.ID)
 			if adminErr == nil {
-				return b.coordinatorLeaseTargetForConfig(lease, cfg, adminCoord)
+				coord, err = adminCoord, nil
 			}
 		}
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+	}
+	if prepare {
+		if err := ctx.Err(); err != nil {
+			return LeaseTarget{}, err
+		}
+		if lease.ID != req.ID {
+			return LeaseTarget{}, exit(4, "coordinator returned lease %s for requested lease %s", blank(lease.ID, "<empty>"), req.ID)
+		}
+	}
+	target, err := b.coordinatorLeaseTargetForConfig(lease, cfg, coord)
+	if err != nil {
 		return LeaseTarget{}, err
 	}
-	return b.coordinatorLeaseTargetForConfig(lease, cfg, b.coord)
+	if req.Prepare && !req.ReleaseOnly && target.providerRelease != nil {
+		return LeaseTarget{}, exit(2, "lease %s is released; start a new lease before running commands", target.LeaseID)
+	}
+	return target, nil
 }
 
 func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest) (statusView, error) {
@@ -874,19 +933,21 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		if err := prepareLeaseSSHTrust(&target, leaseID); err != nil {
 			return statusView{}, err
 		}
-		ready = probeSSHReady(ctx, &target, 4*time.Second)
+		ready = probeSSHReady(ctx, &target, statusSSHReadinessTimeout(target))
 	}
 	return statusView{
 		ID:                           lease.ID,
 		Slug:                         lease.Slug,
 		Provider:                     blank(lease.Provider, b.cfg.Provider),
 		TargetOS:                     blank(target.TargetOS, b.cfg.TargetOS),
+		WorkRoot:                     statusWorkRoot(b.cfg, server, target),
 		WindowsMode:                  blank(target.WindowsMode, b.cfg.WindowsMode),
 		State:                        lease.State,
 		ServerID:                     leaseDisplayID(lease),
 		ServerType:                   lease.ServerType,
 		Host:                         lease.Host,
 		Network:                      resolved.Network,
+		NetworkDiagnostics:           lease.Network,
 		Tailscale:                    lease.Tailscale,
 		SSHHost:                      target.Host,
 		SSHHostKey:                   target.SSHHostKey,
@@ -952,12 +1013,23 @@ func (b *coordinatorLeaseBackend) ListJSON(ctx context.Context, req ListRequest)
 }
 
 func (b *coordinatorLeaseBackend) listUserLeases(ctx context.Context) ([]CoordinatorLease, error) {
-	leases, err := b.coord.Leases(ctx, "active", 1000)
+	leases, err := b.coord.listLeases(ctx, "", 1000, "current", b.cfg.Provider)
 	if err != nil {
 		return nil, err
 	}
+	if len(leases) >= 1000 {
+		fmt.Fprintln(b.rt.Stderr, "warning: coordinator list reached its 1000-lease limit; older kept leases may be omitted; inspect them by exact lease ID")
+	}
+	// Older coordinators ignore view=current and return ended history too.
+	current := make([]CoordinatorLease, 0, len(leases))
+	for _, lease := range leases {
+		retained := lease.Keep || lease.ReleaseDeletesServer != nil && !*lease.ReleaseDeletesServer
+		if lease.State == "active" || lease.State == "provisioning" || retained && !coordinatorProviderReleaseConfirmed(lease) {
+			current = append(current, lease)
+		}
+	}
 	return redactCoordinatorLeaseListSecrets(
-		filterCoordinatorLeasesForProvider(leases, b.cfg.Provider),
+		filterCoordinatorLeasesForProvider(current, b.cfg.Provider),
 	), nil
 }
 
