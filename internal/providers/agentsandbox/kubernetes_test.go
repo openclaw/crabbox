@@ -1163,13 +1163,21 @@ func TestKubectlExecOnlyMapsProvenRemoteExitStatus(t *testing.T) {
 				errors:  []error{errors.New("kubectl failed")},
 			}
 			client := &kubectlKubernetesClient{runner: runner, kubectl: "kubectl"}
+			var delivered bytes.Buffer
 			err := client.Exec(context.Background(), podExecRequest{
 				Namespace: "sandboxes",
 				Pod:       "sandbox-a",
 				Command:   []string{"false"},
+				Stderr:    &delivered,
 			})
 			if err == nil {
 				t.Fatal("exec unexpectedly succeeded")
+			}
+			if delivered.String() != tt.result.Stderr || !strings.Contains(err.Error(), strings.TrimSpace(tt.result.Stderr)) {
+				t.Fatalf("stderr delivery/capture changed: delivered=%q error=%v", delivered.String(), err)
+			}
+			if !runner.requests[0].DisableOutputCapture {
+				t.Fatal("exec unexpectedly requested runner output capture")
 			}
 			_, remote := remoteExitStatus(err)
 			if remote != tt.wantRemote {

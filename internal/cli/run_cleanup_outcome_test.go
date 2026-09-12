@@ -83,8 +83,17 @@ func TestRunCoordinatorCleanupOutcomes(t *testing.T) {
 						_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
 					case strings.HasPrefix(r.URL.Path, "/v1/leases/"):
 						_ = json.NewEncoder(w).Encode(map[string]any{"lease": active})
-					case r.URL.Path == "/v1/runs" || strings.HasSuffix(r.URL.Path, "/finish"):
-						_ = json.NewEncoder(w).Encode(map[string]any{"run": map[string]any{"id": "run_abcdef123456"}})
+					case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v1/runs/"):
+						var body struct {
+							Command []string `json:"command"`
+						}
+						if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+							http.Error(w, err.Error(), http.StatusBadRequest)
+							return
+						}
+						_ = json.NewEncoder(w).Encode(CoordinatorRunResponse{Run: CoordinatorRun{ID: strings.TrimPrefix(r.URL.Path, "/v1/runs/"), LeaseID: id, State: "running", Phase: "starting", Command: body.Command}})
+					case strings.HasSuffix(r.URL.Path, "/finish"):
+						_ = json.NewEncoder(w).Encode(map[string]any{"run": map[string]any{"id": strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/runs/"), "/finish")}})
 					case strings.HasSuffix(r.URL.Path, "/events"):
 						_, _ = io.WriteString(w, `{"event":{"seq":1}}`)
 					default:
@@ -119,10 +128,13 @@ func TestRunCoordinatorCleanupOutcomes(t *testing.T) {
 				if len(digest) != 2 {
 					t.Fatalf("missing digest:\n%s", out)
 				}
-				for _, command := range []string{"ssh", "run", "stop"} {
+				for _, command := range []string{"ssh", "stop"} {
 					if got := strings.Contains(digest[1], "next: crabbox "+command+" "); got == tc.terminal {
 						t.Errorf("recovery %s present=%t terminal=%t\n%s", command, got, tc.terminal, out)
 					}
+				}
+				if strings.Contains(digest[1], "next: crabbox run ") {
+					t.Errorf("unknown failure advertised a blind rerun\n%s", out)
 				}
 				wantPosts := int32(1)
 				if tc.releaseError {

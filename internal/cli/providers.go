@@ -11,6 +11,7 @@ import (
 )
 
 type providerMatrixEntry struct {
+	providerStaticStatus
 	Provider      string               `json:"provider"`
 	Family        string               `json:"family"`
 	Aliases       []string             `json:"aliases,omitempty"`
@@ -30,6 +31,7 @@ type providerMatrixEntry struct {
 }
 
 type providerRecommendationEntry struct {
+	providerStaticStatus
 	Provider     string       `json:"provider"`
 	Kind         ProviderKind `json:"kind"`
 	Category     string       `json:"category,omitempty"`
@@ -215,21 +217,22 @@ func providerMatrixEntryFor(provider Provider) providerMatrixEntry {
 	category := benchmarkProviderCategories[name]
 	targets := formatProviderTargets(spec.Targets)
 	entry := providerMatrixEntry{
-		Provider:      name,
-		Family:        firstNonBlank(spec.Family, provider.Name()),
-		Aliases:       append([]string(nil), provider.Aliases()...),
-		Kind:          spec.Kind,
-		Category:      category,
-		Targets:       targets,
-		Features:      append(FeatureSet{}, spec.Features...),
-		Runtime:       runtimeCapabilitiesForProvider(name, spec.Kind, category, targets, spec.Features),
-		Reachability:  reachabilityCapabilitiesForProvider(name),
-		Workspace:     workspaceCapabilitiesForFeatures(spec.Features),
-		Evidence:      evidenceCapabilitiesForFeatures(spec.Features),
-		Lifecycle:     lifecycleCapabilitiesForProvider(spec.Coordinator, spec.Features),
-		Coordinator:   string(spec.Coordinator),
-		ClassCatalog:  providerClassCatalogFor(provider),
-		SizeSelection: spec.SizeSelection,
+		providerStaticStatus: providerStaticStatusFor(spec),
+		Provider:             name,
+		Family:               firstNonBlank(spec.Family, provider.Name()),
+		Aliases:              append([]string(nil), provider.Aliases()...),
+		Kind:                 spec.Kind,
+		Category:             category,
+		Targets:              targets,
+		Features:             append(FeatureSet{}, spec.Features...),
+		Runtime:              runtimeCapabilitiesForProvider(name, spec.Kind, category, targets, spec.Features),
+		Reachability:         reachabilityCapabilitiesForProvider(name),
+		Workspace:            workspaceCapabilitiesForFeatures(spec.Features),
+		Evidence:             evidenceCapabilitiesForFeatures(spec.Features),
+		Lifecycle:            lifecycleCapabilitiesForProvider(spec.Coordinator, spec.Features),
+		Coordinator:          string(spec.Coordinator),
+		ClassCatalog:         providerClassCatalogFor(provider),
+		SizeSelection:        spec.SizeSelection,
 	}
 	if classProvider, ok := provider.(ProviderClassSpecProvider); ok {
 		entry.Classes = append([]ClassSpec(nil), classProvider.ClassSpecs()...)
@@ -624,18 +627,19 @@ func recommendProvidersForUseCase(entries []providerMatrixEntry, useCase string,
 			continue
 		}
 		recommendations = append(recommendations, providerRecommendationEntry{
-			Provider:     entry.Provider,
-			Kind:         entry.Kind,
-			Category:     benchmarkProviderCategories[entry.Provider],
-			Targets:      append([]string(nil), entry.Targets...),
-			Features:     append([]Feature(nil), entry.Features...),
-			Runtime:      append([]string(nil), entry.Runtime...),
-			Reachability: append([]string(nil), entry.Reachability...),
-			Workspace:    append([]string(nil), entry.Workspace...),
-			Evidence:     append([]string(nil), entry.Evidence...),
-			Lifecycle:    append([]string(nil), entry.Lifecycle...),
-			Score:        score,
-			Reasons:      reasons,
+			providerStaticStatus: entry.providerStaticStatus.clone(),
+			Provider:             entry.Provider,
+			Kind:                 entry.Kind,
+			Category:             benchmarkProviderCategories[entry.Provider],
+			Targets:              append([]string(nil), entry.Targets...),
+			Features:             append([]Feature(nil), entry.Features...),
+			Runtime:              append([]string(nil), entry.Runtime...),
+			Reachability:         append([]string(nil), entry.Reachability...),
+			Workspace:            append([]string(nil), entry.Workspace...),
+			Evidence:             append([]string(nil), entry.Evidence...),
+			Lifecycle:            append([]string(nil), entry.Lifecycle...),
+			Score:                score,
+			Reasons:              reasons,
 		})
 	}
 	sort.SliceStable(recommendations, func(i, j int) bool {
@@ -1635,6 +1639,7 @@ func printProviderRecommendations(out io.Writer, useCase string, entries []provi
 	fmt.Fprintf(out, "recommended providers for %s:\n", useCase)
 	for _, entry := range entries {
 		fmt.Fprintf(out, "%s\n", entry.Provider)
+		writeProviderStaticStatus(out, entry.providerStaticStatus)
 		fmt.Fprintf(out, "  score: %d\n", entry.Score)
 		fmt.Fprintf(out, "  kind: %s\n", entry.Kind)
 		fmt.Fprintf(out, "  category: %s\n", blank(entry.Category, "-"))
@@ -1662,6 +1667,7 @@ func printProviderRecommendations(out io.Writer, useCase string, entries []provi
 func printProviderMatrix(out io.Writer, entries []providerMatrixEntry) {
 	for _, entry := range entries {
 		fmt.Fprintf(out, "%s\n", entry.Provider)
+		writeProviderStaticStatus(out, entry.providerStaticStatus)
 		fmt.Fprintf(out, "  family: %s\n", entry.Family)
 		fmt.Fprintf(out, "  kind: %s\n", entry.Kind)
 		fmt.Fprintf(out, "  category: %s\n", blank(entry.Category, "-"))

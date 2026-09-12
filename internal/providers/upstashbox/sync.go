@@ -13,7 +13,7 @@ import (
 func (b *backend) prepareArchive(ctx context.Context, req RunRequest) (*core.PreparedArchive, error) {
 	return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 		Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-		TempPattern: "crabbox-upstash-box-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+		TempPattern: "crabbox-upstash-box-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 	})
 }
 
@@ -40,7 +40,7 @@ func (b *backend) syncWorkspace(ctx context.Context, client api, boxID string, r
 	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
 		Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
 		Workdir: folder, RemoteArchiveDir: ".", RemoteArchivePrefix: ".crabbox-upstash-box-sync-",
-		Provider: providerName, PhaseName: "upstash_box_sync", Stderr: b.rt.Stderr, Now: b.now,
+		Provider: providerName, PhaseName: "upstash_box_sync", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 		CleanupContext: func(context.Context) (context.Context, context.CancelFunc) { return upstashBoxCleanupContext() },
 		Upload: func(uploadCtx context.Context, remoteArchive string, _ io.Reader) error {
 			if err := client.UploadFile(uploadCtx, boxID, archive.File.Name(), workspacePath(remoteArchive)); err != nil {

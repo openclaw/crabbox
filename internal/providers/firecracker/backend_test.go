@@ -1,12 +1,16 @@
 package firecracker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +18,104 @@ import (
 	"github.com/containernetworking/cni/libcni"
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestFirecrackerOrdinaryFlagStages(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, duration := range []string{"bad", "0s", "-1s", " 2m ", "", "2m"} {
+		t.Run(duration, func(t *testing.T) {
+			cfg := core.Config{Provider: " FIRECRACKER ", SSHUser: "old", WorkRoot: "/old", SSHPort: " 2200 ", SSHFallbackPorts: []string{"2222"}, Firecracker: core.FirecrackerConfig{LaunchTimeout: time.Minute, DeleteOnRelease: true}}
+			want := cfg
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			values := RegisterFirecrackerProviderFlags(fs, cfg)
+			args := []string{"--firecracker-binary=~/ordinary", "--firecracker-jailer=~/ordinary", "--firecracker-kernel=~/ordinary", "--firecracker-rootfs=~/ordinary", "--firecracker-user= runner ", "--firecracker-work-root= /work/ordinary ", "--firecracker-cpus=0", "--firecracker-memory-mib=-2", "--firecracker-disk-mib=7", "--firecracker-network=cni", "--firecracker-cni-network=ordinary", "--firecracker-cni-conf-dir=~/ordinary", "--firecracker-cni-bin-dir=~/ordinary", "--firecracker-launch-timeout=" + duration, "--firecracker-delete-on-release=false"}
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			err := ApplyFirecrackerProviderFlags(&cfg, fs, values)
+			path := filepath.Join(home, "ordinary")
+			want.Firecracker.Binary, want.Firecracker.Jailer, want.Firecracker.Kernel, want.Firecracker.RootFS = path, path, path, path
+			want.Firecracker.CNIConfDir, want.Firecracker.CNIBinDir = path, path
+			want.Firecracker.User, want.SSHUser = " runner ", " runner "
+			want.Firecracker.WorkRoot, want.WorkRoot = " /work/ordinary ", " /work/ordinary "
+			want.Firecracker.CPUs, want.Firecracker.MemoryMiB, want.Firecracker.DiskMiB = 0, -2, 7
+			want.Firecracker.Network, want.Firecracker.CNINetwork = "cni", "ordinary"
+			core.RecordProviderFlagInputs(&want, true, "firecracker")
+			if duration == "" || duration == "2m" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if duration == "2m" {
+					want.Firecracker.LaunchTimeout = 2 * time.Minute
+				}
+				want.Firecracker.DeleteOnRelease = false
+				core.MarkDeleteOnReleaseExplicit(&want, "firecracker")
+				core.RecordProviderFlagIntents(&want, true, "firecracker")
+				want.Provider, want.TargetOS = "firecracker", "linux"
+				want.SSHUser, want.WorkRoot, want.SSHPort = "runner", "/work/ordinary", "2200"
+				want.SSHFallbackPorts = nil
+				want.ServerType = "microvm"
+			} else if err == nil || err.Error() != "invalid duration "+strconv.Quote(duration) {
+				t.Fatalf("error %v", err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("stage %#v want %#v", cfg, want)
+			}
+		})
+	}
+	for _, provider := range []string{" FIRECRACKER ", "other"} {
+		for _, sizing := range []string{"", "class", "type"} {
+			cfg := core.Config{Provider: provider}
+			before := cfg
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.String("class", "", "")
+			fs.String("type", "", "")
+			if sizing != "" {
+				if err := fs.Parse([]string{"--" + sizing + "=ordinary"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, values := range []any{nil, struct{}{}} {
+				err := ApplyFirecrackerProviderFlags(&cfg, fs, values)
+				if (err != nil) != (provider != "other" && sizing != "") || !reflect.DeepEqual(cfg, before) {
+					t.Fatalf("guard %q/%q %v", provider, sizing, err)
+				}
+			}
+		}
+	}
+}
+
+func TestManualConfigInputFlags(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "fixture-other"
+	fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+	values := RegisterFirecrackerProviderFlags(fs, cfg)
+	before := cfg
+	if err := ApplyFirecrackerProviderFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+		t.Fatalf("foreign values changed configuration: %v", err)
+	}
+	if err := ApplyFirecrackerProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	want := cfg
+	core.RecordProviderFlagInputs(&want, true, "firecracker")
+	if reflect.DeepEqual(cfg, want) {
+		t.Fatal("unvisited flags recorded input")
+	}
+	for repeat := 0; repeat < 2; repeat++ {
+		if err := fs.Set("firecracker-user", "fixture"); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyFirecrackerProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want = cfg
+		core.RecordProviderFlagInputs(&want, true, "firecracker")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatal("accepted/equal flag value was not recorded")
+		}
+	}
+}
 
 func TestProviderSpecAndAliases(t *testing.T) {
 	provider := Provider{}
@@ -392,4 +494,94 @@ func (f fakeFileInfo) Mode() os.FileMode {
 		return os.ModeDir | 0o755
 	}
 	return 0o644
+}
+
+func TestConfigShowCompleteRawContract(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config core.FirecrackerConfig
+		fields []core.ProviderConfigShowField
+	}{{name: "zero", config: core.FirecrackerConfig{Binary: "", Jailer: "", Kernel: "", RootFS: "", User: "", WorkRoot: "", CPUs: 0, MemoryMiB: 0, DiskMiB: 0, Network: "", CNINetwork: "", CNIConfDir: "", CNIBinDir: "", LaunchTimeout: 0, DeleteOnRelease: false}, fields: []core.ProviderConfigShowField{{JSONName: "binary", JSONValue: "", TextName: "binary", TextValue: "-"}, {JSONName: "jailer", JSONValue: "", TextName: "jailer", TextValue: "-"}, {JSONName: "kernel", JSONValue: "", TextName: "kernel", TextValue: "-"}, {JSONName: "rootfs", JSONValue: "", TextName: "rootfs", TextValue: "-"}, {JSONName: "user", JSONValue: "", TextName: "user", TextValue: "-"}, {JSONName: "workRoot", JSONValue: "", TextName: "work_root", TextValue: "-"}, {JSONName: "cpus", JSONValue: int(0), TextName: "cpus", TextValue: "0"}, {JSONName: "memoryMiB", JSONValue: int(0), TextName: "memory_mib", TextValue: "0"}, {JSONName: "diskMiB", JSONValue: int(0), TextName: "disk_mib", TextValue: "0"}, {JSONName: "network", JSONValue: "", TextName: "network", TextValue: "-"}, {JSONName: "cniNetwork", JSONValue: "", TextName: "cni_network", TextValue: "-"}, {JSONName: "cniConfDir", JSONValue: "", TextName: "cni_conf_dir", TextValue: "-"}, {JSONName: "cniBinDir", JSONValue: "", TextName: "cni_bin_dir", TextValue: "-"}, {JSONName: "launchTimeout", JSONValue: "0s", TextName: "launch_timeout", TextValue: "0s"}, {JSONName: "deleteOnRelease", JSONValue: false, TextName: "delete_on_release", TextValue: "false"}}},
+		{name: "raw", config: core.FirecrackerConfig{Binary: " Binary reference ", Jailer: " Jailer reference ", Kernel: " Kernel reference ", RootFS: " RootFS reference ", User: " User reference ", WorkRoot: " WorkRoot reference ", CPUs: -7, MemoryMiB: -7, DiskMiB: -7, Network: " Network reference ", CNINetwork: " CNINetwork reference ", CNIConfDir: " CNIConfDir reference ", CNIBinDir: " CNIBinDir reference ", LaunchTimeout: -1500 * time.Millisecond, DeleteOnRelease: true}, fields: []core.ProviderConfigShowField{{JSONName: "binary", JSONValue: " Binary reference ", TextName: "binary", TextValue: " Binary reference "}, {JSONName: "jailer", JSONValue: " Jailer reference ", TextName: "jailer", TextValue: " Jailer reference "}, {JSONName: "kernel", JSONValue: " Kernel reference ", TextName: "kernel", TextValue: " Kernel reference "}, {JSONName: "rootfs", JSONValue: " RootFS reference ", TextName: "rootfs", TextValue: " RootFS reference "}, {JSONName: "user", JSONValue: " User reference ", TextName: "user", TextValue: " User reference "}, {JSONName: "workRoot", JSONValue: " WorkRoot reference ", TextName: "work_root", TextValue: " WorkRoot reference "}, {JSONName: "cpus", JSONValue: int(-7), TextName: "cpus", TextValue: "-7"}, {JSONName: "memoryMiB", JSONValue: int(-7), TextName: "memory_mib", TextValue: "-7"}, {JSONName: "diskMiB", JSONValue: int(-7), TextName: "disk_mib", TextValue: "-7"}, {JSONName: "network", JSONValue: " Network reference ", TextName: "network", TextValue: " Network reference "}, {JSONName: "cniNetwork", JSONValue: " CNINetwork reference ", TextName: "cni_network", TextValue: " CNINetwork reference "}, {JSONName: "cniConfDir", JSONValue: " CNIConfDir reference ", TextName: "cni_conf_dir", TextValue: " CNIConfDir reference "}, {JSONName: "cniBinDir", JSONValue: " CNIBinDir reference ", TextName: "cni_bin_dir", TextValue: " CNIBinDir reference "}, {JSONName: "launchTimeout", JSONValue: "-1.5s", TextName: "launch_timeout", TextValue: "-1.5s"}, {JSONName: "deleteOnRelease", JSONValue: true, TextName: "delete_on_release", TextValue: "true"}}},
+		{name: "whitespace", config: core.FirecrackerConfig{Binary: " \t ", Jailer: " \t ", Kernel: " \t ", RootFS: " \t ", User: " \t ", WorkRoot: " \t ", CPUs: -7, MemoryMiB: -7, DiskMiB: -7, Network: " \t ", CNINetwork: " \t ", CNIConfDir: " \t ", CNIBinDir: " \t ", LaunchTimeout: -1500 * time.Millisecond, DeleteOnRelease: true}, fields: []core.ProviderConfigShowField{{JSONName: "binary", JSONValue: " \t ", TextName: "binary", TextValue: " \t "}, {JSONName: "jailer", JSONValue: " \t ", TextName: "jailer", TextValue: " \t "}, {JSONName: "kernel", JSONValue: " \t ", TextName: "kernel", TextValue: " \t "}, {JSONName: "rootfs", JSONValue: " \t ", TextName: "rootfs", TextValue: " \t "}, {JSONName: "user", JSONValue: " \t ", TextName: "user", TextValue: " \t "}, {JSONName: "workRoot", JSONValue: " \t ", TextName: "work_root", TextValue: " \t "}, {JSONName: "cpus", JSONValue: int(-7), TextName: "cpus", TextValue: "-7"}, {JSONName: "memoryMiB", JSONValue: int(-7), TextName: "memory_mib", TextValue: "-7"}, {JSONName: "diskMiB", JSONValue: int(-7), TextName: "disk_mib", TextValue: "-7"}, {JSONName: "network", JSONValue: " \t ", TextName: "network", TextValue: " \t "}, {JSONName: "cniNetwork", JSONValue: " \t ", TextName: "cni_network", TextValue: " \t "}, {JSONName: "cniConfDir", JSONValue: " \t ", TextName: "cni_conf_dir", TextValue: " \t "}, {JSONName: "cniBinDir", JSONValue: " \t ", TextName: "cni_bin_dir", TextValue: " \t "}, {JSONName: "launchTimeout", JSONValue: "-1.5s", TextName: "launch_timeout", TextValue: "-1.5s"}, {JSONName: "deleteOnRelease", JSONValue: true, TextName: "delete_on_release", TextValue: "true"}}}} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.Config{Provider: "unselected-display"}
+			cfg.Firecracker = tc.config
+			want := core.ProviderConfigShowSection{JSONKey: "firecracker", TextLabel: "firecracker", Providers: []string{"firecracker"}, Fields: tc.fields}
+			for _, selection := range []string{"unselected-display", "firecracker"} {
+				cfg.Provider = selection
+				before := cfg
+				got := (Provider{}).ConfigShowSection(cfg)
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("selection=%s section=%#v want%#v", selection, got, want)
+				}
+				if !reflect.DeepEqual(cfg, before) {
+					t.Fatal("passive projector mutated config")
+				}
+			}
+		})
+	}
+}
+
+func TestConfigShowIncludesFirecrackerConfig(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "firecracker"
+	cfg.Firecracker.Binary = "/opt/bin/firecracker"
+	cfg.Firecracker.Jailer = "/opt/bin/jailer"
+	cfg.Firecracker.Kernel = "/var/lib/firecracker/vmlinux"
+	cfg.Firecracker.RootFS = "/var/lib/firecracker/rootfs.ext4"
+	cfg.Firecracker.User = "runner"
+	cfg.Firecracker.WorkRoot = "/workspace/firecracker"
+	cfg.Firecracker.CPUs = 6
+	cfg.Firecracker.MemoryMiB = 12288
+	cfg.Firecracker.DiskMiB = 32768
+	cfg.Firecracker.Network = "cni"
+	cfg.Firecracker.CNINetwork = "lab-firecracker"
+	cfg.Firecracker.CNIConfDir = "/etc/cni/lab"
+	cfg.Firecracker.CNIBinDir = "/opt/cni/lab"
+	cfg.Firecracker.LaunchTimeout = 3 * time.Minute
+	cfg.Firecracker.DeleteOnRelease = false
+
+	section := (Provider{}).ConfigShowSection(cfg)
+	values := map[string]any{}
+	var projected strings.Builder
+	projected.WriteString(section.TextLabel)
+	for _, field := range section.Fields {
+		values[field.JSONName] = field.JSONValue
+		projected.WriteString(" " + field.TextName + "=" + field.TextValue)
+	}
+	projected.WriteByte('\n')
+	view := map[string]any{section.JSONKey: values}
+	firecracker, ok := view["firecracker"].(map[string]any)
+	if !ok || firecracker["binary"] != "/opt/bin/firecracker" || firecracker["jailer"] != "/opt/bin/jailer" ||
+		firecracker["kernel"] != "/var/lib/firecracker/vmlinux" || firecracker["rootfs"] != "/var/lib/firecracker/rootfs.ext4" ||
+		firecracker["workRoot"] != "/workspace/firecracker" || firecracker["cpus"] != 6 ||
+		firecracker["memoryMiB"] != 12288 || firecracker["diskMiB"] != 32768 ||
+		firecracker["cniNetwork"] != "lab-firecracker" || firecracker["launchTimeout"] != "3m0s" ||
+		firecracker["deleteOnRelease"] != false {
+		t.Fatalf("firecracker view=%#v", firecracker)
+	}
+	var text bytes.Buffer
+	text.WriteString(projected.String())
+	for _, want := range []string{
+		"firecracker binary=/opt/bin/firecracker",
+		"jailer=/opt/bin/jailer",
+		"kernel=/var/lib/firecracker/vmlinux",
+		"rootfs=/var/lib/firecracker/rootfs.ext4",
+		"user=runner",
+		"work_root=/workspace/firecracker",
+		"cpus=6",
+		"memory_mib=12288",
+		"disk_mib=32768",
+		"network=cni",
+		"cni_network=lab-firecracker",
+		"cni_conf_dir=/etc/cni/lab",
+		"cni_bin_dir=/opt/cni/lab",
+		"launch_timeout=3m0s",
+		"delete_on_release=false",
+	} {
+		if !strings.Contains(text.String(), want) {
+			t.Fatalf("config show missing %q: %q", want, text.String())
+		}
+	}
 }

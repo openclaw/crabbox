@@ -1,7 +1,6 @@
 package vultr
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const vultrAPIBaseURL = "https://api.vultr.com/v2"
@@ -172,15 +172,7 @@ func (c *vultrClient) do(ctx context.Context, method, path string, body any, out
 }
 
 func (c *vultrClient) doAttempt(ctx context.Context, method, path string, body any, out any, allowRetry bool) error {
-	var reader io.Reader
-	if body != nil {
-		var buf bytes.Buffer
-		if err := json.NewEncoder(&buf).Encode(body); err != nil {
-			return err
-		}
-		reader = &buf
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
+	req, err := shared.NewJSONRequest(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return err
 	}
@@ -395,7 +387,7 @@ func (c *vultrClient) createInstanceBody(ctx context.Context, cfg core.Config, p
 		"hostname":         name,
 		"tags":             leaseTags(cfg, leaseID, slug, "provisioning", keep, now),
 		"activation_email": false,
-		"user_scheme":      vultrUserScheme(cfg),
+		"user_scheme":      cfg.Vultr.WithRuntimeDefaults().UserScheme,
 	}
 	for k, v := range boot {
 		body[k] = v
@@ -660,14 +652,7 @@ func vultrRegion(cfg core.Config) string {
 	if cfg.Location != "" {
 		return cfg.Location
 	}
-	return "ewr"
-}
-
-func vultrUserScheme(cfg core.Config) string {
-	if cfg.Vultr.UserScheme != "" {
-		return cfg.Vultr.UserScheme
-	}
-	return "root"
+	return core.VultrRegionFallback
 }
 
 func providerKeyForLease(leaseID string) string {

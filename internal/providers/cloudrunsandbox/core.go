@@ -1,7 +1,6 @@
 package cloudrunsandbox
 
 import (
-	"flag"
 	"io"
 	"time"
 
@@ -40,8 +39,6 @@ const (
 	providerFamily        = "cloud-run-sandbox"
 	leasePrefix           = "gcrs_"
 	namePrefix            = "crabbox-"
-	defaultCLIPath        = "/usr/local/gcp/bin/sandbox"
-	defaultWorkdir        = "/tmp/crabbox"
 	defaultSandboxPath    = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 	targetLinux           = core.TargetLinux
 	NetworkPublic         = core.NetworkPublic
@@ -59,10 +56,6 @@ const (
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
 }
 
 func writeTimingJSON(w io.Writer, report timingReport) error {

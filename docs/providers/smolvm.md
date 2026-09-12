@@ -29,7 +29,10 @@ export CRABBOX_SMOLVM_API_KEY=smk_...
 export SMK_API_KEY=smk_...
 ```
 
-`CRABBOX_SMOLVM_API_KEY` takes precedence when multiple variables are present.
+The first nonempty value wins in this order: `CRABBOX_SMOLVM_API_KEY`,
+`SMOLMACHINES_API_KEY`, then `SMK_API_KEY`. Empty values fall through; nonempty
+values are not trimmed during configuration loading. The key has no YAML field
+or command-line flag.
 
 Rotate the key if it was ever pasted into a chat, shell history, issue, or log.
 
@@ -61,13 +64,14 @@ smolvm:
 Provider flags (each overrides the matching `smolvm.*` config key):
 
 ```text
+--smolvm-base-url
 --smolvm-image
 --smolvm-workdir
 --smolvm-cpus
 --smolvm-memory-mb
+--smolvm-network
+--smolvm-keep
 ```
-
-(Additional `--smolvm-*` flags exist for other smolfleet options; run `crabbox run --help` with `--provider smolvm` for the current set.)
 
 Environment overrides:
 
@@ -91,7 +95,22 @@ API key is sent as a bearer token only to official `smolmachines.com` hosts or
 loopback by default. Set `CRABBOX_SMOLVM_ALLOW_CUSTOM_BASE_URL=1` only when you
 intend to trust a custom control plane with the API key.
 
-Defaults: image `alpine` (lightweight; provides the standard shell tools needed for direct archive sync via the API), workdir `/workspace`, network open by default.
+Defaults: endpoint `https://api.smolmachines.com`, image `alpine`, workdir
+`/workspace`, 2 CPUs, 2048 MiB memory, open network, and `keep: false`.
+
+Nonempty YAML strings override earlier values without trimming. Omitted, null,
+and empty strings preserve them. YAML CPU and memory values apply only when
+positive; zero and negative values preserve the earlier setting. Environment
+integers preserve the earlier value on malformed input, but parsed zero or
+negative values reach the existing flag/provider validation. Explicit flags
+still apply empty, zero, and false values. `keep: false` in YAML is also explicit.
+
+All eight bindings share one typed declaration. The endpoint, displayed host,
+image, CPU, memory, and workdir helpers share their compiled defaults without
+changing their fallback rules. Raw empty network settings retain their existing
+blocked behavior; they do not acquire the normal configuration's open default.
+The fixed `/workspace` mount and upload roots remain separate from the configured
+workdir. Endpoint trust, credential forwarding, and lifecycle rules are unchanged.
 
 ## Lifecycle
 

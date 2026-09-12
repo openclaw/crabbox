@@ -88,6 +88,10 @@ func writePrivateRunOutputFile(path string, data []byte) error {
 	return nil
 }
 
+func replacePrivateRunOutputTemp(tempPath, path string) error {
+	return os.Rename(tempPath, path)
+}
+
 func createPrivateRunOutputTemp(path string) (*os.File, string, error) {
 	dir := filepath.Dir(path)
 	file, err := os.CreateTemp(dir, "."+filepath.Base(path)+".crabbox-*")

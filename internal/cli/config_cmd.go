@@ -49,7 +49,10 @@ func (a App) configShow(args []string) error {
 			"coordinatorRegistrationUrl": coordinatorRegistrationURL,
 		})
 	}
+	inputs := cfg.inputProvenance
 	cfg = effectiveConfigForShow(cfg)
+	// Display-only normalization cannot manufacture accepted input history.
+	cfg.inputProvenance = inputs
 	if *jsonOut {
 		agentBaseURL, err := webVNCAgentBaseURL("")
 		if err != nil {
@@ -65,10 +68,16 @@ func (a App) configShow(args []string) error {
 		view["idempotentLeaseId"] = fixedLeaseID
 		view["coordinatorRegistrationUrl"] = redactedConfigURL(coordinatorRegistrationURL)
 		view["webvncAgentBaseUrl"] = agentBaseURL
+		sections, err := collectProviderConfigShowSections(cfg)
+		if err != nil {
+			return err
+		}
+		if err := addProviderConfigShowSections(view, sections); err != nil {
+			return err
+		}
 		return json.NewEncoder(a.Stdout).Encode(view)
 	}
-	writeConfigShowText(a.Stdout, cfg)
-	return nil
+	return writeConfigShowText(a.Stdout, cfg)
 }
 
 func configArchitectureForShow(cfg Config) string {
@@ -93,54 +102,19 @@ func effectiveConfigForShow(cfg Config) Config {
 	cfg.Vast.WorkRoot = EffectiveVastWorkRoot(cfg)
 	cfg.NvidiaBrev.WorkRoot = EffectiveNvidiaBrevWorkRoot(cfg)
 	if cfg.Provider == "digitalocean" || cfg.Provider == "linode" {
-		base := baseConfig()
-		if !IsSSHUserExplicit(&cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
-			cfg.SSHUser = "root"
-		}
-		if !IsSSHPortExplicit(&cfg) && (cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort) {
-			cfg.SSHPort = "22"
-		}
-		cfg.SSHFallbackPorts = nil
+		applyConfigShowSSHDefaults(&cfg, "root")
 	}
 	if cfg.Provider == "vultr" {
-		base := baseConfig()
-		if !IsSSHUserExplicit(&cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
-			cfg.SSHUser = "root"
-		}
-		if !IsSSHPortExplicit(&cfg) && (cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort) {
-			cfg.SSHPort = "22"
-		}
-		cfg.SSHFallbackPorts = nil
+		applyConfigShowSSHDefaults(&cfg, "root")
 	}
 	if cfg.Provider == "lambda" {
-		base := baseConfig()
-		if !IsSSHUserExplicit(&cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
-			cfg.SSHUser = "ubuntu"
-		}
-		if !IsSSHPortExplicit(&cfg) && (cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort) {
-			cfg.SSHPort = "22"
-		}
-		cfg.SSHFallbackPorts = nil
+		applyConfigShowSSHDefaults(&cfg, "ubuntu")
 	}
 	if cfg.Provider == "scaleway" {
-		base := baseConfig()
-		if !IsSSHUserExplicit(&cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
-			cfg.SSHUser = "root"
-		}
-		if !IsSSHPortExplicit(&cfg) && (cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort) {
-			cfg.SSHPort = "22"
-		}
-		cfg.SSHFallbackPorts = nil
+		applyConfigShowSSHDefaults(&cfg, "root")
 	}
 	if cfg.Provider == "tencentcloud" {
-		base := baseConfig()
-		if !IsSSHUserExplicit(&cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
-			cfg.SSHUser = "ubuntu"
-		}
-		if !IsSSHPortExplicit(&cfg) && (cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort) {
-			cfg.SSHPort = "22"
-		}
-		cfg.SSHFallbackPorts = nil
+		applyConfigShowSSHDefaults(&cfg, "ubuntu")
 	}
 	if cfg.Provider == "hostinger" {
 		cfg.WorkRoot = cfg.Hostinger.WorkRoot
@@ -169,6 +143,18 @@ func effectiveConfigForShow(cfg Config) Config {
 	return cfg
 }
 
+// applyConfigShowSSHDefaults only mutates the local copy used for offline display.
+func applyConfigShowSSHDefaults(cfg *Config, user string) {
+	base := baseConfig()
+	if !IsSSHUserExplicit(cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
+		cfg.SSHUser = user
+	}
+	if !IsSSHPortExplicit(cfg) && (cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort) {
+		cfg.SSHPort = "22"
+	}
+	cfg.SSHFallbackPorts = nil
+}
+
 func configShowView(cfg Config) map[string]any {
 	provider := cfg.Provider
 	serverType := cfg.ServerType
@@ -178,6 +164,7 @@ func configShowView(cfg Config) map[string]any {
 		serverType = ""
 	}
 	return map[string]any{
+		"providerStatus":             providerConfigStatus(cfg),
 		"profile":                    cfg.Profile,
 		"provider":                   provider,
 		"providerSelected":           providerSelected,
@@ -242,39 +229,6 @@ func configShowView(cfg Config) map[string]any {
 			"runnerLabels":  cfg.Actions.RunnerLabels,
 			"runnerVersion": cfg.Actions.RunnerVersion,
 			"ephemeral":     cfg.Actions.Ephemeral,
-		},
-		"azure": map[string]any{
-			"location":      cfg.AzureLocation,
-			"resourceGroup": cfg.AzureResourceGroup,
-			"image":         cfg.AzureImage,
-			"osDisk":        cfg.AzureOSDisk,
-			"snapshotSKU":   cfg.AzureSnapshotSKU,
-			"osDiskSKU":     cfg.AzureOSDiskSKU,
-			"network":       cfg.AzureNetwork,
-			"sshCIDRs":      cfg.AzureSSHCIDRs,
-		},
-		"digitalocean": map[string]any{
-			"region":   cfg.DigitalOcean.Region,
-			"image":    cfg.DigitalOcean.Image,
-			"vpc":      cfg.DigitalOcean.VPCUUID,
-			"sshCIDRs": cfg.DigitalOcean.SSHCIDRs,
-		},
-		"vultr": map[string]any{
-			"region":        cfg.Vultr.Region,
-			"os":            cfg.Vultr.OS,
-			"image":         cfg.Vultr.Image,
-			"snapshot":      cfg.Vultr.Snapshot,
-			"firewallGroup": cfg.Vultr.FirewallGroup,
-			"vpcIds":        cfg.Vultr.VPCIDs,
-			"sshCIDRs":      cfg.Vultr.SSHCIDRs,
-			"userScheme":    cfg.Vultr.UserScheme,
-		},
-		"linode": map[string]any{
-			"region":   cfg.Linode.Region,
-			"image":    cfg.Linode.Image,
-			"type":     cfg.Linode.Type,
-			"firewall": cfg.Linode.FirewallID,
-			"sshCIDRs": cfg.Linode.SSHCIDRs,
 		},
 		"githubCodespaces": map[string]any{
 			"apiUrl":           redactedConfigURL(cfg.GitHubCodespaces.APIURL),
@@ -405,28 +359,6 @@ func configShowView(cfg Config) map[string]any {
 			"workdir":         cfg.AzureDynamicSessions.Workdir,
 			"timeoutSecs":     cfg.AzureDynamicSessions.TimeoutSecs,
 		},
-		"blacksmith": map[string]any{
-			"org":         cfg.Blacksmith.Org,
-			"workflow":    cfg.Blacksmith.Workflow,
-			"job":         cfg.Blacksmith.Job,
-			"ref":         cfg.Blacksmith.Ref,
-			"idleTimeout": cfg.Blacksmith.IdleTimeout.String(),
-			"debug":       cfg.Blacksmith.Debug,
-		},
-		"agentSandbox": map[string]any{
-			"kubectl":             cfg.AgentSandbox.Kubectl,
-			"kubeconfig":          cfg.AgentSandbox.Kubeconfig,
-			"context":             cfg.AgentSandbox.Context,
-			"namespace":           cfg.AgentSandbox.Namespace,
-			"warmPool":            cfg.AgentSandbox.WarmPool,
-			"container":           cfg.AgentSandbox.Container,
-			"workdir":             cfg.AgentSandbox.Workdir,
-			"sandboxReadyTimeout": cfg.AgentSandbox.SandboxReadyTimeout.String(),
-			"podReadyTimeout":     cfg.AgentSandbox.PodReadyTimeout.String(),
-			"execTimeoutSecs":     cfg.AgentSandbox.ExecTimeoutSecs,
-			"deleteOnRelease":     cfg.AgentSandbox.DeleteOnRelease,
-			"forgetMissing":       cfg.AgentSandbox.ForgetMissing,
-		},
 		"namespace": map[string]any{
 			"image":               cfg.Namespace.Image,
 			"size":                cfg.Namespace.Size,
@@ -447,6 +379,14 @@ func configShowView(cfg Config) map[string]any {
 			"volumes":     cfg.NamespaceInstance.Volumes,
 			"workRoot":    cfg.NamespaceInstance.WorkRoot,
 			"bare":        cfg.NamespaceInstance.Bare,
+		},
+		"phala": map[string]any{
+			"cli":          cfg.Phala.CLIPath,
+			"instanceType": cfg.Phala.InstanceType,
+			"workRoot":     cfg.Phala.WorkRoot,
+			"nodeId":       cfg.Phala.NodeID,
+			"compose":      cfg.Phala.Compose,
+			"attest":       cfg.Phala.Attest,
 		},
 		"morph": map[string]any{
 			"apiUrl":          redactedConfigURL(cfg.Morph.APIURL),
@@ -580,49 +520,6 @@ func configShowView(cfg Config) map[string]any {
 			"networkDenyOut":  cfg.Superserve.NetworkDenyOut,
 			"forgetMissing":   cfg.Superserve.ForgetMissing,
 		},
-		"localContainer": map[string]any{
-			"runtime":      cfg.LocalContainer.Runtime,
-			"image":        cfg.LocalContainer.Image,
-			"user":         cfg.LocalContainer.User,
-			"workRoot":     cfg.LocalContainer.WorkRoot,
-			"cpus":         cfg.LocalContainer.CPUs,
-			"memory":       cfg.LocalContainer.Memory,
-			"network":      cfg.LocalContainer.Network,
-			"dockerSocket": cfg.LocalContainer.DockerSocket,
-		},
-		"appleContainer": map[string]any{
-			"cliPath":  cfg.AppleContainer.CLIPath,
-			"image":    cfg.AppleContainer.Image,
-			"user":     cfg.AppleContainer.User,
-			"workRoot": cfg.AppleContainer.WorkRoot,
-			"cpus":     cfg.AppleContainer.CPUs,
-			"memory":   cfg.AppleContainer.Memory,
-		},
-		"mxc": map[string]any{
-			"cliPath":           cfg.MXC.CLIPath,
-			"version":           cfg.MXC.Version,
-			"containment":       cfg.MXC.Containment,
-			"network":           cfg.MXC.Network,
-			"readOnlyPaths":     cfg.MXC.ReadOnlyPaths,
-			"readWritePaths":    cfg.MXC.ReadWritePaths,
-			"allowedHosts":      cfg.MXC.AllowedHosts,
-			"blockedHosts":      cfg.MXC.BlockedHosts,
-			"allowDaclMutation": cfg.MXC.AllowDACLMutation,
-			"allowWindowsUI":    cfg.MXC.AllowWindowsUI,
-			"experimental":      cfg.MXC.Experimental,
-		},
-		"dockerSandbox": map[string]any{
-			"cliPath":         cfg.DockerSandbox.CLIPath,
-			"agent":           cfg.DockerSandbox.Agent,
-			"template":        cfg.DockerSandbox.Template,
-			"cpus":            cfg.DockerSandbox.CPUs,
-			"memory":          cfg.DockerSandbox.Memory,
-			"clone":           cfg.DockerSandbox.Clone,
-			"workdir":         cfg.DockerSandbox.Workdir,
-			"extraWorkspaces": cfg.DockerSandbox.ExtraWorkspaces,
-			"mcp":             cfg.DockerSandbox.MCP,
-			"kit":             cfg.DockerSandbox.Kit,
-		},
 		"cloudRunSandbox": map[string]any{
 			"gatewayURL":  redactedConfigURL(cfg.CloudRunSandbox.GatewayURL),
 			"cliPath":     cfg.CloudRunSandbox.CLIPath,
@@ -630,16 +527,6 @@ func configShowView(cfg Config) map[string]any {
 			"allowEgress": cfg.CloudRunSandbox.AllowEgress,
 			"write":       cfg.CloudRunSandbox.Write,
 			"rootfs":      cfg.CloudRunSandbox.Rootfs,
-		},
-		"multipass": map[string]any{
-			"cliPath":       cfg.Multipass.CLIPath,
-			"image":         cfg.Multipass.Image,
-			"user":          cfg.Multipass.User,
-			"workRoot":      cfg.Multipass.WorkRoot,
-			"cpus":          cfg.Multipass.CPUs,
-			"memory":        cfg.Multipass.Memory,
-			"disk":          cfg.Multipass.Disk,
-			"launchTimeout": cfg.Multipass.LaunchTimeout.String(),
 		},
 		"machine0": map[string]any{
 			"cliPath":       cfg.Machine0.CLIPath,
@@ -653,29 +540,6 @@ func configShowView(cfg Config) map[string]any {
 			"releasePolicy": cfg.Machine0.ReleasePolicy,
 			"createTimeout": cfg.Machine0.CreateTimeout.String(),
 			"pollInterval":  cfg.Machine0.PollInterval.String(),
-		},
-		"tart": map[string]any{
-			"image":    cfg.Tart.Image,
-			"user":     cfg.Tart.User,
-			"workRoot": cfg.Tart.WorkRoot,
-			"cpus":     cfg.Tart.CPUs,
-			"memory":   cfg.Tart.Memory,
-			"disk":     cfg.Tart.Disk,
-		},
-		"lume": map[string]any{
-			"cliPath":  cfg.Lume.CLIPath,
-			"base":     cfg.Lume.Base,
-			"storage":  cfg.Lume.Storage,
-			"user":     cfg.Lume.User,
-			"workRoot": cfg.Lume.WorkRoot,
-		},
-		"static": map[string]any{
-			"id":       cfg.Static.ID,
-			"name":     cfg.Static.Name,
-			"host":     cfg.Static.Host,
-			"user":     cfg.Static.User,
-			"port":     cfg.Static.Port,
-			"workRoot": cfg.Static.WorkRoot,
 		},
 		"results": map[string]any{
 			"junit":          cfg.Results.JUnit,
@@ -697,15 +561,6 @@ func configShowView(cfg Config) map[string]any {
 			"image":    cfg.Image,
 			"sshKey":   cfg.ProviderKey,
 		},
-		"aws": map[string]any{
-			"region":          cfg.AWSRegion,
-			"ami":             cfg.AWSAMI,
-			"securityGroupId": cfg.AWSSGID,
-			"subnetId":        cfg.AWSSubnetID,
-			"instanceProfile": cfg.AWSProfile,
-			"rootGB":          cfg.AWSRootGB,
-			"sshCIDRs":        cfg.AWSSSHCIDRs,
-		},
 		"awsLambdaMicroVM": map[string]any{
 			"image":             cfg.AWSLambdaMicroVM.Image,
 			"imageVersion":      cfg.AWSLambdaMicroVM.ImageVersion,
@@ -714,17 +569,6 @@ func configShowView(cfg Config) map[string]any {
 			"ingressConnectors": cfg.AWSLambdaMicroVM.IngressConnectors,
 			"egressConnectors":  cfg.AWSLambdaMicroVM.EgressConnectors,
 			"forgetMissing":     cfg.AWSLambdaMicroVM.ForgetMissing,
-		},
-		"gcp": map[string]any{
-			"project":        cfg.GCPProject,
-			"zone":           cfg.GCPZone,
-			"image":          cfg.GCPImage,
-			"network":        cfg.GCPNetwork,
-			"subnet":         cfg.GCPSubnet,
-			"tags":           cfg.GCPTags,
-			"rootGB":         cfg.GCPRootGB,
-			"sshCIDRs":       cfg.GCPSSHCIDRs,
-			"serviceAccount": cfg.GCPServiceAccount,
 		},
 		"proxmox": map[string]any{
 			"apiUrl":      redactedConfigURL(cfg.Proxmox.APIURL),
@@ -760,23 +604,6 @@ func configShowView(cfg Config) map[string]any {
 			"insecureTLS":       cfg.Incus.InsecureTLS,
 			"remoteImageServer": redactedConfigURL(cfg.Incus.RemoteImageServer),
 		},
-		"firecracker": map[string]any{
-			"binary":          cfg.Firecracker.Binary,
-			"jailer":          cfg.Firecracker.Jailer,
-			"kernel":          cfg.Firecracker.Kernel,
-			"rootfs":          cfg.Firecracker.RootFS,
-			"user":            cfg.Firecracker.User,
-			"workRoot":        cfg.Firecracker.WorkRoot,
-			"cpus":            cfg.Firecracker.CPUs,
-			"memoryMiB":       cfg.Firecracker.MemoryMiB,
-			"diskMiB":         cfg.Firecracker.DiskMiB,
-			"network":         cfg.Firecracker.Network,
-			"cniNetwork":      cfg.Firecracker.CNINetwork,
-			"cniConfDir":      cfg.Firecracker.CNIConfDir,
-			"cniBinDir":       cfg.Firecracker.CNIBinDir,
-			"launchTimeout":   cfg.Firecracker.LaunchTimeout.String(),
-			"deleteOnRelease": cfg.Firecracker.DeleteOnRelease,
-		},
 		"xcpNg": map[string]any{
 			"apiUrl":       redactedConfigURL(cfg.XCPNg.APIURL),
 			"username":     cfg.XCPNg.Username,
@@ -792,50 +619,21 @@ func configShowView(cfg Config) map[string]any {
 			"workRoot":     cfg.XCPNg.WorkRoot,
 			"insecureTLS":  cfg.XCPNg.InsecureTLS,
 		},
-		"parallels": map[string]any{
-			"template":         cfg.Parallels.Template,
-			"source":           cfg.Parallels.Source,
-			"sourceId":         cfg.Parallels.SourceID,
-			"sourceSnapshot":   cfg.Parallels.SourceSnapshot,
-			"sourceSnapshotId": cfg.Parallels.SourceSnapshotID,
-			"cloneMode":        cfg.Parallels.CloneMode,
-			"host":             cfg.Parallels.Host,
-			"hostUser":         cfg.Parallels.HostUser,
-			"hostKey":          tokenState(cfg.Parallels.HostKey),
-			"vmRoot":           cfg.Parallels.VMRoot,
-			"user":             cfg.Parallels.User,
-			"workRoot":         cfg.Parallels.WorkRoot,
-			"startupTimeout":   cfg.Parallels.StartupTimeout.String(),
-			"templates":        redactedParallelsTemplateConfigs(cfg.Parallels.Templates),
-			"hosts":            redactedParallelsHostConfigs(cfg.Parallels.Hosts),
-		},
 	}
 }
 
-func redactedParallelsTemplateConfigs(templates map[string]ParallelsTemplateConfig) map[string]ParallelsTemplateConfig {
-	if templates == nil {
-		return nil
+func writeConfigShowText(w io.Writer, cfg Config) error {
+	sections, err := collectProviderConfigShowSections(cfg)
+	if err != nil {
+		return err
 	}
-	redacted := make(map[string]ParallelsTemplateConfig, len(templates))
-	for name, template := range templates {
-		template.HostKey = tokenState(template.HostKey)
-		redacted[name] = template
+	layout := newConfigShowTextLayout(sections)
+	output := &configShowWriter{Writer: w}
+	w = output
+	phalaAttest := "default"
+	if cfg.Phala.Attest != nil {
+		phalaAttest = fmt.Sprint(*cfg.Phala.Attest)
 	}
-	return redacted
-}
-
-func redactedParallelsHostConfigs(hosts []ParallelsHostConfig) []ParallelsHostConfig {
-	if hosts == nil {
-		return nil
-	}
-	redacted := append(make([]ParallelsHostConfig, 0, len(hosts)), hosts...)
-	for i := range redacted {
-		redacted[i].Key = tokenState(redacted[i].Key)
-	}
-	return redacted
-}
-
-func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "config=%s\n", writableConfigPath())
 	provider := cfg.Provider
 	serverType := cfg.ServerType
@@ -854,8 +652,13 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "run preflight_tools=%s\n", blank(strings.Join(cfg.Run.PreflightTools, ","), "-"))
 	fmt.Fprintf(w, "capacity market=%s strategy=%s fallback=%s regions=%s hints=%t\n", cfg.Capacity.Market, cfg.Capacity.Strategy, cfg.Capacity.Fallback, blank(strings.Join(cfg.Capacity.Regions, ","), "-"), cfg.Capacity.Hints)
 	fmt.Fprintf(w, "actions repo=%s workflow=%s job=%s ref=%s runner_version=%s ephemeral=%t labels=%s\n", blank(cfg.Actions.Repo, "-"), blank(cfg.Actions.Workflow, "-"), blank(cfg.Actions.Job, "-"), blank(cfg.Actions.Ref, "-"), cfg.Actions.RunnerVersion, cfg.Actions.Ephemeral, blank(strings.Join(cfg.Actions.RunnerLabels, ","), "-"))
-	fmt.Fprintf(w, "blacksmith org=%s workflow=%s job=%s ref=%s idle_timeout=%s debug=%t\n", blank(cfg.Blacksmith.Org, "-"), blank(cfg.Blacksmith.Workflow, "-"), blank(cfg.Blacksmith.Job, "-"), blank(cfg.Blacksmith.Ref, "-"), cfg.Blacksmith.IdleTimeout, cfg.Blacksmith.Debug)
-	fmt.Fprintf(w, "agent_sandbox kubectl=%s kubeconfig=%s context=%s namespace=%s warm_pool=%s container=%s workdir=%s sandbox_ready_timeout=%s pod_ready_timeout=%s exec_timeout_secs=%d delete_on_release=%t forget_missing=%t\n", blank(cfg.AgentSandbox.Kubectl, "-"), blank(cfg.AgentSandbox.Kubeconfig, "-"), blank(cfg.AgentSandbox.Context, "-"), blank(cfg.AgentSandbox.Namespace, "-"), blank(cfg.AgentSandbox.WarmPool, "-"), blank(cfg.AgentSandbox.Container, "-"), blank(cfg.AgentSandbox.Workdir, "-"), cfg.AgentSandbox.SandboxReadyTimeout, cfg.AgentSandbox.PodReadyTimeout, cfg.AgentSandbox.ExecTimeoutSecs, cfg.AgentSandbox.DeleteOnRelease, cfg.AgentSandbox.ForgetMissing)
+	if err := layout.writeSlot(w, "blacksmith"); err != nil {
+		return err
+	}
+	if err := layout.writeSlot(w, "agent_sandbox"); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "phala cli=%s instance_type=%s work_root=%s node_id=%s compose=%s attest=%s\n", blank(cfg.Phala.CLIPath, "-"), blank(cfg.Phala.InstanceType, "-"), blank(cfg.Phala.WorkRoot, "-"), blank(cfg.Phala.NodeID, "-"), blank(cfg.Phala.Compose, "-"), phalaAttest)
 	fmt.Fprintf(w, "namespace image=%s size=%s repository=%s site=%s volume_size_gb=%d auto_stop_idle_timeout=%s work_root=%s delete_on_release=%t\n", cfg.Namespace.Image, blank(cfg.Namespace.Size, "-"), blank(cfg.Namespace.Repository, "-"), blank(cfg.Namespace.Site, "-"), cfg.Namespace.VolumeSizeGB, cfg.Namespace.AutoStopIdleTimeout, cfg.Namespace.WorkRoot, cfg.Namespace.DeleteOnRelease)
 	fmt.Fprintf(w, "namespace_instance cli=%s machine_type=%s duration=%s region=%s endpoint=%s keychain=%s volumes=%d work_root=%s bare=%t\n", cfg.NamespaceInstance.CLIPath, blank(cfg.NamespaceInstance.MachineType, "-"), cfg.NamespaceInstance.Duration, blank(cfg.NamespaceInstance.Region, "-"), blank(redactedConfigURL(cfg.NamespaceInstance.Endpoint), "-"), blank(cfg.NamespaceInstance.Keychain, "-"), len(cfg.NamespaceInstance.Volumes), cfg.NamespaceInstance.WorkRoot, cfg.NamespaceInstance.Bare)
 	fmt.Fprintf(w, "morph api_url=%s snapshot=%s ssh_gateway_host=%s work_root=%s delete_on_release=%t wake_on_ssh=%t auth=%s\n", blank(redactedConfigURL(cfg.Morph.APIURL), "-"), blank(cfg.Morph.Snapshot, "-"), blank(cfg.Morph.SSHGatewayHost, "-"), blank(cfg.Morph.WorkRoot, "-"), cfg.Morph.DeleteOnRelease, cfg.Morph.WakeOnSSH, tokenState(cfg.Morph.APIKey))
@@ -867,19 +670,35 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "nomad address=%s region=%s namespace=%s auth_env=%s auth=%s tls_ca=%s tls_capath=%s tls_cert=%s tls_key=%s tls_server_name=%s skip_verify=%t task=%s driver=%s image=%s workdir=%s jobspec_template=%s node_pool=%s datacenters=%s cpu=%d memory_mb=%d disk_mb=%d alloc_ready_timeout=%s eval_timeout=%s exec_timeout_secs=%d\n", blank(redactedConfigURL(cfg.Nomad.Address), "-"), blank(cfg.Nomad.Region, "-"), blank(cfg.Nomad.Namespace, "-"), nomadTextAuthEnv(cfg), nomadAuthState(cfg), blank(cfg.Nomad.CACert, "-"), blank(cfg.Nomad.CAPath, "-"), blank(cfg.Nomad.ClientCert, "-"), blank(cfg.Nomad.ClientKey, "-"), blank(cfg.Nomad.TLSServerName, "-"), cfg.Nomad.SkipVerify, cfg.Nomad.Task, cfg.Nomad.Driver, cfg.Nomad.Image, cfg.Nomad.Workdir, blank(cfg.Nomad.JobSpecTemplate, "-"), blank(cfg.Nomad.NodePool, "-"), blank(strings.Join(cfg.Nomad.Datacenters, ","), "-"), cfg.Nomad.CPU, cfg.Nomad.MemoryMB, cfg.Nomad.DiskMB, cfg.Nomad.AllocReadyTimeout, cfg.Nomad.EvalTimeout, cfg.Nomad.ExecTimeoutSecs)
 	fmt.Fprintf(w, "ascii_box base_url=%s cli=%s workdir=%s auth=%s\n", redactedConfigURL(cfg.AsciiBox.BaseURL), cfg.AsciiBox.CLIPath, cfg.AsciiBox.Workdir, tokenState(cfg.AsciiBox.APIKey))
 	fmt.Fprintf(w, "superserve base_url=%s template=%s snapshot=%s workdir=%s timeout_secs=%d exec_timeout_secs=%d network_allow_out=%s network_deny_out=%s forget_missing=%t auth=%s\n", redactedConfigURL(cfg.Superserve.BaseURL), blank(cfg.Superserve.Template, "-"), blank(cfg.Superserve.Snapshot, "-"), cfg.Superserve.Workdir, cfg.Superserve.TimeoutSecs, cfg.Superserve.ExecTimeoutSecs, blank(strings.Join(cfg.Superserve.NetworkAllowOut, ","), "-"), blank(strings.Join(cfg.Superserve.NetworkDenyOut, ","), "-"), cfg.Superserve.ForgetMissing, superserveAuthState())
-	fmt.Fprintf(w, "local_container runtime=%s image=%s user=%s work_root=%s cpus=%d memory=%s network=%s docker_socket=%t\n", cfg.LocalContainer.Runtime, cfg.LocalContainer.Image, cfg.LocalContainer.User, blank(cfg.LocalContainer.WorkRoot, "-"), cfg.LocalContainer.CPUs, blank(cfg.LocalContainer.Memory, "-"), cfg.LocalContainer.Network, cfg.LocalContainer.DockerSocket)
-	fmt.Fprintf(w, "apple_container cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s\n", cfg.AppleContainer.CLIPath, cfg.AppleContainer.Image, cfg.AppleContainer.User, cfg.AppleContainer.WorkRoot, cfg.AppleContainer.CPUs, blank(cfg.AppleContainer.Memory, "-"))
-	fmt.Fprintf(w, "mxc cli=%s version=%s containment=%s network=%s readonly_paths=%d readwrite_paths=%d allowed_hosts=%d blocked_hosts=%d allow_dacl_mutation=%t allow_windows_ui=%t experimental=%t\n", cfg.MXC.CLIPath, cfg.MXC.Version, cfg.MXC.Containment, cfg.MXC.Network, len(cfg.MXC.ReadOnlyPaths), len(cfg.MXC.ReadWritePaths), len(cfg.MXC.AllowedHosts), len(cfg.MXC.BlockedHosts), cfg.MXC.AllowDACLMutation, cfg.MXC.AllowWindowsUI, cfg.MXC.Experimental)
-	fmt.Fprintf(w, "docker_sandbox cli=%s agent=%s template=%s cpus=%g memory=%s clone=%t workdir=%s extra_workspaces=%s mcp=%s kit=%s\n", cfg.DockerSandbox.CLIPath, cfg.DockerSandbox.Agent, blank(cfg.DockerSandbox.Template, "-"), cfg.DockerSandbox.CPUs, blank(cfg.DockerSandbox.Memory, "-"), cfg.DockerSandbox.Clone, blank(cfg.DockerSandbox.Workdir, "-"), blank(strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ","), "-"), blank(strings.Join(cfg.DockerSandbox.MCP, ","), "-"), blank(strings.Join(cfg.DockerSandbox.Kit, ","), "-"))
-	fmt.Fprintf(w, "multipass cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s disk=%s launch_timeout=%s\n", cfg.Multipass.CLIPath, cfg.Multipass.Image, cfg.Multipass.User, cfg.Multipass.WorkRoot, cfg.Multipass.CPUs, blank(cfg.Multipass.Memory, "-"), blank(cfg.Multipass.Disk, "-"), cfg.Multipass.LaunchTimeout)
-	fmt.Fprintf(w, "machine0 cli=%s image=%s image_version=%d desktop_image=%s size=%s region=%s key=%s work_root=%s release_policy=%s create_timeout=%s poll_interval=%s auth=cli\n", cfg.Machine0.CLIPath, cfg.Machine0.Image, cfg.Machine0.ImageVersion, blank(cfg.Machine0.DesktopImage, "-"), cfg.Machine0.Size, cfg.Machine0.Region, blank(cfg.Machine0.Key, "default"), machine0ConfigWorkRoot(cfg.Machine0.WorkRoot), cfg.Machine0.ReleasePolicy, cfg.Machine0.CreateTimeout, cfg.Machine0.PollInterval)
-	fmt.Fprintf(w, "tart image=%s user=%s work_root=%s cpus=%d memory=%d disk=%d\n", cfg.Tart.Image, cfg.Tart.User, cfg.Tart.WorkRoot, cfg.Tart.CPUs, cfg.Tart.Memory, cfg.Tart.Disk)
-	fmt.Fprintf(w, "lume cli=%s base=%s storage=%s user=%s work_root=%s\n", cfg.Lume.CLIPath, cfg.Lume.Base, blank(cfg.Lume.Storage, "default"), cfg.Lume.User, cfg.Lume.WorkRoot)
+	if err := layout.writeSlot(w, "local_container"); err != nil {
+		return err
+	}
+	if err := layout.writeSlot(w, "apple_container"); err != nil {
+		return err
+	}
+	if err := layout.writeSlot(w, "mxc"); err != nil {
+		return err
+	}
+	if err := layout.writeSlot(w, "docker_sandbox"); err != nil {
+		return err
+	}
+	if err := layout.writeSlot(w, "multipass"); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "machine0 cli=%s image=%s image_version=%d desktop_image=%s size=%s region=%s key=%s work_root=%s release_policy=%s create_timeout=%s poll_interval=%s auth_mode=cli auth_status=unchecked readiness=unchecked\n", cfg.Machine0.CLIPath, cfg.Machine0.Image, cfg.Machine0.ImageVersion, blank(cfg.Machine0.DesktopImage, "-"), cfg.Machine0.Size, cfg.Machine0.Region, blank(cfg.Machine0.Key, "default"), machine0ConfigWorkRoot(cfg.Machine0.WorkRoot), cfg.Machine0.ReleasePolicy, cfg.Machine0.CreateTimeout, cfg.Machine0.PollInterval)
+	if err := layout.writeSlot(w, "tart"); err != nil {
+		return err
+	}
+	if err := layout.writeSlot(w, "lume"); err != nil {
+		return err
+	}
 	fmt.Fprintf(w, "cloudflare api_url=%s workdir=%s auth=%s\n", blank(redactedConfigURL(cfg.Cloudflare.APIURL), "-"), cfg.Cloudflare.Workdir, tokenState(cfg.Cloudflare.Token))
 	fmt.Fprintf(w, "fastapi_cloud api_url=%s app_id=%s team_id=%s auth=%s\n", blank(redactedConfigURL(cfg.FastAPICloud.APIURL), "-"), blank(cfg.FastAPICloud.AppID, "-"), blank(cfg.FastAPICloud.TeamID, "-"), tokenState(cfg.FastAPICloud.Token))
 	fmt.Fprintf(w, "cloudflare_dynamic_workers loader_url=%s compatibility_date=%s compatibility_flags=%s cache_mode=%s egress=%s cpu_ms=%d subrequests=%d timeout_secs=%d metadata=%d auth=%s\n", blank(redactedConfigURL(cfg.CloudflareDynamicWorkers.LoaderURL), "-"), blank(cfg.CloudflareDynamicWorkers.CompatibilityDate, "-"), blank(strings.Join(cfg.CloudflareDynamicWorkers.CompatibilityFlags, ","), "-"), cfg.CloudflareDynamicWorkers.CacheMode, cfg.CloudflareDynamicWorkers.Egress, cfg.CloudflareDynamicWorkers.CPUMs, cfg.CloudflareDynamicWorkers.Subrequests, cfg.CloudflareDynamicWorkers.TimeoutSecs, len(cfg.CloudflareDynamicWorkers.Metadata), tokenState(cfg.CloudflareDynamicWorkers.Token))
 	fmt.Fprintf(w, "cloudflare_sandbox url=%s workdir=%s exec_timeout_secs=%d forget_missing=%t auth=%s\n", blank(redactedConfigURL(cfg.CloudflareSandbox.BridgeURL), "-"), cfg.CloudflareSandbox.Workdir, cfg.CloudflareSandbox.ExecTimeoutSecs, cfg.CloudflareSandbox.ForgetMissing, tokenState(cfg.CloudflareSandbox.Token))
-	fmt.Fprintf(w, "static id=%s name=%s host=%s user=%s port=%s work_root=%s\n", blank(cfg.Static.ID, "-"), blank(cfg.Static.Name, "-"), blank(cfg.Static.Host, "-"), blank(cfg.Static.User, "-"), blank(cfg.Static.Port, "-"), blank(cfg.Static.WorkRoot, "-"))
+	if err := layout.writeSlot(w, "static"); err != nil {
+		return err
+	}
 	fmt.Fprintf(w, "results junit=%s auto=%t fail_on_failures=%t\n", blank(strings.Join(cfg.Results.JUnit, ","), "-"), cfg.Results.Auto, cfg.Results.FailOnFailures)
 	fmt.Fprintf(w, "cache pnpm=%t npm=%t docker=%t git=%t max_gb=%d purge_on_release=%t volumes=%d\n", cfg.Cache.Pnpm, cfg.Cache.Npm, cfg.Cache.Docker, cfg.Cache.Git, cfg.Cache.MaxGB, cfg.Cache.PurgeOnRelease, len(cfg.Cache.Volumes))
 	if len(cfg.Jobs) > 0 {
@@ -890,27 +709,48 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 		sort.Strings(names)
 		fmt.Fprintf(w, "jobs=%s\n", strings.Join(names, ","))
 	}
-	fmt.Fprintf(w, "aws region=%s root_gb=%d ssh_cidrs=%s\n", cfg.AWSRegion, cfg.AWSRootGB, blank(strings.Join(cfg.AWSSSHCIDRs, ","), "-"))
+	if err := layout.writeSlot(w, "aws"); err != nil {
+		return err
+	}
 	fmt.Fprintf(w, "aws_lambda_microvm image=%s image_version=%s workdir=%s forget_missing=%t\n", blank(cfg.AWSLambdaMicroVM.Image, "-"), blank(cfg.AWSLambdaMicroVM.ImageVersion, "latest"), cfg.AWSLambdaMicroVM.Workdir, cfg.AWSLambdaMicroVM.ForgetMissing)
-	fmt.Fprintf(w, "azure location=%s resource_group=%s os_disk=%s snapshot_sku=%s os_disk_sku=%s network=%s ssh_cidrs=%s\n", cfg.AzureLocation, cfg.AzureResourceGroup, cfg.AzureOSDisk, blank(cfg.AzureSnapshotSKU, "-"), blank(cfg.AzureOSDiskSKU, "-"), blank(cfg.AzureNetwork, "-"), blank(strings.Join(cfg.AzureSSHCIDRs, ","), "-"))
-	fmt.Fprintf(w, "digitalocean region=%s image=%s vpc=%s ssh_cidrs=%s\n", cfg.DigitalOcean.Region, cfg.DigitalOcean.Image, blank(cfg.DigitalOcean.VPCUUID, "-"), blank(strings.Join(cfg.DigitalOcean.SSHCIDRs, ","), "-"))
-	fmt.Fprintf(w, "vultr region=%s os=%s image=%s snapshot=%s firewall_group=%s vpc_ids=%s ssh_cidrs=%s user_scheme=%s\n", cfg.Vultr.Region, blank(cfg.Vultr.OS, "-"), blank(cfg.Vultr.Image, "-"), blank(cfg.Vultr.Snapshot, "-"), blank(cfg.Vultr.FirewallGroup, "-"), blank(strings.Join(cfg.Vultr.VPCIDs, ","), "-"), blank(strings.Join(cfg.Vultr.SSHCIDRs, ","), "-"), blank(cfg.Vultr.UserScheme, "-"))
-	fmt.Fprintf(w, "linode region=%s image=%s type=%s firewall=%s ssh_cidrs=%s\n", cfg.Linode.Region, cfg.Linode.Image, cfg.Linode.Type, blank(cfg.Linode.FirewallID, "-"), blank(strings.Join(cfg.Linode.SSHCIDRs, ","), "-"))
-	fmt.Fprintf(w, "github_codespaces api_url=%s gh_path=%s repo=%s ref=%s machine=%s devcontainer_path=%s working_directory=%s geo=%s idle_timeout=%s retention_period=%s delete_on_release=%t work_root=%s auth=gh\n", blank(redactedConfigURL(cfg.GitHubCodespaces.APIURL), "-"), blank(cfg.GitHubCodespaces.GHPath, "-"), blank(cfg.GitHubCodespaces.Repo, "-"), blank(cfg.GitHubCodespaces.Ref, "-"), blank(cfg.GitHubCodespaces.Machine, "-"), blank(cfg.GitHubCodespaces.DevcontainerPath, "-"), blank(cfg.GitHubCodespaces.WorkingDirectory, "-"), blank(cfg.GitHubCodespaces.Geo, "-"), cfg.GitHubCodespaces.IdleTimeout, cfg.GitHubCodespaces.RetentionPeriod, cfg.GitHubCodespaces.DeleteOnRelease, blank(cfg.GitHubCodespaces.WorkRoot, "-"))
+	if err := layout.writeSlot(w, "azure"); err != nil {
+		return err
+	}
+	if err := layout.writeSlot(w, "digitalocean"); err != nil {
+		return err
+	}
+	if err := layout.writeSlot(w, "vultr"); err != nil {
+		return err
+	}
+	if err := layout.writeSlot(w, "linode"); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "github_codespaces api_url=%s gh_path=%s repo=%s ref=%s machine=%s devcontainer_path=%s working_directory=%s geo=%s idle_timeout=%s retention_period=%s delete_on_release=%t work_root=%s auth_mode=cli auth_status=unchecked readiness=unchecked\n", blank(redactedConfigURL(cfg.GitHubCodespaces.APIURL), "-"), blank(cfg.GitHubCodespaces.GHPath, "-"), blank(cfg.GitHubCodespaces.Repo, "-"), blank(cfg.GitHubCodespaces.Ref, "-"), blank(cfg.GitHubCodespaces.Machine, "-"), blank(cfg.GitHubCodespaces.DevcontainerPath, "-"), blank(cfg.GitHubCodespaces.WorkingDirectory, "-"), blank(cfg.GitHubCodespaces.Geo, "-"), cfg.GitHubCodespaces.IdleTimeout, cfg.GitHubCodespaces.RetentionPeriod, cfg.GitHubCodespaces.DeleteOnRelease, blank(cfg.GitHubCodespaces.WorkRoot, "-"))
 	fmt.Fprintf(w, "lambda region=%s type=%s image=%s image_family=%s firewall_ruleset=%s ssh_cidrs=%s filesystems=%s mounts=%d auth=%s\n", cfg.Lambda.Region, cfg.Lambda.Type, blank(cfg.Lambda.Image, "-"), blank(cfg.Lambda.ImageFamily, "-"), blank(cfg.Lambda.FirewallRuleset, "-"), blank(strings.Join(cfg.Lambda.SSHCIDRs, ","), "-"), blank(strings.Join(cfg.Lambda.FilesystemNames, ","), "-"), len(cfg.Lambda.FilesystemMounts), lambdaAuthState())
 	fmt.Fprintf(w, "vast api_url=%s instance_type=%s gpu_name=%s gpu_count=%d image=%s template_id=%s runtype=%s disk_gb=%d max_dph_total=%.4g min_reliability=%.4g order=%s user=%s work_root=%s release_action=%s auth=%s\n", blank(redactedConfigURL(cfg.Vast.APIURL), "-"), blank(cfg.Vast.InstanceType, "-"), blank(cfg.Vast.GPUName, "-"), cfg.Vast.GPUCount, blank(cfg.Vast.Image, "-"), blank(cfg.Vast.TemplateID, "-"), blank(cfg.Vast.Runtype, "-"), cfg.Vast.DiskGB, cfg.Vast.MaxDphTotal, cfg.Vast.MinReliability, blank(cfg.Vast.Order, "-"), blank(cfg.Vast.User, "-"), blank(cfg.Vast.WorkRoot, "-"), blank(cfg.Vast.ReleaseAction, "-"), tokenState(cfg.Vast.APIKey))
-	fmt.Fprintf(w, "nvidia_brev cli=%s org=%s type=%s gpu_name=%s provider=%s mode=%s launchable=%s startup_script=%s release_action=%s target=%s user=%s work_root=%s auth=cli\n", blank(cfg.NvidiaBrev.CLI, "-"), blank(cfg.NvidiaBrev.Org, "-"), blank(cfg.NvidiaBrev.Type, "-"), blank(cfg.NvidiaBrev.GPUName, "-"), blank(cfg.NvidiaBrev.Provider, "-"), blank(cfg.NvidiaBrev.Mode, "-"), blank(cfg.NvidiaBrev.Launchable, "-"), blank(cfg.NvidiaBrev.StartupScript, "-"), blank(cfg.NvidiaBrev.ReleaseAction, "-"), blank(cfg.NvidiaBrev.Target, "-"), blank(cfg.NvidiaBrev.User, "-"), blank(cfg.NvidiaBrev.WorkRoot, "-"))
-	fmt.Fprintf(w, "nebius cli=%s profile=%s parent_id=%s subnet_id=%s platform=%s preset=%s image_family=%s disk_type=%s disk_size_gib=%d user=%s public_ip=%s security_group_ids=%s service_account_id=%s recovery_policy=%s auth=cli\n", blank(cfg.Nebius.CLI, "-"), blank(cfg.Nebius.Profile, "-"), blank(cfg.Nebius.ParentID, "-"), blank(cfg.Nebius.SubnetID, "-"), blank(cfg.Nebius.Platform, "-"), blank(cfg.Nebius.Preset, "-"), blank(cfg.Nebius.ImageFamily, "-"), blank(cfg.Nebius.DiskType, "-"), cfg.Nebius.DiskSizeGiB, blank(cfg.Nebius.User, "-"), blank(cfg.Nebius.PublicIP, "-"), blank(strings.Join(cfg.Nebius.SecurityGroupIDs, ","), "-"), blank(cfg.Nebius.ServiceAccountID, "-"), blank(cfg.Nebius.RecoveryPolicy, "-"))
+	fmt.Fprintf(w, "nvidia_brev cli=%s org=%s type=%s gpu_name=%s provider=%s mode=%s launchable=%s startup_script=%s release_action=%s target=%s user=%s work_root=%s auth_mode=cli auth_status=unchecked readiness=unchecked\n", blank(cfg.NvidiaBrev.CLI, "-"), blank(cfg.NvidiaBrev.Org, "-"), blank(cfg.NvidiaBrev.Type, "-"), blank(cfg.NvidiaBrev.GPUName, "-"), blank(cfg.NvidiaBrev.Provider, "-"), blank(cfg.NvidiaBrev.Mode, "-"), blank(cfg.NvidiaBrev.Launchable, "-"), blank(cfg.NvidiaBrev.StartupScript, "-"), blank(cfg.NvidiaBrev.ReleaseAction, "-"), blank(cfg.NvidiaBrev.Target, "-"), blank(cfg.NvidiaBrev.User, "-"), blank(cfg.NvidiaBrev.WorkRoot, "-"))
+	fmt.Fprintf(w, "nebius cli=%s profile=%s parent_id=%s subnet_id=%s platform=%s preset=%s image_family=%s disk_type=%s disk_size_gib=%d user=%s public_ip=%s security_group_ids=%s service_account_id=%s recovery_policy=%s auth_mode=cli auth_status=unchecked readiness=unchecked\n", blank(cfg.Nebius.CLI, "-"), blank(cfg.Nebius.Profile, "-"), blank(cfg.Nebius.ParentID, "-"), blank(cfg.Nebius.SubnetID, "-"), blank(cfg.Nebius.Platform, "-"), blank(cfg.Nebius.Preset, "-"), blank(cfg.Nebius.ImageFamily, "-"), blank(cfg.Nebius.DiskType, "-"), cfg.Nebius.DiskSizeGiB, blank(cfg.Nebius.User, "-"), blank(cfg.Nebius.PublicIP, "-"), blank(strings.Join(cfg.Nebius.SecurityGroupIDs, ","), "-"), blank(cfg.Nebius.ServiceAccountID, "-"), blank(cfg.Nebius.RecoveryPolicy, "-"))
 	fmt.Fprintf(w, "hostinger api_url=%s item_id=%s payment_method_id=%s template_id=%s data_center_id=%s hostname_prefix=%s user=%s work_root=%s allow_purchase=%t release_action=%s auth=%s\n", blank(redactedConfigURL(cfg.Hostinger.APIURL), "-"), blank(cfg.Hostinger.ItemID, "-"), blank(cfg.Hostinger.PaymentMethodID, "-"), blank(cfg.Hostinger.TemplateID, "-"), blank(cfg.Hostinger.DataCenterID, "-"), blank(cfg.Hostinger.HostnamePrefix, "-"), blank(cfg.Hostinger.User, "-"), blank(cfg.Hostinger.WorkRoot, "-"), cfg.Hostinger.AllowPurchase, blank(cfg.Hostinger.ReleaseAction, "-"), tokenState(cfg.Hostinger.APIToken))
 	fmt.Fprintf(w, "ovh endpoint=%s project_id=%s region=%s image=%s flavor=%s auth=%s\n", blank(redactedConfigURL(cfg.OVH.Endpoint), "-"), blank(cfg.OVH.ProjectID, "-"), blank(cfg.OVH.Region, "-"), blank(cfg.OVH.Image, "-"), blank(cfg.OVH.Flavor, "-"), ovhAuthState())
 	fmt.Fprintf(w, "scaleway region=%s zone=%s image=%s type=%s project_id=%s organization_id=%s security_group=%s ssh_cidrs=%s auth=%s\n", blank(cfg.Scaleway.Region, "-"), blank(cfg.Scaleway.Zone, "-"), blank(cfg.Scaleway.Image, "-"), blank(cfg.Scaleway.Type, "-"), blank(cfg.Scaleway.ProjectID, "-"), blank(cfg.Scaleway.OrganizationID, "-"), blank(cfg.Scaleway.SecurityGroup, "-"), blank(strings.Join(cfg.Scaleway.SSHCIDRs, ","), "-"), scalewayAuthState())
 	fmt.Fprintf(w, "tencentcloud region=%s zone=%s image=%s type=%s vpc_id=%s subnet_id=%s security_group_id=%s root_gb=%d internet_charge_type=%s internet_max_bandwidth_out=%d ssh_cidrs=%s api_endpoint=%s auth=%s\n", blank(cfg.TencentCloud.Region, "-"), blank(cfg.TencentCloud.Zone, "-"), blank(cfg.TencentCloud.Image, "-"), blank(cfg.TencentCloud.Type, "-"), blank(cfg.TencentCloud.VPCID, "-"), blank(cfg.TencentCloud.SubnetID, "-"), blank(cfg.TencentCloud.SecurityGroupID, "-"), cfg.TencentCloud.RootGB, blank(cfg.TencentCloud.InternetChargeType, "-"), cfg.TencentCloud.InternetMaxBandwidthOut, blank(strings.Join(cfg.TencentCloud.SSHCIDRs, ","), "-"), blank(redactedConfigURL(cfg.TencentCloud.APIEndpoint), "-"), tencentCloudAuthState())
 	fmt.Fprintf(w, "azure_dynamic_sessions endpoint=%s unsupported_pool=%s api_version=%s workdir=%s timeout_secs=%d\n", blank(redactedConfigURL(cfg.AzureDynamicSessions.Endpoint), "-"), blank(cfg.AzureDynamicSessions.Pool, "-"), cfg.AzureDynamicSessions.APIVersion, cfg.AzureDynamicSessions.Workdir, cfg.AzureDynamicSessions.TimeoutSecs)
-	fmt.Fprintf(w, "gcp project=%s zone=%s image=%s network=%s subnet=%s root_gb=%d ssh_cidrs=%s\n", blank(cfg.GCPProject, "-"), cfg.GCPZone, cfg.GCPImage, cfg.GCPNetwork, blank(cfg.GCPSubnet, "-"), cfg.GCPRootGB, blank(strings.Join(cfg.GCPSSHCIDRs, ","), "-"))
+	if err := layout.writeSlot(w, "gcp"); err != nil {
+		return err
+	}
 	fmt.Fprintf(w, "proxmox api_url=%s node=%s template_id=%d storage=%s pool=%s bridge=%s user=%s work_root=%s full_clone=%t auth=%s\n", blank(redactedConfigURL(cfg.Proxmox.APIURL), "-"), blank(cfg.Proxmox.Node, "-"), cfg.Proxmox.TemplateID, blank(cfg.Proxmox.Storage, "-"), blank(cfg.Proxmox.Pool, "-"), blank(cfg.Proxmox.Bridge, "-"), cfg.Proxmox.User, cfg.Proxmox.WorkRoot, cfg.Proxmox.FullClone, tokenState(cfg.Proxmox.TokenSecret))
-	fmt.Fprintf(w, "firecracker binary=%s jailer=%s kernel=%s rootfs=%s user=%s work_root=%s cpus=%d memory_mib=%d disk_mib=%d network=%s cni_network=%s cni_conf_dir=%s cni_bin_dir=%s launch_timeout=%s delete_on_release=%t\n", blank(cfg.Firecracker.Binary, "-"), blank(cfg.Firecracker.Jailer, "-"), blank(cfg.Firecracker.Kernel, "-"), blank(cfg.Firecracker.RootFS, "-"), blank(cfg.Firecracker.User, "-"), blank(cfg.Firecracker.WorkRoot, "-"), cfg.Firecracker.CPUs, cfg.Firecracker.MemoryMiB, cfg.Firecracker.DiskMiB, blank(cfg.Firecracker.Network, "-"), blank(cfg.Firecracker.CNINetwork, "-"), blank(cfg.Firecracker.CNIConfDir, "-"), blank(cfg.Firecracker.CNIBinDir, "-"), cfg.Firecracker.LaunchTimeout, cfg.Firecracker.DeleteOnRelease)
+	if err := layout.writeSlot(w, "firecracker"); err != nil {
+		return err
+	}
 	fmt.Fprintf(w, "xcp_ng api_url=%s username=%s template=%s template_uuid=%s sr=%s sr_uuid=%s network=%s network_uuid=%s host=%s user=%s work_root=%s insecure_tls=%t auth=%s\n", blank(redactedConfigURL(cfg.XCPNg.APIURL), "-"), blank(cfg.XCPNg.Username, "-"), blank(cfg.XCPNg.Template, "-"), blank(cfg.XCPNg.TemplateUUID, "-"), blank(cfg.XCPNg.SR, "-"), blank(cfg.XCPNg.SRUUID, "-"), blank(cfg.XCPNg.Network, "-"), blank(cfg.XCPNg.NetworkUUID, "-"), blank(cfg.XCPNg.Host, "-"), cfg.XCPNg.User, cfg.XCPNg.WorkRoot, cfg.XCPNg.InsecureTLS, tokenState(cfg.XCPNg.Password))
-	fmt.Fprintf(w, "parallels template=%s source=%s source_id=%s snapshot=%s snapshot_id=%s clone_mode=%s host=%s user=%s work_root=%s startup_timeout=%s templates=%d hosts=%d\n", blank(cfg.Parallels.Template, "-"), blank(cfg.Parallels.Source, "-"), blank(cfg.Parallels.SourceID, "-"), blank(cfg.Parallels.SourceSnapshot, "-"), blank(cfg.Parallels.SourceSnapshotID, "-"), cfg.Parallels.CloneMode, blank(cfg.Parallels.Host, "local"), cfg.Parallels.User, cfg.Parallels.WorkRoot, cfg.Parallels.StartupTimeout, len(cfg.Parallels.Templates), len(cfg.Parallels.Hosts))
+	if err := layout.writeSlot(w, "parallels"); err != nil {
+		return err
+	}
+	if err := layout.writeRemaining(w); err != nil {
+		return err
+	}
+	writeProviderConfigStatus(w, providerConfigStatus(cfg))
+	return output.err
 }
 
 func redactedConfigURL(value string) string {

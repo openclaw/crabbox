@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -319,53 +320,31 @@ func TestWarmupDoesNotCreateWhenIntentCannotBePersisted(t *testing.T) {
 }
 
 func TestRunIsRejected(t *testing.T) {
-	for _, test := range []struct {
-		name            string
-		req             RunRequest
-		wantErrContains string
+	for _, tc := range []struct {
+		name string
+		req  RunRequest
+		want string
 	}{
-		{
-			name:            "sync required off",
-			req:             RunRequest{Command: []string{"true"}},
-			wantErrContains: "pass --no-sync",
-		},
-		{
-			name:            "command rejected",
-			req:             RunRequest{NoSync: true, Command: []string{"true"}},
-			wantErrContains: "cannot execute arbitrary run commands",
-		},
-		{
-			name:            "missing command",
-			req:             RunRequest{NoSync: true},
-			wantErrContains: "missing command",
-		},
-		{
-			name:            "keep rejected",
-			req:             RunRequest{NoSync: true, Keep: true, Command: []string{"true"}},
-			wantErrContains: "--keep is not supported",
-		},
-		{
-			name:            "shell rejected",
-			req:             RunRequest{NoSync: true, ShellMode: true, Command: []string{"true"}},
-			wantErrContains: "--shell is not supported",
-		},
+		{name: "keep first", req: RunRequest{Keep: true, Reclaim: true}, want: "provider=unikraft-cloud cannot run commands; --keep is not supported"},
+		{name: "reclaim", req: RunRequest{Reclaim: true}, want: "provider=unikraft-cloud cannot run commands; --reclaim is not supported"},
+		{name: "no sync", req: RunRequest{}, want: "provider=unikraft-cloud does not support workspace sync; pass --no-sync"},
+		{name: "shell", req: RunRequest{NoSync: true, ShellMode: true}, want: "provider=unikraft-cloud cannot open an interactive shell; --shell is not supported"},
+		{name: "env summary without env", req: RunRequest{NoSync: true, EnvSummary: true}, want: "provider=unikraft-cloud cannot forward per-run environment variables"},
+		{name: "missing command", req: RunRequest{NoSync: true}, want: "missing command"},
+		{name: "command", req: RunRequest{NoSync: true, Command: []string{"true"}}, want: "provider=unikraft-cloud cannot execute arbitrary run commands; Unikraft Cloud instances run their OCI image entrypoint"},
+		{name: "implicit env", req: RunRequest{NoSync: true, Env: map[string]string{"CI": "true"}, Command: []string{"true"}}, want: "provider=unikraft-cloud cannot execute arbitrary run commands; Unikraft Cloud instances run their OCI image entrypoint"},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			api := &fakeUnikraftCloudAPI{baseURL: "https://api.fra.unikraft.cloud"}
-			b := testBackend(api, nil, nil)
-			_, err := b.Run(context.Background(), test.req)
-			if err == nil {
-				t.Fatal("Run succeeded, want rejection")
+		t.Run(tc.name, func(t *testing.T) {
+			b := &backend{newClient: func(Config, Runtime) (unikraftCloudAPI, error) {
+				panic("Run must not request a provider API client")
+			}}
+			result, err := b.Run(context.Background(), tc.req)
+			var public ExitError
+			if !errors.As(err, &public) || public.Code != 2 || public.Message != tc.want {
+				t.Fatalf("err=%v, want exit2 %q", err, tc.want)
 			}
-			if !strings.Contains(err.Error(), test.wantErrContains) {
-				t.Fatalf("err = %v, want containing %q", err, test.wantErrContains)
-			}
-			var exitErr ExitError
-			if !errors.As(err, &exitErr) || exitErr.Code != 2 {
-				t.Fatalf("err = %#v, want exit code 2", err)
-			}
-			if len(api.created) != 0 || len(api.deletedIDs) != 0 {
-				t.Fatalf("Run touched the API: %#v", api)
+			if !reflect.DeepEqual(result, RunResult{}) {
+				t.Fatalf("result=%#v, want zero result", result)
 			}
 		})
 	}

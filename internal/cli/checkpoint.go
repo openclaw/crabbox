@@ -1546,9 +1546,15 @@ func (a App) provisionCheckpointForkWithoutClaim(ctx context.Context, cfg Config
 	if requestedLeaseID != "" {
 		checkpointID = record.ID
 	}
+	var source *NativeCheckpointForkRecord
+	if isNativeCheckpointKind(record.Kind) {
+		native := nativeCheckpointForkRecord(record)
+		source = &native
+	}
 	lease, err := sshBackend.Acquire(ctx, AcquireRequest{
 		Repo: repo, Options: leaseOptionsFromConfig(cfg), Keep: keep, Reclaim: reclaim,
 		RequestedLeaseID: requestedLeaseID, RequestedCheckpointID: checkpointID, RequestedSlug: requestedSlug,
+		CheckpointSource: source,
 	})
 	if err != nil {
 		return checkpointForkProvision{}, err

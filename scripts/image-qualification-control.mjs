@@ -533,22 +533,84 @@ export function verifyPublisherContract(source) {
   if (requiredPatterns.some((pattern) => !pattern.test(source))) {
     throw new Error("candidate publisher lacks the transactional rollback contract");
   }
-  const ordered = [
+  // Admission checks the audited publisher layout, not arbitrary shell semantics.
+  // Keep failure handling inside cleanup: promotion stays armed through teardown.
+  const cleanup = source.match(/^cleanup\(\) \{\n([\s\S]*?)^\}\ntrap cleanup EXIT$/m);
+  if (!cleanup) {
+    throw new Error("candidate publisher cleanup contract is missing");
+  }
+  const main = source.slice(cleanup.index + cleanup[0].length);
+  const rollback = `  if [[ "$rollback_pending" == "1" && "$exit_status" != "0" ]]; then
+    rollback_pending=0
+    if rollback_promoted_image "$promotion_log"; then
+      rollback_status="succeeded"
+    else
+      rollback_status="failed"
+      finalizer_status=1
+    fi
+  fi`;
+  const cleanupOrdered = [
+    "  local exit_status=$?\n  trap - EXIT",
+    rollback,
+    '  if [[ "$keep_lease" != "1" ]]; then',
+    '    cleanup_leases=("$measurement_lease" "$promoted_lease" "$candidate_lease" "$source_lease")',
+    `      if ! "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease"; then
+        cleanup_status="failed"
+        finalizer_status=1
+      fi`,
+    `  if [[ "$exit_status" == "0" && "$finalizer_status" != "0" ]]; then
+    exit_status="$finalizer_status"
+  fi`,
+    rollback,
+    '  if [[ "$measured" == "1" && -n "$measurement_dir" && -n "$public_outcome" ]]; then',
+    '    outcome_candidate="$(mktemp "${public_outcome}.candidate.XXXXXX")" || proof_status=$?',
+    `    node "$ROOT/scripts/devtools-image-proof.mjs" finalize \\
+      "$outcome_candidate" "$measurement_dir/policy.json" "$measurement_dir" \\
+      "$outcome_stage" "$exit_status" "$rollback_status" "$cleanup_status" "$receipt_path" ||
+      proof_status=$?`,
+    '      mv -f "$outcome_candidate" "$public_outcome" || proof_status=$?',
+    '    if [[ "$proof_status" != "0" ]]; then',
+    `      if [[ "$exit_status" == "0" ]]; then
+        exit_status="$proof_status"
+      fi`,
+    `      if [[ "$rollback_pending" == "1" ]]; then
+        rollback_pending=0
+        if rollback_promoted_image "$promotion_log"; then
+          rollback_status="succeeded"
+        else
+          rollback_status="failed"
+          finalizer_status=1
+        fi
+      fi`,
+    '    elif [[ "$exit_status" == "0" ]]; then\n      rollback_pending=0',
+    '  exit "$exit_status"\n',
+  ];
+  const mainOrdered = [
     'run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$candidate_lease"',
     'candidate_lease=""',
     "rollback_pending=1",
     'run_json_tee "$promotion_log" "$CRABBOX_BIN" "${promote_args[@]}"',
     'promoted_lease="$(warmup promoted)"',
     'smoke "$promoted_lease"',
-    "rollback_pending=0",
   ];
-  let cursor = 0;
-  for (const marker of ordered) {
-    const next = source.indexOf(marker, cursor);
-    if (next === -1) {
-      throw new Error("candidate publisher rollback ordering is not admissible");
+  for (const [text, ordered] of [
+    [cleanup[1], cleanupOrdered],
+    [main, mainOrdered],
+  ]) {
+    let cursor = 0;
+    for (const marker of ordered) {
+      const next = text.indexOf(marker, cursor);
+      if (next === -1) {
+        throw new Error("candidate publisher rollback ordering is not admissible");
+      }
+      cursor = next + marker.length;
     }
-    cursor = next + marker.length;
+  }
+  if (
+    (cleanup[1].match(/^\s*rollback_pending=0$/gm) ?? []).length !== 4 ||
+    /^\s*rollback_pending=0$/m.test(main.slice(main.indexOf("rollback_pending=1")))
+  ) {
+    throw new Error("candidate publisher disarms rollback outside cleanup outcomes");
   }
 }
 

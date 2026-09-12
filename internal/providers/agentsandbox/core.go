@@ -2,7 +2,7 @@ package agentsandbox
 
 import (
 	"context"
-	"flag"
+
 	"fmt"
 	"io"
 	"os"
@@ -64,14 +64,6 @@ const (
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
-}
-
-func expandUserPath(path string) string {
-	return core.ExpandUserPath(path)
 }
 
 func blank(value, fallback string) string {

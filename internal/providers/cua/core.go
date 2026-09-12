@@ -1,7 +1,6 @@
 package cua
 
 import (
-	"flag"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -31,18 +30,10 @@ type LeaseClaim = core.LeaseClaim
 type ExitError = core.ExitError
 
 const (
-	providerName             = "cua"
-	defaultImage             = "ubuntu:24.04"
-	defaultKind              = "container"
-	defaultRegion            = ""
-	defaultWorkdir           = "/workspace/crabbox"
-	defaultBridgeCommand     = "python3"
-	defaultSDKPackage        = "cua"
-	defaultSDKImport         = "cua"
-	defaultSDKFallbackImport = "cua_sandbox"
-	targetLinux              = core.TargetLinux
-	cuaTrackingIssue         = "https://github.com/openclaw/crabbox/issues/381"
-	maxBridgeTimeoutSeconds  = int64((1<<63 - 1) / int64(time.Second))
+	providerName            = "cua"
+	targetLinux             = core.TargetLinux
+	cuaTrackingIssue        = "https://github.com/openclaw/crabbox/issues/381"
+	maxBridgeTimeoutSeconds = int64((1<<63 - 1) / int64(time.Second))
 )
 
 func provisioningUnsupported() error {
@@ -55,10 +46,6 @@ func mutationUnsupported() error {
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
 }
 
 func blank(value, fallback string) string {

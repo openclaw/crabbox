@@ -1,9 +1,7 @@
 package e2b
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -97,11 +96,11 @@ var newE2BClient = func(cfg Config, rt Runtime) (e2bAPI, error) {
 		return nil, exit(2, "provider=e2b requires E2B_API_KEY")
 	}
 	httpClient, envdClient := shared.ControlAndDataHTTPClients(rt.HTTP, e2bControlTimeout)
-	apiURL, err := validateE2BAPIURL(blank(cfg.E2B.APIURL, "https://api.e2b.app"))
+	apiURL, err := validateE2BAPIURL(blank(cfg.E2B.APIURL, core.E2BConfigDefaultAPIURL))
 	if err != nil {
 		return nil, err
 	}
-	domain := strings.TrimSpace(blank(cfg.E2B.Domain, "e2b.app"))
+	domain := strings.TrimSpace(blank(cfg.E2B.Domain, core.E2BConfigDefaultDomain))
 	return &e2bClient{
 		apiKey:     apiKey,
 		apiURL:     apiURL,
@@ -259,19 +258,11 @@ func (c *e2bClient) doJSON(ctx context.Context, method, path string, query url.V
 }
 
 func (c *e2bClient) doJSONWithHeaders(ctx context.Context, method, path string, query url.Values, body any, out any) (http.Header, error) {
-	var r io.Reader
-	if body != nil {
-		var buf bytes.Buffer
-		if err := json.NewEncoder(&buf).Encode(body); err != nil {
-			return nil, err
-		}
-		r = &buf
-	}
 	endpoint := c.apiURL + path
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, r)
+	req, err := shared.NewJSONRequest(ctx, method, endpoint, body)
 	if err != nil {
 		return nil, err
 	}
@@ -285,17 +276,10 @@ func (c *e2bClient) doJSONWithHeaders(ctx context.Context, method, path string, 
 		return nil, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
+	if err := shared.DecodeUnboundedJSONResponse(resp, out, func(statusCode int, status string, data []byte) error {
+		return &e2bAPIError{StatusCode: statusCode, Status: status, Body: shared.RedactErrorSecrets(summarizeJSON(data), c.apiKey)}
+	}); err != nil {
 		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &e2bAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(summarizeJSON(data), c.apiKey)}
-	}
-	if out != nil && len(data) > 0 {
-		if err := json.Unmarshal(data, out); err != nil {
-			return nil, err
-		}
 	}
 	return resp.Header.Clone(), nil
 }

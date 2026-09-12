@@ -1012,6 +1012,7 @@ export interface RunRecord {
   terminalReceipt?: TerminalRunReceipt;
   terminalFinishSHA256?: string;
   terminalLogPrefix?: string;
+  createRequestSHA256?: string;
 }
 
 export interface TerminalRunReceipt {

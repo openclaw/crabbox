@@ -23,6 +23,7 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/openclaw/crabbox/internal/prefixbuffer"
 	xssh "golang.org/x/crypto/ssh"
 )
 
@@ -47,7 +48,8 @@ type SSHTarget struct {
 	SSHConfigProxy         bool
 	ProxyCommand           string
 	ChildEnvDenylist       []string
-	ChildEnv               map[string]string
+	// Transport-only overrides can contain credentials; never serialize them.
+	ChildEnv map[string]string `json:"-"`
 }
 
 func isLocalMacTarget(target SSHTarget) bool {
@@ -657,10 +659,17 @@ func sshReadyCommand(target SSHTarget) string {
 		return target.ReadyCheck
 	}
 	if isWindowsNativeTarget(target) {
-		return powershellCommand(`$ErrorActionPreference = "Stop"
+		return powershellCommand(windowsPowerShellPathRefresh + `$ErrorActionPreference = "Stop"
 git --version | Out-Null
 tar --version | Out-Null
+node --version | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "node readiness failed" }
+npm.cmd --version | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "npm readiness failed" }
 if (-not (Test-Path -LiteralPath ` + psQuote(targetWindowsReadyRoot(target)) + `)) { throw "work root missing" }`)
+	}
+	if target.TargetOS == targetMacOS {
+		return sshReadyCommand(SSHTarget{}) + " && /bin/bash -lc 'node --version >/dev/null && npm --version >/dev/null'"
 	}
 	return "test -x /usr/local/bin/crabbox-ready && /usr/local/bin/crabbox-ready >/tmp/crabbox-ready.log 2>&1"
 }
@@ -731,7 +740,7 @@ func resolveSSHPortNoInput(ctx context.Context, target *SSHTarget, connectTimeou
 	for index, port := range ports {
 		probe.Port = port
 		command := sshTransportPreparation{command: sshTransportProbeCommand(probe)}
-		var diagnostic synchronizedBuffer
+		diagnostic := newSynchronizedBuffer(0)
 		_, err = command.runOnce(ctx, probe, connectTimeout, connectionAttempts, io.Discard, &diagnostic, false)
 		if err == nil {
 			target.recordPreparedEndpoint(port)
@@ -988,7 +997,7 @@ func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) 
 }
 
 func runSSHCombinedOutputLimit(ctx context.Context, target SSHTarget, remote string, maxBytes int) (string, error) {
-	out := synchronizedBuffer{limit: maxBytes}
+	out := newSynchronizedBuffer(maxBytes)
 	err := executeSSH(ctx, &target, remote, nil, 0, 0, "10", "3", &out, &out)
 	return strings.TrimSpace(out.String()), err
 }
@@ -1017,7 +1026,7 @@ func runIdempotentSSHCombinedOutputLimit(ctx context.Context, target SSHTarget, 
 }
 
 func runWSL2ControlScriptCombinedOutput(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) (string, error) {
-	var out synchronizedBuffer
+	out := newSynchronizedBuffer(0)
 	err := executeSSH(ctx, &target, remote, nil, 0, waitTimeout, connectTimeout, connectionAttempts, &out, &out)
 	return strings.TrimSpace(out.String()), err
 }
@@ -1090,29 +1099,30 @@ func sameCommandStreamWriter(left, right io.Writer) bool {
 	return left == right
 }
 
+// Construct explicitly so SSH's nonpositive limits remain unlimited.
 type synchronizedBuffer struct {
-	mu        sync.Mutex
-	buf       bytes.Buffer
-	limit     int
-	truncated bool
+	mu  sync.Mutex
+	buf prefixbuffer.Buffer
+}
+
+func newSynchronizedBuffer(limit int) synchronizedBuffer {
+	buf := prefixbuffer.NewUnlimited()
+	if limit > 0 {
+		buf = prefixbuffer.NewLimited(limit)
+	}
+	return synchronizedBuffer{buf: buf}
 }
 
 func (b *synchronizedBuffer) Write(data []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	n := len(data)
-	if b.limit > 0 && len(data) > b.limit-b.buf.Len() {
-		data = data[:b.limit-b.buf.Len()]
-		b.truncated = true
-	}
-	_, _ = b.buf.Write(data)
-	return n, nil
+	return b.buf.Write(data)
 }
 
 func (b *synchronizedBuffer) Bytes() []byte {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.truncated {
+	if b.buf.Exceeded() {
 		return nil
 	}
 	return bytes.Clone(b.buf.Bytes())
@@ -1121,7 +1131,7 @@ func (b *synchronizedBuffer) Bytes() []byte {
 func (b *synchronizedBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.truncated {
+	if b.buf.Exceeded() {
 		return ""
 	}
 	return b.buf.String()
@@ -1130,7 +1140,7 @@ func (b *synchronizedBuffer) String() string {
 func (b *synchronizedBuffer) boundedString() (string, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.buf.String(), b.truncated
+	return b.buf.String(), b.buf.Exceeded()
 }
 
 type gitOriginDiagnosticsTruncatedError struct {
@@ -1152,7 +1162,7 @@ func runIdempotentSSHGitOriginAttempt(ctx context.Context, target SSHTarget, rem
 		truncated bool
 	)
 	for attempt := 0; attempt < 2; attempt++ {
-		out = synchronizedBuffer{limit: gitSeedDiagnosticLimit}
+		out = newSynchronizedBuffer(gitSeedDiagnosticLimit)
 		lastErr = executeSSH(ctx, &target, remote, nil, 0, 0, "10", "3", &out, &out)
 		if lastErr == nil || !shouldRetrySSHPort(lastErr) || attempt == 1 {
 			break
@@ -1789,8 +1799,12 @@ if ($remaining -gt 0) {
 `
 }
 
+// OpenSSH sessions can inherit PATH from before bootstrap updated the registry.
+const windowsPowerShellPathRefresh = `$env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+`
+
 func windowsPowerShellStdinScriptCommand(inputSize int) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return powershellCommand(windowsPowerShellPathRefresh + `$ErrorActionPreference = "Stop"
 $path = Join-Path $env:TEMP ("crabbox-stdin-command-" + [Guid]::NewGuid().ToString("N") + ".ps1")
 try {
 	$scriptFile = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)

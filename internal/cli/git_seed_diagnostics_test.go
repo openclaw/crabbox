@@ -140,9 +140,11 @@ func TestGitSeedCaptureLimitPreservesExecutionAndRetry(t *testing.T) {
 			}
 		})
 	}
-	capture := synchronizedBuffer{limit: gitSeedDiagnosticLimit}
-	if n, err := io.Copy(&capture, strings.NewReader(strings.Repeat("x", 1<<20))); err != nil || n != 1<<20 || capture.buf.Len() > gitSeedDiagnosticLimit || !capture.truncated || capture.String() != "" {
-		t.Fatalf("capture n=%d err=%v retained=%d truncated=%v", n, err, capture.buf.Len(), capture.truncated)
+	capture := newSynchronizedBuffer(gitSeedDiagnosticLimit)
+	n, err := io.Copy(&capture, strings.NewReader(strings.Repeat("x", 1<<20)))
+	retained, truncated := capture.boundedString()
+	if err != nil || n != 1<<20 || len(retained) > gitSeedDiagnosticLimit || !truncated || capture.String() != "" {
+		t.Fatalf("capture n=%d err=%v retained=%d truncated=%v", n, err, len(retained), truncated)
 	}
 }
 

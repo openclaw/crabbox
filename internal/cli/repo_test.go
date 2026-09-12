@@ -542,6 +542,53 @@ func TestGitCheckoutHasHiddenOmissionsThroughSymlinkAncestor(t *testing.T) {
 	}
 }
 
+func setupOrdinaryHiddenSyncRepo(t *testing.T, skipWorktree bool) string {
+	t.Helper()
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, t.TempDir())
+	t.Chdir(dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, "visible", "keep.txt"), "keep\n")
+	writeFile(t, filepath.Join(dir, "hidden", "drop.txt"), "drop\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	if skipWorktree {
+		runGit(t, dir, "update-index", "--skip-worktree", "hidden/drop.txt")
+		if err := os.Remove(filepath.Join(dir, "hidden", "drop.txt")); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		runGit(t, dir, "sparse-checkout", "set", "visible")
+	}
+	return dir
+}
+
+func assertOrdinaryHiddenSyncGuidance(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected hidden in-scope path error")
+	}
+	for _, text := range []string{`tracked path "hidden/drop.txt"`, "materialize", "sync.include", "sync.exclude", ".crabboxignore"} {
+		if !strings.Contains(err.Error(), text) {
+			t.Errorf("diagnostic missing %q: %v", text, err)
+		}
+	}
+}
+
+func TestSyncManifestOrdinaryHiddenPathRecovery(t *testing.T) {
+	for _, skip := range []bool{false, true} {
+		t.Run(fmt.Sprintf("skip=%t", skip), func(t *testing.T) {
+			dir := setupOrdinaryHiddenSyncRepo(t, skip)
+			_, err := syncManifestFiltered(dir, nil, nil)
+			assertOrdinaryHiddenSyncGuidance(t, err)
+		})
+	}
+}
+
 func TestSyncManifestRejectsOnlyHiddenPathsInEffectiveScope(t *testing.T) {
 	tests := []struct {
 		name      string

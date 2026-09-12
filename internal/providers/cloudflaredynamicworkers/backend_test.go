@@ -7,16 +7,51 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
+
+func TestManualConfigInputFlags(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "fixture-other"
+	fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+	values := RegisterProviderFlags(fs, cfg)
+	before := cfg
+	if err := ApplyProviderFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+		t.Fatalf("foreign values changed configuration: %v", err)
+	}
+	if err := ApplyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	want := cfg
+	core.RecordProviderFlagInputs(&want, true, "cloudflare-dynamic-workers")
+	if reflect.DeepEqual(cfg, want) {
+		t.Fatal("unvisited flags recorded input")
+	}
+	for repeat := 0; repeat < 2; repeat++ {
+		if err := fs.Set("cloudflare-dynamic-workers-cache", "stable"); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want = cfg
+		core.RecordProviderFlagInputs(&want, true, "cloudflare-dynamic-workers")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatal("accepted/equal flag value was not recorded")
+		}
+	}
+}
 
 func TestProviderSpecAndFlags(t *testing.T) {
 	spec := Provider{}.Spec()
@@ -2258,4 +2293,80 @@ func testConfig(url string) Config {
 
 func newTestFlagSet() *flag.FlagSet {
 	return flag.NewFlagSet("test", flag.ContinueOnError)
+}
+
+func TestJSONRequestAdoptionEnvelope(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "capture")
+	var typedNil *struct{ Value string }
+	const base = "https://api.example.test/base"
+	sentinel := errors.New("synthetic captured transport stop")
+	for _, tc := range []struct {
+		name        string
+		body        any
+		want        string
+		query, fail bool
+	}{
+		{name: "nil"},
+		{name: "typed nil", body: typedNil, want: "null\n"},
+		{name: "JSON bytes", body: map[string]string{"message": "<&>"}, want: "{\"message\":\"\\u003c\\u0026\\u003e\"}\n"},
+		{name: "query without body", query: true},
+		{name: "transport error", fail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			endpoint := "/records"
+			if tc.query {
+				endpoint += "?limit=2&prefix=two+words"
+			}
+
+			headers := http.Header{"Authorization": []string{"Bearer synthetic-token"}}
+
+			if tc.body != nil {
+				headers.Set("Content-Type", "application/json")
+			}
+			transport := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, base+endpoint, tc.want, headers)
+				if tc.fail {
+					return nil, sentinel
+				}
+				return &http.Response{StatusCode: 204, Header: http.Header{"X-Capture": []string{"yes"}}, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+			})}
+			c := &client{baseURL: base, token: "synthetic-token", http: transport}
+			var gotHeaders http.Header
+			err := c.doJSON(ctx, http.MethodPost, endpoint, tc.body, nil)
+			if tc.fail {
+				if !errors.Is(err, sentinel) || gotHeaders != nil {
+					t.Fatalf("error/headers=%v %v", err, gotHeaders)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+
+			if calls != 1 {
+				t.Fatalf("calls=%d", calls)
+			}
+		})
+	}
+}
+
+func TestJSONRequestAdoptionConcreteEnvelope(t *testing.T) {
+	ctx := context.Background()
+	sentinel := errors.New("synthetic captured concrete request")
+	calls := 0
+	headers := http.Header{"Authorization": []string{"Bearer synthetic-token"}, "Content-Type": []string{"application/json"}}
+	transport := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, "https://api.example.test/base/v1/runs", "{\"cacheMode\":\"none\",\"retainMetadata\":true,\"module\":{\"source\":\"\\u003c\\u0026\\u003e\"},\"egress\":\"none\",\"limits\":{},\"timeoutMs\":7}\n", headers)
+		return nil, sentinel
+	})}
+	c := &client{baseURL: "https://api.example.test/base", token: "synthetic-token", http: transport}
+	out, err := c.Run(ctx, runRequest{CacheMode: "none", RetainMetadata: true, Module: moduleSource{Source: "<&>"}, Egress: "none", TimeoutMS: 7})
+	if !reflect.DeepEqual(out, runResponse{}) {
+		t.Fatalf("out=%#v", out)
+	}
+	if !errors.Is(err, sentinel) || calls != 1 {
+		t.Fatalf("error=%v calls=%d", err, calls)
+	}
 }

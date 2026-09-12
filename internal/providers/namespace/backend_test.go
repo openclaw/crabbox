@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
@@ -489,6 +491,30 @@ func TestNamespaceRejectsUnsafeWorkRoot(t *testing.T) {
 	}
 }
 
+func TestNamespaceConfigGetterDefaults(t *testing.T) {
+	for _, tc := range []struct{ raw, image, root string }{
+		{"", "builtin:base", "/workspaces/crabbox"},
+		{" \t ", "builtin:base", "/workspaces/crabbox"},
+		{" /workspaces/custom ", "/workspaces/custom", "/workspaces/custom"},
+	} {
+		cfg := Config{Namespace: NamespaceConfig{Image: tc.raw, WorkRoot: tc.raw}}
+		if image, root := namespaceImage(cfg), namespaceWorkRoot(cfg); image != tc.image || root != tc.root {
+			t.Fatalf("raw %q resolved to %q / %q", tc.raw, image, root)
+		}
+	}
+	for _, tc := range []struct{ provider, generic, want time.Duration }{
+		{17 * time.Minute, 9 * time.Minute, 17 * time.Minute},
+		{0, 9 * time.Minute, 9 * time.Minute},
+		{-time.Minute, 0, 30 * time.Minute},
+		{0, -time.Minute, 30 * time.Minute},
+	} {
+		cfg := Config{Namespace: NamespaceConfig{AutoStopIdleTimeout: tc.provider}, IdleTimeout: tc.generic}
+		if got := namespaceAutoStopIdleTimeout(cfg); got != tc.want {
+			t.Fatalf("timeout=%s, want %s", got, tc.want)
+		}
+	}
+}
+
 func TestNamespaceAutoStopDurationFlagValidation(t *testing.T) {
 	for _, value := range []string{"bogus", "0s", "-1m", ""} {
 		t.Run(value, func(t *testing.T) {
@@ -508,18 +534,54 @@ func TestNamespaceAutoStopDurationFlagValidation(t *testing.T) {
 }
 
 func TestNamespaceAutoStopDurationFlagAppliesValidValue(t *testing.T) {
-	cfg := Config{}
-	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	values := RegisterNamespaceProviderFlags(fs, cfg)
-	if err := fs.Parse([]string{"--namespace-auto-stop-idle-timeout", "45m"}); err != nil {
-		t.Fatal(err)
+	for _, raw := range []string{"45m", " 45m "} {
+		t.Run(raw, func(t *testing.T) {
+			cfg := Config{Namespace: NamespaceConfig{DeleteOnRelease: true}}
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			values := RegisterNamespaceProviderFlags(fs, cfg)
+			if err := fs.Parse([]string{"--namespace-size= m ", "--namespace-auto-stop-idle-timeout=5m", "--namespace-auto-stop-idle-timeout=" + raw, "--namespace-work-root=/workspaces/changed", "--namespace-delete-on-release=false"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := ApplyNamespaceProviderFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Namespace.AutoStopIdleTimeout != 45*time.Minute {
+				t.Fatalf("auto-stop idle timeout=%s, want 45m", cfg.Namespace.AutoStopIdleTimeout)
+			}
+			if cfg.Namespace.Size != "M" || cfg.ServerType != "M" || !cfg.ServerTypeExplicit || cfg.Namespace.WorkRoot != "/workspaces/changed" || cfg.WorkRoot != "/workspaces/changed" || cfg.Namespace.DeleteOnRelease || !deleteOnReleaseExplicit(cfg) {
+				t.Fatalf("successful flag effects=%#v", cfg.Namespace)
+			}
+		})
 	}
-	if err := ApplyNamespaceProviderFlags(&cfg, fs, values); err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Namespace.AutoStopIdleTimeout != 45*time.Minute {
-		t.Fatalf("auto-stop idle timeout=%s, want 45m", cfg.Namespace.AutoStopIdleTimeout)
+}
+
+func TestNamespaceDurationFlagPartialEffects(t *testing.T) {
+	for _, priorMarker := range []bool{false, true} {
+		for _, raw := range []string{"", " \t ", "bogus", "0s", "-1m"} {
+			t.Run(fmt.Sprintf("marker-%t-duration-%q", priorMarker, raw), func(t *testing.T) {
+				cfg := Config{WorkRoot: "/workspaces/generic", Namespace: NamespaceConfig{AutoStopIdleTimeout: 17 * time.Minute, WorkRoot: "/workspaces/prior", DeleteOnRelease: true}}
+				if priorMarker {
+					markDeleteOnReleaseExplicit(&cfg)
+				}
+				fs := flag.NewFlagSet("test", flag.ContinueOnError)
+				fs.SetOutput(io.Discard)
+				values := RegisterNamespaceProviderFlags(fs, cfg)
+				if err := fs.Parse([]string{"--namespace-image=new-image", "--namespace-size= xl ", "--namespace-repository=new-repo", "--namespace-site=new-site", "--namespace-volume-size-gb=-2", "--namespace-auto-stop-idle-timeout=" + raw, "--namespace-work-root=/workspaces/later", "--namespace-delete-on-release=false"}); err != nil {
+					t.Fatal(err)
+				}
+				err := ApplyNamespaceProviderFlags(&cfg, fs, values)
+				if err == nil || core.ExitCodeForError(err, 1) != 2 || err.Error() != "namespace auto-stop idle timeout must be a positive duration" {
+					t.Fatalf("duration error=%v", err)
+				}
+				if cfg.Namespace.Image != "new-image" || cfg.Namespace.Size != "XL" || cfg.ServerType != "XL" || !cfg.ServerTypeExplicit || cfg.Namespace.Repository != "new-repo" || cfg.Namespace.Site != "new-site" || cfg.Namespace.VolumeSizeGB != -2 {
+					t.Fatalf("earlier flag effects lost: %#v", cfg.Namespace)
+				}
+				if cfg.Namespace.AutoStopIdleTimeout != 17*time.Minute || cfg.Namespace.WorkRoot != "/workspaces/prior" || cfg.WorkRoot != "/workspaces/generic" || !cfg.Namespace.DeleteOnRelease || core.DeleteOnReleaseExplicit(cfg, namespaceProvider) != priorMarker {
+					t.Fatalf("later flag effects escaped failed duration: %#v", cfg.Namespace)
+				}
+			})
+		}
 	}
 }
 

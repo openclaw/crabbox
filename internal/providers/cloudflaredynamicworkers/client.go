@@ -329,11 +329,7 @@ func (c *client) Readiness(ctx context.Context) (readinessResponse, error) {
 
 func (c *client) Run(ctx context.Context, req runRequest) (runResponse, error) {
 	var out runResponse
-	var body bytes.Buffer
-	if err := json.NewEncoder(&body).Encode(req); err != nil {
-		return out, err
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/runs", &body)
+	httpReq, err := shared.NewJSONRequest(ctx, http.MethodPost, c.baseURL+"/v1/runs", req)
 	if err != nil {
 		return out, err
 	}
@@ -543,15 +539,7 @@ func (c *client) DeleteAcknowledgedComplete(ctx context.Context, id string) erro
 
 func (c *client) doJSON(ctx context.Context, method, endpoint string, input any, output any) error {
 	for attempt := 0; ; attempt++ {
-		var body io.Reader
-		if input != nil {
-			var buf bytes.Buffer
-			if err := json.NewEncoder(&buf).Encode(input); err != nil {
-				return err
-			}
-			body = &buf
-		}
-		req, err := http.NewRequestWithContext(ctx, method, c.baseURL+endpoint, body)
+		req, err := shared.NewJSONRequest(ctx, method, c.baseURL+endpoint, input)
 		if err != nil {
 			return err
 		}

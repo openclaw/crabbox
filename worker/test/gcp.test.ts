@@ -21,6 +21,7 @@ import {
 } from "../src/provider-provisioning";
 import { leaseProviderName } from "../src/slug";
 import type { Env, LeaseRecord, ProviderMachine } from "../src/types";
+import { gcpBillingBody, gcpBillingError, gcpBillingMessage } from "./fixtures/gcp-billing-error";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -140,6 +141,82 @@ describe("gcp provider", () => {
     expect(operationDone({ name: "operation-1", status: "PENDING" })).toBe(false);
     expect(operationDone({ name: "operation-1" })).toBe(false);
     expect(operationDone({ name: "operation-1", status: "DONE" })).toBe(true);
+  });
+
+  it.each([
+    { body: gcpBillingBody, summary: `forbidden: ${gcpBillingMessage}` },
+    {
+      body: JSON.stringify({ error: { ...gcpBillingError.error, status: "PERMISSION_DENIED" } }),
+      summary: `PERMISSION_DENIED: ${gcpBillingMessage}`,
+    },
+    { body: '{"error":{"message":"enable billing"}}', summary: "enable billing" },
+    { body: '{"error":{"code":403}}', summary: '{"error":{"code":403}}' },
+    { body: 'upstream said "billing disabled"', summary: 'upstream said "billing disabled"' },
+    { body: "null", summary: "null" },
+    {
+      body: JSON.stringify({ error: { message: 'enable "billing" ' + "x".repeat(600) } }),
+      summary: ('enable "billing" ' + "x".repeat(600)).slice(0, 512),
+    },
+    { body: "x".repeat(600), summary: "x".repeat(512) },
+  ])(
+    "summarizes GCP HTTP bodies while preserving raw error properties ($summary)",
+    async ({ body, summary }) => {
+      const client = new GCPClient(env);
+      primeAccessToken(client);
+      client.fetcher = async () => new Response(body, { status: 403 });
+
+      await expect(client.getServer("runner")).rejects.toMatchObject({
+        method: "GET",
+        path: "/zones/us-central1-a/instances/runner",
+        status: 403,
+        body,
+        message: `gcp GET /zones/us-central1-a/instances/runner: http 403: ${summary}`,
+      });
+    },
+  );
+
+  it("redacts GCP credentials and the client email before bounding the body summary", async () => {
+    const client = new GCPClient(env);
+    const token = "test-access-credential".repeat(40);
+    primeAccessToken(client, token);
+    client.fetcher = async () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            message: `billing disabled ${env.GCP_CLIENT_EMAIL} ${token} ${env.GCP_PRIVATE_KEY} token=reflected-secret`,
+          },
+        }),
+        { status: 403 },
+      );
+
+    await expect(client.getServer("runner")).rejects.toThrow(
+      "http 403: billing disabled [redacted] [redacted] [redacted] token=[redacted]",
+    );
+  });
+
+  it("carries the billing reason through GCP fallback history without retrying", async () => {
+    const client = new GCPClient(env);
+    primeAccessToken(client);
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(gcpBillingBody, { status: 403 }));
+    client.fetcher = fetcher;
+    const config = leaseConfig(
+      { provider: "gcp", serverType: "c4-standard-4", sshPublicKey: "ssh-ed25519 test" },
+      env,
+    );
+
+    await expect(
+      client.createServerWithFallback(config, "cbx_abcdef123456", "runner", "alice@example.com"),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining(`http 403: forbidden: ${gcpBillingMessage}`),
+      attempts: [
+        expect.objectContaining({
+          category: "fatal",
+          message: expect.stringContaining(gcpBillingMessage),
+        }),
+      ],
+      cause: expect.objectContaining({ status: 403, body: gcpBillingBody }),
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
   it("prefers per-request project over Worker defaults", () => {

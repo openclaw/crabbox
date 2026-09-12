@@ -18,9 +18,8 @@ import (
 )
 
 const (
-	openComputerCleanupTimeout  = 15 * time.Second
-	openComputerExecTimeoutSecs = 3600
-	openComputerClaimTagKey     = "crabbox.claim"
+	openComputerCleanupTimeout = 15 * time.Second
+	openComputerClaimTagKey    = "crabbox.claim"
 )
 
 func NewOpenComputerBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
@@ -41,7 +40,7 @@ func (b *openComputerBackend) Warmup(ctx context.Context, req WarmupRequest) err
 	if req.ActionsRunner {
 		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	api, err := newOCAPIClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -54,7 +53,7 @@ func (b *openComputerBackend) Warmup(ctx context.Context, req WarmupRequest) err
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: opencomputer warmup keeps the sandbox until explicit stop\n")
 	}
-	total := b.now().Sub(started)
+	total := core.ClockNow(b.rt.Clock).Sub(started)
 	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
 		Provider: providerName,
 		LeaseID:  leaseID,
@@ -85,7 +84,7 @@ func (b *openComputerBackend) Run(ctx context.Context, req RunRequest) (RunResul
 		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
 			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-opencomputer-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+				TempPattern: "crabbox-opencomputer-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 			})
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
@@ -241,7 +240,7 @@ func (b *openComputerBackend) Status(ctx context.Context, req StatusRequest) (St
 	if waitTimeout <= 0 {
 		waitTimeout = 5 * time.Minute
 	}
-	deadline := b.now().Add(waitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(waitTimeout)
 	pollCtx := ctx
 	cancel := func() {}
 	if req.Wait {
@@ -288,7 +287,7 @@ func (b *openComputerBackend) Status(ctx context.Context, req StatusRequest) (St
 		if isTerminalState(state) {
 			return StatusView{}, exit(5, "opencomputer sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
-		if b.now().After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return StatusView{}, exit(5, "timed out waiting for opencomputer sandbox %s to become ready", sandboxID)
 		}
 		select {
@@ -528,7 +527,7 @@ func randomSuffix() string {
 func openComputerWorkdir(cfg Config) (string, error) {
 	workdir := strings.TrimSpace(cfg.OpenComputer.Workdir)
 	if workdir == "" {
-		workdir = defaultWorkdir
+		workdir = core.OpenComputerConfigDefaultWorkdir
 	}
 	clean := path.Clean(workdir)
 	if !strings.HasPrefix(clean, "/") {
@@ -539,13 +538,6 @@ func openComputerWorkdir(cfg Config) (string, error) {
 		return "", exit(2, "opencomputer workdir %q is too broad; choose a dedicated subdirectory", clean)
 	}
 	return clean, nil
-}
-
-func (b *openComputerBackend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }
 
 func (b *openComputerBackend) cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -575,5 +567,5 @@ func (b *openComputerBackend) execTimeoutSecs() int {
 	if b.cfg.OpenComputer.ExecTimeoutSecs > 0 {
 		return b.cfg.OpenComputer.ExecTimeoutSecs
 	}
-	return openComputerExecTimeoutSecs
+	return core.OpenComputerConfigDefaultExecTimeoutSecs
 }

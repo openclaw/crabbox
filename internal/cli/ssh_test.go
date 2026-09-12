@@ -29,6 +29,86 @@ import (
 
 const powerShellEncodedCommandPrefix = "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
 
+func TestSynchronizedBufferSnapshots(t *testing.T) {
+	for _, limit := range []int{-1, 0, 4} {
+		t.Run(strconv.Itoa(limit), func(t *testing.T) {
+			output := newSynchronizedBuffer(limit)
+			if output.Bytes() != nil || output.String() != "" {
+				t.Fatal("new capture is not empty")
+			}
+			if n, err := output.Write([]byte("ab")); n != 2 || err != nil {
+				t.Fatalf("write=%d/%v", n, err)
+			}
+			snapshot := output.Bytes()
+			snapshot[0] = 'z'
+			if output.String() != "ab" {
+				t.Fatal("snapshot mutation changed captured bytes")
+			}
+			if n, err := output.Write([]byte("cd")); n != 2 || err != nil {
+				t.Fatalf("write=%d/%v", n, err)
+			}
+			if string(snapshot) != "zb" || string(output.Bytes()) != "abcd" {
+				t.Fatalf("snapshot=%q capture=%q", snapshot, output.Bytes())
+			}
+			if retained, truncated := output.boundedString(); retained != "abcd" || truncated {
+				t.Fatalf("exact-fill view=%q/%v", retained, truncated)
+			}
+			for _, input := range []string{"e", ""} {
+				if n, err := output.Write([]byte(input)); n != len(input) || err != nil {
+					t.Fatalf("write=%d/%v", n, err)
+				}
+				retained, truncated := output.boundedString()
+				if limit > 0 {
+					if output.Bytes() != nil || output.String() != "" || retained != "abcd" || !truncated {
+						t.Fatalf("truncated views: bytes=%q string=%q bounded=%q/%v", output.Bytes(), output.String(), retained, truncated)
+					}
+				} else if string(output.Bytes()) != "abcde" || output.String() != "abcde" || retained != "abcde" || truncated {
+					t.Fatalf("unlimited views: bytes=%q string=%q bounded=%q/%v", output.Bytes(), output.String(), retained, truncated)
+				}
+			}
+		})
+	}
+}
+
+func TestSynchronizedBufferConcurrentSnapshots(t *testing.T) {
+	for _, limit := range []int{0, 4} {
+		t.Run(strconv.Itoa(limit), func(t *testing.T) {
+			output := newSynchronizedBuffer(limit)
+			start := make(chan struct{})
+			var workers sync.WaitGroup
+			for range 4 {
+				workers.Go(func() {
+					<-start
+					for range 2 {
+						if n, err := output.Write([]byte("x")); n != 1 || err != nil {
+							t.Errorf("write=%d/%v", n, err)
+						}
+					}
+				})
+			}
+			workers.Go(func() {
+				<-start
+				for range 8 {
+					if snapshot := output.Bytes(); len(snapshot) > 0 {
+						snapshot[0] = 'z'
+					}
+					_ = output.String()
+					_, _ = output.boundedString()
+				}
+			})
+			close(start)
+			workers.Wait()
+			want := "xxxxxxxx"
+			if limit > 0 {
+				want = "xxxx"
+			}
+			if retained, truncated := output.boundedString(); retained != want || truncated != (limit > 0) {
+				t.Fatalf("final view=%q/%v, want %q/%v", retained, truncated, want, limit > 0)
+			}
+		})
+	}
+}
+
 func TestSSHCommandContextBoundsPipeDrainAfterCancellation(t *testing.T) {
 	cmd := sshCommandContext(context.Background(), SSHTarget{}, "-V")
 	if cmd.WaitDelay != sshCommandWaitDelay {
@@ -42,6 +122,7 @@ func TestWindowsPowerShellStdinScriptCommandUsesExactLengthFrame(t *testing.T) {
 		t.Fatalf("stdin script command length=%d exceeds cmd.exe limit", len(command))
 	}
 	decoded := decodePowerShellCommand(t, command)
+	assertWindowsPowerShellPathRefresh(t, decoded)
 	for _, want := range []string{
 		"$remaining = [Int64]12345",
 		"$stdin.ReadAsync($buffer, 0, $readSize).GetAwaiter().GetResult()",
@@ -6147,36 +6228,6 @@ func TestServerProviderKeyUsesOnlyCrabboxLeaseKeys(t *testing.T) {
 	}
 	if validCrabboxProviderKey("crabbox-steipete") {
 		t.Fatal("shared key must not be treated as per-lease cleanup key")
-	}
-}
-
-func TestMoveStoredTestboxKeyHandlesCoordinatorRenamedLease(t *testing.T) {
-	isolateTestUserDirs(t)
-	oldPath, err := testboxKeyPath("cbx_111111111111")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(oldPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(oldPath, []byte("key"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(oldPath+".pub", []byte("pub"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := moveStoredTestboxKey("cbx_111111111111", "cbx_222222222222"); err != nil {
-		t.Fatal(err)
-	}
-	newPath, err := testboxKeyPath("cbx_222222222222")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(newPath); err != nil {
-		t.Fatalf("moved key missing: %v", err)
-	}
-	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
-		t.Fatalf("old key still exists or unexpected stat error: %v", err)
 	}
 }
 

@@ -228,6 +228,11 @@ group, set `azure.location` / `CRABBOX_AZURE_LOCATION` to the same region as the
 existing vnet and NSG, or pick distinct `azure.vnet`, `azure.subnet`, and
 `azure.nsg` names for a new region.
 
+A failed shared-infrastructure write retains its legacy fence. The next lease
+automatically resolves it once the resource group, location's vnet, and NSG read
+back as absent or in a settled provisioning state (`Succeeded`, `Failed`, or
+`Canceled`). A durable provisioning operation's fence is never taken over.
+
 The default location is `eastus`. The default Linux image is
 `Canonical:ubuntu-26_04-lts:server:latest`; native Windows defaults to
 `MicrosoftWindowsServer:windowsserver2022:2022-datacenter-smalldisk-g2:latest`.

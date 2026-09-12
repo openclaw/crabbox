@@ -13,55 +13,25 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type e2bFlagValues struct {
-	APIURL   *string
-	Domain   *string
-	Template *string
-	Workdir  *string
-	User     *string
-}
-
 const e2bCleanupTimeout = 30 * time.Second
 
 func RegisterE2BProviderFlags(fs *flag.FlagSet, defaults Config) any {
-	return e2bFlagValues{
-		APIURL:   fs.String("e2b-api-url", defaults.E2B.APIURL, "E2B API URL"),
-		Domain:   fs.String("e2b-domain", defaults.E2B.Domain, "E2B sandbox domain"),
-		Template: fs.String("e2b-template", defaults.E2B.Template, "E2B sandbox template ID"),
-		Workdir:  fs.String("e2b-workdir", defaults.E2B.Workdir, "E2B sandbox working directory"),
-		User:     fs.String("e2b-user", defaults.E2B.User, "E2B sandbox user for command and file ownership"),
-	}
+	return core.RegisterE2BConfigFlags(fs, defaults.E2B)
 }
 
 func ApplyE2BProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == e2bProvider {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=e2b")
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=e2b")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, e2bProvider, "", ""); err != nil {
+			return err
 		}
 	}
-	v, ok := values.(e2bFlagValues)
+	v, ok := values.(core.E2BConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "e2b-api-url") {
-		cfg.E2B.APIURL = *v.APIURL
-	}
-	if flagWasSet(fs, "e2b-domain") {
-		cfg.E2B.Domain = *v.Domain
-	}
-	if flagWasSet(fs, "e2b-template") {
-		cfg.E2B.Template = *v.Template
-	}
-	if flagWasSet(fs, "e2b-workdir") {
-		cfg.E2B.Workdir = *v.Workdir
-	}
-	if flagWasSet(fs, "e2b-user") {
-		cfg.E2B.User = *v.User
-	}
-	return nil
+	applied, err := v.Apply(&cfg.E2B, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, e2bProvider)
+	return err
 }
 
 func NewE2BBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
@@ -83,7 +53,7 @@ func (b *e2bBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if err := validateE2BUser(b.cfg.E2B.User); err != nil {
 		return err
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	client, err := newE2BClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -96,7 +66,7 @@ func (b *e2bBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: e2b warmup keeps the sandbox until explicit stop\n")
 	}
-	total := b.now().Sub(started)
+	total := core.ClockNow(b.rt.Clock).Sub(started)
 	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
 		Provider: e2bProvider,
 		LeaseID:  leaseID,
@@ -132,7 +102,7 @@ func (b *e2bBackend) Run(ctx context.Context, req RunRequest) (RunResult, error)
 		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
 			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-e2b-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+				TempPattern: "crabbox-e2b-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 			})
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
@@ -215,7 +185,7 @@ func (b *e2bBackend) Status(ctx context.Context, req StatusRequest) (statusView,
 	if waitTimeout <= 0 {
 		waitTimeout = 5 * time.Minute
 	}
-	deadline := b.now().Add(waitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(waitTimeout)
 	pollCtx := ctx
 	cancel := func() {}
 	if req.Wait {
@@ -247,7 +217,7 @@ func (b *e2bBackend) Status(ctx context.Context, req StatusRequest) (statusView,
 		if !req.Wait || view.Ready {
 			return view, nil
 		}
-		if b.now().After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return statusView{}, exit(5, "timed out waiting for sandbox %s to become ready", sandboxID)
 		}
 		select {
@@ -375,7 +345,7 @@ func (b *e2bBackend) createSandbox(ctx context.Context, client e2bAPI, repo Repo
 	if err != nil {
 		return "", e2bSandbox{}, "", err
 	}
-	template := blank(b.cfg.E2B.Template, "base")
+	template := blank(b.cfg.E2B.Template, core.E2BConfigDefaultTemplate)
 	cfg := b.cfg
 	workspace, err := cleanE2BWorkspacePath(e2bWorkspacePath(cfg))
 	if err != nil {
@@ -383,7 +353,7 @@ func (b *e2bBackend) createSandbox(ctx context.Context, client e2bAPI, repo Repo
 	}
 	cfg.TTL = e2bTimeoutDuration(cfg.TTL)
 	cfg.ServerType = template
-	labels := directLeaseLabels(cfg, leaseID, slug, e2bProvider, "", keep, b.now().UTC())
+	labels := directLeaseLabels(cfg, leaseID, slug, e2bProvider, "", keep, core.ClockNow(b.rt.Clock).UTC())
 	labels["state"] = "ready"
 	labels["workdir"] = workspace
 	labels["template"] = template
@@ -546,7 +516,7 @@ func validateE2BClaim(cfg Config, claim LeaseClaim, sandbox e2bSandbox) error {
 func e2bClaimConfig(cfg Config) Config {
 	cfg.Provider = e2bProvider
 	if strings.TrimSpace(cfg.E2B.APIURL) == "" {
-		cfg.E2B.APIURL = "https://api.e2b.app"
+		cfg.E2B.APIURL = core.E2BConfigDefaultAPIURL
 	}
 	return cfg
 }
@@ -735,7 +705,7 @@ func e2bTimeoutSeconds(ttl time.Duration) int {
 func e2bWorkspacePath(cfg Config) string {
 	workdir := strings.TrimSpace(cfg.E2B.Workdir)
 	if workdir == "" {
-		workdir = "crabbox"
+		workdir = core.E2BConfigDefaultWorkdir
 	}
 	if strings.HasPrefix(workdir, "/") {
 		return path.Clean(workdir)
@@ -802,11 +772,4 @@ func e2bError(action string, err error) error {
 		return nil
 	}
 	return fmt.Errorf("e2b %s: %w", action, err)
-}
-
-func (b *e2bBackend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }

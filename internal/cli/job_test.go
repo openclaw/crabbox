@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +11,76 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestSynthesizedConfigFlagInputs(t *testing.T) {
+	// Ignored events remain no-ops without requiring a configuration snapshot.
+	RecordProviderFlagInputs(nil, false, "morph")
+	RecordProviderFlagIntents(nil, false, "morph")
+	for _, synthesized := range []bool{false, true} {
+		name := "direct"
+		if synthesized {
+			name = "derived"
+		}
+		t.Run(name, func(t *testing.T) {
+			var original Config
+			recordConfigInput(&original, configInputGeneric, configInputUser, true)
+			recordConfigInput(&original, "morph", configInputRepo, true)
+			original.inputProvenance = original.inputProvenance.withCoverage(configInputGeneric, true).withCoverage("morph", true)
+			cfg := original
+			markSynthesizedFlagInputs(&cfg, synthesized)
+			fs := newFlagSet("origin", io.Discard)
+			market := fs.String("market", "", "")
+			if err := fs.Parse([]string{"--market=spot"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyCapacityMarketFlag(&cfg, fs, *market); err != nil {
+				t.Fatal(err)
+			}
+			RecordProviderFlagInputs(&cfg, true, "morph")
+			RecordProviderFlagIntents(&cfg, true, "morph")
+			recordConfigInput(&cfg, configInputGeneric, configInputEnvironment, true)
+			generic := cfg.inputProvenance.summary(configInputGeneric)
+			provider := cfg.inputProvenance.summary("morph")
+			wantGeneric, wantProvider := []string{"user_config", "environment", "flag"}, []string{"repo_config", "flag"}
+			if synthesized {
+				wantGeneric, wantProvider = []string{"user_config", "environment"}, []string{"repo_config"}
+			}
+			if !reflect.DeepEqual(generic.sources, wantGeneric) || !reflect.DeepEqual(provider.sources, wantProvider) || generic.complete == synthesized || provider.complete == synthesized {
+				t.Fatalf("origin=%t generic=%#v provider=%#v", synthesized, generic, provider)
+			}
+			if !reflect.DeepEqual(original.inputProvenance.summary(configInputGeneric).sources, []string{"user_config"}) || !original.inputProvenance.summary(configInputGeneric).complete {
+				t.Fatal("derived copy mutated original source or coverage")
+			}
+			if cfg.Capacity.Market != "spot" {
+				t.Fatal("origin changed flag application")
+			}
+		})
+	}
+}
+
+func TestJobSynthesizedLeaseFlagInputs(t *testing.T) {
+	clearConfigEnv(t)
+	p := architectureCapabilityTestProvider{}
+	providerRegistry[p.Name()] = p
+	t.Cleanup(func() { delete(providerRegistry, p.Name()) })
+	cfg := baseConfig()
+	cfg.Provider = p.Name()
+	recordConfigInput(&cfg, configInputGeneric, configInputRepo, true)
+	cfg.inputProvenance = cfg.inputProvenance.withCoverage(configInputGeneric, true)
+	job := JobConfig{Provider: p.Name(), Target: targetLinux, Class: "standard"}
+	fs := newFlagSet("job projected flags", io.Discard)
+	values := registerLeaseCreateFlags(fs, cfg)
+	if err := fs.Parse(jobLeaseCreateArgsFor(cfg, job, false)); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyLeaseCreateFlagsForTarget(&cfg, fs, values, leaseFlagTarget{SynthesizedInputs: true}, false); err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.inputProvenance.summary(configInputGeneric)
+	if !reflect.DeepEqual(got.sources, []string{"repo_config"}) || got.complete || !cfg.synthesizedFlagInputs {
+		t.Fatalf("synthesized job projection=%#v", got)
+	}
+}
 
 type jobNoConfigureProvider struct {
 	testHetznerProvider

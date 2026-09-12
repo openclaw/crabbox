@@ -53,8 +53,8 @@ func TestProviderAliasesAndDiagnosticSecrets(t *testing.T) {
 func TestProviderConfigureAndFlags(t *testing.T) {
 	p := Provider{}
 	cfg := Config{CloudRunSandbox: CloudRunSandboxConfig{
-		CLIPath: defaultCLIPath,
-		Workdir: defaultWorkdir,
+		CLIPath: "/usr/local/gcp/bin/sandbox",
+		Workdir: "/tmp/crabbox",
 		Write:   true,
 		Rootfs:  "/",
 	}}
@@ -122,10 +122,64 @@ func TestProviderConfigureAndFlags(t *testing.T) {
 	}
 }
 
+func TestCloudRunConfigFlagPresenceAndGuardOrder(t *testing.T) {
+	for _, name := range []string{"cloud-run-sandbox", "gcrun-sandbox", "google-cloud-run-sandbox", "cloudrun-sandbox", " Cloud-Run-Sandbox "} {
+		cfg := core.BaseConfig()
+		cfg.Provider = name
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.String("class", "", "")
+		fs.String("type", "", "")
+		values := RegisterCloudRunSandboxProviderFlags(fs, cfg)
+		cfg.CloudRunSandbox = CloudRunSandboxConfig{GatewayURL: "https://example.invalid/env", CLIPath: "/opt/env", Workdir: "/tmp/env", Rootfs: "/env", Write: true, AllowEgress: true}
+		before := cfg.CloudRunSandbox
+		if err := ApplyCloudRunSandboxProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.CloudRunSandbox != before {
+			t.Fatal("unvisited values changed config")
+		}
+		if err := fs.Parse([]string{"--cloud-run-sandbox-gateway-url=", "--cloud-run-sandbox-cli=", "--cloud-run-sandbox-workdir=", "--cloud-run-sandbox-rootfs=", "--cloud-run-sandbox-write=false", "--cloud-run-sandbox-allow-egress=false"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyCloudRunSandboxProviderFlags(&cfg, fs, values); err == nil || err.Error() != "cloudRunSandbox.cliPath must not be empty" {
+			t.Fatalf("empty flags=%v", err)
+		}
+		if cfg.CloudRunSandbox != (CloudRunSandboxConfig{}) {
+			t.Fatalf("all flags not copied before validation: %#v", cfg.CloudRunSandbox)
+		}
+		cfg.CloudRunSandbox.Workdir = "relative"
+		if err := ApplyCloudRunSandboxProviderFlags(&cfg, fs, struct{}{}); err != nil {
+			t.Fatalf("foreign type reached validation: %v", err)
+		}
+		if err := validateConfig(cfg); err == nil || err.Error() != "cloudRunSandbox.workdir must be an absolute path" {
+			t.Fatalf("workdir must precede CLI validation: %v", err)
+		}
+		for _, args := range [][]string{{"--type=vm"}, {"--type=vm", "--class=large"}} {
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			want := "--type"
+			if len(args) == 2 {
+				want = "--class"
+			}
+			for _, v := range []any{nil, struct{}{}, values} {
+				before := cfg.CloudRunSandbox
+				err := ApplyCloudRunSandboxProviderFlags(&cfg, fs, v)
+				if err == nil || err.Error() != want+" is not supported for provider=cloud-run-sandbox; sandboxes share Cloud Run service CPU/memory" {
+					t.Fatalf("alias=%s guard=%v", name, err)
+				}
+				if cfg.CloudRunSandbox != before {
+					t.Fatal("guard copied flags")
+				}
+			}
+		}
+	}
+}
+
 func TestWarmupRejectsUnsupportedOptions(t *testing.T) {
 	b := NewBackend(Provider{}.Spec(), Config{CloudRunSandbox: CloudRunSandboxConfig{
-		CLIPath: defaultCLIPath,
-		Workdir: defaultWorkdir,
+		CLIPath: "/usr/local/gcp/bin/sandbox",
+		Workdir: "/tmp/crabbox",
 	}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
 	if err := b.Warmup(context.Background(), WarmupRequest{ActionsRunner: true}); err == nil {
@@ -148,8 +202,8 @@ func TestRunRejectsUnsupportedOptionsAndMissingCommand(t *testing.T) {
 	t.Cleanup(func() { newTransport = prev })
 
 	b := NewBackend(Provider{}.Spec(), Config{CloudRunSandbox: CloudRunSandboxConfig{
-		CLIPath: defaultCLIPath,
-		Workdir: defaultWorkdir,
+		CLIPath: "/usr/local/gcp/bin/sandbox",
+		Workdir: "/tmp/crabbox",
 	}, IdleTimeout: time.Minute}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
 	if _, err := b.Run(context.Background(), RunRequest{Options: core.LeaseOptions{Browser: true}}); err == nil {
@@ -185,8 +239,8 @@ func TestDoctorListStopStatusCleanup(t *testing.T) {
 	cfg := Config{
 		CloudRunSandbox: CloudRunSandboxConfig{
 			GatewayURL: "https://gw.example.run.app",
-			CLIPath:    defaultCLIPath,
-			Workdir:    defaultWorkdir,
+			CLIPath:    "/usr/local/gcp/bin/sandbox",
+			Workdir:    "/tmp/crabbox",
 		},
 		IdleTimeout: time.Minute,
 	}
@@ -258,7 +312,7 @@ func TestDoctorFailsWhenLocalClaimsAreUnreadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{GatewayURL: "https://gw.example.run.app", CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+		CloudRunSandbox: CloudRunSandboxConfig{GatewayURL: "https://gw.example.run.app", CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	result, err := b.Doctor(context.Background(), DoctorRequest{})
 	if err == nil || result.Status != "error" || !strings.Contains(result.Message, "local_claims=blocked") {
@@ -319,7 +373,7 @@ func TestBuildCommandAndHelpers(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0] != "echo hi" {
 		t.Fatalf("shell mode: %v %v", got, err)
 	}
-	directCleanup := cleanupCommand(Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath}}, "gcrs_x")
+	directCleanup := cleanupCommand(Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox"}}, "gcrs_x")
 	if directCleanup != `crabbox stop --provider cloud-run-sandbox --id 'gcrs_x'` {
 		t.Fatalf("cleanupCommand=%q", directCleanup)
 	}
@@ -379,8 +433,8 @@ func TestExecCommandAndUploadArchive(t *testing.T) {
 	transport := &writeCaptureTransport{fakeTransport: fake}
 
 	b := NewBackend(Provider{}.Spec(), Config{CloudRunSandbox: CloudRunSandboxConfig{
-		CLIPath: defaultCLIPath,
-		Workdir: defaultWorkdir,
+		CLIPath: "/usr/local/gcp/bin/sandbox",
+		Workdir: "/tmp/crabbox",
 	}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
 	if err := b.uploadArchive(context.Background(), transport, "box", "/tmp/a.tgz", strings.NewReader("payload")); err != nil {
@@ -421,8 +475,8 @@ func TestUploadArchiveStreamsBoundedChunks(t *testing.T) {
 		onExec: func(string, string) (int, string, string, error) { return 0, "", "", nil },
 	}}
 	b := NewBackend(Provider{}.Spec(), Config{CloudRunSandbox: CloudRunSandboxConfig{
-		CLIPath: defaultCLIPath,
-		Workdir: defaultWorkdir,
+		CLIPath: "/usr/local/gcp/bin/sandbox",
+		Workdir: "/tmp/crabbox",
 	}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	if err := b.uploadArchive(context.Background(), transport, "box", "/tmp/large.tgz", strings.NewReader(input)); err != nil {
 		t.Fatal(err)
@@ -480,7 +534,7 @@ func TestRunSyncOnlyAndFailurePaths(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir, Write: true},
+		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox", Write: true},
 		IdleTimeout:     time.Minute,
 	}, Runtime{Stdout: &stdout, Stderr: &stderr}).(*backend)
 

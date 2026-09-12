@@ -2661,11 +2661,9 @@ if [ -x /usr/local/bin/crabbox-start-desktop ]; then
 elif [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ]; then
   sudo systemctl restart crabbox-desktop.service crabbox-wayvnc.service
 elif systemctl cat crabbox-xvfb.service 2>/dev/null | grep -q Xtigervnc; then
-  sudo systemctl restart crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service
-elif systemctl cat crabbox-desktop.service >/dev/null 2>&1; then
-  sudo systemctl restart crabbox-desktop.service crabbox-x11vnc.service
+  sudo systemctl restart crabbox-xvfb.service crabbox-desktop.service
 else
-  sudo systemctl restart crabbox-desktop-session.service crabbox-x11vnc.service
+  sudo systemctl restart crabbox-desktop.service crabbox-x11vnc.service
 fi`
 }
 

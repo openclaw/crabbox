@@ -1,7 +1,10 @@
 package vast
 
 import (
+	"encoding/json"
+	"errors"
 	"flag"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -226,5 +229,205 @@ func TestConfigureRejectsTailscaleBeforeBackend(t *testing.T) {
 				t.Fatalf("backend=%T err=%v, want Tailscale rejection", backend, err)
 			}
 		})
+	}
+}
+
+func TestVastBindingFlagContract(t *testing.T) {
+	for _, selector := range []string{"vast", " VAST-AI ", "vastai", "aws"} {
+		cfg := core.BaseConfig()
+		cfg.Provider = selector
+		cfg.Vast.InstanceType = " On_Demand "
+		p := Provider{}
+		fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+		values := p.RegisterFlags(fs, cfg)
+		count := 0
+		fs.VisitAll(func(*flag.Flag) { count++ })
+		if count != 14 || fs.Lookup("vast-api-key") != nil {
+			t.Fatal("flag surface changed")
+		}
+		if err := p.ApplyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Vast.InstanceType != " On_Demand " || core.IsVastWorkRootExplicit(&cfg) || core.DeleteOnReleaseExplicit(cfg, "vast") {
+			t.Fatal("unvisited values normalized/marked")
+		}
+		args := []string{"--vast-api-url=https://console.vast.ai/api/v0", "--vast-instance-type= On_Demand ", "--vast-gpu-name=fixture-gpu", "--vast-gpu-count=2", "--vast-image=fixture-image", "--vast-template-id=fixture-template", "--vast-runtype=ssh_direct", "--vast-disk-gb=37", "--vast-max-dph-total=0.25", "--vast-min-reliability=0.75", "--vast-order=reliability desc", "--vast-user=alice", "--vast-work-root=/work/fixture", "--vast-release-action=keep"}
+		if err := fs.Parse(args); err != nil {
+			t.Fatal(err)
+		}
+		before := fmt.Sprintf("%#v", cfg)
+		if err := p.ApplyFlags(&cfg, fs, struct{}{}); err != nil {
+			t.Fatal(err)
+		}
+		if fmt.Sprintf("%#v", cfg) != before {
+			t.Fatal("wrong values type changed config")
+		}
+		if err := p.ApplyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want := core.VastConfig{APIURL: "https://console.vast.ai/api/v0", InstanceType: "ondemand", GPUName: "fixture-gpu", GPUCount: 2, Image: "fixture-image", TemplateID: "fixture-template", Runtype: "ssh_direct", DiskGB: 37, MaxDphTotal: .25, MinReliability: .75, Order: "reliability desc", User: "alice", WorkRoot: "/work/fixture", ReleaseAction: "keep"}
+		if cfg.Vast != want || !core.IsVastWorkRootExplicit(&cfg) || !core.DeleteOnReleaseExplicit(cfg, "vast") {
+			t.Fatalf("selector=%q flags=%#v want=%#v", selector, cfg.Vast, want)
+		}
+	}
+	for _, value := range []string{"same", "empty"} {
+		cfg := core.BaseConfig()
+		cfg.Provider = "vast"
+		p := Provider{}
+		fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+		values := p.RegisterFlags(fs, cfg)
+		root, action := "/work/crabbox", "destroy"
+		if value == "empty" {
+			root = ""
+			action = ""
+		}
+		if err := fs.Parse([]string{"--vast-work-root=" + root, "--vast-release-action=" + action, "--vast-image=", "--vast-disk-gb=0"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.ApplyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Vast.Image != "" || cfg.Vast.DiskGB != 0 || cfg.Vast.WorkRoot != root || cfg.Vast.ReleaseAction != action || !core.IsVastWorkRootExplicit(&cfg) || !core.DeleteOnReleaseExplicit(cfg, "vast") {
+			t.Fatal("empty/same-value flag acceptance changed")
+		}
+		route := p.CommandRouting(cfg, core.CommandRoutingRequest{}).Args
+		found := false
+		for i, arg := range route {
+			if arg == "--vast-release-action" && i+1 < len(route) && route[i+1] == action {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("explicit release routing missing")
+		}
+	}
+}
+
+func TestVastBindingGuardAndValidationOrder(t *testing.T) {
+	for _, args := range [][]string{{"--type=fixture", "--class="}, {"--type="}} {
+		cfg := core.BaseConfig()
+		cfg.Provider = " VASTAI "
+		p := Provider{}
+		fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+		fs.String("class", "", "")
+		fs.String("type", "", "")
+		p.RegisterFlags(fs, cfg)
+		if err := fs.Parse(append(args, "--vast-work-root=/work/fixture")); err != nil {
+			t.Fatal(err)
+		}
+		before := fmt.Sprintf("%#v", cfg)
+		err := p.ApplyFlags(&cfg, fs, struct{}{})
+		want := "--type is not supported for provider=vast; use --vast-image"
+		if len(args) == 2 {
+			want = "--class is not supported for provider=vast; use --vast-gpu-name or --vast-gpu-count"
+		}
+		var exitErr core.ExitError
+		if err == nil || err.Error() != want || !errors.As(err, &exitErr) || exitErr.Code != 2 || fmt.Sprintf("%#v", cfg) != before {
+			t.Fatalf("sizing phase err=%v want=%q", err, want)
+		}
+	}
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--vast-api-url=", "--vast-instance-type=unknown"}, "vast.apiUrl is required"},
+		{[]string{"--vast-instance-type=unknown", "--vast-runtype=unknown"}, "vast.instanceType must be ondemand or interruptible"},
+		{[]string{"--vast-instance-type= On_Demand ", "--vast-runtype=unknown", "--vast-gpu-count=-2"}, "vast.runtype must be ssh_direct"},
+		{[]string{"--vast-gpu-count=-2", "--vast-disk-gb=-2"}, "vast.gpuCount must be non-negative"},
+		{[]string{"--vast-disk-gb=-2", "--vast-max-dph-total=-2"}, "vast.diskGB must be non-negative"},
+		{[]string{"--vast-max-dph-total=-2", "--vast-min-reliability=2"}, "vast.maxDphTotal must be non-negative"},
+		{[]string{"--vast-min-reliability=2", "--vast-release-action=unknown"}, "vast.minReliability must be between 0 and 1"},
+		{[]string{"--vast-release-action=unknown"}, "vast.releaseAction must be destroy, delete, stop, or keep"},
+	} {
+		for _, selected := range []bool{false, true} {
+			cfg := core.BaseConfig()
+			cfg.Provider = "aws"
+			if selected {
+				cfg.Provider = "vast-ai"
+			}
+			p := Provider{}
+			fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+			values := p.RegisterFlags(fs, cfg)
+			if err := fs.Parse(append(tc.args, "--vast-work-root=/work/fixture")); err != nil {
+				t.Fatal(err)
+			}
+			err := p.ApplyFlags(&cfg, fs, values)
+			if selected {
+				var exitErr core.ExitError
+				if err == nil || err.Error() != tc.want || !errors.As(err, &exitErr) || exitErr.Code != 2 {
+					t.Fatalf("validation err=%v want=%q", err, tc.want)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if !core.IsVastWorkRootExplicit(&cfg) || cfg.Vast.WorkRoot != "/work/fixture" {
+				t.Fatal("validation moved before copy/marker")
+			}
+		}
+	}
+}
+
+func TestVastBindingBackendDefaultsAndPayload(t *testing.T) {
+	for _, explicitUser := range []bool{false, true} {
+		cfg := core.Config{SSHUser: "generic-user", WorkRoot: "/generic/root", Vast: core.VastConfig{User: "provider-user", WorkRoot: "/provider/root"}}
+		if explicitUser {
+			core.MarkSSHUserExplicit(&cfg)
+		}
+		applyVastDefaults(&cfg)
+		wantUser := "provider-user"
+		if explicitUser {
+			wantUser = "generic-user"
+		}
+		if cfg.SSHUser != wantUser || cfg.WorkRoot != "/provider/root" || cfg.Vast.APIURL != "" || cfg.Vast.Image != "" || cfg.Vast.DiskGB != 0 || cfg.Vast.InstanceType != "ondemand" || cfg.Vast.Runtype != "ssh_direct" || cfg.Vast.Order != "dlperf_per_dphtotal desc" || cfg.Vast.ReleaseAction != "destroy" {
+			t.Fatal("backend fallback/projection phase changed")
+		}
+	}
+	cfg := core.Config{}
+	applyVastDefaults(&cfg)
+	if cfg.SSHUser != "root" || cfg.WorkRoot != "/work/crabbox" {
+		t.Fatal("backend raw-empty user/root fallback changed")
+	}
+	for _, tc := range []struct{ instance, want string }{{" On_Demand ", "ondemand"}, {"interruptible", "bid"}} {
+		cfg := core.BaseConfig()
+		cfg.Provider = "vast"
+		cfg.Vast.APIKey = "inert-configured-key"
+		cfg.Vast.APIURL = "https://console.vast.ai/api/v0/"
+		cfg.Vast.InstanceType = tc.instance
+		cfg.Vast.Image = ""
+		cfg.Vast.DiskGB = 0
+		configured, err := (Provider{}).Configure(cfg, core.Runtime{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := configured.(*backend)
+		if b.cfg.Vast.Image != "" || b.cfg.Vast.DiskGB != 0 || b.cfg.Vast.InstanceType != tc.instance {
+			t.Fatal("validated backend changed post-flag values")
+		}
+		api, err := b.api()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if api.(*vastClient).apiURL != "https://console.vast.ai/api/v0" {
+			t.Fatal("validated constructor endpoint changed")
+		}
+		search := buildVastOfferSearchPayload(b.cfg.Vast)
+		data, err := json.Marshal(search)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if decoded["type"] != tc.want {
+			t.Fatalf("search type=%v want=%s", decoded["type"], tc.want)
+		}
+		create := buildVastCreatePayload(vastCreateInstanceInput{Config: b.cfg.Vast})
+		if _, ok := create["image"]; ok {
+			t.Fatal("empty image no longer omitted")
+		}
+		if _, ok := create["disk"]; ok {
+			t.Fatal("zero disk no longer omitted")
+		}
 	}
 }

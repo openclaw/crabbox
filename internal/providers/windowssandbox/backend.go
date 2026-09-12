@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type backend struct {
@@ -97,11 +99,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		return RunResult{}, err
 	}
 
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	cfg := b.configForRun()
 	run, syncPhases, syncDuration, err := b.prepareRun(ctx, cfg, req)
 	if err != nil {
-		return RunResult{Total: b.now().Sub(started), SyncDelegated: true, Provider: providerName}, err
+		return RunResult{Total: core.ClockNow(b.rt.Clock).Sub(started), SyncDelegated: true, Provider: providerName}, err
 	}
 	keepWorkspace := req.Keep
 	defer func() {
@@ -118,7 +120,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	}
 	fmt.Fprintf(b.rt.Stderr, "provider=%s workdir=%s host_workspace=%s networking=%s vgpu=%s\n", providerName, cfg.WindowsSandbox.Workdir, run.hostWorkspace, cfg.WindowsSandbox.Networking, cfg.WindowsSandbox.VGPU)
 
-	commandStarted := b.now()
+	commandStarted := core.ClockNow(b.rt.Clock)
 	execResult, execErr := b.runHostRunner(ctx, LocalCommandRequest{
 		Name:                 "powershell.exe",
 		Args:                 hostRunnerArgs(run, cfg, req),
@@ -126,7 +128,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		Stderr:               b.rt.Stderr,
 		DisableOutputCapture: true,
 	}, filepath.Join(run.hostControl, "cancel.txt"), req.Keep || req.KeepOnFailure)
-	commandDuration := b.now().Sub(commandStarted)
+	commandDuration := core.ClockNow(b.rt.Clock).Sub(commandStarted)
 	exitCode := execResult.ExitCode
 	if execErr != nil && exitCode == 0 {
 		exitCode = 1
@@ -139,7 +141,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	result := RunResult{
 		ExitCode:      exitCode,
 		Command:       commandDuration,
-		Total:         b.now().Sub(started),
+		Total:         core.ClockNow(b.rt.Clock).Sub(started),
 		SyncDelegated: true,
 		Provider:      providerName,
 		Slug:          filepath.Base(run.root),
@@ -218,13 +220,6 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	return DoctorResult{Provider: providerName, Message: msg}, nil
 }
 
-func (b *backend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
-}
-
 type preparedRun struct {
 	root          string
 	hostWorkspace string
@@ -285,7 +280,7 @@ func (b *backend) prepareRun(ctx context.Context, cfg Config, req RunRequest) (p
 }
 
 func (b *backend) syncWorkspace(ctx context.Context, cfg Config, req RunRequest, hostWorkspace string) ([]timingPhase, time.Duration, error) {
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	if req.NoSync {
 		if err := os.MkdirAll(hostWorkspace, 0o700); err != nil {
 			return nil, 0, fmt.Errorf("create windows-sandbox workspace: %w", err)
@@ -303,18 +298,18 @@ func (b *backend) syncWorkspace(ctx context.Context, cfg Config, req RunRequest,
 	if err != nil {
 		return nil, 0, err
 	}
-	manifestStarted := b.now()
+	manifestStarted := core.ClockNow(b.rt.Clock)
 	manifest, err := syncManifest(req.Repo.Root, excludes, cfg.Sync.Includes)
 	if err != nil {
 		return nil, 0, exit(6, "build sync file list: %v", err)
 	}
-	manifestDuration := b.now().Sub(manifestStarted)
-	preflightStarted := b.now()
+	manifestDuration := core.ClockNow(b.rt.Clock).Sub(manifestStarted)
+	preflightStarted := core.ClockNow(b.rt.Clock)
 	if err := checkSyncPreflight(manifest, cfg, req.ForceSyncLarge, b.rt.Stderr); err != nil {
 		return nil, 0, err
 	}
-	preflightDuration := b.now().Sub(preflightStarted)
-	copyStarted := b.now()
+	preflightDuration := core.ClockNow(b.rt.Clock).Sub(preflightStarted)
+	copyStarted := core.ClockNow(b.rt.Clock)
 	if cfg.Sync.Delete {
 		if err := os.RemoveAll(hostWorkspace); err != nil {
 			return nil, 0, fmt.Errorf("reset windows-sandbox workspace: %w", err)
@@ -326,8 +321,8 @@ func (b *backend) syncWorkspace(ctx context.Context, cfg Config, req RunRequest,
 	if err := copyManifest(syncCtx, req.Repo.Root, hostWorkspace, manifest); err != nil {
 		return nil, 0, err
 	}
-	copyDuration := b.now().Sub(copyStarted)
-	total := b.now().Sub(started)
+	copyDuration := core.ClockNow(b.rt.Clock).Sub(copyStarted)
+	total := core.ClockNow(b.rt.Clock).Sub(started)
 	return []timingPhase{
 		{Name: "manifest", Ms: manifestDuration.Milliseconds()},
 		{Name: "preflight", Ms: preflightDuration.Milliseconds()},

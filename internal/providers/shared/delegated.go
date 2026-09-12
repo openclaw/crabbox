@@ -126,10 +126,8 @@ func AppendDelegatedRunFailure(result core.RunResult, primary, secondary error, 
 // joined as diagnostics. Sandbox cleanup alone fails with code 1. A failed deletion
 // leaves the session kept (and its claim intact in the adapter) for recovery.
 func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle DelegatedSandboxLifecycle) (result core.RunResult, retErr error) {
-	now := time.Now
-	if lifecycle.Runtime.Clock != nil {
-		now = lifecycle.Runtime.Clock.Now
-	}
+	clock := lifecycle.Runtime.Clock
+	now := func() time.Time { return core.ClockNow(clock) }
 	stdout, stderr := lifecycle.Runtime.Stdout, lifecycle.Runtime.Stderr
 	if stdout == nil {
 		stdout = io.Discard

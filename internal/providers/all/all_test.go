@@ -1,13 +1,172 @@
 package all
 
 import (
+	"flag"
 	"io"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func manualBatchBFlagMask(cfg core.Config, owner string) uint64 {
+	ledger := reflect.ValueOf(cfg).FieldByName("inputProvenance")
+	facts := ledger.MapIndex(reflect.ValueOf(owner).Convert(ledger.Type().Key()))
+	if !facts.IsValid() {
+		return 0
+	}
+	return facts.FieldByName("values").Uint() | facts.FieldByName("intents").Uint()
+}
+
+func TestManualBatchBProviderFlagInputFacts(t *testing.T) {
+	for _, owner := range []string{"freestyle", "github-codespaces", "hostinger", "hyperv", "incus", "islo", "mxc", "nebius", "nomad", "nvidia-brev"} {
+		provider, err := core.ProviderFor(owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defaults := core.BaseConfig()
+		defaults.Provider = ""
+		catalog := flag.NewFlagSet("catalog", flag.ContinueOnError)
+		provider.RegisterFlags(catalog, defaults)
+		catalog.VisitAll(func(entry *flag.Flag) {
+			t.Run(owner+"/"+entry.Name, func(t *testing.T) {
+				cfg := defaults
+				fs := flag.NewFlagSet("test", flag.ContinueOnError)
+				fs.SetOutput(io.Discard)
+				values := provider.RegisterFlags(fs, cfg)
+				_ = provider.ApplyFlags(&cfg, fs, values)
+				if manualBatchBFlagMask(cfg, owner) != 0 {
+					t.Fatal("unvisited flags acquired an input fact")
+				}
+				raw := entry.DefValue
+				if getter, ok := entry.Value.(flag.Getter); ok {
+					switch getter.Get().(type) {
+					case bool:
+						raw = "false"
+					case int:
+						raw = "1"
+					case time.Duration:
+						raw = "5m"
+					}
+				}
+				if strings.Contains(entry.Name, "timeout") && !strings.HasSuffix(entry.Name, "-secs") {
+					raw = "5m"
+				}
+				if err := fs.Set(entry.Name, raw); err != nil {
+					t.Fatal("ordinary flag fixture did not parse")
+				}
+				// A later provider validation error does not erase an accepted value.
+				_ = provider.ApplyFlags(&cfg, fs, values)
+				if manualBatchBFlagMask(cfg, owner) != 1<<3 {
+					t.Fatal("accepted flag did not record exactly its flag source")
+				}
+			})
+		})
+	}
+}
+
+func TestManualBatchBFlagPartialErrors(t *testing.T) {
+	for _, tc := range []struct {
+		owner    string
+		args     []string
+		wantFact bool
+	}{
+		{"incus", []string{"--incus-start-timeout="}, false},
+		{"incus", []string{"--incus-instance-type=invalid"}, false},
+		{"incus", []string{"--incus-project=sample", "--incus-instance-type=invalid"}, true},
+		{"nomad", []string{"--nomad-alloc-ready-timeout=invalid"}, false},
+		{"nomad", []string{"--nomad-region=sample", "--nomad-alloc-ready-timeout=invalid"}, true},
+	} {
+		provider, err := core.ProviderFor(tc.owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := core.BaseConfig()
+		cfg.Provider = ""
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		values := provider.RegisterFlags(fs, cfg)
+		if err := fs.Parse(tc.args); err != nil {
+			t.Fatal("partial-error fixture did not parse")
+		}
+		_ = provider.ApplyFlags(&cfg, fs, values)
+		if got := manualBatchBFlagMask(cfg, tc.owner) != 0; got != tc.wantFact {
+			t.Fatalf("partial flag input fact=%t, want=%t for %s", got, tc.wantFact, tc.owner)
+		}
+	}
+}
+
+func TestManualBatchBCodespacesGenericTypeInput(t *testing.T) {
+	provider, err := core.ProviderFor("github-codespaces")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider, cfg.TargetOS = "github-codespaces", core.TargetLinux
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.String("type", "", "shared machine type")
+	if err := fs.Set("type", " sample-machine "); err != nil {
+		t.Fatal(err)
+	}
+	// The shared type is applied before the provider-values type assertion.
+	if err := provider.ApplyFlags(&cfg, fs, struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubCodespaces.Machine != "sample-machine" || manualBatchBFlagMask(cfg, "github-codespaces") != 1<<3 {
+		t.Fatal("accepted shared type mapping lost its provider input fact")
+	}
+}
+
+func TestProviderAuthenticationDeclarations(t *testing.T) {
+	methods := map[core.ProviderAuthenticationMethod]bool{
+		"api_key": true, "api_token": true, "session_token": true,
+		"api_credentials": true, "username_password": true, "cli": true,
+		"sdk_credentials": true, "native_config": true, "ssh": true,
+		"local_context": true, "external_contract": true, "shared_secret": true,
+		"identity_token": true, "coordinator": true, "none": true,
+	}
+	names := core.RegisteredProviderNames()
+	if len(names) == 0 {
+		t.Fatal("no providers registered")
+	}
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			provider, err := core.ProviderFor(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			authentication := provider.Spec().Authentication
+			if len(authentication) == 0 {
+				t.Fatal("missing static authentication declaration")
+			}
+			routes := map[string]bool{}
+			for _, route := range authentication {
+				if route.Route == "" || strings.TrimSpace(route.Route) != route.Route || routes[route.Route] {
+					t.Fatalf("empty, padded or duplicate route %q", route.Route)
+				}
+				routes[route.Route] = true
+				if len(route.Methods) == 0 || strings.TrimSpace(route.Description) == "" {
+					t.Fatalf("route %q lacks methods or explanation", route.Route)
+				}
+				seen := map[core.ProviderAuthenticationMethod]bool{}
+				for _, method := range route.Methods {
+					if !methods[method] || seen[method] {
+						t.Fatalf("route %q has unsupported or duplicate method %q", route.Route, method)
+					}
+					seen[method] = true
+				}
+			}
+			original := authentication[0].Methods[0]
+			authentication[0].Methods[0] = "test-only-mutation"
+			if provider.Spec().Authentication[0].Methods[0] != original {
+				t.Fatal("Spec authentication shares mutable method storage")
+			}
+		})
+	}
+}
 
 func TestAppleContainerRegistersWithoutAliasCollision(t *testing.T) {
 	for _, alias := range []string{"apple-container", "apple", "applecontainer"} {
@@ -1462,5 +1621,57 @@ func TestClassSpecsReportCompleteShapesForEveryClass(t *testing.T) {
 	}
 	if seen == 0 {
 		t.Fatal("no providers implement ClassSpecs; test would be vacuous")
+	}
+}
+
+func TestManualBatchCProviderFlagInputLedger(t *testing.T) {
+	for _, owner := range []string{"parallels", "phala", "proxmox", "sprites", "ssh", "superserve", "tenki", "unikraft-cloud", "windows-sandbox", "xcp-ng"} {
+		t.Run(owner, func(t *testing.T) {
+			provider, err := core.ProviderFor(owner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seed := core.BaseConfig()
+			seed.Provider = "unselected-fixture"
+			inventory := flag.NewFlagSet("inventory", flag.ContinueOnError)
+			provider.RegisterFlags(inventory, seed)
+			check := func(t *testing.T, cfg core.Config, accepted bool) {
+				t.Helper()
+				ledger := reflect.ValueOf(cfg).FieldByName("inputProvenance")
+				wantLen := 0
+				if accepted {
+					wantLen = 1
+				}
+				if ledger.Len() != wantLen {
+					t.Fatalf("ledger owners=%d want=%d", ledger.Len(), wantLen)
+				}
+				if !accepted {
+					return
+				}
+				key := reflect.ValueOf(owner).Convert(ledger.Type().Key())
+				facts := ledger.MapIndex(key)
+				if !facts.IsValid() || facts.FieldByName("values").Uint() != 8 || facts.FieldByName("intents").Uint() != 0 || facts.FieldByName("complete").Bool() {
+					t.Fatal("flag attribution mismatch")
+				}
+			}
+			idle := seed
+			idleFlags := flag.NewFlagSet("idle", flag.ContinueOnError)
+			idleValues := provider.RegisterFlags(idleFlags, idle)
+			_ = provider.ApplyFlags(&idle, idleFlags, idleValues)
+			check(t, idle, false)
+			inventory.VisitAll(func(f *flag.Flag) {
+				t.Run(f.Name, func(t *testing.T) {
+					cfg := seed
+					fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+					values := provider.RegisterFlags(fs, cfg)
+					// Reapplying the registered value exercises equal-value acceptance at the actual assignment.
+					if err := fs.Set(f.Name, f.DefValue); err != nil {
+						t.Fatal(err)
+					}
+					_ = provider.ApplyFlags(&cfg, fs, values)
+					check(t, cfg, f.Name != "phala-skip-attestation")
+				})
+			})
+		})
 	}
 }

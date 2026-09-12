@@ -74,7 +74,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if req.Options.Tailscale.Enabled {
 		return exit(2, "provider=%s is delegated-run only and does not support Tailscale options", providerName)
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	client, err := b.client(ctx)
 	if err != nil {
 		return err
@@ -84,7 +84,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 		return err
 	}
 	defer unlockOperation()
-	total := b.now().Sub(started)
+	total := core.ClockNow(b.rt.Clock).Sub(started)
 	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s claim=%s sandbox=%s pod=%s\n", leaseID, slug, providerName, claimName, ready.SandboxName, ready.PodName)
 	if !req.Keep {
 		if expiresAt := strings.TrimSpace(claim.Labels[claimLabelExpiresAt]); expiresAt != "" {
@@ -115,7 +115,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		return RunResult{}, exit(2, "provider=%s is delegated-run only and does not support Tailscale options", providerName)
 	}
 	workdir := path.Clean(b.cfg.AgentSandbox.Workdir)
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	client, err := b.client(ctx)
 	if err != nil {
 		return RunResult{}, err
@@ -143,7 +143,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		result.SyncDelegated = true
 		result, retErr = shared.PinDelegatedRunFailure(result, retErr)
 		shouldStop := acquired && !req.Keep && b.cfg.AgentSandbox.DeleteOnRelease
-		expired := claimTTLExpired(claim, b.now().UTC())
+		expired := claimTTLExpired(claim, core.ClockNow(b.rt.Clock).UTC())
 		if admitted && retErr != nil && !earlyExpiry && !expired {
 			handleDelegatedRunFailure(b.rt.Stderr, b.cfg, req, leaseID, slug, acquired, &shouldStop)
 		}
@@ -183,7 +183,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			Provider: providerName, LeaseID: leaseID, Slug: slug, Reused: !acquired,
 			Kept: custody == runClaimRetained, CleanupCommand: agentSandboxCleanupCommand(leaseID),
 		}
-		result.Total = b.now().Sub(started)
+		result.Total = core.ClockNow(b.rt.Clock).Sub(started)
 		result = core.FinalizeRunResult(result, retErr)
 		if req.TimingJSON {
 			report := timingReportWithRunResult(timingReport{
@@ -239,7 +239,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			return RunResult{}, err
 		}
 		custody = runClaimRetained
-		if claimTTLExpired(claim, b.now().UTC()) {
+		if claimTTLExpired(claim, core.ClockNow(b.rt.Clock).UTC()) {
 			earlyExpiry = true
 			return RunResult{}, exit(4, "agent-sandbox claim %s reached its TTL expiry; command not run", claim.LeaseID)
 		}
@@ -280,17 +280,17 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			return RunResult{}, err
 		}
 	}
-	if claimTTLExpired(claim, b.now().UTC()) {
+	if claimTTLExpired(claim, core.ClockNow(b.rt.Clock).UTC()) {
 		return RunResult{}, exit(4, "agent-sandbox claim %s reached its TTL expiry; command not run", claim.LeaseID)
 	}
 	if req.SyncOnly {
 		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
 		return RunResult{}, nil
 	}
-	commandStart := b.now()
+	commandStart := core.ClockNow(b.rt.Clock)
 	exitCode, runErr := b.runCommand(ctx, client, ready, req, workdir)
 	result = shared.FinalizeDelegatedCommandOutcome(exitCode, runErr)
-	result.Command = b.now().Sub(commandStart)
+	result.Command = core.ClockNow(b.rt.Clock).Sub(commandStart)
 	if runErr != nil {
 		// Public callers already select typed errors through the transport wrapper;
 		// retain that code without reclassifying it as a workload exit.
@@ -342,7 +342,7 @@ func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) 
 			if err != nil {
 				return nil, err
 			}
-			if expired, reason := sandboxClaimExpired(claim, liveClaim, b.now().UTC()); expired {
+			if expired, reason := sandboxClaimExpired(claim, liveClaim, core.ClockNow(b.rt.Clock).UTC()); expired {
 				state = "expired"
 				stateReason = reason
 			} else {
@@ -432,7 +432,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		if err != nil {
 			return StatusView{}, err
 		}
-		if expired, reason := sandboxClaimExpired(claim, liveClaim, b.now().UTC()); expired {
+		if expired, reason := sandboxClaimExpired(claim, liveClaim, core.ClockNow(b.rt.Clock).UTC()); expired {
 			view := baseView
 			view.State = "expired"
 			view.Labels = cloneStringMap(baseView.Labels)
@@ -528,7 +528,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	if err != nil {
 		return err
 	}
-	now := b.now().UTC()
+	now := core.ClockNow(b.rt.Clock).UTC()
 	checked, removed, claimsRemoved := 0, 0, 0
 	for _, listedClaim := range claims {
 		if listedClaim.Provider != providerName || listedClaim.ProviderScope != claimScope(b.cfg) {
@@ -643,7 +643,7 @@ func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requ
 	}
 	expiresAt := ""
 	if b.cfg.TTL > 0 {
-		deadline := b.now().UTC().Add(b.cfg.TTL)
+		deadline := core.ClockNow(b.rt.Clock).UTC().Add(b.cfg.TTL)
 		if deadline.Nanosecond() != 0 {
 			deadline = deadline.Truncate(time.Second).Add(time.Second)
 		}
@@ -705,7 +705,7 @@ func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requ
 	if err != nil {
 		return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, b.rollbackCreatedClaim(client, leaseID, slug, repo, reclaim, claimResourceName, pending, expiresAt, recoveryNonce, err)
 	}
-	if claimTTLExpired(pendingClaim, b.now().UTC()) {
+	if claimTTLExpired(pendingClaim, core.ClockNow(b.rt.Clock).UTC()) {
 		cause := exit(4, "agent-sandbox claim %s reached its TTL expiry before becoming ready", leaseID)
 		return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, b.rollbackCreatedClaim(client, leaseID, slug, repo, reclaim, claimResourceName, pending, expiresAt, recoveryNonce, cause)
 	}
@@ -726,7 +726,7 @@ func (b *backend) waitForClaimReadiness(ctx context.Context, client kubernetesCl
 		if err != nil {
 			return sandboxReadiness{}, exit(4, "agent-sandbox claim %s has invalid TTL expiry %q", identity.LeaseID, identity.ExpiresAt)
 		}
-		remaining := expiresAt.Sub(b.now().UTC())
+		remaining := expiresAt.Sub(core.ClockNow(b.rt.Clock).UTC())
 		if remaining <= 0 {
 			return sandboxReadiness{}, claimTTLExpiryError{err: exit(4, "agent-sandbox claim %s reached its TTL expiry before becoming ready", identity.LeaseID)}
 		}

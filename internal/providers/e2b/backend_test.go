@@ -1,12 +1,11 @@
 package e2b
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,7 +14,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -23,6 +24,7 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 type e2bRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -93,7 +95,7 @@ func TestE2BClientRedactsReflectedCredentials(t *testing.T) {
 		defer server.Close()
 		client := &e2bClient{apiKey: secret, apiURL: server.URL, httpClient: server.Client()}
 		_, err := client.ListSandboxes(context.Background(), nil)
-		assertE2BRedactedError(t, err, secret)
+		testutil.RequireRedactedProviderError(t, err, secret)
 	})
 
 	t.Run("envd access token", func(t *testing.T) {
@@ -109,22 +111,15 @@ func TestE2BClientRedactsReflectedCredentials(t *testing.T) {
 		})}
 		client := &e2bClient{envdClient: httpClient}
 		_, err := client.StartProcess(context.Background(), e2bSession{SandboxID: "sbx_1", Domain: "example.test", EnvdAccessToken: secret}, e2bProcessRequest{Command: "true"})
-		assertE2BRedactedError(t, err, secret)
+		testutil.RequireRedactedProviderError(t, err, secret)
 	})
-}
-
-func assertE2BRedactedError(t *testing.T, err error, secret string) {
-	t.Helper()
-	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "quota exceeded") {
-		t.Fatalf("error=%v, want redacted useful provider error", err)
-	}
 }
 
 func TestE2BProcessStreamRedactsReflectedCredential(t *testing.T) {
 	const secret = "envd-stream-secret"
 
 	t.Run("process end diagnostic", func(t *testing.T) {
-		body := e2bTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 1, "exited": false, "error": "Bearer " + secret + " quota exceeded"}}})
+		body := testutil.GRPCWebEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 1, "exited": false, "error": "Bearer " + secret + " quota exceeded"}}})
 		var stderr bytes.Buffer
 		if _, err := parseE2BProcessStream(bytes.NewReader(body), io.Discard, &stderr, secret); err != nil {
 			t.Fatal(err)
@@ -227,11 +222,11 @@ func TestE2BDataPlaneStreamOutlivesControlTimeout(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		_, _ = io.Copy(io.Discard, req.Body)
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(e2bTestEnvelope(0, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 42}}}))
+		_, _ = w.Write(testutil.GRPCWebEnvelope(0, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 42}}}))
 		w.(http.Flusher).Flush()
 		time.Sleep(3 * controlTimeout)
-		_, _ = w.Write(e2bTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 0, "exited": true}}}))
-		_, _ = w.Write(e2bTestEnvelope(2, map[string]any{}))
+		_, _ = w.Write(testutil.GRPCWebEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 0, "exited": true}}}))
+		_, _ = w.Write(testutil.GRPCWebEnvelope(2, map[string]any{}))
 	}))
 	defer server.Close()
 
@@ -346,7 +341,176 @@ func TestValidateE2BAPIURL(t *testing.T) {
 	}
 }
 
+func TestE2BFlagsPreserveExactGuardAndDeferredValidation(t *testing.T) {
+	cfg := Config{Provider: "e2b"}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := RegisterE2BProviderFlags(fs, cfg)
+	fs.VisitAll(func(f *flag.Flag) {
+		if strings.Contains(f.Name, "key") {
+			t.Fatal("API key flag introduced")
+		}
+	})
+	cfg.E2B = E2BConfig{APIURL: "https://example.invalid/api", Domain: "example.invalid", Template: "custom", Workdir: "work", User: "alice"}
+	before := cfg
+	if err := ApplyE2BProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("unvisited flags changed config")
+	}
+	if err := fs.Parse([]string{"--e2b-api-url=https://example.invalid/api", "--e2b-domain=example.invalid", "--e2b-template=custom", "--e2b-workdir=work", "--e2b-user=alice"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.E2B = E2BConfig{}
+	if err := ApplyE2BProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	core.RecordProviderFlagInputs(&before, true, "e2b")
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("positive flags changed binding or marker semantics")
+	}
+	args := []string{"--e2b-api-url=", "--e2b-domain=", "--e2b-template=", "--e2b-workdir=", "--e2b-user="}
+	if err := fs.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyE2BProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal("wrapper added client validation")
+	}
+	before.E2B = E2BConfig{}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("explicit empty values or central provenance side effects changed")
+	}
+	if _, err := (Provider{}).Configure(cfg, Runtime{}); err != nil {
+		t.Fatalf("Configure added client validation: %v", err)
+	}
+	for _, name := range []string{"e2b", "E2B", " e2b "} {
+		cfg := Config{Provider: name}
+		fs := flag.NewFlagSet("guard", flag.ContinueOnError)
+		fs.String("class", "", "")
+		fs.String("type", "", "")
+		values := RegisterE2BProviderFlags(fs, cfg)
+		for _, args := range [][]string{{"--type=vm"}, {"--type=vm", "--class=large"}} {
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			for _, v := range []any{nil, struct{}{}, values} {
+				err := ApplyE2BProviderFlags(&cfg, fs, v)
+				if name != "e2b" {
+					if err != nil {
+						t.Fatalf("guard normalized provider: %v", err)
+					}
+					continue
+				}
+				want := "--type"
+				if len(args) == 2 {
+					want = "--class"
+				}
+				if err == nil || err.Error() != want+" is not supported for provider=e2b" {
+					t.Fatalf("guard=%v", err)
+				}
+			}
+		}
+	}
+}
+
+func TestE2BConfiguredEndpointDefaultsAndRawScope(t *testing.T) {
+	for _, raw := range []string{"", "  ", " https://example.invalid/api/ "} {
+		cfg := Config{E2B: E2BConfig{APIKey: "inert", APIURL: raw}}
+		before := cfg.E2B
+		api, err := newE2BClient(cfg, Runtime{HTTP: &http.Client{}})
+		if raw == "  " {
+			if err == nil {
+				t.Fatal("whitespace client endpoint unexpectedly defaulted")
+			}
+		} else {
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "https://api.e2b.app"
+			if raw != "" {
+				want = "https://example.invalid/api"
+			}
+			if api.(*e2bClient).apiURL != want {
+				t.Fatal("client endpoint default changed")
+			}
+		}
+		scoped := e2bClaimConfig(cfg)
+		want := "https://api.e2b.app"
+		if strings.TrimSpace(raw) != "" {
+			want = raw
+		}
+		if scoped.E2B.APIURL != want {
+			t.Fatal("claim-config trim-before-default changed")
+		}
+		scope := (Provider{}).ClaimScope(cfg)
+		if strings.TrimSpace(raw) == "" && scope != "" {
+			t.Fatal("raw scope gained endpoint default")
+		}
+		if strings.TrimSpace(raw) != "" && scope != "endpoint:https://example.invalid/api" {
+			t.Fatalf("custom scope=%q", scope)
+		}
+		if cfg.E2B != before {
+			t.Fatal("default helpers mutated config")
+		}
+	}
+	for _, raw := range []string{"", "  ", " sandbox.example.invalid "} {
+		cfg := Config{E2B: E2BConfig{APIKey: "inert", APIURL: "https://example.invalid/api", Domain: raw, User: " alice "}}
+		api, err := newE2BClient(cfg, Runtime{HTTP: &http.Client{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := strings.TrimSpace(raw)
+		if raw == "" {
+			want = "e2b.app"
+		}
+		if api.(*e2bClient).domain != want || api.(*e2bClient).user != " alice " {
+			t.Fatal("client domain/user predicate changed")
+		}
+	}
+	for _, rawKey := range []string{"", "  "} {
+		if _, err := newE2BClient(Config{E2B: E2BConfig{APIKey: rawKey, APIURL: "relative"}}, Runtime{HTTP: &http.Client{}}); err == nil || err.Error() != "provider=e2b requires E2B_API_KEY" {
+			t.Fatalf("key-first=%v", err)
+		}
+	}
+	cfg := Config{E2B: E2BConfig{APIURL: "https://example.invalid/api", Domain: " sandbox.example.invalid ", User: " alice ", Workdir: " project "}}
+	got := (Provider{}).CommandRouting(cfg, core.CommandRoutingRequest{}).Args
+	want := []string{"--e2b-api-url", "https://example.invalid/api", "--e2b-domain", " sandbox.example.invalid ", "--e2b-user", " alice ", "--e2b-workdir", " project "}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("raw routing=%v", got)
+	}
+}
+
+func TestE2BTemplateAcquisitionAndMetadataDefaultAreDistinct(t *testing.T) {
+	for _, raw := range []string{"", "  ", "custom-template"} {
+		t.Run(fmt.Sprintf("template=%q", raw), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cfg := core.BaseConfig()
+			cfg.Provider = "e2b"
+			cfg.E2B.Template = raw
+			b := &e2bBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+			fake := &fakeE2BSyncClient{}
+			_, sandbox, _, err := b.createSandbox(context.Background(), fake, Repo{Name: "example", Root: t.TempDir()}, false, false, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := raw
+			if want == "" {
+				want = "base"
+			}
+			if fake.createReq.TemplateID != want {
+				t.Fatalf("template=%q want=%q", fake.createReq.TemplateID, want)
+			}
+			if e2bSandboxToServer(sandbox).ServerType.Name != "base" {
+				t.Fatal("missing remote metadata inferred configured template")
+			}
+		})
+	}
+}
+
 func TestE2BWorkspacePath(t *testing.T) {
+	if got := e2bWorkspacePath(Config{E2B: E2BConfig{User: " alice ", Workdir: "  "}}); got != "/home/alice/crabbox" {
+		t.Fatalf("whitespace/default workspace=%q", got)
+	}
 	if got := e2bWorkspacePath(Config{}); got != "/home/user/crabbox" {
 		t.Fatalf("workspace=%q", got)
 	}
@@ -756,7 +920,7 @@ func TestE2BSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 	if client.uploadPath == "" || !strings.HasPrefix(client.uploadPath, "/tmp/crabbox-") {
 		t.Fatalf("upload path=%q", client.uploadPath)
 	}
-	if !tarGzipContains(t, client.uploaded.Bytes(), "go.mod") {
+	if !testutil.TarGzipContains(t, client.uploaded.Bytes(), "go.mod") {
 		t.Fatal("uploaded archive missing go.mod")
 	}
 	if !client.commandContains("mkdir -p '/home/ubuntu/repo'") || !client.commandContains("tar -xzf") {
@@ -1570,40 +1734,6 @@ func (f *fakeE2BSyncClient) userContains(value string) bool {
 	return false
 }
 
-func e2bTestEnvelope(flags byte, v any) []byte {
-	data, err := json.Marshal(v)
-	if err != nil {
-		panic(err)
-	}
-	var out bytes.Buffer
-	out.WriteByte(flags)
-	out.Write([]byte{byte(len(data) >> 24), byte(len(data) >> 16), byte(len(data) >> 8), byte(len(data))})
-	out.Write(data)
-	return out.Bytes()
-}
-
-func tarGzipContains(t *testing.T, data []byte, name string) bool {
-	t.Helper()
-	gz, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			return false
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		if header.Name == name {
-			return true
-		}
-	}
-}
-
 func TestE2BRunLifecycleArchiveGuardrailBeforeCreation(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeE2BSyncClient{}
@@ -1655,104 +1785,30 @@ func TestE2BRunLifecycleCleanupOutcomeAndTiming(t *testing.T) {
 }
 
 func TestRunCommandIntentReachesExistingShell(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX shell contract")
-	}
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skip("bash unavailable")
-	}
-	for _, name := range []string{"literal separator", "literal assignment", "literal singleton", "mixed operators", "quoted argv", "unmarked assignment", "explicit source", "empty source", "inferred source", "missing command"} {
-		t.Run(name, func(t *testing.T) {
-			t.Setenv("XDG_STATE_HOME", t.TempDir())
-			root := t.TempDir()
-			marker := filepath.Join(root, "must-not-exist")
-			program := filepath.Join(root, "FOO=x")
-			if err := os.WriteFile(program, []byte("#!/bin/sh\nprintf 'literal:%s' \"$*\"\nexit 42\n"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			client := &fakeE2BSyncClient{}
-			restore := swapNewE2BClient(client)
-			defer restore()
-			backend := &e2bBackend{cfg: Config{E2B: E2BConfig{Template: "base", Workdir: root}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-			req := RunRequest{Repo: Repo{Root: root}, NoSync: true, Keep: true}
-			want, wantExit := "", 0
-			switch name {
-			case "literal separator":
-				req.Command = []string{"printf", "<%s>", ";", "touch", marker}
-				req.CommandLiteralArgs = map[int]bool{2: true}
-				want = "<;><touch><" + marker + ">"
-			case "literal assignment":
-				req.Command = []string{"FOO=x", "argument"}
-				req.CommandLiteralArgs = map[int]bool{0: true}
-				want, wantExit = "literal:argument", 42
-			case "literal singleton":
-				req.Command = []string{"FOO=x"}
-				req.CommandLiteralArgs = map[int]bool{0: true}
-				want, wantExit = "literal:", 42
-			case "mixed operators":
-				req.Command = []string{"printf", "%s", ";", "&&", "printf", "%s", "tail"}
-				req.CommandLiteralArgs = map[int]bool{2: true}
-				want = ";tail"
-			case "quoted argv":
-				req.Command = []string{"printf", "<%s>", "", "$literal", "a'b"}
-				want = "<><$literal><a'b>"
-			case "unmarked assignment":
-				req.Command = []string{"CBX_PROBE=value", "sh", "-c", `printf %s "$CBX_PROBE"`}
-				want = "value"
-			case "explicit source":
-				req.Command = []string{`printf %s "$unexported_fixture_state"; exit 7`}
-				req.ShellMode = true
-				want, wantExit = "existing-shell", 7
-			case "empty source":
-				req.Command = []string{""}
-				req.ShellMode = true
-			case "inferred source":
-				req.Command = []string{"printf %s inferred"}
-				want = "inferred"
-			}
-			_, runErr := backend.Run(t.Context(), req)
-			if name == "missing command" {
-				var ee core.ExitError
-				if !errors.As(runErr, &ee) || ee.Code != 2 {
-					t.Fatalf("missing command error=%v", runErr)
-				}
-				if len(client.commands) != 1 {
-					t.Fatalf("missing command reached workload: %v", client.commands)
-				}
-				return
-			}
-			if runErr != nil {
-				t.Fatal(runErr)
-			}
-			if len(client.commands) != 2 {
-				t.Fatalf("commands=%v want preparation and workload", client.commands)
-			}
-			// Exercise the captured workload in an existing shell; the separate
-			// native envd fixture verifies its actual login-shell transport.
-			source := "unexported_fixture_state=existing-shell\n" + client.commands[1]
-			cmd := exec.CommandContext(t.Context(), bash, "--noprofile", "--norc", "-c", source)
-			cmd.Dir = root
-			cmd.Env = []string{"HOME=" + root, "PATH=" + root + ":/usr/bin:/bin"}
-			var stdout, stderr bytes.Buffer
-			cmd.Stdout, cmd.Stderr = &stdout, &stderr
-			commandErr := cmd.Run()
-			code := 0
-			if commandErr != nil {
-				var ee *exec.ExitError
-				if !errors.As(commandErr, &ee) {
-					t.Fatal(commandErr)
-				}
-				code = ee.ExitCode()
-			}
-			if code != wantExit || stdout.String() != want {
-				t.Fatalf("source=%q stdout=%q stderr=%q exit=%d; want %q/%d", source, stdout.String(), stderr.String(), code, want, wantExit)
-			}
-			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("literal separator ran touch: %v", err)
-			}
+	testutil.VerifyExistingShellCommandIntent(t, func(t *testing.T, root string, intent testutil.CommandIntent) testutil.ExistingShellResult {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		client := &fakeE2BSyncClient{}
+		restore := swapNewE2BClient(client)
+		t.Cleanup(restore)
+		backend := &e2bBackend{cfg: Config{E2B: E2BConfig{Template: "base", Workdir: root}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+		_, runErr := backend.Run(t.Context(), RunRequest{
+			Repo:               Repo{Root: root},
+			NoSync:             true,
+			Keep:               true,
+			Command:            intent.Command,
+			CommandLiteralArgs: intent.LiteralArgs,
+			ShellMode:          intent.ShellMode,
 		})
-	}
+		result := testutil.ExistingShellResult{
+			Commands: append([]string(nil), client.commands...),
+			Err:      runErr,
+		}
+		var exitErr core.ExitError
+		if errors.As(runErr, &exitErr) {
+			result.ErrorCode = exitErr.Code
+		}
+		return result
+	})
 }
 
 func TestE2BRunCanonicalIDPreservesInventoryRecovery(t *testing.T) {
@@ -1863,9 +1919,9 @@ func TestE2BProcessEndPolicy(t *testing.T) {
 		})
 		for _, ending := range []string{"clean", "RPC failure", "read failure", "truncated"} {
 			t.Run(fmt.Sprintf("abnormal/%d/%s", code, ending), func(t *testing.T) {
-				body := e2bTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": code, "exited": false, "error": "fixture end"}}})
+				body := testutil.GRPCWebEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": code, "exited": false, "error": "fixture end"}}})
 				if ending == "RPC failure" {
-					body = append(body, e2bTestEnvelope(2, map[string]any{"error": map[string]any{"code": "internal", "message": "fixture RPC failure"}})...)
+					body = append(body, testutil.GRPCWebEnvelope(2, map[string]any{"error": map[string]any{"code": "internal", "message": "fixture RPC failure"}})...)
 				}
 				if ending == "truncated" {
 					body = append(body, 0)
@@ -1902,5 +1958,170 @@ func TestE2BProcessEndDoesNotUseStatusAsDiagnostic(t *testing.T) {
 	code, err := interpretE2BProcessEnd(shared.EnvdProcessEnd{ExitCode: -1, Status: "fixture status"}, &diagnostic)
 	if code != -1 || err != nil || diagnostic.Len() != 0 {
 		t.Fatalf("code=%d err=%v diagnostic=%q", code, err, diagnostic.String())
+	}
+}
+
+func TestJSONRequestAdoptionEnvelope(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "capture")
+	var typedNil *struct{ Value string }
+	const base = "https://api.example.test/base"
+	sentinel := errors.New("synthetic captured transport stop")
+	for _, tc := range []struct {
+		name        string
+		body        any
+		want        string
+		query, fail bool
+	}{
+		{name: "nil"},
+		{name: "typed nil", body: typedNil, want: "null\n"},
+		{name: "JSON bytes", body: map[string]string{"message": "<&>"}, want: "{\"message\":\"\\u003c\\u0026\\u003e\"}\n"},
+		{name: "query without body", query: true},
+		{name: "transport error", fail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			endpoint := "/records"
+			if tc.query {
+				endpoint += "?limit=2&prefix=two+words"
+			}
+			var query url.Values
+			if tc.query {
+				query = url.Values{"limit": []string{"2"}, "prefix": []string{"two words"}}
+			}
+			headers := http.Header{"X-Api-Key": []string{"synthetic-token"}}
+			headers.Set("Accept", "application/json")
+			if tc.body != nil {
+				headers.Set("Content-Type", "application/json")
+			}
+			transport := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, base+endpoint, tc.want, headers)
+				if tc.fail {
+					return nil, sentinel
+				}
+				return &http.Response{StatusCode: 204, Header: http.Header{"X-Capture": []string{"yes"}}, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+			})}
+			c := &e2bClient{apiURL: base, apiKey: "synthetic-token", httpClient: transport}
+			gotHeaders, err := c.doJSONWithHeaders(ctx, http.MethodPost, "/records", query, tc.body, nil)
+			if tc.fail {
+				if !errors.Is(err, sentinel) || gotHeaders != nil {
+					t.Fatalf("error/headers=%v %v", err, gotHeaders)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.fail && (gotHeaders.Get("X-Capture") != "yes") {
+				t.Fatalf("response headers=%v", gotHeaders)
+			}
+			if calls != 1 {
+				t.Fatalf("calls=%d", calls)
+			}
+		})
+	}
+}
+
+type responseCloseObserver struct {
+	io.Reader
+	close func() error
+}
+
+func (b responseCloseObserver) Close() error { return b.close() }
+
+func TestRawJSONResponseContract(t *testing.T) {
+	readFailure := errors.New("synthetic response read failure")
+	closeFailure := errors.New("synthetic ignored close failure")
+	for _, tc := range []struct {
+		name, data        string
+		status            int
+		nilOut, readError bool
+		wantError         string
+		wantValue         int
+	}{
+		{name: "nil output still reads invalid JSON", data: "not JSON", nilOut: true, wantValue: 99},
+		{name: "raw empty", wantValue: 99},
+		{name: "whitespace with output", data: " \t\n", wantError: "syntax", wantValue: 99},
+		{name: "whitespace without output", data: " \t\n", nilOut: true, wantValue: 99},
+		{name: "JSON object", data: `{"value":12}`, wantValue: 12},
+		{name: "JSON null", data: "null", wantValue: 99},
+		{name: "JSON trailing whitespace", data: "{\"value\":12}\n \t", wantValue: 12},
+		{name: "trailing JSON value", data: `{"value":12}{"value":13}`, wantError: "syntax", wantValue: 99},
+		{name: "wrong JSON field type", data: `{"value":"bad"}`, wantError: "type", wantValue: 99},
+		{name: "status error", data: "  unavailable \n", status: 503, wantError: "status", wantValue: 99},
+		{name: "status error with nil output", data: "  unavailable \n", status: 503, nilOut: true, wantError: "status", wantValue: 99},
+		{name: "read error beats success", data: `{"value":12}`, readError: true, wantError: "read", wantValue: 99},
+		{name: "read error beats status and nil output", data: "partial body", status: 503, nilOut: true, readError: true, wantError: "read", wantValue: 99},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := bytes.NewReader([]byte(tc.data))
+			var reader io.Reader = payload
+			if tc.readError {
+				reader = io.MultiReader(payload, iotest.ErrReader(readFailure))
+			}
+			closed, calls := 0, 0
+			responseHeaders := http.Header{"X-Trace": []string{"before-close", "second"}}
+			body := responseCloseObserver{Reader: reader, close: func() error { closed++; responseHeaders["X-Trace"][0] = "after-close"; return closeFailure }}
+			status := tc.status
+			if status == 0 {
+				status = 200
+			}
+			const base = "https://api.example.test"
+			httpClient := &http.Client{Transport: e2bRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				return &http.Response{StatusCode: status, Status: strconv.Itoa(status) + " Synthetic", Header: responseHeaders, Body: body, Request: req}, nil
+			})}
+			client := &e2bClient{apiURL: base, apiKey: "synthetic-token", httpClient: httpClient}
+			out := struct {
+				Value int `json:"value"`
+			}{Value: 99}
+			var destination any = &out
+			if tc.nilOut {
+				destination = nil
+			}
+			headers, err := client.doJSONWithHeaders(context.Background(), http.MethodGet, "/records", nil, nil, destination)
+			if calls != 1 || closed != 1 || payload.Len() != 0 {
+				t.Fatalf("calls=%d closes=%d unread=%d", calls, closed, payload.Len())
+			}
+			if out.Value != tc.wantValue {
+				t.Fatalf("value=%d want%d", out.Value, tc.wantValue)
+			}
+			switch tc.wantError {
+			case "":
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "read":
+				if err != readFailure {
+					t.Fatalf("read error=%T %v want exact sentinel", err, err)
+				}
+			case "syntax":
+				if _, ok := err.(*json.SyntaxError); !ok {
+					t.Fatalf("decode error=%T %v want unwrapped SyntaxError", err, err)
+				}
+			case "type":
+				if _, ok := err.(*json.UnmarshalTypeError); !ok {
+					t.Fatalf("decode error=%T %v want unwrapped UnmarshalTypeError", err, err)
+				}
+			case "status":
+				api, ok := err.(*e2bAPIError)
+				if !ok || api.StatusCode != 503 || api.Status != "503 Synthetic" || api.Body != "unavailable" {
+					t.Fatalf("status error=%T %#v", err, err)
+				}
+			}
+			if tc.wantError != "" {
+				if headers != nil {
+					t.Fatalf("error headers=%v", headers)
+				}
+			} else {
+				want := http.Header{"X-Trace": []string{"before-close", "second"}}
+				if !reflect.DeepEqual(headers, want) {
+					t.Fatalf("headers=%v want pre-close clone%v", headers, want)
+				}
+				headers["X-Trace"][0] = "caller-change"
+				if responseHeaders["X-Trace"][0] != "after-close" {
+					t.Fatal("returned headers share backing values")
+				}
+			}
+		})
 	}
 }

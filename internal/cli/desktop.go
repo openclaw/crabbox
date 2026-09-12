@@ -58,6 +58,7 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 		return err
 	}
 	cfg.Browser = *browser
+	recordConfigInput(&cfg, configInputGeneric, configInputFlag, flagWasSet(fs, "browser"))
 	if err := validateRequestedCapabilities(cfg); err != nil {
 		return err
 	}

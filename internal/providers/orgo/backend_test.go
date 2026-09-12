@@ -9,11 +9,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 type fakeOrgoAPI struct {
@@ -1036,6 +1039,173 @@ func TestRunTypedTimingReportFailurePreservesFirstPublicCode(t *testing.T) {
 			_, claimPresent, claimErr := core.ReadLeaseClaimWithPresence(result.LeaseID)
 			if claimErr != nil || claimPresent != (tc.cleanupErr != nil) {
 				t.Errorf("claim=%t err=%v", claimPresent, claimErr)
+			}
+		})
+	}
+}
+
+func TestOrgoConfigFlagAndFactoryContract(t *testing.T) {
+	for _, provider := range []string{"orgo", " ORGO-AI ", "aws"} {
+		cfg := Config{Provider: provider, Orgo: OrgoConfig{APIKey: "inert", APIBase: "https://configured.example.test", WorkspaceID: "prior", RAMGB: 4, CPUs: 1, DiskGB: 8, Resolution: "1280x720x24"}}
+		fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+		values := RegisterOrgoProviderFlags(fs, cfg)
+		count := 0
+		fs.VisitAll(func(*flag.Flag) { count++ })
+		if count != 6 || fs.Lookup("orgo-api-key") != nil {
+			t.Fatalf("flag count=%d", count)
+		}
+		original := cfg.Orgo
+		if err := ApplyOrgoProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Orgo != original {
+			t.Fatal("unvisited changed config")
+		}
+		if err := fs.Parse([]string{"--orgo-api-base=", "--orgo-workspace-id=workspace", "--orgo-ram=0", "--orgo-cpu=-2", "--orgo-disk=-3", "--orgo-resolution=  "}); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyOrgoProviderFlags(&cfg, fs, struct{}{}); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Orgo != original {
+			t.Fatal("wrong values type changed config")
+		}
+		if err := ApplyOrgoProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want := OrgoConfig{APIKey: "inert", WorkspaceID: "workspace", RAMGB: 0, CPUs: -2, DiskGB: -3, Resolution: "  "}
+		if cfg.Orgo != want {
+			t.Fatalf("flags=%#v want=%#v", cfg.Orgo, want)
+		}
+		t.Setenv("CRABBOX_ORGO_API_KEY", "")
+		t.Setenv("ORGO_API_KEY", "")
+		t.Setenv("CRABBOX_ORGO_API_BASE", "https://ambient.example.test")
+		t.Setenv("ORGO_API_BASE_URL", "https://vendor.example.test")
+		b := NewOrgoBackend(Provider{}.Spec(), cfg, Runtime{}).(*orgoBackend)
+		want.APIBase = "https://www.orgo.ai/api"
+		want.RAMGB = 4
+		want.CPUs = 1
+		want.DiskGB = 8
+		want.Resolution = "1280x720x24"
+		if b.cfg.Orgo != want || b.cfg.Provider != "orgo" || b.cfg.TargetOS != "linux" {
+			t.Fatalf("factory defaults=%#v", b.cfg.Orgo)
+		}
+		client, err := b.api()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if client.(*orgoHTTPClient).baseURL != "https://www.orgo.ai/api" {
+			t.Fatal("cleared flag reopened ambient base")
+		}
+	}
+}
+
+func TestOrgoConfigEffectiveDefaultsAndScope(t *testing.T) {
+	for _, raw := range []string{"", "  "} {
+		cfg := Config{Orgo: OrgoConfig{APIBase: raw, Resolution: raw, RAMGB: -2, CPUs: 0, DiskGB: -3}}
+		applyOrgoDefaults(&cfg)
+		want := OrgoConfig{APIBase: "https://www.orgo.ai/api", RAMGB: 4, CPUs: 1, DiskGB: 8, Resolution: "1280x720x24"}
+		if cfg.Orgo != want || cfg.Provider != "orgo" || cfg.TargetOS != "linux" {
+			t.Fatalf("defaults=%#v", cfg.Orgo)
+		}
+	}
+	cfg := Config{Provider: "other", TargetOS: "windows", Orgo: OrgoConfig{APIBase: " https://EXAMPLE.test/api/ ", Resolution: " 1920x1080 ", RAMGB: 2, CPUs: 3, DiskGB: 4, WorkspaceID: "workspace"}}
+	want := cfg.Orgo
+	applyOrgoDefaults(&cfg)
+	if cfg.Orgo != want || cfg.Provider != "orgo" || cfg.TargetOS != "windows" {
+		t.Fatal("positive/raw configured values changed")
+	}
+	if got := orgoClaimScope(cfg, " workspace "); got != "endpoint:https://example.test/api|workspace:workspace" {
+		t.Fatalf("scope=%q", got)
+	}
+	if got := orgoClaimScope(Config{}, " workspace "); got != "endpoint:https://www.orgo.ai/api|workspace:workspace" {
+		t.Fatalf("default scope=%q", got)
+	}
+}
+
+func TestOrgoConfigFactoryKeyNormalization(t *testing.T) {
+	for _, tc := range []struct{ name, primary, resolved, vendor, want string }{
+		{"configured", "", " inert-configured ", "inert-vendor", "inert-configured"},
+		{"primary", " inert-primary ", " inert-primary ", "inert-vendor", "inert-primary"},
+		{"vendor", "", "inert-vendor", " inert-vendor ", "inert-vendor"},
+		{"configured-blank", "", "  ", " inert-vendor ", "inert-vendor"},
+		{"primary-blank", "  ", "  ", " inert-vendor ", "inert-vendor"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CRABBOX_ORGO_API_KEY", tc.primary)
+			t.Setenv("ORGO_API_KEY", tc.vendor)
+			b := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: tc.resolved}}, Runtime{}).(*orgoBackend)
+			api, err := b.api()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if api.(*orgoHTTPClient).apiKey != tc.want {
+				t.Fatalf("normalization changed for %s", tc.name)
+			}
+		})
+	}
+}
+
+func TestOrgoConfigMachineFlagOrder(t *testing.T) {
+	for _, provider := range []string{"orgo", " ORGO-AI ", "aws"} {
+		for _, args := range [][]string{{"--class=large", "--type=machine"}, {"--type=machine"}} {
+			cfg := Config{Provider: provider}
+			fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+			fs.String("class", "", "")
+			fs.String("type", "", "")
+			RegisterOrgoProviderFlags(fs, cfg)
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			err := ApplyOrgoProviderFlags(&cfg, fs, struct{}{})
+			if provider == "aws" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				continue
+			}
+			want := "--type is not supported"
+			if len(args) == 2 {
+				want = "--class is not supported"
+			}
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("provider=%q err=%v want=%s", provider, err, want)
+			}
+		}
+	}
+}
+
+func TestOrgoConfigLoaderContract(t *testing.T) {
+	for _, primary := range []string{"", "inert-primary"} {
+		t.Run(primary, func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			t.Chdir(t.TempDir())
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte("provider: orgo\norgo:\n  apiKey: inert-configured\n  workspaceID: workspace-configured\n  ramGB: 6\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_CONFIG", path)
+			t.Setenv("CRABBOX_ORGO_API_KEY", primary)
+			t.Setenv("ORGO_API_KEY", "inert-vendor")
+			t.Setenv("CRABBOX_ORGO_WORKSPACE_ID", "workspace-env")
+			cfg, err := core.LoadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantKey := "inert-configured"
+			if primary != "" {
+				wantKey = primary
+			}
+			if cfg.Orgo.APIKey != wantKey || cfg.Orgo.WorkspaceID != "workspace-env" || cfg.Orgo.RAMGB != 6 || cfg.Orgo.APIBase != "https://www.orgo.ai/api" {
+				t.Fatal("public loader precedence/default contract changed")
+			}
+			backend := NewOrgoBackend(Provider{}.Spec(), cfg, Runtime{}).(*orgoBackend)
+			api, err := backend.api()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if api.(*orgoHTTPClient).apiKey != wantKey {
+				t.Fatal("loader/factory key mismatch")
 			}
 		})
 	}

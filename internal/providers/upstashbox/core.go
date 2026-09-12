@@ -1,7 +1,6 @@
 package upstashbox
 
 import (
-	"flag"
 	"io"
 	"time"
 
@@ -37,10 +36,6 @@ const (
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
 }
 
 func blank(value, fallback string) string {
@@ -85,11 +80,4 @@ func upstashBoxCleanupCommand(leaseID string) string {
 
 func inventoryDoctorResult(provider string, leases int) DoctorResult {
 	return core.InventoryDoctorResult(provider, leases)
-}
-
-func now(rt Runtime) time.Time {
-	if rt.Clock != nil {
-		return rt.Clock.Now()
-	}
-	return time.Now()
 }

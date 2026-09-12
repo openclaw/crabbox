@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -68,31 +69,31 @@ func TestCoordinatorRunEvents(t *testing.T) {
 	var eventBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/runs/"+admissionTestRunID:
 			if err := json.NewDecoder(r.Body).Decode(&createBody); err != nil {
 				t.Fatal(err)
 			}
-			_, _ = w.Write([]byte(`{"run":{"id":"run_123","leaseID":"","owner":"peter@example.com","org":"openclaw","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"label":"smoke","state":"running","phase":"starting","logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z"}}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_123/events":
+			_, _ = w.Write([]byte(`{"run":{"id":"run_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","leaseID":"","owner":"peter@example.com","org":"openclaw","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"label":"smoke","state":"running","phase":"starting","logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/events":
 			if err := json.NewDecoder(r.Body).Decode(&eventBody); err != nil {
 				t.Fatal(err)
 			}
-			_, _ = w.Write([]byte(`{"event":{"runID":"run_123","seq":2,"type":"sync.started","phase":"sync","createdAt":"2026-05-02T00:00:01Z"}}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/run_123/events":
+			_, _ = w.Write([]byte(`{"event":{"runID":"run_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","seq":2,"type":"sync.started","phase":"sync","createdAt":"2026-05-02T00:00:01Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/run_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/events":
 			if got := r.URL.Query().Get("after"); got != "4" {
 				t.Fatalf("after query=%q", got)
 			}
 			if got := r.URL.Query().Get("limit"); got != "25" {
 				t.Fatalf("limit query=%q", got)
 			}
-			_, _ = w.Write([]byte(`{"events":[{"runID":"run_123","seq":1,"type":"run.started","phase":"starting","createdAt":"2026-05-02T00:00:00Z"}]}`))
+			_, _ = w.Write([]byte(`{"events":[{"runID":"run_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","seq":1,"type":"run.started","phase":"starting","createdAt":"2026-05-02T00:00:00Z"}]}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
 	}))
 	defer server.Close()
 	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
-	run, err := client.CreateRun(context.Background(), "", Config{
+	run, err := client.CreateRun(context.Background(), admissionTestRunID, "", Config{
 		Provider:   "aws",
 		Class:      "standard",
 		ServerType: "t3.small",
@@ -100,7 +101,7 @@ func TestCoordinatorRunEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.ID != "run_123" || run.Phase != "starting" {
+	if run.ID != "run_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" || run.Phase != "starting" {
 		t.Fatalf("run=%#v", run)
 	}
 	if got, ok := createBody["leaseID"].(string); !ok || got != "" {
@@ -293,7 +294,7 @@ func TestCurlConfigKeepsBearerTokenInConfig(t *testing.T) {
 	}
 }
 
-func TestCoordinatorHTTPRejectsCrossOriginRedirect(t *testing.T) {
+func TestCoordinatorRejectsCrossOriginRedirect(t *testing.T) {
 	var redirected atomic.Int32
 	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		redirected.Add(1)
@@ -327,6 +328,13 @@ func TestCoordinatorHTTPRejectsCrossOriginRedirect(t *testing.T) {
 	}
 	if got := redirected.Load(); got != 0 {
 		t.Fatalf("redirect target received %d requests", got)
+	}
+	_, err = dialCoordinatorControl(t.Context(), &client)
+	if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
+		t.Fatalf("control error=%v, want cross-origin redirect rejection", err)
+	}
+	if got := redirected.Load(); got != 0 {
+		t.Fatalf("control redirect target received %d requests", got)
 	}
 }
 
@@ -1401,17 +1409,38 @@ func TestCoordinatorLeaseWatchCancelsWhenLeaseReleased(t *testing.T) {
 	}
 }
 
-func TestCoordinatorCurlFallbackSkipsNonIdempotentAndTimeouts(t *testing.T) {
-	transportErr := &url.Error{Op: "Get", URL: "https://broker.example.test/v1/leases", Err: io.ErrUnexpectedEOF}
-	if !shouldUseCoordinatorCurlFallback(http.MethodGet, false, transportErr) {
-		t.Fatal("GET transport error should use curl fallback")
-	}
-	if shouldUseCoordinatorCurlFallback(http.MethodPost, true, transportErr) {
-		t.Fatal("POST with body should not use curl fallback")
-	}
-	timeoutErr := &url.Error{Op: "Get", URL: "https://broker.example.test/v1/leases", Err: context.DeadlineExceeded}
-	if shouldUseCoordinatorCurlFallback(http.MethodGet, false, timeoutErr) {
-		t.Fatal("deadline exceeded should not use curl fallback")
+func TestCoordinatorCurlFallbackEligibility(t *testing.T) {
+	dialErr := &net.OpError{Op: "dial", Net: "tcp", Err: context.DeadlineExceeded}
+	for _, test := range []struct {
+		name      string
+		err       error
+		wrapped   bool
+		fallback  bool
+		transport bool
+	}{
+		{"unexpected EOF", io.ErrUnexpectedEOF, true, true, true},
+		{"dial deadline", dialErr, true, true, false},
+		{"unwrapped dial deadline", dialErr, false, false, false},
+		{"request deadline", context.DeadlineExceeded, true, false, false},
+		{"read deadline", &net.OpError{Op: "read", Net: "tcp", Err: context.DeadlineExceeded}, true, false, false},
+		{"cancellation", context.Canceled, true, false, false},
+		{"dial cancellation", &net.OpError{Op: "dial", Net: "tcp", Err: context.Canceled}, true, false, false},
+		{"no error", nil, false, false, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.err
+			if test.wrapped {
+				err = &url.Error{Op: "Get", URL: "https://broker.example.test/v1/leases", Err: err}
+			}
+			for _, method := range []string{http.MethodGet, http.MethodHead} {
+				if got := shouldUseCoordinatorCurlFallback(t.Context(), method, false, err); got != test.fallback {
+					t.Errorf("%s fallback=%t, want %t", method, got, test.fallback)
+				}
+			}
+			if got := isCoordinatorTransportError(err); got != test.transport {
+				t.Errorf("shared transport classification=%t, want unchanged %t", got, test.transport)
+			}
+		})
 	}
 }
 

@@ -23,26 +23,31 @@ import (
 )
 
 type daytonaLifecycleFixture struct {
-	mu                sync.Mutex
-	server            *httptest.Server
-	sandbox           *api.Sandbox
-	classSnapshot     *api.SnapshotDto
-	responseTarget    string
-	rejectCreate      bool
-	responseMismatch  string
-	create            api.CreateSandbox
-	createState       api.SandboxState
-	createErrorStatus int
-	createCanceled    chan struct{}
-	sandboxCreates    int
-	recoveryDelay     int
-	recoveryReads     int
-	deletes           int
-	activity          int
-	autoStop          string
-	autoStopError     bool
-	deleteError       bool
-	paths             []string
+	mu                    sync.Mutex
+	server                *httptest.Server
+	sandbox               *api.Sandbox
+	classSnapshot         *api.SnapshotDto
+	responseTarget        string
+	rejectCreate          bool
+	responseMismatch      string
+	create                api.CreateSandbox
+	createState           api.SandboxState
+	createErrorStatus     int
+	createCanceled        chan struct{}
+	sandboxCreates        int
+	recoveryDelay         int
+	recoveryReads         int
+	deletes               int
+	activity              int
+	autoStop              string
+	autoStopError         bool
+	deleteError           bool
+	deleteErrorAfterApply bool
+	paths                 []string
+	identityOrganization  string
+	hideIdentitySandbox   bool
+	deletionPending       bool
+	currentKeyIdentity    func(map[string]any)
 }
 
 func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *daytonaLeaseBackend, Repo) {
@@ -54,7 +59,36 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 		defer f.mu.Unlock()
 		f.paths = append(f.paths, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
+		// The released API rejects duplicate organization headers. Check every
+		// request, including successful snapshot and sandbox reads.
+		if values := r.Header.Values("X-Daytona-Organization-Id"); len(values) > 1 {
+			t.Errorf("%s %s sent the organization header %d times", r.Method, r.URL.Path, len(values))
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"message":"Invalid authentication context"}`)
+			return
+		}
+
 		switch {
+		case r.Method == "GET" && r.URL.Path == "/api-keys/current":
+			identity := map[string]any{
+				"name": "fixture", "value": "masked", "createdAt": "2026-01-01T00:00:00Z",
+				"permissions": []string{}, "lastUsedAt": nil, "expiresAt": nil, "userId": "fixture-user",
+				"organizationId": f.identityOrganization,
+			}
+			if f.currentKeyIdentity != nil {
+				f.currentKeyIdentity(identity)
+			}
+			_ = json.NewEncoder(w).Encode(identity)
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/organizations/"):
+			if r.Header.Get("Authorization") != "Bearer synthetic-jwt" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			if r.URL.Path != "/organizations/"+f.identityOrganization {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(api.Organization{Id: f.identityOrganization, Name: "fixture"})
 		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/snapshots/"):
 			if f.classSnapshot == nil {
 				w.WriteHeader(http.StatusNotFound)
@@ -65,12 +99,37 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 				t.Errorf("unexpected snapshot selection %q", selected)
 			}
 			_ = json.NewEncoder(w).Encode(f.classSnapshot)
-		case r.Method == "GET" && r.URL.Path == "/sandbox":
+		case r.Method == "GET" && r.URL.Path == "/sandbox/paginated":
+			if r.URL.Query().Get("labels") != "" || r.URL.Query().Get("states") != "" || r.URL.Query().Get("id") == "" ||
+				r.URL.Query().Get("includeErroredDeleted") != "true" || r.URL.Query().Get("page") != "1" || r.URL.Query().Get("limit") != "100" {
+				t.Errorf("unexpected database deletion query: %s", r.URL.RawQuery)
+			}
 			items := []*api.Sandbox{}
 			if f.sandbox != nil && f.sandbox.GetState() != api.SANDBOXSTATE_DESTROYED {
 				items = append(items, f.sandbox)
 			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "total": len(items), "page": 1, "totalPages": len(items)})
+		case r.Method == "GET" && r.URL.Path == "/sandbox":
+			if r.URL.Query().Get("id") != "" || r.URL.Query().Get("includeErroredDeleted") == "true" {
+				t.Error("fixed deletion used the search index")
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			items := []*api.Sandbox{}
+			if r.URL.Query().Get("states") == "destroyed" {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"message":"states must not contain destroyed"}`)
+				return
+			}
+			if r.URL.Query().Get("limit") == "1" && r.URL.Query().Get("id") == "" && f.identityOrganization != "" && !f.hideIdentitySandbox {
+				items = append(items, &api.Sandbox{Id: "identity-sandbox", OrganizationId: f.identityOrganization, Labels: map[string]string{}})
+			} else if f.sandbox != nil && f.sandbox.GetState() != api.SANDBOXSTATE_DESTROYED &&
+				(r.URL.Query().Get("includeErroredDeleted") == "true" || !hiddenDaytonaDeletion(f.sandbox)) {
+				items = append(items, f.sandbox)
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "nextCursor": nil})
+		case r.Method == "GET" && r.URL.Path == "/sandbox/identity-sandbox":
+			_ = json.NewEncoder(w).Encode(&api.Sandbox{Id: "identity-sandbox", OrganizationId: f.identityOrganization, Labels: map[string]string{}})
 		case r.Method == "POST" && r.URL.Path == "/sandbox":
 			if err := json.NewDecoder(r.Body).Decode(&f.create); err != nil {
 				t.Error(err)
@@ -84,6 +143,8 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 			f.sandbox = &api.Sandbox{}
 			f.sandbox.SetId("sandbox-test")
 			f.sandbox.SetName(f.create.GetName())
+			f.sandbox.SetOrganizationId(f.identityOrganization)
+			f.sandbox.SetUser(f.create.GetUser())
 			f.sandbox.SetLabels(f.create.GetLabels())
 			f.sandbox.SetState(f.createState)
 			f.sandbox.SetToolboxProxyUrl(f.server.URL + "/toolbox")
@@ -121,6 +182,11 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 			}
 			_ = json.NewEncoder(w).Encode(f.sandbox)
 		case r.Method == "GET" && r.URL.Path == "/sandbox/sandbox-test":
+			if f.identityOrganization != "" && hiddenDaytonaDeletion(f.sandbox) {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = io.WriteString(w, `{"message":"resource access could not be established"}`)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(f.sandbox)
 		case r.Method == "GET" && f.rejectCreate && r.URL.Path == "/sandbox/"+f.create.GetName():
 			f.recoveryReads++
@@ -133,6 +199,9 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 				return
 			}
 			_ = json.NewEncoder(w).Encode(f.sandbox)
+		case r.Method == "GET" && f.sandbox != nil && r.URL.Path == "/sandbox/"+f.create.GetName():
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"message":"original name is no longer visible"}`)
 		case r.Method == "DELETE" && r.URL.Path == "/sandbox/sandbox-test":
 			f.deletes++
 			if f.deleteError {
@@ -140,8 +209,22 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 				_, _ = io.WriteString(w, `{"message":"temporary cleanup failure"}`)
 				return
 			}
-			f.sandbox.SetState(api.SANDBOXSTATE_DESTROYED)
-			_ = json.NewEncoder(w).Encode(f.sandbox)
+			if f.identityOrganization == "" {
+				f.sandbox.SetState(api.SANDBOXSTATE_DESTROYED)
+			} else {
+				f.sandbox.SetDesiredState(api.SANDBOXDESIREDSTATE_DESTROYED)
+				f.sandbox.SetName("DESTROYED_" + f.sandbox.GetName() + "_fixture")
+			}
+			acknowledgment := *f.sandbox
+			if !f.deletionPending {
+				f.sandbox.SetState(api.SANDBOXSTATE_DESTROYED)
+			}
+			if f.deleteErrorAfterApply {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = io.WriteString(w, `{"message":"deletion response unavailable"}`)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(&acknowledgment)
 		case strings.HasSuffix(r.URL.Path, "/labels"):
 			var body api.SandboxLabels
 			_ = json.NewDecoder(r.Body).Decode(&body)
@@ -756,6 +839,39 @@ func TestDaytonaHTTPRedirectPolicy(t *testing.T) {
 			}
 			if surface != "upload" && (err == nil || !strings.Contains(err.Error(), "cross-origin")) {
 				t.Fatalf("redirect error=%v", err)
+			}
+		})
+	}
+}
+
+func hiddenDaytonaDeletion(sandbox *api.Sandbox) bool {
+	return sandbox.GetState() == api.SANDBOXSTATE_DESTROYED ||
+		(sandbox.GetDesiredState() == api.SANDBOXDESIREDSTATE_DESTROYED &&
+			(sandbox.GetState() == api.SANDBOXSTATE_ERROR || sandbox.GetState() == api.SANDBOXSTATE_BUILD_FAILED))
+}
+
+func TestDaytonaClientSendsOrganizationHeaderOnce(t *testing.T) {
+	for _, apiKey := range []bool{false, true} {
+		t.Run(fmt.Sprintf("api-key=%t", apiKey), func(t *testing.T) {
+			f, b, _ := newDaytonaLifecycleFixture(t)
+			f.identityOrganization = "org-test"
+			b.cfg.Daytona.OrganizationID = "org-test"
+			if !apiKey {
+				b.cfg.Daytona.APIKey = ""
+				b.cfg.Daytona.JWTToken = "synthetic-jwt"
+			}
+			client, err := newDaytonaClient(b.cfg, b.rt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.ListCrabboxSandboxes(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.GetSandbox(t.Context(), "identity-sandbox"); err != nil {
+				t.Fatal(err)
+			}
+			if _, organization, err := fixedDaytonaContext(t.Context(), client); err != nil || organization != "org-test" {
+				t.Fatalf("organization identity failed: %q %v", organization, err)
 			}
 		})
 	}

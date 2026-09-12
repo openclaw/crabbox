@@ -1,7 +1,6 @@
 package nomad
 
 import (
-	"flag"
 	"io"
 	"time"
 
@@ -37,10 +36,6 @@ const networkPublic = core.NetworkPublic
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
 }
 
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {

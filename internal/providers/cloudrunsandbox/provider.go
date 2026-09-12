@@ -37,6 +37,10 @@ func (Provider) ServerTypeForClass(string) string       { return "" }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication: core.ProviderAuthentication{
+			{Route: "gateway", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationSharedSecret, core.ProviderAuthenticationIdentityToken}, Description: "The gateway uses a shared secret; a private IAM-protected gateway additionally uses an identity token."},
+			{Route: "embedded-launcher", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationLocalContext}, Description: "The mounted CLI runs in an already provisioned sandbox-launcher service context."},
+		},
 		SyncGuardrailFullCandidate: true,
 		Name:                       providerName,
 		Family:                     providerFamily,

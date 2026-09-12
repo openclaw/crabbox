@@ -19,9 +19,10 @@ func (Provider) Aliases() []string { return []string{"srt"} }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:   providerName,
-		Family: providerFamily,
-		Kind:   core.ProviderKindDelegatedRun,
+		Authentication: core.DirectProviderAuthentication(core.ProviderAuthenticationLocalContext),
+		Name:           providerName,
+		Family:         providerFamily,
+		Kind:           core.ProviderKindDelegatedRun,
 		Targets: []core.TargetSpec{
 			{OS: core.TargetLinux},
 			{OS: core.TargetMacOS},

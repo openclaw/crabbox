@@ -83,9 +83,10 @@ func (a App) jobRun(ctx context.Context, args []string) (err error) {
 		}
 		return nil
 	}
+	a.synthesizedFlagInputs = true
 	if createdLease {
 		var out bytes.Buffer
-		warmupApp := App{Stdout: io.MultiWriter(a.Stdout, &out), Stderr: a.Stderr}
+		warmupApp := App{Stdout: io.MultiWriter(a.Stdout, &out), Stderr: a.Stderr, synthesizedFlagInputs: true}
 		if err := warmupApp.warmup(ctx, append(jobLeaseCreateArgs(cfg, job), "--keep=true")); err != nil {
 			return err
 		}
@@ -126,6 +127,7 @@ func (a App) jobRun(ctx context.Context, args []string) (err error) {
 }
 
 func validateJobRunOptions(cfg Config, job JobConfig, leaseID string) error {
+	markSynthesizedFlagInputs(&cfg, true)
 	if !job.NoSync {
 		return nil
 	}

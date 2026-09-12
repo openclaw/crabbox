@@ -30,7 +30,6 @@ type timingReport = core.TimingReport
 const (
 	providerName   = "anthropic-sandbox-runtime"
 	providerFamily = "anthropic-sandbox-runtime"
-	defaultCLIPath = "srt"
 )
 
 func exit(code int, format string, args ...any) core.ExitError {

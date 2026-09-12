@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -13,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/prefixbuffer"
 )
 
 type Provider interface {
@@ -92,6 +93,14 @@ type ProviderClaimScoper interface {
 // locks or publish local claims; core validates and publishes the result once.
 type RunLeaseClaimResolver interface {
 	ResolveRunLeaseUnderClaim(context.Context, ResolveRequest, LeaseClaim) (LeaseTarget, error)
+}
+
+// ExecLeaseClaimResolver admits only lease kinds whose release paths honor the
+// same claim fence as exec. Core holds a shared fence through execution; the
+// resolver must reject incompatible claims before native effects and must not
+// reenter or publish claims while preparing fresh access.
+type ExecLeaseClaimResolver interface {
+	ResolveExecLeaseUnderClaim(context.Context, ResolveRequest, LeaseClaim) (LeaseTarget, error)
 }
 
 // ProviderDiagnosticSecretSource contributes runtime-only credentials to the
@@ -272,6 +281,7 @@ type SSHLeaseBackend interface {
 
 // SSHRunActivityBackend keeps provider-owned idle activity alive after lease
 // admission, including setup and sync. Stop must cancel and join its work.
+// Calls may hold a shared claim fence and must not reenter or mutate claims.
 type SSHRunActivityBackend interface {
 	BeginSSHRunActivity(context.Context, LeaseTarget) (stop func(), err error)
 }
@@ -655,6 +665,7 @@ type CheckpointLeaseIDBackend interface {
 }
 
 type ProviderSpec struct {
+	Authentication   ProviderAuthentication
 	Name             string
 	Family           string
 	Kind             ProviderKind
@@ -716,8 +727,13 @@ const (
 	// FeatureSSHScriptRun routes explicit scripts through the core SSH owner,
 	// while a hybrid backend may delegate ordinary commands.
 	FeatureSSHScriptRun Feature = "ssh-script-run"
-	FeaturePauseResume  Feature = "pause-resume"
-	FeatureMCP          Feature = "mcp-attachments"
+	// FeatureClaimExec requires ExecLeaseClaimResolver, private POSIX SSH execution,
+	// and provider-owned idle activity that does not require exclusive claim writes.
+	FeatureClaimExec Feature = "claim-exec"
+	// FeatureFixedCurrentRepoStop requires RepositoryScopedStopBackend for fixed IDs.
+	FeatureFixedCurrentRepoStop Feature = "fixed-current-repo-stop"
+	FeaturePauseResume          Feature = "pause-resume"
+	FeatureMCP                  Feature = "mcp-attachments"
 )
 
 const FeaturePreparedArtifactWorkspace Feature = "prepared-artifact-workspace"
@@ -770,6 +786,11 @@ type LocalCommandRequest struct {
 	// child cannot block forever after the capture buffer fills.
 	MaxCapturedOutputBytes int
 	CancelGracePeriod      time.Duration
+	// RequireProcessGroupJoin keeps this call active until its owned standalone
+	// process group closes, including after cancellation or cleanup grace expiry.
+	RequireProcessGroupJoin bool
+	// OnCleanupPending reports grace expiry once while the command still joins.
+	OnCleanupPending func(error) `json:"-"`
 }
 
 type LocalCommandResult struct {
@@ -865,7 +886,7 @@ func TrackLocalCommandCancellation(ctx context.Context, cmd *exec.Cmd) func(erro
 	}
 }
 
-func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (result LocalCommandResult, err error) {
 	if req.CaptureOutputToFiles && (req.DisableOutputCapture || req.MaxCapturedOutputBytes <= 0 || req.Stdout != nil || req.Stderr != nil) {
 		return LocalCommandResult{ExitCode: 1}, errors.New("file output capture requires a positive limit and no streaming writers")
 	}
@@ -889,6 +910,13 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 	if req.MaxCapturedOutputBytes > 0 && !req.DisableOutputCapture {
 		configureBoundedCommandCancellation(cmd)
 	}
+	var group *localCommandGroupOwner
+	if req.RequireProcessGroupJoin {
+		group, err = configureJoinedLocalCommand(ctx, cmd, req.CancelGracePeriod, req.OnCleanupPending)
+		if err != nil {
+			return LocalCommandResult{ExitCode: 1}, err
+		}
+	}
 	stopCommand := cmd.Cancel
 	withCancellationCause := TrackLocalCommandCancellation(ctx, cmd)
 	env := req.Env
@@ -900,8 +928,8 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 	cmd.Env = stripControllerAcquireIdentityEnv(env)
 	cmd.Dir = req.Dir
 	cmd.Stdin = req.Stdin
-	stdout := commandCaptureBuffer{limit: req.MaxCapturedOutputBytes, cancel: cancel}
-	stderr := commandCaptureBuffer{limit: req.MaxCapturedOutputBytes, cancel: cancel}
+	stdout := newCommandCaptureBuffer(req.MaxCapturedOutputBytes, cancel)
+	stderr := newCommandCaptureBuffer(req.MaxCapturedOutputBytes, cancel)
 	cmd.Stdout = commandOutputWriter(req.Stdout, &stdout, req.DisableOutputCapture)
 	cmd.Stderr = commandOutputWriter(req.Stderr, &stderr, req.DisableOutputCapture)
 	var files *commandFileCapture
@@ -914,12 +942,27 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 		defer files.close()
 		cmd.Stdout, cmd.Stderr = files.streams[0].writer, files.streams[1].writer
 	}
-	err := cmd.Start()
+	var observedFileOverflow bool
+	err = cmd.Start()
 	if err == nil {
 		var finishCapture func() commandFileCaptureOutcome
 		if files != nil {
 			files.closeWriters()
 			finishCapture = files.watch(cancel, stopCommand, cmd.WaitDelay)
+		}
+		if group != nil {
+			// This owner is the sole reaper. Retain the leader's PID until
+			// every group signal and join is complete, including cancellation.
+			groupErr := group.beforeWait()
+			defer func() {
+				if groupErr != nil && !errors.Is(err, groupErr) {
+					err = errors.Join(err, groupErr)
+					if result.ExitCode == 0 {
+						result.ExitCode = 1
+					}
+				}
+			}()
+			close(group.waitReady)
 		}
 		err = withCancellationCause(cmd.Wait())
 		if finishCapture != nil {
@@ -933,8 +976,8 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 				err = errors.Join(err, readErr)
 				return LocalCommandResult{ExitCode: exitCode(err)}, err
 			}
-			stdout.overflow = stdout.overflow || observed.overflow
-			if stdout.overflow || stderr.overflow || err != nil {
+			observedFileOverflow = observed.overflow
+			if stdout.buffer.Exceeded() || stderr.buffer.Exceeded() || observedFileOverflow || err != nil {
 				_ = stopCommand()
 			}
 		}
@@ -942,8 +985,8 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 	if errors.Is(err, exec.ErrWaitDelay) && req.MaxCapturedOutputBytes > 0 && !req.DisableOutputCapture {
 		_ = stopCommand()
 	}
-	result := LocalCommandResult{ExitCode: exitCode(err), Stdout: stdout.String(), Stderr: stderr.String()}
-	if stdout.overflow || stderr.overflow {
+	result = LocalCommandResult{ExitCode: exitCode(err), Stdout: stdout.String(), Stderr: stderr.String()}
+	if stdout.buffer.Exceeded() || stderr.buffer.Exceeded() || observedFileOverflow {
 		err = fmt.Errorf("captured command output exceeded %d-byte limit", req.MaxCapturedOutputBytes)
 		result.ExitCode = 5
 	}
@@ -984,31 +1027,24 @@ func configureBoundedCommandCancellation(cmd *exec.Cmd) {
 }
 
 type commandCaptureBuffer struct {
-	buffer   bytes.Buffer
-	limit    int
-	overflow bool
-	cancel   context.CancelFunc
+	buffer prefixbuffer.Buffer
+	cancel context.CancelFunc
+}
+
+func newCommandCaptureBuffer(limit int, cancel context.CancelFunc) commandCaptureBuffer {
+	buffer := prefixbuffer.NewUnlimited()
+	if limit > 0 {
+		buffer = prefixbuffer.NewLimited(limit)
+	}
+	return commandCaptureBuffer{buffer: buffer, cancel: cancel}
 }
 
 func (b *commandCaptureBuffer) Write(data []byte) (int, error) {
-	if b.limit <= 0 {
-		return b.buffer.Write(data)
-	}
-	original := len(data)
-	remaining := b.limit - b.buffer.Len()
-	if remaining > 0 {
-		if len(data) > remaining {
-			b.overflow = true
-			data = data[:remaining]
-		}
-		_, _ = b.buffer.Write(data)
-	} else if original > 0 {
-		b.overflow = true
-	}
-	if b.overflow && b.cancel != nil {
+	n, err := b.buffer.Write(data)
+	if b.buffer.Exceeded() && b.cancel != nil {
 		b.cancel()
 	}
-	return original, nil
+	return n, err
 }
 
 func (b *commandCaptureBuffer) String() string {
@@ -1046,7 +1082,10 @@ type AcquireRequest struct {
 	Reclaim               bool
 	RequestedLeaseID      string
 	RequestedCheckpointID string
-	RequestedSlug         string
+	// Native source identity remains available at the allocation owner, which can
+	// distinguish a fresh fork from replay of an already allocated resource.
+	CheckpointSource *NativeCheckpointForkRecord
+	RequestedSlug    string
 	// OnAcquired observes a fully validated raw provider identity before local
 	// routing, readiness, or claim side effects. Returning an error requires the
 	// provider adapter to roll back the acquired resource.
@@ -1257,6 +1296,13 @@ type StatusRequest struct {
 type StopRequest struct {
 	Options LeaseOptions
 	ID      string
+}
+
+// RepositoryScopedStopBackend validates the calling repository under its
+// existing exclusive release fence before native or connection cleanup. It
+// must reject unsupported claim kinds; validated terminal replay may be a no-op.
+type RepositoryScopedStopBackend interface {
+	StopForRepository(context.Context, StopRequest, string) error
 }
 
 type PauseRequest struct {

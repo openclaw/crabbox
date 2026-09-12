@@ -2,6 +2,25 @@
   "schema": "crabbox-bootstrap-fragments/v1",
   "fragments": [
     {
+      "name": "xfceSessionEnvironment",
+      "file": "xfceSessionEnvironment.sh",
+      "literal": true,
+      "parameters": {}
+    },
+    {
+      "name": "xfceDesktopTheme",
+      "file": "xfceDesktopTheme.sh",
+      "parameters": {
+        "cssStyle": "sh-string"
+      }
+    },
+    {
+      "name": "xfceDesktopSession",
+      "file": "xfceDesktopSession.sh",
+      "literal": true,
+      "parameters": {}
+    },
+    {
       "name": "gnomeDesktopTheme",
       "file": "gnomeDesktopTheme.sh",
       "literal": true,
@@ -10,6 +29,12 @@
     {
       "name": "linuxSSHRestart",
       "file": "linuxSSHRestart.sh",
+      "parameters": {}
+    },
+    {
+      "name": "linuxOptionalPackages",
+      "file": "linuxOptionalPackages.sh",
+      "literal": true,
       "parameters": {}
     },
     {
@@ -30,6 +55,11 @@
     {
       "name": "windowsRuntimeGate",
       "file": "windowsRuntimeGate.ps1",
+      "parameters": {}
+    },
+    {
+      "name": "windowsNodeInstall",
+      "file": "windowsNodeInstall.ps1",
       "parameters": {}
     },
     {
@@ -55,6 +85,16 @@
     {
       "name": "windowsDesktop",
       "file": "windowsDesktop.ps1",
+      "parameters": {}
+    },
+    {
+      "name": "macOSSSHSession",
+      "file": "macOSSSHSession.sh",
+      "parameters": {}
+    },
+    {
+      "name": "macOSNodeInstall",
+      "file": "macOSNodeInstall.sh",
       "parameters": {}
     },
     {

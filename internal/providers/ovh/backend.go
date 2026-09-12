@@ -169,7 +169,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
 	}
-	now := b.now()
+	now := core.ClockNow(b.RT.Clock).UTC()
 	labels := ovhLeaseLabels(cfg, leaseID, slug, req.Keep, now, "provisioning")
 	committed := false
 	recovery := ""
@@ -257,7 +257,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	if err := b.waitSSH(ctx, &ssh, "ovh bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
 		return core.LeaseTarget{}, err
 	}
-	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", b.now())
+	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", core.ClockNow(b.RT.Clock).UTC())
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, ssh, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -498,7 +498,7 @@ func (b *Backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 		delete(labels, "idle_timeout_secs")
 	}
 	tailscaleLabels := exactTailscaleLabels(labels)
-	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, b.now())
+	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, core.ClockNow(b.RT.Clock).UTC())
 	for key, value := range tailscaleLabels {
 		labels[key] = value
 	}
@@ -566,7 +566,7 @@ func (b *Backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	if err != nil {
 		return fmt.Errorf("list ovh cleanup claims: %w", err)
 	}
-	now := b.now()
+	now := core.ClockNow(b.RT.Clock).UTC()
 	for _, claim := range claims {
 		if claim.Provider != providerName || claim.Slug == "" || !claimMatchesOVHProject(claim, b.Cfg.OVH.ProjectID) {
 			continue
@@ -711,7 +711,7 @@ func (b *Backend) resolveAcquireConfig(ctx context.Context) (core.Config, error)
 		return core.Config{}, core.Exit(2, "provider=ovh does not support --os %s; use --os ubuntu:24.04 or set ovh.image explicitly", cfg.OSImage)
 	}
 	if cfg.OVH.Image == "" {
-		cfg.OVH.Image = "Ubuntu 24.04"
+		cfg.OVH.Image = core.OVHConfigDefaultImage
 	}
 	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
 		cfg.OVH.Flavor = cfg.ServerType
@@ -880,7 +880,7 @@ func (b *Backend) recoveryStillPending(claim core.LeaseClaim) bool {
 	if grace <= 0 {
 		grace = ambiguousCreateRecoveryGrace
 	}
-	return b.now().Before(time.Unix(createdAt, 0).Add(grace))
+	return core.ClockNow(b.RT.Clock).UTC().Before(time.Unix(createdAt, 0).Add(grace))
 }
 
 func (b *Backend) reconcileCreatedInstance(ctx context.Context, client API, claim core.LeaseClaim) (Instance, bool, error) {
@@ -1012,9 +1012,9 @@ func claimOnlyServer(claim core.LeaseClaim) core.Server {
 }
 
 func (b *Backend) waitForInstanceIP(ctx context.Context, client API, projectID, instanceID string) (Instance, error) {
-	deadline := b.now().Add(5 * time.Minute)
+	deadline := core.ClockNow(b.RT.Clock).UTC().Add(5 * time.Minute)
 	if b.ipWaitTimeout > 0 {
-		deadline = b.now().Add(b.ipWaitTimeout)
+		deadline = core.ClockNow(b.RT.Clock).UTC().Add(b.ipWaitTimeout)
 	}
 	interval := 3 * time.Second
 	if b.ipWaitInterval > 0 {
@@ -1035,7 +1035,7 @@ func (b *Backend) waitForInstanceIP(ctx context.Context, client API, projectID, 
 			if fetchErr != nil && !isTransientOVHControlPlaneError(fetchErr) {
 				return false, fetchErr
 			}
-			if b.now().After(deadline) {
+			if core.ClockNow(b.RT.Clock).UTC().After(deadline) {
 				if fetchErr != nil {
 					return false, core.Exit(5, "timed out waiting for OVH instance IP after transient error: %v", fetchErr)
 				}
@@ -1047,13 +1047,6 @@ func (b *Backend) waitForInstanceIP(ctx context.Context, client API, projectID, 
 		return Instance{}, err
 	}
 	return result.Value, nil
-}
-
-func (b *Backend) now() time.Time {
-	if b.RT.Clock != nil {
-		return b.RT.Clock.Now().UTC()
-	}
-	return time.Now().UTC()
 }
 
 func ovhLeaseLabels(cfg core.Config, leaseID, slug string, keep bool, now time.Time, state string) map[string]string {

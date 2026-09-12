@@ -405,7 +405,7 @@ func (fn orgoRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error)
 func TestNewOrgoClientRejectsInsecureNonLoopbackAPIBase(t *testing.T) {
 	t.Setenv("CRABBOX_ORGO_API_KEY", "test-key")
 	t.Setenv("CRABBOX_ORGO_API_BASE", "http://api.example.test")
-	if _, err := newOrgoClient(Config{}, Runtime{}); err == nil || !strings.Contains(err.Error(), "must use https") {
+	if _, err := newOrgoClient(Config{Orgo: OrgoConfig{APIBase: "http://api.example.test"}}, Runtime{}); err == nil || !strings.Contains(err.Error(), "must use https") {
 		t.Fatalf("err=%v, want HTTPS requirement", err)
 	}
 }
@@ -413,7 +413,8 @@ func TestNewOrgoClientRejectsInsecureNonLoopbackAPIBase(t *testing.T) {
 func TestNewOrgoClientUsesResolvedConfigBeforeAmbientAPIBase(t *testing.T) {
 	t.Setenv("CRABBOX_ORGO_API_KEY", "test-key")
 	t.Setenv("CRABBOX_ORGO_API_BASE", "https://ambient.example.test")
-	client, err := newOrgoClient(Config{Orgo: OrgoConfig{APIBase: "https://flag-selected.example.test"}}, Runtime{})
+	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIBase: "https://flag-selected.example.test"}}, Runtime{}).(*orgoBackend)
+	client, err := backend.api()
 	if err != nil {
 		t.Fatal(err)
 	}

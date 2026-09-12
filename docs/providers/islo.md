@@ -167,8 +167,11 @@ Post-admission Tailscale errors retain their actual causes while preserving the
 existing public codes and messages, including fallback `1` for opaque validation
 errors. A status code alone does not create a context-cancellation cause.
 
-Observed SSE command exits keep their exact codes. Exec transport/cancellation
-failures return `1` with their known failure origin and reachable context cause.
+Observed SSE command exits keep their exact codes when stream decoding and output
+delivery complete successfully. A stream read, decode, or stdout/stderr delivery
+failure returns `1` even after an exit event was observed. Transport and cancellation
+failures also return `1` with their known failure origin and reachable cause.
+Closing the stream does not establish that the remote process stopped.
 Setup/helper failures preserve their public code without being mislabeled as
 user-command exits. Required-artifact and download failures after command success
 are provider errors: required-artifact failures keep `7`, and local download-write

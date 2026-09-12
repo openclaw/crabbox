@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -255,7 +256,7 @@ func TestAcquireCreatesLinodeClaimsLeaseAndMarksReady(t *testing.T) {
 		t.Fatalf("createRequests=%#v", api.createRequests)
 	}
 	req := api.createRequests[0]
-	if req.Label != core.LeaseProviderName(lease.LeaseID, "my-app") || req.Region != defaultRegion || req.Type != defaultType || req.Image != defaultImage {
+	if req.Label != core.LeaseProviderName(lease.LeaseID, "my-app") || req.Region != "us-ord" || req.Type != defaultType || req.Image != "linode/ubuntu24.04" {
 		t.Fatalf("request=%#v", req)
 	}
 	if len(req.AuthorizedKeys) != 1 || !strings.HasPrefix(req.AuthorizedKeys[0], "ssh-ed25519 ") {
@@ -1536,5 +1537,60 @@ func TestRollbackCleanupClaimResolvesWithSnapshotAndReleases(t *testing.T) {
 	}
 	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stored key retained after rollback cleanup: %v", err)
+	}
+}
+
+func TestLinodeConfigShowCompletePassiveSection(t *testing.T) {
+	projector, ok := any(Provider{}).(core.ProviderConfigShowProjector)
+	if !ok {
+		t.Fatal("actual provider has no passive config-show projector")
+	}
+	for _, tc := range []struct {
+		name  string
+		input core.LinodeConfig
+		want  map[string]any
+		text  string
+	}{
+		{name: "nil", input: core.LinodeConfig{}, want: map[string]any{"region": "", "image": "", "type": "", "firewall": "", "sshCIDRs": []string(nil)}, text: "linode region= image= type= firewall=- ssh_cidrs=-\n"},
+		{name: "empty", input: core.LinodeConfig{SSHCIDRs: []string{}}, want: map[string]any{"region": "", "image": "", "type": "", "firewall": "", "sshCIDRs": []string{}}, text: "linode region= image= type= firewall=- ssh_cidrs=-\n"},
+		{name: "raw-references-list", input: core.LinodeConfig{Region: "raw-region", Image: "image reference", Type: "raw-type", FirewallID: "firewall reference", SSHCIDRs: []string{"second", "first", "second", " "}}, want: map[string]any{"region": "raw-region", "image": "image reference", "type": "raw-type", "firewall": "firewall reference", "sshCIDRs": []string{"second", "first", "second", " "}}, text: "linode region=raw-region image=image reference type=raw-type firewall=firewall reference ssh_cidrs=second,first,second, \n"},
+		{name: "whitespace-empty-elements", input: core.LinodeConfig{Region: " ", Image: " ", Type: " ", FirewallID: " ", SSHCIDRs: []string{"", ""}}, want: map[string]any{"region": " ", "image": " ", "type": " ", "firewall": " ", "sshCIDRs": []string{"", ""}}, text: "linode region=  image=  type=  firewall=  ssh_cidrs=,\n"},
+	} {
+		for _, selected := range []string{"linode", "static"} {
+			t.Run(tc.name+"/"+selected, func(t *testing.T) {
+				cfg := core.Config{Provider: selected, Linode: tc.input}
+				before := cfg.Linode
+				before.SSHCIDRs = slices.Clone(cfg.Linode.SSHCIDRs)
+				section := projector.ConfigShowSection(cfg)
+				if section.JSONKey != "linode" || section.TextLabel != "linode" || !reflect.DeepEqual(section.Providers, []string{"linode"}) {
+					t.Fatalf("section metadata=%#v", section)
+				}
+				wantOrder := []string{"region", "image", "type", "firewall", "sshCIDRs"}
+				if len(section.Fields) != len(wantOrder) {
+					t.Fatalf("field count=%d want %d", len(section.Fields), len(wantOrder))
+				}
+				got := map[string]any{}
+				line := section.TextLabel
+				for i, field := range section.Fields {
+					if field.JSONName != wantOrder[i] {
+						t.Fatalf("field %d name=%q want %q", i, field.JSONName, wantOrder[i])
+					}
+					got[field.JSONName] = field.JSONValue
+					if field.TextName != "" {
+						line += " " + field.TextName + "=" + field.TextValue
+					}
+				}
+				line += "\n"
+				if !reflect.DeepEqual(got, tc.want) {
+					t.Fatalf("public fields=%#v want %#v", got, tc.want)
+				}
+				if line != tc.text {
+					t.Fatalf("text=%q want %q", line, tc.text)
+				}
+				if !reflect.DeepEqual(cfg.Linode, before) {
+					t.Fatal("projection mutated supplied configuration")
+				}
+			})
+		}
 	}
 }

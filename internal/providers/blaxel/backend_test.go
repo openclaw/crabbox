@@ -51,9 +51,86 @@ type lifecycleFakeClient struct {
 	onExec         func(context.Context, ExecuteProcessRequest) (Process, error)
 }
 
+func TestBlaxelConfiguredDefaultPredicates(t *testing.T) {
+	for _, raw := range []string{"", "  ", " https://example.invalid/api/ "} {
+		cfg := Config{Blaxel: BlaxelConfig{APIKey: "inert", APIURL: raw}}
+		api, err := newBlaxelClient(cfg, Runtime{HTTP: &http.Client{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "https://api.blaxel.ai"
+		if strings.TrimSpace(raw) != "" {
+			want = "https://example.invalid/api"
+		}
+		if api.(*restClient).base != want {
+			t.Fatal("client trim-before-default changed")
+		}
+		err = validateBlaxelConfig(cfg)
+		if (err != nil) != (raw == "  ") {
+			t.Fatalf("validation blank-before-trim=%v", err)
+		}
+	}
+	for _, seconds := range []int{-1, 0, 17} {
+		b := backend{cfg: Config{Blaxel: BlaxelConfig{ExecTimeoutSecs: seconds}}}
+		want := 600
+		if seconds > 0 {
+			want = seconds
+		}
+		if b.execTimeoutSecs() != want {
+			t.Fatal("exec timeout fallback changed")
+		}
+	}
+	for _, raw := range []string{"", "  ", " /workspace/app/ "} {
+		cfg := Config{Blaxel: BlaxelConfig{Workdir: raw}}
+		got, err := blaxelWorkdir(cfg)
+		if raw == "  " {
+			if err == nil {
+				t.Fatal("whitespace workdir unexpectedly defaulted")
+			}
+			continue
+		}
+		want := "/workspace/crabbox"
+		if raw != "" {
+			want = "/workspace/app"
+		}
+		if err != nil || got != want {
+			t.Fatalf("workdir=%q error=%v", got, err)
+		}
+	}
+}
+
+func TestBlaxelCreatePreservesRawDefaultPredicates(t *testing.T) {
+	for _, raw := range []string{"", "  ", "custom"} {
+		t.Run(fmt.Sprintf("raw=%q", raw), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cfg := core.BaseConfig()
+			cfg.Blaxel.Image = raw
+			cfg.Blaxel.Workdir = raw
+			if raw == "custom" {
+				cfg.Blaxel.Workdir = "/workspace/custom"
+			}
+			fake := newLifecycleFakeClient()
+			b := &backend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+			if _, _, _, err := b.createSandbox(context.Background(), fake, Repo{Name: "example", Root: t.TempDir()}, false, ""); err != nil {
+				t.Fatal(err)
+			}
+			image, dir := raw, raw
+			if raw == "custom" {
+				dir = "/workspace/custom"
+			}
+			if raw == "" {
+				image, dir = "ubuntu:24.04", "/workspace/crabbox"
+			}
+			if len(fake.createReqs) != 1 || fake.createReqs[0].Image != image || fake.createReqs[0].WorkingDir != dir {
+				t.Fatal("create raw-empty defaults changed")
+			}
+		})
+	}
+}
+
 func newLifecycleFakeClient() *lifecycleFakeClient {
 	return &lifecycleFakeClient{
-		baseURL:       defaultAPIURL,
+		baseURL:       "https://api.blaxel.ai",
 		sandboxes:     map[string]Sandbox{},
 		nextSandboxID: "sbx_1",
 		logs:          ProcessLogs{Stdout: "ok\n", Stderr: "warn\n"},

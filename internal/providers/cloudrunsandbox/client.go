@@ -213,11 +213,7 @@ func (t *remoteTransport) authorize(req *http.Request) {
 func (t *remoteTransport) request(ctx context.Context, path string, body map[string]any) (json.RawMessage, error) {
 	ctx, cancel := contextWithDefaultTimeout(ctx, defaultExecTimeout)
 	defer cancel()
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.baseURL+path, bytes.NewReader(payload))
+	req, err := shared.NewCompactJSONRequest(ctx, http.MethodPost, t.baseURL+path, body)
 	if err != nil {
 		return nil, err
 	}
@@ -382,11 +378,7 @@ func (t *remoteTransport) Exec(ctx context.Context, sandboxID, command string, o
 	}
 	ctx, cancel := contextWithDefaultTimeout(ctx, defaultExecTimeout)
 	defer cancel()
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return 1, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.baseURL+"/v1/sandbox/exec", bytes.NewReader(payload))
+	req, err := shared.NewCompactJSONRequest(ctx, http.MethodPost, t.baseURL+"/v1/sandbox/exec", body)
 	if err != nil {
 		return 1, err
 	}
@@ -520,7 +512,7 @@ type directTransport struct {
 func (t *directTransport) Mode() string { return "direct" }
 
 func (t *directTransport) binary() string {
-	return blank(strings.TrimSpace(t.cfg.CloudRunSandbox.CLIPath), defaultCLIPath)
+	return blank(strings.TrimSpace(t.cfg.CloudRunSandbox.CLIPath), core.CloudRunSandboxConfigDefaultCLIPath)
 }
 
 func (t *directTransport) baseArgs() []string { return nil }
