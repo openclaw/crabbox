@@ -1058,7 +1058,10 @@ Nonsecret plan/attempt histories and exact completed Azure deletion claims are
 retained alongside lease history without automatic pruning. Do not remove
 retained or unresolved histories to clear a cleanup incident. The shared Azure
 scope lock is released after settled terminal/retained completion; an unresolved
-shared-infrastructure write intentionally keeps its lock pending resolution.
+shared-infrastructure write retains its lock. A retained legacy fence is resolved
+automatically on the next lease once the resource group, location's vnet, and NSG
+read back as absent or in a settled provisioning state (`Succeeded`, `Failed`, or
+`Canceled`). A durable provisioning operation's fence is never taken over.
 
 ### AWS provisioning timing logs
 

@@ -10,10 +10,188 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
+
+func TestCanonicalInputCoverageBoundary(t *testing.T) {
+	clearConfigEnv(t)
+	path := isolatedConfigPath(t)
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, owner := range canonicalConfigInputOwners {
+		if got := providerConfigurationFor(cfg, owner); got.State != "defaults_only" || !got.ProviderInput.Complete || !got.GenericInput.Complete {
+			t.Fatalf("canonical owner %s: %#v", owner, got)
+		}
+	}
+	if got := providerConfigurationFor(cfg, "future-untracked-provider"); got.State != "unknown" || got.ProviderInput.Complete {
+		t.Fatal("unlisted provider was certified from registration/defaults alone")
+	}
+	if got := providerConfigurationFor(baseConfig(), "machine0"); got.State != "unknown" {
+		t.Fatal("base defaults acquired a complete input history")
+	}
+	partial := baseConfig()
+	if err := applyFileConfig(&partial, fileConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := providerConfigurationFor(partial, "machine0"); got.State != "unknown" {
+		t.Fatal("one partial overlay certified the entire history")
+	}
+	original := cfg
+	markSynthesizedFlagInputs(&cfg, true)
+	completeCanonicalConfigInputs(&cfg)
+	if providerConfigurationFor(cfg, "machine0").State != "unknown" || providerConfigurationFor(original, "machine0").State != "defaults_only" {
+		t.Fatal("derived qualification lost copy isolation or reacquired completeness")
+	}
+	if err := os.WriteFile(path, []byte("provider: nonexistent-provider-for-input-test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := loadConfig()
+	if err == nil || failed.inputProvenance != nil {
+		t.Fatal("failed canonical load retained a completeness certificate")
+	}
+}
+
+func TestProviderConfigurationStatusStates(t *testing.T) {
+	const owner configInputOwner = "machine0"
+	complete := configInputLedger(nil).withCoverage(owner, true).withCoverage(configInputGeneric, true)
+	for _, tc := range []struct {
+		name, want string
+		ledger     configInputLedger
+	}{
+		{"untracked", "unknown", nil},
+		{"provider incomplete", "unknown", configInputLedger(nil).withCoverage(configInputGeneric, true)},
+		{"generic incomplete", "unknown", configInputLedger(nil).withCoverage(owner, true)},
+		{"defaults", "defaults_only", complete},
+		{"generic only", "generic_inputs_present", complete.withInput(configInputGeneric, configInputRepo, configInputValue)},
+		{"direct", "explicit", complete.withInput(owner, configInputUser, configInputValue)},
+		{"intent only", "explicit", complete.withInput(owner, configInputEnvironment, configInputIntent)},
+		{"known partial input", "explicit", configInputLedger(nil).withInput(owner, configInputFlag, configInputValue)},
+		{"unknown provider with generic input", "unknown", configInputLedger(nil).withInput(configInputGeneric, configInputUser, configInputValue)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{inputProvenance: tc.ledger}
+			got := providerConfigurationFor(cfg, owner)
+			if got.State != tc.want {
+				t.Fatalf("state=%s, want %s", got.State, tc.want)
+			}
+			cfg.Machine0.CLIPath = "not-installed"
+			cfg.Machine0.Image = "different-from-default"
+			if !reflect.DeepEqual(got, providerConfigurationFor(cfg, owner)) {
+				t.Fatal("values or executable names were used to infer source state")
+			}
+			if got.ProviderInput.Sources == nil || got.GenericInput.Sources == nil {
+				t.Fatal("source arrays must not be JSON null")
+			}
+		})
+	}
+}
+
+func TestProviderStatusSelectionAndOfflineContract(t *testing.T) {
+	view := providerConfigStatus(Config{})
+	if view.SchemaVersion != 1 || view.Kind != "offline" || len(view.Providers) != len(RegisteredProviderNames()) {
+		t.Fatal("incorrect offline registry projection")
+	}
+	for name, entry := range view.Providers {
+		if !entry.Supported || entry.Selection.Selected || entry.Selection.Source != nil || entry.Configuration.State != "unknown" || entry.Authentication.Status != "unchecked" || entry.Readiness != "unchecked" {
+			t.Fatalf("untracked provider %s acquired a false status: %#v", name, entry)
+		}
+	}
+	for _, provider := range registeredProviders() {
+		for _, alias := range append([]string{provider.Name()}, provider.Aliases()...) {
+			cfg := Config{Provider: alias, providerSelectionSource: providerSelectionFlag}
+			selected := providerConfigStatus(cfg)
+			for name, entry := range selected.Providers {
+				want := name == provider.Name()
+				if entry.Selection.Selected != want || (entry.Selection.Source != nil) != want {
+					t.Fatalf("alias %s selection incorrectly attributed to %s", alias, name)
+				}
+				if want && *entry.Selection.Source != providerSelectionFlag {
+					t.Fatal("selection source changed")
+				}
+			}
+		}
+	}
+	data, err := json.Marshal(view)
+	if err != nil || !bytes.Contains(data, []byte(`"source":null`)) {
+		t.Fatal("unselected source must be explicit JSON null")
+	}
+	var text bytes.Buffer
+	writeProviderConfigStatus(&text, view)
+	if !strings.Contains(text.String(), "inspection=offline") || !strings.Contains(text.String(), "auth_status=unchecked readiness=unchecked") || strings.Contains(text.String(), "configuration=defaults_only") {
+		t.Fatal("text output claimed checked or complete configuration")
+	}
+}
+
+func TestLocalContainerOrdinaryFileRoundTrip(t *testing.T) {
+	for _, tc := range []struct {
+		name, input, wantYAML string
+		present, enabled      bool
+	}{
+		{"omitted", "{}", "localContainer: {}\n", false, true},
+		{"null", "{dockerSocket: null, noHostname: null}", "localContainer: {}\n", false, true},
+		{"false", "{dockerSocket: false, noHostname: false}", "localContainer:\n    dockerSocket: false\n    noHostname: false\n", true, false},
+		{"true", "{dockerSocket: true, noHostname: true}", "localContainer:\n    dockerSocket: true\n    noHostname: true\n", true, true},
+		{"zero values", "{runtime: '', image: '', user: '', workRoot: '', cpus: 0, memory: '', network: ''}", "localContainer: {}\n", false, true},
+		{"nine values", "{runtime: custom, image: example:tag, user: runner, workRoot: '~/literal', cpus: 3, memory: 4g, network: custom, dockerSocket: false, noHostname: false}", "localContainer:\n    runtime: custom\n    image: example:tag\n    user: runner\n    workRoot: ~/literal\n    cpus: 3\n    memory: 4g\n    network: custom\n    dockerSocket: false\n    noHostname: false\n", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := isolatedConfigPath(t)
+			if err := os.WriteFile(path, []byte("localContainer: "+tc.input+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			file, err := readFileConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if file.LocalContainer == nil || (file.LocalContainer.DockerSocket != nil) != tc.present || (file.LocalContainer.NoHostname != nil) != tc.present {
+				t.Fatal("reader lost pointer boolean presence")
+			}
+			cfg := baseConfig()
+			cfg.Provider = "unselected-config-test"
+			cfg.LocalContainer.DockerSocket, cfg.LocalContainer.NoHostname = !tc.enabled, !tc.enabled
+			if !tc.present {
+				cfg.LocalContainer.DockerSocket, cfg.LocalContainer.NoHostname = true, true
+			}
+			if err := applyFileConfig(&cfg, file); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.LocalContainer.DockerSocket != tc.enabled || cfg.LocalContainer.NoHostname != tc.enabled {
+				t.Fatal("file boolean layering changed")
+			}
+			written, err := writeUserFileConfig(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if written != path {
+				t.Fatalf("write path=%q, want %q", written, path)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != tc.wantYAML {
+				t.Fatalf("written YAML=%q, want %q", data, tc.wantYAML)
+			}
+			again, err := readFileConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(again, file) {
+				t.Fatal("file values changed on round trip")
+			}
+		})
+	}
+}
 
 type configArchitectureTestProvider struct {
 	architectureCapabilityTestProvider
@@ -387,6 +565,43 @@ func TestConfigShowIncludesCubeSandboxWithoutSecret(t *testing.T) {
 	}
 }
 
+func TestConfigShowIncludesPhalaConfig(t *testing.T) {
+	for _, state := range []string{"default", "true", "false"} {
+		t.Run(state, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Phala = PhalaConfig{CLIPath: "/opt/phala", InstanceType: "tdx.small", WorkRoot: "/work/phala", NodeID: "example-node", Compose: "/tmp/example.yaml"}
+			var wantAttest any
+			if state != "default" {
+				value := state == "true"
+				cfg.Phala.Attest = &value
+				wantAttest = value
+			}
+			before := cfg.Phala
+			encoded, err := json.Marshal(configShowView(cfg))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var view map[string]any
+			if err := json.Unmarshal(encoded, &view); err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]any{"cli": "/opt/phala", "instanceType": "tdx.small", "workRoot": "/work/phala", "nodeId": "example-node", "compose": "/tmp/example.yaml", "attest": wantAttest}
+			if !reflect.DeepEqual(view["phala"], want) {
+				t.Fatalf("phala view = %#v, want %#v", view["phala"], want)
+			}
+			var text bytes.Buffer
+			writeConfigShowText(&text, cfg)
+			wantLine := "phala cli=/opt/phala instance_type=tdx.small work_root=/work/phala node_id=example-node compose=/tmp/example.yaml attest=" + state + "\n"
+			if !strings.Contains(text.String(), wantLine) {
+				t.Fatalf("missing Phala settings line %q", wantLine)
+			}
+			if cfg.Phala != before {
+				t.Fatal("config inspection changed Phala configuration")
+			}
+		})
+	}
+}
+
 func TestConfigShowIncludesFirecrackerConfig(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "firecracker"
@@ -441,6 +656,303 @@ func TestConfigShowIncludesFirecrackerConfig(t *testing.T) {
 		if !strings.Contains(text.String(), want) {
 			t.Fatalf("config show missing %q: %q", want, text.String())
 		}
+	}
+}
+
+func TestAppleVMOrdinaryFileRoundTrip(t *testing.T) {
+	full := "  helperPath: ' ~/helper '\n  image: ' ~/image '\n  imageSHA256: ' checksum '\n  user: ' user '\n  workRoot: ' ~/work '\n  cpus: 0\n  memoryMiB: -2\n  diskGiB: 0\n"
+	zeros := "  cpus: 0\n  memoryMiB: 0\n  diskGiB: 0\n"
+	for _, tc := range []struct {
+		name, document, serialized string
+	}{
+		{"current-all-fields", "appleVM:\n" + full, "appleVM:\n" + full},
+		{"legacy-retained", "appleVZ:\n" + full, "appleVZ:\n" + full},
+		{"both-retained", "appleVM:\n" + full + "appleVZ:\n" + zeros, "appleVM:\n" + full + "appleVZ:\n" + zeros},
+		{"empty-current-retained", "appleVM: {}\nappleVZ:\n" + full, "appleVM: {}\nappleVZ:\n" + full},
+		{"null-current-omitted", "appleVM: null\nappleVZ:\n" + full, "appleVZ:\n" + full},
+		{"value-strings-omitted-zero-pointers-retained", "appleVM:\n  helperPath: ''\n  image: ''\n  imageSHA256: ''\n  user: ''\n  workRoot: ''\n" + zeros, "appleVM:\n" + zeros},
+		{"null-numeric-pointers-omitted", "appleVM:\n  cpus: null\n  memoryMiB: null\n  diskGiB: null\n", "appleVM: {}\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := isolatedConfigPath(t)
+			if err := os.WriteFile(path, []byte(tc.document), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			file, err := readFileConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var original fileConfig
+			if err := yaml.Unmarshal([]byte(tc.document), &original); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(file, original) {
+				t.Fatalf("read file=%+v, want %+v", file, original)
+			}
+			// Runtime alias selection must not normalize the persistent document.
+			cfg := Config{}
+			if err := applyFileConfig(&cfg, file); err != nil {
+				t.Fatal(err)
+			}
+			writtenPath, err := writeUserFileConfig(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if writtenPath != path {
+				t.Fatalf("writer path=%q, want %q", writtenPath, path)
+			}
+			if !reflect.DeepEqual(file, original) {
+				t.Fatal("apply/write mutated the input file config")
+			}
+			reread, err := readFileConfig(writtenPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(reread, original) {
+				t.Fatalf("round-trip file=%+v, want %+v", reread, original)
+			}
+			data, err := os.ReadFile(writtenPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var gotMap, wantMap map[string]any
+			if err := yaml.Unmarshal(data, &gotMap); err != nil {
+				t.Fatal(err)
+			}
+			if err := yaml.Unmarshal([]byte(tc.serialized), &wantMap); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(gotMap, wantMap) {
+				t.Fatalf("serialized config=%s, want semantic YAML %s", data, tc.serialized)
+			}
+			if strings.Contains(tc.serialized, "appleVM:") && strings.Contains(tc.serialized, "appleVZ:") && strings.Index(string(data), "appleVM:") > strings.Index(string(data), "appleVZ:") {
+				t.Fatal("current section should precede legacy section")
+			}
+		})
+	}
+}
+
+func TestSealosConfigWriter(t *testing.T) {
+	for _, value := range []string{"null", "{}", "{kubectl: '', kubeconfig: '', context: '', namespace: '', image: '', templateID: '', cpu: '', memory: '', storageLimit: '', network: '', sshGatewayHost: '', sshGatewayPort: '', sshUser: '', workRoot: '', nodeHost: '', deleteOnRelease: false}"} {
+		path := isolatedConfigPath(t)
+		if err := os.WriteFile(path, []byte("sealosDevbox: "+value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writeUserFileConfig(file); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := yaml.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]any{}
+		if value != "null" {
+			want["sealosDevbox"] = map[string]any{}
+		}
+		if strings.Contains(value, "false") {
+			want["sealosDevbox"] = map[string]any{"deleteOnRelease": false}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("writer=%#v want %#v", got, want)
+		}
+	}
+}
+
+func TestKubeVirtConfigWriter(t *testing.T) {
+	for _, input := range []string{"null", "{}", "{kubectl: '', virtctl: '', kubeconfig: '', context: '', namespace: '', template: '', sshUser: '', sshKey: '', sshPublicKey: '', sshPort: '', workRoot: '', deleteOnRelease: false}", "{context: '  ', workRoot: '/workspace/~/guest', deleteOnRelease: true}"} {
+		path := isolatedConfigPath(t)
+		if err := os.WriteFile(path, []byte("kubevirt: "+input), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := yaml.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := baseConfig()
+		if err := applyFileConfig(&cfg, file); err != nil {
+			t.Fatal(err)
+		}
+		after, err := yaml.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Fatal("overlay mutated writer input")
+		}
+		if _, err := writeUserFileConfig(file); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := yaml.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]any{}
+		if input != "null" {
+			want["kubevirt"] = map[string]any{}
+		}
+		if strings.Contains(input, "false") {
+			want["kubevirt"] = map[string]any{"deleteOnRelease": false}
+		}
+		if strings.Contains(input, "true") {
+			want["kubevirt"] = map[string]any{"context": "  ", "workRoot": "/workspace/~/guest", "deleteOnRelease": true}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("writer=%#v want %#v", got, want)
+		}
+	}
+}
+
+func TestAppleContainerConfigWriterAndJSON(t *testing.T) {
+	if reflect.TypeOf(fileAppleContainerConfig{}).Name() != "fileAppleContainerConfig" {
+		t.Fatal("file decoder destination name changed")
+	}
+	for _, tc := range []struct{ input, want string }{{"null", "{}"}, {"{}", "appleContainer: {}"}, {"{cliPath: '', image: '', user: '', workRoot: '', cpus: 0, memory: '', extraRunArgs: []}", "appleContainer: {}"}, {"{cliPath: '~/literal', image: '  ', cpus: -2, extraRunArgs: [' a ', a, a]}", "appleContainer: {cliPath: '~/literal', image: '  ', cpus: -2, extraRunArgs: [' a ', a, a]}"}} {
+		path := isolatedConfigPath(t)
+		if err := os.WriteFile(path, []byte("appleContainer: "+tc.input), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := yaml.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := baseConfig()
+		if err := applyFileConfig(&cfg, file); err != nil {
+			t.Fatal(err)
+		}
+		after, err := yaml.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Fatal("overlay mutated writer input")
+		}
+		if _, err := writeUserFileConfig(file); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got, want map[string]any
+		if err := yaml.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		if err := yaml.Unmarshal([]byte(tc.want), &want); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("writer=%#v want %#v", got, want)
+		}
+	}
+	cfg := baseConfig()
+	cfg.AppleContainer = AppleContainerConfig{CLIPath: "tool", Image: "image-example", User: "user-example", WorkRoot: "/workspace/example", CPUs: 3, Memory: "6g"}
+	data, err := json.Marshal(cfg.AppleContainer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	wantJSON := map[string]any{"CLIPath": "tool", "Image": "image-example", "User": "user-example", "WorkRoot": "/workspace/example", "CPUs": float64(3), "Memory": "6g", "ExtraRunArgs": nil}
+	if !reflect.DeepEqual(got, wantJSON) {
+		t.Fatalf("runtime JSON=%#v", got)
+	}
+}
+
+func TestGeneratedFileStorageWriter(t *testing.T) {
+	for _, tc := range []struct{ name, input, want string }{
+		{"missing", "{}", "{}"},
+		{"null sections", "vultr: null\ntensorlake: null\ntencentcloud: null\nrunpod: null\nlinode: null", "{}"},
+		{"empty sections", "vultr: {}\ntensorlake: {}\ntencentcloud: {}\nrunpod: {}\nlinode: {}", "vultr: {}\ntensorlake: {}\ntencentcloud: {}\nrunpod: {}\nlinode: {}"},
+		{"null values", "vultr: {region: null, vpcIds: null}\ntensorlake: {cpus: null, memoryMB: null}\ntencentcloud: {rootGB: null}\nrunpod: {diskGB: null}\nlinode: {region: null, image: null, type: null, firewall: null, sshCIDRs: null}", "vultr: {}\ntensorlake: {}\ntencentcloud: {}\nrunpod: {}\nlinode: {}"},
+		{"historical zero omission", "vultr: {region: '', vpcIds: [], sshCIDRs: []}\ntensorlake: {cpus: 0, memoryMB: 0}\ntencentcloud: {rootGB: 0}\nrunpod: {diskGB: 0}\nlinode: {region: '', image: '', type: '', firewall: '', sshCIDRs: []}", "vultr: {}\ntensorlake: {}\ntencentcloud: {}\nrunpod: {}\nlinode: {}"},
+		{"raw nonzero storage", "vultr: {region: '  ', vpcIds: [' a ', a, a]}\ntensorlake: {cpus: -0.5, memoryMB: -2}\ntencentcloud: {rootGB: 4294967296}\nrunpod: {diskGB: -3}\nlinode: {region: '  ', image: image-example, type: type-example, firewall: firewall-example, sshCIDRs: [' 192.0.2.0/24 ', 192.0.2.0/24, 192.0.2.0/24]}", "vultr: {region: '  ', vpcIds: [' a ', a, a]}\ntensorlake: {cpus: -0.5, memoryMB: -2}\ntencentcloud: {rootGB: 4294967296}\nrunpod: {diskGB: -3}\nlinode: {region: '  ', image: image-example, type: type-example, firewall: firewall-example, sshCIDRs: [' 192.0.2.0/24 ', 192.0.2.0/24, 192.0.2.0/24]}"},
+		{"negative int64 retained", "tencentcloud: {rootGB: -4}", "tencentcloud: {rootGB: -4}"},
+		{"intentional presence and clear", "blaxel: {execTimeoutSecs: 0, forgetMissing: false}\nanthropicSandboxRuntime: {settings: '', debug: false}\nmodal: {secrets: []}", "blaxel: {execTimeoutSecs: 0, forgetMissing: false}\nanthropicSandboxRuntime: {settings: '', debug: false}\nmodal: {secrets: []}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := isolatedConfigPath(t)
+			if err := os.WriteFile(path, []byte(tc.input), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			file, err := readFileConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := writeUserFileConfig(file); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got, want map[string]any
+			if err := yaml.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			if err := yaml.Unmarshal([]byte(tc.want), &want); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("stored config = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+func TestGeneratedFileStorageSetBroker(t *testing.T) {
+	path := isolatedConfigPath(t)
+	if err := os.WriteFile(path, []byte("vultr: {region: '', vpcIds: []}\nlinode: {region: '', image: '', type: '', firewall: '', sshCIDRs: []}\nmodal: {secrets: []}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if err := app.configSetBroker([]string{"--url", "https://broker.example.invalid"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := yaml.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got["vultr"], map[string]any{}) {
+		t.Errorf("vultr storage = %#v, want empty mapping", got["vultr"])
+	}
+	if !reflect.DeepEqual(got["linode"], map[string]any{}) {
+		t.Errorf("linode storage = %#v, want empty mapping", got["linode"])
+	}
+	if !reflect.DeepEqual(got["modal"], map[string]any{"secrets": []any{}}) {
+		t.Errorf("modal clear lost: %#v", got["modal"])
+	}
+	file, err := readFileConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Broker == nil || file.Broker.URL != "https://broker.example.invalid" {
+		t.Fatalf("broker update missing")
 	}
 }
 
@@ -1090,9 +1602,27 @@ func TestConfigShowIncludesDigitalOceanProviderConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
 	var stdout bytes.Buffer
-	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
-	if err := app.configShow(nil); err != nil {
+	runShow := func(args []string) error {
+		cmd := exec.CommandContext(t.Context(), binary, append([]string{"config", "show"}, args...)...)
+		cmd.Dir = home
+		cmd.Env = []string{"HOME=" + home, "USERPROFILE=" + home, "APPDATA=" + home, "XDG_CONFIG_HOME=" + home, "XDG_STATE_HOME=" + home, "CRABBOX_CONFIG=" + configPath, "PATH=" + t.TempDir()}
+		var stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("config show: %w: %s", err, &stderr)
+		}
+		if stderr.Len() != 0 {
+			return fmt.Errorf("config show stderr: %s", &stderr)
+		}
+		return nil
+	}
+	if err := runShow(nil); err != nil {
 		t.Fatal(err)
 	}
 	text := stdout.String()
@@ -1104,7 +1634,7 @@ func TestConfigShowIncludesDigitalOceanProviderConfig(t *testing.T) {
 	}
 
 	stdout.Reset()
-	if err := app.configShow([]string{"--json"}); err != nil {
+	if err := runShow([]string{"--json"}); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
@@ -1139,9 +1669,27 @@ func TestConfigShowIncludesVultrProviderConfigWithoutSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
 	var stdout bytes.Buffer
-	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
-	if err := app.configShow(nil); err != nil {
+	runShow := func(args []string) error {
+		cmd := exec.CommandContext(t.Context(), binary, append([]string{"config", "show"}, args...)...)
+		cmd.Dir = home
+		cmd.Env = []string{"HOME=" + home, "USERPROFILE=" + home, "APPDATA=" + home, "XDG_CONFIG_HOME=" + home, "XDG_STATE_HOME=" + home, "CRABBOX_CONFIG=" + configPath, "PATH=" + t.TempDir(), "VULTR_API_KEY=" + os.Getenv("VULTR_API_KEY")}
+		var stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("config show: %w: %s", err, &stderr)
+		}
+		if stderr.Len() != 0 {
+			return fmt.Errorf("config show stderr: %s", &stderr)
+		}
+		return nil
+	}
+	if err := runShow(nil); err != nil {
 		t.Fatal(err)
 	}
 	text := stdout.String()
@@ -1156,7 +1704,7 @@ func TestConfigShowIncludesVultrProviderConfigWithoutSecret(t *testing.T) {
 	}
 
 	stdout.Reset()
-	if err := app.configShow([]string{"--json"}); err != nil {
+	if err := runShow([]string{"--json"}); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
@@ -1443,7 +1991,7 @@ func TestConfigShowIncludesNvidiaBrevWithoutSecretSurface(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := stdout.String()
-	want := "nvidia_brev cli=/usr/local/bin/brev org=example-org type=gpu gpu_name=L40S provider=aws mode=vm launchable=pytorch startup_script=setup.sh release_action=stop target=host user=ubuntu work_root=/work/brev auth=cli"
+	want := "nvidia_brev cli=/usr/local/bin/brev org=example-org type=gpu gpu_name=L40S provider=aws mode=vm launchable=pytorch startup_script=setup.sh release_action=stop target=host user=ubuntu work_root=/work/brev auth_mode=cli auth_status=unchecked readiness=unchecked"
 	if !strings.Contains(text, want) {
 		t.Fatalf("config show missing nvidia-brev summary: %q", text)
 	}
@@ -1626,7 +2174,7 @@ nebius:
 		t.Fatal(err)
 	}
 	text := stdout.String()
-	want := "nebius cli=/usr/local/bin/nebius profile=env-profile parent_id=project-123 subnet_id=subnet-123 platform=cpu-d3 preset=4vcpu-16gb image_family=ubuntu24.04-driverless disk_type=network_ssd disk_size_gib=50 user=crabbox public_ip=dynamic security_group_ids=sg-1,sg-2 service_account_id=sa-123 recovery_policy=fail auth=cli"
+	want := "nebius cli=/usr/local/bin/nebius profile=env-profile parent_id=project-123 subnet_id=subnet-123 platform=cpu-d3 preset=4vcpu-16gb image_family=ubuntu24.04-driverless disk_type=network_ssd disk_size_gib=50 user=crabbox public_ip=dynamic security_group_ids=sg-1,sg-2 service_account_id=sa-123 recovery_policy=fail auth_mode=cli auth_status=unchecked readiness=unchecked"
 	if !strings.Contains(text, want) {
 		t.Fatalf("config show missing nebius summary: %q", text)
 	}
@@ -1723,6 +2271,197 @@ func TestConfigShowAppliesHostingerPerUserWorkRootDefault(t *testing.T) {
 		got.SSHUser != "ubuntu" ||
 		got.Hostinger.WorkRoot != "/home/ubuntu/crabbox" {
 		t.Fatalf("unexpected effective Hostinger config: %#v", got)
+	}
+}
+
+func TestConfigShowSSHDefaults(t *testing.T) {
+	clearConfigEnv(t)
+	type sshValues struct{ user, port string }
+	for _, tc := range []struct {
+		name, provider     string
+		source             providerSelectionSource
+		user, port         string
+		marked             *sshValues
+		fallback           []string
+		fallbackExplicit   bool
+		wantUser, wantPort string
+		wantFallback       []string
+	}{
+		{
+			name: "digitalocean/empty", provider: "digitalocean",
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "digitalocean/base compiled default", provider: "digitalocean", source: providerSelectionCompiledDefault,
+			user: "crabbox", port: "2222", fallback: []string{"22", "2201"}, fallbackExplicit: true,
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "linode/empty", provider: "linode", fallback: []string{},
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "linode/base compiled default", provider: "linode", source: providerSelectionCompiledDefault,
+			user: "crabbox", port: "2222", fallback: []string{"22", "2201"},
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "vultr/empty", provider: "vultr", fallback: []string{"22", "2201"},
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "vultr/base compiled default", provider: "vultr", source: providerSelectionCompiledDefault,
+			user: "crabbox", port: "2222", fallback: []string{}, fallbackExplicit: true,
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "lambda/empty with fallback backing data", provider: "lambda",
+			fallback: []string{"2201", "2202"}[:0], fallbackExplicit: true,
+			wantUser: "ubuntu", wantPort: "22",
+		},
+		{
+			name: "lambda/base compiled default", provider: "lambda", source: providerSelectionCompiledDefault,
+			user: "crabbox", port: "2222", fallback: []string{"22", "2201"}, fallbackExplicit: true,
+			wantUser: "ubuntu", wantPort: "22",
+		},
+		{
+			name: "scaleway/empty with explicit nil fallback", provider: "scaleway", fallbackExplicit: true,
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "scaleway/base compiled default", provider: "scaleway", source: providerSelectionCompiledDefault,
+			user: "crabbox", port: "2222", fallback: []string{"22", "2201"},
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "tencentcloud/empty", provider: "tencentcloud", fallback: []string{"22", "2201"},
+			wantUser: "ubuntu", wantPort: "22",
+		},
+		{
+			name: "tencentcloud/base compiled default", provider: "tencentcloud", source: providerSelectionCompiledDefault,
+			user: "crabbox", port: "2222", fallback: []string{},
+			wantUser: "ubuntu", wantPort: "22",
+		},
+		{
+			name: "digitalocean/custom user with base port", provider: "digitalocean",
+			user: "operator", port: "2222", fallback: []string{"2201"},
+			wantUser: "operator", wantPort: "22",
+		},
+		{
+			name: "linode/base user with custom port", provider: "linode",
+			user: "crabbox", port: "2200", wantUser: "root", wantPort: "2200",
+		},
+		{
+			name: "lambda/padded base values", provider: "lambda",
+			user: " crabbox ", port: " 2222 ", fallback: []string{"2201"},
+			wantUser: " crabbox ", wantPort: " 2222 ",
+		},
+		{
+			name: "vultr/whitespace values", provider: "vultr",
+			user: " \t", port: " ", wantUser: " \t", wantPort: " ",
+		},
+		{
+			name: "scaleway/user marker only", provider: "scaleway",
+			user: "crabbox", port: "2222", marked: &sshValues{user: "crabbox"},
+			wantUser: "crabbox", wantPort: "22",
+		},
+		{
+			name: "tencentcloud/port marker only", provider: "tencentcloud",
+			user: "crabbox", port: "2222", marked: &sshValues{port: "2222"},
+			wantUser: "ubuntu", wantPort: "2222",
+		},
+		{
+			name: "linode/both marked then base values", provider: "linode",
+			user: "crabbox", port: "2222", marked: &sshValues{user: "saved-user", port: "2200"},
+			fallback: []string{"22", "2201"}, fallbackExplicit: true,
+			wantUser: "crabbox", wantPort: "2222",
+		},
+		{
+			name: "vultr/both marked then cleared", provider: "vultr",
+			marked: &sshValues{user: "saved-user", port: "2200"}, fallback: []string{"2201"},
+			wantUser: "", wantPort: "",
+		},
+		{
+			name: "lambda/both marked then changed", provider: "lambda",
+			user: "current-user", port: "2202", marked: &sshValues{user: "saved-user", port: "2200"},
+			fallback: []string{"2203"}, fallbackExplicit: true,
+			wantUser: "current-user", wantPort: "2202",
+		},
+		{
+			name: "digitalocean/empty snapshots are not explicit", provider: "digitalocean",
+			user: "crabbox", port: "2222", marked: &sshValues{},
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "tencentcloud/whitespace snapshots are explicit", provider: "tencentcloud",
+			marked:   &sshValues{user: " ", port: "\t"},
+			wantUser: "", wantPort: "",
+		},
+		{
+			name: "scaleway/actionable selection", provider: "scaleway", source: providerSelectionFlag,
+			fallback: []string{"2201"}, wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "outside cohort/hetzner", provider: "hetzner",
+			fallback: []string{"22", "2201"}, wantFallback: []string{"22", "2201"},
+			wantUser: "", wantPort: "",
+		},
+		{
+			name: "outside cohort/padded provider", provider: " digitalocean ",
+			user: "crabbox", port: "2222", fallback: []string{"2201"},
+			wantUser: "crabbox", wantPort: "2222", wantFallback: []string{"2201"},
+		},
+		{
+			name: "outside cohort/alias", provider: "do",
+			fallback: []string{}, wantFallback: []string{},
+			wantUser: "", wantPort: "",
+		},
+		{
+			name: "outside cohort/case variant", provider: "Lambda",
+			user: "crabbox", port: "2222", fallback: []string{"2201"},
+			wantUser: "crabbox", wantPort: "2222", wantFallback: []string{"2201"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{
+				Provider: tc.provider, providerSelectionSource: tc.source,
+				TargetOS: "windows", WindowsMode: "wsl", Class: "beast", WorkRoot: "/srv/config-show",
+				SSHFallbackPorts: tc.fallback, sshFallbackPortsExplicit: tc.fallbackExplicit,
+			}
+			// Keep the unrelated work-root preprojections stable for the full-config comparison.
+			cfg.Hostinger.WorkRoot = "/srv/hostinger"
+			cfg.Vast.WorkRoot = "/srv/vast"
+			cfg.NvidiaBrev.WorkRoot = "/srv/brev"
+			MarkWorkRootExplicit(&cfg)
+			if tc.marked != nil {
+				cfg.SSHUser, cfg.SSHPort = tc.marked.user, tc.marked.port
+				MarkSSHUserExplicit(&cfg)
+				MarkSSHPortExplicit(&cfg)
+			}
+			cfg.SSHUser, cfg.SSHPort = tc.user, tc.port
+			if tc.fallbackExplicit {
+				cfg.explicitSSHFallbackPorts = []string{"2205", "2206"}
+			}
+			before := cfg
+			before.SSHFallbackPorts = slices.Clone(cfg.SSHFallbackPorts)
+			before.explicitSSHFallbackPorts = slices.Clone(cfg.explicitSSHFallbackPorts)
+			fallbackBacking := cfg.SSHFallbackPorts[:cap(cfg.SSHFallbackPorts)]
+			beforeBacking := slices.Clone(fallbackBacking)
+			want := before
+			want.SSHUser, want.SSHPort, want.SSHFallbackPorts = tc.wantUser, tc.wantPort, tc.wantFallback
+
+			got := effectiveConfigForShow(cfg)
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("display config differs from expected SSH-only projection: user=%q port=%q fallbacks=%#v; want user=%q port=%q fallbacks=%#v",
+					got.SSHUser, got.SSHPort, got.SSHFallbackPorts, tc.wantUser, tc.wantPort, tc.wantFallback)
+			}
+			if !reflect.DeepEqual(cfg, before) {
+				t.Error("display projection changed the input config or marker snapshots")
+			}
+			if !reflect.DeepEqual(fallbackBacking, beforeBacking) {
+				t.Errorf("display projection changed fallback backing data: got %#v, want %#v", fallbackBacking, beforeBacking)
+			}
+		})
 	}
 }
 
@@ -2391,8 +3130,12 @@ func TestRoutingSafeURLRedactsUserinfoOnMalformedURL(t *testing.T) {
 }
 
 func TestConfigShowIncludesDockerSandboxConfig(t *testing.T) {
-	configPath := isolatedConfigPath(t)
-	t.Setenv("CRABBOX_PROVIDER", "")
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
 	if err := os.WriteFile(configPath, []byte(`provider: docker-sandbox
 dockerSandbox:
   cliPath: /opt/sbx
@@ -2405,13 +3148,29 @@ dockerSandbox:
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES", "/tmp/extra")
-	t.Setenv("CRABBOX_DOCKER_SANDBOX_MCP", "context7,all")
-	t.Setenv("CRABBOX_DOCKER_SANDBOX_KIT", "example-org/base")
-
 	var stdout bytes.Buffer
-	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
-	if err := app.configShow(nil); err != nil {
+	runShow := func(args []string) error {
+		cmd := exec.CommandContext(t.Context(), binary, append([]string{"config", "show"}, args...)...)
+		cmd.Dir = home
+		cmd.Env = []string{
+			"HOME=" + home, "USERPROFILE=" + home, "APPDATA=" + home,
+			"XDG_CONFIG_HOME=" + home, "XDG_STATE_HOME=" + home,
+			"CRABBOX_CONFIG=" + configPath, "PATH=" + t.TempDir(),
+			"CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES=/tmp/extra",
+			"CRABBOX_DOCKER_SANDBOX_MCP=context7,all",
+			"CRABBOX_DOCKER_SANDBOX_KIT=example-org/base",
+		}
+		var stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("config show: %w: %s", err, &stderr)
+		}
+		if stderr.Len() != 0 {
+			return fmt.Errorf("config show stderr: %s", &stderr)
+		}
+		return nil
+	}
+	if err := runShow(nil); err != nil {
 		t.Fatal(err)
 	}
 	text := stdout.String()
@@ -2428,7 +3187,7 @@ dockerSandbox:
 	}
 
 	stdout.Reset()
-	if err := app.configShow([]string{"--json"}); err != nil {
+	if err := runShow([]string{"--json"}); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
@@ -2699,17 +3458,11 @@ func TestConfigShowLocalContainerSettingsOffline(t *testing.T) {
 	}
 }
 
-func TestConfigShowLocalContainerExcludesInternalFields(t *testing.T) {
+func TestConfigShowCoordinatorEndpointAndTokenStatus(t *testing.T) {
 	cfg := baseConfig()
-	cfg.LocalContainer.Volumes = []string{"/synthetic-private-volume:/mnt/data"}
-	cfg.LocalContainer.CheckpointMetadata = map[string]string{"fork_name": "synthetic-private-checkpoint"}
 	cfg.CoordToken = "synthetic-private-token"
 	cfg.Coordinator = "https://broker.example.test/api"
 	view := configShowView(cfg)
-	local, ok := view["localContainer"].(map[string]any)
-	if !ok || len(local) != 8 {
-		t.Fatalf("public localContainer fields=%#v", local)
-	}
 	data, err := json.Marshal(view)
 	if err != nil {
 		t.Fatal(err)
@@ -2717,11 +3470,86 @@ func TestConfigShowLocalContainerExcludesInternalFields(t *testing.T) {
 	var text bytes.Buffer
 	writeConfigShowText(&text, cfg)
 	for name, output := range map[string]string{"json": string(data), "text": text.String()} {
-		if strings.Contains(output, "synthetic-private") || strings.Contains(strings.ToLower(output), "checkpointmetadata") {
+		if strings.Contains(output, "synthetic-private") {
 			t.Errorf("%s exposed internal fields or credentials", name)
 		}
 		if !strings.Contains(output, "broker.example.test/api") || !strings.Contains(output, "configured") {
 			t.Errorf("%s lost safe endpoint or token status", name)
 		}
+	}
+}
+
+func TestLambdaBindingFileRoundTrip(t *testing.T) {
+	path := isolatedConfigPath(t)
+	for _, tc := range []struct {
+		input, want string
+		nilLambda   bool
+	}{{"{}\n", "{}\n", true}, {"lambda: null\n", "{}\n", true}, {"lambda: {}\n", "lambda: {}\n", false}, {"lambda: {sshCIDRs: [], filesystemNames: [], filesystemMounts: []}\n", "lambda: {}\n", false}, {"lambda:\n  region: west\n  type: gpu\n  image: image\n  imageFamily: family\n  firewallRuleset: rule\n  sshCIDRs: [cidr]\n  filesystemNames: [data]\n  filesystemMounts:\n    - name: data\n      mountPath: /mnt/data\n    - {}\n", "lambda:\n    region: west\n    type: gpu\n    image: image\n    imageFamily: family\n    firewallRuleset: rule\n    sshCIDRs:\n        - cidr\n    filesystemNames:\n        - data\n    filesystemMounts:\n        - name: data\n          mountPath: /mnt/data\n        - {}\n", false}} {
+		if err := os.WriteFile(path, []byte(tc.input), 0600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (file.Lambda == nil) != tc.nilLambda {
+			t.Fatalf("decoded lambda=%#v", file.Lambda)
+		}
+		if tc.input == "lambda: {}\n" && !reflect.DeepEqual(*file.Lambda, fileLambdaConfig{}) {
+			t.Fatal("decoded file initialized runtime defaults")
+		}
+		written, err := writeUserFileConfig(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if written != path {
+			t.Fatalf("write path=%q", written)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(data) != tc.want {
+			t.Fatalf("YAML got=%q want=%q", data, tc.want)
+		}
+		again, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tc.input != "lambda: {sshCIDRs: [], filesystemNames: [], filesystemMounts: []}\n" && !reflect.DeepEqual(again, file) {
+			t.Fatal("roundtrip fields changed")
+		}
+	}
+	for _, tc := range []struct{ input, detail string }{{"lambda: wrong\n", "line 1: cannot unmarshal !!str `wrong` into cli.fileLambdaConfig"}, {"lambda: [wrong]\n", "line 1: cannot unmarshal !!seq into cli.fileLambdaConfig"}} {
+		if err := os.WriteFile(path, []byte(tc.input), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := readFileConfig(path)
+		want := "parse config " + path + ": yaml: unmarshal errors:\n  " + tc.detail
+		if err == nil || err.Error() != want {
+			t.Fatalf("diagnostic=%v want=%q", err, want)
+		}
+	}
+}
+
+func TestLambdaBindingJSON(t *testing.T) {
+	isolatedConfigPath(t)
+	cfg := baseConfig()
+	cfg.Lambda = LambdaConfig{Region: "west", Type: "gpu", Image: "image", ImageFamily: "family", FirewallRuleset: "rule", SSHCIDRs: []string{"cidr"}, FilesystemNames: []string{"data"}, FilesystemMounts: []LambdaFilesystemMount{{Name: "data", MountPath: "/mnt/data"}, {}}}
+	data, err := json.Marshal(cfg.Lambda)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"Region":"west","Type":"gpu","Image":"image","ImageFamily":"family","FirewallRuleset":"rule","SSHCIDRs":["cidr"],"FilesystemNames":["data"],"FilesystemMounts":[{"name":"data","mountPath":"/mnt/data"},{}]}`
+	if string(data) != want {
+		t.Fatalf("runtime JSON=%s", data)
+	}
+	data, err = json.Marshal(configShowView(cfg)["lambda"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = `{"auth":"missing","filesystemMounts":[{"name":"data","mountPath":"/mnt/data"},{}],"filesystemNames":["data"],"firewallRuleset":"rule","image":"image","imageFamily":"family","region":"west","sshCIDRs":["cidr"],"type":"gpu"}`
+	if string(data) != want {
+		t.Fatalf("config-show JSON=%s", data)
 	}
 }

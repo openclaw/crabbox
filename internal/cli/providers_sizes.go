@@ -38,6 +38,7 @@ func (a App) providerSizes(ctx context.Context, args []string) error {
 	if flagWasSet(fs, "class") {
 		cfg.Class = *class
 		MarkClassExplicit(&cfg)
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	applyServerTypeFlagOverrides(&cfg, fs, "")
 	backend, err := loadBackend(cfg, runtimeForApp(a))

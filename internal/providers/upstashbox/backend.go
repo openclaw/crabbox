@@ -30,7 +30,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if req.ActionsRunner {
 		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	client, err := newAPI(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -43,7 +43,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: upstash-box warmup keeps the box until explicit stop\n")
 	}
-	total := b.now().Sub(started)
+	total := core.ClockNow(b.rt.Clock).Sub(started)
 	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
 		Provider: providerName,
 		LeaseID:  leaseID,
@@ -177,7 +177,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		Network:     networkPublic,
 		Wait:        req.Wait,
 		WaitTimeout: req.WaitTimeout,
-		Now:         b.now,
+		Now:         func() time.Time { return core.ClockNow(b.rt.Clock) },
 		Resolve: func(id string) (string, string, string, error) {
 			return b.resolveBoxID(ctx, client, id, "", false)
 		},
@@ -346,10 +346,6 @@ func resolveBoxBySlug(ctx context.Context, client api, slug string) (boxData, er
 	return boxData{}, exit(4, "upstash-box %q was not found", slug)
 }
 
-func (b *backend) now() time.Time {
-	return now(b.rt)
-}
-
 func boxToServer(cfg Config, box boxData) Server {
 	leaseID := boxLeaseID(box)
 	labels := directLeaseLabels(cfg, leaseID, boxSlug(leaseID, box), providerName, "", box.KeepAlive, time.Now().UTC())
@@ -371,7 +367,7 @@ func boxToServer(cfg Config, box boxData) Server {
 }
 
 func boxBaseHost(cfg Config) string {
-	raw := blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), "https://us-east-1.box.upstash.com")
+	raw := blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), core.UpstashBoxConfigDefaultBaseURL)
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" {
 		return raw
@@ -380,7 +376,7 @@ func boxBaseHost(cfg Config) string {
 }
 
 func upstashBoxClaimScope(cfg Config) string {
-	raw := blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), "https://us-east-1.box.upstash.com")
+	raw := blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), core.UpstashBoxConfigDefaultBaseURL)
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" {
 		return "endpoint:" + strings.TrimRight(raw, "/")
@@ -429,7 +425,7 @@ func isNotFound(err error) bool {
 }
 
 func runtimeName(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.UpstashBox.Runtime), "node")
+	return blank(strings.TrimSpace(cfg.UpstashBox.Runtime), core.UpstashBoxConfigDefaultRuntime)
 }
 
 func upstashBoxName(leaseID, slug string) string {
@@ -441,11 +437,11 @@ func upstashBoxName(leaseID, slug string) string {
 }
 
 func sizeName(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.UpstashBox.Size), "small")
+	return blank(strings.TrimSpace(cfg.UpstashBox.Size), core.UpstashBoxConfigDefaultSize)
 }
 
 func workdir(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.UpstashBox.Workdir), "/workspace/home/crabbox")
+	return blank(strings.TrimSpace(cfg.UpstashBox.Workdir), core.UpstashBoxConfigDefaultWorkdir)
 }
 
 func cleanWorkdir(workdir string) (string, error) {

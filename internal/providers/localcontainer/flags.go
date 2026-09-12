@@ -44,7 +44,7 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 	}
 	// CLI-only: bind mounts expose host paths and must be an explicit
 	// operator action. Not loaded from repo-local .crabbox.yaml — see
-	// the comment in config.go where YAML ingestion is blocked.
+	// the omission comment in config_local_container.go.
 	fs.Var(&volumes, "local-container-volume",
 		"bind-mount a host path into the container; host:container[:ro]; repeatable")
 	return v
@@ -56,34 +56,39 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		return nil
 	}
 	if core.FlagWasSet(fs, "local-container-runtime") {
-		cfg.LocalContainer.Runtime = *v.Runtime
-		core.MarkLocalContainerRuntimeExplicit(cfg)
+		core.ApplyLocalContainerRuntime(cfg, *v.Runtime)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "local-container-image") {
-		cfg.LocalContainer.Image = *v.Image
-		core.MarkLocalContainerImageExplicit(cfg)
+		core.ApplyLocalContainerImage(cfg, *v.Image)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "local-container-user") {
 		cfg.LocalContainer.User = *v.User
 		cfg.SSHUser = *v.User
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "local-container-work-root") {
-		cfg.LocalContainer.WorkRoot = *v.WorkRoot
+		core.ApplyLocalContainerWorkRoot(cfg, *v.WorkRoot)
 		cfg.WorkRoot = *v.WorkRoot
 		core.MarkWorkRootExplicit(cfg)
-		core.MarkLocalContainerWorkRootExplicit(cfg)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "local-container-cpus") {
 		cfg.LocalContainer.CPUs = *v.CPUs
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "local-container-memory") {
 		cfg.LocalContainer.Memory = *v.Memory
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "local-container-network") {
 		cfg.LocalContainer.Network = *v.Network
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "local-container-docker-socket") {
 		cfg.LocalContainer.DockerSocket = *v.DockerSocket
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if v.Volumes != nil && len(*v.Volumes) > 0 {
 		if idFlag := fs.Lookup("id"); idFlag != nil && strings.TrimSpace(idFlag.Value.String()) != "" {
@@ -93,8 +98,9 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 			return core.Exit(2, "--local-container-volume only applies when creating a new lease; omit --pool or warm a new lease")
 		}
 		cfg.LocalContainer.Volumes = []string(*v.Volumes)
+		core.RecordProviderFlagInputs(cfg, core.FlagWasSet(fs, "local-container-volume"), providerName)
 	}
-	if cfg.Provider == providerName || cfg.Provider == "docker" || cfg.Provider == "container" || cfg.Provider == "local-docker" {
+	if core.ProviderNameMatchesExact(cfg.Provider, Provider{}) {
 		applyDefaults(cfg)
 	}
 	return nil

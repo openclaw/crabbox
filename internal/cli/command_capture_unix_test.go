@@ -20,6 +20,53 @@ import (
 	"time"
 )
 
+func TestCommandFileCaptureRetainsObservedOverflow(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	capture, err := newCommandFileCapture(4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer capture.close()
+	if _, err := capture.streams[0].writer.WriteString("abcde"); err != nil {
+		t.Fatal(err)
+	}
+	observed := make(chan struct{}, 1)
+	finish := capture.watch(func() {
+		select {
+		case observed <- struct{}{}:
+		default:
+		}
+	}, func() error { return nil }, time.Second)
+	finished := false
+	defer func() {
+		if !finished {
+			capture.closeWriters()
+			finish()
+		}
+	}()
+	select {
+	case <-observed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher did not observe the few-byte overflow")
+	}
+	if err := capture.streams[0].writer.Truncate(3); err != nil {
+		t.Fatal(err)
+	}
+	capture.closeWriters()
+	outcome := finish()
+	finished = true
+	if !outcome.settled || !outcome.overflow || outcome.err != nil {
+		t.Fatalf("watcher outcome=%+v", outcome)
+	}
+	stdout, stderr := newCommandCaptureBuffer(4, nil), newCommandCaptureBuffer(4, nil)
+	if err := capture.read(&stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if stdout.String() != "abc" || stderr.String() != "" || stdout.buffer.Exceeded() || stderr.buffer.Exceeded() {
+		t.Fatalf("readback=%q/%q overflow=%v/%v", stdout.String(), stderr.String(), stdout.buffer.Exceeded(), stderr.buffer.Exceeded())
+	}
+}
+
 func TestExecCommandRunnerFileCapture(t *testing.T) {
 	t.Setenv(controllerProcessTreeOwnedEnv, "")
 	for _, tc := range []struct {

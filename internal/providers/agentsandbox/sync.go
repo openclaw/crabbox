@@ -12,7 +12,7 @@ import (
 )
 
 func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, ready sandboxReadiness, req RunRequest, workdir string) ([]timingPhase, time.Duration, error) {
-	start := b.now()
+	start := core.ClockNow(b.rt.Clock)
 	syncCtx := ctx
 	cancel := func() {}
 	if b.cfg.Sync.Timeout > 0 {
@@ -24,20 +24,20 @@ func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, re
 	if err != nil {
 		return nil, 0, err
 	}
-	manifestStart := b.now()
+	manifestStart := core.ClockNow(b.rt.Clock)
 	manifest, err := syncManifest(req.Repo.Root, excludes, b.cfg.Sync.Includes)
 	if err != nil {
 		return nil, 0, exit(6, "build sync file list: %v", err)
 	}
-	manifestDuration := b.now().Sub(manifestStart)
+	manifestDuration := core.ClockNow(b.rt.Clock).Sub(manifestStart)
 
-	preflightStart := b.now()
+	preflightStart := core.ClockNow(b.rt.Clock)
 	if err := checkAgentSandboxSyncPreflight(manifest, b.cfg, req.ForceSyncLarge, b.rt.Stderr); err != nil {
 		return nil, 0, err
 	}
-	preflightDuration := b.now().Sub(preflightStart)
+	preflightDuration := core.ClockNow(b.rt.Clock).Sub(preflightStart)
 
-	archiveStart := b.now()
+	archiveStart := core.ClockNow(b.rt.Clock)
 	archive, err := createPortableSyncArchive(syncCtx, req.Repo, manifest, "crabbox-agent-sandbox-sync-*.tgz")
 	if err != nil {
 		return nil, 0, err
@@ -46,7 +46,7 @@ func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, re
 		_ = archive.Close()
 		_ = os.Remove(archive.Name())
 	}()
-	archiveDuration := b.now().Sub(archiveStart)
+	archiveDuration := core.ClockNow(b.rt.Clock).Sub(archiveStart)
 
 	extractDir := workdir
 	stagingDir := ""
@@ -67,7 +67,7 @@ func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, re
 	}
 	defer cleanupRemote()
 
-	prepareStart := b.now()
+	prepareStart := core.ClockNow(b.rt.Clock)
 	if stagingDir == "" {
 		err = b.execShell(syncCtx, client, ready, "mkdir -p "+shellQuote(workdir))
 	} else {
@@ -76,9 +76,9 @@ func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, re
 	if err != nil {
 		return nil, 0, err
 	}
-	prepareDuration := b.now().Sub(prepareStart)
+	prepareDuration := core.ClockNow(b.rt.Clock).Sub(prepareStart)
 
-	uploadStart := b.now()
+	uploadStart := core.ClockNow(b.rt.Clock)
 	if _, err := archive.Seek(0, 0); err != nil {
 		return nil, 0, exit(6, "rewind sync archive: %v", err)
 	}
@@ -93,21 +93,21 @@ func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, re
 		}
 		return nil, 0, err
 	}
-	uploadDuration := b.now().Sub(uploadStart)
+	uploadDuration := core.ClockNow(b.rt.Clock).Sub(uploadStart)
 
 	replaceDuration := time.Duration(0)
 	if stagingDir != "" {
-		replaceStart := b.now()
+		replaceStart := core.ClockNow(b.rt.Clock)
 		if err := b.replaceWorkspace(syncCtx, client, ready, stagingDir, workdir); err != nil {
 			return nil, 0, err
 		}
-		replaceDuration = b.now().Sub(replaceStart)
+		replaceDuration = core.ClockNow(b.rt.Clock).Sub(replaceStart)
 	}
 
-	cleanupStart := b.now()
+	cleanupStart := core.ClockNow(b.rt.Clock)
 	cleanupPending = false
-	cleanupDuration := b.now().Sub(cleanupStart)
-	total := b.now().Sub(start)
+	cleanupDuration := core.ClockNow(b.rt.Clock).Sub(cleanupStart)
+	total := core.ClockNow(b.rt.Clock).Sub(start)
 	phases := []timingPhase{
 		{Name: "manifest", Ms: manifestDuration.Milliseconds()},
 		{Name: "preflight", Ms: preflightDuration.Milliseconds()},

@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -29,6 +30,116 @@ func TestRailwayProviderSpec(t *testing.T) {
 	aliases := Provider{}.Aliases()
 	if len(aliases) != 2 || aliases[0] != "rail" || aliases[1] != "railwayapp" {
 		t.Fatalf("aliases = %#v, want [rail railwayapp]", aliases)
+	}
+}
+
+func TestRailwayBindingFlagsRemainDeferredAndLocal(t *testing.T) {
+	for _, name := range []string{"railway", "rail", "railwayapp", " Railway "} {
+		cfg := Config{Provider: name, Railway: RailwayConfig{APIURL: "https://example.invalid/prior", ProjectID: "prior-app", EnvironmentID: "prior-team"}}
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.String("class", "", "")
+		fs.String("type", "", "")
+		values := RegisterRailwayProviderFlags(fs, cfg)
+		fs.VisitAll(func(f *flag.Flag) {
+			if strings.Contains(f.Name, "token") {
+				t.Fatal("token flag registered")
+			}
+		})
+		cfg.Railway.ProjectID = "later-app"
+		before := cfg
+		if err := ApplyRailwayProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(cfg, before) {
+			t.Fatal("unvisited flags changed config")
+		}
+		if err := fs.Parse([]string{"--railway-url=", "--railway-project=", "--railway-environment="}); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyRailwayProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatalf("wrapper performed deferred client validation: %v", err)
+		}
+		before.Railway.APIURL, before.Railway.ProjectID, before.Railway.EnvironmentID = "", "", ""
+		core.RecordProviderFlagInputs(&before, true, "railway")
+		if !reflect.DeepEqual(cfg, before) {
+			t.Fatal("wrapper copies or global provenance side effects changed")
+		}
+		if _, err := (Provider{}).Configure(cfg, Runtime{}); err != nil {
+			t.Fatalf("Configure performed client validation: %v", err)
+		}
+		if err := ApplyRailwayProviderFlags(&cfg, fs, struct{}{}); err != nil {
+			t.Fatal(err)
+		}
+		for _, args := range [][]string{{"--type=vm"}, {"--type=vm", "--class=large"}} {
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			want := "--type"
+			if len(args) == 2 {
+				want = "--class"
+			}
+			for _, v := range []any{nil, struct{}{}, values} {
+				before := cfg
+				err := ApplyRailwayProviderFlags(&cfg, fs, v)
+				if err == nil || err.Error() != want+" is not supported for provider=railway" {
+					t.Fatalf("alias %q guard=%v", name, err)
+				}
+				if !reflect.DeepEqual(cfg, before) {
+					t.Fatal("guard applied values or provenance")
+				}
+			}
+		}
+	}
+}
+
+func TestRailwayClientDefaultAndValidationOrder(t *testing.T) {
+	for _, rawToken := range []string{"", "  "} {
+		cfg := Config{Railway: RailwayConfig{APIToken: rawToken, APIURL: "relative"}}
+		if _, err := newRailwayClient(cfg, Runtime{}); err == nil || err.Error() != "provider=railway requires RAILWAY_API_TOKEN" {
+			t.Fatalf("token validation order=%v", err)
+		}
+	}
+	for _, tc := range []struct {
+		raw, want string
+		invalid   bool
+	}{
+		{raw: "", want: "https://backboard.railway.com/graphql/v2"},
+		{raw: "  ", invalid: true},
+		{raw: " https://example.invalid/api/ ", want: "https://example.invalid/api"},
+	} {
+		cfg := Config{Railway: RailwayConfig{APIToken: "inert-constructor-only", APIURL: tc.raw}}
+		before := cfg.Railway
+		api, err := newRailwayClient(cfg, Runtime{})
+		if tc.invalid {
+			if err == nil || err.Error() != `railway url "" is invalid` {
+				t.Fatalf("whitespace endpoint=%v", err)
+			}
+		} else {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if api.(*railwayClient).apiURL != tc.want {
+				t.Fatalf("endpoint=%q want=%q", api.(*railwayClient).apiURL, tc.want)
+			}
+		}
+		if cfg.Railway != before {
+			t.Fatal("constructor changed raw config")
+		}
+	}
+}
+
+func TestRailwayClaimScopeKeepsRawEndpointContract(t *testing.T) {
+	cfg := Config{Railway: RailwayConfig{ProjectID: " project ", EnvironmentID: " environment "}}
+	if got := (Provider{}).ClaimScope(cfg); got != "" {
+		t.Fatalf("empty endpoint must not gain client default scope: %q", got)
+	}
+	cfg.Railway.APIURL = " https://example.invalid/api/ "
+	if got := (Provider{}).ClaimScope(cfg); got != "endpoint:https://example.invalid/api|project:project|environment:environment" {
+		t.Fatalf("legacy scope=%q", got)
+	}
+	cfg.Railway.EnvironmentID = ""
+	if got := (Provider{}).ClaimScope(cfg); got != "" {
+		t.Fatalf("incomplete scope=%q", got)
 	}
 }
 
@@ -517,7 +628,7 @@ func TestRailwayRunRequiresNoSync(t *testing.T) {
 
 func TestRailwayRunRequiresServiceID(t *testing.T) {
 	backend := &railwayBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-	_, err := backend.Run(context.Background(), RunRequest{NoSync: true, Command: []string{"pnpm", "test"}})
+	_, err := backend.Run(context.Background(), RunRequest{NoSync: true})
 	if err == nil || !strings.Contains(err.Error(), "--id") {
 		t.Fatalf("err = %v, want --id rejection", err)
 	}
@@ -565,30 +676,43 @@ func TestRailwayRunRejectsLeaseFlags(t *testing.T) {
 		req  RunRequest
 		want string
 	}{
-		{name: "keep", req: RunRequest{ID: "svc-1", Keep: true, NoSync: true, Command: []string{"pnpm", "test"}}, want: "--keep"},
-		{name: "reclaim", req: RunRequest{ID: "svc-1", Reclaim: true, NoSync: true, Command: []string{"pnpm", "test"}}, want: "--reclaim"},
-		{name: "shell", req: RunRequest{ID: "svc-1", ShellMode: true, NoSync: true, Command: []string{"pnpm test"}}, want: "--shell"},
-		{name: "env summary", req: RunRequest{ID: "svc-1", NoSync: true, Env: map[string]string{"TOKEN": "secret"}, EnvSummary: true, Command: []string{"pnpm", "test"}}, want: "environment"},
+		{name: "keep first", req: RunRequest{Keep: true, Reclaim: true}, want: "provider=railway lifecycle is owned by Railway; --keep is not supported"},
+		{name: "reclaim", req: RunRequest{Reclaim: true}, want: "provider=railway lifecycle is owned by Railway; --reclaim is not supported"},
+		{name: "sync only", req: RunRequest{NoSync: true, SyncOnly: true}, want: "provider=railway does not support sync; --sync-only is rejected"},
+		{name: "checksum", req: RunRequest{NoSync: true, ChecksumSync: true}, want: "provider=railway does not support sync; --checksum is rejected"},
+		{name: "force large", req: RunRequest{NoSync: true, ForceSyncLarge: true}, want: "provider=railway does not support sync; --force-sync-large is rejected"},
+		{name: "full resync", req: RunRequest{NoSync: true, FullResync: true}, want: "provider=railway does not support sync; --full-resync is rejected"},
+		{name: "shell before ID", req: RunRequest{NoSync: true, ShellMode: true}, want: "provider=railway runs the Railway service start command; --shell is not supported"},
+		{name: "env summary without env", req: RunRequest{NoSync: true, EnvSummary: true}, want: "provider=railway cannot forward per-run environment variables"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			backend := &railwayBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-			_, err := backend.Run(context.Background(), tc.req)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("err = %v, want %s rejection", err, tc.want)
+			api := &fakeRailwayAPI{}
+			backend := newRailwayBackendForTest(api)
+			result, err := backend.Run(context.Background(), tc.req)
+			var public ExitError
+			if !errors.As(err, &public) || public.Code != 2 || public.Message != tc.want {
+				t.Fatalf("err=%v, want exit2 %q", err, tc.want)
+			}
+			if !reflect.DeepEqual(result, RunResult{}) || len(api.calls) != 0 {
+				t.Fatalf("result=%#v API calls=%v", result, api.calls)
 			}
 		})
 	}
 }
 
 func TestRailwayRunAllowsImplicitDefaultEnv(t *testing.T) {
-	err := rejectRailwayRunOptions(RunRequest{
-		ID:      "svc-1",
-		NoSync:  true,
-		Env:     map[string]string{"CI": "true"},
-		Command: []string{"pnpm", "test"},
+	api := &fakeRailwayAPI{}
+	backend := newRailwayBackendForTest(api)
+	result, err := backend.Run(context.Background(), RunRequest{
+		ID: "svc-1", NoSync: true, Env: map[string]string{"CI": "true"}, Command: []string{"pnpm", "test"},
 	})
-	if err != nil {
-		t.Fatalf("rejectRailwayRunOptions err: %v", err)
+	var public ExitError
+	want := "provider=railway cannot execute arbitrary run commands; Railway only runs the service's configured start command"
+	if !errors.As(err, &public) || public.Code != 2 || public.Message != want {
+		t.Fatalf("err=%v, want command rejection after option admission", err)
+	}
+	if !reflect.DeepEqual(result, RunResult{}) || len(api.calls) != 0 {
+		t.Fatalf("result=%#v API calls=%v", result, api.calls)
 	}
 }
 

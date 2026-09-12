@@ -35,6 +35,10 @@ func (Provider) RoutingFlagNames() []string {
 }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication: core.ProviderAuthentication{
+			{Route: "direct", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationSDKCredentials}, Description: "Direct access uses explicit Azure SDK credentials or DefaultAzureCredential."},
+			{Route: "brokered", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationCoordinator}, Description: "The client authenticates to the coordinator; cloud credentials remain server-side."},
+		},
 		Name:   "azure",
 		Family: "azure",
 		Kind:   core.ProviderKindSSHLease,
@@ -59,10 +63,12 @@ func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 
 func (Provider) RouteConfig(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	backend := cfg.AzureBackend
+	acceptedBackend := false
 	if fs != nil && core.FlagWasSet(fs, "azure-backend") {
 		flags, _ := values.(flagValues)
 		if flags.Backend != nil {
 			backend = *flags.Backend
+			acceptedBackend = true
 		}
 	}
 	normalized, err := core.NormalizeAzureBackend(backend)
@@ -70,6 +76,7 @@ func (Provider) RouteConfig(cfg *core.Config, fs *flag.FlagSet, values any) erro
 		return core.Exit(2, "%s", err)
 	}
 	cfg.AzureBackend = normalized
+	core.RecordProviderFlagInputs(cfg, acceptedBackend, "azure")
 	if normalized == core.AzureBackendDynamicSessions {
 		cfg.Provider = "azure-dynamic-sessions"
 	} else {
@@ -95,6 +102,7 @@ func (p Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) err
 			return err
 		}
 		cfg.AzureOSDisk = mode
+		core.RecordProviderFlagInputs(cfg, true, "azure")
 		cfg.AzureOSDiskExplicit = true
 	}
 	if cfg.AzureOSDisk != "" {
@@ -106,6 +114,7 @@ func (p Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) err
 	}
 	if core.FlagWasSet(fs, "azure-snapshot-sku") && flags.SnapshotSKU != nil {
 		cfg.AzureSnapshotSKU = *flags.SnapshotSKU
+		core.RecordProviderFlagInputs(cfg, true, "azure")
 	}
 	if cfg.AzureSnapshotSKU != "" {
 		sku, err := core.NormalizeAzureSnapshotSKU(cfg.AzureSnapshotSKU)
@@ -116,6 +125,7 @@ func (p Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) err
 	}
 	if core.FlagWasSet(fs, "azure-os-disk-sku") && flags.OSDiskSKU != nil {
 		cfg.AzureOSDiskSKU = *flags.OSDiskSKU
+		core.RecordProviderFlagInputs(cfg, true, "azure")
 	}
 	if cfg.AzureOSDiskSKU != "" {
 		sku, err := core.NormalizeAzureDiskSKU(cfg.AzureOSDiskSKU)

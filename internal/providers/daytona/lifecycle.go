@@ -15,12 +15,39 @@ import (
 
 const daytonaActivityRequestTimeout = 10 * time.Second
 
-func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo Repo, keep, reclaim bool, requestedSlug string) (sandbox *daytona.Sandbox, leaseID, slug string, err error) {
-	if strings.TrimSpace(b.cfg.Daytona.Snapshot) == "" && !classSnapshotRequested(b.cfg) {
-		return nil, "", "", exit(2, "provider=daytona requires --daytona-snapshot or daytona.snapshot")
+func validateDaytonaCreateConfig(cfg Config) error {
+	if strings.TrimSpace(cfg.Daytona.Snapshot) == "" && !classSnapshotRequested(cfg) {
+		return exit(2, "provider=daytona requires --daytona-snapshot or daytona.snapshot")
 	}
-	if b.cfg.TTL <= 0 || b.cfg.IdleTimeout <= 0 || durationMinutesCeil(b.cfg.TTL) > math.MaxInt32 || durationMinutesCeil(b.cfg.IdleTimeout) > math.MaxInt32 {
-		return nil, "", "", exit(2, "provider=daytona requires positive TTL and idle timeout within Daytona's minute range")
+	if cfg.TTL <= 0 || cfg.IdleTimeout <= 0 || durationMinutesCeil(cfg.TTL) > math.MaxInt32 || durationMinutesCeil(cfg.IdleTimeout) > math.MaxInt32 {
+		return exit(2, "provider=daytona requires positive TTL and idle timeout within Daytona's minute range")
+	}
+	return nil
+}
+
+func daytonaCreateBody(cfg Config, leaseID, slug string, keep bool, now time.Time) *daytona.CreateSandbox {
+	cfg.WorkRoot, cfg.SSHUser = daytonaWorkRoot(cfg), daytonaUser(cfg)
+	labels := directLeaseLabels(cfg, leaseID, slug, daytonaProvider, "", keep, now)
+	labels["lease_name"], labels["work_root"] = leaseProviderName(leaseID, slug), cfg.WorkRoot
+	body := daytona.NewCreateSandbox()
+	body.SetName(labels["lease_name"])
+	body.SetSnapshot(strings.TrimSpace(cfg.Daytona.Snapshot))
+	body.SetUser(cfg.SSHUser)
+	body.SetLabels(labels)
+	body.SetPublic(false)
+	body.SetAutoStopInterval(int32(durationMinutesCeil(cfg.IdleTimeout)))
+	body.SetAutoDeleteInterval(-1)
+	// The pinned generated client preserves newer API fields in AdditionalProperties.
+	body.AdditionalProperties = map[string]interface{}{"ttlMinutes": durationMinutesCeil(cfg.TTL)}
+	if target := strings.TrimSpace(cfg.Daytona.Target); target != "" {
+		body.SetTarget(target)
+	}
+	return body
+}
+
+func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo Repo, keep, reclaim bool, requestedSlug string, sources ...*core.NativeCheckpointForkRecord) (sandbox *daytona.Sandbox, leaseID, slug string, err error) {
+	if err := validateDaytonaCreateConfig(b.cfg); err != nil {
+		return nil, "", "", err
 	}
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
@@ -30,6 +57,17 @@ func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo Rep
 	snapshot, err := selectClassSnapshot(ctx, client, cfg)
 	if err != nil {
 		return nil, "", "", err
+	}
+	if len(sources) != 0 && sources[0] != nil {
+		if snapshot == nil {
+			snapshot, err = client.GetSnapshot(ctx, strings.TrimSpace(cfg.Daytona.Snapshot))
+			if err != nil {
+				return nil, "", "", err
+			}
+		}
+		if err := validateDaytonaForkSnapshot(snapshot, sources[0]); err != nil {
+			return nil, "", "", err
+		}
 	}
 	existing, err := client.ListCrabboxSandboxes(ctx)
 	if err != nil {
@@ -45,21 +83,8 @@ func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo Rep
 		// Carry the resolved selection; setting Snapshot changes configuration precedence.
 		cfg.Daytona.Snapshot, cfg.ServerType = snapshot.GetId(), snapshot.GetId()
 	}
-	labels := directLeaseLabels(cfg, leaseID, slug, daytonaProvider, "", keep, time.Now().UTC())
-	labels["lease_name"], labels["work_root"] = leaseProviderName(leaseID, slug), cfg.WorkRoot
-	body := daytona.NewCreateSandbox()
-	body.SetName(labels["lease_name"])
-	body.SetSnapshot(strings.TrimSpace(cfg.Daytona.Snapshot))
-	body.SetUser(cfg.SSHUser)
-	body.SetLabels(labels)
-	body.SetPublic(false)
-	body.SetAutoStopInterval(int32(durationMinutesCeil(cfg.IdleTimeout)))
-	body.SetAutoDeleteInterval(-1)
-	// The pinned generated client preserves newer API fields in AdditionalProperties.
-	body.AdditionalProperties = map[string]interface{}{"ttlMinutes": durationMinutesCeil(cfg.TTL)}
-	if target := strings.TrimSpace(cfg.Daytona.Target); target != "" {
-		body.SetTarget(target)
-	}
+	body := daytonaCreateBody(cfg, leaseID, slug, keep, time.Now().UTC())
+	labels := body.GetLabels()
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=daytona lease=%s slug=%s snapshot=%s target=%s keep=%v\n", leaseID, slug, cfg.Daytona.Snapshot, blank(cfg.Daytona.Target, "-"), keep)
 	created, createErr := client.CreateSandbox(ctx, *body)
 	if createErr != nil || created == nil || created.GetId() == "" {

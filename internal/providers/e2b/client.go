@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -97,11 +98,11 @@ var newE2BClient = func(cfg Config, rt Runtime) (e2bAPI, error) {
 		return nil, exit(2, "provider=e2b requires E2B_API_KEY")
 	}
 	httpClient, envdClient := shared.ControlAndDataHTTPClients(rt.HTTP, e2bControlTimeout)
-	apiURL, err := validateE2BAPIURL(blank(cfg.E2B.APIURL, "https://api.e2b.app"))
+	apiURL, err := validateE2BAPIURL(blank(cfg.E2B.APIURL, core.E2BConfigDefaultAPIURL))
 	if err != nil {
 		return nil, err
 	}
-	domain := strings.TrimSpace(blank(cfg.E2B.Domain, "e2b.app"))
+	domain := strings.TrimSpace(blank(cfg.E2B.Domain, core.E2BConfigDefaultDomain))
 	return &e2bClient{
 		apiKey:     apiKey,
 		apiURL:     apiURL,

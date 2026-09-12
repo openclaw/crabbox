@@ -1,9 +1,7 @@
 package islo
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -20,11 +18,13 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	gosdk "github.com/islo-labs/go-sdk"
 	sdkcore "github.com/islo-labs/go-sdk/core"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func isolateIsloTestHome(t *testing.T) {
@@ -105,6 +105,107 @@ func TestParseIsloSSERejectsInvalidExitEvent(t *testing.T) {
 	}, "\n")
 	if _, err := parseIsloSSE(strings.NewReader(body), &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "invalid exit event") {
 		t.Fatalf("err=%v, want invalid exit event error", err)
+	}
+}
+
+type isloOutputFailureWriter struct{ err error }
+
+func (w isloOutputFailureWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestParseIsloSSEPropagatesOutputWriteFailure(t *testing.T) {
+	writeErr := errors.New("output destination rejected bytes")
+	for _, stream := range []string{"stdout", "stderr"} {
+		for _, position := range []string{"before exit", "after exit", "final EOF flush"} {
+			t.Run(stream+"/"+position, func(t *testing.T) {
+				output := "event: " + stream + "\ndata: command output"
+				body := output + "\n\nevent: exit\ndata: 0\n\n"
+				if position == "after exit" {
+					body = "event: exit\ndata: 23\n\n" + output + "\n\n"
+				} else if position == "final EOF flush" {
+					body = "event: exit\ndata: 137\n\n" + output
+				}
+				var stdout, stderr io.Writer = io.Discard, io.Discard
+				if stream == "stdout" {
+					stdout = isloOutputFailureWriter{writeErr}
+				} else {
+					stderr = isloOutputFailureWriter{writeErr}
+				}
+				code, err := parseIsloSSE(strings.NewReader(body), stdout, stderr)
+				if code != 1 || err != writeErr {
+					t.Fatalf("code=%d err=%v, want code 1 and original writer error", code, err)
+				}
+			})
+		}
+	}
+}
+
+func TestParseIsloSSEReadOnlyOutputFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "output")
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	_, writeErr := file.Write([]byte("probe"))
+	var pathErr *os.PathError
+	if !errors.As(writeErr, &pathErr) {
+		t.Fatalf("read-only file write error=%v", writeErr)
+	}
+	for _, stream := range []string{"stdout", "stderr"} {
+		t.Run(stream, func(t *testing.T) {
+			var stdout, stderr io.Writer = io.Discard, io.Discard
+			if stream == "stdout" {
+				stdout = file
+			} else {
+				stderr = file
+			}
+			body := "event: " + stream + "\ndata: command output\n\nevent: exit\ndata: 0\n\n"
+			code, err := parseIsloSSE(strings.NewReader(body), stdout, stderr)
+			if code != 1 || !errors.Is(err, pathErr.Err) {
+				t.Fatalf("code=%d err=%v, want code 1 and file error %v", code, err, pathErr.Err)
+			}
+		})
+	}
+}
+
+func TestParseIsloSSEPreservesCompletionRules(t *testing.T) {
+	readErr := errors.New("stream disconnected")
+	for _, tc := range []struct {
+		name    string
+		body    string
+		readErr error
+		code    int
+		output  string
+		errText string
+	}{
+		{name: "multiline comments and final EOF", body: ": keepalive\r\nevent: stdout\r\ndata: first\r\nid: ignored\r\ndata: second\r\n\r\nevent: exit\ndata: -1", code: -1, output: "first\nsecond"},
+		{name: "last exit wins", body: "event: exit\ndata: 7\n\nevent: stdout\ndata: between\n\nevent: exit\ndata: 23", code: 23, output: "between"},
+		{name: "error event with exit", body: "event: exit\ndata: 0\n\nevent: error\ndata: diagnostic", code: 0},
+		{name: "read error after exit", body: "event: exit\ndata: 23\n\n", readErr: readErr, code: 1, errText: "stream disconnected"},
+		{name: "invalid exit after exit", body: "event: exit\ndata: 23\n\nevent: exit\ndata: invalid", code: 1, errText: "invalid exit event"},
+		{name: "final decode error precedes read error", body: "event: exit\ndata: invalid", readErr: readErr, code: 1, errText: "invalid exit event"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reader io.Reader = strings.NewReader(tc.body)
+			if tc.readErr != nil {
+				reader = io.MultiReader(reader, iotest.ErrReader(tc.readErr))
+			}
+			var stdout bytes.Buffer
+			code, err := parseIsloSSE(reader, &stdout, io.Discard)
+			if code != tc.code || stdout.String() != tc.output {
+				t.Fatalf("code=%d output=%q, want %d/%q", code, stdout.String(), tc.code, tc.output)
+			}
+			if tc.errText == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.errText) {
+				t.Fatalf("err=%v, want %q", err, tc.errText)
+			}
+		})
 	}
 }
 
@@ -1769,7 +1870,7 @@ func TestIsloSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 	if repair.GetUser() == nil || *repair.GetUser() != isloAdminUser || !strings.Contains(client.prepareCommands[1], "chown -R 'islo:islo' '/workspace/repo'") {
 		t.Fatalf("ownership repair request=%#v command=%q", repair, client.prepareCommands[1])
 	}
-	if !tarGzipContains(t, client.uploaded.Bytes(), "go.mod") {
+	if !testutil.TarGzipContains(t, client.uploaded.Bytes(), "go.mod") {
 		t.Fatal("uploaded archive missing go.mod")
 	}
 }
@@ -2415,28 +2516,6 @@ func withIsloCleanupTimeout(t *testing.T, timeout time.Duration) {
 	original := isloCleanupTimeout
 	isloCleanupTimeout = timeout
 	t.Cleanup(func() { isloCleanupTimeout = original })
-}
-
-func tarGzipContains(t *testing.T, data []byte, name string) bool {
-	t.Helper()
-	gz, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			return false
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		if header.Name == name {
-			return true
-		}
-	}
 }
 
 // This writer fails only timing serialization, not earlier human diagnostics.

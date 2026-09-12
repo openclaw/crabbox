@@ -12,10 +12,13 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/prefixbuffer"
 )
 
 type CoordinatorClient struct {
@@ -68,6 +71,7 @@ type CoordinatorLease struct {
 	DesktopEnv                   string                         `json:"desktopEnv,omitempty"`
 	Browser                      bool                           `json:"browser,omitempty"`
 	Code                         bool                           `json:"code,omitempty"`
+	Network                      *LeaseNetworkDiagnostics       `json:"network,omitempty"`
 	Tailscale                    *TailscaleMetadata             `json:"tailscale,omitempty"`
 	Region                       string                         `json:"region,omitempty"`
 	ProviderProject              string                         `json:"providerProject,omitempty"`
@@ -119,6 +123,18 @@ type CoordinatorLease struct {
 	ProvisioningResourceMayExist *bool                          `json:"provisioningResourceMayExist,omitempty"`
 	ProvisioningFailureRetryable *bool                          `json:"provisioningFailureRetryable,omitempty"`
 	ProviderMetadata             map[string]any                 `json:"providerMetadata,omitempty"`
+}
+
+// LeaseNetworkDiagnostics retains broker records, not live ingress observations.
+// Pointers preserve unknown fields separately from explicit false or empty values.
+type LeaseNetworkDiagnostics struct {
+	SSHSourceCIDRs         *[]string `json:"sshSourceCIDRs,omitempty"`
+	SSHPinnedSourceCIDRs   *[]string `json:"sshPinnedSourceCIDRs,omitempty"`
+	SSHSourceCIDRsComplete *bool     `json:"sshSourceCIDRsComplete,omitempty"`
+	AWSSecurityGroupID     *string   `json:"awsSecurityGroupID,omitempty"`
+	AWSSecurityGroupName   *string   `json:"awsSecurityGroupName,omitempty"`
+	AWSSubnetID            *string   `json:"awsSubnetID,omitempty"`
+	AWSPrivate             *bool     `json:"awsPrivate,omitempty"`
 }
 
 // ProviderCleanupEvidence is recorded broker evidence, not a live provider observation.
@@ -1005,7 +1021,9 @@ func newCoordinatorClient(cfg Config) (*CoordinatorClient, bool, error) {
 					Timeout:   5 * time.Second,
 					KeepAlive: 30 * time.Second,
 				}).DialContext,
-				TLSHandshakeTimeout:   10 * time.Second,
+				TLSHandshakeTimeout: 10 * time.Second,
+				// Custom dialing otherwise disables HTTP/2 and its independent streams.
+				ForceAttemptHTTP2:     true,
 				ResponseHeaderTimeout: coordinatorHTTPTimeout,
 				IdleConnTimeout:       90 * time.Second,
 			},
@@ -1456,10 +1474,20 @@ func (c *CoordinatorClient) Pool(ctx context.Context, cfg Config) ([]Coordinator
 }
 
 func (c *CoordinatorClient) Leases(ctx context.Context, state string, limit int) ([]CoordinatorLease, error) {
+	return c.listLeases(ctx, state, limit, "", "")
+}
+
+func (c *CoordinatorClient) listLeases(ctx context.Context, state string, limit int, view, provider string) ([]CoordinatorLease, error) {
 	var res struct {
 		Leases []CoordinatorLease `json:"leases"`
 	}
 	values := url.Values{}
+	if view != "" {
+		values.Set("view", view)
+	}
+	if provider != "" {
+		values.Set("provider", provider)
+	}
 	if state != "" {
 		values.Set("state", state)
 	}
@@ -1884,6 +1912,23 @@ func (c *CoordinatorClient) AdminDeleteLease(ctx context.Context, id string) (Co
 	return res.Lease, err
 }
 
+// AdminHostReservation reads or clears coordinator host associations without changing provider resources.
+func (c *CoordinatorClient) AdminHostReservation(ctx context.Context, region, hostID string, clear, force bool) (json.RawMessage, error) {
+	values := adminHostScopeValues(region, "")
+	if clear && force {
+		values.Set("force", "true")
+	}
+	method := http.MethodGet
+	if clear {
+		// Older coordinators dispatch any host DELETE suffix as a Dedicated Host release.
+		method = http.MethodPost
+	}
+	path := "/v1/admin/hosts/" + url.PathEscape(hostID) + "/reservation?" + values.Encode()
+	var result json.RawMessage
+	err := c.do(ctx, method, path, nil, &result)
+	return result, err
+}
+
 func (c *CoordinatorClient) AdminMacHosts(ctx context.Context, region, serverType, state string) ([]CoordinatorMacHost, error) {
 	var res struct {
 		Hosts []CoordinatorMacHost `json:"hosts"`
@@ -2250,8 +2295,7 @@ func imagePath(imageID, action string, refs ...CoordinatorImageRef) string {
 	return path
 }
 
-func (c *CoordinatorClient) CreateRun(ctx context.Context, leaseID string, cfg Config, command []string, label string) (CoordinatorRun, error) {
-	var res CoordinatorRunResponse
+func (c *CoordinatorClient) CreateRun(ctx context.Context, runID, leaseID string, cfg Config, command []string, label string) (CoordinatorRun, error) {
 	body := map[string]any{
 		"leaseID":     leaseID,
 		"provider":    cfg.Provider,
@@ -2264,8 +2308,33 @@ func (c *CoordinatorClient) CreateRun(ctx context.Context, leaseID string, cfg C
 	if strings.TrimSpace(label) != "" {
 		body["label"] = strings.TrimSpace(label)
 	}
-	err := c.do(ctx, http.MethodPost, "/v1/runs", body, &res)
-	return res.Run, err
+	// Only identity-bound admission is replayed, within the caller's original budget.
+	ctx, cancel := context.WithTimeout(ctx, runRecorderRequestTimeout)
+	defer cancel()
+	var err error
+	for attempt := 0; attempt < 2 && ctx.Err() == nil; attempt++ {
+		var res CoordinatorRunResponse
+		err = c.do(ctx, http.MethodPut, "/v1/runs/"+url.PathEscape(runID), body, &res)
+		if err == nil {
+			if ctx.Err() != nil {
+				return CoordinatorRun{}, ctx.Err()
+			}
+			if res.Run.ID != runID || res.Run.State != "running" || res.Run.Phase != "starting" || !slices.Equal(res.Run.Command, command) {
+				return CoordinatorRun{}, exit(7, "coordinator returned a mismatched or already-started run admission for %s", runID)
+			}
+			return res.Run, nil
+		}
+		if !runRecorderFinishRetryable(err) {
+			break
+		}
+	}
+	if ctx.Err() != nil {
+		return CoordinatorRun{}, ctx.Err()
+	}
+	if isCoordinatorNotFoundError(err) {
+		return CoordinatorRun{}, fmt.Errorf("coordinator run admission unavailable; upgrade the coordinator: %w", err)
+	}
+	return CoordinatorRun{}, err
 }
 
 func (c *CoordinatorClient) FinishRun(ctx context.Context, runID string, exitCode int, sync, command time.Duration, log string, truncated bool, results *TestResultSummary, telemetry *RunTelemetrySummary, classification FailureClassification, receipt *terminalRunReceipt) (CoordinatorRun, error) {
@@ -2426,7 +2495,7 @@ func (c *CoordinatorClient) doWithHeaders(ctx context.Context, method, path stri
 		}
 	}
 	err = c.doHTTPWithHeaders(ctx, method, path, data, body != nil, out, headers)
-	if err == nil || !shouldUseCoordinatorCurlFallback(method, body != nil, err) {
+	if err == nil || !shouldUseCoordinatorCurlFallback(ctx, method, body != nil, err) {
 		return err
 	}
 	if curlErr := c.doCurl(ctx, method, path, data, body != nil, out); curlErr == nil {
@@ -2502,7 +2571,7 @@ func (c *CoordinatorClient) authorizationToken(ctx context.Context) (string, err
 	cmd := exec.CommandContext(commandCtx, c.TokenCommand[0], c.TokenCommand[1:]...)
 	configureBoundedCommandCancellation(cmd)
 	c.applyChildEnvironment(cmd)
-	var output limitedCoordinatorTokenOutput
+	output := prefixbuffer.NewLimited(maxCoordinatorTokenBytes)
 	cmd.Stdout = &output
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
@@ -2514,7 +2583,7 @@ func (c *CoordinatorClient) authorizationToken(ctx context.Context) (string, err
 		}
 		return "", fmt.Errorf("coordinator token command failed: %w", err)
 	}
-	if output.overflow {
+	if output.Exceeded() {
 		return "", fmt.Errorf("coordinator token command output exceeds %d bytes", maxCoordinatorTokenBytes)
 	}
 	token := strings.TrimSuffix(output.String(), "\n")
@@ -2526,26 +2595,6 @@ func (c *CoordinatorClient) authorizationToken(ctx context.Context) (string, err
 		return "", errors.New("coordinator token command must return exactly one token line")
 	}
 	return token, nil
-}
-
-type limitedCoordinatorTokenOutput struct {
-	bytes.Buffer
-	overflow bool
-}
-
-func (w *limitedCoordinatorTokenOutput) Write(p []byte) (int, error) {
-	originalLength := len(p)
-	remaining := maxCoordinatorTokenBytes - w.Len()
-	if remaining <= 0 {
-		w.overflow = w.overflow || originalLength > 0
-		return originalLength, nil
-	}
-	if len(p) > remaining {
-		p = p[:remaining]
-		w.overflow = true
-	}
-	_, _ = w.Buffer.Write(p)
-	return originalLength, nil
 }
 
 func (c *CoordinatorClient) doCurl(ctx context.Context, method, path string, data []byte, hasBody bool, out any) error {
@@ -2707,16 +2756,23 @@ func isCoordinatorTransportError(err error) bool {
 	return errors.As(err, &urlErr)
 }
 
-func shouldUseCoordinatorCurlFallback(method string, hasBody bool, err error) bool {
-	if hasBody {
+func shouldUseCoordinatorCurlFallback(ctx context.Context, method string, hasBody bool, err error) bool {
+	if ctx.Err() != nil || hasBody || errors.Is(err, context.Canceled) {
 		return false
 	}
 	switch method {
 	case http.MethodGet, http.MethodHead:
-		return isCoordinatorTransportError(err)
 	default:
 		return false
 	}
+	if isCoordinatorTransportError(err) {
+		return true
+	}
+	// A dial timeout can match DeadlineExceeded while the request budget is live.
+	var urlErr *url.Error
+	var dialErr *net.OpError
+	return errors.As(err, &urlErr) && errors.As(urlErr.Err, &dialErr) &&
+		dialErr.Op == "dial" && dialErr.Timeout()
 }
 
 func (c *CoordinatorClient) applyChildEnvironment(cmd *exec.Cmd) {

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -124,7 +125,7 @@ const blaxelControlTimeout = 60 * time.Second
 func newBlaxelClient(cfg Config, rt Runtime) (Client, error) {
 	baseURL := strings.TrimSpace(cfg.Blaxel.APIURL)
 	if baseURL == "" {
-		baseURL = defaultAPIURL
+		baseURL = core.BlaxelConfigDefaultAPIURL
 	}
 	baseURL, err := ValidateAPIURL(baseURL)
 	if err != nil {
@@ -230,7 +231,7 @@ func isBlaxelDataPlaneHost(host string) bool {
 }
 
 func validateBlaxelConfig(cfg Config) error {
-	if _, err := ValidateAPIURL(blank(cfg.Blaxel.APIURL, defaultAPIURL)); err != nil {
+	if _, err := ValidateAPIURL(blank(cfg.Blaxel.APIURL, core.BlaxelConfigDefaultAPIURL)); err != nil {
 		return err
 	}
 	if cfg.Blaxel.MemoryMB < 0 {

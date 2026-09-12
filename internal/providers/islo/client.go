@@ -511,9 +511,13 @@ func parseIsloSSE(r io.Reader, stdout, stderr io.Writer, secrets ...string) (int
 		payload := strings.Join(data, "\n")
 		switch event {
 		case "stdout":
-			_, _ = stdout.Write([]byte(payload))
+			if _, err := stdout.Write([]byte(payload)); err != nil {
+				return err
+			}
 		case "stderr":
-			_, _ = stderr.Write([]byte(payload))
+			if _, err := stderr.Write([]byte(payload)); err != nil {
+				return err
+			}
 		case "exit":
 			n, err := strconv.Atoi(strings.TrimSpace(payload))
 			if err != nil {

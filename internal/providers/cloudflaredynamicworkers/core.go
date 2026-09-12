@@ -1,7 +1,6 @@
 package cloudflaredynamicworkers
 
 import (
-	"flag"
 	"io"
 	"time"
 
@@ -41,10 +40,6 @@ const (
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
 }
 
 func blank(value, fallback string) string {
@@ -137,11 +132,4 @@ func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []s
 
 func rejectDelegatedSyncOptions(spec ProviderSpec, req RunRequest) error {
 	return core.RejectDelegatedSyncOptionsForSpec(spec, req)
-}
-
-func now(rt Runtime) time.Time {
-	if rt.Clock != nil {
-		return rt.Clock.Now()
-	}
-	return time.Now()
 }

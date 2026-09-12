@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"reflect"
 	"strings"
@@ -65,6 +66,93 @@ func TestProviderSpec(t *testing.T) {
 	}
 	if aliases := (Provider{}).Aliases(); len(aliases) != 0 {
 		t.Fatalf("aliases=%v, want none", aliases)
+	}
+}
+
+func TestNebiusOrdinaryFlagMetadata(t *testing.T) {
+	initial := core.NebiusConfig{CLI: "nebius", Profile: "profile", ParentID: "parent", SubnetID: "subnet", Platform: "cpu-d3", Preset: "4vcpu-16gb", ImageFamily: "ubuntu24.04-driverless", DiskType: "network_ssd", DiskSizeGiB: 50, User: "crabbox", PublicIP: "dynamic", SecurityGroupIDs: []string{"prior"}, ServiceAccountID: "account", RecoveryPolicy: "fail"}
+	for _, tc := range []struct {
+		raw    string
+		groups []string
+		disk   int
+	}{{"", nil, 0}, {", ,", nil, -2}, {"none", []string{"none"}, 50}, {" a, ,b,a ", []string{"a", "b", "a"}, 50}} {
+		t.Run(fmt.Sprintf("%q", tc.raw), func(t *testing.T) {
+			cfg := core.Config{Provider: "other", SSHUser: "generic", WorkRoot: "/workspace/generic", ServerType: "generic", Nebius: initial}
+			before := cfg
+			fs := flag.NewFlagSet("metadata", flag.ContinueOnError)
+			values := (Provider{}).RegisterFlags(fs, cfg)
+			if fs.Lookup("nebius-security-group-ids").DefValue != "" {
+				t.Fatal("group scalar inherited nonempty default")
+			}
+			if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, before) {
+				t.Fatal("unvisited fields changed")
+			}
+			if err := fs.Parse([]string{"--nebius-cli=~/literal", "--nebius-profile= profile ", "--nebius-parent-id=parent", "--nebius-subnet-id=subnet", "--nebius-platform=cpu-d3", "--nebius-preset=4vcpu-16gb", "--nebius-image-family=ubuntu24.04-driverless", "--nebius-disk-type=network_ssd", fmt.Sprintf("--nebius-disk-size-gib=%d", tc.disk), "--nebius-user=crabbox", "--nebius-public-ip=dynamic", "--nebius-security-group-ids=first", "--nebius-security-group-ids=" + tc.raw, "--nebius-service-account-id=account", "--nebius-recovery-policy=fail"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			want := before
+			want.Nebius.CLI = "~/literal"
+			want.Nebius.Profile = " profile "
+			want.Nebius.DiskSizeGiB = tc.disk
+			want.Nebius.SecurityGroupIDs = tc.groups
+			core.RecordProviderFlagInputs(&want, true, "nebius")
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatal("all-field raw/equal/repeated/list/ledger application changed generic state")
+			}
+		})
+	}
+	for _, name := range []string{"nebius", "Nebius", " nebius ", "other"} {
+		cfg := core.Config{Provider: name, Nebius: initial}
+		fs := flag.NewFlagSet("validation", flag.ContinueOnError)
+		values := (Provider{}).RegisterFlags(fs, cfg)
+		if err := fs.Parse([]string{"--nebius-disk-size-gib=-1"}); err != nil {
+			t.Fatal(err)
+		}
+		before := cfg
+		for _, foreign := range []any{nil, struct{}{}} {
+			if err := (Provider{}).ApplyFlags(&cfg, fs, foreign); err != nil || !reflect.DeepEqual(cfg, before) {
+				t.Fatal("foreign values reached validation or mutation")
+			}
+		}
+		err := (Provider{}).ApplyFlags(&cfg, fs, values)
+		if name == "nebius" {
+			if err == nil || err.Error() != "nebius.diskSizeGiB must be positive" {
+				t.Fatalf("selected validation=%v", err)
+			}
+		} else if err != nil {
+			t.Fatalf("other spelling unexpectedly validated: %v", err)
+		}
+		want := before
+		want.Nebius.DiskSizeGiB = -1
+		core.RecordProviderFlagInputs(&want, true, "nebius")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatal("assignment before selected validation changed")
+		}
+	}
+	cfg := core.Config{Provider: "other", Nebius: initial}
+	fs := flag.NewFlagSet("empty", flag.ContinueOnError)
+	values := (Provider{}).RegisterFlags(fs, cfg)
+	var args []string
+	for _, name := range []string{"cli", "profile", "parent-id", "subnet-id", "platform", "preset", "image-family", "disk-type", "user", "public-ip", "security-group-ids", "service-account-id", "recovery-policy"} {
+		args = append(args, "--nebius-"+name+"=")
+	}
+	args = append(args, "--nebius-disk-size-gib=0")
+	if err := fs.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	want := core.Config{Provider: "other"}
+	core.RecordProviderFlagInputs(&want, true, "nebius")
+	if !reflect.DeepEqual(cfg, want) {
+		t.Fatal("empty visited fields did not clear without extra validation")
 	}
 }
 

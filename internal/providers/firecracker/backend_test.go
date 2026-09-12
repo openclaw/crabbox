@@ -7,6 +7,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +17,104 @@ import (
 	"github.com/containernetworking/cni/libcni"
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestFirecrackerOrdinaryFlagStages(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, duration := range []string{"bad", "0s", "-1s", " 2m ", "", "2m"} {
+		t.Run(duration, func(t *testing.T) {
+			cfg := core.Config{Provider: " FIRECRACKER ", SSHUser: "old", WorkRoot: "/old", SSHPort: " 2200 ", SSHFallbackPorts: []string{"2222"}, Firecracker: core.FirecrackerConfig{LaunchTimeout: time.Minute, DeleteOnRelease: true}}
+			want := cfg
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			values := RegisterFirecrackerProviderFlags(fs, cfg)
+			args := []string{"--firecracker-binary=~/ordinary", "--firecracker-jailer=~/ordinary", "--firecracker-kernel=~/ordinary", "--firecracker-rootfs=~/ordinary", "--firecracker-user= runner ", "--firecracker-work-root= /work/ordinary ", "--firecracker-cpus=0", "--firecracker-memory-mib=-2", "--firecracker-disk-mib=7", "--firecracker-network=cni", "--firecracker-cni-network=ordinary", "--firecracker-cni-conf-dir=~/ordinary", "--firecracker-cni-bin-dir=~/ordinary", "--firecracker-launch-timeout=" + duration, "--firecracker-delete-on-release=false"}
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			err := ApplyFirecrackerProviderFlags(&cfg, fs, values)
+			path := filepath.Join(home, "ordinary")
+			want.Firecracker.Binary, want.Firecracker.Jailer, want.Firecracker.Kernel, want.Firecracker.RootFS = path, path, path, path
+			want.Firecracker.CNIConfDir, want.Firecracker.CNIBinDir = path, path
+			want.Firecracker.User, want.SSHUser = " runner ", " runner "
+			want.Firecracker.WorkRoot, want.WorkRoot = " /work/ordinary ", " /work/ordinary "
+			want.Firecracker.CPUs, want.Firecracker.MemoryMiB, want.Firecracker.DiskMiB = 0, -2, 7
+			want.Firecracker.Network, want.Firecracker.CNINetwork = "cni", "ordinary"
+			core.RecordProviderFlagInputs(&want, true, "firecracker")
+			if duration == "" || duration == "2m" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if duration == "2m" {
+					want.Firecracker.LaunchTimeout = 2 * time.Minute
+				}
+				want.Firecracker.DeleteOnRelease = false
+				core.MarkDeleteOnReleaseExplicit(&want, "firecracker")
+				core.RecordProviderFlagIntents(&want, true, "firecracker")
+				want.Provider, want.TargetOS = "firecracker", "linux"
+				want.SSHUser, want.WorkRoot, want.SSHPort = "runner", "/work/ordinary", "2200"
+				want.SSHFallbackPorts = nil
+				want.ServerType = "microvm"
+			} else if err == nil || err.Error() != "invalid duration "+strconv.Quote(duration) {
+				t.Fatalf("error %v", err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("stage %#v want %#v", cfg, want)
+			}
+		})
+	}
+	for _, provider := range []string{" FIRECRACKER ", "other"} {
+		for _, sizing := range []string{"", "class", "type"} {
+			cfg := core.Config{Provider: provider}
+			before := cfg
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.String("class", "", "")
+			fs.String("type", "", "")
+			if sizing != "" {
+				if err := fs.Parse([]string{"--" + sizing + "=ordinary"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, values := range []any{nil, struct{}{}} {
+				err := ApplyFirecrackerProviderFlags(&cfg, fs, values)
+				if (err != nil) != (provider != "other" && sizing != "") || !reflect.DeepEqual(cfg, before) {
+					t.Fatalf("guard %q/%q %v", provider, sizing, err)
+				}
+			}
+		}
+	}
+}
+
+func TestManualConfigInputFlags(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "fixture-other"
+	fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+	values := RegisterFirecrackerProviderFlags(fs, cfg)
+	before := cfg
+	if err := ApplyFirecrackerProviderFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+		t.Fatalf("foreign values changed configuration: %v", err)
+	}
+	if err := ApplyFirecrackerProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	want := cfg
+	core.RecordProviderFlagInputs(&want, true, "firecracker")
+	if reflect.DeepEqual(cfg, want) {
+		t.Fatal("unvisited flags recorded input")
+	}
+	for repeat := 0; repeat < 2; repeat++ {
+		if err := fs.Set("firecracker-user", "fixture"); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyFirecrackerProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want = cfg
+		core.RecordProviderFlagInputs(&want, true, "firecracker")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatal("accepted/equal flag value was not recorded")
+		}
+	}
+}
 
 func TestProviderSpecAndAliases(t *testing.T) {
 	provider := Provider{}

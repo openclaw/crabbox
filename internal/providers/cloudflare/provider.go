@@ -26,6 +26,7 @@ func (Provider) Aliases() []string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:             core.DirectProviderAuthentication(core.ProviderAuthenticationAPIToken),
 		SyncGuardrailFullCandidate: true,
 		Name:                       providerName,
 		Family:                     "cloudflare",

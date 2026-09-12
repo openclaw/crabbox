@@ -2,7 +2,6 @@ package morph
 
 import (
 	"context"
-	"flag"
 	"io"
 	"strings"
 	"time"
@@ -44,10 +43,6 @@ func exit(code int, format string, args ...any) core.ExitError {
 
 func asExitError(err error, target *ExitError) bool {
 	return core.AsExitError(err, target)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
 }
 
 func blank(value, fallback string) string {

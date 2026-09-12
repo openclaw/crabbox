@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/prefixbuffer"
 )
 
 func controllerSubprocessTestTimeout(base time.Duration) time.Duration {
@@ -49,6 +51,39 @@ func (b *confirmedAbsentCleanupTestBackend) CleanupConfirmedAbsentLocalState(_ c
 
 func (r *fixedIdentityExecControllerRunner) ProviderIdentity(context.Context) (controllerProviderIdentity, error) {
 	return controllerProviderIdentity{Route: "external", Scope: "test-provider-scope", IdempotentFixedLeaseID: true}, nil
+}
+
+func TestFreestyleConfigLoadersAgree(t *testing.T) {
+	clearConfigEnv(t)
+	home, repo := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_FREESTYLE_MEMORY_GB", "16")
+	t.Chdir(repo)
+	userPath := userConfigPath()
+	if err := os.MkdirAll(filepath.Dir(userPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userPath, []byte("freestyle:\n  apiUrl: https://user.example.test\n  workdir: user-workdir\n  vcpus: 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "crabbox.yaml"), []byte("freestyle:\n  apiUrl: https://repo.example.test\n  workdir: repo-workdir\n  vcpus: 4\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := FreestyleConfig{APIURL: "https://user.example.test", Workdir: "repo-workdir", VCPUs: 4, MemoryGB: 16}
+	for _, load := range []func() (Config, error){
+		func() (Config, error) { return loadConfigWithOverrides("", "xcp-ng") },
+		func() (Config, error) { return loadControllerRunnerConfigState("", "xcp-ng", repo) },
+	} {
+		cfg, err := load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Freestyle != want {
+			t.Fatalf("Freestyle configuration = %#v, want %#v", cfg.Freestyle, want)
+		}
+	}
 }
 
 func TestControllerWarmupArgsUseFixedRoutingAndCapabilities(t *testing.T) {
@@ -1678,16 +1713,18 @@ func TestControllerAbsenceIdentitySetUsesEveryPersistedIdentity(t *testing.T) {
 	}
 }
 
-func TestControllerLimitedBufferReportsOverflow(t *testing.T) {
-	var output controllerLimitedBuffer
-	output.limit = 4
-	if n, err := output.Write([]byte("12345")); err != nil || n != 5 {
-		t.Fatalf("write bytes=%d err=%v", n, err)
+func TestControllerOutputReportsOverflow(t *testing.T) {
+	output := prefixbuffer.NewLimited(4)
+	if err := controllerOutputOverflowError(output.Exceeded(), "controller provider inventory", 4); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := io.Copy(&output, struct{ io.Reader }{strings.NewReader("12345")}); err != nil || n != 5 {
+		t.Fatalf("copied bytes=%d err=%v", n, err)
 	}
 	if got := output.String(); got != "1234" {
 		t.Fatalf("retained output=%q", got)
 	}
-	if err := output.overflowError("controller provider inventory"); err == nil || !strings.Contains(err.Error(), "exceeded 4-byte output limit") {
+	if err := controllerOutputOverflowError(output.Exceeded(), "controller provider inventory", 4); err == nil || err.Error() != "controller provider inventory exceeded 4-byte output limit" {
 		t.Fatalf("overflow error=%v", err)
 	}
 }

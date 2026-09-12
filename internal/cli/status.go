@@ -183,6 +183,15 @@ func statusTerminalState(state string) bool {
 	}
 }
 
+func statusSSHReadinessTimeout(target SSHTarget) time.Duration {
+	if isWindowsWSL2Target(target) {
+		// WSL startup, SFTP negotiation, and the Linux ready check share this
+		// budget; a healthy managed guest can exceed the ordinary four seconds.
+		return 30 * time.Second
+	}
+	return 4 * time.Second
+}
+
 func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarget) (statusView, error) {
 	server := lease.Server
 	target := lease.SSH
@@ -199,7 +208,7 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 	}
 	target = resolved.Target
 	state := blank(server.Labels["state"], server.Status)
-	ready := hasHost && leaseStatusStateCanBeReady(lease, state) && probeSSHReady(ctx, &target, 4*time.Second)
+	ready := hasHost && leaseStatusStateCanBeReady(lease, state) && probeSSHReady(ctx, &target, statusSSHReadinessTimeout(target))
 	meta := serverTailscaleMetadata(server)
 	var tailscale *TailscaleMetadata
 	if meta.Enabled {
@@ -215,6 +224,7 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		Slug:             serverSlug(server),
 		Provider:         provider,
 		TargetOS:         blank(server.Labels["target"], cfg.TargetOS),
+		WorkRoot:         statusWorkRoot(cfg, server, target),
 		WindowsMode:      blank(server.Labels["windows_mode"], cfg.WindowsMode),
 		State:            state,
 		ServerID:         serverID,
@@ -240,6 +250,11 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 	}, nil
 }
 
+func statusWorkRoot(cfg Config, server Server, target SSHTarget) string {
+	applyResolvedLeaseConfig(&cfg, server, &target)
+	return cfg.WorkRoot
+}
+
 func inspectProviderMetadata(provider string, metadata map[string]any) map[string]any {
 	if provider != "aws" {
 		return nil
@@ -263,6 +278,7 @@ type StatusView struct {
 	Slug        string `json:"slug,omitempty"`
 	Provider    string `json:"provider"`
 	TargetOS    string `json:"target"`
+	WorkRoot    string `json:"workroot,omitempty"`
 	WindowsMode string `json:"windowsMode,omitempty"`
 	State       string `json:"state"`
 	ServerID    string `json:"serverId"`
@@ -274,6 +290,7 @@ type StatusView struct {
 	Host                         string                   `json:"host"`
 	Pond                         string                   `json:"pond,omitempty"`
 	Network                      NetworkMode              `json:"network"`
+	NetworkDiagnostics           *LeaseNetworkDiagnostics `json:"networkDiagnostics,omitempty"`
 	Tailscale                    *TailscaleMetadata       `json:"tailscale,omitempty"`
 	SSHHost                      string                   `json:"sshHost"`
 	SSHHostKey                   string                   `json:"sshHostKey,omitempty"`

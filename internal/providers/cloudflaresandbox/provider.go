@@ -21,6 +21,7 @@ func (Provider) ServerTypeForClass(string) string       { return "" }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:             core.DirectProviderAuthentication(core.ProviderAuthenticationAPIToken),
 		SyncGuardrailFullCandidate: true,
 		Name:                       providerName,
 		Family:                     providerFamily,

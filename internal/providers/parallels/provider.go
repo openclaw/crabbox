@@ -18,6 +18,10 @@ func (Provider) Aliases() []string { return nil }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication: core.ProviderAuthentication{
+			{Route: "local-host", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationLocalContext}, Description: "The local host context runs prlctl on the same Mac."},
+			{Route: "remote-host", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationSSH}, Description: "A configured remote Mac is accessed through SSH; guest/bootstrap credentials are separate."},
+		},
 		Name:   "parallels",
 		Family: "parallels",
 		Kind:   core.ProviderKindSSHLease,
@@ -87,6 +91,7 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	windowsModeOverride := cfg.WindowsMode
 	if core.FlagWasSet(fs, "parallels-template") {
 		cfg.Parallels.Template = *v.Template
+		core.RecordProviderFlagInputs(cfg, true, "parallels")
 		if err := core.ApplyParallelsTemplateConfig(cfg, *v.Template); err != nil {
 			return err
 		}
@@ -99,49 +104,65 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	}
 	if core.FlagWasSet(fs, "parallels-source") {
 		cfg.Parallels.Source = *v.Source
+		core.RecordProviderFlagInputs(cfg, true, "parallels")
 		cfg.Parallels.SourceID = ""
+		core.RecordProviderFlagInputs(cfg, true, "parallels")
 	}
 	if core.FlagWasSet(fs, "parallels-source-id") {
 		cfg.Parallels.SourceID = *v.SourceID
+		core.RecordProviderFlagInputs(cfg, true, "parallels")
 	}
 	if core.FlagWasSet(fs, "parallels-source-snapshot") {
 		cfg.Parallels.SourceSnapshot = *v.SourceSnapshot
+		core.RecordProviderFlagInputs(cfg, true, "parallels")
 		cfg.Parallels.SourceSnapshotID = ""
+		core.RecordProviderFlagInputs(cfg, true, "parallels")
 	}
 	if core.FlagWasSet(fs, "parallels-source-snapshot-id") {
 		cfg.Parallels.SourceSnapshotID = *v.SourceSnapshotID
+		core.RecordProviderFlagInputs(cfg, true, "parallels")
 	}
 	if core.FlagWasSet(fs, "parallels-clone-mode") {
 		cfg.Parallels.CloneMode = *v.CloneMode
+		core.RecordProviderFlagInputs(cfg, true, "parallels")
 	}
 	if core.FlagWasSet(fs, "parallels-host") {
 		cfg.Parallels.Host = *v.Host
+		core.RecordProviderFlagInputs(cfg, true, "parallels")
 		// An explicit host is a direct-host override, not another fleet hint.
 		// Leaving configured fleet candidates here silently replaces the flag.
 		cfg.Parallels.Hosts = nil
+		core.RecordProviderFlagInputs(cfg, true, "parallels")
 		cfg.Parallels.SelectedHost = ""
+		core.RecordProviderFlagInputs(cfg, true, "parallels")
 	}
 	if core.FlagWasSet(fs, "parallels-host-user") {
 		cfg.Parallels.HostUser = *v.HostUser
+		core.RecordProviderFlagInputs(cfg, true, "parallels")
 	}
 	if core.FlagWasSet(fs, "parallels-host-key") {
 		cfg.Parallels.HostKey = core.ExpandUserPath(*v.HostKey)
+		core.RecordProviderFlagInputs(cfg, true, "parallels")
 	}
 	if core.FlagWasSet(fs, "parallels-vm-root") {
 		cfg.Parallels.VMRoot = core.ExpandUserPath(*v.VMRoot)
+		core.RecordProviderFlagInputs(cfg, true, "parallels")
 	}
 	if core.FlagWasSet(fs, "parallels-user") {
 		cfg.Parallels.User = *v.User
+		core.RecordProviderFlagInputs(cfg, true, "parallels")
 		cfg.SSHUser = *v.User
 	}
 	if core.FlagWasSet(fs, "parallels-work-root") {
 		cfg.Parallels.WorkRoot = *v.WorkRoot
+		core.RecordProviderFlagInputs(cfg, true, "parallels")
 		cfg.WorkRoot = *v.WorkRoot
 	}
 	if core.FlagWasSet(fs, "parallels-startup-timeout") {
 		if err := core.ApplyLeaseDuration(&cfg.Parallels.StartupTimeout, *v.StartupTimeout); err != nil {
 			return err
 		}
+		core.RecordProviderFlagInputs(cfg, *v.StartupTimeout != "", "parallels")
 	}
 	return nil
 }

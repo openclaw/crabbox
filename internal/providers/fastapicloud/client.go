@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -135,7 +136,7 @@ func newFastAPICloudClient(cfg Config, rt Runtime) (fastAPICloudAPI, error) {
 	if token == "" {
 		return nil, exit(2, "provider=%s requires FASTAPI_CLOUD_TOKEN", providerName)
 	}
-	apiURL, err := validateFastAPICloudAPIURL(blank(cfg.FastAPICloud.APIURL, "https://api.fastapicloud.com/api/v1"))
+	apiURL, err := validateFastAPICloudAPIURL(blank(cfg.FastAPICloud.APIURL, core.FastAPICloudConfigDefaultAPIURL))
 	if err != nil {
 		return nil, err
 	}

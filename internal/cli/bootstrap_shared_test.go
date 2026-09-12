@@ -57,6 +57,7 @@ func TestSharedBootstrapFixtures(t *testing.T) {
 				if cfg.WindowsMode == windowsModeWSL2 {
 					fragments["prelude"] = sharedWindowsNativePrelude()
 					fragments["trufflehog"] = sharedWslTruffleHogInstall()
+					fragments["node"] = sharedLinuxNodeInstall()
 				} else if cfg.Desktop {
 					fragments["prelude"] = sharedWindowsDesktopPrelude()
 					fragments["desktop"] = sharedWindowsDesktop()

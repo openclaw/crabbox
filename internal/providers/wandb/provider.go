@@ -28,6 +28,7 @@ func (Provider) DiagnosticSecrets(cfg core.Config) []string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		Name:             providerName,
 		Family:           "wandb",
 		Kind:             core.ProviderKindDelegatedRun,

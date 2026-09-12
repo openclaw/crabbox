@@ -154,6 +154,24 @@ CRABBOX_RUNPOD_USER
 CRABBOX_RUNPOD_WORK_ROOT
 ```
 
+### Input and default behavior
+
+The nine settings use shared typed bindings; API keys remain environment-only.
+Nonempty strings override prior values without trimming, while empty YAML or
+environment strings preserve them. Visited string flags can explicitly clear a
+value before the existing selected-provider defaults run.
+
+For `diskGB`, omitted/null/zero YAML preserves the prior value; a nonzero integer,
+including a negative value, assigns. The environment parser preserves the prior
+value for malformed input but accepts parsed zero and negative integers. Runtime
+defaults then replace a nonpositive disk size with 20 GB. File application and
+runtime defaulting are separate steps.
+
+The raw provider `user` and `workRoot` defaults remain empty. The values in the
+example above are effective settings: Runpod can inherit a custom generic SSH
+user or work root, otherwise using its existing `root` and `/tmp/crabbox`
+fallbacks. Endpoint provenance and credential-destination checks remain unchanged.
+
 ## Cost discipline
 
 Pods are terminated immediately on release. If `--keep` is set, the pod stays

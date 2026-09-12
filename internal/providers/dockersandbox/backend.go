@@ -40,7 +40,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if req.ActionsRunner {
 		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	cli, err := newSBXCLI(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -53,7 +53,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: docker-sandbox warmup keeps the sandbox until explicit stop\n")
 	}
-	total := b.now().Sub(started)
+	total := core.ClockNow(b.rt.Clock).Sub(started)
 	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
 		Provider: providerName,
 		LeaseID:  leaseID,
@@ -70,7 +70,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	if err != nil {
 		return RunResult{}, err
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	cli, err := newSBXCLI(b.cfg, b.rt)
 	if err != nil {
 		return RunResult{}, err
@@ -121,7 +121,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 				result.Session.Kept = false
 			}
 		}
-		result.Total = b.now().Sub(started)
+		result.Total = core.ClockNow(b.rt.Clock).Sub(started)
 		result = core.FinalizeRunResult(result, retErr)
 		if commandRan {
 			fmt.Fprintf(b.rt.Stderr, "docker-sandbox run summary sync_delegated=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
@@ -161,9 +161,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		defer cleanup()
 	}
 	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s sync_delegated=true\n", providerName, leaseID, sandboxName, workdir)
-	commandStart := b.now()
+	commandStart := core.ClockNow(b.rt.Clock)
 	exitCode, runErr := cli.execStream(ctx, sandboxName, workdir, envFile, command, b.rt.Stdout, b.rt.Stderr)
-	result.Command = b.now().Sub(commandStart)
+	result.Command = core.ClockNow(b.rt.Clock).Sub(commandStart)
 	result.CommandText = strings.Join(req.Command, " ")
 	commandRan = true
 	outcome := shared.FinalizeDelegatedCommandOutcome(exitCode, runErr)
@@ -251,9 +251,9 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	if err != nil {
 		return StatusView{}, err
 	}
-	deadline := b.now().Add(req.WaitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
 	if req.WaitTimeout <= 0 {
-		deadline = b.now().Add(5 * time.Minute)
+		deadline = core.ClockNow(b.rt.Clock).Add(5 * time.Minute)
 	}
 	for {
 		records, err := cli.list(ctx)
@@ -268,7 +268,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		if !req.Wait || view.Ready || dockerSandboxTerminalState(view.State) {
 			return view, nil
 		}
-		remaining := deadline.Sub(b.now())
+		remaining := deadline.Sub(core.ClockNow(b.rt.Clock))
 		if remaining <= 0 {
 			return StatusView{}, exit(5, "timed out waiting for docker-sandbox sandbox %s to become ready", sandboxName)
 		}
@@ -697,13 +697,6 @@ func sbxVersionMatchesBaseline(version string) bool {
 		}
 	}
 	return false
-}
-
-func (b *backend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }
 
 func writeDockerSandboxEnvFile(env map[string]string) (string, func(), error) {

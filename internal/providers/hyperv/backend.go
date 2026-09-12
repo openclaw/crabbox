@@ -72,13 +72,7 @@ func applyDefaults(cfg *Config) {
 			cfg.HyperV.User = "crabbox"
 		}
 	}
-	if cfg.HyperV.WorkRoot == "" {
-		if !core.IsDefaultWorkRoot(cfg.WorkRoot) {
-			cfg.HyperV.WorkRoot = cfg.WorkRoot
-		} else {
-			cfg.HyperV.WorkRoot = `C:\crabbox`
-		}
-	}
+	cfg.HyperV.WorkRoot = core.ResolveInheritedWorkRoot(cfg.HyperV.WorkRoot, cfg.WorkRoot, `C:\crabbox`)
 	if cfg.HyperV.CPUs <= 0 {
 		cfg.HyperV.CPUs = 4
 	}

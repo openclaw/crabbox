@@ -21,6 +21,7 @@ func (Provider) Aliases() []string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationSSH),
 		Name:             providerName,
 		Family:           "exe-dev",
 		Kind:             core.ProviderKindSSHLease,

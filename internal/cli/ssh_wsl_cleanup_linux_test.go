@@ -32,7 +32,7 @@ func startWSLLinuxFixture(t *testing.T, command string, payload []byte, declared
 	if _, err := exec.LookPath("setsid"); err != nil {
 		t.Fatal("native fixture requires the documented setsid prerequisite")
 	}
-	f := &wslLinuxFixture{directory: filepath.Join(t.TempDir(), "owned"), done: make(chan error, 1)}
+	f := &wslLinuxFixture{directory: filepath.Join(t.TempDir(), "owned"), output: newSynchronizedBuffer(0), done: make(chan error, 1)}
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)

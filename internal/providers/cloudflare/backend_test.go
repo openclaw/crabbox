@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -104,6 +105,105 @@ func TestCloudflareTokenFlagIsNotRegistered(t *testing.T) {
 	RegisterCloudflareProviderFlags(fs, cfg)
 	if fs.Lookup("cloudflare-token") != nil {
 		t.Fatal("cloudflare-token flag registered")
+	}
+}
+
+func TestCloudflareFlagNormalizationPrecedesValues(t *testing.T) {
+	for _, name := range []string{"cloudflare", "cf", " CF "} {
+		for _, tc := range []struct {
+			stored, want            string
+			explicit, visited, fail bool
+		}{{"", "standard-4", false, false, false}, {" STANDARD-2 ", "standard-2", false, true, false}, {"other", "standard-4", false, false, false}, {"other", "other", true, false, true}, {"other", "other", false, true, true}} {
+			cfg := Config{Provider: name, Class: "standard", ServerType: tc.stored, ServerTypeExplicit: tc.explicit}
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.String("type", "", "")
+			if tc.visited {
+				if err := fs.Parse([]string{"--type=example"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := ApplyCloudflareProviderFlags(&cfg, fs, struct{}{})
+			if tc.fail {
+				if err == nil || err.Error() != "cloudflare --type must be one of lite, basic, standard-1, standard-2, standard-3, standard-4" {
+					t.Fatalf("type normalization=%v", err)
+				}
+				continue
+			}
+			if err != nil || cfg.ServerType != tc.want || cfg.ServerTypeExplicit != (tc.explicit || tc.visited) {
+				t.Fatalf("name=%q type=%q explicit=%t error=%v", name, cfg.ServerType, cfg.ServerTypeExplicit, err)
+			}
+		}
+	}
+	cfg := Config{Provider: "cloudflare", Class: "standard", ServerType: "standard-4"}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := RegisterCloudflareProviderFlags(fs, cfg)
+	fs.VisitAll(func(f *flag.Flag) {
+		if strings.Contains(f.Name, "token") {
+			t.Fatal("token flag registered")
+		}
+	})
+	cfg.Cloudflare = CloudflareConfig{APIURL: "https://example.invalid/prior", Token: "inert", Workdir: "/workspace/prior"}
+	before := cfg
+	if err := ApplyCloudflareProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("unvisited flags changed config")
+	}
+	if err := fs.Parse([]string{"--cloudflare-url=", "--cloudflare-workdir="}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyCloudflareProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal("wrapper performed deferred URL/workdir validation")
+	}
+	before.Cloudflare.APIURL, before.Cloudflare.Workdir = "", ""
+	core.RecordProviderFlagInputs(&before, true, "cloudflare")
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("wrapper copied token or introduced central provenance marking")
+	}
+	if _, err := (Provider{}).Configure(cfg, Runtime{}); err != nil {
+		t.Fatalf("Configure URL validation=%v", err)
+	}
+}
+
+func TestCloudflareClientDeferredValidationAndWorkdirDefault(t *testing.T) {
+	cfg := Config{ServerType: "other", ServerTypeExplicit: true}
+	if _, err := newCloudflareClient(cfg, Runtime{HTTP: &http.Client{}}); err == nil || err.Error() != "cloudflare requires --cloudflare-url or CRABBOX_CLOUDFLARE_RUNNER_URL" {
+		t.Fatalf("URL-first=%v", err)
+	}
+	cfg.Cloudflare.APIURL = "relative"
+	if _, err := newCloudflareClient(cfg, Runtime{HTTP: &http.Client{}}); err == nil || err.Error() != "cloudflare requires CRABBOX_CLOUDFLARE_RUNNER_TOKEN or user-level config" {
+		t.Fatalf("token second=%v", err)
+	}
+	cfg.Cloudflare.Token = "inert"
+	if _, err := newCloudflareClient(cfg, Runtime{HTTP: &http.Client{}}); err == nil || !strings.Contains(err.Error(), "--type must be one of") {
+		t.Fatalf("type before URL syntax=%v", err)
+	}
+	cfg.ServerType = "standard-2"
+	if _, err := newCloudflareClient(cfg, Runtime{HTTP: &http.Client{}}); err == nil || err.Error() != `cloudflare url "relative" is invalid` {
+		t.Fatalf("URL syntax=%v", err)
+	}
+	cfg.Cloudflare.APIURL = " https://example.invalid/base/ "
+	client, err := newCloudflareClient(cfg, Runtime{HTTP: &http.Client{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.baseURL != "https://example.invalid/base" || client.instanceType != "standard-2" {
+		t.Fatal("constructor normalization changed")
+	}
+	for _, tc := range []struct{ raw, want string }{{"", "/workspace/crabbox"}, {"  ", "/workspace/crabbox"}, {" /workspace/app/ ", "/workspace/app"}} {
+		cfg.Cloudflare.Workdir = tc.raw
+		before := cfg.Cloudflare
+		got, err := cloudflareWorkdir(cfg)
+		if err != nil || got != tc.want {
+			t.Fatalf("workdir=%q error=%v", got, err)
+		}
+		if cfg.Cloudflare != before {
+			t.Fatal("workdir read changed config")
+		}
+		if strings.TrimSpace(tc.raw) == "" && got != core.BaseConfig().Cloudflare.Workdir {
+			t.Fatal("Go workdir differs from configured default")
+		}
 	}
 }
 

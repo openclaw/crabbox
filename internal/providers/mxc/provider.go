@@ -16,6 +16,7 @@ func (Provider) Name() string      { return providerName }
 func (Provider) Aliases() []string { return []string{"execution-container"} }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationLocalContext),
 		Name:             providerName,
 		Family:           "sandbox",
 		Kind:             core.ProviderKindDelegatedRun,

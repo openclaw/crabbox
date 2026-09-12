@@ -2,9 +2,58 @@ package cli
 
 import (
 	"context"
+	"io"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestGenericNetworkFlagInputAcceptance(t *testing.T) {
+	for _, args := range [][]string{nil, {"--network=auto"}, {"--tailscale=false"}, {"--tailscale-tags="}, {"--tailscale-hostname-template="}, {"--tailscale-exit-node="}, {"--tailscale-exit-node-allow-lan-access=false"}} {
+		t.Run(strings.Join(args, ","), func(t *testing.T) {
+			cfg := baseConfig()
+			fs := newFlagSet("network inputs", io.Discard)
+			values := registerNetworkFlags(fs, cfg)
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyNetworkFlagOverrides(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			got := cfg.inputProvenance.summary(configInputGeneric)
+			if (got.state == "present") != (len(args) > 0) || got.complete {
+				t.Fatalf("summary=%#v", got)
+			}
+		})
+	}
+	for _, value := range []string{"", "synthetic-value"} {
+		name := "dynamic-missing"
+		if value != "" {
+			name = "dynamic-present"
+		}
+		t.Run(name, func(t *testing.T) {
+			const name = "CRABBOX_TEST_GENERIC_NETWORK_INPUT"
+			t.Setenv(name, value)
+			cfg := baseConfig()
+			fs := newFlagSet("network inputs", io.Discard)
+			values := registerNetworkFlags(fs, cfg)
+			if err := fs.Parse([]string{"--tailscale-auth-key-env=" + name}); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyNetworkFlagOverrides(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"flag"}
+			if value != "" {
+				want = []string{"environment", "flag"}
+			}
+			got := cfg.inputProvenance.summary(configInputGeneric)
+			if !reflect.DeepEqual(got.sources, want) || cfg.Tailscale.AuthKey != value {
+				t.Fatal("dynamic input source or value mismatch")
+			}
+		})
+	}
+}
 
 func TestNetworkPublicIgnoresTailscaleMetadata(t *testing.T) {
 	cfg := baseConfig()

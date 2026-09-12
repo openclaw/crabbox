@@ -404,6 +404,7 @@ The core provider contract lives in `internal/cli`:
 
 ```text
 internal/cli/provider_backend.go      # interfaces, registry, request/result types
+internal/cli/provider_name.go         # pure normalized/exact name membership
 internal/cli/provider_coordinator.go  # brokered coordinator lease wrapper
 internal/cli/provider_labels.go       # shared direct-provider label helpers
 ```
@@ -482,6 +483,25 @@ Cross-process provider lease serialization also belongs in
 semaphore, advisory file lock, retry cadence, and idempotent release. Adapters
 retain provider-specific lease ID validation, namespace preparation, and
 diagnostics; the provider name selects the existing on-disk lock filename.
+
+Raw byte-prefix storage lives in `internal/prefixbuffer`. Core command capture,
+controller responses, coordinator token helpers, and SSH capture share it. Finite
+nonpositive limits discard output; unlimited capture requires explicit construction.
+Command and SSH wrappers preserve their nonpositive-limit unlimited behavior. Callers
+retain cancellation, labelled errors, and independent file-watcher overflow.
+The buffer has no locking or truncation markers, and `Bytes` returns a borrowed
+view. Byte tails, line tails, and UTF-8-aware logs remain separate storage policies.
+SSH retains its mutex-protected cloned snapshots and hides ordinary snapshots
+after truncation; its bounded diagnostic view still exposes the retained prefix
+and overflow flag.
+
+Raw byte-tail storage lives in `internal/tailbuffer`. Agent Sandbox stderr and
+Blacksmith proof streams share its finite last-N-byte retention and discard
+observation; it does not normalize text, lock, or add markers. Agent Sandbox
+retains stderr delivery order and native exit classification. Blacksmith keeps
+its mutex, cloned snapshots, first Actions URL detection before eviction, and
+the historical proof marker for a full-sized incoming chunk. Its URL scan carry
+uses the same storage owner without sharing URL policy with the leaf.
 
 Strict one-request/one-response JSON subprocesses may use
 `internal/providers/shared/procjson`. It owns bounded capture, cancellation
@@ -667,6 +687,23 @@ type Provider interface {
 }
 ```
 
+Normalized selection guards use `cli.ProviderNameMatches(name, Provider{})` so
+`Name()` and `Aliases()` remain the single name-set owner. The matcher reads only
+that metadata and uses the existing name normalizer; it does not look up or
+register a provider, call `Spec` or `Configure`, or mutate configuration. Keep
+the check at its existing position relative to flag copying and validation.
+
+This is not a replacement for raw comparisons, case-fold-only comparisons,
+provider-family routing, or historical claim-provider interpretation. Those
+callers retain their own contracts rather than automatically accepting future
+selection aliases.
+
+For a guard whose contract is raw equality against the complete declared name
+set, use `cli.ProviderNameMatchesExact(name, Provider{})`. It compares both the
+input and metadata unchanged: case and surrounding whitespace remain significant.
+Keep canonical-only constant checks as they are when there is no duplicated alias
+set. Neither matcher changes claim/history interpretation or owns validation order.
+
 A minimal SSH provider package:
 
 ```go
@@ -759,6 +796,12 @@ Pick `Kind` carefully:
 - `ProviderKindServiceControl`: provider inspects or controls an existing
   hosted service instead of leasing a run surface (for example `railway` and
   `fastapi-cloud`).
+
+FastAPI Cloud, Railway, and Unikraft Cloud share their ordered unsupported-run
+option checks through `shared.RejectServiceRunOptions`. The adapters retain
+their lifecycle and shell explanations, request-ID requirements, and final
+command refusal. These checks do not grant a service an execution capability or
+contact its API.
 
 `Targets` should describe what the provider can actually satisfy. Use `linux`,
 `macos`, or `windows` only for real operating-system targets. Use
@@ -888,6 +931,19 @@ each `Provider.RegisterFlags` invocation, and treats everything else registered
 by `run` as a shared command flag. It never calls `ApplyFlags` or `Configure`.
 Do not add a parallel flag inventory.
 
+Providers that reject both explicit `--class` and `--type` can share
+`shared.RejectExplicitMachineSizingFlags`. It checks flag visits rather than
+inherited config values, rejects class before type regardless of argument order,
+and retains the caller's canonical provider name and literal guidance. An empty
+explicit value is still a visit. The helper does not select a provider, mutate
+configuration, register flags, or infer admission from class-mapping metadata.
+
+Keep its call at the provider's existing validation position. In particular,
+value-type assertions may precede the guard, and target/expose checks or field
+application may follow it. Single-flag rejection, supported type mapping, and
+providers without this rejection policy remain distinct contracts; do not use
+the pair helper to change them.
+
 Pattern for a provider with typed config fields:
 
 ```go
@@ -933,6 +989,15 @@ Blacksmith does) when the config type is not ready to export cleanly.
 
 If a provider needs durable config, add typed config fields in `Config` and env
 overrides in `config.go`.
+
+`cli.ResolveInheritedWorkRoot` shares the raw work-root decision used by exe.dev
+(core loading and backend defaults), Runpod, Multipass, Hyper-V, and Tart. A
+nonempty provider root wins; otherwise a generic root that is not an exact
+portable default is inherited, or the caller's fallback is used. The resolver
+does not trim, normalize paths, inspect markers or targets, validate directories,
+or mutate configuration. Keep subsequent generic-root copies and other default
+assignments at their existing call sites. Providers with trimmed classifiers,
+explicit-root markers, or different projection rules retain their own policy.
 
 Never pass provider secrets as command-line arguments. Use environment variables,
 local SDK config, the broker, or a credential store outside repo config.

@@ -7,50 +7,28 @@ import (
 	"path"
 	"strings"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type flagValues struct {
-	URL             *string
-	Workdir         *string
-	ExecTimeoutSecs *int
-	ForgetMissing   *bool
-}
-
 func RegisterProviderFlags(fs *flag.FlagSet, defaults Config) any {
-	cfg := defaults.CloudflareSandbox
-	return flagValues{
-		URL:             fs.String("cloudflare-sandbox-url", cfg.BridgeURL, "Cloudflare Sandbox bridge URL"),
-		Workdir:         fs.String("cloudflare-sandbox-workdir", cfg.Workdir, "Absolute working directory inside the sandbox"),
-		ExecTimeoutSecs: fs.Int("cloudflare-sandbox-exec-timeout-secs", cfg.ExecTimeoutSecs, "command timeout in seconds (0 = bridge default)"),
-		ForgetMissing:   fs.Bool("cloudflare-sandbox-forget-missing", cfg.ForgetMissing, "remove the local claim when stop gets 404 (explicit stale-claim cleanup)"),
-	}
+	return core.RegisterCloudflareSandboxConfigFlags(fs, defaults.CloudflareSandbox)
 }
 
 func ApplyProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if strings.EqualFold(strings.TrimSpace(cfg.Provider), providerName) {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=%s", providerName)
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=%s", providerName)
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
+			return err
 		}
 	}
-	v, ok := values.(flagValues)
+	v, ok := values.(core.CloudflareSandboxConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "cloudflare-sandbox-url") {
-		cfg.CloudflareSandbox.BridgeURL = *v.URL
-	}
-	if flagWasSet(fs, "cloudflare-sandbox-workdir") {
-		cfg.CloudflareSandbox.Workdir = *v.Workdir
-	}
-	if flagWasSet(fs, "cloudflare-sandbox-exec-timeout-secs") {
-		cfg.CloudflareSandbox.ExecTimeoutSecs = *v.ExecTimeoutSecs
-	}
-	if flagWasSet(fs, "cloudflare-sandbox-forget-missing") {
-		cfg.CloudflareSandbox.ForgetMissing = *v.ForgetMissing
+	applied, err := v.Apply(&cfg.CloudflareSandbox, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	if err != nil {
+		return err
 	}
 	return validateProviderConfig(*cfg)
 }
@@ -71,7 +49,7 @@ func validateProviderConfig(cfg Config) error {
 func cloudflareSandboxWorkdir(cfg Config) (string, error) {
 	workdir := strings.TrimSpace(cfg.CloudflareSandbox.Workdir)
 	if workdir == "" {
-		workdir = defaultWorkdir
+		workdir = core.CloudflareSandboxConfigDefaultWorkdir
 	}
 	if !path.IsAbs(workdir) {
 		return "", exit(2, "%s workdir must be absolute", providerName)

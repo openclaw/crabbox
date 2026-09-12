@@ -54,7 +54,7 @@ func (b *orgoBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if req.Options.Tailscale.Enabled {
 		return exit(2, "provider=%s is delegated-run only and does not support Tailscale options", providerName)
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	client, err := b.api()
 	if err != nil {
 		return err
@@ -67,7 +67,7 @@ func (b *orgoBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: orgo warmup keeps the computer until explicit stop\n")
 	}
-	total := b.now().Sub(started)
+	total := core.ClockNow(b.rt.Clock).Sub(started)
 	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
 		Provider: providerName,
 		LeaseID:  lease.LeaseID,
@@ -83,7 +83,7 @@ func (b *orgoBackend) Run(ctx context.Context, req RunRequest) (result RunResult
 	if len(req.Command) == 0 {
 		return RunResult{}, exit(2, "missing command")
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	client, err := b.api()
 	if err != nil {
 		return RunResult{}, err
@@ -120,7 +120,7 @@ func (b *orgoBackend) Run(ctx context.Context, req RunRequest) (result RunResult
 				result, retErr = shared.AppendDelegatedRunFailure(result, retErr, fmt.Errorf("orgo cleanup failed for %s: %w", lease.Computer.ID, cleanupErr), 1)
 			}
 		}
-		result.Total = b.now().Sub(started)
+		result.Total = core.ClockNow(b.rt.Clock).Sub(started)
 		result = core.FinalizeRunResult(result, retErr)
 		if commandRan {
 			fmt.Fprintf(b.rt.Stderr, "orgo run summary sync_delegated=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
@@ -144,9 +144,9 @@ func (b *orgoBackend) Run(ctx context.Context, req RunRequest) (result RunResult
 	if req.EnvSummary {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
-	commandStarted := b.now()
+	commandStarted := core.ClockNow(b.rt.Clock)
 	exitCode, runErr := client.RunBash(ctx, lease.Computer.ID, command, b.rt.Stdout, b.rt.Stderr)
-	result.Command = b.now().Sub(commandStarted)
+	result.Command = core.ClockNow(b.rt.Clock).Sub(commandStarted)
 	commandRan = true
 	if runErr != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, lease.LeaseID, lease.Slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
@@ -202,7 +202,7 @@ func (b *orgoBackend) Status(ctx context.Context, req StatusRequest) (StatusView
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
 	}
-	deadline := b.now().Add(timeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(timeout)
 	for {
 		view := orgoStatusView(lease)
 		if !req.Wait || view.Ready {
@@ -212,7 +212,7 @@ func (b *orgoBackend) Status(ctx context.Context, req StatusRequest) (StatusView
 		case "error", "failed", "deleted":
 			return view, exit(5, "orgo computer %s entered %s state", lease.Computer.ID, view.State)
 		}
-		if b.now().After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return StatusView{}, exit(5, "timed out waiting for orgo computer %s to become ready", lease.Computer.ID)
 		}
 		select {
@@ -399,7 +399,7 @@ func (b *orgoBackend) ensureComputerRunning(ctx context.Context, client orgoAPI,
 }
 
 func (b *orgoBackend) waitForComputerRunning(ctx context.Context, client orgoAPI, computer orgoComputer, startStopped bool) (orgoComputer, error) {
-	deadline := b.now().Add(orgoReadyTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(orgoReadyTimeout)
 	startRequested := false
 	initial := true
 	_, err := shared.Poll(context.WithoutCancel(ctx), 0, orgoReadyPollInterval,
@@ -444,7 +444,7 @@ func (b *orgoBackend) waitForComputerRunning(ctx context.Context, client orgoAPI
 					state = "starting"
 				}
 			}
-			if !b.now().Before(deadline) {
+			if !core.ClockNow(b.rt.Clock).Before(deadline) {
 				return false, exit(5, "timed out waiting for orgo computer %s to become running (last state=%s)", computer.ID, state)
 			}
 			return false, nil
@@ -488,7 +488,7 @@ func (b *orgoBackend) claimLease(repo Repo, lease orgoLease, reclaim bool) error
 }
 
 func orgoClaimScope(cfg Config, workspaceID string) string {
-	endpoint := strings.TrimRight(strings.TrimSpace(blank(cfg.Orgo.APIBase, defaultAPIBase)), "/")
+	endpoint := strings.TrimRight(strings.TrimSpace(blank(cfg.Orgo.APIBase, core.OrgoConfigDefaultAPIBase)), "/")
 	if parsed, err := url.Parse(endpoint); err == nil && parsed.Host != "" {
 		parsed.Scheme = strings.ToLower(parsed.Scheme)
 		parsed.Host = strings.ToLower(parsed.Host)
@@ -795,25 +795,18 @@ func applyOrgoDefaults(cfg *Config) {
 		cfg.TargetOS = targetLinux
 	}
 	if strings.TrimSpace(cfg.Orgo.APIBase) == "" {
-		cfg.Orgo.APIBase = defaultAPIBase
+		cfg.Orgo.APIBase = core.OrgoConfigDefaultAPIBase
 	}
 	if cfg.Orgo.RAMGB <= 0 {
-		cfg.Orgo.RAMGB = 4
+		cfg.Orgo.RAMGB = core.OrgoConfigDefaultRAMGB
 	}
 	if cfg.Orgo.CPUs <= 0 {
-		cfg.Orgo.CPUs = 1
+		cfg.Orgo.CPUs = core.OrgoConfigDefaultCPUs
 	}
 	if cfg.Orgo.DiskGB <= 0 {
-		cfg.Orgo.DiskGB = 8
+		cfg.Orgo.DiskGB = core.OrgoConfigDefaultDiskGB
 	}
 	if strings.TrimSpace(cfg.Orgo.Resolution) == "" {
-		cfg.Orgo.Resolution = "1280x720x24"
+		cfg.Orgo.Resolution = core.OrgoConfigDefaultResolution
 	}
-}
-
-func (b *orgoBackend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }

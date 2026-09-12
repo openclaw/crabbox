@@ -505,7 +505,7 @@ func (b *backend) Doctor(_ context.Context, _ DoctorRequest) (DoctorResult, erro
 	}
 	return DoctorResult{
 		Provider: providerName,
-		Status:   aggregateDoctorStatus(checks),
+		Status:   core.DoctorChecksStatus(checks),
 		Message:  summarizeDoctorChecks(checks),
 		Checks:   checks,
 	}, nil
@@ -1023,20 +1023,6 @@ func openKVMDevice() error {
 		return err
 	}
 	return file.Close()
-}
-
-func aggregateDoctorStatus(checks []DoctorCheck) string {
-	for _, check := range checks {
-		if strings.EqualFold(strings.TrimSpace(check.Status), "failed") || strings.EqualFold(strings.TrimSpace(check.Status), "missing") {
-			return "failed"
-		}
-	}
-	for _, check := range checks {
-		if strings.EqualFold(strings.TrimSpace(check.Status), "warning") {
-			return "warning"
-		}
-	}
-	return "ok"
 }
 
 func summarizeDoctorChecks(checks []DoctorCheck) string {

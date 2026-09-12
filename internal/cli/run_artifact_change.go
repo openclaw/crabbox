@@ -68,10 +68,8 @@ func snapshotArtifactChanges(ctx context.Context, target SSHTarget, workdir stri
 	if len(paths) == 0 {
 		return nil, nil
 	}
-	var output synchronizedBuffer
-	output.limit = 4*((maxArtifactChangeTotalBytes+2)/3) + 1024
-	var diagnostic synchronizedBuffer
-	diagnostic.limit = 4096
+	output := newSynchronizedBuffer(4*((maxArtifactChangeTotalBytes+2)/3) + 1024)
+	diagnostic := newSynchronizedBuffer(4096)
 	script := artifactChangeSnapshotScript(workdir, paths)
 	if err := runSSHInput(ctx, target, remoteRunArtifactShellInputCommand(target), strings.NewReader(script), &output, &diagnostic); err != nil {
 		return nil, exit(7, "artifact change snapshot: %v: %s", err, strings.TrimSpace(diagnostic.String()))

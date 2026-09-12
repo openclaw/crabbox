@@ -520,7 +520,7 @@ type directTransport struct {
 func (t *directTransport) Mode() string { return "direct" }
 
 func (t *directTransport) binary() string {
-	return blank(strings.TrimSpace(t.cfg.CloudRunSandbox.CLIPath), defaultCLIPath)
+	return blank(strings.TrimSpace(t.cfg.CloudRunSandbox.CLIPath), core.CloudRunSandboxConfigDefaultCLIPath)
 }
 
 func (t *directTransport) baseArgs() []string { return nil }

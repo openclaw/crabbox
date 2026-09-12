@@ -18,6 +18,7 @@ func (Provider) Aliases() []string { return []string{"unikraftcloud", "ukc"} }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		Name:             providerName,
 		Family:           "unikraft-cloud",
 		Kind:             core.ProviderKindServiceControl,

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -99,7 +100,7 @@ var newAzureDynamicSessionsClient = func(ctx context.Context, cfg Config, rt Run
 	httpClient, dataHTTPClient := shared.ControlAndDataHTTPClients(rt.HTTP, azureDynamicSessionsControlTimeout)
 	return &azureDynamicSessionsClient{
 		endpoint:             endpoint,
-		managementAPIVersion: blank(strings.TrimSpace(cfg.AzureDynamicSessions.APIVersion), "2025-02-02-preview"),
+		managementAPIVersion: blank(strings.TrimSpace(cfg.AzureDynamicSessions.APIVersion), core.AzureDynamicSessionsConfigDefaultAPIVersion),
 		token:                token,
 		httpClient:           httpClient,
 		dataHTTPClient:       dataHTTPClient,
@@ -538,7 +539,7 @@ func azureDynamicSessionsTimeoutSeconds(cfg Config) int {
 		if cfg.TTL > 0 {
 			return durationSecondsCeil(cfg.TTL)
 		}
-		return 1800
+		return core.AzureDynamicSessionsConfigDefaultTimeoutSecs
 	}
 	return timeout
 }

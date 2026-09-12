@@ -243,7 +243,7 @@ func TestScalewayRedirectGuardUsesEffectiveOrigin(t *testing.T) {
 
 func TestApplyScalewayOverridesPreservesSDKLocationWithoutExplicitCrabboxValue(t *testing.T) {
 	profile := &scw.Profile{DefaultRegion: scw.StringPtr("nl-ams"), DefaultZone: scw.StringPtr("nl-ams-1")}
-	cfg := core.Config{Scaleway: core.ScalewayConfig{Region: defaultRegion, Zone: defaultZone}}
+	cfg := core.Config{Scaleway: core.ScalewayConfig{Region: "fr-par", Zone: "fr-par-1"}}
 	applyCrabboxScalewayOverrides(profile, cfg)
 	if got := stringPtrValue(profile.DefaultRegion); got != "nl-ams" {
 		t.Fatalf("region=%q", got)
@@ -255,14 +255,14 @@ func TestApplyScalewayOverridesPreservesSDKLocationWithoutExplicitCrabboxValue(t
 
 func TestApplyScalewayOverridesUsesExplicitCrabboxLocation(t *testing.T) {
 	profile := &scw.Profile{DefaultRegion: scw.StringPtr("nl-ams"), DefaultZone: scw.StringPtr("nl-ams-1")}
-	cfg := core.Config{Scaleway: core.ScalewayConfig{Region: defaultRegion, Zone: defaultZone}}
+	cfg := core.Config{Scaleway: core.ScalewayConfig{Region: "fr-par", Zone: "fr-par-1"}}
 	core.SetScalewayRegionExplicit(&cfg)
 	core.SetScalewayZoneExplicit(&cfg)
 	applyCrabboxScalewayOverrides(profile, cfg)
-	if got := stringPtrValue(profile.DefaultRegion); got != defaultRegion {
+	if got := stringPtrValue(profile.DefaultRegion); got != "fr-par" {
 		t.Fatalf("region=%q", got)
 	}
-	if got := stringPtrValue(profile.DefaultZone); got != defaultZone {
+	if got := stringPtrValue(profile.DefaultZone); got != "fr-par-1" {
 		t.Fatalf("zone=%q", got)
 	}
 }
@@ -273,7 +273,7 @@ func TestApplyScalewayLocationDefaultsOnlyFillsMissingSDKValues(t *testing.T) {
 	if got := stringPtrValue(profile.DefaultRegion); got != "nl-ams" {
 		t.Fatalf("region=%q", got)
 	}
-	if got := stringPtrValue(profile.DefaultZone); got != defaultZone {
+	if got := stringPtrValue(profile.DefaultZone); got != "fr-par-1" {
 		t.Fatalf("zone=%q", got)
 	}
 }
@@ -505,4 +505,56 @@ func (l *captureScalewayLogger) String() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.text.String()
+}
+
+func TestScalewayBindingProfilePrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		region, zone         string
+		explicit             bool
+		wantRegion, wantZone string
+	}{{"fr-par", "fr-par-1", false, "nl-ams", "nl-ams-1"}, {"fr-par", "fr-par-1", true, "fr-par", "fr-par-1"}, {"  ", "  ", true, "fr-par", "fr-par-1"}, {"", "", true, "fr-par", "fr-par-1"}, {"  ", "  ", false, "nl-ams", "nl-ams-1"}, {" pl-waw ", " pl-waw-2 ", true, "pl-waw", "pl-waw-2"}} {
+		cfg := core.Config{Scaleway: core.ScalewayConfig{Region: tc.region, Zone: tc.zone, Image: "  ", Type: "  ", ProjectID: " project-fixture ", OrganizationID: " org-fixture "}, Class: "standard"}
+		if tc.explicit {
+			core.SetScalewayRegionExplicit(&cfg)
+			core.SetScalewayZoneExplicit(&cfg)
+		}
+		b := Backend{cfg: cfg}
+		effective := b.cfgForRun()
+		if effective.Scaleway.Image != "ubuntu_noble" || effective.Scaleway.Type != "DEV1-S" || core.ScalewayRegionWasExplicit(effective) != tc.explicit || core.ScalewayZoneWasExplicit(effective) != tc.explicit || b.cfg.Scaleway.Region != tc.region {
+			t.Fatal("effective fallback/marker/copy phase changed")
+		}
+		profile := &scw.Profile{DefaultRegion: scw.StringPtr("nl-ams"), DefaultZone: scw.StringPtr("nl-ams-1"), DefaultProjectID: scw.StringPtr("project-prior"), DefaultOrganizationID: scw.StringPtr("org-prior")}
+		applyCrabboxScalewayOverrides(profile, effective)
+		applyScalewayLocationDefaults(profile)
+		if stringPtrValue(profile.DefaultRegion) != tc.wantRegion || stringPtrValue(profile.DefaultZone) != tc.wantZone || stringPtrValue(profile.DefaultProjectID) != "project-fixture" || stringPtrValue(profile.DefaultOrganizationID) != "org-fixture" {
+			t.Fatalf("profile region=%q zone=%q", stringPtrValue(profile.DefaultRegion), stringPtrValue(profile.DefaultZone))
+		}
+		if tc.explicit && strings.TrimSpace(tc.region) == "" {
+			direct := &scw.Profile{DefaultRegion: scw.StringPtr("nl-ams"), DefaultZone: scw.StringPtr("nl-ams-1")}
+			applyCrabboxScalewayOverrides(direct, cfg)
+			if stringPtrValue(direct.DefaultRegion) != "nl-ams" || stringPtrValue(direct.DefaultZone) != "nl-ams-1" {
+				t.Fatal("raw blank override should defer before effective fallback")
+			}
+		}
+	}
+	for _, tc := range []struct {
+		region, zone         *string
+		wantRegion, wantZone string
+	}{{nil, nil, "fr-par", "fr-par-1"}, {nil, scw.StringPtr("nl-ams-2"), "fr-par", "nl-ams-2"}, {scw.StringPtr("nl-ams"), nil, "nl-ams", "fr-par-1"}, {scw.StringPtr("  "), scw.StringPtr("nl-ams-2"), "fr-par", "nl-ams-2"}} {
+		profile := &scw.Profile{DefaultRegion: tc.region, DefaultZone: tc.zone}
+		applyScalewayLocationDefaults(profile)
+		if stringPtrValue(profile.DefaultRegion) != tc.wantRegion || stringPtrValue(profile.DefaultZone) != tc.wantZone {
+			t.Fatal("independent profile defaults changed")
+		}
+	}
+	p := Provider{}
+	if p.ServerTypeForClass("standard") != "DEV1-S" || p.ServerTypeForClass("unknown") != "DEV1-S" {
+		t.Fatal("fixed class fallback changed")
+	}
+	for _, raw := range []string{"", "  "} {
+		cfg := core.Config{Scaleway: core.ScalewayConfig{Region: raw, Zone: raw, Image: raw}}
+		if regionForConfig(cfg) != "fr-par" || zoneForConfig(cfg) != "fr-par-1" || imageForConfig(cfg) != "ubuntu_noble" {
+			t.Fatal("trimmed config fallback changed")
+		}
+	}
 }

@@ -1289,19 +1289,42 @@ func TestWebVNCPortalCredentialsPreserveParallelsVNCMode(t *testing.T) {
 }
 
 func TestWebVNCResetRemoteCommandHandlesWaylandAndX11(t *testing.T) {
-	got := webVNCResetRemoteCommand(SSHTarget{TargetOS: targetLinux})
-	for _, want := range []string{
-		"/var/lib/crabbox/desktop.env",
-		"/usr/local/bin/crabbox-start-desktop",
-		`CRABBOX_DESKTOP_ENV:-xfce`,
-		"crabbox-desktop.service crabbox-wayvnc.service",
-		"crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service",
-		"crabbox-desktop.service crabbox-x11vnc.service",
-		"crabbox-desktop-session.service crabbox-x11vnc.service",
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell")
+	}
+	for _, tc := range []struct{ mode, want string }{
+		{"wayland", "crabbox-desktop.service crabbox-wayvnc.service"},
+		{"tiger", "crabbox-xvfb.service crabbox-desktop.service"},
+		{"x11", "crabbox-desktop.service crabbox-x11vnc.service"},
 	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("reset command missing %q:\n%s", want, got)
-		}
+		t.Run(tc.mode, func(t *testing.T) {
+			dir := t.TempDir()
+			command := strings.NewReplacer(
+				"/var/lib/crabbox/desktop.env", filepath.Join(dir, "desktop.env"),
+				"/usr/local/bin/crabbox-start-desktop", filepath.Join(dir, "start-desktop"),
+			).Replace(webVNCResetRemoteCommand(SSHTarget{TargetOS: targetLinux}))
+			fixture := `sudo() { "$@"; }
+systemctl() {
+  if [ "$1" = cat ]; then
+    [ "$FIXTURE_MODE" = tiger ] && [ "$2" = crabbox-xvfb.service ] && { echo Xtigervnc; return; }
+    [ "$2" = crabbox-desktop.service ]; return
+  fi
+  [ "$1" = restart ] || return 2
+  shift
+  for unit in "$@"; do [ "$unit" != crabbox-desktop-session.service ] || return 3; done
+  printf '%s\n' "$*"
+}
+`
+			cmd := exec.Command("sh", "-c", fixture+command)
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "FIXTURE_MODE=" + tc.mode}
+			if tc.mode == "wayland" {
+				cmd.Env = append(cmd.Env, "CRABBOX_DESKTOP_ENV=wayland")
+			}
+			out, err := cmd.CombinedOutput()
+			if err != nil || strings.TrimSpace(string(out)) != tc.want {
+				t.Fatalf("reset got %q, %v; want restarted session services %q", out, err, tc.want)
+			}
+		})
 	}
 }
 

@@ -1,5 +1,7 @@
 package crownest
 
+import core "github.com/openclaw/crabbox/internal/cli"
+
 import (
 	"flag"
 	"net/url"
@@ -8,51 +10,24 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type flagValues struct {
-	APIURL        *string
-	ProjectID     *string
-	Template      *string
-	TimeoutSecs   *int
-	ForgetMissing *bool
-}
-
 func registerFlags(fs *flag.FlagSet, defaults Config) any {
-	return flagValues{
-		APIURL:        fs.String("crownest-url", defaults.Crownest.APIURL, "Trusted CrowNest API base URL"),
-		ProjectID:     fs.String("crownest-project-id", defaults.Crownest.ProjectID, "CrowNest project ID"),
-		Template:      fs.String("crownest-template", defaults.Crownest.Template, "CrowNest Workspace Run template"),
-		TimeoutSecs:   fs.Int("crownest-timeout-secs", defaults.Crownest.TimeoutSecs, "CrowNest Workspace Run timeout in seconds"),
-		ForgetMissing: fs.Bool("crownest-forget-missing", defaults.Crownest.ForgetMissing, "remove the local claim when stop gets 404"),
-	}
+	return core.RegisterCrownestConfigFlags(fs, defaults.Crownest)
 }
 
 func applyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if strings.EqualFold(strings.TrimSpace(cfg.Provider), providerName) {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=crownest; use --crownest-template")
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=crownest; use --crownest-template")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --crownest-template", "use --crownest-template"); err != nil {
+			return err
 		}
 	}
-	v, ok := values.(flagValues)
+	v, ok := values.(core.CrownestConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "crownest-url") {
-		cfg.Crownest.APIURL = *v.APIURL
-	}
-	if flagWasSet(fs, "crownest-project-id") {
-		cfg.Crownest.ProjectID = *v.ProjectID
-	}
-	if flagWasSet(fs, "crownest-template") {
-		cfg.Crownest.Template = *v.Template
-	}
-	if flagWasSet(fs, "crownest-timeout-secs") {
-		cfg.Crownest.TimeoutSecs = *v.TimeoutSecs
-	}
-	if flagWasSet(fs, "crownest-forget-missing") {
-		cfg.Crownest.ForgetMissing = *v.ForgetMissing
+	applied, err := v.Apply(&cfg.Crownest, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, "crownest")
+	if err != nil {
+		return err
 	}
 	return validateConfig(*cfg)
 }
@@ -73,7 +48,7 @@ func validateConfig(cfg Config) error {
 func validateBaseURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		raw = "https://api.crownest.dev"
+		raw = core.CrownestConfigDefaultAPIURL
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {

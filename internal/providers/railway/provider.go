@@ -18,6 +18,7 @@ func (Provider) Aliases() []string { return []string{"rail", "railwayapp"} }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPIToken),
 		Name:             providerName,
 		Family:           "railway",
 		Kind:             core.ProviderKindServiceControl,

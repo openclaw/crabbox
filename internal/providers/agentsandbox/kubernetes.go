@@ -15,7 +15,9 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
+	"github.com/openclaw/crabbox/internal/tailbuffer"
 )
 
 var (
@@ -183,7 +185,7 @@ func newKubernetesClient(ctx context.Context, cfg Config, rt Runtime) (kubernete
 	}
 	kubectl := strings.TrimSpace(values.Kubectl)
 	if kubectl == "" {
-		kubectl = "kubectl"
+		kubectl = core.AgentSandboxConfigDefaultKubectl
 	}
 
 	baseArgs := make([]string, 0, 4)
@@ -519,8 +521,7 @@ func (c *kubectlKubernetesClient) Exec(ctx context.Context, req podExecRequest) 
 	args = append(args, "--")
 	args = append(args, req.Command...)
 
-	var stderrTail tailBuffer
-	stderrTail.limit = kubectlErrorDetailLimitBytes
+	stderrTail := tailbuffer.NewLimited(kubectlErrorDetailLimitBytes)
 	stderr := io.Writer(&stderrTail)
 	if req.Stderr != nil {
 		stderr = io.MultiWriter(req.Stderr, &stderrTail)
@@ -603,32 +604,6 @@ func kubectlRemoteExitStatus(stderr string, processExitCode int) (int, bool) {
 		return 0, false
 	}
 	return code, true
-}
-
-type tailBuffer struct {
-	data  []byte
-	limit int
-}
-
-func (b *tailBuffer) Write(p []byte) (int, error) {
-	if b.limit <= 0 {
-		return len(p), nil
-	}
-	if len(p) >= b.limit {
-		b.data = append(b.data[:0], p[len(p)-b.limit:]...)
-		return len(p), nil
-	}
-	overflow := len(b.data) + len(p) - b.limit
-	if overflow > 0 {
-		copy(b.data, b.data[overflow:])
-		b.data = b.data[:len(b.data)-overflow]
-	}
-	b.data = append(b.data, p...)
-	return len(p), nil
-}
-
-func (b *tailBuffer) String() string {
-	return string(b.data)
 }
 
 func podStateFromObject(object kubernetesObject) podState {

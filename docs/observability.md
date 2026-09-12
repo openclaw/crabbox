@@ -73,12 +73,19 @@ crabbox attach run_...
 crabbox results run_...
 ```
 
-If the initial run-record request fails with a transient coordinator transport
-or service error, Crabbox keeps the create retry armed while it acquires or
-replaces the lease. It retries after a lease attaches and starts recording as
-soon as creation succeeds. If history remains unavailable, the remote run can
-still proceed; the warning and failure digest identify the lease and print the
-recovery commands that remain usable without a run handle.
+The CLI chooses the run ID before admission. If an admission response is lost,
+it can recover the same record using that ID and the original request. The
+coordinator accepts recovery only for the same initiating owner, organization,
+and request; it does not append another `run.started` event. Lease replacement
+uses the existing acknowledged attribution flow after admission, rather than
+changing the original create request.
+
+Recovery never replays the remote command. The CLI refuses execution without a
+validated, still-starting run handle, and cancellation stops admission recovery.
+An older coordinator that lacks the caller-known admission route must be
+updated; the CLI does not fall back to anonymous record creation. Run IDs are
+single-invocation identities, and recovery relies on the existing record's
+retention. A new CLI invocation always uses a new ID.
 
 - **`history`** lists recorded runs. Filter with `--lease`, `--owner`, `--org`,
   `--state`, and `--limit` (default 50). It is intended for command debugging,
@@ -350,12 +357,10 @@ Preflight is a probe layer, not an installer. Missing tools print
 a prebaked image, a devcontainer/Nix/mise/asdf setup, or the uploaded
 script/command itself.
 
-The built-in probes cover common toolchains — `git`, `tar`, `node`, `npm`,
-`corepack`, `pnpm`, `yarn`, `bun`, and `docker`; opt-in `go`, `cargo`, `cmake`,
-`uv`, `python`, and `python3` on POSIX, WSL2, and native Windows; and opt-in
-`make` on POSIX and WSL2 — plus target-specific probes such as `sudo`, `apt`,
-`bubblewrap`, `powershell`, `execution_policy`, `longpaths`, `temp`, and `pwsh`.
-Linux and WSL2 also support an opt-in `raw_socket` capability probe. Override
+The built-in probes cover common toolchains and target-specific capabilities.
+Use [`crabbox preflight-tools [--json]`](commands/preflight-tools.md) for the
+complete names, selector aliases, default membership, and target support in the
+installed binary. This inspection is offline and executes no probes. Override
 the probe list per run:
 
 ```sh

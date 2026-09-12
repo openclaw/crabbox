@@ -104,6 +104,25 @@ Trusted local config may also set `apiUrl` and `workspace`. Repository config ma
 set only non-secret runtime settings such as region, image, memory, lifetimes,
 workdir, exec timeout, and `forgetMissing`.
 
+All eleven bindings share one typed declaration. The API key remains
+environment-only, with no YAML or flag field. API URL and workspace retain their
+trusted-file gate. Empty YAML strings preserve earlier URL/workspace/region/TTL
+values; explicit empty image and workdir values still apply. Environment strings
+retain raw nonempty primary/alias precedence.
+
+Memory uses the existing source-specific rules: negative YAML is rejected
+immediately, but malformed, padded, or out-of-range `CRABBOX_BLAXEL_MEMORY_MB`
+input retains the earlier value. A parsed negative environment value continues
+to the existing later provider validation. Exec-timeout environment input stays
+strict and can fail before later boolean application. Flags retain their existing
+opportunity to override earlier values before semantic validation.
+
+The client, validator, doctor, create request, workdir, and exec-timeout helpers
+share the compiled defaults while retaining their raw-empty/trimmed-empty and
+zero-value distinctions. Memory zero remains a service default; exec-timeout zero
+retains its Crabbox fallback. Upload, retry, lifetime, and cleanup policy are
+unchanged.
+
 Provider flags:
 
 ```text
