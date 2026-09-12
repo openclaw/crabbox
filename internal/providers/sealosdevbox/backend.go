@@ -227,7 +227,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 			return
 		}
 	}()
-	item, err := b.waitForDevboxPrepared(ctx, name, bootstrapWaitTimeout(b.cfg))
+	item, err := b.waitForDevboxPrepared(ctx, name, core.BootstrapWaitTimeout(b.cfg))
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -263,7 +263,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 		return core.LeaseTarget{}, err
 	}
 	claimPersisted = true
-	secret, err := b.waitForDevboxSecret(ctx, item, bootstrapWaitTimeout(b.cfg))
+	secret, err := b.waitForDevboxSecret(ctx, item, core.BootstrapWaitTimeout(b.cfg))
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -448,7 +448,7 @@ func (b *backend) resumeDevboxIfPaused(ctx context.Context, item devboxItem, ser
 	if err := b.patchDevboxState(ctx, name, item.Metadata.ResourceVersion, devboxStateRun, nil); err != nil {
 		return item, server, err
 	}
-	resumed, err := b.waitForDevboxPrepared(ctx, name, bootstrapWaitTimeout(b.cfg))
+	resumed, err := b.waitForDevboxPrepared(ctx, name, core.BootstrapWaitTimeout(b.cfg))
 	if err != nil {
 		return item, server, err
 	}
@@ -699,8 +699,4 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
-}
-
-func bootstrapWaitTimeout(cfg core.Config) time.Duration {
-	return core.BootstrapWaitTimeout(cfg)
 }

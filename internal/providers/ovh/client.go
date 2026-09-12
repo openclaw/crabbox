@@ -251,7 +251,7 @@ func secureOVHHTTPClient(source *http.Client, trusted *url.URL) *http.Client {
 	client := *source
 	originalCheckRedirect := source.CheckRedirect
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !sameOVHOrigin(trusted, req.URL) {
+		if !core.SameHTTPOrigin(trusted, req.URL) {
 			return errOVHCrossOriginRedirect
 		}
 		if originalCheckRedirect != nil {
@@ -263,10 +263,6 @@ func secureOVHHTTPClient(source *http.Client, trusted *url.URL) *http.Client {
 		return nil
 	}
 	return &client
-}
-
-func sameOVHOrigin(a, b *url.URL) bool {
-	return core.SameHTTPOrigin(a, b)
 }
 
 func sanitizeOVHClientError(err error) error {

@@ -227,7 +227,7 @@ func (b *backend) launchRequest(cfg core.Config, leaseID, slug, publicKey string
 		InstanceTypeName: typeForConfig(cfg),
 		Quantity:         1,
 		SSHKeyNames:      []string{key.Name},
-		UserData:         lambdaUserData(cfg, publicKey),
+		UserData:         core.CloudInitUserData(cfg, publicKey),
 	}
 	if image := imageForConfig(cfg); image != "" {
 		req.ImageID = image

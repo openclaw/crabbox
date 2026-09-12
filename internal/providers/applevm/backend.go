@@ -211,7 +211,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	claim.LeaseID = leaseID
 	claim.Slug = slug
 	if leaseID == "" {
-		return core.LeaseTarget{}, exit(4, "apple-vm instance %q has no Crabbox lease metadata; clean it up with `crabbox cleanup --provider apple-vm`", inst.Name)
+		return core.LeaseTarget{}, core.Exit(4, "apple-vm instance %q has no Crabbox lease metadata; clean it up with `crabbox cleanup --provider apple-vm`", inst.Name)
 	}
 	owned, conflict, err := appleVMClaimStatus(leaseID, inst.Name)
 	if err != nil {
@@ -225,7 +225,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		return core.LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: leaseID}, nil
 	}
 	if !appleVMRunning(inst.Status) && !req.StatusOnly {
-		return core.LeaseTarget{}, exit(5, "apple-vm instance %s is %s; start a new lease with `crabbox run` or clean it up with `crabbox cleanup --provider apple-vm`", inst.Name, core.Blank(inst.Status, "stopped"))
+		return core.LeaseTarget{}, core.Exit(5, "apple-vm instance %s is %s; start a new lease with `crabbox run` or clean it up with `crabbox cleanup --provider apple-vm`", inst.Name, core.Blank(inst.Status, "stopped"))
 	}
 	if req.StatusOnly && (inst.SSHHost == "" || inst.SSHPort <= 0) {
 		return core.LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: leaseID}, nil
@@ -283,7 +283,7 @@ func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 		return core.DoctorResult{}, err
 	}
 	if strings.TrimSpace(resp.Status) != "ok" {
-		return core.DoctorResult{}, exit(2, "apple-vm doctor failed: %s", core.Blank(resp.Message, "unknown error"))
+		return core.DoctorResult{}, core.Exit(2, "apple-vm doctor failed: %s", core.Blank(resp.Message, "unknown error"))
 	}
 	if image := strings.TrimSpace(resp.Details["image"]); image != "" {
 		resp.Details["image"] = applevmhelper.RedactImageRef(image)
@@ -334,7 +334,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		core.RemoveStoredTestboxKey(leaseID)
 	}
 	if name == "" && leaseID == "" {
-		return exit(2, "provider=%s release requires an apple-vm instance name or lease id", providerName)
+		return core.Exit(2, "provider=%s release requires an apple-vm instance name or lease id", providerName)
 	}
 	return nil
 }
@@ -362,7 +362,7 @@ func appleVMClaimStatus(leaseID, instanceName string) (owned, conflict bool, err
 }
 
 func appleVMOwnershipError(leaseID, instanceName string) error {
-	return exit(4, "apple-vm lease %q has no exact local claim bound to instance %q; adopt it with an explicit --reclaim reuse before stop", strings.TrimSpace(leaseID), strings.TrimSpace(instanceName))
+	return core.Exit(4, "apple-vm lease %q has no exact local claim bound to instance %q; adopt it with an explicit --reclaim reuse before stop", strings.TrimSpace(leaseID), strings.TrimSpace(instanceName))
 }
 
 func requireExactAppleVMClaim(leaseID, instanceName string) error {
@@ -509,7 +509,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst applev
 		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	if inst.SSHHost == "" || inst.SSHPort <= 0 {
-		return core.LeaseTarget{}, exit(5, "apple-vm instance %s has no local SSH endpoint", inst.Name)
+		return core.LeaseTarget{}, core.Exit(5, "apple-vm instance %s has no local SSH endpoint", inst.Name)
 	}
 	if leaseID != "" {
 		if keyPath, err := core.OptionalStoredTestboxKeyPath(leaseID); err == nil {
@@ -666,7 +666,7 @@ func (b *backend) listInstances(ctx context.Context, cfg core.Config) ([]applevm
 func (b *backend) resolveInstance(ctx context.Context, cfg core.Config, identifier string) (applevmhelper.Instance, core.LeaseClaim, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
-		return applevmhelper.Instance{}, core.LeaseClaim{}, exit(2, "provider=%s requires a lease id, slug, or instance name", providerName)
+		return applevmhelper.Instance{}, core.LeaseClaim{}, core.Exit(2, "provider=%s requires a lease id, slug, or instance name", providerName)
 	}
 	instances, err := b.listInstances(ctx, cfg)
 	if err != nil {
@@ -692,7 +692,7 @@ func (b *backend) resolveInstance(ctx context.Context, cfg core.Config, identifi
 				}
 			}
 			return applevmhelper.Instance{}, requestedClaim, &missingInstanceError{
-				err: exit(4, "apple-vm lease %q points to a missing instance; run `crabbox cleanup --provider apple-vm`", identifier),
+				err: core.Exit(4, "apple-vm lease %q points to a missing instance; run `crabbox cleanup --provider apple-vm`", identifier),
 			}
 		}
 	}
@@ -702,7 +702,7 @@ func (b *backend) resolveInstance(ctx context.Context, cfg core.Config, identifi
 		claim := claims[inst.Name]
 		if inst.Name == identifier || inst.LeaseID == identifier || inst.Slug == identifier || claim.LeaseID == identifier || claim.Slug == identifier {
 			if matched != nil {
-				return applevmhelper.Instance{}, core.LeaseClaim{}, exit(2, "apple-vm identifier %s matches multiple instances; use an exact claimed instance name", identifier)
+				return applevmhelper.Instance{}, core.LeaseClaim{}, core.Exit(2, "apple-vm identifier %s matches multiple instances; use an exact claimed instance name", identifier)
 			}
 			candidate := inst
 			matched, matchedClaim = &candidate, claim
@@ -713,10 +713,10 @@ func (b *backend) resolveInstance(ctx context.Context, cfg core.Config, identifi
 	}
 	if hasRequestedClaim {
 		return applevmhelper.Instance{}, requestedClaim, &missingInstanceError{
-			err: exit(4, "apple-vm lease %q points to a missing instance; run `crabbox cleanup --provider apple-vm`", identifier),
+			err: core.Exit(4, "apple-vm lease %q points to a missing instance; run `crabbox cleanup --provider apple-vm`", identifier),
 		}
 	}
-	return applevmhelper.Instance{}, core.LeaseClaim{}, exit(4, "apple-vm lease not found: %s", identifier)
+	return applevmhelper.Instance{}, core.LeaseClaim{}, core.Exit(4, "apple-vm lease not found: %s", identifier)
 }
 
 type missingInstanceError struct {
@@ -797,7 +797,7 @@ func (b *backend) runHelperJSONInput(ctx context.Context, helperPath string, arg
 	if input != nil {
 		data, err := json.Marshal(input)
 		if err != nil {
-			return exit(2, "encode apple-vm helper input: %v", err)
+			return core.Exit(2, "encode apple-vm helper input: %v", err)
 		}
 		stdin = strings.NewReader(string(data))
 	}
@@ -809,13 +809,13 @@ func (b *backend) runHelperJSONInput(ctx context.Context, helperPath string, arg
 		CancelGracePeriod: helperCancelGracePeriod,
 	})
 	if err != nil {
-		return exit(2, "apple-vm helper %s failed: %s", strings.Join(args, " "), localCommandDetail(result, err))
+		return core.Exit(2, "apple-vm helper %s failed: %s", strings.Join(args, " "), localCommandDetail(result, err))
 	}
 	if out == nil {
 		return nil
 	}
 	if err := json.Unmarshal([]byte(result.Stdout), out); err != nil {
-		return exit(2, "apple-vm helper %s returned invalid JSON: %v", strings.Join(args, " "), err)
+		return core.Exit(2, "apple-vm helper %s returned invalid JSON: %v", strings.Join(args, " "), err)
 	}
 	return nil
 }
@@ -868,12 +868,12 @@ func (b *backend) appleVMStateRoot() (string, error) {
 		legacy := filepath.Join(stateDir, "apple-vz")
 		if _, legacyErr := os.Stat(legacy); legacyErr == nil {
 			if err := os.Rename(legacy, root); err != nil {
-				return "", exit(2, "migrate apple-vz state directory: %v", err)
+				return "", core.Exit(2, "migrate apple-vz state directory: %v", err)
 			}
 		}
 	}
 	if err := ensurePrivateDir(root); err != nil {
-		return "", exit(2, "create apple-vm state directory: %v", err)
+		return "", core.Exit(2, "create apple-vm state directory: %v", err)
 	}
 	return root, nil
 }
@@ -891,7 +891,7 @@ func resolveHelperSourcePath(cfg core.Config) (string, error) {
 		if _, err := os.Stat(path); err == nil {
 			return path, nil
 		}
-		return "", exit(2, "apple-vm helper not found at %s", path)
+		return "", core.Exit(2, "apple-vm helper not found at %s", path)
 	}
 	if exe, err := os.Executable(); err == nil {
 		sibling := filepath.Join(filepath.Dir(exe), applevmhelper.ManagedHelperName)
@@ -902,7 +902,7 @@ func resolveHelperSourcePath(cfg core.Config) (string, error) {
 	if path, err := exec.LookPath(applevmhelper.ManagedHelperName); err == nil {
 		return path, nil
 	}
-	return "", exit(2, "apple-vm helper binary not found. Reinstall Crabbox on Apple Silicon, put `%s` on PATH, or explicitly pass --apple-vm-helper for a source build", applevmhelper.ManagedHelperName)
+	return "", core.Exit(2, "apple-vm helper binary not found. Reinstall Crabbox on Apple Silicon, put `%s` on PATH, or explicitly pass --apple-vm-helper for a source build", applevmhelper.ManagedHelperName)
 }
 
 func providerClaims() (map[string]core.LeaseClaim, error) {
@@ -929,18 +929,18 @@ func instanceScope(name string) string { return name }
 
 func requireHost() error {
 	if hostGOOS != "darwin" || hostGOARCH != "arm64" {
-		return exit(2, "provider=%s requires macOS on Apple silicon; current host is %s/%s", providerName, hostGOOS, hostGOARCH)
+		return core.Exit(2, "provider=%s requires macOS on Apple silicon; current host is %s/%s", providerName, hostGOOS, hostGOARCH)
 	}
 	version, err := hostMacOSVersion()
 	if err != nil {
-		return exit(2, "provider=%s could not determine the macOS version: %v", providerName, err)
+		return core.Exit(2, "provider=%s could not determine the macOS version: %v", providerName, err)
 	}
 	major, err := macOSMajorVersion(version)
 	if err != nil {
-		return exit(2, "provider=%s could not parse macOS version %q: %v", providerName, version, err)
+		return core.Exit(2, "provider=%s could not parse macOS version %q: %v", providerName, version, err)
 	}
 	if major < 13 {
-		return exit(2, "provider=%s requires macOS 13 or newer for Virtualization.framework EFI support; current version is %s", providerName, version)
+		return core.Exit(2, "provider=%s requires macOS 13 or newer for Virtualization.framework EFI support; current version is %s", providerName, version)
 	}
 	return nil
 }
@@ -1059,8 +1059,4 @@ func localCommandDetail(result core.LocalCommandResult, err error) string {
 
 func firstNonBlank(values ...string) string {
 	return shared.FirstNonBlankTrimmed(values...)
-}
-
-func exit(code int, format string, args ...any) core.ExitError {
-	return core.Exit(code, format, args...)
 }

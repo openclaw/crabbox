@@ -94,7 +94,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if image, set := stringFlag(fs, "apple-vm-image", v.Image, "apple-vz-image", v.LegacyImage); set {
 		image = strings.TrimSpace(image)
 		if applevmhelper.IsRemoteImageRef(image) {
-			return exit(2, "--apple-vm-image accepts local paths only; use CRABBOX_APPLE_VM_IMAGE or configuration for remote URLs")
+			return core.Exit(2, "--apple-vm-image accepts local paths only; use CRABBOX_APPLE_VM_IMAGE or configuration for remote URLs")
 		}
 		core.ApplyAppleVMImage(cfg, image)
 		core.RecordProviderFlagInputs(cfg, true, providerName)
@@ -115,7 +115,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if cpus, set := intFlag(fs, "apple-vm-cpus", v.CPUs, "apple-vz-cpus", v.LegacyCPUs); set {
 		if cpus <= 0 {
-			return exit(2, "--apple-vm-cpus must be positive (got %d)", cpus)
+			return core.Exit(2, "--apple-vm-cpus must be positive (got %d)", cpus)
 		}
 		cfg.AppleVM.CPUs = cpus
 		core.MarkAppleVMCPUsExplicit(cfg)
@@ -123,7 +123,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if memoryMiB, set := intFlag(fs, "apple-vm-memory", v.MemoryMiB, "apple-vz-memory", v.LegacyMemoryMiB); set {
 		if memoryMiB < 1024 {
-			return exit(2, "--apple-vm-memory must be at least 1024 MiB (got %d)", memoryMiB)
+			return core.Exit(2, "--apple-vm-memory must be at least 1024 MiB (got %d)", memoryMiB)
 		}
 		cfg.AppleVM.MemoryMiB = memoryMiB
 		core.MarkAppleVMMemoryExplicit(cfg)
@@ -131,7 +131,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if diskGiB, set := intFlag(fs, "apple-vm-disk", v.DiskGiB, "apple-vz-disk", v.LegacyDiskGiB); set {
 		if diskGiB <= 0 {
-			return exit(2, "--apple-vm-disk must be positive (got %d)", diskGiB)
+			return core.Exit(2, "--apple-vm-disk must be positive (got %d)", diskGiB)
 		}
 		cfg.AppleVM.DiskGiB = diskGiB
 		core.MarkAppleVMDiskExplicit(cfg)

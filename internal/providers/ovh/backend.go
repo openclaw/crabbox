@@ -165,7 +165,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		return core.LeaseTarget{}, err
 	}
 	cfg.SSHKey = keyPath
-	cfg.ProviderKey = providerKeyForLease(leaseID)
+	cfg.ProviderKey = core.ProviderKeyForLease(leaseID)
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
 	}
@@ -933,7 +933,7 @@ func (b *Backend) reconcilePendingSSHKey(ctx context.Context, client API, claim 
 	if err != nil {
 		return core.LeaseTarget{}, false, fmt.Errorf("read retained OVH public key: %w", err)
 	}
-	key, found, err := b.reconcileSSHKey(ctx, client, b.Cfg.OVH.ProjectID, providerKeyForLease(claim.LeaseID), strings.TrimSpace(string(publicKey)))
+	key, found, err := b.reconcileSSHKey(ctx, client, b.Cfg.OVH.ProjectID, core.ProviderKeyForLease(claim.LeaseID), strings.TrimSpace(string(publicKey)))
 	if err != nil || !found {
 		return core.LeaseTarget{}, false, err
 	}
@@ -1447,8 +1447,4 @@ func blank(value string) string {
 
 func firstNonBlank(values ...string) string {
 	return shared.FirstNonBlank(values...)
-}
-
-func providerKeyForLease(leaseID string) string {
-	return core.ProviderKeyForLease(leaseID)
 }
