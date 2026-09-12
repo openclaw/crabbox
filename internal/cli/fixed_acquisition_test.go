@@ -141,6 +141,60 @@ func TestFixedAcquisitionSerializesCLIReplayAcrossProcesses(t *testing.T) {
 	}
 }
 
+func TestFixedAcquisitionCancellationDoesNotWaitForClaimLock(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_123456abcdef"
+	locked, release := make(chan struct{}), make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- WithDurableLeaseClaimLock(leaseID, func(*LeaseClaim, bool, func() error) error {
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-locked:
+	case err := <-holderDone:
+		t.Fatalf("hold claim lock: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	acquireDone := make(chan error, 1)
+	go func() {
+		_, err := AcquireFixedLease(FixedAcquireOptions{
+			Kind: FixedLeaseKind{ClaimProvider: "test", IntentVersion: 1}, LeaseID: leaseID,
+		}, func(context.Context, *LeaseClaim, bool) (FixedLeaseBinding, error) {
+			return FixedLeaseBinding{}, errors.New("canceled acquisition reached prepare")
+		}, func(context.Context, *LeaseClaim, *FixedCreateIntent, func() error) (LeaseTarget, error) {
+			return LeaseTarget{}, errors.New("canceled acquisition reached provider")
+		}, ctx)
+		acquireDone <- err
+	}()
+	finished := false
+	defer func() {
+		close(release)
+		if err := <-holderDone; err != nil {
+			t.Errorf("release claim lock: %v", err)
+		}
+		if !finished {
+			<-acquireDone
+		}
+	}()
+	select {
+	case err := <-acquireDone:
+		finished = true
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("acquisition error=%v, want cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled fixed acquisition waited for the held claim lock")
+	}
+	if _, exists, err := ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("canceled acquisition published a claim: exists=%t err=%v", exists, err)
+	}
+}
+
 func TestWarmupFailedFixedReplayPreservesLease(t *testing.T) {
 	clearConfigEnv(t)
 	isolateRunTestUserDirs(t, t.TempDir())

@@ -60,7 +60,7 @@ func AcquireFixedLease(
 		now = time.Now
 	}
 	var acquired LeaseTarget
-	err := WithDurableLeaseClaimLock(opts.LeaseID, func(claim *LeaseClaim, exists bool, persist func() error) error {
+	err := WithDurableLeaseClaimLockContext(ctx, opts.LeaseID, func(claim *LeaseClaim, exists bool, persist func() error) error {
 		if exists && opts.Kind.IsFixedClaim(*claim) && claim.FixedCreateIntent.State == "released" {
 			return exit(4, "lease_id_conflict: fixed lease %s is terminal and cannot be replayed", opts.LeaseID)
 		}

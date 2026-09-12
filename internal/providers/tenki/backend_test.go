@@ -881,11 +881,11 @@ func TestTenkiSSHTargetUsesProxyCommand(t *testing.T) {
 	if !target.SSHConfigProxy || target.Host != "sandbox" || target.User != "tenki" || target.Key != "/tmp/id_ed25519" || target.CertificateFile != "/tmp/session-cert.pub" {
 		t.Fatalf("unexpected target: %#v", target)
 	}
-	if target.NoControlMaster || target.DisableHostKeyChecking {
-		t.Fatalf("tenki target should keep SSH mux and host-key checks enabled: %#v", target)
+	if target.NoControlMaster || !target.DisableHostKeyChecking {
+		t.Fatalf("tenki target should keep SSH mux and use proxy-bound host trust: %#v", target)
 	}
-	if target.KnownHostsFile != "/tmp/known_hosts_00000000-0000-0000-0000-000000000001" {
-		t.Fatalf("known_hosts=%q", target.KnownHostsFile)
+	if target.KnownHostsFile != "" {
+		t.Fatalf("known_hosts=%q, want empty for proxy-bound ephemeral host keys", target.KnownHostsFile)
 	}
 	for _, want := range []string{
 		`"/opt/Tenki CLI/tenki" sandbox ssh-proxy`,

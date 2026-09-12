@@ -230,7 +230,7 @@ Current coverage: 81 providers; 9 with convention-named hermetic lifecycle tests
 | [superserve](../providers/superserve.md) | — | dedicated + matrix | — |
 | [tart](../providers/tart.md) | — | matrix | — |
 | [tencentcloud](../providers/tencentcloud.md) | — | dedicated + matrix | — |
-| [tenki](../providers/tenki.md) | — | matrix | — |
+| [tenki](../providers/tenki.md) | yes (`tenki`) | matrix | — |
 | [tensorlake](../providers/tensorlake.md) | — | — | — |
 | [unikraft-cloud](../providers/unikraft-cloud.md) | — | dedicated + matrix | — |
 | [upstash-box](../providers/upstash-box.md) | — | — | — |

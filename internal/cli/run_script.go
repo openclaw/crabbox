@@ -156,11 +156,11 @@ func remoteRunScriptCommandWithEnvFiles(workdir string, env map[string]string, e
 	writeRemoteCommandPrefix(&b, workdir, env, envFiles)
 	if script.Shebang {
 		b.WriteString("bash -lc ")
-		b.WriteString(shellQuote(`exec "$@"`))
+		b.WriteString(shellQuote(remoteBashLoginScript(workdir, `exec "$@"`)))
 		b.WriteString(" bash ")
 	} else {
 		b.WriteString("bash -lc ")
-		b.WriteString(shellQuote(`exec bash "$@"`))
+		b.WriteString(shellQuote(remoteBashLoginScript(workdir, `exec bash "$@"`)))
 		b.WriteString(" bash ")
 	}
 	b.WriteString(shellQuote(script.RemotePath))
