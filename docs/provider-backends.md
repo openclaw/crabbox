@@ -1169,6 +1169,11 @@ own the remote workflow.
 `List` and `Status` should return normalized views. If the provider only offers a
 table or lossy native status shape, keep that parsing inside the backend.
 
+Providers that bound in-flight status requests use `shared.StatusWait` for the
+wait context, deadline, and cancellation precedence. Construct it at the
+adapter's existing resolution boundary; keep ownership validation, readiness,
+terminal states, retry policy, and status-view fields in the adapter.
+
 E2B-compatible adapters use `shared.EnvdSandboxViews` to project their common
 wire metadata. Provider identity and legacy ID prefixes stay explicit; resource
 ownership validation remains in each adapter.

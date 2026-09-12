@@ -185,25 +185,15 @@ func (b *codeSandboxBackend) Status(ctx context.Context, req core.StatusRequest)
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	waitTimeout := req.WaitTimeout
-	if waitTimeout <= 0 {
-		waitTimeout = 5 * time.Minute
-	}
-	deadline := core.ClockNow(b.rt.Clock).Add(waitTimeout)
-	pollCtx := ctx
-	cancel := func() {}
-	if req.Wait {
-		pollCtx, cancel = context.WithTimeout(ctx, waitTimeout)
-	}
-	defer cancel()
+	wait := shared.NewStatusWait(ctx, req, b.rt.Clock, func(id string) error {
+		return core.Exit(5, "timed out waiting for codesandbox sandbox %s to become ready", id)
+	})
+	defer wait.Close()
 	for {
-		sb, getErr := api.GetSandbox(pollCtx, sandboxID)
+		sb, getErr := api.GetSandbox(wait.Context(), sandboxID)
 		if getErr != nil {
-			if req.Wait && errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return core.StatusView{}, core.Exit(5, "timed out waiting for codesandbox sandbox %s to become ready", sandboxID)
-			}
-			if ctx.Err() != nil {
-				return core.StatusView{}, ctx.Err()
+			if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
+				return core.StatusView{}, ctxErr
 			}
 			return core.StatusView{}, getErr
 		}
@@ -235,16 +225,8 @@ func (b *codeSandboxBackend) Status(ctx context.Context, req core.StatusRequest)
 		if isTerminalState(state) {
 			return core.StatusView{}, core.Exit(5, "codesandbox sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
-		if core.ClockNow(b.rt.Clock).After(deadline) {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for codesandbox sandbox %s to become ready", sandboxID)
-		}
-		select {
-		case <-pollCtx.Done():
-			if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return core.StatusView{}, core.Exit(5, "timed out waiting for codesandbox sandbox %s to become ready", sandboxID)
-			}
-			return core.StatusView{}, pollCtx.Err()
-		case <-time.After(2 * time.Second):
+		if err := wait.Next(sandboxID, 2*time.Second); err != nil {
+			return core.StatusView{}, err
 		}
 	}
 }

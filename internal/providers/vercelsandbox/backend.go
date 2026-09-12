@@ -249,25 +249,15 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 	if !ok {
 		return core.StatusView{}, core.Exit(4, "vercel-sandbox sandbox %q is not claimed by Crabbox", req.ID)
 	}
-	waitTimeout := req.WaitTimeout
-	if waitTimeout <= 0 {
-		waitTimeout = 5 * time.Minute
-	}
-	deadline := core.ClockNow(b.rt.Clock).Add(waitTimeout)
-	pollCtx := ctx
-	cancel := func() {}
-	if req.Wait {
-		pollCtx, cancel = context.WithTimeout(ctx, waitTimeout)
-	}
-	defer cancel()
+	wait := shared.NewStatusWait(ctx, req, b.rt.Clock, func(id string) error {
+		return core.Exit(5, "timed out waiting for vercel-sandbox sandbox %s to become ready", id)
+	})
+	defer wait.Close()
 	for {
-		sb, getErr := api.GetSandbox(pollCtx, sandboxID)
+		sb, getErr := api.GetSandbox(wait.Context(), sandboxID)
 		if getErr != nil {
-			if req.Wait && ctx.Err() == nil && pollCtx.Err() != nil {
-				return core.StatusView{}, core.Exit(5, "timed out waiting for vercel-sandbox sandbox %s to become ready", sandboxID)
-			}
-			if ctx.Err() != nil {
-				return core.StatusView{}, ctx.Err()
+			if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
+				return core.StatusView{}, ctxErr
 			}
 			return core.StatusView{}, getErr
 		}
@@ -299,16 +289,8 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 		if isTerminalState(state) {
 			return core.StatusView{}, core.Exit(5, "vercel-sandbox sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
-		if core.ClockNow(b.rt.Clock).After(deadline) {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for vercel-sandbox sandbox %s to become ready", sandboxID)
-		}
-		select {
-		case <-pollCtx.Done():
-			if ctx.Err() == nil {
-				return core.StatusView{}, core.Exit(5, "timed out waiting for vercel-sandbox sandbox %s to become ready", sandboxID)
-			}
-			return core.StatusView{}, pollCtx.Err()
-		case <-time.After(2 * time.Second):
+		if err := wait.Next(sandboxID, 2*time.Second); err != nil {
+			return core.StatusView{}, err
 		}
 	}
 }

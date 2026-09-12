@@ -191,60 +191,34 @@ func (b *azureDynamicSessionsBackend) Status(ctx context.Context, req core.Statu
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	waitTimeout := req.WaitTimeout
-	if waitTimeout <= 0 {
-		waitTimeout = 5 * time.Minute
-	}
-	deadline := core.ClockNow(b.rt.Clock).Add(waitTimeout)
-	pollCtx := ctx
-	cancel := func() {}
-	if req.Wait {
-		pollCtx, cancel = context.WithTimeout(ctx, waitTimeout)
-	}
-	defer cancel()
-	leaseID, slug, err := b.resolveSessionID(pollCtx, client, req.ID, "", false)
+	wait := shared.NewStatusWait(ctx, req, b.rt.Clock, func(id string) error {
+		return core.Exit(5, "timed out waiting for session %s to become ready", id)
+	})
+	defer wait.Close()
+	leaseID, slug, err := b.resolveSessionID(wait.Context(), client, req.ID, "", false)
 	if err != nil {
 		return core.StatusView{}, err
 	}
 	for {
-		session, err := client.GetSession(pollCtx, leaseID)
+		session, err := client.GetSession(wait.Context(), leaseID)
 		if err == nil {
 			view := b.statusView(leaseID, slug, session)
 			if !req.Wait || view.Ready {
 				return view, nil
 			}
-			if core.ClockNow(b.rt.Clock).After(deadline) {
-				return core.StatusView{}, core.Exit(5, "timed out waiting for session %s to become ready", leaseID)
-			}
-			select {
-			case <-pollCtx.Done():
-				if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-					return core.StatusView{}, core.Exit(5, "timed out waiting for session %s to become ready", leaseID)
-				}
-				return core.StatusView{}, pollCtx.Err()
-			case <-time.After(2 * time.Second):
+			if err := wait.Next(leaseID, 2*time.Second); err != nil {
+				return core.StatusView{}, err
 			}
 			continue
 		}
-		if req.Wait && errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for session %s to become ready", leaseID)
-		}
-		if ctx.Err() != nil {
-			return core.StatusView{}, ctx.Err()
+		if ctxErr := wait.ContextError(leaseID); ctxErr != nil {
+			return core.StatusView{}, ctxErr
 		}
 		if !isNotFoundError(err) || !req.Wait {
 			return core.StatusView{}, providerError("get session", err)
 		}
-		if core.ClockNow(b.rt.Clock).After(deadline) {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for session %s to become ready", leaseID)
-		}
-		select {
-		case <-pollCtx.Done():
-			if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return core.StatusView{}, core.Exit(5, "timed out waiting for session %s to become ready", leaseID)
-			}
-			return core.StatusView{}, pollCtx.Err()
-		case <-time.After(2 * time.Second):
+		if err := wait.Next(leaseID, 2*time.Second); err != nil {
+			return core.StatusView{}, err
 		}
 	}
 }

@@ -184,35 +184,22 @@ func (b *e2bBackend) Status(ctx context.Context, req core.StatusRequest) (core.S
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	waitTimeout := req.WaitTimeout
-	if waitTimeout <= 0 {
-		waitTimeout = 5 * time.Minute
-	}
-	deadline := core.ClockNow(b.rt.Clock).Add(waitTimeout)
-	pollCtx := ctx
-	cancel := func() {}
-	if req.Wait {
-		pollCtx, cancel = context.WithTimeout(ctx, waitTimeout)
-	}
-	defer cancel()
-	leaseID, sandboxID, _, err := b.resolveSandboxID(pollCtx, client, req.ID, "", false)
+	wait := shared.NewStatusWait(ctx, req, b.rt.Clock, func(id string) error {
+		return core.Exit(5, "timed out waiting for sandbox %s to become ready", id)
+	})
+	defer wait.Close()
+	leaseID, sandboxID, _, err := b.resolveSandboxID(wait.Context(), client, req.ID, "", false)
 	if err != nil {
-		if req.Wait && errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for sandbox %s to become ready", req.ID)
-		}
-		if ctx.Err() != nil {
-			return core.StatusView{}, ctx.Err()
+		if ctxErr := wait.ContextError(req.ID); ctxErr != nil {
+			return core.StatusView{}, ctxErr
 		}
 		return core.StatusView{}, err
 	}
 	for {
-		sandbox, err := client.GetSandbox(pollCtx, sandboxID)
+		sandbox, err := client.GetSandbox(wait.Context(), sandboxID)
 		if err != nil {
-			if req.Wait && errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return core.StatusView{}, core.Exit(5, "timed out waiting for sandbox %s to become ready", sandboxID)
-			}
-			if ctx.Err() != nil {
-				return core.StatusView{}, ctx.Err()
+			if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
+				return core.StatusView{}, ctxErr
 			}
 			return core.StatusView{}, e2bError("get sandbox", err)
 		}
@@ -220,16 +207,8 @@ func (b *e2bBackend) Status(ctx context.Context, req core.StatusRequest) (core.S
 		if !req.Wait || view.Ready {
 			return view, nil
 		}
-		if core.ClockNow(b.rt.Clock).After(deadline) {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for sandbox %s to become ready", sandboxID)
-		}
-		select {
-		case <-pollCtx.Done():
-			if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return core.StatusView{}, core.Exit(5, "timed out waiting for sandbox %s to become ready", sandboxID)
-			}
-			return core.StatusView{}, pollCtx.Err()
-		case <-time.After(2 * time.Second):
+		if err := wait.Next(sandboxID, 2*time.Second); err != nil {
+			return core.StatusView{}, err
 		}
 	}
 }

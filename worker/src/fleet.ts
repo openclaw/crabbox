@@ -2502,17 +2502,7 @@ export class FleetCoordinator {
           owner: attachment.owner,
           ...(attachment.org ? { org: attachment.org } : {}),
           ...(attachment.admin !== undefined ? { admin: attachment.admin } : {}),
-          ...(attachment.auth ? { auth: attachment.auth } : {}),
-          ...(attachment.login ? { login: attachment.login } : {}),
-          ...(attachment.sharedTokenHash ? { sharedTokenHash: attachment.sharedTokenHash } : {}),
-          ...(attachment.adminTokenHash ? { adminTokenHash: attachment.adminTokenHash } : {}),
-          ...(attachment.adminGrantVersion
-            ? { adminGrantVersion: attachment.adminGrantVersion }
-            : {}),
-          ...(attachment.portalSessionHash
-            ? { portalSessionHash: attachment.portalSessionHash }
-            : {}),
-          ...(attachment.githubGrant ? { githubGrant: attachment.githubGrant } : {}),
+          ...copyBridgeGrant(attachment),
           ...(attachment.viewerSessionID ? { viewerSessionID: attachment.viewerSessionID } : {}),
           ...(attachment.viewerSessionExpiresAt
             ? { viewerSessionExpiresAt: attachment.viewerSessionExpiresAt }
@@ -24333,13 +24323,7 @@ function leaseBridgeTicketPrincipal(
     owner: ticket.owner,
     org: ticket.org,
     admin: ticket.admin === true,
-    ...(ticket.auth ? { auth: ticket.auth } : {}),
-    ...(ticket.login ? { login: ticket.login } : {}),
-    ...(ticket.sharedTokenHash ? { sharedTokenHash: ticket.sharedTokenHash } : {}),
-    ...(ticket.adminTokenHash ? { adminTokenHash: ticket.adminTokenHash } : {}),
-    ...(ticket.adminGrantVersion ? { adminGrantVersion: ticket.adminGrantVersion } : {}),
-    ...(ticket.portalSessionHash ? { portalSessionHash: ticket.portalSessionHash } : {}),
-    ...(ticket.githubGrant ? { githubGrant: ticket.githubGrant } : {}),
+    ...copyBridgeGrant(ticket),
   };
 }
 
