@@ -51,22 +51,7 @@ const maxPondTailscaleTagOwnerLength = 7
 // dashes. The shape matches normalizeLeaseSlug; pond names participate in the
 // same DNS-ish identifier space so peer hostnames stay regular.
 func normalizePondName(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	var out strings.Builder
-	lastDash := false
-	for _, r := range value {
-		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
-		if ok {
-			out.WriteRune(r)
-			lastDash = false
-			continue
-		}
-		if !lastDash {
-			out.WriteByte('-')
-			lastDash = true
-		}
-	}
-	return strings.Trim(out.String(), "-")
+	return normalizeLeaseSlug(value)
 }
 
 // requestedPondName validates a user-supplied `--pond <name>` flag value.
