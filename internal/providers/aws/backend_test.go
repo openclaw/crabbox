@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -212,6 +213,9 @@ func TestLeaseSSHAWSInvalidStateRootPreventsAcquireAndFallback(t *testing.T) {
 						t.Fatal(err)
 					}
 					wantError = selected
+					if runtime.GOOS == "windows" && !fixed {
+						wantError = "private directory path contains a symlink or non-directory component"
+					}
 				}
 				t.Setenv("XDG_STATE_HOME", selected)
 				before := snapshotAWSStateFixture(t, dirs.Root)
@@ -2475,9 +2479,7 @@ func TestAWSAcquireUsesTailscaleHostnameOnlyForStrictMode(t *testing.T) {
 func TestAWSAcquireStopsFreshRetryAfterRollbackFailure(t *testing.T) {
 	for _, failure := range []string{"none", "instance", "key", "client"} {
 		t.Run(failure, func(t *testing.T) {
-			t.Setenv("HOME", t.TempDir())
-			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			testutil.IsolateUserDirs(t)
 			primary := core.Exit(5, "timed out waiting for SSH: fixture")
 			debt := errors.New("cleanup unavailable")
 			fake := &fakeAWSClient{}

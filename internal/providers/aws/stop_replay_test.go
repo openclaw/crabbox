@@ -216,11 +216,8 @@ func TestAWSFixedStopReplayAfterInventoryDisappears(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Model local files left by an older stop or interrupted cleanup.
-			key, err := core.TestboxKeyPath(lease.LeaseID)
+			key, err := core.PrepareStoredTestboxKeyPath(lease.LeaseID)
 			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.MkdirAll(filepath.Dir(key), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			trust := filepath.Join(filepath.Dir(key), "known_hosts")
