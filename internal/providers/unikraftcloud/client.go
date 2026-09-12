@@ -206,7 +206,7 @@ func secureUnikraftCloudHTTPClient(source *http.Client, baseURL string) *http.Cl
 	trusted, _ := url.Parse(baseURL)
 	originalCheckRedirect := source.CheckRedirect
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !sameUnikraftCloudOrigin(trusted, req.URL) {
+		if !core.SameHTTPOrigin(trusted, req.URL) {
 			return &unikraftCloudRedirectError{origin: unikraftCloudRedirectOrigin(req.URL)}
 		}
 		if !withinUnikraftCloudAPIPath(trusted, req.URL) {
@@ -251,10 +251,6 @@ func isUnikraftCloudMutation(method string) bool {
 	default:
 		return false
 	}
-}
-
-func sameUnikraftCloudOrigin(a, b *url.URL) bool {
-	return core.SameHTTPOrigin(a, b)
 }
 
 type unikraftCloudRedirectError struct {

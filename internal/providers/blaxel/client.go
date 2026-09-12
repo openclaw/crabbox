@@ -257,7 +257,7 @@ func secureHTTPClient(source *http.Client) *http.Client {
 		if len(via) >= 10 {
 			return errors.New("stopped after 10 redirects")
 		}
-		if len(via) > 0 && !sameOrigin(via[len(via)-1].URL, req.URL) {
+		if len(via) > 0 && !core.SameHTTPOrigin(via[len(via)-1].URL, req.URL) {
 			return fmt.Errorf("blaxel refused cross-origin redirect to %s://%s", req.URL.Scheme, req.URL.Host)
 		}
 		if originalCheckRedirect != nil {
@@ -266,10 +266,6 @@ func secureHTTPClient(source *http.Client) *http.Client {
 		return nil
 	}
 	return &client
-}
-
-func sameOrigin(a, b *url.URL) bool {
-	return core.SameHTTPOrigin(a, b)
 }
 
 func (c *restClient) BaseURL() string { return c.base }
