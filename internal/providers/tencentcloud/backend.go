@@ -334,7 +334,9 @@ func (b *Backend) targetFromInstance(item instance, req core.ResolveRequest, acc
 	}
 	cfg := cfgForRun(b.Cfg)
 	ssh := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
-	core.UseStoredTestboxKey(&ssh, leaseID)
+	if err := core.UseStoredTestboxKey(&ssh, leaseID); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	if req.Repo.Root != "" {
 		if _, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, labels["slug"], cfg, server, ssh, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, claim, claimExists); err != nil {
 			return core.LeaseTarget{}, err

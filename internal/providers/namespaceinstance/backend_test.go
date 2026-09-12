@@ -62,7 +62,7 @@ func TestLeasePinsProxyHostKeyPerLease(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	applyDefaults(&cfg)
-	lease, err := (&backend{}).lease(instance{ClusterID: "instance-id", Labels: map[string]string{"lease": leaseID}}, cfg, leaseID)
+	lease, err := (&backend{}).lease(instance{ClusterID: "instance-id", Labels: map[string]string{"lease": leaseID}}, cfg, leaseID, false)
 	if err != nil {
 		t.Fatal(err)
 	}

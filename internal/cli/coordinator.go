@@ -2882,8 +2882,6 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 		target.ReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null"
 		target.AuthSecret = true
 		target.NetworkKind = NetworkPublic
-	} else {
-		useStoredTestboxKey(&target, lease.ID)
 	}
 	return server, target, lease.ID
 }

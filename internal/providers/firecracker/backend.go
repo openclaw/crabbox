@@ -156,8 +156,7 @@ func validateConfig(cfg Config) error {
 func (b *backend) Spec() ProviderSpec { return b.spec }
 
 func (b *backend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
-	core.UseStoredTestboxKey(&target.SSH, leaseID)
-	return nil
+	return core.UseStoredTestboxKey(&target.SSH, leaseID)
 }
 
 func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
@@ -578,7 +577,9 @@ func (b *backend) targetFromRecord(cfg Config, record leaseStateRecord) (SSHTarg
 	cfg.SSHUser = firstNonBlank(record.SSHUser, cfg.SSHUser)
 	cfg.SSHPort = firstNonBlank(record.SSHPort, cfg.SSHPort)
 	target := core.SSHTargetFromConfig(cfg, record.GuestIP)
-	core.UseStoredTestboxKey(&target, record.LeaseID)
+	if err := core.UseStoredTestboxKey(&target, record.LeaseID); err != nil {
+		return SSHTarget{}, err
+	}
 	return target, nil
 }
 

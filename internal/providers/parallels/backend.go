@@ -203,7 +203,11 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 					}
 				}
 				target := core.SSHTargetFromConfig(candidate, vm.IP)
-				useStoredTestboxKey(&target, leaseID)
+				if !req.ReleaseOnly {
+					if err := useStoredTestboxKey(&target, leaseID); err != nil {
+						return LeaseTarget{}, err
+					}
+				}
 				if candidate.Parallels.Host != "" {
 					target.ProxyCommand = parallelsProxyCommand(candidate, vm.IP)
 					target.SSHConfigProxy = true
@@ -447,8 +451,8 @@ func blank(value, fallback string) string {
 	return value
 }
 
-func useStoredTestboxKey(target *SSHTarget, leaseID string) {
-	shared.UseStoredTestboxKey(target, leaseID)
+func useStoredTestboxKey(target *SSHTarget, leaseID string) error {
+	return shared.UseStoredTestboxKey(target, leaseID)
 }
 
 func parallelsLeaseFromVMName(name string) (string, string) {

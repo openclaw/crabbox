@@ -67,6 +67,7 @@ type inspectContainer struct {
 	NetworkSettings inspectNetworking `json:"NetworkSettings"`
 	// Optional settings must not make identity or OOM-state inspection fail.
 	HostConfig json.RawMessage `json:"HostConfig"`
+	Mounts     json.RawMessage `json:"Mounts"`
 }
 
 type inspectConfig struct {
@@ -193,8 +194,7 @@ func parseOOMKillCount(text string) (uint64, error) {
 }
 
 func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
-	core.UseStoredTestboxKey(&target.SSH, leaseID)
-	return nil
+	return core.UseStoredTestboxKey(&target.SSH, leaseID)
 }
 
 func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
@@ -314,7 +314,14 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 		return core.LeaseTarget{}, errors.Join(err, reconcileErr)
 	}
-	lease = b.pendingLease(cfg, container, leaseID, slug)
+	lease, err = b.pendingLease(cfg, container, leaseID, slug)
+	if err != nil {
+		retained, reconcileErr := b.reconcileReadinessFailure(req.Keep, pendingClaim, lease, bootstrapDir, err)
+		if retained {
+			b.printPendingRecovery(leaseID, slug, pendingClaim, err)
+		}
+		return core.LeaseTarget{}, errors.Join(err, reconcileErr)
+	}
 	markPendingLease(&lease.Server)
 	updatedPendingClaim, err := core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, pendingClaim, lease.Server, lease.SSH)
 	if err != nil {
@@ -433,7 +440,7 @@ func (b *backend) publishCreatedPendingClaim(leaseID, slug, claimScope string, r
 	return claim, err
 }
 
-func (b *backend) pendingLease(cfg core.Config, container inspectContainer, leaseID, slug string) core.LeaseTarget {
+func (b *backend) pendingLease(cfg core.Config, container inspectContainer, leaseID, slug string) (core.LeaseTarget, error) {
 	server := b.serverFromContainer(container, cfg)
 	if user := strings.TrimSpace(server.Labels["ssh_user"]); user != "" {
 		cfg.LocalContainer.User = user
@@ -444,15 +451,17 @@ func (b *backend) pendingLease(cfg core.Config, container inspectContainer, leas
 		cfg.WorkRoot = root
 	}
 	host, port, _ := containerSSHHostPort(container)
-	if keyPath, err := core.TestboxKeyPath(leaseID); err == nil {
+	if keyPath, err := core.OptionalStoredTestboxKeyPath(leaseID); err == nil {
 		if _, statErr := os.Stat(keyPath); statErr == nil {
 			cfg.SSHKey = keyPath
 		}
+	} else if !os.IsNotExist(err) {
+		return core.LeaseTarget{Server: server, LeaseID: leaseID}, err
 	}
 	target := core.SSHTargetFromConfig(cfg, host)
 	target.Port = port
 	target.ReadyCheck = localContainerReadyCheck(cfg)
-	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
 func (b *backend) waitForContainerEndpoint(ctx context.Context, cfg core.Config, containerID, leaseID, slug string) (core.LeaseTarget, error) {
@@ -756,6 +765,11 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		core.SetServerLeaseClaimSnapshot(&server, claim, true)
 		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
+	if !readOnlyStatus || req.Prepare || req.ReadyProbe {
+		if err := validateLocalContainerInspectedMounts(container); err != nil {
+			return core.LeaseTarget{}, err
+		}
+	}
 	var exactClaim core.LeaseClaim
 	if owned {
 		claim, ok, exact, claimErr := core.ResolveLeaseClaimForProviderWithExact(leaseID, providerName)
@@ -770,7 +784,10 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	}
 	var lease core.LeaseTarget
 	if isPendingLocalContainerClaim(exactClaim) {
-		lease = b.pendingLease(cfg, container, leaseID, slug)
+		lease, err = b.pendingLease(cfg, container, leaseID, slug)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
 		if req.Prepare {
 			keep := strings.EqualFold(exactClaim.Labels["keep"], "true")
 			bootstrapDir := strings.TrimSpace(exactClaim.Labels["bootstrap_dir"])
@@ -816,7 +833,10 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 			exactClaim = updatedClaim
 		}
 	} else if terminalContainerState(container.State.Status) != "" && req.StatusOnly {
-		lease = b.pendingLease(cfg, container, leaseID, slug)
+		lease, err = b.pendingLease(cfg, container, leaseID, slug)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
 	} else {
 		lease, err = b.prepareLease(ctx, cfg, container, leaseID, slug, false)
 		if err != nil {
@@ -1772,6 +1792,9 @@ func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.C
 	hostWorkRoot := ""
 	if cfg.LocalContainer.DockerSocket {
 		hostWorkRoot, containerWorkRoot = dockerSocketWorkRoots(cfg)
+		if err := validateLocalContainerHostMount("local-container host work-root mount", hostWorkRoot); err != nil {
+			return "", "", err
+		}
 		labels["host_work_root"] = hostWorkRoot
 	}
 	hostLeaseWorkRoot := ""
@@ -1851,6 +1874,9 @@ func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.C
 		if err != nil {
 			return "", "", err
 		}
+		if err := validateLocalContainerHostMount("local-container Docker socket mount", socketPath); err != nil {
+			return "", "", err
+		}
 		args = append(args, "-v", socketPath+":"+dockerSocketInGuest)
 		if isPodmanRuntime(cfg.LocalContainer.Runtime) {
 			args = append(args, "--security-opt", "label=disable")
@@ -1869,6 +1895,9 @@ func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.C
 	bootstrapDir, err := os.MkdirTemp(bootstrapRoot, "crabbox-bootstrap-*")
 	if err != nil {
 		return "", "", core.Exit(2, "create bootstrap script directory: %v", err)
+	}
+	if err := validateLocalContainerHostMount("local-container bootstrap mount", bootstrapDir); err != nil {
+		return "", "", errors.Join(err, os.Remove(bootstrapDir))
 	}
 	bootstrapPath := filepath.Join(bootstrapDir, "bootstrap.sh")
 	if err := os.WriteFile(bootstrapPath, []byte(bootstrapScript), 0o644); err != nil {
@@ -2085,11 +2114,13 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, container i
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	keyPath, err := core.TestboxKeyPath(leaseID)
+	keyPath, err := core.OptionalStoredTestboxKeyPath(leaseID)
 	if err == nil {
 		if _, statErr := os.Stat(keyPath); statErr == nil {
 			cfg.SSHKey = keyPath
 		}
+	} else if !os.IsNotExist(err) {
+		return core.LeaseTarget{}, err
 	}
 	target := core.SSHTargetFromConfig(cfg, host)
 	target.Port = port
@@ -2903,7 +2934,7 @@ func validateLocalContainerHostVolumes(cfg core.Config, workRoot string) ([]stri
 	}
 	destinations := make([]string, 0, len(cfg.LocalContainer.Volumes))
 	for _, volume := range cfg.LocalContainer.Volumes {
-		destination, err := localContainerVolumeDestination(volume)
+		source, destination, err := localContainerVolumePaths(volume)
 		if err != nil {
 			return nil, err
 		}
@@ -2912,34 +2943,99 @@ func validateLocalContainerHostVolumes(cfg core.Config, workRoot string) ([]stri
 				return nil, core.Exit(2, "local-container volume %q targets %s, which overlaps bootstrap-managed path %s", volume, destination, path.Clean(managedPath))
 			}
 		}
+		if !localContainerNamedVolume(source) {
+			if err := validateLocalContainerHostMount("local-container host volume", source); err != nil {
+				return nil, err
+			}
+		}
 		destinations = append(destinations, destination)
 	}
 	return destinations, nil
 }
 
+func validateLocalContainerHostMount(scope, source string) error {
+	if os.Getenv("XDG_STATE_HOME") == "" {
+		return nil
+	}
+	root, err := filepath.Abs(source)
+	if err != nil {
+		return err
+	}
+	return core.ValidateManagedStateTransferScope(scope, root)
+}
+
+func validateLocalContainerInspectedMounts(container inspectContainer) error {
+	if os.Getenv("XDG_STATE_HOME") == "" {
+		return nil
+	}
+	var mounts []struct {
+		Type   string `json:"Type"`
+		Source string `json:"Source"`
+	}
+	if json.Unmarshal(container.Mounts, &mounts) != nil || mounts == nil {
+		return core.Exit(2, "local-container retained bind mount scope is unavailable for %s", container.ID)
+	}
+	for _, mount := range mounts {
+		if mount.Type == "" {
+			return core.Exit(2, "local-container retained bind mount scope is incomplete for %s", container.ID)
+		}
+		if mount.Type != "bind" {
+			continue
+		}
+		if !filepath.IsAbs(mount.Source) {
+			return core.Exit(2, "local-container retained bind mount source is not an absolute host path for %s", container.ID)
+		}
+		if _, err := os.Lstat(mount.Source); err != nil {
+			return core.Exit(2, "local-container retained bind mount source cannot be qualified on this host for %s: %v", container.ID, err)
+		}
+		if err := validateLocalContainerHostMount("local-container retained bind mount", mount.Source); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func localContainerVolumeDestination(spec string) (string, error) {
+	_, destination, err := localContainerVolumePaths(spec)
+	return destination, err
+}
+
+func localContainerNamedVolume(source string) bool {
+	if source == "" {
+		return false
+	}
+	for i, c := range source {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || (i > 0 && strings.ContainsRune("_.-", c)) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func localContainerVolumePaths(spec string) (string, string, error) {
 	spec = strings.TrimSpace(spec)
 	original := spec
 	lastColon := strings.LastIndex(spec, ":")
 	if lastColon < 0 {
-		return "", core.Exit(2, "invalid local-container volume %q; expected host:container[:options]", original)
+		return "", "", core.Exit(2, "invalid local-container volume %q; expected host:container[:options]", original)
 	}
 	destination := spec[lastColon+1:]
 	if !strings.HasPrefix(destination, "/") {
 		spec = spec[:lastColon]
 		lastColon = strings.LastIndex(spec, ":")
 		if lastColon < 0 {
-			return "", core.Exit(2, "invalid local-container volume %q; expected host:container[:options]", original)
+			return "", "", core.Exit(2, "invalid local-container volume %q; expected host:container[:options]", original)
 		}
 		destination = spec[lastColon+1:]
 	}
 	if !strings.HasPrefix(destination, "/") {
-		return "", core.Exit(2, "invalid local-container volume destination %q; expected an absolute container path", destination)
+		return "", "", core.Exit(2, "invalid local-container volume destination %q; expected an absolute container path", destination)
 	}
 	if strings.ContainsAny(destination, "\r\n") {
-		return "", core.Exit(2, "invalid local-container volume destination %q; line breaks are not allowed", destination)
+		return "", "", core.Exit(2, "invalid local-container volume destination %q; line breaks are not allowed", destination)
 	}
-	return path.Clean(destination), nil
+	return spec[:lastColon], path.Clean(destination), nil
 }
 
 func containerPathsOverlap(left, right string) bool {

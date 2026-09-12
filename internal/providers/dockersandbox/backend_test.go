@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"math"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -205,6 +207,150 @@ func TestParseSandboxListCoercesFieldsAndRejectsInvalidShapes(t *testing.T) {
 	}
 	if _, err := parseSandboxList(`{`); err == nil || !strings.Contains(err.Error(), "parse sbx ls --json") {
 		t.Fatalf("invalid json err=%v", err)
+	}
+}
+
+func TestManagedStateNativeDockerSandboxCreateScopes(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		extra, clone, noSync bool
+	}{{name: "repo"}, {name: "clone", clone: true}, {name: "extra no-sync", extra: true, noSync: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := t.TempDir()
+			t.Setenv("XDG_STATE_HOME", filepath.Join(source, "state-base"))
+			cfg := newTestConfig()
+			cfg.DockerSandbox.Clone = tc.clone
+			repo := source
+			if tc.extra {
+				repo = t.TempDir()
+				cfg.DockerSandbox.ExtraWorkspaces = []string{source}
+			}
+			runner := newRunner(nil, nil)
+			_, err := newTestBackend(cfg, runner, io.Discard, io.Discard).Run(t.Context(), RunRequest{Repo: Repo{Root: repo}, NoSync: tc.noSync, Command: []string{"true"}})
+			if err == nil || !strings.Contains(err.Error(), "docker-sandbox workspace mount") || len(runner.calls) != 0 {
+				t.Fatalf("err=%v calls=%v", err, callVerbs(runner))
+			}
+		})
+	}
+}
+
+func TestManagedStateNativeDockerSandboxRetainedScopes(t *testing.T) {
+	for _, stored := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stored=%t", stored), func(t *testing.T) {
+			state := t.TempDir()
+			t.Setenv("XDG_STATE_HOME", state)
+			repo := t.TempDir()
+			leaseID := leasePrefix + "fixture"
+			if err := claimLeaseForRepoProviderPond(leaseID, "fixture", providerName, "", repo, time.Hour, false); err != nil {
+				t.Fatal(err)
+			}
+			if stored {
+				claim, _, err := resolveLeaseClaimForProvider(leaseID, providerName)
+				if err != nil {
+					t.Fatal(err)
+				}
+				roots, _ := json.Marshal([]string{repo, state})
+				if _, err := core.UpdateLeaseClaimLabelsIfUnchangedAfter(leaseID, claim, map[string]string{dockerSandboxWorkspaceRootsLabel: string(roots)}, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg := newTestConfig()
+			cfg.DockerSandbox.ExtraWorkspaces = []string{t.TempDir()}
+			runner := newRunner(map[string]scriptedReply{"rm": {}}, nil)
+			b := newTestBackend(cfg, runner, io.Discard, io.Discard)
+			_, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: repo}, ID: leaseID, NoSync: true, Command: []string{"true"}})
+			if err == nil || !strings.Contains(err.Error(), "workspace mount") || len(runner.calls) != 0 {
+				t.Fatalf("err=%v calls=%v", err, callVerbs(runner))
+			}
+			if err := b.Stop(t.Context(), StopRequest{ID: leaseID}); err != nil {
+				t.Fatalf("cleanup blocked by outgoing guard: %v", err)
+			}
+			if got := callVerbs(runner); !reflect.DeepEqual(got, []string{"rm"}) {
+				t.Fatalf("cleanup calls=%v", got)
+			}
+		})
+	}
+	t.Setenv("XDG_STATE_HOME", "")
+	if err := validateDockerSandboxStoredWorkspaces(leasePrefix + "legacy"); err != nil {
+		t.Fatalf("unset compatibility: %v", err)
+	}
+}
+
+func recordDockerSandboxTestWorkspaces(t *testing.T, leaseID string, roots ...string) {
+	t.Helper()
+	claim, exists, err := resolveLeaseClaimForProvider(leaseID, providerName)
+	if err != nil || !exists {
+		t.Fatalf("workspace fixture claim missing: %v", err)
+	}
+	encoded, err := json.Marshal(roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := make(map[string]string, len(claim.Labels)+1)
+	for key, value := range claim.Labels {
+		labels[key] = value
+	}
+	labels[dockerSandboxWorkspaceRootsLabel] = string(encoded)
+	if _, err := core.UpdateLeaseClaimLabelsIfUnchangedAfter(leaseID, claim, labels, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManagedStateNativeDockerSandboxPersistsCreatedScope(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repo, extra := t.TempDir(), t.TempDir()
+	cfg := newTestConfig()
+	cfg.DockerSandbox.ExtraWorkspaces = []string{extra}
+	runner := newRunner(map[string]scriptedReply{"create": {}, "exec": {}, "rm": {}}, nil)
+	b := newTestBackend(cfg, runner, io.Discard, io.Discard)
+	result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Name: "fixture", Root: repo}, NoSync: true, Keep: true, Command: []string{"true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, exists, err := resolveLeaseClaimForProvider(result.LeaseID, providerName)
+	if err != nil || !exists {
+		t.Fatalf("created claim missing: %v", err)
+	}
+	var stored []string
+	if err := json.Unmarshal([]byte(claim.Labels[dockerSandboxWorkspaceRootsLabel]), &stored); err != nil {
+		t.Fatal(err)
+	}
+	want, err := dockerSandboxWorkspaceRoots(cfg, repo)
+	if err != nil || !reflect.DeepEqual(stored, want) {
+		t.Fatalf("stored=%v want=%v err=%v", stored, want, err)
+	}
+	b.cfg.DockerSandbox.ExtraWorkspaces = nil
+	if err := validateDockerSandboxStoredWorkspaces(result.LeaseID); err != nil {
+		t.Fatalf("stored nonoverlapping scope lost after config change: %v", err)
+	}
+	if err := b.Stop(t.Context(), StopRequest{ID: result.LeaseID}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManagedStateNativeDockerSandboxUnsetScopeIsOptional(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", "")
+	cfg := newTestConfig()
+	// With no selection, legacy native argument acceptance remains the CLI's decision.
+	cfg.DockerSandbox.ExtraWorkspaces = []string{""}
+	runner := newRunner(map[string]scriptedReply{"create": {}, "exec": {}, "rm": {}}, nil)
+	var stderr bytes.Buffer
+	b := newTestBackend(cfg, runner, io.Discard, &stderr)
+	result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Name: "fixture", Root: t.TempDir()}, Keep: true, Command: []string{"true"}})
+	if err != nil || !reflect.DeepEqual(callVerbs(runner), []string{"create", "exec"}) {
+		t.Fatalf("optional metadata changed native result: %v calls=%v", err, callVerbs(runner))
+	}
+	if !strings.Contains(stderr.String(), "scope persistence is unconfirmed") {
+		t.Fatalf("missing qualification warning: %q", stderr.String())
+	}
+	claim, exists, err := resolveLeaseClaimForProvider(result.LeaseID, providerName)
+	if err != nil || !exists || claim.Labels[dockerSandboxWorkspaceRootsLabel] != "" {
+		t.Fatalf("unqualified scope was fabricated: %+v %v", claim, err)
+	}
+	if err := b.Stop(t.Context(), StopRequest{ID: result.LeaseID}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -528,6 +674,7 @@ func TestRunCloneFailureAndNativeWorkspaceControls(t *testing.T) {
 				if err := claimLeaseForRepoProviderPond(req.ID, "fixture", providerName, "", repoRoot, time.Hour, false); err != nil {
 					t.Fatal(err)
 				}
+				recordDockerSandboxTestWorkspaces(t, req.ID, repoRoot)
 			}
 			if tc.badEnv {
 				req.Env = map[string]string{"INVALID-NAME": "synthetic"}
@@ -802,6 +949,7 @@ func TestRunWithExistingIDReusesClaimedSandbox(t *testing.T) {
 	if err := claimLeaseForRepoProviderPond(leaseID, "blue-box", providerName, "", repoRoot, time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
+	recordDockerSandboxTestWorkspaces(t, leaseID, repoRoot)
 	runner := newRunner(map[string]scriptedReply{"exec": {stdout: "pwd\n"}}, nil)
 	backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
 	result, err := backend.Run(context.Background(), RunRequest{
@@ -827,6 +975,7 @@ func TestRunWithExistingIDClassifiesMissingSBXCLI(t *testing.T) {
 	if err := claimLeaseForRepoProviderPond(leaseID, "missing-cli", providerName, "", repoRoot, time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
+	recordDockerSandboxTestWorkspaces(t, leaseID, repoRoot)
 	runner := newRunner(map[string]scriptedReply{
 		"exec": {stderr: "not found", exitCode: 1, err: os.ErrNotExist},
 	}, nil)

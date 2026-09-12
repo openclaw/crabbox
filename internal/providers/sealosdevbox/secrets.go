@@ -77,7 +77,7 @@ func secretField(secret devboxSecret, key string) (string, error) {
 }
 
 func persistDevboxKey(leaseID string, keys devboxSecretKeys) (string, error) {
-	path, err := core.TestboxKeyPath(leaseID)
+	path, err := core.PrepareStoredTestboxKeyPath(leaseID)
 	if err != nil {
 		return "", err
 	}
@@ -137,6 +137,10 @@ func writeDevboxKeyFile(path string, data []byte, mode os.FileMode) error {
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
+	if err := core.SecureCreatedLeaseSSHFile(tmp); err != nil {
+		_ = tmp.Close()
+		return err
+	}
 	if err := tmp.Chmod(mode); err != nil {
 		_ = tmp.Close()
 		return err

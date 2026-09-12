@@ -127,11 +127,14 @@ func removeStoredTestboxKey(leaseID string) {
 }
 
 func useStoredTestboxKey(target *SSHTarget, leaseID string, allowAlternate bool) error {
-	keyPath, err := core.TestboxKeyPath(leaseID)
-	if err != nil {
+	keyPath, err := core.StoredTestboxKeyPath(leaseID)
+	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	if _, err := os.Stat(keyPath); err == nil {
+	if err == nil {
+		_, err = os.Stat(keyPath)
+	}
+	if err == nil {
 		target.Key = keyPath
 		return nil
 	} else if allowAlternate && target.Key != "" && os.IsNotExist(err) {

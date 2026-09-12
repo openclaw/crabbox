@@ -131,7 +131,7 @@ func (b *coordinatorLeaseBackend) expectedProvider() (string, error) {
 	return canonicalProviderName(selectedProvider)
 }
 
-func (b *coordinatorLeaseBackend) coordinatorLeaseTargetForConfig(lease CoordinatorLease, cfg Config, coord *CoordinatorClient) (LeaseTarget, error) {
+func (b *coordinatorLeaseBackend) coordinatorLeaseTargetForConfig(lease CoordinatorLease, cfg Config, coord *CoordinatorClient, releaseOnly bool) (LeaseTarget, error) {
 	if err := b.validateCoordinatorLeaseProviderIdentity(lease); err != nil {
 		return LeaseTarget{}, err
 	}
@@ -145,8 +145,13 @@ func (b *coordinatorLeaseBackend) coordinatorLeaseTargetForConfig(lease Coordina
 		// Confirmed deletion retires guest access, not the release operation. Keep
 		// platform metadata for local cleanup without recreating SSH trust.
 		target = SSHTarget{TargetOS: target.TargetOS, WindowsMode: target.WindowsMode}
-	} else if err := prepareLeaseSSHTrust(&target, leaseID); err != nil {
-		return LeaseTarget{}, err
+	} else if !releaseOnly {
+		if err := useCoordinatorStoredSSHKey(&target, server.Provider, leaseID); err != nil {
+			return LeaseTarget{}, err
+		}
+		if err := prepareLeaseSSHTrust(&target, leaseID); err != nil {
+			return LeaseTarget{}, err
+		}
 	}
 	result := LeaseTarget{
 		Server:      server,
@@ -158,6 +163,13 @@ func (b *coordinatorLeaseBackend) coordinatorLeaseTargetForConfig(lease Coordina
 		result.providerRelease = &leaseReleaseConfirmation{backend: b, leaseID: leaseID}
 	}
 	return result, nil
+}
+
+func useCoordinatorStoredSSHKey(target *SSHTarget, provider, leaseID string) error {
+	if provider == "daytona" {
+		return nil
+	}
+	return useStoredTestboxKey(target, leaseID)
 }
 
 func selectCoordinatorLeaseSSHPort(lease CoordinatorLease, cfg Config) (CoordinatorLease, error) {
@@ -174,7 +186,7 @@ func selectCoordinatorLeaseSSHPort(lease CoordinatorLease, cfg Config) (Coordina
 }
 
 func (b *coordinatorLeaseBackend) prepareCoordinatorLeaseAcquisition(lease CoordinatorLease, cfg Config) (LeaseTarget, SSHTarget, error) {
-	resolved, err := b.coordinatorLeaseTargetForConfig(lease, cfg, b.coord)
+	resolved, err := b.coordinatorLeaseTargetForConfig(lease, cfg, b.coord, false)
 	if err != nil {
 		return LeaseTarget{}, SSHTarget{}, err
 	}
@@ -893,7 +905,7 @@ func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveReques
 			return LeaseTarget{}, exit(4, "coordinator returned lease %s for requested lease %s", blank(lease.ID, "<empty>"), req.ID)
 		}
 	}
-	target, err := b.coordinatorLeaseTargetForConfig(lease, cfg, coord)
+	target, err := b.coordinatorLeaseTargetForConfig(lease, cfg, coord, req.ReleaseOnly)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -922,6 +934,11 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		return statusView{}, err
 	}
 	server, target, leaseID := leaseToServerTarget(lease, b.cfg)
+	if !coordinatorProviderReleaseConfirmed(lease) {
+		if err := useCoordinatorStoredSSHKey(&target, server.Provider, leaseID); err != nil {
+			return statusView{}, err
+		}
+	}
 	resolved, err := resolveNetworkTarget(ctx, b.cfg, server, target)
 	if err != nil {
 		return statusView{}, err

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Add opt-in private local run history with bounded logs and parsed results, offline readback after lease cleanup, explicit provenance, and bounded pruning. [PR 2141](https://github.com/openclaw/crabbox/pull/2141). Thanks @coygeek.
+- Honor an explicit `XDG_STATE_HOME` for generated lease SSH keys and host trust, preserving default paths and isolated-root reuse and cleanup. [Issue 1516](https://github.com/openclaw/crabbox/issues/1516). Thanks @coygeek.
 - Bound Nomad's finite control-plane requests while retaining durable recovery identity for uncertain registration, preserving caller cancellation and keeping established exec streams outside the request ceiling. [PR 1916](https://github.com/openclaw/crabbox/pull/1916). Thanks @SebTardif.
 - Preserve GCP capacity fallback when a bounded error summary omits retry evidence, while keeping user-visible diagnostics redacted and bounded. [PR 1987](https://github.com/openclaw/crabbox/pull/1987). Thanks @steipete.
 - AWS: add administrator-only legacy cleanup recovery backed by authenticated original CloudTrail allocation evidence, preserving remaining key and access cleanup and recording an atomic scope-recovery audit without force-success. [PR 1975](https://github.com/openclaw/crabbox/pull/1975).

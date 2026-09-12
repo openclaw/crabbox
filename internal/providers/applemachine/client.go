@@ -30,6 +30,9 @@ func (b *backend) command(ctx context.Context, args []string, dir string) (Local
 }
 
 func (b *backend) createMachine(ctx context.Context, name string) error {
+	if err := validateRepoMount(""); err != nil {
+		return err
+	}
 	args := []string{"machine", "create", "--name", name, "--home-mount", "rw"}
 	if b.cfg.AppleContainer.CPUs > 0 {
 		args = append(args, "--cpus", fmt.Sprintf("%d", b.cfg.AppleContainer.CPUs))

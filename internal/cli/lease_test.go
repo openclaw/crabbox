@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -40,7 +41,8 @@ func TestNewCreateAttemptIDIsOpaqueAndUnique(t *testing.T) {
 }
 
 func TestLeaseOperationLockSerializesFixedIDKeyCreation(t *testing.T) {
-	isolateTestUserDirs(t)
+	dirs := isolateTestUserDirs(t)
+	prepareLeaseSSHTestStateRoot(t, dirs.StateHome)
 	const leaseID = "cbx_abcdef123456"
 	start := make(chan struct{})
 	paths := make(chan string, 2)
@@ -86,6 +88,7 @@ func TestTestboxKeyPathRejectsTraversalIDs(t *testing.T) {
 
 func TestTestboxKeyPathAllowsSafeCustomIDs(t *testing.T) {
 	isolateTestUserDirs(t)
+	t.Setenv("XDG_STATE_HOME", "")
 
 	path, err := testboxKeyPath("morphvm_123")
 	if err != nil {
@@ -139,8 +142,201 @@ func TestUseStoredTestboxKeyPreservesOptionalFallback(t *testing.T) {
 	}
 }
 
-func TestUseLeaseKnownHostsScopesAndEnforcesHostVerification(t *testing.T) {
+func TestLeaseSSHRootSelection(t *testing.T) {
+	dirs := isolateTestUserDirs(t)
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, root, want string }{
+		{"explicit", dirs.StateHome, dirs.StateHome},
+		{"legacy empty", "", configDir},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", tc.root)
+			got, err := testboxKeyPath("cbx_1516")
+			want := filepath.Join(tc.want, "crabbox", "testboxes", "cbx_1516", "id_ed25519")
+			if err != nil || got != want {
+				t.Fatalf("key path=%q err=%v want %q", got, err, want)
+			}
+		})
+	}
+	t.Setenv("XDG_STATE_HOME", "relative-state")
+	if _, err := testboxKeyPath("cbx_1516"); err == nil {
+		t.Fatal("relative explicit root accepted")
+	}
+	target := SSHTarget{Key: "external-key"}
+	if err := useStoredTestboxKey(&target, "cbx_1516"); err == nil || target.Key != "external-key" {
+		t.Fatalf("invalid root must return error without changing target: %+v, %v", target, err)
+	}
+}
+
+func TestLeaseSSHOptionalDefaultCompatibility(t *testing.T) {
+	dirs := isolateTestUserDirs(t)
+	t.Setenv("XDG_STATE_HOME", "")
+	const invalidID = "invalid/lease"
+	if _, err := StoredTestboxKeyPath(invalidID); err == nil {
+		t.Fatal("required key lookup lost its error")
+	}
+	if path, err := OptionalStoredTestboxKeyPath(invalidID); err != nil || path != "" {
+		t.Fatalf("legacy optional lookup=%q %v", path, err)
+	}
+	target := SSHTarget{Key: "external-key"}
+	if err := UseStoredTestboxKey(&target, invalidID); err != nil || target.Key != "external-key" {
+		t.Fatal("legacy optional key fallback changed")
+	}
+	t.Setenv("XDG_STATE_HOME", dirs.StateHome)
+	if _, err := OptionalStoredTestboxKeyPath(invalidID); err == nil {
+		t.Fatal("selected-root error was suppressed")
+	}
+	if err := UseStoredTestboxKey(&target, invalidID); err == nil || target.Key != "external-key" {
+		t.Fatal("selected-root admission error became fallback")
+	}
+}
+
+func TestLeaseSSHImportedFilePrivacy(t *testing.T) {
+	dirs := isolateTestUserDirs(t)
+	prepareLeaseSSHTestStateRoot(t, dirs.StateHome)
+	const leaseID = "cbx_1516_import"
+	path, err := PrepareStoredTestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{"synthetic imported bytes", "replacement synthetic bytes"} {
+		if err := WritePreparedLeaseSSHKeyFile(path, []byte(content)); err != nil {
+			t.Fatal(err)
+		}
+		if err := verifySSHTransportPathPrivate(path, false); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != content {
+			t.Fatal("imported bytes changed")
+		}
+		if got, err := StoredTestboxKeyPath(leaseID); err != nil || got != path {
+			t.Fatalf("stored import path=%q error=%v", got, err)
+		}
+	}
+}
+
+func TestSelectedLeaseSSHRootReuseAndCleanup(t *testing.T) {
+	dirs := isolateTestUserDirs(t)
+	prepareLeaseSSHTestStateRoot(t, dirs.StateHome)
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkConfigUnchanged := makeLeaseSSHTestConfigReadOnly(t, configDir)
+	const leaseID = "cbx_1516"
+	key, _, err := ensureTestboxKey(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ensureTestboxKey(leaseID); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(key)
+	if err != nil || string(before) != string(after) {
+		t.Fatal("existing generated key changed")
+	}
+	target := SSHTarget{}
+	if err := useStoredTestboxKey(&target, leaseID); err != nil || target.Key != key {
+		t.Fatalf("reuse key=%q err=%v", target.Key, err)
+	}
+	if err := useLeaseKnownHosts(&target, leaseID); err != nil {
+		t.Fatal(err)
+	}
+	if target.KnownHostsFile != filepath.Join(filepath.Dir(key), "known_hosts") {
+		t.Fatal("host trust did not share the selected lease root")
+	}
+	if _, err := os.Lstat(filepath.Join(configDir, "crabbox")); !os.IsNotExist(err) {
+		t.Fatalf("default key tree was touched: %v", err)
+	}
+	t.Setenv("XDG_STATE_HOME", filepath.Join(dirs.Root, "other-state"))
+	external := SSHTarget{Key: "external-key"}
+	if err := useStoredTestboxKey(&external, leaseID); err != nil || external.Key != "external-key" {
+		t.Fatalf("root switch adopted an alternate key: %+v %v", external, err)
+	}
+	if _, err := os.Stat(key); err != nil {
+		t.Fatal("root switch changed the original key")
+	}
+	t.Setenv("XDG_STATE_HOME", dirs.StateHome)
+	if err := RemoveStoredTestboxConnectionArtifacts(leaseID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Dir(key)); !os.IsNotExist(err) {
+		t.Fatalf("selected lease directory remains: %v", err)
+	}
+	checkConfigUnchanged()
+}
+
+func TestSelectedLeaseSSHRootDoesNotRepairCallerDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows privacy is verified through ACL tests")
+	}
+	for _, tc := range []struct {
+		name    string
+		mode    os.FileMode
+		wantErr bool
+	}{{"readable base", 0o755, false}, {"other-writable base", 0o777, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			dirs := isolateTestUserDirs(t)
+			if err := os.Chmod(dirs.StateHome, tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			err := PreflightLeaseSSHStorage()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("preflight=%v want error=%t", err, tc.wantErr)
+			}
+			info, err := os.Stat(dirs.StateHome)
+			if err != nil || info.Mode().Perm() != tc.mode {
+				t.Fatal("caller-selected directory was silently repaired")
+			}
+			info, err = os.Lstat(filepath.Join(dirs.StateHome, "crabbox"))
+			if tc.wantErr {
+				if !os.IsNotExist(err) {
+					t.Fatalf("rejected root gained generated namespace: %v", err)
+				}
+			} else if err != nil || info.Mode().Perm() != 0o700 {
+				t.Fatalf("generated namespace is not private: %v", err)
+			}
+		})
+	}
+}
+
+func TestSelectedLeaseSSHExistingKeyRequiresPrivateMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows privacy is verified through ACL tests")
+	}
 	isolateTestUserDirs(t)
+	const leaseID = "cbx_1516_mode"
+	key, _, err := ensureTestboxKey(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(key, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ensureTestboxKey(leaseID); err == nil {
+		t.Fatal("existing-key fast path accepted a non-private generated key")
+	}
+	target := SSHTarget{}
+	if err := useStoredTestboxKey(&target, leaseID); err == nil || target.Key != "" {
+		t.Fatalf("use must report invalid generated key without assigning it: %+v %v", target, err)
+	}
+	info, err := os.Stat(key)
+	if err != nil || info.Mode().Perm() != 0o644 {
+		t.Fatal("inspection silently repaired or replaced the existing key")
+	}
+}
+
+func TestUseLeaseKnownHostsScopesAndEnforcesHostVerification(t *testing.T) {
+	dirs := isolateTestUserDirs(t)
+	prepareLeaseSSHTestStateRoot(t, dirs.StateHome)
 
 	const leaseID = "cbx_abcdef123456"
 	target := SSHTarget{User: "root", Host: "provider-resource", Port: "22"}
@@ -155,10 +351,8 @@ func TestUseLeaseKnownHostsScopesAndEnforcesHostVerification(t *testing.T) {
 	if target.KnownHostsFile != want {
 		t.Fatalf("KnownHostsFile=%q want %q", target.KnownHostsFile, want)
 	}
-	if info, err := os.Stat(filepath.Dir(want)); err != nil {
-		t.Fatalf("stat lease SSH directory: %v", err)
-	} else if info.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("lease SSH directory mode=%#o want private", info.Mode().Perm())
+	if err := verifySSHTransportPathPrivate(filepath.Dir(want), true); err != nil {
+		t.Fatalf("lease SSH directory is not private: %v", err)
 	}
 
 	args := strings.Join(sshBaseArgs(target), " ")
@@ -176,6 +370,7 @@ func TestUseLeaseKnownHostsScopesAndEnforcesHostVerification(t *testing.T) {
 
 func TestUseLeaseKnownHostsFailsClosedWhenDirectoryCannotBePrepared(t *testing.T) {
 	isolateTestUserDirs(t)
+	t.Setenv("XDG_STATE_HOME", "")
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		t.Fatal(err)

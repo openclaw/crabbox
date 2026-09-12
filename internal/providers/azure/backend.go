@@ -163,7 +163,11 @@ func (b *azureLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 		}
 		leaseID := server.Labels["lease"]
 		target := sshTargetFromConfig(b.Cfg, azureServerHost(server, b.Cfg.AzureNetwork))
-		useStoredTestboxKey(&target, leaseID)
+		if !req.ReleaseOnly {
+			if err := useStoredTestboxKey(&target, leaseID); err != nil {
+				return LeaseTarget{}, err
+			}
+		}
 		return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 	}
 	servers, err := listOwnedAzureServers(ctx, client)
@@ -174,7 +178,11 @@ func (b *azureLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 		return LeaseTarget{}, err
 	} else if leaseID != "" {
 		target := sshTargetFromConfig(b.Cfg, azureServerHost(server, b.Cfg.AzureNetwork))
-		useStoredTestboxKey(&target, leaseID)
+		if !req.ReleaseOnly {
+			if err := useStoredTestboxKey(&target, leaseID); err != nil {
+				return LeaseTarget{}, err
+			}
+		}
 		return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 	}
 	if req.ReleaseOnly {
@@ -528,8 +536,8 @@ func isAzureCleanupNotFound(err error) bool {
 	return strings.Contains(message, "ResourceNotFound") || strings.Contains(message, "NotFound")
 }
 
-func useStoredTestboxKey(target *SSHTarget, leaseID string) {
-	shared.UseStoredTestboxKey(target, leaseID)
+func useStoredTestboxKey(target *SSHTarget, leaseID string) error {
+	return shared.UseStoredTestboxKey(target, leaseID)
 }
 func findServerByAlias(servers []Server, id string) (Server, string, error) {
 	return core.FindServerByAlias(servers, id)

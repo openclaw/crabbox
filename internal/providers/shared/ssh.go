@@ -1,7 +1,6 @@
 package shared
 
 import (
-	"os"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -21,10 +20,6 @@ func QuoteSSHProxyCommandWord(word string) string {
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, "$", `\$`, "`", "\\`").Replace(word) + `"`
 }
 
-func UseStoredTestboxKey(target *core.SSHTarget, leaseID string) {
-	if keyPath, err := core.TestboxKeyPath(leaseID); err == nil {
-		if _, statErr := os.Stat(keyPath); statErr == nil {
-			target.Key = keyPath
-		}
-	}
+func UseStoredTestboxKey(target *core.SSHTarget, leaseID string) error {
+	return core.UseStoredTestboxKey(target, leaseID)
 }

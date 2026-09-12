@@ -7,9 +7,146 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestManagedStateSyncExclusionIsLiteralAndProtected(t *testing.T) {
+	root := t.TempDir()
+	runGit(t, root, "init")
+	runGit(t, root, "config", "user.email", "test@example.com")
+	runGit(t, root, "config", "user.name", "Test")
+	base := "state [cache]"
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, base))
+	managed := base + "/crabbox/marker.txt"
+	deleted := base + "/crabbox/old-marker.txt"
+	for _, path := range []string{managed, deleted, base + "/source.txt", base + "/old-source.txt", "source.txt"} {
+		writeFile(t, filepath.Join(root, filepath.FromSlash(path)), "benign marker\n")
+	}
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-m", "markers")
+	writeFile(t, filepath.Join(root, filepath.FromSlash(managed)), "updated marker\n")
+	writeFile(t, filepath.Join(root, base, "crabbox", "new-marker.txt"), "new marker\n")
+	writeFile(t, filepath.Join(root, base, "source.txt"), "updated source marker\n")
+	if err := os.Remove(filepath.Join(root, filepath.FromSlash(deleted))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, base, "old-source.txt")); err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	cfg.Sync.Excludes = []string{"!**"}
+	writeFile(t, filepath.Join(root, ".crabboxignore"), "!**\n")
+	rules, err := syncExcludes(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	includes := []string{base, "source.txt"}
+	if !pathIncluded(managed, includes) {
+		t.Fatal("include control must admit the entire managed subtree before protection")
+	}
+	manifest, err := syncManifestFilteredRules(root, rules, includes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, paths := range [][]string{manifest.Files, manifest.Changed, manifest.Deleted, manifest.OverlayFiles} {
+		for _, path := range paths {
+			if strings.HasPrefix(path, base+"/crabbox/") {
+				t.Fatalf("managed marker remained in manifest: %q", path)
+			}
+		}
+	}
+	for _, wanted := range []string{base + "/source.txt", "source.txt"} {
+		if !slices.Contains(manifest.Files, wanted) {
+			t.Fatalf("ordinary source omitted: %q", wanted)
+		}
+	}
+	if !slices.Contains(manifest.Changed, base+"/source.txt") || !slices.Contains(manifest.OverlayFiles, base+"/source.txt") || !slices.Contains(manifest.Deleted, base+"/old-source.txt") {
+		t.Fatal("ordinary changed/overlay/deleted controls were lost")
+	}
+	if newWatchPathScope(rules, nil).traverseExcludedDir(base + "/crabbox") {
+		t.Fatal("negation reopened protected watch subtree")
+	}
+	cfg.Sync.GitSeed = true
+	cfg.Sync.BaseRef = "main"
+	head := gitOutput(root, "rev-parse", "HEAD")
+	if head == "" {
+		t.Fatal("fixture HEAD unavailable")
+	}
+	runGit(t, root, "remote", "add", "origin", "https://example.invalid/repository")
+	runGit(t, root, "update-ref", "refs/remotes/origin/main", head)
+	repo := Repo{Root: root, Head: head, BaseRef: "main", RemoteURL: "https://example.invalid/repository"}
+	for _, state := range []string{"", t.TempDir()} {
+		t.Setenv("XDG_STATE_HOME", state)
+		plan, _ := syncGitCoherencePlan(cfg, repo)
+		if !plan.seedEnabled() || !plan.enabled() {
+			t.Fatal("ordinary metadata-only seed control is not eligible")
+		}
+	}
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, base))
+	plan, _ := syncGitCoherencePlan(cfg, repo)
+	if plan.seedEnabled() || plan.enabled() {
+		t.Fatal("nested state retained whole-tree seeding")
+	}
+}
+
+func TestManagedStateTransferScopeBoundaries(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	for _, scope := range []string{root, filepath.Join(root, "state", "crabbox"), filepath.Join(root, "state", "crabbox", "marker.txt")} {
+		if err := ValidateManagedStateTransferScope("fixture native scope", scope); err == nil {
+			t.Fatalf("overlap accepted: %q", scope)
+		}
+	}
+	if err := ValidateManagedStateTransferScope("fixture native scope", filepath.Join(root, "state", "source")); err != nil {
+		t.Fatal(err)
+	}
+	volumeRoot := filepath.VolumeName(root) + string(filepath.Separator)
+	if !managedPathContains(volumeRoot, root) {
+		t.Fatal("filesystem root containment failed")
+	}
+	if _, err := managedStateSyncSubtree(filepath.Join(root, "state", "crabbox", "repo")); err == nil {
+		t.Fatal("source inside managed namespace accepted")
+	}
+	t.Setenv("XDG_STATE_HOME", "")
+	if err := ValidateManagedStateTransferScope("fixture", "relative-default-scope"); err != nil {
+		t.Fatal("unset default changed")
+	}
+}
+
+func TestManagedStateTransferCaseSpelling(t *testing.T) {
+	parent := t.TempDir()
+	original := filepath.Join(parent, "MixedCase")
+	if err := os.Mkdir(original, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := NormalizeManagedStateTransferRoot(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	variant := filepath.Join(parent, "mixedcase")
+	got, err := NormalizeManagedStateTransferRoot(variant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalInfo, err := os.Stat(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	variantInfo, statErr := os.Stat(variant)
+	if statErr == nil {
+		if !os.SameFile(originalInfo, variantInfo) || got != canonical {
+			t.Fatal("case alias did not resolve to its actual directory")
+		}
+	} else if os.IsNotExist(statErr) {
+		if got != filepath.Join(filepath.Dir(canonical), "mixedcase") {
+			t.Fatal("case-sensitive missing sibling was conflated")
+		}
+	} else {
+		t.Fatal(statErr)
+	}
+}
 
 func TestRepositoryGitEnvironmentExcludesSecretsAndPreservesSafeGitRouting(t *testing.T) {
 	t.Setenv("SCREEN_SHARING_PASSWORD", "operator-secret")

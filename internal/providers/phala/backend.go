@@ -258,8 +258,7 @@ func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID st
 	if err := core.UseLeaseKnownHosts(&target.SSH, leaseID); err != nil {
 		return err
 	}
-	core.UseStoredTestboxKey(&target.SSH, leaseID)
-	return nil
+	return core.UseStoredTestboxKey(&target.SSH, leaseID)
 }
 
 func (b *backend) configForRun() core.Config {
@@ -339,7 +338,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		recoveryLabels["recovery"] = recovery
 		recoveryLabels["state"] = "provisioning"
 		item := instance{ID: id, Name: phalaCVMName(leaseID), Labels: recoveryLabels}
-		lease, err := b.lease(item, cfg, leaseID)
+		lease, err := b.lease(item, cfg, leaseID, false)
 		if err != nil {
 			return err
 		}
@@ -397,7 +396,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if slug != "" {
 		item.Labels["slug"] = slug
 	}
-	lease, err := b.lease(item, cfg, leaseID)
+	lease, err := b.lease(item, cfg, leaseID, false)
 	if err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
@@ -469,7 +468,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 			item.Labels["gateway_host"] = gatewayHost
 		}
 	}
-	lease, err := b.lease(item, cfg, leaseID)
+	lease, err := b.lease(item, cfg, leaseID, req.ReleaseOnly)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -1089,7 +1088,7 @@ func (b *backend) resolve(ctx context.Context, identifier string, cfg core.Confi
 	return instance{}, "", core.Exit(4, "Phala CVM lease not found: %s", identifier)
 }
 
-func (b *backend) lease(item instance, cfg core.Config, leaseID string) (core.LeaseTarget, error) {
+func (b *backend) lease(item instance, cfg core.Config, leaseID string, releaseOnly bool) (core.LeaseTarget, error) {
 	target := core.SSHTarget{
 		User:            "root",
 		Host:            item.cloudID(),
@@ -1102,11 +1101,13 @@ func (b *backend) lease(item instance, cfg core.Config, leaseID string) (core.Le
 		SSHConfigProxy:  true,
 		ProxyCommand:    proxyCommand(cfg, item.cloudID(), item.Labels["gateway_host"]),
 	}
-	if leaseID != "" {
+	if leaseID != "" && !releaseOnly {
 		if err := core.UseLeaseKnownHosts(&target, leaseID); err != nil {
 			return core.LeaseTarget{}, err
 		}
-		core.UseStoredTestboxKey(&target, leaseID)
+		if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
+			return core.LeaseTarget{}, err
+		}
 	}
 	server := b.server(item, cfg)
 	if claim, ok, _ := resolvePhalaClaim(leaseID, cfg); ok {

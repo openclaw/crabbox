@@ -33,6 +33,9 @@ crabbox history delete run_<id> --source local
 
 Local history lives under the existing state directory's `history` directory,
 separate from lease claims. Files and directories are private to their owner.
+An explicit `XDG_STATE_HOME` places it at `$XDG_STATE_HOME/crabbox/history`, beside
+the separate claim and generated lease-key namespaces; the unset default remains
+unchanged. Root switching does not migrate records or credentials.
 It retains up to 100 inactive records, 256 MiB overall, and 30 days; abandoned
 incomplete records are included. Active writers hold a lock and reserve bounded
 space. Admission fails before acquisition if private storage cannot be reserved.

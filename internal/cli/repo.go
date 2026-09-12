@@ -518,7 +518,8 @@ type syncExcludeRule struct {
 // SyncExcludeRules keeps ordered matcher provenance internal while allowing
 // provider adapters to pass the rules back to the core manifest owner.
 type SyncExcludeRules struct {
-	rules []syncExcludeRule
+	rules          []syncExcludeRule
+	managedSubtree string
 }
 
 func configuredExcludes(cfg Config) SyncExcludeRules {
@@ -533,6 +534,11 @@ func configuredExcludes(cfg Config) SyncExcludeRules {
 
 func syncExcludes(root string, cfg Config) (SyncExcludeRules, error) {
 	excludes := configuredExcludes(cfg)
+	managed, err := managedStateSyncSubtree(root)
+	if err != nil {
+		return SyncExcludeRules{}, err
+	}
+	excludes.managedSubtree = managed
 	ignore, err := readCrabboxIgnore(root)
 	if err != nil {
 		return SyncExcludeRules{}, err
@@ -546,7 +552,7 @@ func newSyncExcludeRules(patterns []string, origin syncExcludeOrigin) SyncExclud
 }
 
 func (r SyncExcludeRules) append(patterns []string, origin syncExcludeOrigin) SyncExcludeRules {
-	out := SyncExcludeRules{rules: append([]syncExcludeRule(nil), r.rules...)}
+	out := SyncExcludeRules{rules: append([]syncExcludeRule(nil), r.rules...), managedSubtree: r.managedSubtree}
 	for _, pattern := range patterns {
 		if pattern = strings.TrimSpace(pattern); pattern != "" {
 			out.rules = append(out.rules, syncExcludeRule{pattern: pattern, origin: origin})
@@ -631,6 +637,11 @@ func (p gitCoherencePlan) enabled() bool { return p.seedEnabled() && p.Tree != "
 
 func syncGitCoherencePlan(cfg Config, repo Repo) (gitCoherencePlan, bool) {
 	if !cfg.Sync.GitSeed || len(syncIncludes(cfg)) != 0 || repo.Root == "" || repo.RemoteURL == "" || repo.Head == "" {
+		return gitCoherencePlan{}, false
+	}
+	// A seed materializes a whole remote tree, outside local file filtering.
+	// Nested managed state therefore uses file sync, including on Windows.
+	if subtree, err := managedStateSyncSubtree(repo.Root); err != nil || subtree != "" {
 		return gitCoherencePlan{}, false
 	}
 	if gitRemoteURLHasCredentials(repo.RemoteURL) {
@@ -1005,6 +1016,17 @@ func syncManifestFiltered(root string, excludes, includes []string) (SyncManifes
 }
 
 func syncManifestFilteredRules(root string, excludes SyncExcludeRules, includes []string) (SyncManifest, error) {
+	managed, err := newManagedSyncScope(root)
+	if err != nil {
+		return SyncManifest{}, err
+	}
+	if managed.namespace != "" && managedPathContains(managed.source, managed.namespace) {
+		rel, err := filepath.Rel(managed.source, managed.namespace)
+		if err != nil {
+			return SyncManifest{}, err
+		}
+		excludes.managedSubtree = filepath.ToSlash(rel)
+	}
 	out, err := gitSyncFileList(root)
 	if err != nil {
 		return SyncManifest{}, err
@@ -1018,6 +1040,13 @@ func syncManifestFilteredRules(root string, excludes SyncExcludeRules, includes 
 	manifest := SyncManifest{}
 	for _, rel := range splitNul(out) {
 		rel = filepath.ToSlash(rel)
+		protected, err := managed.contains(rel)
+		if err != nil {
+			return SyncManifest{}, err
+		}
+		if protected {
+			continue
+		}
 		_, isTrackedRegular := trackedRegular[rel]
 		excluded, protectedPattern := pathExcludeDecision(rel, excludes, isTrackedRegular)
 		if _, isGitlink := gitlinkPaths[rel]; isGitlink || !safeRepoRel(rel) || excluded || !pathIncluded(rel, includes) || seen[rel] {
@@ -1046,6 +1075,10 @@ func syncManifestFilteredRules(root string, excludes SyncExcludeRules, includes 
 	if err != nil {
 		return SyncManifest{}, err
 	}
+	deleted, err = managed.filter(deleted)
+	if err != nil {
+		return SyncManifest{}, err
+	}
 	for rel := range deletedGitlinks {
 		gitlinkPaths[rel] = struct{}{}
 	}
@@ -1054,6 +1087,10 @@ func syncManifestFilteredRules(root string, excludes SyncExcludeRules, includes 
 		trackedRegular[rel] = struct{}{}
 	}
 	changed, err := changedSyncPaths(root, excludes, includes, trackedRegular)
+	if err != nil {
+		return SyncManifest{}, err
+	}
+	changed, err = managed.filter(changed)
 	if err != nil {
 		return SyncManifest{}, err
 	}
@@ -1585,6 +1622,9 @@ func pathExcludedByRules(rel string, rules SyncExcludeRules, trackedRegular bool
 
 func pathExcludeDecision(rel string, rules SyncExcludeRules, trackedRegular bool) (bool, string) {
 	rel = filepath.ToSlash(rel)
+	if rules.protectsManagedState(rel) {
+		return true, ""
+	}
 	excluded := false
 	protectedPattern := ""
 	for _, rule := range rules.rules {
@@ -1602,6 +1642,12 @@ func pathExcludeDecision(rel string, rules SyncExcludeRules, trackedRegular bool
 		protectedPattern = ""
 	}
 	return excluded, protectedPattern
+}
+
+func (rules SyncExcludeRules) protectsManagedState(rel string) bool {
+	rel = filepath.ToSlash(rel)
+	protected := rules.managedSubtree
+	return protected != "" && (rel == protected || strings.HasPrefix(rel, protected+"/"))
 }
 
 func excludeRule(rule string) (pattern string, negated bool) {

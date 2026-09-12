@@ -811,6 +811,9 @@ func (s watchPathScope) traverseDir(rel string) bool {
 }
 
 func (s watchPathScope) traverseExcludedDir(rel string) bool {
+	if s.rules.protectsManagedState(rel) {
+		return false
+	}
 	if excludedDirMayContainReinclude(rel, s.rules.patterns()) {
 		return true
 	}

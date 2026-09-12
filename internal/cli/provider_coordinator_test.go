@@ -61,6 +61,118 @@ func TestCoordinatorAcquireValidatesBeforeAllocation(t *testing.T) {
 	}
 }
 
+func TestLeaseSSHCoordinatorMetadataIgnoresInvalidGeneratedNamespace(t *testing.T) {
+	const leaseID = "cbx_0123456789ab"
+	namespace := coordinatorInvalidLeaseSSHNamespace(t, leaseID)
+	lease := CoordinatorLease{
+		ID: leaseID, Slug: "metadata-only", Provider: "aws", TargetOS: targetLinux,
+		CloudID: "i-metadata", Host: "203.0.113.10", SSHUser: "crabbox", SSHPort: "22",
+		State: "active", LastTouchedAt: "2026-09-12T12:00:00Z",
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases":
+			_ = json.NewEncoder(w).Encode(map[string]any{"leases": []CoordinatorLease{lease}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+leaseID+"/heartbeat":
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+leaseID:
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+		default:
+			t.Errorf("unexpected coordinator request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	backend := newCoordinatorIdentityTestBackend(t, server.URL, "")
+	servers, err := backend.List(t.Context(), ListRequest{})
+	if err != nil || len(servers) != 1 || servers[0].CloudID != lease.CloudID || servers[0].Labels["lease"] != leaseID {
+		t.Fatalf("inventory projection=%#v err=%v", servers, err)
+	}
+	touched, err := backend.Touch(t.Context(), TouchRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: servers[0]}})
+	if err != nil || touched.CloudID != lease.CloudID || touched.Labels["last_touched_at"] != lease.LastTouchedAt {
+		t.Fatalf("touch projection=%#v err=%v", touched, err)
+	}
+	if _, err := backend.Resolve(t.Context(), ResolveRequest{ID: leaseID, Prepare: true}); err == nil {
+		t.Fatal("active guest resolution accepted the invalid generated namespace")
+	}
+	if data, err := os.ReadFile(namespace); err != nil || string(data) != "not a directory" {
+		t.Fatalf("metadata operations changed the invalid namespace: %q err=%v", data, err)
+	}
+}
+
+func TestLeaseSSHCoordinatorReleasedResolveBypassesGuestMaterial(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		state     string
+		confirmed bool
+	}{
+		{name: "confirmed released", state: "released", confirmed: true},
+		{name: "unconfirmed released", state: "released"},
+		{name: "active", state: "active"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const leaseID = "cbx_0123456789ab"
+			namespace := coordinatorInvalidLeaseSSHNamespace(t, leaseID)
+			lease := CoordinatorLease{
+				ID: leaseID, Provider: "aws", TargetOS: targetLinux, CloudID: "i-retired",
+				State: test.state, CleanupStatus: "pending",
+			}
+			if test.confirmed {
+				lease.CleanupStatus = "complete"
+				lease.CleanupCompletedAt = "2026-09-12T12:00:00Z"
+			} else {
+				lease.Host = "203.0.113.10"
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/"+leaseID {
+					t.Errorf("unexpected coordinator request: %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+			}))
+			defer server.Close()
+			backend := newCoordinatorIdentityTestBackend(t, server.URL, "")
+			resolved, err := backend.Resolve(t.Context(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+			if err != nil || resolved.LeaseID != leaseID || resolved.Server.CloudID != lease.CloudID || resolved.Server.Status != test.state || resolved.providerReleaseConfirmedBy(backend) != test.confirmed {
+				t.Fatalf("release-purpose resolution=%#v err=%v", resolved, err)
+			}
+			if test.confirmed {
+				if resolved.SSH.Host != "" || resolved.SSH.Key != "" || resolved.SSH.KnownHostsFile != "" {
+					t.Fatalf("retired guest acquired SSH material: %#v", resolved.SSH)
+				}
+				if err := cleanupReleasedCoordinatorLeaseArtifacts(t.Context(), io.Discard, leaseID); err == nil {
+					t.Fatal("provider release confirmation incorrectly implied local cleanup success")
+				}
+			} else {
+				if resolved.SSH.Host != lease.Host || resolved.SSH.KnownHostsFile != "" {
+					t.Fatalf("release-purpose target lost projection or prepared guest trust: %#v", resolved.SSH)
+				}
+				if _, err := backend.Resolve(t.Context(), ResolveRequest{ID: leaseID, Prepare: true}); err == nil {
+					t.Fatal("guest resolution accepted the invalid generated namespace")
+				}
+			}
+			if data, err := os.ReadFile(namespace); err != nil || string(data) != "not a directory" {
+				t.Fatalf("released resolution changed the invalid namespace: %q err=%v", data, err)
+			}
+		})
+	}
+}
+
+func coordinatorInvalidLeaseSSHNamespace(t *testing.T, leaseID string) string {
+	t.Helper()
+	isolateTestUserDirs(t)
+	path := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(path, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_STATE_HOME", path)
+	if _, err := StoredTestboxKeyPath(leaseID); err == nil || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fixture must reject guest key admission, got %v", err)
+	}
+	return path
+}
+
 func TestCoordinatorListUsesUserLeasesWithoutAdminProbe(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

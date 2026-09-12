@@ -96,8 +96,7 @@ func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID st
 	if err := core.UseLeaseKnownHosts(&target.SSH, leaseID); err != nil {
 		return err
 	}
-	core.UseStoredTestboxKey(&target.SSH, leaseID)
-	return nil
+	return core.UseStoredTestboxKey(&target.SSH, leaseID)
 }
 
 func (b *backend) configForRun() core.Config {
@@ -193,7 +192,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		recoveryLabels["recovery"] = recovery
 		recoveryLabels["state"] = "provisioning"
 		item := instance{ClusterID: id, Labels: recoveryLabels}
-		lease, err := b.lease(item, cfg, leaseID)
+		lease, err := b.lease(item, cfg, leaseID, false)
 		if err != nil {
 			return err
 		}
@@ -223,7 +222,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
-	lease, err := b.lease(item, cfg, leaseID)
+	lease, err := b.lease(item, cfg, leaseID, false)
 	if err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
@@ -249,7 +248,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	lease, err := b.lease(item, cfg, leaseID)
+	lease, err := b.lease(item, cfg, leaseID, req.ReleaseOnly)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -768,7 +767,7 @@ func (b *backend) resolve(ctx context.Context, identifier string, cfg core.Confi
 	return instance{}, "", core.Exit(4, "Namespace instance lease not found: %s", identifier)
 }
 
-func (b *backend) lease(item instance, cfg core.Config, leaseID string) (core.LeaseTarget, error) {
+func (b *backend) lease(item instance, cfg core.Config, leaseID string, releaseOnly bool) (core.LeaseTarget, error) {
 	target := core.SSHTarget{
 		User:            "root",
 		Host:            item.ClusterID,
@@ -781,11 +780,13 @@ func (b *backend) lease(item instance, cfg core.Config, leaseID string) (core.Le
 		SSHConfigProxy:  true,
 		ProxyCommand:    proxyCommand(cfg, item.ClusterID),
 	}
-	if leaseID != "" {
+	if leaseID != "" && !releaseOnly {
 		if err := core.UseLeaseKnownHosts(&target, leaseID); err != nil {
 			return core.LeaseTarget{}, err
 		}
-		core.UseStoredTestboxKey(&target, leaseID)
+		if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
+			return core.LeaseTarget{}, err
+		}
 	}
 	server := b.server(item, cfg)
 	if claim, ok, _ := resolveNamespaceClaim(leaseID, cfg); ok {

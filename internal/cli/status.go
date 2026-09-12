@@ -472,13 +472,13 @@ func resolveSSHLeaseTarget(ctx context.Context, backend SSHLoginBackend, req Res
 		if claimBefore.Slug != "" {
 			lease.Server.Labels["slug"] = claimBefore.Slug
 		}
-		if rebinder, ok := backend.(ResolvedLeaseTargetRebinder); ok && leaseIDChanged {
+		if rebinder, ok := backend.(ResolvedLeaseTargetRebinder); ok && leaseIDChanged && !req.ReleaseOnly {
 			if err := rebinder.RebindResolvedLeaseTarget(&lease, claimBefore.LeaseID); err != nil {
 				return LeaseTarget{}, err
 			}
 		}
 		if leaseIDChanged && !resolvedClaimExistedBefore && validLeaseClaimID(resolvedLeaseID) {
-			if aliasKeyPath, err := testboxKeyPath(resolvedLeaseID); err == nil && lease.SSH.Key == aliasKeyPath {
+			if aliasKeyPath, err := testboxKeyPath(resolvedLeaseID); !req.ReleaseOnly && err == nil && lease.SSH.Key == aliasKeyPath {
 				return LeaseTarget{}, exit(2, "lease %s resolved to %s but the canonical stored SSH key is unavailable", resolvedLeaseID, claimBefore.LeaseID)
 			}
 			if discardedClaimExists {

@@ -370,13 +370,13 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 				return LeaseTarget{}, exit(4, "lease/server not found: %s (VM exists but is not Crabbox-managed)", req.ID)
 			}
 			if req.StatusOnly && !req.ReadyProbe {
-				return b.targetForServer(b.resolveStatusServer(ctx, client, server)), nil
+				return b.targetForServer(b.resolveStatusServer(ctx, client, server), req.ReleaseOnly)
 			}
 			server, err = b.ensureServerIP(ctx, client, server, req.ReleaseOnly)
 			if err != nil {
 				return LeaseTarget{}, err
 			}
-			return b.targetForServer(server), nil
+			return b.targetForServer(server, req.ReleaseOnly)
 		}
 		if !isNotFound(err) {
 			return LeaseTarget{}, err
@@ -395,7 +395,10 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 			return LeaseTarget{}, err
 		}
 		if req.StatusOnly && !req.ReadyProbe {
-			target := b.targetForServer(b.resolveStatusServer(ctx, client, server))
+			target, err := b.targetForServer(b.resolveStatusServer(ctx, client, server), req.ReleaseOnly)
+			if err != nil {
+				return LeaseTarget{}, err
+			}
 			target.LeaseID = leaseID
 			return target, nil
 		}
@@ -403,7 +406,10 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		if err != nil {
 			return LeaseTarget{}, err
 		}
-		target := b.targetForServer(server)
+		target, err := b.targetForServer(server, req.ReleaseOnly)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
 		target.LeaseID = leaseID
 		return target, nil
 	}
@@ -475,7 +481,7 @@ func (b *leaseBackend) ensureServerIP(ctx context.Context, client lifecycleClien
 	return server, nil
 }
 
-func (b *leaseBackend) targetForServer(server Server) LeaseTarget {
+func (b *leaseBackend) targetForServer(server Server, releaseOnly bool) (LeaseTarget, error) {
 	cfg := b.Cfg
 	if storedTarget := strings.TrimSpace(server.Labels["target"]); storedTarget != "" {
 		cfg.TargetOS = storedTarget
@@ -491,8 +497,12 @@ func (b *leaseBackend) targetForServer(server Server) LeaseTarget {
 	}
 	target := sshTargetFromConfig(cfg, firstNonBlank(server.PublicNet.IPv4.IP, server.PrivateNet.IPv4.IP))
 	leaseID := core.Blank(server.Labels["lease"], server.CloudID)
-	useStoredTestboxKey(&target, leaseID)
-	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+	if !releaseOnly {
+		if err := useStoredTestboxKey(&target, leaseID); err != nil {
+			return LeaseTarget{}, err
+		}
+	}
+	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
 func (b *leaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
@@ -844,6 +854,6 @@ var findServerByAlias = func(servers []Server, id string) (Server, string, error
 var removeStoredTestboxKey = func(leaseID string) { core.RemoveStoredTestboxKey(leaseID) }
 var exit = func(code int, format string, args ...any) core.ExitError { return core.Exit(code, format, args...) }
 
-func useStoredTestboxKey(target *SSHTarget, leaseID string) {
-	shared.UseStoredTestboxKey(target, leaseID)
+func useStoredTestboxKey(target *SSHTarget, leaseID string) error {
+	return shared.UseStoredTestboxKey(target, leaseID)
 }

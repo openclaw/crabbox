@@ -97,8 +97,7 @@ type spritesBackend struct {
 func (b *spritesBackend) Spec() ProviderSpec { return b.spec }
 
 func (b *spritesBackend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
-	core.UseStoredTestboxKey(&target.SSH, leaseID)
-	return nil
+	return core.UseStoredTestboxKey(&target.SSH, leaseID)
 }
 
 func (b *spritesBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
@@ -200,7 +199,9 @@ func (b *spritesBackend) Resolve(ctx context.Context, req ResolveRequest) (Lease
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	core.UseStoredTestboxKey(&target, leaseID)
+	if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
+		return LeaseTarget{}, err
+	}
 	resolved := LeaseTarget{Server: b.spriteToServer(sprite, true), SSH: target, LeaseID: leaseID}
 	resolved.Server.Labels["lease"], resolved.Server.Labels["slug"] = leaseID, slug
 	if err := core.ValidateLeaseTargetProviderIdentity(resolved, req.ExpectedProviderIdentity); err != nil {

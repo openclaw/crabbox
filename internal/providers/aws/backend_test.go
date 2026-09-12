@@ -8,6 +8,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -1437,6 +1438,36 @@ func TestAWSAcquireDoesNotDeleteProviderKeyByNameOnCreateFailure(t *testing.T) {
 	}
 	if len(east.deletedKeys) != 0 || len(west.deletedKeys) != 0 {
 		t.Fatalf("east keys=%v west keys=%v, want no unsafe name-based cleanup", east.deletedKeys, west.deletedKeys)
+	}
+}
+
+func TestLeaseSSHAWSReleaseOnlyResolveBypassesGuestKey(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	const leaseID = "cbx_0123456789ab"
+	namespace := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(namespace, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_STATE_HOME", namespace)
+	server := awsTestServer("i-release", leaseID, "release-only", "us-west-2")
+	fake := &fakeAWSClient{servers: []Server{server}}
+	oldClient := newAWSClient
+	newAWSClient = func(context.Context, Config) (awsClient, error) { return fake, nil }
+	t.Cleanup(func() { newAWSClient = oldClient })
+	backend := NewAWSLeaseBackend(ProviderSpec{}, Config{Provider: "aws", AWSRegion: "us-west-2"}, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	for _, id := range []string{server.CloudID, server.Labels["slug"]} {
+		t.Run(id, func(t *testing.T) {
+			lease, err := backend.Resolve(t.Context(), ResolveRequest{ID: id, ReleaseOnly: true})
+			if err != nil || lease.LeaseID != leaseID || lease.Server.CloudID != server.CloudID || lease.Server.Labels["aws_region"] != "us-west-2" {
+				t.Fatalf("release identity=%#v err=%v", lease, err)
+			}
+			if _, err := backend.Resolve(t.Context(), ResolveRequest{ID: id}); err == nil {
+				t.Fatal("guest resolution accepted the invalid generated namespace")
+			}
+		})
+	}
+	if len(fake.deletedInstances) != 0 || len(fake.deletedKeys) != 0 {
+		t.Fatal("resolve performed provider cleanup")
 	}
 }
 

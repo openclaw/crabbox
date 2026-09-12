@@ -139,7 +139,11 @@ func (b *gcpLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Leas
 			}
 			leaseID := core.Blank(server.Labels["lease"], req.ID)
 			target := sshTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
-			useStoredTestboxKey(&target, leaseID)
+			if !req.ReleaseOnly {
+				if err := useStoredTestboxKey(&target, leaseID); err != nil {
+					return LeaseTarget{}, err
+				}
+			}
 			return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 		}
 	}
@@ -151,7 +155,11 @@ func (b *gcpLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Leas
 		return LeaseTarget{}, err
 	} else if leaseID != "" {
 		target := sshTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
-		useStoredTestboxKey(&target, leaseID)
+		if !req.ReleaseOnly {
+			if err := useStoredTestboxKey(&target, leaseID); err != nil {
+				return LeaseTarget{}, err
+			}
+		}
 		return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 	}
 	return LeaseTarget{}, exit(4, "lease/server not found: %s", req.ID)
@@ -475,8 +483,8 @@ var waitForSSHReady = core.WaitForSSHReady
 
 func bootstrapWaitTimeout(cfg Config) time.Duration { return core.BootstrapWaitTimeout(cfg) }
 
-func useStoredTestboxKey(target *SSHTarget, leaseID string) {
-	shared.UseStoredTestboxKey(target, leaseID)
+func useStoredTestboxKey(target *SSHTarget, leaseID string) error {
+	return shared.UseStoredTestboxKey(target, leaseID)
 }
 func findServerByAlias(servers []Server, id string) (Server, string, error) {
 	return core.FindServerByAlias(servers, id)

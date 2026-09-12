@@ -403,7 +403,9 @@ func (b *backend) targetFromClaimedServer(server core.Server, req core.ResolveRe
 		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	ssh := core.SSHTargetFromConfig(b.cfg, server.PublicNet.IPv4.IP)
-	core.UseStoredTestboxKey(&ssh, leaseID)
+	if err := core.UseStoredTestboxKey(&ssh, leaseID); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	if req.Repo.Root != "" {
 		if err := core.ClaimLeaseTargetForRepoConfig(leaseID, server.Labels["slug"], b.cfg, server, ssh, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
 			return core.LeaseTarget{}, err

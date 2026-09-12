@@ -28,16 +28,52 @@ Fixed-ID AWS acquisition holds the normal durable claim lock while creating or
 reusing this key, so concurrent replays cannot race two different keypairs into
 one EC2 idempotency identity.
 
-Local key storage lives under the Crabbox user config directory, outside the
-repository:
+Without an explicit `XDG_STATE_HOME`, local key storage keeps its existing OS
+user-config location:
 
 ```text
 macOS:   ~/Library/Application Support/crabbox/testboxes/<lease>/id_ed25519
 Linux:   ~/.config/crabbox/testboxes/<lease>/id_ed25519
 ```
 
-The matching `<lease>/id_ed25519.pub` sits beside it. The key directory is
-created with `0700` permissions.
+Set `XDG_STATE_HOME` to a writable absolute directory to place generated keys at
+`$XDG_STATE_HOME/crabbox/testboxes/<lease>/id_ed25519`. Claims and local history
+use their separate namespaces under the same explicit state root. This is local
+operator input only: repository YAML and `CRABBOX_CONFIG` cannot redirect keys.
+`CRABBOX_CONFIG` selects the YAML file, not generated credential storage.
+
+The matching `<lease>/id_ed25519.pub` and lease host-trust files sit beside the
+private key. Directories remain private (`0700`) and private keys `0600` on
+POSIX; Windows uses private ACLs. An existing explicit root must be owned by the
+current user and not writable by unrelated users. A POSIX `0755` base is allowed;
+Crabbox does not chmod that caller-owned directory. Windows permits harmless
+read/traverse access and well-known SYSTEM/Builtin Administrators authority at
+the base, but generated descendants use protected current-user-only ACLs.
+Unsupported Windows grants are rejected conservatively rather than interpreted
+as safe. The root must be absolute, without unsafe path components. Existing
+generated keys are admitted under the same selected-root policy before reuse,
+not silently repaired.
+
+Keep the same root for acquire, inspect, SSH, reuse, heartbeat, stop and cleanup.
+Switching roots never migrates keys or searches the old root; return to the
+original root to manage its leases. This also covers canonical per-lease key
+copies managed by Crabbox after authenticated provider import. User-supplied
+keys, external provider auth files and host-level trust retain their existing
+paths and ownership. Caches keep their separate locations,
+and short SSH control sockets retain their temporary namespace.
+
+For sandboxed automation, combine a writable explicit state root with
+`CRABBOX_CONFIG` pointing at an approved configuration file. The default
+user-config `crabbox` directory need not be writable for generated lease keys;
+allow the runtime's separately documented cache and temporary paths as needed.
+
+Prefer a state root outside source checkouts and shared host directories.
+Crabbox's filtered repository sync excludes the exact
+`$XDG_STATE_HOME/crabbox` namespace, even when tracked files or repository rules
+would otherwise include it; sibling source files remain eligible. A checkout
+inside that managed namespace cannot be synced. See [Sync](sync.md) for native
+sync and mount limitations. This is not a general secret scanner and does not
+remove files already committed upstream or shared with an existing runner.
 
 ## Provisioned host identity
 

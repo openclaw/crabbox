@@ -26,7 +26,9 @@ func (b *DirectSSHBackend) Spec() core.ProviderSpec { return b.SpecValue }
 
 func (b *DirectSSHBackend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
 	if b.StoredLeaseKeys {
-		core.UseStoredTestboxKey(&target.SSH, leaseID)
+		if err := core.UseStoredTestboxKey(&target.SSH, leaseID); err != nil {
+			return err
+		}
 	}
 	return nil
 }

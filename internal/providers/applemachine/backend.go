@@ -442,12 +442,18 @@ func requireHost() error {
 }
 
 func validateRepoMount(root string) error {
-	if strings.TrimSpace(root) == "" {
+	if strings.TrimSpace(root) == "" && os.Getenv("XDG_STATE_HOME") == "" {
 		return nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return exit(2, "resolve home directory: %v", err)
+	}
+	if err := core.ValidateManagedStateTransferScope("apple-machine home mount", home); err != nil {
+		return err
+	}
+	if strings.TrimSpace(root) == "" {
+		return nil
 	}
 	rel, err := filepath.Rel(home, root)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {

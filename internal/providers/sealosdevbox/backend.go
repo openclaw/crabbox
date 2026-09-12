@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -157,6 +158,9 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 	} else if exists {
 		return core.LeaseTarget{}, core.Exit(2, "Sealos lease %s already has a local claim; reuse the existing lease or choose another lease ID", leaseID)
 	}
+	if _, err := core.PrepareStoredTestboxKeyPath(leaseID); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	slug, err := b.allocateLeaseSlug(ctx, leaseID, req.RequestedSlug)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -301,7 +305,11 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (lease c
 		return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 	}
 	if req.StatusOnly || req.NoLocalStateMutations {
-		resolved, err := b.sshTarget(item, b.statusSSHKey(leaseID), false)
+		keyPath, err := b.statusSSHKey(leaseID)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		resolved, err := b.sshTarget(item, keyPath, false)
 		if err != nil {
 			if !req.StatusOnly {
 				return core.LeaseTarget{}, err
@@ -332,6 +340,9 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (lease c
 	}
 	if req.Reclaim && strings.TrimSpace(req.Repo.Root) == "" {
 		return core.LeaseTarget{}, core.Exit(2, "Sealos DevBox %q cannot be reclaimed without a repository root", item.Metadata.Name)
+	}
+	if _, err := core.PrepareStoredTestboxKeyPath(leaseID); err != nil {
+		return core.LeaseTarget{}, err
 	}
 	defer func() {
 		if err == nil || !rollbackClaim {
@@ -530,7 +541,11 @@ func (b *backend) statusView(ctx context.Context, id string) (core.StatusView, c
 		return core.StatusView{}, core.SSHTarget{}, devboxItem{}, err
 	}
 	server := b.serverFromDevbox(item)
-	target, _ := b.sshTarget(item, b.statusSSHKey(leaseID), false)
+	keyPath, err := b.statusSSHKey(leaseID)
+	if err != nil {
+		return core.StatusView{}, core.SSHTarget{}, devboxItem{}, err
+	}
+	target, _ := b.sshTarget(item, keyPath, false)
 	return core.StatusView{
 		ID:            leaseID,
 		Slug:          slug,
@@ -555,12 +570,12 @@ func (b *backend) statusView(ctx context.Context, id string) (core.StatusView, c
 	}, target, item, nil
 }
 
-func (b *backend) statusSSHKey(leaseID string) string {
-	keyPath, err := core.TestboxKeyPath(leaseID)
-	if err != nil {
-		return ""
+func (b *backend) statusSSHKey(leaseID string) (string, error) {
+	keyPath, err := core.OptionalStoredTestboxKeyPath(leaseID)
+	if err != nil && !os.IsNotExist(err) {
+		return "", err
 	}
-	return keyPath
+	return keyPath, nil
 }
 
 func (b *backend) waitForDevboxPrepared(ctx context.Context, name string, timeout time.Duration) (devboxItem, error) {

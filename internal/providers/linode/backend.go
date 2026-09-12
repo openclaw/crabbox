@@ -496,7 +496,9 @@ func (b *linodeLeaseBackend) targetFromLinode(item linodeInstance, req core.Reso
 		return target, nil
 	}
 	ssh := core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
-	core.UseStoredTestboxKey(&ssh, leaseID)
+	if err := core.UseStoredTestboxKey(&ssh, leaseID); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	if req.Repo.Root != "" && !req.NoLocalStateMutations {
 		updatedClaim, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, server.Labels["slug"], b.Cfg, server, ssh, req.Repo.Root, b.Cfg.IdleTimeout, req.Reclaim, claim, claimExists)
 		if err != nil {

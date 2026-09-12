@@ -86,8 +86,7 @@ func applyDefaults(cfg *Config) {
 func (b *backend) Spec() ProviderSpec { return b.spec }
 
 func (b *backend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
-	core.UseStoredTestboxKey(&target.SSH, leaseID)
-	return nil
+	return core.UseStoredTestboxKey(&target.SSH, leaseID)
 }
 
 func (b *backend) configForRun() Config {
@@ -256,7 +255,9 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (lease LeaseT
 		target.Port = labelPort
 	}
 	if leaseID != "" {
-		core.UseStoredTestboxKey(&target, leaseID)
+		if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
+			return LeaseTarget{}, err
+		}
 	}
 	if !req.StatusOnly {
 		if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "reuse", core.BootstrapWaitTimeout(cfg)); err != nil {

@@ -185,6 +185,11 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 			if err := validateFixedLocalContainer(container, cfg, leaseID, intent.Slug, fingerprint); err != nil {
 				return core.LeaseTarget{}, err
 			}
+			if container.State.Running {
+				if err := validateLocalContainerInspectedMounts(container); err != nil {
+					return core.LeaseTarget{}, err
+				}
+			}
 		} else {
 			if intent.State == "acquired" || claim.CloudID != "" {
 				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: acquired fixed local-container lease %s is missing its bound container", leaseID)
@@ -236,7 +241,12 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 			}
 		}
 		if isPendingLocalContainerClaim(*claim) {
-			rememberPending(claim, b.pendingLease(cfg, container, leaseID, intent.Slug))
+			pending, err := b.pendingLease(cfg, container, leaseID, intent.Slug)
+			// Keep the observed identity for reconciliation even when key admission fails.
+			rememberPending(claim, pending)
+			if err != nil {
+				return core.LeaseTarget{}, err
+			}
 		}
 		containerID := strings.TrimSpace(claim.CloudID)
 		if !container.State.Running {

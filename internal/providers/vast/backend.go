@@ -450,12 +450,12 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 				return b.targetFromInstance(ctx, client, item, req)
 			}
 			if req.ReleaseOnly {
-				return claimTarget(claim), nil
+				return claimTarget(claim)
 			}
 			return core.LeaseTarget{}, getErr
 		}
 		if req.ReleaseOnly {
-			return claimTarget(claim), nil
+			return claimTarget(claim)
 		}
 	}
 	if id, ok := parseVastInstanceID(req.ID); ok {
@@ -516,7 +516,7 @@ func (b *backend) releaseTargetFromClaim(id string, cause error, releaseOnly boo
 		}
 		return core.LeaseTarget{}, cause
 	}
-	return claimTarget(claim), nil
+	return claimTarget(claim)
 }
 
 func (b *backend) targetFromInstance(ctx context.Context, client vastAPI, item vastInstance, req core.ResolveRequest) (core.LeaseTarget, error) {
@@ -559,7 +559,9 @@ func (b *backend) targetFromInstance(ctx context.Context, client vastAPI, item v
 		if err != nil {
 			return core.LeaseTarget{}, err
 		}
-		core.UseStoredTestboxKey(&ssh, leaseID)
+		if err := core.UseStoredTestboxKey(&ssh, leaseID); err != nil {
+			return core.LeaseTarget{}, err
+		}
 		target.SSH = ssh
 	}
 	if req.Repo.Root != "" && !req.NoLocalStateMutations {
@@ -980,7 +982,7 @@ func firstNonBlank(values ...string) string {
 	return shared.FirstNonBlankTrimmed(values...)
 }
 
-func claimTarget(claim core.LeaseClaim) core.LeaseTarget {
+func claimTarget(claim core.LeaseClaim) (core.LeaseTarget, error) {
 	server := core.Server{
 		CloudID:  claim.CloudID,
 		Provider: providerName,
@@ -990,8 +992,7 @@ func claimTarget(claim core.LeaseClaim) core.LeaseTarget {
 	}
 	server.PublicNet.IPv4.IP = claim.SSHHost
 	target := core.SSHTarget{Host: claim.SSHHost, Port: strconv.Itoa(claim.SSHPort), TargetOS: core.TargetLinux}
-	core.UseStoredTestboxKey(&target, claim.LeaseID)
-	return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server, SSH: target}
+	return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server, SSH: target}, nil
 }
 
 func (b *backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, repoRoot string, instanceID int, keyID, accountID, apiURL, reason string, keep bool, now time.Time) error {

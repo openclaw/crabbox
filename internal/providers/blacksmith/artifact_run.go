@@ -291,6 +291,9 @@ func (g *blacksmithArchiveGuard) flush() {
 // Called only inside the original shared claim fence. There is no follow-up
 // native run, route resolution, sync, or stopped-lease recovery.
 func (b *blacksmithBackend) runArtifactTestbox(ctx context.Context, req RunRequest, leaseID string, phases *core.CommandPhaseTracker, stdoutExtra, stderrExtra io.Writer, budget time.Duration) (code int, ended time.Time, collected []core.RunArtifact, artifactErr error) {
+	if err := validateBlacksmithNativeSyncScope(req.Repo.Root); err != nil {
+		return 2, time.Time{}, nil, err
+	}
 	if err := core.ValidateLocalCommandProcessGroupJoin(ctx); err != nil {
 		return 2, time.Time{}, collected, exit(2, "Blacksmith artifact command ownership: %v", err)
 	}
@@ -315,7 +318,7 @@ func (b *blacksmithBackend) runArtifactTestbox(ctx context.Context, req RunReque
 	if err != nil {
 		return 2, time.Time{}, collected, err
 	}
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := core.StoredTestboxKeyPath(leaseID)
 	if err != nil {
 		return 2, time.Time{}, collected, err
 	}

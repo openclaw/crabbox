@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -579,6 +580,38 @@ func TestProxmoxReleasePreservesMigratedTargetWithSameVMID(t *testing.T) {
 		t.Fatalf("claim=%#v ok=%t err=%v, want migrated target", claim, ok, err)
 	}
 	assertStoredTestboxKeyExists(t, leaseID)
+}
+
+func TestLeaseSSHProxmoxReleaseOnlyResolveBypassesGuestKey(t *testing.T) {
+	const leaseID = "cbx_0123456789ab"
+	namespace := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(namespace, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_STATE_HOME", namespace)
+	server := expiredProxmoxServer("101", leaseID)
+	server.Provider, server.HostID = "proxmox", "pve2"
+	server.Labels["crabbox"], server.Labels["provider"] = "true", "proxmox"
+	fake := &fakeProxmoxDoctorClient{servers: []Server{server}}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) { return fake, nil }
+	t.Cleanup(func() { newClient = oldClient })
+	cfg := Config{Provider: "proxmox", Proxmox: core.ProxmoxConfig{APIURL: "https://pve.example.test:8006", Node: "pve1"}}
+	backend := NewLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stderr: io.Discard}).(*leaseBackend)
+	for _, id := range []string{server.CloudID, server.Labels["slug"]} {
+		t.Run(id, func(t *testing.T) {
+			lease, err := backend.Resolve(t.Context(), ResolveRequest{ID: id, ReleaseOnly: true})
+			if err != nil || lease.LeaseID != leaseID || lease.Server.CloudID != server.CloudID || lease.Server.HostID != "pve2" {
+				t.Fatalf("release identity=%#v err=%v", lease, err)
+			}
+			if _, err := backend.Resolve(t.Context(), ResolveRequest{ID: id}); err == nil {
+				t.Fatal("guest resolution accepted the invalid generated namespace")
+			}
+		})
+	}
+	if fake.mutated || fake.deleteCalls != 0 {
+		t.Fatal("resolve performed provider mutation")
+	}
 }
 
 func TestProxmoxReleaseResolvesAndDeletesMigratedTarget(t *testing.T) {

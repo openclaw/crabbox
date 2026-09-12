@@ -67,8 +67,7 @@ func isDefaultWorkRoot(value string) bool {
 func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
-	core.UseStoredTestboxKey(&target.SSH, leaseID)
-	return nil
+	return core.UseStoredTestboxKey(&target.SSH, leaseID)
 }
 
 func (b *backend) configForRun() core.Config {
@@ -717,11 +716,13 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, c inspectCo
 	if host == "" {
 		return core.LeaseTarget{}, exit(5, "apple-container %s has no network address yet", c.id())
 	}
-	keyPath, err := core.TestboxKeyPath(leaseID)
+	keyPath, err := core.OptionalStoredTestboxKeyPath(leaseID)
 	if err == nil {
 		if _, statErr := os.Stat(keyPath); statErr == nil {
 			cfg.SSHKey = keyPath
 		}
+	} else if !os.IsNotExist(err) {
+		return core.LeaseTarget{}, err
 	}
 	target := core.SSHTargetFromConfig(cfg, host)
 	target.Port = sshPort

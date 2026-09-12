@@ -116,8 +116,7 @@ func defaultAppleVMImageSHA256(osImage string) string {
 func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
-	core.UseStoredTestboxKey(&target.SSH, leaseID)
-	return nil
+	return core.UseStoredTestboxKey(&target.SSH, leaseID)
 }
 
 func (b *backend) configForRun() core.Config {
@@ -513,10 +512,12 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst applev
 		return core.LeaseTarget{}, exit(5, "apple-vm instance %s has no local SSH endpoint", inst.Name)
 	}
 	if leaseID != "" {
-		if keyPath, err := core.TestboxKeyPath(leaseID); err == nil {
+		if keyPath, err := core.OptionalStoredTestboxKeyPath(leaseID); err == nil {
 			if _, statErr := os.Stat(keyPath); statErr == nil {
 				cfg.SSHKey = keyPath
 			}
+		} else if !os.IsNotExist(err) {
+			return core.LeaseTarget{}, err
 		}
 	}
 	target := core.SSHTargetFromConfig(cfg, inst.SSHHost)

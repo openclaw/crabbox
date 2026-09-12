@@ -83,7 +83,7 @@ func TestCoordinatorFreshWindowsBootstrapTargets(t *testing.T) {
 					t.Fatalf("bootstrap lost authoritative host-key pin: %q, %v", pin, err)
 				}
 				// Resolution for subsequent commands still uses the strict selector.
-				reused, err := backend.coordinatorLeaseTargetForConfig(lease, cfg, nil)
+				reused, err := backend.coordinatorLeaseTargetForConfig(lease, cfg, nil, false)
 				if err != nil || reused.SSH.Port != workload.SSH.Port || !slices.Equal(reused.SSH.FallbackPorts, workload.SSH.FallbackPorts) || reused.SSH.User != lease.SSHUser {
 					t.Fatalf("reuse changed its port or user contract: %+v, %v", reused.SSH, err)
 				}

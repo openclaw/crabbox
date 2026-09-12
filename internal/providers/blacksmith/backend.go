@@ -121,6 +121,14 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (runResult 
 	if err := b.ValidateRunOptions(req); err != nil {
 		return RunResult{}, err
 	}
+	if err := validateBlacksmithNativeSyncScope(req.Repo.Root); err != nil {
+		return RunResult{}, err
+	}
+	if len(req.ArtifactGlobs) == 0 && len(req.RequiredArtifactGlobs) == 0 {
+		if err := validateBlacksmithNativeSyncScope(""); err != nil {
+			return RunResult{}, err
+		}
+	}
 	if err := core.ValidateRunArtifactGlobs(req.ArtifactGlobs); err != nil {
 		return RunResult{}, err
 	}
@@ -817,7 +825,7 @@ func (b *blacksmithBackend) openFailureStreamCapture(label string) (io.WriteClos
 }
 
 func (b *blacksmithBackend) runTestbox(ctx context.Context, leaseID string, command []string, debug, shellMode bool, phaseTracker *core.CommandPhaseTracker, stdoutExtra, stderrExtra io.Writer, observation *core.RunObservation) int {
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := core.StoredTestboxKeyPath(leaseID)
 	if err != nil {
 		fmt.Fprintf(b.rt.Stderr, "blacksmith key path failed: %v\n", err)
 		return 2
@@ -939,6 +947,9 @@ func (b *blacksmithBackend) runCommandWithSyncGuardCapture(ctx context.Context, 
 
 // Filter before sync observation as well as console, proof, and failure capture.
 func (b *blacksmithBackend) runCommandWithSyncGuardFiltered(ctx context.Context, args []string, stdout, stderr io.Writer, disableOutputCapture bool, dir string, filter func(io.Writer, io.Writer) (io.Writer, io.Writer)) (LocalCommandResult, bool, error) {
+	if err := validateBlacksmithNativeSyncScope(dir); err != nil {
+		return LocalCommandResult{ExitCode: 2}, false, err
+	}
 	timeout := blacksmithSyncTimeout(os.Getenv)
 	if timeout <= 0 {
 		if filter != nil {
@@ -988,6 +999,24 @@ func (b *blacksmithBackend) runCommandWithSyncGuardFiltered(ctx context.Context,
 			cancel()
 		}
 	}
+}
+
+func validateBlacksmithNativeSyncScope(dir string) error {
+	if os.Getenv("XDG_STATE_HOME") == "" {
+		return nil
+	}
+	if dir == "" {
+		var err error
+		dir, err = os.Getwd()
+		if err != nil {
+			return err
+		}
+	}
+	root, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	return core.ValidateManagedStateTransferScope("blacksmith native sync", root)
 }
 
 type blacksmithSyncTracker struct {

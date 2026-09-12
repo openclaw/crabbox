@@ -124,7 +124,7 @@ func (b resolveResultBackend) RebindResolvedLeaseTarget(target *LeaseTarget, lea
 		b.onRebind()
 	}
 	if b.rebindStoredTestboxKey {
-		useStoredTestboxKey(&target.SSH, leaseID)
+		return useStoredTestboxKey(&target.SSH, leaseID)
 	}
 	return nil
 }
@@ -137,8 +137,7 @@ func (b creatingMinimalClaimResolveBackend) Resolve(context.Context, ResolveRequ
 }
 
 func (b creatingMinimalClaimResolveBackend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
-	useStoredTestboxKey(&target.SSH, leaseID)
-	return nil
+	return useStoredTestboxKey(&target.SSH, leaseID)
 }
 
 func (b stoppingClaimResolveBackend) Resolve(context.Context, ResolveRequest) (LeaseTarget, error) {
@@ -280,6 +279,73 @@ func TestResolveSSHLeaseTargetAcceptsMinimalProviderClaim(t *testing.T) {
 	}
 	if !lease.Server.claimSnapshotExists {
 		t.Fatal("provider-created minimal claim was not accepted")
+	}
+}
+
+func TestLeaseSSHReleaseOnlyResolveSkipsGuestRebinding(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		releaseOnly  bool
+		incompatible bool
+		wantError    bool
+		wantRebind   bool
+	}{
+		{name: "release", releaseOnly: true},
+		{name: "guest", wantError: true, wantRebind: true},
+		{name: "release identity mismatch", releaseOnly: true, incompatible: true, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			isolateTestUserDirs(t)
+			const leaseID = "cbx_release_rebind"
+			const aliasID = "cbx_remote_rebind"
+			cfg := baseConfig()
+			cfg.Provider = "aws"
+			server := Server{
+				CloudID: "i-rebind", ImmutableID: "generation-a", Provider: "aws",
+				Labels: map[string]string{"provider": "aws", "lease": leaseID, "slug": "rebind", "state": "ready"},
+			}
+			if err := claimLeaseTargetForRepoConfig(leaseID, "rebind", cfg, server, SSHTarget{}, "/repo", time.Hour, false); err != nil {
+				t.Fatal(err)
+			}
+			before, err := readLeaseClaim(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			key, err := testboxKeyPath(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			namespace := filepath.Dir(filepath.Dir(key))
+			if err := os.WriteFile(namespace, []byte("not a directory"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			aliasKey, err := testboxKeyPath(aliasID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server.Labels = cloneStringMap(server.Labels)
+			server.Labels["lease"] = aliasID
+			if test.incompatible {
+				server.ImmutableID = "generation-b"
+			}
+			rebound := false
+			lease, err := resolveSSHLeaseTarget(t.Context(), resolveResultBackend{
+				testSSHBackend:         testSSHBackend{spec: ProviderSpec{Name: "aws"}},
+				lease:                  LeaseTarget{LeaseID: aliasID, Server: server, SSH: SSHTarget{Key: aliasKey}},
+				rebindStoredTestboxKey: true,
+				onRebind:               func() { rebound = true },
+			}, ResolveRequest{ID: server.CloudID, Repo: Repo{Root: "/repo"}, ReleaseOnly: test.releaseOnly})
+			if (err != nil) != test.wantError || rebound != test.wantRebind {
+				t.Fatalf("resolve err=%v rebound=%t, want error=%t rebound=%t", err, rebound, test.wantError, test.wantRebind)
+			}
+			if !test.wantError && (lease.LeaseID != leaseID || lease.Server.Labels["lease"] != leaseID || !lease.Server.claimSnapshotExists) {
+				t.Fatalf("release resolution lost canonical claim identity: %#v", lease)
+			}
+			after, err := readLeaseClaim(leaseID)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("resolution changed canonical claim: err=%v", err)
+			}
+		})
 	}
 }
 

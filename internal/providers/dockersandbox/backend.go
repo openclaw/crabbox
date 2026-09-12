@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -22,6 +23,7 @@ var randomBytes = rand.Read
 var statusPollInterval = 2 * time.Second
 
 const dockerSandboxCleanupTimeout = 30 * time.Second
+const dockerSandboxWorkspaceRootsLabel = "docker_sandbox_workspace_roots_v1"
 
 type backend struct {
 	spec ProviderSpec
@@ -86,6 +88,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	} else {
 		leaseID, sandboxName, slug, err = resolveLeaseID(req.ID, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout)
 		if err != nil {
+			return RunResult{}, err
+		}
+		if err := validateDockerSandboxStoredWorkspaces(leaseID); err != nil {
 			return RunResult{}, err
 		}
 	}
@@ -409,6 +414,17 @@ func parseSandboxPathSpec(value string) (string, string) {
 }
 
 func (b *backend) createSandbox(ctx context.Context, cli *sbxCLI, repo Repo, reclaim bool, requestedSlug string) (string, string, string, error) {
+	if strings.TrimSpace(repo.Root) == "" {
+		return "", "", "", validateCreateRepo(b.cfg, repo)
+	}
+	selectedState := os.Getenv("XDG_STATE_HOME") != ""
+	roots, scopeErr := dockerSandboxWorkspaceRoots(b.cfg, repo.Root)
+	if scopeErr != nil && selectedState {
+		return "", "", "", scopeErr
+	}
+	if err := core.ValidateManagedStateTransferScope("docker-sandbox workspace mount", roots...); err != nil {
+		return "", "", "", err
+	}
 	if err := validateCreateRepo(b.cfg, repo); err != nil {
 		return "", "", "", err
 	}
@@ -424,7 +440,84 @@ func (b *backend) createSandbox(ctx context.Context, cli *sbxCLI, repo Repo, rec
 	if err := claimLeaseForRepoProviderPond(leaseID, slug, providerName, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
 		return "", "", "", b.removeCreatedSandboxAfterClaimFailure(cli, sandboxName, err)
 	}
+	unqualified := func() {
+		fmt.Fprintf(b.rt.Stderr, "warning: docker-sandbox workspace scope persistence is unconfirmed for %s; future explicit-state reuse may require a new sandbox\n", leaseID)
+	}
+	if scopeErr == nil {
+		claim, exists, err := resolveLeaseClaimForProvider(leaseID, providerName)
+		if err != nil || !exists {
+			if !selectedState {
+				unqualified()
+				return leaseID, sandboxName, slug, nil
+			}
+			return "", "", "", fmt.Errorf("docker-sandbox workspace scope could not bind claim %s; retained sandbox %s for explicit cleanup: %w", leaseID, sandboxName, errors.Join(err, errors.New("created claim unavailable")))
+		}
+		labels := make(map[string]string, len(claim.Labels)+1)
+		for key, value := range claim.Labels {
+			labels[key] = value
+		}
+		encoded, _ := json.Marshal(roots)
+		labels[dockerSandboxWorkspaceRootsLabel] = string(encoded)
+		if _, err := core.UpdateLeaseClaimLabelsIfUnchangedAfter(leaseID, claim, labels, nil); err != nil {
+			if !selectedState {
+				unqualified()
+				return leaseID, sandboxName, slug, nil
+			}
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), dockerSandboxCleanupTimeout)
+			defer cancel()
+			cleanupErr := core.RemoveLeaseClaimIfUnchangedAfter(leaseID, claim, func() error { return cli.remove(cleanupCtx, sandboxName) })
+			if cleanupErr != nil {
+				return "", "", "", fmt.Errorf("docker-sandbox scope persistence failed; cleanup unconfirmed for %s: %w", leaseID, errors.Join(err, cleanupErr))
+			}
+			return "", "", "", err
+		}
+	} else {
+		unqualified()
+	}
 	return leaseID, sandboxName, slug, nil
+}
+
+func dockerSandboxWorkspaceRoots(cfg Config, repoRoot string) ([]string, error) {
+	paths := []string{repoRoot}
+	for _, value := range cfg.DockerSandbox.ExtraWorkspaces {
+		paths = append(paths, strings.TrimSpace(value))
+	}
+	roots := make([]string, 0, len(paths))
+	for _, value := range paths {
+		if value == "" {
+			return nil, exit(2, "docker-sandbox workspace mount has an empty source")
+		}
+		absolute, err := filepath.Abs(value)
+		if err != nil {
+			return nil, err
+		}
+		root, err := core.NormalizeManagedStateTransferRoot(absolute)
+		if err != nil {
+			return nil, err
+		}
+		roots = append(roots, root)
+	}
+	return roots, nil
+}
+
+func validateDockerSandboxStoredWorkspaces(leaseID string) error {
+	if os.Getenv("XDG_STATE_HOME") == "" {
+		return nil
+	}
+	claim, exists, err := resolveLeaseClaimForProvider(leaseID, providerName)
+	if err != nil {
+		return err
+	}
+	var roots []string
+	if !exists || json.Unmarshal([]byte(claim.Labels[dockerSandboxWorkspaceRootsLabel]), &roots) != nil || len(roots) == 0 {
+		return exit(2, "docker-sandbox workspace mount scope is unavailable for %s; create a new sandbox before using an explicit state root", leaseID)
+	}
+	for _, root := range roots {
+		if !filepath.IsAbs(root) {
+			return exit(2, "docker-sandbox workspace mount scope is invalid for %s", leaseID)
+		}
+	}
+	return core.ValidateManagedStateTransferScope("docker-sandbox retained workspace mount", roots...)
 }
 
 func (b *backend) removeCreatedSandboxAfterClaimFailure(cli *sbxCLI, sandboxName string, primaryErr error) error {

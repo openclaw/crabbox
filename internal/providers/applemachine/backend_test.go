@@ -89,6 +89,34 @@ func testBackend(runner *recordingRunner) *backend {
 	return newBackend(Provider{}.Spec(), cfg, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 }
 
+func TestManagedStateNativeAppleMachineHomeMount(t *testing.T) {
+	originalGOOS, originalGOARCH := hostGOOS, hostGOARCH
+	hostGOOS, hostGOARCH = "darwin", "arm64"
+	t.Cleanup(func() { hostGOOS, hostGOARCH = originalGOOS, originalGOARCH })
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state-outside-repo"))
+	for _, noSync := range []bool{false, true} {
+		runner := &recordingRunner{}
+		_, err := testBackend(runner).Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: filepath.Join(home, "repo")}, NoSync: noSync, Command: []string{"true"}})
+		if err == nil || !strings.Contains(err.Error(), "apple-machine home mount") || len(runner.requests) != 0 {
+			t.Fatalf("noSync=%t err=%v native calls=%v", noSync, err, runner.requests)
+		}
+	}
+	runner := &recordingRunner{}
+	if err := testBackend(runner).createMachine(t.Context(), "fixture"); err == nil || len(runner.requests) != 0 {
+		t.Fatalf("mount handoff err=%v calls=%v", err, runner.requests)
+	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := validateRepoMount(filepath.Join(home, "repo")); err != nil {
+		t.Fatalf("state outside HOME: %v", err)
+	}
+	t.Setenv("XDG_STATE_HOME", "")
+	if err := validateRepoMount(filepath.Join(home, "repo")); err != nil {
+		t.Fatalf("unset compatibility: %v", err)
+	}
+}
+
 func TestAppleMachineConfigFlags(t *testing.T) {
 	defaults := core.Config{AppleContainer: core.AppleContainerConfig{CLIPath: "tool", Image: "image-example", User: "user-example", WorkRoot: "/workspace/example", CPUs: 3, Memory: "6g", ExtraRunArgs: []string{"token"}}}
 	fs := flag.NewFlagSet("machine", flag.ContinueOnError)

@@ -816,14 +816,20 @@ func TestTargetForServerRestoresStoredTargetLabels(t *testing.T) {
 	server.Labels["target"] = "linux"
 	server.Labels["work_root"] = "/srv/crabbox"
 
-	target := backend.targetForServer(server)
+	target, err := backend.targetForServer(server, false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if target.SSH.TargetOS != "linux" || target.SSH.WindowsMode != "" {
 		t.Fatalf("ssh target=%#v", target.SSH)
 	}
 
 	server.Labels["target"] = "windows"
 	server.Labels["windows_mode"] = "wsl2"
-	target = backend.targetForServer(server)
+	target, err = backend.targetForServer(server, false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if target.SSH.TargetOS != "windows" || target.SSH.WindowsMode != "wsl2" {
 		t.Fatalf("windows ssh target=%#v", target.SSH)
 	}

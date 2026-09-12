@@ -182,6 +182,46 @@ jobs:
       - name: Test native Windows local history store, readers, and observation
         run: go test ./internal/cli/ -run '^(TestLocalHistory|TestRunObservation(DelegatedAppRoundTrip|DisabledHasNoLedger|CapturesOnlyCommandWriters|AdoptsExistingCaptureOmissions|FinalFailureOnlyWarns|NeverEntersWireRequest|CoordinatorReferenceExcludesCredentials|CoordinatorTerminalAcknowledgment|PolicyIgnoresRepositoryFiles)$)' -count=1 -timeout=5m -v
 
+      - name: Require native Windows lease SSH root and managed-state contracts
+        shell: pwsh
+        run: |
+          $required = @(
+            'TestManagedStateSyncExclusionIsLiteralAndProtected',
+            'TestManagedStateTransferScopeBoundaries',
+            'TestManagedStateTransferCaseSpelling',
+            'TestManagedStateArchiveRejectsSuppliedMarker',
+            'TestManagedStateTransferWindowsDirectoryAlias',
+            'TestLeaseSSHRootSelection',
+            'TestLeaseSSHOptionalDefaultCompatibility',
+            'TestLeaseSSHImportedFilePrivacy',
+            'TestLeaseSSHCoordinatorMetadataIgnoresInvalidGeneratedNamespace',
+            'TestLeaseSSHCoordinatorReleasedResolveBypassesGuestMaterial',
+            'TestLeaseSSHReleaseOnlyResolveSkipsGuestRebinding',
+            'TestSelectedLeaseSSHRootReuseAndCleanup',
+            'TestSelectedLeaseSSHRootWindowsACLContract',
+            'TestSelectedLeaseSSHRootWindowsPrivateComponents',
+            'TestSelectedLeaseSSHWindowsOwnedNamespaceSecuring',
+            'TestSelectedLeaseSSHWindowsPrivateKeyReuse',
+            'TestEnsureTestboxLeaseDirectoryCreatesPrivateWindowsComponents',
+            'TestTestboxKeyPathAllowsSafeCustomIDs',
+            'TestUseLeaseKnownHostsScopesAndEnforcesHostVerification',
+            'TestSSHControlPathIsScopedByKey'
+          )
+          # POSIX mode tests are excluded; the native Windows ACL equivalents above must pass.
+          $events = @(go test ./internal/cli -run '^(Test(LeaseSSH|SelectedLeaseSSH|ManagedState)|Test(EnsureTestboxLeaseDirectoryCreatesPrivateWindowsComponents|TestboxKeyPathAllowsSafeCustomIDs|UseLeaseKnownHostsScopesAndEnforcesHostVerification|SSHControlPathIsScopedByKey)$)' -skip '^TestSelectedLeaseSSH(RootDoesNotRepairCallerDirectory|ExistingKeyRequiresPrivateMode)$' -count=1 -timeout=5m -json)
+          $code = $LASTEXITCODE
+          $events | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { exit $code }
+          $records = @($events | ForEach-Object { $_ | ConvertFrom-Json })
+          foreach ($name in $required) {
+            foreach ($action in @('run', 'pass')) {
+              if (-not ($records | Where-Object { $_.Test -eq $name -and $_.Action -eq $action })) {
+                throw "required native root contract $name did not $action"
+              }
+            }
+          }
+          if ($records | Where-Object { $_.Action -eq 'skip' }) { throw 'required native root contract was skipped' }
+
       - name: Test concurrent claim discovery and ownership
         run: go test ./internal/cli/ -run '^Test(ClaimMetadata|ClaimTransaction|RemoveControllerFile|ConfirmedAbsentStateCleanup|PrivateRunOutput)' -count=1 -v
 
@@ -297,6 +337,43 @@ jobs:
 
       - name: Vet native helper
         run: go vet ./internal/applevmhelper ./cmd/crabbox-apple-vm-helper
+
+      - name: Require native macOS lease SSH root and managed-state contracts
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -race ./internal/cli -run '^(Test(LeaseSSH|SelectedLeaseSSH|ManagedState)|Test(TestboxKeyPathAllowsSafeCustomIDs|UseLeaseKnownHostsScopesAndEnforcesHostVerification|SSHControlPathIsScopedByKey)$)' -count=1 -timeout=5m -json | tee "$RUNNER_TEMP/lease-ssh-root-macos.jsonl"
+          node - "$RUNNER_TEMP/lease-ssh-root-macos.jsonl" <<'NODE'
+          const fs = require('node:fs');
+          const records = fs.readFileSync(process.argv[2], 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+          const required = [
+            'TestManagedStateSyncExclusionIsLiteralAndProtected',
+            'TestManagedStateTransferScopeBoundaries',
+            'TestManagedStateTransferCaseSpelling',
+            'TestManagedStateArchiveRejectsSuppliedMarker',
+            'TestManagedStateTransferAliasesAndDanglingLinks',
+            'TestLeaseSSHRootSelection',
+            'TestLeaseSSHOptionalDefaultCompatibility',
+            'TestLeaseSSHImportedFilePrivacy',
+            'TestLeaseSSHCoordinatorMetadataIgnoresInvalidGeneratedNamespace',
+            'TestLeaseSSHCoordinatorReleasedResolveBypassesGuestMaterial',
+            'TestLeaseSSHReleaseOnlyResolveSkipsGuestRebinding',
+            'TestSelectedLeaseSSHRootReuseAndCleanup',
+            'TestSelectedLeaseSSHRootDoesNotRepairCallerDirectory',
+            'TestSelectedLeaseSSHExistingKeyRequiresPrivateMode',
+            'TestTestboxKeyPathAllowsSafeCustomIDs',
+            'TestUseLeaseKnownHostsScopesAndEnforcesHostVerification',
+            'TestSSHControlPathIsScopedByKey',
+          ];
+          for (const name of required) {
+            for (const action of ['run', 'pass']) {
+              if (!records.some(record => record.Test === name && record.Action === action)) {
+                throw new Error(`required native root contract ${name} did not ${action}`);
+              }
+            }
+          }
+          if (records.some(record => record.Action === 'skip')) throw new Error('required native root contract was skipped');
+          NODE
 
       - name: Test native helper and provider
         run: go test -race ./internal/applevmhelper ./internal/providers/applevm

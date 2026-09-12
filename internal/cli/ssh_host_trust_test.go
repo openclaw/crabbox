@@ -212,6 +212,7 @@ func TestCoordinatorMalformedAuthoritativeHostKeyFailsBeforeSSHAndRedactsKey(t *
 
 func TestPrepareLeaseSSHTrustRejectsSymlinkedLeaseNamespace(t *testing.T) {
 	isolateTestUserDirs(t)
+	t.Setenv("XDG_STATE_HOME", "")
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		t.Fatal(err)
@@ -237,6 +238,7 @@ func TestPrepareLeaseSSHTrustRejectsSymlinkedLeaseNamespace(t *testing.T) {
 }
 
 func TestEnsureTestboxLeaseDirectoryDoesNotCreateThroughConfigPathSymlink(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "")
 	root := t.TempDir()
 	outside := t.TempDir()
 	if err := os.Symlink(outside, filepath.Join(root, "redirect")); err != nil {

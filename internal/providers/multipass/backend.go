@@ -85,8 +85,7 @@ func applyDefaults(cfg *Config) {
 func (b *backend) Spec() ProviderSpec { return b.spec }
 
 func (b *backend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
-	core.UseStoredTestboxKey(&target.SSH, leaseID)
-	return nil
+	return core.UseStoredTestboxKey(&target.SSH, leaseID)
 }
 
 func (b *backend) configForRun() Config {
@@ -598,11 +597,13 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst multipassIn
 		return LeaseTarget{}, exit(5, "multipass instance %s has no IPv4 address", inst.Name)
 	}
 	if claim.LeaseID != "" {
-		keyPath, err := testboxKeyPath(claim.LeaseID)
+		keyPath, err := core.OptionalStoredTestboxKeyPath(claim.LeaseID)
 		if err == nil {
 			if _, statErr := os.Stat(keyPath); statErr == nil {
 				cfg.SSHKey = keyPath
 			}
+		} else if !os.IsNotExist(err) {
+			return LeaseTarget{}, err
 		}
 	}
 	target := sshTargetFromConfig(cfg, host)
