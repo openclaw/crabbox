@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -757,6 +758,222 @@ func TestAzureDynamicSessionsStreamCancellationAtCleanEOF(t *testing.T) {
 			} else if !errors.Is(err, context.Canceled) {
 				t.Fatalf("cancellation lost at clean EOF: %v", err)
 			}
+		})
+	}
+}
+
+type adoptionRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f adoptionRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func assertAdoptionRequest(t *testing.T, req *http.Request, ctx context.Context, endpoint, body string, headers http.Header) {
+	t.Helper()
+	if req.Context() != ctx || req.Method != http.MethodPost || req.URL.String() != endpoint {
+		t.Fatalf("request context/method/URL mismatch: %s %s", req.Method, req.URL)
+	}
+	if !reflect.DeepEqual(req.Header, headers) {
+		t.Fatalf("headers=%v want %v", req.Header, headers)
+	}
+	if req.ContentLength != int64(len(body)) || (req.Body == nil) != (body == "") {
+		t.Fatalf("body metadata length=%d nil=%v want length=%d", req.ContentLength, req.Body == nil, len(body))
+	}
+	if body == "" {
+		if req.GetBody != nil {
+			t.Fatal("nil body gained replay")
+		}
+		return
+	}
+	data, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != body {
+		t.Fatalf("body=%q want %q", data, body)
+	}
+	if req.GetBody == nil {
+		t.Fatal("encoded body lost replay")
+	}
+	replay, err := req.GetBody()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replay.Close()
+	data, err = io.ReadAll(replay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != body {
+		t.Fatalf("replay=%q want %q", data, body)
+	}
+}
+
+func TestJSONRequestAdoptionEnvelope(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "capture")
+	var typedNil *struct{ Value string }
+	const base = "https://api.example.test/base"
+	sentinel := errors.New("synthetic captured transport stop")
+	for _, tc := range []struct {
+		name        string
+		body        any
+		want        string
+		query, fail bool
+	}{
+		{name: "nil"},
+		{name: "typed nil", body: typedNil, want: "null\n"},
+		{name: "JSON bytes", body: map[string]string{"message": "<&>"}, want: "{\"message\":\"\\u003c\\u0026\\u003e\"}\n"},
+		{name: "query without body", query: true},
+		{name: "transport error", fail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			endpoint := "/records"
+			if tc.query {
+				endpoint += "?limit=2&prefix=two+words"
+			}
+
+			headers := http.Header{"Authorization": []string{"Bearer synthetic-token"}}
+			headers.Set("Accept", "application/json")
+			headers.Set("User-Agent", "crabbox/azure-dynamic-sessions")
+			if tc.body != nil {
+				headers.Set("Content-Type", "application/json")
+			}
+			transport := &http.Client{Transport: adoptionRoundTripper(func(req *http.Request) (*http.Response, error) {
+				calls++
+				assertAdoptionRequest(t, req, ctx, base+endpoint, tc.want, headers)
+				if tc.fail {
+					return nil, sentinel
+				}
+				return &http.Response{StatusCode: 204, Header: http.Header{"X-Capture": []string{"yes"}}, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+			})}
+			c := &azureDynamicSessionsClient{endpoint: base, token: "synthetic-token", httpClient: transport}
+			var gotHeaders http.Header
+			err := c.doJSONURL(ctx, http.MethodPost, base+endpoint, tc.body, nil)
+			if tc.fail {
+				if !errors.Is(err, sentinel) || gotHeaders != nil {
+					t.Fatalf("error/headers=%v %v", err, gotHeaders)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+
+			if calls != 1 {
+				t.Fatalf("calls=%d", calls)
+			}
+		})
+	}
+}
+
+func TestJSONRequestAdoptionConcreteEnvelope(t *testing.T) {
+	ctx := context.Background()
+	sentinel := errors.New("synthetic captured concrete request")
+	calls := 0
+	headers := http.Header{"Authorization": []string{"Bearer synthetic-token"}, "Content-Type": []string{"application/json"}}
+	headers.Set("Accept", "application/json")
+	headers.Set("User-Agent", "crabbox/azure-dynamic-sessions")
+	transport := &http.Client{Transport: adoptionRoundTripper(func(req *http.Request) (*http.Response, error) {
+		calls++
+		assertAdoptionRequest(t, req, ctx, "https://api.example.test/base/v1/exec?identifier=session+one", "{\"command\":\"\\u003c\\u0026\\u003e\",\"cwd\":\"/work\",\"env\":{\"A\":\"B\"},\"timeoutMs\":7}\n", headers)
+		return nil, sentinel
+	})}
+	c := &azureDynamicSessionsClient{endpoint: "https://api.example.test/base", token: "synthetic-token", httpClient: transport}
+	code, err := c.ExecStream(ctx, "session one", azureDynamicSessionsExecRequest{Command: "<&>", Cwd: "/work", Env: map[string]string{"A": "B"}, TimeoutMS: 7}, io.Discard, io.Discard)
+	if code != 0 {
+		t.Fatalf("exit=%d", code)
+	}
+	if !errors.Is(err, sentinel) || calls != 1 {
+		t.Fatalf("error=%v calls=%d", err, calls)
+	}
+}
+
+type responseCloseObserver struct {
+	io.Reader
+	close func() error
+}
+
+func (b responseCloseObserver) Close() error { return b.close() }
+
+func TestRawJSONResponseContract(t *testing.T) {
+	readFailure := errors.New("synthetic response read failure")
+	closeFailure := errors.New("synthetic ignored close failure")
+	for _, tc := range []struct {
+		name, data        string
+		status            int
+		nilOut, readError bool
+		wantError         string
+		wantValue         int
+	}{
+		{name: "nil output still reads invalid JSON", data: "not JSON", nilOut: true, wantValue: 99},
+		{name: "raw empty", wantValue: 99},
+		{name: "whitespace with output", data: " \t\n", wantError: "syntax", wantValue: 99},
+		{name: "whitespace without output", data: " \t\n", nilOut: true, wantValue: 99},
+		{name: "JSON object", data: `{"value":12}`, wantValue: 12},
+		{name: "JSON null", data: "null", wantValue: 99},
+		{name: "JSON trailing whitespace", data: "{\"value\":12}\n \t", wantValue: 12},
+		{name: "trailing JSON value", data: `{"value":12}{"value":13}`, wantError: "syntax", wantValue: 99},
+		{name: "wrong JSON field type", data: `{"value":"bad"}`, wantError: "type", wantValue: 99},
+		{name: "status error", data: "  unavailable \n", status: 503, wantError: "status", wantValue: 99},
+		{name: "status error with nil output", data: "  unavailable \n", status: 503, nilOut: true, wantError: "status", wantValue: 99},
+		{name: "read error beats success", data: `{"value":12}`, readError: true, wantError: "read", wantValue: 99},
+		{name: "read error beats status and nil output", data: "partial body", status: 503, nilOut: true, readError: true, wantError: "read", wantValue: 99},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := bytes.NewReader([]byte(tc.data))
+			var reader io.Reader = payload
+			if tc.readError {
+				reader = io.MultiReader(payload, iotest.ErrReader(readFailure))
+			}
+			closed, calls := 0, 0
+			responseHeaders := http.Header{"X-Trace": []string{"before-close", "second"}}
+			body := responseCloseObserver{Reader: reader, close: func() error { closed++; responseHeaders["X-Trace"][0] = "after-close"; return closeFailure }}
+			status := tc.status
+			if status == 0 {
+				status = 200
+			}
+			const base = "https://api.example.test"
+			httpClient := &http.Client{Transport: adoptionRoundTripper(func(req *http.Request) (*http.Response, error) {
+				calls++
+				return &http.Response{StatusCode: status, Status: strconv.Itoa(status) + " Synthetic", Header: responseHeaders, Body: body, Request: req}, nil
+			})}
+			client := &azureDynamicSessionsClient{endpoint: base, token: "synthetic-token", httpClient: httpClient}
+			out := struct {
+				Value int `json:"value"`
+			}{Value: 99}
+			var destination any = &out
+			if tc.nilOut {
+				destination = nil
+			}
+			err := client.doJSONURL(context.Background(), http.MethodGet, base+"/records", nil, destination)
+			if calls != 1 || closed != 1 || payload.Len() != 0 {
+				t.Fatalf("calls=%d closes=%d unread=%d", calls, closed, payload.Len())
+			}
+			if out.Value != tc.wantValue {
+				t.Fatalf("value=%d want%d", out.Value, tc.wantValue)
+			}
+			switch tc.wantError {
+			case "":
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "read":
+				if err != readFailure {
+					t.Fatalf("read error=%T %v want exact sentinel", err, err)
+				}
+			case "syntax":
+				if _, ok := err.(*json.SyntaxError); !ok {
+					t.Fatalf("decode error=%T %v want unwrapped SyntaxError", err, err)
+				}
+			case "type":
+				if _, ok := err.(*json.UnmarshalTypeError); !ok {
+					t.Fatalf("decode error=%T %v want unwrapped UnmarshalTypeError", err, err)
+				}
+			case "status":
+				api, ok := err.(*azureDynamicSessionsAPIError)
+				if !ok || api.StatusCode != 503 || api.Status != "503 Synthetic" || api.Body != "unavailable" {
+					t.Fatalf("status error=%T %#v", err, err)
+				}
+			}
+
 		})
 	}
 }

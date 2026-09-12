@@ -297,15 +297,7 @@ func (c *morphClient) doRaw(ctx context.Context, method, path string, query url.
 	if len(query) > 0 {
 		endpoint.RawQuery = query.Encode()
 	}
-	var payload io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return nil, err
-		}
-		payload = bytes.NewReader(data)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint.String(), payload)
+	req, err := shared.NewCompactJSONRequest(ctx, method, endpoint.String(), body)
 	if err != nil {
 		return nil, err
 	}

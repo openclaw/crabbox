@@ -19,6 +19,7 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestCloudRunNativeExitFixture(t *testing.T) {
@@ -789,4 +790,82 @@ func (r recordingLocalExec) Run(_ context.Context, req LocalCommandRequest) (Loc
 		return r.handler(req)
 	}
 	return LocalCommandResult{}, nil
+}
+
+func TestCompactJSONRemoteRequestAndExecEnvelopes(t *testing.T) {
+	type key struct{}
+	for _, parentDeadline := range []bool{false, true} {
+		for _, tc := range []struct {
+			name string
+			body map[string]any
+			want string
+			exec bool
+		}{
+			{"typed nil map", nil, "null", false}, {"empty map", map[string]any{}, "{}", false}, {"map JSON", map[string]any{"message": "<&>"}, `{"message":"\u003c\u0026\u003e"}`, false},
+			{name: "exec", exec: true, want: `{"allowEgress":false,"command":"\u003c\u0026\u003e","executionMode":"stateful","sandboxId":"box","timeout":7,"write":false}`},
+		} {
+			t.Run(tc.name+map[bool]string{false: "/default deadline", true: "/parent deadline"}[parentDeadline], func(t *testing.T) {
+				ctx := context.WithValue(context.Background(), key{}, "ctx")
+				cancel := func() {}
+				if parentDeadline {
+					ctx, cancel = context.WithTimeout(ctx, time.Minute)
+				}
+				defer cancel()
+				before := time.Now()
+				calls := 0
+				var captured context.Context
+				headers := http.Header{}
+				headers.Set("Content-Type", "application/json")
+				headers.Set("Accept", "application/json")
+				headers.Set("X-ComputeSDK-Cloud-Run-Secret", "synthetic-secret")
+				headers.Set("Authorization", "Bearer synthetic-token")
+				endpoint := "https://api.example.test/base/records"
+				if tc.exec {
+					endpoint = "https://api.example.test/base/v1/sandbox/exec"
+					headers.Set("Accept", "application/x-ndjson")
+				}
+				transport := &remoteTransport{baseURL: "https://api.example.test/base", secret: "synthetic-secret", authToken: "synthetic-token", http: &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+					calls++
+					captured = req.Context()
+					if captured == ctx || captured.Value(key{}) != "ctx" {
+						t.Fatal("timeout context lost parent values or was not derived")
+					}
+					testutil.RequireRequestEnvelope(t, req, captured, http.MethodPost, endpoint, tc.want, headers)
+					return nil, errors.New("synthetic-transport-stop")
+				})}}
+				var err error
+				if tc.exec {
+					var code int
+					code, err = transport.Exec(ctx, "box", "<&>", execOptions{Timeout: 7 * time.Millisecond}, io.Discard, io.Discard)
+					if code != 1 {
+						t.Fatalf("code=%d", code)
+					}
+				} else {
+					var out json.RawMessage
+					out, err = transport.request(ctx, "/records", tc.body)
+					if out != nil {
+						t.Fatalf("out=%s", out)
+					}
+				}
+				if err == nil || !strings.Contains(err.Error(), "synthetic-transport-stop") || calls != 1 {
+					t.Fatalf("error=%v calls=%d", err, calls)
+				}
+				deadline, ok := captured.Deadline()
+				if !ok {
+					t.Fatal("missing request deadline")
+				}
+				if parentDeadline {
+					want, _ := ctx.Deadline()
+					if !deadline.Equal(want) {
+						t.Fatalf("deadline=%v want%v", deadline, want)
+					}
+				} else if deadline.Before(before.Add(defaultExecTimeout)) || deadline.After(time.Now().Add(defaultExecTimeout)) {
+					t.Fatalf("default deadline=%v", deadline)
+				}
+				if captured.Err() != context.Canceled || ctx.Err() != nil {
+					t.Fatalf("cancellation child=%v parent=%v", captured.Err(), ctx.Err())
+				}
+			})
+		}
+	}
 }

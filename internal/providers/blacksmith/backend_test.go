@@ -1663,3 +1663,30 @@ func TestResolveBlacksmithDiscoveryID(t *testing.T) {
 		t.Fatalf("slug read-only discovery=%q err=%v", got, err)
 	}
 }
+
+func TestConfigShowCompleteRawContract(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config core.BlacksmithConfig
+		fields []core.ProviderConfigShowField
+	}{{name: "zero", config: core.BlacksmithConfig{Org: "", Workflow: "", Job: "", Ref: "", IdleTimeout: 0, Debug: false}, fields: []core.ProviderConfigShowField{{JSONName: "org", JSONValue: "", TextName: "org", TextValue: "-"}, {JSONName: "workflow", JSONValue: "", TextName: "workflow", TextValue: "-"}, {JSONName: "job", JSONValue: "", TextName: "job", TextValue: "-"}, {JSONName: "ref", JSONValue: "", TextName: "ref", TextValue: "-"}, {JSONName: "idleTimeout", JSONValue: "0s", TextName: "idle_timeout", TextValue: "0s"}, {JSONName: "debug", JSONValue: false, TextName: "debug", TextValue: "false"}}},
+		{name: "raw", config: core.BlacksmithConfig{Org: " Org reference ", Workflow: " Workflow reference ", Job: " Job reference ", Ref: " Ref reference ", IdleTimeout: -1500 * time.Millisecond, Debug: true}, fields: []core.ProviderConfigShowField{{JSONName: "org", JSONValue: " Org reference ", TextName: "org", TextValue: " Org reference "}, {JSONName: "workflow", JSONValue: " Workflow reference ", TextName: "workflow", TextValue: " Workflow reference "}, {JSONName: "job", JSONValue: " Job reference ", TextName: "job", TextValue: " Job reference "}, {JSONName: "ref", JSONValue: " Ref reference ", TextName: "ref", TextValue: " Ref reference "}, {JSONName: "idleTimeout", JSONValue: "-1.5s", TextName: "idle_timeout", TextValue: "-1.5s"}, {JSONName: "debug", JSONValue: true, TextName: "debug", TextValue: "true"}}},
+		{name: "whitespace", config: core.BlacksmithConfig{Org: " \t ", Workflow: " \t ", Job: " \t ", Ref: " \t ", IdleTimeout: -1500 * time.Millisecond, Debug: true}, fields: []core.ProviderConfigShowField{{JSONName: "org", JSONValue: " \t ", TextName: "org", TextValue: " \t "}, {JSONName: "workflow", JSONValue: " \t ", TextName: "workflow", TextValue: " \t "}, {JSONName: "job", JSONValue: " \t ", TextName: "job", TextValue: " \t "}, {JSONName: "ref", JSONValue: " \t ", TextName: "ref", TextValue: " \t "}, {JSONName: "idleTimeout", JSONValue: "-1.5s", TextName: "idle_timeout", TextValue: "-1.5s"}, {JSONName: "debug", JSONValue: true, TextName: "debug", TextValue: "true"}}}} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.Config{Provider: "unselected-display"}
+			cfg.Blacksmith = tc.config
+			want := core.ProviderConfigShowSection{JSONKey: "blacksmith", TextLabel: "blacksmith", Providers: []string{"blacksmith-testbox"}, Fields: tc.fields}
+			for _, selection := range []string{"unselected-display", "blacksmith-testbox"} {
+				cfg.Provider = selection
+				before := cfg
+				got := (Provider{}).ConfigShowSection(cfg)
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("selection=%s section=%#v want%#v", selection, got, want)
+				}
+				if !reflect.DeepEqual(cfg, before) {
+					t.Fatal("passive projector mutated config")
+				}
+			}
+		})
+	}
+}

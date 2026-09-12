@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -123,5 +125,106 @@ func TestLaunchRequestShape(t *testing.T) {
 		if _, ok := got[key]; ok {
 			t.Fatalf("request should not include unsupported %s: %s", key, data)
 		}
+	}
+}
+
+type adoptionRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f adoptionRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func assertAdoptionRequest(t *testing.T, req *http.Request, ctx context.Context, endpoint, body string, headers http.Header) {
+	t.Helper()
+	if req.Context() != ctx || req.Method != http.MethodPost || req.URL.String() != endpoint {
+		t.Fatalf("request context/method/URL mismatch: %s %s", req.Method, req.URL)
+	}
+	if !reflect.DeepEqual(req.Header, headers) {
+		t.Fatalf("headers=%v want %v", req.Header, headers)
+	}
+	if req.ContentLength != int64(len(body)) || (req.Body == nil) != (body == "") {
+		t.Fatalf("body metadata length=%d nil=%v want length=%d", req.ContentLength, req.Body == nil, len(body))
+	}
+	if body == "" {
+		if req.GetBody != nil {
+			t.Fatal("nil body gained replay")
+		}
+		return
+	}
+	data, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != body {
+		t.Fatalf("body=%q want %q", data, body)
+	}
+	if req.GetBody == nil {
+		t.Fatal("encoded body lost replay")
+	}
+	replay, err := req.GetBody()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replay.Close()
+	data, err = io.ReadAll(replay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != body {
+		t.Fatalf("replay=%q want %q", data, body)
+	}
+}
+
+func TestJSONRequestAdoptionEnvelope(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "capture")
+	var typedNil *struct{ Value string }
+	const base = "https://api.example.test/base"
+	sentinel := errors.New("synthetic captured transport stop")
+	for _, tc := range []struct {
+		name        string
+		body        any
+		want        string
+		query, fail bool
+	}{
+		{name: "nil"},
+		{name: "typed nil", body: typedNil, want: "null\n"},
+		{name: "JSON bytes", body: map[string]string{"message": "<&>"}, want: "{\"message\":\"\\u003c\\u0026\\u003e\"}\n"},
+		{name: "query without body", query: true},
+		{name: "transport error", fail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			endpoint := "/records"
+			if tc.query {
+				endpoint += "?limit=2&prefix=two+words"
+			}
+
+			headers := http.Header{"Authorization": []string{"Bearer synthetic-token"}}
+			headers.Set("Accept", "application/json")
+			if tc.body != nil {
+				headers.Set("Content-Type", "application/json")
+			}
+			transport := &http.Client{Transport: adoptionRoundTripper(func(req *http.Request) (*http.Response, error) {
+				calls++
+				assertAdoptionRequest(t, req, ctx, base+endpoint, tc.want, headers)
+				if tc.fail {
+					return nil, sentinel
+				}
+				return &http.Response{StatusCode: 204, Header: http.Header{"X-Capture": []string{"yes"}}, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+			})}
+			c := &Client{baseURL: base, token: "synthetic-token", client: transport}
+			var gotHeaders http.Header
+			err := c.do(ctx, http.MethodPost, endpoint, tc.body, nil)
+			if tc.fail {
+				if !errors.Is(err, sentinel) || gotHeaders != nil {
+					t.Fatalf("error/headers=%v %v", err, gotHeaders)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+
+			if calls != 1 {
+				t.Fatalf("calls=%d", calls)
+			}
+		})
 	}
 }

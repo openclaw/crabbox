@@ -1811,3 +1811,209 @@ func TestCubeSandboxProcessEndDiagnosticPrecedence(t *testing.T) {
 		})
 	}
 }
+
+func assertAdoptionRequest(t *testing.T, req *http.Request, ctx context.Context, endpoint, body string, headers http.Header) {
+	t.Helper()
+	if req.Context() != ctx || req.Method != http.MethodPost || req.URL.String() != endpoint {
+		t.Fatalf("request context/method/URL mismatch: %s %s", req.Method, req.URL)
+	}
+	if !reflect.DeepEqual(req.Header, headers) {
+		t.Fatalf("headers=%v want %v", req.Header, headers)
+	}
+	if req.ContentLength != int64(len(body)) || (req.Body == nil) != (body == "") {
+		t.Fatalf("body metadata length=%d nil=%v want length=%d", req.ContentLength, req.Body == nil, len(body))
+	}
+	if body == "" {
+		if req.GetBody != nil {
+			t.Fatal("nil body gained replay")
+		}
+		return
+	}
+	data, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != body {
+		t.Fatalf("body=%q want %q", data, body)
+	}
+	if req.GetBody == nil {
+		t.Fatal("encoded body lost replay")
+	}
+	replay, err := req.GetBody()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replay.Close()
+	data, err = io.ReadAll(replay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != body {
+		t.Fatalf("replay=%q want %q", data, body)
+	}
+}
+
+func TestJSONRequestAdoptionEnvelope(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "capture")
+	var typedNil *struct{ Value string }
+	const base = "https://api.example.test/base"
+	sentinel := errors.New("synthetic captured transport stop")
+	for _, tc := range []struct {
+		name        string
+		body        any
+		want        string
+		query, fail bool
+	}{
+		{name: "nil"},
+		{name: "typed nil", body: typedNil, want: "null\n"},
+		{name: "JSON bytes", body: map[string]string{"message": "<&>"}, want: "{\"message\":\"\\u003c\\u0026\\u003e\"}\n"},
+		{name: "query without body", query: true},
+		{name: "transport error", fail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			endpoint := "/records"
+			if tc.query {
+				endpoint += "?limit=2&prefix=two+words"
+			}
+			var query url.Values
+			if tc.query {
+				query = url.Values{"limit": []string{"2"}, "prefix": []string{"two words"}}
+			}
+			headers := http.Header{"Authorization": []string{"Bearer synthetic-token"}}
+			headers.Set("Accept", "application/json")
+			if tc.body != nil {
+				headers.Set("Content-Type", "application/json")
+			}
+			transport := &http.Client{Transport: cubesandboxRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				assertAdoptionRequest(t, req, ctx, base+endpoint, tc.want, headers)
+				if tc.fail {
+					return nil, sentinel
+				}
+				return &http.Response{StatusCode: 204, Header: http.Header{"X-Capture": []string{"yes"}}, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+			})}
+			c := &cubesandboxClient{apiURL: base, apiKey: "synthetic-token", httpClient: transport}
+			gotHeaders, err := c.doJSONWithHeaders(ctx, http.MethodPost, "/records", query, tc.body, nil)
+			if tc.fail {
+				if !errors.Is(err, sentinel) || gotHeaders != nil {
+					t.Fatalf("error/headers=%v %v", err, gotHeaders)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.fail && (gotHeaders.Get("X-Capture") != "yes") {
+				t.Fatalf("response headers=%v", gotHeaders)
+			}
+			if calls != 1 {
+				t.Fatalf("calls=%d", calls)
+			}
+		})
+	}
+}
+
+type responseCloseObserver struct {
+	io.Reader
+	close func() error
+}
+
+func (b responseCloseObserver) Close() error { return b.close() }
+
+func TestRawJSONResponseContract(t *testing.T) {
+	readFailure := errors.New("synthetic response read failure")
+	closeFailure := errors.New("synthetic ignored close failure")
+	for _, tc := range []struct {
+		name, data        string
+		status            int
+		nilOut, readError bool
+		wantError         string
+		wantValue         int
+	}{
+		{name: "nil output still reads invalid JSON", data: "not JSON", nilOut: true, wantValue: 99},
+		{name: "raw empty", wantValue: 99},
+		{name: "whitespace with output", data: " \t\n", wantError: "syntax", wantValue: 99},
+		{name: "whitespace without output", data: " \t\n", nilOut: true, wantValue: 99},
+		{name: "JSON object", data: `{"value":12}`, wantValue: 12},
+		{name: "JSON null", data: "null", wantValue: 99},
+		{name: "JSON trailing whitespace", data: "{\"value\":12}\n \t", wantValue: 12},
+		{name: "trailing JSON value", data: `{"value":12}{"value":13}`, wantError: "syntax", wantValue: 99},
+		{name: "wrong JSON field type", data: `{"value":"bad"}`, wantError: "type", wantValue: 99},
+		{name: "status error", data: "  unavailable \n", status: 503, wantError: "status", wantValue: 99},
+		{name: "status error with nil output", data: "  unavailable \n", status: 503, nilOut: true, wantError: "status", wantValue: 99},
+		{name: "read error beats success", data: `{"value":12}`, readError: true, wantError: "read", wantValue: 99},
+		{name: "read error beats status and nil output", data: "partial body", status: 503, nilOut: true, readError: true, wantError: "read", wantValue: 99},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := bytes.NewReader([]byte(tc.data))
+			var reader io.Reader = payload
+			if tc.readError {
+				reader = io.MultiReader(payload, iotest.ErrReader(readFailure))
+			}
+			closed, calls := 0, 0
+			responseHeaders := http.Header{"X-Trace": []string{"before-close", "second"}}
+			body := responseCloseObserver{Reader: reader, close: func() error { closed++; responseHeaders["X-Trace"][0] = "after-close"; return closeFailure }}
+			status := tc.status
+			if status == 0 {
+				status = 200
+			}
+			const base = "https://api.example.test"
+			httpClient := &http.Client{Transport: cubesandboxRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				return &http.Response{StatusCode: status, Status: strconv.Itoa(status) + " Synthetic", Header: responseHeaders, Body: body, Request: req}, nil
+			})}
+			client := &cubesandboxClient{apiURL: base, apiKey: "synthetic-token", httpClient: httpClient}
+			out := struct {
+				Value int `json:"value"`
+			}{Value: 99}
+			var destination any = &out
+			if tc.nilOut {
+				destination = nil
+			}
+			headers, err := client.doJSONWithHeaders(context.Background(), http.MethodGet, "/records", nil, nil, destination)
+			if calls != 1 || closed != 1 || payload.Len() != 0 {
+				t.Fatalf("calls=%d closes=%d unread=%d", calls, closed, payload.Len())
+			}
+			if out.Value != tc.wantValue {
+				t.Fatalf("value=%d want%d", out.Value, tc.wantValue)
+			}
+			switch tc.wantError {
+			case "":
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "read":
+				if err != readFailure {
+					t.Fatalf("read error=%T %v want exact sentinel", err, err)
+				}
+			case "syntax":
+				if _, ok := err.(*json.SyntaxError); !ok {
+					t.Fatalf("decode error=%T %v want unwrapped SyntaxError", err, err)
+				}
+			case "type":
+				if _, ok := err.(*json.UnmarshalTypeError); !ok {
+					t.Fatalf("decode error=%T %v want unwrapped UnmarshalTypeError", err, err)
+				}
+			case "status":
+				api, ok := err.(*cubesandboxAPIError)
+				if !ok || api.StatusCode != 503 || api.Status != "503 Synthetic" || api.Body != "unavailable" {
+					t.Fatalf("status error=%T %#v", err, err)
+				}
+			}
+			if tc.wantError != "" {
+				if headers != nil {
+					t.Fatalf("error headers=%v", headers)
+				}
+			} else {
+				want := http.Header{"X-Trace": []string{"before-close", "second"}}
+				if !reflect.DeepEqual(headers, want) {
+					t.Fatalf("headers=%v want pre-close clone%v", headers, want)
+				}
+				headers["X-Trace"][0] = "caller-change"
+				if responseHeaders["X-Trace"][0] != "after-close" {
+					t.Fatal("returned headers share backing values")
+				}
+			}
+		})
+	}
+}

@@ -17,6 +17,7 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestRailwayProviderSpec(t *testing.T) {
@@ -1171,6 +1172,35 @@ func TestRailwayFlagsRejectUnsupportedSizingForAliases(t *testing.T) {
 			err := ApplyRailwayProviderFlags(&cfg, fs, values)
 			if err == nil || !strings.Contains(err.Error(), "--class is not supported") {
 				t.Fatalf("err = %v, want class rejection", err)
+			}
+		})
+	}
+}
+
+func TestCompactJSONGraphQLEnvelope(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		vars map[string]any
+		want string
+	}{
+		{"nil variables", nil, `{"query":"\u003c\u0026\u003e"}`},
+		{"variables", map[string]any{"name": "<&>"}, `{"query":"\u003c\u0026\u003e","variables":{"name":"\u003c\u0026\u003e"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			headers := http.Header{}
+			headers.Set("Authorization", "Bearer synthetic-token")
+			headers.Set("Content-Type", "application/json")
+			headers.Set("Accept", "application/json")
+			c := &railwayClient{apiURL: "https://api.example.test/graphql", apiToken: "synthetic-token", httpClient: &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, "https://api.example.test/graphql", tc.want, headers)
+				return nil, errors.New("synthetic-transport-stop")
+			})}}
+			err := c.do(ctx, "<&>", tc.vars, nil)
+			if err == nil || !strings.Contains(err.Error(), "synthetic-transport-stop") || calls != 1 {
+				t.Fatalf("error=%v calls=%d", err, calls)
 			}
 		})
 	}
