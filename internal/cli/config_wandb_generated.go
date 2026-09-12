@@ -41,10 +41,9 @@ type WandbConfigFlagValues struct {
 
 // RegisterWandbConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterWandbConfigFlags(fs *flag.FlagSet, defaults WandbConfig) WandbConfigFlagValues {
-	return WandbConfigFlagValues{
-		DefaultImage:       fs.String("wandb-image", defaults.DefaultImage, "Container image used when acquiring a new W&B sandbox"),
-		MaxLifetimeSeconds: fs.Int("wandb-max-lifetime", defaults.MaxLifetimeSeconds, "Maximum sandbox lifetime in seconds before W&B reclaims it"),
-	}
+	var values WandbConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.

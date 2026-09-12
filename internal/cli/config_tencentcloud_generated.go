@@ -64,20 +64,9 @@ type TencentCloudConfigFlagValues struct {
 
 // RegisterTencentCloudConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterTencentCloudConfigFlags(fs *flag.FlagSet, defaults TencentCloudConfig) TencentCloudConfigFlagValues {
-	return TencentCloudConfigFlagValues{
-		Region:                  fs.String("tencentcloud-region", defaults.Region, "Tencent Cloud CVM region"),
-		Zone:                    fs.String("tencentcloud-zone", defaults.Zone, "Tencent Cloud CVM availability zone"),
-		Image:                   fs.String("tencentcloud-image", defaults.Image, "Tencent Cloud CVM image ID"),
-		Type:                    fs.String("tencentcloud-type", defaults.Type, "Tencent Cloud CVM instance type"),
-		VPCID:                   fs.String("tencentcloud-vpc-id", defaults.VPCID, "Tencent Cloud VPC ID"),
-		SubnetID:                fs.String("tencentcloud-subnet-id", defaults.SubnetID, "Tencent Cloud subnet ID"),
-		SecurityGroupID:         fs.String("tencentcloud-security-group-id", defaults.SecurityGroupID, "Tencent Cloud security group ID"),
-		SSHCIDRs:                fs.String("tencentcloud-ssh-cidrs", "", "comma-separated Tencent Cloud SSH source CIDRs; reserved for managed security-group support"),
-		RootGB:                  fs.Int64("tencentcloud-root-gb", defaults.RootGB, "Tencent Cloud CVM system disk size in GiB"),
-		InternetChargeType:      fs.String("tencentcloud-internet-charge-type", defaults.InternetChargeType, "Tencent Cloud public bandwidth charge type"),
-		InternetMaxBandwidthOut: fs.Int64("tencentcloud-internet-max-bandwidth-out", defaults.InternetMaxBandwidthOut, "Tencent Cloud public outbound bandwidth in Mbps"),
-		APIEndpoint:             fs.String("tencentcloud-api-endpoint", defaults.APIEndpoint, "Tencent Cloud CVM API endpoint"),
-	}
+	var values TencentCloudConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // TencentCloudConfigVisitedFlags records raw flag visits, independently of application.

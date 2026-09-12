@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
@@ -20,7 +21,7 @@ type spritesSandboxedCLIRunner struct {
 	profile string
 }
 
-func (r spritesSandboxedCLIRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r spritesSandboxedCLIRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	req.Name = "/usr/bin/sandbox-exec"
 	req.Args = append([]string{"-f", r.profile, r.cli}, req.Args...)
 	return (spritesRealCLIRunner{}).Run(ctx, req)
@@ -102,13 +103,13 @@ func TestSpritesRealCLIOverridesWorkingSavedContext(t *testing.T) {
 	}
 	runner := spritesSandboxedCLIRunner{cli: cli, profile: profile}
 	b := &spritesBackend{
-		cfg: Config{Sprites: SpritesConfig{Token: "test-configured-token", APIURL: configured.URL}},
-		rt:  Runtime{Exec: runner},
+		cfg: core.Config{Sprites: core.SpritesConfig{Token: "test-configured-token", APIURL: configured.URL}},
+		rt:  core.Runtime{Exec: runner},
 	}
 	for i, args := range [][]string{{"exec", "-s", "crabbox-test", "--", "true"}, {"proxy", "-s", "crabbox-test", "-W", "22"}} {
 		// Prove the saved fixture works before testing Crabbox's overrides.
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-		_, err := runner.Run(ctx, LocalCommandRequest{Name: "sprite", Args: args, Env: os.Environ(), Dir: dirs.Home})
+		_, err := runner.Run(ctx, core.LocalCommandRequest{Name: "sprite", Args: args, Env: os.Environ(), Dir: dirs.Home})
 		cancel()
 		if err == nil || savedRequests[i].Load() == 0 || configuredRequests[i].Load() != 0 {
 			t.Fatalf("%s did not use the working saved context", args[0])

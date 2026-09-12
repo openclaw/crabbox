@@ -91,6 +91,11 @@ func TestManagedStateTransferWindowsDirectoryAlias(t *testing.T) {
 	if err != nil || got != want {
 		t.Fatalf("junction normalized to %q, want %q: %v", got, want, err)
 	}
+	missing := filepath.Join("missing-directory", "leaf")
+	got, err = NormalizeManagedStateTransferRoot(filepath.Join(alias, missing))
+	if err != nil || got != filepath.Join(want, missing) {
+		t.Fatalf("junction missing suffix normalized to %q: %v", got, err)
+	}
 	t.Setenv("XDG_STATE_HOME", state)
 	if err := ValidateManagedStateTransferScope("owned junction fixture", alias); err == nil {
 		t.Fatal("junction scope admitted overlapping managed namespace")

@@ -13,16 +13,16 @@ import (
 )
 
 type tensorlakeCLI struct {
-	cfg Config
-	rt  Runtime
+	cfg core.Config
+	rt  core.Runtime
 }
 
-func newTensorlakeCLI(cfg Config, rt Runtime) (*tensorlakeCLI, error) {
+func newTensorlakeCLI(cfg core.Config, rt core.Runtime) (*tensorlakeCLI, error) {
 	if strings.TrimSpace(cfg.Tensorlake.APIKey) == "" {
-		return nil, exit(2, "provider=tensorlake requires TENSORLAKE_API_KEY")
+		return nil, core.Exit(2, "provider=tensorlake requires TENSORLAKE_API_KEY")
 	}
 	if rt.Exec == nil {
-		return nil, exit(2, "provider=tensorlake requires Runtime.Exec")
+		return nil, core.Exit(2, "provider=tensorlake requires Runtime.Exec")
 	}
 	apiURL, err := canonicalTensorlakeURL(core.Blank(cfg.Tensorlake.APIURL, core.TensorlakeConfigDefaultAPIURL))
 	if err != nil {
@@ -31,7 +31,7 @@ func newTensorlakeCLI(cfg Config, rt Runtime) (*tensorlakeCLI, error) {
 	cfg.Tensorlake.APIURL = apiURL
 	cfg.Tensorlake.Namespace = core.Blank(strings.TrimSpace(cfg.Tensorlake.Namespace), "default")
 	if !validScopeValue(cfg.Tensorlake.Namespace) {
-		return nil, exit(2, "invalid Tensorlake namespace")
+		return nil, core.Exit(2, "invalid Tensorlake namespace")
 	}
 	return &tensorlakeCLI{cfg: cfg, rt: rt}, nil
 }
@@ -81,7 +81,7 @@ func (c *tensorlakeCLI) runQuiet(ctx context.Context, sub []string, args []strin
 	full = append(full, sub...)
 	full = append(full, args...)
 	var stdout, stderr bytes.Buffer
-	res, err := c.rt.Exec.Run(ctx, LocalCommandRequest{
+	res, err := c.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:   c.binary(),
 		Args:   full,
 		Env:    c.env(),
@@ -105,7 +105,7 @@ func (c *tensorlakeCLI) runStreamed(ctx context.Context, sub []string, args []st
 	full := append([]string{}, c.globalArgs()...)
 	full = append(full, sub...)
 	full = append(full, args...)
-	res, err := c.rt.Exec.Run(ctx, LocalCommandRequest{
+	res, err := c.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:   c.binary(),
 		Args:   full,
 		Env:    c.env(),
@@ -208,7 +208,7 @@ func (c *tensorlakeCLI) execShell(ctx context.Context, name, command string) err
 		return fmt.Errorf("tensorlake exec %q: %w", command, err)
 	}
 	if code != 0 {
-		return exit(code, "tensorlake exec %q exited %d", command, code)
+		return core.Exit(code, "tensorlake exec %q exited %d", command, code)
 	}
 	return nil
 }

@@ -63,19 +63,8 @@ type NamespaceInstanceConfigFlagValues struct {
 
 // RegisterNamespaceInstanceConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterNamespaceInstanceConfigFlags(fs *flag.FlagSet, defaults NamespaceInstanceConfig) NamespaceInstanceConfigFlagValues {
-	listVolumes := newAppendTrimmedListFlag(defaults.Volumes)
-	values := NamespaceInstanceConfigFlagValues{
-		CLIPath:     fs.String("namespace-instance-cli", defaults.CLIPath, "Namespace nsc CLI path"),
-		MachineType: fs.String("namespace-instance-machine-type", defaults.MachineType, "Namespace instance CPUxMemoryGB shape, for example 4x8"),
-		Duration:    fs.String("namespace-instance-duration", defaults.Duration.String(), "Namespace instance duration; defaults to --ttl"),
-		Region:      fs.String("namespace-instance-region", defaults.Region, "Namespace region"),
-		Endpoint:    fs.String("namespace-instance-endpoint", defaults.Endpoint, "Namespace API endpoint"),
-		Keychain:    fs.String("namespace-instance-keychain", defaults.Keychain, "Namespace token keychain"),
-		Volumes:     listVolumes,
-		WorkRoot:    fs.String("namespace-instance-work-root", defaults.WorkRoot, "remote Crabbox work root"),
-		Bare:        fs.Bool("namespace-instance-bare", defaults.Bare, "disable Kubernetes for a smaller instance"),
-	}
-	fs.Var(listVolumes, "namespace-instance-volume", "Namespace volume kind:tag:mountpoint:size; repeatable")
+	var values NamespaceInstanceConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
 	return values
 }
 

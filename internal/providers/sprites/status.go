@@ -10,7 +10,7 @@ import (
 // Plain status is API-only: it must not wake a sleeping Sprite just to display
 // its state. --wait explicitly opts into an SSH probe, never SSH installation.
 func (b *spritesBackend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
-	lease, err := b.Resolve(ctx, ResolveRequest{ID: req.ID, StatusOnly: true, NoLocalStateMutations: true})
+	lease, err := b.Resolve(ctx, core.ResolveRequest{ID: req.ID, StatusOnly: true, NoLocalStateMutations: true})
 	if err != nil {
 		return core.StatusView{}, err
 	}

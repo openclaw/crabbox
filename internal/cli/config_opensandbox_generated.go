@@ -74,20 +74,9 @@ type OpenSandboxConfigFlagValues struct {
 
 // RegisterOpenSandboxConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterOpenSandboxConfigFlags(fs *flag.FlagSet, defaults OpenSandboxConfig) OpenSandboxConfigFlagValues {
-	return OpenSandboxConfigFlagValues{
-		APIURL:          fs.String("opensandbox-api-url", defaults.APIURL, "Trusted OpenSandbox API base URL; not accepted from repository config"),
-		Image:           fs.String("opensandbox-image", defaults.Image, "OpenSandbox container image URI"),
-		Workdir:         fs.String("opensandbox-workdir", defaults.Workdir, "Absolute working directory inside the sandbox (also used as sync target)"),
-		CPU:             fs.String("opensandbox-cpu", defaults.CPU, "OpenSandbox CPU resource limit string (empty = service default)"),
-		Memory:          fs.String("opensandbox-memory", defaults.Memory, "OpenSandbox memory resource limit string (empty = service default)"),
-		TimeoutSecs:     fs.Int("opensandbox-timeout-secs", defaults.TimeoutSecs, "OpenSandbox sandbox lifetime cap and readiness budget in seconds (0 = Crabbox TTL)"),
-		ExecTimeoutSecs: fs.Int("opensandbox-exec-timeout-secs", defaults.ExecTimeoutSecs, "OpenSandbox command timeout in seconds (0 = Crabbox default 600)"),
-		PlatformOS:      fs.String("opensandbox-platform-os", defaults.PlatformOS, "OpenSandbox platform OS constraint (set with --opensandbox-platform-arch; both empty = service default)"),
-		PlatformArch:    fs.String("opensandbox-platform-arch", defaults.PlatformArch, "OpenSandbox platform architecture constraint (set with --opensandbox-platform-os; both empty = service default)"),
-		SecureAccess:    fs.Bool("opensandbox-secure-access", defaults.SecureAccess, "request secured sandbox endpoints"),
-		UseServerProxy:  fs.Bool("opensandbox-use-server-proxy", defaults.UseServerProxy, "route execd requests through the OpenSandbox server proxy"),
-		ForgetMissing:   fs.Bool("opensandbox-forget-missing", defaults.ForgetMissing, "remove the local claim when stop gets 404 (explicit stale-claim cleanup)"),
-	}
+	var values OpenSandboxConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.

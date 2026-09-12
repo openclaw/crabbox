@@ -66,16 +66,9 @@ type ScalewayConfigFlagValues struct {
 
 // RegisterScalewayConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterScalewayConfigFlags(fs *flag.FlagSet, defaults ScalewayConfig) ScalewayConfigFlagValues {
-	return ScalewayConfigFlagValues{
-		Region:         fs.String("scaleway-region", defaults.Region, "Scaleway region"),
-		Zone:           fs.String("scaleway-zone", defaults.Zone, "Scaleway zone"),
-		Image:          fs.String("scaleway-image", defaults.Image, "Scaleway image label or ID"),
-		Type:           fs.String("scaleway-type", defaults.Type, "Scaleway Instances commercial type"),
-		ProjectID:      fs.String("scaleway-project-id", defaults.ProjectID, "Scaleway project ID"),
-		OrganizationID: fs.String("scaleway-organization-id", defaults.OrganizationID, "Scaleway organization ID"),
-		SecurityGroup:  fs.String("scaleway-security-group", defaults.SecurityGroup, "Scaleway security group ID"),
-		SSHCIDRs:       fs.String("scaleway-ssh-cidrs", "", "comma-separated Scaleway SSH source CIDRs"),
-	}
+	var values ScalewayConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // ScalewayConfigVisitedFlags records raw flag visits, independently of application.

@@ -49,6 +49,21 @@ func normalizeManagedTransferPath(path string, depth int) (string, error) {
 		}
 		return normalizeManagedTransferPath(resolved, depth+1)
 	}
+	if err == nil && runtime.GOOS == "windows" && info.Mode()&os.ModeIrregular != 0 {
+		// Go reports Windows junctions as irregular, not symlinks. Readlink
+		// recognizes junctions; unsupported reparse types remain an error.
+		resolved, err := os.Readlink(path)
+		if err != nil {
+			return "", err
+		}
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(parent, resolved)
+		}
+		if _, err := os.Stat(resolved); err != nil {
+			return "", err
+		}
+		return normalizeManagedTransferPath(resolved, depth+1)
+	}
 	resolvedParent, parentErr := normalizeManagedTransferPath(parent, depth+1)
 	if parentErr != nil {
 		return "", parentErr

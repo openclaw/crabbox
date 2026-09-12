@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"strings"
 )
 
 type fileVercelSandboxConfig struct {
@@ -79,24 +78,9 @@ type VercelSandboxConfigFlagValues struct {
 
 // RegisterVercelSandboxConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterVercelSandboxConfigFlags(fs *flag.FlagSet, defaults VercelSandboxConfig) VercelSandboxConfigFlagValues {
-	return VercelSandboxConfigFlagValues{
-		Runtime:         fs.String("vercel-sandbox-runtime", defaults.Runtime, "Vercel Sandbox runtime (node26, node24, node22, python3.13)"),
-		Workdir:         fs.String("vercel-sandbox-workdir", defaults.Workdir, "Absolute working directory inside the sandbox"),
-		ProjectID:       fs.String("vercel-sandbox-project-id", defaults.ProjectID, "Vercel project ID used for sandbox scoping"),
-		TeamID:          fs.String("vercel-sandbox-team-id", defaults.TeamID, "Vercel team ID used for sandbox scoping"),
-		Scope:           fs.String("vercel-sandbox-scope", defaults.Scope, "Vercel account or team slug used for sandbox scoping"),
-		VCPUs:           fs.Float64("vercel-sandbox-vcpus", defaults.VCPUs, "requested Vercel Sandbox vCPU count (0 = service default)"),
-		TimeoutSecs:     fs.Int("vercel-sandbox-timeout-secs", defaults.TimeoutSecs, "sandbox lifetime cap in seconds (0 = service default)"),
-		ExecTimeoutSecs: fs.Int("vercel-sandbox-exec-timeout-secs", defaults.ExecTimeoutSecs, "command timeout in seconds (0 = service default)"),
-		Persistent:      fs.Bool("vercel-sandbox-persistent", defaults.Persistent, "request a persistent sandbox when lifecycle support lands"),
-		Snapshot:        fs.String("vercel-sandbox-snapshot", defaults.Snapshot, "snapshot/checkpoint name or ID for future lifecycle use"),
-		SnapshotMode:    fs.String("vercel-sandbox-snapshot-mode", defaults.SnapshotMode, "snapshot/checkpoint mode for future lifecycle use"),
-		NetworkPolicy:   fs.String("vercel-sandbox-network-policy", defaults.NetworkPolicy, "sandbox network policy: default, public, private, restricted, or none"),
-		NetworkAllow:    fs.String("vercel-sandbox-network-allow", strings.Join(defaults.NetworkAllow, ","), "comma-separated outbound CIDR/domain allow list"),
-		NetworkDeny:     fs.String("vercel-sandbox-network-deny", strings.Join(defaults.NetworkDeny, ","), "comma-separated outbound IP/CIDR deny list"),
-		Ports:           fs.String("vercel-sandbox-ports", strings.Join(defaults.Ports, ","), "comma-separated ports or ranges to expose later"),
-		ForgetMissing:   fs.Bool("vercel-sandbox-forget-missing", defaults.ForgetMissing, "remove the local claim when stop gets 404 (explicit stale-claim cleanup)"),
-	}
+	var values VercelSandboxConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.

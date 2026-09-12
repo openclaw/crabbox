@@ -81,22 +81,9 @@ type CuaConfigFlagValues struct {
 
 // RegisterCuaConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterCuaConfigFlags(fs *flag.FlagSet, defaults CuaConfig) CuaConfigFlagValues {
-	return CuaConfigFlagValues{
-		APIURL:             fs.String("cua-api-url", defaults.APIURL, "Trusted CUA API base URL; not accepted from repository config"),
-		Image:              fs.String("cua-image", defaults.Image, "CUA Linux sandbox image"),
-		Kind:               fs.String("cua-kind", defaults.Kind, "CUA sandbox kind: container or vm"),
-		Region:             fs.String("cua-region", defaults.Region, "CUA deployment region (empty = service default/policy)"),
-		Workdir:            fs.String("cua-workdir", defaults.Workdir, "Absolute working directory inside the sandbox"),
-		VCPUs:              fs.Int("cua-vcpus", defaults.VCPUs, "CUA sandbox vCPU count (0 = service default)"),
-		MemoryMB:           fs.Int("cua-memory-mb", defaults.MemoryMB, "CUA sandbox memory in MB (0 = service default)"),
-		DiskGB:             fs.Int("cua-disk-gb", defaults.DiskGB, "CUA sandbox disk in GB (0 = service default)"),
-		StartupTimeoutSecs: fs.Int("cua-startup-timeout-secs", defaults.StartupTimeoutSecs, "CUA sandbox startup timeout in seconds (0 = Crabbox default)"),
-		ExecTimeoutSecs:    fs.Int("cua-exec-timeout-secs", defaults.ExecTimeoutSecs, "CUA command timeout in seconds (0 = Crabbox default 600)"),
-		BridgeCommand:      fs.String("cua-bridge-command", defaults.BridgeCommand, "trusted local Python command for the future CUA SDK bridge"),
-		SDKPackage:         fs.String("cua-sdk-package", defaults.SDKPackage, "trusted local Python package name for CUA SDK diagnostics"),
-		SDKImport:          fs.String("cua-sdk-import", defaults.SDKImport, "trusted local Python import path for CUA SDK diagnostics"),
-		SDKFallbackImport:  fs.String("cua-sdk-fallback-import", defaults.SDKFallbackImport, "trusted local fallback import path for CUA SDK diagnostics"),
-	}
+	var values CuaConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.

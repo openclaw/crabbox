@@ -48,11 +48,9 @@ type FastAPICloudConfigFlagValues struct {
 
 // RegisterFastAPICloudConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterFastAPICloudConfigFlags(fs *flag.FlagSet, defaults FastAPICloudConfig) FastAPICloudConfigFlagValues {
-	return FastAPICloudConfigFlagValues{
-		APIURL: fs.String("fastapi-cloud-url", defaults.APIURL, "FastAPI Cloud API URL"),
-		AppID:  fs.String("fastapi-cloud-app-id", defaults.AppID, "FastAPI Cloud app ID"),
-		TeamID: fs.String("fastapi-cloud-team-id", defaults.TeamID, "FastAPI Cloud team ID for listing apps"),
-	}
+	var values FastAPICloudConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // FastAPICloudConfigVisitedFlags records raw flag visits, independently of application.

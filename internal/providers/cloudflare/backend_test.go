@@ -46,8 +46,8 @@ func TestCloudflareProviderSpec(t *testing.T) {
 }
 
 func TestCloudflareWarmupRejectsActionsRunner(t *testing.T) {
-	backend := &cloudflareBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-	err := backend.Warmup(context.Background(), WarmupRequest{ActionsRunner: true})
+	backend := &cloudflareBackend{rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	err := backend.Warmup(context.Background(), core.WarmupRequest{ActionsRunner: true})
 	if err == nil {
 		t.Fatal("Warmup accepted --actions-runner")
 	}
@@ -56,7 +56,7 @@ func TestCloudflareWarmupRejectsActionsRunner(t *testing.T) {
 	}
 }
 
-func hasCloudflareFeature(features FeatureSet, want Feature) bool {
+func hasCloudflareFeature(features core.FeatureSet, want core.Feature) bool {
 	for _, feature := range features {
 		if feature == want {
 			return true
@@ -66,7 +66,7 @@ func hasCloudflareFeature(features FeatureSet, want Feature) bool {
 }
 
 func TestCloudflareWorkdirRejectsBroadPaths(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Cloudflare.Workdir = "/workspace"
 	if _, err := cloudflareWorkdir(cfg); err == nil {
 		t.Fatal("cloudflareWorkdir accepted broad /workspace path")
@@ -100,7 +100,7 @@ func TestCloudflareStoppedWithCodeIsTerminal(t *testing.T) {
 }
 
 func TestCloudflareTokenFlagIsNotRegistered(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Cloudflare.Token = "secret-token"
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	RegisterCloudflareProviderFlags(fs, cfg)
@@ -115,7 +115,7 @@ func TestCloudflareFlagNormalizationPrecedesValues(t *testing.T) {
 			stored, want            string
 			explicit, visited, fail bool
 		}{{"", "standard-4", false, false, false}, {" STANDARD-2 ", "standard-2", false, true, false}, {"other", "standard-4", false, false, false}, {"other", "other", true, false, true}, {"other", "other", false, true, true}} {
-			cfg := Config{Provider: name, Class: "standard", ServerType: tc.stored, ServerTypeExplicit: tc.explicit}
+			cfg := core.Config{Provider: name, Class: "standard", ServerType: tc.stored, ServerTypeExplicit: tc.explicit}
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			fs.String("type", "", "")
 			if tc.visited {
@@ -135,7 +135,7 @@ func TestCloudflareFlagNormalizationPrecedesValues(t *testing.T) {
 			}
 		}
 	}
-	cfg := Config{Provider: "cloudflare", Class: "standard", ServerType: "standard-4"}
+	cfg := core.Config{Provider: "cloudflare", Class: "standard", ServerType: "standard-4"}
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	values := RegisterCloudflareProviderFlags(fs, cfg)
 	fs.VisitAll(func(f *flag.Flag) {
@@ -143,7 +143,7 @@ func TestCloudflareFlagNormalizationPrecedesValues(t *testing.T) {
 			t.Fatal("token flag registered")
 		}
 	})
-	cfg.Cloudflare = CloudflareConfig{APIURL: "https://example.invalid/prior", Token: "inert", Workdir: "/workspace/prior"}
+	cfg.Cloudflare = core.CloudflareConfig{APIURL: "https://example.invalid/prior", Token: "inert", Workdir: "/workspace/prior"}
 	before := cfg
 	if err := ApplyCloudflareProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
@@ -162,30 +162,30 @@ func TestCloudflareFlagNormalizationPrecedesValues(t *testing.T) {
 	if !reflect.DeepEqual(cfg, before) {
 		t.Fatal("wrapper copied token or introduced central provenance marking")
 	}
-	if _, err := (Provider{}).Configure(cfg, Runtime{}); err != nil {
+	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err != nil {
 		t.Fatalf("Configure URL validation=%v", err)
 	}
 }
 
 func TestCloudflareClientDeferredValidationAndWorkdirDefault(t *testing.T) {
-	cfg := Config{ServerType: "other", ServerTypeExplicit: true}
-	if _, err := newCloudflareClient(cfg, Runtime{HTTP: &http.Client{}}); err == nil || err.Error() != "cloudflare requires --cloudflare-url or CRABBOX_CLOUDFLARE_RUNNER_URL" {
+	cfg := core.Config{ServerType: "other", ServerTypeExplicit: true}
+	if _, err := newCloudflareClient(cfg, core.Runtime{HTTP: &http.Client{}}); err == nil || err.Error() != "cloudflare requires --cloudflare-url or CRABBOX_CLOUDFLARE_RUNNER_URL" {
 		t.Fatalf("URL-first=%v", err)
 	}
 	cfg.Cloudflare.APIURL = "relative"
-	if _, err := newCloudflareClient(cfg, Runtime{HTTP: &http.Client{}}); err == nil || err.Error() != "cloudflare requires CRABBOX_CLOUDFLARE_RUNNER_TOKEN or user-level config" {
+	if _, err := newCloudflareClient(cfg, core.Runtime{HTTP: &http.Client{}}); err == nil || err.Error() != "cloudflare requires CRABBOX_CLOUDFLARE_RUNNER_TOKEN or user-level config" {
 		t.Fatalf("token second=%v", err)
 	}
 	cfg.Cloudflare.Token = "inert"
-	if _, err := newCloudflareClient(cfg, Runtime{HTTP: &http.Client{}}); err == nil || !strings.Contains(err.Error(), "--type must be one of") {
+	if _, err := newCloudflareClient(cfg, core.Runtime{HTTP: &http.Client{}}); err == nil || !strings.Contains(err.Error(), "--type must be one of") {
 		t.Fatalf("type before URL syntax=%v", err)
 	}
 	cfg.ServerType = "standard-2"
-	if _, err := newCloudflareClient(cfg, Runtime{HTTP: &http.Client{}}); err == nil || err.Error() != `cloudflare url "relative" is invalid` {
+	if _, err := newCloudflareClient(cfg, core.Runtime{HTTP: &http.Client{}}); err == nil || err.Error() != `cloudflare url "relative" is invalid` {
 		t.Fatalf("URL syntax=%v", err)
 	}
 	cfg.Cloudflare.APIURL = " https://example.invalid/base/ "
-	client, err := newCloudflareClient(cfg, Runtime{HTTP: &http.Client{}})
+	client, err := newCloudflareClient(cfg, core.Runtime{HTTP: &http.Client{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestCloudflareClientDeferredValidationAndWorkdirDefault(t *testing.T) {
 }
 
 func TestCloudflareFlagsApply(t *testing.T) {
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	cfg.Cloudflare.Token = "configured-token"
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	values := RegisterCloudflareProviderFlags(fs, cfg)
@@ -229,10 +229,10 @@ func TestCloudflareFlagsApply(t *testing.T) {
 }
 
 func TestCloudflareClientNormalizesBaseURL(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Cloudflare.APIURL = " https://runner.example.com/base/ "
 	cfg.Cloudflare.Token = "token"
-	client, err := newCloudflareClient(cfg, Runtime{})
+	client, err := newCloudflareClient(cfg, core.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,10 +242,10 @@ func TestCloudflareClientNormalizesBaseURL(t *testing.T) {
 }
 
 func TestCloudflareClientUsesBoundedDefaultTransport(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Cloudflare.APIURL = "http://127.0.0.1:8787"
 	cfg.Cloudflare.Token = "token"
-	client, err := newCloudflareClient(cfg, Runtime{})
+	client, err := newCloudflareClient(cfg, core.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,10 +279,10 @@ func TestNewCloudflareClientRejectsUnsupportedDefaultTransport(t *testing.T) {
 	recorder := &unusedDefaultRoundTripper{}
 	http.DefaultTransport = recorder
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Cloudflare.APIURL = "http://127.0.0.1:8787"
 	cfg.Cloudflare.Token = "token"
-	client, err := newCloudflareClient(cfg, Runtime{})
+	client, err := newCloudflareClient(cfg, core.Runtime{})
 	if client != nil || err == nil || !strings.Contains(err.Error(), "non-nil *http.Transport") {
 		t.Fatalf("client=%#v err=%v, want transport setup error", client, err)
 	}
@@ -296,11 +296,11 @@ func TestNewCloudflareClientAcceptsExplicitClientWithUnsupportedDefault(t *testi
 	t.Cleanup(func() { http.DefaultTransport = original })
 	http.DefaultTransport = &unusedDefaultRoundTripper{}
 	injected := &http.Client{Transport: &unusedDefaultRoundTripper{}}
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Cloudflare.APIURL = "http://127.0.0.1:8787"
 	cfg.Cloudflare.Token = "token"
 
-	client, err := newCloudflareClient(cfg, Runtime{HTTP: injected})
+	client, err := newCloudflareClient(cfg, core.Runtime{HTTP: injected})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,10 +323,10 @@ func TestCloudflareClientRejectsCrossOriginExecRedirectBeforeReplay(t *testing.T
 			}))
 			defer runner.Close()
 
-			cfg := Config{}
+			cfg := core.Config{}
 			cfg.Cloudflare.APIURL = runner.URL
 			cfg.Cloudflare.Token = "token"
-			client, err := newCloudflareClient(cfg, Runtime{HTTP: runner.Client()})
+			client, err := newCloudflareClient(cfg, core.Runtime{HTTP: runner.Client()})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -356,10 +356,10 @@ func TestCloudflareClientRejectsCrossOriginUploadRedirect(t *testing.T) {
 	}))
 	defer runner.Close()
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Cloudflare.APIURL = runner.URL
 	cfg.Cloudflare.Token = "token"
-	client, err := newCloudflareClient(cfg, Runtime{HTTP: runner.Client()})
+	client, err := newCloudflareClient(cfg, core.Runtime{HTTP: runner.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,10 +399,10 @@ func TestCloudflareClientAllowsSameOriginRedirectAndPreservesCallerPolicy(t *tes
 		return nil
 	}
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Cloudflare.APIURL = runner.URL
 	cfg.Cloudflare.Token = "token"
-	client, err := newCloudflareClient(cfg, Runtime{HTTP: source})
+	client, err := newCloudflareClient(cfg, core.Runtime{HTTP: source})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,10 +425,10 @@ func TestCloudflareClientRejectsURLQueryAndFragment(t *testing.T) {
 		"https://runner.example.com/#sandbox",
 	} {
 		t.Run(rawURL, func(t *testing.T) {
-			cfg := Config{}
+			cfg := core.Config{}
 			cfg.Cloudflare.APIURL = rawURL
 			cfg.Cloudflare.Token = "token"
-			_, err := newCloudflareClient(cfg, Runtime{})
+			_, err := newCloudflareClient(cfg, core.Runtime{})
 			if err == nil {
 				t.Fatal("newCloudflareClient accepted URL query or fragment")
 			}
@@ -445,10 +445,10 @@ func TestCloudflareClientRejectsURLUserinfoWithoutLeakingIt(t *testing.T) {
 		"http://secret-token@runner.example.com",
 	} {
 		t.Run(rawURL, func(t *testing.T) {
-			cfg := Config{}
+			cfg := core.Config{}
 			cfg.Cloudflare.APIURL = rawURL
 			cfg.Cloudflare.Token = "token"
-			_, err := newCloudflareClient(cfg, Runtime{})
+			_, err := newCloudflareClient(cfg, core.Runtime{})
 			if err == nil {
 				t.Fatal("newCloudflareClient accepted URL userinfo")
 			}
@@ -479,12 +479,12 @@ func TestCloudflareDoctorChecksRunnerAuth(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{Provider: providerName, Class: "beast"}
+	cfg := core.Config{Provider: providerName, Class: "beast"}
 	cfg.Cloudflare.APIURL = server.URL
 	cfg.Cloudflare.Token = "token"
 	cfg.ServerType = cloudflareContainerInstanceTypeForClass(cfg.Class)
-	backend := NewCloudflareBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*cloudflareBackend)
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	backend := NewCloudflareBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*cloudflareBackend)
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -534,10 +534,10 @@ func TestCloudflareClientRedactsStreamError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Cloudflare.APIURL = server.URL
 	cfg.Cloudflare.Token = token
-	client, err := newCloudflareClient(cfg, Runtime{HTTP: server.Client()})
+	client, err := newCloudflareClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,15 +566,15 @@ func TestCloudflareDoctorTimesOutStalledRunnerReadiness(t *testing.T) {
 		cloudflareDoctorTimeout = oldTimeout
 	})
 
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	cfg.Cloudflare.APIURL = server.URL
 	cfg.Cloudflare.Token = "token"
-	backend := NewCloudflareBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*cloudflareBackend)
+	backend := NewCloudflareBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*cloudflareBackend)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	started := time.Now()
-	_, err := backend.Doctor(ctx, DoctorRequest{})
+	_, err := backend.Doctor(ctx, core.DoctorRequest{})
 	elapsed := time.Since(started)
 	if err == nil {
 		t.Fatal("doctor succeeded against stalled runner")
@@ -594,12 +594,12 @@ func TestCloudflareDoctorRejectsInvalidReadinessPayload(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	cfg.Cloudflare.APIURL = server.URL
 	cfg.Cloudflare.Token = "token"
-	backend := NewCloudflareBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*cloudflareBackend)
+	backend := NewCloudflareBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*cloudflareBackend)
 	err := func() error {
-		_, err := backend.Doctor(context.Background(), DoctorRequest{})
+		_, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 		return err
 	}()
 	if err == nil || !strings.Contains(err.Error(), "readiness response is invalid") {
@@ -613,12 +613,12 @@ func TestCloudflareDoctorRejectsWrongRunnerPath(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	cfg.Cloudflare.APIURL = server.URL + "/wrong"
 	cfg.Cloudflare.Token = "token"
-	backend := NewCloudflareBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*cloudflareBackend)
+	backend := NewCloudflareBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*cloudflareBackend)
 	err := func() error {
-		_, err := backend.Doctor(context.Background(), DoctorRequest{})
+		_, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 		return err
 	}()
 	if err == nil || !cloudflareNotFoundError(err) {
@@ -632,12 +632,12 @@ func TestCloudflareDoctorRejectsUnauthorizedRunner(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	cfg.Cloudflare.APIURL = server.URL
 	cfg.Cloudflare.Token = "wrong"
-	backend := NewCloudflareBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*cloudflareBackend)
+	backend := NewCloudflareBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*cloudflareBackend)
 	err := func() error {
-		_, err := backend.Doctor(context.Background(), DoctorRequest{})
+		_, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 		return err
 	}()
 	if err == nil || !strings.Contains(err.Error(), "unauthorized") {
@@ -646,9 +646,9 @@ func TestCloudflareDoctorRejectsUnauthorizedRunner(t *testing.T) {
 }
 
 func TestCloudflareDoctorRejectsMissingRunnerConfig(t *testing.T) {
-	backend := NewCloudflareBackend(Provider{}.Spec(), Config{Provider: providerName}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*cloudflareBackend)
+	backend := NewCloudflareBackend(Provider{}.Spec(), core.Config{Provider: providerName}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*cloudflareBackend)
 	err := func() error {
-		_, err := backend.Doctor(context.Background(), DoctorRequest{})
+		_, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 		return err
 	}()
 	if err == nil || !strings.Contains(err.Error(), "requires --cloudflare-url") {
@@ -671,17 +671,17 @@ func TestCloudflareCreateSandboxSendsInstanceType(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{Provider: providerName, Class: "fast"}
+	cfg := core.Config{Provider: providerName, Class: "fast"}
 	cfg.ServerType = cloudflareContainerInstanceTypeForClass(cfg.Class)
 	cfg.Cloudflare.APIURL = server.URL
 	cfg.Cloudflare.Token = "token"
-	rt := Runtime{HTTP: server.Client()}
+	rt := core.Runtime{HTTP: server.Client()}
 	backend := NewCloudflareBackend(Provider{}.Spec(), cfg, rt).(*cloudflareBackend)
 	client, err := newCloudflareClient(cfg, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, _, err := backend.createSandbox(context.Background(), client, Repo{Name: "my-app", Root: t.TempDir()}, "")
+	created, _, err := backend.createSandbox(context.Background(), client, core.Repo{Name: "my-app", Root: t.TempDir()}, "")
 	leaseID, slug := created.LeaseID, created.Slug
 	if err != nil {
 		t.Fatal(err)
@@ -689,7 +689,7 @@ func TestCloudflareCreateSandboxSendsInstanceType(t *testing.T) {
 	if got.InstanceType != "standard-4" {
 		t.Fatalf("instance type = %q, want standard-4", got.InstanceType)
 	}
-	claim, ok, err := resolveLeaseClaimForProvider(slug, providerName)
+	claim, ok, err := core.ResolveLeaseClaimForProvider(slug, providerName)
 	if err != nil || !ok {
 		t.Fatalf("claim for %s ok=%t err=%v", slug, ok, err)
 	}
@@ -700,10 +700,10 @@ func TestCloudflareCreateSandboxSendsInstanceType(t *testing.T) {
 
 func TestCloudflareListRefreshChecksClaimState(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if err := claimLeaseForRepoProvider("cbx_live", "blue-lobster", providerName, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_live", "blue-lobster", providerName, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseForRepoProvider("cbx_missing", "red-lobster", providerName, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_missing", "red-lobster", providerName, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -718,12 +718,12 @@ func TestCloudflareListRefreshChecksClaimState(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Cloudflare.APIURL = server.URL
 	cfg.Cloudflare.Token = "token"
 	cfg.ServerType = "lite"
-	backend := cloudflareBackend{cfg: cfg, rt: Runtime{HTTP: server.Client(), Stderr: io.Discard}}
-	servers, err := backend.List(context.Background(), ListRequest{Refresh: true})
+	backend := cloudflareBackend{cfg: cfg, rt: core.Runtime{HTTP: server.Client(), Stderr: io.Discard}}
+	servers, err := backend.List(context.Background(), core.ListRequest{Refresh: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -752,11 +752,11 @@ func TestCloudflareStatusUsesClaimedInstanceType(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{Provider: providerName, ServerType: "standard-4"}
+	cfg := core.Config{Provider: providerName, ServerType: "standard-4"}
 	cfg.Cloudflare.APIURL = server.URL
 	cfg.Cloudflare.Token = "token"
-	backend := cloudflareBackend{cfg: cfg, rt: Runtime{HTTP: server.Client(), Stderr: io.Discard}}
-	view, err := backend.Status(context.Background(), StatusRequest{ID: "blue-lobster"})
+	backend := cloudflareBackend{cfg: cfg, rt: core.Runtime{HTTP: server.Client(), Stderr: io.Discard}}
+	view, err := backend.Status(context.Background(), core.StatusRequest{ID: "blue-lobster"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -792,18 +792,18 @@ func TestCloudflareArchiveGuardrailUsesFullSnapshotBeforeRemoteWork(t *testing.T
 			calls := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { calls++; http.Error(w, "unexpected remote work", 503) }))
 			defer server.Close()
-			cfg := Config{Provider: providerName, TTL: time.Hour}
+			cfg := core.Config{Provider: providerName, TTL: time.Hour}
 			cfg.Cloudflare.APIURL = server.URL
 			cfg.Cloudflare.Token = "synthetic-token"
 			cfg.Sync.FailBytes = 256
-			req := RunRequest{Repo: Repo{Root: root, Name: "fixture"}, SyncOnly: true}
+			req := core.RunRequest{Repo: core.Repo{Root: root, Name: "fixture"}, SyncOnly: true}
 			if reuse {
 				req.ID = "cbx_sync"
-				if err := claimLeaseForRepoProvider(req.ID, "sync", providerName, root, time.Hour, false); err != nil {
+				if err := core.ClaimLeaseForRepoProvider(req.ID, "sync", providerName, root, time.Hour, false); err != nil {
 					t.Fatal(err)
 				}
 			}
-			backend := cloudflareBackend{cfg: cfg, rt: Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+			backend := cloudflareBackend{cfg: cfg, rt: core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
 			_, err := backend.Run(context.Background(), req)
 			if err == nil || !strings.Contains(err.Error(), "sync candidate too large") || calls != 0 {
 				t.Fatalf("error=%v remote calls=%d", err, calls)
@@ -838,7 +838,7 @@ func TestCloudflareSyncPreservesWorkspaceUntilReplacement(t *testing.T) {
 			if err := os.WriteFile(old, []byte("original"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := claimLeaseForRepoProvider("cbx_sync", "sync", providerName, repoRoot, time.Hour, false); err != nil {
+			if err := core.ClaimLeaseForRepoProvider("cbx_sync", "sync", providerName, repoRoot, time.Hour, false); err != nil {
 				t.Fatal(err)
 			}
 			var remoteArchive string
@@ -914,13 +914,13 @@ func TestCloudflareSyncPreservesWorkspaceUntilReplacement(t *testing.T) {
 					_ = os.Remove(remoteArchive)
 				}
 			}()
-			cfg := Config{Provider: providerName, TTL: time.Hour}
+			cfg := core.Config{Provider: providerName, TTL: time.Hour}
 			cfg.Cloudflare.APIURL = server.URL
 			cfg.Cloudflare.Token = "synthetic-token"
 			cfg.Cloudflare.Workdir = workdir
 			cfg.Sync.Delete = mode != "merge"
-			backend := cloudflareBackend{cfg: cfg, rt: Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
-			result, err := backend.Run(context.Background(), RunRequest{ID: "cbx_sync", Repo: Repo{Root: repoRoot, Name: "fixture"}, SyncOnly: true})
+			backend := cloudflareBackend{cfg: cfg, rt: core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+			result, err := backend.Run(context.Background(), core.RunRequest{ID: "cbx_sync", Repo: core.Repo{Root: repoRoot, Name: "fixture"}, SyncOnly: true})
 			failed := mode == "upload rejected" || mode == "corrupt archive"
 			if (err != nil) != failed {
 				t.Fatalf("Run error=%v, failed=%t", err, failed)
@@ -972,10 +972,10 @@ func TestCloudflareRemoteDiskCheckRejectsSmallContainer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Cloudflare.APIURL = server.URL
 	cfg.Cloudflare.Token = "token"
-	backend := cloudflareBackend{cfg: cfg, rt: Runtime{HTTP: server.Client(), Stderr: io.Discard}}
+	backend := cloudflareBackend{cfg: cfg, rt: core.Runtime{HTTP: server.Client(), Stderr: io.Discard}}
 	client, err := newCloudflareClient(cfg, backend.rt)
 	if err != nil {
 		t.Fatal(err)
@@ -993,7 +993,7 @@ func TestCloudflareRemoteDiskCheckRejectsSmallContainer(t *testing.T) {
 }
 
 func TestCloudflareAliasAcceptsResourceFlags(t *testing.T) {
-	cfg := Config{Provider: providerAlias, ServerType: cloudflareContainerInstanceTypeForClass("standard")}
+	cfg := core.Config{Provider: providerAlias, ServerType: cloudflareContainerInstanceTypeForClass("standard")}
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	_ = fs.String("class", "", "")
 	values := RegisterCloudflareProviderFlags(fs, cfg)
@@ -1009,7 +1009,7 @@ func TestCloudflareAliasAcceptsResourceFlags(t *testing.T) {
 }
 
 func TestCloudflareRejectsUnsupportedInstanceType(t *testing.T) {
-	cfg := Config{Provider: providerName, ServerType: "ccx63", ServerTypeExplicit: true}
+	cfg := core.Config{Provider: providerName, ServerType: "ccx63", ServerTypeExplicit: true}
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	values := RegisterCloudflareProviderFlags(fs, cfg)
 	if err := ApplyCloudflareProviderFlags(&cfg, fs, values); err == nil {
@@ -1033,10 +1033,10 @@ func TestCloudflareClientExecStream(t *testing.T) {
 	defer server.Close()
 
 	token = "test-token"
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Cloudflare.APIURL = server.URL
 	cfg.Cloudflare.Token = token
-	client, err := newCloudflareClient(cfg, Runtime{HTTP: server.Client()})
+	client, err := newCloudflareClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1091,10 +1091,10 @@ func TestCloudflareClientExecStreamPropagatesWriterErrors(t *testing.T) {
 			}))
 			defer server.Close()
 
-			cfg := Config{}
+			cfg := core.Config{}
 			cfg.Cloudflare.APIURL = server.URL
 			cfg.Cloudflare.Token = "test-token"
-			client, err := newCloudflareClient(cfg, Runtime{HTTP: server.Client()})
+			client, err := newCloudflareClient(cfg, core.Runtime{HTTP: server.Client()})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1114,7 +1114,7 @@ func (w cloudflareErrWriter) Write([]byte) (int, error) {
 
 func TestCloudflareRunReportsCommandErrorAsFailure(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if err := claimLeaseForRepoProvider("cbx_test", "test-run", providerName, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_test", "test-run", providerName, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	execCalls := 0
@@ -1134,11 +1134,11 @@ func TestCloudflareRunReportsCommandErrorAsFailure(t *testing.T) {
 	defer server.Close()
 
 	var stderr bytes.Buffer
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Cloudflare.APIURL = server.URL
 	cfg.Cloudflare.Token = "token"
-	backend := cloudflareBackend{cfg: cfg, rt: Runtime{HTTP: server.Client(), Stderr: &stderr, Stdout: io.Discard}}
-	_, err := backend.Run(context.Background(), RunRequest{
+	backend := cloudflareBackend{cfg: cfg, rt: core.Runtime{HTTP: server.Client(), Stderr: &stderr, Stdout: io.Discard}}
+	_, err := backend.Run(context.Background(), core.RunRequest{
 		ID:         "cbx_test",
 		NoSync:     true,
 		Command:    []string{"true"},
@@ -1186,14 +1186,14 @@ func TestCloudflareRunCleanupDestroyUsesBoundedContext(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	cfg.Cloudflare.APIURL = server.URL
 	cfg.Cloudflare.Token = "token"
 	var stderr bytes.Buffer
-	backend := cloudflareBackend{cfg: cfg, rt: Runtime{HTTP: server.Client(), Stderr: &stderr, Stdout: io.Discard}}
+	backend := cloudflareBackend{cfg: cfg, rt: core.Runtime{HTTP: server.Client(), Stderr: &stderr, Stdout: io.Discard}}
 	start := time.Now()
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "repo", Root: t.TempDir()},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Name: "repo", Root: t.TempDir()},
 		Command: []string{"true"},
 		NoSync:  true,
 	})
@@ -1217,7 +1217,7 @@ func TestCloudflareRunCleanupDestroyUsesBoundedContext(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("Run took %s, want bounded cleanup", elapsed)
 	}
-	if _, ok, err := resolveLeaseClaimForProvider(createdID, providerName); err != nil || !ok {
+	if _, ok, err := core.ResolveLeaseClaimForProvider(createdID, providerName); err != nil || !ok {
 		t.Fatalf("missing recovery claim: %v", err)
 	}
 }
@@ -1247,12 +1247,12 @@ func TestCloudflareRunKeepReturnsSessionHandle(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	cfg.Cloudflare.APIURL = server.URL
 	cfg.Cloudflare.Token = "token"
-	backend := cloudflareBackend{cfg: cfg, rt: Runtime{HTTP: server.Client(), Stderr: io.Discard, Stdout: io.Discard}}
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "repo", Root: t.TempDir()},
+	backend := cloudflareBackend{cfg: cfg, rt: core.Runtime{HTTP: server.Client(), Stderr: io.Discard, Stdout: io.Discard}}
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Name: "repo", Root: t.TempDir()},
 		Command: []string{"true"},
 		NoSync:  true,
 		Keep:    true,
@@ -1326,12 +1326,12 @@ func TestCloudflareRunKeepOnFailureRetainsSession(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	cfg.Cloudflare.APIURL = server.URL
 	cfg.Cloudflare.Token = "token"
-	backend := cloudflareBackend{cfg: cfg, rt: Runtime{HTTP: server.Client(), Stderr: io.Discard, Stdout: io.Discard}}
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:          Repo{Name: "repo", Root: t.TempDir()},
+	backend := cloudflareBackend{cfg: cfg, rt: core.Runtime{HTTP: server.Client(), Stderr: io.Discard, Stdout: io.Discard}}
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:          core.Repo{Name: "repo", Root: t.TempDir()},
 		Command:       []string{"false"},
 		NoSync:        true,
 		KeepOnFailure: true,
@@ -1374,10 +1374,10 @@ func TestCloudflareClientUploadSendsContentLength(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Cloudflare.APIURL = server.URL
 	cfg.Cloudflare.Token = "token"
-	client, err := newCloudflareClient(cfg, Runtime{HTTP: server.Client()})
+	client, err := newCloudflareClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1408,10 +1408,10 @@ func TestCloudflareClientRejectsPlainHTTPExceptLoopback(t *testing.T) {
 		{name: "remote http", apiURL: "http://runner.example.test", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := Config{}
+			cfg := core.Config{}
 			cfg.Cloudflare.APIURL = tc.apiURL
 			cfg.Cloudflare.Token = "token"
-			_, err := newCloudflareClient(cfg, Runtime{})
+			_, err := newCloudflareClient(cfg, core.Runtime{})
 			if tc.wantErr && err == nil {
 				t.Fatal("expected URL validation error")
 			}
@@ -1467,7 +1467,7 @@ func TestCloudflareUnclaimedIDNeverReachesRunner(t *testing.T) {
 		invoke func(*cloudflareBackend) error
 	}{
 		{name: "run reuse", invoke: func(backend *cloudflareBackend) error {
-			_, err := backend.Run(context.Background(), RunRequest{
+			_, err := backend.Run(context.Background(), core.RunRequest{
 				ID:      "raw-sandbox-id",
 				NoSync:  true,
 				Command: []string{"true"},
@@ -1475,11 +1475,11 @@ func TestCloudflareUnclaimedIDNeverReachesRunner(t *testing.T) {
 			return err
 		}},
 		{name: "status", invoke: func(backend *cloudflareBackend) error {
-			_, err := backend.Status(context.Background(), StatusRequest{ID: "raw-sandbox-id"})
+			_, err := backend.Status(context.Background(), core.StatusRequest{ID: "raw-sandbox-id"})
 			return err
 		}},
 		{name: "stop", invoke: func(backend *cloudflareBackend) error {
-			return backend.Stop(context.Background(), StopRequest{ID: "raw-sandbox-id"})
+			return backend.Stop(context.Background(), core.StopRequest{ID: "raw-sandbox-id"})
 		}},
 	}
 
@@ -1493,12 +1493,12 @@ func TestCloudflareUnclaimedIDNeverReachesRunner(t *testing.T) {
 				http.Error(w, "unexpected request", http.StatusInternalServerError)
 			}))
 			defer server.Close()
-			cfg := Config{Provider: providerName}
+			cfg := core.Config{Provider: providerName}
 			cfg.Cloudflare.APIURL = server.URL
 			cfg.Cloudflare.Token = "token"
 			backend := &cloudflareBackend{
 				cfg: cfg,
-				rt:  Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard},
+				rt:  core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard},
 			}
 
 			err := tt.invoke(backend)
@@ -1523,27 +1523,27 @@ func TestCloudflareStatusRetainsExpiredClaim(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := claimLeaseForRepoProvider("cbx_expired", "blue-lobster", providerName, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_expired", "blue-lobster", providerName, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	backend := cloudflareBackend{
-		cfg: Config{
+		cfg: core.Config{
 			Provider: providerName,
-			Cloudflare: CloudflareConfig{
+			Cloudflare: core.CloudflareConfig{
 				APIURL: server.URL,
 				Token:  "token",
 			},
 		},
-		rt: Runtime{HTTP: server.Client()},
+		rt: core.Runtime{HTTP: server.Client()},
 	}
-	view, err := backend.Status(context.Background(), StatusRequest{ID: "blue-lobster", Wait: true, WaitTimeout: time.Nanosecond})
+	view, err := backend.Status(context.Background(), core.StatusRequest{ID: "blue-lobster", Wait: true, WaitTimeout: time.Nanosecond})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if view.State != "expired" {
 		t.Fatalf("state = %q, want expired", view.State)
 	}
-	if _, ok, err := resolveLeaseClaimForProvider("blue-lobster", providerName); err != nil || !ok {
+	if _, ok, err := core.ResolveLeaseClaimForProvider("blue-lobster", providerName); err != nil || !ok {
 		t.Fatalf("claim resolved after expired status ok=%t err=%v", ok, err)
 	}
 }
@@ -1559,24 +1559,24 @@ func TestCloudflareStopPrunesMissingClaim(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := claimLeaseForRepoProvider("cbx_missing", "stale-claim", providerName, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_missing", "stale-claim", providerName, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	var stdout bytes.Buffer
 	backend := cloudflareBackend{
-		cfg: Config{
+		cfg: core.Config{
 			Provider: providerName,
-			Cloudflare: CloudflareConfig{
+			Cloudflare: core.CloudflareConfig{
 				APIURL: server.URL,
 				Token:  "token",
 			},
 		},
-		rt: Runtime{HTTP: server.Client(), Stdout: &stdout},
+		rt: core.Runtime{HTTP: server.Client(), Stdout: &stdout},
 	}
-	if err := backend.Stop(context.Background(), StopRequest{ID: "stale-claim"}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: "stale-claim"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := resolveLeaseClaimForProvider("stale-claim", providerName); err != nil || ok {
+	if _, ok, err := core.ResolveLeaseClaimForProvider("stale-claim", providerName); err != nil || ok {
 		t.Fatalf("claim resolved after stale stop ok=%t err=%v", ok, err)
 	}
 	if !strings.Contains(stdout.String(), "removed stale cloudflare claim cbx_missing reason=not-found") {
@@ -1605,10 +1605,10 @@ func TestCloudflareRemoteDiskCheckRejectsZeroOrUnknownAvailable(t *testing.T) {
 			}))
 			defer server.Close()
 
-			cfg := Config{}
+			cfg := core.Config{}
 			cfg.Cloudflare.APIURL = server.URL
 			cfg.Cloudflare.Token = "token"
-			backend := cloudflareBackend{cfg: cfg, rt: Runtime{HTTP: server.Client(), Stderr: io.Discard}}
+			backend := cloudflareBackend{cfg: cfg, rt: core.Runtime{HTTP: server.Client(), Stderr: io.Discard}}
 			client, err := newCloudflareClient(cfg, backend.rt)
 			if err != nil {
 				t.Fatal(err)
@@ -1636,30 +1636,30 @@ func TestCloudflareCleanupPrunesTerminalClaims(t *testing.T) {
 	defer server.Close()
 
 	repo := t.TempDir()
-	if err := claimLeaseForRepoProvider("cbx_expired", "blue-lobster", providerName, repo, time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_expired", "blue-lobster", providerName, repo, time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseForRepoProvider("cbx_running", "green-lobster", providerName, repo, time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_running", "green-lobster", providerName, repo, time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	var stdout bytes.Buffer
 	backend := cloudflareBackend{
-		cfg: Config{
+		cfg: core.Config{
 			Provider: providerName,
-			Cloudflare: CloudflareConfig{
+			Cloudflare: core.CloudflareConfig{
 				APIURL: server.URL,
 				Token:  "token",
 			},
 		},
-		rt: Runtime{HTTP: server.Client(), Stdout: &stdout},
+		rt: core.Runtime{HTTP: server.Client(), Stdout: &stdout},
 	}
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := resolveLeaseClaimForProvider("blue-lobster", providerName); err != nil || ok {
+	if _, ok, err := core.ResolveLeaseClaimForProvider("blue-lobster", providerName); err != nil || ok {
 		t.Fatalf("expired claim resolved after cleanup ok=%t err=%v", ok, err)
 	}
-	if _, ok, err := resolveLeaseClaimForProvider("green-lobster", providerName); err != nil || !ok {
+	if _, ok, err := core.ResolveLeaseClaimForProvider("green-lobster", providerName); err != nil || !ok {
 		t.Fatalf("running claim missing after cleanup ok=%t err=%v", ok, err)
 	}
 	if !bytes.Contains(stdout.Bytes(), []byte("removed=1 checked=2")) {
@@ -1695,20 +1695,20 @@ func TestCloudflareRunFinalizesAfterFailedCleanup(t *testing.T) {
 			}))
 			defer server.Close()
 			var stderr bytes.Buffer
-			backend := cloudflareBackend{cfg: Config{Cloudflare: CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: &stderr}}
-			result, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "repo", Root: t.TempDir()}, NoSync: true, Command: []string{"true"}, TimingJSON: true})
+			backend := cloudflareBackend{cfg: core.Config{Cloudflare: core.CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: &stderr}}
+			result, err := backend.Run(context.Background(), core.RunRequest{Repo: core.Repo{Name: "repo", Root: t.TempDir()}, NoSync: true, Command: []string{"true"}, TimingJSON: true})
 			wantExit, wantKind := commandExit, "command-exit"
 			if wantExit == 0 {
 				wantExit, wantKind = 1, string(core.RunErrorProvider)
 			}
-			var ee ExitError
+			var ee core.ExitError
 			if !errors.As(err, &ee) || ee.Code != wantExit || result.ExitCode != wantExit || result.Status != "failed" || string(result.ErrorKind) != wantKind {
 				t.Fatalf("result=%+v error=%v, want failed/%s/%d", result, err, wantKind, wantExit)
 			}
 			if deletes != 1 || result.Session == nil || !result.Session.Kept {
 				t.Fatalf("deletes=%d session=%+v", deletes, result.Session)
 			}
-			if _, ok, err := resolveLeaseClaimForProvider(leaseID, providerName); err != nil || !ok {
+			if _, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName); err != nil || !ok {
 				t.Fatalf("recovery claim missing: %v", err)
 			}
 			if strings.Count(stderr.String(), `"runStatus"`) != 1 || !strings.Contains(stderr.String(), fmt.Sprintf(`"exitCode":%d`, wantExit)) {
@@ -1721,7 +1721,7 @@ func TestCloudflareRunFinalizesAfterFailedCleanup(t *testing.T) {
 func TestCloudflareFreshPublicationDoesNotReclaimCompetingClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := t.TempDir()
-	var competing LeaseClaim
+	var competing core.LeaseClaim
 	deletes := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
@@ -1738,8 +1738,8 @@ func TestCloudflareFreshPublicationDoesNotReclaimCompetingClaim(t *testing.T) {
 		_, _ = fmt.Fprintf(w, `{"id":%q,"state":"running"}`, req.ID)
 	}))
 	defer server.Close()
-	backend := cloudflareBackend{cfg: Config{Cloudflare: CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
-	err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "repo", Root: repo}, Reclaim: true, Keep: true})
+	backend := cloudflareBackend{cfg: core.Config{Cloudflare: core.CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+	err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "repo", Root: repo}, Reclaim: true, Keep: true})
 	if err == nil || deletes != 0 {
 		t.Fatalf("warmup error=%v deletes=%d, want rejected without destructive rollback", err, deletes)
 	}
@@ -1770,8 +1770,8 @@ func TestCloudflareCleanupRequiresConfirmedAbsence(t *testing.T) {
 				_, _ = io.WriteString(w, `{"id":"cbx_recovery","state":"stopped"}`)
 			}))
 			defer server.Close()
-			backend := cloudflareBackend{cfg: Config{Cloudflare: CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
-			_ = backend.Cleanup(context.Background(), CleanupRequest{DryRun: probe == "dry-run"})
+			backend := cloudflareBackend{cfg: core.Config{Cloudflare: core.CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+			_ = backend.Cleanup(context.Background(), core.CleanupRequest{DryRun: probe == "dry-run"})
 			if err := core.VerifyLeaseClaimUnchanged(claim.LeaseID, claim); err != nil {
 				t.Fatalf("lost recovery claim: %v", err)
 			}
@@ -1814,7 +1814,7 @@ func TestCloudflareAdmissionRejectsStaleClaim(t *testing.T) {
 					}
 				}
 				if change == "remove" {
-					if _, ok, err := resolveLeaseClaimForProvider(captured.LeaseID, providerName); err != nil || ok {
+					if _, ok, err := core.ResolveLeaseClaimForProvider(captured.LeaseID, providerName); err != nil || ok {
 						t.Fatalf("retired claim resurrected: %v", err)
 					}
 				} else if err := core.VerifyLeaseClaimUnchanged(successor.LeaseID, successor); err != nil {
@@ -1830,7 +1830,7 @@ func TestCloudflareRunDoesNotDeleteSuccessorClaim(t *testing.T) {
 		t.Run(fmt.Sprint(commandExit), func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			var leaseID string
-			var successor LeaseClaim
+			var successor core.LeaseClaim
 			execCalls, deletes := 0, 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
@@ -1864,8 +1864,8 @@ func TestCloudflareRunDoesNotDeleteSuccessorClaim(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			backend := cloudflareBackend{cfg: Config{Cloudflare: CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
-			result, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "repo", Root: t.TempDir()}, NoSync: true, Command: []string{"true"}})
+			backend := cloudflareBackend{cfg: core.Config{Cloudflare: core.CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+			result, err := backend.Run(context.Background(), core.RunRequest{Repo: core.Repo{Name: "repo", Root: t.TempDir()}, NoSync: true, Command: []string{"true"}})
 			wantExit := commandExit
 			if wantExit == 0 {
 				wantExit = 1
@@ -1888,7 +1888,7 @@ func TestCloudflareCleanupDoesNotPruneSuccessor(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var successor LeaseClaim
+			var successor core.LeaseClaim
 			deletes := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == http.MethodDelete {
@@ -1909,8 +1909,8 @@ func TestCloudflareCleanupDoesNotPruneSuccessor(t *testing.T) {
 				_, _ = io.WriteString(w, `{"id":"cbx_successor","state":"stopped"}`)
 			}))
 			defer server.Close()
-			backend := cloudflareBackend{cfg: Config{Cloudflare: CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
-			if err := backend.Cleanup(context.Background(), CleanupRequest{}); err == nil {
+			backend := cloudflareBackend{cfg: core.Config{Cloudflare: core.CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+			if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err == nil {
 				t.Fatal("stale cleanup succeeded")
 			}
 			if deletes != 0 {
@@ -1924,13 +1924,13 @@ func TestCloudflareCleanupDoesNotPruneSuccessor(t *testing.T) {
 }
 
 func TestCloudflareFreshRunRequiresRecoveryOwnerAndCommand(t *testing.T) {
-	for _, req := range []RunRequest{{NoSync: true, Command: []string{"true"}}, {NoSync: true, Repo: Repo{Root: t.TempDir()}}, {ID: " ", NoSync: true, Repo: Repo{Root: t.TempDir()}, Command: []string{"true"}}} {
+	for _, req := range []core.RunRequest{{NoSync: true, Command: []string{"true"}}, {NoSync: true, Repo: core.Repo{Root: t.TempDir()}}, {ID: " ", NoSync: true, Repo: core.Repo{Root: t.TempDir()}, Command: []string{"true"}}} {
 		t.Run(fmt.Sprintf("root=%t", req.Repo.Root != ""), func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			requests := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests++; http.Error(w, "unexpected", 500) }))
 			defer server.Close()
-			backend := cloudflareBackend{cfg: Config{Cloudflare: CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+			backend := cloudflareBackend{cfg: core.Config{Cloudflare: core.CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
 			if _, err := backend.Run(context.Background(), req); err == nil {
 				t.Fatal("invalid run succeeded")
 			}
@@ -1957,7 +1957,7 @@ func TestCloudflareDestroyClaimFenceSpansNativeDelete(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	client, err := newCloudflareClient(Config{Cloudflare: CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, Runtime{HTTP: server.Client()})
+	client, err := newCloudflareClient(core.Config{Cloudflare: core.CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1967,7 +1967,7 @@ func TestCloudflareDestroyClaimFenceSpansNativeDelete(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	called := false
-	err = core.WithDurableLeaseClaimLockContext(ctx, claim.LeaseID, func(*LeaseClaim, bool, func() error) error { called = true; return nil })
+	err = core.WithDurableLeaseClaimLockContext(ctx, claim.LeaseID, func(*core.LeaseClaim, bool, func() error) error { called = true; return nil })
 	close(release)
 	if !errors.Is(err, context.DeadlineExceeded) || called {
 		t.Fatalf("claim writer entered DELETE fence: called=%t err=%v", called, err)
@@ -1975,7 +1975,7 @@ func TestCloudflareDestroyClaimFenceSpansNativeDelete(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := resolveLeaseClaimForProvider(claim.LeaseID, providerName); err != nil || ok {
+	if _, ok, err := core.ResolveLeaseClaimForProvider(claim.LeaseID, providerName); err != nil || ok {
 		t.Fatalf("cleanup did not remove exact claim: %v", err)
 	}
 }
@@ -1989,14 +1989,14 @@ func TestCloudflareCanceledDestroyFenceMakesNoRequest(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests++ }))
 	defer server.Close()
-	client, err := newCloudflareClient(Config{Cloudflare: CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, Runtime{HTTP: server.Client()})
+	client, err := newCloudflareClient(core.Config{Cloudflare: core.CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	entered, release := make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- core.WithDurableLeaseClaimLockContext(context.Background(), claim.LeaseID, func(*LeaseClaim, bool, func() error) error { close(entered); <-release; return nil })
+		done <- core.WithDurableLeaseClaimLockContext(context.Background(), claim.LeaseID, func(*core.LeaseClaim, bool, func() error) error { close(entered); <-release; return nil })
 	}()
 	<-entered
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
@@ -2043,12 +2043,12 @@ func TestCloudflareRunKeepOnPreparationFailure(t *testing.T) {
 				http.Error(w, "preparation unavailable", http.StatusServiceUnavailable)
 			}))
 			defer server.Close()
-			backend := cloudflareBackend{cfg: Config{Cloudflare: CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
-			result, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "repo", Root: repo}, NoSync: noSync, KeepOnFailure: true, Command: []string{"true"}})
+			backend := cloudflareBackend{cfg: core.Config{Cloudflare: core.CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+			result, err := backend.Run(context.Background(), core.RunRequest{Repo: core.Repo{Name: "repo", Root: repo}, NoSync: noSync, KeepOnFailure: true, Command: []string{"true"}})
 			if err == nil || result.Session == nil || !result.Session.Kept || deletes != 0 {
 				t.Fatalf("result=%+v error=%v deletes=%d", result, err, deletes)
 			}
-			if _, ok, err := resolveLeaseClaimForProvider(leaseID, providerName); err != nil || !ok {
+			if _, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName); err != nil || !ok {
 				t.Fatalf("recovery claim missing: %v", err)
 			}
 		})
@@ -2083,15 +2083,15 @@ func TestCloudflareRunCancellationSurvivesFailedCleanup(t *testing.T) {
 	}))
 	defer server.Close()
 	var stderr bytes.Buffer
-	backend := cloudflareBackend{cfg: Config{Cloudflare: CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: &stderr}}
-	result, err := backend.Run(ctx, RunRequest{Repo: Repo{Name: "repo", Root: t.TempDir()}, NoSync: true, Command: []string{"true"}, TimingJSON: true})
+	backend := cloudflareBackend{cfg: core.Config{Cloudflare: core.CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: &stderr}}
+	result, err := backend.Run(ctx, core.RunRequest{Repo: core.Repo{Name: "repo", Root: t.TempDir()}, NoSync: true, Command: []string{"true"}, TimingJSON: true})
 	if !errors.Is(err, context.Canceled) || result.Status != core.RunStatusCanceled || result.Session == nil || !result.Session.Kept || deletes != 1 {
 		t.Fatalf("result=%+v error=%v deletes=%d", result, err, deletes)
 	}
 	if !strings.Contains(stderr.String(), `"runStatus":"canceled"`) || strings.Count(stderr.String(), `"runStatus"`) != 1 {
 		t.Fatalf("timing=%s", stderr.String())
 	}
-	if _, ok, err := resolveLeaseClaimForProvider(leaseID, providerName); err != nil || !ok {
+	if _, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName); err != nil || !ok {
 		t.Fatalf("recovery claim missing: %v", err)
 	}
 }

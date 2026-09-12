@@ -57,22 +57,22 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 	return shared.ConfigureDoctor("vercel-sandbox", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }
 
-func NewBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+func NewBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = providerName
 	return &backend{spec: spec, cfg: cfg, rt: rt, newClient: newBridgeClient}
 }
 
 type backend struct {
-	spec            ProviderSpec
-	cfg             Config
-	rt              Runtime
+	spec            core.ProviderSpec
+	cfg             core.Config
+	rt              core.Runtime
 	resolvedProject string
 	resolvedTeam    string
 	legacyScopeBase string
-	newClient       func(Config, Runtime) (vercelSandboxClient, error)
+	newClient       func(core.Config, core.Runtime) (vercelSandboxClient, error)
 }
 
-func (b *backend) Spec() ProviderSpec { return b.spec }
+func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *backend) client() (vercelSandboxClient, error) {
 	if b.newClient != nil {

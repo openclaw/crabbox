@@ -92,24 +92,9 @@ type SealosDevboxConfigFlagValues struct {
 
 // RegisterSealosDevboxConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterSealosDevboxConfigFlags(fs *flag.FlagSet, defaults SealosDevboxConfig) SealosDevboxConfigFlagValues {
-	return SealosDevboxConfigFlagValues{
-		Kubectl:         fs.String("sealos-devbox-kubectl", defaults.Kubectl, "kubectl executable"),
-		Kubeconfig:      fs.String("sealos-devbox-kubeconfig", defaults.Kubeconfig, "Kubernetes kubeconfig path"),
-		Context:         fs.String("sealos-devbox-context", defaults.Context, "Kubernetes context"),
-		Namespace:       fs.String("sealos-devbox-namespace", defaults.Namespace, "Kubernetes namespace"),
-		Image:           fs.String("sealos-devbox-image", defaults.Image, "Sealos DevBox image"),
-		TemplateID:      fs.String("sealos-devbox-template-id", defaults.TemplateID, "Sealos DevBox template ID"),
-		CPU:             fs.String("sealos-devbox-cpu", defaults.CPU, "Sealos DevBox CPU request"),
-		Memory:          fs.String("sealos-devbox-memory", defaults.Memory, "Sealos DevBox memory request"),
-		StorageLimit:    fs.String("sealos-devbox-storage-limit", defaults.StorageLimit, "Sealos DevBox storage limit"),
-		Network:         fs.String("sealos-devbox-network", defaults.Network, "Sealos DevBox network mode: SSHGate or NodePort"),
-		SSHGatewayHost:  fs.String("sealos-devbox-ssh-gateway-host", defaults.SSHGatewayHost, "Sealos SSHGate host"),
-		SSHGatewayPort:  fs.String("sealos-devbox-ssh-gateway-port", defaults.SSHGatewayPort, "Sealos SSHGate port"),
-		SSHUser:         fs.String("sealos-devbox-ssh-user", defaults.SSHUser, "DevBox SSH user"),
-		WorkRoot:        fs.String("sealos-devbox-work-root", defaults.WorkRoot, "DevBox Crabbox work root"),
-		NodeHost:        fs.String("sealos-devbox-node-host", defaults.NodeHost, "Node host for NodePort mode"),
-		DeleteOnRelease: fs.Bool("sealos-devbox-delete-on-release", defaults.DeleteOnRelease, "delete the DevBox on release instead of retaining it"),
-	}
+	var values SealosDevboxConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // SealosDevboxConfigVisitedFlags records raw flag visits, independently of application.

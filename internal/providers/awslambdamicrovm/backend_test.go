@@ -155,7 +155,7 @@ func TestRunSyncsExecutesAndTerminatesOneShot(t *testing.T) {
 	runner := &fakeRunner{}
 	var stdout bytes.Buffer
 	b := testBackend(control, runner, &stdout)
-	result, err := b.Run(context.Background(), RunRequest{Repo: Repo{Root: repo, Name: "my-app"}, Command: []string{"printf", "runner-ok"}})
+	result, err := b.Run(context.Background(), core.RunRequest{Repo: core.Repo{Root: repo, Name: "my-app"}, Command: []string{"printf", "runner-ok"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,8 +180,8 @@ func TestRunRejectsOversizedWorkspaceBeforeProviderCalls(t *testing.T) {
 	b := testBackend(control, runner, io.Discard)
 	b.cfg.Sync.FailBytes = 1
 
-	_, err := b.Run(context.Background(), RunRequest{
-		Repo: Repo{Root: testRepo(t), Name: "my-app"}, Command: []string{"true"},
+	_, err := b.Run(context.Background(), core.RunRequest{
+		Repo: core.Repo{Root: testRepo(t), Name: "my-app"}, Command: []string{"true"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "sync candidate too large:") || !strings.Contains(err.Error(), "limit 1 B") {
 		t.Fatalf("err=%v", err)
@@ -199,8 +199,8 @@ func TestRunCleansPreparedArchiveWhenResourceCreationFails(t *testing.T) {
 	control := &fakeControlPlane{runErr: errors.New("creation denied")}
 	b := testBackend(control, &fakeRunner{}, io.Discard)
 
-	_, err := b.Run(context.Background(), RunRequest{
-		Repo: Repo{Root: repo, Name: "my-app"}, Command: []string{"true"},
+	_, err := b.Run(context.Background(), core.RunRequest{
+		Repo: core.Repo{Root: repo, Name: "my-app"}, Command: []string{"true"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "creation denied") {
 		t.Fatalf("err=%v", err)
@@ -219,20 +219,20 @@ func TestRetainedLifecyclePauseResumeStop(t *testing.T) {
 	control := &fakeControlPlane{}
 	runner := &fakeRunner{}
 	b := testBackend(control, runner, io.Discard)
-	result, err := b.Run(context.Background(), RunRequest{Repo: Repo{Root: testRepo(t), Name: "my-app"}, Command: []string{"true"}, Keep: true})
+	result, err := b.Run(context.Background(), core.RunRequest{Repo: core.Repo{Root: testRepo(t), Name: "my-app"}, Command: []string{"true"}, Keep: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Session == nil || !result.Session.Kept {
 		t.Fatalf("session=%#v", result.Session)
 	}
-	if err := b.Pause(context.Background(), PauseRequest{ID: result.LeaseID}); err != nil {
+	if err := b.Pause(context.Background(), core.PauseRequest{ID: result.LeaseID}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Resume(context.Background(), ResumeRequest{ID: result.LeaseID}); err != nil {
+	if err := b.Resume(context.Background(), core.ResumeRequest{ID: result.LeaseID}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Stop(context.Background(), StopRequest{ID: result.LeaseID}); err != nil {
+	if err := b.Stop(context.Background(), core.StopRequest{ID: result.LeaseID}); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"suspend:mvm-test", "resume:mvm-test", "terminate:mvm-test"}
@@ -251,22 +251,22 @@ func TestImageRotationKeepsOldLeaseManageableButBlocksReuse(t *testing.T) {
 	control := &fakeControlPlane{}
 	runner := &fakeRunner{}
 	b := testBackend(control, runner, io.Discard)
-	result, err := b.Run(context.Background(), RunRequest{Repo: Repo{Root: testRepo(t), Name: "my-app"}, Command: []string{"true"}, Keep: true})
+	result, err := b.Run(context.Background(), core.RunRequest{Repo: core.Repo{Root: testRepo(t), Name: "my-app"}, Command: []string{"true"}, Keep: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	b.cfg.AWSLambdaMicroVM.Image = "arn:aws:lambda:eu-west-1:123456789012:microvm-image:new-runner"
-	if _, err := b.Status(context.Background(), StatusRequest{ID: result.LeaseID}); err != nil {
+	if _, err := b.Status(context.Background(), core.StatusRequest{ID: result.LeaseID}); err != nil {
 		t.Fatalf("status after image rotation: %v", err)
 	}
-	servers, err := b.List(context.Background(), ListRequest{})
+	servers, err := b.List(context.Background(), core.ListRequest{})
 	if err != nil || len(servers) != 1 {
 		t.Fatalf("list after image rotation: servers=%#v err=%v", servers, err)
 	}
-	if _, err := b.Run(context.Background(), RunRequest{Repo: Repo{Root: "/repo", Name: "my-app"}, ID: result.LeaseID, Command: []string{"true"}, NoSync: true}); err == nil || !strings.Contains(err.Error(), "image identity mismatch") {
+	if _, err := b.Run(context.Background(), core.RunRequest{Repo: core.Repo{Root: "/repo", Name: "my-app"}, ID: result.LeaseID, Command: []string{"true"}, NoSync: true}); err == nil || !strings.Contains(err.Error(), "image identity mismatch") {
 		t.Fatalf("reuse after image rotation err=%v", err)
 	}
-	if err := b.Stop(context.Background(), StopRequest{ID: result.LeaseID}); err != nil {
+	if err := b.Stop(context.Background(), core.StopRequest{ID: result.LeaseID}); err != nil {
 		t.Fatalf("stop after image rotation: %v", err)
 	}
 }
@@ -276,7 +276,7 @@ func TestNoSyncWorkspaceFailureStopsBeforeCommand(t *testing.T) {
 	control := &fakeControlPlane{}
 	runner := &fakeRunner{exitCode: 9}
 	b := testBackend(control, runner, io.Discard)
-	result, err := b.Run(context.Background(), RunRequest{Repo: Repo{Root: testRepo(t), Name: "my-app"}, Command: []string{"must-not-run"}, NoSync: true})
+	result, err := b.Run(context.Background(), core.RunRequest{Repo: core.Repo{Root: testRepo(t), Name: "my-app"}, Command: []string{"must-not-run"}, NoSync: true})
 	if err == nil || result.ExitCode != 9 || result.ErrorKind != core.RunErrorProvider {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
@@ -295,7 +295,7 @@ func TestCreateRollsBackWhenRunnerIsUnhealthy(t *testing.T) {
 	b := testBackend(control, runner, io.Discard)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := b.Warmup(ctx, WarmupRequest{Repo: Repo{Root: "/repo", Name: "my-app"}, Keep: true}); err == nil {
+	if err := b.Warmup(ctx, core.WarmupRequest{Repo: core.Repo{Root: "/repo", Name: "my-app"}, Keep: true}); err == nil {
 		t.Fatal("unhealthy runner unexpectedly became ready")
 	}
 	if !slices.Contains(control.calls, "terminate:mvm-test") {
@@ -314,7 +314,7 @@ func TestCreateRollbackFailurePersistsExactRecoveryClaim(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := b.Warmup(ctx, WarmupRequest{Repo: Repo{Root: "/repo", Name: "my-app"}, Keep: true})
+	err := b.Warmup(ctx, core.WarmupRequest{Repo: core.Repo{Root: "/repo", Name: "my-app"}, Keep: true})
 	if !errors.Is(err, context.Canceled) || !errors.Is(err, terminateErr) {
 		t.Fatalf("Warmup err=%v, want joined cancellation and termination failure", err)
 	}
@@ -327,7 +327,7 @@ func TestCreateRollbackFailurePersistsExactRecoveryClaim(t *testing.T) {
 	if !control.terminateDeadline || control.terminateContextErr != nil {
 		t.Fatalf("rollback context deadline=%t err=%v", control.terminateDeadline, control.terminateContextErr)
 	}
-	claims, err := listLeaseClaims()
+	claims, err := core.ListLeaseClaims()
 	if err != nil || len(claims) != 1 {
 		t.Fatalf("claims=%#v err=%v, want one recovery claim", claims, err)
 	}
@@ -336,7 +336,7 @@ func TestCreateRollbackFailurePersistsExactRecoveryClaim(t *testing.T) {
 		t.Fatalf("recovery claim=%#v", claim)
 	}
 	control.terminateErr = nil
-	if err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID}); err != nil {
+	if err := b.Stop(context.Background(), core.StopRequest{ID: claim.LeaseID}); err != nil {
 		t.Fatalf("recovery stop: %v", err)
 	}
 	if _, ok, err := resolveLeaseClaim(claim.LeaseID); err != nil || ok {
@@ -356,7 +356,7 @@ func TestCreateRollbackFailureReportsRecoveryClaimPersistenceFailure(t *testing.
 	var stderr bytes.Buffer
 	b.rt.Stderr = &stderr
 
-	err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: "/repo", Name: "my-app"}, Keep: true})
+	err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: "/repo", Name: "my-app"}, Keep: true})
 	if !errors.Is(err, terminateErr) || !strings.Contains(err.Error(), "mvm-test") || !strings.Contains(err.Error(), "could not be persisted") {
 		t.Fatalf("Warmup err=%v, want termination and recovery persistence failures", err)
 	}
@@ -375,7 +375,7 @@ func TestWarmupWarnsWhenKeepIsFalse(t *testing.T) {
 	b := testBackend(control, runner, io.Discard)
 	var stderr bytes.Buffer
 	b.rt.Stderr = &stderr
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: "/repo", Name: "my-app"}}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: "/repo", Name: "my-app"}}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(stderr.String(), "warmup keeps the MicroVM until explicit stop") {
@@ -782,7 +782,7 @@ func TestProviderFlagsAndEndpointValidation(t *testing.T) {
 func TestProviderConfigFlagBindings(t *testing.T) {
 	const connector = "arn:aws:lambda:eu-west-1:aws:network-connector:synthetic"
 	const role = "arn:aws:iam::123456789012:role/Synthetic"
-	newConfig := func() Config {
+	newConfig := func() core.Config {
 		cfg := core.BaseConfig()
 		cfg.AWSRegion = "eu-west-1"
 		cfg.AWSLambdaMicroVM = core.AWSLambdaMicroVMConfig{
@@ -922,11 +922,11 @@ func testBackend(control *fakeControlPlane, runner *fakeRunner, stdout io.Writer
 	return &backend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt:   Runtime{Stdout: stdout, Stderr: io.Discard},
-		newControl: func(context.Context, Config) (controlPlane, error) {
+		rt:   core.Runtime{Stdout: stdout, Stderr: io.Discard},
+		newControl: func(context.Context, core.Config) (controlPlane, error) {
 			return control, nil
 		},
-		newRunner: func(controlPlane, Config, Runtime) (runnerAPI, error) { return runner, nil },
+		newRunner: func(controlPlane, core.Config, core.Runtime) (runnerAPI, error) { return runner, nil },
 	}
 }
 
@@ -1016,7 +1016,7 @@ func TestRunFinalOutcomeIncludesCleanupAndTiming(t *testing.T) {
 			var stderr bytes.Buffer
 			b.rt.Stderr = &stderr
 			b.rt.Clock = clock
-			result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: testRepo(t), Name: "my-app"}, NoSync: true, KeepOnFailure: tc.keep, SyncOnly: tc.syncOnly, TimingJSON: true, Command: []string{"fixture-user"}})
+			result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: testRepo(t), Name: "my-app"}, NoSync: true, KeepOnFailure: tc.keep, SyncOnly: tc.syncOnly, TimingJSON: true, Command: []string{"fixture-user"}})
 			if err == nil || result.ExitCode != tc.wantCode || result.Status != core.RunStatusFailed || result.ErrorKind != tc.wantKind {
 				t.Errorf("result=%+v err=%v", result, err)
 			}
@@ -1076,7 +1076,7 @@ func TestRunTimingWriterCannotReplaceCommandFailure(t *testing.T) {
 			b := testBackend(control, runner, io.Discard)
 			writerErr := errors.New("synthetic timing writer failure")
 			b.rt.Stderr = &failingTimingWriter{err: writerErr}
-			result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: testRepo(t), Name: "my-app"}, NoSync: true, KeepOnFailure: true, TimingJSON: true, Command: []string{"fixture-user"}})
+			result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: testRepo(t), Name: "my-app"}, NoSync: true, KeepOnFailure: true, TimingJSON: true, Command: []string{"fixture-user"}})
 			wantCode := 7
 			if cause != nil {
 				wantCode = 1
@@ -1106,10 +1106,10 @@ func TestRunPreservesSuccessOnlyClaimRefresh(t *testing.T) {
 				control := &fakeControlPlane{}
 				runner := &fakeRunner{}
 				b := testBackend(control, runner, io.Discard)
-				repo := Repo{Root: testRepo(t), Name: "my-app"}
+				repo := core.Repo{Root: testRepo(t), Name: "my-app"}
 				id := ""
 				if reuse {
-					first, err := b.Run(t.Context(), RunRequest{Repo: repo, NoSync: true, Keep: true, Command: []string{"true"}})
+					first, err := b.Run(t.Context(), core.RunRequest{Repo: repo, NoSync: true, Keep: true, Command: []string{"true"}})
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -1119,7 +1119,7 @@ func TestRunPreservesSuccessOnlyClaimRefresh(t *testing.T) {
 				control.terminateErr = errors.New("synthetic termination refusal")
 				var before core.LeaseClaim
 				runner.onExec = func(_ context.Context, _ string, workdir string) (int, error) {
-					claims, err := listLeaseClaims()
+					claims, err := core.ListLeaseClaims()
 					if err != nil || len(claims) != 1 {
 						t.Fatalf("claims=%v err=%v", claims, err)
 					}
@@ -1135,7 +1135,7 @@ func TestRunPreservesSuccessOnlyClaimRefresh(t *testing.T) {
 					}
 					return 0, nil
 				}
-				result, _ := b.Run(t.Context(), RunRequest{Repo: repo, ID: id, NoSync: true, Keep: mode == "kept-success", KeepOnFailure: true, SyncOnly: mode == "sync-only", Command: []string{"fixture-user"}})
+				result, _ := b.Run(t.Context(), core.RunRequest{Repo: repo, ID: id, NoSync: true, Keep: mode == "kept-success", KeepOnFailure: true, SyncOnly: mode == "sync-only", Command: []string{"fixture-user"}})
 				after, ok, err := resolveLeaseClaim(result.LeaseID)
 				if err != nil || !ok {
 					t.Fatalf("claim ok=%t err=%v", ok, err)
@@ -1156,8 +1156,8 @@ func (f runWriteFunc) Write(p []byte) (int, error) { return f(p) }
 func TestReusedRunHoldsOperationLockThroughFinalReporting(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	b := testBackend(&fakeControlPlane{}, &fakeRunner{}, io.Discard)
-	repo := Repo{Root: testRepo(t), Name: "my-app"}
-	first, err := b.Run(t.Context(), RunRequest{Repo: repo, NoSync: true, Keep: true, Command: []string{"true"}})
+	repo := core.Repo{Root: testRepo(t), Name: "my-app"}
+	first, err := b.Run(t.Context(), core.RunRequest{Repo: repo, NoSync: true, Keep: true, Command: []string{"true"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1177,7 +1177,7 @@ func TestReusedRunHoldsOperationLockThroughFinalReporting(t *testing.T) {
 		}
 		return len(p), nil
 	})
-	if _, err := b.Run(t.Context(), RunRequest{Repo: repo, ID: first.LeaseID, NoSync: true, TimingJSON: true, Command: []string{"true"}}); err != nil {
+	if _, err := b.Run(t.Context(), core.RunRequest{Repo: repo, ID: first.LeaseID, NoSync: true, TimingJSON: true, Command: []string{"true"}}); err != nil {
 		t.Fatal(err)
 	}
 	if !observed {
@@ -1202,7 +1202,7 @@ func TestRunSuccessRefreshPreservesPublicClaimError(t *testing.T) {
 				if workdir == "/" {
 					return 0, nil
 				}
-				claims, err := listLeaseClaims()
+				claims, err := core.ListLeaseClaims()
 				if err != nil || len(claims) != 1 {
 					t.Fatalf("claims=%v err=%v", claims, err)
 				}
@@ -1215,7 +1215,7 @@ func TestRunSuccessRefreshPreservesPublicClaimError(t *testing.T) {
 				return 0, nil
 			}}
 			b := testBackend(control, runner, io.Discard)
-			result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: testRepo(t), Name: "my-app"}, NoSync: true, Keep: keep, KeepOnFailure: true, Command: []string{"fixture-user"}})
+			result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: testRepo(t), Name: "my-app"}, NoSync: true, Keep: keep, KeepOnFailure: true, Command: []string{"fixture-user"}})
 			var public core.ExitError
 			if !core.AsExitError(err, &public) || public.Code != 2 || !strings.Contains(public.Message, "parse claim") {
 				t.Errorf("public code=%d want=2 error=%v", public.Code, err)

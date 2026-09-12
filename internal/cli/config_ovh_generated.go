@@ -55,13 +55,9 @@ type OVHConfigFlagValues struct {
 
 // RegisterOVHConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterOVHConfigFlags(fs *flag.FlagSet, defaults OVHConfig) OVHConfigFlagValues {
-	return OVHConfigFlagValues{
-		Endpoint:  fs.String("ovh-endpoint", defaults.Endpoint, "OVHcloud API endpoint"),
-		ProjectID: fs.String("ovh-project-id", defaults.ProjectID, "OVHcloud Public Cloud project ID"),
-		Region:    fs.String("ovh-region", defaults.Region, "OVHcloud Public Cloud region"),
-		Image:     fs.String("ovh-image", defaults.Image, "OVHcloud Public Cloud image name or ID"),
-		Flavor:    fs.String("ovh-flavor", defaults.Flavor, "OVHcloud Public Cloud flavor name or ID"),
-	}
+	var values OVHConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // OVHConfigVisitedFlags records raw flag visits, independently of application.

@@ -8,7 +8,7 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func (b *backend) syncWorkspace(ctx context.Context, runner runnerAPI, vm microVM, req RunRequest, prepared ...*core.PreparedArchive) ([]timingPhase, time.Duration, error) {
+func (b *backend) syncWorkspace(ctx context.Context, runner runnerAPI, vm microVM, req core.RunRequest, prepared ...*core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
 	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
 		Config:              b.cfg,
 		Repo:                req.Repo,
@@ -30,7 +30,7 @@ func (b *backend) syncWorkspace(ctx context.Context, runner runnerAPI, vm microV
 				return err
 			}
 			if exitCode != 0 {
-				return exit(exitCode, "%s sync command exited %d", providerName, exitCode)
+				return core.Exit(exitCode, "%s sync command exited %d", providerName, exitCode)
 			}
 			return nil
 		},

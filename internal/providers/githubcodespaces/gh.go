@@ -7,16 +7,18 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 var githubTokenPattern = regexp.MustCompile(`(?i)(?:github_pat_[a-z0-9_]{12,}|gh[opur]_[a-z0-9_]{12,}|ghs_[a-z0-9._-]{36,})`)
 
 type ghRunner struct {
-	cfg GitHubCodespacesConfig
-	rt  Runtime
+	cfg core.GitHubCodespacesConfig
+	rt  core.Runtime
 }
 
-func newGHRunner(cfg GitHubCodespacesConfig, rt Runtime) ghRunner {
+func newGHRunner(cfg core.GitHubCodespacesConfig, rt core.Runtime) ghRunner {
 	return ghRunner{cfg: cfg, rt: rt}
 }
 
@@ -56,9 +58,9 @@ func (r ghRunner) codespaceSSHConfig(ctx context.Context, codespace string) (str
 	return result.Stdout, nil
 }
 
-func (r ghRunner) run(ctx context.Context, args ...string) (LocalCommandResult, error) {
+func (r ghRunner) run(ctx context.Context, args ...string) (core.LocalCommandResult, error) {
 	if r.rt.Exec == nil {
-		return LocalCommandResult{}, exit(2, "provider=github-codespaces requires local command runner")
+		return core.LocalCommandResult{}, core.Exit(2, "provider=github-codespaces requires local command runner")
 	}
 	name := strings.TrimSpace(r.cfg.GHPath)
 	if name == "" {
@@ -66,7 +68,7 @@ func (r ghRunner) run(ctx context.Context, args ...string) (LocalCommandResult, 
 	}
 	host, err := r.apiHostname()
 	if err != nil {
-		return LocalCommandResult{}, err
+		return core.LocalCommandResult{}, err
 	}
 	dotcomTokens := githubCodespacesUsesDotcomTokenEnv(r.cfg)
 	selectedToken := githubCodespacesTokenFromEnv(r.cfg)
@@ -88,7 +90,7 @@ func (r ghRunner) run(ctx context.Context, args ...string) (LocalCommandResult, 
 		}
 		env = append(env, name+"="+selectedToken)
 	}
-	result, err := r.rt.Exec.Run(ctx, LocalCommandRequest{Name: name, Args: args, Env: env})
+	result, err := r.rt.Exec.Run(ctx, core.LocalCommandRequest{Name: name, Args: args, Env: env})
 	if err != nil {
 		return result, fmt.Errorf("github-codespaces gh %s failed: %s", strings.Join(redactGHArgs(args), " "), redactSecretText(result.Stderr+" "+err.Error()))
 	}
@@ -120,12 +122,12 @@ func (r ghRunner) apiHostname() (string, error) {
 		}
 	}
 	if host == "" {
-		return "", exit(2, "github-codespaces API URL has no hostname")
+		return "", core.Exit(2, "github-codespaces API URL has no hostname")
 	}
 	return host, nil
 }
 
-func githubCodespacesUsesDotcomTokenEnv(cfg GitHubCodespacesConfig) bool {
+func githubCodespacesUsesDotcomTokenEnv(cfg core.GitHubCodespacesConfig) bool {
 	raw := strings.TrimSpace(cfg.APIURL)
 	if raw == "" {
 		raw = defaultAPIURL

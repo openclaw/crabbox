@@ -12,11 +12,11 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-func RegisterVercelSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any {
+func RegisterVercelSandboxProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return core.RegisterVercelSandboxConfigFlags(fs, defaults.VercelSandbox)
 }
 
-func ApplyVercelSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+func ApplyVercelSandboxProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if strings.EqualFold(strings.TrimSpace(cfg.Provider), providerName) {
 		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --vercel-sandbox-vcpus", "use --vercel-sandbox-runtime or --vercel-sandbox-vcpus"); err != nil {
 			return err
@@ -34,49 +34,49 @@ func ApplyVercelSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) 
 	return validateVercelSandboxConfig(*cfg)
 }
 
-func validateVercelSandboxConfig(cfg Config) error {
+func validateVercelSandboxConfig(cfg core.Config) error {
 	if _, err := vercelSandboxWorkdir(cfg); err != nil {
 		return err
 	}
 	if strings.TrimSpace(cfg.VercelSandbox.ProjectID) != "" &&
 		strings.TrimSpace(cfg.VercelSandbox.TeamID) == "" &&
 		strings.TrimSpace(cfg.VercelSandbox.Scope) == "" {
-		return exit(2, "vercel-sandbox projectId requires teamId or scope")
+		return core.Exit(2, "vercel-sandbox projectId requires teamId or scope")
 	}
 	switch strings.ToLower(strings.TrimSpace(cfg.VercelSandbox.Runtime)) {
 	case "", "node26", "node24", "node22", "python3.13":
 	default:
-		return exit(2, "vercel-sandbox runtime must be one of node26, node24, node22, python3.13")
+		return core.Exit(2, "vercel-sandbox runtime must be one of node26, node24, node22, python3.13")
 	}
 	if cfg.VercelSandbox.TimeoutSecs < 0 {
-		return exit(2, "vercel-sandbox timeoutSecs must be non-negative")
+		return core.Exit(2, "vercel-sandbox timeoutSecs must be non-negative")
 	}
 	if cfg.VercelSandbox.ExecTimeoutSecs < 0 {
-		return exit(2, "vercel-sandbox execTimeoutSecs must be non-negative")
+		return core.Exit(2, "vercel-sandbox execTimeoutSecs must be non-negative")
 	}
 	if cfg.VercelSandbox.VCPUs < 0 {
-		return exit(2, "vercel-sandbox vcpus must be positive when set")
+		return core.Exit(2, "vercel-sandbox vcpus must be positive when set")
 	}
 	if cfg.VercelSandbox.VCPUs > 0 && cfg.VercelSandbox.VCPUs < 0.25 {
-		return exit(2, "vercel-sandbox vcpus must be at least 0.25 when set")
+		return core.Exit(2, "vercel-sandbox vcpus must be at least 0.25 when set")
 	}
 	switch strings.ToLower(strings.TrimSpace(cfg.VercelSandbox.NetworkPolicy)) {
 	case "", "default", "public", "private", "restricted", "none":
 	default:
-		return exit(2, "vercel-sandbox networkPolicy must be default, public, private, restricted, or none")
+		return core.Exit(2, "vercel-sandbox networkPolicy must be default, public, private, restricted, or none")
 	}
 	if strings.EqualFold(strings.TrimSpace(cfg.VercelSandbox.NetworkPolicy), "none") &&
 		(len(cfg.VercelSandbox.NetworkAllow) > 0 || len(cfg.VercelSandbox.NetworkDeny) > 0) {
-		return exit(2, "vercel-sandbox networkPolicy none cannot be combined with networkAllow or networkDeny")
+		return core.Exit(2, "vercel-sandbox networkPolicy none cannot be combined with networkAllow or networkDeny")
 	}
 	for _, entry := range append([]string{}, cfg.VercelSandbox.NetworkAllow...) {
 		if err := validateNetworkEntry(entry); err != nil {
-			return exit(2, "vercel-sandbox networkAllow entry %q is invalid: %v", entry, err)
+			return core.Exit(2, "vercel-sandbox networkAllow entry %q is invalid: %v", entry, err)
 		}
 	}
 	for _, entry := range append([]string{}, cfg.VercelSandbox.NetworkDeny...) {
 		if err := validateNetworkEntry(entry); err != nil {
-			return exit(2, "vercel-sandbox networkDeny entry %q is invalid: %v", entry, err)
+			return core.Exit(2, "vercel-sandbox networkDeny entry %q is invalid: %v", entry, err)
 		}
 		value := strings.TrimSpace(entry)
 		if value == "" {
@@ -84,14 +84,14 @@ func validateVercelSandboxConfig(cfg Config) error {
 		}
 		if net.ParseIP(value) == nil {
 			if _, _, err := net.ParseCIDR(value); err != nil {
-				return exit(2, "vercel-sandbox networkDeny entry %q must be an IP address or CIDR; Vercel does not support domain deny rules", entry)
+				return core.Exit(2, "vercel-sandbox networkDeny entry %q must be an IP address or CIDR; Vercel does not support domain deny rules", entry)
 			}
 		}
 	}
 	exposedPorts := map[int]struct{}{}
 	for _, port := range cfg.VercelSandbox.Ports {
 		if err := validatePortSpec(port); err != nil {
-			return exit(2, "vercel-sandbox port %q is invalid: %v", port, err)
+			return core.Exit(2, "vercel-sandbox port %q is invalid: %v", port, err)
 		}
 		value := strings.TrimSpace(port)
 		if value == "" {
@@ -106,25 +106,25 @@ func validateVercelSandboxConfig(cfg Config) error {
 		for current := start; current <= end; current++ {
 			exposedPorts[current] = struct{}{}
 			if len(exposedPorts) > 15 {
-				return exit(2, "vercel-sandbox supports at most 15 unique exposed ports")
+				return core.Exit(2, "vercel-sandbox supports at most 15 unique exposed ports")
 			}
 		}
 	}
 	return nil
 }
 
-func vercelSandboxWorkdir(cfg Config) (string, error) {
+func vercelSandboxWorkdir(cfg core.Config) (string, error) {
 	workdir := strings.TrimSpace(cfg.VercelSandbox.Workdir)
 	if workdir == "" {
 		workdir = defaultWorkdir
 	}
 	if !path.IsAbs(workdir) {
-		return "", exit(2, "vercel-sandbox workdir must be absolute")
+		return "", core.Exit(2, "vercel-sandbox workdir must be absolute")
 	}
 	clean := path.Clean(workdir)
 	switch clean {
 	case "/", "/tmp", "/usr", "/var", "/home", "/vercel", "/vercel/sandbox":
-		return "", exit(2, "vercel-sandbox workdir %q is too broad; choose a dedicated subdirectory", clean)
+		return "", core.Exit(2, "vercel-sandbox workdir %q is too broad; choose a dedicated subdirectory", clean)
 	}
 	return clean, nil
 }

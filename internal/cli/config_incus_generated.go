@@ -96,26 +96,9 @@ type IncusConfigFlagValues struct {
 
 // RegisterIncusConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterIncusConfigFlags(fs *flag.FlagSet, defaults IncusConfig) IncusConfigFlagValues {
-	return IncusConfigFlagValues{
-		Remote:            fs.String("incus-remote", defaults.Remote, "Incus remote name from the local Incus client config"),
-		Project:           fs.String("incus-project", defaults.Project, "Incus project name"),
-		Address:           fs.String("incus-address", defaults.Address, "Incus API address override, for example https://host:8443"),
-		Socket:            fs.String("incus-socket", defaults.Socket, "Incus Unix socket path override"),
-		InstanceType:      fs.String("incus-instance-type", defaults.InstanceType, "Incus instance type: container or vm"),
-		Image:             fs.String("incus-image", defaults.Image, "Incus image alias or fingerprint"),
-		Profile:           fs.String("incus-profile", defaults.Profile, "optional Incus profile applied to Crabbox leases"),
-		User:              fs.String("incus-user", defaults.User, "SSH user inside Incus leases"),
-		WorkRoot:          fs.String("incus-work-root", defaults.WorkRoot, "remote Crabbox work root inside Incus leases"),
-		DeleteOnRelease:   fs.Bool("incus-delete-on-release", defaults.DeleteOnRelease, "delete the Incus instance on release"),
-		StartTimeout:      fs.String("incus-start-timeout", defaults.StartTimeout.String(), "Incus start timeout"),
-		LaunchPort:        fs.String("incus-launch-port", defaults.LaunchPort, "guest SSH port exposed by Incus cloud-init/bootstrap"),
-		ProxyListenHost:   fs.String("incus-proxy-listen-host", defaults.ProxyListenHost, "host address for optional Incus proxy device"),
-		ProxyListenPort:   fs.String("incus-proxy-listen-port", defaults.ProxyListenPort, "host TCP port for optional Incus proxy device"),
-		ProxyDevice:       fs.String("incus-proxy-device", defaults.ProxyDevice, "Incus proxy device name"),
-		TLSServerCert:     fs.String("incus-tls-server-cert", defaults.TLSServerCert, "trusted Incus server certificate path"),
-		InsecureTLS:       fs.Bool("incus-insecure-tls", defaults.InsecureTLS, "allow self-signed or untrusted Incus TLS certificates"),
-		RemoteImageServer: fs.String("incus-remote-image-server", defaults.RemoteImageServer, "remote image server for alias-based image resolution"),
-	}
+	var values IncusConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // IncusConfigVisitedFlags records raw flag visits, independently of application.

@@ -52,12 +52,9 @@ type CloudflareSandboxConfigFlagValues struct {
 
 // RegisterCloudflareSandboxConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterCloudflareSandboxConfigFlags(fs *flag.FlagSet, defaults CloudflareSandboxConfig) CloudflareSandboxConfigFlagValues {
-	return CloudflareSandboxConfigFlagValues{
-		BridgeURL:       fs.String("cloudflare-sandbox-url", defaults.BridgeURL, "Cloudflare Sandbox bridge URL"),
-		Workdir:         fs.String("cloudflare-sandbox-workdir", defaults.Workdir, "Absolute working directory inside the sandbox"),
-		ExecTimeoutSecs: fs.Int("cloudflare-sandbox-exec-timeout-secs", defaults.ExecTimeoutSecs, "command timeout in seconds (0 = bridge default)"),
-		ForgetMissing:   fs.Bool("cloudflare-sandbox-forget-missing", defaults.ForgetMissing, "remove the local claim when stop gets 404 (explicit stale-claim cleanup)"),
-	}
+	var values CloudflareSandboxConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.

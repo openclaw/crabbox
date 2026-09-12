@@ -66,16 +66,9 @@ type RunpodConfigFlagValues struct {
 
 // RegisterRunpodConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterRunpodConfigFlags(fs *flag.FlagSet, defaults RunpodConfig) RunpodConfigFlagValues {
-	return RunpodConfigFlagValues{
-		APIURL:     fs.String("runpod-url", defaults.APIURL, "RunPod REST API URL"),
-		CloudType:  fs.String("runpod-cloud-type", defaults.CloudType, "RunPod cloud type: SECURE or COMMUNITY"),
-		InstanceID: fs.String("runpod-instance-id", defaults.InstanceID, "RunPod GPU type ID or CPU flavor ID"),
-		Image:      fs.String("runpod-image", defaults.Image, "Docker image to deploy on the pod"),
-		TemplateID: fs.String("runpod-template-id", defaults.TemplateID, "Optional RunPod template ID"),
-		DiskGB:     fs.Int("runpod-disk-gb", defaults.DiskGB, "Container disk size in GB"),
-		User:       fs.String("runpod-user", defaults.User, "SSH user for runpod pods"),
-		WorkRoot:   fs.String("runpod-work-root", defaults.WorkRoot, "remote Crabbox work root on runpod pods"),
-	}
+	var values RunpodConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // RunpodConfigVisitedFlags records raw flag visits, independently of application.

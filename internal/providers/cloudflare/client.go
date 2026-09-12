@@ -68,37 +68,37 @@ var cloudflareCleanupTimeout = 15 * time.Second
 
 var cloudflareBearerPattern = regexp.MustCompile(`(?i)\bbearer[ \t]+[A-Za-z0-9._~+/=-]+`)
 
-func newCloudflareClient(cfg Config, rt Runtime) (*cloudflareClient, error) {
+func newCloudflareClient(cfg core.Config, rt core.Runtime) (*cloudflareClient, error) {
 	apiURL := strings.TrimSpace(cfg.Cloudflare.APIURL)
 	if apiURL == "" {
-		return nil, exit(2, "%s requires --cloudflare-url or CRABBOX_CLOUDFLARE_RUNNER_URL", providerName)
+		return nil, core.Exit(2, "%s requires --cloudflare-url or CRABBOX_CLOUDFLARE_RUNNER_URL", providerName)
 	}
 	token := strings.TrimSpace(cfg.Cloudflare.Token)
 	if token == "" {
-		return nil, exit(2, "%s requires CRABBOX_CLOUDFLARE_RUNNER_TOKEN or user-level config", providerName)
+		return nil, core.Exit(2, "%s requires CRABBOX_CLOUDFLARE_RUNNER_TOKEN or user-level config", providerName)
 	}
-	instanceType, ok := normalizeCloudflareContainerInstanceType(core.Blank(cfg.ServerType, cloudflareContainerInstanceTypeForClass(cfg.Class)))
+	instanceType, ok := core.NormalizeCloudflareContainerInstanceType(core.Blank(cfg.ServerType, cloudflareContainerInstanceTypeForClass(cfg.Class)))
 	if !ok {
 		if cfg.ServerTypeExplicit {
-			return nil, exit(2, "%s --type must be one of %s", providerName, strings.Join(cloudflareContainerInstanceTypes(), ", "))
+			return nil, core.Exit(2, "%s --type must be one of %s", providerName, strings.Join(core.CloudflareContainerInstanceTypes(), ", "))
 		}
 		instanceType = cloudflareContainerInstanceTypeForClass(cfg.Class)
 	}
 	parsed, err := url.Parse(apiURL)
 	if err != nil {
-		return nil, exit(2, "%s url %q is invalid", providerName, apiURL)
+		return nil, core.Exit(2, "%s url %q is invalid", providerName, apiURL)
 	}
 	if parsed.User != nil {
-		return nil, exit(2, "%s url must not include userinfo", providerName)
+		return nil, core.Exit(2, "%s url must not include userinfo", providerName)
 	}
 	if parsed.Scheme == "" || parsed.Host == "" {
-		return nil, exit(2, "%s url %q is invalid", providerName, apiURL)
+		return nil, core.Exit(2, "%s url %q is invalid", providerName, apiURL)
 	}
 	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
-		return nil, exit(2, "%s url %q must use https unless it targets localhost", providerName, apiURL)
+		return nil, core.Exit(2, "%s url %q must use https unless it targets localhost", providerName, apiURL)
 	}
 	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return nil, exit(2, "%s url %q must not include query or fragment components", providerName, apiURL)
+		return nil, core.Exit(2, "%s url %q must not include query or fragment components", providerName, apiURL)
 	}
 	baseURL := strings.TrimRight(parsed.String(), "/")
 	httpClient := rt.HTTP
@@ -117,7 +117,7 @@ func newCloudflareClient(cfg Config, rt Runtime) (*cloudflareClient, error) {
 }
 
 func (c *cloudflareClient) useInstanceType(instanceType string) {
-	if normalized, ok := normalizeCloudflareContainerInstanceType(instanceType); ok {
+	if normalized, ok := core.NormalizeCloudflareContainerInstanceType(instanceType); ok {
 		c.instanceType = normalized
 	}
 }

@@ -289,7 +289,7 @@ func TestCodespacesWorkRootFlagControlsDefaultDerivation(t *testing.T) {
 			if err := (Provider{}).ApplyConfigDefaults(&cfg); err != nil {
 				t.Fatal(err)
 			}
-			backend := newBackend(Provider{}.Spec(), cfg, Runtime{})
+			backend := newBackend(Provider{}.Spec(), cfg, core.Runtime{})
 			if got := backend.effectiveWorkRoot("example-org/my-app"); got != tt.want {
 				t.Fatalf("work root=%q want %q", got, tt.want)
 			}

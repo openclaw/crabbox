@@ -70,16 +70,9 @@ type MultipassConfigFlagValues struct {
 
 // RegisterMultipassConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterMultipassConfigFlags(fs *flag.FlagSet, defaults MultipassConfig) MultipassConfigFlagValues {
-	return MultipassConfigFlagValues{
-		CLIPath:       fs.String("multipass-cli", defaults.CLIPath, "Multipass CLI path"),
-		Image:         fs.String("multipass-image", defaults.Image, "Multipass Ubuntu image selector"),
-		User:          fs.String("multipass-user", defaults.User, "SSH user created inside Multipass leases"),
-		WorkRoot:      fs.String("multipass-work-root", defaults.WorkRoot, "remote Crabbox work root inside Multipass leases"),
-		CPUs:          fs.Int("multipass-cpus", defaults.CPUs, "CPU count for Multipass leases; 0 leaves Multipass default"),
-		Memory:        fs.String("multipass-memory", defaults.Memory, "memory size for Multipass leases, for example 8G"),
-		Disk:          fs.String("multipass-disk", defaults.Disk, "disk size for Multipass leases, for example 30G"),
-		LaunchTimeout: fs.String("multipass-launch-timeout", defaults.LaunchTimeout.String(), "Multipass launch timeout"),
-	}
+	var values MultipassConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // MultipassConfigVisitedFlags records raw flag visits, independently of application.

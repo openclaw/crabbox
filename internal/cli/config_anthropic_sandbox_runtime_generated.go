@@ -46,11 +46,9 @@ type AnthropicSRTConfigFlagValues struct {
 
 // RegisterAnthropicSRTConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterAnthropicSRTConfigFlags(fs *flag.FlagSet, defaults AnthropicSRTConfig) AnthropicSRTConfigFlagValues {
-	return AnthropicSRTConfigFlagValues{
-		CLIPath:  fs.String("anthropic-sandbox-runtime-cli", defaults.CLIPath, "path to the srt CLI binary"),
-		Settings: fs.String("anthropic-sandbox-runtime-settings", defaults.Settings, "path to an Anthropic Sandbox Runtime settings JSON file; empty uses srt defaults"),
-		Debug:    fs.Bool("anthropic-sandbox-runtime-debug", defaults.Debug, "pass --debug to the srt CLI"),
-	}
+	var values AnthropicSRTConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.

@@ -84,20 +84,9 @@ type KubeVirtConfigFlagValues struct {
 
 // RegisterKubeVirtConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterKubeVirtConfigFlags(fs *flag.FlagSet, defaults KubeVirtConfig) KubeVirtConfigFlagValues {
-	return KubeVirtConfigFlagValues{
-		Kubectl:         fs.String("kubevirt-kubectl", defaults.Kubectl, "kubectl executable"),
-		Virtctl:         fs.String("kubevirt-virtctl", defaults.Virtctl, "virtctl executable"),
-		Kubeconfig:      fs.String("kubevirt-kubeconfig", defaults.Kubeconfig, "Kubernetes kubeconfig path"),
-		Context:         fs.String("kubevirt-context", defaults.Context, "Kubernetes context"),
-		Namespace:       fs.String("kubevirt-namespace", defaults.Namespace, "Kubernetes namespace"),
-		Template:        fs.String("kubevirt-template", defaults.Template, "KubeVirt VirtualMachine manifest template"),
-		SSHUser:         fs.String("kubevirt-ssh-user", defaults.SSHUser, "guest SSH user"),
-		SSHKey:          fs.String("kubevirt-ssh-key", defaults.SSHKey, "guest SSH private key"),
-		SSHPublicKey:    fs.String("kubevirt-ssh-public-key", defaults.SSHPublicKey, "guest SSH public key inserted into the template"),
-		SSHPort:         fs.String("kubevirt-ssh-port", defaults.SSHPort, "guest SSH port"),
-		WorkRoot:        fs.String("kubevirt-work-root", defaults.WorkRoot, "guest Crabbox work root"),
-		DeleteOnRelease: fs.Bool("kubevirt-delete-on-release", defaults.DeleteOnRelease, "delete the VM on release instead of stopping it"),
-	}
+	var values KubeVirtConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // KubeVirtConfigVisitedFlags records raw flag visits, independently of application.

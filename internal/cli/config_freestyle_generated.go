@@ -50,12 +50,9 @@ type FreestyleConfigFlagValues struct {
 
 // RegisterFreestyleConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterFreestyleConfigFlags(fs *flag.FlagSet, defaults FreestyleConfig) FreestyleConfigFlagValues {
-	return FreestyleConfigFlagValues{
-		APIURL:   fs.String("freestyle-api-url", defaults.APIURL, "Freestyle API URL"),
-		Workdir:  fs.String("freestyle-workdir", defaults.Workdir, "Freestyle sandbox workdir"),
-		VCPUs:    fs.Int("freestyle-vcpus", defaults.VCPUs, "Freestyle sandbox vCPUs (power of two; omit for plan default)"),
-		MemoryGB: fs.Int("freestyle-memory-gb", defaults.MemoryGB, "Freestyle sandbox memory in GiB (power of two; omit for plan default)"),
-	}
+	var values FreestyleConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.

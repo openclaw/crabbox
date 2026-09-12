@@ -56,13 +56,9 @@ type LumeConfigFlagValues struct {
 
 // RegisterLumeConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterLumeConfigFlags(fs *flag.FlagSet, defaults LumeConfig) LumeConfigFlagValues {
-	return LumeConfigFlagValues{
-		CLIPath:  fs.String("lume-cli", defaults.CLIPath, "path to the Lume CLI"),
-		Base:     fs.String("lume-base", defaults.Base, "stopped Lume VM to clone for each lease"),
-		Storage:  fs.String("lume-storage", defaults.Storage, "optional Lume storage location"),
-		User:     fs.String("lume-user", defaults.User, "guest account prepared for SSH"),
-		WorkRoot: fs.String("lume-work-root", defaults.WorkRoot, "guest work root"),
-	}
+	var values LumeConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.

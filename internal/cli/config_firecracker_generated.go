@@ -104,23 +104,9 @@ type FirecrackerConfigFlagValues struct {
 
 // RegisterFirecrackerConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterFirecrackerConfigFlags(fs *flag.FlagSet, defaults FirecrackerConfig) FirecrackerConfigFlagValues {
-	return FirecrackerConfigFlagValues{
-		Binary:          fs.String("firecracker-binary", defaults.Binary, "Firecracker binary name or path"),
-		Jailer:          fs.String("firecracker-jailer", defaults.Jailer, "Optional Firecracker jailer binary path"),
-		Kernel:          fs.String("firecracker-kernel", defaults.Kernel, "Linux kernel image for Firecracker guests"),
-		RootFS:          fs.String("firecracker-rootfs", defaults.RootFS, "Root filesystem image for Firecracker guests"),
-		User:            fs.String("firecracker-user", defaults.User, "SSH user inside Firecracker guests"),
-		WorkRoot:        fs.String("firecracker-work-root", defaults.WorkRoot, "Remote Crabbox work root inside Firecracker guests"),
-		CPUs:            fs.Int("firecracker-cpus", defaults.CPUs, "vCPU count for Firecracker guests"),
-		MemoryMiB:       fs.Int("firecracker-memory-mib", defaults.MemoryMiB, "Guest memory in MiB"),
-		DiskMiB:         fs.Int("firecracker-disk-mib", defaults.DiskMiB, "Per-lease writable disk size in MiB"),
-		Network:         fs.String("firecracker-network", defaults.Network, "Firecracker network mode (currently cni)"),
-		CNINetwork:      fs.String("firecracker-cni-network", defaults.CNINetwork, "CNI network name for Firecracker guests"),
-		CNIConfDir:      fs.String("firecracker-cni-conf-dir", defaults.CNIConfDir, "CNI network configuration directory"),
-		CNIBinDir:       fs.String("firecracker-cni-bin-dir", defaults.CNIBinDir, "CNI plugin binary directory"),
-		LaunchTimeout:   fs.String("firecracker-launch-timeout", defaults.LaunchTimeout.String(), "Firecracker launch timeout"),
-		DeleteOnRelease: fs.Bool("firecracker-delete-on-release", defaults.DeleteOnRelease, "Delete owned Firecracker artifacts when releasing a lease"),
-	}
+	var values FirecrackerConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // FirecrackerConfigVisitedFlags records raw flag visits, independently of application.

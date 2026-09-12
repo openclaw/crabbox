@@ -59,14 +59,9 @@ type PhalaConfigFlagValues struct {
 
 // RegisterPhalaConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterPhalaConfigFlags(fs *flag.FlagSet, defaults PhalaConfig) PhalaConfigFlagValues {
-	return PhalaConfigFlagValues{
-		CLIPath:      fs.String("phala-cli", defaults.CLIPath, "Phala CLI path"),
-		InstanceType: fs.String("phala-instance-type", defaults.InstanceType, "Phala confidential TDX instance type, for example tdx.small"),
-		WorkRoot:     fs.String("phala-work-root", defaults.WorkRoot, "remote Crabbox work root"),
-		NodeID:       fs.String("phala-node-id", defaults.NodeID, "Phala node id to pin deployments to"),
-		Compose:      fs.String("phala-compose", defaults.Compose, "optional Docker Compose file deployed alongside the dev OS"),
-		Attest:       fs.Bool("phala-attest", defaults.Attest != nil && *defaults.Attest, "verify the leased CVM's Intel TDX remote attestation before trusting it (default true)"),
-	}
+	var values PhalaConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // PhalaConfigVisitedFlags records raw flag visits, independently of application.
