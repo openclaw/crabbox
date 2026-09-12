@@ -117,16 +117,19 @@ Explicit overrides are useful for budget policy or conservative accounting:
 
 ```sh
 export CRABBOX_COST_RATES_JSON='{
-  "aws": {
-    "c7a.48xlarge": 2.25
-  },
-  "hetzner": {
-    "ccx63": 0.44
-  }
+  "aws:c7a.48xlarge": 2.25,
+  "hetzner:ccx63": 0.44
 }'
 ```
 
 Hetzner prices are returned in EUR. The broker converts them to USD using `CRABBOX_EUR_TO_USD` (default `1.08`).
+
+Optional live pricing lookups stop waiting after five seconds, including
+credential resolution, identity checks, and response-body reads, and use the
+existing fallback rates on failure. The expired quote aborts its HTTP request and
+cannot issue a later request or retry. An SDK credential lookup or authority RPC
+already in flight may continue under its existing owner; fallback does not wait
+for it. Ordinary provider operations keep their existing deadlines.
 
 ## Limits
 

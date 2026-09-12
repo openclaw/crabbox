@@ -39,6 +39,7 @@ import {
   sshPublicKeyIdentity,
 } from "./provider-key";
 import { leaseProviderLabels } from "./provider-labels";
+import { withPricingDeadline } from "./provider-pricing";
 import { ProvisioningAttemptHistory } from "./provisioning-attempts";
 import { leaseProviderName } from "./slug";
 import type {
@@ -357,9 +358,11 @@ class QualificationAWSFetchClient implements AWSFetchClient {
     private readonly binding: AWSQualificationTransportBinding,
     private readonly service: AWSQualificationService,
     private readonly region: string,
+    private readonly signal?: AbortSignal,
   ) {}
 
   async fetch(_input: string, init?: RequestInit): Promise<Response> {
+    this.signal?.throwIfAborted();
     const request = qualificationRequest(this.service, this.region, init);
     let result;
     try {
@@ -367,8 +370,10 @@ class QualificationAWSFetchClient implements AWSFetchClient {
     } catch {
       // The authority keeps opId receipts and pending intents. A same-op retry is safe
       // after a lost RPC response and never falls back to candidate-held credentials.
+      this.signal?.throwIfAborted();
       result = await this.binding.execute(request);
     }
+    this.signal?.throwIfAborted();
     return new Response(result.body, { status: result.status });
   }
 }
@@ -763,7 +768,8 @@ export class EC2SpotClient {
   constructor(
     private readonly env: Env,
     region: string,
-    credentialSnapshot?: ResolvedAWSCredentials,
+    private readonly credentialSnapshot?: ResolvedAWSCredentials,
+    requestSignal?: AbortSignal,
   ) {
     this.region = requireAWSRegion(region || env.CRABBOX_AWS_REGION || "eu-west-1");
     const expected = awsExpectedIdentityConfig(env);
@@ -778,30 +784,52 @@ export class EC2SpotClient {
     this.ssmEndpoint = `https://ssm.${this.region}.amazonaws.com/`;
     const qualification = env.CRABBOX_AWS_QUALIFICATION_TRANSPORT;
     if (qualification) {
-      this.aws = new QualificationAWSFetchClient(qualification, "ec2", this.region);
+      this.aws = new QualificationAWSFetchClient(qualification, "ec2", this.region, requestSignal);
       this.serviceQuotas = new QualificationAWSFetchClient(
         qualification,
         "servicequotas",
         this.region,
+        requestSignal,
       );
-      this.stsClient = new QualificationAWSFetchClient(qualification, "sts", this.region);
+      this.stsClient = new QualificationAWSFetchClient(
+        qualification,
+        "sts",
+        this.region,
+        requestSignal,
+      );
       this.ssmClient = new RejectedQualificationFetchClient();
     } else if (credentialSnapshot) {
-      this.aws = new FixedAWSFetchClient(credentialSnapshot, "ec2", this.region);
+      this.aws = new FixedAWSFetchClient(credentialSnapshot, "ec2", this.region, requestSignal);
       this.serviceQuotas = new FixedAWSFetchClient(
         credentialSnapshot,
         "servicequotas",
         this.region,
+        requestSignal,
       );
-      this.stsClient = new FixedAWSFetchClient(credentialSnapshot, "sts", this.region);
-      this.ssmClient = new FixedAWSFetchClient(credentialSnapshot, "ssm", this.region);
+      this.stsClient = new FixedAWSFetchClient(
+        credentialSnapshot,
+        "sts",
+        this.region,
+        requestSignal,
+      );
+      this.ssmClient = new FixedAWSFetchClient(
+        credentialSnapshot,
+        "ssm",
+        this.region,
+        requestSignal,
+      );
     } else {
       const credentials = awsCredentialProvider(env);
       this.credentialProvider = credentials;
-      this.aws = new RefreshingAWSFetchClient(credentials, "ec2", this.region);
-      this.serviceQuotas = new RefreshingAWSFetchClient(credentials, "servicequotas", this.region);
-      this.stsClient = new RefreshingAWSFetchClient(credentials, "sts", this.region);
-      this.ssmClient = new RefreshingAWSFetchClient(credentials, "ssm", this.region);
+      this.aws = new RefreshingAWSFetchClient(credentials, "ec2", this.region, requestSignal);
+      this.serviceQuotas = new RefreshingAWSFetchClient(
+        credentials,
+        "servicequotas",
+        this.region,
+        requestSignal,
+      );
+      this.stsClient = new RefreshingAWSFetchClient(credentials, "sts", this.region, requestSignal);
+      this.ssmClient = new RefreshingAWSFetchClient(credentials, "ssm", this.region, requestSignal);
     }
   }
 
@@ -1814,14 +1842,19 @@ export class EC2SpotClient {
   }
 
   async hourlySpotPriceUSD(instanceType: string): Promise<number | undefined> {
-    const root = await this.ec2("DescribeSpotPriceHistory", {
-      "InstanceType.1": instanceType,
-      MaxResults: "1",
-      "ProductDescription.1": "Linux/UNIX",
-      StartTime: new Date().toISOString(),
+    return await withPricingDeadline(async (signal) => {
+      // The quote owns its identity check; its deadline must not abort another
+      // operation's cached verification or inherit aws4fetch retry backoff.
+      const client = new EC2SpotClient(this.env, this.region, this.credentialSnapshot, signal);
+      const root = await client.ec2("DescribeSpotPriceHistory", {
+        "InstanceType.1": instanceType,
+        MaxResults: "1",
+        "ProductDescription.1": "Linux/UNIX",
+        StartTime: new Date().toISOString(),
+      });
+      const item = items(record(root["spotPriceHistorySet"])["item"])[0];
+      return positiveFloat(asString(record(item)["spotPrice"]));
     });
-    const item = items(record(root["spotPriceHistorySet"])["item"])[0];
-    return positiveFloat(asString(record(item)["spotPrice"]));
   }
 
   async deleteServer(instanceID: string): Promise<void> {

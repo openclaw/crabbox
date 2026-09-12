@@ -51697,6 +51697,264 @@ function decodeUserTokenPayload(token: string): {
   };
 }
 
+describe("optional pricing deadlines", () => {
+  afterEach(() => vi.useRealTimers());
+  it.each(["admission", "activation"])(
+    "continues %s before optional Node pricing credentials resolve",
+    async (phase) => {
+      vi.useFakeTimers();
+      const storage = new MemoryStorage();
+      const started = deferred<void>();
+      const credentials = deferred<{ accessKeyId: string; secretAccessKey: string }>();
+      const fetchImpl = vi.fn<typeof fetch>();
+      vi.stubGlobal("fetch", fetchImpl);
+      const client = new EC2SpotClient(
+        {
+          awsCredentialProvider: async () => {
+            started.resolve();
+            return await credentials.promise;
+          },
+        } as Env,
+        "eu-west-1",
+      );
+      const create = vi.fn<() => void>();
+      const provider = fakeProvider(create, { provider: "aws", serverType: "t3.small" });
+      const pricing = vi.spyOn(provider, "hourlyPriceUSD");
+      if (phase === "activation") pricing.mockResolvedValueOnce(undefined);
+      pricing
+        .mockImplementationOnce(() => client.hourlySpotPriceUSD("t3.small"))
+        .mockResolvedValue(undefined);
+      const fleet = testCoordinator(storage, { aws: provider });
+      const leaseID = "cbx_abcdef654322";
+      let settled = false;
+      let active: LeaseRecord | undefined;
+      const pending = fleet
+        .fetch(
+          request("PUT", `/v1/leases/${leaseID}`, {
+            headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+            body: {
+              leaseID,
+              provider: "aws",
+              serverType: "t3.small",
+              sshPublicKey: "ssh-ed25519 test",
+            },
+          }),
+        )
+        .finally(() => {
+          settled = true;
+        });
+      try {
+        await started.promise;
+        const stored = storage.value<LeaseRecord>(`lease:${leaseID}`);
+        expect(phase === "admission" ? stored : stored?.state).toBe(
+          phase === "admission" ? undefined : "provisioning",
+        );
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(settled).toBe(true);
+        expect(create).toHaveBeenCalledTimes(1);
+        expect((await pending).status).toBe(201);
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+          state: "active",
+          estimatedHourlyUSD: 3,
+        });
+        active = structuredClone(storage.value<LeaseRecord>(`lease:${leaseID}`));
+      } finally {
+        credentials.resolve({ accessKeyId: "test", secretAccessKey: "test-secret" });
+        await pending;
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toEqual(active);
+    },
+  );
+  it("continues lease admission and activation after optional pricing HTTP deadlines", async () => {
+    vi.useFakeTimers();
+    const storage = new MemoryStorage();
+    const started = [deferred<void>(), deferred<void>()];
+    let quoteRequests = 0;
+    let canceledRequests = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const index = quoteRequests++;
+        started[index]?.resolve();
+        return await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => {
+              canceledRequests += 1;
+              reject(init.signal?.reason);
+            },
+            { once: true },
+          );
+        });
+      }),
+    );
+    const create = vi.fn<() => void>();
+    const provider = fakeProvider(create, { provider: "hetzner", serverType: "cx23" });
+    const client = new HetznerClient({ HETZNER_TOKEN: "test" } as Env);
+    vi.spyOn(provider, "hourlyPriceUSD").mockImplementation(() =>
+      client.hourlyPriceUSD("cx23", "hel1"),
+    );
+    const fleet = testCoordinator(storage, { hetzner: provider });
+    const leaseID = "cbx_abcdef654321";
+    const pending = fleet.fetch(
+      request("PUT", `/v1/leases/${leaseID}`, {
+        headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+        body: {
+          leaseID,
+          provider: "hetzner",
+          serverType: "cx23",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    await started[0]!.promise;
+    expect(storage.value(`lease:${leaseID}`)).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await started[1]!.promise;
+    expect(create.mock.calls.length).toBe(1);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.state).toBe("provisioning");
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect((await pending).status).toBe(201);
+    expect(canceledRequests).toBe(2);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "active",
+      estimatedHourlyUSD: 0.5,
+    });
+  });
+});
+
+it.each([true, false])(
+  "recovers workspace activation after an optional pricing HTTP deadline (abort-aware=%s)",
+  async (abortAware) => {
+    vi.useFakeTimers();
+    const storage = new MemoryStorage();
+    const started = deferred<void>();
+    const response = deferred<Response>();
+    let canceled = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        started.resolve();
+        if (!abortAware) return await response.promise;
+        return await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => {
+              canceled = true;
+              reject(init.signal?.reason);
+            },
+            { once: true },
+          );
+        });
+      }),
+    );
+    const leaseID = "cbx_abcdef123456";
+    const workspaceID = "fleet-is-pricing-recovery";
+    const provider = fakeProvider(undefined, {
+      provider: "hetzner",
+      onRecoverServer: () => ({
+        provider: "hetzner",
+        id: 123,
+        cloudID: "123",
+        name: "crabbox-pricing-recovery",
+        status: "running",
+        serverType: "cx23",
+        host: "192.0.2.10",
+        labels: {
+          crabbox: "true",
+          created_by: "crabbox",
+          provider: "hetzner",
+          lease: leaseID,
+          owner: "alice_example.com",
+          slug: workspaceID,
+        },
+      }),
+    });
+    const client = new HetznerClient({ HETZNER_TOKEN: "test" } as Env);
+    vi.spyOn(provider, "hourlyPriceUSD").mockImplementation(() =>
+      client.hourlyPriceUSD("cx23", "hel1"),
+    );
+    const fleet = testFleet(storage, { hetzner: provider });
+    const now = new Date().toISOString();
+    storage.seed(workspaceFixtureKey(workspaceID), {
+      id: workspaceID,
+      leaseID,
+      owner: "alice@example.com",
+      org: "example-org",
+      profile: "default",
+      provider: "hetzner",
+      class: "standard",
+      desktop: false,
+      ttlSeconds: 1800,
+      idleTimeoutSeconds: 360,
+      provisionClaim: "expired-claim",
+      provisionClaimExpiresAt: new Date(Date.now() - 1_000).toISOString(),
+      createdAt: now,
+      updatedAt: now,
+    });
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: workspaceID,
+        workspaceID,
+        provider: "hetzner",
+        target: "linux",
+        owner: "alice@example.com",
+        org: "example-org",
+        class: "standard",
+        serverType: "cx23",
+        cloudID: "123",
+        host: "",
+        providerKey: "workspace-test",
+        keep: false,
+        state: "provisioning",
+        ttlSeconds: 1800,
+        idleTimeoutSeconds: 360,
+        provisioningRequestStartedAt: now,
+        createdAt: now,
+        updatedAt: now,
+        lastTouchedAt: now,
+        expiresAt: new Date(Date.now() + 1_800_000).toISOString(),
+      }),
+    );
+    let settled = false;
+    const recovering = fleet.alarm().finally(() => {
+      settled = true;
+    });
+    try {
+      await started.promise;
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.state).toBe("provisioning");
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(settled).toBe(true);
+      await recovering;
+      expect(canceled).toBe(abortAware);
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+        state: "active",
+        cloudID: "123",
+        estimatedHourlyUSD: 0.5,
+      });
+    } finally {
+      response.resolve(
+        Response.json({
+          server_types: [
+            { name: "cx23", prices: [{ location: "hel1", price_hourly: { gross: "0.1" } }] },
+          ],
+        }),
+      );
+      await recovering;
+      await vi.advanceTimersByTimeAsync(0);
+      vi.useRealTimers();
+    }
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "active",
+      cloudID: "123",
+      estimatedHourlyUSD: 0.5,
+    });
+  },
+);
 function testHetznerCleanupProvider(): HetznerProvider {
   const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
   const release = provider.releaseLease.bind(provider);

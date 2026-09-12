@@ -87,6 +87,16 @@ hourly USD number; non-positive or non-numeric entries are ignored. Hetzner live
 are quoted in EUR and converted to USD by multiplying with `CRABBOX_EUR_TO_USD`
 (default `1.08`).
 
+Optional AWS and Hetzner pricing lookups have a five-second deadline covering
+credential resolution, identity checks, HTTP requests and response-body reads.
+A timeout releases the pricing caller to use the existing fallback rate and
+aborts the quote's HTTP request. Capacity provisioning keeps its own deadlines.
+AWS pricing makes one signed attempt and keeps its identity check separate from
+other provider operations. Node credential resolution still belongs to the AWS
+SDK credential chain; an authority RPC already in flight also retains its own
+owner. Fallback does not wait for either to settle. An expired quote cannot start
+a subsequent HTTP request or authority RPC, including a retry after a late error.
+
 ## Budget guardrails
 
 Budgets are enforced on lease creation. Exceeding any active-lease limit or monthly
