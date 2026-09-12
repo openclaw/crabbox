@@ -10,29 +10,29 @@ import (
 )
 
 type backend struct {
-	spec ProviderSpec
-	cfg  Config
-	rt   Runtime
+	spec core.ProviderSpec
+	cfg  core.Config
+	rt   core.Runtime
 }
 
-func (b backend) Spec() ProviderSpec { return b.spec }
+func (b backend) Spec() core.ProviderSpec { return b.spec }
 
 func (b backend) client() *bridgeClient {
 	return newBridgeClient(b.cfg, b.rt)
 }
 
-func (b backend) Warmup(ctx context.Context, req WarmupRequest) error {
+func (b backend) Warmup(ctx context.Context, req core.WarmupRequest) error {
 	return provisioningUnsupported()
 }
 
-func (b backend) Run(_ context.Context, req RunRequest) (RunResult, error) {
+func (b backend) Run(_ context.Context, req core.RunRequest) (core.RunResult, error) {
 	if strings.TrimSpace(req.ID) == "" {
-		return RunResult{}, provisioningUnsupported()
+		return core.RunResult{}, provisioningUnsupported()
 	}
-	return RunResult{}, mutationUnsupported()
+	return core.RunResult{}, mutationUnsupported()
 }
 
-func (b backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) {
+func (b backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseView, error) {
 	client := b.client()
 	sandboxes, err := client.ListSandboxes(ctx)
 	if err != nil {
@@ -42,7 +42,7 @@ func (b backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) {
 	if err != nil {
 		return nil, err
 	}
-	claimsBySandbox := make(map[string]LeaseClaim, len(claims))
+	claimsBySandbox := make(map[string]core.LeaseClaim, len(claims))
 	for _, claim := range claims {
 		if claim.Provider != providerName || !b.claimMatchesActiveScope(claim) {
 			continue
@@ -53,7 +53,7 @@ func (b backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) {
 		}
 		claimsBySandbox[sandboxName] = claim
 	}
-	views := make([]LeaseView, 0, len(sandboxes)+len(claimsBySandbox))
+	views := make([]core.LeaseView, 0, len(sandboxes)+len(claimsBySandbox))
 	seen := make(map[string]bool, len(sandboxes))
 	for _, sb := range sandboxes {
 		sandboxName := strings.TrimSpace(core.Blank(sb.Name, sb.ID))
@@ -69,7 +69,7 @@ func (b backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) {
 				claimed = true
 				claimState = "claimed"
 			} else {
-				claim = LeaseClaim{}
+				claim = core.LeaseClaim{}
 				claimState = "identity-mismatch"
 			}
 		}
@@ -91,20 +91,20 @@ func (b backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) {
 	return views, nil
 }
 
-func (b backend) Status(ctx context.Context, req StatusRequest) (StatusView, error) {
+func (b backend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
 	identifier := strings.TrimSpace(req.ID)
 	if identifier == "" {
-		return StatusView{}, exit(2, "provider=cua status requires a sandbox id, Crabbox lease id, or slug")
+		return core.StatusView{}, core.Exit(2, "provider=cua status requires a sandbox id, Crabbox lease id, or slug")
 	}
 	claim, claimed, err := resolveCUALeaseClaim(identifier, b.cfg)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	sandboxID := identifier
 	if claimed {
 		sandboxID = claimSandboxName(claim)
 		if sandboxID == "" {
-			return StatusView{}, exit(4, "CUA lease %q is missing its claimed sandbox name", claim.LeaseID)
+			return core.StatusView{}, core.Exit(4, "CUA lease %q is missing its claimed sandbox name", claim.LeaseID)
 		}
 	}
 	waitTimeout := req.WaitTimeout
@@ -125,18 +125,18 @@ func (b backend) Status(ctx context.Context, req StatusRequest) (StatusView, err
 		}
 		if getErr != nil {
 			if req.Wait && ctx.Err() == nil && pollCtx.Err() != nil {
-				return StatusView{}, exit(5, "timed out waiting for CUA sandbox %s to become ready", sandboxID)
+				return core.StatusView{}, core.Exit(5, "timed out waiting for CUA sandbox %s to become ready", sandboxID)
 			}
-			return StatusView{}, getErr
+			return core.StatusView{}, getErr
 		}
 		state := normalizedSandboxState(sb)
 		leaseID, slug, pond := sandboxID, "", ""
 		if claimed {
 			leaseID = claim.LeaseID
-			slug = core.Blank(claim.Slug, newLeaseSlug(claim.LeaseID))
+			slug = core.Blank(claim.Slug, core.NewLeaseSlug(claim.LeaseID))
 			pond = claim.Pond
 		}
-		view := StatusView{
+		view := core.StatusView{
 			ID:       leaseID,
 			Slug:     slug,
 			Provider: providerName,
@@ -160,37 +160,37 @@ func (b backend) Status(ctx context.Context, req StatusRequest) (StatusView, err
 			return view, nil
 		}
 		if isTerminalState(state) {
-			return StatusView{}, exit(5, "CUA sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
+			return core.StatusView{}, core.Exit(5, "CUA sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
 		if core.ClockNow(b.rt.Clock).After(deadline) {
-			return StatusView{}, exit(5, "timed out waiting for CUA sandbox %s to become ready", sandboxID)
+			return core.StatusView{}, core.Exit(5, "timed out waiting for CUA sandbox %s to become ready", sandboxID)
 		}
 		select {
 		case <-pollCtx.Done():
 			if ctx.Err() == nil {
-				return StatusView{}, exit(5, "timed out waiting for CUA sandbox %s to become ready", sandboxID)
+				return core.StatusView{}, core.Exit(5, "timed out waiting for CUA sandbox %s to become ready", sandboxID)
 			}
-			return StatusView{}, pollCtx.Err()
+			return core.StatusView{}, pollCtx.Err()
 		case <-time.After(2 * time.Second):
 		}
 	}
 }
 
-func (b backend) Stop(context.Context, StopRequest) error {
+func (b backend) Stop(context.Context, core.StopRequest) error {
 	return mutationUnsupported()
 }
 
-func (b backend) Cleanup(context.Context, CleanupRequest) error {
+func (b backend) Cleanup(context.Context, core.CleanupRequest) error {
 	return mutationUnsupported()
 }
 
-func (b backend) serverFromSandbox(claim LeaseClaim, sb bridgeSandboxSummary) Server {
+func (b backend) serverFromSandbox(claim core.LeaseClaim, sb bridgeSandboxSummary) core.Server {
 	state := normalizedSandboxState(sb)
 	sandboxName := strings.TrimSpace(core.Blank(sb.Name, sb.ID))
 	if sandboxName == "" {
 		sandboxName = claimSandboxName(claim)
 	}
-	return Server{
+	return core.Server{
 		Provider: providerName,
 		CloudID:  sandboxName,
 		Name:     sandboxName,
@@ -206,7 +206,7 @@ func (b backend) serverFromSandbox(claim LeaseClaim, sb bridgeSandboxSummary) Se
 	}
 }
 
-func (b backend) claimMatchesActiveScope(claim LeaseClaim) bool {
+func (b backend) claimMatchesActiveScope(claim core.LeaseClaim) bool {
 	scope, err := cuaScope(b.cfg)
 	return err == nil && claim.ProviderScope == scope
 }
@@ -233,7 +233,7 @@ func isTerminalState(state string) bool {
 	}
 }
 
-func sandboxTargetOS(claim LeaseClaim, sb bridgeSandboxSummary) string {
+func sandboxTargetOS(claim core.LeaseClaim, sb bridgeSandboxSummary) string {
 	value := strings.ToLower(strings.TrimSpace(core.Blank(sb.OSType, sb.Metadata["osType"])))
 	if value == "" {
 		value = strings.ToLower(strings.TrimSpace(claim.TargetOS))

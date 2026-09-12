@@ -67,12 +67,12 @@ const isloDefaultBaseURL = "https://api.islo.dev"
 
 var isloCleanupTimeout = 15 * time.Second
 
-var newIsloClient = func(cfg Config, rt Runtime) (isloAPI, error) {
+var newIsloClient = func(cfg core.Config, rt core.Runtime) (isloAPI, error) {
 	apiKey := strings.TrimSpace(cfg.Islo.APIKey)
 	if apiKey == "" {
-		return nil, exit(2, "provider=islo requires ISLO_API_KEY")
+		return nil, core.Exit(2, "provider=islo requires ISLO_API_KEY")
 	}
-	baseURL := strings.TrimRight(blank(cfg.Islo.BaseURL, isloDefaultBaseURL), "/")
+	baseURL := strings.TrimRight(core.Blank(cfg.Islo.BaseURL, isloDefaultBaseURL), "/")
 	httpClient := rt.HTTP
 	if httpClient == nil {
 		var err error

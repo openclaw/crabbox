@@ -14,6 +14,7 @@ import (
 	"time"
 
 	gosdk "github.com/islo-labs/go-sdk"
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 // TestIsloClientDeleteSandboxHandlesEmptyAndMissing verifies the raw DELETE
@@ -41,10 +42,10 @@ func TestIsloClientDeleteSandboxHandlesEmptyAndMissing(t *testing.T) {
 
 	mkClient := func(t *testing.T, srv *httptest.Server) isloAPI {
 		t.Helper()
-		cfg := Config{}
+		cfg := core.Config{}
 		cfg.Islo.APIKey = "test-key"
 		cfg.Islo.BaseURL = srv.URL
-		c, err := newIsloClient(cfg, Runtime{HTTP: srv.Client()})
+		c, err := newIsloClient(cfg, core.Runtime{HTTP: srv.Client()})
 		if err != nil {
 			t.Fatalf("new client: %v", err)
 		}
@@ -103,10 +104,10 @@ func TestIsloClientDeleteSandboxConfinesRedirects(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Islo.APIKey = "test-key"
 	cfg.Islo.BaseURL = server.URL
-	client, err := newIsloClient(cfg, Runtime{HTTP: server.Client()})
+	client, err := newIsloClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,10 +165,10 @@ func TestIsloRedirectErrorsHideRejectedLocation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Islo.APIKey = "test-key"
 	cfg.Islo.BaseURL = server.URL
-	client, err := newIsloClient(cfg, Runtime{HTTP: server.Client()})
+	client, err := newIsloClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +182,7 @@ func TestIsloRedirectErrorsHideRejectedLocation(t *testing.T) {
 		},
 		"default create override": {
 			call: func() error {
-				defaultClient, err := newIsloClient(cfg, Runtime{})
+				defaultClient, err := newIsloClient(cfg, core.Runtime{})
 				if err != nil {
 					return err
 				}
@@ -249,10 +250,10 @@ func TestIsloRawErrorsRedactSessionToken(t *testing.T) {
 		_, _ = io.WriteString(w, `{"message":"Bearer `+secret+` quota exceeded"}`)
 	}))
 	defer server.Close()
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Islo.APIKey = "test-key"
 	cfg.Islo.BaseURL = server.URL
-	client, err := newIsloClient(cfg, Runtime{HTTP: server.Client()})
+	client, err := newIsloClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +345,7 @@ func TestIsloCreateHasBoundedOperationContext(t *testing.T) {
 					<-r.Context().Done()
 					return nil, r.Context().Err()
 				})
-				api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "synthetic-key", BaseURL: "https://example.invalid"}}, Runtime{HTTP: &http.Client{Transport: transport}})
+				api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: "synthetic-key", BaseURL: "https://example.invalid"}}, core.Runtime{HTTP: &http.Client{Transport: transport}})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -374,7 +375,7 @@ func TestIsloCreateSeparatesDefaultHeaderBudget(t *testing.T) {
 		io.WriteString(w, `{"id":"synthetic-id","name":"crabbox-proof-abcdef"}`)
 	}))
 	defer server.Close()
-	api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "synthetic-key", BaseURL: server.URL}}, Runtime{})
+	api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: "synthetic-key", BaseURL: server.URL}}, core.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,14 +420,14 @@ func TestIsloCreatePreservesAuthAndInjectedTimeouts(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			rt := Runtime{}
+			rt := core.Runtime{}
 			var injected *http.Client
 			if mode == "injected create" {
 				injected = server.Client()
 				injected.Timeout = 10 * time.Millisecond
 				rt.HTTP = injected
 			}
-			api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "synthetic-key", BaseURL: server.URL}}, rt)
+			api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: "synthetic-key", BaseURL: server.URL}}, rt)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -453,7 +454,7 @@ func TestIsloCreatePreservesAuthAndInjectedTimeouts(t *testing.T) {
 
 func TestIsloCreateCallerCancellationBeforeRequest(t *testing.T) {
 	calls := 0
-	api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "synthetic-key", BaseURL: "https://example.invalid"}}, Runtime{HTTP: &http.Client{Transport: isloCreateRoundTripFunc(func(*http.Request) (*http.Response, error) { calls++; return nil, errors.New("unexpected request") })}})
+	api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: "synthetic-key", BaseURL: "https://example.invalid"}}, core.Runtime{HTTP: &http.Client{Transport: isloCreateRoundTripFunc(func(*http.Request) (*http.Response, error) { calls++; return nil, errors.New("unexpected request") })}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,7 +484,7 @@ func TestIsloCreateTransportKeepsStreamingBodyUnbounded(t *testing.T) {
 		io.WriteString(w, "event: exit\ndata: 0\n\n")
 	}))
 	defer server.Close()
-	api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "synthetic-key", BaseURL: server.URL}}, Runtime{})
+	api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: "synthetic-key", BaseURL: server.URL}}, core.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}

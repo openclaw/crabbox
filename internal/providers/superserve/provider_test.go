@@ -140,17 +140,17 @@ func TestValidateSuperserveBaseURL(t *testing.T) {
 func TestValidateSuperserveConfigRejectsBadValues(t *testing.T) {
 	tests := []struct {
 		name    string
-		mutate  func(*Config)
+		mutate  func(*core.Config)
 		wantErr string
 	}{
-		{name: "relative workdir", mutate: func(cfg *Config) { cfg.Superserve.Workdir = "workspace" }, wantErr: "workdir must be absolute"},
-		{name: "broad workdir", mutate: func(cfg *Config) { cfg.Superserve.Workdir = "/workspace" }, wantErr: "too broad"},
-		{name: "system workdir", mutate: func(cfg *Config) { cfg.Superserve.Workdir = "/etc" }, wantErr: "too broad"},
-		{name: "negative timeout", mutate: func(cfg *Config) { cfg.Superserve.TimeoutSecs = -1 }, wantErr: "timeoutSecs must be non-negative"},
-		{name: "negative exec timeout", mutate: func(cfg *Config) { cfg.Superserve.ExecTimeoutSecs = -1 }, wantErr: "execTimeoutSecs must be non-negative"},
-		{name: "timeout over seven days", mutate: func(cfg *Config) { cfg.Superserve.TimeoutSecs = maxSuperserveSandboxTimeoutSecs + 1 }, wantErr: "must not exceed 604800"},
-		{name: "derived TTL over seven days", mutate: func(cfg *Config) { cfg.TTL = 7*24*time.Hour + time.Millisecond }, wantErr: "must not exceed 604800"},
-		{name: "deny hostname", mutate: func(cfg *Config) { cfg.Superserve.NetworkDenyOut = []string{"metadata.example.test"} }, wantErr: "must be a CIDR"},
+		{name: "relative workdir", mutate: func(cfg *core.Config) { cfg.Superserve.Workdir = "workspace" }, wantErr: "workdir must be absolute"},
+		{name: "broad workdir", mutate: func(cfg *core.Config) { cfg.Superserve.Workdir = "/workspace" }, wantErr: "too broad"},
+		{name: "system workdir", mutate: func(cfg *core.Config) { cfg.Superserve.Workdir = "/etc" }, wantErr: "too broad"},
+		{name: "negative timeout", mutate: func(cfg *core.Config) { cfg.Superserve.TimeoutSecs = -1 }, wantErr: "timeoutSecs must be non-negative"},
+		{name: "negative exec timeout", mutate: func(cfg *core.Config) { cfg.Superserve.ExecTimeoutSecs = -1 }, wantErr: "execTimeoutSecs must be non-negative"},
+		{name: "timeout over seven days", mutate: func(cfg *core.Config) { cfg.Superserve.TimeoutSecs = maxSuperserveSandboxTimeoutSecs + 1 }, wantErr: "must not exceed 604800"},
+		{name: "derived TTL over seven days", mutate: func(cfg *core.Config) { cfg.TTL = 7*24*time.Hour + time.Millisecond }, wantErr: "must not exceed 604800"},
+		{name: "deny hostname", mutate: func(cfg *core.Config) { cfg.Superserve.NetworkDenyOut = []string{"metadata.example.test"} }, wantErr: "must be a CIDR"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -167,7 +167,7 @@ func TestValidateSuperserveConfigRejectsBadValues(t *testing.T) {
 func TestSuperserveExecTimeoutPreservesExplicitZero(t *testing.T) {
 	cfg := testConfig()
 	cfg.Superserve.ExecTimeoutSecs = 0
-	backend := NewSuperserveBackend((Provider{}).Spec(), cfg, Runtime{}).(*backend)
+	backend := NewSuperserveBackend((Provider{}).Spec(), cfg, core.Runtime{}).(*backend)
 	if got := backend.execTimeoutSecs(); got != 0 {
 		t.Fatalf("exec timeout=%d, want service default marker 0", got)
 	}
@@ -176,7 +176,7 @@ func TestSuperserveExecTimeoutPreservesExplicitZero(t *testing.T) {
 func TestSuperserveSandboxTimeoutUsesConfiguredValueOrTTL(t *testing.T) {
 	cfg := testConfig()
 	cfg.TTL = 2*time.Minute + time.Millisecond
-	backend := NewSuperserveBackend((Provider{}).Spec(), cfg, Runtime{}).(*backend)
+	backend := NewSuperserveBackend((Provider{}).Spec(), cfg, core.Runtime{}).(*backend)
 	if got := backend.sandboxTimeoutSecs(); got != 121 {
 		t.Fatalf("sandbox timeout=%d, want rounded TTL 121", got)
 	}
@@ -196,7 +196,7 @@ func TestConfigureReturnsLifecycleBackendAndCredentialedDoctor(t *testing.T) {
 	t.Setenv("SUPERSERVE_API_KEY", "")
 	provider := Provider{}
 	cfg := testConfig()
-	rt := Runtime{Stdout: io.Discard, Stderr: io.Discard}
+	rt := core.Runtime{Stdout: io.Discard, Stderr: io.Discard}
 	configured, err := provider.Configure(cfg, rt)
 	if err != nil {
 		t.Fatalf("Configure err=%v", err)
@@ -205,7 +205,7 @@ func TestConfigureReturnsLifecycleBackendAndCredentialedDoctor(t *testing.T) {
 	if !ok {
 		t.Fatalf("configured backend does not implement DelegatedRunBackend: %T", configured)
 	}
-	if _, err := delegated.Run(context.Background(), RunRequest{}); err == nil || !strings.Contains(err.Error(), "API key") {
+	if _, err := delegated.Run(context.Background(), core.RunRequest{}); err == nil || !strings.Contains(err.Error(), "API key") {
 		t.Fatalf("Run err=%v, want API key requirement", err)
 	}
 	cleanup, ok := configured.(core.CleanupBackend)
@@ -217,13 +217,13 @@ func TestConfigureReturnsLifecycleBackendAndCredentialedDoctor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConfigureDoctor err=%v", err)
 	}
-	if _, err := doctor.Doctor(context.Background(), DoctorRequest{}); err == nil || !strings.Contains(err.Error(), "API key") {
+	if _, err := doctor.Doctor(context.Background(), core.DoctorRequest{}); err == nil || !strings.Contains(err.Error(), "API key") {
 		t.Fatalf("Doctor err=%v, want API key requirement", err)
 	}
 }
 
-func testConfig() Config {
-	cfg := Config{}
+func testConfig() core.Config {
+	cfg := core.Config{}
 	cfg.Provider = providerName
 	cfg.Superserve.BaseURL = defaultBaseURL
 	cfg.Superserve.Template = "superserve/base"

@@ -52,7 +52,7 @@ func isloIdentityFromSandbox(sandbox *gosdk.SandboxResponse) isloIdentity {
 func requireIsloByIDResponse(resourceID string, sandbox *gosdk.SandboxResponse) error {
 	observed := isloIdentityFromSandbox(sandbox).ID
 	if resourceID == "" || observed != resourceID {
-		return exit(5, "islo by-id response for resource %q reported id %q; refusing to use unverified resource identity", resourceID, observed)
+		return core.Exit(5, "islo by-id response for resource %q reported id %q; refusing to use unverified resource identity", resourceID, observed)
 	}
 	return nil
 }
@@ -116,8 +116,8 @@ func sameIsloRunOwnership(acquired, current core.LeaseClaim) bool {
 // https://api.islo.dev; it is not a region identifier and it is not a credential
 // fingerprint. Two different API keys pointed at the same endpoint therefore
 // share a scope, so this guard separates endpoints only.
-func isloClaimScope(cfg Config) string {
-	endpoint := shared.NormalizedSandboxClaimEndpoint(blank(strings.TrimSpace(cfg.Islo.BaseURL), isloDefaultBaseURL))
+func isloClaimScope(cfg core.Config) string {
+	endpoint := shared.NormalizedSandboxClaimEndpoint(core.Blank(strings.TrimSpace(cfg.Islo.BaseURL), isloDefaultBaseURL))
 	if endpoint == "" {
 		return ""
 	}
@@ -141,11 +141,11 @@ func (identity isloIdentity) labels() map[string]string {
 // whichever claim happens to occupy the name after the provider lookup.
 func (b *isloBackend) publishIsloClaim(ctx context.Context, leaseID, slug, repoRoot string, identity isloIdentity) (core.LeaseClaim, error) {
 	if identity.ID == "" || identity.Name == "" {
-		return core.LeaseClaim{}, exit(5, "islo sandbox %q returned incomplete resource identity; refusing to publish an unbound claim", identity.Name)
+		return core.LeaseClaim{}, core.Exit(5, "islo sandbox %q returned incomplete resource identity; refusing to publish an unbound claim", identity.Name)
 	}
 	cfg := b.cfg
 	cfg.Provider = isloProvider
-	server := Server{
+	server := core.Server{
 		Provider: isloProvider, CloudID: identity.ID, ImmutableID: identity.ID,
 		Name: identity.Name, Labels: identity.labels(),
 	}
@@ -166,7 +166,7 @@ func requireIsloClaimScope(claim core.LeaseClaim, scope string) error {
 	if bound == "" || bound == scope {
 		return nil
 	}
-	return exit(4, "islo lease %q was claimed against %s but the current credentials target %s; refusing to act on a resource this scope cannot address", claim.LeaseID, bound, scope)
+	return core.Exit(4, "islo lease %q was claimed against %s but the current credentials target %s; refusing to act on a resource this scope cannot address", claim.LeaseID, bound, scope)
 }
 
 // requireIsloIdentityMatch checks that a live sandbox is the same resource the
@@ -188,7 +188,7 @@ func requireIsloIdentityMatch(claim core.LeaseClaim, observed isloIdentity) (str
 		// lease does not own. Whether the API ever re-issues a released name to
 		// a new sandbox is UNCONFIRMED against the live service; if it never
 		// does, this branch simply never fires.
-		return "", exit(4, "islo sandbox %q now resolves to resource %s but lease %q owns %s; refusing to act on a resource this lease does not own", observed.Name, observed.ID, claim.LeaseID, bound.ID)
+		return "", core.Exit(4, "islo sandbox %q now resolves to resource %s but lease %q owns %s; refusing to act on a resource this lease does not own", observed.Name, observed.ID, claim.LeaseID, bound.ID)
 	}
 	var advisories []string
 	for _, field := range []struct{ what, bound, observed string }{
@@ -257,5 +257,5 @@ func isloReportedResourceID(mismatched bool, resourceID, claimedID string) strin
 	if mismatched {
 		return ""
 	}
-	return blank(resourceID, claimedID)
+	return core.Blank(resourceID, claimedID)
 }

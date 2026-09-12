@@ -96,7 +96,7 @@ func (e *cubesandboxAPIError) Error() string {
 	return e.Status + ": " + e.Body
 }
 
-var newCubeSandboxClient = func(cfg Config, rt Runtime) (cubesandboxAPI, error) {
+var newCubeSandboxClient = func(cfg core.Config, rt core.Runtime) (cubesandboxAPI, error) {
 	apiKey := strings.TrimSpace(cfg.CubeSandbox.APIKey)
 	httpClient, dataPlaneClient := shared.ControlAndDataHTTPClients(rt.HTTP, cubesandboxControlTimeout)
 	apiURL, err := validateCubeSandboxAPIURL(core.Blank(cfg.CubeSandbox.APIURL, "http://127.0.0.1:3000"))
@@ -142,7 +142,7 @@ func cubeSandboxDataPlaneHTTPClient(source *http.Client, proxyHost string, proxy
 	}
 	base, ok := transport.(*http.Transport)
 	if !ok {
-		return nil, exit(2, "provider=cubesandbox CubeProxy direct routing requires an HTTP transport that supports a dial override")
+		return nil, core.Exit(2, "provider=cubesandbox CubeProxy direct routing requires an HTTP transport that supports a dial override")
 	}
 	clone := base.Clone()
 	dialContext := clone.DialContext
@@ -166,14 +166,14 @@ func cubeSandboxDataPlaneHTTPClient(source *http.Client, proxyHost string, proxy
 func validateCubeSandboxAPIURL(raw string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
-		return "", exit(2, "provider=cubesandbox API URL must be an absolute HTTPS URL")
+		return "", core.Exit(2, "provider=cubesandbox API URL must be an absolute HTTPS URL")
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", exit(2, "provider=cubesandbox API URL must not contain userinfo, query parameters, or a fragment")
+		return "", core.Exit(2, "provider=cubesandbox API URL must not contain userinfo, query parameters, or a fragment")
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
 	if parsed.Scheme != "https" && parsed.Scheme != "http" {
-		return "", exit(2, "provider=cubesandbox API URL must use HTTP or HTTPS")
+		return "", core.Exit(2, "provider=cubesandbox API URL must use HTTP or HTTPS")
 	}
 	host := strings.ToLower(parsed.Hostname())
 	port := parsed.Port()
@@ -202,7 +202,7 @@ func cubeSandboxProxyScheme(scheme string, port int) (string, error) {
 		}
 		return "http", nil
 	default:
-		return "", exit(2, "provider=cubesandbox proxy scheme %q must be http or https", scheme)
+		return "", core.Exit(2, "provider=cubesandbox proxy scheme %q must be http or https", scheme)
 	}
 }
 
@@ -310,7 +310,7 @@ func (c *cubesandboxClient) UploadFile(ctx context.Context, session cubesandboxS
 		HTTPClient:     c.dataPlaneHTTPClient(),
 		SetHeaders:     func(req *http.Request) { c.setEnvdHeaders(req, session) },
 		RedirectError:  cubeSandboxRedirectError,
-		SummarizeError: summarizeJSON,
+		SummarizeError: core.SummarizeJSON,
 		APIError: func(statusCode int, status, body string) error {
 			return &cubesandboxAPIError{StatusCode: statusCode, Status: status, Body: body}
 		},
@@ -333,7 +333,7 @@ func (c *cubesandboxClient) StartProcess(ctx context.Context, session cubesandbo
 		RedirectError:  cubeSandboxRedirectError,
 		Provider:       "cubesandbox",
 		InterpretEnd:   interpretCubeSandboxProcessEnd,
-		SummarizeError: summarizeJSON,
+		SummarizeError: core.SummarizeJSON,
 		APIError: func(statusCode int, status, body string) error {
 			return &cubesandboxAPIError{StatusCode: statusCode, Status: status, Body: body}
 		},
@@ -367,7 +367,7 @@ func (c *cubesandboxClient) doJSONWithHeaders(ctx context.Context, method, path 
 	}
 	defer resp.Body.Close()
 	if err := shared.DecodeUnboundedJSONResponse(resp, out, func(statusCode int, status string, data []byte) error {
-		return &cubesandboxAPIError{StatusCode: statusCode, Status: status, Body: shared.RedactErrorSecrets(summarizeJSON(data), c.apiKey)}
+		return &cubesandboxAPIError{StatusCode: statusCode, Status: status, Body: shared.RedactErrorSecrets(core.SummarizeJSON(data), c.apiKey)}
 	}); err != nil {
 		return nil, err
 	}

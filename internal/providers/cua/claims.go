@@ -31,7 +31,7 @@ func newCUALeaseID() string {
 	return leasePrefix + hex.EncodeToString(b[:])
 }
 
-func cuaScope(cfg Config) (string, error) {
+func cuaScope(cfg core.Config) (string, error) {
 	apiURL, err := cuaAPIURL(cfg)
 	if err != nil {
 		return "", err
@@ -49,7 +49,7 @@ func cuaAPIKey() string {
 	return os.Getenv("CUA_API_KEY")
 }
 
-func claimSandboxName(claim LeaseClaim) string {
+func claimSandboxName(claim core.LeaseClaim) string {
 	if claim.CloudID != "" {
 		return claim.CloudID
 	}
@@ -59,53 +59,53 @@ func claimSandboxName(claim LeaseClaim) string {
 	return ""
 }
 
-func resolveCUALeaseClaim(identifier string, cfg Config) (LeaseClaim, bool, error) {
+func resolveCUALeaseClaim(identifier string, cfg core.Config) (core.LeaseClaim, bool, error) {
 	scope, err := cuaScope(cfg)
 	if err != nil {
-		return LeaseClaim{}, false, err
+		return core.LeaseClaim{}, false, err
 	}
 	if claim, ok, exact, err := core.ResolveLeaseClaimForProviderWithExact(identifier, providerName); err != nil {
-		return LeaseClaim{}, false, err
+		return core.LeaseClaim{}, false, err
 	} else if ok {
 		if !exact && !strings.HasPrefix(claim.LeaseID, leasePrefix) {
-			return LeaseClaim{}, false, nil
+			return core.LeaseClaim{}, false, nil
 		}
 		if err := validateClaimScope(claim, scope); err != nil {
-			return LeaseClaim{}, false, err
+			return core.LeaseClaim{}, false, err
 		}
 		return claim, true, nil
 	}
 	if !strings.HasPrefix(identifier, leasePrefix) {
 		exact := leasePrefix + identifier
 		if claim, err := core.ReadLeaseClaim(exact); err != nil {
-			return LeaseClaim{}, false, err
+			return core.LeaseClaim{}, false, err
 		} else if claim.LeaseID == exact && claim.Provider == providerName {
 			if err := validateClaimScope(claim, scope); err != nil {
-				return LeaseClaim{}, false, err
+				return core.LeaseClaim{}, false, err
 			}
 			return claim, true, nil
 		}
 	}
-	return LeaseClaim{}, false, nil
+	return core.LeaseClaim{}, false, nil
 }
 
-func validateClaimScope(claim LeaseClaim, expected string) error {
+func validateClaimScope(claim core.LeaseClaim, expected string) error {
 	if claim.Provider != providerName {
-		return exit(4, "lease %q is not a CUA claim", claim.LeaseID)
+		return core.Exit(4, "lease %q is not a CUA claim", claim.LeaseID)
 	}
 	if claim.ProviderScope != expected {
-		return exit(4, "CUA lease %q belongs to a different API scope; restore the API URL used to create it", claim.LeaseID)
+		return core.Exit(4, "CUA lease %q belongs to a different API scope; restore the API URL used to create it", claim.LeaseID)
 	}
 	return nil
 }
 
-func validateSandboxOwnership(claim LeaseClaim, sandbox bridgeSandboxSummary, expectedScope string) error {
+func validateSandboxOwnership(claim core.LeaseClaim, sandbox bridgeSandboxSummary, expectedScope string) error {
 	if err := validateClaimScope(claim, expectedScope); err != nil {
 		return err
 	}
 	expectedName := claimSandboxName(claim)
 	if expectedName == "" {
-		return exit(4, "CUA lease %q is missing its claimed sandbox name", claim.LeaseID)
+		return core.Exit(4, "CUA lease %q is missing its claimed sandbox name", claim.LeaseID)
 	}
 	identities := []string{strings.TrimSpace(sandbox.Name), strings.TrimSpace(sandbox.ID)}
 	seenIdentity := false
@@ -115,20 +115,20 @@ func validateSandboxOwnership(claim LeaseClaim, sandbox bridgeSandboxSummary, ex
 		}
 		seenIdentity = true
 		if actual != expectedName {
-			return exit(4, "CUA sandbox %q does not match local claim %q", actual, expectedName)
+			return core.Exit(4, "CUA sandbox %q does not match local claim %q", actual, expectedName)
 		}
 	}
 	if !seenIdentity {
-		return exit(4, "CUA sandbox response has no identity for local claim %q", expectedName)
+		return core.Exit(4, "CUA sandbox response has no identity for local claim %q", expectedName)
 	}
 	expectedCreatedAt := strings.TrimSpace(claim.Labels[labelCreatedAt])
 	actualCreatedAt := strings.TrimSpace(sandbox.Metadata["createdAt"])
 	if expectedCreatedAt == "" || actualCreatedAt == "" || actualCreatedAt != expectedCreatedAt {
-		return exit(4, "CUA sandbox %q creation identity does not match its local claim", expectedName)
+		return core.Exit(4, "CUA sandbox %q creation identity does not match its local claim", expectedName)
 	}
 	return nil
 }
 
-func claimIsMissing(claim LeaseClaim) bool {
+func claimIsMissing(claim core.LeaseClaim) bool {
 	return claim.Labels != nil && claim.Labels[labelMissing] == "true"
 }

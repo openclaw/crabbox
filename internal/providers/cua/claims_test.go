@@ -12,7 +12,7 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func claimLabels(cfg Config, sandboxName, createdAt string, missing bool) map[string]string {
+func claimLabels(cfg core.Config, sandboxName, createdAt string, missing bool) map[string]string {
 	workdir, _ := cuaWorkdir(cfg)
 	labels := map[string]string{
 		labelSandboxName: sandboxName,

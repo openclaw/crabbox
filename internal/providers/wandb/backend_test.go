@@ -23,8 +23,8 @@ import (
 // arguments and return canned stdout/exit codes without actually invoking
 // python3.
 type wandbRecordingRunner struct {
-	calls []LocalCommandRequest
-	fn    func(LocalCommandRequest) (LocalCommandResult, error)
+	calls []core.LocalCommandRequest
+	fn    func(core.LocalCommandRequest) (core.LocalCommandResult, error)
 }
 
 func TestWandbProviderSpec(t *testing.T) {
@@ -74,7 +74,7 @@ func TestWandbIsProviderName(t *testing.T) {
 }
 
 func TestWandbTokenFlagIsNotRegistered(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Wandb.APIKey = "secret-token"
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	RegisterWandbProviderFlags(fs, cfg)
@@ -101,7 +101,7 @@ func TestWandbTokenFlagIsNotRegistered(t *testing.T) {
 }
 
 func TestWandbFlagsApply(t *testing.T) {
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	cfg.Wandb.DefaultImage = "ubuntu:24.04"
 	cfg.Wandb.MaxLifetimeSeconds = 1800
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
@@ -123,7 +123,7 @@ func TestWandbFlagsApply(t *testing.T) {
 func TestWandbFlagsRejectClassAndType(t *testing.T) {
 	for _, provider := range []string{providerName, "weights-and-biases"} {
 		t.Run(provider, func(t *testing.T) {
-			cfg := Config{Provider: provider}
+			cfg := core.Config{Provider: provider}
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			fs.String("class", "", "class")
 			fs.String("type", "", "type")
@@ -140,7 +140,7 @@ func TestWandbFlagsRejectClassAndType(t *testing.T) {
 }
 
 func TestWandbDefaultsDoNotTouchSSHOrWorkRoot(t *testing.T) {
-	cfg := Config{WorkRoot: "/preserve/me", SSHUser: "alice"}
+	cfg := core.Config{WorkRoot: "/preserve/me", SSHUser: "alice"}
 	applyWandbDefaults(&cfg)
 	if cfg.WorkRoot != "/preserve/me" {
 		t.Fatalf("WorkRoot=%q, want preserved (delegated-run must not touch SSH/WorkRoot)", cfg.WorkRoot)
@@ -157,7 +157,7 @@ func TestWandbDefaultsDoNotTouchSSHOrWorkRoot(t *testing.T) {
 }
 
 func TestWandbMaxLifetimeHonorsTTL(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Wandb.MaxLifetimeSeconds = 1800
 	cfg.TTL = time.Minute
 	if got := wandbMaxLifetimeSeconds(cfg); got != 60 {
@@ -167,8 +167,8 @@ func TestWandbMaxLifetimeHonorsTTL(t *testing.T) {
 
 func TestWandbRunRequiresNoSync(t *testing.T) {
 	t.Setenv("WANDB_API_KEY", "fake")
-	backend := &wandbBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-	_, err := backend.Run(context.Background(), RunRequest{Command: []string{"echo", "hi"}})
+	backend := &wandbBackend{rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	_, err := backend.Run(context.Background(), core.RunRequest{Command: []string{"echo", "hi"}})
 	if err == nil || !strings.Contains(err.Error(), "--no-sync") {
 		t.Fatalf("err = %v, want --no-sync rejection", err)
 	}
@@ -181,8 +181,8 @@ func TestWandbRunRequiresAPIKey(t *testing.T) {
 	// can't silently satisfy this test on a developer machine where
 	// `wandb login` already wrote real credentials to ~/.netrc.
 	t.Setenv("HOME", t.TempDir())
-	backend := &wandbBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-	_, err := backend.Run(context.Background(), RunRequest{NoSync: true, Command: []string{"echo", "hi"}})
+	backend := &wandbBackend{rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	_, err := backend.Run(context.Background(), core.RunRequest{NoSync: true, Command: []string{"echo", "hi"}})
 	if err == nil || !strings.Contains(err.Error(), "W&B API key") {
 		t.Fatalf("err = %v, want W&B API key rejection", err)
 	}
@@ -192,14 +192,14 @@ func TestWandbRunRejectsUnsupportedOptions(t *testing.T) {
 	t.Setenv("WANDB_API_KEY", "fake")
 	for _, tc := range []struct {
 		name string
-		req  RunRequest
+		req  core.RunRequest
 		want string
 	}{
-		{name: "reclaim", req: RunRequest{NoSync: true, Reclaim: true, Command: []string{"echo"}}, want: "--reclaim"},
-		{name: "shell", req: RunRequest{NoSync: true, ShellMode: true, Command: []string{"echo"}}, want: "--shell"},
+		{name: "reclaim", req: core.RunRequest{NoSync: true, Reclaim: true, Command: []string{"echo"}}, want: "--reclaim"},
+		{name: "shell", req: core.RunRequest{NoSync: true, ShellMode: true, Command: []string{"echo"}}, want: "--shell"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			backend := &wandbBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+			backend := &wandbBackend{rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
 			_, err := backend.Run(context.Background(), tc.req)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v, want %s", err, tc.want)
@@ -289,17 +289,17 @@ func newWandbBackendForTest(t *testing.T, api wandbAPI) *wandbBackend {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("WANDB_ENTITY_NAME", "test-entity")
 	t.Setenv("WANDB_PROJECT", "test-project")
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	applyWandbDefaults(&cfg)
 	return &wandbBackend{
 		spec:   Provider{}.Spec(),
 		cfg:    cfg,
-		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		rt:     core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 		client: api,
 	}
 }
 
-func seedWandbClaim(t *testing.T, backend *wandbBackend, sandboxID string) LeaseClaim {
+func seedWandbClaim(t *testing.T, backend *wandbBackend, sandboxID string) core.LeaseClaim {
 	t.Helper()
 	scope, err := wandbProviderScope()
 	if err != nil {
@@ -325,7 +325,7 @@ func TestWandbRunHappyPathAcquireExecStop(t *testing.T) {
 		execCode: 0,
 	}
 	backend := newWandbBackendForTest(t, api)
-	result, err := backend.Run(context.Background(), RunRequest{NoSync: true, Command: []string{"echo", "hello"}})
+	result, err := backend.Run(context.Background(), core.RunRequest{NoSync: true, Command: []string{"echo", "hello"}})
 	if err != nil {
 		t.Fatalf("Run err: %v", err)
 	}
@@ -370,7 +370,7 @@ func TestWandbRunRollsBackWhenClaimCannotBePersisted(t *testing.T) {
 	}
 	t.Setenv("XDG_STATE_HOME", blockedState)
 
-	_, err := backend.Run(context.Background(), RunRequest{NoSync: true, Command: []string{"true"}})
+	_, err := backend.Run(context.Background(), core.RunRequest{NoSync: true, Command: []string{"true"}})
 	if err == nil || !strings.Contains(err.Error(), "ownership claim") {
 		t.Fatalf("Run err = %v, want claim persistence failure", err)
 	}
@@ -392,7 +392,7 @@ func TestWandbRunClosesCachedClientAfterOperation(t *testing.T) {
 		closeErr: errors.New("connection close failed"),
 	}
 	backend := newWandbBackendForTest(t, api)
-	if _, err := backend.Run(context.Background(), RunRequest{NoSync: true, Command: []string{"echo", "hello"}}); err != nil {
+	if _, err := backend.Run(context.Background(), core.RunRequest{NoSync: true, Command: []string{"echo", "hello"}}); err != nil {
 		t.Fatalf("Run err: %v", err)
 	}
 	if api.stopID != "sb-abc" {
@@ -417,7 +417,7 @@ func TestWandbRunWithExistingIDSkipsAcquireAndStop(t *testing.T) {
 	api := &fakeWandbAPI{execCode: 0, listValue: []wandbSandbox{{ID: "sb-supplied"}}}
 	backend := newWandbBackendForTest(t, api)
 	seedWandbClaim(t, backend, "sb-supplied")
-	result, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), core.RunRequest{
 		ID:      "sb-supplied",
 		NoSync:  true,
 		Command: []string{"echo"},
@@ -449,7 +449,7 @@ func TestWandbRunWithExistingIDSkipsAcquireAndStop(t *testing.T) {
 func TestWandbRunRejectsUnownedExistingID(t *testing.T) {
 	api := &fakeWandbAPI{listValue: []wandbSandbox{{ID: "sb-foreign"}}}
 	backend := newWandbBackendForTest(t, api)
-	_, err := backend.Run(context.Background(), RunRequest{ID: "sb-foreign", NoSync: true, Command: []string{"echo"}})
+	_, err := backend.Run(context.Background(), core.RunRequest{ID: "sb-foreign", NoSync: true, Command: []string{"echo"}})
 	if err == nil || !strings.Contains(err.Error(), "no matching local ownership claim") {
 		t.Fatalf("Run err = %v, want ownership rejection", err)
 	}
@@ -463,7 +463,7 @@ func TestWandbRunFailsClosedWhenOwnershipListFails(t *testing.T) {
 	api := &fakeWandbAPI{listErr: wantErr}
 	backend := newWandbBackendForTest(t, api)
 	seedWandbClaim(t, backend, "sb-unknown")
-	_, err := backend.Run(context.Background(), RunRequest{ID: "sb-unknown", NoSync: true, Command: []string{"echo"}})
+	_, err := backend.Run(context.Background(), core.RunRequest{ID: "sb-unknown", NoSync: true, Command: []string{"echo"}})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("Run err = %v, want %v", err, wantErr)
 	}
@@ -476,7 +476,7 @@ func TestWandbRunNonZeroExecMapsToExit(t *testing.T) {
 	t.Setenv("WANDB_API_KEY", "fake")
 	api := &fakeWandbAPI{acquired: wandbSandbox{ID: "sb-abc", Status: "RUNNING"}, execCode: 7}
 	backend := newWandbBackendForTest(t, api)
-	result, err := backend.Run(context.Background(), RunRequest{NoSync: true, Command: []string{"false"}})
+	result, err := backend.Run(context.Background(), core.RunRequest{NoSync: true, Command: []string{"false"}})
 	if err == nil {
 		t.Fatal("Run accepted non-zero exec exit")
 	}
@@ -493,7 +493,7 @@ func TestWandbStatusReturnsView(t *testing.T) {
 	}
 	backend := newWandbBackendForTest(t, api)
 	seedWandbClaim(t, backend, "sb-abc")
-	view, err := backend.Status(context.Background(), StatusRequest{ID: "sb-abc"})
+	view, err := backend.Status(context.Background(), core.StatusRequest{ID: "sb-abc"})
 	if err != nil {
 		t.Fatalf("Status err: %v", err)
 	}
@@ -516,7 +516,7 @@ func TestWandbStatusWaitPollsUntilRunning(t *testing.T) {
 	backend := newWandbBackendForTest(t, api)
 	seedWandbClaim(t, backend, "sb-abc")
 
-	view, err := backend.Status(context.Background(), StatusRequest{ID: "sb-abc", Wait: true, WaitTimeout: time.Second})
+	view, err := backend.Status(context.Background(), core.StatusRequest{ID: "sb-abc", Wait: true, WaitTimeout: time.Second})
 	if err != nil {
 		t.Fatalf("Status err: %v", err)
 	}
@@ -538,7 +538,7 @@ func TestWandbStatusWaitReturnsTerminalState(t *testing.T) {
 			backend := newWandbBackendForTest(t, api)
 			seedWandbClaim(t, backend, "sb-abc")
 
-			view, err := backend.Status(context.Background(), StatusRequest{ID: "sb-abc", Wait: true, WaitTimeout: time.Second})
+			view, err := backend.Status(context.Background(), core.StatusRequest{ID: "sb-abc", Wait: true, WaitTimeout: time.Second})
 			if err != nil {
 				t.Fatalf("Status err: %v", err)
 			}
@@ -557,8 +557,8 @@ func TestWandbStatusWaitHonorsTimeout(t *testing.T) {
 	backend := newWandbBackendForTest(t, api)
 	seedWandbClaim(t, backend, "sb-abc")
 
-	_, err := backend.Status(context.Background(), StatusRequest{ID: "sb-abc", Wait: true, WaitTimeout: 10 * time.Millisecond})
-	var exitErr ExitError
+	_, err := backend.Status(context.Background(), core.StatusRequest{ID: "sb-abc", Wait: true, WaitTimeout: 10 * time.Millisecond})
+	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 5 || !strings.Contains(err.Error(), "sb-abc") {
 		t.Fatalf("Status err=%v, want sandbox-specific timeout exit", err)
 	}
@@ -575,7 +575,7 @@ func TestWandbStatusWithoutWaitReturnsImmediately(t *testing.T) {
 	backend := newWandbBackendForTest(t, api)
 	seedWandbClaim(t, backend, "sb-abc")
 
-	view, err := backend.Status(context.Background(), StatusRequest{ID: "sb-abc"})
+	view, err := backend.Status(context.Background(), core.StatusRequest{ID: "sb-abc"})
 	if err != nil || view.State != "creating" || view.Ready || api.statusCalls != 1 {
 		t.Fatalf("view=%#v err=%v calls=%d, want immediate creating status", view, err, api.statusCalls)
 	}
@@ -584,7 +584,7 @@ func TestWandbStatusWithoutWaitReturnsImmediately(t *testing.T) {
 func TestWandbStatusRequiresID(t *testing.T) {
 	backend := newWandbBackendForTest(t, &fakeWandbAPI{})
 	for _, id := range []string{"", "  \t"} {
-		if _, err := backend.Status(context.Background(), StatusRequest{ID: id}); err == nil {
+		if _, err := backend.Status(context.Background(), core.StatusRequest{ID: id}); err == nil {
 			t.Fatalf("Status accepted empty id %q", id)
 		}
 	}
@@ -593,7 +593,7 @@ func TestWandbStatusRequiresID(t *testing.T) {
 func TestWandbStatusRejectsUnownedID(t *testing.T) {
 	api := &fakeWandbAPI{listValue: []wandbSandbox{{ID: "sb-foreign"}}}
 	backend := newWandbBackendForTest(t, api)
-	_, err := backend.Status(context.Background(), StatusRequest{ID: "sb-foreign"})
+	_, err := backend.Status(context.Background(), core.StatusRequest{ID: "sb-foreign"})
 	if err == nil || !strings.Contains(err.Error(), "no matching local ownership claim") {
 		t.Fatalf("Status err = %v, want ownership rejection", err)
 	}
@@ -608,7 +608,7 @@ func TestWandbListEnumeratesSandboxes(t *testing.T) {
 		{ID: "sb-2", Status: "COMPLETED"},
 	}}
 	backend := newWandbBackendForTest(t, api)
-	servers, err := backend.List(context.Background(), ListRequest{})
+	servers, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatalf("List err: %v", err)
 	}
@@ -620,7 +620,7 @@ func TestWandbListEnumeratesSandboxes(t *testing.T) {
 func TestWandbStopRequiresID(t *testing.T) {
 	backend := newWandbBackendForTest(t, &fakeWandbAPI{})
 	for _, id := range []string{"", "  \t"} {
-		if err := backend.Stop(context.Background(), StopRequest{ID: id}); err == nil {
+		if err := backend.Stop(context.Background(), core.StopRequest{ID: id}); err == nil {
 			t.Fatalf("Stop accepted empty id %q", id)
 		}
 	}
@@ -630,7 +630,7 @@ func TestWandbStopCallsClient(t *testing.T) {
 	api := &fakeWandbAPI{listValue: []wandbSandbox{{ID: "sb-abc"}}}
 	backend := newWandbBackendForTest(t, api)
 	seedWandbClaim(t, backend, "sb-abc")
-	if err := backend.Stop(context.Background(), StopRequest{ID: "sb-abc"}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: "sb-abc"}); err != nil {
 		t.Fatalf("Stop err: %v", err)
 	}
 	if api.stopID != "sb-abc" {
@@ -653,7 +653,7 @@ func TestWandbStopFailurePreservesClaim(t *testing.T) {
 	backend := newWandbBackendForTest(t, api)
 	seedWandbClaim(t, backend, "sb-abc")
 
-	err := backend.Stop(context.Background(), StopRequest{ID: "sb-abc"})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: "sb-abc"})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("Stop err = %v, want %v", err, wantErr)
 	}
@@ -668,7 +668,7 @@ func TestWandbStopRemovesStaleClaimWhenSandboxIsGone(t *testing.T) {
 	backend := newWandbBackendForTest(t, api)
 	seedWandbClaim(t, backend, "sb-abc")
 
-	if err := backend.Stop(context.Background(), StopRequest{ID: "sb-abc"}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: "sb-abc"}); err != nil {
 		t.Fatalf("Stop err: %v", err)
 	}
 	if api.statusID != "sb-abc" || api.stopID != "" {
@@ -684,7 +684,7 @@ func TestWandbStopPreservesClaimWhenSandboxLostManagedTag(t *testing.T) {
 	backend := newWandbBackendForTest(t, api)
 	seedWandbClaim(t, backend, "sb-abc")
 
-	err := backend.Stop(context.Background(), StopRequest{ID: "sb-abc"})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: "sb-abc"})
 	if err == nil || !strings.Contains(err.Error(), "still exists but is not tagged as Crabbox-managed") {
 		t.Fatalf("Stop err=%v, want untagged refusal", err)
 	}
@@ -709,7 +709,7 @@ func TestWandbStopPreservesClaimWhenOwnershipLookupFails(t *testing.T) {
 			backend := newWandbBackendForTest(t, tt.api)
 			seedWandbClaim(t, backend, "sb-unknown")
 
-			if err := backend.Stop(context.Background(), StopRequest{ID: "sb-unknown"}); err == nil {
+			if err := backend.Stop(context.Background(), core.StopRequest{ID: "sb-unknown"}); err == nil {
 				t.Fatal("Stop succeeded despite ownership lookup failure")
 			}
 			if tt.api.stopID != "" {
@@ -728,8 +728,8 @@ func TestWandbStatusMissingPreservesClaimAndReturnsExitError(t *testing.T) {
 	backend := newWandbBackendForTest(t, api)
 	seedWandbClaim(t, backend, "sb-abc")
 
-	_, err := backend.Status(context.Background(), StatusRequest{ID: "sb-abc"})
-	var exitErr ExitError
+	_, err := backend.Status(context.Background(), core.StatusRequest{ID: "sb-abc"})
+	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 4 {
 		t.Fatalf("Status err=%v, want ExitError code 4", err)
 	}
@@ -744,7 +744,7 @@ func TestWandbStopRejectsClaimFromAnotherScope(t *testing.T) {
 	seedWandbClaim(t, backend, "sb-abc")
 	t.Setenv("WANDB_PROJECT", "another-project")
 
-	err := backend.Stop(context.Background(), StopRequest{ID: "sb-abc"})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: "sb-abc"})
 	if err == nil || !strings.Contains(err.Error(), "different endpoint, entity, or project") {
 		t.Fatalf("Stop err = %v, want scope rejection", err)
 	}
@@ -756,7 +756,7 @@ func TestWandbStopRejectsClaimFromAnotherScope(t *testing.T) {
 func TestWandbStopRejectsUnownedID(t *testing.T) {
 	api := &fakeWandbAPI{listValue: []wandbSandbox{{ID: "sb-foreign"}}}
 	backend := newWandbBackendForTest(t, api)
-	err := backend.Stop(context.Background(), StopRequest{ID: "sb-foreign"})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: "sb-foreign"})
 	if err == nil || !strings.Contains(err.Error(), "no matching local ownership claim") {
 		t.Fatalf("Stop err = %v, want ownership rejection", err)
 	}
@@ -768,14 +768,14 @@ func TestWandbStopRejectsUnownedID(t *testing.T) {
 func TestWandbDoctorReturnsInventoryResult(t *testing.T) {
 	t.Setenv("WANDB_API_KEY", "fake")
 	api := &fakeWandbAPI{versionValue: "coreweave.sandbox.v1beta2", listValue: []wandbSandbox{{ID: "sb-1"}}}
-	doctor, err := Provider{}.ConfigureDoctor(Config{}, Runtime{Stdout: io.Discard, Stderr: io.Discard})
+	doctor, err := Provider{}.ConfigureDoctor(core.Config{}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Inject the fake API into the configured backend so we don't dial the
 	// real cwsandbox gateway.
 	doctor.(*wandbBackend).client = api
-	result, err := doctor.Doctor(context.Background(), DoctorRequest{})
+	result, err := doctor.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatalf("Doctor err: %v", err)
 	}
@@ -791,7 +791,7 @@ func TestWandbDoctorSurfacesAuthError(t *testing.T) {
 	t.Setenv("WANDB_API_KEY", "fake")
 	api := &fakeWandbAPI{versionErr: errors.New("UNAUTHENTICATED: invalid key")}
 	backend := newWandbBackendForTest(t, api)
-	_, err := backend.Doctor(context.Background(), DoctorRequest{})
+	_, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err == nil {
 		t.Fatal("Doctor accepted a Version() failure")
 	}
@@ -811,7 +811,7 @@ func TestWandbKeepOnFailureRetainsSandbox(t *testing.T) {
 	var stderr bytes.Buffer
 	backend := newWandbBackendForTest(t, api)
 	backend.rt.Stderr = &stderr
-	result, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), core.RunRequest{
 		NoSync:        true,
 		KeepOnFailure: true,
 		Command:       []string{"false"},
@@ -819,7 +819,7 @@ func TestWandbKeepOnFailureRetainsSandbox(t *testing.T) {
 	if result.ExitCode != 7 {
 		t.Fatalf("exit = %d, want 7", result.ExitCode)
 	}
-	var ee ExitError
+	var ee core.ExitError
 	if !errors.As(err, &ee) || ee.Code != 7 {
 		t.Fatalf("err = %v, want ExitError code 7", err)
 	}
@@ -853,7 +853,7 @@ func TestWandbRunForwardsEnvToAcquire(t *testing.T) {
 		execCode: 0,
 	}
 	backend := newWandbBackendForTest(t, api)
-	if _, err := backend.Run(context.Background(), RunRequest{
+	if _, err := backend.Run(context.Background(), core.RunRequest{
 		NoSync:  true,
 		Command: []string{"echo", "hi"},
 		Env:     map[string]string{"FOO": "bar"},
@@ -868,7 +868,7 @@ func TestWandbRunForwardsEnvToAcquire(t *testing.T) {
 func TestWandbRunRejectsIDWithEnv(t *testing.T) {
 	t.Setenv("WANDB_API_KEY", "fake")
 	backend := newWandbBackendForTest(t, &fakeWandbAPI{})
-	_, err := backend.Run(context.Background(), RunRequest{
+	_, err := backend.Run(context.Background(), core.RunRequest{
 		ID:         "sb-existing",
 		NoSync:     true,
 		Command:    []string{"echo"},
@@ -883,7 +883,7 @@ func TestWandbRunRejectsIDWithEnv(t *testing.T) {
 func TestWandbRunRejectsIDWithConfiguredEnv(t *testing.T) {
 	t.Setenv("WANDB_API_KEY", "fake")
 	backend := newWandbBackendForTest(t, &fakeWandbAPI{})
-	_, err := backend.Run(context.Background(), RunRequest{
+	_, err := backend.Run(context.Background(), core.RunRequest{
 		ID:      "sb-existing",
 		NoSync:  true,
 		Command: []string{"echo"},
@@ -903,14 +903,14 @@ func TestWandbRunEmitsTimingJSONOnFailure(t *testing.T) {
 	var stderr bytes.Buffer
 	backend := newWandbBackendForTest(t, api)
 	backend.rt.Stderr = &stderr
-	if _, err := backend.Run(context.Background(), RunRequest{
+	if _, err := backend.Run(context.Background(), core.RunRequest{
 		NoSync:     true,
 		TimingJSON: true,
 		Command:    []string{"false"},
 	}); err == nil {
 		t.Fatal("Run accepted non-zero exec exit")
 	}
-	var report timingReport
+	var report core.TimingReport
 	found := false
 	for _, line := range strings.Split(strings.TrimSpace(stderr.String()), "\n") {
 		if !strings.HasPrefix(line, "{") {
@@ -937,19 +937,19 @@ func TestWandbRunTimingJSONUsesExecErrorCode(t *testing.T) {
 	t.Setenv("WANDB_API_KEY", "fake")
 	api := &fakeWandbAPI{
 		acquired: wandbSandbox{ID: "sb-abc", Status: "running"},
-		execErr:  ExitError{Code: 69, Message: "unavailable"},
+		execErr:  core.ExitError{Code: 69, Message: "unavailable"},
 	}
 	var stderr bytes.Buffer
 	backend := newWandbBackendForTest(t, api)
 	backend.rt.Stderr = &stderr
-	if _, err := backend.Run(context.Background(), RunRequest{
+	if _, err := backend.Run(context.Background(), core.RunRequest{
 		NoSync:     true,
 		TimingJSON: true,
 		Command:    []string{"echo", "hi"},
 	}); err == nil {
 		t.Fatal("Run accepted exec error")
 	}
-	var report timingReport
+	var report core.TimingReport
 	for _, line := range strings.Split(strings.TrimSpace(stderr.String()), "\n") {
 		if !strings.HasPrefix(line, "{") {
 			continue
@@ -970,7 +970,7 @@ func TestWandbRunTimingJSONUsesExecErrorCode(t *testing.T) {
 func TestWandbListAllIncludesStopped(t *testing.T) {
 	api := &fakeWandbAPI{listValue: []wandbSandbox{{ID: "sb-done", Status: "completed"}}}
 	backend := newWandbBackendForTest(t, api)
-	if _, err := backend.List(context.Background(), ListRequest{All: true}); err != nil {
+	if _, err := backend.List(context.Background(), core.ListRequest{All: true}); err != nil {
 		t.Fatalf("List err: %v", err)
 	}
 	if api.listStatusFilter != "all" {
@@ -983,7 +983,7 @@ func TestWandbListAllIncludesStopped(t *testing.T) {
 
 func TestWandbWarmupRejected(t *testing.T) {
 	backend := newWandbBackendForTest(t, &fakeWandbAPI{})
-	err := backend.Warmup(context.Background(), WarmupRequest{})
+	err := backend.Warmup(context.Background(), core.WarmupRequest{})
 	if err == nil || !strings.Contains(err.Error(), "does not support warmup") {
 		t.Fatalf("err = %v, want warmup rejection", err)
 	}
@@ -1049,7 +1049,7 @@ func TestWandbRunTerminalFailures(t *testing.T) {
 			b := newWandbBackendForTest(t, api)
 			writer := &wandbTimingWriter{err: tc.writerErr}
 			b.rt.Stderr = writer
-			req := RunRequest{NoSync: true, TimingJSON: true, Command: []string{"true"}, Keep: tc.keep, KeepOnFailure: tc.keepFailure}
+			req := core.RunRequest{NoSync: true, TimingJSON: true, Command: []string{"true"}, Keep: tc.keep, KeepOnFailure: tc.keepFailure}
 			if tc.reuse {
 				seedWandbClaim(t, b, "sb-terminal")
 				req.ID = "sb-terminal"
@@ -1076,7 +1076,7 @@ func TestWandbRunTerminalFailures(t *testing.T) {
 					t.Errorf("unexpected error: %v", err)
 				}
 			} else {
-				var public ExitError
+				var public core.ExitError
 				if !errors.As(err, &public) || public.Code != tc.wantCode {
 					t.Errorf("public=%+v err=%v want code=%d", public, err, tc.wantCode)
 				}
@@ -1090,7 +1090,7 @@ func TestWandbRunTerminalFailures(t *testing.T) {
 				}
 			}
 			if tc.writerErr == nil {
-				var report timingReport
+				var report core.TimingReport
 				found := false
 				for _, line := range strings.Split(writer.String(), "\n") {
 					if strings.HasPrefix(line, "{") {
@@ -1109,12 +1109,12 @@ func TestWandbRunTerminalFailures(t *testing.T) {
 }
 
 func TestWandbRunTypedTimingWriterPreservesPublicCode(t *testing.T) {
-	writerErr := ExitError{Code: 69, Message: "custom timing writer unavailable"}
+	writerErr := core.ExitError{Code: 69, Message: "custom timing writer unavailable"}
 	api := &fakeWandbAPI{acquired: wandbSandbox{ID: "sb-writer", Status: "running"}}
 	b := newWandbBackendForTest(t, api)
 	b.rt.Stderr = &wandbTimingWriter{err: writerErr}
-	result, err := b.Run(context.Background(), RunRequest{NoSync: true, TimingJSON: true, Command: []string{"true"}})
-	var public ExitError
+	result, err := b.Run(context.Background(), core.RunRequest{NoSync: true, TimingJSON: true, Command: []string{"true"}})
+	var public core.ExitError
 	if !errors.As(err, &public) || public.Code != 69 || !errors.Is(err, writerErr) {
 		t.Fatalf("publicCode=%d err=%v; want original writer code69 and cause", public.Code, err)
 	}
@@ -1143,7 +1143,7 @@ func TestWandbExistingIDEnvironmentPolicy(t *testing.T) {
 		{name: "lowercase-default-not-exception", env: map[string]string{"ci": "true"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := wandbExistingIDEnvCanBeOmitted(RunRequest{Env: tc.env, EnvSummary: tc.explicit})
+			got := wandbExistingIDEnvCanBeOmitted(core.RunRequest{Env: tc.env, EnvSummary: tc.explicit})
 			t.Logf("actual=%t desired=%t explicit=%t", got, tc.want, tc.explicit)
 			if got != tc.want {
 				t.Errorf("reuse environment accepted=%t want=%t", got, tc.want)
@@ -1216,7 +1216,7 @@ func TestWandbBindingFlagContract(t *testing.T) {
 func TestWandbBindingRuntimeDefaultsContract(t *testing.T) {
 	for _, image := range []string{"", "  ", " image "} {
 		for _, life := range []int{-2, 0, 37} {
-			cfg := Config{Provider: "prior", WorkRoot: "/fixture/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, Wandb: core.WandbConfig{APIKey: "inert-configured", DefaultImage: image, MaxLifetimeSeconds: life}}
+			cfg := core.Config{Provider: "prior", WorkRoot: "/fixture/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, Wandb: core.WandbConfig{APIKey: "inert-configured", DefaultImage: image, MaxLifetimeSeconds: life}}
 			want := cfg
 			want.Provider = "wandb"
 			want.TargetOS = "linux"
@@ -1232,7 +1232,7 @@ func TestWandbBindingRuntimeDefaultsContract(t *testing.T) {
 			}
 		}
 	}
-	cfg := Config{TargetOS: "macos"}
+	cfg := core.Config{TargetOS: "macos"}
 	applyWandbDefaults(&cfg)
 	if cfg.TargetOS != "macos" {
 		t.Fatal("nonempty target changed")
@@ -1242,7 +1242,7 @@ func TestWandbBindingRuntimeDefaultsContract(t *testing.T) {
 		ttl  time.Duration
 		want int
 	}{{0, 0, 1800}, {-2, -time.Second, 1800}, {37, 0, 37}, {0, time.Nanosecond, 1}, {0, 999 * time.Millisecond, 1}, {0, time.Second, 1}, {0, 1001 * time.Millisecond, 2}, {1, 1500 * time.Millisecond, 1}, {37, 36100 * time.Millisecond, 37}, {37, 35100 * time.Millisecond, 36}, {0, time.Hour, 1800}, {-2, time.Minute, 60}} {
-		cfg := Config{TTL: tc.ttl, Wandb: core.WandbConfig{MaxLifetimeSeconds: tc.life}}
+		cfg := core.Config{TTL: tc.ttl, Wandb: core.WandbConfig{MaxLifetimeSeconds: tc.life}}
 		if got := wandbMaxLifetimeSeconds(cfg); got != tc.want {
 			t.Fatalf("life=%d ttl=%s got=%d want=%d", tc.life, tc.ttl, got, tc.want)
 		}

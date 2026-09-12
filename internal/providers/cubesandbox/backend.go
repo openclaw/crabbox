@@ -28,7 +28,7 @@ type cubesandboxFlagValues struct {
 
 const cubesandboxCleanupTimeout = 30 * time.Second
 
-func RegisterCubeSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any {
+func RegisterCubeSandboxProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return cubesandboxFlagValues{
 		APIURL:        fs.String("cubesandbox-api-url", defaults.CubeSandbox.APIURL, "CubeSandbox API URL"),
 		Domain:        fs.String("cubesandbox-domain", defaults.CubeSandbox.Domain, "CubeSandbox sandbox domain"),
@@ -41,7 +41,7 @@ func RegisterCubeSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any {
 	}
 }
 
-func ApplyCubeSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+func ApplyCubeSandboxProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == providerName {
 		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
 			return err
@@ -86,20 +86,20 @@ func ApplyCubeSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) er
 	return nil
 }
 
-func NewCubeSandboxBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+func NewCubeSandboxBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = providerName
 	return &cubesandboxBackend{spec: spec, cfg: cfg, rt: rt}
 }
 
 type cubesandboxBackend struct {
-	spec ProviderSpec
-	cfg  Config
-	rt   Runtime
+	spec core.ProviderSpec
+	cfg  core.Config
+	rt   core.Runtime
 }
 
-func (b *cubesandboxBackend) Spec() ProviderSpec { return b.spec }
+func (b *cubesandboxBackend) Spec() core.ProviderSpec { return b.spec }
 
-func (b *cubesandboxBackend) Warmup(ctx context.Context, req WarmupRequest) error {
+func (b *cubesandboxBackend) Warmup(ctx context.Context, req core.WarmupRequest) error {
 	if err := validateCubeSandboxUser(b.cfg.CubeSandbox.User); err != nil {
 		return err
 	}
@@ -125,7 +125,7 @@ func (b *cubesandboxBackend) Warmup(ctx context.Context, req WarmupRequest) erro
 	})
 }
 
-func (b *cubesandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *cubesandboxBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
 	var client cubesandboxAPI
 	var processUser, leaseID, sandboxID, slug string
 	var session cubesandboxSession
@@ -190,7 +190,7 @@ func (b *cubesandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
 			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 			if err != nil {
-				return shared.DelegatedSandboxCommand{}, exit(2, "%v", err)
+				return shared.DelegatedSandboxCommand{}, core.Exit(2, "%v", err)
 			}
 			command := intent.ShellSource()
 			fmt.Fprintf(b.rt.Stderr, "running on cubesandbox %s\n", strings.Join(req.Command, " "))
@@ -232,7 +232,7 @@ func cubeSandboxCommandEnv(env map[string]string) (map[string]string, []string) 
 	return out, stripped
 }
 
-func (b *cubesandboxBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *cubesandboxBackend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	_ = req
 	client, err := newCubeSandboxClient(b.cfg, b.rt)
 	if err != nil {
@@ -242,29 +242,29 @@ func (b *cubesandboxBackend) List(ctx context.Context, req ListRequest) ([]Lease
 	if err != nil {
 		return nil, cubesandboxError("list sandboxes", err)
 	}
-	servers := make([]Server, 0, len(sandboxes))
+	servers := make([]core.Server, 0, len(sandboxes))
 	for _, sandbox := range sandboxes {
 		servers = append(servers, cubesandboxSandboxToServer(sandbox))
 	}
 	return servers, nil
 }
 
-func (b *cubesandboxBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
-	servers, err := b.List(ctx, ListRequest{})
+func (b *cubesandboxBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
+	servers, err := b.List(ctx, core.ListRequest{})
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
-	return inventoryDoctorResult(providerName, len(servers)), nil
+	return core.InventoryDoctorResult(providerName, len(servers)), nil
 }
 
-func (b *cubesandboxBackend) Status(ctx context.Context, req StatusRequest) (statusView, error) {
+func (b *cubesandboxBackend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
 	client, err := newCubeSandboxClient(b.cfg, b.rt)
 	if err != nil {
-		return statusView{}, err
+		return core.StatusView{}, err
 	}
 	leaseID, sandboxID, _, err := b.resolveSandboxID(ctx, client, req.ID, "", false)
 	if err != nil {
-		return statusView{}, err
+		return core.StatusView{}, err
 	}
 	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
 	if req.WaitTimeout <= 0 {
@@ -273,24 +273,24 @@ func (b *cubesandboxBackend) Status(ctx context.Context, req StatusRequest) (sta
 	for {
 		sandbox, err := client.GetSandbox(ctx, sandboxID)
 		if err != nil {
-			return statusView{}, cubesandboxError("get sandbox", err)
+			return core.StatusView{}, cubesandboxError("get sandbox", err)
 		}
 		view := cubesandboxStatusView(leaseID, sandbox)
 		if !req.Wait || view.Ready {
 			return view, nil
 		}
 		if core.ClockNow(b.rt.Clock).After(deadline) {
-			return statusView{}, exit(5, "timed out waiting for sandbox %s to become ready", sandboxID)
+			return core.StatusView{}, core.Exit(5, "timed out waiting for sandbox %s to become ready", sandboxID)
 		}
 		select {
 		case <-ctx.Done():
-			return statusView{}, ctx.Err()
+			return core.StatusView{}, ctx.Err()
 		case <-time.After(2 * time.Second):
 		}
 	}
 }
 
-func (b *cubesandboxBackend) Stop(ctx context.Context, req StopRequest) error {
+func (b *cubesandboxBackend) Stop(ctx context.Context, req core.StopRequest) error {
 	client, err := newCubeSandboxClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -299,7 +299,7 @@ func (b *cubesandboxBackend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		var missing *cubesandboxClaimedSandboxMissingError
 		if errors.As(err, &missing) {
-			if removeErr := removeLeaseClaimIfUnchangedAfter(missing.claim.LeaseID, missing.claim, nil); removeErr != nil {
+			if removeErr := core.RemoveLeaseClaimIfUnchangedAfter(missing.claim.LeaseID, missing.claim, nil); removeErr != nil {
 				return removeErr
 			}
 			fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s (already absent)\n", missing.claim.LeaseID, missing.claim.CloudID)
@@ -314,15 +314,15 @@ func (b *cubesandboxBackend) Stop(ctx context.Context, req StopRequest) error {
 	return nil
 }
 
-func (b *cubesandboxBackend) ReclaimAndStop(ctx context.Context, req StopRequest) error {
+func (b *cubesandboxBackend) ReclaimAndStop(ctx context.Context, req core.StopRequest) error {
 	if req.ID == "" {
-		return exit(2, "provider=cubesandbox stop --reclaim requires an exact CubeSandbox sandbox id")
+		return core.Exit(2, "provider=cubesandbox stop --reclaim requires an exact CubeSandbox sandbox id")
 	}
 	sandboxID := req.ID
 	if isCubeSandboxSyntheticID(sandboxID) {
 		sandboxID = strings.TrimPrefix(sandboxID, "cubesandbox_")
 	} else if strings.HasPrefix(sandboxID, "cbx_") {
-		return exit(2, "provider=cubesandbox stop --reclaim requires an exact CubeSandbox sandbox id, not lease %q", req.ID)
+		return core.Exit(2, "provider=cubesandbox stop --reclaim requires an exact CubeSandbox sandbox id, not lease %q", req.ID)
 	}
 	client, err := newCubeSandboxClient(b.cfg, b.rt)
 	if err != nil {
@@ -333,34 +333,32 @@ func (b *cubesandboxBackend) ReclaimAndStop(ctx context.Context, req StopRequest
 		return cubesandboxError("get sandbox", err)
 	}
 	if !isCrabboxCubeSandboxSandbox(sandbox) {
-		return exit(4, "cubesandbox sandbox %q is not claimed by Crabbox", req.ID)
+		return core.Exit(4, "cubesandbox sandbox %q is not claimed by Crabbox", req.ID)
 	}
 	leaseID := strings.TrimSpace(sandbox.Metadata["lease"])
-	if !isCanonicalLeaseID(leaseID) {
-		return exit(4, "cubesandbox sandbox %q lacks a canonical Crabbox lease id", req.ID)
+	if !core.IsCanonicalLeaseID(leaseID) {
+		return core.Exit(4, "cubesandbox sandbox %q lacks a canonical Crabbox lease id", req.ID)
 	}
 	cfg := cubesandboxClaimConfig(b.cfg)
 	if existing, ok, err := resolveLeaseClaimForProviderCloudIDScope(sandbox.SandboxID, providerClaimScope(cfg)); err != nil {
 		return err
 	} else if ok && existing.LeaseID != leaseID {
-		return exit(4, "cubesandbox sandbox %q is already bound to lease %q", sandbox.SandboxID, existing.LeaseID)
+		return core.Exit(4, "cubesandbox sandbox %q is already bound to lease %q", sandbox.SandboxID, existing.LeaseID)
 	}
-	previous, previousExists, err := readLeaseClaimWithPresence(leaseID)
+	previous, previousExists, err := core.ReadLeaseClaimWithPresence(leaseID)
 	if err != nil {
 		return err
 	}
 	if err := validateCubeSandboxReclaimCollision(leaseID, sandbox.SandboxID, previous, previousExists); err != nil {
 		return err
 	}
-	var claim LeaseClaim
+	var claim core.LeaseClaim
 	if previousExists && previous.RepoRoot != "" {
 		claim, err = claimLeaseTargetForRepoConfigIfUnchanged(
 			leaseID,
 			cubesandboxSlug(leaseID, sandbox),
 			cfg,
-			cubesandboxSandboxToServer(sandbox),
-			SSHTarget{},
-			previous.RepoRoot,
+			cubesandboxSandboxToServer(sandbox), core.SSHTarget{}, previous.RepoRoot,
 			cfg.IdleTimeout,
 			true,
 			previous,
@@ -371,9 +369,7 @@ func (b *cubesandboxBackend) ReclaimAndStop(ctx context.Context, req StopRequest
 			leaseID,
 			cubesandboxSlug(leaseID, sandbox),
 			cfg,
-			cubesandboxSandboxToServer(sandbox),
-			SSHTarget{},
-			cfg.IdleTimeout,
+			cubesandboxSandboxToServer(sandbox), core.SSHTarget{}, cfg.IdleTimeout,
 			previous,
 			previousExists,
 		)
@@ -391,9 +387,9 @@ func (b *cubesandboxBackend) ReclaimAndStop(ctx context.Context, req StopRequest
 	return nil
 }
 
-func (b *cubesandboxBackend) createSandbox(ctx context.Context, client cubesandboxAPI, repo Repo, keep, reclaim bool, requestedSlug string) (string, cubesandboxSandbox, string, error) {
+func (b *cubesandboxBackend) createSandbox(ctx context.Context, client cubesandboxAPI, repo core.Repo, keep, reclaim bool, requestedSlug string) (string, cubesandboxSandbox, string, error) {
 	leaseID := core.NewLeaseID()
-	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
+	slug, err := core.AllocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return "", cubesandboxSandbox{}, "", err
 	}
@@ -404,11 +400,11 @@ func (b *cubesandboxBackend) createSandbox(ctx context.Context, client cubesandb
 	}
 	template := strings.TrimSpace(b.cfg.CubeSandbox.Template)
 	if template == "" {
-		return "", cubesandboxSandbox{}, "", exit(2, "provider=cubesandbox requires a template; set --cubesandbox-template, CUBE_TEMPLATE_ID, or cubeSandbox.template")
+		return "", cubesandboxSandbox{}, "", core.Exit(2, "provider=cubesandbox requires a template; set --cubesandbox-template, CUBE_TEMPLATE_ID, or cubeSandbox.template")
 	}
 	cfg.TTL = cubesandboxTimeoutDuration(cfg.TTL)
 	cfg.ServerType = template
-	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", keep, core.ClockNow(b.rt.Clock).UTC())
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, core.ClockNow(b.rt.Clock).UTC())
 	labels["state"] = "ready"
 	labels["workdir"] = workspace
 	labels["template"] = template
@@ -427,11 +423,11 @@ func (b *cubesandboxBackend) createSandbox(ctx context.Context, client cubesandb
 		return "", cubesandboxSandbox{}, "", cubesandboxError("create sandbox", err)
 	}
 	if sandbox.SandboxID == "" {
-		return "", cubesandboxSandbox{}, "", exit(5, "cubesandbox create sandbox returned no sandbox id")
+		return "", cubesandboxSandbox{}, "", core.Exit(5, "cubesandbox create sandbox returned no sandbox id")
 	}
 	cfg = cubesandboxClaimConfig(cfg)
 	server := cubesandboxSandboxToServer(sandbox)
-	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, SSHTarget{}, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{}, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
 		if cleanupErr := b.deleteSandboxForCleanup(client, sandbox.SandboxID); cleanupErr != nil {
 			leakErr := fmt.Errorf("cleanup cubesandbox sandbox %s after claim failure: %w; run `crabbox stop --provider cubesandbox --id %s --reclaim` to retry cleanup", sandbox.SandboxID, cleanupErr, sandbox.SandboxID)
 			fmt.Fprintf(b.rt.Stderr, "warning: %v\n", leakErr)
@@ -449,12 +445,12 @@ func (b *cubesandboxBackend) deleteSandboxForCleanup(client cubesandboxAPI, sand
 }
 
 func cubesandboxCleanupCommand(leaseID string) string {
-	return fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, shellQuote(leaseID))
+	return fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, core.ShellQuote(leaseID))
 }
 
 func (b *cubesandboxBackend) resolveSandboxID(ctx context.Context, client cubesandboxAPI, id, repoRoot string, reclaim bool) (string, string, string, error) {
 	if id == "" {
-		return "", "", "", exit(2, "provider=cubesandbox requires a Crabbox lease id, slug, or CubeSandbox sandbox id")
+		return "", "", "", core.Exit(2, "provider=cubesandbox requires a Crabbox lease id, slug, or CubeSandbox sandbox id")
 	}
 	cfg := cubesandboxClaimConfig(b.cfg)
 	claim, ok, exact, err := resolveLeaseClaimForProviderScopeWithExact(id, providerClaimScope(cfg))
@@ -463,15 +459,15 @@ func (b *cubesandboxBackend) resolveSandboxID(ctx context.Context, client cubesa
 	}
 	if exact && !ok {
 		if claim.Provider != providerName {
-			return "", "", "", exit(4, "cubesandbox identifier %q is claimed by a different provider", id)
+			return "", "", "", core.Exit(4, "cubesandbox identifier %q is claimed by a different provider", id)
 		}
-		return "", "", "", exit(4, "cubesandbox identifier %q is claimed for a different API endpoint", id)
+		return "", "", "", core.Exit(4, "cubesandbox identifier %q is claimed for a different API endpoint", id)
 	}
 	if ok {
 		return b.resolveClaimedSandbox(ctx, client, claim, repoRoot, reclaim)
 	}
 	if strings.HasPrefix(id, "cbx_") {
-		return "", "", "", exit(4, "cubesandbox lease %q has no exact local claim", id)
+		return "", "", "", core.Exit(4, "cubesandbox lease %q has no exact local claim", id)
 	}
 
 	sandboxID := id
@@ -486,26 +482,26 @@ func (b *cubesandboxBackend) resolveSandboxID(ctx context.Context, client cubesa
 	sandbox, err := client.GetSandbox(ctx, sandboxID)
 	if err != nil {
 		if isNotFoundError(err) {
-			return "", "", "", exit(4, "cubesandbox sandbox or claim %q was not found", id)
+			return "", "", "", core.Exit(4, "cubesandbox sandbox or claim %q was not found", id)
 		}
 		return "", "", "", cubesandboxError("get sandbox", err)
 	}
 	if !isCrabboxCubeSandboxSandbox(sandbox) {
-		return "", "", "", exit(4, "cubesandbox sandbox %q is not claimed by Crabbox", id)
+		return "", "", "", core.Exit(4, "cubesandbox sandbox %q is not claimed by Crabbox", id)
 	}
 	leaseID := strings.TrimSpace(sandbox.Metadata["lease"])
-	if !isCanonicalLeaseID(leaseID) {
-		return "", "", "", exit(4, "cubesandbox sandbox %q lacks a canonical Crabbox lease id", id)
+	if !core.IsCanonicalLeaseID(leaseID) {
+		return "", "", "", core.Exit(4, "cubesandbox sandbox %q lacks a canonical Crabbox lease id", id)
 	}
 	if repoRoot == "" || !reclaim {
-		return "", "", "", exit(4, "cubesandbox sandbox %q has no exact local claim; use --reclaim to adopt it explicitly", id)
+		return "", "", "", core.Exit(4, "cubesandbox sandbox %q has no exact local claim; use --reclaim to adopt it explicitly", id)
 	}
 	if existing, ok, err := resolveLeaseClaimForProviderCloudIDScope(sandbox.SandboxID, providerClaimScope(cfg)); err != nil {
 		return "", "", "", err
 	} else if ok && existing.LeaseID != leaseID {
-		return "", "", "", exit(4, "cubesandbox sandbox %q is already bound to lease %q", sandbox.SandboxID, existing.LeaseID)
+		return "", "", "", core.Exit(4, "cubesandbox sandbox %q is already bound to lease %q", sandbox.SandboxID, existing.LeaseID)
 	}
-	previous, previousExists, err := readLeaseClaimWithPresence(leaseID)
+	previous, previousExists, err := core.ReadLeaseClaimWithPresence(leaseID)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -516,9 +512,7 @@ func (b *cubesandboxBackend) resolveSandboxID(ctx context.Context, client cubesa
 		leaseID,
 		cubesandboxSlug(leaseID, sandbox),
 		cfg,
-		cubesandboxSandboxToServer(sandbox),
-		SSHTarget{},
-		repoRoot,
+		cubesandboxSandboxToServer(sandbox), core.SSHTarget{}, repoRoot,
 		cfg.IdleTimeout,
 		true,
 		previous,
@@ -533,26 +527,26 @@ func (b *cubesandboxBackend) resolveSandboxID(ctx context.Context, client cubesa
 	return claim.LeaseID, sandbox.SandboxID, claim.Slug, nil
 }
 
-func validateCubeSandboxReclaimCollision(leaseID, sandboxID string, previous LeaseClaim, previousExists bool) error {
+func validateCubeSandboxReclaimCollision(leaseID, sandboxID string, previous core.LeaseClaim, previousExists bool) error {
 	if !previousExists {
 		return nil
 	}
 	if previous.Provider != providerName {
-		return exit(4, "cubesandbox lease %q is already claimed by provider %q; refusing reclaim", leaseID, previous.Provider)
+		return core.Exit(4, "cubesandbox lease %q is already claimed by provider %q; refusing reclaim", leaseID, previous.Provider)
 	}
 	if previous.CloudID != "" && previous.CloudID != sandboxID {
-		return exit(4, "cubesandbox lease %q is already bound to sandbox %q; refusing retarget to %q", leaseID, previous.CloudID, sandboxID)
+		return core.Exit(4, "cubesandbox lease %q is already bound to sandbox %q; refusing retarget to %q", leaseID, previous.CloudID, sandboxID)
 	}
 	return nil
 }
 
-func (b *cubesandboxBackend) resolveClaimedSandbox(ctx context.Context, client cubesandboxAPI, claim LeaseClaim, repoRoot string, reclaim bool) (string, string, string, error) {
+func (b *cubesandboxBackend) resolveClaimedSandbox(ctx context.Context, client cubesandboxAPI, claim core.LeaseClaim, repoRoot string, reclaim bool) (string, string, string, error) {
 	cfg := cubesandboxClaimConfig(b.cfg)
 	if claim.ProviderScope != providerClaimScope(cfg) {
-		return "", "", "", exit(4, "cubesandbox lease %q belongs to a different API endpoint; use --reclaim with the exact sandbox id to adopt it", claim.LeaseID)
+		return "", "", "", core.Exit(4, "cubesandbox lease %q belongs to a different API endpoint; use --reclaim with the exact sandbox id to adopt it", claim.LeaseID)
 	}
 	if strings.TrimSpace(claim.CloudID) == "" {
-		return "", "", "", exit(4, "cubesandbox lease %q has a legacy claim not bound to an exact sandbox; use --reclaim with the exact sandbox id to adopt it", claim.LeaseID)
+		return "", "", "", core.Exit(4, "cubesandbox lease %q has a legacy claim not bound to an exact sandbox; use --reclaim with the exact sandbox id to adopt it", claim.LeaseID)
 	}
 	sandbox, err := client.GetSandbox(ctx, claim.CloudID)
 	if err != nil {
@@ -569,9 +563,7 @@ func (b *cubesandboxBackend) resolveClaimedSandbox(ctx context.Context, client c
 			claim.LeaseID,
 			claim.Slug,
 			cfg,
-			cubesandboxSandboxToServer(sandbox),
-			SSHTarget{},
-			repoRoot,
+			cubesandboxSandboxToServer(sandbox), core.SSHTarget{}, repoRoot,
 			time.Duration(claim.IdleTimeoutSeconds)*time.Second,
 			reclaim,
 			claim,
@@ -591,12 +583,12 @@ func (b *cubesandboxBackend) deleteClaimedSandbox(ctx context.Context, client cu
 		return err
 	}
 	if !ok || !exact {
-		return exit(4, "cubesandbox lease %q has no exact local claim; refusing deletion", leaseID)
+		return core.Exit(4, "cubesandbox lease %q has no exact local claim; refusing deletion", leaseID)
 	}
 	if claim.ProviderScope != providerClaimScope(cfg) || claim.CloudID != sandboxID {
-		return exit(4, "cubesandbox lease %q is not bound to sandbox %q on this API endpoint; refusing deletion", leaseID, sandboxID)
+		return core.Exit(4, "cubesandbox lease %q is not bound to sandbox %q on this API endpoint; refusing deletion", leaseID, sandboxID)
 	}
-	return removeLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
+	return core.RemoveLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
 		sandbox, err := client.GetSandbox(ctx, sandboxID)
 		if err != nil {
 			if isNotFoundError(err) {
@@ -618,27 +610,27 @@ func (b *cubesandboxBackend) deleteClaimedSandbox(ctx context.Context, client cu
 }
 
 type cubesandboxClaimedSandboxMissingError struct {
-	claim LeaseClaim
+	claim core.LeaseClaim
 }
 
 func (e *cubesandboxClaimedSandboxMissingError) Error() string {
 	return fmt.Sprintf("cubesandbox sandbox %q for lease %q no longer exists", e.claim.CloudID, e.claim.LeaseID)
 }
 
-func validateCubeSandboxClaim(cfg Config, claim LeaseClaim, sandbox cubesandboxSandbox) error {
+func validateCubeSandboxClaim(cfg core.Config, claim core.LeaseClaim, sandbox cubesandboxSandbox) error {
 	if claim.Provider != providerName || claim.ProviderScope != providerClaimScope(cubesandboxClaimConfig(cfg)) {
-		return exit(4, "cubesandbox lease %q belongs to a different provider or API endpoint", claim.LeaseID)
+		return core.Exit(4, "cubesandbox lease %q belongs to a different provider or API endpoint", claim.LeaseID)
 	}
 	if claim.CloudID == "" || claim.CloudID != sandbox.SandboxID {
-		return exit(4, "cubesandbox lease %q is not bound to sandbox %q", claim.LeaseID, sandbox.SandboxID)
+		return core.Exit(4, "cubesandbox lease %q is not bound to sandbox %q", claim.LeaseID, sandbox.SandboxID)
 	}
 	if !isCrabboxCubeSandboxSandbox(sandbox) || strings.TrimSpace(sandbox.Metadata["lease"]) != claim.LeaseID {
-		return exit(4, "cubesandbox sandbox %q no longer has canonical ownership metadata for lease %q", sandbox.SandboxID, claim.LeaseID)
+		return core.Exit(4, "cubesandbox sandbox %q no longer has canonical ownership metadata for lease %q", sandbox.SandboxID, claim.LeaseID)
 	}
 	return nil
 }
 
-func cubesandboxClaimConfig(cfg Config) Config {
+func cubesandboxClaimConfig(cfg core.Config) core.Config {
 	cfg.Provider = providerName
 	if strings.TrimSpace(cfg.CubeSandbox.APIURL) == "" {
 		cfg.CubeSandbox.APIURL = "http://127.0.0.1:3000"
@@ -646,7 +638,7 @@ func cubesandboxClaimConfig(cfg Config) Config {
 	return cfg
 }
 
-func cubesandboxSandboxToServer(sandbox cubesandboxSandbox) Server {
+func cubesandboxSandboxToServer(sandbox cubesandboxSandbox) core.Server {
 	labels := map[string]string{}
 	for k, v := range sandbox.Metadata {
 		labels[k] = v
@@ -654,13 +646,13 @@ func cubesandboxSandboxToServer(sandbox cubesandboxSandbox) Server {
 	labels["provider"] = providerName
 	labels["lease"] = cubesandboxLeaseID(sandbox)
 	if labels["slug"] == "" {
-		labels["slug"] = newLeaseSlug(labels["lease"])
+		labels["slug"] = core.NewLeaseSlug(labels["lease"])
 	}
 	labels["target"] = targetLinux
 	if labels["state"] == "" {
 		labels["state"] = sandbox.State
 	}
-	server := Server{
+	server := core.Server{
 		Provider: providerName,
 		CloudID:  sandbox.SandboxID,
 		Name:     sandbox.SandboxID,
@@ -674,9 +666,9 @@ func cubesandboxSandboxToServer(sandbox cubesandboxSandbox) Server {
 	return server
 }
 
-func cubesandboxStatusView(leaseID string, sandbox cubesandboxSandbox) statusView {
+func cubesandboxStatusView(leaseID string, sandbox cubesandboxSandbox) core.StatusView {
 	server := cubesandboxSandboxToServer(sandbox)
-	return statusView{
+	return core.StatusView{
 		ID:         leaseID,
 		Slug:       cubesandboxSlug(leaseID, sandbox),
 		Provider:   providerName,
@@ -710,7 +702,7 @@ func cubesandboxSlug(leaseID string, sandbox cubesandboxSandbox) string {
 	if slug := strings.TrimSpace(sandbox.Metadata["slug"]); slug != "" {
 		return slug
 	}
-	return newLeaseSlug(leaseID)
+	return core.NewLeaseSlug(leaseID)
 }
 
 func isCubeSandboxSyntheticID(id string) bool {
@@ -732,7 +724,7 @@ func cubesandboxTimeoutSeconds(ttl time.Duration) int {
 	return durationSecondsCeil(cubesandboxTimeoutDuration(ttl))
 }
 
-func cubesandboxWorkspacePath(cfg Config) string {
+func cubesandboxWorkspacePath(cfg core.Config) string {
 	workdir := strings.TrimSpace(cfg.CubeSandbox.Workdir)
 	if workdir == "" {
 		workdir = "crabbox"
@@ -773,14 +765,14 @@ func cubesandboxProcessUser(user string) (string, error) {
 		return "root", nil
 	}
 	if clean == "." || clean == ".." || strings.ContainsAny(clean, `/\`) || strings.ContainsRune(clean, 0) {
-		return "", exit(2, "invalid cubesandbox.user %q: use a login name, not a path", user)
+		return "", core.Exit(2, "invalid cubesandbox.user %q: use a login name, not a path", user)
 	}
 	return clean, nil
 }
 
-func rejectCubeSandboxSyncOptions(req RunRequest) error {
+func rejectCubeSandboxSyncOptions(req core.RunRequest) error {
 	if req.ChecksumSync {
-		return exit(2, "%s uses CubeSandbox archive sync; --checksum is not supported", providerName)
+		return core.Exit(2, "%s uses CubeSandbox archive sync; --checksum is not supported", providerName)
 	}
 	return nil
 }

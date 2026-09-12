@@ -6,29 +6,6 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-type Config = core.Config
-type CuaConfig = core.CuaConfig
-type ProviderSpec = core.ProviderSpec
-type Runtime = core.Runtime
-type Backend = core.Backend
-type DoctorRequest = core.DoctorRequest
-type DoctorResult = core.DoctorResult
-type DoctorCheck = core.DoctorCheck
-type WarmupRequest = core.WarmupRequest
-type RunRequest = core.RunRequest
-type RunResult = core.RunResult
-type ListRequest = core.ListRequest
-type LeaseView = core.LeaseView
-type StatusRequest = core.StatusRequest
-type StatusView = core.StatusView
-type StopRequest = core.StopRequest
-type CleanupRequest = core.CleanupRequest
-type LocalCommandRequest = core.LocalCommandRequest
-type Server = core.Server
-type Repo = core.Repo
-type LeaseClaim = core.LeaseClaim
-type ExitError = core.ExitError
-
 const (
 	providerName            = "cua"
 	targetLinux             = core.TargetLinux
@@ -37,21 +14,13 @@ const (
 )
 
 func provisioningUnsupported() error {
-	return exit(2, "provider=cua provisioning is disabled: the upstream CUA create API has no idempotency key or client-assigned identity echoed by create/list/get, so a timed-out create could orphan a billed sandbox; use doctor, list, or status; tracking issue: %s", cuaTrackingIssue)
+	return core.Exit(2, "provider=cua provisioning is disabled: the upstream CUA create API has no idempotency key or client-assigned identity echoed by create/list/get, so a timed-out create could orphan a billed sandbox; use doctor, list, or status; tracking issue: %s", cuaTrackingIssue)
 }
 
 func mutationUnsupported() error {
-	return exit(2, "provider=cua is experimental and read-only: remote mutation is disabled because upstream deletion cannot atomically bind to an immutable sandbox identity; use doctor, list, or status; tracking issue: %s", cuaTrackingIssue)
+	return core.Exit(2, "provider=cua is experimental and read-only: remote mutation is disabled because upstream deletion cannot atomically bind to an immutable sandbox identity; use doctor, list, or status; tracking issue: %s", cuaTrackingIssue)
 }
 
-func exit(code int, format string, args ...any) core.ExitError {
-	return core.Exit(code, format, args...)
-}
-
-func newLeaseSlug(leaseID string) string {
-	return core.NewLeaseSlug(leaseID)
-}
-
-func listCUALeaseClaims() ([]LeaseClaim, error) {
+func listCUALeaseClaims() ([]core.LeaseClaim, error) {
 	return core.ListLeaseClaimsWithPrefix(leasePrefix)
 }

@@ -5,14 +5,16 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestDoctorUsesBridgeClassification(t *testing.T) {
-	runner := &recordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &recordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		_, _ = io.WriteString(req.Stdout, `{"ok":false,"class":"environment_blocked","doctor":{"pythonVersion":"3.11.9","importPath":"cua_sandbox","auth":"missing","checks":[{"status":"ok","check":"python","message":"python=3.11.9 required=\u003e=3.11,\u003c3.14"},{"status":"ok","check":"sdk","message":"import=cua_sandbox","details":{"import":"cua_sandbox"}},{"status":"failed","check":"auth","message":"auth=missing mutation=false","class":"environment_blocked"}]}}`)
-		return LocalCommandResult{ExitCode: 0}, nil
+		return core.LocalCommandResult{ExitCode: 0}, nil
 	}}
-	result, err := (backend{spec: Provider{}.Spec(), cfg: testConfig(), rt: Runtime{Exec: runner}}).Doctor(context.Background(), DoctorRequest{})
+	result, err := (backend{spec: Provider{}.Spec(), cfg: testConfig(), rt: core.Runtime{Exec: runner}}).Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatalf("Doctor: %v", err)
 	}
@@ -33,10 +35,10 @@ func TestDoctorUsesBridgeClassification(t *testing.T) {
 }
 
 func TestDoctorClassifiesBridgeTransportFailureWithoutReturningError(t *testing.T) {
-	runner := &recordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
-		return LocalCommandResult{ExitCode: 127}, nil
+	runner := &recordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		return core.LocalCommandResult{ExitCode: 127}, nil
 	}}
-	result, err := (backend{spec: Provider{}.Spec(), cfg: testConfig(), rt: Runtime{Exec: runner}}).Doctor(context.Background(), DoctorRequest{})
+	result, err := (backend{spec: Provider{}.Spec(), cfg: testConfig(), rt: core.Runtime{Exec: runner}}).Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatalf("Doctor returned transport error instead of classified result: %v", err)
 	}

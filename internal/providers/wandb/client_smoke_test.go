@@ -8,6 +8,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 // TestSmokeVersionAndExec hits the live CoreWeave Sandboxes gateway.
@@ -29,7 +31,7 @@ func TestSmokeVersionAndExec(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	api, err := newWandbClient(Config{}, Runtime{})
+	api, err := newWandbClient(core.Config{}, core.Runtime{})
 	if err != nil {
 		t.Fatalf("newWandbClient: %v", err)
 	}
