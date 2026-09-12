@@ -8,7 +8,6 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func (b *modalBackend) syncWorkspace(ctx context.Context, client modalAPI, sandboxID string, req RunRequest, workdir string, prepared ...*core.PreparedArchive) ([]timingPhase, time.Duration, error) {
@@ -16,7 +15,7 @@ func (b *modalBackend) syncWorkspace(ctx context.Context, client modalAPI, sandb
 	if err != nil {
 		return nil, 0, err
 	}
-	return shared.RunSandboxArchiveSync(ctx, shared.SandboxArchiveSyncRequest{
+	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
 		Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge, Workdir: workdir,
 		TempPattern: "crabbox-modal-sync-*.tgz", RemoteArchivePrefix: "crabbox-modal-sync-",
 		PhaseName: "modal_sync", Provider: providerName, Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },

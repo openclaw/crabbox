@@ -11,7 +11,6 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func (b *azureDynamicSessionsBackend) syncWorkspace(ctx context.Context, client azureDynamicSessionsAPI, sessionID string, req RunRequest, workspace string, prepared ...*core.PreparedArchive) ([]timingPhase, time.Duration, error) {
@@ -19,7 +18,7 @@ func (b *azureDynamicSessionsBackend) syncWorkspace(ctx context.Context, client 
 	if err != nil {
 		return nil, 0, err
 	}
-	return shared.RunSandboxArchiveSync(ctx, shared.SandboxArchiveSyncRequest{
+	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
 		Config:              b.cfg,
 		Repo:                req.Repo,
 		ForceSyncLarge:      req.ForceSyncLarge,

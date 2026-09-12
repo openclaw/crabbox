@@ -497,6 +497,13 @@ summary.
    `SyncDelegated: true`;
 6. stop temporary resources when `Keep` is false.
 
+Archive-based providers call `core.RunDelegatedArchiveSync` with a
+`core.DelegatedArchiveSyncRequest`. Core owns preparation, guardrails, transfer
+timing, workspace replacement, and temporary-archive cleanup, using `/tmp` as
+the default remote archive directory. Adapters supply upload and execution
+callbacks and any provider-specific cleanup context or replacement behavior.
+Use this request directly rather than mirroring it in another provider layer.
+
 `Status` returns a normalized `StatusView`. If the provider only emits a table,
 parse it inside the backend and return structured fields — do not print the
 native table.

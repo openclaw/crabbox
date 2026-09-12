@@ -7,11 +7,10 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func (b *backend) syncWorkspace(ctx context.Context, api vercelSandboxClient, sandboxID string, req RunRequest, workdir string, prepared ...*core.PreparedArchive) ([]timingPhase, time.Duration, error) {
-	return shared.RunSandboxArchiveSync(ctx, shared.SandboxArchiveSyncRequest{
+	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
 		Config:              b.cfg,
 		Repo:                req.Repo,
 		ForceSyncLarge:      req.ForceSyncLarge,
