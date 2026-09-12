@@ -27,7 +27,7 @@ import (
 
 func TestAzureDynamicSessionsFlagRouteAndDeferredPoolContract(t *testing.T) {
 	p := Provider{}
-	cfg := Config{}
+	cfg := core.Config{}
 	if err := p.RouteConfig(&cfg, nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -35,8 +35,8 @@ func TestAzureDynamicSessionsFlagRouteAndDeferredPoolContract(t *testing.T) {
 		t.Fatal("Azure backend route changed")
 	}
 	for _, target := range []string{"", core.TargetLinux, "darwin"} {
-		cfg := Config{TargetOS: target}
-		b, err := p.Configure(cfg, Runtime{})
+		cfg := core.Config{TargetOS: target}
+		b, err := p.Configure(cfg, core.Runtime{})
 		if target == "darwin" {
 			if err == nil || err.Error() != "azure-dynamic-sessions supports target=linux only" {
 				t.Fatalf("target check=%v", err)
@@ -58,7 +58,7 @@ func TestAzureDynamicSessionsFlagRouteAndDeferredPoolContract(t *testing.T) {
 	if fs.Lookup("azure-dynamic-sessions-pool") != nil {
 		t.Fatal("legacy Pool acquired a flag")
 	}
-	cfg.AzureDynamicSessions = AzureDynamicSessionsConfig{Endpoint: "https://example.invalid/pool", Pool: "legacy", APIVersion: "version", Workdir: "/workspace/app", TimeoutSecs: 12}
+	cfg.AzureDynamicSessions = core.AzureDynamicSessionsConfig{Endpoint: "https://example.invalid/pool", Pool: "legacy", APIVersion: "version", Workdir: "/workspace/app", TimeoutSecs: 12}
 	before := cfg
 	if err := ApplyAzureDynamicSessionsProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
@@ -69,7 +69,7 @@ func TestAzureDynamicSessionsFlagRouteAndDeferredPoolContract(t *testing.T) {
 	if err := fs.Parse([]string{"--azure-dynamic-sessions-endpoint=https://example.invalid/pool", "--azure-dynamic-sessions-api-version=version", "--azure-dynamic-sessions-workdir=/workspace/app", "--azure-dynamic-sessions-timeout-secs=12"}); err != nil {
 		t.Fatal(err)
 	}
-	cfg.AzureDynamicSessions = AzureDynamicSessionsConfig{Pool: "legacy"}
+	cfg.AzureDynamicSessions = core.AzureDynamicSessionsConfig{Pool: "legacy"}
 	if err := ApplyAzureDynamicSessionsProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestAzureDynamicSessionsFlagRouteAndDeferredPoolContract(t *testing.T) {
 	if err := ApplyAzureDynamicSessionsProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal("flag application performed deferred validation")
 	}
-	before.AzureDynamicSessions = AzureDynamicSessionsConfig{Pool: "legacy", TimeoutSecs: -1}
+	before.AzureDynamicSessions = core.AzureDynamicSessionsConfig{Pool: "legacy", TimeoutSecs: -1}
 	if !reflect.DeepEqual(cfg, before) {
 		t.Fatal("explicit fields or central marker phase changed")
 	}
@@ -100,7 +100,7 @@ func TestAzureDynamicSessionsFlagRouteAndDeferredPoolContract(t *testing.T) {
 		t.Fatalf("legacy Pool later rejection=%v", err)
 	}
 	for _, name := range []string{providerName, "Azure-Dynamic-Sessions", " azure-dynamic-sessions "} {
-		cfg := Config{Provider: name}
+		cfg := core.Config{Provider: name}
 		fs := flag.NewFlagSet("guard", flag.ContinueOnError)
 		fs.String("class", "", "")
 		fs.String("type", "", "")
@@ -132,9 +132,9 @@ func TestAzureDynamicSessionsFlagRouteAndDeferredPoolContract(t *testing.T) {
 func TestAzureDynamicSessionsDefaultConsumersWithMockedAuth(t *testing.T) {
 	t.Setenv(tokenEnvName, "")
 	for _, raw := range []string{"", "  ", " custom-version "} {
-		cfg := Config{AzureDynamicSessions: AzureDynamicSessionsConfig{Endpoint: "http://127.0.0.1:8787", APIVersion: raw, Workdir: "  "}}
-		runner := &recordingRunner{result: LocalCommandResult{Stdout: "inert-mocked-auth\n"}}
-		api, err := newAzureDynamicSessionsClient(context.Background(), cfg, Runtime{Exec: runner, HTTP: &http.Client{}})
+		cfg := core.Config{AzureDynamicSessions: core.AzureDynamicSessionsConfig{Endpoint: "http://127.0.0.1:8787", APIVersion: raw, Workdir: "  "}}
+		runner := &recordingRunner{result: core.LocalCommandResult{Stdout: "inert-mocked-auth\n"}}
+		api, err := newAzureDynamicSessionsClient(context.Background(), cfg, core.Runtime{Exec: runner, HTTP: &http.Client{}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -157,12 +157,12 @@ func TestAzureDynamicSessionsDefaultConsumersWithMockedAuth(t *testing.T) {
 		ttl        time.Duration
 		want       int
 	}{{0, 0, 1800}, {-1, 0, 1800}, {0, -time.Second, 1800}, {0, 1500 * time.Millisecond, 2}, {-1, 42 * time.Second, 42}, {7, 42 * time.Second, 7}} {
-		cfg := Config{TTL: tc.ttl, AzureDynamicSessions: AzureDynamicSessionsConfig{TimeoutSecs: tc.configured}}
+		cfg := core.Config{TTL: tc.ttl, AzureDynamicSessions: core.AzureDynamicSessionsConfig{TimeoutSecs: tc.configured}}
 		if got := azureDynamicSessionsTimeoutSeconds(cfg); got != tc.want {
 			t.Fatalf("timeout configured=%d ttl=%s got=%d want=%d", tc.configured, tc.ttl, got, tc.want)
 		}
 	}
-	cfg := Config{AzureDynamicSessions: AzureDynamicSessionsConfig{Workdir: " /workspace/custom/ "}}
+	cfg := core.Config{AzureDynamicSessions: core.AzureDynamicSessionsConfig{Workdir: " /workspace/custom/ "}}
 	if got, err := azureDynamicSessionsWorkspace(cfg); err != nil || got != "/workspace/custom" {
 		t.Fatalf("custom workspace=%q error=%v", got, err)
 	}
@@ -170,8 +170,8 @@ func TestAzureDynamicSessionsDefaultConsumersWithMockedAuth(t *testing.T) {
 	if defaults.APIVersion != "2025-02-02-preview" || defaults.Workdir != "/workspace/crabbox" || defaults.TimeoutSecs != 1800 {
 		t.Fatal("compiled defaults changed")
 	}
-	runner := &recordingRunner{result: LocalCommandResult{Stdout: "inert"}}
-	_, err := newAzureDynamicSessionsClient(context.Background(), Config{AzureDynamicSessions: AzureDynamicSessionsConfig{Pool: "legacy"}}, Runtime{Exec: runner, HTTP: &http.Client{}})
+	runner := &recordingRunner{result: core.LocalCommandResult{Stdout: "inert"}}
+	_, err := newAzureDynamicSessionsClient(context.Background(), core.Config{AzureDynamicSessions: core.AzureDynamicSessionsConfig{Pool: "legacy"}}, core.Runtime{Exec: runner, HTTP: &http.Client{}})
 	if err == nil || len(runner.calls) != 0 {
 		t.Fatal("legacy Pool validation must precede mocked authentication")
 	}
@@ -233,9 +233,9 @@ func TestAzureDynamicSessionsFallbackBoundsControlAndPreservesExecStream(t *test
 func TestAzureDynamicSessionsInjectedHTTPClientIsPreservedForBothPlanes(t *testing.T) {
 	t.Setenv(tokenEnvName, "test-token")
 	injected := &http.Client{Timeout: 17 * time.Second}
-	api, err := newAzureDynamicSessionsClient(context.Background(), Config{AzureDynamicSessions: AzureDynamicSessionsConfig{
+	api, err := newAzureDynamicSessionsClient(context.Background(), core.Config{AzureDynamicSessions: core.AzureDynamicSessionsConfig{
 		Endpoint: "http://127.0.0.1:8787",
-	}}, Runtime{HTTP: injected})
+	}}, core.Runtime{HTTP: injected})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func TestAzureDynamicSessionsInjectedHTTPClientIsPreservedForBothPlanes(t *testi
 }
 
 func TestAzureDynamicSessionsEndpointRequiresPoolManagementEndpoint(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	if _, err := azureDynamicSessionsEndpoint(cfg); err == nil {
 		t.Fatal("endpoint should be required")
 	}
@@ -263,12 +263,12 @@ func TestAzureDynamicSessionsEndpointRequiresPoolManagementEndpoint(t *testing.T
 
 func TestAzureDynamicSessionsPoolSelectorIsUnsupported(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	RegisterAzureDynamicSessionsProviderFlags(fs, Config{})
+	RegisterAzureDynamicSessionsProviderFlags(fs, core.Config{})
 	if fs.Lookup("azure-dynamic-sessions-pool") != nil {
 		t.Fatal("azure-dynamic-sessions-pool should not be registered")
 	}
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.AzureDynamicSessions.Endpoint = "https://pool.env.eastus.azurecontainerapps.io"
 	cfg.AzureDynamicSessions.Pool = "pool"
 	_, err := azureDynamicSessionsEndpoint(cfg)
@@ -288,7 +288,7 @@ func TestAzureDynamicSessionsEndpointRejectsUnsafeTokenDestinations(t *testing.T
 		"pool.env.eastus.azurecontainerapps.io",
 	} {
 		t.Run(endpoint, func(t *testing.T) {
-			cfg := Config{}
+			cfg := core.Config{}
 			cfg.AzureDynamicSessions.Endpoint = endpoint
 			_, err := azureDynamicSessionsEndpoint(cfg)
 			if err == nil {
@@ -299,7 +299,7 @@ func TestAzureDynamicSessionsEndpointRejectsUnsafeTokenDestinations(t *testing.T
 }
 
 func TestAzureDynamicSessionsEndpointAllowsLoopbackHTTPForLocalRunner(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.AzureDynamicSessions.Endpoint = "http://127.0.0.1:8787/"
 	got, err := azureDynamicSessionsEndpoint(cfg)
 	if err != nil {
@@ -312,9 +312,9 @@ func TestAzureDynamicSessionsEndpointAllowsLoopbackHTTPForLocalRunner(t *testing
 
 func TestAzureDynamicSessionsAccessTokenUsesDynamicsessionsAudience(t *testing.T) {
 	t.Setenv(tokenEnvName, "")
-	runner := &recordingRunner{result: LocalCommandResult{Stdout: "token\n"}}
-	cfg := Config{AzureTenant: "tenant-1", AzureSubscription: "sub-1"}
-	token, err := azureDynamicSessionsAccessToken(context.Background(), cfg, Runtime{Exec: runner})
+	runner := &recordingRunner{result: core.LocalCommandResult{Stdout: "token\n"}}
+	cfg := core.Config{AzureTenant: "tenant-1", AzureSubscription: "sub-1"}
+	token, err := azureDynamicSessionsAccessToken(context.Background(), cfg, core.Runtime{Exec: runner})
 	if err != nil {
 		t.Fatalf("access token: %v", err)
 	}
@@ -335,9 +335,9 @@ func TestAzureDynamicSessionsAccessTokenUsesDynamicsessionsAudience(t *testing.T
 
 func TestAzureDynamicSessionsAccessTokenPrefersEnvironmentToken(t *testing.T) {
 	t.Setenv(tokenEnvName, " env-token ")
-	runner := &recordingRunner{result: LocalCommandResult{Stdout: "az-token\n"}}
+	runner := &recordingRunner{result: core.LocalCommandResult{Stdout: "az-token\n"}}
 
-	token, err := azureDynamicSessionsAccessToken(context.Background(), Config{}, Runtime{Exec: runner})
+	token, err := azureDynamicSessionsAccessToken(context.Background(), core.Config{}, core.Runtime{Exec: runner})
 	if err != nil {
 		t.Fatalf("access token: %v", err)
 	}
@@ -708,11 +708,11 @@ func (w errWriter) Write([]byte) (int, error) {
 }
 
 type recordingRunner struct {
-	calls  []LocalCommandRequest
-	result LocalCommandResult
+	calls  []core.LocalCommandRequest
+	result core.LocalCommandResult
 }
 
-func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
 	return r.result, nil
 }

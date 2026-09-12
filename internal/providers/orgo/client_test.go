@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -405,7 +406,7 @@ func (fn orgoRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error)
 func TestNewOrgoClientRejectsInsecureNonLoopbackAPIBase(t *testing.T) {
 	t.Setenv("CRABBOX_ORGO_API_KEY", "test-key")
 	t.Setenv("CRABBOX_ORGO_API_BASE", "http://api.example.test")
-	if _, err := newOrgoClient(Config{Orgo: OrgoConfig{APIBase: "http://api.example.test"}}, Runtime{}); err == nil || !strings.Contains(err.Error(), "must use https") {
+	if _, err := newOrgoClient(core.Config{Orgo: core.OrgoConfig{APIBase: "http://api.example.test"}}, core.Runtime{}); err == nil || !strings.Contains(err.Error(), "must use https") {
 		t.Fatalf("err=%v, want HTTPS requirement", err)
 	}
 }
@@ -413,7 +414,7 @@ func TestNewOrgoClientRejectsInsecureNonLoopbackAPIBase(t *testing.T) {
 func TestNewOrgoClientUsesResolvedConfigBeforeAmbientAPIBase(t *testing.T) {
 	t.Setenv("CRABBOX_ORGO_API_KEY", "test-key")
 	t.Setenv("CRABBOX_ORGO_API_BASE", "https://ambient.example.test")
-	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIBase: "https://flag-selected.example.test"}}, Runtime{}).(*orgoBackend)
+	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIBase: "https://flag-selected.example.test"}}, core.Runtime{}).(*orgoBackend)
 	client, err := backend.api()
 	if err != nil {
 		t.Fatal(err)
@@ -475,7 +476,7 @@ func TestOrgoFallbackBoundsControlAndPreservesCommand(t *testing.T) {
 func TestOrgoInjectedHTTPClientIsPreservedForBothPlanes(t *testing.T) {
 	t.Setenv("CRABBOX_ORGO_API_KEY", "test-key")
 	injected := &http.Client{Timeout: 17 * time.Second}
-	api, err := newOrgoClient(Config{Orgo: OrgoConfig{APIBase: "http://127.0.0.1:8787"}}, Runtime{HTTP: injected})
+	api, err := newOrgoClient(core.Config{Orgo: core.OrgoConfig{APIBase: "http://127.0.0.1:8787"}}, core.Runtime{HTTP: injected})
 	if err != nil {
 		t.Fatal(err)
 	}

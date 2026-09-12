@@ -75,12 +75,12 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 	return shared.ConfigureDoctor("cloud-run-sandbox", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }
 
-func validateConfig(cfg Config) error {
+func validateConfig(cfg core.Config) error {
 	if workdir := strings.TrimSpace(cfg.CloudRunSandbox.Workdir); workdir != "" && !strings.HasPrefix(workdir, "/") {
-		return exit(2, "cloudRunSandbox.workdir must be an absolute path")
+		return core.Exit(2, "cloudRunSandbox.workdir must be an absolute path")
 	}
 	if cli := strings.TrimSpace(cfg.CloudRunSandbox.CLIPath); cli == "" {
-		return exit(2, "cloudRunSandbox.cliPath must not be empty")
+		return core.Exit(2, "cloudRunSandbox.cliPath must not be empty")
 	}
 	return nil
 }
