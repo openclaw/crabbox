@@ -25,31 +25,15 @@ var tagSchema = shared.LeaseTagSchema(
 func leaseTags(cfg core.Config, leaseID, slug, state string, keep bool, now time.Time) []string {
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, now)
 	labels["state"] = state
-	tags := []string{
-		tagCrabbox,
-		"crabbox:provider:" + providerName,
-		"crabbox:target:" + core.TargetLinux,
-	}
-	for _, key := range tagSchema.Keys() {
-		if value := labels[key]; value != "" {
-			tags = append(tags, encodeTagKV(key, value))
-		}
-	}
-	return shared.NormalizeTags(tags)
+	return tagsFromLabels(labels)
 }
 
 func tagsFromLabels(labels map[string]string) []string {
-	tags := []string{
+	return tagSchema.EncodeTags(labels, []string{
 		tagCrabbox,
 		"crabbox:provider:" + providerName,
 		"crabbox:target:" + core.TargetLinux,
-	}
-	for _, key := range tagSchema.Keys() {
-		if value := labels[key]; value != "" {
-			tags = append(tags, encodeTagKV(key, value))
-		}
-	}
-	return shared.NormalizeTags(tags)
+	}, encodeTagKV)
 }
 
 func encodeTagKV(key, value string) string {

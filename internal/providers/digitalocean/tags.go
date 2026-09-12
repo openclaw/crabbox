@@ -27,31 +27,15 @@ func leaseTags(cfg core.Config, leaseID, slug, state string, keep bool, now time
 	if cfg.Tailscale.Enabled && len(cfg.Tailscale.Tags) > 0 {
 		labels["tailscale_tags"] = strings.Join(cfg.Tailscale.Tags, ",")
 	}
-	tags := []string{
-		tagCrabbox,
-		"crabbox:provider:" + providerName,
-		"crabbox:target:" + core.TargetLinux,
-	}
-	for _, key := range tagSchema.Keys() {
-		if value := labels[key]; value != "" {
-			tags = append(tags, encodeTagKV(key, value))
-		}
-	}
-	return shared.NormalizeTags(tags)
+	return tagsFromLabels(labels)
 }
 
 func tagsFromLabels(labels map[string]string) []string {
-	tags := []string{
+	return tagSchema.EncodeTags(labels, []string{
 		tagCrabbox,
 		"crabbox:provider:" + providerName,
 		"crabbox:target:" + core.TargetLinux,
-	}
-	for _, key := range tagSchema.Keys() {
-		if value := labels[key]; value != "" {
-			tags = append(tags, encodeTagKV(key, value))
-		}
-	}
-	return shared.NormalizeTags(tags)
+	}, encodeTagKV)
 }
 
 func encodeTagKV(key, value string) string {
