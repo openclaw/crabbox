@@ -612,7 +612,7 @@ func processFileDescriptors(t *testing.T) map[int]uint64 {
 }
 
 type acquisitionResult struct {
-	lease LeaseTarget
+	lease core.LeaseTarget
 	err   error
 	done  chan struct{}
 }
@@ -654,7 +654,7 @@ func (f *processFixture) assertFailedAcquisitionCleaned(t *testing.T, child proc
 	if err != nil || len(keys) != 0 {
 		t.Fatalf("failed-acquisition keys=%v err=%v", keys, err)
 	}
-	claims, err := listLeaseClaims()
+	claims, err := core.ListLeaseClaims()
 	if err != nil || len(claims) != 0 {
 		t.Fatalf("failed-acquisition claims=%v err=%v", claims, err)
 	}
@@ -769,7 +769,7 @@ func TestAcquireStartupSuccessLifetime(t *testing.T) {
 			if result.err != nil {
 				t.Fatal(result.err)
 			}
-			claims, err := listLeaseClaims()
+			claims, err := core.ListLeaseClaims()
 			if err != nil || len(claims) != 1 || claims[0].LeaseID != result.lease.LeaseID || claims[0].CloudImmutableID == "" {
 				t.Fatalf("claim=%+v err=%v", claims, err)
 			}

@@ -56,13 +56,13 @@ func TestClaimOperationWaitHonorsCallerContext(t *testing.T) {
 						var err error
 						switch operation {
 						case "stop":
-							err = b.Stop(ctx, StopRequest{ID: claim.LeaseID})
+							err = b.Stop(ctx, core.StopRequest{ID: claim.LeaseID})
 						case "reuse":
 							_, err = b.resolveLease(ctx, claim.LeaseID, claim.RepoRoot, false)
 						case "status":
-							_, err = b.Status(ctx, StatusRequest{ID: claim.LeaseID})
+							_, err = b.Status(ctx, core.StatusRequest{ID: claim.LeaseID})
 						case "list":
-							_, err = b.List(ctx, ListRequest{})
+							_, err = b.List(ctx, core.ListRequest{})
 						}
 						done <- err
 					}()
@@ -190,7 +190,7 @@ func TestAcquisitionPublicationRollbackIncludesClaimFence(t *testing.T) {
 					t.Fatal(err)
 				}
 				done := make(chan error, 1)
-				go func() { _, err := b.createLease(ctx, Repo{Root: home}, false, ""); done <- err }()
+				go func() { _, err := b.createLease(ctx, core.Repo{Root: home}, false, ""); done <- err }()
 				<-entered
 				synctest.Wait()
 				if _, err := readMachineIdentity(f.root, name); err != nil {
@@ -257,10 +257,10 @@ func TestAcquisitionPublicationRollbackIncludesClaimFence(t *testing.T) {
 func TestClaimContextLookupsRemainReadOnly(t *testing.T) {
 	b, f, claim := identityFixture(t)
 	b.rt.Exec = claimContextRunner{inner: f.runner}
-	if _, err := b.List(t.Context(), ListRequest{}); err != nil {
+	if _, err := b.List(t.Context(), core.ListRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := b.Status(t.Context(), StatusRequest{ID: claim.LeaseID}); err != nil {
+	if _, err := b.Status(t.Context(), core.StatusRequest{ID: claim.LeaseID}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := b.resolveLease(t.Context(), claim.LeaseID, "", false); err != nil {
@@ -520,7 +520,7 @@ func TestStopRejectsUnboundAndReplacedMachines(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := b.Stop(t.Context(), StopRequest{ID: claim.LeaseID}); err == nil {
+			if err := b.Stop(t.Context(), core.StopRequest{ID: claim.LeaseID}); err == nil {
 				t.Fatal("unsafe stop succeeded")
 			}
 			requireNoMachineMutation(t, f)
@@ -532,7 +532,7 @@ func TestStopRejectsUnboundAndReplacedMachines(t *testing.T) {
 func TestStopBoundStoppedMachineAndConfirmAbsence(t *testing.T) {
 	b, f, claim := identityFixture(t)
 	t.Setenv("CONTAINER_APP_ROOT", t.TempDir())
-	if err := b.Stop(t.Context(), StopRequest{ID: claim.Slug}); err != nil {
+	if err := b.Stop(t.Context(), core.StopRequest{ID: claim.Slug}); err != nil {
 		t.Fatal(err)
 	}
 	if _, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
@@ -579,7 +579,7 @@ func TestDeleteRetainsClaimWhenRemovalOrInventoryIsUncertain(t *testing.T) {
 				}
 				return core.LocalCommandResult{}, nil, false
 			}
-			if err := b.Stop(t.Context(), StopRequest{ID: claim.LeaseID}); err == nil {
+			if err := b.Stop(t.Context(), core.StopRequest{ID: claim.LeaseID}); err == nil {
 				t.Fatal("uncertain deletion succeeded")
 			}
 			requireClaimUnchanged(t, claim)
@@ -600,7 +600,7 @@ func TestStopRetriesConfirmedAbsenceWithoutAnotherDelete(t *testing.T) {
 		}
 		return core.LocalCommandResult{}, nil, false
 	}
-	if err := b.Stop(t.Context(), StopRequest{ID: claim.LeaseID}); err == nil {
+	if err := b.Stop(t.Context(), core.StopRequest{ID: claim.LeaseID}); err == nil {
 		t.Fatal("uncertain deletion succeeded")
 	}
 	requireClaimUnchanged(t, claim)
@@ -609,7 +609,7 @@ func TestStopRetriesConfirmedAbsenceWithoutAnotherDelete(t *testing.T) {
 	}
 	f.before = nil
 	f.runner.requests = nil
-	if err := b.Stop(t.Context(), StopRequest{ID: claim.LeaseID}); err != nil {
+	if err := b.Stop(t.Context(), core.StopRequest{ID: claim.LeaseID}); err != nil {
 		t.Fatal(err)
 	}
 	requireNoMachineMutation(t, f)
@@ -621,7 +621,7 @@ func TestStopRetriesConfirmedAbsenceWithoutAnotherDelete(t *testing.T) {
 func TestAbsentInventoryDoesNotRetireExistingStorage(t *testing.T) {
 	b, f, claim := identityFixture(t)
 	delete(f.machines, claim.CloudID)
-	if err := b.Stop(t.Context(), StopRequest{ID: claim.LeaseID}); err == nil {
+	if err := b.Stop(t.Context(), core.StopRequest{ID: claim.LeaseID}); err == nil {
 		t.Fatal("retired claim while bundle still exists")
 	}
 	requireNoMachineMutation(t, f)
@@ -761,7 +761,7 @@ func TestAcquisitionRollbackRequiresOriginalBindingAndClaim(t *testing.T) {
 				}
 				return core.LocalCommandResult{}, nil, false
 			}
-			if _, err := b.createLease(ctx, Repo{Root: filepath.Join(home, "src", "fixture")}, false, ""); err == nil {
+			if _, err := b.createLease(ctx, core.Repo{Root: filepath.Join(home, "src", "fixture")}, false, ""); err == nil {
 				t.Fatal("failed acquisition succeeded")
 			}
 			removed := false
@@ -798,7 +798,7 @@ func TestAcquisitionRejectsEmptyRepositoryBeforeMutation(t *testing.T) {
 	originalGOOS, originalGOARCH := hostGOOS, hostGOARCH
 	hostGOOS, hostGOARCH = "darwin", "arm64"
 	defer func() { hostGOOS, hostGOARCH = originalGOOS, originalGOARCH }()
-	if _, err := b.createLease(t.Context(), Repo{}, false, ""); err == nil {
+	if _, err := b.createLease(t.Context(), core.Repo{}, false, ""); err == nil {
 		t.Fatal("empty repo accepted")
 	}
 	requireNoMachineMutation(t, f)

@@ -24,21 +24,21 @@ var statusPollInterval = 2 * time.Second
 const dockerSandboxCleanupTimeout = 30 * time.Second
 
 type backend struct {
-	spec ProviderSpec
-	cfg  Config
-	rt   Runtime
+	spec core.ProviderSpec
+	cfg  core.Config
+	rt   core.Runtime
 }
 
-func NewBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+func NewBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = providerName
 	return &backend{spec: spec, cfg: cfg, rt: rt}
 }
 
-func (b *backend) Spec() ProviderSpec { return b.spec }
+func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
-func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
+func (b *backend) Warmup(ctx context.Context, req core.WarmupRequest) error {
 	if req.ActionsRunner {
-		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
+		return core.Exit(2, "--actions-runner is not supported for provider=%s", providerName)
 	}
 	started := core.ClockNow(b.rt.Clock)
 	cli, err := newSBXCLI(b.cfg, b.rt)
@@ -62,34 +62,34 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	})
 }
 
-func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
+func (b *backend) Run(ctx context.Context, req core.RunRequest) (result core.RunResult, retErr error) {
 	if err := rejectRunOptions(b.spec, req); err != nil {
-		return RunResult{}, err
+		return core.RunResult{}, err
 	}
 	workdir, err := dockerSandboxWorkdir(b.cfg, req.Repo.Root)
 	if err != nil {
-		return RunResult{}, err
+		return core.RunResult{}, err
 	}
 	started := core.ClockNow(b.rt.Clock)
 	cli, err := newSBXCLI(b.cfg, b.rt)
 	if err != nil {
-		return RunResult{}, err
+		return core.RunResult{}, err
 	}
 	leaseID, sandboxName, slug := "", "", ""
 	acquired := req.ID == ""
 	if acquired {
 		leaseID, sandboxName, slug, err = b.createSandbox(ctx, cli, req.Repo, req.Reclaim, req.RequestedSlug)
 		if err != nil {
-			return RunResult{}, err
+			return core.RunResult{}, err
 		}
 		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s name=%s\n", leaseID, slug, providerName, sandboxName, sandboxName)
 	} else {
 		leaseID, sandboxName, slug, err = resolveLeaseID(req.ID, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout)
 		if err != nil {
-			return RunResult{}, err
+			return core.RunResult{}, err
 		}
 	}
-	result = RunResult{
+	result = core.RunResult{
 		Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true,
 		Session: &core.RunSessionHandle{
 			Provider: providerName, LeaseID: leaseID, Slug: slug, Reused: !acquired, Kept: true,
@@ -102,7 +102,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	defer func() {
 		result, retErr = shared.PinDelegatedRunFailure(result, retErr)
 		if retErr != nil {
-			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+			core.HandleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		}
 		// Preserve clone commits based on command success, before reporting can fail.
 		if commandRan && retErr == nil && acquired && b.cfg.DockerSandbox.Clone && !req.Keep {
@@ -127,9 +127,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			fmt.Fprintf(b.rt.Stderr, "docker-sandbox run summary sync_delegated=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
 		}
 		if req.TimingJSON {
-			timingErr := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
+			timingErr := core.WriteTimingJSON(b.rt.Stderr, core.TimingReportWithRunResult(core.TimingReport{
 				Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true,
-				SyncPhases:  []timingPhase{{Name: "sync", Skipped: true, Reason: "provider-delegated workspace"}},
+				SyncPhases:  []core.TimingPhase{{Name: "sync", Skipped: true, Reason: "provider-delegated workspace"}},
 				SyncSkipped: true, CommandMs: result.Command.Milliseconds(), TotalMs: result.Total.Milliseconds(),
 				ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label),
 			}, result, retErr))
@@ -149,7 +149,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	}
 	command := intent.Argv("sh", "-lc")
 	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
-		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+		core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
 	envFile := ""
 	if len(req.Env) > 0 {
@@ -174,12 +174,12 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		return result, shared.ExitErrorWithCause(result.ExitCode, fmt.Sprintf("docker-sandbox run failed: %v", shared.RedactErrorSecrets(runErr.Error())), runErr)
 	}
 	if result.ExitCode != 0 {
-		return result, exit(result.ExitCode, "docker-sandbox run exited %d", result.ExitCode)
+		return result, core.Exit(result.ExitCode, "docker-sandbox run exited %d", result.ExitCode)
 	}
 	return result, nil
 }
 
-func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) {
+func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseView, error) {
 	cli, err := newSBXCLI(b.cfg, b.rt)
 	if err != nil {
 		return nil, err
@@ -194,11 +194,11 @@ func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) 
 			byName[record.Name] = record
 		}
 	}
-	claims, err := listLeaseClaims()
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return nil, err
 	}
-	var servers []Server
+	var servers []core.Server
 	for _, claim := range claims {
 		if claim.Provider != providerName {
 			continue
@@ -213,12 +213,12 @@ func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) 
 	return servers, nil
 }
 
-func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	cli, err := newSBXCLI(b.cfg, b.rt)
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
-	result := DoctorResult{Provider: providerName}
+	result := core.DoctorResult{Provider: providerName}
 	version, versionErr := cli.version(ctx)
 	result.Checks = append(result.Checks, doctorCheck("sbx_version", versionErr, map[string]string{"version": version}))
 	if versionErr == nil {
@@ -227,9 +227,9 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	records, listErr := cli.list(ctx)
 	result.Checks = append(result.Checks, doctorCheck("sbx_inventory", listErr, map[string]string{"leases": fmt.Sprint(len(records))}))
 	if _, diagnoseErr := cli.diagnose(ctx); diagnoseErr == nil {
-		result.Checks = append(result.Checks, DoctorCheck{Status: "ok", Check: "sbx_diagnose", Message: "diagnose completed", Details: map[string]string{"mutation": "false"}})
+		result.Checks = append(result.Checks, core.DoctorCheck{Status: "ok", Check: "sbx_diagnose", Message: "diagnose completed", Details: map[string]string{"mutation": "false"}})
 	} else {
-		result.Checks = append(result.Checks, DoctorCheck{Status: "warn", Check: "sbx_diagnose", Message: diagnoseErr.Error(), Details: map[string]string{"mutation": "false", "optional": "true"}})
+		result.Checks = append(result.Checks, core.DoctorCheck{Status: "warn", Check: "sbx_diagnose", Message: diagnoseErr.Error(), Details: map[string]string{"mutation": "false", "optional": "true"}})
 	}
 	if versionErr != nil || listErr != nil {
 		result.Status = "error"
@@ -244,14 +244,14 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	return result, nil
 }
 
-func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, error) {
+func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
 	cli, err := newSBXCLI(b.cfg, b.rt)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	leaseID, sandboxName, slug, err := resolveLeaseID(req.ID, "", false, 0)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
 	if req.WaitTimeout <= 0 {
@@ -260,11 +260,11 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	for {
 		records, err := cli.list(ctx)
 		if err != nil {
-			return StatusView{}, err
+			return core.StatusView{}, err
 		}
 		record, ok := findRecord(records, sandboxName)
 		if !ok {
-			return StatusView{}, exit(4, "docker-sandbox sandbox %q is not present in sbx inventory", sandboxName)
+			return core.StatusView{}, core.Exit(4, "docker-sandbox sandbox %q is not present in sbx inventory", sandboxName)
 		}
 		view := statusFromRecord(leaseID, slug, record)
 		if !req.Wait || view.Ready || dockerSandboxTerminalState(view.State) {
@@ -272,7 +272,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		}
 		remaining := deadline.Sub(core.ClockNow(b.rt.Clock))
 		if remaining <= 0 {
-			return StatusView{}, exit(5, "timed out waiting for docker-sandbox sandbox %s to become ready", sandboxName)
+			return core.StatusView{}, core.Exit(5, "timed out waiting for docker-sandbox sandbox %s to become ready", sandboxName)
 		}
 		sleepFor := statusPollInterval
 		if remaining < sleepFor {
@@ -287,13 +287,13 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 				default:
 				}
 			}
-			return StatusView{}, ctx.Err()
+			return core.StatusView{}, ctx.Err()
 		case <-timer.C:
 		}
 	}
 }
 
-func (b *backend) Stop(ctx context.Context, req StopRequest) error {
+func (b *backend) Stop(ctx context.Context, req core.StopRequest) error {
 	cli, err := newSBXCLI(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -319,17 +319,17 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 }
 
 func dockerSandboxClaimForDeletion(leaseID string) (core.LeaseClaim, error) {
-	claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 	if err != nil {
 		return core.LeaseClaim{}, err
 	}
 	if !ok || claim.LeaseID != leaseID {
-		return core.LeaseClaim{}, exit(4, "docker-sandbox sandbox %q is not claimed by Crabbox", leaseID)
+		return core.LeaseClaim{}, core.Exit(4, "docker-sandbox sandbox %q is not claimed by Crabbox", leaseID)
 	}
 	return claim, nil
 }
 
-func (b *backend) Ports(ctx context.Context, req PortsRequest) (string, error) {
+func (b *backend) Ports(ctx context.Context, req core.PortsRequest) (string, error) {
 	cli, err := newSBXCLI(b.cfg, b.rt)
 	if err != nil {
 		return "", err
@@ -341,7 +341,7 @@ func (b *backend) Ports(ctx context.Context, req PortsRequest) (string, error) {
 	return cli.ports(ctx, sandboxName, req.Publish, req.Unpublish, req.JSON)
 }
 
-func (b *backend) Copy(ctx context.Context, req CopyRequest) error {
+func (b *backend) Copy(ctx context.Context, req core.CopyRequest) error {
 	cli, err := newSBXCLI(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -373,20 +373,20 @@ func rewriteSandboxCopyPaths(sandboxName, src, dst string) (string, string, erro
 	srcSandbox, srcPath := parseSandboxPathSpec(src)
 	dstSandbox, dstPath := parseSandboxPathSpec(dst)
 	if srcSandbox == "" && dstSandbox == "" {
-		return "", "", exit(2, "copy requires one side to use SANDBOX:PATH")
+		return "", "", core.Exit(2, "copy requires one side to use SANDBOX:PATH")
 	}
 	if srcSandbox != "" && dstSandbox != "" {
-		return "", "", exit(2, "copy does not support sandbox-to-sandbox transfers")
+		return "", "", core.Exit(2, "copy does not support sandbox-to-sandbox transfers")
 	}
 	if srcSandbox != "" {
 		if !strings.EqualFold(srcSandbox, "SANDBOX") {
-			return "", "", exit(2, "copy source must use SANDBOX:PATH")
+			return "", "", core.Exit(2, "copy source must use SANDBOX:PATH")
 		}
 		src = sandboxName + ":" + srcPath
 	}
 	if dstSandbox != "" {
 		if !strings.EqualFold(dstSandbox, "SANDBOX") {
-			return "", "", exit(2, "copy destination must use SANDBOX:PATH")
+			return "", "", core.Exit(2, "copy destination must use SANDBOX:PATH")
 		}
 		dst = sandboxName + ":" + dstPath
 	}
@@ -408,7 +408,7 @@ func parseSandboxPathSpec(value string) (string, string) {
 	return prefix, value[idx+1:]
 }
 
-func (b *backend) createSandbox(ctx context.Context, cli *sbxCLI, repo Repo, reclaim bool, requestedSlug string) (string, string, string, error) {
+func (b *backend) createSandbox(ctx context.Context, cli *sbxCLI, repo core.Repo, reclaim bool, requestedSlug string) (string, string, string, error) {
 	if err := validateCreateRepo(b.cfg, repo); err != nil {
 		return "", "", "", err
 	}
@@ -417,11 +417,11 @@ func (b *backend) createSandbox(ctx context.Context, cli *sbxCLI, repo Repo, rec
 		return "", "", "", err
 	}
 	leaseID := leasePrefix + sandboxName
-	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
+	slug, err := core.AllocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return "", "", "", b.removeCreatedSandboxAfterClaimFailure(cli, sandboxName, err)
 	}
-	if err := claimLeaseForRepoProviderPond(leaseID, slug, providerName, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
+	if err := core.ClaimLeaseForRepoProviderPond(leaseID, slug, providerName, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
 		return "", "", "", b.removeCreatedSandboxAfterClaimFailure(cli, sandboxName, err)
 	}
 	return leaseID, sandboxName, slug, nil
@@ -441,14 +441,14 @@ func (b *backend) removeCreatedSandboxAfterClaimFailure(cli *sbxCLI, sandboxName
 func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration) (string, string, string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return "", "", "", exit(2, "provider=docker-sandbox requires a Crabbox-created sandbox slug or lease id")
+		return "", "", "", core.Exit(2, "provider=docker-sandbox requires a Crabbox-created sandbox slug or lease id")
 	}
 	probes := []string{id}
 	if !strings.HasPrefix(id, leasePrefix) {
 		probes = append(probes, leasePrefix+id)
 	}
 	for _, probe := range probes {
-		claim, ok, err := resolveLeaseClaimForProvider(probe, providerName)
+		claim, ok, err := core.ResolveLeaseClaimForProvider(probe, providerName)
 		if err != nil {
 			return "", "", "", err
 		}
@@ -456,49 +456,49 @@ func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration
 			continue
 		}
 		if repoRoot != "" {
-			if err := claimLeaseForRepoProviderPond(claim.LeaseID, claim.Slug, providerName, claim.Pond, repoRoot, timeoutOrDefault(idleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), reclaim); err != nil {
+			if err := core.ClaimLeaseForRepoProviderPond(claim.LeaseID, claim.Slug, providerName, claim.Pond, repoRoot, timeoutOrDefault(idleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), reclaim); err != nil {
 				return "", "", "", err
 			}
 		}
 		slug := claim.Slug
 		if strings.TrimSpace(slug) == "" {
-			slug = newLeaseSlug(claim.LeaseID)
+			slug = core.NewLeaseSlug(claim.LeaseID)
 		}
 		return claim.LeaseID, sandboxNameFromLeaseID(claim.LeaseID), slug, nil
 	}
-	return "", "", "", exit(4, "docker-sandbox sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<sandbox-name>", id, leasePrefix)
+	return "", "", "", core.Exit(4, "docker-sandbox sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<sandbox-name>", id, leasePrefix)
 }
 
-func rejectRunOptions(spec ProviderSpec, req RunRequest) error {
+func rejectRunOptions(spec core.ProviderSpec, req core.RunRequest) error {
 	if err := core.RejectDelegatedSyncOptionsForSpec(spec, req); err != nil {
 		return err
 	}
 	if req.Options.Desktop || req.Options.Browser || req.Options.Code {
-		return exit(2, "provider=%s does not support desktop, browser, or code-server options in v1", providerName)
+		return core.Exit(2, "provider=%s does not support desktop, browser, or code-server options in v1", providerName)
 	}
 	if req.Options.Tailscale.Enabled {
-		return exit(2, "provider=%s is delegated-run only and does not support Tailscale options", providerName)
+		return core.Exit(2, "provider=%s is delegated-run only and does not support Tailscale options", providerName)
 	}
 	if !req.ApplyLocalPatch && strings.TrimSpace(req.Repo.Root) == "" {
-		return exit(2, "provider=%s requires a local workspace", providerName)
+		return core.Exit(2, "provider=%s requires a local workspace", providerName)
 	}
 	return nil
 }
 
-func validateCreateRepo(cfg Config, repo Repo) error {
+func validateCreateRepo(cfg core.Config, repo core.Repo) error {
 	if strings.TrimSpace(repo.Root) == "" {
-		return exit(2, "provider=%s requires a local workspace", providerName)
+		return core.Exit(2, "provider=%s requires a local workspace", providerName)
 	}
 	if cfg.DockerSandbox.Clone {
 		cmd := exec.Command("git", "rev-parse", "--git-dir", "--git-common-dir", "--is-inside-work-tree")
 		cmd.Dir = repo.Root
 		output, err := cmd.CombinedOutput()
 		if err != nil {
-			return exit(2, "docker-sandbox --clone requires a normal Git repository workspace: %v: %s", err, strings.TrimSpace(string(output)))
+			return core.Exit(2, "docker-sandbox --clone requires a normal Git repository workspace: %v: %s", err, strings.TrimSpace(string(output)))
 		}
 		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 		if len(lines) != 3 || strings.TrimSpace(lines[2]) != "true" {
-			return exit(2, "docker-sandbox --clone requires a normal Git repository workspace: git rev-parse output was %q", strings.TrimSpace(string(output)))
+			return core.Exit(2, "docker-sandbox --clone requires a normal Git repository workspace: git rev-parse output was %q", strings.TrimSpace(string(output)))
 		}
 		resolveGitPath := func(value string) string {
 			value = strings.TrimSpace(value)
@@ -508,13 +508,13 @@ func validateCreateRepo(cfg Config, repo Repo) error {
 			return filepath.Clean(filepath.Join(repo.Root, value))
 		}
 		if resolveGitPath(lines[0]) != resolveGitPath(lines[1]) {
-			return exit(2, "docker-sandbox --clone requires a normal Git repository workspace: linked Git worktrees are not supported")
+			return core.Exit(2, "docker-sandbox --clone requires a normal Git repository workspace: linked Git worktrees are not supported")
 		}
 	}
 	return nil
 }
 
-func dockerSandboxAgent(cfg Config) string {
+func dockerSandboxAgent(cfg core.Config) string {
 	agent := strings.TrimSpace(cfg.DockerSandbox.Agent)
 	if agent == "" {
 		return defaultAgent
@@ -522,7 +522,7 @@ func dockerSandboxAgent(cfg Config) string {
 	return agent
 }
 
-func dockerSandboxWorkdir(cfg Config, repoRoot string) (string, error) {
+func dockerSandboxWorkdir(cfg core.Config, repoRoot string) (string, error) {
 	workdir := strings.TrimSpace(cfg.DockerSandbox.Workdir)
 	if workdir == "" {
 		workdir = repoRoot
@@ -532,7 +532,7 @@ func dockerSandboxWorkdir(cfg Config, repoRoot string) (string, error) {
 	}
 	clean := path.Clean(workdir)
 	if !strings.HasPrefix(clean, "/") {
-		return "", exit(2, "docker-sandbox workdir %q must be an absolute path", workdir)
+		return "", core.Exit(2, "docker-sandbox workdir %q must be an absolute path", workdir)
 	}
 	return clean, nil
 }
@@ -541,8 +541,8 @@ func sandboxNameFromLeaseID(leaseID string) string {
 	return strings.TrimPrefix(leaseID, leasePrefix)
 }
 
-func newSandboxName(repo Repo) string {
-	base := normalizeLeaseSlug(repo.Name)
+func newSandboxName(repo core.Repo) string {
+	base := core.NormalizeLeaseSlug(repo.Name)
 	if base == "" {
 		base = "crabbox"
 	}
@@ -572,7 +572,7 @@ func randomSuffix() string {
 	return hex.EncodeToString(b[:])
 }
 
-func serverFromClaimRecord(claim core.LeaseClaim, record sandboxRecord) Server {
+func serverFromClaimRecord(claim core.LeaseClaim, record sandboxRecord) core.Server {
 	state := core.Blank(record.State, "unknown")
 	labels := map[string]string{
 		"provider":  providerName,
@@ -584,7 +584,7 @@ func serverFromClaimRecord(claim core.LeaseClaim, record sandboxRecord) Server {
 		"agent":     core.Blank(record.Agent, defaultAgent),
 		"workspace": record.Workspace,
 	}
-	server := Server{
+	server := core.Server{
 		Provider: providerName,
 		CloudID:  record.Name,
 		Name:     record.Name,
@@ -595,9 +595,9 @@ func serverFromClaimRecord(claim core.LeaseClaim, record sandboxRecord) Server {
 	return server
 }
 
-func statusFromRecord(leaseID, slug string, record sandboxRecord) StatusView {
+func statusFromRecord(leaseID, slug string, record sandboxRecord) core.StatusView {
 	state := core.Blank(record.State, "unknown")
-	return StatusView{
+	return core.StatusView{
 		ID:         leaseID,
 		Slug:       slug,
 		Provider:   providerName,
@@ -653,32 +653,32 @@ func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
 	return fallback
 }
 
-func doctorCheck(name string, err error, details map[string]string) DoctorCheck {
+func doctorCheck(name string, err error, details map[string]string) core.DoctorCheck {
 	if details == nil {
 		details = map[string]string{}
 	}
 	details["mutation"] = "false"
 	if err != nil {
-		return DoctorCheck{Status: "error", Check: name, Message: err.Error(), Details: details}
+		return core.DoctorCheck{Status: "error", Check: name, Message: err.Error(), Details: details}
 	}
-	return DoctorCheck{Status: "ok", Check: name, Message: "ready", Details: details}
+	return core.DoctorCheck{Status: "ok", Check: name, Message: "ready", Details: details}
 }
 
-func dockerSandboxCompatibilityCheck(version string) DoctorCheck {
+func dockerSandboxCompatibilityCheck(version string) core.DoctorCheck {
 	details := map[string]string{
 		"mutation": "false",
 		"baseline": baselineSBX,
 		"version":  version,
 	}
 	if sbxVersionMatchesBaseline(version) {
-		return DoctorCheck{
+		return core.DoctorCheck{
 			Status:  "ok",
 			Check:   "sbx_compatibility",
 			Message: fmt.Sprintf("matches documented compatibility baseline %s", baselineSBX),
 			Details: details,
 		}
 	}
-	return DoctorCheck{
+	return core.DoctorCheck{
 		Status:  "warn",
 		Check:   "sbx_compatibility",
 		Message: fmt.Sprintf("best-effort compatibility; validated baseline is %s", baselineSBX),
@@ -733,7 +733,7 @@ func formatDockerSandboxEnvFile(env map[string]string) (string, error) {
 	keys := make([]string, 0, len(env))
 	for key := range env {
 		if !core.ValidShellEnvName(key) {
-			return "", exit(2, "docker-sandbox env name %q is not a valid shell environment name", key)
+			return "", core.Exit(2, "docker-sandbox env name %q is not a valid shell environment name", key)
 		}
 		keys = append(keys, key)
 	}
@@ -742,7 +742,7 @@ func formatDockerSandboxEnvFile(env map[string]string) (string, error) {
 	for _, key := range keys {
 		value := env[key]
 		if strings.ContainsAny(value, "\x00\r\n") {
-			return "", exit(2, "docker-sandbox env value for %s cannot contain NUL or newlines when forwarded through sbx --env-file", key)
+			return "", core.Exit(2, "docker-sandbox env value for %s cannot contain NUL or newlines when forwarded through sbx --env-file", key)
 		}
 		fmt.Fprintf(&b, "%s=%s\n", key, value)
 	}

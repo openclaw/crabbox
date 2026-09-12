@@ -228,7 +228,7 @@ func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 	// running. We use it as the readiness probe before listing.
 	statusResult, statusErr := b.container(ctx, []string{"system", "status"}, nil, nil)
 	if statusErr != nil {
-		return core.DoctorResult{}, exit(2, "%s system status failed (is the container CLI installed and started with `container system start`?): %s", providerName, commandDetail(statusResult, statusErr))
+		return core.DoctorResult{}, core.Exit(2, "%s system status failed (is the container CLI installed and started with `container system start`?): %s", providerName, commandDetail(statusResult, statusErr))
 	}
 	// The lease path shells out to `container run` with detached mode, `--user`,
 	// `--label`, and `--dns`. Probe that surface here so doctor fails fast on a
@@ -263,7 +263,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		}
 	}
 	if id == "" {
-		return exit(2, "provider=%s release requires a container id", providerName)
+		return core.Exit(2, "provider=%s release requires a container id", providerName)
 	}
 	if err := requireExactAppleContainerClaim(lease.LeaseID, id); err != nil {
 		return err
@@ -296,7 +296,7 @@ func appleContainerClaimStatus(leaseID, containerID string) (owned, conflict boo
 }
 
 func appleContainerOwnershipError(leaseID, containerID string) error {
-	return exit(4, "apple-container lease %q has no exact local claim bound to container %q; adopt it with an explicit --reclaim reuse before stop", strings.TrimSpace(leaseID), strings.TrimSpace(containerID))
+	return core.Exit(4, "apple-container lease %q has no exact local claim bound to container %q; adopt it with an explicit --reclaim reuse before stop", strings.TrimSpace(leaseID), strings.TrimSpace(containerID))
 }
 
 func requireExactAppleContainerClaim(leaseID, containerID string) error {
@@ -415,7 +415,7 @@ func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, 
 func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, leaseID, slug, publicKey string, keep bool) (string, error) {
 	digest, reviewedDefault := core.DefaultContainerImageDigest(cfg.AppleContainer.Image)
 	if reviewedDefault && digest == "" {
-		return "", exit(2, "compiled container image is missing its reviewed digest")
+		return "", core.Exit(2, "compiled container image is missing its reviewed digest")
 	}
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
 	labels["image"] = cfg.AppleContainer.Image
@@ -502,23 +502,23 @@ func appleContainerCacheVolumeMounts(volumes []core.CacheVolumeConfig) ([]string
 		key := strings.TrimSpace(volume.Key)
 		path := strings.TrimSpace(volume.Path)
 		if key == "" {
-			return nil, exit(2, "cache volume key is required")
+			return nil, core.Exit(2, "cache volume key is required")
 		}
 		if strings.Contains(key, ":") {
-			return nil, exit(2, "cache volume key %q must not contain ':'", key)
+			return nil, core.Exit(2, "cache volume key %q must not contain ':'", key)
 		}
 		if path == "" {
-			return nil, exit(2, "cache volume path is required")
+			return nil, core.Exit(2, "cache volume path is required")
 		}
 		if !strings.HasPrefix(path, "/") {
-			return nil, exit(2, "cache volume path %q must be absolute", path)
+			return nil, core.Exit(2, "cache volume path %q must be absolute", path)
 		}
 		hostPath := filepath.Join(root, appleContainerCacheVolumeName(key))
 		if err := os.MkdirAll(hostPath, 0o777); err != nil {
-			return nil, exit(2, "create apple-container cache volume %s: %v", hostPath, err)
+			return nil, core.Exit(2, "create apple-container cache volume %s: %v", hostPath, err)
 		}
 		if err := os.Chmod(hostPath, 0o777); err != nil {
-			return nil, exit(2, "make apple-container cache volume writable %s: %v", hostPath, err)
+			return nil, core.Exit(2, "make apple-container cache volume writable %s: %v", hostPath, err)
 		}
 		mounts = append(mounts, hostPath+":"+path)
 	}
@@ -528,7 +528,7 @@ func appleContainerCacheVolumeMounts(volumes []core.CacheVolumeConfig) ([]string
 func appleContainerCacheRoot() (string, error) {
 	dir, err := os.UserCacheDir()
 	if err != nil {
-		return "", exit(2, "user cache directory is unavailable")
+		return "", core.Exit(2, "user cache directory is unavailable")
 	}
 	return filepath.Join(dir, "crabbox", "apple-container-cache"), nil
 }
@@ -544,7 +544,7 @@ func (b *backend) listContainers(ctx context.Context) ([]inspectContainer, error
 	}
 	all, err := decodeInspect([]byte(result.Stdout))
 	if err != nil {
-		return nil, exit(2, "parse container ls: %v", err)
+		return nil, core.Exit(2, "parse container ls: %v", err)
 	}
 	out := make([]inspectContainer, 0, len(all))
 	for _, c := range all {
@@ -563,10 +563,10 @@ func (b *backend) inspectContainer(ctx context.Context, id string) (inspectConta
 	}
 	containers, err := decodeInspect([]byte(result.Stdout))
 	if err != nil {
-		return inspectContainer{}, exit(2, "parse container inspect for %s: %v", id, err)
+		return inspectContainer{}, core.Exit(2, "parse container inspect for %s: %v", id, err)
 	}
 	if len(containers) == 0 {
-		return inspectContainer{}, exit(4, "container not found: %s", id)
+		return inspectContainer{}, core.Exit(4, "container not found: %s", id)
 	}
 	return containers[0], nil
 }
@@ -576,7 +576,7 @@ func (b *backend) waitForNetworkAddress(ctx context.Context, id string, c inspec
 		return c, nil
 	}
 	if appleContainerTerminalStatus(c.status()) {
-		return inspectContainer{}, exit(5, "apple-container %s stopped before a network address was assigned", id)
+		return inspectContainer{}, core.Exit(5, "apple-container %s stopped before a network address was assigned", id)
 	}
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -592,7 +592,7 @@ func (b *backend) waitForNetworkAddress(ctx context.Context, id string, c inspec
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-deadline.C:
-				return exit(5, "apple-container %s has no network address yet", id)
+				return core.Exit(5, "apple-container %s has no network address yet", id)
 			case <-tick.C:
 				return nil
 			}
@@ -612,7 +612,7 @@ func (b *backend) waitForNetworkAddress(ctx context.Context, id string, c inspec
 				return true, nil
 			}
 			if appleContainerTerminalStatus(next.status()) {
-				return false, exit(5, "apple-container %s stopped before a network address was assigned", id)
+				return false, core.Exit(5, "apple-container %s stopped before a network address was assigned", id)
 			}
 			return false, nil
 		}, nil)
@@ -634,7 +634,7 @@ func appleContainerTerminalStatus(status string) bool {
 func (b *backend) resolveContainer(ctx context.Context, identifier string) (inspectContainer, string, string, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
-		return inspectContainer{}, "", "", exit(2, "provider=%s requires --id <lease-id-or-slug-or-container>", providerName)
+		return inspectContainer{}, "", "", core.Exit(2, "provider=%s requires --id <lease-id-or-slug-or-container>", providerName)
 	}
 	var resolvedClaim core.LeaseClaim
 	var wantLease, wantSlug string
@@ -656,7 +656,7 @@ func (b *backend) resolveContainer(ctx context.Context, identifier string) (insp
 				return c, firstNonBlank(resolvedClaim.LeaseID, labels["lease"]), firstNonBlank(resolvedClaim.Slug, labels["slug"]), nil
 			}
 		}
-		return inspectContainer{}, "", "", exit(4, "apple-container lease not found: %s", identifier)
+		return inspectContainer{}, "", "", core.Exit(4, "apple-container lease not found: %s", identifier)
 	}
 	normalized := core.NormalizeLeaseSlug(identifier)
 	var matched *inspectContainer
@@ -667,7 +667,7 @@ func (b *backend) resolveContainer(ctx context.Context, identifier string) (insp
 		slug := labels["slug"]
 		if wantLease != "" && leaseID == wantLease {
 			if matched != nil {
-				return inspectContainer{}, "", "", exit(2, "apple-container lease %s matches multiple containers; use an exact claimed container id", wantLease)
+				return inspectContainer{}, "", "", core.Exit(2, "apple-container lease %s matches multiple containers; use an exact claimed container id", wantLease)
 			}
 			candidate := c
 			matched, matchedLease, matchedSlug = &candidate, leaseID, slug
@@ -675,7 +675,7 @@ func (b *backend) resolveContainer(ctx context.Context, identifier string) (insp
 		}
 		if wantSlug != "" && core.NormalizeLeaseSlug(slug) == core.NormalizeLeaseSlug(wantSlug) {
 			if matched != nil {
-				return inspectContainer{}, "", "", exit(2, "apple-container slug %s matches multiple containers; use a lease id", wantSlug)
+				return inspectContainer{}, "", "", core.Exit(2, "apple-container slug %s matches multiple containers; use a lease id", wantSlug)
 			}
 			candidate := c
 			matched, matchedLease, matchedSlug = &candidate, leaseID, slug
@@ -691,7 +691,7 @@ func (b *backend) resolveContainer(ctx context.Context, identifier string) (insp
 	if matched != nil {
 		return *matched, matchedLease, matchedSlug, nil
 	}
-	return inspectContainer{}, "", "", exit(4, "apple-container lease not found: %s", identifier)
+	return inspectContainer{}, "", "", core.Exit(4, "apple-container lease not found: %s", identifier)
 }
 
 func (b *backend) removeContainer(ctx context.Context, id string) error {
@@ -715,7 +715,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, c inspectCo
 	}
 	host := c.ip()
 	if host == "" {
-		return core.LeaseTarget{}, exit(5, "apple-container %s has no network address yet", c.id())
+		return core.LeaseTarget{}, core.Exit(5, "apple-container %s has no network address yet", c.id())
 	}
 	keyPath, err := core.TestboxKeyPath(leaseID)
 	if err == nil {
@@ -771,9 +771,9 @@ func (b *backend) exitedDuringBootstrapError(ctx context.Context, id, status str
 		hint = "; DNS failed during package bootstrap, retry with --apple-container-extra-run-args '--dns <resolver>' or configure appleContainer.extraRunArgs"
 	}
 	if strings.TrimSpace(logs) == "" {
-		return exit(5, "apple-container %s stopped during SSH bootstrap status=%s%s", id, core.Blank(status, "unknown"), hint)
+		return core.Exit(5, "apple-container %s stopped during SSH bootstrap status=%s%s", id, core.Blank(status, "unknown"), hint)
 	}
-	return exit(5, "apple-container %s stopped during SSH bootstrap status=%s%s\ncontainer logs:\n%s", id, core.Blank(status, "unknown"), hint, logs)
+	return core.Exit(5, "apple-container %s stopped during SSH bootstrap status=%s%s\ncontainer logs:\n%s", id, core.Blank(status, "unknown"), hint, logs)
 }
 
 func (b *backend) containerLogTail(ctx context.Context, id string, limit int) string {
@@ -853,7 +853,7 @@ func (b *backend) serverFromContainer(c inspectContainer, cfg core.Config) core.
 func (b *backend) checkRunSurface(ctx context.Context) error {
 	result, err := b.container(ctx, []string{"run", "--help"}, nil, nil)
 	if err != nil {
-		return exit(2, "%s `container run` subcommand unavailable (incompatible container CLI?): %s", providerName, commandDetail(result, err))
+		return core.Exit(2, "%s `container run` subcommand unavailable (incompatible container CLI?): %s", providerName, commandDetail(result, err))
 	}
 	help := result.Stdout + result.Stderr
 	required := []string{"--user", "--label", "--dns"}
@@ -862,7 +862,7 @@ func (b *backend) checkRunSurface(ctx context.Context) error {
 	}
 	for _, opt := range required {
 		if !strings.Contains(help, opt) {
-			return exit(2, "%s `container run` is missing the required %s option; upgrade Apple's container CLI", providerName, opt)
+			return core.Exit(2, "%s `container run` is missing the required %s option; upgrade Apple's container CLI", providerName, opt)
 		}
 	}
 	return nil
@@ -870,7 +870,7 @@ func (b *backend) checkRunSurface(ctx context.Context) error {
 
 func requireMacOS() error {
 	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
-		return exit(2, "provider=%s requires macOS on Apple silicon; current host is %s/%s", providerName, runtime.GOOS, runtime.GOARCH)
+		return core.Exit(2, "provider=%s requires macOS on Apple silicon; current host is %s/%s", providerName, runtime.GOOS, runtime.GOARCH)
 	}
 	return nil
 }

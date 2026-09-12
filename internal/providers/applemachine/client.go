@@ -19,8 +19,8 @@ type machine struct {
 	Memory    uint64 `json:"memory,omitempty"`
 }
 
-func (b *backend) command(ctx context.Context, args []string, dir string) (LocalCommandResult, error) {
-	return b.rt.Exec.Run(ctx, LocalCommandRequest{
+func (b *backend) command(ctx context.Context, args []string, dir string) (core.LocalCommandResult, error) {
+	return b.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:   core.Blank(strings.TrimSpace(b.cfg.AppleContainer.CLIPath), "container"),
 		Args:   args,
 		Dir:    dir,
@@ -52,7 +52,7 @@ func (b *backend) inspectMachine(ctx context.Context, name string) (machine, err
 	}
 	var machines []machine
 	if err := json.Unmarshal([]byte(result.Stdout), &machines); err != nil || len(machines) != 1 || machines[0].ID != name || machines[0].Status == "" {
-		return machine{}, exit(5, "invalid Apple container machine inspection for %q", name)
+		return machine{}, core.Exit(5, "invalid Apple container machine inspection for %q", name)
 	}
 	return machines[0], nil
 }
@@ -64,15 +64,15 @@ func (b *backend) listMachines(ctx context.Context) ([]machine, error) {
 	}
 	var machines []machine
 	if err := json.Unmarshal([]byte(result.Stdout), &machines); err != nil {
-		return nil, exit(5, "decode Apple container machine list: %v", err)
+		return nil, core.Exit(5, "decode Apple container machine list: %v", err)
 	}
 	if machines == nil {
-		return nil, exit(5, "Apple container machine list must be a JSON array")
+		return nil, core.Exit(5, "Apple container machine list must be a JSON array")
 	}
 	seen := map[string]bool{}
 	for _, item := range machines {
 		if !validMachineName(item.ID) || item.Status == "" || seen[item.ID] {
-			return nil, exit(5, "invalid or duplicate Apple container machine inventory entry")
+			return nil, core.Exit(5, "invalid or duplicate Apple container machine inventory entry")
 		}
 		seen[item.ID] = true
 	}
@@ -88,11 +88,11 @@ func (b *backend) removeMachine(ctx context.Context, name string) error {
 }
 
 // Control responses are private, bounded, and never accepted after a partial failure.
-func (b *backend) control(ctx context.Context, args []string) (LocalCommandResult, error) {
+func (b *backend) control(ctx context.Context, args []string) (core.LocalCommandResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	const limit = 1024 * 1024
-	result, err := b.rt.Exec.Run(ctx, LocalCommandRequest{
+	result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name: core.Blank(strings.TrimSpace(b.cfg.AppleContainer.CLIPath), "container"), Args: args,
 		MaxCapturedOutputBytes: limit, CancelGracePeriod: time.Second,
 	})
@@ -100,7 +100,7 @@ func (b *backend) control(ctx context.Context, args []string) (LocalCommandResul
 		return result, ctx.Err()
 	}
 	if len(result.Stdout) > limit || len(result.Stderr) > limit {
-		return LocalCommandResult{}, fmt.Errorf("Apple container control output exceeded its limit")
+		return core.LocalCommandResult{}, fmt.Errorf("Apple container control output exceeded its limit")
 	}
 	if err == nil && result.ExitCode != 0 {
 		err = fmt.Errorf("Apple container exited with code %d", result.ExitCode)
@@ -108,7 +108,7 @@ func (b *backend) control(ctx context.Context, args []string) (LocalCommandResul
 	return result, err
 }
 
-func failureDetail(result LocalCommandResult, err error) string {
+func failureDetail(result core.LocalCommandResult, err error) string {
 	if detail := strings.TrimSpace(result.Stderr); detail != "" {
 		return detail
 	}
