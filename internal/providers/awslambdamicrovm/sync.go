@@ -20,7 +20,7 @@ func (b *backend) syncWorkspace(ctx context.Context, runner runnerAPI, vm microV
 		PhaseName:           "aws_lambda_microvm_sync",
 		Provider:            providerName,
 		Stderr:              b.rt.Stderr,
-		Now:                 func() time.Time { return now(b.rt) },
+		Now:                 func() time.Time { return core.ClockNow(b.rt.Clock) },
 		Upload: func(uploadCtx context.Context, remoteArchive string, body io.Reader) error {
 			return runner.Upload(uploadCtx, vm, remoteArchive, body)
 		},

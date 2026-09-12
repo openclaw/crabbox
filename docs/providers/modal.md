@@ -110,6 +110,19 @@ those names inside Modal when creating the sandbox. Use `modal.environment` (or
 Set these fields in the user config or pass the corresponding flags or environment
 variables; repository-local config cannot select a Modal environment or Secret.
 
+Secret-name lists retain their source-specific behavior. Trusted YAML replaces
+the list without trimming or deduplicating its elements; `secrets: []` clears it,
+while omission or `null` keeps the previous value. A present
+`CRABBOX_MODAL_SECRETS` replaces the list after splitting on commas, trimming
+elements, and dropping blanks. An empty value or case-insensitive `none` clears
+the environment list.
+
+The first `--modal-secret` occurrence replaces configured names, even when its
+value is empty. Later occurrences append comma-separated names, trimming and
+dropping blank elements while preserving order and duplicates. Unlike the
+environment variable, the flag treats `none` as an ordinary name. Without the
+flag, configured names remain unchanged.
+
 ## Lifecycle
 
 The Python bridge's process exit describes transport health; the remote command

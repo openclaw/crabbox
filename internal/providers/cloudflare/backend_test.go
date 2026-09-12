@@ -13,12 +13,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestCloudflareProviderSpec(t *testing.T) {
@@ -104,6 +106,105 @@ func TestCloudflareTokenFlagIsNotRegistered(t *testing.T) {
 	RegisterCloudflareProviderFlags(fs, cfg)
 	if fs.Lookup("cloudflare-token") != nil {
 		t.Fatal("cloudflare-token flag registered")
+	}
+}
+
+func TestCloudflareFlagNormalizationPrecedesValues(t *testing.T) {
+	for _, name := range []string{"cloudflare", "cf", " CF "} {
+		for _, tc := range []struct {
+			stored, want            string
+			explicit, visited, fail bool
+		}{{"", "standard-4", false, false, false}, {" STANDARD-2 ", "standard-2", false, true, false}, {"other", "standard-4", false, false, false}, {"other", "other", true, false, true}, {"other", "other", false, true, true}} {
+			cfg := Config{Provider: name, Class: "standard", ServerType: tc.stored, ServerTypeExplicit: tc.explicit}
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.String("type", "", "")
+			if tc.visited {
+				if err := fs.Parse([]string{"--type=example"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := ApplyCloudflareProviderFlags(&cfg, fs, struct{}{})
+			if tc.fail {
+				if err == nil || err.Error() != "cloudflare --type must be one of lite, basic, standard-1, standard-2, standard-3, standard-4" {
+					t.Fatalf("type normalization=%v", err)
+				}
+				continue
+			}
+			if err != nil || cfg.ServerType != tc.want || cfg.ServerTypeExplicit != (tc.explicit || tc.visited) {
+				t.Fatalf("name=%q type=%q explicit=%t error=%v", name, cfg.ServerType, cfg.ServerTypeExplicit, err)
+			}
+		}
+	}
+	cfg := Config{Provider: "cloudflare", Class: "standard", ServerType: "standard-4"}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := RegisterCloudflareProviderFlags(fs, cfg)
+	fs.VisitAll(func(f *flag.Flag) {
+		if strings.Contains(f.Name, "token") {
+			t.Fatal("token flag registered")
+		}
+	})
+	cfg.Cloudflare = CloudflareConfig{APIURL: "https://example.invalid/prior", Token: "inert", Workdir: "/workspace/prior"}
+	before := cfg
+	if err := ApplyCloudflareProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("unvisited flags changed config")
+	}
+	if err := fs.Parse([]string{"--cloudflare-url=", "--cloudflare-workdir="}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyCloudflareProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal("wrapper performed deferred URL/workdir validation")
+	}
+	before.Cloudflare.APIURL, before.Cloudflare.Workdir = "", ""
+	core.RecordProviderFlagInputs(&before, true, "cloudflare")
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("wrapper copied token or introduced central provenance marking")
+	}
+	if _, err := (Provider{}).Configure(cfg, Runtime{}); err != nil {
+		t.Fatalf("Configure URL validation=%v", err)
+	}
+}
+
+func TestCloudflareClientDeferredValidationAndWorkdirDefault(t *testing.T) {
+	cfg := Config{ServerType: "other", ServerTypeExplicit: true}
+	if _, err := newCloudflareClient(cfg, Runtime{HTTP: &http.Client{}}); err == nil || err.Error() != "cloudflare requires --cloudflare-url or CRABBOX_CLOUDFLARE_RUNNER_URL" {
+		t.Fatalf("URL-first=%v", err)
+	}
+	cfg.Cloudflare.APIURL = "relative"
+	if _, err := newCloudflareClient(cfg, Runtime{HTTP: &http.Client{}}); err == nil || err.Error() != "cloudflare requires CRABBOX_CLOUDFLARE_RUNNER_TOKEN or user-level config" {
+		t.Fatalf("token second=%v", err)
+	}
+	cfg.Cloudflare.Token = "inert"
+	if _, err := newCloudflareClient(cfg, Runtime{HTTP: &http.Client{}}); err == nil || !strings.Contains(err.Error(), "--type must be one of") {
+		t.Fatalf("type before URL syntax=%v", err)
+	}
+	cfg.ServerType = "standard-2"
+	if _, err := newCloudflareClient(cfg, Runtime{HTTP: &http.Client{}}); err == nil || err.Error() != `cloudflare url "relative" is invalid` {
+		t.Fatalf("URL syntax=%v", err)
+	}
+	cfg.Cloudflare.APIURL = " https://example.invalid/base/ "
+	client, err := newCloudflareClient(cfg, Runtime{HTTP: &http.Client{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.baseURL != "https://example.invalid/base" || client.instanceType != "standard-2" {
+		t.Fatal("constructor normalization changed")
+	}
+	for _, tc := range []struct{ raw, want string }{{"", "/workspace/crabbox"}, {"  ", "/workspace/crabbox"}, {" /workspace/app/ ", "/workspace/app"}} {
+		cfg.Cloudflare.Workdir = tc.raw
+		before := cfg.Cloudflare
+		got, err := cloudflareWorkdir(cfg)
+		if err != nil || got != tc.want {
+			t.Fatalf("workdir=%q error=%v", got, err)
+		}
+		if cfg.Cloudflare != before {
+			t.Fatal("workdir read changed config")
+		}
+		if strings.TrimSpace(tc.raw) == "" && got != core.BaseConfig().Cloudflare.Workdir {
+			t.Fatal("Go workdir differs from configured default")
+		}
 	}
 }
 
@@ -2038,5 +2139,81 @@ func TestCloudflareStreamCancellationAtCleanEOF(t *testing.T) {
 				t.Fatalf("cancellation lost at clean EOF: %v", err)
 			}
 		})
+	}
+}
+
+func TestJSONRequestAdoptionEnvelope(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "capture")
+	var typedNil *struct{ Value string }
+	const base = "https://api.example.test/base"
+	sentinel := errors.New("synthetic captured transport stop")
+	for _, tc := range []struct {
+		name        string
+		body        any
+		want        string
+		query, fail bool
+	}{
+		{name: "nil"},
+		{name: "typed nil", body: typedNil, want: "null\n"},
+		{name: "JSON bytes", body: map[string]string{"message": "<&>"}, want: "{\"message\":\"\\u003c\\u0026\\u003e\"}\n"},
+		{name: "query without body", query: true},
+		{name: "transport error", fail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			endpoint := "/records"
+			if tc.query {
+				endpoint += "?limit=2&prefix=two+words"
+			}
+
+			headers := http.Header{"Authorization": []string{"Bearer synthetic-token"}}
+
+			if tc.body != nil {
+				headers.Set("Content-Type", "application/json")
+			}
+			transport := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, base+endpoint, tc.want, headers)
+				if tc.fail {
+					return nil, sentinel
+				}
+				return &http.Response{StatusCode: 204, Header: http.Header{"X-Capture": []string{"yes"}}, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+			})}
+			c := &cloudflareClient{baseURL: base, token: "synthetic-token", http: transport}
+			var gotHeaders http.Header
+			err := c.doJSON(ctx, http.MethodPost, endpoint, tc.body, nil)
+			if tc.fail {
+				if !errors.Is(err, sentinel) || gotHeaders != nil {
+					t.Fatalf("error/headers=%v %v", err, gotHeaders)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+
+			if calls != 1 {
+				t.Fatalf("calls=%d", calls)
+			}
+		})
+	}
+}
+
+func TestJSONRequestAdoptionConcreteEnvelope(t *testing.T) {
+	ctx := context.Background()
+	sentinel := errors.New("synthetic captured concrete request")
+	calls := 0
+	headers := http.Header{"Authorization": []string{"Bearer synthetic-token"}, "Content-Type": []string{"application/json"}}
+	transport := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, "https://api.example.test/base/v1/sandboxes/sandbox%20one/exec-stream?instanceType=large+size", "{\"command\":\"\\u003c\\u0026\\u003e\",\"cwd\":\"/work\",\"env\":{\"A\":\"B\"},\"timeoutMs\":7}\n", headers)
+		return nil, sentinel
+	})}
+	c := &cloudflareClient{baseURL: "https://api.example.test/base", token: "synthetic-token", instanceType: "large size", http: transport}
+	code, err := c.execStream(ctx, "sandbox one", execStreamRequest{Command: "<&>", Cwd: "/work", Env: map[string]string{"A": "B"}, TimeoutMS: 7}, io.Discard, io.Discard)
+	if code != 0 {
+		t.Fatalf("exit=%d", code)
+	}
+	if !errors.Is(err, sentinel) || calls != 1 {
+		t.Fatalf("error=%v calls=%d", err, calls)
 	}
 }

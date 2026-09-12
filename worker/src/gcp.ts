@@ -9,6 +9,7 @@ import {
   type LeaseConfig,
 } from "./config";
 import { ExpiringTokenCache, type ExpiringToken } from "./expiring-token-cache";
+import { redactDiagnosticSecrets } from "./http";
 import {
   leaseProviderLabels,
   providerLabelValue,
@@ -60,9 +61,28 @@ class GCPHTTPError extends Error {
     readonly path: string,
     readonly status: number,
     readonly body: string,
+    secrets: readonly (string | undefined)[] = [],
   ) {
-    super(`gcp ${method} ${path}: http ${status}: ${body}`);
+    super(`gcp ${method} ${path}: http ${status}: ${gcpErrorBodySummary(body, secrets)}`);
   }
+}
+
+function gcpErrorBodySummary(body: string, secrets: readonly (string | undefined)[]): string {
+  let summary = body;
+  try {
+    const parsed = JSON.parse(body) as {
+      error?: { message?: unknown; status?: unknown; errors?: { reason?: unknown }[] };
+    } | null;
+    const error = parsed?.error;
+    if (typeof error?.message === "string" && error.message.trim()) {
+      const reason = error.status || error.errors?.[0]?.reason;
+      summary = typeof reason === "string" ? `${reason}: ${error.message}` : error.message;
+    }
+  } catch {
+    // Non-JSON provider responses still carry useful diagnostics.
+  }
+  // Redact before bounding so a clipped credential cannot evade exact-secret matching.
+  return redactDiagnosticSecrets(summary, secrets).replace(/\s+/g, " ").trim().slice(0, 512);
 }
 
 class GCPOperationError extends Error {}
@@ -472,17 +492,18 @@ export class GCPClient {
             throw error;
           }
           const message = errorMessage(error);
+          const fallback = isFallbackProvisioningError(error);
           history.record(
             {
               region: zone,
               serverType: machineType,
               market: config.capacityMarket,
-              category: isFallbackProvisioningError(message) ? "capacity" : "fatal",
+              category: fallback ? "capacity" : "fatal",
               message,
             },
             `${zone}/${machineType}: ${message}`,
           );
-          if (!isFallbackProvisioningError(message)) {
+          if (!fallback) {
             throw history.error("", { cause: error });
           }
         }
@@ -524,17 +545,18 @@ export class GCPClient {
               throw error;
             }
             const message = errorMessage(error);
+            const fallback = isFallbackProvisioningError(error);
             history.record(
               {
                 region: zone,
                 serverType: machineType,
                 market: "on-demand",
-                category: isFallbackProvisioningError(message) ? "capacity" : "fatal",
+                category: fallback ? "capacity" : "fatal",
                 message,
               },
               `on-demand ${zone}/${machineType}: ${message}`,
             );
-            if (!isFallbackProvisioningError(message)) {
+            if (!fallback) {
               throw history.error("", { cause: error });
             }
           }
@@ -1124,7 +1146,11 @@ export class GCPClient {
     const response = await this.fetcher(`${computeBaseURL}/projects/${this.project}${path}`, init);
     const text = await response.text();
     if (!response.ok) {
-      throw new GCPHTTPError(method, path, response.status, text);
+      throw new GCPHTTPError(method, path, response.status, text, [
+        token,
+        this.env.GCP_CLIENT_EMAIL,
+        this.env.GCP_PRIVATE_KEY,
+      ]);
     }
     return (text ? JSON.parse(text) : {}) as T;
   }
@@ -1470,7 +1496,12 @@ export function gcpProviderLabelValue(value: string): string {
   return gcpLabelValue(providerLabelValue(value));
 }
 
-export function isFallbackProvisioningError(message: string): boolean {
+export function isFallbackProvisioningError(error: unknown): boolean {
+  // Display summaries are lossy; keep complete HTTP evidence inside retry classification.
+  const message =
+    error instanceof GCPHTTPError
+      ? `gcp ${error.method} ${error.path}: http ${error.status}: ${error.body}`
+      : errorMessage(error);
   const value = message.toLowerCase();
   return (
     value.includes("quota") ||

@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -213,7 +214,7 @@ func (f *fakeAPI) GetImage(ctx context.Context, name string) (machineImageDetail
 func (f *fakeAPI) recordImageSnapshot(detail machineImageDetail) {
 	state := "MISSING"
 	if len(detail.Versions) > 0 {
-		state = strings.ToUpper(blank(detail.Versions[0].SnapshotStatus, "UNKNOWN"))
+		state = strings.ToUpper(core.Blank(detail.Versions[0].SnapshotStatus, "UNKNOWN"))
 	}
 	f.actions = append(f.actions, "image:"+state)
 	if state == "READY" {
@@ -872,7 +873,7 @@ func TestAcquirePreflightsPublicSSHKeyBeforeCreate(t *testing.T) {
 		{name: "managed key can materialize later", key: machineKey{Name: "managed-key", Type: "MANAGED", FileName: "machine0__managed-key"}},
 	} {
 		for _, leaseID := range []string{"", fixedMachine0TestLeaseID} {
-			t.Run(tc.name+"/"+blank(leaseID, "ordinary"), func(t *testing.T) {
+			t.Run(tc.name+"/"+core.Blank(leaseID, "ordinary"), func(t *testing.T) {
 				repo := setupState(t)
 				keyPath := filepath.Join(os.Getenv("SSH_KEY_PATH"), tc.key.FileName)
 				if tc.private != nil {
@@ -986,7 +987,7 @@ func TestAcquirePublicSSHKeyFileKinds(t *testing.T) {
 	}
 	for _, kind := range []string{"fifo", "symlink fifo", "device", "symlink regular"} {
 		for _, leaseID := range []string{"", fixedMachine0TestLeaseID} {
-			t.Run(kind+"/"+blank(leaseID, "ordinary"), func(t *testing.T) {
+			t.Run(kind+"/"+core.Blank(leaseID, "ordinary"), func(t *testing.T) {
 				repo := setupState(t)
 				keyPath := filepath.Join(os.Getenv("SSH_KEY_PATH"), "local-key")
 				target := keyPath + "-target"
@@ -1800,6 +1801,87 @@ func TestCleanupRejectsPartialOrMismatchedOwnership(t *testing.T) {
 				t.Fatalf("partial claim should remain for manual repair: ok=%v err=%v", ok, err)
 			}
 		})
+	}
+}
+
+func TestMachine0OrdinaryFlagMetadata(t *testing.T) {
+	for _, field := range []string{"create-timeout", "poll-interval"} {
+		for _, tc := range []struct {
+			raw      string
+			duration time.Duration
+			bad      bool
+		}{{"", time.Minute, false}, {"2m", 2 * time.Minute, false}, {"0s", time.Minute, true}, {" 0s ", time.Minute, true}, {"0", time.Minute, true}, {"-1m", time.Minute, true}, {" 2m ", time.Minute, true}, {"invalid", time.Minute, true}} {
+			t.Run(field+"/"+fmt.Sprintf("%q", tc.raw), func(t *testing.T) {
+				cfg := core.Config{Provider: "unselected-metadata", ServerType: "generic", WorkRoot: "generic", Machine0: core.Machine0Config{CLIPath: "prior", Image: "prior", ImageVersion: 5, DesktopImage: "prior", Size: "large", Region: "prior", Key: "prior", WorkRoot: "prior", ReleasePolicy: "prior", CreateTimeout: time.Minute, PollInterval: time.Minute}}
+				fs := flag.NewFlagSet("metadata", flag.ContinueOnError)
+				values := (Provider{}).RegisterFlags(fs, cfg)
+				before := cfg
+				if fs.Lookup("machine0-create-timeout").DefValue != "1m0s" || fs.Lookup("machine0-poll-interval").DefValue != "1m0s" {
+					t.Fatal("duration string registration")
+				}
+				if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(cfg, before) {
+					t.Fatal("unvisited flags changed config")
+				}
+				create, poll := "3m", "4m"
+				if field == "create-timeout" {
+					create = tc.raw
+				} else {
+					poll = tc.raw
+				}
+				if err := fs.Parse([]string{"--machine0-cli=~/literal", "--machine0-image=image-example", "--machine0-image-version=-2", "--machine0-desktop-image=desktop-example", "--machine0-size=large", "--machine0-region= eu ", "--machine0-key=name-example", "--machine0-work-root=~/guest", "--machine0-release-policy=suspend", "--machine0-create-timeout=" + create, "--machine0-poll-interval=" + poll}); err != nil {
+					t.Fatal(err)
+				}
+				err := (Provider{}).ApplyFlags(&cfg, fs, values)
+				want := core.Machine0Config{CLIPath: "~/literal", Image: "image-example", ImageVersion: -2, DesktopImage: "desktop-example", Size: "large", SizeExplicit: true, Region: " eu ", Key: "name-example", WorkRoot: "~/guest", ReleasePolicy: "suspend", CreateTimeout: 3 * time.Minute, PollInterval: tc.duration}
+				if field == "create-timeout" {
+					want.CreateTimeout = tc.duration
+					want.PollInterval = 4 * time.Minute
+					if tc.bad {
+						want.PollInterval = time.Minute
+					}
+				}
+				if tc.bad {
+					if err == nil || err.Error() != fmt.Sprintf("invalid duration %q", tc.raw) {
+						t.Fatalf("duration error=%v", err)
+					}
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				if cfg.Machine0 != want || cfg.ServerType != "large" || !cfg.ServerTypeExplicit || cfg.WorkRoot != "~/guest" || core.IsWorkRootExplicit(&cfg) {
+					t.Fatalf("partial metadata=%#v want %#v", cfg.Machine0, want)
+				}
+			})
+		}
+	}
+	for _, marked := range []bool{false, true} {
+		cfg := core.Config{Provider: "unselected-metadata", Machine0: core.Machine0Config{Size: "large", SizeExplicit: marked, ImageVersion: 5}}
+		fs := flag.NewFlagSet("empty", flag.ContinueOnError)
+		values := (Provider{}).RegisterFlags(fs, cfg)
+		if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Machine0.SizeExplicit != marked {
+			t.Fatal("absent SizeExplicit not preserved")
+		}
+		if err := fs.Parse([]string{"--machine0-size=", "--machine0-image-version=0", "--machine0-work-root="}); err != nil {
+			t.Fatal(err)
+		}
+		if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Machine0.Size != "" || !cfg.Machine0.SizeExplicit || cfg.ServerType != "" || !cfg.ServerTypeExplicit || cfg.Machine0.ImageVersion != 0 || cfg.WorkRoot != "" {
+			t.Fatal("empty size/zero version flag effects")
+		}
+	}
+	cfg := core.Config{Provider: "unselected-metadata", Machine0: core.Machine0Config{SizeExplicit: true}}
+	before := cfg
+	for _, foreign := range []any{nil, struct{}{}} {
+		if err := (Provider{}).ApplyFlags(&cfg, flag.NewFlagSet("foreign", flag.ContinueOnError), foreign); err != nil || !reflect.DeepEqual(cfg, before) {
+			t.Fatal("foreign values changed state")
+		}
 	}
 }
 

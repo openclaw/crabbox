@@ -55,7 +55,7 @@ func (b *openSandboxBackend) Warmup(ctx context.Context, req WarmupRequest) erro
 	if _, err := openSandboxWorkdir(b.cfg); err != nil {
 		return err
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	api, err := b.client()
 	if err != nil {
 		return err
@@ -76,7 +76,7 @@ func (b *openSandboxBackend) Warmup(ctx context.Context, req WarmupRequest) erro
 		return b.cleanupClaimedSandboxFailure(ctx, api, leaseID, sandboxID, err)
 	}
 	required := openSandboxRunBudgetForConfig(b.cfg, false, false)
-	if remaining := deadline.Sub(b.now()); remaining < required {
+	if remaining := deadline.Sub(core.ClockNow(b.rt.Clock)); remaining < required {
 		return b.cleanupClaimedSandboxFailure(ctx, api, leaseID, sandboxID,
 			exit(5, "opensandbox sandbox %s has %s remaining after warmup, less than the %s default run budget", sandboxID, remaining.Round(time.Second), required))
 	}
@@ -84,18 +84,13 @@ func (b *openSandboxBackend) Warmup(ctx context.Context, req WarmupRequest) erro
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: opensandbox warmup keeps the sandbox until explicit stop\n")
 	}
-	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  leaseID,
-			Slug:     slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	total := core.ClockNow(b.rt.Clock).Sub(started)
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
 
 func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
@@ -121,10 +116,10 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		if err != nil {
 			return err
 		}
-		if !deadline.After(b.now()) {
+		if !deadline.After(core.ClockNow(b.rt.Clock)) {
 			return exit(5, "opensandbox sandbox %s exceeded its absolute Crabbox TTL", sandboxID)
 		}
-		if remaining, required := deadline.Sub(b.now()), b.runLifetimeBudget(req); remaining < required {
+		if remaining, required := deadline.Sub(core.ClockNow(b.rt.Clock)), b.runLifetimeBudget(req); remaining < required {
 			return exit(5, "opensandbox sandbox %s has %s remaining before its absolute TTL, less than the %s sync/command budget; create a new sandbox", sandboxID, remaining.Round(time.Second), required)
 		}
 		return nil
@@ -151,7 +146,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
 			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-opensandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+				TempPattern: "crabbox-opensandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 			})
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
@@ -204,10 +199,10 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 			if err := b.ensureReusableSandbox(ctx, api, sandboxID, sb); err != nil {
 				return err
 			}
-			if !deadline.After(b.now()) {
+			if !deadline.After(core.ClockNow(b.rt.Clock)) {
 				return exit(5, "opensandbox sandbox %s exceeded its absolute Crabbox TTL while resuming", sandboxID)
 			}
-			if remaining, required := deadline.Sub(b.now()), b.runLifetimeBudget(req); remaining < required {
+			if remaining, required := deadline.Sub(core.ClockNow(b.rt.Clock)), b.runLifetimeBudget(req); remaining < required {
 				return exit(5, "opensandbox sandbox %s has %s remaining after resume before its absolute TTL, less than the %s sync/command budget; create a new sandbox", sandboxID, remaining.Round(time.Second), required)
 			}
 			if err := ctx.Err(); err != nil {
@@ -239,7 +234,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 			if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
 				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
-			if remaining := deadline.Sub(b.now()); remaining < b.commandLifetime() {
+			if remaining := deadline.Sub(core.ClockNow(b.rt.Clock)); remaining < b.commandLifetime() {
 				return shared.DelegatedSandboxCommand{}, exit(5, "opensandbox sandbox %s has %s remaining before its absolute TTL, less than the %s command budget; create a new sandbox", sandboxID, remaining.Round(time.Second), b.commandLifetime())
 			}
 			text := intent.ShellCommand("bash", "-lc")
@@ -299,7 +294,7 @@ func (b *openSandboxBackend) List(ctx context.Context, req ListRequest) ([]Lease
 			if err := validateOpenSandboxOwnership(claim, sb); err != nil {
 				return nil, err
 			}
-			state = blank(strings.ToLower(sb.State), statusViewReady)
+			state = core.Blank(strings.ToLower(sb.State), statusViewReady)
 		}
 		servers = append(servers, Server{
 			Provider: providerName,
@@ -354,7 +349,7 @@ func (b *openSandboxBackend) Status(ctx context.Context, req StatusRequest) (Sta
 	if waitTimeout <= 0 {
 		waitTimeout = 5 * time.Minute
 	}
-	deadline := b.now().Add(waitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(waitTimeout)
 	pollCtx := ctx
 	cancel := func() {}
 	if req.Wait {
@@ -415,7 +410,7 @@ func (b *openSandboxBackend) Status(ctx context.Context, req StatusRequest) (Sta
 		if isTerminalState(state) {
 			return StatusView{}, exit(5, "opensandbox sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
-		if b.now().After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return StatusView{}, exit(5, "timed out waiting for opensandbox sandbox %s to become ready", sandboxID)
 		}
 		select {
@@ -475,7 +470,7 @@ func (b *openSandboxBackend) Cleanup(ctx context.Context, req CleanupRequest) er
 	if err != nil {
 		return err
 	}
-	now := b.now().UTC()
+	now := core.ClockNow(b.rt.Clock).UTC()
 	checked := 0
 	removed := 0
 	claimsRemoved := 0
@@ -513,13 +508,13 @@ func (b *openSandboxBackend) Cleanup(ctx context.Context, req CleanupRequest) er
 					return nil
 				}
 				if req.DryRun {
-					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 					return nil
 				}
 				if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 					return err
 				}
-				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 				claimRemovedOne = true
 				return nil
 			}
@@ -1020,13 +1015,6 @@ func newSandboxName(repo Repo) string {
 
 func randomSuffix() string {
 	return shared.RandomSuffix()
-}
-
-func (b *openSandboxBackend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }
 
 func (b *openSandboxBackend) cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {

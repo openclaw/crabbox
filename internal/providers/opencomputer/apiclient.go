@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -99,7 +100,7 @@ func newOCAPIClient(cfg Config, rt Runtime) (*ocAPIClient, error) {
 	// API URL precedence: an explicit trusted Crabbox setting, then the `oc` CLI
 	// config file's api_url, then the built-in default. Repository YAML cannot
 	// populate cfg.OpenComputer.APIURL.
-	baseURL, err := validateOCAPIURL(blank(strings.TrimSpace(cfg.OpenComputer.APIURL), blank(strings.TrimSpace(fileCfg.APIURL), defaultAPIURL)))
+	baseURL, err := validateOCAPIURL(core.Blank(strings.TrimSpace(cfg.OpenComputer.APIURL), core.Blank(strings.TrimSpace(fileCfg.APIURL), defaultAPIURL)))
 	if err != nil {
 		return nil, err
 	}

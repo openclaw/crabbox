@@ -50,7 +50,7 @@ func (b *backend) acquireFixed(ctx context.Context, req AcquireRequest) (LeaseTa
 		WindowsMode:  cfg.WindowsMode,
 		TTL:          cfg.TTL,
 		IdleTimeout:  cfg.IdleTimeout,
-		Now:          b.now,
+		Now:          func() time.Time { return core.ClockNow(b.rt.Clock).UTC() },
 	}, func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		freshClaim = !exists
 		var err error
@@ -126,7 +126,7 @@ func (b *backend) acquireFixed(ctx context.Context, req AcquireRequest) (LeaseTa
 			attempt := machine0CreateAttempt{
 				Name: name, Size: cfg.Machine0.Size, Region: cfg.Machine0.Region,
 				Image: image, ImageVersion: cfg.Machine0.ImageVersion, Key: cfg.Machine0.Key,
-				CreatedAt: b.now().Format(time.RFC3339Nano),
+				CreatedAt: core.ClockNow(b.rt.Clock).UTC().Format(time.RFC3339Nano),
 			}
 			data, err := json.Marshal(attempt)
 			if err != nil {
@@ -164,7 +164,7 @@ func (b *backend) acquireFixed(ctx context.Context, req AcquireRequest) (LeaseTa
 			return LeaseTarget{}, err
 		}
 		server := b.serverFromMachine(item, *claim, cfg)
-		server.Labels = machineLabels(cfg, item, leaseID, intent.Slug, req.Keep, b.now())
+		server.Labels = machineLabels(cfg, item, leaseID, intent.Slug, req.Keep, core.ClockNow(b.rt.Clock).UTC())
 		return b.prepareLease(ctx, item, server, leaseID, true)
 	}, ctx)
 	if err != nil {
@@ -274,7 +274,7 @@ func validateFixedMachine0Ownership(claim LeaseClaim, item machine) error {
 		return exit(4, "lease_id_conflict: Machine0 machine %s has no durable create attempt", item.Name)
 	}
 	if strings.TrimSpace(item.ID) == "" || (claim.CloudID != "" && item.ID != claim.CloudID) {
-		return exit(4, "lease_id_conflict: fixed lease %s machine %s does not match acquired CloudID %s", claim.LeaseID, blank(item.ID, "<empty>"), blank(claim.CloudID, "<empty>"))
+		return exit(4, "lease_id_conflict: fixed lease %s machine %s does not match acquired CloudID %s", claim.LeaseID, core.Blank(item.ID, "<empty>"), core.Blank(claim.CloudID, "<empty>"))
 	}
 	if strings.TrimSpace(attempt.Key) != "" && (item.Key == nil || strings.TrimSpace(item.Key.Name) != strings.TrimSpace(attempt.Key)) {
 		return exit(4, "lease_id_conflict: Machine0 machine detail for fixed lease %s does not match its durable selected SSH key %q", claim.LeaseID, attempt.Key)
@@ -294,7 +294,7 @@ func (b *backend) bindFixedMachine0(claim *LeaseClaim, item machine, keep bool, 
 	}
 	claim.CloudID, claim.CloudImmutableID = item.ID, item.ID
 	claim.ProviderScope = machineScope(item.ID)
-	claim.Labels = machineLabels(b.configForRun(), item, claim.LeaseID, claim.Slug, keep, b.now())
+	claim.Labels = machineLabels(b.configForRun(), item, claim.LeaseID, claim.Slug, keep, core.ClockNow(b.rt.Clock).UTC())
 	return persist()
 }
 
@@ -367,7 +367,7 @@ func (b *backend) destroyClaimedMachineWithOutcome(ctx context.Context, expected
 		} else {
 			return exit(4, "fixed Machine0 lease %s is not visible in the current account; absence is unverified, retain its claim and inspect the original account", claim.LeaseID)
 		}
-		*claim = fixedMachine0LeaseKind.TerminalClaim(*claim, b.now())
+		*claim = fixedMachine0LeaseKind.TerminalClaim(*claim, core.ClockNow(b.rt.Clock).UTC())
 		return persist()
 	})
 }

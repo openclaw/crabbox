@@ -27,6 +27,38 @@ import (
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
+func TestManualConfigInputFlags(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "fixture-other"
+	fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+	values := RegisterDaytonaProviderFlags(fs, cfg)
+	before := cfg
+	if err := ApplyDaytonaProviderFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+		t.Fatalf("foreign values changed configuration: %v", err)
+	}
+	if err := ApplyDaytonaProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	want := cfg
+	core.RecordProviderFlagInputs(&want, true, "daytona")
+	if reflect.DeepEqual(cfg, want) {
+		t.Fatal("unvisited flags recorded input")
+	}
+	for repeat := 0; repeat < 2; repeat++ {
+		if err := fs.Set("daytona-snapshot", "fixture"); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyDaytonaProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want = cfg
+		core.RecordProviderFlagInputs(&want, true, "daytona")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatal("accepted/equal flag value was not recorded")
+		}
+	}
+}
+
 func TestDaytonaCommandRunnerPreservesCallerExecutionBudget(t *testing.T) {
 	var requests []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

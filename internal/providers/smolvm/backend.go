@@ -289,11 +289,7 @@ func (b *backend) createMachine(ctx context.Context, client api, repo Repo, keep
 		}
 		if cleanupErr != nil {
 			// A typed rollback error must not replace the acquisition's CLI exit.
-			code := 1
-			var primary ExitError
-			if errors.As(resultErr, &primary) && primary.Code != 0 {
-				code = primary.Code
-			}
+			code := core.ExitCodeForError(resultErr, 1)
 			joined := errors.Join(resultErr, fmt.Errorf("smolvm rollback retained machine=%s lease=%s: %w", original.ID, leaseID, cleanupErr))
 			resultErr = shared.ExitErrorWithCause(code, joined.Error(), joined)
 		}
@@ -413,7 +409,7 @@ func machineToServer(cfg Config, m machineData) Server {
 	labels := directLeaseLabels(cfg, leaseID, machineSlug(leaseID, m), providerName, "", cfg.Smolvm.Keep, time.Now().UTC())
 	labels["machine_id"] = m.ID
 	labels["machine_name"] = m.Name
-	labels["image"] = blank(m.Source.Reference, imageName(cfg))
+	labels["image"] = core.Blank(m.Source.Reference, imageName(cfg))
 	if m.Resources.CPUs > 0 {
 		labels["cpus"] = fmt.Sprintf("%d", m.Resources.CPUs)
 	}
@@ -424,7 +420,7 @@ func machineToServer(cfg Config, m machineData) Server {
 	server := Server{
 		Provider: providerName,
 		CloudID:  m.ID,
-		Name:     blank(m.Name, m.ID),
+		Name:     core.Blank(m.Name, m.ID),
 		Status:   m.State,
 		Labels:   labels,
 	}
@@ -434,7 +430,7 @@ func machineToServer(cfg Config, m machineData) Server {
 }
 
 func machineBaseHost(cfg Config) string {
-	raw := blank(strings.TrimSpace(cfg.Smolvm.BaseURL), "https://api.smolmachines.com")
+	raw := core.Blank(strings.TrimSpace(cfg.Smolvm.BaseURL), core.SmolvmConfigDefaultBaseURL)
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" {
 		return raw
@@ -472,7 +468,7 @@ func statusReady(status string) bool {
 }
 
 func imageName(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Smolvm.Image), "alpine")
+	return core.Blank(strings.TrimSpace(cfg.Smolvm.Image), core.SmolvmConfigDefaultImage)
 }
 
 func machineName(leaseID, slug string) string {
@@ -487,14 +483,14 @@ func cpusValue(cfg Config) int {
 	if cfg.Smolvm.CPUs > 0 {
 		return cfg.Smolvm.CPUs
 	}
-	return 2
+	return core.SmolvmConfigDefaultCPUs
 }
 
 func memoryValue(cfg Config) int {
 	if cfg.Smolvm.MemoryMB > 0 {
 		return cfg.Smolvm.MemoryMB
 	}
-	return 2048
+	return core.SmolvmConfigDefaultMemoryMB
 }
 
 func networkMode(cfg Config) string {
@@ -509,7 +505,7 @@ func networkMode(cfg Config) string {
 }
 
 func workdir(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Smolvm.Workdir), "/workspace")
+	return core.Blank(strings.TrimSpace(cfg.Smolvm.Workdir), core.SmolvmConfigDefaultWorkdir)
 }
 
 func cleanWorkdir(workdir string) (string, error) {

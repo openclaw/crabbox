@@ -137,7 +137,7 @@ func (b *gcpLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Leas
 			if !isCrabboxGCPLease(server) {
 				return LeaseTarget{}, exit(4, "lease/server not found: %s (instance exists but is not Crabbox-managed)", req.ID)
 			}
-			leaseID := blank(server.Labels["lease"], req.ID)
+			leaseID := core.Blank(server.Labels["lease"], req.ID)
 			target := sshTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
 			useStoredTestboxKey(&target, leaseID)
 			return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
@@ -222,7 +222,7 @@ func (b *gcpLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequ
 		return exit(4, "refusing to delete gcp instance %q for lease=%s: live instance is not canonical Crabbox-owned", cloudID, req.Lease.LeaseID)
 	}
 	if liveLeaseID := strings.TrimSpace(live.Labels["lease"]); liveLeaseID != req.Lease.LeaseID {
-		return exit(4, "refusing to delete gcp instance %q for lease=%s: live instance belongs to lease=%s", cloudID, req.Lease.LeaseID, blank(liveLeaseID, "-"))
+		return exit(4, "refusing to delete gcp instance %q for lease=%s: live instance belongs to lease=%s", cloudID, req.Lease.LeaseID, core.Blank(liveLeaseID, "-"))
 	}
 	if err := validateExactGCPClaim(claim, live, req.Lease.LeaseID, b.Cfg); err != nil {
 		return err
@@ -427,13 +427,13 @@ func (b *gcpLeaseBackend) pruneStaleClaims(ctx context.Context, liveLeaseIDs map
 				return err
 			}
 			if _, err := client.GetServer(ctx, claim.CloudID); err == nil {
-				fmt.Fprintf(b.RT.Stderr, "retain stale claim lease=%s slug=%s provider=gcp reason=cloud resource still exists\n", claim.LeaseID, blank(claim.Slug, "-"))
+				fmt.Fprintf(b.RT.Stderr, "retain stale claim lease=%s slug=%s provider=gcp reason=cloud resource still exists\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 				continue
 			} else if !core.IsGCPNotFound(err) {
 				return fmt.Errorf("re-read GCP stale claim %s: %w", claim.LeaseID, err)
 			}
 		}
-		fmt.Fprintf(b.RT.Stderr, "remove stale claim lease=%s slug=%s provider=gcp\n", claim.LeaseID, blank(claim.Slug, "-"))
+		fmt.Fprintf(b.RT.Stderr, "remove stale claim lease=%s slug=%s provider=gcp\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 		if !dryRun {
 			removeLeaseClaim(claim.LeaseID)
 		}
@@ -475,7 +475,7 @@ func sshTargetFromConfig(cfg Config, host string) SSHTarget {
 var waitForSSHReady = core.WaitForSSHReady
 
 func bootstrapWaitTimeout(cfg Config) time.Duration { return core.BootstrapWaitTimeout(cfg) }
-func blank(value, fallback string) string           { return core.Blank(value, fallback) }
+
 func useStoredTestboxKey(target *SSHTarget, leaseID string) {
 	shared.UseStoredTestboxKey(target, leaseID)
 }

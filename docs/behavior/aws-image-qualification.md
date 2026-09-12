@@ -251,10 +251,13 @@ instead of accumulating stale IDs; terminating instances remain active until a
 single-ID read confirms `terminated` or absent. Before and after teardown, bounded
 eventual-consistency inventory scans find resources that appeared after an
 ambiguous response. The authority revalidates the configured STS account before
-every mutation, so credential rotation cannot move a run into another account.
-The public AWS release path waits for that terminal instance state only when the
-qualification transport binding is active; ordinary AWS releases keep their
-existing fire-and-forget behavior.
+every mutation, so a replacement credential is accepted only when it resolves
+to the enrolled account and fixed Region policy. This is an immediate identity
+check around each protected qualification operation, not a promise that the
+qualification signer retains one immutable credential object. Separately,
+managed public AWS release through `AWSProvider.releaseLease` waits for
+`TerminateInstances` acknowledgement and a terminal `terminated` or absent
+observation; it does not depend on the qualification transport being active.
 Successful deletes move exact instance, key-pair, AMI, and snapshot IDs into
 tombstone sets bounded by the launch and candidate-operation limits. Tombstones
 do not consume active-resource capacity or permit new use, but they preserve

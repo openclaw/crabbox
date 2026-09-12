@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,6 +26,141 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
+
+func TestSmolvmFlagPresenceAndValidationOrder(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := RegisterSmolvmProviderFlags(fs, cfg)
+	fs.VisitAll(func(f *flag.Flag) {
+		if strings.Contains(f.Name, "key") {
+			t.Fatal("key flag introduced")
+		}
+	})
+	cfg.Smolvm = core.SmolvmConfig{APIKey: "inert", BaseURL: "http://127.0.0.1:8787", Image: "ubuntu", Workdir: "/workspace/app", CPUs: 3, MemoryMB: 3000, Network: "blocked", Keep: true}
+	before := cfg
+	if err := ApplySmolvmProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("unvisited flags changed config")
+	}
+	if err := fs.Parse([]string{"--smolvm-base-url=http://127.0.0.1:8787", "--smolvm-image=ubuntu", "--smolvm-workdir=/workspace/app", "--smolvm-cpus=3", "--smolvm-memory-mb=3000", "--smolvm-network=blocked", "--smolvm-keep=true"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Smolvm = core.SmolvmConfig{APIKey: "inert"}
+	if err := ApplySmolvmProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	core.RecordProviderFlagInputs(&before, true, "smolvm")
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("positive fields/central provenance changed")
+	}
+	if err := fs.Parse([]string{"--smolvm-base-url=", "--smolvm-image=", "--smolvm-workdir=", "--smolvm-cpus=0", "--smolvm-memory-mb=0", "--smolvm-network=", "--smolvm-keep=false"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplySmolvmProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	before.Smolvm = core.SmolvmConfig{APIKey: "inert"}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("explicit false/empty/zero flags changed")
+	}
+	for _, name := range []string{"smolvm", "smol", "smolmachines", "smolfleet", "SMOL", " smolvm "} {
+		cfg := Config{Provider: name}
+		fs := flag.NewFlagSet("guard", flag.ContinueOnError)
+		fs.String("class", "", "")
+		fs.String("type", "", "")
+		values := RegisterSmolvmProviderFlags(fs, cfg)
+		for _, args := range [][]string{{"--type=vm"}, {"--type=vm", "--class=large"}} {
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			want := "--type is not supported for provider=smolvm; use --smolvm-image"
+			if len(args) == 2 {
+				want = "--class is not supported for provider=smolvm; use --smolvm-cpus/--smolvm-memory-mb"
+			}
+			for _, v := range []any{nil, struct{}{}, values} {
+				err := ApplySmolvmProviderFlags(&cfg, fs, v)
+				if name == "SMOL" || name == " smolvm " {
+					if err != nil {
+						t.Fatal("guard gained provider normalization")
+					}
+					continue
+				}
+				if err == nil || err.Error() != want {
+					t.Fatalf("guard=%v", err)
+				}
+			}
+		}
+	}
+	cfg = Config{Smolvm: core.SmolvmConfig{Network: "other", CPUs: -1, MemoryMB: -1, Workdir: "relative"}}
+	if err := ApplySmolvmProviderFlags(&cfg, flag.NewFlagSet("foreign", flag.ContinueOnError), struct{}{}); err != nil {
+		t.Fatal("foreign values reached validation")
+	}
+	if err := validateConfig(cfg); err == nil || !strings.HasPrefix(err.Error(), "invalid smolvm network") {
+		t.Fatalf("network order=%v", err)
+	}
+	cfg.Smolvm.Network = "blocked"
+	if err := validateConfig(cfg); err == nil || err.Error() != "smolvm cpus must be >= 0" {
+		t.Fatalf("CPU order=%v", err)
+	}
+	cfg.Smolvm.CPUs = 0
+	if err := validateConfig(cfg); err == nil || err.Error() != "smolvm memory-mb must be >= 0" {
+		t.Fatalf("memory order=%v", err)
+	}
+	cfg.Smolvm.MemoryMB = 0
+	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "absolute path") {
+		t.Fatalf("workdir order=%v", err)
+	}
+}
+
+func TestSmolvmSixDefaultConsumersAndSeparateNetworkRoot(t *testing.T) {
+	for _, tc := range []struct{ base, image, dir, wantBase, wantImage, wantDir, wantHost string }{{"", "", "", "https://api.smolmachines.com", "alpine", "/workspace", "api.smolmachines.com"}, {"  ", "  ", "  ", "https://api.smolmachines.com", "alpine", "/workspace", "api.smolmachines.com"}, {" http://127.0.0.1:8787/api/ ", " ubuntu ", " /workspace/app ", "http://127.0.0.1:8787/api", "ubuntu", "/workspace/app", "127.0.0.1:8787"}} {
+		cfg := Config{Smolvm: core.SmolvmConfig{APIKey: "inert", BaseURL: tc.base, Image: tc.image, Workdir: tc.dir}}
+		before := cfg.Smolvm
+		endpoint, err := smolvmEndpoint(cfg)
+		if err != nil || endpoint != tc.wantBase {
+			t.Fatalf("endpoint=%q err=%v", endpoint, err)
+		}
+		api, err := newAPI(cfg, Runtime{HTTP: &http.Client{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if api.(*client).base != tc.wantBase || machineBaseHost(cfg) != tc.wantHost || imageName(cfg) != tc.wantImage || workdir(cfg) != tc.wantDir {
+			t.Fatal("default consumer changed")
+		}
+		if cfg.Smolvm != before {
+			t.Fatal("consumer mutated raw config")
+		}
+	}
+	for _, raw := range []int{-1, 0, 7} {
+		cfg := Config{Smolvm: core.SmolvmConfig{CPUs: raw, MemoryMB: raw}}
+		cpu, memory := 2, 2048
+		if raw > 0 {
+			cpu, memory = raw, raw
+		}
+		if cpusValue(cfg) != cpu || memoryValue(cfg) != memory {
+			t.Fatal("numeric default changed")
+		}
+	}
+	if networkMode(Config{}) != "blocked" || networkMode(core.BaseConfig()) != "open" {
+		t.Fatal("raw empty network and compiled open default conflated")
+	}
+	for raw, want := range map[string]string{"  ": "blocked", " PUBLIC ": "open", "private": "blocked"} {
+		if got := networkMode(Config{Smolvm: core.SmolvmConfig{Network: raw}}); got != want {
+			t.Fatalf("network raw=%q got=%q", raw, got)
+		}
+	}
+	if workspaceRoot != "/workspace" {
+		t.Fatal("fixed transfer root changed")
+	}
+	for _, path := range []string{"/workspace", "/workspace/app"} {
+		if got, err := workspaceFolder(path); err != nil || got != path {
+			t.Fatalf("workspace folder=%q err=%v", got, err)
+		}
+	}
+}
 
 func TestProviderSpecAndAliases(t *testing.T) {
 	p := Provider{}
@@ -263,7 +399,7 @@ func TestSmolVMFallbackBoundsControlAndPreservesCommand(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	control, data := smolvmHTTPClients(nil, controlTimeout)
+	control, data := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	trusted, _ := url.Parse(server.URL)
 	client := &client{
 		apiKey:   "smk_key",

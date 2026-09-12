@@ -1,6 +1,7 @@
 package parallels
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -557,5 +558,193 @@ func (r *parallelsAcquireRunner) Run(_ context.Context, req core.LocalCommandReq
 		return core.LocalCommandResult{}, nil
 	default:
 		return core.LocalCommandResult{}, errors.New("unexpected prlctl command")
+	}
+}
+
+func TestParallelsConfigShowCompleteRawFields(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config core.ParallelsConfig
+		fields []core.ProviderConfigShowField
+	}{{name: "zero", config: core.ParallelsConfig{Template: "", Source: "", SourceID: "", SourceSnapshot: "", SourceSnapshotID: "", CloneMode: "", Host: "", HostUser: "", HostKey: "", VMRoot: "", User: "", WorkRoot: "", SelectedHost: "internal-selected-host", StartupTimeout: 0}, fields: []core.ProviderConfigShowField{{JSONName: "template", JSONValue: "", TextName: "template", TextValue: "-"}, {JSONName: "source", JSONValue: "", TextName: "source", TextValue: "-"}, {JSONName: "sourceId", JSONValue: "", TextName: "source_id", TextValue: "-"}, {JSONName: "sourceSnapshot", JSONValue: "", TextName: "snapshot", TextValue: "-"}, {JSONName: "sourceSnapshotId", JSONValue: "", TextName: "snapshot_id", TextValue: "-"}, {JSONName: "cloneMode", JSONValue: "", TextName: "clone_mode", TextValue: ""}, {JSONName: "host", JSONValue: "", TextName: "host", TextValue: "local"}, {JSONName: "hostUser", JSONValue: ""}, {JSONName: "hostKey", JSONValue: "missing"}, {JSONName: "vmRoot", JSONValue: ""}, {JSONName: "user", JSONValue: "", TextName: "user", TextValue: ""}, {JSONName: "workRoot", JSONValue: "", TextName: "work_root", TextValue: ""}, {JSONName: "startupTimeout", JSONValue: "0s", TextName: "startup_timeout", TextValue: "0s"}, {JSONName: "templates", JSONValue: map[string]core.ParallelsTemplateConfig(nil), TextName: "templates", TextValue: "0"}, {JSONName: "hosts", JSONValue: []core.ParallelsHostConfig(nil), TextName: "hosts", TextValue: "0"}}},
+		{name: "raw", config: core.ParallelsConfig{Template: " Template reference ", Source: " Source reference ", SourceID: " SourceID reference ", SourceSnapshot: " SourceSnapshot reference ", SourceSnapshotID: " SourceSnapshotID reference ", CloneMode: " CloneMode reference ", Host: " Host reference ", HostUser: " HostUser reference ", HostKey: " HostKey reference ", VMRoot: " VMRoot reference ", User: " User reference ", WorkRoot: " WorkRoot reference ", SelectedHost: "internal-selected-host", StartupTimeout: -1500 * time.Millisecond}, fields: []core.ProviderConfigShowField{{JSONName: "template", JSONValue: " Template reference ", TextName: "template", TextValue: " Template reference "}, {JSONName: "source", JSONValue: " Source reference ", TextName: "source", TextValue: " Source reference "}, {JSONName: "sourceId", JSONValue: " SourceID reference ", TextName: "source_id", TextValue: " SourceID reference "}, {JSONName: "sourceSnapshot", JSONValue: " SourceSnapshot reference ", TextName: "snapshot", TextValue: " SourceSnapshot reference "}, {JSONName: "sourceSnapshotId", JSONValue: " SourceSnapshotID reference ", TextName: "snapshot_id", TextValue: " SourceSnapshotID reference "}, {JSONName: "cloneMode", JSONValue: " CloneMode reference ", TextName: "clone_mode", TextValue: " CloneMode reference "}, {JSONName: "host", JSONValue: " Host reference ", TextName: "host", TextValue: " Host reference "}, {JSONName: "hostUser", JSONValue: " HostUser reference "}, {JSONName: "hostKey", JSONValue: "configured"}, {JSONName: "vmRoot", JSONValue: " VMRoot reference "}, {JSONName: "user", JSONValue: " User reference ", TextName: "user", TextValue: " User reference "}, {JSONName: "workRoot", JSONValue: " WorkRoot reference ", TextName: "work_root", TextValue: " WorkRoot reference "}, {JSONName: "startupTimeout", JSONValue: "-1.5s", TextName: "startup_timeout", TextValue: "-1.5s"}, {JSONName: "templates", JSONValue: map[string]core.ParallelsTemplateConfig(nil), TextName: "templates", TextValue: "0"}, {JSONName: "hosts", JSONValue: []core.ParallelsHostConfig(nil), TextName: "hosts", TextValue: "0"}}},
+		{name: "whitespace", config: core.ParallelsConfig{Template: " \t ", Source: " \t ", SourceID: " \t ", SourceSnapshot: " \t ", SourceSnapshotID: " \t ", CloneMode: " \t ", Host: " \t ", HostUser: " \t ", HostKey: " \t ", VMRoot: " \t ", User: " \t ", WorkRoot: " \t ", SelectedHost: "internal-selected-host", StartupTimeout: -1500 * time.Millisecond}, fields: []core.ProviderConfigShowField{{JSONName: "template", JSONValue: " \t ", TextName: "template", TextValue: " \t "}, {JSONName: "source", JSONValue: " \t ", TextName: "source", TextValue: " \t "}, {JSONName: "sourceId", JSONValue: " \t ", TextName: "source_id", TextValue: " \t "}, {JSONName: "sourceSnapshot", JSONValue: " \t ", TextName: "snapshot", TextValue: " \t "}, {JSONName: "sourceSnapshotId", JSONValue: " \t ", TextName: "snapshot_id", TextValue: " \t "}, {JSONName: "cloneMode", JSONValue: " \t ", TextName: "clone_mode", TextValue: " \t "}, {JSONName: "host", JSONValue: " \t ", TextName: "host", TextValue: " \t "}, {JSONName: "hostUser", JSONValue: " \t "}, {JSONName: "hostKey", JSONValue: "configured"}, {JSONName: "vmRoot", JSONValue: " \t "}, {JSONName: "user", JSONValue: " \t ", TextName: "user", TextValue: " \t "}, {JSONName: "workRoot", JSONValue: " \t ", TextName: "work_root", TextValue: " \t "}, {JSONName: "startupTimeout", JSONValue: "-1.5s", TextName: "startup_timeout", TextValue: "-1.5s"}, {JSONName: "templates", JSONValue: map[string]core.ParallelsTemplateConfig(nil), TextName: "templates", TextValue: "0"}, {JSONName: "hosts", JSONValue: []core.ParallelsHostConfig(nil), TextName: "hosts", TextValue: "0"}}}} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.Config{Parallels: tc.config}
+			want := core.ProviderConfigShowSection{JSONKey: "parallels", TextLabel: "parallels", Providers: []string{"parallels"}, Fields: tc.fields}
+			for _, selection := range []string{"unselected-display", "parallels"} {
+				cfg.Provider = selection
+				before := cfg
+				got := (Provider{}).ConfigShowSection(cfg)
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("section=%#v want%#v", got, want)
+				}
+				if !reflect.DeepEqual(cfg, before) {
+					t.Fatal("projection mutated config")
+				}
+			}
+		})
+	}
+}
+
+func TestParallelsConfigShowTypedCollections(t *testing.T) {
+	for _, empty := range []bool{true, false} {
+		t.Run(map[bool]string{true: "nonnull empty", false: "populated ordered duplicates"}[empty], func(t *testing.T) {
+			cfg := core.Config{}
+			cfg.Parallels.Templates = map[string]core.ParallelsTemplateConfig{}
+			cfg.Parallels.Hosts = []core.ParallelsHostConfig{}
+			if !empty {
+				cfg.Parallels.Templates["raw template key"] = core.ParallelsTemplateConfig{Source: "source", SourceID: "source-id", SourceSnapshot: "snapshot", SourceSnapshotID: "snapshot-id", TargetOS: "linux", WindowsMode: "normal", CloneMode: "linked", Host: "host", HostUser: "host-user", HostKey: "loaded-template-key", VMRoot: "/vm", User: "user", WorkRoot: "/work"}
+				first := core.ParallelsHostConfig{Name: "first", Host: "first-host", User: "host-user", Key: "loaded-host-key", VMRoot: "/vm", Targets: []string{"linux", "linux", "macos"}, MaxVMs: 3}
+				second := core.ParallelsHostConfig{Name: "second", Host: "second-host", Targets: []string{}, MaxVMs: 0}
+				cfg.Parallels.Hosts = []core.ParallelsHostConfig{first, second, first}
+			}
+			before, err := json.Marshal(cfg.Parallels)
+			if err != nil {
+				t.Fatal(err)
+			}
+			section := (Provider{}).ConfigShowSection(cfg)
+			values := map[string]any{}
+			texts := map[string]string{}
+			for _, field := range section.Fields {
+				values[field.JSONName] = field.JSONValue
+				if field.TextName != "" {
+					texts[field.TextName] = field.TextValue
+				}
+			}
+			if len(values) != 15 || len(texts) != 12 {
+				t.Fatalf("field counts=%d/%d", len(values), len(texts))
+			}
+			for _, omitted := range []string{"hostUser", "hostKey", "vmRoot", "selectedHost", "SelectedHost"} {
+				if _, ok := texts[omitted]; ok {
+					t.Fatalf("JSON-only/internal field in text: %s", omitted)
+				}
+			}
+			if _, ok := values["selectedHost"]; ok {
+				t.Fatal("internal selectedHost exposed")
+			}
+			templates, ok := values["templates"].(map[string]core.ParallelsTemplateConfig)
+			if !ok || templates == nil {
+				t.Fatalf("templates type/nil=%T %v", values["templates"], templates == nil)
+			}
+			hosts, ok := values["hosts"].([]core.ParallelsHostConfig)
+			if !ok || hosts == nil {
+				t.Fatalf("hosts type/nil=%T %v", values["hosts"], hosts == nil)
+			}
+			encoded, err := json.Marshal(values)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded map[string]any
+			if err := json.Unmarshal(encoded, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if empty {
+				if len(templates) != 0 || len(hosts) != 0 || texts["templates"] != "0" || texts["hosts"] != "0" {
+					t.Fatal("empty collections changed")
+				}
+				if !strings.Contains(string(encoded), `"templates":{}`) || !strings.Contains(string(encoded), `"hosts":[]`) {
+					t.Fatalf("empty JSON=%s", encoded)
+				}
+			} else {
+				wantTemplate := map[string]any{"Source": "source", "SourceID": "source-id", "SourceSnapshot": "snapshot", "SourceSnapshotID": "snapshot-id", "TargetOS": "linux", "WindowsMode": "normal", "CloneMode": "linked", "Host": "host", "HostUser": "host-user", "HostKey": "configured", "VMRoot": "/vm", "User": "user", "WorkRoot": "/work"}
+				if !reflect.DeepEqual(decoded["templates"], map[string]any{"raw template key": wantTemplate}) {
+					t.Fatalf("typed template JSON=%#v", decoded["templates"])
+				}
+				wantFirst := map[string]any{"Name": "first", "Host": "first-host", "User": "host-user", "Key": "configured", "VMRoot": "/vm", "Targets": []any{"linux", "linux", "macos"}, "MaxVMs": float64(3)}
+				wantSecond := map[string]any{"Name": "second", "Host": "second-host", "User": "", "Key": "missing", "VMRoot": "", "Targets": []any{}, "MaxVMs": float64(0)}
+				if !reflect.DeepEqual(decoded["hosts"], []any{wantFirst, wantSecond, wantFirst}) {
+					t.Fatalf("typed host JSON=%#v", decoded["hosts"])
+				}
+				if texts["templates"] != "1" || texts["hosts"] != "3" {
+					t.Fatalf("counts=%v", texts)
+				}
+				if &hosts[0].Targets[0] != &cfg.Parallels.Hosts[0].Targets[0] {
+					t.Fatal("Targets shallow alias changed")
+				}
+				hosts[0].Host = "result-only"
+				template := templates["raw template key"]
+				template.Host = "result-only"
+				templates["raw template key"] = template
+			}
+			after, err := json.Marshal(cfg.Parallels)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("projection or outer-result edits mutated source")
+			}
+		})
+	}
+}
+
+func TestConfigShowRedactsParallelsSSHKeys(t *testing.T) {
+	const (
+		topLevelKey = "top-level-private-key-sentinel"
+		templateKey = "template-private-key-sentinel"
+		hostKey     = "host-private-key-sentinel"
+	)
+	cfg := core.Config{}
+	cfg.Parallels.HostKey = topLevelKey
+	cfg.Parallels.Templates = map[string]core.ParallelsTemplateConfig{
+		"macos": {
+			Source:  "macOS Tahoe",
+			Host:    "template-host.example.test",
+			HostKey: templateKey,
+		},
+	}
+	cfg.Parallels.Hosts = []core.ParallelsHostConfig{{
+		Name: "builder",
+		Host: "builder.example.test",
+		Key:  hostKey,
+	}}
+
+	var text bytes.Buffer
+	section := (Provider{}).ConfigShowSection(cfg)
+	values := map[string]any{}
+	text.WriteString(section.TextLabel)
+	for _, field := range section.Fields {
+		values[field.JSONName] = field.JSONValue
+		if field.TextName != "" {
+			text.WriteString(" " + field.TextName + "=" + field.TextValue)
+		}
+	}
+	text.WriteByte('\n')
+	jsonData, err := json.Marshal(map[string]any{"parallels": values})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, output := range map[string]string{"text": text.String(), "json": string(jsonData)} {
+		for _, secret := range []string{topLevelKey, templateKey, hostKey} {
+			if strings.Contains(output, secret) {
+				t.Fatalf("%s config output leaked %q: %s", name, secret, output)
+			}
+		}
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(jsonData, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	parallels := decoded["parallels"].(map[string]any)
+	if parallels["hostKey"] != "configured" {
+		t.Fatalf("top-level hostKey=%#v, want configured", parallels["hostKey"])
+	}
+	templates := parallels["templates"].(map[string]any)
+	template := templates["macos"].(map[string]any)
+	if template["HostKey"] != "configured" || template["Source"] != "macOS Tahoe" {
+		t.Fatalf("template view=%#v", template)
+	}
+	hosts := parallels["hosts"].([]any)
+	host := hosts[0].(map[string]any)
+	if host["Key"] != "configured" || host["Host"] != "builder.example.test" {
+		t.Fatalf("host view=%#v", host)
+	}
+
+	if cfg.Parallels.HostKey != topLevelKey || cfg.Parallels.Templates["macos"].HostKey != templateKey || cfg.Parallels.Hosts[0].Key != hostKey {
+		t.Fatal("config-show redaction mutated the effective Parallels config")
+	}
+	if redactedParallelsTemplateConfigs(nil) != nil || redactedParallelsHostConfigs(nil) != nil {
+		t.Fatal("config-show redaction changed nil Parallels collections")
 	}
 }

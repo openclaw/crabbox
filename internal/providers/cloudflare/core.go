@@ -1,7 +1,6 @@
 package cloudflare
 
 import (
-	"flag"
 	"io"
 	"time"
 
@@ -31,7 +30,6 @@ type Repo = core.Repo
 type ExitError = core.ExitError
 type FeatureSet = core.FeatureSet
 type Feature = core.Feature
-type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 
 const (
@@ -43,14 +41,6 @@ const (
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
-}
-
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
 }
 
 func newLeaseID() string {
@@ -71,10 +61,6 @@ func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTim
 
 func resolveLeaseClaimForProvider(identifier, provider string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaimForProvider(identifier, provider)
-}
-
-func writeTimingJSON(w io.Writer, report timingReport) error {
-	return core.WriteTimingJSON(w, report)
 }
 
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {

@@ -2,9 +2,7 @@ package runpod
 
 import (
 	"context"
-	"flag"
 	"io"
-	"strings"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -37,14 +35,6 @@ const (
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
-}
-
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
 }
 
 func newLeaseID() string {
@@ -111,10 +101,6 @@ func sshTargetFromConfig(cfg Config, host string) SSHTarget {
 	return core.SSHTargetFromConfig(cfg, host)
 }
 
-func isDefaultWorkRoot(value string) bool {
-	return core.IsDefaultWorkRoot(value)
-}
-
 func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 	return core.WaitForSSHReady(ctx, target, stderr, phase, timeout)
 }
@@ -129,16 +115,4 @@ func bootstrapWaitTimeout(cfg Config) time.Duration {
 
 func inventoryDoctorResult(provider string, leases int) DoctorResult {
 	return core.InventoryDoctorResult(provider, leases)
-}
-
-// isRunpodProviderName reports whether the configured provider string refers to
-// the runpod provider, accepting the canonical name and the documented aliases
-// in a case- and whitespace-tolerant way.
-func isRunpodProviderName(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case providerName, "run-pod", "runpodio":
-		return true
-	default:
-		return false
-	}
 }

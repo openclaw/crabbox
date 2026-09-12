@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -51,6 +52,28 @@ func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (
 
 func commandKey(args []string) string {
 	return strings.Join(args, "\x00")
+}
+
+func TestTartConfigShowSection(t *testing.T) {
+	for _, number := range []int{0, -2, 4} {
+		cfg := core.Config{Provider: "other", Tart: core.TartConfig{Image: " raw-image ", User: "", WorkRoot: " raw-root ", CPUs: number, Memory: number, Disk: number}}
+		before := cfg
+		section := (Provider{}).ConfigShowSection(cfg)
+		got := map[string]any{}
+		var fields []string
+		for _, f := range section.Fields {
+			got[f.JSONName] = f.JSONValue
+			fields = append(fields, f.TextName+"="+f.TextValue)
+		}
+		want := map[string]any{"image": " raw-image ", "user": "", "workRoot": " raw-root ", "cpus": number, "memory": number, "disk": number}
+		text := fmt.Sprintf("image= raw-image  user= work_root= raw-root  cpus=%d memory=%d disk=%d", number, number, number)
+		if section.JSONKey != "tart" || section.TextLabel != "tart" || !reflect.DeepEqual(section.Providers, []string{"tart"}) || len(section.Fields) != 6 || !reflect.DeepEqual(got, want) || strings.Join(fields, " ") != text {
+			t.Fatalf("Tart projection %#v", section)
+		}
+		if !reflect.DeepEqual(cfg, before) {
+			t.Fatal("projection mutated config")
+		}
+	}
 }
 
 func TestProviderSpecAndAliases(t *testing.T) {
@@ -2152,13 +2175,25 @@ func TestCommandErrorMinimalExitCode(t *testing.T) {
 }
 
 func TestIsTartProviderName(t *testing.T) {
+	selected := func(name string) bool {
+		cfg := core.BaseConfig()
+		cfg.Provider = name
+		cfg.TargetOS = "linux"
+		fs := flag.NewFlagSet("name-contract", flag.ContinueOnError)
+		p := Provider{}
+		values := p.RegisterFlags(fs, cfg)
+		if err := p.ApplyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		return cfg.TargetOS == "macos"
+	}
 	for _, name := range []string{"tart", "Tart", "TART", "local-tart", "macos-vm", " tart "} {
-		if !isTartProviderName(name) {
+		if !selected(name) {
 			t.Errorf("isTartProviderName(%q) = false, want true", name)
 		}
 	}
 	for _, name := range []string{"docker", "aws", "hyperv", ""} {
-		if isTartProviderName(name) {
+		if selected(name) {
 			t.Errorf("isTartProviderName(%q) = true, want false", name)
 		}
 	}
@@ -3004,29 +3039,25 @@ func TestConfigureVMSkipsDiskWhenNotExplicit(t *testing.T) {
 	}
 }
 
-func TestValidateTartEnvIntNonNegative(t *testing.T) {
-	t.Setenv("CRABBOX_TART_DISK", "0")
-	err := validateTartEnvIntNonNegative("CRABBOX_TART_DISK", "disk must be non-negative")
-	if err != nil {
-		t.Fatalf("should accept 0: %v", err)
-	}
-
-	t.Setenv("CRABBOX_TART_DISK", "50")
-	err = validateTartEnvIntNonNegative("CRABBOX_TART_DISK", "disk must be non-negative")
-	if err != nil {
-		t.Fatalf("should accept 50: %v", err)
-	}
-
-	t.Setenv("CRABBOX_TART_DISK", "-1")
-	err = validateTartEnvIntNonNegative("CRABBOX_TART_DISK", "disk must be non-negative")
-	if err == nil {
-		t.Fatal("should reject negative disk")
-	}
-
-	t.Setenv("CRABBOX_TART_DISK", "abc")
-	err = validateTartEnvIntNonNegative("CRABBOX_TART_DISK", "disk must be non-negative")
-	if err == nil {
-		t.Fatal("should reject non-integer")
+func TestValidateTartEnvIntZeroMinimum(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{"", ""}, {"0", ""}, {"+0", ""}, {"50", ""},
+		{"-1", "disk must be non-negative (got -1)"},
+		{"abc", `CRABBOX_TART_DISK must be a valid integer (got "abc")`},
+		{" 50 ", `CRABBOX_TART_DISK must be a valid integer (got " 50 ")`},
+		{"99999999999999999999999", `CRABBOX_TART_DISK must be a valid integer (got "99999999999999999999999")`},
+	} {
+		t.Run(fmt.Sprintf("%q", tc.raw), func(t *testing.T) {
+			t.Setenv("CRABBOX_TART_DISK", tc.raw)
+			err := validateTartEnvInt("CRABBOX_TART_DISK", 0, "disk must be non-negative")
+			if tc.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || err.Error() != tc.want || core.ExitCodeForError(err, 1) != 2 {
+				t.Fatalf("error=%v, want exit2 %q", err, tc.want)
+			}
+		})
 	}
 }
 
@@ -4168,10 +4199,10 @@ func TestShouldCleanupEmptyStatus(t *testing.T) {
 }
 
 func TestBlankHelper(t *testing.T) {
-	if got := blank("value", "fallback"); got != "value" {
+	if got := core.Blank("value", "fallback"); got != "value" {
 		t.Fatalf("blank(\"value\", \"fallback\") = %q", got)
 	}
-	if got := blank("", "fallback"); got != "fallback" {
+	if got := core.Blank("", "fallback"); got != "fallback" {
 		t.Fatalf("blank(\"\", \"fallback\") = %q", got)
 	}
 }
@@ -4249,5 +4280,58 @@ func TestNormalizeLeaseSlugWithPrefix(t *testing.T) {
 	result := normalizeLeaseSlug("my-slug")
 	if result == "" {
 		t.Fatal("normalizeLeaseSlug should return non-empty for valid slug")
+	}
+}
+
+func TestInheritedWorkRootCallerContract(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USER", "fixture-user")
+	for _, tc := range []struct{ providerRoot, genericRoot, want string }{
+		{"", "", "/Users/admin/crabbox"},
+		{"", "/work/crabbox", "/Users/admin/crabbox"},
+		{"", "/Users/ec2-user/crabbox", "/Users/admin/crabbox"},
+		{"", "C:\\crabbox", "/Users/admin/crabbox"},
+		{"", " /work/crabbox ", " /work/crabbox "},
+		{"", "/WORK/crabbox", "/WORK/crabbox"},
+		{"", "c:\\crabbox", "c:\\crabbox"},
+		{"", "/srv/custom", "/srv/custom"},
+		{"", "/Users/alice/custom", "/Users/alice/custom"},
+		{"", "D:\\custom", "D:\\custom"},
+		{"", "  ", "  "},
+		{" ", "/srv/custom", " "},
+		{"/work/crabbox", "/srv/custom", "/work/crabbox"},
+		{"relative", "/srv/custom", "relative"},
+		{"/provider/root", "/srv/custom", "/provider/root"},
+	} {
+		for _, explicit := range []bool{false, true} {
+			cfg := Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
+			if explicit {
+				core.MarkWorkRootExplicit(&cfg)
+				cfg.TargetOS = "existing-target"
+				cfg.WindowsMode = "prior-mode"
+			}
+			cfg.WorkRoot = tc.genericRoot
+			cfg.Tart.WorkRoot = tc.providerRoot
+			cfg.Tart.Image = "fixture-image"
+			want := cfg
+			want.Provider = "tart"
+			if !explicit {
+				want.TargetOS = "macos"
+			}
+			want.Tart.WorkRoot = tc.want
+			want.WorkRoot = tc.want
+			want.Tart.User = "fixture-user"
+			want.Tart.Password = "admin"
+			want.Tart.CPUs = 4
+			want.Tart.Memory = 8192
+			want.SSHPort = "22"
+			want.SSHFallbackPorts = []string{}
+			want.WindowsMode = ""
+			want.ServerType = "fixture-image"
+			applyDefaults(&cfg)
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("whole config differs for roots=%q/%q explicit=%t: got=%#v want=%#v", tc.providerRoot, tc.genericRoot, explicit, cfg, want)
+			}
+		}
 	}
 }

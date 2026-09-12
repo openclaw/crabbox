@@ -1,9 +1,7 @@
 package nomad
 
 import (
-	"flag"
 	"io"
-	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -29,7 +27,6 @@ type LeaseClaim = core.LeaseClaim
 type Repo = core.Repo
 type Server = core.Server
 type ExitError = core.ExitError
-type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 
 const providerName = "nomad"
@@ -40,16 +37,8 @@ func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
 }
 
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
-}
-
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
-}
-
-func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
 }
 
 func readLeaseClaim(leaseID string) (LeaseClaim, error) {
@@ -70,10 +59,6 @@ func updateLeaseClaimLabelsIfUnchanged(leaseID string, expected LeaseClaim, labe
 
 func delegatedSyncOptionsError(spec ProviderSpec, req RunRequest) error {
 	return core.RejectDelegatedSyncOptionsForSpec(spec, req)
-}
-
-func writeTimingJSON(w io.Writer, report timingReport) error {
-	return core.WriteTimingJSON(w, report)
 }
 
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {

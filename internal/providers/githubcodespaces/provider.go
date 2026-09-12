@@ -27,6 +27,7 @@ func (Provider) Aliases() []string {
 
 func (Provider) Spec() ProviderSpec {
 	return ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationCLI),
 		Name:             providerName,
 		Family:           providerFamily,
 		Kind:             core.ProviderKindSSHLease,

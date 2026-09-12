@@ -233,13 +233,6 @@ func randomSuffix() string {
 	return shared.RandomSuffix()
 }
 
-func (b *codeSandboxBackend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
-}
-
 func (b *codeSandboxBackend) cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), codeSandboxCleanupTimeout)
 }

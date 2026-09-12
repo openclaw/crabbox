@@ -541,3 +541,41 @@ func TestIsloTailscaleArchiveVerification(t *testing.T) {
 		t.Fatal("mismatched checksum accepted")
 	}
 }
+
+func TestEnsureLeaseTailscalePostBindingPreservesOpaqueCodeAndCause(t *testing.T) {
+	for _, stage := range []string{"resume", "health", "repair"} {
+		t.Run(stage, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "reuse", isloTeardownName, isloTestResourceID, isloTestClaimScope)
+			if err := updateLeaseClaimTailscale(isloTeardownLeaseID, "100.64.7.7", ""); err != nil {
+				t.Fatal(err)
+			}
+			cause := core.Exit(69, "underlying provider unavailable")
+			client := &fakeIsloSyncClient{getSandbox: &gosdk.SandboxResponse{ID: isloTestResourceID, Name: isloTeardownName, Status: "running"}}
+			var want string
+			switch stage {
+			case "resume":
+				client.getSandbox.Status = "paused"
+				client.resumeErr = cause
+				want = fmt.Sprintf("%v: resume sandbox: %v", core.ErrTailnetPeerValidationUnavailable, cause)
+			case "health":
+				client.execErrOnCommand = cause
+				client.execErrOnCommandContains = `"BackendState"`
+				want = fmt.Sprintf("%v: %v", core.ErrTailnetPeerValidationUnavailable, cause)
+			case "repair":
+				client.execCodes = []int{1}
+				client.execErrOnCommand = cause
+				client.execErrOnCommandContains = "TS_AUTH_VALUE"
+				want = fmt.Sprintf("%v: restart failed: islo tailscale bring-up: %v", core.ErrTailnetPeerUnavailable, cause)
+			}
+			b := newIsloTeardownBackend(t, client, io.Discard)
+			_, err := b.ensureLeaseTailscale(context.Background(), client, isloTeardownName, "reuse", isloTeardownLeaseID, true)
+			if err == nil || err.Error() != want || core.ExitCodeForError(err, 1) != 1 {
+				t.Errorf("public=%d message=%v want1/%s", core.ExitCodeForError(err, 1), err, want)
+			}
+			if !errors.Is(err, cause) {
+				t.Error("post-binding cause lost")
+			}
+		})
+	}
+}

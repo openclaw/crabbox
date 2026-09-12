@@ -1,7 +1,6 @@
 package freestyle
 
 import (
-	"flag"
 	"io"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -11,10 +10,6 @@ type statusView = core.StatusView
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
 }
 
 func writeTimingJSON(w io.Writer, report timingReport) error {
@@ -51,10 +46,6 @@ func normalizeLeaseSlug(value string) string {
 
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
-}
-
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
 }
 
 var claimLeaseForRepoProviderPond = core.ClaimLeaseForRepoProviderPond

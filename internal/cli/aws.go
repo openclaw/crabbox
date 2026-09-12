@@ -908,7 +908,7 @@ func (c *AWSClient) DeleteServer(ctx context.Context, id string) error {
 func (c *AWSClient) CreateImageCheckpoint(ctx context.Context, instanceID, name string, noReboot bool) (CoordinatorImage, error) {
 	accountID, err := c.CallerAccountID(ctx)
 	if err != nil {
-		return CoordinatorImage{}, err
+		return CoordinatorImage{}, NativeCheckpointNotSubmittedError{Cause: err}
 	}
 	tags := awsTagsWithName(map[string]string{
 		"crabbox":           "true",

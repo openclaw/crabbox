@@ -24,6 +24,7 @@ func (Provider) Aliases() []string { return []string{"phala-cloud", "dstack"} }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationCLI),
 		Name:             providerName,
 		Family:           providerName,
 		Kind:             core.ProviderKindSSHLease,

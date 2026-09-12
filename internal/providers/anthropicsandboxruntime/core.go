@@ -30,7 +30,6 @@ type timingReport = core.TimingReport
 const (
 	providerName   = "anthropic-sandbox-runtime"
 	providerFamily = "anthropic-sandbox-runtime"
-	defaultCLIPath = "srt"
 )
 
 func exit(code int, format string, args ...any) core.ExitError {
@@ -59,8 +58,4 @@ func leadingEnvAssignment(command []string) bool {
 
 func shellScriptFromArgv(command []string) string {
 	return core.ShellScriptFromArgv(command)
-}
-
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
 }

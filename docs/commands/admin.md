@@ -101,7 +101,7 @@ The baseline AWS provider policy covers key pairs, instance launch and terminati
 
 Inspect and manage host lifecycle resources through provider- and target-scoped subcommands. Today `--provider aws --target macos` maps to AWS EC2 Mac Dedicated Host operations; the command shape is intentionally generic so other providers can add macOS host backends without introducing new top-level admin nouns.
 
-`policy`, `list`, `offerings`, `quota`, and `allocate --dry-run` are read-only. Real `allocate` and `release` require `--force`, because host resources are billed separately from leases and carry provider lifecycle constraints.
+`policy`, `list`, `offerings`, `quota`, `reservation`, and `allocate --dry-run` are read-only. Real `allocate` and `release` require `--force`, because host resources are billed separately from leases and carry provider lifecycle constraints.
 
 All subcommands share the scope flags:
 
@@ -109,6 +109,24 @@ All subcommands share the scope flags:
 --provider <provider>   host provider (default aws; currently aws)
 --target <target>       host target OS (default macos; currently macos)
 ```
+
+### hosts reservation / clear
+
+```sh
+crabbox admin hosts reservation h-0123456789abcdef0 --region eu-west-1 --json
+crabbox admin hosts clear h-0123456789abcdef0 --region eu-west-1
+```
+
+`reservation` reads coordinator host associations, with their storage keys,
+credential-free record summaries, canonical lease state (or `null`), and stale
+reason. `clear` removes those host references atomically and reports the number
+cleared. It preserves lease history, instance identity, and cleanup obligations;
+it does not terminate instances or release Dedicated Hosts. Active/provisioning
+and potentially retained associations require `clear --force`. A running create
+may restore its association, so inspect the lease and provider before forcing.
+Clear uses POST so older coordinators reject the unsupported operation without
+dispatching a Dedicated Host release. Both commands require admin credentials and support the shared scope flags,
+`--region`, and `--json`. They also work through `admin mac-hosts`.
 
 ### hosts policy
 
@@ -195,7 +213,7 @@ These spellings remain for existing scripts and runbooks. Prefer the provider- a
 
 - `crabbox admin aws-identity` — alias for `crabbox admin providers identity --provider aws`.
 - `crabbox admin aws-policy` — alias for `crabbox admin providers policy --provider aws`; supports `--mac-hosts` for the combined macOS policy.
-- `crabbox admin mac-hosts <list|offerings|quota|allocate|release|policy>` — alias for `crabbox admin hosts --provider aws --target macos`.
+- `crabbox admin mac-hosts <list|offerings|quota|allocate|release|reservation|clear|policy>` — alias for `crabbox admin hosts --provider aws --target macos`.
 
 ## Applying a macOS IAM policy for coordinator remediation
 

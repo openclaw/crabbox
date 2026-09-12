@@ -23,6 +23,7 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/openclaw/crabbox/internal/prefixbuffer"
 	xssh "golang.org/x/crypto/ssh"
 )
 
@@ -36,6 +37,7 @@ type SSHTarget struct {
 	HostKeyAlias           string
 	Port                   string
 	FallbackPorts          []string
+	preparedEndpoint       string
 	TargetOS               string
 	WindowsMode            string
 	ReadyCheck             string
@@ -46,7 +48,8 @@ type SSHTarget struct {
 	SSHConfigProxy         bool
 	ProxyCommand           string
 	ChildEnvDenylist       []string
-	ChildEnv               map[string]string
+	// Transport-only overrides can contain credentials; never serialize them.
+	ChildEnv map[string]string `json:"-"`
 }
 
 func isLocalMacTarget(target SSHTarget) bool {
@@ -290,22 +293,42 @@ func sshReadinessProfileForTarget(target SSHTarget) sshReadinessProfile {
 func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 	start := time.Now()
 	deadline := time.Now().Add(timeout)
-	profile := sshReadinessProfileForTarget(*target)
 	probeCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
+	return waitForSSHReadyWithProbeContext(ctx, probeCtx, target, stderr, phase, start, deadline)
+}
+
+func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHTarget, stderr io.Writer, phase string, start, deadline time.Time) error {
+	profile := sshReadinessProfileForTarget(*target)
 	lastPorts := ""
-	for {
-		if ctx.Err() != nil {
-			return context.Cause(ctx)
+	lastProbe := "transport"
+	check := func(probeErr error) error {
+		if stopped := sshReadinessProbeContextError(ctx, lastProbe); stopped != nil {
+			return stopped.cause
 		}
-		if time.Until(deadline) <= 0 {
-			if lastPorts != "" {
-				return exit(5, "timed out waiting for SSH on %s during %s ports=%s; %s", target.Host, phase, lastPorts, sshWaitNextAction(phase))
+		if sshReadinessProbeContextError(probeCtx, lastProbe) != nil {
+			var stopped *sshReadinessProbeStopped
+			if errors.As(probeErr, &stopped) {
+				lastProbe = stopped.probe
 			}
-			return exit(5, "timed out waiting for SSH on %s during %s; %s", target.Host, phase, sshWaitNextAction(phase))
+			ports := ""
+			if lastPorts != "" {
+				ports = " ports=" + lastPorts
+			}
+			return exit(5, "timed out waiting for SSH on %s during %s probe=%s cause=deadline_exceeded authentication=unknown%s; %s", target.Host, phase, lastProbe, ports, sshWaitNextAction(phase))
+		}
+		return nil
+	}
+	for {
+		if err := check(nil); err != nil {
+			return err
 		}
 		if isWindowsWSL2Target(*target) {
+			lastProbe = "transport"
 			err := probeWSL2SSHReady(probeCtx, target, profile, stderr)
+			if stopped := check(err); stopped != nil {
+				return stopped
+			}
 			if err == nil {
 				return nil
 			}
@@ -318,7 +341,11 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 			lastPorts = "wsl2"
 			fmt.Fprintln(stderr, sshWaitProgressMessage(target, phase, "", "", lastPorts, time.Since(start), time.Until(deadline)))
 		} else if target.SSHConfigProxy {
+			lastProbe = "readiness"
 			err := probeProxySSHReady(probeCtx, target, profile)
+			if stopped := check(err); stopped != nil {
+				return stopped
+			}
 			if err == nil {
 				return nil
 			}
@@ -332,11 +359,19 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 			transportPort := ""
 			probes := make([]string, 0, len(sshPortCandidates(target.Port, target.FallbackPorts)))
 			for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
+				lastProbe = "transport"
+				if err := check(nil); err != nil {
+					return err
+				}
 				probe := *target
 				probe.Port = port
 				probe.FallbackPorts = []string{}
-				conn, err := net.DialTimeout("tcp", net.JoinHostPort(probe.Host, probe.Port), 5*time.Second)
+				dialer := net.Dialer{Timeout: 5 * time.Second}
+				conn, err := dialer.DialContext(probeCtx, "tcp", net.JoinHostPort(probe.Host, probe.Port))
 				if err != nil {
+					if stopped := check(err); stopped != nil {
+						return stopped
+					}
 					probes = append(probes, port+":closed")
 					continue
 				}
@@ -344,20 +379,34 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 				if reachablePort == "" {
 					reachablePort = probe.Port
 				}
-				// Successful readiness also proves transport. Diagnose authentication
+				// Successful readiness also proves transport. Diagnose transport
 				// separately only when readiness fails, avoiding a healthy-path SSH call.
+				lastProbe = "readiness"
+				if err := check(nil); err != nil {
+					return err
+				}
 				err = runSSHReadinessProbe(probeCtx, probe, sshReadyCommand(probe), profile.connectTimeout, profile.connectionAttempts)
+				if stopped := check(err); stopped != nil {
+					return stopped
+				}
 				if err == nil {
 					if target.Port != probe.Port {
 						fmt.Fprintf(stderr, "using ssh port %s for %s (configured %s not ready)\n", probe.Port, target.Host, target.Port)
-						target.Port = probe.Port
 					}
+					target.recordPreparedEndpoint(probe.Port)
 					return nil
 				}
 				if setupErr := sshReadinessError(err, phase); setupErr != nil {
 					return setupErr
 				}
+				lastProbe = "transport"
+				if err := check(nil); err != nil {
+					return err
+				}
 				if err := runSSHReadinessProbe(probeCtx, probe, sshTransportProbeCommand(probe), profile.connectTimeout, profile.connectionAttempts); err != nil {
+					if stopped := check(err); stopped != nil {
+						return stopped
+					}
 					if setupErr := sshReadinessError(err, phase); setupErr != nil {
 						return setupErr
 					}
@@ -372,11 +421,11 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 			lastPorts = strings.Join(probes, ",")
 			fmt.Fprintln(stderr, sshWaitProgressMessage(target, phase, reachablePort, transportPort, lastPorts, time.Since(start), time.Until(deadline)))
 		}
-		if time.Until(deadline) <= 0 {
-			continue
+		if err := check(nil); err != nil {
+			return err
 		}
-		if err := sleepContext(ctx, 10*time.Second); err != nil {
-			return context.Cause(ctx)
+		if err := sleepContext(probeCtx, 10*time.Second); err != nil {
+			return check(err)
 		}
 	}
 }
@@ -410,7 +459,7 @@ func sshWaitProgressMessage(target *SSHTarget, phase, reachablePort, transportPo
 		return fmt.Sprintf("waiting for %s:%s %s ready-check... elapsed=%s remaining=%s%s", target.Host, transportPort, phase, elapsed, remaining, suffix)
 	}
 	if reachablePort != "" {
-		return fmt.Sprintf("waiting for %s:%s %s ssh-auth... elapsed=%s remaining=%s%s", target.Host, reachablePort, phase, elapsed, remaining, suffix)
+		return fmt.Sprintf("waiting for %s:%s %s ssh-transport... elapsed=%s remaining=%s%s", target.Host, reachablePort, phase, elapsed, remaining, suffix)
 	}
 	return fmt.Sprintf("waiting for %s:%s %s... elapsed=%s remaining=%s%s", target.Host, target.Port, phase, elapsed, remaining, suffix)
 }
@@ -429,6 +478,9 @@ func probeSSHReady(ctx context.Context, target *SSHTarget, timeout time.Duration
 		return probeProxySSHReady(ctx, target, profile) == nil
 	}
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
+		if sshReadinessProbeContextError(ctx, "transport") != nil {
+			return false
+		}
 		probe := *target
 		probe.Port = port
 		probe.FallbackPorts = []string{}
@@ -438,8 +490,11 @@ func probeSSHReady(ctx context.Context, target *SSHTarget, timeout time.Duration
 			continue
 		}
 		_ = conn.Close()
+		if sshReadinessProbeContextError(ctx, "readiness") != nil {
+			return false
+		}
 		if runSSHQuietWithOptions(ctx, probe, sshReadyCommand(probe), profile.connectTimeout, profile.connectionAttempts) == nil {
-			target.Port = probe.Port
+			target.recordPreparedEndpoint(probe.Port)
 			return true
 		}
 	}
@@ -447,24 +502,36 @@ func probeSSHReady(ctx context.Context, target *SSHTarget, timeout time.Duration
 }
 
 func probeProxySSHReady(ctx context.Context, target *SSHTarget, profile sshReadinessProfile) error {
+	if stopped := sshReadinessProbeContextError(ctx, "readiness"); stopped != nil {
+		return stopped
+	}
 	var lastErr error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
+		if stopped := sshReadinessProbeContextError(ctx, "readiness"); stopped != nil {
+			return stopped
+		}
 		candidate := *target
 		candidate.Port, candidate.FallbackPorts = port, []string{}
 		if lastErr = runSSHReadinessProbe(ctx, candidate, sshReadyCommand(candidate), profile.connectTimeout, profile.connectionAttempts); lastErr != nil {
+			if stopped := sshReadinessProbeContextError(ctx, "readiness"); stopped != nil {
+				return stopped
+			}
 			var setupErr *workspaceOwnerSetupError
 			if errors.As(lastErr, &setupErr) || errors.Is(lastErr, errSSHHostKeyVerification) {
 				return lastErr
 			}
 			continue
 		}
-		target.Port, target.FallbackPorts = port, []string{}
+		target.recordPreparedEndpoint(port)
 		return nil
 	}
 	return lastErr
 }
 
 func probeWSL2SSHReady(ctx context.Context, target *SSHTarget, profile sshReadinessProfile, stderr io.Writer) error {
+	if stopped := sshReadinessProbeContextError(ctx, "transport"); stopped != nil {
+		return stopped
+	}
 	ports := sshPortCandidates(target.Port, target.FallbackPorts)
 	type outcome struct {
 		err         error
@@ -472,6 +539,9 @@ func probeWSL2SSHReady(ctx context.Context, target *SSHTarget, profile sshReadin
 	}
 	outcomes := make([]outcome, 0, len(ports))
 	for _, port := range ports {
+		if stopped := sshReadinessProbeContextError(ctx, "transport"); stopped != nil {
+			return stopped
+		}
 		probe := *target
 		probe.Port, probe.FallbackPorts = port, []string{}
 		run := func(remote string) error {
@@ -481,11 +551,17 @@ func probeWSL2SSHReady(ctx context.Context, target *SSHTarget, profile sshReadin
 			return sshReadinessProbeError(ctx, err, diagnostic.hostKeyRejected())
 		}
 		if err := run(sshTransportProbeCommand(probe)); err != nil {
+			if stopped := sshReadinessProbeContextError(ctx, "transport"); stopped != nil {
+				return stopped
+			}
 			if errors.Is(err, errSSHHostKeyVerification) {
 				return err
 			}
 			outcomes = append(outcomes, outcome{err: err})
 			continue
+		}
+		if stopped := sshReadinessProbeContextError(ctx, "transport"); stopped != nil {
+			return stopped
 		}
 		var diagnostic sshReadinessDiagnostic
 		var diagnosticOutput io.Writer = &diagnostic
@@ -494,11 +570,17 @@ func probeWSL2SSHReady(ctx context.Context, target *SSHTarget, profile sshReadin
 		}
 		sftpErr := probeWSLSFTPSubsystem(ctx, probe, profile.connectTimeout, profile.connectionAttempts, diagnosticOutput)
 		if err := sshReadinessProbeError(ctx, sftpErr, diagnostic.hostKeyRejected()); err != nil {
+			if stopped := sshReadinessProbeContextError(ctx, "transport"); stopped != nil {
+				return stopped
+			}
 			if errors.Is(err, errSSHHostKeyVerification) {
 				return err
 			}
 			outcomes = append(outcomes, outcome{err: err, missingSFTP: IsWSLSFTPUnavailable(err)})
 			continue
+		}
+		if stopped := sshReadinessProbeContextError(ctx, "readiness"); stopped != nil {
+			return stopped
 		}
 		// Transport/SFTP probes stay lightweight. An owned readiness command
 		// must pass the same staged witness setup as the subsequent workload.
@@ -508,9 +590,12 @@ func probeWSL2SSHReady(ctx context.Context, target *SSHTarget, profile sshReadin
 			}
 		}
 		if err := run(sshReadyCommand(probe)); err == nil {
-			target.Port, target.FallbackPorts = port, []string{}
+			target.recordPreparedEndpoint(port)
 			return nil
 		} else {
+			if stopped := sshReadinessProbeContextError(ctx, "readiness"); stopped != nil {
+				return stopped
+			}
 			var setupErr *workspaceOwnerSetupError
 			if errors.As(err, &setupErr) || errors.Is(err, errSSHHostKeyVerification) {
 				return err
@@ -542,6 +627,9 @@ func probeSSHTransport(ctx context.Context, target *SSHTarget, timeout time.Dura
 		return runSSHQuietWithOptionsResolvePort(ctx, target, sshTransportProbeCommand(*target), "2", "1") == nil
 	}
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
+		if sshReadinessProbeContextError(ctx, "transport") != nil {
+			return false
+		}
 		probe := *target
 		probe.Port = port
 		probe.FallbackPorts = []string{}
@@ -551,8 +639,11 @@ func probeSSHTransport(ctx context.Context, target *SSHTarget, timeout time.Dura
 			continue
 		}
 		_ = conn.Close()
+		if sshReadinessProbeContextError(ctx, "transport") != nil {
+			return false
+		}
 		if runSSHQuietWithOptions(ctx, probe, sshTransportProbeCommand(probe), "2", "1") == nil {
-			target.Port = probe.Port
+			target.recordPreparedEndpoint(probe.Port)
 			return true
 		}
 	}
@@ -568,10 +659,17 @@ func sshReadyCommand(target SSHTarget) string {
 		return target.ReadyCheck
 	}
 	if isWindowsNativeTarget(target) {
-		return powershellCommand(`$ErrorActionPreference = "Stop"
+		return powershellCommand(windowsPowerShellPathRefresh + `$ErrorActionPreference = "Stop"
 git --version | Out-Null
 tar --version | Out-Null
+node --version | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "node readiness failed" }
+npm.cmd --version | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "npm readiness failed" }
 if (-not (Test-Path -LiteralPath ` + psQuote(targetWindowsReadyRoot(target)) + `)) { throw "work root missing" }`)
+	}
+	if target.TargetOS == targetMacOS {
+		return sshReadyCommand(SSHTarget{}) + " && /bin/bash -lc 'node --version >/dev/null && npm --version >/dev/null'"
 	}
 	return "test -x /usr/local/bin/crabbox-ready && /usr/local/bin/crabbox-ready >/tmp/crabbox-ready.log 2>&1"
 }
@@ -608,14 +706,32 @@ func uniqueSSHPorts(ports []string) []string {
 	return out
 }
 
+// A prepared endpoint avoids rediscovery within one operation. Keep every
+// advertised candidate: network selection can retarget the same lease to a
+// different host whose reachable SSH port differs.
+func (target *SSHTarget) recordPreparedEndpoint(port string) {
+	if target.Port != port {
+		target.FallbackPorts = sshPortCandidates(target.Port, target.FallbackPorts)
+	}
+	target.Port = port
+	target.preparedEndpoint = net.JoinHostPort(target.Host, port)
+}
+
 // Port probes may retry before delivery; a delivered command must never replay.
+func resolvedSSHPortCandidates(target SSHTarget) []string {
+	if target.preparedEndpoint != "" && target.preparedEndpoint == net.JoinHostPort(target.Host, target.Port) {
+		return []string{target.Port}
+	}
+	return sshPortCandidates(target.Port, target.FallbackPorts)
+}
+
 func resolveSSHPortNoInput(ctx context.Context, target *SSHTarget, connectTimeout, connectionAttempts string, stderr io.Writer) error {
-	ports := sshPortCandidates(target.Port, target.FallbackPorts)
+	ports := resolvedSSHPortCandidates(*target)
 	if len(ports) == 0 {
 		ports = []string{"22"}
 	}
 	if len(ports) == 1 {
-		target.Port, target.FallbackPorts = ports[0], []string{}
+		target.Port = ports[0]
 		return nil
 	}
 	probe := *target
@@ -624,10 +740,10 @@ func resolveSSHPortNoInput(ctx context.Context, target *SSHTarget, connectTimeou
 	for index, port := range ports {
 		probe.Port = port
 		command := sshTransportPreparation{command: sshTransportProbeCommand(probe)}
-		var diagnostic synchronizedBuffer
+		diagnostic := newSynchronizedBuffer(0)
 		_, err = command.runOnce(ctx, probe, connectTimeout, connectionAttempts, io.Discard, &diagnostic, false)
 		if err == nil {
-			target.Port, target.FallbackPorts = port, []string{}
+			target.recordPreparedEndpoint(port)
 			return nil
 		}
 		if !shouldRetrySSHPort(err) || index == len(ports)-1 {
@@ -881,7 +997,7 @@ func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) 
 }
 
 func runSSHCombinedOutputLimit(ctx context.Context, target SSHTarget, remote string, maxBytes int) (string, error) {
-	out := synchronizedBuffer{limit: maxBytes}
+	out := newSynchronizedBuffer(maxBytes)
 	err := executeSSH(ctx, &target, remote, nil, 0, 0, "10", "3", &out, &out)
 	return strings.TrimSpace(out.String()), err
 }
@@ -910,7 +1026,7 @@ func runIdempotentSSHCombinedOutputLimit(ctx context.Context, target SSHTarget, 
 }
 
 func runWSL2ControlScriptCombinedOutput(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) (string, error) {
-	var out synchronizedBuffer
+	out := newSynchronizedBuffer(0)
 	err := executeSSH(ctx, &target, remote, nil, 0, waitTimeout, connectTimeout, connectionAttempts, &out, &out)
 	return strings.TrimSpace(out.String()), err
 }
@@ -983,29 +1099,30 @@ func sameCommandStreamWriter(left, right io.Writer) bool {
 	return left == right
 }
 
+// Construct explicitly so SSH's nonpositive limits remain unlimited.
 type synchronizedBuffer struct {
-	mu        sync.Mutex
-	buf       bytes.Buffer
-	limit     int
-	truncated bool
+	mu  sync.Mutex
+	buf prefixbuffer.Buffer
+}
+
+func newSynchronizedBuffer(limit int) synchronizedBuffer {
+	buf := prefixbuffer.NewUnlimited()
+	if limit > 0 {
+		buf = prefixbuffer.NewLimited(limit)
+	}
+	return synchronizedBuffer{buf: buf}
 }
 
 func (b *synchronizedBuffer) Write(data []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	n := len(data)
-	if b.limit > 0 && len(data) > b.limit-b.buf.Len() {
-		data = data[:b.limit-b.buf.Len()]
-		b.truncated = true
-	}
-	_, _ = b.buf.Write(data)
-	return n, nil
+	return b.buf.Write(data)
 }
 
 func (b *synchronizedBuffer) Bytes() []byte {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.truncated {
+	if b.buf.Exceeded() {
 		return nil
 	}
 	return bytes.Clone(b.buf.Bytes())
@@ -1014,7 +1131,7 @@ func (b *synchronizedBuffer) Bytes() []byte {
 func (b *synchronizedBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.truncated {
+	if b.buf.Exceeded() {
 		return ""
 	}
 	return b.buf.String()
@@ -1023,7 +1140,7 @@ func (b *synchronizedBuffer) String() string {
 func (b *synchronizedBuffer) boundedString() (string, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.buf.String(), b.truncated
+	return b.buf.String(), b.buf.Exceeded()
 }
 
 type gitOriginDiagnosticsTruncatedError struct {
@@ -1045,7 +1162,7 @@ func runIdempotentSSHGitOriginAttempt(ctx context.Context, target SSHTarget, rem
 		truncated bool
 	)
 	for attempt := 0; attempt < 2; attempt++ {
-		out = synchronizedBuffer{limit: gitSeedDiagnosticLimit}
+		out = newSynchronizedBuffer(gitSeedDiagnosticLimit)
 		lastErr = executeSSH(ctx, &target, remote, nil, 0, 0, "10", "3", &out, &out)
 		if lastErr == nil || !shouldRetrySSHPort(lastErr) || attempt == 1 {
 			break
@@ -1682,8 +1799,12 @@ if ($remaining -gt 0) {
 `
 }
 
+// OpenSSH sessions can inherit PATH from before bootstrap updated the registry.
+const windowsPowerShellPathRefresh = `$env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+`
+
 func windowsPowerShellStdinScriptCommand(inputSize int) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return powershellCommand(windowsPowerShellPathRefresh + `$ErrorActionPreference = "Stop"
 $path = Join-Path $env:TEMP ("crabbox-stdin-command-" + [Guid]::NewGuid().ToString("N") + ".ps1")
 try {
 	$scriptFile = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)

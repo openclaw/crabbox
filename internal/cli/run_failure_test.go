@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -83,12 +85,12 @@ func TestClassifyRunFailureUsesNormalizedMemoryEvidence(t *testing.T) {
 func TestRunOutcomeFailureKeepsMemoryEvidenceAcrossSecondaryFailures(t *testing.T) {
 	got := classifyRunOutcomeFailure(0, "", nil, RunFailureEvidence{
 		ResourceExhaustion: ResourceExhaustionMemory,
-	}, true)
+	}, true, false)
 	if got.BlockedStage != "resource_exhaustion" || got.ResourceExhaustion != ResourceExhaustionMemory || got.RetryLikely != "false" {
 		t.Fatalf("classifyRunOutcomeFailure()=%#v, want memory exhaustion", got)
 	}
 
-	got = classifyRunOutcomeFailure(0, "", []TimingPhase{{Name: "build"}}, RunFailureEvidence{}, true)
+	got = classifyRunOutcomeFailure(0, "", []TimingPhase{{Name: "build"}}, RunFailureEvidence{}, true, false)
 	if got.BlockedStage != "test" || got.ResourceExhaustion != "" || got.RetryLikely != "false" {
 		t.Fatalf("classifyRunOutcomeFailure()=%#v, want test failure", got)
 	}
@@ -489,11 +491,13 @@ func TestPrintRunFailureDigest(t *testing.T) {
 		"area: user_command",
 		"next: crabbox logs run_123 --tail 80",
 		"next: crabbox doctor --from-run run_123",
-		"next: crabbox run --id blue-lobster --fresh-sync -- go test ./...",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("digest missing %q:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "next: crabbox run ") {
+		t.Fatalf("unknown failure advertised a blind rerun:\n%s", out)
 	}
 }
 
@@ -511,7 +515,6 @@ func TestPrintRunFailureDigestExplainsUnavailableRunHistory(t *testing.T) {
 	for _, want := range []string{
 		"run_history: unavailable",
 		"next: crabbox ssh --id blue-lobster",
-		"next: crabbox run --id blue-lobster --fresh-sync -- go test ./...",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("digest missing %q:\n%s", want, out)
@@ -521,6 +524,7 @@ func TestPrintRunFailureDigestExplainsUnavailableRunHistory(t *testing.T) {
 		"crabbox logs run_",
 		"crabbox events run_",
 		"crabbox doctor --from-run run_",
+		"next: crabbox run ",
 	} {
 		if strings.Contains(out, unexpected) {
 			t.Fatalf("digest should not include run-based command %q:\n%s", unexpected, out)
@@ -551,15 +555,15 @@ func TestFailureDigestNextCommandsRespectRunHistoryAvailability(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			commands := failureDigestNextCommands(runFailureDigestInput{
+			commands := classifiedFailureDigestNextCommands(runFailureDigestInput{
 				Provider:              "local-container",
 				LeaseID:               "cbx_123",
 				Slug:                  "retained-direct",
 				RunID:                 tt.runID,
 				RunHistoryUnavailable: tt.historyUnavailable,
 				CommandDisplay:        "go test ./...",
-				Classification:        FailureClassification{RetryLikely: "unknown"},
-			}, "unknown")
+				Classification:        FailureClassification{RetryLikely: "true"},
+			}, "true")
 			joined := strings.Join(commands, "\n")
 			for _, command := range historyCommands {
 				if got := strings.Contains(joined, command); got != tt.wantHistory {
@@ -570,6 +574,32 @@ func TestFailureDigestNextCommandsRespectRunHistoryAvailability(t *testing.T) {
 				if !strings.Contains(joined, command) {
 					t.Fatalf("lease recovery command missing %q:\n%s", command, joined)
 				}
+			}
+		})
+	}
+}
+
+func TestFailureDigestRetryAdviceByClassification(t *testing.T) {
+	for _, test := range []struct {
+		retry   string
+		wantRun bool
+	}{
+		{retry: "true", wantRun: true},
+		{retry: "false"},
+		{retry: "unknown"},
+	} {
+		t.Run(test.retry, func(t *testing.T) {
+			commands := classifiedFailureDigestNextCommands(runFailureDigestInput{
+				LeaseID:        "cbx_123",
+				RunID:          "run_123",
+				CommandDisplay: "go test ./...",
+			}, test.retry)
+			joined := strings.Join(commands, "\n")
+			if got := strings.Contains(joined, "crabbox run "); got != test.wantRun {
+				t.Fatalf("retry=%s run advice=%t want=%t:\n%s", test.retry, got, test.wantRun, joined)
+			}
+			if !strings.Contains(joined, "crabbox doctor --from-run run_123") {
+				t.Fatalf("retry=%s lost run-scoped diagnosis:\n%s", test.retry, joined)
 			}
 		})
 	}
@@ -627,7 +657,7 @@ func TestPrintRunFailureDigestExplainsAndChainShortCircuit(t *testing.T) {
 		LeaseID:        "cbx_123",
 		CommandDisplay: "pnpm check && pnpm test",
 		ShellMode:      true,
-		Classification: FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"},
+		Classification: FailureClassification{BlockedStage: "unknown", RetryLikely: "true"},
 	})
 	out := buf.String()
 	for _, want := range []string{
@@ -722,12 +752,102 @@ func TestFailureDigestSuppressesScriptRetryCommand(t *testing.T) {
 		LeaseID:        "cbx_123",
 		CommandDisplay: "'--script=./smoke test.sh' arg",
 		ScriptMode:     true,
-		Classification: FailureClassification{RetryLikely: "unknown"},
-	}, "unknown")
+		Classification: FailureClassification{RetryLikely: "true"},
+	}, "true")
 	for _, command := range commands {
 		if strings.Contains(command, "crabbox run") {
 			t.Fatalf("script retry command should be suppressed: %v", commands)
 		}
+	}
+}
+
+func TestFailureDigestPreservesRecoveryIntent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX rendered-shell argv fixture")
+	}
+	for _, tc := range []struct {
+		name                                    string
+		noSync, shell, script, stopped, noRetry bool
+		globs                                   []string
+	}{
+		{name: "default keeps fresh sync"},
+		{name: "no sync", noSync: true},
+		{name: "requirements", globs: []string{"reports/manifest.json", "reports/proof-*.json"}},
+		{name: "no sync requirements shell", noSync: true, shell: true, globs: []string{"reports/manifest.json", "reports/proof-*.json"}},
+		{name: "script suppressed", script: true, noSync: true, globs: []string{"proof.json"}},
+		{name: "retry suppressed", noRetry: true, noSync: true, globs: []string{"proof.json"}},
+		{name: "stopped suppressed", stopped: true, noSync: true, globs: []string{"proof.json"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.Mkdir(filepath.Join(dir, "reports"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "reports", "proof-local.json"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			capture := filepath.Join(dir, "argv")
+			if err := os.WriteFile(filepath.Join(dir, "crabbox"), []byte("#!/bin/sh\nprintf '%s\\000' \"$@\" > \"$FIXTURE_ARGV\"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			display := "printf '%s\\n' 'two words'"
+			if tc.shell {
+				display = "printf first && printf second"
+			}
+			routing := CommandRouting{Args: []string{"--provider", "local-container", "--local-container-runtime", "docker"}}
+			input := runFailureDigestInput{LeaseID: "cbx_fixture", CommandDisplay: display, ShellMode: tc.shell, ScriptMode: tc.script, LeaseStopped: tc.stopped, NoSync: tc.noSync, RequiredArtifactGlobs: tc.globs, Routing: routing}
+			retry := "true"
+			if tc.noRetry {
+				retry = "false"
+			}
+			var hint string
+			for _, command := range failureDigestNextCommands(input, retry) {
+				if strings.HasPrefix(command, "crabbox run ") {
+					if hint != "" {
+						t.Fatal("multiple retry commands")
+					}
+					hint = command
+				}
+			}
+			if tc.script || tc.stopped || tc.noRetry {
+				if hint != "" {
+					t.Fatalf("unexpected retry: %s", hint)
+				}
+				return
+			}
+			if hint == "" {
+				t.Fatal("missing retry")
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", hint)
+			cmd.Dir = dir
+			cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin", "FIXTURE_ARGV=" + capture}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("replay: %v %s", err, out)
+			}
+			data, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := strings.Split(strings.TrimSuffix(string(data), "\x00"), "\x00")
+			syncFlag := "--fresh-sync"
+			if tc.noSync {
+				syncFlag = "--no-sync"
+			}
+			want := append(append([]string{"run"}, routing.Args...), "--id", "cbx_fixture", syncFlag)
+			for _, glob := range tc.globs {
+				want = append(want, "--require-artifact", glob)
+			}
+			if tc.shell {
+				want = append(want, "--shell", "--", display)
+			} else {
+				want = append(want, "--", "printf", "%s\\n", "two words")
+			}
+			if !reflect.DeepEqual(args, want) {
+				t.Fatalf("args=%q want=%q", args, want)
+			}
+		})
 	}
 }
 
@@ -738,9 +858,9 @@ func TestFailureDigestRoutesNextCommands(t *testing.T) {
 		WindowsMode:    windowsModeWSL2,
 		LeaseID:        "cbx_123",
 		CommandDisplay: "go test ./...",
-		Classification: FailureClassification{RetryLikely: "unknown"},
+		Classification: FailureClassification{RetryLikely: "true"},
 		StopCommand:    "crabbox stop --provider aws --target windows --windows-mode wsl2 cbx_123",
-	}, "unknown")
+	}, "true")
 	joined := strings.Join(commands, "\n")
 	for _, want := range []string{
 		"crabbox ssh --provider aws --target windows --windows-mode wsl2 --id cbx_123",
@@ -762,9 +882,9 @@ func TestFailureDigestRoutesProviderArgsToSSH(t *testing.T) {
 		Routing:        CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
 		SSHRouting:     CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
 		StopRouting:    CommandRoutingFor(cfg, "cbx_123", CommandRoutingStop),
-		Classification: FailureClassification{RetryLikely: "unknown"},
+		Classification: FailureClassification{RetryLikely: "true"},
 		StopCommand:    "crabbox stop --provider proxmox --proxmox-api-url https://pve.example cbx_123",
-	}, "unknown")
+	}, "true")
 	if len(commands) < 3 {
 		t.Fatalf("commands=%v", commands)
 	}
@@ -795,8 +915,8 @@ func TestFailureDigestPreservesInheritedKubeconfigForKubeVirt(t *testing.T) {
 		Routing:        CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
 		SSHRouting:     CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
 		StopRouting:    CommandRoutingFor(cfg, "cbx_123", CommandRoutingStop),
-		Classification: FailureClassification{RetryLikely: "unknown"},
-	}, "unknown")
+		Classification: FailureClassification{RetryLikely: "true"},
+	}, "true")
 	joined := strings.Join(commands, "\n")
 	for _, want := range []string{
 		"KUBECONFIG='/tmp/base.yaml:/tmp/cluster.yaml' crabbox ssh --provider kubevirt",
@@ -837,8 +957,8 @@ func TestFailureDigestPreservesSealosRouting(t *testing.T) {
 		Routing:        CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
 		SSHRouting:     CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
 		StopRouting:    CommandRoutingFor(cfg, "cbx_123", CommandRoutingStop),
-		Classification: FailureClassification{RetryLikely: "unknown"},
-	}, "unknown")
+		Classification: FailureClassification{RetryLikely: "true"},
+	}, "true")
 	joined := strings.Join(commands, "\n")
 	for _, want := range []string{
 		"KUBECONFIG='/tmp/base.yaml:/tmp/cluster.yaml' crabbox ssh --provider sealos-devbox",
@@ -913,5 +1033,87 @@ func TestFailureDigestStoppedLeaseKeepsHistoryAndLocalEvidence(t *testing.T) {
 		if strings.Contains(out.String(), "next: crabbox "+command+" ") {
 			t.Errorf("stale recovery command %s: %s", command, out.String())
 		}
+	}
+}
+
+func TestRunArtifactFailureClassificationPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		artifact, testFailed bool
+		evidence             RunFailureEvidence
+		stage, retry         string
+	}{
+		{name: "known artifact", artifact: true, stage: "artifacts", retry: "unknown"},
+		{name: "artifact before test policy", artifact: true, testFailed: true, stage: "artifacts", retry: "unknown"},
+		{name: "positive memory evidence", artifact: true, testFailed: true, evidence: RunFailureEvidence{ResourceExhaustion: ResourceExhaustionMemory}, stage: "resource_exhaustion", retry: "false"},
+		{name: "genuine workload seven", stage: "test", retry: "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyRunOutcomeFailure(7, "", []TimingPhase{{Name: "test"}}, tc.evidence, tc.testFailed, tc.artifact)
+			if got.BlockedStage != tc.stage || got.RetryLikely != tc.retry || got.ResourceExhaustion != tc.evidence.ResourceExhaustion {
+				t.Fatalf("classification=%+v", got)
+			}
+		})
+	}
+}
+
+func TestApplyArtifactFailureOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		failure, observedContext error
+		memory                   ResourceExhaustionReason
+		wantStatus               RunStatus
+		wantKind                 RunErrorKind
+	}{
+		{name: "not artifact failure", wantStatus: RunStatusFailed, wantKind: RunErrorCommandExit},
+		{name: "validation", failure: exit(7, "missing proof"), wantStatus: RunStatusFailed, wantKind: RunErrorProvider},
+		{name: "observed cancellation", failure: exit(7, "flattened fetch failure"), observedContext: context.Canceled, wantStatus: RunStatusCanceled, wantKind: RunErrorCanceled},
+		{name: "observed deadline", failure: exit(7, "flattened fetch failure"), observedContext: context.DeadlineExceeded, wantStatus: RunStatusTimedOut, wantKind: RunErrorTimeout},
+		{name: "wrapped cancellation", failure: fmt.Errorf("fetch: %w", context.Canceled), wantStatus: RunStatusCanceled, wantKind: RunErrorCanceled},
+		{name: "memory outranks secondary validation", failure: exit(7, "missing proof"), memory: ResourceExhaustionMemory, wantStatus: RunStatusFailed, wantKind: RunErrorCommandExit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report := TimingReport{ExitCode: 7, RunStatus: RunStatusFailed, ErrorKind: RunErrorCommandExit, ResourceExhaustion: tc.memory}
+			applyArtifactFailureOutcome(&report, tc.failure, tc.observedContext)
+			report = finalizeTimingReport(report)
+			if report.ExitCode != 7 || report.RunStatus != tc.wantStatus || report.ErrorKind != tc.wantKind || report.ResourceExhaustion != tc.memory {
+				t.Fatalf("report=%+v", report)
+			}
+		})
+	}
+}
+
+func TestArtifactFailureContextSnapshot(t *testing.T) {
+	for _, duringValidation := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancel_during_validation=%t", duringValidation), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			schema, err := parseArtifactSchema([]byte(`true`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			reader := func(context.Context, SSHTarget, string, string, int) ([]byte, error) {
+				if duringValidation {
+					cancel()
+					return nil, ctx.Err()
+				}
+				return nil, errors.New("missing proof")
+			}
+			_, _, failure := validateArtifactSchemasWithReader(ctx, SSHTarget{}, "/work", []loadedArtifactSchema{{remote: "proof", schemaPath: "schema.json", schema: schema}}, reader)
+			if failure == nil {
+				t.Fatal("expected failed schema fetch")
+			}
+			observedContextErr := ctx.Err()
+			cancel() // Later cleanup cancellation cannot reclassify validation.
+			report := TimingReport{ExitCode: 7}
+			applyArtifactFailureOutcome(&report, failure, observedContextErr)
+			wantStatus, wantKind := RunStatusFailed, RunErrorProvider
+			if duringValidation {
+				wantStatus, wantKind = RunStatusCanceled, RunErrorCanceled
+			}
+			if report.RunStatus != wantStatus || report.ErrorKind != wantKind || report.ExitCode != 7 {
+				t.Fatalf("report=%+v", report)
+			}
+		})
 	}
 }

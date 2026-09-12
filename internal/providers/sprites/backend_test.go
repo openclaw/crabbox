@@ -14,6 +14,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestSpritesSSHTargetUsesSpriteProxy(t *testing.T) {
@@ -718,6 +719,7 @@ func TestSpritesBootstrapInstallsFullSyncToolchain(t *testing.T) {
 
 type recordingRunner struct {
 	calls        []string
+	requests     []LocalCommandRequest
 	failContains string
 	err          error
 }
@@ -725,6 +727,7 @@ type recordingRunner struct {
 func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 	call := strings.Join(append([]string{req.Name}, req.Args...), " ")
 	r.calls = append(r.calls, call)
+	r.requests = append(r.requests, req)
 	if r.failContains != "" && strings.Contains(call, r.failContains) {
 		err := r.err
 		if err == nil {
@@ -736,12 +739,19 @@ func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (Local
 }
 
 type fakeSpritesAPI struct {
-	create        spritesInfo
-	get           spritesInfo
-	createdName   string
-	createdLabels []string
-	deleted       string
-	deleteErr     error
+	organization    string
+	organizationErr error
+	create          spritesInfo
+	get             spritesInfo
+	list            []spritesInfo
+	createdName     string
+	createdLabels   []string
+	deleted         string
+	deleteErr       error
+}
+
+func (f *fakeSpritesAPI) GetOrganization(context.Context) (string, error) {
+	return f.organization, f.organizationErr
 }
 
 func (f *fakeSpritesAPI) CreateSprite(_ context.Context, name string, labels []string) (spritesInfo, error) {
@@ -762,7 +772,7 @@ func (f *fakeSpritesAPI) GetSprite(context.Context, string) (spritesInfo, error)
 }
 
 func (f *fakeSpritesAPI) ListSprites(context.Context, string) ([]spritesInfo, error) {
-	return nil, nil
+	return f.list, nil
 }
 
 func (f *fakeSpritesAPI) DeleteSprite(_ context.Context, name string) error {
@@ -771,4 +781,63 @@ func (f *fakeSpritesAPI) DeleteSprite(_ context.Context, name string) error {
 	}
 	f.deleted = name
 	return nil
+}
+
+func TestJSONRequestAdoptionEnvelope(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "capture")
+	var typedNil *struct{ Value string }
+	const base = "https://api.example.test/base"
+	sentinel := errors.New("synthetic captured transport stop")
+	for _, tc := range []struct {
+		name        string
+		body        any
+		want        string
+		query, fail bool
+	}{
+		{name: "nil"},
+		{name: "typed nil", body: typedNil, want: "null\n"},
+		{name: "JSON bytes", body: map[string]string{"message": "<&>"}, want: "{\"message\":\"\\u003c\\u0026\\u003e\"}\n"},
+		{name: "query without body", query: true},
+		{name: "transport error", fail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			endpoint := "/records"
+			if tc.query {
+				endpoint += "?limit=2&prefix=two+words"
+			}
+			var query url.Values
+			if tc.query {
+				query = url.Values{"limit": []string{"2"}, "prefix": []string{"two words"}}
+			}
+			headers := http.Header{"Authorization": []string{"Bearer synthetic-token"}}
+			headers.Set("Accept", "application/json")
+			if tc.body != nil {
+				headers.Set("Content-Type", "application/json")
+			}
+			transport := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, base+endpoint, tc.want, headers)
+				if tc.fail {
+					return nil, sentinel
+				}
+				return &http.Response{StatusCode: 204, Header: http.Header{"X-Capture": []string{"yes"}}, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+			})}
+			c := &spritesClient{apiURL: base, token: "synthetic-token", httpClient: transport}
+			var gotHeaders http.Header
+			err := c.doJSON(ctx, http.MethodPost, "/records", query, tc.body, nil)
+			if tc.fail {
+				if !errors.Is(err, sentinel) || gotHeaders != nil {
+					t.Fatalf("error/headers=%v %v", err, gotHeaders)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+
+			if calls != 1 {
+				t.Fatalf("calls=%d", calls)
+			}
+		})
+	}
 }

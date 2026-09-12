@@ -134,7 +134,7 @@ func windowsBootstrapHeaderPowerShell(cfg Config, publicKey, workRoot string) st
 	script := sharedWindowsHeader(cfg.SSHUser, publicKey, workRoot, sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts))
 	// An omitted mode retains the native default; WSL2 owns a separate Linux runtime.
 	if cfg.WindowsMode != windowsModeWSL2 {
-		script += sharedWindowsRuntime() + sharedWindowsRuntimeGate()
+		script += sharedWindowsRuntime() + sharedWindowsRuntimeGate() + sharedWindowsNodeInstall() + sharedWindowsDetachInstall()
 	}
 	return script
 }
@@ -178,7 +178,14 @@ func windowsManagedCorePreludePowerShell(cfg Config) string {
 
 func windowsWSL2BootstrapPowerShell(cfg Config) string {
 	workRoot := windowsWSLWorkRoot(cfg)
+	headless := ""
+	if !cfg.Desktop && !cfg.Browser {
+		// WSLg can stall headless distro launches from Windows service sessions.
+		headless = `$managedWSLConfig = Set-CrabboxWSLConfigValue $managedWSLConfig 'wsl2' 'guiApplications=false'`
+	}
 	return `
+	$wslConfigChanged = $false
+` + strings.ReplaceAll(windowsWSL2ConfigPowerShell, "@HEADLESS_CONFIG@", headless) + `
 	$wslDistro = "Crabbox"
 	$wslRoot = "C:\ProgramData\crabbox\wsl\Crabbox"
 	$wslRootfs = "C:\ProgramData\crabbox\wsl\ubuntu-noble-wsl-amd64.rootfs.tar.gz"
@@ -211,6 +218,10 @@ func windowsWSL2BootstrapPowerShell(cfg Config) string {
 	  wsl.exe --update --web-download | Out-Host
 	  if ($LASTEXITCODE -ne 0) { throw "wsl --update --web-download failed with exit $LASTEXITCODE" }
 	  Restart-CrabboxBootstrap $wslKernelMarker
+	}
+	if ($wslConfigChanged) {
+	  wsl.exe --shutdown | Out-Host
+	  if ($LASTEXITCODE -ne 0) { throw "apply managed WSL configuration failed with exit $LASTEXITCODE" }
 	}
 	wsl.exe --set-default-version 2 | Out-Host
 	if ($LASTEXITCODE -ne 0) { throw "wsl --set-default-version 2 failed with exit $LASTEXITCODE" }
@@ -256,6 +267,10 @@ func windowsWSL2BootstrapPowerShell(cfg Config) string {
 	$linuxSetup = @'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+mkdir -p /etc/cloud
+# Crabbox owns this distro's setup. WSL datasource discovery can block systemd
+# and root login while trying to invoke Windows tools from an SSH session.
+touch /etc/cloud/cloud-init.disabled
 mkdir -p ` + shellQuote(workRoot) + ` /var/cache/crabbox/pnpm /var/cache/crabbox/npm /var/lib/crabbox
 cat >/etc/apt/apt.conf.d/80-crabbox-retries <<'APT'
 Acquire::Retries "8";
@@ -264,31 +279,108 @@ Acquire::https::Timeout "30";
 APT
 rm -rf /var/lib/apt/lists/*
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl git jq python3-minimal rsync
-` + sharedWslTruffleHogInstall() + `cat >/usr/local/bin/crabbox-ready <<'READY'
+apt-get install -y --no-install-recommends ca-certificates curl git jq python3 rsync sudo
+if ! id -u crabbox >/dev/null 2>&1; then
+  useradd --create-home --user-group --shell /bin/bash crabbox
+fi
+groupadd -f docker
+usermod --append --groups sudo,docker --shell /bin/bash crabbox
+test "$(id -u crabbox)" -ne 0
+install -d -m 0755 /etc/sudoers.d
+printf '%s\n' 'crabbox ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/crabbox
+chmod 0440 /etc/sudoers.d/crabbox
+visudo -cf /etc/sudoers.d/crabbox
+chown -R crabbox:crabbox ` + shellQuote(workRoot) + ` /var/cache/crabbox
+# All WSL transports inherit this identity, including staged helpers and rsync.
+# Preserve the distro's boot, automount, networking, and interop settings.
+python3 - <<'WSL_USER'
+import configparser
+from pathlib import Path
+path = Path('/etc/wsl.conf')
+config = configparser.ConfigParser(interpolation=None)
+config.optionxform = str
+config.read(path)
+if not config.has_section('user'):
+    config.add_section('user')
+config.set('user', 'default', 'crabbox')
+with path.open('w') as output:
+    config.write(output, space_around_delimiters=False)
+WSL_USER
+` + sharedLinuxNodeInstall() + sharedWslTruffleHogInstall() + `cat >/usr/local/bin/crabbox-ready <<'READY'
 #!/usr/bin/env bash
 set -euo pipefail
+test "$(id -u)" -ne 0
+test "$(id -un)" = crabbox
+test "$HOME" = /home/crabbox
+test -w "$HOME"
+sudo -n true
+test -w /var/cache/crabbox/npm
+test -w /var/cache/crabbox/pnpm
 git --version >/dev/null
 python3 --version >/dev/null
 rsync --version >/dev/null
 curl --version >/dev/null
 jq --version >/dev/null
 trufflehog --no-update --version >/dev/null
+node --version >/dev/null
+npm --version >/dev/null
 wslpath -w ` + shellQuote(workRoot) + ` >/dev/null
 test -w ` + shellQuote(workRoot) + `
 READY
 chmod 0755 /usr/local/bin/crabbox-ready
 touch /var/lib/crabbox/bootstrapped
-crabbox-ready
+sudo -H -u crabbox /usr/local/bin/crabbox-ready
 '@
 	$linuxSetup = $linuxSetup.Replace(([string][char]13 + [string][char]10), ([string][char]10))
 	[IO.File]::WriteAllText($wslSetup, $linuxSetup, (New-Object Text.UTF8Encoding($false)))
 	wsl.exe -d $wslDistro --user root --exec bash /mnt/c/ProgramData/crabbox/wsl/linux-setup.sh
 	if ($LASTEXITCODE -ne 0) { throw "WSL setup failed with exit $LASTEXITCODE" }
+	wsl.exe --terminate $wslDistro | Out-Host
+	if ($LASTEXITCODE -ne 0) { throw "WSL restart failed with exit $LASTEXITCODE" }
+	wsl.exe -d $wslDistro --exec /usr/local/bin/crabbox-ready
+	if ($LASTEXITCODE -ne 0) { throw "WSL cold-start readiness failed with exit $LASTEXITCODE" }
 	Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
 	Restart-Service sshd -Force
 	`
 }
+
+// The lease owns distro lifetime: WSL's client-idle shutdown kills detached
+// daemons even while their Linux processes remain active. WSLg stays optional.
+const windowsWSL2ConfigPowerShell = `
+function Set-CrabboxWSLConfigValue([string]$Text, [string]$Section, [string]$Setting) {
+  $result = [Collections.Generic.List[string]]::new()
+  $inSection = $false
+  $hasSection = $false
+  $hasKey = $false
+  $keyPattern = '^\s*' + [Regex]::Escape(($Setting -split '=', 2)[0]) + '\s*='
+  if ($Text.Length -gt 0) {
+    foreach ($line in ($Text -split '\r?\n')) {
+      if ($line -match '^\s*\[([^\]]+)\]\s*(?:[;#].*)?$') {
+        if ($inSection -and -not $hasKey) { $result.Add($Setting) }
+        $inSection = $Matches[1].Trim() -eq $Section
+        $hasSection = $hasSection -or $inSection
+        $hasKey = $false
+      }
+      if ($inSection -and $line -match $keyPattern) {
+        $result.Add($Setting)
+        $hasKey = $true
+      } else { $result.Add($line) }
+    }
+  }
+  if (-not $hasSection) { $result.Add('[' + $Section + ']'); $inSection = $true; $hasKey = $false }
+  if ($inSection -and -not $hasKey) { $result.Add($Setting) }
+  return $result -join [char]10
+}
+$wslConfigPath = Join-Path $HOME '.wslconfig'
+$wslConfig = ''
+if (Test-Path -LiteralPath $wslConfigPath) { $wslConfig = [IO.File]::ReadAllText($wslConfigPath) }
+$managedWSLConfig = Set-CrabboxWSLConfigValue $wslConfig 'general' 'instanceIdleTimeout=-1'
+@HEADLESS_CONFIG@
+$wslConfigChanged = $managedWSLConfig -cne $wslConfig
+if ($wslConfigChanged) {
+  [IO.File]::WriteAllText($wslConfigPath, $managedWSLConfig, [Text.UTF8Encoding]::new($false))
+}
+`
 
 func windowsDesktopBootstrapPowerShell() string {
 	return windowsDesktopLauncherServicePowerShell() + sharedWindowsDesktop()
@@ -371,7 +463,7 @@ func macOSUserData(cfg Config, publicKey string) string {
 	if workRoot == "" {
 		workRoot = defaultMacOSWorkRoot
 	}
-	return sharedMacOS(cfg.SSHUser, publicKey, workRoot, sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts))
+	return "#!/bin/bash\nset -euo pipefail\n(\n" + sharedMacOSSSHSession() + ")\n(\n" + sharedMacOSNodeInstall() + ")\n" + sharedMacOS(cfg.SSHUser, publicKey, workRoot, sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts))
 }
 
 func cloudInitOptionalReadyChecks(cfg Config) string {
@@ -387,7 +479,6 @@ func cloudInitOptionalReadyChecks(cfg Config) string {
 		} else {
 			b.WriteString("      systemctl is-active --quiet crabbox-xvfb.service\n")
 			b.WriteString("      systemctl is-active --quiet crabbox-desktop.service\n")
-			b.WriteString("      systemctl is-active --quiet crabbox-desktop-session.service\n")
 		}
 		b.WriteString("      ss -ltn | grep -q '127.0.0.1:5900'\n")
 	}
@@ -426,214 +517,14 @@ func cloudInitOptionalWriteFiles(cfg Config) string {
 
       [Install]
       WantedBy=multi-user.target
+  - path: /usr/local/lib/crabbox/xfce-session.sh
+    permissions: '0644'
+    content: |
+      `+strings.ReplaceAll(strings.TrimSuffix(sharedXfceSessionEnvironment(), "\n"), "\n", "\n      ")+`
   - path: /usr/local/bin/crabbox-configure-desktop-theme
     permissions: '0755'
     content: |
-      #!/bin/sh
-      set -eu
-      requested_mode="${1:-${CRABBOX_DESKTOP_THEME:-}}"
-      user="${CRABBOX_DESKTOP_USER:-crabbox}"
-      home_dir="$(getent passwd "$user" | cut -d: -f6)"
-      if [ -z "$home_dir" ]; then
-        home_dir="/home/$user"
-      fi
-      config_dir="$home_dir/.config"
-      mode="$requested_mode"
-      if [ -z "$mode" ] && [ -f "$config_dir/crabbox/desktop-theme" ]; then
-        mode="$(cat "$config_dir/crabbox/desktop-theme" 2>/dev/null || true)"
-      fi
-      case "$mode" in
-        light|dark) ;;
-        *) mode=dark ;;
-      esac
-      if [ "$mode" = "light" ]; then
-        gtk_theme=Adwaita
-        gtk_prefer_dark=false
-        gtk_prefer_dark_ini=0
-        gsettings_scheme=prefer-light
-        root_color="#f4f6f8"
-        terminal_fg="#1f2937"
-        terminal_bg="#f8fafc"
-        terminal_cursor="#111827"
-        panel_rgba="0.94 0.95 0.97 1"
-        panel_css_bg="#eef2f7"
-        panel_css_fg="#111827"
-        gtk_candidates="Arc Greybird Adwaita"
-        xfwm_candidates="Arc Greybird Daloa Default"
-      else
-        gtk_theme=Adwaita-dark
-        gtk_prefer_dark=true
-        gtk_prefer_dark_ini=1
-        gsettings_scheme=prefer-dark
-        root_color="#20242b"
-        terminal_fg="#e5e7eb"
-        terminal_bg="#111827"
-        terminal_cursor="#f3f4f6"
-        panel_rgba="0.12 0.13 0.15 1"
-        panel_css_bg="#20242b"
-        panel_css_fg="#e5e7eb"
-        gtk_candidates="Arc-Dark Greybird-dark Adwaita-dark Greybird"
-        xfwm_candidates="Arc-Dark Greybird-dark Daloa Default"
-      fi
-      for candidate in $gtk_candidates; do
-        if [ -d "/usr/share/themes/$candidate/gtk-3.0" ]; then
-          gtk_theme="$candidate"
-          break
-        fi
-      done
-      xfwm_theme=Default
-      for candidate in $xfwm_candidates; do
-        if [ -d "/usr/share/themes/$candidate/xfwm4" ]; then
-          xfwm_theme="$candidate"
-          break
-        fi
-      done
-      if [ "$(id -u)" -eq 0 ]; then
-        install -d -m 0700 -o "$user" "$config_dir/xfce4/xfconf/xfce-perchannel-xml" "$config_dir/xfce4/terminal" "$config_dir/gtk-3.0" "$config_dir/crabbox"
-      else
-        mkdir -p "$config_dir/xfce4/xfconf/xfce-perchannel-xml" "$config_dir/xfce4/terminal" "$config_dir/gtk-3.0" "$config_dir/crabbox"
-        chmod 0700 "$config_dir" "$config_dir/xfce4" "$config_dir/xfce4/xfconf" "$config_dir/xfce4/xfconf/xfce-perchannel-xml" "$config_dir/xfce4/terminal" "$config_dir/gtk-3.0" "$config_dir/crabbox"
-      fi
-      printf '%s\n' "$mode" > "$config_dir/crabbox/desktop-theme"
-      cat > "$config_dir/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml" <<XML
-      <?xml version="1.0" encoding="UTF-8"?>
-      <channel name="xsettings" version="1.0">
-        <property name="Net" type="empty">
-          <property name="ThemeName" type="string" value="$gtk_theme"/>
-          <property name="IconThemeName" type="string" value="Adwaita"/>
-        </property>
-        <property name="Gtk" type="empty">
-          <property name="ApplicationPreferDarkTheme" type="bool" value="$gtk_prefer_dark"/>
-        </property>
-      </channel>
-      XML
-      if [ ! -s "$config_dir/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml" ]; then
-        cat > "$config_dir/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml" <<XML
-      <?xml version="1.0" encoding="UTF-8"?>
-      <channel name="xfwm4" version="1.0">
-        <property name="general" type="empty">
-          <property name="theme" type="string" value="$xfwm_theme"/>
-          <property name="box_move" type="bool" value="false"/>
-          <property name="box_resize" type="bool" value="false"/>
-          <property name="move_opacity" type="int" value="100"/>
-          <property name="resize_opacity" type="int" value="100"/>
-          <property name="snap_resist" type="bool" value="false"/>
-          <property name="snap_to_border" type="bool" value="false"/>
-          <property name="snap_to_windows" type="bool" value="false"/>
-          <property name="snap_width" type="int" value="0"/>
-          <property name="tile_on_move" type="bool" value="false"/>
-          <property name="use_compositing" type="bool" value="false"/>
-          <property name="wrap_windows" type="bool" value="false"/>
-        </property>
-      </channel>
-      XML
-      fi
-      cat > "$config_dir/xfce4/terminal/terminalrc" <<EOF
-      [Configuration]
-      ColorForeground=$terminal_fg
-      ColorBackground=$terminal_bg
-      ColorCursor=$terminal_cursor
-      MiscBell=FALSE
-      EOF
-      cat > "$config_dir/gtk-3.0/settings.ini" <<EOF
-      [Settings]
-      gtk-theme-name=$gtk_theme
-      gtk-icon-theme-name=Adwaita
-      gtk-application-prefer-dark-theme=$gtk_prefer_dark_ini
-      EOF
-      cat > "$home_dir/.gtkrc-2.0" <<EOF
-      gtk-theme-name="$gtk_theme"
-      gtk-icon-theme-name="Adwaita"
-      gtk-application-prefer-dark-theme=$gtk_prefer_dark_ini
-      EOF
-      css_file="$config_dir/gtk-3.0/gtk.css"
-      css_tmp="$(mktemp)"
-      if [ -f "$css_file" ]; then
-        sed '/^[/][*] crabbox desktop theme start [*][/]$/,/^[/][*] crabbox desktop theme end [*][/]$/d' "$css_file" > "$css_tmp" || true
-      fi
-      cat >> "$css_tmp" <<EOF
-      /* crabbox desktop theme start */
-      .xfce4-panel { background: $panel_css_bg; background-color: $panel_css_bg; color: $panel_css_fg; }
-      .xfce4-panel * { color: $panel_css_fg; text-shadow: none; -gtk-icon-shadow: none; }
-      .xfce4-panel button,
-      .xfce4-panel button.flat,
-      .xfce4-panel button:hover,
-      .xfce4-panel button:active,
-      .xfce4-panel button:checked,
-      .xfce4-panel button:focus,
-      .xfce4-panel button:backdrop,
-      .xfce4-panel .tasklist button,
-      .xfce4-panel .tasklist button:hover,
-      .xfce4-panel .tasklist button:active,
-      .xfce4-panel .tasklist button:checked,
-      .xfce4-panel .tasklist button:checked:hover,
-      .xfce4-panel .tasklist button:focus,
-      .xfce4-panel .tasklist button:backdrop,
-      .xfce4-panel .tasklist .toggle,
-      .xfce4-panel .tasklist .toggle:hover,
-      .xfce4-panel .tasklist .toggle:checked,
-      .xfce4-panel .tasklist .toggle:checked:hover,
-      .xfce4-panel .tasklist button:checked,
-      .xfce4-panel .tasklist button:active {
-        background: $panel_css_bg;
-        background-image: none;
-        background-color: $panel_css_bg;
-        border-image: none;
-        border-color: $panel_css_fg;
-        box-shadow: none;
-        color: $panel_css_fg;
-        outline-color: transparent;
-        text-shadow: none;
-        -gtk-icon-shadow: none;
-      }
-      .xfce4-panel .tasklist button label,
-      .xfce4-panel .tasklist .toggle label {
-        color: $panel_css_fg;
-        text-shadow: none;
-      }
-      /* crabbox desktop theme end */
-      EOF
-      mv "$css_tmp" "$css_file"
-      if [ "$(id -u)" -eq 0 ]; then
-        chown -R "$user" "$config_dir" "$home_dir/.gtkrc-2.0"
-      fi
-      if [ -n "${DISPLAY:-}" ] && command -v xfconf-query >/dev/null 2>&1; then
-        xfconf-query -c xsettings -p /Net/ThemeName -n -t string -s "$gtk_theme" >/dev/null 2>&1 || true
-        xfconf-query -c xsettings -p /Net/IconThemeName -n -t string -s Adwaita >/dev/null 2>&1 || true
-        xfconf-query -c xsettings -p /Gtk/ApplicationPreferDarkTheme -n -t bool -s "$gtk_prefer_dark" >/dev/null 2>&1 || true
-        xfconf-query -c xfwm4 -p /general/theme -n -t string -s "$xfwm_theme" >/dev/null 2>&1 || true
-        xfconf-query -c xfwm4 -p /general/box_move -n -t bool -s false >/dev/null 2>&1 || true
-        xfconf-query -c xfwm4 -p /general/box_resize -n -t bool -s false >/dev/null 2>&1 || true
-        xfconf-query -c xfwm4 -p /general/move_opacity -n -t int -s 100 >/dev/null 2>&1 || true
-        xfconf-query -c xfwm4 -p /general/resize_opacity -n -t int -s 100 >/dev/null 2>&1 || true
-        xfconf-query -c xfwm4 -p /general/snap_resist -n -t bool -s false >/dev/null 2>&1 || true
-        xfconf-query -c xfwm4 -p /general/snap_to_border -n -t bool -s false >/dev/null 2>&1 || true
-        xfconf-query -c xfwm4 -p /general/snap_to_windows -n -t bool -s false >/dev/null 2>&1 || true
-        xfconf-query -c xfwm4 -p /general/snap_width -n -t int -s 0 >/dev/null 2>&1 || true
-        xfconf-query -c xfwm4 -p /general/tile_on_move -n -t bool -s false >/dev/null 2>&1 || true
-        xfconf-query -c xfwm4 -p /general/use_compositing -n -t bool -s false >/dev/null 2>&1 || true
-        xfconf-query -c xfwm4 -p /general/wrap_windows -n -t bool -s false >/dev/null 2>&1 || true
-        xfconf-query -c xfce4-panel -p /panels/dark-mode -n -t bool -s "$gtk_prefer_dark" >/dev/null 2>&1 || true
-        set -- $panel_rgba
-        for panel_id in panel-1 panel-2; do
-          xfconf-query -c xfce4-panel -p "/panels/$panel_id/background-style" -n -t int -s 1 >/dev/null 2>&1 || true
-          xfconf-query -c xfce4-panel -p "/panels/$panel_id/background-rgba" -n -a -t double -s "$1" -t double -s "$2" -t double -s "$3" -t double -s "$4" >/dev/null 2>&1 || true
-        done
-        if [ "$(id -un)" = "$user" ]; then
-          pkill -TERM -x xfce4-panel >/dev/null 2>&1 || true
-          (sleep 0.4; xfce4-panel >"/tmp/crabbox-xfce4-panel-$user.log" 2>&1 &) >/dev/null 2>&1 &
-        else
-          pkill -USR1 -x xfce4-panel >/dev/null 2>&1 || true
-        fi
-        xfwm4 --replace --compositor=off >"/tmp/crabbox-xfwm4-replace-$user.log" 2>&1 &
-      fi
-      if [ -n "${DISPLAY:-}" ] && command -v xsetroot >/dev/null 2>&1; then
-        xsetroot -solid "$root_color" || true
-      fi
-      if command -v gsettings >/dev/null 2>&1; then
-        gsettings set org.gnome.desktop.interface color-scheme "$gsettings_scheme" >/dev/null 2>&1 || true
-        gsettings set org.gnome.desktop.interface gtk-theme "$gtk_theme" >/dev/null 2>&1 || true
-      fi
+      `+strings.ReplaceAll(strings.TrimSuffix(sharedXfceDesktopTheme("classic"), "\n"), "\n", "\n      ")+`
   - path: /etc/systemd/system/crabbox-desktop.service
     permissions: '0644'
     content: |
@@ -650,35 +541,20 @@ func cloudInitOptionalWriteFiles(cfg Config) string {
 
       [Install]
       WantedBy=multi-user.target
+      # Published CLI reset commands still request this legacy name.
+      Alias=crabbox-desktop-session.service
   - path: /usr/local/bin/crabbox-desktop-session
     permissions: '0755'
     content: |
-      #!/bin/sh
-      set -eu
-      export DISPLAY="${DISPLAY:-:99}"
-      CRABBOX_DESKTOP_USER="$(id -un)" /usr/local/bin/crabbox-configure-desktop-theme || true
-      if command -v xfce4-terminal >/dev/null 2>&1 && ! pgrep -u "$(id -u)" -f 'xfce4-terminal.*Crabbox Desktop' >/dev/null 2>&1; then
-        xfce4-terminal --title='Crabbox Desktop' --geometry=110x32+48+48 &
-      elif command -v xterm >/dev/null 2>&1 && ! pgrep -u "$(id -u)" -f 'xterm -title Crabbox Desktop' >/dev/null 2>&1; then
-        xterm -title 'Crabbox Desktop' -geometry 110x32+48+48 -bg '#111827' -fg '#e5e7eb' &
-      fi
-      tail -f /dev/null
-  - path: /etc/systemd/system/crabbox-desktop-session.service
+      `+strings.ReplaceAll(strings.TrimSuffix(sharedXfceDesktopSession(), "\n"), "\n", "\n      ")+`
+  - path: /etc/xdg/autostart/crabbox-desktop.desktop
     permissions: '0644'
     content: |
-      [Unit]
-      Description=Crabbox visible desktop helper
-      After=crabbox-desktop.service
-      Requires=crabbox-xvfb.service crabbox-desktop.service
-
-      [Service]
-      User=crabbox
-      Environment=DISPLAY=:99
-      ExecStart=/usr/local/bin/crabbox-desktop-session
-      Restart=always
-
-      [Install]
-      WantedBy=multi-user.target
+      [Desktop Entry]
+      Type=Application
+      Name=Crabbox Desktop
+      Exec=/usr/local/bin/crabbox-desktop-session
+      OnlyShowIn=XFCE;
 `)
 	}
 	return strings.Join(parts, "\n")
@@ -762,6 +638,9 @@ func cloudInitWaylandDesktopWriteFiles(desktopEnv string) string {
 
 func cloudInitOptionalBootstrap(cfg Config) string {
 	var parts []string
+	if cfg.Desktop || cfg.Browser {
+		parts = append(parts, indentCloudInitRuncmd(sharedLinuxOptionalPackages()))
+	}
 	if cfg.Tailscale.Enabled {
 		parts = append(parts, cloudInitTailscaleBootstrap(cfg))
 	}
@@ -820,7 +699,7 @@ chmod 0755 /usr/local/bin/crabbox-configure-desktop-theme
 `)
 			themeConfigure = "    CRABBOX_DESKTOP_USER=crabbox /usr/local/bin/crabbox-configure-desktop-theme\n"
 		}
-		parts = append(parts, `    retry apt-get install -y --no-install-recommends `+packages+`
+		parts = append(parts, `    crabbox_install_packages `+packages+`
     install -d -m 0750 -o crabbox -g crabbox /var/lib/crabbox
     if [ ! -s /var/lib/crabbox/vnc.password ]; then
       (umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)
@@ -853,7 +732,7 @@ chmod 0755 /usr/local/bin/crabbox-configure-desktop-theme
     systemctl enable crabbox-desktop.service crabbox-wayvnc.service
     systemctl restart crabbox-desktop.service crabbox-wayvnc.service`)
 	} else if cfg.Desktop {
-		parts = append(parts, `    retry apt-get install -y --no-install-recommends tigervnc-standalone-server tigervnc-tools xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme util-linux novnc websockify
+		parts = append(parts, `    crabbox_install_packages tigervnc-standalone-server tigervnc-tools xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme util-linux novnc websockify
     install -d -m 0750 -o crabbox -g crabbox /var/lib/crabbox
     if [ ! -s /var/lib/crabbox/vnc.password ]; then
       (umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)
@@ -864,19 +743,22 @@ chmod 0755 /usr/local/bin/crabbox-configure-desktop-theme
     printf 'CRABBOX_DESKTOP_ENV=xfce\nDISPLAY=:99\n' >/var/lib/crabbox/desktop.env
     chown crabbox:crabbox /var/lib/crabbox/desktop.env
     chmod 0644 /var/lib/crabbox/desktop.env
-    CRABBOX_DESKTOP_USER=crabbox /usr/local/bin/crabbox-configure-desktop-theme
+    systemctl disable --now crabbox-desktop-session.service 2>/dev/null || true
+    rm -f /etc/systemd/system/crabbox-desktop-session.service
+    systemctl stop crabbox-desktop.service 2>/dev/null || true
+    env -u DISPLAY CRABBOX_DESKTOP_USER=crabbox /usr/local/bin/crabbox-configure-desktop-theme
     systemctl daemon-reload
     systemctl disable --now crabbox-wayvnc.service crabbox-x11vnc.service 2>/dev/null || true
-    systemctl enable crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service
-    systemctl restart crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service`)
+    systemctl enable crabbox-xvfb.service crabbox-desktop.service
+    systemctl restart crabbox-xvfb.service crabbox-desktop.service`)
 	}
 	if cfg.Provider == "gcp" {
 		parts = append(parts, cloudInitGCPExpiryGuardBootstrap())
 	}
 	if cfg.Browser {
-		parts = append(parts, `    retry apt-get install -y --no-install-recommends gnupg build-essential python3
-    browser_path=""
-    if [ "$(dpkg --print-architecture)" = "amd64" ]; then
+		parts = append(parts, `    crabbox_install_packages gnupg build-essential python3
+    browser_path="$(crabbox_existing_browser || true)"
+    if [ -z "$browser_path" ] && [ "$(dpkg --print-architecture)" = "amd64" ]; then
       install -d -m 0755 /etc/apt/keyrings
       google_key_tmp="$(mktemp -d /etc/apt/keyrings/google-linux.gpg.tmp.XXXXXX)"
       google_key_home="$google_key_tmp/gnupg"

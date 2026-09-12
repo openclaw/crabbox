@@ -72,13 +72,7 @@ func applyDefaults(cfg *Config) {
 			cfg.HyperV.User = "crabbox"
 		}
 	}
-	if cfg.HyperV.WorkRoot == "" {
-		if !core.IsDefaultWorkRoot(cfg.WorkRoot) {
-			cfg.HyperV.WorkRoot = cfg.WorkRoot
-		} else {
-			cfg.HyperV.WorkRoot = `C:\crabbox`
-		}
-	}
+	cfg.HyperV.WorkRoot = core.ResolveInheritedWorkRoot(cfg.HyperV.WorkRoot, cfg.WorkRoot, `C:\crabbox`)
 	if cfg.HyperV.CPUs <= 0 {
 		cfg.HyperV.CPUs = 4
 	}
@@ -374,7 +368,7 @@ func pruneLeaseState(leaseID string) {
 }
 
 func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
-	return fmt.Sprintf("released lease=%s instance=%s", lease.LeaseID, blank(firstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]), "-"))
+	return fmt.Sprintf("released lease=%s instance=%s", lease.LeaseID, core.Blank(firstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]), "-"))
 }
 
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
@@ -414,10 +408,10 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			continue
 		}
 		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would remove instance name=%s lease=%s reason=%s\n", inst.Name, blank(claim.LeaseID, "-"), reason)
+			fmt.Fprintf(b.rt.Stdout, "would remove instance name=%s lease=%s reason=%s\n", inst.Name, core.Blank(claim.LeaseID, "-"), reason)
 			continue
 		}
-		fmt.Fprintf(b.rt.Stdout, "remove instance name=%s lease=%s reason=%s\n", inst.Name, blank(claim.LeaseID, "-"), reason)
+		fmt.Fprintf(b.rt.Stdout, "remove instance name=%s lease=%s reason=%s\n", inst.Name, core.Blank(claim.LeaseID, "-"), reason)
 		if err := b.removeVM(ctx, inst.Name); err != nil {
 			return err
 		}
@@ -436,14 +430,14 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			continue
 		}
 		if ready, reason := missingClaimCleanupReady(claim, now); !ready {
-			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=%s\n", claim.LeaseID, blank(claim.Slug, "-"), reason)
+			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=%s\n", claim.LeaseID, core.Blank(claim.Slug, "-"), reason)
 			continue
 		}
 		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing instance\n", claim.LeaseID, blank(claim.Slug, "-"))
+			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing instance\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 			continue
 		}
-		fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing instance\n", claim.LeaseID, blank(claim.Slug, "-"))
+		fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing instance\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 		if name := instanceNameFromClaim(claim); name != "" {
 			if err := b.removeVMStorage(name, nil); err != nil {
 				return err
@@ -662,7 +656,8 @@ func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error
 		if lastErr == nil {
 			lastErr = budgetCtx.Err()
 		}
-		return fmt.Errorf("guest %s did not accept PowerShell Direct within %s: %w", vmName, b.guestReadyBudget, lastErr)
+		diagnostic := fmt.Errorf("guest %s did not accept PowerShell Direct within %s: %w", vmName, b.guestReadyBudget, lastErr)
+		return shared.PollTerminationError(budgetCtx, err, diagnostic)
 	}
 	return err
 }
@@ -1359,7 +1354,7 @@ func shouldCleanup(server Server, claim core.LeaseClaim, hasClaim bool, now time
 		return false, "missing claim"
 	}
 	if server.Status != "running" && server.Status != "ready" {
-		return true, "instance state=" + blank(server.Status, "unknown")
+		return true, "instance state=" + core.Blank(server.Status, "unknown")
 	}
 	expiresAt := strings.TrimSpace(server.Labels["expires_at"])
 	if expiresAt == "" {

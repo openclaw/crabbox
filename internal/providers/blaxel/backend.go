@@ -50,180 +50,111 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 }
 
 func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
-	workdir, err := blaxelWorkdir(b.cfg)
-	if err != nil {
-		return RunResult{}, err
-	}
-	started := now(b.rt)
-	client, err := b.client()
-	if err != nil {
-		return RunResult{}, err
-	}
-	leaseID, sandboxID, slug := "", "", ""
-	acquired := false
-	var prepared *core.PreparedArchive
-	if req.ID == "" && !req.NoSync {
-		prepared, err = core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-			Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-			TempPattern: "crabbox-blaxel-sync-*.tgz", Stderr: b.rt.Stderr,
-			Now: func() time.Time { return now(b.rt) },
-		})
-		if err != nil {
-			return RunResult{}, err
-		}
-		defer prepared.Close()
-	}
-	if req.ID == "" {
-		var sb Sandbox
-		leaseID, sb, slug, err = b.createSandbox(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
-		if err != nil {
-			return RunResult{}, err
-		}
-		sandboxID = sb.ID
-		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s name=%s\n", leaseID, slug, providerName, sb.ID, sb.Name)
-		acquired = true
-	} else {
-		leaseID, sandboxID, slug, err = resolveLeaseID(req.ID, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, client.BaseURL(), b.cfg.Blaxel.Workspace)
-		if err != nil {
-			return RunResult{}, err
-		}
-		if _, err := verifyBlaxelClaim(ctx, client, leaseID, sandboxID, b.cfg.Blaxel.Workspace); err != nil {
-			return RunResult{}, err
+	workdir, workdirErr := blaxelWorkdir(b.cfg)
+	var client Client
+	var leaseID, sandboxID, slug string
+	var claim LeaseClaim
+	var claimErr error
+	boundSandbox := func() shared.DelegatedSandbox {
+		return shared.DelegatedSandbox{
+			LeaseID: leaseID, Slug: slug,
+			CleanupCommand: fmt.Sprintf("crabbox stop --provider %s %s", providerName, leaseID),
 		}
 	}
-	shouldStop := acquired && !req.Keep
-	if shouldStop {
-		claim, err := readLeaseClaim(leaseID)
-		if err != nil {
-			return RunResult{}, err
-		}
-		defer func() {
-			if !shouldStop {
-				return
+	return shared.RunDelegatedSandbox(ctx, req, shared.DelegatedSandboxLifecycle{
+		Provider: providerName, Runtime: b.rt, Workdir: workdir,
+		IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL, CleanupTimeout: blaxelCleanupTimeout,
+		Preflight: func(context.Context) error {
+			if workdirErr != nil {
+				return workdirErr
 			}
-			cleanupCtx, cancel := b.cleanupContext(ctx)
-			defer cancel()
-			if err := removeLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
-				if err := client.DeleteSandbox(cleanupCtx, sandboxID); err != nil && !isBlaxelNotFound(err) {
+			var err error
+			client, err = b.client()
+			return err
+		},
+		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
+			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
+				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
+				TempPattern: "crabbox-blaxel-sync-*.tgz", Stderr: b.rt.Stderr,
+				Now: func() time.Time { return now(b.rt) },
+			})
+		},
+		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var sb Sandbox
+			var err error
+			leaseID, sb, slug, err = b.createSandbox(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			sandboxID = sb.ID
+			// Capture the acquisition claim before any run work; cleanup must not
+			// authorize a replacement claim created while the command executes.
+			claim, claimErr = readLeaseClaim(leaseID)
+			fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s name=%s\n", leaseID, slug, providerName, sb.ID, sb.Name)
+			return boundSandbox(), nil
+		},
+		Resolve: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var err error
+			leaseID, sandboxID, slug, err = resolveLeaseID(req.ID, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, client.BaseURL(), b.cfg.Blaxel.Workspace)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			if _, err := verifyBlaxelClaim(ctx, client, leaseID, sandboxID, b.cfg.Blaxel.Workspace); err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			return boundSandbox(), nil
+		},
+		Setup: func(context.Context) error {
+			if claimErr != nil {
+				return claimErr
+			}
+			fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
+			return nil
+		},
+		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+			return b.syncWorkspace(ctx, client, sandboxID, req, workdir, prepared)
+		},
+		NoSync: func(ctx context.Context) error { return b.ensureWorkspace(ctx, client, sandboxID, workdir) },
+		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
+			command, err := buildCommand(req.Command, req.ShellMode)
+			if err != nil {
+				return shared.DelegatedSandboxCommand{}, err
+			}
+			if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
+				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+			}
+			return shared.DelegatedSandboxCommand{
+				Text: strings.Join(req.Command, " "),
+				Run: func(ctx context.Context) (int, error) {
+					return b.execCommand(ctx, client, sandboxID, workdir, command, req.Env)
+				},
+			}, nil
+		},
+		Cleanup: func(ctx context.Context) error {
+			if claimErr != nil {
+				return claimErr
+			}
+			return core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, leaseID, claim, true, func() error {
+				if err := validateBlaxelClaimScope(claim, client.BaseURL(), b.cfg.Blaxel.Workspace); err != nil {
+					return err
+				}
+				sb, err := client.GetSandbox(ctx, sandboxID)
+				if isBlaxelNotFound(err) {
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+				if err := validateBlaxelSandboxOwnership(claim, sb); err != nil {
+					return err
+				}
+				if err := client.DeleteSandbox(ctx, sandboxID); err != nil && !isBlaxelNotFound(err) {
 					return err
 				}
 				return nil
-			}); err != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: blaxel delete failed for %s: %v\n", sandboxID, err)
-				return
-			}
-		}()
-	}
-	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
-
-	syncDuration := time.Duration(0)
-	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
-	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, sandboxID, req, workdir, prepared)
-		if err != nil {
-			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-			return RunResult{Total: now(b.rt).Sub(started), SyncDelegated: true}, err
-		}
-		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.ensureWorkspace(ctx, client, sandboxID, workdir); err != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return RunResult{}, err
-	}
-	if req.SyncOnly {
-		result := RunResult{
-			Total:         now(b.rt).Sub(started),
-			SyncDelegated: true,
-			Provider:      providerName,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			Session:       blaxelRunSession(leaseID, slug, acquired, shouldStop),
-		}
-		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
-		if req.TimingJSON {
-			return result, writeTimingJSON(b.rt.Stderr, timingReport{
-				Provider:      providerName,
-				LeaseID:       leaseID,
-				Slug:          slug,
-				SyncDelegated: true,
-				SyncMs:        syncDuration.Milliseconds(),
-				SyncPhases:    syncPhases,
-				SyncSkipped:   req.NoSync,
-				TotalMs:       result.Total.Milliseconds(),
-				ExitCode:      0,
-				Label:         strings.TrimSpace(req.Label),
 			})
-		}
-		return result, nil
-	}
-
-	command, err := buildCommand(req.Command, req.ShellMode)
-	if err != nil {
-		return RunResult{}, err
-	}
-	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
-		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
-	}
-	commandStarted := now(b.rt)
-	exitCode, commandErr := b.execCommand(ctx, client, sandboxID, workdir, command, req.Env)
-	commandDuration := now(b.rt).Sub(commandStarted)
-	result := RunResult{
-		ExitCode:      exitCode,
-		Command:       commandDuration,
-		Total:         now(b.rt).Sub(started),
-		SyncDelegated: true,
-		Session:       blaxelRunSession(leaseID, slug, acquired, shouldStop),
-		Provider:      providerName,
-		LeaseID:       leaseID,
-		Slug:          slug,
-		CommandText:   strings.Join(req.Command, " "),
-	}
-	if req.NoSync {
-		fmt.Fprintf(b.rt.Stderr, "blaxel run summary sync_skipped=true command=%s total=%s exit=%d\n",
-			result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
-	} else {
-		fmt.Fprintf(b.rt.Stderr, "blaxel run summary sync=%s command=%s total=%s exit=%d\n",
-			syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
-	}
-	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider:      providerName,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			SyncDelegated: true,
-			SyncMs:        syncDuration.Milliseconds(),
-			SyncPhases:    syncPhases,
-			SyncSkipped:   req.NoSync,
-			CommandMs:     result.Command.Milliseconds(),
-			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      exitCode,
-			Label:         strings.TrimSpace(req.Label),
-		}); err != nil {
-			return result, err
-		}
-	}
-	if commandErr != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		result.Session.Kept = !shouldStop
-		return result, shared.ExitErrorWithCause(1, fmt.Sprintf("blaxel run failed: %v", commandErr), commandErr)
-	}
-	if exitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		result.Session.Kept = !shouldStop
-		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("blaxel run exited %d", exitCode)}
-	}
-	result.Session.Kept = !shouldStop
-	return result, nil
-}
-
-func blaxelRunSession(leaseID, slug string, acquired, shouldStop bool) *RunSessionHandle {
-	return &RunSessionHandle{
-		Provider:       providerName,
-		LeaseID:        leaseID,
-		Slug:           slug,
-		Reused:         !acquired,
-		Kept:           !shouldStop,
-		CleanupCommand: fmt.Sprintf("crabbox stop --provider %s %s", providerName, leaseID),
-	}
+		},
+	})
 }
 
 func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
@@ -251,7 +182,7 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 			if err := validateBlaxelSandboxOwnership(claim, sb); err != nil {
 				return nil, err
 			}
-			state = blank(sb.Status, "unknown")
+			state = core.Blank(sb.Status, "unknown")
 		}
 		servers = append(servers, Server{
 			Provider: providerName,
@@ -430,13 +361,13 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 				continue
 			}
 			if req.DryRun {
-				fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+				fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 				continue
 			}
 			if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 				return err
 			}
-			fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+			fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 			claimsRemoved++
 			continue
 		}
@@ -565,12 +496,12 @@ func (b *backend) createSandbox(ctx context.Context, client Client, repo Repo, r
 	slug := ""
 	req := CreateSandboxRequest{
 		Name:       newSandboxName(repo),
-		Image:      blank(b.cfg.Blaxel.Image, defaultImage),
+		Image:      core.Blank(b.cfg.Blaxel.Image, core.BlaxelConfigDefaultImage),
 		Region:     b.cfg.Blaxel.Region,
 		MemoryMB:   b.cfg.Blaxel.MemoryMB,
 		TTL:        b.cfg.Blaxel.TTL,
 		IdleTTL:    b.cfg.Blaxel.IdleTTL,
-		WorkingDir: blank(b.cfg.Blaxel.Workdir, defaultWorkdir),
+		WorkingDir: core.Blank(b.cfg.Blaxel.Workdir, core.BlaxelConfigDefaultWorkdir),
 		Labels: map[string]string{
 			"crabbox":          "true",
 			"crabbox.provider": providerName,
@@ -762,7 +693,7 @@ func (b *backend) execTimeoutSecs() int {
 	if b.cfg.Blaxel.ExecTimeoutSecs > 0 {
 		return b.cfg.Blaxel.ExecTimeoutSecs
 	}
-	return blaxelExecTimeout
+	return core.BlaxelConfigDefaultExecTimeoutSecs
 }
 
 func buildCommand(command []string, shellMode bool) ([]string, error) {
@@ -779,7 +710,7 @@ func buildCommand(command []string, shellMode bool) ([]string, error) {
 }
 
 func blaxelWorkdir(cfg Config) (string, error) {
-	workdir := strings.TrimSpace(blank(cfg.Blaxel.Workdir, defaultWorkdir))
+	workdir := strings.TrimSpace(core.Blank(cfg.Blaxel.Workdir, core.BlaxelConfigDefaultWorkdir))
 	clean := path.Clean(workdir)
 	if workdir == "" || !strings.HasPrefix(clean, "/") || strings.Contains(workdir, "\x00") {
 		return "", exit(2, "blaxel workdir %q must be an absolute path", workdir)

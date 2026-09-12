@@ -265,10 +265,10 @@ func TestAWSFixedStopReplayAfterInventoryDisappears(t *testing.T) {
 			}
 			if tc.expectedLease != "" || tc.expectedAttempt != "" || tc.expectedSlug != "" || tc.expectedCloud != "" || tc.expectedExact {
 				args = append(args,
-					"--expected-provider-lease-id", blank(tc.expectedLease, lease.LeaseID),
-					"--expected-provider-attempt-lease-id", blank(tc.expectedAttempt, lease.LeaseID),
-					"--expected-provider-slug", blank(tc.expectedSlug, req.RequestedSlug),
-					"--expected-provider-resource-id", blank(tc.expectedCloud, lease.Server.CloudID),
+					"--expected-provider-lease-id", core.Blank(tc.expectedLease, lease.LeaseID),
+					"--expected-provider-attempt-lease-id", core.Blank(tc.expectedAttempt, lease.LeaseID),
+					"--expected-provider-slug", core.Blank(tc.expectedSlug, req.RequestedSlug),
+					"--expected-provider-resource-id", core.Blank(tc.expectedCloud, lease.Server.CloudID),
 				)
 			}
 			var output bytes.Buffer

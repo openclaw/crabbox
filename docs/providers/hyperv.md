@@ -145,6 +145,10 @@ PowerShell Direct calls use the guest administrator password. Readiness and
 later guest operations have bounded retries, preventing a stalled call from
 hanging the lease.
 
+Exhausting the PowerShell Direct boot-readiness budget reports a timeout while
+preserving the last probe's diagnostic and public exit code. Caller cancellation
+still takes precedence over that provider-owned budget.
+
 Set `CRABBOX_HYPERV_GUEST_PASSWORD` or `hyperv.guestPassword` in trusted user
 config to match the administrator password in your VHDX template. The provider
 requires an explicit value and disables SSH password authentication after key

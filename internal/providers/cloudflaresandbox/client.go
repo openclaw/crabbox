@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -106,7 +107,7 @@ func newBridgeClient(cfg Config, rt Runtime) (bridgeClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	httpClient, dataHTTPClient := cloudflareSandboxHTTPClients(rt.HTTP, cloudflareSandboxControlTimeout)
+	httpClient, dataHTTPClient := shared.ControlAndDataHTTPClients(rt.HTTP, cloudflareSandboxControlTimeout)
 	trusted, _ := url.Parse(baseURL)
 	return &client{
 		baseURL:  baseURL,
@@ -114,13 +115,6 @@ func newBridgeClient(cfg Config, rt Runtime) (bridgeClient, error) {
 		http:     shared.SecureHTTPClient(httpClient, trusted, cloudflareSandboxRedirectError),
 		dataHTTP: shared.SecureHTTPClient(dataHTTPClient, trusted, cloudflareSandboxRedirectError),
 	}, nil
-}
-
-func cloudflareSandboxHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
-	if injected != nil {
-		return injected, injected
-	}
-	return &http.Client{Timeout: controlTimeout}, &http.Client{}
 }
 
 func cloudflareSandboxRedirectError(destination *url.URL) error {
@@ -253,7 +247,7 @@ func (c *client) parseExecSSE(body io.Reader, stdout, stderr io.Writer) (execRes
 		if err := json.Unmarshal([]byte(data), &frame); err != nil {
 			return fmt.Errorf("decode cloudflare-sandbox exec SSE event: %w", err)
 		}
-		kind := strings.ToLower(blank(frame.Type, ev))
+		kind := strings.ToLower(core.Blank(frame.Type, ev))
 		stream := strings.ToLower(frame.Stream)
 		switch kind {
 		case "stdout", "stderr", "output":

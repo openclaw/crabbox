@@ -1,11 +1,7 @@
 package cubesandbox
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
-	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -101,12 +98,12 @@ func (e *cubesandboxAPIError) Error() string {
 
 var newCubeSandboxClient = func(cfg Config, rt Runtime) (cubesandboxAPI, error) {
 	apiKey := strings.TrimSpace(cfg.CubeSandbox.APIKey)
-	httpClient, dataPlaneClient := cubeSandboxHTTPClients(rt.HTTP, cubesandboxControlTimeout)
-	apiURL, err := validateCubeSandboxAPIURL(blank(cfg.CubeSandbox.APIURL, "http://127.0.0.1:3000"))
+	httpClient, dataPlaneClient := shared.ControlAndDataHTTPClients(rt.HTTP, cubesandboxControlTimeout)
+	apiURL, err := validateCubeSandboxAPIURL(core.Blank(cfg.CubeSandbox.APIURL, "http://127.0.0.1:3000"))
 	if err != nil {
 		return nil, err
 	}
-	domain := strings.TrimSpace(blank(cfg.CubeSandbox.Domain, "cube.app"))
+	domain := strings.TrimSpace(core.Blank(cfg.CubeSandbox.Domain, "cube.app"))
 	proxyScheme, err := cubeSandboxProxyScheme(cfg.CubeSandbox.ProxyScheme, cfg.CubeSandbox.ProxyPortHTTP)
 	if err != nil {
 		return nil, err
@@ -132,13 +129,6 @@ var newCubeSandboxClient = func(cfg Config, rt Runtime) (cubesandboxAPI, error) 
 		httpClient:  httpClient,
 		envdClient:  envdClient,
 	}, nil
-}
-
-func cubeSandboxHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
-	if injected != nil {
-		return injected, injected
-	}
-	return &http.Client{Timeout: controlTimeout}, &http.Client{Timeout: 0}
 }
 
 func cubeSandboxDataPlaneHTTPClient(source *http.Client, proxyHost string, proxyPort int) (*http.Client, error) {
@@ -341,8 +331,8 @@ func (c *cubesandboxClient) StartProcess(ctx context.Context, session cubesandbo
 		HTTPClient:     c.dataPlaneHTTPClient(),
 		SetHeaders:     func(httpReq *http.Request) { c.setEnvdHeaders(httpReq, session) },
 		RedirectError:  cubeSandboxRedirectError,
-		EncodeEnvelope: encodeConnectJSONEnvelope,
-		ParseStream:    parseCubeSandboxProcessStream,
+		Provider:       "cubesandbox",
+		InterpretEnd:   interpretCubeSandboxProcessEnd,
 		SummarizeError: summarizeJSON,
 		APIError: func(statusCode int, status, body string) error {
 			return &cubesandboxAPIError{StatusCode: statusCode, Status: status, Body: body}
@@ -356,19 +346,11 @@ func (c *cubesandboxClient) doJSON(ctx context.Context, method, path string, que
 }
 
 func (c *cubesandboxClient) doJSONWithHeaders(ctx context.Context, method, path string, query url.Values, body any, out any) (http.Header, error) {
-	var r io.Reader
-	if body != nil {
-		var buf bytes.Buffer
-		if err := json.NewEncoder(&buf).Encode(body); err != nil {
-			return nil, err
-		}
-		r = &buf
-	}
 	endpoint := c.apiURL + path
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, r)
+	req, err := shared.NewJSONRequest(ctx, method, endpoint, body)
 	if err != nil {
 		return nil, err
 	}
@@ -384,17 +366,10 @@ func (c *cubesandboxClient) doJSONWithHeaders(ctx context.Context, method, path 
 		return nil, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
+	if err := shared.DecodeUnboundedJSONResponse(resp, out, func(statusCode int, status string, data []byte) error {
+		return &cubesandboxAPIError{StatusCode: statusCode, Status: status, Body: shared.RedactErrorSecrets(summarizeJSON(data), c.apiKey)}
+	}); err != nil {
 		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &cubesandboxAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(summarizeJSON(data), c.apiKey)}
-	}
-	if out != nil && len(data) > 0 {
-		if err := json.Unmarshal(data, out); err != nil {
-			return nil, err
-		}
 	}
 	return resp.Header.Clone(), nil
 }
@@ -438,125 +413,22 @@ func (c *cubesandboxClient) dataPlaneHTTPClient() *http.Client {
 	return &http.Client{Timeout: 0}
 }
 
-type cubesandboxStartResponse struct {
-	Event struct {
-		Start *struct {
-			PID uint32 `json:"pid"`
-		} `json:"start,omitempty"`
-		Data *struct {
-			Stdout string `json:"stdout,omitempty"`
-			Stderr string `json:"stderr,omitempty"`
-			PTY    string `json:"pty,omitempty"`
-		} `json:"data,omitempty"`
-		End *struct {
-			ExitCode int    `json:"exitCode"`
-			Exited   bool   `json:"exited"`
-			Status   string `json:"status"`
-			Error    string `json:"error,omitempty"`
-		} `json:"end,omitempty"`
-		Keepalive map[string]any `json:"keepalive,omitempty"`
-	} `json:"event"`
-}
-
-type cubesandboxEndStream struct {
-	Error *struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error,omitempty"`
-}
-
-func encodeConnectJSONEnvelope(v any) ([]byte, error) {
-	data, err := json.Marshal(v)
-	if err != nil {
-		return nil, err
+func interpretCubeSandboxProcessEnd(end shared.EnvdProcessEnd, stderr io.Writer, secrets ...string) (int, error) {
+	if end.Exited {
+		return end.ExitCode, nil
 	}
-	var out bytes.Buffer
-	out.WriteByte(0)
-	var size [4]byte
-	binary.BigEndian.PutUint32(size[:], uint32(len(data)))
-	out.Write(size[:])
-	out.Write(data)
-	return out.Bytes(), nil
-}
-
-func parseCubeSandboxProcessStream(r io.Reader, stdout, stderr io.Writer, secrets ...string) (int, error) {
-	exitCode := 0
-	seenEnd := false
-	for {
-		var header [5]byte
-		if _, err := io.ReadFull(r, header[:]); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return 1, err
-		}
-		flags := header[0]
-		size := binary.BigEndian.Uint32(header[1:])
-		if flags&1 != 0 {
-			return 1, fmt.Errorf("compressed connect envelopes are not supported")
-		}
-		data := make([]byte, size)
-		if _, err := io.ReadFull(r, data); err != nil {
-			return 1, err
-		}
-		if flags&2 != 0 {
-			var end cubesandboxEndStream
-			if len(data) > 0 {
-				if err := json.Unmarshal(data, &end); err != nil {
-					return 1, err
-				}
-			}
-			if end.Error != nil {
-				return 1, errors.New(shared.RedactErrorSecrets(end.Error.Code+": "+end.Error.Message, secrets...))
-			}
-			break
-		}
-		var event cubesandboxStartResponse
-		if err := json.Unmarshal(data, &event); err != nil {
-			return 1, err
-		}
-		if event.Event.Data != nil {
-			if err := writeBase64(event.Event.Data.Stdout, stdout); err != nil {
-				return 1, err
-			}
-			if err := writeBase64(event.Event.Data.Stderr, stderr); err != nil {
-				return 1, err
-			}
-		}
-		if event.Event.End != nil {
-			exitCode = event.Event.End.ExitCode
-			seenEnd = true
-			if !event.Event.End.Exited {
-				detail := strings.TrimSpace(event.Event.End.Error)
-				if detail == "" {
-					detail = strings.TrimSpace(event.Event.End.Status)
-				}
-				if detail == "" {
-					detail = "process did not exit normally"
-				}
-				detail = shared.RedactErrorSecrets(detail, secrets...)
-				fmt.Fprintln(stderr, detail)
-				if exitCode == 0 {
-					exitCode = 1
-				}
-				return exitCode, shared.ObservedProcessEndError(fmt.Sprintf("cubesandbox process did not exit normally: %s", detail))
-			}
-		}
+	detail := strings.TrimSpace(end.Error)
+	if detail == "" {
+		detail = strings.TrimSpace(end.Status)
 	}
-	if !seenEnd {
-		return 1, fmt.Errorf("cubesandbox process stream ended without end event")
+	if detail == "" {
+		detail = "process did not exit normally"
 	}
-	return exitCode, nil
-}
-
-func writeBase64(value string, w io.Writer) error {
-	if value == "" {
-		return nil
+	detail = shared.RedactErrorSecrets(detail, secrets...)
+	fmt.Fprintln(stderr, detail)
+	code := end.ExitCode
+	if code == 0 {
+		code = 1
 	}
-	data, err := base64.StdEncoding.DecodeString(value)
-	if err != nil {
-		return err
-	}
-	_, err = w.Write(data)
-	return err
+	return code, shared.ObservedProcessEndError(fmt.Sprintf("cubesandbox process did not exit normally: %s", detail))
 }

@@ -83,10 +83,14 @@ func TestProviderFlagsRejectGenericSizingForAliases(t *testing.T) {
 				fs.String("class", "", "")
 				fs.String("type", "", "")
 				values := RegisterCodeSandboxProviderFlags(fs, cfg)
-				if err := fs.Parse([]string{"--" + flagName, "large"}); err != nil {
+				if err := fs.Parse([]string{"--" + flagName, "large", "--codesandbox-template-id=changed"}); err != nil {
 					t.Fatal(err)
 				}
+				before := cfg.CodeSandbox
 				err := ApplyCodeSandboxProviderFlags(&cfg, fs, values)
+				if cfg.CodeSandbox != before {
+					t.Fatal("sizing guard copied provider flags")
+				}
 				if err == nil || !strings.Contains(err.Error(), "--codesandbox-vm-tier") {
 					t.Fatalf("provider=%q flag=%s err=%v", provider, flagName, err)
 				}
@@ -245,4 +249,63 @@ func (f *fakeSandboxLister) ListPorts(context.Context, string) ([]PortInfo, erro
 
 func (f *fakeSandboxLister) WaitForPortURL(context.Context, string, int) (PortInfo, error) {
 	return PortInfo{}, nil
+}
+
+func TestProviderFlagPresenceBeforeValidation(t *testing.T) {
+	cfg := newTestConfig()
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	values := RegisterCodeSandboxProviderFlags(fs, cfg)
+	// Earlier layers may change after registration; unvisited flags must not restore defaults.
+	cfg.CodeSandbox.TemplateID = "later-template"
+	cfg.CodeSandbox.VMTier = "micro"
+	cfg.CodeSandbox.Workdir = "/project/workspace/later"
+	cfg.CodeSandbox.Privacy = "public-hosts"
+	cfg.CodeSandbox.HibernationTimeoutSecs = 90
+	cfg.CodeSandbox.AutomaticWakeupHTTP = true
+	cfg.CodeSandbox.AutomaticWakeupWebSocket = true
+	cfg.CodeSandbox.BridgeCommand = "later-node"
+	cfg.CodeSandbox.SDKPackage = "@codesandbox/sdk"
+	cfg.CodeSandbox.DoctorListLimit = 3
+	cfg.CodeSandbox.OperationTimeoutSecs = 40
+	before := cfg.CodeSandbox
+	if err := ApplyCodeSandboxProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CodeSandbox != before {
+		t.Fatalf("unvisited flags changed config: %#v", cfg.CodeSandbox)
+	}
+	if err := fs.Parse([]string{
+		"--codesandbox-template-id=", "--codesandbox-workdir=", "--codesandbox-vm-tier=", "--codesandbox-privacy=",
+		"--codesandbox-hibernation-timeout-secs=0", "--codesandbox-automatic-wakeup-http=false", "--codesandbox-automatic-wakeup-websocket=false",
+		"--codesandbox-bridge-command=", "--codesandbox-sdk-package=", "--codesandbox-doctor-list-limit=0", "--codesandbox-operation-timeout-secs=0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyCodeSandboxProviderFlags(&cfg, fs, values); err == nil {
+		t.Fatal("expected semantic validation failure")
+	}
+	if cfg.CodeSandbox != (CodeSandboxConfig{}) {
+		t.Fatalf("explicit zero values not copied before validation: %#v", cfg.CodeSandbox)
+	}
+}
+
+func TestProviderFlagsWrongValuesBeforeSizingGuard(t *testing.T) {
+	for _, values := range []any{nil, struct{}{}} {
+		cfg := newTestConfig()
+		cfg.Provider = "csb"
+		cfg.CodeSandbox.BridgeCommand = ""
+		before := cfg.CodeSandbox
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.String("class", "", "")
+		if err := fs.Parse([]string{"--class=large"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyCodeSandboxProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatalf("wrong values %T reached guard/validation: %v", values, err)
+		}
+		if cfg.CodeSandbox != before {
+			t.Fatal("wrong values changed config")
+		}
+	}
 }

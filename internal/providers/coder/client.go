@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type coderClient struct {
@@ -23,7 +25,7 @@ func newCoderClient(cfg Config, rt Runtime) (*coderClient, error) {
 	}
 	cliPath := strings.TrimSpace(cfg.Coder.CLIPath)
 	if cliPath == "" {
-		cliPath = "coder"
+		cliPath = core.CoderConfigDefaultCLIPath
 	}
 	return &coderClient{cliPath: cliPath, runner: rt.Exec, stdout: rt.Stdout, stderr: rt.Stderr}, nil
 }

@@ -83,16 +83,16 @@ func applyDefaults(cfg *Config) {
 	cfg.WindowsMode = ""
 	cfg.SSHFallbackPorts = nil
 	if strings.TrimSpace(cfg.Lume.CLIPath) == "" {
-		cfg.Lume.CLIPath = "lume"
+		cfg.Lume.CLIPath = core.LumeConfigDefaultCLIPath
 	}
 	if strings.TrimSpace(cfg.Lume.Base) == "" {
-		cfg.Lume.Base = "crabbox-macos-golden"
+		cfg.Lume.Base = core.LumeConfigDefaultBase
 	}
 	if strings.TrimSpace(cfg.Lume.User) == "" {
-		cfg.Lume.User = "lume"
+		cfg.Lume.User = core.LumeConfigDefaultUser
 	}
-	lumeWorkRootIsDefault := strings.TrimSpace(cfg.Lume.WorkRoot) == "" || (cfg.Lume.User != "lume" && cfg.Lume.WorkRoot == "/Users/lume/crabbox")
-	genericWorkRootIsDefault := strings.TrimSpace(cfg.WorkRoot) == "" || core.IsDefaultWorkRoot(cfg.WorkRoot) || cfg.WorkRoot == "/Users/lume/crabbox"
+	lumeWorkRootIsDefault := strings.TrimSpace(cfg.Lume.WorkRoot) == "" || (cfg.Lume.User != core.LumeConfigDefaultUser && cfg.Lume.WorkRoot == core.LumeConfigDefaultWorkRoot)
+	genericWorkRootIsDefault := strings.TrimSpace(cfg.WorkRoot) == "" || core.IsDefaultWorkRoot(cfg.WorkRoot) || cfg.WorkRoot == core.LumeConfigDefaultWorkRoot
 	if lumeWorkRootIsDefault {
 		if !genericWorkRootIsDefault {
 			cfg.Lume.WorkRoot = cfg.WorkRoot
@@ -210,7 +210,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		}
 	}()
 	cfg.SSHKey = keyPath
-	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s base=%s storage=%s keep=%v\n", providerName, leaseID, slug, cfg.Lume.Base, blank(cfg.Lume.Storage, "home"), req.Keep)
+	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s base=%s storage=%s keep=%v\n", providerName, leaseID, slug, cfg.Lume.Base, core.Blank(cfg.Lume.Storage, "home"), req.Keep)
 	launchToken, err := newLaunchToken()
 	if err != nil {
 		return LeaseTarget{}, err
@@ -450,7 +450,7 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 		return lease, nil
 	}
 	if !instanceRunning(inst.Status) {
-		return LeaseTarget{}, exit(5, "Lume VM %s is %s; start a new lease or clean it up", inst.Name, blank(inst.Status, "not running"))
+		return LeaseTarget{}, exit(5, "Lume VM %s is %s; start a new lease or clean it up", inst.Name, core.Blank(inst.Status, "not running"))
 	}
 	lease, err = b.prepareLease(ctx, cfg, inst, claim, false)
 	if err != nil {
@@ -537,7 +537,7 @@ func (b *backend) Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, 
 		return DoctorResult{}, exit(2, "Lume base VM %q must be stopped, found %s", cfg.Lume.Base, baseState)
 	}
 	if !strings.EqualFold(baseOS, targetMacOS) {
-		return DoctorResult{}, exit(2, "Lume base VM %q must run macOS, found %s", cfg.Lume.Base, blank(baseOS, "unknown"))
+		return DoctorResult{}, exit(2, "Lume base VM %q must run macOS, found %s", cfg.Lume.Base, core.Blank(baseOS, "unknown"))
 	}
 	probe := "unchecked"
 	if req.ProbeSSH {
@@ -628,7 +628,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 }
 
 func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
-	return fmt.Sprintf("released lease=%s instance=%s", lease.LeaseID, blank(firstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]), "-"))
+	return fmt.Sprintf("released lease=%s instance=%s", lease.LeaseID, core.Blank(firstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]), "-"))
 }
 
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
@@ -697,7 +697,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 					return observeErr
 				}
 				if !stillMissing {
-					return exit(4, "refusing to remove Lume claim %s after VM %q reappeared in state %s", claim.LeaseID, name, blank(state, "unknown"))
+					return exit(4, "refusing to remove Lume claim %s after VM %q reappeared in state %s", claim.LeaseID, name, core.Blank(state, "unknown"))
 				}
 				if ownerProcessMatches(owner) {
 					return exit(5, "refusing to remove missing Lume claim %s while owner pid %d is still running", claim.LeaseID, owner.PID)
@@ -1980,7 +1980,7 @@ func firstLine(value string) string {
 	if idx := strings.IndexByte(value, '\n'); idx >= 0 {
 		value = value[:idx]
 	}
-	return blank(strings.TrimSpace(value), "unknown")
+	return core.Blank(strings.TrimSpace(value), "unknown")
 }
 
 func firstNonBlank(values ...string) string {

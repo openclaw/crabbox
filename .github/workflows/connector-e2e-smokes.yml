@@ -123,9 +123,15 @@ jobs:
         run: |
           archive="$RUNNER_TEMP/rsync-$RSYNC_VERSION.tar.gz"
           prefix="$RUNNER_TEMP/rsync-install"
-          curl --fail --location --silent --show-error \
+          if ! curl --disable --fail --location --silent --show-error \
+            --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 60 \
             --output "$archive" \
-            "https://download.samba.org/pub/rsync/src/rsync-$RSYNC_VERSION.tar.gz"
+            "https://download.samba.org/pub/rsync/src/rsync-$RSYNC_VERSION.tar.gz"; then
+            curl --disable --fail --location --silent --show-error \
+              --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 60 \
+              --output "$archive" \
+              "https://github.com/RsyncProject/rsync/releases/download/v$RSYNC_VERSION/rsync-$RSYNC_VERSION.tar.gz"
+          fi
           printf '%s  %s\n' "$RSYNC_SHA256" "$archive" | sha256sum --check --strict
           tar -xzf "$archive" -C "$RUNNER_TEMP"
           cd "$RUNNER_TEMP/rsync-$RSYNC_VERSION"

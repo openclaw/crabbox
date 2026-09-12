@@ -36,7 +36,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if _, err := vercelSandboxWorkdir(b.cfg); err != nil {
 		return err
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	api, err := b.client()
 	if err != nil {
 		return err
@@ -53,18 +53,13 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: vercel-sandbox warmup keeps the sandbox until explicit stop\n")
 	}
-	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  leaseID,
-			Slug:     slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	total := core.ClockNow(b.rt.Clock).Sub(started)
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
 
 func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
@@ -91,7 +86,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
 			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-vercel-sandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+				TempPattern: "crabbox-vercel-sandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 			})
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
@@ -257,7 +252,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	if waitTimeout <= 0 {
 		waitTimeout = 5 * time.Minute
 	}
-	deadline := b.now().Add(waitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(waitTimeout)
 	pollCtx := ctx
 	cancel := func() {}
 	if req.Wait {
@@ -303,7 +298,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		if isTerminalState(state) {
 			return StatusView{}, exit(5, "vercel-sandbox sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
-		if b.now().After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return StatusView{}, exit(5, "timed out waiting for vercel-sandbox sandbox %s to become ready", sandboxID)
 		}
 		select {
@@ -378,7 +373,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	if err := b.bindProviderScope(ctx, api, true); err != nil {
 		return err
 	}
-	now := b.now().UTC()
+	now := core.ClockNow(b.rt.Clock).UTC()
 	checked := 0
 	removed := 0
 	claimsRemoved := 0
@@ -412,13 +407,13 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 					return nil
 				}
 				if req.DryRun {
-					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 					return nil
 				}
 				if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 					return err
 				}
-				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 				claimRemovedOne = true
 				return nil
 			}
@@ -653,12 +648,12 @@ func (b *backend) bindProviderScope(ctx context.Context, api vercelSandboxClient
 }
 
 func (b *backend) providerScopeBase() string {
-	projectID := blank(strings.TrimSpace(b.resolvedProject), strings.TrimSpace(b.cfg.VercelSandbox.ProjectID))
-	teamID := blank(strings.TrimSpace(b.resolvedTeam), strings.TrimSpace(b.cfg.VercelSandbox.TeamID))
+	projectID := core.Blank(strings.TrimSpace(b.resolvedProject), strings.TrimSpace(b.cfg.VercelSandbox.ProjectID))
+	teamID := core.Blank(strings.TrimSpace(b.resolvedTeam), strings.TrimSpace(b.cfg.VercelSandbox.TeamID))
 	parts := []string{
-		"scope:" + blank(strings.TrimSpace(b.cfg.VercelSandbox.Scope), "-"),
-		"team:" + blank(teamID, "-"),
-		"project:" + blank(projectID, "-"),
+		"scope:" + core.Blank(strings.TrimSpace(b.cfg.VercelSandbox.Scope), "-"),
+		"team:" + core.Blank(teamID, "-"),
+		"project:" + core.Blank(projectID, "-"),
 	}
 	return strings.Join(parts, "/")
 }
@@ -768,15 +763,8 @@ func (b *backend) execTimeoutSecs() int {
 	return b.cfg.VercelSandbox.ExecTimeoutSecs
 }
 
-func (b *backend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
-}
-
 func normalizedSandboxState(sb sandboxSummary) string {
-	return strings.ToLower(blank(strings.TrimSpace(sb.Status), blank(strings.TrimSpace(sb.State), "unknown")))
+	return strings.ToLower(core.Blank(strings.TrimSpace(sb.Status), core.Blank(strings.TrimSpace(sb.State), "unknown")))
 }
 
 func isReadyState(state string) bool {
@@ -798,7 +786,7 @@ func isTerminalState(state string) bool {
 }
 
 func vercelSandboxRuntime(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.VercelSandbox.Runtime), defaultRuntime)
+	return core.Blank(strings.TrimSpace(cfg.VercelSandbox.Runtime), defaultRuntime)
 }
 
 func newSandboxName(repo Repo) string {

@@ -55,6 +55,12 @@ Resolve the Orgo API key in this precedence:
 The API key is never exposed as a CLI flag; do not pass secrets on the command
 line.
 
+Configuration loading preserves raw nonempty values in that order: the vendor
+environment key applies only when both the primary environment key and the
+configured key are empty. An ignored fallback does not change the recorded
+configuration source. The client's later key trimming and resolution remain
+separate and unchanged.
+
 ## Config
 
 ```yaml
@@ -101,6 +107,20 @@ Environment overrides:
 Defaults: API base `https://www.orgo.ai/api`, 4 GB RAM, 1 CPU, 8 GB disk,
 and resolution `1280x720x24`.
 
+All seven bindings share one typed declaration. Nonempty YAML strings override
+earlier values without trimming; omitted, null, and empty strings preserve them.
+YAML sizing applies only when positive. Environment integers retain the earlier
+value on malformed input, while parsed zero/negative values and explicit flags
+retain their existing later handling. The backend replaces nonpositive sizes
+with their defaults and fills empty/whitespace API-base and resolution settings.
+
+The backend factory resolves the API base before constructing a client. The
+client consumes that resolved value without another environment fallback;
+explicitly clearing the API-base flag therefore uses the backend default.
+Defaulting and claim-scope helpers share the compiled values while preserving
+their existing normalization. Key resolution, destination checks, workspace
+ownership, and resource lifecycle remain unchanged.
+
 Repository config cannot redirect an inherited Orgo API key. Set
 `CRABBOX_ORGO_API_BASE` or pass `--orgo-api-base` to explicitly approve a
 custom credential destination. Non-loopback API endpoints must use HTTPS.
@@ -117,6 +137,17 @@ custom credential destination. Non-loopback API endpoints must use HTTPS.
 
 `--keep-on-failure` preserves a newly created computer when the command fails,
 so it can be inspected with Orgo tooling before manual cleanup.
+
+Run outcomes and timing are finalized after automatic cleanup. Cleanup failure
+fails an otherwise successful command; later cleanup or timing-writer failures
+do not replace the primary command or API error. API failures retain their
+public exit codes, including 4 for not found, 77 for authentication/authorization,
+and 69 for rate limits or service failures. Cleanup still preserves configured
+workspaces and accepts successful deletion of an owned temporary workspace as
+cleanup of its contained computer.
+
+No local checkout is copied, whether or not `--no-sync` is supplied. This does
+not add persistent-session output support.
 
 ## Capabilities
 

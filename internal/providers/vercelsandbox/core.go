@@ -1,7 +1,6 @@
 package vercelsandbox
 
 import (
-	"flag"
 	"io"
 	"time"
 
@@ -28,7 +27,6 @@ type Server = core.Server
 type Repo = core.Repo
 type LeaseClaim = core.LeaseClaim
 type ExitError = core.ExitError
-type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 
 const (
@@ -45,16 +43,8 @@ func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
 }
 
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
-}
-
 func inventoryDoctorResult(provider string, leases int) DoctorResult {
 	return core.InventoryDoctorResult(provider, leases)
-}
-
-func writeTimingJSON(w io.Writer, report core.TimingReport) error {
-	return core.WriteTimingJSON(w, report)
 }
 
 func newLeaseSlug(leaseID string) string {
@@ -67,10 +57,6 @@ func normalizeLeaseSlug(value string) string {
 
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
-}
-
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
 }
 
 func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {

@@ -25,6 +25,7 @@ func (Provider) ServerTypeForConfig(core.Config) string { return "" }
 func (Provider) ServerTypeForClass(string) string       { return "" }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:             core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		Name:                       "freestyle",
 		SyncGuardrailFullCandidate: true,
 		Kind:                       core.ProviderKindDelegatedRun,

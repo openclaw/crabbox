@@ -89,15 +89,19 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 	}
 	if *repoFlag != "" {
 		cfg.Actions.Repo = *repoFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *workflowFlag != "" {
 		cfg.Actions.Workflow = *workflowFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *jobFlag != "" {
 		cfg.Actions.Job = *jobFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *refFlag != "" {
 		cfg.Actions.Ref = *refFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	followupArgs := prewarmProviderPassthroughArgs(args, defaults)
 	if strings.TrimSpace(*probeCommand) != "" {
@@ -160,7 +164,7 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 	var out bytes.Buffer
 	var acquiredLease LeaseTarget
 	warmupStarted := time.Now()
-	warmupApp := App{Stdout: io.MultiWriter(a.Stdout, &out), Stderr: a.Stderr}
+	warmupApp := App{Stdout: io.MultiWriter(a.Stdout, &out), Stderr: a.Stderr, synthesizedFlagInputs: true}
 	if err := warmupApp.warmupWithLeaseObserver(ctx, leaseArgs, func(lease LeaseTarget) { acquiredLease = lease }); err != nil {
 		return err
 	}
@@ -182,7 +186,9 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 		hydrateStarted := time.Now()
 		hydrateArgs = prewarmHydrateArgs(cfg, leaseID, *githubRunner, *waitTimeout, *keepAliveMinutes, followupArgs)
 		if err := a.runPrewarmPostWarmupStep(ctx, backend, cfg, acquiredLease, "actions hydration", func() error {
-			return a.actionsHydrate(ctx, hydrateArgs)
+			child := a
+			child.synthesizedFlagInputs = true
+			return child.actionsHydrate(ctx, hydrateArgs)
 		}); err != nil {
 			return err
 		}
@@ -194,7 +200,9 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 	if strings.TrimSpace(*probeCommand) != "" {
 		probeStarted := time.Now()
 		if err := a.runPrewarmPostWarmupStep(ctx, backend, cfg, acquiredLease, "probe", func() error {
-			return a.runCommand(ctx, prewarmProbeArgs(cfg, leaseID, *probeCommand, followupArgs))
+			child := a
+			child.synthesizedFlagInputs = true
+			return child.runCommand(ctx, prewarmProbeArgs(cfg, leaseID, *probeCommand, followupArgs))
 		}); err != nil {
 			return err
 		}
@@ -450,7 +458,7 @@ func admitPrewarmProbe(args []string) error {
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	cfg, err := loadRunConfig(fs, flags, leaseFlagTarget{Reuse: true}, false, nil)
+	cfg, err := loadRunConfig(fs, flags, leaseFlagTarget{Reuse: true, SynthesizedInputs: true}, false, nil)
 	if err != nil {
 		return err
 	}
@@ -495,7 +503,7 @@ func admitPrewarmHydration(cfg Config, passthrough []string) error {
 		return err
 	}
 	// Use hydration's config loader, without a lease lookup or run-profile expansion.
-	projected, err := flags.loadConfig(fs, "")
+	projected, err := flags.loadConfig(fs, "", true)
 	if err != nil {
 		return err
 	}

@@ -2745,3 +2745,40 @@ func (f *fakeAPI) StopVM(_ context.Context, id string) error {
 	}
 	return nil
 }
+
+func TestCompactJSONRequestEnvelope(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "ctx")
+	const base = "https://api.example.test/base"
+	var ptr *string
+	var slice []string
+	for _, tc := range []struct {
+		name string
+		body any
+		want string
+	}{
+		{name: "nil"}, {name: "typed nil pointer", body: ptr, want: "null"}, {name: "typed nil slice", body: slice, want: "null"}, {name: "compact escaped JSON", body: map[string]string{"message": "<&>"}, want: "{\"message\":\"\\u003c\\u0026\\u003e\"}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			path := "/records"
+			endpoint := base + path
+			headers := http.Header{}
+			headers.Set("Authorization", "Bearer synthetic-token")
+			headers.Set("Accept", "application/json")
+			if tc.body != nil {
+				headers.Set("Content-Type", "application/json")
+			}
+			httpClient := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, endpoint, tc.want, headers)
+				return nil, errors.New("synthetic-transport-stop")
+			})}
+			c := &hostingerClient{apiURL: base, token: "synthetic-token", httpClient: httpClient}
+			err := c.do(ctx, http.MethodPost, path, tc.body, nil)
+			if err == nil || !strings.Contains(err.Error(), "synthetic-transport-stop") || calls != 1 {
+				t.Fatalf("error=%v calls=%d", err, calls)
+			}
+		})
+	}
+}

@@ -170,9 +170,16 @@ crabbox run --id blue-lobster -- pnpm test:changed
 
 The workflow owns repository-specific setup: checkout, dependency install,
 caches, and project tools. Local hydration supports `run` steps plus common
-setup actions: `actions/checkout`, `actions/setup-node`, `actions/setup-go`,
-`actions/setup-python`, and `actions/cache/restore|save` (cache restore reports a
-miss; save is skipped). Repo-local composite actions (`./path`) are supported.
+setup actions: `actions/checkout`, `actions/setup-node`, `pnpm/action-setup`,
+`actions/setup-go`, `actions/setup-python`, and `actions/cache/restore|save`
+(cache restore reports a miss; save is skipped). `pnpm/action-setup` requires an
+explicit exact `version` (`major.minor.patch`) and installs into the managed tool
+cache without lifecycle scripts; it bootstraps Node 24 if Node or npm is absent,
+so pnpm setup may precede setup-node. A later setup-node selects the project Node
+version without displacing the managed pnpm. Other pnpm inputs and version
+inference/ranges require `--github-runner`; install project dependencies in a
+separate `run` step. Setup-node accepts `cache: pnpm` as an explicitly uncached
+local run. Repo-local composite actions (`./path`) are supported.
 Job containers and service containers are not; `actions/checkout` options that
 change the repository, path, submodules, or LFS fail locally so you can rerun
 with `--github-runner` when you need full GitHub Actions semantics.

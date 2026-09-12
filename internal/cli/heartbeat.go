@@ -54,6 +54,7 @@ func (a App) heartbeat(ctx context.Context, args []string) error {
 	var idleTimeoutOverride *time.Duration
 	if idleTimeoutSet {
 		cfg.IdleTimeout = *idleTimeout
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 		idleTimeoutOverride = idleTimeout
 	}
 

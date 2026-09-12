@@ -30,12 +30,39 @@ ordered events as it advances:
 - `lease.released`
 - `run.failed` (if the run errors before the command finishes)
 
+Current clients admit runs through `PUT /v1/runs/<run-id>`, using a cryptographically
+random ID known before the request. The coordinator commits the record and its
+first event atomically. Matching admission replay returns the retained record;
+changed request content conflicts, and another actor cannot adopt the record.
+The original request binding remains unchanged when later events attach or
+replace a lease. Legacy clients can still use `POST /v1/runs` for coordinator-issued
+IDs, but that route cannot recover a lost create response. Upgrade an older
+coordinator before using the current client's admission route.
+
+Admission recovery is limited to the original live CLI invocation before command
+execution. A terminal or already-progressed record is a historical result, not
+permission to execute again. Record retention is unchanged; clients must never
+reuse an ID for a new invocation.
+
 Crabbox-generated event messages are redacted before they enter coordinator
 storage. The recorder removes configured and provider-discovered runtime
 credentials, authorization headers, credential-bearing URLs, and other known
 secret encodings while preserving useful diagnostic context. Raw `stdout` and
 `stderr` event data and retained command logs remain caller-owned output and are
 not automatically redacted.
+
+Phase and stream diagnostics publish through one bounded queue while the workload
+continues. An existing lease's run creation already records its binding; a new
+or replacement lease binding first drains and joins diagnostics, then gets its
+own acknowledged request before command admission. Missing diagnostic endpoints
+do not block an already bound run; a changed binding must be accepted because
+the signed terminal receipt requires the exact lease, slug, and provider.
+Sync-only runs keep their optional-history behavior and warn when binding is
+unavailable. Before
+terminal recording, the CLI drains diagnostics for up to two seconds, cancels
+remaining publication, and joins the publisher. Queue overflow or drain expiry
+produces a warning; retained logs and verified terminal receipts remain the
+completion record.
 
 Each event carries a sequence number, type, phase, and stream. Streamed output
 events are capped at **64 KiB total per run**; once the cap is hit the CLI emits

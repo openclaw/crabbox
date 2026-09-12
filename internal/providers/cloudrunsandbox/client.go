@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -212,11 +213,7 @@ func (t *remoteTransport) authorize(req *http.Request) {
 func (t *remoteTransport) request(ctx context.Context, path string, body map[string]any) (json.RawMessage, error) {
 	ctx, cancel := contextWithDefaultTimeout(ctx, defaultExecTimeout)
 	defer cancel()
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.baseURL+path, bytes.NewReader(payload))
+	req, err := shared.NewCompactJSONRequest(ctx, http.MethodPost, t.baseURL+path, body)
 	if err != nil {
 		return nil, err
 	}
@@ -272,10 +269,10 @@ func (t *remoteTransport) requestBody(sandboxID string, opts runOptions, extra m
 	if opts.OwnershipToken != "" {
 		body["ownershipToken"] = opts.OwnershipToken
 	}
-	if rootfs := blank(opts.Rootfs, t.cfg.CloudRunSandbox.Rootfs); rootfs != "" {
+	if rootfs := core.Blank(opts.Rootfs, t.cfg.CloudRunSandbox.Rootfs); rootfs != "" {
 		body["rootfs"] = rootfs
 	}
-	if workdir := blank(opts.Workdir, t.cfg.CloudRunSandbox.Workdir); workdir != "" {
+	if workdir := core.Blank(opts.Workdir, t.cfg.CloudRunSandbox.Workdir); workdir != "" {
 		body["workdir"] = workdir
 		body["cwd"] = workdir
 	}
@@ -381,11 +378,7 @@ func (t *remoteTransport) Exec(ctx context.Context, sandboxID, command string, o
 	}
 	ctx, cancel := contextWithDefaultTimeout(ctx, defaultExecTimeout)
 	defer cancel()
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return 1, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.baseURL+"/v1/sandbox/exec", bytes.NewReader(payload))
+	req, err := shared.NewCompactJSONRequest(ctx, http.MethodPost, t.baseURL+"/v1/sandbox/exec", body)
 	if err != nil {
 		return 1, err
 	}
@@ -519,7 +512,7 @@ type directTransport struct {
 func (t *directTransport) Mode() string { return "direct" }
 
 func (t *directTransport) binary() string {
-	return blank(strings.TrimSpace(t.cfg.CloudRunSandbox.CLIPath), defaultCLIPath)
+	return core.Blank(strings.TrimSpace(t.cfg.CloudRunSandbox.CLIPath), core.CloudRunSandboxConfigDefaultCLIPath)
 }
 
 func (t *directTransport) baseArgs() []string { return nil }
@@ -528,11 +521,11 @@ func (t *directTransport) pushRunArgs(args []string, opts runOptions) []string {
 	if opts.AllowEgress || t.cfg.CloudRunSandbox.AllowEgress {
 		args = append(args, "--allow-egress")
 	}
-	if rootfs := blank(opts.Rootfs, t.cfg.CloudRunSandbox.Rootfs); rootfs != "" {
+	if rootfs := core.Blank(opts.Rootfs, t.cfg.CloudRunSandbox.Rootfs); rootfs != "" {
 		args = append(args, "--rootfs", rootfs)
 	}
 	if !opts.OmitWorkdir {
-		if workdir := blank(opts.Workdir, t.cfg.CloudRunSandbox.Workdir); workdir != "" {
+		if workdir := core.Blank(opts.Workdir, t.cfg.CloudRunSandbox.Workdir); workdir != "" {
 			args = append(args, "--workdir", workdir)
 		}
 	}
@@ -543,7 +536,7 @@ func (t *directTransport) pushRunArgs(args []string, opts runOptions) []string {
 }
 
 func (t *directTransport) pushExecArgs(args []string, opts execOptions) []string {
-	if workdir := blank(opts.Workdir, t.cfg.CloudRunSandbox.Workdir); workdir != "" {
+	if workdir := core.Blank(opts.Workdir, t.cfg.CloudRunSandbox.Workdir); workdir != "" {
 		args = append(args, "--workdir", workdir)
 	}
 	return args
@@ -672,6 +665,9 @@ func (t *directTransport) Exec(ctx context.Context, sandboxID, command string, o
 		defer cancel()
 	}
 	result, err := t.runCLIWithStdin(ctx, args, strings.NewReader(script.String()), stdout, stderr)
+	if core.IsPlainLocalCommandExit(result, err) {
+		return result.ExitCode, nil
+	}
 	if err != nil {
 		return result.ExitCode, fmt.Errorf("sandbox exec failed: %w", err)
 	}

@@ -89,7 +89,7 @@ func (b *e2bBackend) bridgeSandboxCoords(ctx context.Context, leaseID string) (s
 	}
 	domain := strings.TrimSpace(sandbox.Domain)
 	if domain == "" {
-		domain = strings.TrimSpace(blank(b.cfg.E2B.Domain, "e2b.app"))
+		domain = strings.TrimSpace(core.Blank(b.cfg.E2B.Domain, core.E2BConfigDefaultDomain))
 	}
 	return sandbox.SandboxID, domain, nil
 }
@@ -101,7 +101,7 @@ func (b *e2bBackend) bridgeSandboxCoords(ctx context.Context, leaseID string) (s
 func e2bPreviewURL(domain, sandboxID string, port int) string {
 	domain = strings.TrimSpace(domain)
 	if domain == "" {
-		domain = "e2b.app"
+		domain = core.E2BConfigDefaultDomain
 	}
 	return "https://" + strconv.Itoa(port) + "-" + sandboxID + "." + domain
 }

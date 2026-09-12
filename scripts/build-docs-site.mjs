@@ -15,6 +15,45 @@ const providerMetadata = JSON.parse(
 const providerMetadataByDocs = new Map(
   Object.entries(providerMetadata).map(([name, metadata]) => [metadata.docs, { name, metadata }]),
 );
+const skillsDir = path.join(root, "skills");
+// AI Catalog editorial metadata, one entry per skills/<name>.
+const catalogMetadata = {
+  crabbox: {
+    displayName: "Crabbox Agent Skill",
+    tags: ["remote-testing", "remote-execution", "developer-tools", "agent-skill"],
+    capabilities: [
+      "RemoteTestExecution",
+      "ReusableRemoteEnvironment",
+      "CrossPlatformValidation",
+      "AuditableExecutionEvidence",
+    ],
+    representativeQueries: [
+      "run this repository's tests on a clean remote machine",
+      "validate this change on Linux, macOS, or Windows",
+      "use Crabbox to collect auditable remote test evidence",
+    ],
+  },
+  "crabbox-quickstart": {
+    displayName: "Crabbox Quickstart Skill",
+    tags: ["getting-started", "onboarding", "local-container", "docker", "test-execution", "developer-tools"],
+    capabilities: [
+      "GuidedFirstRun",
+      "LocalContainerExecution",
+      "CredentialFreeEvaluation",
+      "ZeroConfigEvaluation",
+      "LeaseLifecycleHygiene",
+    ],
+    representativeQueries: [
+      "run my repository's tests in a throwaway Docker container without a cloud account",
+      "what is Crabbox and how do I try it without an account",
+      "set up Crabbox in this repo that has no crabbox.yaml yet",
+      "why does crabbox say no provider selected",
+    ],
+  },
+};
+
+// Parsed at module load because llms.txt is written before the discovery files.
+const agentSkills = readAgentSkills();
 const legacyProviderFeatureNotes = new Set([
   "aws.md",
   "azure.md",
@@ -103,47 +142,79 @@ writeAgentSkillsDiscovery();
 writeAgentMap();
 console.log(`built docs site: ${path.relative(root, outDir)}`);
 
-function writeAgentSkillsDiscovery() {
-  const sourcePath = path.join(root, "skills", "crabbox", "SKILL.md");
-  const skill = fs.readFileSync(sourcePath, "utf8");
-  const frontmatter = skill.match(/^---\n([\s\S]*?)\n---\n/);
-  if (!frontmatter) throw new Error(`${path.relative(root, sourcePath)} has no YAML frontmatter`);
+// Preserve the original first entry; sort any additional skills by name.
+export function readAgentSkills(sourceDir = skillsDir, metadata = catalogMetadata) {
+  return fs
+    .readdirSync(sourceDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort((a, b) => (a === b ? 0 : a === "crabbox" ? -1 : b === "crabbox" ? 1 : a < b ? -1 : 1))
+    .map((name) => {
+      const sourcePath = path.join(sourceDir, name, "SKILL.md");
+      const skill = fs.readFileSync(sourcePath, "utf8");
+      const frontmatter = skill.match(/^---\n([\s\S]*?)\n---\n/);
+      if (!frontmatter) throw new Error(`${path.relative(root, sourcePath)} has no YAML frontmatter`);
 
-  const name = frontmatter[1].match(/^name:\s*([a-z0-9-]+)$/m)?.[1];
-  const encodedDescription = frontmatter[1].match(/^description:\s*("(?:\\.|[^"\\])*")$/m)?.[1];
-  if (!name || !encodedDescription) {
-    throw new Error(`${path.relative(root, sourcePath)} must declare a quoted description and name`);
-  }
-  const description = JSON.parse(encodedDescription);
-  const digest = crypto.createHash("sha256").update(skill).digest("hex");
+      const declared = frontmatter[1].match(/^name:\s*([a-z0-9-]+)$/m)?.[1];
+      const encodedDescription = frontmatter[1].match(/^description:\s*("(?:\\.|[^"\\])*")$/m)?.[1];
+      if (!declared || !encodedDescription) {
+        throw new Error(`${path.relative(root, sourcePath)} must declare a quoted description and name`);
+      }
+      if (declared !== name) {
+        throw new Error(`${path.relative(root, sourcePath)} declares name ${declared} but lives in skills/${name}`);
+      }
+      const catalog = Object.hasOwn(metadata, name) ? metadata[name] : undefined;
+      if (!catalog) {
+        throw new Error(`skills/${name} has no AI Catalog metadata in build-docs-site.mjs`);
+      }
+      if (typeof catalog.displayName !== "string" || !catalog.displayName.trim()) {
+        throw new Error(`skills/${name} AI Catalog displayName must be a non-empty string`);
+      }
+      for (const field of ["tags", "capabilities", "representativeQueries"]) {
+        if (!Array.isArray(catalog[field]) || !catalog[field].length ||
+            catalog[field].some((value) => typeof value !== "string" || !value.trim())) {
+          throw new Error(`skills/${name} AI Catalog ${field} must be a non-empty array of non-empty strings`);
+        }
+      }
+      return {
+        name,
+        skill,
+        catalog,
+        description: JSON.parse(encodedDescription),
+        digest: crypto.createHash("sha256").update(skill).digest("hex"),
+      };
+    });
+}
+
+function writeAgentSkillsDiscovery() {
   const discoveryDir = path.join(outDir, ".well-known", "agent-skills");
-  const publishedSkillDir = path.join(discoveryDir, name);
-  fs.mkdirSync(publishedSkillDir, { recursive: true });
-  fs.writeFileSync(path.join(publishedSkillDir, "SKILL.md"), skill, "utf8");
+  for (const { name, skill } of agentSkills) {
+    const publishedSkillDir = path.join(discoveryDir, name);
+    fs.mkdirSync(publishedSkillDir, { recursive: true });
+    fs.writeFileSync(path.join(publishedSkillDir, "SKILL.md"), skill, "utf8");
+  }
   fs.writeFileSync(
     path.join(discoveryDir, "index.json"),
     `${JSON.stringify(
       {
         $schema: "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
-        skills: [
-          {
-            name,
-            type: "skill-md",
-            description,
-            url: `/.well-known/agent-skills/${name}/SKILL.md`,
-            digest: `sha256:${digest}`,
-          },
-        ],
+        skills: agentSkills.map(({ name, description, digest }) => ({
+          name,
+          type: "skill-md",
+          description,
+          url: `/.well-known/agent-skills/${name}/SKILL.md`,
+          digest: `sha256:${digest}`,
+        })),
       },
       null,
       2,
     )}\n`,
     "utf8",
   );
-  writeAICatalog({ name, description });
+  writeAICatalog();
 }
 
-function writeAICatalog({ name, description }) {
+function writeAICatalog() {
   const origin = docsOrigin();
   if (!origin) throw new Error("Agentic Resource Discovery requires a canonical docs origin");
   const catalog = {
@@ -152,29 +223,18 @@ function writeAICatalog({ name, description }) {
       displayName: "Crabbox",
       documentationUrl: `${origin}/integrations/agents.html`,
     },
-    entries: [
-      {
-        identifier: `urn:air:crabbox.sh:skill:${name}`,
-        displayName: "Crabbox Agent Skill",
-        // Current AI Catalog integrated-ecosystem type. ARD's draft examples
-        // and bundled conformance helper still disagree on older alternatives.
-        type: "application/agent-skills+md",
-        url: `${origin}/.well-known/agent-skills/${name}/SKILL.md`,
-        description,
-        tags: ["remote-testing", "remote-execution", "developer-tools", "agent-skill"],
-        capabilities: [
-          "RemoteTestExecution",
-          "ReusableRemoteEnvironment",
-          "CrossPlatformValidation",
-          "AuditableExecutionEvidence",
-        ],
-        representativeQueries: [
-          "run this repository's tests on a clean remote machine",
-          "validate this change on Linux, macOS, or Windows",
-          "use Crabbox to collect auditable remote test evidence",
-        ],
-      },
-    ],
+    entries: agentSkills.map(({ name, description, catalog: meta }) => ({
+      identifier: `urn:air:crabbox.sh:skill:${name}`,
+      displayName: meta.displayName,
+      // Current AI Catalog integrated-ecosystem type. ARD's draft examples
+      // and bundled conformance helper still disagree on older alternatives.
+      type: "application/agent-skills+md",
+      url: `${origin}/.well-known/agent-skills/${name}/SKILL.md`,
+      description,
+      tags: meta.tags,
+      capabilities: meta.capabilities,
+      representativeQueries: meta.representativeQueries,
+    })),
   };
   fs.writeFileSync(
     path.join(outDir, ".well-known", "ai-catalog.json"),
@@ -219,7 +279,7 @@ function llmsTxt() {
       "",
       "Agent Skill and resource discovery:",
       `- ${origin}/.well-known/agent-skills/index.json`,
-      `- ${origin}/.well-known/agent-skills/crabbox/SKILL.md`,
+      ...agentSkills.map(({ name }) => `- ${origin}/.well-known/agent-skills/${name}/SKILL.md`),
       `- ${origin}/.well-known/ai-catalog.json`,
     );
   }

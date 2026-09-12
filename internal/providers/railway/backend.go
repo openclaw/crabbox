@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -42,7 +44,7 @@ func (b *railwayBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 
 func (b *railwayBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	_ = ctx
-	if err := rejectRailwayRunOptions(req); err != nil {
+	if err := shared.RejectServiceRunOptions(req, providerName, "lifecycle is owned by Railway", "runs the Railway service start command"); err != nil {
 		return RunResult{}, err
 	}
 	if req.ID == "" {
@@ -308,39 +310,4 @@ func (b *railwayBackend) requireProjectEnv() (string, string, error) {
 		return "", "", exit(2, "provider=%s requires --railway-environment or RAILWAY_ENVIRONMENT_ID", providerName)
 	}
 	return projectID, environmentID, nil
-}
-
-func rejectRailwayRunOptions(req RunRequest) error {
-	if req.Keep {
-		return exit(2, "provider=%s lifecycle is owned by Railway; --keep is not supported", providerName)
-	}
-	if req.Reclaim {
-		return exit(2, "provider=%s lifecycle is owned by Railway; --reclaim is not supported", providerName)
-	}
-	if !req.NoSync {
-		// Railway does not expose a workspace-sync surface; mirror other
-		// delegated-only providers and require --no-sync explicitly so callers
-		// understand the deploy runs whatever the service is already configured
-		// to run.
-		return exit(2, "provider=%s does not support workspace sync; pass --no-sync", providerName)
-	}
-	if req.SyncOnly {
-		return exit(2, "provider=%s does not support sync; --sync-only is rejected", providerName)
-	}
-	if req.ChecksumSync {
-		return exit(2, "provider=%s does not support sync; --checksum is rejected", providerName)
-	}
-	if req.ForceSyncLarge {
-		return exit(2, "provider=%s does not support sync; --force-sync-large is rejected", providerName)
-	}
-	if req.FullResync {
-		return exit(2, "provider=%s does not support sync; --full-resync is rejected", providerName)
-	}
-	if req.ShellMode {
-		return exit(2, "provider=%s runs the Railway service start command; --shell is not supported", providerName)
-	}
-	if req.EnvSummary {
-		return exit(2, "provider=%s cannot forward per-run environment variables", providerName)
-	}
-	return nil
 }

@@ -30,6 +30,8 @@ func (a App) login(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	markSynthesizedFlagInputs(&cfg, a.synthesizedFlagInputs)
+	recordConfigInput(&cfg, configInputGeneric, configInputFlag, urlWasExplicit && flagWasSet(fs, "url"))
 	brokerMode := cfg.BrokerMode
 	if *brokerURL == "" {
 		*brokerURL = cfg.Coordinator

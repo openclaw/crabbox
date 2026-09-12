@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -36,10 +35,7 @@ func (b *DirectSSHBackend) CleanupServers(ctx context.Context, req core.CleanupR
 	if b.PrepareCleanup != nil && b.CleanupEligible != nil {
 		return core.Exit(2, "provider=%s cleanup backend cannot configure both PrepareCleanup and CleanupEligible", b.SpecValue.Name)
 	}
-	now := time.Now().UTC()
-	if b.RT.Clock != nil {
-		now = b.RT.Clock.Now().UTC()
-	}
+	now := core.ClockNow(b.RT.Clock).UTC()
 	for _, s := range servers {
 		shouldDelete, reason := core.ShouldCleanupServer(s, now)
 		if !shouldDelete {

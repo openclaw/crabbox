@@ -18,6 +18,7 @@ func (Provider) Aliases() []string { return nil }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationCLI),
 		Name:             coderProvider,
 		Family:           coderProvider,
 		Kind:             core.ProviderKindSSHLease,

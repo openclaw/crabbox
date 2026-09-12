@@ -759,6 +759,12 @@ export interface LeaseImageIdentity {
   promotedAt?: string;
 }
 
+// Request-local observations; never persisted or used to authorize provider access.
+export type ProviderAccessTimingObserver = (
+  step: "ingress_wait" | "lifecycle_wait" | "access_snapshot",
+  durationMs: number,
+) => void;
+
 export interface LeaseProvisioningTiming {
   requestMs: number;
   networkReadyMs?: number;
@@ -1006,6 +1012,7 @@ export interface RunRecord {
   terminalReceipt?: TerminalRunReceipt;
   terminalFinishSHA256?: string;
   terminalLogPrefix?: string;
+  createRequestSHA256?: string;
 }
 
 export interface TerminalRunReceipt {

@@ -77,7 +77,7 @@ func newCloudflareClient(cfg Config, rt Runtime) (*cloudflareClient, error) {
 	if token == "" {
 		return nil, exit(2, "%s requires CRABBOX_CLOUDFLARE_RUNNER_TOKEN or user-level config", providerName)
 	}
-	instanceType, ok := normalizeCloudflareContainerInstanceType(blank(cfg.ServerType, cloudflareContainerInstanceTypeForClass(cfg.Class)))
+	instanceType, ok := normalizeCloudflareContainerInstanceType(core.Blank(cfg.ServerType, cloudflareContainerInstanceTypeForClass(cfg.Class)))
 	if !ok {
 		if cfg.ServerTypeExplicit {
 			return nil, exit(2, "%s --type must be one of %s", providerName, strings.Join(cloudflareContainerInstanceTypes(), ", "))
@@ -203,11 +203,7 @@ func (c *cloudflareClient) uploadFile(ctx context.Context, sandboxID, localPath,
 }
 
 func (c *cloudflareClient) execStream(ctx context.Context, sandboxID string, req execStreamRequest, stdout, stderr io.Writer) (int, error) {
-	var body bytes.Buffer
-	if err := json.NewEncoder(&body).Encode(req); err != nil {
-		return 0, err
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+c.sandboxEndpoint(sandboxID, "/exec-stream"), &body)
+	httpReq, err := shared.NewJSONRequest(ctx, http.MethodPost, c.baseURL+c.sandboxEndpoint(sandboxID, "/exec-stream"), req)
 	if err != nil {
 		return 0, err
 	}
@@ -280,15 +276,7 @@ func (c *cloudflareClient) sandboxEndpoint(sandboxID, suffix string) string {
 }
 
 func (c *cloudflareClient) doJSON(ctx context.Context, method, endpoint string, input any, output any) error {
-	var body io.Reader
-	if input != nil {
-		var buf bytes.Buffer
-		if err := json.NewEncoder(&buf).Encode(input); err != nil {
-			return err
-		}
-		body = &buf
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+endpoint, body)
+	req, err := shared.NewJSONRequest(ctx, method, c.baseURL+endpoint, input)
 	if err != nil {
 		return err
 	}

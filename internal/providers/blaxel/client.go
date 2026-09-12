@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -124,7 +125,7 @@ const blaxelControlTimeout = 60 * time.Second
 func newBlaxelClient(cfg Config, rt Runtime) (Client, error) {
 	baseURL := strings.TrimSpace(cfg.Blaxel.APIURL)
 	if baseURL == "" {
-		baseURL = defaultAPIURL
+		baseURL = core.BlaxelConfigDefaultAPIURL
 	}
 	baseURL, err := ValidateAPIURL(baseURL)
 	if err != nil {
@@ -135,7 +136,7 @@ func newBlaxelClient(cfg Config, rt Runtime) (Client, error) {
 		return nil, exit(2, "provider=blaxel needs an API key; load CRABBOX_BLAXEL_API_KEY or BL_API_KEY from a secret manager")
 	}
 	workspace := strings.TrimSpace(cfg.Blaxel.Workspace)
-	httpClient, dataHTTPClient := blaxelHTTPClients(rt.HTTP, blaxelControlTimeout)
+	httpClient, dataHTTPClient := shared.ControlAndDataHTTPClients(rt.HTTP, blaxelControlTimeout)
 	return &restClient{
 		base:      baseURL,
 		apiKey:    apiKey,
@@ -144,13 +145,6 @@ func newBlaxelClient(cfg Config, rt Runtime) (Client, error) {
 		http:      secureHTTPClient(httpClient),
 		dataHTTP:  secureHTTPClient(dataHTTPClient),
 	}, nil
-}
-
-func blaxelHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
-	if injected != nil {
-		return injected, injected
-	}
-	return &http.Client{Timeout: controlTimeout}, &http.Client{}
 }
 
 func BlaxelAPIKey(cfg Config) string {
@@ -237,7 +231,7 @@ func isBlaxelDataPlaneHost(host string) bool {
 }
 
 func validateBlaxelConfig(cfg Config) error {
-	if _, err := ValidateAPIURL(blank(cfg.Blaxel.APIURL, defaultAPIURL)); err != nil {
+	if _, err := ValidateAPIURL(core.Blank(cfg.Blaxel.APIURL, core.BlaxelConfigDefaultAPIURL)); err != nil {
 		return err
 	}
 	if cfg.Blaxel.MemoryMB < 0 {
@@ -565,20 +559,7 @@ func (c *restClient) doAt(ctx context.Context, httpClient *http.Client, baseURL,
 	if err != nil {
 		return nil, redactError(err)
 	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, apiError{StatusCode: resp.StatusCode, Body: redactString(string(data))}
-	}
-	if response != nil && len(bytes.TrimSpace(data)) > 0 {
-		if err := json.Unmarshal(data, response); err != nil {
-			return nil, err
-		}
-	}
-	return data, nil
+	return decodeBlaxelResponse(resp, response)
 }
 
 func (c *restClient) sandboxBaseURL(ctx context.Context, sandbox string) (string, error) {
@@ -651,6 +632,11 @@ func (c *restClient) doMultipartAt(ctx context.Context, baseURL, method, endpoin
 	if err != nil {
 		return nil, redactError(err)
 	}
+	return decodeBlaxelResponse(resp, response)
+}
+
+// decodeBlaxelResponse consumes buffered JSON and multipart responses alike.
+func decodeBlaxelResponse(resp *http.Response, response any) ([]byte, error) {
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {

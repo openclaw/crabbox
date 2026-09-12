@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -79,7 +82,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if b.cfg.UnikraftCloud.MemoryMB < 0 {
 		return exit(2, "provider=%s memory must be zero or greater", providerName)
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	api, err := b.client()
 	if err != nil {
 		return err
@@ -190,27 +193,22 @@ func (b *backend) preflightCreateIntent(ctx context.Context, api unikraftCloudAP
 
 func (b *backend) finishWarmup(started time.Time, claim LeaseClaim, instance ukcInstance, req WarmupRequest) error {
 	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s instance=%s state=%s fqdn=%s\n",
-		claim.LeaseID, claim.Slug, providerName, instance.UUID, normalizedInstanceState(instance.State), blank(instanceFQDN(instance), "-"))
+		claim.LeaseID, claim.Slug, providerName, instance.UUID, normalizedInstanceState(instance.State), core.Blank(instanceFQDN(instance), "-"))
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: %s warmup keeps the instance until explicit stop or eligible cleanup\n", providerName)
 	}
-	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  claim.LeaseID,
-			Slug:     claim.Slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	total := core.ClockNow(b.rt.Clock).Sub(started)
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  claim.LeaseID,
+		Slug:     claim.Slug,
+		Total:    total,
+	})
 }
 
 func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	_ = ctx
-	if err := rejectUnikraftCloudRunOptions(req); err != nil {
+	if err := shared.RejectServiceRunOptions(req, providerName, "cannot run commands", "cannot open an interactive shell"); err != nil {
 		return RunResult{}, err
 	}
 	if len(req.Command) == 0 {
@@ -440,7 +438,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 			labels[ukcLabelProviderState] = state
 		}
 		view := StatusView{
-			ID:         blank(leaseID, instance.UUID),
+			ID:         core.Blank(leaseID, instance.UUID),
 			Slug:       slug,
 			Provider:   providerName,
 			TargetOS:   targetLinux,
@@ -517,9 +515,9 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 		return err
 	}
 	if missing {
-		fmt.Fprintf(b.rt.Stderr, "warning: %s instance=%s was already gone; removed local claim\n", providerName, blank(instanceID, "pending"))
+		fmt.Fprintf(b.rt.Stderr, "warning: %s instance=%s was already gone; removed local claim\n", providerName, core.Blank(instanceID, "pending"))
 	}
-	fmt.Fprintf(b.rt.Stderr, "released lease=%s instance=%s\n", claim.LeaseID, blank(instanceID, "pending"))
+	fmt.Fprintf(b.rt.Stderr, "released lease=%s instance=%s\n", claim.LeaseID, core.Blank(instanceID, "pending"))
 	return nil
 }
 
@@ -535,7 +533,7 @@ func unikraftCloudServer(instance ukcInstance, claim LeaseClaim) Server {
 	return Server{
 		CloudID:  instance.UUID,
 		Provider: providerName,
-		Name:     blank(instance.Name, instance.UUID),
+		Name:     core.Blank(instance.Name, instance.UUID),
 		Status:   normalizedInstanceState(instance.State),
 		Labels:   labels,
 	}
@@ -577,43 +575,5 @@ func instanceFQDN(instance ukcInstance) string {
 }
 
 func normalizedInstanceState(state string) string {
-	return strings.ToLower(blank(strings.TrimSpace(state), "unknown"))
-}
-
-func rejectUnikraftCloudRunOptions(req RunRequest) error {
-	if req.Keep {
-		return exit(2, "provider=%s cannot run commands; --keep is not supported", providerName)
-	}
-	if req.Reclaim {
-		return exit(2, "provider=%s cannot run commands; --reclaim is not supported", providerName)
-	}
-	if !req.NoSync {
-		return exit(2, "provider=%s does not support workspace sync; pass --no-sync", providerName)
-	}
-	if req.SyncOnly {
-		return exit(2, "provider=%s does not support sync; --sync-only is rejected", providerName)
-	}
-	if req.ChecksumSync {
-		return exit(2, "provider=%s does not support sync; --checksum is rejected", providerName)
-	}
-	if req.ForceSyncLarge {
-		return exit(2, "provider=%s does not support sync; --force-sync-large is rejected", providerName)
-	}
-	if req.FullResync {
-		return exit(2, "provider=%s does not support sync; --full-resync is rejected", providerName)
-	}
-	if req.ShellMode {
-		return exit(2, "provider=%s cannot open an interactive shell; --shell is not supported", providerName)
-	}
-	if req.EnvSummary {
-		return exit(2, "provider=%s cannot forward per-run environment variables", providerName)
-	}
-	return nil
-}
-
-func (b *backend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
+	return strings.ToLower(core.Blank(strings.TrimSpace(state), "unknown"))
 }

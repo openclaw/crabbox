@@ -95,6 +95,13 @@ Precedence follows the normal Crabbox order:
 flags > env > repo config > user config > defaults
 ```
 
+An omitted, null, or empty YAML `cliPath` keeps the inherited binary path.
+An empty YAML `settings` value clears the inherited settings path, and
+`debug: false` clears an earlier true value. An explicitly empty CLI-path flag
+still overrides earlier layers and fails validation; whitespace-only paths are
+also rejected. These existing distinctions are preserved by the generated
+configuration bindings.
+
 Crabbox validates only its own config shape, such as a non-empty `cliPath`.
 Anthropic Sandbox Runtime owns validation of the settings JSON schema and
 sandbox policy. Keep trusted, machine-specific settings in user config when

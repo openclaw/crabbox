@@ -1570,6 +1570,7 @@ profiles:
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	downloadedArtifacts := []byte("artifacts\n")
 	script := `#!/bin/sh
 cmd=""
 for arg do cmd="$arg"; done
@@ -1577,7 +1578,7 @@ input="$(cat)"
 printf '%s\n%s\n---\n' "$cmd" "$input" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$cmd
 $input" in
-  *"base64 <"*) printf 'YXJ0aWZhY3RzCg=='; exit 0 ;;
+  *"base64 <"*) printf '%s' ` + shellQuote(encodedRunDownloadPayload(int64(len(downloadedArtifacts)), downloadedArtifacts)) + `; exit 0 ;;
   *"base64 -d >"*) printf 'ok      node             v22.1.0\nok      pnpm             9.0.0\nok      docker-compose   Docker Compose version v2.27.0\n'; exit 0 ;;
   *"artifacts.tgz"*) printf 'warning: no artifact matches\n'; exit 0 ;;
 esac

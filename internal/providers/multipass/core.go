@@ -2,7 +2,7 @@ package multipass
 
 import (
 	"context"
-	"flag"
+
 	"io"
 	"time"
 
@@ -36,14 +36,6 @@ const (
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
-}
-
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
 }
 
 func newLeaseID() string {

@@ -7,100 +7,28 @@ import (
 	"path"
 	"strings"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type flagValues struct {
-	APIURL             *string
-	Image              *string
-	Kind               *string
-	Region             *string
-	Workdir            *string
-	VCPUs              *int
-	MemoryMB           *int
-	DiskGB             *int
-	StartupTimeoutSecs *int
-	ExecTimeoutSecs    *int
-	BridgeCommand      *string
-	SDKPackage         *string
-	SDKImport          *string
-	SDKFallbackImport  *string
-}
-
 func RegisterProviderFlags(fs *flag.FlagSet, defaults Config) any {
-	cfg := defaults.Cua
-	return flagValues{
-		APIURL:             fs.String("cua-api-url", cfg.APIURL, "Trusted CUA API base URL; not accepted from repository config"),
-		Image:              fs.String("cua-image", cfg.Image, "CUA Linux sandbox image"),
-		Kind:               fs.String("cua-kind", cfg.Kind, "CUA sandbox kind: container or vm"),
-		Region:             fs.String("cua-region", cfg.Region, "CUA deployment region (empty = service default/policy)"),
-		Workdir:            fs.String("cua-workdir", cfg.Workdir, "Absolute working directory inside the sandbox"),
-		VCPUs:              fs.Int("cua-vcpus", cfg.VCPUs, "CUA sandbox vCPU count (0 = service default)"),
-		MemoryMB:           fs.Int("cua-memory-mb", cfg.MemoryMB, "CUA sandbox memory in MB (0 = service default)"),
-		DiskGB:             fs.Int("cua-disk-gb", cfg.DiskGB, "CUA sandbox disk in GB (0 = service default)"),
-		StartupTimeoutSecs: fs.Int("cua-startup-timeout-secs", cfg.StartupTimeoutSecs, "CUA sandbox startup timeout in seconds (0 = Crabbox default)"),
-		ExecTimeoutSecs:    fs.Int("cua-exec-timeout-secs", cfg.ExecTimeoutSecs, "CUA command timeout in seconds (0 = Crabbox default 600)"),
-		BridgeCommand:      fs.String("cua-bridge-command", cfg.BridgeCommand, "trusted local Python command for the future CUA SDK bridge"),
-		SDKPackage:         fs.String("cua-sdk-package", cfg.SDKPackage, "trusted local Python package name for CUA SDK diagnostics"),
-		SDKImport:          fs.String("cua-sdk-import", cfg.SDKImport, "trusted local Python import path for CUA SDK diagnostics"),
-		SDKFallbackImport:  fs.String("cua-sdk-fallback-import", cfg.SDKFallbackImport, "trusted local fallback import path for CUA SDK diagnostics"),
-	}
+	return core.RegisterCuaConfigFlags(fs, defaults.Cua)
 }
 
 func ApplyProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if strings.EqualFold(strings.TrimSpace(cfg.Provider), providerName) {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=cua; use --cua-vcpus and --cua-memory-mb")
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=cua; use --cua-image and --cua-kind")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --cua-vcpus and --cua-memory-mb", "use --cua-image and --cua-kind"); err != nil {
+			return err
 		}
 	}
-	v, ok := values.(flagValues)
+	v, ok := values.(core.CuaConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "cua-api-url") {
-		cfg.Cua.APIURL = *v.APIURL
-	}
-	if flagWasSet(fs, "cua-image") {
-		cfg.Cua.Image = *v.Image
-	}
-	if flagWasSet(fs, "cua-kind") {
-		cfg.Cua.Kind = *v.Kind
-	}
-	if flagWasSet(fs, "cua-region") {
-		cfg.Cua.Region = *v.Region
-	}
-	if flagWasSet(fs, "cua-workdir") {
-		cfg.Cua.Workdir = *v.Workdir
-	}
-	if flagWasSet(fs, "cua-vcpus") {
-		cfg.Cua.VCPUs = *v.VCPUs
-	}
-	if flagWasSet(fs, "cua-memory-mb") {
-		cfg.Cua.MemoryMB = *v.MemoryMB
-	}
-	if flagWasSet(fs, "cua-disk-gb") {
-		cfg.Cua.DiskGB = *v.DiskGB
-	}
-	if flagWasSet(fs, "cua-startup-timeout-secs") {
-		cfg.Cua.StartupTimeoutSecs = *v.StartupTimeoutSecs
-	}
-	if flagWasSet(fs, "cua-exec-timeout-secs") {
-		cfg.Cua.ExecTimeoutSecs = *v.ExecTimeoutSecs
-	}
-	if flagWasSet(fs, "cua-bridge-command") {
-		cfg.Cua.BridgeCommand = *v.BridgeCommand
-	}
-	if flagWasSet(fs, "cua-sdk-package") {
-		cfg.Cua.SDKPackage = *v.SDKPackage
-	}
-	if flagWasSet(fs, "cua-sdk-import") {
-		cfg.Cua.SDKImport = *v.SDKImport
-	}
-	if flagWasSet(fs, "cua-sdk-fallback-import") {
-		cfg.Cua.SDKFallbackImport = *v.SDKFallbackImport
+	applied, err := v.Apply(&cfg.Cua, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	if err != nil {
+		return err
 	}
 	return validateProviderConfig(*cfg)
 }
@@ -112,7 +40,7 @@ func validateProviderConfig(cfg Config) error {
 	if _, err := cuaWorkdir(cfg); err != nil {
 		return err
 	}
-	kind := strings.ToLower(strings.TrimSpace(blank(cfg.Cua.Kind, defaultKind)))
+	kind := strings.ToLower(strings.TrimSpace(core.Blank(cfg.Cua.Kind, core.CuaConfigDefaultKind)))
 	if kind != "container" && kind != "vm" {
 		return exit(2, "%s kind must be container or vm", providerName)
 	}
@@ -147,7 +75,7 @@ func validateProviderConfig(cfg Config) error {
 }
 
 func cuaWorkdir(cfg Config) (string, error) {
-	workdir := strings.TrimSpace(blank(cfg.Cua.Workdir, defaultWorkdir))
+	workdir := strings.TrimSpace(core.Blank(cfg.Cua.Workdir, core.CuaConfigDefaultWorkdir))
 	if !path.IsAbs(workdir) {
 		return "", exit(2, "%s workdir must be absolute", providerName)
 	}

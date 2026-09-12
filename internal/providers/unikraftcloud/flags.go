@@ -2,7 +2,9 @@ package unikraftcloud
 
 import (
 	"flag"
-	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type unikraftCloudFlagValues struct {
@@ -26,38 +28,30 @@ func registerUnikraftCloudProviderFlags(fs *flag.FlagSet, defaults Config) any {
 }
 
 func applyUnikraftCloudProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	if isUnikraftCloudProviderName(cfg.Provider) {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=%s", providerName)
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=%s", providerName)
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(unikraftCloudFlagValues)
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "unikraft-cloud-url") {
+	if core.FlagWasSet(fs, "unikraft-cloud-url") {
 		cfg.UnikraftCloud.APIURL = *v.APIURL
+		core.RecordProviderFlagInputs(cfg, true, "unikraft-cloud")
 	}
-	if flagWasSet(fs, "unikraft-cloud-metro") {
+	if core.FlagWasSet(fs, "unikraft-cloud-metro") {
 		cfg.UnikraftCloud.Metro = *v.Metro
+		core.RecordProviderFlagInputs(cfg, true, "unikraft-cloud")
 	}
-	if flagWasSet(fs, "unikraft-cloud-image") {
+	if core.FlagWasSet(fs, "unikraft-cloud-image") {
 		cfg.UnikraftCloud.Image = *v.Image
+		core.RecordProviderFlagInputs(cfg, true, "unikraft-cloud")
 	}
-	if flagWasSet(fs, "unikraft-cloud-memory") {
+	if core.FlagWasSet(fs, "unikraft-cloud-memory") {
 		cfg.UnikraftCloud.MemoryMB = *v.MemoryMB
+		core.RecordProviderFlagInputs(cfg, true, "unikraft-cloud")
 	}
 	return nil
-}
-
-func isUnikraftCloudProviderName(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case providerName, "unikraftcloud", "ukc":
-		return true
-	default:
-		return false
-	}
 }

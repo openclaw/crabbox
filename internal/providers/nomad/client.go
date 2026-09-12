@@ -48,6 +48,7 @@ var (
 	nomadControlRequestTimeout  = defaultNomadControlRequestTimeout
 )
 
+// controlRequestContext bounds finite JSON calls, not allocation exec.
 func controlRequestContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if nomadControlRequestTimeout <= 0 {
 		return ctx, func() {}

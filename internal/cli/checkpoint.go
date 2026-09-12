@@ -248,8 +248,30 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 		}
 		dir = paths.Dir
 		recordWritten := isNativeCheckpointKind(createKind)
+		notSubmitted := false
 		defer func() {
-			cleanupUncommittedCheckpointDir(dir, recordWritten, err)
+			if cleanupErr := cleanupUncommittedCheckpointDir(dir, recordWritten, err); cleanupErr != nil {
+				err = errors.Join(err, cleanupErr)
+				var failure ExitError
+				if errors.As(err, &failure) {
+					// The CLI prints the first ExitError message; retain its code and
+					// typed cause while making reservation cleanup failure visible.
+					err = errors.Join(exit(failure.Code, "%v", err), err)
+				}
+				return
+			}
+			// The native owner attests non-submission; verified reservation cleanup
+			// permits reporting it without implying that source rollback succeeded.
+			if notSubmitted && *jsonOut {
+				err = errors.Join(err, json.NewEncoder(a.Stdout).Encode(struct {
+					Schema           string `json:"schema"`
+					Outcome          string `json:"outcome"`
+					Provider         string `json:"provider"`
+					LeaseID          string `json:"leaseId"`
+					CheckpointID     string `json:"checkpointId"`
+					LocalReservation string `json:"localReservation"`
+				}{"crabbox.checkpoint.create.failure.v1", "not_submitted", record.Provider, record.LeaseID, record.ID, "removed"}))
+			}
 		}()
 		switch createKind {
 		case checkpointKindRecipe:
@@ -289,9 +311,10 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 				}
 			}
 			if err != nil {
-				var notSubmitted NativeCheckpointNotSubmittedError
-				if record.Native.ImageID == "" && errors.As(err, &notSubmitted) && !record.coordinatorManaged() {
+				var unsubmitted NativeCheckpointNotSubmittedError
+				if record.Native.ImageID == "" && errors.As(err, &unsubmitted) && !record.coordinatorManaged() {
 					recordWritten = false
+					notSubmitted = true
 				}
 				if record.Native.ImageID != "" {
 					if writeErr := store.Write(record); writeErr != nil {
@@ -1523,9 +1546,15 @@ func (a App) provisionCheckpointForkWithoutClaim(ctx context.Context, cfg Config
 	if requestedLeaseID != "" {
 		checkpointID = record.ID
 	}
+	var source *NativeCheckpointForkRecord
+	if isNativeCheckpointKind(record.Kind) {
+		native := nativeCheckpointForkRecord(record)
+		source = &native
+	}
 	lease, err := sshBackend.Acquire(ctx, AcquireRequest{
 		Repo: repo, Options: leaseOptionsFromConfig(cfg), Keep: keep, Reclaim: reclaim,
 		RequestedLeaseID: requestedLeaseID, RequestedCheckpointID: checkpointID, RequestedSlug: requestedSlug,
+		CheckpointSource: source,
 	})
 	if err != nil {
 		return checkpointForkProvision{}, err
@@ -2487,11 +2516,17 @@ func newCheckpointRecord(repo Repo, cfg Config, server Server, target SSHTarget,
 	return record, dir, nil
 }
 
-func cleanupUncommittedCheckpointDir(dir string, committed bool, err error) {
+func cleanupUncommittedCheckpointDir(dir string, committed bool, err error) error {
 	if err == nil || committed || dir == "" {
-		return
+		return nil
 	}
-	_ = os.RemoveAll(dir)
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("remove incomplete checkpoint reservation: %w", err)
+	}
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+		return fmt.Errorf("checkpoint reservation removal could not be verified: %v", err)
+	}
+	return nil
 }
 
 func newCheckpointID() (string, error) {

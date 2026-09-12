@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -145,7 +146,7 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 	// server), so this client talks net/http directly to the documented
 	// OpenAPI, like other direct-API providers. If an official Go client
 	// appears, the transport can be swapped behind the api interface.
-	httpClient, dataHTTPClient := smolvmHTTPClients(rt.HTTP, smolvmControlTimeout)
+	httpClient, dataHTTPClient := shared.ControlAndDataHTTPClients(rt.HTTP, smolvmControlTimeout)
 	base, err := smolvmEndpoint(cfg)
 	if err != nil {
 		return nil, err
@@ -159,7 +160,7 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 }
 
 func smolvmEndpoint(cfg Config) (string, error) {
-	base := blank(strings.TrimSpace(cfg.Smolvm.BaseURL), "https://api.smolmachines.com")
+	base := core.Blank(strings.TrimSpace(cfg.Smolvm.BaseURL), core.SmolvmConfigDefaultBaseURL)
 	parsed, err := url.Parse(base)
 	if err != nil {
 		return "", exit(2, "%s url %q is invalid", providerName, base)
@@ -181,13 +182,6 @@ func smolvmEndpoint(cfg Config) (string, error) {
 	}
 	base = strings.TrimRight(parsed.String(), "/")
 	return base, nil
-}
-
-func smolvmHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
-	if injected != nil {
-		return injected, injected
-	}
-	return &http.Client{Timeout: controlTimeout}, &http.Client{}
 }
 
 func smolvmRedirectError(destination *url.URL) error {

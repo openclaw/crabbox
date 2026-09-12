@@ -26,7 +26,7 @@ func fixtureScopeReply(req core.LocalCommandRequest) scriptedReply {
 		}
 		return fallback
 	}
-	api := get("--api-url", defaultAPIURL)
+	api := get("--api-url", "https://api.tensorlake.ai")
 	data, _ := json.Marshal(map[string]any{"endpoints": map[string]string{"cloudApi": api, "sandboxApi": api}, "apiKey": map[string]string{"organizationId": get("--organization", "org_fixture"), "projectId": get("--project", "project_fixture"), "key": "fixture-masked-prefix****"}})
 	return scriptedReply{stdout: string(data)}
 }
@@ -515,7 +515,7 @@ func TestScopePinsRoutingAndAllowsSameProjectKeyRotation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, req := range r.calls {
-		if !containsArg(req.Args, defaultAPIURL) || !containsArg(req.Args, "default") {
+		if !containsArg(req.Args, "https://api.tensorlake.ai") || !containsArg(req.Args, "default") {
 			t.Fatal("scope flags were omitted")
 		}
 		for _, entry := range req.Env {
@@ -530,7 +530,7 @@ func TestScopePinsRoutingAndAllowsSameProjectKeyRotation(t *testing.T) {
 }
 
 func claimBoundTensorlakeForTest(leaseID, slug, repo string, idle time.Duration, reclaim bool) error {
-	scope, _ := json.Marshal(tensorlakeScope{defaultAPIURL, defaultAPIURL, "org_fixture", "project_fixture", "default"})
+	scope, _ := json.Marshal(tensorlakeScope{"https://api.tensorlake.ai", "https://api.tensorlake.ai", "org_fixture", "project_fixture", "default"})
 	cfg := newTestConfig()
 	cfg.Provider = providerName
 	server := Server{Provider: providerName, CloudID: strings.TrimPrefix(leaseID, leasePrefix), Labels: map[string]string{"provider": providerName, "lease": leaseID, "slug": slug, "tensorlake_namespace": "sandbox_ns"}}

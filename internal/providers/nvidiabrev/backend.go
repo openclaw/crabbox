@@ -830,21 +830,7 @@ func applyNvidiaBrevDefaults(cfg *Config) {
 	if cfg.TargetOS == "" {
 		cfg.TargetOS = targetLinux
 	}
-	if cfg.NvidiaBrev.CLI == "" {
-		cfg.NvidiaBrev.CLI = "brev"
-	}
-	if cfg.NvidiaBrev.GPUName == "" {
-		cfg.NvidiaBrev.GPUName = "A100"
-	}
-	if cfg.NvidiaBrev.Mode == "" {
-		cfg.NvidiaBrev.Mode = "vm"
-	}
-	if cfg.NvidiaBrev.ReleaseAction == "" {
-		cfg.NvidiaBrev.ReleaseAction = "delete"
-	}
-	if cfg.NvidiaBrev.Target == "" {
-		cfg.NvidiaBrev.Target = "container"
-	}
+	cfg.NvidiaBrev = cfg.NvidiaBrev.WithRuntimeDefaults()
 	cfg.NvidiaBrev.WorkRoot = effectiveNvidiaBrevWorkRoot(*cfg)
 	if cfg.NvidiaBrev.User != "" {
 		cfg.SSHUser = cfg.NvidiaBrev.User

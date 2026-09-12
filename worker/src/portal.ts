@@ -1,4 +1,5 @@
 import type { PortalExternalRunnerRecord, PortalLeaseRecord } from "./org-records";
+import { orderedTelemetrySamples } from "./telemetry";
 import type {
   ExternalRunnerRecord,
   LeaseRecord,
@@ -2909,18 +2910,7 @@ function telemetrySamples(
   telemetry: LeaseRecord["telemetry"],
   history: LeaseRecord["telemetryHistory"],
 ): LeaseTelemetrySample[] {
-  const byTime = new Map<string, LeaseTelemetrySample>();
-  for (const sample of Array.isArray(history) ? history : []) {
-    if (sample?.capturedAt) {
-      byTime.set(sample.capturedAt, sample);
-    }
-  }
-  if (telemetry?.capturedAt) {
-    byTime.set(telemetry.capturedAt, telemetry);
-  }
-  return [...byTime.values()].toSorted((left, right) =>
-    left.capturedAt.localeCompare(right.capturedAt),
-  );
+  return orderedTelemetrySamples([...(Array.isArray(history) ? history : []), telemetry]);
 }
 
 type LeaseTelemetrySample = NonNullable<LeaseRecord["telemetry"]>;
@@ -3086,15 +3076,7 @@ function runTelemetrySamples(telemetry: RunRecord["telemetry"]): LeaseTelemetryS
   if (!telemetry) {
     return [];
   }
-  const byTime = new Map<string, LeaseTelemetrySample>();
-  for (const sample of [telemetry.start, ...(telemetry.samples ?? []), telemetry.end]) {
-    if (sample?.capturedAt) {
-      byTime.set(sample.capturedAt, sample);
-    }
-  }
-  return [...byTime.values()].toSorted((left, right) =>
-    left.capturedAt.localeCompare(right.capturedAt),
-  );
+  return orderedTelemetrySamples([telemetry.start, ...(telemetry.samples ?? []), telemetry.end]);
 }
 
 function telemetryDelta(start: number | undefined, end: number | undefined): string | undefined {

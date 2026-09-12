@@ -199,6 +199,15 @@ serialization and live bridge ownership are process-local. PostgreSQL and
 pg-boss are durable, but horizontal replicas need distributed locking and
 bridge routing first.
 
+Maintenance selects bridge cleanup from live bridge owners and existing persisted
+egress records, so ended leases with no bridge state require no repeated deletes,
+including after coordinator restarts. Failed deletes retain their cleanup evidence.
+Ready-pool maintenance reads only the leases referenced by its entries, and
+interrupted-provisioning checks read journals only for recovery candidates.
+Each maintenance pass collects candidate lease IDs once, then rereads their
+current records at the owning phase. Final alarm selection still scans current
+state so work admitted during provider I/O keeps its wakeup.
+
 ## Coordinator HTTP API
 
 Lease lifecycle:
@@ -233,6 +242,7 @@ Runs and observability:
 ```text
 GET  /v1/runs
 POST /v1/runs
+PUT  /v1/runs/{run-id}
 GET  /v1/runs/{run-id}
 GET  /v1/runs/{run-id}/logs
 POST /v1/runs/{run-id}/events
@@ -287,7 +297,9 @@ retries as admin.
 progress to the broker so the portal and `history`/`logs`/`events`/`results`
 commands can read it back:
 
-- `POST /v1/runs` creates a `RunRecord` in state `running`.
+- `PUT /v1/runs/{id}` atomically admits a caller-known run and its first event,
+  or returns the retained record for the same caller and original request.
+  Legacy `POST /v1/runs` creates a coordinator-issued `RunRecord` in state `running`.
 - `POST /v1/runs/{id}/events` streams phase-tagged events: `run.started`,
   `leasing.started`, `bootstrap.waiting`, `sync.started`/`finished`,
   `actions.hydrate.*`, `command.started`, stdout/stderr chunks,
@@ -297,6 +309,12 @@ commands can read it back:
   (chunked at 64 KiB, capped at 8 MiB), and parsed [results](features/test-results.md).
   The coordinator computes `durationMs`, sets state `succeeded`/`failed`, and records
   classification (`blockedStage`, `retryLikely`).
+
+Coordinator API requests negotiate HTTP/2 over TLS when the server supports it,
+so independent requests can share a connection. HTTP/1 coordinators and the
+HTTP/1 WebSocket upgrade remain supported; both use the coordinator's same-origin
+redirect guard. An ended control owner closes and
+joins its local connection without waiting for a peer close handshake.
 
 The command itself, file sync, and I/O streaming all happen **directly
 CLI → runner over SSH** and never traverse the broker.

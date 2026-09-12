@@ -39,6 +39,7 @@ type fixedLocalContainerCreateIntent struct {
 	Memory          string          `json:"memory"`
 	Network         string          `json:"network"`
 	DockerSocket    bool            `json:"dockerSocket"`
+	NoHostname      bool            `json:"noHostname,omitempty"` // Omit false to preserve persisted v1 fingerprints.
 	HostVolumes     []string        `json:"hostVolumes,omitempty"`
 	CacheVolumes    []string        `json:"cacheVolumes,omitempty"`
 	Desktop         bool            `json:"desktop"`
@@ -73,6 +74,7 @@ func fixedLocalContainerFingerprint(cfg core.Config, req core.AcquireRequest, pu
 		Memory:          strings.TrimSpace(cfg.LocalContainer.Memory),
 		Network:         strings.TrimSpace(cfg.LocalContainer.Network),
 		DockerSocket:    cfg.LocalContainer.DockerSocket,
+		NoHostname:      cfg.LocalContainer.NoHostname,
 		HostVolumes:     volumes,
 		CacheVolumes:    cacheVolumes,
 		Desktop:         cfg.Desktop,

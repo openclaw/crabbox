@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 const (
@@ -53,7 +55,7 @@ func cloneLabels(labels map[string]string) map[string]string {
 }
 
 func (b *backend) createIntentClaim(leaseID, slug, scope, accountUUID string, req WarmupRequest, createReq createInstanceRequest) (LeaseClaim, error) {
-	labels := directLeaseLabels(b.cfg, leaseID, slug, req.Keep, b.now())
+	labels := directLeaseLabels(b.cfg, leaseID, slug, req.Keep, core.ClockNow(b.rt.Clock))
 	labels["state"] = ukcStateCreatePreflight
 	labels[ukcLabelResourceName] = createReq.Name
 	labels[ukcLabelRequestHash] = unikraftCloudCreateRequestHash(createReq)
@@ -670,7 +672,7 @@ func serverFromClaim(claim LeaseClaim) Server {
 	return Server{
 		CloudID:  claim.CloudID,
 		Provider: providerName,
-		Name:     blank(labels[ukcLabelResourceName], claim.CloudID),
+		Name:     core.Blank(labels[ukcLabelResourceName], claim.CloudID),
 		Status:   labels["state"],
 		Labels:   labels,
 	}
@@ -718,7 +720,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			return err
 		}
 		state := current.Labels["state"]
-		remove, reason := shouldCleanupServer(serverFromClaim(current), b.now())
+		remove, reason := shouldCleanupServer(serverFromClaim(current), core.ClockNow(b.rt.Clock))
 		if state == ukcStateDeleteAttempt || state == ukcStateDeleteAccepted || state == ukcStateCreatePreflight || state == ukcStateCreateConflict {
 			remove, reason = true, "resume "+state
 		}
@@ -737,11 +739,11 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			action = "reconcile"
 		}
 		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would %s %s lease=%s instance=%s reason=%s\n", action, providerName, current.LeaseID, blank(current.CloudID, "pending"), reason)
+			fmt.Fprintf(b.rt.Stdout, "would %s %s lease=%s instance=%s reason=%s\n", action, providerName, current.LeaseID, core.Blank(current.CloudID, "pending"), reason)
 			unlock()
 			continue
 		}
-		fmt.Fprintf(b.rt.Stdout, "%s %s lease=%s instance=%s reason=%s\n", action, providerName, current.LeaseID, blank(current.CloudID, "pending"), reason)
+		fmt.Fprintf(b.rt.Stdout, "%s %s lease=%s instance=%s reason=%s\n", action, providerName, current.LeaseID, core.Blank(current.CloudID, "pending"), reason)
 		_, deleteErr := b.deleteClaimedInstance(ctx, api, current)
 		unlock()
 		if deleteErr != nil {

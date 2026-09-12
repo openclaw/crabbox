@@ -122,6 +122,7 @@ localContainer:
   memory: ""               # memory limit, e.g. 8g
   network: bridge          # container network
   dockerSocket: false      # mount the host Docker-compatible socket into the lease
+  noHostname: false        # omit the explicit container hostname when true
 ```
 
 Defaults applied when unset: `runtime=docker`, a reviewed Ubuntu OCI index
@@ -242,7 +243,29 @@ CRABBOX_LOCAL_CONTAINER_CPUS
 CRABBOX_LOCAL_CONTAINER_MEMORY
 CRABBOX_LOCAL_CONTAINER_NETWORK
 CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET
+CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME
 ```
+
+File strings only replace earlier values when nonempty, and file CPU values
+apply only when positive. Environment CPU parsing preserves the earlier value
+on malformed input; an explicit environment zero still applies. The two boolean
+settings distinguish omission/null from explicit `false`, so false can override
+an earlier true value. Source overlays keep string text unchanged; later
+provider defaults and runtime normalization remain separate.
+
+Explicit runtime, image and work-root input remains explicit even when it equals
+the existing value. The raw initial work root is empty; the effective
+`/work/crabbox` default is applied later. `noHostname` has no provider CLI flag,
+and volumes and checkpoint metadata are not file/environment settings.
+
+Set `localContainer.noHostname: true` or
+`CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME=1` when the runtime rejects an explicit
+hostname, such as when it shares the host UTS namespace. By default Crabbox
+passes `--hostname` with the container name; this opt-in only omits that argument.
+It does not change the runtime's namespace, network, or capability settings.
+The configured runtime must still support the loopback-published SSH port.
+Changing this setting for a fixed lease ID returns `lease_id_conflict`; omitted
+or `false` preserves the existing fixed-lease fingerprint.
 
 Host bind mounts must be passed explicitly with `--local-container-volume`.
 Crabbox intentionally ignores `localContainer.volumes` from config files because
@@ -290,6 +313,12 @@ Restore the original cache settings, or explicitly remove the verified residue,
 then retry stop. Orphan cleanup also preserves claims with bootstrap residue.
 Bootstrap paths from older releases under the current system temp root remain
 supported.
+
+If runtime removal fails after the container has disappeared, retry `stop` with
+the original configuration. Crabbox can finish cleanup after an exact-ID absence
+confirmation, including Podman's quoted-ID diagnostic. Connection, permission,
+authentication, and ambiguous errors still retain the claim and local recovery
+state; the original removal failure is not converted into success.
 
 1. `warmup` or a fresh `run` creates a per-lease SSH key.
 2. The provider writes its bootstrap script under the user's cache directory,

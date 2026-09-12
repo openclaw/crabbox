@@ -4,15 +4,338 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+type claimContextRunner struct {
+	inner *recordingRunner
+	run   func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error)
+}
+
+func (r claimContextRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	if err := ctx.Err(); err != nil {
+		return core.LocalCommandResult{}, err
+	}
+	if r.run != nil {
+		return r.run(ctx, req)
+	}
+	return r.inner.Run(ctx, req)
+}
+
+func TestClaimOperationWaitHonorsCallerContext(t *testing.T) {
+	for _, operation := range []string{"stop", "reuse", "status", "list"} {
+		for _, sharedLock := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/shared=%t", operation, sharedLock), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					b, f, claim := identityFixture(t)
+					b.rt.Exec = claimContextRunner{inner: f.runner}
+					entered, release := make(chan struct{}), make(chan struct{})
+					holderDone := make(chan error, 1)
+					go func() {
+						hold := func() error { close(entered); <-release; return nil }
+						if sharedLock {
+							holderDone <- core.WithLeaseClaimUnchangedShared(t.Context(), claim.LeaseID, claim, hold)
+						} else {
+							holderDone <- core.WithDurableLeaseClaimLockContext(t.Context(), claim.LeaseID, func(*core.LeaseClaim, bool, func() error) error { return hold() })
+						}
+					}()
+					<-entered
+					ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+					defer cancel()
+					done := make(chan error, 1)
+					go func() {
+						var err error
+						switch operation {
+						case "stop":
+							err = b.Stop(ctx, StopRequest{ID: claim.LeaseID})
+						case "reuse":
+							_, err = b.resolveLease(ctx, claim.LeaseID, claim.RepoRoot, false)
+						case "status":
+							_, err = b.Status(ctx, StatusRequest{ID: claim.LeaseID})
+						case "list":
+							_, err = b.List(ctx, ListRequest{})
+						}
+						done <- err
+					}()
+					time.Sleep(time.Second)
+					var err error
+					returned := false
+					select {
+					case err = <-done:
+						returned = true
+					default:
+					}
+					close(release)
+					holderErr := <-holderDone
+					if !returned {
+						err = <-done
+					}
+					if holderErr != nil {
+						t.Fatal(holderErr)
+					}
+					if !returned || !errors.Is(err, context.DeadlineExceeded) {
+						t.Errorf("operation=%s returned_before_release=%t err=%v", operation, returned, err)
+					}
+					wantCalls := 0
+					if operation == "list" {
+						wantCalls = 1
+					}
+					if len(f.runner.requests) != wantCalls {
+						t.Errorf("native calls=%v want count=%d", f.runner.requests, wantCalls)
+					}
+					requireNoMachineMutation(t, f)
+					requireClaimUnchanged(t, claim)
+				})
+			})
+		}
+	}
+}
+
+func TestDeletionDefaultBudgetIncludesClaimFence(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b, f, claim := identityFixture(t)
+		b.rt.Exec = claimContextRunner{inner: f.runner}
+		entered, release := make(chan struct{}), make(chan struct{})
+		holderDone := make(chan error, 1)
+		go func() {
+			holderDone <- core.WithDurableLeaseClaimLockContext(t.Context(), claim.LeaseID, func(*core.LeaseClaim, bool, func() error) error { close(entered); <-release; return nil })
+		}()
+		<-entered
+		done := make(chan error, 1)
+		go func() { done <- b.removeBoundLease(context.Background(), claim) }()
+		time.Sleep(31 * time.Second)
+		var err error
+		returned := false
+		select {
+		case err = <-done:
+			returned = true
+		default:
+		}
+		close(release)
+		holderErr := <-holderDone
+		if !returned {
+			err = <-done
+		}
+		if holderErr != nil {
+			t.Fatal(holderErr)
+		}
+		if !returned || !errors.Is(err, context.DeadlineExceeded) || len(f.runner.requests) != 0 {
+			t.Errorf("default deletion budget returned=%t err=%v native=%v", returned, err, f.runner.requests)
+		}
+		requireClaimUnchanged(t, claim)
+	})
+}
+
+func TestAcquisitionPublicationRollbackIncludesClaimFence(t *testing.T) {
+	for _, successor := range []bool{false, true} {
+		t.Run(fmt.Sprint(successor), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				t.Setenv("XDG_STATE_HOME", t.TempDir())
+				t.Setenv("HOME", t.TempDir())
+				oldOS, oldArch := hostGOOS, hostGOARCH
+				hostGOOS, hostGOARCH = "darwin", "arm64"
+				t.Cleanup(func() { hostGOOS, hostGOARCH = oldOS, oldArch })
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				runner := &recordingRunner{}
+				f := newMachineFixture(t, runner)
+				b := testBackend(runner)
+				b.rt.Exec = claimContextRunner{inner: runner}
+				entered, release := make(chan struct{}), make(chan struct{})
+				holderDone := make(chan error, 1)
+				var leaseID, name string
+				var successorClaim core.LeaseClaim
+				holding := false
+				f.before = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+					if len(req.Args) > 2 && req.Args[1] == "inspect" && !holding {
+						holding = true
+						name = req.Args[2]
+						leaseID = "cbx_" + strings.TrimPrefix(name, "crabbox-")
+						go func() {
+							holderDone <- core.WithDurableLeaseClaimLockContext(t.Context(), leaseID, func(claim *core.LeaseClaim, exists bool, persist func() error) error {
+								if exists {
+									return errors.New("fixture expected absent publication claim")
+								}
+								close(entered)
+								<-release
+								if successor {
+									identity, err := readMachineIdentity(f.root, name)
+									if err != nil {
+										return err
+									}
+									*claim = core.LeaseClaim{LeaseID: leaseID, Provider: providerName, Slug: "successor", CloudID: name, CloudImmutableID: identity, ProviderScope: f.root, RepoRoot: "successor", Labels: map[string]string{"apple_machine_storage": f.root}}
+									if err := persist(); err != nil {
+										return err
+									}
+									successorClaim = *claim
+								}
+								return nil
+							})
+						}()
+						<-entered
+					}
+					return core.LocalCommandResult{}, nil, false
+				}
+				home, err := os.UserHomeDir()
+				if err != nil {
+					t.Fatal(err)
+				}
+				done := make(chan error, 1)
+				go func() { _, err := b.createLease(ctx, Repo{Root: home}, false, ""); done <- err }()
+				<-entered
+				synctest.Wait()
+				if _, err := readMachineIdentity(f.root, name); err != nil {
+					close(release)
+					<-holderDone
+					<-done
+					t.Fatalf("fixture did not reach publication after marker creation: %v", err)
+				}
+				nativeBefore := len(runner.requests)
+				cancel()
+				wait := 31 * time.Second
+				if successor {
+					wait = time.Second
+				}
+				time.Sleep(wait)
+				var runErr error
+				returned := false
+				select {
+				case runErr = <-done:
+					returned = true
+				default:
+				}
+				close(release)
+				holderErr := <-holderDone
+				if !returned {
+					runErr = <-done
+				}
+				if holderErr != nil {
+					t.Fatal(holderErr)
+				}
+				if !errors.Is(runErr, context.Canceled) || !strings.Contains(runErr.Error(), "retained machine="+name) {
+					t.Errorf("primary cause/retention lost: %v", runErr)
+				}
+				publicCode := 1
+				var public core.ExitError
+				if core.AsExitError(runErr, &public) {
+					publicCode = public.Code
+				}
+				if publicCode != 1 {
+					t.Errorf("rollback replaced primary code: %d err=%v", publicCode, runErr)
+				}
+				if !strings.Contains(public.Message, "retained machine="+name) {
+					t.Errorf("CLI lost original recovery diagnostic: %q", public.Message)
+				}
+				if !successor && (!returned || !errors.Is(runErr, context.DeadlineExceeded)) {
+					t.Errorf("detached default budget returned=%t err=%v", returned, runErr)
+				}
+				if len(runner.requests) != nativeBefore {
+					t.Errorf("native calls after canceled publication: %v", runner.requests[nativeBefore:])
+				}
+				if successor {
+					requireClaimUnchanged(t, successorClaim)
+				} else if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
+					t.Errorf("claim exists=%t err=%v", exists, err)
+				}
+				if _, err := readMachineIdentity(f.root, name); err != nil {
+					t.Errorf("original machine witness lost: %v", err)
+				}
+			})
+		})
+	}
+}
+
+func TestClaimContextLookupsRemainReadOnly(t *testing.T) {
+	b, f, claim := identityFixture(t)
+	b.rt.Exec = claimContextRunner{inner: f.runner}
+	if _, err := b.List(t.Context(), ListRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Status(t.Context(), StatusRequest{ID: claim.LeaseID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.resolveLease(t.Context(), claim.LeaseID, "", false); err != nil {
+		t.Fatal(err)
+	}
+	requireNoMachineMutation(t, f)
+	requireClaimUnchanged(t, claim)
+}
+
+func TestStandaloneControlKeepsDefaultBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := testBackend(&recordingRunner{})
+		b.rt.Exec = claimContextRunner{run: func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+			deadline, ok := ctx.Deadline()
+			if !ok || time.Until(deadline) != 30*time.Second || req.MaxCapturedOutputBytes != 1024*1024 || req.CancelGracePeriod != time.Second {
+				t.Errorf("standalone control contract: deadline=%v request=%+v", deadline, req)
+			}
+			<-ctx.Done()
+			return core.LocalCommandResult{}, ctx.Err()
+		}}
+		if _, err := b.control(context.Background(), []string{"machine", "list", "--format", "json"}); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("control did not retain default deadline: %v", err)
+		}
+	})
+}
+
+func TestNativeControlFailuresPreserveCauseAndPublicCode(t *testing.T) {
+	for _, action := range []string{"create", "inspect", "list", "remove"} {
+		for _, deadline := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/deadline=%t", action, deadline), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					ctx, cancel := context.WithCancel(t.Context())
+					defer cancel()
+					cause := error(context.Canceled)
+					if deadline {
+						var c context.CancelFunc
+						ctx, c = context.WithTimeout(t.Context(), 100*time.Millisecond)
+						defer c()
+						cause = context.DeadlineExceeded
+					}
+					b := testBackend(&recordingRunner{})
+					b.rt.Exec = claimContextRunner{run: func(callCtx context.Context, _ core.LocalCommandRequest) (core.LocalCommandResult, error) {
+						if !deadline {
+							cancel()
+						}
+						<-callCtx.Done()
+						return core.LocalCommandResult{Stderr: "synthetic diagnostic"}, callCtx.Err()
+					}}
+					var err error
+					wantCode := 5
+					var wantMessage string
+					switch action {
+					case "create":
+						err = b.createMachine(ctx, "crabbox-test")
+						wantMessage = "create Apple container machine: synthetic diagnostic"
+					case "inspect":
+						_, err = b.inspectMachine(ctx, "crabbox-test")
+						wantCode = 4
+						wantMessage = "Apple container machine \"crabbox-test\" not found: synthetic diagnostic"
+					case "list":
+						_, err = b.listMachines(ctx)
+						wantMessage = "list Apple container machines: synthetic diagnostic"
+					case "remove":
+						err = b.removeMachine(ctx, "crabbox-test")
+						wantMessage = "delete Apple container machine \"crabbox-test\": synthetic diagnostic"
+					}
+					var public core.ExitError
+					if !errors.Is(err, cause) || !core.AsExitError(err, &public) || public.Code != wantCode || public.Message != wantMessage {
+						t.Fatalf("cause/code/message changed: err=%v public=%+v want cause=%v code=%d message=%q", err, public, cause, wantCode, wantMessage)
+					}
+				})
+			})
+		}
+	}
+}
 
 type machineFixture struct {
 	root     string

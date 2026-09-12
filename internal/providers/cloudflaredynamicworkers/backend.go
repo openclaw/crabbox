@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type backend struct {
@@ -47,7 +49,7 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 			checks = append(checks, DoctorCheck{Status: "fail", Check: "ok", Message: "readiness did not report ok=true"})
 		}
 		if readiness.Runner != providerName {
-			checks = append(checks, DoctorCheck{Status: "fail", Check: "runner", Message: fmt.Sprintf("readiness runner=%s", blank(readiness.Runner, "-"))})
+			checks = append(checks, DoctorCheck{Status: "fail", Check: "runner", Message: fmt.Sprintf("readiness runner=%s", core.Blank(readiness.Runner, "-"))})
 		}
 		if !readiness.LoaderBinding {
 			checks = append(checks, DoctorCheck{Status: "fail", Check: "loader-binding", Message: "Dynamic Workers binding unavailable"})
@@ -62,7 +64,7 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	return DoctorResult{
 		Provider: providerName,
 		Status:   status,
-		Message:  fmt.Sprintf("auth=ready control_plane=ready api=readiness mutation=false runner=%s loader_binding=%t coordinator_binding=%t durable_run_metadata=%t compatibility_date=%s egress=%s", blank(readiness.Runner, "-"), readiness.LoaderBinding, readiness.CoordinatorBinding, readiness.DurableRunMetadata, blank(readiness.CompatibilityDate, "-"), blank(readiness.Egress, "-")),
+		Message:  fmt.Sprintf("auth=ready control_plane=ready api=readiness mutation=false runner=%s loader_binding=%t coordinator_binding=%t durable_run_metadata=%t compatibility_date=%s egress=%s", core.Blank(readiness.Runner, "-"), readiness.LoaderBinding, readiness.CoordinatorBinding, readiness.DurableRunMetadata, core.Blank(readiness.CompatibilityDate, "-"), core.Blank(readiness.Egress, "-")),
 		Checks:   checks,
 	}, nil
 }
@@ -78,7 +80,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if req.Script == nil || len(req.Script.Data) == 0 {
 		return RunResult{}, exit(2, "%s requires --script or --script-stdin module source", providerName)
 	}
-	started := now(b.rt)
+	started := core.ClockNow(b.rt.Clock)
 	client, err := newLoaderAPI(b.cfg, b.rt)
 	if err != nil {
 		return RunResult{}, err
@@ -98,11 +100,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if req.EnvSummary {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
-	commandStarted := now(b.rt)
+	commandStarted := core.ClockNow(b.rt.Clock)
 	run, err := client.Run(ctx, loaderReq)
-	commandDuration := now(b.rt).Sub(commandStarted)
+	commandDuration := core.ClockNow(b.rt.Clock).Sub(commandStarted)
 	if err != nil {
-		total := now(b.rt).Sub(started)
+		total := core.ClockNow(b.rt.Clock).Sub(started)
 		timingWritten := false
 		result := RunResult{
 			ExitCode:    1,
@@ -154,7 +156,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			fmt.Fprintf(b.rt.Stderr, "kept uncertain run=%s slug=%s after request error\n", leaseID, slug)
 			fmt.Fprintf(b.rt.Stderr, "inspect: crabbox status --provider %s --id %s\n", providerName, slug)
 			fmt.Fprintf(b.rt.Stderr, "stop: crabbox stop --provider %s --id %s\n", providerName, slug)
-			total = now(b.rt).Sub(started)
+			total = core.ClockNow(b.rt.Clock).Sub(started)
 			result.Total = total
 			if req.TimingJSON {
 				report := timingReportWithProviderError(timingReportWithRunResult(timingReport{
@@ -249,7 +251,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if exitCode != 0 {
 		runErr = ExitError{Code: exitCode, Message: fmt.Sprintf("%s run exited %d", providerName, exitCode)}
 	}
-	total := now(b.rt).Sub(started)
+	total := core.ClockNow(b.rt.Clock).Sub(started)
 	keepRun := req.Keep || cacheMode == "explicit" || (req.KeepOnFailure && exitCode != 0) || run.LifecycleUncertain
 	result := RunResult{
 		ExitCode:    exitCode,
@@ -345,7 +347,7 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 			views = append(views, claimServer(claim, "unknown"))
 			continue
 		}
-		views = append(views, runServer(claim.LeaseID, blank(claim.Slug, newLeaseSlug(claim.LeaseID)), status, mergeRunLabels(claim.Labels, status.Metadata)))
+		views = append(views, runServer(claim.LeaseID, core.Blank(claim.Slug, newLeaseSlug(claim.LeaseID)), status, mergeRunLabels(claim.Labels, status.Metadata)))
 	}
 	return views, nil
 }
@@ -359,9 +361,9 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	if err != nil {
 		return StatusView{}, err
 	}
-	deadline := now(b.rt).Add(req.WaitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
 	if req.WaitTimeout <= 0 {
-		deadline = now(b.rt).Add(5 * time.Minute)
+		deadline = core.ClockNow(b.rt.Clock).Add(5 * time.Minute)
 	}
 	for {
 		status, err := client.Status(ctx, leaseID)
@@ -375,7 +377,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		if !req.Wait || view.Ready || terminalState(view.State) {
 			return view, nil
 		}
-		if now(b.rt).After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return StatusView{}, exit(5, "timed out waiting for %s run %s to become ready", providerName, leaseID)
 		}
 		select {
@@ -433,7 +435,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 				continue
 			}
 			if req.DryRun {
-				fmt.Fprintf(b.rt.Stdout, "would remove stale %s claim %s slug=%s reason=not-found\n", providerName, claim.LeaseID, blank(claim.Slug, "-"))
+				fmt.Fprintf(b.rt.Stdout, "would remove stale %s claim %s slug=%s reason=not-found\n", providerName, claim.LeaseID, core.Blank(claim.Slug, "-"))
 				continue
 			}
 			if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
@@ -441,14 +443,14 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 				continue
 			}
 			removed++
-			fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s slug=%s reason=not-found\n", providerName, claim.LeaseID, blank(claim.Slug, "-"))
+			fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s slug=%s reason=not-found\n", providerName, claim.LeaseID, core.Blank(claim.Slug, "-"))
 			continue
 		}
 		if !terminalState(status.Status) {
 			continue
 		}
 		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would delete terminal %s metadata and remove claim %s slug=%s state=%s\n", providerName, claim.LeaseID, blank(claim.Slug, "-"), status.Status)
+			fmt.Fprintf(b.rt.Stdout, "would delete terminal %s metadata and remove claim %s slug=%s state=%s\n", providerName, claim.LeaseID, core.Blank(claim.Slug, "-"), status.Status)
 			continue
 		}
 		if err := client.Delete(ctx, claim.LeaseID); err != nil && !notFoundError(err) {
@@ -460,7 +462,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			continue
 		}
 		removed++
-		fmt.Fprintf(b.rt.Stdout, "deleted terminal %s metadata and removed claim %s slug=%s state=%s\n", providerName, claim.LeaseID, blank(claim.Slug, "-"), status.Status)
+		fmt.Fprintf(b.rt.Stdout, "deleted terminal %s metadata and removed claim %s slug=%s state=%s\n", providerName, claim.LeaseID, core.Blank(claim.Slug, "-"), status.Status)
 	}
 	if !req.DryRun {
 		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d checked=%d\n", providerName, removed, len(claims))
@@ -516,12 +518,12 @@ func (b *backend) resolveRunID(identifier, repoRoot string, reclaim bool) (strin
 	}
 	if ok {
 		if repoRoot != "" {
-			server := claimServer(claim, blank(claim.Labels["state"], "unknown"))
+			server := claimServer(claim, core.Blank(claim.Labels["state"], "unknown"))
 			if err := claimLease(claim.LeaseID, claim.Slug, b.cfg, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim, server); err != nil {
 				return "", "", LeaseClaim{}, false, err
 			}
 		}
-		return claim.LeaseID, blank(claim.Slug, newLeaseSlug(claim.LeaseID)), claim, true, nil
+		return claim.LeaseID, core.Blank(claim.Slug, newLeaseSlug(claim.LeaseID)), claim, true, nil
 	}
 	value := strings.TrimSpace(identifier)
 	if value == "" {
@@ -682,7 +684,7 @@ func normalizeCacheMode(value string) string {
 }
 
 func effectiveCompatibilityDate(value string) string {
-	return blank(strings.TrimSpace(value), defaultCompatibilityDate)
+	return core.Blank(strings.TrimSpace(value), defaultCompatibilityDate)
 }
 
 func normalizeEgress(value string) string {
@@ -718,16 +720,16 @@ func providerClaims(cfg Config) ([]LeaseClaim, error) {
 }
 
 func claimServer(claim LeaseClaim, state string) Server {
-	return runServer(claim.LeaseID, blank(claim.Slug, newLeaseSlug(claim.LeaseID)), runStatus{ID: claim.LeaseID, Status: state}, claim.Labels)
+	return runServer(claim.LeaseID, core.Blank(claim.Slug, newLeaseSlug(claim.LeaseID)), runStatus{ID: claim.LeaseID, Status: state}, claim.Labels)
 }
 
 func runServer(leaseID, slug string, status runStatus, extra map[string]string) Server {
 	labels := map[string]string{
 		"provider": providerName,
 		"lease":    leaseID,
-		"slug":     blank(slug, newLeaseSlug(leaseID)),
+		"slug":     core.Blank(slug, newLeaseSlug(leaseID)),
 		"target":   targetWorker,
-		"state":    blank(status.Status, "unknown"),
+		"state":    core.Blank(status.Status, "unknown"),
 	}
 	if strings.TrimSpace(status.WorkerID) != "" {
 		labels["worker_id"] = status.WorkerID
@@ -739,9 +741,9 @@ func runServer(leaseID, slug string, status runStatus, extra map[string]string) 
 	}
 	labels["provider"] = providerName
 	labels["lease"] = leaseID
-	labels["slug"] = blank(slug, newLeaseSlug(leaseID))
+	labels["slug"] = core.Blank(slug, newLeaseSlug(leaseID))
 	labels["target"] = targetWorker
-	labels["state"] = blank(status.Status, "unknown")
+	labels["state"] = core.Blank(status.Status, "unknown")
 	if strings.TrimSpace(status.WorkerID) != "" {
 		labels["worker_id"] = status.WorkerID
 	} else {
@@ -762,11 +764,11 @@ func statusView(leaseID, slug string, status runStatus) StatusView {
 	server := runServer(leaseID, slug, status, status.Metadata)
 	return StatusView{
 		ID:         leaseID,
-		Slug:       blank(slug, newLeaseSlug(leaseID)),
+		Slug:       core.Blank(slug, newLeaseSlug(leaseID)),
 		Provider:   providerName,
 		TargetOS:   targetWorker,
 		State:      server.Status,
-		ServerID:   blank(status.ID, leaseID),
+		ServerID:   core.Blank(status.ID, leaseID),
 		ServerType: server.ServerType.Name,
 		Ready:      readyState(server.Status),
 		Labels:     server.Labels,

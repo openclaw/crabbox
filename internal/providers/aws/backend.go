@@ -244,7 +244,7 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 				server = matching[0]
 				if intent.State == fixedAWSIntentAcquired || claim.CloudID != "" {
 					if claim.CloudID == "" || server.CloudID != claim.CloudID {
-						return exit(4, "lease_id_conflict: fixed lease %s resource %s does not match acquired CloudID %s", leaseID, blank(server.CloudID, "<empty>"), blank(claim.CloudID, "<empty>"))
+						return exit(4, "lease_id_conflict: fixed lease %s resource %s does not match acquired CloudID %s", leaseID, core.Blank(server.CloudID, "<empty>"), core.Blank(claim.CloudID, "<empty>"))
 					}
 				}
 				resolvedCfg = awsConfigForServer(cfg, server)
@@ -478,7 +478,7 @@ func (b *awsLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Leas
 			if !isCrabboxAWSLease(server) {
 				return LeaseTarget{}, exit(4, "lease/server not found: %s (instance exists but is not Crabbox-managed)", req.ID)
 			}
-			leaseID := blank(server.Labels["lease"], req.ID)
+			leaseID := core.Blank(server.Labels["lease"], req.ID)
 			target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
 			useStoredTestboxKey(&target, leaseID)
 			return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
@@ -876,7 +876,6 @@ func sshTargetForBootstrap(cfg Config, publicIP, leaseID, slug string) SSHTarget
 
 var bootstrapAWSWindowsDesktop = core.BootstrapAWSWindowsDesktop
 
-func blank(value, fallback string) string { return core.Blank(value, fallback) }
 func useStoredTestboxKey(target *SSHTarget, leaseID string) {
 	shared.UseStoredTestboxKey(target, leaseID)
 }

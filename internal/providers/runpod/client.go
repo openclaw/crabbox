@@ -121,7 +121,7 @@ func newRunpodClient(cfg Config, rt Runtime) (runpodAPI, error) {
 	if apiKey == "" {
 		return nil, exit(2, "provider=%s requires RUNPOD_API_KEY", providerName)
 	}
-	apiURL := strings.TrimRight(strings.TrimSpace(blank(cfg.Runpod.APIURL, "https://rest.runpod.io/v1")), "/")
+	apiURL := strings.TrimRight(strings.TrimSpace(cfg.Runpod.APIURL), "/")
 	parsed, err := url.Parse(apiURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return nil, exit(2, "%s url %q is invalid", providerName, apiURL)
@@ -215,7 +215,7 @@ func runpodDeployPayload(input runpodDeployInput) map[string]any {
 	payload := map[string]any{
 		"name":              input.Name,
 		"imageName":         input.ImageName,
-		"cloudType":         blank(input.CloudType, "SECURE"),
+		"cloudType":         input.CloudType,
 		"containerDiskInGb": input.ContainerDiskInGb,
 		"ports":             []string{input.Ports},
 		"supportPublicIp":   true,

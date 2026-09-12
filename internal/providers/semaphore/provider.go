@@ -30,6 +30,7 @@ func (Provider) ClaimScope(cfg core.Config) string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPIToken),
 		Name:             "semaphore",
 		Family:           "semaphore",
 		Kind:             core.ProviderKindSSHLease,
@@ -41,12 +42,16 @@ func (Provider) Spec() core.ProviderSpec {
 }
 
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return registerFlags(fs, defaults)
+	return core.RegisterSemaphoreConfigFlags(fs, defaults.Semaphore)
 }
 
 func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	if v, ok := values.(flagValues); ok {
-		applyFlagOverrides(cfg, fs, v)
+	if v, ok := values.(core.SemaphoreConfigFlagValues); ok {
+		applied, err := v.Apply(&cfg.Semaphore, fs)
+		core.RecordProviderFlagInputs(cfg, applied.InputAccepted, "semaphore")
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }

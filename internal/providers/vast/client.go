@@ -1,7 +1,6 @@
 package vast
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -135,9 +134,6 @@ func newVastClient(cfg VastConfig, rt Runtime) (vastAPI, error) {
 		return nil, exit(2, "provider=%s requires CRABBOX_VAST_API_KEY or VAST_API_KEY", providerName)
 	}
 	apiURL := strings.TrimRight(strings.TrimSpace(cfg.APIURL), "/")
-	if apiURL == "" {
-		apiURL = "https://console.vast.ai/api/v0"
-	}
 	parsed, err := url.Parse(apiURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil {
 		return nil, exit(2, "vast.apiUrl must be an absolute URL without credentials")
@@ -157,19 +153,11 @@ func vastRedirectError(destination *url.URL) error {
 }
 
 func (c *vastClient) do(ctx context.Context, method, path string, body any, out any) error {
-	var reader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		reader = bytes.NewReader(data)
-	}
 	endpoint := c.apiURL + path
 	if parsed, err := url.Parse(path); err == nil && parsed.IsAbs() {
 		endpoint = path
 	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
+	req, err := shared.NewCompactJSONRequest(ctx, method, endpoint, body)
 	if err != nil {
 		return err
 	}
@@ -337,9 +325,6 @@ func buildVastOfferSearchPayload(cfg VastConfig) map[string]any {
 		payload["dph_total"] = vastFilter("lte", cfg.MaxDphTotal)
 	}
 	instanceType := vastAPIInstanceType(cfg.InstanceType)
-	if instanceType == "" {
-		instanceType = "ondemand"
-	}
 	payload["type"] = instanceType
 	if order := strings.TrimSpace(cfg.Order); order != "" {
 		payload["order"] = vastOrderTuples(order)

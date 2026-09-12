@@ -182,7 +182,7 @@ func (b *hetznerLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (
 		if err := validateHetznerResolveOwnership(server, req); err != nil {
 			return LeaseTarget{}, err
 		}
-		leaseID := blank(server.Labels["lease"], req.ID)
+		leaseID := core.Blank(server.Labels["lease"], req.ID)
 		target := sshTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
 		useStoredTestboxKey(&target, leaseID)
 		return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
@@ -531,7 +531,7 @@ func rollbackHetznerAcquire(client hetznerClient, server Server, serverCreated b
 	return nil
 }
 func parseServerID(s string) (int64, bool) { return core.ParseServerID(s) }
-func blank(value, fallback string) string  { return core.Blank(value, fallback) }
+
 func useStoredTestboxKey(target *SSHTarget, leaseID string) {
 	shared.UseStoredTestboxKey(target, leaseID)
 }

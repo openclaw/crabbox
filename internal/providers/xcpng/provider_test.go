@@ -140,6 +140,29 @@ func TestFlagsClearStaleNameUUIDCounterparts(t *testing.T) {
 				NetworkUUID:  "net-0002",
 			},
 		},
+		{
+			name: "both flags uuid wins after name",
+			args: []string{
+				"--xcp-ng-template", "Other Template", "--xcp-ng-template-uuid", xcpNgTestVMUUID,
+				"--xcp-ng-sr", "other-sr", "--xcp-ng-sr-uuid", "sr-0002",
+				"--xcp-ng-network", "other-network", "--xcp-ng-network-uuid", "net-0002",
+			},
+			want: core.XCPNgConfig{TemplateUUID: xcpNgTestVMUUID, SRUUID: "sr-0002", NetworkUUID: "net-0002"},
+		},
+		{
+			name: "both flags uuid wins before name",
+			args: []string{
+				"--xcp-ng-template-uuid", xcpNgTestVMUUID, "--xcp-ng-template", "Other Template",
+				"--xcp-ng-sr-uuid", "sr-0002", "--xcp-ng-sr", "other-sr",
+				"--xcp-ng-network-uuid", "net-0002", "--xcp-ng-network", "other-network",
+			},
+			want: core.XCPNgConfig{TemplateUUID: xcpNgTestVMUUID, SRUUID: "sr-0002", NetworkUUID: "net-0002"},
+		},
+		{
+			name: "empty uuid flags clear stale names",
+			args: []string{"--xcp-ng-template-uuid=", "--xcp-ng-sr-uuid=", "--xcp-ng-network-uuid="},
+			want: core.XCPNgConfig{},
+		},
 	}
 
 	for _, tt := range tests {

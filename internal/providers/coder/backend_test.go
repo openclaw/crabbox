@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -40,6 +41,46 @@ func TestCoderProviderSpec(t *testing.T) {
 	for _, feature := range []Feature{Feature("ssh"), Feature("crabbox-sync"), Feature("cleanup")} {
 		if !spec.Features.Has(feature) {
 			t.Fatalf("features=%v missing %s", spec.Features, feature)
+		}
+	}
+}
+
+func TestCoderOrdinaryFlagMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want []string
+	}{{"", nil}, {" \t ", nil}, {", ,", []string{}}, {"none", []string{"none"}}, {" a=1, ,b=2,a=1 ", []string{"a=1", "b=2", "a=1"}}} {
+		t.Run(tc.raw, func(t *testing.T) {
+			cfg := core.Config{Provider: "unselected-metadata", WorkRoot: "generic", Coder: core.CoderConfig{CLIPath: "coder", Template: "prior", Preset: "prior", WorkspacePrefix: "prior", WorkRoot: "prior", DeleteOnRelease: true, Wait: "yes", UseParameterDefaults: true, Parameters: []string{"prior"}, RichParameterFile: "prior"}}
+			fs := flag.NewFlagSet("metadata", flag.ContinueOnError)
+			values := (Provider{}).RegisterFlags(fs, cfg)
+			before := cfg
+			if fs.Lookup("coder-parameter").DefValue != "prior" {
+				t.Fatal("parameter registration default")
+			}
+			if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, before) {
+				t.Fatal("unvisited values changed")
+			}
+			if err := fs.Parse([]string{"--coder-cli=~/coder", "--coder-template= template ", "--coder-preset= preset ", "--coder-workspace-prefix= prefix ", "--coder-work-root=~/guest", "--coder-delete-on-release=false", "--coder-wait= auto ", "--coder-use-parameter-defaults=false", "--coder-parameter=first=1", "--coder-parameter=" + tc.raw, "--coder-rich-parameter-file=~/params"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			want := core.CoderConfig{CLIPath: "~/coder", Template: " template ", Preset: " preset ", WorkspacePrefix: " prefix ", WorkRoot: "~/guest", Wait: " auto ", Parameters: tc.want, RichParameterFile: "~/params"}
+			if !reflect.DeepEqual(cfg.Coder, want) || cfg.WorkRoot != "~/guest" || core.IsWorkRootExplicit(&cfg) {
+				t.Fatalf("flags=%#v want %#v", cfg.Coder, want)
+			}
+		})
+	}
+	cfg := core.Config{Provider: "unselected-metadata", Coder: core.CoderConfig{CLIPath: "prior"}}
+	before := cfg
+	for _, foreign := range []any{nil, struct{}{}} {
+		if err := (Provider{}).ApplyFlags(&cfg, flag.NewFlagSet("foreign", flag.ContinueOnError), foreign); err != nil || !reflect.DeepEqual(cfg, before) {
+			t.Fatal("foreign values changed config")
 		}
 	}
 }
