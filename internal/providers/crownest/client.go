@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	core "github.com/openclaw/crabbox/internal/cli"
 	"io"
 	"net/http"
 	"net/url"
@@ -122,7 +123,7 @@ func crownestRedirectError(destination *url.URL) error {
 }
 
 func sameOrigin(a, b *url.URL) bool {
-	return shared.SameOrigin(a, b)
+	return core.SameHTTPOrigin(a, b)
 }
 
 func (c *httpClient) BaseURL() string { return c.baseURL }

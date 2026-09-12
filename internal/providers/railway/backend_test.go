@@ -16,7 +16,6 @@ import (
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
@@ -355,8 +354,8 @@ func TestSameRailwayOrigin(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			candidate, _ := url.Parse(test.raw)
-			if got := shared.SameOrigin(trusted, candidate); got != test.want {
-				t.Fatalf("shared.SameOrigin(%q)=%v, want %v", test.raw, got, test.want)
+			if got := core.SameHTTPOrigin(trusted, candidate); got != test.want {
+				t.Fatalf("core.SameHTTPOrigin(%q)=%v, want %v", test.raw, got, test.want)
 			}
 		})
 	}

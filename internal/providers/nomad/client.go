@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	core "github.com/openclaw/crabbox/internal/cli"
 	"io"
 	"net"
 	"net/http"
@@ -16,7 +17,6 @@ import (
 
 	"github.com/hashicorp/go-cleanhttp"
 	nomadapi "github.com/hashicorp/nomad/api"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type Client interface {
@@ -132,7 +132,7 @@ func secureNomadHTTPClient(source *http.Client, trusted *url.URL) *http.Client {
 }
 
 func sameNomadOrigin(a, b *url.URL) bool {
-	return shared.SameOrigin(a, b)
+	return core.SameHTTPOrigin(a, b)
 }
 
 func sanitizeNomadClientError(err error) error {

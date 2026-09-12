@@ -462,7 +462,7 @@ func (c *azureDynamicSessionsClient) nextURL(next string) (string, error) {
 }
 
 func sameOriginURL(a, b *url.URL) bool {
-	return shared.SameOrigin(a, b)
+	return core.SameHTTPOrigin(a, b)
 }
 
 func (c *azureDynamicSessionsClient) url(path string, query url.Values) string {

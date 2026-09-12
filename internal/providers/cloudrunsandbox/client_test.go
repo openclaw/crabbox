@@ -749,16 +749,16 @@ func TestSecureHTTPClientSameOrigin(t *testing.T) {
 	t.Parallel()
 	trusted, _ := url.Parse("https://gw.example.run.app")
 	other, _ := url.Parse("https://evil.example")
-	if !shared.SameOrigin(trusted, trusted) || shared.SameOrigin(trusted, other) {
+	if !core.SameHTTPOrigin(trusted, trusted) || core.SameHTTPOrigin(trusted, other) {
 		t.Fatal("sameOrigin mismatch")
 	}
 	explicitHTTPS, _ := url.Parse("https://gw.example.run.app:443")
-	if !shared.SameOrigin(trusted, explicitHTTPS) {
+	if !core.SameHTTPOrigin(trusted, explicitHTTPS) {
 		t.Fatal("default HTTPS port mismatch")
 	}
 	httpURL, _ := url.Parse("http://127.0.0.1")
 	explicitHTTP, _ := url.Parse("http://127.0.0.1:80")
-	if !shared.SameOrigin(httpURL, explicitHTTP) {
+	if !core.SameHTTPOrigin(httpURL, explicitHTTP) {
 		t.Fatal("default HTTP port mismatch")
 	}
 	client := shared.SecureHTTPClient(http.DefaultClient, trusted, cloudRunSandboxRedirectError)

@@ -553,8 +553,8 @@ func TestSameSmolvmOrigin(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := shared.SameOrigin(base, redirected); got != tc.want {
-				t.Fatalf("shared.SameOrigin(%q) = %v, want %v", tc.url, got, tc.want)
+			if got := core.SameHTTPOrigin(base, redirected); got != tc.want {
+				t.Fatalf("core.SameHTTPOrigin(%q) = %v, want %v", tc.url, got, tc.want)
 			}
 		})
 	}

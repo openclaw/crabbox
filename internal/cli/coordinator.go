@@ -2534,7 +2534,7 @@ func (c *CoordinatorClient) doHTTPWithHeaders(ctx context.Context, method, path 
 func (c *CoordinatorClient) secureHTTPClient() *http.Client {
 	trusted, _ := url.Parse(c.BaseURL)
 	return redirectCheckedHTTPClient(c.Client, func(req *http.Request) error {
-		if !sameHTTPOrigin(trusted, req.URL) {
+		if !SameHTTPOrigin(trusted, req.URL) {
 			return fmt.Errorf("coordinator refused cross-origin redirect to %s", req.URL.Redacted())
 		}
 		return nil

@@ -254,7 +254,7 @@ func isUnikraftCloudMutation(method string) bool {
 }
 
 func sameUnikraftCloudOrigin(a, b *url.URL) bool {
-	return shared.SameOrigin(a, b)
+	return core.SameHTTPOrigin(a, b)
 }
 
 type unikraftCloudRedirectError struct {

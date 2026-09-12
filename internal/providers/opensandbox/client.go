@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	core "github.com/openclaw/crabbox/internal/cli"
 	"io"
 	"net"
 	"net/http"
@@ -239,7 +240,7 @@ func secureOpenSandboxHTTPClient(source *http.Client) *http.Client {
 }
 
 func sameOpenSandboxOrigin(a, b *url.URL) bool {
-	return shared.SameOrigin(a, b)
+	return core.SameHTTPOrigin(a, b)
 }
 
 func (c *sdkOpenSandboxClient) BaseURL() string { return c.base }

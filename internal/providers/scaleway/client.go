@@ -19,7 +19,6 @@ import (
 	"github.com/scaleway/scaleway-sdk-go/scw"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const defaultScalewayAPIURL = "https://api.scaleway.com"
@@ -280,7 +279,7 @@ func isScalewayRedirect(status int) bool {
 }
 
 func sameScalewayOrigin(a, b *url.URL) bool {
-	return shared.SameOrigin(a, b)
+	return core.SameHTTPOrigin(a, b)
 }
 
 func scalewayProfileFromSDKConfig() (*scw.Profile, error) {

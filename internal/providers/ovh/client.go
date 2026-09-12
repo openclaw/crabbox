@@ -19,7 +19,6 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 var (
@@ -267,7 +266,7 @@ func secureOVHHTTPClient(source *http.Client, trusted *url.URL) *http.Client {
 }
 
 func sameOVHOrigin(a, b *url.URL) bool {
-	return shared.SameOrigin(a, b)
+	return core.SameHTTPOrigin(a, b)
 }
 
 func sanitizeOVHClientError(err error) error {

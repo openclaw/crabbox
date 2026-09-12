@@ -519,7 +519,7 @@ unchanged. It does not prove that canceling a bridge stops its remote workload.
 
 Vanilla provider HTTP redirect policy also belongs in
 `internal/providers/shared`. `shared.SecureHTTPClient` clones an injected
-client, rejects destinations outside a trusted `shared.SameOrigin`, preserves
+client, rejects destinations outside a trusted `core.SameHTTPOrigin`, preserves
 an existing redirect hook, and otherwise applies the standard redirect limit.
 The adapter supplies the exact refusal error and retains any additional path,
 method, transport, previous-hop, or provider-specific origin policy locally.

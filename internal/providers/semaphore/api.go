@@ -13,7 +13,6 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type apiClient struct {
@@ -358,7 +357,7 @@ func (c *apiClient) apiURL(path string) (string, error) {
 }
 
 func sameOriginURL(a, b *url.URL) bool {
-	return shared.SameOrigin(a, b)
+	return core.SameHTTPOrigin(a, b)
 }
 
 func (c *apiClient) getWithHeaders(ctx context.Context, path string) ([]byte, http.Header, error) {

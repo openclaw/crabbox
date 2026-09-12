@@ -421,7 +421,7 @@ retryability, normalization, ownership checks, provider actions, claim updates,
 cleanup, and error wording in the adapter.
 
 Vanilla provider HTTP redirect guards should use `shared.SecureHTTPClient` and
-`shared.SameOrigin`. The shared policy compares scheme and hostname
+`core.SameHTTPOrigin`. The shared policy compares scheme and hostname
 case-insensitively, normalizes the default HTTP and HTTPS ports, preserves an
 injected redirect hook, and otherwise retains the standard 10-redirect cap.
 The adapter still builds its exact provider-specific refusal error. Keep a

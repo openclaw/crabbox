@@ -411,7 +411,7 @@ func downloadArtifactURL(ctx context.Context, file artifactManifestFile, outPath
 
 func artifactHTTPClient(origin *url.URL) *http.Client {
 	return redirectCheckedHTTPClient(nil, func(req *http.Request) error {
-		if !sameHTTPOrigin(origin, req.URL) {
+		if !SameHTTPOrigin(origin, req.URL) {
 			return errArtifactCrossOriginRedirect
 		}
 		return nil
