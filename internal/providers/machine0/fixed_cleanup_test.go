@@ -43,7 +43,7 @@ func TestMachine0FixedReadinessFailureBindsIdentity(t *testing.T) {
 				}
 				return item, nil
 			}
-			b.waitSSH = func(context.Context, *SSHTarget, time.Duration) error { return failure }
+			b.waitSSH = func(context.Context, *core.SSHTarget, time.Duration) error { return failure }
 			if _, err := b.Acquire(context.Background(), req); err == nil || !strings.Contains(err.Error(), failure.Error()) {
 				t.Fatalf("expected readiness failure, got %v", err)
 			}
@@ -70,14 +70,14 @@ func TestMachine0ResumeRejectsTerminalFixedLease(t *testing.T) {
 				t.Fatal(err)
 			}
 			if released {
-				if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+				if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 					t.Fatal(err)
 				}
 			}
 			api.machines = []machine{}
 			before := readFixedMachine0Claim(t, req.RequestedLeaseID)
 			starts := len(api.started)
-			if err := b.Resume(context.Background(), ResumeRequest{ID: req.RequestedLeaseID}); err == nil {
+			if err := b.Resume(context.Background(), core.ResumeRequest{ID: req.RequestedLeaseID}); err == nil {
 				t.Fatal("resume reported success without a live resource")
 			}
 			if len(api.started) != starts || !reflect.DeepEqual(before, readFixedMachine0Claim(t, req.RequestedLeaseID)) {
@@ -162,11 +162,11 @@ func TestMachine0FixedNativeCreateResponseRemainsStoppable(t *testing.T) {
 			}
 			runner.responses["ls\x00--json"] = core.LocalCommandResult{Stdout: "[" + string(data) + "]"}
 			runner.responses[get] = core.LocalCommandResult{Stdout: string(data)}
-			lease, err := b.Resolve(context.Background(), ResolveRequest{ID: req.RequestedLeaseID, ReleaseOnly: true})
+			lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: req.RequestedLeaseID, ReleaseOnly: true})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+			if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 				t.Fatal(err)
 			}
 			assertFixedMachine0Tombstone(t, readFixedMachine0Claim(t, req.RequestedLeaseID))
@@ -196,7 +196,7 @@ func TestMachine0FixedResolvedClaimReplacementFencesDeletion(t *testing.T) {
 	if _, err := b.Acquire(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: req.RequestedLeaseID, ReleaseOnly: true})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: req.RequestedLeaseID, ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,24 +206,24 @@ func TestMachine0FixedResolvedClaimReplacementFencesDeletion(t *testing.T) {
 	if err := core.ReplaceLeaseClaimIfUnchanged(claim.LeaseID, claim, replacement); err != nil {
 		t.Fatal(err)
 	}
-	err = b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease})
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease})
 	if err == nil || !strings.Contains(err.Error(), "claim changed") || len(api.removed) != 0 {
 		t.Fatalf("stale resolve deleted replacement: err=%v removed=%v", err, api.removed)
 	}
-	if _, err := b.Resolve(context.Background(), ResolveRequest{ID: req.RequestedLeaseID, Repo: req.Repo}); err == nil {
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: req.RequestedLeaseID, Repo: req.Repo}); err == nil {
 		t.Fatal("resolve ignored repository binding")
 	}
 }
 
 func TestMachine0FixedCleanupRetainsInvisiblePreparation(t *testing.T) {
 	b, api, req := fixedMachine0TestFixture(t)
-	b.waitSSH = func(context.Context, *SSHTarget, time.Duration) error { return errors.New("SSH failed") }
+	b.waitSSH = func(context.Context, *core.SSHTarget, time.Duration) error { return errors.New("SSH failed") }
 	if _, err := b.Acquire(context.Background(), req); err == nil {
 		t.Fatal("expected interrupted acquisition")
 	}
 	before := readFixedMachine0Claim(t, req.RequestedLeaseID)
 	api.machines = []machine{}
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if after := readFixedMachine0Claim(t, req.RequestedLeaseID); !reflect.DeepEqual(before, after) {
@@ -414,7 +414,7 @@ func TestMachine0ResolveReclaimsExistingLease(t *testing.T) {
 				t.Fatal(err)
 			}
 			other := core.Repo{Root: t.TempDir()}
-			resolved, err := b.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID, Repo: other, Reclaim: true, Prepare: true})
+			resolved, err := b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, Repo: other, Reclaim: true, Prepare: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -422,7 +422,7 @@ func TestMachine0ResolveReclaimsExistingLease(t *testing.T) {
 			if err != nil || after.RepoRoot != other.Root || after.CloudID != before.CloudID || !reflect.DeepEqual(after.FixedCreateIntent, before.FixedCreateIntent) || len(api.created) != 1 || resolved.Server.CloudID != before.CloudID {
 				t.Fatalf("reclaim did not transfer exact lease: err=%v before=%+v after=%+v", err, before, after)
 			}
-			if _, err := b.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID, Repo: other, Prepare: true}); err != nil {
+			if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, Repo: other, Prepare: true}); err != nil {
 				t.Fatalf("new owner resolve: %v", err)
 			}
 		})
@@ -476,7 +476,7 @@ func TestMachine0CheckpointAccountFencesAbsenceAndRelease(t *testing.T) {
 			if (err != nil) != tc.fail || absent == tc.fail {
 				t.Fatalf("absence=%t err=%v", absent, err)
 			}
-			outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: lease, CheckpointID: checkpointID})
+			outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease, CheckpointID: checkpointID})
 			if (err != nil) != tc.fail || outcome.Terminal == tc.fail {
 				t.Fatalf("release outcome=%+v err=%v", outcome, err)
 			}

@@ -3,6 +3,8 @@ package unikraftcloud
 import (
 	"context"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestNonAdoptableCreateClaimsClearOnlyAfterAbsenceProof(t *testing.T) {
@@ -14,7 +16,7 @@ func TestNonAdoptableCreateClaimsClearOnlyAfterAbsenceProof(t *testing.T) {
 				b := testBackend(api, nil, nil)
 				leaseID := newLeaseID()
 				createReq := createInstanceRequest{
-					Name:      leaseProviderName(leaseID, ""),
+					Name:      core.LeaseProviderName(leaseID, ""),
 					Image:     b.cfg.UnikraftCloud.Image,
 					MemoryMB:  b.cfg.UnikraftCloud.MemoryMB,
 					Autostart: true,
@@ -23,9 +25,7 @@ func TestNonAdoptableCreateClaimsClearOnlyAfterAbsenceProof(t *testing.T) {
 					leaseID,
 					"non-adoptable",
 					testClaimScope(t, api.BaseURL()),
-					testUserUUID,
-					WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}, Keep: true},
-					createReq,
+					testUserUUID, core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}, Keep: true}, createReq,
 				)
 				if err != nil {
 					t.Fatalf("create preflight claim: %v", err)
@@ -39,9 +39,9 @@ func TestNonAdoptableCreateClaimsClearOnlyAfterAbsenceProof(t *testing.T) {
 
 				switch operation {
 				case "stop":
-					err = b.Stop(context.Background(), StopRequest{ID: claim.LeaseID})
+					err = b.Stop(context.Background(), core.StopRequest{ID: claim.LeaseID})
 				case "cleanup":
-					err = b.Cleanup(context.Background(), CleanupRequest{})
+					err = b.Cleanup(context.Background(), core.CleanupRequest{})
 				}
 				if err != nil {
 					t.Fatalf("%s: %v", operation, err)
@@ -49,7 +49,7 @@ func TestNonAdoptableCreateClaimsClearOnlyAfterAbsenceProof(t *testing.T) {
 				if len(api.created) != 0 || len(api.deletedIDs) != 0 {
 					t.Fatalf("provider mutations = created %#v deleted %#v, want none", api.created, api.deletedIDs)
 				}
-				if _, exists, readErr := readLeaseClaimWithPresence(claim.LeaseID); readErr != nil || exists {
+				if _, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID); readErr != nil || exists {
 					t.Fatalf("claim exists=%v err=%v, want removed", exists, readErr)
 				}
 			})

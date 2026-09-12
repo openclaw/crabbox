@@ -32,10 +32,10 @@ func unikraftCloudClaimScope(baseURL, accountUUID string) (string, error) {
 	baseURL = strings.TrimSpace(baseURL)
 	accountUUID = strings.TrimSpace(accountUUID)
 	if baseURL == "" {
-		return "", exit(2, "provider=%s API endpoint is unavailable", providerName)
+		return "", core.Exit(2, "provider=%s API endpoint is unavailable", providerName)
 	}
 	if !unikraftCloudUUIDPattern.MatchString(accountUUID) {
-		return "", exit(3, "provider=%s account identity is unavailable", providerName)
+		return "", core.Exit(3, "provider=%s account identity is unavailable", providerName)
 	}
 	return "endpoint:" + baseURL + "|account:" + accountUUID, nil
 }
@@ -54,7 +54,7 @@ func cloneLabels(labels map[string]string) map[string]string {
 	return out
 }
 
-func (b *backend) createIntentClaim(leaseID, slug, scope, accountUUID string, req WarmupRequest, createReq createInstanceRequest) (LeaseClaim, error) {
+func (b *backend) createIntentClaim(leaseID, slug, scope, accountUUID string, req core.WarmupRequest, createReq createInstanceRequest) (core.LeaseClaim, error) {
 	labels := directLeaseLabels(b.cfg, leaseID, slug, req.Keep, core.ClockNow(b.rt.Clock))
 	labels["state"] = ukcStateCreatePreflight
 	labels[ukcLabelResourceName] = createReq.Name
@@ -64,27 +64,23 @@ func (b *backend) createIntentClaim(leaseID, slug, scope, accountUUID string, re
 		leaseID,
 		slug,
 		b.cfg,
-		scope,
-		Server{Provider: providerName, Name: createReq.Name, Status: ukcStateCreatePreflight, Labels: labels},
-		req.Repo.Root,
+		scope, core.Server{Provider: providerName, Name: createReq.Name, Status: ukcStateCreatePreflight, Labels: labels}, req.Repo.Root,
 		b.cfg.IdleTimeout,
-		req.Reclaim,
-		LeaseClaim{},
-		false,
+		req.Reclaim, core.LeaseClaim{}, false,
 	)
 	if err != nil {
 		cause := fmt.Errorf("persist %s create preflight %s: %w", providerName, leaseID, err)
 		if intent.LeaseID != "" {
-			return LeaseClaim{}, discardUnmutatedUnikraftCloudCreateClaim(intent, cause)
+			return core.LeaseClaim{}, discardUnmutatedUnikraftCloudCreateClaim(intent, cause)
 		}
-		return LeaseClaim{}, cause
+		return core.LeaseClaim{}, cause
 	}
 	return intent, nil
 }
 
-func transitionUnikraftCloudCreateState(claim LeaseClaim, state string) (LeaseClaim, error) {
+func transitionUnikraftCloudCreateState(claim core.LeaseClaim, state string) (core.LeaseClaim, error) {
 	if claim.CloudID != "" {
-		return LeaseClaim{}, exit(5, "%s lease %s is already bound to instance %s", providerName, claim.LeaseID, claim.CloudID)
+		return core.LeaseClaim{}, core.Exit(5, "%s lease %s is already bound to instance %s", providerName, claim.LeaseID, claim.CloudID)
 	}
 	updated := claim
 	updated.Labels = cloneLabels(claim.Labels)
@@ -92,36 +88,35 @@ func transitionUnikraftCloudCreateState(claim LeaseClaim, state string) (LeaseCl
 	written, err := replaceLeaseClaimIfUnchangedDurable(claim.LeaseID, claim, updated)
 	if err != nil {
 		if written.Revision == "" {
-			return LeaseClaim{}, err
+			return core.LeaseClaim{}, err
 		}
-		current, exists, readErr := readLeaseClaimWithPresence(claim.LeaseID)
+		current, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID)
 		if readErr != nil {
-			return LeaseClaim{}, errors.Join(err, readErr)
+			return core.LeaseClaim{}, errors.Join(err, readErr)
 		}
 		if !exists || !reflect.DeepEqual(current, written) {
-			return LeaseClaim{}, err
+			return core.LeaseClaim{}, err
 		}
 		retryWritten, retryErr := replaceLeaseClaimIfUnchangedDurable(claim.LeaseID, current, current)
 		if retryErr != nil {
-			return LeaseClaim{}, errors.Join(err, retryErr)
+			return core.LeaseClaim{}, errors.Join(err, retryErr)
 		}
 		return retryWritten, nil
 	}
 	return written, nil
 }
 
-func sameUnikraftCloudCreateIdentity(left, right LeaseClaim) bool {
+func sameUnikraftCloudCreateIdentity(left, right core.LeaseClaim) bool {
 	return left.LeaseID == right.LeaseID &&
 		left.Provider == right.Provider &&
-		left.ProviderScope == right.ProviderScope &&
-		normalizeLeaseSlug(left.Slug) == normalizeLeaseSlug(right.Slug) &&
+		left.ProviderScope == right.ProviderScope && core.NormalizeLeaseSlug(left.Slug) == core.NormalizeLeaseSlug(right.Slug) &&
 		left.Labels[ukcLabelResourceName] == right.Labels[ukcLabelResourceName] &&
 		left.Labels[ukcLabelRequestHash] == right.Labels[ukcLabelRequestHash] &&
 		left.Labels[ukcLabelAccountUUID] == right.Labels[ukcLabelAccountUUID]
 }
 
-func discardUnmutatedUnikraftCloudCreateClaim(expected LeaseClaim, cause error) error {
-	current, exists, readErr := readLeaseClaimWithPresence(expected.LeaseID)
+func discardUnmutatedUnikraftCloudCreateClaim(expected core.LeaseClaim, cause error) error {
+	current, exists, readErr := core.ReadLeaseClaimWithPresence(expected.LeaseID)
 	if readErr != nil {
 		return errors.Join(cause, readErr)
 	}
@@ -135,11 +130,11 @@ func discardUnmutatedUnikraftCloudCreateClaim(expected LeaseClaim, cause error) 
 	if state != ukcStateCreatePreflight && state != ukcStateCreateIntent {
 		return cause
 	}
-	removeErr := removeLeaseClaimIfUnchanged(current.LeaseID, current)
+	removeErr := core.RemoveLeaseClaimIfUnchanged(current.LeaseID, current)
 	if removeErr == nil {
 		return cause
 	}
-	after, afterExists, afterErr := readLeaseClaimWithPresence(current.LeaseID)
+	after, afterExists, afterErr := core.ReadLeaseClaimWithPresence(current.LeaseID)
 	if afterErr != nil {
 		return errors.Join(cause, removeErr, afterErr)
 	}
@@ -150,8 +145,8 @@ func discardUnmutatedUnikraftCloudCreateClaim(expected LeaseClaim, cause error) 
 	return errors.Join(cause, removeErr, quarantineErr)
 }
 
-func quarantineRejectedUnikraftCloudCreateClaim(expected LeaseClaim, cause error) error {
-	current, exists, readErr := readLeaseClaimWithPresence(expected.LeaseID)
+func quarantineRejectedUnikraftCloudCreateClaim(expected core.LeaseClaim, cause error) error {
+	current, exists, readErr := core.ReadLeaseClaimWithPresence(expected.LeaseID)
 	if readErr != nil {
 		return errors.Join(cause, readErr)
 	}
@@ -174,7 +169,7 @@ func quarantineRejectedUnikraftCloudCreateClaim(expected LeaseClaim, cause error
 	if quarantineErr == nil {
 		return cause
 	}
-	after, afterExists, afterErr := readLeaseClaimWithPresence(current.LeaseID)
+	after, afterExists, afterErr := core.ReadLeaseClaimWithPresence(current.LeaseID)
 	if afterErr != nil {
 		return errors.Join(cause, quarantineErr, afterErr)
 	}
@@ -184,23 +179,23 @@ func quarantineRejectedUnikraftCloudCreateClaim(expected LeaseClaim, cause error
 	return errors.Join(cause, quarantineErr, fmt.Errorf("%s rejected create recovery claim %s remains adoptable", providerName, expected.LeaseID))
 }
 
-func validateUnikraftCloudReadyClaimReadback(intent, current LeaseClaim, instance ukcInstance) error {
+func validateUnikraftCloudReadyClaimReadback(intent, current core.LeaseClaim, instance ukcInstance) error {
 	if err := validateUnikraftCloudClaim(current, intent.ProviderScope); err != nil {
 		return err
 	}
 	if !sameUnikraftCloudCreateIdentity(current, intent) {
-		return exit(4, "%s lease %q ready claim changed recovery identity", providerName, intent.LeaseID)
+		return core.Exit(4, "%s lease %q ready claim changed recovery identity", providerName, intent.LeaseID)
 	}
 	if current.Labels["state"] != ukcStateReady || current.CloudID != instance.UUID || current.Labels[ukcLabelResourceName] != instance.Name {
-		return exit(4, "%s lease %q does not contain the expected ready binding", providerName, intent.LeaseID)
+		return core.Exit(4, "%s lease %q does not contain the expected ready binding", providerName, intent.LeaseID)
 	}
 	return nil
 }
 
-func (b *backend) publishReadyClaim(intent LeaseClaim, instance ukcInstance) (LeaseClaim, error) {
+func (b *backend) publishReadyClaim(intent core.LeaseClaim, instance ukcInstance) (core.LeaseClaim, error) {
 	resourceName := strings.TrimSpace(intent.Labels[ukcLabelResourceName])
 	if err := validateUnikraftCloudInstanceIdentity(instance, strings.TrimSpace(instance.UUID), resourceName); err != nil {
-		return LeaseClaim{}, err
+		return core.LeaseClaim{}, err
 	}
 	labels := cloneLabels(intent.Labels)
 	labels["state"] = ukcStateReady
@@ -210,15 +205,13 @@ func (b *backend) publishReadyClaim(intent LeaseClaim, instance ukcInstance) (Le
 		intent.LeaseID,
 		intent.Slug,
 		b.cfg,
-		intent.ProviderScope,
-		Server{
+		intent.ProviderScope, core.Server{
 			CloudID:  instance.UUID,
 			Provider: providerName,
 			Name:     instance.Name,
 			Status:   normalizedInstanceState(instance.State),
 			Labels:   labels,
-		},
-		intent.RepoRoot,
+		}, intent.RepoRoot,
 		time.Duration(intent.IdleTimeoutSeconds)*time.Second,
 		false,
 		intent,
@@ -230,29 +223,29 @@ func (b *backend) publishReadyClaim(intent LeaseClaim, instance ukcInstance) (Le
 	return ready, nil
 }
 
-func (b *backend) reconcileReadyClaimWrite(intent LeaseClaim, instance ukcInstance, writeErr error) (LeaseClaim, error) {
-	current, exists, readErr := readLeaseClaimWithPresence(intent.LeaseID)
+func (b *backend) reconcileReadyClaimWrite(intent core.LeaseClaim, instance ukcInstance, writeErr error) (core.LeaseClaim, error) {
+	current, exists, readErr := core.ReadLeaseClaimWithPresence(intent.LeaseID)
 	if readErr != nil {
-		return LeaseClaim{}, errors.Join(writeErr, readErr)
+		return core.LeaseClaim{}, errors.Join(writeErr, readErr)
 	}
 	if exists {
 		if err := validateUnikraftCloudReadyClaimReadback(intent, current, instance); err != nil {
-			return LeaseClaim{}, errors.Join(writeErr, err)
+			return core.LeaseClaim{}, errors.Join(writeErr, err)
 		}
 		written, err := replaceLeaseClaimIfUnchangedDurable(intent.LeaseID, current, current)
 		if err != nil {
-			return LeaseClaim{}, errors.Join(writeErr, err)
+			return core.LeaseClaim{}, errors.Join(writeErr, err)
 		}
 		return written, nil
 	}
 	unlockSlug, lockErr := lockUnikraftCloudSlugAllocation(context.Background())
 	if lockErr != nil {
-		return LeaseClaim{}, errors.Join(writeErr, fmt.Errorf("reserve restored %s lease slug: %w", providerName, lockErr))
+		return core.LeaseClaim{}, errors.Join(writeErr, fmt.Errorf("reserve restored %s lease slug: %w", providerName, lockErr))
 	}
-	recoveredSlug, slugErr := allocateClaimLeaseSlug(intent.LeaseID, intent.Slug)
+	recoveredSlug, slugErr := core.AllocateClaimLeaseSlug(intent.LeaseID, intent.Slug)
 	if slugErr != nil {
 		unlockSlug()
-		return LeaseClaim{}, errors.Join(writeErr, fmt.Errorf("reserve restored %s lease slug: %w", providerName, slugErr))
+		return core.LeaseClaim{}, errors.Join(writeErr, fmt.Errorf("reserve restored %s lease slug: %w", providerName, slugErr))
 	}
 	labels := cloneLabels(intent.Labels)
 	labels["slug"] = recoveredSlug
@@ -263,77 +256,73 @@ func (b *backend) reconcileReadyClaimWrite(intent LeaseClaim, instance ukcInstan
 		intent.LeaseID,
 		recoveredSlug,
 		b.cfg,
-		intent.ProviderScope,
-		Server{CloudID: instance.UUID, Provider: providerName, Name: instance.Name, Status: normalizedInstanceState(instance.State), Labels: labels},
-		intent.RepoRoot,
+		intent.ProviderScope, core.Server{CloudID: instance.UUID, Provider: providerName, Name: instance.Name, Status: normalizedInstanceState(instance.State), Labels: labels}, intent.RepoRoot,
 		time.Duration(intent.IdleTimeoutSeconds)*time.Second,
-		false,
-		LeaseClaim{},
-		false,
+		false, core.LeaseClaim{}, false,
 	)
 	unlockSlug()
 	if recoverErr != nil {
-		return LeaseClaim{}, errors.Join(writeErr, fmt.Errorf("restore known %s ownership: %w", providerName, recoverErr))
+		return core.LeaseClaim{}, errors.Join(writeErr, fmt.Errorf("restore known %s ownership: %w", providerName, recoverErr))
 	}
 	return recovered, nil
 }
 
-func validateUnikraftCloudClaim(claim LeaseClaim, scope string) error {
+func validateUnikraftCloudClaim(claim core.LeaseClaim, scope string) error {
 	if claim.LeaseID == "" || !strings.HasPrefix(claim.LeaseID, leasePrefix) {
-		return exit(4, "%s claim has an invalid lease identity", providerName)
+		return core.Exit(4, "%s claim has an invalid lease identity", providerName)
 	}
 	if claim.Provider != providerName {
-		return exit(4, "%s lease %q belongs to provider=%s", providerName, claim.LeaseID, claim.Provider)
+		return core.Exit(4, "%s lease %q belongs to provider=%s", providerName, claim.LeaseID, claim.Provider)
 	}
 	if claim.ProviderScope != scope {
-		return exit(4, "%s lease %q belongs to a different API endpoint or account", providerName, claim.LeaseID)
+		return core.Exit(4, "%s lease %q belongs to a different API endpoint or account", providerName, claim.LeaseID)
 	}
-	if claim.Labels["provider"] != providerName || claim.Labels["lease"] != claim.LeaseID || normalizeLeaseSlug(claim.Labels["slug"]) != normalizeLeaseSlug(claim.Slug) {
-		return exit(4, "%s lease %q ownership labels do not match its local claim", providerName, claim.LeaseID)
+	if claim.Labels["provider"] != providerName || claim.Labels["lease"] != claim.LeaseID || core.NormalizeLeaseSlug(claim.Labels["slug"]) != core.NormalizeLeaseSlug(claim.Slug) {
+		return core.Exit(4, "%s lease %q ownership labels do not match its local claim", providerName, claim.LeaseID)
 	}
 	resourceName := claim.Labels[ukcLabelResourceName]
 	accountUUID := claim.Labels[ukcLabelAccountUUID]
 	if strings.TrimSpace(resourceName) == "" || strings.TrimSpace(accountUUID) == "" || strings.TrimSpace(claim.Labels[ukcLabelRequestHash]) == "" {
-		return exit(4, "%s lease %q has incomplete recovery identity", providerName, claim.LeaseID)
+		return core.Exit(4, "%s lease %q has incomplete recovery identity", providerName, claim.LeaseID)
 	}
-	if resourceName != leaseProviderName(claim.LeaseID, "") {
-		return exit(4, "%s lease %q has an unexpected recovery resource name", providerName, claim.LeaseID)
+	if resourceName != core.LeaseProviderName(claim.LeaseID, "") {
+		return core.Exit(4, "%s lease %q has an unexpected recovery resource name", providerName, claim.LeaseID)
 	}
 	if accountUUID != unikraftCloudScopeAccountUUID(scope) {
-		return exit(4, "%s lease %q account identity does not match its local claim scope", providerName, claim.LeaseID)
+		return core.Exit(4, "%s lease %q account identity does not match its local claim scope", providerName, claim.LeaseID)
 	}
 	if claim.CloudID != "" {
 		if !unikraftCloudUUIDPattern.MatchString(claim.CloudID) {
-			return exit(4, "%s lease %q has an invalid instance UUID", providerName, claim.LeaseID)
+			return core.Exit(4, "%s lease %q has an invalid instance UUID", providerName, claim.LeaseID)
 		}
 		if claim.Labels[ukcLabelInstanceUUID] != claim.CloudID {
-			return exit(4, "%s lease %q has a mismatched instance binding", providerName, claim.LeaseID)
+			return core.Exit(4, "%s lease %q has a mismatched instance binding", providerName, claim.LeaseID)
 		}
 	}
 	return nil
 }
 
-func verifyUnikraftCloudClaimSnapshot(snapshot, current LeaseClaim) error {
+func verifyUnikraftCloudClaimSnapshot(snapshot, current core.LeaseClaim) error {
 	if !reflect.DeepEqual(snapshot, current) {
-		return exit(4, "%s lease %q changed while waiting for its operation lock; retry with the current lease identity", providerName, snapshot.LeaseID)
+		return core.Exit(4, "%s lease %q changed while waiting for its operation lock; retry with the current lease identity", providerName, snapshot.LeaseID)
 	}
 	return nil
 }
 
 func validateUnikraftCloudInstanceIdentity(instance ukcInstance, expectedUUID, expectedName string) error {
 	if !unikraftCloudUUIDPattern.MatchString(instance.UUID) {
-		return exit(5, "%s instance response has an invalid UUID", providerName)
+		return core.Exit(5, "%s instance response has an invalid UUID", providerName)
 	}
 	if expectedUUID != "" && !strings.EqualFold(instance.UUID, expectedUUID) {
-		return exit(5, "%s instance identity changed: got %s, want %s", providerName, instance.UUID, expectedUUID)
+		return core.Exit(5, "%s instance identity changed: got %s, want %s", providerName, instance.UUID, expectedUUID)
 	}
 	if expectedName != "" && instance.Name != expectedName {
-		return exit(5, "%s instance %s name changed: got %q, want %q", providerName, instance.UUID, instance.Name, expectedName)
+		return core.Exit(5, "%s instance %s name changed: got %q, want %q", providerName, instance.UUID, instance.Name, expectedName)
 	}
 	return nil
 }
 
-func (b *backend) reconcileCreateIntent(ctx context.Context, api unikraftCloudAPI, claim LeaseClaim, removeWhenAbsent bool) (LeaseClaim, *ukcInstance, bool, error) {
+func (b *backend) reconcileCreateIntent(ctx context.Context, api unikraftCloudAPI, claim core.LeaseClaim, removeWhenAbsent bool) (core.LeaseClaim, *ukcInstance, bool, error) {
 	if claim.CloudID != "" {
 		return claim, nil, false, nil
 	}
@@ -354,13 +343,13 @@ func (b *backend) reconcileCreateIntent(ctx context.Context, api unikraftCloudAP
 	if err := b.proveCreateIntentAbsent(ctx, api, claim); err != nil {
 		return claim, nil, false, err
 	}
-	if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+	if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 		return claim, nil, false, err
 	}
-	return LeaseClaim{}, nil, true, nil
+	return core.LeaseClaim{}, nil, true, nil
 }
 
-func (b *backend) reconcileCreateIntentFromInventory(claim LeaseClaim, instances []ukcInstance) (LeaseClaim, *ukcInstance, error) {
+func (b *backend) reconcileCreateIntentFromInventory(claim core.LeaseClaim, instances []ukcInstance) (core.LeaseClaim, *ukcInstance, error) {
 	if claim.CloudID != "" || claim.Labels["state"] != ukcStateCreateIntent {
 		return claim, nil, nil
 	}
@@ -375,7 +364,7 @@ func (b *backend) reconcileCreateIntentFromInventory(claim LeaseClaim, instances
 		}
 	}
 	if len(matches) > 1 {
-		return claim, nil, exit(5, "%s create recovery found %d instances named %q; claim retained", providerName, len(matches), resourceName)
+		return claim, nil, core.Exit(5, "%s create recovery found %d instances named %q; claim retained", providerName, len(matches), resourceName)
 	}
 	if len(matches) == 1 {
 		if err := validateUnikraftCloudInstanceIdentity(matches[0], "", resourceName); err != nil {
@@ -405,82 +394,82 @@ func definiteUnikraftCloudCreateRejection(err error) bool {
 }
 
 type unikraftCloudClaimNotFoundError struct {
-	cause ExitError
+	cause core.ExitError
 }
 
 func (e *unikraftCloudClaimNotFoundError) Error() string { return e.cause.Error() }
 func (e *unikraftCloudClaimNotFoundError) Unwrap() error { return e.cause }
 
 func newUnikraftCloudClaimNotFoundError(identifier string) error {
-	return &unikraftCloudClaimNotFoundError{cause: exit(4, "%s instance %q is not claimed by Crabbox; warmup creates claimed instances, or use the Unikraft Cloud console or kraft CLI for unmanaged instances", providerName, identifier)}
+	return &unikraftCloudClaimNotFoundError{cause: core.Exit(4, "%s instance %q is not claimed by Crabbox; warmup creates claimed instances, or use the Unikraft Cloud console or kraft CLI for unmanaged instances", providerName, identifier)}
 }
 
-func (b *backend) resolveClaim(identifier, scope string) (LeaseClaim, bool, error) {
+func (b *backend) resolveClaim(identifier, scope string) (core.LeaseClaim, bool, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
-		return LeaseClaim{}, false, exit(2, "provider=%s requires --id <lease-id or slug>", providerName)
+		return core.LeaseClaim{}, false, core.Exit(2, "provider=%s requires --id <lease-id or slug>", providerName)
 	}
 	if strings.HasPrefix(identifier, leasePrefix) {
-		claim, exists, err := readLeaseClaimWithPresence(identifier)
+		claim, exists, err := core.ReadLeaseClaimWithPresence(identifier)
 		if err != nil {
-			return LeaseClaim{}, false, err
+			return core.LeaseClaim{}, false, err
 		}
 		if exists {
 			if err := validateUnikraftCloudClaim(claim, scope); err != nil {
-				return LeaseClaim{}, false, err
+				return core.LeaseClaim{}, false, err
 			}
 			return claim, true, nil
 		}
-		return LeaseClaim{}, false, newUnikraftCloudClaimNotFoundError(identifier)
+		return core.LeaseClaim{}, false, newUnikraftCloudClaimNotFoundError(identifier)
 	}
 	claims, err := listUnikraftCloudLeaseClaims()
 	if err != nil {
-		return LeaseClaim{}, false, err
+		return core.LeaseClaim{}, false, err
 	}
 	if unikraftCloudUUIDPattern.MatchString(identifier) {
-		var matched LeaseClaim
+		var matched core.LeaseClaim
 		for _, claim := range claims {
 			if claim.Provider != providerName || claim.ProviderScope != scope || !strings.EqualFold(claim.CloudID, identifier) {
 				continue
 			}
 			if matched.LeaseID != "" {
-				return LeaseClaim{}, false, exit(4, "%s instance %q is claimed by multiple local leases; use an exact lease ID", providerName, identifier)
+				return core.LeaseClaim{}, false, core.Exit(4, "%s instance %q is claimed by multiple local leases; use an exact lease ID", providerName, identifier)
 			}
 			matched = claim
 		}
 		if matched.LeaseID == "" {
-			return LeaseClaim{}, false, newUnikraftCloudClaimNotFoundError(identifier)
+			return core.LeaseClaim{}, false, newUnikraftCloudClaimNotFoundError(identifier)
 		}
 		if err := validateUnikraftCloudClaim(matched, scope); err != nil {
-			return LeaseClaim{}, false, err
+			return core.LeaseClaim{}, false, err
 		}
 		return matched, true, nil
 	}
 
-	slug := normalizeLeaseSlug(identifier)
-	var matched LeaseClaim
+	slug := core.NormalizeLeaseSlug(identifier)
+	var matched core.LeaseClaim
 	for _, claim := range claims {
 		if claim.Provider != providerName || claim.ProviderScope != scope {
 			continue
 		}
-		if claim.LeaseID != identifier && normalizeLeaseSlug(claim.Slug) != slug {
+		if claim.LeaseID != identifier && core.NormalizeLeaseSlug(claim.Slug) != slug {
 			continue
 		}
 		if matched.LeaseID != "" {
-			return LeaseClaim{}, false, exit(4, "%s identifier %q matches multiple local claims; use an exact lease ID", providerName, identifier)
+			return core.LeaseClaim{}, false, core.Exit(4, "%s identifier %q matches multiple local claims; use an exact lease ID", providerName, identifier)
 		}
 		matched = claim
 	}
 	if matched.LeaseID == "" {
-		return LeaseClaim{}, false, newUnikraftCloudClaimNotFoundError(identifier)
+		return core.LeaseClaim{}, false, newUnikraftCloudClaimNotFoundError(identifier)
 	}
 	if err := validateUnikraftCloudClaim(matched, scope); err != nil {
-		return LeaseClaim{}, false, err
+		return core.LeaseClaim{}, false, err
 	}
 	return matched, true, nil
 }
 
-func (b *backend) deleteClaimedInstance(ctx context.Context, api unikraftCloudAPI, claim LeaseClaim) (bool, error) {
+func (b *backend) deleteClaimedInstance(ctx context.Context, api unikraftCloudAPI, claim core.LeaseClaim) (bool, error) {
 	if claim.CloudID == "" {
 		state := claim.Labels["state"]
 		if state == ukcStateCreatePreflight || state == ukcStateCreateConflict {
@@ -488,7 +477,7 @@ func (b *backend) deleteClaimedInstance(ctx context.Context, api unikraftCloudAP
 			if err := b.proveInstanceAbsent(ctx, api, resourceName, resourceName); err != nil {
 				return false, fmt.Errorf("%s lease %s is non-adoptable and exact-name absence is unconfirmed; claim retained: %w", providerName, claim.LeaseID, err)
 			}
-			if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+			if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 				return false, err
 			}
 			return true, nil
@@ -500,7 +489,7 @@ func (b *backend) deleteClaimedInstance(ctx context.Context, api unikraftCloudAP
 		claim = resolved
 	}
 	if claim.CloudID == "" {
-		return false, exit(5, "%s lease %s has no resolved instance; recovery claim retained", providerName, claim.LeaseID)
+		return false, core.Exit(5, "%s lease %s has no resolved instance; recovery claim retained", providerName, claim.LeaseID)
 	}
 	instanceID := claim.CloudID
 	resourceName := claim.Labels[ukcLabelResourceName]
@@ -512,7 +501,7 @@ func (b *backend) deleteClaimedInstance(ctx context.Context, api unikraftCloudAP
 				if proofErr := b.proveInstanceAbsent(ctx, api, instanceID, resourceName); proofErr != nil {
 					return false, errors.Join(err, proofErr)
 				}
-				return true, removeLeaseClaimIfUnchanged(claim.LeaseID, claim)
+				return true, core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim)
 			}
 			return false, err
 		}
@@ -533,7 +522,7 @@ func (b *backend) deleteClaimedInstance(ctx context.Context, api unikraftCloudAP
 		deleted, deleteErr := api.DeleteInstance(ctx, instanceID)
 		if deleteErr != nil {
 			if proofErr := b.proveInstanceAbsent(ctx, api, instanceID, resourceName); proofErr == nil {
-				return true, removeLeaseClaimIfUnchanged(claim.LeaseID, claim)
+				return true, core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim)
 			}
 			return false, fmt.Errorf("delete %s instance %s was not confirmed; claim retained: %w", providerName, instanceID, deleteErr)
 		}
@@ -554,7 +543,7 @@ func (b *backend) deleteClaimedInstance(ctx context.Context, api unikraftCloudAP
 	if err := b.proveInstanceAbsent(ctx, api, instanceID, resourceName); err != nil {
 		return false, fmt.Errorf("%s deletion accepted for instance %s but absence is unconfirmed; claim retained: %w", providerName, instanceID, err)
 	}
-	if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+	if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 		return false, err
 	}
 	return false, nil
@@ -595,7 +584,7 @@ func (b *backend) proveInstanceAbsent(ctx context.Context, api unikraftCloudAPI,
 	}
 }
 
-func (b *backend) proveCreateIntentAbsent(ctx context.Context, api unikraftCloudAPI, claim LeaseClaim) error {
+func (b *backend) proveCreateIntentAbsent(ctx context.Context, api unikraftCloudAPI, claim core.LeaseClaim) error {
 	resourceName := strings.TrimSpace(claim.Labels[ukcLabelResourceName])
 	grace := b.deleteConfirmationTimeout
 	if grace <= 0 {
@@ -609,7 +598,7 @@ func (b *backend) proveCreateIntentAbsent(ctx context.Context, api unikraftCloud
 	defer cancel()
 	for {
 		if instance, err := api.GetInstance(graceCtx, resourceName); err == nil {
-			return exit(5, "%s ambiguous create for lease %s became visible as instance %s; claim retained, retry stop to reconcile exact ownership", providerName, claim.LeaseID, instance.UUID)
+			return core.Exit(5, "%s ambiguous create for lease %s became visible as instance %s; claim retained, retry stop to reconcile exact ownership", providerName, claim.LeaseID, instance.UUID)
 		} else if !isNotFound(err) {
 			return fmt.Errorf("observe %s ambiguous create %s during absence grace: %w", providerName, claim.LeaseID, err)
 		}
@@ -621,7 +610,7 @@ func (b *backend) proveCreateIntentAbsent(ctx context.Context, api unikraftCloud
 			return err
 		}
 		if unikraftCloudInventoryContains(instances, resourceName, resourceName) {
-			return exit(5, "%s ambiguous create for lease %s became visible during absence grace; claim retained, retry stop to reconcile exact ownership", providerName, claim.LeaseID)
+			return core.Exit(5, "%s ambiguous create for lease %s became visible during absence grace; claim retained, retry stop to reconcile exact ownership", providerName, claim.LeaseID)
 		}
 		timer := time.NewTimer(poll)
 		select {
@@ -667,9 +656,9 @@ func unikraftCloudTerminalState(state string) bool {
 	}
 }
 
-func serverFromClaim(claim LeaseClaim) Server {
+func serverFromClaim(claim core.LeaseClaim) core.Server {
 	labels := cloneLabels(claim.Labels)
-	return Server{
+	return core.Server{
 		CloudID:  claim.CloudID,
 		Provider: providerName,
 		Name:     core.Blank(labels[ukcLabelResourceName], claim.CloudID),
@@ -678,7 +667,7 @@ func serverFromClaim(claim LeaseClaim) Server {
 	}
 }
 
-func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
+func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	api, err := b.client()
 	if err != nil {
 		return err
@@ -706,7 +695,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		if err != nil {
 			return err
 		}
-		current, exists, readErr := readLeaseClaimWithPresence(snapshot.LeaseID)
+		current, exists, readErr := core.ReadLeaseClaimWithPresence(snapshot.LeaseID)
 		if readErr != nil {
 			unlock()
 			return readErr
@@ -720,7 +709,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			return err
 		}
 		state := current.Labels["state"]
-		remove, reason := shouldCleanupServer(serverFromClaim(current), core.ClockNow(b.rt.Clock))
+		remove, reason := core.ShouldCleanupServer(serverFromClaim(current), core.ClockNow(b.rt.Clock))
 		if state == ukcStateDeleteAttempt || state == ukcStateDeleteAccepted || state == ukcStateCreatePreflight || state == ukcStateCreateConflict {
 			remove, reason = true, "resume "+state
 		}

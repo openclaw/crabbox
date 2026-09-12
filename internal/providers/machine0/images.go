@@ -70,11 +70,11 @@ func (c *client) ListImages(ctx context.Context) ([]machineImage, error) {
 	}
 	var images []machineImage
 	if err := decodeJSON(result.Stdout, &images); err != nil {
-		return nil, exit(5, "parse machine0 images ls --json: %v", err)
+		return nil, core.Exit(5, "parse machine0 images ls --json: %v", err)
 	}
 	for i, image := range images {
 		if strings.TrimSpace(image.ID) == "" || strings.TrimSpace(image.Name) == "" || strings.TrimSpace(image.Status) == "" {
-			return nil, exit(5, "invalid machine0 image list item %d", i)
+			return nil, core.Exit(5, "invalid machine0 image list item %d", i)
 		}
 	}
 	return images, nil
@@ -87,14 +87,14 @@ func (c *client) GetImage(ctx context.Context, name string) (machineImageDetail,
 	}
 	var detail machineImageDetail
 	if err := decodeJSON(result.Stdout, &detail); err != nil {
-		return machineImageDetail{}, exit(5, "parse machine0 images get %s --json: %v", name, err)
+		return machineImageDetail{}, core.Exit(5, "parse machine0 images get %s --json: %v", name, err)
 	}
 	if detail.Image.ID == "" || detail.Image.Name == "" {
-		return machineImageDetail{}, exit(5, "invalid machine0 image details for %s", name)
+		return machineImageDetail{}, core.Exit(5, "invalid machine0 image details for %s", name)
 	}
 	for i, version := range detail.Versions {
 		if version.Version <= 0 {
-			return machineImageDetail{}, exit(5, "invalid machine0 image %s version at index %d", name, i)
+			return machineImageDetail{}, core.Exit(5, "invalid machine0 image %s version at index %d", name, i)
 		}
 	}
 	return detail, nil
@@ -103,7 +103,7 @@ func (c *client) GetImage(ctx context.Context, name string) (machineImageDetail,
 func (c *client) SaveImage(ctx context.Context, machine, image string, metadata map[string]string) error {
 	encoded, err := json.Marshal(metadata)
 	if err != nil {
-		return exit(2, "encode Machine0 image metadata: %v", err)
+		return core.Exit(2, "encode Machine0 image metadata: %v", err)
 	}
 	_, err = c.run(ctx, "images", "save", machine, image, "--metadata", string(encoded))
 	return err
@@ -131,7 +131,7 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 	return capability, true
 }
 
-func checkpointRetirementPolicy(cfg Config, labels map[string]string) string {
+func checkpointRetirementPolicy(cfg core.Config, labels map[string]string) string {
 	if normalizeReleasePolicy(cfg.Machine0.ReleasePolicy) != "destroy" || labels["release_policy"] == "suspend" {
 		return "checkpoint --retire-source requires the configured and claimed Machine0 release policy to allow destruction; suspend is not retirement"
 	}
@@ -151,14 +151,14 @@ func (Provider) NativeCheckpointWorkdir(req core.NativeCheckpointWorkdirRequest)
 
 func (p Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheckpointCreateRequest) (core.NativeCheckpointCreateResult, error) {
 	if core.NormalizeCheckpointStrategy(req.Strategy) == core.CheckpointStrategyDiskSnapshot {
-		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: exit(2, "Machine0 reusable images require --strategy image; use `crabbox pause` for suspend snapshots")}
+		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: core.Exit(2, "Machine0 reusable images require --strategy image; use `crabbox pause` for suspend snapshots")}
 	}
 	claim, claimed, err := resolveClaim(req.LeaseID)
 	if err != nil {
 		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: err}
 	}
 	if !claimed || claim.CloudID != req.Server.CloudID {
-		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: exit(2, "refusing Machine0 image save without an exact source lease claim")}
+		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: core.Exit(2, "refusing Machine0 image save without an exact source lease claim")}
 	}
 	configured, err := p.Configure(req.Config, providerOperationRuntime(req.Stderr))
 	if err != nil {
@@ -167,7 +167,7 @@ func (p Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeChe
 	return configured.(*backend).createNativeCheckpoint(ctx, req, claim)
 }
 
-func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeCheckpointCreateRequest, claim LeaseClaim) (result core.NativeCheckpointCreateResult, err error) {
+func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeCheckpointCreateRequest, claim core.LeaseClaim) (result core.NativeCheckpointCreateResult, err error) {
 	if req.Capture != nil {
 		return b.advanceCheckpointCapture(ctx, req, claim)
 	}
@@ -213,40 +213,40 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 	var version machineImageVersion
 	var lifecycleErr error
 	snapshotTimeout := machine0CheckpointSnapshotTimeout(req.WaitTimeout, b.configForRun().Machine0.CreateTimeout)
-	_, _, _, actionErr := updateClaimAction(claim.LeaseID, claim, func() (Server, SSHTarget, bool, error) {
+	_, _, _, actionErr := core.ReplaceLeaseClaimEndpointIfUnchangedAction(claim.LeaseID, claim, func() (core.Server, core.SSHTarget, bool, error) {
 		lookup := firstNonBlank(claim.Labels["machine0_name"], req.Server.Name, claim.CloudID)
 		item, err := b.readCheckpointSource(ctx, claim, lookup)
 		if err != nil {
-			return Server{}, SSHTarget{}, false, err
+			return core.Server{}, core.SSHTarget{}, false, err
 		}
 
 		stoppedByCheckpoint := false
 		switch {
 		case machineRunning(item.Status):
 			if err := b.prepareNativeImageSource(ctx, req.Target); err != nil {
-				return Server{}, SSHTarget{}, false, err
+				return core.Server{}, core.SSHTarget{}, false, err
 			}
 			item, err = b.readCheckpointSource(ctx, claim, item.Name)
 			if err != nil {
-				return Server{}, SSHTarget{}, false, err
+				return core.Server{}, core.SSHTarget{}, false, err
 			}
 			if !machineRunning(item.Status) {
-				return Server{}, SSHTarget{}, false, exit(5, "Machine0 checkpoint source changed state before stop")
+				return core.Server{}, core.SSHTarget{}, false, core.Exit(5, "Machine0 checkpoint source changed state before stop")
 			}
 			if err := b.api.Stop(ctx, item.Name); err != nil {
-				return Server{}, SSHTarget{}, false, err
+				return core.Server{}, core.SSHTarget{}, false, err
 			}
 			stoppedByCheckpoint = true
 			if stopped, err := b.waitForStopped(ctx, item.Name, b.configForRun().Machine0.CreateTimeout); err != nil {
 				lifecycleErr = err
 			} else if err := validateMachineClaimOwnership(claim, stopped); err != nil {
 				// The observed source was replaced; never save or restart its successor.
-				return Server{}, SSHTarget{}, false, err
+				return core.Server{}, core.SSHTarget{}, false, err
 			}
 		case strings.EqualFold(strings.TrimSpace(item.Status), "STOPPED"):
 			// A pre-stopped source is already filesystem-consistent. Preserve its state.
 		default:
-			return Server{}, SSHTarget{}, false, exit(5, "machine0 machine %s must be RUNNING or STOPPED to create an image; state=%s", item.Name, item.Status)
+			return core.Server{}, core.SSHTarget{}, false, core.Exit(5, "machine0 machine %s must be RUNNING or STOPPED to create an image; state=%s", item.Name, item.Status)
 		}
 
 		if lifecycleErr == nil {
@@ -265,13 +265,13 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 			}
 		}
 
-		var server Server
-		var target SSHTarget
+		var server core.Server
+		var target core.SSHTarget
 		if stoppedByCheckpoint {
 			var restartErr error
 			server, target, restartErr = b.restartCheckpointSource(ctx, claim, item)
 			if restartErr != nil {
-				return Server{}, SSHTarget{}, false, restartErr
+				return core.Server{}, core.SSHTarget{}, false, restartErr
 			}
 		}
 		return server, target, stoppedByCheckpoint, nil
@@ -292,7 +292,7 @@ func machine0CheckpointSnapshotTimeout(requested, fallback time.Duration) time.D
 
 // Native mutations accept names. This rejects replacements visible at each
 // adapter boundary, not a privileged remote rename inside the opaque CLI call.
-func (b *backend) readCheckpointSource(ctx context.Context, claim LeaseClaim, name string) (machine, error) {
+func (b *backend) readCheckpointSource(ctx context.Context, claim core.LeaseClaim, name string) (machine, error) {
 	item, err := b.api.Get(ctx, name)
 	if err != nil {
 		return machine{}, err
@@ -301,7 +301,7 @@ func (b *backend) readCheckpointSource(ctx context.Context, claim LeaseClaim, na
 		return machine{}, err
 	}
 	if item.Name != name {
-		return machine{}, exit(2, "checkpoint source name changed")
+		return machine{}, core.Exit(2, "checkpoint source name changed")
 	}
 	if fixedMachine0LeaseKind.IsFixedClaim(claim) {
 		if err := validateFixedMachine0Ownership(claim, item); err != nil {
@@ -311,7 +311,7 @@ func (b *backend) readCheckpointSource(ctx context.Context, claim LeaseClaim, na
 	return item, nil
 }
 
-func (b *backend) restartCheckpointSource(ctx context.Context, claim LeaseClaim, stopped machine) (Server, SSHTarget, error) {
+func (b *backend) restartCheckpointSource(ctx context.Context, claim core.LeaseClaim, stopped machine) (core.Server, core.SSHTarget, error) {
 	timeout := b.configForRun().Machine0.CreateTimeout
 	// Once this operation stops a running source, restoring it is a rollback
 	// obligation even if the caller cancels the checkpoint wait.
@@ -319,10 +319,10 @@ func (b *backend) restartCheckpointSource(ctx context.Context, claim LeaseClaim,
 	defer cancel()
 	_, err := b.readCheckpointSource(restartCtx, claim, stopped.Name)
 	if err != nil {
-		return Server{}, SSHTarget{}, err
+		return core.Server{}, core.SSHTarget{}, err
 	}
 	if err := b.api.Start(restartCtx, stopped.Name); err != nil {
-		return Server{}, SSHTarget{}, fmt.Errorf("restart Machine0 checkpoint source %s: %w", stopped.Name, err)
+		return core.Server{}, core.SSHTarget{}, fmt.Errorf("restart Machine0 checkpoint source %s: %w", stopped.Name, err)
 	}
 	running, err := b.waitForRunningAfterStart(restartCtx, stopped.Name, timeout, func(previous, observed machine) (machine, error) {
 		if fixedMachine0LeaseKind.IsFixedClaim(claim) {
@@ -334,21 +334,21 @@ func (b *backend) restartCheckpointSource(ctx context.Context, claim LeaseClaim,
 		return observed, nil
 	})
 	if err != nil {
-		return Server{}, SSHTarget{}, fmt.Errorf("restart Machine0 checkpoint source %s: %w", stopped.Name, err)
+		return core.Server{}, core.SSHTarget{}, fmt.Errorf("restart Machine0 checkpoint source %s: %w", stopped.Name, err)
 	}
 	if err := validateMachineClaimOwnership(claim, running); err != nil {
-		return Server{}, SSHTarget{}, err
+		return core.Server{}, core.SSHTarget{}, err
 	}
 	cfg := effectiveMachine0Config(b.configForRun(), running)
 	server := b.serverFromMachine(running, claim, cfg)
 	lease, err := b.prepareLeaseWithOptions(restartCtx, running, server, claim.LeaseID, machine0PrepareOptions{Check: true, ResetHostTrust: true})
 	if err != nil {
-		return Server{}, SSHTarget{}, fmt.Errorf("prepare restarted Machine0 checkpoint source %s: %w", stopped.Name, err)
+		return core.Server{}, core.SSHTarget{}, fmt.Errorf("prepare restarted Machine0 checkpoint source %s: %w", stopped.Name, err)
 	}
 	return lease.Server, lease.SSH, nil
 }
 
-func machine0NativeCheckpointResult(req core.NativeCheckpointCreateRequest, claim LeaseClaim, name string, createdImage bool, detail machineImageDetail, version machineImageVersion) core.NativeCheckpointCreateResult {
+func machine0NativeCheckpointResult(req core.NativeCheckpointCreateRequest, claim core.LeaseClaim, name string, createdImage bool, detail machineImageDetail, version machineImageVersion) core.NativeCheckpointCreateResult {
 	if strings.TrimSpace(detail.Image.ID) == "" || version.Version <= 0 {
 		return core.NativeCheckpointCreateResult{}
 	}
@@ -422,7 +422,7 @@ func (b *backend) deleteNativeCheckpoint(ctx context.Context, req core.NativeChe
 	createdImage := req.Metadata[metadataCreatedImage] == "true"
 	if createdImage {
 		if len(detail.Versions) != 1 || detail.Versions[0].Version != version.Version {
-			return exit(2, "refusing to remove Machine0 image %q: owned checkpoint version v%d is no longer the only version (%d versions found); remove the exact draft version with `machine0 images versions rm %s %d --yes` when applicable, or resolve the image versions manually", detail.Image.Name, version.Version, len(detail.Versions), detail.Image.Name, version.Version)
+			return core.Exit(2, "refusing to remove Machine0 image %q: owned checkpoint version v%d is no longer the only version (%d versions found); remove the exact draft version with `machine0 images versions rm %s %d --yes` when applicable, or resolve the image versions manually", detail.Image.Name, version.Version, len(detail.Versions), detail.Image.Name, version.Version)
 		}
 		err = b.api.RemoveImage(ctx, detail.Image.Name)
 	} else {
@@ -444,12 +444,12 @@ func (b *backend) deleteNativeCheckpoint(ctx context.Context, req core.NativeChe
 
 func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkRequest) error {
 	if req.Record.Kind != core.CheckpointKindMachine0 || !req.Record.Direct {
-		return exit(2, "provider=machine0 does not support checkpoint kind=%s", req.Record.Kind)
+		return core.Exit(2, "provider=machine0 does not support checkpoint kind=%s", req.Record.Kind)
 	}
 	name := strings.TrimSpace(req.Record.Metadata[metadataImageName])
 	version, err := strconv.Atoi(req.Record.Metadata[metadataImageVersion])
 	if name == "" || err != nil || version <= 0 {
-		return exit(2, "Machine0 checkpoint image metadata is missing or invalid")
+		return core.Exit(2, "Machine0 checkpoint image metadata is missing or invalid")
 	}
 	req.Config.Provider = providerName
 	req.Config.Machine0.Image = name
@@ -498,7 +498,7 @@ func (b *backend) waitForImageVersion(ctx context.Context, name string, previous
 		}
 		if version.Version == 0 {
 			if !wait {
-				return false, exit(5, "Machine0 did not report a new image version for %s", name)
+				return false, core.Exit(5, "Machine0 did not report a new image version for %s", name)
 			}
 			return false, nil
 		}
@@ -512,7 +512,7 @@ func (b *backend) waitForImageVersion(ctx context.Context, name string, previous
 			return true, nil
 		}
 		if imageVersionTerminal(version) {
-			return false, exit(5, "Machine0 image %s v%d entered terminal state %s", name, version.Version, imageVersionState(version))
+			return false, core.Exit(5, "Machine0 image %s v%d entered terminal state %s", name, version.Version, imageVersionState(version))
 		}
 		if stderr != nil {
 			_, _ = fmt.Fprintf(stderr, "waiting image=%s version=%d state=%s\n", name, version.Version, imageVersionState(version))
@@ -520,7 +520,7 @@ func (b *backend) waitForImageVersion(ctx context.Context, name string, previous
 		return false, nil
 	}, nil)
 	if err != nil && wait && context.Cause(ctx) == nil && errors.Is(context.Cause(pollCtx), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
-		err = exit(5, "timed out waiting for Machine0 image %s", name)
+		err = core.Exit(5, "timed out waiting for Machine0 image %s", name)
 	}
 	if lastVersion.Version > 0 {
 		return lastDetail, lastVersion, err
@@ -542,7 +542,7 @@ func machine0ImageVersionMetadataMatches(version machineImageVersion, expected m
 
 func (b *backend) loadCheckpointImage(ctx context.Context, req core.NativeCheckpointResourceRequest) (machineImageDetail, machineImageVersion, error) {
 	if req.Capture != nil && req.Capture.SourceDisposition == "abandon" {
-		return machineImageDetail{}, machineImageVersion{}, exit(2, "checkpoint abandonment does not authorize image operations; retain the unresolved image obligation")
+		return machineImageDetail{}, machineImageVersion{}, core.Exit(2, "checkpoint abandonment does not authorize image operations; retain the unresolved image obligation")
 	}
 	// Ordinary checkpoints predating account-bound retirement keep their existing
 	// image contract. A bound capture must never treat another account as absence.
@@ -552,15 +552,15 @@ func (b *backend) loadCheckpointImage(ctx context.Context, req core.NativeCheckp
 		}
 	}
 	if req.Image.Provider != providerName || req.Image.Kind != core.CheckpointKindMachine0 || !req.Image.Direct {
-		return machineImageDetail{}, machineImageVersion{}, exit(2, "refusing to operate on a non-direct Machine0 checkpoint")
+		return machineImageDetail{}, machineImageVersion{}, core.Exit(2, "refusing to operate on a non-direct Machine0 checkpoint")
 	}
 	name := req.Metadata[metadataImageName]
 	versionNumber, err := strconv.Atoi(req.Metadata[metadataImageVersion])
 	if name == "" || err != nil || versionNumber <= 0 {
-		return machineImageDetail{}, machineImageVersion{}, exit(2, "Machine0 checkpoint metadata is missing image version identity")
+		return machineImageDetail{}, machineImageVersion{}, core.Exit(2, "Machine0 checkpoint metadata is missing image version identity")
 	}
 	if req.Metadata[metadataImageID] == "" || req.Metadata[metadataImageID] != req.Image.ResourceID || req.Metadata[metadataSourceMachine] == "" || req.Metadata["crabbox_checkpoint"] == "" || req.Metadata["crabbox_lease"] == "" {
-		return machineImageDetail{}, machineImageVersion{}, exit(2, "Machine0 checkpoint is missing its exact resource binding")
+		return machineImageDetail{}, machineImageVersion{}, core.Exit(2, "Machine0 checkpoint is missing its exact resource binding")
 	}
 	images, err := b.api.ListImages(ctx)
 	if err != nil {
@@ -570,14 +570,14 @@ func (b *backend) loadCheckpointImage(ctx context.Context, req core.NativeCheckp
 	for _, image := range images {
 		if image.Name == name || image.ID == req.Image.ResourceID {
 			if image.Name != name || image.ID != req.Image.ResourceID || found {
-				return machineImageDetail{}, machineImageVersion{}, exit(2, "Machine0 checkpoint image identity changed or is ambiguous")
+				return machineImageDetail{}, machineImageVersion{}, core.Exit(2, "Machine0 checkpoint image identity changed or is ambiguous")
 			}
 			found = true
 		}
 	}
 	if !found {
 		if req.Metadata[metadataAccountID] == "" {
-			return machineImageDetail{}, machineImageVersion{}, exit(4, "Machine0 checkpoint image is not visible and its original account is unbound; retain checkpoint metadata and inspect the original account")
+			return machineImageDetail{}, machineImageVersion{}, core.Exit(4, "Machine0 checkpoint image is not visible and its original account is unbound; retain checkpoint metadata and inspect the original account")
 		}
 		if req.Metadata[metadataAccountID] != "" {
 			if err := b.attestCheckpointAccount(ctx, req.Metadata[metadataAccountID]); err != nil {
@@ -591,7 +591,7 @@ func (b *backend) loadCheckpointImage(ctx context.Context, req core.NativeCheckp
 		return machineImageDetail{}, machineImageVersion{}, err
 	}
 	if detail.Image.ID != req.Metadata[metadataImageID] || detail.Image.ID != req.Image.ResourceID || detail.Image.Name != name {
-		return machineImageDetail{}, machineImageVersion{}, exit(2, "refusing Machine0 checkpoint operation with mismatched image identity")
+		return machineImageDetail{}, machineImageVersion{}, core.Exit(2, "refusing Machine0 checkpoint operation with mismatched image identity")
 	}
 	for _, version := range detail.Versions {
 		if version.Version == versionNumber {
@@ -601,13 +601,13 @@ func (b *backend) loadCheckpointImage(ctx context.Context, req core.NativeCheckp
 					expected = req.Metadata[metadataSourceMachine]
 				}
 				if expected == "" || fmt.Sprint(version.Metadata[key]) != expected {
-					return machineImageDetail{}, machineImageVersion{}, exit(2, "refusing Machine0 checkpoint operation with mismatched %s metadata", key)
+					return machineImageDetail{}, machineImageVersion{}, core.Exit(2, "refusing Machine0 checkpoint operation with mismatched %s metadata", key)
 				}
 			}
 			return detail, version, nil
 		}
 	}
-	return detail, machineImageVersion{}, checkpointImageVersionAbsentError{exit(4, "Machine0 image %s version %d was not found", name, versionNumber)}
+	return detail, machineImageVersion{}, checkpointImageVersionAbsentError{core.Exit(4, "Machine0 image %s version %d was not found", name, versionNumber)}
 }
 
 func imageVersionState(version machineImageVersion) string {

@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type unikraftCloudStatusWaitAPI struct {
@@ -33,7 +35,7 @@ func TestStatusWaitSleepsOutsideLeaseOperationLock(t *testing.T) {
 	b.pollInterval = 50 * time.Millisecond
 	leaseID := newLeaseID()
 	createReq := createInstanceRequest{
-		Name:      leaseProviderName(leaseID, ""),
+		Name:      core.LeaseProviderName(leaseID, ""),
 		Image:     b.cfg.UnikraftCloud.Image,
 		MemoryMB:  b.cfg.UnikraftCloud.MemoryMB,
 		Autostart: true,
@@ -42,9 +44,7 @@ func TestStatusWaitSleepsOutsideLeaseOperationLock(t *testing.T) {
 		leaseID,
 		"status-wait-lock",
 		testClaimScope(t, api.BaseURL()),
-		testUserUUID,
-		WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}},
-		createReq,
+		testUserUUID, core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}}, createReq,
 	)
 	if err != nil {
 		t.Fatalf("create preflight claim: %v", err)
@@ -56,7 +56,7 @@ func TestStatusWaitSleepsOutsideLeaseOperationLock(t *testing.T) {
 
 	statusErr := make(chan error, 1)
 	go func() {
-		_, waitErr := b.Status(context.Background(), StatusRequest{ID: intent.LeaseID, Wait: true, WaitTimeout: 500 * time.Millisecond})
+		_, waitErr := b.Status(context.Background(), core.StatusRequest{ID: intent.LeaseID, Wait: true, WaitTimeout: 500 * time.Millisecond})
 		statusErr <- waitErr
 	}()
 	select {
@@ -67,7 +67,7 @@ func TestStatusWaitSleepsOutsideLeaseOperationLock(t *testing.T) {
 
 	stopCtx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
-	if err := b.Stop(stopCtx, StopRequest{ID: intent.LeaseID}); err != nil {
+	if err := b.Stop(stopCtx, core.StopRequest{ID: intent.LeaseID}); err != nil {
 		t.Fatalf("Stop while Status waits: %v", err)
 	}
 	select {

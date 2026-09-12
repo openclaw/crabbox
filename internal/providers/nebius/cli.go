@@ -12,12 +12,13 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type cliRunner struct {
-	cfg NebiusConfig
-	rt  Runtime
+	cfg core.NebiusConfig
+	rt  core.Runtime
 }
 
 type cliResult struct {
@@ -37,7 +38,7 @@ type nebiusAPI interface {
 }
 
 type nebiusClient struct {
-	cfg NebiusConfig
+	cfg core.NebiusConfig
 	cli cliRunner
 }
 
@@ -57,17 +58,17 @@ type nebiusInstance struct {
 	Raw      map[string]any
 }
 
-func newCLIRunner(cfg NebiusConfig, rt Runtime) cliRunner {
+func newCLIRunner(cfg core.NebiusConfig, rt core.Runtime) cliRunner {
 	return cliRunner{cfg: cfg, rt: rt}
 }
 
-func newNebiusClient(cfg NebiusConfig, rt Runtime) *nebiusClient {
+func newNebiusClient(cfg core.NebiusConfig, rt core.Runtime) *nebiusClient {
 	return &nebiusClient{cfg: cfg, cli: newCLIRunner(cfg, rt)}
 }
 
 func (c cliRunner) run(ctx context.Context, args ...string) (cliResult, error) {
 	commandArgs := c.withProfile(args)
-	result, err := c.rt.Exec.Run(ctx, LocalCommandRequest{
+	result, err := c.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name: c.cfg.CLI,
 		Args: commandArgs,
 	})
@@ -281,9 +282,9 @@ func instanceFromObject(object map[string]any) nebiusInstance {
 	}
 }
 
-func serverFromInstance(item nebiusInstance, cfg Config) Server {
+func serverFromInstance(item nebiusInstance, cfg core.Config) core.Server {
 	labels := shared.CloneLabels(item.Labels)
-	server := Server{
+	server := core.Server{
 		CloudID:  item.ID,
 		Provider: providerName,
 		Name:     firstNonBlank(item.Name, labels["slug"]),
@@ -327,7 +328,7 @@ func cleanIP(value string) string {
 	return strings.TrimSpace(value)
 }
 
-func renderNetworkInterfaces(cfg NebiusConfig) string {
+func renderNetworkInterfaces(cfg core.NebiusConfig) string {
 	item := map[string]any{
 		"name":       "eth0",
 		"subnet_id":  strings.TrimSpace(cfg.SubnetID),
@@ -482,5 +483,5 @@ func isJSON(output string) bool {
 }
 
 func validationError(format string, args ...any) error {
-	return exit(2, format, args...)
+	return core.Exit(2, format, args...)
 }

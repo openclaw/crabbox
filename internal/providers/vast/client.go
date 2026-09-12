@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -112,11 +113,11 @@ type vastAttachSSHKeyResponse struct {
 }
 
 type vastOfferSearchInput struct {
-	Config VastConfig
+	Config core.VastConfig
 }
 
 type vastCreateInstanceInput struct {
-	Config      VastConfig
+	Config      core.VastConfig
 	Label       string
 	SSHKey      string
 	Environment map[string]string
@@ -128,18 +129,18 @@ type vastManageInstanceInput struct {
 	Label string `json:"label,omitempty"`
 }
 
-func newVastClient(cfg VastConfig, rt Runtime) (vastAPI, error) {
+func newVastClient(cfg core.VastConfig, rt core.Runtime) (vastAPI, error) {
 	apiKey := strings.TrimSpace(cfg.APIKey)
 	if apiKey == "" {
-		return nil, exit(2, "provider=%s requires CRABBOX_VAST_API_KEY or VAST_API_KEY", providerName)
+		return nil, core.Exit(2, "provider=%s requires CRABBOX_VAST_API_KEY or VAST_API_KEY", providerName)
 	}
 	apiURL := strings.TrimRight(strings.TrimSpace(cfg.APIURL), "/")
 	parsed, err := url.Parse(apiURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil {
-		return nil, exit(2, "vast.apiUrl must be an absolute URL without credentials")
+		return nil, core.Exit(2, "vast.apiUrl must be an absolute URL without credentials")
 	}
 	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
-		return nil, exit(2, "vast.apiUrl must use https unless it targets localhost")
+		return nil, core.Exit(2, "vast.apiUrl must use https unless it targets localhost")
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
@@ -305,7 +306,7 @@ func (c *vastClient) DetachInstanceSSHKey(ctx context.Context, id int, keyID str
 	return c.do(ctx, http.MethodDelete, "/instances/"+strconv.Itoa(id)+"/ssh/"+url.PathEscape(keyID)+"/", nil, nil)
 }
 
-func buildVastOfferSearchPayload(cfg VastConfig) map[string]any {
+func buildVastOfferSearchPayload(cfg core.VastConfig) map[string]any {
 	payload := map[string]any{
 		"verified":          vastFilter("eq", true),
 		"rentable":          vastFilter("eq", true),
@@ -337,11 +338,11 @@ func vastFilter(operator string, value any) map[string]any {
 }
 
 func vastAPIInstanceType(value string) string {
-	switch normalizeInstanceType(value) {
+	switch core.NormalizeVastInstanceType(value) {
 	case "interruptible":
 		return "bid"
 	default:
-		return normalizeInstanceType(value)
+		return core.NormalizeVastInstanceType(value)
 	}
 }
 

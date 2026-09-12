@@ -16,26 +16,6 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type Config = core.Config
-type ProviderSpec = core.ProviderSpec
-type Runtime = core.Runtime
-type Backend = core.Backend
-type FreestyleConfig = core.FreestyleConfig
-type SyncConfig = core.SyncConfig
-type WarmupRequest = core.WarmupRequest
-type RunRequest = core.RunRequest
-type RunResult = core.RunResult
-type ListRequest = core.ListRequest
-type LeaseView = core.LeaseView
-type StatusRequest = core.StatusRequest
-type StatusView = core.StatusView
-type StopRequest = core.StopRequest
-type Server = core.Server
-type Repo = core.Repo
-type ExitError = core.ExitError
-type timingReport = core.TimingReport
-type timingPhase = core.TimingPhase
-
 const (
 	targetLinux   = core.TargetLinux
 	NetworkPublic = core.NetworkPublic
@@ -49,11 +29,11 @@ const (
 
 var freestyleCleanupTimeout = 30 * time.Second
 
-func RegisterFreestyleProviderFlags(fs *flag.FlagSet, defaults Config) any {
+func RegisterFreestyleProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return core.RegisterFreestyleConfigFlags(fs, defaults.Freestyle)
 }
 
-func ApplyFreestyleProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+func ApplyFreestyleProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	v, ok := values.(core.FreestyleConfigFlagValues)
 	if !ok {
 		return nil
@@ -63,22 +43,22 @@ func ApplyFreestyleProviderFlags(cfg *Config, fs *flag.FlagSet, values any) erro
 	return err
 }
 
-func NewFreestyleBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+func NewFreestyleBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = freestyleProvider
 	return &freestyleBackend{spec: spec, cfg: cfg, rt: rt}
 }
 
 type freestyleBackend struct {
-	spec ProviderSpec
-	cfg  Config
-	rt   Runtime
+	spec core.ProviderSpec
+	cfg  core.Config
+	rt   core.Runtime
 }
 
-func (b *freestyleBackend) Spec() ProviderSpec { return b.spec }
+func (b *freestyleBackend) Spec() core.ProviderSpec { return b.spec }
 
-func (b *freestyleBackend) Warmup(ctx context.Context, req WarmupRequest) error {
+func (b *freestyleBackend) Warmup(ctx context.Context, req core.WarmupRequest) error {
 	if req.ActionsRunner {
-		return exit(2, "--actions-runner is not supported for provider=%s", freestyleProvider)
+		return core.Exit(2, "--actions-runner is not supported for provider=%s", freestyleProvider)
 	}
 	started := b.now()
 	client, err := newFreestyleClient(b.cfg, b.rt)
@@ -96,7 +76,7 @@ func (b *freestyleBackend) Warmup(ctx context.Context, req WarmupRequest) error 
 	total := b.now().Sub(started)
 	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
 	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
+		return core.WriteTimingJSON(b.rt.Stderr, core.TimingReport{
 			Provider: freestyleProvider,
 			LeaseID:  leaseID,
 			Slug:     slug,
@@ -107,7 +87,7 @@ func (b *freestyleBackend) Warmup(ctx context.Context, req WarmupRequest) error 
 	return nil
 }
 
-func (b *freestyleBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *freestyleBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
 	workspace, workspaceErr := freestyleWorkspacePath(b.cfg)
 	var client freestyleAPI
 	var leaseID, name, slug string
@@ -118,14 +98,14 @@ func (b *freestyleBackend) Run(ctx context.Context, req RunRequest) (RunResult, 
 		Provider: freestyleProvider, Runtime: b.rt, Workdir: workspace,
 		IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL, CleanupTimeout: freestyleCleanupTimeout,
 		Preflight: func(context.Context) error {
-			if err := delegatedSyncOptionsError(b.spec, req); err != nil {
+			if err := core.RejectDelegatedSyncOptionsForSpec(b.spec, req); err != nil {
 				return err
 			}
 			if workspaceErr != nil {
 				return workspaceErr
 			}
 			if !req.SyncOnly && (len(req.Command) == 0 || (len(req.Command) == 1 && strings.TrimSpace(req.Command[0]) == "")) {
-				return exit(2, "missing command")
+				return core.Exit(2, "missing command")
 			}
 			var err error
 			client, err = newFreestyleClient(b.cfg, b.rt)
@@ -160,7 +140,7 @@ func (b *freestyleBackend) Run(ctx context.Context, req RunRequest) (RunResult, 
 		NoSync: func(ctx context.Context) error { return b.prepareWorkspace(ctx, client, name, workspace) },
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
 			if req.EnvSummary {
-				printEnvForwardingSummary(b.rt.Stderr, freestyleProvider, "forwarded", req.Options.EnvAllow, req.Env)
+				core.PrintEnvForwardingSummary(b.rt.Stderr, freestyleProvider, "forwarded", req.Options.EnvAllow, req.Env)
 			}
 			return shared.DelegatedSandboxCommand{Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
 				return b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, req.Env, stdout, stderr)
@@ -170,13 +150,13 @@ func (b *freestyleBackend) Run(ctx context.Context, req RunRequest) (RunResult, 
 			if err := client.DeleteVM(ctx, name); err != nil {
 				return err
 			}
-			removeLeaseClaim(leaseID)
+			core.RemoveLeaseClaim(leaseID)
 			return nil
 		},
 	})
 }
 
-func (b *freestyleBackend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) {
+func (b *freestyleBackend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseView, error) {
 	client, err := newFreestyleClient(b.cfg, b.rt)
 	if err != nil {
 		return nil, err
@@ -185,7 +165,7 @@ func (b *freestyleBackend) List(ctx context.Context, _ ListRequest) ([]LeaseView
 	if err != nil {
 		return nil, freestyleError("list vms", err)
 	}
-	servers := make([]Server, 0, len(vms))
+	servers := make([]core.Server, 0, len(vms))
 	for _, vm := range vms {
 		if !isCrabboxFreestyleSandboxName(vm.Name) {
 			continue
@@ -196,21 +176,21 @@ func (b *freestyleBackend) List(ctx context.Context, _ ListRequest) ([]LeaseView
 }
 
 func (b *freestyleBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
-	servers, err := b.List(ctx, ListRequest{})
+	servers, err := b.List(ctx, core.ListRequest{})
 	if err != nil {
 		return core.DoctorResult{}, err
 	}
 	return core.InventoryDoctorResult(freestyleProvider, len(servers)), nil
 }
 
-func (b *freestyleBackend) Status(ctx context.Context, req StatusRequest) (statusView, error) {
+func (b *freestyleBackend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
 	client, err := newFreestyleClient(b.cfg, b.rt)
 	if err != nil {
-		return statusView{}, err
+		return core.StatusView{}, err
 	}
 	leaseID, id, err := b.resolveLeaseID(ctx, client, req.ID, "", false)
 	if err != nil {
-		return statusView{}, err
+		return core.StatusView{}, err
 	}
 	deadline := b.now().Add(req.WaitTimeout)
 	if req.WaitTimeout <= 0 {
@@ -219,27 +199,27 @@ func (b *freestyleBackend) Status(ctx context.Context, req StatusRequest) (statu
 	for {
 		vm, err := client.GetVM(ctx, id)
 		if err != nil {
-			return statusView{}, freestyleError("get vm", err)
+			return core.StatusView{}, freestyleError("get vm", err)
 		}
 		view := freestyleStatusView(leaseID, vm)
 		if !req.Wait || view.Ready {
 			return view, nil
 		}
 		if freestyleStatusTerminal(view.State) {
-			return statusView{}, exit(5, "freestyle vm %s entered terminal state %q before becoming ready", id, view.State)
+			return core.StatusView{}, core.Exit(5, "freestyle vm %s entered terminal state %q before becoming ready", id, view.State)
 		}
 		if b.now().After(deadline) {
-			return statusView{}, exit(5, "timed out waiting for vm %s to become ready", id)
+			return core.StatusView{}, core.Exit(5, "timed out waiting for vm %s to become ready", id)
 		}
 		select {
 		case <-ctx.Done():
-			return statusView{}, ctx.Err()
+			return core.StatusView{}, ctx.Err()
 		case <-time.After(2 * time.Second):
 		}
 	}
 }
 
-func (b *freestyleBackend) Stop(ctx context.Context, req StopRequest) error {
+func (b *freestyleBackend) Stop(ctx context.Context, req core.StopRequest) error {
 	client, err := newFreestyleClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -254,12 +234,12 @@ func (b *freestyleBackend) Stop(ctx context.Context, req StopRequest) error {
 	if err := client.DeleteVM(ctx, id); err != nil {
 		return freestyleError("delete vm", err)
 	}
-	removeLeaseClaim(leaseID)
+	core.RemoveLeaseClaim(leaseID)
 	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s\n", leaseID, id)
 	return nil
 }
 
-func (b *freestyleBackend) createSandbox(ctx context.Context, client freestyleAPI, repo Repo, reclaim bool, requestedSlug string) (string, string, string, error) {
+func (b *freestyleBackend) createSandbox(ctx context.Context, client freestyleAPI, repo core.Repo, reclaim bool, requestedSlug string) (string, string, string, error) {
 	if _, err := freestyleRelativeWorkdir(b.cfg); err != nil {
 		return "", "", "", err
 	}
@@ -282,10 +262,10 @@ func (b *freestyleBackend) createSandbox(ctx context.Context, client freestyleAP
 		return "", "", "", freestyleError("create vm", err)
 	}
 	if vm.ID == "" {
-		return "", "", "", exit(5, "freestyle create vm returned no id")
+		return "", "", "", core.Exit(5, "freestyle create vm returned no id")
 	}
 	leaseID := freestyleLeasePrefix + vm.ID
-	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
+	slug, err := core.AllocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return "", "", "", b.rollbackCreatedVM(client, vm.ID, err)
 	}
@@ -308,7 +288,7 @@ func (b *freestyleBackend) rollbackCreatedVM(client freestyleAPI, vmID string, c
 }
 
 func freestyleAdoptCommand(leaseID string) string {
-	return fmt.Sprintf("crabbox run --provider %s --id %s --reclaim --no-sync -- true", freestyleProvider, shellQuote(leaseID))
+	return fmt.Sprintf("crabbox run --provider %s --id %s --reclaim --no-sync -- true", freestyleProvider, core.ShellQuote(leaseID))
 }
 
 func deleteFreestyleVMForCleanup(client freestyleAPI, vmID string) error {
@@ -318,21 +298,21 @@ func deleteFreestyleVMForCleanup(client freestyleAPI, vmID string) error {
 }
 
 func freestyleCleanupCommand(leaseID string) string {
-	return fmt.Sprintf("crabbox stop --provider %s --id %s", freestyleProvider, shellQuote(leaseID))
+	return fmt.Sprintf("crabbox stop --provider %s --id %s", freestyleProvider, core.ShellQuote(leaseID))
 }
 
 func (b *freestyleBackend) exec(ctx context.Context, client freestyleAPI, id, workdir string, command []string, shellMode bool, env map[string]string, stdout, stderr io.Writer) (int, error) {
 	execCommand := freestyleExecCommand(command, shellMode)
 	parts := make([]string, 0, 3)
 	if workdir != "" {
-		parts = append(parts, "cd "+shellQuote(workdir))
+		parts = append(parts, "cd "+core.ShellQuote(workdir))
 	}
 	if envCommand := freestyleEnvExportCommand(env); envCommand != "" {
 		parts = append(parts, envCommand)
 	}
 	parts = append(parts, execCommand)
 	fullCommand := strings.Join(parts, " && ")
-	return client.Exec(ctx, id, "bash -lc "+shellQuote(fullCommand), stdout, stderr)
+	return client.Exec(ctx, id, "bash -lc "+core.ShellQuote(fullCommand), stdout, stderr)
 }
 
 func freestyleEnvExportCommand(env map[string]string) string {
@@ -355,7 +335,7 @@ func freestyleEnvExportCommand(env map[string]string) string {
 		b.WriteByte(' ')
 		b.WriteString(name)
 		b.WriteByte('=')
-		b.WriteString(shellQuote(env[name]))
+		b.WriteString(core.ShellQuote(env[name]))
 	}
 	return b.String()
 }
@@ -367,20 +347,20 @@ func freestyleExecCommand(command []string, shellMode bool) string {
 	if shellMode {
 		return strings.Join(command, " ")
 	}
-	if len(command) == 1 && shouldUseShell(command) {
+	if len(command) == 1 && core.ShouldUseShell(command) {
 		return command[0]
 	}
-	if shouldUseShell(command) || leadingEnvAssignment(command) {
-		return shellScriptFromArgv(command)
+	if core.ShouldUseShell(command) || core.LeadingEnvAssignment(command) {
+		return core.ShellScriptFromArgv(command)
 	}
-	return strings.Join(shellWords(command), " ")
+	return strings.Join(core.ShellWords(command), " ")
 }
 
 func (b *freestyleBackend) resolveLeaseID(ctx context.Context, client freestyleAPI, id, repoRoot string, reclaim bool) (string, string, error) {
 	if id == "" {
-		return "", "", exit(2, "provider=freestyle requires a Crabbox-created vm name, lease id, or slug")
+		return "", "", core.Exit(2, "provider=freestyle requires a Crabbox-created vm name, lease id, or slug")
 	}
-	if claim, ok, err := resolveLeaseClaim(id); err != nil {
+	if claim, ok, err := core.ResolveLeaseClaim(id); err != nil {
 		return "", "", err
 	} else if ok && claim.Provider == freestyleProvider {
 		if repoRoot != "" {
@@ -396,7 +376,7 @@ func (b *freestyleBackend) resolveLeaseID(ctx context.Context, client freestyleA
 	if strings.HasPrefix(leaseID, freestyleLeasePrefix) {
 		vmID = strings.TrimPrefix(leaseID, freestyleLeasePrefix)
 		if vmID == "" {
-			return "", "", exit(4, "freestyle vm %q is not claimed by Crabbox", id)
+			return "", "", core.Exit(4, "freestyle vm %q is not claimed by Crabbox", id)
 		}
 		var err error
 		vm, err = client.GetVM(ctx, vmID)
@@ -408,28 +388,28 @@ func (b *freestyleBackend) resolveLeaseID(ctx context.Context, client freestyleA
 		if err != nil {
 			return "", "", freestyleError("list vms", err)
 		}
-		normalizedID := normalizeLeaseSlug(id)
+		normalizedID := core.NormalizeLeaseSlug(id)
 		for _, candidate := range vms {
 			if !isCrabboxFreestyleSandboxName(candidate.Name) {
 				continue
 			}
 			candidateLeaseID := freestyleLeasePrefix + candidate.ID
-			if candidate.ID != id && candidate.Name != id && newLeaseSlug(candidateLeaseID) != normalizedID {
+			if candidate.ID != id && candidate.Name != id && core.NewLeaseSlug(candidateLeaseID) != normalizedID {
 				continue
 			}
 			if vmID != "" {
-				return "", "", exit(4, "freestyle identifier %q is ambiguous", id)
+				return "", "", core.Exit(4, "freestyle identifier %q is ambiguous", id)
 			}
 			vm = candidate
 			vmID = candidate.ID
 			leaseID = candidateLeaseID
 		}
 		if vmID == "" {
-			return "", "", exit(4, "freestyle vm %q is not claimed by Crabbox; use an id, name, slug, or claimed lease from `crabbox list --provider freestyle`", id)
+			return "", "", core.Exit(4, "freestyle vm %q is not claimed by Crabbox; use an id, name, slug, or claimed lease from `crabbox list --provider freestyle`", id)
 		}
 	}
 	if !isCrabboxFreestyleSandboxName(vm.Name) {
-		return "", "", exit(4, "freestyle vm %q is not claimed by Crabbox", id)
+		return "", "", core.Exit(4, "freestyle vm %q is not claimed by Crabbox", id)
 	}
 	if repoRoot != "" {
 		claim, ok, err := resolveExactFreestyleLeaseClaim(leaseID)
@@ -441,8 +421,8 @@ func (b *freestyleBackend) resolveLeaseID(ctx context.Context, client freestyleA
 				return "", "", err
 			}
 		} else if !reclaim {
-			return "", "", exit(4, "freestyle vm %q has no exact local claim; use --reclaim to adopt it before reuse", id)
-		} else if err := claimLeaseForRepoProviderPond(leaseID, newLeaseSlug(leaseID), freestyleProvider, b.cfg.Pond, repoRoot, b.cfg.IdleTimeout, true); err != nil {
+			return "", "", core.Exit(4, "freestyle vm %q has no exact local claim; use --reclaim to adopt it before reuse", id)
+		} else if err := claimLeaseForRepoProviderPond(leaseID, core.NewLeaseSlug(leaseID), freestyleProvider, b.cfg.Pond, repoRoot, b.cfg.IdleTimeout, true); err != nil {
 			return "", "", err
 		}
 	}
@@ -450,7 +430,7 @@ func (b *freestyleBackend) resolveLeaseID(ctx context.Context, client freestyleA
 }
 
 func resolveExactFreestyleLeaseClaim(leaseID string) (core.LeaseClaim, bool, error) {
-	claim, ok, err := resolveLeaseClaim(leaseID)
+	claim, ok, err := core.ResolveLeaseClaim(leaseID)
 	if err != nil {
 		return claim, ok, err
 	}
@@ -464,15 +444,15 @@ func requireFreestyleLeaseClaim(leaseID string) error {
 	if _, ok, err := resolveExactFreestyleLeaseClaim(leaseID); err != nil {
 		return err
 	} else if !ok {
-		return exit(4, "freestyle lease %q has no exact local claim; adopt it with an explicit --reclaim reuse before stop", leaseID)
+		return core.Exit(4, "freestyle lease %q has no exact local claim; adopt it with an explicit --reclaim reuse before stop", leaseID)
 	}
 	return nil
 }
 
-func freestyleVMToServer(vm freestyleVM) Server {
+func freestyleVMToServer(vm freestyleVM) core.Server {
 	leaseID := freestyleLeasePrefix + vm.ID
 	labels := applyFreestyleClaimLabels(leaseID, vm)
-	return Server{
+	return core.Server{
 		Provider: freestyleProvider,
 		CloudID:  vm.ID,
 		Name:     vm.Name,
@@ -481,15 +461,15 @@ func freestyleVMToServer(vm freestyleVM) Server {
 	}
 }
 
-func freestyleStatusView(leaseID string, vm freestyleVM) statusView {
+func freestyleStatusView(leaseID string, vm freestyleVM) core.StatusView {
 	labels := map[string]string{
 		"provider": freestyleProvider,
 		"lease":    leaseID,
-		"slug":     newLeaseSlug(leaseID),
+		"slug":     core.NewLeaseSlug(leaseID),
 		"state":    vm.State,
 	}
 	applyFreestyleClaimMetadata(labels, leaseID)
-	return statusView{
+	return core.StatusView{
 		ID:         leaseID,
 		Slug:       labels["slug"],
 		Provider:   freestyleProvider,
@@ -507,7 +487,7 @@ func applyFreestyleClaimLabels(leaseID string, vm freestyleVM) map[string]string
 	labels := map[string]string{
 		"provider": freestyleProvider,
 		"lease":    leaseID,
-		"slug":     newLeaseSlug(leaseID),
+		"slug":     core.NewLeaseSlug(leaseID),
 		"target":   targetLinux,
 		"state":    vm.State,
 	}
@@ -516,12 +496,12 @@ func applyFreestyleClaimLabels(leaseID string, vm freestyleVM) map[string]string
 }
 
 func applyFreestyleClaimMetadata(labels map[string]string, leaseID string) {
-	claim, ok, err := resolveLeaseClaim(leaseID)
+	claim, ok, err := core.ResolveLeaseClaim(leaseID)
 	if err != nil || !ok || claim.Provider != freestyleProvider {
 		return
 	}
 	if strings.TrimSpace(claim.Slug) != "" {
-		labels["slug"] = normalizeLeaseSlug(claim.Slug)
+		labels["slug"] = core.NormalizeLeaseSlug(claim.Slug)
 	}
 	if strings.TrimSpace(claim.Pond) != "" {
 		labels["pond"] = claim.Pond
@@ -529,10 +509,10 @@ func applyFreestyleClaimMetadata(labels map[string]string, leaseID string) {
 }
 
 func freestyleClaimSlug(leaseID string) string {
-	if claim, ok, err := resolveLeaseClaim(leaseID); err == nil && ok && claim.Provider == freestyleProvider && strings.TrimSpace(claim.Slug) != "" {
+	if claim, ok, err := core.ResolveLeaseClaim(leaseID); err == nil && ok && claim.Provider == freestyleProvider && strings.TrimSpace(claim.Slug) != "" {
 		return claim.Slug
 	}
-	return newLeaseSlug(leaseID)
+	return core.NewLeaseSlug(leaseID)
 }
 
 func freestyleStatusReady(status string) bool {
@@ -548,8 +528,8 @@ func freestyleStatusTerminal(status string) bool {
 	}
 }
 
-func newFreestyleSandboxName(repo Repo) string {
-	base := normalizeLeaseSlug(repo.Name)
+func newFreestyleSandboxName(repo core.Repo) string {
+	base := core.NormalizeLeaseSlug(repo.Name)
 	if base == "" {
 		base = "crabbox"
 	}
@@ -558,7 +538,7 @@ func newFreestyleSandboxName(repo Repo) string {
 }
 
 func isCrabboxFreestyleSandboxName(name string) bool {
-	return name == normalizeLeaseSlug(name) && strings.HasPrefix(name, freestyleNamePrefix)
+	return name == core.NormalizeLeaseSlug(name) && strings.HasPrefix(name, freestyleNamePrefix)
 }
 
 func freestyleRandomSuffix() string {

@@ -19,13 +19,13 @@ const (
 	nebiusProfileLabel  = "crabbox_profile"
 )
 
-func nebiusLeaseLabels(cfg Config, leaseID, slug, state string, keep bool, now time.Time) map[string]string {
+func nebiusLeaseLabels(cfg core.Config, leaseID, slug, state string, keep bool, now time.Time) map[string]string {
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, now)
 	labels["state"] = state
 	return addNebiusScopeLabels(labels, cfg)
 }
 
-func addNebiusScopeLabels(labels map[string]string, cfg Config) map[string]string {
+func addNebiusScopeLabels(labels map[string]string, cfg core.Config) map[string]string {
 	out := make(map[string]string, len(labels)+8)
 	for key, value := range labels {
 		out[normalizeNebiusLabelKey(key)] = normalizeNebiusLabelValue(value)
@@ -45,7 +45,7 @@ func addNebiusScopeLabels(labels map[string]string, cfg Config) map[string]strin
 	return out
 }
 
-func validateNebiusOwnership(labels map[string]string, cfg Config) error {
+func validateNebiusOwnership(labels map[string]string, cfg core.Config) error {
 	if labels == nil {
 		return core.Exit(3, "nebius resource has no labels; refusing lifecycle action")
 	}
@@ -80,7 +80,7 @@ func validateNebiusOwnership(labels map[string]string, cfg Config) error {
 	return nil
 }
 
-func nebiusScopeHash(cfg Config) string {
+func nebiusScopeHash(cfg core.Config) string {
 	parts := []string{
 		"provider=" + providerName,
 		"profile=" + strings.TrimSpace(cfg.Nebius.Profile),

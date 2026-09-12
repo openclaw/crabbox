@@ -8,7 +8,7 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func duplicateBoundUnikraftCloudClaims(t *testing.T) (*backend, *fakeUnikraftCloudAPI, LeaseClaim, LeaseClaim) {
+func duplicateBoundUnikraftCloudClaims(t *testing.T) (*backend, *fakeUnikraftCloudAPI, core.LeaseClaim, core.LeaseClaim) {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	api := &fakeUnikraftCloudAPI{
@@ -16,13 +16,13 @@ func duplicateBoundUnikraftCloudClaims(t *testing.T) (*backend, *fakeUnikraftClo
 		createResult: ukcInstance{UUID: testInstanceUUID, State: "running"},
 	}
 	b := testBackend(api, nil, nil)
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
 	first := onlyTestClaim(t)
 
 	secondLeaseID := newLeaseID()
-	secondName := leaseProviderName(secondLeaseID, "")
+	secondName := core.LeaseProviderName(secondLeaseID, "")
 	createReq := createInstanceRequest{
 		Name:      secondName,
 		Image:     b.cfg.UnikraftCloud.Image,
@@ -33,9 +33,7 @@ func duplicateBoundUnikraftCloudClaims(t *testing.T) (*backend, *fakeUnikraftClo
 		secondLeaseID,
 		"duplicate-owner",
 		testClaimScope(t, api.BaseURL()),
-		testUserUUID,
-		WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}, Keep: true},
-		createReq,
+		testUserUUID, core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}, Keep: true}, createReq,
 	)
 	if err != nil {
 		t.Fatalf("create second intent: %v", err)
@@ -50,7 +48,7 @@ func duplicateBoundUnikraftCloudClaims(t *testing.T) (*backend, *fakeUnikraftClo
 func TestStopRejectsDuplicateInstanceClaimsBeforeMutation(t *testing.T) {
 	b, api, first, _ := duplicateBoundUnikraftCloudClaims(t)
 
-	err := b.Stop(context.Background(), StopRequest{ID: first.LeaseID})
+	err := b.Stop(context.Background(), core.StopRequest{ID: first.LeaseID})
 	if err == nil || !strings.Contains(err.Error(), "claimed by both") {
 		t.Fatalf("Stop err = %v, want duplicate ownership error", err)
 	}
@@ -68,7 +66,7 @@ func TestCleanupRejectsDuplicateInstanceClaimsBeforeMutation(t *testing.T) {
 		t.Fatalf("expire first claim: %v", err)
 	}
 
-	err := b.Cleanup(context.Background(), CleanupRequest{})
+	err := b.Cleanup(context.Background(), core.CleanupRequest{})
 	if err == nil || !strings.Contains(err.Error(), "claimed by both") {
 		t.Fatalf("Cleanup err = %v, want duplicate ownership error", err)
 	}
@@ -80,7 +78,7 @@ func TestCleanupRejectsDuplicateInstanceClaimsBeforeMutation(t *testing.T) {
 func TestStatusRejectsDuplicateInstanceClaimAmbiguity(t *testing.T) {
 	b, api, _, _ := duplicateBoundUnikraftCloudClaims(t)
 
-	_, err := b.Status(context.Background(), StatusRequest{ID: testInstanceUUID})
+	_, err := b.Status(context.Background(), core.StatusRequest{ID: testInstanceUUID})
 	if err == nil || !strings.Contains(err.Error(), "claimed by multiple") {
 		t.Fatalf("Status err = %v, want duplicate CloudID ambiguity", err)
 	}
@@ -94,7 +92,7 @@ func TestOwnershipPreflightCanonicalizesInstanceUUIDCase(t *testing.T) {
 	second.CloudID = strings.ToUpper(second.CloudID)
 	second.Labels[ukcLabelInstanceUUID] = second.CloudID
 
-	err := preflightUnikraftCloudClaimOwnership([]LeaseClaim{first, second}, first.ProviderScope)
+	err := preflightUnikraftCloudClaimOwnership([]core.LeaseClaim{first, second}, first.ProviderScope)
 	if err == nil || !strings.Contains(err.Error(), "claimed by both") {
 		t.Fatalf("preflight err = %v, want case-insensitive duplicate UUID rejection", err)
 	}
@@ -106,7 +104,7 @@ func TestOwnershipPreflightRejectsPendingResourceNameCollision(t *testing.T) {
 	second.Labels[ukcLabelInstanceUUID] = ""
 	second.Labels[ukcLabelResourceName] = first.Labels[ukcLabelResourceName]
 
-	err := preflightUnikraftCloudClaimOwnership([]LeaseClaim{first, second}, first.ProviderScope)
+	err := preflightUnikraftCloudClaimOwnership([]core.LeaseClaim{first, second}, first.ProviderScope)
 	if err == nil || !strings.Contains(err.Error(), "recovery resource name") {
 		t.Fatalf("preflight err = %v, want corrupt resource-name rejection", err)
 	}

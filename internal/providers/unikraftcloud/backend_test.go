@@ -143,7 +143,7 @@ func (f *fakeUnikraftCloudAPI) DeleteInstance(_ context.Context, id string) (ukc
 }
 
 func testBackend(api unikraftCloudAPI, stdout, stderr *bytes.Buffer) *backend {
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	cfg.UnikraftCloud.Image = "unikraft.org/nginx:latest"
 	cfg.UnikraftCloud.MemoryMB = 256
 	if stdout == nil {
@@ -155,8 +155,8 @@ func testBackend(api unikraftCloudAPI, stdout, stderr *bytes.Buffer) *backend {
 	return &backend{
 		spec:                      Provider{}.Spec(),
 		cfg:                       cfg,
-		rt:                        Runtime{Stdout: stdout, Stderr: stderr},
-		newClient:                 func(Config, Runtime) (unikraftCloudAPI, error) { return api, nil },
+		rt:                        core.Runtime{Stdout: stdout, Stderr: stderr},
+		newClient:                 func(core.Config, core.Runtime) (unikraftCloudAPI, error) { return api, nil },
 		pollInterval:              time.Millisecond,
 		deleteConfirmationTimeout: 20 * time.Millisecond,
 	}
@@ -175,7 +175,7 @@ func testClaimScope(t *testing.T, baseURL string) string {
 	return scope
 }
 
-func onlyTestClaim(t *testing.T) LeaseClaim {
+func onlyTestClaim(t *testing.T) core.LeaseClaim {
 	t.Helper()
 	claims, err := listUnikraftCloudLeaseClaims()
 	if err != nil {
@@ -203,7 +203,7 @@ func TestWarmupCreatesInstanceAndClaimsLease(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	b := testBackend(api, &stdout, &stderr)
 
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
 	if len(api.created) != 1 {
@@ -237,7 +237,7 @@ func TestWarmupErrors(t *testing.T) {
 	for _, test := range []struct {
 		name            string
 		mutate          func(b *backend, api *fakeUnikraftCloudAPI)
-		req             WarmupRequest
+		req             core.WarmupRequest
 		wantErrContains string
 		wantExitCode    int
 	}{
@@ -249,13 +249,13 @@ func TestWarmupErrors(t *testing.T) {
 		},
 		{
 			name:            "actions runner rejected",
-			req:             WarmupRequest{ActionsRunner: true},
+			req:             core.WarmupRequest{ActionsRunner: true},
 			wantErrContains: "--actions-runner is not supported",
 			wantExitCode:    2,
 		},
 		{
 			name: "tailscale rejected",
-			req: WarmupRequest{Options: core.LeaseOptions{
+			req: core.WarmupRequest{Options: core.LeaseOptions{
 				Tailscale: core.TailscaleConfig{Enabled: true},
 			}},
 			wantErrContains: "does not support Tailscale",
@@ -278,7 +278,7 @@ func TestWarmupErrors(t *testing.T) {
 			}
 			req := test.req
 			if req.Repo.Root == "" {
-				req.Repo = Repo{Root: t.TempDir(), Name: "demo"}
+				req.Repo = core.Repo{Root: t.TempDir(), Name: "demo"}
 			}
 			err := b.Warmup(context.Background(), req)
 			if err == nil {
@@ -288,7 +288,7 @@ func TestWarmupErrors(t *testing.T) {
 				t.Fatalf("err = %v, want containing %q", err, test.wantErrContains)
 			}
 			if test.wantExitCode != 0 {
-				var exitErr ExitError
+				var exitErr core.ExitError
 				if !errors.As(err, &exitErr) || exitErr.Code != test.wantExitCode {
 					t.Fatalf("err = %#v, want exit code %d", err, test.wantExitCode)
 				}
@@ -308,8 +308,8 @@ func TestWarmupDoesNotCreateWhenIntentCannotBePersisted(t *testing.T) {
 		createResult: ukcInstance{UUID: testInstanceUUID, State: "running"},
 	}
 	b := testBackend(api, nil, nil)
-	err := b.Warmup(context.Background(), WarmupRequest{
-		Repo: Repo{Root: t.TempDir(), Name: "demo"},
+	err := b.Warmup(context.Background(), core.WarmupRequest{
+		Repo: core.Repo{Root: t.TempDir(), Name: "demo"},
 	})
 	if err == nil {
 		t.Fatal("Warmup succeeded, want claim write failure")
@@ -322,28 +322,28 @@ func TestWarmupDoesNotCreateWhenIntentCannotBePersisted(t *testing.T) {
 func TestRunIsRejected(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		req  RunRequest
+		req  core.RunRequest
 		want string
 	}{
-		{name: "keep first", req: RunRequest{Keep: true, Reclaim: true}, want: "provider=unikraft-cloud cannot run commands; --keep is not supported"},
-		{name: "reclaim", req: RunRequest{Reclaim: true}, want: "provider=unikraft-cloud cannot run commands; --reclaim is not supported"},
-		{name: "no sync", req: RunRequest{}, want: "provider=unikraft-cloud does not support workspace sync; pass --no-sync"},
-		{name: "shell", req: RunRequest{NoSync: true, ShellMode: true}, want: "provider=unikraft-cloud cannot open an interactive shell; --shell is not supported"},
-		{name: "env summary without env", req: RunRequest{NoSync: true, EnvSummary: true}, want: "provider=unikraft-cloud cannot forward per-run environment variables"},
-		{name: "missing command", req: RunRequest{NoSync: true}, want: "missing command"},
-		{name: "command", req: RunRequest{NoSync: true, Command: []string{"true"}}, want: "provider=unikraft-cloud cannot execute arbitrary run commands; Unikraft Cloud instances run their OCI image entrypoint"},
-		{name: "implicit env", req: RunRequest{NoSync: true, Env: map[string]string{"CI": "true"}, Command: []string{"true"}}, want: "provider=unikraft-cloud cannot execute arbitrary run commands; Unikraft Cloud instances run their OCI image entrypoint"},
+		{name: "keep first", req: core.RunRequest{Keep: true, Reclaim: true}, want: "provider=unikraft-cloud cannot run commands; --keep is not supported"},
+		{name: "reclaim", req: core.RunRequest{Reclaim: true}, want: "provider=unikraft-cloud cannot run commands; --reclaim is not supported"},
+		{name: "no sync", req: core.RunRequest{}, want: "provider=unikraft-cloud does not support workspace sync; pass --no-sync"},
+		{name: "shell", req: core.RunRequest{NoSync: true, ShellMode: true}, want: "provider=unikraft-cloud cannot open an interactive shell; --shell is not supported"},
+		{name: "env summary without env", req: core.RunRequest{NoSync: true, EnvSummary: true}, want: "provider=unikraft-cloud cannot forward per-run environment variables"},
+		{name: "missing command", req: core.RunRequest{NoSync: true}, want: "missing command"},
+		{name: "command", req: core.RunRequest{NoSync: true, Command: []string{"true"}}, want: "provider=unikraft-cloud cannot execute arbitrary run commands; Unikraft Cloud instances run their OCI image entrypoint"},
+		{name: "implicit env", req: core.RunRequest{NoSync: true, Env: map[string]string{"CI": "true"}, Command: []string{"true"}}, want: "provider=unikraft-cloud cannot execute arbitrary run commands; Unikraft Cloud instances run their OCI image entrypoint"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			b := &backend{newClient: func(Config, Runtime) (unikraftCloudAPI, error) {
+			b := &backend{newClient: func(core.Config, core.Runtime) (unikraftCloudAPI, error) {
 				panic("Run must not request a provider API client")
 			}}
 			result, err := b.Run(context.Background(), tc.req)
-			var public ExitError
+			var public core.ExitError
 			if !errors.As(err, &public) || public.Code != 2 || public.Message != tc.want {
 				t.Fatalf("err=%v, want exit2 %q", err, tc.want)
 			}
-			if !reflect.DeepEqual(result, RunResult{}) {
+			if !reflect.DeepEqual(result, core.RunResult{}) {
 				t.Fatalf("result=%#v, want zero result", result)
 			}
 		})
@@ -367,7 +367,7 @@ func TestStatusReportsInstanceState(t *testing.T) {
 		}},
 	}
 	b := testBackend(api, nil, nil)
-	view, err := b.Status(context.Background(), StatusRequest{ID: testInstanceUUID})
+	view, err := b.Status(context.Background(), core.StatusRequest{ID: testInstanceUUID})
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
@@ -390,10 +390,10 @@ func TestStatusResolvesClaimedSlug(t *testing.T) {
 	}
 	var stdout bytes.Buffer
 	b := testBackend(api, &stdout, nil)
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}, RequestedSlug: "my-ukc"}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}, RequestedSlug: "my-ukc"}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
-	view, err := b.Status(context.Background(), StatusRequest{ID: "my-ukc"})
+	view, err := b.Status(context.Background(), core.StatusRequest{ID: "my-ukc"})
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
@@ -417,7 +417,7 @@ func TestStatusErrors(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			api := &fakeUnikraftCloudAPI{baseURL: "https://api.fra.unikraft.cloud", getErr: test.getErr}
 			b := testBackend(api, nil, nil)
-			_, err := b.Status(context.Background(), StatusRequest{ID: test.id})
+			_, err := b.Status(context.Background(), core.StatusRequest{ID: test.id})
 			if err == nil {
 				t.Fatal("Status succeeded, want error")
 			}
@@ -439,7 +439,7 @@ func TestStatusWaitPollsUntilRunning(t *testing.T) {
 		},
 	}
 	b := testBackend(api, nil, nil)
-	view, err := b.Status(context.Background(), StatusRequest{ID: testInstanceUUID, Wait: true, WaitTimeout: 10 * time.Second})
+	view, err := b.Status(context.Background(), core.StatusRequest{ID: testInstanceUUID, Wait: true, WaitTimeout: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
@@ -458,7 +458,7 @@ func TestStatusWaitTimesOut(t *testing.T) {
 		getResults: []ukcInstance{{UUID: testInstanceUUID, State: "starting"}},
 	}
 	b := testBackend(api, nil, nil)
-	_, err := b.Status(context.Background(), StatusRequest{ID: testInstanceUUID, Wait: true, WaitTimeout: 300 * time.Millisecond})
+	_, err := b.Status(context.Background(), core.StatusRequest{ID: testInstanceUUID, Wait: true, WaitTimeout: 300 * time.Millisecond})
 	if err == nil || !strings.Contains(err.Error(), "timed out waiting") {
 		t.Fatalf("err = %v, want wait timeout", err)
 	}
@@ -475,11 +475,11 @@ func TestListMergesRemoteInstancesWithLocalClaims(t *testing.T) {
 		},
 	}
 	b := testBackend(api, nil, nil)
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}, RequestedSlug: "my-ukc"}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}, RequestedSlug: "my-ukc"}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
 	api.listResult[0].Name = api.createResult.Name
-	servers, err := b.List(context.Background(), ListRequest{})
+	servers, err := b.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -493,7 +493,7 @@ func TestListMergesRemoteInstancesWithLocalClaims(t *testing.T) {
 	if servers[0].Labels["lease"] != claim.LeaseID || servers[0].Labels["slug"] != "my-ukc" {
 		t.Fatalf("servers[0].Labels = %#v", servers[0].Labels)
 	}
-	all, err := b.List(context.Background(), ListRequest{All: true})
+	all, err := b.List(context.Background(), core.ListRequest{All: true})
 	if err != nil || len(all) != 2 || all[1].Labels["lease"] != "" {
 		t.Fatalf("all = %#v err=%v, want claimed plus unclaimed", all, err)
 	}
@@ -506,7 +506,7 @@ func TestListPropagatesAPIError(t *testing.T) {
 		listErr: &unikraftCloudAPIError{StatusCode: http.StatusUnauthorized, Message: "invalid token"},
 	}
 	b := testBackend(api, nil, nil)
-	if _, err := b.List(context.Background(), ListRequest{}); err == nil || !strings.Contains(err.Error(), "invalid token") {
+	if _, err := b.List(context.Background(), core.ListRequest{}); err == nil || !strings.Contains(err.Error(), "invalid token") {
 		t.Fatalf("err = %v, want invalid token", err)
 	}
 }
@@ -520,7 +520,7 @@ func TestListDoesNotPresentUnboundClaimAsOwned(t *testing.T) {
 	}
 	b := testBackend(api, nil, nil)
 	repoRoot := t.TempDir()
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: repoRoot, Name: "demo"}}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: repoRoot, Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
 	leaseID := onlyTestClaim(t).LeaseID
@@ -529,7 +529,7 @@ func TestListDoesNotPresentUnboundClaimAsOwned(t *testing.T) {
 		t.Fatalf("write unbound claim: %v", err)
 	}
 
-	if _, err := b.List(context.Background(), ListRequest{}); err == nil || !strings.Contains(err.Error(), "ownership labels") {
+	if _, err := b.List(context.Background(), core.ListRequest{}); err == nil || !strings.Contains(err.Error(), "ownership labels") {
 		t.Fatalf("List err = %v, want invalid legacy claim rejection", err)
 	}
 }
@@ -542,11 +542,11 @@ func TestStopDeletesClaimedInstance(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 	b := testBackend(api, nil, &stderr)
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}, RequestedSlug: "my-ukc"}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}, RequestedSlug: "my-ukc"}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
 	claim := onlyTestClaim(t)
-	if err := b.Stop(context.Background(), StopRequest{ID: "my-ukc"}); err != nil {
+	if err := b.Stop(context.Background(), core.StopRequest{ID: "my-ukc"}); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	if len(api.deletedIDs) != 1 || api.deletedIDs[0] != testInstanceUUID {
@@ -555,7 +555,7 @@ func TestStopDeletesClaimedInstance(t *testing.T) {
 	if !strings.Contains(stderr.String(), "released lease="+claim.LeaseID) {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
-	if stored, err := readLeaseClaim(claim.LeaseID); err == nil && stored.LeaseID != "" {
+	if stored, err := core.ReadLeaseClaim(claim.LeaseID); err == nil && stored.LeaseID != "" {
 		t.Fatalf("claim = %#v, want removed", stored)
 	}
 }
@@ -564,11 +564,11 @@ func TestStopRequiresLocalClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	api := &fakeUnikraftCloudAPI{baseURL: "https://api.fra.unikraft.cloud"}
 	b := testBackend(api, nil, nil)
-	err := b.Stop(context.Background(), StopRequest{ID: testInstanceUUID})
+	err := b.Stop(context.Background(), core.StopRequest{ID: testInstanceUUID})
 	if err == nil {
 		t.Fatal("Stop succeeded, want unclaimed error")
 	}
-	var exitErr ExitError
+	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 4 {
 		t.Fatalf("err = %#v, want exit code 4", err)
 	}
@@ -585,7 +585,7 @@ func TestStopRejectsClaimWithoutExactInstanceBinding(t *testing.T) {
 	}
 	b := testBackend(api, nil, nil)
 	repoRoot := t.TempDir()
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: repoRoot, Name: "demo"}}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: repoRoot, Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
 	leaseID := onlyTestClaim(t).LeaseID
@@ -594,7 +594,7 @@ func TestStopRejectsClaimWithoutExactInstanceBinding(t *testing.T) {
 		t.Fatalf("write unbound claim: %v", err)
 	}
 
-	err := b.Stop(context.Background(), StopRequest{ID: leaseID})
+	err := b.Stop(context.Background(), core.StopRequest{ID: leaseID})
 	if err == nil || !strings.Contains(err.Error(), "ownership labels") {
 		t.Fatalf("Stop err = %v, want incomplete legacy claim rejection", err)
 	}
@@ -611,12 +611,12 @@ func TestStopRemovesClaimWhenInstanceAlreadyGone(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 	b := testBackend(api, nil, &stderr)
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
 	claim := onlyTestClaim(t)
 	api.deleted = map[string]bool{testInstanceUUID: true}
-	if err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID}); err != nil {
+	if err := b.Stop(context.Background(), core.StopRequest{ID: claim.LeaseID}); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	if len(api.deletedIDs) != 0 {
@@ -625,7 +625,7 @@ func TestStopRemovesClaimWhenInstanceAlreadyGone(t *testing.T) {
 	if !strings.Contains(stderr.String(), "already gone") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
-	if stored, err := readLeaseClaim(claim.LeaseID); err == nil && stored.LeaseID != "" {
+	if stored, err := core.ReadLeaseClaim(claim.LeaseID); err == nil && stored.LeaseID != "" {
 		t.Fatalf("claim = %#v, want removed", stored)
 	}
 }
@@ -638,16 +638,16 @@ func TestStopPropagatesDeleteError(t *testing.T) {
 		deleteErr:    &unikraftCloudAPIError{StatusCode: http.StatusInternalServerError, Message: "backend unavailable"},
 	}
 	b := testBackend(api, nil, nil)
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
 	claim := onlyTestClaim(t)
-	err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID})
+	err := b.Stop(context.Background(), core.StopRequest{ID: claim.LeaseID})
 	if err == nil || !strings.Contains(err.Error(), "backend unavailable") {
 		t.Fatalf("err = %v, want delete failure", err)
 	}
 	// The claim must survive so the user can retry stop.
-	if stored, readErr := readLeaseClaim(claim.LeaseID); readErr != nil || stored.LeaseID == "" {
+	if stored, readErr := core.ReadLeaseClaim(claim.LeaseID); readErr != nil || stored.LeaseID == "" {
 		t.Fatalf("claim = %#v err = %v, want retained claim", stored, readErr)
 	}
 }
@@ -659,12 +659,12 @@ func TestStopRejectsClaimFromDifferentEndpoint(t *testing.T) {
 		createResult: ukcInstance{UUID: testInstanceUUID, State: "running"},
 	}
 	b := testBackend(api, nil, nil)
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
 	claim := onlyTestClaim(t)
 	api.baseURL = "https://api.dal.unikraft.cloud"
-	err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID})
+	err := b.Stop(context.Background(), core.StopRequest{ID: claim.LeaseID})
 	if err == nil || !strings.Contains(err.Error(), "different API endpoint or account") {
 		t.Fatalf("err = %v, want scope mismatch", err)
 	}
@@ -693,7 +693,7 @@ func TestWarmupPublishesCreateIntentBeforeProviderMutation(t *testing.T) {
 		}
 	}
 	b := testBackend(api, nil, nil)
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
 	if len(api.created) != 1 || !strings.HasPrefix(api.created[0].Name, "crabbox-ukc-") {
@@ -710,7 +710,7 @@ func TestWarmupReconcilesAmbiguousCreateWithoutSecondPost(t *testing.T) {
 		createBeforeError: true,
 	}
 	b := testBackend(api, nil, nil)
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
 	if len(api.created) != 1 {
@@ -729,7 +729,7 @@ func TestWarmupRetainsIntentWhenCreateOutcomeIsAmbiguous(t *testing.T) {
 		createErr: errors.New("connection reset after request"),
 	}
 	b := testBackend(api, nil, nil)
-	err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}})
+	err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}})
 	if err == nil || !strings.Contains(err.Error(), "recovery claim") {
 		t.Fatalf("Warmup err = %v", err)
 	}
@@ -747,7 +747,7 @@ func TestWarmupRejectsNegativeMemoryBeforeProviderAccess(t *testing.T) {
 	api := &fakeUnikraftCloudAPI{baseURL: "https://api.fra.unikraft.cloud"}
 	b := testBackend(api, nil, nil)
 	b.cfg.UnikraftCloud.MemoryMB = -1
-	err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}})
+	err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}})
 	if err == nil || !strings.Contains(err.Error(), "memory must be zero or greater") {
 		t.Fatalf("Warmup err = %v", err)
 	}
@@ -764,19 +764,19 @@ func TestStopRejectsClaimFromDifferentAccount(t *testing.T) {
 		createResult: ukcInstance{UUID: testInstanceUUID, State: "running"},
 	}
 	b := testBackend(api, nil, nil)
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
 	claim := onlyTestClaim(t)
 	api.userUUID = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
-	err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID})
+	err := b.Stop(context.Background(), core.StopRequest{ID: claim.LeaseID})
 	if err == nil || !strings.Contains(err.Error(), "different API endpoint or account") {
 		t.Fatalf("Stop err = %v", err)
 	}
 	if len(api.deletedIDs) != 0 {
 		t.Fatalf("deletedIDs = %#v, want none", api.deletedIDs)
 	}
-	if stored, exists, readErr := readLeaseClaimWithPresence(claim.LeaseID); readErr != nil || !exists || stored.CloudID != testInstanceUUID {
+	if stored, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID); readErr != nil || !exists || stored.CloudID != testInstanceUUID {
 		t.Fatalf("stored claim = %#v exists=%v err=%v", stored, exists, readErr)
 	}
 }
@@ -789,28 +789,28 @@ func TestStopRetainsAcceptedClaimUntilStrongAbsenceProof(t *testing.T) {
 		retainAfterDelete: true,
 	}
 	b := testBackend(api, nil, nil)
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
 	claim := onlyTestClaim(t)
-	if err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID}); err == nil || !strings.Contains(err.Error(), "absence is unconfirmed") {
+	if err := b.Stop(context.Background(), core.StopRequest{ID: claim.LeaseID}); err == nil || !strings.Contains(err.Error(), "absence is unconfirmed") {
 		t.Fatalf("first Stop err = %v", err)
 	}
 	accepted := onlyTestClaim(t)
 	if accepted.Labels["state"] != ukcStateDeleteAccepted || len(api.deletedIDs) != 1 {
 		t.Fatalf("accepted = %#v deleted=%#v", accepted, api.deletedIDs)
 	}
-	if err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID}); err == nil {
+	if err := b.Stop(context.Background(), core.StopRequest{ID: claim.LeaseID}); err == nil {
 		t.Fatal("second Stop succeeded while instance remains visible")
 	}
 	if len(api.deletedIDs) != 1 {
 		t.Fatalf("accepted delete replayed: %#v", api.deletedIDs)
 	}
 	api.deleted = map[string]bool{testInstanceUUID: true}
-	if err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID}); err != nil {
+	if err := b.Stop(context.Background(), core.StopRequest{ID: claim.LeaseID}); err != nil {
 		t.Fatalf("final Stop: %v", err)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
+	if _, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
 		t.Fatalf("claim exists=%v err=%v, want removed", exists, err)
 	}
 }
@@ -822,20 +822,20 @@ func TestStopDoesNotTrustNotFoundWhenInventoryStillContainsInstance(t *testing.T
 		createResult: ukcInstance{UUID: testInstanceUUID, State: "running"},
 	}
 	b := testBackend(api, nil, nil)
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
 	claim := onlyTestClaim(t)
 	api.listResult = []ukcInstance{api.createResult}
 	api.getErr = notFoundErr()
-	err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID})
+	err := b.Stop(context.Background(), core.StopRequest{ID: claim.LeaseID})
 	if err == nil {
 		t.Fatal("Stop succeeded on contradictory absence evidence")
 	}
 	if len(api.deletedIDs) != 0 {
 		t.Fatalf("deletedIDs = %#v, want none", api.deletedIDs)
 	}
-	if _, exists, readErr := readLeaseClaimWithPresence(claim.LeaseID); readErr != nil || !exists {
+	if _, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID); readErr != nil || !exists {
 		t.Fatalf("claim exists=%v err=%v, want retained", exists, readErr)
 	}
 }
@@ -849,17 +849,17 @@ func TestStopReconcilesAmbiguousDeleteAfterStrongAbsenceProof(t *testing.T) {
 		removeBeforeDeleteErr: true,
 	}
 	b := testBackend(api, nil, nil)
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
 	claim := onlyTestClaim(t)
-	if err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID}); err != nil {
+	if err := b.Stop(context.Background(), core.StopRequest{ID: claim.LeaseID}); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	if len(api.deletedIDs) != 1 {
 		t.Fatalf("deletedIDs = %#v", api.deletedIDs)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
+	if _, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
 		t.Fatalf("claim exists=%v err=%v, want removed", exists, err)
 	}
 }
@@ -875,7 +875,7 @@ func TestConcurrentWarmupsReserveDistinctRequestedSlugs(t *testing.T) {
 		api := api
 		go func() {
 			b := testBackend(api, nil, nil)
-			errCh <- b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}, RequestedSlug: "same-slug"})
+			errCh <- b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}, RequestedSlug: "same-slug"})
 		}()
 	}
 	for range apis {
@@ -900,7 +900,7 @@ func TestStatusWaitFailsImmediatelyOnTerminalState(t *testing.T) {
 	}
 	b := testBackend(api, nil, nil)
 	started := time.Now()
-	_, err := b.Status(context.Background(), StatusRequest{ID: testInstanceUUID, Wait: true, WaitTimeout: time.Second})
+	_, err := b.Status(context.Background(), core.StatusRequest{ID: testInstanceUUID, Wait: true, WaitTimeout: time.Second})
 	if err == nil || !strings.Contains(err.Error(), "terminal state=stopped") {
 		t.Fatalf("Status err = %v", err)
 	}
@@ -917,21 +917,21 @@ func TestCleanupResumesAcceptedDeletionWithoutReissuingDelete(t *testing.T) {
 		retainAfterDelete: true,
 	}
 	b := testBackend(api, nil, nil)
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
 	claim := onlyTestClaim(t)
-	if err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID}); err == nil {
+	if err := b.Stop(context.Background(), core.StopRequest{ID: claim.LeaseID}); err == nil {
 		t.Fatal("Stop succeeded without absence proof")
 	}
 	api.deleted = map[string]bool{testInstanceUUID: true}
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
 	if len(api.deletedIDs) != 1 {
 		t.Fatalf("accepted delete replayed: %#v", api.deletedIDs)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
+	if _, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
 		t.Fatalf("claim exists=%v err=%v, want removed", exists, err)
 	}
 }
@@ -964,7 +964,7 @@ func TestDoctorReportsInventory(t *testing.T) {
 				listResult: []ukcInstance{{UUID: testInstanceUUID, State: "running"}},
 			}
 			b := testBackend(api, nil, nil)
-			result, err := b.Doctor(context.Background(), DoctorRequest{})
+			result, err := b.Doctor(context.Background(), core.DoctorRequest{})
 			if test.wantErr {
 				if err == nil || !strings.Contains(err.Error(), test.wantErrContains) {
 					t.Fatalf("err = %v, want containing %q", err, test.wantErrContains)

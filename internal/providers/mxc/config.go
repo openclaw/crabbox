@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type mxcConfig struct {
@@ -43,9 +45,9 @@ type mxcUI struct {
 	Disable bool `json:"disable"`
 }
 
-func buildConfig(cfg Config, req RunRequest) (mxcConfig, error) {
+func buildConfig(cfg core.Config, req core.RunRequest) (mxcConfig, error) {
 	if req.ShellMode && !cfg.MXC.AllowWindowsUI {
-		return mxcConfig{}, exit(2, "provider=mxc --shell uses Windows PowerShell; rerun with --mxc-allow-windows-ui")
+		return mxcConfig{}, core.Exit(2, "provider=mxc --shell uses Windows PowerShell; rerun with --mxc-allow-windows-ui")
 	}
 	commandLine, err := windowsCommandLine(req.Command, req.ShellMode)
 	if err != nil {
@@ -54,7 +56,7 @@ func buildConfig(cfg Config, req RunRequest) (mxcConfig, error) {
 	readwrite := append([]string(nil), cfg.MXC.ReadWritePaths...)
 	if root := strings.TrimSpace(req.Repo.Root); root != "" {
 		if isWindowsVolumeRoot(root) {
-			return mxcConfig{}, exit(2, "refusing to grant MXC read-write access to volume root %q", root)
+			return mxcConfig{}, core.Exit(2, "refusing to grant MXC read-write access to volume root %q", root)
 		}
 		readwrite = append(readwrite, root)
 	}
@@ -141,15 +143,15 @@ func windowsProcessEnvironment(forwarded map[string]string) []string {
 	return env
 }
 
-func buildIsolatedConfig(cfg Config, req RunRequest) (mxcConfig, string, func(), error) {
+func buildIsolatedConfig(cfg core.Config, req core.RunRequest) (mxcConfig, string, func(), error) {
 	tempDir, err := os.MkdirTemp("", "crabbox-mxc-run-*")
 	if err != nil {
-		return mxcConfig{}, "", nil, exit(2, "create MXC temporary directory: %v", err)
+		return mxcConfig{}, "", nil, core.Exit(2, "create MXC temporary directory: %v", err)
 	}
 	cleanup := func() { _ = os.RemoveAll(tempDir) }
 	if err := secureDirectory(tempDir); err != nil {
 		cleanup()
-		return mxcConfig{}, "", nil, exit(2, "secure MXC temporary directory: %v", err)
+		return mxcConfig{}, "", nil, core.Exit(2, "secure MXC temporary directory: %v", err)
 	}
 	cfg.MXC.ReadWritePaths = append(append([]string(nil), cfg.MXC.ReadWritePaths...), tempDir)
 	req.Env = cloneEnv(req.Env)
@@ -178,7 +180,7 @@ func secureDirectory(path string) error {
 	}
 	result, err := exec.Command("icacls.exe", path, "/inheritance:r", "/grant:r", current.Username+`:(OI)(CI)F`).CombinedOutput()
 	if err != nil {
-		return exit(2, "icacls: %s", strings.TrimSpace(string(result)))
+		return core.Exit(2, "icacls: %s", strings.TrimSpace(string(result)))
 	}
 	return nil
 }
@@ -246,7 +248,7 @@ func windowsCommandLine(command []string, shellMode bool) (string, error) {
 
 func windowsCommandLineWithLookPath(command []string, shellMode bool, lookPath func(string) (string, error)) (string, error) {
 	if len(command) == 0 {
-		return "", exit(2, "provider=mxc requires a command")
+		return "", core.Exit(2, "provider=mxc requires a command")
 	}
 	if shellMode {
 		return "powershell.exe -NoProfile -NonInteractive -Command " + quoteWindowsArg(strings.Join(command, " ")), nil
@@ -255,7 +257,7 @@ func windowsCommandLineWithLookPath(command []string, shellMode bool, lookPath f
 	if resolved, err := lookPath(command[0]); err == nil {
 		switch strings.ToLower(filepath.Ext(resolved)) {
 		case ".bat", ".cmd":
-			return "", exit(2, "command %q resolves to a Windows script shim; rerun with --shell or invoke an executable directly", command[0])
+			return "", core.Exit(2, "command %q resolves to a Windows script shim; rerun with --shell or invoke an executable directly", command[0])
 		}
 		resolvedCommand[0] = resolved
 	}

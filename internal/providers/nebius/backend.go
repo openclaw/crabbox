@@ -14,18 +14,18 @@ import (
 
 type backend struct {
 	shared.DirectSSHBackend
-	clientFactory func(Runtime) nebiusAPI
+	clientFactory func(core.Runtime) nebiusAPI
 	waitSSH       func(context.Context, *core.SSHTarget, string, time.Duration) error
 	now           func() time.Time
 }
 
-func NewBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+func NewBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = providerName
 	b := &backend{
 		DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, StoredLeaseKeys: true},
 		now:              time.Now,
 	}
-	b.clientFactory = func(rt Runtime) nebiusAPI { return newNebiusClient(cfg.Nebius, rt) }
+	b.clientFactory = func(rt core.Runtime) nebiusAPI { return newNebiusClient(cfg.Nebius, rt) }
 	b.waitSSH = func(ctx context.Context, target *core.SSHTarget, phase string, timeout time.Duration) error {
 		return core.WaitForSSHReady(ctx, target, b.RT.Stderr, phase, timeout)
 	}
@@ -34,31 +34,31 @@ func NewBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	return b
 }
 
-func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
+func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	return shared.AcquireAttemptsRetry(b.RT, req.Keep, func() (core.LeaseTarget, error) {
 		return b.acquireOnce(ctx, req)
 	})
 }
 
-func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (target LeaseTarget, err error) {
+func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (target core.LeaseTarget, err error) {
 	cfg := b.Cfg
 	if err := validateNebiusAcquireConfig(cfg); err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	client := b.clientFactory(b.RT)
 	leaseID := core.NewLeaseID()
 	existing, err := client.ListInstances(ctx)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	servers := ownedServers(existing, cfg)
 	slug, err := core.AllocateDirectLeaseSlug(leaseID, req.RequestedSlug, servers)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	keyPath, publicKey, err := core.EnsureTestboxKeyForConfig(cfg, leaseID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	committed := false
 	retainKey := false
@@ -77,7 +77,7 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (target L
 	created := nebiusInstance{}
 	userData, err := renderNebiusCloudInit(cfg, publicKey)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	fmt.Fprintf(b.RT.Stderr, "provisioning provider=nebius lease=%s slug=%s platform=%s preset=%s keep=%v\n", leaseID, slug, cfg.Nebius.Platform, cfg.Nebius.Preset, req.Keep)
 	created, err = client.CreateInstance(ctx, nebiusCreateRequest{
@@ -90,7 +90,7 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (target L
 		if isIndeterminateNebiusError(err) {
 			_ = b.persistRecoveryClaim(leaseID, slug, "", cfg, req.Repo.Root, labels, req.Reclaim)
 		}
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	defer func() {
 		if err == nil || committed || strings.TrimSpace(created.ID) == "" {
@@ -119,39 +119,39 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (target L
 	}()
 	if req.OnAcquired != nil {
 		if err := req.OnAcquired(core.LeaseTarget{LeaseID: leaseID, Server: serverFromInstance(created, cfg)}); err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 	}
 	ready, err := client.WaitInstance(ctx, created.ID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	server := serverFromInstance(ready, cfg)
 	if server.PublicNet.IPv4.IP == "" {
-		return LeaseTarget{}, core.Exit(5, "nebius instance %s has no public IP", server.DisplayID())
+		return core.LeaseTarget{}, core.Exit(5, "nebius instance %s has no public IP", server.DisplayID())
 	}
 	ssh := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
 	if err := b.waitSSH(ctx, &ssh, "nebius bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	readyLabels := nebiusLeaseLabels(cfg, leaseID, slug, "ready", req.Keep, now)
 	if err := client.UpdateLabels(ctx, server.CloudID, readyLabels); err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	server.Labels = readyLabels
 	server.Status = "ready"
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, ssh, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	committed = true
-	return LeaseTarget{LeaseID: leaseID, Server: server, SSH: ssh}, nil
+	return core.LeaseTarget{LeaseID: leaseID, Server: server, SSH: ssh}, nil
 }
 
-func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
 	client := b.clientFactory(b.RT)
 	items, err := client.ListInstances(ctx)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	servers := ownedServers(items, b.Cfg)
 	byCloudID := make(map[string]nebiusInstance, len(items))
@@ -160,7 +160,7 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 	}
 	server, leaseID, err := core.FindServerByAlias(servers, req.ID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if leaseID == "" {
 		for _, s := range servers {
@@ -175,14 +175,14 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 		return b.releaseTargetFromClaim(req.ID)
 	}
 	if leaseID == "" {
-		return LeaseTarget{}, core.Exit(4, "lease/nebius instance not found: %s", req.ID)
+		return core.LeaseTarget{}, core.Exit(4, "lease/nebius instance not found: %s", req.ID)
 	}
 	item := byCloudID[server.CloudID]
 	if item.ID != "" {
 		server = serverFromInstance(item, b.Cfg)
 	}
 	if err := validateNebiusOwnership(server.Labels, b.Cfg); err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	ssh := core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
 	if !req.ReleaseOnly {
@@ -193,88 +193,88 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 	if req.Repo.Root != "" && !req.NoLocalStateMutations {
 		claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		if _, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, server.Labels["slug"], b.Cfg, server, ssh, req.Repo.Root, b.Cfg.IdleTimeout, req.Reclaim, claim, exists); err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 	}
-	return LeaseTarget{LeaseID: leaseID, Server: server, SSH: ssh}, nil
+	return core.LeaseTarget{LeaseID: leaseID, Server: server, SSH: ssh}, nil
 }
 
-func (b *backend) releaseTargetFromClaim(id string) (LeaseTarget, error) {
+func (b *backend) releaseTargetFromClaim(id string) (core.LeaseTarget, error) {
 	claim, ok, err := core.ResolveLeaseClaimForProvider(id, providerName)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if !ok {
 		claim, ok, err = core.ResolveLeaseClaimForProviderCloudID(id, providerName)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 	}
 	if !ok {
-		return LeaseTarget{}, core.Exit(4, "lease/nebius instance not found: %s", id)
+		return core.LeaseTarget{}, core.Exit(4, "lease/nebius instance not found: %s", id)
 	}
 	if err := validateNebiusOwnership(claim.Labels, b.Cfg); err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
-	server := Server{Provider: providerName, CloudID: claim.CloudID, Name: claim.Slug, Labels: claim.Labels}
-	return LeaseTarget{LeaseID: claim.LeaseID, Server: server}, nil
+	server := core.Server{Provider: providerName, CloudID: claim.CloudID, Name: claim.Slug, Labels: claim.Labels}
+	return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server}, nil
 }
 
-func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) {
+func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseView, error) {
 	items, err := b.clientFactory(b.RT).ListInstances(ctx)
 	if err != nil {
 		return nil, err
 	}
 	servers := ownedServers(items, b.Cfg)
-	out := make([]LeaseView, 0, len(servers))
+	out := make([]core.LeaseView, 0, len(servers))
 	for _, server := range servers {
 		out = append(out, server)
 	}
 	return out, nil
 }
 
-func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
 	if err := core.ValidateLeaseTargetProviderIdentity(req.Lease, req.ExpectedProviderIdentity); err != nil {
 		return err
 	}
 	return b.deleteServer(ctx, b.Cfg, req.Lease.Server)
 }
 
-func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
+func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	return fmt.Sprintf("deleted lease=%s nebius_instance=%s name=%s", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
 }
 
-func (b *backend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
+func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	server := req.Lease.Server
 	if err := validateNebiusOwnership(server.Labels, b.Cfg); err != nil {
-		return Server{}, err
+		return core.Server{}, err
 	}
 	client := b.clientFactory(b.RT)
 	live, err := client.GetInstance(ctx, server.CloudID)
 	if err != nil {
-		return Server{}, err
+		return core.Server{}, err
 	}
 	liveServer := serverFromInstance(live, b.Cfg)
 	if err := validateNebiusOwnership(liveServer.Labels, b.Cfg); err != nil {
-		return Server{}, err
+		return core.Server{}, err
 	}
 	if liveServer.Labels["lease"] != server.Labels["lease"] || liveServer.Labels["slug"] != server.Labels["slug"] {
-		return Server{}, core.Exit(3, "nebius live ownership changed for instance %s; refusing touch", server.DisplayID())
+		return core.Server{}, core.Exit(3, "nebius live ownership changed for instance %s; refusing touch", server.DisplayID())
 	}
 	leaseID := liveServer.Labels["lease"]
 	claim, claimExists, err := core.ReadLeaseClaimWithPresence(leaseID)
 	if err != nil {
-		return Server{}, err
+		return core.Server{}, err
 	}
 	if claimExists {
 		if claim.Provider != providerName || (claim.CloudID != "" && claim.CloudID != liveServer.CloudID) || claim.Slug != liveServer.Labels["slug"] {
-			return Server{}, core.Exit(3, "nebius local claim changed for instance %s; refusing touch", server.DisplayID())
+			return core.Server{}, core.Exit(3, "nebius local claim changed for instance %s; refusing touch", server.DisplayID())
 		}
 		if claim.Labels["state"] == "cleanup" {
-			return Server{}, core.Exit(4, "nebius lease=%s cleanup is already in progress", leaseID)
+			return core.Server{}, core.Exit(4, "nebius lease=%s cleanup is already in progress", leaseID)
 		}
 	}
 	cfg := b.Cfg
@@ -288,7 +288,7 @@ func (b *backend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
 	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, b.now().UTC())
 	labels = addNebiusScopeLabels(labels, cfg)
 	if err := client.UpdateLabels(ctx, server.CloudID, labels); err != nil {
-		return Server{}, err
+		return core.Server{}, err
 	}
 	if claimExists {
 		liveServer.Labels = labels
@@ -299,19 +299,19 @@ func (b *backend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
 			_, err = core.ClaimLeaseTargetForConfigIfUnchanged(leaseID, labels["slug"], cfg, liveServer, req.Lease.SSH, cfg.IdleTimeout, claim, true)
 		}
 		if err != nil {
-			return Server{}, err
+			return core.Server{}, err
 		}
 	}
 	liveServer.Labels = labels
 	return liveServer, nil
 }
 
-func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
+func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	items, err := b.clientFactory(b.RT).ListInstances(ctx)
 	if err != nil {
 		return err
 	}
-	servers := make([]Server, 0, len(items))
+	servers := make([]core.Server, 0, len(items))
 	for _, item := range items {
 		server := serverFromInstance(item, b.Cfg)
 		if err := validateNebiusOwnership(server.Labels, b.Cfg); err != nil {
@@ -325,7 +325,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	return b.CleanupServers(ctx, req, servers)
 }
 
-func (b *backend) cleanupClaimBinding(server Server) shared.ClaimBinding {
+func (b *backend) cleanupClaimBinding(server core.Server) shared.ClaimBinding {
 	return shared.ClaimBinding{
 		Provider:      providerName,
 		ProviderScope: core.ProviderClaimScope(providerName, b.Cfg),
@@ -338,7 +338,7 @@ func (b *backend) cleanupClaimBinding(server Server) shared.ClaimBinding {
 	}
 }
 
-func (b *backend) prepareCleanupServer(_ context.Context, server Server) (Server, bool, shared.CleanupSkipReason, error) {
+func (b *backend) prepareCleanupServer(_ context.Context, server core.Server) (core.Server, bool, shared.CleanupSkipReason, error) {
 	claim, err := shared.RequireExactClaim(b.cleanupClaimBinding(server))
 	if err != nil {
 		eligible, cleanupErr := shared.CleanupClaimEligible(err)
@@ -348,7 +348,7 @@ func (b *backend) prepareCleanupServer(_ context.Context, server Server) (Server
 	return server, true, "", nil
 }
 
-func (b *backend) deleteServer(ctx context.Context, _ Config, server Server) error {
+func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.Server) error {
 	if err := validateNebiusOwnership(server.Labels, b.Cfg); err != nil {
 		return err
 	}
@@ -400,13 +400,13 @@ func (b *backend) deleteServer(ctx context.Context, _ Config, server Server) err
 	return nil
 }
 
-func (b *backend) persistRecoveryClaim(leaseID, slug, cloudID string, cfg Config, repoRoot string, labels map[string]string, reclaim bool) error {
-	server := Server{Provider: providerName, CloudID: cloudID, Name: core.LeaseProviderName(leaseID, slug), Labels: labels}
-	return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, SSHTarget{}, repoRoot, cfg.IdleTimeout, reclaim)
+func (b *backend) persistRecoveryClaim(leaseID, slug, cloudID string, cfg core.Config, repoRoot string, labels map[string]string, reclaim bool) error {
+	server := core.Server{Provider: providerName, CloudID: cloudID, Name: core.LeaseProviderName(leaseID, slug), Labels: labels}
+	return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{}, repoRoot, cfg.IdleTimeout, reclaim)
 }
 
-func ownedServers(items []nebiusInstance, cfg Config) []Server {
-	servers := make([]Server, 0, len(items))
+func ownedServers(items []nebiusInstance, cfg core.Config) []core.Server {
+	servers := make([]core.Server, 0, len(items))
 	for _, item := range items {
 		server := serverFromInstance(item, cfg)
 		if validateNebiusOwnership(server.Labels, cfg) == nil {
@@ -416,7 +416,7 @@ func ownedServers(items []nebiusInstance, cfg Config) []Server {
 	return servers
 }
 
-func validateNebiusAcquireConfig(cfg Config) error {
+func validateNebiusAcquireConfig(cfg core.Config) error {
 	if cfg.TargetOS != "" && cfg.TargetOS != targetLinux {
 		return core.Exit(2, "provider=nebius supports target=linux only")
 	}
@@ -470,7 +470,7 @@ func isNebiusInstanceNotFound(err error, id string) bool {
 	return strings.Contains(text, "instance not found")
 }
 
-func nebiusServerType(cfg Config) string {
+func nebiusServerType(cfg core.Config) string {
 	if strings.TrimSpace(cfg.ServerType) != "" {
 		return strings.TrimSpace(cfg.ServerType)
 	}
@@ -489,12 +489,12 @@ var _ core.SSHLeaseBackend = (*backend)(nil)
 var _ core.CleanupBackend = (*backend)(nil)
 var _ core.ReleaseLeaseReporter = (*backend)(nil)
 
-func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	if b.RT.Exec == nil {
-		return DoctorResult{}, exit(2, "provider=nebius doctor requires command runner")
+		return core.DoctorResult{}, core.Exit(2, "provider=nebius doctor requires command runner")
 	}
 	client := newCLIRunner(b.Cfg.Nebius, b.RT)
-	checks := []DoctorCheck{
+	checks := []core.DoctorCheck{
 		b.checkVersion(ctx, client),
 		b.checkProfile(ctx, client),
 		b.checkParentID(ctx, client),
@@ -510,7 +510,7 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 			break
 		}
 	}
-	return DoctorResult{
+	return core.DoctorResult{
 		Provider: providerName,
 		Status:   status,
 		Message:  fmt.Sprintf("cli=%s control_plane=read_only mutation=false", status),
@@ -518,7 +518,7 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	}, nil
 }
 
-func (b *backend) checkVersion(ctx context.Context, client cliRunner) DoctorCheck {
+func (b *backend) checkVersion(ctx context.Context, client cliRunner) core.DoctorCheck {
 	result, err := client.run(ctx, "version")
 	if err != nil {
 		return doctorCheck("cli", "error", err.Error(), nil)
@@ -526,7 +526,7 @@ func (b *backend) checkVersion(ctx context.Context, client cliRunner) DoctorChec
 	return doctorCheck("cli", "ok", "nebius cli available", map[string]string{"version": redactNebiusText(firstNonBlank(result.Stdout, result.Stderr))})
 }
 
-func (b *backend) checkProfile(ctx context.Context, client cliRunner) DoctorCheck {
+func (b *backend) checkProfile(ctx context.Context, client cliRunner) core.DoctorCheck {
 	result, err := client.run(ctx, "profile", "list")
 	if err != nil {
 		return doctorCheck("profile", "error", err.Error(), nil)
@@ -537,7 +537,7 @@ func (b *backend) checkProfile(ctx context.Context, client cliRunner) DoctorChec
 	return doctorCheck("profile", "ok", "profile store readable", nil)
 }
 
-func (b *backend) checkParentID(ctx context.Context, client cliRunner) DoctorCheck {
+func (b *backend) checkParentID(ctx context.Context, client cliRunner) core.DoctorCheck {
 	parentID := strings.TrimSpace(b.Cfg.Nebius.ParentID)
 	if parentID == "" {
 		return doctorCheck("parent-id", "error", "nebius.parentId is required", nil)
@@ -552,7 +552,7 @@ func (b *backend) checkParentID(ctx context.Context, client cliRunner) DoctorChe
 	return doctorCheck("parent-id", "ok", "project readable", map[string]string{"parentId": parentID})
 }
 
-func (b *backend) checkSubnet(ctx context.Context, client cliRunner) DoctorCheck {
+func (b *backend) checkSubnet(ctx context.Context, client cliRunner) core.DoctorCheck {
 	subnetID := strings.TrimSpace(b.Cfg.Nebius.SubnetID)
 	if subnetID == "" {
 		return doctorCheck("subnet", "error", "nebius.subnetId is required", nil)
@@ -571,7 +571,7 @@ func (b *backend) checkSubnet(ctx context.Context, client cliRunner) DoctorCheck
 	return doctorCheck("subnet", "ok", "subnet readable", map[string]string{"subnetId": subnetID})
 }
 
-func (b *backend) checkPlatform(ctx context.Context, client cliRunner) DoctorCheck {
+func (b *backend) checkPlatform(ctx context.Context, client cliRunner) core.DoctorCheck {
 	platform := strings.TrimSpace(b.Cfg.Nebius.Platform)
 	result, err := client.run(ctx, "compute", "platform", "list", "--parent-id", b.Cfg.Nebius.ParentID, "--format", "json")
 	if err != nil {
@@ -587,7 +587,7 @@ func (b *backend) checkPlatform(ctx context.Context, client cliRunner) DoctorChe
 	return doctorCheck("platform", "ok", "platform readable", map[string]string{"platform": platform})
 }
 
-func (b *backend) checkImage(ctx context.Context, client cliRunner) DoctorCheck {
+func (b *backend) checkImage(ctx context.Context, client cliRunner) core.DoctorCheck {
 	imageFamily := strings.TrimSpace(b.Cfg.Nebius.ImageFamily)
 	result, err := client.run(ctx, "compute", "image", "get-latest-by-family", "--image-family", imageFamily, "--format", "json")
 	if err != nil {
@@ -603,7 +603,7 @@ func (b *backend) checkImage(ctx context.Context, client cliRunner) DoctorCheck 
 	return doctorCheck("image", "ok", "image family readable", map[string]string{"imageFamily": imageFamily})
 }
 
-func (b *backend) checkJSON(ctx context.Context, client cliRunner) DoctorCheck {
+func (b *backend) checkJSON(ctx context.Context, client cliRunner) core.DoctorCheck {
 	// A single page is enough to verify CLI JSON compatibility; lifecycle inventory uses --all.
 	result, err := client.run(ctx, "compute", "instance", "list", "--parent-id", b.Cfg.Nebius.ParentID, "--format", "json")
 	if err != nil {
@@ -615,6 +615,6 @@ func (b *backend) checkJSON(ctx context.Context, client cliRunner) DoctorCheck {
 	return doctorCheck("json", "ok", "json output available", nil)
 }
 
-func doctorCheck(name, status, message string, details map[string]string) DoctorCheck {
-	return DoctorCheck{Check: name, Status: status, Message: redactNebiusText(message), Details: details}
+func doctorCheck(name, status, message string, details map[string]string) core.DoctorCheck {
+	return core.DoctorCheck{Check: name, Status: status, Message: redactNebiusText(message), Details: details}
 }

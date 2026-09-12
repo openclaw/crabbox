@@ -19,7 +19,7 @@ func TestResolveReadinessOwnsClaimUntilPublicationBeforeCaptureAdmission(t *test
 	repo := setupState(t)
 	api := &fakeAPI{sizes: []machineSize{testSize()}, getSequence: []machine{readyMachine("203.0.113.10")}}
 	b := testBackendWithAPI(api)
-	lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +36,7 @@ func TestResolveReadinessOwnsClaimUntilPublicationBeforeCaptureAdmission(t *test
 	preparingSSH, releaseSSH := make(chan struct{}), make(chan struct{})
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(releaseSSH) }) }
-	b.waitSSH = func(context.Context, *SSHTarget, time.Duration) error {
+	b.waitSSH = func(context.Context, *core.SSHTarget, time.Duration) error {
 		close(preparingSSH)
 		<-releaseSSH
 		return nil
@@ -45,7 +45,7 @@ func TestResolveReadinessOwnsClaimUntilPublicationBeforeCaptureAdmission(t *test
 	resolveDone := make(chan struct{})
 	go func() {
 		defer close(resolveDone)
-		_, err := b.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID, StatusOnly: true, ReadyProbe: true})
+		_, err := b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true, ReadyProbe: true})
 		resolved <- err
 	}()
 	t.Cleanup(func() {
