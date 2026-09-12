@@ -165,33 +165,18 @@ func loaderURL(cfg Config) (string, error) {
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", exit(2, "%s loader URL %q is invalid", providerName, loaderURLForError(raw))
+		return "", exit(2, "%s loader URL %q is invalid", providerName, shared.EndpointURLForError(raw))
 	}
 	if parsed.User != nil {
 		return "", exit(2, "%s loader URL must not include userinfo", providerName)
 	}
 	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
-		return "", exit(2, "%s loader URL %q must use https unless it targets localhost", providerName, loaderURLForError(raw))
+		return "", exit(2, "%s loader URL %q must use https unless it targets localhost", providerName, shared.EndpointURLForError(raw))
 	}
 	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", exit(2, "%s loader URL %q must not include query or fragment components", providerName, loaderURLForError(raw))
+		return "", exit(2, "%s loader URL %q must not include query or fragment components", providerName, shared.EndpointURLForError(raw))
 	}
 	return strings.TrimRight(parsed.String(), "/"), nil
-}
-
-func loaderURLForError(raw string) string {
-	parsed, err := url.Parse(raw)
-	if err == nil {
-		if parsed.Opaque != "" || parsed.Host == "" {
-			return "<redacted>"
-		}
-		parsed.User = nil
-		parsed.RawQuery = ""
-		parsed.ForceQuery = false
-		parsed.Fragment = ""
-		return parsed.String()
-	}
-	return "<redacted>"
 }
 
 func loaderClaimScope(cfg Config) (string, error) {

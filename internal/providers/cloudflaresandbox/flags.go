@@ -2,7 +2,6 @@ package cloudflaresandbox
 
 import (
 	"flag"
-	"net"
 	"net/url"
 	"path"
 	"strings"
@@ -71,49 +70,19 @@ func bridgeURL(cfg Config) (string, error) {
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", exit(2, "%s bridge URL %q is invalid", providerName, bridgeURLForError(raw))
+		return "", exit(2, "%s bridge URL %q is invalid", providerName, shared.EndpointURLForError(raw))
 	}
 	if parsed.User != nil {
 		return "", exit(2, "%s bridge URL must not include userinfo", providerName)
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
 	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && shared.IsLoopbackHost(parsed.Hostname())) {
-		return "", exit(2, "%s bridge URL %q must use https unless it targets localhost", providerName, bridgeURLForError(raw))
+		return "", exit(2, "%s bridge URL %q must use https unless it targets localhost", providerName, shared.EndpointURLForError(raw))
 	}
 	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", exit(2, "%s bridge URL %q must not include query or fragment components", providerName, bridgeURLForError(raw))
+		return "", exit(2, "%s bridge URL %q must not include query or fragment components", providerName, shared.EndpointURLForError(raw))
 	}
-	parsed.Host = canonicalHostPort(parsed)
+	parsed.Host = shared.CanonicalHostPort(parsed)
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	return strings.TrimRight(parsed.String(), "/"), nil
-}
-
-func bridgeURLForError(raw string) string {
-	parsed, err := url.Parse(raw)
-	if err == nil {
-		if parsed.Opaque != "" || parsed.Host == "" {
-			return "<redacted>"
-		}
-		parsed.User = nil
-		parsed.RawQuery = ""
-		parsed.ForceQuery = false
-		parsed.Fragment = ""
-		return parsed.String()
-	}
-	return "<redacted>"
-}
-
-func canonicalHostPort(parsed *url.URL) string {
-	host := strings.ToLower(parsed.Hostname())
-	port := parsed.Port()
-	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
-		port = ""
-	}
-	if port == "" {
-		if strings.Contains(host, ":") {
-			return "[" + host + "]"
-		}
-		return host
-	}
-	return net.JoinHostPort(host, port)
 }

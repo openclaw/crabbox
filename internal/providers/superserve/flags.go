@@ -147,7 +147,7 @@ func validateSuperserveBaseURL(raw string) (string, error) {
 	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
 		return "", exit(2, "provider=superserve base URL must use HTTPS except for loopback development endpoints")
 	}
-	parsed.Host = canonicalHostPort(parsed)
+	parsed.Host = shared.CanonicalHostPort(parsed)
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	return parsed.String(), nil
 }
@@ -170,21 +170,6 @@ func superserveWorkdir(cfg Config) (string, error) {
 
 func isLoopbackHost(host string) bool {
 	return shared.IsLoopbackHost(host)
-}
-
-func canonicalHostPort(parsed *url.URL) string {
-	host := strings.ToLower(parsed.Hostname())
-	port := parsed.Port()
-	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
-		port = ""
-	}
-	if port == "" {
-		if strings.Contains(host, ":") {
-			return "[" + host + "]"
-		}
-		return host
-	}
-	return net.JoinHostPort(host, port)
 }
 
 func splitSuperserveList(value string) []string {

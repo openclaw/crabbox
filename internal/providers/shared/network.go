@@ -30,21 +30,44 @@ func NormalizeHTTPSURL(raw string, errs EndpointURLErrors) (string, error) {
 // Callers own scheme admission and URL-component policy before canonicalizing
 // the lowercased scheme's address. Claim keys and live endpoints differ there.
 func canonicalEndpointAddress(parsed *url.URL) string {
+	parsed.Host = CanonicalHostPort(parsed)
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawPath = ""
+	return strings.TrimRight(parsed.String(), "/")
+}
+
+// CanonicalHostPort formats an already-parsed endpoint authority. Callers own
+// scheme validation and path policy; the complete hostname is lowercased.
+func CanonicalHostPort(parsed *url.URL) string {
 	host := strings.ToLower(parsed.Hostname())
 	port := parsed.Port()
 	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
 		port = ""
 	}
 	if port != "" {
-		parsed.Host = net.JoinHostPort(host, port)
-	} else if strings.Contains(host, ":") {
-		parsed.Host = "[" + host + "]"
-	} else {
-		parsed.Host = host
+		return net.JoinHostPort(host, port)
 	}
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
-	parsed.RawPath = ""
-	return strings.TrimRight(parsed.String(), "/")
+	if strings.Contains(host, ":") {
+		return "[" + host + "]"
+	}
+	return host
+}
+
+// EndpointURLForError omits userinfo, query, and fragment components. It is an
+// endpoint display formatter, not a general diagnostic secret scrubber.
+func EndpointURLForError(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err == nil {
+		if parsed.Opaque != "" || parsed.Host == "" {
+			return "<redacted>"
+		}
+		parsed.User = nil
+		parsed.RawQuery = ""
+		parsed.ForceQuery = false
+		parsed.Fragment = ""
+		return parsed.String()
+	}
+	return "<redacted>"
 }
 
 func IsLoopbackHost(host string) bool {
