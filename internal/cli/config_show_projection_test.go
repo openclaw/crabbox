@@ -239,13 +239,13 @@ func TestConfigShowLegacySlotPositions(t *testing.T) {
 				name = "jobs"
 			}
 			switch name {
-			case "actions", "phala", "superserve", "local_container", "apple_container", "mxc", "docker_sandbox", "machine0", "cloudflare", "jobs", "aws", "aws_lambda_microvm", "azure", "digitalocean", "vultr", "linode", "github_codespaces", "azure_dynamic_sessions", "gcp", "proxmox", "xcp_ng":
+			case "actions", "phala", "superserve", "local_container", "apple_container", "mxc", "docker_sandbox", "machine0", "cloudflare", "cloudflare_sandbox", "results", "jobs", "aws", "aws_lambda_microvm", "azure", "digitalocean", "vultr", "linode", "github_codespaces", "azure_dynamic_sessions", "gcp", "proxmox", "xcp_ng":
 				order = append(order, name)
 			}
 		}
 		return true
 	})
-	if got := strings.Join(order, ","); got != "actions,blacksmith,agent_sandbox,phala,superserve,local_container,apple_container,mxc,docker_sandbox,multipass,machine0,tart,lume,cloudflare,jobs,aws,aws_lambda_microvm,azure,digitalocean,vultr,linode,github_codespaces,azure_dynamic_sessions,gcp,proxmox,firecracker,xcp_ng,parallels" {
+	if got := strings.Join(order, ","); got != "actions,blacksmith,agent_sandbox,phala,superserve,local_container,apple_container,mxc,docker_sandbox,multipass,machine0,tart,lume,cloudflare,cloudflare_sandbox,static,results,jobs,aws,aws_lambda_microvm,azure,digitalocean,vultr,linode,github_codespaces,azure_dynamic_sessions,gcp,proxmox,firecracker,xcp_ng,parallels" {
 		t.Fatalf("legacy text slot positions: %s", got)
 	}
 }
@@ -360,6 +360,7 @@ func TestConfigShowMigratedLegacyOwnershipRetired(t *testing.T) {
 		{"digitalocean", "digitalocean"}, {"vultr", "vultr"}, {"linode", "linode"},
 		{"blacksmith", "blacksmith"}, {"agentSandbox", "agent_sandbox"}, {"firecracker", "firecracker"},
 		{"parallels", "parallels"},
+		{"static", "static"},
 	} {
 		t.Run(tc.key, func(t *testing.T) {
 			if _, exists := view[tc.key]; exists {

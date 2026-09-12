@@ -82,6 +82,12 @@ and host order stay unchanged. Text retains collection counts and its existing
 raw strings and empty-only fallbacks. Projection does not select templates,
 resolve hosts or read key files, and runtime-only selected-host state stays omitted.
 
+Static SSH owns its six existing string fields through the canonical `ssh`
+provider. Its published JSON key and text label remain `static`, including when
+selected through the `static` or `static-ssh` aliases. Port remains a string,
+text keeps empty-only dashes, and the section retains its original slot without
+resolving an SSH target or changing the separate generic SSH display.
+
 ## Remaining migration
 
 The baseline census contains 81 canonical providers: 49 have both value formats,
@@ -94,9 +100,9 @@ sections**. They do not complete the migration. Existing provider projections
 also still need to move out of the parallel JSON map and text formatter so
 their field selection and transformations have one owner.
 
-The Multipass/Tart/Lume, local-container, cloud, VPS, runtime and Parallels cohorts remove eighteen
+The Multipass/Tart/Lume, local-container, cloud, VPS, runtime, Parallels and Static SSH cohorts remove nineteen
 of the original 49 canonical both-format providers from that legacy
-implementation, leaving 31 in that cohort. The local cohort covers five
+implementation, leaving 30 in that cohort. The local cohort covers five
 identities through four sections because Apple Machine shares Apple Container's
 values. These migrations do not fill any of the missing sections above.
 

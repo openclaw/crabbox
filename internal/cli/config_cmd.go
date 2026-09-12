@@ -541,14 +541,6 @@ func configShowView(cfg Config) map[string]any {
 			"createTimeout": cfg.Machine0.CreateTimeout.String(),
 			"pollInterval":  cfg.Machine0.PollInterval.String(),
 		},
-		"static": map[string]any{
-			"id":       cfg.Static.ID,
-			"name":     cfg.Static.Name,
-			"host":     cfg.Static.Host,
-			"user":     cfg.Static.User,
-			"port":     cfg.Static.Port,
-			"workRoot": cfg.Static.WorkRoot,
-		},
 		"results": map[string]any{
 			"junit":          cfg.Results.JUnit,
 			"auto":           cfg.Results.Auto,
@@ -704,7 +696,9 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 	fmt.Fprintf(w, "fastapi_cloud api_url=%s app_id=%s team_id=%s auth=%s\n", blank(redactedConfigURL(cfg.FastAPICloud.APIURL), "-"), blank(cfg.FastAPICloud.AppID, "-"), blank(cfg.FastAPICloud.TeamID, "-"), tokenState(cfg.FastAPICloud.Token))
 	fmt.Fprintf(w, "cloudflare_dynamic_workers loader_url=%s compatibility_date=%s compatibility_flags=%s cache_mode=%s egress=%s cpu_ms=%d subrequests=%d timeout_secs=%d metadata=%d auth=%s\n", blank(redactedConfigURL(cfg.CloudflareDynamicWorkers.LoaderURL), "-"), blank(cfg.CloudflareDynamicWorkers.CompatibilityDate, "-"), blank(strings.Join(cfg.CloudflareDynamicWorkers.CompatibilityFlags, ","), "-"), cfg.CloudflareDynamicWorkers.CacheMode, cfg.CloudflareDynamicWorkers.Egress, cfg.CloudflareDynamicWorkers.CPUMs, cfg.CloudflareDynamicWorkers.Subrequests, cfg.CloudflareDynamicWorkers.TimeoutSecs, len(cfg.CloudflareDynamicWorkers.Metadata), tokenState(cfg.CloudflareDynamicWorkers.Token))
 	fmt.Fprintf(w, "cloudflare_sandbox url=%s workdir=%s exec_timeout_secs=%d forget_missing=%t auth=%s\n", blank(redactedConfigURL(cfg.CloudflareSandbox.BridgeURL), "-"), cfg.CloudflareSandbox.Workdir, cfg.CloudflareSandbox.ExecTimeoutSecs, cfg.CloudflareSandbox.ForgetMissing, tokenState(cfg.CloudflareSandbox.Token))
-	fmt.Fprintf(w, "static id=%s name=%s host=%s user=%s port=%s work_root=%s\n", blank(cfg.Static.ID, "-"), blank(cfg.Static.Name, "-"), blank(cfg.Static.Host, "-"), blank(cfg.Static.User, "-"), blank(cfg.Static.Port, "-"), blank(cfg.Static.WorkRoot, "-"))
+	if err := layout.writeSlot(w, "static"); err != nil {
+		return err
+	}
 	fmt.Fprintf(w, "results junit=%s auto=%t fail_on_failures=%t\n", blank(strings.Join(cfg.Results.JUnit, ","), "-"), cfg.Results.Auto, cfg.Results.FailOnFailures)
 	fmt.Fprintf(w, "cache pnpm=%t npm=%t docker=%t git=%t max_gb=%d purge_on_release=%t volumes=%d\n", cfg.Cache.Pnpm, cfg.Cache.Npm, cfg.Cache.Docker, cfg.Cache.Git, cfg.Cache.MaxGB, cfg.Cache.PurgeOnRelease, len(cfg.Cache.Volumes))
 	if len(cfg.Jobs) > 0 {
