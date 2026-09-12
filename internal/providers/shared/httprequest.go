@@ -21,3 +21,17 @@ func NewJSONRequest(ctx context.Context, method, url string, body any) (*http.Re
 	}
 	return http.NewRequestWithContext(ctx, method, url, reader)
 }
+
+// NewCompactJSONRequest uses Marshal's compact wire representation without the
+// Encoder newline. A nil interface stays absent; typed-nil values encode as null.
+func NewCompactJSONRequest(ctx context.Context, method, url string, body any) (*http.Request, error) {
+	var reader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		reader = bytes.NewReader(data)
+	}
+	return http.NewRequestWithContext(ctx, method, url, reader)
+}

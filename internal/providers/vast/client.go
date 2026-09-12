@@ -1,7 +1,6 @@
 package vast
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -154,19 +153,11 @@ func vastRedirectError(destination *url.URL) error {
 }
 
 func (c *vastClient) do(ctx context.Context, method, path string, body any, out any) error {
-	var reader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		reader = bytes.NewReader(data)
-	}
 	endpoint := c.apiURL + path
 	if parsed, err := url.Parse(path); err == nil && parsed.IsAbs() {
 		endpoint = path
 	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
+	req, err := shared.NewCompactJSONRequest(ctx, method, endpoint, body)
 	if err != nil {
 		return err
 	}

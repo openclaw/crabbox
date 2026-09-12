@@ -1,7 +1,6 @@
 package railway
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -209,11 +208,7 @@ type graphqlResponse struct {
 }
 
 func (c *railwayClient) do(ctx context.Context, query string, vars map[string]any, out any) error {
-	body, err := json.Marshal(graphqlRequest{Query: query, Variables: vars})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiURL, bytes.NewReader(body))
+	req, err := shared.NewCompactJSONRequest(ctx, http.MethodPost, c.apiURL, graphqlRequest{Query: query, Variables: vars})
 	if err != nil {
 		return err
 	}
