@@ -91,7 +91,7 @@ func ensurePrivateDirectoryDurableWithinWithSync(dir, boundary string, syncDirec
 	if !pathWithinRoot(dir, boundary) {
 		return exit(2, "private directory %s is outside durability boundary %s", dir, boundary)
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := makePrivateDurableDirectories(dir); err != nil {
 		return exit(2, "create private directory %s: %v", dir, err)
 	}
 	if dir == boundary {

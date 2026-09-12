@@ -28,7 +28,7 @@ Fixed-ID AWS acquisition holds the normal durable claim lock while creating or
 reusing this key, so concurrent replays cannot race two different keypairs into
 one EC2 idempotency identity.
 
-Without an explicit `XDG_STATE_HOME`, local key storage keeps its existing OS
+With `XDG_STATE_HOME` unset or empty, local key storage keeps its existing OS
 user-config location:
 
 ```text

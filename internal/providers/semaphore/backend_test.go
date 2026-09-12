@@ -581,10 +581,7 @@ func TestAcquirePersistsExactScopedClaimOrRollsBack(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 			t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 			withWaitForRunningPollInterval(t, 0)
-			blockedState := filepath.Join(t.TempDir(), "not-a-directory")
-			if err := os.WriteFile(blockedState, []byte("blocked"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			blockedClaims := filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims")
 			stops := 0
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 				switch {
@@ -604,7 +601,7 @@ func TestAcquirePersistsExactScopedClaimOrRollsBack(t *testing.T) {
 					})
 				case req.Method == http.MethodGet && req.URL.Path == "/api/v1alpha/jobs/job-created/debug_ssh_key":
 					if tc.claimFailure {
-						if err := os.Setenv("XDG_STATE_HOME", blockedState); err != nil {
+						if err := os.WriteFile(blockedClaims, []byte("blocked"), 0o600); err != nil {
 							t.Error(err)
 						}
 					}

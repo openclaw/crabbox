@@ -414,7 +414,7 @@ func TestShouldCleanupStoppedVM(t *testing.T) {
 }
 
 func TestReleaseRequiresExactClaim(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	oldOS := hypervHostOS
 	hypervHostOS = "windows"
 	t.Cleanup(func() { hypervHostOS = oldOS })
@@ -760,7 +760,6 @@ func TestAcquireRejectsUnsafeSSHUser(t *testing.T) {
 
 func TestAcquireQuarantinesSSHBeforeConnectingNetwork(t *testing.T) {
 	testutil.IsolateUserDirs(t)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	oldOS := hypervHostOS
 	hypervHostOS = "windows"
@@ -830,7 +829,6 @@ func TestAcquireQuarantinesSSHBeforeConnectingNetwork(t *testing.T) {
 
 func TestAcquireKeepPersistsClaimAndKeyBeforeBootstrap(t *testing.T) {
 	testutil.IsolateUserDirs(t)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	oldOS := hypervHostOS
 	hypervHostOS = "windows"
 	t.Cleanup(func() { hypervHostOS = oldOS })
@@ -874,7 +872,6 @@ func TestAcquireKeepPersistsClaimAndKeyBeforeBootstrap(t *testing.T) {
 
 func TestAcquirePersistsProvisionalClaimThenRollsBackFailedLease(t *testing.T) {
 	testutil.IsolateUserDirs(t)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	oldOS := hypervHostOS
 	hypervHostOS = "windows"
 	t.Cleanup(func() { hypervHostOS = oldOS })
@@ -959,7 +956,7 @@ func TestAcquireInitPasswordRejectsCmdUnsafeUser(t *testing.T) {
 // Success must leave a claim that already carries the endpoint -- there is no
 // separate endpoint update whose failure could strand a half-written claim.
 func TestPersistLeaseWritesClaimAndEndpointAtomically(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	b := testBackend(&recordingRunner{})
 	cfg := b.configForRun()
 	lease := LeaseTarget{LeaseID: "cbx_atomic123456"}
@@ -1025,7 +1022,7 @@ func TestPersistLeaseFailureLeavesNoStaleClaim(t *testing.T) {
 }
 
 func TestResolveStatusOnlyAllowsRetainedLeaseWithoutIP(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	name := "crabbox-retained-no-ip"
 	queryScript := fmt.Sprintf(`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq '%s' } | Select-Object Name, State | ConvertTo-Json -Compress`, name)
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
@@ -1092,7 +1089,7 @@ func TestQueryVMParsesSingle(t *testing.T) {
 }
 
 func TestReleasePrunesClaimAndKeyWhenVMIsMissing(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1172,7 +1169,7 @@ func TestReleasePrunesClaimAndKeyWhenVMIsMissing(t *testing.T) {
 }
 
 func TestCleanupMissingClaimRemovesDeterministicStorage(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
@@ -1223,7 +1220,7 @@ func TestCleanupMissingClaimRemovesDeterministicStorage(t *testing.T) {
 }
 
 func TestCleanupMissingKeepClaimPreservesStorage(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
@@ -2003,7 +2000,6 @@ func TestInvokeInGuestAbortsOnContextCancel(t *testing.T) {
 // The readiness probe must precede the SSH lockdown.
 func TestAcquireWaitsForGuestReadyBeforeLockdown(t *testing.T) {
 	testutil.IsolateUserDirs(t)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	oldOS := hypervHostOS
 	hypervHostOS = "windows"

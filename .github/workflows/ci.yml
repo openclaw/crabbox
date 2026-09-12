@@ -201,6 +201,7 @@ jobs:
             'TestSelectedLeaseSSHRootWindowsACLContract',
             'TestSelectedLeaseSSHRootWindowsPrivateComponents',
             'TestSelectedLeaseSSHWindowsOwnedNamespaceSecuring',
+            'TestSelectedLeaseSSHWindowsClaimFirstNamespace',
             'TestSelectedLeaseSSHWindowsPrivateKeyReuse',
             'TestEnsureTestboxLeaseDirectoryCreatesPrivateWindowsComponents',
             'TestTestboxKeyPathAllowsSafeCustomIDs',

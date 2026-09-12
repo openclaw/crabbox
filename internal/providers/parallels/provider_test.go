@@ -371,23 +371,13 @@ func TestParallelsAcquireKeepsStoredKeyWhenRollbackDeleteFails(t *testing.T) {
 
 func storedTestboxKeyMatches(t *testing.T) []string {
 	t.Helper()
-	var patterns []string
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		patterns = append(patterns, filepath.Join(xdg, "crabbox", "testboxes", "*", "id_ed25519"))
+	key, err := core.TestboxKeyPath("fixture-root")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if home := os.Getenv("HOME"); home != "" {
-		patterns = append(patterns,
-			filepath.Join(home, ".config", "crabbox", "testboxes", "*", "id_ed25519"),
-			filepath.Join(home, "Library", "Application Support", "crabbox", "testboxes", "*", "id_ed25519"),
-		)
-	}
-	var matches []string
-	for _, pattern := range patterns {
-		found, err := filepath.Glob(pattern)
-		if err != nil {
-			t.Fatal(err)
-		}
-		matches = append(matches, found...)
+	matches, err := filepath.Glob(filepath.Join(filepath.Dir(filepath.Dir(key)), "*", filepath.Base(key)))
+	if err != nil {
+		t.Fatal(err)
 	}
 	return matches
 }
