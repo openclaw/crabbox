@@ -101,6 +101,44 @@ func TestTestboxKeyPathAllowsSafeCustomIDs(t *testing.T) {
 	}
 }
 
+func TestUseStoredTestboxKeyPreservesOptionalFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		leaseID  string
+		stored   bool
+		fallback string
+	}{
+		{name: "stored key overrides configured key", leaseID: "cbx_optional", stored: true, fallback: "configured-key"},
+		{name: "missing key preserves configured key", leaseID: "cbx_optional", fallback: "configured-key"},
+		{name: "invalid ID preserves configured key", leaseID: "invalid/id", fallback: "configured-key"},
+		{name: "missing key preserves empty key", leaseID: "cbx_optional"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateTestUserDirs(t)
+			t.Setenv("XDG_STATE_HOME", "")
+			want := tc.fallback
+			if tc.stored {
+				path, err := testboxKeyPath(tc.leaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				want = path
+			}
+			target := SSHTarget{Key: tc.fallback}
+			UseStoredTestboxKey(&target, tc.leaseID)
+			if target.Key != want {
+				t.Fatalf("key=%q want %q", target.Key, want)
+			}
+		})
+	}
+}
+
 func TestUseLeaseKnownHostsScopesAndEnforcesHostVerification(t *testing.T) {
 	isolateTestUserDirs(t)
 

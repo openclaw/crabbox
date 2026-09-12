@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -257,11 +256,7 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (lease LeaseT
 		target.Port = labelPort
 	}
 	if leaseID != "" {
-		if keyPath, keyErr := core.TestboxKeyPath(leaseID); keyErr == nil {
-			if _, statErr := os.Stat(keyPath); statErr == nil {
-				target.Key = keyPath
-			}
-		}
+		core.UseStoredTestboxKey(&target, leaseID)
 	}
 	if !req.StatusOnly {
 		if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "reuse", core.BootstrapWaitTimeout(cfg)); err != nil {
