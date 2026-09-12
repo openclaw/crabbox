@@ -437,6 +437,12 @@ type CleanupBackend interface {
 }
 ```
 
+Delegated adapters that expire local claims by last activity should use
+`shared.ClaimIdleCleanupDue`. It preserves the shared idle-deadline decision
+and skip reasons, including disabled timeouts and invalid timestamps. Absolute
+TTL rules, recovery deadlines, ownership validation, and deletion authorization
+remain adapter-owned; an idle deadline alone does not authorize cleanup.
+
 Cleanup must honor `CleanupRequest.DryRun`, log every skip/delete decision to
 `rt.Stderr`, and filter by Crabbox labels so it never touches unrelated
 machines. When a broker is configured, core refuses to call provider cleanup at

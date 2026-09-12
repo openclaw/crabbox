@@ -519,7 +519,7 @@ func (b *openSandboxBackend) Cleanup(ctx context.Context, req CleanupRequest) er
 				claimRemovedOne = true
 				return nil
 			}
-			due, reason := openSandboxClaimCleanupDue(claim, now)
+			due, reason := shared.ClaimIdleCleanupDue(claim, now)
 			if !due {
 				fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
 				return nil
@@ -627,21 +627,6 @@ func openSandboxRecoveryExpired(claim LeaseClaim, now time.Time) (bool, error) {
 
 func openSandboxClaimMatchesEndpoint(claim LeaseClaim, baseURL string) bool {
 	return strings.HasPrefix(strings.TrimSpace(claim.ProviderScope), openSandboxEndpointScope(baseURL)+"-own-")
-}
-
-func openSandboxClaimCleanupDue(claim LeaseClaim, now time.Time) (bool, string) {
-	if claim.IdleTimeoutSeconds <= 0 {
-		return false, "idle timeout disabled"
-	}
-	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
-	if err != nil {
-		return false, "invalid last-used time"
-	}
-	deadline := lastUsed.Add(time.Duration(claim.IdleTimeoutSeconds) * time.Second)
-	if now.Before(deadline) {
-		return false, "idle timeout not reached"
-	}
-	return true, "idle timeout"
 }
 
 func (b *openSandboxBackend) refreshOpenSandboxLeaseActivity(leaseID string) error {

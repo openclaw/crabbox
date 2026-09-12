@@ -434,7 +434,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 				claimRemovedOne = true
 				return nil
 			}
-			due, reason := superserveClaimCleanupDue(claim, now)
+			due, reason := shared.ClaimIdleCleanupDue(claim, now)
 			if !due {
 				fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
 				return nil
@@ -682,21 +682,6 @@ func validateSuperserveSandboxOwnership(claim LeaseClaim, sb superserveSandbox) 
 		return exit(4, "superserve sandbox %q ownership metadata does not match its local claim", sb.ID)
 	}
 	return nil
-}
-
-func superserveClaimCleanupDue(claim LeaseClaim, now time.Time) (bool, string) {
-	if claim.IdleTimeoutSeconds <= 0 {
-		return false, "idle timeout disabled"
-	}
-	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
-	if err != nil {
-		return false, "invalid last-used time"
-	}
-	deadline := lastUsed.Add(time.Duration(claim.IdleTimeoutSeconds) * time.Second)
-	if now.Before(deadline) {
-		return false, "idle timeout not reached"
-	}
-	return true, "idle timeout"
 }
 
 func (b *backend) refreshSuperserveLeaseActivity(leaseID string) error {

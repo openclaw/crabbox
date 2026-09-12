@@ -418,7 +418,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 				claimRemovedOne = true
 				return nil
 			}
-			due, reason := claimCleanupDue(claim, now)
+			due, reason := shared.ClaimIdleCleanupDue(claim, now)
 			if !due {
 				fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
 				return nil
@@ -707,21 +707,6 @@ func validateSandboxOwnership(claim LeaseClaim, sb sandboxSummary) error {
 		return exit(4, "vercel-sandbox sandbox %q ownership metadata does not match its local claim", sb.ID)
 	}
 	return nil
-}
-
-func claimCleanupDue(claim LeaseClaim, now time.Time) (bool, string) {
-	if claim.IdleTimeoutSeconds <= 0 {
-		return false, "idle timeout disabled"
-	}
-	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
-	if err != nil {
-		return false, "invalid last-used time"
-	}
-	deadline := lastUsed.Add(time.Duration(claim.IdleTimeoutSeconds) * time.Second)
-	if now.Before(deadline) {
-		return false, "idle timeout not reached"
-	}
-	return true, "idle timeout"
 }
 
 func (b *backend) refreshLeaseActivity(leaseID string) error {

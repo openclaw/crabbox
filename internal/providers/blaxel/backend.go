@@ -371,7 +371,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			claimsRemoved++
 			continue
 		}
-		due, reason := blaxelClaimCleanupDue(claim, now)
+			due, reason := shared.ClaimIdleCleanupDue(claim, now)
 		if !due {
 			fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
 			continue

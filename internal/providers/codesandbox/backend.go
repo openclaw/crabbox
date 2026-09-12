@@ -300,7 +300,7 @@ func (b *codeSandboxBackend) Cleanup(ctx context.Context, req CleanupRequest) er
 			return err
 		}
 		checked++
-		due, reason := claimCleanupDue(claim, now)
+		due, reason := shared.ClaimIdleCleanupDue(claim, now)
 		sandboxID := strings.TrimPrefix(claim.LeaseID, leasePrefix)
 		if !due {
 			fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)

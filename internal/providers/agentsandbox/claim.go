@@ -11,6 +11,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -322,18 +323,7 @@ func claimCleanupDue(claim LeaseClaim, now time.Time) (bool, string) {
 	if claimTTLExpired(claim, now) {
 		return true, "ttl"
 	}
-	if claim.IdleTimeoutSeconds <= 0 {
-		return false, "idle timeout disabled"
-	}
-	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
-	if err != nil {
-		return false, "invalid last-used time"
-	}
-	deadline := lastUsed.Add(time.Duration(claim.IdleTimeoutSeconds) * time.Second)
-	if now.Before(deadline) {
-		return false, "idle timeout not reached"
-	}
-	return true, "idle timeout"
+	return shared.ClaimIdleCleanupDue(claim, now)
 }
 
 func claimTTLExpired(claim LeaseClaim, now time.Time) bool {

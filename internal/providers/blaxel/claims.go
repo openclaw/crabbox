@@ -192,21 +192,6 @@ func validateBlaxelSandboxOwnership(claim LeaseClaim, sb Sandbox) error {
 	return nil
 }
 
-func blaxelClaimCleanupDue(claim LeaseClaim, now time.Time) (bool, string) {
-	if claim.IdleTimeoutSeconds <= 0 {
-		return false, "idle timeout disabled"
-	}
-	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
-	if err != nil {
-		return false, "invalid last-used time"
-	}
-	deadline := lastUsed.Add(time.Duration(claim.IdleTimeoutSeconds) * time.Second)
-	if now.Before(deadline) {
-		return false, "idle timeout not reached"
-	}
-	return true, "idle timeout"
-}
-
 func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
 	if primary > 0 {
 		return primary
