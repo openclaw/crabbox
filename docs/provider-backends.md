@@ -577,6 +577,9 @@ Acquisition already shares the mechanics that have provider-neutral contracts:
   `shared.ResolveProviderClaimStrict`, and `shared.ErrStrictClaimMismatch`
   validate structural identity and exact provider/scope-bound claim lookup;
   `shared.CloneLabels` supplies writable label copies.
+- `shared.LabelsWithDefaults` copies stored labels and fills missing or empty
+  values during inventory projection. Adapters retain the default values and
+  any authoritative state, identity, redaction, or live-port overrides.
 - `core.AcquireFixedLease`, `core.FixedAcquireOptions`,
   `core.FixedLeaseBinding`, and `core.FixedLeaseKind` already share durable
   fixed-ID intent locking, replay validation, acquired-state commit, and

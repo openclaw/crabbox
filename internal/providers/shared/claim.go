@@ -218,3 +218,15 @@ func CloneLabels(labels map[string]string) map[string]string {
 	}
 	return clone
 }
+
+// LabelsWithDefaults copies labels and fills missing or empty values. Whitespace
+// is a stored value, and an empty default still creates the corresponding key.
+func LabelsWithDefaults(labels, defaults map[string]string) map[string]string {
+	labels = CloneLabels(labels)
+	for key, value := range defaults {
+		if labels[key] == "" {
+			labels[key] = value
+		}
+	}
+	return labels
+}

@@ -1214,40 +1214,20 @@ func (b *backend) queryVHDPaths(ctx context.Context, name string) []string {
 }
 
 func (b *backend) serverFromInstance(inst hypervVM, claim core.LeaseClaim, cfg core.Config) core.Server {
-	labels := map[string]string{}
-	for key, value := range claim.Labels {
-		labels[key] = value
-	}
-	if labels["crabbox"] == "" {
-		labels["crabbox"] = "true"
-	}
-	if labels["provider"] == "" {
-		labels["provider"] = providerName
-	}
-	if labels["instance"] == "" {
-		labels["instance"] = inst.Name
-	}
-	if labels["lease"] == "" {
-		labels["lease"] = claim.LeaseID
-	}
-	if labels["slug"] == "" {
-		labels["slug"] = claim.Slug
-	}
+	labels := shared.LabelsWithDefaults(claim.Labels, map[string]string{
+		"crabbox":   "true",
+		"provider":  providerName,
+		"instance":  inst.Name,
+		"lease":     claim.LeaseID,
+		"slug":      claim.Slug,
+		"image":     cfg.HyperV.Image,
+		"ssh_user":  cfg.HyperV.User,
+		"ssh_port":  sshPort,
+		"work_root": cfg.HyperV.WorkRoot,
+	})
 	liveState := hypervState(inst.State)
 	if inst.State != 2 || labels["state"] == "" {
 		labels["state"] = liveState
-	}
-	if labels["image"] == "" {
-		labels["image"] = cfg.HyperV.Image
-	}
-	if labels["ssh_user"] == "" {
-		labels["ssh_user"] = cfg.HyperV.User
-	}
-	if labels["ssh_port"] == "" {
-		labels["ssh_port"] = sshPort
-	}
-	if labels["work_root"] == "" {
-		labels["work_root"] = cfg.HyperV.WorkRoot
 	}
 	status := liveState
 	if inst.State == 2 && labels["state"] == "ready" {

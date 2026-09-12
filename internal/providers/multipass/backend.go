@@ -625,43 +625,19 @@ func (b *backend) removeInstance(ctx context.Context, name string) error {
 }
 
 func (b *backend) serverFromInstance(inst multipassInstance, claim core.LeaseClaim, cfg core.Config) core.Server {
-	labels := map[string]string{}
-	for key, value := range claim.Labels {
-		labels[key] = value
-	}
-	if labels["crabbox"] == "" {
-		labels["crabbox"] = "true"
-	}
-	if labels["provider"] == "" {
-		labels["provider"] = providerName
-	}
-	if labels["instance"] == "" {
-		labels["instance"] = inst.Name
-	}
-	if labels["lease"] == "" {
-		labels["lease"] = claim.LeaseID
-	}
-	if labels["slug"] == "" {
-		labels["slug"] = claim.Slug
-	}
-	if labels["state"] == "" {
-		labels["state"] = multipassState(inst.State)
-	}
-	if labels["server_type"] == "" {
-		labels["server_type"] = shared.FirstNonBlank(inst.Release, cfg.Multipass.Image)
-	}
-	if labels["image"] == "" {
-		labels["image"] = cfg.Multipass.Image
-	}
-	if labels["ssh_user"] == "" {
-		labels["ssh_user"] = cfg.Multipass.User
-	}
-	if labels["ssh_port"] == "" {
-		labels["ssh_port"] = sshPort
-	}
-	if labels["work_root"] == "" {
-		labels["work_root"] = cfg.Multipass.WorkRoot
-	}
+	labels := shared.LabelsWithDefaults(claim.Labels, map[string]string{
+		"crabbox":     "true",
+		"provider":    providerName,
+		"instance":    inst.Name,
+		"lease":       claim.LeaseID,
+		"slug":        claim.Slug,
+		"state":       multipassState(inst.State),
+		"server_type": shared.FirstNonBlank(inst.Release, cfg.Multipass.Image),
+		"image":       cfg.Multipass.Image,
+		"ssh_user":    cfg.Multipass.User,
+		"ssh_port":    sshPort,
+		"work_root":   cfg.Multipass.WorkRoot,
+	})
 	status := multipassState(inst.State)
 	if instanceRunning(inst.State) && labels["state"] == "ready" {
 		status = "ready"

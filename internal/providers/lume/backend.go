@@ -1696,28 +1696,21 @@ func requireAuthenticatedLumeHostKey(target core.SSHTarget, state, name string) 
 }
 
 func (b *backend) serverFromInstance(inst lumeVM, claim core.LeaseClaim, cfg core.Config) core.Server {
-	labels := map[string]string{}
-	for key, value := range claim.Labels {
-		labels[key] = value
-	}
+	labels := shared.LabelsWithDefaults(claim.Labels, map[string]string{
+		"lease":       claim.LeaseID,
+		"slug":        claim.Slug,
+		"server_type": cfg.Lume.Base,
+		"base":        cfg.Lume.Base,
+		"ssh_user":    cfg.Lume.User,
+		"ssh_port":    sshPort,
+		"work_root":   cfg.Lume.WorkRoot,
+	})
 	labels["crabbox"] = "true"
 	labels["provider"] = providerName
 	labels["instance"] = inst.Name
-	if labels["lease"] == "" {
-		labels["lease"] = claim.LeaseID
-	}
-	if labels["slug"] == "" {
-		labels["slug"] = claim.Slug
-	}
 	state := normalizedState(inst.Status)
 	if labels["state"] == "" || labels["state"] == "running" {
 		labels["state"] = state
-	}
-	if labels["server_type"] == "" {
-		labels["server_type"] = cfg.Lume.Base
-	}
-	if labels["base"] == "" {
-		labels["base"] = cfg.Lume.Base
 	}
 	if labels["storage"] == "" {
 		if storage := strings.TrimSpace(inst.LocationName); storage != "" {
@@ -1726,15 +1719,6 @@ func (b *backend) serverFromInstance(inst lumeVM, claim core.LeaseClaim, cfg cor
 		} else {
 			labels["storage"] = strings.TrimSpace(cfg.Lume.Storage)
 		}
-	}
-	if labels["ssh_user"] == "" {
-		labels["ssh_user"] = cfg.Lume.User
-	}
-	if labels["ssh_port"] == "" {
-		labels["ssh_port"] = sshPort
-	}
-	if labels["work_root"] == "" {
-		labels["work_root"] = cfg.Lume.WorkRoot
 	}
 	status := state
 	if instanceRunning(inst.Status) && labels["state"] == "ready" {

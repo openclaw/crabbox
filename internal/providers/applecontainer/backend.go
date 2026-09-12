@@ -811,20 +811,12 @@ func (b *backend) hostDNSServers(ctx context.Context) []string {
 }
 
 func (b *backend) serverFromContainer(c inspectContainer, cfg core.Config) core.Server {
-	labels := map[string]string{}
-	for key, value := range c.labels() {
-		labels[key] = value
-	}
+	labels := shared.LabelsWithDefaults(c.labels(), map[string]string{
+		"provider":    providerName,
+		"server_type": shared.FirstNonBlank(c.image(), cfg.AppleContainer.Image),
+		"state":       c.status(),
+	})
 	labels["container_id"] = c.id()
-	if labels["provider"] == "" {
-		labels["provider"] = providerName
-	}
-	if labels["server_type"] == "" {
-		labels["server_type"] = shared.FirstNonBlank(c.image(), cfg.AppleContainer.Image)
-	}
-	if labels["state"] == "" {
-		labels["state"] = c.status()
-	}
 	labels["ssh_port"] = sshPort
 	status := c.status()
 	if c.running() && labels["state"] == "ready" {

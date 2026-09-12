@@ -732,44 +732,23 @@ func (e *missingInstanceError) Unwrap() error {
 }
 
 func (b *backend) serverFromInstance(inst applevmhelper.Instance, claim core.LeaseClaim, cfg core.Config) core.Server {
-	labels := map[string]string{}
-	for key, value := range claim.Labels {
-		labels[key] = value
-	}
-	if labels["crabbox"] == "" {
-		labels["crabbox"] = "true"
-	}
-	if labels["provider"] == "" {
-		labels["provider"] = providerName
-	}
-	if labels["instance"] == "" {
-		labels["instance"] = inst.Name
-	}
-	if labels["lease"] == "" {
-		labels["lease"] = shared.FirstNonBlankTrimmed(claim.LeaseID, inst.LeaseID)
-	}
-	if labels["slug"] == "" {
-		labels["slug"] = shared.FirstNonBlankTrimmed(claim.Slug, inst.Slug)
-	}
 	imageIdentity := applevmhelper.ImageIdentity(cfg.AppleVM.Image, cfg.AppleVM.ImageSHA256)
-	if labels["server_type"] == "" {
-		labels["server_type"] = shared.FirstNonBlankTrimmed(inst.Image, imageIdentity)
-	}
+	labels := shared.LabelsWithDefaults(claim.Labels, map[string]string{
+		"crabbox":     "true",
+		"provider":    providerName,
+		"instance":    inst.Name,
+		"lease":       shared.FirstNonBlankTrimmed(claim.LeaseID, inst.LeaseID),
+		"slug":        shared.FirstNonBlankTrimmed(claim.Slug, inst.Slug),
+		"server_type": shared.FirstNonBlankTrimmed(inst.Image, imageIdentity),
+		"image":       shared.FirstNonBlankTrimmed(inst.Image, imageIdentity),
+		"ssh_user":    shared.FirstNonBlankTrimmed(inst.SSHUser, cfg.AppleVM.User),
+		"ssh_port":    cfg.SSHPort,
+		"work_root":   shared.FirstNonBlankTrimmed(inst.WorkRoot, cfg.AppleVM.WorkRoot),
+	})
 	labels["server_type"] = applevmhelper.RedactImageRef(labels["server_type"])
-	if labels["image"] == "" {
-		labels["image"] = shared.FirstNonBlankTrimmed(inst.Image, imageIdentity)
-	}
 	labels["image"] = applevmhelper.RedactImageRef(labels["image"])
-	if labels["ssh_user"] == "" {
-		labels["ssh_user"] = shared.FirstNonBlankTrimmed(inst.SSHUser, cfg.AppleVM.User)
-	}
 	if inst.SSHPort > 0 {
 		labels["ssh_port"] = strconv.Itoa(inst.SSHPort)
-	} else if labels["ssh_port"] == "" {
-		labels["ssh_port"] = cfg.SSHPort
-	}
-	if labels["work_root"] == "" {
-		labels["work_root"] = shared.FirstNonBlankTrimmed(inst.WorkRoot, cfg.AppleVM.WorkRoot)
 	}
 	status := appleVMState(inst.Status)
 	if appleVMRunning(inst.Status) && labels["state"] == "ready" {

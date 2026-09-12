@@ -31,6 +31,25 @@ func TestCloneLabels(t *testing.T) {
 	}
 }
 
+func TestLabelsWithDefaultsPreservesStoredValuesAndCopies(t *testing.T) {
+	stored := map[string]string{"provider": "stored", "state": "", "space": " ", "extra": "kept"}
+	defaults := map[string]string{"provider": "fallback", "state": "running", "space": "fallback", "empty": ""}
+	got := LabelsWithDefaults(stored, defaults)
+	want := map[string]string{"provider": "stored", "state": "running", "space": " ", "extra": "kept", "empty": ""}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("labels=%#v, want %#v", got, want)
+	}
+	got["provider"] = "changed"
+	if stored["provider"] != "stored" || stored["state"] != "" || defaults["provider"] != "fallback" {
+		t.Fatal("label projection mutated its inputs")
+	}
+	fromNil := LabelsWithDefaults(nil, map[string]string{"lease": ""})
+	if value, exists := fromNil["lease"]; !exists || value != "" {
+		t.Fatalf("empty default not materialized: %#v", fromNil)
+	}
+	LabelsWithDefaults(nil, nil)["new"] = "writable"
+}
+
 func TestValidateClaimBindingFields(t *testing.T) {
 	claim := core.LeaseClaim{
 		Provider:      "example",

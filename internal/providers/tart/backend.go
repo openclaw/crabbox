@@ -785,42 +785,20 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst tartIn
 }
 
 func (b *backend) serverFromInstance(inst tartInstance, claim core.LeaseClaim, cfg core.Config) core.Server {
-	labels := map[string]string{}
-	for key, value := range claim.Labels {
-		labels[key] = value
-	}
-	if labels["crabbox"] == "" {
-		labels["crabbox"] = "true"
-	}
-	if labels["provider"] == "" {
-		labels["provider"] = providerName
-	}
-	if labels["instance"] == "" {
-		labels["instance"] = inst.Name
-	}
-	if labels["lease"] == "" {
-		labels["lease"] = claim.LeaseID
-	}
-	if labels["slug"] == "" {
-		labels["slug"] = claim.Slug
-	}
-	if labels["state"] == "" {
-		labels["state"] = tartState(inst.State)
-	}
-	if labels["server_type"] == "" {
-		labels["server_type"] = shared.FirstNonBlank(inst.Source, cfg.Tart.Image)
-	}
+	labels := shared.LabelsWithDefaults(claim.Labels, map[string]string{
+		"crabbox":     "true",
+		"provider":    providerName,
+		"instance":    inst.Name,
+		"lease":       claim.LeaseID,
+		"slug":        claim.Slug,
+		"state":       tartState(inst.State),
+		"server_type": shared.FirstNonBlank(inst.Source, cfg.Tart.Image),
+		"ssh_user":    cfg.Tart.User,
+		"ssh_port":    sshPort,
+		"work_root":   cfg.Tart.WorkRoot,
+	})
 	// Native inventory's Source is a storage kind, not an image identity.
 	// Only acquisition records image provenance in the claim.
-	if labels["ssh_user"] == "" {
-		labels["ssh_user"] = cfg.Tart.User
-	}
-	if labels["ssh_port"] == "" {
-		labels["ssh_port"] = sshPort
-	}
-	if labels["work_root"] == "" {
-		labels["work_root"] = cfg.Tart.WorkRoot
-	}
 	status := tartState(inst.State)
 	if instanceRunning(inst.State) && labels["state"] == "ready" {
 		status = "ready"
