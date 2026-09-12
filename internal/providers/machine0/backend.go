@@ -39,8 +39,8 @@ type machine0PrepareOptions struct {
 func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	applyDefaults(&cfg)
 	b := &backend{spec: spec, cfg: cfg, rt: rt}
-	b.api = &client{cfg: cfg.Machine0, rt: rt, sleep: sleepContext}
-	b.sleep = sleepContext
+	b.api = &client{cfg: cfg.Machine0, rt: rt, sleep: core.SleepContext}
+	b.sleep = core.SleepContext
 	b.stat = os.Stat
 	b.knownHostsFile = machine0KnownHostsFile
 	b.waitSSH = func(ctx context.Context, target *core.SSHTarget, timeout time.Duration) error {
@@ -343,7 +343,7 @@ func validateResolvedMachine0Claim(identifier string, claim core.LeaseClaim) err
 		if err != nil {
 			return err
 		}
-	} else if firstNonBlank(claim.Labels["machine0_name"], claim.CloudID) == "" {
+	} else if shared.FirstNonBlankTrimmed(claim.Labels["machine0_name"], claim.CloudID) == "" {
 		return core.Exit(4, "machine0 lease %q has no bound native resource", identifier)
 	}
 	return nil
@@ -376,7 +376,7 @@ func (b *backend) resolve(ctx context.Context, req core.ResolveRequest, original
 	}
 	lookup := strings.TrimSpace(req.ID)
 	if claimed {
-		lookup = firstNonBlank(claim.Labels["machine0_name"], claim.CloudID)
+		lookup = shared.FirstNonBlankTrimmed(claim.Labels["machine0_name"], claim.CloudID)
 	}
 	var item machine
 	if claimed && (claim.Provider == core.FixedMachine0ClaimProvider || claim.FixedCreateIntent != nil) {
@@ -600,7 +600,7 @@ func (b *backend) releaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if req.CheckpointID != "" {
 		return b.releaseCheckpointSource(ctx, req, outcome)
 	}
-	identifier := firstNonBlank(req.Lease.LeaseID, req.Lease.Server.Labels["lease"], req.Lease.Server.CloudID, req.Lease.Server.Name)
+	identifier := shared.FirstNonBlankTrimmed(req.Lease.LeaseID, req.Lease.Server.Labels["lease"], req.Lease.Server.CloudID, req.Lease.Server.Name)
 	claim, claimed, err := resolveClaim(identifier)
 	if err != nil {
 		return err
@@ -1215,7 +1215,7 @@ func resetMachine0HostTrust(path string) error {
 }
 
 func (b *backend) releaseTarget(ctx context.Context, lease core.LeaseTarget) (core.LeaseClaim, machine, error) {
-	identifier := firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"], lease.Server.CloudID, lease.Server.Name)
+	identifier := shared.FirstNonBlankTrimmed(lease.LeaseID, lease.Server.Labels["lease"], lease.Server.CloudID, lease.Server.Name)
 	claim, claimed, err := resolveClaim(identifier)
 	if err != nil {
 		return core.LeaseClaim{}, machine{}, err
@@ -1223,7 +1223,7 @@ func (b *backend) releaseTarget(ctx context.Context, lease core.LeaseTarget) (co
 	if !claimed {
 		return core.LeaseClaim{}, machine{}, core.Exit(2, "refusing to release machine0 machine without an exact local Crabbox claim")
 	}
-	lookup := firstNonBlank(claim.Labels["machine0_name"], claim.CloudID)
+	lookup := shared.FirstNonBlankTrimmed(claim.Labels["machine0_name"], claim.CloudID)
 	if fixedMachine0LeaseKind.IsFixedClaim(claim) {
 		item, err := b.resolveFixedMachine0(ctx, claim)
 		if err != nil {
@@ -1292,7 +1292,7 @@ func machine0Claims() (map[string]core.LeaseClaim, error) {
 		if !isMachine0ClaimProvider(claim.Provider) {
 			continue
 		}
-		id := firstNonBlank(claim.CloudID, claim.Labels["machine0_id"])
+		id := shared.FirstNonBlankTrimmed(claim.CloudID, claim.Labels["machine0_id"])
 		if id != "" {
 			out[id] = claim
 		} else if (fixedMachine0LeaseKind.IsFixedClaim(claim) || claim.Labels["recovery"] == "create-pending") && claim.ProviderScope != "" {
@@ -1444,19 +1444,7 @@ func machineTerminal(value string) bool {
 func terminalMachineError(item machine) error {
 	return core.Exit(5, "machine0 machine %s entered terminal state %s: %s", item.Name, item.Status, core.Blank(item.LastErrorMessage, "run `machine0 get "+item.Name+" --json` for diagnostics"))
 }
-func sleepContext(ctx context.Context, delay time.Duration) error {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlankTrimmed(values...)
-}
+
 func firstLine(value string) string {
 	if line, _, ok := strings.Cut(strings.TrimSpace(value), "\n"); ok {
 		return line

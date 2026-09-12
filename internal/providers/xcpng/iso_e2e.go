@@ -13,6 +13,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type ISOE2EOptions struct {
@@ -252,7 +253,7 @@ func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcp
 	labelCfg := opts.Config
 	labelCfg.TargetOS = core.TargetWindows
 	labelCfg.WindowsMode = core.WindowsModeNormal
-	workRoot := strings.TrimSpace(firstNonBlank(labelCfg.XCPNg.WorkRoot, labelCfg.WorkRoot))
+	workRoot := strings.TrimSpace(shared.FirstNonBlank(labelCfg.XCPNg.WorkRoot, labelCfg.WorkRoot))
 	if workRoot == "" || strings.HasPrefix(workRoot, "/") {
 		workRoot = `C:\crabbox`
 	}
@@ -357,9 +358,9 @@ func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcp
 	runtime.sshTarget.TargetOS = "windows"
 	runtime.sshTarget.WindowsMode = "normal"
 	runtime.sshTarget.Key = runtime.keyPath
-	runtime.sshTarget.User = firstNonBlank(runtime.windowsUser, runtime.sshTarget.User, opts.Config.XCPNg.User, opts.Config.SSHUser)
+	runtime.sshTarget.User = shared.FirstNonBlank(runtime.windowsUser, runtime.sshTarget.User, opts.Config.XCPNg.User, opts.Config.SSHUser)
 	if runtime.sshTarget.Port == "" {
-		runtime.sshTarget.Port = firstNonBlank(opts.Config.SSHPort, "22")
+		runtime.sshTarget.Port = shared.FirstNonBlank(opts.Config.SSHPort, "22")
 	}
 	if err = isoE2EWaitForSSHReady(ctx, &runtime.sshTarget, "windows_first_boot", opts.Timeout); err != nil {
 		result.Classification = "environment_blocked"
@@ -389,7 +390,7 @@ func runISOE2ELinux(ctx context.Context, client lifecycleClient, placement xcpNg
 	guestCfg := opts.Config
 	guestCfg.TargetOS = core.TargetLinux
 	guestCfg.WindowsMode = ""
-	workRoot := strings.TrimSpace(firstNonBlank(guestCfg.XCPNg.WorkRoot, guestCfg.WorkRoot))
+	workRoot := strings.TrimSpace(shared.FirstNonBlank(guestCfg.XCPNg.WorkRoot, guestCfg.WorkRoot))
 	if workRoot == "" || !strings.HasPrefix(workRoot, "/") {
 		workRoot = "/work/crabbox"
 	}
@@ -486,10 +487,10 @@ func runISOE2ELinux(ctx context.Context, client lifecycleClient, placement xcpNg
 	runtime.sshTarget = core.SSHTargetFromConfig(opts.Config, firstBootIP)
 	runtime.sshTarget.Key = runtime.keyPath
 	if runtime.sshTarget.User == "" {
-		runtime.sshTarget.User = firstNonBlank(opts.Config.XCPNg.User, opts.Config.SSHUser)
+		runtime.sshTarget.User = shared.FirstNonBlank(opts.Config.XCPNg.User, opts.Config.SSHUser)
 	}
 	if runtime.sshTarget.Port == "" {
-		runtime.sshTarget.Port = firstNonBlank(opts.Config.SSHPort, "22")
+		runtime.sshTarget.Port = shared.FirstNonBlank(opts.Config.SSHPort, "22")
 	}
 	if err = isoE2EWaitForSSHReady(ctx, &runtime.sshTarget, "linux_first_boot", minDuration(isoE2EGuestMetricsTimeout, opts.Timeout/3)); err != nil {
 		result.Classification = "environment_blocked"

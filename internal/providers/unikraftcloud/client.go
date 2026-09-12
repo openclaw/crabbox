@@ -186,7 +186,7 @@ func validateUnikraftCloudAPIURL(raw string) (string, error) {
 		return "", core.Exit(2, "provider=%s API URL must not contain userinfo, query parameters, or a fragment", providerName)
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
+	if parsed.Scheme != "https" && !shared.IsLoopbackHTTPURL(parsed) {
 		return "", core.Exit(2, "provider=%s API URL must use HTTPS except for loopback development endpoints", providerName)
 	}
 	if escapedPath := parsed.EscapedPath(); escapedPath != "" && escapedPath != "/" {
@@ -195,10 +195,6 @@ func validateUnikraftCloudAPIURL(raw string) (string, error) {
 	parsed.Path = ""
 	parsed.RawPath = ""
 	return parsed.String(), nil
-}
-
-func isLoopbackHTTPURL(parsed *url.URL) bool {
-	return shared.IsLoopbackHTTPURL(parsed)
 }
 
 func secureUnikraftCloudHTTPClient(source *http.Client, baseURL string) *http.Client {

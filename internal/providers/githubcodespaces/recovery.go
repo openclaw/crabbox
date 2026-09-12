@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func githubCodespacesClaimScope(cfg core.Config) string {
@@ -231,7 +232,7 @@ func validateCreatedCodespaceIdentity(expected core.LeaseClaim, item codespace) 
 func (b *backend) bindValidatedCreatedClaim(expected core.LeaseClaim, item codespace) (core.LeaseClaim, error) {
 	name := strings.TrimSpace(item.Name)
 	displayName := strings.TrimSpace(expected.Labels[labelDisplayName])
-	repo := firstNonEmpty(strings.TrimSpace(item.Repository.FullName), strings.TrimSpace(expected.Labels[labelRepository]))
+	repo := shared.FirstNonBlankTrimmed(strings.TrimSpace(item.Repository.FullName), strings.TrimSpace(expected.Labels[labelRepository]))
 	labels := cloneLabels(expected.Labels)
 	delete(labels, labelRecovery)
 	labels[labelCodespaceName] = name
@@ -242,7 +243,7 @@ func (b *backend) bindValidatedCreatedClaim(expected core.LeaseClaim, item codes
 	labels[labelLogin] = item.Owner.Login
 	labels[labelRepository] = repo
 	labels[labelRepositoryID] = strconv.FormatInt(item.Repository.ID, 10)
-	labels[labelMachine] = firstNonEmpty(item.Machine.Name, labels[labelMachine])
+	labels[labelMachine] = shared.FirstNonBlankTrimmed(item.Machine.Name, labels[labelMachine])
 	labels[labelState] = "provisioning"
 	server := b.serverFromCodespace(item, labels)
 	claim, err := b.bindClaim(expected.LeaseID, expected, server)

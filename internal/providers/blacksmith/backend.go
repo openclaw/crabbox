@@ -251,14 +251,14 @@ func (b *blacksmithBackend) Run(ctx context.Context, req core.RunRequest) (runRe
 	commandDuration := commandEnd.Sub(commandStart)
 	commandPhases := core.FinishCommandPhaseTracker(phaseTracker, commandEnd)
 	total := finished.Sub(started)
-	actionsURL := firstNonBlank(stdoutProof.ActionsURL(), stderrProof.ActionsURL())
+	actionsURL := shared.FirstNonBlank(stdoutProof.ActionsURL(), stderrProof.ActionsURL())
 	result := core.RunResult{
 		Provider:      blacksmithTestboxProvider,
 		LeaseID:       leaseID,
 		Slug:          slug,
 		CommandText:   blacksmithCommandString(req.Command, req.ShellMode),
 		LogExcerpt:    core.SelectProofLogExcerpt(strings.TrimSpace(string(stdoutProof.Bytes()) + "\n" + string(stderrProof.Bytes()))),
-		ActionsURL:    firstNonBlank(actionsURL, firstBlacksmithActionsURL(string(stdoutProof.Bytes())+"\n"+string(stderrProof.Bytes()))),
+		ActionsURL:    shared.FirstNonBlank(actionsURL, firstBlacksmithActionsURL(string(stdoutProof.Bytes())+"\n"+string(stderrProof.Bytes()))),
 		ExitCode:      code,
 		Command:       commandDuration,
 		Total:         total,
@@ -385,10 +385,6 @@ type blacksmithProofTailBuffer struct {
 	fullChunk  bool
 }
 
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlank(values...)
-}
-
 func newBlacksmithProofTailBuffer() *blacksmithProofTailBuffer {
 	return &blacksmithProofTailBuffer{
 		data:     tailbuffer.NewLimited(blacksmithProofStreamCaptureBytes),
@@ -437,7 +433,7 @@ func (b *blacksmithBackend) blacksmithProofResult(req core.RunRequest, leaseID, 
 		Slug:        slug,
 		CommandText: blacksmithCommandString(req.Command, req.ShellMode),
 		LogExcerpt:  core.SelectProofLogExcerpt(combined),
-		ActionsURL:  firstNonBlank(actionsURL, firstBlacksmithActionsURL(combined)),
+		ActionsURL:  shared.FirstNonBlank(actionsURL, firstBlacksmithActionsURL(combined)),
 	}
 	if strings.TrimSpace(req.EmitProof) == "" {
 		return result, nil

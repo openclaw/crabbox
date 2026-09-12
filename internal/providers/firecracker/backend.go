@@ -372,7 +372,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if err != nil {
 		return err
 	}
-	leaseID := firstNonBlank(req.Lease.LeaseID, req.Lease.Server.Labels["lease"])
+	leaseID := shared.FirstNonBlankTrimmed(req.Lease.LeaseID, req.Lease.Server.Labels["lease"])
 	if !found {
 		if strings.TrimSpace(leaseID) != "" {
 			core.RemoveLeaseClaim(leaseID)
@@ -450,7 +450,7 @@ func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, 
 	server.Status = state
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, state, b.currentTime().UTC())
 
-	leaseID := firstNonBlank(req.Lease.LeaseID, server.Labels["lease"])
+	leaseID := shared.FirstNonBlankTrimmed(req.Lease.LeaseID, server.Labels["lease"])
 	if strings.TrimSpace(leaseID) == "" {
 		return server, nil
 	}
@@ -555,8 +555,8 @@ func (b *backend) targetFromRecord(cfg core.Config, record leaseStateRecord) (co
 	if strings.TrimSpace(record.GuestIP) == "" {
 		return core.SSHTarget{}, core.Exit(5, "firecracker lease %s has no guest IP", record.LeaseID)
 	}
-	cfg.SSHUser = firstNonBlank(record.SSHUser, cfg.SSHUser)
-	cfg.SSHPort = firstNonBlank(record.SSHPort, cfg.SSHPort)
+	cfg.SSHUser = shared.FirstNonBlankTrimmed(record.SSHUser, cfg.SSHUser)
+	cfg.SSHPort = shared.FirstNonBlankTrimmed(record.SSHPort, cfg.SSHPort)
 	target := core.SSHTargetFromConfig(cfg, record.GuestIP)
 	if err := core.UseStoredTestboxKey(&target, record.LeaseID); err != nil {
 		return core.SSHTarget{}, err
@@ -575,29 +575,29 @@ func (b *backend) serverFromRecord(cfg core.Config, record leaseStateRecord, run
 		labels["state"] = status
 	}
 	server := core.Server{
-		CloudID:  firstNonBlank(record.VMID, record.Name, record.LeaseID),
+		CloudID:  shared.FirstNonBlankTrimmed(record.VMID, record.Name, record.LeaseID),
 		Provider: providerName,
-		Name:     firstNonBlank(record.Name, record.VMID, record.LeaseID),
+		Name:     shared.FirstNonBlankTrimmed(record.Name, record.VMID, record.LeaseID),
 		Status:   status,
 		Labels:   labels,
 	}
 	server.PublicNet.IPv4.IP = record.GuestIP
-	server.ServerType.Name = firstNonBlank(labels["server_type"], firecrackerServerTypeForConfig(cfg))
+	server.ServerType.Name = shared.FirstNonBlankTrimmed(labels["server_type"], firecrackerServerTypeForConfig(cfg))
 	return server
 }
 
 func serverFromClaim(cfg core.Config, claim core.LeaseClaim) core.Server {
 	labels := shared.CloneLabels(claim.Labels)
-	name := firstNonBlank(labels["instance"], core.LeaseProviderName(claim.LeaseID, claim.Slug))
+	name := shared.FirstNonBlankTrimmed(labels["instance"], core.LeaseProviderName(claim.LeaseID, claim.Slug))
 	server := core.Server{
 		CloudID:  name,
 		Provider: providerName,
 		Name:     name,
-		Status:   firstNonBlank(labels["state"], "unknown"),
+		Status:   shared.FirstNonBlankTrimmed(labels["state"], "unknown"),
 		Labels:   labels,
 	}
 	server.PublicNet.IPv4.IP = claim.SSHHost
-	server.ServerType.Name = firstNonBlank(labels["server_type"], firecrackerServerTypeForConfig(cfg))
+	server.ServerType.Name = shared.FirstNonBlankTrimmed(labels["server_type"], firecrackerServerTypeForConfig(cfg))
 	return server
 }
 
@@ -696,7 +696,7 @@ func (b *backend) releaseStateRecord(ctx context.Context, cfg core.Config, recor
 }
 
 func (b *backend) releaseRecordForLease(cfg core.Config, lease core.LeaseTarget) (leaseStateRecord, bool, error) {
-	identifier := firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"], lease.Server.Name, lease.Server.CloudID)
+	identifier := shared.FirstNonBlankTrimmed(lease.LeaseID, lease.Server.Labels["lease"], lease.Server.Name, lease.Server.CloudID)
 	if strings.TrimSpace(identifier) == "" {
 		return leaseStateRecord{}, false, nil
 	}
@@ -737,10 +737,6 @@ func requireLifecycleHost() error {
 		return core.Exit(2, "provider=firecracker requires a Linux KVM host, got host=%s", firecrackerHostGOOS)
 	}
 	return nil
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlankTrimmed(values...)
 }
 
 func removeIfExists(path string) error {

@@ -115,7 +115,7 @@ func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID st
 	if err := core.UseLeaseKnownHosts(&target.SSH, leaseID); err != nil {
 		return err
 	}
-	name := strings.TrimSpace(firstNonBlank(target.Server.CloudID, target.Server.Labels["instance"]))
+	name := strings.TrimSpace(shared.FirstNonBlank(target.Server.CloudID, target.Server.Labels["instance"]))
 	if name == "" {
 		return core.Exit(5, "Lume lease %s has no VM identity for SSH host-key binding", leaseID)
 	}
@@ -563,7 +563,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if err := core.ValidateLeaseTargetProviderIdentity(lease, req.ExpectedProviderIdentity); err != nil {
 		return err
 	}
-	name := strings.TrimSpace(firstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]))
+	name := strings.TrimSpace(shared.FirstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]))
 	if name == "" && lease.LeaseID != "" {
 		inst, claim, err := b.resolveInstance(ctx, lease.LeaseID)
 		if err != nil {
@@ -630,7 +630,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 }
 
 func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
-	return fmt.Sprintf("released lease=%s instance=%s", lease.LeaseID, core.Blank(firstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]), "-"))
+	return fmt.Sprintf("released lease=%s instance=%s", lease.LeaseID, core.Blank(shared.FirstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]), "-"))
 }
 
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
@@ -1451,7 +1451,7 @@ func (b *backend) activeMacOSGuestCount(ctx context.Context, cfg core.Config) (i
 }
 
 func lumeStorageIdentity(cfg core.Config, inst lumeVM, fallback string) (string, error) {
-	cfg.Lume.Storage = strings.TrimSpace(firstNonBlank(inst.LocationName, fallback))
+	cfg.Lume.Storage = strings.TrimSpace(shared.FirstNonBlank(inst.LocationName, fallback))
 	root, err := lumeStorageRoot(cfg, inst.LocationName)
 	if err != nil {
 		return "", err
@@ -1970,8 +1970,4 @@ func firstLine(value string) string {
 		value = value[:idx]
 	}
 	return core.Blank(strings.TrimSpace(value), "unknown")
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlank(values...)
 }

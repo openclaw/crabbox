@@ -10,6 +10,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -343,7 +344,7 @@ func (b *backend) destroyClaimedMachineWithOutcome(ctx context.Context, expected
 			outcome.Terminal = err == nil
 			return err
 		}
-		resourceID := firstNonBlank(item.ID, claim.CloudID)
+		resourceID := shared.FirstNonBlankTrimmed(item.ID, claim.CloudID)
 		if (lease.Server.CloudID != "" && lease.Server.CloudID != resourceID) || (lease.Server.ImmutableID != "" && lease.Server.ImmutableID != resourceID) {
 			return core.Exit(4, "lease_id_conflict: fixed Machine0 resource changed before release")
 		}

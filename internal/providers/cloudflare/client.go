@@ -94,7 +94,7 @@ func newCloudflareClient(cfg core.Config, rt core.Runtime) (*cloudflareClient, e
 	if parsed.Scheme == "" || parsed.Host == "" {
 		return nil, core.Exit(2, "%s url %q is invalid", providerName, apiURL)
 	}
-	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
+	if parsed.Scheme != "https" && !shared.IsLoopbackHTTPURL(parsed) {
 		return nil, core.Exit(2, "%s url %q must use https unless it targets localhost", providerName, apiURL)
 	}
 	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
@@ -137,10 +137,6 @@ func defaultCloudflareHTTPClient() (*http.Client, error) {
 
 func cloudflareRedirectError(destination *url.URL) error {
 	return fmt.Errorf("%s refused cross-origin redirect to %s", providerName, destination.Redacted())
-}
-
-func isLoopbackHTTPURL(parsed *url.URL) bool {
-	return shared.IsLoopbackHTTPURL(parsed)
 }
 
 func (c *cloudflareClient) createSandbox(ctx context.Context, req createSandboxRequest) (cloudflareContainer, error) {

@@ -120,7 +120,7 @@ func (c *client) RemoveImageVersion(ctx context.Context, image string, version i
 }
 
 func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (core.NativeCheckpointCapability, bool) {
-	if firstNonBlank(req.Server.Provider, req.Config.Provider) != providerName || strings.TrimSpace(req.Server.CloudID) == "" {
+	if shared.FirstNonBlankTrimmed(req.Server.Provider, req.Config.Provider) != providerName || strings.TrimSpace(req.Server.CloudID) == "" {
 		return core.NativeCheckpointCapability{}, false
 	}
 	capability := core.NativeCheckpointCapability{Kind: core.CheckpointKindMachine0, Direct: true, ReplayCapture: true, RetireSource: true}
@@ -214,7 +214,7 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 	var lifecycleErr error
 	snapshotTimeout := machine0CheckpointSnapshotTimeout(req.WaitTimeout, b.configForRun().Machine0.CreateTimeout)
 	_, _, _, actionErr := core.ReplaceLeaseClaimEndpointIfUnchangedAction(claim.LeaseID, claim, func() (core.Server, core.SSHTarget, bool, error) {
-		lookup := firstNonBlank(claim.Labels["machine0_name"], req.Server.Name, claim.CloudID)
+		lookup := shared.FirstNonBlankTrimmed(claim.Labels["machine0_name"], req.Server.Name, claim.CloudID)
 		item, err := b.readCheckpointSource(ctx, claim, lookup)
 		if err != nil {
 			return core.Server{}, core.SSHTarget{}, false, err
@@ -359,7 +359,7 @@ func machine0NativeCheckpointResult(req core.NativeCheckpointCreateRequest, clai
 	for key, value := range machine0ImageCostMetadata(version) {
 		metadata[key] = value
 	}
-	return core.NativeCheckpointCreateResult{Image: core.NativeCheckpointImage{ID: fmt.Sprintf("%s@v%d", detail.Image.ID, version.Version), Name: name, State: imageVersionState(version), Provider: providerName, Kind: core.CheckpointKindMachine0, Region: req.Server.Labels["region"], ResourceID: detail.Image.ID, Architecture: firstNonBlank(req.Server.ServerType.Architecture, "amd64"), Direct: true}, Metadata: metadata}
+	return core.NativeCheckpointCreateResult{Image: core.NativeCheckpointImage{ID: fmt.Sprintf("%s@v%d", detail.Image.ID, version.Version), Name: name, State: imageVersionState(version), Provider: providerName, Kind: core.CheckpointKindMachine0, Region: req.Server.Labels["region"], ResourceID: detail.Image.ID, Architecture: shared.FirstNonBlankTrimmed(req.Server.ServerType.Architecture, "amd64"), Direct: true}, Metadata: metadata}
 }
 
 func (Provider) VerifyNativeCheckpoint(ctx context.Context, req core.NativeCheckpointResourceRequest) (core.NativeCheckpointVerifyResult, error) {
@@ -611,7 +611,7 @@ func (b *backend) loadCheckpointImage(ctx context.Context, req core.NativeCheckp
 }
 
 func imageVersionState(version machineImageVersion) string {
-	return firstNonBlank(version.DisplayStatus, version.Status, "unknown")
+	return shared.FirstNonBlankTrimmed(version.DisplayStatus, version.Status, "unknown")
 }
 
 func machine0ImageCostMetadata(version machineImageVersion) map[string]string {

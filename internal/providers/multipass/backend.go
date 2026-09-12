@@ -257,7 +257,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if lease.LeaseID == "" {
 		lease.LeaseID = strings.TrimSpace(lease.Server.Labels["lease"])
 	}
-	name := strings.TrimSpace(firstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]))
+	name := strings.TrimSpace(shared.FirstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]))
 	if name == "" && lease.LeaseID != "" {
 		inst, claim, err := b.resolveInstance(ctx, lease.LeaseID)
 		if err != nil {
@@ -285,7 +285,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 }
 
 func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
-	return fmt.Sprintf("released lease=%s instance=%s", lease.LeaseID, core.Blank(firstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]), "-"))
+	return fmt.Sprintf("released lease=%s instance=%s", lease.LeaseID, core.Blank(shared.FirstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]), "-"))
 }
 
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
@@ -488,7 +488,7 @@ func multipassCacheVolumeMounts(volumes []core.CacheVolumeConfig) ([]multipassCa
 		if !strings.HasPrefix(path, "/") {
 			return nil, core.Exit(2, "cache volume path %q must be absolute", path)
 		}
-		hostPath := filepath.Join(root, multipassCacheVolumeName(key))
+		hostPath := filepath.Join(root, shared.CacheVolumeName(key))
 		if err := os.MkdirAll(hostPath, 0o777); err != nil {
 			return nil, core.Exit(2, "create multipass cache volume %s: %v", hostPath, err)
 		}
@@ -506,10 +506,6 @@ func multipassCacheRoot() (string, error) {
 		return "", core.Exit(2, "user cache directory is unavailable")
 	}
 	return filepath.Join(dir, "crabbox", "multipass-cache"), nil
-}
-
-func multipassCacheVolumeName(key string) string {
-	return shared.CacheVolumeName(key)
 }
 
 func (b *backend) listInstances(ctx context.Context) ([]multipassInstance, error) {
@@ -652,7 +648,7 @@ func (b *backend) serverFromInstance(inst multipassInstance, claim core.LeaseCla
 		labels["state"] = multipassState(inst.State)
 	}
 	if labels["server_type"] == "" {
-		labels["server_type"] = firstNonBlank(inst.Release, cfg.Multipass.Image)
+		labels["server_type"] = shared.FirstNonBlank(inst.Release, cfg.Multipass.Image)
 	}
 	if labels["image"] == "" {
 		labels["image"] = cfg.Multipass.Image
@@ -678,7 +674,7 @@ func (b *backend) serverFromInstance(inst multipassInstance, claim core.LeaseCla
 		Labels:   labels,
 	}
 	server.PublicNet.IPv4.IP = inst.ip()
-	server.ServerType.Name = firstNonBlank(labels["server_type"], cfg.Multipass.Image)
+	server.ServerType.Name = shared.FirstNonBlank(labels["server_type"], cfg.Multipass.Image)
 	return server
 }
 
@@ -790,7 +786,7 @@ func (i multipassInfoEntry) toInstance(name string) multipassInstance {
 		Name:    name,
 		State:   i.State,
 		IPv4:    append([]string(nil), i.IPv4...),
-		Release: firstNonBlank(i.Release, i.ImageRelease),
+		Release: shared.FirstNonBlank(i.Release, i.ImageRelease),
 	}
 }
 
@@ -827,8 +823,4 @@ func firstLine(value string) string {
 		value = value[:idx]
 	}
 	return strings.TrimSpace(value)
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlank(values...)
 }

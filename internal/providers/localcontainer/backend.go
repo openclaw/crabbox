@@ -685,7 +685,7 @@ func (b *backend) rollbackPendingLease(expected core.LeaseClaim, lease core.Leas
 }
 
 func (b *backend) printPendingRecovery(leaseID, slug string, claim core.LeaseClaim, reason error) {
-	runtimeName := firstNonBlank(claim.Labels[checkpointMetadataRuntime], claim.Labels["runtime"], b.cfg.LocalContainer.Runtime, "docker")
+	runtimeName := shared.FirstNonBlank(claim.Labels[checkpointMetadataRuntime], claim.Labels["runtime"], b.cfg.LocalContainer.Runtime, "docker")
 	envPrefix := []string{"CRABBOX_LOCAL_CONTAINER_RUNTIME=" + core.ShellQuote(runtimeName)}
 	scope := checkpointScopeFromMetadata(checkpointScopeMetadataFromLabels(claim.Labels), runtimeName)
 	if isDockerRuntime(runtimeName) && scope.Context != "" {
@@ -983,7 +983,7 @@ func (b *backend) releaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		return err
 	}
 	if !appliedScope {
-		identifier := firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"])
+		identifier := shared.FirstNonBlank(lease.LeaseID, lease.Server.Labels["lease"])
 		if claim, ok, err := core.ResolveLeaseClaimForProvider(identifier, providerName); err != nil {
 			return err
 		} else if ok {
@@ -1124,7 +1124,7 @@ func (b *backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.Leas
 }
 
 func (b *backend) releaseMissingClaim(ctx context.Context, lease core.LeaseTarget, checkpointID string, outcome *core.ReleaseLeaseOutcome) (bool, error) {
-	leaseID := strings.TrimSpace(firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"]))
+	leaseID := strings.TrimSpace(shared.FirstNonBlank(lease.LeaseID, lease.Server.Labels["lease"]))
 	if leaseID == "" || strings.TrimSpace(lease.Server.CloudID) != "" {
 		return false, nil
 	}
@@ -1966,13 +1966,9 @@ func localContainerCacheVolumeMounts(volumes []core.CacheVolumeConfig) ([]string
 		if !strings.HasPrefix(path, "/") {
 			return nil, core.Exit(2, "cache volume path %q must be absolute", path)
 		}
-		mounts = append(mounts, localContainerCacheVolumeName(key)+":"+path)
+		mounts = append(mounts, shared.CacheVolumeName(key)+":"+path)
 	}
 	return mounts, nil
-}
-
-func localContainerCacheVolumeName(key string) string {
-	return shared.CacheVolumeName(key)
 }
 
 func (b *backend) dockerSocketMountPath(ctx context.Context) (string, error) {
@@ -2176,7 +2172,7 @@ func (b *backend) exactContainerAbsent(ctx context.Context, id string) (bool, er
 	if err == nil {
 		return false, nil
 	}
-	detail := strings.ToLower(strings.TrimSpace(firstNonBlank(result.Stderr, result.Stdout)))
+	detail := strings.ToLower(strings.TrimSpace(shared.FirstNonBlank(result.Stderr, result.Stdout)))
 	if localContainerRouteFailure(detail) {
 		return false, shared.LocalCommandError("confirm local-container absence", result, err)
 	}
@@ -2349,10 +2345,10 @@ func (b *backend) findContainerForClaim(ctx context.Context, claim core.LeaseCla
 		for _, container := range containers {
 			if strings.TrimSpace(container.ID) == boundID {
 				labels := container.Config.Labels
-				return container, firstNonBlank(claim.LeaseID, labels["lease"]), firstNonBlank(claim.Slug, labels["slug"]), nil
+				return container, shared.FirstNonBlank(claim.LeaseID, labels["lease"]), shared.FirstNonBlank(claim.Slug, labels["slug"]), nil
 			}
 		}
-		return inspectContainer{}, "", "", core.Exit(4, "local-container lease not found: %s", firstNonBlank(claim.Slug, claim.LeaseID))
+		return inspectContainer{}, "", "", core.Exit(4, "local-container lease not found: %s", shared.FirstNonBlank(claim.Slug, claim.LeaseID))
 	}
 	var matched *inspectContainer
 	for _, container := range containers {
@@ -2369,7 +2365,7 @@ func (b *backend) findContainerForClaim(ctx context.Context, claim core.LeaseCla
 		labels := matched.Config.Labels
 		return *matched, labels["lease"], labels["slug"], nil
 	}
-	return inspectContainer{}, "", "", core.Exit(4, "local-container lease not found: %s", firstNonBlank(claim.Slug, claim.LeaseID))
+	return inspectContainer{}, "", "", core.Exit(4, "local-container lease not found: %s", shared.FirstNonBlank(claim.Slug, claim.LeaseID))
 }
 
 func (b *backend) removeContainer(ctx context.Context, id string) error {
@@ -2611,7 +2607,7 @@ func (b *backend) serverFromContainer(container inspectContainer, cfg core.Confi
 		server.Status = "ready"
 	}
 	server.PublicNet.IPv4.IP = host
-	server.ServerType.Name = firstNonBlank(labels["server_type"], cfg.LocalContainer.Image)
+	server.ServerType.Name = shared.FirstNonBlank(labels["server_type"], cfg.LocalContainer.Image)
 	return server
 }
 
@@ -2709,19 +2705,15 @@ func blank(value, fallback string) string {
 	return value
 }
 
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlank(values...)
-}
-
 func hostLeaseWorkRoot(lease core.LeaseTarget) string {
-	return hostLeaseWorkRootFromLabels(firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"]), lease.Server.Labels)
+	return hostLeaseWorkRootFromLabels(shared.FirstNonBlank(lease.LeaseID, lease.Server.Labels["lease"]), lease.Server.Labels)
 }
 
 func hostLeaseWorkRootFromLabels(leaseID string, labels map[string]string) string {
 	if labels["docker_socket"] != "1" {
 		return ""
 	}
-	root := strings.TrimSpace(firstNonBlank(labels["host_work_root"], labels["work_root"]))
+	root := strings.TrimSpace(shared.FirstNonBlank(labels["host_work_root"], labels["work_root"]))
 	leaseID = strings.TrimSpace(leaseID)
 	if root == "" || leaseID == "" || !filepath.IsAbs(root) {
 		return ""

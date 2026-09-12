@@ -589,7 +589,7 @@ func (k *vastInstanceSSHKey) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	k.Name = raw.Name
-	k.PublicKey = firstNonBlank(raw.SSHKey, raw.PublicKey, raw.Key)
+	k.PublicKey = shared.FirstNonBlankTrimmed(raw.SSHKey, raw.PublicKey, raw.Key)
 	switch id := raw.ID.(type) {
 	case string:
 		k.ID = strings.TrimSpace(id)

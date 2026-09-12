@@ -101,7 +101,7 @@ func TestClientHelpers(t *testing.T) {
 	if got := firstNonEmpty("", "  ", " value ", "later"); got != "value" {
 		t.Fatalf("firstNonEmpty=%q", got)
 	}
-	if !isLoopbackHost("localhost") || !isLoopbackHost("::1") || isLoopbackHost("example.com") {
+	if !shared.IsLoopbackHost("localhost") || !shared.IsLoopbackHost("::1") || shared.IsLoopbackHost("example.com") {
 		t.Fatal("unexpected loopback classification")
 	}
 	if err := validateEnv(map[string]string{"VALID_1": "x"}); err != nil {

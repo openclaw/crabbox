@@ -444,15 +444,13 @@ func isoMediaLabels(base map[string]string) map[string]string {
 }
 
 func buildConfigDriveImage(payload xcpNgCloudInitPayload) ([]byte, error) {
-	files := []fatFile{
+	files := []shared.FATFile{
 		{Name: "user-data", Data: []byte(payload.UserData)},
 		{Name: "meta-data", Data: []byte(payload.MetaData)},
 	}
 	return buildFAT16Image("cidata", files)
 }
 
-type fatFile = shared.FATFile
-
-func buildFAT16Image(label string, files []fatFile) ([]byte, error) {
+func buildFAT16Image(label string, files []shared.FATFile) ([]byte, error) {
 	return shared.BuildFAT16Image(label, files, "CRAB%04dTXT", "config-drive")
 }

@@ -241,7 +241,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		} else if ok {
 			recovery = "ambiguous-create"
 			created = mergeInstanceLabels(recovered, labels)
-			created.SSHKeyID = firstNonBlank(created.SSHKeyID, createdKey.ID)
+			created.SSHKeyID = shared.FirstNonBlank(created.SSHKeyID, createdKey.ID)
 		}
 		return core.LeaseTarget{}, err
 	}
@@ -251,7 +251,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		return core.LeaseTarget{}, err
 	}
 	waited = mergeInstanceLabels(waited, labels)
-	waited.SSHKeyID = firstNonBlank(waited.SSHKeyID, createdKey.ID)
+	waited.SSHKeyID = shared.FirstNonBlank(waited.SSHKeyID, createdKey.ID)
 	server := serverFromInstance(waited, cfg)
 	ssh := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
 	if err := b.waitSSH(ctx, &ssh, "ovh bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
@@ -540,12 +540,12 @@ func (b *Backend) UpdateTailscaleMetadata(ctx context.Context, lease core.LeaseT
 			return core.Server{}, core.Exit(4, "ovh lease=%s cleanup is already in progress", claim.LeaseID)
 		}
 		labels = shared.CloneLabels(claim.Labels)
-		applyTailscaleMetadata(labels, meta)
+		shared.ApplyTailscaleMetadata(labels, meta)
 		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels); err != nil {
 			return core.Server{}, err
 		}
 	} else {
-		applyTailscaleMetadata(labels, meta)
+		shared.ApplyTailscaleMetadata(labels, meta)
 	}
 	live.Labels = labels
 	return live, nil
@@ -784,13 +784,13 @@ func selectFlavor(flavors []Flavor, value string) (Flavor, error) {
 
 func validateFlavor(flavor Flavor) (Flavor, error) {
 	if flavor.Available != nil && !*flavor.Available {
-		return Flavor{}, core.Exit(2, "ovh flavor %q is unavailable", firstNonBlank(flavor.ID, flavor.Name))
+		return Flavor{}, core.Exit(2, "ovh flavor %q is unavailable", shared.FirstNonBlank(flavor.ID, flavor.Name))
 	}
 	if flavor.Quota != nil && *flavor.Quota <= 0 {
-		return Flavor{}, core.Exit(2, "ovh flavor %q has no remaining project quota", firstNonBlank(flavor.ID, flavor.Name))
+		return Flavor{}, core.Exit(2, "ovh flavor %q has no remaining project quota", shared.FirstNonBlank(flavor.ID, flavor.Name))
 	}
 	if osType := strings.ToLower(strings.TrimSpace(flavor.OSType)); osType != "" && osType != "linux" {
-		return Flavor{}, core.Exit(2, "ovh flavor %q is for osType=%s, not linux", firstNonBlank(flavor.ID, flavor.Name), flavor.OSType)
+		return Flavor{}, core.Exit(2, "ovh flavor %q is for osType=%s, not linux", shared.FirstNonBlank(flavor.ID, flavor.Name), flavor.OSType)
 	}
 	return flavor, nil
 }
@@ -820,14 +820,14 @@ func selectImage(images []Image, value string) (Image, error) {
 
 func validateImage(image Image, selectedByID bool) (Image, error) {
 	if status := strings.ToLower(strings.TrimSpace(image.Status)); status != "" && status != "active" {
-		return Image{}, core.Exit(2, "ovh image %q has status=%s", firstNonBlank(image.ID, image.Name), image.Status)
+		return Image{}, core.Exit(2, "ovh image %q has status=%s", shared.FirstNonBlank(image.ID, image.Name), image.Status)
 	}
 	if imageType := strings.ToLower(strings.TrimSpace(image.Type)); imageType != "" && imageType != "linux" {
-		return Image{}, core.Exit(2, "ovh image %q has type=%s, not linux", firstNonBlank(image.ID, image.Name), image.Type)
+		return Image{}, core.Exit(2, "ovh image %q has type=%s, not linux", shared.FirstNonBlank(image.ID, image.Name), image.Type)
 	}
 	imageName := strings.ToLower(strings.TrimSpace(image.Name))
 	if !strings.Contains(imageName, "ubuntu") && !strings.Contains(imageName, "debian") {
-		return Image{}, core.Exit(2, "ovh image %q is not a supported Debian or Ubuntu image", firstNonBlank(image.ID, image.Name))
+		return Image{}, core.Exit(2, "ovh image %q is not a supported Debian or Ubuntu image", shared.FirstNonBlank(image.ID, image.Name))
 	}
 	if !selectedByID {
 		visibility := strings.ToLower(strings.TrimSpace(image.Visibility))
@@ -892,7 +892,7 @@ func (b *Backend) reconcileCreatedInstance(ctx context.Context, client API, clai
 			lastErr = err
 		}
 		if attempt+1 < b.effectiveRecoveryPolls() {
-			if err := sleepContext(ctx, b.effectiveRecoveryInterval()); err != nil {
+			if err := core.SleepContext(ctx, b.effectiveRecoveryInterval()); err != nil {
 				return Instance{}, false, err
 			}
 		}
@@ -916,7 +916,7 @@ func (b *Backend) reconcileSSHKey(ctx context.Context, client API, projectID, na
 			lastErr = err
 		}
 		if attempt+1 < b.effectiveRecoveryPolls() {
-			if err := sleepContext(ctx, b.effectiveRecoveryInterval()); err != nil {
+			if err := core.SleepContext(ctx, b.effectiveRecoveryInterval()); err != nil {
 				return SSHKey{}, false, err
 			}
 		}
@@ -986,17 +986,6 @@ func selectSSHKey(keys []SSHKey, name, publicKey string) (SSHKey, bool, error) {
 		return SSHKey{}, false, core.Exit(3, "ovh SSH key %q exists with a different public key", name)
 	default:
 		return SSHKey{}, false, nil
-	}
-}
-
-func sleepContext(ctx context.Context, delay time.Duration) error {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
 	}
 }
 
@@ -1189,10 +1178,6 @@ func overlayExpectedOVHLabels(live, expected core.Server) core.Server {
 	return merged
 }
 
-func applyTailscaleMetadata(labels map[string]string, meta core.TailscaleMetadata) {
-	shared.ApplyTailscaleMetadata(labels, meta)
-}
-
 func exactTailscaleLabels(labels map[string]string) map[string]string {
 	out := map[string]string{}
 	for _, key := range []string{
@@ -1225,7 +1210,7 @@ func serverFromInstance(instance Instance, cfg core.Config) core.Server {
 		labels[ovhProjectLabel] = cfg.OVH.ProjectID
 	}
 	if labels[ovhRegionLabel] == "" {
-		labels[ovhRegionLabel] = firstNonBlank(instance.Region, cfg.OVH.Region)
+		labels[ovhRegionLabel] = shared.FirstNonBlank(instance.Region, cfg.OVH.Region)
 	}
 	if labels[ovhSSHKeyIDLabel] == "" && instance.SSHKeyID != "" {
 		labels[ovhSSHKeyIDLabel] = instance.SSHKeyID
@@ -1238,7 +1223,7 @@ func serverFromInstance(instance Instance, cfg core.Config) core.Server {
 		Labels:   labels,
 	}
 	server.PublicNet.IPv4.IP = publicIPv4(instance)
-	server.ServerType.Name = firstNonBlank(instance.FlavorID, instance.Flavor.ID, instance.Flavor.Name, cfg.ServerType)
+	server.ServerType.Name = shared.FirstNonBlank(instance.FlavorID, instance.Flavor.ID, instance.Flavor.Name, cfg.ServerType)
 	return server
 }
 
@@ -1374,7 +1359,7 @@ func retryOVHDelete(ctx context.Context, interval time.Duration, resource string
 			return err
 		}
 		lastErr = err
-		if err := sleepContext(ctx, interval); err != nil {
+		if err := core.SleepContext(ctx, interval); err != nil {
 			return fmt.Errorf("could not confirm deletion of OVH %s: %w", resource, errors.Join(lastErr, err))
 		}
 	}
@@ -1443,8 +1428,4 @@ func blank(value string) string {
 		return "-"
 	}
 	return value
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlank(values...)
 }

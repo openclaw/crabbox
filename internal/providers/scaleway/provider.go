@@ -524,7 +524,7 @@ func (b *Backend) UpdateTailscaleMetadata(ctx context.Context, lease core.LeaseT
 		return core.Server{}, err
 	}
 	labels := live.Labels
-	applyTailscaleMetadata(labels, meta)
+	shared.ApplyTailscaleMetadata(labels, meta)
 	updateResp, err := client.Instance().UpdateServer(&instance.UpdateServerRequest{
 		Zone:     scw.Zone(client.Zone()),
 		ServerID: resp.Server.ID,
@@ -1228,8 +1228,4 @@ func isAmbiguousScalewayError(err error) bool {
 		}
 	}
 	return false
-}
-
-func applyTailscaleMetadata(labels map[string]string, meta core.TailscaleMetadata) {
-	shared.ApplyTailscaleMetadata(labels, meta)
 }

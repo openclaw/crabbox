@@ -146,7 +146,7 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, req core.AcquireRequest)
 	cfg.ServerType = xcpNgServerTypeForConfig(cfg)
 	now := currentTime(b.RT).UTC()
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, "xcp-ng", "", keep, now)
-	labels["work_root"] = firstNonBlank(cfg.XCPNg.WorkRoot, cfg.WorkRoot)
+	labels["work_root"] = shared.FirstNonBlank(cfg.XCPNg.WorkRoot, cfg.WorkRoot)
 
 	resolved, err := b.resolvePlacement(ctx, client)
 	if err != nil {
@@ -403,7 +403,7 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 
 func (b *leaseBackend) resolveStatusServer(ctx context.Context, client lifecycleClient, server core.Server) core.Server {
 	server = reconcileXCPNgServerState(server)
-	if !strings.EqualFold(strings.TrimSpace(server.Status), "running") || firstNonBlank(server.PublicNet.IPv4.IP, server.PrivateNet.IPv4.IP) != "" {
+	if !strings.EqualFold(strings.TrimSpace(server.Status), "running") || shared.FirstNonBlank(server.PublicNet.IPv4.IP, server.PrivateNet.IPv4.IP) != "" {
 		return server
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
@@ -438,7 +438,7 @@ func reconcileXCPNgServerState(server core.Server) core.Server {
 }
 
 func (b *leaseBackend) ensureServerIP(ctx context.Context, client lifecycleClient, server core.Server, releaseOnly bool) (core.Server, error) {
-	if firstNonBlank(server.PublicNet.IPv4.IP, server.PrivateNet.IPv4.IP) != "" || releaseOnly {
+	if shared.FirstNonBlank(server.PublicNet.IPv4.IP, server.PrivateNet.IPv4.IP) != "" || releaseOnly {
 		return server, nil
 	}
 	ip, guestErr := client.GuestIPv4ForID(ctx, server.CloudID)
@@ -480,7 +480,7 @@ func (b *leaseBackend) targetForServer(server core.Server, releaseOnly bool) (co
 	if storedWorkRoot := strings.TrimSpace(server.Labels["work_root"]); storedWorkRoot != "" {
 		cfg.WorkRoot = storedWorkRoot
 	}
-	target := sshTargetFromConfig(cfg, firstNonBlank(server.PublicNet.IPv4.IP, server.PrivateNet.IPv4.IP))
+	target := sshTargetFromConfig(cfg, shared.FirstNonBlank(server.PublicNet.IPv4.IP, server.PrivateNet.IPv4.IP))
 	leaseID := core.Blank(server.Labels["lease"], server.CloudID)
 	if !releaseOnly {
 		if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
@@ -758,7 +758,7 @@ func xcpNgVMToServer(vm xapiVM, labels map[string]string, ip string) core.Server
 	}
 	server := core.Server{
 		Provider: "xcp-ng",
-		CloudID:  firstNonBlank(vm.UUID, vm.Ref),
+		CloudID:  shared.FirstNonBlank(vm.UUID, vm.Ref),
 		Name:     vm.Name,
 		Status:   vm.PowerState,
 		Labels:   labels,
@@ -799,10 +799,6 @@ func closeClient(ctx context.Context, client lifecycleClient, stderr io.Writer) 
 	if err := client.Close(closeCtx); err != nil {
 		fmt.Fprintf(stderr, "warning: close xcp-ng session: %v\n", err)
 	}
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlank(values...)
 }
 
 func currentTime(rt core.Runtime) time.Time {

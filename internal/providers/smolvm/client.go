@@ -171,7 +171,7 @@ func smolvmEndpoint(cfg core.Config) (string, error) {
 	if parsed.Scheme == "" || parsed.Host == "" {
 		return "", core.Exit(2, "%s url %q is invalid", providerName, base)
 	}
-	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
+	if parsed.Scheme != "https" && !shared.IsLoopbackHTTPURL(parsed) {
 		return "", core.Exit(2, "%s url %q must use https unless it targets localhost", providerName, base)
 	}
 	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
@@ -201,10 +201,6 @@ func customSmolvmBaseURLAllowed() bool {
 	default:
 		return false
 	}
-}
-
-func isLoopbackHTTPURL(parsed *url.URL) bool {
-	return shared.IsLoopbackHTTPURL(parsed)
 }
 
 func (c *client) CreateMachine(ctx context.Context, req createRequest) (machineData, error) {

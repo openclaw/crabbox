@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -199,7 +200,7 @@ func readStateRecordFile(path string) (leaseStateRecord, error) {
 	record.NetNSPath = filepath.Join(record.StateDir, firecrackerNetNSFile)
 	record.CNICacheDir = filepath.Join(record.StateDir, firecrackerCNICacheDirName)
 	if strings.TrimSpace(record.VMID) == "" {
-		record.VMID = firstNonBlank(record.Name, record.LeaseID)
+		record.VMID = shared.FirstNonBlankTrimmed(record.Name, record.LeaseID)
 	}
 	if record.Labels == nil {
 		record.Labels = map[string]string{}

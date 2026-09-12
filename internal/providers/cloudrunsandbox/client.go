@@ -107,10 +107,6 @@ func validateGatewayURL(raw string) (string, error) {
 	})
 }
 
-func isLoopbackHost(host string) bool {
-	return shared.IsLoopbackHost(host)
-}
-
 func cloudRunSandboxRedirectError(destination *url.URL) error {
 	return fmt.Errorf("cloud-run-sandbox refused cross-origin redirect to %s", destination.Redacted())
 }

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
@@ -1266,7 +1267,7 @@ func TestRunTimingJSONUsesClaimSlugForReusedSandbox(t *testing.T) {
 
 func TestKeepOnFailureRetainsSandboxAndPrintsHint(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir()) // keep-on-failure writes a lease claim (and lock); keep both out of the real state dir
-	sandboxID := "failkeep0" + randomSuffix() + randomSuffix()
+	sandboxID := "failkeep0" + shared.RandomSuffix() + shared.RandomSuffix()
 	defer core.RemoveLeaseClaim(leasePrefix + sandboxID)
 	runner := newRunner(
 		map[string]scriptedReply{

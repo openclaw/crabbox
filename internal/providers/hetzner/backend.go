@@ -42,7 +42,7 @@ func NewHetznerLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Run
 }
 
 func (b *hetznerLeaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
-	return acquireAttemptsRetry(b.RT, req.Keep, func() (core.LeaseTarget, error) {
+	return shared.AcquireAttemptsRetry(b.RT, req.Keep, func() (core.LeaseTarget, error) {
 		return b.acquireOnce(ctx, req.Keep, req.RequestedSlug)
 	})
 }
@@ -324,10 +324,6 @@ func (b *hetznerLeaseBackend) Cleanup(ctx context.Context, req core.CleanupReque
 		}
 	}
 	return nil
-}
-
-func acquireAttemptsRetry(rt core.Runtime, keep bool, acquire func() (core.LeaseTarget, error)) (core.LeaseTarget, error) {
-	return shared.AcquireAttemptsRetry(rt, keep, acquire)
 }
 
 func deleteServer(ctx context.Context, cfg core.Config, server core.Server) error {

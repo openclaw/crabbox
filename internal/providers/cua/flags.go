@@ -102,7 +102,7 @@ func cuaAPIURL(cfg core.Config) (string, error) {
 		return "", core.Exit(2, "%s API URL must not contain userinfo, query parameters, or a fragment", providerName)
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && shared.IsLoopbackHost(parsed.Hostname())) {
 		return "", core.Exit(2, "%s API URL must use HTTPS except for loopback development endpoints", providerName)
 	}
 	host := canonicalHostname(parsed.Hostname())
@@ -123,10 +123,6 @@ func cuaAPIURL(cfg core.Config) (string, error) {
 	parsed.Path = strings.TrimSuffix(parsed.Path, "/v1")
 	parsed.RawPath = ""
 	return strings.TrimRight(parsed.String(), "/"), nil
-}
-
-func isLoopbackHost(host string) bool {
-	return shared.IsLoopbackHost(host)
 }
 
 func canonicalHostname(host string) string {

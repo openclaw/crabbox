@@ -523,7 +523,7 @@ func (b *backend) checkVersion(ctx context.Context, client cliRunner) core.Docto
 	if err != nil {
 		return doctorCheck("cli", "error", err.Error(), nil)
 	}
-	return doctorCheck("cli", "ok", "nebius cli available", map[string]string{"version": redactNebiusText(firstNonBlank(result.Stdout, result.Stderr))})
+	return doctorCheck("cli", "ok", "nebius cli available", map[string]string{"version": redactNebiusText(shared.FirstNonBlankTrimmed(result.Stdout, result.Stderr))})
 }
 
 func (b *backend) checkProfile(ctx context.Context, client cliRunner) core.DoctorCheck {

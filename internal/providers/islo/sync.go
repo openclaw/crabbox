@@ -12,6 +12,7 @@ import (
 
 	gosdk "github.com/islo-labs/go-sdk"
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func rejectIsloSyncOptions(req core.RunRequest) error {
@@ -121,7 +122,7 @@ func (b *isloBackend) restoreWorkspaceOwnership(ctx context.Context, client islo
 }
 
 func (b *isloBackend) uploadArchiveViaExec(ctx context.Context, client isloAPI, name, workspace string, archive io.Reader, user string) error {
-	suffix := isloRandomSuffix()
+	suffix := shared.RandomSuffix()
 	remoteB64 := path.Join("/tmp", "crabbox-"+suffix+".tgz.b64")
 	remoteArchive := path.Join("/tmp", "crabbox-"+suffix+".tgz")
 	cleanup := "rm -f " + core.ShellQuote(remoteB64) + " " + core.ShellQuote(remoteArchive)

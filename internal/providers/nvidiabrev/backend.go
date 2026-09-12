@@ -86,7 +86,7 @@ func (b *nvidiaBrevBackend) Acquire(ctx context.Context, req core.AcquireRequest
 			if workspaceIdentifier(workspace) == "" {
 				workspace.Name = name
 			}
-			err = b.retainFailedCreatedWorkspace(workspace, firstNonEmpty(workspaceOrgID, createOrg.ID), leaseID, slug, cfg, req, "kept_acquire_failed", err)
+			err = b.retainFailedCreatedWorkspace(workspace, shared.FirstNonBlankTrimmed(workspaceOrgID, createOrg.ID), leaseID, slug, cfg, req, "kept_acquire_failed", err)
 		} else {
 			if workspaceIdentifier(workspace) == "" {
 				workspace.Name = name
@@ -143,7 +143,7 @@ func (b *nvidiaBrevBackend) Resolve(ctx context.Context, req core.ResolveRequest
 		if err != nil {
 			return core.LeaseTarget{}, err
 		}
-		_, found, err := findBrevWorkspace(workspaces, firstNonEmpty(claim.CloudID, claim.Labels["brev_workspace_name"]))
+		_, found, err := findBrevWorkspace(workspaces, shared.FirstNonBlankTrimmed(claim.CloudID, claim.Labels["brev_workspace_name"]))
 		if err != nil {
 			return core.LeaseTarget{}, err
 		}
@@ -174,7 +174,7 @@ func (b *nvidiaBrevBackend) Resolve(ctx context.Context, req core.ResolveRequest
 	}
 	if req.ReleaseOnly || req.StatusOnly {
 		if req.ReadyProbe && brevWorkspaceReady(workspace) {
-			target, targetErr := b.resolveSSHTarget(ctx, client, cfg, workspace, firstNonEmpty(activeOrgID, claim.Labels["brev_org_id"]))
+			target, targetErr := b.resolveSSHTarget(ctx, client, cfg, workspace, shared.FirstNonBlankTrimmed(activeOrgID, claim.Labels["brev_org_id"]))
 			if targetErr != nil {
 				return core.LeaseTarget{}, targetErr
 			}
@@ -258,7 +258,7 @@ func (b *nvidiaBrevBackend) releaseLease(ctx context.Context, req core.ReleaseLe
 	if err := client.rejectOrgScopedMutation("release"); err != nil {
 		return err
 	}
-	identifier := firstNonEmpty(req.Lease.LeaseID, req.Lease.Server.CloudID, req.Lease.Server.Name)
+	identifier := shared.FirstNonBlankTrimmed(req.Lease.LeaseID, req.Lease.Server.CloudID, req.Lease.Server.Name)
 	if claim, claimed, claimErr := resolveNvidiaBrevClaim(identifier); claimErr != nil {
 		return claimErr
 	} else if claimed && strings.EqualFold(strings.TrimSpace(claim.Labels["state"]), "deleting") {
@@ -303,7 +303,7 @@ func (b *nvidiaBrevBackend) RetainLeaseClaimAfterRelease(lease core.LeaseTarget)
 }
 
 func (b *nvidiaBrevBackend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
-	workspace := firstNonEmpty(lease.Server.CloudID, lease.Server.Name, "-")
+	workspace := shared.FirstNonBlankTrimmed(lease.Server.CloudID, lease.Server.Name, "-")
 	if b.releaseResultAction(lease.Server.Labels) == "stop" {
 		if createRecoveryLabels(lease.Server.Labels) && lease.LeaseID != "" {
 			if _, retained, err := resolveLeaseClaimForProvider(lease.LeaseID); err == nil && !retained {
@@ -692,7 +692,7 @@ func deletingLeaseTarget(claim core.LeaseClaim) core.LeaseTarget {
 }
 
 func claimStateLeaseTarget(claim core.LeaseClaim) core.LeaseTarget {
-	return claimLeaseTargetWithStatus(claim, firstNonEmpty(claim.Labels["state"], "failed"))
+	return claimLeaseTargetWithStatus(claim, shared.FirstNonBlankTrimmed(claim.Labels["state"], "failed"))
 }
 
 func claimLeaseTargetWithStatus(claim core.LeaseClaim, status string) core.LeaseTarget {
@@ -1137,7 +1137,7 @@ func (b *nvidiaBrevBackend) resolveWorkspace(ctx context.Context, client *brevCl
 		return brevWorkspace{}, "", "", core.LeaseClaim{}, err
 	}
 	if claimed {
-		workspaceRef := firstNonEmpty(claim.CloudID, claim.Labels["brev_workspace_name"])
+		workspaceRef := shared.FirstNonBlankTrimmed(claim.CloudID, claim.Labels["brev_workspace_name"])
 		if workspace, found, err := findBrevWorkspace(workspaces, workspaceRef); err != nil {
 			return brevWorkspace{}, "", "", core.LeaseClaim{}, err
 		} else if found {
@@ -1333,7 +1333,7 @@ func workspaceToServer(cfg core.Config, workspace brevWorkspace, leaseID, slug s
 		Status:   labels["state"],
 		Labels:   labels,
 	}
-	server.ServerType.Name = firstNonEmpty(workspace.InstanceType, workspace.WorkspaceClass, cfg.NvidiaBrev.Type, cfg.NvidiaBrev.GPUName)
+	server.ServerType.Name = shared.FirstNonBlankTrimmed(workspace.InstanceType, workspace.WorkspaceClass, cfg.NvidiaBrev.Type, cfg.NvidiaBrev.GPUName)
 	server.Labels["server_type"] = server.ServerType.Name
 	return server
 }
@@ -1439,7 +1439,7 @@ func oneOf(value string, allowed ...string) bool {
 }
 
 func workspaceIdentifier(workspace brevWorkspace) string {
-	return firstNonEmpty(workspace.ID, workspace.Name)
+	return shared.FirstNonBlankTrimmed(workspace.ID, workspace.Name)
 }
 
 func safeWorkspaceRef(workspace brevWorkspace) string {

@@ -129,7 +129,7 @@ func validateOCAPIURL(raw string) (string, error) {
 		return "", core.Exit(2, "provider=opencomputer API URL must not contain userinfo, query parameters, or a fragment")
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && shared.IsLoopbackHost(parsed.Hostname())) {
 		return "", core.Exit(2, "provider=opencomputer API URL must use HTTPS except for loopback development endpoints")
 	}
 	host := shared.LowercaseHostname(parsed.Hostname())
@@ -151,10 +151,6 @@ func validateOCAPIURL(raw string) (string, error) {
 	parsed.Path = cleanPath
 	parsed.RawPath = ""
 	return strings.TrimRight(parsed.String(), "/"), nil
-}
-
-func isLoopbackHost(host string) bool {
-	return shared.IsLoopbackHost(host)
 }
 
 func ocRedirectError(destination *url.URL) error {

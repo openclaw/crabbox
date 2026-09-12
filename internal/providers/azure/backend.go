@@ -37,7 +37,7 @@ func NewAzureLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runti
 }
 
 func (b *azureLeaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
-	return acquireAttemptsRetry(b.RT, req.Keep, func() (core.LeaseTarget, error) {
+	return shared.AcquireAttemptsRetry(b.RT, req.Keep, func() (core.LeaseTarget, error) {
 		return b.acquireOnce(ctx, req.Keep, req.RequestedSlug)
 	})
 }
@@ -414,10 +414,6 @@ func listOwnedAzureServers(ctx context.Context, client azureClient) ([]core.Serv
 		}
 	}
 	return owned, nil
-}
-
-func acquireAttemptsRetry(rt core.Runtime, keep bool, acquire func() (core.LeaseTarget, error)) (core.LeaseTarget, error) {
-	return shared.AcquireAttemptsRetry(rt, keep, acquire)
 }
 
 var newAzureClient = func(ctx context.Context, cfg core.Config) (azureClient, error) {

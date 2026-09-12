@@ -112,7 +112,7 @@ func newSuperserveClient(cfg core.Config, rt core.Runtime) (superserveClient, er
 	if err != nil {
 		return nil, err
 	}
-	apiKey := firstNonEmpty(
+	apiKey := shared.FirstNonBlankTrimmed(
 		os.Getenv("CRABBOX_SUPERSERVE_API_KEY"),
 		os.Getenv("SUPERSERVE_API_KEY"),
 	)
@@ -383,7 +383,7 @@ func (c *httpSuperserveClient) dataPlaneTarget(sandboxID string) (dataPlaneTarge
 	if err != nil {
 		return dataPlaneTarget{}, err
 	}
-	if isLoopbackHost(parsed.Hostname()) {
+	if shared.IsLoopbackHost(parsed.Hostname()) {
 		return dataPlaneTarget{
 			baseURL: strings.TrimRight(parsed.String(), "/"),
 			headers: map[string]string{
@@ -686,13 +686,4 @@ func redactJSONSecretField(value, key string) string {
 func superserveEndpointScope(baseURL string) string {
 	digest := sha256.Sum256([]byte(baseURL))
 	return "endpoint-sha256:" + hex.EncodeToString(digest[:])
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
 }

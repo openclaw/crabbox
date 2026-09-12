@@ -39,7 +39,7 @@ func (b *blacksmithBackend) withRoute(ctx context.Context) (*blacksmithBackend, 
 	if b.route != nil {
 		return b, nil
 	}
-	route := blacksmithRoute{API: strings.TrimSpace(os.Getenv("BLACKSMITH_API_URL")), Org: strings.TrimSpace(firstNonBlank(b.cfg.Blacksmith.Org, os.Getenv("BLACKSMITH_ORG")))}
+	route := blacksmithRoute{API: strings.TrimSpace(os.Getenv("BLACKSMITH_API_URL")), Org: strings.TrimSpace(shared.FirstNonBlank(b.cfg.Blacksmith.Org, os.Getenv("BLACKSMITH_ORG")))}
 	if route.API == "" {
 		route.API = blacksmithDefaultAPI
 	}

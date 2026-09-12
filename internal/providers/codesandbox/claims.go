@@ -187,7 +187,7 @@ func newSandboxTitle(repo core.Repo) string {
 	if base == "" {
 		base = "workspace"
 	}
-	return codeSandboxNamePrefix + base + "-" + randomSuffix()
+	return codeSandboxNamePrefix + base + "-" + shared.RandomSuffix()
 }
 
 func codeSandboxWorkdir(cfg core.Config) (string, error) {
@@ -228,10 +228,6 @@ func isTerminalState(state string) bool {
 	default:
 		return false
 	}
-}
-
-func randomSuffix() string {
-	return shared.RandomSuffix()
 }
 
 func (b *codeSandboxBackend) cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {

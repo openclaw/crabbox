@@ -837,11 +837,11 @@ func (b *backend) server(item instance, cfg core.Config) core.Server {
 	if labels["state"] == "" {
 		labels["state"] = "running"
 	}
-	labels["server_type"] = firstNonBlank(labels["server_type"], shapeName(item.Shape), cfg.ServerType)
+	labels["server_type"] = shared.FirstNonBlankTrimmed(labels["server_type"], shapeName(item.Shape), cfg.ServerType)
 	server := core.Server{
 		CloudID:  item.ClusterID,
 		Provider: providerName,
-		Name:     firstNonBlank(labels["slug"], item.ClusterID),
+		Name:     shared.FirstNonBlankTrimmed(labels["slug"], item.ClusterID),
 		Status:   labels["state"],
 		Labels:   labels,
 	}
@@ -1084,8 +1084,4 @@ func commandError(action string, result core.LocalCommandResult, err error) erro
 		return core.Exit(result.ExitCode, "%s failed: %v: %s", action, err, detail)
 	}
 	return core.Exit(result.ExitCode, "%s failed: %v", action, err)
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlankTrimmed(values...)
 }

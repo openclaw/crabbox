@@ -28,7 +28,7 @@ func NewGCPLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime
 }
 
 func (b *gcpLeaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
-	return acquireAttemptsRetry(b.RT, req.Keep, func() (core.LeaseTarget, error) {
+	return shared.AcquireAttemptsRetry(b.RT, req.Keep, func() (core.LeaseTarget, error) {
 		return b.acquireOnce(ctx, req.Keep, req.RequestedSlug)
 	})
 }
@@ -435,10 +435,6 @@ func gcpClaimScope(cfg core.Config) string {
 		return ""
 	}
 	return "project:" + cfg.GCPProject
-}
-
-func acquireAttemptsRetry(rt core.Runtime, keep bool, acquire func() (core.LeaseTarget, error)) (core.LeaseTarget, error) {
-	return shared.AcquireAttemptsRetry(rt, keep, acquire)
 }
 
 var newGCPClient = func(ctx context.Context, cfg core.Config) (gcpClient, error) {

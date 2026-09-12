@@ -14,8 +14,6 @@ type cloudInitPayload struct {
 	MetaData string
 }
 
-type fatFile = shared.FATFile
-
 func buildCloudInitPayload(cfg core.Config, leaseID, slug, publicKey string) (cloudInitPayload, error) {
 	publicKey = strings.TrimSpace(publicKey)
 	if publicKey == "" {
@@ -27,7 +25,7 @@ func buildCloudInitPayload(cfg core.Config, leaseID, slug, publicKey string) (cl
 }
 
 func writeCloudInitDrive(path string, payload cloudInitPayload) error {
-	image, err := buildFAT16Image("cidata", []fatFile{
+	image, err := buildFAT16Image("cidata", []shared.FATFile{
 		{Name: "user-data", Data: []byte(payload.UserData)},
 		{Name: "meta-data", Data: []byte(payload.MetaData)},
 	})
@@ -40,6 +38,6 @@ func writeCloudInitDrive(path string, payload cloudInitPayload) error {
 	return nil
 }
 
-func buildFAT16Image(label string, files []fatFile) ([]byte, error) {
+func buildFAT16Image(label string, files []shared.FATFile) ([]byte, error) {
 	return shared.BuildFAT16Image(label, files, "FC%06dTXT", "firecracker cloud-init")
 }

@@ -34,5 +34,5 @@ func syncSSHConfigDirectory(path string) error {
 }
 
 func quoteSSHProxyExecutable(path string) string {
-	return shellQuote(path)
+	return core.ShellQuote(path)
 }

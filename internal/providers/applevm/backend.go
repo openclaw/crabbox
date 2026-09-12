@@ -206,8 +206,8 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	leaseID := firstNonBlank(claim.LeaseID, inst.LeaseID)
-	slug := firstNonBlank(claim.Slug, inst.Slug)
+	leaseID := shared.FirstNonBlankTrimmed(claim.LeaseID, inst.LeaseID)
+	slug := shared.FirstNonBlankTrimmed(claim.Slug, inst.Slug)
 	claim.LeaseID = leaseID
 	claim.Slug = slug
 	if leaseID == "" {
@@ -306,8 +306,8 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if err := requireHost(); err != nil {
 		return err
 	}
-	leaseID := firstNonBlank(req.Lease.LeaseID, req.Lease.Server.Labels["lease"])
-	name := strings.TrimSpace(firstNonBlank(req.Lease.Server.CloudID, req.Lease.Server.Labels["instance"]))
+	leaseID := shared.FirstNonBlankTrimmed(req.Lease.LeaseID, req.Lease.Server.Labels["lease"])
+	name := strings.TrimSpace(shared.FirstNonBlankTrimmed(req.Lease.Server.CloudID, req.Lease.Server.Labels["instance"]))
 	if name == "" && leaseID != "" {
 		inst, claim, err := b.resolveInstance(ctx, cfg, leaseID)
 		if err != nil {
@@ -315,10 +315,10 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 			if !errors.As(err, &missing) {
 				return err
 			}
-			leaseID = firstNonBlank(leaseID, claim.LeaseID)
+			leaseID = shared.FirstNonBlankTrimmed(leaseID, claim.LeaseID)
 		} else {
 			name = inst.Name
-			leaseID = firstNonBlank(leaseID, claim.LeaseID, inst.LeaseID)
+			leaseID = shared.FirstNonBlankTrimmed(leaseID, claim.LeaseID, inst.LeaseID)
 		}
 	}
 	if name != "" {
@@ -377,7 +377,7 @@ func requireExactAppleVMClaim(leaseID, instanceName string) error {
 }
 
 func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
-	return fmt.Sprintf("released lease=%s instance=%s", lease.LeaseID, core.Blank(firstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]), "-"))
+	return fmt.Sprintf("released lease=%s instance=%s", lease.LeaseID, core.Blank(shared.FirstNonBlankTrimmed(lease.Server.CloudID, lease.Server.Labels["instance"]), "-"))
 }
 
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
@@ -406,7 +406,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	removed := 0
 	for _, inst := range instances {
 		claim, hasClaim := claims[inst.Name]
-		leaseID := firstNonBlank(claim.LeaseID, inst.LeaseID)
+		leaseID := shared.FirstNonBlankTrimmed(claim.LeaseID, inst.LeaseID)
 		if hasClaim && claim.LeaseID != "" {
 			live[claim.LeaseID] = struct{}{}
 			claim.LeaseID = leaseID
@@ -502,7 +502,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst applev
 		cfg.AppleVM.WorkRoot = root
 		cfg.WorkRoot = root
 	}
-	leaseID := firstNonBlank(claim.LeaseID, inst.LeaseID)
+	leaseID := shared.FirstNonBlankTrimmed(claim.LeaseID, inst.LeaseID)
 	if !appleVMRunning(inst.Status) {
 		server.Status = appleVMState(inst.Status)
 		server.Labels["state"] = server.Status
@@ -746,22 +746,22 @@ func (b *backend) serverFromInstance(inst applevmhelper.Instance, claim core.Lea
 		labels["instance"] = inst.Name
 	}
 	if labels["lease"] == "" {
-		labels["lease"] = firstNonBlank(claim.LeaseID, inst.LeaseID)
+		labels["lease"] = shared.FirstNonBlankTrimmed(claim.LeaseID, inst.LeaseID)
 	}
 	if labels["slug"] == "" {
-		labels["slug"] = firstNonBlank(claim.Slug, inst.Slug)
+		labels["slug"] = shared.FirstNonBlankTrimmed(claim.Slug, inst.Slug)
 	}
 	imageIdentity := applevmhelper.ImageIdentity(cfg.AppleVM.Image, cfg.AppleVM.ImageSHA256)
 	if labels["server_type"] == "" {
-		labels["server_type"] = firstNonBlank(inst.Image, imageIdentity)
+		labels["server_type"] = shared.FirstNonBlankTrimmed(inst.Image, imageIdentity)
 	}
 	labels["server_type"] = applevmhelper.RedactImageRef(labels["server_type"])
 	if labels["image"] == "" {
-		labels["image"] = firstNonBlank(inst.Image, imageIdentity)
+		labels["image"] = shared.FirstNonBlankTrimmed(inst.Image, imageIdentity)
 	}
 	labels["image"] = applevmhelper.RedactImageRef(labels["image"])
 	if labels["ssh_user"] == "" {
-		labels["ssh_user"] = firstNonBlank(inst.SSHUser, cfg.AppleVM.User)
+		labels["ssh_user"] = shared.FirstNonBlankTrimmed(inst.SSHUser, cfg.AppleVM.User)
 	}
 	if inst.SSHPort > 0 {
 		labels["ssh_port"] = strconv.Itoa(inst.SSHPort)
@@ -769,7 +769,7 @@ func (b *backend) serverFromInstance(inst applevmhelper.Instance, claim core.Lea
 		labels["ssh_port"] = cfg.SSHPort
 	}
 	if labels["work_root"] == "" {
-		labels["work_root"] = firstNonBlank(inst.WorkRoot, cfg.AppleVM.WorkRoot)
+		labels["work_root"] = shared.FirstNonBlankTrimmed(inst.WorkRoot, cfg.AppleVM.WorkRoot)
 	}
 	status := appleVMState(inst.Status)
 	if appleVMRunning(inst.Status) && labels["state"] == "ready" {
@@ -784,7 +784,7 @@ func (b *backend) serverFromInstance(inst applevmhelper.Instance, claim core.Lea
 		Labels:   labels,
 	}
 	server.PublicNet.IPv4.IP = inst.SSHHost
-	server.ServerType.Name = applevmhelper.RedactImageRef(firstNonBlank(labels["server_type"], imageIdentity))
+	server.ServerType.Name = applevmhelper.RedactImageRef(shared.FirstNonBlankTrimmed(labels["server_type"], imageIdentity))
 	return server
 }
 
@@ -1055,8 +1055,4 @@ func localCommandDetail(result core.LocalCommandResult, err error) string {
 		return "no output"
 	}
 	return strings.Join(parts, " ")
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlankTrimmed(values...)
 }

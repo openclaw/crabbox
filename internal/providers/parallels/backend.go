@@ -42,7 +42,7 @@ func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (co
 
 func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (core.LeaseTarget, error) {
 	cfg := b.Cfg
-	source := strings.TrimSpace(firstNonEmpty(cfg.Parallels.SourceID, cfg.Parallels.Source))
+	source := strings.TrimSpace(shared.FirstNonBlankTrimmed(cfg.Parallels.SourceID, cfg.Parallels.Source))
 	if source == "" {
 		return core.LeaseTarget{}, core.Exit(2, "provider=parallels requires --parallels-source, --parallels-template, or parallels.source")
 	}
@@ -78,7 +78,7 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	}
 	cfg.SSHKey = keyPath
 	cfg.ProviderKey = core.ProviderKeyForLease(leaseID)
-	snapshotID := strings.TrimSpace(firstNonEmpty(cfg.Parallels.SourceSnapshotID, cfg.Parallels.SourceSnapshot))
+	snapshotID := strings.TrimSpace(shared.FirstNonBlankTrimmed(cfg.Parallels.SourceSnapshotID, cfg.Parallels.SourceSnapshot))
 	if snapshotID != "" && cfg.Parallels.SourceSnapshotID == "" {
 		resolved, err := client.SnapshotID(ctx, source, snapshotID)
 		if err != nil {
@@ -159,7 +159,7 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 			leaseID, slug := parallelsLeaseFromVMName(vm.Name)
 			labels := core.ParallelsLabelsFromName(vm.Name)
 			if labels["lease"] == "" {
-				labels = core.DirectLeaseLabels(candidate, firstNonEmpty(leaseID, vm.ID), slug, "parallels", "", true, time.Now().UTC())
+				labels = core.DirectLeaseLabels(candidate, shared.FirstNonBlankTrimmed(leaseID, vm.ID), slug, "parallels", "", true, time.Now().UTC())
 			}
 			labels["host"] = parallelsHostName(candidate)
 			server := core.Server{CloudID: vm.ID, Provider: "parallels", Name: vm.Name, Status: strings.ToLower(vm.State), Labels: labels}
@@ -167,7 +167,7 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 			server.ServerType.Name = core.ServerTypeForProviderClass("parallels", candidate.Class)
 			normalizedID := strings.ReplaceAll(id, "_", "-")
 			if vm.ID == id || vm.Name == id || leaseID == id || strings.ReplaceAll(leaseID, "_", "-") == normalizedID || core.NormalizeLeaseSlug(slug) == core.NormalizeLeaseSlug(id) {
-				leaseID = firstNonEmpty(leaseID, vm.ID)
+				leaseID = shared.FirstNonBlankTrimmed(leaseID, vm.ID)
 				adopt, err := authorizeParallelsResolve(req, leaseID, vm.ID, parallelsHostName(candidate))
 				if err != nil {
 					return core.LeaseTarget{}, err
@@ -297,7 +297,7 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRe
 	if req.Lease.Server.Name != "" && !strings.HasPrefix(req.Lease.Server.Name, "crabbox-") {
 		return core.Exit(2, "refusing to release non-Crabbox Parallels VM %q", req.Lease.Server.Name)
 	}
-	id := firstNonEmpty(req.Lease.Server.CloudID, req.Lease.LeaseID)
+	id := shared.FirstNonBlankTrimmed(req.Lease.Server.CloudID, req.Lease.LeaseID)
 	cfg := b.configForLease(ctx, req.Lease)
 	if err := requireExactParallelsClaim(req.Lease.LeaseID, id, parallelsHostName(cfg)); err != nil {
 		return err
@@ -313,7 +313,7 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRe
 func (b *leaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	server := req.Lease.Server
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.Cfg, req.State, time.Now().UTC())
-	core.NewParallelsClient(b.configForLease(ctx, req.Lease), b.RT.Exec).SetLeaseLabels(firstNonEmpty(req.Lease.LeaseID, server.Labels["lease"]), server.Labels)
+	core.NewParallelsClient(b.configForLease(ctx, req.Lease), b.RT.Exec).SetLeaseLabels(shared.FirstNonBlankTrimmed(req.Lease.LeaseID, server.Labels["lease"]), server.Labels)
 	return server, nil
 }
 
@@ -404,7 +404,7 @@ func (b *leaseBackend) configForLease(ctx context.Context, lease core.LeaseTarge
 			}
 		}
 	}
-	id := firstNonEmpty(lease.Server.CloudID, lease.LeaseID)
+	id := shared.FirstNonBlankTrimmed(lease.Server.CloudID, lease.LeaseID)
 	if id != "" {
 		for _, candidate := range core.ParallelsCandidateConfigs(b.Cfg) {
 			client := core.NewParallelsClient(candidate, b.RT.Exec)
@@ -416,17 +416,8 @@ func (b *leaseBackend) configForLease(ctx context.Context, lease core.LeaseTarge
 	return b.Cfg
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
-}
-
 func parallelsHostName(cfg core.Config) string {
-	return firstNonEmpty(cfg.Parallels.SelectedHost, cfg.Parallels.Host, "local")
+	return shared.FirstNonBlankTrimmed(cfg.Parallels.SelectedHost, cfg.Parallels.Host, "local")
 }
 
 func blank(value, fallback string) string {
