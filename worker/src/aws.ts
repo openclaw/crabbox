@@ -1,6 +1,10 @@
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 
 import {
+  lookupAWSLegacyAllocation,
+  type AWSLegacyAllocationEvidence,
+} from "./aws-cleanup-recovery";
+import {
   FixedAWSFetchClient,
   RefreshingAWSFetchClient,
   resolvedAWSCredentials,
@@ -48,6 +52,7 @@ import type {
   ProviderImage,
   ProviderCheckpointOwnership,
   LeaseImageIdentity,
+  LeaseRecord,
   ProviderMachine,
   ProviderAccessTimingObserver,
   ProvisioningAttempt,
@@ -763,7 +768,7 @@ export class EC2SpotClient {
   constructor(
     private readonly env: Env,
     region: string,
-    credentialSnapshot?: ResolvedAWSCredentials,
+    private readonly credentialSnapshot?: ResolvedAWSCredentials,
   ) {
     this.region = requireAWSRegion(region || env.CRABBOX_AWS_REGION || "eu-west-1");
     const expected = awsExpectedIdentityConfig(env);
@@ -803,6 +808,21 @@ export class EC2SpotClient {
       this.stsClient = new RefreshingAWSFetchClient(credentials, "sts", this.region);
       this.ssmClient = new RefreshingAWSFetchClient(credentials, "ssm", this.region);
     }
+  }
+
+  async legacyAllocationEvidence(
+    lease: LeaseRecord,
+    account: string,
+  ): Promise<AWSLegacyAllocationEvidence> {
+    if (!this.credentialSnapshot || this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT) {
+      throw new AWSLeaseAuthorityError(
+        "AWS scope recovery requires a fixed direct-provider credential snapshot",
+      );
+    }
+    const cloudtrail = new FixedAWSFetchClient(this.credentialSnapshot, "cloudtrail", this.region);
+    return lookupAWSLegacyAllocation(lease, account, (input, init) =>
+      cloudtrail.fetch(input, init),
+    );
   }
 
   async withLeaseOperation<T>(operation: (session: AWSLeaseOperation) => Promise<T>): Promise<T> {

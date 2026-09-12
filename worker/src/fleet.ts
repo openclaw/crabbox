@@ -70,6 +70,14 @@ import {
   type AWSIngressConfig,
   type AWSPrivateWorkspaceConfig,
 } from "./aws";
+import {
+  awsCleanupAuditMatchesLease,
+  awsCleanupAuditView,
+  awsCleanupRecoveryAuditKey,
+  awsCleanupRecoveryFingerprint,
+  requireAWSLegacyCleanupLease,
+  type AWSLegacyCleanupAudit,
+} from "./aws-cleanup-recovery";
 import { InvalidAWSRegionError, sanitizeAWSRegion } from "./aws-region";
 import {
   AzureClient,
@@ -7194,7 +7202,61 @@ export class FleetCoordinator {
       lease.createAttemptID,
       lease.createAttemptGeneration,
       lease.lifecycle,
+      lease.slug,
+      lease.providerOwner,
+      lease.providerKey,
+      lease.providerKeyCleanupOwned,
+      lease.hostId,
+      lease.hostID,
     ]);
+  }
+
+  private async commitRecoveredLeaseScope<T>(
+    request: Request,
+    leaseID: string,
+    expectedBinding: string,
+    observation: { providerScope: string; resourceAbsent: true },
+    persistAudit: (transaction: CoordinatorStorageView) => Promise<T>,
+  ): Promise<T> {
+    const runtime = this.state.provisioning;
+    if (!runtime)
+      throw new ProviderResourceUnresolvedError("Atomic cleanup recovery is unavailable");
+    return this.state.runExclusive(() =>
+      runtime.commitAndWake(async (transaction) => {
+        const current = await transaction.get<LeaseRecord>(leaseKey(leaseID));
+        if (
+          !isAdminRequest(request) ||
+          requestAuthType(request) === "device" ||
+          !current ||
+          this.cleanupRecoveryLeaseBinding(current) !== expectedBinding ||
+          !this.cleanupRecoveryLeaseEligible(current) ||
+          current.providerScope != null ||
+          current.provisioningRequestStartedAt ||
+          current.cleanupCompletedAt ||
+          !current.cleanupError ||
+          current.state !== "released" ||
+          current.releaseDeletesServer !== true ||
+          (await provisioningOwnsLease(transaction, leaseID))
+        ) {
+          throw new ProviderResourceUnresolvedError(
+            "Cleanup recovery lease or administrator authority changed before commit",
+          );
+        }
+        const audit = await persistAudit(transaction);
+        const now = Date.now();
+        await transaction.put(leaseKey(leaseID), {
+          ...current,
+          providerScope: observation.providerScope,
+          provisioningResourceMayExist: false,
+          cleanupRetryAt: new Date(now).toISOString(),
+          updatedAt: new Date(now).toISOString(),
+        });
+        // This records the next cleanup wake, not provider cleanup completion.
+        const previousWake = await transaction.get<number | null>(legacyAlarmKey);
+        await setLegacyWake(transaction, Math.min(previousWake ?? now, now));
+        return audit;
+      }),
+    );
   }
 
   private async leaseRoute(request: Request, leaseID: string, action?: string): Promise<Response> {
@@ -7234,10 +7296,29 @@ export class FleetCoordinator {
           : undefined;
       if (!provider?.recoverCleanup)
         return json({ error: "cleanup_recovery_unsupported" }, { status: 501 });
-      if (!this.cleanupRecoveryLeaseEligible(lease)) {
+      if (provider.supportsCleanupScopeRecovery && !admin) {
+        return json(
+          { error: "forbidden", message: "administrator cleanup recovery required" },
+          { status: 403 },
+        );
+      }
+      if (
+        !this.cleanupRecoveryLeaseEligible(lease) ||
+        (await provisioningOwnsLease(this.state.storage, lease.id))
+      ) {
         return json({ error: "cleanup_recovery_requires_expired_blocked_lease" }, { status: 409 });
       }
       const expectedBinding = this.cleanupRecoveryLeaseBinding(lease);
+      const commitScopeRecovery: ProviderScopeRecoveryCommit = (observation, persistAudit) =>
+        this.commitRecoveredLeaseScope(
+          request,
+          lease.id,
+          expectedBinding,
+          observation,
+          persistAudit,
+        );
+      const scopeRecoveryArgs: [] | [ProviderScopeRecoveryCommit] =
+        provider.supportsCleanupScopeRecovery ? [commitScopeRecovery] : [];
       try {
         const recovery = await provider.recoverCleanup(
           lease,
@@ -7257,6 +7338,7 @@ export class FleetCoordinator {
               }
               return await commit();
             }),
+          ...scopeRecoveryArgs,
         );
         return json({ leaseID: lease.id, provider: providerID, recovery });
       } catch (error) {
@@ -7289,6 +7371,12 @@ export class FleetCoordinator {
           : undefined;
       if (!provider?.inspectCleanup) {
         return json({ error: "cleanup_inspection_unsupported" }, { status: 501 });
+      }
+      if (provider.supportsCleanupScopeRecovery && !admin) {
+        return json(
+          { error: "forbidden", message: "administrator cleanup inspection required" },
+          { status: 403 },
+        );
       }
       return json({
         leaseID: lease.id,
@@ -26619,12 +26707,15 @@ interface CloudProvider {
   deleteServer(id: string): Promise<void>;
   deleteOwnedServer?(lease: LeaseRecord): Promise<void>;
   inspectCleanup?(lease: LeaseRecord): Promise<unknown>;
+  // Scope repair requires admin authorization and its own lifecycle commit capability.
+  supportsCleanupScopeRecovery?: true;
   // Revalidate the lease after provider reads, before committing any recovery writes.
   recoverCleanup?(
     lease: LeaseRecord,
     expectedClaimFingerprint: string,
     actor: string,
     commitGuard: <T>(commit: () => Promise<T>) => Promise<T>,
+    commitScopeRecovery?: ProviderScopeRecoveryCommit,
   ): Promise<unknown>;
   supportsNativeImages(): boolean;
   nativeImagesUnsupportedMessage(): string;
@@ -26723,6 +26814,12 @@ interface ProviderWorkspaceCapability {
 
 type ProviderStateStorage = CoordinatorStorage;
 type ProviderStateStorageView = CoordinatorStorageView;
+
+// The lifecycle owner accepts a proved scope binding, never an arbitrary lease patch.
+type ProviderScopeRecoveryCommit = <T>(
+  observation: { providerScope: string; resourceAbsent: true },
+  persistAudit: (transaction: CoordinatorStorageView) => Promise<T>,
+) => Promise<T>;
 
 interface ProviderAccessContext {
   requestSourceCIDRs: string[];
@@ -28294,6 +28391,7 @@ async function recordAWSMacHostAllocations(
 
 export class AWSProvider implements CloudProvider {
   readonly recoveryIsAuthoritative = true;
+  readonly supportsCleanupScopeRecovery = true;
 
   private clientValue?: EC2SpotClient;
   private readonly region: string;
@@ -28407,6 +28505,113 @@ export class AWSProvider implements CloudProvider {
 
   findServer(id: string): Promise<ProviderMachine | undefined> {
     return this.client.findServer(id);
+  }
+
+  private async recordedCleanupRecovery(
+    lease: LeaseRecord,
+  ): Promise<AWSLegacyCleanupAudit | undefined> {
+    const audit = await this.storage.get<AWSLegacyCleanupAudit>(
+      awsCleanupRecoveryAuditKey(lease.id),
+    );
+    if (audit && !(await awsCleanupAuditMatchesLease(audit, lease))) {
+      throw new ProviderResourceUnresolvedError(
+        "AWS cleanup recovery audit does not match the retained lease",
+      );
+    }
+    return audit ? awsCleanupAuditView(audit) : undefined;
+  }
+
+  private async observeLegacyCleanupScope(lease: LeaseRecord) {
+    requireAWSLegacyCleanupLease(lease);
+    return this.withLeaseOperation(async (session) => {
+      if (session.region !== lease.region) {
+        throw new ProviderResourceUnresolvedError(
+          "AWS recovery Region does not match the retained lease",
+        );
+      }
+      const identity = await session.verifiedIdentity();
+      const evidence = await session.client.legacyAllocationEvidence(lease, identity.account);
+      if (await session.findServer(lease.cloudID)) {
+        throw new ProviderResourceUnresolvedError(
+          "AWS instance is still visible; use normal owned-resource cleanup instead of scope recovery",
+        );
+      }
+      return evidence;
+    });
+  }
+
+  async inspectCleanup(lease: LeaseRecord): Promise<unknown> {
+    const recoveryAudit = await this.recordedCleanupRecovery(lease);
+    if (recoveryAudit) return { recoveryAudit };
+    const claimFingerprint = await awsCleanupRecoveryFingerprint(lease);
+    const evidence = await this.observeLegacyCleanupScope(lease);
+    const current = await this.storage.get<LeaseRecord>(leaseKey(lease.id));
+    const claimUnchanged = Boolean(
+      current &&
+      current.providerScope == null &&
+      !current.cleanupStartedAt &&
+      !current.provisioningRequestStartedAt &&
+      (await awsCleanupRecoveryFingerprint(current)) === claimFingerprint,
+    );
+    return {
+      basis: "aws-cloudtrail-run-instances",
+      ...evidence,
+      resourceAbsent: true,
+      remainingCleanup: ["owned-key", "provider-access"],
+      claimUnchanged,
+      ...(claimUnchanged ? { claimFingerprint } : {}),
+    };
+  }
+
+  async recoverCleanup(
+    lease: LeaseRecord,
+    expectedClaimFingerprint: string,
+    actor: string,
+    commitGuard: <T>(commit: () => Promise<T>) => Promise<T>,
+    commitScopeRecovery?: ProviderScopeRecoveryCommit,
+  ): Promise<AWSLegacyCleanupAudit> {
+    const existing = await this.recordedCleanupRecovery(lease);
+    if (existing) {
+      if (existing.claimFingerprint !== expectedClaimFingerprint) {
+        throw new ProviderResourceUnresolvedError(
+          "AWS cleanup recovery was recorded for another binding",
+        );
+      }
+      return commitGuard(async () => existing);
+    }
+    if (
+      !commitScopeRecovery ||
+      !actor.trim() ||
+      actor.length > 256 ||
+      (await awsCleanupRecoveryFingerprint(lease)) !== expectedClaimFingerprint
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        "AWS recovery binding changed; inspect cleanup again",
+      );
+    }
+    const evidence = await this.observeLegacyCleanupScope(lease);
+    const audit: AWSLegacyCleanupAudit = {
+      leaseID: lease.id,
+      region: evidence.region,
+      providerScope: evidence.providerScope,
+      cloudID: lease.cloudID,
+      eventID: evidence.eventID,
+      eventTime: evidence.eventTime,
+      actor,
+      recoveredAt: new Date().toISOString(),
+      claimFingerprint: expectedClaimFingerprint,
+    };
+    return commitScopeRecovery(
+      { providerScope: evidence.providerScope, resourceAbsent: true },
+      async (transaction) => {
+        const key = awsCleanupRecoveryAuditKey(lease.id);
+        if (await transaction.get(key)) {
+          throw new ProviderResourceUnresolvedError("AWS recovery evidence changed before commit");
+        }
+        await transaction.put(key, audit);
+        return audit;
+      },
+    );
   }
 
   private async verifyLeaseOperationAuthority(

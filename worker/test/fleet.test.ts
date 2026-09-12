@@ -26612,6 +26612,304 @@ describe("fleet lease identity and idle", () => {
     },
   );
 
+  it.each([false, true])(
+    "recovers legacy AWS scope after the forward cleanup refusal without skipping failed key cleanup (keep=%s)",
+    async (keep) => {
+      const f = awsLegacyRecoveryFixture(keep);
+      const key = `lease:${f.lease.id}`;
+      const auditKey = `aws-cleanup-recovery-audit:${f.lease.id}`;
+      await f.fleet.alarm();
+      const refused = structuredClone(f.storage.value<LeaseRecord>(key)!);
+      expect(refused).toMatchObject({
+        keep,
+        releaseDeletesServer: true,
+        provisioningResourceMayExist: true,
+        provisioningFailureRetryable: false,
+      });
+      expect(refused.cleanupCompletedAt).toBeUndefined();
+      expect(refused.cleanupRetryAt).toBeUndefined();
+
+      const inspection = await f.inspect();
+      expect(inspection.status).toBe(200);
+      const inspected = (await inspection.json()) as {
+        inspection: { claimFingerprint: string; providerScope: string; claimUnchanged: boolean };
+      };
+      expect(inspected.inspection).toMatchObject({
+        providerScope: "aws:account:123456789012",
+        claimUnchanged: true,
+      });
+      expect(f.storage.value(key)).toEqual(refused);
+      expect(JSON.stringify(inspected)).not.toContain("private-bootstrap-canary");
+
+      const recovered = await f.recover(inspected.inspection.claimFingerprint);
+      expect(recovered.status).toBe(200);
+      expect(f.lookupAttributes).toEqual([
+        [{ AttributeKey: "ResourceName", AttributeValue: f.lease.cloudID }],
+        [{ AttributeKey: "ResourceName", AttributeValue: f.lease.cloudID }],
+      ]);
+      const repair = (await recovered.json()) as { recovery: Record<string, unknown> };
+      expect(Object.keys(repair.recovery).toSorted()).toEqual([
+        "actor",
+        "claimFingerprint",
+        "cloudID",
+        "eventID",
+        "eventTime",
+        "leaseID",
+        "providerScope",
+        "recoveredAt",
+        "region",
+      ]);
+      expect(f.storage.value(key)).toMatchObject({
+        keep,
+        releaseDeletesServer: true,
+        providerScope: "aws:account:123456789012",
+        provisioningResourceMayExist: false,
+        cleanupRetryAt: expect.any(String),
+        cleanupError: refused.cleanupError,
+        failureError: refused.failureError,
+        host: f.lease.host,
+        sshHostKey: f.lease.sshHostKey,
+        providerAccessExpiresAt: f.lease.providerAccessExpiresAt,
+      });
+      expect(f.storage.value<LeaseRecord>(key)?.cleanupCompletedAt).toBeUndefined();
+      expect(f.storage.value(auditKey)).toEqual(repair.recovery);
+      expect(f.storage.alarm()).toBeLessThanOrEqual(Date.now());
+
+      f.state.keyFailure = true;
+      await f.fleet.alarm();
+      const failedKey = f.storage.value<LeaseRecord>(key)!;
+      expect(failedKey.cleanupError).toContain("UnauthorizedOperation");
+      expect(failedKey.cleanupCompletedAt).toBeUndefined();
+      expect(failedKey.sshHostKey).toBe(f.lease.sshHostKey);
+      expect(f.state.keyDeleted).toBe(false);
+      f.state.keyFailure = false;
+      f.storage.seed(key, {
+        ...failedKey,
+        cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+      });
+      await f.fleet.alarm();
+      expect(f.state.keyDeleted).toBe(true);
+      expect(f.deletedKeyIDs).toEqual(["key-0123456789abcdef0", "key-0123456789abcdef0"]);
+      expect(f.storage.value(key)).toMatchObject({
+        state: "released",
+        keep,
+        host: "",
+        cleanupCompletedAt: expect.any(String),
+      });
+      expect(f.storage.value<LeaseRecord>(key)?.cleanupError).toBeUndefined();
+      expect(f.storage.value<LeaseRecord>(key)?.sshHostKey).toBeUndefined();
+      expect(f.storage.value<LeaseRecord>(key)?.providerAccessExpiresAt).toBeUndefined();
+      expect(f.actions).not.toContain("TerminateInstances");
+      const lookupCount = f.actions.filter((action) => action === "LookupEvents").length;
+      expect((await f.recover(inspected.inspection.claimFingerprint)).status).toBe(200);
+      expect(f.actions.filter((action) => action === "LookupEvents")).toHaveLength(lookupCount);
+      expect(f.storage.value(auditKey)).toEqual(repair.recovery);
+    },
+  );
+
+  it.each([false, undefined])(
+    "refuses legacy AWS recovery without explicit delete intent (%s)",
+    async (releaseDeletesServer) => {
+      const f = awsLegacyRecoveryFixture(true);
+      const key = `lease:${f.lease.id}`;
+      f.storage.seed(key, { ...f.lease, releaseDeletesServer });
+      const before = structuredClone(f.storage.value(key));
+      expect((await f.inspect()).status).not.toBe(200);
+      expect((await f.recover("a".repeat(64))).status).not.toBe(200);
+      expect(f.actions).toEqual([]);
+      expect(f.storage.value(key)).toEqual(before);
+      expect(f.storage.value(`aws-cleanup-recovery-audit:${f.lease.id}`)).toBeUndefined();
+    },
+  );
+
+  it.each(["GET", "POST"])(
+    "requires admin authority before %s AWS recovery evidence reads",
+    async (method) => {
+      const f = awsLegacyRecoveryFixture();
+      const response = await f.fleet.fetch(
+        request(method, `/v1/leases/${f.lease.id}/cleanup`, {
+          headers: { ...f.headers, "x-crabbox-admin": "false" },
+          ...(method === "POST"
+            ? {
+                body: {
+                  action: "acknowledge-missing-resource",
+                  expectedClaimFingerprint: "a".repeat(64),
+                },
+              }
+            : {}),
+        }),
+      );
+      expect(response.status).toBe(403);
+      expect(f.actions).toEqual([]);
+    },
+  );
+
+  it.each([
+    "missing event",
+    "conflicting events",
+    "incomplete pagination",
+    "truncated event",
+    "wrong account",
+    "wrong Region",
+    "wrong instance",
+    "wrong lease tags",
+    "wrong key",
+    "missing provider-key tag",
+    "access denied",
+    "network failure",
+    "oversized response",
+  ])("refuses AWS legacy recovery with %s and preserves cleanup evidence", async (failure) => {
+    const f = awsLegacyRecoveryFixture();
+    const before = structuredClone(f.storage.value(`lease:${f.lease.id}`));
+    switch (failure) {
+      case "missing event":
+        f.state.lookupBody = JSON.stringify({ Events: [] });
+        break;
+      case "conflicting events":
+      case "incomplete pagination": {
+        const events = [
+          f.event,
+          ...(failure === "conflicting events"
+            ? [{ ...f.event, eventID: "00000000-0000-4000-8000-000000000002" }]
+            : []),
+        ];
+        f.state.lookupBody = JSON.stringify({
+          Events: events.map((event) => ({
+            EventName: event.eventName,
+            EventSource: event.eventSource,
+            EventId: event.eventID,
+            CloudTrailEvent: JSON.stringify(event),
+          })),
+          ...(failure === "incomplete pagination" ? { NextToken: "repeated-token" } : {}),
+        });
+        break;
+      }
+      case "truncated event":
+        f.state.event = { ...f.event, responseElements: null };
+        break;
+      case "wrong account":
+        f.state.event = { ...f.event, recipientAccountId: "999999999999" };
+        break;
+      case "wrong Region":
+        f.state.event = { ...f.event, awsRegion: "us-east-1" };
+        break;
+      case "wrong instance":
+        f.state.event = {
+          ...f.event,
+          responseElements: { instancesSet: { items: [{ instanceId: "i-99999999999999999" }] } },
+        };
+        break;
+      case "wrong lease tags":
+        f.state.event = {
+          ...f.event,
+          requestParameters: { ...f.event.requestParameters, tagSpecificationSet: { items: [] } },
+        };
+        break;
+      case "wrong key":
+        f.state.event = {
+          ...f.event,
+          requestParameters: { ...f.event.requestParameters, keyName: "foreign-key" },
+        };
+        break;
+      case "missing provider-key tag":
+        f.state.event = {
+          ...f.event,
+          requestParameters: {
+            ...f.event.requestParameters,
+            tagSpecificationSet: {
+              items: f.event.requestParameters.tagSpecificationSet.items.map((item) => ({
+                ...item,
+                tags: item.tags.filter((tag) => tag.key !== "provider_key"),
+              })),
+            },
+          },
+        };
+        break;
+      case "access denied":
+        f.state.lookupStatus = 403;
+        break;
+      case "network failure":
+        f.state.lookupError = true;
+        break;
+      case "oversized response":
+        f.state.lookupBody = "x".repeat(2 * 1024 * 1024 + 1);
+        break;
+    }
+    const response = await f.inspect();
+    expect(response.status).not.toBe(200);
+    expect(await response.text()).not.toContain("private-bootstrap-canary");
+    expect(f.storage.value(`lease:${f.lease.id}`)).toEqual(before);
+    expect(f.storage.value(`aws-cleanup-recovery-audit:${f.lease.id}`)).toBeUndefined();
+    expect(f.actions).not.toContain("DeleteKeyPair");
+  });
+
+  it("uses one AWS credential snapshot for STS, CloudTrail, and current instance absence", async () => {
+    const f = awsLegacyRecoveryFixture();
+    expect((await f.inspect()).status).toBe(200);
+    expect(f.actions).toEqual(["GetCallerIdentity", "LookupEvents", "DescribeInstances"]);
+    expect(f.credentials).toHaveBeenCalledOnce();
+    expect(f.credentialKeys).toEqual(["test-1", "test-1", "test-1"]);
+  });
+
+  it("revalidates AWS allocation evidence instead of trusting an inspected fingerprint", async () => {
+    const f = awsLegacyRecoveryFixture();
+    const response = await f.inspect();
+    expect(response.status).toBe(200);
+    const { inspection } = (await response.json()) as { inspection: { claimFingerprint: string } };
+    const before = structuredClone(f.storage.value(`lease:${f.lease.id}`));
+    f.state.event = { ...f.event, recipientAccountId: "999999999999" };
+    expect((await f.recover(inspection.claimFingerprint)).status).toBe(409);
+    expect(f.actions.filter((action) => action === "LookupEvents")).toHaveLength(2);
+    expect(f.storage.value(`lease:${f.lease.id}`)).toEqual(before);
+    expect(f.storage.value(`aws-cleanup-recovery-audit:${f.lease.id}`)).toBeUndefined();
+  });
+
+  it.each([
+    "key replacement",
+    "active allocation",
+    "active cleanup",
+    "completed cleanup",
+    "retained disposition",
+    "audit transaction failure",
+  ])("fences AWS recovery after refreshed reads observe %s", async (change) => {
+    const f = awsLegacyRecoveryFixture();
+    const response = await f.inspect();
+    expect(response.status).toBe(200);
+    const { inspection } = (await response.json()) as {
+      inspection: { claimFingerprint: string };
+    };
+    const key = `lease:${f.lease.id}`;
+    f.state.beforeLookup = () => {
+      if (change === "audit transaction failure") {
+        f.storage.beforePut = async (writtenKey, value) => {
+          if (writtenKey === key && (value as LeaseRecord).providerScope)
+            throw new Error("synthetic storage unavailable");
+        };
+      } else {
+        f.storage.seed(key, {
+          ...f.storage.value<LeaseRecord>(key)!,
+          ...(change === "key replacement" ? { providerKey: "replacement-key" } : {}),
+          ...(change === "active allocation"
+            ? { provisioningRequestStartedAt: new Date().toISOString() }
+            : {}),
+          ...(change === "active cleanup" ? { cleanupStartedAt: new Date().toISOString() } : {}),
+          ...(change === "retained disposition" ? { releaseDeletesServer: false } : {}),
+          ...(change === "completed cleanup"
+            ? { cleanupCompletedAt: new Date().toISOString() }
+            : {}),
+        });
+      }
+    };
+    const recovery = await f.recover(inspection.claimFingerprint);
+    expect(recovery.status).not.toBe(200);
+    expect(f.storage.value<LeaseRecord>(key)?.providerScope).toBeUndefined();
+    expect(Boolean(f.storage.value<LeaseRecord>(key)?.cleanupCompletedAt)).toBe(
+      change === "completed cleanup",
+    );
+    expect(f.storage.value(`aws-cleanup-recovery-audit:${f.lease.id}`)).toBeUndefined();
+    expect(f.actions).not.toContain("DeleteKeyPair");
+  });
+
   it("completes matching account-bound AWS cleanup when the historical instance lookup is empty", async () => {
     const credentials = vi.fn<
       () => Promise<{ accessKeyId: string; secretAccessKey: string; sessionToken: string }>
@@ -50042,6 +50340,172 @@ async function requestBodyForTest(input: RequestInfo | URL, init?: RequestInit):
     return await input.clone().text();
   }
   return "";
+}
+
+function awsLegacyRecoveryFixture(keep = false) {
+  const storage = new MemoryStorage();
+  const lease = testLease({
+    id: "cbx_abcdef123456",
+    provider: "aws",
+    cloudID: "i-0123456789abcdef0",
+    owner: "alice@example.com",
+    org: "example-org",
+    slug: "blue-lobster",
+    region: "eu-west-1",
+    providerScope: undefined,
+    providerKey: "crabbox-cbx-abcdef123456",
+    providerKeyCleanupOwned: true,
+    state: "released",
+    keep,
+    releaseDeletesServer: true,
+    createdAt: new Date(Date.now() - 60_000).toISOString(),
+    releasedAt: new Date(Date.now() - 30_000).toISOString(),
+    expiresAt: new Date(Date.now() - 30_000).toISOString(),
+    cleanupError: "prior instance observation failed",
+    cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+    sshHostKey: "ssh-ed25519 synthetic-host-key",
+    providerAccessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+  const event = {
+    eventID: "00000000-0000-4000-8000-000000000001",
+    eventTime: new Date(Date.now() - 45_000).toISOString(),
+    eventName: "RunInstances",
+    eventSource: "ec2.amazonaws.com",
+    eventType: "AwsApiCall",
+    recipientAccountId: "123456789012",
+    awsRegion: "eu-west-1",
+    requestParameters: {
+      keyName: lease.providerKey,
+      userData: "private-bootstrap-canary",
+      tagSpecificationSet: {
+        items: [
+          {
+            resourceType: "instance",
+            tags: [
+              { key: "crabbox", value: "true" },
+              { key: "created_by", value: "crabbox" },
+              { key: "lease", value: lease.id },
+              { key: "slug", value: lease.slug! },
+              { key: "provider", value: "aws" },
+              { key: "owner", value: "alice_example.com" },
+              { key: "provider_key", value: lease.providerKey },
+            ],
+          },
+        ],
+      },
+    },
+    responseElements: { instancesSet: { items: [{ instanceId: lease.cloudID }] } },
+  };
+  const state = {
+    event: event as unknown,
+    lookupStatus: 200,
+    lookupBody: undefined as string | undefined,
+    lookupError: false,
+    beforeLookup: undefined as (() => void) | undefined,
+    keyFailure: false,
+    keyDeleted: false,
+  };
+  const actions: string[] = [];
+  const credentialKeys: string[] = [];
+  const lookupAttributes: unknown[] = [];
+  const deletedKeyIDs: Array<string | null> = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const outgoing = input instanceof Request ? input : new Request(input, init);
+      credentialKeys.push(
+        /Credential=([^/]+)/.exec(outgoing.headers.get("authorization") ?? "")?.[1] ?? "",
+      );
+      if (outgoing.headers.get("x-amz-target")?.endsWith(".LookupEvents")) {
+        actions.push("LookupEvents");
+        const lookup = (await outgoing.json()) as Record<string, unknown>;
+        lookupAttributes.push(lookup.LookupAttributes);
+        state.beforeLookup?.();
+        if (state.lookupError) throw new Error("private-bootstrap-canary");
+        return new Response(
+          state.lookupBody ??
+            JSON.stringify({
+              Events: [
+                {
+                  EventName: "RunInstances",
+                  EventSource: "ec2.amazonaws.com",
+                  EventId: event.eventID,
+                  CloudTrailEvent: JSON.stringify(state.event),
+                },
+              ],
+            }),
+          { status: state.lookupStatus },
+        );
+      }
+      const params = new URLSearchParams(await outgoing.clone().text());
+      const action = params.get("Action") ?? "";
+      actions.push(action);
+      if (action === "GetCallerIdentity") return awsIdentityResponse("123456789012");
+      if (action === "DescribeInstances") return awsEmptyDescribeInstancesResponse();
+      if (action === "DescribeKeyPairs") {
+        if (state.keyDeleted)
+          return ec2XMLResponse(
+            "<Response><Errors><Error><Code>InvalidKeyPair.NotFound</Code></Error></Errors></Response>",
+            400,
+          );
+        return ec2XMLResponse(
+          `<DescribeKeyPairsResponse><keySet><item><keyPairId>key-0123456789abcdef0</keyPairId><keyName>${lease.providerKey}</keyName><tagSet><item><key>crabbox</key><value>true</value></item><item><key>created_by</key><value>crabbox</value></item><item><key>lease</key><value>${lease.id}</value></item></tagSet></item></keySet></DescribeKeyPairsResponse>`,
+        );
+      }
+      if (action === "DeleteKeyPair") {
+        deletedKeyIDs.push(params.get("KeyPairId"));
+        if (state.keyFailure)
+          return ec2XMLResponse(
+            "<Response><Errors><Error><Code>UnauthorizedOperation</Code></Error></Errors></Response>",
+            403,
+          );
+        state.keyDeleted = true;
+        return ec2XMLResponse("<DeleteKeyPairResponse />");
+      }
+      throw new Error(`unexpected fixture operation ${action}`);
+    }),
+  );
+  let credentialGeneration = 0;
+  const credentials = vi.fn<NonNullable<Env["awsCredentialProvider"]>>(async () => ({
+    accessKeyId: `test-${++credentialGeneration}`,
+    secretAccessKey: "test",
+  }));
+  const env = { awsCredentialProvider: credentials } as Env;
+  const provider = new AWSProvider(env, lease.region!, storage);
+  vi.spyOn(provider, "reconcileLeaseAccess").mockResolvedValue();
+  const fleet = testFleet(storage, { aws: provider }, env);
+  storage.seed(`lease:${lease.id}`, lease);
+  const headers = {
+    "x-crabbox-owner": lease.owner,
+    "x-crabbox-org": "example-org",
+    "x-crabbox-admin": "true",
+  };
+  const inspect = () => fleet.fetch(request("GET", `/v1/leases/${lease.id}/cleanup`, { headers }));
+  const recover = (claimFingerprint: string) =>
+    fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/cleanup`, {
+        headers,
+        body: {
+          action: "acknowledge-missing-resource",
+          expectedClaimFingerprint: claimFingerprint,
+        },
+      }),
+    );
+  return {
+    storage,
+    lease,
+    event,
+    state,
+    actions,
+    credentialKeys,
+    credentials,
+    lookupAttributes,
+    deletedKeyIDs,
+    fleet,
+    headers,
+    inspect,
+    recover,
+  };
 }
 
 function testFleet(
