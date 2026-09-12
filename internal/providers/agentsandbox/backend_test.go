@@ -895,7 +895,6 @@ func (e testExitError) ExitStatus() int {
 func TestRunExistingLeaseReadinessIsBounded(t *testing.T) {
 	cfg := testAgentSandboxConfig(t)
 	cfg.AgentSandbox.SandboxReadyTimeout = time.Minute
-	cfg.AgentSandbox.PodReadyTimeout = time.Millisecond
 	fake := readyFakeClient(cfg)
 	backend := testBackend(cfg, fake, nil, nil)
 	repo := testGitRepo(t)
@@ -916,6 +915,7 @@ func TestRunExistingLeaseReadinessIsBounded(t *testing.T) {
 	pod.Phase = "Pending"
 	pod.Ready = false
 	fake.pods[podKey] = []podState{pod}
+	backend.cfg.AgentSandbox.PodReadyTimeout = time.Millisecond
 	start := time.Now()
 	_, err = backend.Run(context.Background(), RunRequest{Repo: repo, ID: claim.LeaseID, NoSync: true, Command: []string{"true"}})
 	if err == nil || !strings.Contains(err.Error(), "readiness timed out") {
