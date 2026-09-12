@@ -10,24 +10,24 @@ import (
 
 // rejectIncompatibleSyncOptions keeps unsupported sync modes rejected before
 // archive preparation or provider work. ForceSyncLarge reaches the archive owner.
-func rejectIncompatibleSyncOptions(req RunRequest) error {
+func rejectIncompatibleSyncOptions(req core.RunRequest) error {
 	if req.SyncOnly {
-		return exit(2, "provider=tensorlake uses archive sync; --sync-only is not supported")
+		return core.Exit(2, "provider=tensorlake uses archive sync; --sync-only is not supported")
 	}
 	if req.ChecksumSync {
-		return exit(2, "provider=tensorlake uses archive sync; --checksum is not supported")
+		return core.Exit(2, "provider=tensorlake uses archive sync; --checksum is not supported")
 	}
 	return nil
 }
 
-func (b *tensorlakeBackend) prepareArchive(ctx context.Context, req RunRequest) (*core.PreparedArchive, error) {
+func (b *tensorlakeBackend) prepareArchive(ctx context.Context, req core.RunRequest) (*core.PreparedArchive, error) {
 	return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 		Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
 		TempPattern: "crabbox-tensorlake-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 	})
 }
 
-func (b *tensorlakeBackend) syncWorkspace(ctx context.Context, cli *tensorlakeCLI, sandboxID string, req RunRequest, workdir string, prepared ...*core.PreparedArchive) ([]timingPhase, time.Duration, error) {
+func (b *tensorlakeBackend) syncWorkspace(ctx context.Context, cli *tensorlakeCLI, sandboxID string, req core.RunRequest, workdir string, prepared ...*core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
 	var archive *core.PreparedArchive
 	if len(prepared) > 0 {
 		archive = prepared[0]
@@ -51,5 +51,5 @@ func (b *tensorlakeBackend) syncWorkspace(ctx context.Context, cli *tensorlakeCL
 }
 
 func (b *tensorlakeBackend) prepareWorkspace(ctx context.Context, cli *tensorlakeCLI, sandboxID, workdir string) error {
-	return cli.execShell(ctx, sandboxID, "mkdir -p "+shellQuote(workdir))
+	return cli.execShell(ctx, sandboxID, "mkdir -p "+core.ShellQuote(workdir))
 }

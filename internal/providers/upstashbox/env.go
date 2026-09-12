@@ -68,7 +68,7 @@ func uploadEnvProfile(ctx context.Context, client api, leaseID, boxID, slug stri
 	cleanup := func(cleanupCtx context.Context) error {
 		err := profile.Close(cleanupCtx, func(removeCtx context.Context, remotePath string) error {
 			return receipt.withUnchanged(removeCtx, func() error {
-				result, err := client.Exec(removeCtx, boxID, "rm -f "+shellQuote(remotePath), "")
+				result, err := client.Exec(removeCtx, boxID, "rm -f "+core.ShellQuote(remotePath), "")
 				if err != nil {
 					return err
 				}

@@ -15,21 +15,21 @@ import (
 )
 
 type backend struct {
-	spec ProviderSpec
-	cfg  Config
-	rt   Runtime
+	spec core.ProviderSpec
+	cfg  core.Config
+	rt   core.Runtime
 }
 
-func NewBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+func NewBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = providerName
 	return &backend{spec: spec, cfg: cfg, rt: rt}
 }
 
-func (b *backend) Spec() ProviderSpec { return b.spec }
+func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
-func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
+func (b *backend) Warmup(ctx context.Context, req core.WarmupRequest) error {
 	if req.ActionsRunner {
-		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
+		return core.Exit(2, "--actions-runner is not supported for provider=%s", providerName)
 	}
 	started := core.ClockNow(b.rt.Clock)
 	client, err := newAPI(b.cfg, b.rt)
@@ -53,7 +53,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	})
 }
 
-func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
 	workdir, validationErr := cleanWorkdir(workdir(b.cfg))
 	folder := ""
 	if validationErr == nil {
@@ -110,7 +110,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			}
 			command := intent.ShellSource()
 			if req.EnvSummary {
-				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+				core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
 			var closeCommand func(context.Context) error
 			if len(req.Env) > 0 {
@@ -140,7 +140,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	})
 }
 
-func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *backend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	_ = req
 	client, err := newAPI(b.cfg, b.rt)
 	if err != nil {
@@ -150,7 +150,7 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 	if err != nil {
 		return nil, err
 	}
-	servers := make([]Server, 0, len(boxes))
+	servers := make([]core.Server, 0, len(boxes))
 	for _, box := range boxes {
 		if isCrabboxBox(box) {
 			servers = append(servers, boxToServer(b.cfg, box))
@@ -159,18 +159,18 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 	return servers, nil
 }
 
-func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
-	servers, err := b.List(ctx, ListRequest{})
+func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
+	servers, err := b.List(ctx, core.ListRequest{})
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
-	return inventoryDoctorResult(providerName, len(servers)), nil
+	return core.InventoryDoctorResult(providerName, len(servers)), nil
 }
 
-func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, error) {
+func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
 	client, err := newAPI(b.cfg, b.rt)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	return shared.PollDelegatedStatus(ctx, shared.DelegatedStatusRequest{
 		ID:          req.ID,
@@ -198,12 +198,12 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 			}, nil
 		},
 		TimeoutError: func(boxID string) error {
-			return exit(5, "timed out waiting for upstash-box %s to become ready", boxID)
+			return core.Exit(5, "timed out waiting for upstash-box %s to become ready", boxID)
 		},
 	})
 }
 
-func (b *backend) Stop(ctx context.Context, req StopRequest) error {
+func (b *backend) Stop(ctx context.Context, req core.StopRequest) error {
 	client, err := newAPI(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -241,15 +241,15 @@ func (b *backend) deleteClaimedBox(ctx context.Context, client api, leaseID, box
 			return err
 		}
 		if box.ID != boxID || !isCrabboxBox(box) || boxLeaseID(box) != leaseID || boxSlug(leaseID, box) != slug {
-			return exit(2, "provider=%s box %s no longer matches its exact local ownership claim", providerName, boxID)
+			return core.Exit(2, "provider=%s box %s no longer matches its exact local ownership claim", providerName, boxID)
 		}
 		return client.DeleteBoxes(ctx, []string{boxID})
 	})
 }
 
-func (b *backend) createBox(ctx context.Context, client api, repo Repo, keep, reclaim bool, requestedSlug string) (string, boxData, string, error) {
+func (b *backend) createBox(ctx context.Context, client api, repo core.Repo, keep, reclaim bool, requestedSlug string) (string, boxData, string, error) {
 	leaseID := core.NewLeaseID()
-	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
+	slug, err := core.AllocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return "", boxData{}, "", err
 	}
@@ -279,14 +279,14 @@ func (b *backend) createBox(ctx context.Context, client api, repo Repo, keep, re
 func (b *backend) resolveBoxID(ctx context.Context, client api, id, repoRoot string, reclaim bool) (string, string, string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return "", "", "", exit(2, "provider=%s requires a Crabbox lease id, slug, or Upstash Box id", providerName)
+		return "", "", "", core.Exit(2, "provider=%s requires a Crabbox lease id, slug, or Upstash Box id", providerName)
 	}
-	if claim, ok, err := resolveLeaseClaim(id); err != nil {
+	if claim, ok, err := core.ResolveLeaseClaim(id); err != nil {
 		return "", "", "", err
 	} else if ok && claim.Provider == providerName {
 		if repoRoot == "" {
 			if strings.TrimSpace(claim.CloudID) == "" {
-				return "", "", "", exit(2, "provider=%s lease=%s has no exact local ownership claim for an immutable box ID", providerName, claim.LeaseID)
+				return "", "", "", core.Exit(2, "provider=%s lease=%s has no exact local ownership claim for an immutable box ID", providerName, claim.LeaseID)
 			}
 			return claim.LeaseID, claim.CloudID, claim.Slug, nil
 		}
@@ -332,7 +332,7 @@ func resolveBoxByLease(ctx context.Context, client api, leaseID string) (boxData
 			return box, nil
 		}
 	}
-	return boxData{}, exit(4, "upstash-box lease %q was not found", leaseID)
+	return boxData{}, core.Exit(4, "upstash-box lease %q was not found", leaseID)
 }
 
 func resolveBoxBySlug(ctx context.Context, client api, slug string) (boxData, error) {
@@ -345,18 +345,18 @@ func resolveBoxBySlug(ctx context.Context, client api, slug string) (boxData, er
 			return box, nil
 		}
 	}
-	return boxData{}, exit(4, "upstash-box %q was not found", slug)
+	return boxData{}, core.Exit(4, "upstash-box %q was not found", slug)
 }
 
-func boxToServer(cfg Config, box boxData) Server {
+func boxToServer(cfg core.Config, box boxData) core.Server {
 	leaseID := boxLeaseID(box)
-	labels := directLeaseLabels(cfg, leaseID, boxSlug(leaseID, box), providerName, "", box.KeepAlive, time.Now().UTC())
+	labels := core.DirectLeaseLabels(cfg, leaseID, boxSlug(leaseID, box), providerName, "", box.KeepAlive, time.Now().UTC())
 	labels["box_id"] = box.ID
 	labels["box_name"] = box.Name
 	labels["runtime"] = core.Blank(box.Runtime, runtimeName(cfg))
 	labels["size"] = core.Blank(box.Size, sizeName(cfg))
 	labels["state"] = box.Status
-	server := Server{
+	server := core.Server{
 		Provider: providerName,
 		CloudID:  box.ID,
 		Name:     core.Blank(box.Name, box.ID),
@@ -368,7 +368,7 @@ func boxToServer(cfg Config, box boxData) Server {
 	return server
 }
 
-func boxBaseHost(cfg Config) string {
+func boxBaseHost(cfg core.Config) string {
 	raw := core.Blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), core.UpstashBoxConfigDefaultBaseURL)
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" {
@@ -377,7 +377,7 @@ func boxBaseHost(cfg Config) string {
 	return parsed.Host
 }
 
-func upstashBoxClaimScope(cfg Config) string {
+func upstashBoxClaimScope(cfg core.Config) string {
 	raw := core.Blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), core.UpstashBoxConfigDefaultBaseURL)
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" {
@@ -406,7 +406,7 @@ func boxSlug(leaseID string, box boxData) string {
 	if match := boxNamePattern.FindStringSubmatch(strings.TrimSpace(box.Name)); len(match) == 3 {
 		return match[1]
 	}
-	return newLeaseSlug(leaseID)
+	return core.NewLeaseSlug(leaseID)
 }
 
 func statusReady(status string) bool {
@@ -426,38 +426,38 @@ func isNotFound(err error) bool {
 	return strings.Contains(msg, "404") || strings.Contains(msg, "not found")
 }
 
-func runtimeName(cfg Config) string {
+func runtimeName(cfg core.Config) string {
 	return core.Blank(strings.TrimSpace(cfg.UpstashBox.Runtime), core.UpstashBoxConfigDefaultRuntime)
 }
 
 func upstashBoxName(leaseID, slug string) string {
 	slug = strings.Trim(strings.ToLower(strings.TrimSpace(slug)), "-")
 	if slug == "" {
-		slug = newLeaseSlug(leaseID)
+		slug = core.NewLeaseSlug(leaseID)
 	}
 	return "crabbox-" + slug + "-" + strings.TrimPrefix(leaseID, "cbx_")
 }
 
-func sizeName(cfg Config) string {
+func sizeName(cfg core.Config) string {
 	return core.Blank(strings.TrimSpace(cfg.UpstashBox.Size), core.UpstashBoxConfigDefaultSize)
 }
 
-func workdir(cfg Config) string {
+func workdir(cfg core.Config) string {
 	return core.Blank(strings.TrimSpace(cfg.UpstashBox.Workdir), core.UpstashBoxConfigDefaultWorkdir)
 }
 
 func cleanWorkdir(workdir string) (string, error) {
 	trimmed := strings.TrimSpace(workdir)
 	if trimmed == "" {
-		return "", exit(2, "upstash-box workdir is empty")
+		return "", core.Exit(2, "upstash-box workdir is empty")
 	}
 	clean := path.Clean(trimmed)
 	if !strings.HasPrefix(clean, "/") {
-		return "", exit(2, "upstash-box workdir %q must resolve to an absolute path", workdir)
+		return "", core.Exit(2, "upstash-box workdir %q must resolve to an absolute path", workdir)
 	}
 	switch clean {
 	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var", "/workspace", "/workspace/home":
-		return "", exit(2, "upstash-box workdir %q is too broad; choose a dedicated subdirectory", clean)
+		return "", core.Exit(2, "upstash-box workdir %q is too broad; choose a dedicated subdirectory", clean)
 	}
 	return clean, nil
 }
@@ -471,7 +471,7 @@ func workspaceFolder(workdir string) (string, error) {
 	}
 	prefix := workspaceRoot + "/"
 	if !strings.HasPrefix(clean, prefix) {
-		return "", exit(2, "upstash-box workdir %q must be under %s", clean, workspaceRoot)
+		return "", core.Exit(2, "upstash-box workdir %q must be under %s", clean, workspaceRoot)
 	}
 	return strings.TrimPrefix(clean, prefix), nil
 }

@@ -65,10 +65,10 @@ const upstashBoxDefaultResponseHeaderTimeout = 30 * time.Second
 
 var upstashBoxCleanupTimeout = 15 * time.Second
 
-var newAPI = func(cfg Config, rt Runtime) (api, error) {
+var newAPI = func(cfg core.Config, rt core.Runtime) (api, error) {
 	apiKey := strings.TrimSpace(cfg.UpstashBox.APIKey)
 	if apiKey == "" {
-		return nil, exit(2, "provider=%s requires UPSTASH_BOX_API_KEY", providerName)
+		return nil, core.Exit(2, "provider=%s requires UPSTASH_BOX_API_KEY", providerName)
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
@@ -128,10 +128,10 @@ func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, err
 			return box, nil
 		}
 		if status == "error" || status == "failed" {
-			return boxData{}, c.cleanupCreatedBox(box.ID, exit(5, "upstash-box creation failed for %s", box.ID))
+			return boxData{}, c.cleanupCreatedBox(box.ID, core.Exit(5, "upstash-box creation failed for %s", box.ID))
 		}
 		if time.Now().After(deadline) {
-			return boxData{}, c.cleanupCreatedBox(box.ID, exit(5, "upstash-box creation timed out for %s status=%s", box.ID, core.Blank(box.Status, "unknown")))
+			return boxData{}, c.cleanupCreatedBox(box.ID, core.Exit(5, "upstash-box creation timed out for %s status=%s", box.ID, core.Blank(box.Status, "unknown")))
 		}
 		select {
 		case <-ctx.Done():
@@ -456,5 +456,5 @@ func commandExitError(prefix string, result execResult) error {
 	if msg == "" {
 		msg = "exit " + strconv.Itoa(result.ExitCode)
 	}
-	return exit(result.ExitCode, "%s: %s", prefix, msg)
+	return core.Exit(result.ExitCode, "%s: %s", prefix, msg)
 }

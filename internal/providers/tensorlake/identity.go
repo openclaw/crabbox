@@ -26,11 +26,11 @@ type sandboxBinding struct{ ID, Namespace, Scope string }
 func canonicalTensorlakeURL(value string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(value))
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || u.RawPath != "" {
-		return "", exit(2, "Tensorlake API URL must be an absolute URL without credentials, query, or fragment")
+		return "", core.Exit(2, "Tensorlake API URL must be an absolute URL without credentials, query, or fragment")
 	}
 	u.Scheme, u.Host = strings.ToLower(u.Scheme), strings.ToLower(u.Host)
 	if u.Scheme != "https" && u.Scheme != "http" {
-		return "", exit(2, "Tensorlake API URL requires HTTP or HTTPS")
+		return "", core.Exit(2, "Tensorlake API URL requires HTTP or HTTPS")
 	}
 	u.Path = strings.TrimRight(u.Path, "/")
 	u.RawPath = ""
@@ -58,7 +58,7 @@ func (c *tensorlakeCLI) control(ctx context.Context, args []string) (string, err
 		return "", err
 	}
 	const limit = 1024 * 1024
-	result, err := c.rt.Exec.Run(ctx, LocalCommandRequest{
+	result, err := c.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name: c.binary(), Args: append(c.globalArgs(), args...), Env: c.env(),
 		MaxCapturedOutputBytes: limit, CancelGracePeriod: time.Second,
 	})
@@ -66,7 +66,7 @@ func (c *tensorlakeCLI) control(ctx context.Context, args []string) (string, err
 		return "", ctx.Err()
 	}
 	if err != nil || result.ExitCode != 0 || len(result.Stdout) >= limit || len(result.Stderr) >= limit {
-		return "", exit(5, "Tensorlake ownership control command failed; verify authentication and native CLI support (response withheld)")
+		return "", core.Exit(5, "Tensorlake ownership control command failed; verify authentication and native CLI support (response withheld)")
 	}
 	return result.Stdout, nil
 }
@@ -87,24 +87,24 @@ func (c *tensorlakeCLI) observeScope(ctx context.Context) (string, error) {
 		} `json:"apiKey"`
 	}
 	if err := json.Unmarshal([]byte(out), &identity); err != nil {
-		return "", exit(5, "Tensorlake whoami did not return valid scope JSON; upgrade the native CLI")
+		return "", core.Exit(5, "Tensorlake whoami did not return valid scope JSON; upgrade the native CLI")
 	}
 	api, err := canonicalTensorlakeURL(identity.Endpoints.CloudAPI)
 	if err != nil {
-		return "", exit(5, "Tensorlake whoami returned an invalid cloud API scope")
+		return "", core.Exit(5, "Tensorlake whoami returned an invalid cloud API scope")
 	}
 	sandboxAPI, err := canonicalTensorlakeURL(identity.Endpoints.SandboxAPI)
 	if err != nil {
-		return "", exit(5, "Tensorlake whoami returned an invalid sandbox API scope")
+		return "", core.Exit(5, "Tensorlake whoami returned an invalid sandbox API scope")
 	}
 	if api != c.cfg.Tensorlake.APIURL || !validScopeValue(identity.APIKey.Organization) || !validScopeValue(identity.APIKey.Project) {
-		return "", exit(2, "Tensorlake ownership requires a verified API endpoint and API-key organization/project scope")
+		return "", core.Exit(2, "Tensorlake ownership requires a verified API endpoint and API-key organization/project scope")
 	}
 	if org := strings.TrimSpace(c.cfg.Tensorlake.OrganizationID); org != "" && org != identity.APIKey.Organization {
-		return "", exit(2, "Tensorlake API-key organization differs from the configured organization")
+		return "", core.Exit(2, "Tensorlake API-key organization differs from the configured organization")
 	}
 	if project := strings.TrimSpace(c.cfg.Tensorlake.ProjectID); project != "" && project != identity.APIKey.Project {
-		return "", exit(2, "Tensorlake API-key project differs from the configured project")
+		return "", core.Exit(2, "Tensorlake API-key project differs from the configured project")
 	}
 	data, err := json.Marshal(tensorlakeScope{api, sandboxAPI, identity.APIKey.Organization, identity.APIKey.Project, c.cfg.Tensorlake.Namespace})
 	return string(data), err
@@ -122,13 +122,13 @@ func parseSandboxIdentity(out string) (sandboxIdentity, error) {
 		}
 		key = strings.TrimSpace(key)
 		if seen[key] {
-			return sandboxIdentity{}, exit(5, "Tensorlake describe returned duplicate identity fields")
+			return sandboxIdentity{}, core.Exit(5, "Tensorlake describe returned duplicate identity fields")
 		}
 		seen[key] = true
 		*field = strings.TrimSpace(value)
 	}
 	if !isLikelySandboxID(item.ID) || !validScopeValue(item.Namespace) || !validScopeValue(item.State) {
-		return sandboxIdentity{}, exit(5, "Tensorlake describe did not return an exact sandbox ID, namespace, and state")
+		return sandboxIdentity{}, core.Exit(5, "Tensorlake describe did not return an exact sandbox ID, namespace, and state")
 	}
 	item.State = strings.ToLower(item.State)
 	return item, nil
@@ -136,7 +136,7 @@ func parseSandboxIdentity(out string) (sandboxIdentity, error) {
 
 func (c *tensorlakeCLI) inspectIdentity(ctx context.Context, id string) (sandboxIdentity, error) {
 	if !isLikelySandboxID(id) {
-		return sandboxIdentity{}, exit(2, "Tensorlake ownership requires a canonical sandbox ID")
+		return sandboxIdentity{}, core.Exit(2, "Tensorlake ownership requires a canonical sandbox ID")
 	}
 	out, err := c.control(ctx, []string{"sbx", "describe", id})
 	if err != nil {
@@ -147,7 +147,7 @@ func (c *tensorlakeCLI) inspectIdentity(ctx context.Context, id string) (sandbox
 		return sandboxIdentity{}, err
 	}
 	if item.ID != id {
-		return sandboxIdentity{}, exit(2, "Tensorlake describe returned a different sandbox ID")
+		return sandboxIdentity{}, core.Exit(2, "Tensorlake describe returned a different sandbox ID")
 	}
 	return item, nil
 }
@@ -157,7 +157,7 @@ func bindingForClaim(claim core.LeaseClaim) (shared.ClaimBinding, sandboxBinding
 	want := shared.ClaimBinding{Provider: providerName, LeaseID: leasePrefix + claim.CloudID, Slug: claim.Slug, CloudID: claim.CloudID, ProviderScope: claim.ProviderScope, ExactProviderScope: true, RequiredLabels: map[string]string{"tensorlake_namespace": binding.Namespace}}
 	var scope tensorlakeScope
 	if !isLikelySandboxID(binding.ID) || !validScopeValue(binding.Namespace) || claim.Slug == "" || json.Unmarshal([]byte(binding.Scope), &scope) != nil || scope.APIURL == "" || scope.SandboxAPIURL == "" || !validScopeValue(scope.Organization) || !validScopeValue(scope.Project) || !validScopeValue(scope.Namespace) {
-		return want, binding, exit(2, "Tensorlake lease %q has no exact resource/account binding; retain the sandbox, inspect it with tensorlake sbx describe, and use manual cleanup or create a new lease; --reclaim cannot adopt legacy ownership", claim.LeaseID)
+		return want, binding, core.Exit(2, "Tensorlake lease %q has no exact resource/account binding; retain the sandbox, inspect it with tensorlake sbx describe, and use manual cleanup or create a new lease; --reclaim cannot adopt legacy ownership", claim.LeaseID)
 	}
 	return want, binding, shared.ValidateClaimBinding(claim, want)
 }
@@ -168,14 +168,14 @@ func (c *tensorlakeCLI) verifyBinding(ctx context.Context, binding sandboxBindin
 		return sandboxIdentity{}, err
 	}
 	if scope != binding.Scope {
-		return sandboxIdentity{}, exit(2, "Tensorlake API/account/namespace scope changed; retaining sandbox ownership")
+		return sandboxIdentity{}, core.Exit(2, "Tensorlake API/account/namespace scope changed; retaining sandbox ownership")
 	}
 	item, err := c.inspectIdentity(ctx, binding.ID)
 	if err != nil {
 		return sandboxIdentity{}, err
 	}
 	if item.Namespace != binding.Namespace {
-		return sandboxIdentity{}, exit(2, "Tensorlake sandbox namespace changed; retaining sandbox ownership")
+		return sandboxIdentity{}, core.Exit(2, "Tensorlake sandbox namespace changed; retaining sandbox ownership")
 	}
 	return item, nil
 }

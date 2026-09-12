@@ -11,11 +11,11 @@ import (
 // Deploy tokens are sourced from FASTAPI_CLOUD_TOKEN /
 // CRABBOX_FASTAPI_CLOUD_TOKEN so they are not passed as command-line
 // arguments.
-func RegisterFastAPICloudProviderFlags(fs *flag.FlagSet, defaults Config) any {
+func RegisterFastAPICloudProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return core.RegisterFastAPICloudConfigFlags(fs, defaults.FastAPICloud)
 }
 
-func ApplyFastAPICloudProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+func ApplyFastAPICloudProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
 			return err

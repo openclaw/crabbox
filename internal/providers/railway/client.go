@@ -154,18 +154,18 @@ func (s railwayDeploymentStatus) ExitCode() int {
 	return 1
 }
 
-func newRailwayClient(cfg Config, rt Runtime) (railwayAPI, error) {
+func newRailwayClient(cfg core.Config, rt core.Runtime) (railwayAPI, error) {
 	apiToken := strings.TrimSpace(cfg.Railway.APIToken)
 	if apiToken == "" {
-		return nil, exit(2, "provider=%s requires RAILWAY_API_TOKEN", providerName)
+		return nil, core.Exit(2, "provider=%s requires RAILWAY_API_TOKEN", providerName)
 	}
 	apiURL := strings.TrimRight(strings.TrimSpace(core.Blank(cfg.Railway.APIURL, core.RailwayConfigDefaultAPIURL)), "/")
 	parsed, err := url.Parse(apiURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return nil, exit(2, "%s url %q is invalid", providerName, apiURL)
+		return nil, core.Exit(2, "%s url %q is invalid", providerName, apiURL)
 	}
 	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
-		return nil, exit(2, "%s url %q must use https unless it targets localhost", providerName, apiURL)
+		return nil, core.Exit(2, "%s url %q must use https unless it targets localhost", providerName, apiURL)
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
