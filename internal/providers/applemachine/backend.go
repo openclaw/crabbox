@@ -34,7 +34,7 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	if err := requireHost(); err != nil {
 		return DoctorResult{}, err
 	}
-	result, err := b.rt.Exec.Run(ctx, LocalCommandRequest{Name: blank(b.cfg.AppleContainer.CLIPath, "container"), Args: []string{"--version"}})
+	result, err := b.rt.Exec.Run(ctx, LocalCommandRequest{Name: core.Blank(b.cfg.AppleContainer.CLIPath, "container"), Args: []string{"--version"}})
 	if err != nil {
 		return DoctorResult{}, exit(3, "Apple container CLI unavailable: %s", failureDetail(result, err))
 	}
@@ -418,7 +418,7 @@ func machineName(leaseID string) string {
 func machineServer(item machine, leaseID, slug string, cfg Config) Server {
 	labels := map[string]string{"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": slug, "target": targetLinux}
 	server := Server{Provider: providerName, CloudID: item.ID, Name: item.ID, Status: item.Status, Labels: labels}
-	server.ServerType.Name = blank(cfg.AppleContainer.Image, "ubuntu:26.04")
+	server.ServerType.Name = core.Blank(cfg.AppleContainer.Image, "ubuntu:26.04")
 	return server
 }
 

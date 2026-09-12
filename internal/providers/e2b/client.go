@@ -96,11 +96,11 @@ var newE2BClient = func(cfg Config, rt Runtime) (e2bAPI, error) {
 		return nil, exit(2, "provider=e2b requires E2B_API_KEY")
 	}
 	httpClient, envdClient := shared.ControlAndDataHTTPClients(rt.HTTP, e2bControlTimeout)
-	apiURL, err := validateE2BAPIURL(blank(cfg.E2B.APIURL, core.E2BConfigDefaultAPIURL))
+	apiURL, err := validateE2BAPIURL(core.Blank(cfg.E2B.APIURL, core.E2BConfigDefaultAPIURL))
 	if err != nil {
 		return nil, err
 	}
-	domain := strings.TrimSpace(blank(cfg.E2B.Domain, core.E2BConfigDefaultDomain))
+	domain := strings.TrimSpace(core.Blank(cfg.E2B.Domain, core.E2BConfigDefaultDomain))
 	return &e2bClient{
 		apiKey:     apiKey,
 		apiURL:     apiURL,

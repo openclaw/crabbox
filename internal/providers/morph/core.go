@@ -45,10 +45,6 @@ func asExitError(err error, target *ExitError) bool {
 	return core.AsExitError(err, target)
 }
 
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
-}
-
 func newLeaseID() string {
 	return core.NewLeaseID()
 }

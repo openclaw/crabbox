@@ -159,7 +159,7 @@ func newRailwayClient(cfg Config, rt Runtime) (railwayAPI, error) {
 	if apiToken == "" {
 		return nil, exit(2, "provider=%s requires RAILWAY_API_TOKEN", providerName)
 	}
-	apiURL := strings.TrimRight(strings.TrimSpace(blank(cfg.Railway.APIURL, core.RailwayConfigDefaultAPIURL)), "/")
+	apiURL := strings.TrimRight(strings.TrimSpace(core.Blank(cfg.Railway.APIURL, core.RailwayConfigDefaultAPIURL)), "/")
 	parsed, err := url.Parse(apiURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return nil, exit(2, "%s url %q is invalid", providerName, apiURL)

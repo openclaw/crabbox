@@ -90,7 +90,3 @@ func cloudflareSandboxCleanupCommand(leaseID string) string {
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
 	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
 }
-
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
-}

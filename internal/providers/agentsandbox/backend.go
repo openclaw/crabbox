@@ -560,13 +560,13 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 					return nil
 				}
 				if req.DryRun {
-					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing claim\n", claim.LeaseID, blank(claim.Slug, "-"))
+					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing claim\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 					return nil
 				}
 				if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 					return err
 				}
-				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing claim\n", claim.LeaseID, blank(claim.Slug, "-"))
+				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing claim\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 				claimRemovedOne = true
 				return nil
 			}
@@ -897,12 +897,12 @@ func (b *backend) claimIdentityForLiveClaim(claim LeaseClaim, live *kubernetesOb
 	}
 	expectedName := claimName(claim.LeaseID, claim.Slug)
 	if got := strings.TrimSpace(claimNameFromLocalClaim(claim)); got != expectedName {
-		return LeaseClaim{}, claimIdentity{}, exit(4, "agent-sandbox recovery lease %s claim name changed from %s to %s", claim.LeaseID, expectedName, blank(got, "<empty>"))
+		return LeaseClaim{}, claimIdentity{}, exit(4, "agent-sandbox recovery lease %s claim name changed from %s to %s", claim.LeaseID, expectedName, core.Blank(got, "<empty>"))
 	}
 	if live == nil || strings.TrimSpace(live.Metadata.Name) != expectedName {
 		got := "<empty>"
 		if live != nil {
-			got = blank(strings.TrimSpace(live.Metadata.Name), "<empty>")
+			got = core.Blank(strings.TrimSpace(live.Metadata.Name), "<empty>")
 		}
 		return LeaseClaim{}, claimIdentity{}, exit(4, "agent-sandbox recovery lease %s expected claim %s, got %s", claim.LeaseID, expectedName, got)
 	}
@@ -989,15 +989,15 @@ func validateClaimIdentity(obj *kubernetesObject, identity claimIdentity) error 
 		return resourceIdentityError{err: exit(4, "agent-sandbox lease %s has no pinned SandboxWarmPool", identity.LeaseID)}
 	}
 	if got := strings.TrimSpace(obj.Metadata.UID); got != identity.UID {
-		return resourceIdentityError{err: exit(4, "agent-sandbox SandboxClaim %s UID changed from %s to %s", obj.Metadata.Name, identity.UID, blank(got, "<empty>"))}
+		return resourceIdentityError{err: exit(4, "agent-sandbox SandboxClaim %s UID changed from %s to %s", obj.Metadata.Name, identity.UID, core.Blank(got, "<empty>"))}
 	}
 	if got := sandboxClaimWarmPool(obj); got != identity.WarmPool {
-		return resourceIdentityError{err: exit(4, "agent-sandbox SandboxClaim %s warm pool changed from %s to %s", obj.Metadata.Name, identity.WarmPool, blank(got, "<empty>"))}
+		return resourceIdentityError{err: exit(4, "agent-sandbox SandboxClaim %s warm pool changed from %s to %s", obj.Metadata.Name, identity.WarmPool, core.Blank(got, "<empty>"))}
 	}
 	if identity.ExpiresAt != "" {
 		shutdownTime, shutdownPolicy := sandboxClaimLifecycle(obj)
 		if shutdownTime != identity.ExpiresAt || shutdownPolicy != "Retain" {
-			return resourceIdentityError{err: exit(4, "agent-sandbox SandboxClaim %s lifecycle changed from shutdownTime=%s shutdownPolicy=Retain to shutdownTime=%s shutdownPolicy=%s", obj.Metadata.Name, identity.ExpiresAt, blank(shutdownTime, "<empty>"), blank(shutdownPolicy, "<empty>"))}
+			return resourceIdentityError{err: exit(4, "agent-sandbox SandboxClaim %s lifecycle changed from shutdownTime=%s shutdownPolicy=Retain to shutdownTime=%s shutdownPolicy=%s", obj.Metadata.Name, identity.ExpiresAt, core.Blank(shutdownTime, "<empty>"), core.Blank(shutdownPolicy, "<empty>"))}
 		}
 	}
 	if err := validateClaimOwnership(obj, identity.LeaseID, identity.ProviderScope); err != nil {
@@ -1017,7 +1017,7 @@ func validateClaimRecoveryNonce(obj *kubernetesObject, expected string) error {
 	if got != expected {
 		name := "<missing>"
 		if obj != nil {
-			name = blank(strings.TrimSpace(obj.Metadata.Name), "<missing>")
+			name = core.Blank(strings.TrimSpace(obj.Metadata.Name), "<missing>")
 		}
 		return resourceIdentityError{err: exit(4, "agent-sandbox SandboxClaim %s recovery nonce changed", name)}
 	}

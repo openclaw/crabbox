@@ -274,7 +274,7 @@ func validateFixedMachine0Ownership(claim LeaseClaim, item machine) error {
 		return exit(4, "lease_id_conflict: Machine0 machine %s has no durable create attempt", item.Name)
 	}
 	if strings.TrimSpace(item.ID) == "" || (claim.CloudID != "" && item.ID != claim.CloudID) {
-		return exit(4, "lease_id_conflict: fixed lease %s machine %s does not match acquired CloudID %s", claim.LeaseID, blank(item.ID, "<empty>"), blank(claim.CloudID, "<empty>"))
+		return exit(4, "lease_id_conflict: fixed lease %s machine %s does not match acquired CloudID %s", claim.LeaseID, core.Blank(item.ID, "<empty>"), core.Blank(claim.CloudID, "<empty>"))
 	}
 	if strings.TrimSpace(attempt.Key) != "" && (item.Key == nil || strings.TrimSpace(item.Key.Name) != strings.TrimSpace(attempt.Key)) {
 		return exit(4, "lease_id_conflict: Machine0 machine detail for fixed lease %s does not match its durable selected SSH key %q", claim.LeaseID, attempt.Key)

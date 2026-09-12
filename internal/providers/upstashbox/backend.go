@@ -351,23 +351,23 @@ func boxToServer(cfg Config, box boxData) Server {
 	labels := directLeaseLabels(cfg, leaseID, boxSlug(leaseID, box), providerName, "", box.KeepAlive, time.Now().UTC())
 	labels["box_id"] = box.ID
 	labels["box_name"] = box.Name
-	labels["runtime"] = blank(box.Runtime, runtimeName(cfg))
-	labels["size"] = blank(box.Size, sizeName(cfg))
+	labels["runtime"] = core.Blank(box.Runtime, runtimeName(cfg))
+	labels["size"] = core.Blank(box.Size, sizeName(cfg))
 	labels["state"] = box.Status
 	server := Server{
 		Provider: providerName,
 		CloudID:  box.ID,
-		Name:     blank(box.Name, box.ID),
+		Name:     core.Blank(box.Name, box.ID),
 		Status:   box.Status,
 		Labels:   labels,
 	}
-	server.ServerType.Name = blank(box.Size, sizeName(cfg))
+	server.ServerType.Name = core.Blank(box.Size, sizeName(cfg))
 	server.PublicNet.IPv4.IP = boxBaseHost(cfg)
 	return server
 }
 
 func boxBaseHost(cfg Config) string {
-	raw := blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), core.UpstashBoxConfigDefaultBaseURL)
+	raw := core.Blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), core.UpstashBoxConfigDefaultBaseURL)
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" {
 		return raw
@@ -376,7 +376,7 @@ func boxBaseHost(cfg Config) string {
 }
 
 func upstashBoxClaimScope(cfg Config) string {
-	raw := blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), core.UpstashBoxConfigDefaultBaseURL)
+	raw := core.Blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), core.UpstashBoxConfigDefaultBaseURL)
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" {
 		return "endpoint:" + strings.TrimRight(raw, "/")
@@ -425,7 +425,7 @@ func isNotFound(err error) bool {
 }
 
 func runtimeName(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.UpstashBox.Runtime), core.UpstashBoxConfigDefaultRuntime)
+	return core.Blank(strings.TrimSpace(cfg.UpstashBox.Runtime), core.UpstashBoxConfigDefaultRuntime)
 }
 
 func upstashBoxName(leaseID, slug string) string {
@@ -437,11 +437,11 @@ func upstashBoxName(leaseID, slug string) string {
 }
 
 func sizeName(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.UpstashBox.Size), core.UpstashBoxConfigDefaultSize)
+	return core.Blank(strings.TrimSpace(cfg.UpstashBox.Size), core.UpstashBoxConfigDefaultSize)
 }
 
 func workdir(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.UpstashBox.Workdir), core.UpstashBoxConfigDefaultWorkdir)
+	return core.Blank(strings.TrimSpace(cfg.UpstashBox.Workdir), core.UpstashBoxConfigDefaultWorkdir)
 }
 
 func cleanWorkdir(workdir string) (string, error) {

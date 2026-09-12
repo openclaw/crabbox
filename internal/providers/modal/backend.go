@@ -390,11 +390,11 @@ func modalSandboxToServer(sandbox modalSandbox) Server {
 	server := Server{
 		Provider: providerName,
 		CloudID:  sandbox.ID,
-		Name:     blank(sandbox.Name, sandbox.ID),
+		Name:     core.Blank(sandbox.Name, sandbox.ID),
 		Status:   sandbox.Status,
 		Labels:   labels,
 	}
-	server.ServerType.Name = blank(labels["image"], "python:3.13-slim")
+	server.ServerType.Name = core.Blank(labels["image"], "python:3.13-slim")
 	return server
 }
 
@@ -402,7 +402,7 @@ func modalStatusView(leaseID, slug string, sandbox modalSandbox) StatusView {
 	server := modalSandboxToServer(sandbox)
 	return StatusView{
 		ID:         leaseID,
-		Slug:       blank(slug, modalSlug(leaseID, sandbox)),
+		Slug:       core.Blank(slug, modalSlug(leaseID, sandbox)),
 		Provider:   providerName,
 		TargetOS:   targetLinux,
 		State:      sandbox.Status,
@@ -442,15 +442,15 @@ func isCrabboxModalSandbox(sandbox modalSandbox) bool {
 }
 
 func modalApp(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Modal.App), core.ModalConfigDefaultApp)
+	return core.Blank(strings.TrimSpace(cfg.Modal.App), core.ModalConfigDefaultApp)
 }
 
 func modalImage(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Modal.Image), core.ModalConfigDefaultImage)
+	return core.Blank(strings.TrimSpace(cfg.Modal.Image), core.ModalConfigDefaultImage)
 }
 
 func modalWorkdir(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Modal.Workdir), core.ModalConfigDefaultWorkdir)
+	return core.Blank(strings.TrimSpace(cfg.Modal.Workdir), core.ModalConfigDefaultWorkdir)
 }
 
 func cleanModalWorkdir(workdir string) (string, error) {

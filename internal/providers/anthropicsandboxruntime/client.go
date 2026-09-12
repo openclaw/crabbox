@@ -24,7 +24,7 @@ func newSRTCLI(cfg Config, rt Runtime) (*srtCLI, error) {
 }
 
 func (c *srtCLI) binary() string {
-	return blank(strings.TrimSpace(c.cfg.AnthropicSRT.CLIPath), core.AnthropicSRTConfigDefaultCLIPath)
+	return core.Blank(strings.TrimSpace(c.cfg.AnthropicSRT.CLIPath), core.AnthropicSRTConfigDefaultCLIPath)
 }
 
 func (c *srtCLI) baseArgs() []string {

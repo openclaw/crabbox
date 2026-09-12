@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	core "github.com/openclaw/crabbox/internal/cli"
 	"io"
 	"os/exec"
 	"regexp"
@@ -173,7 +174,7 @@ func (c *client) run(ctx context.Context, args ...string) (LocalCommandResult, e
 	if strings.Contains(lower, "not logged in") || strings.Contains(lower, "not authenticated") || strings.Contains(lower, "unauthorized") {
 		return result, exit(3, "Machine0 authentication is required; run `machine0 login` or set MACHINE0_API_TOKEN: %s", detail)
 	}
-	return result, exit(5, "machine0 %s failed: %s", strings.Join(args, " "), blank(detail, "unknown error"))
+	return result, exit(5, "machine0 %s failed: %s", strings.Join(args, " "), core.Blank(detail, "unknown error"))
 }
 
 func (c *client) runRead(ctx context.Context, args ...string) (LocalCommandResult, error) {
@@ -369,7 +370,7 @@ func (c *client) SelectedKey(ctx context.Context, name string) (*machineKey, err
 		return nil, exit(5, "parse machine0 keys get %s --json: %v", name, err)
 	}
 	if strings.TrimSpace(key.Name) != name {
-		return nil, exit(5, "machine0 key lookup returned mismatched key name: expected %s, found %s", name, blank(key.Name, "<empty>"))
+		return nil, exit(5, "machine0 key lookup returned mismatched key name: expected %s, found %s", name, core.Blank(key.Name, "<empty>"))
 	}
 	return &key, nil
 }

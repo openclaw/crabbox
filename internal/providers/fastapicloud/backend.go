@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strings"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -139,7 +140,7 @@ func fastAPICloudServer(app fastAPICloudApp) Server {
 	return Server{
 		CloudID:  app.ID,
 		Provider: providerName,
-		Name:     blank(app.Name, app.Slug),
+		Name:     core.Blank(app.Name, app.Slug),
 		Labels:   fastAPICloudLabels(app, fastAPICloudDeployment{}, false),
 	}
 }

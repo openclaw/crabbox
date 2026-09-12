@@ -395,7 +395,7 @@ func (b *azureDynamicSessionsBackend) sessionToServer(session azureDynamicSessio
 		"lease":    identifier,
 		"slug":     normalizeLeaseSlug(slug),
 		"target":   targetLinux,
-		"state":    blank(status, "ready"),
+		"state":    core.Blank(status, "ready"),
 	}
 	if claim.RepoRoot != "" {
 		labels["claimed"] = "true"
@@ -407,7 +407,7 @@ func (b *azureDynamicSessionsBackend) sessionToServer(session azureDynamicSessio
 		Provider: providerName,
 		CloudID:  identifier,
 		Name:     identifier,
-		Status:   blank(status, "ready"),
+		Status:   core.Blank(status, "ready"),
 		Labels:   labels,
 	}
 	server.ServerType.Name = "custom-container"
@@ -421,7 +421,7 @@ func (b *azureDynamicSessionsBackend) statusView(leaseID, slug string, session a
 		Slug:       slug,
 		Provider:   providerName,
 		TargetOS:   targetLinux,
-		State:      blank(status, "ready"),
+		State:      core.Blank(status, "ready"),
 		ServerID:   leaseID,
 		ServerType: "custom-container",
 		Network:    networkPublic,

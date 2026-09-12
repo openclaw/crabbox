@@ -452,7 +452,7 @@ func (b *freestyleBackend) resolveLeaseID(ctx context.Context, client freestyleA
 			return "", "", err
 		}
 	}
-	return leaseID, blank(vm.ID, vmID), nil
+	return leaseID, core.Blank(vm.ID, vmID), nil
 }
 
 func resolveExactFreestyleLeaseClaim(leaseID string) (core.LeaseClaim, bool, error) {

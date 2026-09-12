@@ -66,10 +66,6 @@ func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
 }
 
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
-}
-
 func newLeaseSlug(leaseID string) string {
 	return core.NewLeaseSlug(leaseID)
 }
@@ -101,7 +97,7 @@ func handleDelegatedRunFailure(w io.Writer, cfg Config, req RunRequest, leaseID,
 	if id == "" {
 		id = leaseID
 	}
-	fmt.Fprintf(w, "keep-on-failure: kept lease=%s slug=%s expires=idle/ttl idle_timeout=%s ttl=%s\n", leaseID, blank(slug, "-"), cfg.IdleTimeout, cfg.TTL)
+	fmt.Fprintf(w, "keep-on-failure: kept lease=%s slug=%s expires=idle/ttl idle_timeout=%s ttl=%s\n", leaseID, core.Blank(slug, "-"), cfg.IdleTimeout, cfg.TTL)
 	fmt.Fprintf(w, "rerun: %s --id %s -- <command>\n", agentSandboxRecoveryCommand(cfg, "run"), shellQuote(id))
 	fmt.Fprintf(w, "stop: %s %s\n", agentSandboxRecoveryCommand(cfg, "stop"), shellQuote(id))
 }

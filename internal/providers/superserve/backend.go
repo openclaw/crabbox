@@ -423,13 +423,13 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 					return nil
 				}
 				if req.DryRun {
-					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 					return nil
 				}
 				if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 					return err
 				}
-				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 				claimRemovedOne = true
 				return nil
 			}
@@ -770,7 +770,7 @@ func superserveCommandEnv(env map[string]string) (map[string]string, []string) {
 }
 
 func normalizedSandboxState(sb superserveSandbox) string {
-	return strings.ToLower(blank(strings.TrimSpace(sb.Status), blank(strings.TrimSpace(sb.State), "unknown")))
+	return strings.ToLower(core.Blank(strings.TrimSpace(sb.Status), core.Blank(strings.TrimSpace(sb.State), "unknown")))
 }
 
 func isReadyState(state string) bool {

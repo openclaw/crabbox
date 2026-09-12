@@ -666,7 +666,7 @@ func cubesandboxSandboxToServer(sandbox cubesandboxSandbox) Server {
 		Status:   sandbox.State,
 		Labels:   labels,
 	}
-	server.ServerType.Name = blank(sandbox.Alias, sandbox.TemplateID)
+	server.ServerType.Name = core.Blank(sandbox.Alias, sandbox.TemplateID)
 	if server.ServerType.Name == "" {
 		server.ServerType.Name = "base"
 	}

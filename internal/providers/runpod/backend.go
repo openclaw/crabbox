@@ -186,7 +186,7 @@ func (b *runpodLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (L
 	if claimed {
 		pod, err = b.resolveClaimedPod(ctx, client, claim, false)
 		leaseID = claim.LeaseID
-		slug = blank(claim.Slug, newLeaseSlug(claim.LeaseID))
+		slug = core.Blank(claim.Slug, newLeaseSlug(claim.LeaseID))
 	} else {
 		pod, leaseID, slug, err = b.resolveUnclaimedPod(ctx, client, req.ID)
 		if err == nil {
@@ -449,7 +449,7 @@ func resolveRunpodClaim(identifier string) (LeaseClaim, bool, error) {
 	if claim, ok, exact, err := resolveLeaseClaimForProviderWithExact(identifier, providerName); err != nil {
 		return LeaseClaim{}, false, err
 	} else if exact && !ok {
-		return LeaseClaim{}, false, exit(2, "local claim %s belongs to provider=%s, not provider=%s", identifier, blank(claim.Provider, "<unknown>"), providerName)
+		return LeaseClaim{}, false, exit(2, "local claim %s belongs to provider=%s, not provider=%s", identifier, core.Blank(claim.Provider, "<unknown>"), providerName)
 	} else if exact {
 		return claim, true, nil
 	} else if ok {
@@ -512,7 +512,7 @@ func ensureRunpodAdoptionDoesNotRetargetClaim(leaseID string, pod runpodPod) err
 		return nil
 	}
 	if !ok {
-		return exit(2, "cannot adopt RunPod pod %s as lease %s because that local claim belongs to provider=%s", pod.ID, leaseID, blank(claim.Provider, "<unknown>"))
+		return exit(2, "cannot adopt RunPod pod %s as lease %s because that local claim belongs to provider=%s", pod.ID, leaseID, core.Blank(claim.Provider, "<unknown>"))
 	}
 	if !runpodClaimIsBound(claim) {
 		return nil
@@ -542,7 +542,7 @@ func (b *runpodLeaseBackend) resolveClaimedPod(ctx context.Context, client runpo
 	if strings.TrimSpace(claim.CloudID) != "" {
 		pod, err = client.GetPod(ctx, claim.CloudID)
 	} else {
-		slug := blank(claim.Slug, newLeaseSlug(claim.LeaseID))
+		slug := core.Blank(claim.Slug, newLeaseSlug(claim.LeaseID))
 		pod, err = b.findPodByName(ctx, client, leaseProviderName(claim.LeaseID, slug))
 	}
 	if err != nil {
@@ -552,10 +552,10 @@ func (b *runpodLeaseBackend) resolveClaimedPod(ctx context.Context, client runpo
 		return pod, nil
 	}
 	if pod.ID != claim.CloudID {
-		return runpodPod{}, exit(2, "runpod claim %s expects pod %s but provider returned %s", claim.LeaseID, claim.CloudID, blank(pod.ID, "<empty>"))
+		return runpodPod{}, exit(2, "runpod claim %s expects pod %s but provider returned %s", claim.LeaseID, claim.CloudID, core.Blank(pod.ID, "<empty>"))
 	}
 	if name := strings.TrimSpace(claim.Labels["name"]); pod.Name != name {
-		return runpodPod{}, exit(2, "runpod claim %s expects pod name %s but provider returned %s", claim.LeaseID, name, blank(pod.Name, "<empty>"))
+		return runpodPod{}, exit(2, "runpod claim %s expects pod name %s but provider returned %s", claim.LeaseID, name, core.Blank(pod.Name, "<empty>"))
 	}
 	return pod, nil
 }
@@ -594,7 +594,7 @@ func (b *runpodLeaseBackend) resolveUnclaimedPod(ctx context.Context, client run
 }
 
 func unclaimedRunpodError(identifier string) error {
-	return exit(2, "runpod pod %s has no exact resource-bound local claim; adopt it from a reuse command with --reclaim before stopping it", blank(strings.TrimSpace(identifier), "<unknown>"))
+	return exit(2, "runpod pod %s has no exact resource-bound local claim; adopt it from a reuse command with --reclaim before stopping it", core.Blank(strings.TrimSpace(identifier), "<unknown>"))
 }
 
 func validateCreatedRunpodPod(pod runpodPod, expectedID, expectedName string) error {
@@ -604,9 +604,9 @@ func validateCreatedRunpodPod(pod runpodPod, expectedID, expectedName string) er
 		return nil
 	}
 	if mismatch.Field == "ID" {
-		return exit(1, "runpod create returned pod %s but readiness resolved %s", blank(expectedID, "<empty>"), blank(pod.ID, "<empty>"))
+		return exit(1, "runpod create returned pod %s but readiness resolved %s", core.Blank(expectedID, "<empty>"), core.Blank(pod.ID, "<empty>"))
 	}
-	return exit(1, "runpod create expected pod name %s but readiness returned %s", blank(expectedName, "<empty>"), blank(pod.Name, "<empty>"))
+	return exit(1, "runpod create expected pod name %s but readiness returned %s", core.Blank(expectedName, "<empty>"), core.Blank(pod.Name, "<empty>"))
 }
 
 func (b *runpodLeaseBackend) findPodByName(ctx context.Context, client runpodAPI, name string) (runpodPod, error) {
@@ -744,7 +744,7 @@ func runpodLeaseIdentity(name string) (string, string) {
 	name = strings.TrimSpace(name)
 	const prefix = "crabbox-"
 	if !strings.HasPrefix(name, prefix) {
-		slug := normalizeLeaseSlug(blank(name, "manual"))
+		slug := normalizeLeaseSlug(core.Blank(name, "manual"))
 		return "rpod_" + slug, slug
 	}
 	rest := strings.TrimPrefix(name, prefix)

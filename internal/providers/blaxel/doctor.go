@@ -17,7 +17,7 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 			Details: map[string]string{"provider": providerName},
 		})
 	}
-	if _, err := ValidateAPIURL(blank(b.cfg.Blaxel.APIURL, core.BlaxelConfigDefaultAPIURL)); err != nil {
+	if _, err := ValidateAPIURL(core.Blank(b.cfg.Blaxel.APIURL, core.BlaxelConfigDefaultAPIURL)); err != nil {
 		record("failed", "api_url", err.Error())
 		return DoctorResult{Provider: providerName, Status: "failed", Message: "api_url=failed mutation=false", Checks: checks}, err
 	}

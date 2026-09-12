@@ -77,7 +77,7 @@ func newCloudflareClient(cfg Config, rt Runtime) (*cloudflareClient, error) {
 	if token == "" {
 		return nil, exit(2, "%s requires CRABBOX_CLOUDFLARE_RUNNER_TOKEN or user-level config", providerName)
 	}
-	instanceType, ok := normalizeCloudflareContainerInstanceType(blank(cfg.ServerType, cloudflareContainerInstanceTypeForClass(cfg.Class)))
+	instanceType, ok := normalizeCloudflareContainerInstanceType(core.Blank(cfg.ServerType, cloudflareContainerInstanceTypeForClass(cfg.Class)))
 	if !ok {
 		if cfg.ServerTypeExplicit {
 			return nil, exit(2, "%s --type must be one of %s", providerName, strings.Join(cloudflareContainerInstanceTypes(), ", "))

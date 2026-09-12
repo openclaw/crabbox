@@ -48,10 +48,6 @@ func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
 }
 
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
-}
-
 var claimLeaseForRepoProviderPond = core.ClaimLeaseForRepoProviderPond
 
 func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {

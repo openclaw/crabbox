@@ -986,7 +986,7 @@ func TestSyncWorkspaceCleansRemoteArchiveWhenExtractFails(t *testing.T) {
 
 func TestSyncWorkspaceNativePreservesExistingFilesOnTransferFailure(t *testing.T) {
 	for _, failure := range []string{"upload", "extract", ""} {
-		t.Run(blank(failure, "success"), func(t *testing.T) {
+		t.Run(core.Blank(failure, "success"), func(t *testing.T) {
 			root := t.TempDir()
 			work := filepath.Join(root, "crabbox")
 			if err := os.Mkdir(work, 0o755); err != nil {

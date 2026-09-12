@@ -182,7 +182,7 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 			if err := validateBlaxelSandboxOwnership(claim, sb); err != nil {
 				return nil, err
 			}
-			state = blank(sb.Status, "unknown")
+			state = core.Blank(sb.Status, "unknown")
 		}
 		servers = append(servers, Server{
 			Provider: providerName,
@@ -361,13 +361,13 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 				continue
 			}
 			if req.DryRun {
-				fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+				fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 				continue
 			}
 			if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 				return err
 			}
-			fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+			fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 			claimsRemoved++
 			continue
 		}
@@ -496,12 +496,12 @@ func (b *backend) createSandbox(ctx context.Context, client Client, repo Repo, r
 	slug := ""
 	req := CreateSandboxRequest{
 		Name:       newSandboxName(repo),
-		Image:      blank(b.cfg.Blaxel.Image, core.BlaxelConfigDefaultImage),
+		Image:      core.Blank(b.cfg.Blaxel.Image, core.BlaxelConfigDefaultImage),
 		Region:     b.cfg.Blaxel.Region,
 		MemoryMB:   b.cfg.Blaxel.MemoryMB,
 		TTL:        b.cfg.Blaxel.TTL,
 		IdleTTL:    b.cfg.Blaxel.IdleTTL,
-		WorkingDir: blank(b.cfg.Blaxel.Workdir, core.BlaxelConfigDefaultWorkdir),
+		WorkingDir: core.Blank(b.cfg.Blaxel.Workdir, core.BlaxelConfigDefaultWorkdir),
 		Labels: map[string]string{
 			"crabbox":          "true",
 			"crabbox.provider": providerName,
@@ -710,7 +710,7 @@ func buildCommand(command []string, shellMode bool) ([]string, error) {
 }
 
 func blaxelWorkdir(cfg Config) (string, error) {
-	workdir := strings.TrimSpace(blank(cfg.Blaxel.Workdir, core.BlaxelConfigDefaultWorkdir))
+	workdir := strings.TrimSpace(core.Blank(cfg.Blaxel.Workdir, core.BlaxelConfigDefaultWorkdir))
 	clean := path.Clean(workdir)
 	if workdir == "" || !strings.HasPrefix(clean, "/") || strings.Contains(workdir, "\x00") {
 		return "", exit(2, "blaxel workdir %q must be an absolute path", workdir)

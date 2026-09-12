@@ -193,7 +193,7 @@ func (b *backend) preflightCreateIntent(ctx context.Context, api unikraftCloudAP
 
 func (b *backend) finishWarmup(started time.Time, claim LeaseClaim, instance ukcInstance, req WarmupRequest) error {
 	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s instance=%s state=%s fqdn=%s\n",
-		claim.LeaseID, claim.Slug, providerName, instance.UUID, normalizedInstanceState(instance.State), blank(instanceFQDN(instance), "-"))
+		claim.LeaseID, claim.Slug, providerName, instance.UUID, normalizedInstanceState(instance.State), core.Blank(instanceFQDN(instance), "-"))
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: %s warmup keeps the instance until explicit stop or eligible cleanup\n", providerName)
 	}
@@ -438,7 +438,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 			labels[ukcLabelProviderState] = state
 		}
 		view := StatusView{
-			ID:         blank(leaseID, instance.UUID),
+			ID:         core.Blank(leaseID, instance.UUID),
 			Slug:       slug,
 			Provider:   providerName,
 			TargetOS:   targetLinux,
@@ -515,9 +515,9 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 		return err
 	}
 	if missing {
-		fmt.Fprintf(b.rt.Stderr, "warning: %s instance=%s was already gone; removed local claim\n", providerName, blank(instanceID, "pending"))
+		fmt.Fprintf(b.rt.Stderr, "warning: %s instance=%s was already gone; removed local claim\n", providerName, core.Blank(instanceID, "pending"))
 	}
-	fmt.Fprintf(b.rt.Stderr, "released lease=%s instance=%s\n", claim.LeaseID, blank(instanceID, "pending"))
+	fmt.Fprintf(b.rt.Stderr, "released lease=%s instance=%s\n", claim.LeaseID, core.Blank(instanceID, "pending"))
 	return nil
 }
 
@@ -533,7 +533,7 @@ func unikraftCloudServer(instance ukcInstance, claim LeaseClaim) Server {
 	return Server{
 		CloudID:  instance.UUID,
 		Provider: providerName,
-		Name:     blank(instance.Name, instance.UUID),
+		Name:     core.Blank(instance.Name, instance.UUID),
 		Status:   normalizedInstanceState(instance.State),
 		Labels:   labels,
 	}
@@ -575,5 +575,5 @@ func instanceFQDN(instance ukcInstance) string {
 }
 
 func normalizedInstanceState(state string) string {
-	return strings.ToLower(blank(strings.TrimSpace(state), "unknown"))
+	return strings.ToLower(core.Blank(strings.TrimSpace(state), "unknown"))
 }

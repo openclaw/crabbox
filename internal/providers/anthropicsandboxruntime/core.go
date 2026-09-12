@@ -59,7 +59,3 @@ func leadingEnvAssignment(command []string) bool {
 func shellScriptFromArgv(command []string) string {
 	return core.ShellScriptFromArgv(command)
 }
-
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
-}

@@ -921,5 +921,5 @@ func commandDetail(result LocalCommandResult, err error) string {
 	if text == "" && err != nil {
 		text = err.Error()
 	}
-	return blank(text, "unknown error")
+	return core.Blank(text, "unknown error")
 }

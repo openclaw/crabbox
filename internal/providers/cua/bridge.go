@@ -157,7 +157,7 @@ func bridgeResponseError(action string, resp bridgeResponse) error {
 	return &bridgeActionError{
 		action: action,
 		code:   strings.TrimSpace(resp.Error.Code),
-		class:  strings.TrimSpace(blank(resp.Error.Class, resp.Class)),
+		class:  strings.TrimSpace(core.Blank(resp.Error.Class, resp.Class)),
 		msg:    strings.TrimSpace(resp.Error.Message),
 	}
 }
@@ -195,7 +195,7 @@ func (c *bridgeClient) RoundTrip(ctx context.Context, req bridgeRequest) (bridge
 		return bridgeResponse{}, err
 	}
 	defer os.RemoveAll(dir)
-	command := LocalCommandRequest{Name: strings.TrimSpace(blank(c.cfg.Cua.BridgeCommand, core.CuaConfigDefaultBridgeCommand)), Args: []string{"-I", "-c", bridgeScript}, Env: bridgeEnv(c.cfg, dir), Dir: dir}
+	command := LocalCommandRequest{Name: strings.TrimSpace(core.Blank(c.cfg.Cua.BridgeCommand, core.CuaConfigDefaultBridgeCommand)), Args: []string{"-I", "-c", bridgeScript}, Env: bridgeEnv(c.cfg, dir), Dir: dir}
 	resp, result, err := procjson.Exchange[bridgeRequest, bridgeResponse](ctx, c.rt.Exec, command, req, procjson.Limits{MaxBytesPerStream: bridgeOutputLimit, CancelGrace: 2 * time.Second})
 	if err != nil {
 		failure, _ := err.(*procjson.Failure)
@@ -213,8 +213,8 @@ func bridgeConfigForConfig(cfg Config) bridgeConfig {
 	workdir, _ := cuaWorkdir(cfg)
 	return bridgeConfig{
 		APIURL:         apiURL,
-		Image:          strings.TrimSpace(blank(cfg.Cua.Image, core.CuaConfigDefaultImage)),
-		Kind:           strings.ToLower(strings.TrimSpace(blank(cfg.Cua.Kind, core.CuaConfigDefaultKind))),
+		Image:          strings.TrimSpace(core.Blank(cfg.Cua.Image, core.CuaConfigDefaultImage)),
+		Kind:           strings.ToLower(strings.TrimSpace(core.Blank(cfg.Cua.Kind, core.CuaConfigDefaultKind))),
 		Region:         strings.TrimSpace(cfg.Cua.Region),
 		Workdir:        workdir,
 		VCPUs:          cfg.Cua.VCPUs,
@@ -222,8 +222,8 @@ func bridgeConfigForConfig(cfg Config) bridgeConfig {
 		DiskGB:         cfg.Cua.DiskGB,
 		StartupTimeout: cfg.Cua.StartupTimeoutSecs,
 		ExecTimeout:    cfg.Cua.ExecTimeoutSecs,
-		SDKPackage:     strings.TrimSpace(blank(cfg.Cua.SDKPackage, core.CuaConfigDefaultSDKPackage)),
-		SDKImport:      strings.TrimSpace(blank(cfg.Cua.SDKImport, core.CuaConfigDefaultSDKImport)),
+		SDKPackage:     strings.TrimSpace(core.Blank(cfg.Cua.SDKPackage, core.CuaConfigDefaultSDKPackage)),
+		SDKImport:      strings.TrimSpace(core.Blank(cfg.Cua.SDKImport, core.CuaConfigDefaultSDKImport)),
 		FallbackImport: cuaSDKFallbackImport(cfg.Cua),
 	}
 }
@@ -231,7 +231,7 @@ func bridgeConfigForConfig(cfg Config) bridgeConfig {
 // Whitespace fallback imports previously reached Python's terminal default.
 // Resolve that accepted value before supplying either bridge transport channel.
 func cuaSDKFallbackImport(cfg CuaConfig) string {
-	return blank(strings.TrimSpace(cfg.SDKFallbackImport), core.CuaConfigDefaultSDKFallbackImport)
+	return core.Blank(strings.TrimSpace(cfg.SDKFallbackImport), core.CuaConfigDefaultSDKFallbackImport)
 }
 
 func bridgeTimeout(cfg Config, req bridgeRequest) time.Duration {
@@ -277,8 +277,8 @@ func bridgeEnv(cfg Config, home string) []string {
 		// https://github.com/trycua/cua/blob/sandbox-v0.1.17/libs/python/cua-sandbox/cua_sandbox/_config.py
 		env = upsertEnv(env, "CUA_BASE_URL", apiURL)
 	}
-	env = upsertEnv(env, "CRABBOX_CUA_SDK_PACKAGE", strings.TrimSpace(blank(cfg.Cua.SDKPackage, core.CuaConfigDefaultSDKPackage)))
-	env = upsertEnv(env, "CRABBOX_CUA_SDK_IMPORT", strings.TrimSpace(blank(cfg.Cua.SDKImport, core.CuaConfigDefaultSDKImport)))
+	env = upsertEnv(env, "CRABBOX_CUA_SDK_PACKAGE", strings.TrimSpace(core.Blank(cfg.Cua.SDKPackage, core.CuaConfigDefaultSDKPackage)))
+	env = upsertEnv(env, "CRABBOX_CUA_SDK_IMPORT", strings.TrimSpace(core.Blank(cfg.Cua.SDKImport, core.CuaConfigDefaultSDKImport)))
 	env = upsertEnv(env, "CRABBOX_CUA_SDK_FALLBACK_IMPORT", cuaSDKFallbackImport(cfg.Cua))
 	return env
 }

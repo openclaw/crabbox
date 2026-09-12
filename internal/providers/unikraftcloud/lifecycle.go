@@ -672,7 +672,7 @@ func serverFromClaim(claim LeaseClaim) Server {
 	return Server{
 		CloudID:  claim.CloudID,
 		Provider: providerName,
-		Name:     blank(labels[ukcLabelResourceName], claim.CloudID),
+		Name:     core.Blank(labels[ukcLabelResourceName], claim.CloudID),
 		Status:   labels["state"],
 		Labels:   labels,
 	}
@@ -739,11 +739,11 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			action = "reconcile"
 		}
 		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would %s %s lease=%s instance=%s reason=%s\n", action, providerName, current.LeaseID, blank(current.CloudID, "pending"), reason)
+			fmt.Fprintf(b.rt.Stdout, "would %s %s lease=%s instance=%s reason=%s\n", action, providerName, current.LeaseID, core.Blank(current.CloudID, "pending"), reason)
 			unlock()
 			continue
 		}
-		fmt.Fprintf(b.rt.Stdout, "%s %s lease=%s instance=%s reason=%s\n", action, providerName, current.LeaseID, blank(current.CloudID, "pending"), reason)
+		fmt.Fprintf(b.rt.Stdout, "%s %s lease=%s instance=%s reason=%s\n", action, providerName, current.LeaseID, core.Blank(current.CloudID, "pending"), reason)
 		_, deleteErr := b.deleteClaimedInstance(ctx, api, current)
 		unlock()
 		if deleteErr != nil {

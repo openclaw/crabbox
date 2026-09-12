@@ -571,7 +571,7 @@ func randomSuffix() string {
 }
 
 func serverFromClaimRecord(claim core.LeaseClaim, record sandboxRecord) Server {
-	state := blank(record.State, "unknown")
+	state := core.Blank(record.State, "unknown")
 	labels := map[string]string{
 		"provider":  providerName,
 		"lease":     claim.LeaseID,
@@ -579,7 +579,7 @@ func serverFromClaimRecord(claim core.LeaseClaim, record sandboxRecord) Server {
 		"target":    targetLinux,
 		"state":     state,
 		"sandbox":   record.Name,
-		"agent":     blank(record.Agent, defaultAgent),
+		"agent":     core.Blank(record.Agent, defaultAgent),
 		"workspace": record.Workspace,
 	}
 	server := Server{
@@ -594,7 +594,7 @@ func serverFromClaimRecord(claim core.LeaseClaim, record sandboxRecord) Server {
 }
 
 func statusFromRecord(leaseID, slug string, record sandboxRecord) StatusView {
-	state := blank(record.State, "unknown")
+	state := core.Blank(record.State, "unknown")
 	return StatusView{
 		ID:         leaseID,
 		Slug:       slug,
@@ -611,7 +611,7 @@ func statusFromRecord(leaseID, slug string, record sandboxRecord) StatusView {
 			"slug":      slug,
 			"state":     state,
 			"sandbox":   record.Name,
-			"agent":     blank(record.Agent, defaultAgent),
+			"agent":     core.Blank(record.Agent, defaultAgent),
 			"workspace": record.Workspace,
 		},
 	}

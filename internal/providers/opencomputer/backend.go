@@ -185,7 +185,7 @@ func (b *openComputerBackend) List(ctx context.Context, req ListRequest) ([]Leas
 			if err := validateOpenComputerSandboxOwnership(claim, sb); err != nil {
 				return nil, err
 			}
-			state = blank(sb.Status, statusViewReady)
+			state = core.Blank(sb.Status, statusViewReady)
 		}
 		servers = append(servers, Server{
 			Provider: providerName,

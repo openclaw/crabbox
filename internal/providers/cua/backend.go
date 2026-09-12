@@ -56,7 +56,7 @@ func (b backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) {
 	views := make([]LeaseView, 0, len(sandboxes)+len(claimsBySandbox))
 	seen := make(map[string]bool, len(sandboxes))
 	for _, sb := range sandboxes {
-		sandboxName := strings.TrimSpace(blank(sb.Name, sb.ID))
+		sandboxName := strings.TrimSpace(core.Blank(sb.Name, sb.ID))
 		if sandboxName == "" {
 			continue
 		}
@@ -133,7 +133,7 @@ func (b backend) Status(ctx context.Context, req StatusRequest) (StatusView, err
 		leaseID, slug, pond := sandboxID, "", ""
 		if claimed {
 			leaseID = claim.LeaseID
-			slug = blank(claim.Slug, newLeaseSlug(claim.LeaseID))
+			slug = core.Blank(claim.Slug, newLeaseSlug(claim.LeaseID))
 			pond = claim.Pond
 		}
 		view := StatusView{
@@ -186,7 +186,7 @@ func (b backend) Cleanup(context.Context, CleanupRequest) error {
 
 func (b backend) serverFromSandbox(claim LeaseClaim, sb bridgeSandboxSummary) Server {
 	state := normalizedSandboxState(sb)
-	sandboxName := strings.TrimSpace(blank(sb.Name, sb.ID))
+	sandboxName := strings.TrimSpace(core.Blank(sb.Name, sb.ID))
 	if sandboxName == "" {
 		sandboxName = claimSandboxName(claim)
 	}
@@ -212,7 +212,7 @@ func (b backend) claimMatchesActiveScope(claim LeaseClaim) bool {
 }
 
 func normalizedSandboxState(sb bridgeSandboxSummary) string {
-	return strings.ToLower(blank(strings.TrimSpace(blank(sb.Status, sb.State)), "unknown"))
+	return strings.ToLower(core.Blank(strings.TrimSpace(core.Blank(sb.Status, sb.State)), "unknown"))
 }
 
 func isReadyState(state string) bool {
@@ -234,7 +234,7 @@ func isTerminalState(state string) bool {
 }
 
 func sandboxTargetOS(claim LeaseClaim, sb bridgeSandboxSummary) string {
-	value := strings.ToLower(strings.TrimSpace(blank(sb.OSType, sb.Metadata["osType"])))
+	value := strings.ToLower(strings.TrimSpace(core.Blank(sb.OSType, sb.Metadata["osType"])))
 	if value == "" {
 		value = strings.ToLower(strings.TrimSpace(claim.TargetOS))
 	}

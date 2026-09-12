@@ -318,9 +318,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	case streamErr != nil:
 		retErr = shared.ExitErrorWithCause(1, fmt.Sprintf("crownest stream failed: %v", streamErr), streamErr)
 	case missingExitStatusFailure:
-		retErr = exit(5, "crownest workspace run ended status=%s reason=%s class=%s without command exit code", blank(terminalStatus, "unknown"), blank(terminal.FailureReason, "unknown"), blank(terminal.FailureClass, "unknown"))
+		retErr = exit(5, "crownest workspace run ended status=%s reason=%s class=%s without command exit code", core.Blank(terminalStatus, "unknown"), core.Blank(terminal.FailureReason, "unknown"), core.Blank(terminal.FailureClass, "unknown"))
 	case terminalStatus == "failed" && terminal.FailureReason != "command_exit":
-		retErr = exit(5, "crownest workspace run failed reason=%s class=%s", blank(terminal.FailureReason, "unknown"), blank(terminal.FailureClass, "unknown"))
+		retErr = exit(5, "crownest workspace run failed reason=%s class=%s", core.Blank(terminal.FailureReason, "unknown"), core.Blank(terminal.FailureClass, "unknown"))
 	default:
 		result = core.FinalizeRunResult(result, nil)
 		if result.ExitCode != 0 {
@@ -392,7 +392,7 @@ func (b *backend) crownestRunSession(leaseID, slug string, reused, kept bool) *R
 		Slug:           slug,
 		Reused:         reused,
 		Kept:           kept,
-		CleanupCommand: crownestCleanupCommand(b.cfg, blank(slug, leaseID)),
+		CleanupCommand: crownestCleanupCommand(b.cfg, core.Blank(slug, leaseID)),
 	}
 }
 
@@ -573,13 +573,13 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 					return nil
 				}
 				if req.DryRun {
-					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 					return nil
 				}
 				if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 					return err
 				}
-				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 				claimRemovedOne = true
 				return nil
 			}
@@ -736,7 +736,7 @@ func (b *backend) streamRun(ctx context.Context, api client, workspaceRunID stri
 			case "terminal":
 				terminal = event.WorkspaceRun
 			case "error":
-				return exit(5, "crownest event error %s: %s", blank(event.Code, "error"), event.Message)
+				return exit(5, "crownest event error %s: %s", core.Blank(event.Code, "error"), event.Message)
 			}
 			return nil
 		})
@@ -913,7 +913,7 @@ func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
 }
 
 func normalizedSandboxState(sb sandbox) string {
-	return strings.ToLower(blank(strings.TrimSpace(sb.Status), "unknown"))
+	return strings.ToLower(core.Blank(strings.TrimSpace(sb.Status), "unknown"))
 }
 
 func isReadyState(state string) bool {

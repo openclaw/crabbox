@@ -231,7 +231,7 @@ func isBlaxelDataPlaneHost(host string) bool {
 }
 
 func validateBlaxelConfig(cfg Config) error {
-	if _, err := ValidateAPIURL(blank(cfg.Blaxel.APIURL, core.BlaxelConfigDefaultAPIURL)); err != nil {
+	if _, err := ValidateAPIURL(core.Blank(cfg.Blaxel.APIURL, core.BlaxelConfigDefaultAPIURL)); err != nil {
 		return err
 	}
 	if cfg.Blaxel.MemoryMB < 0 {

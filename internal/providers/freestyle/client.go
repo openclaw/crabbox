@@ -92,7 +92,7 @@ var newFreestyleClient = func(cfg Config, rt Runtime) (freestyleAPI, error) {
 	if apiKey == "" {
 		return nil, exit(2, "provider=freestyle requires FREESTYLE_API_KEY")
 	}
-	apiURL, err := validateFreestyleAPIURL(blank(cfg.Freestyle.APIURL, core.FreestyleConfigDefaultAPIURL))
+	apiURL, err := validateFreestyleAPIURL(core.Blank(cfg.Freestyle.APIURL, core.FreestyleConfigDefaultAPIURL))
 	if err != nil {
 		return nil, err
 	}

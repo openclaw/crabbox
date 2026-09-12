@@ -345,7 +345,7 @@ func (b *e2bBackend) createSandbox(ctx context.Context, client e2bAPI, repo Repo
 	if err != nil {
 		return "", e2bSandbox{}, "", err
 	}
-	template := blank(b.cfg.E2B.Template, core.E2BConfigDefaultTemplate)
+	template := core.Blank(b.cfg.E2B.Template, core.E2BConfigDefaultTemplate)
 	cfg := b.cfg
 	workspace, err := cleanE2BWorkspacePath(e2bWorkspacePath(cfg))
 	if err != nil {
@@ -634,7 +634,7 @@ func e2bSandboxToServer(sandbox e2bSandbox) Server {
 		Status:   sandbox.State,
 		Labels:   labels,
 	}
-	server.ServerType.Name = blank(sandbox.Alias, sandbox.TemplateID)
+	server.ServerType.Name = core.Blank(sandbox.Alias, sandbox.TemplateID)
 	if server.ServerType.Name == "" {
 		server.ServerType.Name = "base"
 	}

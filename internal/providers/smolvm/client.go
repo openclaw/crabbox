@@ -160,7 +160,7 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 }
 
 func smolvmEndpoint(cfg Config) (string, error) {
-	base := blank(strings.TrimSpace(cfg.Smolvm.BaseURL), core.SmolvmConfigDefaultBaseURL)
+	base := core.Blank(strings.TrimSpace(cfg.Smolvm.BaseURL), core.SmolvmConfigDefaultBaseURL)
 	parsed, err := url.Parse(base)
 	if err != nil {
 		return "", exit(2, "%s url %q is invalid", providerName, base)

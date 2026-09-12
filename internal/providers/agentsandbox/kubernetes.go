@@ -714,7 +714,7 @@ func sandboxReady(sandbox *kubernetesObject) error {
 				"agent-sandbox Sandbox %s expired reason=%s message=%s",
 				sandbox.Metadata.Name,
 				condition.Reason,
-				blank(condition.Message, "none"),
+				core.Blank(condition.Message, "none"),
 			)}
 		}
 	}
@@ -724,8 +724,8 @@ func sandboxReady(sandbox *kubernetesObject) error {
 				4,
 				"agent-sandbox Sandbox %s finished reason=%s message=%s",
 				sandbox.Metadata.Name,
-				blank(condition.Reason, "unknown"),
-				blank(condition.Message, "none"),
+				core.Blank(condition.Reason, "unknown"),
+				core.Blank(condition.Message, "none"),
 			)}
 		}
 	}
@@ -1056,7 +1056,7 @@ func validateSandboxClaimBinding(sandbox *kubernetesObject, claimName string, id
 		return resourceIdentityError{err: exit(4, "agent-sandbox Sandbox identity is missing")}
 	}
 	if got := strings.TrimSpace(sandbox.Metadata.Labels[agentSandboxClaimUIDLabel]); got != identity.UID {
-		return resourceIdentityError{err: exit(4, "agent-sandbox Sandbox %s claim UID label changed from %s to %s", sandbox.Metadata.Name, identity.UID, blank(got, "<empty>"))}
+		return resourceIdentityError{err: exit(4, "agent-sandbox Sandbox %s claim UID label changed from %s to %s", sandbox.Metadata.Name, identity.UID, core.Blank(got, "<empty>"))}
 	}
 	ref, ok := controllerOwnerReference(sandbox.Metadata.OwnerReferences)
 	if !ok ||
