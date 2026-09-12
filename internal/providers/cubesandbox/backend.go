@@ -28,6 +28,8 @@ type cubesandboxFlagValues struct {
 
 const cubesandboxCleanupTimeout = 30 * time.Second
 
+var sandboxViews = shared.EnvdSandboxViews{Provider: providerName, LeasePrefix: "cubesandbox_"}
+
 func RegisterCubeSandboxProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return cubesandboxFlagValues{
 		APIURL:        fs.String("cubesandbox-api-url", defaults.CubeSandbox.APIURL, "CubeSandbox API URL"),
@@ -244,7 +246,7 @@ func (b *cubesandboxBackend) List(ctx context.Context, req core.ListRequest) ([]
 	}
 	servers := make([]core.Server, 0, len(sandboxes))
 	for _, sandbox := range sandboxes {
-		servers = append(servers, cubesandboxSandboxToServer(sandbox))
+		servers = append(servers, sandboxViews.Server(sandbox))
 	}
 	return servers, nil
 }
@@ -275,7 +277,7 @@ func (b *cubesandboxBackend) Status(ctx context.Context, req core.StatusRequest)
 		if err != nil {
 			return core.StatusView{}, cubesandboxError("get sandbox", err)
 		}
-		view := cubesandboxStatusView(leaseID, sandbox)
+		view := sandboxViews.Status(leaseID, sandbox)
 		if !req.Wait || view.Ready {
 			return view, nil
 		}
@@ -356,9 +358,9 @@ func (b *cubesandboxBackend) ReclaimAndStop(ctx context.Context, req core.StopRe
 	if previousExists && previous.RepoRoot != "" {
 		claim, err = claimLeaseTargetForRepoConfigIfUnchanged(
 			leaseID,
-			cubesandboxSlug(leaseID, sandbox),
+			shared.EnvdSandboxSlug(leaseID, sandbox),
 			cfg,
-			cubesandboxSandboxToServer(sandbox), core.SSHTarget{}, previous.RepoRoot,
+			sandboxViews.Server(sandbox), core.SSHTarget{}, previous.RepoRoot,
 			cfg.IdleTimeout,
 			true,
 			previous,
@@ -367,9 +369,9 @@ func (b *cubesandboxBackend) ReclaimAndStop(ctx context.Context, req core.StopRe
 	} else {
 		claim, err = claimLeaseTargetForConfigIfUnchanged(
 			leaseID,
-			cubesandboxSlug(leaseID, sandbox),
+			shared.EnvdSandboxSlug(leaseID, sandbox),
 			cfg,
-			cubesandboxSandboxToServer(sandbox), core.SSHTarget{}, cfg.IdleTimeout,
+			sandboxViews.Server(sandbox), core.SSHTarget{}, cfg.IdleTimeout,
 			previous,
 			previousExists,
 		)
@@ -426,7 +428,7 @@ func (b *cubesandboxBackend) createSandbox(ctx context.Context, client shared.En
 		return "", shared.EnvdSandbox{}, "", core.Exit(5, "cubesandbox create sandbox returned no sandbox id")
 	}
 	cfg = cubesandboxClaimConfig(cfg)
-	server := cubesandboxSandboxToServer(sandbox)
+	server := sandboxViews.Server(sandbox)
 	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{}, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
 		if cleanupErr := b.deleteSandboxForCleanup(client, sandbox.SandboxID); cleanupErr != nil {
 			leakErr := fmt.Errorf("cleanup cubesandbox sandbox %s after claim failure: %w; run `crabbox stop --provider cubesandbox --id %s --reclaim` to retry cleanup", sandbox.SandboxID, cleanupErr, sandbox.SandboxID)
@@ -510,9 +512,9 @@ func (b *cubesandboxBackend) resolveSandboxID(ctx context.Context, client shared
 	}
 	claim, err = claimLeaseTargetForRepoConfigIfUnchanged(
 		leaseID,
-		cubesandboxSlug(leaseID, sandbox),
+		shared.EnvdSandboxSlug(leaseID, sandbox),
 		cfg,
-		cubesandboxSandboxToServer(sandbox), core.SSHTarget{}, repoRoot,
+		sandboxViews.Server(sandbox), core.SSHTarget{}, repoRoot,
 		cfg.IdleTimeout,
 		true,
 		previous,
@@ -563,7 +565,7 @@ func (b *cubesandboxBackend) resolveClaimedSandbox(ctx context.Context, client s
 			claim.LeaseID,
 			claim.Slug,
 			cfg,
-			cubesandboxSandboxToServer(sandbox), core.SSHTarget{}, repoRoot,
+			sandboxViews.Server(sandbox), core.SSHTarget{}, repoRoot,
 			time.Duration(claim.IdleTimeoutSeconds)*time.Second,
 			reclaim,
 			claim,
@@ -636,73 +638,6 @@ func cubesandboxClaimConfig(cfg core.Config) core.Config {
 		cfg.CubeSandbox.APIURL = "http://127.0.0.1:3000"
 	}
 	return cfg
-}
-
-func cubesandboxSandboxToServer(sandbox shared.EnvdSandbox) core.Server {
-	labels := map[string]string{}
-	for k, v := range sandbox.Metadata {
-		labels[k] = v
-	}
-	labels["provider"] = providerName
-	labels["lease"] = cubesandboxLeaseID(sandbox)
-	if labels["slug"] == "" {
-		labels["slug"] = core.NewLeaseSlug(labels["lease"])
-	}
-	labels["target"] = targetLinux
-	if labels["state"] == "" {
-		labels["state"] = sandbox.State
-	}
-	server := core.Server{
-		Provider: providerName,
-		CloudID:  sandbox.SandboxID,
-		Name:     sandbox.SandboxID,
-		Status:   sandbox.State,
-		Labels:   labels,
-	}
-	server.ServerType.Name = core.Blank(sandbox.Alias, sandbox.TemplateID)
-	if server.ServerType.Name == "" {
-		server.ServerType.Name = "base"
-	}
-	return server
-}
-
-func cubesandboxStatusView(leaseID string, sandbox shared.EnvdSandbox) core.StatusView {
-	server := cubesandboxSandboxToServer(sandbox)
-	return core.StatusView{
-		ID:         leaseID,
-		Slug:       cubesandboxSlug(leaseID, sandbox),
-		Provider:   providerName,
-		TargetOS:   targetLinux,
-		State:      sandbox.State,
-		ServerID:   sandbox.SandboxID,
-		ServerType: server.ServerType.Name,
-		Network:    NetworkPublic,
-		Ready:      cubesandboxStatusReady(sandbox.State),
-		Labels:     server.Labels,
-	}
-}
-
-func cubesandboxStatusReady(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "", "running":
-		return true
-	default:
-		return false
-	}
-}
-
-func cubesandboxLeaseID(sandbox shared.EnvdSandbox) string {
-	if lease := strings.TrimSpace(sandbox.Metadata["lease"]); lease != "" {
-		return lease
-	}
-	return "cubesandbox_" + sandbox.SandboxID
-}
-
-func cubesandboxSlug(leaseID string, sandbox shared.EnvdSandbox) string {
-	if slug := strings.TrimSpace(sandbox.Metadata["slug"]); slug != "" {
-		return slug
-	}
-	return core.NewLeaseSlug(leaseID)
 }
 
 func isCubeSandboxSyntheticID(id string) bool {

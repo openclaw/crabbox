@@ -500,7 +500,7 @@ func TestE2BTemplateAcquisitionAndMetadataDefaultAreDistinct(t *testing.T) {
 			if fake.createReq.TemplateID != want {
 				t.Fatalf("template=%q want=%q", fake.createReq.TemplateID, want)
 			}
-			if e2bSandboxToServer(sandbox).ServerType.Name != "base" {
+			if sandboxViews.Server(sandbox).ServerType.Name != "base" {
 				t.Fatal("missing remote metadata inferred configured template")
 			}
 		})
@@ -1073,11 +1073,11 @@ func TestE2BCreateSandboxRejectsUnsafeWorkdirBeforeAPI(t *testing.T) {
 
 func TestE2BStatusReady(t *testing.T) {
 	for _, status := range []string{"", "running"} {
-		if !e2bStatusReady(status) {
+		if !shared.EnvdSandboxStatusReady(status) {
 			t.Fatalf("expected %q ready", status)
 		}
 	}
-	if e2bStatusReady("paused") {
+	if shared.EnvdSandboxStatusReady("paused") {
 		t.Fatal("paused should not be ready")
 	}
 }
@@ -1370,7 +1370,7 @@ func TestE2BRunCleanupUsesExactClaim(t *testing.T) {
 }
 
 func TestE2BSandboxToServerUsesMetadata(t *testing.T) {
-	server := e2bSandboxToServer(shared.EnvdSandbox{
+	server := sandboxViews.Server(shared.EnvdSandbox{
 		SandboxID:  "sbx_1",
 		TemplateID: "base",
 		State:      "running",

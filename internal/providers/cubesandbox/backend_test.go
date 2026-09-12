@@ -847,11 +847,11 @@ func TestCubeSandboxCreateSandboxRejectsUnsafeWorkdirBeforeAPI(t *testing.T) {
 
 func TestCubeSandboxStatusReady(t *testing.T) {
 	for _, status := range []string{"", "running"} {
-		if !cubesandboxStatusReady(status) {
+		if !shared.EnvdSandboxStatusReady(status) {
 			t.Fatalf("expected %q ready", status)
 		}
 	}
-	if cubesandboxStatusReady("paused") {
+	if shared.EnvdSandboxStatusReady("paused") {
 		t.Fatal("paused should not be ready")
 	}
 }
@@ -1179,7 +1179,7 @@ func TestCubeSandboxRunPreservesAbnormalProcessExitCode(t *testing.T) {
 }
 
 func TestCubeSandboxSandboxToServerUsesMetadata(t *testing.T) {
-	server := cubesandboxSandboxToServer(shared.EnvdSandbox{
+	server := sandboxViews.Server(shared.EnvdSandbox{
 		SandboxID:  "sbx_1",
 		TemplateID: "base",
 		State:      "running",
@@ -1465,7 +1465,7 @@ func TestCubeSandboxReclaimAndStopPreservesRepoBoundClaim(t *testing.T) {
 			"slug":     "reclaim-me",
 		},
 	}
-	if err := claimLeaseTargetForRepoConfig(leaseID, "reclaim-me", firstCfg, cubesandboxSandboxToServer(sandbox), core.SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, "reclaim-me", firstCfg, sandboxViews.Server(sandbox), core.SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	client := &fakeCubeSandboxSyncClient{sandbox: sandbox}
