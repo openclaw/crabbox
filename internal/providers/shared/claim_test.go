@@ -31,6 +31,43 @@ func TestCloneLabels(t *testing.T) {
 	}
 }
 
+func TestIndexProviderClaimsPreservesFilteringAndLastKeyWinner(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	ids := []string{"cbx_000000000001", "cbx_000000000002", "cbx_000000000003", "cbx_000000000004"}
+	for index, id := range ids {
+		provider, native := "example", "same"
+		if index == 2 {
+			native = ""
+		}
+		if index == 3 {
+			provider = "other"
+		}
+		server := core.Server{Provider: provider, CloudID: id, Labels: map[string]string{"native": native}}
+		if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(id, "fixture", provider, "scope", "", t.TempDir(), time.Minute, false, server, core.SSHTarget{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var visited []string
+	indexed, err := IndexProviderClaims("example", func(claim core.LeaseClaim) string {
+		if claim.Provider != "example" {
+			t.Fatal("key projection ran for a foreign provider")
+		}
+		visited = append(visited, claim.LeaseID)
+		return claim.Labels["native"]
+	})
+	if err != nil || len(indexed) != 1 || indexed["same"].LeaseID != ids[1] || !reflect.DeepEqual(visited, ids[:3]) {
+		t.Fatalf("index=%v visited=%v error=%v", indexed, visited, err)
+	}
+	empty, err := IndexProviderClaims("absent", func(core.LeaseClaim) string {
+		t.Fatal("key projection ran for an absent provider")
+		return ""
+	})
+	if err != nil || empty == nil || len(empty) != 0 {
+		t.Fatalf("empty index=%v error=%v", empty, err)
+	}
+	empty["writable"] = core.LeaseClaim{}
+}
+
 func TestLabelsWithDefaultsPreservesStoredValuesAndCopies(t *testing.T) {
 	stored := map[string]string{"provider": "stored", "state": "", "space": " ", "extra": "kept"}
 	defaults := map[string]string{"provider": "fallback", "state": "running", "space": "fallback", "empty": ""}

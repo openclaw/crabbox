@@ -230,3 +230,23 @@ func LabelsWithDefaults(labels, defaults map[string]string) map[string]string {
 	}
 	return labels
 }
+
+// IndexProviderClaims indexes stored snapshots using adapter-owned resource
+// keys. Empty keys are skipped and later snapshots win duplicate keys. The
+// index is a lookup aid; it does not grant ownership or mutation authority.
+func IndexProviderClaims(provider string, key func(core.LeaseClaim) string) (map[string]core.LeaseClaim, error) {
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]core.LeaseClaim{}
+	for _, claim := range claims {
+		if claim.Provider != provider {
+			continue
+		}
+		if name := key(claim); name != "" {
+			out[name] = claim
+		}
+	}
+	return out, nil
+}

@@ -1270,22 +1270,7 @@ func (b *backend) powershellWithEnv(ctx context.Context, script string, env []st
 }
 
 func providerClaims() (map[string]core.LeaseClaim, error) {
-	claims, err := core.ListLeaseClaims()
-	if err != nil {
-		return nil, err
-	}
-	out := map[string]core.LeaseClaim{}
-	for _, claim := range claims {
-		if claim.Provider != providerName {
-			continue
-		}
-		name := instanceNameFromClaim(claim)
-		if name == "" {
-			continue
-		}
-		out[name] = claim
-	}
-	return out, nil
+	return shared.IndexProviderClaims(providerName, instanceNameFromClaim)
 }
 
 func instanceScope(name string) string {

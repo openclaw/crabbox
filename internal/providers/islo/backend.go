@@ -130,17 +130,12 @@ func (b *isloBackend) Warmup(ctx context.Context, req core.WarmupRequest) error 
 		fmt.Fprintf(b.rt.Stderr, "warning: islo warmup keeps the sandbox until explicit stop\n")
 	}
 	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return core.WriteTimingJSON(b.rt.Stderr, core.TimingReport{
-			Provider: isloProvider,
-			LeaseID:  leaseID,
-			Slug:     slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: isloProvider,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
 
 func (b *isloBackend) Run(ctx context.Context, req core.RunRequest) (result core.RunResult, retErr error) {

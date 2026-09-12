@@ -467,27 +467,20 @@ func (b *coderLeaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest
 }
 
 func listCoderClaimsByWorkspace(cfg core.Config) (map[string]core.LeaseClaim, error) {
-	claims, err := core.ListLeaseClaims()
-	if err != nil {
-		return nil, err
-	}
-	out := map[string]core.LeaseClaim{}
-	for _, claim := range claims {
-		if claim.Provider != coderProvider {
-			continue
-		}
+	return shared.IndexProviderClaims(coderProvider, func(claim core.LeaseClaim) string {
 		name := coderClaimWorkspaceRef(claim)
 		if name == "" {
+			var err error
 			name, err = coderClaimWorkspaceName(cfg, claim)
 			if err != nil {
-				continue
+				return ""
 			}
 		}
-		if name != "" {
-			out[coderClaimKey(name)] = claim
+		if name == "" {
+			return ""
 		}
-	}
-	return out, nil
+		return coderClaimKey(name)
+	})
 }
 
 func coderClaimForWorkspace(claims map[string]core.LeaseClaim, workspace coderWorkspace) (core.LeaseClaim, bool) {

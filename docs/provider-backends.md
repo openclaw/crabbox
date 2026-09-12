@@ -580,6 +580,9 @@ Acquisition already shares the mechanics that have provider-neutral contracts:
 - `shared.LabelsWithDefaults` copies stored labels and fills missing or empty
   values during inventory projection. Adapters retain the default values and
   any authoritative state, identity, redaction, or live-port overrides.
+- `shared.IndexProviderClaims` builds lookup indexes from stored snapshots
+  using adapter-owned resource keys. Index entries remain candidates for later
+  ownership validation, rather than authority to mutate a resource.
 - `core.AcquireFixedLease`, `core.FixedAcquireOptions`,
   `core.FixedLeaseBinding`, and `core.FixedLeaseKind` already share durable
   fixed-ID intent locking, replay validation, acquired-state commit, and

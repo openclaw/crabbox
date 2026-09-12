@@ -642,25 +642,13 @@ func boxIDFromScope(scope string) string {
 }
 
 func boxClaimsByID(cfg core.Config) (map[string]core.LeaseClaim, error) {
-	claims, err := core.ListLeaseClaims()
-	if err != nil {
-		return nil, err
-	}
-	out := map[string]core.LeaseClaim{}
-	for _, claim := range claims {
-		if claim.Provider != providerName {
-			continue
-		}
+	return shared.IndexProviderClaims(providerName, func(claim core.LeaseClaim) string {
 		boxID := boxIDFromScope(claim.ProviderScope)
 		if claim.ProviderScope == (Provider{}).ClaimScope(cfg) {
 			boxID = claim.CloudID
 		}
-		if boxID == "" {
-			continue
-		}
-		out[boxID] = claim
-	}
-	return out, nil
+		return boxID
+	})
 }
 
 func isNotFound(err error) bool {

@@ -47,17 +47,12 @@ func (b *backend) Warmup(ctx context.Context, req core.WarmupRequest) error {
 		fmt.Fprintf(b.rt.Stderr, "warning: smolvm warmup keeps the machine until explicit stop\n")
 	}
 	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return core.WriteTimingJSON(b.rt.Stderr, core.TimingReport{
-			Provider: providerName,
-			LeaseID:  leaseID,
-			Slug:     slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
 
 func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
