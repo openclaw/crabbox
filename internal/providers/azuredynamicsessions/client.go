@@ -382,19 +382,9 @@ func (c *azureDynamicSessionsClient) doJSONURL(ctx context.Context, method, endp
 		return err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &azureDynamicSessionsAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(summarizeJSON(data), c.token)}
-	}
-	if out != nil && len(data) > 0 {
-		if err := json.Unmarshal(data, out); err != nil {
-			return err
-		}
-	}
-	return nil
+	return shared.DecodeUnboundedJSONResponse(resp, out, func(statusCode int, status string, data []byte) error {
+		return &azureDynamicSessionsAPIError{StatusCode: statusCode, Status: status, Body: shared.RedactErrorSecrets(summarizeJSON(data), c.token)}
+	})
 }
 
 func (c *azureDynamicSessionsClient) responseError(resp *http.Response) error {

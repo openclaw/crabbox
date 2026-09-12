@@ -532,6 +532,15 @@ typed API error and redaction policy, so capacity retry and purchase ambiguity
 classification remain provider-owned. This does not apply to streaming
 responses or change request construction, redirects, or client timeouts.
 
+E2B, CubeSandbox, and Azure Dynamic Sessions share unbounded buffered JSON
+decoding through `shared.DecodeUnboundedJSONResponse`. It borrows the body:
+callers retain their deferred close and any successful response-header clone.
+It reads the entire body even without an output target, returns read errors
+before interpreting status, and leaves typed API errors and body redaction to
+the adapter. Only a zero-length body skips decoding; nonempty whitespace is
+decoded, and JSON errors remain unwrapped. This separate contract adds no
+response limit and does not apply to streams or alter the bounded decoder.
+
 ## Acquisition stays adapter-owned
 
 SSH lease acquisition is a provider-owned transaction, not a shared sequence of
