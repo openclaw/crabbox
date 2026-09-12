@@ -223,7 +223,7 @@ func TestDoctorReportsConfiguredImage(t *testing.T) {
 	t.Cleanup(func() { hypervHostOS = oldOS })
 
 	b := testBackend(&recordingRunner{})
-	result, err := b.Doctor(context.Background(), DoctorRequest{})
+	result, err := b.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatalf("Doctor: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestCleanupScopedToCrabboxPrefix(t *testing.T) {
 	}
 	cfg := b.configForRun()
 	claims := map[string]core.LeaseClaim{}
-	var views []LeaseView
+	var views []core.LeaseView
 	for _, vm := range vms {
 		claim := claims[vm.Name]
 		if claim.LeaseID == "" && !strings.HasPrefix(vm.Name, "crabbox-") {
@@ -377,7 +377,7 @@ func TestInstanceScopeRoundTrip(t *testing.T) {
 
 func TestShouldCleanupProtectsRetainedLease(t *testing.T) {
 	now := time.Now().UTC()
-	server := Server{Status: "stopped", Labels: map[string]string{
+	server := core.Server{Status: "stopped", Labels: map[string]string{
 		"keep":       "true",
 		"expires_at": core.LeaseLabelTime(now.Add(-time.Hour)),
 	}}
@@ -388,7 +388,7 @@ func TestShouldCleanupProtectsRetainedLease(t *testing.T) {
 }
 
 func TestShouldCleanupExpiredClaim(t *testing.T) {
-	server := Server{Status: "running", Labels: map[string]string{}}
+	server := core.Server{Status: "running", Labels: map[string]string{}}
 	claim := core.LeaseClaim{
 		LeaseID:            "cbx_123",
 		LastUsedAt:         time.Now().Add(-48 * time.Hour).Format(time.RFC3339),
@@ -400,14 +400,14 @@ func TestShouldCleanupExpiredClaim(t *testing.T) {
 }
 
 func TestShouldCleanupSkipsMissingClaim(t *testing.T) {
-	server := Server{Status: "running", Labels: map[string]string{}}
+	server := core.Server{Status: "running", Labels: map[string]string{}}
 	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, false, time.Now()); ok || reason != "missing claim" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
 	}
 }
 
 func TestShouldCleanupStoppedVM(t *testing.T) {
-	server := Server{Status: "off", Labels: map[string]string{}}
+	server := core.Server{Status: "off", Labels: map[string]string{}}
 	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, false, time.Now()); ok || reason != "missing claim" {
 		t.Fatalf("cleanup=%v reason=%s, want false missing claim", ok, reason)
 	}
@@ -422,11 +422,11 @@ func TestReleaseRequiresExactClaim(t *testing.T) {
 	const name = "crabbox-unclaimed-1234"
 	runner := &recordingRunner{}
 	b := testBackend(runner)
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		LeaseID: leaseID,
-		Server:  Server{CloudID: name, Labels: map[string]string{"lease": leaseID, "instance": name}},
+		Server:  core.Server{CloudID: name, Labels: map[string]string{"lease": leaseID, "instance": name}},
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "no exact local claim") {
 		t.Fatalf("ReleaseLease unclaimed err=%v", err)
 	}
 	for _, call := range runner.calls {
@@ -774,7 +774,7 @@ func TestAcquireQuarantinesSSHBeforeConnectingNetwork(t *testing.T) {
 		}
 		script := req.Args[len(req.Args)-1]
 		if strings.Contains(script, "Start-VM") {
-			claims, err := listLeaseClaims()
+			claims, err := core.ListLeaseClaims()
 			claimSeenBeforeStart = err == nil && len(claims) == 1
 		}
 		if strings.Contains(script, "Connect-VMNetworkAdapter") {
@@ -846,7 +846,7 @@ func TestAcquireKeepPersistsClaimAndKeyBeforeBootstrap(t *testing.T) {
 		t.Fatal("Acquire unexpectedly succeeded")
 	}
 
-	claims, claimErr := listLeaseClaims()
+	claims, claimErr := core.ListLeaseClaims()
 	if claimErr != nil {
 		t.Fatalf("listLeaseClaims: %v", claimErr)
 	}
@@ -855,13 +855,13 @@ func TestAcquireKeepPersistsClaimAndKeyBeforeBootstrap(t *testing.T) {
 	}
 	claim := claims[0]
 	t.Cleanup(func() {
-		removeLeaseClaim(claim.LeaseID)
-		removeStoredTestboxKey(claim.LeaseID)
+		core.RemoveLeaseClaim(claim.LeaseID)
+		core.RemoveStoredTestboxKey(claim.LeaseID)
 	})
 	if claim.Provider != providerName || instanceNameFromClaim(claim) == "" {
 		t.Fatalf("retained claim missing provider identity: %#v", claim)
 	}
-	keyPath, keyErr := testboxKeyPath(claim.LeaseID)
+	keyPath, keyErr := core.TestboxKeyPath(claim.LeaseID)
 	if keyErr != nil {
 		t.Fatalf("testboxKeyPath: %v", keyErr)
 	}
@@ -882,7 +882,7 @@ func TestAcquirePersistsProvisionalClaimThenRollsBackFailedLease(t *testing.T) {
 		if len(req.Args) == 0 || !strings.Contains(req.Args[len(req.Args)-1], "Get-VMNetworkAdapter") {
 			return
 		}
-		claims, err := listLeaseClaims()
+		claims, err := core.ListLeaseClaims()
 		if err == nil && len(claims) == 1 {
 			observed = claims[0]
 		}
@@ -900,14 +900,14 @@ func TestAcquirePersistsProvisionalClaimThenRollsBackFailedLease(t *testing.T) {
 	if observed.LeaseID == "" || observed.Provider != providerName || instanceNameFromClaim(observed) == "" {
 		t.Fatalf("bootstrap started without a provisional claim: %#v", observed)
 	}
-	claims, claimErr := listLeaseClaims()
+	claims, claimErr := core.ListLeaseClaims()
 	if claimErr != nil {
 		t.Fatalf("listLeaseClaims: %v", claimErr)
 	}
 	if len(claims) != 0 {
 		t.Fatalf("failed non-retained lease left claims: %#v", claims)
 	}
-	keyPath, keyErr := testboxKeyPath(observed.LeaseID)
+	keyPath, keyErr := core.TestboxKeyPath(observed.LeaseID)
 	if keyErr != nil {
 		t.Fatalf("testboxKeyPath: %v", keyErr)
 	}
@@ -959,19 +959,19 @@ func TestPersistLeaseWritesClaimAndEndpointAtomically(t *testing.T) {
 	testutil.IsolateUserDirs(t)
 	b := testBackend(&recordingRunner{})
 	cfg := b.configForRun()
-	lease := LeaseTarget{LeaseID: "cbx_atomic123456"}
+	lease := core.LeaseTarget{LeaseID: "cbx_atomic123456"}
 	lease.Server = b.serverFromInstance(hypervVM{Name: "crabbox-atom-1234", State: 2}, core.LeaseClaim{}, cfg)
 	lease.Server.PublicNet.IPv4.IP = "172.20.0.9"
-	lease.SSH = sshTargetFromConfig(cfg, "172.20.0.9")
+	lease.SSH = core.SSHTargetFromConfig(cfg, "172.20.0.9")
 
-	req := AcquireRequest{}
+	req := core.AcquireRequest{}
 	req.Repo.Root = t.TempDir()
 	if err := persistLease("cbx_atomic123456", "atomslug", "crabbox-atom-1234", cfg, req, lease); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
-	t.Cleanup(func() { removeLeaseClaim("cbx_atomic123456") })
+	t.Cleanup(func() { core.RemoveLeaseClaim("cbx_atomic123456") })
 
-	claims, err := listLeaseClaims()
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		t.Fatalf("listLeaseClaims: %v", err)
 	}
@@ -1006,11 +1006,11 @@ func TestPersistLeaseFailureLeavesNoStaleClaim(t *testing.T) {
 
 	b := testBackend(&recordingRunner{})
 	cfg := b.configForRun()
-	lease := LeaseTarget{LeaseID: "cbx_atomfail12345"}
+	lease := core.LeaseTarget{LeaseID: "cbx_atomfail12345"}
 	lease.Server = b.serverFromInstance(hypervVM{Name: "crabbox-atom-fail", State: 2}, core.LeaseClaim{}, cfg)
-	lease.SSH = sshTargetFromConfig(cfg, "172.20.0.10")
+	lease.SSH = core.SSHTargetFromConfig(cfg, "172.20.0.10")
 
-	req := AcquireRequest{}
+	req := core.AcquireRequest{}
 	req.Repo.Root = t.TempDir()
 	if err := persistLease("cbx_atomfail12345", "atomfail", "crabbox-atom-fail", cfg, req, lease); err == nil {
 		t.Fatal("persistLease should fail when the state directory is unwritable")
@@ -1030,7 +1030,7 @@ func TestResolveStatusOnlyAllowsRetainedLeaseWithoutIP(t *testing.T) {
 	}}
 	b := testBackend(runner)
 	cfg := b.configForRun()
-	req := AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true}
+	req := core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true}
 	claim := core.LeaseClaim{
 		LeaseID:       "cbx_retained12345",
 		Slug:          "retained-no-ip",
@@ -1038,16 +1038,16 @@ func TestResolveStatusOnlyAllowsRetainedLeaseWithoutIP(t *testing.T) {
 		ProviderScope: instanceScope(name),
 		Labels:        map[string]string{"instance": name, "state": "leased"},
 	}
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
 		LeaseID: claim.LeaseID,
 	}
 	if err := persistLease(claim.LeaseID, claim.Slug, name, cfg, req, lease); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
-	t.Cleanup(func() { removeLeaseClaim(claim.LeaseID) })
+	t.Cleanup(func() { core.RemoveLeaseClaim(claim.LeaseID) })
 
-	resolved, err := b.Resolve(context.Background(), ResolveRequest{ID: claim.LeaseID, StatusOnly: true})
+	resolved, err := b.Resolve(context.Background(), core.ResolveRequest{ID: claim.LeaseID, StatusOnly: true})
 	if err != nil {
 		t.Fatalf("Resolve status-only: %v", err)
 	}
@@ -1103,7 +1103,7 @@ func TestReleasePrunesClaimAndKeyWhenVMIsMissing(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	b := testBackend(runner)
 	cfg := b.configForRun()
-	if _, _, err := ensureTestboxKeyForConfig(cfg, leaseID); err != nil {
+	if _, _, err := core.EnsureTestboxKeyForConfig(cfg, leaseID); err != nil {
 		t.Fatalf("ensureTestboxKeyForConfig: %v", err)
 	}
 	claim := core.LeaseClaim{
@@ -1113,11 +1113,11 @@ func TestReleasePrunesClaimAndKeyWhenVMIsMissing(t *testing.T) {
 		ProviderScope: instanceScope(name),
 		Labels:        map[string]string{"instance": name, "lease": leaseID},
 	}
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
 		LeaseID: leaseID,
 	}
-	req := AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}
+	req := core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}
 	if err := persistLease(leaseID, claim.Slug, name, cfg, req, lease); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
@@ -1136,20 +1136,20 @@ func TestReleasePrunesClaimAndKeyWhenVMIsMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resolved, err := b.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	resolved, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
 	if err != nil {
 		t.Fatalf("Resolve release-only: %v", err)
 	}
 	if resolved.Server.Status != "missing" {
 		t.Fatalf("resolved status=%q want missing", resolved.Server.Status)
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: resolved}); err != nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil {
 		t.Fatalf("ReleaseLease: %v", err)
 	}
-	if claims, err := listLeaseClaims(); err != nil || len(claims) != 0 {
+	if claims, err := core.ListLeaseClaims(); err != nil || len(claims) != 0 {
 		t.Fatalf("claims after release=%#v err=%v", claims, err)
 	}
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := core.TestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatalf("testboxKeyPath: %v", err)
 	}
@@ -1193,11 +1193,11 @@ func TestCleanupMissingClaimRemovesDeterministicStorage(t *testing.T) {
 			"created_at": core.LeaseLabelTime(time.Now().Add(-2 * hypervProvisioningClaimGrace)),
 		},
 	}
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
 		LeaseID: leaseID,
 	}
-	if err := persistLease(leaseID, claim.Slug, name, cfg, AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}, lease); err != nil {
+	if err := persistLease(leaseID, claim.Slug, name, cfg, core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}, lease); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
 	baseVHD := filepath.Join(hypervVHDDir(), name+".vhdx")
@@ -1214,7 +1214,7 @@ func TestCleanupMissingClaimRemovesDeterministicStorage(t *testing.T) {
 	if _, err := os.Stat(baseVHD); !os.IsNotExist(err) {
 		t.Fatalf("cleanup left deterministic disk %s: %v", baseVHD, err)
 	}
-	if claims, err := listLeaseClaims(); err != nil || len(claims) != 0 {
+	if claims, err := core.ListLeaseClaims(); err != nil || len(claims) != 0 {
 		t.Fatalf("claims after cleanup=%#v err=%v", claims, err)
 	}
 }
@@ -1245,11 +1245,11 @@ func TestCleanupMissingKeepClaimPreservesStorage(t *testing.T) {
 			"created_at": core.LeaseLabelTime(time.Now().Add(-2 * hypervProvisioningClaimGrace)),
 		},
 	}
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
 		LeaseID: leaseID,
 	}
-	if err := persistLease(leaseID, claim.Slug, name, cfg, AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true}, lease); err != nil {
+	if err := persistLease(leaseID, claim.Slug, name, cfg, core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true}, lease); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
 	baseVHD := filepath.Join(hypervVHDDir(), name+".vhdx")
@@ -1266,7 +1266,7 @@ func TestCleanupMissingKeepClaimPreservesStorage(t *testing.T) {
 	if _, err := os.Stat(baseVHD); err != nil {
 		t.Fatalf("cleanup removed retained disk %s: %v", baseVHD, err)
 	}
-	if claims, err := listLeaseClaims(); err != nil || len(claims) != 1 || claims[0].LeaseID != leaseID {
+	if claims, err := core.ListLeaseClaims(); err != nil || len(claims) != 1 || claims[0].LeaseID != leaseID {
 		t.Fatalf("claims after cleanup=%#v err=%v", claims, err)
 	}
 }
@@ -2096,7 +2096,7 @@ func TestInheritedWorkRootCallerContract(t *testing.T) {
 		{"/provider/root", "/srv/custom", "/provider/root"},
 	} {
 		for _, explicit := range []bool{false, true} {
-			cfg := Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
+			cfg := core.Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
 			if explicit {
 				core.MarkWorkRootExplicit(&cfg)
 				cfg.TargetOS = "existing-target"

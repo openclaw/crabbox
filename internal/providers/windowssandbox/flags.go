@@ -118,7 +118,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "windows-sandbox-memory-mb") {
 		if *v.MemoryMB < 0 {
-			return exit(2, "--windows-sandbox-memory-mb must be non-negative")
+			return core.Exit(2, "--windows-sandbox-memory-mb must be non-negative")
 		}
 		cfg.WindowsSandbox.MemoryMB = *v.MemoryMB
 		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")

@@ -9,7 +9,7 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func (b *backend) syncWorkspace(ctx context.Context, api superserveClient, access *sandboxAccess, req RunRequest, workdir string, prepared ...*core.PreparedArchive) ([]timingPhase, time.Duration, error) {
+func (b *backend) syncWorkspace(ctx context.Context, api superserveClient, access *sandboxAccess, req core.RunRequest, workdir string, prepared ...*core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
 	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
 		Config:              b.cfg,
 		Repo:                req.Repo,
@@ -34,18 +34,18 @@ func (b *backend) syncWorkspace(ctx context.Context, api superserveClient, acces
 
 func (b *backend) execShell(ctx context.Context, api superserveClient, access *sandboxAccess, command string) error {
 	res, err := api.Exec(ctx, access, execRequest{
-		Command:     "sh -lc " + shellQuote(command),
+		Command:     "sh -lc " + core.ShellQuote(command),
 		TimeoutSecs: b.execTimeoutSecs(),
 	}, io.Discard, io.Discard)
 	if err != nil {
 		return err
 	}
 	if res.ExitCode != 0 {
-		return exit(res.ExitCode, "superserve exec %q exited %d: %s", command, res.ExitCode, strings.TrimSpace(res.Stderr))
+		return core.Exit(res.ExitCode, "superserve exec %q exited %d: %s", command, res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	return nil
 }
 
 func (b *backend) ensureWorkspace(ctx context.Context, api superserveClient, access *sandboxAccess, workdir string) error {
-	return b.execShell(ctx, api, access, "mkdir -p "+shellQuote(workdir))
+	return b.execShell(ctx, api, access, "mkdir -p "+core.ShellQuote(workdir))
 }

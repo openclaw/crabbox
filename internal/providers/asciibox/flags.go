@@ -1,9 +1,9 @@
 package asciibox
 
-import core "github.com/openclaw/crabbox/internal/cli"
-
 import (
 	"flag"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type flagValues struct {
@@ -12,7 +12,7 @@ type flagValues struct {
 	Workdir *string
 }
 
-func RegisterAsciiBoxProviderFlags(fs *flag.FlagSet, defaults Config) any {
+func RegisterAsciiBoxProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
 		BaseURL: fs.String("ascii-box-base-url", defaults.AsciiBox.BaseURL, "trusted ASCII Box API base URL"),
 		CLIPath: fs.String("ascii-box-cli", defaults.AsciiBox.CLIPath, "ASCII Box CLI path"),
@@ -20,13 +20,13 @@ func RegisterAsciiBoxProviderFlags(fs *flag.FlagSet, defaults Config) any {
 	}
 }
 
-func ApplyAsciiBoxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+func ApplyAsciiBoxProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == providerName || cfg.Provider == "ascii" || cfg.Provider == "asciibox" || cfg.Provider == "ascii-box" {
 		if core.FlagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=%s", providerName)
+			return core.Exit(2, "--class is not supported for provider=%s", providerName)
 		}
 		if core.FlagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=%s", providerName)
+			return core.Exit(2, "--type is not supported for provider=%s", providerName)
 		}
 	}
 	v, ok := values.(flagValues)

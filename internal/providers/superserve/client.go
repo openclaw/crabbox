@@ -107,7 +107,7 @@ type superserveAPIError struct {
 func (e *superserveAPIError) Error() string { return e.err.Error() }
 func (e *superserveAPIError) Unwrap() error { return e.err }
 
-func newSuperserveClient(cfg Config, rt Runtime) (superserveClient, error) {
+func newSuperserveClient(cfg core.Config, rt core.Runtime) (superserveClient, error) {
 	baseURL, err := validateSuperserveBaseURL(cfg.Superserve.BaseURL)
 	if err != nil {
 		return nil, err
@@ -117,7 +117,7 @@ func newSuperserveClient(cfg Config, rt Runtime) (superserveClient, error) {
 		os.Getenv("SUPERSERVE_API_KEY"),
 	)
 	if apiKey == "" {
-		return nil, exit(2, "provider=superserve needs an API key; load CRABBOX_SUPERSERVE_API_KEY or SUPERSERVE_API_KEY from a secret manager")
+		return nil, core.Exit(2, "provider=superserve needs an API key; load CRABBOX_SUPERSERVE_API_KEY or SUPERSERVE_API_KEY from a secret manager")
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
@@ -184,7 +184,7 @@ func (c *httpSuperserveClient) CreateSandbox(ctx context.Context, req createSand
 		return superserveSandbox{}, err
 	}
 	if sb.ID == "" {
-		return superserveSandbox{}, exit(5, "superserve create returned no sandbox id")
+		return superserveSandbox{}, core.Exit(5, "superserve create returned no sandbox id")
 	}
 	return sb, nil
 }
@@ -256,13 +256,13 @@ func (c *httpSuperserveClient) DeleteSandbox(ctx context.Context, id string) err
 
 func (c *httpSuperserveClient) UploadFile(ctx context.Context, access *sandboxAccess, remotePath string, content io.Reader) error {
 	if strings.TrimSpace(remotePath) == "" || !strings.HasPrefix(remotePath, "/") || strings.Contains(remotePath, "..") {
-		return exit(2, "superserve file path must be absolute and must not contain '..': %q", remotePath)
+		return core.Exit(2, "superserve file path must be absolute and must not contain '..': %q", remotePath)
 	}
 	seeker, canSeek := content.(io.Seeker)
 	return c.withAccessRetry(ctx, access, func(token string) error {
 		if canSeek {
 			if _, err := seeker.Seek(0, io.SeekStart); err != nil {
-				return exit(6, "rewind sync archive: %v", err)
+				return core.Exit(6, "rewind sync archive: %v", err)
 			}
 		}
 		target, err := c.dataPlaneTarget(access.Sandbox.ID)
@@ -333,7 +333,7 @@ func (c *httpSuperserveClient) postAccess(ctx context.Context, apiPath string) (
 	}
 	token := core.Blank(raw.AccessToken, raw.Token)
 	if token == "" {
-		return sandboxAccess{}, exit(5, "superserve %s returned no access token", apiPath)
+		return sandboxAccess{}, core.Exit(5, "superserve %s returned no access token", apiPath)
 	}
 	sb := raw.Sandbox
 	if sb.ID == "" {
@@ -353,10 +353,10 @@ func (c *httpSuperserveClient) postAccess(ctx context.Context, apiPath string) (
 
 func (c *httpSuperserveClient) withAccessRetry(ctx context.Context, access *sandboxAccess, send func(token string) error) error {
 	if access == nil || strings.TrimSpace(access.Sandbox.ID) == "" {
-		return exit(5, "superserve data-plane request needs an activated sandbox")
+		return core.Exit(5, "superserve data-plane request needs an activated sandbox")
 	}
 	if strings.TrimSpace(access.AccessToken) == "" {
-		return exit(5, "superserve activated sandbox %s returned no access token", access.Sandbox.ID)
+		return core.Exit(5, "superserve activated sandbox %s returned no access token", access.Sandbox.ID)
 	}
 	err := send(access.AccessToken)
 	if !isSuperserveUnauthorized(err) {
@@ -393,7 +393,7 @@ func (c *httpSuperserveClient) dataPlaneTarget(sandboxID string) (dataPlaneTarge
 	}
 	sandboxHost, ok := deriveSuperserveSandboxHost(parsed.Hostname())
 	if !ok {
-		return dataPlaneTarget{}, exit(2, "provider=superserve cannot derive a data-plane sandbox host from base URL %s; use the production/staging Superserve API or a loopback development endpoint", c.baseURL)
+		return dataPlaneTarget{}, core.Exit(2, "provider=superserve cannot derive a data-plane sandbox host from base URL %s; use the production/staging Superserve API or a loopback development endpoint", c.baseURL)
 	}
 	if supportsSuperserveSharedHost(sandboxHost) {
 		return dataPlaneTarget{
@@ -580,7 +580,7 @@ func consumeSuperserveExecStream(body io.Reader, stdout, stderr io.Writer, secre
 					return execResult{}, fmt.Errorf("superserve write command stderr: %w", err)
 				}
 				if result.ExitCode == 0 {
-					return result, exit(5, "superserve command stream failed: %s", streamErr)
+					return result, core.Exit(5, "superserve command stream failed: %s", streamErr)
 				}
 			}
 		}
@@ -589,7 +589,7 @@ func consumeSuperserveExecStream(body io.Reader, stdout, stderr io.Writer, secre
 		return execResult{}, fmt.Errorf("superserve read /exec/stream: %w", err)
 	}
 	if !sawFinished {
-		return execResult{}, exit(5, "superserve command stream ended without a finished event")
+		return execResult{}, core.Exit(5, "superserve command stream ended without a finished event")
 	}
 	return result, nil
 }
@@ -652,7 +652,7 @@ func (c *httpSuperserveClient) apiError(method, apiPath string, resp *http.Respo
 	msg = redactSuperserveSecrets(msg, append([]string{c.apiKey}, secrets...)...)
 	return &superserveAPIError{
 		StatusCode: resp.StatusCode,
-		err:        exit(5, "superserve %s %s failed: %s: %s", method, apiPath, resp.Status, msg),
+		err:        core.Exit(5, "superserve %s %s failed: %s: %s", method, apiPath, resp.Status, msg),
 	}
 }
 

@@ -288,7 +288,7 @@ func TestTartOwnershipMarkerCannotAdoptOrFollowSymlinks(t *testing.T) {
 
 func TestCleanupFencesClaimThroughDeleteAndRetainsKey(t *testing.T) {
 	b, runner, claim := cleanupFixture(t)
-	key, err := testboxKeyPath(cleanupLease)
+	key, err := core.TestboxKeyPath(cleanupLease)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestSuperserveClientCreateListActivateAndDelete(t *testing.T) {
@@ -53,7 +55,7 @@ func TestSuperserveClientCreateListActivateAndDelete(t *testing.T) {
 	defer server.Close()
 
 	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
-	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +116,7 @@ func TestSuperserveClientRejectsCrossOriginRedirect(t *testing.T) {
 	}))
 	defer server.Close()
 	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
-	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +133,7 @@ func TestSuperserveClientRedactsSecretsFromErrors(t *testing.T) {
 	}))
 	defer server.Close()
 	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
-	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +159,7 @@ func TestSuperserveClientUpdateDoesNotFabricateMissingMetadata(t *testing.T) {
 	}))
 	defer server.Close()
 	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
-	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +185,7 @@ func TestSuperserveClientUpdateFetchesSandboxAfterEmptyPatch(t *testing.T) {
 	}))
 	defer server.Close()
 	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
-	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +245,7 @@ func TestSuperserveClientDataPlaneUploadAndStreamUseAccessTokenRouting(t *testin
 	defer server.Close()
 
 	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
-	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +310,7 @@ func TestSuperserveClientRefreshesAccessTokenOnDataPlane401(t *testing.T) {
 	defer server.Close()
 
 	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
-	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +352,7 @@ func TestSuperserveClientFallsBackToBufferedExecWhenStreamUnsupported(t *testing
 	defer server.Close()
 
 	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
-	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +398,7 @@ func TestSuperserveUploadHonorsCallerDeadline(t *testing.T) {
 		}, nil
 	})}
 	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
-	client, err := newSuperserveClient(testConfigWithBaseURL("http://localhost"), Runtime{HTTP: httpClient})
+	client, err := newSuperserveClient(testConfigWithBaseURL("http://localhost"), core.Runtime{HTTP: httpClient})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +447,7 @@ func TestSuperserveClientStreamDoesNotRetainUnboundedOutput(t *testing.T) {
 	defer server.Close()
 
 	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
-	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -498,7 +500,7 @@ func TestSuperserveClientPropagatesOutputWriterFailures(t *testing.T) {
 			defer server.Close()
 
 			t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
-			client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+			client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), core.Runtime{HTTP: server.Client()})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -530,7 +532,7 @@ func TestSuperserveClientRedactsForwardedEnvValuesFromExecErrors(t *testing.T) {
 		defer server.Close()
 
 		t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
-		client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+		client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), core.Runtime{HTTP: server.Client()})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -560,7 +562,7 @@ func TestSuperserveClientRedactsForwardedEnvValuesFromExecErrors(t *testing.T) {
 		defer server.Close()
 
 		t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
-		client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+		client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), core.Runtime{HTTP: server.Client()})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -601,7 +603,7 @@ func TestSuperserveClientStreamRequiresFinishedEvent(t *testing.T) {
 	defer server.Close()
 
 	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
-	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -624,7 +626,7 @@ func TestSuperserveClientRejectsTerminalStreamError(t *testing.T) {
 	defer server.Close()
 
 	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
-	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -654,7 +656,7 @@ func TestSuperserveClientPreservesExitCodeWithTerminalStreamError(t *testing.T) 
 	defer server.Close()
 
 	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
-	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -683,7 +685,7 @@ func writeTestJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func testConfigWithBaseURL(baseURL string) Config {
+func testConfigWithBaseURL(baseURL string) core.Config {
 	cfg := testConfig()
 	cfg.Superserve.BaseURL = baseURL
 	return cfg

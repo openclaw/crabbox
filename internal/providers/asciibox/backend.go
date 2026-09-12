@@ -16,12 +16,12 @@ import (
 )
 
 type backend struct {
-	spec ProviderSpec
-	cfg  Config
-	rt   Runtime
+	spec core.ProviderSpec
+	cfg  core.Config
+	rt   core.Runtime
 }
 
-func NewBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+func NewBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = providerName
 	cfg.TargetOS = targetLinux
 	cfg.Network = networkPublic
@@ -31,50 +31,50 @@ func NewBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	return &backend{spec: spec, cfg: cfg, rt: rt}
 }
 
-func (b *backend) Spec() ProviderSpec { return b.spec }
+func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
-func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
+func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	cfg, err := b.configForRun()
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	client, err := newAPI(cfg, b.rt)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
-	leaseID := newLeaseID()
-	slug, err := allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
+	leaseID := core.NewLeaseID()
+	slug, err := core.AllocateClaimLeaseSlug(leaseID, req.RequestedSlug)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	ttl := req.Options.TTL
 	if ttl <= 0 {
 		ttl = cfg.TTL
 	}
-	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s ttl=%s\n", providerName, leaseID, slug, blank(ttl.String(), "-"))
+	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s ttl=%s\n", providerName, leaseID, slug, core.Blank(ttl.String(), "-"))
 	box, createErr := client.CreateBox(ctx, createRequest{TTL: ttl})
 	if !concreteBoxID(box.createdID) || box.ID != box.createdID {
 		if createErr != nil {
-			return LeaseTarget{}, fmt.Errorf("ascii-box creation did not establish an original Box ID; retaining any resource: %w", createErr)
+			return core.LeaseTarget{}, fmt.Errorf("ascii-box creation did not establish an original Box ID; retaining any resource: %w", createErr)
 		}
-		return LeaseTarget{}, exit(2, "ascii-box creation did not establish an original Box ID; retaining any resource")
+		return core.LeaseTarget{}, core.Exit(2, "ascii-box creation did not establish an original Box ID; retaining any resource")
 	}
 	if createErr != nil {
-		return LeaseTarget{}, errors.Join(createErr, b.rollbackBox(ctx, client, leaseID, box, LeaseClaim{}, false))
+		return core.LeaseTarget{}, errors.Join(createErr, b.rollbackBox(ctx, client, leaseID, box, core.LeaseClaim{}, false))
 	}
 	fresh, err := client.GetBox(ctx, box.ID)
 	if err != nil {
-		return LeaseTarget{}, fmt.Errorf("ascii-box created %s but could not verify its identity; resource retained: %w", box.ID, err)
+		return core.LeaseTarget{}, fmt.Errorf("ascii-box created %s but could not verify its identity; resource retained: %w", box.ID, err)
 	}
 	if fresh.ID != box.ID || boxCreationTime(fresh) == "" || boxCreationTime(box) != "" && boxCreationTime(fresh) != boxCreationTime(box) {
-		return LeaseTarget{}, exit(2, "ascii-box created %s but its creation identity is missing or changed; resource retained", box.ID)
+		return core.LeaseTarget{}, core.Exit(2, "ascii-box created %s but its creation identity is missing or changed; resource retained", box.ID)
 	}
 	box = mergeBox(box, fresh)
 	claim, err := publishBoxClaim(cfg, leaseID, slug, req.Repo.Root, box, req.Keep)
 	if err != nil {
-		return LeaseTarget{}, errors.Join(err, b.rollbackBox(ctx, client, leaseID, box, LeaseClaim{}, false))
+		return core.LeaseTarget{}, errors.Join(err, b.rollbackBox(ctx, client, leaseID, box, core.LeaseClaim{}, false))
 	}
-	var lease LeaseTarget
+	var lease core.LeaseTarget
 	err = core.WithLeaseClaimUnchanged(leaseID, claim, func() error {
 		current, err := client.GetBox(ctx, box.ID)
 		if err != nil {
@@ -93,7 +93,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		if !req.Keep {
 			err = errors.Join(err, b.rollbackBox(ctx, client, leaseID, box, claim, true))
 		}
-		return LeaseTarget{}, fmt.Errorf("ascii-box lease=%s box=%s preparation failed: %w", leaseID, box.ID, err)
+		return core.LeaseTarget{}, fmt.Errorf("ascii-box lease=%s box=%s preparation failed: %w", leaseID, box.ID, err)
 	}
 	core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
 	if req.OnAcquired != nil {
@@ -101,19 +101,19 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 			if !req.Keep {
 				err = errors.Join(err, b.rollbackBox(ctx, client, leaseID, box, claim, true))
 			}
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 	}
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s slug=%s box=%s host=%s state=%s\n", leaseID, slug, box.ID, boxHost(box), boxState(box))
 	return lease, nil
 }
 
-func (b *backend) rollbackBox(ctx context.Context, client api, leaseID string, box boxData, claim LeaseClaim, exists bool) error {
+func (b *backend) rollbackBox(ctx context.Context, client api, leaseID string, box boxData, claim core.LeaseClaim, exists bool) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), boxReleaseTimeout)
 	defer cancel()
 	if exists {
 		if claim.LeaseID != leaseID || box.ID != box.createdID || !concreteBoxID(box.createdID) {
-			return exit(2, "ascii-box rollback has no matching original publication identity")
+			return core.Exit(2, "ascii-box rollback has no matching original publication identity")
 		}
 		if err := validateBoxIdentity(box, boxFromClaim(claim)); err != nil {
 			return err
@@ -122,7 +122,7 @@ func (b *backend) rollbackBox(ctx context.Context, client api, leaseID string, b
 	}
 	return core.CleanupLeaseClaimIfUnchangedAfter(leaseID, claim, false, func() error {
 		if box.ID != box.createdID || !concreteBoxID(box.createdID) {
-			return exit(2, "ascii-box rollback has no original creation identity")
+			return core.Exit(2, "ascii-box rollback has no original creation identity")
 		}
 		if boxCreationTime(box) == "" {
 			fresh, err := client.GetBox(cleanupCtx, box.ID)
@@ -130,7 +130,7 @@ func (b *backend) rollbackBox(ctx context.Context, client api, leaseID string, b
 				return err
 			}
 			if fresh.ID != box.ID || boxCreationTime(fresh) == "" {
-				return exit(2, "ascii-box rollback cannot establish creation identity for %s; retained", box.ID)
+				return core.Exit(2, "ascii-box rollback cannot establish creation identity for %s; retained", box.ID)
 			}
 			box = mergeBox(box, fresh)
 		}
@@ -138,31 +138,31 @@ func (b *backend) rollbackBox(ctx context.Context, client api, leaseID string, b
 	})
 }
 
-func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
 	cfg, err := b.configForRun()
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	client, err := newAPI(cfg, b.rt)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if req.IsReadOnlyStatus() {
 		leaseID, boxID, slug, err := b.resolveBoxID(ctx, client, req.ID)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		box, err := client.GetBox(ctx, boxID)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
-		return LeaseTarget{Server: boxToServer(cfg, box, leaseID, slug, true), LeaseID: leaseID}, nil
+		return core.LeaseTarget{Server: boxToServer(cfg, box, leaseID, slug, true), LeaseID: leaseID}, nil
 	}
 	claim, err := resolveOwnedBox(cfg, req.ID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
-	var lease LeaseTarget
+	var lease core.LeaseTarget
 	err = core.WithLeaseClaimUnchanged(claim.LeaseID, claim, func() error {
 		if !req.ReleaseOnly && req.Repo.Root != "" {
 			if err := core.CheckLeaseClaimRepositoryOwner(claim.LeaseID, claim, req.Repo.Root, req.Reclaim); err != nil {
@@ -188,7 +188,7 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 		if err := validateBoxIdentity(box, boxFromClaim(claim)); err != nil {
 			return err
 		}
-		lease = LeaseTarget{Server: boxToServer(cfg, box, claim.LeaseID, claim.Slug, true), LeaseID: claim.LeaseID}
+		lease = core.LeaseTarget{Server: boxToServer(cfg, box, claim.LeaseID, claim.Slug, true), LeaseID: claim.LeaseID}
 		if req.ReleaseOnly {
 			return nil
 		}
@@ -199,13 +199,13 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 		return err
 	})
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
 	return lease, nil
 }
 
-func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *backend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	_ = req
 	cfg, err := b.configForRun()
 	if err != nil {
@@ -223,7 +223,7 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Server, 0, len(boxes))
+	out := make([]core.Server, 0, len(boxes))
 	for _, box := range boxes {
 		leaseID, slug, ok := b.boxLeaseMetadata(box, claims)
 		if !ok {
@@ -234,36 +234,36 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 	return out, nil
 }
 
-func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	cfg, err := b.configForRun()
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
 	client, err := newAPI(cfg, b.rt)
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
 	if err := client.Check(ctx); err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
-	return DoctorResult{
+	return core.DoctorResult{
 		Provider: providerName,
 		Message:  "auth=ready cli=ready control_plane=ready limits=ready mutation=false runtime=unchecked",
 	}, nil
 }
 
-func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, error) {
+func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
 	cfg, err := b.configForRun()
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	client, err := newAPI(cfg, b.rt)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	leaseID, boxID, slug, err := b.resolveBoxID(ctx, client, req.ID)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	deadline := b.now().Add(req.WaitTimeout)
 	if req.WaitTimeout <= 0 {
@@ -272,7 +272,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	for {
 		box, err := client.GetBox(ctx, boxID)
 		if err != nil {
-			return StatusView{}, err
+			return core.StatusView{}, err
 		}
 		view := statusFromBox(cfg, box, leaseID, slug)
 		if !req.Wait || view.Ready {
@@ -282,17 +282,17 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 			return view, nil
 		}
 		if b.now().After(deadline) {
-			return StatusView{}, exit(5, "timed out waiting for ascii-box %s to become ready", boxID)
+			return core.StatusView{}, core.Exit(5, "timed out waiting for ascii-box %s to become ready", boxID)
 		}
 		select {
 		case <-ctx.Done():
-			return StatusView{}, ctx.Err()
+			return core.StatusView{}, ctx.Err()
 		case <-time.After(2 * time.Second):
 		}
 	}
 }
 
-func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
 	cfg, err := b.configForRun()
 	if err != nil {
 		return err
@@ -312,7 +312,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 		return err
 	}
 	if req.Lease.LeaseID != claim.LeaseID || req.Lease.Server.CloudID != claim.CloudID || req.Lease.Server.Labels["box_id"] != claim.CloudID {
-		return exit(2, "ascii-box release target differs from its original claim")
+		return core.Exit(2, "ascii-box release target differs from its original claim")
 	}
 	ctx, cancel := context.WithTimeout(ctx, boxReleaseTimeout)
 	defer cancel()
@@ -328,50 +328,50 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	})
 }
 
-func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
-	return fmt.Sprintf("released lease=%s box=%s", lease.LeaseID, blank(lease.Server.CloudID, lease.Server.Labels["box_id"]))
+func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
+	return fmt.Sprintf("released lease=%s box=%s", lease.LeaseID, core.Blank(lease.Server.CloudID, lease.Server.Labels["box_id"]))
 }
 
-func (b *backend) Touch(_ context.Context, req TouchRequest) (Server, error) {
+func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, error) {
 	cfg, err := b.configForRun()
 	if err != nil {
-		return Server{}, err
+		return core.Server{}, err
 	}
 	server := req.Lease.Server
 	if server.Labels == nil {
 		server.Labels = map[string]string{}
 	}
-	server.Labels = touchDirectLeaseLabels(server.Labels, cfg, req.State, time.Now().UTC())
+	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, req.State, time.Now().UTC())
 	server.Status = req.State
 	return server, nil
 }
 
-func (b *backend) leaseFromBox(ctx context.Context, cfg Config, box boxData, leaseID, slug string, keep, waitSSH bool) (LeaseTarget, error) {
+func (b *backend) leaseFromBox(ctx context.Context, cfg core.Config, box boxData, leaseID, slug string, keep, waitSSH bool) (core.LeaseTarget, error) {
 	server := boxToServer(cfg, box, leaseID, slug, keep)
 	target, err := boxSSHTarget(cfg, box)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if waitSSH {
-		if err := waitForSSHReadyFunc(ctx, &target, b.rt.Stderr, "ascii-box ssh", bootstrapWaitTimeout(cfg)); err != nil {
-			return LeaseTarget{}, err
+		if err := waitForSSHReadyFunc(ctx, &target, b.rt.Stderr, "ascii-box ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
+			return core.LeaseTarget{}, err
 		}
 		server.Labels["state"] = "ready"
 		server.Status = "ready"
 	}
-	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
 // resolveBoxID is discovery only. It must never create or update ownership.
 func (b *backend) resolveBoxID(ctx context.Context, client api, id string) (string, string, string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return "", "", "", exit(2, "provider=%s requires a Crabbox lease id, slug, or ASCII Box id", providerName)
+		return "", "", "", core.Exit(2, "provider=%s requires a Crabbox lease id, slug, or ASCII Box id", providerName)
 	}
-	if claim, ok, err := resolveLeaseClaimForProvider(id, providerName); err != nil {
+	if claim, ok, err := core.ResolveLeaseClaimForProvider(id, providerName); err != nil {
 		return "", "", "", err
 	} else if ok {
-		boxID := blank(claim.CloudID, boxIDFromScope(claim.ProviderScope))
+		boxID := core.Blank(claim.CloudID, boxIDFromScope(claim.ProviderScope))
 		if boxID == "" {
 			box, err := resolveLegacyBoxByLease(ctx, client, claim.LeaseID)
 			if err != nil {
@@ -413,7 +413,7 @@ func resolveLegacyBoxByLease(ctx context.Context, client api, leaseID string) (b
 			return box, nil
 		}
 	}
-	return boxData{}, exit(4, "ascii-box lease %q was not found", leaseID)
+	return boxData{}, core.Exit(4, "ascii-box lease %q was not found", leaseID)
 }
 
 func resolveLegacyBoxBySlug(ctx context.Context, client api, slug string) (boxData, error) {
@@ -430,10 +430,10 @@ func resolveLegacyBoxBySlug(ctx context.Context, client api, slug string) (boxDa
 			return box, nil
 		}
 	}
-	return boxData{}, exit(4, "ascii-box %q was not found", slug)
+	return boxData{}, core.Exit(4, "ascii-box %q was not found", slug)
 }
 
-func (b *backend) boxLeaseMetadata(box boxData, claims map[string]LeaseClaim) (string, string, bool) {
+func (b *backend) boxLeaseMetadata(box boxData, claims map[string]core.LeaseClaim) (string, string, bool) {
 	if claim, ok := claims[box.ID]; ok {
 		return claim.LeaseID, claim.Slug, true
 	}
@@ -444,15 +444,15 @@ func (b *backend) boxLeaseMetadata(box boxData, claims map[string]LeaseClaim) (s
 	return "", "", false
 }
 
-func (b *backend) configForRun() (Config, error) {
+func (b *backend) configForRun() (core.Config, error) {
 	cfg := b.cfg
 	cfg.Provider = providerName
 	cfg.TargetOS = targetLinux
 	cfg.Network = networkPublic
-	cfg.SSHPort = blank(strings.TrimSpace(cfg.SSHPort), "22")
+	cfg.SSHPort = core.Blank(strings.TrimSpace(cfg.SSHPort), "22")
 	cleaned, err := cleanWorkdir(workdir(cfg))
 	if err != nil {
-		return Config{}, err
+		return core.Config{}, err
 	}
 	cfg.WorkRoot = cleaned
 	return cfg, nil
@@ -462,8 +462,8 @@ func (b *backend) now() time.Time {
 	return now(b.rt)
 }
 
-func boxToServer(cfg Config, box boxData, leaseID, slug string, keep bool) Server {
-	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
+func boxToServer(cfg core.Config, box boxData, leaseID, slug string, keep bool) core.Server {
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
 	labels["box_id"] = box.ID
 	labels["ascii_box_scope"] = (Provider{}).ClaimScope(cfg)
 	labels[boxCreationLabel] = boxCreationTime(box)
@@ -474,10 +474,10 @@ func boxToServer(cfg Config, box boxData, leaseID, slug string, keep bool) Serve
 	if expiresAt := boxExpiresAt(box); expiresAt != "" {
 		labels["expires_at"] = expiresAt
 	}
-	server := Server{
+	server := core.Server{
 		Provider: providerName,
 		CloudID:  box.ID,
-		Name:     blank(box.Name, leaseProviderName(leaseID, slug)),
+		Name:     core.Blank(box.Name, core.LeaseProviderName(leaseID, slug)),
 		Status:   boxState(box),
 		Labels:   labels,
 	}
@@ -486,7 +486,7 @@ func boxToServer(cfg Config, box boxData, leaseID, slug string, keep bool) Serve
 	return server
 }
 
-func statusFromBox(cfg Config, box boxData, leaseID, slug string) StatusView {
+func statusFromBox(cfg core.Config, box boxData, leaseID, slug string) core.StatusView {
 	server := boxToServer(cfg, box, leaseID, slug, true)
 	host := boxHost(box)
 	sshHost := host
@@ -496,7 +496,7 @@ func statusFromBox(cfg Config, box boxData, leaseID, slug string) StatusView {
 		port = endpointPort
 	}
 	user := boxSSHUser(box)
-	return StatusView{
+	return core.StatusView{
 		ID:         leaseID,
 		Slug:       slug,
 		Provider:   providerName,
@@ -517,16 +517,16 @@ func statusFromBox(cfg Config, box boxData, leaseID, slug string) StatusView {
 	}
 }
 
-func boxSSHTarget(cfg Config, box boxData) (SSHTarget, error) {
+func boxSSHTarget(cfg core.Config, box boxData) (core.SSHTarget, error) {
 	host, port, err := boxSSHConnection(box)
 	if err != nil {
-		return SSHTarget{}, err
+		return core.SSHTarget{}, err
 	}
 	user := boxSSHUser(box)
 	if user == "" {
-		return SSHTarget{}, exit(5, "ascii-box %s is missing SSH user", box.ID)
+		return core.SSHTarget{}, core.Exit(5, "ascii-box %s is missing SSH user", box.ID)
 	}
-	return SSHTarget{
+	return core.SSHTarget{
 		User:            user,
 		Host:            host,
 		Key:             boxSSHKey(cfg),
@@ -542,18 +542,18 @@ func boxSSHConnection(box boxData) (string, string, error) {
 	if endpoint := strings.TrimSpace(firstNonBlank(box.SSHEndpoint, box.SSHEndpointAlt)); endpoint != "" {
 		host, port, err := net.SplitHostPort(endpoint)
 		if err != nil || strings.TrimSpace(host) == "" || strings.TrimSpace(port) == "" {
-			return "", "", exit(5, "ascii-box %s has invalid SSH endpoint %q", box.ID, endpoint)
+			return "", "", core.Exit(5, "ascii-box %s has invalid SSH endpoint %q", box.ID, endpoint)
 		}
 		return strings.TrimSpace(host), strings.TrimSpace(port), nil
 	}
 	host := boxHost(box)
 	if host == "" {
-		return "", "", exit(5, "ascii-box %s is missing ip for SSH", box.ID)
+		return "", "", core.Exit(5, "ascii-box %s is missing ip for SSH", box.ID)
 	}
 	return host, "22", nil
 }
 
-func boxSSHKey(cfg Config) string {
+func boxSSHKey(cfg core.Config) string {
 	return path.Join(asciiBoxCLIHome(), ".ssh", "ascii_box_ed25519")
 }
 
@@ -566,7 +566,7 @@ func boxSSHUser(box boxData) string {
 }
 
 func boxState(box boxData) string {
-	return strings.ToLower(blank(firstNonBlank(box.Status, box.State), "provisioning"))
+	return strings.ToLower(core.Blank(firstNonBlank(box.Status, box.State), "provisioning"))
 }
 
 func boxExpiresAt(box boxData) string {
@@ -630,7 +630,7 @@ func boxSlug(leaseID string, box boxData) string {
 	if match := boxNamePattern.FindStringSubmatch(strings.TrimSpace(box.Name)); len(match) == 3 {
 		return match[1]
 	}
-	return newLeaseSlug(leaseID)
+	return core.NewLeaseSlug(leaseID)
 }
 
 func boxIDFromScope(scope string) string {
@@ -641,12 +641,12 @@ func boxIDFromScope(scope string) string {
 	return strings.TrimSpace(strings.TrimPrefix(scope, "box:"))
 }
 
-func boxClaimsByID(cfg Config) (map[string]LeaseClaim, error) {
-	claims, err := listLeaseClaims()
+func boxClaimsByID(cfg core.Config) (map[string]core.LeaseClaim, error) {
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]LeaseClaim{}
+	out := map[string]core.LeaseClaim{}
 	for _, claim := range claims {
 		if claim.Provider != providerName {
 			continue
@@ -675,22 +675,22 @@ func isNotFound(err error) bool {
 	return strings.Contains(msg, "404") || strings.Contains(msg, "not found")
 }
 
-func workdir(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.AsciiBox.Workdir), "/home/user/crabbox")
+func workdir(cfg core.Config) string {
+	return core.Blank(strings.TrimSpace(cfg.AsciiBox.Workdir), "/home/user/crabbox")
 }
 
 func cleanWorkdir(workdir string) (string, error) {
 	trimmed := strings.TrimSpace(workdir)
 	if trimmed == "" {
-		return "", exit(2, "ascii-box workdir is empty")
+		return "", core.Exit(2, "ascii-box workdir is empty")
 	}
 	clean := path.Clean(trimmed)
 	if !strings.HasPrefix(clean, "/") {
-		return "", exit(2, "ascii-box workdir %q must resolve to an absolute path", workdir)
+		return "", core.Exit(2, "ascii-box workdir %q must resolve to an absolute path", workdir)
 	}
 	switch clean {
 	case "/", "/bin", "/dev", "/etc", "/home", "/home/user", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var", "/workspace", "/workspace/home":
-		return "", exit(2, "ascii-box workdir %q is too broad; choose a dedicated subdirectory", clean)
+		return "", core.Exit(2, "ascii-box workdir %q is too broad; choose a dedicated subdirectory", clean)
 	}
 	return clean, nil
 }
@@ -699,4 +699,4 @@ func firstNonBlank(values ...string) string {
 	return shared.FirstNonBlankTrimmed(values...)
 }
 
-var waitForSSHReadyFunc = waitForSSHReady
+var waitForSSHReadyFunc = core.WaitForSSHReady

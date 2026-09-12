@@ -18,33 +18,33 @@ const (
 	wandbStatusWaitTimeout  = 5 * time.Minute
 )
 
-func NewWandbBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+func NewWandbBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = providerName
 	applyWandbDefaults(&cfg)
 	return &wandbBackend{spec: spec, cfg: cfg, rt: rt}
 }
 
 type wandbBackend struct {
-	spec   ProviderSpec
-	cfg    Config
-	rt     Runtime
+	spec   core.ProviderSpec
+	cfg    core.Config
+	rt     core.Runtime
 	client wandbAPI
 }
 
-func (b *wandbBackend) Spec() ProviderSpec { return b.spec }
+func (b *wandbBackend) Spec() core.ProviderSpec { return b.spec }
 
-func (b *wandbBackend) Warmup(ctx context.Context, req WarmupRequest) error {
+func (b *wandbBackend) Warmup(ctx context.Context, req core.WarmupRequest) error {
 	_ = ctx
 	_ = req
-	return exit(2, "provider=%s does not support warmup; sandboxes are acquired per-run", providerName)
+	return core.Exit(2, "provider=%s does not support warmup; sandboxes are acquired per-run", providerName)
 }
 
-func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
+func (b *wandbBackend) Run(ctx context.Context, req core.RunRequest) (result core.RunResult, retErr error) {
 	if err := rejectWandbRunOptions(req); err != nil {
-		return RunResult{}, err
+		return core.RunResult{}, err
 	}
 	if len(req.Command) == 0 {
-		return RunResult{}, exit(2, "missing command")
+		return core.RunResult{}, core.Exit(2, "missing command")
 	}
 	// Credential resolution lives in the client (CRABBOX_WANDB_API_KEY →
 	// cfg.Wandb.APIKey → WANDB_API_KEY plus required WANDB_ENTITY_NAME). The
@@ -52,12 +52,12 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (result RunResul
 	// CRABBOX_WANDB_API_KEY override.
 	client, err := b.api()
 	if err != nil {
-		return RunResult{}, err
+		return core.RunResult{}, err
 	}
 	defer b.closeClientAfterOperation()
 	providerScope, err := wandbProviderScope()
 	if err != nil {
-		return RunResult{}, err
+		return core.RunResult{}, err
 	}
 	started := core.ClockNow(b.rt.Clock)
 	cfg := b.cfg
@@ -66,7 +66,7 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (result RunResul
 
 	sandboxID := strings.TrimSpace(req.ID)
 	acquired := false
-	var claim LeaseClaim
+	var claim core.LeaseClaim
 	if sandboxID == "" {
 		fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s image=%s max_lifetime=%ds\n", providerName, image, maxLifetime)
 		sb, err := client.Acquire(ctx, wandbAcquireRequest{
@@ -76,7 +76,7 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (result RunResul
 			EnvironmentVars: req.Env,
 		})
 		if err != nil {
-			return RunResult{}, err
+			return core.RunResult{}, err
 		}
 		sandboxID = sb.ID
 		acquired = true
@@ -86,12 +86,12 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (result RunResul
 			stopCtx, cancel := context.WithTimeout(context.Background(), wandbStopTimeout)
 			defer cancel()
 			if stopErr := client.Stop(stopCtx, sandboxID, 10, true); stopErr != nil {
-				return RunResult{}, fmt.Errorf("persist wandb sandbox %s ownership claim: %w (rollback stop also failed: %v)", sandboxID, err, stopErr)
+				return core.RunResult{}, fmt.Errorf("persist wandb sandbox %s ownership claim: %w (rollback stop also failed: %v)", sandboxID, err, stopErr)
 			}
-			return RunResult{}, fmt.Errorf("persist wandb sandbox %s ownership claim: %w", sandboxID, err)
+			return core.RunResult{}, fmt.Errorf("persist wandb sandbox %s ownership claim: %w", sandboxID, err)
 		}
 		if req.EnvSummary {
-			printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+			core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 		}
 	} else {
 		if len(req.Env) > 0 && !wandbExistingIDEnvCanBeOmitted(req) {
@@ -100,11 +100,11 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (result RunResul
 			// selected env on an already-running sandbox. Core-owned run metadata
 			// may be omitted, as can the built-in implicit CI/NODE_OPTIONS defaults;
 			// neither exception forwards new environment values through Exec.
-			return RunResult{}, exit(2, "provider=%s cannot forward env vars to an existing sandbox (--id); rerun without --id or omit --allow-env", providerName)
+			return core.RunResult{}, core.Exit(2, "provider=%s cannot forward env vars to an existing sandbox (--id); rerun without --id or omit --allow-env", providerName)
 		}
 		claim, sandboxID, err = requireWandbOwnership(ctx, client, sandboxID, providerScope)
 		if err != nil {
-			return RunResult{}, err
+			return core.RunResult{}, err
 		}
 	}
 
@@ -113,8 +113,8 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (result RunResul
 	// retain) and --keep-on-failure (retain only when the run fails) so
 	// users can debug a sandbox after a bad command.
 	shouldStop := acquired && !req.Keep
-	result = RunResult{
-		Session: &RunSessionHandle{
+	result = core.RunResult{
+		Session: &core.RunSessionHandle{
 			Provider:       providerName,
 			LeaseID:        sandboxID,
 			Slug:           sandboxID,
@@ -141,7 +141,7 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (result RunResul
 		}
 		result.Total = core.ClockNow(b.rt.Clock).Sub(started)
 		if req.TimingJSON {
-			timingErr := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
+			timingErr := core.WriteTimingJSON(b.rt.Stderr, core.TimingReportWithRunResult(core.TimingReport{
 				Provider: providerName, Slug: sandboxID,
 				CommandMs: result.Command.Milliseconds(), TotalMs: result.Total.Milliseconds(),
 				ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label),
@@ -175,19 +175,19 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (result RunResul
 
 	if execErr != nil {
 		result, execErr = shared.PinDelegatedRunFailure(result, execErr)
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, sandboxID, sandboxID, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		core.HandleDelegatedRunFailure(b.rt.Stderr, req, providerName, sandboxID, sandboxID, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		return result, execErr
 	}
 	result = core.FinalizeRunResult(result, nil)
 	if result.ExitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, sandboxID, sandboxID, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s sandbox exit=%d", providerName, result.ExitCode)}
+		core.HandleDelegatedRunFailure(b.rt.Stderr, req, providerName, sandboxID, sandboxID, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		return result, core.ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s sandbox exit=%d", providerName, result.ExitCode)}
 	}
 	return result, nil
 }
 
 func wandbCleanupCommand(sandboxID string) string {
-	return fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, shellQuote(sandboxID))
+	return fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, core.ShellQuote(sandboxID))
 }
 
 type wandbSandboxMissingError struct {
@@ -199,23 +199,23 @@ func (e *wandbSandboxMissingError) Error() string {
 }
 
 func (e *wandbSandboxMissingError) As(target any) bool {
-	if exitErr, ok := target.(*ExitError); ok {
-		*exitErr = ExitError{Code: 4, Message: e.Error()}
+	if exitErr, ok := target.(*core.ExitError); ok {
+		*exitErr = core.ExitError{Code: 4, Message: e.Error()}
 		return true
 	}
 	return false
 }
 
-func requireWandbOwnership(ctx context.Context, client wandbAPI, identifier, providerScope string) (LeaseClaim, string, error) {
+func requireWandbOwnership(ctx context.Context, client wandbAPI, identifier, providerScope string) (core.LeaseClaim, string, error) {
 	claim, ok, err := resolveWandbClaim(identifier)
 	if err != nil {
-		return LeaseClaim{}, "", err
+		return core.LeaseClaim{}, "", err
 	}
 	if !ok || claim.CloudID == "" {
-		return LeaseClaim{}, "", exit(4, "wandb sandbox %q has no matching local ownership claim", identifier)
+		return core.LeaseClaim{}, "", core.Exit(4, "wandb sandbox %q has no matching local ownership claim", identifier)
 	}
 	if claim.ProviderScope == "" || claim.ProviderScope != providerScope {
-		return LeaseClaim{}, "", exit(4, "wandb sandbox %q ownership claim belongs to a different endpoint, entity, or project", identifier)
+		return core.LeaseClaim{}, "", core.Exit(4, "wandb sandbox %q ownership claim belongs to a different endpoint, entity, or project", identifier)
 	}
 	if err := requireWandbInventoryOwnership(ctx, client, claim.CloudID); err != nil {
 		return claim, claim.CloudID, err
@@ -240,10 +240,10 @@ func requireWandbInventoryOwnership(ctx context.Context, client wandbAPI, sandbo
 		}
 		return err
 	}
-	return exit(4, "wandb sandbox %q still exists but is not tagged as Crabbox-managed", sandboxID)
+	return core.Exit(4, "wandb sandbox %q still exists but is not tagged as Crabbox-managed", sandboxID)
 }
 
-func (b *wandbBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *wandbBackend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	client, err := b.api()
 	if err != nil {
 		return nil, err
@@ -257,9 +257,9 @@ func (b *wandbBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, 
 	if err != nil {
 		return nil, err
 	}
-	views := make([]Server, 0, len(sandboxes))
+	views := make([]core.Server, 0, len(sandboxes))
 	for _, sb := range sandboxes {
-		views = append(views, Server{
+		views = append(views, core.Server{
 			CloudID:  sb.ID,
 			Provider: providerName,
 			Name:     sb.ID,
@@ -270,23 +270,23 @@ func (b *wandbBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, 
 	return views, nil
 }
 
-func (b *wandbBackend) Status(ctx context.Context, req StatusRequest) (StatusView, error) {
+func (b *wandbBackend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
 	sandboxID := strings.TrimSpace(req.ID)
 	if sandboxID == "" {
-		return StatusView{}, exit(2, "provider=%s status requires --id <sandbox-id>", providerName)
+		return core.StatusView{}, core.Exit(2, "provider=%s status requires --id <sandbox-id>", providerName)
 	}
 	client, err := b.api()
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	defer b.closeClientAfterOperation()
 	providerScope, err := wandbProviderScope()
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	_, sandboxID, err = requireWandbOwnership(ctx, client, sandboxID, providerScope)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	pollCtx := ctx
 	cancel := func() {}
@@ -315,14 +315,14 @@ func (b *wandbBackend) Status(ctx context.Context, req StatusRequest) (StatusVie
 		}, nil)
 	if err != nil {
 		if req.Wait && errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-			return StatusView{}, exit(5, "timed out waiting for wandb sandbox %s to become ready", sandboxID)
+			return core.StatusView{}, core.Exit(5, "timed out waiting for wandb sandbox %s to become ready", sandboxID)
 		}
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	sb := result.Value
 	state := strings.ToLower(strings.TrimSpace(sb.Status))
 	ready := state == "running"
-	return StatusView{
+	return core.StatusView{
 		ID:         sb.ID,
 		Slug:       sb.ID,
 		Provider:   providerName,
@@ -336,10 +336,10 @@ func (b *wandbBackend) Status(ctx context.Context, req StatusRequest) (StatusVie
 	}, nil
 }
 
-func (b *wandbBackend) Stop(ctx context.Context, req StopRequest) error {
+func (b *wandbBackend) Stop(ctx context.Context, req core.StopRequest) error {
 	sandboxID := strings.TrimSpace(req.ID)
 	if sandboxID == "" {
-		return exit(2, "provider=%s stop requires --id <sandbox-id>", providerName)
+		return core.Exit(2, "provider=%s stop requires --id <sandbox-id>", providerName)
 	}
 	client, err := b.api()
 	if err != nil {
@@ -367,10 +367,10 @@ func (b *wandbBackend) Stop(ctx context.Context, req StopRequest) error {
 // authenticated RPC, list inventory, return an inventory-style result. The
 // missing-credential and gRPC-unreachable cases bubble up through b.api() and
 // client.Version() with their typed errors.
-func (b *wandbBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+func (b *wandbBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	client, err := b.api()
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
 	defer b.closeClientAfterOperation()
 	if _, err := client.Version(ctx); err != nil {
@@ -378,13 +378,13 @@ func (b *wandbBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResul
 		// boundary unwraps it into ExitError with the mapped sysexit code
 		// (77 EX_NOPERM, 69 EX_UNAVAILABLE, 124 timeout, …). Wrapping with
 		// exit(1, …) here would erase that code.
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
-	views, err := b.List(ctx, ListRequest{})
+	views, err := b.List(ctx, core.ListRequest{})
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
-	return inventoryDoctorResult(providerName, len(views)), nil
+	return core.InventoryDoctorResult(providerName, len(views)), nil
 }
 
 func (b *wandbBackend) api() (wandbAPI, error) {
@@ -423,7 +423,7 @@ func (b *wandbBackend) closeClientAfterOperation() {
 // applyWandbDefaults fills in interpreter / image / lifetime defaults without
 // touching SSH or WorkRoot — delegated-run providers must not stomp on SSH
 // config.
-func applyWandbDefaults(cfg *Config) {
+func applyWandbDefaults(cfg *core.Config) {
 	cfg.Provider = providerName
 	if cfg.TargetOS == "" {
 		cfg.TargetOS = targetLinux
@@ -436,7 +436,7 @@ func applyWandbDefaults(cfg *Config) {
 	}
 }
 
-func wandbMaxLifetimeSeconds(cfg Config) int {
+func wandbMaxLifetimeSeconds(cfg core.Config) int {
 	maxLifetime := cfg.Wandb.MaxLifetimeSeconds
 	if maxLifetime <= 0 {
 		maxLifetime = core.WandbMaxLifetimeSecondsFallback
@@ -450,27 +450,27 @@ func wandbMaxLifetimeSeconds(cfg Config) int {
 	return maxLifetime
 }
 
-func rejectWandbRunOptions(req RunRequest) error {
+func rejectWandbRunOptions(req core.RunRequest) error {
 	if req.Reclaim {
-		return exit(2, "provider=%s lifecycle is owned by W&B; --reclaim is not supported", providerName)
+		return core.Exit(2, "provider=%s lifecycle is owned by W&B; --reclaim is not supported", providerName)
 	}
 	if !req.NoSync {
-		return exit(2, "provider=%s does not support workspace sync; pass --no-sync", providerName)
+		return core.Exit(2, "provider=%s does not support workspace sync; pass --no-sync", providerName)
 	}
 	if req.SyncOnly {
-		return exit(2, "provider=%s does not support sync; --sync-only is rejected", providerName)
+		return core.Exit(2, "provider=%s does not support sync; --sync-only is rejected", providerName)
 	}
 	if req.ChecksumSync {
-		return exit(2, "provider=%s does not support sync; --checksum is rejected", providerName)
+		return core.Exit(2, "provider=%s does not support sync; --checksum is rejected", providerName)
 	}
 	if req.ForceSyncLarge {
-		return exit(2, "provider=%s does not support sync; --force-sync-large is rejected", providerName)
+		return core.Exit(2, "provider=%s does not support sync; --force-sync-large is rejected", providerName)
 	}
 	if req.FullResync {
-		return exit(2, "provider=%s does not support sync; --full-resync is rejected", providerName)
+		return core.Exit(2, "provider=%s does not support sync; --full-resync is rejected", providerName)
 	}
 	if req.ShellMode {
-		return exit(2, "provider=%s does not support --shell", providerName)
+		return core.Exit(2, "provider=%s does not support --shell", providerName)
 	}
 	// req.EnvSummary (set by --allow-env / env profiles / CRABBOX_ENV_ALLOW)
 	// is intentionally NOT rejected — Run forwards the resolved req.Env into
@@ -478,7 +478,7 @@ func rejectWandbRunOptions(req RunRequest) error {
 	return nil
 }
 
-func wandbExistingIDEnvCanBeOmitted(req RunRequest) bool {
+func wandbExistingIDEnvCanBeOmitted(req core.RunRequest) bool {
 	for name := range req.Env {
 		if core.IsRunExecutionMetadataEnvName(name) {
 			continue

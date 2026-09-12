@@ -38,11 +38,11 @@ func (f *fakeBridgeClient) ListShares(context.Context, string) ([]IsloShare, err
 func newBridgeBackend(t *testing.T, fake *fakeBridgeClient) *isloBackend {
 	t.Helper()
 	prev := newIsloClient
-	newIsloClient = func(Config, Runtime) (isloAPI, error) { return fake, nil }
+	newIsloClient = func(core.Config, core.Runtime) (isloAPI, error) { return fake, nil }
 	t.Cleanup(func() { newIsloClient = prev })
 	return &isloBackend{
-		cfg: Config{Provider: isloProvider, Islo: IsloConfig{APIKey: "key"}},
-		rt:  Runtime{},
+		cfg: core.Config{Provider: isloProvider, Islo: core.IsloConfig{APIKey: "key"}},
+		rt:  core.Runtime{},
 	}
 }
 
