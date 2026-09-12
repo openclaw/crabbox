@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 )
@@ -541,29 +540,10 @@ func renderProofTemplateField(label, templateValue, fallback string, values map[
 	if strings.TrimSpace(templateValue) == "" {
 		return strings.TrimSpace(fallback), nil
 	}
-	if err := validateProofTemplatePlaceholders(label, templateValue, values); err != nil {
+	if err := validatePresetTemplatePlaceholders("proof template "+label, templateValue, values); err != nil {
 		return "", err
 	}
 	return expandPresetValue(templateValue, values), nil
-}
-
-func validateProofTemplatePlaceholders(label, value string, values map[string]string) error {
-	matches := presetPlaceholderPattern.FindAllString(value, -1)
-	if len(matches) == 0 {
-		return nil
-	}
-	var missing []string
-	for _, match := range appendUniqueStrings(nil, matches...) {
-		key := strings.TrimSuffix(strings.TrimPrefix(match, "{{"), "}}")
-		if _, ok := values[key]; !ok {
-			missing = append(missing, match)
-		}
-	}
-	if len(missing) == 0 {
-		return nil
-	}
-	sort.Strings(missing)
-	return exit(2, "proof template %s has unresolved preset variable(s): %s", label, strings.Join(missing, ", "))
 }
 
 func markdownFence(info, content string) (string, string) {
