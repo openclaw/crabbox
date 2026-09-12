@@ -23,7 +23,7 @@ type flagValues struct {
 	WorkRoot        *string
 }
 
-func RegisterGitHubCodespacesProviderFlags(fs *flag.FlagSet, defaults Config) any {
+func RegisterGitHubCodespacesProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
 		Repo:            fs.String("github-codespaces-repo", defaults.GitHubCodespaces.Repo, "GitHub repository owner/name for Codespaces"),
 		Ref:             fs.String("github-codespaces-ref", defaults.GitHubCodespaces.Ref, "Git ref for a new GitHub Codespace"),
@@ -39,13 +39,13 @@ func RegisterGitHubCodespacesProviderFlags(fs *flag.FlagSet, defaults Config) an
 	}
 }
 
-func ApplyGitHubCodespacesProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+func ApplyGitHubCodespacesProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		if core.FlagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=github-codespaces; use --type or --github-codespaces-machine for a Codespaces machine slug")
+			return core.Exit(2, "--class is not supported for provider=github-codespaces; use --type or --github-codespaces-machine for a Codespaces machine slug")
 		}
 		if cfg.TargetOS != "" && strings.ToLower(strings.TrimSpace(cfg.TargetOS)) != targetLinux {
-			return exit(2, "provider=github-codespaces supports target=linux only")
+			return core.Exit(2, "provider=github-codespaces supports target=linux only")
 		}
 		if core.FlagWasSet(fs, "type") && !core.FlagWasSet(fs, "github-codespaces-machine") {
 			if flag := fs.Lookup("type"); flag != nil {
@@ -91,7 +91,7 @@ func ApplyGitHubCodespacesProviderFlags(cfg *Config, fs *flag.FlagSet, values an
 	if core.FlagWasSet(fs, "github-codespaces-retention-period") {
 		cfg.GitHubCodespaces.RetentionPeriod = *v.RetentionPeriod
 		core.RecordProviderFlagInputs(cfg, true, providerName)
-		markRetentionPeriodExplicit(cfg)
+		core.MarkGitHubCodespacesRetentionExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "github-codespaces-delete-on-release") {
 		cfg.GitHubCodespaces.DeleteOnRelease = *v.DeleteOnRelease
@@ -106,30 +106,30 @@ func ApplyGitHubCodespacesProviderFlags(cfg *Config, fs *flag.FlagSet, values an
 		cfg.GitHubCodespaces.WorkRoot = *v.WorkRoot
 		core.RecordProviderFlagInputs(cfg, true, providerName)
 		cfg.WorkRoot = *v.WorkRoot
-		markWorkRootExplicit(cfg)
+		core.MarkWorkRootExplicit(cfg)
 	}
 	return ValidateGitHubCodespacesConfig(*cfg)
 }
 
-func ValidateGitHubCodespacesConfig(cfg Config) error {
+func ValidateGitHubCodespacesConfig(cfg core.Config) error {
 	if core.ProviderNameMatches(cfg.Provider, Provider{}) && strings.TrimSpace(cfg.TargetOS) != "" && strings.ToLower(strings.TrimSpace(cfg.TargetOS)) != targetLinux {
-		return exit(2, "provider=github-codespaces supports target=linux only")
+		return core.Exit(2, "provider=github-codespaces supports target=linux only")
 	}
 	c := cfg.GitHubCodespaces
 	if strings.TrimSpace(c.Repo) != "" && !validRepo(c.Repo) {
-		return exit(2, "github-codespaces repo must be owner/name")
+		return core.Exit(2, "github-codespaces repo must be owner/name")
 	}
 	if c.IdleTimeout < 0 {
-		return exit(2, "github-codespaces idle timeout must be non-negative")
+		return core.Exit(2, "github-codespaces idle timeout must be non-negative")
 	}
 	if c.IdleTimeout > 0 && (c.IdleTimeout < 5*time.Minute || c.IdleTimeout > 4*time.Hour) {
-		return exit(2, "github-codespaces idle timeout must be between 5m and 4h")
+		return core.Exit(2, "github-codespaces idle timeout must be between 5m and 4h")
 	}
 	if c.RetentionPeriod < 0 {
-		return exit(2, "github-codespaces retention period must be non-negative")
+		return core.Exit(2, "github-codespaces retention period must be non-negative")
 	}
 	if c.RetentionPeriod > 30*24*time.Hour {
-		return exit(2, "github-codespaces retention period must not exceed 30 days")
+		return core.Exit(2, "github-codespaces retention period must not exceed 30 days")
 	}
 	if err := validateGitHubCodespacesWorkRoot("work root", c.WorkRoot); err != nil {
 		return err
@@ -138,7 +138,7 @@ func ValidateGitHubCodespacesConfig(cfg Config) error {
 		return err
 	}
 	if strings.TrimSpace(c.GHPath) == "" {
-		return exit(2, "github-codespaces gh path is required")
+		return core.Exit(2, "github-codespaces gh path is required")
 	}
 	return nil
 }
@@ -150,14 +150,14 @@ func validateGitHubCodespacesWorkRoot(label, value string) error {
 	}
 	clean := path.Clean(trimmed)
 	if !path.IsAbs(clean) {
-		return exit(2, "github-codespaces %s must be absolute", label)
+		return core.Exit(2, "github-codespaces %s must be absolute", label)
 	}
 	if clean != trimmed {
-		return exit(2, "github-codespaces %s must be a canonical path", label)
+		return core.Exit(2, "github-codespaces %s must be a canonical path", label)
 	}
 	switch clean {
 	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var", "/workspace", "/workspaces":
-		return exit(2, "github-codespaces %s %q is too broad; choose a dedicated subdirectory", label, clean)
+		return core.Exit(2, "github-codespaces %s %q is too broad; choose a dedicated subdirectory", label, clean)
 	}
 	return nil
 }

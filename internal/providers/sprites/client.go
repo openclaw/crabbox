@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -72,8 +73,8 @@ func (e *spritesAPIError) Error() string {
 	return e.Status + ": " + e.Body
 }
 
-func newSpritesClient(cfg Config, rt Runtime) (spritesAPI, error) {
-	apiURL, origin, err := validateSpritesAPIURL(blank(cfg.Sprites.APIURL, "https://api.sprites.dev"))
+func newSpritesClient(cfg core.Config, rt core.Runtime) (spritesAPI, error) {
+	apiURL, origin, err := validateSpritesAPIURL(core.Blank(cfg.Sprites.APIURL, "https://api.sprites.dev"))
 	if err != nil {
 		return nil, err
 	}
@@ -91,24 +92,24 @@ func newSpritesClient(cfg Config, rt Runtime) (spritesAPI, error) {
 func validateSpritesAPIURL(raw string) (string, *url.URL, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
-		return "", nil, exit(2, "provider=sprites API URL must be an absolute HTTP(S) URL")
+		return "", nil, core.Exit(2, "provider=sprites API URL must be an absolute HTTP(S) URL")
 	}
 	if !parsed.IsAbs() || parsed.Host == "" || parsed.Hostname() == "" || parsed.Opaque != "" {
-		return "", nil, exit(2, "provider=sprites API URL must be an absolute HTTP(S) URL")
+		return "", nil, core.Exit(2, "provider=sprites API URL must be an absolute HTTP(S) URL")
 	}
 	if parsed.User != nil {
-		return "", nil, exit(2, "provider=sprites API URL must not contain userinfo")
+		return "", nil, core.Exit(2, "provider=sprites API URL must not contain userinfo")
 	}
 	if parsed.RawQuery != "" || parsed.ForceQuery {
-		return "", nil, exit(2, "provider=sprites API URL must not contain a query")
+		return "", nil, core.Exit(2, "provider=sprites API URL must not contain a query")
 	}
 	if parsed.Fragment != "" {
-		return "", nil, exit(2, "provider=sprites API URL must not contain a fragment")
+		return "", nil, core.Exit(2, "provider=sprites API URL must not contain a fragment")
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
 	hostname := canonicalSpritesHostname(parsed.Hostname())
 	if parsed.Scheme != "https" && (parsed.Scheme != "http" || !isSpritesLoopbackHost(hostname)) {
-		return "", nil, exit(2, "provider=sprites API URL must use HTTPS except for loopback HTTP")
+		return "", nil, core.Exit(2, "provider=sprites API URL must use HTTPS except for loopback HTTP")
 	}
 	port := parsed.Port()
 	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
@@ -282,7 +283,7 @@ func spritesAPILabels(leaseID, slug string) []string {
 		"crabbox",
 		"provider-sprites",
 		"lease-" + strings.ReplaceAll(leaseID, "_", "-"),
-		"slug-" + normalizeLeaseSlug(slug),
+		"slug-" + core.NormalizeLeaseSlug(slug),
 	}
 }
 
@@ -311,13 +312,13 @@ func spritesLeaseID(sprite spritesInfo) string {
 func spritesSlug(leaseID string, sprite spritesInfo) string {
 	for _, label := range sprite.Labels {
 		if strings.HasPrefix(label, "slug-") {
-			return normalizeLeaseSlug(strings.TrimPrefix(label, "slug-"))
+			return core.NormalizeLeaseSlug(strings.TrimPrefix(label, "slug-"))
 		}
 	}
 	if leaseID != "" {
-		return newLeaseSlug(leaseID)
+		return core.NewLeaseSlug(leaseID)
 	}
-	return normalizeLeaseSlug(sprite.Name)
+	return core.NormalizeLeaseSlug(sprite.Name)
 }
 
 func isSpritesNotFound(err error) bool {

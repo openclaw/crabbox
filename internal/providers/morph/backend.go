@@ -21,12 +21,12 @@ import (
 const morphReadyCheck = "command -v bash >/dev/null && command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && (command -v python3 >/dev/null || command -v python >/dev/null || command -v perl >/dev/null)"
 const morphAcquireRollbackTimeout = 30 * time.Second
 
-var waitForMorphSSHReady = waitForSSHReady
+var waitForMorphSSHReady = core.WaitForSSHReady
 
 type morphLeaseBackend struct {
-	spec              ProviderSpec
-	cfg               Config
-	rt                Runtime
+	spec              core.ProviderSpec
+	cfg               core.Config
+	rt                core.Runtime
 	client            morphAPI
 	now               func() time.Time
 	readyPollInterval time.Duration
@@ -34,17 +34,17 @@ type morphLeaseBackend struct {
 	rollbackTimeout   time.Duration
 }
 
-func RegisterMorphProviderFlags(fs *flag.FlagSet, defaults Config) any {
+func RegisterMorphProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return core.RegisterMorphConfigFlags(fs, defaults.Morph)
 }
 
-func ApplyMorphProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+func ApplyMorphProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if isMorphProviderName(cfg.Provider) {
 		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", "use --morph-snapshot"); err != nil {
 			return err
 		}
 		if cfg.TargetOS != "" && cfg.TargetOS != targetLinux {
-			return exit(2, "provider=morph supports target=linux only")
+			return core.Exit(2, "provider=morph supports target=linux only")
 		}
 	}
 	v, ok := values.(core.MorphConfigFlagValues)
@@ -66,7 +66,7 @@ func ApplyMorphProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	return nil
 }
 
-func NewMorphBackend(spec ProviderSpec, cfg Config, rt Runtime) (Backend, error) {
+func NewMorphBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	applyMorphDefaults(&cfg)
 	if err := validateMorphConfig(cfg); err != nil {
 		return nil, err
@@ -82,35 +82,35 @@ func NewMorphBackend(spec ProviderSpec, cfg Config, rt Runtime) (Backend, error)
 	}, nil
 }
 
-func (b *morphLeaseBackend) Spec() ProviderSpec { return b.spec }
+func (b *morphLeaseBackend) Spec() core.ProviderSpec { return b.spec }
 
-func (b *morphLeaseBackend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
+func (b *morphLeaseBackend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
 	core.UseStoredTestboxKey(&target.SSH, leaseID)
 	return nil
 }
 
-func (b *morphLeaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+func (b *morphLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	cfg := b.configForRun()
 	if err := validateMorphCreateConfig(cfg); err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
 	client, err := b.api()
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
 	if _, err := client.GetSnapshot(ctx, cfg.Morph.Snapshot); err != nil {
 		if isMorphNotFound(err) {
-			return DoctorResult{}, exit(2, "provider=morph snapshot %q not found", cfg.Morph.Snapshot)
+			return core.DoctorResult{}, core.Exit(2, "provider=morph snapshot %q not found", cfg.Morph.Snapshot)
 		}
-		return DoctorResult{}, exit(1, "provider=morph snapshot lookup failed: %v", err)
+		return core.DoctorResult{}, core.Exit(1, "provider=morph snapshot lookup failed: %v", err)
 	}
 	instances, err := b.listInstances(ctx, client, false)
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
-	return DoctorResult{
+	return core.DoctorResult{
 		Provider: providerName,
-		Checks: []DoctorCheck{{
+		Checks: []core.DoctorCheck{{
 			Status:  "ok",
 			Check:   "provider",
 			Message: fmt.Sprintf("provider=%s auth=ready control_plane=ready inventory=ready snapshot=ready api=list,get_snapshot mutation=false leases=%d runtime=unchecked", providerName, len(instances)),
@@ -129,29 +129,29 @@ func (b *morphLeaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (Doctor
 	}, nil
 }
 
-func (b *morphLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
+func (b *morphLeaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	cfg := b.configForRun()
 	if err := validateMorphCreateConfig(cfg); err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	client, err := b.api()
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if _, err := client.GetSnapshot(ctx, cfg.Morph.Snapshot); err != nil {
 		if isMorphNotFound(err) {
-			return LeaseTarget{}, exit(2, "provider=morph snapshot %q not found", cfg.Morph.Snapshot)
+			return core.LeaseTarget{}, core.Exit(2, "provider=morph snapshot %q not found", cfg.Morph.Snapshot)
 		}
-		return LeaseTarget{}, exit(1, "morph snapshot lookup failed: %v", err)
+		return core.LeaseTarget{}, core.Exit(1, "morph snapshot lookup failed: %v", err)
 	}
 	instances, err := b.listInstances(ctx, client, false)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	leaseID := core.NewLeaseID()
-	slug, err := allocateDirectLeaseSlug(leaseID, req.RequestedSlug, serversFromLeaseViews(instances, cfg))
+	slug, err := core.AllocateDirectLeaseSlug(leaseID, req.RequestedSlug, serversFromLeaseViews(instances, cfg))
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	now := b.now().UTC()
 	labels := morphLeaseMetadata(cfg, morphInstance{
@@ -166,11 +166,11 @@ func (b *morphLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 	}
 	instance, err := client.BootSnapshot(ctx, cfg.Morph.Snapshot, bootReq)
 	if err != nil {
-		return LeaseTarget{}, exit(1, "morph boot snapshot %q failed: %v", cfg.Morph.Snapshot, err)
+		return core.LeaseTarget{}, core.Exit(1, "morph boot snapshot %q failed: %v", cfg.Morph.Snapshot, err)
 	}
-	createdLease := LeaseTarget{LeaseID: leaseID, Server: Server{CloudID: instance.ID}}
+	createdLease := core.LeaseTarget{LeaseID: leaseID, Server: core.Server{CloudID: instance.ID}}
 	cleanupCreated := func() {
-		removeStoredTestboxKey(leaseID)
+		core.RemoveStoredTestboxKey(leaseID)
 		timeout := b.rollbackTimeout
 		if timeout <= 0 {
 			timeout = morphAcquireRollbackTimeout
@@ -186,28 +186,28 @@ func (b *morphLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 		if !req.Keep {
 			cleanupCreated()
 		}
-		return LeaseTarget{}, exit(1, "morph set metadata for %s failed: %v", instance.ID, err)
+		return core.LeaseTarget{}, core.Exit(1, "morph set metadata for %s failed: %v", instance.ID, err)
 	}
 	if ttlSeconds := morphTTLSecondsFromLabels(labels, b.now().UTC()); ttlSeconds > 0 {
 		if err := client.UpdateInstanceTTL(ctx, instance.ID, ttlSeconds, morphTTLAction(cfg)); err != nil {
 			if !req.Keep {
 				cleanupCreated()
 			}
-			return LeaseTarget{}, exit(1, "morph update ttl for %s failed: %v", instance.ID, err)
+			return core.LeaseTarget{}, core.Exit(1, "morph update ttl for %s failed: %v", instance.ID, err)
 		}
 	}
 	if err := client.UpdateInstanceWakeOn(ctx, instance.ID, boolPtr(cfg.Morph.WakeOnSSH), nil); err != nil {
 		if !req.Keep {
 			cleanupCreated()
 		}
-		return LeaseTarget{}, exit(1, "morph update wake-on for %s failed: %v", instance.ID, err)
+		return core.LeaseTarget{}, core.Exit(1, "morph update wake-on for %s failed: %v", instance.ID, err)
 	}
 	instance, err = b.waitForInstanceReady(ctx, client, instance.ID, false)
 	if err != nil {
 		if !req.Keep {
 			cleanupCreated()
 		}
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	instance.Metadata = labels
 	target, err := b.resolveSSHTarget(ctx, cfg, client, leaseID, instance, true)
@@ -215,7 +215,7 @@ func (b *morphLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 		if !req.Keep {
 			cleanupCreated()
 		}
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	server := morphServer(instance, cfg, leaseID, slug)
 	createdLease.Server = server
@@ -228,43 +228,43 @@ func (b *morphLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 	}
 	if claimErr != nil {
 		cleanupCreated()
-		return LeaseTarget{}, fmt.Errorf("persist exact morph instance ownership claim: %w", claimErr)
+		return core.LeaseTarget{}, fmt.Errorf("persist exact morph instance ownership claim: %w", claimErr)
 	}
 	return createdLease, nil
 }
 
-func (b *morphLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (lease LeaseTarget, err error) {
+func (b *morphLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (lease core.LeaseTarget, err error) {
 	cfg := b.configForRun()
 	client, err := b.api()
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	instance, leaseID, slug, err := b.resolveInstance(ctx, client, req.ID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	server := morphServer(instance, cfg, leaseID, slug)
 	if req.ReleaseOnly || (req.StatusOnly && !req.ReadyProbe) {
-		return LeaseTarget{LeaseID: leaseID, Server: server}, nil
+		return core.LeaseTarget{LeaseID: leaseID, Server: server}, nil
 	}
-	var previousClaim, preflightClaim LeaseClaim
+	var previousClaim, preflightClaim core.LeaseClaim
 	var previousClaimExists, rollbackClaim bool
 	defer func() {
 		if err == nil || !rollbackClaim {
 			return
 		}
-		if restoreErr := restoreLeaseClaimIfUnchanged(leaseID, preflightClaim, previousClaim, previousClaimExists); restoreErr != nil {
+		if restoreErr := core.RestoreLeaseClaimIfUnchanged(leaseID, preflightClaim, previousClaim, previousClaimExists); restoreErr != nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: restore Morph lease claim %s after resolve failure: %v\n", leaseID, restoreErr)
 		}
 	}()
 	if req.Repo.Root != "" {
-		previousClaim, previousClaimExists, err = readLeaseClaimWithPresence(leaseID)
+		previousClaim, previousClaimExists, err = core.ReadLeaseClaimWithPresence(leaseID)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		preflightClaim, err = claimLeaseForRepoProviderIfUnchanged(leaseID, slug, providerName, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, previousClaim, previousClaimExists)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		rollbackClaim = true
 	}
@@ -275,28 +275,28 @@ func (b *morphLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (le
 				if cfg.Morph.WakeOnSSH {
 					if !instance.WakeOn.WakeOnSSH {
 						if err := client.UpdateInstanceWakeOn(ctx, instance.ID, boolPtr(true), nil); err != nil {
-							return LeaseTarget{}, exit(1, "morph enable wake-on-ssh for %s failed: %v", instance.ID, err)
+							return core.LeaseTarget{}, core.Exit(1, "morph enable wake-on-ssh for %s failed: %v", instance.ID, err)
 						}
 						instance.WakeOn.WakeOnSSH = true
 					}
 					break
 				}
 				if err := client.ResumeInstance(ctx, instance.ID); err != nil && !isMorphNotFound(err) {
-					return LeaseTarget{}, exit(1, "morph resume instance %s failed: %v", instance.ID, err)
+					return core.LeaseTarget{}, core.Exit(1, "morph resume instance %s failed: %v", instance.ID, err)
 				}
 				instance, err = b.waitForInstanceReady(ctx, client, instance.ID, false)
 			} else {
 				instance, err = b.waitForInstanceReady(ctx, client, instance.ID, true)
 			}
 			if err != nil {
-				return LeaseTarget{}, err
+				return core.LeaseTarget{}, err
 			}
 		}
 	}
 	server = morphServer(instance, cfg, leaseID, slug)
 	target, err := b.resolveSSHTarget(ctx, cfg, client, leaseID, instance, needsReady)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if needsReady && morphInstancePaused(instance) && cfg.Morph.WakeOnSSH {
 		if refreshed, refreshErr := client.GetInstance(ctx, instance.ID); refreshErr == nil {
@@ -305,15 +305,15 @@ func (b *morphLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (le
 		}
 	}
 	if req.Repo.Root != "" {
-		if _, err = updateLeaseClaimEndpointIfUnchanged(leaseID, preflightClaim, server, target); err != nil {
-			return LeaseTarget{}, err
+		if _, err = core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, preflightClaim, server, target); err != nil {
+			return core.LeaseTarget{}, err
 		}
 		rollbackClaim = false
 	}
-	return LeaseTarget{LeaseID: leaseID, Server: server, SSH: target}, nil
+	return core.LeaseTarget{LeaseID: leaseID, Server: server, SSH: target}, nil
 }
 
-func (b *morphLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *morphLeaseBackend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	cfg := b.configForRun()
 	client, err := b.api()
 	if err != nil {
@@ -323,7 +323,7 @@ func (b *morphLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseV
 	if err != nil {
 		return nil, err
 	}
-	views := make([]LeaseView, 0, len(instances))
+	views := make([]core.LeaseView, 0, len(instances))
 	for _, instance := range instances {
 		leaseID := strings.TrimSpace(instance.Metadata["lease"])
 		slug := strings.TrimSpace(instance.Metadata["slug"])
@@ -337,18 +337,18 @@ func (b *morphLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseV
 	return views, nil
 }
 
-func (b *morphLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+func (b *morphLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
 	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
 	return err
 }
 
-func (b *morphLeaseBackend) ReleaseLeaseWithOutcome(ctx context.Context, req ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+func (b *morphLeaseBackend) ReleaseLeaseWithOutcome(ctx context.Context, req core.ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
 	var outcome core.ReleaseLeaseOutcome
 	err := b.releaseLease(ctx, req, &outcome)
 	return outcome, err
 }
 
-func (b *morphLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
+func (b *morphLeaseBackend) releaseLease(ctx context.Context, req core.ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	cfg := b.configForRun()
 	client, err := b.api()
 	if err != nil {
@@ -360,12 +360,12 @@ func (b *morphLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRe
 		instanceID = strings.TrimSpace(req.Lease.Server.Labels["instance_id"])
 	}
 	removeMissingInstance := func() error {
-		claim, ok, claimErr := resolveLeaseClaimForProvider(core.Blank(leaseID, instanceID), providerName)
+		claim, ok, claimErr := core.ResolveLeaseClaimForProvider(core.Blank(leaseID, instanceID), providerName)
 		if claimErr != nil {
 			return claimErr
 		}
 		if !ok {
-			return exit(2, "morph instance %s has no exact local ownership claim", instanceID)
+			return core.Exit(2, "morph instance %s has no exact local ownership claim", instanceID)
 		}
 		binding := shared.ClaimBinding{
 			Provider: providerName, ProviderScope: Provider{}.ClaimScope(cfg), ExactProviderScope: true,
@@ -381,17 +381,17 @@ func (b *morphLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRe
 		}); claimErr != nil {
 			return claimErr
 		}
-		removeStoredTestboxKey(claim.LeaseID)
+		core.RemoveStoredTestboxKey(claim.LeaseID)
 		return nil
 	}
 	var instance morphInstance
 	if instanceID != "" {
 		instance, err = client.GetInstance(ctx, instanceID)
 		if err != nil && !isMorphNotFound(err) {
-			return exit(1, "morph get instance %s failed: %v", instanceID, err)
+			return core.Exit(1, "morph get instance %s failed: %v", instanceID, err)
 		}
 		if instance.ID != "" && !morphIsManaged(instance) {
-			return exit(4, "morph instance %s is not managed by Crabbox", instance.ID)
+			return core.Exit(4, "morph instance %s is not managed by Crabbox", instance.ID)
 		}
 	}
 	if instance.ID == "" {
@@ -399,8 +399,8 @@ func (b *morphLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRe
 		if resolveID != "" {
 			resolved, resolvedLeaseID, _, resolveErr := b.resolveInstance(ctx, client, resolveID)
 			if resolveErr != nil {
-				var exitErr ExitError
-				if asExitError(resolveErr, &exitErr) && exitErr.Code == 4 {
+				var exitErr core.ExitError
+				if core.AsExitError(resolveErr, &exitErr) && exitErr.Code == 4 {
 					return removeMissingInstance()
 				}
 				return resolveErr
@@ -430,7 +430,7 @@ func (b *morphLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRe
 			return fmt.Errorf("verify live morph instance %s ownership: %w", instance.ID, err)
 		}
 		if live.ID != instance.ID || !morphIsManaged(live) || live.Metadata["lease"] != leaseID || live.Metadata["slug"] != slug || live.Metadata["instance_id"] != instance.ID {
-			return exit(2, "morph instance %s ownership changed before release", instance.ID)
+			return core.Exit(2, "morph instance %s ownership changed before release", instance.ID)
 		}
 		return nil
 	}
@@ -476,14 +476,14 @@ func (b *morphLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRe
 				return err
 			}
 			if err := client.DeleteInstance(ctx, instance.ID); err != nil && !isMorphNotFound(err) {
-				return exit(1, "morph delete instance %s failed: %v", instance.ID, err)
+				return core.Exit(1, "morph delete instance %s failed: %v", instance.ID, err)
 			}
 			outcome.Terminal = true
 			return nil
 		}); err != nil {
 			return err
 		}
-		removeStoredTestboxKey(core.Blank(leaseID, instance.ID))
+		core.RemoveStoredTestboxKey(core.Blank(leaseID, instance.ID))
 		return nil
 	}
 	wasPaused := morphInstancePaused(instance)
@@ -496,21 +496,21 @@ func (b *morphLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRe
 		}
 		if !wasPaused {
 			if err := client.PauseInstance(ctx, instance.ID); err != nil && !isMorphNotFound(err) {
-				return exit(1, "morph pause instance %s failed: %v", instance.ID, err)
+				return core.Exit(1, "morph pause instance %s failed: %v", instance.ID, err)
 			}
 		}
 		if err := client.SetInstanceMetadata(ctx, instance.ID, labels); err != nil {
-			return exit(1, "morph persist paused metadata for %s failed: %v", instance.ID, err)
+			return core.Exit(1, "morph persist paused metadata for %s failed: %v", instance.ID, err)
 		}
 		return nil
 	}
 	instance.Metadata = labels
 	server := morphServer(instance, cfg, leaseID, labels["slug"])
-	_, err = updateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, SSHTarget{}, pauseAndPersist)
+	_, err = core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, core.SSHTarget{}, pauseAndPersist)
 	return err
 }
 
-func (b *morphLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
+func (b *morphLeaseBackend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	instance := core.Blank(core.Blank(lease.Server.CloudID, lease.Server.Labels["instance_id"]), "-")
 	if morphDeleteOnRelease(lease, b.configForRun()) {
 		return fmt.Sprintf("deleted lease=%s instance=%s", lease.LeaseID, instance)
@@ -518,18 +518,18 @@ func (b *morphLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
 	return fmt.Sprintf("paused lease=%s instance=%s retained=true", lease.LeaseID, instance)
 }
 
-func (b *morphLeaseBackend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool {
+func (b *morphLeaseBackend) RetainLeaseClaimAfterRelease(lease core.LeaseTarget) bool {
 	return !morphDeleteOnRelease(lease, b.configForRun())
 }
 
-func (b *morphLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
+func (b *morphLeaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	cfg := b.configForRun()
 	if req.IdleTimeout > 0 {
 		cfg.IdleTimeout = req.IdleTimeout
 	}
 	client, err := b.api()
 	if err != nil {
-		return Server{}, err
+		return core.Server{}, err
 	}
 	leaseID := strings.TrimSpace(req.Lease.LeaseID)
 	slug := strings.TrimSpace(req.Lease.Server.Labels["slug"])
@@ -539,17 +539,17 @@ func (b *morphLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server
 		instance, err = client.GetInstance(ctx, instanceID)
 		if err != nil {
 			if isMorphNotFound(err) {
-				return Server{}, exit(4, "lease %s not found for provider=%s", core.Blank(leaseID, instanceID), providerName)
+				return core.Server{}, core.Exit(4, "lease %s not found for provider=%s", core.Blank(leaseID, instanceID), providerName)
 			}
-			return Server{}, exit(1, "morph get instance %s failed: %v", instanceID, err)
+			return core.Server{}, core.Exit(1, "morph get instance %s failed: %v", instanceID, err)
 		}
 		if !morphIsManaged(instance) {
-			return Server{}, exit(4, "morph instance %s is not managed by Crabbox", instance.ID)
+			return core.Server{}, core.Exit(4, "morph instance %s is not managed by Crabbox", instance.ID)
 		}
 	} else {
 		instance, leaseID, slug, err = b.resolveInstance(ctx, client, core.Blank(leaseID, slug))
 		if err != nil {
-			return Server{}, err
+			return core.Server{}, err
 		}
 	}
 	if instance.Metadata == nil {
@@ -561,15 +561,15 @@ func (b *morphLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server
 	}
 	labels := morphLeaseMetadata(cfg, instance, core.Blank(leaseID, instance.ID), slug, req.State, false, b.now().UTC(), true)
 	if err := client.SetInstanceMetadata(ctx, instance.ID, labels); err != nil {
-		return Server{}, exit(1, "morph set metadata for %s failed: %v", instance.ID, err)
+		return core.Server{}, core.Exit(1, "morph set metadata for %s failed: %v", instance.ID, err)
 	}
 	if ttlSeconds := morphTTLSecondsFromLabels(labels, b.now().UTC()); ttlSeconds > 0 {
 		if err := client.UpdateInstanceTTL(ctx, instance.ID, ttlSeconds, morphTTLAction(cfg)); err != nil {
-			return Server{}, exit(1, "morph update ttl for %s failed: %v", instance.ID, err)
+			return core.Server{}, core.Exit(1, "morph update ttl for %s failed: %v", instance.ID, err)
 		}
 	}
 	if err := client.UpdateInstanceWakeOn(ctx, instance.ID, boolPtr(cfg.Morph.WakeOnSSH), nil); err != nil {
-		return Server{}, exit(1, "morph update wake-on for %s failed: %v", instance.ID, err)
+		return core.Server{}, core.Exit(1, "morph update wake-on for %s failed: %v", instance.ID, err)
 	}
 	instance.Metadata = labels
 	return morphServer(instance, cfg, core.Blank(leaseID, instance.ID), slug), nil
@@ -582,7 +582,7 @@ func (b *morphLeaseBackend) api() (morphAPI, error) {
 	return newMorphClient(b.configForRun(), b.rt)
 }
 
-func (b *morphLeaseBackend) configForRun() Config {
+func (b *morphLeaseBackend) configForRun() core.Config {
 	cfg := b.cfg
 	applyMorphDefaults(&cfg)
 	return cfg
@@ -591,9 +591,9 @@ func (b *morphLeaseBackend) configForRun() Config {
 func (b *morphLeaseBackend) resolveInstance(ctx context.Context, client morphAPI, identifier string) (morphInstance, string, string, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
-		return morphInstance{}, "", "", exit(2, "missing lease identifier for provider=%s", providerName)
+		return morphInstance{}, "", "", core.Exit(2, "missing lease identifier for provider=%s", providerName)
 	}
-	claim, claimed, err := resolveLeaseClaimForProvider(identifier, providerName)
+	claim, claimed, err := core.ResolveLeaseClaimForProvider(identifier, providerName)
 	if err != nil {
 		return morphInstance{}, "", "", err
 	}
@@ -604,20 +604,20 @@ func (b *morphLeaseBackend) resolveInstance(ctx context.Context, client morphAPI
 		instance, err := client.GetInstance(ctx, candidate)
 		if err == nil {
 			if !morphIsManaged(instance) {
-				return morphInstance{}, "", "", exit(4, "morph instance %s is not managed by Crabbox", instance.ID)
+				return morphInstance{}, "", "", core.Exit(4, "morph instance %s is not managed by Crabbox", instance.ID)
 			}
 			instance, leaseID, slug := finalizeMorphResolution(instance, identifier, claim, claimed)
 			return instance, leaseID, slug, nil
 		}
 		if !isMorphNotFound(err) {
-			return morphInstance{}, "", "", exit(1, "morph get instance %s failed: %v", candidate, err)
+			return morphInstance{}, "", "", core.Exit(1, "morph get instance %s failed: %v", candidate, err)
 		}
 	}
 	instances, err := b.listInstances(ctx, client, false)
 	if err != nil {
 		return morphInstance{}, "", "", err
 	}
-	wantSlug := normalizeLeaseSlug(identifier)
+	wantSlug := core.NormalizeLeaseSlug(identifier)
 	var matched *morphInstance
 	for i := range instances {
 		labels := instances[i].Metadata
@@ -627,13 +627,13 @@ func (b *morphLeaseBackend) resolveInstance(ctx context.Context, client morphAPI
 			labels["instance_id"] == identifier ||
 			instances[i].ID == identifier {
 			if matched != nil {
-				return morphInstance{}, "", "", exit(5, "lease %s matched multiple morph instances", identifier)
+				return morphInstance{}, "", "", core.Exit(5, "lease %s matched multiple morph instances", identifier)
 			}
 			matched = &instances[i]
 		}
 	}
 	if matched == nil {
-		return morphInstance{}, "", "", exit(4, "lease %s not found for provider=%s", identifier, providerName)
+		return morphInstance{}, "", "", core.Exit(4, "lease %s not found for provider=%s", identifier, providerName)
 	}
 	instance, leaseID, slug := finalizeMorphResolution(*matched, identifier, claim, claimed)
 	return instance, leaseID, slug, nil
@@ -646,7 +646,7 @@ func (b *morphLeaseBackend) listInstances(ctx context.Context, client morphAPI, 
 	}
 	instances, err := client.ListInstances(ctx, filter)
 	if err != nil {
-		return nil, exit(1, "morph list instances failed: %v", err)
+		return nil, core.Exit(1, "morph list instances failed: %v", err)
 	}
 	if all {
 		return instances, nil
@@ -671,19 +671,19 @@ func (b *morphLeaseBackend) waitForInstanceReady(ctx context.Context, client mor
 		func(_ context.Context, instance morphInstance, fetchErr error) (bool, error) {
 			switch {
 			case isMorphNotFound(fetchErr):
-				return false, exit(4, "morph instance %s disappeared while waiting for readiness", instanceID)
+				return false, core.Exit(4, "morph instance %s disappeared while waiting for readiness", instanceID)
 			case fetchErr != nil:
-				return false, exit(1, "morph get instance %s failed: %v", instanceID, fetchErr)
+				return false, core.Exit(1, "morph get instance %s failed: %v", instanceID, fetchErr)
 			case morphInstanceReady(instance) || allowPaused && morphInstancePaused(instance):
 				return true, nil
 			case morphInstanceTerminal(instance):
-				return false, exit(1, "morph instance %s entered terminal state %q", instanceID, core.Blank(instance.Status, "unknown"))
+				return false, core.Exit(1, "morph instance %s entered terminal state %q", instanceID, core.Blank(instance.Status, "unknown"))
 			}
 			return false, nil
 		}, nil)
 	if waitErr := waitCtx.Err(); waitErr != nil && errors.Is(err, context.Cause(waitCtx)) {
 		if waitErr == context.DeadlineExceeded {
-			return morphInstance{}, exit(5, "timed out waiting for morph instance %s to become ready", instanceID)
+			return morphInstance{}, core.Exit(5, "timed out waiting for morph instance %s to become ready", instanceID)
 		}
 		return morphInstance{}, waitErr
 	}
@@ -693,29 +693,29 @@ func (b *morphLeaseBackend) waitForInstanceReady(ctx context.Context, client mor
 	return morphInstance{}, err
 }
 
-func (b *morphLeaseBackend) resolveSSHTarget(ctx context.Context, cfg Config, client morphAPI, leaseID string, instance morphInstance, waitReady bool) (SSHTarget, error) {
+func (b *morphLeaseBackend) resolveSSHTarget(ctx context.Context, cfg core.Config, client morphAPI, leaseID string, instance morphInstance, waitReady bool) (core.SSHTarget, error) {
 	sshKey, err := client.GetSSHKey(ctx, instance.ID)
 	if err != nil {
-		return SSHTarget{}, exit(1, "morph get ssh key for %s failed: %v", instance.ID, err)
+		return core.SSHTarget{}, core.Exit(1, "morph get ssh key for %s failed: %v", instance.ID, err)
 	}
 	keyPath, err := storeMorphSSHKey(leaseID, sshKey)
 	if err != nil {
-		return SSHTarget{}, err
+		return core.SSHTarget{}, err
 	}
 	knownHostsPath, err := ensureMorphKnownHostsPath()
 	if err != nil {
-		return SSHTarget{}, err
+		return core.SSHTarget{}, err
 	}
 	target := morphSSHTarget(cfg, instance, keyPath, knownHostsPath)
 	if waitReady {
-		if err := waitForMorphSSHReady(ctx, &target, b.rt.Stderr, "morph ssh", bootstrapWaitTimeout(cfg)); err != nil {
-			return SSHTarget{}, err
+		if err := waitForMorphSSHReady(ctx, &target, b.rt.Stderr, "morph ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
+			return core.SSHTarget{}, err
 		}
 	}
 	return target, nil
 }
 
-func applyMorphDefaults(cfg *Config) {
+func applyMorphDefaults(cfg *core.Config) {
 	cfg.Provider = providerName
 	if strings.TrimSpace(cfg.TargetOS) == "" {
 		cfg.TargetOS = targetLinux
@@ -727,7 +727,7 @@ func applyMorphDefaults(cfg *Config) {
 		cfg.Morph.SSHGatewayHost = core.MorphConfigDefaultSSHGatewayHost
 	}
 	if strings.TrimSpace(cfg.Morph.WorkRoot) == "" {
-		if isDefaultWorkRoot(cfg.WorkRoot) || strings.TrimSpace(cfg.WorkRoot) == "" {
+		if core.IsDefaultWorkRoot(cfg.WorkRoot) || strings.TrimSpace(cfg.WorkRoot) == "" {
 			cfg.Morph.WorkRoot = core.MorphConfigDefaultWorkRoot
 		} else {
 			cfg.Morph.WorkRoot = cfg.WorkRoot
@@ -742,25 +742,25 @@ func applyMorphDefaults(cfg *Config) {
 	cfg.ServerType = core.Blank(strings.TrimSpace(cfg.Morph.Snapshot), "snapshot")
 }
 
-func validateMorphConfig(cfg Config) error {
+func validateMorphConfig(cfg core.Config) error {
 	if cfg.TargetOS != "" && cfg.TargetOS != targetLinux {
-		return exit(2, "provider=morph supports target=linux only")
+		return core.Exit(2, "provider=morph supports target=linux only")
 	}
 	if cfg.Network == networkTailscale {
-		return exit(2, "--network=tailscale is not supported for provider=morph; Morph exposes SSH through the public gateway")
+		return core.Exit(2, "--network=tailscale is not supported for provider=morph; Morph exposes SSH through the public gateway")
 	}
 	if cfg.Tailscale.Enabled {
-		return exit(2, "--tailscale is not supported for provider=morph; Morph exposes SSH through the public gateway")
+		return core.Exit(2, "--tailscale is not supported for provider=morph; Morph exposes SSH through the public gateway")
 	}
 	return nil
 }
 
-func validateMorphCreateConfig(cfg Config) error {
+func validateMorphCreateConfig(cfg core.Config) error {
 	if err := validateMorphConfig(cfg); err != nil {
 		return err
 	}
 	if strings.TrimSpace(cfg.Morph.Snapshot) == "" {
-		return exit(2, "provider=morph requires CRABBOX_MORPH_SNAPSHOT or morph.snapshot")
+		return core.Exit(2, "provider=morph requires CRABBOX_MORPH_SNAPSHOT or morph.snapshot")
 	}
 	return nil
 }
@@ -777,18 +777,18 @@ func morphIsManaged(instance morphInstance) bool {
 		strings.EqualFold(strings.TrimSpace(instance.Metadata["provider"]), providerName)
 }
 
-func morphLeaseMetadata(cfg Config, instance morphInstance, leaseID, slug, state string, keep bool, now time.Time, touch bool) map[string]string {
+func morphLeaseMetadata(cfg core.Config, instance morphInstance, leaseID, slug, state string, keep bool, now time.Time, touch bool) map[string]string {
 	existingWorkRoot := strings.TrimSpace(instance.Metadata["work_root"])
 	var labels map[string]string
 	if touch {
-		labels = touchDirectLeaseLabels(instance.Metadata.Clone(), cfg, state, now)
+		labels = core.TouchDirectLeaseLabels(instance.Metadata.Clone(), cfg, state, now)
 		if strings.EqualFold(strings.TrimSpace(state), "running") {
 			if expiresAt := morphLeaseTTLCap(labels); expiresAt != "" {
 				labels["expires_at"] = expiresAt
 			}
 		}
 	} else {
-		labels = directLeaseLabels(cfg, leaseID, slug, providerName, "", keep, now)
+		labels = core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, now)
 	}
 	labels["crabbox"] = "true"
 	labels["provider"] = providerName
@@ -796,7 +796,7 @@ func morphLeaseMetadata(cfg Config, instance morphInstance, leaseID, slug, state
 		labels["lease"] = leaseID
 	}
 	if slug != "" {
-		labels["slug"] = normalizeLeaseSlug(slug)
+		labels["slug"] = core.NormalizeLeaseSlug(slug)
 	}
 	if root := strings.TrimSpace(cfg.WorkRoot); root != "" {
 		switch {
@@ -828,7 +828,7 @@ func morphLeaseMetadata(cfg Config, instance morphInstance, leaseID, slug, state
 	} else if strings.TrimSpace(labels["server_type"]) == "" && snapshotID != "" {
 		labels["server_type"] = snapshotID
 	}
-	if name := leaseProviderName(core.Blank(leaseID, instance.ID), slug); name != "" {
+	if name := core.LeaseProviderName(core.Blank(leaseID, instance.ID), slug); name != "" {
 		labels["lease_name"] = name
 	}
 	if strings.TrimSpace(labels["release"]) == "" {
@@ -837,7 +837,7 @@ func morphLeaseMetadata(cfg Config, instance morphInstance, leaseID, slug, state
 	return labels
 }
 
-func morphServer(instance morphInstance, cfg Config, leaseID, slug string) Server {
+func morphServer(instance morphInstance, cfg core.Config, leaseID, slug string) core.Server {
 	labels := instance.Metadata.Clone()
 	if leaseID == "" {
 		leaseID = core.Blank(strings.TrimSpace(labels["lease"]), instance.ID)
@@ -849,7 +849,7 @@ func morphServer(instance morphInstance, cfg Config, leaseID, slug string) Serve
 		labels["lease"] = leaseID
 	}
 	if slug != "" {
-		labels["slug"] = normalizeLeaseSlug(slug)
+		labels["slug"] = core.NormalizeLeaseSlug(slug)
 	}
 	if labels["provider"] == "" {
 		labels["provider"] = providerName
@@ -882,7 +882,7 @@ func morphServer(instance morphInstance, cfg Config, leaseID, slug string) Serve
 	if state != "" {
 		labels["state"] = state
 	}
-	server := Server{
+	server := core.Server{
 		CloudID:  instance.ID,
 		Provider: providerName,
 		Name:     core.Blank(labels["lease_name"], instance.ID),
@@ -894,8 +894,8 @@ func morphServer(instance morphInstance, cfg Config, leaseID, slug string) Serve
 	return server
 }
 
-func morphSSHTarget(cfg Config, instance morphInstance, keyPath, knownHostsPath string) SSHTarget {
-	target := sshTargetFromConfig(cfg, core.Blank(strings.TrimSpace(cfg.Morph.SSHGatewayHost), core.MorphConfigDefaultSSHGatewayHost))
+func morphSSHTarget(cfg core.Config, instance morphInstance, keyPath, knownHostsPath string) core.SSHTarget {
+	target := core.SSHTargetFromConfig(cfg, core.Blank(strings.TrimSpace(cfg.Morph.SSHGatewayHost), core.MorphConfigDefaultSSHGatewayHost))
 	target.Host = core.Blank(strings.TrimSpace(cfg.Morph.SSHGatewayHost), core.MorphConfigDefaultSSHGatewayHost)
 	target.Port = "22"
 	target.User = instance.ID
@@ -911,7 +911,7 @@ func morphSSHTarget(cfg Config, instance morphInstance, keyPath, knownHostsPath 
 func storeMorphSSHKey(leaseID string, sshKey morphSSHKey) (string, error) {
 	privateKey := strings.TrimSpace(sshKey.PrivateKey)
 	if privateKey == "" {
-		return "", exit(1, "morph ssh key response did not include private_key")
+		return "", core.Exit(1, "morph ssh key response did not include private_key")
 	}
 	keyData := []byte(privateKey + "\n")
 	if sshKey.Password != "" {
@@ -920,16 +920,16 @@ func storeMorphSSHKey(leaseID string, sshKey morphSSHKey) (string, error) {
 			decryptedKey, decryptErr := ssh.ParseRawPrivateKeyWithPassphrase(keyData, password)
 			clear(password)
 			if decryptErr != nil {
-				return "", exit(1, "morph ssh key response could not be decrypted")
+				return "", core.Exit(1, "morph ssh key response could not be decrypted")
 			}
 			block, marshalErr := ssh.MarshalPrivateKey(decryptedKey, "")
 			if marshalErr != nil {
-				return "", exit(1, "morph ssh key response could not be stored: %v", marshalErr)
+				return "", core.Exit(1, "morph ssh key response could not be stored: %v", marshalErr)
 			}
 			keyData = pem.EncodeToMemory(block)
 		}
 	}
-	path, err := testboxKeyPath(leaseID)
+	path, err := core.TestboxKeyPath(leaseID)
 	if err != nil {
 		return "", err
 	}
@@ -945,7 +945,7 @@ func storeMorphSSHKey(leaseID string, sshKey morphSSHKey) (string, error) {
 func ensureMorphKnownHostsPath() (string, error) {
 	configDir, err := os.UserConfigDir()
 	if err != nil {
-		return "", exit(2, "user config directory is unavailable")
+		return "", core.Exit(2, "user config directory is unavailable")
 	}
 	path := filepath.Join(configDir, "crabbox", providerName, "known_hosts")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -954,15 +954,15 @@ func ensureMorphKnownHostsPath() (string, error) {
 	return path, nil
 }
 
-func serversFromLeaseViews(instances []morphInstance, cfg Config) []Server {
-	servers := make([]Server, 0, len(instances))
+func serversFromLeaseViews(instances []morphInstance, cfg core.Config) []core.Server {
+	servers := make([]core.Server, 0, len(instances))
 	for _, instance := range instances {
 		servers = append(servers, morphServer(instance, cfg, strings.TrimSpace(instance.Metadata["lease"]), strings.TrimSpace(instance.Metadata["slug"])))
 	}
 	return servers
 }
 
-func finalizeMorphResolution(instance morphInstance, requested string, claim LeaseClaim, claimed bool) (morphInstance, string, string) {
+func finalizeMorphResolution(instance morphInstance, requested string, claim core.LeaseClaim, claimed bool) (morphInstance, string, string) {
 	leaseID := strings.TrimSpace(instance.Metadata["lease"])
 	slug := strings.TrimSpace(instance.Metadata["slug"])
 	if claimed {
@@ -974,7 +974,7 @@ func finalizeMorphResolution(instance morphInstance, requested string, claim Lea
 		}
 	}
 	if leaseID == "" {
-		if isCanonicalLeaseID(requested) {
+		if core.IsCanonicalLeaseID(requested) {
 			leaseID = requested
 		} else {
 			leaseID = instance.ID
@@ -1016,21 +1016,21 @@ func morphInstanceTerminal(instance morphInstance) bool {
 	}
 }
 
-func morphTTLAction(cfg Config) string {
+func morphTTLAction(cfg core.Config) string {
 	if cfg.Morph.DeleteOnRelease {
 		return "stop"
 	}
 	return "pause"
 }
 
-func morphReleaseAction(cfg Config) string {
+func morphReleaseAction(cfg core.Config) string {
 	if cfg.Morph.DeleteOnRelease {
 		return "delete"
 	}
 	return "pause"
 }
 
-func morphDeleteOnRelease(lease LeaseTarget, cfg Config) bool {
+func morphDeleteOnRelease(lease core.LeaseTarget, cfg core.Config) bool {
 	if deleteOnReleaseExplicit(cfg) {
 		return cfg.Morph.DeleteOnRelease
 	}
@@ -1079,5 +1079,5 @@ func boolPtr(value bool) *bool {
 
 func isDefaultMorphWorkRoot(value string) bool {
 	value = strings.TrimSpace(value)
-	return value == "" || value == core.MorphConfigDefaultWorkRoot || isDefaultWorkRoot(value)
+	return value == "" || value == core.MorphConfigDefaultWorkRoot || core.IsDefaultWorkRoot(value)
 }

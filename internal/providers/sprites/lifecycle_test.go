@@ -15,31 +15,31 @@ import (
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
-func spritesTestClaim(t *testing.T, cfg Config, name, id, org string) (LeaseTarget, LeaseClaim, string) {
+func spritesTestClaim(t *testing.T, cfg core.Config, name, id, org string) (core.LeaseTarget, core.LeaseClaim, string) {
 	t.Helper()
 	repo := t.TempDir()
-	server := Server{Provider: spritesProvider, CloudID: name, Name: name, Labels: map[string]string{
+	server := core.Server{Provider: spritesProvider, CloudID: name, Name: name, Labels: map[string]string{
 		"provider": spritesProvider, "lease": "cbx_testidentity", "slug": "test-identity", "name": name,
 		"sprites_resource_id": id, "sprites_organization": org,
 	}}
-	if err := core.ClaimLeaseTargetForRepoConfig("cbx_testidentity", "test-identity", cfg, server, SSHTarget{}, repo, 0, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig("cbx_testidentity", "test-identity", cfg, server, core.SSHTarget{}, repo, 0, false); err != nil {
 		t.Fatal(err)
 	}
 	claim, _, err := core.ReadLeaseClaimWithPresence("cbx_testidentity")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return LeaseTarget{Server: server, LeaseID: "cbx_testidentity"}, claim, repo
+	return core.LeaseTarget{Server: server, LeaseID: "cbx_testidentity"}, claim, repo
 }
 
 func TestSpritesResolveValidatesClaimBeforeBootstrap(t *testing.T) {
 	for _, scenario := range []string{"identity", "reclaim replacement", "raw reclaim replacement", "prefixed reclaim replacement", "raw changed lease", "organization", "endpoint", "name", "labels", "live lease", "repo", "expected identity"} {
 		t.Run(scenario, func(t *testing.T) {
 			testutil.IsolateUserDirs(t)
-			cfg := Config{Provider: spritesProvider, Sprites: SpritesConfig{WorkRoot: "/home/sprite/crabbox"}}
+			cfg := core.Config{Provider: spritesProvider, Sprites: core.SpritesConfig{WorkRoot: "/home/sprite/crabbox"}}
 			lease, before, repo := spritesTestClaim(t, cfg, "crabbox-test", "original-id", "test-org")
 			sprite := spritesInfo{ID: "original-id", Name: "crabbox-test", Organization: "test-org", Labels: spritesAPILabels(lease.LeaseID, "test-identity")}
-			req := ResolveRequest{ID: lease.LeaseID, Repo: core.Repo{Root: repo}}
+			req := core.ResolveRequest{ID: lease.LeaseID, Repo: core.Repo{Root: repo}}
 			switch scenario {
 			case "identity":
 				sprite.ID = "replacement-id"
@@ -70,7 +70,7 @@ func TestSpritesResolveValidatesClaimBeforeBootstrap(t *testing.T) {
 				req.ExpectedProviderIdentity = core.ProviderIdentityExpectation{LeaseID: lease.LeaseID, ResourceID: "other-name"}
 			}
 			runner := &recordingRunner{failContains: "sprite", err: errors.New("unexpected native command")}
-			b := &spritesBackend{cfg: cfg, client: &fakeSpritesAPI{get: sprite}, rt: Runtime{Exec: runner, Stderr: io.Discard}}
+			b := &spritesBackend{cfg: cfg, client: &fakeSpritesAPI{get: sprite}, rt: core.Runtime{Exec: runner, Stderr: io.Discard}}
 			if _, err := b.Resolve(t.Context(), req); err == nil {
 				t.Fatal("expected identity/ownership error")
 			}
@@ -89,12 +89,12 @@ func TestSpritesReadOnlyResolutionAndStatusDoNotBootstrap(t *testing.T) {
 	for _, state := range []string{"cold", "warm", "running"} {
 		t.Run(state, func(t *testing.T) {
 			testutil.IsolateUserDirs(t)
-			cfg := Config{Provider: spritesProvider, Sprites: SpritesConfig{WorkRoot: "/home/sprite/crabbox"}}
+			cfg := core.Config{Provider: spritesProvider, Sprites: core.SpritesConfig{WorkRoot: "/home/sprite/crabbox"}}
 			lease, before, _ := spritesTestClaim(t, cfg, "crabbox-test", "original-id", "test-org")
 			sprite := spritesInfo{ID: "original-id", Name: "crabbox-test", Organization: "test-org", Status: state, Labels: spritesAPILabels(lease.LeaseID, "test-identity")}
 			b := &spritesBackend{cfg: cfg, client: &fakeSpritesAPI{get: sprite}}
 			// No runner is installed: read-only resolution must not require a CLI.
-			for _, req := range []ResolveRequest{{ID: lease.LeaseID, StatusOnly: true}, {ID: lease.LeaseID, NoLocalStateMutations: true}} {
+			for _, req := range []core.ResolveRequest{{ID: lease.LeaseID, StatusOnly: true}, {ID: lease.LeaseID, NoLocalStateMutations: true}} {
 				resolved, err := b.Resolve(t.Context(), req)
 				if err != nil {
 					t.Fatal(err)
@@ -131,7 +131,7 @@ func TestSpritesResolveAllowsVerifiedReuseAndExplicitAdoption(t *testing.T) {
 	for _, scenario := range []string{"managed", "adopted", "reclaim", "raw reclaim"} {
 		t.Run(scenario, func(t *testing.T) {
 			testutil.IsolateUserDirs(t)
-			cfg := Config{Provider: spritesProvider, Sprites: SpritesConfig{WorkRoot: "/home/sprite/crabbox"}}
+			cfg := core.Config{Provider: spritesProvider, Sprites: core.SpritesConfig{WorkRoot: "/home/sprite/crabbox"}}
 			lease, _, repo := spritesTestClaim(t, cfg, "crabbox-test", "original-id", "test-org")
 			sprite := spritesInfo{ID: "original-id", Name: "crabbox-test", Organization: "test-org", Labels: spritesAPILabels(lease.LeaseID, "test-identity")}
 			if scenario != "managed" {
@@ -139,18 +139,18 @@ func TestSpritesResolveAllowsVerifiedReuseAndExplicitAdoption(t *testing.T) {
 			}
 			if scenario == "adopted" {
 				lease.Server.Labels["sprites_ownership"] = "adopted"
-				if err := core.ClaimLeaseTargetForRepoConfig(lease.LeaseID, "test-identity", cfg, lease.Server, SSHTarget{}, repo, 0, false); err != nil {
+				if err := core.ClaimLeaseTargetForRepoConfig(lease.LeaseID, "test-identity", cfg, lease.Server, core.SSHTarget{}, repo, 0, false); err != nil {
 					t.Fatal(err)
 				}
 			}
 			// Stop at bootstrap so this test never starts SSH or remote processes.
 			runner := &recordingRunner{failContains: "sprite exec", err: errors.New("bootstrap reached")}
-			b := &spritesBackend{cfg: cfg, client: &fakeSpritesAPI{get: sprite}, rt: Runtime{Exec: runner, Stderr: io.Discard}}
+			b := &spritesBackend{cfg: cfg, client: &fakeSpritesAPI{get: sprite}, rt: core.Runtime{Exec: runner, Stderr: io.Discard}}
 			id := lease.LeaseID
 			if scenario == "raw reclaim" {
 				id = sprite.Name
 			}
-			_, err := b.Resolve(t.Context(), ResolveRequest{ID: id, Repo: core.Repo{Root: repo}, Reclaim: scenario == "reclaim" || scenario == "raw reclaim"})
+			_, err := b.Resolve(t.Context(), core.ResolveRequest{ID: id, Repo: core.Repo{Root: repo}, Reclaim: scenario == "reclaim" || scenario == "raw reclaim"})
 			if err == nil || !strings.Contains(err.Error(), "bootstrap reached") || len(runner.calls) != 2 {
 				t.Fatalf("verified reuse did not reach bootstrap: err=%v calls=%d", err, len(runner.calls))
 			}
@@ -163,9 +163,9 @@ func TestSpritesClaimlessReuseRequiresExplicitAdoption(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			testutil.IsolateUserDirs(t)
 			const leaseID = "cbx_abcdef123456"
-			cfg := Config{Provider: spritesProvider, Sprites: SpritesConfig{WorkRoot: "/home/sprite/crabbox"}}
+			cfg := core.Config{Provider: spritesProvider, Sprites: core.SpritesConfig{WorkRoot: "/home/sprite/crabbox"}}
 			sprite := spritesInfo{ID: "original-id", Name: "crabbox-test", Organization: "test-org", Labels: spritesAPILabels(leaseID, "test-identity")}
-			req := ResolveRequest{ID: sprite.Name, Repo: core.Repo{Root: t.TempDir()}}
+			req := core.ResolveRequest{ID: sprite.Name, Repo: core.Repo{Root: t.TempDir()}}
 			switch scenario {
 			case "empty repo":
 				req.Repo.Root = ""
@@ -185,7 +185,7 @@ func TestSpritesClaimlessReuseRequiresExplicitAdoption(t *testing.T) {
 				req.NoLocalStateMutations = true
 			}
 			runner := &recordingRunner{failContains: "sprite exec", err: errors.New("bootstrap reached")}
-			b := &spritesBackend{cfg: cfg, client: &fakeSpritesAPI{get: sprite, list: []spritesInfo{sprite}}, rt: Runtime{Exec: runner, Stderr: io.Discard}}
+			b := &spritesBackend{cfg: cfg, client: &fakeSpritesAPI{get: sprite, list: []spritesInfo{sprite}}, rt: core.Runtime{Exec: runner, Stderr: io.Discard}}
 			_, err := b.Resolve(t.Context(), req)
 			if scenario == "reclaim" {
 				if err == nil || !strings.Contains(err.Error(), "bootstrap reached") || len(runner.calls) != 2 {
@@ -267,22 +267,22 @@ func TestSpritesReleaseAbsentResource(t *testing.T) {
 				}
 			}))
 			defer srv.Close()
-			cfg := Config{Provider: spritesProvider, Sprites: SpritesConfig{Token: "test-token", APIURL: srv.URL, WorkRoot: "/home/sprite/crabbox"}}
+			cfg := core.Config{Provider: spritesProvider, Sprites: core.SpritesConfig{Token: "test-token", APIURL: srv.URL, WorkRoot: "/home/sprite/crabbox"}}
 			id, org := "original-id", "test-org"
 			if scenario == "legacy claim" {
 				id, org = "", ""
 			}
 			lease, before, _ := spritesTestClaim(t, cfg, "crabbox-test", id, org)
-			keyPath, _, err := ensureTestboxKey(lease.LeaseID)
+			keyPath, _, err := core.EnsureTestboxKey(lease.LeaseID)
 			if err != nil {
 				t.Fatal(err)
 			}
-			client, err := newSpritesClient(cfg, Runtime{HTTP: srv.Client()})
+			client, err := newSpritesClient(cfg, core.Runtime{HTTP: srv.Client()})
 			if err != nil {
 				t.Fatal(err)
 			}
-			b := &spritesBackend{cfg: cfg, client: client, rt: Runtime{Stderr: io.Discard}}
-			err = b.ReleaseLease(t.Context(), ReleaseLeaseRequest{Lease: lease})
+			b := &spritesBackend{cfg: cfg, client: client, rt: core.Runtime{Stderr: io.Discard}}
+			err = b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease})
 			after, exists, readErr := core.ReadLeaseClaimWithPresence(lease.LeaseID)
 			if readErr != nil {
 				t.Fatal(readErr)

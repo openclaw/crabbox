@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type sshConfigEntry struct {
@@ -66,25 +68,25 @@ func parseSSHConfig(data string) ([]sshConfigEntry, error) {
 	return entries, nil
 }
 
-func selectSSHTarget(cfg Config, data, alias string) (SSHTarget, error) {
+func selectSSHTarget(cfg core.Config, data, alias string) (core.SSHTarget, error) {
 	entry, selectedAlias, err := selectSSHConfigEntry(data, alias)
 	if err != nil {
-		return SSHTarget{}, err
+		return core.SSHTarget{}, err
 	}
 	user := firstNonEmpty(entry.User, cfg.SSHUser)
 	if user == "" {
-		return SSHTarget{}, exit(2, "github-codespaces SSH config entry %q is missing User", selectedAlias)
+		return core.SSHTarget{}, core.Exit(2, "github-codespaces SSH config entry %q is missing User", selectedAlias)
 	}
 	if !validSSHUser(user) {
-		return SSHTarget{}, exit(2, "github-codespaces SSH config entry %q has invalid User %q", selectedAlias, user)
+		return core.SSHTarget{}, core.Exit(2, "github-codespaces SSH config entry %q has invalid User %q", selectedAlias, user)
 	}
 	if strings.TrimSpace(entry.IdentityFile) == "" {
-		return SSHTarget{}, exit(2, "github-codespaces SSH config entry %q is missing IdentityFile", selectedAlias)
+		return core.SSHTarget{}, core.Exit(2, "github-codespaces SSH config entry %q is missing IdentityFile", selectedAlias)
 	}
 	host := strings.TrimSpace(entry.HostName)
 	proxy := strings.TrimSpace(entry.ProxyCommand)
 	if host == "" && proxy == "" {
-		return SSHTarget{}, exit(2, "github-codespaces SSH config entry %q is missing HostName or ProxyCommand", selectedAlias)
+		return core.SSHTarget{}, core.Exit(2, "github-codespaces SSH config entry %q is missing HostName or ProxyCommand", selectedAlias)
 	}
 	if host == "" {
 		host = selectedAlias
@@ -94,9 +96,9 @@ func selectSSHTarget(cfg Config, data, alias string) (SSHTarget, error) {
 		port = defaultSSHPort
 	}
 	if _, err := strconv.Atoi(port); err != nil {
-		return SSHTarget{}, exit(2, "github-codespaces SSH config entry %q has invalid Port %q", selectedAlias, port)
+		return core.SSHTarget{}, core.Exit(2, "github-codespaces SSH config entry %q has invalid Port %q", selectedAlias, port)
 	}
-	target := SSHTarget{
+	target := core.SSHTarget{
 		User:           user,
 		Host:           host,
 		Key:            entry.IdentityFile,
@@ -114,7 +116,7 @@ func selectSSHTarget(cfg Config, data, alias string) (SSHTarget, error) {
 		)
 		host, err := (ghRunner{cfg: cfg.GitHubCodespaces}).apiHostname()
 		if err != nil {
-			return SSHTarget{}, err
+			return core.SSHTarget{}, err
 		}
 		target.ProxyCommand = command
 		target.ChildEnv = map[string]string{"GH_HOST": host}
@@ -125,7 +127,7 @@ func selectSSHTarget(cfg Config, data, alias string) (SSHTarget, error) {
 func selectSSHConfigEntry(data, alias string) (sshConfigEntry, string, error) {
 	alias = strings.TrimSpace(alias)
 	if alias == "" {
-		return sshConfigEntry{}, "", exit(2, "github-codespaces SSH config host alias is required")
+		return sshConfigEntry{}, "", core.Exit(2, "github-codespaces SSH config host alias is required")
 	}
 	entries, err := parseSSHConfig(data)
 	if err != nil {
@@ -152,10 +154,10 @@ func selectSSHConfigEntry(data, alias string) (sshConfigEntry, string, error) {
 		}
 	}
 	if len(matches) == 0 {
-		return sshConfigEntry{}, "", exit(4, "github-codespaces SSH config entry not found for host %q", alias)
+		return sshConfigEntry{}, "", core.Exit(4, "github-codespaces SSH config entry not found for host %q", alias)
 	}
 	if len(matches) > 1 {
-		return sshConfigEntry{}, "", exit(2, "github-codespaces SSH config entry for host %q is ambiguous", alias)
+		return sshConfigEntry{}, "", core.Exit(2, "github-codespaces SSH config entry for host %q is ambiguous", alias)
 	}
 	return matches[0], matchAliases[0], nil
 }
@@ -263,7 +265,7 @@ func validatePrivateSSHConfigFile(path string) error {
 		return err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return exit(2, "github-codespaces SSH config path %q must be a regular non-symlink file", path)
+		return core.Exit(2, "github-codespaces SSH config path %q must be a regular non-symlink file", path)
 	}
 	return validatePrivateSSHConfigPermissions(path, info)
 }
@@ -271,7 +273,7 @@ func validatePrivateSSHConfigFile(path string) error {
 func storeSSHConfig(leaseID, data string) (string, error) {
 	leaseID = strings.TrimSpace(leaseID)
 	if leaseID == "" {
-		return "", exit(2, "github-codespaces lease id is required for SSH config storage")
+		return "", core.Exit(2, "github-codespaces lease id is required for SSH config storage")
 	}
 	dir, err := sshConfigDir()
 	if err != nil {
@@ -283,7 +285,7 @@ func storeSSHConfig(leaseID, data string) (string, error) {
 	path := filepath.Join(dir, leaseID+".ssh_config")
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return "", exit(2, "refusing to replace non-regular github-codespaces SSH config path %q", path)
+			return "", core.Exit(2, "refusing to replace non-regular github-codespaces SSH config path %q", path)
 		}
 	} else if !os.IsNotExist(err) {
 		return "", err
@@ -343,14 +345,14 @@ func removeStoredSSHConfig(leaseID string) error {
 }
 
 func sshConfigDir() (string, error) {
-	stateDir, err := crabboxStateDir()
+	stateDir, err := core.CrabboxStateDir()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(stateDir, "github-codespaces"), nil
 }
 
-func githubCodespacesReadyCheck(cfg Config) string {
+func githubCodespacesReadyCheck(cfg core.Config) string {
 	workRoot := strings.TrimSpace(cfg.GitHubCodespaces.WorkRoot)
 	if workRoot == "" {
 		workRoot = strings.TrimSpace(cfg.WorkRoot)

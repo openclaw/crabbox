@@ -42,10 +42,10 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
-		return nil, exit(2, "provider=%s managed provisioning supports target=linux only", providerName)
+		return nil, core.Exit(2, "provider=%s managed provisioning supports target=linux only", providerName)
 	}
 	if cfg.Tailscale.Enabled || string(cfg.Network) == "tailscale" {
-		return nil, exit(2, "--tailscale is not supported for provider=%s; runpod pods expose public SSH only", providerName)
+		return nil, core.Exit(2, "--tailscale is not supported for provider=%s; runpod pods expose public SSH only", providerName)
 	}
 	return NewRunpodLeaseBackend(p.Spec(), cfg, rt), nil
 }

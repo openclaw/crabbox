@@ -34,14 +34,14 @@ func TestProviderServerTypeResolution(t *testing.T) {
 	provider := Provider{}
 	for _, test := range []struct {
 		name string
-		cfg  Config
+		cfg  core.Config
 		want string
 	}{
-		{name: "provider size", cfg: Config{Provider: namespaceProvider, Namespace: NamespaceConfig{Size: " xl "}, Class: "standard"}, want: "XL"},
-		{name: "explicit type", cfg: Config{Provider: namespaceProvider, ServerType: " l ", ServerTypeExplicit: true, Class: "standard"}, want: "L"},
-		{name: "canonical class", cfg: Config{Provider: namespaceProvider, TargetOS: targetLinux, Architecture: "amd64", Class: "large"}, want: "L"},
-		{name: "empty default", cfg: Config{Provider: namespaceProvider}, want: "M"},
-		{name: "custom class", cfg: Config{Provider: namespaceProvider, Class: "gpu"}, want: "GPU"},
+		{name: "provider size", cfg: core.Config{Provider: namespaceProvider, Namespace: core.NamespaceConfig{Size: " xl "}, Class: "standard"}, want: "XL"},
+		{name: "explicit type", cfg: core.Config{Provider: namespaceProvider, ServerType: " l ", ServerTypeExplicit: true, Class: "standard"}, want: "L"},
+		{name: "canonical class", cfg: core.Config{Provider: namespaceProvider, TargetOS: targetLinux, Architecture: "amd64", Class: "large"}, want: "L"},
+		{name: "empty default", cfg: core.Config{Provider: namespaceProvider}, want: "M"},
+		{name: "custom class", cfg: core.Config{Provider: namespaceProvider, Class: "gpu"}, want: "GPU"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := provider.ServerTypeForConfig(test.cfg); got != test.want {
@@ -83,13 +83,13 @@ func TestParseNamespaceListAcceptsEmptyCLIText(t *testing.T) {
 
 func TestListDevboxesIgnoresSuccessfulCommandStderr(t *testing.T) {
 	runner := &namespaceQueuedRunner{
-		results: []LocalCommandResult{{
+		results: []core.LocalCommandResult{{
 			Stdout: `[{"name":"crabbox-blue-lobster-deadbeef","status":"running","size":"L"}]`,
 			Stderr: "warning: update available\n",
 		}},
 	}
 	var stderr bytes.Buffer
-	backend := &namespaceLeaseBackend{rt: Runtime{Exec: runner, Stderr: &stderr}}
+	backend := &namespaceLeaseBackend{rt: core.Runtime{Exec: runner, Stderr: &stderr}}
 
 	items, err := backend.listDevboxes(context.Background())
 	if err != nil {
@@ -135,7 +135,7 @@ func TestNamespaceItemToServerMapsCrabboxNames(t *testing.T) {
 		Name:   "crabbox-blue-lobster-deadbeef",
 		Status: "running",
 		Size:   "XL",
-	}, Config{})
+	}, core.Config{})
 	if server.Provider != namespaceProvider || server.Name != "crabbox-blue-lobster-deadbeef" || server.Status != "running" {
 		t.Fatalf("server=%#v", server)
 	}
@@ -148,11 +148,11 @@ func TestListRestoresNamespaceClaimMetadata(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_deadbeef0000"
 	slug := "blue-lobster"
-	name := leaseProviderName(leaseID, slug)
-	if err := claimLeaseForRepoProvider(leaseID, slug, namespaceProvider, t.TempDir(), time.Hour, false); err != nil {
+	name := core.LeaseProviderName(leaseID, slug)
+	if err := core.ClaimLeaseForRepoProvider(leaseID, slug, namespaceProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	server := Server{
+	server := core.Server{
 		CloudID:  name,
 		Provider: namespaceProvider,
 		Name:     name,
@@ -167,12 +167,12 @@ func TestListRestoresNamespaceClaimMetadata(t *testing.T) {
 			"state":              "stopped",
 		},
 	}
-	if err := updateLeaseClaimEndpoint(leaseID, server, SSHTarget{}); err != nil {
+	if err := core.UpdateLeaseClaimEndpoint(leaseID, server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
-	runner := &namespaceQueuedRunner{results: []LocalCommandResult{{Stdout: `{"devboxes":[{"name":"` + name + `","state":"stopped","machine_size":"M"}]}`}}}
-	backend := &namespaceLeaseBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	servers, err := backend.List(context.Background(), ListRequest{})
+	runner := &namespaceQueuedRunner{results: []core.LocalCommandResult{{Stdout: `{"devboxes":[{"name":"` + name + `","state":"stopped","machine_size":"M"}]}`}}}
+	backend := &namespaceLeaseBackend{rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	servers, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestListRestoresNamespaceClaimMetadata(t *testing.T) {
 
 func TestResolveNamespaceDevboxNameKeepsClaimedExternalName(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if err := claimLeaseForRepoProvider("nsd_existing-devbox", "existing-devbox", namespaceProvider, t.TempDir(), 0, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("nsd_existing-devbox", "existing-devbox", namespaceProvider, t.TempDir(), 0, false); err != nil {
 		t.Fatal(err)
 	}
 	name, leaseID, slug, err := resolveNamespaceDevboxName("existing-devbox", false)
@@ -198,15 +198,15 @@ func TestResolveNamespaceDevboxNameKeepsClaimedExternalName(t *testing.T) {
 func TestResolveReleaseOnlySkipsNamespacePrepare(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repoRoot := t.TempDir()
-	if err := claimLeaseForRepoProvider("nsd_crabbox-blue-lobster-deadbeef", "blue-lobster", namespaceProvider, repoRoot, 0, true); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("nsd_crabbox-blue-lobster-deadbeef", "blue-lobster", namespaceProvider, repoRoot, 0, true); err != nil {
 		t.Fatal(err)
 	}
 	runner := &namespaceRecordingRunner{}
 	backend := &namespaceLeaseBackend{
-		cfg: Config{Namespace: NamespaceConfig{WorkRoot: "/workspaces/crabbox"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+		cfg: core.Config{Namespace: core.NamespaceConfig{WorkRoot: "/workspaces/crabbox"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
 	}
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "blue-lobster", ReleaseOnly: true})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "blue-lobster", ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,16 +225,16 @@ func TestResolveChecksRepoClaimBeforeNamespacePrepare(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_deadbeef0000"
 	slug := "blue-lobster"
-	if err := claimLeaseForRepoProvider(leaseID, slug, namespaceProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider(leaseID, slug, namespaceProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	runner := &namespaceRecordingRunner{}
 	backend := &namespaceLeaseBackend{
-		cfg: Config{Provider: namespaceProvider},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+		cfg: core.Config{Provider: namespaceProvider},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
 	}
 
-	req := ResolveRequest{ID: leaseID}
+	req := core.ResolveRequest{ID: leaseID}
 	req.Repo.Root = t.TempDir()
 	_, err := backend.Resolve(context.Background(), req)
 	if err == nil || !strings.Contains(err.Error(), "is claimed by repo") {
@@ -250,17 +250,17 @@ func TestResolveRestoresRepoClaimWhenNamespacePrepareFails(t *testing.T) {
 	leaseID := "cbx_deadbeef0000"
 	runner := &namespaceRecordingRunner{failAll: true}
 	backend := &namespaceLeaseBackend{
-		cfg: Config{Provider: namespaceProvider},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+		cfg: core.Config{Provider: namespaceProvider},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
 	}
-	req := ResolveRequest{ID: leaseID}
+	req := core.ResolveRequest{ID: leaseID}
 	req.Repo.Root = t.TempDir()
 
 	_, err := backend.Resolve(context.Background(), req)
 	if err == nil || !strings.Contains(err.Error(), "namespace devbox failed") {
 		t.Fatalf("Resolve error=%v", err)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
 		t.Fatalf("failed resolve retained claim exists=%v err=%v", exists, err)
 	}
 }
@@ -316,25 +316,25 @@ func TestReleaseLeaseCleansNamespaceSSHFiles(t *testing.T) {
 	runner := &namespaceRecordingRunner{}
 	var out bytes.Buffer
 	backend := &namespaceLeaseBackend{
-		cfg: Config{Namespace: NamespaceConfig{DeleteOnRelease: true}},
-		rt:  Runtime{Stdout: &out, Stderr: io.Discard, Exec: runner},
+		cfg: core.Config{Namespace: core.NamespaceConfig{DeleteOnRelease: true}},
+		rt:  core.Runtime{Stdout: &out, Stderr: io.Discard, Exec: runner},
 	}
 	leaseID := "cbx_deadbeef0000"
 	name := "crabbox-blue-lobster-deadbeef"
-	server := Server{
+	server := core.Server{
 		CloudID:  name,
 		Provider: namespaceProvider,
 		Name:     name,
 		Labels:   map[string]string{"provider": namespaceProvider, "lease": leaseID, "slug": "blue-lobster", "name": name},
 	}
-	if err := claimLeaseForRepoProvider(leaseID, "blue-lobster", namespaceProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "blue-lobster", namespaceProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := updateLeaseClaimEndpoint(leaseID, server, SSHTarget{}); err != nil {
+	if err := core.UpdateLeaseClaimEndpoint(leaseID, server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
-	lease := LeaseTarget{LeaseID: leaseID, Server: server}
-	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil || !outcome.Terminal {
+	lease := core.LeaseTarget{LeaseID: leaseID, Server: server}
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil || !outcome.Terminal {
 		t.Fatalf("deletion outcome=%+v err=%v", outcome, err)
 	}
 	if len(runner.calls) != 1 || runner.calls[0] != "devbox delete crabbox-blue-lobster-deadbeef --force" {
@@ -367,23 +367,23 @@ func TestReleaseLeaseRequiresExactNamespaceClaim(t *testing.T) {
 			const slug = "blue-lobster"
 			const name = "crabbox-blue-lobster-deadbeef"
 			if test.claimName != "" {
-				if err := claimLeaseForRepoProvider(leaseID, slug, namespaceProvider, t.TempDir(), time.Hour, false); err != nil {
+				if err := core.ClaimLeaseForRepoProvider(leaseID, slug, namespaceProvider, t.TempDir(), time.Hour, false); err != nil {
 					t.Fatal(err)
 				}
-				claimed := Server{CloudID: test.claimName, Provider: namespaceProvider, Name: test.claimName, Labels: map[string]string{
+				claimed := core.Server{CloudID: test.claimName, Provider: namespaceProvider, Name: test.claimName, Labels: map[string]string{
 					"provider": namespaceProvider, "lease": leaseID, "slug": slug, "name": test.claimName,
 				}}
-				if err := updateLeaseClaimEndpoint(leaseID, claimed, SSHTarget{}); err != nil {
+				if err := core.UpdateLeaseClaimEndpoint(leaseID, claimed, core.SSHTarget{}); err != nil {
 					t.Fatal(err)
 				}
 			}
 			runner := &namespaceRecordingRunner{failAll: test.failProvider}
 			backend := &namespaceLeaseBackend{
-				cfg: Config{Namespace: NamespaceConfig{DeleteOnRelease: test.deleteOnRelease}},
-				rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+				cfg: core.Config{Namespace: core.NamespaceConfig{DeleteOnRelease: test.deleteOnRelease}},
+				rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
 			}
-			lease := LeaseTarget{LeaseID: leaseID, Server: Server{Name: name, Labels: map[string]string{"slug": slug}}}
-			err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true})
+			lease := core.LeaseTarget{LeaseID: leaseID, Server: core.Server{Name: name, Labels: map[string]string{"slug": slug}}}
+			err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true})
 			if err == nil {
 				t.Fatal("expected release to fail")
 			}
@@ -391,7 +391,7 @@ func TestReleaseLeaseRequiresExactNamespaceClaim(t *testing.T) {
 				t.Fatalf("calls=%#v want %d", runner.calls, test.wantCalls)
 			}
 			if test.claimName != "" {
-				claim, exists, claimErr := resolveLeaseClaim(leaseID)
+				claim, exists, claimErr := core.ResolveLeaseClaim(leaseID)
 				if claimErr != nil || !exists || claim.CloudID != test.claimName {
 					t.Fatalf("claim=%#v exists=%v err=%v", claim, exists, claimErr)
 				}
@@ -404,7 +404,7 @@ func TestReleaseLeaseRetainsStoppedNamespaceClaimAndSSHFiles(t *testing.T) {
 	home := testutil.IsolateUserDirs(t).Home
 	leaseID := "cbx_deadbeef0000"
 	slug := "blue-lobster"
-	name := leaseProviderName(leaseID, slug)
+	name := core.LeaseProviderName(leaseID, slug)
 	dir := filepath.Join(home, ".namespace", "ssh")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -414,10 +414,10 @@ func TestReleaseLeaseRetainsStoppedNamespaceClaimAndSSHFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := claimLeaseForRepoProvider(leaseID, slug, namespaceProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider(leaseID, slug, namespaceProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	server := Server{
+	server := core.Server{
 		CloudID:  name,
 		Provider: namespaceProvider,
 		Name:     name,
@@ -430,44 +430,44 @@ func TestReleaseLeaseRetainsStoppedNamespaceClaimAndSSHFiles(t *testing.T) {
 			"state":    "ready",
 		},
 	}
-	if err := updateLeaseClaimEndpoint(leaseID, server, SSHTarget{Host: "ssh.namespace.example", Port: "22"}); err != nil {
+	if err := core.UpdateLeaseClaimEndpoint(leaseID, server, core.SSHTarget{Host: "ssh.namespace.example", Port: "22"}); err != nil {
 		t.Fatal(err)
 	}
-	claim, ok, err := resolveLeaseClaim(leaseID)
+	claim, ok, err := core.ResolveLeaseClaim(leaseID)
 	if err != nil || !ok {
 		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
 	}
 	claim.Labels["pond"] = "alpha"
 	claim.Labels["pond_exposed_ports"] = "8080"
-	currentServer := namespaceServer(name, leaseID, slug, Config{Namespace: NamespaceConfig{DeleteOnRelease: true}}, true)
-	restoreNamespaceClaimLabels(&currentServer, claim, true, Config{Namespace: NamespaceConfig{DeleteOnRelease: true}})
+	currentServer := namespaceServer(name, leaseID, slug, core.Config{Namespace: core.NamespaceConfig{DeleteOnRelease: true}}, true)
+	restoreNamespaceClaimLabels(&currentServer, claim, true, core.Config{Namespace: core.NamespaceConfig{DeleteOnRelease: true}})
 	if currentServer.Labels["release"] != "stop" || currentServer.Labels["pond"] != "alpha" || currentServer.Labels["pond_exposed_ports"] != "8080" {
 		t.Fatalf("stored release policy was overwritten: %#v", currentServer.Labels)
 	}
-	explicitCfg := Config{Namespace: NamespaceConfig{DeleteOnRelease: true}}
+	explicitCfg := core.Config{Namespace: core.NamespaceConfig{DeleteOnRelease: true}}
 	markDeleteOnReleaseExplicit(&explicitCfg)
-	if !namespaceDeleteOnRelease(LeaseTarget{Server: currentServer}, explicitCfg) {
+	if !namespaceDeleteOnRelease(core.LeaseTarget{Server: currentServer}, explicitCfg) {
 		t.Fatal("explicit delete flag did not override stored stop policy")
 	}
 	runner := &namespaceRecordingRunner{}
 	backend := &namespaceLeaseBackend{
-		cfg: Config{Namespace: NamespaceConfig{DeleteOnRelease: true}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+		cfg: core.Config{Namespace: core.NamespaceConfig{DeleteOnRelease: true}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
 	}
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if lease.Server.Labels["release"] != "stop" || !backend.RetainLeaseClaimAfterRelease(lease) {
 		t.Fatalf("resolved lease=%#v", lease)
 	}
-	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil || outcome.Terminal {
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil || outcome.Terminal {
 		t.Fatalf("stop outcome=%+v err=%v", outcome, err)
 	}
 	if len(runner.calls) != 1 || runner.calls[0] != "devbox shutdown "+name+" --force" {
 		t.Fatalf("calls=%#v", runner.calls)
 	}
-	claim, ok, err = resolveLeaseClaim(leaseID)
+	claim, ok, err = core.ResolveLeaseClaim(leaseID)
 	if err != nil || !ok || claim.Labels["state"] != "stopped" || claim.SSHHost != "" || claim.SSHPort != 0 {
 		t.Fatalf("stopped claim=%#v ok=%v err=%v", claim, ok, err)
 	}
@@ -481,12 +481,12 @@ func TestReleaseLeaseRetainsStoppedNamespaceClaimAndSSHFiles(t *testing.T) {
 
 func TestNamespaceRejectsUnsafeWorkRoot(t *testing.T) {
 	for _, workRoot := range []string{"/", "/workspaces", "/tmp", "relative"} {
-		cfg := Config{Namespace: NamespaceConfig{WorkRoot: workRoot}}
+		cfg := core.Config{Namespace: core.NamespaceConfig{WorkRoot: workRoot}}
 		if err := validateNamespaceConfig(cfg); err == nil {
 			t.Fatalf("expected %q to be rejected", workRoot)
 		}
 	}
-	if err := validateNamespaceConfig(Config{Namespace: NamespaceConfig{WorkRoot: "/workspaces/crabbox"}}); err != nil {
+	if err := validateNamespaceConfig(core.Config{Namespace: core.NamespaceConfig{WorkRoot: "/workspaces/crabbox"}}); err != nil {
 		t.Fatalf("valid work root rejected: %v", err)
 	}
 }
@@ -497,7 +497,7 @@ func TestNamespaceConfigGetterDefaults(t *testing.T) {
 		{" \t ", "builtin:base", "/workspaces/crabbox"},
 		{" /workspaces/custom ", "/workspaces/custom", "/workspaces/custom"},
 	} {
-		cfg := Config{Namespace: NamespaceConfig{Image: tc.raw, WorkRoot: tc.raw}}
+		cfg := core.Config{Namespace: core.NamespaceConfig{Image: tc.raw, WorkRoot: tc.raw}}
 		if image, root := namespaceImage(cfg), namespaceWorkRoot(cfg); image != tc.image || root != tc.root {
 			t.Fatalf("raw %q resolved to %q / %q", tc.raw, image, root)
 		}
@@ -508,7 +508,7 @@ func TestNamespaceConfigGetterDefaults(t *testing.T) {
 		{-time.Minute, 0, 30 * time.Minute},
 		{0, -time.Minute, 30 * time.Minute},
 	} {
-		cfg := Config{Namespace: NamespaceConfig{AutoStopIdleTimeout: tc.provider}, IdleTimeout: tc.generic}
+		cfg := core.Config{Namespace: core.NamespaceConfig{AutoStopIdleTimeout: tc.provider}, IdleTimeout: tc.generic}
 		if got := namespaceAutoStopIdleTimeout(cfg); got != tc.want {
 			t.Fatalf("timeout=%s, want %s", got, tc.want)
 		}
@@ -518,7 +518,7 @@ func TestNamespaceConfigGetterDefaults(t *testing.T) {
 func TestNamespaceAutoStopDurationFlagValidation(t *testing.T) {
 	for _, value := range []string{"bogus", "0s", "-1m", ""} {
 		t.Run(value, func(t *testing.T) {
-			cfg := Config{}
+			cfg := core.Config{}
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			fs.SetOutput(io.Discard)
 			values := RegisterNamespaceProviderFlags(fs, cfg)
@@ -536,7 +536,7 @@ func TestNamespaceAutoStopDurationFlagValidation(t *testing.T) {
 func TestNamespaceAutoStopDurationFlagAppliesValidValue(t *testing.T) {
 	for _, raw := range []string{"45m", " 45m "} {
 		t.Run(raw, func(t *testing.T) {
-			cfg := Config{Namespace: NamespaceConfig{DeleteOnRelease: true}}
+			cfg := core.Config{Namespace: core.NamespaceConfig{DeleteOnRelease: true}}
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			fs.SetOutput(io.Discard)
 			values := RegisterNamespaceProviderFlags(fs, cfg)
@@ -560,7 +560,7 @@ func TestNamespaceDurationFlagPartialEffects(t *testing.T) {
 	for _, priorMarker := range []bool{false, true} {
 		for _, raw := range []string{"", " \t ", "bogus", "0s", "-1m"} {
 			t.Run(fmt.Sprintf("marker-%t-duration-%q", priorMarker, raw), func(t *testing.T) {
-				cfg := Config{WorkRoot: "/workspaces/generic", Namespace: NamespaceConfig{AutoStopIdleTimeout: 17 * time.Minute, WorkRoot: "/workspaces/prior", DeleteOnRelease: true}}
+				cfg := core.Config{WorkRoot: "/workspaces/generic", Namespace: core.NamespaceConfig{AutoStopIdleTimeout: 17 * time.Minute, WorkRoot: "/workspaces/prior", DeleteOnRelease: true}}
 				if priorMarker {
 					markDeleteOnReleaseExplicit(&cfg)
 				}
@@ -587,7 +587,7 @@ func TestNamespaceDurationFlagPartialEffects(t *testing.T) {
 
 func TestNamespaceLifecycleCommandFallbacks(t *testing.T) {
 	runner := &namespaceRecordingRunner{failFirst: true}
-	backend := &namespaceLeaseBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	backend := &namespaceLeaseBackend{rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 
 	if err := backend.shutdownDevbox(context.Background(), "crabbox-blue-lobster-deadbeef"); err != nil {
 		t.Fatal(err)
@@ -609,7 +609,7 @@ func TestNamespaceLifecycleCommandFallbacks(t *testing.T) {
 func TestNamespacePrepareReportsPrepareFailure(t *testing.T) {
 	testutil.IsolateUserDirs(t)
 	runner := &namespaceRecordingRunner{failAll: true}
-	backend := &namespaceLeaseBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	backend := &namespaceLeaseBackend{rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 
 	_, err := backend.prepareDevbox(context.Background(), "crabbox-blue-lobster-deadbeef")
 	if err == nil || !strings.Contains(err.Error(), "namespace devbox failed") {
@@ -623,14 +623,14 @@ func TestNamespacePrepareReportsPrepareFailure(t *testing.T) {
 func TestNamespacePrepareIgnoresSuccessfulCommandStderr(t *testing.T) {
 	testutil.IsolateUserDirs(t)
 	runner := &namespaceQueuedRunner{
-		results: []LocalCommandResult{
+		results: []core.LocalCommandResult{
 			{ExitCode: 2, Stderr: "configure unsupported"},
 			{Stdout: `{"ssh_endpoint":"crabbox@ssh.namespace.example:2222","ssh_key_path":"/tmp/ns-key"}`, Stderr: "warning: update available\n"},
 		},
 		errs: []error{errors.New("unsupported"), nil},
 	}
 	var stderr bytes.Buffer
-	backend := &namespaceLeaseBackend{rt: Runtime{Stdout: io.Discard, Stderr: &stderr, Exec: runner}}
+	backend := &namespaceLeaseBackend{rt: core.Runtime{Stdout: io.Discard, Stderr: &stderr, Exec: runner}}
 
 	target, err := backend.prepareDevbox(context.Background(), "crabbox-blue-lobster-deadbeef")
 	if err != nil {
@@ -650,28 +650,28 @@ type namespaceRecordingRunner struct {
 	failFirst bool
 }
 
-func (r *namespaceRecordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *namespaceRecordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.calls = append(r.calls, req.Name+" "+strings.Join(req.Args, " "))
 	if r.failAll {
-		return LocalCommandResult{ExitCode: 2}, errors.New("unsupported")
+		return core.LocalCommandResult{ExitCode: 2}, errors.New("unsupported")
 	}
 	if r.failFirst {
 		r.failFirst = false
-		return LocalCommandResult{ExitCode: 2}, errors.New("unsupported")
+		return core.LocalCommandResult{ExitCode: 2}, errors.New("unsupported")
 	}
-	return LocalCommandResult{}, nil
+	return core.LocalCommandResult{}, nil
 }
 
 type namespaceQueuedRunner struct {
 	calls   []string
-	results []LocalCommandResult
+	results []core.LocalCommandResult
 	errs    []error
 }
 
-func (r *namespaceQueuedRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *namespaceQueuedRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.calls = append(r.calls, req.Name+" "+strings.Join(req.Args, " "))
 	if len(r.results) == 0 {
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
 	result := r.results[0]
 	r.results = r.results[1:]
