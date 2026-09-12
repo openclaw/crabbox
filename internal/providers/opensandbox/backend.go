@@ -471,92 +471,28 @@ func (b *openSandboxBackend) Cleanup(ctx context.Context, req core.CleanupReques
 		return err
 	}
 	now := core.ClockNow(b.rt.Clock).UTC()
-	checked := 0
-	removed := 0
-	claimsRemoved := 0
-	for _, listedClaim := range claims {
-		if listedClaim.Provider != providerName || !openSandboxClaimMatchesEndpoint(listedClaim, api.BaseURL()) {
-			continue
-		}
-		var removedOne, claimRemovedOne, checkedOne bool
-		err := func() error {
-			unlock, err := lockOpenSandboxLeaseOperation(ctx, listedClaim.LeaseID)
-			if err != nil {
-				return err
+	return shared.CleanupSandboxClaims(ctx, req, claims, shared.SandboxClaimCleanup[sandboxInfo]{
+		Provider:          providerName,
+		Runtime:           b.rt,
+		Now:               now,
+		MatchesScope:      func(claim core.LeaseClaim) bool { return openSandboxClaimMatchesEndpoint(claim, api.BaseURL()) },
+		Lock:              lockOpenSandboxLeaseOperation,
+		SandboxID:         func(claim core.LeaseClaim) string { return strings.TrimPrefix(claim.LeaseID, leasePrefix) },
+		Get:               api.GetSandbox,
+		Delete:            api.DeleteSandbox,
+		IsNotFound:        isOpenSandboxNotFound,
+		ForgetMissing:     b.cfg.OpenSandbox.ForgetMissing,
+		ForgetMissingHint: "opensandbox forget-missing",
+		Due:               shared.ClaimIdleCleanupDue,
+		Validate:          validateOpenSandboxOwnership,
+		Special: func(ctx context.Context, claim core.LeaseClaim) (bool, bool, bool, error) {
+			if !strings.HasPrefix(claim.LeaseID, recoveryPrefix) {
+				return false, false, false, nil
 			}
-			defer unlock()
-			claim, err := core.ReadLeaseClaim(listedClaim.LeaseID)
-			if err != nil {
-				return err
-			}
-			if claim.LeaseID == "" || claim.Provider != providerName || !openSandboxClaimMatchesEndpoint(claim, api.BaseURL()) {
-				return nil
-			}
-			checkedOne = true
-			if strings.HasPrefix(claim.LeaseID, recoveryPrefix) {
-				removedOne, claimRemovedOne, err = b.cleanupOpenSandboxRecovery(ctx, api, claim, now, req.DryRun)
-				return err
-			}
-			sandboxID := strings.TrimPrefix(claim.LeaseID, leasePrefix)
-			sb, getErr := api.GetSandbox(ctx, sandboxID)
-			if getErr != nil {
-				if !isOpenSandboxNotFound(getErr) {
-					return getErr
-				}
-				if !b.cfg.OpenSandbox.ForgetMissing {
-					fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=missing-or-inaccessible; set opensandbox forget-missing to remove the claim\n", sandboxID, claim.LeaseID)
-					return nil
-				}
-				if req.DryRun {
-					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
-					return nil
-				}
-				if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
-					return err
-				}
-				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
-				claimRemovedOne = true
-				return nil
-			}
-			due, reason := shared.ClaimIdleCleanupDue(claim, now)
-			if !due {
-				fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-				return nil
-			}
-			if err := validateOpenSandboxOwnership(claim, sb); err != nil {
-				return err
-			}
-			if req.DryRun {
-				fmt.Fprintf(b.rt.Stdout, "would delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-				return nil
-			}
-			if err := api.DeleteSandbox(ctx, sandboxID); err != nil && !isOpenSandboxNotFound(err) {
-				return err
-			}
-			if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
-				return err
-			}
-			fmt.Fprintf(b.rt.Stdout, "delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-			removedOne = true
-			return nil
-		}()
-		if err != nil {
-			return err
-		}
-		if checkedOne {
-			checked++
-		}
-		if removedOne {
-			removed++
-		}
-		if claimRemovedOne {
-			claimsRemoved++
-		}
-	}
-	if !req.DryRun {
-		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d claims_removed=%d checked=%d\n", providerName, removed, claimsRemoved, checked)
-	}
-	return nil
+			removed, claimRemoved, err := b.cleanupOpenSandboxRecovery(ctx, api, claim, now, req.DryRun)
+			return true, removed, claimRemoved, err
+		},
+	})
 }
 
 func (b *openSandboxBackend) cleanupOpenSandboxRecovery(ctx context.Context, api openSandboxClient, claim core.LeaseClaim, now time.Time, dryRun bool) (bool, bool, error) {

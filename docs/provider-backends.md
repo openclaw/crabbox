@@ -629,6 +629,12 @@ semantic tests required by the mechanism. Keep acquisition adapter-owned unless
 a future proposal proves both behavior preservation and meaningful net value.
 ## Shared run sequencing and provider authority
 
+`shared.CleanupSandboxClaims` owns the claim-backed sandbox cleanup scan. It
+rechecks provider scope after acquiring each adapter's operation lock, preserves
+dry-run and missing-resource reporting, and removes claims only after provider
+deletion succeeds. Adapters supply resource lookup, identity checks, expiry,
+deletion, and special recovery handling; the lock spans the complete operation.
+
 `shared.RunDelegatedSandbox` owns the common sandbox run sequence: preflight,
 archive preparation, acquisition or resolution, setup, sync, command execution,
 and one final retention/cleanup decision before timing and session reporting.

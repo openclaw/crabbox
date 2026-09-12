@@ -542,85 +542,20 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	}
 	scope := claimScope(api.BaseURL(), b.cfg)
 	now := core.ClockNow(b.rt.Clock).UTC()
-	checked := 0
-	removed := 0
-	claimsRemoved := 0
-	for _, listed := range claims {
-		if listed.Provider != providerName || listed.ProviderScope != scope {
-			continue
-		}
-		var checkedOne, removedOne, claimRemovedOne bool
-		err := func() error {
-			unlockOperation, err := lockCrownestLeaseOperation(ctx, listed.LeaseID)
-			if err != nil {
-				return err
-			}
-			defer unlockOperation()
-			claim, err := core.ReadLeaseClaim(listed.LeaseID)
-			if err != nil {
-				return err
-			}
-			if claim.LeaseID == "" || claim.Provider != providerName || claim.ProviderScope != scope {
-				return nil
-			}
-			checkedOne = true
-			sandboxID := sandboxIDFromLease(claim.LeaseID)
-			_, err = api.GetSandbox(ctx, sandboxID)
-			if err != nil {
-				if !isNotFound(err) {
-					return err
-				}
-				if !b.cfg.Crownest.ForgetMissing {
-					fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=missing-or-inaccessible; set crownest forget-missing to remove the claim\n", sandboxID, claim.LeaseID)
-					return nil
-				}
-				if req.DryRun {
-					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
-					return nil
-				}
-				if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
-					return err
-				}
-				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
-				claimRemovedOne = true
-				return nil
-			}
-			due, reason := crownestClaimCleanupDue(claim, now)
-			if !due {
-				fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-				return nil
-			}
-			if req.DryRun {
-				fmt.Fprintf(b.rt.Stdout, "would delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-				return nil
-			}
-			if err := api.DeleteSandbox(ctx, sandboxID); err != nil && !isNotFound(err) {
-				return err
-			}
-			if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
-				return err
-			}
-			fmt.Fprintf(b.rt.Stdout, "delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-			removedOne = true
-			return nil
-		}()
-		if err != nil {
-			return err
-		}
-		if checkedOne {
-			checked++
-		}
-		if removedOne {
-			removed++
-		}
-		if claimRemovedOne {
-			claimsRemoved++
-		}
-	}
-	if !req.DryRun {
-		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d claims_removed=%d checked=%d\n", providerName, removed, claimsRemoved, checked)
-	}
-	return nil
+	return shared.CleanupSandboxClaims(ctx, req, claims, shared.SandboxClaimCleanup[sandbox]{
+		Provider:          providerName,
+		Runtime:           b.rt,
+		Now:               now,
+		MatchesScope:      func(claim core.LeaseClaim) bool { return claim.ProviderScope == scope },
+		Lock:              lockCrownestLeaseOperation,
+		SandboxID:         func(claim core.LeaseClaim) string { return sandboxIDFromLease(claim.LeaseID) },
+		Get:               api.GetSandbox,
+		Delete:            api.DeleteSandbox,
+		IsNotFound:        isNotFound,
+		ForgetMissing:     b.cfg.Crownest.ForgetMissing,
+		ForgetMissingHint: "crownest forget-missing",
+		Due:               crownestClaimCleanupDue,
+	})
 }
 
 func (b *backend) createSandbox(ctx context.Context, api client, repo core.Repo, reclaim bool, requestedSlug string) (string, string, string, error) {

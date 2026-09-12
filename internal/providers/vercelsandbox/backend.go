@@ -375,88 +375,21 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		return err
 	}
 	now := core.ClockNow(b.rt.Clock).UTC()
-	checked := 0
-	removed := 0
-	claimsRemoved := 0
-	for _, listed := range claims {
-		if listed.Provider != providerName || !b.claimMatchesActiveScope(listed) {
-			continue
-		}
-		var removedOne, claimRemovedOne, checkedOne bool
-		err := func() error {
-			unlockOperation, err := lockVercelSandboxLeaseOperation(ctx, listed.LeaseID)
-			if err != nil {
-				return err
-			}
-			defer unlockOperation()
-			claim, err := core.ReadLeaseClaim(listed.LeaseID)
-			if err != nil {
-				return err
-			}
-			if claim.LeaseID == "" || claim.Provider != providerName || !b.claimMatchesActiveScope(claim) {
-				return nil
-			}
-			checkedOne = true
-			sandboxID := strings.TrimPrefix(claim.LeaseID, leasePrefix)
-			sb, getErr := api.GetSandbox(ctx, sandboxID)
-			if getErr != nil {
-				if !isVercelSandboxNotFound(getErr) {
-					return getErr
-				}
-				if !b.cfg.VercelSandbox.ForgetMissing {
-					fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=missing-or-inaccessible; set vercelSandbox.forgetMissing to remove the claim\n", sandboxID, claim.LeaseID)
-					return nil
-				}
-				if req.DryRun {
-					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
-					return nil
-				}
-				if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
-					return err
-				}
-				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
-				claimRemovedOne = true
-				return nil
-			}
-			due, reason := shared.ClaimIdleCleanupDue(claim, now)
-			if !due {
-				fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-				return nil
-			}
-			if err := validateSandboxOwnership(claim, sb); err != nil {
-				return err
-			}
-			if req.DryRun {
-				fmt.Fprintf(b.rt.Stdout, "would delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-				return nil
-			}
-			if err := api.DeleteSandbox(ctx, sandboxID); err != nil && !isVercelSandboxNotFound(err) {
-				return err
-			}
-			if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
-				return err
-			}
-			fmt.Fprintf(b.rt.Stdout, "delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-			removedOne = true
-			return nil
-		}()
-		if err != nil {
-			return err
-		}
-		if checkedOne {
-			checked++
-		}
-		if removedOne {
-			removed++
-		}
-		if claimRemovedOne {
-			claimsRemoved++
-		}
-	}
-	if !req.DryRun {
-		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d claims_removed=%d checked=%d\n", providerName, removed, claimsRemoved, checked)
-	}
-	return nil
+	return shared.CleanupSandboxClaims(ctx, req, claims, shared.SandboxClaimCleanup[sandboxSummary]{
+		Provider:          providerName,
+		Runtime:           b.rt,
+		Now:               now,
+		MatchesScope:      b.claimMatchesActiveScope,
+		Lock:              lockVercelSandboxLeaseOperation,
+		SandboxID:         func(claim core.LeaseClaim) string { return strings.TrimPrefix(claim.LeaseID, leasePrefix) },
+		Get:               api.GetSandbox,
+		Delete:            api.DeleteSandbox,
+		IsNotFound:        isVercelSandboxNotFound,
+		ForgetMissing:     b.cfg.VercelSandbox.ForgetMissing,
+		ForgetMissingHint: "vercelSandbox.forgetMissing",
+		Due:               shared.ClaimIdleCleanupDue,
+		Validate:          validateSandboxOwnership,
+	})
 }
 
 func (b *backend) createSandbox(ctx context.Context, api vercelSandboxClient, repo core.Repo, reclaim bool, requestedSlug string, retained bool) (string, string, string, func(), error) {
