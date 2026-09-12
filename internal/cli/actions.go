@@ -1367,7 +1367,7 @@ func localCompositeActionScript(step localHydrateStep, ctx localHydrateScriptCon
 		return "", nil, exit(2, "local Actions hydration only supports repo-local composite actions; %s uses %q", step.Uses, action.Runs.Using)
 	}
 	inputs := map[string]string{}
-	for _, name := range sortedCompositeInputKeys(action.Inputs) {
+	for _, name := range sortedKeys(action.Inputs) {
 		inputs[name] = action.Inputs[name].Default
 	}
 	for _, name := range sortedKeys(step.With) {
@@ -1460,15 +1460,6 @@ func readLocalCompositeAction(dir string) (localCompositeAction, error) {
 	return localCompositeAction{}, exit(2, "local composite action %s is not readable: %v", dir, lastErr)
 }
 
-func sortedCompositeInputKeys(values map[string]localCompositeInput) []string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
 func localCompositeActionOutputs(specs map[string]localCompositeOutput, ctx localHydrateScriptContext, actionTargetPath string) (map[string]string, error) {
 	if len(specs) == 0 {
 		return nil, nil
@@ -1476,7 +1467,7 @@ func localCompositeActionOutputs(specs map[string]localCompositeOutput, ctx loca
 	env := copyStringMap(ctx.Env)
 	env["GITHUB_ACTION_PATH"] = actionTargetPath
 	out := map[string]string{}
-	for _, name := range sortedCompositeOutputKeys(specs) {
+	for _, name := range sortedKeys(specs) {
 		value, err := interpolateLocalActionsValue(specs[name].Value, ctx.Inputs, env, ctx.Workdir, ctx.RepoRoot, ctx.StepOutputs)
 		if err != nil {
 			return nil, err
@@ -1484,15 +1475,6 @@ func localCompositeActionOutputs(specs map[string]localCompositeOutput, ctx loca
 		out[name] = value
 	}
 	return out, nil
-}
-
-func sortedCompositeOutputKeys(values map[string]localCompositeOutput) []string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 func validateWorkflowInputFields(fields []string) error {
@@ -1866,7 +1848,7 @@ func actionInputEnvName(name string) string {
 	return b.String()
 }
 
-func sortedKeys(values map[string]string) []string {
+func sortedKeys[T any](values map[string]T) []string {
 	keys := make([]string, 0, len(values))
 	for key := range values {
 		keys = append(keys, key)
