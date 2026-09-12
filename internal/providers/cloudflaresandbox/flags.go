@@ -77,7 +77,7 @@ func bridgeURL(cfg Config) (string, error) {
 		return "", exit(2, "%s bridge URL must not include userinfo", providerName)
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && shared.IsLoopbackHost(parsed.Hostname())) {
 		return "", exit(2, "%s bridge URL %q must use https unless it targets localhost", providerName, bridgeURLForError(raw))
 	}
 	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
@@ -101,10 +101,6 @@ func bridgeURLForError(raw string) string {
 		return parsed.String()
 	}
 	return "<redacted>"
-}
-
-func isLoopbackHost(host string) bool {
-	return shared.IsLoopbackHost(host)
 }
 
 func canonicalHostPort(parsed *url.URL) string {

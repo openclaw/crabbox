@@ -58,16 +58,12 @@ func validateBaseURL(raw string) (string, error) {
 		return "", exit(2, "provider=crownest base URL must not contain userinfo, query parameters, or a fragment")
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && shared.IsLoopbackHost(parsed.Hostname())) {
 		return "", exit(2, "provider=crownest base URL must use HTTPS except for loopback development endpoints")
 	}
 	parsed.Host = canonicalHostPort(parsed)
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	return parsed.String(), nil
-}
-
-func isLoopbackHost(host string) bool {
-	return shared.IsLoopbackHost(host)
 }
 
 func canonicalHostPort(parsed *url.URL) string {
