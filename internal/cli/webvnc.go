@@ -712,10 +712,19 @@ func (a App) webVNCDaemonStart(ctx context.Context, args []string) error {
 	target := SSHTarget{TargetOS: cfg.TargetOS, WindowsMode: cfg.WindowsMode}
 	bridgeID := *id
 	identityValidated := false
-	if useDirectSSHWebVNC(cfg) {
+	resolveTarget := useDirectSSHWebVNC(cfg)
+	if resolveTarget {
 		if err := guardMacOSDirectWebVNC(cfg); err != nil {
 			return err
 		}
+	} else if !isBlacksmithProvider(cfg.Provider) && (!isStaticProvider(cfg.Provider) || shouldRegisterCoordinatorLease(cfg)) {
+		coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
+		if err != nil {
+			return err
+		}
+		resolveTarget = useCoordinator && coord != nil && coord.hasConfiguredAuth()
+	}
+	if resolveTarget {
 		var server Server
 		var resolvedTarget SSHTarget
 		var leaseID string
@@ -750,47 +759,6 @@ func (a App) webVNCDaemonStart(ctx context.Context, args []string) error {
 		}
 		target = resolvedTarget
 		bridgeID = leaseID
-	} else if !isBlacksmithProvider(cfg.Provider) && (!isStaticProvider(cfg.Provider) || shouldRegisterCoordinatorLease(cfg)) {
-		coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
-		if err != nil {
-			return err
-		}
-		if useCoordinator && coord != nil && coord.hasConfiguredAuth() {
-			var server Server
-			var resolvedTarget SSHTarget
-			var leaseID string
-			if *controllerOwned {
-				server, resolvedTarget, leaseID, err = a.resolveNetworkLeaseTargetReadOnly(ctx, cfg, *id, expectedIdentity.Identity)
-			} else {
-				server, resolvedTarget, leaseID, err = a.resolveNetworkLeaseTargetForRepo(ctx, cfg, *id, false, *reclaim)
-			}
-			if err != nil {
-				return err
-			}
-			if err := validateWebVNCResolvedProviderIdentity(cfg, server, resolvedTarget, leaseID, expectedIdentity); err != nil {
-				return err
-			}
-			identityValidated = expectedIdentity.set
-			if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
-				return err
-			}
-			if !*controllerOwned {
-				if err := a.claimAndTouchLeaseTarget(ctx, cfg, &server, resolvedTarget, leaseID, *reclaim); err != nil {
-					return err
-				}
-			}
-			if server.Provider != "" {
-				cfg.Provider = server.Provider
-			}
-			if resolvedTarget.TargetOS != "" {
-				cfg.TargetOS = resolvedTarget.TargetOS
-			}
-			if resolvedTarget.WindowsMode != "" {
-				cfg.WindowsMode = resolvedTarget.WindowsMode
-			}
-			target = resolvedTarget
-			bridgeID = leaseID
-		}
 	}
 	if expectedIdentity.set && !identityValidated {
 		return exit(4, "controller WebVNC provider identity could not be resolved and validated")
