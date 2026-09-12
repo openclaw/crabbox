@@ -63,7 +63,10 @@ and SIGQUIT dispositions, including intentionally ignored signals.
 
 POSIX workspace ownership uses `flock`, BSD `lockf`, or an atomic directory gate
 when neither tool is available. Acquire, renewal, release, and foreground-child
-registration share the same gate. The directory fallback never steals a gate
+registration share the same gate. The directory fallback requires a
+BSD/GNU-compatible `mkdir -v` creation receipt, so a tool that
+incorrectly returns success for an existing directory cannot grant ownership.
+It never steals a gate
 based on elapsed time: an interrupted helper may still have a writer in flight.
 Stop and replace a managed lease if that gate remains ambiguous. Normal owner
 expiry recovery still requires proof that the recorded foreground child exited.

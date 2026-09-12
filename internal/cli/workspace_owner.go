@@ -635,7 +635,9 @@ func workspaceOwnerPOSIXGate(timeout string) string {
     /bin/sh -c '
       gate_dir="$1.portable"
       remaining="$2"
-      while ! mkdir -m 700 "$gate_dir" 2>/dev/null; do
+      # Some mkdir implementations return success after an EEXIST race.
+      # Require the verbose creation receipt as well as a successful exit.
+      while ! { created=$(mkdir -m 700 -v "$gate_dir" 2>/dev/null) && [ -n "$created" ]; }; do
         # A successful contender may already have removed the gate.
         [ ! -f "$gate_dir" ] && [ ! -L "$gate_dir" ] || exit 74
         [ "$remaining" -gt 0 ] || exit 73

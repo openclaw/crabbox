@@ -187,6 +187,48 @@ func TestWorkspaceOwnerBSDConcurrentAcquireAndWitness(t *testing.T) {
 	}
 }
 
+func TestWorkspaceOwnerBSDGateRequiresConfirmedDirectoryCreation(t *testing.T) {
+	for _, tc := range []struct {
+		name, output string
+		code         int
+	}{
+		{name: "success without creation"},
+		{name: "output with failure", output: "created", code: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nativeMkdir, err := exec.LookPath("mkdir")
+			if err != nil {
+				t.Fatal(err)
+			}
+			path, home := workspaceOwnerBSDPath(t), t.TempDir()
+			mkdir := filepath.Join(path, "mkdir")
+			if err := os.Remove(mkdir); err != nil {
+				t.Fatal(err)
+			}
+			// Model mkdir implementations that return success after losing an
+			// EEXIST race, and ensure failed commands cannot grant the gate.
+			stub := "#!/bin/sh\ncase \"$*\" in *'.gate.portable'*) printf %s " + shellQuote(tc.output) + "; exit " + strconv.Itoa(tc.code) + " ;; esac\nexec " + shellQuote(nativeMkdir) + " \"$@\"\n"
+			if err := os.WriteFile(mkdir, []byte(stub), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			key := workspaceOwnerKey("occupied-portable-gate")
+			gate := filepath.Join(home, ".crabbox", "workspace-owners", key+".gate.portable")
+			if err := os.MkdirAll(gate, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			req := workspaceOwnerRemoteRequest{Action: workspaceOwnerAcquire, Key: key, Token: strings.Repeat("a", 64), TTL: time.Minute}
+			cmd := exec.CommandContext(t.Context(), "/bin/sh", "-c", remoteWorkspaceOwnerPOSIX(req))
+			cmd.Env = []string{"HOME=" + home, "PATH=" + path}
+			if out, err := cmd.CombinedOutput(); err != nil || string(out) != "BUSY" {
+				t.Fatalf("occupied gate: out=%q err=%v", out, err)
+			}
+			if info, err := os.Stat(gate); err != nil || !info.IsDir() {
+				t.Fatalf("contender changed the existing gate: %v", err)
+			}
+		})
+	}
+}
+
 func TestWorkspaceOwnerBSDDetachedAndRenewingCommand(t *testing.T) {
 	testWorkspaceOwnerDetachedAndRenewingCommand(t, workspaceOwnerBSDPath(t))
 }

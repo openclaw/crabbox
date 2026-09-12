@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep portable workspace ownership exclusive when a runner's mkdir reports success after losing a directory-creation race.
+
 - Resolve macOS managed-state path spelling without scanning unrelated sibling files, so crowded temporary directories do not block sync preparation. [PR 2187](https://github.com/openclaw/crabbox/pull/2187).
 - Keep Linode lease metadata consistent with the created instance type when an explicit type contains only whitespace. [PR 2186](https://github.com/openclaw/crabbox/pull/2186).
 - Avoid unnecessary sibling traversal for nested artifact globs with an exact, safe literal directory prefix, preserving matching, archive membership, and collection limits. [PR 2162](https://github.com/openclaw/crabbox/pull/2162). Thanks @vincentkoc.
