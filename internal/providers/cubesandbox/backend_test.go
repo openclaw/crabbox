@@ -90,7 +90,7 @@ func TestCubeSandboxClientRedactsReflectedCredentials(t *testing.T) {
 			}, nil
 		})}
 		client := &cubesandboxClient{envdClient: httpClient}
-		_, err := client.StartProcess(context.Background(), cubesandboxSession{SandboxID: "sbx_1", Domain: "example.test", EnvdAccessToken: secret}, cubesandboxProcessRequest{Command: "true"})
+		_, err := client.StartProcess(context.Background(), shared.EnvdSandboxSession{SandboxID: "sbx_1", Domain: "example.test", EnvdAccessToken: secret}, shared.EnvdSandboxProcessRequest{Command: "true"})
 		testutil.RequireRedactedProviderError(t, err, secret)
 	})
 }
@@ -247,7 +247,7 @@ func TestCubeSandboxDataPlaneStreamOutlivesControlTimeout(t *testing.T) {
 		envdClient:  routedDataPlaneClient,
 	}
 	started := time.Now()
-	code, err := client.StartProcess(t.Context(), cubesandboxSession{SandboxID: "sbx_1", Domain: "cube.test"}, cubesandboxProcessRequest{Command: "true"})
+	code, err := client.StartProcess(t.Context(), shared.EnvdSandboxSession{SandboxID: "sbx_1", Domain: "cube.test"}, shared.EnvdSandboxProcessRequest{Command: "true"})
 	if err != nil || code != 0 {
 		t.Fatalf("StartProcess code=%d err=%v", code, err)
 	}
@@ -383,11 +383,11 @@ func TestCubeSandboxClientBindsObservedSandboxID(t *testing.T) {
 				}
 				var id, token string
 				if operation == "connect" {
-					var session cubesandboxSession
+					var session shared.EnvdSandboxSession
 					session, err = client.ConnectSandbox(t.Context(), "sbx_a", 120)
 					id, token = session.SandboxID, session.EnvdAccessToken
 				} else {
-					var sandbox cubesandboxSandbox
+					var sandbox shared.EnvdSandbox
 					sandbox, err = client.GetSandbox(t.Context(), "sbx_a")
 					id, token = sandbox.SandboxID, sandbox.EnvdAccessToken
 				}
@@ -472,7 +472,7 @@ func TestCubeSandboxClientCreateConnectListAndDeleteUseOfficialRESTShape(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	sandbox, err := api.CreateSandbox(t.Context(), cubesandboxCreateSandboxRequest{
+	sandbox, err := api.CreateSandbox(t.Context(), shared.EnvdSandboxCreateRequest{
 		TemplateID:          "base",
 		TimeoutSeconds:      60,
 		AllowInternetAccess: true,
@@ -575,7 +575,7 @@ func TestCubeSandboxClientRoutesEnvdToPort49983(t *testing.T) {
 		domain:      "cube.test",
 		proxyScheme: "http",
 	}
-	session := cubesandboxSession{SandboxID: "sbx_1", Domain: "cube.test"}
+	session := shared.EnvdSandboxSession{SandboxID: "sbx_1", Domain: "cube.test"}
 	endpoint := client.envdURL(session, "/process.Process/Start")
 	if got, want := endpoint, "http://49983-sbx_1.cube.test/process.Process/Start"; got != want {
 		t.Fatalf("endpoint=%q, want %q", got, want)
@@ -624,7 +624,7 @@ func TestCubeSandboxHTTPSProxyPreservesVirtualHostForSNI(t *testing.T) {
 		httpClient:  source,
 		envdClient:  envdClient,
 	}
-	session := cubesandboxSession{SandboxID: "sbx_1", Domain: "cube.test", EnvdAccessToken: "test-token"}
+	session := shared.EnvdSandboxSession{SandboxID: "sbx_1", Domain: "cube.test", EnvdAccessToken: "test-token"}
 	if err := client.UploadFile(t.Context(), session, "/tmp/proof", strings.NewReader("proof")); err != nil {
 		t.Fatal(err)
 	}
@@ -642,7 +642,7 @@ func TestCubeSandboxClientFollowsSameOriginRedirect(t *testing.T) {
 			http.Redirect(w, r, "/redirected", http.StatusTemporaryRedirect)
 		case "/redirected":
 			redirectedAuth = r.Header.Get("Authorization")
-			_ = json.NewEncoder(w).Encode([]cubesandboxSandbox{})
+			_ = json.NewEncoder(w).Encode([]shared.EnvdSandbox{})
 		default:
 			http.NotFound(w, r)
 		}
@@ -686,7 +686,7 @@ func TestCubeSandboxClientPreservesCallerRedirectPolicy(t *testing.T) {
 
 func TestCubeSandboxUploadFileRejectsMalformedDomainBeforeProducer(t *testing.T) {
 	client := &cubesandboxClient{apiKey: "cubesandbox_test", domain: "%zz", httpClient: http.DefaultClient}
-	err := client.UploadFile(context.Background(), cubesandboxSession{SandboxID: "sbx_1"}, "/tmp/archive.tgz", strings.NewReader("archive"))
+	err := client.UploadFile(context.Background(), shared.EnvdSandboxSession{SandboxID: "sbx_1"}, "/tmp/archive.tgz", strings.NewReader("archive"))
 	if err == nil {
 		t.Fatal("UploadFile err=nil, want malformed URL error")
 	}
@@ -723,7 +723,7 @@ func TestCubeSandboxSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 		rt:  core.Runtime{Stderr: io.Discard},
 	}
 	workspace := cubesandboxWorkspacePath(backend.cfg)
-	_, _, err := backend.syncWorkspace(context.Background(), client, cubesandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
+	_, _, err := backend.syncWorkspace(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
 		Repo: core.Repo{Root: root, Name: "repo"},
 	}, workspace)
 	if err != nil {
@@ -782,7 +782,7 @@ func TestCubeSandboxSyncWorkspaceCleansRemoteArchiveWhenExtractFails(t *testing.
 		rt:  core.Runtime{Stderr: io.Discard},
 	}
 	workspace := cubesandboxWorkspacePath(backend.cfg)
-	_, _, err := backend.syncWorkspace(context.Background(), client, cubesandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
+	_, _, err := backend.syncWorkspace(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
 		Repo: core.Repo{Root: root, Name: "repo"},
 	}, workspace)
 	if err == nil {
@@ -810,7 +810,7 @@ func TestCubeSandboxPrepareWorkspaceRejectsUnsafePath(t *testing.T) {
 		cfg: cfg,
 		rt:  core.Runtime{Stderr: io.Discard},
 	}
-	err := backend.prepareWorkspace(context.Background(), client, cubesandboxSession{SandboxID: "sbx_1"}, "/")
+	err := backend.prepareWorkspace(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, "/")
 	if err == nil || !strings.Contains(err.Error(), "too broad") {
 		t.Fatalf("err=%v, want unsafe workspace error", err)
 	}
@@ -822,7 +822,7 @@ func TestCubeSandboxPrepareWorkspaceRejectsUnsafePath(t *testing.T) {
 func TestCubeSandboxPrepareWorkspacePreservesExistingWithoutSync(t *testing.T) {
 	client := &fakeCubeSandboxSyncClient{}
 	backend := &cubesandboxBackend{rt: core.Runtime{Stderr: io.Discard}}
-	if err := backend.prepareWorkspace(context.Background(), client, cubesandboxSession{SandboxID: "sbx_1"}, "/root/repo"); err != nil {
+	if err := backend.prepareWorkspace(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, "/root/repo"); err != nil {
 		t.Fatal(err)
 	}
 	if len(client.commands) != 1 || client.commands[0] != "mkdir -p '/root/repo'" {
@@ -1179,7 +1179,7 @@ func TestCubeSandboxRunPreservesAbnormalProcessExitCode(t *testing.T) {
 }
 
 func TestCubeSandboxSandboxToServerUsesMetadata(t *testing.T) {
-	server := cubesandboxSandboxToServer(cubesandboxSandbox{
+	server := cubesandboxSandboxToServer(shared.EnvdSandbox{
 		SandboxID:  "sbx_1",
 		TemplateID: "base",
 		State:      "running",
@@ -1202,7 +1202,7 @@ func TestCubeSandboxResolveSyntheticIDRequiresCrabboxMetadata(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	backend := &cubesandboxBackend{}
 	client := &fakeCubeSandboxSyncClient{
-		sandbox: cubesandboxSandbox{
+		sandbox: shared.EnvdSandbox{
 			SandboxID: "sbx_1",
 			Metadata:  map[string]string{"provider": "other"},
 		},
@@ -1268,7 +1268,7 @@ func TestCubeSandboxCreateBindsExactSandboxAndEndpoint(t *testing.T) {
 
 func TestCubeSandboxStopRejectsLabelledButUnclaimedSandbox(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	client := &fakeCubeSandboxSyncClient{sandbox: cubesandboxSandbox{
+	client := &fakeCubeSandboxSyncClient{sandbox: shared.EnvdSandbox{
 		SandboxID: "sbx_unclaimed",
 		Metadata: map[string]string{
 			"provider": providerName,
@@ -1429,7 +1429,7 @@ func TestCubeSandboxStopRejectsDifferentAPIEndpointBeforeRemoteRead(t *testing.T
 
 func TestCubeSandboxReclaimAndStopAdoptsExactSandbox(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	client := &fakeCubeSandboxSyncClient{sandbox: cubesandboxSandbox{
+	client := &fakeCubeSandboxSyncClient{sandbox: shared.EnvdSandbox{
 		SandboxID: "sbx_reclaim",
 		Metadata: map[string]string{
 			"provider": providerName,
@@ -1456,7 +1456,7 @@ func TestCubeSandboxReclaimAndStopPreservesRepoBoundClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const leaseID = "cbx_123456789abc"
 	firstCfg := core.Config{Provider: providerName, CubeSandbox: core.CubeSandboxConfig{APIURL: "https://cube-a.example.test"}}
-	sandbox := cubesandboxSandbox{
+	sandbox := shared.EnvdSandbox{
 		SandboxID: "sbx_reclaim",
 		Metadata: map[string]string{
 			"provider": providerName,
@@ -1497,7 +1497,7 @@ func TestCubeSandboxReclaimRejectsCrossProviderLeaseCollision(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			client := &fakeCubeSandboxSyncClient{sandbox: cubesandboxSandbox{
+			client := &fakeCubeSandboxSyncClient{sandbox: shared.EnvdSandbox{
 				SandboxID: "sbx_reclaim",
 				Metadata: map[string]string{
 					"provider": providerName,
@@ -1536,7 +1536,7 @@ func TestCubeSandboxReclaimScopesCloudIDCollisionToEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	client := &fakeCubeSandboxSyncClient{sandbox: cubesandboxSandbox{
+	client := &fakeCubeSandboxSyncClient{sandbox: shared.EnvdSandbox{
 		SandboxID: "same-sandbox-id",
 		Metadata: map[string]string{
 			"provider": providerName,
@@ -1571,8 +1571,8 @@ func TestCubeSandboxReclaimScopesCloudIDCollisionToEndpoint(t *testing.T) {
 type fakeCubeSandboxSyncClient struct {
 	commands          []string
 	users             []string
-	sandbox           cubesandboxSandbox
-	createReq         cubesandboxCreateSandboxRequest
+	sandbox           shared.EnvdSandbox
+	createReq         shared.EnvdSandboxCreateRequest
 	createCalls       int
 	getIDs            []string
 	getErr            error
@@ -1587,35 +1587,35 @@ type fakeCubeSandboxSyncClient struct {
 	processEnvs       []map[string]string
 }
 
-func swapNewCubeSandboxClient(fake cubesandboxAPI) func() {
+func swapNewCubeSandboxClient(fake shared.EnvdSandboxAPI) func() {
 	prev := newCubeSandboxClient
-	newCubeSandboxClient = func(core.Config, core.Runtime) (cubesandboxAPI, error) { return fake, nil }
+	newCubeSandboxClient = func(core.Config, core.Runtime) (shared.EnvdSandboxAPI, error) { return fake, nil }
 	return func() { newCubeSandboxClient = prev }
 }
 
-func (f *fakeCubeSandboxSyncClient) CreateSandbox(_ context.Context, req cubesandboxCreateSandboxRequest) (cubesandboxSandbox, error) {
+func (f *fakeCubeSandboxSyncClient) CreateSandbox(_ context.Context, req shared.EnvdSandboxCreateRequest) (shared.EnvdSandbox, error) {
 	f.createReq = req
 	f.createCalls++
 	if f.sandbox.SandboxID != "" {
 		return f.sandbox, nil
 	}
-	f.sandbox = cubesandboxSandbox{SandboxID: "sbx_1", Metadata: req.Metadata, State: "running"}
+	f.sandbox = shared.EnvdSandbox{SandboxID: "sbx_1", Metadata: req.Metadata, State: "running"}
 	return f.sandbox, nil
 }
 
-func (f *fakeCubeSandboxSyncClient) ConnectSandbox(context.Context, string, int) (cubesandboxSession, error) {
-	return cubesandboxSession{}, f.connectErr
+func (f *fakeCubeSandboxSyncClient) ConnectSandbox(context.Context, string, int) (shared.EnvdSandboxSession, error) {
+	return shared.EnvdSandboxSession{}, f.connectErr
 }
 
-func (f *fakeCubeSandboxSyncClient) GetSandbox(_ context.Context, sandboxID string) (cubesandboxSandbox, error) {
+func (f *fakeCubeSandboxSyncClient) GetSandbox(_ context.Context, sandboxID string) (shared.EnvdSandbox, error) {
 	f.getIDs = append(f.getIDs, sandboxID)
 	if f.getErr != nil {
-		return cubesandboxSandbox{}, f.getErr
+		return shared.EnvdSandbox{}, f.getErr
 	}
 	return f.sandbox, nil
 }
 
-func (f *fakeCubeSandboxSyncClient) ListSandboxes(context.Context, map[string]string) ([]cubesandboxSandbox, error) {
+func (f *fakeCubeSandboxSyncClient) ListSandboxes(context.Context, map[string]string) ([]shared.EnvdSandbox, error) {
 	return nil, nil
 }
 
@@ -1628,13 +1628,13 @@ func (f *fakeCubeSandboxSyncClient) DeleteSandbox(ctx context.Context, sandboxID
 	return f.deleteErr
 }
 
-func (f *fakeCubeSandboxSyncClient) UploadFile(_ context.Context, _ cubesandboxSession, targetPath string, r io.Reader) error {
+func (f *fakeCubeSandboxSyncClient) UploadFile(_ context.Context, _ shared.EnvdSandboxSession, targetPath string, r io.Reader) error {
 	f.uploadPath = targetPath
 	_, err := io.Copy(&f.uploaded, r)
 	return err
 }
 
-func (f *fakeCubeSandboxSyncClient) StartProcess(_ context.Context, _ cubesandboxSession, req cubesandboxProcessRequest) (int, error) {
+func (f *fakeCubeSandboxSyncClient) StartProcess(_ context.Context, _ shared.EnvdSandboxSession, req shared.EnvdSandboxProcessRequest) (int, error) {
 	f.commands = append(f.commands, req.Command)
 	f.users = append(f.users, req.User)
 	f.processEnvs = append(f.processEnvs, req.Env)

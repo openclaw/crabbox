@@ -9,9 +9,10 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-func (b *e2bBackend) syncWorkspace(ctx context.Context, client e2bAPI, session e2bSession, req core.RunRequest, workspace string, prepared ...*core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+func (b *e2bBackend) syncWorkspace(ctx context.Context, client shared.EnvdSandboxAPI, session shared.EnvdSandboxSession, req core.RunRequest, workspace string, prepared ...*core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
 	workspace, err := cleanE2BWorkspacePath(workspace)
 	if err != nil {
 		return nil, 0, err
@@ -36,7 +37,7 @@ func (b *e2bBackend) syncWorkspace(ctx context.Context, client e2bAPI, session e
 	}, prepared...)
 }
 
-func (b *e2bBackend) prepareWorkspace(ctx context.Context, client e2bAPI, session e2bSession, workspace string) error {
+func (b *e2bBackend) prepareWorkspace(ctx context.Context, client shared.EnvdSandboxAPI, session shared.EnvdSandboxSession, workspace string) error {
 	workspace, err := cleanE2BWorkspacePath(workspace)
 	if err != nil {
 		return err
@@ -60,12 +61,12 @@ func cleanE2BWorkspacePath(workspace string) (string, error) {
 	return clean, nil
 }
 
-func (b *e2bBackend) execShell(ctx context.Context, client e2bAPI, session e2bSession, command string, stdout io.Writer) error {
+func (b *e2bBackend) execShell(ctx context.Context, client shared.EnvdSandboxAPI, session shared.EnvdSandboxSession, command string, stdout io.Writer) error {
 	user, err := e2bProcessUser(b.cfg.E2B.User)
 	if err != nil {
 		return err
 	}
-	code, err := client.StartProcess(ctx, session, e2bProcessRequest{
+	code, err := client.StartProcess(ctx, session, shared.EnvdSandboxProcessRequest{
 		Command: command,
 		User:    user,
 		Timeout: b.cfg.TTL,

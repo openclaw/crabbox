@@ -7,6 +7,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 // E2B's bridge plane is built around the native per-sandbox preview URL
@@ -68,7 +69,7 @@ func (b *e2bBackend) bridgeSandboxCoords(ctx context.Context, leaseID string) (s
 	if err != nil {
 		return "", "", err
 	}
-	var sandbox e2bSandbox
+	var sandbox shared.EnvdSandbox
 	if isE2BSyntheticID(leaseID) {
 		sandboxID := strings.TrimPrefix(leaseID, "e2b_")
 		sandbox, err = client.GetSandbox(ctx, sandboxID)

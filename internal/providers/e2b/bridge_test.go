@@ -8,15 +8,16 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type fakeBridgeAPI struct {
 	fakeE2BSyncClient
-	listed  []e2bSandbox
+	listed  []shared.EnvdSandbox
 	listErr error
 }
 
-func (f *fakeBridgeAPI) ListSandboxes(_ context.Context, _ map[string]string) ([]e2bSandbox, error) {
+func (f *fakeBridgeAPI) ListSandboxes(_ context.Context, _ map[string]string) ([]shared.EnvdSandbox, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -26,7 +27,7 @@ func (f *fakeBridgeAPI) ListSandboxes(_ context.Context, _ map[string]string) ([
 func newBridgeBackend(t *testing.T, fake *fakeBridgeAPI) *e2bBackend {
 	t.Helper()
 	prev := newE2BClient
-	newE2BClient = func(core.Config, core.Runtime) (e2bAPI, error) { return fake, nil }
+	newE2BClient = func(core.Config, core.Runtime) (shared.EnvdSandboxAPI, error) { return fake, nil }
 	t.Cleanup(func() { newE2BClient = prev })
 	return &e2bBackend{
 		cfg: core.Config{Provider: e2bProvider, E2B: core.E2BConfig{APIKey: "key", Domain: "e2b.app"}},
@@ -36,7 +37,7 @@ func newBridgeBackend(t *testing.T, fake *fakeBridgeAPI) *e2bBackend {
 
 func TestE2BBridgeDomainAndPreviewDefaultPredicates(t *testing.T) {
 	for _, raw := range []string{"", "  ", " sandbox.example.invalid "} {
-		fake := &fakeBridgeAPI{fakeE2BSyncClient: fakeE2BSyncClient{sandbox: e2bSandbox{SandboxID: "example", Metadata: map[string]string{"provider": "e2b", "crabbox": "true"}}}}
+		fake := &fakeBridgeAPI{fakeE2BSyncClient: fakeE2BSyncClient{sandbox: shared.EnvdSandbox{SandboxID: "example", Metadata: map[string]string{"provider": "e2b", "crabbox": "true"}}}}
 		b := newBridgeBackend(t, fake)
 		b.cfg.E2B.Domain = raw
 		id, domain, err := b.bridgeSandboxCoords(context.Background(), "e2b_example")
@@ -67,7 +68,7 @@ func TestE2BBridgeDomainAndPreviewDefaultPredicates(t *testing.T) {
 
 func TestE2BPublishPeerReturnsCanonicalURL(t *testing.T) {
 	fake := &fakeBridgeAPI{
-		listed: []e2bSandbox{{
+		listed: []shared.EnvdSandbox{{
 			SandboxID: "sbx-abc123",
 			Domain:    "e2b.app",
 			Metadata: map[string]string{
@@ -95,7 +96,7 @@ func TestE2BPublishPeerReturnsCanonicalURL(t *testing.T) {
 func TestE2BPublishPeerAcceptsSyntheticLeaseID(t *testing.T) {
 	fake := &fakeBridgeAPI{
 		fakeE2BSyncClient: fakeE2BSyncClient{
-			sandbox: e2bSandbox{
+			sandbox: shared.EnvdSandbox{
 				SandboxID: "sbx_1",
 				Domain:    "e2b.app",
 				Metadata: map[string]string{
@@ -117,7 +118,7 @@ func TestE2BPublishPeerAcceptsSyntheticLeaseID(t *testing.T) {
 
 func TestE2BPublishPeerFallsBackToConfigDomain(t *testing.T) {
 	fake := &fakeBridgeAPI{
-		listed: []e2bSandbox{{
+		listed: []shared.EnvdSandbox{{
 			SandboxID: "sbx-z",
 			Domain:    "",
 			Metadata: map[string]string{
@@ -164,7 +165,7 @@ func TestE2BPublishPeerSurfacesAPIError(t *testing.T) {
 
 func TestE2BListPeerTargetsIsEmpty(t *testing.T) {
 	fake := &fakeBridgeAPI{
-		listed: []e2bSandbox{{
+		listed: []shared.EnvdSandbox{{
 			SandboxID: "sbx-y",
 			Domain:    "e2b.app",
 			Metadata: map[string]string{

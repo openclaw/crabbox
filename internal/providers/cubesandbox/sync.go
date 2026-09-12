@@ -9,9 +9,10 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-func (b *cubesandboxBackend) syncWorkspace(ctx context.Context, client cubesandboxAPI, session cubesandboxSession, req core.RunRequest, workspace string, prepared ...*core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+func (b *cubesandboxBackend) syncWorkspace(ctx context.Context, client shared.EnvdSandboxAPI, session shared.EnvdSandboxSession, req core.RunRequest, workspace string, prepared ...*core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
 	workspace, err := cleanCubeSandboxWorkspacePath(workspace)
 	if err != nil {
 		return nil, 0, err
@@ -40,7 +41,7 @@ func (b *cubesandboxBackend) syncWorkspace(ctx context.Context, client cubesandb
 	}, prepared...)
 }
 
-func (b *cubesandboxBackend) prepareWorkspace(ctx context.Context, client cubesandboxAPI, session cubesandboxSession, workspace string) error {
+func (b *cubesandboxBackend) prepareWorkspace(ctx context.Context, client shared.EnvdSandboxAPI, session shared.EnvdSandboxSession, workspace string) error {
 	workspace, err := cleanCubeSandboxWorkspacePath(workspace)
 	if err != nil {
 		return err
@@ -64,12 +65,12 @@ func cleanCubeSandboxWorkspacePath(workspace string) (string, error) {
 	return clean, nil
 }
 
-func (b *cubesandboxBackend) execShell(ctx context.Context, client cubesandboxAPI, session cubesandboxSession, command string, stdout io.Writer) error {
+func (b *cubesandboxBackend) execShell(ctx context.Context, client shared.EnvdSandboxAPI, session shared.EnvdSandboxSession, command string, stdout io.Writer) error {
 	user, err := cubesandboxProcessUser(b.cfg.CubeSandbox.User)
 	if err != nil {
 		return err
 	}
-	code, err := client.StartProcess(ctx, session, cubesandboxProcessRequest{
+	code, err := client.StartProcess(ctx, session, shared.EnvdSandboxProcessRequest{
 		Command: command,
 		User:    user,
 		Timeout: b.cfg.TTL,

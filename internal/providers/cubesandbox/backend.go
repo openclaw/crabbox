@@ -126,9 +126,9 @@ func (b *cubesandboxBackend) Warmup(ctx context.Context, req core.WarmupRequest)
 }
 
 func (b *cubesandboxBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
-	var client cubesandboxAPI
+	var client shared.EnvdSandboxAPI
 	var processUser, leaseID, sandboxID, slug string
-	var session cubesandboxSession
+	var session shared.EnvdSandboxSession
 	workspace := cubesandboxWorkspacePath(b.cfg)
 	boundSandbox := func() shared.DelegatedSandbox {
 		return shared.DelegatedSandbox{LeaseID: leaseID, Slug: slug, CleanupCommand: cubesandboxCleanupCommand(leaseID)}
@@ -155,7 +155,7 @@ func (b *cubesandboxBackend) Run(ctx context.Context, req core.RunRequest) (core
 			})
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
-			var sandbox cubesandboxSandbox
+			var sandbox shared.EnvdSandbox
 			var err error
 			leaseID, sandbox, slug, err = b.createSandbox(ctx, client, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug)
 			if err != nil {
@@ -201,7 +201,7 @@ func (b *cubesandboxBackend) Run(ctx context.Context, req core.RunRequest) (core
 			return shared.DelegatedSandboxCommand{
 				Text: strings.Join(req.Command, " "),
 				Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
-					return client.StartProcess(ctx, session, cubesandboxProcessRequest{
+					return client.StartProcess(ctx, session, shared.EnvdSandboxProcessRequest{
 						Command: command, CWD: workspace, Env: commandEnv, User: processUser,
 						Timeout: cubesandboxTimeoutDuration(b.cfg.TTL), Stdout: stdout, Stderr: stderr,
 					})
@@ -387,20 +387,20 @@ func (b *cubesandboxBackend) ReclaimAndStop(ctx context.Context, req core.StopRe
 	return nil
 }
 
-func (b *cubesandboxBackend) createSandbox(ctx context.Context, client cubesandboxAPI, repo core.Repo, keep, reclaim bool, requestedSlug string) (string, cubesandboxSandbox, string, error) {
+func (b *cubesandboxBackend) createSandbox(ctx context.Context, client shared.EnvdSandboxAPI, repo core.Repo, keep, reclaim bool, requestedSlug string) (string, shared.EnvdSandbox, string, error) {
 	leaseID := core.NewLeaseID()
 	slug, err := core.AllocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
-		return "", cubesandboxSandbox{}, "", err
+		return "", shared.EnvdSandbox{}, "", err
 	}
 	cfg := b.cfg
 	workspace, err := cleanCubeSandboxWorkspacePath(cubesandboxWorkspacePath(cfg))
 	if err != nil {
-		return "", cubesandboxSandbox{}, "", err
+		return "", shared.EnvdSandbox{}, "", err
 	}
 	template := strings.TrimSpace(b.cfg.CubeSandbox.Template)
 	if template == "" {
-		return "", cubesandboxSandbox{}, "", core.Exit(2, "provider=cubesandbox requires a template; set --cubesandbox-template, CUBE_TEMPLATE_ID, or cubeSandbox.template")
+		return "", shared.EnvdSandbox{}, "", core.Exit(2, "provider=cubesandbox requires a template; set --cubesandbox-template, CUBE_TEMPLATE_ID, or cubeSandbox.template")
 	}
 	cfg.TTL = cubesandboxTimeoutDuration(cfg.TTL)
 	cfg.ServerType = template
@@ -413,17 +413,17 @@ func (b *cubesandboxBackend) createSandbox(ctx context.Context, client cubesandb
 	}
 	timeoutSeconds := cubesandboxTimeoutSeconds(cfg.TTL)
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=cubesandbox lease=%s slug=%s template=%s timeout=%ds\n", leaseID, slug, template, timeoutSeconds)
-	sandbox, err := client.CreateSandbox(ctx, cubesandboxCreateSandboxRequest{
+	sandbox, err := client.CreateSandbox(ctx, shared.EnvdSandboxCreateRequest{
 		TemplateID:          template,
 		TimeoutSeconds:      timeoutSeconds,
 		Metadata:            labels,
 		AllowInternetAccess: true,
 	})
 	if err != nil {
-		return "", cubesandboxSandbox{}, "", cubesandboxError("create sandbox", err)
+		return "", shared.EnvdSandbox{}, "", cubesandboxError("create sandbox", err)
 	}
 	if sandbox.SandboxID == "" {
-		return "", cubesandboxSandbox{}, "", core.Exit(5, "cubesandbox create sandbox returned no sandbox id")
+		return "", shared.EnvdSandbox{}, "", core.Exit(5, "cubesandbox create sandbox returned no sandbox id")
 	}
 	cfg = cubesandboxClaimConfig(cfg)
 	server := cubesandboxSandboxToServer(sandbox)
@@ -431,14 +431,14 @@ func (b *cubesandboxBackend) createSandbox(ctx context.Context, client cubesandb
 		if cleanupErr := b.deleteSandboxForCleanup(client, sandbox.SandboxID); cleanupErr != nil {
 			leakErr := fmt.Errorf("cleanup cubesandbox sandbox %s after claim failure: %w; run `crabbox stop --provider cubesandbox --id %s --reclaim` to retry cleanup", sandbox.SandboxID, cleanupErr, sandbox.SandboxID)
 			fmt.Fprintf(b.rt.Stderr, "warning: %v\n", leakErr)
-			return "", cubesandboxSandbox{}, "", errors.Join(err, leakErr)
+			return "", shared.EnvdSandbox{}, "", errors.Join(err, leakErr)
 		}
-		return "", cubesandboxSandbox{}, "", err
+		return "", shared.EnvdSandbox{}, "", err
 	}
 	return leaseID, sandbox, slug, nil
 }
 
-func (b *cubesandboxBackend) deleteSandboxForCleanup(client cubesandboxAPI, sandboxID string) error {
+func (b *cubesandboxBackend) deleteSandboxForCleanup(client shared.EnvdSandboxAPI, sandboxID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cubesandboxCleanupTimeout)
 	defer cancel()
 	return client.DeleteSandbox(ctx, sandboxID)
@@ -448,7 +448,7 @@ func cubesandboxCleanupCommand(leaseID string) string {
 	return fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, core.ShellQuote(leaseID))
 }
 
-func (b *cubesandboxBackend) resolveSandboxID(ctx context.Context, client cubesandboxAPI, id, repoRoot string, reclaim bool) (string, string, string, error) {
+func (b *cubesandboxBackend) resolveSandboxID(ctx context.Context, client shared.EnvdSandboxAPI, id, repoRoot string, reclaim bool) (string, string, string, error) {
 	if id == "" {
 		return "", "", "", core.Exit(2, "provider=cubesandbox requires a Crabbox lease id, slug, or CubeSandbox sandbox id")
 	}
@@ -540,7 +540,7 @@ func validateCubeSandboxReclaimCollision(leaseID, sandboxID string, previous cor
 	return nil
 }
 
-func (b *cubesandboxBackend) resolveClaimedSandbox(ctx context.Context, client cubesandboxAPI, claim core.LeaseClaim, repoRoot string, reclaim bool) (string, string, string, error) {
+func (b *cubesandboxBackend) resolveClaimedSandbox(ctx context.Context, client shared.EnvdSandboxAPI, claim core.LeaseClaim, repoRoot string, reclaim bool) (string, string, string, error) {
 	cfg := cubesandboxClaimConfig(b.cfg)
 	if claim.ProviderScope != providerClaimScope(cfg) {
 		return "", "", "", core.Exit(4, "cubesandbox lease %q belongs to a different API endpoint; use --reclaim with the exact sandbox id to adopt it", claim.LeaseID)
@@ -576,7 +576,7 @@ func (b *cubesandboxBackend) resolveClaimedSandbox(ctx context.Context, client c
 	return claim.LeaseID, sandbox.SandboxID, claim.Slug, nil
 }
 
-func (b *cubesandboxBackend) deleteClaimedSandbox(ctx context.Context, client cubesandboxAPI, leaseID, sandboxID string) error {
+func (b *cubesandboxBackend) deleteClaimedSandbox(ctx context.Context, client shared.EnvdSandboxAPI, leaseID, sandboxID string) error {
 	cfg := cubesandboxClaimConfig(b.cfg)
 	claim, ok, exact, err := resolveLeaseClaimForProviderScopeWithExact(leaseID, providerClaimScope(cfg))
 	if err != nil {
@@ -617,7 +617,7 @@ func (e *cubesandboxClaimedSandboxMissingError) Error() string {
 	return fmt.Sprintf("cubesandbox sandbox %q for lease %q no longer exists", e.claim.CloudID, e.claim.LeaseID)
 }
 
-func validateCubeSandboxClaim(cfg core.Config, claim core.LeaseClaim, sandbox cubesandboxSandbox) error {
+func validateCubeSandboxClaim(cfg core.Config, claim core.LeaseClaim, sandbox shared.EnvdSandbox) error {
 	if claim.Provider != providerName || claim.ProviderScope != providerClaimScope(cubesandboxClaimConfig(cfg)) {
 		return core.Exit(4, "cubesandbox lease %q belongs to a different provider or API endpoint", claim.LeaseID)
 	}
@@ -638,7 +638,7 @@ func cubesandboxClaimConfig(cfg core.Config) core.Config {
 	return cfg
 }
 
-func cubesandboxSandboxToServer(sandbox cubesandboxSandbox) core.Server {
+func cubesandboxSandboxToServer(sandbox shared.EnvdSandbox) core.Server {
 	labels := map[string]string{}
 	for k, v := range sandbox.Metadata {
 		labels[k] = v
@@ -666,7 +666,7 @@ func cubesandboxSandboxToServer(sandbox cubesandboxSandbox) core.Server {
 	return server
 }
 
-func cubesandboxStatusView(leaseID string, sandbox cubesandboxSandbox) core.StatusView {
+func cubesandboxStatusView(leaseID string, sandbox shared.EnvdSandbox) core.StatusView {
 	server := cubesandboxSandboxToServer(sandbox)
 	return core.StatusView{
 		ID:         leaseID,
@@ -691,14 +691,14 @@ func cubesandboxStatusReady(status string) bool {
 	}
 }
 
-func cubesandboxLeaseID(sandbox cubesandboxSandbox) string {
+func cubesandboxLeaseID(sandbox shared.EnvdSandbox) string {
 	if lease := strings.TrimSpace(sandbox.Metadata["lease"]); lease != "" {
 		return lease
 	}
 	return "cubesandbox_" + sandbox.SandboxID
 }
 
-func cubesandboxSlug(leaseID string, sandbox cubesandboxSandbox) string {
+func cubesandboxSlug(leaseID string, sandbox shared.EnvdSandbox) string {
 	if slug := strings.TrimSpace(sandbox.Metadata["slug"]); slug != "" {
 		return slug
 	}
@@ -709,7 +709,7 @@ func isCubeSandboxSyntheticID(id string) bool {
 	return strings.HasPrefix(id, "cubesandbox_") && len(id) > len("cubesandbox_")
 }
 
-func isCrabboxCubeSandboxSandbox(sandbox cubesandboxSandbox) bool {
+func isCrabboxCubeSandboxSandbox(sandbox shared.EnvdSandbox) bool {
 	return sandbox.Metadata["provider"] == providerName && sandbox.Metadata["crabbox"] == "true"
 }
 
