@@ -190,6 +190,91 @@ func TestLocalHistoryStoreAbandonedAndPartialAreNotTerminal(t *testing.T) {
 		t.Fatalf("abandoned %+v %q %+v", got, log, summary)
 	}
 }
+
+func TestLocalHistoryStoreInterruptedInitializationKeepsHealthyRows(t *testing.T) {
+	for _, withLock := range []bool{false, true} {
+		t.Run(fmt.Sprintf("lock=%t", withLock), func(t *testing.T) {
+			localHistoryTestHome(t)
+			healthy := localHistoryTestRecord(910)
+			writer, err := beginLocalHistory(healthy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.Commit(healthy, runLogSnapshot{Log: "healthy\n"}, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			root, err := localHistoryRoot(false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			runs, err := localHistoryChild(root, "runs")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runs.Close()
+			id := localHistoryTestRecord(911).ID
+			if err := localHistoryMkdir(runs, id); err != nil {
+				t.Fatal(err)
+			}
+			if withLock {
+				dir, err := localHistoryChild(runs, id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				lock, err := localHistoryLock(dir, true, false)
+				if err != nil {
+					dir.Close()
+					t.Fatal(err)
+				}
+				err = localHistoryUnlock(lock)
+				dir.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			rows, err := listLocalHistory(localHistoryFilter{})
+			if err != nil || len(rows) != 2 || rows[0].ID != healthy.ID {
+				t.Fatalf("rows=%+v err=%v", rows, err)
+			}
+			incomplete, log, results, err := readLocalHistory(id)
+			if err != nil || incomplete.RecordingState != "incomplete" || incomplete.Provider != "" || incomplete.CommandDisplay != "" || incomplete.ExitCode != nil || incomplete.StartedAt != "" || incomplete.Stdout.Availability != "unavailable" || incomplete.Stderr.Availability != "unavailable" || incomplete.ResultsState != "unavailable" || log != "" || results != nil {
+				t.Fatalf("incomplete=%+v log=%q results=%+v err=%v", incomplete, log, results, err)
+			}
+			filtered, err := listLocalHistory(localHistoryFilter{State: "incomplete"})
+			if err != nil || len(filtered) != 1 || filtered[0].ID != id {
+				t.Fatalf("incomplete filter=%+v err=%v", filtered, err)
+			}
+			if _, log, _, err := readLocalHistory(healthy.ID); err != nil || log != "healthy\n" {
+				t.Fatalf("healthy log=%q err=%v", log, err)
+			}
+		})
+	}
+}
+
+func TestLocalHistoryStoreMissingLockWithPublishedMetadataRemainsError(t *testing.T) {
+	path := localHistoryTestHome(t)
+	record := localHistoryTestRecord(912)
+	writer, err := beginLocalHistory(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(path, "runs", record.ID, "write.lock")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := readLocalHistory(record.ID); err == nil {
+		t.Fatal("published metadata without a lock was accepted")
+	}
+	if _, err := listLocalHistory(localHistoryFilter{}); err == nil {
+		t.Fatal("listing accepted published metadata without a lock")
+	}
+}
 func TestLocalHistoryStoreCommitFailureLeavesIncomplete(t *testing.T) {
 	path := localHistoryTestHome(t)
 	record := localHistoryTestRecord(3)

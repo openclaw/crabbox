@@ -469,6 +469,33 @@ func localHistoryReadRecord(dir *os.Root, id string) (localHistoryRecord, error)
 	return record, nil
 }
 
+// A process may stop after creating its directory but before publishing its
+// first metadata. Represent only that absent-file window, never corrupt data.
+func localHistoryReadInitialRecord(dir *os.Root, id string, missingLock bool) (localHistoryRecord, error) {
+	record, err := localHistoryReadRecord(dir, id)
+	if err == nil {
+		if missingLock {
+			return record, fmt.Errorf("local history metadata has no write lock")
+		}
+		return record, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return record, err
+	}
+	info, err := dir.Stat(".")
+	if err != nil {
+		return record, err
+	}
+	return localHistoryRecord{
+		Version: 1, ID: id, RecordingState: "incomplete", Source: "local",
+		CoordinatorState: "unknown", Phase: "initialization-incomplete",
+		UpdatedAt:    info.ModTime().UTC().Format(time.RFC3339Nano),
+		CaptureScope: "unavailable", ResultsState: "unavailable",
+		Stdout: localHistoryStream{Availability: "unavailable"},
+		Stderr: localHistoryStream{Availability: "unavailable"},
+	}, nil
+}
+
 func localHistoryClip(value string, maximum int) (string, bool) {
 	if maximum <= 0 {
 		return "", len(value) > 0
@@ -961,11 +988,11 @@ func listLocalHistory(filter localHistoryFilter) ([]localHistoryRecord, error) {
 			return nil, err
 		}
 		lock, lockErr := localHistoryLock(dir, false, false)
-		if lockErr != nil && !errors.Is(lockErr, errLocalHistoryBusy) {
+		if lockErr != nil && !errors.Is(lockErr, errLocalHistoryBusy) && !errors.Is(lockErr, os.ErrNotExist) {
 			dir.Close()
 			return nil, lockErr
 		}
-		record, err := localHistoryReadRecord(dir, entry.Name())
+		record, err := localHistoryReadInitialRecord(dir, entry.Name(), errors.Is(lockErr, os.ErrNotExist))
 		if err == nil && lockErr == nil && record.RecordingState == "active" {
 			record.RecordingState = "incomplete"
 			record.Stdout.Availability = "unavailable"
@@ -1023,11 +1050,11 @@ func readLocalHistory(id string) (localHistoryRecord, string, *TestResultSummary
 	}
 	defer dir.Close()
 	lock, lockErr := localHistoryLock(dir, false, false)
-	if lockErr != nil && !errors.Is(lockErr, errLocalHistoryBusy) {
+	if lockErr != nil && !errors.Is(lockErr, errLocalHistoryBusy) && !errors.Is(lockErr, os.ErrNotExist) {
 		return record, "", nil, lockErr
 	}
 	defer localHistoryUnlock(lock)
-	record, err = localHistoryReadRecord(dir, id)
+	record, err = localHistoryReadInitialRecord(dir, id, errors.Is(lockErr, os.ErrNotExist))
 	if err != nil {
 		return record, "", nil, err
 	}

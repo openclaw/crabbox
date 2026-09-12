@@ -49,8 +49,9 @@ private retention is appropriate. Command/display diagnostics use the existing
 diagnostic redactor.
 
 Workload writers are observed separately from Crabbox's own diagnostic output.
-Some delegated native CLIs mix command and provider messages; those retained
-streams are labelled `provider-run`, not a pure workload transcript. Streams a
+Direct SSH transports and some delegated native CLIs mix command and provider
+messages; those retained streams are labelled `provider-run`, not a pure workload
+transcript. Streams a
 provider does not expose and streams directed exclusively to captures remain
 explicitly unavailable or omitted. Unsupported delegated JUnit collection is
 not fabricated into a passing result.

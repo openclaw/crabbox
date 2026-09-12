@@ -146,7 +146,8 @@ func (o *RunObservation) adoptDirectLog(log *runLogBuffer, stdoutOmitted, stderr
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.directLog = log
-	o.record.CaptureScope = string(RunOutputWorkload)
+	// The direct buffer also receives diagnostics from the SSH transport.
+	o.record.CaptureScope = string(RunOutputProvider)
 	o.record.Stdout = localHistoryStream{Availability: "retained"}
 	o.record.Stderr = localHistoryStream{Availability: "retained"}
 	if stdoutOmitted {

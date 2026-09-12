@@ -54,7 +54,7 @@ func TestRunObservationDirectAppWithoutTimingOutput(t *testing.T) {
 		t.Fatalf("records=%+v err=%v", records, err)
 	}
 	record := records[0]
-	if record.LeaseID != localContainerRunSessionTestLeaseID || record.Slug != "session-slug" || record.RecordingState != "terminal" || record.ExitCode == nil || *record.ExitCode != 0 || record.TotalMs <= 0 || record.CaptureScope != "workload" {
+	if record.LeaseID != localContainerRunSessionTestLeaseID || record.Slug != "session-slug" || record.RecordingState != "terminal" || record.ExitCode == nil || *record.ExitCode != 0 || record.TotalMs <= 0 || record.CaptureScope != "provider-run" {
 		t.Fatalf("record=%+v", record)
 	}
 	if !strings.Contains(stderr.String(), "run="+record.ID) || strings.Contains(stderr.String(), `"commandMs"`) {
