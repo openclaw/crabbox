@@ -740,8 +740,11 @@ credentials between operations. Empty inventory can complete direct cleanup
 only for leases that persisted the matching 12-digit account scope and explicit
 Region. Historical unbound leases remain cleanupable when the instance is still
 present with exact Crabbox lease labels, but an empty lookup is intentionally
-inconclusive. There is no override that turns missing account or Region evidence
-into proof of deletion.
+inconclusive. Administrators can use [audited legacy AWS recovery](commands/inspect.md#audited-legacy-aws-cleanup-recovery)
+when authenticated CloudTrail allocation evidence proves the original scope and
+an exact current read confirms absence. It restores scope and schedules normal
+remaining cleanup, not a deletion receipt. There is no override that turns
+missing account or Region evidence into proof of deletion.
 
 After AWS credential or account rotation, scan old provider accounts directly
 for Crabbox-tagged EC2 instances that the current coordinator can no longer see:
