@@ -320,17 +320,17 @@ func TestStatusWaitRequestsReadyProbe(t *testing.T) {
 			"provider": "aws",
 		},
 	}
-	if err := claimLeaseTargetForRepoConfig("cbx_status", "status", cfg, claimServer, SSHTarget{}, "/repo", time.Minute, false); err != nil {
+	if err := ClaimLeaseTargetForRepoConfig("cbx_status", "status", cfg, claimServer, SSHTarget{}, "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	beforePlainStatus, err := readLeaseClaim("cbx_status")
+	beforePlainStatus, err := ReadLeaseClaim("cbx_status")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := app.status(context.Background(), []string{"--provider", "aws", "--id", "cbx_status"}); err != nil {
 		t.Fatal(err)
 	}
-	afterPlainStatus, err := readLeaseClaim("cbx_status")
+	afterPlainStatus, err := ReadLeaseClaim("cbx_status")
 	if err != nil || !reflect.DeepEqual(afterPlainStatus, beforePlainStatus) || len(backend.touches) != 0 {
 		t.Fatalf("plain status mutated claim: before=%#v after=%#v touches=%#v err=%v", beforePlainStatus, afterPlainStatus, backend.touches, err)
 	}
@@ -385,10 +385,10 @@ func TestStatusWaitTerminalRuntimeStatePreservesExactClaim(t *testing.T) {
 					"state": "provisioning", "recovery": "ssh-readiness-pending",
 				},
 			}
-			if err := claimLeaseTargetForRepoConfig("cbx_status", "status", cfg, claimServer, SSHTarget{}, "/repo", time.Minute, false); err != nil {
+			if err := ClaimLeaseTargetForRepoConfig("cbx_status", "status", cfg, claimServer, SSHTarget{}, "/repo", time.Minute, false); err != nil {
 				t.Fatal(err)
 			}
-			before, err := readLeaseClaim("cbx_status")
+			before, err := ReadLeaseClaim("cbx_status")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -417,7 +417,7 @@ func TestStatusWaitTerminalRuntimeStatePreservesExactClaim(t *testing.T) {
 			if len(backend.touches) != 0 {
 				t.Fatalf("terminal status touched claim: %#v", backend.touches)
 			}
-			after, err := readLeaseClaim("cbx_status")
+			after, err := ReadLeaseClaim("cbx_status")
 			if err != nil || !reflect.DeepEqual(after, before) {
 				t.Fatalf("terminal status changed claim: before=%#v after=%#v err=%v", before, after, err)
 			}
@@ -438,7 +438,7 @@ func TestStatusWaitClaimReplacementPreventsProviderMutation(t *testing.T) {
 	server := Server{Provider: "aws", CloudID: "i-status", Labels: map[string]string{
 		"lease": "cbx_status", "slug": "status", "provider": "aws",
 	}}
-	if err := claimLeaseTargetForRepoConfig("cbx_status", "status", cfg, server, SSHTarget{}, "/repo", time.Minute, false); err != nil {
+	if err := ClaimLeaseTargetForRepoConfig("cbx_status", "status", cfg, server, SSHTarget{}, "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	var replacement leaseClaim
@@ -451,7 +451,7 @@ func TestStatusWaitClaimReplacementPreventsProviderMutation(t *testing.T) {
 		labels := cloneStringMap(snapshot.Labels)
 		labels["owner"] = "replacement-owner"
 		var err error
-		replacement, err = updateLeaseClaimLabelsIfUnchanged(req.Lease.LeaseID, snapshot, labels)
+		replacement, err = UpdateLeaseClaimLabelsIfUnchanged(req.Lease.LeaseID, snapshot, labels)
 		if err != nil {
 			return Server{}, err
 		}
@@ -466,7 +466,7 @@ func TestStatusWaitClaimReplacementPreventsProviderMutation(t *testing.T) {
 		"--provider", "aws", "--id", "cbx_status", "--wait", "--wait-timeout", "1ns",
 	})
 	var exitErr ExitError
-	persisted, readErr := readLeaseClaim("cbx_status")
+	persisted, readErr := ReadLeaseClaim("cbx_status")
 	if !AsExitError(err, &exitErr) || exitErr.Code != 5 ||
 		!strings.Contains(stderr.String(), "claim changed") || providerWrites != 0 ||
 		readErr != nil || !reflect.DeepEqual(persisted, replacement) {
@@ -480,7 +480,7 @@ func TestStatusLeaseExactClaimAuthorizerOwnsDynamicScopeValidation(t *testing.T)
 	server := Server{Provider: "aws", CloudID: "dynamic-resource", Labels: map[string]string{
 		"lease": leaseID, "provider": "aws", "runtime_scope": "runtime:dynamic/context:owned",
 	}}
-	if err := claimLeaseForRepoProviderScopePondEndpoint(
+	if err := ClaimLeaseForRepoProviderScopePondEndpoint(
 		leaseID,
 		"dynamic-status",
 		"aws",

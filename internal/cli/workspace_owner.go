@@ -308,7 +308,7 @@ func acquireWorkspaceOwner(ctx context.Context, target SSHTarget, leaseID string
 
 func acquireWorkspaceOwnerWithTransport(ctx context.Context, target SSHTarget, leaseID string, stderr io.Writer, transport workspaceOwnerTransport, waitTimeout, ttl, renewInterval time.Duration) (*workspaceOwner, error) {
 	if strings.TrimSpace(leaseID) == "" {
-		return nil, exit(7, "workspace owner requires a lease identity")
+		return nil, Exit(7, "workspace owner requires a lease identity")
 	}
 	if waitTimeout <= 0 {
 		waitTimeout = workspaceOwnerWaitTimeout
@@ -321,7 +321,7 @@ func acquireWorkspaceOwnerWithTransport(ctx context.Context, target SSHTarget, l
 	}
 	token, err := randomHex(32)
 	if err != nil {
-		return nil, exit(7, "create workspace owner fencing token: %v", err)
+		return nil, Exit(7, "create workspace owner fencing token: %v", err)
 	}
 	owner := &workspaceOwner{
 		target:    target,
@@ -339,7 +339,7 @@ func acquireWorkspaceOwnerWithTransport(ctx context.Context, target SSHTarget, l
 	for {
 		response, callErr := callWorkspaceOwnerTransport(waitCtx, owner.callTimeout(), transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerAcquire, Key: owner.key, Token: owner.token, TTL: ttl})
 		if callErr != nil {
-			return nil, exit(7, "acquire remote workspace owner: ambiguous remote state: %v", callErr)
+			return nil, Exit(7, "acquire remote workspace owner: ambiguous remote state: %v", callErr)
 		}
 		switch response {
 		case "ACQUIRED", "RECOVERED":
@@ -354,16 +354,16 @@ func acquireWorkspaceOwnerWithTransport(ctx context.Context, target SSHTarget, l
 				nextProgress += workspaceOwnerProgressEvery
 			}
 		case "AMBIGUOUS":
-			return nil, exit(7, "acquire remote workspace owner: ambiguous protocol state")
+			return nil, Exit(7, "acquire remote workspace owner: ambiguous protocol state")
 		default:
-			return nil, exit(7, "acquire remote workspace owner: unexpected protocol response %q", response)
+			return nil, Exit(7, "acquire remote workspace owner: unexpected protocol response %q", response)
 		}
 		timer := time.NewTimer(workspaceOwnerPollInterval)
 		select {
 		case <-waitCtx.Done():
 			timer.Stop()
 			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
-				return nil, exit(7, "timed out after %s waiting for reusable workspace owner", waitTimeout)
+				return nil, Exit(7, "timed out after %s waiting for reusable workspace owner", waitTimeout)
 			}
 			return nil, waitCtx.Err()
 		case <-timer.C:
@@ -402,7 +402,7 @@ func (o *workspaceOwner) renewLoopWithTicks(ticks <-chan time.Time, callTimeout 
 			}
 			err = workspaceOwnerProtocolError(response, err)
 			o.mu.Lock()
-			o.renewErr = exit(7, "remote workspace owner renewal failed closed: %v", err)
+			o.renewErr = Exit(7, "remote workspace owner renewal failed closed: %v", err)
 			o.mu.Unlock()
 			o.cancel()
 			return
@@ -431,7 +431,7 @@ func (o *workspaceOwner) Err() error {
 func (o *workspaceOwner) ConfirmNoChild(ctx context.Context) error {
 	result, err := o.inspectChild(ctx)
 	if err == nil && result == workspaceOwnerChildActive {
-		err = exit(7, "confirm remote workspace owner child state failed closed: child")
+		err = Exit(7, "confirm remote workspace owner child state failed closed: child")
 	}
 	return err
 }
@@ -446,7 +446,7 @@ func (o *workspaceOwner) inspectChild(ctx context.Context) (workspaceOwnerInspec
 	response, err := callWorkspaceOwnerTransport(ctx, o.callTimeout(), o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerInspect, Key: o.key, Token: o.token, TTL: o.ttl})
 	if err != nil {
 		err = workspaceOwnerProtocolError(response, err)
-		return workspaceOwnerQuiescent, exit(7, "confirm remote workspace owner child state: ambiguous remote state: %v", err)
+		return workspaceOwnerQuiescent, Exit(7, "confirm remote workspace owner child state: ambiguous remote state: %v", err)
 	}
 	switch response {
 	case "OWNED":
@@ -454,7 +454,7 @@ func (o *workspaceOwner) inspectChild(ctx context.Context) (workspaceOwnerInspec
 	case "CHILD":
 		return workspaceOwnerChildActive, nil
 	default:
-		return workspaceOwnerQuiescent, exit(7, "confirm remote workspace owner child state failed closed: %s", strings.ToLower(firstNonBlank(response, "ambiguous")))
+		return workspaceOwnerQuiescent, Exit(7, "confirm remote workspace owner child state failed closed: %s", strings.ToLower(firstNonBlank(response, "ambiguous")))
 	}
 }
 
@@ -467,19 +467,19 @@ func (o *workspaceOwner) WaitForChild(ctx context.Context, timeout time.Duration
 		response, err := callWorkspaceOwnerTransport(ctx, min(o.callTimeout(), time.Until(deadline)), o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerInspect, Key: o.key, Token: o.token, TTL: o.ttl})
 		if err != nil {
 			err = workspaceOwnerProtocolError(response, err)
-			return exit(7, "confirm remote workspace phase witness: ambiguous remote state: %v", err)
+			return Exit(7, "confirm remote workspace phase witness: ambiguous remote state: %v", err)
 		}
 		switch response {
 		case "CHILD":
 			return nil
 		case "OWNED":
 			if time.Now().After(deadline) {
-				return exit(7, "timed out waiting for remote workspace phase witness")
+				return Exit(7, "timed out waiting for remote workspace phase witness")
 			}
 		case "MISMATCH", "AMBIGUOUS":
-			return exit(7, "confirm remote workspace phase witness failed closed: %s", strings.ToLower(response))
+			return Exit(7, "confirm remote workspace phase witness failed closed: %s", strings.ToLower(response))
 		default:
-			return exit(7, "confirm remote workspace phase witness: unexpected protocol response %q", response)
+			return Exit(7, "confirm remote workspace phase witness: unexpected protocol response %q", response)
 		}
 		timer := time.NewTimer(50 * time.Millisecond)
 		select {
@@ -528,9 +528,9 @@ func (o *workspaceOwner) Close(ctx context.Context) error {
 	renewErr := o.Err()
 	response, releaseErr := callWorkspaceOwnerTransport(ctx, o.callTimeout(), o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerRelease, Key: o.key, Token: o.token, TTL: o.ttl})
 	if releaseErr != nil {
-		releaseErr = exit(7, "release remote workspace owner: ambiguous remote state: %v", releaseErr)
+		releaseErr = Exit(7, "release remote workspace owner: ambiguous remote state: %v", releaseErr)
 	} else if response != "RELEASED" {
-		releaseErr = exit(7, "release remote workspace owner failed closed: %s", strings.ToLower(firstNonBlank(response, "ambiguous")))
+		releaseErr = Exit(7, "release remote workspace owner failed closed: %s", strings.ToLower(firstNonBlank(response, "ambiguous")))
 	}
 	return errors.Join(renewErr, releaseErr)
 }
@@ -1040,7 +1040,7 @@ exit "$code"
 }
 
 func remoteWorkspaceOwnerWindowsStageWitnessCommand(key, token, name string, scriptSize int64) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 $root = Join-Path $HOME ".crabbox\workspace-owners"
 $state = Join-Path $root (` + psQuote(key) + ` + ".owner")
 $path = Join-Path $root ` + psQuote(name) + `
@@ -1069,7 +1069,7 @@ try {
 }
 
 func remoteWorkspaceOwnerWindowsRunWitnessCommand(name string) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 $path = Join-Path (Join-Path $HOME ".crabbox\workspace-owners") ` + psQuote(name) + `
 try {
 	if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "staged workspace witness is missing" }
@@ -1083,7 +1083,7 @@ exit $code
 }
 
 func remoteWorkspaceOwnerWindowsCleanupWitnessCommand(name string) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 $path = Join-Path (Join-Path $HOME ".crabbox\workspace-owners") ` + psQuote(name) + `
 Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
 `)
@@ -1100,7 +1100,7 @@ try {
 }
 
 func remoteWorkspaceOwnerWindowsStartBackgroundWitnessCommand(name string) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 $path = Join-Path (Join-Path $HOME ".crabbox\workspace-owners") ` + psQuote(name) + `
 try {
 	if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "staged workspace witness is missing" }

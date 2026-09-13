@@ -686,7 +686,7 @@ func recordConfigFlagVisits[Config any](*flag.FlagSet, any) { panic("stub") }
 func registerConfigFlags(*flag.FlagSet, any, any) { panic("stub") }
 func applyLeaseDuration(*time.Duration, string) bool { panic("stub") }
 func flagWasSet(*flag.FlagSet, string) bool { panic("stub") }
-func exit(int, string, ...any) error { panic("stub") }
+func Exit(int, string, ...any) error { panic("stub") }
 func getenv(string, string) string { panic("stub") }
 func getenvFloat(string, float64) float64 { panic("stub") }
 func getenvNonNegativeInt(string, int) (int, error) { panic("stub") }
@@ -818,7 +818,7 @@ func firstNonEmptyEnv(names ...string) (string, bool) {
 func getenvBool(string) (bool, bool) { boolCalls++; return boolValue, boolAccepted }
 func getenvNonNegativeIntAccepted(_ string, prior int) (int, bool, error) { if intError { return 0, false, fmt.Errorf("bad integer") }; return prior, false, nil }
 func flagWasSet(fs *flag.FlagSet, name string) bool { found := false; fs.Visit(func(f *flag.Flag) { if f.Name == name { found = true } }); return found }
-func exit(_ int, message string, args ...any) error { return fmt.Errorf(message, args...) }
+func Exit(_ int, message string, args ...any) error { return fmt.Errorf(message, args...) }
 func TestAcceptedAssignments(t *testing.T) {
  name, empty, tail, enabled, bad := "same", "", "later", false, -1
  cfg := defaultPilotConfig(); cfg.Input = "prior"; cfg.Enabled = true; cfg.Count = 8; cfg.Tail = "prior"
@@ -1007,7 +1007,7 @@ func TestGenerateManualFlagApplication(t *testing.T) {
 	typecheckGenerated(t, strict, strictOutput)
 	const behavior = `package cli
 import("flag";"fmt";"os";"strings";"testing";"time")
-func exit(_ int,pattern string,args ...any)error{return fmt.Errorf(pattern,args...)}
+func Exit(_ int,pattern string,args ...any)error{return fmt.Errorf(pattern,args...)}
 func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
 func TestMechanicalManualFlags(t *testing.T){
  cfg:=PilotConfig{Name:"prior",Enabled:true,Timeout:time.Minute,Metadata:map[string]string{"label":"same"}}
@@ -1105,7 +1105,7 @@ func TestGenerateEnvironmentSplit(t *testing.T) {
 	}
 	const behavior = `package cli
 import ("flag";"fmt";"os";"strings";"testing";"time")
-func exit(_ int, pattern string, args ...any) error { return fmt.Errorf(pattern,args...) }
+func Exit(_ int, pattern string, args ...any) error { return fmt.Errorf(pattern,args...) }
 func flagWasSet(fs *flag.FlagSet,name string) bool { found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found }
 func TestSplitSources(t *testing.T) {
  if defaultPilotConfig()!=(PilotConfig{}) {t.Fatal("invented defaults")}
@@ -1196,7 +1196,7 @@ func TestGenerateNullableBool(t *testing.T) {
 	}
 	const behavior = `package cli
 import("flag";"fmt";"os";"strings";"testing")
-func exit(_ int,pattern string,args ...any)error{return fmt.Errorf(pattern,args...)}
+func Exit(_ int,pattern string,args ...any)error{return fmt.Errorf(pattern,args...)}
 func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
 func TestNullableSources(t *testing.T){
  if defaultPilotConfig().Enabled!=nil {t.Fatal("nil default lost")}
@@ -1275,7 +1275,7 @@ func TestGenerateCheckedIntegerAndBoolAliases(t *testing.T) {
 	}
 	const behavior = `package cli
 import("flag";"fmt";"os";"strings";"testing")
-func exit(_ int,pattern string,args ...any)error{return fmt.Errorf(pattern,args...)}
+func Exit(_ int,pattern string,args ...any)error{return fmt.Errorf(pattern,args...)}
 func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
 func TestAliasSources(t *testing.T){
  t.Setenv("PILOT_NAME","early");t.Setenv("PILOT_ENABLED","true");t.Setenv("ALIAS_ENABLED","")
@@ -1398,7 +1398,7 @@ func TestGenerateDurationBindings(t *testing.T) {
 	}
 	const behavior = `package cli
 import ("flag";"fmt";"os";"strings";"testing";"time")
-func exit(_ int, pattern string, args ...any) error { return fmt.Errorf(pattern,args...) }
+func Exit(_ int, pattern string, args ...any) error { return fmt.Errorf(pattern,args...) }
 func flagWasSet(fs *flag.FlagSet,name string) bool { found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found }
 func TestDurationSources(t *testing.T) {
  if defaultPilotConfig().Timeout!=180*time.Second {t.Fatal("typed default changed")}
@@ -1474,7 +1474,7 @@ func TestGenerateStrictDurationFlags(t *testing.T) {
 	}
 	const behavior = `package cli
 import("flag";"fmt";"testing";"time")
-func exit(code int,pattern string,args ...any)error{return fmt.Errorf("%d: %s",code,fmt.Sprintf(pattern,args...))}
+func Exit(code int,pattern string,args ...any)error{return fmt.Errorf("%d: %s",code,fmt.Sprintf(pattern,args...))}
 func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
 func TestStrictFlagOrder(t *testing.T){
  for _,raw:=range []string{""," \t ","invalid","0s","-1s"}{
@@ -1818,7 +1818,7 @@ func TestGenerateEnvIntFallback(t *testing.T) {
 	helpers := configFixtureFunctions(t, "getenvInt", "getenvNonNegativeInt", "lookupEnvInteger")
 	const behavior = `package cli
 import ("flag";"fmt";"os";"strconv";"testing")
-func exit(_ int, pattern string, args ...any) error { return fmt.Errorf(pattern,args...) }
+func Exit(_ int, pattern string, args ...any) error { return fmt.Errorf(pattern,args...) }
 func flagWasSet(fs *flag.FlagSet,name string) bool { found:=false; fs.Visit(func(f *flag.Flag){ if f.Name==name {found=true} });return found }
 func TestIntegerSources(t *testing.T) {
  initial:=defaultPilotConfig();if _, err := initial.applyEnv();err!=nil||initial.Count!=7 {t.Fatalf("absent env: %+v %v",initial,err)}
@@ -1926,7 +1926,7 @@ func firstNonEmptyEnv(...string)(string,bool){return "",false}
 func getenvInt(_ string, prior int)int{return prior}
 func getenvNonNegativeInt(_ string,prior int)(int,error){return prior,nil}
 func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
-func exit(_ int,message string,args ...any)error{return fmt.Errorf(message,args...)}
+func Exit(_ int,message string,args ...any)error{return fmt.Errorf(message,args...)}
 func TestFileAdmission(t *testing.T){
  first,tail,bad:="first","tail",-1
  zero,negative,positive:=0,-2,12
@@ -2168,7 +2168,7 @@ func firstNonEmptyEnv(...string)(string,bool){return "",false}
 func getenvFloat(_ string,prior float64)float64{return prior}
 func getenvNonNegativeInt(_ string,prior int)(int,error){return prior,nil}
 func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
-func exit(_ int,message string,args ...any)error{return fmt.Errorf(message,args...)}
+func Exit(_ int,message string,args ...any)error{return fmt.Errorf(message,args...)}
 func TestFloatFileAdmission(t *testing.T){
  first,tail,bad:="first","tail",-1
  zero,negative,fraction,positive:=0.0,-0.5,0.25,2.0
@@ -2338,7 +2338,7 @@ func TestGenerateFileIntPresent(t *testing.T) {
 		if err != nil || !bytes.Equal(output, again) {
 			t.Fatalf("nondeterministic present mode: %v", err)
 		}
-		want := strings.Replace(string(before), "\t\tif *file.Count < 0 {\n\t\t\treturn applied, exit(2, \"pilot count must be non-negative\")\n\t\t}\n", "", 1)
+		want := strings.Replace(string(before), "\t\tif *file.Count < 0 {\n\t\t\treturn applied, Exit(2, \"pilot count must be non-negative\")\n\t\t}\n", "", 1)
 		if string(output) != want {
 			t.Fatal("present mode changed more than file negative check")
 		}
@@ -2347,7 +2347,7 @@ func TestGenerateFileIntPresent(t *testing.T) {
 import("flag";"fmt";"testing")
 func getenvInt(_ string,prior int)int{return prior}
 func getenvNonNegativeInt(_ string,prior int)(int,error){return prior,nil}
-func exit(_ int,message string,args ...any)error{return fmt.Errorf(message,args...)}
+func Exit(_ int,message string,args ...any)error{return fmt.Errorf(message,args...)}
 func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
 func TestFilePresent(t *testing.T){
  zero,negative,positive:=0,-2,12
@@ -2685,14 +2685,14 @@ func TestGenerateFileIntNonzero(t *testing.T) {
 			t.Fatalf("nondeterministic nonzero: %v", err)
 		}
 		want := string(before)
-		want = strings.Replace(want, "\t\tif *file.Count < 0 {\n\t\t\treturn applied, exit(2, \"pilot count must be non-negative\")\n\t\t}\n", "", 1)
+		want = strings.Replace(want, "\t\tif *file.Count < 0 {\n\t\t\treturn applied, Exit(2, \"pilot count must be non-negative\")\n\t\t}\n", "", 1)
 		if string(output) != want {
 			t.Fatal("nonzero mode changed other file/env/default/flag behavior")
 		}
 		typecheckGenerated(t, input+"\nfunc getenvInt(string,int)int{panic(\"stub\")}\n", output)
 		const behavior = `package cli
 import("flag";"fmt";"os";"strconv";"testing")
-func exit(_ int, pattern string, args ...any)error{return fmt.Errorf(pattern,args...)}
+func Exit(_ int, pattern string, args ...any)error{return fmt.Errorf(pattern,args...)}
 func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
 func TestNonzeroSources(t *testing.T){
  zero,negative,positive:=0,-2,4
@@ -3559,7 +3559,7 @@ func testGenerateRawDurationFlags(t *testing.T, mode string) {
 		if source == withoutDefault && strings.Contains(text, `"time"`) {
 			t.Fatal("defaultless raw duration imported unused time")
 		}
-		if strings.Contains(text, "time.ParseDuration(") || strings.Contains(text, "exit(") || strings.Contains(text, `"os"`) {
+		if strings.Contains(text, "time.ParseDuration(") || strings.Contains(text, "Exit(") || strings.Contains(text, `"os"`) {
 			t.Fatal("raw-zero-reset introduced a parser, exit wrapper, or unused environment import")
 		}
 		signature := "Apply(cfg *PilotConfig, fs *flag.FlagSet) (PilotConfigApplied, error)"
@@ -3720,7 +3720,7 @@ func TestSchemaInputAcceptedReportCollision(t *testing.T) {
 
 const acceptanceBehaviorImports = `package cli
 import("flag";"fmt";"os";"reflect";"strconv";"strings";"testing";"time")
-func exit(_ int,pattern string,args ...any)error{return fmt.Errorf(pattern,args...)}
+func Exit(_ int,pattern string,args ...any)error{return fmt.Errorf(pattern,args...)}
 func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
 `
 
@@ -3806,8 +3806,8 @@ func acceptanceFixtureSource(t *testing.T, existing, generated string) string {
 	if strings.Contains(generated+functions, "ApplyLeaseDuration(") && !strings.Contains(existing+functions, "func ApplyLeaseDuration(") {
 		functions += applyLeaseDurationFixtureSource(t)
 	}
-	if strings.Contains(functions, "exit(") && !strings.Contains(existing+functions, "func exit(") {
-		functions += "func exit(_ int, pattern string, args ...any) error { return fmt.Errorf(pattern, args...) }\n"
+	if strings.Contains(functions, "Exit(") && !strings.Contains(existing+functions, "func Exit(") {
+		functions += "func Exit(_ int, pattern string, args ...any) error { return fmt.Errorf(pattern, args...) }\n"
 	}
 	imports := ""
 	for _, name := range []string{"os", "strconv", "strings", "time", "fmt", "flag"} {
@@ -3848,18 +3848,5 @@ func sourceFixtureFunctions(t *testing.T, file string, names ...string) string {
 
 func applyLeaseDurationFixtureSource(t *testing.T) string {
 	t.Helper()
-	source, err := os.ReadFile("../../internal/cli/provider_exports.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	start := strings.Index(string(source), "func ApplyLeaseDuration(")
-	if start < 0 {
-		t.Fatal("missing core ApplyLeaseDuration")
-	}
-	rest := string(source)[start:]
-	end := strings.Index(rest, "\nfunc ")
-	if end < 0 {
-		t.Fatal("missing end of core ApplyLeaseDuration")
-	}
-	return rest[:end] + "\n"
+	return sourceFixtureFunctions(t, "config.go", "ApplyLeaseDuration")
 }

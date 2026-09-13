@@ -33,7 +33,7 @@ func (a App) screenshot(ctx context.Context, args []string) error {
 		return err
 	}
 	if isBlacksmithProvider(cfg.Provider) {
-		return exit(2, "desktop screenshots are not supported for provider=%s; Blacksmith owns machine connectivity", cfg.Provider)
+		return Exit(2, "desktop screenshots are not supported for provider=%s; Blacksmith owns machine connectivity", cfg.Provider)
 	}
 	if err := requireLeaseID(*id, "crabbox screenshot --id <lease-id-or-slug> [--output <path>]", cfg); err != nil {
 		return err
@@ -43,7 +43,7 @@ func (a App) screenshot(ctx context.Context, args []string) error {
 		return err
 	}
 	if isStaticProvider(cfg.Provider) && target.TargetOS != targetLinux {
-		return exit(2, "desktop screenshots are not captured from static %s hosts because those are existing host machines, not Crabbox-created desktops", target.TargetOS)
+		return Exit(2, "desktop screenshots are not captured from static %s hosts because those are existing host machines, not Crabbox-created desktops", target.TargetOS)
 	}
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
@@ -56,7 +56,7 @@ func (a App) screenshot(ctx context.Context, args []string) error {
 	}
 	outPath := strings.TrimSpace(*output)
 	if outPath == "" {
-		outPath = defaultScreenshotPath(leaseID, serverSlug(server))
+		outPath = defaultScreenshotPath(leaseID, ServerSlug(server))
 	}
 	if err := captureDesktopScreenshot(ctx, cfg, target, outPath); err != nil {
 		return err
@@ -73,12 +73,12 @@ func defaultScreenshotPath(leaseID, slug string) string {
 	if strings.TrimSpace(name) == "" {
 		name = "crabbox"
 	}
-	return "crabbox-" + normalizeLeaseSlug(name) + "-screenshot.png"
+	return "crabbox-" + NormalizeLeaseSlug(name) + "-screenshot.png"
 }
 
 func captureDesktopScreenshot(ctx context.Context, cfg Config, target SSHTarget, outputPath string) error {
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
-		return exit(2, "create screenshot directory: %v", err)
+		return Exit(2, "create screenshot directory: %v", err)
 	}
 	switch desktopScreenshotCapturePathFor(cfg, target, isLocalMacTarget(target)) {
 	case desktopScreenshotCaptureLocalMac:
@@ -88,7 +88,7 @@ func captureDesktopScreenshot(ctx context.Context, cfg Config, target SSHTarget,
 	}
 	file, err := os.Create(outputPath)
 	if err != nil {
-		return exit(2, "create screenshot %s: %v", outputPath, err)
+		return Exit(2, "create screenshot %s: %v", outputPath, err)
 	}
 	ok := false
 	defer func() {
@@ -98,7 +98,7 @@ func captureDesktopScreenshot(ctx context.Context, cfg Config, target SSHTarget,
 		}
 	}()
 	if err := runSSHToWriter(ctx, target, screenshotRemoteCommand(target), file); err != nil {
-		return exit(5, "capture screenshot: %v", err)
+		return Exit(5, "capture screenshot: %v", err)
 	}
 	ok = true
 	return nil
@@ -128,7 +128,7 @@ func desktopScreenshotCapturePathFor(cfg Config, target SSHTarget, localMacTarge
 
 func captureLocalMacScreenshot(ctx context.Context, target SSHTarget, outputPath string) error {
 	if err := os.Remove(outputPath); err != nil && !os.IsNotExist(err) {
-		return exit(2, "prepare screenshot %s: %v", outputPath, err)
+		return Exit(2, "prepare screenshot %s: %v", outputPath, err)
 	}
 	cmd := exec.CommandContext(ctx, "screencapture", "-x", "-t", "png", outputPath)
 	applyTargetChildEnvironment(cmd, target)
@@ -137,9 +137,9 @@ func captureLocalMacScreenshot(ctx context.Context, target SSHTarget, outputPath
 	if err := cmd.Run(); err != nil {
 		_ = os.Remove(outputPath)
 		if detail := strings.TrimSpace(stderr.String()); detail != "" {
-			return exit(5, "capture local macOS screenshot: %v: %s", err, detail)
+			return Exit(5, "capture local macOS screenshot: %v: %s", err, detail)
 		}
-		return exit(5, "capture local macOS screenshot: %v", err)
+		return Exit(5, "capture local macOS screenshot: %v", err)
 	}
 	return nil
 }

@@ -16,26 +16,19 @@ func claimLabels(cfg core.Config, sandboxName, createdAt string, missing bool) m
 	workdir, _ := cuaWorkdir(cfg)
 	labels := map[string]string{
 		labelSandboxName: sandboxName,
-		labelImage:       strings.TrimSpace(core.Blank(cfg.Cua.Image, core.CuaConfigDefaultImage)),
-		labelKind:        strings.ToLower(strings.TrimSpace(core.Blank(cfg.Cua.Kind, core.CuaConfigDefaultKind))),
-		labelRegion:      strings.TrimSpace(cfg.Cua.Region),
-		labelWorkdir:     workdir,
+		"cua.image":      strings.TrimSpace(core.Blank(cfg.Cua.Image, core.CuaConfigDefaultImage)),
+		"cua.kind":       strings.ToLower(strings.TrimSpace(core.Blank(cfg.Cua.Kind, core.CuaConfigDefaultKind))),
+		"cua.region":     strings.TrimSpace(cfg.Cua.Region),
+		"cua.workdir":    workdir,
 		labelCreatedAt:   strings.TrimSpace(createdAt),
 	}
 	if cfg.TTL > 0 {
-		labels[labelTTLSeconds] = fmt.Sprintf("%d", int64(cfg.TTL/time.Second))
+		labels["cua.ttl-seconds"] = fmt.Sprintf("%d", int64(cfg.TTL/time.Second))
 	}
 	if missing {
-		labels[labelMissing] = "true"
+		labels["cua.missing"] = "true"
 	}
 	return labels
-}
-
-func TestCUALeaseIDUsesProviderPrefix(t *testing.T) {
-	leaseID := newCUALeaseID()
-	if !strings.HasPrefix(leaseID, leasePrefix) {
-		t.Fatalf("leaseID=%q missing %q", leaseID, leasePrefix)
-	}
 }
 
 func TestCUAScopeNormalizesAPIURL(t *testing.T) {
@@ -87,7 +80,7 @@ func TestResolveClaimFiltersProviderAndScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve claim: %v", err)
 	}
-	if !ok || claim.LeaseID != "cuabx_111111111111" || !claimIsMissing(claim) {
+	if !ok || claim.LeaseID != "cuabx_111111111111" || claim.Labels["cua.missing"] != "true" {
 		t.Fatalf("claim=%#v ok=%v", claim, ok)
 	}
 	other := cfg

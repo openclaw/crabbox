@@ -37,13 +37,13 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 		return err
 	}
 	if *openPortal && !*webvnc {
-		return exit(2, "desktop launch --open requires --webvnc")
+		return Exit(2, "desktop launch --open requires --webvnc")
 	}
 	if *takeControl && !*webvnc {
-		return exit(2, "desktop launch --take-control requires --webvnc")
+		return Exit(2, "desktop launch --take-control requires --webvnc")
 	}
 	if strings.TrimSpace(*egress) != "" && !*browser {
-		return exit(2, "desktop launch --egress currently requires --browser")
+		return Exit(2, "desktop launch --egress currently requires --browser")
 	}
 	positionalID := false
 	if *id == "" && fs.NArg() > 0 {
@@ -63,10 +63,10 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 		return err
 	}
 	if *webvnc && (isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider)) {
-		return exit(2, "desktop launch --webvnc is unavailable for provider=%s", cfg.Provider)
+		return Exit(2, "desktop launch --webvnc is unavailable for provider=%s", cfg.Provider)
 	}
 	if *id == "" && !isStaticProvider(cfg.Provider) {
-		return exit(2, "usage: crabbox desktop launch --id <lease-id-or-slug> [--browser] [--url <url>] -- <command...>")
+		return Exit(2, "usage: crabbox desktop launch --id <lease-id-or-slug> [--browser] [--url <url>] -- <command...>")
 	}
 	server, target, leaseID, err := a.resolveNetworkLeaseTargetForRepoWithConfig(ctx, &cfg, *id, false, *reclaim)
 	if err != nil {
@@ -79,7 +79,7 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 	if err != nil {
 		return err
 	}
-	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, &server, target, repo.Root, *reclaim); err != nil {
+	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(server), cfg, &server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
@@ -106,7 +106,7 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 		if len(command) == 0 {
 			if env["BROWSER"] == "" {
 				printRescue(a.Stdout, rescueBrowserNotLaunched, "browser=true requested but target did not report BROWSER", desktopDoctorCommand(rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}))
-				return exit(2, "browser=true requested but target did not report BROWSER")
+				return Exit(2, "browser=true requested but target did not report BROWSER")
 			}
 			command = []string{env["BROWSER"]}
 			expectBrowserLaunch = true
@@ -130,7 +130,7 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 		}
 	}
 	if len(command) == 0 {
-		return exit(2, "usage: crabbox desktop launch --id <lease-id-or-slug> -- <command...>")
+		return Exit(2, "usage: crabbox desktop launch --id <lease-id-or-slug> -- <command...>")
 	}
 	workdir := remoteJoin(cfg, leaseID, repo.Name)
 	rescueCtx := rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}
@@ -142,20 +142,20 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 	if err != nil {
 		out := launchOutput
 		printRescue(a.Stdout, classifyDesktopFailure(out), trimFailureDetail(out), desktopDoctorCommand(rescueCtx), desktopLaunchRetryCommand(rescueCtx, command))
-		return exit(5, "launch desktop command: %v", err)
+		return Exit(5, "launch desktop command: %v", err)
 	}
 	var windowsWindow windowsDesktopWindow
 	if isWindowsNativeTarget(target) {
 		windowsWindow, err = parseWindowsDesktopWindow(launchOutput)
 		if err != nil {
 			printRescue(a.Stdout, rescueDesktopCommandNotLaunched, trimFailureDetail(launchOutput), desktopDoctorCommand(rescueCtx), desktopLaunchRetryCommand(rescueCtx, command))
-			return exit(5, "launch desktop command: %v", err)
+			return Exit(5, "launch desktop command: %v", err)
 		}
 	}
 	if expectBrowserLaunch && target.TargetOS == targetLinux {
 		if out, err := runSSHCombinedOutput(ctx, target, desktopBrowserLaunchCheckCommand()); err != nil {
 			printRescue(a.Stdout, rescueBrowserNotLaunched, trimFailureDetail(out), desktopDoctorCommand(rescueCtx), desktopLaunchRetryCommand(rescueCtx, command))
-			return exit(5, "browser not launched for %s: %v", leaseID, err)
+			return Exit(5, "browser not launched for %s: %v", leaseID, err)
 		}
 	}
 	fmt.Fprintf(a.Stdout, "launched: %s\n", strings.Join(command, " "))
@@ -231,10 +231,10 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 	}
 	if strings.TrimSpace(*record) != "" {
 		if *recordDuration <= 0 {
-			return exit(2, "desktop terminal --record-duration must be positive")
+			return Exit(2, "desktop terminal --record-duration must be positive")
 		}
 		if *recordFPS <= 0 {
-			return exit(2, "desktop terminal --record-fps must be positive")
+			return Exit(2, "desktop terminal --record-fps must be positive")
 		}
 	}
 	positionalID := false
@@ -253,7 +253,7 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 		return err
 	}
 	if *id == "" && !isStaticProvider(cfg.Provider) {
-		return exit(2, "usage: crabbox desktop terminal --id <lease-id-or-slug> -- <command...>")
+		return Exit(2, "usage: crabbox desktop terminal --id <lease-id-or-slug> -- <command...>")
 	}
 	command := fs.Args()
 	if positionalID && len(command) > 0 && command[0] == *id {
@@ -265,7 +265,7 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 		return err
 	}
 	if strings.TrimSpace(*record) != "" && !supportsDesktopVideoTarget(target) {
-		return exit(2, "desktop terminal --record currently requires target=linux with ffmpeg/x11grab or native Windows desktop capture")
+		return Exit(2, "desktop terminal --record currently requires target=linux with ffmpeg/x11grab or native Windows desktop capture")
 	}
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
@@ -274,7 +274,7 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, &server, target, repo.Root, *reclaim); err != nil {
+	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(server), cfg, &server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
@@ -308,7 +308,7 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 		VisibleWindowTitle: terminalTitle,
 	})); err != nil {
 		printRescue(a.Stdout, classifyDesktopFailure(out), trimFailureDetail(out), desktopDoctorCommand(rescueCtx), desktopLaunchRetryCommand(rescueCtx, terminalCommand))
-		return exit(5, "launch desktop terminal: %v", err)
+		return Exit(5, "launch desktop terminal: %v", err)
 	}
 	fmt.Fprintf(a.Stdout, "launched terminal: %s\n", strings.Join(terminalCommand, " "))
 	if strings.TrimSpace(*screenshot) != "" || strings.TrimSpace(*record) != "" {
@@ -362,7 +362,7 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 				CreatedAt:      time.Now().UTC().Format(time.RFC3339),
 				Version:        currentVersion(),
 				LeaseID:        leaseID,
-				Slug:           serverSlug(server),
+				Slug:           ServerSlug(server),
 				Provider:       cfg.Provider,
 				Network:        string(cfg.Network),
 				TargetOS:       target.TargetOS,
@@ -426,10 +426,10 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 		return err
 	}
 	if *recordDuration <= 0 {
-		return exit(2, "desktop proof --record-duration must be positive")
+		return Exit(2, "desktop proof --record-duration must be positive")
 	}
 	if *recordFPS <= 0 {
-		return exit(2, "desktop proof --record-fps must be positive")
+		return Exit(2, "desktop proof --record-fps must be positive")
 	}
 	positionalID := false
 	if shouldConsumeDesktopTerminalPositionalID(*provider, *id, fs.NArg()) {
@@ -447,7 +447,7 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 		return err
 	}
 	if *id == "" && !isStaticProvider(cfg.Provider) {
-		return exit(2, "usage: crabbox desktop proof --id <lease-id-or-slug> -- <command...>")
+		return Exit(2, "usage: crabbox desktop proof --id <lease-id-or-slug> -- <command...>")
 	}
 	command := fs.Args()
 	if positionalID && len(command) > 0 && command[0] == *id {
@@ -459,7 +459,7 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 		return err
 	}
 	if !supportsDesktopVideoTarget(target) {
-		return exit(2, "desktop proof currently requires target=linux with ffmpeg/x11grab or native Windows desktop capture")
+		return Exit(2, "desktop proof currently requires target=linux with ffmpeg/x11grab or native Windows desktop capture")
 	}
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
@@ -468,7 +468,7 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, &server, target, repo.Root, *reclaim); err != nil {
+	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(server), cfg, &server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
@@ -477,14 +477,14 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 	}
 	dir := strings.TrimSpace(*output)
 	if dir == "" {
-		name := normalizeLeaseSlug(firstNonBlank(serverSlug(server), leaseID))
+		name := NormalizeLeaseSlug(firstNonBlank(ServerSlug(server), leaseID))
 		if name == "" {
 			name = time.Now().UTC().Format("20060102-150405")
 		}
 		dir = filepath.Join("artifacts", name+"-proof")
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return exit(2, "create proof directory: %v", err)
+		return Exit(2, "create proof directory: %v", err)
 	}
 	terminalTitle := desktopTerminalWindowTitle(leaseID)
 	terminalCommand, err := desktopTerminalCommand(target, command, desktopTerminalOptions{
@@ -511,7 +511,7 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 		VisibleWindowTitle: terminalTitle,
 	})); err != nil {
 		printRescue(a.Stdout, classifyDesktopFailure(out), trimFailureDetail(out), desktopDoctorCommand(rescueCtx), desktopLaunchRetryCommand(rescueCtx, terminalCommand))
-		return exit(5, "launch desktop proof terminal: %v", err)
+		return Exit(5, "launch desktop proof terminal: %v", err)
 	}
 	fmt.Fprintf(a.Stdout, "launched terminal: %s\n", strings.Join(terminalCommand, " "))
 	if *waitVisible > 0 {
@@ -528,7 +528,7 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
 		Version:        currentVersion(),
 		LeaseID:        leaseID,
-		Slug:           serverSlug(server),
+		Slug:           ServerSlug(server),
 		Provider:       cfg.Provider,
 		Network:        string(cfg.Network),
 		TargetOS:       target.TargetOS,
@@ -603,7 +603,7 @@ func supportsDesktopVideoTarget(target SSHTarget) bool {
 
 func rejectWaylandDesktopVideoEnv(env map[string]string, command string) error {
 	if isWaylandDesktopEnv(env["CRABBOX_DESKTOP_ENV"]) {
-		return exit(2, "%s does not support Wayland desktop envs yet; video capture currently requires an X11 desktop", command)
+		return Exit(2, "%s does not support Wayland desktop envs yet; video capture currently requires an X11 desktop", command)
 	}
 	return nil
 }
@@ -706,7 +706,7 @@ exec xterm -title %s -fa monospace -fs %s -geometry %s -e bash -lc %s`,
 }
 
 func desktopTerminalWindowTitle(leaseID string) string {
-	suffix := normalizeLeaseSlug(leaseID)
+	suffix := NormalizeLeaseSlug(leaseID)
 	if suffix == "" {
 		suffix = "session"
 	}

@@ -711,10 +711,10 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 	}
 	defaultWorkRootCfg := cfg
 	defaultWorkRootCfg.WorkRoot = ""
-	if got := windowsBootstrapPowerShell(defaultWorkRootCfg, "ssh-ed25519 test"); !strings.Contains(got, `$workRoot = 'C:\crabbox'`) {
+	if got := WindowsBootstrapPowerShell(defaultWorkRootCfg, "ssh-ed25519 test"); !strings.Contains(got, `$workRoot = 'C:\crabbox'`) {
 		t.Fatalf("windows user data should default work root, got missing marker")
 	}
-	got := windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+	got := WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
 	for _, want := range []string{
 		"function Assert-CrabboxFileSHA256",
 		"Get-FileHash -LiteralPath $Path -Algorithm SHA256",
@@ -808,7 +808,7 @@ func TestAWSUserDataWindowsCoreProfileSkipsDesktop(t *testing.T) {
 	cfg.TargetOS = targetWindows
 	cfg.WindowsMode = windowsModeNormal
 	cfg.WorkRoot = `C:\crabbox`
-	got := windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+	got := WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
 	for _, want := range []string{
 		"function Assert-CrabboxFileSHA256",
 		"OpenSSH-Win64.zip",
@@ -857,7 +857,7 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 	cfg.TargetOS = targetWindows
 	cfg.WindowsMode = windowsModeWSL2
 	cfg.WorkRoot = `/work/crabbox`
-	got := windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+	got := WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
 	for _, want := range []string{
 		`$workRoot = 'C:\crabbox'`,
 		`C:\ProgramData\crabbox\windows.password`,
@@ -930,7 +930,7 @@ func TestManagedWindowsWSL2BootstrapInstallsNodeBeforeReadiness(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			cfg := baseConfig()
 			cfg.TargetOS, cfg.WindowsMode = targetWindows, mode
-			script := windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+			script := WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
 			install := "bash /var/lib/crabbox/install-linux-developer-tools.sh --node-only"
 			if mode == windowsModeNormal {
 				if strings.Contains(script, install) {
@@ -959,7 +959,7 @@ func TestManagedWindowsWSL2BootstrapOwnsDistroInitialization(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			cfg := baseConfig()
 			cfg.TargetOS, cfg.WindowsMode = targetWindows, mode
-			script := windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+			script := WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
 			steps := []string{
 				"touch /etc/cloud/cloud-init.disabled",
 				"wsl.exe --terminate $wslDistro",

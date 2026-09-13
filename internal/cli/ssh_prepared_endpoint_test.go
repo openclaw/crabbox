@@ -66,7 +66,7 @@ func TestSSHPreparedEndpointAvoidsRepeatedTransportProbes(t *testing.T) {
 				case "wait":
 					ready = waitForSSHReady(t.Context(), &target, io.Discard, "test", time.Second) == nil
 				case "ready probe":
-					ready = probeSSHReady(t.Context(), &target, time.Second)
+					ready = ProbeSSHReady(t.Context(), &target, time.Second)
 				case "transport probe":
 					ready = probeSSHTransport(t.Context(), &target, time.Second)
 				}

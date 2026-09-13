@@ -131,7 +131,7 @@ func fixedAWSCreateIntentForConfig(cfg Config, req FixedAWSCreateIntentRequest) 
 	return fixedAWSCreateIntent{
 		Version:       FixedAWSCreateIntentVersion,
 		AccountID:     strings.TrimSpace(req.AccountID),
-		RequestedSlug: normalizeLeaseSlug(req.RequestedSlug),
+		RequestedSlug: NormalizeLeaseSlug(req.RequestedSlug),
 		Provider:      strings.TrimSpace(cfg.Provider),
 		Profile:       strings.TrimSpace(cfg.Profile),
 		Machine: fixedAWSCreateIntentMachine{
@@ -192,7 +192,7 @@ func fixedAWSCreateIntentForConfig(cfg Config, req FixedAWSCreateIntentRequest) 
 			IdleNanoseconds: fixedCanonicalDuration(cfg.IdleTimeout),
 		},
 		Workload: fixedCreateIntentWorkload{
-			Pond:         normalizePondName(cfg.Pond),
+			Pond:         NormalizePondName(cfg.Pond),
 			ExposedPorts: exposedPorts,
 			WorkRoot:     strings.TrimSpace(cfg.WorkRoot),
 		},

@@ -102,20 +102,20 @@ func (a App) watch(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() > 0 {
-		return exit(2, "unexpected argument %q; place the command after --", fs.Arg(0))
+		return Exit(2, "unexpected argument %q; place the command after --", fs.Arg(0))
 	}
 	if len(command) == 0 && strings.TrimSpace(*preset) == "" {
-		return exit(2, "usage: crabbox watch [flags] -- <command...>")
+		return Exit(2, "usage: crabbox watch [flags] -- <command...>")
 	}
 	if *debounce <= 0 {
-		return exit(2, "--debounce must be positive")
+		return Exit(2, "--debounce must be positive")
 	}
 	requestedSlug, err := requestedLeaseSlug(*leaseFlags.Slug)
 	if err != nil {
 		return err
 	}
 	if requestedSlug != "" && strings.TrimSpace(*leaseIDFlag) != "" {
-		return exit(2, "--slug only applies when creating a new lease; omit --id or use the existing slug")
+		return Exit(2, "--slug only applies when creating a new lease; omit --id or use the existing slug")
 	}
 	cfg, err := loadConfig()
 	if err != nil {
@@ -161,7 +161,7 @@ func (a App) watch(ctx context.Context, args []string) error {
 func watchBackendGate(backend Backend) (SSHLeaseBackend, error) {
 	sshBackend, ok := backend.(SSHLeaseBackend)
 	if !ok || !backend.Spec().Features.Has(FeatureCrabboxSync) {
-		return nil, exit(2, "provider=%s does not support watch: it requires an SSH lease provider with the crabbox-sync feature; use crabbox run instead", backend.Spec().Name)
+		return nil, Exit(2, "provider=%s does not support watch: it requires an SSH lease provider with the crabbox-sync feature; use crabbox run instead", backend.Spec().Name)
 	}
 	return sshBackend, nil
 }
@@ -184,7 +184,7 @@ func (a App) watchWithBackend(ctx context.Context, opts watchOptions, repo Repo,
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(a.Stdout, "watch lease=%s slug=%s provider=%s idle_timeout=%s idle_exit=%s\n", lease.LeaseID, blank(serverSlug(lease.Server), "-"), cfg.Provider, cfg.IdleTimeout, idleExit)
+		fmt.Fprintf(a.Stdout, "watch lease=%s slug=%s provider=%s idle_timeout=%s idle_exit=%s\n", lease.LeaseID, blank(ServerSlug(lease.Server), "-"), cfg.Provider, cfg.IdleTimeout, idleExit)
 		return a.watchLoop(ctx, opts, repo, cfg, lease.LeaseID, idleExit, execute)
 	}
 	idleExit, err := watchEffectiveIdleExit(opts, cfg.IdleTimeout)
@@ -203,22 +203,22 @@ func (a App) watchWithBackend(ctx context.Context, opts watchOptions, repo Repo,
 		}()
 	}
 	applyResolvedServerConfig(&cfg, lease.Server)
-	if err := a.claimLeaseTargetForRepoAndRegister(ctx, lease.LeaseID, serverSlug(lease.Server), cfg, &lease.Server, lease.SSH, repo.Root, opts.Reclaim); err != nil {
+	if err := a.claimLeaseTargetForRepoAndRegister(ctx, lease.LeaseID, ServerSlug(lease.Server), cfg, &lease.Server, lease.SSH, repo.Root, opts.Reclaim); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.Stdout, "leased %s slug=%s provider=%s idle_timeout=%s idle_exit=%s\n", lease.LeaseID, blank(serverSlug(lease.Server), "-"), cfg.Provider, cfg.IdleTimeout, idleExit)
+	fmt.Fprintf(a.Stdout, "leased %s slug=%s provider=%s idle_timeout=%s idle_exit=%s\n", lease.LeaseID, blank(ServerSlug(lease.Server), "-"), cfg.Provider, cfg.IdleTimeout, idleExit)
 	return a.watchLoop(ctx, opts, repo, cfg, lease.LeaseID, idleExit, execute)
 }
 
 func watchEffectiveIdleExit(opts watchOptions, idleTimeout time.Duration) (time.Duration, error) {
 	if idleTimeout <= 0 {
-		return 0, exit(2, "lease idle timeout must be positive")
+		return 0, Exit(2, "lease idle timeout must be positive")
 	}
 	if !opts.IdleExitSet {
 		return idleTimeout, nil
 	}
 	if opts.IdleExit <= 0 || opts.IdleExit > idleTimeout {
-		return 0, exit(2, "--idle-exit must be positive and at most the lease idle timeout (%s); raise --idle-timeout for longer sessions", idleTimeout)
+		return 0, Exit(2, "--idle-exit must be positive and at most the lease idle timeout (%s); raise --idle-timeout for longer sessions", idleTimeout)
 	}
 	return opts.IdleExit, nil
 }
@@ -271,30 +271,30 @@ func (s *watchSession) run(ctx context.Context) error {
 	s.excludes = excludes
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		return exit(1, "watch: start watcher: %v", err)
+		return Exit(1, "watch: start watcher: %v", err)
 	}
 	defer watcher.Close()
 	s.watcher = watcher
 	s.gitIndexPath, err = watchGitIndexPath(s.root)
 	if err != nil {
-		return exit(1, "watch: resolve Git index: %v", err)
+		return Exit(1, "watch: resolve Git index: %v", err)
 	}
 	if err := watcher.Add(filepath.Dir(s.gitIndexPath)); err != nil {
-		return exit(1, "watch: watch Git index: %v", err)
+		return Exit(1, "watch: watch Git index: %v", err)
 	}
 	tracked, err := loadGitTrackedPaths(s.root)
 	if err != nil {
-		return exit(1, "watch: list tracked paths: %v", err)
+		return Exit(1, "watch: list tracked paths: %v", err)
 	}
 	s.indexRegular = trackedRegularPathSet(tracked)
 	s.trackedRegular, err = trackedRegularPathSetWithCachedDeletions(s.root, tracked)
 	if err != nil {
-		return exit(1, "watch: classify tracked paths: %v", err)
+		return Exit(1, "watch: classify tracked paths: %v", err)
 	}
 	s.pathScope = newWatchPathScope(s.excludes, s.trackedRegular)
 	files, err := addWatchTree(watcher, s.root, s.root, s.pathScope)
 	if err != nil {
-		return exit(1, "watch: watch %s: %v", s.root, err)
+		return Exit(1, "watch: watch %s: %v", s.root, err)
 	}
 	s.paths = make(map[string]watchPathState, len(files))
 	for _, rel := range files {
@@ -350,13 +350,13 @@ func (s *watchSession) run(ctx context.Context) error {
 		case watchErr, ok := <-watcher.Errors:
 			awaitRun()
 			if !ok {
-				return exit(1, "watch: watcher closed unexpectedly")
+				return Exit(1, "watch: watcher closed unexpectedly")
 			}
-			return exit(1, "watch: watcher failed: %v; add noisy paths to .crabboxignore if event volume is the cause", watchErr)
+			return Exit(1, "watch: watcher failed: %v; add noisy paths to .crabboxignore if event volume is the cause", watchErr)
 		case event, ok := <-watcher.Events:
 			if !ok {
 				awaitRun()
-				return exit(1, "watch: watcher closed unexpectedly")
+				return Exit(1, "watch: watcher closed unexpectedly")
 			}
 			if s.observeEvent(watcher, event, batch) {
 				debounceTimer.Reset(s.debounce)
@@ -522,11 +522,11 @@ func (s *watchSession) qualifyBatch(paths []string) ([]string, error) {
 	previousIndexRegular := s.indexRegular
 	tracked, err := loadGitTrackedPaths(s.root)
 	if err != nil {
-		return nil, exit(1, "watch: list tracked paths: %v", err)
+		return nil, Exit(1, "watch: list tracked paths: %v", err)
 	}
 	trackedRegular, err := trackedRegularPathSetWithCachedDeletions(s.root, tracked)
 	if err != nil {
-		return nil, exit(1, "watch: classify tracked paths: %v", err)
+		return nil, Exit(1, "watch: classify tracked paths: %v", err)
 	}
 	excludesChanged := !syncExcludeRulesEqual(excludes, s.excludes)
 	indexRegular := trackedRegularPathSet(tracked)
@@ -540,7 +540,7 @@ func (s *watchSession) qualifyBatch(paths []string) ([]string, error) {
 	if excludesChanged && s.watcher != nil {
 		files, err := addWatchTree(s.watcher, s.root, s.root, s.pathScope)
 		if err != nil {
-			return nil, exit(1, "watch: rewatch %s after filter change: %v", s.root, err)
+			return nil, Exit(1, "watch: rewatch %s after filter change: %v", s.root, err)
 		}
 		for _, file := range files {
 			s.rememberPath(file, filepath.Join(s.root, filepath.FromSlash(file)))
@@ -564,7 +564,7 @@ func (s *watchSession) qualifyBatch(paths []string) ([]string, error) {
 		_, trackedRegular := s.indexRegular[rel]
 		if trackedRegular && s.pathScope.pathEligible(rel) {
 			if err := addWatchParentChain(s.watcher, s.root, rel); err != nil {
-				return nil, exit(1, "watch: attach tracked path %s: %v", rel, err)
+				return nil, Exit(1, "watch: attach tracked path %s: %v", rel, err)
 			}
 			s.rememberPath(rel, filepath.Join(s.root, filepath.FromSlash(rel)))
 		} else {
@@ -686,7 +686,7 @@ func watchGitPaths(root string, paths []string, gitArgs ...string) ([]string, er
 	cmd.Env = repositoryGitEnvironment()
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, exit(1, "watch: git %s failed: %s", gitArgs[0], watchGitError(err))
+		return nil, Exit(1, "watch: git %s failed: %s", gitArgs[0], watchGitError(err))
 	}
 	return splitNul(out), nil
 }
@@ -702,7 +702,7 @@ func watchGitIgnored(root string, paths []string) (map[string]struct{}, error) {
 		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
 			return map[string]struct{}{}, nil
 		}
-		return nil, exit(1, "watch: git check-ignore failed: %s", watchGitError(err))
+		return nil, Exit(1, "watch: git check-ignore failed: %s", watchGitError(err))
 	}
 	ignored := map[string]struct{}{}
 	for _, rel := range splitNul(out) {
@@ -896,7 +896,7 @@ func partitionForwardedRunArgs(fs *flag.FlagSet, flagArgs []string, ownedOnly, f
 	for i < len(flagArgs) {
 		token := flagArgs[i]
 		if token == "-" || !strings.HasPrefix(token, "-") {
-			return nil, nil, exit(2, "unexpected argument %q; place the command after --", token)
+			return nil, nil, Exit(2, "unexpected argument %q; place the command after --", token)
 		}
 		name := strings.TrimLeft(token, "-")
 		hasValue := false
@@ -905,7 +905,7 @@ func partitionForwardedRunArgs(fs *flag.FlagSet, flagArgs []string, ownedOnly, f
 			hasValue = true
 		}
 		if name == "" {
-			return nil, nil, exit(2, "invalid flag %q", token)
+			return nil, nil, Exit(2, "invalid flag %q", token)
 		}
 		if name == "h" || name == "help" {
 			ownArgs = append(ownArgs, token)
@@ -913,14 +913,14 @@ func partitionForwardedRunArgs(fs *flag.FlagSet, flagArgs []string, ownedOnly, f
 			continue
 		}
 		if forbidden[name] {
-			return nil, nil, exit(2, "--%s cannot be used with %s", name, forbiddenReason)
+			return nil, nil, Exit(2, "--%s cannot be used with %s", name, forbiddenReason)
 		}
 		known := fs.Lookup(name) != nil
 		consume := 0
 		if !hasValue {
 			if known && !watchFlagIsBool(fs, name) {
 				if i+1 >= len(flagArgs) {
-					return nil, nil, exit(2, "flag needs an argument: --%s", name)
+					return nil, nil, Exit(2, "flag needs an argument: --%s", name)
 				}
 				consume = 1
 			} else if !known && i+1 < len(flagArgs) && !strings.HasPrefix(flagArgs[i+1], "-") {

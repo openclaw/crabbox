@@ -75,15 +75,15 @@ func (e *proxmoxTaskWaitError) Unwrap() error { return e.err }
 func NewProxmoxClient(cfg Config) (*ProxmoxClient, error) {
 	apiURL := strings.TrimSpace(cfg.Proxmox.APIURL)
 	if apiURL == "" {
-		return nil, exit(3, "proxmox apiUrl is required (set proxmox.apiUrl or CRABBOX_PROXMOX_API_URL)")
+		return nil, Exit(3, "proxmox apiUrl is required (set proxmox.apiUrl or CRABBOX_PROXMOX_API_URL)")
 	}
 	apiURL = strings.TrimRight(apiURL, "/")
 	apiURL = strings.TrimSuffix(apiURL, "/api2/json")
 	if cfg.Proxmox.TokenID == "" || cfg.Proxmox.TokenSecret == "" {
-		return nil, exit(3, "proxmox tokenId/tokenSecret are required (set proxmox.tokenId/tokenSecret or CRABBOX_PROXMOX_TOKEN_ID/CRABBOX_PROXMOX_TOKEN_SECRET)")
+		return nil, Exit(3, "proxmox tokenId/tokenSecret are required (set proxmox.tokenId/tokenSecret or CRABBOX_PROXMOX_TOKEN_ID/CRABBOX_PROXMOX_TOKEN_SECRET)")
 	}
 	if cfg.Proxmox.Node == "" {
-		return nil, exit(3, "proxmox node is required (set proxmox.node or CRABBOX_PROXMOX_NODE)")
+		return nil, Exit(3, "proxmox node is required (set proxmox.node or CRABBOX_PROXMOX_NODE)")
 	}
 	client := &http.Client{Timeout: 60 * time.Second}
 	if cfg.Proxmox.InsecureTLS {
@@ -1000,16 +1000,16 @@ func (c *ProxmoxClient) VMExistsInCluster(ctx context.Context, id string) (bool,
 
 func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool) (Server, error) {
 	if cfg.TargetOS != targetLinux {
-		return Server{}, exit(2, "proxmox provider currently supports target=linux only")
+		return Server{}, Exit(2, "proxmox provider currently supports target=linux only")
 	}
 	if cfg.Proxmox.TemplateID <= 0 {
-		return Server{}, exit(3, "proxmox templateId is required (set proxmox.templateId or CRABBOX_PROXMOX_TEMPLATE_ID)")
+		return Server{}, Exit(3, "proxmox templateId is required (set proxmox.templateId or CRABBOX_PROXMOX_TEMPLATE_ID)")
 	}
 	vmid, err := c.nextID(ctx)
 	if err != nil {
 		return Server{}, err
 	}
-	name := leaseProviderName(leaseID, slug)
+	name := LeaseProviderName(leaseID, slug)
 	full := "1"
 	if !cfg.Proxmox.FullClone {
 		full = "0"
@@ -1041,7 +1041,7 @@ func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey,
 	}
 
 	now := time.Now().UTC()
-	labels := directLeaseLabels(cfg, leaseID, slug, "proxmox", "", keep, now)
+	labels := DirectLeaseLabels(cfg, leaseID, slug, "proxmox", "", keep, now)
 	labels["node"] = cfg.Proxmox.Node
 	labels["template_id"] = strconv.Itoa(cfg.Proxmox.TemplateID)
 	description := proxmoxDescription(labels)

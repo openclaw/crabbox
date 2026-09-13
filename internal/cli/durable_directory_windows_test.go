@@ -30,11 +30,11 @@ func testWindowsClaimFirstNamespace(t *testing.T, producer string) {
 	var createErr error
 	switch producer {
 	case "durable-namespace":
-		createErr = ensureCrabboxClaimNamespaceDurable()
+		createErr = EnsureCrabboxClaimNamespaceDurable()
 	case "operation-lock":
 		createErr = withLeaseIDOperationLock(leaseID, func() error { return nil })
 	case "durable-lock":
-		createErr = withDurableLeaseClaimLock(leaseID, func(*leaseClaim, bool, func() error) error { return nil })
+		createErr = WithDurableLeaseClaimLock(leaseID, func(*leaseClaim, bool, func() error) error { return nil })
 	case "lock-only":
 		_, createErr = leaseClaimLockPath(filepath.Join(state, "claims", leaseID+".json"))
 	default:

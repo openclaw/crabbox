@@ -815,7 +815,7 @@ func TestShouldSkipBlacksmithActionsHydrateForProvider(t *testing.T) {
 }
 
 func TestGitHubRunnerRegistrationPermissionError(t *testing.T) {
-	err := exit(3, "gh api: exit status 1\n%s", "You must have repository write permissions or have the repository runners fine-grained permission. (HTTP 403)")
+	err := Exit(3, "gh api: exit status 1\n%s", "You must have repository write permissions or have the repository runners fine-grained permission. (HTTP 403)")
 	if !isGitHubRunnerRegistrationPermissionError(err) {
 		t.Fatalf("permission error not detected: %v", err)
 	}

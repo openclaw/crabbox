@@ -139,7 +139,7 @@ func windowsBootstrapHeaderPowerShell(cfg Config, publicKey, workRoot string) st
 	return script
 }
 
-func windowsBootstrapPowerShell(cfg Config, publicKey string) string {
+func WindowsBootstrapPowerShell(cfg Config, publicKey string) string {
 	script := windowsBootstrapHeaderPowerShell(cfg, publicKey, windowsBootstrapWorkRoot(cfg)) +
 		windowsManagedCorePreludePowerShell(cfg) +
 		sharedWindowsCore()
@@ -944,7 +944,7 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
 	authKey := strings.TrimSpace(cfg.Tailscale.AuthKey)
 	hostname := strings.TrimSpace(cfg.Tailscale.Hostname)
 	if hostname == "" {
-		hostname = renderTailscaleHostname(cfg.Tailscale.HostnameTemplate, "", "lease", cfg.Provider)
+		hostname = RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, "", "lease", cfg.Provider)
 	}
 	sshUser := strings.TrimSpace(cfg.SSHUser)
 	if sshUser == "" {
@@ -1014,7 +1014,7 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
     fi
     chown ` + sshUserChown + ` /var/lib/crabbox/tailscale-* || true
     chmod 0640 /var/lib/crabbox/tailscale-* || true`
-	if pond := normalizePondName(cfg.Pond); pond != "" {
+	if pond := NormalizePondName(cfg.Pond); pond != "" {
 		tailscaleUpScript += "\n" + cloudInitPondHostsBootstrap(cfg.Pond)
 	}
 	return tailscaleUpScript
@@ -1120,4 +1120,20 @@ PONDTIMER
     /usr/local/bin/crabbox-pond-hosts ` + tagLiteral + ` ` + hostsFile + ` ` + systemHostsFile + ` || true
     test -f ` + hostsFile + `
 `
+}
+
+func XfceDesktopThemeScript() string {
+	return sharedXfceDesktopTheme("classic")
+}
+
+func XfceSessionEnvironmentScript() string {
+	return sharedXfceSessionEnvironment()
+}
+
+func XfceDesktopSessionScript() string {
+	return sharedXfceDesktopSession()
+}
+
+func GnomeDesktopThemeScript() string {
+	return sharedGnomeDesktopTheme()
 }

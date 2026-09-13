@@ -328,7 +328,7 @@ func TestAutoRouteStaticLeaseRespectsExplicitProviderFlag(t *testing.T) {
 
 func TestAutoRouteStaticLeaseSkipsClaimScanForExplicitNonStaticProvider(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	dir, err := crabboxStateDir()
+	dir, err := CrabboxStateDir()
 	if err != nil {
 		t.Fatal(err)
 	}

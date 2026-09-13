@@ -134,7 +134,7 @@ func writeArtifactManifest(root *os.Root, opts artifactPublishOptions, files []a
 	path := filepath.Join(opts.Directory, artifactManifestFilename)
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
-		return "", nil, exit(2, "encode artifact manifest: %v", err)
+		return "", nil, Exit(2, "encode artifact manifest: %v", err)
 	}
 	data = append(data, '\n')
 	private := false
@@ -164,20 +164,20 @@ func readArtifactManifestRef(ctx context.Context, ref string) (artifactManifest,
 	if isHTTPArtifactRef(path) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
 		if err != nil {
-			return artifactManifest{}, path, exit(2, "create artifact manifest request: %v", err)
+			return artifactManifest{}, path, Exit(2, "create artifact manifest request: %v", err)
 		}
 		resp, err := artifactHTTPClient(req.URL).Do(req)
 		if err != nil {
-			return artifactManifest{}, path, exit(2, "download artifact manifest: %v", artifactRequestError(err))
+			return artifactManifest{}, path, Exit(2, "download artifact manifest: %v", artifactRequestError(err))
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-			return artifactManifest{}, path, exit(2, "download artifact manifest: http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+			return artifactManifest{}, path, Exit(2, "download artifact manifest: http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 		data, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 		if err != nil {
-			return artifactManifest{}, path, exit(2, "read artifact manifest response: %v", err)
+			return artifactManifest{}, path, Exit(2, "read artifact manifest response: %v", err)
 		}
 		manifest, err := decodeArtifactManifest(data, path)
 		return manifest, path, err
@@ -187,7 +187,7 @@ func readArtifactManifestRef(ctx context.Context, ref string) (artifactManifest,
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return artifactManifest{}, path, exit(2, "read artifact manifest: %v", err)
+		return artifactManifest{}, path, Exit(2, "read artifact manifest: %v", err)
 	}
 	manifest, err := decodeArtifactManifest(data, path)
 	return manifest, path, err
@@ -196,10 +196,10 @@ func readArtifactManifestRef(ctx context.Context, ref string) (artifactManifest,
 func decodeArtifactManifest(data []byte, path string) (artifactManifest, error) {
 	var manifest artifactManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return artifactManifest{}, exit(2, "parse artifact manifest %s: %v", path, err)
+		return artifactManifest{}, Exit(2, "parse artifact manifest %s: %v", path, err)
 	}
 	if manifest.SchemaVersion != 1 {
-		return artifactManifest{}, exit(2, "unsupported artifact manifest schemaVersion=%d", manifest.SchemaVersion)
+		return artifactManifest{}, Exit(2, "unsupported artifact manifest schemaVersion=%d", manifest.SchemaVersion)
 	}
 	return manifest, nil
 }
@@ -210,15 +210,15 @@ func pullArtifactManifest(ctx context.Context, ref, output string, overwrite boo
 		return artifactPullResult{}, err
 	}
 	if err := os.MkdirAll(output, 0o755); err != nil {
-		return artifactPullResult{}, exit(2, "create output directory: %v", err)
+		return artifactPullResult{}, Exit(2, "create output directory: %v", err)
 	}
 	result := artifactPullResult{Directory: output, Files: make([]artifactPulledFile, 0, len(manifest.Files))}
 	for _, file := range manifest.Files {
 		if strings.TrimSpace(file.Name) == "" {
-			return artifactPullResult{}, exit(2, "artifact manifest contains an unnamed file")
+			return artifactPullResult{}, Exit(2, "artifact manifest contains an unnamed file")
 		}
 		if file.Size < 0 {
-			return artifactPullResult{}, exit(2, "artifact size for %s is invalid: %d", file.Name, file.Size)
+			return artifactPullResult{}, Exit(2, "artifact size for %s is invalid: %d", file.Name, file.Size)
 		}
 		outPath, err := safeArtifactOutputPath(output, file.Name)
 		if err != nil {
@@ -226,11 +226,11 @@ func pullArtifactManifest(ctx context.Context, ref, output string, overwrite boo
 		}
 		if !overwrite {
 			if _, err := os.Stat(outPath); err == nil {
-				return artifactPullResult{}, exit(2, "artifact output already exists: %s", outPath)
+				return artifactPullResult{}, Exit(2, "artifact output already exists: %s", outPath)
 			}
 		}
 		if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
-			return artifactPullResult{}, exit(2, "create artifact output directory: %v", err)
+			return artifactPullResult{}, Exit(2, "create artifact output directory: %v", err)
 		}
 		if err := rejectSymlinkedArtifactOutputParents(output, file.Name); err != nil {
 			return artifactPullResult{}, err
@@ -246,11 +246,11 @@ func pullArtifactManifest(ctx context.Context, ref, output string, overwrite boo
 		}
 		if file.SHA256 != "" && !strings.EqualFold(file.SHA256, hash) {
 			_ = os.Remove(tempPath)
-			return artifactPullResult{}, exit(2, "artifact hash mismatch for %s: got %s, want %s", file.Name, hash, file.SHA256)
+			return artifactPullResult{}, Exit(2, "artifact hash mismatch for %s: got %s, want %s", file.Name, hash, file.SHA256)
 		}
 		if file.declaresSize() && file.Size != size {
 			_ = os.Remove(tempPath)
-			return artifactPullResult{}, exit(2, "artifact size mismatch for %s: got %d, want %d", file.Name, size, file.Size)
+			return artifactPullResult{}, Exit(2, "artifact size mismatch for %s: got %d, want %d", file.Name, size, file.Size)
 		}
 		if err := installPulledArtifact(tempPath, outPath, overwrite); err != nil {
 			_ = os.Remove(tempPath)
@@ -271,12 +271,12 @@ func pullArtifactManifest(ctx context.Context, ref, output string, overwrite boo
 func createArtifactOutputTemp(outPath string) (string, error) {
 	temp, err := os.CreateTemp(filepath.Dir(outPath), "."+filepath.Base(outPath)+".tmp-*")
 	if err != nil {
-		return "", exit(2, "create temporary artifact output: %v", err)
+		return "", Exit(2, "create temporary artifact output: %v", err)
 	}
 	path := temp.Name()
 	if err := temp.Close(); err != nil {
 		_ = os.Remove(path)
-		return "", exit(2, "close temporary artifact output: %v", err)
+		return "", Exit(2, "close temporary artifact output: %v", err)
 	}
 	return path, nil
 }
@@ -287,13 +287,13 @@ func installPulledArtifact(tempPath, outPath string, overwrite bool) error {
 			return nil
 		}
 		if err := os.Remove(outPath); err != nil && !os.IsNotExist(err) {
-			return exit(2, "replace artifact output %s: %v", outPath, err)
+			return Exit(2, "replace artifact output %s: %v", outPath, err)
 		}
 	} else if _, err := os.Stat(outPath); err == nil {
-		return exit(2, "artifact output already exists: %s", outPath)
+		return Exit(2, "artifact output already exists: %s", outPath)
 	}
 	if err := os.Rename(tempPath, outPath); err != nil {
-		return exit(2, "install artifact output %s: %v", outPath, err)
+		return Exit(2, "install artifact output %s: %v", outPath, err)
 	}
 	return nil
 }
@@ -303,13 +303,13 @@ func pullArtifactFile(ctx context.Context, manifestPath string, file artifactMan
 		return downloadArtifactURL(ctx, file, outPath)
 	}
 	if strings.TrimSpace(file.URL) != "" && isHTTPArtifactRef(manifestPath) {
-		return "", 0, "", exit(2, "remote artifact manifest entry %s has non-downloadable url: %s", file.Name, file.URL)
+		return "", 0, "", Exit(2, "remote artifact manifest entry %s has non-downloadable url: %s", file.Name, file.URL)
 	}
 	if strings.TrimSpace(file.Path) == "" {
-		return "", 0, "", exit(2, "artifact %s has no url or path", file.Name)
+		return "", 0, "", Exit(2, "artifact %s has no url or path", file.Name)
 	}
 	if isHTTPArtifactRef(manifestPath) {
-		return "", 0, "", exit(2, "remote artifact manifest entry %s requires url", file.Name)
+		return "", 0, "", Exit(2, "remote artifact manifest entry %s requires url", file.Name)
 	}
 	sourcePath, err := localArtifactSourcePath(manifestPath, file.Path)
 	if err != nil {
@@ -317,18 +317,18 @@ func pullArtifactFile(ctx context.Context, manifestPath string, file artifactMan
 	}
 	source, err := os.Open(sourcePath)
 	if err != nil {
-		return "", 0, "", exit(2, "open artifact %s: %v", file.Name, err)
+		return "", 0, "", Exit(2, "open artifact %s: %v", file.Name, err)
 	}
 	defer source.Close()
 	dest, err := os.Create(outPath)
 	if err != nil {
-		return "", 0, "", exit(2, "create artifact %s: %v", outPath, err)
+		return "", 0, "", Exit(2, "create artifact %s: %v", outPath, err)
 	}
 	defer dest.Close()
 	hash := sha256.New()
 	written, err := io.Copy(io.MultiWriter(dest, hash), source)
 	if err != nil {
-		return "", 0, "", exit(2, "copy artifact %s: %v", file.Name, err)
+		return "", 0, "", Exit(2, "copy artifact %s: %v", file.Name, err)
 	}
 	return firstNonBlank(file.ContentType, artifactContentType(sourcePath)), written, hex.EncodeToString(hash.Sum(nil)), nil
 }
@@ -336,20 +336,20 @@ func pullArtifactFile(ctx context.Context, manifestPath string, file artifactMan
 func localArtifactSourcePath(manifestPath, artifactPath string) (string, error) {
 	cleanPath := filepath.Clean(filepath.FromSlash(strings.TrimSpace(artifactPath)))
 	if cleanPath == "." || cleanPath == "" || filepath.IsAbs(cleanPath) || cleanPath == ".." || strings.HasPrefix(cleanPath, ".."+string(filepath.Separator)) {
-		return "", exit(2, "invalid artifact source path: %s", artifactPath)
+		return "", Exit(2, "invalid artifact source path: %s", artifactPath)
 	}
 	baseDir := filepath.Dir(manifestPath)
 	baseAbs, err := filepath.Abs(baseDir)
 	if err != nil {
-		return "", exit(2, "resolve artifact manifest directory: %v", err)
+		return "", Exit(2, "resolve artifact manifest directory: %v", err)
 	}
 	sourceAbs, err := filepath.Abs(filepath.Join(baseDir, cleanPath))
 	if err != nil {
-		return "", exit(2, "resolve artifact source path: %v", err)
+		return "", Exit(2, "resolve artifact source path: %v", err)
 	}
 	rel, err := filepath.Rel(baseAbs, sourceAbs)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", exit(2, "invalid artifact source path: %s", artifactPath)
+		return "", Exit(2, "invalid artifact source path: %s", artifactPath)
 	}
 	if err := rejectSymlinkedArtifactSourcePath(baseAbs, cleanPath); err != nil {
 		return "", err
@@ -366,10 +366,10 @@ func rejectSymlinkedArtifactSourcePath(baseAbs, cleanPath string) error {
 			return nil
 		}
 		if err != nil {
-			return exit(2, "inspect artifact source path %s: %v", current, err)
+			return Exit(2, "inspect artifact source path %s: %v", current, err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return exit(2, "artifact source path uses symlink: %s", cleanPath)
+			return Exit(2, "artifact source path uses symlink: %s", cleanPath)
 		}
 	}
 	return nil
@@ -378,33 +378,33 @@ func rejectSymlinkedArtifactSourcePath(baseAbs, cleanPath string) error {
 func downloadArtifactURL(ctx context.Context, file artifactManifestFile, outPath string) (string, int64, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, file.URL, nil)
 	if err != nil {
-		return "", 0, "", exit(2, "create artifact download request for %s: %v", file.Name, err)
+		return "", 0, "", Exit(2, "create artifact download request for %s: %v", file.Name, err)
 	}
 	resp, err := artifactHTTPClient(req.URL).Do(req)
 	if err != nil {
-		return "", 0, "", exit(2, "download artifact %s: %v", file.Name, artifactRequestError(err))
+		return "", 0, "", Exit(2, "download artifact %s: %v", file.Name, artifactRequestError(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", 0, "", exit(2, "download artifact %s: http %d: %s", file.Name, resp.StatusCode, strings.TrimSpace(string(body)))
+		return "", 0, "", Exit(2, "download artifact %s: http %d: %s", file.Name, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	limit := artifactDownloadLimit(file)
 	if resp.ContentLength > limit {
-		return "", 0, "", exit(2, "artifact %s is too large: content-length %d exceeds limit %d", file.Name, resp.ContentLength, limit)
+		return "", 0, "", Exit(2, "artifact %s is too large: content-length %d exceeds limit %d", file.Name, resp.ContentLength, limit)
 	}
 	dest, err := os.Create(outPath)
 	if err != nil {
-		return "", 0, "", exit(2, "create artifact %s: %v", outPath, err)
+		return "", 0, "", Exit(2, "create artifact %s: %v", outPath, err)
 	}
 	defer dest.Close()
 	hash := sha256.New()
 	written, exceeded, err := copyArtifactResponse(io.MultiWriter(dest, hash), resp.Body, limit)
 	if err != nil {
-		return "", 0, "", exit(2, "write artifact %s: %v", file.Name, err)
+		return "", 0, "", Exit(2, "write artifact %s: %v", file.Name, err)
 	}
 	if exceeded {
-		return "", 0, "", exit(2, "artifact %s is too large: response exceeds limit %d", file.Name, limit)
+		return "", 0, "", Exit(2, "artifact %s is too large: response exceeds limit %d", file.Name, limit)
 	}
 	return resp.Header.Get("content-type"), written, hex.EncodeToString(hash.Sum(nil)), nil
 }
@@ -451,19 +451,19 @@ func copyArtifactResponse(dest io.Writer, body io.Reader, limit int64) (int64, b
 func safeArtifactOutputPath(root, name string) (string, error) {
 	cleanName := filepath.Clean(filepath.FromSlash(strings.TrimLeft(name, "/")))
 	if cleanName == "." || strings.HasPrefix(cleanName, ".."+string(filepath.Separator)) || cleanName == ".." || filepath.IsAbs(cleanName) {
-		return "", exit(2, "invalid artifact output path: %s", name)
+		return "", Exit(2, "invalid artifact output path: %s", name)
 	}
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
-		return "", exit(2, "resolve output directory: %v", err)
+		return "", Exit(2, "resolve output directory: %v", err)
 	}
 	outAbs, err := filepath.Abs(filepath.Join(root, cleanName))
 	if err != nil {
-		return "", exit(2, "resolve artifact output path: %v", err)
+		return "", Exit(2, "resolve artifact output path: %v", err)
 	}
 	rel, err := filepath.Rel(rootAbs, outAbs)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", exit(2, "invalid artifact output path: %s", name)
+		return "", Exit(2, "invalid artifact output path: %s", name)
 	}
 	if err := rejectSymlinkedArtifactOutputParents(root, cleanName); err != nil {
 		return "", err
@@ -474,11 +474,11 @@ func safeArtifactOutputPath(root, name string) (string, error) {
 func rejectSymlinkedArtifactOutputParents(root, name string) error {
 	cleanName := filepath.Clean(filepath.FromSlash(strings.TrimLeft(name, "/")))
 	if cleanName == "." || cleanName == ".." || filepath.IsAbs(cleanName) || strings.HasPrefix(cleanName, ".."+string(filepath.Separator)) {
-		return exit(2, "invalid artifact output path: %s", name)
+		return Exit(2, "invalid artifact output path: %s", name)
 	}
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
-		return exit(2, "resolve output directory: %v", err)
+		return Exit(2, "resolve output directory: %v", err)
 	}
 	current := rootAbs
 	parts := strings.Split(cleanName, string(filepath.Separator))
@@ -489,13 +489,13 @@ func rejectSymlinkedArtifactOutputParents(root, name string) error {
 			return nil
 		}
 		if err != nil {
-			return exit(2, "inspect artifact output parent %s: %v", current, err)
+			return Exit(2, "inspect artifact output parent %s: %v", current, err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return exit(2, "artifact output path uses symlinked parent: %s", name)
+			return Exit(2, "artifact output path uses symlinked parent: %s", name)
 		}
 		if !info.IsDir() {
-			return exit(2, "artifact output parent is not a directory: %s", current)
+			return Exit(2, "artifact output parent is not a directory: %s", current)
 		}
 	}
 	return nil

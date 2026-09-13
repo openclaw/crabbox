@@ -16,7 +16,7 @@ func resolveHistorySource(source string) (string, *CoordinatorClient, error) {
 		return source, nil, nil
 	case "", "coordinator", "all":
 	default:
-		return "", nil, exit(2, "source must be local, coordinator, or all")
+		return "", nil, Exit(2, "source must be local, coordinator, or all")
 	}
 	cfg, err := loadConfig()
 	if err != nil {
@@ -47,7 +47,7 @@ func resolveHistorySource(source string) (string, *CoordinatorClient, error) {
 			return "local", nil, nil
 		}
 	}
-	return "", nil, exit(2, "command requires a configured coordinator (or existing local history)")
+	return "", nil, Exit(2, "command requires a configured coordinator (or existing local history)")
 }
 
 type historyReadRow struct {
@@ -85,14 +85,14 @@ func (a App) finishHistoryRead(e historyReadEnvelope, jsonOut bool) error {
 		}
 	}
 	if len(e.Errors) != 0 {
-		return exit(1, "one or more requested history sources failed")
+		return Exit(1, "one or more requested history sources failed")
 	}
 	return nil
 }
 
 func (a App) historyFromSources(ctx context.Context, source string, coord *CoordinatorClient, filter localHistoryFilter, owner, org string, jsonOut bool, sourceErr error) error {
 	if filter.Limit <= 0 {
-		return exit(2, "limit must be positive")
+		return Exit(2, "limit must be positive")
 	}
 	e := historyReadEnvelope{Records: []historyReadRow{}}
 	if source != "coordinator" {
@@ -300,21 +300,21 @@ func (a App) localHistoryMaintenance(args []string) error {
 		return err
 	}
 	if *source != "local" {
-		return exit(2, "history %s supports only --source local", action)
+		return Exit(2, "history %s supports only --source local", action)
 	}
 	positionals := fs.Args()
 	if id != "" {
 		positionals = append([]string{id}, positionals...)
 	}
 	if len(positionals) > 1 {
-		return exit(2, "history %s accepts at most one run id", action)
+		return Exit(2, "history %s accepts at most one run id", action)
 	}
 	if len(positionals) == 1 {
 		id = positionals[0]
 	}
 	if action == "prune" {
 		if id != "" {
-			return exit(2, "usage: crabbox history prune [--source local]")
+			return Exit(2, "usage: crabbox history prune [--source local]")
 		}
 		n, err := pruneLocalHistory()
 		if err != nil {
@@ -327,7 +327,7 @@ func (a App) localHistoryMaintenance(args []string) error {
 		return nil
 	}
 	if id == "" {
-		return exit(2, "usage: crabbox history delete <run-id> [--source local]")
+		return Exit(2, "usage: crabbox history delete <run-id> [--source local]")
 	}
 	if err := deleteLocalHistory(id); err != nil {
 		return err

@@ -88,7 +88,7 @@ func TestSharedBootstrapFixtures(t *testing.T) {
 			}
 			script := awsUserData(cfg, fixture.PublicKey)
 			if cfg.TargetOS == targetWindows {
-				script = windowsBootstrapPowerShell(cfg, fixture.PublicKey)
+				script = WindowsBootstrapPowerShell(cfg, fixture.PublicKey)
 				if cfg.WindowsMode == windowsModeWSL2 {
 					assertWindowsRuntimeAbsent(t, script)
 				}

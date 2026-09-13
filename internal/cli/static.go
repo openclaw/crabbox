@@ -71,15 +71,15 @@ func applyTargetFlagOverrides(cfg *Config, fs *flag.FlagSet, values targetFlagVa
 
 func staticLease(cfg Config) (Server, SSHTarget, string, error) {
 	if cfg.Static.Host == "" {
-		return Server{}, SSHTarget{}, "", exit(2, "provider=%s requires static.host or CRABBOX_STATIC_HOST", cfg.Provider)
+		return Server{}, SSHTarget{}, "", Exit(2, "provider=%s requires static.host or CRABBOX_STATIC_HOST", cfg.Provider)
 	}
 	leaseID := strings.TrimSpace(cfg.Static.ID)
 	if leaseID == "" {
-		leaseID = "static_" + normalizeLeaseSlug(cfg.Static.Host)
+		leaseID = "static_" + NormalizeLeaseSlug(cfg.Static.Host)
 	}
-	slug := normalizeLeaseSlug(cfg.Static.Name)
+	slug := NormalizeLeaseSlug(cfg.Static.Name)
 	if slug == "" {
-		slug = normalizeLeaseSlug(cfg.Static.Host)
+		slug = NormalizeLeaseSlug(cfg.Static.Host)
 	}
 	name := cfg.Static.Name
 	if name == "" {
@@ -88,7 +88,7 @@ func staticLease(cfg Config) (Server, SSHTarget, string, error) {
 	now := time.Now().UTC()
 	labelCfg := cfg
 	labelCfg.ServerType = staticServerType(cfg)
-	labels := directLeaseLabels(labelCfg, leaseID, slug, staticProvider, "", true, now)
+	labels := DirectLeaseLabels(labelCfg, leaseID, slug, staticProvider, "", true, now)
 	labels["target"] = cfg.TargetOS
 	if cfg.TargetOS == targetWindows {
 		labels["windows_mode"] = cfg.WindowsMode

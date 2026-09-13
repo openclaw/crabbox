@@ -101,7 +101,7 @@ func pondReleaseDelegatedClaim(id string) leaseClaim {
 
 func assertPondReleaseDelegatedClaim(t *testing.T, id string, want leaseClaim, wantExists bool) {
 	t.Helper()
-	got, exists, err := readLeaseClaimWithPresence(id)
+	got, exists, err := ReadLeaseClaimWithPresence(id)
 	if err != nil || exists != wantExists || !reflect.DeepEqual(got, want) {
 		t.Fatalf("claim=%#v exists=%t err=%v; want %#v exists=%t", got, exists, err, want, wantExists)
 	}
@@ -121,7 +121,7 @@ func TestPondReleaseDelegatedPreservesReplacement(t *testing.T) {
 				if req.ID != original.LeaseID {
 					t.Fatalf("stopping %q, want %q", req.ID, original.LeaseID)
 				}
-				if err := removeLeaseClaimIfUnchangedAfter(req.ID, original, func() error {
+				if err := RemoveLeaseClaimIfUnchangedAfter(req.ID, original, func() error {
 					actions++
 					return nil
 				}); err != nil {
@@ -165,10 +165,10 @@ func TestPondReleaseDelegatedOwnsClaimFinalization(t *testing.T) {
 					retained.Labels["state"] = "stopped"
 					retained.SSHHost, retained.SSHPort = "", 0
 					var err error
-					want, err = replaceLeaseClaimIfUnchangedDurableAfter(req.ID, original, retained, func() error { return nil })
+					want, err = ReplaceLeaseClaimIfUnchangedDurableAfter(req.ID, original, retained, func() error { return nil })
 					return err
 				default:
-					return removeLeaseClaimIfUnchangedAfter(req.ID, original, func() error {
+					return RemoveLeaseClaimIfUnchangedAfter(req.ID, original, func() error {
 						if outcome == "failed" {
 							return failure
 						}
@@ -203,7 +203,7 @@ func TestPondReleaseDelegatedContinuesAfterFailure(t *testing.T) {
 	var calls []string
 	app, stderr := setupPondReleaseDelegated(t, func(_ context.Context, req StopRequest) error {
 		calls = append(calls, req.ID)
-		return removeLeaseClaimIfUnchangedAfter(req.ID, claims[req.ID], func() error { return failures[req.ID] })
+		return RemoveLeaseClaimIfUnchangedAfter(req.ID, claims[req.ID], func() error { return failures[req.ID] })
 	})
 	for _, id := range []string{"cbx_1", "cbx_2", "cbx_3", "cbx_other"} {
 		claim := pondReleaseDelegatedClaim(id)

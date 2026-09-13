@@ -274,16 +274,16 @@ func requestedExposedPorts(values []string) ([]string, error) {
 	out := []int{}
 	for _, raw := range values {
 		if strings.TrimSpace(raw) == "" {
-			return nil, exit(2, "--expose value must not be empty")
+			return nil, Exit(2, "--expose value must not be empty")
 		}
 		parts := splitCommaList(raw)
 		if len(parts) == 0 {
-			return nil, exit(2, "--expose value must not be empty")
+			return nil, Exit(2, "--expose value must not be empty")
 		}
 		for _, part := range parts {
 			port, err := strconv.Atoi(strings.TrimSpace(part))
 			if err != nil || port <= 0 || port > pondMaxExposedPort {
-				return nil, exit(2, "--expose %q must be a TCP port in 1..%d", part, pondMaxExposedPort)
+				return nil, Exit(2, "--expose %q must be a TCP port in 1..%d", part, pondMaxExposedPort)
 			}
 			if seen[port] {
 				continue
@@ -293,7 +293,7 @@ func requestedExposedPorts(values []string) ([]string, error) {
 		}
 	}
 	if len(out) > pondMaxExposedPortsPerLease {
-		return nil, exit(2, "--expose accepts at most %d distinct ports per lease", pondMaxExposedPortsPerLease)
+		return nil, Exit(2, "--expose accepts at most %d distinct ports per lease", pondMaxExposedPortsPerLease)
 	}
 	sort.Ints(out)
 	rendered := make([]string, len(out))
@@ -422,14 +422,14 @@ func (a App) pondConnect(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return exit(2, "usage: crabbox pond connect <name>")
+		return Exit(2, "usage: crabbox pond connect <name>")
 	}
 	pond, err := requestedPondName(fs.Arg(0))
 	if err != nil {
 		return err
 	}
 	if pond == "" {
-		return exit(2, "usage: crabbox pond connect <name>")
+		return Exit(2, "usage: crabbox pond connect <name>")
 	}
 	cfg, err := loadConfig()
 	if err != nil {
@@ -466,7 +466,7 @@ func (a App) pondConnect(ctx context.Context, args []string) error {
 	}
 	if *exportOnly {
 		if !pondMeshDaemonSupported(runtime.GOOS) {
-			return exit(2, "pond connect --export is not supported on Windows operator hosts yet; run without --export or from macOS/Linux")
+			return Exit(2, "pond connect --export is not supported on Windows operator hosts yet; run without --export or from macOS/Linux")
 		}
 		// Start daemons before emitting exports so shell evals never see
 		// assignments for tunnels that failed to start.
@@ -496,14 +496,14 @@ func (a App) pondDisconnect(_ context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 {
-		return exit(2, "usage: crabbox pond disconnect <name>")
+		return Exit(2, "usage: crabbox pond disconnect <name>")
 	}
 	pond, err := requestedPondName(fs.Arg(0))
 	if err != nil {
 		return err
 	}
 	if pond == "" {
-		return exit(2, "usage: crabbox pond disconnect <name>")
+		return Exit(2, "usage: crabbox pond disconnect <name>")
 	}
 	stopped, err := stopPondMeshDaemonState(os.Getenv("HOME"), pond)
 	if err != nil {
@@ -528,7 +528,7 @@ func (a App) pondDisconnect(_ context.Context, args []string) error {
 // provider — the caller passes this through from `--provider X` for users
 // who want an explicit single-provider filter.
 func collectPondMembersAcrossProviders(ctx context.Context, rt Runtime, cfg Config, pond, providerFilter string) ([]pondMember, []string, error) {
-	claims, err := listLeaseClaims()
+	claims, err := ListLeaseClaims()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -568,7 +568,7 @@ func collectPondMembersAcrossProviders(ctx context.Context, rt Runtime, cfg Conf
 			ineligible = append(ineligible, p)
 			continue
 		}
-		servers, serr := sshBackend.List(ctx, ListRequest{Options: LeaseOptions{Pond: normalizePondName(pond)}})
+		servers, serr := sshBackend.List(ctx, ListRequest{Options: LeaseOptions{Pond: NormalizePondName(pond)}})
 		if serr != nil {
 			return nil, nil, fmt.Errorf("list %s leases: %w", p, serr)
 		}
@@ -594,7 +594,7 @@ func collectPondMembers(ctx context.Context, backend SSHLeaseBackend, cfg Config
 	out := make([]pondMember, 0, len(servers))
 	for _, server := range servers {
 		resolveID := pondResolveIDForServer(server)
-		name := strings.TrimSpace(serverSlug(server))
+		name := strings.TrimSpace(ServerSlug(server))
 		if name == "" {
 			name = resolveID
 		}
@@ -603,7 +603,7 @@ func collectPondMembers(ctx context.Context, backend SSHLeaseBackend, cfg Config
 			out = append(out, pondMember{Name: name, Ports: ports, Lease: resolveID})
 			continue
 		}
-		expectedClaim, expectedClaimed, err := resolveLeaseClaim(resolveID)
+		expectedClaim, expectedClaimed, err := ResolveLeaseClaim(resolveID)
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s claim: %w", server.Name, err)
 		}
@@ -612,8 +612,8 @@ func collectPondMembers(ctx context.Context, backend SSHLeaseBackend, cfg Config
 			return nil, fmt.Errorf("resolve %s: %w", server.Name, err)
 		}
 		if expectedClaimed && expectedClaim.LeaseID == lease.LeaseID {
-			if _, err := updateLeaseClaimEndpointIfUnchanged(lease.LeaseID, expectedClaim, lease.Server, lease.SSH); err != nil {
-				current, claimed, resolveErr := resolveLeaseClaim(lease.LeaseID)
+			if _, err := UpdateLeaseClaimEndpointIfUnchanged(lease.LeaseID, expectedClaim, lease.Server, lease.SSH); err != nil {
+				current, claimed, resolveErr := ResolveLeaseClaim(lease.LeaseID)
 				if resolveErr != nil {
 					return nil, fmt.Errorf("refresh %s claim endpoint: %w", server.Name, resolveErr)
 				}
@@ -674,11 +674,11 @@ func disambiguatePondMemberNames(members []pondMember) []pondMember {
 }
 
 func duplicatePondMemberName(member pondMember) string {
-	base := normalizePondName(member.Name)
+	base := NormalizePondName(member.Name)
 	if base == "" {
 		base = "peer"
 	}
-	suffix := normalizePondName(member.Provider)
+	suffix := NormalizePondName(member.Provider)
 	if suffix == "" {
 		suffix = shortLeaseID(member.Lease)
 	}
@@ -697,7 +697,7 @@ func duplicatePondMemberNameWithLease(member pondMember) string {
 }
 
 func shortLeaseID(leaseID string) string {
-	leaseID = normalizePondName(leaseID)
+	leaseID = NormalizePondName(leaseID)
 	leaseID = strings.TrimPrefix(leaseID, "cbx-")
 	leaseID = strings.TrimPrefix(leaseID, "isb-")
 	if len(leaseID) > 6 {
@@ -766,7 +766,7 @@ func allocateLocalForwardPort(used map[int]bool) (int, error) {
 		_ = listener.Close()
 		return port, nil
 	}
-	return 0, exit(7, "no free loopback ports between %d and %d for SSH-mesh forwards", pondMeshLocalPortStart, pondMeshLocalPortEnd)
+	return 0, Exit(7, "no free loopback ports between %d and %d for SSH-mesh forwards", pondMeshLocalPortStart, pondMeshLocalPortEnd)
 }
 
 // pondMeshHostsAndEnvPaths returns the absolute paths to the per-pond state
@@ -782,7 +782,7 @@ func pondMeshHostsAndEnvPaths(home, pond string) (string, string, error) {
 
 func pondMeshStateDir(home, pond string) (string, error) {
 	if home == "" {
-		return "", exit(2, "HOME is unset; cannot write pond SSH-mesh state files")
+		return "", Exit(2, "HOME is unset; cannot write pond SSH-mesh state files")
 	}
 	return filepath.Join(home, pondMeshHostsRoot, pond), nil
 }
@@ -936,11 +936,11 @@ func stopPondMeshDaemonState(home, pond string) (int, error) {
 		return 0, err
 	}
 	if !pondMeshDaemonSupported(runtime.GOOS) {
-		return 0, exit(2, "pond disconnect is not supported on Windows operator hosts because exported SSH-mesh daemons are disabled")
+		return 0, Exit(2, "pond disconnect is not supported on Windows operator hosts because exported SSH-mesh daemons are disabled")
 	}
 	var state pondMeshDaemonState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return 0, exit(2, "parse pond daemon state %s: %v", path, err)
+		return 0, Exit(2, "parse pond daemon state %s: %v", path, err)
 	}
 	stopped := 0
 	for _, entry := range pondMeshDaemonProcesses(state) {
@@ -1029,7 +1029,7 @@ func pondResolveIDForServer(server Server) string {
 	if server.ID != 0 {
 		return strconv.FormatInt(server.ID, 10)
 	}
-	return serverSlug(server)
+	return ServerSlug(server)
 }
 
 type pondMeshForwardGroup struct {
@@ -1044,7 +1044,7 @@ func pondMeshForwardGroups(members []pondMember, forwards []pondMeshForward) ([]
 	for _, fwd := range forwards {
 		target, ok := peerTarget[fwd.LeaseID]
 		if !ok {
-			return nil, exit(7, "no SSH target resolved for pond peer %q", fwd.Peer)
+			return nil, Exit(7, "no SSH target resolved for pond peer %q", fwd.Peer)
 		}
 		index, ok := groupIndex[fwd.LeaseID]
 		if !ok {

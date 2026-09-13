@@ -116,7 +116,7 @@ func (a App) runKong(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		var parseErr *kong.ParseError
 		if errors.As(err, &parseErr) {
-			return exit(2, "%v", parseErr)
+			return Exit(2, "%v", parseErr)
 		}
 		return err
 	}
@@ -906,7 +906,7 @@ func (c *checkpointPruneKongCmd) Run(ctx context.Context, app App) error {
 func (c *configPathKongCmd) Run(ctx context.Context, app App) error {
 	path := writableConfigPath()
 	if path == "" {
-		return exit(2, "user config directory is unavailable")
+		return Exit(2, "user config directory is unavailable")
 	}
 	fmt.Fprintln(app.Stdout, path)
 	return nil

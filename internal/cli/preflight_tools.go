@@ -83,7 +83,7 @@ func (a App) preflightTools(args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return exit(2, "usage: crabbox preflight-tools [--json]")
+		return Exit(2, "usage: crabbox preflight-tools [--json]")
 	}
 	catalog := preflightCatalog()
 	if *jsonOut {

@@ -37,11 +37,11 @@ func (a App) heartbeat(ctx context.Context, args []string) error {
 	}
 	setIDFromFirstArg(fs, id)
 	if strings.TrimSpace(*id) == "" || idOccurrences > 1 || fs.NArg() > 1 || (idOccurrences == 1 && fs.NArg() > 0) {
-		return exit(2, "usage: crabbox heartbeat --id <lease-id-or-slug> [--provider <provider>] [--idle-timeout <duration>] [--json]")
+		return Exit(2, "usage: crabbox heartbeat --id <lease-id-or-slug> [--provider <provider>] [--idle-timeout <duration>] [--json]")
 	}
 	idleTimeoutSet := flagWasSet(fs, "idle-timeout")
 	if idleTimeoutSet && *idleTimeout <= 0 {
-		return exit(2, "idle timeout must be positive")
+		return Exit(2, "idle timeout must be positive")
 	}
 
 	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlagValues{}, networkModeFlagValues{}, leaseTargetConfigOptions{LeaseID: *id})
@@ -76,14 +76,14 @@ func (a App) heartbeat(ctx context.Context, args []string) error {
 			return err
 		}
 		if !configured {
-			return exit(2, "provider=%s does not support lease heartbeat", backend.Spec().Name)
+			return Exit(2, "provider=%s does not support lease heartbeat", backend.Spec().Name)
 		}
 		registeredCoord = coord
 	}
 
 	sshBackend, ok := backend.(SSHLeaseBackend)
 	if !ok {
-		return exit(2, "provider=%s does not support lease heartbeat", backend.Spec().Name)
+		return Exit(2, "provider=%s does not support lease heartbeat", backend.Spec().Name)
 	}
 	lease, err := sshBackend.Resolve(ctx, ResolveRequest{
 		Options:               leaseOptionsFromConfig(cfg),
@@ -96,14 +96,14 @@ func (a App) heartbeat(ctx context.Context, args []string) error {
 	}
 	state := blank(lease.Server.Labels["state"], lease.Server.Status)
 	if statusTerminalState(state) {
-		return exit(5, "lease %s is in terminal state %s", *id, state)
+		return Exit(5, "lease %s is in terminal state %s", *id, state)
 	}
 	claim, claimed, err := statusLeaseExactClaim(ctx, backend, lease, backend.Spec().Name, leaseOptionsFromConfig(cfg).ProviderScope)
 	if err != nil {
 		return err
 	}
 	if !claimed {
-		return exit(4, "lease %s is not claimed for provider=%s; refusing heartbeat", *id, backend.Spec().Name)
+		return Exit(4, "lease %s is not claimed for provider=%s; refusing heartbeat", *id, backend.Spec().Name)
 	}
 	SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
 
@@ -117,7 +117,7 @@ func (a App) heartbeat(ctx context.Context, args []string) error {
 			var supportsTouch bool
 			sshBackend, supportsTouch = backend.(SSHLeaseBackend)
 			if !supportsTouch {
-				return exit(2, "provider=%s does not support lease heartbeat", backend.Spec().Name)
+				return Exit(2, "provider=%s does not support lease heartbeat", backend.Spec().Name)
 			}
 		}
 	}
@@ -132,7 +132,7 @@ func (a App) heartbeat(ctx context.Context, args []string) error {
 			return err
 		}
 		if coordinatorLease.ID != canonicalLeaseID {
-			return exit(4, "coordinator returned mismatched lease id: expected %s, found %s", canonicalLeaseID, blank(coordinatorLease.ID, "<empty>"))
+			return Exit(4, "coordinator returned mismatched lease id: expected %s, found %s", canonicalLeaseID, blank(coordinatorLease.ID, "<empty>"))
 		}
 		registeredLease = &coordinatorLease
 	}
@@ -173,12 +173,12 @@ func heartbeatViewFromCoordinatorLease(lease CoordinatorLease) leaseHeartbeatVie
 func heartbeatViewFromServer(leaseID string, server Server) leaseHeartbeatView {
 	return leaseHeartbeatView{
 		ID:            leaseID,
-		Slug:          serverSlug(server),
+		Slug:          ServerSlug(server),
 		Provider:      server.Provider,
 		State:         blank(server.Labels["state"], server.Status),
-		LastTouchedAt: blank(leaseLabelTimeDisplay(server.Labels["last_touched_at"]), server.Labels["last_touched_at"]),
-		IdleTimeout:   leaseLabelDurationDisplay(server.Labels["idle_timeout_secs"], server.Labels["idle_timeout"]),
-		ExpiresAt:     blank(leaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"]),
+		LastTouchedAt: blank(LeaseLabelTimeDisplay(server.Labels["last_touched_at"]), server.Labels["last_touched_at"]),
+		IdleTimeout:   LeaseLabelDurationDisplay(server.Labels["idle_timeout_secs"], server.Labels["idle_timeout"]),
+		ExpiresAt:     blank(LeaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"]),
 	}
 }
 

@@ -11,12 +11,12 @@ import (
 )
 
 func TestNewLeaseSlugDeterministic(t *testing.T) {
-	first := newLeaseSlug("cbx_000000000001")
-	second := newLeaseSlug("cbx_000000000001")
+	first := NewLeaseSlug("cbx_000000000001")
+	second := NewLeaseSlug("cbx_000000000001")
 	if first != second {
 		t.Fatalf("newLeaseSlug not deterministic: %q != %q", first, second)
 	}
-	if first == newLeaseSlug("cbx_000000000002") {
+	if first == NewLeaseSlug("cbx_000000000002") {
 		t.Fatalf("different IDs should usually spread across slugs: %q", first)
 	}
 }
@@ -28,37 +28,37 @@ func TestLeaseSlugGoldenFixtures(t *testing.T) {
 		"cbx_deadbeefcafe": "silver-crab",
 	}
 	for leaseID, want := range tests {
-		if got := newLeaseSlug(leaseID); got != want {
+		if got := NewLeaseSlug(leaseID); got != want {
 			t.Fatalf("newLeaseSlug(%q)=%q want %q", leaseID, got, want)
 		}
 	}
 }
 
 func TestLeaseSlugFormat(t *testing.T) {
-	slug := newLeaseSlug("cbx_abcdef123456")
+	slug := NewLeaseSlug("cbx_abcdef123456")
 	if !regexp.MustCompile(`^[a-z0-9]+-[a-z0-9]+$`).MatchString(slug) {
 		t.Fatalf("slug %q is not DNS-ish two-word form", slug)
 	}
-	if len(leaseProviderName("cbx_abcdef123456", slug)) > 63 {
+	if len(LeaseProviderName("cbx_abcdef123456", slug)) > 63 {
 		t.Fatalf("provider name too long for slug %q", slug)
 	}
 }
 
 func TestSlugWithCollisionSuffix(t *testing.T) {
-	got := slugWithCollisionSuffix("Blue Lobster", "cbx_abcdef123456")
+	got := SlugWithCollisionSuffix("Blue Lobster", "cbx_abcdef123456")
 	if !strings.HasPrefix(got, "blue-lobster-") || len(got) != len("blue-lobster-0000") {
 		t.Fatalf("unexpected collision slug %q", got)
 	}
-	got = slugWithCollisionSuffix("", "cbx_abcdef123456")
-	if !strings.HasPrefix(got, newLeaseSlug("cbx_abcdef123456")+"-") {
+	got = SlugWithCollisionSuffix("", "cbx_abcdef123456")
+	if !strings.HasPrefix(got, NewLeaseSlug("cbx_abcdef123456")+"-") {
 		t.Fatalf("empty collision base did not fall back to generated slug: %q", got)
 	}
 }
 
 func TestAllocateDirectLeaseSlugAddsSuffixOnCollision(t *testing.T) {
 	leaseID := "cbx_000000000001"
-	base := newLeaseSlug(leaseID)
-	got, err := allocateDirectLeaseSlug(leaseID, "", []Server{
+	base := NewLeaseSlug(leaseID)
+	got, err := AllocateDirectLeaseSlug(leaseID, "", []Server{
 		{Labels: map[string]string{"lease": "cbx_000000000000", "slug": base}},
 	})
 	if err != nil {
@@ -89,14 +89,14 @@ func TestRequestedLeaseSlugNormalizesAndValidates(t *testing.T) {
 }
 
 func TestAllocateDirectLeaseSlugUsesRequestedSlug(t *testing.T) {
-	got, err := allocateDirectLeaseSlug("cbx_000000000001", "Update Flow Smoke", nil)
+	got, err := AllocateDirectLeaseSlug("cbx_000000000001", "Update Flow Smoke", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != "update-flow-smoke" {
 		t.Fatalf("slug=%q", got)
 	}
-	got, err = allocateDirectLeaseSlug("cbx_000000000001", "Update Flow Smoke", []Server{
+	got, err = AllocateDirectLeaseSlug("cbx_000000000001", "Update Flow Smoke", []Server{
 		{Labels: map[string]string{"lease": "cbx_000000000000", "slug": "update-flow-smoke"}},
 	})
 	if err != nil {
@@ -109,10 +109,10 @@ func TestAllocateDirectLeaseSlugUsesRequestedSlug(t *testing.T) {
 
 func TestAllocateDirectLeaseSlugAvoidsLocalClaimCollisionForRequestedSlug(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if err := claimLeaseForRepoProvider("cbx_000000000000", "update-flow-smoke", "cloudflare", "/repo-a", time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProvider("cbx_000000000000", "update-flow-smoke", "cloudflare", "/repo-a", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	got, err := allocateDirectLeaseSlug("cbx_000000000001", "Update Flow Smoke", nil)
+	got, err := AllocateDirectLeaseSlug("cbx_000000000001", "Update Flow Smoke", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,11 +127,11 @@ func TestAllocateDirectLeaseSlugAvoidsLocalClaimCollisionForRequestedSlug(t *tes
 func TestAllocateDirectLeaseSlugAvoidsLocalClaimCollisionForGeneratedSlug(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_000000000001"
-	base := newLeaseSlug(leaseID)
-	if err := claimLeaseForRepoProvider("cbx_000000000000", base, "digitalocean", "/repo-a", time.Minute, false); err != nil {
+	base := NewLeaseSlug(leaseID)
+	if err := ClaimLeaseForRepoProvider("cbx_000000000000", base, "digitalocean", "/repo-a", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	got, err := allocateDirectLeaseSlug(leaseID, "", nil)
+	got, err := AllocateDirectLeaseSlug(leaseID, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,21 +156,21 @@ func TestAllocateDirectLeaseSlugGeneratedIgnoresCorruptUnrelatedClaim(t *testing
 		t.Fatal(err)
 	}
 	leaseID := "cbx_000000000001"
-	got, err := allocateDirectLeaseSlug(leaseID, "", nil)
+	got, err := AllocateDirectLeaseSlug(leaseID, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != newLeaseSlug(leaseID) {
+	if got != NewLeaseSlug(leaseID) {
 		t.Fatalf("slug=%q", got)
 	}
 }
 
 func TestAllocateClaimLeaseSlugAvoidsLocalClaimCollision(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if err := claimLeaseForRepoProvider("cbx_000000000000", "update-flow-smoke", "cloudflare", "/repo-a", time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProvider("cbx_000000000000", "update-flow-smoke", "cloudflare", "/repo-a", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	got, err := allocateClaimLeaseSlug("cbx_000000000001", "Update Flow Smoke")
+	got, err := AllocateClaimLeaseSlug("cbx_000000000001", "Update Flow Smoke")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,11 +194,11 @@ func TestAllocateClaimLeaseSlugGeneratedIgnoresCorruptUnrelatedClaim(t *testing.
 	if err := os.WriteFile(path, []byte(`{`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := allocateClaimLeaseSlug("cbx_000000000001", "")
+	got, err := AllocateClaimLeaseSlug("cbx_000000000001", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != newLeaseSlug("cbx_000000000001") {
+	if got != NewLeaseSlug("cbx_000000000001") {
 		t.Fatalf("slug=%q", got)
 	}
 }
@@ -210,7 +210,7 @@ func TestAllocateClaimLeaseSlugAvoidsGeneratedCollision(t *testing.T) {
 	seen := map[string]string{}
 	for i := 0; i < 1000; i++ {
 		leaseID := fmt.Sprintf("cbx_%012x", i)
-		slug := newLeaseSlug(leaseID)
+		slug := NewLeaseSlug(leaseID)
 		if prior := seen[slug]; prior != "" {
 			firstID = prior
 			secondID = leaseID
@@ -221,11 +221,11 @@ func TestAllocateClaimLeaseSlugAvoidsGeneratedCollision(t *testing.T) {
 	if firstID == "" {
 		t.Fatal("could not find deterministic generated slug collision")
 	}
-	base := newLeaseSlug(firstID)
-	if err := claimLeaseForRepoProvider(firstID, base, "cloudflare", "/repo-a", time.Minute, false); err != nil {
+	base := NewLeaseSlug(firstID)
+	if err := ClaimLeaseForRepoProvider(firstID, base, "cloudflare", "/repo-a", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	got, err := allocateClaimLeaseSlug(secondID, "")
+	got, err := AllocateClaimLeaseSlug(secondID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,16 +240,16 @@ func TestAllocateClaimLeaseSlugRejectsOccupiedFallback(t *testing.T) {
 	base := "exhausted"
 	candidates := []string{base}
 	for attempt := 0; attempt < 19; attempt++ {
-		candidates = append(candidates, slugWithCollisionSuffix(base, fmt.Sprintf("%s-%d", leaseID, attempt)))
+		candidates = append(candidates, SlugWithCollisionSuffix(base, fmt.Sprintf("%s-%d", leaseID, attempt)))
 	}
-	candidates = append(candidates, slugWithCollisionSuffix(base, leaseID))
+	candidates = append(candidates, SlugWithCollisionSuffix(base, leaseID))
 	for i, slug := range candidates {
 		owner := fmt.Sprintf("cbx_%012x", i+1)
-		if err := claimLeaseForRepoProvider(owner, slug, "cloudflare", fmt.Sprintf("/repo-%d", i), time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider(owner, slug, "cloudflare", fmt.Sprintf("/repo-%d", i), time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if got, err := allocateClaimLeaseSlug(leaseID, base); err == nil {
+	if got, err := AllocateClaimLeaseSlug(leaseID, base); err == nil {
 		t.Fatalf("slug=%q want exhaustion error", got)
 	}
 }
@@ -260,9 +260,9 @@ func TestAllocateDirectLeaseSlugRejectsOccupiedFallback(t *testing.T) {
 	base := "exhausted-direct"
 	candidates := []string{base}
 	for attempt := 0; attempt < 19; attempt++ {
-		candidates = append(candidates, slugWithCollisionSuffix(base, fmt.Sprintf("%s-%d", leaseID, attempt)))
+		candidates = append(candidates, SlugWithCollisionSuffix(base, fmt.Sprintf("%s-%d", leaseID, attempt)))
 	}
-	candidates = append(candidates, slugWithCollisionSuffix(base, leaseID))
+	candidates = append(candidates, SlugWithCollisionSuffix(base, leaseID))
 	servers := make([]Server, 0, len(candidates))
 	for i, slug := range candidates {
 		servers = append(servers, Server{Labels: map[string]string{
@@ -270,16 +270,16 @@ func TestAllocateDirectLeaseSlugRejectsOccupiedFallback(t *testing.T) {
 			"slug":  slug,
 		}})
 	}
-	if got, err := allocateDirectLeaseSlug(leaseID, base, servers); err == nil {
+	if got, err := AllocateDirectLeaseSlug(leaseID, base, servers); err == nil {
 		t.Fatalf("slug=%q want exhaustion error", got)
 	}
 }
 
 func TestLeaseProviderNameUsesSlug(t *testing.T) {
-	if got := leaseProviderName("cbx_abcdef123456", "blue-lobster"); got != "crabbox-blue-lobster-c80c2195" {
+	if got := LeaseProviderName("cbx_abcdef123456", "blue-lobster"); got != "crabbox-blue-lobster-c80c2195" {
 		t.Fatalf("provider name=%q", got)
 	}
-	if got := leaseProviderName("cbx_abcdef123456", ""); got != "crabbox-cbx-abcdef123456" {
+	if got := LeaseProviderName("cbx_abcdef123456", ""); got != "crabbox-cbx-abcdef123456" {
 		t.Fatalf("fallback provider name=%q", got)
 	}
 }
@@ -351,7 +351,7 @@ func TestFindServerByAliasAmbiguousSlugFails(t *testing.T) {
 }
 
 func TestServerSlugHandlesMissingLabels(t *testing.T) {
-	if got := serverSlug(Server{}); got != "" {
+	if got := ServerSlug(Server{}); got != "" {
 		t.Fatalf("serverSlug without labels=%q", got)
 	}
 }

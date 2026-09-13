@@ -14,7 +14,7 @@ var errRunClaimAdmissionUnavailable = errors.New("run claim admission unavailabl
 // cannot invalidate its own command admission halfway through that flow.
 func admitRunLeaseUnderClaim(ctx context.Context, backend SSHLoginBackend, req ResolveRequest, cfg *Config, admit func(*LeaseTarget) error) (LeaseTarget, bool, error) {
 	resolver, ok := backend.(RunLeaseClaimResolver)
-	if !ok || req.Reclaim || !isCanonicalLeaseID(req.ID) {
+	if !ok || req.Reclaim || !IsCanonicalLeaseID(req.ID) {
 		return LeaseTarget{}, false, nil
 	}
 	var original leaseClaim
@@ -27,9 +27,9 @@ func admitRunLeaseUnderClaim(ctx context.Context, backend SSHLoginBackend, req R
 				return errRunClaimAdmissionUnavailable
 			}
 			if canonicalClaimProvider(current.Provider) != canonicalClaimProvider(backend.Spec().Name) || (req.Options.ProviderScope != "" && current.ProviderScope != req.Options.ProviderScope) {
-				return exit(2, "lease %s does not match the requested provider scope", req.ID)
+				return Exit(2, "lease %s does not match the requested provider scope", req.ID)
 			}
-			if err := checkLeaseClaimRepositoryOwner(req.ID, current, req.Repo.Root, false); err != nil {
+			if err := CheckLeaseClaimRepositoryOwner(req.ID, current, req.Repo.Root, false); err != nil {
 				return err
 			}
 			original = cloneLeaseClaim(current)
@@ -42,7 +42,7 @@ func admitRunLeaseUnderClaim(ctx context.Context, backend SSHLoginBackend, req R
 				return claimActionContinue, err
 			}
 			if lease.LeaseID != original.LeaseID || lease.Server.CloudID != original.CloudID || canonicalClaimProvider(lease.Server.Provider) != canonicalClaimProvider(original.Provider) {
-				return claimActionContinue, exit(2, "lease %s resolved outside its original claim", req.ID)
+				return claimActionContinue, Exit(2, "lease %s resolved outside its original claim", req.ID)
 			}
 			if err := ctx.Err(); err != nil {
 				return claimActionContinue, err
@@ -55,7 +55,7 @@ func admitRunLeaseUnderClaim(ctx context.Context, backend SSHLoginBackend, req R
 				return err
 			}
 			provider, details := claimProviderDetailsForConfig(*cfg)
-			return transformLeaseClaimForRepo(current, req.ID, serverSlug(lease.Server), provider, providerClaimScope(provider, *cfg), cfg.Pond, details, req.Repo.Root, cfg.IdleTimeout, false, claimMetadata{
+			return transformLeaseClaimForRepo(current, req.ID, ServerSlug(lease.Server), provider, providerClaimScope(provider, *cfg), cfg.Pond, details, req.Repo.Root, cfg.IdleTimeout, false, claimMetadata{
 				setCacheVolumes: true,
 				cacheVolumes:    CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
 				setEndpoint:     true,

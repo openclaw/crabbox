@@ -24,7 +24,7 @@ func (a App) results(ctx context.Context, args []string) error {
 		*runID = fs.Arg(0)
 	}
 	if *runID == "" {
-		return exit(2, "usage: crabbox results <run-id>")
+		return Exit(2, "usage: crabbox results <run-id>")
 	}
 	if jsonAnywhere {
 		*jsonOut = true

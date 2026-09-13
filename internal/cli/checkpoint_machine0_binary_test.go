@@ -225,7 +225,7 @@ esac
 					}
 					write(inventoryPath, inventory+"\n", 0o600)
 					write(detailPath, string(response)+"\n", 0o600)
-					_, err := store.Create(record)
+					_, _, err := store.Reserve(record)
 					if err != nil {
 						t.Fatal(err)
 					}

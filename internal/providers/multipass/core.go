@@ -1,11 +1,6 @@
 package multipass
 
 import (
-	"context"
-
-	"io"
-	"time"
-
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
@@ -15,26 +10,14 @@ const (
 	sshPort      = "22"
 )
 
-var claimLeaseForRepoProviderScopePond = func(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
-}
+var claimLeaseForRepoProviderScopePond = core.ClaimLeaseForRepoProviderScopePond
 
-var claimLeaseForRepoProviderScopePondEndpoint = func(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server core.Server, target core.SSHTarget) error {
-	return core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, server, target)
-}
+var claimLeaseForRepoProviderScopePondEndpoint = core.ClaimLeaseForRepoProviderScopePondEndpoint
 
-var removeLeaseClaim = func(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
-}
+var removeLeaseClaim = core.RemoveLeaseClaim
 
-var updateLeaseClaimEndpoint = func(leaseID string, server core.Server, target core.SSHTarget) error {
-	return core.UpdateLeaseClaimEndpoint(leaseID, server, target)
-}
+var updateLeaseClaimEndpoint = core.UpdateLeaseClaimEndpoint
 
-var updateLeaseClaimCacheVolumes = func(leaseID string, specs []string) error {
-	return core.UpdateLeaseClaimCacheVolumes(leaseID, specs)
-}
+var updateLeaseClaimCacheVolumes = core.UpdateLeaseClaimCacheVolumes
 
-var waitForSSHReady = func(ctx context.Context, target *core.SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
-	return core.WaitForSSHReady(ctx, target, stderr, phase, timeout)
-}
+var waitForSSHReady = core.WaitForSSHReady

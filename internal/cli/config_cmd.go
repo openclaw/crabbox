@@ -20,7 +20,7 @@ func (a App) configShow(args []string) error {
 		return err
 	}
 	if *controllerIdentityOut && !*jsonOut {
-		return exit(2, "--controller-provider-identity requires --json")
+		return Exit(2, "--controller-provider-identity requires --json")
 	}
 	cfg, err := loadConfigWithOverrides("", strings.TrimSpace(*providerOverride))
 	if err != nil {
@@ -889,14 +889,14 @@ func (a App) configSetBroker(args []string) error {
 		return err
 	}
 	if *url == "" {
-		return exit(2, "config set-broker requires --url")
+		return Exit(2, "config set-broker requires --url")
 	}
 	if *mode != "" && *mode != string(BrokerModeManaged) && *mode != string(BrokerModeRegistered) {
-		return exit(2, "--mode must be managed or registered")
+		return Exit(2, "--mode must be managed or registered")
 	}
 	path := writableConfigPath()
 	if path == "" {
-		return exit(2, "user config directory is unavailable")
+		return Exit(2, "user config directory is unavailable")
 	}
 	file, err := readFileConfig(path)
 	if err != nil {
@@ -922,22 +922,22 @@ func (a App) configSetBroker(args []string) error {
 	if *tokenStdin {
 		data, err := io.ReadAll(os.Stdin)
 		if err != nil {
-			return exit(2, "read broker token: %v", err)
+			return Exit(2, "read broker token: %v", err)
 		}
 		token = strings.TrimSpace(string(data))
 		if token == "" {
-			return exit(2, "broker token from stdin is empty")
+			return Exit(2, "broker token from stdin is empty")
 		}
 	}
 	var adminToken string
 	if *adminTokenStdin {
 		data, err := io.ReadAll(os.Stdin)
 		if err != nil {
-			return exit(2, "read broker admin token: %v", err)
+			return Exit(2, "read broker admin token: %v", err)
 		}
 		adminToken = strings.TrimSpace(string(data))
 		if adminToken == "" {
-			return exit(2, "broker admin token from stdin is empty")
+			return Exit(2, "broker admin token from stdin is empty")
 		}
 	}
 	file.Broker.URL = *url
@@ -979,7 +979,7 @@ func validateBrokerProvider(provider string) (string, error) {
 	}
 	spec := resolved.Spec()
 	if spec.Coordinator != CoordinatorSupported {
-		return "", exit(2, "provider %q cannot be used with a broker; supported broker providers are aws, azure, daytona, gcp, and hetzner", provider)
+		return "", Exit(2, "provider %q cannot be used with a broker; supported broker providers are aws, azure, daytona, gcp, and hetzner", provider)
 	}
 	return resolved.Name(), nil
 }

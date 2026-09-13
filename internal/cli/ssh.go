@@ -315,7 +315,7 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 			if lastPorts != "" {
 				ports = " ports=" + lastPorts
 			}
-			return exit(5, "timed out waiting for SSH on %s during %s probe=%s cause=deadline_exceeded authentication=unknown%s; %s", target.Host, phase, lastProbe, ports, sshWaitNextAction(phase))
+			return Exit(5, "timed out waiting for SSH on %s during %s probe=%s cause=deadline_exceeded authentication=unknown%s; %s", target.Host, phase, lastProbe, ports, sshWaitNextAction(phase))
 		}
 		return nil
 	}
@@ -464,7 +464,7 @@ func sshWaitProgressMessage(target *SSHTarget, phase, reachablePort, transportPo
 	return fmt.Sprintf("waiting for %s:%s %s... elapsed=%s remaining=%s%s", target.Host, target.Port, phase, elapsed, remaining, suffix)
 }
 
-func probeSSHReady(ctx context.Context, target *SSHTarget, timeout time.Duration) bool {
+func ProbeSSHReady(ctx context.Context, target *SSHTarget, timeout time.Duration) bool {
 	if target.Host == "" {
 		return false
 	}
@@ -659,7 +659,7 @@ func sshReadyCommand(target SSHTarget) string {
 		return target.ReadyCheck
 	}
 	if isWindowsNativeTarget(target) {
-		return powershellCommand(windowsPowerShellPathRefresh + `$ErrorActionPreference = "Stop"
+		return PowershellCommand(windowsPowerShellPathRefresh + `$ErrorActionPreference = "Stop"
 git --version | Out-Null
 tar --version | Out-Null
 node --version | Out-Null
@@ -675,7 +675,7 @@ if (-not (Test-Path -LiteralPath ` + psQuote(targetWindowsReadyRoot(target)) + `
 }
 
 func wsl2ReadinessCommand(remote string) string {
-	return powershellCommand(`$c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('` + base64.StdEncoding.EncodeToString([]byte(remote)) + `'))
+	return PowershellCommand(`$c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('` + base64.StdEncoding.EncodeToString([]byte(remote)) + `'))
 & wsl.exe --exec sh -lc $c
 exit $LASTEXITCODE`)
 }
@@ -1182,7 +1182,7 @@ func runIdempotentSSHGitOriginAttempt(ctx context.Context, target SSHTarget, rem
 
 func isSSHCommandExitError(err error) bool {
 	var exitErr *exec.ExitError
-	return asExitError(err, &exitErr)
+	return errors.As(err, &exitErr)
 }
 
 func sshArgs(target SSHTarget, remote string) []string {
@@ -1428,10 +1428,10 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 	if owner != nil && !isWindowsNativeTarget(target) {
 		rawCtx := contextWithoutWorkspaceOwner(ctx)
 		if err := runSSHQuiet(rawCtx, target, owner.rsyncPrepareCommand()); err != nil {
-			return exit(7, "prepare rsync workspace witness: %v", err)
+			return Exit(7, "prepare rsync workspace witness: %v", err)
 		}
 		if _, err := runWorkspaceOwnerBackgroundOutput(rawCtx, target, owner, owner.rsyncGuardPayload(dst)); err != nil {
-			return exit(7, "start rsync workspace witness: %v", err)
+			return Exit(7, "start rsync workspace witness: %v", err)
 		}
 		if err := owner.WaitForChild(rawCtx, owner.callTimeout()); err != nil {
 			return err
@@ -1463,11 +1463,11 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 			guardErr = cleanupErr
 		}
 		if guardErr != nil && err == nil {
-			err = exit(7, "finish rsync workspace witness: %v", guardErr)
+			err = Exit(7, "finish rsync workspace witness: %v", guardErr)
 		}
 	}
 	if ctx.Err() == context.DeadlineExceeded {
-		return exit(6, "rsync timed out after %s; next_action=retry with --full-resync, then use a fresh lease if sync still stalls", opts.Timeout)
+		return Exit(6, "rsync timed out after %s; next_action=retry with --full-resync, then use a fresh lease if sync still stalls", opts.Timeout)
 	}
 	if opts.Debug {
 		fmt.Fprintf(stderr, "rsync elapsed=%s checksum=%t delete=%t\n", time.Since(start).Round(time.Millisecond), opts.Checksum, opts.Delete)
@@ -1480,7 +1480,7 @@ func wrapRemoteForTarget(target SSHTarget, remote string) string {
 		if strings.HasPrefix(remote, "powershell.exe ") || strings.HasPrefix(remote, "powershell ") {
 			return remote
 		}
-		return powershellCommand(remote)
+		return PowershellCommand(remote)
 	}
 	if isWindowsWSL2Target(target) {
 		return wsl2Command(remote)
@@ -1490,7 +1490,7 @@ func wrapRemoteForTarget(target SSHTarget, remote string) string {
 
 func wsl2Command(remote string) string {
 	encoded := base64.StdEncoding.EncodeToString([]byte(remote))
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $dir = "C:\ProgramData\crabbox\commands"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -1584,7 +1584,7 @@ func windowsNativeRsyncCommandSpec(args []string) (string, []string, error) {
 func resolveWindowsNativeRsyncPair(lookPath func(string) (string, error), stat func(string) (os.FileInfo, error)) (string, string, error) {
 	rsyncPath, err := lookPath("rsync.exe")
 	if err != nil {
-		return "", "", exit(2, "native Windows transfers require rsync.exe on PATH with a sibling ssh.exe in the same directory; install MSYS2 rsync and OpenSSH together, or use the supported WSL2 transport")
+		return "", "", Exit(2, "native Windows transfers require rsync.exe on PATH with a sibling ssh.exe in the same directory; install MSYS2 rsync and OpenSSH together, or use the supported WSL2 transport")
 	}
 	if absolute, absoluteErr := filepath.Abs(rsyncPath); absoluteErr == nil {
 		rsyncPath = absolute
@@ -1592,7 +1592,7 @@ func resolveWindowsNativeRsyncPair(lookPath func(string) (string, error), stat f
 	sshPath := filepath.Join(filepath.Dir(rsyncPath), "ssh.exe")
 	info, err := stat(sshPath)
 	if err != nil || !info.Mode().IsRegular() {
-		return "", "", exit(2, "native Windows rsync requires its matching sibling OpenSSH at %s next to %s; install MSYS2 rsync and OpenSSH together, or use the supported WSL2 transport", sshPath, rsyncPath)
+		return "", "", Exit(2, "native Windows rsync requires its matching sibling OpenSSH at %s next to %s; install MSYS2 rsync and OpenSSH together, or use the supported WSL2 transport", sshPath, rsyncPath)
 	}
 	return rsyncPath, sshPath, nil
 }
@@ -1604,17 +1604,17 @@ func bindWindowsNativeRsyncSSH(args []string, sshPath string) ([]string, error) 
 			continue
 		}
 		if index+1 >= len(paired) {
-			return nil, exit(2, "native Windows rsync command is missing its owned -e remote shell value")
+			return nil, Exit(2, "native Windows rsync command is missing its owned -e remote shell value")
 		}
 		const ownedSSH = "'ssh'"
 		remoteShell := paired[index+1]
 		if !strings.HasPrefix(remoteShell, ownedSSH) || len(remoteShell) > len(ownedSSH) && remoteShell[len(ownedSSH)] != ' ' {
-			return nil, exit(2, "native Windows rsync command has an unsupported -e remote shell; Crabbox must own the OpenSSH pairing")
+			return nil, Exit(2, "native Windows rsync command has an unsupported -e remote shell; Crabbox must own the OpenSSH pairing")
 		}
 		paired[index+1] = rsyncShellWords([]string{sshPath})[0] + remoteShell[len(ownedSSH):]
 		return paired, nil
 	}
-	return nil, exit(2, "native Windows rsync command is missing its owned -e remote shell")
+	return nil, Exit(2, "native Windows rsync command is missing its owned -e remote shell")
 }
 
 func applyWindowsNativeRsyncEnvironment(cmd *exec.Cmd) {
@@ -1763,7 +1763,7 @@ func psQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-func powershellCommand(script string) string {
+func PowershellCommand(script string) string {
 	script = `$ProgressPreference = "SilentlyContinue"` + "\n" + script
 	encoded := base64.StdEncoding.EncodeToString(utf16LE([]byte(script)))
 	return "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + encoded
@@ -1804,7 +1804,7 @@ const windowsPowerShellPathRefresh = `$env:Path = [Environment]::GetEnvironmentV
 `
 
 func windowsPowerShellStdinScriptCommand(inputSize int) string {
-	return powershellCommand(windowsPowerShellPathRefresh + `$ErrorActionPreference = "Stop"
+	return PowershellCommand(windowsPowerShellPathRefresh + `$ErrorActionPreference = "Stop"
 $path = Join-Path $env:TEMP ("crabbox-stdin-command-" + [Guid]::NewGuid().ToString("N") + ".ps1")
 try {
 	$scriptFile = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
@@ -2141,7 +2141,7 @@ fi`
 
 func remoteInvalidateSyncFingerprintForTarget(target SSHTarget, workdir string, plainManifest bool) string {
 	if isWindowsNativeTarget(target) {
-		return powershellCommand("exit 0")
+		return PowershellCommand("exit 0")
 	}
 	metadataScript := remoteSyncMetaDirScript()
 	shellCommand := func(script string) string { return "bash -lc " + shellQuote(script) }
@@ -2854,7 +2854,7 @@ func exitCode(err error) int {
 		return 0
 	}
 	var exitErr *exec.ExitError
-	if asExitError(err, &exitErr) {
+	if errors.As(err, &exitErr) {
 		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
 			return status.ExitStatus()
 		}
@@ -2869,4 +2869,18 @@ func parseServerID(s string) (int64, bool) {
 
 func ParseServerID(s string) (int64, bool) {
 	return parseServerID(s)
+}
+
+// PruneArchiveSyncManifestCommand preserves remote-only files while pruning the
+// previous archive manifest with the same path checks as Git overlay sync.
+func PruneArchiveSyncManifestCommand(workdir, token string, allowMassDeletions bool) string {
+	metadata := `if [ -L .crabbox ] || [ ! -d .crabbox ]; then
+  echo "archive sync requires nonsymlink metadata" >&2; exit 67
+fi
+meta_dir="$PWD/.crabbox"
+for file in "$meta_dir/sync-manifest" "$meta_dir/sync-manifest.` + token + `.new" "$meta_dir/sync-deleted.` + token + `.new"; do
+  if [ -L "$file" ]; then echo "archive sync refuses symlink manifest" >&2; exit 67; fi
+done
+`
+	return remotePruneSafeSyncManifest(workdir, token, metadata, allowMassDeletions)
 }
