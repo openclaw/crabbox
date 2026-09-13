@@ -44,19 +44,19 @@ func newRunID() (string, error) {
 
 func PublicKeyFor(privatePath string) (string, error) {
 	if strings.TrimSpace(privatePath) == "" {
-		return "", exit(2, "ssh key path is not configured")
+		return "", Exit(2, "ssh key path is not configured")
 	}
 	pub := privatePath + ".pub"
 	data, err := os.ReadFile(pub)
 	if err != nil {
-		return "", exit(2, "read ssh public key %s: %v", pub, err)
+		return "", Exit(2, "read ssh public key %s: %v", pub, err)
 	}
 	key := strings.TrimSpace(string(data))
 	if key == "" {
-		return "", exit(2, "ssh public key %s is empty", pub)
+		return "", Exit(2, "ssh public key %s is empty", pub)
 	}
 	if !LooksLikeInlineSSHPublicKey(key) {
-		return "", exit(2, "ssh public key %s is not a supported OpenSSH public key", pub)
+		return "", Exit(2, "ssh public key %s is not a supported OpenSSH public key", pub)
 	}
 	return key, nil
 }
@@ -83,7 +83,7 @@ func testboxKeyPath(leaseID string) (string, error) {
 		if os.Getenv("XDG_STATE_HOME") != "" {
 			return "", err
 		}
-		return "", exit(2, "user config directory is unavailable")
+		return "", Exit(2, "user config directory is unavailable")
 	}
 	return filepath.Join(dir, "crabbox", "testboxes", leaseID, "id_ed25519"), nil
 }
@@ -110,7 +110,7 @@ func ensureLeaseSSHDirectories(components []string) error {
 	}
 	_, rootErr := os.Lstat(configDir)
 	if err := ensureDirectoryPathWithoutSymlinks(configDir, boundary); err != nil {
-		return exit(2, "create user config directory without symlinks: %v", err)
+		return Exit(2, "create user config directory without symlinks: %v", err)
 	}
 	if os.Getenv("XDG_STATE_HOME") != "" {
 		if errors.Is(rootErr, os.ErrNotExist) {
@@ -128,15 +128,15 @@ func ensureLeaseSSHDirectories(components []string) error {
 		info, err := os.Lstat(current)
 		if errors.Is(err, os.ErrNotExist) {
 			if err := createPrivateSSHTransportDirectory(current); err != nil {
-				return exit(2, "create private lease SSH directory: %v", err)
+				return Exit(2, "create private lease SSH directory: %v", err)
 			}
 			info, err = os.Lstat(current)
 		}
 		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return exit(2, "lease SSH directory has an unsafe path component")
+			return Exit(2, "lease SSH directory has an unsafe path component")
 		}
 		if err := secureLeaseSSHDirectory(current); err != nil {
-			return exit(2, "secure lease SSH directory: %v", err)
+			return Exit(2, "secure lease SSH directory: %v", err)
 		}
 	}
 	return nil
@@ -149,7 +149,7 @@ func inspectTestboxLeaseDirectory(leaseID string) (string, error) {
 	}
 	configDir, err := leaseSSHRoot()
 	if err != nil {
-		return "", exit(2, "user config directory is unavailable")
+		return "", Exit(2, "user config directory is unavailable")
 	}
 	boundary, err := privateDirectoryDurabilityBoundary(configDir, configDir)
 	if err != nil {
@@ -166,7 +166,7 @@ func inspectTestboxLeaseDirectory(leaseID string) (string, error) {
 			return "", err
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return "", exit(2, "lease SSH directory has an unsafe path component")
+			return "", Exit(2, "lease SSH directory has an unsafe path component")
 		}
 		if os.Getenv("XDG_STATE_HOME") != "" {
 			var err error
@@ -306,7 +306,7 @@ func ensureTestboxKeyWithType(leaseID, keyType string) (string, string, error) {
 	}
 	cmd := exec.Command("ssh-keygen", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", "", exit(2, "generate ssh key for %s: %v: %s", leaseID, err, strings.TrimSpace(string(out)))
+		return "", "", Exit(2, "generate ssh key for %s: %v: %s", leaseID, err, strings.TrimSpace(string(out)))
 	}
 	if err := secureCreatedLeaseSSHKeyPair(privatePath); err != nil {
 		return "", "", err
@@ -336,7 +336,7 @@ func UseStoredTestboxKey(target *SSHTarget, leaseID string) error {
 func useLeaseKnownHosts(target *SSHTarget, leaseID string) error {
 	dir, err := ensureTestboxLeaseDirectory(leaseID)
 	if err != nil {
-		return exit(2, "prepare lease SSH host-key directory for %s: %v", leaseID, err)
+		return Exit(2, "prepare lease SSH host-key directory for %s: %v", leaseID, err)
 	}
 	// Keep the verified host identity beside Crabbox's lease credentials so
 	// cleanup removes both and identical provider hostnames cannot share trust.

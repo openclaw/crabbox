@@ -64,13 +64,13 @@ func (a App) logs(ctx context.Context, args []string) error {
 		*runID = fs.Arg(0)
 	}
 	if *runID == "" {
-		return exit(2, "usage: crabbox logs <run-id>")
+		return Exit(2, "usage: crabbox logs <run-id>")
 	}
 	if jsonAnywhere {
 		*jsonOut = true
 	}
 	if *tail < 0 {
-		return exit(2, "tail must be >= 0")
+		return Exit(2, "tail must be >= 0")
 	}
 	sourceName, coord, err := resolveHistorySource(*source)
 	if err != nil && sourceName != "all" {
@@ -114,16 +114,16 @@ func (a App) events(ctx context.Context, args []string) error {
 		*runID = fs.Arg(0)
 	}
 	if *runID == "" {
-		return exit(2, "usage: crabbox events <run-id>")
+		return Exit(2, "usage: crabbox events <run-id>")
 	}
 	if jsonAnywhere {
 		*jsonOut = true
 	}
 	if *after < 0 {
-		return exit(2, "after must be >= 0")
+		return Exit(2, "after must be >= 0")
 	}
 	if *limit <= 0 {
-		return exit(2, "limit must be positive")
+		return Exit(2, "limit must be positive")
 	}
 	coord, err := configuredCoordinator()
 	if err != nil {
@@ -162,13 +162,13 @@ func (a App) attach(ctx context.Context, args []string) error {
 		*runID = fs.Arg(0)
 	}
 	if *runID == "" {
-		return exit(2, "usage: crabbox attach <run-id>")
+		return Exit(2, "usage: crabbox attach <run-id>")
 	}
 	if *after < 0 {
-		return exit(2, "after must be >= 0")
+		return Exit(2, "after must be >= 0")
 	}
 	if *poll <= 0 {
-		return exit(2, "poll must be positive")
+		return Exit(2, "poll must be positive")
 	}
 	coord, err := configuredCoordinator()
 	if err != nil {

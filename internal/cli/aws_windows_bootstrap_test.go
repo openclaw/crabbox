@@ -165,7 +165,7 @@ func TestCoordinatorFreshWindowsBootstrapDelivery(t *testing.T) {
 				t.Fatalf("bootstrap did not transition from 22 to pinned 2222:\n%s", calls)
 			}
 			payload, err := os.ReadFile(filepath.Join(logDir, "bootstrap.ps1"))
-			if err != nil || string(payload) != windowsBootstrapPowerShell(cfg, "ssh-ed25519 fixture") {
+			if err != nil || string(payload) != WindowsBootstrapPowerShell(cfg, "ssh-ed25519 fixture") {
 				t.Fatalf("bootstrap did not receive the configured final-port script: %v", err)
 			}
 			if mode == windowsModeNormal {
@@ -174,7 +174,7 @@ func TestCoordinatorFreshWindowsBootstrapDelivery(t *testing.T) {
 				}
 				t.Setenv("CRABBOX_TEST_WINDOWS_REQUIRE_FRESH", "")
 				t.Setenv("CRABBOX_TEST_WINDOWS_WORKLOAD_FAIL", "1")
-				err := runSSHInput(ctx, workload.SSH, powershellCommand("exit 73"), nil, io.Discard, io.Discard)
+				err := runSSHInput(ctx, workload.SSH, PowershellCommand("exit 73"), nil, io.Discard, io.Discard)
 				var exitErr *exec.ExitError
 				if !errors.As(err, &exitErr) || exitErr.ExitCode() != 73 {
 					t.Fatalf("fake workload failure was lost: %v", err)

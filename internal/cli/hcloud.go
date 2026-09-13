@@ -162,7 +162,7 @@ func newHetznerClient() (*HetznerClient, error) {
 		token = os.Getenv("HETZNER_TOKEN")
 	}
 	if token == "" {
-		return nil, exit(3, "HCLOUD_TOKEN or HETZNER_TOKEN is required")
+		return nil, Exit(3, "HCLOUD_TOKEN or HETZNER_TOKEN is required")
 	}
 	return &HetznerClient{Token: token, Client: &http.Client{Timeout: 60 * time.Second}, BaseURL: "https://api.hetzner.cloud/v1"}, nil
 }
@@ -233,7 +233,7 @@ func (c *HetznerClient) EnsureSSHKey(ctx context.Context, name, publicKey string
 	for _, key := range list.SSHKeys {
 		if key.Name == name {
 			if strings.TrimSpace(key.PublicKey) != strings.TrimSpace(publicKey) {
-				return SSHKey{}, false, exit(3, "hetzner ssh key %q exists with different public key", name)
+				return SSHKey{}, false, Exit(3, "hetzner ssh key %q exists with different public key", name)
 			}
 			return key, false, nil
 		}
@@ -284,12 +284,12 @@ func (c *HetznerClient) DeleteSSHKey(ctx context.Context, name string) error {
 }
 
 func (c *HetznerClient) CreateServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool) (Server, error) {
-	name := leaseProviderName(leaseID, slug)
+	name := LeaseProviderName(leaseID, slug)
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
-		cfg.Tailscale.Hostname = renderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
+		cfg.Tailscale.Hostname = RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
 	}
 	now := time.Now().UTC()
-	labels := directLeaseLabels(cfg, leaseID, slug, "hetzner", "", keep, now)
+	labels := DirectLeaseLabels(cfg, leaseID, slug, "hetzner", "", keep, now)
 	body := map[string]any{
 		"name":               name,
 		"server_type":        cfg.ServerType,
@@ -314,19 +314,19 @@ func (c *HetznerClient) CreateServer(ctx context.Context, cfg Config, publicKey,
 }
 
 func (c *HetznerClient) CreateServerWithFallback(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any)) (Server, Config, error) {
-	candidates := hetznerServerTypeCandidatesForConfig(cfg)
+	candidates := HetznerServerTypeCandidatesForConfig(cfg)
 	if len(candidates) == 0 && cfg.ServerTypeExplicit && cfg.ServerType != "" {
 		candidates = []string{cfg.ServerType}
 	}
 	if len(candidates) == 0 {
 		provider, _ := ProviderFor(cfg.Provider)
 		if provider == nil {
-			return Server{}, cfg, exit(2, "provider=%s has no class profile for class=%s", cfg.Provider, cfg.Class)
+			return Server{}, cfg, Exit(2, "provider=%s has no class profile for class=%s", cfg.Provider, cfg.Class)
 		}
 		if err := validateProviderClassSelector(provider, cfg); err != nil {
 			return Server{}, cfg, err
 		}
-		return Server{}, cfg, exit(2, "provider=%s has no usable provisioning candidates for class=%s", cfg.Provider, cfg.Class)
+		return Server{}, cfg, Exit(2, "provider=%s has no usable provisioning candidates for class=%s", cfg.Provider, cfg.Class)
 	}
 	var errs []error
 	for i, serverType := range candidates {

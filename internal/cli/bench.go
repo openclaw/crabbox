@@ -187,27 +187,27 @@ func (a App) benchRunWithExecutor(ctx context.Context, args []string, execute be
 		return err
 	}
 	if execute == nil {
-		return exit(2, "benchmark run executor is not configured")
+		return Exit(2, "benchmark run executor is not configured")
 	}
 	command := fs.Args()
 	if len(command) > 0 && command[0] == "--" {
 		command = command[1:]
 	}
 	if len(command) == 0 {
-		return exit(2, "usage: crabbox bench run --providers a,b [--repeats n] -- <command...>")
+		return Exit(2, "usage: crabbox bench run --providers a,b [--repeats n] -- <command...>")
 	}
 	if *repeats < 1 {
-		return exit(2, "--repeats must be >= 1")
+		return Exit(2, "--repeats must be >= 1")
 	}
 	if *cold && *warm {
-		return exit(2, "--cold and --warm are mutually exclusive")
+		return Exit(2, "--cold and --warm are mutually exclusive")
 	}
 	storePath, enabled, err := resolveBenchmarkTimingStore(*store)
 	if err != nil {
 		return err
 	}
 	if !enabled {
-		return exit(2, "--store cannot be off for bench run")
+		return Exit(2, "--store cannot be off for bench run")
 	}
 	providerValues := append(splitCommaList(*providers), splitCommaList(*provider)...)
 	providerValues = normalizeBenchmarkProviderFilters(providerValues)
@@ -219,7 +219,7 @@ func (a App) benchRunWithExecutor(ctx context.Context, args []string, execute be
 		providerValues = normalizeBenchmarkProviderFilters([]string{cfg.Provider})
 	}
 	if len(providerValues) == 0 {
-		return exit(2, "bench run requires --provider, --providers, or a configured default provider")
+		return Exit(2, "bench run requires --provider, --providers, or a configured default provider")
 	}
 	var coldRun *bool
 	if *cold || *warm {
@@ -247,7 +247,7 @@ func (a App) benchRunWithExecutor(ctx context.Context, args []string, execute be
 	}
 	fmt.Fprintf(a.Stderr, "benchmark run completed path=%s observations=%d failures=%d\n", storePath, observations, len(failures))
 	if len(failures) > 0 {
-		return exit(1, "benchmark run failed: %s", strings.Join(failures, "; "))
+		return Exit(1, "benchmark run failed: %s", strings.Join(failures, "; "))
 	}
 	return nil
 }
@@ -275,20 +275,20 @@ func (a App) benchRecord(_ context.Context, args []string) error {
 		commandArgs = commandArgs[1:]
 	}
 	if strings.TrimSpace(*commandDisplay) != "" && len(commandArgs) > 0 {
-		return exit(2, "use either --command or command args after --, not both")
+		return Exit(2, "use either --command or command args after --, not both")
 	}
 	if *cold && *warm {
-		return exit(2, "--cold and --warm are mutually exclusive")
+		return Exit(2, "--cold and --warm are mutually exclusive")
 	}
 	if *repeatIndex < 0 {
-		return exit(2, "--repeat-index must be >= 0")
+		return Exit(2, "--repeat-index must be >= 0")
 	}
 	storePath, enabled, err := resolveBenchmarkTimingStore(*store)
 	if err != nil {
 		return err
 	}
 	if !enabled {
-		return exit(2, "--store cannot be off for bench record")
+		return Exit(2, "--store cannot be off for bench record")
 	}
 	report, err := readTimingReportInput(a.input(), strings.TrimSpace(*timingJSONPath))
 	if err != nil {
@@ -324,17 +324,17 @@ func (a App) benchReport(_ context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return exit(2, "usage: crabbox bench report [--store default|path] [--providers a,b] [--command-fingerprint sha256:...] [--since 7d] [--min-samples n] [--json]")
+		return Exit(2, "usage: crabbox bench report [--store default|path] [--providers a,b] [--command-fingerprint sha256:...] [--since 7d] [--min-samples n] [--json]")
 	}
 	storePath, enabled, err := resolveBenchmarkTimingStore(*store)
 	if err != nil {
 		return err
 	}
 	if !enabled {
-		return exit(2, "--store cannot be off for bench report")
+		return Exit(2, "--store cannot be off for bench report")
 	}
 	if *minSamples < 1 {
-		return exit(2, "--min-samples must be >= 1")
+		return Exit(2, "--min-samples must be >= 1")
 	}
 	now := time.Now().UTC()
 	sinceTime, sinceLabel, err := parseBenchmarkSince(*since, now)
@@ -381,31 +381,31 @@ func (a App) benchCheck(_ context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return exit(2, "usage: crabbox bench check [--store default|path] [--providers a,b] [--command-fingerprint sha256:...] [--since 7d] [--min-samples n] [--max-failures n] --max-p95-runner-total 5s [--json]")
+		return Exit(2, "usage: crabbox bench check [--store default|path] [--providers a,b] [--command-fingerprint sha256:...] [--since 7d] [--min-samples n] [--max-failures n] --max-p95-runner-total 5s [--json]")
 	}
 	storePath, enabled, err := resolveBenchmarkTimingStore(*store)
 	if err != nil {
 		return err
 	}
 	if !enabled {
-		return exit(2, "--store cannot be off for bench check")
+		return Exit(2, "--store cannot be off for bench check")
 	}
 	if *minSamples < 1 {
-		return exit(2, "--min-samples must be >= 1")
+		return Exit(2, "--min-samples must be >= 1")
 	}
 	if *maxFailures < 0 {
-		return exit(2, "--max-failures must be >= 0")
+		return Exit(2, "--max-failures must be >= 0")
 	}
 	maxP95RunnerTotalValue := strings.TrimSpace(*maxP95RunnerTotalRaw)
 	if maxP95RunnerTotalValue == "" {
-		return exit(2, "--max-p95-runner-total is required")
+		return Exit(2, "--max-p95-runner-total is required")
 	}
 	maxP95RunnerTotal, err := time.ParseDuration(maxP95RunnerTotalValue)
 	if err != nil {
-		return exit(2, "--max-p95-runner-total must be a positive duration such as 5s")
+		return Exit(2, "--max-p95-runner-total must be a positive duration such as 5s")
 	}
 	if maxP95RunnerTotal <= 0 {
-		return exit(2, "--max-p95-runner-total must be greater than zero")
+		return Exit(2, "--max-p95-runner-total must be greater than zero")
 	}
 
 	now := time.Now().UTC()
@@ -446,7 +446,7 @@ func (a App) benchCheck(_ context.Context, args []string) error {
 		printBenchmarkCheck(a.Stdout, result)
 	}
 	if !result.Passed {
-		return exit(1, "benchmark check failed")
+		return Exit(1, "benchmark check failed")
 	}
 	return nil
 }
@@ -550,7 +550,7 @@ func readTimingReportInput(stdin io.Reader, path string) (TimingReport, error) {
 	default:
 		f, err := os.Open(path)
 		if err != nil {
-			return TimingReport{}, exit(2, "read timing JSON %s: %v", path, err)
+			return TimingReport{}, Exit(2, "read timing JSON %s: %v", path, err)
 		}
 		file = f
 		reader = f
@@ -560,10 +560,10 @@ func readTimingReportInput(stdin io.Reader, path string) (TimingReport, error) {
 	}
 	var report TimingReport
 	if err := json.NewDecoder(reader).Decode(&report); err != nil {
-		return TimingReport{}, exit(2, "decode timing JSON: %v", err)
+		return TimingReport{}, Exit(2, "decode timing JSON: %v", err)
 	}
 	if strings.TrimSpace(report.Provider) == "" {
-		return TimingReport{}, exit(2, "timing JSON is missing provider")
+		return TimingReport{}, Exit(2, "timing JSON is missing provider")
 	}
 	return report, nil
 }
@@ -573,7 +573,7 @@ func resolveBenchmarkTimingStore(value string) (string, bool, error) {
 	case "", "off":
 		return "", false, nil
 	case "default":
-		dir, err := crabboxStateDir()
+		dir, err := CrabboxStateDir()
 		if err != nil {
 			return "", false, err
 		}
@@ -585,7 +585,7 @@ func resolveBenchmarkTimingStore(value string) (string, bool, error) {
 
 func appendBenchmarkTimingRecord(path string, record BenchmarkTimingRecord) error {
 	if strings.TrimSpace(path) == "" {
-		return exit(2, "benchmark timing store path is empty")
+		return Exit(2, "benchmark timing store path is empty")
 	}
 	if record.SchemaVersion == 0 {
 		record.SchemaVersion = benchmarkTimingSchemaVersion
@@ -593,21 +593,21 @@ func appendBenchmarkTimingRecord(path string, record BenchmarkTimingRecord) erro
 	parent := filepath.Dir(path)
 	if parent != "." && parent != "" {
 		if err := os.MkdirAll(parent, 0o700); err != nil {
-			return exit(2, "create benchmark timing store directory %s: %v", parent, err)
+			return Exit(2, "create benchmark timing store directory %s: %v", parent, err)
 		}
 	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return exit(2, "open benchmark timing store %s: %v", path, err)
+		return Exit(2, "open benchmark timing store %s: %v", path, err)
 	}
 	encoder := json.NewEncoder(file)
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(record); err != nil {
 		_ = file.Close()
-		return exit(2, "write benchmark timing record %s: %v", path, err)
+		return Exit(2, "write benchmark timing record %s: %v", path, err)
 	}
 	if err := file.Close(); err != nil {
-		return exit(2, "close benchmark timing store %s: %v", path, err)
+		return Exit(2, "close benchmark timing store %s: %v", path, err)
 	}
 	return nil
 }
@@ -618,7 +618,7 @@ func readBenchmarkTimingRecords(path string) ([]BenchmarkTimingRecord, error) {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, exit(2, "read benchmark timing store %s: %v", path, err)
+		return nil, Exit(2, "read benchmark timing store %s: %v", path, err)
 	}
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
@@ -633,15 +633,15 @@ func readBenchmarkTimingRecords(path string) ([]BenchmarkTimingRecord, error) {
 		}
 		var record BenchmarkTimingRecord
 		if err := json.Unmarshal([]byte(line), &record); err != nil {
-			return nil, exit(2, "decode benchmark timing store %s line %d: %v", path, lineNo, err)
+			return nil, Exit(2, "decode benchmark timing store %s line %d: %v", path, lineNo, err)
 		}
 		if record.SchemaVersion != benchmarkTimingSchemaVersion {
-			return nil, exit(2, "decode benchmark timing store %s line %d: unsupported schemaVersion=%d", path, lineNo, record.SchemaVersion)
+			return nil, Exit(2, "decode benchmark timing store %s line %d: unsupported schemaVersion=%d", path, lineNo, record.SchemaVersion)
 		}
 		records = append(records, record)
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, exit(2, "read benchmark timing store %s: %v", path, err)
+		return nil, Exit(2, "read benchmark timing store %s: %v", path, err)
 	}
 	return records, nil
 }
@@ -1048,16 +1048,16 @@ func parseBenchmarkSince(value string, now time.Time) (time.Time, string, error)
 		daysValue := strings.TrimSuffix(value, "d")
 		days, err := strconv.Atoi(daysValue)
 		if err != nil || days < 0 {
-			return time.Time{}, "", exit(2, "--since day duration must look like 7d")
+			return time.Time{}, "", Exit(2, "--since day duration must look like 7d")
 		}
 		return now.Add(-time.Duration(days) * 24 * time.Hour), value, nil
 	}
 	duration, err := time.ParseDuration(value)
 	if err != nil {
-		return time.Time{}, "", exit(2, "--since must be a duration such as 7d or 24h")
+		return time.Time{}, "", Exit(2, "--since must be a duration such as 7d or 24h")
 	}
 	if duration < 0 {
-		return time.Time{}, "", exit(2, "--since must not be negative")
+		return time.Time{}, "", Exit(2, "--since must not be negative")
 	}
 	return now.Add(-duration), value, nil
 }

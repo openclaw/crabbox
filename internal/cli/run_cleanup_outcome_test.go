@@ -143,7 +143,7 @@ func TestRunCoordinatorCleanupOutcomes(t *testing.T) {
 				if got := posts.Load(); got != wantPosts {
 					t.Errorf("release POSTs=%d want %d", got, wantPosts)
 				}
-				_, exists, claimErr := readLeaseClaimWithPresence(id)
+				_, exists, claimErr := ReadLeaseClaimWithPresence(id)
 				wantClaim := !tc.terminal || tc.artifactError
 				if claimErr != nil || exists != wantClaim {
 					t.Errorf("claim exists=%t err=%v want=%t", exists, claimErr, wantClaim)
@@ -173,7 +173,7 @@ func TestCoordinatorReleaseOutcomeRejectsSuccessorClaim(t *testing.T) {
 	clearConfigEnv(t)
 	const id = "cbx_abcdef123456"
 	key, claimPath := managedStopLocalState(t, id)
-	successor, err := readLeaseClaim(id)
+	successor, err := ReadLeaseClaim(id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestCoordinatorReleaseOutcomeRejectsSuccessorClaim(t *testing.T) {
 	if got.err == nil || got.outcome.Terminal || requests.Load() != 0 {
 		t.Fatalf("outcome=%+v err=%v requests=%d", got.outcome, got.err, requests.Load())
 	}
-	current, err := readLeaseClaim(id)
+	current, err := ReadLeaseClaim(id)
 	if err != nil || current.Revision != successor.Revision || current.RepoRoot != successor.RepoRoot {
 		t.Fatalf("successor changed: %+v %v", current, err)
 	}

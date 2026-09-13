@@ -38,18 +38,18 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 	if inheritedWebVNCDaemonPortReservation(webPort) {
 		webListener, err = inheritedWebVNCDaemonListener(webPort)
 		if err != nil {
-			return exit(5, "adopt local macOS WebVNC listener: %v", err)
+			return Exit(5, "adopt local macOS WebVNC listener: %v", err)
 		}
 	} else {
 		webReservation, reserveErr := reserveWebVNCDaemonPort(webPort)
 		if reserveErr != nil {
-			return exit(5, "reserve local macOS WebVNC port: %v", reserveErr)
+			return Exit(5, "reserve local macOS WebVNC port: %v", reserveErr)
 		}
 		webPort = webReservation.port
 		webListener, err = webReservation.listener()
 		if err != nil {
 			webReservation.release()
-			return exit(5, "open local macOS WebVNC listener: %v", err)
+			return Exit(5, "open local macOS WebVNC listener: %v", err)
 		}
 	}
 	defer webListener.Close()
@@ -74,7 +74,7 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 	}
 	fmt.Fprintln(a.Stdout, "preflight: macOS Screen Sharing RFB authentication ok")
 
-	fmt.Fprintf(a.Stdout, "lease: %s slug=%s provider=%s target=macos\n", leaseID, blank(serverSlug(server), "-"), blank(server.Provider, cfg.Provider))
+	fmt.Fprintf(a.Stdout, "lease: %s slug=%s provider=%s target=macos\n", leaseID, blank(ServerSlug(server), "-"), blank(server.Provider, cfg.Provider))
 	fmt.Fprintf(a.Stdout, "bridge: serving noVNC locally; SSH tunnel -> guest 127.0.0.1:%s; keep this running while viewing\n", managedVNCPort)
 	return a.serveLocalWebVNCBridge(
 		bridgeCtx,
@@ -175,11 +175,11 @@ func resolveMacOSWebVNCCredentials(ctx context.Context, cfg Config, target SSHTa
 	}
 	password, err := readPassword(ctx, target, remoteVNCCredentialReadCommand(target))
 	if err != nil {
-		return rfbCredentials{}, localWebVNCAuthAuto, exit(5, "read managed macOS desktop credentials: %v", err)
+		return rfbCredentials{}, localWebVNCAuthAuto, Exit(5, "read managed macOS desktop credentials: %v", err)
 	}
 	password = strings.TrimSpace(password)
 	if password == "" {
-		return rfbCredentials{}, localWebVNCAuthAuto, exit(5, "managed macOS desktop password is empty")
+		return rfbCredentials{}, localWebVNCAuthAuto, Exit(5, "managed macOS desktop password is empty")
 	}
 	authMode := localWebVNCAuthARD
 	if provider, providerErr := ProviderFor(cfg.Provider); providerErr == nil && provider.Name() == parallelsProvider {
@@ -196,10 +196,10 @@ func requireMacOSWebVNCCredentials(credentials rfbCredentials, authMode localWeb
 		return requireMacOSScreenSharingCredentials(credentials)
 	}
 	if authMode != localWebVNCAuthVNC {
-		return exit(2, "unsupported macOS WebVNC authentication mode")
+		return Exit(2, "unsupported macOS WebVNC authentication mode")
 	}
 	if strings.TrimSpace(credentials.Password) == "" {
-		return exit(2, "managed macOS desktop password is required for WebVNC preflight")
+		return Exit(2, "managed macOS desktop password is required for WebVNC preflight")
 	}
 	return nil
 }
@@ -210,11 +210,11 @@ func preflightMacOSWebVNCTunnel(ctx context.Context, tunnel *vncForegroundTunnel
 	}
 	conn, err := dialVNCForegroundTunnel(ctx, tunnel, port)
 	if err != nil {
-		return exit(5, "macOS Screen Sharing preflight failed: %v", err)
+		return Exit(5, "macOS Screen Sharing preflight failed: %v", err)
 	}
 	defer conn.Close()
 	if err := preflightRFBAuthenticationFromConnWithMode(ctx, conn, credentials, authMode); err != nil {
-		return exit(5, "macOS Screen Sharing preflight failed: %v", err)
+		return Exit(5, "macOS Screen Sharing preflight failed: %v", err)
 	}
 	return nil
 }
@@ -279,7 +279,7 @@ func newMacOSWebVNCSession() (macOSWebVNCSession, error) {
 func createMacOSWebVNCHandoff(webPort string, session macOSWebVNCSession, viewerNeedsCredentials bool) (macOSWebVNCHandoff, error) {
 	file, err := os.CreateTemp("", "crabbox-webvnc-*.html")
 	if err != nil {
-		return macOSWebVNCHandoff{}, exit(5, "create WebVNC browser handoff: %v", err)
+		return macOSWebVNCHandoff{}, Exit(5, "create WebVNC browser handoff: %v", err)
 	}
 	path := file.Name()
 	ok := false
@@ -291,11 +291,11 @@ func createMacOSWebVNCHandoff(webPort string, session macOSWebVNCSession, viewer
 	}()
 	rfbSource, err := fs.ReadFile(webVNCAssets(), "rfb.js")
 	if err != nil {
-		return macOSWebVNCHandoff{}, exit(5, "read embedded WebVNC viewer: %v", err)
+		return macOSWebVNCHandoff{}, Exit(5, "read embedded WebVNC viewer: %v", err)
 	}
 	rfbJSON, err := json.Marshal(string(rfbSource))
 	if err != nil {
-		return macOSWebVNCHandoff{}, exit(5, "encode embedded WebVNC viewer: %v", err)
+		return macOSWebVNCHandoff{}, Exit(5, "encode embedded WebVNC viewer: %v", err)
 	}
 	config := map[string]string{
 		"protocol":     session.Protocol,
@@ -307,7 +307,7 @@ func createMacOSWebVNCHandoff(webPort string, session macOSWebVNCSession, viewer
 	}
 	configJSON, err := json.Marshal(config)
 	if err != nil {
-		return macOSWebVNCHandoff{}, exit(5, "encode WebVNC viewer config: %v", err)
+		return macOSWebVNCHandoff{}, Exit(5, "encode WebVNC viewer config: %v", err)
 	}
 	credentialsScript := `let creds={};`
 	if viewerNeedsCredentials {
@@ -328,10 +328,10 @@ func createMacOSWebVNCHandoff(webPort string, session macOSWebVNCSession, viewer
 		`rfb.addEventListener("credentialsrequired",()=>{status.style.display="block";status.textContent="VNC credentials required"});` +
 		`</script></body></html>`
 	if _, err := file.WriteString(content); err != nil {
-		return macOSWebVNCHandoff{}, exit(5, "write WebVNC browser handoff: %v", err)
+		return macOSWebVNCHandoff{}, Exit(5, "write WebVNC browser handoff: %v", err)
 	}
 	if err := file.Close(); err != nil {
-		return macOSWebVNCHandoff{}, exit(5, "close WebVNC browser handoff: %v", err)
+		return macOSWebVNCHandoff{}, Exit(5, "close WebVNC browser handoff: %v", err)
 	}
 	ok = true
 	return macOSWebVNCHandoff{

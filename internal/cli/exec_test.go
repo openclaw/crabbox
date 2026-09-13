@@ -86,7 +86,7 @@ exec /bin/sh -c "$command"
 	b.lease = LeaseTarget{LeaseID: "cbx_123456789abc", Server: Server{Provider: p.Name(), CloudID: "synthetic-resource", Labels: map[string]string{"lease": "cbx_123456789abc", "provider": p.Name(), "state": "ready"}}, SSH: SSHTarget{User: "synthetic-token", Host: "fixture.invalid", Port: "22", TargetOS: targetLinux, AuthSecret: true}}
 	cfg := baseConfig()
 	cfg.Provider = p.Name()
-	if err := claimLeaseTargetForRepoConfig(b.lease.LeaseID, "exec-fixture", cfg, b.lease.Server, b.lease.SSH, dir, time.Hour, false); err != nil {
+	if err := ClaimLeaseTargetForRepoConfig(b.lease.LeaseID, "exec-fixture", cfg, b.lease.Server, b.lease.SSH, dir, time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	return b, dir
@@ -170,7 +170,7 @@ func TestExecCommandHoldsClaimThroughCancellationAndStreamCompletion(t *testing.
 		<-done
 		t.Fatalf("no live output: %q %v", marker, err)
 	}
-	claim, err := readLeaseClaim(b.lease.LeaseID)
+	claim, err := ReadLeaseClaim(b.lease.LeaseID)
 	if err != nil {
 		cancel()
 		<-done
@@ -191,7 +191,7 @@ func TestExecCommandHoldsClaimThroughCancellationAndStreamCompletion(t *testing.
 	if !b.activityStopped {
 		t.Fatal("activity survived cancellation")
 	}
-	if err := withLeaseClaimUnchanged(b.lease.LeaseID, claim, func() error { return nil }); err != nil {
+	if err := WithLeaseClaimUnchanged(b.lease.LeaseID, claim, func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	args, err := os.ReadFile(filepath.Join(dir, "args"))

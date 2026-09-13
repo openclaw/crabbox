@@ -14,21 +14,21 @@ import (
 func trustedReadyPoolRemoteURL(remoteURL string) (string, error) {
 	remoteURL = strings.TrimSpace(remoteURL)
 	if remoteURL == "" {
-		return "", exit(7, "ready-pool reuse requires a canonical local Git origin")
+		return "", Exit(7, "ready-pool reuse requires a canonical local Git origin")
 	}
 	if gitRemoteURLHasCredentials(remoteURL) {
-		return "", exit(7, "ready-pool reuse refuses a credential-bearing local Git origin")
+		return "", Exit(7, "ready-pool reuse refuses a credential-bearing local Git origin")
 	}
 	if strings.HasPrefix(remoteURL, "ssh://") || (!strings.Contains(remoteURL, "://") && strings.Contains(remoteURL, "@")) {
-		return "", exit(7, "ready-pool reuse requires an anonymously fetchable non-SSH Git origin")
+		return "", Exit(7, "ready-pool reuse requires an anonymously fetchable non-SSH Git origin")
 	}
 	canonical := normalizeGitRemoteURL(remoteURL)
 	if canonical == "" {
-		return "", exit(7, "ready-pool reuse could not normalize the local Git origin")
+		return "", Exit(7, "ready-pool reuse could not normalize the local Git origin")
 	}
 	parsed, err := url.Parse(canonical)
 	if err != nil || parsed.User != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Opaque != "" {
-		return "", exit(7, "ready-pool reuse requires an anonymously fetchable HTTPS Git origin")
+		return "", Exit(7, "ready-pool reuse requires an anonymously fetchable HTTPS Git origin")
 	}
 	return canonical, nil
 }
@@ -38,7 +38,7 @@ func preflightReadyPoolRemote(ctx context.Context, remoteURL, branch string) err
 	defer cancel()
 	workdir, err := os.MkdirTemp("", "crabbox-ready-pool-preflight-")
 	if err != nil {
-		return exit(7, "create ready-pool origin preflight directory")
+		return Exit(7, "create ready-pool origin preflight directory")
 	}
 	defer os.RemoveAll(workdir)
 	configNull := "/dev/null"
@@ -58,21 +58,21 @@ func preflightReadyPoolRemote(ctx context.Context, remoteURL, branch string) err
 		"GCM_INTERACTIVE=Never",
 	}
 	if err := cmd.Run(); err != nil {
-		return exit(7, "ready-pool reuse requires an anonymously fetchable Git origin before borrowing")
+		return Exit(7, "ready-pool reuse requires an anonymously fetchable Git origin before borrowing")
 	}
 	return nil
 }
 
 func (a App) scrubReadyPoolLease(ctx context.Context, target SSHTarget, entry CoordinatorReadyPoolEntry, workdir, trustedRemoteURL string, requireActionsHydration bool) (string, bool, error) {
 	if strings.TrimSpace(workdir) == "" {
-		return "", false, exit(7, "ready-pool scrub has no remote workdir")
+		return "", false, Exit(7, "ready-pool scrub has no remote workdir")
 	}
 	branch, err := readyPoolScrubBranch(entry.Ref)
 	if err != nil {
-		return "", false, exit(7, "ready-pool scrub requires a branch ref")
+		return "", false, Exit(7, "ready-pool scrub requires a branch ref")
 	}
 	if strings.TrimSpace(trustedRemoteURL) == "" {
-		return "", false, exit(7, "ready-pool scrub has no trusted Git origin")
+		return "", false, Exit(7, "ready-pool scrub has no trusted Git origin")
 	}
 	command := remoteReadyPoolScrub(workdir, branch, trustedRemoteURL)
 	if isWindowsNativeTarget(target) {
@@ -80,24 +80,24 @@ func (a App) scrubReadyPoolLease(ctx context.Context, target SSHTarget, entry Co
 	}
 	out, err := runSSHOutput(ctx, target, command)
 	if err != nil {
-		return "", false, exit(7, "ready-pool scrub failed on %s: %v", target.Host, err)
+		return "", false, Exit(7, "ready-pool scrub failed on %s: %v", target.Host, err)
 	}
 	preparedCommit := strings.TrimSpace(out)
 	if !isGitCommitSHA(preparedCommit) {
-		return "", false, exit(7, "ready-pool scrub did not report one valid prepared commit")
+		return "", false, Exit(7, "ready-pool scrub did not report one valid prepared commit")
 	}
 	hydrationCompatible := true
 	state, err := readActionsHydrationState(ctx, target, entry.LeaseID)
 	if err != nil {
-		return "", false, exit(7, "read ready-pool Actions hydration marker: %v", err)
+		return "", false, Exit(7, "read ready-pool Actions hydration marker: %v", err)
 	}
 	if strings.TrimSpace(state.Workspace) != "" {
 		if strings.TrimSpace(state.Workspace) != strings.TrimSpace(workdir) {
-			return "", false, exit(7, "ready-pool Actions hydration marker no longer owns the prepared workspace")
+			return "", false, Exit(7, "ready-pool Actions hydration marker no longer owns the prepared workspace")
 		}
 		hydrationCompatible = isGitCommitSHA(state.Commit) && strings.EqualFold(state.Commit, preparedCommit)
 	} else if requireActionsHydration {
-		return "", false, exit(7, "ready-pool entry requires an Actions hydration marker")
+		return "", false, Exit(7, "ready-pool entry requires an Actions hydration marker")
 	}
 	return preparedCommit, hydrationCompatible, nil
 }
@@ -247,7 +247,7 @@ printf '%s\n' "$target_commit"`
 }
 
 func windowsRemoteReadyPoolScrub(workdir, ref, trustedRemoteURL string) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 $workdir = ` + psQuote(workdir) + `
 $ref = ` + psQuote(strings.TrimSpace(ref)) + `
 $trustedRemote = ` + psQuote(strings.TrimSpace(trustedRemoteURL)) + `

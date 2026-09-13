@@ -105,7 +105,7 @@ func windowsWebVNCDaemonProcessTree(rootPID int) ([]windowsWebVNCDaemonProcessId
 	pids := windowsWebVNCDaemonTreePIDs(parentByPID, rootPID)
 	identities := make([]windowsWebVNCDaemonProcessIdentity, 0, len(pids))
 	for _, processID := range pids {
-		started, err := webVNCDaemonProcessStartIdentity(processID)
+		started, err := LocalProcessStartIdentity(processID)
 		if err != nil {
 			if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
 				continue
@@ -153,7 +153,7 @@ func windowsWebVNCDaemonSurvivors(tree []windowsWebVNCDaemonProcessIdentity) []i
 }
 
 func windowsWebVNCDaemonIdentityStillMatches(identity windowsWebVNCDaemonProcessIdentity) bool {
-	started, err := webVNCDaemonProcessStartIdentity(identity.pid)
+	started, err := LocalProcessStartIdentity(identity.pid)
 	if err == nil {
 		return started == identity.started
 	}

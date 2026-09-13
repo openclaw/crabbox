@@ -32,15 +32,15 @@ type artifactChangeSnapshot struct {
 
 func validateArtifactChangePaths(paths []string) error {
 	if len(paths) > maxArtifactChangePaths {
-		return exit(2, "--require-artifact-change accepts at most %d paths", maxArtifactChangePaths)
+		return Exit(2, "--require-artifact-change accepts at most %d paths", maxArtifactChangePaths)
 	}
 	for _, p := range paths {
 		if len(p) > 1024 || strings.TrimSpace(p) != p || !safeArtifactGlob(p) || strings.ContainsAny(p, "*?") || path.Clean(p) != p || p == "." {
-			return exit(2, "--require-artifact-change requires exact safe relative file paths: %s", p)
+			return Exit(2, "--require-artifact-change requires exact safe relative file paths: %s", p)
 		}
 		for _, component := range strings.Split(p, "/") {
 			if component == ".git" || component == ".crabbox" {
-				return exit(2, "--require-artifact-change excludes protected paths: %s", p)
+				return Exit(2, "--require-artifact-change excludes protected paths: %s", p)
 			}
 		}
 	}
@@ -49,7 +49,7 @@ func validateArtifactChangePaths(paths []string) error {
 
 func validateArtifactChangeTarget(target SSHTarget, paths []string) error {
 	if len(paths) > 0 && target.TargetOS != targetLinux {
-		return exit(2, "--require-artifact-change requires an ordinary SSH-backed Linux target")
+		return Exit(2, "--require-artifact-change requires an ordinary SSH-backed Linux target")
 	}
 	return nil
 }
@@ -72,7 +72,7 @@ func snapshotArtifactChanges(ctx context.Context, target SSHTarget, workdir stri
 	diagnostic := newSynchronizedBuffer(4096)
 	script := artifactChangeSnapshotScript(workdir, paths)
 	if err := runSSHInput(ctx, target, remoteRunArtifactShellInputCommand(target), strings.NewReader(script), &output, &diagnostic); err != nil {
-		return nil, exit(7, "artifact change snapshot: %v: %s", err, strings.TrimSpace(diagnostic.String()))
+		return nil, Exit(7, "artifact change snapshot: %v: %s", err, strings.TrimSpace(diagnostic.String()))
 	}
 	return parseArtifactChangeSnapshot(output.String(), paths)
 }
@@ -111,7 +111,7 @@ func artifactChangeSnapshotScript(workdir string, paths []string) string {
 func parseArtifactChangeSnapshot(output string, paths []string) ([]artifactChangeSnapshot, error) {
 	lines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
 	if len(lines) != len(paths) {
-		return nil, exit(7, "incomplete artifact change snapshot")
+		return nil, Exit(7, "incomplete artifact change snapshot")
 	}
 	snapshots := make([]artifactChangeSnapshot, len(paths))
 	total := 0
@@ -121,12 +121,12 @@ func parseArtifactChangeSnapshot(output string, paths []string) ([]artifactChang
 		}
 		encoded, ok := strings.CutPrefix(line, "file ")
 		if !ok {
-			return nil, exit(7, "invalid artifact change snapshot for %s", paths[i])
+			return nil, Exit(7, "invalid artifact change snapshot for %s", paths[i])
 		}
 		data, err := base64.StdEncoding.Strict().DecodeString(encoded)
 		total += len(data)
 		if err != nil || len(data) > maxArtifactChangeFileBytes || total > maxArtifactChangeTotalBytes {
-			return nil, exit(7, "invalid or oversized artifact change snapshot for %s", paths[i])
+			return nil, Exit(7, "invalid or oversized artifact change snapshot for %s", paths[i])
 		}
 		snapshots[i] = artifactChangeSnapshot{present: true, digest: sha256.Sum256(data), data: data}
 	}
@@ -152,7 +152,7 @@ func compareArtifactChanges(paths []string, before, after []artifactChangeSnapsh
 		}
 	}
 	if len(failed) > 0 {
-		return results, exit(7, "required artifact change failed: %s", strings.Join(failed, "; "))
+		return results, Exit(7, "required artifact change failed: %s", strings.Join(failed, "; "))
 	}
 	return results, nil
 }
@@ -182,10 +182,10 @@ func collectChangedArtifacts(repoRoot, runID, leaseID string, results []Artifact
 	name := safeCaptureName(firstNonBlank(runID, leaseID, "run")) + "-artifacts.tgz"
 	local := localRunArtifactPath(repoRoot, runID, leaseID, name)
 	if err := createPrivateRunOutputDir(filepath.Dir(local)); err != nil {
-		return nil, exit(7, "create artifact change archive directory: %v", err)
+		return nil, Exit(7, "create artifact change archive directory: %v", err)
 	}
 	if err := writePrivateRunOutputFile(local, archive.Bytes()); err != nil {
-		return nil, exit(7, "write artifact change archive: %v", err)
+		return nil, Exit(7, "write artifact change archive: %v", err)
 	}
 	return []runArtifact{{Kind: "artifact-change", Path: local, Bytes: archive.Len()}}, nil
 }

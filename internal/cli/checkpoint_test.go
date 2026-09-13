@@ -26,7 +26,7 @@ func TestProvisionCheckpointForkReleasesWithFreshContextWhenCanceled(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := store.Create(checkpointRecord{ID: "chk_cancel_release", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+	created, _, err := store.Reserve(checkpointRecord{ID: "chk_cancel_release", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,10 +134,10 @@ func TestCheckpointRecordRoundTripAndListOrder(t *testing.T) {
 	second := first
 	second.ID = "chk_second"
 	second.CreatedAt = "2026-05-13T11:00:00Z"
-	if _, err := store.Create(first); err != nil {
+	if _, _, err := store.Reserve(first); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Create(second); err != nil {
+	if _, _, err := store.Reserve(second); err != nil {
 		t.Fatal(err)
 	}
 	records, err := store.List()
@@ -335,7 +335,7 @@ func TestCheckpointDeleteDryRunKeepsRecordedCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := store.Create(checkpointRecord{ID: "chk_delete_dryrun", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+	record, _, err := store.Reserve(checkpointRecord{ID: "chk_delete_dryrun", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +360,7 @@ func TestCheckpointRestoreDryRunDoesNotResolveLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	const lastUsedAt = "2026-05-14T10:00:00Z"
-	record, err := store.Create(checkpointRecord{ID: "chk_restore_dryrun", Kind: checkpointKindArchive, CreatedAt: "2026-05-13T10:00:00Z", LastUsedAt: lastUsedAt, Workdir: "/work/cbx_old/my-app"})
+	record, _, err := store.Reserve(checkpointRecord{ID: "chk_restore_dryrun", Kind: checkpointKindArchive, CreatedAt: "2026-05-13T10:00:00Z", LastUsedAt: lastUsedAt, Workdir: "/work/cbx_old/my-app"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,7 +387,7 @@ func TestCheckpointRestoreDryRunUsesStoredLeaseTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	const lastUsedAt = "2026-05-14T11:00:00Z"
-	record, err := store.Create(checkpointRecord{ID: "chk_restore_windows_dryrun", Kind: checkpointKindArchive, CreatedAt: "2026-05-13T11:00:00Z", LastUsedAt: lastUsedAt, Workdir: "/work/cbx_old/my-app"})
+	record, _, err := store.Reserve(checkpointRecord{ID: "chk_restore_windows_dryrun", Kind: checkpointKindArchive, CreatedAt: "2026-05-13T11:00:00Z", LastUsedAt: lastUsedAt, Workdir: "/work/cbx_old/my-app"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +400,7 @@ func TestCheckpointRestoreDryRunUsesStoredLeaseTarget(t *testing.T) {
 		"windows_mode": windowsModeNormal,
 		"work_root":    `C:\crabbox`,
 	}}
-	if err := claimLeaseTargetForRepoConfig(leaseID, "windows-dryrun", cfg, server, SSHTarget{}, repo, time.Minute, false); err != nil {
+	if err := ClaimLeaseTargetForRepoConfig(leaseID, "windows-dryrun", cfg, server, SSHTarget{}, repo, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -435,7 +435,7 @@ func TestCheckpointRestoreUpdatesLastUsedAtOnSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	const lastUsedAt = "2026-05-14T11:30:00Z"
-	record, err := store.Create(checkpointRecord{
+	record, _, err := store.Reserve(checkpointRecord{
 		ID:          "chk_restore_success",
 		Kind:        checkpointKindArchive,
 		CreatedAt:   "2026-05-13T11:30:00Z",
@@ -477,7 +477,7 @@ func TestCheckpointRestoreDockerCommitPointsAtFork(t *testing.T) {
 	}
 	record := checkpointRecord{ID: "chk_dc_restore", Kind: checkpointKindDockerCommit, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
 	record.Native.ImageID = "sha256:deadbeef"
-	if _, err := store.Create(record); err != nil {
+	if _, _, err := store.Reserve(record); err != nil {
 		t.Fatal(err)
 	}
 	app := App{Stdout: io.Discard, Stderr: io.Discard}
@@ -510,7 +510,7 @@ func TestCheckpointForkDryRunDoesNotAcquireLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	const lastUsedAt = "2026-05-14T12:00:00Z"
-	record, err := store.Create(checkpointRecord{ID: "chk_fork_dryrun", Kind: checkpointKindArchive, CreatedAt: "2026-05-13T12:00:00Z", LastUsedAt: lastUsedAt})
+	record, _, err := store.Reserve(checkpointRecord{ID: "chk_fork_dryrun", Kind: checkpointKindArchive, CreatedAt: "2026-05-13T12:00:00Z", LastUsedAt: lastUsedAt})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -532,7 +532,7 @@ func TestCheckpointForkArchiveDryRunRequiresProviderIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := store.Create(checkpointRecord{ID: "chk_fork_no_provider", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+	record, _, err := store.Reserve(checkpointRecord{ID: "chk_fork_no_provider", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -554,7 +554,7 @@ func TestCheckpointForkNativeDryRunUsesRecordedProvider(t *testing.T) {
 	record := checkpointRecord{ID: "chk_native_recorded_provider", Kind: checkpointKindDockerCommit, CreatedAt: "2026-05-13T13:00:00Z", LastUsedAt: lastUsedAt, TargetOS: targetLinux}
 	record.Native.ImageID = "sha256:checkpoint"
 	record.Native.Direct = true
-	if _, err := store.Create(record); err != nil {
+	if _, _, err := store.Reserve(record); err != nil {
 		t.Fatal(err)
 	}
 	var stdout bytes.Buffer
@@ -596,7 +596,7 @@ func TestCheckpointForkDryRunFansOutRequestedSlug(t *testing.T) {
 		t.Fatal(err)
 	}
 	const lastUsedAt = "2026-05-14T14:00:00Z"
-	record, err := store.Create(checkpointRecord{ID: "chk_fork_fanout", Kind: checkpointKindArchive, CreatedAt: "2026-05-13T14:00:00Z", LastUsedAt: lastUsedAt})
+	record, _, err := store.Reserve(checkpointRecord{ID: "chk_fork_fanout", Kind: checkpointKindArchive, CreatedAt: "2026-05-13T14:00:00Z", LastUsedAt: lastUsedAt})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -630,7 +630,7 @@ func TestCheckpointForkDryRunFansOutCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	const lastUsedAt = "2026-05-14T15:00:00Z"
-	record, err := store.Create(checkpointRecord{ID: "chk_fork_run_fanout", Kind: checkpointKindArchive, CreatedAt: "2026-05-13T15:00:00Z", LastUsedAt: lastUsedAt})
+	record, _, err := store.Reserve(checkpointRecord{ID: "chk_fork_run_fanout", Kind: checkpointKindArchive, CreatedAt: "2026-05-13T15:00:00Z", LastUsedAt: lastUsedAt})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -772,7 +772,7 @@ func TestCheckpointForkFixedLeaseRejectsNonNativeCheckpoints(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			record, err := store.Create(checkpointRecord{ID: "chk_fixed_" + tc.name, Kind: tc.kind})
+			record, _, err := store.Reserve(checkpointRecord{ID: "chk_fixed_" + tc.name, Kind: tc.kind})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1079,7 +1079,7 @@ func TestCheckpointForkJSONReportsLeaseWhenArchiveRestoreFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := store.Create(checkpointRecord{ID: "chk_missing_archive", Kind: checkpointKindArchive})
+	record, _, err := store.Reserve(checkpointRecord{ID: "chk_missing_archive", Kind: checkpointKindArchive})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1147,7 +1147,7 @@ func TestCheckpointForkFailedFixedLeaseReplayPreservesAdoptedLease(t *testing.T)
 	if backend.creates != 1 || backend.releaseCount != 0 {
 		t.Fatalf("fixed lease creates=%d releases=%d, want 1/0", backend.creates, backend.releaseCount)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || !exists {
+	if _, exists, err := ReadLeaseClaimWithPresence(leaseID); err != nil || !exists {
 		t.Fatalf("adopted fixed lease claim exists=%t err=%v", exists, err)
 	}
 	if len(results) != 1 || results[0].LeaseID != leaseID || results[0].CheckpointID != record.ID {
@@ -1175,7 +1175,7 @@ func createCheckpointForkTestRecord(t *testing.T, checkpointID, workdirLeaseID s
 		record.Workdir = remoteJoin(defaultConfig(), workdirLeaseID, repo.Name)
 	}
 	record.Native.ImageID = "ami-12345678"
-	record, err = store.Create(record)
+	record, _, err = store.Reserve(record)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1388,7 +1388,7 @@ func TestCheckpointInspectVerifyArchiveStates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := store.Create(checkpointRecord{
+	record, _, err := store.Reserve(checkpointRecord{
 		ID:          "chk_archive",
 		Kind:        checkpointKindArchive,
 		CreatedAt:   "2026-05-13T10:00:00Z",
@@ -1439,7 +1439,7 @@ func TestCheckpointPruneDryRunAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldRecord, err := store.Create(checkpointRecord{
+	oldRecord, _, err := store.Reserve(checkpointRecord{
 		ID:        "chk_old",
 		Kind:      checkpointKindArchive,
 		CreatedAt: time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339),
@@ -1447,7 +1447,7 @@ func TestCheckpointPruneDryRunAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Create(checkpointRecord{
+	if _, _, err := store.Reserve(checkpointRecord{
 		ID:        "chk_new",
 		Kind:      checkpointKindArchive,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
@@ -1496,7 +1496,7 @@ func TestCheckpointPruneUnusedForComposesWithAgeAndKind(t *testing.T) {
 		{ID: "chk_old_unused_native", Kind: checkpointKindAzureOS, CreatedAt: now.Add(-96 * time.Hour).Format(time.RFC3339), LastUsedAt: now.Add(-72 * time.Hour).Format(time.RFC3339)},
 	}
 	for _, record := range records {
-		if _, err := store.Create(record); err != nil {
+		if _, _, err := store.Reserve(record); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1585,7 +1585,7 @@ func TestCheckpointPruneProviderDeleteFailureRetainsRecord(t *testing.T) {
 	}
 	record.Native.Provider = "azure"
 	record.Native.Resource = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/checkpoint"
-	if _, err := store.Create(record); err != nil {
+	if _, _, err := store.Reserve(record); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1606,7 +1606,7 @@ func TestCheckpointForkUseTimestampChangesOnlyAfterConsumption(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := store.Create(checkpointRecord{
+	record, _, err := store.Reserve(checkpointRecord{
 		ID:         "chk_fork_use",
 		Kind:       checkpointKindAWSEBS,
 		CreatedAt:  "2026-05-01T10:00:00Z",
@@ -1657,7 +1657,7 @@ func TestCheckpointForkMetadataWriteFailureReleasesProvisionedLease(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := store.Create(checkpointRecord{
+	record, _, err := store.Reserve(checkpointRecord{
 		ID:         "chk_fork_write_failure",
 		Kind:       checkpointKindAWSEBS,
 		CreatedAt:  "2026-05-01T11:00:00Z",
@@ -1690,7 +1690,7 @@ func TestCheckpointForkMetadataWriteFailureReleasesProvisionedLease(t *testing.T
 		t.Fatalf("metadata write failure releases=%d, want 1", releases)
 	}
 	snapshot, exists, set := ServerLeaseClaimSnapshot(backend.releaseLease.Server)
-	current, claimErr := readLeaseClaim(backend.releaseLease.LeaseID)
+	current, claimErr := ReadLeaseClaim(backend.releaseLease.LeaseID)
 	if claimErr != nil || !set || !exists || !reflect.DeepEqual(snapshot, current) {
 		t.Fatalf("rollback snapshot=%#v current=%#v exists=%t set=%t err=%v", snapshot, current, exists, set, claimErr)
 	}
@@ -1717,7 +1717,7 @@ func TestCheckpointPruneRejectsOperands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Create(checkpointRecord{
+	if _, _, err := store.Reserve(checkpointRecord{
 		ID:        "chk_old",
 		Kind:      checkpointKindArchive,
 		CreatedAt: time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339),
@@ -2092,9 +2092,16 @@ func TestCreateDirectAWSAMICheckpointValidatesConfigBeforePreparingSource(t *tes
 	cfg.Coordinator = ""
 	cfg.AWSRegion = ""
 	target := SSHTarget{User: "nobody", Host: "127.0.0.1", Port: "1", TargetOS: targetMacOS}
-	app := App{Stderr: io.Discard}
 
-	_, err := app.createDirectAWSAMICheckpoint(context.Background(), cfg, Server{Provider: "aws", CloudID: "i-123"}, target, "cbx_test", "", "repo", false, false, time.Minute)
+	_, err := (directAWSAMICheckpointDriver{}).Create(context.Background(), NativeCheckpointCreateRequest{
+		Config:      cfg,
+		Server:      Server{Provider: "aws", CloudID: "i-123"},
+		Target:      target,
+		LeaseID:     "cbx_test",
+		RepoName:    "repo",
+		WaitTimeout: time.Minute,
+		Stderr:      io.Discard,
+	})
 	if err == nil {
 		t.Fatal("expected missing AWS region error")
 	}
@@ -2134,7 +2141,7 @@ func TestWaitForDirectAWSImagePreservesAccountID(t *testing.T) {
 
 func TestApplyNativeImageCheckpointRecordPersistsSnapshotIDs(t *testing.T) {
 	store := checkpointStore{root: t.TempDir()}
-	record, err := store.Create(checkpointRecord{ID: "chk_progress", Kind: checkpointKindArchive, Provider: "aws"})
+	record, _, err := store.Reserve(checkpointRecord{ID: "chk_progress", Kind: checkpointKindArchive, Provider: "aws"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2215,7 +2222,16 @@ func TestCreateAWSAMICheckpointValidatesAdminBeforeCloudInit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := (App{Stdout: io.Discard, Stderr: io.Discard}).createAWSAMICheckpoint(ctx, cfg, SSHTarget{TargetOS: targetLinux}, "cbx_123", "", "repo", true, false, 0)
+	_, _, err := (App{Stdout: io.Discard, Stderr: io.Discard}).createNativeCheckpointRequest(ctx, NativeCheckpointCreateRequest{
+		Config:   cfg,
+		Server:   Server{Provider: "aws", CloudID: "cbx_123"},
+		Target:   SSHTarget{TargetOS: targetLinux},
+		LeaseID:  "cbx_123",
+		RepoName: "repo",
+		Strategy: checkpointStrategyImage,
+		NoReboot: true,
+		Stderr:   io.Discard,
+	})
 	if err == nil {
 		t.Fatal("expected missing admin token to fail")
 	}
@@ -2297,7 +2313,7 @@ func TestDirectAzureWindowsCheckpointRejectsInvalidSnapshotName(t *testing.T) {
 
 func TestApplyAWSAMIImageCheckpointRecord(t *testing.T) {
 	record := checkpointRecord{Kind: checkpointKindArchive}
-	applyAWSAMIImageCheckpointRecord(&record, CoordinatorImage{
+	record.applyNativeImage(CoordinatorImage{
 		ID:     "ami-12345678",
 		Name:   "checkpoint",
 		State:  "pending",
@@ -2349,7 +2365,7 @@ func TestCheckpointForkReleasesLeaseWhenKeepFalse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Create(record); err != nil {
+	if _, _, err := store.Reserve(record); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2385,7 +2401,7 @@ func TestCheckpointForkRejectsPendingNativeCheckpoint(t *testing.T) {
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		TargetOS:  targetLinux,
 	}
-	if _, err := store.Create(record); err != nil {
+	if _, _, err := store.Reserve(record); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2416,7 +2432,7 @@ func TestCheckpointInspectVerifyResourceOnlyNativeDoesNotUseCoordinator(t *testi
 		TargetOS:  targetLinux,
 	}
 	record.Native.Resource = "projects/proj/global/snapshots/checkpoint"
-	if _, err := store.Create(record); err != nil {
+	if _, _, err := store.Reserve(record); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2490,7 +2506,7 @@ func TestCheckpointInspectVerifyDirectAWSUsesLocalPathBeforeCoordinator(t *testi
 	record.Native.ImageID = "ami-12345678"
 	record.Native.Region = "eu-west-1"
 	record.Native.Direct = true
-	if _, err := store.Create(record); err != nil {
+	if _, _, err := store.Reserve(record); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2542,7 +2558,7 @@ func TestCheckpointDeleteResourceOnlyNativeDeletesProviderResource(t *testing.T)
 		TargetOS:  targetLinux,
 	}
 	record.Native.Resource = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/checkpoint"
-	if _, err := store.Create(record); err != nil {
+	if _, _, err := store.Reserve(record); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2656,7 +2672,7 @@ func TestCheckpointDeleteCoordinatorProviderAbsence(t *testing.T) {
 				TargetOS:  targetLinux,
 			}
 			record.Native.ImageID = "snapshot-missing"
-			if _, err := store.Create(record); err != nil {
+			if _, _, err := store.Reserve(record); err != nil {
 				t.Fatal(err)
 			}
 
@@ -2694,23 +2710,23 @@ func TestCheckpointDeleteCoordinatorProviderAbsence(t *testing.T) {
 func TestNativeCheckpointResourceIDAllowsAzureGCPResourceOnlyRecords(t *testing.T) {
 	aws := checkpointRecord{Kind: checkpointKindAWSAMI}
 	aws.Native.Resource = "ami-resource-only"
-	if got := nativeCheckpointResourceID(aws); got != "" {
+	if got := aws.nativeResourceID(); got != "" {
 		t.Fatalf("aws resource-only ref=%q, want empty", got)
 	}
 	aws.Native.ImageID = "ami-12345678"
-	if got := nativeCheckpointResourceID(aws); got != "ami-12345678" {
+	if got := aws.nativeResourceID(); got != "ami-12345678" {
 		t.Fatalf("aws ref=%q", got)
 	}
 
 	azure := checkpointRecord{Kind: checkpointKindAzureOS}
 	azure.Native.Resource = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/checkpoint"
-	if got := nativeCheckpointResourceID(azure); got != azure.Native.Resource {
+	if got := azure.nativeResourceID(); got != azure.Native.Resource {
 		t.Fatalf("azure ref=%q", got)
 	}
 
 	gcp := checkpointRecord{Kind: checkpointKindGCPDisk}
 	gcp.Native.Resource = "projects/proj/global/snapshots/checkpoint"
-	if got := nativeCheckpointResourceID(gcp); got != gcp.Native.Resource {
+	if got := gcp.nativeResourceID(); got != gcp.Native.Resource {
 		t.Fatalf("gcp ref=%q", got)
 	}
 }
@@ -2784,7 +2800,7 @@ func (b *checkpointFixedForkBackend) Acquire(_ context.Context, req AcquireReque
 	}
 	cloudID, exists := b.leases[leaseID]
 	if exists && b.checkpoints[leaseID] != req.RequestedCheckpointID {
-		return LeaseTarget{}, exit(4, "lease_id_conflict: lease %s is bound to checkpoint %s, not checkpoint %s", leaseID, b.checkpoints[leaseID], req.RequestedCheckpointID)
+		return LeaseTarget{}, Exit(4, "lease_id_conflict: lease %s is bound to checkpoint %s, not checkpoint %s", leaseID, b.checkpoints[leaseID], req.RequestedCheckpointID)
 	}
 	if !exists {
 		b.creates++
@@ -2816,7 +2832,7 @@ func TestApplyAWSAMICheckpointForkConfigRecomputesServerType(t *testing.T) {
 	record.Native.ImageID = "ami-12345678"
 	record.Native.Region = "eu-west-1"
 
-	if err := applyAWSAMICheckpointForkConfig(&cfg, fs, record); err != nil {
+	if err := applyNativeCheckpointForkConfig(&cfg, fs, record); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2848,7 +2864,7 @@ func TestApplyAWSAMICheckpointForkConfigKeepsDirectRecordsOffCoordinator(t *test
 	record.Native.Region = "eu-west-1"
 	record.Native.Direct = true
 
-	if err := applyAWSAMICheckpointForkConfig(&cfg, fs, record); err != nil {
+	if err := applyNativeCheckpointForkConfig(&cfg, fs, record); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Coordinator != "" || cfg.CoordToken != "" {
@@ -2879,7 +2895,7 @@ func TestApplyAWSAMICheckpointForkConfigPreservesDirectMacHostPin(t *testing.T) 
 	record.Native.Region = "eu-west-1"
 	record.Native.Direct = true
 
-	if err := applyAWSAMICheckpointForkConfig(&cfg, fs, record); err != nil {
+	if err := applyNativeCheckpointForkConfig(&cfg, fs, record); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2915,7 +2931,7 @@ func TestApplyAWSAMICheckpointForkConfigHonorsClassOverride(t *testing.T) {
 	record.Native.ImageID = "ami-12345678"
 	record.Native.Region = "eu-west-1"
 
-	if err := applyAWSAMICheckpointForkConfig(&cfg, fs, record); err != nil {
+	if err := applyNativeCheckpointForkConfig(&cfg, fs, record); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2943,7 +2959,7 @@ func TestApplyAWSAMICheckpointForkConfigPreservesExplicitTypeFlag(t *testing.T) 
 	record := checkpointRecord{Kind: checkpointKindAWSAMI, TargetOS: targetLinux, WindowsMode: windowsModeNormal}
 	record.Native.ImageID = "ami-12345678"
 
-	if err := applyAWSAMICheckpointForkConfig(&cfg, fs, record); err != nil {
+	if err := applyNativeCheckpointForkConfig(&cfg, fs, record); err != nil {
 		t.Fatal(err)
 	}
 

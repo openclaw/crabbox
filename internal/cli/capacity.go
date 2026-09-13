@@ -13,7 +13,7 @@ func (a App) capacity(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return exit(2, "usage: crabbox capacity [--json]")
+		return Exit(2, "usage: crabbox capacity [--json]")
 	}
 	cfg, err := loadConfig()
 	if err != nil {
@@ -24,7 +24,7 @@ func (a App) capacity(ctx context.Context, args []string) error {
 		return err
 	}
 	if !ok {
-		return exit(2, "capacity requires a configured coordinator")
+		return Exit(2, "capacity requires a configured coordinator")
 	}
 	res, err := coord.Capacity(ctx)
 	if err != nil {

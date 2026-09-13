@@ -31,7 +31,7 @@ func (a App) readyPoolList(ctx context.Context, args []string) error {
 			return loadErr
 		}
 		if key == "" {
-			return exit(2, "typed ready-pool listing requires a pool key")
+			return Exit(2, "typed ready-pool listing requires a pool key")
 		}
 		entries, err = coord.TypedReadyPool(ctx, key)
 		if err == nil {
@@ -74,7 +74,7 @@ func (a App) readyPoolIdentity(ctx context.Context, args []string) error {
 		return err
 	}
 	if key == "" || strings.TrimSpace(*id) == "" || strings.TrimSpace(*cacheCompatibility) == "" {
-		return exit(2, "usage: crabbox pool identity <key> --id <lease-id> --cache-compatibility <value>")
+		return Exit(2, "usage: crabbox pool identity <key> --id <lease-id> --cache-compatibility <value>")
 	}
 	cfg, err := loadConfig()
 	if err != nil {
@@ -121,13 +121,13 @@ func (a App) readyPoolRegister(ctx context.Context, args []string) error {
 		return err
 	}
 	if key == "" || *id == "" {
-		return exit(2, "usage: crabbox pool register <key> --id <lease-id>")
+		return Exit(2, "usage: crabbox pool register <key> --id <lease-id>")
 	}
 	if flagWasSet(fs, "identity-file") && flagWasSet(fs, "cache-compatibility") {
-		return exit(2, "--identity-file and --cache-compatibility are mutually exclusive")
+		return Exit(2, "--identity-file and --cache-compatibility are mutually exclusive")
 	}
 	if flagWasSet(fs, "cache-compatibility") && strings.TrimSpace(*cacheCompatibility) == "" {
-		return exit(2, "--cache-compatibility must not be empty")
+		return Exit(2, "--cache-compatibility must not be empty")
 	}
 	var identity *CoordinatorReadyPoolIdentityV1
 	if flagWasSet(fs, "identity-file") {
@@ -212,7 +212,7 @@ func (a App) readyPoolBorrow(ctx context.Context, args []string) error {
 		return err
 	}
 	if key == "" {
-		return exit(2, "usage: crabbox pool borrow <key>")
+		return Exit(2, "usage: crabbox pool borrow <key>")
 	}
 	cfg, err := loadConfig()
 	if err != nil {
@@ -270,7 +270,7 @@ func (a App) readyPoolHeartbeat(ctx context.Context, args []string) error {
 		return err
 	}
 	if key == "" || *id == "" || *borrowToken == "" {
-		return exit(2, "usage: crabbox pool heartbeat <key> --id <lease-id> --borrow-token <token>")
+		return Exit(2, "usage: crabbox pool heartbeat <key> --id <lease-id> --borrow-token <token>")
 	}
 	coord, err := readyPoolCoordinator()
 	if err != nil {
@@ -308,7 +308,7 @@ func (a App) readyPoolReturn(ctx context.Context, args []string) error {
 		return err
 	}
 	if key == "" || *id == "" {
-		return exit(2, "usage: crabbox pool return <key> --id <lease-id>")
+		return Exit(2, "usage: crabbox pool return <key> --id <lease-id>")
 	}
 	if err := validateReadyPoolReturnResult(*result); err != nil {
 		return err
@@ -362,19 +362,19 @@ func (a App) readyPoolEnsure(ctx context.Context, args []string) error {
 		return err
 	}
 	if key == "" {
-		return exit(2, "usage: crabbox pool ensure <key> [--create] [prewarm flags...]")
+		return Exit(2, "usage: crabbox pool ensure <key> [--create] [prewarm flags...]")
 	}
 	if err := validateReadyPoolEnsurePrewarmArgs(fs.Args()); err != nil {
 		return err
 	}
 	if *minReady < 0 || *minReady > 100 {
-		return exit(2, "--min-ready must be between 0 and 100")
+		return Exit(2, "--min-ready must be between 0 and 100")
 	}
 	if *maxReady < 0 {
 		*maxReady = *minReady
 	}
 	if *maxReady < *minReady || *maxReady > 100 {
-		return exit(2, "--max-ready must be between min-ready and 100")
+		return Exit(2, "--max-ready must be between min-ready and 100")
 	}
 	cfg, err := loadConfig()
 	if err != nil {
@@ -469,7 +469,7 @@ func (a App) readyPoolEnsure(ctx context.Context, args []string) error {
 							return encodeErr
 						}
 					}
-					return exit(5, "pool=%s ready=%d min_ready=%d create=%t", key, ready, *minReady, *create)
+					return Exit(5, "pool=%s ready=%d min_ready=%d create=%t", key, ready, *minReady, *create)
 				}
 				return renderReadyPoolLegacyResult(a.Stdout, key, ready, *minReady, entries, *jsonOut)
 			}
@@ -484,7 +484,7 @@ func (a App) readyPoolEnsure(ctx context.Context, args []string) error {
 					return err
 				}
 			}
-			return exit(5, "pool=%s ready=%d min_ready=%d create=false", key, res.Counts.Ready, *minReady)
+			return Exit(5, "pool=%s ready=%d min_ready=%d create=false", key, res.Counts.Ready, *minReady)
 		}
 		if res.Claim == nil {
 			if *jsonOut {
@@ -492,7 +492,7 @@ func (a App) readyPoolEnsure(ctx context.Context, args []string) error {
 					return err
 				}
 			}
-			return exit(5, "pool=%s ready=%d in_flight=%d min_ready=%d max_ready=%d capped=%t", key, res.Counts.Ready, res.Counts.InFlight, *minReady, *maxReady, res.Capped)
+			return Exit(5, "pool=%s ready=%d in_flight=%d min_ready=%d max_ready=%d capped=%t", key, res.Counts.Ready, res.Counts.InFlight, *minReady, *maxReady, res.Capped)
 		}
 		if err := prewarmApp.prewarmWithPoolFillClaim(ctx, prewarmArgs, res.Claim.Token); err != nil {
 			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -581,7 +581,7 @@ func validateReadyPoolEnsurePrewarmArgs(args []string) error {
 		}
 		switch {
 		case arg == "--repo" || arg == "--ref" || strings.HasPrefix(arg, "--repo=") || strings.HasPrefix(arg, "--ref="):
-			return exit(2, "pool ensure --create does not support forwarded --repo or --ref overrides")
+			return Exit(2, "pool ensure --create does not support forwarded --repo or --ref overrides")
 		}
 	}
 	return nil
@@ -593,7 +593,7 @@ func readyPoolCoordinatorFromConfig(cfg Config) (*CoordinatorClient, error) {
 		return nil, err
 	}
 	if !ok {
-		return nil, exit(2, "ready pools require broker.url or CRABBOX_COORDINATOR")
+		return nil, Exit(2, "ready pools require broker.url or CRABBOX_COORDINATOR")
 	}
 	return coord, nil
 }
@@ -615,7 +615,7 @@ func bindReadyPoolIdentityProvider(input map[string]any, identity CoordinatorRea
 	if requested != "" {
 		provider, err := canonicalProviderName(requested)
 		if err != nil || provider != identity.Image.Provider {
-			return exit(2, "typed ready-pool provider %q does not match identity provider %q", requested, identity.Image.Provider)
+			return Exit(2, "typed ready-pool provider %q does not match identity provider %q", requested, identity.Image.Provider)
 		}
 	}
 	input["provider"] = identity.Image.Provider
@@ -624,12 +624,12 @@ func bindReadyPoolIdentityProvider(input map[string]any, identity CoordinatorRea
 
 func bindReadyPoolIdentityProviderConfig(cfg *Config, fs *flag.FlagSet, providerValue *string, identity CoordinatorReadyPoolIdentityV1) error {
 	if providerValue == nil {
-		return exit(2, "typed ready-pool provider selection is unavailable")
+		return Exit(2, "typed ready-pool provider selection is unavailable")
 	}
 	if flagWasSet(fs, "provider") {
 		provider, err := canonicalProviderName(*providerValue)
 		if err != nil || provider != identity.Image.Provider {
-			return exit(2, "typed ready-pool provider %q does not match identity provider %q", *providerValue, identity.Image.Provider)
+			return Exit(2, "typed ready-pool provider %q does not match identity provider %q", *providerValue, identity.Image.Provider)
 		}
 		*providerValue = identity.Image.Provider
 		return nil
@@ -645,7 +645,7 @@ func bindReadyPoolIdentityConfiguredProvider(cfg *Config, identity CoordinatorRe
 	if providerSelectionIsActionable(*cfg) {
 		provider, err := canonicalProviderName(cfg.Provider)
 		if err != nil || provider != identity.Image.Provider {
-			return exit(2, "configured typed ready-pool provider %q does not match identity provider %q", cfg.Provider, identity.Image.Provider)
+			return Exit(2, "configured typed ready-pool provider %q does not match identity provider %q", cfg.Provider, identity.Image.Provider)
 		}
 	} else {
 		setProviderSelection(cfg, identity.Image.Provider, providerSelectionLeaseContext)
@@ -656,7 +656,7 @@ func bindReadyPoolIdentityConfiguredProvider(cfg *Config, identity CoordinatorRe
 func validateReadyPoolIdentityProviderConfig(cfg Config, identity CoordinatorReadyPoolIdentityV1) error {
 	provider, err := canonicalProviderName(cfg.Provider)
 	if err != nil || provider != identity.Image.Provider {
-		return exit(2, "routed typed ready-pool provider %q does not match identity provider %q", cfg.Provider, identity.Image.Provider)
+		return Exit(2, "routed typed ready-pool provider %q does not match identity provider %q", cfg.Provider, identity.Image.Provider)
 	}
 	_, err = validateReadyPoolIdentityProvider(provider)
 	return err
@@ -679,7 +679,7 @@ func validateReadyPoolEnsureProviderArgs(args []string, identity CoordinatorRead
 		found = true
 		canonical, err := canonicalProviderName(provider)
 		if err != nil || canonical != identity.Image.Provider {
-			return false, exit(2, "typed ready-pool provider %q does not match identity provider %q", provider, identity.Image.Provider)
+			return false, Exit(2, "typed ready-pool provider %q does not match identity provider %q", provider, identity.Image.Provider)
 		}
 	}
 	return found, nil
@@ -708,7 +708,7 @@ func readyPoolRunBorrowInputForRun(cfg Config, repo Repo, repoSlug string, noSyn
 		return input, nil
 	}
 	if readyPoolInputString(input, "commit") == "" {
-		return nil, exit(2, "--pool --no-sync requires an exact commit match; omit --no-sync or use a checked-out branch/SHA ref")
+		return nil, Exit(2, "--pool --no-sync requires an exact commit match; omit --no-sync or use a checked-out branch/SHA ref")
 	}
 	delete(input, "allowMissingCommit")
 	return input, nil
@@ -805,7 +805,7 @@ func bestEffortGitHubRepoSlug(repo Repo, cfg Config) string {
 }
 
 func readyPoolClaimSSHHost(leaseID string) string {
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := ReadLeaseClaim(leaseID)
 	if err != nil {
 		return ""
 	}
@@ -813,7 +813,7 @@ func readyPoolClaimSSHHost(leaseID string) string {
 }
 
 func readyPoolClaimSSHPort(leaseID string) string {
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := ReadLeaseClaim(leaseID)
 	if err != nil || claim.SSHPort <= 0 {
 		return ""
 	}
@@ -821,7 +821,7 @@ func readyPoolClaimSSHPort(leaseID string) string {
 }
 
 func readyPoolClaimWorkRoot(leaseID string) string {
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := ReadLeaseClaim(leaseID)
 	if err != nil {
 		return ""
 	}
@@ -848,7 +848,7 @@ func validateReadyPoolReturnResult(result string) error {
 	case "ready", "drain", "release":
 		return nil
 	default:
-		return exit(2, "--result must be ready, drain, or release")
+		return Exit(2, "--result must be ready, drain, or release")
 	}
 }
 
@@ -857,7 +857,7 @@ func validateReadyPoolRunReturnPolicy(policy string) error {
 	case "", "auto", "ready", "drain", "release":
 		return nil
 	default:
-		return exit(2, "--pool-return must be auto, ready, drain, or release")
+		return Exit(2, "--pool-return must be auto, ready, drain, or release")
 	}
 }
 

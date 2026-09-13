@@ -280,10 +280,10 @@ func TestClaimSharedFenceAcrossProcesses(t *testing.T) {
 func TestClaimSharedFinalizationPreservesReplacement(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const id = "cbx_shared_replaced"
-	if err := claimLeaseForRepoProvider(id, "shared", "blacksmith-testbox", t.TempDir(), time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProvider(id, "shared", "blacksmith-testbox", t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	before, err := readLeaseClaim(id)
+	before, err := ReadLeaseClaim(id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,11 +292,11 @@ func TestClaimSharedFinalizationPreservesReplacement(t *testing.T) {
 	}
 	replacement := before
 	replacement.RepoRoot = filepath.Join(t.TempDir(), "new-owner")
-	if err := replaceLeaseClaimIfUnchanged(id, before, replacement); err != nil {
+	if err := ReplaceLeaseClaimIfUnchanged(id, before, replacement); err != nil {
 		t.Fatal(err)
 	}
 	err = cleanupLeaseClaimIfUnchangedAfterContext(t.Context(), id, before, true, func() error { t.Error("replacement authorized cleanup"); return nil }, syncControllerDirectory)
-	after, readErr := readLeaseClaim(id)
+	after, readErr := ReadLeaseClaim(id)
 	if err == nil || readErr != nil || after.RepoRoot != replacement.RepoRoot {
 		t.Fatalf("replacement lost: err=%v read=%v after=%+v", err, readErr, after)
 	}
@@ -308,10 +308,10 @@ func TestClaimFenceContextCancelsPublicationWithoutMutation(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			const id = "cbx_shared_publication"
 			repo := t.TempDir()
-			if err := claimLeaseForRepoProvider(id, "shared", "blacksmith-testbox", repo, time.Minute, false); err != nil {
+			if err := ClaimLeaseForRepoProvider(id, "shared", "blacksmith-testbox", repo, time.Minute, false); err != nil {
 				t.Fatal(err)
 			}
-			claim, err := readLeaseClaim(id)
+			claim, err := ReadLeaseClaim(id)
 			if err != nil {
 				t.Fatal(err)
 			}

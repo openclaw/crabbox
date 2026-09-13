@@ -53,7 +53,7 @@ func (b *runClaimAdmissionTestBackend) ResolveRunLeaseUnderClaim(ctx context.Con
 
 func TestRunClaimAdmissionCoexistsWithHeartbeat(t *testing.T) {
 	lease, _ := setupRunClaimSnapshotTest(t)
-	removeLeaseClaim(lease.LeaseID)
+	RemoveLeaseClaim(lease.LeaseID)
 	lease.LeaseID = "cbx_123456789abc"
 	provider := runClaimAdmissionTestProvider{}
 	lease.Server.Provider = provider.Name()
@@ -83,10 +83,10 @@ decoded=""`), 1)
 	}
 	cfg := baseConfig()
 	cfg.Provider = provider.Name()
-	if err := claimLeaseTargetForRepoConfig(lease.LeaseID, "claim-snapshot", cfg, lease.Server, lease.SSH, repo.Root, time.Hour, false); err != nil {
+	if err := ClaimLeaseTargetForRepoConfig(lease.LeaseID, "claim-snapshot", cfg, lease.Server, lease.SSH, repo.Root, time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	original, err := readLeaseClaim(lease.LeaseID)
+	original, err := ReadLeaseClaim(lease.LeaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ decoded=""`), 1)
 	b := &runClaimAdmissionTestBackend{runEnvProfileTestBackend: runEnvProfileTestBackend{spec: provider.Spec()},
 		lease: lease, entered: make(chan struct{}), release: make(chan struct{})}
 	runClaimAdmissionBackend = b
-	t.Cleanup(func() { runClaimAdmissionBackend = nil; removeLeaseClaim(lease.LeaseID) })
+	t.Cleanup(func() { runClaimAdmissionBackend = nil; RemoveLeaseClaim(lease.LeaseID) })
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	var release sync.Once
@@ -187,7 +187,7 @@ decoded=""`), 1)
 	if heartbeatErr != nil && !strings.Contains(heartbeatErr.Error(), "claim changed") {
 		t.Fatalf("unexpected heartbeat failure: %v", heartbeatErr)
 	}
-	current, err := readLeaseClaim(lease.LeaseID)
+	current, err := ReadLeaseClaim(lease.LeaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,16 +233,16 @@ func TestRunClaimAdmissionPublishesOnlyValidatedCurrentOwner(t *testing.T) {
 			}
 			cfg := baseConfig()
 			cfg.Provider = provider.Name()
-			if err := claimLeaseTargetForRepoConfig(lease.LeaseID, "claim-snapshot", cfg, lease.Server, lease.SSH, repo.Root, cfg.IdleTimeout, false); err != nil {
+			if err := ClaimLeaseTargetForRepoConfig(lease.LeaseID, "claim-snapshot", cfg, lease.Server, lease.SSH, repo.Root, cfg.IdleTimeout, false); err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { removeLeaseClaim(lease.LeaseID) })
+			t.Cleanup(func() { RemoveLeaseClaim(lease.LeaseID) })
 			if test.changeClaim != nil {
 				if err := mutateLeaseClaim(lease.LeaseID, func(claim *leaseClaim) error { test.changeClaim(claim); return nil }); err != nil {
 					t.Fatal(err)
 				}
 			}
-			before, err := readLeaseClaim(lease.LeaseID)
+			before, err := ReadLeaseClaim(lease.LeaseID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -263,7 +263,7 @@ func TestRunClaimAdmissionPublishesOnlyValidatedCurrentOwner(t *testing.T) {
 				if admitted || err != nil {
 					t.Fatalf("incomplete binding did not retain its existing resolver: admitted=%t err=%v", admitted, err)
 				}
-				after, readErr := readLeaseClaim(lease.LeaseID)
+				after, readErr := ReadLeaseClaim(lease.LeaseID)
 				if readErr != nil || !reflect.DeepEqual(before, after) {
 					t.Fatal("capability modified incomplete binding")
 				}
@@ -271,10 +271,10 @@ func TestRunClaimAdmissionPublishesOnlyValidatedCurrentOwner(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := (App{}).claimRunLeaseTargetForRepoAndRegister(ctx, result.LeaseID, serverSlug(result.Server), cfg, &result.Server, result.SSH, repo.Root, false, true); err != nil {
+				if err := (App{}).claimRunLeaseTargetForRepoAndRegister(ctx, result.LeaseID, ServerSlug(result.Server), cfg, &result.Server, result.SSH, repo.Root, false, true); err != nil {
 					t.Fatal(err)
 				}
-				after, readErr = readLeaseClaim(lease.LeaseID)
+				after, readErr = ReadLeaseClaim(lease.LeaseID)
 				if readErr != nil || after.Provider != provider.Name() || after.CloudID != before.CloudID {
 					t.Fatal("legacy resolution did not retain its resource and bind the provider")
 				}
@@ -283,7 +283,7 @@ func TestRunClaimAdmissionPublishesOnlyValidatedCurrentOwner(t *testing.T) {
 			if !admitted {
 				t.Fatal("bound canonical claim skipped admission")
 			}
-			after, readErr := readLeaseClaim(lease.LeaseID)
+			after, readErr := ReadLeaseClaim(lease.LeaseID)
 			if readErr != nil {
 				t.Fatal(readErr)
 			}

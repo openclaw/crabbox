@@ -260,7 +260,7 @@ exit 0
 		runEnvProfileTestPreservesSSHWorkspace = false
 		runEnvProfileTestRetainsLease = false
 		runEnvProfileTestTerminalReleaseError = false
-		removeLeaseClaim("cbx_env_profile_test")
+		RemoveLeaseClaim("cbx_env_profile_test")
 	})
 	return dir
 }

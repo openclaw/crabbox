@@ -151,7 +151,7 @@ crabbox checkpoint fork chk_abc123def456 --slug update-flow-smoke
 Crabbox is creating a new lease; existing leases keep their assigned slug.
 It is never an operation or idempotency key.
 
-Slugs are normalized everywhere they are accepted. `normalizeLeaseSlug`
+Slugs are normalized everywhere they are accepted. `NormalizeLeaseSlug`
 lowercases, keeps only `[a-z0-9]`, collapses every other run of characters into
 a single `-`, and trims leading and trailing dashes — so `Blue_Lobster` and
 `BLUE-LOBSTER` both resolve to `blue-lobster`. A requested slug must contain at

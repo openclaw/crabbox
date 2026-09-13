@@ -1,11 +1,8 @@
 package cua
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"os"
 	"strings"
-	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -15,21 +12,7 @@ const (
 	scopePrefix      = "cua-account-sha256:"
 	labelSandboxName = "cua.sandbox.name"
 	labelCreatedAt   = "cua.created-at"
-	labelImage       = "cua.image"
-	labelKind        = "cua.kind"
-	labelRegion      = "cua.region"
-	labelWorkdir     = "cua.workdir"
-	labelTTLSeconds  = "cua.ttl-seconds"
-	labelMissing     = "cua.missing"
 )
-
-func newCUALeaseID() string {
-	var b [6]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return leasePrefix + strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000"), ".", "")
-	}
-	return leasePrefix + hex.EncodeToString(b[:])
-}
 
 func cuaScope(cfg core.Config) (string, error) {
 	apiURL, err := cuaAPIURL(cfg)
@@ -127,8 +110,4 @@ func validateSandboxOwnership(claim core.LeaseClaim, sandbox bridgeSandboxSummar
 		return core.Exit(4, "CUA sandbox %q creation identity does not match its local claim", expectedName)
 	}
 	return nil
-}
-
-func claimIsMissing(claim core.LeaseClaim) bool {
-	return claim.Labels != nil && claim.Labels[labelMissing] == "true"
 }

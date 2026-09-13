@@ -39,7 +39,7 @@ func applyConfigFlagField(dst, src reflect.Value, tags reflect.StructTag) (bool,
 		if mode == "trim-positive" {
 			parsed, err := time.ParseDuration(strings.TrimSpace(raw))
 			if err != nil || parsed <= 0 {
-				return false, exit(2, "%s", tags.Get("flagDurationError"))
+				return false, Exit(2, "%s", tags.Get("flagDurationError"))
 			}
 			dst.SetInt(int64(parsed))
 			return true, nil

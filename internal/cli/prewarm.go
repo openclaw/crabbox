@@ -44,13 +44,13 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 	typedIdentityFile := flagWasSet(fs, "pool-identity-file")
 	typedCacheCompatibility := flagWasSet(fs, "pool-cache-compatibility")
 	if (typedIdentityFile || typedCacheCompatibility) && strings.TrimSpace(*poolKey) == "" {
-		return exit(2, "typed ready-pool identity flags require --pool")
+		return Exit(2, "typed ready-pool identity flags require --pool")
 	}
 	if typedIdentityFile && typedCacheCompatibility {
-		return exit(2, "--pool-identity-file and --pool-cache-compatibility are mutually exclusive")
+		return Exit(2, "--pool-identity-file and --pool-cache-compatibility are mutually exclusive")
 	}
 	if typedCacheCompatibility && strings.TrimSpace(*poolCacheCompatibility) == "" {
-		return exit(2, "--pool-cache-compatibility must not be empty")
+		return Exit(2, "--pool-cache-compatibility must not be empty")
 	}
 	var poolIdentity *CoordinatorReadyPoolIdentityV1
 	var poolIdentityErr error
@@ -127,14 +127,14 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 		return err
 	}
 	if backend.Spec().Kind == ProviderKindServiceControl {
-		return exit(2, "prewarm is not supported for provider=%s; it does not provide a lease or run surface", backend.Spec().Name)
+		return Exit(2, "prewarm is not supported for provider=%s; it does not provide a lease or run surface", backend.Spec().Name)
 	}
 	readyPoolKey := strings.TrimSpace(*poolKey)
 	if strings.TrimSpace(poolFillClaim) != "" && readyPoolKey == "" {
-		return exit(2, "ready-pool fill claim requires --pool")
+		return Exit(2, "ready-pool fill claim requires --pool")
 	}
 	if readyPoolKey != "" && backendCoordinator(backend) == nil {
-		return exit(2, "--pool requires a coordinator-backed SSH lease provider")
+		return Exit(2, "--pool requires a coordinator-backed SSH lease provider")
 	}
 	if typedIdentityFile || typedCacheCompatibility {
 		coord, coordinatorErr := readyPoolCoordinatorFromConfig(cfg)
@@ -170,10 +170,10 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 	}
 	leaseID := parseWarmupLeaseID(out.String())
 	if leaseID == "" {
-		return exit(2, "prewarm could not parse warmup lease id")
+		return Exit(2, "prewarm could not parse warmup lease id")
 	}
 	if backend.Spec().Kind != ProviderKindDelegatedRun && acquiredLease.LeaseID != leaseID {
-		return exit(2, "prewarm warmup lease identity was not preserved")
+		return Exit(2, "prewarm warmup lease identity was not preserved")
 	}
 	warmupMs := time.Since(warmupStarted).Milliseconds()
 	hydration := "skipped"
@@ -478,10 +478,10 @@ func admitPrewarmProbe(args []string) error {
 		return err
 	}
 	if err := validateProviderRun(provider, req, *flags.ReadyPool, len(*flags.RequiredSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
-		return exit(2, "prewarm --probe-command is not supported for provider=%s: %v; omit --probe-command or choose a provider that supports the probe options", provider.Spec().Name, err)
+		return Exit(2, "prewarm --probe-command is not supported for provider=%s: %v; omit --probe-command or choose a provider that supports the probe options", provider.Spec().Name, err)
 	}
 	if err := validateProviderConfig(cfg); err != nil {
-		return exit(2, "prewarm probe configuration is invalid: %v", err)
+		return Exit(2, "prewarm probe configuration is invalid: %v", err)
 	}
 	return nil
 }
@@ -508,7 +508,7 @@ func admitPrewarmHydration(cfg Config, passthrough []string) error {
 		return err
 	}
 	if err := validateProviderConfig(projected); err != nil {
-		return exit(2, "prewarm hydration configuration is invalid: %v", err)
+		return Exit(2, "prewarm hydration configuration is invalid: %v", err)
 	}
 	return nil
 }

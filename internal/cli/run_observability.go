@@ -83,7 +83,7 @@ func printRunContextSummary(w io.Writer, coord *CoordinatorClient, cfg Config, s
 	}
 	fmt.Fprintln(w, "run context:")
 	fmt.Fprintf(w, "  run=%s portal=%s logs=%s\n", blank(runID, "-"), runPortalURL(coord, historyRunID), runLogsURL(coord, historyRunID))
-	fmt.Fprintf(w, "  lease=%s slug=%s provider=%s target=%s type=%s\n", leaseID, blank(serverSlug(server), "-"), cfg.Provider, blank(target.TargetOS, cfg.TargetOS), server.ServerType.Name)
+	fmt.Fprintf(w, "  lease=%s slug=%s provider=%s target=%s type=%s\n", leaseID, blank(ServerSlug(server), "-"), cfg.Provider, blank(target.TargetOS, cfg.TargetOS), server.ServerType.Name)
 	fmt.Fprintf(w, "  ssh=%s@%s:%s ip=%s\n", redactedSSHUser(cfg, server, target), target.Host, target.Port, blank(server.PublicNet.IPv4.IP, target.Host))
 	fmt.Fprintf(w, "  workdir=%s workspace=%s actions=%s\n", workdir, workspace, blank(actionsURL, "-"))
 }
@@ -92,12 +92,12 @@ func printKeepOnFailureSSHHint(w io.Writer, cfg Config, leaseID string, server S
 	if w == nil {
 		return
 	}
-	id := firstNonBlank(serverSlug(server), leaseID)
-	expires := blank(leaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"])
+	id := firstNonBlank(ServerSlug(server), leaseID)
+	expires := blank(LeaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"])
 	if expires == "" {
 		expires = "idle/ttl"
 	}
-	fmt.Fprintf(w, "keep-on-failure: kept lease=%s slug=%s expires=%s idle_timeout=%s ttl=%s\n", leaseID, blank(serverSlug(server), "-"), expires, cfg.IdleTimeout, cfg.TTL)
+	fmt.Fprintf(w, "keep-on-failure: kept lease=%s slug=%s expires=%s idle_timeout=%s ttl=%s\n", leaseID, blank(ServerSlug(server), "-"), expires, cfg.IdleTimeout, cfg.TTL)
 	fmt.Fprintf(w, "inspect: crabbox inspect --provider %s --id %s\n", displayShellArg(cfg.Provider), displayShellArg(id))
 	fmt.Fprintf(w, "ssh: crabbox ssh --provider %s --id %s\n", displayShellArg(cfg.Provider), displayShellArg(id))
 	if target.Host != "" && !target.AuthSecret {
@@ -304,7 +304,7 @@ func runWSL2ControlCombinedOutput(ctx context.Context, target SSHTarget, remote 
 	defer cancel()
 	out, err := runWSL2ControlScriptCombinedOutput(commandCtx, target, remote, 15*time.Second, "2", "1")
 	if commandCtx.Err() == context.DeadlineExceeded {
-		return out, exit(7, "WSL2 control SSH probe timed out after 30s")
+		return out, Exit(7, "WSL2 control SSH probe timed out after 30s")
 	}
 	return out, err
 }
@@ -324,7 +324,7 @@ func windowsRemoteMissingToolsCommand(tools []string) string {
   }
 }
 `)
-	return powershellCommand(b.String())
+	return PowershellCommand(b.String())
 }
 
 func parseMissingRemoteToolsOutput(value string) []string {
@@ -357,7 +357,7 @@ func rawJSRuntimeMissingError(cfg Config, missing []string, command []string, sh
 	}
 	parts = append(parts, "or include Node/Corepack/package-manager setup before the command")
 	parts = append(parts, "or choose a provider/image with the JS toolchain")
-	return exit(5, "%s", strings.Join(parts, "; "))
+	return Exit(5, "%s", strings.Join(parts, "; "))
 }
 
 func printCommandNotFoundHint(w io.Writer, cfg Config, target SSHTarget, leaseID string, command []string, shellMode bool, exitCode int, hydrated bool, hydrateSuggestion string) {
@@ -409,7 +409,7 @@ preflight_cmd() {
 }
 
 func windowsRemoteCapabilityPreflightCommand(workdir string, env map[string]string, envFiles []string, tools []string) string {
-	return powershellCommand(windowsRemoteCapabilityPreflightScript(workdir, env, envFiles, tools))
+	return PowershellCommand(windowsRemoteCapabilityPreflightScript(workdir, env, envFiles, tools))
 }
 
 func runWindowsRemoteCapabilityPreflight(ctx context.Context, target SSHTarget, workdir string, env map[string]string, envFiles []string, tools []string) (string, error) {
@@ -459,7 +459,7 @@ func windowsRemoteCapabilityPreflightPath(script string) string {
 }
 
 func windowsRemoteRunCapabilityPreflightCommand(workdir, remotePath string) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 Set-Location -LiteralPath ` + psQuote(workdir) + `
 $__crabboxPreflight = ` + psQuote(remotePath) + `
 & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $__crabboxPreflight
@@ -468,7 +468,7 @@ exit $LASTEXITCODE
 }
 
 func windowsRemoteRemoveCapabilityPreflightCommand(workdir, remotePath string) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 Set-Location -LiteralPath ` + psQuote(workdir) + `
 $__crabboxPreflight = ` + psQuote(remotePath) + `
 if (Test-Path -LiteralPath $__crabboxPreflight) {
@@ -716,7 +716,7 @@ func validatePreflightTools(tools []string) error {
 			continue
 		}
 		if _, ok := preflightToolRegistry[tool]; !ok {
-			return exit(2, "unknown preflight tool %q; run 'crabbox preflight-tools' to list supported names", tool)
+			return Exit(2, "unknown preflight tool %q; run 'crabbox preflight-tools' to list supported names", tool)
 		}
 	}
 	return nil
@@ -843,7 +843,7 @@ func openFailureStreamBundleFile(label, explicitPath string) (*os.File, string, 
 	}
 	file, err := os.CreateTemp("", "crabbox-failure-*."+label+".log")
 	if err != nil {
-		return nil, "", func() {}, exit(2, "failure bundle %s temp: %v", label, err)
+		return nil, "", func() {}, Exit(2, "failure bundle %s temp: %v", label, err)
 	}
 	path := file.Name()
 	cleanup := func() {
@@ -855,7 +855,7 @@ func openFailureStreamBundleFile(label, explicitPath string) (*os.File, string, 
 
 func captureFailureArtifacts(ctx context.Context, target SSHTarget, workdir, leaseID, runID string, meta FailureCaptureMetadata) (local string, bytes int, err error) {
 	if isWindowsNativeTarget(target) {
-		return "", 0, exit(2, "capture-on-fail is not supported for native Windows targets")
+		return "", 0, Exit(2, "capture-on-fail is not supported for native Windows targets")
 	}
 	name := safeCaptureName(firstNonBlank(runID, leaseID, "run")) + "-" + time.Now().UTC().Format("20060102T150405Z") + ".tar.gz"
 	remotePath := ".crabbox/" + name
@@ -869,13 +869,13 @@ func captureFailureArtifacts(ctx context.Context, target SSHTarget, workdir, lea
 		}
 		local, bytes, bundleErr := writeLocalFailureBundle(name, "", meta)
 		if bundleErr != nil {
-			return local, bytes, exit(7, "capture-on-fail prepare: %v: %s; local bundle: %v", prepareErr, strings.TrimSpace(out), bundleErr)
+			return local, bytes, Exit(7, "capture-on-fail prepare: %v: %s; local bundle: %v", prepareErr, strings.TrimSpace(out), bundleErr)
 		}
-		return local, bytes, exit(7, "capture-on-fail prepare: %v: %s", prepareErr, strings.TrimSpace(out))
+		return local, bytes, Exit(7, "capture-on-fail prepare: %v: %s", prepareErr, strings.TrimSpace(out))
 	}
 	defer func() {
 		if out, cleanupErr := cleanupRemoteFailureCapture(ctx, target, workdir, remotePath, runSSHCombinedOutput); cleanupErr != nil && err == nil {
-			err = exit(7, "capture-on-fail remote cleanup: %v: %s", cleanupErr, strings.TrimSpace(out))
+			err = Exit(7, "capture-on-fail remote cleanup: %v: %s", cleanupErr, strings.TrimSpace(out))
 		}
 	}()
 	remoteLocalPath := filepath.Join(os.TempDir(), safeCaptureName(firstNonBlank(runID, leaseID, "run"))+"-remote-"+name)
@@ -883,7 +883,7 @@ func captureFailureArtifacts(ctx context.Context, target SSHTarget, workdir, lea
 	if downloadErr != nil {
 		local, bytes, bundleErr := writeLocalFailureBundle(name, "", meta)
 		if bundleErr != nil {
-			return local, bytes, exit(7, "capture-on-fail download: %v; local bundle: %v", downloadErr, bundleErr)
+			return local, bytes, Exit(7, "capture-on-fail download: %v; local bundle: %v", downloadErr, bundleErr)
 		}
 		return local, bytes, downloadErr
 	}
@@ -904,7 +904,7 @@ func captureFailureBundle(ctx context.Context, target SSHTarget, workdir, leaseI
 }
 
 func writeLocalFailureBundle(name, remoteTarPath string, meta FailureCaptureMetadata) (string, int, error) {
-	file, localPath, err := openFailureBundleDestination(name, crabboxStateDir, openFailureBundleOutput)
+	file, localPath, err := openFailureBundleDestination(name, CrabboxStateDir, openFailureBundleOutput)
 	if err != nil {
 		return localPath, 0, err
 	}
@@ -942,14 +942,14 @@ func writeLocalFailureBundle(name, remoteTarPath string, meta FailureCaptureMeta
 		}
 	}
 	if err := closeErr(true); err != nil {
-		return localPath, int(counting.N), exit(2, "failure bundle close %s: %v", localPath, err)
+		return localPath, int(counting.N), Exit(2, "failure bundle close %s: %v", localPath, err)
 	}
 	return localPath, int(counting.N), nil
 }
 
 func openFailureBundleDestination(name string, stateDir func() (string, error), openFile func(string) (*failureBundleOutput, error)) (*failureBundleOutput, string, error) {
 	if name == "." || !filepath.IsLocal(name) || filepath.Base(name) != name {
-		return nil, "", exit(2, "invalid failure bundle name %q", name)
+		return nil, "", Exit(2, "invalid failure bundle name %q", name)
 	}
 	localPath := filepath.Join(".crabbox", "captures", name)
 	file, err := openFile(localPath)
@@ -957,16 +957,16 @@ func openFailureBundleDestination(name string, stateDir func() (string, error), 
 		return file, localPath, nil
 	}
 	if !failureBundleDestinationUnwritable(err) {
-		return nil, localPath, exit(2, "failure bundle create %s: %v", localPath, err)
+		return nil, localPath, Exit(2, "failure bundle create %s: %v", localPath, err)
 	}
 	state, stateErr := stateDir()
 	if stateErr != nil {
-		return nil, localPath, exit(2, "failure bundle create %s: %v; resolve user state fallback: %v", localPath, err, stateErr)
+		return nil, localPath, Exit(2, "failure bundle create %s: %v; resolve user state fallback: %v", localPath, err, stateErr)
 	}
 	fallbackPath := filepath.Join(state, "captures", name)
 	file, fallbackErr := openFile(fallbackPath)
 	if fallbackErr != nil {
-		return nil, fallbackPath, exit(2, "failure bundle create %s: %v; fallback %s: %v", localPath, err, fallbackPath, fallbackErr)
+		return nil, fallbackPath, Exit(2, "failure bundle create %s: %v; fallback %s: %v", localPath, err, fallbackPath, fallbackErr)
 	}
 	return file, fallbackPath, nil
 }
@@ -1058,21 +1058,21 @@ func addFailureBundleFile(tw *tar.Writer, name, path string) error {
 		if os.IsNotExist(err) {
 			return addFailureBundleBytes(tw, name, nil)
 		}
-		return exit(2, "failure bundle stat %s: %v", path, err)
+		return Exit(2, "failure bundle stat %s: %v", path, err)
 	}
 	if !info.Mode().IsRegular() {
-		return exit(2, "failure bundle read %s: not a regular file", path)
+		return Exit(2, "failure bundle read %s: not a regular file", path)
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return exit(2, "failure bundle open %s: %v", path, err)
+		return Exit(2, "failure bundle open %s: %v", path, err)
 	}
 	defer file.Close()
 	if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: info.Size(), ModTime: info.ModTime()}); err != nil {
 		return err
 	}
 	if _, err := io.Copy(tw, file); err != nil {
-		return exit(2, "failure bundle stream %s: %v", path, err)
+		return Exit(2, "failure bundle stream %s: %v", path, err)
 	}
 	return nil
 }
@@ -1080,12 +1080,12 @@ func addFailureBundleFile(tw *tar.Writer, name, path string) error {
 func appendRemoteFailureTar(tw *tar.Writer, remoteTarPath, prefix string) error {
 	file, err := os.Open(remoteTarPath)
 	if err != nil {
-		return exit(2, "failure bundle open remote tar %s: %v", remoteTarPath, err)
+		return Exit(2, "failure bundle open remote tar %s: %v", remoteTarPath, err)
 	}
 	defer file.Close()
 	gzipReader, err := gzip.NewReader(file)
 	if err != nil {
-		return exit(2, "failure bundle read remote tar %s: %v", remoteTarPath, err)
+		return Exit(2, "failure bundle read remote tar %s: %v", remoteTarPath, err)
 	}
 	defer gzipReader.Close()
 	tr := tar.NewReader(gzipReader)
@@ -1095,7 +1095,7 @@ func appendRemoteFailureTar(tw *tar.Writer, remoteTarPath, prefix string) error 
 			return nil
 		}
 		if err != nil {
-			return exit(2, "failure bundle read remote tar %s: %v", remoteTarPath, err)
+			return Exit(2, "failure bundle read remote tar %s: %v", remoteTarPath, err)
 		}
 		cleanName, ok := cleanRemoteFailureTarPath(header.Name)
 		if !ok {

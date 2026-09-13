@@ -843,10 +843,10 @@ func setupRunClaimSnapshotTest(t *testing.T) (LeaseTarget, leaseClaim) {
 			SSHConfigProxy: true,
 		},
 	}
-	if err := claimLeaseTargetForRepoConfig(lease.LeaseID, "claim-snapshot", cfg, lease.Server, lease.SSH, repo.Root, cfg.IdleTimeout, false); err != nil {
+	if err := ClaimLeaseTargetForRepoConfig(lease.LeaseID, "claim-snapshot", cfg, lease.Server, lease.SSH, repo.Root, cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
-	initial, err := readLeaseClaim(lease.LeaseID)
+	initial, err := ReadLeaseClaim(lease.LeaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -855,7 +855,7 @@ func setupRunClaimSnapshotTest(t *testing.T) (LeaseTarget, leaseClaim) {
 	t.Cleanup(func() {
 		runEnvProfileTestAcquireLease = nil
 		runEnvProfileTestReleaseRequestHook = nil
-		removeLeaseClaim(lease.LeaseID)
+		RemoveLeaseClaim(lease.LeaseID)
 	})
 	return lease, initial
 }
@@ -871,7 +871,7 @@ func TestRunCommandOneShotCleanupUsesUpdatedClaimSnapshot(t *testing.T) {
 		if claim.Revision == initial.Revision {
 			return errors.New("release received the pre-registration claim snapshot")
 		}
-		return removeLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, func() error {
+		return RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, func() error {
 			resourceDeleted = true
 			return nil
 		})
@@ -890,7 +890,7 @@ func TestRunCommandOneShotCleanupUsesUpdatedClaimSnapshot(t *testing.T) {
 	if !resourceDeleted {
 		t.Fatal("task-owned resource was not deleted")
 	}
-	if _, exists, err := readLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
+	if _, exists, err := ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
 		t.Fatalf("claim exists=%v err=%v after successful cleanup", exists, err)
 	}
 }
@@ -904,7 +904,7 @@ func TestWarmupFailureAfterRegistrationReleasesNewestClaimSnapshot(t *testing.T)
 		if !set || !exists || snapshot.Revision == initial.Revision {
 			return fmt.Errorf("release received stale claim snapshot: %#v", snapshot)
 		}
-		return removeLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, snapshot, nil)
+		return RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, snapshot, nil)
 	}
 	err := (App{Stdout: io.Discard, Stderr: io.Discard}).warmup(context.Background(), []string{
 		"--provider", runEnvProfileTestProvider{}.Name(), "--network", "tailscale",
@@ -912,7 +912,7 @@ func TestWarmupFailureAfterRegistrationReleasesNewestClaimSnapshot(t *testing.T)
 	if err == nil || !strings.Contains(err.Error(), "no tailnet address") || releases != 1 {
 		t.Fatalf("warmup error=%v releases=%d", err, releases)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
+	if _, exists, err := ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
 		t.Fatalf("claim exists=%t err=%v", exists, err)
 	}
 }
@@ -925,7 +925,7 @@ func TestResolvedRegistrationTouchReceivesNewestClaimSnapshot(t *testing.T) {
 	runEnvProfileTestTouchHook = func(req TouchRequest) error {
 		touches++
 		snapshot, exists, set := ServerLeaseClaimSnapshot(req.Lease.Server)
-		current, err := readLeaseClaim(req.Lease.LeaseID)
+		current, err := ReadLeaseClaim(req.Lease.LeaseID)
 		if err != nil || !set || !exists || snapshot.Revision == initial.Revision || !reflect.DeepEqual(snapshot, current) {
 			return fmt.Errorf("touch received stale snapshot: snapshot=%#v current=%#v exists=%t set=%t err=%v", snapshot, current, exists, set, err)
 		}
@@ -951,10 +951,10 @@ func TestRunCommandCleanupRejectsClaimReplacedAfterRegistration(t *testing.T) {
 		}
 		labels := cloneStringMap(claim.Labels)
 		labels["owner"] = "replacement-process"
-		if _, err := updateLeaseClaimLabelsIfUnchanged(req.Lease.LeaseID, claim, labels); err != nil {
+		if _, err := UpdateLeaseClaimLabelsIfUnchanged(req.Lease.LeaseID, claim, labels); err != nil {
 			return err
 		}
-		return removeLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, func() error {
+		return RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, func() error {
 			resourceDeleted = true
 			return nil
 		})
@@ -973,7 +973,7 @@ func TestRunCommandCleanupRejectsClaimReplacedAfterRegistration(t *testing.T) {
 	if resourceDeleted {
 		t.Fatal("replacement-owned resource was deleted")
 	}
-	replacement, readErr := readLeaseClaim(lease.LeaseID)
+	replacement, readErr := ReadLeaseClaim(lease.LeaseID)
 	if readErr != nil || replacement.Labels["owner"] != "replacement-process" {
 		t.Fatalf("replacement claim=%#v err=%v", replacement, readErr)
 	}
@@ -1206,7 +1206,7 @@ func TestRunOrdinarySparseScopeBeforeLeaseWork(t *testing.T) {
 				acquires := 0
 				runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) {
 					acquires++
-					return LeaseTarget{}, exit(9, "acquire captured")
+					return LeaseTarget{}, Exit(9, "acquire captured")
 				}
 				t.Cleanup(func() { runEnvProfileTestAcquireLease = nil })
 				runPrepareTestResolveRequests = nil
@@ -1443,11 +1443,11 @@ var runPrepareTestResolveRequests []ResolveRequest
 
 func (b runPrepareTestBackend) Spec() ProviderSpec { return b.spec }
 func (b runPrepareTestBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
-	return LeaseTarget{}, exit(9, "unexpected acquire")
+	return LeaseTarget{}, Exit(9, "unexpected acquire")
 }
 func (b runPrepareTestBackend) Resolve(_ context.Context, req ResolveRequest) (LeaseTarget, error) {
 	runPrepareTestResolveRequests = append(runPrepareTestResolveRequests, req)
-	return LeaseTarget{}, exit(9, "resolve captured")
+	return LeaseTarget{}, Exit(9, "resolve captured")
 }
 func (b runPrepareTestBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
 	return nil, nil
@@ -1617,7 +1617,7 @@ func TestRunWithExistingLeaseRoutesProviderFromClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	const leaseID = "cbx_1257abcdefff"
-	if err := claimLeaseForRepoProvider(leaseID, "claim-routed", "run-prepare-test", repo.Root, time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProvider(leaseID, "claim-routed", "run-prepare-test", repo.Root, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1700,8 +1700,8 @@ func TestFormatRunSummaryNoSync(t *testing.T) {
 }
 
 func TestShouldReplaceLeaseAfterBeforeCommandSSHFailure(t *testing.T) {
-	waitErr := exit(5, "timed out waiting for SSH on 203.0.113.10 during before command")
-	otherErr := exit(6, "rsync failed")
+	waitErr := Exit(5, "timed out waiting for SSH on 203.0.113.10 during before command")
+	otherErr := Exit(6, "rsync failed")
 	tests := []struct {
 		name            string
 		err             error
@@ -2010,7 +2010,7 @@ func setupLocalContainerRunSessionTest(t *testing.T, commandScript string) (stri
 		runEnvProfileTestReleaseRequestHook = nil
 		runEnvProfileTestTouchHook = nil
 		runEnvProfileTestReleaseErr = nil
-		removeLeaseClaim(localContainerRunSessionTestLeaseID)
+		RemoveLeaseClaim(localContainerRunSessionTestLeaseID)
 	})
 	return dir, lease
 }
@@ -2067,7 +2067,7 @@ func TestRunCommandWritesFreshLocalContainerLeaseOutputAfterClaim(t *testing.T) 
 	}
 	touchObserved := false
 	runEnvProfileTestTouchHook = func(req TouchRequest) error {
-		if _, exists, err := readLeaseClaimWithPresence(req.Lease.LeaseID); err != nil || !exists {
+		if _, exists, err := ReadLeaseClaimWithPresence(req.Lease.LeaseID); err != nil || !exists {
 			return fmt.Errorf("touch observed before exact claim: exists=%t err=%v", exists, err)
 		}
 		if _, err := os.Stat(path); err != nil {
@@ -2286,7 +2286,7 @@ exit 0
 			testAWSBackendOverride = testSSHBackend{spec: testAWSProvider{}.Spec()}
 			t.Cleanup(func() {
 				testAWSBackendOverride = nil
-				removeLeaseClaim(leaseID)
+				RemoveLeaseClaim(leaseID)
 			})
 
 			var stdout, stderr bytes.Buffer
@@ -2419,7 +2419,7 @@ profiles:
 				t.Fatalf("fresh unreported lease released %d time(s), want 1", releases)
 			}
 			assertRunSessionValidationStoppedBeforeWork(t, path, commandMarker, syncMarker)
-			if _, exists, readErr := readLeaseClaimWithPresence(localContainerRunSessionTestLeaseID); readErr != nil || exists {
+			if _, exists, readErr := ReadLeaseClaimWithPresence(localContainerRunSessionTestLeaseID); readErr != nil || exists {
 				t.Fatalf("claim after validation failure exists=%t err=%v", exists, readErr)
 			}
 		})
@@ -2612,7 +2612,7 @@ func TestRunCommandLocalContainerLeaseOutputClaimFailureReleasesFreshLease(t *te
 	marker := filepath.Join(dir, "command-ran")
 	t.Setenv("CRABBOX_COMMAND_MARKER", marker)
 	runEnvProfileTestAcquireHook = func(AcquireRequest) {
-		if err := claimLeaseForRepoProvider(
+		if err := ClaimLeaseForRepoProvider(
 			localContainerRunSessionTestLeaseID,
 			"session-slug",
 			"local-container",
@@ -2669,7 +2669,7 @@ func TestRunCommandLocalContainerLeaseOutputWriteFailureReleasesFreshLease(t *te
 		if !set || !exists {
 			return errors.New("release did not receive the exact recorded claim")
 		}
-		return removeLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, nil)
+		return RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, nil)
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -2687,7 +2687,7 @@ func TestRunCommandLocalContainerLeaseOutputWriteFailureReleasesFreshLease(t *te
 	if releasedID != localContainerRunSessionTestLeaseID {
 		t.Fatalf("released lease=%q want %q", releasedID, localContainerRunSessionTestLeaseID)
 	}
-	if _, exists, readErr := readLeaseClaimWithPresence(localContainerRunSessionTestLeaseID); readErr != nil || exists {
+	if _, exists, readErr := ReadLeaseClaimWithPresence(localContainerRunSessionTestLeaseID); readErr != nil || exists {
 		t.Fatalf("claim residue exists=%t err=%v", exists, readErr)
 	}
 	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
@@ -8260,7 +8260,7 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 	t.Run("exact id canonicalizes fixed AWS marker", func(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		const leaseID = "cbx_1257aaaa0001"
-		if err := claimLeaseForRepoProvider(leaseID, "fixed", FixedAWSClaimProvider, "/repo", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider(leaseID, "fixed", FixedAWSClaimProvider, "/repo", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 		fs, provider := newFlags(t, "hetzner")
@@ -8279,10 +8279,10 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 	t.Run("exact id wins over slug collision", func(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		const leaseID = "cbx_1257aaaa0002"
-		if err := claimLeaseForRepoProvider(leaseID, "exact-owner", "run-prepare-test", "/repo-a", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider(leaseID, "exact-owner", "run-prepare-test", "/repo-a", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
-		if err := claimLeaseForRepoProvider("cbx_1257bbbb0002", leaseID, "local-container", "/repo-b", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider("cbx_1257bbbb0002", leaseID, "local-container", "/repo-b", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 		fs, provider := newFlags(t, "hetzner")
@@ -8297,7 +8297,7 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 
 	t.Run("unique slug routes provider", func(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
-		if err := claimLeaseForRepoProvider("cbx_1257aaaa0003", "Blue Lobster", "local-container", "/repo", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider("cbx_1257aaaa0003", "Blue Lobster", "local-container", "/repo", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 		fs, provider := newFlags(t, "hetzner")
@@ -8316,7 +8316,7 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 	t.Run("duplicate slug within one provider defers scope resolution", func(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		for _, leaseID := range []string{"cbx_1257aaaa0007", "cbx_1257bbbb0007"} {
-			if err := claimLeaseForRepoProviderScope(leaseID, "Scoped Slug", "local-container", leaseID, "/repo", time.Minute, false); err != nil {
+			if err := ClaimLeaseForRepoProviderScope(leaseID, "Scoped Slug", "local-container", leaseID, "/repo", time.Minute, false); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -8334,7 +8334,7 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		for i, providerName := range []string{"external", "exec-provider"} {
 			leaseID := fmt.Sprintf("cbx_1257eeee000%d", i)
-			if err := claimLeaseForRepoProviderScope(leaseID, "External Alias", providerName, leaseID, "/repo", time.Minute, false); err != nil {
+			if err := ClaimLeaseForRepoProviderScope(leaseID, "External Alias", providerName, leaseID, "/repo", time.Minute, false); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -8350,10 +8350,10 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 
 	t.Run("ambiguous slug fails with guidance", func(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
-		if err := claimLeaseForRepoProvider("cbx_1257aaaa0004", "Shared Slug", "local-container", "/repo-a", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider("cbx_1257aaaa0004", "Shared Slug", "local-container", "/repo-a", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
-		if err := claimLeaseForRepoProvider("cbx_1257bbbb0004", "Shared Slug", "run-prepare-test", "/repo-b", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider("cbx_1257bbbb0004", "Shared Slug", "run-prepare-test", "/repo-b", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 		fs, provider := newFlags(t, "hetzner")
@@ -8367,7 +8367,7 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 	t.Run("explicit provider remains authoritative", func(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		const leaseID = "cbx_1257aaaa0005"
-		if err := claimLeaseForRepoProvider(leaseID, "explicit", "local-container", "/repo", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider(leaseID, "explicit", "local-container", "/repo", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 		fs, provider := newFlags(t, "hetzner", "--provider", "run-prepare-test")

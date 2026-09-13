@@ -1,11 +1,85 @@
 package cli
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
+
+func TestManagedStateDarwinSpecialEntrySpelling(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", "cb-special-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(root, "State")
+	namespace := filepath.Join(state, "crabbox")
+	if err := os.MkdirAll(namespace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_STATE_HOME", state)
+	for _, dir := range []string{root, namespace} {
+		for _, kind := range []string{"Socket", "FIFO"} {
+			path := filepath.Join(dir, kind)
+			if kind == "Socket" {
+				listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = listener.Close() })
+			} else if err := unix.Mkfifo(path, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Run(rel, func(t *testing.T) {
+				got, err := NormalizeManagedStateTransferRoot(path)
+				if err != nil || got != filepath.Join(canonicalRoot, rel) {
+					t.Fatalf("normalization=%q err=%v", got, err)
+				}
+				current, err := os.Lstat(path)
+				if err != nil || !os.SameFile(info, current) || info.Mode() != current.Mode() {
+					t.Fatal("metadata lookup changed fixture")
+				}
+				err = ValidateManagedStateTransferScope("owned special entry", path)
+				if (err != nil) != (dir == namespace) {
+					t.Fatalf("overlap admission=%v", err)
+				}
+			})
+			t.Run(rel+"/case-folded", func(t *testing.T) {
+				input := filepath.Join(dir, strings.ToLower(kind))
+				alias, err := os.Lstat(input)
+				if os.IsNotExist(err) {
+					t.Skip("fixture filesystem does not expose this case-folded alias")
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !os.SameFile(info, alias) {
+					t.Skip("fixture case-folded path names a distinct object")
+				}
+				got, err := NormalizeManagedStateTransferRoot(input)
+				if err != nil || got != filepath.Join(canonicalRoot, rel) {
+					t.Fatalf("case-folded normalization=%q err=%v", got, err)
+				}
+			})
+		}
+	}
+}
 
 func TestManagedStateDarwinDescriptorSpelling(t *testing.T) {
 	root := t.TempDir()

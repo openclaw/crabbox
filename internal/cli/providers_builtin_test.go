@@ -118,7 +118,7 @@ func (testExternalProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any
 		}
 	}
 	if strings.TrimSpace(cfg.External.Command) == "" {
-		return exit(2, "external command is required")
+		return Exit(2, "external command is required")
 	}
 	return nil
 }
@@ -192,7 +192,7 @@ func (testAzureProvider) RouteConfig(cfg *Config, fs *flag.FlagSet, values any) 
 	}
 	normalized, err := NormalizeAzureBackend(backend)
 	if err != nil {
-		return exit(2, "%s", err)
+		return Exit(2, "%s", err)
 	}
 	cfg.AzureBackend = normalized
 	if normalized == AzureBackendDynamicSessions {
@@ -204,7 +204,7 @@ func (testAzureProvider) RouteConfig(cfg *Config, fs *flag.FlagSet, values any) 
 }
 func (p testAzureProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	backendExplicit := fs != nil && flagWasSet(fs, "azure-backend")
-	if !providerSelectionIsAuthoritativeRoute(*cfg) || backendExplicit {
+	if !ProviderSelectionIsAuthoritativeRoute(*cfg) || backendExplicit {
 		if err := p.RouteConfig(cfg, fs, values); err != nil {
 			return err
 		}
@@ -223,7 +223,7 @@ func (p testAzureProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any)
 	return nil
 }
 func (testAzureProvider) ServerTypeForConfig(cfg Config) string {
-	candidates := azureVMSizeCandidatesForConfig(cfg)
+	candidates := AzureVMSizeCandidatesForConfig(cfg)
 	if len(candidates) == 0 {
 		return ""
 	}
@@ -239,7 +239,7 @@ func (testAzureProvider) NativeCheckpointCapability(req NativeCheckpointRequest)
 	if req.Config.Coordinator == "" || req.Server.CloudID == "" || firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != targetLinux {
 		return NativeCheckpointCapability{}, false
 	}
-	if normalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
+	if NormalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
 		return NativeCheckpointCapability{
 			Kind:              checkpointKindAzure,
 			CreateUnsupported: "Azure managed images require a stopped/generalized source VM; use --strategy disk-snapshot for active Azure leases",
@@ -254,7 +254,7 @@ func (testAzureProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointFor
 	case checkpointKindAzureOS:
 		req.Config.AzureSnapshot = firstNonBlank(req.Record.Resource, req.Record.ImageID)
 	default:
-		return exit(2, "provider=azure does not support checkpoint kind=%s", req.Record.Kind)
+		return Exit(2, "provider=azure does not support checkpoint kind=%s", req.Record.Kind)
 	}
 	if req.Record.Region != "" {
 		req.Config.AzureLocation = req.Record.Region
@@ -410,7 +410,7 @@ func (testHetznerProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (testHetznerProvider) ServerTypeForConfig(cfg Config) string {
-	candidates := hetznerServerTypeCandidatesForConfig(cfg)
+	candidates := HetznerServerTypeCandidatesForConfig(cfg)
 	if len(candidates) == 0 {
 		return ""
 	}
@@ -657,7 +657,7 @@ func (testGCPProvider) ReadyPoolImageIdentityMatchesLease(req ProviderReadyPoolI
 		fmt.Sprintf("projects/%s/global/%s", parts[1], collection) == req.Identity.Scope
 }
 func (testGCPProvider) ServerTypeForConfig(cfg Config) string {
-	candidates := gcpMachineTypeCandidatesForConfig(cfg)
+	candidates := GCPMachineTypeCandidatesForConfig(cfg)
 	if len(candidates) == 0 {
 		return ""
 	}
@@ -673,7 +673,7 @@ func (testGCPProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (
 	if req.Config.Coordinator == "" || req.Server.CloudID == "" || firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != targetLinux {
 		return NativeCheckpointCapability{}, false
 	}
-	if normalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
+	if NormalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
 		return NativeCheckpointCapability{Kind: checkpointKindGCP}, true
 	}
 	return NativeCheckpointCapability{Kind: checkpointKindGCPDisk}, true
@@ -685,7 +685,7 @@ func (testGCPProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkR
 	case checkpointKindGCPDisk:
 		req.Config.GCPSnapshot = firstNonBlank(req.Record.Resource, req.Record.ImageID)
 	default:
-		return exit(2, "provider=gcp does not support checkpoint kind=%s", req.Record.Kind)
+		return Exit(2, "provider=gcp does not support checkpoint kind=%s", req.Record.Kind)
 	}
 	if req.Record.Region != "" {
 		req.Config.GCPZone = req.Record.Region
@@ -759,7 +759,7 @@ func (testAWSProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (
 		return NativeCheckpointCapability{}, false
 	}
 	targetOS := firstNonBlank(req.Target.TargetOS, req.Config.TargetOS)
-	strategy := normalizeCheckpointStrategy(req.Strategy)
+	strategy := NormalizeCheckpointStrategy(req.Strategy)
 	if isWindowsNativeTarget(req.Target) {
 		if req.StrategyExplicit && strategy != checkpointStrategyImage {
 			return NativeCheckpointCapability{}, false
@@ -790,7 +790,7 @@ func (testAWSProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkR
 	case checkpointKindAWSEBS:
 		req.Config.AWSSnapshot = req.Record.ImageID
 	default:
-		return exit(2, "provider=aws does not support checkpoint kind=%s", req.Record.Kind)
+		return Exit(2, "provider=aws does not support checkpoint kind=%s", req.Record.Kind)
 	}
 	if req.Record.Region != "" {
 		req.Config.AWSRegion = req.Record.Region
@@ -834,21 +834,21 @@ func (p testParallelsProvider) Configure(cfg Config, rt Runtime) (Backend, error
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 func (testParallelsProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool) {
-	if req.Server.CloudID == "" || normalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
+	if req.Server.CloudID == "" || NormalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
 		return NativeCheckpointCapability{}, false
 	}
 	return NativeCheckpointCapability{Kind: checkpointKindParallels, Direct: true}, true
 }
 func (testParallelsProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error {
 	if req.Record.Kind != checkpointKindParallels {
-		return exit(2, "provider=parallels does not support checkpoint kind=%s", req.Record.Kind)
+		return Exit(2, "provider=parallels does not support checkpoint kind=%s", req.Record.Kind)
 	}
 	req.Config.Provider = "parallels"
 	req.Config.Coordinator = ""
 	req.Config.CoordToken = ""
 	req.Config.Parallels.SourceID = req.Record.Resource
 	req.Config.Parallels.SourceSnapshotID = req.Record.ImageID
-	applyParallelsHostRefConfig(req.Config, req.Record.Region)
+	ApplyParallelsHostRefConfig(req.Config, req.Record.Region)
 	return nil
 }
 
@@ -1110,7 +1110,7 @@ func xcpNgTestServerTypeForConfig(cfg Config) string {
 		return "template-" + cfg.XCPNg.TemplateUUID
 	}
 	if cfg.XCPNg.Template != "" {
-		return "template-" + normalizeLeaseSlug(cfg.XCPNg.Template)
+		return "template-" + NormalizeLeaseSlug(cfg.XCPNg.Template)
 	}
 	return "template"
 }
@@ -1348,7 +1348,7 @@ func (p testBlacksmithProvider) Configure(cfg Config, rt Runtime) (Backend, erro
 
 func (testBlacksmithProvider) ValidateRunOptions(req RunRequest) error {
 	if req.NoSync {
-		return exit(2, "blacksmith-testbox delegates sync; --no-sync is not supported")
+		return Exit(2, "blacksmith-testbox delegates sync; --no-sync is not supported")
 	}
 	return nil
 }
@@ -1467,13 +1467,13 @@ func (testMorphProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
 func (testMorphProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == "morph" {
 		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=morph")
+			return Exit(2, "--class is not supported for provider=morph")
 		}
 		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=morph; use --morph-snapshot")
+			return Exit(2, "--type is not supported for provider=morph; use --morph-snapshot")
 		}
 		if cfg.TargetOS != "" && cfg.TargetOS != targetLinux {
-			return exit(2, "provider=morph supports target=linux only")
+			return Exit(2, "provider=morph supports target=linux only")
 		}
 	}
 	v, ok := values.(testMorphFlagValues)
@@ -1537,7 +1537,7 @@ func (testDaytonaProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any 
 func (testDaytonaProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == "daytona" {
 		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=daytona")
+			return Exit(2, "--type is not supported for provider=daytona")
 		}
 	}
 	v, ok := values.(testDaytonaFlagValues)
@@ -1691,10 +1691,10 @@ func (testE2BProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
 func (testE2BProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == "e2b" {
 		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=e2b")
+			return Exit(2, "--class is not supported for provider=e2b")
 		}
 		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=e2b")
+			return Exit(2, "--type is not supported for provider=e2b")
 		}
 	}
 	v, ok := values.(testE2BFlagValues)
@@ -1760,10 +1760,10 @@ func (testModalProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
 func (testModalProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == "modal" {
 		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=modal")
+			return Exit(2, "--class is not supported for provider=modal")
 		}
 		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=modal")
+			return Exit(2, "--type is not supported for provider=modal")
 		}
 	}
 	v, ok := values.(testModalFlagValues)
@@ -1894,7 +1894,7 @@ func (testCloudflareDynamicWorkersProvider) ApplyFlags(
 }
 func (p testCloudflareDynamicWorkersProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	if cfg.TargetOS != "" && cfg.TargetOS != targetWorkerRuntime && cfg.TargetOS != targetLinux {
-		return nil, exit(2, "%s supports target=worker-runtime only", p.Name())
+		return nil, Exit(2, "%s supports target=worker-runtime only", p.Name())
 	}
 	return testCloudflareDynamicWorkersBackend{
 		testDelegatedBackend: testDelegatedBackend{spec: p.Spec()},
@@ -2010,10 +2010,10 @@ func (testSpritesProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any 
 func (testSpritesProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == "sprites" {
 		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=sprites")
+			return Exit(2, "--class is not supported for provider=sprites")
 		}
 		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=sprites")
+			return Exit(2, "--type is not supported for provider=sprites")
 		}
 	}
 	v, ok := values.(testSpritesFlagValues)
@@ -2129,7 +2129,7 @@ func (testLocalContainerProvider) NativeCheckpointCapability(req NativeCheckpoin
 }
 func (testLocalContainerProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error {
 	if req.Record.Kind != checkpointKindDockerCommit {
-		return exit(2, "provider=local-container does not support checkpoint kind=%s", req.Record.Kind)
+		return Exit(2, "provider=local-container does not support checkpoint kind=%s", req.Record.Kind)
 	}
 	req.Config.LocalContainer.Image = req.Record.ImageID
 	req.Config.LocalContainer.Runtime = req.Record.Metadata["runtime"]
@@ -2526,7 +2526,7 @@ func (testDockerSandboxProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, value
 }
 func (testDockerSandboxProvider) ValidateConfig(cfg Config) error {
 	if cfg.DockerSandbox.CPUs != math.Trunc(cfg.DockerSandbox.CPUs) {
-		return exit(2, "docker-sandbox cpus must be a whole number")
+		return Exit(2, "docker-sandbox cpus must be a whole number")
 	}
 	return nil
 }
@@ -2635,7 +2635,7 @@ func (b testServiceControlBackend) Status(_ context.Context, req StatusRequest) 
 	if testServiceControlStatusHook != nil {
 		return testServiceControlStatusHook(req)
 	}
-	return StatusView{}, exit(2, "service-control-test status unavailable")
+	return StatusView{}, Exit(2, "service-control-test status unavailable")
 }
 
 func (b testDelegatedBackend) Spec() ProviderSpec { return b.spec }

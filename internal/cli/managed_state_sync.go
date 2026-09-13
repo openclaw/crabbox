@@ -128,10 +128,10 @@ func ValidateManagedStateTransferScope(scope string, roots ...string) error {
 	for _, root := range roots {
 		source, managed, err := managedTransferRoots(root)
 		if err != nil {
-			return exit(2, "%s: cannot establish managed-state transfer scope: %v", scope, err)
+			return Exit(2, "%s: cannot establish managed-state transfer scope: %v", scope, err)
 		}
 		if managedPathContains(source, managed) || managedPathContains(managed, source) {
-			return exit(2, "%s cannot exclude the selected managed state namespace from this source or mount; choose a state root outside that scope", scope)
+			return Exit(2, "%s cannot exclude the selected managed state namespace from this source or mount; choose a state root outside that scope", scope)
 		}
 	}
 	return nil
@@ -143,7 +143,7 @@ func managedStateSyncSubtree(root string) (string, error) {
 		return "", err
 	}
 	if managedPathContains(managed, source) {
-		return "", exit(6, "sync source is inside the selected managed state namespace")
+		return "", Exit(6, "sync source is inside the selected managed state namespace")
 	}
 	if !managedPathContains(source, managed) {
 		return "", nil
@@ -168,7 +168,7 @@ func newManagedSyncScope(root string) (*managedSyncScope, error) {
 		return nil, err
 	}
 	if namespace != "" && managedPathContains(namespace, source) {
-		return nil, exit(6, "sync source is inside the selected managed state namespace")
+		return nil, Exit(6, "sync source is inside the selected managed state namespace")
 	}
 	return &managedSyncScope{input: root, source: source, namespace: namespace, parents: map[string]managedSyncParent{}}, nil
 }

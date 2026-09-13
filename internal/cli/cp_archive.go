@@ -48,7 +48,7 @@ func copyOverResolvedSSHArchive(ctx context.Context, session *sshTransportSessio
 	srcRemote, srcPath := sandboxCopyPath(src)
 	_, dstPath := sandboxCopyPath(dst)
 	if strings.TrimSpace(srcPath) == "" || strings.TrimSpace(dstPath) == "" {
-		return exit(2, "copy source and destination paths must not be empty")
+		return Exit(2, "copy source and destination paths must not be empty")
 	}
 	if srcRemote {
 		return downloadResolvedSSHArchive(ctx, session, target, srcPath, dstPath, stdout, stderr, defaultCopyArchiveLimits)
@@ -110,9 +110,9 @@ func downloadResolvedSSHArchive(ctx context.Context, session *sshTransportSessio
 	}
 	parent := filepath.Dir(targetPath)
 	if info, err := os.Stat(parent); err != nil {
-		return exit(2, "copy destination parent is unavailable: %v", err)
+		return Exit(2, "copy destination parent is unavailable: %v", err)
 	} else if !info.IsDir() {
-		return exit(2, "copy destination parent is not a directory: %s", parent)
+		return Exit(2, "copy destination parent is not a directory: %s", parent)
 	}
 	stage, err := os.MkdirTemp(parent, ".crabbox-cp-*")
 	if err != nil {
@@ -141,7 +141,7 @@ type copyArchiveBoundedWriter struct {
 
 func (w *copyArchiveBoundedWriter) Write(data []byte) (int, error) {
 	if int64(len(data)) > w.remaining {
-		w.limitErr = exit(2, "copy archive exceeds compressed size limit (%d bytes)", w.limit)
+		w.limitErr = Exit(2, "copy archive exceeds compressed size limit (%d bytes)", w.limit)
 		return 0, w.limitErr
 	}
 	n, err := w.writer.Write(data)
@@ -183,26 +183,26 @@ func createCopyArchive(ctx context.Context, sourcePath string, followLink bool, 
 			lastComponent = trimmedSource[index+1:]
 		}
 		if lastComponent == "." || lastComponent == ".." {
-			return copyArchiveSource{}, nil, exit(2, "archive copy does not support local source paths ending in . or ..")
+			return copyArchiveSource{}, nil, Exit(2, "archive copy does not support local source paths ending in . or ..")
 		}
 	}
 	abs, err := filepath.Abs(sourcePath)
 	if err != nil {
-		return copyArchiveSource{}, nil, exit(2, "resolve copy source: %v", err)
+		return copyArchiveSource{}, nil, Exit(2, "resolve copy source: %v", err)
 	}
 	info, err := os.Lstat(abs)
 	if err != nil {
-		return copyArchiveSource{}, nil, exit(2, "read copy source: %v", err)
+		return copyArchiveSource{}, nil, Exit(2, "read copy source: %v", err)
 	}
 	semanticInfo := info
 	if followLink && info.Mode()&os.ModeSymlink != 0 {
 		semanticInfo, err = os.Stat(abs)
 		if err != nil {
-			return copyArchiveSource{}, nil, exit(2, "follow copy source: %v", err)
+			return copyArchiveSource{}, nil, Exit(2, "follow copy source: %v", err)
 		}
 	}
 	if hasTrailingPathSeparator(sourcePath) && !semanticInfo.IsDir() {
-		return copyArchiveSource{}, nil, exit(2, "archive copy source with trailing slash is not a directory")
+		return copyArchiveSource{}, nil, Exit(2, "archive copy source with trailing slash is not a directory")
 	}
 	contentsOnly := hasTrailingPathSeparator(sourcePath) && semanticInfo.IsDir()
 	source := copyArchiveSource{base: filepath.Base(abs), contentsOnly: contentsOnly}
@@ -230,14 +230,14 @@ func createCopyArchive(ctx context.Context, sourcePath string, followLink bool, 
 	if err != nil {
 		_ = tw.Close()
 		_ = gz.Close()
-		return copyArchiveSource{}, nil, exit(2, "open copy source root: %v", err)
+		return copyArchiveSource{}, nil, Exit(2, "open copy source root: %v", err)
 	}
 	anchoredInfo, err := root.Lstat(rootRelative)
 	if err != nil || !os.SameFile(info, anchoredInfo) {
 		_ = root.Close()
 		_ = tw.Close()
 		_ = gz.Close()
-		return copyArchiveSource{}, nil, exit(2, "copy source changed before it could be archived")
+		return copyArchiveSource{}, nil, Exit(2, "copy source changed before it could be archived")
 	}
 	state := &copyArchiveCreateState{ctx: ctx, writer: tw, limits: limits, followLink: followLink}
 	appendErr := state.append(root, rootRelative, copyArchivePayloadRoot)
@@ -262,7 +262,7 @@ func createCopyArchive(ctx context.Context, sourcePath string, followLink bool, 
 	if info, err := archive.Stat(); err != nil {
 		return copyArchiveSource{}, nil, fmt.Errorf("stat copy archive: %w", err)
 	} else if info.Size() > limits.maxCompressedBytes {
-		return copyArchiveSource{}, nil, exit(2, "copy archive exceeds compressed size limit (%d bytes)", limits.maxCompressedBytes)
+		return copyArchiveSource{}, nil, Exit(2, "copy archive exceeds compressed size limit (%d bytes)", limits.maxCompressedBytes)
 	}
 	if _, err := archive.Seek(0, io.SeekStart); err != nil {
 		return copyArchiveSource{}, nil, fmt.Errorf("rewind copy archive: %w", err)
@@ -287,62 +287,62 @@ func (s *copyArchiveCreateState) append(root *os.Root, name, archiveName string)
 	}
 	info, err := root.Lstat(name)
 	if err != nil {
-		return exit(2, "read copy source %s: %v", archiveName, err)
+		return Exit(2, "read copy source %s: %v", archiveName, err)
 	}
 	linkName := ""
 	if info.Mode()&os.ModeSymlink != 0 {
 		if s.followLink {
 			resolved, resolveErr := filepath.EvalSymlinks(filepath.Join(root.Name(), name))
 			if resolveErr != nil {
-				return exit(2, "follow copy source symlink %s: %v", archiveName, resolveErr)
+				return Exit(2, "follow copy source symlink %s: %v", archiveName, resolveErr)
 			}
 			resolvedRoot, openErr := os.OpenRoot(filepath.Dir(resolved))
 			if openErr != nil {
-				return exit(2, "open followed copy source symlink %s: %v", archiveName, openErr)
+				return Exit(2, "open followed copy source symlink %s: %v", archiveName, openErr)
 			}
 			defer resolvedRoot.Close()
 			return s.append(resolvedRoot, filepath.Base(resolved), archiveName)
 		} else {
-			return exit(2, "archive copy source contains a symlink; use -L to follow it: %s", archiveName)
+			return Exit(2, "archive copy source contains a symlink; use -L to follow it: %s", archiveName)
 		}
 	}
 	var opened *os.File
 	if info.Mode()&os.ModeSymlink == 0 {
 		opened, err = root.Open(name)
 		if err != nil {
-			return exit(2, "open copy source %s without following links: %v", archiveName, err)
+			return Exit(2, "open copy source %s without following links: %v", archiveName, err)
 		}
 		openedInfo, statErr := opened.Stat()
 		if statErr != nil {
 			_ = opened.Close()
-			return exit(2, "verify opened copy source %s: %v", archiveName, statErr)
+			return Exit(2, "verify opened copy source %s: %v", archiveName, statErr)
 		}
 		if !os.SameFile(info, openedInfo) || info.Mode().Type() != openedInfo.Mode().Type() {
 			_ = opened.Close()
-			return exit(2, "copy source changed while it was being archived: %s", archiveName)
+			return Exit(2, "copy source changed while it was being archived: %s", archiveName)
 		}
 		info = openedInfo
 		defer opened.Close()
 	}
 	if !info.Mode().IsRegular() && !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-		return exit(2, "copy archive source contains unsupported special file: %s", archiveName)
+		return Exit(2, "copy archive source contains unsupported special file: %s", archiveName)
 	}
 	s.entries++
 	if s.entries > s.limits.maxEntries {
-		return exit(2, "copy archive exceeds entry limit (%d)", s.limits.maxEntries)
+		return Exit(2, "copy archive exceeds entry limit (%d)", s.limits.maxEntries)
 	}
 	if info.Mode().IsRegular() {
 		if info.Size() > s.limits.maxFileBytes {
-			return exit(2, "copy archive file exceeds size limit (%d bytes): %s", s.limits.maxFileBytes, archiveName)
+			return Exit(2, "copy archive file exceeds size limit (%d bytes): %s", s.limits.maxFileBytes, archiveName)
 		}
 		s.totalBytes += info.Size()
 		if s.totalBytes > s.limits.maxTotalBytes {
-			return exit(2, "copy archive exceeds total size limit (%d bytes)", s.limits.maxTotalBytes)
+			return Exit(2, "copy archive exceeds total size limit (%d bytes)", s.limits.maxTotalBytes)
 		}
 	}
 	header, err := tar.FileInfoHeader(info, linkName)
 	if err != nil {
-		return exit(2, "create copy archive header %s: %v", archiveName, err)
+		return Exit(2, "create copy archive header %s: %v", archiveName, err)
 	}
 	header.Name = filepath.ToSlash(archiveName)
 	header.Format = tar.FormatPAX
@@ -360,23 +360,23 @@ func (s *copyArchiveCreateState) append(root *os.Root, name, archiveName string)
 	}
 	for _, active := range s.activeDirs {
 		if os.SameFile(active, info) {
-			return exit(2, "copy source symlink cycle at %s", archiveName)
+			return Exit(2, "copy source symlink cycle at %s", archiveName)
 		}
 	}
 	s.activeDirs = append(s.activeDirs, info)
 	defer func() { s.activeDirs = s.activeDirs[:len(s.activeDirs)-1] }()
 	children, err := opened.ReadDir(-1)
 	if err != nil {
-		return exit(2, "read copy source directory %s: %v", archiveName, err)
+		return Exit(2, "read copy source directory %s: %v", archiveName, err)
 	}
 	subroot, err := root.OpenRoot(name)
 	if err != nil {
-		return exit(2, "open copy source directory %s: %v", archiveName, err)
+		return Exit(2, "open copy source directory %s: %v", archiveName, err)
 	}
 	defer subroot.Close()
 	subrootInfo, err := subroot.Stat(".")
 	if err != nil || !os.SameFile(info, subrootInfo) {
-		return exit(2, "copy source changed while it was being archived: %s", archiveName)
+		return Exit(2, "copy source changed while it was being archived: %s", archiveName)
 	}
 	for _, child := range children {
 		if err := s.append(subroot, child.Name(), path.Join(archiveName, filepath.ToSlash(child.Name()))); err != nil {
@@ -396,7 +396,7 @@ func remoteCopyArchiveRoot(remotePath string) (string, bool, error) {
 	}
 	trimmed := strings.TrimRight(remotePath, "/")
 	if trimmed == "" || trimmed == "~" {
-		return "", false, exit(2, "archive copy of a remote filesystem root or bare home is unsupported; use a path below it")
+		return "", false, Exit(2, "archive copy of a remote filesystem root or bare home is unsupported; use a path below it")
 	}
 	root := path.Base(trimmed)
 	lastComponent := trimmed
@@ -404,23 +404,23 @@ func remoteCopyArchiveRoot(remotePath string) (string, bool, error) {
 		lastComponent = trimmed[index+1:]
 	}
 	if lastComponent == "." || lastComponent == ".." {
-		return "", false, exit(2, "archive copy does not support remote source paths ending in . or ..")
+		return "", false, Exit(2, "archive copy does not support remote source paths ending in . or ..")
 	}
 	if root == "." || root == ".." || root == "/" {
-		return "", false, exit(2, "archive copy requires a named remote source path")
+		return "", false, Exit(2, "archive copy requires a named remote source path")
 	}
 	return root, strings.HasSuffix(remotePath, "/"), nil
 }
 
 func validateRemoteCopyArchivePath(remotePath string) error {
 	if strings.TrimSpace(remotePath) == "" {
-		return exit(2, "remote copy paths must not be empty")
+		return Exit(2, "remote copy paths must not be empty")
 	}
 	if strings.ContainsAny(remotePath, "\x00\r\n") {
-		return exit(2, "remote copy paths must not contain control characters")
+		return Exit(2, "remote copy paths must not contain control characters")
 	}
 	if strings.HasPrefix(remotePath, "~") && remotePath != "~" && !strings.HasPrefix(remotePath, "~/") {
-		return exit(2, "archive copy does not support named-user ~ paths; use an absolute path")
+		return Exit(2, "archive copy does not support named-user ~ paths; use an absolute path")
 	}
 	return nil
 }
@@ -441,7 +441,7 @@ func remoteCopyArchiveUploadCommand(remotePath, sourceBase string, contentsOnly 
 		return "", err
 	}
 	if sourceBase == "" || sourceBase == "." || strings.ContainsAny(sourceBase, "/\x00\r\n") {
-		return "", exit(2, "copy source has an unsupported base name")
+		return "", Exit(2, "copy source has an unsupported base name")
 	}
 	var script strings.Builder
 	script.WriteString("set -euo pipefail\n")
@@ -591,24 +591,24 @@ func localCopyArchiveTarget(localPath, sourceBase string, contentsOnly bool) (st
 	directoryIntent := hasTrailingPathSeparator(localPath)
 	abs, err := filepath.Abs(localPath)
 	if err != nil {
-		return "", exit(2, "resolve copy destination: %v", err)
+		return "", Exit(2, "resolve copy destination: %v", err)
 	}
 	info, statErr := os.Lstat(abs)
 	if statErr == nil && info.Mode()&os.ModeSymlink != 0 {
-		return "", exit(2, "archive copy refuses a symlink destination: %s", localPath)
+		return "", Exit(2, "archive copy refuses a symlink destination: %s", localPath)
 	}
 	if statErr != nil && !os.IsNotExist(statErr) {
-		return "", exit(2, "read copy destination: %v", statErr)
+		return "", Exit(2, "read copy destination: %v", statErr)
 	}
 	if directoryIntent && statErr == nil && !info.IsDir() {
-		return "", exit(2, "archive copy directory destination is not a directory: %s", localPath)
+		return "", Exit(2, "archive copy directory destination is not a directory: %s", localPath)
 	}
 	if contentsOnly {
 		return abs, nil
 	}
 	if directoryIntent && os.IsNotExist(statErr) {
 		if err := os.Mkdir(abs, 0o755); err != nil {
-			return "", exit(2, "create copy destination directory: %v", err)
+			return "", Exit(2, "create copy destination directory: %v", err)
 		}
 		if err := syncCopyArchiveDirectory(filepath.Dir(abs)); err != nil {
 			return "", err
@@ -625,12 +625,12 @@ func extractValidatedCopyArchive(ctx context.Context, archive io.Reader, stage, 
 	buffered := bufio.NewReader(archive)
 	gz, err := gzip.NewReader(buffered)
 	if err != nil {
-		return exit(2, "read checksummed copy archive: %v", err)
+		return Exit(2, "read checksummed copy archive: %v", err)
 	}
 	gz.Multistream(false)
 	maxArchiveBytes := limits.maxTotalBytes + int64(limits.maxEntries)*4096 + 1<<20
 	if maxArchiveBytes < limits.maxTotalBytes {
-		return exit(2, "copy archive size limit overflow")
+		return Exit(2, "copy archive size limit overflow")
 	}
 	limitedArchive := &io.LimitedReader{R: gz, N: maxArchiveBytes + 1}
 	tr := tar.NewReader(limitedArchive)
@@ -648,11 +648,11 @@ func extractValidatedCopyArchive(ctx context.Context, archive io.Reader, stage, 
 			break
 		}
 		if nextErr != nil {
-			return exit(2, "read copy archive: %v", nextErr)
+			return Exit(2, "read copy archive: %v", nextErr)
 		}
 		entries++
 		if entries > limits.maxEntries {
-			return exit(2, "copy archive exceeds entry limit (%d)", limits.maxEntries)
+			return Exit(2, "copy archive exceeds entry limit (%d)", limits.maxEntries)
 		}
 		clean, rel, err := validatedCopyArchiveEntryPath(header.Name, archiveRoot)
 		if err != nil {
@@ -662,10 +662,10 @@ func extractValidatedCopyArchive(ctx context.Context, archive io.Reader, stage, 
 		// entry; this explicit dot-dot rejection restates the guarantee in the
 		// form static dataflow analysis recognizes (go/zipslip sanitizer).
 		if strings.Contains(clean, "..") || strings.Contains(rel, "..") {
-			return exit(2, "copy archive contains unsafe path: %q", header.Name)
+			return Exit(2, "copy archive contains unsafe path: %q", header.Name)
 		}
 		if seen[clean] {
-			return exit(2, "copy archive contains duplicate entry: %s", clean)
+			return Exit(2, "copy archive contains duplicate entry: %s", clean)
 		}
 		seen[clean] = true
 		destination := filepath.Join(stage, copyArchivePayloadRoot)
@@ -677,7 +677,7 @@ func extractValidatedCopyArchive(ctx context.Context, archive io.Reader, stage, 
 		// is local and provable independent of the sanitizer.
 		payloadRoot := filepath.Join(stage, copyArchivePayloadRoot)
 		if destination != payloadRoot && !strings.HasPrefix(destination, payloadRoot+string(os.PathSeparator)) {
-			return exit(2, "copy archive entry escapes the staging root: %q", header.Name)
+			return Exit(2, "copy archive entry escapes the staging root: %q", header.Name)
 		}
 		switch header.Typeflag {
 		case tar.TypeDir:
@@ -687,11 +687,11 @@ func extractValidatedCopyArchive(ctx context.Context, archive io.Reader, stage, 
 			directoryTimes = append(directoryTimes, copyArchiveDirectoryTime{path: destination, modTime: header.ModTime})
 		case tar.TypeReg, tar.TypeRegA:
 			if header.Size < 0 || header.Size > limits.maxFileBytes {
-				return exit(2, "copy archive file exceeds size limit (%d bytes): %s", limits.maxFileBytes, clean)
+				return Exit(2, "copy archive file exceeds size limit (%d bytes): %s", limits.maxFileBytes, clean)
 			}
 			totalBytes += header.Size
 			if totalBytes > limits.maxTotalBytes {
-				return exit(2, "copy archive exceeds total size limit (%d bytes)", limits.maxTotalBytes)
+				return Exit(2, "copy archive exceeds total size limit (%d bytes)", limits.maxTotalBytes)
 			}
 			if rel != "" {
 				parentRel := path.Dir(rel)
@@ -703,7 +703,7 @@ func extractValidatedCopyArchive(ctx context.Context, archive io.Reader, stage, 
 				}
 			}
 			if existing, err := os.Lstat(destination); err == nil {
-				return exit(2, "copy archive entry conflicts with existing path: %s (%s)", clean, existing.Mode())
+				return Exit(2, "copy archive entry conflicts with existing path: %s (%s)", clean, existing.Mode())
 			} else if !os.IsNotExist(err) {
 				return fmt.Errorf("inspect copy archive destination: %w", err)
 			}
@@ -715,7 +715,7 @@ func extractValidatedCopyArchive(ctx context.Context, archive io.Reader, stage, 
 			syncErr := file.Sync()
 			closeErr := file.Close()
 			if copyErr != nil || written != header.Size {
-				return exit(2, "copy archive entry %s is truncated", clean)
+				return Exit(2, "copy archive entry %s is truncated", clean)
 			}
 			if closeErr != nil {
 				return fmt.Errorf("close copy archive file %s: %w", destination, closeErr)
@@ -727,7 +727,7 @@ func extractValidatedCopyArchive(ctx context.Context, archive io.Reader, stage, 
 				return err
 			}
 		default:
-			return exit(2, "copy archive contains unsupported link or special entry: %s", clean)
+			return Exit(2, "copy archive contains unsupported link or special entry: %s", clean)
 		}
 	}
 	trailerBuffer := make([]byte, 128*1024)
@@ -735,34 +735,34 @@ func extractValidatedCopyArchive(ctx context.Context, archive io.Reader, stage, 
 		n, readErr := limitedArchive.Read(trailerBuffer)
 		for _, value := range trailerBuffer[:n] {
 			if value != 0 {
-				return exit(2, "copy archive contains data after its end marker")
+				return Exit(2, "copy archive contains data after its end marker")
 			}
 		}
 		if readErr == io.EOF {
 			break
 		}
 		if readErr != nil {
-			return exit(2, "verify copy archive checksum: %v", readErr)
+			return Exit(2, "verify copy archive checksum: %v", readErr)
 		}
 		if limitedArchive.N == 0 {
-			return exit(2, "copy archive exceeds uncompressed size limit (%d bytes)", maxArchiveBytes)
+			return Exit(2, "copy archive exceeds uncompressed size limit (%d bytes)", maxArchiveBytes)
 		}
 	}
 	if limitedArchive.N == 0 {
-		return exit(2, "copy archive exceeds uncompressed size limit (%d bytes)", maxArchiveBytes)
+		return Exit(2, "copy archive exceeds uncompressed size limit (%d bytes)", maxArchiveBytes)
 	}
 	if err := gz.Close(); err != nil {
-		return exit(2, "verify copy archive checksum: %v", err)
+		return Exit(2, "verify copy archive checksum: %v", err)
 	}
 	if _, err := buffered.Peek(1); err != io.EOF {
 		if err == nil {
-			return exit(2, "copy archive contains trailing compressed data")
+			return Exit(2, "copy archive contains trailing compressed data")
 		}
-		return exit(2, "inspect copy archive trailer: %v", err)
+		return Exit(2, "inspect copy archive trailer: %v", err)
 	}
 	payload := filepath.Join(stage, copyArchivePayloadRoot)
 	if _, err := os.Lstat(payload); err != nil {
-		return exit(2, "copy archive contained no payload")
+		return Exit(2, "copy archive contained no payload")
 	}
 	for index := len(directoryTimes) - 1; index >= 0; index-- {
 		if err := applyCopyArchiveModTime(directoryTimes[index].path, directoryTimes[index].modTime); err != nil {
@@ -804,12 +804,12 @@ func (t *copyArchiveDirectoryTracker) ensure(stage, archiveRoot, rel string) err
 			return fmt.Errorf("inspect copy archive directory %s: %w", current, err)
 		}
 		if !info.IsDir() {
-			return exit(2, "copy archive directory conflicts with existing path: %s", logical)
+			return Exit(2, "copy archive directory conflicts with existing path: %s", logical)
 		}
 		identity := copyArchiveDirectoryIdentity(current, info)
 		if existing, ok := t.identities[identity]; ok {
 			if existing != logical {
-				return exit(2, "copy archive contains duplicate filesystem path aliases: %s and %s", existing, logical)
+				return Exit(2, "copy archive contains duplicate filesystem path aliases: %s and %s", existing, logical)
 			}
 		} else {
 			t.identities[identity] = logical
@@ -834,23 +834,23 @@ func validatedCopyArchiveEntryPath(name, archiveRoot string) (string, string, er
 
 func validatedCopyArchiveEntryPathForGOOS(goos, name, archiveRoot string) (string, string, error) {
 	if goos == "windows" && strings.Contains(name, `\`) {
-		return "", "", exit(2, "copy archive contains unsafe path: %q", name)
+		return "", "", Exit(2, "copy archive contains unsafe path: %q", name)
 	}
 	slashed := filepath.ToSlash(name)
 	if strings.ContainsRune(slashed, '\x00') || path.IsAbs(slashed) {
-		return "", "", exit(2, "copy archive contains unsafe path: %q", name)
+		return "", "", Exit(2, "copy archive contains unsafe path: %q", name)
 	}
 	clean := path.Clean(slashed)
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
-		return "", "", exit(2, "copy archive contains unsafe path: %q", name)
+		return "", "", Exit(2, "copy archive contains unsafe path: %q", name)
 	}
 	if clean != archiveRoot && !strings.HasPrefix(clean, archiveRoot+"/") {
-		return "", "", exit(2, "copy archive entry escapes its source root: %q", name)
+		return "", "", Exit(2, "copy archive entry escapes its source root: %q", name)
 	}
 	rel := strings.TrimPrefix(clean, archiveRoot)
 	rel = strings.TrimPrefix(rel, "/")
 	if goos == "windows" && !validWindowsCopyArchivePath(rel) {
-		return "", "", exit(2, "copy archive contains unsafe Windows path: %q", name)
+		return "", "", Exit(2, "copy archive contains unsafe Windows path: %q", name)
 	}
 	return clean, rel, nil
 }
@@ -944,12 +944,12 @@ func recoverCopyArchiveTransaction(target, backup, marker string, currentOwner i
 	}
 	if os.IsNotExist(markerErr) {
 		if backupExists {
-			return exit(2, "archive copy found reserved backup without transaction marker: %s", backup)
+			return Exit(2, "archive copy found reserved backup without transaction marker: %s", backup)
 		}
 		return nil
 	}
 	if !copyArchiveMarkerIsPrivate(markerInfo) {
-		return exit(2, "archive copy found an unauthenticated transaction marker: %s", marker)
+		return Exit(2, "archive copy found an unauthenticated transaction marker: %s", marker)
 	}
 	state, err := os.ReadFile(marker)
 	if err != nil {
@@ -957,16 +957,16 @@ func recoverCopyArchiveTransaction(target, backup, marker string, currentOwner i
 	}
 	lines := strings.Split(strings.TrimSuffix(string(state), "\n"), "\n")
 	if len(lines) != 3 || lines[0] != "crabbox-cp-v1" || strings.TrimSpace(lines[2]) == "" {
-		return exit(2, "archive copy found invalid transaction state: %s", marker)
+		return Exit(2, "archive copy found invalid transaction state: %s", marker)
 	}
 	owner, err := strconv.Atoi(lines[1])
 	if err != nil || owner <= 0 {
-		return exit(2, "archive copy found invalid transaction state: %s", marker)
+		return Exit(2, "archive copy found invalid transaction state: %s", marker)
 	}
 	if owner != currentOwner && copyArchiveProcessIsAlive(owner) {
 		identity, ok := copyArchiveProcessIdentity(owner)
 		if !ok || identity == lines[2] {
-			return exit(2, "another archive copy is active for destination %s", target)
+			return Exit(2, "another archive copy is active for destination %s", target)
 		}
 	}
 	if backupExists {
@@ -1026,7 +1026,7 @@ func acquireCopyArchiveTargetLock(target string) (func(), error) {
 		if err != nil {
 			return nil, fmt.Errorf("lock copy destination: %w", err)
 		}
-		return nil, exit(2, "another archive copy is active for destination %s", target)
+		return nil, Exit(2, "another archive copy is active for destination %s", target)
 	}
 	return func() {
 		_ = fileLock.Unlock()
@@ -1076,7 +1076,7 @@ func syncCopyArchiveTree(root string) error {
 			return walkErr
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
-			return exit(2, "refusing to sync symlink in downloaded copy archive: %s", name)
+			return Exit(2, "refusing to sync symlink in downloaded copy archive: %s", name)
 		}
 		file, err := os.Open(name)
 		if err != nil {

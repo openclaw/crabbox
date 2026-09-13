@@ -67,7 +67,7 @@ func (a App) webCode(ctx context.Context, args []string) error {
 		*id = fs.Arg(0)
 	}
 	if *id == "" {
-		return exit(2, "usage: crabbox code --id <lease-id-or-slug>")
+		return Exit(2, "usage: crabbox code --id <lease-id-or-slug>")
 	}
 	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
 	if err != nil {
@@ -78,14 +78,14 @@ func (a App) webCode(ctx context.Context, args []string) error {
 		return err
 	}
 	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
-		return exit(2, "code currently supports coordinator-backed hetzner/aws Linux leases")
+		return Exit(2, "code currently supports coordinator-backed hetzner/aws Linux leases")
 	}
 	coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
 	if err != nil {
 		return err
 	}
 	if !useCoordinator || !coord.hasConfiguredAuth() {
-		return exit(2, "code requires a configured coordinator login; run crabbox login --url <broker-url> first")
+		return Exit(2, "code requires a configured coordinator login; run crabbox login --url <broker-url> first")
 	}
 	server, target, leaseID, err := a.resolveNetworkLeaseTargetForRepoWithConfig(ctx, &cfg, *id, true, *reclaim)
 	if err != nil {
@@ -98,7 +98,7 @@ func (a App) webCode(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, &server, target, repo.Root, *reclaim); err != nil {
+	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(server), cfg, &server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
@@ -154,7 +154,7 @@ func (a App) webCode(ctx context.Context, args []string) error {
 
 func ensureRemoteCodeServer(ctx context.Context, target SSHTarget, workdir string) error {
 	if err := runSSHQuiet(ctx, target, startCodeServerCommand(workdir)); err != nil {
-		return exit(5, "start code-server: %v", err)
+		return Exit(5, "start code-server: %v", err)
 	}
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
@@ -168,7 +168,7 @@ func ensureRemoteCodeServer(ctx context.Context, target SSHTarget, workdir strin
 			return context.Cause(ctx)
 		}
 	}
-	return exit(5, "timed out waiting for code-server on 127.0.0.1:%s", managedCodePort)
+	return Exit(5, "timed out waiting for code-server on 127.0.0.1:%s", managedCodePort)
 }
 
 func codeWorkspace(ctx context.Context, target SSHTarget, cfg Config, leaseID string, repo Repo) (string, string, bool) {

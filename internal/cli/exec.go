@@ -33,18 +33,18 @@ func (a App) execCommand(ctx context.Context, args []string) error {
 	}
 	command := fs.Args()
 	if *check && (*id != "" || *pty || len(command) != 0) {
-		return exit(2, "exec --check cannot combine a lease ID, --pty, or a command")
+		return Exit(2, "exec --check cannot combine a lease ID, --pty, or a command")
 	}
-	if !*check && (!isCanonicalLeaseID(*id) || len(command) == 0) {
-		return exit(2, "usage: crabbox exec --id <canonical-lease-id> [--pty] -- <command> [args...]")
+	if !*check && (!IsCanonicalLeaseID(*id) || len(command) == 0) {
+		return Exit(2, "usage: crabbox exec --id <canonical-lease-id> [--pty] -- <command> [args...]")
 	}
 	for _, arg := range command {
 		if strings.ContainsRune(arg, '\x00') {
-			return exit(2, "command arguments cannot contain NUL bytes")
+			return Exit(2, "command arguments cannot contain NUL bytes")
 		}
 	}
 	if input, ok := a.input().(*os.File); !*check && ok && term.IsTerminal(int(input.Fd())) {
-		return exit(2, "exec requires piped or redirected stdin; redirect from /dev/null when no input is needed")
+		return Exit(2, "exec requires piped or redirected stdin; redirect from /dev/null when no input is needed")
 	}
 	cfg, err := loadSSHCommandConfig(fs, *provider, providerFlags, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
 	if err != nil {
@@ -58,7 +58,7 @@ func (a App) execCommand(ctx context.Context, args []string) error {
 		return json.NewEncoder(a.Stdout).Encode(capabilities)
 	}
 	if !capabilities.Execution {
-		return exit(2, "provider=%s target=%s does not support claim-fenced SSH execution", capabilities.Provider, capabilities.Target)
+		return Exit(2, "provider=%s target=%s does not support claim-fenced SSH execution", capabilities.Provider, capabilities.Target)
 	}
 	boundary, err := findRepositoryBoundary()
 	if err != nil {
@@ -72,14 +72,14 @@ func (a App) execCommand(ctx context.Context, args []string) error {
 	}
 	resolver, ok := backend.(ExecLeaseClaimResolver)
 	if !ok || !backend.Spec().Features.Has(FeatureSSH) {
-		return exit(2, "provider=%s does not support claim-fenced SSH execution", backend.Spec().Name)
+		return Exit(2, "provider=%s does not support claim-fenced SSH execution", backend.Spec().Name)
 	}
-	claim, exists, err := readLeaseClaimWithPresence(*id)
+	claim, exists, err := ReadLeaseClaimWithPresence(*id)
 	if err != nil {
 		return err
 	}
 	if !exists || claim.CloudID == "" || claim.Provider == "" || claim.RepoRoot == "" {
-		return exit(2, "exec requires an existing, resource-bound repository claim for %s", *id)
+		return Exit(2, "exec requires an existing, resource-bound repository claim for %s", *id)
 	}
 	ctx, cancel := pondMeshTerminationContext(ctx)
 	defer cancel()
@@ -87,9 +87,9 @@ func (a App) execCommand(ctx context.Context, args []string) error {
 	return withLeaseClaimUnchangedContext(ctx, *id, claim, true, func() error {
 		if canonicalClaimProvider(claim.Provider) != canonicalClaimProvider(backend.Spec().Name) ||
 			(options.ProviderScope != "" && claim.ProviderScope != options.ProviderScope) {
-			return exit(2, "lease %s does not match the requested provider scope", *id)
+			return Exit(2, "lease %s does not match the requested provider scope", *id)
 		}
-		if err := checkLeaseClaimRepositoryOwner(*id, claim, boundary.root, false); err != nil {
+		if err := CheckLeaseClaimRepositoryOwner(*id, claim, boundary.root, false); err != nil {
 			return err
 		}
 		if err := AuthorizeCheckpointRelease(claim, ""); err != nil {
@@ -106,11 +106,11 @@ func (a App) execCommand(ctx context.Context, args []string) error {
 		if lease.LeaseID != claim.LeaseID || lease.Server.CloudID != claim.CloudID ||
 			canonicalClaimProvider(lease.Server.Provider) != canonicalClaimProvider(claim.Provider) ||
 			!resolvedLeaseClaimIdentityCompatible(claim, lease.Server) {
-			return exit(2, "lease %s resolved outside its original claim", *id)
+			return Exit(2, "lease %s resolved outside its original claim", *id)
 		}
 		applyResolvedLeaseConfig(&cfg, lease.Server, &lease.SSH)
 		if lease.SSH.TargetOS != targetLinux && lease.SSH.TargetOS != targetMacOS {
-			return exit(2, "exec currently requires a Linux or macOS SSH target")
+			return Exit(2, "exec currently requires a Linux or macOS SSH target")
 		}
 		resolved, err := resolveSSHTargetNetwork(ctx, cfg, lease.Server, lease.SSH, false)
 		if err != nil {
@@ -137,7 +137,7 @@ type execCapabilities struct {
 
 func execCapabilitiesForConfig(cfg Config) (execCapabilities, error) {
 	if !providerSelectionIsActionable(cfg) {
-		return execCapabilities{}, exit(2, "%s", providerSelectionRequiredDiagnostic)
+		return execCapabilities{}, Exit(2, "%s", providerSelectionRequiredDiagnostic)
 	}
 	provider, err := ProviderFor(cfg.Provider)
 	if err != nil {

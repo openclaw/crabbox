@@ -11,7 +11,7 @@ import (
 func leaseSSHRoot() (string, error) {
 	if root := os.Getenv("XDG_STATE_HOME"); root != "" {
 		if !filepath.IsAbs(root) {
-			return "", exit(2, "XDG_STATE_HOME must be absolute for generated lease SSH material")
+			return "", Exit(2, "XDG_STATE_HOME must be absolute for generated lease SSH material")
 		}
 		return filepath.Clean(root), nil
 	}
@@ -112,7 +112,7 @@ func secureCreatedLeaseSSHKeyPair(key string) error {
 		}
 		info, err := file.Stat()
 		if err == nil && !info.Mode().IsRegular() {
-			err = exit(2, "created lease SSH material must be a regular file")
+			err = Exit(2, "created lease SSH material must be a regular file")
 		}
 		if err == nil {
 			err = SecureCreatedLeaseSSHFile(file)

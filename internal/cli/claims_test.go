@@ -105,7 +105,7 @@ func TestClaimsListScansDoNotCreateLocksOrMutateState(t *testing.T) {
 				writeClaimsListFixture(t, " cbx_padded.json", leaseClaim{LeaseID: " cbx_padded"})
 			}
 
-			stateDir, err := crabboxStateDir()
+			stateDir, err := CrabboxStateDir()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -182,7 +182,7 @@ func TestClaimsListEnforcesInclusiveClaimFileSizeLimit(t *testing.T) {
 			t.Fatalf("human output missing %q:\n%s", want, human)
 		}
 	}
-	stateDir, err := crabboxStateDir()
+	stateDir, err := CrabboxStateDir()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func TestClaimsListSizeLimitDoesNotChangeRuntimeClaimReader(t *testing.T) {
 	if len(output.Claims) != 0 || len(output.Problems) != 1 || output.Problems[0].Code != "claim_too_large" {
 		t.Fatalf("inventory output=%#v", output)
 	}
-	stateDir, err := crabboxStateDir()
+	stateDir, err := CrabboxStateDir()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestClaimsListSizeLimitDoesNotChangeRuntimeClaimReader(t *testing.T) {
 		t.Fatalf("inventory created claim locks: %v", err)
 	}
 
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatalf("runtime reader rejected compatible large claim: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestRuntimeClaimsSnapshotDoesNotCreateLocks(t *testing.T) {
 	if len(snapshot.claims) != 1 || snapshot.claims[0].LeaseID != "cbx_runtime" {
 		t.Fatalf("claims=%#v", snapshot.claims)
 	}
-	stateDir, err := crabboxStateDir()
+	stateDir, err := CrabboxStateDir()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +307,7 @@ func TestLeaseClaimsSnapshotBoundaryHandling(t *testing.T) {
 			t.Fatalf("invalid[%q]=%v want code=%s", leaseID, snapshot.invalid[leaseID], wantCode)
 		}
 	}
-	stateDir, err := crabboxStateDir()
+	stateDir, err := CrabboxStateDir()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +415,7 @@ func TestClaimsListConcurrentDeleteAndChangeProduceDeterministicProblems(t *test
 		} else if !reflect.DeepEqual(output, want) {
 			t.Fatalf("nondeterministic output\nfirst=%#v\nsecond=%#v", want, output)
 		}
-		stateDir, err := crabboxStateDir()
+		stateDir, err := CrabboxStateDir()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -649,7 +649,7 @@ func writeClaimsListFixture(t *testing.T, name string, value any) {
 
 func writeClaimsListRawFixture(t *testing.T, name string, data []byte) {
 	t.Helper()
-	dir, err := crabboxStateDir()
+	dir, err := CrabboxStateDir()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -699,7 +699,7 @@ func (r *claimsListRepeatingReader) Read(p []byte) (int, error) {
 
 func makeClaimsListDirectoryFixture(t *testing.T, name string) {
 	t.Helper()
-	dir, err := crabboxStateDir()
+	dir, err := CrabboxStateDir()
 	if err != nil {
 		t.Fatal(err)
 	}

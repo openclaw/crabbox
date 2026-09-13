@@ -85,7 +85,7 @@ func (a App) status(ctx context.Context, args []string) error {
 		}
 		if err != nil {
 			if *wait && errors.Is(statusCtx.Err(), context.DeadlineExceeded) {
-				timeoutErr := exit(5, "timed out waiting for %s to become ready", *id)
+				timeoutErr := Exit(5, "timed out waiting for %s to become ready", *id)
 				if err != statusCtx.Err() {
 					return errors.Join(timeoutErr, err)
 				}
@@ -125,7 +125,7 @@ func (a App) status(ctx context.Context, args []string) error {
 		select {
 		case <-statusCtx.Done():
 			if errors.Is(statusCtx.Err(), context.DeadlineExceeded) {
-				return exit(5, "timed out waiting for %s to become ready", *id)
+				return Exit(5, "timed out waiting for %s to become ready", *id)
 			}
 			return statusCtx.Err()
 		case <-time.After(5 * time.Second):
@@ -142,7 +142,7 @@ func statusLeaseExactClaim(ctx context.Context, backend Backend, lease LeaseTarg
 	if lease.LeaseID == "" || provider == "" {
 		return leaseClaim{}, false, nil
 	}
-	claim, claimed, exact, err := resolveLeaseClaimForProviderWithExact(lease.LeaseID, provider)
+	claim, claimed, exact, err := ResolveLeaseClaimForProviderWithExact(lease.LeaseID, provider)
 	if err != nil {
 		return leaseClaim{}, false, fmt.Errorf("read exact %s lease claim: %w", provider, err)
 	}
@@ -171,7 +171,7 @@ func statusWaitTerminalError(id string, state statusView) error {
 	if state.Ready || !statusTerminalState(state.State) {
 		return nil
 	}
-	return exit(5, "lease %s reached terminal state %s before ready", id, state.State)
+	return Exit(5, "lease %s reached terminal state %s before ready", id, state.State)
 }
 
 func statusTerminalState(state string) bool {
@@ -208,7 +208,7 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 	}
 	target = resolved.Target
 	state := blank(server.Labels["state"], server.Status)
-	ready := hasHost && leaseStatusStateCanBeReady(lease, state) && probeSSHReady(ctx, &target, statusSSHReadinessTimeout(target))
+	ready := hasHost && leaseStatusStateCanBeReady(lease, state) && ProbeSSHReady(ctx, &target, statusSSHReadinessTimeout(target))
 	meta := serverTailscaleMetadata(server)
 	var tailscale *TailscaleMetadata
 	if meta.Enabled {
@@ -221,7 +221,7 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 	}
 	return statusView{
 		ID:               lease.LeaseID,
-		Slug:             serverSlug(server),
+		Slug:             ServerSlug(server),
 		Provider:         provider,
 		TargetOS:         blank(server.Labels["target"], cfg.TargetOS),
 		WorkRoot:         statusWorkRoot(cfg, server, target),
@@ -239,10 +239,10 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		SSHPort:          target.Port,
 		SSHFallbackPorts: target.FallbackPorts,
 		SSHKey:           target.Key,
-		LastTouchedAt:    blank(leaseLabelTimeDisplay(server.Labels["last_touched_at"]), server.Labels["last_touched_at"]),
+		LastTouchedAt:    blank(LeaseLabelTimeDisplay(server.Labels["last_touched_at"]), server.Labels["last_touched_at"]),
 		IdleFor:          idleForString(server.Labels["last_touched_at"], time.Now()),
-		IdleTimeout:      leaseLabelDurationDisplay(server.Labels["idle_timeout_secs"], server.Labels["idle_timeout"]),
-		ExpiresAt:        blank(leaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"]),
+		IdleTimeout:      LeaseLabelDurationDisplay(server.Labels["idle_timeout_secs"], server.Labels["idle_timeout"]),
+		ExpiresAt:        blank(LeaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"]),
 		Labels:           server.Labels,
 		ProviderMetadata: inspectProviderMetadata(provider, server.ProviderMetadata),
 		HasHost:          hasHost,
@@ -347,7 +347,7 @@ func (a App) leaseStatusWithRequest(
 	}
 	sshBackend, ok := backend.(SSHLeaseBackend)
 	if !ok {
-		return statusView{}, exit(2, "provider=%s does not support status", backend.Spec().Name)
+		return statusView{}, Exit(2, "provider=%s does not support status", backend.Spec().Name)
 	}
 	lease, err := sshBackend.Resolve(ctx, ResolveRequest{Options: req.Options, ID: req.ID, StatusOnly: true, NoLocalStateMutations: true, IncludeDiagnostics: includeDiagnostics})
 	if err != nil {
@@ -382,7 +382,7 @@ func (a App) resolveSSHTargetWithRequestConfig(ctx context.Context, cfg *Config,
 
 func (a App) resolveSSHLeaseWithRequestConfig(ctx context.Context, cfg *Config, req ResolveRequest, allowLoginOnly bool) (LeaseTarget, error) {
 	if cfg == nil {
-		return LeaseTarget{}, exit(2, "lease target config is required")
+		return LeaseTarget{}, Exit(2, "lease target config is required")
 	}
 	if err := autoRouteExternalLeaseForConfig(cfg, req.ID); err != nil {
 		return LeaseTarget{}, err
@@ -393,11 +393,11 @@ func (a App) resolveSSHLeaseWithRequestConfig(ctx context.Context, cfg *Config, 
 	}
 	sshBackend, ok := backend.(SSHLoginBackend)
 	if !ok {
-		return LeaseTarget{}, exit(2, "provider=%s does not expose an SSH target", backend.Spec().Name)
+		return LeaseTarget{}, Exit(2, "provider=%s does not expose an SSH target", backend.Spec().Name)
 	}
 	if !allowLoginOnly {
 		if _, ok := backend.(SSHLeaseBackend); !ok {
-			return LeaseTarget{}, exit(2, "provider=%s exposes SSH login only, not a Crabbox-managed SSH lease", backend.Spec().Name)
+			return LeaseTarget{}, Exit(2, "provider=%s exposes SSH login only, not a Crabbox-managed SSH lease", backend.Spec().Name)
 		}
 	}
 	req.Options = leaseOptionsFromConfig(*cfg)
@@ -445,19 +445,19 @@ func resolveSSHLeaseTarget(ctx context.Context, backend SSHLoginBackend, req Res
 	}
 	if claimExistedBefore {
 		if !resolvedLeaseClaimIdentityCompatible(claimBefore, lease.Server) {
-			return LeaseTarget{}, exit(2, "lease %s has an incompatible provider identity; refusing to rebind resolved access", claimBefore.LeaseID)
+			return LeaseTarget{}, Exit(2, "lease %s has an incompatible provider identity; refusing to rebind resolved access", claimBefore.LeaseID)
 		}
 		leaseIDChanged := lease.LeaseID != claimBefore.LeaseID
 		var discardedClaim leaseClaim
 		discardedClaimExists := false
 		if leaseIDChanged && !resolvedClaimExistedBefore && validLeaseClaimID(resolvedLeaseID) {
-			resolvedClaim, resolvedClaimExists, err := readLeaseClaimWithPresence(resolvedLeaseID)
+			resolvedClaim, resolvedClaimExists, err := ReadLeaseClaimWithPresence(resolvedLeaseID)
 			if err != nil {
 				return LeaseTarget{}, err
 			}
 			if resolvedClaimExists {
 				if !resolvedLeaseClaimAttestsResult(resolvedClaim, lease.Server, expectedRepoRoot, req.Options.ProviderScope) {
-					return LeaseTarget{}, exit(2, "lease %s claim changed during resolve; retry", resolvedLeaseID)
+					return LeaseTarget{}, Exit(2, "lease %s claim changed during resolve; retry", resolvedLeaseID)
 				}
 				discardedClaim = resolvedClaim
 				discardedClaimExists = true
@@ -479,10 +479,10 @@ func resolveSSHLeaseTarget(ctx context.Context, backend SSHLoginBackend, req Res
 		}
 		if leaseIDChanged && !resolvedClaimExistedBefore && validLeaseClaimID(resolvedLeaseID) {
 			if aliasKeyPath, err := testboxKeyPath(resolvedLeaseID); !req.ReleaseOnly && err == nil && lease.SSH.Key == aliasKeyPath {
-				return LeaseTarget{}, exit(2, "lease %s resolved to %s but the canonical stored SSH key is unavailable", resolvedLeaseID, claimBefore.LeaseID)
+				return LeaseTarget{}, Exit(2, "lease %s resolved to %s but the canonical stored SSH key is unavailable", resolvedLeaseID, claimBefore.LeaseID)
 			}
 			if discardedClaimExists {
-				if err := removeLeaseClaimIfUnchanged(resolvedLeaseID, discardedClaim); err != nil {
+				if err := RemoveLeaseClaimIfUnchanged(resolvedLeaseID, discardedClaim); err != nil {
 					return LeaseTarget{}, err
 				}
 				removeStoredTestboxKey(resolvedLeaseID)
@@ -492,7 +492,7 @@ func resolveSSHLeaseTarget(ctx context.Context, backend SSHLoginBackend, req Res
 	var claimAfter leaseClaim
 	claimExistsAfter := false
 	if lease.LeaseID != "" {
-		if claimAfter, claimExistsAfter, err = readLeaseClaimWithPresence(lease.LeaseID); err != nil {
+		if claimAfter, claimExistsAfter, err = ReadLeaseClaimWithPresence(lease.LeaseID); err != nil {
 			return LeaseTarget{}, err
 		}
 	}
@@ -537,7 +537,7 @@ func resolvedLeaseClaimBefore(snapshot leaseClaimsSnapshot, provider, providerSc
 				continue
 			}
 			if found.LeaseID != "" && found.LeaseID != claim.LeaseID {
-				return leaseClaim{}, false, exit(2, "multiple provider=%s claims match resolved lease %s", provider, firstNonBlank(lease.LeaseID, identifier))
+				return leaseClaim{}, false, Exit(2, "multiple provider=%s claims match resolved lease %s", provider, firstNonBlank(lease.LeaseID, identifier))
 			}
 			found = cloneLeaseClaim(claim)
 		}
@@ -554,8 +554,8 @@ func resolvedLeaseClaimBefore(snapshot leaseClaimsSnapshot, provider, providerSc
 		if candidate.LeaseID == identifier {
 			return strings.TrimSpace(candidate.ProviderScope) == "" || providerScope == "" || scopeMatches(candidate)
 		}
-		slug := normalizeLeaseSlug(identifier)
-		if slug != "" && normalizeLeaseSlug(candidate.Slug) == slug {
+		slug := NormalizeLeaseSlug(identifier)
+		if slug != "" && NormalizeLeaseSlug(candidate.Slug) == slug {
 			return scopeMatches(candidate) &&
 				(candidate.CloudID == "" || lease.Server.CloudID == "" || candidate.CloudID == lease.Server.CloudID)
 		}

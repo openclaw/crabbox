@@ -11,7 +11,7 @@ import (
 
 const linuxBootIDPath = "/proc/sys/kernel/random/boot_id"
 
-func processBootIdentity() (string, error) {
+func LocalProcessBootIdentity() (string, error) {
 	data, err := os.ReadFile(linuxBootIDPath)
 	if err != nil {
 		return "", err
@@ -23,7 +23,7 @@ func processBootIdentity() (string, error) {
 	return bootID, nil
 }
 
-func processBootIdentityRequired() bool {
+func LocalProcessBootIdentityRequired() bool {
 	return true
 }
 

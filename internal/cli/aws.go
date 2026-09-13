@@ -81,7 +81,7 @@ type AWSFixedCreateControl struct {
 
 func newAWSClient(ctx context.Context, cfg Config) (*AWSClient, error) {
 	if cfg.AWSRegion == "" {
-		return nil, exit(3, "CRABBOX_AWS_REGION or AWS_REGION is required")
+		return nil, Exit(3, "CRABBOX_AWS_REGION or AWS_REGION is required")
 	}
 	return newAWSClientForRegion(ctx, cfg, cfg.AWSRegion)
 }
@@ -236,7 +236,7 @@ func (c *AWSClient) ensureSSHKeyBinding(ctx context.Context, name, publicKey str
 	}
 	keyPairID := strings.TrimSpace(aws.ToString(created.KeyPairId))
 	if keyPairID == "" {
-		return awsKeyPairBinding{}, exit(5, "aws imported key pair %q without an immutable key pair id", name)
+		return awsKeyPairBinding{}, Exit(5, "aws imported key pair %q without an immutable key pair id", name)
 	}
 	return awsKeyPairBinding{ID: keyPairID, Managed: true, Created: true}, nil
 }
@@ -248,7 +248,7 @@ func (c *AWSClient) EnsureSSHKey(ctx context.Context, name, publicKey string) er
 
 func verifyAWSKeyPairMatches(name, publicKey string, keyPairs []types.KeyPairInfo) error {
 	if len(keyPairs) == 0 {
-		return exit(2, "aws key pair %q exists but DescribeKeyPairs returned no key material", name)
+		return Exit(2, "aws key pair %q exists but DescribeKeyPairs returned no key material", name)
 	}
 	existing := keyPairs[0]
 	if sameOpenSSHPublicKey(aws.ToString(existing.PublicKey), publicKey) {
@@ -262,12 +262,12 @@ func verifyAWSKeyPairMatches(name, publicKey string, keyPairs []types.KeyPairInf
 		return nil
 	}
 	if existing.PublicKey != nil && strings.TrimSpace(aws.ToString(existing.PublicKey)) != "" {
-		return exit(2, "aws key pair %q already exists with different public key; delete it or configure a unique provider key", name)
+		return Exit(2, "aws key pair %q already exists with different public key; delete it or configure a unique provider key", name)
 	}
 	if existing.KeyFingerprint == nil || strings.TrimSpace(aws.ToString(existing.KeyFingerprint)) == "" {
-		return exit(2, "aws key pair %q already exists but Crabbox cannot verify its public key; delete it or configure a unique provider key", name)
+		return Exit(2, "aws key pair %q already exists but Crabbox cannot verify its public key; delete it or configure a unique provider key", name)
 	}
-	return exit(2, "aws key pair %q already exists with fingerprint %s, expected %s; delete it or configure a unique provider key", name, aws.ToString(existing.KeyFingerprint), strings.Join(fingerprints, " or "))
+	return Exit(2, "aws key pair %q already exists with fingerprint %s, expected %s; delete it or configure a unique provider key", name, aws.ToString(existing.KeyFingerprint), strings.Join(fingerprints, " or "))
 }
 
 func sameOpenSSHPublicKey(left, right string) bool {
@@ -301,7 +301,7 @@ func awsImportedPublicKeyFingerprints(publicKey string) ([]string, error) {
 		derSum := md5.Sum(x509.MarshalPKCS1PublicKey(pub)) //nolint:gosec // AWS examples also derive imported RSA fingerprints from PKCS#1 DER.
 		return []string{colonHex(blobSum[:]), colonHex(derSum[:])}, nil
 	default:
-		return nil, exit(2, "unsupported AWS SSH public key type %q", keyType)
+		return nil, Exit(2, "unsupported AWS SSH public key type %q", keyType)
 	}
 }
 
@@ -333,18 +333,18 @@ func normalizeAWSKeyFingerprint(value string) string {
 func parseOpenSSHPublicKey(publicKey string) (string, []byte, error) {
 	fields := strings.Fields(strings.TrimSpace(publicKey))
 	if len(fields) < 2 {
-		return "", nil, exit(2, "invalid SSH public key")
+		return "", nil, Exit(2, "invalid SSH public key")
 	}
 	blob, err := base64.StdEncoding.DecodeString(fields[1])
 	if err != nil {
-		return "", nil, exit(2, "invalid SSH public key: %v", err)
+		return "", nil, Exit(2, "invalid SSH public key: %v", err)
 	}
 	innerType, rest, err := readSSHString(blob)
 	if err != nil {
-		return "", nil, exit(2, "invalid SSH public key: %v", err)
+		return "", nil, Exit(2, "invalid SSH public key: %v", err)
 	}
 	if innerType != fields[0] {
-		return "", nil, exit(2, "invalid SSH public key: type %q does not match blob type %q", fields[0], innerType)
+		return "", nil, Exit(2, "invalid SSH public key: type %q does not match blob type %q", fields[0], innerType)
 	}
 	_ = rest
 	return innerType, blob, nil
@@ -353,29 +353,29 @@ func parseOpenSSHPublicKey(publicKey string) (string, []byte, error) {
 func parseOpenSSHRSAPublicKey(blob []byte) (*rsa.PublicKey, error) {
 	keyType, rest, err := readSSHString(blob)
 	if err != nil {
-		return nil, exit(2, "invalid RSA public key: %v", err)
+		return nil, Exit(2, "invalid RSA public key: %v", err)
 	}
 	if keyType != "ssh-rsa" {
-		return nil, exit(2, "invalid RSA public key: type %q", keyType)
+		return nil, Exit(2, "invalid RSA public key: type %q", keyType)
 	}
 	eBytes, rest, err := readSSHBytes(rest)
 	if err != nil {
-		return nil, exit(2, "invalid RSA public key exponent: %v", err)
+		return nil, Exit(2, "invalid RSA public key exponent: %v", err)
 	}
 	nBytes, rest, err := readSSHBytes(rest)
 	if err != nil {
-		return nil, exit(2, "invalid RSA public key modulus: %v", err)
+		return nil, Exit(2, "invalid RSA public key modulus: %v", err)
 	}
 	if len(rest) != 0 {
-		return nil, exit(2, "invalid RSA public key: trailing data")
+		return nil, Exit(2, "invalid RSA public key: trailing data")
 	}
 	e := new(big.Int).SetBytes(eBytes)
 	if !e.IsInt64() || e.Sign() <= 0 || e.Int64() > int64(^uint(0)>>1) {
-		return nil, exit(2, "invalid RSA public key exponent")
+		return nil, Exit(2, "invalid RSA public key exponent")
 	}
 	n := new(big.Int).SetBytes(nBytes)
 	if n.Sign() <= 0 {
-		return nil, exit(2, "invalid RSA public key modulus")
+		return nil, Exit(2, "invalid RSA public key modulus")
 	}
 	return &rsa.PublicKey{N: n, E: int(e.Int64())}, nil
 }
@@ -478,7 +478,7 @@ func (c *AWSClient) CreateServerWithFallback(ctx context.Context, cfg Config, pu
 
 func (c *AWSClient) CreateServerWithFallbackControl(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any), control *AWSFixedCreateControl) (Server, Config, error) {
 	if control != nil && control.PinnedAttempt != nil {
-		return Server{}, cfg, exit(4, "lease_id_conflict: fixed AWS lease %s has an unresolved launch attempt", leaseID)
+		return Server{}, cfg, Exit(4, "lease_id_conflict: fixed AWS lease %s has an unresolved launch attempt", leaseID)
 	}
 	regions := awsRegionCandidates(cfg, c.region)
 	if len(regions) > 1 {
@@ -571,7 +571,7 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 	if err != nil {
 		return Server{}, cfg, err
 	}
-	candidates := awsLaunchCandidates(cfg)
+	candidates := AWSLaunchCandidates(cfg)
 	useSpot := cfg.Capacity.Market != "on-demand"
 	var marketFallbackCandidates []string
 	var errs []error
@@ -653,15 +653,15 @@ func awsRunInstancesUserData(cfg Config, publicKey string) (string, error) {
 
 func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, imageID, securityGroupID string, spot bool, control *AWSFixedCreateControl) (Server, error) {
 	_ = publicKey
-	name := leaseProviderName(leaseID, slug)
+	name := LeaseProviderName(leaseID, slug)
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
-		cfg.Tailscale.Hostname = renderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
+		cfg.Tailscale.Hostname = RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
 	}
 	now := time.Now().UTC()
 	if control != nil && !control.CreatedAt.IsZero() {
 		now = control.CreatedAt.UTC()
 	}
-	labels := directLeaseLabels(cfg, leaseID, slug, "aws", mapMarket(spot), keep, now)
+	labels := DirectLeaseLabels(cfg, leaseID, slug, "aws", mapMarket(spot), keep, now)
 	labels["aws_region"] = cfg.AWSRegion
 	if control != nil {
 		labels["fixed_intent_sha256"] = control.IntentFingerprint
@@ -781,7 +781,7 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 			return Server{}, fmt.Errorf("fixed AWS launch attempt %s already failed without a resource: InsufficientInstanceCapacity", attempt.ClientToken)
 		}
 		if control.PinnedAttempt != nil {
-			return Server{}, exit(4, "lease_id_conflict: fixed AWS lease %s has an unresolved launch attempt", leaseID)
+			return Server{}, Exit(4, "lease_id_conflict: fixed AWS lease %s has an unresolved launch attempt", leaseID)
 		} else if control.BeforeAttempt != nil {
 			if err := control.BeforeAttempt(attempt); err != nil {
 				return Server{}, err
@@ -808,7 +808,7 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 		return Server{}, err
 	}
 	if len(out.Instances) == 0 {
-		return Server{}, exit(5, "aws returned no instances")
+		return Server{}, Exit(5, "aws returned no instances")
 	}
 	return awsInstanceToServer(out.Instances[0]), nil
 }
@@ -859,7 +859,7 @@ func mapMarket(spot bool) string {
 }
 
 func (c *AWSClient) waitForServerIP(ctx context.Context, id string) (Server, error) {
-	ctx, cancel := context.WithTimeoutCause(ctx, 10*time.Minute, exit(5, "timed out waiting for AWS instance public IP"))
+	ctx, cancel := context.WithTimeoutCause(ctx, 10*time.Minute, Exit(5, "timed out waiting for AWS instance public IP"))
 	defer cancel()
 	for {
 		server, err := c.GetServer(ctx, id)
@@ -895,7 +895,7 @@ func (c *AWSClient) GetServer(ctx context.Context, id string) (Server, error) {
 			return awsInstanceToServer(instance), nil
 		}
 	}
-	return Server{}, exit(4, "aws instance not found: %s", id)
+	return Server{}, Exit(4, "aws instance not found: %s", id)
 }
 
 func (c *AWSClient) DeleteServer(ctx context.Context, id string) error {
@@ -929,7 +929,7 @@ func (c *AWSClient) CreateImageCheckpoint(ctx context.Context, instanceID, name 
 	}
 	imageID := aws.ToString(out.ImageId)
 	if imageID == "" {
-		return CoordinatorImage{}, exit(5, "aws returned no image id")
+		return CoordinatorImage{}, Exit(5, "aws returned no image id")
 	}
 	return CoordinatorImage{
 		ID:         imageID,
@@ -963,7 +963,7 @@ func (c *AWSClient) GetImageCheckpoint(ctx context.Context, imageID string) (Coo
 		return CoordinatorImage{}, err
 	}
 	if len(out.Images) == 0 {
-		return CoordinatorImage{}, exit(4, "aws image not found: %s", imageID)
+		return CoordinatorImage{}, Exit(4, "aws image not found: %s", imageID)
 	}
 	image := out.Images[0]
 	return CoordinatorImage{
@@ -992,7 +992,7 @@ func (c *AWSClient) DeleteImageCheckpoint(ctx context.Context, imageID string, f
 		return err
 	}
 	if imageNotFound && expectedAccountID == "" {
-		return exit(3, "cannot confirm direct AWS checkpoint delete for %s: image not found and checkpoint record has no accountId; switch to the original AWS account or use --local-only", imageID)
+		return Exit(3, "cannot confirm direct AWS checkpoint delete for %s: image not found and checkpoint record has no accountId; switch to the original AWS account or use --local-only", imageID)
 	}
 	snapshotIDs := append([]string(nil), fallbackSnapshotIDs...)
 	if err == nil && len(out.Images) > 0 {
@@ -1000,10 +1000,10 @@ func (c *AWSClient) DeleteImageCheckpoint(ctx context.Context, imageID string, f
 	}
 	snapshotIDs = uniqueStrings(snapshotIDs)
 	if len(snapshotIDs) == 0 {
-		return exit(3, "cannot delete direct AWS checkpoint %s: backing snapshot identities are unavailable; retain the checkpoint and retry discovery", imageID)
+		return Exit(3, "cannot delete direct AWS checkpoint %s: backing snapshot identities are unavailable; retain the checkpoint and retry discovery", imageID)
 	}
 	if persist == nil {
-		return exit(3, "direct AWS checkpoint deletion requires durable snapshot identity persistence")
+		return Exit(3, "direct AWS checkpoint deletion requires durable snapshot identity persistence")
 	}
 	// Deregistration removes the provider mapping. Retain the complete union before
 	// that boundary so an interrupted or partially failed deletion can resume.
@@ -1023,7 +1023,7 @@ func (c *AWSClient) DeleteImageCheckpoint(ctx context.Context, imageID string, f
 
 func (c *AWSClient) CallerAccountID(ctx context.Context) (string, error) {
 	if c.sts == nil {
-		return "", exit(3, "aws sts client is unavailable")
+		return "", Exit(3, "aws sts client is unavailable")
 	}
 	out, err := c.sts.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if err != nil {
@@ -1031,7 +1031,7 @@ func (c *AWSClient) CallerAccountID(ctx context.Context) (string, error) {
 	}
 	accountID := aws.ToString(out.Account)
 	if accountID == "" {
-		return "", exit(3, "aws returned no caller account id")
+		return "", Exit(3, "aws returned no caller account id")
 	}
 	return accountID, nil
 }
@@ -1046,7 +1046,7 @@ func (c *AWSClient) GuardAccount(ctx context.Context, expectedAccountID string) 
 		return err
 	}
 	if accountID != expectedAccountID {
-		return exit(3, "direct AWS checkpoint account mismatch: current account %s does not match checkpoint account %s", accountID, expectedAccountID)
+		return Exit(3, "direct AWS checkpoint account mismatch: current account %s does not match checkpoint account %s", accountID, expectedAccountID)
 	}
 	return nil
 }
@@ -1140,7 +1140,7 @@ func (c *AWSClient) resolveAMI(ctx context.Context, cfg Config) (string, error) 
 		return "", err
 	}
 	if len(out.Images) == 0 {
-		return "", exit(3, "no %s %s AMI found in %s; set CRABBOX_AWS_AMI", label, architecture, cfg.AWSRegion)
+		return "", Exit(3, "no %s %s AMI found in %s; set CRABBOX_AWS_AMI", label, architecture, cfg.AWSRegion)
 	}
 	sort.Slice(out.Images, func(i, j int) bool {
 		return aws.ToString(out.Images[i].CreationDate) > aws.ToString(out.Images[j].CreationDate)
@@ -1179,7 +1179,7 @@ func (c *AWSClient) resolveLatestAmazonAMI(ctx context.Context, name, architectu
 		return "", err
 	}
 	if len(out.Images) == 0 {
-		return "", exit(3, "no AWS AMI found in %s for name=%s architecture=%s; set CRABBOX_AWS_AMI", c.region, name, architecture)
+		return "", Exit(3, "no AWS AMI found in %s for name=%s architecture=%s; set CRABBOX_AWS_AMI", c.region, name, architecture)
 	}
 	sort.Slice(out.Images, func(i, j int) bool {
 		return aws.ToString(out.Images[i].CreationDate) > aws.ToString(out.Images[j].CreationDate)
@@ -1235,7 +1235,7 @@ func (c *AWSClient) ensureSecurityGroup(ctx context.Context, cfg Config) (string
 		}
 	}
 	if groupID == "" {
-		return "", exit(3, "aws security group id is empty")
+		return "", Exit(3, "aws security group id is empty")
 	}
 	ports := sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts)
 	if group != nil {
@@ -1360,7 +1360,7 @@ func (c *AWSClient) defaultVPC(ctx context.Context) (string, error) {
 		return "", err
 	}
 	if len(out.Vpcs) == 0 {
-		return "", exit(3, "no default VPC found; set CRABBOX_AWS_SUBNET_ID and CRABBOX_AWS_SECURITY_GROUP_ID")
+		return "", Exit(3, "no default VPC found; set CRABBOX_AWS_SUBNET_ID and CRABBOX_AWS_SECURITY_GROUP_ID")
 	}
 	return aws.ToString(out.Vpcs[0].VpcId), nil
 }
@@ -1376,7 +1376,7 @@ func (c *AWSClient) securityGroupVPC(ctx context.Context, cfg Config) (string, e
 		return "", err
 	}
 	if len(out.Subnets) == 0 {
-		return "", exit(3, "AWS subnet not found: %s", cfg.AWSSubnetID)
+		return "", Exit(3, "AWS subnet not found: %s", cfg.AWSSubnetID)
 	}
 	return aws.ToString(out.Subnets[0].VpcId), nil
 }
@@ -1384,7 +1384,7 @@ func (c *AWSClient) securityGroupVPC(ctx context.Context, cfg Config) (string, e
 func (c *AWSClient) allowTCP(ctx context.Context, groupID, port string, cidrs []string) error {
 	p, ok := parsePort32(port)
 	if !ok {
-		return exit(2, "invalid SSH port: %s", port)
+		return Exit(2, "invalid SSH port: %s", port)
 	}
 	ranges := make([]types.IpRange, 0, len(cidrs))
 	for _, cidr := range cidrs {
@@ -1541,7 +1541,7 @@ func awsAvailabilityZoneForRegion(cfg Config, region string) string {
 	return ""
 }
 
-func awsLaunchCandidates(cfg Config) []string {
+func AWSLaunchCandidates(cfg Config) []string {
 	if cfg.ServerTypeExplicit {
 		return []string{cfg.ServerType}
 	}
@@ -1590,7 +1590,7 @@ func awsCapacityDoctorCheckForQuota(cfg Config, market string, quotaValue float6
 		serverType = serverTypeForConfig(cfg)
 	}
 	quotaCode := awsQuotaCodeForMarket(market)
-	needed := awsInstanceTypeVCPUs(serverType)
+	needed := AWSInstanceTypeVCPUs(serverType)
 	base := map[string]string{
 		"provider":             "aws",
 		"market":               market,
@@ -1686,19 +1686,19 @@ func awsRecommendedClassForQuota(cfg Config, limitVCPUs int) (string, string) {
 		if len(candidates) == 0 {
 			continue
 		}
-		if awsInstanceTypeVCPUs(candidates[0]) <= limitVCPUs {
+		if AWSInstanceTypeVCPUs(candidates[0]) <= limitVCPUs {
 			return class, candidates[0]
 		}
 	}
 	for _, serverType := range awsInstanceTypeCandidatesForTargetModeArchitectureClass(cfg.TargetOS, cfg.WindowsMode, architecture, "standard") {
-		if awsInstanceTypeVCPUs(serverType) <= limitVCPUs {
+		if AWSInstanceTypeVCPUs(serverType) <= limitVCPUs {
 			return "standard", serverType
 		}
 	}
 	return "", ""
 }
 
-func awsInstanceTypeVCPUs(serverType string) int {
+func AWSInstanceTypeVCPUs(serverType string) int {
 	_, size, ok := strings.Cut(strings.TrimSpace(serverType), ".")
 	if !ok || size == "" {
 		return 0

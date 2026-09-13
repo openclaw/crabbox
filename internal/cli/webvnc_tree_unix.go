@@ -48,8 +48,8 @@ func stopWebVNCDaemonProcessTree(identity webVNCDaemonIdentity, path string) err
 }
 
 func signalWebVNCDaemonSupervisor(identity webVNCDaemonIdentity, signal syscall.Signal) error {
-	command, alive := webVNCDaemonProcessCommand(identity.PID)
-	started, err := webVNCDaemonProcessStartIdentity(identity.PID)
+	command, alive := LocalProcessCommand(identity.PID)
+	started, err := LocalProcessStartIdentity(identity.PID)
 	if !alive || err != nil || !webVNCDaemonIdentityMatchesProcess(identity, command, started) {
 		return fmt.Errorf("refusing to signal WebVNC daemon pid %d without its recorded supervisor identity", identity.PID)
 	}

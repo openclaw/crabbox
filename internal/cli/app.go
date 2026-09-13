@@ -34,7 +34,7 @@ func (a App) input() io.Reader {
 func (a App) Run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		a.printHelp()
-		return exit(2, "missing command")
+		return Exit(2, "missing command")
 	}
 
 	switch args[0] {
@@ -396,7 +396,7 @@ func parseFlags(fs *flag.FlagSet, args []string) error {
 		if errors.Is(err, flag.ErrHelp) {
 			return ExitError{Code: 0}
 		}
-		return exit(2, "%v", err)
+		return Exit(2, "%v", err)
 	}
 	return nil
 }

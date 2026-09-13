@@ -168,9 +168,11 @@ Git seeding is disabled so a seeded tree cannot materialize excluded paths.
 These protections do not remove state already committed upstream or previously
 shared with a runner.
 
-On macOS, managed-state path spelling uses descriptor metadata rather than
-enumerating sibling files, so crowded temporary directories do not block sync
-preparation.
+On macOS, managed-state path spelling uses entry-name and identity attributes
+relative to a retained parent descriptor, rather than opening the leaf or
+enumerating sibling files. This also supports Unix socket and FIFO entries
+without opening them, while preserving object-identity and namespace checks.
+Crowded temporary directories do not block sync preparation.
 
 Native transports without subtree filtering require the selected managed
 namespace to be outside their shared source scope. This includes Blacksmith's

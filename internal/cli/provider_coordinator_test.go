@@ -3321,7 +3321,7 @@ func TestActionsResolveRejectsCoordinatorProviderMismatchBeforeClaimOrLocalAdapt
 	if direct.resolveCalls.Load() != 0 {
 		t.Fatalf("local provider resolve calls=%d want zero", direct.resolveCalls.Load())
 	}
-	if _, exists, readErr := readLeaseClaimWithPresence("cbx_actions_identity"); readErr != nil {
+	if _, exists, readErr := ReadLeaseClaimWithPresence("cbx_actions_identity"); readErr != nil {
 		t.Fatal(readErr)
 	} else if exists {
 		t.Fatal("provider mismatch wrote a local lease claim")

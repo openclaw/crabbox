@@ -77,7 +77,7 @@ func prepareDelegatedArchive(ctx context.Context, req DelegatedArchivePreparatio
 	manifestStart := now()
 	manifest, err := syncManifestFilteredRules(req.Repo.Root, excludes, req.Config.Sync.Includes)
 	if err != nil {
-		return nil, archiveCtx, cancel, exit(6, "build sync file list: %v", err)
+		return nil, archiveCtx, cancel, Exit(6, "build sync file list: %v", err)
 	}
 	manifestDuration := now().Sub(manifestStart)
 
@@ -233,7 +233,7 @@ func RunDelegatedArchiveSync(ctx context.Context, req DelegatedArchiveSyncReques
 
 	uploadStart := now()
 	if _, err := archive.Seek(0, io.SeekStart); err != nil {
-		return nil, 0, exit(6, "rewind sync archive: %v", err)
+		return nil, 0, Exit(6, "rewind sync archive: %v", err)
 	}
 	if err := req.Upload(syncCtx, remoteArchive, archive); err != nil {
 		return nil, 0, err

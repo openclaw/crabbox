@@ -160,7 +160,7 @@ func TestWarmupFailedFixedReplayPreservesLease(t *testing.T) {
 	if backend.creates != 1 || backend.releaseCount != 0 {
 		t.Fatalf("fixed replay created=%d released=%d, want 1/0", backend.creates, backend.releaseCount)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || !exists {
+	if _, exists, err := ReadLeaseClaimWithPresence(leaseID); err != nil || !exists {
 		t.Fatalf("fixed replay lost its claim: exists=%t err=%v", exists, err)
 	}
 }

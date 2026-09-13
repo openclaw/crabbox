@@ -111,7 +111,7 @@ func autoRouteClaimLeaseProvider(cfg *Config, fs *flag.FlagSet, identifier strin
 }
 
 func autoRouteClaimLeaseProviderForIdentifier(cfg *Config, identifier string) error {
-	if providerSelectionIsAuthoritativeRoute(*cfg) {
+	if ProviderSelectionIsAuthoritativeRoute(*cfg) {
 		return nil
 	}
 	provider, ok, err := claimProviderForIdentifier(identifier)
@@ -156,7 +156,7 @@ func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseC
 	if flagWasSet(fs, "ssh-port") {
 		cfg.SSHPort = strings.TrimSpace(*values.SSHPort)
 		if cfg.SSHPort == "" {
-			return exit(2, "--ssh-port must not be empty")
+			return Exit(2, "--ssh-port must not be empty")
 		}
 		MarkSSHPortExplicit(cfg)
 		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
@@ -166,7 +166,7 @@ func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseC
 		MarkClassExplicit(cfg)
 	}
 	if flagWasSet(fs, "arch") {
-		arch, err := normalizeArchitecture(*values.Architecture)
+		arch, err := NormalizeArchitecture(*values.Architecture)
 		if err != nil {
 			return err
 		}
@@ -319,12 +319,12 @@ func validateImageRequirementsForLease(cfg Config, reuse bool) error {
 		return nil
 	}
 	if reuse {
-		return exit(2, "image capability requirements apply only when creating a new lease")
+		return Exit(2, "image capability requirements apply only when creating a new lease")
 	}
 	if cfg.Provider != "aws" ||
 		strings.TrimSpace(cfg.Coordinator) == "" ||
 		cfg.BrokerMode == BrokerModeRegistered {
-		return exit(2, "image capability requirements require a coordinator-managed AWS lease")
+		return Exit(2, "image capability requirements require a coordinator-managed AWS lease")
 	}
 	return nil
 }
@@ -337,12 +337,12 @@ func validateCacheVolumesForLeaseReuse(cfg Config, existingLeaseID string) error
 	if len(required) == 0 {
 		return nil
 	}
-	claim, ok, err := resolveLeaseClaimForProvider(existingLeaseID, canonicalClaimProvider(cfg.Provider))
+	claim, ok, err := ResolveLeaseClaimForProvider(existingLeaseID, canonicalClaimProvider(cfg.Provider))
 	if err != nil {
 		return err
 	}
 	if !ok {
-		return exit(2, "required cache volumes cannot be verified for existing lease %s; warm a new lease instead", existingLeaseID)
+		return Exit(2, "required cache volumes cannot be verified for existing lease %s; warm a new lease instead", existingLeaseID)
 	}
 	attached := map[string]struct{}{}
 	for _, spec := range claim.CacheVolumes {
@@ -350,7 +350,7 @@ func validateCacheVolumesForLeaseReuse(cfg Config, existingLeaseID string) error
 	}
 	for _, spec := range required {
 		if _, ok := attached[spec]; !ok {
-			return exit(2, "required cache volume %q is not recorded on existing lease %s; warm a new lease instead", spec, existingLeaseID)
+			return Exit(2, "required cache volume %q is not recorded on existing lease %s; warm a new lease instead", spec, existingLeaseID)
 		}
 	}
 	return nil
@@ -438,10 +438,10 @@ func maybeBootstrapPondACL(ctx context.Context, cfg Config) error {
 
 func validateLeaseDurations(cfg Config) error {
 	if cfg.TTL <= 0 {
-		return exit(2, "ttl must be positive")
+		return Exit(2, "ttl must be positive")
 	}
 	if cfg.IdleTimeout <= 0 {
-		return exit(2, "idle timeout must be positive")
+		return Exit(2, "idle timeout must be positive")
 	}
 	return nil
 }
@@ -521,7 +521,7 @@ func setIDFromFirstArg(fs *flag.FlagSet, id *string) {
 
 func requireLeaseID(id, usage string, cfg Config) error {
 	if id == "" && !isStaticProvider(cfg.Provider) {
-		return exit(2, "usage: %s", usage)
+		return Exit(2, "usage: %s", usage)
 	}
 	return nil
 }
@@ -570,7 +570,7 @@ func (a App) resolveNetworkLoginLeaseTargetForRepo(ctx context.Context, cfg *Con
 		return LeaseTarget{}, err
 	}
 	if !probeTransport && lease.SSH.AuthSecret {
-		return LeaseTarget{}, exit(2, "crabbox connect does not support token-as-username SSH targets; use crabbox ssh --show-secret in a trusted terminal")
+		return LeaseTarget{}, Exit(2, "crabbox connect does not support token-as-username SSH targets; use crabbox ssh --show-secret in a trusted terminal")
 	}
 	resolved, err := resolveSSHTargetNetwork(ctx, *cfg, lease.Server, lease.SSH, true)
 	if err != nil {
@@ -612,7 +612,7 @@ func (a App) resolveNetworkLeaseTargetWithRepoConfig(ctx context.Context, cfg *C
 
 func (a App) resolveNetworkSSHTargetWithRepoConfig(ctx context.Context, cfg *Config, id string, printFallback bool, repo Repo, reclaim, allowLoginOnly bool) (Server, SSHTarget, string, error) {
 	if cfg == nil {
-		return Server{}, SSHTarget{}, "", exit(2, "lease target config is required")
+		return Server{}, SSHTarget{}, "", Exit(2, "lease target config is required")
 	}
 	req := ResolveRequest{Repo: repo, ID: id, Reclaim: reclaim}
 	var server Server
@@ -661,7 +661,7 @@ func resolvedLeaseClaimSnapshot(leaseID string, server Server) (leaseClaim, bool
 		return leaseClaim{}, false, nil
 	}
 	if !server.claimSnapshotSet {
-		return leaseClaim{}, false, exit(2, "lease %s resolve claim snapshot is missing", leaseID)
+		return leaseClaim{}, false, Exit(2, "lease %s resolve claim snapshot is missing", leaseID)
 	}
 	return cloneLeaseClaim(server.claimSnapshot), server.claimSnapshotExists, nil
 }
@@ -671,7 +671,7 @@ func updateResolvedLeaseClaimEndpoint(leaseID string, server Server, target SSHT
 	if err != nil || !exists {
 		return leaseClaim{}, exists, err
 	}
-	updated, err := updateLeaseClaimEndpointIfUnchanged(leaseID, expected, server, target)
+	updated, err := UpdateLeaseClaimEndpointIfUnchanged(leaseID, expected, server, target)
 	return updated, true, err
 }
 
@@ -683,7 +683,7 @@ func (a App) claimAndTouchLeaseTarget(ctx context.Context, cfg Config, server *S
 	if err != nil {
 		return err
 	}
-	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(*server), cfg, server, target, boundary.root, reclaim); err != nil {
+	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(*server), cfg, server, target, boundary.root, reclaim); err != nil {
 		return err
 	}
 	*server = a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: *server, SSH: target, LeaseID: leaseID}, "")

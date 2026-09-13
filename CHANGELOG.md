@@ -2,11 +2,12 @@
 
 ## Unreleased
 
-- Keep artifact filename matching case-sensitive on macOS when shell glob settings enable `nocaseglob`, while preserving explicit `nocasematch` behavior. [PR 2208](https://github.com/openclaw/crabbox/pull/2208).
+- Resolve macOS managed-state paths for Unix sockets and FIFOs through bounded metadata queries without opening those entries or scanning sibling files. [PR 2207](https://github.com/openclaw/crabbox/pull/2207).
 
 - Keep portable workspace ownership exclusive when a runner's mkdir reports success after losing a directory-creation race. [PR 2201](https://github.com/openclaw/crabbox/pull/2201).
 
 - Resolve macOS managed-state path spelling without scanning unrelated sibling files, so crowded temporary directories do not block sync preparation. [PR 2187](https://github.com/openclaw/crabbox/pull/2187).
+- Keep artifact filename matching case-sensitive on macOS when shell glob settings enable `nocaseglob`, while preserving explicit `nocasematch` behavior. [PR 2208](https://github.com/openclaw/crabbox/pull/2208).
 - Keep Linode lease metadata consistent with the created instance type when an explicit type contains only whitespace. [PR 2186](https://github.com/openclaw/crabbox/pull/2186).
 - Avoid unnecessary sibling traversal for nested artifact globs with an exact, safe literal directory prefix, preserving matching, archive membership, and collection limits. [PR 2162](https://github.com/openclaw/crabbox/pull/2162). Thanks @vincentkoc.
 - Add opt-in private local run history with bounded logs and parsed results, offline readback after lease cleanup, explicit provenance, and bounded pruning. [PR 2141](https://github.com/openclaw/crabbox/pull/2141). Thanks @coygeek.

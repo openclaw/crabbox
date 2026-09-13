@@ -43,25 +43,25 @@ func validateRequestedCapabilities(cfg Config) error {
 	}
 	spec := provider.Spec()
 	if cfg.Desktop && !featureSetHas(spec.Features, FeatureDesktop) {
-		return exit(2, "desktop/VNC is not supported for provider=%s", provider.Name())
+		return Exit(2, "desktop/VNC is not supported for provider=%s", provider.Name())
 	}
 	if err := validateDesktopEnv(cfg); err != nil {
 		return err
 	}
 	if cfg.Browser && !featureSetHas(spec.Features, FeatureBrowser) {
-		return exit(2, "browser provisioning is not supported for provider=%s", provider.Name())
+		return Exit(2, "browser provisioning is not supported for provider=%s", provider.Name())
 	}
 	if cfg.Code && !featureSetHas(spec.Features, FeatureCode) {
-		return exit(2, "web code is not supported for provider=%s", provider.Name())
+		return Exit(2, "web code is not supported for provider=%s", provider.Name())
 	}
 	if cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 && cfg.Desktop {
-		return exit(2, "target=windows --windows-mode wsl2 does not support desktop/VNC; use --windows-mode normal for desktop/VNC or omit --desktop for WSL2")
+		return Exit(2, "target=windows --windows-mode wsl2 does not support desktop/VNC; use --windows-mode normal for desktop/VNC or omit --desktop for WSL2")
 	}
 	if cfg.Provider == "azure" && cfg.TargetOS == targetWindows && (cfg.Browser || cfg.Code || cfg.Tailscale.Enabled) {
-		return exit(2, "provider=azure target=windows currently supports SSH, sync, run, and desktop/VNC; browser/code/tailscale require Linux or AWS Windows where supported")
+		return Exit(2, "provider=azure target=windows currently supports SSH, sync, run, and desktop/VNC; browser/code/tailscale require Linux or AWS Windows where supported")
 	}
 	if cfg.Code && cfg.TargetOS != targetLinux {
-		return exit(2, "web code currently supports managed Linux leases only")
+		return Exit(2, "web code currently supports managed Linux leases only")
 	}
 	return nil
 }
@@ -84,11 +84,11 @@ func validateDesktopEnv(cfg Config) error {
 		return nil
 	case desktopEnvWayland, desktopEnvGnome:
 		if cfg.Desktop && cfg.TargetOS != targetLinux {
-			return exit(2, "desktopEnv=%s requires target=linux", normalizedDesktopEnv(cfg.DesktopEnv))
+			return Exit(2, "desktopEnv=%s requires target=linux", normalizedDesktopEnv(cfg.DesktopEnv))
 		}
 		return nil
 	default:
-		return exit(2, "desktopEnv must be xfce, wayland, or gnome")
+		return Exit(2, "desktopEnv must be xfce, wayland, or gnome")
 	}
 }
 
@@ -106,19 +106,19 @@ func enforceManagedLeaseCapabilities(cfg Config, server Server, leaseID string) 
 		return nil
 	}
 	if cfg.Desktop && !labelBool(server.Labels["desktop"]) && !macOSScreenSharingLease(cfg, server) {
-		return exit(2, "lease %s was not created with desktop=true; warm a new lease with --desktop", leaseID)
+		return Exit(2, "lease %s was not created with desktop=true; warm a new lease with --desktop", leaseID)
 	}
 	if cfg.Desktop {
 		requestedDesktopEnv := normalizedDesktopEnv(cfg.DesktopEnv)
 		if requestedDesktopEnv != desktopEnvXFCE && normalizedDesktopEnv(server.Labels["desktop_env"]) != requestedDesktopEnv {
-			return exit(2, "lease %s was not created with desktopEnv=%s; warm a new lease with --desktop-env %s", leaseID, requestedDesktopEnv, requestedDesktopEnv)
+			return Exit(2, "lease %s was not created with desktopEnv=%s; warm a new lease with --desktop-env %s", leaseID, requestedDesktopEnv, requestedDesktopEnv)
 		}
 	}
 	if cfg.Browser && !labelBool(server.Labels["browser"]) {
-		return exit(2, "lease %s was not created with browser=true; warm a new lease with --browser", leaseID)
+		return Exit(2, "lease %s was not created with browser=true; warm a new lease with --browser", leaseID)
 	}
 	if cfg.Code && !labelBool(server.Labels["code"]) {
-		return exit(2, "lease %s was not created with code=true; warm a new lease with --code", leaseID)
+		return Exit(2, "lease %s was not created with code=true; warm a new lease with --code", leaseID)
 	}
 	return nil
 }
@@ -195,22 +195,22 @@ func ensureStaticDesktop(ctx context.Context, cfg Config, target SSHTarget) erro
 func probeStaticDesktop(ctx context.Context, cfg Config, target SSHTarget) error {
 	if isWindowsNativeTarget(target) {
 		if err := probeLoopbackVNC(ctx, target, "10", "3"); err != nil {
-			return exit(2, "target=windows does not expose a localhost VNC service; install a VNC server bound to 127.0.0.1:5900 or expose static VNC on host:5900")
+			return Exit(2, "target=windows does not expose a localhost VNC service; install a VNC server bound to 127.0.0.1:5900 or expose static VNC on host:5900")
 		}
 		return nil
 	}
 	if target.TargetOS == targetMacOS {
 		if err := probeLoopbackVNC(ctx, target, "10", "3"); err != nil {
-			return exit(2, "target=macos does not expose a localhost VNC service; enable Screen Sharing or use a preconfigured VNC server")
+			return Exit(2, "target=macos does not expose a localhost VNC service; enable Screen Sharing or use a preconfigured VNC server")
 		}
 		return nil
 	}
 	check := staticDesktopProbeCommand(cfg, target)
 	if err := runSSHQuiet(ctx, target, check); err != nil {
 		if isWaylandDesktopEnv(cfg.DesktopEnv) {
-			return exit(2, "target=linux does not expose a Crabbox Wayland desktop; create %s with CRABBOX_DESKTOP_ENV=wayland or gnome, XDG_RUNTIME_DIR, and WAYLAND_DISPLAY, then start the compositor and WayVNC on 127.0.0.1:5900", desktopEnvPath)
+			return Exit(2, "target=linux does not expose a Crabbox Wayland desktop; create %s with CRABBOX_DESKTOP_ENV=wayland or gnome, XDG_RUNTIME_DIR, and WAYLAND_DISPLAY, then start the compositor and WayVNC on 127.0.0.1:5900", desktopEnvPath)
 		}
-		return exit(2, "target=linux does not expose a loopback X11 VNC desktop; start Xtigervnc or Xvfb/x11vnc on 127.0.0.1:5900, or request --desktop-env wayland or gnome")
+		return Exit(2, "target=linux does not expose a loopback X11 VNC desktop; start Xtigervnc or Xvfb/x11vnc on 127.0.0.1:5900, or request --desktop-env wayland or gnome")
 	}
 	return nil
 }
@@ -269,11 +269,11 @@ printf 'BROWSER=%s\nCHROME_BIN=%s\n' "$path" "$path"`
 	}
 	out, err := runSSHOutput(ctx, target, script)
 	if err != nil {
-		return nil, exit(2, "browser=true requested but no supported browser was found on target")
+		return nil, Exit(2, "browser=true requested but no supported browser was found on target")
 	}
 	env := parseEnvLines(out)
 	if env["BROWSER"] == "" {
-		return nil, exit(2, "browser=true requested but target did not report BROWSER")
+		return nil, Exit(2, "browser=true requested but target did not report BROWSER")
 	}
 	if env["CHROME_BIN"] == "" {
 		env["CHROME_BIN"] = env["BROWSER"]
@@ -353,7 +353,7 @@ func resolveVNCEndpoint(ctx context.Context, cfg Config, target *SSHTarget) (vnc
 		if tcpReachable(ctx, target.Host, managedVNCPort, 2*time.Second) {
 			return vncEndpoint{Direct: true, Host: target.Host, Port: managedVNCPort}, nil
 		}
-		return vncEndpoint{}, exit(5, "target does not expose VNC through SSH loopback 127.0.0.1:5900 or direct %s:%s", target.Host, managedVNCPort)
+		return vncEndpoint{}, Exit(5, "target does not expose VNC through SSH loopback 127.0.0.1:5900 or direct %s:%s", target.Host, managedVNCPort)
 	}
 	if err := waitForLoopbackVNC(ctx, target); err != nil {
 		return vncEndpoint{}, err
@@ -380,7 +380,7 @@ func waitForLoopbackVNC(ctx context.Context, target *SSHTarget) error {
 			return err
 		}
 	}
-	return exit(5, "target does not expose VNC on 127.0.0.1:5900")
+	return Exit(5, "target does not expose VNC on 127.0.0.1:5900")
 }
 
 func probeLoopbackVNC(ctx context.Context, target SSHTarget, connectTimeout, connectionAttempts string) error {
@@ -389,7 +389,7 @@ func probeLoopbackVNC(ctx context.Context, target SSHTarget, connectTimeout, con
 
 func vncLoopbackCheckCommand(target SSHTarget) string {
 	if isWindowsNativeTarget(target) {
-		return powershellCommand(`$result = Test-NetConnection -ComputerName 127.0.0.1 -Port 5900 -WarningAction SilentlyContinue
+		return PowershellCommand(`$result = Test-NetConnection -ComputerName 127.0.0.1 -Port 5900 -WarningAction SilentlyContinue
 if (-not $result.TcpTestSucceeded) { exit 1 }`)
 	}
 	if target.TargetOS == targetMacOS {
@@ -412,7 +412,7 @@ func runVNCPasswordSSH(ctx context.Context, target SSHTarget, remote string) (st
 // remoteVNCCredentialReadCommand builds a remote read operation, not a credential value.
 func remoteVNCCredentialReadCommand(target SSHTarget) string {
 	if isWindowsNativeTarget(target) {
-		return powershellCommand("Get-Content -Raw -LiteralPath " + psQuote(windowsVNCPasswordPath))
+		return PowershellCommand("Get-Content -Raw -LiteralPath " + psQuote(windowsVNCPasswordPath))
 	}
 	if target.TargetOS == targetMacOS {
 		return "sudo cat " + shellQuote(macOSVNCPasswordPath)

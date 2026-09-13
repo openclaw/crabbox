@@ -813,7 +813,7 @@ var newAWSClient = func(ctx context.Context, cfg core.Config) (awsClient, error)
 	return core.NewAWSClient(ctx, cfg)
 }
 
-var ensureAWSSSHCIDRs = func(ctx context.Context, cfg *core.Config) { core.EnsureAWSSSHCIDRs(ctx, cfg) }
+var ensureAWSSSHCIDRs = core.EnsureAWSSSHCIDRs
 
 // bootstrapSSHHost returns the address used for the acquisition readiness probe.
 // Strict Tailscale mode cannot fall back to the public address, which can be

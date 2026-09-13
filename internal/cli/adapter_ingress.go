@@ -56,7 +56,7 @@ func (a App) adapterIngress(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 || strings.TrimSpace(*configPath) == "" {
-		return exit(2, "usage: crabbox adapter ingress --config <path>")
+		return Exit(2, "usage: crabbox adapter ingress --config <path>")
 	}
 	config, err := loadAdapterIngressConfig(*configPath)
 	if err != nil {
@@ -68,7 +68,7 @@ func (a App) adapterIngress(ctx context.Context, args []string) error {
 	}
 	listener, err := net.Listen("tcp", config.Listen)
 	if err != nil {
-		return exit(5, "listen on %s: %v", config.Listen, err)
+		return Exit(5, "listen on %s: %v", config.Listen, err)
 	}
 	defer listener.Close()
 	serveCtx, cancel := context.WithCancel(ctx)
@@ -105,7 +105,7 @@ func (a App) adapterIngress(ctx context.Context, args []string) error {
 func loadAdapterIngressConfig(path string) (adapterIngressConfig, error) {
 	path = expandUserPath(strings.TrimSpace(path))
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return adapterIngressConfig{}, exit(2, "adapter ingress config path must be absolute and clean")
+		return adapterIngressConfig{}, Exit(2, "adapter ingress config path must be absolute and clean")
 	}
 	data, err := readPrivateAdapterFile(path, adapterIngressMaxConfigBytes, "adapter ingress config")
 	if err != nil {
@@ -115,10 +115,10 @@ func loadAdapterIngressConfig(path string) (adapterIngressConfig, error) {
 	decoder.DisallowUnknownFields()
 	var config adapterIngressConfig
 	if err := decoder.Decode(&config); err != nil {
-		return adapterIngressConfig{}, exit(2, "decode adapter ingress config: %v", err)
+		return adapterIngressConfig{}, Exit(2, "decode adapter ingress config: %v", err)
 	}
 	if err := requireJSONEOF(decoder); err != nil {
-		return adapterIngressConfig{}, exit(2, "decode adapter ingress config: %v", err)
+		return adapterIngressConfig{}, Exit(2, "decode adapter ingress config: %v", err)
 	}
 	return validateAdapterIngressConfig(config)
 }
@@ -126,35 +126,35 @@ func loadAdapterIngressConfig(path string) (adapterIngressConfig, error) {
 func readPrivateAdapterFile(path string, maximum int64, label string) ([]byte, error) {
 	file, err := openControllerTokenFile(path)
 	if err != nil {
-		return nil, exit(2, "read %s file: %v", label, err)
+		return nil, Exit(2, "read %s file: %v", label, err)
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return nil, exit(2, "stat %s file: %v", label, err)
+		return nil, Exit(2, "stat %s file: %v", label, err)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, exit(2, "%s file must be regular", label)
+		return nil, Exit(2, "%s file must be regular", label)
 	}
 	if mode := info.Mode().Perm(); mode != 0o400 && mode != 0o600 {
-		return nil, exit(2, "%s file must have mode 0400 or 0600", label)
+		return nil, Exit(2, "%s file must have mode 0400 or 0600", label)
 	}
 	if info.Size() > maximum {
-		return nil, exit(2, "%s file is too large", label)
+		return nil, Exit(2, "%s file is too large", label)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
 	if err != nil {
-		return nil, exit(2, "read %s file: %v", label, err)
+		return nil, Exit(2, "read %s file: %v", label, err)
 	}
 	if int64(len(data)) > maximum {
-		return nil, exit(2, "%s file is too large", label)
+		return nil, Exit(2, "%s file is too large", label)
 	}
 	after, err := file.Stat()
 	if err != nil {
-		return nil, exit(2, "stat %s file after reading: %v", label, err)
+		return nil, Exit(2, "stat %s file after reading: %v", label, err)
 	}
 	if !adapterIngressPrivateFileStable(info, after, int64(len(data))) {
-		return nil, exit(2, "%s file changed while it was being read", label)
+		return nil, Exit(2, "%s file changed while it was being read", label)
 	}
 	return data, nil
 }
@@ -184,7 +184,7 @@ func validateAdapterIngressConfig(config adapterIngressConfig) (adapterIngressCo
 		return adapterIngressConfig{}, err
 	}
 	if adapterIngressEndpointsOverlap(listen, upstream) {
-		return adapterIngressConfig{}, exit(2, "adapter ingress listen and upstream must differ")
+		return adapterIngressConfig{}, Exit(2, "adapter ingress listen and upstream must differ")
 	}
 	publicOrigin, err := validateAdapterIngressPublicOrigin(config.PublicOrigin)
 	if err != nil {
@@ -199,21 +199,21 @@ func validateAdapterIngressConfig(config adapterIngressConfig) (adapterIngressCo
 		return adapterIngressConfig{}, err
 	}
 	if strings.EqualFold(identityHeader, secretHeader) {
-		return adapterIngressConfig{}, exit(2, "adapter ingress identityHeader and secretHeader must differ")
+		return adapterIngressConfig{}, Exit(2, "adapter ingress identityHeader and secretHeader must differ")
 	}
 	for _, header := range []string{identityHeader, secretHeader} {
 		name := strings.ToLower(header)
 		if adapterIngressReservedAuthHeader(name) {
-			return adapterIngressConfig{}, exit(2, "adapter ingress authentication headers must not use reserved header %s", header)
+			return adapterIngressConfig{}, Exit(2, "adapter ingress authentication headers must not use reserved header %s", header)
 		}
 	}
 	identity := strings.TrimSpace(config.Identity)
 	if identity == "" || identity != config.Identity || len(identity) > 1024 || !validAdapterIngressHeaderValue(identity) {
-		return adapterIngressConfig{}, exit(2, "adapter ingress identity must be one nonempty bounded header value")
+		return adapterIngressConfig{}, Exit(2, "adapter ingress identity must be one nonempty bounded header value")
 	}
 	secretFile := expandUserPath(strings.TrimSpace(config.SecretFile))
 	if !filepath.IsAbs(secretFile) || filepath.Clean(secretFile) != secretFile {
-		return adapterIngressConfig{}, exit(2, "adapter ingress secretFile must be absolute and clean")
+		return adapterIngressConfig{}, Exit(2, "adapter ingress secretFile must be absolute and clean")
 	}
 	denyPaths, err := validateAdapterIngressRoutes(config.DenyPaths, false)
 	if err != nil {
@@ -260,15 +260,15 @@ func adapterIngressEndpointsOverlap(listen string, upstream *url.URL) bool {
 func validateAdapterIngressListen(value string) (string, error) {
 	host, port, err := net.SplitHostPort(strings.TrimSpace(value))
 	if err != nil || port == "0" {
-		return "", exit(2, "adapter ingress listen must be an IP address with a nonzero port")
+		return "", Exit(2, "adapter ingress listen must be an IP address with a nonzero port")
 	}
 	address, err := netip.ParseAddr(strings.Trim(host, "[]"))
 	if err != nil {
-		return "", exit(2, "adapter ingress listen host must be a literal IP address")
+		return "", Exit(2, "adapter ingress listen host must be a literal IP address")
 	}
 	parsedPort, err := net.LookupPort("tcp", port)
 	if err != nil || parsedPort < 1 || parsedPort > 65535 {
-		return "", exit(2, "adapter ingress listen port must be from 1 through 65535")
+		return "", Exit(2, "adapter ingress listen port must be from 1 through 65535")
 	}
 	return net.JoinHostPort(address.String(), fmt.Sprint(parsedPort)), nil
 }
@@ -276,16 +276,16 @@ func validateAdapterIngressListen(value string) (string, error) {
 func validateAdapterIngressUpstream(value string) (*url.URL, error) {
 	parsed, err := url.Parse(strings.TrimSpace(value))
 	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
-		return nil, exit(2, "adapter ingress upstream must be one exact loopback HTTP origin")
+		return nil, Exit(2, "adapter ingress upstream must be one exact loopback HTTP origin")
 	}
 	host := strings.Trim(parsed.Hostname(), "[]")
 	address, err := netip.ParseAddr(host)
 	if err != nil || !address.Unmap().IsLoopback() || address.Zone() != "" || parsed.Port() == "" {
-		return nil, exit(2, "adapter ingress upstream must be one exact loopback HTTP origin")
+		return nil, Exit(2, "adapter ingress upstream must be one exact loopback HTTP origin")
 	}
 	port, err := net.LookupPort("tcp", parsed.Port())
 	if err != nil || port < 1 || port > 65535 {
-		return nil, exit(2, "adapter ingress upstream must contain a valid nonzero port")
+		return nil, Exit(2, "adapter ingress upstream must contain a valid nonzero port")
 	}
 	parsed.Host = net.JoinHostPort(address.Unmap().String(), fmt.Sprint(port))
 	parsed.Path = ""
@@ -295,30 +295,30 @@ func validateAdapterIngressUpstream(value string) (*url.URL, error) {
 func validateAdapterIngressPublicOrigin(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if len(value) > 2048 || !adapterIngressVisibleASCII(value) {
-		return "", exit(2, "adapter ingress publicOrigin must be one exact non-loopback HTTPS origin")
+		return "", Exit(2, "adapter ingress publicOrigin must be one exact non-loopback HTTPS origin")
 	}
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") || parsed.Hostname() == "" {
-		return "", exit(2, "adapter ingress publicOrigin must be one exact non-loopback HTTPS origin")
+		return "", Exit(2, "adapter ingress publicOrigin must be one exact non-loopback HTTPS origin")
 	}
 	host := strings.Trim(parsed.Hostname(), "[]")
 	if strings.HasSuffix(host, ".") || strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
-		return "", exit(2, "adapter ingress publicOrigin must be one exact non-loopback HTTPS origin")
+		return "", Exit(2, "adapter ingress publicOrigin must be one exact non-loopback HTTPS origin")
 	}
 	if address, parseErr := netip.ParseAddr(host); parseErr == nil {
 		if address.Unmap().IsLoopback() || address.Zone() != "" || address.Is4In6() || host != address.String() {
-			return "", exit(2, "adapter ingress publicOrigin must be one exact non-loopback HTTPS origin")
+			return "", Exit(2, "adapter ingress publicOrigin must be one exact non-loopback HTTPS origin")
 		}
 	} else if !validAdapterIngressDNSName(host) || looksLikeLegacyIPv4Host(host) {
-		return "", exit(2, "adapter ingress publicOrigin must contain a valid lowercase DNS hostname or IP address")
+		return "", Exit(2, "adapter ingress publicOrigin must contain a valid lowercase DNS hostname or IP address")
 	}
 	port, explicitPort, err := adapterIngressOriginPort(parsed)
 	if err != nil || (explicitPort && port == 443) {
-		return "", exit(2, "adapter ingress publicOrigin must contain a canonical valid HTTPS port")
+		return "", Exit(2, "adapter ingress publicOrigin must contain a canonical valid HTTPS port")
 	}
 	origin := parsed.Scheme + "://" + parsed.Host
 	if value != origin {
-		return "", exit(2, "adapter ingress publicOrigin must be one exact non-loopback HTTPS origin")
+		return "", Exit(2, "adapter ingress publicOrigin must be one exact non-loopback HTTPS origin")
 	}
 	return origin, nil
 }
@@ -405,7 +405,7 @@ func adapterIngressVisibleASCII(value string) bool {
 func validateAdapterIngressHeader(value, label string) (string, error) {
 	value = strings.TrimSpace(value)
 	if !validHTTPToken(value) || strings.Contains(value, "_") {
-		return "", exit(2, "adapter ingress %s must be one valid HTTP header name", label)
+		return "", Exit(2, "adapter ingress %s must be one valid HTTP header name", label)
 	}
 	return http.CanonicalHeaderKey(value), nil
 }
@@ -459,7 +459,7 @@ func validateAdapterIngressRoutes(values []string, prefix bool) ([]string, error
 	for _, value := range values {
 		value, err := url.PathUnescape(value)
 		if err != nil || value == "" || !strings.HasPrefix(value, "/") || strings.ContainsAny(value, "?#\r\n") || strings.IndexFunc(value, func(character rune) bool { return character < 0x20 || character == 0x7f }) >= 0 {
-			return nil, exit(2, "adapter ingress denied routes must be absolute URL paths")
+			return nil, Exit(2, "adapter ingress denied routes must be absolute URL paths")
 		}
 		trailingSlash := strings.HasSuffix(value, "/")
 		value = pathpkg.Clean(value)
@@ -467,10 +467,10 @@ func validateAdapterIngressRoutes(values []string, prefix bool) ([]string, error
 			value += "/"
 		}
 		if prefix && value == "/" {
-			return nil, exit(2, "adapter ingress denyPrefixes must not deny every route")
+			return nil, Exit(2, "adapter ingress denyPrefixes must not deny every route")
 		}
 		if _, ok := seen[value]; ok {
-			return nil, exit(2, "adapter ingress denied routes must not contain duplicates")
+			return nil, Exit(2, "adapter ingress denied routes must not contain duplicates")
 		}
 		seen[value] = struct{}{}
 		result = append(result, value)
@@ -483,10 +483,10 @@ func validateAdapterIngressHeaderPrefixes(values []string) ([]string, error) {
 	result := make([]string, 0, len(values))
 	for _, value := range values {
 		if value == "" || value != strings.ToLower(value) || strings.Contains(value, "_") || !strings.HasSuffix(value, "-") || !validHTTPToken(value+"x") {
-			return nil, exit(2, "adapter ingress stripHeaderPrefixes must be lowercase HTTP header prefixes ending in a dash")
+			return nil, Exit(2, "adapter ingress stripHeaderPrefixes must be lowercase HTTP header prefixes ending in a dash")
 		}
 		if _, ok := seen[value]; ok {
-			return nil, exit(2, "adapter ingress stripHeaderPrefixes must not contain duplicates")
+			return nil, Exit(2, "adapter ingress stripHeaderPrefixes must not contain duplicates")
 		}
 		seen[value] = struct{}{}
 		result = append(result, value)
@@ -507,7 +507,7 @@ func newAdapterIngressProxy(config adapterIngressConfig) (*adapterIngressProxy, 
 		return nil, err
 	}
 	if len(secret) > 1024 || !adapterIngressVisibleASCII(secret) {
-		return nil, exit(2, "adapter ingress secret file must contain one bounded visible ASCII token")
+		return nil, Exit(2, "adapter ingress secret file must contain one bounded visible ASCII token")
 	}
 	transport := &http.Transport{
 		Proxy:                  nil,
@@ -559,10 +559,10 @@ func readAdapterIngressSecret(path string) (string, error) {
 	defer clear(data)
 	secret := strings.TrimSpace(string(data))
 	if secret == "" {
-		return "", exit(2, "adapter ingress secret file is empty")
+		return "", Exit(2, "adapter ingress secret file is empty")
 	}
 	if strings.ContainsAny(secret, "\r\n") {
-		return "", exit(2, "adapter ingress secret file must contain one token")
+		return "", Exit(2, "adapter ingress secret file must contain one token")
 	}
 	return secret, nil
 }

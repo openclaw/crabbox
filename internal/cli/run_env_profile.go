@@ -19,7 +19,7 @@ func loadEnvProfiles(paths []string) (map[string]string, error) {
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return nil, exit(2, "read env profile %s: %v", path, err)
+			return nil, Exit(2, "read env profile %s: %v", path, err)
 		}
 		for key, value := range parseEnvProfile(data) {
 			out[key] = value
@@ -280,9 +280,9 @@ func uploadRunEnvProfile(ctx context.Context, target SSHTarget, workdir, remoteP
 	if err := runSSHInput(ctx, target, remote, strings.NewReader(input), &stdout, &stderr); err != nil {
 		detail := trimFailureDetail(strings.TrimSpace(stdout.String() + "\n" + stderr.String()))
 		if detail != "" {
-			return exit(7, "upload env profile %s: %v: %s", remotePath, err, detail)
+			return Exit(7, "upload env profile %s: %v: %s", remotePath, err, detail)
 		}
-		return exit(7, "upload env profile %s: %v", remotePath, err)
+		return Exit(7, "upload env profile %s: %v", remotePath, err)
 	}
 	return nil
 }
@@ -298,14 +298,14 @@ func runEnvHelperPath(name string) string {
 func safeEnvHelperName(name string) (string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return "", exit(2, "--env-helper requires a name")
+		return "", Exit(2, "--env-helper requires a name")
 	}
 	if strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
-		return "", exit(2, "--env-helper must be a simple name, not a path")
+		return "", Exit(2, "--env-helper must be a simple name, not a path")
 	}
 	safe := safeCaptureName(name)
 	if safe == "" || safe != name {
-		return "", exit(2, "--env-helper must contain only letters, numbers, dash, or underscore")
+		return "", Exit(2, "--env-helper must contain only letters, numbers, dash, or underscore")
 	}
 	return safe, nil
 }
@@ -321,11 +321,11 @@ func probeRunEnvProfile(ctx context.Context, target SSHTarget, workdir, remotePa
 	}
 	out, err := runSSHOutput(ctx, target, remote)
 	if err != nil {
-		return exit(7, "probe env profile %s: %v", remotePath, err)
+		return Exit(7, "probe env profile %s: %v", remotePath, err)
 	}
 	entries := splitNonEmptyLines(out)
 	if len(entries) == 0 {
-		return exit(7, "probe env profile %s: empty probe output", remotePath)
+		return Exit(7, "probe env profile %s: empty probe output", remotePath)
 	}
 	fmt.Fprintf(stderr, "env profile remote=%s vars=%s\n", remotePath, strings.Join(entries, ","))
 	return nil
@@ -341,9 +341,9 @@ func uploadRunEnvHelper(ctx context.Context, target SSHTarget, workdir, helperPa
 	if err := runSSHInput(ctx, target, remote, strings.NewReader(input), &stdout, &stderr); err != nil {
 		detail := trimFailureDetail(strings.TrimSpace(stdout.String() + "\n" + stderr.String()))
 		if detail != "" {
-			return exit(7, "upload env helper %s: %v: %s", helperPath, err, detail)
+			return Exit(7, "upload env helper %s: %v: %s", helperPath, err, detail)
 		}
-		return exit(7, "upload env helper %s: %v", helperPath, err)
+		return Exit(7, "upload env helper %s: %v", helperPath, err)
 	}
 	return nil
 }
@@ -353,7 +353,7 @@ func validateRunEnvHelperTarget(target SSHTarget, helperPath string) error {
 		return nil
 	}
 	if isWindowsNativeTarget(target) {
-		return exit(2, "--env-helper is not supported for native Windows targets yet")
+		return Exit(2, "--env-helper is not supported for native Windows targets yet")
 	}
 	return nil
 }
@@ -481,7 +481,7 @@ func windowsRemoteRemoveRunEnvProfileCommand(workdir, remotePath string) string 
 Set-Location -LiteralPath ` + psQuote(workdir) + `
 Remove-Item -LiteralPath ` + psQuote(remotePath) + ` -Force -ErrorAction SilentlyContinue
 `
-	return powershellCommand(script)
+	return PowershellCommand(script)
 }
 
 func windowsRemoteProbeRunEnvProfileCommand(workdir, remotePath string, names []string) string {
@@ -518,7 +518,7 @@ if ($null -eq $value) {
 		script += `}
 `
 	}
-	return powershellCommand(script)
+	return PowershellCommand(script)
 }
 
 func secretSuffix(secret bool, length int) string {
