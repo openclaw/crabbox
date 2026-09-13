@@ -515,10 +515,157 @@ describe("AWS qualification authority", () => {
     await expect(fixture.run.enroll(controller, retainedIdentity())).resolves.toBeUndefined();
   });
 
+  it.each([0, 1, 2])(
+    "preserves retained instance-store mappings with root index %i",
+    async (index) => {
+      useImmediateTimeouts();
+      const retained = retainedIdentity();
+      const fixture = authorityHTTPFixture(retained);
+      const [root, ...mappings] = fixture.signer.retainedMappings;
+      mappings.splice(index, 0, root!);
+      fixture.signer.retainedMappings = mappings;
+      await fixture.controller.claim(retained);
+      await importKey(fixture, retained);
+      await fixture.candidate.execute(
+        request(
+          "RunInstances",
+          {
+            ...runInstancesParams(),
+            ImageId: retained.retainedImage!.imageId,
+            "BlockDeviceMapping.1.Ebs.VolumeSize": "400",
+          },
+          "ec2",
+        ),
+      );
+      const launches = fixture.signer.calls.filter(({ action }) => action === "RunInstances");
+      expect(launches).toHaveLength(1);
+      expect(
+        Object.fromEntries(
+          Object.entries(launches[0]!.parameters).filter(([key]) =>
+            key.startsWith("BlockDeviceMapping."),
+          ),
+        ),
+      ).toEqual({
+        "BlockDeviceMapping.1.DeviceName": "/dev/sda1",
+        "BlockDeviceMapping.1.Ebs.DeleteOnTermination": "true",
+        "BlockDeviceMapping.1.Ebs.Encrypted": "true",
+        "BlockDeviceMapping.1.Ebs.VolumeSize": "400",
+        "BlockDeviceMapping.1.Ebs.VolumeType": "gp3",
+      });
+      await fixture.controller.finalize(retained.runId);
+      const proof = await fixture.controller.attest(retained.runId);
+      expect(proof.finalized).toBe(true);
+      expect(proof.finalReceipt).toMatchObject({
+        finalCounts: { images: 0, instances: 0, keyPairs: 0, snapshots: 0, volumes: 0 },
+        failureCodes: [],
+      });
+      expect(proof.finalReceipt?.verification).toContainEqual(
+        expect.objectContaining({ action: "RetainedImagePreserved", outcome: "accepted" }),
+      );
+      expect(
+        fixture.signer.calls.some(({ action }) =>
+          ["CreateImage", "DeregisterImage", "DeleteSnapshot", "CreateTags"].includes(action),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it.each([
+    ["missing discriminator", "<deviceName>/dev/sdd</deviceName>"],
+    ["missing device", "<virtualName>ephemeral2</virtualName>"],
+    ["invalid device", "<deviceName>root</deviceName><virtualName>ephemeral2</virtualName>"],
+    [
+      "invalid virtual name",
+      "<deviceName>/dev/sdd</deviceName><virtualName>ephemeral24</virtualName>",
+    ],
+    [
+      "duplicate virtual name",
+      "<deviceName>/dev/sdd</deviceName><virtualName>ephemeral0</virtualName>",
+    ],
+    ["duplicate device", "<deviceName>/dev/sdb</deviceName><virtualName>ephemeral2</virtualName>"],
+    ["root collision", "<deviceName>/dev/sda1</deviceName><virtualName>ephemeral2</virtualName>"],
+    ["suppressed device", "<deviceName>/dev/sdd</deviceName><noDevice/>"],
+    [
+      "mixed suppression",
+      "<deviceName>/dev/sdd</deviceName><virtualName>ephemeral2</virtualName><noDevice/>",
+    ],
+    ["empty EBS", "<deviceName>/dev/sdd</deviceName><ebs/><virtualName>ephemeral2</virtualName>"],
+    [
+      "scalar EBS",
+      "<deviceName>/dev/sdd</deviceName><ebs>false</ebs><virtualName>ephemeral2</virtualName>",
+    ],
+  ])("rejects retained enrollment with %s mapping", async (_name, mapping) => {
+    const fixture = authorityFixture();
+    fixture.signer.retainedMappings.push(`<item>${mapping}</item>`);
+    await expect(fixture.run.enroll(controller, retainedIdentity())).rejects.toThrow(
+      "retained image identity",
+    );
+    expect(await fixture.storage.get("run")).toBeUndefined();
+    expect(fixture.storage.alarm).toBeUndefined();
+  });
+
+  it.each(["<virtualName/>", "<noDevice/>", "<noDevice>false</noDevice>"])(
+    "rejects an EBS root with the extra discriminator %s",
+    async (discriminator) => {
+      const fixture = authorityFixture();
+      fixture.signer.retainedMappings[0] = fixture.signer.retainedMappings[0]!.replace(
+        "</item>",
+        `${discriminator}</item>`,
+      );
+      await expect(fixture.run.enroll(controller, retainedIdentity())).rejects.toThrow(
+        "retained image identity",
+      );
+      expect(await fixture.storage.get("run")).toBeUndefined();
+    },
+  );
+
+  it("cleans owned resources but retries failed retained mapping preservation", async () => {
+    useImmediateTimeouts();
+    const retained = retainedIdentity();
+    const fixture = authorityHTTPFixture(retained);
+    await fixture.controller.claim(retained);
+    await importKey(fixture, retained);
+    await fixture.candidate.execute(
+      request(
+        "RunInstances",
+        {
+          ...runInstancesParams(),
+          ImageId: retained.retainedImage!.imageId,
+          "BlockDeviceMapping.1.Ebs.VolumeSize": "400",
+        },
+        "ec2",
+      ),
+    );
+    fixture.signer.retainedMappings.push(
+      "<item><deviceName>/dev/sdd</deviceName><ebs><volumeSize>400</volumeSize></ebs></item>",
+    );
+    const before = Date.now();
+    await expect(fixture.controller.finalize(retained.runId)).rejects.toThrow(
+      "Describe retained image preservation failed",
+    );
+    const proof = await fixture.controller.attest(retained.runId);
+    expect(proof.finalized).toBe(false);
+    expect(proof.finalReceipt).toMatchObject({
+      finalCounts: { images: 0, instances: 0, keyPairs: 0, snapshots: 0, volumes: 0 },
+      failureCodes: ["verification-failed"],
+    });
+    expect(proof.finalReceipt?.verification).toContainEqual(
+      expect.objectContaining({ action: "RetainedImagePreserved", outcome: "rejected" }),
+    );
+    expect(fixture.storage.alarm).toBeGreaterThanOrEqual(before + 60_000);
+    expect(fixture.signer.calls.some(({ action }) => action === "TerminateInstances")).toBe(true);
+    expect(fixture.signer.calls.some(({ action }) => action === "DeleteKeyPair")).toBe(true);
+    expect(
+      fixture.signer.calls.some(({ action }) =>
+        ["CreateImage", "DeregisterImage", "DeleteSnapshot", "CreateTags"].includes(action),
+      ),
+    ).toBe(false);
+  });
+
   it.each([
     [
       "extra EBS mapping",
-      "<item><deviceName>/dev/sdb</deviceName><ebs><volumeSize>400</volumeSize></ebs></item>",
+      "<item><deviceName>/dev/sdd</deviceName><ebs><volumeSize>400</volumeSize></ebs></item>",
       "400",
       "400",
       "/dev/sda1",
@@ -2273,6 +2420,11 @@ class FakeSigner {
   ownerId: string | undefined;
   advanceNextIdentityByMs = 0;
   instanceDescribeNotFound = false;
+  retainedMappings = [
+    "<item><deviceName>/dev/sda1</deviceName><ebs><snapshotId>snap-22222222</snapshotId><volumeSize>400</volumeSize></ebs></item>",
+    "<item><deviceName>/dev/sdb</deviceName><virtualName>ephemeral0</virtualName></item>",
+    "<item><deviceName>/dev/sdc</deviceName><virtualName>ephemeral1</virtualName></item>",
+  ];
   private failed = false;
   private imageDescribeCalls = 0;
   private key?: { id: string; name: string; publicKey: string; runId?: string; sha?: string };
@@ -2414,7 +2566,7 @@ class FakeSigner {
           <imageId>ami-11111111</imageId><imageOwnerId>${this.accountId}</imageOwnerId>
           <imageState>available</imageState><architecture>x86_64</architecture>
           <rootDeviceType>ebs</rootDeviceType><rootDeviceName>/dev/sda1</rootDeviceName>
-          <blockDeviceMapping><item><deviceName>/dev/sda1</deviceName><ebs><snapshotId>snap-22222222</snapshotId><volumeSize>400</volumeSize></ebs></item></blockDeviceMapping>
+          <blockDeviceMapping>${this.retainedMappings.join("")}</blockDeviceMapping>
         </item></imagesSet></DescribeImagesResponse>`);
       }
       this.imageDescribeCalls += 1;
