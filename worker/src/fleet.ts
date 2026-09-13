@@ -20912,7 +20912,12 @@ function azureLeaseImageIdentity(
   region: string,
 ): LeaseImageIdentity | undefined {
   if (config.selectedImage) {
-    return { ...config.selectedImage, region };
+    const { revision, ...selected } = config.selectedImage;
+    return {
+      ...selected,
+      region,
+      ...(selected.region === region && revision ? { revision } : {}),
+    };
   }
   if (config.azureSnapshot) {
     return {
@@ -21387,6 +21392,7 @@ function sameLeaseImageIdentity(left: LeaseImageIdentity, right: LeaseImageIdent
     left.kind === right.kind &&
     left.region === right.region &&
     left.promotedAt === right.promotedAt &&
+    left.revision === right.revision &&
     left.sourceID === right.sourceID
   );
 }
@@ -26962,6 +26968,7 @@ export class AzureProvider implements CloudProvider {
             kind: promoted.kind ?? "azure-os-disk-snapshot",
             region: promoted.region ?? located.azureLocation,
             promotedAt: promoted.promotedAt,
+            ...(promoted.revision ? { revision: promoted.revision } : {}),
             ...(snapshotID !== promoted.id ? { sourceID: snapshotID } : {}),
           },
         };
@@ -28676,6 +28683,7 @@ export class AWSProvider implements CloudProvider {
               kind: promoted.kind ?? "aws-ami",
               region: promoted.region ?? config.awsRegion,
               promotedAt: promoted.promotedAt,
+              ...(promoted.revision ? { revision: promoted.revision } : {}),
             },
           }
         : {}),

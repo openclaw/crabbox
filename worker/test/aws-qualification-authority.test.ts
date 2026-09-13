@@ -12,6 +12,7 @@ import {
 import type {
   AWSQualificationControllerProps,
   AWSQualificationFinalReceipt,
+  AWSQualificationOperationEvidence,
   AWSQualificationRequest,
   AWSQualificationRunIdentity,
 } from "../src/aws-qualification-contract";
@@ -34,6 +35,7 @@ const authorityConfig = readFileSync(
 );
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -284,6 +286,366 @@ describe("AWS qualification authority deployment", () => {
 });
 
 describe("AWS qualification authority", () => {
+  it("preserves lexical AWS account IDs when verifying retained resources", async () => {
+    const fixture = authorityFixture();
+    fixture.env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID = "001234567890";
+    fixture.signer.accountId = "001234567890";
+    await expect(fixture.run.enroll(controller, retainedIdentity())).resolves.toBeUndefined();
+  });
+
+  it.each([
+    [
+      "extra EBS mapping",
+      "<item><deviceName>/dev/sdb</deviceName><ebs><volumeSize>400</volumeSize></ebs></item>",
+      "400",
+      "400",
+      "/dev/sda1",
+    ],
+    ["oversized image volume", "", "401", "400", "/dev/sda1"],
+    ["oversized snapshot", "", "400", "401", "/dev/sda1"],
+    ["different root mapping", "", "400", "400", "/dev/sdb"],
+  ])(
+    "rejects retained enrollment with %s",
+    async (_name, extra, imageSize, snapshotSize, device) => {
+      const fixture = authorityFixture();
+      const execute = fixture.signer.execute.bind(fixture.signer);
+      vi.spyOn(fixture.signer, "execute").mockImplementation(async (...args) => {
+        const response = await execute(...args);
+        const body = await response.text();
+        return xml(
+          args[1] === "DescribeImages"
+            ? body
+                .replace("<volumeSize>400</volumeSize>", `<volumeSize>${imageSize}</volumeSize>`)
+                .replace("<deviceName>/dev/sda1</deviceName>", `<deviceName>${device}</deviceName>`)
+                .replace("</blockDeviceMapping>", `${extra}</blockDeviceMapping>`)
+            : args[1] === "DescribeSnapshots"
+              ? body.replace(
+                  "<volumeSize>400</volumeSize>",
+                  `<volumeSize>${snapshotSize}</volumeSize>`,
+                )
+              : body,
+        );
+      });
+      await expect(fixture.run.enroll(controller, retainedIdentity())).rejects.toThrow(
+        /retained (image|snapshot) identity/,
+      );
+      expect(await fixture.storage.get("run")).toBeUndefined();
+    },
+  );
+
+  it("rewrites the launch root device from enrolled provider metadata", async () => {
+    const fixture = authorityFixture();
+    const execute = fixture.signer.execute.bind(fixture.signer);
+    vi.spyOn(fixture.signer, "execute").mockImplementation(async (...args) => {
+      const response = await execute(...args);
+      return args[1] === "DescribeImages"
+        ? xml((await response.text()).replaceAll("/dev/sda1", "/dev/xvda"))
+        : response;
+    });
+    const retained = retainedIdentity();
+    await fixture.run.enroll(controller, retained);
+    await importKey(fixture, retained);
+    await fixture.run.execute(
+      retained,
+      request(
+        "RunInstances",
+        {
+          ...runInstancesParams(),
+          ImageId: retained.retainedImage!.imageId,
+          "BlockDeviceMapping.1.Ebs.VolumeSize": "400",
+        },
+        "ec2",
+      ),
+    );
+    expect(
+      fixture.signer.calls.find((call) => call.action === "RunInstances")?.parameters,
+    ).toMatchObject({ "BlockDeviceMapping.1.DeviceName": "/dev/xvda" });
+  });
+
+  it("admits one 400 GiB retained launch without adopting borrowed resources", async () => {
+    useImmediateTimeouts();
+    const retained = retainedIdentity();
+    const fixture = authorityFixture({ borrowedInventory: true });
+    await fixture.run.enroll(controller, retained);
+    await importKey(fixture, retained);
+    const parameters = {
+      ...runInstancesParams(),
+      ImageId: retained.retainedImage!.imageId,
+      "BlockDeviceMapping.1.Ebs.VolumeSize": "400",
+    };
+    await expect(
+      fixture.run.execute(
+        retained,
+        request(
+          "RunInstances",
+          {
+            ...parameters,
+            ImageId: "ami-base",
+          },
+          "ec2",
+        ),
+      ),
+    ).rejects.toThrow("outside the run ledger");
+    await expect(
+      fixture.run.execute(
+        retained,
+        request(
+          "RunInstances",
+          {
+            ...parameters,
+            "BlockDeviceMapping.1.Ebs.VolumeSize": "401",
+          },
+          "ec2",
+        ),
+      ),
+    ).rejects.toThrow("outside policy");
+    await fixture.run.execute(retained, request("RunInstances", parameters, "ec2"));
+    await expect(
+      fixture.run.execute(
+        retained,
+        request(
+          "CreateImage",
+          {
+            InstanceId: "i-owned",
+            Name: "forbidden",
+          },
+          "ec2",
+        ),
+      ),
+    ).rejects.toThrow("does not allow CreateImage");
+    for (const [action, forbiddenParameters] of [
+      ["DeregisterImage", { ImageId: retained.retainedImage!.imageId }],
+      ["DeleteSnapshot", { SnapshotId: retained.retainedImage!.snapshotId }],
+      ["CreateTags", { "ResourceId.1": retained.retainedImage!.imageId }],
+    ] as const) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each denial observes the same serial lifecycle ledger.
+      await expect(
+        fixture.run.execute(retained, request(action, forbiddenParameters, "ec2")),
+      ).rejects.toThrow(/outside/);
+    }
+    await fixture.run.execute(
+      retained,
+      request("TerminateInstances", { "InstanceId.1": "i-owned" }, "ec2"),
+    );
+    for (let index = 0; index < 2; index += 1) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- absence must be observed twice in order.
+      await fixture.run.execute(
+        retained,
+        request("DescribeInstances", { "InstanceId.1": "i-owned" }, "ec2"),
+      );
+    }
+    await expect(
+      fixture.run.execute(retained, request("RunInstances", parameters, "ec2")),
+    ).rejects.toThrow("launch budget");
+
+    // Even recovered/tombstoned IDs and tag inventories cannot grant deletion ownership.
+    const ledger = await fixture.storage.get<Record<string, unknown>>("ledger");
+    await fixture.storage.put("ledger", {
+      ...ledger,
+      imageIds: [retained.retainedImage!.imageId],
+      retiredImageIds: [retained.retainedImage!.imageId],
+      snapshotIds: [retained.retainedImage!.snapshotId],
+      retiredSnapshotIds: [retained.retainedImage!.snapshotId],
+    });
+    const recovered = request(
+      "CreateImage",
+      { InstanceId: "i-owned", Name: "never-created" },
+      "ec2",
+    );
+    await fixture.storage.put(`intent:${recovered.opId}`, {
+      phase: "dispatched",
+      requestHash: "recovery-test",
+      request: recovered,
+      startedAt: new Date().toISOString(),
+    });
+    await fixture.run.finalize(controller);
+    expect(fixture.signer.calls.filter((call) => call.action === "RunInstances")).toHaveLength(1);
+    expect(
+      fixture.signer.calls.some((call) =>
+        ["CreateImage", "DeregisterImage", "DeleteSnapshot", "CreateTags"].includes(call.action),
+      ),
+    ).toBe(false);
+    expect((await fixture.run.attest(controller)).finalReceipt?.verification).toContainEqual(
+      expect.objectContaining({ action: "RetainedImagePreserved", outcome: "accepted" }),
+    );
+  });
+
+  it.each(["failOnce", "loseAfterEffect"] as const)(
+    "never redispatches a retained launch after %s",
+    async (failure) => {
+      useImmediateTimeouts();
+      const retained = retainedIdentity();
+      const fixture = authorityFixture({ [failure]: "RunInstances" });
+      await fixture.run.enroll(controller, retained);
+      await importKey(fixture, retained);
+      const launch = request(
+        "RunInstances",
+        {
+          ...runInstancesParams(),
+          ImageId: retained.retainedImage!.imageId,
+          "BlockDeviceMapping.1.Ebs.VolumeSize": "400",
+        },
+        "ec2",
+      );
+      await expect(fixture.run.execute(retained, launch)).rejects.toThrow("lost response");
+      await expect(fixture.run.execute(retained, launch)).rejects.toThrow("requires finalization");
+      await expect(fixture.run.execute(retained, launch)).rejects.toThrow(
+        /retained launch|launch budget|active instance/,
+      );
+      await fixture.run.finalize(controller);
+      expect(fixture.signer.calls.filter((call) => call.action === "RunInstances")).toHaveLength(1);
+      expect((await fixture.run.attest(controller)).finalReceipt?.finalCounts).toEqual({
+        images: 0,
+        instances: 0,
+        keyPairs: 0,
+        snapshots: 0,
+        volumes: 0,
+      });
+    },
+  );
+
+  it("reserves the final eight minutes for retained cleanup", async () => {
+    vi.useFakeTimers();
+    const retained = retainedIdentity();
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, retained);
+    expect(fixture.storage.alarm).toBe(Date.parse(retained.expiresAt) - 8 * 60_000);
+    await importKey(fixture, retained);
+    vi.setSystemTime(Date.parse(retained.expiresAt) - 8 * 60_000);
+    await expect(
+      fixture.run.execute(
+        retained,
+        request(
+          "RunInstances",
+          {
+            ...runInstancesParams(),
+            ImageId: retained.retainedImage!.imageId,
+            "BlockDeviceMapping.1.Ebs.VolumeSize": "400",
+          },
+          "ec2",
+        ),
+      ),
+    ).rejects.toThrow("work window expired");
+    await expect(
+      fixture.run.execute(retained, request("GetCallerIdentity", {}, "sts")),
+    ).resolves.toMatchObject({ status: 200 });
+    await expect(
+      fixture.run.execute(retained, request("DeleteKeyPair", { KeyPairId: "key-owned" }, "ec2")),
+    ).resolves.toMatchObject({ status: 200 });
+    expect(fixture.signer.calls.filter((call) => call.action === "RunInstances")).toHaveLength(0);
+  });
+
+  it("keeps exact rollback image reads available after the cleanup alarm, only until expiry", async () => {
+    useImmediateTimeouts();
+    const retained = retainedIdentity();
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, retained);
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse(retained.expiresAt) - 8 * 60_000);
+    await fixture.run.alarm();
+    expect((await fixture.run.attest(controller)).finalized).toBe(true);
+    await expect(
+      fixture.run.execute(
+        retained,
+        request(
+          "DescribeImages",
+          {
+            "ImageId.1": retained.retainedImage!.imageId,
+          },
+          "ec2",
+        ),
+      ),
+    ).resolves.toMatchObject({ status: 200 });
+    await expect(
+      fixture.run.execute(
+        retained,
+        request(
+          "DescribeImages",
+          {
+            "ImageId.1": "ami-foreign",
+          },
+          "ec2",
+        ),
+      ),
+    ).rejects.toThrow("outside the run ledger");
+    await expect(importKey(fixture, retained)).rejects.toThrow("finalized");
+    now.mockReturnValue(Date.parse(retained.expiresAt));
+    await expect(
+      fixture.run.execute(
+        retained,
+        request(
+          "DescribeImages",
+          {
+            "ImageId.1": retained.retainedImage!.imageId,
+          },
+          "ec2",
+        ),
+      ),
+    ).rejects.toThrow("expired");
+  });
+
+  it("rechecks the retained work cutoff after signer evidence persistence", async () => {
+    const retained = retainedIdentity();
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, retained);
+    await importKey(fixture, retained);
+    const put = fixture.storage.put.bind(fixture.storage);
+    vi.spyOn(fixture.storage, "put").mockImplementation(async (key, value) => {
+      await put(key, value);
+      if (
+        typeof key === "object" &&
+        Object.entries(key).some(
+          ([name, evidence]) =>
+            name.startsWith("evidence:") &&
+            (evidence as AWSQualificationOperationEvidence).action === "RunInstances" &&
+            (evidence as AWSQualificationOperationEvidence).signerDispatches.length > 0,
+        )
+      ) {
+        vi.spyOn(Date, "now").mockReturnValue(Date.parse(retained.expiresAt) - 8 * 60_000);
+      }
+    });
+    await expect(
+      fixture.run.execute(
+        retained,
+        request(
+          "RunInstances",
+          {
+            ...runInstancesParams(),
+            ImageId: retained.retainedImage!.imageId,
+            "BlockDeviceMapping.1.Ebs.VolumeSize": "400",
+          },
+          "ec2",
+        ),
+      ),
+    ).rejects.toThrow("work window expired");
+    expect(fixture.signer.calls.some((call) => call.action === "RunInstances")).toBe(false);
+  });
+
+  it("records the real candidate FSR denial at the authority before signing", async () => {
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    const client = new EC2SpotClient(
+      {
+        CRABBOX_AWS_QUALIFICATION_TRANSPORT: {
+          execute: (value: AWSQualificationRequest) => fixture.run.execute(identity, value),
+        },
+      } as Env,
+      "us-east-1",
+    );
+    await expect(client.enableFastSnapshotRestore(["snap-child"], ["us-east-1a"])).rejects.toThrow(
+      "fast snapshot restore is disabled",
+    );
+    expect(fixture.signer.calls.some((call) => call.action === "EnableFastSnapshotRestores")).toBe(
+      false,
+    );
+    expect((await fixture.run.attest(controller)).operations).toContainEqual(
+      expect.objectContaining({
+        action: "EnableFastSnapshotRestores",
+        denialReason: "policy-denied",
+        signerDispatches: [],
+      }),
+    );
+  });
+
   it("rejects cross-run identity, policy drift, FSR, and foreign resources", async () => {
     const fixture = authorityFixture();
     await expect(fixture.run.enroll({ deploymentHash: "e".repeat(64) }, identity)).rejects.toThrow(
@@ -1492,6 +1854,7 @@ describe("AWS qualification candidate transport", () => {
 
 function authorityFixture(
   options: {
+    borrowedInventory?: boolean;
     delayedImageVisibility?: number;
     delayedKeyVisibility?: number;
     deleteNotFound?: string;
@@ -1520,6 +1883,19 @@ function authorityFixture(
   };
   const run = new AWSQualificationRun({ storage } as never, env as never, signer);
   return { env, run, signer, storage };
+}
+
+function retainedIdentity(): AWSQualificationRunIdentity {
+  return {
+    ...identity,
+    expiresAt: new Date(Date.now() + 38 * 60_000).toISOString(),
+    retainedImage: {
+      imageId: "ami-11111111",
+      snapshotId: "snap-22222222",
+      sourceSha: "c".repeat(40),
+      capsuleSha256: "e".repeat(64),
+    },
+  };
 }
 
 async function importKey(
@@ -1622,6 +1998,7 @@ class FakeSigner {
 
   constructor(
     private readonly options: {
+      borrowedInventory?: boolean;
       delayedImageVisibility?: number;
       delayedKeyVisibility?: number;
       deleteNotFound?: string;
@@ -1742,6 +2119,14 @@ class FakeSigner {
       return xml("<CreateImageResponse><imageId>ami-created</imageId></CreateImageResponse>");
     }
     if (action === "DescribeImages") {
+      if (parameters["ImageId.1"] === "ami-11111111" || this.options.borrowedInventory) {
+        return xml(`<DescribeImagesResponse><imagesSet><item>
+          <imageId>ami-11111111</imageId><imageOwnerId>${this.accountId}</imageOwnerId>
+          <imageState>available</imageState><architecture>x86_64</architecture>
+          <rootDeviceType>ebs</rootDeviceType><rootDeviceName>/dev/sda1</rootDeviceName>
+          <blockDeviceMapping><item><deviceName>/dev/sda1</deviceName><ebs><snapshotId>snap-22222222</snapshotId><volumeSize>400</volumeSize></ebs></item></blockDeviceMapping>
+        </item></imagesSet></DescribeImagesResponse>`);
+      }
       this.imageDescribeCalls += 1;
       const visible =
         this.imageActive && this.imageDescribeCalls > (this.options.delayedImageVisibility ?? 0);
@@ -1823,6 +2208,12 @@ class FakeSigner {
       );
     }
     if (action === "DescribeSnapshots") {
+      if (parameters["SnapshotId.1"] === "snap-22222222" || this.options.borrowedInventory) {
+        return xml(`<DescribeSnapshotsResponse><snapshotSet><item>
+          <snapshotId>snap-22222222</snapshotId><ownerId>${this.accountId}</ownerId><status>completed</status>
+          <volumeSize>400</volumeSize>
+        </item></snapshotSet></DescribeSnapshotsResponse>`);
+      }
       return xml(
         `<DescribeSnapshotsResponse><snapshotSet>${this.snapshotActive ? "<item><snapshotId>snap-child</snapshotId></item>" : ""}</snapshotSet></DescribeSnapshotsResponse>`,
       );

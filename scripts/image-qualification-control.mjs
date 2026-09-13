@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -14,11 +14,27 @@ const runIdPattern = /^image-qualification-[0-9]+-[0-9]+$/;
 const workerNamePattern = /^crabbox-image-qualification-[0-9]+-[0-9]+$/;
 const relayNamePattern = /^crabbox-image-qualification-relay-[0-9]+-[0-9]+$/;
 const maxRunMs = 120 * 60 * 1000;
+const retainedRunMs = 38 * 60 * 1000;
 const controllerName = "crabbox-image-qualification-controller";
 const authorityName = "crabbox-aws-qualification-authority";
 const qualificationWorkflowPath = ".github/workflows/image-qualification.yml";
 const controllerSource = path.join(root, "scripts/image-qualification-controller-worker.mjs");
 const relaySource = path.join(root, "scripts/image-qualification-relay-worker.mjs");
+const imageCapsulePaths = [
+  "internal/cli/actions.go",
+  "recipes/devtools/v1/linux-x86_64.json",
+  "recipes/devtools/v1/recipe.schema.json",
+  "recipes/linux/v1/linux-builder.json",
+  "recipes/linux/v1/linux-minimal.json",
+  "recipes/linux/v1/manifest.schema.json",
+  "recipes/linux/v1/profile.schema.json",
+  "scripts/devtools-image-contract.mjs",
+  "scripts/devtools-image-smoke-linux.sh",
+  "scripts/generate-linux-readiness.mjs",
+  "scripts/install-linux-developer-tools.sh",
+  "scripts/linux-readiness.generated.sh",
+  "scripts/mint-aws-devtools-image.sh",
+];
 
 function relayNameForRun(runId) {
   const match = runId.match(/^image-qualification-([0-9]+-[0-9]+)$/);
@@ -84,6 +100,29 @@ function objectAt(value, name) {
     throw new Error(`${name} is invalid`);
   }
   return value;
+}
+
+export function retainedImageFromEnv() {
+  const mode = process.env.QUALIFICATION_MODE || "mint";
+  const names = [
+    "QUALIFICATION_RETAINED_IMAGE_ID",
+    "QUALIFICATION_RETAINED_SNAPSHOT_ID",
+    "QUALIFICATION_RETAINED_SOURCE_SHA",
+    "QUALIFICATION_RETAINED_CAPSULE_SHA256",
+  ];
+  if (mode === "mint") {
+    if (names.some((name) => process.env[name])) {
+      throw new Error("mint mode cannot accept retained-image inputs");
+    }
+    return undefined;
+  }
+  if (mode !== "retained") throw new Error("qualification mode is invalid");
+  return {
+    imageId: required(names[0], /^ami-[0-9a-f]+$/),
+    snapshotId: required(names[1], /^snap-[0-9a-f]+$/),
+    sourceSha: required(names[2], sha40),
+    capsuleSha256: required(names[3], sha64),
+  };
 }
 
 function imageRecord(value, name) {
@@ -204,6 +243,33 @@ export function verifyCatalogRollbackEvidence({
   };
 }
 
+export function verifyRetainedSelection(lease, promotion, region) {
+  const image = imageRecord(objectAt(promotion, "promotion receipt").image, "promotion image");
+  if (
+    !/^cbx_[A-Za-z0-9_-]+$/.test(lease?.id ?? "") ||
+    lease.provider !== "aws" ||
+    lease.target !== "linux" ||
+    lease.region !== region ||
+    lease.serverType !== "t3.small" ||
+    !/^i-[0-9a-f]+$/.test(lease.cloudID ?? "") ||
+    lease.image?.id !== image.id ||
+    lease.image?.source !== "promoted" ||
+    lease.image?.kind !== "aws-ami" ||
+    lease.image?.region !== region ||
+    lease.image?.revision !== image.revision
+  ) {
+    throw new Error("lease did not record the exact normally selected promotion revision");
+  }
+  return {
+    normalSelection: true,
+    exactPromotedRevision: true,
+    leaseDigest: digest(lease.id),
+    instanceDigest: digest(lease.cloudID),
+    selectedImageDigest: digest(image.id),
+    selectedRevisionDigest: digest(image.revision),
+  };
+}
+
 async function github(pathname) {
   const token = required("GH_TOKEN");
   const response = await fetch(`https://api.github.com${pathname}`, {
@@ -224,7 +290,9 @@ export function workflowRunPathMatches(value, expected, branch) {
 }
 
 export function normalizeArtifactDigest(value) {
-  const digest = String(value ?? "").trim().toLowerCase();
+  const digest = String(value ?? "")
+    .trim()
+    .toLowerCase();
   if (/^[0-9a-f]{64}$/.test(digest)) return `sha256:${digest}`;
   if (/^sha256:[0-9a-f]{64}$/.test(digest)) return digest;
   throw new Error("candidate artifact digest is absent or invalid");
@@ -267,6 +335,7 @@ async function candidateArtifact(repository, workflowSha, defaultBranch) {
 }
 
 export async function verifyCandidateIdentity({ artifact = false, cleanup = false } = {}) {
+  retainedImageFromEnv();
   const repository = required("GITHUB_REPOSITORY", /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
   const number = required("QUALIFICATION_PULL_REQUEST", /^[1-9][0-9]*$/);
   const candidateSha = required("QUALIFICATION_CANDIDATE_SHA", sha40);
@@ -320,18 +389,110 @@ function checkoutSha(directory) {
   }).trim();
 }
 
+function imageCapsuleRecords(directory) {
+  const entries = execFileSync("git", ["ls-tree", "-z", "HEAD", "--", ...imageCapsulePaths], {
+    cwd: directory,
+    encoding: "utf8",
+  })
+    .split("\0")
+    .filter(Boolean);
+  const records = entries
+    .map((entry) => {
+      const match = entry.match(/^(100644|100755) blob ([0-9a-f]{40})\t(.+)$/);
+      if (!match || !imageCapsulePaths.includes(match[3])) {
+        throw new Error("retained capsule contains an invalid Git entry");
+      }
+      const file = path.join(directory, match[3]);
+      const stat = fs.lstatSync(file);
+      if (
+        !stat.isFile() ||
+        stat.size > 1024 * 1024 ||
+        Boolean(stat.mode & 0o111) !== (match[1] === "100755")
+      ) {
+        throw new Error("retained capsule input is not a bounded regular file");
+      }
+      const data = fs.readFileSync(file);
+      const blob = crypto
+        .createHash("sha1")
+        .update(`blob ${data.length}\0`)
+        .update(data)
+        .digest("hex");
+      if (blob !== match[2])
+        throw new Error("retained capsule input differs from its exact checkout");
+      return { path: match[3], mode: match[1], blob, bytes: data.length, sha256: digest(data) };
+    })
+    .sort((left, right) => left.path.localeCompare(right.path));
+  if (canonical(records.map((record) => record.path)) !== canonical(imageCapsulePaths)) {
+    throw new Error("retained capsule requires all 13 source inputs");
+  }
+  return records;
+}
+
+export function createRetainedCapsule(sourceDir, candidateDir, receiptFile) {
+  const retained = retainedImageFromEnv();
+  if (!retained) throw new Error("retained capsule requires retained mode");
+  const candidateSha = required("QUALIFICATION_CANDIDATE_SHA", sha40);
+  if (checkoutSha(sourceDir) !== retained.sourceSha || checkoutSha(candidateDir) !== candidateSha) {
+    throw new Error("retained capsule checkout SHA mismatch");
+  }
+  const sourceFiles = imageCapsuleRecords(sourceDir);
+  const candidateFiles = imageCapsuleRecords(candidateDir);
+  const sourceCapsuleSha256 = digest(canonical(sourceFiles));
+  if (sourceCapsuleSha256 !== retained.capsuleSha256) {
+    throw new Error("retained source capsule differs from the reviewed receipt");
+  }
+  // actions.go is the CLI proof identity, not a baked input. Preserve both
+  // records without pretending a newly built CLI equals the historical binary.
+  const baked = (records) => records.filter((record) => record.path !== "internal/cli/actions.go");
+  if (canonical(baked(sourceFiles)) !== canonical(baked(candidateFiles))) {
+    throw new Error("candidate changed a retained image recipe, runtime, or proof input");
+  }
+  const receipt = {
+    version: 1,
+    sourceSha: retained.sourceSha,
+    candidateSha,
+    sourceCapsuleSha256,
+    sourceFiles,
+    candidateFiles,
+    bakedInputsIdentical: true,
+  };
+  writeJSON(receiptFile, receipt);
+  return receipt;
+}
+
+function verifyRetainedCapsule(artifactDir, candidateSha) {
+  const retained = retainedImageFromEnv();
+  if (!retained) return;
+  const receipt = readJSON(path.join(artifactDir, "retained-capsule.json"));
+  if (
+    receipt.version !== 1 ||
+    receipt.sourceSha !== retained.sourceSha ||
+    receipt.candidateSha !== candidateSha ||
+    receipt.sourceCapsuleSha256 !== retained.capsuleSha256 ||
+    digest(canonical(receipt.sourceFiles)) !== retained.capsuleSha256 ||
+    canonical(receipt.sourceFiles?.map((entry) => entry.path)) !== canonical(imageCapsulePaths) ||
+    canonical(receipt.candidateFiles?.map((entry) => entry.path)) !==
+      canonical(imageCapsulePaths) ||
+    canonical(receipt.sourceFiles.slice(1)) !== canonical(receipt.candidateFiles.slice(1)) ||
+    receipt.bakedInputsIdentical !== true
+  ) {
+    throw new Error("retained capsule identity mismatch");
+  }
+  for (const record of receipt.candidateFiles) {
+    const file = path.join(artifactDir, "candidate", record.path);
+    if (fs.existsSync(file) && digest(fs.readFileSync(file)) !== record.sha256) {
+      throw new Error("candidate runtime differs from retained capsule");
+    }
+  }
+}
+
 function trackedWorkerBuildInputs(directory) {
   return execFileSync("git", ["ls-files", "-z", "--", "worker"], {
     cwd: directory,
     encoding: "utf8",
   })
     .split("\0")
-    .filter(
-      (file) =>
-        file &&
-        !file.startsWith("worker/src/") &&
-        !file.startsWith("worker/test/"),
-    )
+    .filter((file) => file && !file.startsWith("worker/src/") && !file.startsWith("worker/test/"))
     .sort();
 }
 
@@ -377,10 +538,7 @@ export function prepareCandidateBuild(
   if (!sha40.test(candidateSha) || !sha40.test(workflowSha)) {
     throw new Error("invalid protected build SHA");
   }
-  if (
-    checkoutSha(harnessDir) !== workflowSha ||
-    checkoutSha(candidateDir) !== candidateSha
-  ) {
+  if (checkoutSha(harnessDir) !== workflowSha || checkoutSha(candidateDir) !== candidateSha) {
     throw new Error("protected build checkout SHA mismatch");
   }
   // Candidate source remains data: every executable build control comes from
@@ -442,6 +600,7 @@ export function createManifest(candidateDir, artifactDir, candidateSha, workflow
   const actualSha = checkoutSha(candidateDir);
   if (actualSha !== candidateSha) throw new Error("candidate checkout SHA mismatch");
   verifyBuildReceipt(candidateDir, artifactDir, candidateSha, workflowSha);
+  verifyRetainedCapsule(artifactDir, candidateSha);
   const files = filesUnder(artifactDir)
     .filter((file) => path.basename(file) !== "manifest.json")
     .map((file) => ({
@@ -514,6 +673,7 @@ export function verifyManifest(artifactDir, expectedCandidate, expectedWorkflow)
   );
   if (actual.some((file) => !expected.has(file)))
     throw new Error("candidate artifact has extra files");
+  verifyRetainedCapsule(artifactDir, expectedCandidate);
   return manifest;
 }
 
@@ -712,7 +872,10 @@ class Cloudflare {
 }
 
 function qualificationConfig() {
-  const rootGB = Number(required("QUALIFICATION_ROOT_GB", /^(?:[89]|1[0-9]|20)$/));
+  const retainedImage = retainedImageFromEnv();
+  const rootGB = retainedImage
+    ? 400
+    : Number(required("QUALIFICATION_ROOT_GB", /^(?:[89]|1[0-9]|20)$/));
   return {
     region: required("QUALIFICATION_AWS_REGION", /^[a-z]{2}-[a-z]+-[0-9]+$/),
     subnetId: required("QUALIFICATION_SUBNET_ID", /^subnet-[0-9a-f]+$/),
@@ -720,11 +883,12 @@ function qualificationConfig() {
     baseAmiId: required("QUALIFICATION_BASE_AMI_ID", /^ami-[0-9a-f]+$/),
     rootGB,
     instanceTypes: ["t3.small", "t3a.small"],
-    maxMinutes: 120,
+    maxMinutes: retainedImage ? 38 : 120,
     maxMonthlyUSD: 10,
     maxConcurrentInstances: 1,
-    maxLaunches: 3,
+    maxLaunches: retainedImage ? 1 : 3,
     fastSnapshotRestore: false,
+    ...(retainedImage ? { retainedImage } : {}),
   };
 }
 
@@ -737,7 +901,7 @@ function candidateBindings(identity, adminToken, sharedToken, config) {
     CRABBOX_WORKSPACE_PREWARM_COUNT: "0",
     CRABBOX_AWS_REGION: config.region,
     CRABBOX_CAPACITY_REGIONS: config.region,
-    CRABBOX_AWS_AMI: config.baseAmiId,
+    CRABBOX_AWS_AMI: config.retainedImage ? "" : config.baseAmiId,
     CRABBOX_AWS_SUBNET_ID: config.subnetId,
     CRABBOX_AWS_SECURITY_GROUP_ID: config.securityGroupId,
     CRABBOX_AWS_ROOT_GB: String(config.rootGB),
@@ -819,6 +983,9 @@ function relayMetadata(
       { name: "QUALIFICATION_OWNER", type: "plain_text", text: owner },
       { name: "QUALIFICATION_ORG", type: "plain_text", text: "image-qualification" },
       { name: "QUALIFICATION_EXPIRES_AT", type: "plain_text", text: expiresAt },
+      ...(config.retainedImage
+        ? [{ name: "QUALIFICATION_MODE", type: "plain_text", text: "retained" }]
+        : []),
       { name: "CANDIDATE", type: "service", service: candidateWorker },
     ],
   };
@@ -858,6 +1025,7 @@ function executionManifest(identity) {
     policyHash: identity.policyHash,
     enrolledAt: identity.enrolledAt,
     expiresAt: identity.expiresAt,
+    ...(identity.retainedImage ? { retainedImage: identity.retainedImage } : {}),
   };
 }
 
@@ -868,6 +1036,7 @@ export function executionManifestDigest(identity) {
 function qualificationExpectedFromEnv({ optional = false } = {}) {
   const runId = process.env.QUALIFICATION_EXPECTED_RUN_ID?.trim() ?? "";
   if (optional && !runId) return undefined;
+  const retainedImage = retainedImageFromEnv();
   return {
     runId: required("QUALIFICATION_EXPECTED_RUN_ID", runIdPattern),
     candidateSha: required("QUALIFICATION_EXPECTED_CANDIDATE_SHA", sha40),
@@ -885,6 +1054,7 @@ function qualificationExpectedFromEnv({ optional = false } = {}) {
     enrolledAt: required("QUALIFICATION_EXPECTED_ENROLLED_AT"),
     expiresAt: required("QUALIFICATION_EXPECTED_EXPIRES_AT"),
     executionManifestDigest: required("QUALIFICATION_EXPECTED_EXECUTION_MANIFEST_DIGEST", sha64),
+    ...(retainedImage ? { retainedImage } : {}),
   };
 }
 
@@ -962,6 +1132,8 @@ async function verifyExecutionDeployment(cf, expected) {
     transport?.props?.candidateWorker !== expected.candidateWorker ||
     transport?.props?.deploymentHash !== expected.deploymentHash ||
     transport?.props?.expiresAt !== expected.expiresAt ||
+    canonical(transport?.props?.retainedImage ?? null) !==
+      canonical(expected.retainedImage ?? null) ||
     relayExpiry?.text !== expected.expiresAt ||
     digest(canonical(relayBindings)) !== expected.relayBindingDigest ||
     relayBindings.some(
@@ -1064,9 +1236,11 @@ async function deploy() {
   if (!workerNamePattern.test(candidateWorker)) throw new Error("candidate Worker name is invalid");
   const relayWorker = relayNameForRun(runId);
   if (!relayNamePattern.test(relayWorker)) throw new Error("relay Worker name is invalid");
-  const expiresAt = new Date(Date.now() + maxRunMs).toISOString();
   const owner = `${runId}@example.invalid`;
   const config = qualificationConfig();
+  const expiresAt = new Date(
+    Date.now() + (config.retainedImage ? retainedRunMs : maxRunMs),
+  ).toISOString();
   const authoritySha = required("QUALIFICATION_AUTHORITY_SHA", sha40);
   const authorityVersion = boundedString("QUALIFICATION_AUTHORITY_VERSION", 64);
   const policyHash = required("QUALIFICATION_EXPECTED_POLICY_HASH", sha64);
@@ -1076,6 +1250,7 @@ async function deploy() {
     candidateSha: identityCheck.candidateSha,
     candidateWorker,
     expiresAt,
+    ...(config.retainedImage ? { retainedImage: config.retainedImage } : {}),
   };
   const adminToken = crypto.randomBytes(32).toString("hex");
   const sharedToken = crypto.randomBytes(32).toString("hex");
@@ -1389,11 +1564,7 @@ async function deleteCandidate(cf, worker) {
 
 async function deleteRelay(cf, worker) {
   if (!relayNamePattern.test(worker)) throw new Error("refusing to delete an unexpected relay");
-  const existing = await cf.request(
-    `/workers/scripts/${worker}/settings`,
-    {},
-    { allow404: true },
-  );
+  const existing = await cf.request(`/workers/scripts/${worker}/settings`, {}, { allow404: true });
   if (existing === undefined) {
     if ((await namespaceResidue(cf, worker)) !== 0) {
       throw new Error("qualification relay Durable Object residue remains");
@@ -1619,7 +1790,9 @@ async function cleanupRun({
       const message = `idle cleanup: ${error instanceof Error ? error.message : String(error)}`;
       return {
         result: "failed",
-        failure: initialQualificationFailure ? `${initialQualificationFailure}; ${message}` : message,
+        failure: initialQualificationFailure
+          ? `${initialQualificationFailure}; ${message}`
+          : message,
       };
     }
     if (initialQualificationFailure || requireProof) {
@@ -1670,7 +1843,11 @@ async function cleanupRun({
     if (requireProof) {
       try {
         verifyAttestationIdentity(firstAttestation, expected, { finalized: true });
-        verifyQualificationEvidence(firstAttestation, readExecutionProof());
+        verifyQualificationEvidence(
+          firstAttestation,
+          readExecutionProof(),
+          expected?.retainedImage,
+        );
       } catch (error) {
         recordQualificationFailure(error);
       }
@@ -1748,7 +1925,7 @@ function readExecutionProof() {
   };
 }
 
-export function verifyQualificationEvidence(attestation, proof) {
+export function verifyQualificationEvidence(attestation, proof, retainedImage) {
   const operations = attestation?.operations ?? [];
   const millisecondTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
   const probeStarted = proof?.spoof?.startedAt ?? "";
@@ -1770,9 +1947,7 @@ export function verifyQualificationEvidence(attestation, proof) {
     }
     return timestamps.some((timestamp) => {
       const parsed = Date.parse(timestamp);
-      return (
-        !Number.isFinite(parsed) || (parsed >= probeStartedAt && parsed <= probeCompletedAt)
-      );
+      return !Number.isFinite(parsed) || (parsed >= probeStartedAt && parsed <= probeCompletedAt);
     });
   });
   if (
@@ -1803,7 +1978,32 @@ export function verifyQualificationEvidence(attestation, proof) {
       );
   const launches = accepted("RunInstances");
   const images = accepted("CreateImage");
-  if (
+  const launchDispatches = operations
+    .filter((operation) => operation.action === "RunInstances")
+    .flatMap((operation) => operation.signerDispatches ?? []);
+  if (retainedImage) {
+    if (
+      launches.length !== 1 ||
+      launchDispatches.length !== 1 ||
+      operations.some(
+        (operation) => operation.action === "CreateImage" && operation.signerDispatches?.length,
+      ) ||
+      proof?.execution?.normalSelection !== true ||
+      proof?.execution?.exactPromotedRevision !== true ||
+      proof?.execution?.selectedImageDigest !== digest(retainedImage.imageId) ||
+      proof?.execution?.selectedRevisionDigest !== proof?.catalog?.failedRevisionDigest ||
+      !attestation.finalReceipt?.verification?.some(
+        (entry) => entry.action === "RetainedImagePreserved" && entry.outcome === "accepted",
+      ) ||
+      attestation.finalReceipt?.cleanupAttempts?.some(
+        (entry) => entry.action === "DeregisterImage" || entry.action === "DeleteSnapshot",
+      )
+    ) {
+      throw new Error(
+        "attestation does not prove one retained launch and borrowed-image preservation",
+      );
+    }
+  } else if (
     launches.length !== 3 ||
     images.length !== 1 ||
     !(
@@ -1819,7 +2019,10 @@ export function verifyQualificationEvidence(attestation, proof) {
     !attestation.finalized ||
     !receipt ||
     receipt.failureCodes?.length !== 0 ||
-    (receipt.resourcesAtStart?.images ?? 0) < 1 ||
+    (retainedImage
+      ? (receipt.resourcesAtStart?.images ?? 0) !== 0 ||
+        (receipt.resourcesAtStart?.snapshots ?? 0) !== 0
+      : (receipt.resourcesAtStart?.images ?? 0) < 1) ||
     proof?.fsr?.rejected !== true ||
     proof?.catalog?.seededDefaultReadback !== true ||
     proof?.catalog?.priorDefaultImageRestored !== true ||
@@ -1834,8 +2037,8 @@ export function verifyQualificationEvidence(attestation, proof) {
     !sha64.test(proof?.catalog?.restoredRevisionDigest ?? "") ||
     proof?.execution?.mintExit !== 86 ||
     proof?.execution?.injectedAfterPromotedSmoke !== true ||
-    proof?.execution?.launchCount !== 3 ||
-    proof?.execution?.smokeCount < 3 ||
+    proof?.execution?.launchCount !== (retainedImage ? 1 : 3) ||
+    proof?.execution?.smokeCount < (retainedImage ? 1 : 3) ||
     proof?.hardKill?.executorKilled !== true ||
     proof?.hardKill?.cloudCredentialsPresent !== false
   ) {
@@ -1884,6 +2087,21 @@ function writeEvidence(result) {
 
 async function main() {
   const [command, ...args] = process.argv.slice(2);
+  if (command === "retained-capsule") {
+    createRetainedCapsule(path.resolve(args[0]), path.resolve(args[1]), path.resolve(args[2]));
+    return;
+  }
+  if (command === "retained-selection") {
+    writeJSON(
+      args[2],
+      verifyRetainedSelection(
+        readJSON(args[0]).lease,
+        readJSON(args[1]),
+        required("QUALIFICATION_AWS_REGION"),
+      ),
+    );
+    return;
+  }
   if (command === "authorize") {
     const result = await verifyCandidateIdentity();
     appendOutput("candidate_sha", result.candidateSha);

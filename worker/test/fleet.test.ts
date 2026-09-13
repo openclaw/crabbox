@@ -5,7 +5,7 @@ import { Script, createContext } from "node:vm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { adminGrantVersion, issueUserToken } from "../src/auth";
-import { EC2SpotClient, AWSLeaseAuthorityError } from "../src/aws";
+import { EC2SpotClient, AWSLeaseAuthorityError, awsLeaseImageIdentity } from "../src/aws";
 import { AzureClient, azureOwnedDeleteClaimKey } from "../src/azure";
 import { codeOriginForLease } from "../src/code-origin";
 import {
@@ -43011,18 +43011,26 @@ describe("fleet lease identity and idle", () => {
   it("uses promoted AWS image region when creating leases", async () => {
     const storage = new MemoryStorage();
     let createdConfig: LeaseConfig | undefined;
-    const fleet = testFleet(
-      storage,
-      {
-        aws: fakeProvider(
-          (config) => {
-            createdConfig = config;
-          },
-          { provider: "aws", region: "us-east-2" },
-        ),
+    const provider = fakeProvider(
+      (config) => {
+        createdConfig = config;
       },
-      { CRABBOX_AWS_REGION: "eu-west-1" },
+      {
+        provider: "aws",
+        region: "us-east-2",
+        onPrepareLeaseConfig: (config) =>
+          new AWSProvider({} as Env, config.awsRegion, storage).prepareLeaseConfig(config),
+      },
     );
+    const create = provider.createServerWithFallback.bind(provider);
+    provider.createServerWithFallback = async (...args) => {
+      const result = await create(...args);
+      return {
+        ...result,
+        image: awsLeaseImageIdentity(args[0], args[0].awsAMI, result.server.region!),
+      };
+    };
+    const fleet = testFleet(storage, { aws: provider }, { CRABBOX_AWS_REGION: "eu-west-1" });
     storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04", {
       id: "ami-000000000001",
       name: "crabbox-image-test",
@@ -43031,6 +43039,7 @@ describe("fleet lease identity and idle", () => {
       target: "linux",
       os: "ubuntu:26.04",
       promotedAt: "2026-05-01T12:46:00Z",
+      revision: "selected-revision",
     });
 
     const response = await fleet.fetch(
@@ -43045,8 +43054,14 @@ describe("fleet lease identity and idle", () => {
     expect(response.status).toBe(201);
     expect(createdConfig?.awsAMI).toBe("ami-000000000001");
     expect(createdConfig?.awsRegion).toBe("us-east-2");
+    expect(createdConfig?.selectedImage?.revision).toBe("selected-revision");
     const body = (await response.json()) as { lease: LeaseRecord };
     expect(body.lease.region).toBe("us-east-2");
+    expect(body.lease.image?.revision).toBe("selected-revision");
+    const persisted = await fleet.fetch(request("GET", `/v1/leases/${body.lease.id}`));
+    expect(((await persisted.json()) as { lease: LeaseRecord }).lease.image?.revision).toBe(
+      "selected-revision",
+    );
   });
 
   it("uses ARM64 promoted AWS Linux images for ARM leases", async () => {

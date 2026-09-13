@@ -4,6 +4,7 @@
 
 ### Changes
 
+- Qualify an existing AWS image through an isolated protected catalog with one normal-selection lease, exact promotion-revision evidence, full runtime smoke, receipt rollback, and borrowed-image-safe cleanup, without reminting.
 - Add a protected, verification-only image-publisher auth check that confirms administrator access without creating leases or publishing images. [PR 2219](https://github.com/openclaw/crabbox/pull/2219). Thanks @vincentkoc.
 
 ### Fixes

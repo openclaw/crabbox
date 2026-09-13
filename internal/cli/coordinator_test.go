@@ -41,6 +41,32 @@ func TestCoordinatorMachineIDAcceptsStringOrNumber(t *testing.T) {
 	}
 }
 
+func TestCoordinatorLeasePreservesSelectedImageRevision(t *testing.T) {
+	for _, revision := range []string{"", "selected-revision"} {
+		t.Run(revision, func(t *testing.T) {
+			input := `{"id":"cbx_test","image":{"id":"ami-11111111","source":"promoted","region":"us-east-1","promotedAt":"2026-09-01T00:00:00Z"`
+			if revision != "" {
+				input += `,"revision":"` + revision + `"`
+			}
+			input += `}}`
+			var lease CoordinatorLease
+			if err := json.Unmarshal([]byte(input), &lease); err != nil {
+				t.Fatal(err)
+			}
+			if lease.Image == nil || lease.Image.Revision != revision {
+				t.Fatalf("image revision was not preserved: %#v", lease.Image)
+			}
+			encoded, err := json.Marshal(lease)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), `"revision"`) != (revision != "") {
+				t.Fatalf("optional image revision changed on encoding: %s", encoded)
+			}
+		})
+	}
+}
+
 func TestSplitCurlResponseParsesTrailingStatus(t *testing.T) {
 	body, status, err := splitCurlResponse([]byte("{\"ok\":true}\n200"))
 	if err != nil {
@@ -2564,6 +2590,52 @@ func TestImagePromoteOrdinaryOutputCompatibility(t *testing.T) {
 	}
 	if _, ok := decoded["variantSelectors"]; ok {
 		t.Fatalf("ordinary JSON gained variantSelectors: %s", jsonOut.String())
+	}
+}
+
+func TestImagePromoteRetainedQualificationScope(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	var requests []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query(); got.Get("provider") != "aws" ||
+			got.Get("target") != "linux" || got.Get("region") != "us-east-1" ||
+			got.Get("serverType") != "t3.small" || got.Get("architecture") != "x86_64" ||
+			got.Get("os") != "ubuntu:24.04" {
+			t.Errorf("retained qualification promotion scope=%v", got)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, body)
+		_, _ = w.Write([]byte(`{"image":{"id":"ami-11111111","revision":"candidate"},"previous":{"state":"absent","aliases":[{"alias":"regional","state":"absent"}]}}`))
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "admin-token")
+
+	scope := []string{"--provider", "aws", "--target", "linux", "--region", "us-east-1",
+		"--type", "t3.small", "--architecture", "x86_64", "--os", "ubuntu:24.04"}
+	var out bytes.Buffer
+	app := App{Stdout: &out, Stderr: io.Discard}
+	args := append([]string{"ami-11111111"}, scope...)
+	args = append(args, "--json", "--expected-current-image", "capture")
+	if err := app.imagePromote(context.Background(), args); err != nil {
+		t.Fatal(err)
+	}
+	receiptPath := filepath.Join(t.TempDir(), "promotion.json")
+	if err := os.WriteFile(receiptPath, out.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args = append(append([]string{}, scope...), "--json", "--restore-receipt", receiptPath, "ami-11111111")
+	if err := app.imagePromote(context.Background(), args); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 2 || requests[1]["restorePrevious"] == nil ||
+		requests[1]["retireExpectedCatalog"] != true {
+		t.Fatalf("retained promotion/restore requests=%#v", requests)
 	}
 }
 

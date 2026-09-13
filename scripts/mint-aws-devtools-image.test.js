@@ -365,9 +365,16 @@ test("runtime-user pnpm rejects a shadowing ordinary command before image captur
   assert.match(log, /stop --provider aws --target linux cbx_source/);
 });
 
-async function qualificationFixture(t) {
+async function qualificationFixture(t, { providerImageIDs = false } = {}) {
   const fake = await setupFakeCrabbox();
   t.after(() => rm(fake.dir, { recursive: true, force: true }));
+  if (providerImageIDs) {
+    const cli = await readFile(fake.fake, "utf8");
+    await writeFile(
+      fake.fake,
+      cli.replaceAll("ami-devtools", "ami-11111111").replaceAll("ami-previous", "ami-22222222"),
+    );
+  }
   const workflow = await readFile(
     path.join(repoRoot, ".github/workflows/image-qualification.yml"),
     "utf8",
@@ -417,7 +424,7 @@ test("qualification bundle runs the bundled installer and all three Linux smokes
 });
 
 test("qualification bundle preserves the protected promoted-smoke failure and receipt rollback", async (t) => {
-  const fake = await qualificationFixture(t);
+  const fake = await qualificationFixture(t, { providerImageIDs: true });
   const state = path.join(fake.dir, "adapter");
   const result = await runScript(
     ["--target", "linux", "--run"],
@@ -436,7 +443,7 @@ test("qualification bundle preserves the protected promoted-smoke failure and re
   assert.equal(promotion.previous.imageId, rollback.image.id);
   const log = await readFile(fake.log, "utf8");
   assert.equal((log.match(/docker_probe=/g) ?? []).length, 3);
-  assert.match(log, /--restore-receipt \S+ ami-devtools/);
+  assert.match(log, /--restore-receipt \S+ ami-11111111/);
   for (const lease of ["cbx_source", "cbx_candidate", "cbx_promoted"]) {
     assert.match(log, new RegExp(`stop --provider aws --target linux ${lease}`));
   }
