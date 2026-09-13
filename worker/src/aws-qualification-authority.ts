@@ -156,6 +156,7 @@ interface AWSQualificationRunState {
   policy: AWSQualificationPolicy;
   policyHash: string;
   retainedRootDeviceName?: string;
+  finalizationSource?: "automatic" | "controller";
   finalizingAt?: string;
   finalizedAt?: string;
 }
@@ -1070,9 +1071,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     if (!run || canonicalJSON(run.identity) !== canonicalJSON(identity)) {
       throw new Error("AWS qualification service binding is not enrolled for this run");
     }
-    // Receipt restore and release verify provider identity/resources first.
-    // Keep those already-scoped reads available while independent cleanup runs.
-    const rollbackRead = Boolean(identity.retainedImage) && retainedCleanupReads.has(action);
+    // Only automatic cleanup grants rollback reads. A controller fence is terminal,
+    // including requests admitted by the registry before reaching this serialized owner.
+    const rollbackRead =
+      run.finalizationSource === "automatic" &&
+      Boolean(identity.retainedImage) &&
+      retainedCleanupReads.has(action);
     if (run.finalizedAt && !rollbackRead) throw new Error("AWS qualification run is finalized");
     if (run.finalizingAt && !rollbackRead) throw new Error("AWS qualification run is finalizing");
     if (Date.now() >= Date.parse(run.identity.expiresAt)) {
@@ -1197,6 +1201,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     if (controller) validateController(controller, run.identity.deploymentHash);
     if (!run.finalizingAt && !run.finalizedAt) {
       run.finalizingAt = new Date().toISOString();
+      run.finalizationSource = controller ? "controller" : "automatic";
+      await this.ctx.storage.put(stateKey, run);
+    } else if (controller && run.finalizationSource !== "controller") {
+      // Explicit revocation upgrades automatic cleanup even after cleanup completed.
+      // Alarm retries must never downgrade this persisted fence or grant legacy state grace.
+      run.finalizationSource = "controller";
       await this.ctx.storage.put(stateKey, run);
     }
     return run;
@@ -3033,7 +3043,13 @@ function appendBoundedEvidence<T>(
 function evidenceDenialReason(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("outside the run ledger")) return "resource-not-owned";
-  if (message.includes("outside policy") || message.includes("not allowed")) return "policy-denied";
+  if (
+    message.includes("outside policy") ||
+    message.includes("not allowed") ||
+    message === "AWS qualification fast snapshot restore is disabled"
+  ) {
+    return "policy-denied";
+  }
   if (message.includes("wrong account")) return "account-mismatch";
   if (message.includes("limit") || message.includes("allows one")) return "capacity-denied";
   if (message.includes("expired")) return "run-expired";

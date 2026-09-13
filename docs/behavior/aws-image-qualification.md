@@ -179,9 +179,12 @@ window and eight-minute cleanup reserve inside a 38-minute absolute lifetime.
 The compute guard, volume size and expiry bound the operation; they are not a
 provider billing cap. Obtain a separate spend authorization before dispatch.
 At the work cutoff, new work is denied and independent authority cleanup starts.
-Until absolute expiry, scoped identity, image, instance and key reads remain
-available for receipt restoration and release in the isolated catalog. The protected finalizer's
-registry fence still closes all candidate access. A lost launch response is
+Until absolute expiry, automatic cleanup permits scoped identity, image, instance
+and key reads for receipt restoration and release in the isolated catalog.
+Explicit protected finalization durably revokes that allowance at the run owner,
+including requests admitted by the registry before revocation. Alarm retries and
+object restarts cannot reopen it; pre-existing finalization state without an
+automatic-cleanup marker grants no read allowance. A lost launch response is
 reconciled by reads only: the authority never dispatches `RunInstances` again,
 even with the same idempotency token.
 
@@ -211,9 +214,11 @@ it does not promote a shared production default or delete the source checkpoint.
 The final attestation must prove one launch, no image capture, matching selection
 and catalog-revision evidence, zero owned residue and preserved borrowed resources.
 
-Deploy the reviewed authority capability through the existing protected
-infrastructure route before running retained mode. Infrastructure landing alone
-does not qualify an older candidate CLI or authorize paid execution.
+Before running retained mode, the infrastructure owner must identify and approve
+the protected deployment and credential-custody route for the reviewed authority.
+The qualification workflow does not deploy that authority. Infrastructure landing
+alone does not establish its availability, qualify an older candidate CLI, or
+authorize paid execution.
 
 ## Enrollment and binding
 
@@ -267,9 +272,10 @@ active run. A retired or finalizing per-run object cannot be enrolled again.
 These methods and `attest` exist only on the named controller entrypoint; the
 candidate transport exposes only `execute`. The controller persists the per-run
 cleanup owner before publishing its global claim, and every candidate call must
-match that exact registry record while its state remains `claimed`. Finalization
-persists an irreversible per-run `finalizingAt` fence before transitioning the
-registry to `finalizing` or starting cleanup I/O, so an already-admitted
+match that exact registry record while its state remains `claimed`. Protected
+controller finalization records its source alongside the per-run `finalizingAt`
+fence before transitioning the registry to `finalizing` or starting cleanup I/O,
+and upgrades automatic cleanup to an irreversible controller fence. An already-admitted
 candidate call and a failed cleanup cannot reopen candidate dispatch.
 The relay name is deterministically derived from the registered run ID, so the
 durable registry identity is sufficient for a fresh finalizer or reaper to

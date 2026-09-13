@@ -244,6 +244,228 @@ describe("AWS qualification authority deployment", () => {
     );
   });
 
+  it.each(
+    ["begin", "complete", "failed", "registry-failed", "after-alarm"].flatMap((phase) =>
+      ["GetCallerIdentity", "DescribeImages", "DescribeInstances", "DescribeKeyPairs"].map(
+        (action) => ({ phase, action }),
+      ),
+    ),
+  )(
+    "revokes an already-admitted $action when controller finalization is $phase",
+    async ({ phase, action }) => {
+      useImmediateTimeouts();
+      const retained = retainedIdentity();
+      const fixture = authorityHTTPFixture(retained);
+      await fixture.controller.claim(retained);
+      const cachedRead = request("GetCallerIdentity");
+      await fixture.candidate.execute(cachedRead);
+      if (phase === "after-alarm") {
+        vi.spyOn(Date, "now").mockReturnValue(Date.parse(retained.expiresAt) - 8 * 60_000);
+        await fixture.run.alarm();
+      }
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const admittedRun = fixture.run;
+      vi.spyOn(fixture.namespace, "get").mockReturnValueOnce({
+        execute: async (
+          runIdentity: AWSQualificationRunIdentity,
+          candidateRequest: AWSQualificationRequest,
+        ) => {
+          entered.resolve();
+          await release.promise;
+          return await admittedRun.execute(runIdentity, candidateRequest);
+        },
+      } as AWSQualificationRun);
+      const result = fixture.candidate.execute(cleanupReadRequest(action, retained));
+      await entered.promise;
+      expect((await fixture.registry.discover(controller))?.cleanupState).toBe("claimed");
+      if (phase === "failed") {
+        fixture.signer.accountId = "999999999999";
+      } else if (phase === "registry-failed") {
+        vi.spyOn(fixture.registryStorage, "put").mockRejectedValueOnce(
+          new Error("registry unavailable"),
+        );
+      }
+      const finalization =
+        phase === "begin" || phase === "registry-failed"
+          ? fixture.controller.beginFinalization(retained.runId)
+          : fixture.controller.finalize(retained.runId);
+      const outcome = await finalization.then(
+        () => "",
+        (error: Error) => error.message,
+      );
+      expect(outcome).toBe(
+        phase === "failed"
+          ? "AWS qualification authority is authenticated to the wrong account"
+          : phase === "registry-failed"
+            ? "registry unavailable"
+            : "",
+      );
+      expect((await fixture.registry.discover(controller))?.cleanupState).toBe(
+        phase === "registry-failed"
+          ? "claimed"
+          : phase === "begin" || phase === "failed"
+            ? "finalizing"
+            : "finalized",
+      );
+      fixture.signer.accountId = fixture.env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID;
+      fixture.fetch.mockClear();
+      fixture.signer.calls.length = 0;
+      release.resolve();
+      await expect(result).rejects.toThrow(/finalizing|finalized/);
+      expect(fixture.fetch).not.toHaveBeenCalled();
+      expect(fixture.signer.calls).toHaveLength(0);
+
+      // Reopening the object and retrying automatic cleanup cannot undo a controller fence.
+      fixture.reopen();
+      await fixture.run.alarm();
+      fixture.fetch.mockClear();
+      fixture.signer.calls.length = 0;
+      await expect(fixture.run.execute(retained, cachedRead)).rejects.toThrow("finalized");
+      await expect(fixture.candidate.execute(request("GetCallerIdentity"))).rejects.toThrow(
+        phase === "registry-failed" ? "finalized" : "not active",
+      );
+      expect(fixture.fetch).not.toHaveBeenCalled();
+      expect(fixture.signer.calls).toHaveLength(0);
+      expect(await fixture.storage.get("run")).toMatchObject({
+        finalizationSource: "controller",
+      });
+    },
+  );
+
+  it("keeps automatic cleanup reads on the signed transport path without admitting foreign resources", async () => {
+    useImmediateTimeouts();
+    const retained = retainedIdentity();
+    const fixture = authorityHTTPFixture(retained);
+    await fixture.controller.claim(retained);
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse(retained.expiresAt) - 8 * 60_000);
+    await fixture.run.alarm();
+    await expect(fixture.run.beginFinalization({ deploymentHash: "f".repeat(64) })).rejects.toThrow(
+      "not bound to this deployment",
+    );
+    fixture.reopen();
+    fixture.fetch.mockClear();
+    fixture.signer.calls.length = 0;
+    await Promise.all(
+      [retained.retainedImage!.imageId, "ami-base"].map((imageId) =>
+        expect(
+          fixture.candidate.execute(request("DescribeImages", { "ImageId.1": imageId }, "ec2")),
+        ).resolves.toMatchObject({ status: 200 }),
+      ),
+    );
+    expect(fixture.fetch).toHaveBeenCalledTimes(4);
+    expect(fixture.signer.calls.map(({ action }) => action)).toEqual([
+      "GetCallerIdentity",
+      "DescribeImages",
+      "GetCallerIdentity",
+      "DescribeImages",
+    ]);
+    await expect(
+      fixture.candidate.execute(cleanupReadRequest("GetCallerIdentity", retained)),
+    ).resolves.toMatchObject({ status: 200 });
+    await expect(
+      fixture.candidate.execute(cleanupReadRequest("DescribeInstances", retained)),
+    ).resolves.toMatchObject({ status: 200 });
+    await expect(
+      fixture.candidate.execute(cleanupReadRequest("DescribeKeyPairs", retained)),
+    ).resolves.toMatchObject({ status: 400 });
+    expect(fixture.fetch).toHaveBeenCalledTimes(9);
+    fixture.fetch.mockClear();
+    fixture.signer.calls.length = 0;
+    await expect(
+      fixture.candidate.execute(request("DescribeImages", { "ImageId.1": "ami-foreign" }, "ec2")),
+    ).rejects.toThrow("outside the run ledger");
+    await expect(
+      fixture.candidate.execute(request("RunInstances", runInstancesParams(), "ec2")),
+    ).rejects.toThrow("finalized");
+    now.mockReturnValue(Date.parse(retained.expiresAt));
+    await expect(fixture.candidate.execute(request("GetCallerIdentity"))).rejects.toThrow(
+      "expired",
+    );
+    expect(fixture.fetch).not.toHaveBeenCalled();
+    expect(fixture.signer.calls).toHaveLength(0);
+  });
+
+  it("finishes a read that won the run queue before persisting controller revocation", async () => {
+    const retained = retainedIdentity();
+    const fixture = authorityHTTPFixture(retained);
+    await fixture.controller.claim(retained);
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const network = fixture.fetch.getMockImplementation()!;
+    fixture.fetch.mockImplementationOnce(async (...args) => {
+      entered.resolve();
+      await release.promise;
+      return await network(...args);
+    });
+    const read = request("GetCallerIdentity");
+    const result = fixture.candidate.execute(read);
+    await entered.promise;
+    const finalization = fixture.controller.beginFinalization(retained.runId);
+    release.resolve();
+    await expect(result).resolves.toMatchObject({ status: 200 });
+    await finalization;
+    expect(await fixture.storage.get("run")).toMatchObject({
+      finalizationSource: "controller",
+      finalizingAt: expect.any(String),
+    });
+    fixture.reopen();
+    fixture.fetch.mockClear();
+    await expect(fixture.run.execute(retained, read)).rejects.toThrow("finalizing");
+    expect(fixture.fetch).not.toHaveBeenCalled();
+  });
+
+  it("preserves cleanup of an enrolled mint run across an authority deployment change", async () => {
+    useImmediateTimeouts();
+    const fixture = authorityHTTPFixture(identity);
+    await fixture.controller.claim(identity);
+    await importKey(fixture);
+    await fixture.candidate.execute(request("RunInstances", runInstancesParams(), "ec2"));
+    const before = await fixture.storage.get<Record<string, unknown>>("run");
+    expect(before).not.toHaveProperty("finalizationSource");
+    fixture.env.CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA = "f".repeat(40);
+    fixture.reopen();
+    fixture.fetch.mockClear();
+    await expect(fixture.candidate.execute(request("GetCallerIdentity"))).rejects.toThrow(
+      "authority deployment changed",
+    );
+    expect(fixture.fetch).not.toHaveBeenCalled();
+    await fixture.controller.finalize(identity.runId);
+    const proof = await fixture.controller.attest(identity.runId);
+    expect(proof).toMatchObject({
+      authoritySha: before!["authoritySha"],
+      finalized: true,
+      finalReceipt: {
+        finalCounts: { images: 0, instances: 0, keyPairs: 0, snapshots: 0, volumes: 0 },
+        failureCodes: [],
+      },
+    });
+    expect(fixture.signer.calls.filter(({ action }) => action === "RunInstances")).toHaveLength(1);
+    expect(fixture.signer.calls.some(({ action }) => action === "TerminateInstances")).toBe(true);
+    await fixture.controller.retire(identity.runId);
+    expect(await fixture.controller.discover()).toBeUndefined();
+  });
+
+  it("does not infer automatic read grace from an existing unclassified finalization fence", async () => {
+    useImmediateTimeouts();
+    const retained = retainedIdentity();
+    const fixture = authorityHTTPFixture(retained);
+    await fixture.controller.claim(retained);
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse(retained.expiresAt) - 8 * 60_000);
+    await fixture.run.alarm();
+    const stored = await fixture.storage.get<Record<string, unknown>>("run");
+    delete stored!["finalizationSource"];
+    await fixture.storage.put("run", stored);
+    fixture.reopen();
+    await fixture.run.alarm();
+    fixture.fetch.mockClear();
+    await expect(fixture.candidate.execute(request("GetCallerIdentity"))).rejects.toThrow(
+      "finalized",
+    );
+    expect(fixture.fetch).not.toHaveBeenCalled();
+    expect(await fixture.storage.get("run")).not.toHaveProperty("finalizationSource");
+  });
+
   it("keeps one idempotent active registry claim until finalized retirement", async () => {
     const storage = new MemoryStorage();
     const registry = new AWSQualificationRegistry({ storage } as never, {} as never);
@@ -1896,6 +2118,74 @@ function retainedIdentity(): AWSQualificationRunIdentity {
       capsuleSha256: "e".repeat(64),
     },
   };
+}
+
+function authorityHTTPFixture(runIdentity: AWSQualificationRunIdentity) {
+  const fixture = authorityFixture();
+  const env = {
+    ...fixture.env,
+    AWS_ACCESS_KEY_ID: "qualification-test",
+    AWS_SECRET_ACCESS_KEY: "qualification-test",
+  };
+  // Keep the production signer and intercept only its final network boundary.
+  const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+    const signed = new Request(input, init);
+    const url = new URL(signed.url);
+    const service = url.hostname.split(".")[0]!;
+    expect(["ec2", "sts"]).toContain(service);
+    expect(url.href).toBe(`https://${service}.us-east-1.amazonaws.com/`);
+    expect(signed.method).toBe("POST");
+    expect(signed.headers.get("authorization")).toMatch(/^AWS4-HMAC-SHA256 /);
+    const parameters = new URLSearchParams(await signed.text());
+    const action = parameters.get("Action")!;
+    parameters.delete("Action");
+    parameters.delete("Version");
+    return await fixture.signer.execute(
+      service,
+      action,
+      "us-east-1",
+      Object.fromEntries(parameters),
+    );
+  });
+  vi.stubGlobal("fetch", fetch);
+  let run = new AWSQualificationRun({ storage: fixture.storage } as never, env as never);
+  const registryStorage = new MemoryStorage();
+  const registry = new AWSQualificationRegistry({ storage: registryStorage } as never, {} as never);
+  const namespace = { idFromName: (name: string) => name, get: () => run };
+  const bindings = {
+    AWS_QUALIFICATION_RUNS: namespace,
+    AWS_QUALIFICATION_REGISTRY: { idFromName: (name: string) => name, get: () => registry },
+  } as never;
+  return {
+    ...fixture,
+    env,
+    fetch,
+    namespace,
+    registry,
+    registryStorage,
+    get run() {
+      return run;
+    },
+    reopen() {
+      run = new AWSQualificationRun({ storage: fixture.storage } as never, env as never);
+    },
+    candidate: new AWSQualificationTransport(bindings, runIdentity),
+    controller: new AWSQualificationController(bindings, controller),
+  };
+}
+
+function cleanupReadRequest(
+  action: string,
+  runIdentity: AWSQualificationRunIdentity,
+): AWSQualificationRequest {
+  if (action === "GetCallerIdentity") return request(action);
+  if (action === "DescribeImages") {
+    return request(action, { "ImageId.1": runIdentity.retainedImage!.imageId }, "ec2");
+  }
+  if (action === "DescribeKeyPairs") {
+    return request(action, { "KeyName.1": "crabbox-qualification" }, "ec2");
+  }
+  return request(action, {}, "ec2");
 }
 
 async function importKey(
