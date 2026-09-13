@@ -26927,6 +26927,121 @@ describe("fleet lease identity and idle", () => {
   });
 
   it.each([
+    { pausedRead: "provider lookup", rotateGrant: true },
+    { pausedRead: "eligibility read", rotateGrant: true },
+    { pausedRead: "audit read", rotateGrant: true },
+    { pausedRead: "audit read", rotateGrant: false },
+  ])(
+    "fences legacy AWS recovery admin grants across $pausedRead (rotate=$rotateGrant)",
+    async ({ pausedRead, rotateGrant }) => {
+      const f = awsLegacyRecoveryFixture();
+      const inspected = await f.inspect();
+      expect(inspected.status).toBe(200);
+      const { inspection } = (await inspected.json()) as {
+        inspection: { claimFingerprint: string };
+      };
+      const leaseKey = `lease:${f.lease.id}`;
+      const auditKey = `aws-cleanup-recovery-audit:${f.lease.id}`;
+      const before = structuredClone(f.storage.value<LeaseRecord>(leaseKey)!);
+      const beforeWake = f.storage.value(legacyAlarmKey);
+      const beforeAlarm = f.storage.alarm();
+      const reading = deferred<void>();
+      const resume = deferred<void>();
+      let paused = false;
+      let auditWrites = 0;
+      const pause = async () => {
+        paused = true;
+        reading.resolve();
+        await resume.promise;
+      };
+      f.storage.beforePut = async (key) => {
+        if (key === auditKey) auditWrites += 1;
+      };
+      f.state.beforeLookup = async () => {
+        if (pausedRead === "provider lookup") {
+          await pause();
+          return;
+        }
+        const watchedKey =
+          pausedRead === "audit read" ? auditKey : provisioningOperationKey(f.lease.id);
+        f.storage.afterGet = async (key) => {
+          if (!paused && key === watchedKey) await pause();
+        };
+      };
+
+      const recovery = f.recover(inspection.claimFingerprint);
+      try {
+        await Promise.race([
+          reading.promise,
+          recovery.then((response) => {
+            throw new Error(`recovery settled before paused read: HTTP ${response.status}`);
+          }),
+        ]);
+        const forwarded = await f.fleet.fetch(
+          request("GET", "/v1/leases/cbx_ffffffffffff", {
+            headers: {
+              ...f.headers,
+              "x-crabbox-admin-grant-version": (rotateGrant ? "b" : "a").repeat(64),
+            },
+          }),
+        );
+        expect(forwarded.status).toBe(404);
+        resume.resolve();
+        const response = await recovery;
+        expect(response.status).toBe(rotateGrant ? 409 : 200);
+        const body = (await response.json()) as { error?: string; recovery?: unknown };
+        const recoveredLease = {
+          ...before,
+          providerScope: "aws:account:123456789012",
+          provisioningResourceMayExist: false,
+          cleanupRetryAt: expect.any(String),
+          updatedAt: expect.any(String),
+        };
+        const scheduledWake = expect.any(Number);
+        expect(body).toMatchObject(
+          rotateGrant
+            ? { error: "cleanup_recovery_refused" }
+            : { recovery: { providerScope: "aws:account:123456789012" } },
+        );
+        expect(auditWrites).toBe(rotateGrant ? 0 : 1);
+        expect(f.storage.value(leaseKey)).toEqual(rotateGrant ? before : recoveredLease);
+        expect(f.storage.value(auditKey)).toEqual(rotateGrant ? undefined : body.recovery);
+        expect(f.storage.value(legacyAlarmKey)).toEqual(rotateGrant ? beforeWake : scheduledWake);
+        expect(f.storage.alarm()).toEqual(rotateGrant ? beforeAlarm : scheduledWake);
+        expect(rotateGrant || Number(f.storage.alarm()) <= Date.now()).toBe(true);
+        expect(f.actions).not.toContain("DeleteKeyPair");
+        expect(f.actions).not.toContain("TerminateInstances");
+      } finally {
+        resume.resolve();
+        await recovery;
+      }
+    },
+  );
+
+  it("refuses legacy AWS recovery without an admitted admin grant version", async () => {
+    const f = awsLegacyRecoveryFixture();
+    f.headers["x-crabbox-admin-grant-version"] = "";
+    const inspected = await f.inspect();
+    expect(inspected.status).toBe(200);
+    const { inspection } = (await inspected.json()) as {
+      inspection: { claimFingerprint: string };
+    };
+    const key = `lease:${f.lease.id}`;
+    const before = structuredClone(f.storage.value(key));
+    const beforeWake = f.storage.value(legacyAlarmKey);
+    const beforeAlarm = f.storage.alarm();
+
+    expect((await f.recover(inspection.claimFingerprint)).status).toBe(409);
+
+    expect(f.storage.value(key)).toEqual(before);
+    expect(f.storage.value(`aws-cleanup-recovery-audit:${f.lease.id}`)).toBeUndefined();
+    expect(f.storage.value(legacyAlarmKey)).toBe(beforeWake);
+    expect(f.storage.alarm()).toBe(beforeAlarm);
+    expect(f.actions).not.toContain("DeleteKeyPair");
+    expect(f.actions).not.toContain("TerminateInstances");
+  });
+
+  it.each([
     "key replacement",
     "active allocation",
     "active cleanup",
@@ -50481,7 +50596,7 @@ function awsLegacyRecoveryFixture(keep = false) {
     lookupStatus: 200,
     lookupBody: undefined as string | undefined,
     lookupError: false,
-    beforeLookup: undefined as (() => void) | undefined,
+    beforeLookup: undefined as (() => void | Promise<void>) | undefined,
     keyFailure: false,
     keyDeleted: false,
   };
@@ -50500,7 +50615,7 @@ function awsLegacyRecoveryFixture(keep = false) {
         actions.push("LookupEvents");
         const lookup = (await outgoing.json()) as Record<string, unknown>;
         lookupAttributes.push(lookup.LookupAttributes);
-        state.beforeLookup?.();
+        await state.beforeLookup?.();
         if (state.lookupError) throw new Error("private-bootstrap-canary");
         return new Response(
           state.lookupBody ??
@@ -50559,6 +50674,7 @@ function awsLegacyRecoveryFixture(keep = false) {
     "x-crabbox-owner": lease.owner,
     "x-crabbox-org": "example-org",
     "x-crabbox-admin": "true",
+    "x-crabbox-admin-grant-version": "a".repeat(64),
   };
   const inspect = () => fleet.fetch(request("GET", `/v1/leases/${lease.id}/cleanup`, { headers }));
   const recover = (claimFingerprint: string) =>
