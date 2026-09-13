@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Resolve macOS managed-state paths for Unix sockets and FIFOs through bounded metadata queries without opening those entries or scanning sibling files.
+
 - Keep portable workspace ownership exclusive when a runner's mkdir reports success after losing a directory-creation race. [PR 2201](https://github.com/openclaw/crabbox/pull/2201).
 
 - Resolve macOS managed-state path spelling without scanning unrelated sibling files, so crowded temporary directories do not block sync preparation. [PR 2187](https://github.com/openclaw/crabbox/pull/2187).
