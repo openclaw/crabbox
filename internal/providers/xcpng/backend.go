@@ -812,25 +812,17 @@ var newLifecycleClient = func(ctx context.Context, cfg core.Config) (lifecycleCl
 	return newXAPIClient(ctx, cfg)
 }
 
-var newLeaseID = func() string { return core.NewLeaseID() }
-var allocateDirectLeaseSlug = func(id, requested string, servers []core.Server) (string, error) {
-	return core.AllocateDirectLeaseSlug(id, requested, servers)
-}
-var ensureTestboxKeyForConfig = func(cfg core.Config, leaseID string) (string, string, error) {
-	return core.EnsureTestboxKeyForConfig(cfg, leaseID)
-}
-var providerKeyForLease = func(leaseID string) string { return core.ProviderKeyForLease(leaseID) }
-var sshTargetFromConfig = func(cfg core.Config, host string) core.SSHTarget { return core.SSHTargetFromConfig(cfg, host) }
-var waitForSSHReady = func(ctx context.Context, target *core.SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
-	return core.WaitForSSHReady(ctx, target, stderr, phase, timeout)
-}
-var bootstrapWaitTimeout = func(cfg core.Config) time.Duration { return core.BootstrapWaitTimeout(cfg) }
+var newLeaseID = core.NewLeaseID
+var allocateDirectLeaseSlug = core.AllocateDirectLeaseSlug
+var ensureTestboxKeyForConfig = core.EnsureTestboxKeyForConfig
+var providerKeyForLease = core.ProviderKeyForLease
+var sshTargetFromConfig = core.SSHTargetFromConfig
+var waitForSSHReady = core.WaitForSSHReady
+var bootstrapWaitTimeout = core.BootstrapWaitTimeout
 var guestIPPollInterval = 5 * time.Second
 var guestIPDiscoverInterval = 15 * time.Second
 var xcpNgRollbackCleanupTimeout = 11 * time.Minute
 var xcpNgPartialRollbackTimeout = 30 * time.Second
-var findServerByAlias = func(servers []core.Server, id string) (core.Server, string, error) {
-	return core.FindServerByAlias(servers, id)
-}
-var removeStoredTestboxKey = func(leaseID string) { core.RemoveStoredTestboxKey(leaseID) }
-var exit = func(code int, format string, args ...any) core.ExitError { return core.Exit(code, format, args...) }
+var findServerByAlias = core.FindServerByAlias
+var removeStoredTestboxKey = core.RemoveStoredTestboxKey
+var exit = core.Exit

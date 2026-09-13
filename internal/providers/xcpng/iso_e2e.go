@@ -82,15 +82,11 @@ var (
 	isoE2EWaitForSSHReady = func(ctx context.Context, target *core.SSHTarget, phase string, timeout time.Duration) error {
 		return core.WaitForSSHReady(ctx, target, os.Stderr, phase, timeout)
 	}
-	isoE2ERunSSHQuiet = func(ctx context.Context, target core.SSHTarget, remote string) error {
-		return core.RunSSHQuiet(ctx, target, remote)
-	}
-	isoE2EEnsureTestboxKey = func(cfg core.Config, leaseID string) (string, string, error) {
-		return core.EnsureTestboxKeyForConfig(cfg, leaseID)
-	}
+	isoE2ERunSSHQuiet             = core.RunSSHQuiet
+	isoE2EEnsureTestboxKey        = core.EnsureTestboxKeyForConfig
 	isoE2EStoredTestboxKeyExists  = storedISOE2ETestboxKeyExists
 	isoE2ENewLeaseID              = core.NewLeaseID
-	isoE2EProviderKeyForLease     = func(leaseID string) string { return core.ProviderKeyForLease(leaseID) }
+	isoE2EProviderKeyForLease     = core.ProviderKeyForLease
 	isoE2ERemasterUbuntuISO       = remasterUbuntuAutoinstallISO
 	isoE2EWriteLinuxSeedISO       = writeLinuxSeedISO
 	isoE2EWriteWindowsAnswerISO   = writeWindowsAnswerISO
