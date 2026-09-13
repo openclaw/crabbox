@@ -6,7 +6,6 @@ import (
 	"io"
 	"path"
 	"strings"
-	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -51,34 +50,22 @@ func (w EnvdWorkspace) Path() string {
 	return path.Join(home, workdir)
 }
 
-func (w EnvdWorkspace) Sync(ctx context.Context, client EnvdSandboxAPI, session EnvdSandboxSession, req core.RunRequest, workspace string, prepared ...*core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-	workspace, err := CleanPOSIXWorkspacePath(w.Provider+" workspace path", workspace)
-	if err != nil {
-		return nil, 0, err
+func (w EnvdWorkspace) Bind(client EnvdSandboxAPI, session EnvdSandboxSession, req core.RunRequest, workspace string) core.ArchiveWorkspace {
+	archive := core.NewArchiveWorkspace(w.Config, w.Runtime, req, w.Provider, workspace)
+	archive.RemoteArchivePrefix = w.RemoteArchivePrefix
+	archive.CleanWorkdir = func(workspace string) (string, error) {
+		return CleanPOSIXWorkspacePath(w.Provider+" workspace path", workspace)
 	}
-	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
-		Config: w.Config, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-		Workdir: workspace, TempPattern: "crabbox-" + w.Provider + "-sync-*.tgz",
-		RemoteArchivePrefix: w.RemoteArchivePrefix, PhaseName: w.Provider + "_sync", Provider: w.Provider,
-		Stderr: w.Runtime.Stderr, Now: func() time.Time { return core.ClockNow(w.Runtime.Clock) },
-		Upload: func(ctx context.Context, archivePath string, archive io.Reader) error {
-			if err := client.UploadFile(ctx, session, archivePath, archive); err != nil {
-				return fmt.Errorf("%s upload archive: %w", w.Provider, err)
-			}
-			return nil
-		},
-		Exec: func(ctx context.Context, command string) error {
-			return w.exec(ctx, client, session, command)
-		},
-	}, prepared...)
-}
-
-func (w EnvdWorkspace) Prepare(ctx context.Context, client EnvdSandboxAPI, session EnvdSandboxSession, workspace string) error {
-	workspace, err := CleanPOSIXWorkspacePath(w.Provider+" workspace path", workspace)
-	if err != nil {
-		return err
+	archive.Upload = func(ctx context.Context, archivePath string, archive io.Reader) error {
+		if err := client.UploadFile(ctx, session, archivePath, archive); err != nil {
+			return fmt.Errorf("%s upload archive: %w", w.Provider, err)
+		}
+		return nil
 	}
-	return w.exec(ctx, client, session, "mkdir -p "+core.ShellQuote(workspace))
+	archive.Exec = func(ctx context.Context, command string) error {
+		return w.exec(ctx, client, session, command)
+	}
+	return archive
 }
 
 func (w EnvdWorkspace) exec(ctx context.Context, client EnvdSandboxAPI, session EnvdSandboxSession, command string) error {

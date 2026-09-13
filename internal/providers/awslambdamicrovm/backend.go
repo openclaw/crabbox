@@ -82,11 +82,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (result core.Run
 	}
 	var prepared *core.PreparedArchive
 	if req.ID == "" && !req.NoSync {
-		prepared, err = core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-			Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-			TempPattern: "crabbox-aws-lambda-microvm-sync-*.tgz", Stderr: b.rt.Stderr,
-			Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
-		})
+		prepared, err = b.workspace(runner, microVM{}, req).PrepareArchive(ctx)
 		if err != nil {
 			return core.RunResult{}, err
 		}
@@ -173,7 +169,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (result core.Run
 
 	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s microvm=%s workdir=%s\n", providerName, leaseID, vm.ID, b.cfg.AWSLambdaMicroVM.Workdir)
 	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, runner, vm, req, prepared)
+		syncPhases, syncDuration, err = b.workspace(runner, vm, req).Sync(ctx, prepared)
 	} else {
 		var exitCode int
 		exitCode, err = runner.Exec(ctx, vm, "mkdir -p "+core.ShellQuote(b.cfg.AWSLambdaMicroVM.Workdir), "/", nil, io.Discard, b.rt.Stderr)

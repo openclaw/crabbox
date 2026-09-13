@@ -5,38 +5,27 @@ import (
 	"io"
 	"path"
 	"strings"
-	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func (b *codeSandboxBackend) syncWorkspace(ctx context.Context, api codeSandboxAPI, sandboxID string, req core.RunRequest, workdir string, prepared ...*core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-	syncReq := core.DelegatedArchiveSyncRequest{
-		Config:              b.cfg,
-		Repo:                req.Repo,
-		ForceSyncLarge:      req.ForceSyncLarge,
-		Workdir:             workdir,
-		TempPattern:         "crabbox-codesandbox-sync-*.tgz",
-		RemoteArchiveDir:    defaultWorkdir,
-		RemoteArchivePrefix: ".crabbox-codesandbox-sync-",
-		PhaseName:           "codesandbox_sync",
-		Provider:            providerName,
-		Stderr:              b.rt.Stderr,
-		Now:                 func() time.Time { return core.ClockNow(b.rt.Clock) },
-		CleanupContext:      b.cleanupContext,
-		Upload: func(uploadCtx context.Context, remoteArchive string, body io.Reader) error {
-			return api.UploadFile(uploadCtx, sandboxID, remoteArchive, body)
-		},
-		Exec: func(execCtx context.Context, command string) error {
-			return b.execShell(execCtx, api, sandboxID, command)
-		},
+func (b *codeSandboxBackend) workspace(api codeSandboxAPI, sandboxID string, req core.RunRequest, workdir string) core.ArchiveWorkspace {
+	workspace := core.NewArchiveWorkspace(b.cfg, b.rt, req, providerName, workdir)
+	workspace.RemoteArchiveDir = defaultWorkdir
+	workspace.RemoteArchivePrefix = ".crabbox-codesandbox-sync-"
+	workspace.CleanupContext = b.cleanupContext
+	workspace.Upload = func(uploadCtx context.Context, remoteArchive string, body io.Reader) error {
+		return api.UploadFile(uploadCtx, sandboxID, remoteArchive, body)
+	}
+	workspace.Exec = func(execCtx context.Context, command string) error {
+		return b.execShell(execCtx, api, sandboxID, command)
 	}
 	if workdir == defaultWorkdir {
-		syncReq.Replace = func(replaceCtx context.Context, stagingDir, workdir string) error {
-			return b.execShell(replaceCtx, api, sandboxID, codeSandboxMountReplaceCommand(stagingDir, workdir))
+		workspace.Replace = func(ctx context.Context, stagingDir, workdir string) error {
+			return b.execShell(ctx, api, sandboxID, codeSandboxMountReplaceCommand(stagingDir, workdir))
 		}
 	}
-	return core.RunDelegatedArchiveSync(ctx, syncReq, prepared...)
+	return workspace
 }
 
 func (b *codeSandboxBackend) execShell(ctx context.Context, api codeSandboxAPI, sandboxID, command string) error {
@@ -78,8 +67,4 @@ func codeSandboxMountReplaceCommand(stagingDir, workdir string) string {
 		" && cp -a " + core.ShellQuote(stagingDir+"/.") + " " + core.ShellQuote(workdir+"/") +
 		" && trap - EXIT HUP INT TERM" +
 		" && rm -rf " + core.ShellQuote(backupDir) + " " + core.ShellQuote(stagingDir)
-}
-
-func (b *codeSandboxBackend) ensureWorkspace(ctx context.Context, api codeSandboxAPI, sandboxID, workdir string) error {
-	return b.execShell(ctx, api, sandboxID, "mkdir -p "+core.ShellQuote(workdir))
 }

@@ -503,12 +503,19 @@ summary.
    `SyncDelegated: true`;
 6. stop temporary resources when `Keep` is false.
 
-Archive-based providers call `core.RunDelegatedArchiveSync` with a
-`core.DelegatedArchiveSyncRequest`. Core owns preparation, guardrails, transfer
+Archive-based providers configure a `core.ArchiveWorkspace` using
+`core.NewArchiveWorkspace(cfg, rt, req, providerName, workdir)`. Core owns
+preparation, guardrails, transfer
 timing, workspace replacement, and temporary-archive cleanup, using `/tmp` as
 the default remote archive directory. Adapters supply upload and execution
 callbacks and any provider-specific cleanup context or replacement behavior.
-Use this request directly rather than mirroring it in another provider layer.
+Return this workspace from `DelegatedSandboxLifecycle.Workspace`; the run owner
+prepares the local archive before acquisition and calls `Sync` or `Ensure` after
+admission. Bind the upload and execution callbacks to the current resource inside
+the workspace factory, without contacting the provider during construction.
+Use `CleanWorkdir` for an adapter's path rules and `Replace` for mounted workspace
+replacement. Keep native synchronization or operation-wide claim fencing in
+`shared.WorkspaceOperations` when those contracts need a different sequence.
 
 `Status` returns a normalized `StatusView`. If the provider only emits a table,
 parse it inside the backend and return structured fields — do not print the

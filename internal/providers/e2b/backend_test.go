@@ -911,9 +911,9 @@ func TestE2BSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 		rt:  core.Runtime{Stderr: io.Discard},
 	}
 	workspace := workspaceForConfig(backend.cfg, core.Runtime{}).Path()
-	_, _, err := workspaceForConfig(backend.cfg, backend.rt).Sync(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
+	_, _, err := workspaceForConfig(backend.cfg, backend.rt).Bind(client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
 		Repo: core.Repo{Root: root, Name: "repo"},
-	}, workspace)
+	}, workspace).Sync(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -953,9 +953,9 @@ func TestE2BSyncWorkspaceCleansRemoteArchiveWhenExtractFails(t *testing.T) {
 		rt:  core.Runtime{Stderr: io.Discard},
 	}
 	workspace := workspaceForConfig(backend.cfg, core.Runtime{}).Path()
-	_, _, err := workspaceForConfig(backend.cfg, backend.rt).Sync(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
+	_, _, err := workspaceForConfig(backend.cfg, backend.rt).Bind(client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
 		Repo: core.Repo{Root: root, Name: "repo"},
-	}, workspace)
+	}, workspace).Sync(context.Background())
 	if err == nil {
 		t.Fatalf("expected extract failure")
 	}
@@ -995,9 +995,9 @@ func TestE2BSyncDeletePreservesWorkspaceWhenReplacementFails(t *testing.T) {
 			backend := &e2bBackend{rt: core.Runtime{Stderr: io.Discard}}
 			backend.cfg.Sync.Delete = true
 
-			_, _, err := workspaceForConfig(backend.cfg, backend.rt).Sync(t.Context(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
+			_, _, err := workspaceForConfig(backend.cfg, backend.rt).Bind(client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
 				Repo: core.Repo{Root: root, Name: "repo"},
-			}, workspace)
+			}, workspace).Sync(t.Context())
 			if err == nil {
 				t.Fatal("sync unexpectedly succeeded")
 			}
@@ -1022,9 +1022,9 @@ func TestE2BSyncWorkspaceHonorsConfiguredTimeout(t *testing.T) {
 	backend.cfg.Sync.Timeout = 500 * time.Millisecond
 	started := time.Now()
 
-	_, _, err := workspaceForConfig(backend.cfg, backend.rt).Sync(t.Context(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
+	_, _, err := workspaceForConfig(backend.cfg, backend.rt).Bind(client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
 		Repo: core.Repo{Root: root, Name: "repo"},
-	}, "/home/user/repo")
+	}, "/home/user/repo").Sync(t.Context())
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("sync err=%v, want deadline exceeded", err)
 	}
@@ -1047,7 +1047,7 @@ func TestE2BPrepareWorkspaceRejectsUnsafePath(t *testing.T) {
 		cfg: cfg,
 		rt:  core.Runtime{Stderr: io.Discard},
 	}
-	err := workspaceForConfig(backend.cfg, backend.rt).Prepare(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, "/")
+	err := workspaceForConfig(backend.cfg, backend.rt).Bind(client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{}, "/").Ensure(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "too broad") {
 		t.Fatalf("err=%v, want unsafe workspace error", err)
 	}

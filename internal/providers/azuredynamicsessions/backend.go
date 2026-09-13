@@ -84,12 +84,7 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req core.RunReque
 			client, err = newAzureDynamicSessionsClient(ctx, b.cfg, b.rt)
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
-			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-azds-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
-			})
-		},
+		Workspace: func() shared.SandboxWorkspace { return b.workspace(client, leaseID, req, workspace) },
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var err error
 			leaseID, slug, err = b.createSession(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
@@ -112,10 +107,6 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req core.RunReque
 		},
 		// Keep invalid-workspace handling after acquisition, with normal retention.
 		Setup: func(context.Context) error { return workspaceErr },
-		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, client, leaseID, req, workspace, prepared)
-		},
-		NoSync: func(ctx context.Context) error { return b.prepareWorkspace(ctx, client, leaseID, workspace) },
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
 			command, err := buildAzureDynamicSessionsCommand(req.Command, req.ShellMode)
 			if err != nil {

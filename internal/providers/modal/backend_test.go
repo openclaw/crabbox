@@ -327,9 +327,9 @@ func TestSyncWorkspaceCleansRemoteArchiveWhenExtractFails(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repoRoot, "hello.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := backend.syncWorkspace(context.Background(), fake, "sb-123", core.RunRequest{
+	_, _, err := backend.workspace(fake, "sb-123", core.RunRequest{
 		Repo: core.Repo{Name: "repo", Root: repoRoot},
-	}, "/workspace/crabbox")
+	}, "/workspace/crabbox").Sync(context.Background())
 	if err == nil {
 		t.Fatalf("expected extract failure")
 	}
@@ -690,7 +690,7 @@ func TestSyncWorkspaceUsesSharedTimeoutAndStaging(t *testing.T) {
 	cfg.Sync.Timeout = time.Millisecond
 	cfg.Sync.Delete = true
 	backend := NewModalBackend(Provider{}.Spec(), cfg, testRuntime()).(*modalBackend)
-	_, _, err = backend.syncWorkspace(t.Context(), fake, "sb-123", core.RunRequest{Repo: repo}, "/workspace/crabbox", prepared)
+	_, _, err = backend.workspace(fake, "sb-123", core.RunRequest{Repo: repo}, "/workspace/crabbox").Sync(t.Context(), prepared)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected transfer timeout, got %v", err)
 	}

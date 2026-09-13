@@ -85,7 +85,15 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req core.RunRequest) (core.
 			cli, err = newTensorlakeCLI(b.cfg, b.rt)
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) { return b.prepareArchive(ctx, req) },
+		Workspace: func() shared.SandboxWorkspace {
+			return shared.WorkspaceOperations{
+				PrepareArchiveFunc: func(ctx context.Context) (*core.PreparedArchive, error) { return b.prepareArchive(ctx, req) },
+				SyncFunc: func(ctx context.Context, archive *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+					return b.syncWorkspace(ctx, cli, claim.CloudID, req, workdir, archive)
+				},
+				EnsureFunc: func(ctx context.Context) error { return b.prepareWorkspace(ctx, cli, claim.CloudID, workdir) },
+			}
+		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var name string
 			var err error
@@ -114,10 +122,6 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req core.RunRequest) (core.
 			fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, claim.LeaseID, claim.CloudID, workdir)
 			return nil
 		},
-		Sync: func(ctx context.Context, archive *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, cli, claim.CloudID, req, workdir, archive)
-		},
-		NoSync: func(ctx context.Context) error { return b.prepareWorkspace(ctx, cli, claim.CloudID, workdir) },
 		Command: func(ctx context.Context) (shared.DelegatedSandboxCommand, error) {
 			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 			if err != nil {

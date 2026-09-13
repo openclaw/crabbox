@@ -142,12 +142,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req core.RunRequest) (core
 			api, err = b.client()
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
-			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-opensandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
-			})
-		},
+		Workspace: func() shared.SandboxWorkspace { return b.workspace(api, sandboxID, req, workdir) },
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var err error
 			var unlock func()
@@ -218,12 +213,6 @@ func (b *openSandboxBackend) Run(ctx context.Context, req core.RunRequest) (core
 			}
 			fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
 			return nil
-		},
-		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, api, sandboxID, req, workdir, prepared)
-		},
-		NoSync: func(ctx context.Context) error {
-			return b.ensureWorkspace(ctx, api, sandboxID, workdir)
 		},
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
 			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)

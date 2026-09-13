@@ -92,10 +92,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (finalResult cor
 	}
 	var prepared *core.PreparedArchive
 	if req.ID == "" && !req.NoSync {
-		prepared, err = core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-			Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-			TempPattern: "crabbox-cloud-run-sandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
-		})
+		prepared, err = b.workspace(transport, "", req, workdir).PrepareArchive(ctx)
 		if err != nil {
 			return core.RunResult{}, err
 		}
@@ -192,7 +189,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (finalResult cor
 				pendingTiming.SyncPhases = syncPhases
 			}
 			if !req.NoSync {
-				syncPhases, syncDuration, err = b.syncWorkspace(ctx, transport, sandboxID, req, workdir, prepared)
+				syncPhases, syncDuration, err = b.workspace(transport, sandboxID, req, workdir).Sync(ctx, prepared)
 				if req.TimingJSON {
 					pendingTiming.SyncMs = syncDuration.Milliseconds()
 					pendingTiming.SyncPhases = syncPhases
@@ -202,7 +199,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (finalResult cor
 					return core.RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: core.ClockNow(b.rt.Clock).Sub(started), SyncDelegated: true, Session: session}, err
 				}
 				fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-			} else if err := b.ensureWorkspace(ctx, transport, sandboxID, workdir); err != nil {
+			} else if err := b.workspace(transport, sandboxID, req, workdir).Ensure(ctx); err != nil {
 				core.HandleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 				return core.RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: core.ClockNow(b.rt.Clock).Sub(started), SyncDelegated: true, Session: session}, err
 			}

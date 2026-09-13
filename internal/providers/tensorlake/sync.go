@@ -39,7 +39,7 @@ func (b *tensorlakeBackend) syncWorkspace(ctx context.Context, cli *tensorlakeCL
 			return nil, 0, err
 		}
 	}
-	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
+	return (core.ArchiveWorkspace{
 		Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
 		Workdir: workdir, RemoteArchivePrefix: "crabbox-tensorlake-sync-",
 		Provider: providerName, PhaseName: "tensorlake_sync", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
@@ -47,7 +47,7 @@ func (b *tensorlakeBackend) syncWorkspace(ctx context.Context, cli *tensorlakeCL
 			return cli.uploadFile(uploadCtx, sandboxID, archive.File.Name(), remoteArchive)
 		},
 		Exec: func(execCtx context.Context, command string) error { return cli.execShell(execCtx, sandboxID, command) },
-	}, archive)
+	}).Sync(ctx, archive)
 }
 
 func (b *tensorlakeBackend) prepareWorkspace(ctx context.Context, cli *tensorlakeCLI, sandboxID, workdir string) error {

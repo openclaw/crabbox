@@ -107,7 +107,15 @@ func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.
 			client, err = newCloudflareClient(b.cfg, b.rt)
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) { return b.prepareArchive(ctx, req) },
+		Workspace: func() shared.SandboxWorkspace {
+			return shared.WorkspaceOperations{
+				PrepareArchiveFunc: func(ctx context.Context) (*core.PreparedArchive, error) { return b.prepareArchive(ctx, req) },
+				SyncFunc: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+					return b.syncWorkspace(ctx, client, claim.LeaseID, req, workdir, prepared)
+				},
+				EnsureFunc: func(ctx context.Context) error { return b.prepareWorkspace(ctx, client, claim.LeaseID, workdir) },
+			}
+		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			claim, _, err = b.createSandbox(ctx, client, req.Repo, req.RequestedSlug)
 			if err != nil {
@@ -128,10 +136,6 @@ func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.
 			client.useInstanceType(cloudflareClaimInstanceType(claim))
 			return bound(), nil
 		},
-		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, client, claim.LeaseID, req, workdir, prepared)
-		},
-		NoSync: func(ctx context.Context) error { return b.prepareWorkspace(ctx, client, claim.LeaseID, workdir) },
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
 			if req.EnvSummary {
 				core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)

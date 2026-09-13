@@ -463,7 +463,7 @@ func TestExecCommandAndUploadArchive(t *testing.T) {
 	}, "box", "false"); err == nil {
 		t.Fatal("expected non-zero exec shell error")
 	}
-	if err := b.ensureWorkspace(context.Background(), fake, "box", "/tmp/work"); err != nil {
+	if err := b.workspace(fake, "box", core.RunRequest{}, "/tmp/work").Ensure(context.Background()); err != nil {
 		t.Fatalf("ensureWorkspace: %v", err)
 	}
 }

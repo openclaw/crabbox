@@ -674,7 +674,7 @@ func TestSyncWorkspaceStreamsArchiveThroughAllocationExec(t *testing.T) {
 	b, _, stderr := testBackend(t, fake)
 	repo := newNomadRunRepo(t)
 	ready := allocationReadiness{JobID: "job-sync", AllocationID: "alloc-sync", NodeID: "node-1", NodeName: "worker-1", Task: "crabbox"}
-	phases, _, err := b.syncWorkspace(context.Background(), fake, ready, RunRequest{Repo: repo}, b.cfg.Nomad.Workdir)
+	phases, _, err := b.workspace(fake, ready, RunRequest{Repo: repo}, b.cfg.Nomad.Workdir).Sync(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -282,9 +282,9 @@ func TestSyncDeletePreservesWorkspaceWhenReplacementFails(t *testing.T) {
 			backend := testAzureDynamicSessionsBackend()
 			backend.cfg.Sync.Delete = true
 
-			_, _, err := backend.syncWorkspace(t.Context(), fake, "azds-session", core.RunRequest{
+			_, _, err := backend.workspace(fake, "azds-session", core.RunRequest{
 				Repo: core.Repo{Root: newAzureDynamicSessionsSyncTestRepo(t), Name: "repo"},
-			}, workspace)
+			}, workspace).Sync(t.Context())
 			if err == nil {
 				t.Fatal("sync unexpectedly succeeded")
 			}

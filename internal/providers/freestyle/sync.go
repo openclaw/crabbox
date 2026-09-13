@@ -40,7 +40,7 @@ func (b *freestyleBackend) syncWorkspace(ctx context.Context, client freestyleAP
 			return nil, 0, err
 		}
 	}
-	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
+	return (core.ArchiveWorkspace{
 		Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
 		Workdir: workspace, TempPattern: "crabbox-freestyle-sync-*.tgz",
 		RemoteArchiveDir: "/tmp", RemoteArchivePrefix: "crabbox-freestyle-sync-",
@@ -52,7 +52,7 @@ func (b *freestyleBackend) syncWorkspace(ctx context.Context, client freestyleAP
 		Exec: func(ctx context.Context, command string) error {
 			return b.execShell(ctx, client, name, command)
 		},
-	}, prepared)
+	}).Sync(ctx, prepared)
 }
 
 func (b *freestyleBackend) prepareWorkspace(ctx context.Context, client freestyleAPI, name, workspace string) error {

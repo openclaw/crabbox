@@ -75,8 +75,18 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 			client, err = newAPI(b.cfg, b.rt)
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
-			return b.prepareArchive(ctx, req)
+		Workspace: func() shared.SandboxWorkspace {
+			return shared.WorkspaceOperations{
+				PrepareArchiveFunc: func(ctx context.Context) (*core.PreparedArchive, error) {
+					return b.prepareArchive(ctx, req)
+				},
+				SyncFunc: func(ctx context.Context, archive *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+					return b.syncWorkspace(ctx, client, boxID, req, workdir, folder, archive)
+				},
+				EnsureFunc: func(ctx context.Context) error {
+					return b.prepareWorkspace(ctx, client, boxID, folder)
+				},
+			}
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var box boxData
@@ -96,12 +106,6 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 				return shared.DelegatedSandbox{}, err
 			}
 			return session(), nil
-		},
-		Sync: func(ctx context.Context, archive *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, client, boxID, req, workdir, folder, archive)
-		},
-		NoSync: func(ctx context.Context) error {
-			return b.prepareWorkspace(ctx, client, boxID, folder)
 		},
 		Command: func(ctx context.Context) (shared.DelegatedSandboxCommand, error) {
 			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)

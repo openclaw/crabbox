@@ -731,7 +731,7 @@ commits.
 
 Supporting mechanics remain reusable independently: `procjson.Exchange` for
 bounded subprocess JSON, `shared.Poll` for observations, operation locks for
-serialization, `core.RunDelegatedArchiveSync` for staged archive replacement,
+serialization, `core.ArchiveWorkspace` for staged archive replacement,
 and scoped claim helpers for guarded local state. None of these grants native
 resource ownership or proves that canceling transport stopped a remote command.
 
@@ -743,6 +743,16 @@ gap. A sync that prepares its own archive keeps the same deadline continuously
 through archive construction and transfer; manifest planning and guardrails
 remain outside that budget. Both paths close and remove the owned archive on
 success or failure, and remote cleanup keeps its independent bounded context.
+
+`DelegatedSandboxLifecycle.Workspace` returns a `shared.SandboxWorkspace` bound
+to the current resource. Its factory runs before acquisition for local archive
+preparation and after admission for remote operations; constructing a workspace
+must not contact the provider. Ordinary archive transports configure one
+`core.ArchiveWorkspace` with `core.NewArchiveWorkspace`: `PrepareArchive`, `Sync`,
+and `Ensure` share the request, naming, clock, and transfer settings. The adapter
+supplies upload and execution callbacks, optional path validation, and any native
+replacement or cleanup policy. `WorkspaceOperations` supports native injection,
+disk admission checks, or a claim fence around the entire operation.
 
 ## Provider registration
 

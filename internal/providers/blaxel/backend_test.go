@@ -547,7 +547,7 @@ func TestSharedArchiveSyncNativeWorkspace(t *testing.T) {
 					return err
 				}
 			}}
-			_, _, err := b.syncWorkspace(ctx, client, "sbx-owned", core.RunRequest{Repo: repo}, workspace, nil)
+			_, _, err := b.workspace(client, "sbx-owned", core.RunRequest{Repo: repo}, workspace).Sync(ctx, nil)
 			success := scenario == "replace" || scenario == "merge"
 			if (err == nil) != success {
 				t.Fatalf("sync err=%v success=%t", err, success)

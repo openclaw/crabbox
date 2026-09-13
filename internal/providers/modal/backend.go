@@ -88,11 +88,22 @@ func (b *modalBackend) Run(ctx context.Context, req core.RunRequest) (core.RunRe
 			client, err = newModalAPI(b.cfg, b.rt)
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
-			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-modal-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
-			})
+		Workspace: func() shared.SandboxWorkspace {
+			workspace := b.workspace(client, sandboxID, req, workdir)
+			return shared.WorkspaceOperations{
+				PrepareArchiveFunc: workspace.PrepareArchive,
+				SyncFunc: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+					var phases []core.TimingPhase
+					var elapsed time.Duration
+					err := fenced(func() error {
+						var err error
+						phases, elapsed, err = workspace.Sync(ctx, prepared)
+						return err
+					})
+					return phases, elapsed, err
+				},
+				EnsureFunc: func(ctx context.Context) error { return fenced(func() error { return workspace.Ensure(ctx) }) },
+			}
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var err error
@@ -112,19 +123,6 @@ func (b *modalBackend) Run(ctx context.Context, req core.RunRequest) (core.RunRe
 				err = bind()
 			}
 			return handle(), err
-		},
-		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			var phases []core.TimingPhase
-			var elapsed time.Duration
-			err := fenced(func() error {
-				var err error
-				phases, elapsed, err = b.syncWorkspace(ctx, client, sandboxID, req, workdir, prepared)
-				return err
-			})
-			return phases, elapsed, err
-		},
-		NoSync: func(ctx context.Context) error {
-			return fenced(func() error { return b.prepareWorkspace(ctx, client, sandboxID, workdir) })
 		},
 		Command: func(ctx context.Context) (shared.DelegatedSandboxCommand, error) {
 			command, err := buildModalCommand(req.Command, req.ShellMode, workdir)

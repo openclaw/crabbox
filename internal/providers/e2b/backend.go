@@ -101,11 +101,8 @@ func (b *e2bBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResu
 			client, err = newE2BClient(b.cfg, b.rt)
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
-			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-e2b-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
-			})
+		Workspace: func() shared.SandboxWorkspace {
+			return workspaceForConfig(b.cfg, b.rt).Bind(client, session, req, workspace)
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var sandbox shared.EnvdSandbox
@@ -126,12 +123,6 @@ func (b *e2bBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResu
 			var err error
 			session, err = client.ConnectSandbox(ctx, sandboxID, e2bTimeoutSeconds(b.cfg.TTL))
 			return e2bError("connect sandbox", err)
-		},
-		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return workspaceForConfig(b.cfg, b.rt).Sync(ctx, client, session, req, workspace, prepared)
-		},
-		NoSync: func(ctx context.Context) error {
-			return workspaceForConfig(b.cfg, b.rt).Prepare(ctx, client, session, workspace)
 		},
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
 			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)

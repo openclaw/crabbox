@@ -7,47 +7,27 @@ import (
 	"io"
 	"os"
 	"strings"
-	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-func (b *azureDynamicSessionsBackend) syncWorkspace(ctx context.Context, client azureDynamicSessionsAPI, sessionID string, req core.RunRequest, workspace string, prepared ...*core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-	workspace, err := cleanAzureDynamicSessionsWorkspacePath(workspace)
-	if err != nil {
-		return nil, 0, err
+func (b *azureDynamicSessionsBackend) workspace(client azureDynamicSessionsAPI, sessionID string, req core.RunRequest, workdir string) core.ArchiveWorkspace {
+	workspace := core.NewArchiveWorkspace(b.cfg, b.rt, req, providerName, workdir)
+	workspace.TempPattern = "crabbox-azds-sync-*.tgz"
+	workspace.RemoteArchivePrefix = "crabbox-azds-sync-"
+	workspace.CleanWorkdir = cleanAzureDynamicSessionsWorkspacePath
+	workspace.Upload = func(ctx context.Context, remoteArchive string, body io.Reader) error {
+		archive, ok := body.(*os.File)
+		if !ok {
+			return fmt.Errorf("%s sync archive must be a local file", providerName)
+		}
+		return providerError("upload archive", client.UploadFile(ctx, sessionID, archive.Name(), remoteArchive))
 	}
-	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
-		Config:              b.cfg,
-		Repo:                req.Repo,
-		ForceSyncLarge:      req.ForceSyncLarge,
-		Workdir:             workspace,
-		TempPattern:         "crabbox-azds-sync-*.tgz",
-		RemoteArchivePrefix: "crabbox-azds-sync-",
-		PhaseName:           "azure_dynamic_sessions_sync",
-		Provider:            providerName,
-		Stderr:              b.rt.Stderr,
-		Now:                 func() time.Time { return core.ClockNow(b.rt.Clock) },
-		Upload: func(uploadCtx context.Context, remoteArchive string, body io.Reader) error {
-			archive, ok := body.(*os.File)
-			if !ok {
-				return fmt.Errorf("%s sync archive must be a local file", providerName)
-			}
-			return providerError("upload archive", client.UploadFile(uploadCtx, sessionID, archive.Name(), remoteArchive))
-		},
-		Exec: func(execCtx context.Context, command string) error {
-			return b.execShell(execCtx, client, sessionID, command, io.Discard)
-		},
-	}, prepared...)
-}
-
-func (b *azureDynamicSessionsBackend) prepareWorkspace(ctx context.Context, client azureDynamicSessionsAPI, sessionID, workspace string) error {
-	workspace, err := cleanAzureDynamicSessionsWorkspacePath(workspace)
-	if err != nil {
-		return err
+	workspace.Exec = func(ctx context.Context, command string) error {
+		return b.execShell(ctx, client, sessionID, command, io.Discard)
 	}
-	return b.execShell(ctx, client, sessionID, "mkdir -p "+core.ShellQuote(workspace), io.Discard)
+	return workspace
 }
 
 func (b *azureDynamicSessionsBackend) execShell(ctx context.Context, client azureDynamicSessionsAPI, sessionID, command string, stdout io.Writer) error {

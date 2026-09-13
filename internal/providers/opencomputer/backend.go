@@ -81,12 +81,7 @@ func (b *openComputerBackend) Run(ctx context.Context, req core.RunRequest) (cor
 			api, err = newOCAPIClient(b.cfg, b.rt)
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
-			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-opencomputer-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
-			})
-		},
+		Workspace: func() shared.SandboxWorkspace { return b.workspace(api, sandboxID, req, workdir) },
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var err error
 			leaseID, sandboxID, slug, err = b.createSandbox(ctx, api, req.Repo, req.Reclaim, req.RequestedSlug)
@@ -114,12 +109,6 @@ func (b *openComputerBackend) Run(ctx context.Context, req core.RunRequest) (cor
 				return shared.DelegatedSandbox{}, err
 			}
 			return boundSandbox(), nil
-		},
-		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, api, sandboxID, req, workdir, prepared)
-		},
-		NoSync: func(ctx context.Context) error {
-			return b.ensureWorkspace(ctx, api, sandboxID, workdir)
 		},
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
 			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)

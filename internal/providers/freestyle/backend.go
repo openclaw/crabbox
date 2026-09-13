@@ -104,7 +104,15 @@ func (b *freestyleBackend) Run(ctx context.Context, req core.RunRequest) (core.R
 			client, err = newFreestyleClient(b.cfg, b.rt)
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) { return b.prepareArchive(ctx, req) },
+		Workspace: func() shared.SandboxWorkspace {
+			return shared.WorkspaceOperations{
+				PrepareArchiveFunc: func(ctx context.Context) (*core.PreparedArchive, error) { return b.prepareArchive(ctx, req) },
+				SyncFunc: func(ctx context.Context, archive *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+					return b.syncWorkspace(ctx, client, name, req, archive)
+				},
+				EnsureFunc: func(ctx context.Context) error { return b.prepareWorkspace(ctx, client, name, workspace) },
+			}
+		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var err error
 			leaseID, name, slug, err = b.createSandbox(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
@@ -127,10 +135,6 @@ func (b *freestyleBackend) Run(ctx context.Context, req core.RunRequest) (core.R
 			fmt.Fprintf(b.rt.Stderr, "provider=freestyle lease=%s sandbox=%s\n", leaseID, name)
 			return nil
 		},
-		Sync: func(ctx context.Context, archive *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, client, name, req, archive)
-		},
-		NoSync: func(ctx context.Context) error { return b.prepareWorkspace(ctx, client, name, workspace) },
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
 			if req.EnvSummary {
 				core.PrintEnvForwardingSummary(b.rt.Stderr, freestyleProvider, "forwarded", req.Options.EnvAllow, req.Env)
