@@ -1362,6 +1362,8 @@ export function portalVNC(
       let collaborationRequest = 0;
       let statusPending = false;
       let controlPending = false;
+      const collaborationControllers = new Set();
+      const collaborationTimeoutMs = 10000;
       let takeControlAttempted = false;
       let credentialsSent = false;
       let authenticationFailed = false;
@@ -1383,6 +1385,7 @@ export function portalVNC(
       function retireConnection() {
         connectionEpoch += 1;
         collaborationRequest += 1;
+        for (const controller of collaborationControllers) controller.abort();
         connected = false;
         isController = false;
         statusPending = false;
@@ -1426,6 +1429,29 @@ export function portalVNC(
           return fallback;
         }
       }
+      async function collaborationOperation(operation) {
+        const controller = new AbortController();
+        collaborationControllers.add(controller);
+        let timedOut = false;
+        // Coalesced requests must release their slot even if headers or the body
+        // stall. Retirement aborts transport; epochs still fence obsolete replies.
+        const timer = window.setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, collaborationTimeoutMs);
+        try {
+          const result = await operation(controller.signal);
+          // A JSON fallback must not convert a cancelled takeover into success.
+          if (controller.signal.aborted) throw new Error("WebVNC collaboration request cancelled");
+          return result;
+        } catch (error) {
+          if (timedOut) throw new Error("WebVNC collaboration request timed out; try again");
+          throw error;
+        } finally {
+          window.clearTimeout(timer);
+          collaborationControllers.delete(controller);
+        }
+      }
       function fallbackCopyText(text) {
         const ta = document.createElement("textarea");
         ta.value = text;
@@ -1451,15 +1477,17 @@ export function portalVNC(
       }
       async function bridgeState() {
         try {
-          const response = await fetch(statusURL, { cache: "no-store" });
-          if (response.ok) {
-            return await response.json();
-          }
-          const message = await responseMessage(response, "WebVNC bridge unavailable");
-          if (terminalStatusCodes.has(response.status)) {
-            return { terminal: true, message };
-          }
-          return { transient: true, message };
+          return await collaborationOperation(async (signal) => {
+            const response = await fetch(statusURL, { cache: "no-store", signal });
+            if (response.ok) {
+              return await response.json();
+            }
+            const message = await responseMessage(response, "WebVNC bridge unavailable");
+            if (terminalStatusCodes.has(response.status)) {
+              return { terminal: true, message };
+            }
+            return { transient: true, message };
+          });
         } catch (error) {
           return { transient: true, message: error instanceof Error ? error.message : String(error) };
         }
@@ -1522,12 +1550,16 @@ export function portalVNC(
         const request = ++collaborationRequest;
         controlPending = true;
         try {
-          const response = await fetch(controlURL, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ viewerID }),
+          const { response, state } = await collaborationOperation(async (signal) => {
+            const response = await fetch(controlURL, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ viewerID }),
+              signal,
+            });
+            const state = await response.json().catch(() => ({}));
+            return { response, state };
           });
-          const state = await response.json().catch(() => ({}));
           if (!connected || epoch !== connectionEpoch || request !== collaborationRequest) return;
           if (!response.ok) throw new Error(state.message || "takeover failed");
           applyCollaborationState(state);

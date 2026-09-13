@@ -11,6 +11,18 @@ function settle() {
   return new Promise<void>((resolve) => setImmediate(resolve));
 }
 
+function abortable<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return operation();
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    if (signal.aborted) return abort();
+    signal.addEventListener("abort", abort, { once: true });
+    operation()
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", abort));
+  });
+}
+
 class Element {
   value = "";
   hidden = true;
@@ -28,7 +40,11 @@ class Element {
   }
 }
 
-async function viewer(target: TargetOS = "linux", desktopEnv = "wayland") {
+async function viewer(
+  target: TargetOS = "linux",
+  desktopEnv = "wayland",
+  initialStatus?: () => Promise<State>,
+) {
   const page = await portalVNC({
     id: "cbx_sizing",
     provider: "hetzner",
@@ -75,17 +91,21 @@ async function viewer(target: TargetOS = "linux", desktopEnv = "wayland") {
     }
   }
   let state: State = { viewerRole: "observer", controllerID: "other" };
-  let statusReply: (() => Promise<State>) | undefined;
+  let statusReply = initialStatus;
+  let statusFetch: (() => Promise<void>) | undefined;
   let controlReply: (() => Promise<State>) | undefined;
   let controlFetch: (() => Promise<void>) | undefined;
   let controlCalls = 0;
   const intervals = new Map<number, () => unknown>();
+  const timeouts = new Map<number, { callback: () => unknown; delay: number }>();
+  const signals: AbortSignal[] = [];
   let timerID = 0;
   const context = createContext({
     FakeRFB,
     URL,
     URLSearchParams,
     crypto,
+    AbortController,
     document: {
       getElementById: (id: string) => elements.get(id) ?? null,
       body: { dataset: {} },
@@ -100,31 +120,45 @@ async function viewer(target: TargetOS = "linux", desktopEnv = "wayland") {
       },
       history: { state: null },
       addEventListener() {},
-      clearTimeout() {},
-      setTimeout: () => ++timerID,
+      clearTimeout: (id: number) => timeouts.delete(id),
+      setTimeout: (callback: () => unknown, delay: number) => {
+        timeouts.set(++timerID, { callback, delay });
+        return timerID;
+      },
       setInterval: (callback: () => unknown) => {
         intervals.set(++timerID, callback);
         return timerID;
       },
       clearInterval: (id: number) => intervals.delete(id),
     },
-    fetch: async (url: URL) => {
+    fetch: async (url: URL, options?: { signal?: AbortSignal }) => {
+      const signal = options?.signal;
+      if (signal) signals.push(signal);
       if (url.pathname.endsWith("/control")) {
         controlCalls++;
-        await controlFetch?.();
+        await abortable(async () => controlFetch?.(), signal);
         return {
           ok: true,
-          json: async () =>
-            controlReply ? controlReply() : { viewerRole: "controller", controllerID: "self" },
+          json: () =>
+            abortable(
+              async () =>
+                controlReply ? controlReply() : { viewerRole: "controller", controllerID: "self" },
+              signal,
+            ),
         };
       }
+      await abortable(async () => statusFetch?.(), signal);
       return {
         ok: true,
-        json: async () => ({
-          bridgeConnected: true,
-          availableViewerSlots: 1,
-          ...(statusReply ? await statusReply() : state),
-        }),
+        json: () =>
+          abortable(
+            async () => ({
+              bridgeConnected: true,
+              availableViewerSlots: 1,
+              ...(statusReply ? await statusReply() : state),
+            }),
+            signal,
+          ),
       };
     },
   });
@@ -141,6 +175,9 @@ async function viewer(target: TargetOS = "linux", desktopEnv = "wayland") {
     holdStatus: (reply?: () => Promise<State>) => {
       statusReply = reply;
     },
+    holdStatusFetch: (reply?: () => Promise<void>) => {
+      statusFetch = reply;
+    },
     holdControl: (reply?: () => Promise<State>) => {
       controlReply = reply;
     },
@@ -148,6 +185,15 @@ async function viewer(target: TargetOS = "linux", desktopEnv = "wayland") {
       controlFetch = reply;
     },
     controlCalls: () => controlCalls,
+    signals,
+    expireRequests: async () => {
+      for (const [id, timer] of timeouts) {
+        if (timer.delay !== 10000) continue;
+        timeouts.delete(id);
+        timer.callback();
+      }
+      await settle();
+    },
     poll: async () => {
       for (const callback of intervals.values()) callback();
       await settle();
@@ -287,6 +333,79 @@ describe("emitted WebVNC sizing policy", () => {
     await v.connect();
     reject(new Error("obsolete failure"));
     await takeover;
+    expect(v.elements.get("status")!.textContent).toBe("connected");
+    expect(v.clients[1]!.resizeSession).toBe(false);
+  });
+
+  it("recovers from a stalled initial bridge body", async () => {
+    const v = await viewer("linux", "wayland", () => new Promise(() => {}));
+    expect(v.clients).toHaveLength(0);
+    await v.expireRequests();
+    expect(v.elements.get("status")!.textContent).toContain("timed out");
+    v.holdStatus();
+    await v.reconnect();
+    await v.connect();
+    expect(v.clients).toHaveLength(1);
+  });
+
+  it.each(["headers", "body"])("recovers polling after stalled status %s", async (stage) => {
+    const v = await viewer();
+    await v.connect();
+    if (stage === "headers") v.holdStatusFetch(() => new Promise(() => {}));
+    else v.holdStatus(() => new Promise(() => {}));
+    await v.poll();
+    const signal = v.signals.at(-1)!;
+    await v.expireRequests();
+    expect(signal.aborted).toBe(true);
+    v.holdStatusFetch();
+    v.holdStatus();
+    v.setState({ viewerRole: "controller", controllerID: "self" });
+    await v.poll();
+    expect(v.clients[0]!.resizeSession).toBe(true);
+  });
+
+  it.each(["headers", "body"])(
+    "recovers polling and takeover after stalled control %s",
+    async (stage) => {
+      const v = await viewer();
+      await v.connect();
+      if (stage === "headers") v.holdControlFetch(() => new Promise(() => {}));
+      else v.holdControl(() => new Promise(() => {}));
+      const takeover = v.elements.get("vnc-takeover")!.fire("click");
+      await v.settle();
+      await v.expireRequests();
+      await takeover;
+      expect(v.elements.get("status")!.textContent).toContain("timed out");
+      v.holdControlFetch();
+      v.holdControl();
+      v.setState({ viewerRole: "controller", controllerID: "self" });
+      await v.poll();
+      expect(v.clients[0]!.resizeSession).toBe(true);
+      v.setState({ viewerRole: "observer", controllerID: "other" });
+      await v.poll();
+      await v.elements.get("vnc-takeover")!.fire("click");
+      expect(v.controlCalls()).toBe(2);
+      expect(v.clients[0]!.resizeSession).toBe(true);
+    },
+  );
+
+  it("aborts pending status and control transports when retiring a connection", async () => {
+    const v = await viewer();
+    await v.connect();
+    v.holdStatus(() => new Promise(() => {}));
+    await v.poll();
+    const statusSignal = v.signals.at(-1)!;
+    v.holdControlFetch(() => new Promise(() => {}));
+    const takeover = v.elements.get("vnc-takeover")!.fire("click");
+    await v.settle();
+    const controlSignal = v.signals.at(-1)!;
+    v.holdStatus();
+    v.holdControlFetch();
+    await v.reconnect();
+    await takeover;
+    expect(statusSignal.aborted).toBe(true);
+    expect(controlSignal.aborted).toBe(true);
+    await v.connect();
     expect(v.elements.get("status")!.textContent).toBe("connected");
     expect(v.clients[1]!.resizeSession).toBe(false);
   });
