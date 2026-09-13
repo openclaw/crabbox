@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -100,10 +99,6 @@ func newBridgeClient(cfg core.Config, rt core.Runtime) *bridgeClient {
 	return &bridgeClient{cfg: cfg, rt: rt}
 }
 
-func (c *bridgeClient) CreateSandbox(ctx context.Context, metadata map[string]string) (bridgeSandboxSummary, error) {
-	return bridgeSandboxSummary{}, provisioningUnsupported()
-}
-
 func (c *bridgeClient) ListSandboxes(ctx context.Context) ([]bridgeSandboxSummary, error) {
 	resp, err := c.RoundTrip(ctx, bridgeRequest{Action: "list"})
 	if err != nil {
@@ -160,16 +155,6 @@ func bridgeResponseError(action string, resp bridgeResponse) error {
 		class:  strings.TrimSpace(core.Blank(resp.Error.Class, resp.Class)),
 		msg:    strings.TrimSpace(resp.Error.Message),
 	}
-}
-
-func isCUANotFound(err error) bool {
-	var actionErr *bridgeActionError
-	if !errors.As(err, &actionErr) {
-		return false
-	}
-	class := strings.ToLower(strings.TrimSpace(actionErr.class))
-	code := strings.ToLower(strings.TrimSpace(actionErr.code))
-	return class == "not_found" || code == "not_found" || code == "notfound" || code == "notfounderror" || code == "sandboxnotfounderror"
 }
 
 func (c *bridgeClient) RoundTrip(ctx context.Context, req bridgeRequest) (bridgeResponse, error) {
