@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Match Linux portal desktops to the viewer window with controller-only resize requests, bounded collaboration requests, and a Fit opt-out; use resize-capable TigerVNC for new local-container and public-installer XFCE desktops, preserve direct SSH's local-scaling default and the installer's fixed-size 8-bit mode, and surface Wayland sizing ownership limits. [PR 2075](https://github.com/openclaw/crabbox/pull/2075). Thanks @vincentkoc.
+- Match Linux portal desktops to the viewer window with controller-only resize requests, bounded collaboration requests, and a Fit opt-out; use resize-capable TigerVNC for new local-container and public-installer XFCE desktops, retire the stopped legacy exporter's failure marker on upgrade, preserve direct SSH's local-scaling default and the installer's fixed-size 8-bit mode, and surface Wayland sizing ownership limits. [PR 2075](https://github.com/openclaw/crabbox/pull/2075). Thanks @vincentkoc.
 
 ## 0.58.0 - 2026-09-12
 

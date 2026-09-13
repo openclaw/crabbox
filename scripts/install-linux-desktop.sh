@@ -251,6 +251,9 @@ WantedBy=multi-user.target
 EOF
   elif systemctl cat crabbox-x11vnc.service >/dev/null 2>&1; then
     systemctl disable --now crabbox-x11vnc.service
+    # x11vnc can exit 2 on SIGTERM. Clear only this successfully stopped,
+    # retired unit's failure marker; live exporter failures must remain visible.
+    systemctl reset-failed crabbox-x11vnc.service
   fi
   systemctl daemon-reload
   systemctl enable "${services[@]}"

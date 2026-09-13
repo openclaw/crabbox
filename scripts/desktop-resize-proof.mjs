@@ -420,6 +420,16 @@ async function loopback(name) {
   proof.cases.push({ name: `${name}_loopback`, passed: true });
 }
 
+async function retiredExporter(name) {
+  const state = await run("obsolete_exporter", "systemctl", ["show", "crabbox-x11vnc.service",
+    "--property=ActiveState,SubState,UnitFileState,MainPID,ControlPID,NRestarts"]);
+  check(state.trim().split("\n").sort().join("\n") ===
+    "ActiveState=inactive\nControlPID=0\nMainPID=0\nNRestarts=0\nSubState=dead\nUnitFileState=disabled", "obsolete_exporter_not_retired");
+  await host("obsolete_exporter_absent", "bash", "-c",
+    'if pgrep -x x11vnc >/dev/null; then exit 1; else test "$?" -eq 1; fi');
+  proof.cases.push({ name: `${name}_obsolete_exporter`, inactive: true, disabled: true, noProcess: true, restarts: 0 });
+}
+
 async function dependencyIdentity(exec, name, legacy = false) {
   // The installer source is release-pinned; distro packages are current. Bind
   // the actual server and noVNC bytes separately instead of claiming old packages.
@@ -432,15 +442,25 @@ async function dependencyIdentity(exec, name, legacy = false) {
     return { file: files[index], sha256: line.slice(0, 64) };
   });
   proof.cases.push({ name: `${name}_dependencies`, identities });
+  if (legacy) {
+    const versions = {};
+    for (const pkg of ["systemd", "x11vnc"]) {
+      const version = (await exec("dependency_version", "dpkg-query", "--show", "--showformat=${Version}", pkg)).trim();
+      check(/^[0-9][0-9A-Za-z.+:~_-]{0,127}$/.test(version), "dependency_version_shape");
+      versions[pkg] = version;
+    }
+    proof.cases.push({ name: `${name}_package_versions`, versions });
+  }
 }
 
 async function desktopServiceState() {
   const units = ["crabbox-xvfb.service", "crabbox-desktop.service", "crabbox-x11vnc.service"];
   const text = await run("desktop_service_state", "systemctl", ["show", ...units,
-    "--property=Id,ActiveState,SubState,Result,ExecMainStatus,NRestarts"], 5000);
+    "--property=Id,ActiveState,SubState,UnitFileState,Result,ExecMainStatus,NRestarts,MainPID,ControlPID"], 5000);
   const enums = {
     ActiveState: ["active", "inactive", "activating", "deactivating", "failed", "reloading", "maintenance"],
     SubState: ["running", "dead", "failed", "auto-restart", "start", "start-pre", "start-post", "stop", "stop-sigterm", "stop-sigkill", "stop-post", "exited"],
+    UnitFileState: ["enabled", "disabled", "static", "masked", "enabled-runtime", "masked-runtime", "not-found"],
     Result: ["success", "exit-code", "signal", "core-dump", "timeout", "watchdog", "exec-condition", "start-limit-hit", "resources", "oom-kill", "protocol"],
   };
   const records = text.trim().split(/\n\n+/).map((block) => Object.fromEntries(block.split("\n").map((line) => {
@@ -452,7 +472,7 @@ async function desktopServiceState() {
   return records.map((record) => {
     const result = { unit: record.Id };
     for (const [key, values] of Object.entries(enums)) result[key] = values.includes(record[key]) ? record[key] : "unknown";
-    for (const key of ["ExecMainStatus", "NRestarts"]) {
+    for (const key of ["ExecMainStatus", "NRestarts", "MainPID", "ControlPID"]) {
       const value = Number(record[key]);
       result[key] = /^\d+$/.test(record[key]) && Number.isSafeInteger(value) ? value : null;
     }
@@ -539,8 +559,7 @@ try {
     await run("install_desktop", "sudo", ["-n", "bash", path.join(root, "scripts/install-linux-desktop.sh")], 12 * 60_000);
     await run("installer_services", "systemctl", ["is-active", "--quiet", "crabbox-xvfb.service", "crabbox-desktop.service"]);
     await host("installer_tigervnc_running", "pgrep", "-x", "Xtigervnc");
-    const obsolete = await run("obsolete_exporter", "systemctl", ["show", "crabbox-x11vnc.service", "--property=ActiveState,UnitFileState"]);
-    check(obsolete.trim().split("\n").sort().join("\n") === "ActiveState=inactive\nUnitFileState=disabled", "obsolete_exporter_active");
+    await retiredExporter("installer-upgrade");
     await loopback("installer-upgrade");
     await dependencyIdentity(host, "installer-upgrade");
     installedURL.searchParams.set("password", (await run("upgrade_credential", "sudo", ["-n", "cat", "/var/lib/crabbox/vnc.password"])).trim());
@@ -550,6 +569,7 @@ try {
     await host("installer_reset", "sudo", "-n", "/bin/bash", "/usr/local/bin/crabbox-start-desktop");
     await run("reset_services", "systemctl", ["is-active", "--quiet", "crabbox-xvfb.service", "crabbox-desktop.service"]);
     await host("reset_tigervnc_running", "pgrep", "-x", "Xtigervnc");
+    await retiredExporter("installer-reset");
     await loopback("installer-reset");
     await authentication(installedURL, host, "installer-reset");
     await exercise(installedURL, host, "installer-reset", true);

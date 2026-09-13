@@ -110,14 +110,35 @@ test("public Linux desktop readiness requires every selected service", () => {
 	}
 });
 
-test("public Linux desktop fails if an existing fixed-size VNC service cannot stop", () => {
-	const result = spawnSync("bash", ["-c", `
-		source "$1"
-		write_managed_file() { cat >/dev/null; }
-		systemctl() { if [[ "$1" == cat ]]; then return 0; fi; return 7; }
-		install_services
-	`, "_", scriptPath], { encoding: "utf8" });
-	assert.equal(result.status, 7, result.stderr);
+test("public Linux desktop retires only the stopped fixed-size exporter before restarting", () => {
+	for (const [depth, failed] of [[24, ""], [24, "disable"], [24, "reset-failed"], [8, ""]]) {
+		const result = spawnSync("bash", ["-c", `
+			source "$1"
+			geometry="1280x720x$2"
+			failed="$3"
+			write_managed_file() { cat >/dev/null; }
+			systemctl() {
+				printf 'SYSTEMCTL %s\\n' "$*"
+				if [[ "$1" == "$failed" ]]; then return 7; fi
+			}
+			install_services
+		`, "_", scriptPath, String(depth), failed], { encoding: "utf8" });
+		assert.equal(result.status, failed ? 7 : 0, result.stderr);
+		const commands = result.stdout.trim().split("\n");
+		if (depth === 8) {
+			assert.doesNotMatch(result.stdout, /SYSTEMCTL (disable|reset-failed)/);
+			assert.match(result.stdout, /SYSTEMCTL restart crabbox-xvfb.service crabbox-desktop.service crabbox-x11vnc.service/);
+		} else {
+			const retired = [
+				"SYSTEMCTL disable --now crabbox-x11vnc.service",
+				"SYSTEMCTL reset-failed crabbox-x11vnc.service",
+				"SYSTEMCTL daemon-reload",
+				"SYSTEMCTL enable crabbox-xvfb.service crabbox-desktop.service",
+				"SYSTEMCTL restart crabbox-xvfb.service crabbox-desktop.service",
+			];
+			assert.deepEqual(commands, retired.slice(0, failed === "disable" ? 1 : failed === "reset-failed" ? 2 : undefined));
+		}
+	}
 });
 
 test("public Linux desktop bootstrap refuses managed symlinks", () => {
