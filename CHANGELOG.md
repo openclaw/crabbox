@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Keep artifact filename matching case-sensitive on macOS when shell glob settings enable `nocaseglob`, while preserving explicit `nocasematch` behavior.
+- Keep artifact filename matching case-sensitive on macOS when shell glob settings enable `nocaseglob`, while preserving explicit `nocasematch` behavior. [PR 2208](https://github.com/openclaw/crabbox/pull/2208).
 
 - Keep portable workspace ownership exclusive when a runner's mkdir reports success after losing a directory-creation race. [PR 2201](https://github.com/openclaw/crabbox/pull/2201).
 
