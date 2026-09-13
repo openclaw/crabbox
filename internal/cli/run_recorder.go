@@ -27,6 +27,7 @@ type runRecorder struct {
 	requestedRunID     string
 	createLeaseID      string
 	createConfig       *Config
+	createCoordinator  *CoordinatorClient
 	createBaseURL      string
 	createErr          error
 	startedAt          time.Time
@@ -40,6 +41,7 @@ type runRecorder struct {
 	leaseSlug          string
 	leaseProvider      string
 	finished           bool
+	terminalAttempted  bool
 	terminalConfirmed  bool
 	warned             bool
 	warnMu             sync.Mutex
@@ -87,10 +89,21 @@ func (r *runRecorder) createRun(ctx context.Context, leaseID string, cfg Config)
 	if r.createConfig == nil {
 		r.createLeaseID = leaseID
 		r.createConfig = &Config{Provider: cfg.Provider, TargetOS: cfg.TargetOS, WindowsMode: cfg.WindowsMode, Class: cfg.Class, ServerType: cfg.ServerType}
+		// Keep terminal bookkeeping on the initiating route and authentication.
+		r.createCoordinator = &CoordinatorClient{
+			BaseURL: r.coord.BaseURL, Token: r.coord.Token, Access: r.coord.Access,
+			TokenCommand:     append([]string(nil), r.coord.TokenCommand...),
+			ChildEnvDenylist: append([]string(nil), r.coord.ChildEnvDenylist...),
+			Client:           r.coord.Client,
+			admissionAuth:    &coordinatorAdmissionAuth{},
+		}
 		r.createBaseURL = strings.TrimRight(r.coord.BaseURL, "/")
 		fmt.Fprintf(r.stderr, "run admission attempt %s\n", r.requestedRunID)
 	}
-	run, err := r.coord.CreateRun(ctx, r.requestedRunID, r.createLeaseID, *r.createConfig, r.command, r.label)
+	run, err := r.createCoordinator.CreateRun(ctx, r.requestedRunID, r.createLeaseID, *r.createConfig, r.command, r.label)
+	if binding := r.createCoordinator.admissionAuth; binding != nil {
+		r.diagnosticSecrets = append(r.diagnosticSecrets, strings.TrimPrefix(binding.headers.Get("Authorization"), "Bearer "), binding.headers.Get("CF-Access-Client-Secret"), binding.headers.Get("cf-access-token"))
+	}
 	if err != nil {
 		r.historyUnavailable = true
 		r.createErr = err
@@ -108,11 +121,14 @@ func (r *runRecorder) historyIsUnavailable() bool {
 }
 
 func (r *runRecorder) requireHandle() error {
+	if r != nil && r.finished {
+		return Exit(7, "run admission %s is already finalized; refusing execution", r.requestedRunID)
+	}
 	if r == nil || r.coord == nil || r.runID != "" {
 		return nil
 	}
 	if r.createErr != nil {
-		return Exit(7, "run admission %s unavailable before command: %v", r.requestedRunID, r.createErr)
+		return r.admissionError(r.createErr)
 	}
 	return Exit(7, "run history unavailable before command; refusing execution without a coordinator run handle")
 }
@@ -158,7 +174,7 @@ func (r *runRecorder) AttachLease(ctx context.Context, leaseID, slug string, cfg
 	}
 	if r.runID == "" && r.createPending && r.coord != nil && leaseID != "" {
 		if err := r.createRun(ctx, leaseID, cfg); err != nil {
-			return Exit(7, "run admission %s unavailable before command: %v", r.requestedRunID, err)
+			return r.admissionError(err)
 		}
 	}
 
@@ -263,6 +279,7 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 	if r == nil || r.runID == "" || r.finished {
 		return nil
 	}
+	r.terminalAttempted = true
 	r.waitForEvents(runEventOutputPostWait)
 	r.stopTelemetrySampler()
 	telemetryEnd := collectLeaseTelemetryBestEffort(contextWithoutWorkspaceOwner(ctx), leaseTelemetryCollectorForTarget(target))
@@ -334,7 +351,11 @@ func (r *runRecorder) Failed(err error) {
 	}
 	r.waitForEvents(runEventOutputPostWait)
 	r.stopTelemetrySampler()
-	if r.runID == "" || r.finished || err == nil {
+	if r.finished || err == nil || r.terminalAttempted {
+		return
+	}
+	if r.runID == "" {
+		r.failUnacknowledgedAdmission(err)
 		return
 	}
 	r.finished = true
@@ -343,6 +364,35 @@ func (r *runRecorder) Failed(err error) {
 		Phase:   "failed",
 		Message: err.Error(),
 	})
+}
+
+func (r *runRecorder) failUnacknowledgedAdmission(primary error) {
+	if r.createCoordinator == nil || r.createConfig == nil || r.requestedRunID == "" {
+		return
+	}
+	r.terminalAttempted = true
+	ctx, cancel := context.WithTimeout(context.Background(), runRecorderFinishTimeout)
+	defer cancel()
+	message := r.redactDiagnostic(primary.Error())
+	code := ExitCodeForError(primary, 7)
+	var lastErr error
+	for attempt := 1; attempt <= runRecorderFinishAttempts && ctx.Err() == nil; attempt++ {
+		_, lastErr = r.createCoordinator.FailRunAdmission(ctx, r.requestedRunID, r.createLeaseID, *r.createConfig, r.command, r.label, code, message)
+		if lastErr == nil {
+			r.runID = r.requestedRunID
+			r.finished, r.terminalConfirmed = true, true
+			r.historyUnavailable = false
+			return
+		}
+		if attempt == runRecorderFinishAttempts || !runRecorderFinishRetryable(lastErr) {
+			break
+		}
+		if err := sleepContext(ctx, runRecorderFinishRetry); err != nil {
+			break
+		}
+	}
+	r.historyUnavailable = true
+	r.warnRunHistory("run history finalization unconfirmed for %s: %v; no workload was started; inspect the original run history without replaying the workload", r.requestedRunID, errors.Join(lastErr, ctx.Err()))
 }
 
 func (r *runRecorder) warn(format string, args ...any) {
@@ -364,7 +414,17 @@ func (r *runRecorder) warnRunHistory(format string, args ...any) {
 	}
 	r.warnMu.Lock()
 	defer r.warnMu.Unlock()
-	fmt.Fprintf(r.stderr, "warning: "+format+"\n", args...)
+	fmt.Fprintf(r.stderr, "warning: %s\n", r.redactDiagnostic(fmt.Sprintf(format, args...)))
+}
+
+func (r *runRecorder) admissionError(err error) error {
+	return Exit(7, "%s", r.redactDiagnostic(fmt.Sprintf("run admission %s unavailable before command: %v", r.requestedRunID, err)))
+}
+
+func (r *runRecorder) redactDiagnostic(message string) string {
+	secrets := append([]string(nil), r.diagnosticSecrets...)
+	secrets = append(secrets, configuredDiagnosticSecrets(r.diagnosticConfig)...)
+	return RedactDiagnosticSecrets(message, secrets...)
 }
 
 func (r *runRecorder) recordTelemetrySample(sample *LeaseTelemetry) {
