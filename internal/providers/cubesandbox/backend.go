@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"path"
 	"slices"
 	"strings"
 	"time"
@@ -102,7 +101,7 @@ type cubesandboxBackend struct {
 func (b *cubesandboxBackend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *cubesandboxBackend) Warmup(ctx context.Context, req core.WarmupRequest) error {
-	if err := validateCubeSandboxUser(b.cfg.CubeSandbox.User); err != nil {
+	if _, err := workspaceForConfig(b.cfg, b.rt).ProcessUser(); err != nil {
 		return err
 	}
 	started := core.ClockNow(b.rt.Clock)
@@ -131,7 +130,7 @@ func (b *cubesandboxBackend) Run(ctx context.Context, req core.RunRequest) (core
 	var client shared.EnvdSandboxAPI
 	var processUser, leaseID, sandboxID, slug string
 	var session shared.EnvdSandboxSession
-	workspace := cubesandboxWorkspacePath(b.cfg)
+	workspace := workspaceForConfig(b.cfg, b.rt).Path()
 	boundSandbox := func() shared.DelegatedSandbox {
 		return shared.DelegatedSandbox{LeaseID: leaseID, Slug: slug, CleanupCommand: cubesandboxCleanupCommand(leaseID)}
 	}
@@ -143,7 +142,7 @@ func (b *cubesandboxBackend) Run(ctx context.Context, req core.RunRequest) (core
 				return err
 			}
 			var err error
-			processUser, err = cubesandboxProcessUser(b.cfg.CubeSandbox.User)
+			processUser, err = workspaceForConfig(b.cfg, b.rt).ProcessUser()
 			if err != nil {
 				return err
 			}
@@ -184,10 +183,10 @@ func (b *cubesandboxBackend) Run(ctx context.Context, req core.RunRequest) (core
 			return nil
 		},
 		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, client, session, req, workspace, prepared)
+			return workspaceForConfig(b.cfg, b.rt).Sync(ctx, client, session, req, workspace, prepared)
 		},
 		NoSync: func(ctx context.Context) error {
-			return b.prepareWorkspace(ctx, client, session, workspace)
+			return workspaceForConfig(b.cfg, b.rt).Prepare(ctx, client, session, workspace)
 		},
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
 			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
@@ -396,7 +395,7 @@ func (b *cubesandboxBackend) createSandbox(ctx context.Context, client shared.En
 		return "", shared.EnvdSandbox{}, "", err
 	}
 	cfg := b.cfg
-	workspace, err := cleanCubeSandboxWorkspacePath(cubesandboxWorkspacePath(cfg))
+	workspace, err := shared.CleanPOSIXWorkspacePath("cubesandbox workspace path", workspaceForConfig(cfg, b.rt).Path())
 	if err != nil {
 		return "", shared.EnvdSandbox{}, "", err
 	}
@@ -657,52 +656,6 @@ func cubesandboxTimeoutDuration(ttl time.Duration) time.Duration {
 
 func cubesandboxTimeoutSeconds(ttl time.Duration) int {
 	return durationSecondsCeil(cubesandboxTimeoutDuration(ttl))
-}
-
-func cubesandboxWorkspacePath(cfg core.Config) string {
-	workdir := strings.TrimSpace(cfg.CubeSandbox.Workdir)
-	if workdir == "" {
-		workdir = "crabbox"
-	}
-	if strings.HasPrefix(workdir, "/") {
-		return path.Clean(workdir)
-	}
-	return path.Join(cubesandboxUserHome(cfg.CubeSandbox.User), workdir)
-}
-
-func cubesandboxUserHome(user string) string {
-	user = cubesandboxWorkspaceUser(user)
-	if user == "" {
-		user = "user"
-	}
-	if user == "root" {
-		return "/root"
-	}
-	return path.Join("/home", user)
-}
-
-func cubesandboxWorkspaceUser(user string) string {
-	clean, err := cubesandboxProcessUser(user)
-	if err != nil || clean == "" {
-		return "root"
-	}
-	return clean
-}
-
-func validateCubeSandboxUser(user string) error {
-	_, err := cubesandboxProcessUser(user)
-	return err
-}
-
-func cubesandboxProcessUser(user string) (string, error) {
-	clean := strings.TrimSpace(user)
-	if clean == "" {
-		return "root", nil
-	}
-	if clean == "." || clean == ".." || strings.ContainsAny(clean, `/\`) || strings.ContainsRune(clean, 0) {
-		return "", core.Exit(2, "invalid cubesandbox.user %q: use a login name, not a path", user)
-	}
-	return clean, nil
 }
 
 func rejectCubeSandboxSyncOptions(req core.RunRequest) error {

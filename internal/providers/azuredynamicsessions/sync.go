@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"strings"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func (b *azureDynamicSessionsBackend) syncWorkspace(ctx context.Context, client azureDynamicSessionsAPI, sessionID string, req core.RunRequest, workspace string, prepared ...*core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
@@ -74,19 +74,7 @@ func azureDynamicSessionsWorkspace(cfg core.Config) (string, error) {
 }
 
 func cleanAzureDynamicSessionsWorkspacePath(workspace string) (string, error) {
-	trimmed := strings.TrimSpace(workspace)
-	if trimmed == "" {
-		return "", core.Exit(2, "%s workspace path is empty", providerName)
-	}
-	clean := path.Clean(trimmed)
-	if !strings.HasPrefix(clean, "/") {
-		return "", core.Exit(2, "%s workspace path %q must resolve to an absolute path", providerName, workspace)
-	}
-	switch clean {
-	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/mnt", "/mnt/data", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var", "/workspace":
-		return "", core.Exit(2, "%s workspace path %q is too broad; choose a dedicated subdirectory", providerName, clean)
-	}
-	return clean, nil
+	return shared.CleanPOSIXWorkspacePath("azure-dynamic-sessions workspace path", workspace, "/mnt", "/mnt/data", "/workspace")
 }
 
 func buildAzureDynamicSessionsCommand(command []string, shellMode bool) (string, error) {

@@ -8,6 +8,7 @@
 
 ### Fixes
 
+- Preserve precommand cancellation and operational failure classifications in saved run timing and local history instead of reporting a workload exit. [PR 2217](https://github.com/openclaw/crabbox/pull/2217).
 - Bound artifact discovery to the possible match depth for canonical non-recursive wildcard patterns, preserving selection and recursive glob behavior. [PR 2214](https://github.com/openclaw/crabbox/pull/2214). Thanks @vincentkoc.
 
 ## 0.58.0 - 2026-09-12

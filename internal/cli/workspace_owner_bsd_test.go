@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,17 +24,27 @@ func TestRunFunctionalPreflightContinuation(t *testing.T) {
 		t.Skip("requires the POSIX supervisor fixture")
 	}
 	for _, tc := range []struct {
-		name, state                                          string
-		code                                                 int
-		timeout, canceled, lostAck, lostRetire, cleanedError bool
+		name, state                                                                                         string
+		code, workloadCode                                                                                  int
+		cancelCause                                                                                         error
+		timeout, canceled, lostAck, lostRetire, cleanedError, lateCancel, ownerStoredFailure, ownerDeadline bool
 	}{
 		{name: "ready", state: "ready"},
+		{name: "workload failure", state: "ready", workloadCode: 7},
+		{name: "success with late cancellation", state: "ready", lateCancel: true},
+		{name: "workload failure with late cancellation", state: "ready", workloadCode: 7, lateCancel: true},
 		{name: "missing", state: "missing-python3", code: 20},
 		{name: "venv", state: "venv-unavailable", code: 21},
 		{name: "pip", state: "pip-unavailable", code: 22},
 		{name: "worker", state: "worker-failed", code: 23},
 		{name: "timeout", state: "timed-out", code: 74, timeout: true},
 		{name: "canceled", state: "canceled", canceled: true},
+		{name: "stored owner failure", state: "unavailable", ownerStoredFailure: true},
+		{name: "stored owner timeout", state: "unavailable", ownerStoredFailure: true, ownerDeadline: true},
+		{name: "caller deadline", state: "canceled", canceled: true, cancelCause: context.DeadlineExceeded},
+		{name: "named caller cancellation", state: "canceled", canceled: true, cancelCause: fmt.Errorf("interrupt signal received: %w", context.Canceled)},
+		{name: "operational cancellation cause", state: "unavailable", canceled: true, cancelCause: &workspaceOwnerSetupError{phase: "renew", cause: errors.New("workspace ownership lost")}},
+		{name: "primary operational cause", state: "unavailable", canceled: true, cancelCause: runClassificationTestError{err: fmt.Errorf("workspace ownership lost: %w", context.Canceled), cause: errors.New("workspace ownership lost")}},
 		{name: "unconfirmed acknowledgement", state: "unavailable", lostAck: true},
 		{name: "unconfirmed retirement", state: "unavailable", code: 21, lostRetire: true},
 		{name: "cleaned operational error", state: "unavailable", code: 21, cleanedError: true},
@@ -43,11 +54,26 @@ func TestRunFunctionalPreflightContinuation(t *testing.T) {
 			isolateRunTestUserDirs(t, dir)
 			t.Chdir(dir)
 			logPath := installRecordingSSH(t, dir)
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			if tc.workloadCode != 0 {
+				sshPath := filepath.Join(dir, "ssh")
+				script, err := os.ReadFile(sshPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				script = bytes.Replace(script, []byte("case \"$match\" in"), []byte("case \"$match\" in\n  *cbx-after-functional*) exit "+strconv.Itoa(tc.workloadCode)+" ;;"), 1)
+				if err := os.WriteFile(sshPath, script, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
 			oldRun, oldControl := runOwnedFunctionalPreflight, runFunctionalPreflightControl
 			t.Cleanup(func() { runOwnedFunctionalPreflight, runFunctionalPreflightControl = oldRun, oldControl })
 			controlFailure := errors.New("synthetic owned control transport unavailable")
+			var ownerFailure error = Exit(7, "remote workspace owner renewal failed closed: synthetic stored failure")
+			if tc.ownerDeadline {
+				ownerFailure = errors.Join(ownerFailure, fmt.Errorf("ownership operation: %w", context.DeadlineExceeded))
+			}
 			calls := 0
 			var operationStage string
 			var operationDone <-chan struct{}
@@ -64,7 +90,7 @@ func TestRunFunctionalPreflightContinuation(t *testing.T) {
 				}
 				worker := "printf started >" + shellQuote(filepath.Join(stage, "scratch", "started")) + " || exit 75\n"
 				budget := 10 * time.Second
-				if tc.timeout || tc.canceled || tc.lostAck {
+				if tc.timeout || tc.canceled || tc.lostAck || tc.ownerStoredFailure {
 					worker += "mkfifo " + shellQuote(filepath.Join(stage, "scratch", "wait")) + "\nexec 7<>" + shellQuote(filepath.Join(stage, "scratch", "wait")) + "\ntrap 'exit 0' TERM\nwhile :; do read -r -t 1 -u 7 ignored || :; done\n"
 					if tc.timeout {
 						budget = time.Second
@@ -130,7 +156,7 @@ func TestRunFunctionalPreflightContinuation(t *testing.T) {
 				}
 				cleanupCtx, stop := functionalPreflightCleanupBudget(probeCtx)
 				defer stop()
-				if tc.canceled || tc.lostAck {
+				if tc.canceled || tc.lostAck || tc.ownerStoredFailure {
 					limit := time.Now().Add(5 * time.Second)
 					for {
 						if _, err := os.Stat(filepath.Join(stage, "scratch", "started")); err == nil {
@@ -141,8 +167,24 @@ func TestRunFunctionalPreflightContinuation(t *testing.T) {
 						}
 						time.Sleep(10 * time.Millisecond)
 					}
-					if tc.canceled {
-						cancel()
+					if tc.ownerStoredFailure || tc.canceled {
+						owner := workspaceOwnerFromContext(probeCtx)
+						if owner == nil || owner.Err() != nil {
+							t.Fatal("fixture requires a healthy acquired workspace owner")
+						}
+						if tc.ownerStoredFailure {
+							// Model the existing stored error + plain cancellation without
+							// changing a remote owner or invoking its renewal transport.
+							owner.mu.Lock()
+							owner.renewErr = ownerFailure
+							owner.mu.Unlock()
+							owner.cancel()
+							if context.Cause(probeCtx) != context.Canceled || ctx.Err() != nil {
+								t.Fatal("owner failure must cancel only its plain child context")
+							}
+						} else {
+							cancel(tc.cancelCause)
+						}
 					} else {
 						return finishFunctionalPreflight(probeCtx, cleanupCtx, target, nonce, controlFailure)
 					}
@@ -155,16 +197,69 @@ func TestRunFunctionalPreflightContinuation(t *testing.T) {
 				return finishFunctionalPreflight(probeCtx, cleanupCtx, target, nonce, runErr)
 			}
 			var stdout, stderr bytes.Buffer
-			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(ctx, []string{"--provider", "ssh", "--static-host", "127.0.0.1", "--static-user", "runner", "--static-work-root", filepath.Join(dir, "remote"), "--no-sync", "--preflight", "--preflight-tools", "python3-venv,python3-venv", "--", "printf", "cbx-after-functional"})
-			blocked := tc.canceled || tc.lostAck || tc.lostRetire || tc.cleanedError
-			if (err != nil) != blocked || calls != 1 {
+			timingPath := filepath.Join(dir, "timing.jsonl")
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommandWithBenchmarkRecord(ctx, []string{"--record-local", "--timing-record", timingPath, "--provider", "ssh", "--static-host", "127.0.0.1", "--static-user", "runner", "--static-work-root", filepath.Join(dir, "remote"), "--no-sync", "--preflight", "--preflight-tools", "python3-venv,python3-venv", "--", "printf", "cbx-after-functional"}, benchmarkRecordContext{OnRecord: func() {
+				if tc.lateCancel {
+					cancel(nil)
+				}
+			}})
+			blocked := tc.canceled || tc.lostAck || tc.lostRetire || tc.cleanedError || tc.ownerStoredFailure
+			if (err != nil) != (blocked || tc.workloadCode != 0) || calls != 1 {
 				t.Fatalf("calls=%d err=%v stderr=%s", calls, err, stderr.String())
 			}
-			if tc.canceled && !errors.Is(err, context.Canceled) {
-				t.Fatalf("cancellation lost: %v", err)
+			if tc.canceled {
+				cause := tc.cancelCause
+				if cause == nil {
+					cause = context.Canceled
+				}
+				if !errors.Is(err, cause) {
+					t.Fatalf("cancellation cause lost: %v", err)
+				}
+				if code := ExitCodeForError(err, 1); code != 1 {
+					t.Fatalf("CLI cancellation exit policy changed: %d", code)
+				}
+			}
+			if tc.ownerStoredFailure {
+				if !errors.Is(err, ownerFailure) || ExitCodeForError(err, 1) != 7 {
+					t.Fatalf("stored owner failure or its exit policy lost: %v", err)
+				}
+				wantStatus, wantKind := RunStatusFailed, RunErrorProvider
+				if tc.ownerDeadline {
+					wantStatus, wantKind = RunStatusTimedOut, RunErrorTimeout
+				}
+				if !errors.Is(err, context.Canceled) || RunStatusForResult(RunResult{}, err) != wantStatus || RunErrorKindForResult(RunResult{}, err) != wantKind {
+					t.Errorf("cleanup joins changed the primary owner classification: %v", err)
+				}
 			}
 			if (tc.lostAck || tc.lostRetire || tc.cleanedError) && !errors.Is(err, controlFailure) {
 				t.Fatalf("control cause lost: %v", err)
+			}
+			wantStatus, wantKind, wantCode := RunStatusSucceeded, RunErrorNone, tc.workloadCode
+			if tc.workloadCode != 0 {
+				wantStatus, wantKind = RunStatusFailed, RunErrorCommandExit
+			}
+			if blocked {
+				wantStatus, wantKind, wantCode = RunStatusFailed, RunErrorProvider, 7
+				if tc.ownerDeadline || tc.canceled && tc.cancelCause == context.DeadlineExceeded {
+					wantStatus, wantKind = RunStatusTimedOut, RunErrorTimeout
+				} else if tc.canceled && tc.state == "canceled" {
+					wantStatus, wantKind = RunStatusCanceled, RunErrorCanceled
+				}
+			}
+			records, readErr := readBenchmarkTimingRecords(timingPath)
+			if readErr != nil || len(records) != 1 {
+				t.Fatalf("timing records=%+v err=%v", records, readErr)
+			}
+			report := records[0].Timing
+			if report.RunStatus != wantStatus || report.ErrorKind != wantKind || report.ExitCode != wantCode || (blocked && report.CommandMs != 0) {
+				t.Errorf("saved timing=%+v want=%s/%s/%d", report, wantStatus, wantKind, wantCode)
+			}
+			local, _, _, readErr := readLocalHistory(report.RunID)
+			if readErr != nil || local.RunStatus != wantStatus || local.ErrorKind != wantKind || local.ExitCode == nil || *local.ExitCode != wantCode || (blocked && local.CommandMs != 0) {
+				t.Errorf("local observation=%+v err=%v want=%s/%s/%d", local, readErr, wantStatus, wantKind, wantCode)
+			}
+			if err != nil && !strings.Contains(local.Diagnostic, err.Error()) {
+				t.Errorf("local observation lost cause: %q, want %v", local.Diagnostic, err)
 			}
 			if tc.lostAck {
 				select {
@@ -199,6 +294,67 @@ func TestRunFunctionalPreflightContinuation(t *testing.T) {
 			want := "remote preflight python3-venv=" + tc.state + " cleanup=" + cleanup
 			if strings.Count(stderr.String(), "remote preflight python3-venv=") != 1 || !strings.Contains(stderr.String(), want) {
 				t.Fatalf("diagnostic wanted %q: %s", want, stderr.String())
+			}
+		})
+	}
+}
+
+func TestFunctionalPreflightOwnerErrorPreservesPrimaryExit(t *testing.T) {
+	ownerErr := Exit(7, "synthetic stored owner failure")
+	for _, code := range []int{0, 23} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			owner := &workspaceOwner{renewErr: ownerErr}
+			var original error = context.Cause(ctx)
+			wantCode := 7
+			if code != 0 {
+				original = errors.Join(Exit(code, "synthetic preflight transport failure"), original)
+				wantCode = code
+			}
+			got := functionalPreflightWithOwnerError(contextWithWorkspaceOwner(ctx, owner), original)
+			got = errors.Join(got, context.DeadlineExceeded)
+			if ExitCodeForError(got, 1) != wantCode {
+				t.Errorf("original public exit code changed: got=%d want=%d", ExitCodeForError(got, 1), wantCode)
+			}
+			if !errors.Is(got, original) || !errors.Is(got, ownerErr) || !errors.Is(got, context.DeadlineExceeded) {
+				t.Fatalf("original, owner, or cleanup error lost: %v", got)
+			}
+			if RunStatusForResult(RunResult{}, got) != RunStatusFailed || RunErrorKindForResult(RunResult{}, got) != RunErrorProvider {
+				t.Fatalf("cleanup join displaced ownership classification: %v", got)
+			}
+		})
+	}
+}
+
+func TestFunctionalPreflightCallerCancellationKeepsOwnerHealthy(t *testing.T) {
+	for _, duringRenewal := range []bool{false, true} {
+		t.Run(fmt.Sprintf("during_renewal=%t", duringRenewal), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			calls := 0
+			owner := &workspaceOwner{
+				ctx: ctx, cancel: cancel, stop: make(chan struct{}), done: make(chan struct{}),
+				transport: workspaceOwnerTransportFunc(func(renewCtx context.Context, req workspaceOwnerRemoteRequest) (string, error) {
+					calls++
+					cancel()
+					if req.Action != workspaceOwnerRenew || renewCtx.Err() != nil {
+						t.Fatal("caller cancellation reached the independent renewal transport")
+					}
+					return "RENEWED", nil
+				}),
+			}
+			ticks := make(chan time.Time, 1)
+			wantCalls := 0
+			if duringRenewal {
+				ticks <- time.Now()
+				wantCalls = 1
+			} else {
+				cancel()
+			}
+			owner.renewLoopWithTicks(ticks, time.Second)
+			if calls != wantCalls || owner.Err() != nil || context.Cause(ctx) != context.Canceled {
+				t.Fatalf("caller stop became owner failure: calls=%d error=%v cause=%v", calls, owner.Err(), context.Cause(ctx))
 			}
 		})
 	}

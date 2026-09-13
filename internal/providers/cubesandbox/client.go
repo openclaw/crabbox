@@ -55,7 +55,7 @@ var newCubeSandboxClient = func(cfg core.Config, rt core.Runtime) (shared.EnvdSa
 	if err != nil {
 		return nil, err
 	}
-	user, err := cubesandboxProcessUser(cfg.CubeSandbox.User)
+	user, err := workspaceForConfig(cfg, rt).ProcessUser()
 	if err != nil {
 		return nil, err
 	}

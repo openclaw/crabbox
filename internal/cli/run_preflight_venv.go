@@ -29,6 +29,26 @@ var runOwnedFunctionalPreflight = func(ctx context.Context, target SSHTarget, wo
 	return runPOSIXFunctionalPreflight(ctx, target, workdir, env, envFiles)
 }
 
+type functionalPreflightOwnerError struct {
+	err   error
+	cause error
+}
+
+func (e functionalPreflightOwnerError) Error() string                 { return e.err.Error() }
+func (e functionalPreflightOwnerError) Unwrap() error                 { return e.err }
+func (e functionalPreflightOwnerError) RunClassificationCause() error { return e.cause }
+
+func functionalPreflightWithOwnerError(ctx context.Context, err error) error {
+	if owner := workspaceOwnerFromContext(ctx); owner != nil {
+		if ownerErr := owner.Err(); ownerErr != nil {
+			// Renewal stores its error separately before canceling the plain
+			// context. Keep that provenance through subsequent cleanup joins.
+			return functionalPreflightOwnerError{err: errors.Join(err, ownerErr), cause: ownerErr}
+		}
+	}
+	return err
+}
+
 func functionalPreflightDiagnostic(ctx context.Context, completion functionalPreflightCompletion, err error) string {
 	cleanup := "unconfirmed"
 	if completion.WorkerQuiesced && completion.ScratchRemoved && completion.StageRetired {
@@ -38,8 +58,16 @@ func functionalPreflightDiagnostic(ctx context.Context, completion functionalPre
 	if err != nil || cleanup != "confirmed" {
 		state = "unavailable"
 	}
-	if ctx.Err() != nil {
-		state = "canceled"
+	// An ownership timeout is an unavailable operation, not a caller stop.
+	_, ownerFailed := err.(functionalPreflightOwnerError)
+	if ctx.Err() != nil && !ownerFailed {
+		// Caller deadlines are stops too; only the owner reports probe timeout.
+		switch RunStatusForResult(RunResult{}, context.Cause(ctx)) {
+		case RunStatusCanceled, RunStatusTimedOut:
+			state = "canceled"
+		default:
+			state = "unavailable"
+		}
 	} else if state == "canceled" {
 		state = "unavailable"
 	}

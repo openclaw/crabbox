@@ -632,9 +632,14 @@ failure prevents the next workload, even if cleanup is confirmed. In particular,
 `unavailable cleanup=unconfirmed` never permits continuation with an unresolved
 owned stage.
 Caller cancellation remains cancellation (`canceled`), and no later workload
-starts. The probe has a 90-second allowance and an independent 30-second cleanup
-reserve, plus separately bounded transport setup; this is not a promise that the
-whole command finishes within 120 seconds. This functional probe cannot be used
+starts. An expired caller deadline also reports `canceled` in the preflight line;
+`timed-out` identifies expiration of the functional worker allowance. Operational
+ownership failures report `unavailable`. Saved timing and local history retain
+the caller cancellation or deadline classification, and operational preflight
+failures are not reported as workload `command-exit` errors. The probe has a
+90-second allowance and an independent 30-second cleanup reserve, plus separately
+bounded transport setup; this is not a promise that the whole command finishes
+within 120 seconds. This functional probe cannot be used
 as a profile-doctor version-only tool requirement.
 
 `raw_socket` uses `python3`, then `python`, to open and immediately close

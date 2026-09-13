@@ -207,6 +207,7 @@ func printRemoteCapabilityPreflight(ctx context.Context, w io.Writer, cfg Config
 	}
 	if venvRequested {
 		completion, err := runOwnedFunctionalPreflight(ctx, target, workdir, env, envFiles)
+		err = functionalPreflightWithOwnerError(ctx, err)
 		fmt.Fprintf(w, "remote preflight %s\n", functionalPreflightDiagnostic(ctx, completion, err))
 		if err != nil {
 			return err

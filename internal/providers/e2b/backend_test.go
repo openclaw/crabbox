@@ -508,22 +508,22 @@ func TestE2BTemplateAcquisitionAndMetadataDefaultAreDistinct(t *testing.T) {
 }
 
 func TestE2BWorkspacePath(t *testing.T) {
-	if got := e2bWorkspacePath(core.Config{E2B: core.E2BConfig{User: " alice ", Workdir: "  "}}); got != "/home/alice/crabbox" {
+	if got := workspaceForConfig(core.Config{E2B: core.E2BConfig{User: " alice ", Workdir: "  "}}, core.Runtime{}).Path(); got != "/home/alice/crabbox" {
 		t.Fatalf("whitespace/default workspace=%q", got)
 	}
-	if got := e2bWorkspacePath(core.Config{}); got != "/home/user/crabbox" {
+	if got := workspaceForConfig(core.Config{}, core.Runtime{}).Path(); got != "/home/user/crabbox" {
 		t.Fatalf("workspace=%q", got)
 	}
-	if got := e2bWorkspacePath(core.Config{E2B: core.E2BConfig{Workdir: "repo"}}); got != "/home/user/repo" {
+	if got := workspaceForConfig(core.Config{E2B: core.E2BConfig{Workdir: "repo"}}, core.Runtime{}).Path(); got != "/home/user/repo" {
 		t.Fatalf("workspace=%q", got)
 	}
-	if got := e2bWorkspacePath(core.Config{E2B: core.E2BConfig{User: "ubuntu", Workdir: "repo"}}); got != "/home/ubuntu/repo" {
+	if got := workspaceForConfig(core.Config{E2B: core.E2BConfig{User: "ubuntu", Workdir: "repo"}}, core.Runtime{}).Path(); got != "/home/ubuntu/repo" {
 		t.Fatalf("workspace=%q", got)
 	}
-	if got := e2bWorkspacePath(core.Config{E2B: core.E2BConfig{User: "root", Workdir: "repo"}}); got != "/root/repo" {
+	if got := workspaceForConfig(core.Config{E2B: core.E2BConfig{User: "root", Workdir: "repo"}}, core.Runtime{}).Path(); got != "/root/repo" {
 		t.Fatalf("workspace=%q", got)
 	}
-	if got := e2bWorkspacePath(core.Config{E2B: core.E2BConfig{Workdir: "/work/repo"}}); got != "/work/repo" {
+	if got := workspaceForConfig(core.Config{E2B: core.E2BConfig{Workdir: "/work/repo"}}, core.Runtime{}).Path(); got != "/work/repo" {
 		t.Fatalf("workspace=%q", got)
 	}
 }
@@ -544,7 +544,7 @@ func TestE2BProcessUser(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := e2bProcessUser(tt.user)
+			got, err := workspaceForConfig(core.Config{E2B: core.E2BConfig{User: tt.user}}, core.Runtime{}).ProcessUser()
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("err=%v, want %q", err, tt.wantErr)
@@ -597,7 +597,7 @@ func TestCleanE2BWorkspacePath(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := cleanE2BWorkspacePath(tt.workspace)
+			got, err := shared.CleanPOSIXWorkspacePath("e2b workspace path", tt.workspace)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("err=%v, want %q", err, tt.wantErr)
@@ -910,8 +910,8 @@ func TestE2BSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 		cfg: core.Config{E2B: core.E2BConfig{User: "ubuntu", Workdir: "repo"}},
 		rt:  core.Runtime{Stderr: io.Discard},
 	}
-	workspace := e2bWorkspacePath(backend.cfg)
-	_, _, err := backend.syncWorkspace(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
+	workspace := workspaceForConfig(backend.cfg, core.Runtime{}).Path()
+	_, _, err := workspaceForConfig(backend.cfg, backend.rt).Sync(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
 		Repo: core.Repo{Root: root, Name: "repo"},
 	}, workspace)
 	if err != nil {
@@ -952,8 +952,8 @@ func TestE2BSyncWorkspaceCleansRemoteArchiveWhenExtractFails(t *testing.T) {
 		cfg: core.Config{E2B: core.E2BConfig{User: "ubuntu", Workdir: "repo"}},
 		rt:  core.Runtime{Stderr: io.Discard},
 	}
-	workspace := e2bWorkspacePath(backend.cfg)
-	_, _, err := backend.syncWorkspace(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
+	workspace := workspaceForConfig(backend.cfg, core.Runtime{}).Path()
+	_, _, err := workspaceForConfig(backend.cfg, backend.rt).Sync(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
 		Repo: core.Repo{Root: root, Name: "repo"},
 	}, workspace)
 	if err == nil {
@@ -995,7 +995,7 @@ func TestE2BSyncDeletePreservesWorkspaceWhenReplacementFails(t *testing.T) {
 			backend := &e2bBackend{rt: core.Runtime{Stderr: io.Discard}}
 			backend.cfg.Sync.Delete = true
 
-			_, _, err := backend.syncWorkspace(t.Context(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
+			_, _, err := workspaceForConfig(backend.cfg, backend.rt).Sync(t.Context(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
 				Repo: core.Repo{Root: root, Name: "repo"},
 			}, workspace)
 			if err == nil {
@@ -1022,7 +1022,7 @@ func TestE2BSyncWorkspaceHonorsConfiguredTimeout(t *testing.T) {
 	backend.cfg.Sync.Timeout = 500 * time.Millisecond
 	started := time.Now()
 
-	_, _, err := backend.syncWorkspace(t.Context(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
+	_, _, err := workspaceForConfig(backend.cfg, backend.rt).Sync(t.Context(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
 		Repo: core.Repo{Root: root, Name: "repo"},
 	}, "/home/user/repo")
 	if !errors.Is(err, context.DeadlineExceeded) {
@@ -1047,7 +1047,7 @@ func TestE2BPrepareWorkspaceRejectsUnsafePath(t *testing.T) {
 		cfg: cfg,
 		rt:  core.Runtime{Stderr: io.Discard},
 	}
-	err := backend.prepareWorkspace(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, "/")
+	err := workspaceForConfig(backend.cfg, backend.rt).Prepare(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, "/")
 	if err == nil || !strings.Contains(err.Error(), "too broad") {
 		t.Fatalf("err=%v, want unsafe workspace error", err)
 	}

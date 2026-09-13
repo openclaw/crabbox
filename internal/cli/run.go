@@ -1613,6 +1613,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return
 		}
 		report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, ServerSlug(server), timings, time.Since(timings.started), ExitCodeForError(err, 7), actionsURL)
+		// This fallback has no recorded workload outcome; its synthetic exit code
+		// must not classify an operational failure as a workload command exit.
+		if err != nil {
+			report = TimingReportWithRunResult(report, RunResult{}, err)
+		}
 		populateRunTimingMetadata(&report, cfg, repo, server, leaseID, executionRunID, workdir, nil)
 		report.Label = runLabelValue
 		finalTimingReport = &report
