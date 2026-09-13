@@ -37,7 +37,23 @@ var wslStageVerifier string
 var wslWindowsOwner string
 
 //go:embed scripts/wsl-supervisor.sh
-var wslLinuxHelper string
+var wslLinuxTemplate string
+
+//go:embed scripts/guarded-group.sh
+var guardedGroupFunctions string
+
+//go:embed scripts/guarded-workload.sh
+var guardedWorkload string
+
+//go:embed scripts/guarded-members.sh
+var guardedMembers string
+
+var wslLinuxHelper = strings.NewReplacer(
+	"@GUARDED_GROUP_FUNCTIONS@", strings.TrimSuffix(guardedGroupFunctions, "\n"),
+	"@GUARDED_MEMBERS@", strings.TrimSuffix(guardedMembers, "\n"),
+	"@GUARDED_WORKLOAD@", strings.NewReplacer("@WORKLOAD_INIT@", "", "@WORKLOAD_TICK@", "").Replace(strings.TrimSuffix(guardedWorkload, "\n")),
+	"@FUNCTIONAL_PRELUDE@", "", "@FUNCTIONAL_CLEANUP@", "", "@FUNCTIONAL_CLEANUP_POLL@", "", "@FUNCTIONAL_SCRATCH@", "",
+).Replace(wslLinuxTemplate)
 
 // Framework's stdin StreamWriter may emit a UTF-8 preamble. Consume only the
 // declared preamble, then the exact helper; never read ahead into command/input.
@@ -181,13 +197,16 @@ func (p *wslStageCleanupPhase) start() context.Context {
 }
 
 type wslStageSpool struct {
-	setupMarker string
-	input       *replayableSSHInput
-	size        int64
-	expected    [sha256.Size]byte
-	timing      wslStageTiming
-	routeProof  string
-	shell       wslStageShell
+	setupMarker       string
+	input             *replayableSSHInput
+	size              int64
+	expected          [sha256.Size]byte
+	timing            wslStageTiming
+	routeProof        string
+	shell             wslStageShell
+	functionalNonce   string
+	functionalCleanup context.Context
+	functionalCancel  context.CancelFunc
 }
 type wslStageRouteProofKey struct{}
 type retryableWSLStageError struct{ error }
@@ -303,10 +322,14 @@ func wslStageBudget(floor, idle time.Duration, frameBytes int64) time.Duration {
 }
 
 func newWSLStageSpool(command string, payload []byte, source io.ReadSeeker, payloadSize int64, limit sshCommandLimit) (*wslStageSpool, error) {
+	return newWSLStageSpoolWithHelper(command, payload, source, payloadSize, limit, wslLinuxHelper)
+}
+
+func newWSLStageSpoolWithHelper(command string, payload []byte, source io.ReadSeeker, payloadSize int64, limit sshCommandLimit, linuxHelper string) (*wslStageSpool, error) {
 	owner := strings.NewReplacer("@BOOTSTRAP@", psQuote(wslHelperBootstrap),
 		"@STARTUP@", fmt.Sprint(wslStageIdleTimeout.Milliseconds())).Replace(wslWindowsOwner)
-	if len(owner) == 0 || len(wslLinuxHelper) == 0 || len(owner) > wslStageMaxHelper || len(wslLinuxHelper) > wslStageMaxHelper ||
-		!utf8.ValidString(wslLinuxHelper) || strings.ContainsRune(wslLinuxHelper, 0) ||
+	if len(owner) == 0 || len(linuxHelper) == 0 || len(owner) > wslStageMaxHelper || len(linuxHelper) > wslStageMaxHelper ||
+		!utf8.ValidString(linuxHelper) || strings.ContainsRune(linuxHelper, 0) ||
 		len(command) > wslStageMaxCommand || payloadSize < 0 || payloadSize > wslStageMaxSize || limit.execution < 0 {
 		return nil, errors.New("WSL2 envelope exceeds bounded descriptor limits")
 	}
@@ -324,7 +347,7 @@ func newWSLStageSpool(command string, payload []byte, source io.ReadSeeker, payl
 	var descriptor [wslStageHeaderSize]byte
 	copy(descriptor[:], "CBXFLAT2")
 	binary.LittleEndian.PutUint32(descriptor[8:], uint32(len(owner)))
-	binary.LittleEndian.PutUint32(descriptor[12:], uint32(len(wslLinuxHelper)))
+	binary.LittleEndian.PutUint32(descriptor[12:], uint32(len(linuxHelper)))
 	binary.LittleEndian.PutUint64(descriptor[16:], uint64(len(command)))
 	binary.LittleEndian.PutUint64(descriptor[24:], uint64(payloadSize))
 	binary.LittleEndian.PutUint64(descriptor[32:], uint64(timing.operation.Milliseconds()))
@@ -335,7 +358,7 @@ func newWSLStageSpool(command string, payload []byte, source io.ReadSeeker, payl
 	if _, err := io.ReadFull(wslStageEntropy, descriptor[wslStageBlindingOffset:]); err != nil {
 		return nil, errors.New("generate private WSL2 envelope blinding failed")
 	}
-	prefix := append(descriptor[:], []byte(owner+wslLinuxHelper+command)...)
+	prefix := append(descriptor[:], []byte(owner+linuxHelper+command)...)
 	total := int64(len(prefix)) + payloadSize
 	if total > wslStageMaxSize {
 		return nil, errors.New("WSL2 envelope is too large")
@@ -352,7 +375,12 @@ func newWSLStageSpool(command string, payload []byte, source io.ReadSeeker, payl
 	}
 	return spool, nil
 }
-func (s *wslStageSpool) close() error              { return s.input.close() }
+func (s *wslStageSpool) close() error {
+	if s.functionalCancel != nil {
+		s.functionalCancel()
+	}
+	return s.input.close()
+}
 func (s *wslStageSpool) digest() [sha256.Size]byte { return s.expected }
 func (s *wslStageSpool) prefixDigest(ctx context.Context, size int64) (digest [sha256.Size]byte, err error) {
 	if size < 0 || size > s.size {
@@ -396,7 +424,11 @@ func (s *wslStageSpool) run(ctx context.Context, target *SSHTarget, connectTimeo
 	}
 	defer func() {
 		if err != nil {
-			if cleanupErr := cleanupPublishedWSLStage(ctx, *target, nonce, s, wslStageCleanupBudget(ctx), wslStageCanceledCleanupTimeout, connectTimeout); cleanupErr != nil {
+			cleanupCtx := ctx
+			if s.functionalCleanup != nil {
+				cleanupCtx = s.functionalCleanup
+			}
+			if cleanupErr := cleanupPublishedWSLStage(cleanupCtx, *target, nonce, s, wslStageCleanupBudget(cleanupCtx), wslStageCanceledCleanupTimeout, connectTimeout); cleanupErr != nil {
 				err = errors.Join(err, fmt.Errorf("owned WSL2 ready stage cleanup failed: %w", cleanupErr))
 			}
 		}
@@ -414,6 +446,13 @@ func (s *wslStageSpool) run(ctx context.Context, target *SSHTarget, connectTimeo
 	}
 	defer cancel()
 	stdout, stderr, finish := workspaceOwnerSetupStreams(s.setupMarker, stdout, stderr)
+	if s.functionalNonce != "" {
+		s.functionalCleanup, s.functionalCancel = functionalPreflightCleanupBudget(ctx)
+		deadline, _ := s.functionalCleanup.Deadline()
+		boundedCtx, boundedCancel := context.WithDeadline(execCtx, deadline)
+		defer boundedCancel()
+		execCtx = boundedCtx
+	}
 	transport := sshTransportPreparation{command: command}
 	_, err = transport.runOnce(execCtx, *target, connectTimeout, attempts, stdout, stderr, false)
 	if err == nil {
@@ -440,6 +479,9 @@ func requireWSLStageExecutionReserve(ctx context.Context, reserve time.Duration)
 }
 
 func (s *wslStageSpool) stage(ctx context.Context, target *SSHTarget, timing wslStageTiming, connectTimeout, attempts string, stderr io.Writer) (string, error) {
+	if s.functionalNonce != "" && (len(s.functionalNonce) != 32 || strings.Trim(s.functionalNonce, "0123456789abcdef") != "") {
+		return "", errors.New("invalid functional preflight stage identity")
+	}
 	budgets := wslStageRouteBudgets(*target, timing, s.size)
 	budget := budgets.total
 	if timing.reserve > 0 {
@@ -463,6 +505,9 @@ func (s *wslStageSpool) stage(ctx context.Context, target *SSHTarget, timing wsl
 		nonce, nonceErr := randomHex(16)
 		if nonceErr != nil {
 			return "", nonceErr
+		}
+		if s.functionalNonce != "" {
+			nonce = s.functionalNonce
 		}
 		candidateCtx, cancelCandidate := context.WithTimeout(stageCtx, budgets.candidate)
 		timeoutErr := retryableWSLStageError{fmt.Errorf("WSL2 stage candidate timed out: %w", context.DeadlineExceeded)}

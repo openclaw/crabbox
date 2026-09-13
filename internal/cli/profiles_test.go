@@ -1765,6 +1765,13 @@ func TestProfileValidationRejectsWindowsOnlyDoctorTool(t *testing.T) {
 	}
 }
 
+func TestProfileDoctorRejectsFunctionalPreflight(t *testing.T) {
+	err := validateProfileDoctorTools([]string{pythonVenvPreflightTool})
+	if ExitCodeForError(err, 0) != 2 || !strings.Contains(err.Error(), "not supported for POSIX profile doctor") {
+		t.Fatalf("functional run preflight was admitted as a version check: %v", err)
+	}
+}
+
 func TestRemoteProfileDoctorCommandChecksSudoAndDecode(t *testing.T) {
 	got := remoteProfileDoctorCommand("qa", DoctorProfileConfig{Enabled: true, Tools: []string{"sudo"}}, "/work/repo")
 	for _, want := range []string{"base64 -d >", "|| exit 1"} {

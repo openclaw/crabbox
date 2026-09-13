@@ -2146,6 +2146,85 @@ public class HandoffFixture {
     public void GetResult() { }
 }'`
 
+func TestWSLFunctionalPreflightStagesPrivateCommand(t *testing.T) {
+	oldStage, oldControl := stageWSLSpool, runFunctionalPreflightControl
+	t.Cleanup(func() { stageWSLSpool, runFunctionalPreflightControl = oldStage, oldControl })
+	stagingFailure := errors.New("synthetic staging failure")
+	stages := 0
+	stageWSLSpool = func(spool *wslStageSpool, _ context.Context, _ *SSHTarget, timing wslStageTiming, _, _ string, _ io.Writer) (string, error) {
+		stages++
+		if len(spool.functionalNonce) != 32 || strings.Trim(spool.functionalNonce, "0123456789abcdef") != "" {
+			t.Fatal("scratch identity was not caller-bound before staging")
+		}
+		input, err := spool.input.reset()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, helper, command, payload := decodeWSLStage(t, data)
+		if helper != functionalWSLPreflightHelper(90*time.Second) || helper == wslLinuxHelper || len(payload) != 0 {
+			t.Fatal("functional operation lost its supervised helper")
+		}
+		if !strings.Contains(command, "/tmp/crabbox-command-"+spool.functionalNonce+"/scratch") ||
+			!strings.Contains(command, "SYNTHETIC_SETTING=") || !strings.Contains(command, "fixture value") ||
+			!strings.Contains(command, "python3 -I -B -c") {
+			t.Fatal("private command lost its scratch, environment or literal interpreter")
+		}
+		if timing.operation != 116*time.Second || spool.functionalCleanup != nil {
+			t.Fatal("staging consumed the native cleanup clock")
+		}
+		return "", stagingFailure
+	}
+	runFunctionalPreflightControl = func(context.Context, SSHTarget, string, string) ([]byte, error) {
+		t.Fatal("staging failure must not invent Linux cleanup authority")
+		return nil, nil
+	}
+	completion, err := runWSLFunctionalPreflight(t.Context(), SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2},
+		"/work/probe", map[string]string{"SYNTHETIC_SETTING": "fixture value"}, nil)
+	if !errors.Is(err, stagingFailure) || completion != (functionalPreflightCompletion{}) || stages != 1 {
+		t.Fatalf("completion=%+v stages=%d error=%v", completion, stages, err)
+	}
+}
+
+func TestFunctionalPreflightCleanupBudget(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("caller-canceled=%t", canceled), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				cleanupCtx, closeBudget := functionalPreflightCleanupBudget(ctx)
+				defer closeBudget()
+				deadline, ok := cleanupCtx.Deadline()
+				if !ok || time.Until(deadline) != 182*time.Second {
+					t.Fatal("native startup, worker and cleanup budgets were not kept separate")
+				}
+				if canceled {
+					time.Sleep(20 * time.Second)
+					cancel()
+					synctest.Wait()
+					time.Sleep(29 * time.Second)
+				} else {
+					time.Sleep(181 * time.Second)
+				}
+				if cleanupCtx.Err() != nil {
+					t.Fatal("cleanup reserve ended early")
+				}
+				time.Sleep(time.Second)
+				synctest.Wait()
+				if cleanupCtx.Err() == nil {
+					t.Fatal("cleanup reserve was extended")
+				}
+				if canceled && !errors.Is(context.Cause(ctx), context.Canceled) {
+					t.Fatal("caller cancellation changed")
+				}
+			})
+		})
+	}
+}
+
 func TestWSLStageInitialHandoffBudgets(t *testing.T) {
 	t.Run("embedded programs use LF", func(t *testing.T) {
 		for name, program := range map[string]string{

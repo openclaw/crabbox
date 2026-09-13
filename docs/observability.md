@@ -353,7 +353,7 @@ selected provider/target supports hydration.
 
 Preflight is a probe layer, not an installer. Missing tools print
 `tool=missing`; Crabbox does not run `apt install`, `corepack prepare`,
-`bun install`, or any other setup. Install toolchains through Actions hydration,
+`bun install`, or host toolchain setup. Install toolchains through Actions hydration,
 a prebaked image, a devcontainer/Nix/mise/asdf setup, or the uploaded
 script/command itself.
 
@@ -366,6 +366,7 @@ the probe list per run:
 ```sh
 crabbox run --preflight --preflight-tools python,python3 -- python3 -m pytest
 crabbox run --preflight --preflight-tools default,cmake -- cmake --build build
+crabbox run --preflight --preflight-tools default,python3-venv -- python3 -m pytest
 crabbox run --preflight --preflight-tools raw_socket -- ./packet-tests
 ```
 
@@ -373,6 +374,31 @@ The opt-in CMake probe invokes the literal `cmake --version` command on POSIX,
 WSL2, and native Windows targets. It reports only the first output line or
 `cmake=missing`; the result is diagnostic only, so missing CMake does not block
 the workload or trigger installation or upgrades.
+
+The opt-in `python3-venv` probe checks a real disposable environment on Linux,
+macOS and WSL2, not merely the interpreter version or whether `venv` imports.
+It reports `remote preflight python3-venv=<state> cleanup=<confirmed|unconfirmed>`.
+`ready` means the fresh environment's Python and pip succeeded, the probe owner
+confirmed process quiescence and scratch removal, and the caller confirmed exact
+transport-stage retirement. Capability results distinguish `missing-python3`,
+`venv-unavailable` and `pip-unavailable`; other states are `worker-failed`,
+`timed-out`, `canceled` and `unavailable`. `unavailable` means no reliable capability
+result. Cleanup is independent: an operational transport, setup or envelope error
+may remain after confirmed cleanup, yielding `unavailable cleanup=confirmed`.
+Unknown quiescence, scratch removal or stage retirement instead reports
+`cleanup=unconfirmed`; uncertainty is never successful cleanup.
+
+Capability absence, broken capability, worker failure or probe timeout does not
+block the workload when cleanup is confirmed. Operational transport, setup,
+envelope, ownership or cleanup errors prevent the later workload regardless of
+the cleanup flag. `unavailable cleanup=unconfirmed` also fails the run rather than
+continuing with unresolved ownership. Caller cancellation prevents continuation.
+The 90-second probe allowance and
+independent 30-second cleanup reserve exclude separately bounded transport setup,
+so they are not a total-command deadline. No host packages are installed or
+upgraded, and no project environment is activated or reused; pip is seeded only
+inside the disposable environment. See [run preflight](commands/run.md#preflight)
+for selection and target support.
 
 `raw_socket` reports `direct` when the execution user can open and immediately
 close `socket(AF_INET, SOCK_RAW, IPPROTO_RAW)`, `sudo` when only the same

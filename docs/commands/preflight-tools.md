@@ -56,6 +56,26 @@ Unknown names still fail with exit 2 before lease acquisition. Their diagnostic
 points to `crabbox preflight-tools`, and `crabbox run --help` includes the same
 discovery hint. Arbitrary executable names are not accepted.
 
+## Functional Python environment probe
+
+`python3-venv` is opt-in for `linux`, `macos` and `windows/wsl2`, not native
+Windows. It leaves the default list and literal `python`/`python3` version probes
+unchanged. `default,python3-venv,python3-venv` expands the ordered defaults followed
+by one functional probe. Listing it here does not execute it or establish readiness.
+
+The probe creates a disposable pip-enabled environment and invokes its own Python
+and pip. `ready` also requires confirmed worker quiescence, scratch cleanup and
+exact transport-stage retirement. It does not install host tools, activate or
+reuse project environments, or install project packages. Missing or broken
+capability, worker failure and probe timeout are diagnostic only when cleanup is
+confirmed. Unconfirmed cleanup is an operational failure that blocks the next
+workload; confirmed cleanup does not clear an operational transport, setup or
+envelope error (`unavailable cleanup=confirmed`). Caller cancellation is also
+propagated before the workload. See
+[run preflight](run.md#preflight) for every state, cleanup indication and timeout
+budget. This functional probe is not supported by profile-doctor version-only
+requirements.
+
 ## Command contract
 
 `--json` is the only data-output flag; `-h`/`--help` shows help, including when

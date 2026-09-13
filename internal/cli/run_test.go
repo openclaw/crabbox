@@ -6667,6 +6667,246 @@ func TestCMakePreflightLiteralCommandGeneration(t *testing.T) {
 	}
 }
 
+func TestFunctionalPreflightProcessExit(t *testing.T) {
+	value := os.Getenv("CRABBOX_TEST_PREFLIGHT_EXIT")
+	if value == "" {
+		return
+	}
+	code, err := strconv.Atoi(value)
+	if err != nil || code < 1 || code > 255 {
+		t.Fatal("invalid synthetic exit")
+	}
+	os.Exit(code)
+}
+
+func TestFunctionalPreflightCompletionLifecycle(t *testing.T) {
+	const nonce = "0123456789abcdef0123456789abcdef"
+	for _, tc := range []struct {
+		name, state                                                                 string
+		code                                                                        int
+		canceled, partial, retireFailure, joinedFailure, ownerWrapped, ownerFailure bool
+	}{
+		{name: "ready", state: "ready"},
+		{name: "missing", state: "missing-python3", code: 20},
+		{name: "venv", state: "venv-unavailable", code: 21},
+		{name: "pip", state: "pip-unavailable", code: 22},
+		{name: "timeout", state: "timed-out", code: 74},
+		{name: "cleaned worker failure", state: "worker-failed", code: 23},
+		{name: "caller cancellation", state: "canceled", code: 74, canceled: true},
+		{name: "owner canceled with successful transport", state: "canceled"},
+		{name: "missing completion", code: 255, partial: true},
+		{name: "retirement failed", state: "ready", retireFailure: true},
+		{name: "transport failure is not readiness", state: "ready", code: 255},
+		{name: "capability exit with envelope cleanup failure", state: "missing-python3", code: 20, joinedFailure: true},
+		{name: "ordinary workspace owner wrapper", state: "venv-unavailable", code: 21, ownerWrapped: true},
+		{name: "workspace setup error is retained", state: "venv-unavailable", code: 21, ownerFailure: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := runFunctionalPreflightControl
+			t.Cleanup(func() { runFunctionalPreflightControl = old })
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if tc.canceled {
+				cancel()
+			}
+			var runErr error
+			if tc.code != 0 {
+				childCtx, childCancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer childCancel()
+				child := exec.CommandContext(childCtx, os.Args[0], "-test.run=^TestFunctionalPreflightProcessExit$")
+				child.Env = append(os.Environ(), "CRABBOX_TEST_PREFLIGHT_EXIT="+strconv.Itoa(tc.code))
+				runErr = child.Run()
+				if exitCode(runErr) != tc.code {
+					t.Fatalf("synthetic process exit=%v", runErr)
+				}
+				if tc.joinedFailure {
+					runErr = errors.Join(runErr, errors.New("synthetic envelope cleanup failure"))
+				}
+				if tc.ownerWrapped {
+					_, _, finish := workspaceOwnerSetupStreams("synthetic-marker", io.Discard, io.Discard)
+					runErr = finish(runErr)
+				}
+				if tc.ownerFailure {
+					runErr = &workspaceOwnerSetupError{phase: "synthetic", cause: runErr}
+				}
+			}
+			calls := []string{}
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), pythonVenvPreflightCleanupTime)
+			defer cleanupCancel()
+			sharedCleanup := cleanupCtx
+			runFunctionalPreflightControl = func(cleanupCtx context.Context, _ SSHTarget, gotNonce, action string) ([]byte, error) {
+				deadline, ok := cleanupCtx.Deadline()
+				if cleanupCtx != sharedCleanup || gotNonce != nonce || cleanupCtx.Err() != nil || !ok || time.Until(deadline) > pythonVenvPreflightCleanupTime {
+					t.Fatal("cleanup lost its independent bounded operation identity")
+				}
+				calls = append(calls, action)
+				if action == "retire" {
+					if tc.retireFailure {
+						return nil, errors.New("synthetic retirement failure")
+					}
+					return nil, nil
+				}
+				if tc.partial {
+					return []byte("CBX-PREFLIGHT-1\n"), nil
+				}
+				return []byte("CBX-PREFLIGHT-1\n" + nonce + "\n" + tc.state + "\nworker-quiesced\nscratch-removed\ncomplete\n"), nil
+			}
+			got, err := finishFunctionalPreflight(ctx, cleanupCtx, SSHTarget{}, nonce, runErr)
+			wantAction := "observe"
+			if tc.code != 0 || tc.canceled {
+				wantAction = "cancel"
+			}
+			wantCalls := []string{wantAction, "retire"}
+			if tc.partial {
+				wantCalls = wantCalls[:1]
+			}
+			if !reflect.DeepEqual(calls, wantCalls) {
+				t.Fatalf("calls=%v want=%v", calls, wantCalls)
+			}
+			failure := tc.canceled || tc.state == "canceled" || tc.partial || tc.retireFailure || tc.code == 255 || tc.joinedFailure || tc.ownerFailure
+			if (err != nil) != failure {
+				t.Fatalf("completion=%+v error=%v", got, err)
+			}
+			if failure {
+				if got.State != "" {
+					t.Fatalf("failed completion claimed capability: %+v", got)
+				}
+			} else if got.State != tc.state || !got.WorkerQuiesced || !got.ScratchRemoved || !got.StageRetired {
+				t.Fatalf("completion=%+v", got)
+			}
+			if tc.canceled && !errors.Is(err, context.Canceled) {
+				t.Fatal("caller cancellation lost")
+			}
+			if tc.state == "canceled" && !tc.canceled && errors.Is(err, context.Canceled) {
+				t.Fatal("invented caller cancellation")
+			}
+			if (tc.code == 255 || tc.joinedFailure || tc.ownerFailure) && !errors.Is(err, runErr) {
+				t.Fatal("original transport outcome lost")
+			}
+			wantState, wantCleanup := tc.state, "confirmed"
+			if failure {
+				wantState = "unavailable"
+			}
+			if tc.canceled {
+				wantState = "canceled"
+			}
+			if tc.partial || tc.retireFailure {
+				wantCleanup = "unconfirmed"
+			}
+			wantDiagnostic := "python3-venv=" + wantState + " cleanup=" + wantCleanup
+			if got := functionalPreflightDiagnostic(ctx, got, err); got != wantDiagnostic {
+				t.Fatalf("diagnostic=%q want=%q", got, wantDiagnostic)
+			}
+		})
+	}
+}
+
+func TestFunctionalPreflightCompletion(t *testing.T) {
+	const nonce = "0123456789abcdef0123456789abcdef"
+	record := func(state string) string {
+		return "CBX-PREFLIGHT-1\n" + nonce + "\n" + state + "\nworker-quiesced\nscratch-removed\ncomplete\n"
+	}
+	for _, state := range []string{"ready", "missing-python3", "venv-unavailable", "pip-unavailable", "worker-failed", "timed-out", "canceled"} {
+		t.Run(state, func(t *testing.T) {
+			got, err := parseFunctionalPreflightCompletion([]byte(record(state)), nonce)
+			if err != nil || got.State != state || !got.WorkerQuiesced || !got.ScratchRemoved {
+				t.Fatalf("completion=%+v error=%v", got, err)
+			}
+		})
+	}
+	for _, tc := range []struct{ name, value, nonce string }{
+		{"missing", "", nonce},
+		{"partial", strings.TrimSuffix(record("ready"), "complete\n"), nonce},
+		{"other-operation", record("ready"), "abcdef0123456789abcdef0123456789"},
+		{"unknown-protocol", strings.Replace(record("ready"), "CBX-PREFLIGHT-1", "CBX-PREFLIGHT-2", 1), nonce},
+		{"unknown-state", record("finished"), nonce},
+		{"scratch-retained", strings.Replace(record("ready"), "scratch-removed", "scratch-retained", 1), nonce},
+		{"worker-only", "ready\n", nonce},
+		{"trailing-output", record("ready") + "extra\n", nonce},
+		{"oversized", strings.Repeat("x", functionalPreflightCompletionLimit+1), nonce},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseFunctionalPreflightCompletion([]byte(tc.value), tc.nonce)
+			if err == nil || err.Error() != "functional preflight cleanup unconfirmed" || got != (functionalPreflightCompletion{}) {
+				t.Fatalf("completion=%+v error=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestPythonVenvWorkerTemporaryEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX interpreter environment fixture")
+	}
+	root := t.TempDir()
+	tools := filepath.Join(root, "tools")
+	scratch := filepath.Join(root, "scratch")
+	ambient := filepath.Join(root, "ambient")
+	for _, dir := range []string{tools, scratch, ambient} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record, parent := filepath.Join(root, "child"), filepath.Join(root, "parent")
+	// Capture only the literal interpreter's environment/flags; real ensurepip
+	// containment is a separate runtime qualification, not simulated here.
+	writeExecutable(t, filepath.Join(tools, "python3"), "#!/bin/sh\nprintf '%s\\n' \"$TMPDIR\" \"$TMP\" \"$TEMP\" \"$1\" \"$2\" >"+shellQuote(record)+"\n")
+	script := pythonVenvPreflightWorker(scratch) + "\ncode=$?\nprintf '%s\\n' \"$TMPDIR\" \"$TMP\" \"$TEMP\" >" + shellQuote(parent) + "\nexit \"$code\"\n"
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/bash", "-c", script)
+	cmd.Env = []string{"PATH=" + tools, "HOME=" + root, "TMPDIR=" + ambient, "TMP=" + ambient, "TEMP=" + ambient}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("worker environment: %v %s", err, out)
+	}
+	child, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(child) != strings.Repeat(scratch+"\n", 3)+"-I\n-B\n" {
+		t.Fatalf("child environment/flags=%q", child)
+	}
+	after, err := os.ReadFile(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != strings.Repeat(ambient+"\n", 3) {
+		t.Fatalf("caller temporary environment changed: %q", after)
+	}
+}
+
+func TestPythonVenvPreflightSelection(t *testing.T) {
+	if err := validatePreflightTools([]string{"python3-venv"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		target SSHTarget
+		want   string
+	}{
+		{"linux", SSHTarget{TargetOS: targetLinux}, "python3-venv"},
+		{"macos", SSHTarget{TargetOS: targetMacOS}, "python3-venv"},
+		{"wsl2", SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, "python3-venv"},
+		{"native windows", SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := strings.Join(preflightToolsForTarget(tc.target, []string{"python3-venv"}), ","); got != tc.want {
+				t.Fatalf("tools=%q want %q", got, tc.want)
+			}
+		})
+	}
+	for _, tool := range defaultPreflightToolNames {
+		if tool == "python3-venv" {
+			t.Fatal("functional probe became a default")
+		}
+	}
+	got := normalizePreflightToolNames([]string{"default,python3-venv,python3-venv"})
+	want := append(append([]string(nil), defaultPreflightToolNames...), "python3-venv")
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("deduplicated tools=%v want %v", got, want)
+	}
+}
+
 func TestCMakePreflightPOSIXPresentFirstLineAndMissing(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell behavior is covered on non-Windows CI")
@@ -6742,6 +6982,15 @@ func TestCMakePreflightNativeWindowsPresentAndMissing(t *testing.T) {
 }
 
 func TestCMakePreflightUserAndRepositoryConfig(t *testing.T) {
+	testPreflightToolUserAndRepositoryConfig(t, "cmake")
+}
+
+func TestPythonVenvPreflightUserAndRepositoryConfig(t *testing.T) {
+	testPreflightToolUserAndRepositoryConfig(t, "python3-venv")
+}
+
+func testPreflightToolUserAndRepositoryConfig(t *testing.T, tool string) {
+	t.Helper()
 	for _, source := range []string{"user", "repository"} {
 		t.Run(source, func(t *testing.T) {
 			clearConfigEnv(t)
@@ -6763,18 +7012,18 @@ func TestCMakePreflightUserAndRepositoryConfig(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := os.WriteFile(path, []byte("run:\n  preflightTools: [cmake]\n"), 0o600); err != nil {
+			if err := os.WriteFile(path, []byte("run:\n  preflightTools: ["+tool+"]\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			cfg, err := loadConfig()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := strings.Join(cfg.Run.PreflightTools, ","); got != "cmake" {
+			if got := strings.Join(cfg.Run.PreflightTools, ","); got != tool {
 				t.Fatalf("%s run.preflightTools=%q", source, got)
 			}
 			if err := validatePreflightTools(cfg.Run.PreflightTools); err != nil {
-				t.Fatalf("%s cmake config should validate: %v", source, err)
+				t.Fatalf("%s %s config should validate: %v", source, tool, err)
 			}
 		})
 	}

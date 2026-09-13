@@ -152,9 +152,9 @@ func runLogsURL(coord *CoordinatorClient, runID string) string {
 	return strings.TrimRight(redactedConfigURL(coord.BaseURL), "/") + "/v1/runs/" + url.PathEscape(runID) + "/logs"
 }
 
-func printRemoteCapabilityPreflight(ctx context.Context, w io.Writer, cfg Config, server Server, target SSHTarget, leaseID, workdir string, envFiles []string, hydrated bool, actionsURL string, hydrateSupported bool, env map[string]string) {
+func printRemoteCapabilityPreflight(ctx context.Context, w io.Writer, cfg Config, server Server, target SSHTarget, leaseID, workdir string, envFiles []string, hydrated bool, actionsURL string, hydrateSupported bool, env map[string]string) error {
 	if w == nil {
-		return
+		return nil
 	}
 	for _, line := range remotePreflightWorkspaceLines(cfg, target, leaseID, workdir, hydrated, actionsURL, hydrateSupported) {
 		fmt.Fprintln(w, line)
@@ -166,11 +166,16 @@ func printRemoteCapabilityPreflight(ctx context.Context, w io.Writer, cfg Config
 	}
 	tools := preflightToolsForTarget(target, cfg.Run.PreflightTools)
 	if len(tools) == 0 {
-		return
+		return nil
 	}
 	baseTools := make([]string, 0, len(tools))
 	rawSocketRequested := false
+	venvRequested := false
 	for _, tool := range tools {
+		if tool == pythonVenvPreflightTool {
+			venvRequested = true
+			continue
+		}
 		if tool == rawSocketPreflightTool {
 			rawSocketRequested = true
 			continue
@@ -200,10 +205,24 @@ func printRemoteCapabilityPreflight(ctx context.Context, w io.Writer, cfg Config
 			}
 		}
 	}
+	if venvRequested {
+		completion, err := runOwnedFunctionalPreflight(ctx, target, workdir, env, envFiles)
+		fmt.Fprintf(w, "remote preflight %s\n", functionalPreflightDiagnostic(ctx, completion, err))
+		if err != nil {
+			return err
+		}
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
+		}
+		if !completion.WorkerQuiesced || !completion.ScratchRemoved || !completion.StageRetired {
+			return errors.New("functional preflight cleanup unconfirmed")
+		}
+	}
 	if rawSocketRequested {
 		state := runRawSocketCapabilityPreflight(ctx, target, workdir, env, envFiles)
 		fmt.Fprintf(w, "remote preflight %s=%s\n", rawSocketPreflightTool, state)
 	}
+	return nil
 }
 
 func printDelegatedPreflightUnsupported(w io.Writer, provider string) {
@@ -544,32 +563,33 @@ except BaseException:
     sys.exit(78)`
 
 var preflightToolRegistry = map[string]preflightToolSpec{
-	"apt":                  {Posix: []string{"apt-get", "--version"}, OS: map[string]bool{"linux": true}},
-	"bubblewrap":           {Posix: []string{"bwrap", "--version"}, OS: map[string]bool{"linux": true}},
-	"bun":                  {Posix: []string{"bun", "--version"}, Windows: []string{"bun", "--version"}},
-	"bwrap":                {Posix: []string{"bwrap", "--version"}, OS: map[string]bool{"linux": true}},
-	"cargo":                {Posix: []string{"cargo", "--version"}, Windows: []string{"cargo", "--version"}},
-	"cmake":                {Posix: []string{"cmake", "--version"}, Windows: []string{"cmake", "--version"}},
-	"corepack":             {Posix: []string{"corepack", "--version"}, Windows: []string{"corepack", "--version"}},
-	"docker":               {Posix: []string{"docker", "--version"}, Windows: []string{"docker", "--version"}},
-	"execution_policy":     {Windows: []string{"Get-ExecutionPolicy -Scope Process"}, OS: map[string]bool{"windows": true}},
-	"git":                  {Posix: []string{"git", "--version"}, Windows: []string{"git", "--version"}},
-	"go":                   {Posix: []string{"go", "version"}, Windows: []string{"go", "version"}},
-	"longpaths":            {Windows: []string{"git config --global --get core.longpaths"}, OS: map[string]bool{"windows": true}},
-	"make":                 {Posix: []string{"make", "--version"}},
-	"node":                 {Posix: []string{"node", "--version"}, Windows: []string{"node", "--version"}},
-	"npm":                  {Posix: []string{"npm", "--version"}, Windows: []string{"npm", "--version"}},
-	"pnpm":                 {Posix: []string{"pnpm", "--version"}, Windows: []string{"pnpm", "--version"}},
-	"powershell":           {Windows: []string{"$PSVersionTable.PSVersion.ToString()"}, OS: map[string]bool{"windows": true}},
-	"python":               {Posix: []string{"python", "--version"}, Windows: []string{"python", "--version"}},
-	"python3":              {Posix: []string{"python3", "--version"}, Windows: []string{"python3", "--version"}},
-	"pwsh":                 {Windows: []string{"pwsh", "--version"}, OS: map[string]bool{"windows": true}},
-	rawSocketPreflightTool: {OS: map[string]bool{"linux": true}},
-	"sudo":                 {OS: map[string]bool{"linux": true, "macos": true}},
-	"tar":                  {Posix: []string{"tar", "--version"}, Windows: []string{"tar", "--version"}},
-	"temp":                 {Windows: []string{"$env:TEMP"}, OS: map[string]bool{"windows": true}},
-	"uv":                   {Posix: []string{"uv", "--version"}, Windows: []string{"uv", "--version"}},
-	"yarn":                 {Posix: []string{"yarn", "--version"}, Windows: []string{"yarn", "--version"}},
+	"apt":                   {Posix: []string{"apt-get", "--version"}, OS: map[string]bool{"linux": true}},
+	"bubblewrap":            {Posix: []string{"bwrap", "--version"}, OS: map[string]bool{"linux": true}},
+	"bun":                   {Posix: []string{"bun", "--version"}, Windows: []string{"bun", "--version"}},
+	"bwrap":                 {Posix: []string{"bwrap", "--version"}, OS: map[string]bool{"linux": true}},
+	"cargo":                 {Posix: []string{"cargo", "--version"}, Windows: []string{"cargo", "--version"}},
+	"cmake":                 {Posix: []string{"cmake", "--version"}, Windows: []string{"cmake", "--version"}},
+	"corepack":              {Posix: []string{"corepack", "--version"}, Windows: []string{"corepack", "--version"}},
+	"docker":                {Posix: []string{"docker", "--version"}, Windows: []string{"docker", "--version"}},
+	"execution_policy":      {Windows: []string{"Get-ExecutionPolicy -Scope Process"}, OS: map[string]bool{"windows": true}},
+	"git":                   {Posix: []string{"git", "--version"}, Windows: []string{"git", "--version"}},
+	"go":                    {Posix: []string{"go", "version"}, Windows: []string{"go", "version"}},
+	"longpaths":             {Windows: []string{"git config --global --get core.longpaths"}, OS: map[string]bool{"windows": true}},
+	"make":                  {Posix: []string{"make", "--version"}},
+	"node":                  {Posix: []string{"node", "--version"}, Windows: []string{"node", "--version"}},
+	"npm":                   {Posix: []string{"npm", "--version"}, Windows: []string{"npm", "--version"}},
+	"pnpm":                  {Posix: []string{"pnpm", "--version"}, Windows: []string{"pnpm", "--version"}},
+	"powershell":            {Windows: []string{"$PSVersionTable.PSVersion.ToString()"}, OS: map[string]bool{"windows": true}},
+	"python":                {Posix: []string{"python", "--version"}, Windows: []string{"python", "--version"}},
+	"python3":               {Posix: []string{"python3", "--version"}, Windows: []string{"python3", "--version"}},
+	pythonVenvPreflightTool: {OS: map[string]bool{"linux": true, "macos": true}},
+	"pwsh":                  {Windows: []string{"pwsh", "--version"}, OS: map[string]bool{"windows": true}},
+	rawSocketPreflightTool:  {OS: map[string]bool{"linux": true}},
+	"sudo":                  {OS: map[string]bool{"linux": true, "macos": true}},
+	"tar":                   {Posix: []string{"tar", "--version"}, Windows: []string{"tar", "--version"}},
+	"temp":                  {Windows: []string{"$env:TEMP"}, OS: map[string]bool{"windows": true}},
+	"uv":                    {Posix: []string{"uv", "--version"}, Windows: []string{"uv", "--version"}},
+	"yarn":                  {Posix: []string{"yarn", "--version"}, Windows: []string{"yarn", "--version"}},
 }
 
 const rawSocketSudoPATH = "/usr/local/bin:/usr/bin:/bin:/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/run/current-system/profile/bin"
