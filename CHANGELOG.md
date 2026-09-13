@@ -10,7 +10,7 @@
 
 ### Fixes
 
-- Preserve Anthropic Sandbox Runtime command cancellation and deadline causes in recorded run outcomes and timing without changing numeric exit codes or diagnostics.
+- Preserve Anthropic Sandbox Runtime command cancellation and deadline causes in recorded run outcomes and timing without changing numeric exit codes or diagnostics. [PR 2229](https://github.com/openclaw/crabbox/pull/2229).
 - Disable Corepack downloads and automatic project pinning during package-manager preflight version probes, and suppress supported pnpm secondary version/lockfile management, without changing Corepack's project selection or the later workload's environment. [PR 2224](https://github.com/openclaw/crabbox/pull/2224).
 - Render XFCE clients in explicitly requested 8-bit desktops by selecting an 8-bit TrueColor visual, preserving the requested depth and fixed-size Xvfb/x11vnc backend. [PR 2222](https://github.com/openclaw/crabbox/pull/2222). Thanks @vincentkoc.
 - Use a private stdin pipe for WSL2 Python preflight completion and retirement checks, preserving program bytes without creating another staged workload. [PR 2217](https://github.com/openclaw/crabbox/pull/2217).
