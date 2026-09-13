@@ -146,6 +146,84 @@ requires the exact derived AMI ID to remain active in the enrolled run ledger,
 so another run's or an unrelated tagged image is still rejected. Keep these IAM
 constraints even though the authority duplicates them at runtime.
 
+## Retained-image qualification
+
+The protected `image-qualification.yml` workflow defaults to `mode=mint`.
+Use `mode=retained` only for a reviewed, already available AMI and its single
+backing snapshot. Supply `retained_image_id`, `retained_snapshot_id`,
+`retained_source_sha`, and `retained_capsule_sha256` alongside the exact
+candidate PR/SHA. This mode never prepares a source lease or captures an image.
+
+The capsule is the SHA-256 of the control script's canonical JSON array of all
+13 source records: `internal/cli/actions.go`; both devtools recipe files; the
+builder, minimal, manifest-schema and profile-schema Linux recipe files; and
+the devtools contract, full Linux smoke, readiness generator, tool installer,
+generated readiness and AWS mint scripts. Each record contains the path,
+Git mode/blob, byte length and SHA-256. Build admission verifies the reviewed
+source capsule and requires all 12 recipe/runtime/proof inputs to match the
+candidate checkout exactly. `actions.go` is recorded separately as nonbaked
+CLI source; it may differ. This is input equivalence, not whole-source or
+runtime equivalence. The candidate CLI and Worker are newly built from the
+same admitted candidate SHA, including the current build-control contract.
+Before deployment or allocation, retained bundle admission also requires the
+installer's Node/pnpm, Go, Bun, Rust and uv smoke-generator declarations.
+Admission reads bounded source text without executing candidate code; this
+compatibility check does not replace source review or the full runtime smoke.
+
+Retained mode keeps the existing authority account, Region, subnet and security
+group. Before enrollment, the authority verifies the exact available, owned
+x86-64 AMI, one EBS root mapping, its root-device name, and the exact completed,
+owned 400 GiB snapshot. Both AMI root size and snapshot size must be 400 GiB.
+The authority records the observed root device and uses it when rebuilding
+the launch request. Existing IAM must already permit that exact AMI; a denied
+AMI is a prerequisite failure, not permission to widen IAM or change networking.
+
+The run authorizes at most one 400 GiB on-demand lease, with a 30-minute work
+window and eight-minute cleanup reserve inside a 38-minute absolute lifetime.
+The compute guard, volume size and expiry bound the operation; they are not a
+provider billing cap. Obtain a separate spend authorization before dispatch.
+At the work cutoff, new work is denied and independent authority cleanup starts.
+Until absolute expiry, automatic cleanup permits scoped identity, image, instance
+and key reads for receipt restoration and release in the isolated catalog.
+Explicit protected finalization durably revokes that allowance at the run owner,
+including requests admitted by the registry before revocation. Alarm retries and
+object restarts cannot reopen it; pre-existing finalization state without an
+automatic-cleanup marker grants no read allowance. A lost launch response is
+reconciled by reads only: the authority never dispatches `RunInstances` again,
+even with the same idempotency token.
+
+The protected executor performs this sequence:
+
+1. Seed the prior default in the isolated AWS/Linux/OS/Region/architecture
+   catalog, then CAS-promote the retained AMI and capture the canonical receipt.
+   Require successful CLI output, receipt persistence, and a valid restorable
+   receipt before acquiring a lease. Partial receipts are not rollback evidence.
+2. Clear the base AMI override and acquire one normal-selection lease for
+   Ubuntu 24.04/x86-64 with desktop and browser enabled. Require the lease's
+   AMI, Region, `source=promoted`, and recorded `image.revision` to match the
+   promotion receipt. A missing legacy revision is unknown, never inferred
+   from a timestamp.
+3. Run strict generated readiness and the candidate's complete Linux smoke,
+   including its archive probes. Only a successful full smoke can trigger
+   the intentional exit 86; readiness and incidental commands cannot.
+4. Restore the receipt's exact prior aliases and revision, verify retirement
+   of the failed catalog revision, require stale CAS rejection with unchanged
+   readback, and release the lease.
+5. Prove independent cleanup and preserved borrowed image/snapshot state.
+
+The retained AMI and snapshot are borrowed, not run-owned. They are excluded
+from active ledgers, tombstones, recovered capture intents, inventory adoption
+and deletion. Qualification changes only the isolated candidate catalog;
+it does not promote a shared production default or delete the source checkpoint.
+The final attestation must prove one launch, no image capture, matching selection
+and catalog-revision evidence, zero owned residue and preserved borrowed resources.
+
+Before running retained mode, the infrastructure owner must identify and approve
+the protected deployment and credential-custody route for the reviewed authority.
+The qualification workflow does not deploy that authority. Infrastructure landing
+alone does not establish its availability, qualify an older candidate CLI, or
+authorize paid execution.
+
 ## Enrollment and binding
 
 Deploy the authority from
@@ -172,8 +250,9 @@ identity:
 }
 ```
 
-The candidate configuration must use the same fixed Region, AMI, subnet,
-security group, and root size; request `on-demand`; select only `t3.small` or
+The mint candidate configuration must use the same fixed Region, AMI, subnet,
+security group, and root size; retained mode clears the AMI override and uses
+the enrolled 400 GiB root policy. Both modes request `on-demand`; select only `t3.small` or
 `t3a.small`; leave `CRABBOX_AWS_INSTANCE_PROFILE` empty; and leave
 `CRABBOX_AWS_FAST_SNAPSHOT_RESTORE_AZS` unset. It must also disable routes,
 workers.dev, preview URLs, and cron. Protected tooling first uploads an inert
@@ -197,9 +276,10 @@ active run. A retired or finalizing per-run object cannot be enrolled again.
 These methods and `attest` exist only on the named controller entrypoint; the
 candidate transport exposes only `execute`. The controller persists the per-run
 cleanup owner before publishing its global claim, and every candidate call must
-match that exact registry record while its state remains `claimed`. Finalization
-persists an irreversible per-run `finalizingAt` fence before transitioning the
-registry to `finalizing` or starting cleanup I/O, so an already-admitted
+match that exact registry record while its state remains `claimed`. Protected
+controller finalization records its source alongside the per-run `finalizingAt`
+fence before transitioning the registry to `finalizing` or starting cleanup I/O,
+and upgrades automatic cleanup to an irreversible controller fence. An already-admitted
 candidate call and a failed cleanup cannot reopen candidate dispatch.
 The relay name is deterministically derived from the registered run ID, so the
 durable registry identity is sufficient for a fresh finalizer or reaper to

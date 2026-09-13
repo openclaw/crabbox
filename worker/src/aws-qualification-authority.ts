@@ -4,8 +4,11 @@ import { XMLParser } from "fast-xml-parser";
 
 import {
   awsQualificationAttestationVersion,
+  awsQualificationCleanupReserveMs,
   awsQualificationInstanceTypes,
   awsQualificationMaxRunMs,
+  awsQualificationRetainedRootGB,
+  awsQualificationRetainedRunMs,
   type AWSQualificationAttestation,
   type AWSQualificationControllerProps,
   type AWSQualificationFinalReceipt,
@@ -58,7 +61,9 @@ const parser = new XMLParser({
   // AWS account IDs are decimal-looking identifiers. Undefined preserves their lexical form.
   tagValueProcessor: (_tagName, _value, jPath) =>
     jPath === "GetCallerIdentityResponse.GetCallerIdentityResult.Account" ||
-    jPath === "DescribeInstancesResponse.reservationSet.item.ownerId"
+    jPath === "DescribeInstancesResponse.reservationSet.item.ownerId" ||
+    jPath === "DescribeImagesResponse.imagesSet.item.imageOwnerId" ||
+    jPath === "DescribeSnapshotsResponse.snapshotSet.item.ownerId"
       ? undefined
       : _value,
 });
@@ -90,6 +95,13 @@ const mutatingEC2Actions = new Set([
   "ImportKeyPair",
   "RunInstances",
   "TerminateInstances",
+]);
+
+const retainedCleanupReads = new Set([
+  "GetCallerIdentity",
+  "DescribeImages",
+  "DescribeInstances",
+  "DescribeKeyPairs",
 ]);
 
 const preservedTagKeys = new Set([
@@ -143,6 +155,8 @@ interface AWSQualificationRunState {
   authorityVersion: string;
   policy: AWSQualificationPolicy;
   policyHash: string;
+  retainedRootDeviceName?: string;
+  finalizationSource?: "automatic" | "controller";
   finalizingAt?: string;
   finalizedAt?: string;
 }
@@ -410,6 +424,9 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       if (policy.region !== requireAWSRegion(policy.region)) {
         throw new Error("AWS qualification region is invalid");
       }
+      if (identity.retainedImage?.imageId === policy.baseAmiId) {
+        throw new Error("AWS qualification retained image must differ from the seed default");
+      }
       const existing = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
       if (existing) {
         if (
@@ -426,6 +443,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         return;
       }
       const policyHash = await qualificationPolicyHash(policy);
+      const retainedRootDeviceName = await this.verifyRetainedImage(identity, policy);
       await this.ctx.storage.put({
         [stateKey]: {
           identity: structuredClone(identity),
@@ -436,10 +454,13 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
           authorityVersion: authority.version,
           policy: structuredClone(policy),
           policyHash,
+          ...(retainedRootDeviceName ? { retainedRootDeviceName } : {}),
         } satisfies AWSQualificationRunState,
         [ledgerKey]: emptyLedger(),
       });
-      await this.ctx.storage.setAlarm(expiresAt);
+      await this.ctx.storage.setAlarm(
+        expiresAt - (identity.retainedImage ? awsQualificationCleanupReserveMs : 0),
+      );
     });
   }
 
@@ -503,7 +524,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     identity: AWSQualificationRunIdentity,
     request: AWSQualificationRequest,
   ): Promise<AWSQualificationResponse> {
-    const run = await this.requireActiveRun(identity);
+    const run = await this.requireActiveRun(identity, request.action);
     const policy = run.policy;
     const normalizedRequest = validateRequestShape(request, policy.region);
     const requestHash = await sha256Hex(
@@ -554,6 +575,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         throw new Error("AWS qualification pending opId has a different request");
       }
       if (priorIntent.phase !== "prepared") {
+        if (identity.retainedImage && priorIntent.request.action === "RunInstances") {
+          // A retained qualification authorizes one signer dispatch, not one idempotency
+          // token. Reconcile only; never replay RunInstances after an ambiguous response.
+          await this.reconcilePendingLaunchWithBackoff(run, priorIntent, policy);
+          throw new Error("AWS qualification retained launch outcome requires finalization");
+        }
         const reconciled =
           priorIntent.request.action === "CreateImage" ||
           priorIntent.request.action === "ImportKeyPair"
@@ -581,7 +608,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         if (pending.size >= maxPendingIntents) {
           throw new Error("AWS qualification pending intent limit reached");
         }
-        assertLifecycleCapacity(normalizedRequest, ledger, pending);
+        assertLifecycleCapacity(normalizedRequest, ledger, pending, identity);
       }
     } catch (error) {
       await this.ctx.storage.put(evidenceKey, {
@@ -599,6 +626,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         ledger,
         await qualificationPhysicalKeyName(identity.runId),
         await qualificationClientToken(identity.runId, normalizedRequest.opId),
+        run.retainedRootDeviceName,
       );
     } catch (error) {
       await this.ctx.storage.put(evidenceKey, {
@@ -639,6 +667,9 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       await this.markCandidateMutationDispatched(run, intentKey, dispatchIntent);
     }
     evidence = await this.beginSignerDispatch(run, evidenceKey, evidence);
+    // Durable evidence writes can cross the deadline. Nothing may await between
+    // this final clock check and the actual provider dispatch.
+    this.assertCandidateDispatchWindow(run, normalizedRequest.action);
     const response = await this.signer.execute(
       normalizedRequest.service,
       normalizedRequest.action,
@@ -759,6 +790,9 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     imageId: string,
     ledger: AWSQualificationLedger,
   ): Promise<void> {
+    if (run.identity.retainedImage) {
+      throw new Error("AWS qualification retained mode cannot own checkpoint images");
+    }
     const response = await this.signer.execute("ec2", "DescribeImages", run.policy.region, {
       "ImageId.1": imageId,
       "Owner.1": "self",
@@ -883,6 +917,67 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     }
   }
 
+  private async verifyRetainedImage(
+    identity: AWSQualificationRunIdentity,
+    policy: AWSQualificationPolicy,
+  ): Promise<string | undefined> {
+    const borrowed = identity.retainedImage;
+    if (!borrowed) return;
+    await this.ensureAccount(policy);
+    const result = await boundedResponse(
+      await this.signer.execute("ec2", "DescribeImages", policy.region, {
+        "ImageId.1": borrowed.imageId,
+        "Owner.1": "self",
+      }),
+    );
+    const images = items(
+      record(awsXMLRoot(result.body, "DescribeImages")["imagesSet"])["item"],
+    ).map(record);
+    const image = images[0];
+    const rootDeviceName = asString(image?.["rootDeviceName"]);
+    const mappings = items(record(image?.["blockDeviceMapping"])["item"]).map(record);
+    const root = record(mappings[0]?.["ebs"]);
+    if (
+      result.status !== 200 ||
+      images.length !== 1 ||
+      !image ||
+      asString(image["imageId"]) !== borrowed.imageId ||
+      asString(image["imageState"]) !== "available" ||
+      asString(image["imageOwnerId"]) !== policy.accountId ||
+      asString(image["architecture"]) !== "x86_64" ||
+      asString(image["platform"]) !== "" ||
+      asString(image["rootDeviceType"]) !== "ebs" ||
+      !/^\/dev\/(?:sd|xvd)[a-z][0-9]*$/.test(rootDeviceName) ||
+      mappings.length !== 1 ||
+      asString(mappings[0]?.["deviceName"]) !== rootDeviceName ||
+      asString(root["snapshotId"]) !== borrowed.snapshotId ||
+      Number(root["volumeSize"]) !== awsQualificationRetainedRootGB ||
+      canonicalJSON(imageSnapshotIDs(image)) !== canonicalJSON([borrowed.snapshotId])
+    ) {
+      throw new Error("AWS qualification retained image identity is not verified");
+    }
+    const snapshots = await boundedResponse(
+      await this.signer.execute("ec2", "DescribeSnapshots", policy.region, {
+        "SnapshotId.1": borrowed.snapshotId,
+        "Owner.1": "self",
+      }),
+    );
+    const records = items(
+      record(awsXMLRoot(snapshots.body, "DescribeSnapshots")["snapshotSet"])["item"],
+    ).map(record);
+    if (
+      snapshots.status !== 200 ||
+      records.length !== 1 ||
+      asString(records[0]?.["snapshotId"]) !== borrowed.snapshotId ||
+      asString(records[0]?.["ownerId"]) !== policy.accountId ||
+      asString(records[0]?.["status"]) !== "completed" ||
+      Number(records[0]?.["volumeSize"]) !== awsQualificationRetainedRootGB
+    ) {
+      throw new Error("AWS qualification retained snapshot identity is not verified");
+    }
+    return rootDeviceName;
+  }
+
   private async beginSignerDispatch(
     run: AWSQualificationRunState,
     evidenceKey: string,
@@ -944,25 +1039,51 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     run: AWSQualificationRunState,
     intentKey: string,
   ): Promise<void> {
+    if (run.identity.retainedImage) {
+      const intent = await this.ctx.storage.get<AWSQualificationIntent>(intentKey);
+      this.assertCandidateDispatchWindow(run, intent?.request.action ?? "");
+    }
     if (Date.now() < Date.parse(run.identity.expiresAt)) return;
     await this.ctx.storage.delete(intentKey);
     await this.finalizeSerialized();
     throw new Error("AWS qualification run expired before mutation dispatch");
   }
 
+  private assertCandidateDispatchWindow(run: AWSQualificationRunState, action: string): void {
+    const now = Date.now();
+    const expiresAt = Date.parse(run.identity.expiresAt);
+    if (now >= expiresAt) throw new Error("AWS qualification run expired before signer dispatch");
+    if (
+      run.identity.retainedImage &&
+      now >= expiresAt - awsQualificationCleanupReserveMs &&
+      !retainedCleanupReads.has(action) &&
+      !["TerminateInstances", "DeleteKeyPair"].includes(action)
+    ) {
+      throw new Error("AWS qualification retained work window expired");
+    }
+  }
+
   private async requireActiveRun(
     identity: AWSQualificationRunIdentity,
+    action: string,
   ): Promise<AWSQualificationRunState> {
     const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
     if (!run || canonicalJSON(run.identity) !== canonicalJSON(identity)) {
       throw new Error("AWS qualification service binding is not enrolled for this run");
     }
-    if (run.finalizedAt) throw new Error("AWS qualification run is finalized");
-    if (run.finalizingAt) throw new Error("AWS qualification run is finalizing");
+    // Only automatic cleanup grants rollback reads. A controller fence is terminal,
+    // including requests admitted by the registry before reaching this serialized owner.
+    const rollbackRead =
+      run.finalizationSource === "automatic" &&
+      Boolean(identity.retainedImage) &&
+      retainedCleanupReads.has(action);
+    if (run.finalizedAt && !rollbackRead) throw new Error("AWS qualification run is finalized");
+    if (run.finalizingAt && !rollbackRead) throw new Error("AWS qualification run is finalizing");
     if (Date.now() >= Date.parse(run.identity.expiresAt)) {
       await this.finalizeSerialized();
       throw new Error("AWS qualification run expired");
     }
+    this.assertCandidateDispatchWindow(run, action);
     if ((await qualificationPolicyHash(authorityPolicy(this.env))) !== run.policyHash) {
       throw new Error("AWS qualification authority policy changed after enrollment");
     }
@@ -1044,6 +1165,17 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       "post-cleanup",
     );
     await this.verifyZeroResidue(recoveredLedger, policy, failures);
+    if (run.identity.retainedImage) {
+      try {
+        if ((await this.verifyRetainedImage(run.identity, policy)) !== run.retainedRootDeviceName) {
+          throw new Error("AWS qualification retained root device changed");
+        }
+        await this.recordVerificationEvidence("RetainedImagePreserved", "accepted");
+      } catch {
+        failures.push("Describe retained image preservation failed");
+        await this.recordVerificationEvidence("RetainedImagePreserved", "rejected");
+      }
+    }
     if (hasOwnedResources(residue)) failures.push("run-tag inventory still contains resources");
     if (failures.length === 0) {
       await this.retireUnresolvedIntents();
@@ -1069,6 +1201,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     if (controller) validateController(controller, run.identity.deploymentHash);
     if (!run.finalizingAt && !run.finalizedAt) {
       run.finalizingAt = new Date().toISOString();
+      run.finalizationSource = controller ? "controller" : "automatic";
+      await this.ctx.storage.put(stateKey, run);
+    } else if (controller && run.finalizationSource !== "controller") {
+      // Explicit revocation upgrades automatic cleanup even after cleanup completed.
+      // Alarm retries must never downgrade this persisted fence or grant legacy state grace.
+      run.finalizationSource = "controller";
       await this.ctx.storage.put(stateKey, run);
     }
     return run;
@@ -1294,6 +1432,14 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
   ): Promise<void> {
     let evidenceSequence: number | undefined;
     try {
+      const borrowed = run.identity.retainedImage;
+      if (
+        borrowed &&
+        (parameters["ImageId"] === borrowed.imageId ||
+          parameters["SnapshotId"] === borrowed.snapshotId)
+      ) {
+        throw new Error("AWS qualification borrowed resource is not cleanup-owned");
+      }
       evidenceSequence = await this.beginCleanupEvidence(action, parameters);
       await this.ensureAccount(policy);
       const response = await this.signer.execute("ec2", action, policy.region, parameters);
@@ -1385,6 +1531,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       ).map(record);
       ledger.keyPairIds = keyRecords.map((key) => asString(key["keyPairId"])).filter(Boolean);
       ledger.keyPairNames = keyRecords.map((key) => asString(key["keyName"])).filter(Boolean);
+      excludeBorrowedResources(ledger, run.identity);
       if (
         ledger.instanceIds.length > maxActiveInstances ||
         ledger.imageIds.length > maxActiveImages ||
@@ -1770,7 +1917,10 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
   }
 
   private async ledger(): Promise<AWSQualificationLedger> {
-    return (await this.ctx.storage.get<AWSQualificationLedger>(ledgerKey)) ?? emptyLedger();
+    const ledger = (await this.ctx.storage.get<AWSQualificationLedger>(ledgerKey)) ?? emptyLedger();
+    const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
+    if (run) excludeBorrowedResources(ledger, run.identity);
+    return ledger;
   }
 
   private async serialized<T>(operation: () => Promise<T>): Promise<T> {
@@ -1826,6 +1976,7 @@ async function authorizeRequest(
   ledger: AWSQualificationLedger,
   physicalKeyName: string,
   clientToken: string,
+  retainedRootDeviceName?: string,
 ): Promise<{ mutating: boolean; parameters: Record<string, unknown> }> {
   if (request.service === "sts") {
     if (request.action !== "GetCallerIdentity" || Object.keys(request.parameters).length > 0) {
@@ -1851,7 +2002,15 @@ async function authorizeRequest(
   }
   return {
     mutating: mutatingEC2Actions.has(request.action),
-    parameters: authorizeEC2(request, identity, policy, ledger, physicalKeyName, clientToken),
+    parameters: authorizeEC2(
+      request,
+      identity,
+      policy,
+      ledger,
+      physicalKeyName,
+      clientToken,
+      retainedRootDeviceName,
+    ),
   };
 }
 
@@ -1862,6 +2021,7 @@ function authorizeEC2(
   ledger: AWSQualificationLedger,
   physicalKeyName: string,
   clientToken: string,
+  retainedRootDeviceName?: string,
 ): Record<string, unknown> {
   const input = stringParameters(request.parameters);
   switch (request.action) {
@@ -1912,6 +2072,7 @@ function authorizeEC2(
         policy,
         ledger,
         physicalKeyName,
+        retainedRootDeviceName,
       );
     case "DescribeInstances":
       return authorizedDescribe(
@@ -1926,14 +2087,20 @@ function authorizeEC2(
       return authorizedImageRead(
         input,
         policy.baseAmiId,
-        ownedWithRetired(ledger.imageIds, ledger.retiredImageIds),
+        [
+          ...ownedWithRetired(ledger.imageIds, ledger.retiredImageIds),
+          ...(identity.retainedImage ? [identity.retainedImage.imageId] : []),
+        ],
         identity.runId,
       );
     case "DescribeSnapshots":
       return authorizedDescribe(
         input,
         "SnapshotId",
-        ownedWithRetired(ledger.snapshotIds, ledger.retiredSnapshotIds),
+        [
+          ...ownedWithRetired(ledger.snapshotIds, ledger.retiredSnapshotIds),
+          ...(identity.retainedImage ? [identity.retainedImage.snapshotId] : []),
+        ],
         identity.runId,
         true,
       );
@@ -1956,6 +2123,9 @@ function authorizeEC2(
         ownedWithRetired(ledger.snapshotIds, ledger.retiredSnapshotIds),
       );
     case "CreateImage": {
+      if (identity.retainedImage) {
+        throw new Error("AWS qualification retained mode does not allow CreateImage");
+      }
       requireOwned(input["InstanceId"], ledger.instanceIds, "instance");
       const name = boundedName(input["Name"]);
       return {
@@ -1989,6 +2159,7 @@ function authorizedRunInstances(
   policy: AWSQualificationPolicy,
   ledger: AWSQualificationLedger,
   physicalKeyName: string,
+  retainedRootDeviceName?: string,
 ): Record<string, unknown> {
   for (const key of Object.keys(input)) {
     if (
@@ -2001,7 +2172,11 @@ function authorizedRunInstances(
     }
   }
   const imageId = input["ImageId"] ?? "";
-  if (imageId !== policy.baseAmiId && !ledger.imageIds.includes(imageId)) {
+  if (
+    identity.retainedImage
+      ? imageId !== identity.retainedImage.imageId
+      : imageId !== policy.baseAmiId && !ledger.imageIds.includes(imageId)
+  ) {
     throw new Error("AWS qualification image is outside the run ledger");
   }
   const instanceType = input["InstanceType"] ?? "";
@@ -2023,8 +2198,15 @@ function authorizedRunInstances(
     "security group",
   );
   const rootGB = Number(input["BlockDeviceMapping.1.Ebs.VolumeSize"]);
-  if (!Number.isInteger(rootGB) || rootGB < 8 || rootGB > policy.rootGB) {
+  if (
+    identity.retainedImage
+      ? rootGB !== awsQualificationRetainedRootGB
+      : !Number.isInteger(rootGB) || rootGB < 8 || rootGB > policy.rootGB
+  ) {
     throw new Error("AWS qualification root volume is outside policy");
+  }
+  if (identity.retainedImage && !retainedRootDeviceName) {
+    throw new Error("AWS qualification retained root device is not verified");
   }
   const userData = input["UserData"] ?? "";
   if (new TextEncoder().encode(userData).byteLength > maxUserDataBytes) {
@@ -2038,7 +2220,7 @@ function authorizedRunInstances(
     MaxCount: "1",
     MinCount: "1",
     UserData: userData,
-    "BlockDeviceMapping.1.DeviceName": "/dev/sda1",
+    "BlockDeviceMapping.1.DeviceName": retainedRootDeviceName ?? "/dev/sda1",
     "BlockDeviceMapping.1.Ebs.DeleteOnTermination": "true",
     "BlockDeviceMapping.1.Ebs.Encrypted": "true",
     "BlockDeviceMapping.1.Ebs.VolumeSize": String(rootGB),
@@ -2300,13 +2482,27 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
   if (!Number.isFinite(Date.parse(identity.expiresAt))) {
     throw new Error("AWS qualification expiry is malformed");
   }
+  if (identity.retainedImage !== undefined) {
+    const retained = identity.retainedImage;
+    if (
+      !isPlainRecord(retained) ||
+      Object.keys(retained).toSorted().join(",") !== "capsuleSha256,imageId,snapshotId,sourceSha" ||
+      !/^ami-[0-9a-f]+$/.test(retained.imageId) ||
+      !/^snap-[0-9a-f]+$/.test(retained.snapshotId) ||
+      !/^[0-9a-f]{40}$/.test(retained.sourceSha) ||
+      !/^[0-9a-f]{64}$/.test(retained.capsuleSha256)
+    ) {
+      throw new Error("AWS qualification retained identity is malformed");
+    }
+  }
 }
 
 function validateRunWindow(identity: AWSQualificationRunIdentity): void {
   const expiresAt = Date.parse(identity.expiresAt);
   const now = Date.now();
-  if (expiresAt <= now || expiresAt > now + awsQualificationMaxRunMs) {
-    throw new Error("AWS qualification expiry must be in the next 120 minutes");
+  const maximum = identity.retainedImage ? awsQualificationRetainedRunMs : awsQualificationMaxRunMs;
+  if (expiresAt <= now || expiresAt > now + maximum) {
+    throw new Error(`AWS qualification expiry must be in the next ${maximum / 60_000} minutes`);
   }
 }
 
@@ -2699,6 +2895,20 @@ function emptyLedger(launchCount = 0): AWSQualificationLedger {
   };
 }
 
+function excludeBorrowedResources(
+  ledger: AWSQualificationLedger,
+  identity: AWSQualificationRunIdentity,
+): void {
+  const borrowed = identity.retainedImage;
+  if (!borrowed) return;
+  // Descriptions, recovered intents, and tag inventory cannot turn read/launch
+  // permission into deletion ownership, including retired-resource cleanup retries.
+  ledger.imageIds = ledger.imageIds.filter((id) => id !== borrowed.imageId);
+  ledger.retiredImageIds = ledger.retiredImageIds.filter((id) => id !== borrowed.imageId);
+  ledger.snapshotIds = ledger.snapshotIds.filter((id) => id !== borrowed.snapshotId);
+  ledger.retiredSnapshotIds = ledger.retiredSnapshotIds.filter((id) => id !== borrowed.snapshotId);
+}
+
 function mergeLedgers(
   left: AWSQualificationLedger,
   right: AWSQualificationLedger,
@@ -2770,13 +2980,14 @@ function assertLifecycleCapacity(
   request: AWSQualificationRequest,
   ledger: AWSQualificationLedger,
   pending: Map<string, AWSQualificationIntent>,
+  identity: AWSQualificationRunIdentity,
 ): void {
   const pendingActions = new Set([...pending.values()].map((intent) => intent.request.action));
   if (request.action === "RunInstances") {
     if (ledger.instanceIds.length >= maxActiveInstances || pendingActions.has("RunInstances")) {
       throw new Error("AWS qualification allows one active instance");
     }
-    if (ledger.launchCount >= maxLaunches) {
+    if (ledger.launchCount >= (identity.retainedImage ? 1 : maxLaunches)) {
       throw new Error("AWS qualification launch budget is exhausted");
     }
   }
@@ -2832,7 +3043,13 @@ function appendBoundedEvidence<T>(
 function evidenceDenialReason(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("outside the run ledger")) return "resource-not-owned";
-  if (message.includes("outside policy") || message.includes("not allowed")) return "policy-denied";
+  if (
+    message.includes("outside policy") ||
+    message.includes("not allowed") ||
+    message === "AWS qualification fast snapshot restore is disabled"
+  ) {
+    return "policy-denied";
+  }
   if (message.includes("wrong account")) return "account-mismatch";
   if (message.includes("limit") || message.includes("allows one")) return "capacity-denied";
   if (message.includes("expired")) return "run-expired";
@@ -2842,6 +3059,7 @@ function evidenceDenialReason(error: unknown): string {
 function evidenceAction(action: string): string {
   if (
     allowedEC2Actions.has(action) ||
+    action === "EnableFastSnapshotRestores" ||
     action === "GetCallerIdentity" ||
     action === "GetServiceQuota"
   ) {

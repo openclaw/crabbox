@@ -12,6 +12,7 @@ import {
 import type {
   AWSQualificationControllerProps,
   AWSQualificationFinalReceipt,
+  AWSQualificationOperationEvidence,
   AWSQualificationRequest,
   AWSQualificationRunIdentity,
 } from "../src/aws-qualification-contract";
@@ -34,6 +35,7 @@ const authorityConfig = readFileSync(
 );
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -242,6 +244,228 @@ describe("AWS qualification authority deployment", () => {
     );
   });
 
+  it.each(
+    ["begin", "complete", "failed", "registry-failed", "after-alarm"].flatMap((phase) =>
+      ["GetCallerIdentity", "DescribeImages", "DescribeInstances", "DescribeKeyPairs"].map(
+        (action) => ({ phase, action }),
+      ),
+    ),
+  )(
+    "revokes an already-admitted $action when controller finalization is $phase",
+    async ({ phase, action }) => {
+      useImmediateTimeouts();
+      const retained = retainedIdentity();
+      const fixture = authorityHTTPFixture(retained);
+      await fixture.controller.claim(retained);
+      const cachedRead = request("GetCallerIdentity");
+      await fixture.candidate.execute(cachedRead);
+      if (phase === "after-alarm") {
+        vi.spyOn(Date, "now").mockReturnValue(Date.parse(retained.expiresAt) - 8 * 60_000);
+        await fixture.run.alarm();
+      }
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const admittedRun = fixture.run;
+      vi.spyOn(fixture.namespace, "get").mockReturnValueOnce({
+        execute: async (
+          runIdentity: AWSQualificationRunIdentity,
+          candidateRequest: AWSQualificationRequest,
+        ) => {
+          entered.resolve();
+          await release.promise;
+          return await admittedRun.execute(runIdentity, candidateRequest);
+        },
+      } as AWSQualificationRun);
+      const result = fixture.candidate.execute(cleanupReadRequest(action, retained));
+      await entered.promise;
+      expect((await fixture.registry.discover(controller))?.cleanupState).toBe("claimed");
+      if (phase === "failed") {
+        fixture.signer.accountId = "999999999999";
+      } else if (phase === "registry-failed") {
+        vi.spyOn(fixture.registryStorage, "put").mockRejectedValueOnce(
+          new Error("registry unavailable"),
+        );
+      }
+      const finalization =
+        phase === "begin" || phase === "registry-failed"
+          ? fixture.controller.beginFinalization(retained.runId)
+          : fixture.controller.finalize(retained.runId);
+      const outcome = await finalization.then(
+        () => "",
+        (error: Error) => error.message,
+      );
+      expect(outcome).toBe(
+        phase === "failed"
+          ? "AWS qualification authority is authenticated to the wrong account"
+          : phase === "registry-failed"
+            ? "registry unavailable"
+            : "",
+      );
+      expect((await fixture.registry.discover(controller))?.cleanupState).toBe(
+        phase === "registry-failed"
+          ? "claimed"
+          : phase === "begin" || phase === "failed"
+            ? "finalizing"
+            : "finalized",
+      );
+      fixture.signer.accountId = fixture.env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID;
+      fixture.fetch.mockClear();
+      fixture.signer.calls.length = 0;
+      release.resolve();
+      await expect(result).rejects.toThrow(/finalizing|finalized/);
+      expect(fixture.fetch).not.toHaveBeenCalled();
+      expect(fixture.signer.calls).toHaveLength(0);
+
+      // Reopening the object and retrying automatic cleanup cannot undo a controller fence.
+      fixture.reopen();
+      await fixture.run.alarm();
+      fixture.fetch.mockClear();
+      fixture.signer.calls.length = 0;
+      await expect(fixture.run.execute(retained, cachedRead)).rejects.toThrow("finalized");
+      await expect(fixture.candidate.execute(request("GetCallerIdentity"))).rejects.toThrow(
+        phase === "registry-failed" ? "finalized" : "not active",
+      );
+      expect(fixture.fetch).not.toHaveBeenCalled();
+      expect(fixture.signer.calls).toHaveLength(0);
+      expect(await fixture.storage.get("run")).toMatchObject({
+        finalizationSource: "controller",
+      });
+    },
+  );
+
+  it("keeps automatic cleanup reads on the signed transport path without admitting foreign resources", async () => {
+    useImmediateTimeouts();
+    const retained = retainedIdentity();
+    const fixture = authorityHTTPFixture(retained);
+    await fixture.controller.claim(retained);
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse(retained.expiresAt) - 8 * 60_000);
+    await fixture.run.alarm();
+    await expect(fixture.run.beginFinalization({ deploymentHash: "f".repeat(64) })).rejects.toThrow(
+      "not bound to this deployment",
+    );
+    fixture.reopen();
+    fixture.fetch.mockClear();
+    fixture.signer.calls.length = 0;
+    await Promise.all(
+      [retained.retainedImage!.imageId, "ami-base"].map((imageId) =>
+        expect(
+          fixture.candidate.execute(request("DescribeImages", { "ImageId.1": imageId }, "ec2")),
+        ).resolves.toMatchObject({ status: 200 }),
+      ),
+    );
+    expect(fixture.fetch).toHaveBeenCalledTimes(4);
+    expect(fixture.signer.calls.map(({ action }) => action)).toEqual([
+      "GetCallerIdentity",
+      "DescribeImages",
+      "GetCallerIdentity",
+      "DescribeImages",
+    ]);
+    await expect(
+      fixture.candidate.execute(cleanupReadRequest("GetCallerIdentity", retained)),
+    ).resolves.toMatchObject({ status: 200 });
+    await expect(
+      fixture.candidate.execute(cleanupReadRequest("DescribeInstances", retained)),
+    ).resolves.toMatchObject({ status: 200 });
+    await expect(
+      fixture.candidate.execute(cleanupReadRequest("DescribeKeyPairs", retained)),
+    ).resolves.toMatchObject({ status: 400 });
+    expect(fixture.fetch).toHaveBeenCalledTimes(9);
+    fixture.fetch.mockClear();
+    fixture.signer.calls.length = 0;
+    await expect(
+      fixture.candidate.execute(request("DescribeImages", { "ImageId.1": "ami-foreign" }, "ec2")),
+    ).rejects.toThrow("outside the run ledger");
+    await expect(
+      fixture.candidate.execute(request("RunInstances", runInstancesParams(), "ec2")),
+    ).rejects.toThrow("finalized");
+    now.mockReturnValue(Date.parse(retained.expiresAt));
+    await expect(fixture.candidate.execute(request("GetCallerIdentity"))).rejects.toThrow(
+      "expired",
+    );
+    expect(fixture.fetch).not.toHaveBeenCalled();
+    expect(fixture.signer.calls).toHaveLength(0);
+  });
+
+  it("finishes a read that won the run queue before persisting controller revocation", async () => {
+    const retained = retainedIdentity();
+    const fixture = authorityHTTPFixture(retained);
+    await fixture.controller.claim(retained);
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const network = fixture.fetch.getMockImplementation()!;
+    fixture.fetch.mockImplementationOnce(async (...args) => {
+      entered.resolve();
+      await release.promise;
+      return await network(...args);
+    });
+    const read = request("GetCallerIdentity");
+    const result = fixture.candidate.execute(read);
+    await entered.promise;
+    const finalization = fixture.controller.beginFinalization(retained.runId);
+    release.resolve();
+    await expect(result).resolves.toMatchObject({ status: 200 });
+    await finalization;
+    expect(await fixture.storage.get("run")).toMatchObject({
+      finalizationSource: "controller",
+      finalizingAt: expect.any(String),
+    });
+    fixture.reopen();
+    fixture.fetch.mockClear();
+    await expect(fixture.run.execute(retained, read)).rejects.toThrow("finalizing");
+    expect(fixture.fetch).not.toHaveBeenCalled();
+  });
+
+  it("preserves cleanup of an enrolled mint run across an authority deployment change", async () => {
+    useImmediateTimeouts();
+    const fixture = authorityHTTPFixture(identity);
+    await fixture.controller.claim(identity);
+    await importKey(fixture);
+    await fixture.candidate.execute(request("RunInstances", runInstancesParams(), "ec2"));
+    const before = await fixture.storage.get<Record<string, unknown>>("run");
+    expect(before).not.toHaveProperty("finalizationSource");
+    fixture.env.CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA = "f".repeat(40);
+    fixture.reopen();
+    fixture.fetch.mockClear();
+    await expect(fixture.candidate.execute(request("GetCallerIdentity"))).rejects.toThrow(
+      "authority deployment changed",
+    );
+    expect(fixture.fetch).not.toHaveBeenCalled();
+    await fixture.controller.finalize(identity.runId);
+    const proof = await fixture.controller.attest(identity.runId);
+    expect(proof).toMatchObject({
+      authoritySha: before!["authoritySha"],
+      finalized: true,
+      finalReceipt: {
+        finalCounts: { images: 0, instances: 0, keyPairs: 0, snapshots: 0, volumes: 0 },
+        failureCodes: [],
+      },
+    });
+    expect(fixture.signer.calls.filter(({ action }) => action === "RunInstances")).toHaveLength(1);
+    expect(fixture.signer.calls.some(({ action }) => action === "TerminateInstances")).toBe(true);
+    await fixture.controller.retire(identity.runId);
+    expect(await fixture.controller.discover()).toBeUndefined();
+  });
+
+  it("does not infer automatic read grace from an existing unclassified finalization fence", async () => {
+    useImmediateTimeouts();
+    const retained = retainedIdentity();
+    const fixture = authorityHTTPFixture(retained);
+    await fixture.controller.claim(retained);
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse(retained.expiresAt) - 8 * 60_000);
+    await fixture.run.alarm();
+    const stored = await fixture.storage.get<Record<string, unknown>>("run");
+    delete stored!["finalizationSource"];
+    await fixture.storage.put("run", stored);
+    fixture.reopen();
+    await fixture.run.alarm();
+    fixture.fetch.mockClear();
+    await expect(fixture.candidate.execute(request("GetCallerIdentity"))).rejects.toThrow(
+      "finalized",
+    );
+    expect(fixture.fetch).not.toHaveBeenCalled();
+    expect(await fixture.storage.get("run")).not.toHaveProperty("finalizationSource");
+  });
+
   it("keeps one idempotent active registry claim until finalized retirement", async () => {
     const storage = new MemoryStorage();
     const registry = new AWSQualificationRegistry({ storage } as never, {} as never);
@@ -284,6 +508,366 @@ describe("AWS qualification authority deployment", () => {
 });
 
 describe("AWS qualification authority", () => {
+  it("preserves lexical AWS account IDs when verifying retained resources", async () => {
+    const fixture = authorityFixture();
+    fixture.env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID = "001234567890";
+    fixture.signer.accountId = "001234567890";
+    await expect(fixture.run.enroll(controller, retainedIdentity())).resolves.toBeUndefined();
+  });
+
+  it.each([
+    [
+      "extra EBS mapping",
+      "<item><deviceName>/dev/sdb</deviceName><ebs><volumeSize>400</volumeSize></ebs></item>",
+      "400",
+      "400",
+      "/dev/sda1",
+    ],
+    ["oversized image volume", "", "401", "400", "/dev/sda1"],
+    ["oversized snapshot", "", "400", "401", "/dev/sda1"],
+    ["different root mapping", "", "400", "400", "/dev/sdb"],
+  ])(
+    "rejects retained enrollment with %s",
+    async (_name, extra, imageSize, snapshotSize, device) => {
+      const fixture = authorityFixture();
+      const execute = fixture.signer.execute.bind(fixture.signer);
+      vi.spyOn(fixture.signer, "execute").mockImplementation(async (...args) => {
+        const response = await execute(...args);
+        const body = await response.text();
+        return xml(
+          args[1] === "DescribeImages"
+            ? body
+                .replace("<volumeSize>400</volumeSize>", `<volumeSize>${imageSize}</volumeSize>`)
+                .replace("<deviceName>/dev/sda1</deviceName>", `<deviceName>${device}</deviceName>`)
+                .replace("</blockDeviceMapping>", `${extra}</blockDeviceMapping>`)
+            : args[1] === "DescribeSnapshots"
+              ? body.replace(
+                  "<volumeSize>400</volumeSize>",
+                  `<volumeSize>${snapshotSize}</volumeSize>`,
+                )
+              : body,
+        );
+      });
+      await expect(fixture.run.enroll(controller, retainedIdentity())).rejects.toThrow(
+        /retained (image|snapshot) identity/,
+      );
+      expect(await fixture.storage.get("run")).toBeUndefined();
+    },
+  );
+
+  it("rewrites the launch root device from enrolled provider metadata", async () => {
+    const fixture = authorityFixture();
+    const execute = fixture.signer.execute.bind(fixture.signer);
+    vi.spyOn(fixture.signer, "execute").mockImplementation(async (...args) => {
+      const response = await execute(...args);
+      return args[1] === "DescribeImages"
+        ? xml((await response.text()).replaceAll("/dev/sda1", "/dev/xvda"))
+        : response;
+    });
+    const retained = retainedIdentity();
+    await fixture.run.enroll(controller, retained);
+    await importKey(fixture, retained);
+    await fixture.run.execute(
+      retained,
+      request(
+        "RunInstances",
+        {
+          ...runInstancesParams(),
+          ImageId: retained.retainedImage!.imageId,
+          "BlockDeviceMapping.1.Ebs.VolumeSize": "400",
+        },
+        "ec2",
+      ),
+    );
+    expect(
+      fixture.signer.calls.find((call) => call.action === "RunInstances")?.parameters,
+    ).toMatchObject({ "BlockDeviceMapping.1.DeviceName": "/dev/xvda" });
+  });
+
+  it("admits one 400 GiB retained launch without adopting borrowed resources", async () => {
+    useImmediateTimeouts();
+    const retained = retainedIdentity();
+    const fixture = authorityFixture({ borrowedInventory: true });
+    await fixture.run.enroll(controller, retained);
+    await importKey(fixture, retained);
+    const parameters = {
+      ...runInstancesParams(),
+      ImageId: retained.retainedImage!.imageId,
+      "BlockDeviceMapping.1.Ebs.VolumeSize": "400",
+    };
+    await expect(
+      fixture.run.execute(
+        retained,
+        request(
+          "RunInstances",
+          {
+            ...parameters,
+            ImageId: "ami-base",
+          },
+          "ec2",
+        ),
+      ),
+    ).rejects.toThrow("outside the run ledger");
+    await expect(
+      fixture.run.execute(
+        retained,
+        request(
+          "RunInstances",
+          {
+            ...parameters,
+            "BlockDeviceMapping.1.Ebs.VolumeSize": "401",
+          },
+          "ec2",
+        ),
+      ),
+    ).rejects.toThrow("outside policy");
+    await fixture.run.execute(retained, request("RunInstances", parameters, "ec2"));
+    await expect(
+      fixture.run.execute(
+        retained,
+        request(
+          "CreateImage",
+          {
+            InstanceId: "i-owned",
+            Name: "forbidden",
+          },
+          "ec2",
+        ),
+      ),
+    ).rejects.toThrow("does not allow CreateImage");
+    for (const [action, forbiddenParameters] of [
+      ["DeregisterImage", { ImageId: retained.retainedImage!.imageId }],
+      ["DeleteSnapshot", { SnapshotId: retained.retainedImage!.snapshotId }],
+      ["CreateTags", { "ResourceId.1": retained.retainedImage!.imageId }],
+    ] as const) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each denial observes the same serial lifecycle ledger.
+      await expect(
+        fixture.run.execute(retained, request(action, forbiddenParameters, "ec2")),
+      ).rejects.toThrow(/outside/);
+    }
+    await fixture.run.execute(
+      retained,
+      request("TerminateInstances", { "InstanceId.1": "i-owned" }, "ec2"),
+    );
+    for (let index = 0; index < 2; index += 1) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- absence must be observed twice in order.
+      await fixture.run.execute(
+        retained,
+        request("DescribeInstances", { "InstanceId.1": "i-owned" }, "ec2"),
+      );
+    }
+    await expect(
+      fixture.run.execute(retained, request("RunInstances", parameters, "ec2")),
+    ).rejects.toThrow("launch budget");
+
+    // Even recovered/tombstoned IDs and tag inventories cannot grant deletion ownership.
+    const ledger = await fixture.storage.get<Record<string, unknown>>("ledger");
+    await fixture.storage.put("ledger", {
+      ...ledger,
+      imageIds: [retained.retainedImage!.imageId],
+      retiredImageIds: [retained.retainedImage!.imageId],
+      snapshotIds: [retained.retainedImage!.snapshotId],
+      retiredSnapshotIds: [retained.retainedImage!.snapshotId],
+    });
+    const recovered = request(
+      "CreateImage",
+      { InstanceId: "i-owned", Name: "never-created" },
+      "ec2",
+    );
+    await fixture.storage.put(`intent:${recovered.opId}`, {
+      phase: "dispatched",
+      requestHash: "recovery-test",
+      request: recovered,
+      startedAt: new Date().toISOString(),
+    });
+    await fixture.run.finalize(controller);
+    expect(fixture.signer.calls.filter((call) => call.action === "RunInstances")).toHaveLength(1);
+    expect(
+      fixture.signer.calls.some((call) =>
+        ["CreateImage", "DeregisterImage", "DeleteSnapshot", "CreateTags"].includes(call.action),
+      ),
+    ).toBe(false);
+    expect((await fixture.run.attest(controller)).finalReceipt?.verification).toContainEqual(
+      expect.objectContaining({ action: "RetainedImagePreserved", outcome: "accepted" }),
+    );
+  });
+
+  it.each(["failOnce", "loseAfterEffect"] as const)(
+    "never redispatches a retained launch after %s",
+    async (failure) => {
+      useImmediateTimeouts();
+      const retained = retainedIdentity();
+      const fixture = authorityFixture({ [failure]: "RunInstances" });
+      await fixture.run.enroll(controller, retained);
+      await importKey(fixture, retained);
+      const launch = request(
+        "RunInstances",
+        {
+          ...runInstancesParams(),
+          ImageId: retained.retainedImage!.imageId,
+          "BlockDeviceMapping.1.Ebs.VolumeSize": "400",
+        },
+        "ec2",
+      );
+      await expect(fixture.run.execute(retained, launch)).rejects.toThrow("lost response");
+      await expect(fixture.run.execute(retained, launch)).rejects.toThrow("requires finalization");
+      await expect(fixture.run.execute(retained, launch)).rejects.toThrow(
+        /retained launch|launch budget|active instance/,
+      );
+      await fixture.run.finalize(controller);
+      expect(fixture.signer.calls.filter((call) => call.action === "RunInstances")).toHaveLength(1);
+      expect((await fixture.run.attest(controller)).finalReceipt?.finalCounts).toEqual({
+        images: 0,
+        instances: 0,
+        keyPairs: 0,
+        snapshots: 0,
+        volumes: 0,
+      });
+    },
+  );
+
+  it("reserves the final eight minutes for retained cleanup", async () => {
+    vi.useFakeTimers();
+    const retained = retainedIdentity();
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, retained);
+    expect(fixture.storage.alarm).toBe(Date.parse(retained.expiresAt) - 8 * 60_000);
+    await importKey(fixture, retained);
+    vi.setSystemTime(Date.parse(retained.expiresAt) - 8 * 60_000);
+    await expect(
+      fixture.run.execute(
+        retained,
+        request(
+          "RunInstances",
+          {
+            ...runInstancesParams(),
+            ImageId: retained.retainedImage!.imageId,
+            "BlockDeviceMapping.1.Ebs.VolumeSize": "400",
+          },
+          "ec2",
+        ),
+      ),
+    ).rejects.toThrow("work window expired");
+    await expect(
+      fixture.run.execute(retained, request("GetCallerIdentity", {}, "sts")),
+    ).resolves.toMatchObject({ status: 200 });
+    await expect(
+      fixture.run.execute(retained, request("DeleteKeyPair", { KeyPairId: "key-owned" }, "ec2")),
+    ).resolves.toMatchObject({ status: 200 });
+    expect(fixture.signer.calls.filter((call) => call.action === "RunInstances")).toHaveLength(0);
+  });
+
+  it("keeps exact rollback image reads available after the cleanup alarm, only until expiry", async () => {
+    useImmediateTimeouts();
+    const retained = retainedIdentity();
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, retained);
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse(retained.expiresAt) - 8 * 60_000);
+    await fixture.run.alarm();
+    expect((await fixture.run.attest(controller)).finalized).toBe(true);
+    await expect(
+      fixture.run.execute(
+        retained,
+        request(
+          "DescribeImages",
+          {
+            "ImageId.1": retained.retainedImage!.imageId,
+          },
+          "ec2",
+        ),
+      ),
+    ).resolves.toMatchObject({ status: 200 });
+    await expect(
+      fixture.run.execute(
+        retained,
+        request(
+          "DescribeImages",
+          {
+            "ImageId.1": "ami-foreign",
+          },
+          "ec2",
+        ),
+      ),
+    ).rejects.toThrow("outside the run ledger");
+    await expect(importKey(fixture, retained)).rejects.toThrow("finalized");
+    now.mockReturnValue(Date.parse(retained.expiresAt));
+    await expect(
+      fixture.run.execute(
+        retained,
+        request(
+          "DescribeImages",
+          {
+            "ImageId.1": retained.retainedImage!.imageId,
+          },
+          "ec2",
+        ),
+      ),
+    ).rejects.toThrow("expired");
+  });
+
+  it("rechecks the retained work cutoff after signer evidence persistence", async () => {
+    const retained = retainedIdentity();
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, retained);
+    await importKey(fixture, retained);
+    const put = fixture.storage.put.bind(fixture.storage);
+    vi.spyOn(fixture.storage, "put").mockImplementation(async (key, value) => {
+      await put(key, value);
+      if (
+        typeof key === "object" &&
+        Object.entries(key).some(
+          ([name, evidence]) =>
+            name.startsWith("evidence:") &&
+            (evidence as AWSQualificationOperationEvidence).action === "RunInstances" &&
+            (evidence as AWSQualificationOperationEvidence).signerDispatches.length > 0,
+        )
+      ) {
+        vi.spyOn(Date, "now").mockReturnValue(Date.parse(retained.expiresAt) - 8 * 60_000);
+      }
+    });
+    await expect(
+      fixture.run.execute(
+        retained,
+        request(
+          "RunInstances",
+          {
+            ...runInstancesParams(),
+            ImageId: retained.retainedImage!.imageId,
+            "BlockDeviceMapping.1.Ebs.VolumeSize": "400",
+          },
+          "ec2",
+        ),
+      ),
+    ).rejects.toThrow("work window expired");
+    expect(fixture.signer.calls.some((call) => call.action === "RunInstances")).toBe(false);
+  });
+
+  it("records the real candidate FSR denial at the authority before signing", async () => {
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    const client = new EC2SpotClient(
+      {
+        CRABBOX_AWS_QUALIFICATION_TRANSPORT: {
+          execute: (value: AWSQualificationRequest) => fixture.run.execute(identity, value),
+        },
+      } as Env,
+      "us-east-1",
+    );
+    await expect(client.enableFastSnapshotRestore(["snap-child"], ["us-east-1a"])).rejects.toThrow(
+      "fast snapshot restore is disabled",
+    );
+    expect(fixture.signer.calls.some((call) => call.action === "EnableFastSnapshotRestores")).toBe(
+      false,
+    );
+    expect((await fixture.run.attest(controller)).operations).toContainEqual(
+      expect.objectContaining({
+        action: "EnableFastSnapshotRestores",
+        denialReason: "policy-denied",
+        signerDispatches: [],
+      }),
+    );
+  });
+
   it("rejects cross-run identity, policy drift, FSR, and foreign resources", async () => {
     const fixture = authorityFixture();
     await expect(fixture.run.enroll({ deploymentHash: "e".repeat(64) }, identity)).rejects.toThrow(
@@ -1492,6 +2076,7 @@ describe("AWS qualification candidate transport", () => {
 
 function authorityFixture(
   options: {
+    borrowedInventory?: boolean;
     delayedImageVisibility?: number;
     delayedKeyVisibility?: number;
     deleteNotFound?: string;
@@ -1520,6 +2105,87 @@ function authorityFixture(
   };
   const run = new AWSQualificationRun({ storage } as never, env as never, signer);
   return { env, run, signer, storage };
+}
+
+function retainedIdentity(): AWSQualificationRunIdentity {
+  return {
+    ...identity,
+    expiresAt: new Date(Date.now() + 38 * 60_000).toISOString(),
+    retainedImage: {
+      imageId: "ami-11111111",
+      snapshotId: "snap-22222222",
+      sourceSha: "c".repeat(40),
+      capsuleSha256: "e".repeat(64),
+    },
+  };
+}
+
+function authorityHTTPFixture(runIdentity: AWSQualificationRunIdentity) {
+  const fixture = authorityFixture();
+  const env = {
+    ...fixture.env,
+    AWS_ACCESS_KEY_ID: "qualification-test",
+    AWS_SECRET_ACCESS_KEY: "qualification-test",
+  };
+  // Keep the production signer and intercept only its final network boundary.
+  const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+    const signed = new Request(input, init);
+    const url = new URL(signed.url);
+    const service = url.hostname.split(".")[0]!;
+    expect(["ec2", "sts"]).toContain(service);
+    expect(url.href).toBe(`https://${service}.us-east-1.amazonaws.com/`);
+    expect(signed.method).toBe("POST");
+    expect(signed.headers.get("authorization")).toMatch(/^AWS4-HMAC-SHA256 /);
+    const parameters = new URLSearchParams(await signed.text());
+    const action = parameters.get("Action")!;
+    parameters.delete("Action");
+    parameters.delete("Version");
+    return await fixture.signer.execute(
+      service,
+      action,
+      "us-east-1",
+      Object.fromEntries(parameters),
+    );
+  });
+  vi.stubGlobal("fetch", fetch);
+  let run = new AWSQualificationRun({ storage: fixture.storage } as never, env as never);
+  const registryStorage = new MemoryStorage();
+  const registry = new AWSQualificationRegistry({ storage: registryStorage } as never, {} as never);
+  const namespace = { idFromName: (name: string) => name, get: () => run };
+  const bindings = {
+    AWS_QUALIFICATION_RUNS: namespace,
+    AWS_QUALIFICATION_REGISTRY: { idFromName: (name: string) => name, get: () => registry },
+  } as never;
+  return {
+    ...fixture,
+    env,
+    fetch,
+    namespace,
+    registry,
+    registryStorage,
+    get run() {
+      return run;
+    },
+    reopen() {
+      run = new AWSQualificationRun({ storage: fixture.storage } as never, env as never);
+    },
+    candidate: new AWSQualificationTransport(bindings, runIdentity),
+    controller: new AWSQualificationController(bindings, controller),
+  };
+}
+
+function cleanupReadRequest(
+  action: string,
+  runIdentity: AWSQualificationRunIdentity,
+): AWSQualificationRequest {
+  if (action === "GetCallerIdentity") return request(action);
+  if (action === "DescribeImages") {
+    return request(action, { "ImageId.1": runIdentity.retainedImage!.imageId }, "ec2");
+  }
+  if (action === "DescribeKeyPairs") {
+    return request(action, { "KeyName.1": "crabbox-qualification" }, "ec2");
+  }
+  return request(action, {}, "ec2");
 }
 
 async function importKey(
@@ -1622,6 +2288,7 @@ class FakeSigner {
 
   constructor(
     private readonly options: {
+      borrowedInventory?: boolean;
       delayedImageVisibility?: number;
       delayedKeyVisibility?: number;
       deleteNotFound?: string;
@@ -1742,6 +2409,14 @@ class FakeSigner {
       return xml("<CreateImageResponse><imageId>ami-created</imageId></CreateImageResponse>");
     }
     if (action === "DescribeImages") {
+      if (parameters["ImageId.1"] === "ami-11111111" || this.options.borrowedInventory) {
+        return xml(`<DescribeImagesResponse><imagesSet><item>
+          <imageId>ami-11111111</imageId><imageOwnerId>${this.accountId}</imageOwnerId>
+          <imageState>available</imageState><architecture>x86_64</architecture>
+          <rootDeviceType>ebs</rootDeviceType><rootDeviceName>/dev/sda1</rootDeviceName>
+          <blockDeviceMapping><item><deviceName>/dev/sda1</deviceName><ebs><snapshotId>snap-22222222</snapshotId><volumeSize>400</volumeSize></ebs></item></blockDeviceMapping>
+        </item></imagesSet></DescribeImagesResponse>`);
+      }
       this.imageDescribeCalls += 1;
       const visible =
         this.imageActive && this.imageDescribeCalls > (this.options.delayedImageVisibility ?? 0);
@@ -1823,6 +2498,12 @@ class FakeSigner {
       );
     }
     if (action === "DescribeSnapshots") {
+      if (parameters["SnapshotId.1"] === "snap-22222222" || this.options.borrowedInventory) {
+        return xml(`<DescribeSnapshotsResponse><snapshotSet><item>
+          <snapshotId>snap-22222222</snapshotId><ownerId>${this.accountId}</ownerId><status>completed</status>
+          <volumeSize>400</volumeSize>
+        </item></snapshotSet></DescribeSnapshotsResponse>`);
+      }
       return xml(
         `<DescribeSnapshotsResponse><snapshotSet>${this.snapshotActive ? "<item><snapshotId>snap-child</snapshotId></item>" : ""}</snapshotSet></DescribeSnapshotsResponse>`,
       );

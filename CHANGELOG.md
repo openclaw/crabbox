@@ -4,13 +4,14 @@
 
 ### Changes
 
+- Qualify an existing AWS image through an isolated protected catalog with predeployment archive-helper admission, one normal-selection lease, exact promotion-revision evidence, full runtime smoke, receipt rollback, and borrowed-image-safe cleanup, without reminting. [PR 2225](https://github.com/openclaw/crabbox/pull/2225). Thanks @vincentkoc.
 - Add an opt-in `python3-venv` preflight that checks a disposable Python environment and pip with confirmed cleanup, without installing host tools or blocking workloads on missing capability. [PR 2217](https://github.com/openclaw/crabbox/pull/2217). Thanks @coygeek.
 - Add a protected, verification-only image-publisher auth check that confirms administrator access without creating leases or publishing images. [PR 2219](https://github.com/openclaw/crabbox/pull/2219). Thanks @vincentkoc.
 
 ### Fixes
 
 - Disable Corepack downloads and automatic project pinning during package-manager preflight version probes, and suppress supported pnpm secondary version/lockfile management, without changing Corepack's project selection or the later workload's environment. [PR 2224](https://github.com/openclaw/crabbox/pull/2224).
-- Finalize abandoned run admissions through bounded, authenticated pre-work bookkeeping, keeping late admission responses from leaving history running and reporting unresolved history honestly. [Issue 2223](https://github.com/openclaw/crabbox/issues/2223).
+- Finalize abandoned run admissions through bounded, authenticated pre-work bookkeeping, keeping late admission responses from leaving history running and reporting unresolved history honestly. [Issue 2223](https://github.com/openclaw/crabbox/issues/2223). [PR 2227](https://github.com/openclaw/crabbox/pull/2227).
 - Render XFCE clients in explicitly requested 8-bit desktops by selecting an 8-bit TrueColor visual, preserving the requested depth and fixed-size Xvfb/x11vnc backend. [PR 2222](https://github.com/openclaw/crabbox/pull/2222). Thanks @vincentkoc.
 - Use a private stdin pipe for WSL2 Python preflight completion and retirement checks, preserving program bytes without creating another staged workload. [PR 2217](https://github.com/openclaw/crabbox/pull/2217).
 - Preserve precommand cancellation and operational failure classifications in saved run timing and local history instead of reporting a workload exit. [PR 2217](https://github.com/openclaw/crabbox/pull/2217).
