@@ -2126,3 +2126,82 @@ func TestInheritedWorkRootCallerContract(t *testing.T) {
 		}
 	}
 }
+
+func TestHyperVDecodedSizing(t *testing.T) {
+	for _, tc := range []struct {
+		name                              string
+		cpus, memory, wantCPU, wantMemory int
+		wantError                         string
+	}{
+		{"negative CPU", -1, 8192, -1, 8192, "hyperv.cpus must be zero or greater"},
+		{"negative memory", 4, -1, 4, -1, "hyperv.memory must be zero or greater"},
+		{"both negative", -2, -2, -2, -2, "hyperv.cpus must be zero or greater"},
+		{"zero defaults", 0, 0, 4, 8192, ""},
+		{"positive", 3, 1536, 3, 1536, ""},
+	} {
+		for _, source := range []string{"decoded", "flags"} {
+			t.Run(tc.name+"/"+source, func(t *testing.T) {
+				cfg := core.BaseConfig()
+				cfg.Provider = providerName
+				cfg.TargetOS = core.TargetWindows
+				cfg.WindowsMode = core.WindowsModeNormal
+				if source == "flags" {
+					fs := flag.NewFlagSet("sizing", flag.ContinueOnError)
+					values := registerFlags(fs, cfg)
+					if err := fs.Parse([]string{fmt.Sprintf("--hyperv-cpu=%d", tc.cpus), fmt.Sprintf("--hyperv-memory=%d", tc.memory)}); err != nil {
+						t.Fatal(err)
+					}
+					if err := applyFlags(&cfg, fs, values); err != nil {
+						t.Fatal(err)
+					}
+					if cfg.HyperV.CPUs != tc.wantCPU || cfg.HyperV.Memory != tc.wantMemory {
+						t.Fatalf("flag normalization lost sizing: %d/%d", cfg.HyperV.CPUs, cfg.HyperV.Memory)
+					}
+				} else {
+					cfg.HyperV.CPUs, cfg.HyperV.Memory = tc.cpus, tc.memory
+				}
+				if validator, ok := any(Provider{}).(core.ProviderConfigValidator); ok {
+					err := validator.ValidateConfig(cfg)
+					var exit core.ExitError
+					if tc.wantError == "" && err != nil || tc.wantError != "" && (!errors.As(err, &exit) || exit.Code != 2 || exit.Message != tc.wantError) {
+						t.Errorf("ValidateConfig: %v", err)
+					}
+				} else {
+					t.Error("selected provider has no configuration validator")
+				}
+				got, err := (Provider{}).Configure(cfg, core.Runtime{})
+				if tc.wantError != "" {
+					var exit core.ExitError
+					if got != nil || !errors.As(err, &exit) || exit.Code != 2 || exit.Message != tc.wantError {
+						t.Fatalf("Configure = %T, %v", got, err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				configured := got.(*backend).cfg.HyperV
+				if configured.CPUs != tc.wantCPU || configured.Memory != tc.wantMemory {
+					t.Fatalf("Configure sizing = %d/%d", configured.CPUs, configured.Memory)
+				}
+			})
+		}
+	}
+}
+
+func TestHyperVUnselectedSizingFlagsRemainRaw(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "unselected"
+	beforeTarget, beforeUser, beforeRoot := cfg.TargetOS, cfg.SSHUser, cfg.WorkRoot
+	fs := flag.NewFlagSet("sizing", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--hyperv-cpu=-2", "--hyperv-memory=0"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HyperV.CPUs != -2 || cfg.HyperV.Memory != 0 || cfg.Provider != "unselected" || cfg.TargetOS != beforeTarget || cfg.SSHUser != beforeUser || cfg.WorkRoot != beforeRoot {
+		t.Fatal("unselected flags changed normalization contract")
+	}
+}

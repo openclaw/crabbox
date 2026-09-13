@@ -92,6 +92,12 @@ Notes:
 | `--hyperv-switch` | `Default Switch` | Hyper-V virtual switch name |
 | `--hyperv-init-password` | `false` | Set the guest password at first boot via the lease disk (password-less auto-logon templates) |
 
+Decoded negative CPU or memory values, including environment and explicit flag
+values, are rejected during configuration validation. Zero retains the defaults
+of 4 CPUs and 8192 MB; positive values are passed through unchanged. YAML CPU
+and memory values still apply only when positive, so zero or negative YAML
+values leave the previous setting unchanged.
+
 ### Config file
 
 ```yaml

@@ -73,10 +73,10 @@ func applyDefaults(cfg *core.Config) {
 		}
 	}
 	cfg.HyperV.WorkRoot = core.ResolveInheritedWorkRoot(cfg.HyperV.WorkRoot, cfg.WorkRoot, `C:\crabbox`)
-	if cfg.HyperV.CPUs <= 0 {
+	if cfg.HyperV.CPUs == 0 {
 		cfg.HyperV.CPUs = 4
 	}
-	if cfg.HyperV.Memory <= 0 {
+	if cfg.HyperV.Memory == 0 {
 		cfg.HyperV.Memory = 8192
 	}
 	if cfg.HyperV.Switch == "" {
