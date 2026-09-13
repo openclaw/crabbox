@@ -26,6 +26,8 @@ func (Provider) Spec() core.ProviderSpec {
 		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop, core.FeatureBrowser, core.FeatureCacheVolume, core.FeatureCheckpoint, core.FeatureFork, core.FeatureRunSession},
 		Coordinator:      core.CoordinatorNever,
 		ClassDisposition: core.ProviderClassDispositionUnmapped,
+
+		ActionsRunnerUnsupported: true,
 	}
 }
 

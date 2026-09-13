@@ -681,6 +681,8 @@ type ProviderSpec struct {
 	// TailscaleEgressOnly marks FeatureTailscale as outbound userspace access,
 	// not a bidirectional peer endpoint.
 	TailscaleEgressOnly bool
+	// ActionsRunnerUnsupported rejects --actions-runner, not ordinary Actions hydration.
+	ActionsRunnerUnsupported bool
 }
 
 type ProviderKind string
@@ -1951,8 +1953,8 @@ func validateActionsRunnerCapability(backend Backend, cfg Config) error {
 	if _, ok := backend.(SSHLeaseBackend); !ok {
 		return Exit(2, "--actions-runner requires an SSH lease provider")
 	}
-	if name := backend.Spec().Name; name == "local-container" || name == "apple-container" || name == "multipass" {
-		return Exit(2, "--actions-runner is not supported for provider=%s; use normal crabbox run or a remote SSH provider", name)
+	if spec := backend.Spec(); spec.ActionsRunnerUnsupported {
+		return Exit(2, "--actions-runner is not supported for provider=%s; use normal crabbox run or a remote SSH provider", spec.Name)
 	}
 	if !supportsGitHubActionsRunnerTarget(SSHTarget{TargetOS: cfg.TargetOS, WindowsMode: cfg.WindowsMode}) {
 		return Exit(2, "--actions-runner requires target=linux or target=windows")

@@ -186,6 +186,11 @@ the declarative catalog for supported target and architecture combinations.
 
 Add optional capabilities as small interfaces instead of widening every backend.
 
+`ProviderSpec.ActionsRunnerUnsupported` declares that an SSH backend cannot host
+`--actions-runner`. Core enforces that restriction before target admission;
+ordinary Actions hydration remains available. Providers otherwise retain the
+shared Linux and Windows runner support.
+
 Provider-owned idle activity during an SSH run is optional:
 
 ```go
