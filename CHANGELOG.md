@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Add an opt-in `python3-venv` preflight that checks a disposable Python environment and pip with confirmed cleanup, without installing host tools or blocking workloads on missing capability. [Issue 1578](https://github.com/openclaw/crabbox/issues/1578). Thanks @coygeek.
+- Add an opt-in `python3-venv` preflight that checks a disposable Python environment and pip with confirmed cleanup, without installing host tools or blocking workloads on missing capability. [PR 2217](https://github.com/openclaw/crabbox/pull/2217). Thanks @coygeek.
 
 ## 0.58.0 - 2026-09-12
 
