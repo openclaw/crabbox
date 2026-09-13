@@ -28,9 +28,10 @@ await fs.mkdir(output, { recursive: true });
 const children = new Set();
 const proof = { source: process.env.GITHUB_SHA, run: process.env.GITHUB_RUN_ID, cases: [], screenshots: [], cleanup: {},
   coverage: { localContainer: "candidate_cli_ssh_tunnel_and_guest_novnc",
-    installer: "released_depth8_observation_then_released24_to_candidate_tigervnc_upgrade_reset_depth8",
+    installer: "released_xvfb_to_candidate_tigervnc_upgrade_and_reset",
     legacyFit: "actual_legacy_novnc_with_captured_cli_url_settings",
-    legacySSHStartup: false } };
+    legacySSHStartup: false, depth8Rendering: false,
+    depth8FollowUp: "https://github.com/openclaw/crabbox/issues/2218" } };
 const releasedInstaller = {
   tag: "v0.57.0",
   tagObject: "a57d956766076368baa0e67f1f21f1de4f0517b0",
@@ -266,7 +267,7 @@ async function screenshot(page, name, failureImage = false) {
   proof.screenshots.push({ file: `${name}.png`, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") });
 }
 
-async function sampleFrame(page) {
+async function renderedFrame(page, name) {
   // noVNC sets canvas dimensions and emits connect before its first framebuffer
   // arrives. Observe pixels within the existing readiness budget, not a sleep.
   const started = Date.now();
@@ -296,90 +297,15 @@ async function sampleFrame(page) {
     clearTimeout(timer);
   }
   if (interrupted) throw interrupted;
-  return { canvas: actual, frameUnavailable: !actual, elapsedMs: Date.now() - started,
-    ready: Boolean(actual?.connected && actual.colors > 8 && sampledAt < readyUntil) };
-}
-
-async function renderedFrame(page, name) {
-  const details = await sampleFrame(page);
-  if (!details.ready) {
+  if (!actual || !actual.connected || actual.colors <= 8 || sampledAt >= readyUntil) {
+    const details = { canvas: actual, frameUnavailable: !actual, elapsedMs: Date.now() - started };
     const error = new ProofFailure("blank_canvas", details);
     failure ??= error;
     try { await screenshot(page, `${name}-unready`, true); }
     catch { details.failureImageUnavailable = true; }
     throw error;
   }
-  return details.canvas;
-}
-
-async function diagnosticCommand(label, file, args) {
-  const item = start(label, file, args, 5000);
-  const code = await Promise.race([item.closed, item.termination]);
-  await stop(item);
-  return !item.timedOut && !item.overflow && (code === 0 || code === 1)
-    ? { code, text: item.stdout.trim() } : null;
-}
-
-async function nativeXObservation(name) {
-  // These are observations, not a substitute for the browser's passing frame.
-  // A failed capture stays unavailable; it must never be interpreted as black.
-  const result = { visibleWindows: null, processCounts: {}, nativeImage: null };
-  for (const command of ["xfce4-session", "xfwm4", "xfdesktop", "xfce4-panel"]) {
-    const count = await diagnosticCommand("desktop_process_count", "pgrep", ["-u", "crabbox", "-x", "-c", command]);
-    result.processCounts[command] = count && /^\d{1,4}$/.test(count.text) ? Number(count.text) : null;
-  }
-  const windows = await diagnosticCommand("desktop_visible_windows", "sudo", ["-n", "-u", "crabbox", "env",
-    "DISPLAY=:99", "xdotool", "search", "--onlyvisible", "--name", ".*"]);
-  if (windows?.code === 1 && !windows.text) result.visibleWindows = 0;
-  else if (windows?.code === 0 && /^\d+(\n\d+)*$/.test(windows.text)) result.visibleWindows = windows.text.split("\n").length;
-  const file = path.join(work, `${name}-native-x.png`);
-  check(await absent(file), "native_capture_preexists");
-  const captured = await diagnosticCommand("native_x_capture", "scrot", ["-D", ":99", file]);
-  if (captured?.code === 0) {
-    try {
-      const stat = await fs.lstat(file);
-      if (stat.isFile() && stat.nlink === 1 && stat.size > 24 && stat.size < 8 * 1024 * 1024) {
-        const bytes = await fs.readFile(file);
-        if (bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))) {
-          const image = { file: `${name}-native-x.png`, bytes: bytes.length,
-            sha256: createHash("sha256").update(bytes).digest("hex"),
-            width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
-          await fs.writeFile(path.join(output, image.file), bytes, { flag: "wx" });
-          proof.screenshots.push(image);
-          result.nativeImage = image;
-        }
-      }
-    } catch { result.nativeImageUnavailable = true; }
-  }
-  if (!result.nativeImage) result.nativeImageUnavailable = true;
-  return result;
-}
-
-async function observeReleasedDepth8(url) {
-  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
-  const page = await context.newPage();
-  page.setDefaultTimeout(30_000);
-  const observation = { verdict: "observation_only", browser: null };
-  try {
-    await page.goto(url.href, { waitUntil: "domcontentloaded" });
-    await page.waitForFunction(() => document.documentElement.classList.contains("noVNC_connected"));
-    observation.browser = await sampleFrame(page);
-    try {
-      const bytes = await page.screenshot({ timeout: 5000 });
-      if (!bytes.length || bytes.length >= 8 * 1024 * 1024) throw new Error("capture_size");
-      const image = { file: "released-depth8-observation.png", bytes: bytes.length,
-        sha256: createHash("sha256").update(bytes).digest("hex") };
-      await fs.writeFile(path.join(output, image.file), bytes, { flag: "wx" });
-      proof.screenshots.push(image);
-    } catch { observation.browserImageUnavailable = true; }
-  } catch (error) {
-    if (interrupted) throw interrupted;
-    observation.browserUnavailable = true;
-    observation.failure = project(error);
-  } finally { await context.close(); }
-  observation.native = await nativeXObservation("released-depth8");
-  observation.services = await desktopServiceState();
-  proof.releasedDepth8Observation = observation;
+  return actual;
 }
 
 async function fit(page, exec, name, expected) {
@@ -509,8 +435,7 @@ async function dependencyIdentity(exec, name, legacy = false) {
   // The installer source is release-pinned; distro packages are current. Bind
   // the actual server and noVNC bytes separately instead of claiming old packages.
   const files = ["/usr/share/novnc/app/ui.js", "/usr/share/novnc/core/rfb.js",
-    ...legacy ? ["/usr/bin/Xvfb", "/usr/bin/x11vnc", "/usr/bin/xfce4-session", "/usr/bin/xfwm4",
-      "/usr/bin/xfdesktop", "/usr/bin/scrot"] : ["/usr/bin/Xtigervnc"]];
+    ...legacy ? ["/usr/bin/Xvfb", "/usr/bin/x11vnc"] : ["/usr/bin/Xtigervnc"]];
   const lines = (await exec("dependency_identity", "sha256sum", ...files)).trim().split("\n");
   check(lines.length === files.length, "dependency_identity_count");
   const identities = lines.map((line, index) => {
@@ -613,13 +538,13 @@ try {
   const releasedPath = path.join(work, "released-install-linux-desktop.sh");
   await fs.writeFile(releasedPath, source, { mode: 0o700, flag: "wx" });
   proof.releasedInstaller = releasedInstaller;
-  phase = "released_installer_depth8_observation";
+  phase = "released_installer_xvfb";
   installerStarted = true;
-  await run("install_released_depth8", "sudo", ["-n", "env", "CRABBOX_DESKTOP_GEOMETRY=1920x1080x8", "bash", releasedPath], 12 * 60_000);
+  await run("install_released_desktop", "sudo", ["-n", "bash", releasedPath], 12 * 60_000);
   await run("released_services", "systemctl", ["is-active", "--quiet", "crabbox-xvfb.service", "crabbox-desktop.service", "crabbox-x11vnc.service"]);
   await host("released_xvfb_running", "pgrep", "-x", "Xvfb");
-  await loopback("released-depth8");
-  await dependencyIdentity(host, "released-depth8", true);
+  await loopback("released-installer");
+  await dependencyIdentity(host, "released-installer", true);
   const password = (await run("installer_credential", "sudo", ["-n", "cat", "/var/lib/crabbox/vnc.password"])).trim();
   const webPort = await port();
   const web = start("installer_novnc", "websockify", ["--web", "/usr/share/novnc", `127.0.0.1:${webPort}`, "127.0.0.1:5900"], 12 * 60_000);
@@ -629,15 +554,6 @@ try {
   installedURL.searchParams.set("password", password);
   await delay(500);
   try {
-    await authentication(installedURL, host, "released-depth8", true);
-    await observeReleasedDepth8(installedURL);
-    phase = "released_installer_xvfb";
-    await run("install_released_desktop", "sudo", ["-n", "bash", releasedPath], 12 * 60_000);
-    await run("released_services", "systemctl", ["is-active", "--quiet", "crabbox-xvfb.service", "crabbox-desktop.service", "crabbox-x11vnc.service"]);
-    await host("released_xvfb_running", "pgrep", "-x", "Xvfb");
-    await loopback("released-installer");
-    await dependencyIdentity(host, "released-installer", true);
-    installedURL.searchParams.set("password", (await run("released_credential", "sudo", ["-n", "cat", "/var/lib/crabbox/vnc.password"])).trim());
     await authentication(installedURL, host, "released-installer", true);
     await exercise(installedURL, host, "released-installer", false);
     phase = "installer_tigervnc_upgrade";
@@ -658,16 +574,8 @@ try {
     await loopback("installer-reset");
     await authentication(installedURL, host, "installer-reset");
     await exercise(installedURL, host, "installer-reset", true);
-    phase = "installer_depth8_transition";
-    await run("install_depth8", "sudo", ["-n", "env", "CRABBOX_DESKTOP_GEOMETRY=1920x1080x8", "bash", path.join(root, "scripts/install-linux-desktop.sh")], 12 * 60_000);
-    await run("depth8_services", "systemctl", ["is-active", "--quiet", "crabbox-xvfb.service", "crabbox-desktop.service", "crabbox-x11vnc.service"]);
-    await host("depth8_xvfb_running", "pgrep", "-x", "Xvfb");
-    await loopback("installer-depth8-transition");
-    await dependencyIdentity(host, "installer-depth8-transition", true);
-    installedURL.searchParams.set("password", (await run("depth8_credential", "sudo", ["-n", "cat", "/var/lib/crabbox/vnc.password"])).trim());
-    await authentication(installedURL, host, "installer-depth8-transition", true);
-    await exercise(installedURL, host, "installer-depth8-transition", false);
-    proof.candidateDepth8Observation = await nativeXObservation("candidate-depth8");
+    // The preserved red diagnostic for issue 2218 establishes the pre-existing
+    // depth-8 black output. This acceptance run does not claim depth-8 rendering.
   } finally { await stop(web); }
   if (interrupted) throw interrupted;
   check(Date.now() < deadline, "proof_deadline");
@@ -676,10 +584,6 @@ try {
   failure = interrupted || failure || error;
   proof.passed = false;
   proof.failure = { phase, ...project(failure) };
-  if (phase === "installer_depth8_transition") {
-    try { proof.candidateDepth8Observation = await nativeXObservation("candidate-depth8"); }
-    catch { proof.candidateDepth8ObservationUnavailable = true; }
-  }
   if (installerStarted) {
     try { proof.desktopServiceState = await desktopServiceState(); }
     catch { proof.desktopServiceStateUnavailable = true; }

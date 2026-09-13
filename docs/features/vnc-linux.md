@@ -64,9 +64,13 @@ TigerVNC, like managed cloud XFCE desktops. Existing Xvfb/x11vnc containers
 remain usable at their fixed resolution; recreate those leases for resizing.
 The installer keeps `CRABBOX_DESKTOP_GEOMETRY=1920x1080x24` as its initial size
 and depth, not a permanent size limit. Depths 16, 24, and 32 use TigerVNC.
-The released 8-bit input remains supported through the fixed-size Xvfb/x11vnc
-backend because TigerVNC cannot start at depth 8. Choose a higher depth for
-dynamic sizing; the installer never silently changes the requested depth.
+The 8-bit input still selects the fixed-size Xvfb/x11vnc backend because
+TigerVNC cannot start at depth 8; the installer never silently changes the
+requested depth. With the tested Ubuntu packages, both the released v0.57.0
+installer and the current backend produce a black desktop at depth 8.
+This pre-existing rendering limitation is tracked in
+[issue 2218](https://github.com/openclaw/crabbox/issues/2218).
+Use the default 24-bit geometry for a working, resize-capable desktop.
 
 The `wayland` and `gnome` profiles need a resize-capable WayVNC and a headless
 compositor output. Actual Ubuntu 26.04 packages include WayVNC 0.9.1; Ubuntu
