@@ -14,8 +14,9 @@ type StatusWait struct {
 	parent   context.Context
 	ctx      context.Context
 	cancel   context.CancelFunc
-	clock    core.Clock
+	now      func() time.Time
 	deadline time.Time
+	wait     bool
 	timeout  func(string) error
 }
 
@@ -28,8 +29,9 @@ func NewStatusWait(ctx context.Context, req core.StatusRequest, clock core.Clock
 		parent:   ctx,
 		ctx:      ctx,
 		cancel:   func() {},
-		clock:    clock,
+		now:      func() time.Time { return core.ClockNow(clock) },
 		deadline: core.ClockNow(clock).Add(duration),
+		wait:     req.Wait,
 		timeout:  timeout,
 	}
 	if req.Wait {
@@ -41,6 +43,23 @@ func NewStatusWait(ctx context.Context, req core.StatusRequest, clock core.Clock
 func (w *StatusWait) Context() context.Context { return w.ctx }
 
 func (w *StatusWait) Close() { w.cancel() }
+
+// Poll shares observation sequencing while the adapter retains transport-error
+// classification and ownership checks. done permits a final non-ready result.
+func (w *StatusWait) Poll(id string, interval time.Duration, observe func(context.Context) (core.StatusView, bool, error)) (core.StatusView, error) {
+	for {
+		view, done, err := observe(w.ctx)
+		if done || err != nil {
+			return view, err
+		}
+		if !w.wait || view.Ready {
+			return view, nil
+		}
+		if err := w.Next(id, interval); err != nil {
+			return core.StatusView{}, err
+		}
+	}
+}
 
 // ContextError distinguishes our deadline from cancellation by the caller.
 // Call it only at transport/probe boundaries, never over ownership errors.
@@ -54,13 +73,11 @@ func (w *StatusWait) ContextError(id string) error {
 // Next is called only after a waiting adapter has ruled out readiness and
 // terminal states. The adapter clock deadline takes precedence at this point.
 func (w *StatusWait) Next(id string, interval time.Duration) error {
-	if core.ClockNow(w.clock).After(w.deadline) {
+	if w.now().After(w.deadline) {
 		return w.timeout(id)
 	}
-	select {
-	case <-w.ctx.Done():
+	if err := core.SleepContext(w.ctx, interval); err != nil {
 		return w.ContextError(id)
-	case <-time.After(interval):
-		return nil
 	}
+	return nil
 }

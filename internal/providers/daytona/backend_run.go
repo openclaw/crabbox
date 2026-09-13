@@ -17,6 +17,7 @@ import (
 	sdkoptions "github.com/daytonaio/daytona/libs/sdk-go/pkg/options"
 	sdktypes "github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 var daytonaCleanupTimeout = 30 * time.Second
@@ -275,37 +276,26 @@ func (b *daytonaLeaseBackend) Status(ctx context.Context, req core.StatusRequest
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	deadline := time.Now().Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = time.Now().Add(5 * time.Minute)
-	}
-	for {
+	return shared.PollStatus(ctx, req, time.Now, func(ctx context.Context) (core.StatusView, bool, error) {
 		sandbox, leaseID, err := resolveDaytonaSandbox(ctx, client, b.cfg, req.ID)
 		if err != nil {
 			if exists && claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == "acquired" && daytonaIsNotFoundError(err) {
 				if err := b.releaseFixed(ctx, claim, "", true, ""); err != nil {
-					return core.StatusView{}, err
+					return core.StatusView{}, false, err
 				}
-				return b.Status(ctx, req)
+				view, err := b.Status(ctx, req)
+				return view, true, err
 			}
-			return core.StatusView{}, err
+			return core.StatusView{}, false, err
 		}
 		view := daytonaStatusView(leaseID, sandbox)
-		if !req.Wait || view.Ready {
-			return view, nil
+		if req.Wait && !view.Ready && daytonaStateFailed(daytonaSandboxState(sandbox)) {
+			return view, true, core.Exit(5, "daytona sandbox %s entered terminal state=%s", req.ID, daytonaSandboxState(sandbox))
 		}
-		if daytonaStateFailed(daytonaSandboxState(sandbox)) {
-			return view, core.Exit(5, "daytona sandbox %s entered terminal state=%s", req.ID, daytonaSandboxState(sandbox))
-		}
-		if time.Now().After(deadline) {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for sandbox %s to become ready", req.ID)
-		}
-		select {
-		case <-ctx.Done():
-			return core.StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
+		return view, false, nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for sandbox %s to become ready", req.ID)
+	})
 }
 
 func (b *daytonaLeaseBackend) Stop(ctx context.Context, req core.StopRequest) error {

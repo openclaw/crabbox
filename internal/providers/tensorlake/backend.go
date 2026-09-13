@@ -226,12 +226,8 @@ func (b *tensorlakeBackend) Status(ctx context.Context, req core.StatusRequest) 
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = core.ClockNow(b.rt.Clock).Add(5 * time.Minute)
-	}
 	var lastDescribeErr error
-	for {
+	view, err := shared.PollStatus(ctx, req, func() time.Time { return core.ClockNow(b.rt.Clock) }, func(ctx context.Context) (core.StatusView, bool, error) {
 		var item sandboxIdentity
 		describeErr := core.WithLeaseClaimUnchanged(leaseID, claim, func() error {
 			var err error
@@ -241,7 +237,7 @@ func (b *tensorlakeBackend) Status(ctx context.Context, req core.StatusRequest) 
 		state := item.State
 		if describeErr != nil {
 			if !req.Wait {
-				return core.StatusView{}, describeErr
+				return core.StatusView{}, false, describeErr
 			}
 			lastDescribeErr = describeErr
 		} else {
@@ -263,26 +259,14 @@ func (b *tensorlakeBackend) Status(ctx context.Context, req core.StatusRequest) 
 				"state":    state,
 			},
 		}
-		if !req.Wait || view.Ready {
-			return view, nil
-		}
-		if core.ClockNow(b.rt.Clock).After(deadline) {
-			err := core.Exit(5, "timed out waiting for tensorlake sandbox %s to become ready", sandboxID)
-			if lastDescribeErr != nil {
-				return core.StatusView{}, errors.Join(err, fmt.Errorf("last tensorlake describe failed: %w", lastDescribeErr))
-			}
-			return core.StatusView{}, err
-		}
-		select {
-		case <-ctx.Done():
-			err := ctx.Err()
-			if lastDescribeErr != nil {
-				return core.StatusView{}, errors.Join(err, fmt.Errorf("last tensorlake describe failed: %w", lastDescribeErr))
-			}
-			return core.StatusView{}, err
-		case <-time.After(2 * time.Second):
-		}
+		return view, false, nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for tensorlake sandbox %s to become ready", sandboxID)
+	})
+	if err != nil && lastDescribeErr != nil {
+		return view, errors.Join(err, fmt.Errorf("last tensorlake describe failed: %w", lastDescribeErr))
 	}
+	return view, err
 }
 
 func (b *tensorlakeBackend) Stop(ctx context.Context, req core.StopRequest) error {

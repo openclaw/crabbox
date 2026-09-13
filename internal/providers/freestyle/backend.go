@@ -185,31 +185,19 @@ func (b *freestyleBackend) Status(ctx context.Context, req core.StatusRequest) (
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	deadline := b.now().Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = b.now().Add(5 * time.Minute)
-	}
-	for {
+	return shared.PollStatus(ctx, req, b.now, func(ctx context.Context) (core.StatusView, bool, error) {
 		vm, err := client.GetVM(ctx, id)
 		if err != nil {
-			return core.StatusView{}, freestyleError("get vm", err)
+			return core.StatusView{}, false, freestyleError("get vm", err)
 		}
 		view := freestyleStatusView(leaseID, vm)
-		if !req.Wait || view.Ready {
-			return view, nil
+		if req.Wait && !view.Ready && freestyleStatusTerminal(view.State) {
+			return core.StatusView{}, false, core.Exit(5, "freestyle vm %s entered terminal state %q before becoming ready", id, view.State)
 		}
-		if freestyleStatusTerminal(view.State) {
-			return core.StatusView{}, core.Exit(5, "freestyle vm %s entered terminal state %q before becoming ready", id, view.State)
-		}
-		if b.now().After(deadline) {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for vm %s to become ready", id)
-		}
-		select {
-		case <-ctx.Done():
-			return core.StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
+		return view, false, nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for vm %s to become ready", id)
+	})
 }
 
 func (b *freestyleBackend) Stop(ctx context.Context, req core.StopRequest) error {

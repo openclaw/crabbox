@@ -458,26 +458,22 @@ func (b *isloBackend) Status(ctx context.Context, req core.StatusRequest) (core.
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	deadline := b.now().Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = b.now().Add(5 * time.Minute)
-	}
-	for {
+	return shared.PollStatus(ctx, req, b.now, func(ctx context.Context) (core.StatusView, bool, error) {
 		sandbox, err := b.resolveIsloSandbox(ctx, client, leaseID, name)
 		if err != nil {
-			return core.StatusView{}, err
+			return core.StatusView{}, false, err
 		}
 		view := isloStatusView(leaseID, sandbox)
 		if view.Labels["islo_resource_id_mismatch"] == "true" {
 			if req.Wait {
-				return view, core.Exit(4, "islo sandbox %q does not identify resource %s claimed by lease %q; refusing to wait on an unverified resource", name, view.Labels["islo_claimed_resource_id"], leaseID)
+				return view, true, core.Exit(4, "islo sandbox %q does not identify resource %s claimed by lease %q; refusing to wait on an unverified resource", name, view.Labels["islo_claimed_resource_id"], leaseID)
 			}
-			return view, nil
+			return view, true, nil
 		}
 		var tailscaleValidationErr error
 		if sandbox != nil && isloStatusReady(sandbox.GetStatus()) {
 			if strings.TrimSpace(view.ServerID) == "" {
-				return core.StatusView{}, core.Exit(5, "islo sandbox %s returned no current name; refusing remote status checks", leaseID)
+				return core.StatusView{}, false, core.Exit(5, "islo sandbox %s returned no current name; refusing remote status checks", leaseID)
 			}
 			if _, err := b.ensureLeaseTailscale(ctx, client, view.ServerID, core.NewLeaseSlug(leaseID), leaseID, false); err != nil {
 				switch {
@@ -486,27 +482,19 @@ func (b *isloBackend) Status(ctx context.Context, req core.StatusRequest) (core.
 				case errors.Is(err, core.ErrTailnetPeerValidationUnavailable):
 					tailscaleValidationErr = err
 				default:
-					return core.StatusView{}, err
+					return core.StatusView{}, false, err
 				}
 			}
 		}
 		view = isloStatusView(leaseID, sandbox)
 		applyIsloTailscaleValidationError(&view, tailscaleValidationErr)
-		if !req.Wait || view.Ready {
-			return view, nil
+		if req.Wait && !view.Ready && isloStatusTerminal(view.State) {
+			return core.StatusView{}, false, core.Exit(5, "sandbox %s entered terminal state %q before becoming ready", name, view.State)
 		}
-		if isloStatusTerminal(view.State) {
-			return core.StatusView{}, core.Exit(5, "sandbox %s entered terminal state %q before becoming ready", name, view.State)
-		}
-		if b.now().After(deadline) {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for sandbox %s to become ready", name)
-		}
-		select {
-		case <-ctx.Done():
-			return core.StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
+		return view, false, nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for sandbox %s to become ready", name)
+	})
 }
 
 func (b *isloBackend) Stop(ctx context.Context, req core.StopRequest) error {

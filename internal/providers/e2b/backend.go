@@ -194,22 +194,16 @@ func (b *e2bBackend) Status(ctx context.Context, req core.StatusRequest) (core.S
 		}
 		return core.StatusView{}, err
 	}
-	for {
-		sandbox, err := client.GetSandbox(wait.Context(), sandboxID)
+	return wait.Poll(sandboxID, 2*time.Second, func(ctx context.Context) (core.StatusView, bool, error) {
+		sandbox, err := client.GetSandbox(ctx, sandboxID)
 		if err != nil {
 			if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
-				return core.StatusView{}, ctxErr
+				return core.StatusView{}, false, ctxErr
 			}
-			return core.StatusView{}, e2bError("get sandbox", err)
+			return core.StatusView{}, false, e2bError("get sandbox", err)
 		}
-		view := sandboxViews.Status(leaseID, sandbox)
-		if !req.Wait || view.Ready {
-			return view, nil
-		}
-		if err := wait.Next(sandboxID, 2*time.Second); err != nil {
-			return core.StatusView{}, err
-		}
-	}
+		return sandboxViews.Status(leaseID, sandbox), false, nil
+	})
 }
 
 func (b *e2bBackend) Stop(ctx context.Context, req core.StopRequest) error {

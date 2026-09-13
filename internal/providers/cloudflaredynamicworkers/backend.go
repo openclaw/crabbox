@@ -14,6 +14,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type backend struct {
@@ -363,31 +364,19 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = core.ClockNow(b.rt.Clock).Add(5 * time.Minute)
-	}
-	for {
+	return shared.PollStatus(ctx, req, func() time.Time { return core.ClockNow(b.rt.Clock) }, func(ctx context.Context) (core.StatusView, bool, error) {
 		status, err := client.Status(ctx, leaseID)
 		if err != nil {
 			if notFoundError(err) {
-				return statusView(leaseID, slug, runStatus{ID: leaseID, Status: "missing"}), nil
+				return statusView(leaseID, slug, runStatus{ID: leaseID, Status: "missing"}), true, nil
 			}
-			return core.StatusView{}, providerError("status", err)
+			return core.StatusView{}, false, providerError("status", err)
 		}
 		view := statusView(leaseID, slug, status)
-		if !req.Wait || view.Ready || terminalState(view.State) {
-			return view, nil
-		}
-		if core.ClockNow(b.rt.Clock).After(deadline) {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for %s run %s to become ready", providerName, leaseID)
-		}
-		select {
-		case <-ctx.Done():
-			return core.StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
+		return view, terminalState(view.State), nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for %s run %s to become ready", providerName, leaseID)
+	})
 }
 
 func (b *backend) Stop(ctx context.Context, req core.StopRequest) error {

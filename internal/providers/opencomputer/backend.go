@@ -240,18 +240,18 @@ func (b *openComputerBackend) Status(ctx context.Context, req core.StatusRequest
 		return core.Exit(5, "timed out waiting for opencomputer sandbox %s to become ready", id)
 	})
 	defer wait.Close()
-	for {
-		sb, getErr := api.getSandboxWithTags(wait.Context(), sandboxID)
+	return wait.Poll(sandboxID, 2*time.Second, func(ctx context.Context) (core.StatusView, bool, error) {
+		sb, getErr := api.getSandboxWithTags(ctx, sandboxID)
 		if getErr != nil {
 			if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
-				return core.StatusView{}, ctxErr
+				return core.StatusView{}, false, ctxErr
 			}
 			// Surface real API failures (auth, 5xx, sandbox gone) instead of
 			// masking them as a not-ready status.
-			return core.StatusView{}, getErr
+			return core.StatusView{}, false, getErr
 		}
 		if err := validateOpenComputerSandboxOwnership(claim, sb); err != nil {
-			return core.StatusView{}, err
+			return core.StatusView{}, false, err
 		}
 		state := strings.ToLower(strings.TrimSpace(sb.Status))
 		view := core.StatusView{
@@ -271,16 +271,11 @@ func (b *openComputerBackend) Status(ctx context.Context, req core.StatusRequest
 				"state":    state,
 			},
 		}
-		if !req.Wait || view.Ready {
-			return view, nil
+		if req.Wait && !view.Ready && isTerminalState(state) {
+			return core.StatusView{}, false, core.Exit(5, "opencomputer sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
-		if isTerminalState(state) {
-			return core.StatusView{}, core.Exit(5, "opencomputer sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
-		}
-		if err := wait.Next(sandboxID, 2*time.Second); err != nil {
-			return core.StatusView{}, err
-		}
-	}
+		return view, false, nil
+	})
 }
 
 func (b *openComputerBackend) Stop(ctx context.Context, req core.StopRequest) error {

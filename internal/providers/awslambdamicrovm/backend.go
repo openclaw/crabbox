@@ -279,7 +279,7 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return core.StatusView{}, core.Exit(5, "timed out waiting for AWS Lambda MicroVM %s", vm.ID)
 		}
-		if err := sleepContext(ctx, 2*time.Second); err != nil {
+		if err := core.SleepContext(ctx, 2*time.Second); err != nil {
 			return core.StatusView{}, err
 		}
 		vm, err = control.Get(ctx, vm.ID)
@@ -457,7 +457,7 @@ func (b *backend) resolve(ctx context.Context, control controlPlane, identifier 
 func (b *backend) waitReady(ctx context.Context, control controlPlane, runner runnerAPI, vm microVM) (microVM, error) {
 	deadline := core.ClockNow(b.rt.Clock).Add(lifecycleWaitTimeout)
 	result, err := shared.Poll(context.WithoutCancel(ctx), 0, 2*time.Second,
-		func(context.Context, time.Duration) error { return sleepContext(ctx, 2*time.Second) },
+		func(context.Context, time.Duration) error { return core.SleepContext(ctx, 2*time.Second) },
 		func(context.Context) (microVM, error) { return control.Get(ctx, vm.ID) },
 		func(_ context.Context, current microVM, fetchErr error) (bool, error) {
 			if fetchErr != nil {
@@ -528,7 +528,7 @@ func (b *backend) changeState(ctx context.Context, identifier, target string) er
 		if microVMTerminal(vm.State) || core.ClockNow(b.rt.Clock).After(deadline) {
 			return core.Exit(5, "AWS Lambda MicroVM %s did not reach %s (state=%s)", vm.ID, target, vm.State)
 		}
-		if err := sleepContext(ctx, 2*time.Second); err != nil {
+		if err := core.SleepContext(ctx, 2*time.Second); err != nil {
 			return err
 		}
 	}
@@ -610,15 +610,4 @@ func microVMReady(state string) bool {
 
 func microVMTerminal(state string) bool {
 	return strings.EqualFold(state, "TERMINATED") || strings.EqualFold(state, "TERMINATING")
-}
-
-func sleepContext(ctx context.Context, duration time.Duration) error {
-	timer := time.NewTimer(duration)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }

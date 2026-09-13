@@ -284,16 +284,16 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 		return core.Exit(5, "timed out waiting for superserve sandbox %s to become ready", id)
 	})
 	defer wait.Close()
-	for {
-		sb, getErr := api.GetSandbox(wait.Context(), sandboxID)
+	return wait.Poll(sandboxID, 2*time.Second, func(ctx context.Context) (core.StatusView, bool, error) {
+		sb, getErr := api.GetSandbox(ctx, sandboxID)
 		if getErr != nil {
 			if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
-				return core.StatusView{}, ctxErr
+				return core.StatusView{}, false, ctxErr
 			}
-			return core.StatusView{}, getErr
+			return core.StatusView{}, false, getErr
 		}
 		if err := validateSuperserveSandboxOwnership(claim, sb); err != nil {
-			return core.StatusView{}, err
+			return core.StatusView{}, false, err
 		}
 		state := normalizedSandboxState(sb)
 		view := core.StatusView{
@@ -314,16 +314,11 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 				"state":    state,
 			},
 		}
-		if !req.Wait || view.Ready {
-			return view, nil
+		if req.Wait && !view.Ready && isTerminalState(state) {
+			return core.StatusView{}, false, core.Exit(5, "superserve sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
-		if isTerminalState(state) {
-			return core.StatusView{}, core.Exit(5, "superserve sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
-		}
-		if err := wait.Next(sandboxID, 2*time.Second); err != nil {
-			return core.StatusView{}, err
-		}
-	}
+		return view, false, nil
+	})
 }
 
 func (b *backend) Stop(ctx context.Context, req core.StopRequest) error {

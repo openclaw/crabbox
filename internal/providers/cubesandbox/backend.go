@@ -267,28 +267,15 @@ func (b *cubesandboxBackend) Status(ctx context.Context, req core.StatusRequest)
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = core.ClockNow(b.rt.Clock).Add(5 * time.Minute)
-	}
-	for {
+	return shared.PollStatus(ctx, req, func() time.Time { return core.ClockNow(b.rt.Clock) }, func(ctx context.Context) (core.StatusView, bool, error) {
 		sandbox, err := client.GetSandbox(ctx, sandboxID)
 		if err != nil {
-			return core.StatusView{}, cubesandboxError("get sandbox", err)
+			return core.StatusView{}, false, cubesandboxError("get sandbox", err)
 		}
-		view := sandboxViews.Status(leaseID, sandbox)
-		if !req.Wait || view.Ready {
-			return view, nil
-		}
-		if core.ClockNow(b.rt.Clock).After(deadline) {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for sandbox %s to become ready", sandboxID)
-		}
-		select {
-		case <-ctx.Done():
-			return core.StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
+		return sandboxViews.Status(leaseID, sandbox), false, nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for sandbox %s to become ready", sandboxID)
+	})
 }
 
 func (b *cubesandboxBackend) Stop(ctx context.Context, req core.StopRequest) error {

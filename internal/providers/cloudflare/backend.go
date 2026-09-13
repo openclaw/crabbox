@@ -197,31 +197,16 @@ func (b *cloudflareBackend) Status(ctx context.Context, req core.StatusRequest) 
 		return core.StatusView{}, err
 	}
 	client.useInstanceType(cloudflareClaimInstanceType(claim))
-	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = core.ClockNow(b.rt.Clock).Add(5 * time.Minute)
-	}
-	for {
+	return shared.PollStatus(ctx, req, func() time.Time { return core.ClockNow(b.rt.Clock) }, func(ctx context.Context) (core.StatusView, bool, error) {
 		sandbox, err := client.getSandbox(ctx, claim.LeaseID)
 		if err != nil {
-			return core.StatusView{}, err
+			return core.StatusView{}, false, err
 		}
 		view := sandboxStatusView(claim.LeaseID, claim.Slug, sandbox)
-		if cloudflareTerminalState(view.State) {
-			return view, nil
-		}
-		if !req.Wait || view.Ready {
-			return view, nil
-		}
-		if core.ClockNow(b.rt.Clock).After(deadline) {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for %s container %s to become ready", providerName, claim.LeaseID)
-		}
-		select {
-		case <-ctx.Done():
-			return core.StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
+		return view, cloudflareTerminalState(view.State), nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for %s container %s to become ready", providerName, claim.LeaseID)
+	})
 }
 
 func (b *cloudflareBackend) Stop(ctx context.Context, req core.StopRequest) error {

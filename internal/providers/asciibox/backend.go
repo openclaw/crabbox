@@ -265,31 +265,16 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	deadline := b.now().Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = b.now().Add(5 * time.Minute)
-	}
-	for {
+	return shared.PollStatus(ctx, req, b.now, func(ctx context.Context) (core.StatusView, bool, error) {
 		box, err := client.GetBox(ctx, boxID)
 		if err != nil {
-			return core.StatusView{}, err
+			return core.StatusView{}, false, err
 		}
 		view := statusFromBox(cfg, box, leaseID, slug)
-		if !req.Wait || view.Ready {
-			return view, nil
-		}
-		if boxStateFailed(view.State) {
-			return view, nil
-		}
-		if b.now().After(deadline) {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for ascii-box %s to become ready", boxID)
-		}
-		select {
-		case <-ctx.Done():
-			return core.StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
+		return view, boxStateFailed(view.State), nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for ascii-box %s to become ready", boxID)
+	})
 }
 
 func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {

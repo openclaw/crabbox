@@ -199,28 +199,19 @@ func (b *azureDynamicSessionsBackend) Status(ctx context.Context, req core.Statu
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	for {
-		session, err := client.GetSession(wait.Context(), leaseID)
+	return wait.Poll(leaseID, 2*time.Second, func(ctx context.Context) (core.StatusView, bool, error) {
+		session, err := client.GetSession(ctx, leaseID)
 		if err == nil {
-			view := b.statusView(leaseID, slug, session)
-			if !req.Wait || view.Ready {
-				return view, nil
-			}
-			if err := wait.Next(leaseID, 2*time.Second); err != nil {
-				return core.StatusView{}, err
-			}
-			continue
+			return b.statusView(leaseID, slug, session), false, nil
 		}
 		if ctxErr := wait.ContextError(leaseID); ctxErr != nil {
-			return core.StatusView{}, ctxErr
+			return core.StatusView{}, false, ctxErr
 		}
 		if !isNotFoundError(err) || !req.Wait {
-			return core.StatusView{}, providerError("get session", err)
+			return core.StatusView{}, false, providerError("get session", err)
 		}
-		if err := wait.Next(leaseID, 2*time.Second); err != nil {
-			return core.StatusView{}, err
-		}
-	}
+		return core.StatusView{}, false, nil
+	})
 }
 
 func (b *azureDynamicSessionsBackend) Stop(ctx context.Context, req core.StopRequest) error {

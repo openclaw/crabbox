@@ -7,59 +7,25 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-type DelegatedStatusResource struct {
-	State, ServerID, ServerType string
-	Ready                       bool
-	Labels                      map[string]string
-}
-
-type DelegatedStatusRequest struct {
-	ID, Provider, TargetOS string
-	Network                core.NetworkMode
-	Wait                   bool
-	WaitTimeout            time.Duration
-	Now                    func() time.Time
-	Resolve                func(string) (string, string, string, error)
-	Get                    func(context.Context, string) (DelegatedStatusResource, error)
-	TimeoutError           func(string) error
-}
-
-func PollDelegatedStatus(ctx context.Context, req DelegatedStatusRequest) (core.StatusView, error) {
-	leaseID, resourceID, slug, err := req.Resolve(req.ID)
-	if err != nil {
-		return core.StatusView{}, err
-	}
-	deadline := req.Now().Add(req.WaitTimeout)
+// PollStatus shares observation-only status waiting without bounding provider
+// requests. The adapter owns resolution, views, and terminal/error policy; done
+// returns a final observation even when it is not ready. Observations precede
+// deadline and cancellation checks, including the first observation.
+func PollStatus(
+	ctx context.Context,
+	req core.StatusRequest,
+	now func() time.Time,
+	observe func(context.Context) (view core.StatusView, done bool, err error),
+	timeout func() error,
+) (core.StatusView, error) {
+	deadline := now().Add(req.WaitTimeout)
 	if req.WaitTimeout <= 0 {
-		deadline = req.Now().Add(5 * time.Minute)
+		deadline = now().Add(5 * time.Minute)
 	}
-	for {
-		resource, err := req.Get(ctx, resourceID)
-		if err != nil {
-			return core.StatusView{}, err
-		}
-		view := core.StatusView{
-			ID:         leaseID,
-			Slug:       core.Blank(slug, resource.Labels["slug"]),
-			Provider:   req.Provider,
-			TargetOS:   req.TargetOS,
-			State:      resource.State,
-			ServerID:   resource.ServerID,
-			ServerType: resource.ServerType,
-			Network:    req.Network,
-			Ready:      resource.Ready,
-			Labels:     resource.Labels,
-		}
-		if !req.Wait || view.Ready {
-			return view, nil
-		}
-		if req.Now().After(deadline) {
-			return core.StatusView{}, req.TimeoutError(resourceID)
-		}
-		select {
-		case <-ctx.Done():
-			return core.StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
+	wait := StatusWait{
+		parent: ctx, ctx: ctx, cancel: func() {},
+		now: now, deadline: deadline, wait: req.Wait,
+		timeout: func(string) error { return timeout() },
 	}
+	return wait.Poll("", 2*time.Second, observe)
 }

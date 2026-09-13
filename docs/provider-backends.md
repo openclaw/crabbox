@@ -1203,9 +1203,19 @@ own the remote workflow.
 table or lossy native status shape, keep that parsing inside the backend.
 
 Providers that bound in-flight status requests use `shared.StatusWait` for the
-wait context, deadline, and cancellation precedence. Construct it at the
-adapter's existing resolution boundary; keep ownership validation, readiness,
-terminal states, retry policy, and status-view fields in the adapter.
+wait context, deadline, and cancellation precedence, then its `Poll` method for
+observation sequencing. Construct it at the adapter's existing resolution
+boundary; keep ownership validation, readiness, terminal states, retry policy,
+and status-view fields in the adapter.
+
+Observation-only status waits use `shared.PollStatus` for the polling deadline
+and two-second delay. Adapters return complete `StatusView` values and identify
+final observations, retaining their ownership checks, terminal-state behavior,
+and error diagnostics. The helper preserves observed results before checking
+the deadline or cancellation; it does not add a timeout to provider requests.
+Both waiting contracts use the same observation driver. Transport and probe
+errors retain the adapter's existing context-error classification boundary;
+ownership failures are never reclassified by the shared driver.
 
 E2B-compatible adapters use `shared.EnvdSandboxViews` to project their common
 wire metadata. Provider identity and legacy ID prefixes stay explicit; resource
