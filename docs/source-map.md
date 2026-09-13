@@ -90,8 +90,8 @@ Crabbox has three implementation surfaces:
 
 ## Providers And Runner Bootstrap
 
-Provider adapters live under `internal/providers/<name>` and each expose
-`Name()`, `Aliases()`, and `Spec()` in their `provider.go`. The `Spec.Kind`
+Provider adapters live under `internal/providers/<name>` and declare their name,
+aliases, and capabilities through `Spec()` in `provider.go`. The `ProviderSpec.Kind`
 field distinguishes an SSH-lease backend (Crabbox provisions and connects to an
 SSH-reachable box) from a delegated-run backend (the provider owns sync and run;
 there is no SSH lease) or service-control backend (Crabbox inspects a
