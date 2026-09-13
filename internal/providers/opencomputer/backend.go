@@ -36,7 +36,20 @@ type openComputerBackend struct {
 
 func (b *openComputerBackend) Spec() core.ProviderSpec { return b.spec }
 
+func (b *openComputerBackend) validateCreationSizing() error {
+	if b.cfg.OpenComputer.CPU < 0 {
+		return core.Exit(2, "opencomputer cpu must be non-negative")
+	}
+	if b.cfg.OpenComputer.MemoryMB < 0 {
+		return core.Exit(2, "opencomputer memoryMB must be non-negative")
+	}
+	return nil
+}
+
 func (b *openComputerBackend) Warmup(ctx context.Context, req core.WarmupRequest) error {
+	if err := b.validateCreationSizing(); err != nil {
+		return err
+	}
 	if req.ActionsRunner {
 		return core.Exit(2, "--actions-runner is not supported for provider=%s", providerName)
 	}
@@ -63,6 +76,11 @@ func (b *openComputerBackend) Warmup(ctx context.Context, req core.WarmupRequest
 }
 
 func (b *openComputerBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
+	if req.ID == "" {
+		if err := b.validateCreationSizing(); err != nil {
+			return core.RunResult{}, err
+		}
+	}
 	workdir, err := openComputerWorkdir(b.cfg)
 	if err != nil {
 		return core.RunResult{}, err
@@ -310,6 +328,9 @@ func (b *openComputerBackend) execCommand(ctx context.Context, api *ocAPIClient,
 // createSandbox creates a Crabbox-owned sandbox and records the local lease.
 // Returns (leaseID, sandboxID, slug, err).
 func (b *openComputerBackend) createSandbox(ctx context.Context, api *ocAPIClient, repo core.Repo, reclaim bool, requestedSlug string) (string, string, string, error) {
+	if err := b.validateCreationSizing(); err != nil {
+		return "", "", "", err
+	}
 	providerScope, err := newOpenComputerClaimScope(api.baseURL)
 	if err != nil {
 		return "", "", "", err

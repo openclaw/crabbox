@@ -149,7 +149,8 @@ CRABBOX_MULTIPASS_LAUNCH_TIMEOUT
 ```
 
 Decoded negative CPU counts, including environment and explicit flag values, are
-rejected during configuration validation. Zero leaves the Multipass CPU default,
+rejected before acquiring a new VM. Creation-only CPU sizing does not block
+operations on existing leases, including stop and cleanup. Zero leaves the Multipass CPU default,
 and positive counts are passed through. YAML CPU values still apply only when
 positive; zero or negative YAML values leave the previous setting unchanged.
 

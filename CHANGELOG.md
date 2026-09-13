@@ -10,13 +10,14 @@
 
 ### Fixes
 
-- Reject decoded negative Hyper-V CPU and memory values from environment or flags before backend construction; preserve zero defaults, positive sizing, and positive-only YAML application. [PR 2242](https://github.com/openclaw/crabbox/pull/2242).
+- Keep existing-lease operations available when creation-only sizing is invalid for Hyper-V, Multipass, Freestyle, and OpenComputer.
+- Reject decoded negative Hyper-V CPU and memory values from environment or flags before VM creation; preserve zero defaults, positive sizing, and positive-only YAML application. [PR 2242](https://github.com/openclaw/crabbox/pull/2242).
 
 - Reject stale administrator grants before committing legacy AWS cleanup recovery, preserving the lease, audit, and cleanup wake when authorization changes.
 - Share delegated command parsing so single shell strings execute correctly and literal operator arguments stay quoted across provider transports. [PR 2233](https://github.com/openclaw/crabbox/pull/2233).
 - Allow retained AWS image qualification when an AMI includes instance-store mappings beside its single EBS root, while preserving exact root identity, volume bounds, and borrowed-resource cleanup checks. [PR 2238](https://github.com/openclaw/crabbox/pull/2238). Thanks @vincentkoc.
-- Reject decoded negative Freestyle VM sizing, including explicit negative sizing flags, before backend construction rather than silently omitting it; preserve zero/default and positive-value handling. [PR 2235](https://github.com/openclaw/crabbox/pull/2235).
-- Reject decoded negative OpenComputer CPU or memory sizing before backend construction rather than silently omitting it; preserve decoding, zero/default, partial positive sizing, and service-owned tier validation. [PR 2237](https://github.com/openclaw/crabbox/pull/2237).
+- Reject decoded negative Freestyle VM sizing, including explicit negative sizing flags, before fresh sandbox creation rather than silently omitting it; preserve zero/default and positive-value handling. [PR 2235](https://github.com/openclaw/crabbox/pull/2235).
+- Reject decoded negative OpenComputer CPU or memory sizing before fresh sandbox creation rather than silently omitting it; preserve decoding, zero/default, partial positive sizing, and service-owned tier validation. [PR 2237](https://github.com/openclaw/crabbox/pull/2237).
 - Preserve Anthropic Sandbox Runtime command cancellation and deadline causes in recorded run outcomes and timing without changing numeric exit codes or diagnostics. [PR 2229](https://github.com/openclaw/crabbox/pull/2229).
 - Reject non-finite Vercel Sandbox vCPU values during configuration validation instead of failing later while encoding a bridge request; preserve zero/service-default and supported fractional values. [PR 2230](https://github.com/openclaw/crabbox/pull/2230).
 - Disable Corepack downloads and automatic project pinning during package-manager preflight version probes, and suppress supported pnpm secondary version/lockfile management, without changing Corepack's project selection or the later workload's environment. [PR 2224](https://github.com/openclaw/crabbox/pull/2224).
@@ -26,7 +27,7 @@
 - Bound artifact discovery to the possible match depth for canonical non-recursive wildcard patterns, preserving selection and recursive glob behavior. [PR 2214](https://github.com/openclaw/crabbox/pull/2214). Thanks @vincentkoc.
 - Match Linux portal desktops to the viewer window with controller-only resize requests, bounded collaboration requests, and a Fit opt-out; use resize-capable TigerVNC for new local-container and public-installer XFCE desktops, retire the stopped legacy exporter's failure marker on upgrade, preserve direct SSH's local-scaling default and the installer's 8-bit backend selection, and document existing 8-bit rendering and Wayland sizing limits. [PR 2075](https://github.com/openclaw/crabbox/pull/2075). Thanks @vincentkoc.
 
-- Reject decoded negative Multipass CPU counts from environment or flags before backend construction; preserve zero/default, positive counts, and positive-only YAML application. [PR 2241](https://github.com/openclaw/crabbox/pull/2241).
+- Reject decoded negative Multipass CPU counts from environment or flags before acquiring a new VM; preserve zero/default, positive counts, and positive-only YAML application. [PR 2241](https://github.com/openclaw/crabbox/pull/2241).
 
 - Validate documentation-site heading links against the renderer's shared heading identities, excluding fenced/commented pseudoheadings while preserving published IDs and separate repository-only anchor rules. [PR 2231](https://github.com/openclaw/crabbox/pull/2231).
 

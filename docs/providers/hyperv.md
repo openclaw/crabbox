@@ -93,7 +93,10 @@ Notes:
 | `--hyperv-init-password` | `false` | Set the guest password at first boot via the lease disk (password-less auto-logon templates) |
 
 Decoded negative CPU or memory values, including environment and explicit flag
-values, are rejected during configuration validation. Zero retains the defaults
+values, are rejected when creating a VM, before native commands or local lease
+state changes. Inherited sizing does not block stopping an existing lease or
+cleaning up its resources; those operations retain their existing checks.
+Zero retains the defaults
 of 4 CPUs and 8192 MB; positive values are passed through unchanged. YAML CPU
 and memory values still apply only when positive, so zero or negative YAML
 values leave the previous setting unchanged.

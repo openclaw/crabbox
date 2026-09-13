@@ -117,9 +117,10 @@ apply whenever present, including zero and negative values; omitted/null fields
 preserve earlier values. Environment integer parsing retains the earlier value
 on malformed input, while explicit flags keep their existing value semantics.
 When OpenComputer is selected, decoded negative `cpu` or `memoryMB` values fail
-with exit 2 before backend construction instead of silently omitting sizing.
+with exit 2 before fresh sandbox creation instead of silently omitting sizing.
+Existing lease reuse, inspection, and stop do not consume creation sizing.
 Zero still omits that dimension, and positive values are passed through for
-service-side tier validation. This selected-provider check does not change the
+service-side tier validation. This creation check does not change the
 YAML/environment/flag decoding rules or timeout fallbacks. Nonempty workdir
 strings and explicit `burst: false` retain their existing behavior.
 

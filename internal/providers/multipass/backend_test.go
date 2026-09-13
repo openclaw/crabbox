@@ -882,42 +882,80 @@ func TestInheritedWorkRootCallerContract(t *testing.T) {
 func TestMultipassDecodedCPUSizing(t *testing.T) {
 	for _, cpus := range []int{-2, -1, 0, 1, 3, 4} {
 		t.Run(strconv.Itoa(cpus), func(t *testing.T) {
-			cfg := core.BaseConfig()
-			cfg.Provider = providerName
+			runner := &recordingRunner{}
+			cfg := testBackend(runner).cfg
 			cfg.TargetOS = core.TargetLinux
 			cfg.Multipass.CPUs = cpus
 			before := cfg.Multipass
-			validator, ok := any(Provider{}).(core.ProviderConfigValidator)
-			if !ok {
-				t.Error("selected provider has no configuration validator")
-			} else {
-				err := validator.ValidateConfig(cfg)
-				if cpus < 0 {
-					var exitErr core.ExitError
-					if !errors.As(err, &exitErr) || exitErr.Code != 2 || err.Error() != "multipass.cpus must be zero or greater" {
-						t.Errorf("ValidateConfig error = %v", err)
-					}
-				} else if err != nil {
-					t.Errorf("ValidateConfig: %v", err)
-				}
+			got, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+			if err != nil {
+				t.Fatalf("Configure: %v", err)
 			}
-			got, err := (Provider{}).Configure(cfg, core.Runtime{})
+			if got.(*backend).cfg.Multipass.CPUs != cpus {
+				t.Fatalf("Configure changed CPU count %d", cpus)
+			}
 			if cpus < 0 {
+				_, err = got.(*backend).Acquire(context.Background(), core.AcquireRequest{})
 				var exitErr core.ExitError
-				if !errors.As(err, &exitErr) || exitErr.Code != 2 || err.Error() != "multipass.cpus must be zero or greater" || got != nil {
-					t.Fatalf("Configure = %T, %v; want negative CPU rejection", got, err)
+				if !errors.As(err, &exitErr) || exitErr.Code != 2 || err.Error() != "multipass.cpus must be zero or greater" {
+					t.Fatalf("Acquire error = %v", err)
 				}
-			} else {
-				if err != nil {
-					t.Fatal(err)
-				}
-				if got.(*backend).cfg.Multipass.CPUs != cpus {
-					t.Fatalf("Configure changed CPU count %d", cpus)
+				if len(runner.calls) != 0 {
+					t.Fatalf("invalid sizing reached provider: %#v", runner.calls)
 				}
 			}
 			if cfg.Multipass != before {
 				t.Fatal("validation changed caller configuration")
 			}
 		})
+	}
+}
+
+func TestMultipassExistingLeaseIgnoresCreationCPUs(t *testing.T) {
+	for _, operation := range []string{"stop", "cleanup"} {
+		for _, cpus := range []int{-2, 0} {
+			t.Run(operation+"/"+strconv.Itoa(cpus), func(t *testing.T) {
+				t.Setenv("HOME", t.TempDir())
+				t.Setenv("XDG_STATE_HOME", t.TempDir())
+				const leaseID = "cbx_123"
+				const name = "crabbox-blue-1234abcd"
+				server := core.Server{CloudID: name, Labels: map[string]string{"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": "blue-lobster", "instance": name, "ssh_user": "runner", "ssh_port": "22", "work_root": "/workspace/crabbox"}}
+				if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "blue-lobster", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, server, core.SSHTarget{Host: "192.168.64.7", Port: "22"}); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { core.RemoveLeaseClaim(leaseID) })
+				runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+					commandKey([]string{"list", "--format", "json"}):       {Stdout: strings.ReplaceAll(sampleListJSON(), "Running", "Stopped")},
+					commandKey([]string{"info", "--format", "json", name}): {Stdout: sampleInfoJSON(name)},
+				}}
+				cfg := testBackend(runner).cfg
+				cfg.TargetOS = core.TargetLinux
+				cfg.Multipass.CPUs = cpus
+				configured, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+				if err != nil {
+					t.Fatalf("Configure existing lease: %v", err)
+				}
+				b := configured.(*backend)
+				if operation == "stop" {
+					lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+					t.Fatal(err)
+				}
+				if args := recordedArgsForCommand(t, runner, "delete"); args != "delete\n--purge\n"+name {
+					t.Fatalf("delete args=%q", args)
+				}
+				for _, call := range runner.calls {
+					if len(call.Args) > 0 && call.Args[0] == "launch" {
+						t.Fatal("existing operation launched VM")
+					}
+				}
+			})
+		}
 	}
 }

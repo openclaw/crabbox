@@ -1101,7 +1101,15 @@ func TestReleasePrunesClaimAndKeyWhenVMIsMissing(t *testing.T) {
 	const leaseID = "cbx_missing123456"
 	const name = "crabbox-missing-1234"
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
-	b := testBackend(runner)
+	inherited := testBackend(runner).cfg
+	inherited.TargetOS = core.TargetWindows
+	inherited.WindowsMode = core.WindowsModeNormal
+	inherited.HyperV.CPUs = -2
+	configured, err := (Provider{}).Configure(inherited, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	if err != nil {
+		t.Fatalf("configure existing-lease release with inherited sizing: %v", err)
+	}
+	b := configured.(*backend)
 	cfg := b.configForRun()
 	if _, _, err := core.EnsureTestboxKeyForConfig(cfg, leaseID); err != nil {
 		t.Fatalf("ensureTestboxKeyForConfig: %v", err)
@@ -1179,7 +1187,16 @@ func TestCleanupMissingClaimRemovesDeterministicStorage(t *testing.T) {
 
 	const leaseID = "cbx_cleanupmissing"
 	const name = "crabbox-cleanup-missing"
-	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	inherited := testBackend(runner).cfg
+	inherited.TargetOS = core.TargetWindows
+	inherited.WindowsMode = core.WindowsModeNormal
+	inherited.HyperV.Memory = -2
+	configured, err := (Provider{}).Configure(inherited, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	if err != nil {
+		t.Fatalf("configure existing-lease cleanup with inherited sizing: %v", err)
+	}
+	b := configured.(*backend)
 	cfg := b.configForRun()
 	claim := core.LeaseClaim{
 		LeaseID:       leaseID,
@@ -2128,6 +2145,9 @@ func TestInheritedWorkRootCallerContract(t *testing.T) {
 }
 
 func TestHyperVDecodedSizing(t *testing.T) {
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
 	for _, tc := range []struct {
 		name                              string
 		cpus, memory, wantCPU, wantMemory int
@@ -2160,29 +2180,26 @@ func TestHyperVDecodedSizing(t *testing.T) {
 				} else {
 					cfg.HyperV.CPUs, cfg.HyperV.Memory = tc.cpus, tc.memory
 				}
-				if validator, ok := any(Provider{}).(core.ProviderConfigValidator); ok {
-					err := validator.ValidateConfig(cfg)
-					var exit core.ExitError
-					if tc.wantError == "" && err != nil || tc.wantError != "" && (!errors.As(err, &exit) || exit.Code != 2 || exit.Message != tc.wantError) {
-						t.Errorf("ValidateConfig: %v", err)
-					}
-				} else {
-					t.Error("selected provider has no configuration validator")
-				}
-				got, err := (Provider{}).Configure(cfg, core.Runtime{})
-				if tc.wantError != "" {
-					var exit core.ExitError
-					if got != nil || !errors.As(err, &exit) || exit.Code != 2 || exit.Message != tc.wantError {
-						t.Fatalf("Configure = %T, %v", got, err)
-					}
-					return
-				}
+				runner := &recordingRunner{}
+				got, err := (Provider{}).Configure(cfg, core.Runtime{Exec: runner})
 				if err != nil {
 					t.Fatal(err)
 				}
 				configured := got.(*backend).cfg.HyperV
 				if configured.CPUs != tc.wantCPU || configured.Memory != tc.wantMemory {
 					t.Fatalf("Configure sizing = %d/%d", configured.CPUs, configured.Memory)
+				}
+				_, err = got.(*backend).Acquire(t.Context(), core.AcquireRequest{})
+				var exit core.ExitError
+				if tc.wantError != "" {
+					if !errors.As(err, &exit) || exit.Code != 2 || exit.Message != tc.wantError {
+						t.Fatalf("Acquire sizing: %v", err)
+					}
+				} else if !errors.As(err, &exit) || exit.Code != 2 || !strings.Contains(exit.Message, "requires --hyperv-image") {
+					t.Fatalf("valid sizing did not reach image validation: %v", err)
+				}
+				if len(runner.calls) != 0 {
+					t.Fatal("sizing or missing-image rejection dispatched a native command")
 				}
 			})
 		}
