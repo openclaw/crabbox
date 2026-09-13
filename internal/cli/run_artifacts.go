@@ -186,6 +186,8 @@ func remoteRunArtifactShellInputCommand(target SSHTarget) string {
 }
 
 func writeArtifactGlobMatcher(b *strings.Builder) {
+	// Bash 3.2 also applies nocaseglob to regex matching; retain explicit nocasematch.
+	b.WriteString("shopt -u nocaseglob\n")
 	b.WriteString("artifact_rel_path() { local rel=\"${1#./}\"; case \"$rel\" in \"\"|.|/*|..|../*|*/../*|*/..) return 1;; esac; case \"/$rel/\" in */.git/*|*/.crabbox/*) return 1;; esac; printf '%s' \"$rel\"; }\n")
 	b.WriteString("artifact_safe_search_root() { local root=\"${1#./}\" component path=; [ \"$1\" = . ] && return 0; case \"$root\" in \"\"|.|/*|..|../*|*/../*|*/..) return 1;; esac; while [ -n \"$root\" ]; do component=${root%%/*}; case \"$component\" in \"\"|.|..|.git|.crabbox) return 1;; esac; if [ \"$component\" = \"$root\" ]; then root=; else root=${root#*/}; fi; if [ -n \"$path\" ]; then path=\"$path/$component\"; else path=$component; fi; [ ! -L \"$path\" ] || return 1; [ -d \"$path\" ] || return 1; done; }\n")
 }

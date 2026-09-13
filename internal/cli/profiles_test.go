@@ -1480,6 +1480,7 @@ func TestRunArtifactNestedGlobPreservesSelection(t *testing.T) {
 		{name: "case folded directory", glob: "reports/mixed/**/*.txt", setup: "shopt -s nocasematch\n", fallbackRoot: "reports", want: []string{"reports/Mixed/proof.txt"}},
 		{name: "case folded filenames", glob: "reports/data/**/*.txt", setup: "shopt -s nocasematch\n", fallbackRoot: "reports", want: []string{"reports/data/UPPER.TXT", "reports/data/leaf.txt", "reports/data/nested/result.txt", "reports/data/proof.txt"}},
 		{name: "shell glob settings", glob: "reports/data/**/*.txt", setup: "GLOBIGNORE='data:*.txt'\nshopt -s nocaseglob\nset -f\n", want: recursive},
+		{name: "nocaseglob only", glob: "reports/data/**/*.txt", setup: "shopt -s nocaseglob\n", want: recursive},
 		{name: "directory symlink", glob: "reports/link/**/*.txt", fallbackRoot: "reports"},
 		{name: "missing directory", glob: "reports/absent/**/*.txt", fallbackRoot: "reports"},
 		{name: "git component", glob: "reports/data/.git/**/*.txt", fallbackRoot: "reports/data"},
