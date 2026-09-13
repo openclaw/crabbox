@@ -10,6 +10,7 @@
 
 ### Fixes
 
+- Share delegated command parsing so single shell strings execute correctly and literal operator arguments stay quoted across provider transports. [PR 2233](https://github.com/openclaw/crabbox/pull/2233).
 - Reject decoded negative OpenComputer CPU or memory sizing before backend construction rather than silently omitting it; preserve decoding, zero/default, partial positive sizing, and service-owned tier validation. [PR 2237](https://github.com/openclaw/crabbox/pull/2237).
 - Reject decoded negative Freestyle VM sizing, including explicit negative sizing flags, before backend construction rather than silently omitting it; preserve zero/default and positive-value handling. [PR 2235](https://github.com/openclaw/crabbox/pull/2235).
 - Preserve Anthropic Sandbox Runtime command cancellation and deadline causes in recorded run outcomes and timing without changing numeric exit codes or diagnostics. [PR 2229](https://github.com/openclaw/crabbox/pull/2229).

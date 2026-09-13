@@ -2,7 +2,6 @@ package azuredynamicsessions
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -31,7 +30,7 @@ func (b *azureDynamicSessionsBackend) workspace(client azureDynamicSessionsAPI, 
 }
 
 func (b *azureDynamicSessionsBackend) execShell(ctx context.Context, client azureDynamicSessionsAPI, sessionID, command string, stdout io.Writer) error {
-	code, err := client.ExecStream(ctx, sessionID, azureDynamicSessionsExecRequest{
+	code, err := client.ExecStream(ctx, sessionID, shared.CommandStreamRequest{
 		Command:   command,
 		Cwd:       "/",
 		TimeoutMS: durationMillisecondsCeil(azureDynamicSessionsTimeout(b.cfg)),
@@ -55,20 +54,4 @@ func azureDynamicSessionsWorkspace(cfg core.Config) (string, error) {
 
 func cleanAzureDynamicSessionsWorkspacePath(workspace string) (string, error) {
 	return shared.CleanPOSIXWorkspacePath("azure-dynamic-sessions workspace path", workspace, "/mnt", "/mnt/data", "/workspace")
-}
-
-func buildAzureDynamicSessionsCommand(command []string, shellMode bool) (string, error) {
-	if len(command) == 0 {
-		return "", errors.New("missing command")
-	}
-	if shellMode {
-		return strings.Join(command, " "), nil
-	}
-	if len(command) == 1 && core.ShouldUseShell(command) {
-		return command[0], nil
-	}
-	if core.ShouldUseShell(command) || core.LeadingEnvAssignment(command) {
-		return core.ShellScriptFromArgv(command), nil
-	}
-	return strings.Join(core.ShellWords(command), " "), nil
 }

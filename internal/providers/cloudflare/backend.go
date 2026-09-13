@@ -99,10 +99,11 @@ func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.
 				return err
 			}
 			if !req.SyncOnly {
-				command, err = buildCloudflareCommand(req.Command, req.ShellMode)
+				intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 				if err != nil {
 					return err
 				}
+				command = intent.ShellScript()
 			}
 			client, err = newCloudflareClient(b.cfg, b.rt)
 			return err
@@ -141,7 +142,7 @@ func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.
 				core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
 			return shared.DelegatedSandboxCommand{Text: command, Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
-				return client.execStream(ctx, claim.LeaseID, execStreamRequest{Command: command, Cwd: workdir, Env: req.Env, TimeoutMS: durationMillisecondsCeil(b.cfg.TTL)}, stdout, stderr)
+				return client.execStream(ctx, claim.LeaseID, shared.CommandStreamRequest{Command: command, Cwd: workdir, Env: req.Env, TimeoutMS: durationMillisecondsCeil(b.cfg.TTL)}, stdout, stderr)
 			}}, nil
 		},
 		Cleanup: func(ctx context.Context) error { _, err := destroyClaimedSandbox(ctx, client, claim); return err },
@@ -371,19 +372,6 @@ func admitRunClaim(ctx context.Context, captured core.LeaseClaim, repoRoot strin
 	}
 	// Repository admission retains the existing non-cancelable local lock wait.
 	return core.ClaimLeaseForRepoProviderScopePondIfUnchanged(captured.LeaseID, captured.Slug, providerName, captured.ProviderScope, captured.Pond, repoRoot, time.Duration(captured.IdleTimeoutSeconds)*time.Second, reclaim, captured, true)
-}
-
-func buildCloudflareCommand(command []string, shellMode bool) (string, error) {
-	if len(command) == 0 {
-		return "", errors.New("missing command")
-	}
-	if shellMode {
-		return strings.Join(command, " "), nil
-	}
-	if core.ShouldUseShell(command) || core.LeadingEnvAssignment(command) {
-		return core.ShellScriptFromArgv(command), nil
-	}
-	return strings.Join(core.ShellWords(command), " "), nil
 }
 
 func rejectCloudflareSyncOptions(req core.RunRequest) error {

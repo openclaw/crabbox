@@ -11,6 +11,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func (b *cloudflareBackend) prepareArchive(ctx context.Context, req core.RunRequest) (*core.PreparedArchive, error) {
@@ -133,7 +134,7 @@ func (b *cloudflareBackend) prepareWorkspace(ctx context.Context, client *cloudf
 }
 
 func (b *cloudflareBackend) execShell(ctx context.Context, client *cloudflareClient, sandboxID, command string, stdout io.Writer) error {
-	code, err := client.execStream(ctx, sandboxID, execStreamRequest{
+	code, err := client.execStream(ctx, sandboxID, shared.CommandStreamRequest{
 		Command:   command,
 		Cwd:       "/",
 		TimeoutMS: durationMillisecondsCeil(b.cfg.TTL),

@@ -75,40 +75,6 @@ func TestFreestyleConfigureSizing(t *testing.T) {
 	}
 }
 
-func TestFreestyleExecCommandPreservesShellString(t *testing.T) {
-	got := freestyleExecCommand([]string{"pnpm install && pnpm test"}, true)
-	want := "pnpm install && pnpm test"
-	if got != want {
-		t.Fatalf("command=%q want %q", got, want)
-	}
-}
-
-func TestFreestyleExecCommandQuotesImplicitShellArgv(t *testing.T) {
-	if got := freestyleExecCommand([]string{"go", "test", "./..."}, false); got != "'go' 'test' './...'" {
-		t.Fatalf("command=%q", got)
-	}
-	got := freestyleExecCommand([]string{"FOO=bar", "pnpm", "test"}, false)
-	if !strings.Contains(got, "FOO=") || !strings.Contains(got, "'pnpm'") {
-		t.Fatalf("command=%q", got)
-	}
-}
-
-func TestFreestyleExecCommandPreservesSpacedArguments(t *testing.T) {
-	got := freestyleExecCommand([]string{"echo", "hello world"}, false)
-	want := "'echo' 'hello world'"
-	if got != want {
-		t.Fatalf("command=%q want %q", got, want)
-	}
-}
-
-func TestFreestyleExecCommandPreservesSingleShellString(t *testing.T) {
-	got := freestyleExecCommand([]string{"echo hello from freestyle"}, false)
-	want := "echo hello from freestyle"
-	if got != want {
-		t.Fatalf("command=%q want %q", got, want)
-	}
-}
-
 func TestFreestyleEnvExportCommandQuotesValuesOnly(t *testing.T) {
 	got := freestyleEnvExportCommand(map[string]string{
 		"GREETING":      "hello world",
@@ -127,8 +93,8 @@ func TestFreestyleEnvExportCommandQuotesValuesOnly(t *testing.T) {
 func TestFreestyleExecForwardsEnvAfterWorkdir(t *testing.T) {
 	client := &fakeFreestyleClient{}
 	backend := &freestyleBackend{rt: core.Runtime{Stderr: io.Discard}}
-	code, err := backend.exec(context.Background(), client, "vm123", "/workspace/repo", []string{`echo "$GREETING"`}, false, map[string]string{
-		"GREETING": "hello world",
+	code, err := backend.exec(context.Background(), client, "vm123", "/workspace/repo", core.RunRequest{
+		Command: []string{`echo "$GREETING"`}, Env: map[string]string{"GREETING": "hello world"},
 	}, backend.rt.Stdout, backend.rt.Stderr)
 	if err != nil {
 		t.Fatal(err)

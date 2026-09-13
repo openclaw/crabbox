@@ -439,20 +439,7 @@ func (b *backend) ownershipMetadata(providerScope, leaseID, slug string, repo co
 
 func (b *backend) serverFromSandbox(claim core.LeaseClaim, sb sandboxSummary) core.Server {
 	state := normalizedSandboxState(sb)
-	return core.Server{
-		Provider: providerName,
-		CloudID:  sb.ID,
-		Name:     sb.ID,
-		Status:   state,
-		Labels: map[string]string{
-			"provider": providerName,
-			"lease":    claim.LeaseID,
-			"slug":     claim.Slug,
-			"pond":     claim.Pond,
-			"target":   targetLinux,
-			"state":    state,
-		},
-	}
+	return shared.SandboxLeaseView(providerName, targetLinux, claim, sb.ID, sb.ID, state)
 }
 
 func (b *backend) resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration) (string, string, string, error) {

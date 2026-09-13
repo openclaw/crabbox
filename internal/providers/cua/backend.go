@@ -7,6 +7,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type backend struct {
@@ -190,20 +191,7 @@ func (b backend) serverFromSandbox(claim core.LeaseClaim, sb bridgeSandboxSummar
 	if sandboxName == "" {
 		sandboxName = claimSandboxName(claim)
 	}
-	return core.Server{
-		Provider: providerName,
-		CloudID:  sandboxName,
-		Name:     sandboxName,
-		Status:   state,
-		Labels: map[string]string{
-			"provider": providerName,
-			"lease":    claim.LeaseID,
-			"slug":     claim.Slug,
-			"pond":     claim.Pond,
-			"target":   sandboxTargetOS(claim, sb),
-			"state":    state,
-		},
-	}
+	return shared.SandboxLeaseView(providerName, sandboxTargetOS(claim, sb), claim, sandboxName, sandboxName, state)
 }
 
 func (b backend) claimMatchesActiveScope(claim core.LeaseClaim) bool {

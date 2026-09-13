@@ -219,7 +219,7 @@ func TestAzureDynamicSessionsFallbackBoundsControlAndPreservesExecStream(t *test
 	}
 
 	started = time.Now()
-	code, err := client.ExecStream(context.Background(), "azds-test", azureDynamicSessionsExecRequest{Command: "true"}, io.Discard, io.Discard)
+	code, err := client.ExecStream(context.Background(), "azds-test", shared.CommandStreamRequest{Command: "true"}, io.Discard, io.Discard)
 	if err != nil || code != 0 {
 		t.Fatalf("ExecStream code=%d err=%v", code, err)
 	}
@@ -380,7 +380,7 @@ func TestAzureDynamicSessionsClientUsesCustomContainerEndpoints(t *testing.T) {
 			if r.Method != http.MethodPost || r.URL.Query().Get("identifier") != "azds-test" {
 				t.Fatalf("exec method=%s query=%s", r.Method, r.URL.RawQuery)
 			}
-			var body azureDynamicSessionsExecRequest
+			var body shared.CommandStreamRequest
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatalf("decode exec body: %v", err)
 			}
@@ -431,7 +431,7 @@ func TestAzureDynamicSessionsClientUsesCustomContainerEndpoints(t *testing.T) {
 		t.Fatalf("upload: %v", err)
 	}
 	var stdout bytes.Buffer
-	exitCode, err := client.ExecStream(context.Background(), "azds-test", azureDynamicSessionsExecRequest{
+	exitCode, err := client.ExecStream(context.Background(), "azds-test", shared.CommandStreamRequest{
 		Command: "echo ok",
 		Cwd:     "/workspace/crabbox",
 	}, &stdout, nil)
@@ -549,7 +549,7 @@ func TestAzureDynamicSessionsClientRejectsCrossOriginRedirects(t *testing.T) {
 		run  func() error
 	}{
 		{name: "exec", run: func() error {
-			_, err := client.ExecStream(context.Background(), "azds-test", azureDynamicSessionsExecRequest{
+			_, err := client.ExecStream(context.Background(), "azds-test", shared.CommandStreamRequest{
 				Command: "env",
 				Env:     map[string]string{"MARKER": "fixture-value"},
 			}, io.Discard, io.Discard)
@@ -615,7 +615,7 @@ func TestAzureDynamicSessionsExecStreamRejectsIncompleteStream(t *testing.T) {
 		token:      "test-token",
 		httpClient: server.Client(),
 	}
-	if _, err := client.ExecStream(context.Background(), "azds-test", azureDynamicSessionsExecRequest{Command: "echo partial"}, nil, nil); err == nil || !strings.Contains(err.Error(), "ended before completion") {
+	if _, err := client.ExecStream(context.Background(), "azds-test", shared.CommandStreamRequest{Command: "echo partial"}, nil, nil); err == nil || !strings.Contains(err.Error(), "ended before completion") {
 		t.Fatalf("err = %v, want incomplete stream", err)
 	}
 }
@@ -632,7 +632,7 @@ func TestAzureDynamicSessionsClientRedactsReflectedCredential(t *testing.T) {
 	for name, call := range map[string]func() error{
 		"JSON": func() error { return client.CheckRunner(context.Background(), "azds-test") },
 		"stream": func() error {
-			_, err := client.ExecStream(context.Background(), "azds-test", azureDynamicSessionsExecRequest{Command: "true"}, nil, nil)
+			_, err := client.ExecStream(context.Background(), "azds-test", shared.CommandStreamRequest{Command: "true"}, nil, nil)
 			return err
 		},
 	} {
@@ -653,7 +653,7 @@ func TestAzureDynamicSessionsClientRedactsStreamErrorCredential(t *testing.T) {
 	}))
 	defer server.Close()
 	client := &azureDynamicSessionsClient{endpoint: server.URL, token: secret, httpClient: server.Client()}
-	_, err := client.ExecStream(context.Background(), "azds-test", azureDynamicSessionsExecRequest{Command: "true"}, nil, nil)
+	_, err := client.ExecStream(context.Background(), "azds-test", shared.CommandStreamRequest{Command: "true"}, nil, nil)
 	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "quota exceeded") {
 		t.Fatalf("ExecStream error=%v, want redacted useful stream error", err)
 	}
@@ -693,7 +693,7 @@ func TestAzureDynamicSessionsExecStreamReturnsWriterErrors(t *testing.T) {
 				token:      "test-token",
 				httpClient: server.Client(),
 			}
-			exitCode, err := client.ExecStream(context.Background(), "azds-test", azureDynamicSessionsExecRequest{Command: "echo"}, tc.stdout, tc.stderr)
+			exitCode, err := client.ExecStream(context.Background(), "azds-test", shared.CommandStreamRequest{Command: "echo"}, tc.stdout, tc.stderr)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("exit=%d err=%v, want %q", exitCode, err, tc.wantErr)
 			}
@@ -751,7 +751,7 @@ func TestAzureDynamicSessionsStreamCancellationAtCleanEOF(t *testing.T) {
 				data = "{\"type\":\"complete\",\"exitCode\":7}\n"
 			}
 			client := &azureDynamicSessionsClient{endpoint: "http://127.0.0.1", httpClient: &http.Client{Transport: azureDynamicSessionsStreamEOFTransport{body: &azureDynamicSessionsCancelingEOFBody{data: data, cancel: cancel}}}}
-			code, err := client.ExecStream(ctx, "fixture", azureDynamicSessionsExecRequest{Command: "true"}, io.Discard, io.Discard)
+			code, err := client.ExecStream(ctx, "fixture", shared.CommandStreamRequest{Command: "true"}, io.Discard, io.Discard)
 			if complete {
 				if err != nil || code != 7 {
 					t.Fatalf("accepted completion changed: code=%d err=%v", code, err)
@@ -833,7 +833,7 @@ func TestJSONRequestAdoptionConcreteEnvelope(t *testing.T) {
 		return nil, sentinel
 	})}
 	c := &azureDynamicSessionsClient{endpoint: "https://api.example.test/base", token: "synthetic-token", httpClient: transport}
-	code, err := c.ExecStream(ctx, "session one", azureDynamicSessionsExecRequest{Command: "<&>", Cwd: "/work", Env: map[string]string{"A": "B"}, TimeoutMS: 7}, io.Discard, io.Discard)
+	code, err := c.ExecStream(ctx, "session one", shared.CommandStreamRequest{Command: "<&>", Cwd: "/work", Env: map[string]string{"A": "B"}, TimeoutMS: 7}, io.Discard, io.Discard)
 	if code != 0 {
 		t.Fatalf("exit=%d", code)
 	}

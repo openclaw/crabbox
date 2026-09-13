@@ -117,6 +117,11 @@ Delegated backends return normalized `StatusView` values. Rendering stays
 core-owned, so provider packages should not print their own `status` or `list`
 tables unless a compatibility interface explicitly asks for native output.
 
+Use `shared.SandboxLeaseView` for the common sandbox inventory projection. The
+adapter supplies the observed ID, display name, target, and state; shared code
+adds the lease ID, slug, and pond. Scope checks, ownership validation, and state
+classification remain adapter operations, and unrelated claim labels are omitted.
+
 A delegated backend must reject run/sync options that Crabbox cannot honor
 without a Crabbox-managed SSH target:
 
@@ -465,12 +470,28 @@ source-only shell boundaries. Shell-local functions, builtins, and state require
 shell intent, not literal argv. Do not insert a second shell or reinterpret the
 rendered source before transport.
 
+Use `ShellScript` when the transport owns the surrounding shell and must keep
+it: it preserves shell source and quotes literal argv without adding `exec`.
+Cloudflare containers, Azure Dynamic Sessions, Anthropic Sandbox Runtime,
+Daytona, Freestyle, Cloud Run Sandbox, and Orgo use this boundary. Blaxel and
+Islo use `Argv("bash", "-lc")`; Modal uses `ShellSource` inside its workdir and
+environment wrapper. These adapters share command classification rather than
+repeating single-string, operator, and environment-assignment heuristics.
+
 `shared.WrapCommandWithShellEnvProfile` accepts execution argv, not unclassified
 user input. Its fallback quotes every word literally before terminal execution;
 it must not infer operators or assignments again. An exact three-word
 `bash -lc <body>` invocation reuses its body inside the existing profile wrapper,
 preserving the single login-shell boundary used by Modal and Tensorlake. Profile
 sourcing is failure-gated without adding global errexit to user source.
+
+Runners using the `command`, `cwd`, `env`, and `timeoutMs` JSON contract share
+`shared.CommandStreamRequest`. Cloudflare containers and Azure Dynamic Sessions
+use `shared.CommandStream` to consume their NDJSON response: bounded events,
+stdout/stderr forwarding, and explicit completion have one owner. Adapters retain
+HTTP authentication, redirects, request deadlines, status errors, response-body
+cleanup, and error redaction. A decoded completion wins over cancellation;
+an EOF without completion never establishes success.
 
 Agent Sandbox and Nomad use `shared.ShellWorkspaceCommand` for their common
 POSIX-stdin wrapper: create and enter the workdir, export validated environment

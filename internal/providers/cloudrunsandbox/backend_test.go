@@ -1300,10 +1300,11 @@ func TestRunWithFakeTransport(t *testing.T) {
 	}).(*backend)
 
 	result, err := b.Run(context.Background(), core.RunRequest{
-		Repo:    core.Repo{Root: root},
-		Command: []string{"echo", "hello"},
-		NoSync:  true,
-		Keep:    false,
+		Repo:               core.Repo{Root: root},
+		Command:            []string{"echo", "hello", "&&"},
+		CommandLiteralArgs: map[int]bool{2: true},
+		NoSync:             true,
+		Keep:               false,
 	})
 	if err != nil {
 		t.Fatalf("Run: %v\nstderr=%s", err, stderr.String())
@@ -1319,6 +1320,9 @@ func TestRunWithFakeTransport(t *testing.T) {
 	joined := strings.Join(calls, ",")
 	if !strings.Contains(joined, "create:") || !strings.Contains(joined, "exec:") || !strings.Contains(joined, "destroy:") {
 		t.Fatalf("unexpected calls: %v", calls)
+	}
+	if !strings.Contains(joined, "exec:'echo' 'hello' '&&'") {
+		t.Fatalf("literal argument was reinterpreted: %v", calls)
 	}
 }
 

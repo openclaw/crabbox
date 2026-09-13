@@ -14,6 +14,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const testAzureDynamicSessionsEndpoint = "http://127.0.0.1:8787"
@@ -111,7 +112,7 @@ func TestRunCleanupPreservesReplacedSessionClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	replacementRepo := t.TempDir()
 	fake := &recordingAzureDynamicSessionsAPI{}
-	fake.onExec = func(req azureDynamicSessionsExecRequest) {
+	fake.onExec = func(req shared.CommandStreamRequest) {
 		if strings.HasPrefix(req.Command, "mkdir -p ") {
 			return
 		}
@@ -471,7 +472,7 @@ type recordingAzureDynamicSessionsAPI struct {
 	checkRunnerCalls    int
 	getSessionCalls     int
 	deleted             []string
-	execs               []azureDynamicSessionsExecRequest
+	execs               []shared.CommandStreamRequest
 	commandExit         int
 	commandErr          error
 	deleteErr           error
@@ -481,7 +482,7 @@ type recordingAzureDynamicSessionsAPI struct {
 	failExtract         bool
 	executeShell        bool
 	getWaitForCancel    bool
-	onExec              func(azureDynamicSessionsExecRequest)
+	onExec              func(shared.CommandStreamRequest)
 }
 
 func (r *recordingAzureDynamicSessionsAPI) CheckRunner(context.Context, string) error {
@@ -503,7 +504,7 @@ func (r *recordingAzureDynamicSessionsAPI) UploadFile(_ context.Context, _ strin
 	return os.WriteFile(remotePath, archive, 0o600)
 }
 
-func (r *recordingAzureDynamicSessionsAPI) ExecStream(ctx context.Context, _ string, req azureDynamicSessionsExecRequest, _ io.Writer, _ io.Writer) (int, error) {
+func (r *recordingAzureDynamicSessionsAPI) ExecStream(ctx context.Context, _ string, req shared.CommandStreamRequest, _ io.Writer, _ io.Writer) (int, error) {
 	r.execs = append(r.execs, req)
 	if r.onExec != nil {
 		r.onExec(req)
@@ -644,7 +645,7 @@ func TestRunCleanupBoundsClaimFenceWait(t *testing.T) {
 	defer close(release)
 	holderCtx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
-	fake.onExec = func(req azureDynamicSessionsExecRequest) {
+	fake.onExec = func(req shared.CommandStreamRequest) {
 		if strings.HasPrefix(req.Command, "mkdir -p ") {
 			return
 		}

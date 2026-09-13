@@ -918,15 +918,3 @@ func TestDaytonaBackendIsHybridSDKRunAndSSHAccess(t *testing.T) {
 		t.Fatal("SSH scripts require native Daytona idle activity")
 	}
 }
-
-func TestDaytonaCommandString(t *testing.T) {
-	if got := daytonaCommandString([]string{"go", "test", "./..."}, false); got != "'go' 'test' './...'" {
-		t.Fatalf("command=%q", got)
-	}
-	if got := daytonaCommandString([]string{"FOO=bar", "go", "test"}, false); !strings.Contains(got, "FOO=") || !strings.Contains(got, "go") {
-		t.Fatalf("shell command=%q", got)
-	}
-	if got := daytonaCommandString([]string{"echo hello && pwd"}, true); got != "echo hello && pwd" {
-		t.Fatalf("shell mode=%q", got)
-	}
-}

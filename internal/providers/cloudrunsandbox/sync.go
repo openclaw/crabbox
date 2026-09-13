@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -107,29 +106,4 @@ func (b *backend) execShell(ctx context.Context, transport sandboxTransport, san
 		return core.Exit(code, "cloud-run-sandbox exec %q exited %d", command, code)
 	}
 	return nil
-}
-
-func (b *backend) execCommand(ctx context.Context, transport sandboxTransport, sandboxID, workdir string, command []string, env map[string]string, stdout, stderr io.Writer) (int, error) {
-	if len(command) == 0 {
-		return 2, core.Exit(2, "missing command")
-	}
-	commandText := core.ShellScriptFromArgv(command)
-	if len(command) == 1 && core.ShouldUseShell(command) {
-		commandText = command[0]
-	}
-	return transport.Exec(ctx, sandboxID, commandText, execOptions{
-		Workdir: workdir,
-		Env:     env,
-		Timeout: defaultExecTimeout,
-	}, stdout, stderr)
-}
-
-func buildCommand(command []string, shellMode bool) ([]string, error) {
-	if len(command) == 0 {
-		return nil, core.Exit(2, "missing command")
-	}
-	if shellMode {
-		return []string{strings.Join(command, " ")}, nil
-	}
-	return command, nil
 }

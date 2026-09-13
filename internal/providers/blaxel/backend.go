@@ -101,10 +101,11 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 			return nil
 		},
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
-			command, err := buildCommand(req.Command, req.ShellMode)
+			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 			if err != nil {
-				return shared.DelegatedSandboxCommand{}, err
+				return shared.DelegatedSandboxCommand{}, core.Exit(2, "%v", err)
 			}
+			command := intent.Argv("bash", "-lc")
 			if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
 				core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
@@ -169,20 +170,7 @@ func (b *backend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseV
 			}
 			state = core.Blank(sb.Status, "unknown")
 		}
-		servers = append(servers, core.Server{
-			Provider: providerName,
-			CloudID:  sandboxID,
-			Name:     sandboxID,
-			Status:   state,
-			Labels: map[string]string{
-				"provider": providerName,
-				"lease":    claim.LeaseID,
-				"slug":     claim.Slug,
-				"pond":     claim.Pond,
-				"target":   targetLinux,
-				"state":    state,
-			},
-		})
+		servers = append(servers, shared.SandboxLeaseView(providerName, targetLinux, claim, sandboxID, sandboxID, state))
 	}
 	return servers, nil
 }
@@ -679,19 +667,6 @@ func (b *backend) execTimeoutSecs() int {
 		return b.cfg.Blaxel.ExecTimeoutSecs
 	}
 	return core.BlaxelConfigDefaultExecTimeoutSecs
-}
-
-func buildCommand(command []string, shellMode bool) ([]string, error) {
-	if len(command) == 0 {
-		return nil, core.Exit(2, "missing command")
-	}
-	if shellMode {
-		return []string{"bash", "-lc", strings.Join(command, " ")}, nil
-	}
-	if core.ShouldUseShell(command) {
-		return []string{"bash", "-lc", core.ShellScriptFromArgv(command)}, nil
-	}
-	return command, nil
 }
 
 func blaxelWorkdir(cfg core.Config) (string, error) {

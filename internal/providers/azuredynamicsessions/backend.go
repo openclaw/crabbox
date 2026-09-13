@@ -108,16 +108,17 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req core.RunReque
 		// Keep invalid-workspace handling after acquisition, with normal retention.
 		Setup: func(context.Context) error { return workspaceErr },
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
-			command, err := buildAzureDynamicSessionsCommand(req.Command, req.ShellMode)
+			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 			if err != nil {
 				return shared.DelegatedSandboxCommand{}, err
 			}
+			command := intent.ShellScript()
 			if req.EnvSummary {
 				core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
 			return shared.DelegatedSandboxCommand{Text: command, Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
 				fmt.Fprintf(b.rt.Stderr, "running on %s %s\n", providerName, strings.Join(req.Command, " "))
-				return client.ExecStream(ctx, leaseID, azureDynamicSessionsExecRequest{
+				return client.ExecStream(ctx, leaseID, shared.CommandStreamRequest{
 					Command: command, Cwd: workspace, Env: req.Env,
 					TimeoutMS: durationMillisecondsCeil(azureDynamicSessionsTimeout(b.cfg)),
 				}, stdout, stderr)

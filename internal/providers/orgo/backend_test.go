@@ -747,13 +747,11 @@ func TestDoctorCountsInventoryComputers(t *testing.T) {
 func TestBuildCommandQuotesForwardedEnvValues(t *testing.T) {
 	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 
-	command, err := backend.buildCommand(core.RunRequest{
-		Command: []string{"printf", "ok"},
-		Env: map[string]string{
-			"PIPE": "|",
-			"SEMI": ";",
-		},
-	})
+	intent, err := core.ParseCommandIntent([]string{"printf", "%s", "&&"}, false, map[int]bool{2: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command, err := backend.buildCommand(intent, map[string]string{"PIPE": "|", "SEMI": ";"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -765,6 +763,9 @@ func TestBuildCommandQuotesForwardedEnvValues(t *testing.T) {
 	}
 	if strings.Contains(command, "export PIPE=|\n") || strings.Contains(command, "export SEMI=;\n") {
 		t.Fatalf("control operator leaked unquoted: %q", command)
+	}
+	if !strings.HasSuffix(command, "'printf' '%s' '&&'") {
+		t.Fatalf("literal argument was reinterpreted: %q", command)
 	}
 }
 
