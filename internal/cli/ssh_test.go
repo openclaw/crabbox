@@ -1987,7 +1987,7 @@ func TestProxySSHReadinessPinsOnlyFullyReadyFallback(t *testing.T) {
 			return waitForSSHReady(ctx, target, io.Discard, "test", 5*time.Second) == nil
 		}},
 		{name: "probe", run: func(ctx context.Context, target *SSHTarget) bool {
-			return probeSSHReady(ctx, target, 5*time.Second)
+			return ProbeSSHReady(ctx, target, 5*time.Second)
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2103,7 +2103,7 @@ func TestSSHReadinessCallsUseTargetProfile(t *testing.T) {
 			{
 				name: "probe",
 				run: func(ctx context.Context, target *SSHTarget) bool {
-					return probeSSHReady(ctx, target, 4*time.Second)
+					return ProbeSSHReady(ctx, target, 4*time.Second)
 				},
 			},
 		} {
@@ -2371,7 +2371,7 @@ func TestWindowsSSHReadyProbeHonorsCallerBudget(t *testing.T) {
 		ReadyCheck:     "true",
 	}
 	start := time.Now()
-	if probeSSHReady(context.Background(), &target, 20*time.Millisecond) {
+	if ProbeSSHReady(context.Background(), &target, 20*time.Millisecond) {
 		t.Fatal("Windows readiness probe ignored the caller's short budget")
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
@@ -2673,6 +2673,23 @@ func TestSSHControlPathIsScopedByKey(t *testing.T) {
 	if !strings.HasPrefix(filepath.Base(left), "crabbox-ssh-") || !strings.HasSuffix(left, "-%C") {
 		t.Fatalf("unexpected control path %q", left)
 	}
+	t.Run("selected roots with the same endpoint", func(t *testing.T) {
+		dirs := isolateTestUserDirs(t)
+		keyA, err := testboxKeyPath("cbx_1516")
+		if err != nil {
+			t.Fatal(err)
+		}
+		left := sshControlPath(SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "2222", Key: keyA})
+		t.Setenv("XDG_STATE_HOME", filepath.Join(dirs.Root, "other-state"))
+		keyB, err := testboxKeyPath("cbx_1516")
+		if err != nil || keyA == keyB {
+			t.Fatalf("selected roots did not resolve distinct keys: %q %q %v", keyA, keyB, err)
+		}
+		right := sshControlPath(SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "2222", Key: keyB})
+		if left == right {
+			t.Fatalf("selected roots shared a control path for the same endpoint: %q", left)
+		}
+	})
 }
 
 func TestSSHControlPathIsScopedByProxyAndCertificate(t *testing.T) {
@@ -6109,13 +6126,13 @@ func TestRemoteSyncMetadataUsesGitDirForGitWorktree(t *testing.T) {
 }
 
 func TestIsBootstrapWaitError(t *testing.T) {
-	if !isBootstrapWaitError(exit(5, "timed out waiting for SSH on 203.0.113.10 during bootstrap")) {
+	if !isBootstrapWaitError(Exit(5, "timed out waiting for SSH on 203.0.113.10 during bootstrap")) {
 		t.Fatal("expected SSH timeout to be retryable")
 	}
-	if !isBootstrapWaitError(exit(5, "timed out waiting for XCP-ng guest IPv4")) {
+	if !isBootstrapWaitError(Exit(5, "timed out waiting for XCP-ng guest IPv4")) {
 		t.Fatal("expected XCP-ng guest IPv4 timeout to be retryable")
 	}
-	if isBootstrapWaitError(exit(6, "rsync failed")) {
+	if isBootstrapWaitError(Exit(6, "rsync failed")) {
 		t.Fatal("sync failure must not be treated as retryable bootstrap")
 	}
 }
@@ -6220,13 +6237,13 @@ func TestBootstrapWaitTimeoutExtendsForDesktopBrowser(t *testing.T) {
 
 func TestServerProviderKeyUsesOnlyCrabboxLeaseKeys(t *testing.T) {
 	server := Server{Labels: map[string]string{"lease": "cbx_123456abcdef"}}
-	if got := serverProviderKey(server); got != "crabbox-cbx-123456abcdef" {
+	if got := ServerProviderKey(server); got != "crabbox-cbx-123456abcdef" {
 		t.Fatalf("serverProviderKey()=%q", got)
 	}
-	if !validCrabboxProviderKey("crabbox-cbx-123456abcdef") {
+	if !ValidCrabboxProviderKey("crabbox-cbx-123456abcdef") {
 		t.Fatal("expected per-lease provider key to be valid")
 	}
-	if validCrabboxProviderKey("crabbox-steipete") {
+	if ValidCrabboxProviderKey("crabbox-steipete") {
 		t.Fatal("shared key must not be treated as per-lease cleanup key")
 	}
 }
@@ -6419,28 +6436,28 @@ func TestMappedProviderCandidatesPreserveNonCanonicalClassLiterals(t *testing.T)
 				t.Errorf("provider=%s class=%q candidates=%v want literal", provider, class, got)
 			}
 		}
-		if got := awsLaunchCandidates(Config{Provider: "aws", TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: class}); !reflect.DeepEqual(got, []string{class, "t3.small"}) {
+		if got := AWSLaunchCandidates(Config{Provider: "aws", TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: class}); !reflect.DeepEqual(got, []string{class, "t3.small"}) {
 			t.Errorf("AWS class=%q launch candidates=%v", class, got)
 		}
 	}
 }
 
 func TestAWSLaunchCandidatesAddsPolicyFallbackUnlessExact(t *testing.T) {
-	got := awsLaunchCandidates(Config{Provider: "aws", Class: "beast", ServerType: "c7a.48xlarge"})
+	got := AWSLaunchCandidates(Config{Provider: "aws", Class: "beast", ServerType: "c7a.48xlarge"})
 	if got[len(got)-1] != "t3.small" {
 		t.Fatalf("last fallback=%q want t3.small in %v", got[len(got)-1], got)
 	}
-	arm := awsLaunchCandidates(Config{Provider: "aws", TargetOS: targetLinux, Architecture: ArchitectureARM64, architectureExplicit: true, Class: "beast", ServerType: "c7g.16xlarge"})
+	arm := AWSLaunchCandidates(Config{Provider: "aws", TargetOS: targetLinux, Architecture: ArchitectureARM64, architectureExplicit: true, Class: "beast", ServerType: "c7g.16xlarge"})
 	if arm[len(arm)-1] != "t4g.small" {
 		t.Fatalf("last arm fallback=%q want t4g.small in %v", arm[len(arm)-1], arm)
 	}
-	wsl2 := awsLaunchCandidates(Config{Provider: "aws", TargetOS: targetWindows, WindowsMode: windowsModeWSL2, Class: "standard", ServerType: "m8i.large"})
+	wsl2 := AWSLaunchCandidates(Config{Provider: "aws", TargetOS: targetWindows, WindowsMode: windowsModeWSL2, Class: "standard", ServerType: "m8i.large"})
 	for _, candidate := range wsl2 {
 		if strings.HasPrefix(candidate, "t3.") || strings.HasPrefix(candidate, "m7") {
 			t.Fatalf("WSL2 candidate %q does not support nested virtualization: %v", candidate, wsl2)
 		}
 	}
-	exact := awsLaunchCandidates(Config{Provider: "aws", Class: "beast", ServerType: "t3.small", ServerTypeExplicit: true})
+	exact := AWSLaunchCandidates(Config{Provider: "aws", Class: "beast", ServerType: "t3.small", ServerTypeExplicit: true})
 	if len(exact) != 1 || exact[0] != "t3.small" {
 		t.Fatalf("exact candidates=%v", exact)
 	}

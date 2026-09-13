@@ -30,14 +30,14 @@ type morphAPI interface {
 	DeleteInstance(ctx context.Context, instanceID string) error
 }
 
-var newMorphClient = func(cfg Config, rt Runtime) (morphAPI, error) {
+var newMorphClient = func(cfg core.Config, rt core.Runtime) (morphAPI, error) {
 	apiURL, err := normalizeMorphAPIURL(cfg.Morph.APIURL)
 	if err != nil {
-		return nil, exit(2, "provider=morph has invalid apiUrl %q: %v", cfg.Morph.APIURL, err)
+		return nil, core.Exit(2, "provider=morph has invalid apiUrl %q: %v", cfg.Morph.APIURL, err)
 	}
 	apiKey := strings.TrimSpace(cfg.Morph.APIKey)
 	if apiKey == "" {
-		return nil, exit(2, "provider=morph requires CRABBOX_MORPH_API_KEY, MORPH_API_KEY, or morph.apiKey")
+		return nil, core.Exit(2, "provider=morph requires CRABBOX_MORPH_API_KEY, MORPH_API_KEY, or morph.apiKey")
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
@@ -297,15 +297,7 @@ func (c *morphClient) doRaw(ctx context.Context, method, path string, query url.
 	if len(query) > 0 {
 		endpoint.RawQuery = query.Encode()
 	}
-	var payload io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return nil, err
-		}
-		payload = bytes.NewReader(data)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint.String(), payload)
+	req, err := shared.NewCompactJSONRequest(ctx, method, endpoint.String(), body)
 	if err != nil {
 		return nil, err
 	}

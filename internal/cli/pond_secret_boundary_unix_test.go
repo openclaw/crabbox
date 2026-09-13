@@ -108,7 +108,7 @@ func TestPondSecretBoundaryDaemon(t *testing.T) {
 			}
 			providerRegistry[provider.Name()] = provider
 			t.Cleanup(func() { delete(providerRegistry, provider.Name()) })
-			if err := claimLeaseForRepoProviderScopePond(lease.LeaseID, "peer", provider.Name(), "", "boundary", f.root, time.Minute, false); err != nil {
+			if err := ClaimLeaseForRepoProviderScopePond(lease.LeaseID, "peer", provider.Name(), "", "boundary", f.root, time.Minute, false); err != nil {
 				t.Fatal(err)
 			}
 			app := App{Stdout: io.Discard, Stderr: io.Discard}

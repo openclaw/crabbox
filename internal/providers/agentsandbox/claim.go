@@ -11,6 +11,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -51,7 +52,7 @@ var dns1123LabelPattern = regexp.MustCompile(`[^a-z0-9-]+`)
 func claimName(leaseID, slug string) string {
 	base := normalizeKubernetesName(slug)
 	if base == "" {
-		base = normalizeKubernetesName(newLeaseSlug(leaseID))
+		base = normalizeKubernetesName(core.NewLeaseSlug(leaseID))
 	}
 	if base == "" {
 		base = "sandbox"
@@ -76,7 +77,7 @@ func normalizeKubernetesName(value string) string {
 	return value
 }
 
-func claimScope(cfg Config) string {
+func claimScope(cfg core.Config) string {
 	values := cfg.AgentSandbox
 	container := strings.TrimSpace(values.Container)
 	containerMode := "implicit"
@@ -101,11 +102,11 @@ func claimLabels(leaseID, slug string) map[string]string {
 	}
 }
 
-func claimAnnotations(cfg Config) map[string]string {
+func claimAnnotations(cfg core.Config) map[string]string {
 	return claimAnnotationsWithRecoveryNonce(cfg, "")
 }
 
-func claimAnnotationsWithRecoveryNonce(cfg Config, recoveryNonce string) map[string]string {
+func claimAnnotationsWithRecoveryNonce(cfg core.Config, recoveryNonce string) map[string]string {
 	container := strings.TrimSpace(cfg.AgentSandbox.Container)
 	if container == "" {
 		container = "default"
@@ -135,38 +136,38 @@ func safeLabelValue(value string) string {
 	return strings.TrimRight(value[:54], "-_.") + "-" + hex.EncodeToString(sum[:])[:8]
 }
 
-func claimLeaseForRepo(cfg Config, leaseID, slug string, repo Repo, reclaim bool) error {
-	return claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope(cfg), cfg.Pond, repo.Root, cfg.IdleTimeout, reclaim)
+func claimLeaseForRepo(cfg core.Config, leaseID, slug string, repo core.Repo, reclaim bool) error {
+	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope(cfg), cfg.Pond, repo.Root, cfg.IdleTimeout, reclaim)
 }
 
-func writeClaimLease(cfg Config, leaseID, slug string, repo Repo, reclaim bool, ready sandboxReadiness, claimName, expiresAt, recoveryNonce string) (LeaseClaim, error) {
+func writeClaimLease(cfg core.Config, leaseID, slug string, repo core.Repo, reclaim bool, ready sandboxReadiness, claimName, expiresAt, recoveryNonce string) (core.LeaseClaim, error) {
 	if err := claimLeaseForRepo(cfg, leaseID, slug, repo, reclaim); err != nil {
-		return LeaseClaim{}, err
+		return core.LeaseClaim{}, err
 	}
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
-		return LeaseClaim{}, err
+		return core.LeaseClaim{}, err
 	}
-	return updateLeaseClaimLabelsIfUnchanged(leaseID, claim, claimMetadataLabels(cfg, leaseID, ready, claimName, expiresAt, recoveryNonce))
+	return core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, claimMetadataLabels(cfg, leaseID, ready, claimName, expiresAt, recoveryNonce))
 }
 
-func refreshClaimLeaseActivity(cfg Config, claim LeaseClaim) error {
+func refreshClaimLeaseActivity(cfg core.Config, claim core.LeaseClaim) error {
 	idleTimeout := cfg.IdleTimeout
 	if idleTimeout <= 0 && claim.IdleTimeoutSeconds > 0 {
 		idleTimeout = time.Duration(claim.IdleTimeoutSeconds) * time.Second
 	}
-	if err := claimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, claim.RepoRoot, idleTimeout, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, claim.RepoRoot, idleTimeout, false); err != nil {
 		return err
 	}
-	updated, err := readLeaseClaim(claim.LeaseID)
+	updated, err := core.ReadLeaseClaim(claim.LeaseID)
 	if err != nil {
 		return err
 	}
-	_, err = updateLeaseClaimLabelsIfUnchanged(claim.LeaseID, updated, claim.Labels)
+	_, err = core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, updated, claim.Labels)
 	return err
 }
 
-func claimMetadataLabels(cfg Config, leaseID string, ready sandboxReadiness, claimName, expiresAt, recoveryNonce string) map[string]string {
+func claimMetadataLabels(cfg core.Config, leaseID string, ready sandboxReadiness, claimName, expiresAt, recoveryNonce string) map[string]string {
 	container := strings.TrimSpace(ready.Container)
 	if container == "" {
 		container = strings.TrimSpace(cfg.AgentSandbox.Container)
@@ -217,18 +218,18 @@ func claimReadinessLabels(labels map[string]string, ready sandboxReadiness) map[
 	return updated
 }
 
-func claimIdentityFromLocalClaim(claim LeaseClaim) (claimIdentity, error) {
+func claimIdentityFromLocalClaim(claim core.LeaseClaim) (claimIdentity, error) {
 	uid := ""
 	if claim.Labels != nil {
 		uid = strings.TrimSpace(claim.Labels[claimLabelClaimUID])
 	}
 	if uid == "" {
-		return claimIdentity{}, exit(4, "agent-sandbox lease %s has no pinned Kubernetes claim UID", claim.LeaseID)
+		return claimIdentity{}, core.Exit(4, "agent-sandbox lease %s has no pinned Kubernetes claim UID", claim.LeaseID)
 	}
 	return claimIdentityFromLocalClaimWithUID(claim, uid)
 }
 
-func claimIdentityFromLocalClaimWithUID(claim LeaseClaim, uid string) (claimIdentity, error) {
+func claimIdentityFromLocalClaimWithUID(claim core.LeaseClaim, uid string) (claimIdentity, error) {
 	warmPool := ""
 	expiresAt := ""
 	container := ""
@@ -240,7 +241,7 @@ func claimIdentityFromLocalClaimWithUID(claim LeaseClaim, uid string) (claimIden
 		containerPinned = strings.EqualFold(strings.TrimSpace(claim.Labels[claimLabelContainerPinned]), "true")
 	}
 	if warmPool == "" {
-		return claimIdentity{}, exit(4, "agent-sandbox lease %s has no pinned SandboxWarmPool", claim.LeaseID)
+		return claimIdentity{}, core.Exit(4, "agent-sandbox lease %s has no pinned SandboxWarmPool", claim.LeaseID)
 	}
 	if !containerPinned && strings.Contains(claim.ProviderScope, "containerMode:implicit|") {
 		container = ""
@@ -248,26 +249,26 @@ func claimIdentityFromLocalClaimWithUID(claim LeaseClaim, uid string) (claimIden
 	return claimIdentity{LeaseID: claim.LeaseID, ProviderScope: claim.ProviderScope, UID: uid, WarmPool: warmPool, ExpiresAt: expiresAt, Container: container}, nil
 }
 
-func authorizeClaimScope(cfg Config, claim LeaseClaim) error {
+func authorizeClaimScope(cfg core.Config, claim core.LeaseClaim) error {
 	if claim.Provider != "" && claim.Provider != providerName {
-		return exit(2, "lease %s belongs to provider=%s, not %s", claim.LeaseID, claim.Provider, providerName)
+		return core.Exit(2, "lease %s belongs to provider=%s, not %s", claim.LeaseID, claim.Provider, providerName)
 	}
 	if got, want := strings.TrimSpace(claim.ProviderScope), claimScope(cfg); got != "" && got != want {
-		return exit(2, "lease %s belongs to a different agent-sandbox scope", claim.LeaseID)
+		return core.Exit(2, "lease %s belongs to a different agent-sandbox scope", claim.LeaseID)
 	}
 	return nil
 }
 
-func authorizeAgentSandboxRepoClaim(claim LeaseClaim, repoRoot string, reclaim bool) error {
+func authorizeAgentSandboxRepoClaim(claim core.LeaseClaim, repoRoot string, reclaim bool) error {
 	if repoRoot == "" || claim.RepoRoot == "" || claim.RepoRoot == repoRoot || reclaim {
 		return nil
 	}
-	return exit(2, "lease %s is claimed by repo %s; use --reclaim to claim it for %s", claim.LeaseID, claim.RepoRoot, repoRoot)
+	return core.Exit(2, "lease %s is claimed by repo %s; use --reclaim to claim it for %s", claim.LeaseID, claim.RepoRoot, repoRoot)
 }
 
-func retainMissingClaim(cfg Config, claim LeaseClaim) error {
+func retainMissingClaim(cfg core.Config, claim core.LeaseClaim) error {
 	if cfg.AgentSandbox.ForgetMissing {
-		if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 			return fmt.Errorf("remove forgotten agent-sandbox lease %s: %w", claim.LeaseID, err)
 		}
 		return nil
@@ -275,68 +276,57 @@ func retainMissingClaim(cfg Config, claim LeaseClaim) error {
 	return fmt.Errorf("agent-sandbox claim %s is missing in Kubernetes; local claim retained because forgetMissing=false", claim.LeaseID)
 }
 
-func resolveLocalClaim(identifier string) (LeaseClaim, error) {
-	claim, ok, err := resolveLeaseClaimForProvider(identifier, providerName)
+func resolveLocalClaim(identifier string) (core.LeaseClaim, error) {
+	claim, ok, err := core.ResolveLeaseClaimForProvider(identifier, providerName)
 	if err != nil {
-		return LeaseClaim{}, err
+		return core.LeaseClaim{}, err
 	}
 	if !ok {
 		claim, ok, err = resolveLocalClaimByClaimName(identifier)
 		if err != nil {
-			return LeaseClaim{}, err
+			return core.LeaseClaim{}, err
 		}
 	}
 	if !ok {
-		return LeaseClaim{}, exit(4, "agent-sandbox lease %q is not claimed by Crabbox", identifier)
+		return core.LeaseClaim{}, core.Exit(4, "agent-sandbox lease %q is not claimed by Crabbox", identifier)
 	}
 	return claim, nil
 }
 
-func resolveLocalClaimByClaimName(identifier string) (LeaseClaim, bool, error) {
+func resolveLocalClaimByClaimName(identifier string) (core.LeaseClaim, bool, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
-		return LeaseClaim{}, false, nil
+		return core.LeaseClaim{}, false, nil
 	}
 	claims, err := listAgentSandboxLeaseClaims()
 	if err != nil {
-		return LeaseClaim{}, false, err
+		return core.LeaseClaim{}, false, err
 	}
-	var match LeaseClaim
+	var match core.LeaseClaim
 	for _, claim := range claims {
 		if claim.Provider != providerName || strings.TrimSpace(claim.Labels[claimLabelClaimName]) != identifier {
 			continue
 		}
 		if match.LeaseID != "" {
-			return LeaseClaim{}, false, exit(2, "multiple agent-sandbox claims match claim name %s", identifier)
+			return core.LeaseClaim{}, false, core.Exit(2, "multiple agent-sandbox claims match claim name %s", identifier)
 		}
 		match = claim
 	}
 	return match, match.LeaseID != "", nil
 }
 
-func listAgentSandboxLeaseClaims() ([]LeaseClaim, error) {
-	return listLeaseClaimsWithPrefix(leasePrefix)
+func listAgentSandboxLeaseClaims() ([]core.LeaseClaim, error) {
+	return core.ListLeaseClaimsWithPrefix(leasePrefix)
 }
 
-func claimCleanupDue(claim LeaseClaim, now time.Time) (bool, string) {
+func claimCleanupDue(claim core.LeaseClaim, now time.Time) (bool, string) {
 	if claimTTLExpired(claim, now) {
 		return true, "ttl"
 	}
-	if claim.IdleTimeoutSeconds <= 0 {
-		return false, "idle timeout disabled"
-	}
-	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
-	if err != nil {
-		return false, "invalid last-used time"
-	}
-	deadline := lastUsed.Add(time.Duration(claim.IdleTimeoutSeconds) * time.Second)
-	if now.Before(deadline) {
-		return false, "idle timeout not reached"
-	}
-	return true, "idle timeout"
+	return shared.ClaimIdleCleanupDue(claim, now)
 }
 
-func claimTTLExpired(claim LeaseClaim, now time.Time) bool {
+func claimTTLExpired(claim core.LeaseClaim, now time.Time) bool {
 	expiresAt := strings.TrimSpace(claim.Labels[claimLabelExpiresAt])
 	if expiresAt == "" {
 		return false
@@ -345,7 +335,7 @@ func claimTTLExpired(claim LeaseClaim, now time.Time) bool {
 	return err == nil && !now.Before(deadline)
 }
 
-func claimNameFromLocalClaim(claim LeaseClaim) string {
+func claimNameFromLocalClaim(claim core.LeaseClaim) string {
 	if claim.Labels != nil {
 		if value := strings.TrimSpace(claim.Labels[claimLabelClaimName]); value != "" {
 			return value
@@ -378,7 +368,7 @@ func newLeaseID() string {
 	return leasePrefix + core.NewLeaseID()[4:]
 }
 
-func readinessTimeout(cfg Config) time.Duration {
+func readinessTimeout(cfg core.Config) time.Duration {
 	timeout := cfg.AgentSandbox.SandboxReadyTimeout
 	if timeout <= 0 {
 		timeout = core.AgentSandboxConfigDefaultSandboxReadyTimeout
@@ -386,7 +376,7 @@ func readinessTimeout(cfg Config) time.Duration {
 	return timeout
 }
 
-func podReadinessTimeout(cfg Config) time.Duration {
+func podReadinessTimeout(cfg core.Config) time.Duration {
 	timeout := cfg.AgentSandbox.PodReadyTimeout
 	if timeout <= 0 {
 		timeout = core.AgentSandboxConfigDefaultPodReadyTimeout

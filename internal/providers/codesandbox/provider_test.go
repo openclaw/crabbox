@@ -67,7 +67,7 @@ func TestProviderFlagsApplyAndValidateNonSecretFields(t *testing.T) {
 	if got.HibernationTimeoutSecs != 900 || got.AutomaticWakeupHTTP || !got.AutomaticWakeupWebSocket || got.BridgeCommand != "/opt/node" || got.SDKPackage != "@codesandbox/sdk@2.4.2" || got.DoctorListLimit != 2 || got.OperationTimeoutSecs != 45 {
 		t.Fatalf("codesandbox config=%#v", got)
 	}
-	if _, ok := reflect.TypeOf(CodeSandboxConfig{}).FieldByName("APIKey"); ok {
+	if _, ok := reflect.TypeOf(core.CodeSandboxConfig{}).FieldByName("APIKey"); ok {
 		t.Fatal("CodeSandboxConfig must not persist API keys")
 	}
 }
@@ -102,14 +102,14 @@ func TestProviderFlagsRejectGenericSizingForAliases(t *testing.T) {
 func TestValidateCodeSandboxConfigRejectsUnsafeValues(t *testing.T) {
 	tests := []struct {
 		name   string
-		mutate func(*Config)
+		mutate func(*core.Config)
 		want   string
 	}{
-		{name: "workdir outside project workspace", mutate: func(cfg *Config) { cfg.CodeSandbox.Workdir = "/tmp/app" }, want: "under /project/workspace"},
-		{name: "empty bridge command", mutate: func(cfg *Config) { cfg.CodeSandbox.BridgeCommand = " " }, want: "bridgeCommand"},
-		{name: "invalid privacy", mutate: func(cfg *Config) { cfg.CodeSandbox.Privacy = "team-only" }, want: "privacy"},
-		{name: "invalid vm tier", mutate: func(cfg *Config) { cfg.CodeSandbox.VMTier = "huge" }, want: "vmTier"},
-		{name: "negative timeout", mutate: func(cfg *Config) { cfg.CodeSandbox.OperationTimeoutSecs = -1 }, want: "operationTimeoutSecs"},
+		{name: "workdir outside project workspace", mutate: func(cfg *core.Config) { cfg.CodeSandbox.Workdir = "/tmp/app" }, want: "under /project/workspace"},
+		{name: "empty bridge command", mutate: func(cfg *core.Config) { cfg.CodeSandbox.BridgeCommand = " " }, want: "bridgeCommand"},
+		{name: "invalid privacy", mutate: func(cfg *core.Config) { cfg.CodeSandbox.Privacy = "team-only" }, want: "privacy"},
+		{name: "invalid vm tier", mutate: func(cfg *core.Config) { cfg.CodeSandbox.VMTier = "huge" }, want: "vmTier"},
+		{name: "negative timeout", mutate: func(cfg *core.Config) { cfg.CodeSandbox.OperationTimeoutSecs = -1 }, want: "operationTimeoutSecs"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -141,13 +141,13 @@ func TestDoctorRequiresEnvOnlyAuthBeforeBridge(t *testing.T) {
 	t.Setenv(codesandboxPrimaryAPIKeyEnv, "")
 	t.Setenv(codesandboxFallbackAPIKeyEnv, "")
 	calls := 0
-	restore := replaceClientFactory(func(Config, Runtime) (codeSandboxAPI, error) {
+	restore := replaceClientFactory(func(core.Config, core.Runtime) (codeSandboxAPI, error) {
 		calls++
 		return &fakeSandboxLister{}, nil
 	})
 	defer restore()
 	backend := newTestBackend(newTestConfig())
-	_, err := backend.Doctor(context.Background(), DoctorRequest{})
+	_, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err == nil || !strings.Contains(err.Error(), codesandboxPrimaryAPIKeyEnv) || strings.Contains(err.Error(), "secret") {
 		t.Fatalf("Doctor err=%v", err)
 	}
@@ -164,12 +164,12 @@ func TestDoctorIsNonMutatingListReadiness(t *testing.T) {
 			TotalCount: 1,
 		},
 	}
-	restore := replaceClientFactory(func(Config, Runtime) (codeSandboxAPI, error) {
+	restore := replaceClientFactory(func(core.Config, core.Runtime) (codeSandboxAPI, error) {
 		return fake, nil
 	})
 	defer restore()
 	backend := newTestBackend(newTestConfig())
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatalf("Doctor err=%v", err)
 	}
@@ -181,13 +181,13 @@ func TestDoctorIsNonMutatingListReadiness(t *testing.T) {
 	}
 }
 
-func newTestConfig() Config {
+func newTestConfig() core.Config {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	return cfg
 }
 
-func newTestBackend(cfg Config) *codeSandboxBackend {
+func newTestBackend(cfg core.Config) *codeSandboxBackend {
 	backend, err := Provider{}.Configure(cfg, discardRuntime())
 	if err != nil {
 		panic(err)
@@ -195,7 +195,7 @@ func newTestBackend(cfg Config) *codeSandboxBackend {
 	return backend.(*codeSandboxBackend)
 }
 
-func replaceClientFactory(fn func(Config, Runtime) (codeSandboxAPI, error)) func() {
+func replaceClientFactory(fn func(core.Config, core.Runtime) (codeSandboxAPI, error)) func() {
 	prev := newCodeSandboxClient
 	newCodeSandboxClient = fn
 	return func() { newCodeSandboxClient = prev }
@@ -285,7 +285,7 @@ func TestProviderFlagPresenceBeforeValidation(t *testing.T) {
 	if err := ApplyCodeSandboxProviderFlags(&cfg, fs, values); err == nil {
 		t.Fatal("expected semantic validation failure")
 	}
-	if cfg.CodeSandbox != (CodeSandboxConfig{}) {
+	if cfg.CodeSandbox != (core.CodeSandboxConfig{}) {
 		t.Fatalf("explicit zero values not copied before validation: %#v", cfg.CodeSandbox)
 	}
 }

@@ -3,10 +3,12 @@ package unikraftcloud
 import (
 	"strings"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestVerifyUnikraftCloudClaimSnapshotRejectsRebind(t *testing.T) {
-	snapshot := LeaseClaim{
+	snapshot := core.LeaseClaim{
 		LeaseID:       "ukc_aaaaaaaaaaaa",
 		Slug:          "snapshot",
 		Provider:      providerName,

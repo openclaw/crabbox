@@ -18,36 +18,36 @@ import (
 )
 
 type exeDevRecordingRunner struct {
-	calls []LocalCommandRequest
-	fn    func(LocalCommandRequest) (LocalCommandResult, error)
+	calls []core.LocalCommandRequest
+	fn    func(core.LocalCommandRequest) (core.LocalCommandResult, error)
 }
 
-func (r *exeDevRecordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *exeDevRecordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
 	if r.fn != nil {
 		return r.fn(req)
 	}
-	return LocalCommandResult{}, nil
+	return core.LocalCommandResult{}, nil
 }
 
 func TestExeDevListFiltersCrabboxVMsByDefault(t *testing.T) {
 	runner := &exeDevRecordingRunner{}
-	runner.fn = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.fn = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		base := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", "exe.dev", "ls --l --json"}
 		if !reflect.DeepEqual(req.Args, base) {
 			t.Fatalf("args=%v", req.Args)
 		}
-		return LocalCommandResult{Stdout: `{"vms":[{"vm_name":"crabbox-blue-12345678","ssh_dest":"crabbox-blue-12345678.exe.xyz","status":"running","tags":["crabbox","crabbox-lease-cbx_abcdef123456","crabbox-slug-blue"]},{"vm_name":"crabbox-manual-12345678","ssh_dest":"crabbox-manual-12345678.exe.xyz","status":"running"}]}`}, nil
+		return core.LocalCommandResult{Stdout: `{"vms":[{"vm_name":"crabbox-blue-12345678","ssh_dest":"crabbox-blue-12345678.exe.xyz","status":"running","tags":["crabbox","crabbox-lease-cbx_abcdef123456","crabbox-slug-blue"]},{"vm_name":"crabbox-manual-12345678","ssh_dest":"crabbox-manual-12345678.exe.xyz","status":"running"}]}`}, nil
 	}
-	backend := &exeDevLeaseBackend{cfg: Config{}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	views, err := backend.List(context.Background(), ListRequest{})
+	backend := &exeDevLeaseBackend{cfg: core.Config{}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	views, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(views) != 1 || views[0].Name != "crabbox-blue-12345678" || views[0].Provider != providerName {
 		t.Fatalf("views=%#v", views)
 	}
-	views, err = backend.List(context.Background(), ListRequest{All: true})
+	views, err = backend.List(context.Background(), core.ListRequest{All: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestExeDevListFiltersCrabboxVMsByDefault(t *testing.T) {
 }
 
 func TestExeDevDoctorListsInventory(t *testing.T) {
-	runner := &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &exeDevRecordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		got := strings.Join(req.Args, " ")
 		if !strings.Contains(got, "exe.dev ls --l --json") {
 			t.Fatalf("args=%v", req.Args)
@@ -65,13 +65,13 @@ func TestExeDevDoctorListsInventory(t *testing.T) {
 		if strings.Contains(got, " new ") || strings.Contains(got, " rm ") {
 			t.Fatalf("doctor used mutating command: %v", req.Args)
 		}
-		return LocalCommandResult{Stdout: `{"vms":[{"vm_name":"crabbox-blue-12345678","ssh_dest":"crabbox-blue-12345678.exe.xyz","status":"running","tags":["crabbox","crabbox-lease-cbx_abcdef123456","crabbox-slug-blue"]}]}`}, nil
+		return core.LocalCommandResult{Stdout: `{"vms":[{"vm_name":"crabbox-blue-12345678","ssh_dest":"crabbox-blue-12345678.exe.xyz","status":"running","tags":["crabbox","crabbox-lease-cbx_abcdef123456","crabbox-slug-blue"]}]}`}, nil
 	}}
-	doctor, err := Provider{}.ConfigureDoctor(Config{}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	doctor, err := Provider{}.ConfigureDoctor(core.Config{}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := doctor.Doctor(context.Background(), DoctorRequest{})
+	result, err := doctor.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestExeDevDoctorListsInventory(t *testing.T) {
 }
 
 func TestExeDevCreateVMUsesSSHControlAPI(t *testing.T) {
-	runner := &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &exeDevRecordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		got := strings.Join(req.Args, " ")
 		for _, want := range []string{
 			"exe.dev new",
@@ -102,9 +102,9 @@ func TestExeDevCreateVMUsesSSHControlAPI(t *testing.T) {
 				t.Fatalf("args=%v missing %q", req.Args, want)
 			}
 		}
-		return LocalCommandResult{Stdout: `{"vm_name":"crabbox-blue-12345678","ssh_dest":"crabbox-blue-12345678.exe.xyz","status":"running"}`}, nil
+		return core.LocalCommandResult{Stdout: `{"vm_name":"crabbox-blue-12345678","ssh_dest":"crabbox-blue-12345678.exe.xyz","status":"running"}`}, nil
 	}}
-	cfg := Config{ExeDev: ExeDevConfig{
+	cfg := core.Config{ExeDev: core.ExeDevConfig{
 		Image:   "ubuntu:24.04",
 		CPUs:    4,
 		Memory:  "8GB",
@@ -112,7 +112,7 @@ func TestExeDevCreateVMUsesSSHControlAPI(t *testing.T) {
 		Command: "sleep infinity",
 		NoEmail: true,
 	}}
-	backend := &exeDevLeaseBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	backend := &exeDevLeaseBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 	vm, err := backend.createVM(context.Background(), backend.configForRun(), "crabbox-blue-12345678", "cbx_lease", "blue", "cbx_111111111111")
 	if err != nil {
 		t.Fatal(err)
@@ -125,31 +125,31 @@ func TestExeDevCreateVMUsesSSHControlAPI(t *testing.T) {
 func TestExeDevAcquireReportsRollbackFailureAfterPrepareFailure(t *testing.T) {
 	primaryErr := errors.New("ssh not ready")
 	oldWait := waitForSSHReady
-	waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+	waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
 		return primaryErr
 	}
 	t.Cleanup(func() { waitForSSHReady = oldWait })
 	runner := newExeDevAcquireRollbackRunner()
-	backend := &exeDevLeaseBackend{cfg: Config{}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}})
+	backend := &exeDevLeaseBackend{cfg: core.Config{}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
 	assertExeDevRollbackFailure(t, err, primaryErr, runner)
 }
 
 func TestExeDevAcquireReportsRollbackFailureAfterClaimFailure(t *testing.T) {
 	primaryErr := errors.New("claim failed")
 	oldWait := waitForSSHReady
-	waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+	waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
 		return nil
 	}
 	t.Cleanup(func() { waitForSSHReady = oldWait })
 	oldClaim := claimLeaseTargetForRepoConfigScopeIfUnchanged
-	claimLeaseTargetForRepoConfigScopeIfUnchanged = func(string, string, Config, string, Server, SSHTarget, string, time.Duration, bool, LeaseClaim, bool) (LeaseClaim, error) {
-		return LeaseClaim{}, primaryErr
+	claimLeaseTargetForRepoConfigScopeIfUnchanged = func(string, string, core.Config, string, core.Server, core.SSHTarget, string, time.Duration, bool, core.LeaseClaim, bool) (core.LeaseClaim, error) {
+		return core.LeaseClaim{}, primaryErr
 	}
 	t.Cleanup(func() { claimLeaseTargetForRepoConfigScopeIfUnchanged = oldClaim })
 	runner := newExeDevAcquireRollbackRunner()
-	backend := &exeDevLeaseBackend{cfg: Config{}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}})
+	backend := &exeDevLeaseBackend{cfg: core.Config{}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
 	assertExeDevRollbackFailure(t, err, primaryErr, runner)
 }
 
@@ -160,22 +160,22 @@ func TestExeDevProvisioningRollbackRejectsReplacementGeneration(t *testing.T) {
 		code    int
 	}{
 		{name: "opaque", primary: errors.New("ssh not ready"), code: 1},
-		{name: "typed", primary: ExitError{Code: 69, Message: "ssh not ready"}, code: 69},
-		{name: "signed", primary: ExitError{Code: -1, Message: "ssh not ready"}, code: -1},
-		{name: "zero", primary: ExitError{Code: 0, Message: "ssh not ready"}, code: 1},
+		{name: "typed", primary: core.ExitError{Code: 69, Message: "ssh not ready"}, code: 69},
+		{name: "signed", primary: core.ExitError{Code: -1, Message: "ssh not ready"}, code: -1},
+		{name: "zero", primary: core.ExitError{Code: 0, Message: "ssh not ready"}, code: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			leaseID := "cbx_abcdef123456"
 			slug := "blue"
 			vm := ownedExeDevVM(leaseID, slug)
 			runner := exeDevInventoryRunner(t, vm)
-			backend := newExeDevTestBackend(Config{}, runner)
+			backend := newExeDevTestBackend(core.Config{}, runner)
 
 			err := backend.rollbackCreatedVM(vm.Name(), leaseID, slug, "cbx_222222222222", tc.primary)
 			if err == nil || !strings.Contains(err.Error(), tc.primary.Error()) || !strings.Contains(err.Error(), "refused replacement VM") {
 				t.Fatalf("err=%v, want guarded rollback refusal", err)
 			}
-			var public ExitError
+			var public core.ExitError
 			if !errors.As(err, &public) || public.Code != tc.code {
 				t.Fatalf("rollback exit=%d, want primary code %d", public.Code, tc.code)
 			}
@@ -186,18 +186,18 @@ func TestExeDevProvisioningRollbackRejectsReplacementGeneration(t *testing.T) {
 
 func newExeDevAcquireRollbackRunner() *exeDevRecordingRunner {
 	var created *exeDevVM
-	return &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	return &exeDevRecordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		cmd := strings.Join(req.Args, " ")
 		switch {
 		case strings.Contains(cmd, "whoami --json"):
-			return LocalCommandResult{Stdout: `{"email":"test@example.com"}`}, nil
+			return core.LocalCommandResult{Stdout: `{"email":"test@example.com"}`}, nil
 		case strings.Contains(cmd, "ls --l --json"):
 			vms := []exeDevVM{}
 			if created != nil {
 				vms = append(vms, *created)
 			}
 			payload, err := json.Marshal(exeDevListResponse{VMs: vms})
-			return LocalCommandResult{Stdout: string(payload)}, err
+			return core.LocalCommandResult{Stdout: string(payload)}, err
 		case strings.Contains(cmd, " new "):
 			fields := strings.Fields(req.Args[len(req.Args)-1])
 			vm := exeDevVM{Status: "running"}
@@ -212,11 +212,11 @@ func newExeDevAcquireRollbackRunner() *exeDevRecordingRunner {
 			}
 			created = &vm
 			payload, err := json.Marshal(vm)
-			return LocalCommandResult{Stdout: string(payload)}, err
+			return core.LocalCommandResult{Stdout: string(payload)}, err
 		case strings.Contains(cmd, " rm "):
-			return LocalCommandResult{ExitCode: 1}, errors.New("exit status 1")
+			return core.LocalCommandResult{ExitCode: 1}, errors.New("exit status 1")
 		default:
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		}
 	}}
 }
@@ -226,7 +226,7 @@ func assertExeDevRollbackFailure(t *testing.T, err error, primary error, runner 
 	if err == nil {
 		t.Fatal("Acquire succeeded, want rollback failure")
 	}
-	var exitErr ExitError
+	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 1 {
 		t.Fatalf("err=%#v, want rendered ExitError code 1", err)
 	}
@@ -244,13 +244,13 @@ func assertExeDevRollbackFailure(t *testing.T, err error, primary error, runner 
 }
 
 func TestExeDevDefaultsPreserveCustomTopLevelWorkRoot(t *testing.T) {
-	cfg := Config{WorkRoot: "/custom/crabbox"}
+	cfg := core.Config{WorkRoot: "/custom/crabbox"}
 	applyExeDevDefaults(&cfg)
 	if cfg.WorkRoot != "/custom/crabbox" || cfg.ExeDev.WorkRoot != "/custom/crabbox" {
 		t.Fatalf("workRoot=%q exeDev.workRoot=%q", cfg.WorkRoot, cfg.ExeDev.WorkRoot)
 	}
 
-	cfg = Config{WorkRoot: "/custom/crabbox", ExeDev: ExeDevConfig{WorkRoot: "/exe/crabbox"}}
+	cfg = core.Config{WorkRoot: "/custom/crabbox", ExeDev: core.ExeDevConfig{WorkRoot: "/exe/crabbox"}}
 	applyExeDevDefaults(&cfg)
 	if cfg.WorkRoot != "/exe/crabbox" || cfg.ExeDev.WorkRoot != "/exe/crabbox" {
 		t.Fatalf("workRoot=%q exeDev.workRoot=%q", cfg.WorkRoot, cfg.ExeDev.WorkRoot)
@@ -258,10 +258,10 @@ func TestExeDevDefaultsPreserveCustomTopLevelWorkRoot(t *testing.T) {
 }
 
 func TestExeDevControlSurfacesJSONError(t *testing.T) {
-	runner := &exeDevRecordingRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
-		return LocalCommandResult{ExitCode: 1, Stdout: `{"error":"active plan required"}`}, errors.New("exit status 1")
+	runner := &exeDevRecordingRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		return core.LocalCommandResult{ExitCode: 1, Stdout: `{"error":"active plan required"}`}, errors.New("exit status 1")
 	}}
-	backend := &exeDevLeaseBackend{cfg: Config{}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	backend := &exeDevLeaseBackend{cfg: core.Config{}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 	_, err := backend.controlOutput(context.Background(), []string{"new", "--json"})
 	if err == nil || !strings.Contains(err.Error(), "active plan required") {
 		t.Fatalf("err=%v", err)
@@ -270,7 +270,7 @@ func TestExeDevControlSurfacesJSONError(t *testing.T) {
 
 func TestExeDevControlRejectsSSHOptionLikeHost(t *testing.T) {
 	runner := &exeDevRecordingRunner{}
-	backend := &exeDevLeaseBackend{cfg: Config{ExeDev: ExeDevConfig{ControlHost: "-oProxyCommand=sh"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	backend := &exeDevLeaseBackend{cfg: core.Config{ExeDev: core.ExeDevConfig{ControlHost: "-oProxyCommand=sh"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 	if _, err := backend.controlOutput(context.Background(), []string{"ls", "--json"}); err == nil || !strings.Contains(err.Error(), "invalid exe.dev control host") {
 		t.Fatalf("err=%v, want invalid control host", err)
 	}
@@ -281,7 +281,7 @@ func TestExeDevControlRejectsSSHOptionLikeHost(t *testing.T) {
 
 func TestExeDevControlHostUsesSeparatePortArgument(t *testing.T) {
 	runner := &exeDevRecordingRunner{}
-	backend := &exeDevLeaseBackend{cfg: Config{ExeDev: ExeDevConfig{ControlHost: "alice@control.example:2222"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	backend := &exeDevLeaseBackend{cfg: core.Config{ExeDev: core.ExeDevConfig{ControlHost: "alice@control.example:2222"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 	if _, err := backend.controlOutput(context.Background(), []string{"ls", "--json"}); err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +296,7 @@ func TestExeDevControlHostUsesSeparatePortArgument(t *testing.T) {
 
 func TestExeDevControlHostPreservesBareIPv6Destination(t *testing.T) {
 	runner := &exeDevRecordingRunner{}
-	backend := &exeDevLeaseBackend{cfg: Config{ExeDev: ExeDevConfig{ControlHost: "alice@2001:db8::10"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	backend := &exeDevLeaseBackend{cfg: core.Config{ExeDev: core.ExeDevConfig{ControlHost: "alice@2001:db8::10"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 	if _, err := backend.controlOutput(context.Background(), []string{"ls", "--json"}); err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +311,7 @@ func TestExeDevControlHostPreservesBareIPv6Destination(t *testing.T) {
 
 func TestExeDevControlHostAcceptsBracketedIPv6Port(t *testing.T) {
 	runner := &exeDevRecordingRunner{}
-	backend := &exeDevLeaseBackend{cfg: Config{ExeDev: ExeDevConfig{ControlHost: "alice@[2001:db8::10]:2222"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	backend := &exeDevLeaseBackend{cfg: core.Config{ExeDev: core.ExeDevConfig{ControlHost: "alice@[2001:db8::10]:2222"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 	if _, err := backend.controlOutput(context.Background(), []string{"ls", "--json"}); err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +326,7 @@ func TestExeDevControlHostAcceptsBracketedIPv6Port(t *testing.T) {
 
 func TestExeDevControlHostPreservesScopedIPv6Destination(t *testing.T) {
 	runner := &exeDevRecordingRunner{}
-	backend := &exeDevLeaseBackend{cfg: Config{ExeDev: ExeDevConfig{ControlHost: "alice@fe80::1%eth0"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	backend := &exeDevLeaseBackend{cfg: core.Config{ExeDev: core.ExeDevConfig{ControlHost: "alice@fe80::1%eth0"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 	if _, err := backend.controlOutput(context.Background(), []string{"ls", "--json"}); err != nil {
 		t.Fatal(err)
 	}
@@ -340,10 +340,10 @@ func TestExeDevControlHostPreservesScopedIPv6Destination(t *testing.T) {
 }
 
 func TestExeDevResolveVMUsesTaggedLeaseIdentity(t *testing.T) {
-	runner := &exeDevRecordingRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
-		return LocalCommandResult{Stdout: `{"vms":[{"vm_name":"crabbox-blue-12345678","ssh_dest":"crabbox-blue-12345678.exe.xyz","status":"running","tags":["crabbox","crabbox-lease-cbx_abcdef123456","crabbox-slug-blue"]}]}`}, nil
+	runner := &exeDevRecordingRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		return core.LocalCommandResult{Stdout: `{"vms":[{"vm_name":"crabbox-blue-12345678","ssh_dest":"crabbox-blue-12345678.exe.xyz","status":"running","tags":["crabbox","crabbox-lease-cbx_abcdef123456","crabbox-slug-blue"]}]}`}, nil
 	}}
-	backend := &exeDevLeaseBackend{cfg: Config{}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	backend := &exeDevLeaseBackend{cfg: core.Config{}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 	_, leaseID, slug, err := backend.resolveVM(context.Background(), "crabbox-blue-12345678")
 	if err != nil {
 		t.Fatal(err)
@@ -355,10 +355,10 @@ func TestExeDevResolveVMUsesTaggedLeaseIdentity(t *testing.T) {
 
 func TestExeDevResolveCanonicalLeaseIDScansTags(t *testing.T) {
 	leaseID := "cbx_abcdef123456"
-	runner := &exeDevRecordingRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
-		return LocalCommandResult{Stdout: `{"vms":[{"vm_name":"crabbox-custom-12345678","ssh_dest":"crabbox-custom-12345678.exe.xyz","status":"running","tags":["crabbox","crabbox-lease-` + leaseID + `","crabbox-slug-custom"]}]}`}, nil
+	runner := &exeDevRecordingRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		return core.LocalCommandResult{Stdout: `{"vms":[{"vm_name":"crabbox-custom-12345678","ssh_dest":"crabbox-custom-12345678.exe.xyz","status":"running","tags":["crabbox","crabbox-lease-` + leaseID + `","crabbox-slug-custom"]}]}`}, nil
 	}}
-	backend := &exeDevLeaseBackend{cfg: Config{}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	backend := &exeDevLeaseBackend{cfg: core.Config{}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 	vm, gotLeaseID, slug, err := backend.resolveVM(context.Background(), leaseID)
 	if err != nil {
 		t.Fatal(err)
@@ -372,17 +372,17 @@ func TestExeDevResolveVMNameRecoversExistingClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_abcdef123456"
 	slug := "blue-lobster"
-	name := leaseProviderName(leaseID, slug)
-	cfg := Config{Provider: providerName}
+	name := core.LeaseProviderName(leaseID, slug)
+	cfg := core.Config{Provider: providerName}
 	applyExeDevDefaults(&cfg)
 	vm := exeDevVM{VMName: name, SSHDest: name + ".exe.xyz", Status: "running"}
-	if _, err := claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, mustExeDevControlScope(t, cfg), exeDevServer(vm, leaseID, slug, cfg, true), exeDevSSHTarget(cfg, vm), t.TempDir(), 0, false, LeaseClaim{}, false); err != nil {
+	if _, err := claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, mustExeDevControlScope(t, cfg), exeDevServer(vm, leaseID, slug, cfg, true), exeDevSSHTarget(cfg, vm), t.TempDir(), 0, false, core.LeaseClaim{}, false); err != nil {
 		t.Fatal(err)
 	}
-	runner := &exeDevRecordingRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
-		return LocalCommandResult{Stdout: `{"vms":[{"vm_name":"` + name + `","ssh_dest":"` + name + `.exe.xyz","status":"running"}]}`}, nil
+	runner := &exeDevRecordingRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		return core.LocalCommandResult{Stdout: `{"vms":[{"vm_name":"` + name + `","ssh_dest":"` + name + `.exe.xyz","status":"running"}]}`}, nil
 	}}
-	backend := &exeDevLeaseBackend{cfg: Config{}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	backend := &exeDevLeaseBackend{cfg: core.Config{}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 	_, gotLeaseID, gotSlug, err := backend.resolveVM(context.Background(), name)
 	if err != nil {
 		t.Fatal(err)
@@ -398,8 +398,8 @@ func TestExeDevReleaseRejectsUnclaimedRawIdentifiers(t *testing.T) {
 		t.Run(identifier, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			runner := exeDevInventoryRunner(t, vm)
-			backend := newExeDevTestBackend(Config{}, runner)
-			_, err := backend.Resolve(context.Background(), ResolveRequest{ID: identifier, ReleaseOnly: true})
+			backend := newExeDevTestBackend(core.Config{}, runner)
+			_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: identifier, ReleaseOnly: true})
 			if err == nil || !strings.Contains(err.Error(), "no exact local claim") {
 				t.Fatalf("err=%v, want exact local claim refusal", err)
 			}
@@ -413,8 +413,8 @@ func TestExeDevReleaseRejectsTaggedVMWithoutLocalClaim(t *testing.T) {
 	leaseID := "cbx_abcdef123456"
 	vm := ownedExeDevVM(leaseID, "blue")
 	runner := exeDevInventoryRunner(t, vm)
-	backend := newExeDevTestBackend(Config{}, runner)
-	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.Name(), ReleaseOnly: true})
+	backend := newExeDevTestBackend(core.Config{}, runner)
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: vm.Name(), ReleaseOnly: true})
 	if err == nil || !strings.Contains(err.Error(), "no exact local claim") {
 		t.Fatalf("err=%v, want exact local claim refusal", err)
 	}
@@ -425,14 +425,14 @@ func TestExeDevReleaseRejectsClaimBoundToDifferentVM(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_abcdef123456"
 	vm := ownedExeDevVM(leaseID, "blue")
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	applyExeDevDefaults(&cfg)
 	other := vm
 	other.VMName = "crabbox-other-12345678"
 	persistExeDevClaim(t, cfg, other, leaseID, "blue", t.TempDir())
 	runner := exeDevInventoryRunner(t, vm)
 	backend := newExeDevTestBackend(cfg, runner)
-	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.Name(), ReleaseOnly: true})
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: vm.Name(), ReleaseOnly: true})
 	if err == nil || !strings.Contains(err.Error(), "not bound to an exact provider/resource claim") {
 		t.Fatalf("err=%v, want exact resource binding refusal", err)
 	}
@@ -443,12 +443,12 @@ func TestExeDevReleaseRejectsChangedSSHEndpoint(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_abcdef123456"
 	vm := ownedExeDevVM(leaseID, "blue")
-	backend := newExeDevTestBackend(Config{}, exeDevInventoryRunner(t, vm))
+	backend := newExeDevTestBackend(core.Config{}, exeDevInventoryRunner(t, vm))
 	persistExeDevClaim(t, backend.configForRun(), vm, leaseID, "blue", t.TempDir())
 	vm.SSHDest = "replacement.exe.xyz:2222"
 	backend.rt.Exec = exeDevInventoryRunner(t, vm)
 
-	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.Name(), ReleaseOnly: true})
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: vm.Name(), ReleaseOnly: true})
 	if err == nil || !strings.Contains(err.Error(), "SSH endpoint does not match") {
 		t.Fatalf("err=%v, want exact SSH endpoint refusal", err)
 	}
@@ -457,12 +457,12 @@ func TestExeDevReleaseRejectsChangedSSHEndpoint(t *testing.T) {
 func TestExeDevReleaseRequiresUnchangedClaimAndRemoteTags(t *testing.T) {
 	for _, test := range []struct {
 		name   string
-		mutate func(t *testing.T, backend *exeDevLeaseBackend, runner *exeDevRecordingRunner, lease LeaseTarget, claim LeaseClaim, vm exeDevVM)
+		mutate func(t *testing.T, backend *exeDevLeaseBackend, runner *exeDevRecordingRunner, lease core.LeaseTarget, claim core.LeaseClaim, vm exeDevVM)
 		want   string
 	}{
 		{
 			name: "claim changed",
-			mutate: func(t *testing.T, backend *exeDevLeaseBackend, _ *exeDevRecordingRunner, lease LeaseTarget, claim LeaseClaim, vm exeDevVM) {
+			mutate: func(t *testing.T, backend *exeDevLeaseBackend, _ *exeDevRecordingRunner, lease core.LeaseTarget, claim core.LeaseClaim, vm exeDevVM) {
 				cfg := backend.configForRun()
 				if _, err := claimLeaseTargetForRepoConfigScopeIfUnchanged(lease.LeaseID, claim.Slug, cfg, claim.ProviderScope, lease.Server, exeDevSSHTarget(cfg, vm), t.TempDir(), cfg.IdleTimeout, true, claim, true); err != nil {
 					t.Fatal(err)
@@ -472,14 +472,14 @@ func TestExeDevReleaseRequiresUnchangedClaimAndRemoteTags(t *testing.T) {
 		},
 		{
 			name: "control route changed",
-			mutate: func(_ *testing.T, backend *exeDevLeaseBackend, _ *exeDevRecordingRunner, _ LeaseTarget, _ LeaseClaim, _ exeDevVM) {
+			mutate: func(_ *testing.T, backend *exeDevLeaseBackend, _ *exeDevRecordingRunner, _ core.LeaseTarget, _ core.LeaseClaim, _ exeDevVM) {
 				backend.cfg.ExeDev.ControlHost = "other.exe.dev"
 			},
 			want: "different exe.dev control route",
 		},
 		{
 			name: "remote tags removed",
-			mutate: func(t *testing.T, _ *exeDevLeaseBackend, runner *exeDevRecordingRunner, _ LeaseTarget, _ LeaseClaim, vm exeDevVM) {
+			mutate: func(t *testing.T, _ *exeDevLeaseBackend, runner *exeDevRecordingRunner, _ core.LeaseTarget, _ core.LeaseClaim, vm exeDevVM) {
 				vm.Tags = nil
 				runner.fn = exeDevInventoryResponse(t, vm)
 			},
@@ -491,19 +491,19 @@ func TestExeDevReleaseRequiresUnchangedClaimAndRemoteTags(t *testing.T) {
 			leaseID := "cbx_abcdef123456"
 			vm := ownedExeDevVM(leaseID, "blue")
 			runner := exeDevInventoryRunner(t, vm)
-			backend := newExeDevTestBackend(Config{}, runner)
+			backend := newExeDevTestBackend(core.Config{}, runner)
 			claim := persistExeDevClaim(t, backend.configForRun(), vm, leaseID, "blue", t.TempDir())
-			lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.Name(), ReleaseOnly: true})
+			lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: vm.Name(), ReleaseOnly: true})
 			if err != nil {
 				t.Fatal(err)
 			}
 			test.mutate(t, backend, runner, lease, claim, vm)
-			err = backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease})
+			err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("err=%v, want %q", err, test.want)
 			}
 			assertNoExeDevRM(t, runner)
-			if _, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || !exists {
+			if _, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID); readErr != nil || !exists {
 				t.Fatalf("claim exists=%v err=%v, want retained", exists, readErr)
 			}
 		})
@@ -515,19 +515,19 @@ func TestExeDevReleaseDeletesExactlyClaimedVMAndRemovesClaim(t *testing.T) {
 	leaseID := "cbx_abcdef123456"
 	vm := ownedExeDevVM(leaseID, "blue")
 	runner := exeDevInventoryRunner(t, vm)
-	backend := newExeDevTestBackend(Config{}, runner)
+	backend := newExeDevTestBackend(core.Config{}, runner)
 	persistExeDevClaim(t, backend.configForRun(), vm, leaseID, "blue", t.TempDir())
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.SSHHost(), ReleaseOnly: true})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: vm.SSHHost(), ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatal(err)
 	}
 	if !hasExeDevRM(runner) {
 		t.Fatalf("rm not called: %#v", runner.calls)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
 		t.Fatalf("claim exists=%v err=%v, want removed", exists, err)
 	}
 }
@@ -537,30 +537,30 @@ func TestExeDevReleaseRunsGuardedRemoteCleanupBeforeDelete(t *testing.T) {
 	leaseID := "cbx_abcdef123456"
 	vm := ownedExeDevVM(leaseID, "blue")
 	runner := exeDevInventoryRunner(t, vm)
-	backend := newExeDevTestBackend(Config{}, runner)
+	backend := newExeDevTestBackend(core.Config{}, runner)
 	claim := persistExeDevClaim(t, backend.configForRun(), vm, leaseID, "blue", t.TempDir())
 	labels := maps.Clone(claim.Labels)
 	labels["tailscale"] = "true"
-	claim, err := updateLeaseClaimLabelsIfUnchangedAfter(leaseID, claim, labels, nil)
+	claim, err := core.UpdateLeaseClaimLabelsIfUnchangedAfter(leaseID, claim, labels, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cleaned := false
 	lease.SSH.Host = "stale-endpoint.example"
 	baseRun := runner.fn
-	runner.fn = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.fn = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if strings.Contains(strings.Join(req.Args, " "), " rm ") && !cleaned {
-			return LocalCommandResult{}, errors.New("delete ran before guarded remote cleanup")
+			return core.LocalCommandResult{}, errors.New("delete ran before guarded remote cleanup")
 		}
 		return baseRun(req)
 	}
-	err = backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{
+	err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
 		Lease: lease,
-		GuardedRemoteCleanup: func(_ context.Context, target LeaseTarget) {
+		GuardedRemoteCleanup: func(_ context.Context, target core.LeaseTarget) {
 			if target.SSH.Host != vm.SSHHost() {
 				t.Fatalf("cleanup SSH host=%q want %q", target.SSH.Host, vm.SSHHost())
 			}
@@ -584,16 +584,16 @@ func TestExeDevReleaseRejectsDifferentAuthenticatedAccount(t *testing.T) {
 	slug := "blue"
 	vm := ownedExeDevVM(leaseID, slug)
 	baseResponse := exeDevInventoryResponse(t, vm)
-	runner := &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &exeDevRecordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if strings.Contains(strings.Join(req.Args, " "), "whoami --json") {
-			return LocalCommandResult{Stdout: `{"email":"other@example.com"}`}, nil
+			return core.LocalCommandResult{Stdout: `{"email":"other@example.com"}`}, nil
 		}
 		return baseResponse(req)
 	}}
-	backend := newExeDevTestBackend(Config{}, runner)
+	backend := newExeDevTestBackend(core.Config{}, runner)
 	persistExeDevClaim(t, backend.configForRun(), vm, leaseID, slug, t.TempDir())
 
-	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.Name(), ReleaseOnly: true})
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: vm.Name(), ReleaseOnly: true})
 	if err == nil || !strings.Contains(err.Error(), "different exe.dev control route") {
 		t.Fatalf("err=%v, want account-bound route refusal", err)
 	}
@@ -606,7 +606,7 @@ func TestExeDevReleaseRejectsReplacementClaimGeneration(t *testing.T) {
 	slug := "blue"
 	vm := ownedExeDevVM(leaseID, slug)
 	runner := exeDevInventoryRunner(t, vm)
-	backend := newExeDevTestBackend(Config{}, runner)
+	backend := newExeDevTestBackend(core.Config{}, runner)
 	persistExeDevClaim(t, backend.configForRun(), vm, leaseID, slug, t.TempDir())
 	vm.Tags = slices.DeleteFunc(vm.Tags, func(tag string) bool {
 		return strings.HasPrefix(tag, exeDevClaimGenerationTagPrefix)
@@ -614,12 +614,12 @@ func TestExeDevReleaseRejectsReplacementClaimGeneration(t *testing.T) {
 	vm.Tags = append(vm.Tags, exeDevClaimGenerationTagPrefix+"cbx_222222222222")
 	runner.fn = exeDevInventoryResponse(t, vm)
 
-	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
 	if err == nil || !strings.Contains(err.Error(), "generation does not match") {
 		t.Fatalf("err=%v, want replacement-generation refusal", err)
 	}
 	assertNoExeDevRM(t, runner)
-	if _, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || !exists {
+	if _, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID); readErr != nil || !exists {
 		t.Fatalf("claim exists=%v err=%v, want retained", exists, readErr)
 	}
 }
@@ -630,17 +630,17 @@ func TestExeDevReleaseSurvivesTouchedClaimRoundTrip(t *testing.T) {
 	slug := "blue"
 	vm := ownedExeDevVM(leaseID, slug)
 	runner := exeDevInventoryRunner(t, vm)
-	backend := newExeDevTestBackend(Config{}, runner)
+	backend := newExeDevTestBackend(core.Config{}, runner)
 	cfg := backend.configForRun()
 	repoRoot := t.TempDir()
 	claim := persistExeDevClaim(t, cfg, vm, leaseID, slug, repoRoot)
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		LeaseID: leaseID,
 		Server:  exeDevServer(vm, leaseID, slug, cfg, true),
 	}
 	lease.Server.Labels[exeDevClaimGenerationLabel] = claim.Labels[exeDevClaimGenerationLabel]
-	setServerLeaseClaimSnapshot(&lease.Server, claim, true)
-	touched, err := backend.Touch(context.Background(), TouchRequest{Lease: lease, State: "ready"})
+	core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
+	touched, err := backend.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "ready"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -655,7 +655,7 @@ func TestExeDevReleaseSurvivesTouchedClaimRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: resolved}); err != nil {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil {
 		t.Fatal(err)
 	}
 	if !hasExeDevRM(runner) {
@@ -669,18 +669,18 @@ func TestExeDevReleaseRefreshRejectsConcurrentReclaim(t *testing.T) {
 	slug := "blue"
 	vm := ownedExeDevVM(leaseID, slug)
 	runner := exeDevInventoryRunner(t, vm)
-	backend := newExeDevTestBackend(Config{}, runner)
+	backend := newExeDevTestBackend(core.Config{}, runner)
 	cfg := backend.configForRun()
 	repoRoot := t.TempDir()
 	claim := persistExeDevClaim(t, cfg, vm, leaseID, slug, repoRoot)
-	lease := LeaseTarget{LeaseID: leaseID, Server: exeDevServer(vm, leaseID, slug, cfg, true)}
-	setServerLeaseClaimSnapshot(&lease.Server, claim, true)
+	lease := core.LeaseTarget{LeaseID: leaseID, Server: exeDevServer(vm, leaseID, slug, cfg, true)}
+	core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
 
-	reclaimed, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.Name(), Repo: Repo{Root: repoRoot}, Reclaim: true})
+	reclaimed, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: vm.Name(), Repo: core.Repo{Root: repoRoot}, Reclaim: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	reclaimedClaim, reclaimedExists, reclaimedSet := serverLeaseClaimSnapshot(reclaimed.Server)
+	reclaimedClaim, reclaimedExists, reclaimedSet := core.ServerLeaseClaimSnapshot(reclaimed.Server)
 	if !reclaimedSet || !reclaimedExists || reclaimedClaim.Labels[exeDevClaimGenerationLabel] == claim.Labels[exeDevClaimGenerationLabel] {
 		t.Fatalf("reclaimed generation=%q, want rotation from %q", reclaimedClaim.Labels[exeDevClaimGenerationLabel], claim.Labels[exeDevClaimGenerationLabel])
 	}
@@ -696,11 +696,11 @@ func TestExeDevReleaseRefreshTreatsMissingClaimAsOwnershipChange(t *testing.T) {
 	slug := "blue"
 	vm := ownedExeDevVM(leaseID, slug)
 	runner := exeDevInventoryRunner(t, vm)
-	backend := newExeDevTestBackend(Config{}, runner)
+	backend := newExeDevTestBackend(core.Config{}, runner)
 	claim := persistExeDevClaim(t, backend.configForRun(), vm, leaseID, slug, t.TempDir())
-	lease := LeaseTarget{LeaseID: leaseID, Server: exeDevServer(vm, leaseID, slug, backend.configForRun(), true)}
-	setServerLeaseClaimSnapshot(&lease.Server, claim, true)
-	if err := removeLeaseClaimIfUnchangedAfter(leaseID, claim, nil); err != nil {
+	lease := core.LeaseTarget{LeaseID: leaseID, Server: exeDevServer(vm, leaseID, slug, backend.configForRun(), true)}
+	core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
+	if err := core.RemoveLeaseClaimIfUnchangedAfter(leaseID, claim, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -716,22 +716,22 @@ func TestExeDevReleaseRetainsClaimWhenDeleteFails(t *testing.T) {
 	leaseID := "cbx_abcdef123456"
 	vm := ownedExeDevVM(leaseID, "blue")
 	runner := exeDevInventoryRunner(t, vm)
-	backend := newExeDevTestBackend(Config{}, runner)
+	backend := newExeDevTestBackend(core.Config{}, runner)
 	persistExeDevClaim(t, backend.configForRun(), vm, leaseID, "blue", t.TempDir())
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.Name(), ReleaseOnly: true})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: vm.Name(), ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner.fn = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.fn = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if strings.Contains(strings.Join(req.Args, " "), " rm ") {
-			return LocalCommandResult{ExitCode: 1}, errors.New("delete failed")
+			return core.LocalCommandResult{ExitCode: 1}, errors.New("delete failed")
 		}
 		return exeDevInventoryResponse(t, vm)(req)
 	}
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "delete failed") {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "delete failed") {
 		t.Fatalf("err=%v, want delete failure", err)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || !exists {
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || !exists {
 		t.Fatalf("claim exists=%v err=%v, want retained", exists, err)
 	}
 }
@@ -743,27 +743,27 @@ func TestExeDevReleaseRemovesUnchangedClaimWhenVMIsAlreadyAbsent(t *testing.T) {
 	for _, identifier := range []string{leaseID, vm.Name(), vm.SSHHost()} {
 		t.Run(identifier, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
-			runner := &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+			runner := &exeDevRecordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				if strings.Contains(strings.Join(req.Args, " "), "whoami --json") {
-					return LocalCommandResult{Stdout: `{"email":"test@example.com"}`}, nil
+					return core.LocalCommandResult{Stdout: `{"email":"test@example.com"}`}, nil
 				}
-				return LocalCommandResult{Stdout: `{"vms":[]}`}, nil
+				return core.LocalCommandResult{Stdout: `{"vms":[]}`}, nil
 			}}
-			backend := newExeDevTestBackend(Config{}, runner)
+			backend := newExeDevTestBackend(core.Config{}, runner)
 			persistExeDevClaim(t, backend.configForRun(), vm, leaseID, slug, t.TempDir())
 
-			lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: identifier, ReleaseOnly: true})
+			lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: identifier, ReleaseOnly: true})
 			if err != nil {
 				t.Fatal(err)
 			}
 			if lease.Server.Labels[exeDevConfirmedAbsentLabel] != "true" {
 				t.Fatalf("labels=%v, want confirmed-absence marker", lease.Server.Labels)
 			}
-			if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+			if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 				t.Fatal(err)
 			}
 			assertNoExeDevRM(t, runner)
-			if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+			if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
 				t.Fatalf("claim exists=%v err=%v, want removed", exists, err)
 			}
 		})
@@ -775,16 +775,16 @@ func TestExeDevAbsentReleaseRechecksInventoryBeforeRemovingClaim(t *testing.T) {
 	leaseID := "cbx_abcdef123456"
 	slug := "blue"
 	vm := ownedExeDevVM(leaseID, slug)
-	runner := &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &exeDevRecordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if strings.Contains(strings.Join(req.Args, " "), "whoami --json") {
-			return LocalCommandResult{Stdout: `{"email":"test@example.com"}`}, nil
+			return core.LocalCommandResult{Stdout: `{"email":"test@example.com"}`}, nil
 		}
-		return LocalCommandResult{Stdout: `{"vms":[]}`}, nil
+		return core.LocalCommandResult{Stdout: `{"vms":[]}`}, nil
 	}}
-	backend := newExeDevTestBackend(Config{}, runner)
+	backend := newExeDevTestBackend(core.Config{}, runner)
 	persistExeDevClaim(t, backend.configForRun(), vm, leaseID, slug, t.TempDir())
 
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -792,11 +792,11 @@ func TestExeDevAbsentReleaseRechecksInventoryBeforeRemovingClaim(t *testing.T) {
 	renamed.VMName = "renamed-owned-vm"
 	renamed.SSHDest = "renamed-owned-vm.exe.xyz"
 	runner.fn = exeDevInventoryResponse(t, renamed)
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "is present") {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "is present") {
 		t.Fatalf("err=%v, want present-VM refusal", err)
 	}
 	assertNoExeDevRM(t, runner)
-	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || !exists {
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || !exists {
 		t.Fatalf("claim exists=%v err=%v, want retained", exists, err)
 	}
 }
@@ -810,15 +810,15 @@ func TestExeDevAbsentReleaseRejectsRenamedOwnedVM(t *testing.T) {
 	renamed.VMName = "renamed-owned-vm"
 	renamed.SSHDest = "renamed-owned-vm.exe.xyz"
 	runner := exeDevInventoryRunner(t, renamed)
-	backend := newExeDevTestBackend(Config{}, runner)
+	backend := newExeDevTestBackend(core.Config{}, runner)
 	persistExeDevClaim(t, backend.configForRun(), vm, leaseID, slug, t.TempDir())
 
-	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
 	if err == nil || !strings.Contains(err.Error(), "unexpected VM") {
 		t.Fatalf("err=%v, want renamed owned-VM refusal", err)
 	}
 	assertNoExeDevRM(t, runner)
-	if _, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || !exists {
+	if _, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID); readErr != nil || !exists {
 		t.Fatalf("claim exists=%v err=%v, want retained", exists, readErr)
 	}
 }
@@ -828,21 +828,21 @@ func TestExeDevAbsentReleaseRejectsDifferentAuthenticatedAccount(t *testing.T) {
 	leaseID := "cbx_abcdef123456"
 	slug := "blue"
 	vm := ownedExeDevVM(leaseID, slug)
-	runner := &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &exeDevRecordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if strings.Contains(strings.Join(req.Args, " "), "whoami --json") {
-			return LocalCommandResult{Stdout: `{"email":"other@example.com"}`}, nil
+			return core.LocalCommandResult{Stdout: `{"email":"other@example.com"}`}, nil
 		}
-		return LocalCommandResult{Stdout: `{"vms":[]}`}, nil
+		return core.LocalCommandResult{Stdout: `{"vms":[]}`}, nil
 	}}
-	backend := newExeDevTestBackend(Config{}, runner)
+	backend := newExeDevTestBackend(core.Config{}, runner)
 	persistExeDevClaim(t, backend.configForRun(), vm, leaseID, slug, t.TempDir())
 
-	_, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
 	if err == nil || !strings.Contains(err.Error(), "different exe.dev control route") {
 		t.Fatalf("err=%v, want account-bound route refusal", err)
 	}
 	assertNoExeDevRM(t, runner)
-	if _, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || !exists {
+	if _, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID); readErr != nil || !exists {
 		t.Fatalf("claim exists=%v err=%v, want retained", exists, readErr)
 	}
 }
@@ -854,13 +854,13 @@ func TestExeDevReuseRequiresExplicitAdoptionAndPersistsExactBinding(t *testing.T
 		t.Run(map[bool]string{false: "implicit refused", true: "explicit adopted"}[reclaim], func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			runner := exeDevInventoryRunner(t, vm)
-			backend := newExeDevTestBackend(Config{}, runner)
-			lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.Name(), Repo: Repo{Root: t.TempDir()}, Reclaim: reclaim})
+			backend := newExeDevTestBackend(core.Config{}, runner)
+			lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: vm.Name(), Repo: core.Repo{Root: t.TempDir()}, Reclaim: reclaim})
 			if !reclaim {
 				if err == nil || !strings.Contains(err.Error(), "reuse with --reclaim") {
 					t.Fatalf("err=%v, want explicit reclaim refusal", err)
 				}
-				if _, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || exists {
+				if _, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID); readErr != nil || exists {
 					t.Fatalf("claim exists=%v err=%v, want absent", exists, readErr)
 				}
 				return
@@ -868,7 +868,7 @@ func TestExeDevReuseRequiresExplicitAdoptionAndPersistsExactBinding(t *testing.T
 			if err != nil {
 				t.Fatal(err)
 			}
-			claim, exists, readErr := readLeaseClaimWithPresence(leaseID)
+			claim, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID)
 			if readErr != nil || !exists {
 				t.Fatalf("claim exists=%v err=%v", exists, readErr)
 			}
@@ -879,7 +879,7 @@ func TestExeDevReuseRequiresExplicitAdoptionAndPersistsExactBinding(t *testing.T
 				t.Fatalf("explicit reclaim did not bind a remote claim generation: %#v", runner.calls)
 			}
 			assertExeDevTagOptionsPrecedeVM(t, runner)
-			if _, exists, snapshotSet := serverLeaseClaimSnapshot(lease.Server); !snapshotSet || !exists {
+			if _, exists, snapshotSet := core.ServerLeaseClaimSnapshot(lease.Server); !snapshotSet || !exists {
 				t.Fatalf("claim snapshot set=%v exists=%v", snapshotSet, exists)
 			}
 		})
@@ -898,17 +898,17 @@ func TestExeDevBulkInventoryTreatsMalformedTagsAsUnowned(t *testing.T) {
 	vm := ownedExeDevVM("cbx_abcdef123456", "blue")
 	vm.Tags = append(vm.Tags, "crabbox-lease-cbx_other123456")
 	runner := exeDevInventoryRunner(t, vm)
-	backend := newExeDevTestBackend(Config{}, runner)
+	backend := newExeDevTestBackend(core.Config{}, runner)
 
-	views, err := backend.List(context.Background(), ListRequest{})
+	views, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil || len(views) != 0 {
 		t.Fatalf("owned inventory views=%#v err=%v, want malformed VM omitted", views, err)
 	}
-	views, err = backend.List(context.Background(), ListRequest{All: true})
+	views, err = backend.List(context.Background(), core.ListRequest{All: true})
 	if err != nil || len(views) != 1 || views[0].Name != vm.Name() {
 		t.Fatalf("all inventory views=%#v err=%v, want malformed VM visible", views, err)
 	}
-	if _, err := backend.Resolve(context.Background(), ResolveRequest{ID: vm.Name(), ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "conflicting") {
+	if _, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: vm.Name(), ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "conflicting") {
 		t.Fatalf("exact resolve err=%v, want hard malformed-tag refusal", err)
 	}
 }
@@ -919,7 +919,7 @@ func TestExeDevLeaseLookupSkipsOnlyUnrelatedMalformedTags(t *testing.T) {
 	malformed := ownedExeDevVM("cbx_other123456", "other")
 	malformed.Tags = append(malformed.Tags, "crabbox-lease-cbx_second123456")
 
-	backend := newExeDevTestBackend(Config{}, &exeDevRecordingRunner{fn: exeDevInventoryResponseMany(t, malformed, valid)})
+	backend := newExeDevTestBackend(core.Config{}, &exeDevRecordingRunner{fn: exeDevInventoryResponseMany(t, malformed, valid)})
 	vm, found, err := backend.findVMByLeaseID(context.Background(), leaseID)
 	if err != nil || !found || vm.Name() != valid.Name() {
 		t.Fatalf("vm=%#v found=%v err=%v", vm, found, err)
@@ -929,7 +929,7 @@ func TestExeDevLeaseLookupSkipsOnlyUnrelatedMalformedTags(t *testing.T) {
 	}
 
 	malformed.Tags = append(malformed.Tags, "crabbox-lease-"+leaseID)
-	backend = newExeDevTestBackend(Config{}, &exeDevRecordingRunner{fn: exeDevInventoryResponseMany(t, malformed, valid)})
+	backend = newExeDevTestBackend(core.Config{}, &exeDevRecordingRunner{fn: exeDevInventoryResponseMany(t, malformed, valid)})
 	if _, _, err := backend.findVMByLeaseID(context.Background(), leaseID); err == nil || !strings.Contains(err.Error(), "conflicting") {
 		t.Fatalf("err=%v, want malformed requested-lease refusal", err)
 	}
@@ -943,7 +943,7 @@ func TestExeDevOwnershipRejectsNoncanonicalLeaseTag(t *testing.T) {
 }
 
 func ownedExeDevVM(leaseID, slug string) exeDevVM {
-	name := leaseProviderName(leaseID, slug)
+	name := core.LeaseProviderName(leaseID, slug)
 	return exeDevVM{
 		VMName:  name,
 		SSHDest: name + ".exe.xyz",
@@ -955,13 +955,13 @@ func ownedExeDevVM(leaseID, slug string) exeDevVM {
 func exeDevInventoryRunner(t *testing.T, vm exeDevVM) *exeDevRecordingRunner {
 	t.Helper()
 	current := vm
-	return &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	return &exeDevRecordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		command := strings.Join(req.Args, " ")
 		if strings.Contains(command, "whoami --json") {
-			return LocalCommandResult{Stdout: `{"email":"test@example.com"}`}, nil
+			return core.LocalCommandResult{Stdout: `{"email":"test@example.com"}`}, nil
 		}
 		if strings.Contains(command, " rm ") {
-			return LocalCommandResult{Stdout: `{}`}, nil
+			return core.LocalCommandResult{Stdout: `{}`}, nil
 		}
 		if strings.Contains(command, " tag ") {
 			fields := strings.Fields(req.Args[len(req.Args)-1])
@@ -977,55 +977,55 @@ func exeDevInventoryRunner(t *testing.T, vm exeDevVM) *exeDevRecordingRunner {
 					current.Tags = append(current.Tags, tag)
 				}
 			}
-			return LocalCommandResult{Stdout: `{}`}, nil
+			return core.LocalCommandResult{Stdout: `{}`}, nil
 		}
 		payload, err := json.Marshal(exeDevListResponse{VMs: []exeDevVM{current}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		return LocalCommandResult{Stdout: string(payload)}, nil
+		return core.LocalCommandResult{Stdout: string(payload)}, nil
 	}}
 }
 
-func exeDevInventoryResponse(t *testing.T, vm exeDevVM) func(LocalCommandRequest) (LocalCommandResult, error) {
+func exeDevInventoryResponse(t *testing.T, vm exeDevVM) func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	return exeDevInventoryResponseMany(t, vm)
 }
 
-func exeDevInventoryResponseMany(t *testing.T, vms ...exeDevVM) func(LocalCommandRequest) (LocalCommandResult, error) {
+func exeDevInventoryResponseMany(t *testing.T, vms ...exeDevVM) func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	t.Helper()
 	payload, err := json.Marshal(exeDevListResponse{VMs: vms})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return func(req LocalCommandRequest) (LocalCommandResult, error) {
+	return func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		command := strings.Join(req.Args, " ")
 		if strings.Contains(command, "whoami --json") {
-			return LocalCommandResult{Stdout: `{"email":"test@example.com"}`}, nil
+			return core.LocalCommandResult{Stdout: `{"email":"test@example.com"}`}, nil
 		}
 		if strings.Contains(command, " rm ") {
-			return LocalCommandResult{Stdout: `{}`}, nil
+			return core.LocalCommandResult{Stdout: `{}`}, nil
 		}
-		return LocalCommandResult{Stdout: string(payload)}, nil
+		return core.LocalCommandResult{Stdout: string(payload)}, nil
 	}
 }
 
-func newExeDevTestBackend(cfg Config, runner *exeDevRecordingRunner) *exeDevLeaseBackend {
+func newExeDevTestBackend(cfg core.Config, runner *exeDevRecordingRunner) *exeDevLeaseBackend {
 	applyExeDevDefaults(&cfg)
-	return &exeDevLeaseBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	return &exeDevLeaseBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 }
 
-func persistExeDevClaim(t *testing.T, cfg Config, vm exeDevVM, leaseID, slug, repoRoot string) LeaseClaim {
+func persistExeDevClaim(t *testing.T, cfg core.Config, vm exeDevVM, leaseID, slug, repoRoot string) core.LeaseClaim {
 	t.Helper()
 	server := exeDevServer(vm, leaseID, slug, cfg, true)
 	server.Labels[exeDevClaimGenerationLabel] = "cbx_111111111111"
-	claim, err := claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, mustExeDevControlScope(t, cfg), server, exeDevSSHTarget(cfg, vm), repoRoot, cfg.IdleTimeout, false, LeaseClaim{}, false)
+	claim, err := claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, mustExeDevControlScope(t, cfg), server, exeDevSSHTarget(cfg, vm), repoRoot, cfg.IdleTimeout, false, core.LeaseClaim{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return claim
 }
 
-func mustExeDevControlScope(t *testing.T, cfg Config) string {
+func mustExeDevControlScope(t *testing.T, cfg core.Config) string {
 	t.Helper()
 	scope, err := exeDevControlScope(cfg, exeDevAccountFingerprint("test@example.com"))
 	if err != nil {
@@ -1078,11 +1078,11 @@ func TestExeDevFlagsRejectGenericClassAndType(t *testing.T) {
 		fs.SetOutput(io.Discard)
 		fs.String("class", "", "")
 		fs.String("type", "", "")
-		values := RegisterExeDevProviderFlags(fs, Config{})
+		values := RegisterExeDevProviderFlags(fs, core.Config{})
 		if err := fs.Parse(args); err != nil {
 			t.Fatal(err)
 		}
-		cfg := Config{Provider: providerName}
+		cfg := core.Config{Provider: providerName}
 		err := ApplyExeDevProviderFlags(&cfg, fs, values)
 		if err == nil || !strings.Contains(err.Error(), "not supported for provider=exe-dev") {
 			t.Fatalf("args=%v err=%v", args, err)
@@ -1091,13 +1091,13 @@ func TestExeDevFlagsRejectGenericClassAndType(t *testing.T) {
 }
 
 func TestExeDevConfigureRejectsUnsupportedTargetAndTailscale(t *testing.T) {
-	for name, cfg := range map[string]Config{
+	for name, cfg := range map[string]core.Config{
 		"macos target": {TargetOS: "macos"},
-		"tailscale":    {TargetOS: targetLinux, Tailscale: TailscaleConfig{Enabled: true}},
+		"tailscale":    {TargetOS: targetLinux, Tailscale: core.TailscaleConfig{Enabled: true}},
 		"network":      {TargetOS: targetLinux, Network: "tailscale"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := Provider{}.Configure(cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &exeDevRecordingRunner{}})
+			_, err := Provider{}.Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &exeDevRecordingRunner{}})
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -1106,7 +1106,7 @@ func TestExeDevConfigureRejectsUnsupportedTargetAndTailscale(t *testing.T) {
 }
 
 func TestExeDevSSHTargetUsesSSHDestUserPortAndWorkRootLabel(t *testing.T) {
-	cfg := Config{SSHKey: "/tmp/crabbox-default-key", ExeDev: ExeDevConfig{WorkRoot: "/tmp/crabbox", User: "runner"}}
+	cfg := core.Config{SSHKey: "/tmp/crabbox-default-key", ExeDev: core.ExeDevConfig{WorkRoot: "/tmp/crabbox", User: "runner"}}
 	applyExeDevDefaults(&cfg)
 	vm := exeDevVM{VMName: "crabbox-blue-12345678", SSHDest: "ubuntu@crabbox-blue-12345678.exe.xyz:2200", Status: "running"}
 	target := exeDevSSHTarget(cfg, vm)
@@ -1149,7 +1149,7 @@ func TestExeDevConfigFlagContract(t *testing.T) {
 			if err := ApplyExeDevProviderFlags(&cfg, fs, values); err != nil {
 				t.Fatal(err)
 			}
-			want := ExeDevConfig{Image: "  ", CPUs: cpu, Command: "command", User: "fixture-user", WorkRoot: "/workspace/flag"}
+			want := core.ExeDevConfig{Image: "  ", CPUs: cpu, Command: "command", User: "fixture-user", WorkRoot: "/workspace/flag"}
 			if provider == "exe-dev" || provider == "exe" || provider == "exedev" {
 				want.ControlHost = "exe.dev"
 				want.CPUs = 2
@@ -1168,7 +1168,7 @@ func TestExeDevConfigFlagContract(t *testing.T) {
 	cfg.Provider = "aws"
 	fs := flag.NewFlagSet("contract", flag.ContinueOnError)
 	values := RegisterExeDevProviderFlags(fs, cfg)
-	cfg.ExeDev = ExeDevConfig{ControlHost: "layered", CPUs: 6, Image: "layered", Memory: "8GB", Disk: "20GB", Command: "layered", User: "layered", WorkRoot: "/layered", NoEmail: false}
+	cfg.ExeDev = core.ExeDevConfig{ControlHost: "layered", CPUs: 6, Image: "layered", Memory: "8GB", Disk: "20GB", Command: "layered", User: "layered", WorkRoot: "/layered", NoEmail: false}
 	want := cfg.ExeDev
 	if err := ApplyExeDevProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
@@ -1215,13 +1215,13 @@ func TestExeDevConfigFlagPhaseContract(t *testing.T) {
 func TestExeDevConfigEffectiveDefaultsContract(t *testing.T) {
 	t.Setenv("USER", "fixture-user")
 	for _, tc := range []struct{ providerRoot, generic, want string }{{"", "", "/tmp/crabbox"}, {"", "/work/crabbox", "/tmp/crabbox"}, {"", "/custom/root", "/custom/root"}, {"/specific/root", "/custom/root", "/specific/root"}, {"  ", "/custom/root", "  "}} {
-		cfg := Config{WorkRoot: tc.generic, ExeDev: ExeDevConfig{WorkRoot: tc.providerRoot, CPUs: -2}}
+		cfg := core.Config{WorkRoot: tc.generic, ExeDev: core.ExeDevConfig{WorkRoot: tc.providerRoot, CPUs: -2}}
 		applyExeDevDefaults(&cfg)
 		if cfg.ExeDev.ControlHost != "exe.dev" || cfg.ExeDev.CPUs != 2 || cfg.ExeDev.Memory != "4GB" || cfg.ExeDev.Disk != "10GB" || cfg.ExeDev.WorkRoot != tc.want || cfg.WorkRoot != tc.want || cfg.ExeDev.NoEmail || cfg.ExeDev.Image != "" {
 			t.Fatalf("defaults=%#v want root=%q", cfg.ExeDev, tc.want)
 		}
 	}
-	cfg := Config{ExeDev: ExeDevConfig{ControlHost: "  ", CPUs: 6, Memory: "  ", Disk: "  ", Image: "  "}}
+	cfg := core.Config{ExeDev: core.ExeDevConfig{ControlHost: "  ", CPUs: 6, Memory: "  ", Disk: "  ", Image: "  "}}
 	applyExeDevDefaults(&cfg)
 	if cfg.ExeDev.ControlHost != "  " || cfg.ExeDev.Memory != "  " || cfg.ExeDev.Disk != "  " || cfg.ExeDev.CPUs != 6 {
 		t.Fatal("raw whitespace fallback predicate changed")
@@ -1232,7 +1232,7 @@ func TestExeDevConfigEffectiveDefaultsContract(t *testing.T) {
 			t.Fatalf("display=%q want=%q", got, tc.want)
 		}
 	}
-	backend := NewExeDevLeaseBackend(Provider{}.Spec(), Config{}, Runtime{}).(*exeDevLeaseBackend)
+	backend := NewExeDevLeaseBackend(Provider{}.Spec(), core.Config{}, core.Runtime{}).(*exeDevLeaseBackend)
 	if backend.cfg.ExeDev.NoEmail || backend.cfg.ExeDev.Image != "" {
 		t.Fatal("constructor filled raw false/image")
 	}
@@ -1253,15 +1253,15 @@ func TestExeDevConfigCreateArgumentsContract(t *testing.T) {
 		noEmail, paddedSizes bool
 	}{{"empty", "", false, false}, {"whitespace", "  ", false, true}, {"configured", " image ", true, false}} {
 		t.Run(tc.name, func(t *testing.T) {
-			runner := &exeDevRecordingRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
-				return LocalCommandResult{Stdout: `{"vm_name":"fixture-vm","ssh_dest":"fixture-vm.example","status":"running"}`}, nil
+			runner := &exeDevRecordingRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				return core.LocalCommandResult{Stdout: `{"vm_name":"fixture-vm","ssh_dest":"fixture-vm.example","status":"running"}`}, nil
 			}}
-			cfg := Config{ExeDev: ExeDevConfig{Image: tc.image, NoEmail: tc.noEmail, Command: " echo ok "}}
+			cfg := core.Config{ExeDev: core.ExeDevConfig{Image: tc.image, NoEmail: tc.noEmail, Command: " echo ok "}}
 			if tc.paddedSizes {
 				cfg.ExeDev.Memory = "  "
 				cfg.ExeDev.Disk = "  "
 			}
-			backend := &exeDevLeaseBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+			backend := &exeDevLeaseBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 			if _, err := backend.createVM(t.Context(), backend.configForRun(), "fixture-vm", "cbx_fixture", "fixture", "cbx_generation"); err != nil {
 				t.Fatal(err)
 			}
@@ -1306,7 +1306,7 @@ func TestInheritedWorkRootCallerContract(t *testing.T) {
 		{"/provider/root", "/srv/custom", "/provider/root"},
 	} {
 		for _, explicit := range []bool{false, true} {
-			cfg := Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
+			cfg := core.Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
 			if explicit {
 				core.MarkWorkRootExplicit(&cfg)
 				cfg.TargetOS = "existing-target"

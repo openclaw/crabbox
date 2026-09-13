@@ -1,7 +1,5 @@
 package superserve
 
-import core "github.com/openclaw/crabbox/internal/cli"
-
 import (
 	"flag"
 	"net"
@@ -10,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -27,7 +26,7 @@ type superserveFlagValues struct {
 
 const maxSuperserveSandboxTimeoutSecs = 7 * 24 * 60 * 60
 
-func RegisterSuperserveProviderFlags(fs *flag.FlagSet, defaults Config) any {
+func RegisterSuperserveProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return superserveFlagValues{
 		BaseURL:         fs.String("superserve-base-url", defaults.Superserve.BaseURL, "Trusted Superserve API base URL"),
 		Template:        fs.String("superserve-template", defaults.Superserve.Template, "Superserve sandbox template"),
@@ -41,7 +40,7 @@ func RegisterSuperserveProviderFlags(fs *flag.FlagSet, defaults Config) any {
 	}
 }
 
-func ApplySuperserveProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+func ApplySuperserveProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if strings.EqualFold(strings.TrimSpace(cfg.Provider), providerName) {
 		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --superserve-template or --superserve-snapshot", "use --superserve-template or --superserve-snapshot"); err != nil {
 			return err
@@ -90,7 +89,7 @@ func ApplySuperserveProviderFlags(cfg *Config, fs *flag.FlagSet, values any) err
 	return validateSuperserveConfig(*cfg)
 }
 
-func validateSuperserveConfig(cfg Config) error {
+func validateSuperserveConfig(cfg core.Config) error {
 	if _, err := validateSuperserveBaseURL(cfg.Superserve.BaseURL); err != nil {
 		return err
 	}
@@ -98,23 +97,23 @@ func validateSuperserveConfig(cfg Config) error {
 		return err
 	}
 	if cfg.Superserve.TimeoutSecs < 0 {
-		return exit(2, "superserve timeoutSecs must be non-negative")
+		return core.Exit(2, "superserve timeoutSecs must be non-negative")
 	}
 	if cfg.Superserve.ExecTimeoutSecs < 0 {
-		return exit(2, "superserve execTimeoutSecs must be non-negative")
+		return core.Exit(2, "superserve execTimeoutSecs must be non-negative")
 	}
 	if _, err := superserveSandboxTimeoutSecs(cfg); err != nil {
 		return err
 	}
 	for _, deny := range cfg.Superserve.NetworkDenyOut {
 		if _, _, err := net.ParseCIDR(deny); err != nil {
-			return exit(2, "superserve networkDenyOut entry %q must be a CIDR", deny)
+			return core.Exit(2, "superserve networkDenyOut entry %q must be a CIDR", deny)
 		}
 	}
 	return nil
 }
 
-func superserveSandboxTimeoutSecs(cfg Config) (int, error) {
+func superserveSandboxTimeoutSecs(cfg core.Config) (int, error) {
 	timeout := cfg.Superserve.TimeoutSecs
 	if timeout == 0 {
 		lifetime := cfg.TTL
@@ -124,7 +123,7 @@ func superserveSandboxTimeoutSecs(cfg Config) (int, error) {
 		timeout = int((lifetime + time.Second - 1) / time.Second)
 	}
 	if timeout > maxSuperserveSandboxTimeoutSecs {
-		return 0, exit(2, "superserve sandbox lifetime must not exceed %d seconds (7 days)", maxSuperserveSandboxTimeoutSecs)
+		return 0, core.Exit(2, "superserve sandbox lifetime must not exceed %d seconds (7 days)", maxSuperserveSandboxTimeoutSecs)
 	}
 	// Sandbox lifetime is an independent hard resource cap. It may intentionally
 	// be shorter than the command timeout to bound billing and remote lifetime.
@@ -138,53 +137,34 @@ func validateSuperserveBaseURL(raw string) (string, error) {
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", exit(2, "provider=superserve base URL must be an absolute URL")
+		return "", core.Exit(2, "provider=superserve base URL must be an absolute URL")
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", exit(2, "provider=superserve base URL must not contain userinfo, query parameters, or a fragment")
+		return "", core.Exit(2, "provider=superserve base URL must not contain userinfo, query parameters, or a fragment")
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
-		return "", exit(2, "provider=superserve base URL must use HTTPS except for loopback development endpoints")
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && shared.IsLoopbackHost(parsed.Hostname())) {
+		return "", core.Exit(2, "provider=superserve base URL must use HTTPS except for loopback development endpoints")
 	}
-	parsed.Host = canonicalHostPort(parsed)
+	parsed.Host = shared.CanonicalHostPort(parsed)
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	return parsed.String(), nil
 }
 
-func superserveWorkdir(cfg Config) (string, error) {
+func superserveWorkdir(cfg core.Config) (string, error) {
 	workdir := strings.TrimSpace(cfg.Superserve.Workdir)
 	if workdir == "" {
 		workdir = defaultWorkdir
 	}
 	if !path.IsAbs(workdir) {
-		return "", exit(2, "superserve workdir must be absolute")
+		return "", core.Exit(2, "superserve workdir must be absolute")
 	}
 	clean := path.Clean(workdir)
 	switch clean {
 	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var", "/workspace":
-		return "", exit(2, "superserve workdir %q is too broad; choose a dedicated subdirectory", clean)
+		return "", core.Exit(2, "superserve workdir %q is too broad; choose a dedicated subdirectory", clean)
 	}
 	return clean, nil
-}
-
-func isLoopbackHost(host string) bool {
-	return shared.IsLoopbackHost(host)
-}
-
-func canonicalHostPort(parsed *url.URL) string {
-	host := strings.ToLower(parsed.Hostname())
-	port := parsed.Port()
-	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
-		port = ""
-	}
-	if port == "" {
-		if strings.Contains(host, ":") {
-			return "[" + host + "]"
-		}
-		return host
-	}
-	return net.JoinHostPort(host, port)
 }
 
 func splitSuperserveList(value string) []string {

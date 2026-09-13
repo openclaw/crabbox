@@ -159,6 +159,32 @@ If a project stores source files in one of these reserved directories, move
 them elsewhere before upgrading; reserved runtime paths are no longer eligible
 for sync even when they are tracked or explicitly re-included.
 
+An explicit `XDG_STATE_HOME` adds its exact `crabbox` subtree to protected
+runtime state. The path is literal, not a glob, and includes or negations cannot
+re-enable it. Other files beneath the selected state base remain eligible for
+sync. Crabbox rejects a source root inside the managed namespace instead of
+silently uploading an empty checkout. When this namespace overlaps a checkout,
+Git seeding is disabled so a seeded tree cannot materialize excluded paths.
+These protections do not remove state already committed upstream or previously
+shared with a runner.
+
+On macOS, managed-state path spelling uses entry-name and identity attributes
+relative to a retained parent descriptor, rather than opening the leaf or
+enumerating sibling files. This also supports Unix socket and FIFO entries
+without opening them, while preserving object-identity and namespace checks.
+Crowded temporary directories do not block sync preparation.
+
+Native transports without subtree filtering require the selected managed
+namespace to be outside their shared source scope. This includes Blacksmith's
+native repository sync, Docker Sandbox's repository and extra workspaces, Apple
+Machine's home mount, and Local Container's host volumes and Docker-socket-mode
+host work root.
+Crabbox rejects an overlapping source before transferring or mounting it.
+`--no-sync` does not disable native mounts. Choose a state root outside those
+shared directories; do not rely on `.gitignore` to protect a host mount.
+Explicit file copies, scripts, and arbitrary native arguments are separate
+user-directed operations, not covered by repository filtering.
+
 Repo-local config should hold project-specific excludes and env allowlists.
 Secrets must never be passed as command-line arguments or via broad env globs.
 

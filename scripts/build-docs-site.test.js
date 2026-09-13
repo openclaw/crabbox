@@ -2,17 +2,18 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import test from "node:test";
 
-import { markdownToHtml } from "./build-docs-site.mjs";
+import { markdownToHtml, readAgentSkills } from "./build-docs-site.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const providersDir = path.join(repoRoot, "docs", "providers");
 const integrationsDir = path.join(repoRoot, "docs", "integrations");
 const useCasesFile = path.join(repoRoot, "docs", "use-cases.md");
 const siteDir = path.join(repoRoot, "dist", "docs-site");
-const providerIndexFile = path.join(siteDir, "providers", "index.html");
-const generatedTest = fs.existsSync(providerIndexFile) ? test : test.skip;
+// Importing the builder generates the site before these tests register.
+const generatedTest = test;
 
 const providerMarkdown = fs
   .readdirSync(providersDir)
@@ -66,41 +67,35 @@ generatedTest("generated site publishes Agent Skill and AI Catalog discovery", (
 
   assert.equal(published, canonical);
   assert.equal(index.$schema, "https://schemas.agentskills.io/discovery/0.2.0/schema.json");
-  assert.deepEqual(index.skills, [
-    {
-      name: "crabbox",
-      type: "skill-md",
-      description,
-      url: "/.well-known/agent-skills/crabbox/SKILL.md",
-      digest: `sha256:${digest}`,
-    },
-  ]);
-  assert.deepEqual(catalog, {
-    specVersion: "1.0",
-    host: {
-      displayName: "Crabbox",
-      documentationUrl: "https://crabbox.sh/integrations/agents.html",
-    },
-    entries: [
-      {
-        identifier: "urn:air:crabbox.sh:skill:crabbox",
-        displayName: "Crabbox Agent Skill",
-        type: "application/agent-skills+md",
-        url: "https://crabbox.sh/.well-known/agent-skills/crabbox/SKILL.md",
-        description,
-        tags: ["remote-testing", "remote-execution", "developer-tools", "agent-skill"],
-        capabilities: [
-          "RemoteTestExecution",
-          "ReusableRemoteEnvironment",
-          "CrossPlatformValidation",
-          "AuditableExecutionEvidence",
-        ],
-        representativeQueries: [
-          "run this repository's tests on a clean remote machine",
-          "validate this change on Linux, macOS, or Windows",
-          "use Crabbox to collect auditable remote test evidence",
-        ],
-      },
+  assert.deepEqual(index.skills[0], {
+    name: "crabbox",
+    type: "skill-md",
+    description,
+    url: "/.well-known/agent-skills/crabbox/SKILL.md",
+    digest: `sha256:${digest}`,
+  });
+  assert.equal(catalog.specVersion, "1.0");
+  assert.deepEqual(catalog.host, {
+    displayName: "Crabbox",
+    documentationUrl: "https://crabbox.sh/integrations/agents.html",
+  });
+  assert.deepEqual(catalog.entries[0], {
+    identifier: "urn:air:crabbox.sh:skill:crabbox",
+    displayName: "Crabbox Agent Skill",
+    type: "application/agent-skills+md",
+    url: "https://crabbox.sh/.well-known/agent-skills/crabbox/SKILL.md",
+    description,
+    tags: ["remote-testing", "remote-execution", "developer-tools", "agent-skill"],
+    capabilities: [
+      "RemoteTestExecution",
+      "ReusableRemoteEnvironment",
+      "CrossPlatformValidation",
+      "AuditableExecutionEvidence",
+    ],
+    representativeQueries: [
+      "run this repository's tests on a clean remote machine",
+      "validate this change on Linux, macOS, or Windows",
+      "use Crabbox to collect auditable remote test evidence",
     ],
   });
   assert.match(
@@ -116,6 +111,72 @@ generatedTest("generated site publishes Agent Skill and AI Catalog discovery", (
     /actions\/upload-pages-artifact@[^\n]+\n\s+with:\n\s+path: dist\/docs-site\n\s+include-hidden-files: true/,
     "Pages artifact must include the generated .well-known directory",
   );
+  assert.match(
+    fs.readFileSync(path.join(repoRoot, ".github", "workflows", "pages.yml"), "utf8"),
+    /^\s+- "skills\/\*\*"$/m,
+    "Pages must redeploy when any publishable Agent Skill changes",
+  );
+});
+
+generatedTest("every publishable skill appears once in discovery and the AI catalog", () => {
+  const skillsDir = path.join(repoRoot, "skills");
+  const names = fs
+    .readdirSync(skillsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort((a, b) => (a === b ? 0 : a === "crabbox" ? -1 : b === "crabbox" ? 1 : a < b ? -1 : 1));
+  const index = JSON.parse(
+    fs.readFileSync(path.join(siteDir, ".well-known", "agent-skills", "index.json"), "utf8"),
+  );
+  const catalog = JSON.parse(
+    fs.readFileSync(path.join(siteDir, ".well-known", "ai-catalog.json"), "utf8"),
+  );
+  const llms = fs.readFileSync(path.join(siteDir, "llms.txt"), "utf8");
+
+  assert.deepEqual(
+    index.skills.map((skill) => skill.name),
+    names,
+  );
+  assert.deepEqual(
+    catalog.entries.map((entry) => entry.identifier),
+    names.map((name) => `urn:air:crabbox.sh:skill:${name}`),
+  );
+
+  for (const [position, name] of names.entries()) {
+    const canonical = fs.readFileSync(path.join(skillsDir, name, "SKILL.md"), "utf8");
+    const published = fs.readFileSync(
+      path.join(siteDir, ".well-known", "agent-skills", name, "SKILL.md"),
+      "utf8",
+    );
+    assert.equal(published, canonical, `${name} should publish canonical bytes`);
+    assert.equal(
+      index.skills[position].digest,
+      `sha256:${crypto.createHash("sha256").update(published).digest("hex")}`,
+      `${name} digest should cover the published bytes`,
+    );
+    assert.equal(
+      index.skills[position].description,
+      catalog.entries[position].description,
+      `${name} description should match across discovery surfaces`,
+    );
+    const entry = catalog.entries[position];
+    assert.ok(
+      entry.displayName && entry.tags.length && entry.capabilities.length,
+      `${name} needs display name, tags, and capabilities in the AI catalog`,
+    );
+    assert.ok(
+      entry.representativeQueries.length >= 3,
+      `${name} needs at least three representative queries in the AI catalog`,
+    );
+    assert.match(
+      llms,
+      new RegExp(
+        `^- https://crabbox\\.sh/\\.well-known/agent-skills/${escapeRegExp(name)}/SKILL\\.md$`,
+        "m",
+      ),
+      `${name} should be listed in llms.txt`,
+    );
+  }
 });
 
 generatedTest("generated navigation includes every integration page exactly once", () => {
@@ -495,3 +556,50 @@ const voidElements = new Set([
   "track",
   "wbr",
 ]);
+
+
+test("skill discovery preserves crabbox first even when another skill sorts earlier", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-skills-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const metadata = {};
+  for (const name of ["zeta", "crabbox", "alpha"]) {
+    fs.mkdirSync(path.join(directory, name));
+    fs.writeFileSync(path.join(directory, name, "SKILL.md"),
+      `---\nname: ${name}\ndescription: "Use when testing ${name}"\n---\n`);
+    metadata[name] = {
+      displayName: name,
+      tags: ["sandbox"],
+      capabilities: ["Execution"],
+      representativeQueries: ["run a test"],
+    };
+  }
+  assert.deepEqual(readAgentSkills(directory, metadata).map(({ name }) => name),
+    ["crabbox", "alpha", "zeta"]);
+  fs.rmSync(path.join(directory, "crabbox"), { recursive: true });
+  assert.deepEqual(readAgentSkills(directory, metadata).map(({ name }) => name), ["alpha", "zeta"]);
+});
+
+test("skill discovery rejects malformed catalog metadata before publishing", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-catalog-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(directory, "crabbox"));
+  fs.writeFileSync(path.join(directory, "crabbox", "SKILL.md"),
+    '---\nname: crabbox\ndescription: "Use when testing"\n---\n');
+  const valid = {
+    displayName: "Crabbox",
+    tags: ["sandbox"],
+    capabilities: ["Execution"],
+    representativeQueries: ["run a test"],
+  };
+  assert.throws(() => readAgentSkills(directory, {}), /no AI Catalog metadata/);
+  for (const value of [undefined, null, "", " ", 42, []]) {
+    assert.throws(() => readAgentSkills(directory, { crabbox: { ...valid, displayName: value } }),
+      /displayName must be a non-empty string/);
+  }
+  for (const field of ["tags", "capabilities", "representativeQueries"]) {
+    for (const value of [undefined, null, "sandbox", [], [""], [" "], [42], ["valid", null]]) {
+      assert.throws(() => readAgentSkills(directory, { crabbox: { ...valid, [field]: value } }),
+        new RegExp(`${field} must be a non-empty array of non-empty strings`));
+    }
+  }
+});

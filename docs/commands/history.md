@@ -4,7 +4,8 @@
 created by [`crabbox run`](run.md) (and run-backed flows such as
 [`crabbox job run`](job.md) or `capsule replay`) and persists its state, phase,
 exit code, duration, and telemetry on the coordinator. This command requires a
-configured broker; without one it returns an error.
+configured broker by default. Existing opt-in local records are also readable
+without a broker; use `--source local` to select local data explicitly.
 
 ```sh
 crabbox history
@@ -23,6 +24,7 @@ crabbox history --state failed --limit 100
 --state <state>      Filter by state: running, succeeded, or failed.
 --limit <n>          Maximum runs to return (default 50, broker-capped at 500).
 --json               Print the raw run records as JSON.
+--source <source>     local, coordinator, or all; configured-broker default is unchanged.
 ```
 
 ## Output
@@ -45,6 +47,13 @@ Use a run ID from this list with [`logs`](logs.md), [`events`](events.md), or
 [`attach`](attach.md) to inspect a specific run.
 
 ## Related docs
+
+Local records are created by `run --record-local`, not by reading history.
+`history prune --source local` applies the bounded retention policy, and
+`history delete <run-id> --source local` removes one inactive local record.
+Neither operation stops a lease or changes coordinator records. Active writers
+are not pruned. Local source output includes provenance and incomplete status;
+see [private local history](../features/history-logs.md#private-local-history).
 
 - [logs](logs.md) — print captured run logs.
 - [events](events.md) — print phase and stream events.

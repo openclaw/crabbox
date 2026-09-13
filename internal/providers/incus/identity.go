@@ -23,7 +23,7 @@ func (s connectionIdentity) scope() string {
 const connectionLabel = "incus_connection"
 const identityLabel = "incus_identity"
 
-func connectionMetadata(cfg Config, identity connectionIdentity) map[string]string {
+func connectionMetadata(cfg core.Config, identity connectionIdentity) map[string]string {
 	// Config stores paths to existing trust material, never certificate keys or tokens.
 	config := cfg.Incus
 	config.CheckpointMetadata = nil
@@ -31,7 +31,7 @@ func connectionMetadata(cfg Config, identity connectionIdentity) map[string]stri
 	return map[string]string{connectionLabel: string(data), identityLabel: identity.scope()}
 }
 
-func configFromMetadata(metadata map[string]string) (Config, error) {
+func configFromMetadata(metadata map[string]string) (core.Config, error) {
 	cfg := core.BaseConfig()
 	if metadata[connectionLabel] == "" || metadata[identityLabel] == "" {
 		return cfg, fmt.Errorf("Incus resource has no recorded connection identity")

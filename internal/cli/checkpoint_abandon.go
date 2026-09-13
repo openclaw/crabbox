@@ -21,7 +21,7 @@ func (a App) checkpointAbandon(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 || !canonicalLeaseIDPattern.MatchString(*leaseID) || strings.TrimSpace(*expectedID) == "" || *expectedID != strings.TrimSpace(*expectedID) {
-		return exit(2, "usage: crabbox checkpoint abandon <checkpoint-id> --id <canonical-lease-id> --expected-provider-resource-id <immutable-source-id>")
+		return Exit(2, "usage: crabbox checkpoint abandon <checkpoint-id> --id <canonical-lease-id> --expected-provider-resource-id <immutable-source-id>")
 	}
 	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *leaseID})
 	if err != nil {
@@ -47,8 +47,8 @@ func (a App) checkpointAbandon(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if !isNativeCheckpointKind(record.Kind) || record.coordinatorManaged() || nativeCheckpointDeleteID(record) != "" || record.Native.ImageID != "" || record.Native.Resource != "" || record.LeaseID != *leaseID || record.Provider != cfg.Provider || record.Repo.Root != repo.Root {
-			return exit(2, "checkpoint abandon requires an unresolved ordinary native record for this exact source lease, provider, and repository")
+		if !isNativeCheckpointKind(record.Kind) || record.coordinatorManaged() || record.nativeDeleteID() != "" || record.Native.ImageID != "" || record.Native.Resource != "" || record.LeaseID != *leaseID || record.Provider != cfg.Provider || record.Repo.Root != repo.Root {
+			return Exit(2, "checkpoint abandon requires an unresolved ordinary native record for this exact source lease, provider, and repository")
 		}
 		backend, err := loadBackend(cfg, runtimeForApp(operation))
 		if err != nil {
@@ -56,11 +56,11 @@ func (a App) checkpointAbandon(ctx context.Context, args []string) error {
 		}
 		ssh, ok := backend.(SSHLeaseBackend)
 		if !ok {
-			return exit(2, "provider=%s cannot dispose of a checkpoint source", cfg.Provider)
+			return Exit(2, "provider=%s cannot dispose of a checkpoint source", cfg.Provider)
 		}
 		preparer, ok := backend.(NativeCheckpointAbandonProvider)
 		if !ok {
-			return exit(2, "provider=%s cannot attest source-only checkpoint abandonment", cfg.Provider)
+			return Exit(2, "provider=%s cannot attest source-only checkpoint abandonment", cfg.Provider)
 		}
 		if record.Capture == nil {
 			if err := operation.prepareCheckpointAbandonment(ctx, cfg, repo, store, &record, *expectedID, ssh, preparer); err != nil {
@@ -69,7 +69,7 @@ func (a App) checkpointAbandon(ctx context.Context, args []string) error {
 		}
 		capture := record.Capture
 		if capture.SourceDisposition != "abandon" || capture.SourceID != *expectedID || capture.DiscardFailed {
-			return exit(2, "checkpoint %s abandonment identity conflicts with the original operation", record.ID)
+			return Exit(2, "checkpoint %s abandonment identity conflicts with the original operation", record.ID)
 		}
 		switch capture.Phase {
 		case "prepared":
@@ -77,7 +77,7 @@ func (a App) checkpointAbandon(ctx context.Context, args []string) error {
 			if err != nil {
 				return err
 			}
-			if err := withLeaseClaimUnchanged(record.LeaseID, claim, func() error {
+			if err := WithLeaseClaimUnchanged(record.LeaseID, claim, func() error {
 				capture.Phase = "retiring"
 				return store.Write(record)
 			}); err != nil {
@@ -85,7 +85,7 @@ func (a App) checkpointAbandon(ctx context.Context, args []string) error {
 			}
 		case "retiring", "abandoned":
 		default:
-			return exit(2, "checkpoint %s has an unknown abandonment phase; retain the record", record.ID)
+			return Exit(2, "checkpoint %s has an unknown abandonment phase; retain the record", record.ID)
 		}
 		if err := operation.retireCheckpointSource(ctx, cfg, repo, store, &record, ssh); err != nil {
 			return err
@@ -99,12 +99,12 @@ func (a App) checkpointAbandon(ctx context.Context, args []string) error {
 }
 
 func (a App) prepareCheckpointAbandonment(ctx context.Context, cfg Config, repo Repo, store checkpointStore, record *checkpointRecord, expectedID string, backend SSHLeaseBackend, preparer NativeCheckpointAbandonProvider) error {
-	claim, exists, err := readLeaseClaimWithPresence(record.LeaseID)
+	claim, exists, err := ReadLeaseClaimWithPresence(record.LeaseID)
 	if err != nil {
 		return err
 	}
 	if !exists || claim.CloudID != expectedID || claim.Revision == "" || claim.RepoRoot != repo.Root || canonicalClaimProvider(claim.Provider) != cfg.Provider || claim.CheckpointCapture != nil {
-		return exit(2, "checkpoint abandonment requires the exact current unbound source claim in this repository")
+		return Exit(2, "checkpoint abandonment requires the exact current unbound source claim in this repository")
 	}
 	expected := ProviderIdentityExpectation{LeaseID: record.LeaseID, ResourceID: expectedID}
 	lease, err := backend.Resolve(ctx, ResolveRequest{Repo: repo, ID: record.LeaseID, ReleaseOnly: true, NoLocalStateMutations: true, ExpectedProviderIdentity: expected})
@@ -112,13 +112,13 @@ func (a App) prepareCheckpointAbandonment(ctx context.Context, cfg Config, repo 
 		return err
 	}
 	if lease.LeaseID != record.LeaseID || lease.Server.CloudID != expectedID || lease.Server.Name == "" {
-		return exit(2, "checkpoint source identity changed during abandonment admission")
+		return Exit(2, "checkpoint source identity changed during abandonment admission")
 	}
 	capability, ok := nativeModeCheckpointCapability(cfg, lease.Server, lease.SSH, checkpointStrategyImage)
 	if !ok || capability.Kind != record.Kind || !capability.RetireSource || capability.RetireUnsupported != "" {
-		return exit(2, "provider=%s cannot abandon this checkpoint source: %s", cfg.Provider, firstNonBlank(capability.RetireUnsupported, "source capability changed"))
+		return Exit(2, "provider=%s cannot abandon this checkpoint source: %s", cfg.Provider, firstNonBlank(capability.RetireUnsupported, "source capability changed"))
 	}
-	return withLeaseClaimUnchanged(record.LeaseID, claim, func() error {
+	return WithLeaseClaimUnchanged(record.LeaseID, claim, func() error {
 		if err := requireResolvedSourceCheckpointsExcept(store, record.LeaseID, record.ID); err != nil {
 			return err
 		}

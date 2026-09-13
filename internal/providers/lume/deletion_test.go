@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func newDeleteFence(t *testing.T, name, machineID string) (string, os.FileInfo, *os.File, os.FileInfo, string) {
@@ -39,16 +41,16 @@ func TestDeleteRespectsResize(t *testing.T) {
 	if err != nil || !locked {
 		t.Fatalf("lock resize guard=%v err=%v", locked, err)
 	}
-	want(t, deleteClaimedVM(base(), name, id), "during disk resize")
+	want(t, deleteClaimedVM(core.BaseConfig(), name, id), "during disk resize")
 	must(t, unlockFile(guard))
 	must(t, guard.Close())
 	must(t, os.WriteFile(join(path, "resize.lock.json"), []byte(`{}`), 0o600))
-	want(t, deleteClaimedVM(base(), name, id), "pending disk resize")
+	want(t, deleteClaimedVM(core.BaseConfig(), name, id), "pending disk resize")
 	must(t, os.Remove(join(path, "resize.lock.json")))
 	oldUse := foreignVMUse
 	foreignVMUse = func(string) (string, error) { return "process 123", nil }
 	t.Cleanup(func() { foreignVMUse = oldUse })
-	want(t, deleteClaimedVM(base(), name, id), "still in use")
+	want(t, deleteClaimedVM(core.BaseConfig(), name, id), "still in use")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("fenced VM was lost: %v", err)
 	}

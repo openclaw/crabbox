@@ -1,7 +1,9 @@
 package applecontainer
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"io"
@@ -15,6 +17,8 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	_ "github.com/openclaw/crabbox/internal/providers/applemachine"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func TestConcreteFlagInputAttribution(t *testing.T) {
@@ -513,7 +517,7 @@ func TestCreateContainerMountsCacheVolumes(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, volume := range cfg.Cache.Volumes {
-		want := "--volume\n" + filepath.Join(root, appleContainerCacheVolumeName(volume.Key)) + ":" + volume.Path
+		want := "--volume\n" + filepath.Join(root, shared.CacheVolumeName(volume.Key)) + ":" + volume.Path
 		if !strings.Contains(args, want) {
 			t.Fatalf("cache volume mount missing %q:\n%s", want, args)
 		}
@@ -527,8 +531,8 @@ func TestCreateContainerMountsCacheVolumes(t *testing.T) {
 }
 
 func TestAppleContainerCacheVolumeNameIsStableAndFilesystemSafe(t *testing.T) {
-	got := appleContainerCacheVolumeName("My App/linux node24 lock")
-	again := appleContainerCacheVolumeName("My App/linux node24 lock")
+	got := shared.CacheVolumeName("My App/linux node24 lock")
+	again := shared.CacheVolumeName("My App/linux node24 lock")
 	if got != again {
 		t.Fatalf("cache volume name unstable: %q then %q", got, again)
 	}
@@ -1265,3 +1269,160 @@ func TestDecodeInspectToleratesObjectStatus(t *testing.T) {
 type errFake string
 
 func (e errFake) Error() string { return string(e) }
+
+func TestAppleContainerConfigShowSection(t *testing.T) {
+	projector, ok := any(Provider{}).(core.ProviderConfigShowProjector)
+	if !ok {
+		t.Fatal("real provider is missing passive config-show ownership")
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  core.AppleContainerConfig
+		want map[string]any
+		text string
+	}{
+		{name: "zero", cfg: core.AppleContainerConfig{CLIPath: "", Image: "", User: "", WorkRoot: "", CPUs: 0, Memory: "", ExtraRunArgs: []string{"internal-extra", " internal-extra "}}, want: map[string]any{"cliPath": "", "image": "", "user": "", "workRoot": "", "cpus": 0, "memory": ""}, text: "apple_container cli= image= user= work_root= cpus=0 memory=-\n"},
+		{name: "raw", cfg: core.AppleContainerConfig{CLIPath: " raw-cli ", Image: " raw-image ", User: " raw-user ", WorkRoot: "", CPUs: -2, Memory: "   ", ExtraRunArgs: []string{"internal-extra", " internal-extra "}}, want: map[string]any{"cliPath": " raw-cli ", "image": " raw-image ", "user": " raw-user ", "workRoot": "", "cpus": -2, "memory": "   "}, text: "apple_container cli= raw-cli  image= raw-image  user= raw-user  work_root= cpus=-2 memory=   \n"},
+		{name: "configured", cfg: core.AppleContainerConfig{CLIPath: "tool", Image: "image-example", User: "user-example", WorkRoot: "/workspace/example", CPUs: 3, Memory: "6g", ExtraRunArgs: []string{"internal-extra", " internal-extra "}}, want: map[string]any{"cliPath": "tool", "image": "image-example", "user": "user-example", "workRoot": "/workspace/example", "cpus": 3, "memory": "6g"}, text: "apple_container cli=tool image=image-example user=user-example work_root=/workspace/example cpus=3 memory=6g\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.Config{Provider: "unselected-display-test", AppleContainer: tc.cfg}
+			before, err := json.Marshal(cfg.AppleContainer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			section := projector.ConfigShowSection(cfg)
+			got := map[string]any{}
+			var fields []string
+			for _, field := range section.Fields {
+				got[field.JSONName] = field.JSONValue
+				fields = append(fields, field.TextName+"="+field.TextValue)
+			}
+			if section.JSONKey != "appleContainer" || section.TextLabel != "apple_container" || !reflect.DeepEqual(section.Providers, []string{"apple-container", "apple-machine"}) || len(section.Fields) != 6 {
+				t.Fatalf("section metadata=%#v", section)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("public fields=%#v want %#v", got, tc.want)
+			}
+			if line := section.TextLabel + " " + strings.Join(fields, " ") + "\n"; line != tc.text {
+				t.Fatalf("text=%q want %q", line, tc.text)
+			}
+			after, err := json.Marshal(cfg.AppleContainer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("projection mutated original config or slice contents")
+			}
+		})
+	}
+}
+
+func TestAppleContainerConfigShowSharedCanonicalCoverage(t *testing.T) {
+	owners := 0
+	coverage := map[string]int{}
+	for _, name := range core.RegisteredProviderNames() {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		projector, ok := provider.(core.ProviderConfigShowProjector)
+		if !ok {
+			continue
+		}
+		section := projector.ConfigShowSection(core.Config{})
+		if section.JSONKey != "appleContainer" {
+			continue
+		}
+		owners++
+		if provider.Name() != "apple-container" {
+			t.Fatalf("unexpected shared owner %s", provider.Name())
+		}
+		for _, canonical := range section.Providers {
+			coverage[canonical]++
+		}
+	}
+	if owners != 1 || !reflect.DeepEqual(coverage, map[string]int{"apple-container": 1, "apple-machine": 1}) {
+		t.Fatalf("shared owners=%d coverage=%v", owners, coverage)
+	}
+	machine, err := core.ProviderFor("apple-machine")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, duplicate := machine.(core.ProviderConfigShowProjector); duplicate {
+		t.Fatal("Machine must not emit a competing shared section")
+	}
+}
+
+func TestAppleContainerConfigShowCanonicalSelectionsOffline(t *testing.T) {
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(name, "CRABBOX_") {
+			t.Setenv(name, "")
+		}
+	}
+	home := t.TempDir()
+	t.Chdir(home)
+	for _, name := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"} {
+		t.Setenv(name, home)
+	}
+	t.Setenv("PATH", t.TempDir())
+	configPath := filepath.Join(home, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(`target: linux
+appleContainer:
+  cliPath: tool
+  image: image-example
+  user: user-example
+  workRoot: /workspace/example
+  cpus: 3
+  memory: 6g
+  extraRunArgs: [internal-extra]
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	for _, selected := range []string{"apple-container", "apple-machine"} {
+		for _, format := range []string{"text", "json"} {
+			t.Run(selected+"/"+format, func(t *testing.T) {
+				var out, log bytes.Buffer
+				args := []string{"config", "show", "--provider", selected}
+				if format == "json" {
+					args = append(args, "--json")
+				}
+				if err := (core.App{Stdout: &out, Stderr: &log}).Run(t.Context(), args); err != nil || log.Len() != 0 {
+					t.Fatalf("config-only route: %v stderr=%s", err, &log)
+				}
+				if format == "json" {
+					var view map[string]any
+					if err := json.Unmarshal(out.Bytes(), &view); err != nil {
+						t.Fatal(err)
+					}
+					want := map[string]any{"cliPath": "tool", "image": "image-example", "user": "user-example", "workRoot": "/workspace/example", "cpus": float64(3), "memory": "6g"}
+					if !reflect.DeepEqual(view["appleContainer"], want) || view["provider"] != selected {
+						t.Fatalf("selected shared section=%#v provider=%v", view["appleContainer"], view["provider"])
+					}
+					if _, duplicate := view["appleMachine"]; duplicate {
+						t.Fatal("duplicate Machine section")
+					}
+				} else {
+					want := "apple_container cli=tool image=image-example user=user-example work_root=/workspace/example cpus=3 memory=6g\n"
+					count := 0
+					for _, line := range strings.SplitAfter(out.String(), "\n") {
+						if strings.HasPrefix(line, "apple_container ") {
+							count++
+							if line != want {
+								t.Fatalf("shared text=%q want %q", line, want)
+							}
+						}
+					}
+					if count != 1 || strings.Contains(out.String(), "apple_machine ") {
+						t.Fatalf("shared text section count=%d", count)
+					}
+					if !strings.Contains(out.String(), "provider="+selected+" ") {
+						t.Fatalf("selected provider not retained: %s", &out)
+					}
+				}
+			})
+		}
+	}
+}

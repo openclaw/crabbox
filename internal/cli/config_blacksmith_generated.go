@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"os"
 )
 
 type fileBlacksmithConfig struct {
@@ -27,70 +26,20 @@ type BlacksmithConfigApplied struct {
 
 func (cfg *BlacksmithConfig) applyFile(file *fileBlacksmithConfig) (BlacksmithConfigApplied, error) {
 	var applied BlacksmithConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Org != "" {
-		cfg.Org = file.Org
-		applied.InputAccepted = true
-	}
-	if file.Workflow != "" {
-		cfg.Workflow = file.Workflow
-		applied.InputAccepted = true
-	}
-	if file.Job != "" {
-		cfg.Job = file.Job
-		applied.InputAccepted = true
-	}
-	if file.Ref != "" {
-		cfg.Ref = file.Ref
-		applied.InputAccepted = true
-	}
-	if file.IdleTimeout != "" {
-		if applyLeaseDuration(&cfg.IdleTimeout, file.IdleTimeout) {
-			applied.InputAccepted = true
-		}
-	}
-	if file.Debug != nil {
-		cfg.Debug = *file.Debug
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "blacksmith-testbox")
+	return applied, err
 }
 
 func (cfg *BlacksmithConfig) applyEnvPrefix() (BlacksmithConfigApplied, error) {
 	var applied BlacksmithConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_BLACKSMITH_ORG"); ok {
-		cfg.Org = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_BLACKSMITH_WORKFLOW"); ok {
-		cfg.Workflow = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_BLACKSMITH_JOB"); ok {
-		cfg.Job = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_BLACKSMITH_REF"); ok {
-		cfg.Ref = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 4)
+	return applied, err
 }
 
 func (cfg *BlacksmithConfig) applyEnvSuffix() (BlacksmithConfigApplied, error) {
 	var applied BlacksmithConfigApplied
-	if value := os.Getenv("CRABBOX_BLACKSMITH_IDLE_TIMEOUT"); value != "" {
-		if applyLeaseDuration(&cfg.IdleTimeout, value) {
-			applied.InputAccepted = true
-		}
-	}
-	if value, ok := getenvBool("CRABBOX_BLACKSMITH_DEBUG"); ok {
-		cfg.Debug = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 4, 6)
+	return applied, err
 }
 
 // BlacksmithConfigFlagValues holds parsed values; only visited flags are applied.
@@ -103,32 +52,14 @@ type BlacksmithConfigFlagValues struct {
 
 // RegisterBlacksmithConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterBlacksmithConfigFlags(fs *flag.FlagSet, defaults BlacksmithConfig) BlacksmithConfigFlagValues {
-	return BlacksmithConfigFlagValues{
-		Org:      fs.String("blacksmith-org", defaults.Org, "Blacksmith organization"),
-		Workflow: fs.String("blacksmith-workflow", defaults.Workflow, "Blacksmith Testbox workflow file, name, or id"),
-		Job:      fs.String("blacksmith-job", defaults.Job, "Blacksmith Testbox workflow job"),
-		Ref:      fs.String("blacksmith-ref", defaults.Ref, "Blacksmith Testbox git ref"),
-	}
+	var values BlacksmithConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values BlacksmithConfigFlagValues) Apply(cfg *BlacksmithConfig, fs *flag.FlagSet) (BlacksmithConfigApplied, error) {
 	var applied BlacksmithConfigApplied
-	if flagWasSet(fs, "blacksmith-org") {
-		cfg.Org = *values.Org
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "blacksmith-workflow") {
-		cfg.Workflow = *values.Workflow
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "blacksmith-job") {
-		cfg.Job = *values.Job
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "blacksmith-ref") {
-		cfg.Ref = *values.Ref
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

@@ -5,13 +5,15 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 // Both the bootstrap CLI and SSH's ProxyCommand must use the same endpoint and
 // credential as the API client, regardless of saved CLI context or env aliases.
 // These values stay in child-process environments, never argv or lease claims.
 func (b *spritesBackend) cliEnvironment() (map[string]string, error) {
-	endpoint, _, err := validateSpritesAPIURL(blank(b.cfg.Sprites.APIURL, "https://api.sprites.dev"))
+	endpoint, _, err := validateSpritesAPIURL(core.Blank(b.cfg.Sprites.APIURL, "https://api.sprites.dev"))
 	if err != nil {
 		return nil, err
 	}
@@ -22,11 +24,11 @@ func (b *spritesBackend) cliEnvironment() (map[string]string, error) {
 	}, nil
 }
 
-func (b *spritesBackend) sshTarget(name, keyPath string) (SSHTarget, error) {
+func (b *spritesBackend) sshTarget(name, keyPath string) (core.SSHTarget, error) {
 	target := spritesSSHTarget(name, keyPath)
 	env, err := b.cliEnvironment()
 	if err != nil {
-		return SSHTarget{}, err
+		return core.SSHTarget{}, err
 	}
 	target.ChildEnv = env
 	// An existing master may have authenticated through a different CLI context.
@@ -34,10 +36,10 @@ func (b *spritesBackend) sshTarget(name, keyPath string) (SSHTarget, error) {
 	return target, nil
 }
 
-func (b *spritesBackend) runSprite(ctx context.Context, args []string, stdout, stderr io.Writer) (LocalCommandResult, error) {
+func (b *spritesBackend) runSprite(ctx context.Context, args []string, stdout, stderr io.Writer) (core.LocalCommandResult, error) {
 	overrides, err := b.cliEnvironment()
 	if err != nil {
-		return LocalCommandResult{ExitCode: 2}, err
+		return core.LocalCommandResult{ExitCode: 2}, err
 	}
 	env := make([]string, 0, len(os.Environ())+len(overrides))
 	for _, entry := range os.Environ() {
@@ -49,5 +51,5 @@ func (b *spritesBackend) runSprite(ctx context.Context, args []string, stdout, s
 	for _, name := range []string{"SPRITE_TOKEN", "SPRITE_URL", "SPRITES_API_URL"} {
 		env = append(env, name+"="+overrides[name])
 	}
-	return b.rt.Exec.Run(ctx, LocalCommandRequest{Name: "sprite", Args: args, Env: env, Stdout: stdout, Stderr: stderr})
+	return b.rt.Exec.Run(ctx, core.LocalCommandRequest{Name: "sprite", Args: args, Env: env, Stdout: stdout, Stderr: stderr})
 }

@@ -55,7 +55,7 @@ func TestBlacksmithJobNoSyncAdmission(t *testing.T) {
 			if err := core.ClaimLeaseForRepoProvider(existingID, "existing-box", claimProvider, repo, time.Minute, false); err != nil {
 				t.Fatal(err)
 			}
-			before, err := readLeaseClaim(existingID)
+			before, err := core.ReadLeaseClaim(existingID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -73,19 +73,19 @@ func TestBlacksmithJobNoSyncAdmission(t *testing.T) {
 			if err != nil && !os.IsNotExist(err) {
 				t.Fatal(err)
 			}
-			after, err := readLeaseClaim(existingID)
+			after, err := core.ReadLeaseClaim(existingID)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if !reflect.DeepEqual(before, after) {
 				t.Error("job changed an existing claim")
 			}
-			fresh, err := readLeaseClaim(freshID)
+			fresh, err := core.ReadLeaseClaim(freshID)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if !tc.sync && !tc.supported {
-				var exitErr ExitError
+				var exitErr core.ExitError
 				if !core.AsExitError(runErr, &exitErr) || exitErr.Code != 2 {
 					t.Errorf("job error=%v, want exit 2", runErr)
 				}
@@ -112,7 +112,7 @@ func TestBlacksmithJobNoSyncAdmission(t *testing.T) {
 			if len(calls) != 0 || fresh.LeaseID != "" {
 				t.Errorf("calls=%s retained claim=%q, want ZERO warmup/run/stop/keygen calls and no new claim", calls, fresh.LeaseID)
 			}
-			keyPath, err := testboxKeyPath(freshID)
+			keyPath, err := core.TestboxKeyPath(freshID)
 			if err != nil {
 				t.Fatal(err)
 			}

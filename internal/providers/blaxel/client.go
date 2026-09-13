@@ -122,7 +122,7 @@ type restClient struct {
 
 const blaxelControlTimeout = 60 * time.Second
 
-func newBlaxelClient(cfg Config, rt Runtime) (Client, error) {
+func newBlaxelClient(cfg core.Config, rt core.Runtime) (Client, error) {
 	baseURL := strings.TrimSpace(cfg.Blaxel.APIURL)
 	if baseURL == "" {
 		baseURL = core.BlaxelConfigDefaultAPIURL
@@ -133,7 +133,7 @@ func newBlaxelClient(cfg Config, rt Runtime) (Client, error) {
 	}
 	apiKey := BlaxelAPIKey(cfg)
 	if apiKey == "" {
-		return nil, exit(2, "provider=blaxel needs an API key; load CRABBOX_BLAXEL_API_KEY or BL_API_KEY from a secret manager")
+		return nil, core.Exit(2, "provider=blaxel needs an API key; load CRABBOX_BLAXEL_API_KEY or BL_API_KEY from a secret manager")
 	}
 	workspace := strings.TrimSpace(cfg.Blaxel.Workspace)
 	httpClient, dataHTTPClient := shared.ControlAndDataHTTPClients(rt.HTTP, blaxelControlTimeout)
@@ -147,23 +147,23 @@ func newBlaxelClient(cfg Config, rt Runtime) (Client, error) {
 	}, nil
 }
 
-func BlaxelAPIKey(cfg Config) string {
+func BlaxelAPIKey(cfg core.Config) string {
 	return strings.TrimSpace(cfg.Blaxel.APIKey)
 }
 
 func ValidateAPIURL(raw string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
-		return "", exit(2, "provider=blaxel API URL must be an absolute HTTP(S) URL")
+		return "", core.Exit(2, "provider=blaxel API URL must be an absolute HTTP(S) URL")
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", exit(2, "provider=blaxel API URL must not contain userinfo, query parameters, or a fragment")
+		return "", core.Exit(2, "provider=blaxel API URL must not contain userinfo, query parameters, or a fragment")
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
-		return "", exit(2, "provider=blaxel API URL must use HTTPS except for loopback development endpoints")
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && shared.IsLoopbackHost(parsed.Hostname())) {
+		return "", core.Exit(2, "provider=blaxel API URL must use HTTPS except for loopback development endpoints")
 	}
-	host := canonicalHostname(parsed.Hostname())
+	host := shared.LowercaseHostname(parsed.Hostname())
 	port := parsed.Port()
 	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
 		port = ""
@@ -188,23 +188,23 @@ func ValidateAPIURL(raw string) (string, error) {
 func validateSandboxEndpoint(raw, managementBase string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
-		return "", exit(5, "blaxel sandbox metadata.url must be an absolute HTTP(S) URL")
+		return "", core.Exit(5, "blaxel sandbox metadata.url must be an absolute HTTP(S) URL")
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", exit(5, "blaxel sandbox metadata.url must not contain userinfo, query parameters, or a fragment")
+		return "", core.Exit(5, "blaxel sandbox metadata.url must not contain userinfo, query parameters, or a fragment")
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	host := canonicalHostname(parsed.Hostname())
+	host := shared.LowercaseHostname(parsed.Hostname())
 	if parsed.Scheme == "http" {
 		management, _ := url.Parse(managementBase)
-		if management == nil || !isLoopbackHost(management.Hostname()) || !isLoopbackHost(host) {
-			return "", exit(5, "blaxel sandbox metadata.url must use HTTPS except for loopback development endpoints")
+		if management == nil || !shared.IsLoopbackHost(management.Hostname()) || !shared.IsLoopbackHost(host) {
+			return "", core.Exit(5, "blaxel sandbox metadata.url must use HTTPS except for loopback development endpoints")
 		}
 	} else if parsed.Scheme != "https" {
-		return "", exit(5, "blaxel sandbox metadata.url must use HTTPS")
+		return "", core.Exit(5, "blaxel sandbox metadata.url must use HTTPS")
 	}
-	if !isLoopbackHost(host) && !isBlaxelDataPlaneHost(host) {
-		return "", exit(5, "blaxel sandbox metadata.url host %q is not a trusted Blaxel data-plane origin", host)
+	if !shared.IsLoopbackHost(host) && !isBlaxelDataPlaneHost(host) {
+		return "", core.Exit(5, "blaxel sandbox metadata.url host %q is not a trusted Blaxel data-plane origin", host)
 	}
 	port := parsed.Port()
 	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
@@ -223,38 +223,27 @@ func validateSandboxEndpoint(raw, managementBase string) (string, error) {
 }
 
 func isBlaxelDataPlaneHost(host string) bool {
-	host = strings.TrimSuffix(canonicalHostname(host), ".")
+	host = strings.TrimSuffix(shared.LowercaseHostname(host), ".")
 	return host == "bl.run" ||
 		strings.HasSuffix(host, ".bl.run") ||
 		host == "blaxel.ai" ||
 		strings.HasSuffix(host, ".blaxel.ai")
 }
 
-func validateBlaxelConfig(cfg Config) error {
-	if _, err := ValidateAPIURL(blank(cfg.Blaxel.APIURL, core.BlaxelConfigDefaultAPIURL)); err != nil {
+func validateBlaxelConfig(cfg core.Config) error {
+	if _, err := ValidateAPIURL(core.Blank(cfg.Blaxel.APIURL, core.BlaxelConfigDefaultAPIURL)); err != nil {
 		return err
 	}
 	if cfg.Blaxel.MemoryMB < 0 {
-		return exit(2, "blaxel memory-mb must be >= 0")
+		return core.Exit(2, "blaxel memory-mb must be >= 0")
 	}
 	if cfg.Blaxel.ExecTimeoutSecs < 0 {
-		return exit(2, "blaxel execTimeoutSecs must be non-negative")
+		return core.Exit(2, "blaxel execTimeoutSecs must be non-negative")
 	}
 	if _, err := blaxelWorkdir(cfg); err != nil {
 		return err
 	}
 	return nil
-}
-
-func isLoopbackHost(host string) bool {
-	return shared.IsLoopbackHost(host)
-}
-
-func canonicalHostname(host string) string {
-	if zoneAt := strings.Index(host, "%"); zoneAt > 0 && strings.Contains(host[:zoneAt], ":") {
-		return strings.ToLower(host[:zoneAt]) + host[zoneAt:]
-	}
-	return strings.ToLower(host)
 }
 
 func secureHTTPClient(source *http.Client) *http.Client {
@@ -264,7 +253,7 @@ func secureHTTPClient(source *http.Client) *http.Client {
 		if len(via) >= 10 {
 			return errors.New("stopped after 10 redirects")
 		}
-		if len(via) > 0 && !sameOrigin(via[len(via)-1].URL, req.URL) {
+		if len(via) > 0 && !core.SameHTTPOrigin(via[len(via)-1].URL, req.URL) {
 			return fmt.Errorf("blaxel refused cross-origin redirect to %s://%s", req.URL.Scheme, req.URL.Host)
 		}
 		if originalCheckRedirect != nil {
@@ -273,10 +262,6 @@ func secureHTTPClient(source *http.Client) *http.Client {
 		return nil
 	}
 	return &client
-}
-
-func sameOrigin(a, b *url.URL) bool {
-	return shared.SameOrigin(a, b)
 }
 
 func (c *restClient) BaseURL() string { return c.base }
@@ -559,20 +544,7 @@ func (c *restClient) doAt(ctx context.Context, httpClient *http.Client, baseURL,
 	if err != nil {
 		return nil, redactError(err)
 	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, apiError{StatusCode: resp.StatusCode, Body: redactString(string(data))}
-	}
-	if response != nil && len(bytes.TrimSpace(data)) > 0 {
-		if err := json.Unmarshal(data, response); err != nil {
-			return nil, err
-		}
-	}
-	return data, nil
+	return decodeBlaxelResponse(resp, response)
 }
 
 func (c *restClient) sandboxBaseURL(ctx context.Context, sandbox string) (string, error) {
@@ -581,7 +553,7 @@ func (c *restClient) sandboxBaseURL(ctx context.Context, sandbox string) (string
 		return "", err
 	}
 	if strings.TrimSpace(sb.Endpoint) == "" {
-		return "", exit(5, "blaxel sandbox %q response omitted metadata.url", sandbox)
+		return "", core.Exit(5, "blaxel sandbox %q response omitted metadata.url", sandbox)
 	}
 	return validateSandboxEndpoint(sb.Endpoint, c.base)
 }
@@ -645,6 +617,11 @@ func (c *restClient) doMultipartAt(ctx context.Context, baseURL, method, endpoin
 	if err != nil {
 		return nil, redactError(err)
 	}
+	return decodeBlaxelResponse(resp, response)
+}
+
+// decodeBlaxelResponse consumes buffered JSON and multipart responses alike.
+func decodeBlaxelResponse(resp *http.Response, response any) ([]byte, error) {
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -796,7 +773,7 @@ type blaxelAPIProcessRequest struct {
 func apiProcessRequest(req ExecuteProcessRequest) blaxelAPIProcessRequest {
 	command := req.Command
 	if len(req.Args) > 0 {
-		command = shellScriptFromArgv(append([]string{req.Command}, req.Args...))
+		command = core.ShellScriptFromArgv(append([]string{req.Command}, req.Args...))
 	}
 	return blaxelAPIProcessRequest{
 		Command:           command,

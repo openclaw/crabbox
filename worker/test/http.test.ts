@@ -4,13 +4,13 @@ import coordinator, { isAuthorized } from "../src";
 import {
   adminGrantVersion,
   authenticateRequest,
-  base64URL,
   githubUserGrantIsCurrent,
   issueUserToken,
   requestWithAuthContext,
 } from "../src/auth";
 import { codeOriginForLease } from "../src/code-origin";
 import { prepareCoordinatorRequest } from "../src/coordinator-entry";
+import { base64URL } from "../src/encoding";
 import { errorMessage, json, redactDiagnosticSecrets, requestOwner } from "../src/http";
 import { MISSING_ORG_KEY, requestOrg, requestOrgLabel } from "../src/org-identity";
 import type { Env } from "../src/types";
@@ -656,29 +656,41 @@ describe("coordinator auth", () => {
     ).toEqual([null, null, null, null]);
   });
 
-  it("replaces caller-supplied admin grant versions after authentication", async () => {
-    const env = {
-      CRABBOX_ADMIN_TOKEN: "admin-secret",
-      CRABBOX_DEFAULT_ORG: "example-org",
-    } as Env;
-    const forgedVersion = "a".repeat(64);
-    const prepared = await prepareCoordinatorRequest(
-      new Request("https://example.test/v1/admin/leases", {
-        headers: {
-          authorization: "Bearer admin-secret",
-          "x-crabbox-admin-grant-version": forgedVersion,
-        },
-      }),
-      env,
-    );
+  it.each([
+    ["GET", "/v1/admin/leases", "admin-secret", "true"],
+    ["GET", "/v1/leases/cbx_abcdef123456/cleanup", "shared-secret", "false"],
+    ["POST", "/v1/leases/cbx_abcdef123456/cleanup", "shared-secret", "false"],
+  ])(
+    "replaces caller-supplied admin authority after authentication for %s %s",
+    async (method, path, token, admin) => {
+      const env = {
+        CRABBOX_ADMIN_TOKEN: "admin-secret",
+        CRABBOX_SHARED_TOKEN: "shared-secret",
+        CRABBOX_SHARED_OWNER: "alice@example.com",
+        CRABBOX_DEFAULT_ORG: "example-org",
+      } as Env;
+      const forgedVersion = "a".repeat(64);
+      const prepared = await prepareCoordinatorRequest(
+        new Request(`https://example.test${path}`, {
+          method,
+          headers: {
+            authorization: `Bearer ${token}`,
+            "x-crabbox-admin": "true",
+            "x-crabbox-admin-grant-version": forgedVersion,
+          },
+        }),
+        env,
+      );
 
-    expect(prepared).toMatchObject({ authenticated: true });
-    if ("response" in prepared) throw new Error("admin request was rejected");
-    expect(prepared.request.headers.get("x-crabbox-admin-grant-version")).toBe(
-      await adminGrantVersion(env),
-    );
-    expect(prepared.request.headers.get("x-crabbox-admin-grant-version")).not.toBe(forgedVersion);
-  });
+      expect(prepared).toMatchObject({ authenticated: true });
+      if ("response" in prepared) throw new Error("authenticated request was rejected");
+      expect(prepared.request.headers.get("x-crabbox-admin")).toBe(admin);
+      expect(prepared.request.headers.get("x-crabbox-admin-grant-version")).toBe(
+        await adminGrantVersion(env),
+      );
+      expect(prepared.request.headers.get("x-crabbox-admin-grant-version")).not.toBe(forgedVersion);
+    },
+  );
 
   it("requires normal coordinator authentication for workspace terminals", async () => {
     const unauthorized = await prepareCoordinatorRequest(

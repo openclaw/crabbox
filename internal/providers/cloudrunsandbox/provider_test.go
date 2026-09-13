@@ -34,14 +34,14 @@ func TestProviderAliasesAndDiagnosticSecrets(t *testing.T) {
 			t.Fatalf("missing alias %q in %v", want, aliases)
 		}
 	}
-	if p.ServerTypeForConfig(Config{}) != "" || p.ServerTypeForClass("any") != "" {
+	if p.ServerTypeForConfig(core.Config{}) != "" || p.ServerTypeForClass("any") != "" {
 		t.Fatal("expected empty server type surface")
 	}
 	t.Setenv("CLOUD_RUN_SANDBOX_SECRET", "s1")
 	t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_SECRET", "s2")
 	t.Setenv("CLOUD_RUN_AUTH_TOKEN", "t1")
 	t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_AUTH_TOKEN", "t2")
-	secrets := p.DiagnosticSecrets(Config{})
+	secrets := p.DiagnosticSecrets(core.Config{})
 	joined := strings.Join(secrets, ",")
 	for _, want := range []string{"s1", "s2", "t1", "t2"} {
 		if !strings.Contains(joined, want) {
@@ -52,7 +52,7 @@ func TestProviderAliasesAndDiagnosticSecrets(t *testing.T) {
 
 func TestProviderConfigureAndFlags(t *testing.T) {
 	p := Provider{}
-	cfg := Config{CloudRunSandbox: CloudRunSandboxConfig{
+	cfg := core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{
 		CLIPath: "/usr/local/gcp/bin/sandbox",
 		Workdir: "/tmp/crabbox",
 		Write:   true,
@@ -83,7 +83,7 @@ func TestProviderConfigureAndFlags(t *testing.T) {
 		t.Fatalf("flags not applied: %#v", cfg.CloudRunSandbox)
 	}
 
-	rt := Runtime{Stdout: io.Discard, Stderr: io.Discard}
+	rt := core.Runtime{Stdout: io.Discard, Stderr: io.Discard}
 	backend, err := p.Configure(cfg, rt)
 	if err != nil {
 		t.Fatalf("Configure: %v", err)
@@ -130,7 +130,7 @@ func TestCloudRunConfigFlagPresenceAndGuardOrder(t *testing.T) {
 		fs.String("class", "", "")
 		fs.String("type", "", "")
 		values := RegisterCloudRunSandboxProviderFlags(fs, cfg)
-		cfg.CloudRunSandbox = CloudRunSandboxConfig{GatewayURL: "https://example.invalid/env", CLIPath: "/opt/env", Workdir: "/tmp/env", Rootfs: "/env", Write: true, AllowEgress: true}
+		cfg.CloudRunSandbox = core.CloudRunSandboxConfig{GatewayURL: "https://example.invalid/env", CLIPath: "/opt/env", Workdir: "/tmp/env", Rootfs: "/env", Write: true, AllowEgress: true}
 		before := cfg.CloudRunSandbox
 		if err := ApplyCloudRunSandboxProviderFlags(&cfg, fs, values); err != nil {
 			t.Fatal(err)
@@ -144,7 +144,7 @@ func TestCloudRunConfigFlagPresenceAndGuardOrder(t *testing.T) {
 		if err := ApplyCloudRunSandboxProviderFlags(&cfg, fs, values); err == nil || err.Error() != "cloudRunSandbox.cliPath must not be empty" {
 			t.Fatalf("empty flags=%v", err)
 		}
-		if cfg.CloudRunSandbox != (CloudRunSandboxConfig{}) {
+		if cfg.CloudRunSandbox != (core.CloudRunSandboxConfig{}) {
 			t.Fatalf("all flags not copied before validation: %#v", cfg.CloudRunSandbox)
 		}
 		cfg.CloudRunSandbox.Workdir = "relative"
@@ -177,18 +177,18 @@ func TestCloudRunConfigFlagPresenceAndGuardOrder(t *testing.T) {
 }
 
 func TestWarmupRejectsUnsupportedOptions(t *testing.T) {
-	b := NewBackend(Provider{}.Spec(), Config{CloudRunSandbox: CloudRunSandboxConfig{
+	b := NewBackend(Provider{}.Spec(), core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{
 		CLIPath: "/usr/local/gcp/bin/sandbox",
 		Workdir: "/tmp/crabbox",
-	}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
-	if err := b.Warmup(context.Background(), WarmupRequest{ActionsRunner: true}); err == nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{ActionsRunner: true}); err == nil {
 		t.Fatal("expected actions-runner rejection")
 	}
-	if err := b.Warmup(context.Background(), WarmupRequest{Options: core.LeaseOptions{Desktop: true}}); err == nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Options: core.LeaseOptions{Desktop: true}}); err == nil {
 		t.Fatal("expected desktop rejection")
 	}
-	if err := b.Warmup(context.Background(), WarmupRequest{Options: core.LeaseOptions{Tailscale: core.TailscaleConfig{Enabled: true}}}); err == nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Options: core.LeaseOptions{Tailscale: core.TailscaleConfig{Enabled: true}}}); err == nil {
 		t.Fatal("expected tailscale rejection")
 	}
 }
@@ -196,24 +196,24 @@ func TestWarmupRejectsUnsupportedOptions(t *testing.T) {
 func TestRunRejectsUnsupportedOptionsAndMissingCommand(t *testing.T) {
 	isolateLeaseHome(t)
 	prev := newTransport
-	newTransport = func(Config, Runtime) (sandboxTransport, error) {
+	newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) {
 		return &fakeTransport{mode: "remote"}, nil
 	}
 	t.Cleanup(func() { newTransport = prev })
 
-	b := NewBackend(Provider{}.Spec(), Config{CloudRunSandbox: CloudRunSandboxConfig{
+	b := NewBackend(Provider{}.Spec(), core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{
 		CLIPath: "/usr/local/gcp/bin/sandbox",
 		Workdir: "/tmp/crabbox",
-	}, IdleTimeout: time.Minute}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	}, IdleTimeout: time.Minute}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
-	if _, err := b.Run(context.Background(), RunRequest{Options: core.LeaseOptions{Browser: true}}); err == nil {
+	if _, err := b.Run(context.Background(), core.RunRequest{Options: core.LeaseOptions{Browser: true}}); err == nil {
 		t.Fatal("expected browser rejection")
 	}
-	if _, err := b.Run(context.Background(), RunRequest{Options: core.LeaseOptions{Tailscale: core.TailscaleConfig{Enabled: true}}}); err == nil {
+	if _, err := b.Run(context.Background(), core.RunRequest{Options: core.LeaseOptions{Tailscale: core.TailscaleConfig{Enabled: true}}}); err == nil {
 		t.Fatal("expected tailscale rejection")
 	}
-	if _, err := b.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: t.TempDir()},
+	if _, err := b.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: t.TempDir()},
 		NoSync:  true,
 		Command: nil,
 	}); err == nil {
@@ -232,19 +232,19 @@ func TestDoctorListStopStatusCleanup(t *testing.T) {
 		},
 	}
 	prev := newTransport
-	newTransport = func(Config, Runtime) (sandboxTransport, error) { return fake, nil }
+	newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return fake, nil }
 	t.Cleanup(func() { newTransport = prev })
 
 	var stdout, stderr bytes.Buffer
-	cfg := Config{
-		CloudRunSandbox: CloudRunSandboxConfig{
+	cfg := core.Config{
+		CloudRunSandbox: core.CloudRunSandboxConfig{
 			GatewayURL: "https://gw.example.run.app",
 			CLIPath:    "/usr/local/gcp/bin/sandbox",
 			Workdir:    "/tmp/crabbox",
 		},
 		IdleTimeout: time.Minute,
 	}
-	b := NewBackend(Provider{}.Spec(), cfg, Runtime{Stdout: &stdout, Stderr: &stderr}).(*backend)
+	b := NewBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &stdout, Stderr: &stderr}).(*backend)
 
 	scope, err := b.claimScope()
 	if err != nil {
@@ -255,7 +255,7 @@ func TestDoctorListStopStatusCleanup(t *testing.T) {
 		t.Fatalf("claim: %v", err)
 	}
 
-	doctor, err := b.Doctor(context.Background(), DoctorRequest{})
+	doctor, err := b.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatalf("Doctor: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestDoctorListStopStatusCleanup(t *testing.T) {
 		t.Fatalf("doctor=%#v", doctor)
 	}
 
-	leases, err := b.List(context.Background(), ListRequest{})
+	leases, err := b.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -271,7 +271,7 @@ func TestDoctorListStopStatusCleanup(t *testing.T) {
 		t.Fatalf("leases=%#v", leases)
 	}
 
-	status, err := b.Status(context.Background(), StatusRequest{ID: leaseID})
+	status, err := b.Status(context.Background(), core.StatusRequest{ID: leaseID})
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
@@ -280,20 +280,20 @@ func TestDoctorListStopStatusCleanup(t *testing.T) {
 	}
 
 	// Dry-run cleanup should not destroy while idle timeout remains.
-	if err := b.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatalf("Cleanup dry-run: %v", err)
 	}
 	if len(destroyed) != 0 {
 		t.Fatalf("dry-run destroyed=%v", destroyed)
 	}
 
-	if err := b.Stop(context.Background(), StopRequest{ID: leaseID}); err != nil {
+	if err := b.Stop(context.Background(), core.StopRequest{ID: leaseID}); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	if len(destroyed) != 1 || destroyed[0] != "demo-box-1" {
 		t.Fatalf("destroyed=%v", destroyed)
 	}
-	if _, err := b.Status(context.Background(), StatusRequest{ID: leaseID}); err == nil {
+	if _, err := b.Status(context.Background(), core.StatusRequest{ID: leaseID}); err == nil {
 		t.Fatal("expected status failure after stop")
 	}
 }
@@ -302,7 +302,7 @@ func TestDoctorFailsWhenLocalClaimsAreUnreadable(t *testing.T) {
 	isolateLeaseHome(t)
 	fake := &fakeTransport{mode: "remote"}
 	previousTransport := newTransport
-	newTransport = func(Config, Runtime) (sandboxTransport, error) { return fake, nil }
+	newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return fake, nil }
 	t.Cleanup(func() { newTransport = previousTransport })
 	stateDir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
@@ -311,10 +311,10 @@ func TestDoctorFailsWhenLocalClaimsAreUnreadable(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(stateDir, "claims"), []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{GatewayURL: "https://gw.example.run.app", CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
-	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
-	result, err := b.Doctor(context.Background(), DoctorRequest{})
+	b := NewBackend(Provider{}.Spec(), core.Config{
+		CloudRunSandbox: core.CloudRunSandboxConfig{GatewayURL: "https://gw.example.run.app", CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
+	}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	result, err := b.Doctor(context.Background(), core.DoctorRequest{})
 	if err == nil || result.Status != "error" || !strings.Contains(result.Message, "local_claims=blocked") {
 		t.Fatalf("doctor result=%#v err=%v", result, err)
 	}
@@ -323,31 +323,31 @@ func TestDoctorFailsWhenLocalClaimsAreUnreadable(t *testing.T) {
 func TestClaimCleanupDue(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
-	if due, reason := claimCleanupDue(LeaseClaim{}, now); due || reason != "no-idle-timeout" {
+	if due, reason := claimCleanupDue(core.LeaseClaim{}, now); due || reason != "no-idle-timeout" {
 		t.Fatalf("empty claim due=%v reason=%s", due, reason)
 	}
-	if due, reason := claimCleanupDue(LeaseClaim{IdleTimeoutSeconds: 60}, now); !due || reason != "missing-timestamps" {
+	if due, reason := claimCleanupDue(core.LeaseClaim{IdleTimeoutSeconds: 60}, now); !due || reason != "missing-timestamps" {
 		t.Fatalf("missing ts due=%v reason=%s", due, reason)
 	}
-	if due, reason := claimCleanupDue(LeaseClaim{
+	if due, reason := claimCleanupDue(core.LeaseClaim{
 		IdleTimeoutSeconds: 60,
 		LastUsedAt:         "not-a-time",
 	}, now); !due || reason != "unparseable-timestamp" {
 		t.Fatalf("bad ts due=%v reason=%s", due, reason)
 	}
-	if due, reason := claimCleanupDue(LeaseClaim{
+	if due, reason := claimCleanupDue(core.LeaseClaim{
 		IdleTimeoutSeconds: 3600,
 		LastUsedAt:         now.Add(-30 * time.Minute).Format(time.RFC3339),
 	}, now); due || reason != "idle-timeout-remaining" {
 		t.Fatalf("remaining due=%v reason=%s", due, reason)
 	}
-	if due, reason := claimCleanupDue(LeaseClaim{
+	if due, reason := claimCleanupDue(core.LeaseClaim{
 		IdleTimeoutSeconds: 60,
 		ClaimedAt:          now.Add(-2 * time.Hour).Format(time.RFC3339Nano),
 	}, now); !due || reason != "idle-timeout-expired" {
 		t.Fatalf("expired due=%v reason=%s", due, reason)
 	}
-	creating := LeaseClaim{Labels: map[string]string{
+	creating := core.LeaseClaim{Labels: map[string]string{
 		claimStateLabel:       "creating",
 		claimActiveUntilLabel: now.Add(time.Minute).Format(time.RFC3339Nano),
 		claimOwnershipLabel:   "sandbox-token",
@@ -373,19 +373,19 @@ func TestBuildCommandAndHelpers(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0] != "echo hi" {
 		t.Fatalf("shell mode: %v %v", got, err)
 	}
-	directCleanup := cleanupCommand(Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox"}}, "gcrs_x")
+	directCleanup := cleanupCommand(core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox"}}, "gcrs_x")
 	if directCleanup != `crabbox stop --provider cloud-run-sandbox --id 'gcrs_x'` {
 		t.Fatalf("cleanupCommand=%q", directCleanup)
 	}
-	remoteCleanup := cleanupCommand(Config{CloudRunSandbox: CloudRunSandboxConfig{GatewayURL: "https://gateway.example.run.app"}}, "gcrs_x")
+	remoteCleanup := cleanupCommand(core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{GatewayURL: "https://gateway.example.run.app"}}, "gcrs_x")
 	if !strings.Contains(remoteCleanup, "--cloud-run-sandbox-gateway-url 'https://gateway.example.run.app'") {
 		t.Fatalf("remote cleanupCommand=%q", remoteCleanup)
 	}
-	customDirectCleanup := cleanupCommand(Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/opt/sandbox"}}, "gcrs_x")
+	customDirectCleanup := cleanupCommand(core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/opt/sandbox"}}, "gcrs_x")
 	if !strings.Contains(customDirectCleanup, "--cloud-run-sandbox-cli '/opt/sandbox'") {
 		t.Fatalf("custom direct cleanupCommand=%q", customDirectCleanup)
 	}
-	name, err := newSandboxName(Repo{Root: "/tmp/My Repo!"})
+	name, err := newSandboxName(core.Repo{Root: "/tmp/My Repo!"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +395,7 @@ func TestBuildCommandAndHelpers(t *testing.T) {
 	if suffix := strings.TrimPrefix(name, "crabbox-my-repo-"); len(suffix) != sandboxNameSuffix*2 {
 		t.Fatalf("ownership suffix=%q len=%d", suffix, len(suffix))
 	}
-	longName, err := newSandboxName(Repo{Root: "/tmp/" + strings.Repeat("a", 100)})
+	longName, err := newSandboxName(core.Repo{Root: "/tmp/" + strings.Repeat("a", 100)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,10 +432,10 @@ func TestExecCommandAndUploadArchive(t *testing.T) {
 	}
 	transport := &writeCaptureTransport{fakeTransport: fake}
 
-	b := NewBackend(Provider{}.Spec(), Config{CloudRunSandbox: CloudRunSandboxConfig{
+	b := NewBackend(Provider{}.Spec(), core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{
 		CLIPath: "/usr/local/gcp/bin/sandbox",
 		Workdir: "/tmp/crabbox",
-	}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
 	if err := b.uploadArchive(context.Background(), transport, "box", "/tmp/a.tgz", strings.NewReader("payload")); err != nil {
 		t.Fatalf("uploadArchive: %v", err)
@@ -474,10 +474,10 @@ func TestUploadArchiveStreamsBoundedChunks(t *testing.T) {
 	transport := &writeCaptureTransport{fakeTransport: &fakeTransport{
 		onExec: func(string, string) (int, string, string, error) { return 0, "", "", nil },
 	}}
-	b := NewBackend(Provider{}.Spec(), Config{CloudRunSandbox: CloudRunSandboxConfig{
+	b := NewBackend(Provider{}.Spec(), core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{
 		CLIPath: "/usr/local/gcp/bin/sandbox",
 		Workdir: "/tmp/crabbox",
-	}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	if err := b.uploadArchive(context.Background(), transport, "box", "/tmp/large.tgz", strings.NewReader(input)); err != nil {
 		t.Fatal(err)
 	}
@@ -525,7 +525,7 @@ func TestRunSyncOnlyAndFailurePaths(t *testing.T) {
 		},
 	}
 	prev := newTransport
-	newTransport = func(Config, Runtime) (sandboxTransport, error) { return fake, nil }
+	newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return fake, nil }
 	t.Cleanup(func() { newTransport = prev })
 
 	root := t.TempDir()
@@ -533,13 +533,13 @@ func TestRunSyncOnlyAndFailurePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox", Write: true},
+	b := NewBackend(Provider{}.Spec(), core.Config{
+		CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox", Write: true},
 		IdleTimeout:     time.Minute,
-	}, Runtime{Stdout: &stdout, Stderr: &stderr}).(*backend)
+	}, core.Runtime{Stdout: &stdout, Stderr: &stderr}).(*backend)
 
-	result, err := b.Run(context.Background(), RunRequest{
-		Repo:     Repo{Root: root},
+	result, err := b.Run(context.Background(), core.RunRequest{
+		Repo:     core.Repo{Root: root},
 		NoSync:   true,
 		SyncOnly: true,
 		Keep:     true,
@@ -553,8 +553,8 @@ func TestRunSyncOnlyAndFailurePaths(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	result, err = b.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: root},
+	result, err = b.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: root},
 		Command: []string{"false"},
 		NoSync:  true,
 		Keep:    true,

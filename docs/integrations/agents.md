@@ -91,56 +91,76 @@ instructions; they do not grant credentials or bypass the agent host's command
 approval and sandbox policy. See [`crabbox init`](../commands/init.md) and
 [Repository Onboarding](../features/repository-onboarding.md).
 
-The standards-compliant generated metadata is scheduled for Crabbox 0.40.0.
-Released 0.39.0 binaries still emit a body-only skill; until upgrading, add the
+If an older Crabbox CLI emits a body-only skill, upgrade the CLI or add the
 required `name` and `description` frontmatter manually.
 
 ### Install through ecosystem skill managers
 
-Crabbox also publishes its generic Skill at the non-hidden
-`skills/crabbox/SKILL.md` ecosystem installer convention. This makes the
-authoritative generic Skill visible to installers instead of requiring them to
-search Crabbox's repo-local `.agents` projection.
+Crabbox also publishes its generic Skills at the non-hidden
+`skills/<name>/SKILL.md` ecosystem installer convention. This makes the
+authoritative generic Skills visible to installers instead of requiring them to
+search Crabbox's repo-local `.agents` projection. Two are included:
+
+- **`crabbox`** (`skills/crabbox`): run repository commands in sandbox
+  environments, reuse remote machines, and collect execution evidence.
+- **`crabbox-quickstart`** (`skills/crabbox-quickstart`): get from CLI
+  installation to a first disposable local-container run and explicit cleanup.
+
+Install `crabbox-quickstart` for first contact, or when the repository has no
+`crabbox.yaml` yet; it hands off to `crabbox` as soon as a task needs a
+provider login, a named job, secrets, or artifacts. Install both when
+newcomers and regular users share a repository.
 
 GitHub CLI 2.90 or newer maps Agent Skills into many host-specific locations:
 
 ```sh
 gh skill install openclaw/crabbox skills/crabbox \
   --pin refs/heads/main --agent codex --scope project
+gh skill install openclaw/crabbox skills/crabbox-quickstart \
+  --pin refs/heads/main --agent codex --scope project
 ```
 
 Replace `codex` with the target reported by `gh skill install --help`. The
-cross-client Skills CLI can install the same source and prompt for a target:
+cross-client Skills CLI can install the same sources and prompt for a target:
 
 ```sh
 npx skills add https://github.com/openclaw/crabbox --skill crabbox
+npx skills add https://github.com/openclaw/crabbox --skill crabbox-quickstart
 ```
 
-The generic source has an [official-repository skills.sh
-listing](https://www.skills.sh/openclaw/crabbox/crabbox).
-The checked-in `skills/crabbox` source and `.agents/skills/crabbox` projection
-are byte-identical and CI rejects drift. Use `crabbox init` when the repository
-also needs Crabbox configuration, Actions hydration, and detected project-job
-instructions; use a skill manager when only agent discovery is missing.
-`--pin refs/heads/main` selects this unreleased branch explicitly; after 0.40.0
-is tagged, omit it to follow GitHub CLI's latest-release resolution.
+These are the GitHub sources used by [skills.sh](https://skills.sh). Its
+[leaderboard discovers skills through CLI installation telemetry](https://skills.sh/docs/faq);
+publishing a domain discovery index alone does not submit a listing.
+Use `npx skills add openclaw/crabbox --list` to check available skills.
+Installing a skill adds agent instructions; install the Crabbox CLI separately
+to create and run sandboxes.
+Every checked-in `skills/<name>` source and its `.agents/skills/<name>`
+projection are byte-identical and CI rejects drift. Use `crabbox init` when the
+repository also needs Crabbox configuration, Actions hydration, and detected
+project-job instructions; use a skill manager when only agent discovery is
+missing.
+Keep `--pin refs/heads/main` until the chosen release contains the requested
+skill. Omit it only when GitHub CLI's latest-release resolution includes that
+skill.
 
 ### Discover from crabbox.sh
 
-The docs build publishes the same Skill with a content digest through
+The docs build publishes the same Skills with content digests through
 Cloudflare's [draft Agent Skills discovery
 protocol](https://github.com/cloudflare/agent-skills-discovery-rfc):
 
 - `https://crabbox.sh/.well-known/agent-skills/index.json`
 - `https://crabbox.sh/.well-known/agent-skills/crabbox/SKILL.md`
+- `https://crabbox.sh/.well-known/agent-skills/crabbox-quickstart/SKILL.md`
 
-The index declares the draft 0.2.0 schema and a SHA-256 digest of the exact
+The index declares the draft 0.2.0 schema and a SHA-256 digest of each exact
 published `SKILL.md`. Clients that implement domain discovery can therefore
 find and verify Crabbox without a GitHub-specific registry. After the next docs
 deployment, the Skills CLI can consume the same endpoint directly:
 
 ```sh
 npx skills add https://crabbox.sh --skill crabbox
+npx skills add https://crabbox.sh --skill crabbox-quickstart
 ```
 
 Domain discovery is an emerging transport, not part of the core Agent Skills
@@ -158,9 +178,9 @@ https://crabbox.sh/.well-known/ai-catalog.json
 ```
 
 The catalog follows the draft [Agentic Resource Discovery
-specification](https://github.com/ards-project/ard-spec), identifies the
+specification](https://github.com/ards-project/ard-spec), identifies each
 artifact as `application/agent-skills+md`, and points to the same published
-`SKILL.md`. It includes representative queries for remote testing,
+`SKILL.md` files. It includes representative queries for remote testing,
 cross-platform validation, and auditable evidence so ARD-compatible discovery
 services can match Crabbox at task time. The site also advertises the catalog
 through an HTML `ai-catalog` link and an `Agentmap` directive in `robots.txt`.

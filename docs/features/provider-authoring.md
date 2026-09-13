@@ -421,7 +421,7 @@ retryability, normalization, ownership checks, provider actions, claim updates,
 cleanup, and error wording in the adapter.
 
 Vanilla provider HTTP redirect guards should use `shared.SecureHTTPClient` and
-`shared.SameOrigin`. The shared policy compares scheme and hostname
+`core.SameHTTPOrigin`. The shared policy compares scheme and hostname
 case-insensitively, normalizes the default HTTP and HTTPS ports, preserves an
 injected redirect hook, and otherwise retains the standard 10-redirect cap.
 The adapter still builds its exact provider-specific refusal error. Keep a
@@ -436,6 +436,12 @@ type CleanupBackend interface {
 	Cleanup(ctx context.Context, req CleanupRequest) error
 }
 ```
+
+Delegated adapters that expire local claims by last activity should use
+`shared.ClaimIdleCleanupDue`. It preserves the shared idle-deadline decision
+and skip reasons, including disabled timeouts and invalid timestamps. Absolute
+TTL rules, recovery deadlines, ownership validation, and deletion authorization
+remain adapter-owned; an idle deadline alone does not authorize cleanup.
 
 Cleanup must honor `CleanupRequest.DryRun`, log every skip/delete decision to
 `rt.Stderr`, and filter by Crabbox labels so it never touches unrelated
@@ -497,6 +503,13 @@ summary.
    `SyncDelegated: true`;
 6. stop temporary resources when `Keep` is false.
 
+Archive-based providers call `core.RunDelegatedArchiveSync` with a
+`core.DelegatedArchiveSyncRequest`. Core owns preparation, guardrails, transfer
+timing, workspace replacement, and temporary-archive cleanup, using `/tmp` as
+the default remote archive directory. Adapters supply upload and execution
+callbacks and any provider-specific cleanup context or replacement behavior.
+Use this request directly rather than mirroring it in another provider layer.
+
 `Status` returns a normalized `StatusView`. If the provider only emits a table,
 parse it inside the backend and return structured fields — do not print the
 native table.
@@ -523,6 +536,11 @@ boundary intact across those flows.
 
 ## Step 7. Use The Runtime
 
+Use `core.ValidShellEnvName` for the portable ASCII environment-name grammar
+and `core.IsShellEnvAssignment` to recognize a leading `NAME=value` argument.
+These helpers do not trim names or validate values. Keep the adapter's policy
+for invalid names, value restrictions, allowlists, quoting, and transport local.
+
 Backends receive a narrow runtime instead of touching package-level state:
 
 ```go
@@ -548,6 +566,9 @@ Rules:
   tests can pass a fake clock for deterministic timing assertions.
 - Use `rt.Stdout` and `rt.Stderr` for streaming and warnings. Do not write
   directly to `os.Stdout` / `os.Stderr`.
+- Use `shared.LocalCommandError` when a failed tool keeps its nonzero exit code
+  (zero becomes one) and reports trimmed stderr before stdout. Providers with
+  different exit, redaction, or cause-wrapping contracts retain their own policy.
 - Use `rt.HTTP` for outbound HTTP when the provider has a JSON API. Tests can
   inject a stubbed transport.
 

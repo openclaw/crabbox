@@ -12,10 +12,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/openclaw/crabbox/internal/atomicfile"
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
+	RecordLocal                   bool `json:"-" yaml:"-"`
 	Profile                       string
 	Provider                      string
 	providerSelectionSource       providerSelectionSource
@@ -300,7 +302,9 @@ func providerSelectionIsActionable(cfg Config) bool {
 	}
 }
 
-func providerSelectionIsAuthoritativeRoute(cfg Config) bool {
+// ProviderSelectionIsAuthoritativeRoute reports whether cfg names an exact
+// provider restored from lease or recorded-run context.
+func ProviderSelectionIsAuthoritativeRoute(cfg Config) bool {
 	switch cfg.providerSelectionSource {
 	case providerSelectionRecordedRun, providerSelectionLeaseContext:
 		return true
@@ -832,7 +836,7 @@ func ParseCacheVolumeSpec(spec string) (CacheVolumeConfig, error) {
 	}
 	key, path, ok := strings.Cut(spec, ":")
 	if !ok {
-		return CacheVolumeConfig{}, exit(2, "cache volume %q must use [name=]key:path", spec)
+		return CacheVolumeConfig{}, Exit(2, "cache volume %q must use [name=]key:path", spec)
 	}
 	volume := CacheVolumeConfig{
 		Name: name,
@@ -887,19 +891,19 @@ func normalizeFileCacheVolumes(files []fileCacheVolumeConfig) ([]CacheVolumeConf
 
 func validateCacheVolume(volume CacheVolumeConfig) error {
 	if strings.TrimSpace(volume.Key) == "" {
-		return exit(2, "cache volume key is required")
+		return Exit(2, "cache volume key is required")
 	}
 	if strings.Contains(volume.Key, ":") {
-		return exit(2, "cache volume key %q must not contain ':'", volume.Key)
+		return Exit(2, "cache volume key %q must not contain ':'", volume.Key)
 	}
 	if strings.TrimSpace(volume.Path) == "" {
-		return exit(2, "cache volume path is required")
+		return Exit(2, "cache volume path is required")
 	}
 	if !strings.HasPrefix(volume.Path, "/") {
-		return exit(2, "cache volume path %q must be absolute", volume.Path)
+		return Exit(2, "cache volume path %q must be absolute", volume.Path)
 	}
 	if volume.SizeGB < 0 {
-		return exit(2, "cache volume sizeGB must be non-negative")
+		return Exit(2, "cache volume sizeGB must be non-negative")
 	}
 	return nil
 }
@@ -918,7 +922,7 @@ func ValidateCacheVolumesForProvider(cfg Config) error {
 	}
 	for _, volume := range cfg.Cache.Volumes {
 		if volume.Required {
-			return exit(2, "provider=%s does not support required cache volume %q", cfg.Provider, firstNonBlank(volume.Name, volume.Key))
+			return Exit(2, "provider=%s does not support required cache volume %q", cfg.Provider, firstNonBlank(volume.Name, volume.Key))
 		}
 	}
 	return nil
@@ -1046,7 +1050,7 @@ func loadConfigWithOverrides(coordinator, provider string) (Config, error) {
 	// dispatch. The selected value may itself be CRABBOX_PROVIDER, so waiting
 	// for External provider validation would let that value route around it.
 	if err := ValidateExternalDesktopPasswordEnvironmentName(cfg.External.Connection.Desktop.PasswordEnv); err != nil {
-		return Config{}, exit(2, "%v", err)
+		return Config{}, Exit(2, "%v", err)
 	}
 	applyCloudflareDynamicWorkersRepositoryCaps(&cfg)
 	if coordinator = strings.TrimSpace(coordinator); coordinator != "" {
@@ -1088,7 +1092,7 @@ func normalizeBrokerConfig(cfg *Config) error {
 	}
 	cfg.BrokerMode = mode
 	if mode == BrokerModeRegistered && strings.TrimSpace(cfg.Coordinator) == "" {
-		return exit(2, "broker.mode=registered requires broker.url or coordinator")
+		return Exit(2, "broker.mode=registered requires broker.url or coordinator")
 	}
 	return nil
 }
@@ -1102,7 +1106,7 @@ func normalizeBrokerMode(value string) (BrokerMode, error) {
 	case BrokerModeManaged, BrokerModeRegistered:
 		return mode, nil
 	default:
-		return "", exit(2, "broker.mode must be managed or registered")
+		return "", Exit(2, "broker.mode must be managed or registered")
 	}
 }
 
@@ -1154,7 +1158,7 @@ func applyLinuxConnectionDefaults(cfg *Config, defaultSSHUser, defaultSSHPort st
 
 func applyProviderConfigDefaults(cfg *Config) error {
 	prepareProviderDefaults(cfg)
-	if normalized, err := normalizeArchitecture(cfg.Architecture); err != nil {
+	if normalized, err := NormalizeArchitecture(cfg.Architecture); err != nil {
 		return err
 	} else {
 		cfg.Architecture = normalized
@@ -1371,13 +1375,13 @@ func applyProviderConfigDefaults(cfg *Config) error {
 	}
 	if cfg.Provider == "windows-sandbox" || cfg.Provider == "wsb" || cfg.Provider == "windows-sandbox-provider" {
 		if IsTargetExplicit(cfg) && normalizeTargetOS(cfg.TargetOS) != targetWindows {
-			return exit(2, "provider=windows-sandbox supports target=windows only")
+			return Exit(2, "provider=windows-sandbox supports target=windows only")
 		}
 		if cfg.TargetOS == "" || (!IsTargetExplicit(cfg) && cfg.TargetOS == targetLinux) {
 			cfg.TargetOS = targetWindows
 		}
 		if cfg.explicitWindowsMode != "" && normalizeWindowsMode(cfg.explicitWindowsMode) != windowsModeNormal {
-			return exit(2, "provider=windows-sandbox supports windows.mode=normal only")
+			return Exit(2, "provider=windows-sandbox supports windows.mode=normal only")
 		}
 		cfg.WindowsMode = windowsModeNormal
 		if cfg.WindowsSandbox.Workdir == "" {
@@ -2307,6 +2311,7 @@ func baseConfig() Config {
 }
 
 type fileConfig struct {
+	History                  *fileLocalHistoryPolicy             `yaml:"history,omitempty"`
 	Profile                  string                              `yaml:"profile,omitempty"`
 	Provider                 string                              `yaml:"provider,omitempty"`
 	Target                   string                              `yaml:"target,omitempty"`
@@ -3224,13 +3229,13 @@ func readFileConfig(path string) (fileConfig, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return cfg, nil
 		}
-		return cfg, exit(2, "read config %s: %v", path, err)
+		return cfg, Exit(2, "read config %s: %v", path, err)
 	}
 	if len(data) == 0 {
 		return cfg, nil
 	}
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return cfg, exit(2, "parse config %s: %v", path, err)
+		return cfg, Exit(2, "parse config %s: %v", path, err)
 	}
 	return cfg, nil
 }
@@ -3238,17 +3243,17 @@ func readFileConfig(path string) (fileConfig, error) {
 func writeUserFileConfig(cfg fileConfig) (string, error) {
 	path := writableConfigPath()
 	if path == "" {
-		return "", exit(2, "user config directory is unavailable")
+		return "", Exit(2, "user config directory is unavailable")
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return "", exit(2, "create config directory: %v", err)
+		return "", Exit(2, "create config directory: %v", err)
 	}
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return "", err
 	}
 	if err := writeUserFileConfigAtomic(path, data, replaceClaimFile, fsyncDir); err != nil {
-		return "", exit(2, "write config %s: %v", path, err)
+		return "", Exit(2, "write config %s: %v", path, err)
 	}
 	return path, nil
 }
@@ -3258,38 +3263,10 @@ func writeUserFileConfigAtomic(path string, data []byte, replaceFile func(string
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(writePath)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
-	if err != nil {
+	if err := atomicfile.WritePrivate(writePath, "."+filepath.Base(path)+".tmp-*", data, replaceFile); err != nil {
 		return err
 	}
-	tmpPath := tmp.Name()
-	removeTemp := true
-	defer func() {
-		if removeTemp {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := replaceFile(tmpPath, writePath); err != nil {
-		return err
-	}
-	removeTemp = false
-	syncDirectory(dir)
+	syncDirectory(filepath.Dir(writePath))
 	return nil
 }
 
@@ -3404,19 +3381,6 @@ func pathWithinRoot(path, root string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
-func inlineSSHPublicKey(value string) bool {
-	fields := strings.Fields(value)
-	if len(fields) < 2 {
-		return false
-	}
-	switch fields[0] {
-	case "ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com":
-		return true
-	default:
-		return false
-	}
-}
-
 func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error {
 	source := providerSelectionRepoConfig
 	if trusted {
@@ -3426,6 +3390,9 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 }
 
 func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, trusted bool, providerSource providerSelectionSource) error {
+	if trusted && file.History != nil && file.History.Local != nil && file.History.Local.Enabled != nil {
+		cfg.RecordLocal = *file.History.Local.Enabled
+	}
 	credentialSource := credentialSourceForFile(trusted)
 	inputSource := configInputSourceForFile(providerSource)
 	if !trusted && cfg.credentialProvenance.repositoryRoot == "" {
@@ -4267,7 +4234,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 				targetOS, windowsMode := normalizedExternalDesktopTarget(*cfg)
 				outputContract, outputContractOK := externalProviderOutputContract(cfg.External)
 				if ssh.TrustProviderOutput && !outputContractOK {
-					return exit(2, "external provider-output contract must be JSON encodable")
+					return Exit(2, "external provider-output contract must be JSON encodable")
 				}
 				cfg.credentialProvenance.externalApproved = externalCredentialApproval{
 					resource:           cfg.External.Connection.ResourceName,
@@ -4322,7 +4289,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			outputContract, outputContractOK := externalProviderOutputContract(cfg.External)
 			if trusted {
 				if !outputContractOK {
-					return exit(2, "external provider-output contract must be JSON encodable")
+					return Exit(2, "external provider-output contract must be JSON encodable")
 				}
 				cfg.credentialProvenance.externalApproved.providerOutput = true
 				cfg.credentialProvenance.externalApproved.outputContract = outputContract
@@ -4340,7 +4307,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			if externalLifecycleAllowsConfigArgv(cfg.External.Lifecycle) {
 				contract, ok := externalLifecycleContract(cfg.External)
 				if !ok {
-					return exit(2, "external lifecycle config-argv contract must be JSON encodable")
+					return Exit(2, "external lifecycle config-argv contract must be JSON encodable")
 				}
 				cfg.credentialProvenance.externalArgvApproval = externalLifecycleCredentialApproval{
 					configArgv: true,
@@ -4853,21 +4820,21 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			}
 			if file.Nomad.CPU != nil {
 				if *file.Nomad.CPU < 0 {
-					return exit(2, "nomad cpu must be non-negative")
+					return Exit(2, "nomad cpu must be non-negative")
 				}
 				cfg.Nomad.CPU = *file.Nomad.CPU
 				recordConfigInput(cfg, "nomad", inputSource, true)
 			}
 			if file.Nomad.MemoryMB != nil {
 				if *file.Nomad.MemoryMB < 0 {
-					return exit(2, "nomad memoryMB must be non-negative")
+					return Exit(2, "nomad memoryMB must be non-negative")
 				}
 				cfg.Nomad.MemoryMB = *file.Nomad.MemoryMB
 				recordConfigInput(cfg, "nomad", inputSource, true)
 			}
 			if file.Nomad.DiskMB != nil {
 				if *file.Nomad.DiskMB < 0 {
-					return exit(2, "nomad diskMB must be non-negative")
+					return Exit(2, "nomad diskMB must be non-negative")
 				}
 				cfg.Nomad.DiskMB = *file.Nomad.DiskMB
 				recordConfigInput(cfg, "nomad", inputSource, true)
@@ -4880,7 +4847,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			}
 			if file.Nomad.ExecTimeoutSecs != nil {
 				if *file.Nomad.ExecTimeoutSecs < 0 {
-					return exit(2, "nomad execTimeoutSecs must be non-negative")
+					return Exit(2, "nomad execTimeoutSecs must be non-negative")
 				}
 				cfg.Nomad.ExecTimeoutSecs = *file.Nomad.ExecTimeoutSecs
 				recordConfigInput(cfg, "nomad", inputSource, true)
@@ -4911,14 +4878,14 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		recordConfigInput(cfg, "superserve", inputSource, applyOptional(&cfg.Superserve.Workdir, file.Superserve.Workdir))
 		if file.Superserve.TimeoutSecs != nil {
 			if *file.Superserve.TimeoutSecs < 0 {
-				return exit(2, "superserve timeoutSecs must be non-negative")
+				return Exit(2, "superserve timeoutSecs must be non-negative")
 			}
 			cfg.Superserve.TimeoutSecs = *file.Superserve.TimeoutSecs
 			recordConfigInput(cfg, "superserve", inputSource, true)
 		}
 		if file.Superserve.ExecTimeoutSecs != nil {
 			if *file.Superserve.ExecTimeoutSecs < 0 {
-				return exit(2, "superserve execTimeoutSecs must be non-negative")
+				return Exit(2, "superserve execTimeoutSecs must be non-negative")
 			}
 			cfg.Superserve.ExecTimeoutSecs = *file.Superserve.ExecTimeoutSecs
 			recordConfigInput(cfg, "superserve", inputSource, true)
@@ -4951,7 +4918,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 		if file.DockerSandbox.CPUs != nil {
 			if *file.DockerSandbox.CPUs < 0 {
-				return exit(2, "docker-sandbox cpus must be non-negative")
+				return Exit(2, "docker-sandbox cpus must be non-negative")
 			}
 			cfg.DockerSandbox.CPUs = *file.DockerSandbox.CPUs
 			recordConfigInput(cfg, "docker-sandbox", inputSource, true)
@@ -6382,7 +6349,7 @@ func applyEnv(cfg *Config) error {
 	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_PROXY_PORT_HTTP", "CUBE_PROXY_PORT_HTTP"); ok {
 		port, err := strconv.Atoi(value)
 		if err != nil {
-			return exit(2, "invalid cubesandbox proxy HTTP port %q", value)
+			return Exit(2, "invalid cubesandbox proxy HTTP port %q", value)
 		}
 		cfg.CubeSandbox.ProxyPortHTTP = port
 		recordConfigInput(cfg, "cubesandbox", configInputEnvironment, true)
@@ -7310,11 +7277,11 @@ func parallelsServerTypeForConfig(cfg Config) string {
 	source := strings.TrimSpace(firstNonBlank(cfg.Parallels.Source, cfg.Parallels.SourceID))
 	if source == "" {
 		if cfg.Parallels.Template != "" {
-			return "template-" + normalizeLeaseSlug(cfg.Parallels.Template)
+			return "template-" + NormalizeLeaseSlug(cfg.Parallels.Template)
 		}
 		return "template"
 	}
-	return "template-" + normalizeLeaseSlug(source)
+	return "template-" + NormalizeLeaseSlug(source)
 }
 
 func applyFileParallelsTemplateConfig(template ParallelsTemplateConfig, file fileParallelsTemplateConfig) ParallelsTemplateConfig {
@@ -7382,7 +7349,7 @@ func ApplyParallelsTemplateConfig(cfg *Config, name string) error {
 	}
 	template, ok := cfg.Parallels.Templates[name]
 	if !ok {
-		return exit(2, "parallels template %q not found", name)
+		return Exit(2, "parallels template %q not found", name)
 	}
 	cfg.Parallels.Template = name
 	if template.Source != "" {
@@ -7475,10 +7442,10 @@ func CloudflareContainerInstanceTypeForClass(class string) string {
 
 func serverTypeCandidatesForClass(class string) []string {
 	cfg := Config{Provider: "hetzner", TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: class, architectureExplicit: true}
-	return hetznerServerTypeCandidatesForConfig(cfg)
+	return HetznerServerTypeCandidatesForConfig(cfg)
 }
 
-func hetznerServerTypeCandidatesForConfig(cfg Config) []string {
+func HetznerServerTypeCandidatesForConfig(cfg Config) []string {
 	if cfg.ServerTypeExplicit {
 		if strings.TrimSpace(cfg.ServerType) != "" {
 			return []string{cfg.ServerType}
@@ -7607,10 +7574,10 @@ func parseNonNegativeIntAccepted(name, value string, fallback int) (int, bool, e
 	}
 	parsed, err := strconv.Atoi(value)
 	if err != nil {
-		return 0, false, exit(2, "%s must be an integer", name)
+		return 0, false, Exit(2, "%s must be an integer", name)
 	}
 	if parsed < 0 {
-		return 0, false, exit(2, "%s must be non-negative", name)
+		return 0, false, Exit(2, "%s must be non-negative", name)
 	}
 	return parsed, true, nil
 }
@@ -7746,4 +7713,177 @@ func appendOrderedStringsAccepted(values []string, extra ...string) ([]string, b
 		}
 	}
 	return out, accepted
+}
+
+func BaseConfig() Config {
+	return baseConfig()
+}
+
+func LoadConfig() (Config, error) {
+	return loadConfig()
+}
+
+func NormalizeTargetConfig(cfg *Config) {
+	normalizeTargetConfig(cfg)
+}
+
+func ExpandUserPath(path string) string {
+	return expandUserPath(path)
+}
+
+func ApplyLeaseDuration(target *time.Duration, value string) error {
+	if value == "" {
+		return nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return fmt.Errorf("invalid duration %q", value)
+	}
+	*target = parsed
+	return nil
+}
+
+func ServerTypeForProviderClass(provider, class string) string {
+	return serverTypeForProviderClass(provider, class)
+}
+
+func ProxmoxServerTypeForConfig(cfg Config) string {
+	return proxmoxServerTypeForConfig(cfg)
+}
+
+func IncusServerTypeForConfig(cfg Config) string {
+	return incusServerTypeForConfig(cfg)
+}
+
+func IsArchitectureExplicit(cfg Config) bool {
+	return cfg.architectureExplicit
+}
+
+func IsWindowsModeExplicit(cfg Config) bool {
+	return cfg.explicitWindowsMode != "" || cfg.windowsModeFlagExplicit
+}
+
+func MarkArchitectureExplicit(cfg *Config) {
+	cfg.architectureExplicit = true
+}
+
+func OSImageWasExplicit(cfg Config) bool {
+	return cfg.osImageExplicit
+}
+
+func ImageRequirementsIntent(cfg Config) (string, error) {
+	data, err := json.Marshal(cfg.imageRequirements)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func ClassWasExplicit(cfg Config) bool {
+	return cfg.classExplicitOrder != 0
+}
+
+// ClassFlagWasExplicit preserves CLI intent until checkpoint routing is final.
+// Config-file and environment selections still use ClassWasExplicit.
+func ClassFlagWasExplicit(cfg Config) bool {
+	return cfg.classFlagExplicit
+}
+
+func MarkClassExplicit(cfg *Config) {
+	cfg.explicitSelectionOrder++
+	cfg.classExplicitOrder = cfg.explicitSelectionOrder
+}
+
+func PhalaInstanceTypeWasExplicit(cfg Config) bool {
+	return cfg.phalaTypeExplicitOrder != 0
+}
+
+func MarkPhalaInstanceTypeExplicit(cfg *Config) {
+	cfg.explicitSelectionOrder++
+	cfg.phalaTypeExplicitOrder = cfg.explicitSelectionOrder
+}
+
+func PhalaInstanceTypeOverridesClass(cfg Config) bool {
+	return cfg.phalaTypeExplicitOrder > cfg.classExplicitOrder
+}
+
+func SetOSImageExplicit(cfg *Config) {
+	cfg.osImageExplicit = true
+}
+
+func OVHImageWasExplicit(cfg Config) bool {
+	return cfg.ovhImageExplicit
+}
+
+func SetOVHImageExplicit(cfg *Config) {
+	cfg.ovhImageExplicit = true
+}
+
+func ScalewayRegionWasExplicit(cfg Config) bool {
+	return cfg.scalewayRegionExplicit
+}
+
+func SetScalewayRegionExplicit(cfg *Config) {
+	cfg.scalewayRegionExplicit = true
+}
+
+func ScalewayZoneWasExplicit(cfg Config) bool {
+	return cfg.scalewayZoneExplicit
+}
+
+func SetScalewayZoneExplicit(cfg *Config) {
+	cfg.scalewayZoneExplicit = true
+}
+
+func ScalewayImageWasExplicit(cfg Config) bool {
+	return cfg.scalewayImageExplicit
+}
+
+func SetScalewayImageExplicit(cfg *Config) {
+	cfg.scalewayImageExplicit = true
+}
+
+func ScalewayTypeWasExplicit(cfg Config) bool {
+	return cfg.scalewayTypeExplicit
+}
+
+func SetScalewayTypeExplicit(cfg *Config) {
+	cfg.scalewayTypeExplicit = true
+}
+
+func TencentCloudRegionWasExplicit(cfg Config) bool {
+	return cfg.tencentCloudRegionExplicit
+}
+
+func SetTencentCloudRegionExplicit(cfg *Config) {
+	cfg.tencentCloudRegionExplicit = true
+}
+
+func TencentCloudZoneWasExplicit(cfg Config) bool {
+	return cfg.tencentCloudZoneExplicit
+}
+
+func SetTencentCloudZoneExplicit(cfg *Config) {
+	cfg.tencentCloudZoneExplicit = true
+}
+
+func TencentCloudImageWasExplicit(cfg Config) bool {
+	return cfg.tencentCloudImageExplicit
+}
+
+func SetTencentCloudImageExplicit(cfg *Config) {
+	cfg.tencentCloudImageExplicit = true
+}
+
+func TencentCloudTypeWasExplicit(cfg Config) bool {
+	return cfg.tencentCloudTypeExplicit
+}
+
+func SetTencentCloudTypeExplicit(cfg *Config) {
+	cfg.tencentCloudTypeExplicit = true
+}
+
+func SetGCPProjectExplicit(cfg *Config, project string) {
+	cfg.GCPProject = project
+	cfg.gcpProjectExplicit = true
 }

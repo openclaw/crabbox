@@ -13,6 +13,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 	"google.golang.org/api/googleapi"
 )
 
@@ -20,24 +21,24 @@ type fakeGCPDoctorClient struct {
 	listCalls   int
 	deleted     []string
 	mutated     bool
-	servers     []Server
-	complete    []Server
-	get         map[string]Server
+	servers     []core.Server
+	complete    []core.Server
+	get         map[string]core.Server
 	getErr      error
-	created     Server
-	createCfg   Config
+	created     core.Server
+	createCfg   core.Config
 	createErr   error
 	waitErr     error
 	deleteErr   error
 	createCalls int
 }
 
-func (c *fakeGCPDoctorClient) ListCrabboxServers(context.Context) ([]Server, error) {
+func (c *fakeGCPDoctorClient) ListCrabboxServers(context.Context) ([]core.Server, error) {
 	c.listCalls++
 	return c.servers, nil
 }
 
-func (c *fakeGCPDoctorClient) ListCrabboxServersComplete(context.Context) ([]Server, error) {
+func (c *fakeGCPDoctorClient) ListCrabboxServersComplete(context.Context) ([]core.Server, error) {
 	c.listCalls++
 	if c.complete != nil {
 		return c.complete, nil
@@ -45,35 +46,35 @@ func (c *fakeGCPDoctorClient) ListCrabboxServersComplete(context.Context) ([]Ser
 	return c.servers, nil
 }
 
-func (c *fakeGCPDoctorClient) CreateServerWithFallback(context.Context, Config, string, string, string, bool, func(string, ...any)) (Server, Config, error) {
+func (c *fakeGCPDoctorClient) CreateServerWithFallback(context.Context, core.Config, string, string, string, bool, func(string, ...any)) (core.Server, core.Config, error) {
 	c.createCalls++
 	c.mutated = true
 	if c.createErr != nil {
-		return Server{}, Config{}, c.createErr
+		return core.Server{}, core.Config{}, c.createErr
 	}
 	if c.created.CloudID == "" {
-		c.created = Server{CloudID: "crabbox-created", Name: "crabbox-created", Labels: map[string]string{}}
+		c.created = core.Server{CloudID: "crabbox-created", Name: "crabbox-created", Labels: map[string]string{}}
 	}
 	return c.created, c.createCfg, nil
 }
 
-func (c *fakeGCPDoctorClient) WaitForServerIP(context.Context, string) (Server, error) {
+func (c *fakeGCPDoctorClient) WaitForServerIP(context.Context, string) (core.Server, error) {
 	if c.waitErr != nil {
-		return Server{}, c.waitErr
+		return core.Server{}, c.waitErr
 	}
 	return c.created, nil
 }
 
-func (c *fakeGCPDoctorClient) GetServer(_ context.Context, name string) (Server, error) {
+func (c *fakeGCPDoctorClient) GetServer(_ context.Context, name string) (core.Server, error) {
 	if c.getErr != nil {
-		return Server{}, c.getErr
+		return core.Server{}, c.getErr
 	}
 	if c.get != nil {
 		if server, ok := c.get[name]; ok {
 			return server, nil
 		}
 	}
-	return Server{}, errors.New("gcp server not found: " + name)
+	return core.Server{}, errors.New("gcp server not found: " + name)
 }
 
 func (c *fakeGCPDoctorClient) DeleteServer(_ context.Context, name string) error {
@@ -87,9 +88,9 @@ func (c *fakeGCPDoctorClient) SetLabels(context.Context, string, map[string]stri
 	return nil
 }
 
-func canonicalGCPTestServer(leaseID, slug string) Server {
+func canonicalGCPTestServer(leaseID, slug string) core.Server {
 	name := core.LeaseProviderName(leaseID, slug)
-	return Server{
+	return core.Server{
 		Provider: "gcp",
 		CloudID:  name,
 		ID:       42,
@@ -106,7 +107,7 @@ func canonicalGCPTestServer(leaseID, slug string) Server {
 	}
 }
 
-func claimGCPTestServer(t *testing.T, cfg Config, server Server) {
+func claimGCPTestServer(t *testing.T, cfg core.Config, server core.Server) {
 	t.Helper()
 	if err := core.ClaimLeaseTargetForConfig(server.Labels["lease"], server.Labels["slug"], cfg, server, core.SSHTarget{}, time.Minute); err != nil {
 		t.Fatal(err)
@@ -115,7 +116,7 @@ func claimGCPTestServer(t *testing.T, cfg Config, server Server) {
 
 func TestValidateExactGCPClaimBindsProviderResourceAndLease(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	cfg := Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}
+	cfg := core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}
 	server := canonicalGCPTestServer("cbx_111111111111", "owned")
 	claimGCPTestServer(t, cfg, server)
 	claim, err := core.ReadLeaseClaim(server.Labels["lease"])
@@ -126,17 +127,21 @@ func TestValidateExactGCPClaimBindsProviderResourceAndLease(t *testing.T) {
 		t.Fatalf("valid exact claim rejected: %v", err)
 	}
 
-	tests := map[string]func(*core.LeaseClaim, *Server, *Config){
-		"project scope": func(_ *core.LeaseClaim, _ *Server, cfg *Config) { cfg.GCPProject = "project-b" },
-		"cloud name":    func(_ *core.LeaseClaim, server *Server, _ *Config) { server.CloudID += "-other" },
-		"numeric id":    func(_ *core.LeaseClaim, server *Server, _ *Config) { server.ID++ },
-		"slug": func(_ *core.LeaseClaim, server *Server, _ *Config) {
+	tests := map[string]func(*core.LeaseClaim, *core.Server, *core.Config){
+		"project scope": func(_ *core.LeaseClaim, _ *core.Server, cfg *core.Config) { cfg.GCPProject = "project-b" },
+		"cloud name":    func(_ *core.LeaseClaim, server *core.Server, _ *core.Config) { server.CloudID += "-other" },
+		"numeric id":    func(_ *core.LeaseClaim, server *core.Server, _ *core.Config) { server.ID++ },
+		"slug": func(_ *core.LeaseClaim, server *core.Server, _ *core.Config) {
 			server.Labels["slug"] = "other"
 			server.Name = core.LeaseProviderName(server.Labels["lease"], "other")
 		},
-		"zone":         func(_ *core.LeaseClaim, server *Server, _ *Config) { server.Labels["zone"] = "us-central1-c" },
-		"provider key": func(_ *core.LeaseClaim, server *Server, _ *Config) { server.Labels["provider_key"] = "crabbox-other" },
-		"claim labels": func(claim *core.LeaseClaim, _ *Server, _ *Config) { delete(claim.Labels, "zone") },
+		"zone": func(_ *core.LeaseClaim, server *core.Server, _ *core.Config) {
+			server.Labels["zone"] = "us-central1-c"
+		},
+		"provider key": func(_ *core.LeaseClaim, server *core.Server, _ *core.Config) {
+			server.Labels["provider_key"] = "crabbox-other"
+		},
+		"claim labels": func(claim *core.LeaseClaim, _ *core.Server, _ *core.Config) { delete(claim.Labels, "zone") },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -156,13 +161,13 @@ func TestValidateExactGCPClaimBindsProviderResourceAndLease(t *testing.T) {
 func TestGCPReleaseLeaseRejectsMissingExactClaimBeforeDelete(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	server := canonicalGCPTestServer("cbx_222222222222", "claimless")
-	fake := &fakeGCPDoctorClient{get: map[string]Server{server.CloudID: server}}
+	fake := &fakeGCPDoctorClient{get: map[string]core.Server{server.CloudID: server}}
 	old := newGCPClient
-	newGCPClient = func(context.Context, Config) (gcpClient, error) { return fake, nil }
+	newGCPClient = func(context.Context, core.Config) (gcpClient, error) { return fake, nil }
 	t.Cleanup(func() { newGCPClient = old })
 
-	backend := NewGCPLeaseBackend(core.ProviderSpec{}, Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}, Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
-	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: server.Labels["lease"], Server: server}})
+	backend := NewGCPLeaseBackend(core.ProviderSpec{}, core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}, core.Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
+	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: server.Labels["lease"], Server: server}})
 	if err == nil || !strings.Contains(err.Error(), "no exact local claim") {
 		t.Fatalf("ReleaseLease() error=%v, want missing-claim refusal", err)
 	}
@@ -185,17 +190,17 @@ func TestGCPAcquireCleansUpCreatedServerOnIPFailure(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	ipErr := errors.New("ip unavailable")
 	fake := &fakeGCPDoctorClient{
-		created:   Server{CloudID: "crabbox-created", Name: "crabbox-created", Labels: map[string]string{"lease": "cbx_created"}},
-		createCfg: Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"},
+		created:   core.Server{CloudID: "crabbox-created", Name: "crabbox-created", Labels: map[string]string{"lease": "cbx_created"}},
+		createCfg: core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"},
 		waitErr:   ipErr,
 	}
 	old := newGCPClient
-	newGCPClient = func(context.Context, Config) (gcpClient, error) {
+	newGCPClient = func(context.Context, core.Config) (gcpClient, error) {
 		return fake, nil
 	}
 	t.Cleanup(func() { newGCPClient = old })
 
-	backend := NewGCPLeaseBackend(core.ProviderSpec{}, Config{Provider: "gcp", GCPProject: "project-a"}, Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
+	backend := NewGCPLeaseBackend(core.ProviderSpec{}, core.Config{Provider: "gcp", GCPProject: "project-a"}, core.Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
 	_, err := backend.acquireOnce(context.Background(), false, "")
 	if !errors.Is(err, ipErr) {
 		t.Fatalf("err=%v, want IP failure", err)
@@ -210,12 +215,12 @@ func TestGCPAcquireCleansUpCreatedServerOnFallbackClientFailure(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	rebuildErr := errors.New("fallback auth failed")
 	fake := &fakeGCPDoctorClient{
-		created:   Server{CloudID: "crabbox-fallback", Name: "crabbox-fallback", Labels: map[string]string{"lease": "cbx_created"}},
-		createCfg: Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-c"},
+		created:   core.Server{CloudID: "crabbox-fallback", Name: "crabbox-fallback", Labels: map[string]string{"lease": "cbx_created"}},
+		createCfg: core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-c"},
 	}
 	calls := 0
 	old := newGCPClient
-	newGCPClient = func(context.Context, Config) (gcpClient, error) {
+	newGCPClient = func(context.Context, core.Config) (gcpClient, error) {
 		calls++
 		if calls >= 2 {
 			return nil, rebuildErr
@@ -224,7 +229,7 @@ func TestGCPAcquireCleansUpCreatedServerOnFallbackClientFailure(t *testing.T) {
 	}
 	t.Cleanup(func() { newGCPClient = old })
 
-	backend := NewGCPLeaseBackend(core.ProviderSpec{}, Config{Provider: "gcp", GCPProject: "project-a"}, Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
+	backend := NewGCPLeaseBackend(core.ProviderSpec{}, core.Config{Provider: "gcp", GCPProject: "project-a"}, core.Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
 	_, err := backend.acquireOnce(context.Background(), false, "")
 	if !errors.Is(err, rebuildErr) {
 		t.Fatalf("err=%v, want fallback client failure", err)
@@ -249,7 +254,7 @@ func TestGCPCleanupRemovesDeletedAndStaleClaims(t *testing.T) {
 	if err := core.ClaimLeaseForRepoProviderScope(otherProjectLeaseID, "other-box", "gcp", "project:project-b", repo, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	expired := Server{
+	expired := core.Server{
 		CloudID: core.LeaseProviderName(expiredLeaseID, "expired-box"),
 		Name:    core.LeaseProviderName(expiredLeaseID, "expired-box"),
 		ID:      42,
@@ -259,9 +264,9 @@ func TestGCPCleanupRemovesDeletedAndStaleClaims(t *testing.T) {
 			"state": "ready", "expires_at": core.LeaseLabelTime(time.Now().Add(-time.Hour)),
 		},
 	}
-	claimGCPTestServer(t, Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}, expired)
+	claimGCPTestServer(t, core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}, expired)
 	fake := &fakeGCPDoctorClient{
-		servers: []Server{expired,
+		servers: []core.Server{expired,
 			{
 				CloudID: "crabbox-forged",
 				Name:    "crabbox-forged",
@@ -272,16 +277,16 @@ func TestGCPCleanupRemovesDeletedAndStaleClaims(t *testing.T) {
 					"state": "ready", "expires_at": core.LeaseLabelTime(time.Now().Add(-time.Hour)),
 				},
 			}},
-		get: map[string]Server{expired.CloudID: expired},
+		get: map[string]core.Server{expired.CloudID: expired},
 	}
 	old := newGCPClient
-	newGCPClient = func(context.Context, Config) (gcpClient, error) {
+	newGCPClient = func(context.Context, core.Config) (gcpClient, error) {
 		return fake, nil
 	}
 	t.Cleanup(func() { newGCPClient = old })
 
 	var stderr bytes.Buffer
-	backend := NewGCPLeaseBackend(core.ProviderSpec{}, Config{Provider: "gcp", GCPProject: "project-a"}, Runtime{Stderr: &stderr})
+	backend := NewGCPLeaseBackend(core.ProviderSpec{}, core.Config{Provider: "gcp", GCPProject: "project-a"}, core.Runtime{Stderr: &stderr})
 	cleaner, ok := backend.(core.CleanupBackend)
 	if !ok {
 		t.Fatal("gcp backend missing cleanup")
@@ -329,23 +334,23 @@ func TestGCPCleanupRevalidatesLiveOwnershipBeforeDelete(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	snapshot := canonicalGCPTestServer("cbx_111111111111", "stale")
 	snapshot.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
-	cfg := Config{Provider: "gcp", GCPProject: "project-a", GCPZone: snapshot.Labels["zone"]}
+	cfg := core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: snapshot.Labels["zone"]}
 	claimGCPTestServer(t, cfg, snapshot)
 	live := snapshot
 	live.Labels = maps.Clone(snapshot.Labels)
 	delete(live.Labels, "created_by")
 	fake := &fakeGCPDoctorClient{
-		servers:  []Server{snapshot},
-		complete: []Server{live},
-		get:      map[string]Server{snapshot.CloudID: live},
+		servers:  []core.Server{snapshot},
+		complete: []core.Server{live},
+		get:      map[string]core.Server{snapshot.CloudID: live},
 	}
 	old := newGCPClient
-	newGCPClient = func(context.Context, Config) (gcpClient, error) { return fake, nil }
+	newGCPClient = func(context.Context, core.Config) (gcpClient, error) { return fake, nil }
 	t.Cleanup(func() { newGCPClient = old })
 
 	var stderr bytes.Buffer
-	backend := NewGCPLeaseBackend(core.ProviderSpec{}, cfg, Runtime{Stderr: &stderr}).(*gcpLeaseBackend)
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	backend := NewGCPLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: &stderr}).(*gcpLeaseBackend)
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.deleted) != 0 {
@@ -358,7 +363,7 @@ func TestGCPCleanupRevalidatesLiveOwnershipBeforeDelete(t *testing.T) {
 
 func TestGCPCleanupSkipsClaimlessAndStaleExactClaims(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	cfg := Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}
+	cfg := core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}
 	claimless := canonicalGCPTestServer("cbx_333333333333", "claimless")
 	claimless.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
 	stale := canonicalGCPTestServer("cbx_444444444444", "stale")
@@ -366,16 +371,16 @@ func TestGCPCleanupSkipsClaimlessAndStaleExactClaims(t *testing.T) {
 	claimGCPTestServer(t, cfg, stale)
 	stale.ID++
 	fake := &fakeGCPDoctorClient{
-		servers: []Server{claimless, stale},
-		get:     map[string]Server{claimless.CloudID: claimless, stale.CloudID: stale},
+		servers: []core.Server{claimless, stale},
+		get:     map[string]core.Server{claimless.CloudID: claimless, stale.CloudID: stale},
 	}
 	old := newGCPClient
-	newGCPClient = func(context.Context, Config) (gcpClient, error) { return fake, nil }
+	newGCPClient = func(context.Context, core.Config) (gcpClient, error) { return fake, nil }
 	t.Cleanup(func() { newGCPClient = old })
 
 	var stderr bytes.Buffer
-	backend := NewGCPLeaseBackend(core.ProviderSpec{}, cfg, Runtime{Stderr: &stderr}).(*gcpLeaseBackend)
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	backend := NewGCPLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: &stderr}).(*gcpLeaseBackend)
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.deleted) != 0 {
@@ -393,22 +398,22 @@ func TestGCPCleanupRetainsClaimWhenOwnershipLabelsDrift(t *testing.T) {
 	live := snapshot
 	live.Labels = maps.Clone(snapshot.Labels)
 	live.Labels["created_by"] = "external"
-	cfg := Config{Provider: "gcp", GCPProject: "project-a", GCPZone: snapshot.Labels["zone"]}
+	cfg := core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: snapshot.Labels["zone"]}
 	if err := core.ClaimLeaseTargetForConfig(snapshot.Labels["lease"], snapshot.Labels["slug"], cfg, snapshot, core.SSHTarget{}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	fake := &fakeGCPDoctorClient{
-		servers:  []Server{snapshot},
-		complete: []Server{live},
-		get:      map[string]Server{snapshot.CloudID: live},
+		servers:  []core.Server{snapshot},
+		complete: []core.Server{live},
+		get:      map[string]core.Server{snapshot.CloudID: live},
 	}
 	old := newGCPClient
-	newGCPClient = func(context.Context, Config) (gcpClient, error) { return fake, nil }
+	newGCPClient = func(context.Context, core.Config) (gcpClient, error) { return fake, nil }
 	t.Cleanup(func() { newGCPClient = old })
 
 	var stderr bytes.Buffer
-	backend := NewGCPLeaseBackend(core.ProviderSpec{}, cfg, Runtime{Stderr: &stderr}).(*gcpLeaseBackend)
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	backend := NewGCPLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: &stderr}).(*gcpLeaseBackend)
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	claim, ok, err := core.ResolveLeaseClaim(snapshot.Labels["lease"])
@@ -424,19 +429,19 @@ func TestGCPCleanupRevalidatesLiveEligibilityBeforeDelete(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	snapshot := canonicalGCPTestServer("cbx_111111111111", "renewed")
 	snapshot.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
-	cfg := Config{Provider: "gcp", GCPProject: "project-a", GCPZone: snapshot.Labels["zone"]}
+	cfg := core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: snapshot.Labels["zone"]}
 	claimGCPTestServer(t, cfg, snapshot)
 	live := snapshot
 	live.Labels = maps.Clone(snapshot.Labels)
 	live.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(time.Hour))
-	fake := &fakeGCPDoctorClient{servers: []Server{snapshot}, get: map[string]Server{snapshot.CloudID: live}}
+	fake := &fakeGCPDoctorClient{servers: []core.Server{snapshot}, get: map[string]core.Server{snapshot.CloudID: live}}
 	old := newGCPClient
-	newGCPClient = func(context.Context, Config) (gcpClient, error) { return fake, nil }
+	newGCPClient = func(context.Context, core.Config) (gcpClient, error) { return fake, nil }
 	t.Cleanup(func() { newGCPClient = old })
 
 	var stderr bytes.Buffer
-	backend := NewGCPLeaseBackend(core.ProviderSpec{}, cfg, Runtime{Stderr: &stderr}).(*gcpLeaseBackend)
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	backend := NewGCPLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: &stderr}).(*gcpLeaseBackend)
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.deleted) != 0 {
@@ -453,19 +458,19 @@ func TestGCPCleanupTreatsMissingLiveInstanceAsAlreadyDeleted(t *testing.T) {
 	slug := "gone"
 	snapshot := canonicalGCPTestServer(leaseID, slug)
 	snapshot.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
-	cfg := Config{Provider: "gcp", GCPProject: "project-a", GCPZone: snapshot.Labels["zone"]}
+	cfg := core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: snapshot.Labels["zone"]}
 	claimGCPTestServer(t, cfg, snapshot)
 	fake := &fakeGCPDoctorClient{
-		servers: []Server{snapshot},
+		servers: []core.Server{snapshot},
 		getErr:  &googleapi.Error{Code: http.StatusNotFound, Message: "instance gone"},
 	}
 	old := newGCPClient
-	newGCPClient = func(context.Context, Config) (gcpClient, error) { return fake, nil }
+	newGCPClient = func(context.Context, core.Config) (gcpClient, error) { return fake, nil }
 	t.Cleanup(func() { newGCPClient = old })
 
 	var stderr bytes.Buffer
-	backend := NewGCPLeaseBackend(core.ProviderSpec{}, cfg, Runtime{Stderr: &stderr}).(*gcpLeaseBackend)
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	backend := NewGCPLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: &stderr}).(*gcpLeaseBackend)
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.deleted) != 0 {
@@ -488,17 +493,17 @@ func TestGCPReleaseLeaseRequiresCanonicalLiveOwnership(t *testing.T) {
 	leaseID := "cbx_777777777777"
 	slug := "release-box"
 	live := canonicalGCPTestServer(leaseID, slug)
-	claimGCPTestServer(t, Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}, live)
-	fake := &fakeGCPDoctorClient{get: map[string]Server{live.CloudID: live}}
+	claimGCPTestServer(t, core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}, live)
+	fake := &fakeGCPDoctorClient{get: map[string]core.Server{live.CloudID: live}}
 	old := newGCPClient
-	newGCPClient = func(context.Context, Config) (gcpClient, error) {
+	newGCPClient = func(context.Context, core.Config) (gcpClient, error) {
 		return fake, nil
 	}
 	t.Cleanup(func() { newGCPClient = old })
 
-	backend := NewGCPLeaseBackend(core.ProviderSpec{}, Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}, Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
-	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{
-		Lease: LeaseTarget{
+	backend := NewGCPLeaseBackend(core.ProviderSpec{}, core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}, core.Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
+	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{
 			LeaseID: leaseID,
 			Server:  live,
 		},
@@ -522,22 +527,22 @@ func TestGCPReleaseLeaseRefusesWrongLiveLease(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_888888888888"
 	claimed := canonicalGCPTestServer(leaseID, "release-box")
-	claimGCPTestServer(t, Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}, claimed)
+	claimGCPTestServer(t, core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}, claimed)
 	live := claimed
 	live.Labels = maps.Clone(claimed.Labels)
 	live.Labels["lease"] = "cbx_999999999999"
 	live.Labels["slug"] = "other-box"
 	live.Name = core.LeaseProviderName(live.Labels["lease"], live.Labels["slug"])
-	fake := &fakeGCPDoctorClient{get: map[string]Server{claimed.CloudID: live}}
+	fake := &fakeGCPDoctorClient{get: map[string]core.Server{claimed.CloudID: live}}
 	old := newGCPClient
-	newGCPClient = func(context.Context, Config) (gcpClient, error) {
+	newGCPClient = func(context.Context, core.Config) (gcpClient, error) {
 		return fake, nil
 	}
 	t.Cleanup(func() { newGCPClient = old })
 
-	backend := NewGCPLeaseBackend(core.ProviderSpec{}, Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}, Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
-	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{
-		Lease: LeaseTarget{
+	backend := NewGCPLeaseBackend(core.ProviderSpec{}, core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}, core.Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
+	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{
 			LeaseID: leaseID,
 			Server:  claimed,
 		},
@@ -562,20 +567,20 @@ func TestGCPReleaseLeaseRefusesNonCanonicalLiveInstance(t *testing.T) {
 	leaseID := "cbx_aaaaaaaaaaaa"
 	claimed := canonicalGCPTestServer(leaseID, "release-box")
 	cloudID := claimed.CloudID
-	claimGCPTestServer(t, Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}, claimed)
+	claimGCPTestServer(t, core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}, claimed)
 	live := claimed
 	live.Labels = maps.Clone(claimed.Labels)
 	delete(live.Labels, "created_by")
-	fake := &fakeGCPDoctorClient{get: map[string]Server{cloudID: live}}
+	fake := &fakeGCPDoctorClient{get: map[string]core.Server{cloudID: live}}
 	old := newGCPClient
-	newGCPClient = func(context.Context, Config) (gcpClient, error) {
+	newGCPClient = func(context.Context, core.Config) (gcpClient, error) {
 		return fake, nil
 	}
 	t.Cleanup(func() { newGCPClient = old })
 
-	backend := NewGCPLeaseBackend(core.ProviderSpec{}, Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}, Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
-	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{
-		Lease: LeaseTarget{
+	backend := NewGCPLeaseBackend(core.ProviderSpec{}, core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}, core.Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
+	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{
 			LeaseID: leaseID,
 			Server:  claimed,
 		},
@@ -596,9 +601,9 @@ func TestGCPReleaseLeaseRefusesNonCanonicalLiveInstance(t *testing.T) {
 }
 
 func TestGCPDoctorListsInventoryOnly(t *testing.T) {
-	server := func(leaseID, slug string) Server {
+	server := func(leaseID, slug string) core.Server {
 		name := core.LeaseProviderName(leaseID, slug)
-		return Server{
+		return core.Server{
 			CloudID: name,
 			Name:    name,
 			Labels: map[string]string{
@@ -607,18 +612,18 @@ func TestGCPDoctorListsInventoryOnly(t *testing.T) {
 			},
 		}
 	}
-	fake := &fakeGCPDoctorClient{servers: []Server{
+	fake := &fakeGCPDoctorClient{servers: []core.Server{
 		server("cbx_555555555555", "one"),
 		server("cbx_666666666666", "two"),
 		{CloudID: "crabbox-forged", Name: "crabbox-forged", Labels: map[string]string{"crabbox": "true"}},
 	}}
 	old := newGCPClient
-	newGCPClient = func(context.Context, Config) (gcpClient, error) {
+	newGCPClient = func(context.Context, core.Config) (gcpClient, error) {
 		return fake, nil
 	}
 	t.Cleanup(func() { newGCPClient = old })
 
-	doctor, err := Provider{}.ConfigureDoctor(Config{}, Runtime{})
+	doctor, err := Provider{}.ConfigureDoctor(core.Config{}, core.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -645,18 +650,18 @@ func TestGCPAcquireStopsFreshRetryAfterRollbackFailure(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			bootstrapErr := core.Exit(5, "timed out waiting for SSH: fixture readiness failure")
 			oldWait := waitForSSHReady
-			waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error { return bootstrapErr }
+			waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return bootstrapErr }
 			t.Cleanup(func() { waitForSSHReady = oldWait })
-			fake := &fakeGCPDoctorClient{created: Server{CloudID: "crabbox-created", Labels: map[string]string{}}, createCfg: Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}}
+			fake := &fakeGCPDoctorClient{created: core.Server{CloudID: "crabbox-created", Labels: map[string]string{}}, createCfg: core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}}
 			if failed {
 				fake.deleteErr = errors.New("delete unavailable")
 			}
 			old := newGCPClient
-			newGCPClient = func(context.Context, Config) (gcpClient, error) { return fake, nil }
+			newGCPClient = func(context.Context, core.Config) (gcpClient, error) { return fake, nil }
 			t.Cleanup(func() { newGCPClient = old })
 			var stderr bytes.Buffer
-			backend := NewGCPLeaseBackend(core.ProviderSpec{}, fake.createCfg, Runtime{Stderr: &stderr}).(*gcpLeaseBackend)
-			_, err := backend.Acquire(context.Background(), AcquireRequest{})
+			backend := NewGCPLeaseBackend(core.ProviderSpec{}, fake.createCfg, core.Runtime{Stderr: &stderr}).(*gcpLeaseBackend)
+			_, err := backend.Acquire(context.Background(), core.AcquireRequest{})
 			want := 2
 			if failed {
 				want = 1
@@ -680,10 +685,10 @@ func TestGCPAcquireRetainsCleanupClientFailureDespiteFallbackSuccess(t *testing.
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	primary := core.Exit(5, "timed out waiting for SSH: fixture")
 	debt := errors.New("selected-zone cleanup client unavailable")
-	fake := &fakeGCPDoctorClient{createCfg: Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-c"}}
+	fake := &fakeGCPDoctorClient{createCfg: core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-c"}}
 	oldClient, oldWait := newGCPClient, waitForSSHReady
 	bootstrapReached := false
-	newGCPClient = func(ctx context.Context, cfg Config) (gcpClient, error) {
+	newGCPClient = func(ctx context.Context, cfg core.Config) (gcpClient, error) {
 		if bootstrapReached {
 			if _, bounded := ctx.Deadline(); bounded {
 				return nil, debt
@@ -691,14 +696,40 @@ func TestGCPAcquireRetainsCleanupClientFailureDespiteFallbackSuccess(t *testing.
 		}
 		return fake, nil
 	}
-	waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+	waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
 		bootstrapReached = true
 		return primary
 	}
 	t.Cleanup(func() { newGCPClient = oldClient; waitForSSHReady = oldWait })
-	b := NewGCPLeaseBackend(ProviderSpec{}, Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}, Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
-	_, err := b.Acquire(context.Background(), AcquireRequest{})
+	b := NewGCPLeaseBackend(core.ProviderSpec{}, core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}, core.Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{})
 	if fake.createCalls != 1 || len(fake.deleted) != 1 || !errors.Is(err, primary) || !errors.Is(err, debt) {
 		t.Fatalf("creates=%d deletes=%v error=%v", fake.createCalls, fake.deleted, err)
+	}
+}
+
+func TestGCPResolvedEndpointDirectAndAlias(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	server := canonicalGCPTestServer("cbx_123456abcdef", "example")
+	server.PublicNet.IPv4.IP = "192.0.2.10"
+	fake := &fakeGCPDoctorClient{servers: []core.Server{server}, get: map[string]core.Server{server.CloudID: server}}
+	old := newGCPClient
+	newGCPClient = func(context.Context, core.Config) (gcpClient, error) { return fake, nil }
+	t.Cleanup(func() { newGCPClient = old })
+	for _, id := range []string{server.CloudID, "example"} {
+		for _, releaseOnly := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/release=%t", id, releaseOnly), func(t *testing.T) {
+				cfg := core.Config{SSHUser: "alice", SSHPort: "2222", SSHKey: "configured-key", TargetOS: "linux"}
+				backend := NewGCPLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{}).(*gcpLeaseBackend)
+				got, err := backend.Resolve(t.Context(), core.ResolveRequest{ID: id, ReleaseOnly: releaseOnly})
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantHost := "192.0.2.10"
+				if got.Server.CloudID != server.CloudID || got.LeaseID != "cbx_123456abcdef" || got.SSH.Host != wantHost || got.SSH.User != "alice" || got.SSH.Port != "2222" || got.SSH.Key != "configured-key" {
+					t.Fatalf("resolved target: %#v", got)
+				}
+			})
+		}
 	}
 }

@@ -161,7 +161,7 @@ esac
 		t.Fatalf("allocation repeated or ready lease stopped: %s", data)
 	}
 	if mode == "allocation failure" {
-		var exitErr ExitError
+		var exitErr core.ExitError
 		if !errors.As(err, &exitErr) || exitErr.Code != 7 {
 			t.Fatalf("allocation error=%v", err)
 		}
@@ -203,11 +203,11 @@ esac
 	if report.LeaseID != "tbx_ready123" || report.Slug != "ready-crab" || report.ExitCode != 0 {
 		t.Fatalf("timing=%+v", report)
 	}
-	claim, err := readLeaseClaim("tbx_ready123")
+	claim, err := core.ReadLeaseClaim("tbx_ready123")
 	if err != nil || claim.Slug != "ready-crab" {
 		t.Fatalf("retained claim=%+v err=%v", claim, err)
 	}
-	key, err := testboxKeyPath("tbx_ready123")
+	key, err := core.TestboxKeyPath("tbx_ready123")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,17 +233,17 @@ func TestBlacksmithWarmupBookkeepingFinalization(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", home)
 			clock := &bookkeepingClock{now: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)}
 			var stdout, stderr bytes.Buffer
-			runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+			runner := &blacksmithFuncRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				if !strings.Contains(strings.Join(req.Args, " "), "testbox warmup") {
 					t.Fatalf("unexpected provider operation: %v", req.Args)
 				}
 				clock.now = clock.now.Add(time.Second)
 				if mode == "allocation failure" {
-					return LocalCommandResult{ExitCode: 7}, errors.New("allocation rejected")
+					return core.LocalCommandResult{ExitCode: 7}, errors.New("allocation rejected")
 				}
-				return LocalCommandResult{Stdout: "tbx_ready123\n"}, nil
+				return core.LocalCommandResult{Stdout: "tbx_ready123\n"}, nil
 			}}
-			cfg := baseConfig()
+			cfg := core.BaseConfig()
 			cfg.Blacksmith.Workflow = "ci.yml"
 			backend := newTestBlacksmithBackend(cfg, runner)
 			backend.rt.Clock, backend.rt.Stdout, backend.rt.Stderr = clock, &stdout, &stderr
@@ -253,14 +253,14 @@ func TestBlacksmithWarmupBookkeepingFinalization(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			finalizations := 0
-			err := backend.Warmup(ctx, WarmupRequest{
-				Repo: Repo{Root: home}, RequestedSlug: "ready-crab", Keep: true, TimingJSON: true,
+			err := backend.Warmup(ctx, core.WarmupRequest{
+				Repo: core.Repo{Root: home}, RequestedSlug: "ready-crab", Keep: true, TimingJSON: true,
 				BeforeComplete: func() {
 					finalizations++
 					if !strings.Contains(stdout.String(), "leased tbx_ready123 slug=ready-crab") || strings.Contains(stdout.String(), "warmup complete") || stderr.Len() != 0 {
 						t.Fatalf("premature final output: stdout=%q stderr=%q", stdout.String(), stderr.String())
 					}
-					if _, err := readLeaseClaim("tbx_ready123"); err != nil {
+					if _, err := core.ReadLeaseClaim("tbx_ready123"); err != nil {
 						t.Fatalf("lease not retained before finalization: %v", err)
 					}
 					clock.now = clock.now.Add(4 * time.Second)
@@ -294,7 +294,7 @@ func TestBlacksmithWarmupBookkeepingFinalization(t *testing.T) {
 			if finalizations != 1 || len(runner.calls) != 3 || strings.Count(stdout.String(), "warmup complete total=5s") != 1 {
 				t.Fatalf("finalizations=%d calls=%v stdout=%q", finalizations, runner.calls, stdout.String())
 			}
-			if _, err := readLeaseClaim("tbx_ready123"); err != nil {
+			if _, err := core.ReadLeaseClaim("tbx_ready123"); err != nil {
 				t.Fatalf("claim lost: %v", err)
 			}
 		})

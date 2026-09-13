@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type fakeClient struct {
@@ -84,12 +86,12 @@ func TestDoctorReadyIsNonMutating(t *testing.T) {
 	fake := &fakeClient{cliPath: "/opt/bin/sandbox", list: []sandboxSummary{{ID: "vsbx_1"}}}
 	b := &backend{
 		spec: Provider{}.Spec(),
-		cfg:  Config{},
-		newClient: func(Config, Runtime) (vercelSandboxClient, error) {
+		cfg:  core.Config{},
+		newClient: func(core.Config, core.Runtime) (vercelSandboxClient, error) {
 			return fake, nil
 		},
 	}
-	result, err := b.Doctor(context.Background(), DoctorRequest{})
+	result, err := b.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,11 +123,11 @@ func TestDoctorReportsEnvironmentBlockersWithoutMutating(t *testing.T) {
 	}
 	b := &backend{
 		spec: Provider{}.Spec(),
-		newClient: func(Config, Runtime) (vercelSandboxClient, error) {
+		newClient: func(core.Config, core.Runtime) (vercelSandboxClient, error) {
 			return fake, nil
 		},
 	}
-	result, err := b.Doctor(context.Background(), DoctorRequest{})
+	result, err := b.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}

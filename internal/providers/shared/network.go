@@ -12,6 +12,15 @@ type EndpointURLErrors struct {
 	Insecure   error
 }
 
+// LowercaseHostname preserves an IPv6 zone identifier's case. It does not
+// normalize IP spelling, strip a trailing dot, or trim whitespace.
+func LowercaseHostname(host string) string {
+	if zoneAt := strings.Index(host, "%"); zoneAt > 0 && strings.Contains(host[:zoneAt], ":") {
+		return strings.ToLower(host[:zoneAt]) + host[zoneAt:]
+	}
+	return strings.ToLower(host)
+}
+
 func NormalizeHTTPSURL(raw string, errs EndpointURLErrors) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
@@ -24,21 +33,50 @@ func NormalizeHTTPSURL(raw string, errs EndpointURLErrors) (string, error) {
 	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && IsLoopbackHost(parsed.Hostname())) {
 		return "", errs.Insecure
 	}
+	return canonicalEndpointAddress(parsed), nil
+}
+
+// Callers own scheme admission and URL-component policy before canonicalizing
+// the lowercased scheme's address. Claim keys and live endpoints differ there.
+func canonicalEndpointAddress(parsed *url.URL) string {
+	parsed.Host = CanonicalHostPort(parsed)
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawPath = ""
+	return strings.TrimRight(parsed.String(), "/")
+}
+
+// CanonicalHostPort formats an already-parsed endpoint authority. Callers own
+// scheme validation and path policy; the complete hostname is lowercased.
+func CanonicalHostPort(parsed *url.URL) string {
 	host := strings.ToLower(parsed.Hostname())
 	port := parsed.Port()
 	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
 		port = ""
 	}
 	if port != "" {
-		parsed.Host = net.JoinHostPort(host, port)
-	} else if strings.Contains(host, ":") {
-		parsed.Host = "[" + host + "]"
-	} else {
-		parsed.Host = host
+		return net.JoinHostPort(host, port)
 	}
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
-	parsed.RawPath = ""
-	return strings.TrimRight(parsed.String(), "/"), nil
+	if strings.Contains(host, ":") {
+		return "[" + host + "]"
+	}
+	return host
+}
+
+// EndpointURLForError omits userinfo, query, and fragment components. It is an
+// endpoint display formatter, not a general diagnostic secret scrubber.
+func EndpointURLForError(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err == nil {
+		if parsed.Opaque != "" || parsed.Host == "" {
+			return "<redacted>"
+		}
+		parsed.User = nil
+		parsed.RawQuery = ""
+		parsed.ForceQuery = false
+		parsed.Fragment = ""
+		return parsed.String()
+	}
+	return "<redacted>"
 }
 
 func IsLoopbackHost(host string) bool {

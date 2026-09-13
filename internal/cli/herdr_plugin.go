@@ -32,7 +32,7 @@ type herdrInvocationContext struct {
 
 func (a App) herdrPlugin(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return exit(2, "usage: crabbox __herdr-plugin <boxes|connect|doctor|job|prewarm|warmup|context-cwd>")
+		return Exit(2, "usage: crabbox __herdr-plugin <boxes|connect|doctor|job|prewarm|warmup|context-cwd>")
 	}
 	switch args[0] {
 	case "boxes":
@@ -49,7 +49,7 @@ func (a App) herdrPlugin(ctx context.Context, args []string) error {
 		return a.herdrPluginInWorkspace(ctx, args[1:], a.warmup)
 	case "context-cwd":
 		if len(args) != 1 {
-			return exit(2, "usage: crabbox __herdr-plugin context-cwd")
+			return Exit(2, "usage: crabbox __herdr-plugin context-cwd")
 		}
 		cwd, err := herdrPluginContextCWD(os.Getenv(herdrPluginContextEnv))
 		if err != nil {
@@ -58,7 +58,7 @@ func (a App) herdrPlugin(ctx context.Context, args []string) error {
 		fmt.Fprintln(a.Stdout, cwd)
 		return nil
 	default:
-		return exit(2, "unknown Herdr plugin command %q", args[0])
+		return Exit(2, "unknown Herdr plugin command %q", args[0])
 	}
 }
 
@@ -82,11 +82,11 @@ func chdirHerdrPluginWorkspace() error {
 
 func herdrPluginContextCWD(raw string) (string, error) {
 	if strings.TrimSpace(raw) == "" {
-		return "", exit(2, "%s is missing; invoke this command through the Crabbox Herdr plugin", herdrPluginContextEnv)
+		return "", Exit(2, "%s is missing; invoke this command through the Crabbox Herdr plugin", herdrPluginContextEnv)
 	}
 	var invocation herdrInvocationContext
 	if err := json.Unmarshal([]byte(raw), &invocation); err != nil {
-		return "", exit(2, "parse %s: %v", herdrPluginContextEnv, err)
+		return "", Exit(2, "parse %s: %v", herdrPluginContextEnv, err)
 	}
 	for _, candidate := range []string{
 		invocation.FocusedPaneCWD,
@@ -96,7 +96,7 @@ func herdrPluginContextCWD(raw string) (string, error) {
 			return candidate, nil
 		}
 	}
-	return "", exit(2, "Herdr plugin context has no focused pane or workspace cwd")
+	return "", Exit(2, "Herdr plugin context has no focused pane or workspace cwd")
 }
 
 func (a App) herdrPluginBoxes(ctx context.Context, args []string) error {
@@ -106,7 +106,7 @@ func (a App) herdrPluginBoxes(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return exit(2, "usage: crabbox __herdr-plugin boxes [--once]")
+		return Exit(2, "usage: crabbox __herdr-plugin boxes [--once]")
 	}
 	if err := chdirHerdrPluginWorkspace(); err != nil {
 		return err
@@ -169,7 +169,7 @@ func herdrPluginRefreshDelay(raw string) (time.Duration, error) {
 	}
 	delay, err := time.ParseDuration(strings.TrimSpace(raw))
 	if err != nil || delay < time.Second {
-		return 0, exit(2, "%s must be a duration of at least 1s", herdrPluginRefreshIntervalEnv)
+		return 0, Exit(2, "%s must be a duration of at least 1s", herdrPluginRefreshIntervalEnv)
 	}
 	return delay, nil
 }
@@ -184,7 +184,7 @@ func mustCurrentWorkingDirectory() string {
 
 func (a App) herdrPluginConnect(ctx context.Context, args []string) error {
 	if len(args) != 0 {
-		return exit(2, "usage: crabbox __herdr-plugin connect")
+		return Exit(2, "usage: crabbox __herdr-plugin connect")
 	}
 	if err := chdirHerdrPluginWorkspace(); err != nil {
 		return err
@@ -204,14 +204,14 @@ func (a App) herdrPluginConnect(ctx context.Context, args []string) error {
 	}
 	leaseID := herdrPluginLeaseID(selected)
 	if leaseID == "" {
-		return exit(2, "could not read a lease id from %q", selected)
+		return Exit(2, "could not read a lease id from %q", selected)
 	}
 	return a.connect(ctx, []string{leaseID})
 }
 
 func (a App) herdrPluginJob(ctx context.Context, args []string) error {
 	if len(args) != 0 {
-		return exit(2, "usage: crabbox __herdr-plugin job")
+		return Exit(2, "usage: crabbox __herdr-plugin job")
 	}
 	if err := chdirHerdrPluginWorkspace(); err != nil {
 		return err
@@ -222,7 +222,7 @@ func (a App) herdrPluginJob(ctx context.Context, args []string) error {
 	}
 	names := configuredJobNames(cfg)
 	if len(names) == 0 {
-		return exit(2, "no Crabbox jobs are configured in this workspace")
+		return Exit(2, "no Crabbox jobs are configured in this workspace")
 	}
 	selected, err := herdrPluginPick(a.input(), a.Stdout, "job", names)
 	if errors.Is(err, errHerdrPluginSelectionCancelled) {
@@ -243,7 +243,7 @@ func (a App) herdrPluginCaptureLines(ctx context.Context, label string, run func
 	}
 	lines := nonBlankLines(stdout.String())
 	if len(lines) == 0 {
-		return nil, exit(2, "no Crabbox %s found for the configured workspace and provider", label)
+		return nil, Exit(2, "no Crabbox %s found for the configured workspace and provider", label)
 	}
 	return lines, nil
 }
@@ -260,7 +260,7 @@ func nonBlankLines(value string) []string {
 
 func herdrPluginPick(input io.Reader, output io.Writer, label string, choices []string) (string, error) {
 	if len(choices) == 0 {
-		return "", exit(2, "no %s choices available", label)
+		return "", Exit(2, "no %s choices available", label)
 	}
 	fmt.Fprintf(output, "Crabbox %ss:\n", label)
 	for index, choice := range choices {
@@ -273,7 +273,7 @@ func herdrPluginPick(input io.Reader, output io.Writer, label string, choices []
 			if err := scanner.Err(); err != nil {
 				return "", fmt.Errorf("read %s selection: %w", label, err)
 			}
-			return "", exit(2, "%s selection input closed", label)
+			return "", Exit(2, "%s selection input closed", label)
 		}
 		value := strings.TrimSpace(scanner.Text())
 		if value == "q" || value == "quit" {

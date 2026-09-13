@@ -1150,6 +1150,38 @@ describe("AWS qualification authority", () => {
     expect(fixture.signer.calls.filter((call) => call.action === "RunInstances")).toHaveLength(0);
   });
 
+  it("preserves leading-zero account and reservation owner identities", async () => {
+    const fixture = authorityFixture();
+    fixture.env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID = "001234567890";
+    fixture.signer.accountId = "001234567890";
+    fixture.signer.ownerId = "001234567890";
+    await fixture.run.enroll(controller, identity);
+    await importKey(fixture);
+    await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
+
+    await expect(
+      fixture.run.execute(
+        identity,
+        request("DescribeInstances", { "InstanceId.1": "i-owned" }, "ec2"),
+      ),
+    ).resolves.toMatchObject({ status: 200 });
+  });
+
+  it("rejects a DescribeInstances reservation from another account", async () => {
+    const fixture = authorityFixture();
+    fixture.signer.ownerId = "999999999999";
+    await fixture.run.enroll(controller, identity);
+    await importKey(fixture);
+    await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
+
+    await expect(
+      fixture.run.execute(
+        identity,
+        request("DescribeInstances", { "InstanceId.1": "i-owned" }, "ec2"),
+      ),
+    ).rejects.toThrow("reservation owner does not match the qualification account");
+  });
+
   it("revalidates the expected STS account before finalization and reconciliation", async () => {
     useImmediateTimeouts();
     const finalizeFixture = authorityFixture();
@@ -1572,6 +1604,7 @@ class FakeSigner {
     parameters: Record<string, unknown>;
   }> = [];
   accountId = "123456789012";
+  ownerId: string | undefined;
   advanceNextIdentityByMs = 0;
   instanceDescribeNotFound = false;
   private failed = false;
@@ -1786,7 +1819,7 @@ class FakeSigner {
           : []),
       ].join("");
       return xml(
-        `<DescribeInstancesResponse><reservationSet>${items ? `<item><instancesSet>${items}</instancesSet></item>` : ""}</reservationSet></DescribeInstancesResponse>`,
+        `<DescribeInstancesResponse><requestId>req-qualification-describe</requestId><reservationSet>${items ? `<item>${this.ownerId ? `<ownerId>${this.ownerId}</ownerId>` : ""}<instancesSet>${items}</instancesSet></item>` : ""}</reservationSet></DescribeInstancesResponse>`,
       );
     }
     if (action === "DescribeSnapshots") {

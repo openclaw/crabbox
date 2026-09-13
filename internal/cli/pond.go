@@ -46,27 +46,12 @@ const maxRequestedPondNameLength = 41
 // rejected so the same email shape works for personal and shared tailnets.
 const maxPondTailscaleTagOwnerLength = 7
 
-// normalizePondName lowercases the requested name and replaces every character
+// NormalizePondName lowercases the requested name and replaces every character
 // outside `[a-z0-9-]` with `-`, collapsing runs and trimming leading/trailing
-// dashes. The shape matches normalizeLeaseSlug; pond names participate in the
+// dashes. The shape matches NormalizeLeaseSlug; pond names participate in the
 // same DNS-ish identifier space so peer hostnames stay regular.
-func normalizePondName(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	var out strings.Builder
-	lastDash := false
-	for _, r := range value {
-		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
-		if ok {
-			out.WriteRune(r)
-			lastDash = false
-			continue
-		}
-		if !lastDash {
-			out.WriteByte('-')
-			lastDash = true
-		}
-	}
-	return strings.Trim(out.String(), "-")
+func NormalizePondName(value string) string {
+	return NormalizeLeaseSlug(value)
 }
 
 // requestedPondName validates a user-supplied `--pond <name>` flag value.
@@ -75,12 +60,12 @@ func requestedPondName(value string) (string, error) {
 	if strings.TrimSpace(value) == "" {
 		return "", nil
 	}
-	name := normalizePondName(value)
+	name := NormalizePondName(value)
 	if name == "" {
-		return "", exit(2, "--pond must contain at least one letter or digit")
+		return "", Exit(2, "--pond must contain at least one letter or digit")
 	}
 	if len(name) > maxRequestedPondNameLength {
-		return "", exit(2, "--pond must be %d characters or fewer after normalization", maxRequestedPondNameLength)
+		return "", Exit(2, "--pond must be %d characters or fewer after normalization", maxRequestedPondNameLength)
 	}
 	return name, nil
 }
@@ -91,14 +76,14 @@ func serverPond(server Server) string {
 	if server.Labels == nil {
 		return ""
 	}
-	return normalizePondName(server.Labels[pondLabelKey])
+	return NormalizePondName(server.Labels[pondLabelKey])
 }
 
 // filterServersByPond returns the subset of servers whose pond label matches
 // the requested name. The filter is a no-op when pond is empty so callers can
 // pass `--pond` through unconditionally.
 func filterServersByPond(servers []Server, pond string) []Server {
-	pond = normalizePondName(pond)
+	pond = NormalizePondName(pond)
 	if pond == "" {
 		return servers
 	}
@@ -122,7 +107,7 @@ func pondTagOwner(identity string) string {
 	if at := strings.IndexByte(identity, '@'); at > 0 {
 		identity = identity[:at]
 	}
-	owner := normalizePondName(identity)
+	owner := NormalizePondName(identity)
 	if owner == "" {
 		return ""
 	}
@@ -148,7 +133,7 @@ func pondTailscaleTag(owner, pond string) string {
 	if owner == "" {
 		owner = "user"
 	}
-	pond = normalizePondName(pond)
+	pond = NormalizePondName(pond)
 	if pond == "" {
 		return ""
 	}
@@ -189,18 +174,18 @@ func providerCapableOfTailscale(provider string) bool {
 }
 
 func pondClaimProviderSummary(pond string) (bool, bool) {
-	pond = normalizePondName(pond)
+	pond = NormalizePondName(pond)
 	if pond == "" {
 		return false, false
 	}
-	claims, err := listLeaseClaims()
+	claims, err := ListLeaseClaims()
 	if err != nil {
 		return false, false
 	}
 	hasClaims := false
 	hasTailscale := false
 	for _, claim := range claims {
-		if normalizePondName(claim.Pond) != pond {
+		if NormalizePondName(claim.Pond) != pond {
 			continue
 		}
 		hasClaims = true
@@ -297,4 +282,8 @@ func (c ProviderCapabilities) Primary() string {
 		return TransportSSH
 	}
 	return TransportNone
+}
+
+func AppendDirectPondTailscaleTag(cfg *Config) {
+	appendPondTailscaleTag(cfg, true)
 }

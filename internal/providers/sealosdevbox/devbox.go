@@ -152,7 +152,7 @@ func (b *backend) renderDevboxManifest(name, leaseID, slug string, keep bool, no
 			Network:      devboxNetworkSpec{Type: network},
 			Config: devboxConfigSpec{
 				User:       strings.TrimSpace(cfg.SSHUser),
-				WorkingDir: sealosWorkRoot(b.cfg),
+				WorkingDir: core.EffectiveSealosDevboxWorkRoot(b.cfg),
 				Ports:      []devboxPortSpec{{Name: devboxSSHPortName, ContainerPort: 22, Protocol: "TCP"}},
 			},
 			Tolerations: []devboxToleration{{

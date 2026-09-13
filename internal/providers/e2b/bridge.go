@@ -7,6 +7,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 // E2B's bridge plane is built around the native per-sandbox preview URL
@@ -29,7 +30,7 @@ import (
 func (b *e2bBackend) PublishPeer(ctx context.Context, leaseID string, port int, ttl time.Duration) (core.BridgePeerTarget, error) {
 	_ = ttl
 	if port <= 0 || port > 65535 {
-		return core.BridgePeerTarget{}, exit(2, "e2b bridge: port %d out of range", port)
+		return core.BridgePeerTarget{}, core.Exit(2, "e2b bridge: port %d out of range", port)
 	}
 	sandboxID, domain, err := b.bridgeSandboxCoords(ctx, leaseID)
 	if err != nil {
@@ -59,16 +60,16 @@ func (b *e2bBackend) ListPeerTargets(ctx context.Context, leaseID string) ([]cor
 func (b *e2bBackend) bridgeSandboxCoords(ctx context.Context, leaseID string) (string, string, error) {
 	leaseID = strings.TrimSpace(leaseID)
 	if leaseID == "" {
-		return "", "", exit(2, "e2b bridge: missing lease id")
+		return "", "", core.Exit(2, "e2b bridge: missing lease id")
 	}
 	if !strings.HasPrefix(leaseID, "cbx_") && !strings.HasPrefix(leaseID, "e2b_") {
-		return "", "", exit(2, "e2b bridge: lease %q is not an E2B-claimed Crabbox lease", leaseID)
+		return "", "", core.Exit(2, "e2b bridge: lease %q is not an E2B-claimed Crabbox lease", leaseID)
 	}
 	client, err := newE2BClient(b.cfg, b.rt)
 	if err != nil {
 		return "", "", err
 	}
-	var sandbox e2bSandbox
+	var sandbox shared.EnvdSandbox
 	if isE2BSyntheticID(leaseID) {
 		sandboxID := strings.TrimPrefix(leaseID, "e2b_")
 		sandbox, err = client.GetSandbox(ctx, sandboxID)
@@ -76,7 +77,7 @@ func (b *e2bBackend) bridgeSandboxCoords(ctx context.Context, leaseID string) (s
 			return "", "", e2bError("get sandbox", err)
 		}
 		if !isCrabboxE2BSandbox(sandbox) {
-			return "", "", exit(4, "e2b sandbox %q is not claimed by Crabbox", leaseID)
+			return "", "", core.Exit(4, "e2b sandbox %q is not claimed by Crabbox", leaseID)
 		}
 	} else {
 		sandbox, err = resolveE2BSandboxByLease(ctx, client, leaseID)
@@ -85,11 +86,11 @@ func (b *e2bBackend) bridgeSandboxCoords(ctx context.Context, leaseID string) (s
 		return "", "", err
 	}
 	if sandbox.SandboxID == "" {
-		return "", "", exit(4, "e2b bridge: no sandbox bound to lease %q", leaseID)
+		return "", "", core.Exit(4, "e2b bridge: no sandbox bound to lease %q", leaseID)
 	}
 	domain := strings.TrimSpace(sandbox.Domain)
 	if domain == "" {
-		domain = strings.TrimSpace(blank(b.cfg.E2B.Domain, core.E2BConfigDefaultDomain))
+		domain = strings.TrimSpace(core.Blank(b.cfg.E2B.Domain, core.E2BConfigDefaultDomain))
 	}
 	return sandbox.SandboxID, domain, nil
 }

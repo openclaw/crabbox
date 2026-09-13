@@ -4,30 +4,9 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
-	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
-
-// SameOrigin reports whether two URLs share scheme, host, and effective port.
-func SameOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectivePort(a) == effectivePort(b)
-}
-
-func effectivePort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
-}
 
 // SecureHTTPClient returns a copy of source whose CheckRedirect refuses
 // redirects leaving the trusted origin, preserves source's CheckRedirect, and
@@ -37,7 +16,7 @@ func SecureHTTPClient(source *http.Client, trusted *url.URL, newError func(dest 
 	client := *source
 	originalCheckRedirect := source.CheckRedirect
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !SameOrigin(trusted, req.URL) {
+		if !core.SameHTTPOrigin(trusted, req.URL) {
 			return newError(req.URL)
 		}
 		if originalCheckRedirect != nil {

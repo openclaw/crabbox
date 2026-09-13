@@ -35,7 +35,7 @@ func TestUnikraftCloudProviderSpec(t *testing.T) {
 
 func TestUnikraftCloudAPIKeyFlagIsNotRegistered(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	registerUnikraftCloudProviderFlags(fs, Config{})
+	registerUnikraftCloudProviderFlags(fs, core.Config{})
 	for _, name := range []string{"unikraft-cloud-token", "unikraft-cloud-api-key", "unikraft-cloud-key", "ukc-token"} {
 		if fs.Lookup(name) != nil {
 			t.Fatalf("Unikraft Cloud API key surfaced as a flag --%s", name)
@@ -53,12 +53,12 @@ func TestApplyUnikraftCloudProviderFlags(t *testing.T) {
 		name    string
 		args    []string
 		wantErr bool
-		check   func(t *testing.T, cfg Config)
+		check   func(t *testing.T, cfg core.Config)
 	}{
 		{
 			name: "overrides",
 			args: []string{"-unikraft-cloud-metro", "dal", "-unikraft-cloud-image", "unikraft.org/nginx:latest", "-unikraft-cloud-memory", "256"},
-			check: func(t *testing.T, cfg Config) {
+			check: func(t *testing.T, cfg core.Config) {
 				if cfg.UnikraftCloud.Metro != "dal" {
 					t.Fatalf("metro = %q", cfg.UnikraftCloud.Metro)
 				}
@@ -85,11 +85,11 @@ func TestApplyUnikraftCloudProviderFlags(t *testing.T) {
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			fs.String("class", "", "")
 			fs.String("type", "", "")
-			values := registerUnikraftCloudProviderFlags(fs, Config{})
+			values := registerUnikraftCloudProviderFlags(fs, core.Config{})
 			if err := fs.Parse(test.args); err != nil {
 				t.Fatalf("parse: %v", err)
 			}
-			cfg := Config{Provider: providerName}
+			cfg := core.Config{Provider: providerName}
 			err := applyUnikraftCloudProviderFlags(&cfg, fs, values)
 			if test.wantErr {
 				if err == nil {

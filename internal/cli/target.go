@@ -139,16 +139,16 @@ func validateTargetConfig(cfg Config) error {
 	switch cfg.TargetOS {
 	case targetLinux, targetMacOS, targetWindows, targetWorkerRuntime:
 	default:
-		return exit(2, "target must be linux, macos, windows, or worker-runtime")
+		return Exit(2, "target must be linux, macos, windows, or worker-runtime")
 	}
 	if cfg.TargetOS != targetWindows && cfg.WindowsMode != windowsModeNormal {
-		return exit(2, "windows.mode is only valid with target=windows")
+		return Exit(2, "windows.mode is only valid with target=windows")
 	}
 	if cfg.TargetOS == targetWindows {
 		switch cfg.WindowsMode {
 		case windowsModeNormal, windowsModeWSL2:
 		default:
-			return exit(2, "windows.mode must be normal or wsl2")
+			return Exit(2, "windows.mode must be normal or wsl2")
 		}
 	}
 	return nil
@@ -160,32 +160,32 @@ func validateProviderTarget(cfg Config) error {
 		return err
 	}
 	if !providerSpecSupportsTarget(provider.Spec(), cfg.TargetOS, cfg.WindowsMode) {
-		return exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Name(), cfg))
+		return Exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Name(), cfg))
 	}
 	machineTarget := cfg.TargetOS != targetWorkerRuntime
 	_, ownsArchitecture := provider.(ProviderArchitectureCapability)
 	if machineTarget && !ownsArchitecture && (provider.Name() == "tart" || provider.Name() == "apple-vm" || provider.Name() == "lume" || provider.Name() == "aws-lambda-microvm") && cfg.architectureExplicit && effectiveArchitectureForConfig(cfg) != ArchitectureARM64 {
-		return exit(2, "provider=%s supports architecture=arm64 only", provider.Name())
+		return Exit(2, "provider=%s supports architecture=arm64 only", provider.Name())
 	}
 	architecture := effectiveArchitectureForConfig(cfg)
 	if machineTarget && ownsArchitecture && !providerSupportsArchitecture(provider, cfg, architecture) {
-		return exit(2, "provider=%s does not support target=%s windows.mode=%s architecture=%s", provider.Name(), cfg.TargetOS, cfg.WindowsMode, architecture)
+		return Exit(2, "provider=%s does not support target=%s windows.mode=%s architecture=%s", provider.Name(), cfg.TargetOS, cfg.WindowsMode, architecture)
 	}
 	if machineTarget && !ownsArchitecture && architecture == ArchitectureARM64 {
 		if !providerSupportsArchitecture(provider, cfg, architecture) {
-			return exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, provider=tart, provider=apple-container, provider=apple-vm, provider=lume, provider=aws-lambda-microvm, provider=external, or a provider with runtime-native architecture support such as provider=local-container")
+			return Exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, provider=tart, provider=apple-container, provider=apple-vm, provider=lume, provider=aws-lambda-microvm, provider=external, or a provider with runtime-native architecture support such as provider=local-container")
 		}
 		if cfg.TargetOS != targetLinux &&
 			!(provider.Name() == "azure" && cfg.TargetOS == targetWindows) &&
 			!((provider.Name() == "tart" || provider.Name() == "lume") && cfg.TargetOS == targetMacOS) &&
 			!(provider.Name() == "external" && (cfg.TargetOS == targetMacOS || cfg.TargetOS == targetWindows)) {
-			return exit(2, "architecture=arm64 currently supports target=linux, provider=azure target=windows, provider=tart/provider=lume target=macos, or provider=external target=macos/windows only")
+			return Exit(2, "architecture=arm64 currently supports target=linux, provider=azure target=windows, provider=tart/provider=lume target=macos, or provider=external target=macos/windows only")
 		}
 		if provider.Name() == "azure" && cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 {
-			return exit(2, "provider=azure target=windows architecture=arm64 supports windows.mode=normal only; windows.mode=wsl2 requires nested virtualization, which Azure Cobalt ARM64 VM sizes do not support")
+			return Exit(2, "provider=azure target=windows architecture=arm64 supports windows.mode=normal only; windows.mode=wsl2 requires nested virtualization, which Azure Cobalt ARM64 VM sizes do not support")
 		}
 		if provider.Name() == "azure" && cfg.TargetOS == targetWindows && !azureWindowsARM64HasExplicitImage(cfg) {
-			return exit(2, "provider=azure target=windows architecture=arm64 requires azure.image or CRABBOX_AZURE_IMAGE with an ARM64 Windows image; the built-in Windows default is x64")
+			return Exit(2, "provider=azure target=windows architecture=arm64 requires azure.image or CRABBOX_AZURE_IMAGE with an ARM64 Windows image; the built-in Windows default is x64")
 		}
 	}
 	if (cfg.TargetOS == targetLinux || (provider.Name() == "azure" && cfg.TargetOS == targetWindows)) && strings.TrimSpace(cfg.ServerType) != "" {
@@ -205,14 +205,14 @@ func validateProviderTarget(cfg Config) error {
 		cfg.WindowsMode == windowsModeWSL2 &&
 		cfg.ServerTypeExplicit &&
 		!awsInstanceTypeSupportsNestedVirtualization(cfg.ServerType) {
-		return exit(2, "provider=aws target=windows windows.mode=wsl2 requires an instance type with AWS nested virtualization; %s is not supported. Use --type m8i.4xlarge or omit --type and choose class=tiny|small|standard|fast|large|beast", cfg.ServerType)
+		return Exit(2, "provider=aws target=windows windows.mode=wsl2 requires an instance type with AWS nested virtualization; %s is not supported. Use --type m8i.4xlarge or omit --type and choose class=tiny|small|standard|fast|large|beast", cfg.ServerType)
 	}
 	if cfg.Provider == "aws" && cfg.TargetOS == targetMacOS {
 		if cfg.HostID == "" && cfg.AWSMacHostID == "" && cfg.Coordinator == "" {
-			return exit(2, "provider=aws target=macos requires CRABBOX_HOST_ID, hostId, CRABBOX_AWS_MAC_HOST_ID, or aws.macHostId for an allocated host")
+			return Exit(2, "provider=aws target=macos requires CRABBOX_HOST_ID, hostId, CRABBOX_AWS_MAC_HOST_ID, or aws.macHostId for an allocated host")
 		}
 		if cfg.Capacity.Market != "on-demand" {
-			return exit(2, "provider=aws target=macos requires --market on-demand; EC2 Mac instances are not Spot")
+			return Exit(2, "provider=aws target=macos requires --market on-demand; EC2 Mac instances are not Spot")
 		}
 		return validateProviderClassSelector(provider, cfg)
 	}
@@ -244,7 +244,7 @@ func validateProviderTargetSupport(cfg Config) (Provider, error) {
 		return nil, err
 	}
 	if !providerSpecSupportsTarget(provider.Spec(), cfg.TargetOS, cfg.WindowsMode) {
-		return nil, exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Name(), cfg))
+		return nil, Exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Name(), cfg))
 	}
 	return provider, nil
 }
@@ -252,10 +252,10 @@ func validateProviderTargetSupport(cfg Config) (Provider, error) {
 func validateArchitectureServerType(kind string, cfg Config, serverTypeARM64 bool) error {
 	architecture := effectiveArchitectureForConfig(cfg)
 	if architecture == ArchitectureARM64 && !serverTypeARM64 {
-		return exit(2, "architecture=arm64 requires an ARM64 %s; %s is not ARM64", kind, cfg.ServerType)
+		return Exit(2, "architecture=arm64 requires an ARM64 %s; %s is not ARM64", kind, cfg.ServerType)
 	}
 	if cfg.architectureExplicit && cfg.Architecture == ArchitectureAMD64 && serverTypeARM64 {
-		return exit(2, "architecture=amd64 requires an amd64 %s; %s is ARM64", kind, cfg.ServerType)
+		return Exit(2, "architecture=amd64 requires an amd64 %s; %s is ARM64", kind, cfg.ServerType)
 	}
 	return nil
 }
@@ -323,7 +323,7 @@ func autoRouteStaticLease(cfg *Config, fs *flag.FlagSet, id string) error {
 	if flagWasSet(fs, "provider") && !isStaticProvider(cfg.Provider) {
 		return nil
 	}
-	authoritative := providerSelectionIsAuthoritativeRoute(*cfg)
+	authoritative := ProviderSelectionIsAuthoritativeRoute(*cfg)
 	if authoritative && !isStaticProvider(cfg.Provider) {
 		return nil
 	}
@@ -383,7 +383,7 @@ func routeExternalLeaseClaim(cfg *Config, leaseID string) error {
 	}
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
-			return exit(2, "external routing state is missing for lease %s; refusing unverified cleanup", leaseID)
+			return Exit(2, "external routing state is missing for lease %s; refusing unverified cleanup", leaseID)
 		}
 		return err
 	}
@@ -410,7 +410,7 @@ func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, ta
 		}
 		return restoreExternalLeaseTarget(cfg, targetExplicit, windowsModeExplicit)
 	}
-	authoritative := providerSelectionIsAuthoritativeRoute(*cfg)
+	authoritative := ProviderSelectionIsAuthoritativeRoute(*cfg)
 	if authoritative && !providerSelected {
 		return nil
 	}
@@ -435,7 +435,7 @@ func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, ta
 			if providerSelected {
 				return restoreExternalLeaseTarget(cfg, targetExplicit, windowsModeExplicit)
 			}
-			return exit(2, "external routing state is missing for lease %s; select provider=external explicitly only if the current lifecycle still owns it", claim.LeaseID)
+			return Exit(2, "external routing state is missing for lease %s; select provider=external explicitly only if the current lifecycle still owns it", claim.LeaseID)
 		}
 		return err
 	}
@@ -521,7 +521,7 @@ func restoreExternalLeaseTarget(cfg *Config, targetExplicit, windowsModeExplicit
 }
 
 func uniqueExternalLeaseClaim(identifier string, providerSelected bool) (leaseClaim, bool, error) {
-	exact, exists, err := readLeaseClaimWithPresence(identifier)
+	exact, exists, err := ReadLeaseClaimWithPresence(identifier)
 	if err != nil {
 		return leaseClaim{}, false, err
 	}
@@ -531,14 +531,14 @@ func uniqueExternalLeaseClaim(identifier string, providerSelected bool) (leaseCl
 		}
 		return exact, true, nil
 	}
-	claims, err := listLeaseClaims()
+	claims, err := ListLeaseClaims()
 	if err != nil {
 		return leaseClaim{}, false, err
 	}
 	matches := make([]leaseClaim, 0, 1)
 	externalMatches := make([]leaseClaim, 0, 1)
 	for _, claim := range claims {
-		if !leaseClaimMatchesIdentifier(claim, identifier) {
+		if !LeaseClaimMatchesIdentifier(claim, identifier) {
 			continue
 		}
 		matches = append(matches, claim)
@@ -562,13 +562,13 @@ func uniqueExternalLeaseClaim(identifier string, providerSelected bool) (leaseCl
 		for _, claim := range candidates {
 			ids = append(ids, claim.LeaseID)
 		}
-		return leaseClaim{}, false, exit(2, "multiple lease claims match %q: %s; use a lease id or an explicit provider", identifier, strings.Join(ids, ", "))
+		return leaseClaim{}, false, Exit(2, "multiple lease claims match %q: %s; use a lease id or an explicit provider", identifier, strings.Join(ids, ", "))
 	}
 	return externalMatches[0], true, nil
 }
 
 func staticLeaseClaim(id string) (leaseClaim, bool, error) {
-	claim, ok, err := resolveLeaseClaim(id)
+	claim, ok, err := ResolveLeaseClaim(id)
 	if err != nil || !ok || !isStaticProvider(claim.Provider) {
 		return leaseClaim{}, false, err
 	}

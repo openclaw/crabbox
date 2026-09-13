@@ -15,26 +15,26 @@ import (
 
 type recordingRunner struct {
 	calls [][]string
-	fn    func(LocalCommandRequest) (LocalCommandResult, error)
+	fn    func(core.LocalCommandRequest) (core.LocalCommandResult, error)
 }
 
-func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	call := append([]string{req.Name}, req.Args...)
 	r.calls = append(r.calls, call)
 	if r.fn != nil {
 		return r.fn(req)
 	}
-	return LocalCommandResult{}, nil
+	return core.LocalCommandResult{}, nil
 }
 
-func testConfig() Config {
-	return Config{
+func testConfig() core.Config {
+	return core.Config{
 		Provider: providerName,
 		TargetOS: targetLinux,
 		SSHUser:  "crabbox",
 		SSHPort:  "22",
 		WorkRoot: "/tmp/crabbox",
-		Nebius: NebiusConfig{
+		Nebius: core.NebiusConfig{
 			CLI:            "nebius",
 			Profile:        "sandbox",
 			ParentID:       "project-123",
@@ -203,7 +203,7 @@ func TestValidateConfigRejectsReservedUsers(t *testing.T) {
 func TestCLIRunnerAddsProfileBeforeCommand(t *testing.T) {
 	runner := &recordingRunner{}
 	cfg := testConfig()
-	client := newCLIRunner(cfg.Nebius, Runtime{Exec: runner})
+	client := newCLIRunner(cfg.Nebius, core.Runtime{Exec: runner})
 	if _, err := client.run(context.Background(), "compute", "platform", "list", "--format", "json"); err != nil {
 		t.Fatal(err)
 	}
@@ -248,34 +248,34 @@ func TestRedactNebiusText(t *testing.T) {
 }
 
 func TestDoctorUsesReadOnlyCLICommands(t *testing.T) {
-	runner := &recordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &recordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		joined := strings.Join(req.Args, " ")
 		for _, forbidden := range []string{" create", " delete", " update", " disk create", " disk delete", " allocation create", " allocation delete"} {
 			if strings.Contains(" "+joined, forbidden) {
-				return LocalCommandResult{}, errors.New("mutating command invoked: " + joined)
+				return core.LocalCommandResult{}, errors.New("mutating command invoked: " + joined)
 			}
 		}
 		switch joined {
 		case "--profile sandbox version":
-			return LocalCommandResult{Stdout: "nebius version 1.0.0\n"}, nil
+			return core.LocalCommandResult{Stdout: "nebius version 1.0.0\n"}, nil
 		case "--profile sandbox profile list":
-			return LocalCommandResult{Stdout: "sandbox [default]\n"}, nil
+			return core.LocalCommandResult{Stdout: "sandbox [default]\n"}, nil
 		case "--profile sandbox iam project get project-123 --format json":
-			return LocalCommandResult{Stdout: `{"id":"project-123"}`}, nil
+			return core.LocalCommandResult{Stdout: `{"id":"project-123"}`}, nil
 		case "--profile sandbox vpc subnet list --parent-id project-123 --format json":
-			return LocalCommandResult{Stdout: `[{"id":"subnet-123"}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"subnet-123"}]`}, nil
 		case "--profile sandbox compute platform list --parent-id project-123 --format json":
-			return LocalCommandResult{Stdout: `[{"id":"cpu-d3"}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"cpu-d3"}]`}, nil
 		case "--profile sandbox compute image get-latest-by-family --image-family ubuntu24.04-driverless --format json":
-			return LocalCommandResult{Stdout: `{"metadata":{"id":"image-123"}}`}, nil
+			return core.LocalCommandResult{Stdout: `{"metadata":{"id":"image-123"}}`}, nil
 		case "--profile sandbox compute instance list --parent-id project-123 --format json":
-			return LocalCommandResult{Stdout: `{"items":[]}`}, nil
+			return core.LocalCommandResult{Stdout: `{"items":[]}`}, nil
 		default:
-			return LocalCommandResult{}, errors.New("unexpected command: " + joined)
+			return core.LocalCommandResult{}, errors.New("unexpected command: " + joined)
 		}
 	}}
-	backend := NewBackend(Provider{}.Spec(), testConfig(), Runtime{Exec: runner}).(*backend)
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	backend := NewBackend(Provider{}.Spec(), testConfig(), core.Runtime{Exec: runner}).(*backend)
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,29 +291,29 @@ func TestDoctorUsesReadOnlyCLICommands(t *testing.T) {
 }
 
 func TestDoctorRejectsMissingImageFamily(t *testing.T) {
-	runner := &recordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &recordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		joined := strings.Join(req.Args, " ")
 		switch joined {
 		case "--profile sandbox version":
-			return LocalCommandResult{Stdout: "nebius version 1.0.0\n"}, nil
+			return core.LocalCommandResult{Stdout: "nebius version 1.0.0\n"}, nil
 		case "--profile sandbox profile list":
-			return LocalCommandResult{Stdout: "sandbox [default]\n"}, nil
+			return core.LocalCommandResult{Stdout: "sandbox [default]\n"}, nil
 		case "--profile sandbox iam project get project-123 --format json":
-			return LocalCommandResult{Stdout: `{"id":"project-123"}`}, nil
+			return core.LocalCommandResult{Stdout: `{"id":"project-123"}`}, nil
 		case "--profile sandbox vpc subnet list --parent-id project-123 --format json":
-			return LocalCommandResult{Stdout: `[{"metadata":{"id":"subnet-123"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"metadata":{"id":"subnet-123"}}]`}, nil
 		case "--profile sandbox compute platform list --parent-id project-123 --format json":
-			return LocalCommandResult{Stdout: `[{"metadata":{"id":"cpu-d3"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"metadata":{"id":"cpu-d3"}}]`}, nil
 		case "--profile sandbox compute image get-latest-by-family --image-family ubuntu24.04-driverless --format json":
-			return LocalCommandResult{Stdout: `{}`}, nil
+			return core.LocalCommandResult{Stdout: `{}`}, nil
 		case "--profile sandbox compute instance list --parent-id project-123 --format json":
-			return LocalCommandResult{Stdout: `{"items":[]}`}, nil
+			return core.LocalCommandResult{Stdout: `{"items":[]}`}, nil
 		default:
-			return LocalCommandResult{}, errors.New("unexpected command: " + joined)
+			return core.LocalCommandResult{}, errors.New("unexpected command: " + joined)
 		}
 	}}
-	backend := NewBackend(Provider{}.Spec(), testConfig(), Runtime{Exec: runner}).(*backend)
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	backend := NewBackend(Provider{}.Spec(), testConfig(), core.Runtime{Exec: runner}).(*backend)
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -115,7 +115,7 @@ func withTempClaims(t *testing.T, claims []leaseClaim) {
 	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "")
 	t.Setenv("CRABBOX_PROVIDER", "")
 	for _, claim := range claims {
-		if err := claimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, claim.Provider, claim.ProviderScope, claim.Pond, claim.RepoRoot, 30*time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, claim.Provider, claim.ProviderScope, claim.Pond, claim.RepoRoot, 30*time.Minute, false); err != nil {
 			t.Fatalf("seed claim %s: %v", claim.LeaseID, err)
 		}
 	}
@@ -690,7 +690,7 @@ func TestFinalizePondReleaseClaimUsesProviderPolicy(t *testing.T) {
 			if got != tc.retain {
 				t.Fatalf("retained=%v want %v", got, tc.retain)
 			}
-			claims, err := listLeaseClaims()
+			claims, err := ListLeaseClaims()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -716,7 +716,7 @@ func TestFinalizePondReleaseClaimPreservesClaimOnRetentionError(t *testing.T) {
 	if retained || !errors.Is(err, want) {
 		t.Fatalf("retained=%t err=%v", retained, err)
 	}
-	claims, listErr := listLeaseClaims()
+	claims, listErr := ListLeaseClaims()
 	if listErr != nil {
 		t.Fatal(listErr)
 	}
@@ -988,7 +988,7 @@ func TestPondPeersHandlesBlacksmithAsNone(t *testing.T) {
 // changes stay covered by the on-disk format.
 func mutateClaim(t *testing.T, leaseID string, fn func(*leaseClaim)) {
 	t.Helper()
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatalf("readLeaseClaim %s: %v", leaseID, err)
 	}

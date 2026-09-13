@@ -12,6 +12,11 @@ already loaded into configuration; Crownest does not look up its separate key.
 Zero sizes/timeouts, explicit false, and raw strings retain their configured
 meaning. Neither section establishes authentication or readiness.
 
+OpenComputer, OpenSandbox and CUA use the same passive capability for all 34
+of their configuration fields. Their separate credential sources are not read.
+CUA's bridge and SDK strings are references only: projection does not execute a
+command, inspect an installation, resolve imports or enable provisioning.
+
 ## Ownership
 
 - `JSONValue` is an explicitly selected public value, never a runtime-config dump.
@@ -44,6 +49,45 @@ missing data, or fall back to the old formatters. An absent optional section is
 a no-op for this data-only renderer; real-provider tests and whole-binary output
 comparisons establish the migrated built-ins' actual coverage and positions.
 
+Local Container, Apple Container, MXC and Docker Sandbox also own their existing
+35 display fields and retain their original text slots. Apple Container supplies
+one shared section for both Apple Container and Apple Machine; it does not apply
+either backend's runtime defaults. MXC retains JSON lists with text counts,
+Docker Sandbox retains JSON lists with comma-joined text and `%g` CPU formatting,
+and nil versus empty lists remain distinct. Internal-only fields stay omitted.
+
+AWS, Azure and GCP own their existing 24 JSON fields and 17 text fields through
+the same capability. Seven fields remain JSON-only rather than gaining new text
+output. AWS's 32-bit and GCP's 64-bit disk sizes, ordered lists and exact text
+slots are preserved. Instance-profile and service-account values remain
+configured references; these projections do not inspect SDK credentials or add
+authentication or readiness facts.
+
+DigitalOcean, Vultr and Linode own all 17 of their existing JSON/text fields.
+Their consecutive sections remain between Azure and GitHub Codespaces. The
+projectors retain raw boot selectors and list shapes without resolving images,
+applying SSH defaults or discovering authentication. Selected-provider defaults
+and explicit SSH settings remain the existing configuration loader's concern.
+
+Blacksmith Testbox, Agent Sandbox and Firecracker own all 33 of their existing
+JSON/text fields. Their sections retain the original text positions. Workflow,
+tool and path values remain references only; projection does not consult a CLI,
+cluster or guest assets. Raw JSON strings, empty-only text dashes, duration
+strings, integer sizes/timeouts and explicit booleans keep their existing forms.
+
+Parallels owns its existing 15 JSON fields and 12 text fields, retaining its
+original text position. Its typed template map and host list are copied before
+loaded key values become presence markers; nested JSON names, nil/empty shapes
+and host order stay unchanged. Text retains collection counts and its existing
+raw strings and empty-only fallbacks. Projection does not select templates,
+resolve hosts or read key files, and runtime-only selected-host state stays omitted.
+
+Static SSH owns its six existing string fields through the canonical `ssh`
+provider. Its published JSON key and text label remain `static`, including when
+selected through the `static` or `static-ssh` aliases. Port remains a string,
+text keeps empty-only dashes, and the section retains its original slot without
+resolving an SSH target or changing the separate generic SSH display.
+
 ## Remaining migration
 
 The baseline census contains 81 canonical providers: 49 have both value formats,
@@ -51,14 +95,16 @@ three have JSON only, and 29 have neither. Apple Machine shares Apple Container'
 configuration, so complete coverage means **80 distinct sections**, not 81
 duplicate sections.
 
-The first two adopters leave **27 missing sections and three missing text
+The five newly added sections leave **24 missing sections and three missing text
 sections**. They do not complete the migration. Existing provider projections
 also still need to move out of the parallel JSON map and text formatter so
 their field selection and transformations have one owner.
 
-The Multipass/Tart/Lume migration removes three of the original 49 canonical
-both-format providers from that legacy implementation, leaving 46 in that
-cohort. It does not fill any of the missing sections above.
+The Multipass/Tart/Lume, local-container, cloud, VPS, runtime, Parallels and Static SSH cohorts remove nineteen
+of the original 49 canonical both-format providers from that legacy
+implementation, leaving 30 in that cohort. The local cohort covers five
+identities through four sections because Apple Machine shares Apple Container's
+values. These migrations do not fill any of the missing sections above.
 
 For each remaining provider, establish the explicit public field contract
 before implementation. Preserve existing keys, types, null/empty distinctions,

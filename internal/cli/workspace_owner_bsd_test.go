@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -188,6 +187,48 @@ func TestWorkspaceOwnerBSDConcurrentAcquireAndWitness(t *testing.T) {
 	}
 }
 
+func TestWorkspaceOwnerBSDGateRequiresConfirmedDirectoryCreation(t *testing.T) {
+	for _, tc := range []struct {
+		name, output string
+		code         int
+	}{
+		{name: "success without creation"},
+		{name: "output with failure", output: "created", code: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nativeMkdir, err := exec.LookPath("mkdir")
+			if err != nil {
+				t.Fatal(err)
+			}
+			path, home := workspaceOwnerBSDPath(t), t.TempDir()
+			mkdir := filepath.Join(path, "mkdir")
+			if err := os.Remove(mkdir); err != nil {
+				t.Fatal(err)
+			}
+			// Model mkdir implementations that return success after losing an
+			// EEXIST race, and ensure failed commands cannot grant the gate.
+			stub := "#!/bin/sh\ncase \"$*\" in *'.gate.portable'*) printf %s " + shellQuote(tc.output) + "; exit " + strconv.Itoa(tc.code) + " ;; esac\nexec " + shellQuote(nativeMkdir) + " \"$@\"\n"
+			if err := os.WriteFile(mkdir, []byte(stub), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			key := workspaceOwnerKey("occupied-portable-gate")
+			gate := filepath.Join(home, ".crabbox", "workspace-owners", key+".gate.portable")
+			if err := os.MkdirAll(gate, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			req := workspaceOwnerRemoteRequest{Action: workspaceOwnerAcquire, Key: key, Token: strings.Repeat("a", 64), TTL: time.Minute}
+			cmd := exec.CommandContext(t.Context(), "/bin/sh", "-c", remoteWorkspaceOwnerPOSIX(req))
+			cmd.Env = []string{"HOME=" + home, "PATH=" + path}
+			if out, err := cmd.CombinedOutput(); err != nil || string(out) != "BUSY" {
+				t.Fatalf("occupied gate: out=%q err=%v", out, err)
+			}
+			if info, err := os.Stat(gate); err != nil || !info.IsDir() {
+				t.Fatalf("contender changed the existing gate: %v", err)
+			}
+		})
+	}
+}
+
 func TestWorkspaceOwnerBSDDetachedAndRenewingCommand(t *testing.T) {
 	testWorkspaceOwnerDetachedAndRenewingCommand(t, workspaceOwnerBSDPath(t))
 }
@@ -204,50 +245,162 @@ func testWorkspaceOwnerDetachedAndRenewingCommand(t *testing.T, path string) {
 		name, command string
 		code          int
 	}{
-		{name: "detached daemon", command: `nohup sleep 30 </dev/null >"$HOME/daemon.log" 2>&1 & echo $! >"$HOME/daemon.pid"`},
-		{name: "renewed stream", command: `i=0; while [ "$i" -lt 5 ]; do echo tick; sleep 1; i=$((i+1)); done; exit 23`, code: 23},
+		{name: "detached daemon", command: `nohup sleep 30 </dev/null >"$HOME/daemon.log" 2>&1 & daemon_pid=$!
+ps -o lstart= -p "$daemon_pid" >"$HOME/daemon.identity" || exit 74
+echo "$daemon_pid" >"$HOME/daemon.pid"`},
+		{name: "renewed stream", command: `echo started >"$HOME/started.tmp"; mv "$HOME/started.tmp" "$HOME/started"
+i=0; while [ ! -f "$HOME/continue" ]; do
+  [ "$i" -lt 3000 ] || exit 124
+  sleep .01; i=$((i+1))
+done
+i=0; while [ "$i" -lt 5 ]; do echo tick; sleep 1; i=$((i+1)); done; exit 23`, code: 23},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
+			clockBin := t.TempDir()
+			// Only the protocol clock is controlled; retain native/BSD gate selection.
+			if err := os.WriteFile(filepath.Join(clockBin, "date"), []byte("#!/bin/sh\n[ \"$#\" -eq 1 ] && [ \"$1\" = +%s ] || exit 64\ncat \"$HOME/clock\"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			setClock := func(now int) {
+				t.Helper()
+				tmp := filepath.Join(home, "clock.tmp")
+				if err := os.WriteFile(tmp, []byte(strconv.Itoa(now)+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(tmp, filepath.Join(home, "clock")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			setClock(1000)
 			key, token := workspaceOwnerKey(tc.name), strings.Repeat("c", 64)
 			run := func(script string) (string, error) {
-				ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+				ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 				defer cancel()
 				cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script)
-				cmd.Env = []string{"HOME=" + home, "PATH=" + path}
+				cmd.Env = []string{"HOME=" + home, "PATH=" + clockBin + string(os.PathListSeparator) + path}
+				cmd.WaitDelay = time.Second
+				if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+					configureControllerCommand(cmd)
+					cmd.Cancel = func() error { return stopControllerProcessGroup(cmd.Process.Pid) }
+				}
 				out, err := cmd.CombinedOutput()
 				return string(out), err
+			}
+			stateExpiry := func() int {
+				t.Helper()
+				data, err := os.ReadFile(filepath.Join(home, ".crabbox", "workspace-owners", key+".owner"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+				if len(lines) != 3 || lines[0] != "v1" || lines[1] != token {
+					t.Fatalf("unexpected owner state %q", data)
+				}
+				expiry, err := strconv.Atoi(lines[2])
+				if err != nil {
+					t.Fatal(err)
+				}
+				return expiry
 			}
 			req := workspaceOwnerRemoteRequest{Action: workspaceOwnerAcquire, Key: key, Token: token, TTL: 3 * time.Second}
 			if out, err := run(remoteWorkspaceOwnerPOSIX(req)); err != nil || out != "ACQUIRED" {
 				t.Fatalf("acquire=%q %v", out, err)
 			}
-			done := make(chan struct{})
-			renewed := make(chan error, 1)
-			go func() {
-				ticker := time.NewTicker(500 * time.Millisecond)
-				defer ticker.Stop()
-				renew := req
-				renew.Action = workspaceOwnerRenew
-				for {
-					select {
-					case <-done:
-						renewed <- nil
-						return
-					case <-ticker.C:
-						out, err := run(remoteWorkspaceOwnerPOSIX(renew))
-						if err != nil || out != "RENEWED" {
-							renewed <- fmt.Errorf("renew=%q %v", out, err)
-							return
-						}
-					}
+			defer func() {
+				req.Action = workspaceOwnerRelease
+				if out, err := run(remoteWorkspaceOwnerPOSIX(req)); err != nil || out != "RELEASED" {
+					t.Errorf("release=%q %v", out, err)
 				}
 			}()
-			out, err := run(remoteWorkspaceOwnerPOSIXWitness(key, token, tc.command))
-			close(done)
-			renewErr := <-renewed
-			if renewErr != nil {
-				t.Fatal(renewErr)
+			var out string
+			var err error
+			if tc.name == "renewed stream" {
+				originalExpiry := stateExpiry()
+				if originalExpiry != 1003 {
+					t.Fatalf("initial expiry=%d want 1003", originalExpiry)
+				}
+				type commandResult struct {
+					out string
+					err error
+				}
+				finished := make(chan commandResult, 1)
+				go func() {
+					out, err := run(remoteWorkspaceOwnerPOSIXWitness(key, token, tc.command))
+					finished <- commandResult{out, err}
+				}()
+				joined := false
+				// Unblock and join before test-context cancellation, including Fatal paths.
+				defer func() {
+					if !joined {
+						_ = os.WriteFile(filepath.Join(home, "continue"), nil, 0o600)
+						<-finished
+					}
+				}()
+				deadline := time.NewTimer(15 * time.Second)
+				defer deadline.Stop()
+				for {
+					if _, statErr := os.Stat(filepath.Join(home, "started")); statErr == nil {
+						break
+					} else if !os.IsNotExist(statErr) {
+						t.Fatal(statErr)
+					}
+					select {
+					case result := <-finished:
+						joined = true
+						t.Fatalf("command ended before start: %q %v", result.out, result.err)
+					case <-deadline.C:
+						t.Fatal("command did not signal start")
+					case <-time.After(10 * time.Millisecond):
+					}
+				}
+				// Advance only after user code starts, so pre-start admission is independent.
+				setClock(1002)
+				req.Action = workspaceOwnerRenew
+				if out, err := run(remoteWorkspaceOwnerPOSIX(req)); err != nil || out != "RENEWED" {
+					t.Fatalf("renew=%q %v", out, err)
+				}
+				renewedExpiry := stateExpiry()
+				if renewedExpiry != 1005 || renewedExpiry <= originalExpiry {
+					t.Fatalf("renewed expiry=%d initial=%d want 1005", renewedExpiry, originalExpiry)
+				}
+				setClock(1004)
+				req.Action = workspaceOwnerInspect
+				if out, err := run(remoteWorkspaceOwnerPOSIX(req)); err != nil || out != "CHILD" {
+					t.Fatalf("live child beyond initial expiry=%q %v", out, err)
+				}
+				if err := os.WriteFile(filepath.Join(home, "continue"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				result := <-finished
+				joined = true
+				out, err = result.out, result.err
+			} else {
+				// Register cleanup before spawning, so assertion failures cannot retain it.
+				defer func() {
+					data, readErr := os.ReadFile(filepath.Join(home, "daemon.pid"))
+					if readErr != nil {
+						return
+					}
+					pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+					identity, identityErr := os.ReadFile(filepath.Join(home, "daemon.identity"))
+					if parseErr != nil || identityErr != nil || len(strings.Fields(string(identity))) == 0 {
+						t.Log("daemon cleanup skipped: creation identity unavailable")
+						return
+					}
+					live, probeErr := run("ps -o lstart= -p " + strconv.Itoa(pid))
+					if probeErr != nil || strings.Join(strings.Fields(live), " ") != strings.Join(strings.Fields(string(identity)), " ") {
+						t.Log("daemon cleanup skipped: no matching live identity")
+						return
+					}
+					process, findErr := os.FindProcess(pid)
+					if findErr != nil {
+						t.Errorf("find owned daemon: %v", findErr)
+					} else if killErr := process.Kill(); killErr != nil {
+						t.Errorf("stop owned daemon: %v", killErr)
+					}
+				}()
+				out, err = run(remoteWorkspaceOwnerPOSIXWitness(key, token, tc.command))
 			}
 			code := 0
 			if err != nil {
@@ -272,19 +425,10 @@ func testWorkspaceOwnerDetachedAndRenewingCommand(t *testing.T, path string) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				process, err := os.FindProcess(pid)
-				if err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { _ = process.Kill() })
 				time.Sleep(time.Second)
 				if out, err := run(remoteWorkspaceOwnerPOSIXWitness(key, token, "kill -0 "+strconv.Itoa(pid))); err != nil {
 					t.Fatalf("daemon did not survive subsequent command: %q %v", out, err)
 				}
-			}
-			req.Action = workspaceOwnerRelease
-			if out, err := run(remoteWorkspaceOwnerPOSIX(req)); err != nil || out != "RELEASED" {
-				t.Fatalf("release=%q %v", out, err)
 			}
 		})
 	}

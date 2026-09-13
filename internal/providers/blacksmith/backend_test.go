@@ -29,12 +29,12 @@ func (testClock) Now() time.Time { return time.Now() }
 
 type blacksmithFuncRunner struct {
 	calls     [][]string
-	fn        func(LocalCommandRequest) (LocalCommandResult, error)
-	onRequest func(context.Context, LocalCommandRequest)
+	fn        func(core.LocalCommandRequest) (core.LocalCommandResult, error)
+	onRequest func(context.Context, core.LocalCommandRequest)
 	states    map[string]string
 }
 
-func (r *blacksmithFuncRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *blacksmithFuncRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.calls = append(r.calls, append([]string(nil), req.Args...))
 	if r.onRequest != nil {
 		r.onRequest(ctx, req)
@@ -43,7 +43,7 @@ func (r *blacksmithFuncRunner) Run(ctx context.Context, req LocalCommandRequest)
 		return result, err
 	}
 	if len(req.Args) >= 2 && req.Args[0] == "auth" && req.Args[1] == "status" {
-		return LocalCommandResult{Stdout: "Authenticated organizations:\n  * example-org (current)\n"}, nil
+		return core.LocalCommandResult{Stdout: "Authenticated organizations:\n  * example-org (current)\n"}, nil
 	}
 	if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "status" {
 		id := testBlacksmithFlag(req.Args, "--id")
@@ -51,7 +51,7 @@ func (r *blacksmithFuncRunner) Run(ctx context.Context, req LocalCommandRequest)
 		if state == "" {
 			state = "ready"
 		}
-		return LocalCommandResult{Stdout: testBlacksmithStatus(id, state)}, nil
+		return core.LocalCommandResult{Stdout: testBlacksmithStatus(id, state)}, nil
 	}
 	if r.fn != nil {
 		result, err := r.fn(req)
@@ -63,7 +63,7 @@ func (r *blacksmithFuncRunner) Run(ctx context.Context, req LocalCommandRequest)
 		}
 		return result, err
 	}
-	return LocalCommandResult{}, nil
+	return core.LocalCommandResult{}, nil
 }
 
 func testBlacksmithFlag(args []string, flag string) string {
@@ -105,32 +105,62 @@ func testOwnedBlacksmithClaim(t *testing.T, id, slug, repo string) core.LeaseCla
 
 type blockingSyncRunner struct{}
 
-func (blockingSyncRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (blockingSyncRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	if len(req.Args) >= 2 && req.Args[0] == "auth" {
-		return LocalCommandResult{Stdout: "Authenticated organizations:\n  * example-org (current)\n"}, nil
+		return core.LocalCommandResult{Stdout: "Authenticated organizations:\n  * example-org (current)\n"}, nil
 	}
 	if len(req.Args) >= 2 && req.Args[1] == "status" {
-		return LocalCommandResult{Stdout: testBlacksmithStatus(testBlacksmithFlag(req.Args, "--id"), "ready")}, nil
+		return core.LocalCommandResult{Stdout: testBlacksmithStatus(testBlacksmithFlag(req.Args, "--id"), "ready")}, nil
 	}
 	if req.Stdout != nil {
 		_, _ = req.Stdout.Write([]byte("Syncing from repo root: /repo\n"))
 	}
 	<-ctx.Done()
-	return LocalCommandResult{ExitCode: 1}, ctx.Err()
+	return core.LocalCommandResult{ExitCode: 1}, ctx.Err()
 }
 
-func newTestBlacksmithBackend(cfg Config, runner CommandRunner) *blacksmithBackend {
+func newTestBlacksmithBackend(cfg core.Config, runner core.CommandRunner) *blacksmithBackend {
 	return &blacksmithBackend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: testClock{}, Exec: runner},
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: testClock{}, Exec: runner},
+	}
+}
+
+func TestManagedStateNativeBlacksmithBoundaries(t *testing.T) {
+	for _, route := range []string{"run", "artifact", "native handoff", "native current directory"} {
+		t.Run(route, func(t *testing.T) {
+			repo := t.TempDir()
+			t.Setenv("XDG_STATE_HOME", filepath.Join(repo, "state-base"))
+			runner := &blacksmithFuncRunner{}
+			b := newTestBlacksmithBackend(core.BaseConfig(), runner)
+			var err error
+			switch route {
+			case "run":
+				_, err = b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: repo}, Command: []string{"true"}})
+			case "artifact":
+				_, _, _, err = b.runArtifactTestbox(t.Context(), core.RunRequest{Repo: core.Repo{Root: repo}}, "tbx_fixture", nil, nil, nil, time.Second)
+			case "native handoff":
+				_, _, err = b.runCommandWithSyncGuardFiltered(t.Context(), []string{"testbox", "run"}, io.Discard, io.Discard, true, repo, nil)
+			case "native current directory":
+				t.Chdir(repo)
+				_, err = b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: t.TempDir()}, Command: []string{"true"}})
+			}
+			if err == nil || !strings.Contains(err.Error(), "blacksmith native sync") || len(runner.calls) != 0 {
+				t.Fatalf("err=%v native calls=%v", err, runner.calls)
+			}
+		})
+	}
+	t.Setenv("XDG_STATE_HOME", "")
+	if err := validateBlacksmithNativeSyncScope(t.TempDir()); err != nil {
+		t.Fatalf("unset compatibility: %v", err)
 	}
 }
 
 func TestBlacksmithOrdinaryFlagMetadata(t *testing.T) {
 	for _, provider := range []string{"other", "blacksmith-testbox", " BLACKSMITH "} {
 		for _, value := range []string{"", "same", " padded "} {
-			cfg := Config{Provider: provider, Blacksmith: BlacksmithConfig{Org: "same", Workflow: "same", Job: "same", Ref: "same", IdleTimeout: time.Minute, Debug: true}}
+			cfg := core.Config{Provider: provider, Blacksmith: core.BlacksmithConfig{Org: "same", Workflow: "same", Job: "same", Ref: "same", IdleTimeout: time.Minute, Debug: true}}
 			before := cfg
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			values := RegisterBlacksmithProviderFlags(fs, cfg)
@@ -206,8 +236,8 @@ func TestManualConfigInputFlags(t *testing.T) {
 }
 
 func TestBlacksmithWarmupArgs(t *testing.T) {
-	cfg := baseConfig()
-	cfg.Blacksmith = BlacksmithConfig{
+	cfg := core.BaseConfig()
+	cfg.Blacksmith = core.BlacksmithConfig{
 		Org:         "openclaw",
 		Workflow:    ".github/workflows/testbox.yml",
 		Job:         "check",
@@ -236,7 +266,7 @@ func TestBlacksmithWarmupArgs(t *testing.T) {
 }
 
 func TestBlacksmithWarmupArgsFallsBackToTestboxActionsConfig(t *testing.T) {
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Actions.Workflow = ".github/workflows/ci-check-testbox.yml"
 	cfg.Actions.Job = "check"
 	cfg.Actions.Ref = "trunk"
@@ -252,7 +282,7 @@ func TestBlacksmithWarmupArgsFallsBackToTestboxActionsConfig(t *testing.T) {
 }
 
 func TestBlacksmithWarmupArgsFallsBackToArbitraryActionsWorkflowName(t *testing.T) {
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Actions.Workflow = ".github/workflows/ci.yml"
 	cfg.Actions.Job = "integration"
 	cfg.Actions.Ref = "trunk"
@@ -274,7 +304,7 @@ func TestBlacksmithWarmupArgsDoesNotUseGenericActionsHydrateWorkflow(t *testing.
 		".github/workflows/crabbox-hydrate.yml",
 		".github/workflows/hydrate.yml",
 	} {
-		cfg := baseConfig()
+		cfg := core.BaseConfig()
 		cfg.Actions.Workflow = workflow
 		cfg.Actions.Job = "hydrate"
 		cfg.Actions.Ref = "main"
@@ -286,7 +316,7 @@ func TestBlacksmithWarmupArgsDoesNotUseGenericActionsHydrateWorkflow(t *testing.
 }
 
 func TestBlacksmithWarmupArgsPrefersExplicitConfigOverGenericActionsConfig(t *testing.T) {
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Actions.Workflow = ".github/workflows/crabbox-hydrate.yml"
 	cfg.Actions.Job = "hydrate"
 	cfg.Actions.Ref = "actions-ref"
@@ -309,7 +339,7 @@ func TestBlacksmithWarmupArgsPrefersExplicitConfigOverGenericActionsConfig(t *te
 }
 
 func TestBlacksmithWarmupArgsExplicitWorkflowCanInheritActionsJobAndRef(t *testing.T) {
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Actions.Workflow = ".github/workflows/crabbox.yml"
 	cfg.Actions.Job = "check"
 	cfg.Actions.Ref = "trunk"
@@ -326,7 +356,7 @@ func TestBlacksmithWarmupArgsExplicitWorkflowCanInheritActionsJobAndRef(t *testi
 }
 
 func TestBlacksmithWarmupArgsRequiresWorkflow(t *testing.T) {
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	_, err := blacksmithWarmupArgs(cfg, "")
 	if err == nil || !strings.Contains(err.Error(), "requires blacksmith.workflow") {
 		t.Fatalf("expected workflow error, got %v", err)
@@ -336,14 +366,14 @@ func TestBlacksmithWarmupArgsRequiresWorkflow(t *testing.T) {
 func TestBlacksmithRunRejectsEnvForwardingBeforeWarmup(t *testing.T) {
 	var stderr bytes.Buffer
 	runner := &blacksmithFuncRunner{}
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	backend := &blacksmithBackend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
 	}
-	_, err := backend.Run(context.Background(), RunRequest{
-		Repo:       Repo{Root: "/repo"},
+	_, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:       core.Repo{Root: "/repo"},
 		Command:    []string{"true"},
 		EnvSummary: true,
 		Options: core.LeaseOptions{
@@ -351,7 +381,7 @@ func TestBlacksmithRunRejectsEnvForwardingBeforeWarmup(t *testing.T) {
 		},
 		Env: map[string]string{"API_TOKEN": "secret-token-value"},
 	})
-	var exitErr ExitError
+	var exitErr core.ExitError
 	if !core.AsExitError(err, &exitErr) || exitErr.Code != 2 {
 		t.Fatalf("Run error=%v, want exit 2", err)
 	}
@@ -398,12 +428,12 @@ func TestBlacksmithRunRejectsSparseCheckoutBeforeWarmup(t *testing.T) {
 	git("sparse-checkout", "set", "included")
 
 	runner := &blacksmithFuncRunner{}
-	backend := newTestBlacksmithBackend(baseConfig(), runner)
-	_, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: dir},
+	backend := newTestBlacksmithBackend(core.BaseConfig(), runner)
+	_, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: dir},
 		Command: []string{"true"},
 	})
-	var exitErr ExitError
+	var exitErr core.ExitError
 	if !core.AsExitError(err, &exitErr) || exitErr.Code != 2 {
 		t.Fatalf("Run error=%v, want exit 2", err)
 	}
@@ -420,18 +450,18 @@ func TestBlacksmithRunDoesNotRejectDefaultEnvMetadata(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	var stderr bytes.Buffer
-	runner := &blacksmithFuncRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
-		return LocalCommandResult{ExitCode: 1}, errors.New("warmup failed")
+	runner := &blacksmithFuncRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		return core.LocalCommandResult{ExitCode: 1}, errors.New("warmup failed")
 	}}
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
 	backend := &blacksmithBackend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
 	}
-	_, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: "/repo"},
+	_, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: "/repo"},
 		Command: []string{"true"},
 		Options: core.LeaseOptions{
 			EnvAllow: []string{"CI", "NODE_OPTIONS"},
@@ -452,14 +482,14 @@ func TestBlacksmithRunDoesNotRejectDefaultEnvMetadata(t *testing.T) {
 func TestBlacksmithRunRejectsExplicitDefaultEnvBeforeWarmup(t *testing.T) {
 	var stderr bytes.Buffer
 	runner := &blacksmithFuncRunner{}
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	backend := &blacksmithBackend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
 	}
-	_, err := backend.Run(context.Background(), RunRequest{
-		Repo:       Repo{Root: "/repo"},
+	_, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:       core.Repo{Root: "/repo"},
 		Command:    []string{"true"},
 		EnvSummary: true,
 		Options: core.LeaseOptions{
@@ -467,7 +497,7 @@ func TestBlacksmithRunRejectsExplicitDefaultEnvBeforeWarmup(t *testing.T) {
 		},
 		Env: map[string]string{"NODE_OPTIONS": "--max-old-space-size=4096"},
 	})
-	var exitErr ExitError
+	var exitErr core.ExitError
 	if !core.AsExitError(err, &exitErr) || exitErr.Code != 2 {
 		t.Fatalf("Run error=%v, want exit 2", err)
 	}
@@ -481,18 +511,18 @@ func TestBlacksmithRunIgnoresConfiguredEnvAllowBeforeWarmup(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	var stderr bytes.Buffer
-	runner := &blacksmithFuncRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
-		return LocalCommandResult{ExitCode: 1}, errors.New("warmup failed")
+	runner := &blacksmithFuncRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		return core.LocalCommandResult{ExitCode: 1}, errors.New("warmup failed")
 	}}
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
 	backend := &blacksmithBackend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
 	}
-	_, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: "/repo"},
+	_, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: "/repo"},
 		Command: []string{"true"},
 		Options: core.LeaseOptions{
 			EnvAllow: []string{"API_TOKEN"},
@@ -515,18 +545,18 @@ func TestBlacksmithRunIgnoresConfiguredEnvAllowBeforeWarmup(t *testing.T) {
 
 func TestBlacksmithWarmupFailureRetainsPendingKey(t *testing.T) {
 	isolateBlacksmithOwnership(t)
-	runner := &blacksmithFuncRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
-		return LocalCommandResult{ExitCode: 1}, errors.New("exit status 1")
+	runner := &blacksmithFuncRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		return core.LocalCommandResult{ExitCode: 1}, errors.New("exit status 1")
 	}}
 
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
 	backend := newTestBlacksmithBackend(cfg, runner)
-	_, err := backend.warmupLease(context.Background(), Repo{Root: "/repo"}, false, "")
+	_, err := backend.warmupLease(context.Background(), core.Repo{Root: "/repo"}, false, "")
 	if err == nil || !strings.Contains(err.Error(), "exit status 1") || !strings.Contains(err.Error(), "retained pending_key=tbx_pending_") {
 		t.Fatalf("expected warmup failure with recovery diagnostic: %v", err)
 	}
-	keyPath, keyErr := testboxKeyPath("tbx_probe")
+	keyPath, keyErr := core.TestboxKeyPath("tbx_probe")
 	if keyErr != nil {
 		t.Fatal(keyErr)
 	}
@@ -552,22 +582,22 @@ func TestBlacksmithWarmupFailureStopsPrintedTestbox(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	var stopped string
-	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &blacksmithFuncRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "stop" {
 			for i, arg := range req.Args {
 				if arg == "--id" && i+1 < len(req.Args) {
 					stopped = req.Args[i+1]
 				}
 			}
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		}
-		return LocalCommandResult{ExitCode: 1, Stdout: "tbx_leaked123\n"}, errors.New("exit status 1")
+		return core.LocalCommandResult{ExitCode: 1, Stdout: "tbx_leaked123\n"}, errors.New("exit status 1")
 	}}
 
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
 	backend := newTestBlacksmithBackend(cfg, runner)
-	_, err := backend.warmupLease(context.Background(), Repo{Root: "/repo"}, false, "")
+	_, err := backend.warmupLease(context.Background(), core.Repo{Root: "/repo"}, false, "")
 	if err == nil {
 		t.Fatal("expected warmup failure")
 	}
@@ -583,12 +613,12 @@ func TestBlacksmithOneShotRunRemovesClaimAfterStop(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	var stderr bytes.Buffer
 	cleanupDeadlineSet := false
-	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &blacksmithFuncRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "warmup" {
 			if req.MaxCapturedOutputBytes != blacksmithCommandCaptureBytes || req.DisableOutputCapture {
 				t.Fatalf("warmup capture settings: limit=%d disabled=%t", req.MaxCapturedOutputBytes, req.DisableOutputCapture)
 			}
-			return LocalCommandResult{Stdout: "tbx_abc123\n"}, nil
+			return core.LocalCommandResult{Stdout: "tbx_abc123\n"}, nil
 		}
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "run" {
 			if !req.DisableOutputCapture || req.MaxCapturedOutputBytes != 0 {
@@ -597,25 +627,25 @@ func TestBlacksmithOneShotRunRemovesClaimAfterStop(t *testing.T) {
 			if req.Stdout != nil {
 				_, _ = req.Stdout.Write([]byte("https://github.com/example-org/my-app/actions/runs/123456789\n"))
 			}
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}}
-	runner.onRequest = func(ctx context.Context, req LocalCommandRequest) {
+	runner.onRequest = func(ctx context.Context, req core.LocalCommandRequest) {
 		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "stop" {
 			_, cleanupDeadlineSet = ctx.Deadline()
 		}
 	}
 
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
 	backend := &blacksmithBackend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
 	}
-	_, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: "/repo"},
+	_, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: "/repo"},
 		Command: []string{"true"},
 	})
 	if err != nil {
@@ -627,12 +657,12 @@ func TestBlacksmithOneShotRunRemovesClaimAfterStop(t *testing.T) {
 	if !cleanupDeadlineSet {
 		t.Fatal("one-shot Testbox cleanup did not receive a deadline")
 	}
-	if claim, err := readLeaseClaim("tbx_abc123"); err != nil {
+	if claim, err := core.ReadLeaseClaim("tbx_abc123"); err != nil {
 		t.Fatal(err)
 	} else if claim.LeaseID != "" {
 		t.Fatalf("claim leaked after one-shot stop: %#v", claim)
 	}
-	if keyPath, err := testboxKeyPath("tbx_abc123"); err != nil {
+	if keyPath, err := core.TestboxKeyPath("tbx_abc123"); err != nil {
 		t.Fatal(err)
 	} else if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
 		t.Fatalf("key leaked after one-shot stop: %v", err)
@@ -660,14 +690,14 @@ func TestBlacksmithCleanupPreservesReplacedClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &blacksmithFuncRunner{}
-	backend := newTestBlacksmithBackend(baseConfig(), runner)
+	backend := newTestBlacksmithBackend(core.BaseConfig(), runner)
 	if err := backend.stopClaimedTestbox(t.Context(), claim.LeaseID, claim); err == nil || !strings.Contains(err.Error(), "claim changed") {
 		t.Fatalf("cleanup=%v", err)
 	}
 	if len(runner.calls) != 0 {
 		t.Fatalf("stale snapshot reached provider: %v", runner.calls)
 	}
-	got, err := readLeaseClaim(claim.LeaseID)
+	got, err := core.ReadLeaseClaim(claim.LeaseID)
 	if err != nil || got.RepoRoot != replacement.RepoRoot {
 		t.Fatalf("replacement=%+v err=%v", got, err)
 	}
@@ -678,24 +708,24 @@ func TestBlacksmithKeptRunWritesLeaseOutput(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
-	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &blacksmithFuncRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "warmup" {
-			return LocalCommandResult{Stdout: "tbx_kept123\n"}, nil
+			return core.LocalCommandResult{Stdout: "tbx_kept123\n"}, nil
 		}
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "run" {
 			if req.Stdout != nil {
 				_, _ = req.Stdout.Write([]byte("https://github.com/example-org/my-app/actions/runs/987654321\n"))
 			}
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}}
 
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
 	backend := newTestBlacksmithBackend(cfg, runner)
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: "/repo"},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: "/repo"},
 		Command: []string{"npm", "test"},
 		Keep:    true,
 	})
@@ -775,18 +805,19 @@ func TestBlacksmithReusedRunWritesLeaseOutput(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
-	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &blacksmithFuncRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "run" {
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}}
 
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	testOwnedBlacksmithClaim(t, "tbx_reuse123", "jade-krill", "/repo")
+	prepareBlacksmithGuestKey(t, "tbx_reuse123")
 	backend := newTestBlacksmithBackend(cfg, runner)
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: "/repo"},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: "/repo"},
 		ID:      "tbx_reuse123",
 		Command: []string{"npm", "run", "smoke"},
 	})
@@ -810,29 +841,29 @@ func TestBlacksmithRunTimingJSONIncludesCommandPhases(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
-	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &blacksmithFuncRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "warmup" {
-			return LocalCommandResult{Stdout: "tbx_phase123\n"}, nil
+			return core.LocalCommandResult{Stdout: "tbx_phase123\n"}, nil
 		}
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "run" {
 			if req.Stdout != nil {
 				_, _ = req.Stdout.Write([]byte("CRABBOX_PHASE:delegated\nok\n"))
 			}
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}}
 	var stderr bytes.Buffer
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
 	backend := &blacksmithBackend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
 	}
 
-	_, err := backend.Run(context.Background(), RunRequest{
-		Repo:       Repo{Root: "/repo"},
+	_, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:       core.Repo{Root: "/repo"},
 		Command:    []string{"true"},
 		Label:      "update flow smoke",
 		TimingJSON: true,
@@ -840,7 +871,7 @@ func TestBlacksmithRunTimingJSONIncludesCommandPhases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var report timingReport
+	var report core.TimingReport
 	for _, line := range strings.Split(stderr.String(), "\n") {
 		if strings.HasPrefix(line, "{") {
 			if err := json.Unmarshal([]byte(line), &report); err != nil {
@@ -879,6 +910,7 @@ func TestBlacksmithRunFailureStagesLocalCommand(t *testing.T) {
 			repo := t.TempDir()
 			t.Chdir(repo)
 			const id = "tbx_stages"
+			prepareBlacksmithGuestKey(t, id)
 			testOwnedBlacksmithClaim(t, id, "stage-check", repo)
 			var script, wantStdout, wantStderr strings.Builder
 			var wantPhases = []string{"user-command"}
@@ -890,7 +922,7 @@ func TestBlacksmithRunFailureStagesLocalCommand(t *testing.T) {
 			} {
 				if tt.marked {
 					marker := "CRABBOX_PHASE:" + phase.name + "\n"
-					fmt.Fprintf(&script, "printf '%%s' %s >&2\n", shellQuote(marker))
+					fmt.Fprintf(&script, "printf '%%s' %s >&2\n", core.ShellQuote(marker))
 					if reached {
 						wantStderr.WriteString(marker)
 						wantPhases = append(wantPhases, phase.name)
@@ -901,22 +933,22 @@ func TestBlacksmithRunFailureStagesLocalCommand(t *testing.T) {
 					code = tt.code
 				}
 				receipt := fmt.Sprintf("STAGE %s START\n{\"name\":%q,\"command\":%s,\"exit\":%d,\"seconds\":0.001}\n", phase.name, phase.name, phase.command, code)
-				fmt.Fprintf(&script, "printf '%%s' %s\n", shellQuote(receipt))
+				fmt.Fprintf(&script, "printf '%%s' %s\n", core.ShellQuote(receipt))
 				if reached {
 					wantStdout.WriteString(receipt)
 				}
 				if code != 0 {
 					diagnostic := fmt.Sprintf("[%s] FAILED (exit %d)\nassertion one failed\nassertion two failed\n", phase.name, code)
-					fmt.Fprintf(&script, "printf '%%s' %s >&2\nexit %d\n", shellQuote(diagnostic), code)
+					fmt.Fprintf(&script, "printf '%%s' %s >&2\nexit %d\n", core.ShellQuote(diagnostic), code)
 					wantStderr.WriteString(diagnostic)
 					reached = false
 				}
 			}
 			command := strings.TrimSpace(script.String())
 			var nativeCode, runs int
-			runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+			runner := &blacksmithFuncRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				if len(req.Args) < 2 || req.Args[0] != "testbox" || req.Args[1] != "run" {
-					return LocalCommandResult{ExitCode: 2}, fmt.Errorf("unexpected native operation: %v", req.Args)
+					return core.LocalCommandResult{ExitCode: 2}, fmt.Errorf("unexpected native operation: %v", req.Args)
 				}
 				var gotCommand string
 				for _, arg := range req.Args {
@@ -926,7 +958,7 @@ func TestBlacksmithRunFailureStagesLocalCommand(t *testing.T) {
 					}
 				}
 				if gotCommand != command {
-					return LocalCommandResult{ExitCode: 2}, fmt.Errorf("delegated command changed: got %q want %q", gotCommand, command)
+					return core.LocalCommandResult{ExitCode: 2}, fmt.Errorf("delegated command changed: got %q want %q", gotCommand, command)
 				}
 				runs++
 				cmd := exec.CommandContext(t.Context(), "/bin/sh", "-c", gotCommand)
@@ -935,24 +967,24 @@ func TestBlacksmithRunFailureStagesLocalCommand(t *testing.T) {
 				cmd.WaitDelay = time.Second
 				err := cmd.Run()
 				if cmd.ProcessState == nil {
-					return LocalCommandResult{ExitCode: 2}, err
+					return core.LocalCommandResult{ExitCode: 2}, err
 				}
 				nativeCode = cmd.ProcessState.ExitCode()
-				return LocalCommandResult{ExitCode: nativeCode}, err
+				return core.LocalCommandResult{ExitCode: nativeCode}, err
 			}}
-			backend := newTestBlacksmithBackend(baseConfig(), runner)
+			backend := newTestBlacksmithBackend(core.BaseConfig(), runner)
 			var stdout, stderr bytes.Buffer
 			backend.rt.Stdout, backend.rt.Stderr = &stdout, &stderr
-			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Root: repo}, ID: id, Command: []string{command}, ShellMode: true, TimingJSON: true})
+			result, err := backend.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: repo}, ID: id, Command: []string{command}, ShellMode: true, TimingJSON: true})
 			t.Logf("command:\n%s\nstdout:\n%sstderr:\n%snative exit=%d delegated exit=%d error=%v", command, stdout.String(), stderr.String(), nativeCode, result.ExitCode, err)
-			var ee ExitError
+			var ee core.ExitError
 			if runs != 1 || nativeCode != tt.code || result.ExitCode != tt.code || (tt.code == 0 && err != nil) || (tt.code != 0 && (!errors.As(err, &ee) || ee.Code != tt.code)) {
 				t.Fatalf("runs=%d native=%d result=%+v err=%v", runs, nativeCode, result, err)
 			}
 			if stdout.String() != wantStdout.String() || !strings.Contains(stderr.String(), wantStderr.String()) || result.CommandText != command {
 				t.Fatal("command or workload output changed")
 			}
-			var report timingReport
+			var report core.TimingReport
 			for _, line := range strings.Split(stderr.String(), "\n") {
 				if strings.HasPrefix(line, "{") {
 					if err := json.Unmarshal([]byte(line), &report); err != nil {
@@ -1034,9 +1066,9 @@ func TestBlacksmithRunProofArtifactsPersistSuccessStreams(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
-	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &blacksmithFuncRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "warmup" {
-			return LocalCommandResult{Stdout: "tbx_proof123\n"}, nil
+			return core.LocalCommandResult{Stdout: "tbx_proof123\n"}, nil
 		}
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "run" {
 			if req.Stdout != nil {
@@ -1047,15 +1079,15 @@ func TestBlacksmithRunProofArtifactsPersistSuccessStreams(t *testing.T) {
 			if req.Stderr != nil {
 				_, _ = req.Stderr.Write([]byte("stderr detail\n"))
 			}
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}}
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
 	backend := newTestBlacksmithBackend(cfg, runner)
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:      Repo{Root: repo},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:      core.Repo{Root: repo},
 		Command:   []string{"pnpm", "test"},
 		EmitProof: filepath.Join(repo, "proof.md"),
 	})
@@ -1107,24 +1139,24 @@ func TestBlacksmithRunCollectsArtifactsBeforeOneShotCleanup(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	testWriteBlacksmithFile(t, repo, "reports/manifest.json", `{"ok":true}`)
 	runCalls := 0
-	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &blacksmithFuncRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "warmup" {
-			return LocalCommandResult{Stdout: "tbx_artifacts\n"}, nil
+			return core.LocalCommandResult{Stdout: "tbx_artifacts\n"}, nil
 		}
 		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "run" {
 			runCalls++
 			return runSyntheticBlacksmithCommand(t, t.Context(), req)
 		}
 		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "stop" {
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}}
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
 	backend := newTestBlacksmithBackend(cfg, runner)
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:                  Repo{Root: repo},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:                  core.Repo{Root: repo},
 		Command:               []string{"true"},
 		ArtifactGlobs:         []string{"reports/**"},
 		RequiredArtifactGlobs: []string{"reports/manifest.json"},
@@ -1154,9 +1186,9 @@ func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	t.Chdir(repo)
 	runCalls := 0
-	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &blacksmithFuncRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "warmup" {
-			return LocalCommandResult{Stdout: "tbx_artifactfail\n"}, nil
+			return core.LocalCommandResult{Stdout: "tbx_artifactfail\n"}, nil
 		}
 		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "run" {
 			runCalls++
@@ -1165,24 +1197,24 @@ func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
 		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "stop" {
 			t.Fatalf("stop should not run after artifact failure with keep-on-failure: %#v", req.Args)
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}}
 	var stderr bytes.Buffer
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
 	backend := &blacksmithBackend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
 	}
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:                  Repo{Root: repo},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:                  core.Repo{Root: repo},
 		Command:               []string{"true"},
 		RequiredArtifactGlobs: []string{"reports/manifest.json"},
 		KeepOnFailure:         true,
 		TimingJSON:            true,
 	})
-	var exitErr ExitError
+	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
 		t.Fatalf("err=%v want artifact exit 7", err)
 	}
@@ -1230,9 +1262,9 @@ func TestBlacksmithKeepOnFailureKeepsTestboxAndWritesBundle(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	t.Chdir(t.TempDir())
-	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &blacksmithFuncRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "warmup" {
-			return LocalCommandResult{Stdout: "tbx_keepfail\n"}, nil
+			return core.LocalCommandResult{Stdout: "tbx_keepfail\n"}, nil
 		}
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "run" {
 			if req.Stdout != nil {
@@ -1241,24 +1273,24 @@ func TestBlacksmithKeepOnFailureKeepsTestboxAndWritesBundle(t *testing.T) {
 			if req.Stderr != nil {
 				_, _ = req.Stderr.Write([]byte("delegated stderr\n"))
 			}
-			return LocalCommandResult{ExitCode: 7}, errors.New("exit status 7")
+			return core.LocalCommandResult{ExitCode: 7}, errors.New("exit status 7")
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}}
 	var stderr bytes.Buffer
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
 	backend := &blacksmithBackend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
 	}
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:          Repo{Root: "/repo"},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:          core.Repo{Root: "/repo"},
 		Command:       []string{"false"},
 		KeepOnFailure: true,
 	})
-	var exitErr ExitError
+	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
 		t.Fatalf("err=%v want exit 7", err)
 	}
@@ -1322,21 +1354,21 @@ func TestBlacksmithRunTerminatesSyncStall(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("CRABBOX_BLACKSMITH_SYNC_TIMEOUT_MS", "1")
-	if _, _, err := ensureTestboxKey("tbx_syncstall"); err != nil {
+	if _, _, err := core.EnsureTestboxKey("tbx_syncstall"); err != nil {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
 	backend := &blacksmithBackend{
 		spec: Provider{}.Spec(),
-		cfg:  baseConfig(),
-		rt: Runtime{
+		cfg:  core.BaseConfig(),
+		rt: core.Runtime{
 			Stdout: io.Discard,
 			Stderr: &stderr,
 			Clock:  testClock{},
 			Exec:   blockingSyncRunner{},
 		},
 	}
-	code := backend.runTestbox(context.Background(), "tbx_syncstall", []string{"pnpm", "test"}, false, false, nil, nil, nil)
+	code := backend.runTestbox(context.Background(), "tbx_syncstall", []string{"pnpm", "test"}, false, false, nil, nil, nil, nil)
 	if code != 124 {
 		t.Fatalf("exit=%d want 124", code)
 	}
@@ -1378,24 +1410,24 @@ func TestBlacksmithSyncTrackerHandlesSplitMarkers(t *testing.T) {
 }
 
 func TestBlacksmithBackendUsesInjectedCommandRunnerForListAndStatus(t *testing.T) {
-	runner := &blacksmithFuncRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
-		return LocalCommandResult{
+	runner := &blacksmithFuncRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		return core.LocalCommandResult{
 			Stdout: "tbx_123 ready my-app .github/workflows/testbox.yml test main 2026-05-06T00:00:00Z\n",
 		}, nil
 	}}
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
 	cfg.Blacksmith.Job = "test"
 	cfg.Blacksmith.Ref = "main"
 	backend := newTestBlacksmithBackend(cfg, runner)
-	servers, err := backend.List(context.Background(), ListRequest{})
+	servers, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	if len(servers) != 1 || servers[0].CloudID != "tbx_123" {
 		t.Fatalf("servers=%#v", servers)
 	}
-	state, err := backend.Status(context.Background(), StatusRequest{ID: "tbx_123"})
+	state, err := backend.Status(context.Background(), core.StatusRequest{ID: "tbx_123"})
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
@@ -1408,13 +1440,13 @@ func TestBlacksmithBackendUsesInjectedCommandRunnerForListAndStatus(t *testing.T
 }
 
 func TestBlacksmithStatusWaitTimeoutMentionsQueuedState(t *testing.T) {
-	runner := &blacksmithFuncRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
-		return LocalCommandResult{
+	runner := &blacksmithFuncRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		return core.LocalCommandResult{
 			Stdout: "tbx_123 queued openclaw .github/workflows/testbox.yml test main 2026-05-06T00:00:00Z\n",
 		}, nil
 	}}
-	backend := newTestBlacksmithBackend(baseConfig(), runner)
-	_, err := backend.Status(context.Background(), StatusRequest{ID: "tbx_123", Wait: true, WaitTimeout: -time.Second})
+	backend := newTestBlacksmithBackend(core.BaseConfig(), runner)
+	_, err := backend.Status(context.Background(), core.StatusRequest{ID: "tbx_123", Wait: true, WaitTimeout: -time.Second})
 	if err == nil {
 		t.Fatal("expected queued timeout")
 	}
@@ -1431,15 +1463,15 @@ func TestBlacksmithStatusWaitReturnsOnContextCancellation(t *testing.T) {
 	t.Cleanup(func() { blacksmithStatusPollDelay = originalDelay })
 
 	ctx, cancel := context.WithCancel(context.Background())
-	runner := &blacksmithFuncRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &blacksmithFuncRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		cancel()
-		return LocalCommandResult{
+		return core.LocalCommandResult{
 			Stdout: "tbx_123 queued openclaw .github/workflows/testbox.yml test main 2026-05-06T00:00:00Z\n",
 		}, nil
 	}}
-	backend := newTestBlacksmithBackend(baseConfig(), runner)
+	backend := newTestBlacksmithBackend(core.BaseConfig(), runner)
 	started := time.Now()
-	_, err := backend.Status(ctx, StatusRequest{ID: "tbx_123", Wait: true, WaitTimeout: time.Minute})
+	_, err := backend.Status(ctx, core.StatusRequest{ID: "tbx_123", Wait: true, WaitTimeout: time.Minute})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Status err=%v, want context.Canceled", err)
 	}
@@ -1452,13 +1484,13 @@ func TestBlacksmithStatusWaitReturnsOnContextCancellation(t *testing.T) {
 }
 
 func TestBlacksmithBackendListJSONKeepsParsedTableShape(t *testing.T) {
-	runner := &blacksmithFuncRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
-		return LocalCommandResult{
+	runner := &blacksmithFuncRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		return core.LocalCommandResult{
 			Stdout: "tbx_123 ready my-app .github/workflows/testbox.yml test main 2026-05-06T00:00:00Z\n",
 		}, nil
 	}}
-	backend := newTestBlacksmithBackend(baseConfig(), runner)
-	view, err := backend.ListJSON(context.Background(), ListRequest{})
+	backend := newTestBlacksmithBackend(core.BaseConfig(), runner)
+	view, err := backend.ListJSON(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatalf("list json: %v", err)
 	}
@@ -1472,13 +1504,13 @@ func TestBlacksmithBackendListJSONKeepsParsedTableShape(t *testing.T) {
 }
 
 func TestBlacksmithBackendListJSONCanIncludeAllStates(t *testing.T) {
-	runner := &blacksmithFuncRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
-		return LocalCommandResult{
+	runner := &blacksmithFuncRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		return core.LocalCommandResult{
 			Stdout: "tbx_123 hydrating openclaw .github/workflows/testbox.yml test main 2026-05-06T00:00:00Z\n",
 		}, nil
 	}}
-	backend := newTestBlacksmithBackend(baseConfig(), runner)
-	view, err := backend.ListJSON(context.Background(), ListRequest{All: true})
+	backend := newTestBlacksmithBackend(core.BaseConfig(), runner)
+	view, err := backend.ListJSON(context.Background(), core.ListRequest{All: true})
 	if err != nil {
 		t.Fatalf("list json: %v", err)
 	}
@@ -1495,8 +1527,8 @@ func TestBlacksmithBackendListJSONCanIncludeAllStates(t *testing.T) {
 }
 
 func TestBlacksmithDoctorListsInventoryOnly(t *testing.T) {
-	runner := &blacksmithFuncRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
-		return LocalCommandResult{
+	runner := &blacksmithFuncRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		return core.LocalCommandResult{
 			Stdout: strings.Join([]string{
 				"tbx_123 ready my-app .github/workflows/testbox.yml test main 2026-05-06T00:00:00Z",
 				"tbx_456 hydrating my-app .github/workflows/testbox.yml test main 2026-05-06T00:01:00Z",
@@ -1505,7 +1537,7 @@ func TestBlacksmithDoctorListsInventoryOnly(t *testing.T) {
 			}, "\n"),
 		}, nil
 	}}
-	backend := newTestBlacksmithBackend(baseConfig(), runner)
+	backend := newTestBlacksmithBackend(core.BaseConfig(), runner)
 	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
@@ -1523,14 +1555,14 @@ func TestBlacksmithDoctorListsInventoryOnly(t *testing.T) {
 }
 
 func TestApplyBlacksmithFlagOverrides(t *testing.T) {
-	defaults := baseConfig()
-	defaults.Blacksmith = BlacksmithConfig{
+	defaults := core.BaseConfig()
+	defaults.Blacksmith = core.BlacksmithConfig{
 		Org:      "default-org",
 		Workflow: "default.yml",
 		Job:      "default-job",
 		Ref:      "main",
 	}
-	cfg := Config{}
+	cfg := core.Config{}
 	fs := newFlagSet("test", io.Discard)
 	values := RegisterBlacksmithProviderFlags(fs, defaults)
 	if err := parseFlags(fs, []string{
@@ -1572,7 +1604,7 @@ func TestParseBlacksmithListIgnoresEmptyMessage(t *testing.T) {
 }
 
 func TestBlacksmithRunArgs(t *testing.T) {
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Blacksmith.Org = "openclaw"
 	got := blacksmithRunArgs(cfg, "tbx_abc123", "/tmp/key", []string{"OPENCLAW_TESTBOX=1", "pnpm", "check:changed"}, true, false)
 	want := []string{
@@ -1661,5 +1693,32 @@ func TestResolveBlacksmithDiscoveryID(t *testing.T) {
 	}
 	if got, err := resolveBlacksmithDiscoveryID("blue-lobster"); err != nil || got != "tbx_abc123" {
 		t.Fatalf("slug read-only discovery=%q err=%v", got, err)
+	}
+}
+
+func TestConfigShowCompleteRawContract(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config core.BlacksmithConfig
+		fields []core.ProviderConfigShowField
+	}{{name: "zero", config: core.BlacksmithConfig{Org: "", Workflow: "", Job: "", Ref: "", IdleTimeout: 0, Debug: false}, fields: []core.ProviderConfigShowField{{JSONName: "org", JSONValue: "", TextName: "org", TextValue: "-"}, {JSONName: "workflow", JSONValue: "", TextName: "workflow", TextValue: "-"}, {JSONName: "job", JSONValue: "", TextName: "job", TextValue: "-"}, {JSONName: "ref", JSONValue: "", TextName: "ref", TextValue: "-"}, {JSONName: "idleTimeout", JSONValue: "0s", TextName: "idle_timeout", TextValue: "0s"}, {JSONName: "debug", JSONValue: false, TextName: "debug", TextValue: "false"}}},
+		{name: "raw", config: core.BlacksmithConfig{Org: " Org reference ", Workflow: " Workflow reference ", Job: " Job reference ", Ref: " Ref reference ", IdleTimeout: -1500 * time.Millisecond, Debug: true}, fields: []core.ProviderConfigShowField{{JSONName: "org", JSONValue: " Org reference ", TextName: "org", TextValue: " Org reference "}, {JSONName: "workflow", JSONValue: " Workflow reference ", TextName: "workflow", TextValue: " Workflow reference "}, {JSONName: "job", JSONValue: " Job reference ", TextName: "job", TextValue: " Job reference "}, {JSONName: "ref", JSONValue: " Ref reference ", TextName: "ref", TextValue: " Ref reference "}, {JSONName: "idleTimeout", JSONValue: "-1.5s", TextName: "idle_timeout", TextValue: "-1.5s"}, {JSONName: "debug", JSONValue: true, TextName: "debug", TextValue: "true"}}},
+		{name: "whitespace", config: core.BlacksmithConfig{Org: " \t ", Workflow: " \t ", Job: " \t ", Ref: " \t ", IdleTimeout: -1500 * time.Millisecond, Debug: true}, fields: []core.ProviderConfigShowField{{JSONName: "org", JSONValue: " \t ", TextName: "org", TextValue: " \t "}, {JSONName: "workflow", JSONValue: " \t ", TextName: "workflow", TextValue: " \t "}, {JSONName: "job", JSONValue: " \t ", TextName: "job", TextValue: " \t "}, {JSONName: "ref", JSONValue: " \t ", TextName: "ref", TextValue: " \t "}, {JSONName: "idleTimeout", JSONValue: "-1.5s", TextName: "idle_timeout", TextValue: "-1.5s"}, {JSONName: "debug", JSONValue: true, TextName: "debug", TextValue: "true"}}}} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.Config{Provider: "unselected-display"}
+			cfg.Blacksmith = tc.config
+			want := core.ProviderConfigShowSection{JSONKey: "blacksmith", TextLabel: "blacksmith", Providers: []string{"blacksmith-testbox"}, Fields: tc.fields}
+			for _, selection := range []string{"unselected-display", "blacksmith-testbox"} {
+				cfg.Provider = selection
+				before := cfg
+				got := (Provider{}).ConfigShowSection(cfg)
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("selection=%s section=%#v want%#v", selection, got, want)
+				}
+				if !reflect.DeepEqual(cfg, before) {
+					t.Fatal("passive projector mutated config")
+				}
+			}
+		})
 	}
 }

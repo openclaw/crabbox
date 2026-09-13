@@ -74,7 +74,7 @@ func TestSmolvmClaimWaitHonorsCallerDeadline(t *testing.T) {
 				done := make(chan error, 1)
 				go func() {
 					if operation == "stop" {
-						done <- b.Stop(ctx, StopRequest{ID: claim.LeaseID})
+						done <- b.Stop(ctx, core.StopRequest{ID: claim.LeaseID})
 					} else {
 						_, err := b.reuseMachine(ctx, fake, claim.LeaseID, repo, true)
 						done <- err
@@ -113,7 +113,7 @@ func TestSmolvmCanceledPublicationPreservesSuccessorAndCause(t *testing.T) {
 	b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	repo, successorRepo := Repo{Root: t.TempDir()}, t.TempDir()
+	repo, successorRepo := core.Repo{Root: t.TempDir()}, t.TempDir()
 	entered, release := make(chan struct{}), make(chan struct{})
 	holderDone := make(chan error, 1)
 	var successor core.LeaseClaim
@@ -216,7 +216,7 @@ func TestStopRequiresExactSmolvmClaim(t *testing.T) {
 					t.Fatal(err)
 				}
 				b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
-				if err := b.Stop(context.Background(), StopRequest{ID: identifier}); err == nil {
+				if err := b.Stop(context.Background(), core.StopRequest{ID: identifier}); err == nil {
 					t.Fatal("unsafe stop succeeded")
 				}
 				if fake.deletedID != "" {
@@ -276,7 +276,7 @@ func TestStopSmolvmConfirmsDeletionBeforeRemovingClaim(t *testing.T) {
 				fake.deleteErr = errors.New("denied")
 			}
 			b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
-			err := b.Stop(ctx, StopRequest{ID: "blue"})
+			err := b.Stop(ctx, core.StopRequest{ID: "blue"})
 			_, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID)
 			if readErr != nil {
 				t.Fatal(readErr)
@@ -302,7 +302,7 @@ func TestSmolvmRunRetainsChangedClaim(t *testing.T) {
 		successor = seedSmolvmClaim(t, id, machineSlug(id, fake.machine), "mach_successor", t.TempDir(), nil)
 	}
 	b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
-	result, err := b.Run(context.Background(), RunRequest{Repo: Repo{Root: t.TempDir()}, NoSync: true, Command: []string{"true"}})
+	result, err := b.Run(context.Background(), core.RunRequest{Repo: core.Repo{Root: t.TempDir()}, NoSync: true, Command: []string{"true"}})
 	if err == nil || result.ExitCode != 1 || result.ErrorKind != core.RunErrorProvider {
 		t.Fatalf("changed claim cleanup result=%+v err=%v", result, err)
 	}
@@ -323,7 +323,7 @@ func TestSmolvmSetupRollbackUsesCreatedIdentity(t *testing.T) {
 			withFakeAPI(t, fake)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			primaryFailure, cleanupFailure := exit(7, "typed start failed"), exit(2, "typed cleanup failed")
+			primaryFailure, cleanupFailure := core.Exit(7, "typed start failed"), core.Exit(2, "typed cleanup failed")
 			fake.createHook = func(f *fakeAPI) {
 				if mode == "incomplete-create" {
 					f.machine.CreatedAt = ""
@@ -363,12 +363,12 @@ func TestSmolvmSetupRollbackUsesCreatedIdentity(t *testing.T) {
 				fake.deleted = true
 				return nil
 			}
-			repo := Repo{Root: t.TempDir()}
+			repo := core.Repo{Root: t.TempDir()}
 			if mode == "no-repo" {
 				repo.Root = ""
 			}
 			b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
-			err := b.Warmup(ctx, WarmupRequest{Repo: repo})
+			err := b.Warmup(ctx, core.WarmupRequest{Repo: repo})
 			if err == nil {
 				t.Fatal("expected setup error")
 			}
@@ -405,7 +405,7 @@ func TestSmolvmReuseNeverAdoptsLegacyClaim(t *testing.T) {
 			fake := &fakeAPI{machine: ownedTestMachine()}
 			withFakeAPI(t, fake)
 			b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
-			_, err := b.Run(context.Background(), RunRequest{ID: "blue", Repo: Repo{Root: repo}, Reclaim: reclaim, NoSync: true, Command: []string{"true"}})
+			_, err := b.Run(context.Background(), core.RunRequest{ID: "blue", Repo: core.Repo{Root: repo}, Reclaim: reclaim, NoSync: true, Command: []string{"true"}})
 			if err == nil || len(fake.verbs) != 0 {
 				t.Fatalf("err=%v verbs=%v", err, fake.verbs)
 			}

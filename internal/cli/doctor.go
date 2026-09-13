@@ -177,7 +177,7 @@ All flags:
 			}
 		}
 		if !ok {
-			return exit(1, "doctor found problems")
+			return Exit(1, "doctor found problems")
 		}
 		return nil
 	}
@@ -289,7 +289,7 @@ All flags:
 			remote := "printf 'git='; git --version; printf 'rsync='; rsync --version | head -1; printf 'curl='; curl --version | head -1; printf 'jq='; jq --version"
 			if cfg.Profiles[cfg.Profile].Doctor.Enabled {
 				if isWindowsNativeTarget(target) {
-					return exit(2, "profile doctor is not supported for native Windows targets")
+					return Exit(2, "profile doctor is not supported for native Windows targets")
 				}
 				remote = remoteProfileDoctorCommand(cfg.Profile, cfg.Profiles[cfg.Profile].Doctor, profileDoctorWorkdirForLease(cfg, leaseID))
 			}
@@ -309,7 +309,7 @@ All flags:
 					}
 					_ = json.NewEncoder(a.Stdout).Encode(doctorJSONOutput{OK: false, Provider: provider, Checks: checks})
 				}
-				return exit(7, "remote doctor failed for %s: %v", resolvedDoctorID, err)
+				return Exit(7, "remote doctor failed for %s: %v", resolvedDoctorID, err)
 			}
 			record("ok", "remote", fmt.Sprintf("%s\n%s", resolvedDoctorID, out), map[string]string{"id": resolvedDoctorID})
 		}
@@ -509,7 +509,7 @@ func applyDoctorFromRunContext(ctx context.Context, cfg *Config, runID string) (
 		return CoordinatorRun{}, nil, err
 	}
 	if !ok {
-		return CoordinatorRun{}, nil, exit(2, "doctor --from-run requires a configured coordinator")
+		return CoordinatorRun{}, nil, Exit(2, "doctor --from-run requires a configured coordinator")
 	}
 	run, err := coord.Run(ctx, runID)
 	if err != nil {

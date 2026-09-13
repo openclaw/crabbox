@@ -3,6 +3,8 @@ package nomad
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -394,7 +397,7 @@ func TestWarmupTimingJSONIncludesNomadLease(t *testing.T) {
 	}
 }
 
-func TestWarmupCleansRegisteredJobWhenReadinessFailsBeforeClaim(t *testing.T) {
+func TestWarmupCleansRegisteredJobWhenReadinessFails(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	fake.evalStatus = nomadapi.EvalStatusFailed
 	b, _, _ := testBackend(t, fake)
@@ -405,6 +408,10 @@ func TestWarmupCleansRegisteredJobWhenReadinessFailsBeforeClaim(t *testing.T) {
 	}
 	if len(fake.deregisters) != 1 {
 		t.Fatalf("deregisters=%v, want one cleanup", fake.deregisters)
+	}
+	var displayed core.ExitError
+	if !core.AsExitError(err, &displayed) || !strings.Contains(displayed.Message, fake.deregisters[0]) || !strings.Contains(displayed.Message, "lease=") || !strings.Contains(displayed.Message, "rolled back") || strings.Contains(displayed.Message, "recover with") {
+		t.Fatalf("warmup rollback diagnostic lost identity or implied retention: %v", err)
 	}
 	claims, err := listNomadLeaseClaims()
 	if err != nil {
@@ -525,20 +532,61 @@ func TestStopRetainsClaimWhenRemovalCannotBeConfirmed(t *testing.T) {
 func TestSetupFailureRefusesCleanupAfterRemoteOwnershipChanges(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	b, _, _ := testBackend(t, fake)
-	expected, err := buildJobSpec(b.cfg, jobSpecInput{LeaseID: "cbx_474747474747", Slug: "changed-crab", JobID: "crabbox-474747474747"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	fake.jobs[stringValue(expected.ID)] = cloneJob(expected)
-	fake.jobs[stringValue(expected.ID)].Meta[metadataLeaseID] = "cbx_someone_else"
+	claim := createClaim(t, b, "cbx_474747474747", "changed-crab", "crabbox-474747474747", "alloc-47")
+	claim = markRegistrationClaim(t, claim, fake.jobs[claim.Labels[claimLabelJobID]], registrationConfirmed)
+	fake.jobs[claim.Labels[claimLabelJobID]].Meta[metadataLeaseID] = "cbx_someone_else"
 
-	err = b.cleanupUnclaimedJob(context.Background(), fake, expected, errors.New("readiness failed"))
+	_, err := b.rollbackRegistration(context.Background(), fake, claim, errors.New("readiness failed"))
 	if err == nil || !strings.Contains(err.Error(), "ownership changed") {
 		t.Fatalf("err=%v, want ownership refusal", err)
 	}
 	if len(fake.deregisters) != 0 {
 		t.Fatalf("deregisters=%v", fake.deregisters)
 	}
+}
+
+// Legacy fixture construction intentionally has no registration-attempt markers.
+func writeNomadClaim(cfg Config, leaseID, slug string, repo Repo, reclaim bool, ready allocationReadiness, expiresAt time.Time) (LeaseClaim, error) {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope(cfg), cfg.Pond, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
+		return LeaseClaim{}, err
+	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		return LeaseClaim{}, err
+	}
+	return updateLeaseClaimLabelsIfUnchanged(leaseID, claim, claimLabels(cfg, leaseID, slug, ready, expiresAt))
+}
+
+func markRegistrationClaim(t *testing.T, claim LeaseClaim, job *nomadapi.Job, state string) LeaseClaim {
+	t.Helper()
+	metadata, err := json.Marshal(job.Meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := make(map[string]string, len(claim.Labels)+3)
+	for key, value := range claim.Labels {
+		labels[key] = value
+	}
+	labels[registrationVersionLabel] = "1"
+	labels[registrationStateLabel] = state
+	delete(labels, claimLabelAllocationID)
+	keys := make([]string, 0, len(job.Meta))
+	for key := range job.Meta {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	keyJSON, err := json.Marshal(keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(metadata)
+	labels[registrationMetaKeysLabel] = string(keyJSON)
+	labels[registrationMetaHashLabel] = hex.EncodeToString(digest[:])
+	updated, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return updated
 }
 
 func TestCleanupDryRunAndLiveOwnedExpiredClaims(t *testing.T) {
@@ -1118,7 +1166,7 @@ func TestRunLiteralArgumentsSurviveNativeStdinTransport(t *testing.T) {
 	b, _, _ := testBackend(t, fake)
 	workdir := t.TempDir()
 	marker := filepath.Join(workdir, "must-not-exist")
-	_, err = b.runCommand(context.Background(), fake, allocationReadiness{JobID: "job", AllocationID: "alloc", Task: "task"}, RunRequest{Command: []string{"printf", "%s", ";", "touch", marker}, CommandLiteralArgs: map[int]bool{2: true}}, workdir)
+	_, err = b.runCommand(context.Background(), fake, allocationReadiness{JobID: "job", AllocationID: "alloc", Task: "task"}, RunRequest{Command: []string{"printf", "%s", ";", "touch", marker}, CommandLiteralArgs: map[int]bool{2: true}}, workdir, b.rt.Stdout, b.rt.Stderr)
 	if err != nil {
 		t.Fatal(err)
 	}

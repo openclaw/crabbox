@@ -14,7 +14,7 @@ import (
 )
 
 func TestWebVNCDaemonProcessStartIdentityFromCreationTime(t *testing.T) {
-	identity, err := webVNCDaemonProcessStartIdentity(os.Getpid())
+	identity, err := LocalProcessStartIdentity(os.Getpid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,7 +24,7 @@ func TestWebVNCDaemonProcessStartIdentityFromCreationTime(t *testing.T) {
 }
 
 func TestWebVNCDaemonProcessCommandFromNativeQuery(t *testing.T) {
-	command, alive := webVNCDaemonProcessCommand(os.Getpid())
+	command, alive := LocalProcessCommand(os.Getpid())
 	if !alive {
 		t.Fatal("current Windows test process was not inspectable")
 	}

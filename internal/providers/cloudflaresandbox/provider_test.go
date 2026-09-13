@@ -153,7 +153,7 @@ func TestCloudflareSandboxOptionalTokenAndRawTimeout(t *testing.T) {
 		if err := validateProviderConfig(cfg); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := newBridgeClient(cfg, Runtime{HTTP: &http.Client{}}); err != nil {
+		if _, err := newBridgeClient(cfg, core.Runtime{HTTP: &http.Client{}}); err != nil {
 			t.Fatalf("optional token=%v", err)
 		}
 		got, err := cloudflareSandboxWorkdir(cfg)
@@ -217,14 +217,14 @@ func TestValidateBridgeURL(t *testing.T) {
 func TestValidateConfigRejectsBadValues(t *testing.T) {
 	tests := []struct {
 		name    string
-		mutate  func(*Config)
+		mutate  func(*core.Config)
 		wantErr string
 	}{
-		{name: "relative workdir", mutate: func(cfg *Config) { cfg.CloudflareSandbox.Workdir = "workspace" }, wantErr: "workdir must be absolute"},
-		{name: "broad workdir", mutate: func(cfg *Config) { cfg.CloudflareSandbox.Workdir = "/workspace" }, wantErr: "too broad"},
-		{name: "outside workspace workdir", mutate: func(cfg *Config) { cfg.CloudflareSandbox.Workdir = "/etc/crabbox" }, wantErr: "must be under /workspace/<dedicated-subdir>"},
-		{name: "workspace traversal workdir", mutate: func(cfg *Config) { cfg.CloudflareSandbox.Workdir = "/workspace/../etc/crabbox" }, wantErr: "must be under /workspace/<dedicated-subdir>"},
-		{name: "negative exec timeout", mutate: func(cfg *Config) { cfg.CloudflareSandbox.ExecTimeoutSecs = -1 }, wantErr: "execTimeoutSecs must be non-negative"},
+		{name: "relative workdir", mutate: func(cfg *core.Config) { cfg.CloudflareSandbox.Workdir = "workspace" }, wantErr: "workdir must be absolute"},
+		{name: "broad workdir", mutate: func(cfg *core.Config) { cfg.CloudflareSandbox.Workdir = "/workspace" }, wantErr: "too broad"},
+		{name: "outside workspace workdir", mutate: func(cfg *core.Config) { cfg.CloudflareSandbox.Workdir = "/etc/crabbox" }, wantErr: "must be under /workspace/<dedicated-subdir>"},
+		{name: "workspace traversal workdir", mutate: func(cfg *core.Config) { cfg.CloudflareSandbox.Workdir = "/workspace/../etc/crabbox" }, wantErr: "must be under /workspace/<dedicated-subdir>"},
+		{name: "negative exec timeout", mutate: func(cfg *core.Config) { cfg.CloudflareSandbox.ExecTimeoutSecs = -1 }, wantErr: "execTimeoutSecs must be non-negative"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -241,7 +241,7 @@ func TestValidateConfigRejectsBadValues(t *testing.T) {
 func TestConfigureReturnsRuntimeBackends(t *testing.T) {
 	provider := Provider{}
 	cfg := testConfig()
-	configured, err := provider.Configure(cfg, Runtime{})
+	configured, err := provider.Configure(cfg, core.Runtime{})
 	if err != nil {
 		t.Fatalf("Configure err=%v", err)
 	}
@@ -261,8 +261,8 @@ func TestConfigureReturnsRuntimeBackends(t *testing.T) {
 	}
 }
 
-func testConfig() Config {
-	cfg := Config{}
+func testConfig() core.Config {
+	cfg := core.Config{}
 	cfg.CloudflareSandbox.BridgeURL = "https://bridge.example.test"
 	cfg.CloudflareSandbox.Workdir = "/workspace/crabbox"
 	cfg.CloudflareSandbox.ExecTimeoutSecs = 600

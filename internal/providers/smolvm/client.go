@@ -135,10 +135,10 @@ type smolvmExecCommandRequest struct {
 	TimeoutSeconds *int              `json:"timeoutSeconds,omitempty"`
 }
 
-var newAPI = func(cfg Config, rt Runtime) (api, error) {
+var newAPI = func(cfg core.Config, rt core.Runtime) (api, error) {
 	apiKey := strings.TrimSpace(cfg.Smolvm.APIKey)
 	if apiKey == "" {
-		return nil, exit(2, "provider=%s requires CRABBOX_SMOLVM_API_KEY, SMOLMACHINES_API_KEY, or SMK_API_KEY", providerName)
+		return nil, core.Exit(2, "provider=%s requires CRABBOX_SMOLVM_API_KEY, SMOLMACHINES_API_KEY, or SMK_API_KEY", providerName)
 	}
 
 	// There is no official Go SDK for the hosted smolfleet control plane
@@ -159,26 +159,26 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 	}, nil
 }
 
-func smolvmEndpoint(cfg Config) (string, error) {
-	base := blank(strings.TrimSpace(cfg.Smolvm.BaseURL), core.SmolvmConfigDefaultBaseURL)
+func smolvmEndpoint(cfg core.Config) (string, error) {
+	base := core.Blank(strings.TrimSpace(cfg.Smolvm.BaseURL), core.SmolvmConfigDefaultBaseURL)
 	parsed, err := url.Parse(base)
 	if err != nil {
-		return "", exit(2, "%s url %q is invalid", providerName, base)
+		return "", core.Exit(2, "%s url %q is invalid", providerName, base)
 	}
 	if parsed.User != nil {
-		return "", exit(2, "%s url must not include userinfo", providerName)
+		return "", core.Exit(2, "%s url must not include userinfo", providerName)
 	}
 	if parsed.Scheme == "" || parsed.Host == "" {
-		return "", exit(2, "%s url %q is invalid", providerName, base)
+		return "", core.Exit(2, "%s url %q is invalid", providerName, base)
 	}
-	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
-		return "", exit(2, "%s url %q must use https unless it targets localhost", providerName, base)
+	if parsed.Scheme != "https" && !shared.IsLoopbackHTTPURL(parsed) {
+		return "", core.Exit(2, "%s url %q must use https unless it targets localhost", providerName, base)
 	}
 	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", exit(2, "%s url %q must not include query or fragment components", providerName, base)
+		return "", core.Exit(2, "%s url %q must not include query or fragment components", providerName, base)
 	}
 	if !trustedSmolvmAPIHost(parsed) && !customSmolvmBaseURLAllowed() {
-		return "", exit(2, "%s url host %q is not an official Smol Machines endpoint; set CRABBOX_SMOLVM_ALLOW_CUSTOM_BASE_URL=1 to send credentials to a custom control plane", providerName, parsed.Hostname())
+		return "", core.Exit(2, "%s url host %q is not an official Smol Machines endpoint; set CRABBOX_SMOLVM_ALLOW_CUSTOM_BASE_URL=1 to send credentials to a custom control plane", providerName, parsed.Hostname())
 	}
 	base = strings.TrimRight(parsed.String(), "/")
 	return base, nil
@@ -201,10 +201,6 @@ func customSmolvmBaseURLAllowed() bool {
 	default:
 		return false
 	}
-}
-
-func isLoopbackHTTPURL(parsed *url.URL) bool {
-	return shared.IsLoopbackHTTPURL(parsed)
 }
 
 func (c *client) CreateMachine(ctx context.Context, req createRequest) (machineData, error) {
@@ -325,7 +321,7 @@ func (c *client) InjectArchive(ctx context.Context, machineID, localPath, target
 		absTarget = "/workspace"
 	}
 	return c.withDecodedFile(ctx, machineID, data, "", `"${TMPDIR:-/tmp}"`,
-		"tar -xzf \"$upload_dir/payload\" -C "+shellQuote(absTarget), "archive extract")
+		"tar -xzf \"$upload_dir/payload\" -C "+core.ShellQuote(absTarget), "archive extract")
 }
 
 func (c *client) WriteFile(ctx context.Context, machineID, remotePath, content string) error {
@@ -333,11 +329,11 @@ func (c *client) WriteFile(ctx context.Context, machineID, remotePath, content s
 	if !strings.HasPrefix(absPath, "/") {
 		absPath = "/workspace/" + strings.TrimLeft(absPath, "/")
 	}
-	parent := shellQuote(path.Dir(absPath))
+	parent := core.ShellQuote(path.Dir(absPath))
 	// Stage beside the destination so publication stays on one filesystem.
-	prepare := "mkdir -p " + parent + "\n[ ! -d " + shellQuote(absPath) + " ] || { echo 'file destination is a directory' >&2; exit 1; }\n"
+	prepare := "mkdir -p " + parent + "\n[ ! -d " + core.ShellQuote(absPath) + " ] || { echo 'file destination is a directory' >&2; exit 1; }\n"
 	return c.withDecodedFile(ctx, machineID, []byte(content), prepare, parent,
-		"mv -f \"$upload_dir/payload\" "+shellQuote(absPath), "write")
+		"mv -f \"$upload_dir/payload\" "+core.ShellQuote(absPath), "write")
 }
 
 // withDecodedFile owns only this exec's private staging directory. Its trap
@@ -447,7 +443,7 @@ func commandExitError(prefix string, result execResult) error {
 	if msg == "" {
 		msg = "exit " + strconv.Itoa(result.ExitCode)
 	}
-	return exit(result.ExitCode, "%s: %s", prefix, msg)
+	return core.Exit(result.ExitCode, "%s: %s", prefix, msg)
 }
 
 func isNotFound(err error) bool {

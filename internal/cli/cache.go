@@ -51,7 +51,7 @@ func (a App) cacheStats(ctx context.Context, args []string) error {
 		*id = fs.Arg(0)
 	}
 	if *id == "" {
-		return exit(2, "usage: crabbox cache stats --id <lease-id-or-slug>")
+		return Exit(2, "usage: crabbox cache stats --id <lease-id-or-slug>")
 	}
 	target, cfg, _, err := a.cacheTarget(ctx, *id, *reclaim)
 	if err != nil {
@@ -101,10 +101,10 @@ func (a App) cachePurge(ctx context.Context, args []string) error {
 		*id = fs.Arg(0)
 	}
 	if *id == "" {
-		return exit(2, "usage: crabbox cache purge --id <lease-id-or-slug> --kind <kind> --force")
+		return Exit(2, "usage: crabbox cache purge --id <lease-id-or-slug> --kind <kind> --force")
 	}
 	if !*force {
-		return exit(2, "cache purge requires --force")
+		return Exit(2, "cache purge requires --force")
 	}
 	target, cfg, leaseID, err := a.cacheTarget(ctx, *id, *reclaim)
 	if err != nil {
@@ -112,10 +112,10 @@ func (a App) cachePurge(ctx context.Context, args []string) error {
 	}
 	enabled := enabledCacheKinds(cfg.Cache)
 	if *kind != "all" && !enabled[*kind] {
-		return exit(2, "cache kind %q is disabled by config", *kind)
+		return Exit(2, "cache kind %q is disabled by config", *kind)
 	}
 	if isWindowsNativeTarget(target) {
-		return exit(2, "cache purge is not supported for target=windows windows.mode=normal")
+		return Exit(2, "cache purge is not supported for target=windows windows.mode=normal")
 	}
 	if err := runSSHQuiet(ctx, target, remoteCachePurge(*kind, enabled)); err != nil {
 		return err
@@ -136,10 +136,10 @@ func (a App) cacheWarm(ctx context.Context, args []string) error {
 		command = command[1:]
 	}
 	if *id == "" {
-		return exit(2, "cache warm requires --id")
+		return Exit(2, "cache warm requires --id")
 	}
 	if len(command) == 0 {
-		return exit(2, "usage: crabbox cache warm --id <lease-id-or-slug> -- <command...>")
+		return Exit(2, "usage: crabbox cache warm --id <lease-id-or-slug> -- <command...>")
 	}
 	target, cfg, leaseID, err := a.cacheTarget(ctx, *id, *reclaim)
 	if err != nil {
@@ -182,7 +182,7 @@ func (a App) cacheTarget(ctx context.Context, id string, reclaim bool) (SSHTarge
 	}
 	server, target, leaseID, err := a.resolveLeaseTargetForRepoWithConfig(ctx, &cfg, id, repo, reclaim)
 	if err == nil {
-		if claimErr := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, &server, target, repo.Root, reclaim); claimErr != nil {
+		if claimErr := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(server), cfg, &server, target, repo.Root, reclaim); claimErr != nil {
 			return SSHTarget{}, Config{}, "", claimErr
 		}
 		a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")

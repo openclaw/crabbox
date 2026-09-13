@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type githubAPIResponseError struct {
@@ -71,7 +73,7 @@ func (c client) currentUser(ctx context.Context) (githubUser, error) {
 	}
 	user.Login = strings.TrimSpace(user.Login)
 	if user.ID <= 0 || user.Login == "" {
-		return githubUser{}, exit(4, "github-codespaces API returned incomplete authenticated user identity")
+		return githubUser{}, core.Exit(4, "github-codespaces API returned incomplete authenticated user identity")
 	}
 	return user, nil
 }
@@ -166,7 +168,7 @@ func (m *machineRef) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func newClient(cfg GitHubCodespacesConfig, rt Runtime, token string) client {
+func newClient(cfg core.GitHubCodespacesConfig, rt core.Runtime, token string) client {
 	httpClient := rt.HTTP
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 60 * time.Second}
@@ -187,7 +189,7 @@ func newClient(cfg GitHubCodespacesConfig, rt Runtime, token string) client {
 func (c client) createCodespace(ctx context.Context, req createCodespaceRequest) (codespace, error) {
 	owner, repo, ok := strings.Cut(strings.TrimSpace(req.Repo), "/")
 	if !ok || owner == "" || repo == "" {
-		return codespace{}, exit(2, "github-codespaces repo must be owner/name")
+		return codespace{}, core.Exit(2, "github-codespaces repo must be owner/name")
 	}
 	body := map[string]any{}
 	if req.Ref != "" {
@@ -240,7 +242,7 @@ func (c client) listCodespaces(ctx context.Context) ([]codespace, error) {
 func (c client) getCodespace(ctx context.Context, name string) (codespace, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return codespace{}, exit(2, "github-codespaces codespace name is required")
+		return codespace{}, core.Exit(2, "github-codespaces codespace name is required")
 	}
 	var out codespace
 	if err := c.do(ctx, http.MethodGet, "/user/codespaces/"+url.PathEscape(name), nil, &out, nil); err != nil {
@@ -252,7 +254,7 @@ func (c client) getCodespace(ctx context.Context, name string) (codespace, error
 func (c client) startCodespace(ctx context.Context, name string) (codespace, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return codespace{}, exit(2, "github-codespaces codespace name is required")
+		return codespace{}, core.Exit(2, "github-codespaces codespace name is required")
 	}
 	var out codespace
 	if err := c.do(ctx, http.MethodPost, "/user/codespaces/"+url.PathEscape(name)+"/start", nil, &out, map[int]bool{http.StatusNotModified: true}); err != nil {
@@ -267,7 +269,7 @@ func (c client) startCodespace(ctx context.Context, name string) (codespace, err
 func (c client) stopCodespace(ctx context.Context, name string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return exit(2, "github-codespaces codespace name is required")
+		return core.Exit(2, "github-codespaces codespace name is required")
 	}
 	return c.do(ctx, http.MethodPost, "/user/codespaces/"+url.PathEscape(name)+"/stop", nil, nil, map[int]bool{http.StatusNotModified: true})
 }
@@ -275,7 +277,7 @@ func (c client) stopCodespace(ctx context.Context, name string) error {
 func (c client) deleteCodespace(ctx context.Context, name string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return exit(2, "github-codespaces codespace name is required")
+		return core.Exit(2, "github-codespaces codespace name is required")
 	}
 	return c.do(ctx, http.MethodDelete, "/user/codespaces/"+url.PathEscape(name), nil, nil, map[int]bool{http.StatusNotModified: true})
 }
@@ -283,7 +285,7 @@ func (c client) deleteCodespace(ctx context.Context, name string) error {
 func (c client) listMachines(ctx context.Context, repo, ref string) ([]codespaceMachine, error) {
 	owner, name, ok := strings.Cut(strings.TrimSpace(repo), "/")
 	if !ok || owner == "" || name == "" {
-		return nil, exit(2, "github-codespaces repo must be owner/name")
+		return nil, core.Exit(2, "github-codespaces repo must be owner/name")
 	}
 	path := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(name) + "/codespaces/machines"
 	if strings.TrimSpace(ref) != "" {
@@ -360,7 +362,7 @@ func (c client) doWithHeader(ctx context.Context, method, path string, body any,
 		return nil, readErr
 	}
 	if len(data) > githubCodespacesMaxResponseSize {
-		return nil, exit(4, "github-codespaces API response exceeds %d-byte limit", githubCodespacesMaxResponseSize)
+		return nil, core.Exit(4, "github-codespaces API response exceeds %d-byte limit", githubCodespacesMaxResponseSize)
 	}
 	if accepted == nil {
 		accepted = map[int]bool{}
@@ -380,7 +382,7 @@ func validateGitHubCodespacesAPIBase(raw string) error {
 		return fmt.Errorf("invalid github-codespaces API URL: %w", err)
 	}
 	if parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return exit(2, "github-codespaces API URL must be an origin with an optional path")
+		return core.Exit(2, "github-codespaces API URL must be an origin with an optional path")
 	}
 	if strings.EqualFold(parsed.Scheme, "https") {
 		return nil
@@ -390,7 +392,7 @@ func validateGitHubCodespacesAPIBase(raw string) error {
 	if strings.EqualFold(parsed.Scheme, "http") && (strings.EqualFold(host, "localhost") || (ip != nil && ip.IsLoopback())) {
 		return nil
 	}
-	return exit(2, "github-codespaces API URL must use https; http is allowed only for loopback testing")
+	return core.Exit(2, "github-codespaces API URL must use https; http is allowed only for loopback testing")
 }
 
 func githubAPIError(status int, retryAfter, body string) error {

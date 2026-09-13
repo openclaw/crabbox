@@ -46,7 +46,7 @@ func TestEnsureCrabboxClaimNamespaceDurableResyncsExistingChain(t *testing.T) {
 	base := t.TempDir()
 	stateRoot := filepath.Join(base, "fresh", "state")
 	t.Setenv("XDG_STATE_HOME", stateRoot)
-	stateDir, err := crabboxStateDir()
+	stateDir, err := CrabboxStateDir()
 	if err != nil {
 		t.Fatal(err)
 	}

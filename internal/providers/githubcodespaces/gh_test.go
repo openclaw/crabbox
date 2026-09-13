@@ -6,11 +6,13 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestGHRunnerCodespaceSSHConfigArgv(t *testing.T) {
-	runner := &recordingRunner{result: LocalCommandResult{Stdout: "Host sturdy-space\n"}}
-	gh := newGHRunner(GitHubCodespacesConfig{GHPath: "/opt/gh"}, Runtime{Exec: runner})
+	runner := &recordingRunner{result: core.LocalCommandResult{Stdout: "Host sturdy-space\n"}}
+	gh := newGHRunner(core.GitHubCodespacesConfig{GHPath: "/opt/gh"}, core.Runtime{Exec: runner})
 	out, err := gh.codespaceSSHConfig(context.Background(), "sturdy-space")
 	if err != nil {
 		t.Fatal(err)
@@ -32,7 +34,7 @@ func TestGHRunnerCodespaceSSHConfigArgv(t *testing.T) {
 
 func TestGHRunnerAuthStatusReadOnly(t *testing.T) {
 	runner := &recordingRunner{}
-	gh := newGHRunner(GitHubCodespacesConfig{GHPath: "gh"}, Runtime{Exec: runner})
+	gh := newGHRunner(core.GitHubCodespacesConfig{GHPath: "gh"}, core.Runtime{Exec: runner})
 	if err := gh.authStatus(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -44,10 +46,10 @@ func TestGHRunnerAuthStatusReadOnly(t *testing.T) {
 
 func TestGHRunnerAuthStatusFallsBackForOlderCLI(t *testing.T) {
 	runner := &recordingRunner{results: []recordingResult{
-		{result: LocalCommandResult{ExitCode: 1, Stderr: "unknown flag: --active"}},
+		{result: core.LocalCommandResult{ExitCode: 1, Stderr: "unknown flag: --active"}},
 		{},
 	}}
-	gh := newGHRunner(GitHubCodespacesConfig{GHPath: "gh"}, Runtime{Exec: runner})
+	gh := newGHRunner(core.GitHubCodespacesConfig{GHPath: "gh"}, core.Runtime{Exec: runner})
 	if err := gh.authStatus(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -66,8 +68,8 @@ func TestGHRunnerRoutesAuthAndCodespaceCommandsToConfiguredAPIHost(t *testing.T)
 	t.Setenv("GH_TOKEN", "dotcom-test-token")
 	t.Setenv("GITHUB_TOKEN", "dotcom-fallback-token")
 	t.Setenv("GH_ENTERPRISE_TOKEN", "enterprise-test-token")
-	runner := &recordingRunner{result: LocalCommandResult{Stdout: "token"}}
-	gh := newGHRunner(GitHubCodespacesConfig{GHPath: "gh", APIURL: "https://api.enterprise.example:8443/api/v3"}, Runtime{Exec: runner})
+	runner := &recordingRunner{result: core.LocalCommandResult{Stdout: "token"}}
+	gh := newGHRunner(core.GitHubCodespacesConfig{GHPath: "gh", APIURL: "https://api.enterprise.example:8443/api/v3"}, core.Runtime{Exec: runner})
 	if _, err := gh.authToken(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -101,8 +103,8 @@ func TestGHRunnerRoutesAuthAndCodespaceCommandsToConfiguredAPIHost(t *testing.T)
 func TestGHRunnerMapsGHECloudAPIHostToCLIHost(t *testing.T) {
 	t.Setenv("GH_TOKEN", "dotcom-test-token")
 	t.Setenv("GH_ENTERPRISE_TOKEN", "enterprise-test-token")
-	runner := &recordingRunner{result: LocalCommandResult{Stdout: "token"}}
-	gh := newGHRunner(GitHubCodespacesConfig{GHPath: "gh", APIURL: "https://api.octocorp.ghe.com"}, Runtime{Exec: runner})
+	runner := &recordingRunner{result: core.LocalCommandResult{Stdout: "token"}}
+	gh := newGHRunner(core.GitHubCodespacesConfig{GHPath: "gh", APIURL: "https://api.octocorp.ghe.com"}, core.Runtime{Exec: runner})
 	if _, err := gh.authToken(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -130,8 +132,8 @@ func TestGHRunnerMapsGHECloudAPIHostToCLIHost(t *testing.T) {
 }
 
 func TestGHRunnerMapsGHECloudDefaultHTTPSPortToPortlessCLIHost(t *testing.T) {
-	runner := &recordingRunner{result: LocalCommandResult{Stdout: "value"}}
-	gh := newGHRunner(GitHubCodespacesConfig{GHPath: "gh", APIURL: "https://api.octocorp.ghe.com:443"}, Runtime{Exec: runner})
+	runner := &recordingRunner{result: core.LocalCommandResult{Stdout: "value"}}
+	gh := newGHRunner(core.GitHubCodespacesConfig{GHPath: "gh", APIURL: "https://api.octocorp.ghe.com:443"}, core.Runtime{Exec: runner})
 	if _, err := gh.authToken(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -146,10 +148,10 @@ func TestGHRunnerMapsGHECloudDefaultHTTPSPortToPortlessCLIHost(t *testing.T) {
 
 func TestGHRunnerErrorRedactsToken(t *testing.T) {
 	runner := &recordingRunner{
-		result: LocalCommandResult{ExitCode: 1, Stderr: "denied ghp_this_token_value_is_redacted"},
+		result: core.LocalCommandResult{ExitCode: 1, Stderr: "denied ghp_this_token_value_is_redacted"},
 		err:    fmt.Errorf("ghp_this_token_value_is_redacted failed"),
 	}
-	gh := newGHRunner(GitHubCodespacesConfig{GHPath: "gh"}, Runtime{Exec: runner})
+	gh := newGHRunner(core.GitHubCodespacesConfig{GHPath: "gh"}, core.Runtime{Exec: runner})
 	_, err := gh.codespaceSSHConfig(context.Background(), "sturdy-space")
 	if err == nil {
 		t.Fatal("expected error")
@@ -182,18 +184,18 @@ func TestRedactSecretTextRedactsStatelessInstallationToken(t *testing.T) {
 }
 
 type recordingRunner struct {
-	calls   []LocalCommandRequest
-	result  LocalCommandResult
+	calls   []core.LocalCommandRequest
+	result  core.LocalCommandResult
 	err     error
 	results []recordingResult
 }
 
 type recordingResult struct {
-	result LocalCommandResult
+	result core.LocalCommandResult
 	err    error
 }
 
-func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
 	if len(r.results) > 0 {
 		result := r.results[0]
@@ -203,7 +205,7 @@ func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (Local
 	return r.result, r.err
 }
 
-func (r *recordingRunner) onlyCall(t *testing.T) LocalCommandRequest {
+func (r *recordingRunner) onlyCall(t *testing.T) core.LocalCommandRequest {
 	t.Helper()
 	if len(r.calls) != 1 {
 		t.Fatalf("call count=%d, want 1", len(r.calls))

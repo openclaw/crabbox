@@ -88,11 +88,11 @@ func SelectParallelsFleetConfig(ctx context.Context, cfg Config, runner CommandR
 			continue
 		}
 		if source != "" && !parallelsVMListContains(vms, source) {
-			lastErr = exit(4, "Parallels source VM %q not found on host %s", source, parallelsHostRefForConfig(candidate))
+			lastErr = Exit(4, "Parallels source VM %q not found on host %s", source, parallelsHostRefForConfig(candidate))
 			continue
 		}
 		if !parallelsHostWithinCapacity(candidate, vms) {
-			lastErr = exit(5, "Parallels host %s is at maxVMs capacity", parallelsHostRefForConfig(candidate))
+			lastErr = Exit(5, "Parallels host %s is at maxVMs capacity", parallelsHostRefForConfig(candidate))
 			continue
 		}
 		return candidate, nil
@@ -126,7 +126,7 @@ func ResolveParallelsVM(ctx context.Context, cfg Config, runner CommandRunner, i
 	if lastErr != nil {
 		return Config{}, ParallelsVM{}, lastErr
 	}
-	return Config{}, ParallelsVM{}, exit(4, "parallels VM not found: %s", id)
+	return Config{}, ParallelsVM{}, Exit(4, "parallels VM not found: %s", id)
 }
 
 func parallelsVMMatchesHandle(vm ParallelsVM, id string) bool {
@@ -141,7 +141,7 @@ func parallelsVMMatchesHandle(vm ParallelsVM, id string) bool {
 	if leaseID == id || strings.ReplaceAll(leaseID, "_", "-") == strings.ReplaceAll(id, "_", "-") {
 		return true
 	}
-	return slug != "" && normalizeLeaseSlug(slug) == normalizeLeaseSlug(id)
+	return slug != "" && NormalizeLeaseSlug(slug) == NormalizeLeaseSlug(id)
 }
 
 func (c *ParallelsClient) ListCrabboxServers(ctx context.Context) ([]Server, error) {
@@ -177,14 +177,14 @@ func (c *ParallelsClient) GetVM(ctx context.Context, id string) (ParallelsVM, er
 		return ParallelsVM{}, err
 	}
 	if len(vms) == 0 {
-		return ParallelsVM{}, exit(4, "parallels VM not found: %s", id)
+		return ParallelsVM{}, Exit(4, "parallels VM not found: %s", id)
 	}
 	return vms[0], nil
 }
 
 func (c *ParallelsClient) Clone(ctx context.Context, source, snapshotID, leaseID, slug string, keep bool) (Server, error) {
 	if strings.TrimSpace(source) == "" {
-		return Server{}, exit(2, "parallels.source or parallels.sourceId is required")
+		return Server{}, Exit(2, "parallels.source or parallels.sourceId is required")
 	}
 	name := parallelsLeaseVMName(leaseID, slug)
 	args := []string{"clone", source, "--name", name}
@@ -195,7 +195,7 @@ func (c *ParallelsClient) Clone(ctx context.Context, source, snapshotID, leaseID
 	switch strings.ToLower(strings.TrimSpace(c.Cfg.Parallels.CloneMode)) {
 	case "", "linked":
 		if strings.TrimSpace(snapshotID) == "" {
-			return Server{}, exit(2, "Parallels linked clones require --parallels-source-snapshot or --parallels-source-snapshot-id; otherwise prlctl creates a source-side linked-clone snapshot")
+			return Server{}, Exit(2, "Parallels linked clones require --parallels-source-snapshot or --parallels-source-snapshot-id; otherwise prlctl creates a source-side linked-clone snapshot")
 		}
 		if snapshotID != "" {
 			snapshot, ok, err := c.snapshotByID(ctx, source, snapshotID)
@@ -211,15 +211,15 @@ func (c *ParallelsClient) Clone(ctx context.Context, source, snapshotID, leaseID
 		args = append(args, "--linked")
 	case "full":
 		if snapshotID != "" {
-			return Server{}, exit(2, "Parallels snapshot forks require cloneMode=linked; prlctl selects snapshots only for linked clones")
+			return Server{}, Exit(2, "Parallels snapshot forks require cloneMode=linked; prlctl selects snapshots only for linked clones")
 		}
 	case "unlink":
 		if snapshotID != "" {
-			return Server{}, exit(2, "Parallels snapshot forks require cloneMode=linked; prlctl selects snapshots only for linked clones")
+			return Server{}, Exit(2, "Parallels snapshot forks require cloneMode=linked; prlctl selects snapshots only for linked clones")
 		}
 		args = append(args, "--unlink")
 	default:
-		return Server{}, exit(2, "parallels.cloneMode must be linked, full, or unlink")
+		return Server{}, Exit(2, "parallels.cloneMode must be linked, full, or unlink")
 	}
 	if snapshotID != "" {
 		args = append(args, "-i", snapshotID)
@@ -228,7 +228,7 @@ func (c *ParallelsClient) Clone(ctx context.Context, source, snapshotID, leaseID
 	if err != nil {
 		return Server{}, commandOutputError("parallels clone", result, err)
 	}
-	labels := directLeaseLabels(c.Cfg, leaseID, slug, parallelsProvider, "", keep, time.Now().UTC())
+	labels := DirectLeaseLabels(c.Cfg, leaseID, slug, parallelsProvider, "", keep, time.Now().UTC())
 	labels["source"] = source
 	labels["host"] = parallelsHostRefForConfig(c.Cfg)
 	if snapshotID != "" {
@@ -265,7 +265,7 @@ func (c *ParallelsClient) Delete(ctx context.Context, id string) error {
 		return err
 	}
 	if !strings.HasPrefix(vm.Name, "crabbox-") {
-		return exit(2, "refusing to delete non-Crabbox Parallels VM %q", vm.Name)
+		return Exit(2, "refusing to delete non-Crabbox Parallels VM %q", vm.Name)
 	}
 	if strings.EqualFold(vm.State, "running") {
 		_ = c.Stop(ctx, id)
@@ -287,14 +287,14 @@ func (c *ParallelsClient) SetLeaseLabels(leaseID string, labels map[string]strin
 func (c *ParallelsClient) InstallSSHKey(ctx context.Context, vmID string, cfg Config, publicKey string) error {
 	user := strings.TrimSpace(cfg.SSHUser)
 	if user == "" {
-		return exit(2, "parallels guest SSH user is required")
+		return Exit(2, "parallels guest SSH user is required")
 	}
 	publicKey = strings.TrimSpace(publicKey)
 	if publicKey == "" {
-		return exit(2, "parallels guest SSH public key is empty")
+		return Exit(2, "parallels guest SSH public key is empty")
 	}
 	if cfg.TargetOS == targetWindows {
-		return c.runWindowsPowerShellFile(ctx, vmID, "install-ssh", windowsBootstrapPowerShell(cfg, publicKey))
+		return c.runWindowsPowerShellFile(ctx, vmID, "install-ssh", WindowsBootstrapPowerShell(cfg, publicKey))
 	}
 	args := []string{"/bin/sh", "-lc", parallelsPOSIXInstallSSHKeyScript(user, publicKey)}
 	result, err := c.prlctl(ctx, nil, append([]string{"exec", vmID}, args...)...)
@@ -335,7 +335,7 @@ $text = [Text.Encoding]::UTF8.GetString($bytes)
 }
 
 func (c *ParallelsClient) runWindowsPowerShell(ctx context.Context, vmID, script string) error {
-	args := strings.Fields(powershellCommand(script))
+	args := strings.Fields(PowershellCommand(script))
 	result, err := c.prlctl(ctx, nil, append([]string{"exec", vmID}, args...)...)
 	if err != nil {
 		return commandOutputError("parallels windows powershell", result, err)
@@ -349,7 +349,7 @@ func (c *ParallelsClient) EnsureGuestReady(ctx context.Context, vmID string, cfg
 	}
 	user := strings.TrimSpace(cfg.SSHUser)
 	if user == "" {
-		return exit(2, "parallels guest SSH user is required")
+		return Exit(2, "parallels guest SSH user is required")
 	}
 	workRoot := strings.TrimSpace(cfg.WorkRoot)
 	if workRoot == "" {
@@ -378,7 +378,7 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 			}
 		}
 		if time.Now().After(deadline) {
-			return ParallelsVM{}, exit(5, "timed out waiting for Parallels VM %s IP; last_state=%s", id, blank(last.State, "-"))
+			return ParallelsVM{}, Exit(5, "timed out waiting for Parallels VM %s IP; last_state=%s", id, blank(last.State, "-"))
 		}
 		select {
 		case <-ctx.Done():
@@ -397,7 +397,7 @@ func (c *ParallelsClient) WaitForGuestExec(ctx context.Context, id string, cfg C
 	for {
 		var args []string
 		if cfg.TargetOS == targetWindows {
-			args = strings.Fields(powershellCommand(`"ok" | Out-Null`))
+			args = strings.Fields(PowershellCommand(`"ok" | Out-Null`))
 		} else {
 			args = []string{"/bin/sh", "-lc", "true"}
 		}
@@ -407,7 +407,7 @@ func (c *ParallelsClient) WaitForGuestExec(ctx context.Context, id string, cfg C
 		}
 		lastErr = err
 		if time.Now().After(deadline) {
-			return exit(5, "timed out waiting for Parallels guest exec in %s: %v", id, lastErr)
+			return Exit(5, "timed out waiting for Parallels guest exec in %s: %v", id, lastErr)
 		}
 		select {
 		case <-ctx.Done():
@@ -464,7 +464,7 @@ func (c *ParallelsClient) Snapshot(ctx context.Context, vmID, nameOrID string) (
 			return snapshot, nil
 		}
 	}
-	return ParallelsSnapshot{}, exit(4, "Parallels snapshot %q not found for VM %s", value, vmID)
+	return ParallelsSnapshot{}, Exit(4, "Parallels snapshot %q not found for VM %s", value, vmID)
 }
 
 func (c *ParallelsClient) snapshotByID(ctx context.Context, vmID, id string) (ParallelsSnapshot, bool, error) {
@@ -499,7 +499,7 @@ func (c *ParallelsClient) CreateSnapshot(ctx context.Context, vmID, name, descri
 			return snapshot, nil
 		}
 	}
-	return ParallelsSnapshot{}, exit(5, "Parallels snapshot %q was created but not found in snapshot-list", name)
+	return ParallelsSnapshot{}, Exit(5, "Parallels snapshot %q was created but not found in snapshot-list", name)
 }
 
 func (c *ParallelsClient) SwitchSnapshot(ctx context.Context, vmID, snapshotID string, skipResume bool) error {
@@ -730,13 +730,13 @@ func validateParallelsSnapshotCloneMode(snapshot ParallelsSnapshot, cloneMode st
 	switch strings.ToLower(strings.TrimSpace(cloneMode)) {
 	case "", "linked":
 		if !strings.EqualFold(snapshot.State, "poweroff") {
-			return exit(2, "Parallels linked clones require a power-off snapshot; snapshot %q state=%s", snapshot.Name, blank(snapshot.State, "unknown"))
+			return Exit(2, "Parallels linked clones require a power-off snapshot; snapshot %q state=%s", snapshot.Name, blank(snapshot.State, "unknown"))
 		}
 		return nil
 	case "full", "unlink":
-		return exit(2, "Parallels snapshot forks require cloneMode=linked; prlctl selects snapshots only for linked clones")
+		return Exit(2, "Parallels snapshot forks require cloneMode=linked; prlctl selects snapshots only for linked clones")
 	default:
-		return exit(2, "parallels.cloneMode must be linked, full, or unlink")
+		return Exit(2, "parallels.cloneMode must be linked, full, or unlink")
 	}
 }
 
@@ -910,7 +910,7 @@ func ParallelsLabelsFromName(name string) map[string]string {
 
 func parallelsLeaseVMName(leaseID, slug string) string {
 	base := strings.ReplaceAll(leaseID, "_", "-")
-	if normalized := normalizeLeaseSlug(slug); normalized != "" {
+	if normalized := NormalizeLeaseSlug(slug); normalized != "" {
 		return "crabbox-" + base + "-" + normalized
 	}
 	return "crabbox-" + base
@@ -923,12 +923,12 @@ func parallelsLeaseFromVMName(name string) (string, string) {
 	}
 	parts := strings.SplitN(rest, "-", 3)
 	if len(parts) < 2 || parts[0] != "cbx" {
-		return "", normalizeLeaseSlug(rest)
+		return "", NormalizeLeaseSlug(rest)
 	}
 	leaseID := "cbx_" + parts[1]
 	slug := ""
 	if len(parts) == 3 {
-		slug = normalizeLeaseSlug(parts[2])
+		slug = NormalizeLeaseSlug(parts[2])
 	}
 	return leaseID, slug
 }
@@ -979,7 +979,7 @@ func removeParallelsLeaseLabels(leaseID string) {
 }
 
 func parallelsLeaseLabelsPath(leaseID string) (string, error) {
-	dir, err := crabboxStateDir()
+	dir, err := CrabboxStateDir()
 	if err != nil {
 		return "", err
 	}

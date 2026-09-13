@@ -1,10 +1,7 @@
 package cubesandbox
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,18 +11,9 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
-
-type cubesandboxAPI interface {
-	CreateSandbox(context.Context, cubesandboxCreateSandboxRequest) (cubesandboxSandbox, error)
-	ConnectSandbox(context.Context, string, int) (cubesandboxSession, error)
-	GetSandbox(context.Context, string) (cubesandboxSandbox, error)
-	ListSandboxes(context.Context, map[string]string) ([]cubesandboxSandbox, error)
-	DeleteSandbox(context.Context, string) error
-	UploadFile(context.Context, cubesandboxSession, string, io.Reader) error
-	StartProcess(context.Context, cubesandboxSession, cubesandboxProcessRequest) (int, error)
-}
 
 type cubesandboxClient struct {
 	apiKey      string
@@ -42,48 +30,6 @@ const (
 	cubesandboxControlTimeout = 60 * time.Second
 )
 
-type cubesandboxCreateSandboxRequest struct {
-	TemplateID          string
-	TimeoutSeconds      int
-	Metadata            map[string]string
-	AllowInternetAccess bool
-}
-
-type cubesandboxSandbox struct {
-	TemplateID      string            `json:"templateID"`
-	SandboxID       string            `json:"sandboxID"`
-	ClientID        string            `json:"clientID"`
-	StartedAt       string            `json:"startedAt"`
-	EndAt           string            `json:"endAt"`
-	EnvdVersion     string            `json:"envdVersion"`
-	EnvdAccessToken string            `json:"envdAccessToken"`
-	TrafficToken    string            `json:"trafficAccessToken"`
-	Alias           string            `json:"alias"`
-	Domain          string            `json:"domain"`
-	State           string            `json:"state"`
-	CPUCount        int               `json:"cpuCount"`
-	MemoryMB        int               `json:"memoryMB"`
-	DiskSizeMB      int               `json:"diskSizeMB"`
-	Metadata        map[string]string `json:"metadata"`
-}
-
-type cubesandboxSession struct {
-	SandboxID       string
-	EnvdVersion     string
-	EnvdAccessToken string
-	Domain          string
-}
-
-type cubesandboxProcessRequest struct {
-	Command string
-	CWD     string
-	Env     map[string]string
-	User    string
-	Timeout time.Duration
-	Stdout  io.Writer
-	Stderr  io.Writer
-}
-
 type cubesandboxAPIError struct {
 	StatusCode int
 	Status     string
@@ -97,14 +43,14 @@ func (e *cubesandboxAPIError) Error() string {
 	return e.Status + ": " + e.Body
 }
 
-var newCubeSandboxClient = func(cfg Config, rt Runtime) (cubesandboxAPI, error) {
+var newCubeSandboxClient = func(cfg core.Config, rt core.Runtime) (shared.EnvdSandboxAPI, error) {
 	apiKey := strings.TrimSpace(cfg.CubeSandbox.APIKey)
 	httpClient, dataPlaneClient := shared.ControlAndDataHTTPClients(rt.HTTP, cubesandboxControlTimeout)
-	apiURL, err := validateCubeSandboxAPIURL(blank(cfg.CubeSandbox.APIURL, "http://127.0.0.1:3000"))
+	apiURL, err := validateCubeSandboxAPIURL(core.Blank(cfg.CubeSandbox.APIURL, "http://127.0.0.1:3000"))
 	if err != nil {
 		return nil, err
 	}
-	domain := strings.TrimSpace(blank(cfg.CubeSandbox.Domain, "cube.app"))
+	domain := strings.TrimSpace(core.Blank(cfg.CubeSandbox.Domain, "cube.app"))
 	proxyScheme, err := cubeSandboxProxyScheme(cfg.CubeSandbox.ProxyScheme, cfg.CubeSandbox.ProxyPortHTTP)
 	if err != nil {
 		return nil, err
@@ -143,7 +89,7 @@ func cubeSandboxDataPlaneHTTPClient(source *http.Client, proxyHost string, proxy
 	}
 	base, ok := transport.(*http.Transport)
 	if !ok {
-		return nil, exit(2, "provider=cubesandbox CubeProxy direct routing requires an HTTP transport that supports a dial override")
+		return nil, core.Exit(2, "provider=cubesandbox CubeProxy direct routing requires an HTTP transport that supports a dial override")
 	}
 	clone := base.Clone()
 	dialContext := clone.DialContext
@@ -167,14 +113,14 @@ func cubeSandboxDataPlaneHTTPClient(source *http.Client, proxyHost string, proxy
 func validateCubeSandboxAPIURL(raw string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
-		return "", exit(2, "provider=cubesandbox API URL must be an absolute HTTPS URL")
+		return "", core.Exit(2, "provider=cubesandbox API URL must be an absolute HTTPS URL")
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", exit(2, "provider=cubesandbox API URL must not contain userinfo, query parameters, or a fragment")
+		return "", core.Exit(2, "provider=cubesandbox API URL must not contain userinfo, query parameters, or a fragment")
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
 	if parsed.Scheme != "https" && parsed.Scheme != "http" {
-		return "", exit(2, "provider=cubesandbox API URL must use HTTP or HTTPS")
+		return "", core.Exit(2, "provider=cubesandbox API URL must use HTTP or HTTPS")
 	}
 	host := strings.ToLower(parsed.Hostname())
 	port := parsed.Port()
@@ -203,7 +149,7 @@ func cubeSandboxProxyScheme(scheme string, port int) (string, error) {
 		}
 		return "http", nil
 	default:
-		return "", exit(2, "provider=cubesandbox proxy scheme %q must be http or https", scheme)
+		return "", core.Exit(2, "provider=cubesandbox proxy scheme %q must be http or https", scheme)
 	}
 }
 
@@ -211,7 +157,7 @@ func cubeSandboxRedirectError(destination *url.URL) error {
 	return fmt.Errorf("cubesandbox refused cross-origin redirect to %s", destination.Redacted())
 }
 
-func (c *cubesandboxClient) CreateSandbox(ctx context.Context, req cubesandboxCreateSandboxRequest) (cubesandboxSandbox, error) {
+func (c *cubesandboxClient) CreateSandbox(ctx context.Context, req shared.EnvdSandboxCreateRequest) (shared.EnvdSandbox, error) {
 	body := map[string]any{
 		"templateID": req.TemplateID,
 		"timeout":    req.TimeoutSeconds,
@@ -220,88 +166,30 @@ func (c *cubesandboxClient) CreateSandbox(ctx context.Context, req cubesandboxCr
 	if !req.AllowInternetAccess {
 		body["allowInternetAccess"] = false
 	}
-	var sandbox cubesandboxSandbox
-	if err := c.doJSON(ctx, http.MethodPost, "/sandboxes", nil, body, &sandbox); err != nil {
-		return cubesandboxSandbox{}, err
-	}
-	if sandbox.Metadata == nil {
-		sandbox.Metadata = req.Metadata
-	}
-	if sandbox.State == "" {
-		sandbox.State = "running"
-	}
-	return sandbox, nil
+	return c.control().CreateSandbox(ctx, body, req.Metadata)
 }
 
-func (c *cubesandboxClient) ConnectSandbox(ctx context.Context, sandboxID string, timeoutSeconds int) (cubesandboxSession, error) {
-	if timeoutSeconds <= 0 {
-		timeoutSeconds = 300
-	}
-	body := map[string]any{"timeout": timeoutSeconds}
-	var sandbox cubesandboxSandbox
-	if err := c.doJSON(ctx, http.MethodPost, "/sandboxes/"+url.PathEscape(sandboxID)+"/connect", nil, body, &sandbox); err != nil {
-		return cubesandboxSession{}, err
-	}
-	if shared.ValidateResourceID(sandboxID, sandbox.SandboxID) != nil {
-		return cubesandboxSession{}, errors.New("connect sandbox returned a different or missing sandbox ID")
+func (c *cubesandboxClient) ConnectSandbox(ctx context.Context, sandboxID string, timeoutSeconds int) (shared.EnvdSandboxSession, error) {
+	sandbox, err := c.control().ConnectSandbox(ctx, sandboxID, timeoutSeconds)
+	if err != nil {
+		return shared.EnvdSandboxSession{}, err
 	}
 	return c.sessionFromSandbox(sandbox), nil
 }
 
-func (c *cubesandboxClient) GetSandbox(ctx context.Context, sandboxID string) (cubesandboxSandbox, error) {
-	var sandbox cubesandboxSandbox
-	if err := c.doJSON(ctx, http.MethodGet, "/sandboxes/"+url.PathEscape(sandboxID), nil, nil, &sandbox); err != nil {
-		return cubesandboxSandbox{}, err
-	}
-	if shared.ValidateResourceID(sandboxID, sandbox.SandboxID) != nil {
-		return cubesandboxSandbox{}, errors.New("get sandbox returned a different or missing sandbox ID")
-	}
-	if sandbox.Metadata == nil {
-		sandbox.Metadata = map[string]string{}
-	}
-	return sandbox, nil
+func (c *cubesandboxClient) GetSandbox(ctx context.Context, sandboxID string) (shared.EnvdSandbox, error) {
+	return c.control().GetSandbox(ctx, sandboxID)
 }
 
-func (c *cubesandboxClient) ListSandboxes(ctx context.Context, metadata map[string]string) ([]cubesandboxSandbox, error) {
-	var all []cubesandboxSandbox
-	nextToken := ""
-	for {
-		query := url.Values{}
-		query.Set("limit", "100")
-		query.Set("state", "running,paused")
-		if nextToken != "" {
-			query.Set("nextToken", nextToken)
-		}
-		if len(metadata) > 0 {
-			values := url.Values{}
-			for key, value := range metadata {
-				values.Set(key, value)
-			}
-			query.Set("metadata", values.Encode())
-		}
-		var page []cubesandboxSandbox
-		headers, err := c.doJSONWithHeaders(ctx, http.MethodGet, "/v2/sandboxes", query, nil, &page)
-		if err != nil {
-			return nil, err
-		}
-		for i := range page {
-			if page[i].Metadata == nil {
-				page[i].Metadata = map[string]string{}
-			}
-		}
-		all = append(all, page...)
-		nextToken = headers.Get("x-next-token")
-		if nextToken == "" {
-			return all, nil
-		}
-	}
+func (c *cubesandboxClient) ListSandboxes(ctx context.Context, metadata map[string]string) ([]shared.EnvdSandbox, error) {
+	return c.control().ListSandboxes(ctx, metadata)
 }
 
 func (c *cubesandboxClient) DeleteSandbox(ctx context.Context, sandboxID string) error {
-	return c.doJSON(ctx, http.MethodDelete, "/sandboxes/"+url.PathEscape(sandboxID), nil, nil, nil)
+	return c.control().DeleteSandbox(ctx, sandboxID)
 }
 
-func (c *cubesandboxClient) UploadFile(ctx context.Context, session cubesandboxSession, targetPath string, r io.Reader) error {
+func (c *cubesandboxClient) UploadFile(ctx context.Context, session shared.EnvdSandboxSession, targetPath string, r io.Reader) error {
 	return shared.UploadEnvdFile(ctx, shared.EnvdUploadFileRequest{
 		Endpoint:       c.envdURL(session, "/files"),
 		TargetPath:     targetPath,
@@ -311,55 +199,36 @@ func (c *cubesandboxClient) UploadFile(ctx context.Context, session cubesandboxS
 		HTTPClient:     c.dataPlaneHTTPClient(),
 		SetHeaders:     func(req *http.Request) { c.setEnvdHeaders(req, session) },
 		RedirectError:  cubeSandboxRedirectError,
-		SummarizeError: summarizeJSON,
+		SummarizeError: core.SummarizeJSON,
 		APIError: func(statusCode int, status, body string) error {
 			return &cubesandboxAPIError{StatusCode: statusCode, Status: status, Body: body}
 		},
 	})
 }
 
-func (c *cubesandboxClient) StartProcess(ctx context.Context, session cubesandboxSession, req cubesandboxProcessRequest) (int, error) {
+func (c *cubesandboxClient) StartProcess(ctx context.Context, session shared.EnvdSandboxSession, req shared.EnvdSandboxProcessRequest) (int, error) {
 	return shared.StartEnvdProcess(ctx, shared.EnvdProcessRequest{
-		Endpoint:       c.envdURL(session, "/process.Process/Start"),
-		Command:        req.Command,
-		CWD:            req.CWD,
-		Env:            req.Env,
-		User:           req.User,
-		Timeout:        req.Timeout,
-		Stdout:         req.Stdout,
-		Stderr:         req.Stderr,
-		AccessToken:    session.EnvdAccessToken,
-		HTTPClient:     c.dataPlaneHTTPClient(),
-		SetHeaders:     func(httpReq *http.Request) { c.setEnvdHeaders(httpReq, session) },
-		RedirectError:  cubeSandboxRedirectError,
-		Provider:       "cubesandbox",
-		InterpretEnd:   interpretCubeSandboxProcessEnd,
-		SummarizeError: summarizeJSON,
+		EnvdSandboxProcessRequest: req,
+		Endpoint:                  c.envdURL(session, "/process.Process/Start"),
+		AccessToken:               session.EnvdAccessToken,
+		HTTPClient:                c.dataPlaneHTTPClient(),
+		SetHeaders:                func(httpReq *http.Request) { c.setEnvdHeaders(httpReq, session) },
+		RedirectError:             cubeSandboxRedirectError,
+		Provider:                  "cubesandbox",
+		InterpretEnd:              interpretCubeSandboxProcessEnd,
+		SummarizeError:            core.SummarizeJSON,
 		APIError: func(statusCode int, status, body string) error {
 			return &cubesandboxAPIError{StatusCode: statusCode, Status: status, Body: body}
 		},
 	})
-}
-
-func (c *cubesandboxClient) doJSON(ctx context.Context, method, path string, query url.Values, body any, out any) error {
-	_, err := c.doJSONWithHeaders(ctx, method, path, query, body, out)
-	return err
 }
 
 func (c *cubesandboxClient) doJSONWithHeaders(ctx context.Context, method, path string, query url.Values, body any, out any) (http.Header, error) {
-	var r io.Reader
-	if body != nil {
-		var buf bytes.Buffer
-		if err := json.NewEncoder(&buf).Encode(body); err != nil {
-			return nil, err
-		}
-		r = &buf
-	}
 	endpoint := c.apiURL + path
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, r)
+	req, err := shared.NewJSONRequest(ctx, method, endpoint, body)
 	if err != nil {
 		return nil, err
 	}
@@ -375,27 +244,20 @@ func (c *cubesandboxClient) doJSONWithHeaders(ctx context.Context, method, path 
 		return nil, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
+	if err := shared.DecodeUnboundedJSONResponse(resp, out, func(statusCode int, status string, data []byte) error {
+		return &cubesandboxAPIError{StatusCode: statusCode, Status: status, Body: shared.RedactErrorSecrets(core.SummarizeJSON(data), c.apiKey)}
+	}); err != nil {
 		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &cubesandboxAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(summarizeJSON(data), c.apiKey)}
-	}
-	if out != nil && len(data) > 0 {
-		if err := json.Unmarshal(data, out); err != nil {
-			return nil, err
-		}
 	}
 	return resp.Header.Clone(), nil
 }
 
-func (c *cubesandboxClient) sessionFromSandbox(sandbox cubesandboxSandbox) cubesandboxSession {
+func (c *cubesandboxClient) sessionFromSandbox(sandbox shared.EnvdSandbox) shared.EnvdSandboxSession {
 	domain := strings.TrimSpace(sandbox.Domain)
 	if domain == "" {
 		domain = c.domain
 	}
-	return cubesandboxSession{
+	return shared.EnvdSandboxSession{
 		SandboxID:       sandbox.SandboxID,
 		EnvdVersion:     sandbox.EnvdVersion,
 		EnvdAccessToken: sandbox.EnvdAccessToken,
@@ -403,7 +265,7 @@ func (c *cubesandboxClient) sessionFromSandbox(sandbox cubesandboxSandbox) cubes
 	}
 }
 
-func (c *cubesandboxClient) envdURL(session cubesandboxSession, path string) string {
+func (c *cubesandboxClient) envdURL(session shared.EnvdSandboxSession, path string) string {
 	domain := strings.TrimSpace(session.Domain)
 	if domain == "" {
 		domain = c.domain
@@ -416,7 +278,7 @@ func (c *cubesandboxClient) envdURL(session cubesandboxSession, path string) str
 	return scheme + "://" + virtualHost + path
 }
 
-func (c *cubesandboxClient) setEnvdHeaders(req *http.Request, session cubesandboxSession) {
+func (c *cubesandboxClient) setEnvdHeaders(req *http.Request, session shared.EnvdSandboxSession) {
 	req.Header.Set("X-Access-Token", session.EnvdAccessToken)
 	req.Header.Set("E2b-Sandbox-Id", session.SandboxID)
 	req.Header.Set("E2b-Sandbox-Port", strconv.Itoa(cubesandboxEnvdPort))
@@ -447,4 +309,8 @@ func interpretCubeSandboxProcessEnd(end shared.EnvdProcessEnd, stderr io.Writer,
 		code = 1
 	}
 	return code, shared.ObservedProcessEndError(fmt.Sprintf("cubesandbox process did not exit normally: %s", detail))
+}
+
+func (c *cubesandboxClient) control() shared.EnvdSandboxControl {
+	return shared.EnvdSandboxControl{Request: c.doJSONWithHeaders}
 }

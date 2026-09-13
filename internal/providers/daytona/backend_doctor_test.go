@@ -7,6 +7,7 @@ import (
 	"time"
 
 	apidaytona "github.com/daytonaio/daytona/libs/api-client-go"
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type fakeDaytonaDoctorAPI struct {
@@ -82,16 +83,16 @@ func TestDaytonaDoctorListsInventoryOnly(t *testing.T) {
 	weaklyLabelled.SetLabels(map[string]string{"crabbox": "true"})
 	fake := &fakeDaytonaDoctorAPI{sandboxes: []apidaytona.Sandbox{owned, weaklyLabelled}}
 	old := newDaytonaClient
-	newDaytonaClient = func(Config, Runtime) (daytonaAPI, error) {
+	newDaytonaClient = func(core.Config, core.Runtime) (daytonaAPI, error) {
 		return fake, nil
 	}
 	t.Cleanup(func() { newDaytonaClient = old })
 
-	doctor, err := Provider{}.ConfigureDoctor(Config{}, Runtime{})
+	doctor, err := Provider{}.ConfigureDoctor(core.Config{}, core.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := doctor.Doctor(context.Background(), DoctorRequest{})
+	result, err := doctor.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,7 +2,6 @@ import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { describe, expect, it, vi } from "vitest";
 
 import { PostgresCoordinatorStorage } from "../node/postgres-storage";
-import { sha256Hex } from "../src/auth";
 import {
   CheckpointError,
   acquireCheckpointUse,
@@ -21,6 +20,7 @@ import {
   reserveCheckpointCreate,
 } from "../src/checkpoints";
 import type { CoordinatorRuntime } from "../src/coordinator-runtime";
+import { sha256Hex } from "../src/encoding";
 import {
   FleetCoordinator,
   readyPoolDesiredCapacityKeyV2,

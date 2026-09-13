@@ -37,6 +37,7 @@ type TimingReport struct {
 	RunID              string                   `json:"runId,omitempty"`
 	Label              string                   `json:"label,omitempty"`
 	MachineType        string                   `json:"machineType,omitempty"`
+	ImageEvidence      *ImageEvidence           `json:"imageEvidence,omitempty"`
 	RepoPath           string                   `json:"repoPath,omitempty"`
 	Workdir            string                   `json:"workdir,omitempty"`
 	StopCommand        string                   `json:"stopCommand,omitempty"`
@@ -96,6 +97,7 @@ func writeTimingJSON(w io.Writer, report TimingReport) error {
 }
 
 func finalizeTimingReport(report TimingReport) TimingReport {
+	report.ImageEvidence = CloneImageEvidence(report.ImageEvidence)
 	if report.FailureEvidence != nil {
 		report.FailureEvidence = runFailureEvidenceSnapshot(*report.FailureEvidence)
 	}

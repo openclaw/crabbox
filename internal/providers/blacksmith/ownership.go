@@ -26,10 +26,10 @@ type blacksmithRoute struct {
 func (r blacksmithRoute) canonical() (string, error) {
 	u, err := url.Parse(r.API)
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || (u.Scheme != "https" && u.Scheme != "http") {
-		return "", exit(2, "Blacksmith ownership requires an API URL without credentials, query, or fragment")
+		return "", core.Exit(2, "Blacksmith ownership requires an API URL without credentials, query, or fragment")
 	}
 	if r.Org == "" || strings.TrimSpace(r.Org) != r.Org || strings.ContainsAny(r.Org, "\r\n\x00") {
-		return "", exit(2, "Blacksmith ownership requires an explicit authenticated organization")
+		return "", core.Exit(2, "Blacksmith ownership requires an explicit authenticated organization")
 	}
 	data, err := json.Marshal(r)
 	return string(data), err
@@ -39,7 +39,7 @@ func (b *blacksmithBackend) withRoute(ctx context.Context) (*blacksmithBackend, 
 	if b.route != nil {
 		return b, nil
 	}
-	route := blacksmithRoute{API: strings.TrimSpace(os.Getenv("BLACKSMITH_API_URL")), Org: strings.TrimSpace(firstNonBlank(b.cfg.Blacksmith.Org, os.Getenv("BLACKSMITH_ORG")))}
+	route := blacksmithRoute{API: strings.TrimSpace(os.Getenv("BLACKSMITH_API_URL")), Org: strings.TrimSpace(shared.FirstNonBlank(b.cfg.Blacksmith.Org, os.Getenv("BLACKSMITH_ORG")))}
 	if route.API == "" {
 		route.API = blacksmithDefaultAPI
 	}
@@ -52,7 +52,7 @@ func (b *blacksmithBackend) withRoute(ctx context.Context) (*blacksmithBackend, 
 			fields := strings.Fields(line)
 			if len(fields) == 3 && fields[0] == "*" && fields[2] == "(current)" {
 				if route.Org != "" {
-					return nil, exit(2, "ambiguous Blacksmith organization; pass --blacksmith-org")
+					return nil, core.Exit(2, "ambiguous Blacksmith organization; pass --blacksmith-org")
 				}
 				route.Org = fields[1]
 			}
@@ -70,15 +70,15 @@ func blacksmithClaimBinding(claim core.LeaseClaim) (blacksmithRoute, shared.Clai
 	var route blacksmithRoute
 	want := shared.ClaimBinding{Provider: blacksmithTestboxProvider, LeaseID: claim.LeaseID, CloudID: claim.LeaseID, Slug: claim.Slug, ProviderScope: claim.ProviderScope, ExactProviderScope: true}
 	if parseBlacksmithID(claim.LeaseID) != claim.LeaseID || claim.LeaseID == "" || claim.Revision == "" || claim.Slug == "" || claim.RepoRoot == "" || json.Unmarshal([]byte(claim.ProviderScope), &route) != nil {
-		return route, want, exit(2, "Blacksmith lease has no exact ownership binding; inspect and clean up through Blacksmith directly; --reclaim cannot adopt legacy or lost state")
+		return route, want, core.Exit(2, "Blacksmith lease has no exact ownership binding; inspect and clean up through Blacksmith directly; --reclaim cannot adopt legacy or lost state")
 	}
 	scope, err := route.canonical()
 	if err != nil || scope != claim.ProviderScope {
-		return route, want, exit(2, "Blacksmith lease has an invalid organization/API binding")
+		return route, want, core.Exit(2, "Blacksmith lease has an invalid organization/API binding")
 	}
 	for _, key := range []string{"workflow", "job", "ref"} {
 		if value := claim.Labels[key]; value == "" || strings.ContainsAny(value, "\r\n\x00") {
-			return route, want, exit(2, "Blacksmith lease has no exact %s binding", key)
+			return route, want, core.Exit(2, "Blacksmith lease has no exact %s binding", key)
 		}
 	}
 	return route, want, shared.ValidateClaimBinding(claim, want)
@@ -87,14 +87,14 @@ func blacksmithClaimBinding(claim core.LeaseClaim) (blacksmithRoute, shared.Clai
 func resolveOwnedBlacksmithClaim(id string) (core.LeaseClaim, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return core.LeaseClaim{}, exit(2, "Blacksmith requires a claimed Testbox ID or slug")
+		return core.LeaseClaim{}, core.Exit(2, "Blacksmith requires a claimed Testbox ID or slug")
 	}
 	claim, ok, exact, err := core.ResolveLeaseClaimForProviderWithExact(id, blacksmithTestboxProvider)
 	if err != nil {
 		return claim, err
 	}
 	if !ok || ((strings.HasPrefix(id, "tbx_") || core.IsCanonicalLeaseID(id)) && (!exact || claim.LeaseID != id)) {
-		return claim, exit(4, "Blacksmith resource %q has no exact local ownership claim; use read-only status/list and native Blacksmith cleanup", id)
+		return claim, core.Exit(4, "Blacksmith resource %q has no exact local ownership claim; use read-only status/list and native Blacksmith cleanup", id)
 	}
 	claims, err := core.ListLeaseClaims()
 	if err != nil {
@@ -102,7 +102,7 @@ func resolveOwnedBlacksmithClaim(id string) (core.LeaseClaim, error) {
 	}
 	for _, other := range claims {
 		if other.LeaseID != claim.LeaseID && other.CloudID == claim.CloudID && claim.CloudID != "" {
-			return claim, exit(2, "Blacksmith Testbox has conflicting local claims")
+			return claim, core.Exit(2, "Blacksmith Testbox has conflicting local claims")
 		}
 	}
 	_, _, err = blacksmithClaimBinding(claim)
@@ -122,11 +122,11 @@ func parseBlacksmithIdentity(output, id string) (blacksmithIdentity, error) {
 	var identity blacksmithIdentity
 	lines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
 	if len(lines) != 2 {
-		return identity, exit(2, "Blacksmith exact status requires one unambiguous row")
+		return identity, core.Exit(2, "Blacksmith exact status requires one unambiguous row")
 	}
 	columns := blacksmithStatusHeader.FindStringSubmatchIndex(lines[0])
 	if columns == nil || strings.ContainsAny(lines[1], "\t\r") {
-		return identity, exit(2, "Blacksmith exact status has an unsupported table")
+		return identity, core.Exit(2, "Blacksmith exact status has an unsupported table")
 	}
 	row := []rune(lines[1])
 	var values [8]string
@@ -139,20 +139,20 @@ func parseBlacksmithIdentity(output, id string) (blacksmithIdentity, error) {
 			continue // Queued records may not yet have a timestamp or Actions URL.
 		}
 		if start >= len(row) || end > len(row) {
-			return identity, exit(2, "Blacksmith exact status has an incomplete row")
+			return identity, core.Exit(2, "Blacksmith exact status has an incomplete row")
 		}
 		cell := string(row[start:end])
 		if i+1 < len(values) && !strings.HasSuffix(cell, "  ") {
-			return identity, exit(2, "Blacksmith exact status has misaligned columns")
+			return identity, core.Exit(2, "Blacksmith exact status has misaligned columns")
 		}
 		values[i] = strings.TrimRight(cell, " ")
 		if strings.HasPrefix(values[i], " ") {
-			return identity, exit(2, "Blacksmith exact status has misaligned cells")
+			return identity, core.Exit(2, "Blacksmith exact status has misaligned cells")
 		}
 	}
 	identity = blacksmithIdentity{ID: values[0], State: values[1], Workflow: values[3], Job: values[4], Ref: values[5]}
 	if identity.ID != id || identity.Workflow == "" || identity.Job == "" || identity.Ref == "" || !identity.knownState() {
-		return identity, exit(2, "Blacksmith exact status has missing or mismatched identity/state")
+		return identity, core.Exit(2, "Blacksmith exact status has missing or mismatched identity/state")
 	}
 	if identity.terminal() {
 		// Never-assigned Testboxes have no Actions URL. Native output still
@@ -160,7 +160,7 @@ func parseBlacksmithIdentity(output, id string) (blacksmithIdentity, error) {
 		// that framing an empty (or numeric-prefix) URL could be truncation.
 		runURLComplete := blacksmithStatusRunURL.MatchString(values[7]) || (values[7] == "" && len(row) == columns[2+7*2])
 		if values[6] == "" || !strings.HasSuffix(output, "\n") || !runURLComplete {
-			return identity, exit(2, "Blacksmith completion requires complete native metadata")
+			return identity, core.Exit(2, "Blacksmith completion requires complete native metadata")
 		}
 	}
 	return identity, nil
@@ -176,10 +176,10 @@ func (i blacksmithIdentity) knownState() bool {
 
 func (i blacksmithIdentity) usable() error {
 	if i.State == "hydration_failed" {
-		return exit(2, "Blacksmith Testbox hydration failed; stop the lease and create a new one")
+		return core.Exit(2, "Blacksmith Testbox hydration failed; stop the lease and create a new one")
 	}
 	if i.terminal() {
-		return exit(2, "Blacksmith Testbox has finished; create a new lease")
+		return core.Exit(2, "Blacksmith Testbox has finished; create a new lease")
 	}
 	return nil
 }
@@ -188,7 +188,7 @@ func (b *blacksmithBackend) inspectTestbox(ctx context.Context, id string) (blac
 	result, err := b.runCommand(ctx, []string{"testbox", "status", "--id", id}, nil, nil)
 	err = blacksmithContextError(ctx, err)
 	if err == nil && result.ExitCode != 0 {
-		err = exit(result.ExitCode, "Blacksmith exact status failed")
+		err = core.Exit(result.ExitCode, "Blacksmith exact status failed")
 	}
 	if err != nil {
 		if diagnostic := strings.TrimSpace(result.Stderr); diagnostic != "" {
@@ -237,14 +237,14 @@ func (b *blacksmithBackend) verifyTestbox(ctx context.Context, claim core.LeaseC
 		return blacksmithIdentity{}, err
 	}
 	if b.route == nil || *b.route != route {
-		return blacksmithIdentity{}, exit(2, "Blacksmith organization/API changed; retaining exact claim")
+		return blacksmithIdentity{}, core.Exit(2, "Blacksmith organization/API changed; retaining exact claim")
 	}
 	identity, err := b.inspectTestbox(ctx, claim.CloudID)
 	if err != nil {
 		return identity, err
 	}
 	if identity.Workflow != claim.Labels["workflow"] || identity.Job != claim.Labels["job"] || identity.Ref != claim.Labels["ref"] {
-		return identity, exit(2, "Blacksmith Testbox workflow identity changed; retaining exact claim")
+		return identity, core.Exit(2, "Blacksmith Testbox workflow identity changed; retaining exact claim")
 	}
 	return identity, nil
 }
@@ -270,7 +270,7 @@ func (b *blacksmithBackend) ownedTestbox(ctx context.Context, id, repoRoot strin
 	if repoRoot == "" {
 		err = core.WithLeaseClaimUnchangedShared(ctx, claim.LeaseID, claim, verify)
 	} else {
-		server := Server{Provider: blacksmithTestboxProvider, CloudID: claim.CloudID, Labels: shared.CloneLabels(claim.Labels)}
+		server := core.Server{Provider: blacksmithTestboxProvider, CloudID: claim.CloudID, Labels: shared.CloneLabels(claim.Labels)}
 		cfg := b.cfg
 		cfg.Provider = blacksmithTestboxProvider
 		claim, err = core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfterContext(ctx, claim.LeaseID, claim.Slug, cfg, claim.ProviderScope, server, core.SSHTarget{}, repoRoot, blacksmithIdleTimeout(b.cfg), reclaim, claim, true, verify)
@@ -297,11 +297,11 @@ func (b *blacksmithBackend) withOwnedTestbox(ctx context.Context, claim core.Lea
 }
 
 type blacksmithReconciledStop struct {
-	result LocalCommandResult
+	result core.LocalCommandResult
 	err    error
 }
 
-func (b *blacksmithBackend) printStopOutput(result LocalCommandResult) {
+func (b *blacksmithBackend) printStopOutput(result core.LocalCommandResult) {
 	if b.rt.Stdout != nil {
 		fmt.Fprint(b.rt.Stdout, result.Stdout)
 	}
@@ -376,12 +376,12 @@ func (b *blacksmithBackend) rollbackTestbox(id, pendingID, repoRoot string) {
 	defer cancel()
 	err := core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, id, core.LeaseClaim{}, false, func() error {
 		if pendingID != id {
-			path, err := testboxKeyPath(id)
+			path, err := core.TestboxKeyPath(id)
 			if err != nil {
 				return err
 			}
 			if _, err := os.Lstat(filepath.Dir(path)); !os.IsNotExist(err) {
-				return exit(2, "Blacksmith rollback conflicts with existing key state")
+				return core.Exit(2, "Blacksmith rollback conflicts with existing key state")
 			}
 		}
 		identity, err := b.inspectTestbox(ctx, id)
@@ -403,21 +403,21 @@ func (b *blacksmithBackend) rollbackTestbox(id, pendingID, repoRoot string) {
 }
 
 func moveFreshBlacksmithKey(pendingID, id string) error {
-	path, err := testboxKeyPath(id)
+	path, err := core.TestboxKeyPath(id)
 	if err != nil {
 		return err
 	}
 	if _, err := os.Lstat(filepath.Dir(path)); !os.IsNotExist(err) {
-		return exit(2, "Blacksmith resource %s already has local key state; refusing to replace it", id)
+		return core.Exit(2, "Blacksmith resource %s already has local key state; refusing to replace it", id)
 	}
-	pending, err := testboxKeyPath(pendingID)
+	pending, err := core.TestboxKeyPath(pendingID)
 	if err != nil {
 		return err
 	}
 	for _, name := range []string{pending, pending + ".pub"} {
 		info, err := os.Lstat(name)
 		if err != nil || !info.Mode().IsRegular() {
-			return exit(2, "Blacksmith pending key pair is missing or not regular")
+			return core.Exit(2, "Blacksmith pending key pair is missing or not regular")
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(filepath.Dir(path)), 0o700); err != nil {

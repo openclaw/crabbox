@@ -126,7 +126,7 @@ export class BridgeTickets {
     const bytes = crypto.getRandomValues(new Uint8Array(16));
     const ticket = {
       ...input,
-      ticket: `${policy.tokenPrefix}${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`,
+      ticket: `${policy.tokenPrefix}${bytesToHex(bytes)}`,
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + policy.ttlSeconds * 1000).toISOString(),
     } as BridgeTicketRecord<K>;
@@ -194,3 +194,4 @@ export class BridgeTickets {
     );
   }
 }
+import { bytesToHex } from "./encoding";

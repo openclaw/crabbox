@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestSafetyResolveRejectsDuplicateClaimSlug(t *testing.T) {
@@ -18,10 +20,10 @@ func TestSafetyResolveRejectsDuplicateClaimSlug(t *testing.T) {
 	fc.items[second.Name] = second
 	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
 	b := newTestBackend(t, fc, fg)
-	mustCreateSafetyClaim(t, b, first, "cbx_347000000008", "shared-slug", releaseDelete, "ready", time.Now().Add(time.Hour), SSHTarget{})
-	mustCreateSafetyClaim(t, b, second, "cbx_347000000009", "shared-slug", releaseDelete, "ready", time.Now().Add(time.Hour), SSHTarget{})
+	mustCreateSafetyClaim(t, b, first, "cbx_347000000008", "shared-slug", releaseDelete, "ready", time.Now().Add(time.Hour), core.SSHTarget{})
+	mustCreateSafetyClaim(t, b, second, "cbx_347000000009", "shared-slug", releaseDelete, "ready", time.Now().Add(time.Hour), core.SSHTarget{})
 
-	if _, err := b.Resolve(context.Background(), ResolveRequest{ID: "shared-slug"}); err == nil || !strings.Contains(err.Error(), "multiple") {
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "shared-slug"}); err == nil || !strings.Contains(err.Error(), "multiple") {
 		t.Fatalf("duplicate slug resolve err=%v", err)
 	}
 	if len(fc.starts) != 0 || fg.configFor != "" {
@@ -36,9 +38,9 @@ func TestSafetyResolveCanonicalIDNeverFallsBackToSlug(t *testing.T) {
 	fc.items[item.Name] = item
 	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
 	b := newTestBackend(t, fc, fg)
-	mustCreateSafetyClaim(t, b, item, "cbx_34700000000a", "cbx-aaaaaaaaaaaa", releaseDelete, "ready", time.Now().Add(time.Hour), SSHTarget{})
+	mustCreateSafetyClaim(t, b, item, "cbx_34700000000a", "cbx-aaaaaaaaaaaa", releaseDelete, "ready", time.Now().Add(time.Hour), core.SSHTarget{})
 
-	if _, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_aaaaaaaaaaaa"}); err == nil || !strings.Contains(err.Error(), "not found") {
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_aaaaaaaaaaaa"}); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("canonical miss resolve err=%v", err)
 	}
 	if len(fc.starts) != 0 || fg.configFor != "" {
@@ -84,15 +86,15 @@ func TestSafetyResolveRevalidatesIdentityBeforeMutationAndSSH(t *testing.T) {
 			fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
 			b := newTestBackend(t, fc, fg)
 			leaseID := "cbx_34700000000e"
-			mustCreateSafetyClaim(t, b, item, leaseID, "resolve-replacement", releaseDelete, "ready", time.Now().Add(time.Hour), SSHTarget{})
+			mustCreateSafetyClaim(t, b, item, leaseID, "resolve-replacement", releaseDelete, "ready", time.Now().Add(time.Hour), core.SSHTarget{})
 
-			if _, err := b.Resolve(context.Background(), ResolveRequest{ID: leaseID}); err == nil || !strings.Contains(err.Error(), "environment id changed") {
+			if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID}); err == nil || !strings.Contains(err.Error(), "environment id changed") {
 				t.Fatalf("resolve err=%v", err)
 			}
 			if len(fc.starts) != test.wantStartCount || fg.configFor != "" {
 				t.Fatalf("starts=%#v config=%q", fc.starts, fg.configFor)
 			}
-			claim, ok, err := readLeaseClaimWithPresence(leaseID)
+			claim, ok, err := core.ReadLeaseClaimWithPresence(leaseID)
 			if err != nil || !ok || claim.Labels[labelState] != "ready" || claim.Labels[labelEnvironmentID] != item.EnvironmentID {
 				t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, err)
 			}
@@ -105,16 +107,16 @@ func TestSafetyAcquireCarriesFinalClaimSnapshot(t *testing.T) {
 	fc := newFakeCodespacesClient()
 	fc.getSeq["cs-1"] = []codespace{fakeCodespace("cs-1", "Available")}
 	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
-	lease, err := b.Acquire(context.Background(), AcquireRequest{
-		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: "cbx_34700000000b",
 		RequestedSlug:    "snapshot-box",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, exists, set := serverLeaseClaimSnapshot(lease.Server)
-	persisted, ok, err := readLeaseClaimWithPresence(lease.LeaseID)
+	snapshot, exists, set := core.ServerLeaseClaimSnapshot(lease.Server)
+	persisted, ok, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
 	if err != nil || !ok {
 		t.Fatalf("claim ok=%t err=%v", ok, err)
 	}
@@ -131,10 +133,10 @@ func TestSafetyCleanupRejectsDuplicateCloudIDClaimsBeforeMutation(t *testing.T) 
 	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
 	expiresAt := time.Now().Add(-time.Hour)
 
-	mustCreateSafetyClaim(t, b, item, "cbx_347000000001", "duplicate-a", releaseDelete, "ready", expiresAt, SSHTarget{})
-	mustCreateSafetyClaim(t, b, item, "cbx_347000000002", "duplicate-b", releaseDelete, "ready", expiresAt, SSHTarget{})
+	mustCreateSafetyClaim(t, b, item, "cbx_347000000001", "duplicate-a", releaseDelete, "ready", expiresAt, core.SSHTarget{})
+	mustCreateSafetyClaim(t, b, item, "cbx_347000000002", "duplicate-b", releaseDelete, "ready", expiresAt, core.SSHTarget{})
 
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err == nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err == nil {
 		t.Fatal("cleanup accepted two claims bound to the same Codespace")
 	}
 	if len(fc.stops) != 0 || len(fc.deletes) != 0 {
@@ -148,7 +150,7 @@ func TestSafetyCleanupRejectsDuplicateLiveCodespaceNamesBeforeMutation(t *testin
 	item := fakeCodespace("cs-duplicate-live", "Available")
 	fc.items[item.Name] = item
 	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
-	mustCreateSafetyClaim(t, b, item, "cbx_347000000003", "duplicate-live", releaseDelete, "ready", time.Now().Add(-time.Hour), SSHTarget{})
+	mustCreateSafetyClaim(t, b, item, "cbx_347000000003", "duplicate-live", releaseDelete, "ready", time.Now().Add(-time.Hour), core.SSHTarget{})
 
 	duplicateInventory := &duplicateCodespacesInventoryClient{
 		fakeCodespacesClient: fc,
@@ -156,7 +158,7 @@ func TestSafetyCleanupRejectsDuplicateLiveCodespaceNamesBeforeMutation(t *testin
 	}
 	b.clientFactory = func(string) codespacesAPI { return duplicateInventory }
 
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err == nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err == nil {
 		t.Fatal("cleanup accepted duplicate Codespace names in live inventory")
 	}
 	if len(fc.stops) != 0 || len(fc.deletes) != 0 {
@@ -167,14 +169,14 @@ func TestSafetyCleanupRejectsDuplicateLiveCodespaceNamesBeforeMutation(t *testin
 func TestSafetyClaimResourceRequiresPermanentIdentity(t *testing.T) {
 	item := fakeCodespace("cs-permanent-identity", "Available")
 	b := newTestBackend(t, newFakeCodespacesClient(), &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
-	baseClaim := LeaseClaim{
+	baseClaim := core.LeaseClaim{
 		LeaseID: "cbx_123456789ab3",
 		CloudID: item.Name,
 		Labels:  b.labelsFor("cbx_123456789ab3", "identity-box", "example-org/my-app", "alice", false, releaseDelete, item, "ready"),
 	}
 	for _, test := range []struct {
 		name        string
-		mutateClaim func(*LeaseClaim)
+		mutateClaim func(*core.LeaseClaim)
 		mutateLive  func(*codespace)
 		want        string
 	}{
@@ -182,7 +184,7 @@ func TestSafetyClaimResourceRequiresPermanentIdentity(t *testing.T) {
 		{name: "environment id changed", mutateLive: func(live *codespace) { live.EnvironmentID = "env-other" }, want: "environment id changed"},
 		{name: "owner id changed", mutateLive: func(live *codespace) { live.Owner.ID++ }, want: "owner id changed"},
 		{name: "repository id changed", mutateLive: func(live *codespace) { live.Repository.ID++ }, want: "repository id changed"},
-		{name: "missing claim id", mutateClaim: func(claim *LeaseClaim) { delete(claim.Labels, labelCodespaceID) }, want: "without complete codespace id identity"},
+		{name: "missing claim id", mutateClaim: func(claim *core.LeaseClaim) { delete(claim.Labels, labelCodespaceID) }, want: "without complete codespace id identity"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			claim := baseClaim
@@ -205,7 +207,7 @@ func TestSafetyClaimResourceRequiresPermanentIdentity(t *testing.T) {
 func TestSafetyClaimResourceAllowsRepositoryRenameWithStableID(t *testing.T) {
 	item := fakeCodespace("cs-repository-renamed", "Available")
 	b := newTestBackend(t, newFakeCodespacesClient(), &fakeGH{login: "alice", token: "test" + "-value"})
-	claim := LeaseClaim{
+	claim := core.LeaseClaim{
 		LeaseID: "cbx_123456789af5",
 		CloudID: item.Name,
 		Labels:  b.labelsFor("cbx_123456789af5", "repository-renamed", "example-org/my-app", "alice", false, releaseDelete, item, "ready"),
@@ -224,26 +226,26 @@ func TestSafetyTouchCannotRestoreStaleEndpointAfterRelease(t *testing.T) {
 	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
 	b.cfg.GitHubCodespaces.DeleteOnRelease = false
 	leaseID := "cbx_347000000004"
-	staleTarget := SSHTarget{Host: "cs.cs-stale-touch.main", Port: "22"}
+	staleTarget := core.SSHTarget{Host: "cs.cs-stale-touch.main", Port: "22"}
 	server := mustCreateSafetyClaim(t, b, item, leaseID, "stale-touch", releaseStop, "ready", time.Now().Add(time.Hour), staleTarget)
 	staleServer := server
 	staleServer.Labels = cloneLabels(server.Labels)
 	releaseServer := server
 	releaseServer.Labels = cloneLabels(server.Labels)
 
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{
-		Lease: LeaseTarget{LeaseID: leaseID, Server: releaseServer, SSH: staleTarget},
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{LeaseID: leaseID, Server: releaseServer, SSH: staleTarget},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := b.Touch(context.Background(), TouchRequest{
-		Lease: LeaseTarget{LeaseID: leaseID, Server: staleServer, SSH: staleTarget},
+	if _, err := b.Touch(context.Background(), core.TouchRequest{
+		Lease: core.LeaseTarget{LeaseID: leaseID, Server: staleServer, SSH: staleTarget},
 		State: "ready",
 	}); err == nil {
 		t.Fatal("stale touch revived a released claim")
 	}
 
-	claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 	if err != nil || !ok {
 		t.Fatalf("claim ok=%t err=%v", ok, err)
 	}
@@ -259,23 +261,23 @@ func TestSafetyTouchUsesCurrentClaimInsteadOfStaleLeaseSnapshot(t *testing.T) {
 	fc.items[item.Name] = item
 	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
 	leaseID := "cbx_347000000007"
-	currentTarget := SSHTarget{Host: "current.codespace.example", Port: "22"}
-	staleTarget := SSHTarget{Host: "stale.codespace.example", Port: "2200"}
+	currentTarget := core.SSHTarget{Host: "current.codespace.example", Port: "22"}
+	staleTarget := core.SSHTarget{Host: "stale.codespace.example", Port: "2200"}
 	staleServer := mustCreateSafetyClaim(t, b, item, leaseID, "authoritative-touch", releaseDelete, "ready", time.Now().Add(time.Hour), currentTarget)
 
-	claim, ok, err := readLeaseClaimWithPresence(leaseID)
+	claim, ok, err := core.ReadLeaseClaimWithPresence(leaseID)
 	if err != nil || !ok {
 		t.Fatalf("claim ok=%t err=%v", ok, err)
 	}
 	currentServer := serverFromClaim(claim)
 	currentServer.Labels["authoritative"] = "current"
-	if _, err := updateLeaseClaimEndpointIfUnchanged(leaseID, claim, currentServer, currentTarget); err != nil {
+	if _, err := core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, claim, currentServer, currentTarget); err != nil {
 		t.Fatal(err)
 	}
 	staleServer.Labels["authoritative"] = "stale"
 
-	touched, err := b.Touch(context.Background(), TouchRequest{
-		Lease: LeaseTarget{LeaseID: leaseID, Server: staleServer, SSH: staleTarget},
+	touched, err := b.Touch(context.Background(), core.TouchRequest{
+		Lease: core.LeaseTarget{LeaseID: leaseID, Server: staleServer, SSH: staleTarget},
 		State: "in-use",
 	})
 	if err != nil {
@@ -284,7 +286,7 @@ func TestSafetyTouchUsesCurrentClaimInsteadOfStaleLeaseSnapshot(t *testing.T) {
 	if touched.Labels["authoritative"] != "current" || touched.Labels[labelState] != "in-use" {
 		t.Fatalf("touch returned stale state: %#v", touched)
 	}
-	claim, ok, err = readLeaseClaimWithPresence(leaseID)
+	claim, ok, err = core.ReadLeaseClaimWithPresence(leaseID)
 	if err != nil || !ok {
 		t.Fatalf("claim ok=%t err=%v", ok, err)
 	}
@@ -314,7 +316,7 @@ func TestSafetyReleaseRefusesSameNameReplacementBeforeStop(t *testing.T) {
 			if test.deleteLease {
 				release = releaseDelete
 			}
-			server := mustCreateSafetyClaim(t, b, item, test.leaseID, "replacement-stop", release, "ready", time.Now().Add(time.Hour), SSHTarget{})
+			server := mustCreateSafetyClaim(t, b, item, test.leaseID, "replacement-stop", release, "ready", time.Now().Add(time.Hour), core.SSHTarget{})
 			replacement := item
 			replacement.EnvironmentID = "env-foreign-replacement"
 			if test.dirty {
@@ -322,14 +324,14 @@ func TestSafetyReleaseRefusesSameNameReplacementBeforeStop(t *testing.T) {
 			}
 			fc.items[item.Name] = replacement
 
-			err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: test.leaseID, Server: server}})
+			err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: test.leaseID, Server: server}})
 			if err == nil || !strings.Contains(err.Error(), "environment id changed") {
 				t.Fatalf("release err=%v", err)
 			}
 			if len(fc.stops) != 0 || len(fc.deletes) != 0 {
 				t.Fatalf("replacement mutated: stops=%#v deletes=%#v", fc.stops, fc.deletes)
 			}
-			claim, ok, readErr := readLeaseClaimWithPresence(test.leaseID)
+			claim, ok, readErr := core.ReadLeaseClaimWithPresence(test.leaseID)
 			if readErr != nil || !ok || claim.CloudID != item.Name || claim.Labels[labelState] != "ready" {
 				t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, readErr)
 			}
@@ -345,14 +347,14 @@ func TestSafetyCleanupSkipsClaimRenewedAfterInventorySnapshot(t *testing.T) {
 	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
 	leaseID := "cbx_347000000005"
 	now := time.Now().UTC()
-	mustCreateSafetyClaim(t, b, item, leaseID, "renewed", releaseDelete, "ready", now.Add(-time.Hour), SSHTarget{})
+	mustCreateSafetyClaim(t, b, item, leaseID, "renewed", releaseDelete, "ready", now.Add(-time.Hour), core.SSHTarget{})
 
 	renewed := false
 	var renewErr error
 	b.now = func() time.Time {
 		if !renewed {
 			renewed = true
-			claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+			claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 			if err != nil {
 				renewErr = err
 				return now
@@ -363,12 +365,12 @@ func TestSafetyCleanupSkipsClaimRenewedAfterInventorySnapshot(t *testing.T) {
 			}
 			server := serverFromClaim(claim)
 			server.Labels["expires_at"] = now.Add(time.Hour).Format(time.RFC3339)
-			renewErr = updateLeaseClaimEndpoint(leaseID, server, SSHTarget{})
+			renewErr = core.UpdateLeaseClaimEndpoint(leaseID, server, core.SSHTarget{})
 		}
 		return now
 	}
 
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if renewErr != nil {
@@ -380,7 +382,7 @@ func TestSafetyCleanupSkipsClaimRenewedAfterInventorySnapshot(t *testing.T) {
 	if len(fc.stops) != 0 || len(fc.deletes) != 0 {
 		t.Fatalf("renewed claim was mutated: stops=%#v deletes=%#v", fc.stops, fc.deletes)
 	}
-	claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 	if err != nil || !ok {
 		t.Fatalf("renewed claim ok=%t err=%v", ok, err)
 	}
@@ -401,16 +403,16 @@ func TestSafetyCleanupDirtyFallbackStopsRetainsAndSucceeds(t *testing.T) {
 	}
 	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
 	leaseID := "cbx_347000000006"
-	target := SSHTarget{Host: "cs.cs-dirty-cleanup.main", Port: "22"}
+	target := core.SSHTarget{Host: "cs.cs-dirty-cleanup.main", Port: "22"}
 	mustCreateSafetyClaim(t, b, item, leaseID, "dirty-cleanup", releaseDelete, "ready", time.Now().Add(-time.Hour), target)
 
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatalf("dirty fallback should stop and retain successfully: %v", err)
 	}
 	if len(fc.stops) == 0 || len(fc.deletes) != 0 {
 		t.Fatalf("dirty fallback actions: stops=%#v deletes=%#v", fc.stops, fc.deletes)
 	}
-	claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 	if err != nil || !ok {
 		t.Fatalf("retained claim ok=%t err=%v", ok, err)
 	}
@@ -437,13 +439,13 @@ func mustCreateSafetyClaim(
 	release string,
 	state string,
 	expiresAt time.Time,
-	target SSHTarget,
-) Server {
+	target core.SSHTarget,
+) core.Server {
 	t.Helper()
 	labels := b.labelsFor(leaseID, slug, "example-org/my-app", "alice", false, release, item, state)
 	labels["expires_at"] = expiresAt.UTC().Format(time.RFC3339)
 	server := b.serverFromCodespace(item, labels)
-	if err := claimLeaseTargetForRepoConfig(leaseID, slug, b.cfg, server, target, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, b.cfg, server, target, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	return server

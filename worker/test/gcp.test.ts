@@ -219,6 +219,48 @@ describe("gcp provider", () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    { name: "clipped body", body: "operation details ".repeat(40) + "quota exceeded" },
+    {
+      name: "reason omitted from the display summary",
+      body: JSON.stringify({
+        error: {
+          message: "Request could not be completed",
+          status: "RESOURCE_EXHAUSTED",
+          errors: [{ reason: "quotaExceeded" }],
+        },
+      }),
+    },
+  ])("preserves fallback decisions with $name", async ({ body }) => {
+    const client = new GCPClient(env);
+    primeAccessToken(client);
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(body, { status: 403 }));
+    client.fetcher = fetcher;
+    const config = leaseConfig({
+      provider: "gcp",
+      gcpZone: "us-central1-a",
+      serverType: "e2-micro",
+      serverTypeExplicit: true,
+      sshPublicKey: "ssh-ed25519 test",
+      capacity: { market: "spot", fallback: "on-demand", availabilityZones: ["us-central1-b"] },
+    });
+
+    const failure = await client
+      .createServerWithFallback(config, "cbx_abcdef123456", "runner", "alice@example.com")
+      .catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({
+      attempts: [
+        { region: "us-central1-a", market: "spot", category: "capacity" },
+        { region: "us-central1-b", market: "spot", category: "capacity" },
+        { region: "us-central1-a", market: "on-demand", category: "capacity" },
+        { region: "us-central1-b", market: "on-demand", category: "capacity" },
+      ],
+    });
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect((failure as Error).message).not.toContain("quota");
+  });
+
   it("prefers per-request project over Worker defaults", () => {
     expect(new GCPClient(env).project).toBe("default-project");
     expect(new GCPClient(env, undefined, "request-project").project).toBe("request-project");

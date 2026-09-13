@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestBridgeListCommandKeepsSecretsOffArgv(t *testing.T) {
@@ -281,7 +283,7 @@ func TestRedactSecretsRemovesTokenValues(t *testing.T) {
 }
 
 func TestCheckProjectUsesReadOnlyBridgeScopeValidation(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.VercelSandbox.ProjectID = "prj_123"
 	cfg.VercelSandbox.TeamID = "team_123"
 	var got bridgeRequest

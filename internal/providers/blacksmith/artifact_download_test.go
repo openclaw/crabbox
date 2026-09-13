@@ -24,6 +24,12 @@ func TestBlacksmithDownloadArtifactValidation(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			fixture := newBlacksmithInstalledHelperFixture(t)
 			repoRoot, tempParent := fixture.repo, fixture.temp
+			if kind == "valid" {
+				t.Setenv("XDG_STATE_HOME", filepath.Join(repoRoot, "nested-state"))
+				if err := validateBlacksmithNativeSyncScope(repoRoot); err == nil {
+					t.Fatal("inbound fixture must overlap a rejected outgoing source scope")
+				}
+			}
 			var physicalTempParent string
 			if kind == "relative-tmp" {
 				t.Chdir(t.TempDir())
@@ -63,7 +69,7 @@ func TestBlacksmithDownloadArtifactValidation(t *testing.T) {
 				expectedHash = "invalid"
 			}
 			calls := 0
-			backend := newTestBlacksmithBackend(baseConfig(), ownershipRunner(func(runCtx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+			backend := newTestBlacksmithBackend(core.BaseConfig(), ownershipRunner(func(runCtx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				calls++
 				destination := req.Args[len(req.Args)-1]
 				stage = filepath.Dir(destination)
@@ -129,16 +135,16 @@ func TestBlacksmithDownloadArtifactValidation(t *testing.T) {
 				}
 				if kind == "cancel" {
 					cancel(nil)
-					return LocalCommandResult{ExitCode: -1}, runCtx.Err()
+					return core.LocalCommandResult{ExitCode: -1}, runCtx.Err()
 				}
 				if kind == "cancel-cause" {
 					cancel(cause)
-					return LocalCommandResult{ExitCode: -1}, runCtx.Err()
+					return core.LocalCommandResult{ExitCode: -1}, runCtx.Err()
 				}
 				if kind == "native-exit" {
-					return LocalCommandResult{ExitCode: 23}, errors.New("synthetic native failure")
+					return core.LocalCommandResult{ExitCode: 23}, errors.New("synthetic native failure")
 				}
-				return LocalCommandResult{}, nil
+				return core.LocalCommandResult{}, nil
 			}))
 			backend.route = &blacksmithRoute{API: "https://api.example.invalid", Org: "example-org"}
 			data, err := backend.downloadArtifact(ctx, repoRoot, "tbx_download", "/synthetic/key", remote, expectedBytes, expectedHash)
@@ -214,7 +220,7 @@ func TestBlacksmithDownloadFileLimit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			result, _ := core.RuntimeForProviderOperation(io.Discard).Exec.Run(t.Context(), LocalCommandRequest{
+			result, _ := core.RuntimeForProviderOperation(io.Discard).Exec.Run(t.Context(), core.LocalCommandRequest{
 				Name: shell, Args: args, MaxCapturedOutputBytes: 1024,
 				Env: []string{"PATH=/usr/bin:/bin", "POSIXLY_CORRECT=1", "CRABBOX_TEST_DOWNLOAD_LIMIT=1"},
 			})

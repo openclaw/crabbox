@@ -3,6 +3,7 @@ package modal
 import (
 	"context"
 	"fmt"
+
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
@@ -17,7 +18,7 @@ func (b *modalBackend) uploadEnvProfile(ctx context.Context, client modalAPI, cl
 			// Each operation owns a unique path; shared fencing excludes claim writers
 			// without allowing lock contention to outlive the cleanup deadline.
 			return core.WithLeaseClaimUnchangedShared(removeCtx, claim.LeaseID, claim, func() error {
-				return b.execShell(removeCtx, client, claim.CloudID, "rm -f "+shellQuote(remotePath), nil)
+				return b.execShell(removeCtx, client, claim.CloudID, "rm -f "+core.ShellQuote(remotePath), nil)
 			})
 		})
 		if err != nil {

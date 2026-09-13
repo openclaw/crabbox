@@ -172,10 +172,10 @@ func TestBlacksmithBackendRejectsNoSyncBeforeActivity(t *testing.T) {
 			root, processLog, gitLog := blacksmithAdmissionFixture(t, blacksmithTestboxProvider)
 			runner := &blacksmithFuncRunner{}
 			clock := &admissionClock{}
-			backend := newTestBlacksmithBackend(baseConfig(), runner)
+			backend := newTestBlacksmithBackend(core.BaseConfig(), runner)
 			backend.rt.Clock = clock
 			before := blacksmithAdmissionState(t, root)
-			_, err := backend.Run(t.Context(), RunRequest{ID: id, Repo: Repo{Root: filepath.Join(root, "repo")}, NoSync: true, Command: []string{"true"}})
+			_, err := backend.Run(t.Context(), core.RunRequest{ID: id, Repo: core.Repo{Root: filepath.Join(root, "repo")}, NoSync: true, Command: []string{"true"}})
 			assertBlacksmithAdmissionError(t, err)
 			if clock.calls != 0 || len(runner.calls) != 0 {
 				t.Errorf("clock=%d runner=%d calls before rejection", clock.calls, len(runner.calls))

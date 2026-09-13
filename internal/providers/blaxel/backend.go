@@ -18,9 +18,9 @@ type processPoller interface {
 	After(time.Duration) <-chan time.Time
 }
 
-func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
+func (b *backend) Warmup(ctx context.Context, req core.WarmupRequest) error {
 	if req.ActionsRunner {
-		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
+		return core.Exit(2, "--actions-runner is not supported for provider=%s", providerName)
 	}
 	started := now(b.rt)
 	client, err := b.client()
@@ -36,24 +36,19 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 		fmt.Fprintf(b.rt.Stderr, "warning: blaxel warmup keeps the sandbox until explicit stop\n")
 	}
 	total := now(b.rt).Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  leaseID,
-			Slug:     slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
 
-func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
 	workdir, workdirErr := blaxelWorkdir(b.cfg)
 	var client Client
 	var leaseID, sandboxID, slug string
-	var claim LeaseClaim
+	var claim core.LeaseClaim
 	var claimErr error
 	boundSandbox := func() shared.DelegatedSandbox {
 		return shared.DelegatedSandbox{
@@ -89,7 +84,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			sandboxID = sb.ID
 			// Capture the acquisition claim before any run work; cleanup must not
 			// authorize a replacement claim created while the command executes.
-			claim, claimErr = readLeaseClaim(leaseID)
+			claim, claimErr = core.ReadLeaseClaim(leaseID)
 			fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s name=%s\n", leaseID, slug, providerName, sb.ID, sb.Name)
 			return boundSandbox(), nil
 		},
@@ -121,12 +116,12 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 				return shared.DelegatedSandboxCommand{}, err
 			}
 			if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
-				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+				core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
 			return shared.DelegatedSandboxCommand{
 				Text: strings.Join(req.Command, " "),
-				Run: func(ctx context.Context) (int, error) {
-					return b.execCommand(ctx, client, sandboxID, workdir, command, req.Env)
+				Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
+					return b.execCommand(ctx, client, sandboxID, workdir, command, req.Env, stdout, stderr)
 				},
 			}, nil
 		},
@@ -157,7 +152,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	})
 }
 
-func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *backend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	_ = req
 	client, err := b.client()
 	if err != nil {
@@ -167,7 +162,7 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 	if err != nil {
 		return nil, err
 	}
-	servers := make([]Server, 0, len(claims))
+	servers := make([]core.Server, 0, len(claims))
 	for _, claim := range claims {
 		if claim.Provider != providerName || !blaxelClaimMatchesEndpointWorkspace(claim, client.BaseURL(), b.cfg.Blaxel.Workspace) {
 			continue
@@ -182,9 +177,9 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 			if err := validateBlaxelSandboxOwnership(claim, sb); err != nil {
 				return nil, err
 			}
-			state = blank(sb.Status, "unknown")
+			state = core.Blank(sb.Status, "unknown")
 		}
-		servers = append(servers, Server{
+		servers = append(servers, core.Server{
 			Provider: providerName,
 			CloudID:  sandboxID,
 			Name:     sandboxID,
@@ -202,18 +197,18 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 	return servers, nil
 }
 
-func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, error) {
+func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
 	client, err := b.client()
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	leaseID, sandboxID, slug, err := resolveLeaseID(req.ID, "", false, 0, client.BaseURL(), b.cfg.Blaxel.Workspace)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	waitTimeout := req.WaitTimeout
 	if waitTimeout <= 0 {
@@ -230,18 +225,18 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		sb, getErr := client.GetSandbox(pollCtx, sandboxID)
 		if getErr != nil {
 			if req.Wait && errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return StatusView{}, exit(5, "timed out waiting for blaxel sandbox %s to become ready", sandboxID)
+				return core.StatusView{}, core.Exit(5, "timed out waiting for blaxel sandbox %s to become ready", sandboxID)
 			}
 			if ctx.Err() != nil {
-				return StatusView{}, ctx.Err()
+				return core.StatusView{}, ctx.Err()
 			}
-			return StatusView{}, getErr
+			return core.StatusView{}, getErr
 		}
 		if err := validateBlaxelSandboxOwnership(claim, sb); err != nil {
-			return StatusView{}, err
+			return core.StatusView{}, err
 		}
 		state := strings.ToLower(strings.TrimSpace(sb.Status))
-		view := StatusView{
+		view := core.StatusView{
 			ID:       leaseID,
 			Slug:     slug,
 			Provider: providerName,
@@ -263,23 +258,23 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 			return view, nil
 		}
 		if isTerminalState(state) {
-			return StatusView{}, exit(5, "blaxel sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
+			return core.StatusView{}, core.Exit(5, "blaxel sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
 		if now(b.rt).After(deadline) {
-			return StatusView{}, exit(5, "timed out waiting for blaxel sandbox %s to become ready", sandboxID)
+			return core.StatusView{}, core.Exit(5, "timed out waiting for blaxel sandbox %s to become ready", sandboxID)
 		}
 		select {
 		case <-pollCtx.Done():
 			if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return StatusView{}, exit(5, "timed out waiting for blaxel sandbox %s to become ready", sandboxID)
+				return core.StatusView{}, core.Exit(5, "timed out waiting for blaxel sandbox %s to become ready", sandboxID)
 			}
-			return StatusView{}, pollCtx.Err()
+			return core.StatusView{}, pollCtx.Err()
 		case <-time.After(blaxelStatusPoll):
 		}
 	}
 }
 
-func (b *backend) Stop(ctx context.Context, req StopRequest) error {
+func (b *backend) Stop(ctx context.Context, req core.StopRequest) error {
 	client, err := b.client()
 	if err != nil {
 		return err
@@ -288,7 +283,7 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		return err
 	}
@@ -296,14 +291,14 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 		if !isBlaxelNotFound(err) || !b.cfg.Blaxel.ForgetMissing {
 			return err
 		}
-		if err := removeLeaseClaimIfUnchangedAfter(leaseID, claim, nil); err != nil {
+		if err := core.RemoveLeaseClaimIfUnchangedAfter(leaseID, claim, nil); err != nil {
 			return err
 		}
 		fmt.Fprintf(b.rt.Stderr, "warning: forgetting missing blaxel sandbox=%s after explicit request\n", sandboxID)
 		return nil
 	}
 	missing := false
-	if err := removeLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
+	if err := core.RemoveLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
 		if err := client.DeleteSandbox(ctx, sandboxID); err != nil {
 			if !isBlaxelNotFound(err) || !b.cfg.Blaxel.ForgetMissing {
 				return err
@@ -321,7 +316,7 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 	return nil
 }
 
-func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
+func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	client, err := b.client()
 	if err != nil {
 		return err
@@ -361,17 +356,17 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 				continue
 			}
 			if req.DryRun {
-				fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+				fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 				continue
 			}
-			if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+			if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 				return err
 			}
-			fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+			fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 			claimsRemoved++
 			continue
 		}
-		due, reason := blaxelClaimCleanupDue(claim, now)
+		due, reason := shared.ClaimIdleCleanupDue(claim, now)
 		if !due {
 			fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
 			continue
@@ -383,7 +378,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stdout, "would delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
 			continue
 		}
-		if err := removeLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+		if err := core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
 			if err := client.DeleteSandbox(ctx, sandboxID); err != nil && !isBlaxelNotFound(err) {
 				return err
 			}
@@ -400,7 +395,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	return nil
 }
 
-func (b *backend) cleanupBlaxelRecovery(ctx context.Context, client Client, claim LeaseClaim, now time.Time, dryRun bool) (bool, bool, error) {
+func (b *backend) cleanupBlaxelRecovery(ctx context.Context, client Client, claim core.LeaseClaim, now time.Time, dryRun bool) (bool, bool, error) {
 	matches := []Sandbox{}
 	cursor := ""
 	for {
@@ -419,7 +414,7 @@ func (b *backend) cleanupBlaxelRecovery(ctx context.Context, client Client, clai
 				continue
 			}
 			if strings.TrimSpace(sb.ID) == "" {
-				return false, false, exit(5, "blaxel recovery %s matched a sandbox without an id", claim.LeaseID)
+				return false, false, core.Exit(5, "blaxel recovery %s matched a sandbox without an id", claim.LeaseID)
 			}
 			matches = append(matches, sb)
 		}
@@ -441,7 +436,7 @@ func (b *backend) cleanupBlaxelRecovery(ctx context.Context, client Client, clai
 			fmt.Fprintf(b.rt.Stdout, "would remove recovery=%s reason=sandbox lifetime elapsed\n", claim.LeaseID)
 			return false, false, nil
 		}
-		if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 			return false, false, err
 		}
 		fmt.Fprintf(b.rt.Stdout, "remove recovery=%s reason=sandbox lifetime elapsed\n", claim.LeaseID)
@@ -453,7 +448,7 @@ func (b *backend) cleanupBlaxelRecovery(ctx context.Context, client Client, clai
 		}
 		return false, false, nil
 	}
-	if err := removeLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+	if err := core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
 		for _, sb := range matches {
 			if err := client.DeleteSandbox(ctx, sb.ID); err != nil && !isBlaxelNotFound(err) {
 				return err
@@ -469,25 +464,25 @@ func (b *backend) cleanupBlaxelRecovery(ctx context.Context, client Client, clai
 	return true, false, nil
 }
 
-func blaxelRecoveryExpired(claim LeaseClaim, now time.Time) (bool, error) {
+func blaxelRecoveryExpired(claim core.LeaseClaim, now time.Time) (bool, error) {
 	createdAt, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.ClaimedAt))
 	if err != nil {
-		return false, exit(5, "blaxel recovery %s has invalid claimed time", claim.LeaseID)
+		return false, core.Exit(5, "blaxel recovery %s has invalid claimed time", claim.LeaseID)
 	}
 	if claim.IdleTimeoutSeconds <= 0 {
-		return false, exit(5, "blaxel recovery %s has no sandbox lifetime", claim.LeaseID)
+		return false, core.Exit(5, "blaxel recovery %s has no sandbox lifetime", claim.LeaseID)
 	}
 	return !now.Before(createdAt.Add(time.Duration(claim.IdleTimeoutSeconds) * time.Second)), nil
 }
 
 func (b *backend) client() (Client, error) {
 	if b.clientFactory == nil {
-		return nil, exit(2, "blaxel client factory unavailable")
+		return nil, core.Exit(2, "blaxel client factory unavailable")
 	}
 	return b.clientFactory(b.cfg, b.rt)
 }
 
-func (b *backend) createSandbox(ctx context.Context, client Client, repo Repo, reclaim bool, requestedSlug string) (string, Sandbox, string, error) {
+func (b *backend) createSandbox(ctx context.Context, client Client, repo core.Repo, reclaim bool, requestedSlug string) (string, Sandbox, string, error) {
 	claimScope, err := newBlaxelClaimScope(client.BaseURL(), b.cfg.Blaxel.Workspace)
 	if err != nil {
 		return "", Sandbox{}, "", err
@@ -496,12 +491,12 @@ func (b *backend) createSandbox(ctx context.Context, client Client, repo Repo, r
 	slug := ""
 	req := CreateSandboxRequest{
 		Name:       newSandboxName(repo),
-		Image:      blank(b.cfg.Blaxel.Image, core.BlaxelConfigDefaultImage),
+		Image:      core.Blank(b.cfg.Blaxel.Image, core.BlaxelConfigDefaultImage),
 		Region:     b.cfg.Blaxel.Region,
 		MemoryMB:   b.cfg.Blaxel.MemoryMB,
 		TTL:        b.cfg.Blaxel.TTL,
 		IdleTTL:    b.cfg.Blaxel.IdleTTL,
-		WorkingDir: blank(b.cfg.Blaxel.Workdir, core.BlaxelConfigDefaultWorkdir),
+		WorkingDir: core.Blank(b.cfg.Blaxel.Workdir, core.BlaxelConfigDefaultWorkdir),
 		Labels: map[string]string{
 			"crabbox":          "true",
 			"crabbox.provider": providerName,
@@ -517,7 +512,7 @@ func (b *backend) createSandbox(ctx context.Context, client Client, repo Repo, r
 	}
 	sandboxID := sb.ID
 	leaseID = blaxelLeaseID(sandboxID)
-	slug, err = allocateClaimLeaseSlug(leaseID, requestedSlug)
+	slug, err = core.AllocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return leaseID, sb, "", b.cleanupCreateFailure(ctx, client, sandboxID, "", claimScope, repo, err)
 	}
@@ -529,7 +524,7 @@ func (b *backend) createSandbox(ctx context.Context, client Client, repo Repo, r
 	if strings.TrimSpace(sb.ID) == "" {
 		sb.ID = sandboxID
 	}
-	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
 		return leaseID, sb, slug, b.cleanupCreateFailure(ctx, client, sandboxID, "", claimScope, repo, err)
 	}
 	ready, err := b.waitSandboxReady(ctx, client, sandboxID)
@@ -563,20 +558,20 @@ func (b *backend) waitSandboxReady(ctx context.Context, client Client, sandboxID
 				return true, nil
 			}
 			if isTerminalState(state) {
-				return false, exit(5, "blaxel sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
+				return false, core.Exit(5, "blaxel sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 			}
 			return false, nil
 		}, nil)
 	if err != nil {
 		if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil && (result.Err != nil || errors.Is(err, context.DeadlineExceeded)) {
-			return Sandbox{}, exit(5, "timed out waiting for blaxel sandbox %s to become ready", sandboxID)
+			return Sandbox{}, core.Exit(5, "timed out waiting for blaxel sandbox %s to become ready", sandboxID)
 		}
 		return Sandbox{}, err
 	}
 	return result.Value, nil
 }
 
-func (b *backend) execCommand(ctx context.Context, client Client, sandboxID, workdir string, command []string, env map[string]string) (int, error) {
+func (b *backend) execCommand(ctx context.Context, client Client, sandboxID, workdir string, command []string, env map[string]string, stdout, stderr io.Writer) (int, error) {
 	if len(command) == 0 {
 		return 2, errors.New("missing command")
 	}
@@ -602,10 +597,10 @@ func (b *backend) execCommand(ctx context.Context, client Client, sandboxID, wor
 		return 1, err
 	}
 	if logs.Stdout != "" {
-		_, _ = io.WriteString(b.rt.Stdout, logs.Stdout)
+		_, _ = io.WriteString(stdout, logs.Stdout)
 	}
 	if logs.Stderr != "" {
-		_, _ = io.WriteString(b.rt.Stderr, logs.Stderr)
+		_, _ = io.WriteString(stderr, logs.Stderr)
 	}
 	if process.ExitCode == nil {
 		return 1, fmt.Errorf("blaxel process %s completed without an exit code", process.ID)
@@ -643,7 +638,7 @@ func (b *backend) cleanupContext(ctx context.Context) (context.Context, context.
 	return context.WithTimeout(context.WithoutCancel(ctx), timeout)
 }
 
-func (b *backend) cleanupCreateFailure(ctx context.Context, client Client, sandboxID, localLeaseID, claimScope string, repo Repo, cause error) error {
+func (b *backend) cleanupCreateFailure(ctx context.Context, client Client, sandboxID, localLeaseID, claimScope string, repo core.Repo, cause error) error {
 	if strings.TrimSpace(sandboxID) == "" {
 		return cause
 	}
@@ -657,11 +652,11 @@ func (b *backend) cleanupCreateFailure(ctx context.Context, client Client, sandb
 	}
 	var cleanupErr error
 	if strings.TrimSpace(localLeaseID) != "" {
-		claim, err := readLeaseClaim(localLeaseID)
+		claim, err := core.ReadLeaseClaim(localLeaseID)
 		if err != nil {
 			cleanupErr = err
 		} else {
-			cleanupErr = removeLeaseClaimIfUnchangedAfter(localLeaseID, claim, deleteSandbox)
+			cleanupErr = core.RemoveLeaseClaimIfUnchangedAfter(localLeaseID, claim, deleteSandbox)
 		}
 	} else {
 		cleanupErr = deleteSandbox()
@@ -670,8 +665,8 @@ func (b *backend) cleanupCreateFailure(ctx context.Context, client Client, sandb
 		if strings.TrimSpace(localLeaseID) != "" {
 			return errors.Join(cause, fmt.Errorf("blaxel cleanup failed for sandbox %s; local claim %s remains for cleanup: %w", sandboxID, localLeaseID, cleanupErr))
 		}
-		recoveryID := recoveryPrefix + randomSuffix()
-		if claimErr := claimLeaseForRepoProviderScopePond(recoveryID, "", providerName, claimScope, "", repo.Root, blaxelRecoveryLifetime(b.cfg), true); claimErr != nil {
+		recoveryID := recoveryPrefix + shared.RandomSuffix()
+		if claimErr := core.ClaimLeaseForRepoProviderScopePond(recoveryID, "", providerName, claimScope, "", repo.Root, blaxelRecoveryLifetime(b.cfg), true); claimErr != nil {
 			return errors.Join(cause, fmt.Errorf("blaxel cleanup failed for sandbox %s and recovery claim failed: %v; delete it in the Blaxel console: %w", sandboxID, claimErr, cleanupErr))
 		}
 		return errors.Join(cause, fmt.Errorf("blaxel cleanup failed for sandbox %s; recovery claim %s recorded for cleanup: %w", sandboxID, recoveryID, cleanupErr))
@@ -679,7 +674,7 @@ func (b *backend) cleanupCreateFailure(ctx context.Context, client Client, sandb
 	return cause
 }
 
-func blaxelRecoveryLifetime(cfg Config) time.Duration {
+func blaxelRecoveryLifetime(cfg core.Config) time.Duration {
 	if cfg.TTL > 0 {
 		return cfg.TTL
 	}
@@ -698,26 +693,26 @@ func (b *backend) execTimeoutSecs() int {
 
 func buildCommand(command []string, shellMode bool) ([]string, error) {
 	if len(command) == 0 {
-		return nil, exit(2, "missing command")
+		return nil, core.Exit(2, "missing command")
 	}
 	if shellMode {
 		return []string{"bash", "-lc", strings.Join(command, " ")}, nil
 	}
-	if shouldUseShell(command) {
-		return []string{"bash", "-lc", shellScriptFromArgv(command)}, nil
+	if core.ShouldUseShell(command) {
+		return []string{"bash", "-lc", core.ShellScriptFromArgv(command)}, nil
 	}
 	return command, nil
 }
 
-func blaxelWorkdir(cfg Config) (string, error) {
-	workdir := strings.TrimSpace(blank(cfg.Blaxel.Workdir, core.BlaxelConfigDefaultWorkdir))
+func blaxelWorkdir(cfg core.Config) (string, error) {
+	workdir := strings.TrimSpace(core.Blank(cfg.Blaxel.Workdir, core.BlaxelConfigDefaultWorkdir))
 	clean := path.Clean(workdir)
 	if workdir == "" || !strings.HasPrefix(clean, "/") || strings.Contains(workdir, "\x00") {
-		return "", exit(2, "blaxel workdir %q must be an absolute path", workdir)
+		return "", core.Exit(2, "blaxel workdir %q must be an absolute path", workdir)
 	}
 	switch clean {
 	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var", "/workspace":
-		return "", exit(2, "blaxel workdir %q is too broad; choose a dedicated subdirectory", clean)
+		return "", core.Exit(2, "blaxel workdir %q is too broad; choose a dedicated subdirectory", clean)
 	}
 	return clean, nil
 }

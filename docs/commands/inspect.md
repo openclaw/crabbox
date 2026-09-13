@@ -250,6 +250,53 @@ claim; consult `recoveryAudit` for its basis. It is still not deletion authority
 Orphan/provisioning continuation paths cannot replace the recovered baseline;
 only ordinary release consumes this recovery.
 
+### Audited legacy AWS cleanup recovery
+
+An administrator can recover the original account scope of an expired, released
+AWS lease whose instance is already absent. Use the existing authenticated
+`GET /v1/leases/{id}/cleanup` and `POST /v1/leases/{id}/cleanup` API, with the
+canonical lease ID. Ordinary owners, shares, and device credentials cannot use
+AWS scope recovery. This does not add a CLI flag or a force-success override.
+
+Recovery requires explicit `releaseDeletesServer: true`. The acquisition's
+`keep` default can remain true after an explicit delete request; recovery does
+not change that flag. A retained disposition (`releaseDeletesServer: false`) or
+missing delete intent refuses recovery, including if it changes during inspection.
+
+Inspection requires a retained instance ID, Region, creation and release times,
+and the canonical owned SSH key. It reads CloudTrail `LookupEvents` in that
+Region using the same fixed credentials as STS and the exact EC2 observation.
+One successful original `RunInstances` event must bind the instance to the
+recorded lease labels, owner, slug, and key. Both its `keyName` request field
+and creation-time `provider_key` instance tag must match the canonical key.
+Its recipient account and Region must match the authenticated observation. Current credentials or an empty EC2
+lookup alone do not establish the original account.
+
+CloudTrail event history is limited to 90 days. Lookup is bounded to ten pages
+and 2 MiB, and incomplete pagination, malformed or truncated events, conflicting
+identities, missing evidence, denied permissions, and transport failures all
+refuse recovery. Crabbox does not add IAM permissions, accept pasted event
+JSON, or fall back to inference. The response contains only the proposed scope,
+event ID and time, an unchanged-binding indicator, and a claim fingerprint;
+raw event bodies and bootstrap data are never returned or retained.
+
+After reviewing an inspection with `claimUnchanged: true`, send the same
+`acknowledge-missing-resource` request shown above with its `claimFingerprint`.
+The administrator acknowledgement selects the recovery; it is not evidence.
+Crabbox rereads authoritative allocation evidence and confirms exact current
+instance absence. Immediately before committing, it rechecks administrator
+access, the unchanged lease binding, and the absence of active cleanup or
+provisioning owners.
+
+One existing-store transaction restores `providerScope`, records a bounded
+provider-specific audit, resolves only the proven instance-existence uncertainty,
+and schedules ordinary cleanup. It does not record `cleanupCompletedAt`, erase
+errors or access evidence, or delete resources. Normal cleanup still verifies
+the bound account and Region and must finish remaining owned-key and access
+cleanup before reporting completion. Failed key deletion retains the lease and
+local recovery artifacts. Repeating an acknowledged fingerprint returns its
+existing audit rather than rewriting the original allocation evidence.
+
 ### Additional provider metadata
 
 For coordinator leases whose provider can inject an SSH host key before first

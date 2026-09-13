@@ -19,7 +19,6 @@ import (
 	"github.com/scaleway/scaleway-sdk-go/scw"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const defaultScalewayAPIURL = "https://api.scaleway.com"
@@ -186,7 +185,7 @@ func (t *scalewayRedirectTransport) RoundTrip(req *http.Request) (*http.Response
 	switch {
 	case parseErr != nil:
 		marker = scalewayRedirectInvalid
-	case !sameScalewayOrigin(t.trusted, target):
+	case !core.SameHTTPOrigin(t.trusted, target):
 		marker = scalewayRedirectCrossOrigin
 	case t.enforceDefaultLimit && scalewayRedirectHop(req.Context()) >= 9:
 		marker = scalewayRedirectLimit
@@ -250,7 +249,7 @@ func secureScalewayHTTPClient(source *http.Client, trusted *url.URL) *http.Clien
 				return errScalewayRedirectLimit
 			}
 		}
-		if !sameScalewayOrigin(trusted, req.URL) {
+		if !core.SameHTTPOrigin(trusted, req.URL) {
 			return errScalewayCrossOriginRedirect
 		}
 		if originalCheckRedirect != nil {
@@ -277,10 +276,6 @@ func isScalewayRedirect(status int) bool {
 	default:
 		return false
 	}
-}
-
-func sameScalewayOrigin(a, b *url.URL) bool {
-	return shared.SameOrigin(a, b)
 }
 
 func scalewayProfileFromSDKConfig() (*scw.Profile, error) {

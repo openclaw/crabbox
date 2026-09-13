@@ -132,7 +132,7 @@ func (i *instance) UnmarshalJSON(data []byte) error {
 // app_id is preferred (confirmed working against live `cvms get/delete
 // --cvm-id`); vm_uuid, instance_id, and name are accepted fallbacks.
 func (i instance) cloudID() string {
-	return firstNonBlank(i.AppID, i.VMUUID, i.ID, i.InstanceID, i.Name)
+	return shared.FirstNonBlankTrimmed(i.AppID, i.VMUUID, i.ID, i.InstanceID, i.Name)
 }
 
 // matchesID reports whether identifier names this CVM under any of the handles
@@ -258,8 +258,7 @@ func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID st
 	if err := core.UseLeaseKnownHosts(&target.SSH, leaseID); err != nil {
 		return err
 	}
-	core.UseStoredTestboxKey(&target.SSH, leaseID)
-	return nil
+	return core.UseStoredTestboxKey(&target.SSH, leaseID)
 }
 
 func (b *backend) configForRun() core.Config {
@@ -339,7 +338,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		recoveryLabels["recovery"] = recovery
 		recoveryLabels["state"] = "provisioning"
 		item := instance{ID: id, Name: phalaCVMName(leaseID), Labels: recoveryLabels}
-		lease, err := b.lease(item, cfg, leaseID)
+		lease, err := b.lease(item, cfg, leaseID, false)
 		if err != nil {
 			return err
 		}
@@ -397,7 +396,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if slug != "" {
 		item.Labels["slug"] = slug
 	}
-	lease, err := b.lease(item, cfg, leaseID)
+	lease, err := b.lease(item, cfg, leaseID, false)
 	if err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
@@ -469,7 +468,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 			item.Labels["gateway_host"] = gatewayHost
 		}
 	}
-	lease, err := b.lease(item, cfg, leaseID)
+	lease, err := b.lease(item, cfg, leaseID, req.ReleaseOnly)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -499,7 +498,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		// stored one. b.lease()/mergeClaimLabels surfaced the authoritative claim.Slug
 		// onto lease.Server.Labels["slug"], so prefer that, and never overwrite a
 		// non-empty stored slug with a blank.
-		slug := firstNonBlank(lease.Server.Labels["slug"], item.Labels["slug"])
+		slug := shared.FirstNonBlankTrimmed(lease.Server.Labels["slug"], item.Labels["slug"])
 		if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 			return core.LeaseTarget{}, err
 		}
@@ -624,7 +623,7 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 		// a blank server.Labels["slug"] (e.g. a lease target whose labels lost it)
 		// would WIPE the stored slug on every idle keepalive. Prefer the existing
 		// claim's slug so Touch never blanks it.
-		slug := firstNonBlank(server.Labels["slug"], claim.Slug)
+		slug := shared.FirstNonBlankTrimmed(server.Labels["slug"], claim.Slug)
 		if ok {
 			if claim.RepoRoot != "" {
 				_, err = core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, req.Lease.SSH, claim.RepoRoot, idleTimeout, false, claim, true)
@@ -1089,7 +1088,7 @@ func (b *backend) resolve(ctx context.Context, identifier string, cfg core.Confi
 	return instance{}, "", core.Exit(4, "Phala CVM lease not found: %s", identifier)
 }
 
-func (b *backend) lease(item instance, cfg core.Config, leaseID string) (core.LeaseTarget, error) {
+func (b *backend) lease(item instance, cfg core.Config, leaseID string, releaseOnly bool) (core.LeaseTarget, error) {
 	target := core.SSHTarget{
 		User:            "root",
 		Host:            item.cloudID(),
@@ -1102,11 +1101,13 @@ func (b *backend) lease(item instance, cfg core.Config, leaseID string) (core.Le
 		SSHConfigProxy:  true,
 		ProxyCommand:    proxyCommand(cfg, item.cloudID(), item.Labels["gateway_host"]),
 	}
-	if leaseID != "" {
+	if leaseID != "" && !releaseOnly {
 		if err := core.UseLeaseKnownHosts(&target, leaseID); err != nil {
 			return core.LeaseTarget{}, err
 		}
-		core.UseStoredTestboxKey(&target, leaseID)
+		if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
+			return core.LeaseTarget{}, err
+		}
 	}
 	server := b.server(item, cfg)
 	if claim, ok, _ := resolvePhalaClaim(leaseID, cfg); ok {
@@ -1178,11 +1179,11 @@ func (b *backend) server(item instance, cfg core.Config) core.Server {
 	if labels["state"] == "" {
 		labels["state"] = phalaState(item.Status)
 	}
-	labels["server_type"] = firstNonBlank(labels["server_type"], item.InstanceType, cfg.ServerType)
+	labels["server_type"] = shared.FirstNonBlankTrimmed(labels["server_type"], item.InstanceType, cfg.ServerType)
 	server := core.Server{
 		CloudID:  item.cloudID(),
 		Provider: providerName,
-		Name:     firstNonBlank(labels["slug"], item.Name, item.cloudID()),
+		Name:     shared.FirstNonBlankTrimmed(labels["slug"], item.Name, item.cloudID()),
 		Status:   labels["state"],
 		Labels:   labels,
 	}
@@ -1419,20 +1420,9 @@ func proxyCommand(cfg core.Config, cvmID, gatewayHost string) string {
 	}
 	words = append(words, cvmID)
 	for i := range words {
-		words[i] = quoteProxyWord(words[i])
+		words[i] = shared.QuoteSSHProxyCommandWord(words[i])
 	}
 	return strings.Join(words, " ")
-}
-
-func quoteProxyWord(word string) string {
-	word = strings.ReplaceAll(word, "%", "%%")
-	if word != "" && strings.IndexFunc(word, func(r rune) bool {
-		return !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') ||
-			strings.ContainsRune("_-./:,@%+=", r))
-	}) == -1 {
-		return word
-	}
-	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, "$", `\$`, "`", "\\`").Replace(word) + `"`
 }
 
 // missingCVMResponse reports whether the phala CLI's stdout/stderr unambiguously
@@ -1589,7 +1579,7 @@ func (g *gatewayGetOutput) UnmarshalJSON(data []byte) error {
 // phalaCVM.appID() EXACTLY so the cached host and the proxy-resolved fallback
 // host are identical (the gateway domain preference already matches).
 func (g *gatewayGetOutput) appID() string {
-	id := firstNonBlank(g.AppID, g.AppIDAlt, g.ID, g.InstanceID)
+	id := shared.FirstNonBlankTrimmed(g.AppID, g.AppIDAlt, g.ID, g.InstanceID)
 	if id == "" && g.CVM != nil {
 		id = g.CVM.appID()
 	}
@@ -1600,7 +1590,7 @@ func (g *gatewayGetOutput) appID() string {
 // the nested base_domain/domain, then a top-level gateway_domain, falling
 // through to the nested cvm object. This preference matches resolvePhalaProxyHost.
 func (g *gatewayGetOutput) gatewayDomain() string {
-	domain := firstNonBlank(g.GatewayDomain, g.BaseDomain, g.Domain, g.TopGateway)
+	domain := shared.FirstNonBlankTrimmed(g.GatewayDomain, g.BaseDomain, g.Domain, g.TopGateway)
 	if domain == "" && g.CVM != nil {
 		domain = g.CVM.gatewayDomain()
 	}
@@ -1649,7 +1639,7 @@ func (b *backend) validateDestroyTarget(ctx context.Context, cfg core.Config, id
 	if !ok {
 		return false, core.Exit(4, "refusing to destroy Phala CVM %s: no local claim for lease %s", id, leaseID)
 	}
-	claimedID := firstNonBlank(claim.CloudID, claim.Labels["phala_cvm"])
+	claimedID := shared.FirstNonBlankTrimmed(claim.CloudID, claim.Labels["phala_cvm"])
 	if claimedID != "" && strings.TrimSpace(claimedID) != strings.TrimSpace(id) {
 		return false, core.Exit(4, "refusing to destroy Phala CVM %s: local claim for lease %s points to %s", id, leaseID, claimedID)
 	}
@@ -1694,10 +1684,6 @@ func commandError(action string, result core.LocalCommandResult, err error) erro
 		return core.Exit(result.ExitCode, "%s failed: %v: %s", action, err, detail)
 	}
 	return core.Exit(result.ExitCode, "%s failed: %v", action, err)
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlankTrimmed(values...)
 }
 
 // jsonObjectPrefix returns the first top-level JSON object/array embedded in a

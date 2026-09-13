@@ -12,12 +12,13 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type cliRunner struct {
-	cfg NebiusConfig
-	rt  Runtime
+	cfg core.NebiusConfig
+	rt  core.Runtime
 }
 
 type cliResult struct {
@@ -37,7 +38,7 @@ type nebiusAPI interface {
 }
 
 type nebiusClient struct {
-	cfg NebiusConfig
+	cfg core.NebiusConfig
 	cli cliRunner
 }
 
@@ -57,22 +58,22 @@ type nebiusInstance struct {
 	Raw      map[string]any
 }
 
-func newCLIRunner(cfg NebiusConfig, rt Runtime) cliRunner {
+func newCLIRunner(cfg core.NebiusConfig, rt core.Runtime) cliRunner {
 	return cliRunner{cfg: cfg, rt: rt}
 }
 
-func newNebiusClient(cfg NebiusConfig, rt Runtime) *nebiusClient {
+func newNebiusClient(cfg core.NebiusConfig, rt core.Runtime) *nebiusClient {
 	return &nebiusClient{cfg: cfg, cli: newCLIRunner(cfg, rt)}
 }
 
 func (c cliRunner) run(ctx context.Context, args ...string) (cliResult, error) {
 	commandArgs := c.withProfile(args)
-	result, err := c.rt.Exec.Run(ctx, LocalCommandRequest{
+	result, err := c.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name: c.cfg.CLI,
 		Args: commandArgs,
 	})
 	if err != nil {
-		return cliResult{Stdout: result.Stdout, Stderr: result.Stderr}, fmt.Errorf("nebius cli %s failed: %s", strings.Join(redactNebiusArgs(commandArgs), " "), redactNebiusText(firstNonBlank(result.Stderr, err.Error())))
+		return cliResult{Stdout: result.Stdout, Stderr: result.Stderr}, fmt.Errorf("nebius cli %s failed: %s", strings.Join(redactNebiusArgs(commandArgs), " "), redactNebiusText(shared.FirstNonBlankTrimmed(result.Stderr, err.Error())))
 	}
 	return cliResult{Stdout: result.Stdout, Stderr: result.Stderr}, nil
 }
@@ -146,7 +147,7 @@ func (c *nebiusClient) CreateInstance(ctx context.Context, req nebiusCreateReque
 		"--boot-disk-attach-mode", "read_write",
 		"--cloud-init-user-data", req.UserData,
 		"--network-interfaces", renderNetworkInterfaces(c.cfg),
-		"--recovery-policy", firstNonBlank(c.cfg.RecoveryPolicy, "fail"),
+		"--recovery-policy", shared.FirstNonBlankTrimmed(c.cfg.RecoveryPolicy, "fail"),
 	}
 	if strings.TrimSpace(c.cfg.ServiceAccountID) != "" {
 		args = append(args, "--service-account-id", strings.TrimSpace(c.cfg.ServiceAccountID))
@@ -281,12 +282,12 @@ func instanceFromObject(object map[string]any) nebiusInstance {
 	}
 }
 
-func serverFromInstance(item nebiusInstance, cfg Config) Server {
+func serverFromInstance(item nebiusInstance, cfg core.Config) core.Server {
 	labels := shared.CloneLabels(item.Labels)
-	server := Server{
+	server := core.Server{
 		CloudID:  item.ID,
 		Provider: providerName,
-		Name:     firstNonBlank(item.Name, labels["slug"]),
+		Name:     shared.FirstNonBlankTrimmed(item.Name, labels["slug"]),
 		Status:   normalizeNebiusState(item.Status),
 		Labels:   labels,
 	}
@@ -327,7 +328,7 @@ func cleanIP(value string) string {
 	return strings.TrimSpace(value)
 }
 
-func renderNetworkInterfaces(cfg NebiusConfig) string {
+func renderNetworkInterfaces(cfg core.NebiusConfig) string {
 	item := map[string]any{
 		"name":       "eth0",
 		"subnet_id":  strings.TrimSpace(cfg.SubnetID),
@@ -472,15 +473,11 @@ func redactNebiusText(text string) string {
 	return strings.TrimSpace(text)
 }
 
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlankTrimmed(values...)
-}
-
 func isJSON(output string) bool {
 	var raw any
 	return json.Unmarshal([]byte(output), &raw) == nil
 }
 
 func validationError(format string, args ...any) error {
-	return exit(2, format, args...)
+	return core.Exit(2, format, args...)
 }

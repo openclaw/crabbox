@@ -18,11 +18,11 @@ const (
 	windowsMaxProcessCommandLineUTF16 = 32768
 )
 
-func processBootIdentity() (string, error) {
+func LocalProcessBootIdentity() (string, error) {
 	return "", nil
 }
 
-func processBootIdentityRequired() bool {
+func LocalProcessBootIdentityRequired() bool {
 	return false
 }
 
@@ -38,7 +38,7 @@ type windowsProcessCommandLineQuery func(
 	retLen *uint32,
 ) error
 
-func webVNCDaemonProcessStartIdentity(pid int) (string, error) {
+func LocalProcessStartIdentity(pid int) (string, error) {
 	if pid <= 0 {
 		return "", fmt.Errorf("pid must be positive")
 	}
@@ -58,7 +58,7 @@ func webVNCDaemonProcessStartIdentity(pid int) (string, error) {
 	return strconv.FormatUint(value, 10), nil
 }
 
-func webVNCDaemonProcessCommand(pid int) (string, bool) {
+func LocalProcessCommand(pid int) (string, bool) {
 	if pid <= 0 {
 		return "", false
 	}

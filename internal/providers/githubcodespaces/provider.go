@@ -25,8 +25,8 @@ func (Provider) Aliases() []string {
 	return []string{"codespaces", "gh-codespaces"}
 }
 
-func (Provider) Spec() ProviderSpec {
-	return ProviderSpec{
+func (Provider) Spec() core.ProviderSpec {
+	return core.ProviderSpec{
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationCLI),
 		Name:             providerName,
 		Family:           providerFamily,
@@ -38,15 +38,15 @@ func (Provider) Spec() ProviderSpec {
 	}
 }
 
-func (Provider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return RegisterGitHubCodespacesProviderFlags(fs, defaults)
 }
 
-func (Provider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	return ApplyGitHubCodespacesProviderFlags(cfg, fs, values)
 }
 
-func (Provider) ApplyConfigDefaults(cfg *Config) error {
+func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
 	c := &cfg.GitHubCodespaces
 	if strings.TrimSpace(c.GHPath) == "" {
 		c.GHPath = defaultGHPath
@@ -57,7 +57,7 @@ func (Provider) ApplyConfigDefaults(cfg *Config) error {
 	if c.IdleTimeout == 0 {
 		c.IdleTimeout = time.Duration(defaultIdleTimeoutMinutes) * time.Minute
 	}
-	if c.RetentionPeriod == 0 && !retentionPeriodExplicit(*cfg) {
+	if c.RetentionPeriod == 0 && !core.GitHubCodespacesRetentionExplicit(*cfg) {
 		c.RetentionPeriod = time.Duration(defaultRetentionPeriodDays) * 24 * time.Hour
 	}
 	if strings.TrimSpace(c.WorkRoot) == "" {
@@ -81,11 +81,11 @@ func (Provider) ApplyConfigDefaults(cfg *Config) error {
 	return ValidateGitHubCodespacesConfig(*cfg)
 }
 
-func (Provider) ClaimScope(cfg Config) string {
+func (Provider) ClaimScope(cfg core.Config) string {
 	return githubCodespacesClaimScope(cfg)
 }
 
-func (Provider) ServerTypeForConfig(cfg Config) string {
+func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
 		return cfg.ServerType
 	}
@@ -99,7 +99,7 @@ func (Provider) ServerTypeForClass(string) string {
 	return defaultCodespaceMachine
 }
 
-func (p Provider) Configure(cfg Config, rt Runtime) (Backend, error) {
+func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	cfg.Provider = providerName
 	if err := ValidateGitHubCodespacesConfig(cfg); err != nil {
 		return nil, err
@@ -107,6 +107,6 @@ func (p Provider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return newBackend(p.Spec(), cfg, rt), nil
 }
 
-func (p Provider) ConfigureDoctor(cfg Config, rt Runtime) (core.DoctorBackend, error) {
+func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
 	return shared.ConfigureDoctor("github-codespaces", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }

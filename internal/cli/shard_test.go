@@ -570,7 +570,7 @@ func TestShardMaxCountCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := store.Create(checkpointRecord{ID: "chk_shard_cap", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+	record, _, err := store.Reserve(checkpointRecord{ID: "chk_shard_cap", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -588,7 +588,7 @@ func TestShardDryRunPrintsPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := store.Create(checkpointRecord{ID: "chk_shard_dry", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+	record, _, err := store.Reserve(checkpointRecord{ID: "chk_shard_dry", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,7 +620,7 @@ func TestShardArchiveDryRunRequiresProviderIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := store.Create(checkpointRecord{ID: "chk_shard_no_provider", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+	record, _, err := store.Reserve(checkpointRecord{ID: "chk_shard_no_provider", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
 	if err != nil {
 		t.Fatal(err)
 	}

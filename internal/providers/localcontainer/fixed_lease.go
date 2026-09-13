@@ -185,6 +185,11 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 			if err := validateFixedLocalContainer(container, cfg, leaseID, intent.Slug, fingerprint); err != nil {
 				return core.LeaseTarget{}, err
 			}
+			if container.State.Running {
+				if err := validateLocalContainerInspectedMounts(container); err != nil {
+					return core.LeaseTarget{}, err
+				}
+			}
 		} else {
 			if intent.State == "acquired" || claim.CloudID != "" {
 				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: acquired fixed local-container lease %s is missing its bound container", leaseID)
@@ -203,7 +208,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 			}
 			pending := createdPendingLease(cfg, containerID, leaseID, intent.Slug, bootstrapDir, req.Keep)
 			pending.Server.Labels["fixed_intent_sha256"] = fingerprint
-			claim.CloudID = containerID
+			core.SetLeaseClaimResourceIdentity(claim, containerID, claim.CloudNumericID, claim.CloudImmutableID, nil)
 			claim.Labels = cloneLabels(pending.Server.Labels)
 			intent.Attempt["container_id"] = containerID
 			if err := persist(); err != nil {
@@ -228,7 +233,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 		if claim.CloudID == "" {
 			pending := createdPendingLease(cfg, container.ID, leaseID, intent.Slug, container.Config.Labels["bootstrap_dir"], req.Keep)
 			pending.Server.Labels["fixed_intent_sha256"] = fingerprint
-			claim.CloudID = container.ID
+			core.SetLeaseClaimResourceIdentity(claim, container.ID, claim.CloudNumericID, claim.CloudImmutableID, nil)
 			claim.Labels = cloneLabels(pending.Server.Labels)
 			intent.Attempt["container_id"] = container.ID
 			if err := persist(); err != nil {
@@ -236,7 +241,12 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 			}
 		}
 		if isPendingLocalContainerClaim(*claim) {
-			rememberPending(claim, b.pendingLease(cfg, container, leaseID, intent.Slug))
+			pending, err := b.pendingLease(cfg, container, leaseID, intent.Slug)
+			// Keep the observed identity for reconciliation even when key admission fails.
+			rememberPending(claim, pending)
+			if err != nil {
+				return core.LeaseTarget{}, err
+			}
 		}
 		containerID := strings.TrimSpace(claim.CloudID)
 		if !container.State.Running {
@@ -249,11 +259,17 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 			}
 			return core.LeaseTarget{}, notRunning
 		}
+		imageEvidence, err := b.observeImageEvidence(ctx, cfg, container, *claim)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
 		lease, err := b.waitForContainerEndpoint(ctx, cfg, containerID, leaseID, intent.Slug)
 		if err != nil {
 			return core.LeaseTarget{}, err
 		}
+		lease.Server.ImageEvidence = imageEvidence
 		if isPendingLocalContainerClaim(*claim) {
+			claim.ImageEvidence = core.CloneImageEvidence(imageEvidence)
 			claim.SSHHost = lease.SSH.Host
 			if port, parseErr := strconv.Atoi(strings.TrimSpace(lease.SSH.Port)); parseErr == nil && port > 0 {
 				claim.SSHPort = port

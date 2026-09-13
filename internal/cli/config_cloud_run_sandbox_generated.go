@@ -35,59 +35,14 @@ type CloudRunSandboxConfigApplied struct {
 
 func (cfg *CloudRunSandboxConfig) applyFile(file *fileCloudRunSandboxConfig) (CloudRunSandboxConfigApplied, error) {
 	var applied CloudRunSandboxConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.CLIPath != "" {
-		cfg.CLIPath = file.CLIPath
-		applied.InputAccepted = true
-	}
-	if file.Workdir != "" {
-		cfg.Workdir = file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.AllowEgress != nil {
-		cfg.AllowEgress = *file.AllowEgress
-		applied.InputAccepted = true
-	}
-	if file.Write != nil {
-		cfg.Write = *file.Write
-		applied.InputAccepted = true
-	}
-	if file.Rootfs != "" {
-		cfg.Rootfs = file.Rootfs
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "cloud-run-sandbox")
+	return applied, err
 }
 
 func (cfg *CloudRunSandboxConfig) applyEnv() (CloudRunSandboxConfigApplied, error) {
 	var applied CloudRunSandboxConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUD_RUN_SANDBOX_GATEWAY_URL", "CLOUD_RUN_SANDBOX_URL"); ok {
-		cfg.GatewayURL = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUD_RUN_SANDBOX_CLI", "CLOUD_RUN_SANDBOX_BINARY"); ok {
-		cfg.CLIPath = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUD_RUN_SANDBOX_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_CLOUD_RUN_SANDBOX_ALLOW_EGRESS"); ok {
-		cfg.AllowEgress = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_CLOUD_RUN_SANDBOX_WRITE"); ok {
-		cfg.Write = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUD_RUN_SANDBOX_ROOTFS"); ok {
-		cfg.Rootfs = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 6)
+	return applied, err
 }
 
 // CloudRunSandboxConfigFlagValues holds parsed values; only visited flags are applied.
@@ -102,42 +57,14 @@ type CloudRunSandboxConfigFlagValues struct {
 
 // RegisterCloudRunSandboxConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterCloudRunSandboxConfigFlags(fs *flag.FlagSet, defaults CloudRunSandboxConfig) CloudRunSandboxConfigFlagValues {
-	return CloudRunSandboxConfigFlagValues{
-		GatewayURL:  fs.String("cloud-run-sandbox-gateway-url", defaults.GatewayURL, "durable-routing Cloud Run sandbox gateway URL (HTTPS)"),
-		CLIPath:     fs.String("cloud-run-sandbox-cli", defaults.CLIPath, "path to the Cloud Run sandbox CLI binary (direct mode)"),
-		Workdir:     fs.String("cloud-run-sandbox-workdir", defaults.Workdir, "absolute working directory inside the sandbox (sync target)"),
-		AllowEgress: fs.Bool("cloud-run-sandbox-allow-egress", defaults.AllowEgress, "allow outbound network access from the sandbox (default deny)"),
-		Write:       fs.Bool("cloud-run-sandbox-write", defaults.Write, "allow writable mounted filesystems inside the sandbox"),
-		Rootfs:      fs.String("cloud-run-sandbox-rootfs", defaults.Rootfs, "root filesystem exposed to the sandbox (default /)"),
-	}
+	var values CloudRunSandboxConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values CloudRunSandboxConfigFlagValues) Apply(cfg *CloudRunSandboxConfig, fs *flag.FlagSet) (CloudRunSandboxConfigApplied, error) {
 	var applied CloudRunSandboxConfigApplied
-	if flagWasSet(fs, "cloud-run-sandbox-gateway-url") {
-		cfg.GatewayURL = *values.GatewayURL
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cloud-run-sandbox-cli") {
-		cfg.CLIPath = *values.CLIPath
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cloud-run-sandbox-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cloud-run-sandbox-allow-egress") {
-		cfg.AllowEgress = *values.AllowEgress
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cloud-run-sandbox-write") {
-		cfg.Write = *values.Write
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cloud-run-sandbox-rootfs") {
-		cfg.Rootfs = *values.Rootfs
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

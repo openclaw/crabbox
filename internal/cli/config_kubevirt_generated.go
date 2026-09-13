@@ -56,127 +56,14 @@ type KubeVirtConfigApplied struct {
 
 func (cfg *KubeVirtConfig) applyFile(file *fileKubeVirtConfig, trusted bool) (KubeVirtConfigApplied, error) {
 	var applied KubeVirtConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Kubectl != "" {
-		cfg.Kubectl = file.Kubectl
-		applied.InputAccepted = true
-		applied.Kubectl = true
-	}
-	if file.Virtctl != "" {
-		cfg.Virtctl = file.Virtctl
-		applied.InputAccepted = true
-		applied.Virtctl = true
-	}
-	if file.Kubeconfig != "" {
-		cfg.Kubeconfig = file.Kubeconfig
-		applied.InputAccepted = true
-		applied.Kubeconfig = true
-	}
-	if file.Context != "" {
-		cfg.Context = file.Context
-		applied.InputAccepted = true
-	}
-	if file.Namespace != "" {
-		cfg.Namespace = file.Namespace
-		applied.InputAccepted = true
-	}
-	if file.Template != "" {
-		cfg.Template = file.Template
-		applied.InputAccepted = true
-		applied.Template = true
-	}
-	if file.SSHUser != "" {
-		cfg.SSHUser = file.SSHUser
-		applied.InputAccepted = true
-	}
-	if trusted && file.SSHKey != "" {
-		cfg.SSHKey = file.SSHKey
-		applied.InputAccepted = true
-		applied.SSHKey = true
-	}
-	if file.SSHPublicKey != "" {
-		cfg.SSHPublicKey = file.SSHPublicKey
-		applied.InputAccepted = true
-		applied.SSHPublicKey = true
-	}
-	if file.SSHPort != "" {
-		cfg.SSHPort = file.SSHPort
-		applied.InputAccepted = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if file.DeleteOnRelease != nil {
-		cfg.DeleteOnRelease = *file.DeleteOnRelease
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "kubevirt")
+	return applied, err
 }
 
 func (cfg *KubeVirtConfig) applyEnv() (KubeVirtConfigApplied, error) {
 	var applied KubeVirtConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_KUBECTL"); ok {
-		cfg.Kubectl = value
-		applied.InputAccepted = true
-		applied.Kubectl = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_VIRTCTL"); ok {
-		cfg.Virtctl = value
-		applied.InputAccepted = true
-		applied.Virtctl = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_KUBECONFIG"); ok {
-		cfg.Kubeconfig = value
-		applied.InputAccepted = true
-		applied.Kubeconfig = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_CONTEXT"); ok {
-		cfg.Context = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_NAMESPACE"); ok {
-		cfg.Namespace = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_TEMPLATE"); ok {
-		cfg.Template = value
-		applied.InputAccepted = true
-		applied.Template = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_SSH_USER"); ok {
-		cfg.SSHUser = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_SSH_KEY"); ok {
-		cfg.SSHKey = value
-		applied.InputAccepted = true
-		applied.SSHKey = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_SSH_PUBLIC_KEY"); ok {
-		cfg.SSHPublicKey = value
-		applied.InputAccepted = true
-		applied.SSHPublicKey = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_SSH_PORT"); ok {
-		cfg.SSHPort = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_KUBEVIRT_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if value, ok := getenvBool("CRABBOX_KUBEVIRT_DELETE_ON_RELEASE"); ok {
-		cfg.DeleteOnRelease = value
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 12)
+	return applied, err
 }
 
 // KubeVirtConfigFlagValues holds parsed values; only visited flags are applied.
@@ -197,20 +84,9 @@ type KubeVirtConfigFlagValues struct {
 
 // RegisterKubeVirtConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterKubeVirtConfigFlags(fs *flag.FlagSet, defaults KubeVirtConfig) KubeVirtConfigFlagValues {
-	return KubeVirtConfigFlagValues{
-		Kubectl:         fs.String("kubevirt-kubectl", defaults.Kubectl, "kubectl executable"),
-		Virtctl:         fs.String("kubevirt-virtctl", defaults.Virtctl, "virtctl executable"),
-		Kubeconfig:      fs.String("kubevirt-kubeconfig", defaults.Kubeconfig, "Kubernetes kubeconfig path"),
-		Context:         fs.String("kubevirt-context", defaults.Context, "Kubernetes context"),
-		Namespace:       fs.String("kubevirt-namespace", defaults.Namespace, "Kubernetes namespace"),
-		Template:        fs.String("kubevirt-template", defaults.Template, "KubeVirt VirtualMachine manifest template"),
-		SSHUser:         fs.String("kubevirt-ssh-user", defaults.SSHUser, "guest SSH user"),
-		SSHKey:          fs.String("kubevirt-ssh-key", defaults.SSHKey, "guest SSH private key"),
-		SSHPublicKey:    fs.String("kubevirt-ssh-public-key", defaults.SSHPublicKey, "guest SSH public key inserted into the template"),
-		SSHPort:         fs.String("kubevirt-ssh-port", defaults.SSHPort, "guest SSH port"),
-		WorkRoot:        fs.String("kubevirt-work-root", defaults.WorkRoot, "guest Crabbox work root"),
-		DeleteOnRelease: fs.Bool("kubevirt-delete-on-release", defaults.DeleteOnRelease, "delete the VM on release instead of stopping it"),
-	}
+	var values KubeVirtConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // KubeVirtConfigVisitedFlags records raw flag visits, independently of application.
@@ -227,77 +103,14 @@ type KubeVirtConfigVisitedFlags struct {
 
 // KubeVirtConfigFlagPresence reports visits for tracked flag bindings.
 func KubeVirtConfigFlagPresence(fs *flag.FlagSet) KubeVirtConfigVisitedFlags {
-	return KubeVirtConfigVisitedFlags{
-		Kubectl:         flagWasSet(fs, "kubevirt-kubectl"),
-		Virtctl:         flagWasSet(fs, "kubevirt-virtctl"),
-		Kubeconfig:      flagWasSet(fs, "kubevirt-kubeconfig"),
-		Template:        flagWasSet(fs, "kubevirt-template"),
-		SSHKey:          flagWasSet(fs, "kubevirt-ssh-key"),
-		SSHPublicKey:    flagWasSet(fs, "kubevirt-ssh-public-key"),
-		WorkRoot:        flagWasSet(fs, "kubevirt-work-root"),
-		DeleteOnRelease: flagWasSet(fs, "kubevirt-delete-on-release"),
-	}
+	var visited KubeVirtConfigVisitedFlags
+	recordConfigFlagVisits[KubeVirtConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values KubeVirtConfigFlagValues) Apply(cfg *KubeVirtConfig, fs *flag.FlagSet) (KubeVirtConfigApplied, error) {
 	var applied KubeVirtConfigApplied
-	visited := KubeVirtConfigFlagPresence(fs)
-	if visited.Kubectl {
-		cfg.Kubectl = *values.Kubectl
-		applied.InputAccepted = true
-		applied.Kubectl = true
-	}
-	if visited.Virtctl {
-		cfg.Virtctl = *values.Virtctl
-		applied.InputAccepted = true
-		applied.Virtctl = true
-	}
-	if visited.Kubeconfig {
-		cfg.Kubeconfig = *values.Kubeconfig
-		applied.InputAccepted = true
-		applied.Kubeconfig = true
-	}
-	if flagWasSet(fs, "kubevirt-context") {
-		cfg.Context = *values.Context
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "kubevirt-namespace") {
-		cfg.Namespace = *values.Namespace
-		applied.InputAccepted = true
-	}
-	if visited.Template {
-		cfg.Template = *values.Template
-		applied.InputAccepted = true
-		applied.Template = true
-	}
-	if flagWasSet(fs, "kubevirt-ssh-user") {
-		cfg.SSHUser = *values.SSHUser
-		applied.InputAccepted = true
-	}
-	if visited.SSHKey {
-		cfg.SSHKey = *values.SSHKey
-		applied.InputAccepted = true
-		applied.SSHKey = true
-	}
-	if visited.SSHPublicKey {
-		cfg.SSHPublicKey = *values.SSHPublicKey
-		applied.InputAccepted = true
-		applied.SSHPublicKey = true
-	}
-	if flagWasSet(fs, "kubevirt-ssh-port") {
-		cfg.SSHPort = *values.SSHPort
-		applied.InputAccepted = true
-	}
-	if visited.WorkRoot {
-		cfg.WorkRoot = *values.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if visited.DeleteOnRelease {
-		cfg.DeleteOnRelease = *values.DeleteOnRelease
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

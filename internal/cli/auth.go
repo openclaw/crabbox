@@ -52,7 +52,7 @@ func (a App) login(ctx context.Context, args []string) error {
 		}
 	}
 	if *brokerURL == "" {
-		return exit(2, "crabbox login requires --url <broker-url> or a configured broker URL")
+		return Exit(2, "crabbox login requires --url <broker-url> or a configured broker URL")
 	}
 	if *tokenStdin {
 		return a.loginWithToken(ctx, *brokerURL, *provider, brokerMode, *jsonOut)
@@ -63,11 +63,11 @@ func (a App) login(ctx context.Context, args []string) error {
 func (a App) loginWithToken(ctx context.Context, brokerURL, provider string, brokerMode BrokerMode, jsonOut bool) error {
 	data, err := io.ReadAll(a.input())
 	if err != nil {
-		return exit(2, "read broker token: %v", err)
+		return Exit(2, "read broker token: %v", err)
 	}
 	token := strings.TrimSpace(string(data))
 	if token == "" {
-		return exit(2, "broker token from stdin is empty")
+		return Exit(2, "broker token from stdin is empty")
 	}
 	path, cfg, err := writeBrokerLogin(brokerURL, token, provider, brokerMode)
 	if err != nil {
@@ -78,7 +78,7 @@ func (a App) loginWithToken(ctx context.Context, brokerURL, provider string, bro
 		return err
 	}
 	if !ok {
-		return exit(2, "login wrote config but broker is not configured")
+		return Exit(2, "login wrote config but broker is not configured")
 	}
 	return a.finishLogin(ctx, coord, path, cfg, jsonOut)
 }
@@ -86,7 +86,7 @@ func (a App) loginWithToken(ctx context.Context, brokerURL, provider string, bro
 func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, brokerMode BrokerMode, noBrowser, jsonOut bool) error {
 	loopback, err := startGitHubLoginLoopback()
 	if err != nil {
-		return exit(3, "start local GitHub login callback: %v", err)
+		return Exit(3, "start local GitHub login callback: %v", err)
 	}
 	defer loopback.Close()
 
@@ -104,11 +104,11 @@ func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, br
 		return err
 	}
 	if err := validateGitHubLoginURL(start.URL); err != nil {
-		return exit(3, "GitHub login returned an invalid authorization URL: %v", err)
+		return Exit(3, "GitHub login returned an invalid authorization URL: %v", err)
 	}
 	if canonicalBrokerURL, ok := canonicalBrokerURLFromLoginURL(start.URL); ok && !sameBrokerURL(brokerURL, canonicalBrokerURL) {
 		if !brokerLoginRedirectOriginAllowed(cfg, canonicalBrokerURL) {
-			return exit(
+			return Exit(
 				3,
 				"GitHub login redirect_uri broker origin %s does not match selected broker %s; add it to broker.loginRedirectOrigins only if this is an intended same-deployment alias",
 				canonicalBrokerURL,
@@ -125,10 +125,10 @@ func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, br
 			return err
 		}
 		if err := validateGitHubLoginURL(start.URL); err != nil {
-			return exit(3, "GitHub login returned an invalid authorization URL: %v", err)
+			return Exit(3, "GitHub login returned an invalid authorization URL: %v", err)
 		}
 		if nextBrokerURL, ok := canonicalBrokerURLFromLoginURL(start.URL); ok && !sameBrokerURL(brokerURL, nextBrokerURL) {
-			return exit(
+			return Exit(
 				3,
 				"GitHub login redirect_uri broker origin %s does not match approved broker %s; check CRABBOX_PUBLIC_URL",
 				nextBrokerURL,
@@ -152,7 +152,7 @@ func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, br
 	browserConfirmation := ""
 	for {
 		if time.Now().After(deadline) {
-			return exit(3, "GitHub login expired")
+			return Exit(3, "GitHub login expired")
 		}
 		select {
 		case browserConfirmation = <-loopback.confirmations:
@@ -166,10 +166,10 @@ func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, br
 		case "pending", "confirmation_required":
 		case "complete":
 			if browserConfirmation == "" {
-				return exit(3, "GitHub login completed before this device received the browser confirmation")
+				return Exit(3, "GitHub login completed before this device received the browser confirmation")
 			}
 			if poll.Token == "" {
-				return exit(3, "GitHub login completed without a broker token")
+				return Exit(3, "GitHub login completed without a broker token")
 			}
 			if provider == "" {
 				provider = poll.Provider
@@ -183,15 +183,15 @@ func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, br
 				return err
 			}
 			if !ok {
-				return exit(2, "login wrote config but broker is not configured")
+				return Exit(2, "login wrote config but broker is not configured")
 			}
 			return a.finishLogin(ctx, coord, path, cfg, jsonOut)
 		case "expired":
-			return exit(3, "GitHub login expired")
+			return Exit(3, "GitHub login expired")
 		case "failed":
-			return exit(3, "GitHub login failed: %s", blank(poll.Error, "unknown error"))
+			return Exit(3, "GitHub login failed: %s", blank(poll.Error, "unknown error"))
 		default:
-			return exit(3, "GitHub login returned unexpected status %q", poll.Status)
+			return Exit(3, "GitHub login returned unexpected status %q", poll.Status)
 		}
 		timer := time.NewTimer(2 * time.Second)
 		select {
@@ -317,7 +317,7 @@ func coordinatorClientConfigForLogin(brokerURL, provider string) (*CoordinatorCl
 		return nil, Config{}, err
 	}
 	if !ok {
-		return nil, Config{}, exit(2, "login requires a broker URL")
+		return nil, Config{}, Exit(2, "login requires a broker URL")
 	}
 	return coord, cfg, nil
 }
@@ -438,7 +438,7 @@ func (a App) logout(_ context.Context, args []string) error {
 	}
 	path := writableConfigPath()
 	if path == "" {
-		return exit(2, "user config directory is unavailable")
+		return Exit(2, "user config directory is unavailable")
 	}
 	file, err := readFileConfig(path)
 	if err != nil {
@@ -474,7 +474,7 @@ func (a App) whoami(ctx context.Context, args []string) error {
 		return err
 	}
 	if !ok {
-		return exit(2, "whoami requires a configured coordinator")
+		return Exit(2, "whoami requires a configured coordinator")
 	}
 	who, err := coord.Whoami(ctx)
 	if err != nil {
@@ -490,7 +490,7 @@ func (a App) whoami(ctx context.Context, args []string) error {
 func writeBrokerLogin(brokerURL, token, provider string, brokerMode BrokerMode) (string, Config, error) {
 	path := writableConfigPath()
 	if path == "" {
-		return "", Config{}, exit(2, "user config directory is unavailable")
+		return "", Config{}, Exit(2, "user config directory is unavailable")
 	}
 	file, err := readFileConfig(path)
 	if err != nil {

@@ -30,7 +30,7 @@ func ownerBackend(t *testing.T, runner *fake) *backend {
 	if runner == nil {
 		runner = &fake{}
 	}
-	cfg := base()
+	cfg := core.BaseConfig()
 	cfg.Provider, cfg.Lume.CLIPath = providerName, fakeLumeOwner(t)
 	return newBackend((Provider{}).Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
 }
@@ -104,7 +104,7 @@ func TestRecoverPendingOwner(t *testing.T) {
 		_ = os.RemoveAll(handoff.Dir)
 	})
 	must(t, os.WriteFile(handoff.OwnerPath, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o600))
-	claim := claim{LeaseID: "cbx_pending_live", Labels: labels{
+	claim := core.LeaseClaim{LeaseID: "cbx_pending_live", Labels: labels{
 		"run_owner_expected": "true",
 		"run_owner_pending":  "true",
 		"run_launch_token":   token,

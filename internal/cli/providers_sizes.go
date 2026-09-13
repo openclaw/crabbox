@@ -19,17 +19,17 @@ func (a App) providerSizes(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox providers sizes <provider> [--all] [--refresh] [--class CLASS] [--json] [--with-context]")
+		return Exit(2, "usage: crabbox providers sizes <provider> [--all] [--refresh] [--class CLASS] [--json] [--with-context]")
 	}
 	if *withContext && !*jsonOut {
-		return exit(2, "--with-context requires --json")
+		return Exit(2, "--with-context requires --json")
 	}
 	provider, err := ProviderFor(fs.Arg(0))
 	if err != nil {
 		return err
 	}
 	if *withContext && provider.Spec().SizeSelection == "" {
-		return exit(2, "provider=%s does not expose native size selection", provider.Name())
+		return Exit(2, "provider=%s does not expose native size selection", provider.Name())
 	}
 	cfg, err := loadConfigWithOverrides("", provider.Name())
 	if err != nil {
@@ -47,13 +47,13 @@ func (a App) providerSizes(ctx context.Context, args []string) error {
 	}
 	catalog, ok := backend.(ProviderSizeCatalogBackend)
 	if !ok {
-		return exit(2, "provider=%s does not expose a live size catalog", provider.Name())
+		return Exit(2, "provider=%s does not expose a live size catalog", provider.Name())
 	}
 	var selection ProviderSizeSelection
 	if *withContext {
 		selector, ok := backend.(ProviderSizeSelectionBackend)
 		if !ok {
-			return exit(2, "provider=%s does not expose native size selection", provider.Name())
+			return Exit(2, "provider=%s does not expose native size selection", provider.Name())
 		}
 		selection = selector.SizeSelection()
 	}

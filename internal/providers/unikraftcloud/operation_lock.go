@@ -5,13 +5,14 @@ import (
 	"path/filepath"
 	"strings"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func lockUnikraftCloudLeaseOperation(ctx context.Context, leaseID string) (func(), error) {
 	if !strings.HasPrefix(leaseID, leasePrefix) || strings.TrimPrefix(leaseID, leasePrefix) == "" ||
 		strings.ContainsAny(leaseID, `/\`) || filepath.Base(leaseID) != leaseID || leaseID == "." {
-		return nil, exit(2, "invalid unikraft-cloud lease id %q", leaseID)
+		return nil, core.Exit(2, "invalid unikraft-cloud lease id %q", leaseID)
 	}
 	return shared.LockLeaseOperation(ctx, "unikraft-cloud", leaseID)
 }

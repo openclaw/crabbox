@@ -15,7 +15,7 @@ import (
 func TestCrownestConfigShowSection(t *testing.T) {
 	for _, selected := range []string{"", "crownest"} {
 		for _, forget := range []bool{false, true} {
-			cfg := Config{Provider: selected, Crownest: core.CrownestConfig{APIURL: "https://api.example.test/path?debug=1#hint", ProjectID: "", Template: " raw-template ", TimeoutSecs: 0, ForgetMissing: forget}}
+			cfg := core.Config{Provider: selected, Crownest: core.CrownestConfig{APIURL: "https://api.example.test/path?debug=1#hint", ProjectID: "", Template: " raw-template ", TimeoutSecs: 0, ForgetMissing: forget}}
 			before := cfg.Crownest
 			section := (Provider{}).ConfigShowSection(cfg)
 			values := map[string]any{}
@@ -41,7 +41,7 @@ func TestCrownestConfigShowSection(t *testing.T) {
 func TestCrownestOrdinaryFlagOrdering(t *testing.T) {
 	for _, provider := range []string{" CROWNEST ", "other"} {
 		for _, sizing := range []string{"", "class", "type"} {
-			cfg := Config{Provider: provider}
+			cfg := core.Config{Provider: provider}
 			before := cfg
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			fs.String("class", "", "")
@@ -65,7 +65,7 @@ func TestCrownestOrdinaryFlagOrdering(t *testing.T) {
 			timeout       int
 			diagnostic    string
 		}{{" https://example.invalid ", "same", 0, ""}, {"", "same", 7, ""}, {"ordinary", "", -1, "provider=crownest base URL must be an absolute URL"}, {"https://example.invalid", "", -1, "crownest timeoutSecs must be non-negative"}, {"https://example.invalid", "", 0, "crownest template must not be empty"}} {
-			cfg := Config{Provider: provider, Crownest: core.CrownestConfig{APIURL: "https://example.invalid", ProjectID: "same", Template: "same", TimeoutSecs: 7}}
+			cfg := core.Config{Provider: provider, Crownest: core.CrownestConfig{APIURL: "https://example.invalid", ProjectID: "same", Template: "same", TimeoutSecs: 7}}
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			values := (Provider{}).RegisterFlags(fs, cfg)
 			before := cfg
@@ -213,7 +213,7 @@ func TestConfigureReturnsDelegatedCleanupAndDoctor(t *testing.T) {
 	t.Setenv("CRABBOX_CROWNEST_API_KEY", "")
 	t.Setenv("CROWNEST_API_KEY", "")
 	provider := Provider{}
-	configured, err := provider.Configure(testConfig(), Runtime{Stdout: io.Discard, Stderr: io.Discard})
+	configured, err := provider.Configure(testConfig(), core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatalf("Configure err=%v", err)
 	}
@@ -221,22 +221,22 @@ func TestConfigureReturnsDelegatedCleanupAndDoctor(t *testing.T) {
 	if !ok {
 		t.Fatalf("configured backend does not implement DelegatedRunBackend: %T", configured)
 	}
-	if _, err := delegated.Run(context.Background(), RunRequest{}); err == nil || !strings.Contains(err.Error(), "API key") {
+	if _, err := delegated.Run(context.Background(), core.RunRequest{}); err == nil || !strings.Contains(err.Error(), "API key") {
 		t.Fatalf("Run err=%v, want API key requirement", err)
 	}
 	if _, ok := configured.(core.CleanupBackend); !ok {
 		t.Fatalf("configured backend does not implement CleanupBackend: %T", configured)
 	}
-	doctor, err := provider.ConfigureDoctor(testConfig(), Runtime{Stdout: io.Discard, Stderr: io.Discard})
+	doctor, err := provider.ConfigureDoctor(testConfig(), core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatalf("ConfigureDoctor err=%v", err)
 	}
-	if _, err := doctor.Doctor(context.Background(), DoctorRequest{}); err == nil || !strings.Contains(err.Error(), "API key") {
+	if _, err := doctor.Doctor(context.Background(), core.DoctorRequest{}); err == nil || !strings.Contains(err.Error(), "API key") {
 		t.Fatalf("Doctor err=%v, want API key requirement", err)
 	}
 }
 
-func testConfig() Config {
+func testConfig() core.Config {
 	cfg := core.BaseConfig()
 	cfg.Crownest.APIURL = "https://api.crownest.dev"
 	cfg.Crownest.Template = "python-node"

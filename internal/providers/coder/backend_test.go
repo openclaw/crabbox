@@ -21,16 +21,16 @@ import (
 const testCoderWorkspaceID = "01234567-89ab-4def-8123-456789abcdef"
 
 type fakeRunner struct {
-	calls []LocalCommandRequest
-	run   func(LocalCommandRequest) (LocalCommandResult, error)
+	calls []core.LocalCommandRequest
+	run   func(core.LocalCommandRequest) (core.LocalCommandResult, error)
 }
 
-func (r *fakeRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *fakeRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
 	if r.run != nil {
 		return r.run(req)
 	}
-	return LocalCommandResult{}, nil
+	return core.LocalCommandResult{}, nil
 }
 
 func TestCoderProviderSpec(t *testing.T) {
@@ -38,7 +38,7 @@ func TestCoderProviderSpec(t *testing.T) {
 	if spec.Name != coderProvider || spec.Kind != "ssh-lease" || spec.Coordinator != "never" {
 		t.Fatalf("unexpected spec: %#v", spec)
 	}
-	for _, feature := range []Feature{Feature("ssh"), Feature("crabbox-sync"), Feature("cleanup")} {
+	for _, feature := range []core.Feature{core.Feature("ssh"), core.Feature("crabbox-sync"), core.Feature("cleanup")} {
 		if !spec.Features.Has(feature) {
 			t.Fatalf("features=%v missing %s", spec.Features, feature)
 		}
@@ -86,7 +86,7 @@ func TestCoderOrdinaryFlagMetadata(t *testing.T) {
 }
 
 func TestCoderFlagsApplyWithoutSecrets(t *testing.T) {
-	cfg := Config{Provider: coderProvider, TargetOS: targetLinux, Coder: CoderConfig{CLIPath: "coder", WorkRoot: "/home/coder/crabbox", WorkspacePrefix: "crabbox-", Wait: "yes"}}
+	cfg := core.Config{Provider: coderProvider, TargetOS: targetLinux, Coder: core.CoderConfig{CLIPath: "coder", WorkRoot: "/home/coder/crabbox", WorkspacePrefix: "crabbox-", Wait: "yes"}}
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	values := RegisterCoderProviderFlags(fs, cfg)
 	if err := fs.Parse([]string{"--coder-template", "go-dev", "--coder-preset", "large", "--coder-parameter", "region=iad,size=large", "--coder-delete-on-release"}); err != nil {
@@ -107,7 +107,7 @@ func TestCoderFlagsApplyWithoutSecrets(t *testing.T) {
 
 func TestCoderCreateCommandUsesTemplateParametersAndNoTokenArgv(t *testing.T) {
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		args := strings.Join(req.Args, " ")
 		for _, forbidden := range []string{"CODER_SESSION_TOKEN", "token", "secret"} {
 			if strings.Contains(strings.ToLower(args), strings.ToLower(forbidden)) {
@@ -122,10 +122,10 @@ func TestCoderCreateCommandUsesTemplateParametersAndNoTokenArgv(t *testing.T) {
 				t.Fatalf("create args missing %q:\n%s", want, args)
 			}
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
 	client := &coderClient{cliPath: "coder", runner: runner, stdout: io.Discard, stderr: io.Discard}
-	cfg := Config{Coder: CoderConfig{Template: "go-dev", Preset: "large", Wait: "no", UseParameterDefaults: true, Parameters: []string{"region=iad", "size=large"}, RichParameterFile: "/tmp/params.yaml"}}
+	cfg := core.Config{Coder: core.CoderConfig{Template: "go-dev", Preset: "large", Wait: "no", UseParameterDefaults: true, Parameters: []string{"region=iad", "size=large"}, RichParameterFile: "/tmp/params.yaml"}}
 	if err := client.create(context.Background(), cfg, "crabbox-blue"); err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestParseCoderWorkspacesTreatsEmptyInventoryAsEmptyList(t *testing.T) {
 
 func TestCoderSSHTargetUsesProxyCommand(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	target := coderSSHTarget(Config{Coder: CoderConfig{CLIPath: "/opt/Coder CLI/coder", Wait: "yes"}}, "crabbox-blue", "ws1")
+	target := coderSSHTarget(core.Config{Coder: core.CoderConfig{CLIPath: "/opt/Coder CLI/coder", Wait: "yes"}}, "crabbox-blue", "ws1")
 	if !target.SSHConfigProxy || target.Host != "crabbox-blue" || target.User != "coder" || target.TargetOS != targetLinux {
 		t.Fatalf("unexpected target: %#v", target)
 	}
@@ -167,7 +167,7 @@ func TestCoderSSHTargetUsesProxyCommand(t *testing.T) {
 
 func TestCoderSSHTargetUsesValidHostForOwnerQualifiedWorkspace(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	target := coderSSHTarget(Config{Coder: CoderConfig{CLIPath: "coder", Wait: "yes"}}, "alice/shared", "ws1")
+	target := coderSSHTarget(core.Config{Coder: core.CoderConfig{CLIPath: "coder", Wait: "yes"}}, "alice/shared", "ws1")
 	if !regexp.MustCompile(`^coder-alice-shared-[0-9a-f]{6}$`).MatchString(target.Host) {
 		t.Fatalf("Host=%q want unique owner-qualified alias", target.Host)
 	}
@@ -178,8 +178,8 @@ func TestCoderSSHTargetUsesValidHostForOwnerQualifiedWorkspace(t *testing.T) {
 
 func TestCoderSSHTargetKeepsOwnerQualifiedHostsUnique(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	alice := coderSSHTarget(Config{Coder: CoderConfig{CLIPath: "coder", Wait: "yes"}}, "alice/shared", "ws1")
-	bob := coderSSHTarget(Config{Coder: CoderConfig{CLIPath: "coder", Wait: "yes"}}, "bob/shared", "ws2")
+	alice := coderSSHTarget(core.Config{Coder: core.CoderConfig{CLIPath: "coder", Wait: "yes"}}, "alice/shared", "ws1")
+	bob := coderSSHTarget(core.Config{Coder: core.CoderConfig{CLIPath: "coder", Wait: "yes"}}, "bob/shared", "ws2")
 	if alice.Host == bob.Host {
 		t.Fatalf("owner-qualified SSH hosts collided: %q", alice.Host)
 	}
@@ -187,8 +187,8 @@ func TestCoderSSHTargetKeepsOwnerQualifiedHostsUnique(t *testing.T) {
 
 func TestCoderSSHTargetKnownHostsChangesWithWorkspaceID(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	first := coderSSHTarget(Config{Coder: CoderConfig{CLIPath: "coder", Wait: "yes"}}, "crabbox-blue", "ws1")
-	second := coderSSHTarget(Config{Coder: CoderConfig{CLIPath: "coder", Wait: "yes"}}, "crabbox-blue", "ws2")
+	first := coderSSHTarget(core.Config{Coder: core.CoderConfig{CLIPath: "coder", Wait: "yes"}}, "crabbox-blue", "ws1")
+	second := coderSSHTarget(core.Config{Coder: core.CoderConfig{CLIPath: "coder", Wait: "yes"}}, "crabbox-blue", "ws2")
 	if first.Host != second.Host {
 		t.Fatalf("workspace aliases should stay stable for SSH config reuse: %q vs %q", first.Host, second.Host)
 	}
@@ -212,13 +212,13 @@ func TestCoderReleaseStopsByDefaultAndDeletesOnlyWhenConfigured(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			installCoderClaimState(t)
 			runner := &fakeRunner{}
-			runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+			runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				if strings.Join(req.Args, " ") == "list -o json" {
-					return LocalCommandResult{Stdout: `[{"id":"` + testCoderWorkspaceID + `","name":"crabbox-blue","template_name":"go-dev"}]`}, nil
+					return core.LocalCommandResult{Stdout: `[{"id":"` + testCoderWorkspaceID + `","name":"crabbox-blue","template_name":"go-dev"}]`}, nil
 				}
-				return LocalCommandResult{}, nil
+				return core.LocalCommandResult{}, nil
 			}
-			backend, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes", DeleteOnRelease: tc.delete}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+			backend, err := NewCoderLeaseBackend(Provider{}.Spec(), core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes", DeleteOnRelease: tc.delete}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -228,10 +228,10 @@ func TestCoderReleaseStopsByDefaultAndDeletesOnlyWhenConfigured(t *testing.T) {
 			for key, value := range tc.labels {
 				server.Labels[key] = value
 			}
-			if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "blue", providerBackend.cfg, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+			if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "blue", providerBackend.cfg, server, core.SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
 				t.Fatal(err)
 			}
-			err = providerBackend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
+			err = providerBackend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -260,15 +260,15 @@ func TestCoderReleaseRefusesUnownedOrStaleWorkspaces(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			installCoderClaimState(t)
 			runner := &fakeRunner{}
-			runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+			runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				if strings.Join(req.Args, " ") != "list -o json" {
 					t.Fatalf("unowned workspace reached destructive Coder command: %v", req.Args)
 				}
-				return LocalCommandResult{Stdout: `[{"id":"` + testCoderWorkspaceID + `","name":"crabbox-owned"}]`}, nil
+				return core.LocalCommandResult{Stdout: `[{"id":"` + testCoderWorkspaceID + `","name":"crabbox-owned"}]`}, nil
 			}
-			configured, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{Coder: CoderConfig{
+			configured, err := NewCoderLeaseBackend(Provider{}.Spec(), core.Config{Coder: core.CoderConfig{
 				CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes", DeleteOnRelease: test.delete,
-			}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+			}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -287,11 +287,11 @@ func TestCoderReleaseRefusesUnownedOrStaleWorkspaces(t *testing.T) {
 				if test.staleID {
 					claimed.Labels["coder_workspace_id"] = "99999999-89ab-4def-8123-456789abcdef"
 				}
-				if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "owned", backend.cfg, claimed, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+				if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "owned", backend.cfg, claimed, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 					t.Fatal(err)
 				}
 			}
-			err = backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
+			err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
 			if err == nil || !strings.Contains(err.Error(), "exact local ownership claim") {
 				t.Fatalf("unowned release err=%v", err)
 			}
@@ -304,37 +304,37 @@ func TestCoderReleaseRefusesUnownedOrStaleWorkspaces(t *testing.T) {
 
 func TestCoderReleaseTargetsRenamedWorkspaceByImmutableID(t *testing.T) {
 	installCoderClaimState(t)
-	runner := &fakeRunner{run: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &fakeRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[{"id":"` + testCoderWorkspaceID + `","name":"renamed-outside-crabbox"}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"` + testCoderWorkspaceID + `","name":"renamed-outside-crabbox"}]`}, nil
 		case "stop --yes " + testCoderWorkspaceID:
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		default:
 			t.Fatalf("unexpected Coder command: %v", req.Args)
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		}
 	}}
-	configured, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{Coder: CoderConfig{
+	configured, err := NewCoderLeaseBackend(Provider{}.Spec(), core.Config{Coder: core.CoderConfig{
 		CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes",
-	}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 	if err != nil {
 		t.Fatal(err)
 	}
 	backend := configured.(*coderLeaseBackend)
 	leaseID := "cbx_renamed"
 	server := coderWorkspaceToServer(coderWorkspace{ID: testCoderWorkspaceID, Name: "crabbox-blue"}, backend.cfg, leaseID, "blue", false)
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "blue", backend.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "blue", backend.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if lease.Server.Status != "missing" {
 		t.Fatalf("renamed workspace should not resolve by its old name: %#v", lease)
 	}
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 3 || strings.Join(runner.calls[2].Args, " ") != "stop --yes "+testCoderWorkspaceID {
@@ -344,28 +344,28 @@ func TestCoderReleaseTargetsRenamedWorkspaceByImmutableID(t *testing.T) {
 
 func TestCoderReleaseRemovesClaimWhenWorkspaceDisappearsDuringLockedPreflight(t *testing.T) {
 	installCoderClaimState(t)
-	runner := &fakeRunner{run: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &fakeRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if strings.Join(req.Args, " ") != "list -o json" {
 			t.Fatalf("missing workspace reached destructive Coder command: %v", req.Args)
 		}
-		return LocalCommandResult{Stdout: `[]`}, nil
+		return core.LocalCommandResult{Stdout: `[]`}, nil
 	}}
-	configured, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{Coder: CoderConfig{
+	configured, err := NewCoderLeaseBackend(Provider{}.Spec(), core.Config{Coder: core.CoderConfig{
 		CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes",
-	}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 	if err != nil {
 		t.Fatal(err)
 	}
 	backend := configured.(*coderLeaseBackend)
 	leaseID := "cbx_disappeared"
 	server := coderWorkspaceToServer(coderWorkspace{ID: testCoderWorkspaceID, Name: "crabbox-blue"}, backend.cfg, leaseID, "blue", false)
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "blue", backend.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "blue", backend.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
 		t.Fatal(err)
 	}
-	claims, err := listLeaseClaims()
+	claims, err := core.ListLeaseClaims()
 	if err != nil || len(claims) != 0 {
 		t.Fatalf("missing workspace retained claim: claims=%#v err=%v", claims, err)
 	}
@@ -385,35 +385,35 @@ func TestCoderReleaseRetainsLegacyClaimWhenOldWorkspaceNameDisappears(t *testing
 		"labels":{"provider":"coder","lease":"cbx_gone","slug":"blue","coder_workspace_ref":"crabbox-blue","coder_workspace":"crabbox-blue"}
 	}`)
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[]`}, nil
+			return core.LocalCommandResult{Stdout: `[]`}, nil
 		case "stop --yes crabbox-blue":
-			return LocalCommandResult{ExitCode: 1, Stderr: "workspace not found"}, errors.New("workspace not found")
+			return core.LocalCommandResult{ExitCode: 1, Stderr: "workspace not found"}, errors.New("workspace not found")
 		default:
 			t.Fatalf("unexpected command: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease, err := backend.(*coderLeaseBackend).Resolve(context.Background(), ResolveRequest{ID: "cbx_gone", ReleaseOnly: true})
+	lease, err := backend.(*coderLeaseBackend).Resolve(context.Background(), core.ResolveRequest{ID: "cbx_gone", ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if lease.Server.Status != "missing" || lease.Server.Labels["coder_workspace_ref"] != "crabbox-blue" {
 		t.Fatalf("stale claim target not preserved: %#v", lease)
 	}
-	if err := backend.(*coderLeaseBackend).ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil {
+	if err := backend.(*coderLeaseBackend).ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil {
 		t.Fatal("legacy name-only claim was discarded without immutable absence proof")
 	}
 	if len(runner.calls) != 1 || strings.Join(runner.calls[0].Args, " ") != "list -o json" {
 		t.Fatalf("missing workspace reached a destructive Coder command: %#v", runner.calls)
 	}
-	claims, err := listLeaseClaims()
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,35 +444,35 @@ func TestCoderAcquireRollbackUsesStopByDefaultAndSkipsCreateFailureRollback(t *t
 			runner := &fakeRunner{}
 			listCalls := 0
 			createdName := ""
-			runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+			runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				command := strings.Join(req.Args, " ")
 				switch {
 				case command == "list -o json":
 					listCalls++
 					if tc.createErr != nil && listCalls == 2 && tc.createErrWorkspaceFound {
-						return LocalCommandResult{Stdout: fmt.Sprintf(`[{"id":"ws1","name":%q,"template_name":"go-dev","latest_build":{"status":"stopped"}}]`, createdName)}, nil
+						return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"id":"ws1","name":%q,"template_name":"go-dev","latest_build":{"status":"stopped"}}]`, createdName)}, nil
 					}
-					return LocalCommandResult{Stdout: `[]`}, nil
+					return core.LocalCommandResult{Stdout: `[]`}, nil
 				case strings.HasPrefix(command, "create --yes --template go-dev crabbox-blue"):
 					createdName = req.Args[len(req.Args)-1]
 					if tc.createErr != nil {
-						return LocalCommandResult{ExitCode: 1, Stderr: tc.createErr.Error()}, tc.createErr
+						return core.LocalCommandResult{ExitCode: 1, Stderr: tc.createErr.Error()}, tc.createErr
 					}
-					return LocalCommandResult{}, nil
+					return core.LocalCommandResult{}, nil
 				case strings.HasPrefix(command, "stop --yes crabbox-blue"):
-					return LocalCommandResult{}, nil
+					return core.LocalCommandResult{}, nil
 				case strings.HasPrefix(command, "delete --yes crabbox-blue"):
-					return LocalCommandResult{}, nil
+					return core.LocalCommandResult{}, nil
 				default:
 					t.Fatalf("unexpected command: %s", command)
 				}
-				return LocalCommandResult{}, nil
+				return core.LocalCommandResult{}, nil
 			}
-			backend, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{IdleTimeout: time.Hour, Coder: CoderConfig{CLIPath: "coder", Template: "go-dev", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes", DeleteOnRelease: tc.deleteOnRelease}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+			backend, err := NewCoderLeaseBackend(Provider{}.Spec(), core.Config{IdleTimeout: time.Hour, Coder: core.CoderConfig{CLIPath: "coder", Template: "go-dev", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes", DeleteOnRelease: tc.deleteOnRelease}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = backend.(*coderLeaseBackend).Acquire(context.Background(), AcquireRequest{RequestedSlug: "blue", Repo: Repo{Root: t.TempDir()}})
+			_, err = backend.(*coderLeaseBackend).Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "blue", Repo: core.Repo{Root: t.TempDir()}})
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("expected %q error, got %v", tc.wantErr, err)
 			}
@@ -501,35 +501,35 @@ func TestCoderAcquireKeepFailurePersistsWorkspaceRefBeforeReady(t *testing.T) {
 	runner := &fakeRunner{}
 	listCalls := 0
 	createdName := ""
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		command := strings.Join(req.Args, " ")
 		switch {
 		case command == "list -o json":
 			listCalls++
 			if listCalls == 1 {
-				return LocalCommandResult{Stdout: `[{"id":"existing","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
+				return core.LocalCommandResult{Stdout: `[{"id":"existing","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
 			}
-			return LocalCommandResult{ExitCode: 1, Stderr: "inventory unavailable"}, errors.New("inventory unavailable")
+			return core.LocalCommandResult{ExitCode: 1, Stderr: "inventory unavailable"}, errors.New("inventory unavailable")
 		case strings.HasPrefix(command, "create --yes --template go-dev crabbox-blue-"):
 			createdName = req.Args[len(req.Args)-1]
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		default:
 			t.Fatalf("unexpected command: %s", command)
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{IdleTimeout: time.Hour, Coder: CoderConfig{CLIPath: "coder", Template: "go-dev", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), core.Config{IdleTimeout: time.Hour, Coder: core.CoderConfig{CLIPath: "coder", Template: "go-dev", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = backend.(*coderLeaseBackend).Acquire(context.Background(), AcquireRequest{RequestedSlug: "blue", Keep: true, Repo: Repo{Root: t.TempDir()}})
+	_, err = backend.(*coderLeaseBackend).Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "blue", Keep: true, Repo: core.Repo{Root: t.TempDir()}})
 	if err == nil || !strings.Contains(err.Error(), "inventory unavailable") {
 		t.Fatalf("expected inventory error, got %v", err)
 	}
 	if createdName == "" {
 		t.Fatal("create was not called")
 	}
-	claims, err := listLeaseClaims()
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -554,32 +554,32 @@ func TestCoderAcquireRollbackFailureHintMatchesReleasePolicy(t *testing.T) {
 			runner := &fakeRunner{}
 			listCalls := 0
 			createdName := ""
-			runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+			runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				command := strings.Join(req.Args, " ")
 				switch {
 				case command == "list -o json":
 					listCalls++
 					if listCalls == 1 {
-						return LocalCommandResult{Stdout: `[]`}, nil
+						return core.LocalCommandResult{Stdout: `[]`}, nil
 					}
-					return LocalCommandResult{Stdout: `[]`}, nil
+					return core.LocalCommandResult{Stdout: `[]`}, nil
 				case strings.HasPrefix(command, "create --yes --template go-dev crabbox-blue"):
 					createdName = req.Args[len(req.Args)-1]
-					return LocalCommandResult{}, nil
+					return core.LocalCommandResult{}, nil
 				case strings.HasPrefix(command, "stop --yes crabbox-blue"):
-					return LocalCommandResult{ExitCode: 1, Stderr: "release failed"}, errors.New("release failed")
+					return core.LocalCommandResult{ExitCode: 1, Stderr: "release failed"}, errors.New("release failed")
 				case strings.HasPrefix(command, "delete --yes crabbox-blue"):
-					return LocalCommandResult{ExitCode: 1, Stderr: "release failed"}, errors.New("release failed")
+					return core.LocalCommandResult{ExitCode: 1, Stderr: "release failed"}, errors.New("release failed")
 				default:
 					t.Fatalf("unexpected command: %s", command)
 				}
-				return LocalCommandResult{}, nil
+				return core.LocalCommandResult{}, nil
 			}
-			backend, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{IdleTimeout: time.Hour, Coder: CoderConfig{CLIPath: "coder", Template: "go-dev", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes", DeleteOnRelease: tc.delete}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+			backend, err := NewCoderLeaseBackend(Provider{}.Spec(), core.Config{IdleTimeout: time.Hour, Coder: core.CoderConfig{CLIPath: "coder", Template: "go-dev", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes", DeleteOnRelease: tc.delete}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = backend.(*coderLeaseBackend).Acquire(context.Background(), AcquireRequest{RequestedSlug: "blue", Repo: Repo{Root: t.TempDir()}})
+			_, err = backend.(*coderLeaseBackend).Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "blue", Repo: core.Repo{Root: t.TempDir()}})
 			want := "manual cleanup: crabbox stop --provider coder --id " + createdName
 			if tc.delete {
 				want = "manual cleanup: crabbox stop --provider coder --coder-delete-on-release --id " + createdName
@@ -593,19 +593,19 @@ func TestCoderAcquireRollbackFailureHintMatchesReleasePolicy(t *testing.T) {
 
 func TestCoderDoctorClassifiesMissingLoginNonMutating(t *testing.T) {
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "version":
-			return LocalCommandResult{Stdout: "Coder v2.33.5"}, nil
+			return core.LocalCommandResult{Stdout: "Coder v2.33.5"}, nil
 		case "whoami -o json":
-			return LocalCommandResult{ExitCode: 1, Stderr: "You are not logged in"}, errors.New("exit 1")
+			return core.LocalCommandResult{ExitCode: 1, Stderr: "You are not logged in"}, errors.New("exit 1")
 		default:
 			t.Fatalf("doctor must be non-mutating, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err == nil {
 		t.Fatal("expected missing login error")
 	}
@@ -619,19 +619,19 @@ func TestCoderDoctorClassifiesMissingLoginNonMutating(t *testing.T) {
 
 func TestCoderDoctorDoesNotClassifyServerFailureAsMissingLogin(t *testing.T) {
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "version":
-			return LocalCommandResult{Stdout: "Coder v2.33.5"}, nil
+			return core.LocalCommandResult{Stdout: "Coder v2.33.5"}, nil
 		case "whoami -o json":
-			return LocalCommandResult{ExitCode: 1, Stderr: "dial tcp: connection refused"}, errors.New("exit 1")
+			return core.LocalCommandResult{ExitCode: 1, Stderr: "dial tcp: connection refused"}, errors.New("exit 1")
 		default:
 			t.Fatalf("doctor must be non-mutating, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err == nil {
 		t.Fatal("expected auth failure")
 	}
@@ -645,21 +645,21 @@ func TestCoderDoctorDoesNotClassifyServerFailureAsMissingLogin(t *testing.T) {
 
 func TestCoderDoctorPreservesChecksOnInventoryFailure(t *testing.T) {
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "version":
-			return LocalCommandResult{Stdout: "Coder v2.33.5"}, nil
+			return core.LocalCommandResult{Stdout: "Coder v2.33.5"}, nil
 		case "whoami -o json":
-			return LocalCommandResult{Stdout: `{"username":"alice"}`}, nil
+			return core.LocalCommandResult{Stdout: `{"username":"alice"}`}, nil
 		case "list -o json":
-			return LocalCommandResult{ExitCode: 1, Stderr: "inventory unavailable"}, errors.New("inventory unavailable")
+			return core.LocalCommandResult{ExitCode: 1, Stderr: "inventory unavailable"}, errors.New("inventory unavailable")
 		default:
 			t.Fatalf("doctor must only read inventory, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err == nil || !strings.Contains(err.Error(), "inventory unavailable") {
 		t.Fatalf("expected inventory error, got %v", err)
 	}
@@ -671,30 +671,30 @@ func TestCoderDoctorPreservesChecksOnInventoryFailure(t *testing.T) {
 func TestCoderListIncludesButCleanupSkipsUnclaimedStoppedWorkspaces(t *testing.T) {
 	installCoderClaimState(t)
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[
+			return core.LocalCommandResult{Stdout: `[
 				{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"stopped"}},
 					{"id":"ws2","name":"personal","template_name":"go-dev","latest_build":{"status":"running"}}
 				]`}, nil
 		default:
 			t.Fatalf("cleanup must not mutate unclaimed Coder workspaces, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 	if err != nil {
 		t.Fatal(err)
 	}
-	servers, err := backend.(*coderLeaseBackend).List(context.Background(), ListRequest{})
+	servers, err := backend.(*coderLeaseBackend).List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(servers) != 1 || servers[0].Name != "crabbox-blue" || serverSlug(servers[0]) != "blue" {
+	if len(servers) != 1 || servers[0].Name != "crabbox-blue" || core.ServerSlug(servers[0]) != "blue" {
 		t.Fatalf("unexpected servers: %#v", servers)
 	}
-	if err := backend.(*coderLeaseBackend).Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.(*coderLeaseBackend).Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 2 {
@@ -706,12 +706,12 @@ func TestCoderListIncludesButCleanupSkipsUnclaimedStoppedWorkspaces(t *testing.T
 }
 
 func TestShouldCleanupCoderRequiresLocalClaimForStoppedWorkspace(t *testing.T) {
-	server := Server{Name: "crabbox-blue", Status: "stopped", Labels: map[string]string{"slug": "blue"}}
-	ok, reason := shouldCleanupCoder(server, LeaseClaim{}, false, time.Now())
+	server := core.Server{Name: "crabbox-blue", Status: "stopped", Labels: map[string]string{"slug": "blue"}}
+	ok, reason := shouldCleanupCoder(server, core.LeaseClaim{}, false, time.Now())
 	if ok || reason != "missing claim" {
 		t.Fatalf("cleanup=%v reason=%q; stopped unclaimed Coder workspaces must be preserved", ok, reason)
 	}
-	expired := LeaseClaim{LeaseID: "cbx_expired", LastUsedAt: time.Now().Add(-48 * time.Hour).Format(time.RFC3339), IdleTimeoutSeconds: int((30 * time.Minute).Seconds())}
+	expired := core.LeaseClaim{LeaseID: "cbx_expired", LastUsedAt: time.Now().Add(-48 * time.Hour).Format(time.RFC3339), IdleTimeoutSeconds: int((30 * time.Minute).Seconds())}
 	ok, reason = shouldCleanupCoder(server, expired, true, time.Now())
 	if !ok || reason != "claim expired" {
 		t.Fatalf("cleanup=%v reason=%q; expired local claim should be cleanup-eligible", ok, reason)
@@ -720,24 +720,24 @@ func TestShouldCleanupCoderRequiresLocalClaimForStoppedWorkspace(t *testing.T) {
 
 func TestCoderCleanupSkipsKeptClaims(t *testing.T) {
 	installCoderClaimState(t)
-	if err := claimLeaseForRepoProvider("cbx_keep", "blue", coderProvider, t.TempDir(), time.Hour, true); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_keep", "blue", coderProvider, t.TempDir(), time.Hour, true); err != nil {
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
 		default:
 			t.Fatalf("kept cleanup should not mutate, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.(*coderLeaseBackend).Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.(*coderLeaseBackend).Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 1 {
@@ -747,14 +747,14 @@ func TestCoderCleanupSkipsKeptClaims(t *testing.T) {
 
 func TestCoderCleanupSkipsActiveClaimedAndRunningUnclaimedWorkspaces(t *testing.T) {
 	installCoderClaimState(t)
-	if err := claimLeaseForRepoProvider("cbx_active", "active", coderProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_active", "active", coderProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[
+			return core.LocalCommandResult{Stdout: `[
 				{"id":"ws1","name":"crabbox-active","template_name":"go-dev","latest_build":{"status":"running","resources":[{"agents":[{"name":"main","operating_system":"linux","status":"connected","lifecycle_state":"ready"}]}]}},
 				{"id":"ws2","name":"crabbox-unclaimed","template_name":"go-dev","latest_build":{"status":"running","resources":[{"agents":[{"name":"main","operating_system":"linux","status":"connected","lifecycle_state":"ready"}]}]}},
 				{"id":"ws3","name":"personal","template_name":"go-dev","latest_build":{"status":"running"}}
@@ -762,13 +762,13 @@ func TestCoderCleanupSkipsActiveClaimedAndRunningUnclaimedWorkspaces(t *testing.
 		default:
 			t.Fatalf("cleanup must skip active/running workspaces, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.(*coderLeaseBackend).Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.(*coderLeaseBackend).Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 1 {
@@ -778,26 +778,26 @@ func TestCoderCleanupSkipsActiveClaimedAndRunningUnclaimedWorkspaces(t *testing.
 
 func TestCoderCleanupSkipsStoppedActiveClaim(t *testing.T) {
 	installCoderClaimState(t)
-	if err := claimLeaseForRepoProvider("cbx_stopped", "stopped", coderProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_stopped", "stopped", coderProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[
+			return core.LocalCommandResult{Stdout: `[
 				{"id":"ws1","name":"crabbox-stopped","template_name":"go-dev","latest_build":{"status":"stopped"}}
 			]`}, nil
 		default:
 			t.Fatalf("cleanup must not act on a stopped active claim, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes", DeleteOnRelease: true}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes", DeleteOnRelease: true}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.(*coderLeaseBackend).Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.(*coderLeaseBackend).Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 1 {
@@ -819,22 +819,22 @@ func TestCoderCleanupUsesListAllForExpiredOwnerQualifiedClaim(t *testing.T) {
 		"labels":{"provider":"coder","lease":"cbx_owner_expired","slug":"shared","coder_workspace_ref":"alice/shared","coder_workspace_id":"`+testCoderWorkspaceID+`"}
 	}`)
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list --all -o json":
-			return LocalCommandResult{Stdout: `[{"id":"` + testCoderWorkspaceID + `","name":"shared","owner_name":"alice","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"` + testCoderWorkspaceID + `","name":"shared","owner_name":"alice","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
 		case "stop --yes " + testCoderWorkspaceID:
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		default:
 			t.Fatalf("cleanup must use owner-qualified inventory/ref, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.(*coderLeaseBackend).Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.(*coderLeaseBackend).Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 3 {
@@ -878,22 +878,22 @@ func TestCoderCleanupUsesPersistedReleasePolicy(t *testing.T) {
 				`+tc.claimLabels+`
 			}`)
 			runner := &fakeRunner{}
-			runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+			runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				switch strings.Join(req.Args, " ") {
 				case "list -o json":
-					return LocalCommandResult{Stdout: `[{"id":"` + testCoderWorkspaceID + `","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
+					return core.LocalCommandResult{Stdout: `[{"id":"` + testCoderWorkspaceID + `","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
 				case "stop --yes " + testCoderWorkspaceID, "delete --yes " + testCoderWorkspaceID:
-					return LocalCommandResult{}, nil
+					return core.LocalCommandResult{}, nil
 				default:
 					t.Fatalf("unexpected cleanup command: %s", strings.Join(req.Args, " "))
 				}
-				return LocalCommandResult{}, nil
+				return core.LocalCommandResult{}, nil
 			}
-			backend, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes", DeleteOnRelease: tc.configDelete}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+			backend, err := NewCoderLeaseBackend(Provider{}.Spec(), core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes", DeleteOnRelease: tc.configDelete}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := backend.(*coderLeaseBackend).Cleanup(context.Background(), CleanupRequest{}); err != nil {
+			if err := backend.(*coderLeaseBackend).Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 				t.Fatal(err)
 			}
 			if got := strings.Join(runner.calls[len(runner.calls)-1].Args, " "); got != tc.wantAction {
@@ -927,25 +927,25 @@ func TestCoderCleanupDoesNotApplyBareClaimToOwnerQualifiedInventory(t *testing.T
 		"labels":{"coder_workspace":"shared"}
 	}`)
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list --all -o json":
-			return LocalCommandResult{Stdout: `[
+			return core.LocalCommandResult{Stdout: `[
 				{"id":"` + testCoderWorkspaceID + `","name":"shared","owner_name":"alice","template_name":"go-dev","latest_build":{"status":"stopped"}},
 				{"id":"ws2","name":"shared","owner_name":"bob","template_name":"go-dev","latest_build":{"status":"stopped"}}
 			]`}, nil
 		case "stop --yes " + testCoderWorkspaceID:
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		default:
 			t.Fatalf("cleanup must not apply bare claim to owner-qualified row, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.(*coderLeaseBackend).Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.(*coderLeaseBackend).Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 3 {
@@ -976,30 +976,30 @@ func TestCoderCleanupSkipsLegacyBareClaimForUniqueOwnerQualifiedInventory(t *tes
 		"labels":{"coder_workspace":"shared"}
 	}`)
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list --all -o json":
-			return LocalCommandResult{Stdout: `[
+			return core.LocalCommandResult{Stdout: `[
 				{"id":"ws1","name":"shared","owner_name":"alice","template_name":"go-dev","latest_build":{"status":"stopped"}},
 				{"id":"ws2","name":"other","owner_name":"alice","template_name":"go-dev","latest_build":{"status":"stopped"}}
 			]`}, nil
 		default:
 			t.Fatalf("legacy bare claim reached destructive command: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 	if err != nil {
 		t.Fatal(err)
 	}
-	claims, err := listCoderClaimsByWorkspace(Config{Coder: CoderConfig{WorkspacePrefix: "crabbox-"}})
+	claims, err := listCoderClaimsByWorkspace(core.Config{Coder: core.CoderConfig{WorkspacePrefix: "crabbox-"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !coderClaimsNeedListAll(claims) {
 		t.Fatal("owner-qualified claim should force cleanup list --all")
 	}
-	if err := backend.(*coderLeaseBackend).Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.(*coderLeaseBackend).Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 1 {
@@ -1009,73 +1009,73 @@ func TestCoderCleanupSkipsLegacyBareClaimForUniqueOwnerQualifiedInventory(t *tes
 
 func TestCoderListAndResolveUseStandardCrabboxLabels(t *testing.T) {
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"team-workspace","template_name":"go-dev","labels":{"crabbox":"true","created_by":"crabbox","provider":"coder","lease":"cbx_label","slug":"blue-lobster"},"latest_build":{"status":"stopped"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"ws1","name":"team-workspace","template_name":"go-dev","labels":{"crabbox":"true","created_by":"crabbox","provider":"coder","lease":"cbx_label","slug":"blue-lobster"},"latest_build":{"status":"stopped"}}]`}, nil
 		default:
 			t.Fatalf("unexpected command: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	servers, err := backend.List(context.Background(), ListRequest{})
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	servers, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(servers) != 1 || servers[0].Name != "team-workspace" || serverSlug(servers[0]) != "blue-lobster" {
+	if len(servers) != 1 || servers[0].Name != "team-workspace" || core.ServerSlug(servers[0]) != "blue-lobster" {
 		t.Fatalf("unexpected servers: %#v", servers)
 	}
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "cbx_label", StatusOnly: true})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_label", StatusOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lease.LeaseID != "cbx_label" || lease.Server.Name != "team-workspace" || serverSlug(lease.Server) != "blue-lobster" {
+	if lease.LeaseID != "cbx_label" || lease.Server.Name != "team-workspace" || core.ServerSlug(lease.Server) != "blue-lobster" {
 		t.Fatalf("unexpected lease: %#v", lease)
 	}
 }
 
 func TestCoderResolveAdoptedWorkspaceSynthesizesStableLeaseID(t *testing.T) {
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
 		default:
 			t.Fatalf("unexpected command: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	first, err := backend.Resolve(context.Background(), ResolveRequest{ID: "blue", StatusOnly: true})
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	first, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "blue", StatusOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := backend.Resolve(context.Background(), ResolveRequest{ID: "crabbox-blue", StatusOnly: true})
+	second, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "crabbox-blue", StatusOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !regexp.MustCompile(`^cbx_[a-f0-9]{12}$`).MatchString(first.LeaseID) || first.LeaseID != second.LeaseID {
 		t.Fatalf("adopted workspace lease IDs must be stable canonical IDs, first=%q second=%q", first.LeaseID, second.LeaseID)
 	}
-	if serverSlug(first.Server) != "blue" {
-		t.Fatalf("adopted workspace slug=%q want blue", serverSlug(first.Server))
+	if core.ServerSlug(first.Server) != "blue" {
+		t.Fatalf("adopted workspace slug=%q want blue", core.ServerSlug(first.Server))
 	}
 }
 
 func TestCoderResolveCrabboxMarkerWorkspaceSynthesizesLeaseID(t *testing.T) {
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"team-workspace","template_name":"go-dev","labels":{"crabbox":"true","created_by":"crabbox"},"latest_build":{"status":"stopped"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"ws1","name":"team-workspace","template_name":"go-dev","labels":{"crabbox":"true","created_by":"crabbox"},"latest_build":{"status":"stopped"}}]`}, nil
 		default:
 			t.Fatalf("unexpected command: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "team-workspace", StatusOnly: true})
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "team-workspace", StatusOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1086,45 +1086,45 @@ func TestCoderResolveCrabboxMarkerWorkspaceSynthesizesLeaseID(t *testing.T) {
 
 func TestCoderListAndResolveUseLegacyCrabboxLabels(t *testing.T) {
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"team-workspace","template_name":"go-dev","labels":{"crabbox_lease_id":"cbx_legacy","crabbox_slug":"legacy-lobster"},"latest_build":{"status":"stopped"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"ws1","name":"team-workspace","template_name":"go-dev","labels":{"crabbox_lease_id":"cbx_legacy","crabbox_slug":"legacy-lobster"},"latest_build":{"status":"stopped"}}]`}, nil
 		default:
 			t.Fatalf("unexpected command: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	servers, err := backend.List(context.Background(), ListRequest{})
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	servers, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(servers) != 1 || servers[0].Name != "team-workspace" || serverSlug(servers[0]) != "legacy-lobster" {
+	if len(servers) != 1 || servers[0].Name != "team-workspace" || core.ServerSlug(servers[0]) != "legacy-lobster" {
 		t.Fatalf("unexpected servers: %#v", servers)
 	}
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "cbx_legacy", StatusOnly: true})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_legacy", StatusOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lease.LeaseID != "cbx_legacy" || lease.Server.Name != "team-workspace" || serverSlug(lease.Server) != "legacy-lobster" {
+	if lease.LeaseID != "cbx_legacy" || lease.Server.Name != "team-workspace" || core.ServerSlug(lease.Server) != "legacy-lobster" {
 		t.Fatalf("unexpected lease: %#v", lease)
 	}
 }
 
 func TestCoderCleanupSkipsProviderLabelWithoutCrabboxOwnership(t *testing.T) {
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"team-workspace","template_name":"go-dev","labels":{"provider":"coder"},"latest_build":{"status":"stopped"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"ws1","name":"team-workspace","template_name":"go-dev","labels":{"provider":"coder"},"latest_build":{"status":"stopped"}}]`}, nil
 		default:
 			t.Fatalf("cleanup must not act on provider-only labels, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 1 {
@@ -1134,17 +1134,17 @@ func TestCoderCleanupSkipsProviderLabelWithoutCrabboxOwnership(t *testing.T) {
 
 func TestCoderCleanupSkipsProviderAndSlugWithoutCrabboxMarker(t *testing.T) {
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"team-workspace","template_name":"go-dev","labels":{"provider":"coder","slug":"blue-lobster"},"latest_build":{"status":"stopped"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"ws1","name":"team-workspace","template_name":"go-dev","labels":{"provider":"coder","slug":"blue-lobster"},"latest_build":{"status":"stopped"}}]`}, nil
 		default:
 			t.Fatalf("cleanup must not act on provider+slug labels without Crabbox markers, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 1 {
@@ -1154,17 +1154,17 @@ func TestCoderCleanupSkipsProviderAndSlugWithoutCrabboxMarker(t *testing.T) {
 
 func TestCoderCleanupSkipsGenericSlugWithoutCrabboxMarker(t *testing.T) {
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"team-workspace","template_name":"go-dev","labels":{"slug":"blue-lobster"},"latest_build":{"status":"stopped"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"ws1","name":"team-workspace","template_name":"go-dev","labels":{"slug":"blue-lobster"},"latest_build":{"status":"stopped"}}]`}, nil
 		default:
 			t.Fatalf("cleanup must not act on generic slug labels, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 1 {
@@ -1174,55 +1174,55 @@ func TestCoderCleanupSkipsGenericSlugWithoutCrabboxMarker(t *testing.T) {
 
 func TestCoderListUsesPrefixOwnershipDespiteUnrelatedProviderLabel(t *testing.T) {
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","labels":{"provider":"terraform"},"latest_build":{"status":"stopped"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","labels":{"provider":"terraform"},"latest_build":{"status":"stopped"}}]`}, nil
 		default:
 			t.Fatalf("unexpected command: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	servers, err := backend.List(context.Background(), ListRequest{})
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	servers, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(servers) != 1 || servers[0].Name != "crabbox-blue" || serverSlug(servers[0]) != "blue" {
+	if len(servers) != 1 || servers[0].Name != "crabbox-blue" || core.ServerSlug(servers[0]) != "blue" {
 		t.Fatalf("unexpected servers: %#v", servers)
 	}
 }
 
 func TestCoderResolveRejectsEmptyNormalizedSlugMatch(t *testing.T) {
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"team-workspace","template_name":"go-dev","labels":{"crabbox":"true","created_by":"crabbox"},"latest_build":{"status":"stopped"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"ws1","name":"team-workspace","template_name":"go-dev","labels":{"crabbox":"true","created_by":"crabbox"},"latest_build":{"status":"stopped"}}]`}, nil
 		default:
 			t.Fatalf("unexpected command: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	if _, err := backend.Resolve(context.Background(), ResolveRequest{ID: "!!!", StatusOnly: true}); err == nil || !strings.Contains(err.Error(), "not found") {
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	if _, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "!!!", StatusOnly: true}); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("expected not found, got %v", err)
 	}
 }
 
 func TestCoderResolveStatusOnlyDoesNotStartOrSSH(t *testing.T) {
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
 		default:
 			t.Fatalf("status-only resolve must not mutate or prepare SSH, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "blue", StatusOnly: true, ReadyProbe: true})
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "blue", StatusOnly: true, ReadyProbe: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1233,17 +1233,17 @@ func TestCoderResolveStatusOnlyDoesNotStartOrSSH(t *testing.T) {
 
 func TestCoderResolveStatusOnlyIncludesSSHForReadyWorkspace(t *testing.T) {
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"running","resources":[{"agents":[{"name":"main","operating_system":"linux","status":"connected","lifecycle_state":"ready"}]}]}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"running","resources":[{"agents":[{"name":"main","operating_system":"linux","status":"connected","lifecycle_state":"ready"}]}]}}]`}, nil
 		default:
 			t.Fatalf("status-only ready resolve must only list, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "blue", StatusOnly: true})
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "blue", StatusOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1254,17 +1254,17 @@ func TestCoderResolveStatusOnlyIncludesSSHForReadyWorkspace(t *testing.T) {
 
 func TestCoderResolveRunningWorkspaceWithoutReadyAgentDoesNotPrepareSSH(t *testing.T) {
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"running","resources":[{"agents":[{"name":"main","operating_system":"linux","status":"connecting","lifecycle_state":"starting"}]}]}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"running","resources":[{"agents":[{"name":"main","operating_system":"linux","status":"connecting","lifecycle_state":"starting"}]}]}}]`}, nil
 		default:
 			t.Fatalf("status-only ready probe must only list, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "blue", StatusOnly: true, ReadyProbe: true})
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "blue", StatusOnly: true, ReadyProbe: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1278,32 +1278,32 @@ func TestCoderResolveRunningWorkspaceWithoutReadyAgentDoesNotPrepareSSH(t *testi
 
 func TestCoderResolveClaimUsesStoredWorkspaceAcrossPrefixChanges(t *testing.T) {
 	installCoderClaimState(t)
-	if err := claimLeaseForRepoProvider("cbx_prefix", "blue", coderProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_prefix", "blue", coderProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	server := Server{Name: "crabbox-blue", Labels: map[string]string{"coder_workspace": "crabbox-blue", "coder_workspace_ref": "crabbox-blue"}}
-	if err := updateLeaseClaimEndpoint("cbx_prefix", server, SSHTarget{}); err != nil {
+	server := core.Server{Name: "crabbox-blue", Labels: map[string]string{"coder_workspace": "crabbox-blue", "coder_workspace_ref": "crabbox-blue"}}
+	if err := core.UpdateLeaseClaimEndpoint("cbx_prefix", server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
 		default:
 			t.Fatalf("status-only resolve must only list, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "other-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "cbx_prefix", StatusOnly: true})
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "other-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_prefix", StatusOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if lease.Server.Name != "crabbox-blue" || lease.LeaseID != "cbx_prefix" {
 		t.Fatalf("unexpected lease: %#v", lease)
 	}
-	lease, err = backend.Resolve(context.Background(), ResolveRequest{ID: "crabbox-blue", StatusOnly: true})
+	lease, err = backend.Resolve(context.Background(), core.ResolveRequest{ID: "crabbox-blue", StatusOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1314,25 +1314,25 @@ func TestCoderResolveClaimUsesStoredWorkspaceAcrossPrefixChanges(t *testing.T) {
 
 func TestCoderResolveDoesNotListAllForUnrelatedOwnerQualifiedClaim(t *testing.T) {
 	installCoderClaimState(t)
-	if err := claimLeaseForRepoProvider("cbx_owner", "shared", coderProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_owner", "shared", coderProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	server := Server{Name: "shared", Labels: map[string]string{"coder_workspace_ref": "alice/shared"}}
-	if err := updateLeaseClaimEndpoint("cbx_owner", server, SSHTarget{}); err != nil {
+	server := core.Server{Name: "shared", Labels: map[string]string{"coder_workspace_ref": "alice/shared"}}
+	if err := core.UpdateLeaseClaimEndpoint("cbx_owner", server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
 		default:
 			t.Fatalf("unrelated owner-qualified claim must not force list --all, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "blue", StatusOnly: true})
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "blue", StatusOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1343,25 +1343,25 @@ func TestCoderResolveDoesNotListAllForUnrelatedOwnerQualifiedClaim(t *testing.T)
 
 func TestCoderResolveBareWorkspaceNameUsesListAllForMatchingOwnerQualifiedClaim(t *testing.T) {
 	installCoderClaimState(t)
-	if err := claimLeaseForRepoProvider("cbx_owner", "shared", coderProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_owner", "shared", coderProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	server := Server{Name: "shared", Labels: map[string]string{"coder_workspace_ref": "alice/shared"}}
-	if err := updateLeaseClaimEndpoint("cbx_owner", server, SSHTarget{}); err != nil {
+	server := core.Server{Name: "shared", Labels: map[string]string{"coder_workspace_ref": "alice/shared"}}
+	if err := core.UpdateLeaseClaimEndpoint("cbx_owner", server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list --all -o json":
-			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"shared","owner_name":"alice","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"ws1","name":"shared","owner_name":"alice","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
 		default:
 			t.Fatalf("matching owner-qualified claim should force list --all, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "shared", StatusOnly: true})
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "shared", StatusOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1372,25 +1372,25 @@ func TestCoderResolveBareWorkspaceNameUsesListAllForMatchingOwnerQualifiedClaim(
 
 func TestCoderListUsesListAllForOwnerQualifiedClaims(t *testing.T) {
 	installCoderClaimState(t)
-	if err := claimLeaseForRepoProvider("cbx_owner", "shared", coderProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_owner", "shared", coderProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	server := Server{Name: "shared", Labels: map[string]string{"coder_workspace_ref": "alice/shared"}}
-	if err := updateLeaseClaimEndpoint("cbx_owner", server, SSHTarget{}); err != nil {
+	server := core.Server{Name: "shared", Labels: map[string]string{"coder_workspace_ref": "alice/shared"}}
+	if err := core.UpdateLeaseClaimEndpoint("cbx_owner", server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list --all -o json":
-			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"shared","owner_name":"alice","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"ws1","name":"shared","owner_name":"alice","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
 		default:
 			t.Fatalf("owner-qualified claim should make list use list --all, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	servers, err := backend.List(context.Background(), ListRequest{})
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	servers, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1419,17 +1419,17 @@ func TestCoderResolvePreservesClaimTimingLabels(t *testing.T) {
 		}
 	}`)
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
 		default:
 			t.Fatalf("unexpected command: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "crabbox-blue", StatusOnly: true})
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "crabbox-blue", StatusOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1454,17 +1454,17 @@ func TestCoderResolvePreservesClaimTimingLabels(t *testing.T) {
 func TestCoderResolvePreservesRemoteWorkspaceLabels(t *testing.T) {
 	installCoderClaimState(t)
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list -o json":
-			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","labels":{"crabbox":"true","created_by":"crabbox","lease":"cbx_abcdef123456","slug":"blue","keep":"true","created_at":"1767225600","last_touched_at":"1767225601","idle_timeout":"1800","idle_timeout_secs":"1800","expires_at":"1767227400"},"latest_build":{"status":"stopped"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","labels":{"crabbox":"true","created_by":"crabbox","lease":"cbx_abcdef123456","slug":"blue","keep":"true","created_at":"1767225600","last_touched_at":"1767225601","idle_timeout":"1800","idle_timeout_secs":"1800","expires_at":"1767227400"},"latest_build":{"status":"stopped"}}]`}, nil
 		default:
 			t.Fatalf("unexpected command: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "crabbox-blue", StatusOnly: true})
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "crabbox-blue", StatusOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1486,17 +1486,17 @@ func TestCoderResolvePreservesRemoteWorkspaceLabels(t *testing.T) {
 
 func TestCoderResolveKeepLabelUsesClaimKeepMetadata(t *testing.T) {
 	installCoderClaimState(t)
-	if err := claimLeaseForRepoProvider("cbx_keepflag", "blue", coderProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_keepflag", "blue", coderProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseForRepoProvider("cbx_keeptrue", "green", coderProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_keeptrue", "green", coderProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	server := Server{Name: "crabbox-green", Labels: map[string]string{"keep": "true"}}
-	if err := updateLeaseClaimEndpoint("cbx_keeptrue", server, SSHTarget{}); err != nil {
+	server := core.Server{Name: "crabbox-green", Labels: map[string]string{"keep": "true"}}
+	if err := core.UpdateLeaseClaimEndpoint("cbx_keeptrue", server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}}
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}}
 	if keep, err := backend.resolveKeepLabel("cbx_keepflag"); err != nil || keep {
 		t.Fatalf("ordinary resolveKeepLabel keep=%v err=%v", keep, err)
 	}
@@ -1507,25 +1507,25 @@ func TestCoderResolveKeepLabelUsesClaimKeepMetadata(t *testing.T) {
 
 func TestCoderResolveClaimUsesListAllForOwnerQualifiedWorkspaceRef(t *testing.T) {
 	installCoderClaimState(t)
-	if err := claimLeaseForRepoProvider("cbx_owner", "shared", coderProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_owner", "shared", coderProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	server := Server{Name: "shared", Labels: map[string]string{"coder_workspace_ref": "alice/shared"}}
-	if err := updateLeaseClaimEndpoint("cbx_owner", server, SSHTarget{}); err != nil {
+	server := core.Server{Name: "shared", Labels: map[string]string{"coder_workspace_ref": "alice/shared"}}
+	if err := core.UpdateLeaseClaimEndpoint("cbx_owner", server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list --all -o json":
-			return LocalCommandResult{Stdout: `[{"id":"ws1","name":"shared","owner_name":"alice","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"ws1","name":"shared","owner_name":"alice","template_name":"go-dev","latest_build":{"status":"stopped"}}]`}, nil
 		default:
 			t.Fatalf("expected owner-qualified claim resolve to use list --all, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "cbx_owner", StatusOnly: true})
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_owner", StatusOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1536,28 +1536,28 @@ func TestCoderResolveClaimUsesListAllForOwnerQualifiedWorkspaceRef(t *testing.T)
 
 func TestCoderResolveSlugClaimDisambiguatesOwnerQualifiedWorkspaces(t *testing.T) {
 	installCoderClaimState(t)
-	if err := claimLeaseForRepoProvider("cbx_owner", "shared", coderProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_owner", "shared", coderProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	server := Server{Name: "shared", Labels: map[string]string{"coder_workspace_ref": "alice/shared"}}
-	if err := updateLeaseClaimEndpoint("cbx_owner", server, SSHTarget{}); err != nil {
+	server := core.Server{Name: "shared", Labels: map[string]string{"coder_workspace_ref": "alice/shared"}}
+	if err := core.UpdateLeaseClaimEndpoint("cbx_owner", server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list --all -o json":
-			return LocalCommandResult{Stdout: `[
+			return core.LocalCommandResult{Stdout: `[
 				{"id":"ws1","name":"shared","owner_name":"bob","template_name":"go-dev","latest_build":{"status":"stopped"}},
 				{"id":"ws2","name":"shared","owner_name":"alice","template_name":"go-dev","latest_build":{"status":"stopped"}}
 			]`}, nil
 		default:
 			t.Fatalf("expected owner-qualified claim resolve to use list --all, got: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "shared", StatusOnly: true})
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "shared", StatusOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1568,14 +1568,14 @@ func TestCoderResolveSlugClaimDisambiguatesOwnerQualifiedWorkspaces(t *testing.T
 
 func TestCoderResolveNeedsListAllUsesOnlyOwnerQualifiedRequestOrClaim(t *testing.T) {
 	installCoderClaimState(t)
-	if err := claimLeaseForRepoProvider("cbx_owner", "shared", coderProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_owner", "shared", coderProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	server := Server{Name: "shared", Labels: map[string]string{"coder_workspace_ref": "alice/shared"}}
-	if err := updateLeaseClaimEndpoint("cbx_owner", server, SSHTarget{}); err != nil {
+	server := core.Server{Name: "shared", Labels: map[string]string{"coder_workspace_ref": "alice/shared"}}
+	if err := core.UpdateLeaseClaimEndpoint("cbx_owner", server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}}
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}}
 	tests := []struct {
 		id   string
 		want bool
@@ -1597,21 +1597,21 @@ func TestCoderResolveNeedsListAllUsesOnlyOwnerQualifiedRequestOrClaim(t *testing
 
 func TestCoderClaimLookupPreservesOwnerQualifiedWorkspaceRefs(t *testing.T) {
 	installCoderClaimState(t)
-	if err := claimLeaseForRepoProvider("cbx_alice", "shared", coderProvider, t.TempDir(), time.Hour, true); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_alice", "shared", coderProvider, t.TempDir(), time.Hour, true); err != nil {
 		t.Fatal(err)
 	}
-	aliceServer := Server{Name: "shared", Labels: map[string]string{"coder_workspace_ref": "alice/shared"}}
-	if err := updateLeaseClaimEndpoint("cbx_alice", aliceServer, SSHTarget{}); err != nil {
+	aliceServer := core.Server{Name: "shared", Labels: map[string]string{"coder_workspace_ref": "alice/shared"}}
+	if err := core.UpdateLeaseClaimEndpoint("cbx_alice", aliceServer, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseForRepoProvider("cbx_local", "shared", coderProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_local", "shared", coderProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	localServer := Server{Name: "shared", Labels: map[string]string{"coder_workspace": "shared"}}
-	if err := updateLeaseClaimEndpoint("cbx_local", localServer, SSHTarget{}); err != nil {
+	localServer := core.Server{Name: "shared", Labels: map[string]string{"coder_workspace": "shared"}}
+	if err := core.UpdateLeaseClaimEndpoint("cbx_local", localServer, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
-	claims, err := listCoderClaimsByWorkspace(Config{Coder: CoderConfig{WorkspacePrefix: "crabbox-"}})
+	claims, err := listCoderClaimsByWorkspace(core.Config{Coder: core.CoderConfig{WorkspacePrefix: "crabbox-"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1630,12 +1630,12 @@ func TestCoderClaimLookupPreservesOwnerQualifiedWorkspaceRefs(t *testing.T) {
 }
 
 func TestCoderResolveRejectsAmbiguousBareClaimWorkspace(t *testing.T) {
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{WorkspacePrefix: "crabbox-"}}}
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{WorkspacePrefix: "crabbox-"}}}
 	workspaces := []coderWorkspace{
 		{Name: "shared", Owner: "alice", Template: "go-dev"},
 		{Name: "shared", Owner: "bob", Template: "go-dev"},
 	}
-	claims := map[string]LeaseClaim{
+	claims := map[string]core.LeaseClaim{
 		coderClaimKey("shared"): {
 			LeaseID: "cbx_local",
 			Slug:    "shared",
@@ -1649,14 +1649,14 @@ func TestCoderResolveRejectsAmbiguousBareClaimWorkspace(t *testing.T) {
 }
 
 func TestCoderResolveClaimFallbackUsesLeaseSuffixedWorkspaceName(t *testing.T) {
-	cfg := Config{Coder: CoderConfig{WorkspacePrefix: "crabbox-"}}
-	claim := LeaseClaim{LeaseID: "cbx_123456abcdef", Slug: "blue", Labels: map[string]string{}}
+	cfg := core.Config{Coder: core.CoderConfig{WorkspacePrefix: "crabbox-"}}
+	claim := core.LeaseClaim{LeaseID: "cbx_123456abcdef", Slug: "blue", Labels: map[string]string{}}
 	workspaceName, err := coderClaimWorkspaceName(cfg, claim)
 	if err != nil {
 		t.Fatal(err)
 	}
 	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: cfg}
-	workspace, leaseID, slug, err := backend.resolveWorkspace(claim.LeaseID, []coderWorkspace{{Name: workspaceName, Template: "go-dev"}}, map[string]LeaseClaim{
+	workspace, leaseID, slug, err := backend.resolveWorkspace(claim.LeaseID, []coderWorkspace{{Name: workspaceName, Template: "go-dev"}}, map[string]core.LeaseClaim{
 		coderClaimKey(workspaceName): claim,
 	}, map[string]int{coderClaimKey(workspaceName): 1})
 	if err != nil {
@@ -1670,39 +1670,39 @@ func TestCoderResolveClaimFallbackUsesLeaseSuffixedWorkspaceName(t *testing.T) {
 func TestCoderOwnerQualifiedResolveAndReleaseUseOwnerWorkspace(t *testing.T) {
 	installCoderClaimState(t)
 	runner := &fakeRunner{}
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch strings.Join(req.Args, " ") {
 		case "list --all -o json":
-			return LocalCommandResult{Stdout: `[{"id":"` + testCoderWorkspaceID + `","name":"shared","owner_name":"alice","template_name":"go-dev","latest_build":{"status":"running","resources":[{"agents":[{"name":"main","operating_system":"linux","status":"connected","lifecycle_state":"ready"}]}]}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"` + testCoderWorkspaceID + `","name":"shared","owner_name":"alice","template_name":"go-dev","latest_build":{"status":"running","resources":[{"agents":[{"name":"main","operating_system":"linux","status":"connected","lifecycle_state":"ready"}]}]}}]`}, nil
 		case "stop --yes " + testCoderWorkspaceID:
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		default:
 			t.Fatalf("unexpected command: %s", strings.Join(req.Args, " "))
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
-	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "alice/shared", StatusOnly: true, ReadyProbe: true})
+	backend := &coderLeaseBackend{spec: Provider{}.Spec(), cfg: core.Config{Coder: core.CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "alice/shared", StatusOnly: true, ReadyProbe: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !regexp.MustCompile(`^coder-alice-shared-[0-9a-f]{6}$`).MatchString(lease.SSH.Host) || !strings.Contains(lease.SSH.ProxyCommand, "'alice/shared'") || lease.Server.Labels["coder_workspace_ref"] != "alice/shared" || lease.Server.CloudID != "alice/shared" {
 		t.Fatalf("owner-qualified target not preserved: %#v", lease)
 	}
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil {
 		t.Fatal("claimless owner-qualified workspace was accepted for release")
 	}
 	backend.cfg.Provider = coderProvider
 	leaseID := "cbx_123456789abd"
 	claimed := coderWorkspaceToServer(coderWorkspace{ID: testCoderWorkspaceID, Name: "shared", Owner: "alice"}, backend.cfg, leaseID, "shared", false)
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "shared", backend.cfg, claimed, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "shared", backend.cfg, claimed, core.SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	lease, err = backend.Resolve(context.Background(), ResolveRequest{ID: "alice/shared", ReleaseOnly: true})
+	lease, err = backend.Resolve(context.Background(), core.ResolveRequest{ID: "alice/shared", ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(runner.calls[len(runner.calls)-1].Args, " "); got != "stop --yes "+testCoderWorkspaceID {

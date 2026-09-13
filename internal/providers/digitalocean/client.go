@@ -1,7 +1,6 @@
 package digitalocean
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -150,15 +149,7 @@ func newDigitalOceanClient(rt core.Runtime) (*digitalOceanClient, error) {
 }
 
 func (c *digitalOceanClient) do(ctx context.Context, method, path string, body any, out any) error {
-	var reader io.Reader
-	if body != nil {
-		var buf bytes.Buffer
-		if err := json.NewEncoder(&buf).Encode(body); err != nil {
-			return err
-		}
-		reader = &buf
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
+	req, err := shared.NewJSONRequest(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return err
 	}
@@ -712,7 +703,7 @@ func (c *digitalOceanClient) resolveCreateTagConflict(ctx context.Context, tags 
 		}
 		canonical = append(canonical, name)
 	}
-	return normalizeTags(canonical), leaseTag, changed, nil
+	return shared.NormalizeTags(canonical), leaseTag, changed, nil
 }
 
 func (c *digitalOceanClient) resolveCanonicalLeaseTag(ctx context.Context, leaseID string) (string, error) {
@@ -799,8 +790,8 @@ func (c *digitalOceanClient) EnsureTag(ctx context.Context, tag string, known ma
 }
 
 func (c *digitalOceanClient) ReplaceDropletTags(ctx context.Context, id int64, currentTags, desiredTags []string) error {
-	currentTags = normalizeTags(currentTags)
-	desiredTags = normalizeTags(desiredTags)
+	currentTags = shared.NormalizeTags(currentTags)
+	desiredTags = shared.NormalizeTags(desiredTags)
 	current := make(map[string]bool, len(currentTags))
 	for _, tag := range currentTags {
 		current[strings.ToLower(tag)] = true

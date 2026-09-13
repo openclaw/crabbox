@@ -286,7 +286,7 @@ func setupClaimRoutingCommandTest(t *testing.T, configuredProvider string) {
 
 func mustWriteClaimRoutingTestClaim(t *testing.T, leaseID, slug, provider string) {
 	t.Helper()
-	if err := claimLeaseForRepoProvider(leaseID, slug, provider, "/repo", time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProvider(leaseID, slug, provider, "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 }

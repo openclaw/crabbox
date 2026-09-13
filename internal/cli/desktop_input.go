@@ -19,7 +19,7 @@ func (a App) desktopDoctor(ctx context.Context, args []string) error {
 	fmt.Fprintf(a.Stdout, "lease: %s provider=%s target=%s\n", leaseID, cfg.Provider, target.TargetOS)
 	out, err := runSSHOutput(ctx, target, desktopDoctorRemoteCommand(target))
 	if err != nil {
-		return exit(5, "desktop doctor failed: %v", err)
+		return Exit(5, "desktop doctor failed: %v", err)
 	}
 	fmt.Fprintln(a.Stdout, out)
 	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
@@ -52,21 +52,21 @@ func (a App) desktopClick(ctx context.Context, args []string) error {
 	x, xOK := intFlagValue(args, "x")
 	y, yOK := intFlagValue(args, "y")
 	if !xOK || !yOK || x < 0 || y < 0 {
-		return exit(2, "usage: crabbox desktop click --id <lease-id-or-slug> --x <n> --y <n>")
+		return Exit(2, "usage: crabbox desktop click --id <lease-id-or-slug> --x <n> --y <n>")
 	}
 	if !desktopClickSupportsTarget(target) {
-		return exit(2, "desktop click supports target=linux, target=macos, or target=windows with windowsMode=normal")
+		return Exit(2, "desktop click supports target=linux, target=macos, or target=windows with windowsMode=normal")
 	}
 	if target.TargetOS == targetMacOS {
 		if err := clickRemoteMacVNC(ctx, cfg, target, x, y); err != nil {
-			return exit(5, "desktop click failed for %s: %v", leaseID, err)
+			return Exit(5, "desktop click failed for %s: %v", leaseID, err)
 		}
 		fmt.Fprintf(a.Stdout, "clicked: lease=%s x=%d y=%d method=vnc\n", leaseID, x, y)
 		return nil
 	}
 	if out, err := runSSHCombinedOutput(ctx, target, desktopClickRemoteCommand(target, x, y)); err != nil {
 		a.printDesktopInputRescue(classifyDesktopFailure(out), out, cfg, target, leaseID)
-		return exit(5, "desktop click failed for %s: %v", leaseID, err)
+		return Exit(5, "desktop click failed for %s: %v", leaseID, err)
 	}
 	fmt.Fprintf(a.Stdout, "clicked: lease=%s x=%d y=%d\n", leaseID, x, y)
 	return nil
@@ -82,7 +82,7 @@ func (a App) desktopPaste(ctx context.Context, args []string) error {
 		return err
 	}
 	if !desktopTextSupportsTarget(target) {
-		return exit(2, "desktop paste supports target=linux or target=macos")
+		return Exit(2, "desktop paste supports target=linux or target=macos")
 	}
 	text, err := desktopTextArgOrStdin(a.Stderr, args, "desktop paste")
 	if err != nil {
@@ -90,7 +90,7 @@ func (a App) desktopPaste(ctx context.Context, args []string) error {
 	}
 	if target.TargetOS == targetMacOS {
 		if err := typeRemoteMacVNC(ctx, cfg, target, text); err != nil {
-			return exit(5, "desktop paste failed for %s: %v", leaseID, err)
+			return Exit(5, "desktop paste failed for %s: %v", leaseID, err)
 		}
 		fmt.Fprintf(a.Stdout, "pasted: lease=%s bytes=%d method=vnc-key\n", leaseID, len(text))
 		return nil
@@ -98,7 +98,7 @@ func (a App) desktopPaste(ctx context.Context, args []string) error {
 	var stdout, stderr strings.Builder
 	if err := runSSHInput(ctx, target, desktopPasteRemoteCommand(), strings.NewReader(text), &stdout, &stderr); err != nil {
 		a.printDesktopInputRescue(classifyDesktopFailure(stderr.String()+"\n"+stdout.String()), stderr.String()+"\n"+stdout.String(), cfg, target, leaseID)
-		return exit(5, "desktop paste failed for %s: %v", leaseID, err)
+		return Exit(5, "desktop paste failed for %s: %v", leaseID, err)
 	}
 	fmt.Fprintf(a.Stdout, "pasted: lease=%s bytes=%d\n", leaseID, len(text))
 	return nil
@@ -110,7 +110,7 @@ func (a App) desktopType(ctx context.Context, args []string) error {
 		return err
 	}
 	if !desktopTextSupportsTarget(target) {
-		return exit(2, "desktop type supports target=linux or target=macos")
+		return Exit(2, "desktop type supports target=linux or target=macos")
 	}
 	text, err := desktopTextArgOrStdin(a.Stderr, args, "desktop type")
 	if err != nil {
@@ -118,7 +118,7 @@ func (a App) desktopType(ctx context.Context, args []string) error {
 	}
 	if target.TargetOS == targetMacOS {
 		if err := typeRemoteMacVNC(ctx, cfg, target, text); err != nil {
-			return exit(5, "desktop type failed for %s: %v", leaseID, err)
+			return Exit(5, "desktop type failed for %s: %v", leaseID, err)
 		}
 		fmt.Fprintf(a.Stdout, "typed: lease=%s bytes=%d method=vnc-key\n", leaseID, len(text))
 		return nil
@@ -129,7 +129,7 @@ func (a App) desktopType(ctx context.Context, args []string) error {
 			pasteDetail := stderr.String() + "\n" + stdout.String()
 			if !desktopPasteFailureSafeToRetry(pasteDetail) {
 				a.printDesktopInputRescue(classifyDesktopFailure(pasteDetail), pasteDetail, cfg, target, leaseID)
-				return exit(5, "desktop type paste failed for %s: %v", leaseID, err)
+				return Exit(5, "desktop type paste failed for %s: %v", leaseID, err)
 			}
 			if out, typeErr := runSSHCombinedOutput(ctx, target, desktopTypeRemoteCommand(text)); typeErr == nil {
 				fmt.Fprintf(a.Stdout, "typed: lease=%s method=key-fallback bytes=%d\n", leaseID, len(text))
@@ -137,7 +137,7 @@ func (a App) desktopType(ctx context.Context, args []string) error {
 			} else {
 				detail := pasteDetail + "\nkey fallback:\n" + out
 				a.printDesktopInputRescue(classifyDesktopFailure(detail), detail, cfg, target, leaseID)
-				return exit(5, "desktop type paste and key fallback failed for %s: %v", leaseID, typeErr)
+				return Exit(5, "desktop type paste and key fallback failed for %s: %v", leaseID, typeErr)
 			}
 		}
 		fmt.Fprintf(a.Stdout, "typed: lease=%s method=paste bytes=%d\n", leaseID, len(text))
@@ -145,7 +145,7 @@ func (a App) desktopType(ctx context.Context, args []string) error {
 	}
 	if out, err := runSSHCombinedOutput(ctx, target, desktopTypeRemoteCommand(text)); err != nil {
 		a.printDesktopInputRescue(classifyDesktopFailure(out), out, cfg, target, leaseID)
-		return exit(5, "desktop type failed for %s: %v", leaseID, err)
+		return Exit(5, "desktop type failed for %s: %v", leaseID, err)
 	}
 	fmt.Fprintf(a.Stdout, "typed: lease=%s method=xdotool bytes=%d\n", leaseID, len(text))
 	return nil
@@ -184,11 +184,11 @@ func (a App) desktopKey(ctx context.Context, args []string) error {
 		return err
 	}
 	if strings.TrimSpace(keys) == "" {
-		return exit(2, "usage: crabbox desktop key --id <lease-id-or-slug> <keys>")
+		return Exit(2, "usage: crabbox desktop key --id <lease-id-or-slug> <keys>")
 	}
 	if out, err := runSSHCombinedOutput(ctx, target, desktopKeyRemoteCommand(keys)); err != nil {
 		a.printDesktopInputRescue(classifyDesktopFailure(out), out, cfg, target, leaseID)
-		return exit(5, "desktop key failed for %s: %v", leaseID, err)
+		return Exit(5, "desktop key failed for %s: %v", leaseID, err)
 	}
 	fmt.Fprintf(a.Stdout, "key: lease=%s keys=%s\n", leaseID, strings.TrimSpace(keys))
 	return nil
@@ -240,7 +240,7 @@ func (a App) desktopCommandTarget(ctx context.Context, name string, args []strin
 		return SSHTarget{}, Config{}, "", err
 	}
 	if isBlacksmithProvider(cfg.Provider) {
-		return SSHTarget{}, Config{}, "", exit(2, "desktop helpers are not supported for provider=%s; Blacksmith owns machine connectivity", cfg.Provider)
+		return SSHTarget{}, Config{}, "", Exit(2, "desktop helpers are not supported for provider=%s; Blacksmith owns machine connectivity", cfg.Provider)
 	}
 	if err := requireLeaseID(*id, "crabbox "+name+" --id <lease-id-or-slug>", cfg); err != nil {
 		return SSHTarget{}, Config{}, "", err
@@ -253,7 +253,7 @@ func (a App) desktopCommandTarget(ctx context.Context, name string, args []strin
 		return SSHTarget{}, Config{}, "", err
 	}
 	if requireLinux && target.TargetOS != targetLinux {
-		return SSHTarget{}, Config{}, "", exit(2, "desktop input helpers currently require target=linux with xdotool")
+		return SSHTarget{}, Config{}, "", Exit(2, "desktop input helpers currently require target=linux with xdotool")
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
 	return target, cfg, leaseID, nil
@@ -291,11 +291,11 @@ func desktopTextArgOrStdin(stderr io.Writer, args []string, name string) (string
 	}
 	info, err := os.Stdin.Stat()
 	if err == nil && info.Mode()&os.ModeCharDevice != 0 {
-		return "", exit(2, "usage: crabbox %s --id <lease-id-or-slug> --text <text>", name)
+		return "", Exit(2, "usage: crabbox %s --id <lease-id-or-slug> --text <text>", name)
 	}
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		return "", exit(2, "read stdin: %v", err)
+		return "", Exit(2, "read stdin: %v", err)
 	}
 	return string(data), nil
 }

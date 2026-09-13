@@ -70,3 +70,37 @@ func containsTag(tags []string, want string) bool {
 	}
 	return false
 }
+
+func TestScalewayTagDecoderRetainsProviderPrecedence(t *testing.T) {
+	labels := labelsFromTags([]string{
+		"crabbox:state:running", "crabbox:state:provisioning",
+		"crabbox:expires_at:20", "crabbox:expires_at:10",
+		"crabbox:keep:TRUE", "crabbox:unknown_metadata:retained",
+		"crabbox:provider:scaleway", "crabbox:provider:ScaleWay",
+	})
+	for key, want := range map[string]string{
+		"state": "provisioning", "expires_at": "10", "keep": "TRUE",
+		"unknown_metadata": "retained", ownershipTagConflictLabel: "provider",
+	} {
+		if labels[key] != want {
+			t.Errorf("labels[%q]=%q, want %q", key, labels[key], want)
+		}
+	}
+}
+
+func TestScalewaySchemaPreservesExactAndRecoveryFields(t *testing.T) {
+	labels := map[string]string{
+		"tailscale_hostname": "box.example.ts.net", "tailscale_tags": "tag:ci,tag:dev",
+		"tailscale_ipv4": "100.100.10.20", "tailscale_fqdn": "box.example.ts.net",
+		"tailscale_error": "a diagnostic with spaces", "tailscale_exit_node": "100.100.10.21",
+		"recovery": "pending", "scaleway_project": "project-1", "scaleway_organization": "org-1",
+		"scaleway_region": "fr-par", "scaleway_zone": "fr-par-1",
+		"scaleway_ssh_key_id": "key-1", "scaleway_ssh_key_name": "crabbox-key",
+	}
+	got := labelsFromTags(tagsFromLabels(labels))
+	for key, want := range labels {
+		if got[key] != want {
+			t.Errorf("round-trip label[%q]=%q, want %q", key, got[key], want)
+		}
+	}
+}

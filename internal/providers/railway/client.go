@@ -1,7 +1,6 @@
 package railway
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -155,18 +154,18 @@ func (s railwayDeploymentStatus) ExitCode() int {
 	return 1
 }
 
-func newRailwayClient(cfg Config, rt Runtime) (railwayAPI, error) {
+func newRailwayClient(cfg core.Config, rt core.Runtime) (railwayAPI, error) {
 	apiToken := strings.TrimSpace(cfg.Railway.APIToken)
 	if apiToken == "" {
-		return nil, exit(2, "provider=%s requires RAILWAY_API_TOKEN", providerName)
+		return nil, core.Exit(2, "provider=%s requires RAILWAY_API_TOKEN", providerName)
 	}
-	apiURL := strings.TrimRight(strings.TrimSpace(blank(cfg.Railway.APIURL, core.RailwayConfigDefaultAPIURL)), "/")
+	apiURL := strings.TrimRight(strings.TrimSpace(core.Blank(cfg.Railway.APIURL, core.RailwayConfigDefaultAPIURL)), "/")
 	parsed, err := url.Parse(apiURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return nil, exit(2, "%s url %q is invalid", providerName, apiURL)
+		return nil, core.Exit(2, "%s url %q is invalid", providerName, apiURL)
 	}
-	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
-		return nil, exit(2, "%s url %q must use https unless it targets localhost", providerName, apiURL)
+	if parsed.Scheme != "https" && !shared.IsLoopbackHTTPURL(parsed) {
+		return nil, core.Exit(2, "%s url %q must use https unless it targets localhost", providerName, apiURL)
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
@@ -209,11 +208,7 @@ type graphqlResponse struct {
 }
 
 func (c *railwayClient) do(ctx context.Context, query string, vars map[string]any, out any) error {
-	body, err := json.Marshal(graphqlRequest{Query: query, Variables: vars})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiURL, bytes.NewReader(body))
+	req, err := shared.NewCompactJSONRequest(ctx, http.MethodPost, c.apiURL, graphqlRequest{Query: query, Variables: vars})
 	if err != nil {
 		return err
 	}
@@ -628,8 +623,4 @@ func (c *railwayClient) GetService(ctx context.Context, serviceID string) (railw
 		return railwayService{}, fmt.Errorf("service %s not found", serviceID)
 	}
 	return railwayService{ID: out.Service.ID, Name: out.Service.Name, ProjectID: out.Service.ProjectID}, nil
-}
-
-func isLoopbackHTTPURL(parsed *url.URL) bool {
-	return shared.IsLoopbackHTTPURL(parsed)
 }

@@ -153,7 +153,7 @@ func preflightAttestPaths(opts attestPathPreflight) error {
 	keyOverride := strings.TrimSpace(opts.KeyOverride)
 	if receiptPath == "" {
 		if keyOverride != "" {
-			return exit(2, "--attest-key requires --attest")
+			return Exit(2, "--attest-key requires --attest")
 		}
 		return nil
 	}
@@ -162,7 +162,7 @@ func preflightAttestPaths(opts attestPathPreflight) error {
 		var err error
 		keyPath, err = attestKeyPath()
 		if err != nil {
-			return exit(2, "attest key path: %v", err)
+			return Exit(2, "attest key path: %v", err)
 		}
 	}
 	outputs := []attestLocalPath{
@@ -194,7 +194,7 @@ func preflightAttestPaths(opts attestPathPreflight) error {
 				return err
 			}
 			if same {
-				return exit(2, "%s and %s paths must be different", left.label, right.label)
+				return Exit(2, "%s and %s paths must be different", left.label, right.label)
 			}
 		}
 	}
@@ -203,7 +203,7 @@ func preflightAttestPaths(opts attestPathPreflight) error {
 		return err
 	}
 	if same {
-		return exit(2, "attest receipt and attest key paths must be different")
+		return Exit(2, "attest receipt and attest key paths must be different")
 	}
 	return nil
 }
@@ -317,7 +317,7 @@ func lengthPrefixedBytes(prefix string, values []string) []byte {
 func buildTerminalRunReceipt(keyPath string, in terminalRunReceiptInput) (terminalRunReceipt, error) {
 	key, err := resolveAttestKey(keyPath)
 	if err != nil {
-		return terminalRunReceipt{}, exit(2, "attest key: %v", err)
+		return terminalRunReceipt{}, Exit(2, "attest key: %v", err)
 	}
 	return buildTerminalRunReceiptWithKey(key, in)
 }
@@ -720,7 +720,7 @@ func validSHA256Digest(value string) bool {
 func writeRunReceipt(path, keyPath string, in runReceiptInput) (runArtifact, error) {
 	key, err := resolveAttestKey(keyPath)
 	if err != nil {
-		return runArtifact{}, exit(2, "attest key: %v", err)
+		return runArtifact{}, Exit(2, "attest key: %v", err)
 	}
 	prepared, err := prepareRunReceipt(path, key, in)
 	if err != nil {
@@ -782,11 +782,11 @@ func persistPreparedRunReceipt(prepared preparedRunReceipt) (runArtifact, error)
 	path := prepared.artifact.Path
 	if dir := filepath.Dir(path); dir != "." && dir != "" {
 		if err := createPrivateRunOutputDir(dir); err != nil {
-			return runArtifact{}, exit(2, "create receipt directory: %v", err)
+			return runArtifact{}, Exit(2, "create receipt directory: %v", err)
 		}
 	}
 	if err := writePrivateRunOutputFile(path, prepared.encoded); err != nil {
-		return runArtifact{}, exit(2, "write receipt %s: %v", path, err)
+		return runArtifact{}, Exit(2, "write receipt %s: %v", path, err)
 	}
 	return prepared.artifact, nil
 }
@@ -797,56 +797,56 @@ func (a App) verify(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox verify <receipt.json>")
+		return Exit(2, "usage: crabbox verify <receipt.json>")
 	}
 	path := fs.Arg(0)
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return exit(2, "read receipt: %v", err)
+		return Exit(2, "read receipt: %v", err)
 	}
 	var envelope struct {
 		SchemaVersion int `json:"schema_version"`
 	}
 	if err := json.Unmarshal(data, &envelope); err != nil {
-		return exit(2, "malformed receipt: %v", err)
+		return Exit(2, "malformed receipt: %v", err)
 	}
 	if envelope.SchemaVersion == terminalReceiptSchemaVersion {
 		receipt, err := decodeTerminalRunReceipt(data)
 		if errors.Is(err, errDuplicateReceiptKey) {
-			return exit(2, "malformed receipt: duplicate key")
+			return Exit(2, "malformed receipt: duplicate key")
 		}
 		if err != nil {
-			return exit(2, "malformed receipt: %v", err)
+			return Exit(2, "malformed receipt: %v", err)
 		}
 		fmt.Fprintf(a.Stdout, "PASS %s signer=%s trust=self-signed exit=%d\n", path, receipt.Signer, receipt.ExitCode)
 		return nil
 	}
 	receipt, err := decodeRunReceipt(data)
 	if errors.Is(err, errDuplicateReceiptKey) {
-		return exit(2, "malformed receipt: duplicate key")
+		return Exit(2, "malformed receipt: duplicate key")
 	}
 	if err != nil {
-		return exit(2, "malformed receipt: %v", err)
+		return Exit(2, "malformed receipt: %v", err)
 	}
 	pubText, ok := receipt["public_key"].(string)
 	if !ok {
-		return exit(2, "malformed receipt: missing public_key")
+		return Exit(2, "malformed receipt: missing public_key")
 	}
 	pub, err := base64.StdEncoding.DecodeString(pubText)
 	if err != nil || len(pub) != ed25519.PublicKeySize {
-		return exit(2, "malformed receipt: invalid public_key")
+		return Exit(2, "malformed receipt: invalid public_key")
 	}
 	sigText, ok := receipt["signature"].(string)
 	if !ok {
-		return exit(2, "malformed receipt: missing signature")
+		return Exit(2, "malformed receipt: missing signature")
 	}
 	sig, err := base64.StdEncoding.DecodeString(sigText)
 	if err != nil || len(sig) != ed25519.SignatureSize {
-		return exit(2, "malformed receipt: invalid signature")
+		return Exit(2, "malformed receipt: invalid signature")
 	}
 	canonical, err := canonicalReceiptBytes(receipt)
 	if err != nil {
-		return exit(2, "canonicalize receipt: %v", err)
+		return Exit(2, "canonicalize receipt: %v", err)
 	}
 	fingerprint := attestFingerprint(ed25519.PublicKey(pub))
 	if !ed25519.Verify(ed25519.PublicKey(pub), canonical, sig) {

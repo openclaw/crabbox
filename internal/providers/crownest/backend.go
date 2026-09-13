@@ -19,19 +19,19 @@ import (
 const cleanupTimeout = 15 * time.Second
 const statusPollInterval = 250 * time.Millisecond
 
-func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = providerName
 	return &backend{spec: spec, cfg: cfg, rt: rt, newClient: newClient}
 }
 
 type backend struct {
-	spec      ProviderSpec
-	cfg       Config
-	rt        Runtime
-	newClient func(Config, Runtime) (client, error)
+	spec      core.ProviderSpec
+	cfg       core.Config
+	rt        core.Runtime
+	newClient func(core.Config, core.Runtime) (client, error)
 }
 
-func (b *backend) Spec() ProviderSpec { return b.spec }
+func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *backend) client() (client, error) {
 	if b.newClient != nil {
@@ -40,26 +40,26 @@ func (b *backend) client() (client, error) {
 	return newClient(b.cfg, b.rt)
 }
 
-func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	api, err := b.client()
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
 	if err := api.Probe(ctx); err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
-	return DoctorResult{
+	return core.DoctorResult{
 		Provider: providerName,
 		Message:  "auth=ready api=ready mutation=false runtime=ready",
 	}, nil
 }
 
-func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
+func (b *backend) Warmup(ctx context.Context, req core.WarmupRequest) error {
 	if req.ActionsRunner {
-		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
+		return core.Exit(2, "--actions-runner is not supported for provider=%s", providerName)
 	}
 	if req.Options.Tailscale.Enabled {
-		return exit(2, "provider=crownest is delegated-run only and does not support Tailscale options")
+		return core.Exit(2, "provider=crownest is delegated-run only and does not support Tailscale options")
 	}
 	started := core.ClockNow(b.rt.Clock)
 	api, err := b.client()
@@ -83,23 +83,23 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	})
 }
 
-func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
-	if err := rejectDelegatedSyncOptionsForSpec(b.spec, req); err != nil {
-		return RunResult{}, err
+func (b *backend) Run(ctx context.Context, req core.RunRequest) (result core.RunResult, retErr error) {
+	if err := core.RejectDelegatedSyncOptionsForSpec(b.spec, req); err != nil {
+		return core.RunResult{}, err
 	}
 	if req.NoSync {
-		return RunResult{}, exit(2, "provider=crownest requires archive sync; --no-sync is not supported")
+		return core.RunResult{}, core.Exit(2, "provider=crownest requires archive sync; --no-sync is not supported")
 	}
 	if req.SyncOnly {
-		return RunResult{}, exit(2, "provider=crownest uses archive sync; --sync-only is not supported")
+		return core.RunResult{}, core.Exit(2, "provider=crownest uses archive sync; --sync-only is not supported")
 	}
 	if req.Options.Tailscale.Enabled {
-		return RunResult{}, exit(2, "provider=crownest is delegated-run only and does not support Tailscale options")
+		return core.RunResult{}, core.Exit(2, "provider=crownest is delegated-run only and does not support Tailscale options")
 	}
 	started := core.ClockNow(b.rt.Clock)
 	api, err := b.client()
 	if err != nil {
-		return RunResult{}, err
+		return core.RunResult{}, err
 	}
 	scope := claimScope(api.BaseURL(), b.cfg)
 	leaseID, sandboxID, slug := "", "", ""
@@ -121,23 +121,23 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	if !acquired {
 		leaseID, _, _, err = resolveLeaseID(req.ID, "", false, 0, scope)
 		if err != nil {
-			return RunResult{}, err
+			return core.RunResult{}, err
 		}
 		unlockOperation, err = lockCrownestLeaseOperation(ctx, leaseID)
 		if err != nil {
-			return RunResult{}, err
+			return core.RunResult{}, err
 		}
 		leaseID, sandboxID, slug, err = resolveLeaseID(leaseID, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, scope)
 		if err != nil {
-			return RunResult{}, err
+			return core.RunResult{}, err
 		}
 		if _, err := api.GetSandbox(ctx, sandboxID); err != nil {
-			return RunResult{}, err
+			return core.RunResult{}, err
 		}
 	}
 	keepSandbox := false
 	shouldStop := acquired && !req.Keep
-	var syncPhases []timingPhase
+	var syncPhases []core.TimingPhase
 	var syncDuration time.Duration
 	var streamErr error
 	var cancelRunID string
@@ -176,7 +176,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		fmt.Fprintf(b.rt.Stderr, "crownest run summary sync=%s command=%s total=%s exit=%d\n",
 			syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
 		if req.TimingJSON {
-			appendFailure(writeTimingJSON(b.rt.Stderr, core.TimingReportWithRunResult(timingReport{
+			appendFailure(core.WriteTimingJSON(b.rt.Stderr, core.TimingReportWithRunResult(core.TimingReport{
 				Provider: providerName, LeaseID: leaseID, Slug: slug,
 				SyncDelegated: true, SyncMs: syncDuration.Milliseconds(), SyncPhases: syncPhases,
 				CommandMs: result.Command.Milliseconds(), TotalMs: result.Total.Milliseconds(),
@@ -186,7 +186,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	}()
 	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 	if err != nil {
-		return RunResult{}, err
+		return core.RunResult{}, err
 	}
 	commandText := intent.ShellCommand("bash", "-lc")
 	commandEnv, stripped := commandEnv(req.Env)
@@ -194,15 +194,15 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		fmt.Fprintf(b.rt.Stderr, "warning: provider=crownest did not forward provider authentication variables: %s\n", strings.Join(stripped, ","))
 	}
 	if len(commandEnv) > 0 {
-		return RunResult{}, exit(2, "provider=crownest does not support command environment forwarding yet; run without Crabbox env forwarding")
+		return core.RunResult{}, core.Exit(2, "provider=crownest does not support command environment forwarding yet; run without Crabbox env forwarding")
 	}
 	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
-		printEnvForwardingSummary(b.rt.Stderr, providerName, "not-forwarded", req.Options.EnvAllow, commandEnv)
+		core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "not-forwarded", req.Options.EnvAllow, commandEnv)
 	}
 	archive, archiveSHA, archiveBytes, phases, duration, err := b.prepareArchive(ctx, req)
 	syncPhases, syncDuration = phases, duration
 	if err != nil {
-		return RunResult{Total: core.ClockNow(b.rt.Clock).Sub(started), SyncDelegated: true}, err
+		return core.RunResult{Total: core.ClockNow(b.rt.Clock).Sub(started), SyncDelegated: true}, err
 	}
 	defer func() {
 		_ = archive.Close()
@@ -230,19 +230,19 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		SourceMeta: map[string]string{
 			"repo": repoName(req.Repo),
 		},
-	}, idempotencyKey("create", randomSuffix()))
+	}, idempotencyKey("create", shared.RandomSuffix()))
 	if err != nil {
 		if acquired && workspaceRun.SandboxID != "" {
-			return RunResult{}, b.cleanupCreateFailure(ctx, api, workspaceRun.SandboxID, err)
+			return core.RunResult{}, b.cleanupCreateFailure(ctx, api, workspaceRun.SandboxID, err)
 		}
-		return RunResult{}, err
+		return core.RunResult{}, err
 	}
 	if workspaceRun.SandboxID != "" {
 		sandboxID = workspaceRun.SandboxID
 	}
 	if acquired && sandboxID != "" {
 		if err := b.claimAcquiredSandbox(ctx, api, req, leaseID, sandboxID, slug, &leaseID, &slug); err != nil {
-			return RunResult{}, err
+			return core.RunResult{}, err
 		}
 		if err := lockAcquiredLease(); err != nil {
 			return b.setupFailure(ctx, req, api, err, started, acquired, leaseID, sandboxID, slug, &shouldStop)
@@ -253,10 +253,10 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		return b.setupFailure(ctx, req, api, err, started, acquired, leaseID, sandboxID, slug, &shouldStop)
 	}
 	if transfer.MaxSizeBytes > 0 && archiveBytes > transfer.MaxSizeBytes {
-		return b.setupFailure(ctx, req, api, exit(6, "crownest archive too large: %d > %d bytes", archiveBytes, transfer.MaxSizeBytes), started, acquired, leaseID, sandboxID, slug, &shouldStop)
+		return b.setupFailure(ctx, req, api, core.Exit(6, "crownest archive too large: %d > %d bytes", archiveBytes, transfer.MaxSizeBytes), started, acquired, leaseID, sandboxID, slug, &shouldStop)
 	}
 	if _, err := archive.Seek(0, io.SeekStart); err != nil {
-		return b.setupFailure(ctx, req, api, exit(6, "rewind sync archive: %v", err), started, acquired, leaseID, sandboxID, slug, &shouldStop)
+		return b.setupFailure(ctx, req, api, core.Exit(6, "rewind sync archive: %v", err), started, acquired, leaseID, sandboxID, slug, &shouldStop)
 	}
 	if err := api.UploadArchive(ctx, transfer, archive, archiveBytes); err != nil {
 		return b.setupFailure(ctx, req, api, err, started, acquired, leaseID, sandboxID, slug, &shouldStop)
@@ -273,7 +273,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	}
 	if acquired {
 		if err := b.claimAcquiredSandbox(ctx, api, req, leaseID, sandboxID, slug, &leaseID, &slug); err != nil {
-			return RunResult{}, err
+			return core.RunResult{}, err
 		}
 		if err := lockAcquiredLease(); err != nil {
 			return b.setupFailure(ctx, req, api, err, started, acquired, leaseID, sandboxID, slug, &shouldStop)
@@ -283,7 +283,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	commandStart := core.ClockNow(b.rt.Clock)
 	commandRan, cancelActiveRun = true, true
 	cancelRunID = workspaceRun.ID
-	terminal, streamErr := b.streamRun(ctx, api, workspaceRun.ID)
+	req.Observation.Phase(core.RunPhaseCommand)
+	stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, core.RunOutputWorkload)
+	terminal, streamErr := b.streamRun(ctx, api, workspaceRun.ID, stdout, stderr)
 	commandDuration := core.ClockNow(b.rt.Clock).Sub(commandStart)
 	if terminal.ID == "" && ctx.Err() == nil {
 		if latest, getErr := api.GetWorkspaceRun(ctx, workspaceRun.ID); getErr == nil {
@@ -301,7 +303,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	} else if missingExitStatusFailure {
 		exitCode = 1
 	}
-	result = RunResult{
+	result = core.RunResult{
 		Provider:      providerName,
 		LeaseID:       leaseID,
 		Slug:          slug,
@@ -318,17 +320,17 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	case streamErr != nil:
 		retErr = shared.ExitErrorWithCause(1, fmt.Sprintf("crownest stream failed: %v", streamErr), streamErr)
 	case missingExitStatusFailure:
-		retErr = exit(5, "crownest workspace run ended status=%s reason=%s class=%s without command exit code", blank(terminalStatus, "unknown"), blank(terminal.FailureReason, "unknown"), blank(terminal.FailureClass, "unknown"))
+		retErr = core.Exit(5, "crownest workspace run ended status=%s reason=%s class=%s without command exit code", core.Blank(terminalStatus, "unknown"), core.Blank(terminal.FailureReason, "unknown"), core.Blank(terminal.FailureClass, "unknown"))
 	case terminalStatus == "failed" && terminal.FailureReason != "command_exit":
-		retErr = exit(5, "crownest workspace run failed reason=%s class=%s", blank(terminal.FailureReason, "unknown"), blank(terminal.FailureClass, "unknown"))
+		retErr = core.Exit(5, "crownest workspace run failed reason=%s class=%s", core.Blank(terminal.FailureReason, "unknown"), core.Blank(terminal.FailureClass, "unknown"))
 	default:
 		result = core.FinalizeRunResult(result, nil)
 		if result.ExitCode != 0 {
-			retErr = ExitError{Code: result.ExitCode, Message: fmt.Sprintf("crownest run exited %d", result.ExitCode)}
+			retErr = core.ExitError{Code: result.ExitCode, Message: fmt.Sprintf("crownest run exited %d", result.ExitCode)}
 		}
 	}
 	if retErr != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		core.HandleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		if result.Session != nil {
 			result.Session.Kept = !shouldStop
 		}
@@ -336,9 +338,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	return result, retErr
 }
 
-func (b *backend) claimAcquiredSandbox(ctx context.Context, api client, req RunRequest, currentLeaseID, sandboxID, currentSlug string, leaseID, slug *string) error {
+func (b *backend) claimAcquiredSandbox(ctx context.Context, api client, req core.RunRequest, currentLeaseID, sandboxID, currentSlug string, leaseID, slug *string) error {
 	if sandboxID == "" {
-		return exit(5, "crownest workspace run did not report a sandbox id")
+		return core.Exit(5, "crownest workspace run did not report a sandbox id")
 	}
 	nextLeaseID := leasePrefix + sandboxID
 	if currentLeaseID == nextLeaseID && currentSlug != "" {
@@ -347,13 +349,13 @@ func (b *backend) claimAcquiredSandbox(ctx context.Context, api client, req RunR
 		return nil
 	}
 	if currentLeaseID != "" && currentLeaseID != nextLeaseID {
-		return exit(5, "crownest workspace run changed sandbox id from %s to %s", strings.TrimPrefix(currentLeaseID, leasePrefix), sandboxID)
+		return core.Exit(5, "crownest workspace run changed sandbox id from %s to %s", strings.TrimPrefix(currentLeaseID, leasePrefix), sandboxID)
 	}
-	allocatedSlug, err := allocateClaimLeaseSlug(nextLeaseID, req.RequestedSlug)
+	allocatedSlug, err := core.AllocateClaimLeaseSlug(nextLeaseID, req.RequestedSlug)
 	if err != nil {
 		return b.cleanupCreateFailure(ctx, api, sandboxID, err)
 	}
-	if err := claimLeaseForRepoProviderScopePond(nextLeaseID, allocatedSlug, providerName, claimScope(api.BaseURL(), b.cfg), b.cfg.Pond, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(nextLeaseID, allocatedSlug, providerName, claimScope(api.BaseURL(), b.cfg), b.cfg.Pond, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
 		return b.cleanupCreateFailure(ctx, api, sandboxID, err)
 	}
 	*leaseID = nextLeaseID
@@ -362,16 +364,16 @@ func (b *backend) claimAcquiredSandbox(ctx context.Context, api client, req RunR
 	return nil
 }
 
-func (b *backend) setupFailure(ctx context.Context, req RunRequest, api client, cause error, started time.Time, acquired bool, leaseID, sandboxID, slug string, shouldStop *bool) (RunResult, error) {
+func (b *backend) setupFailure(ctx context.Context, req core.RunRequest, api client, cause error, started time.Time, acquired bool, leaseID, sandboxID, slug string, shouldStop *bool) (core.RunResult, error) {
 	if acquired && sandboxID != "" && leaseID == "" {
 		if err := b.claimAcquiredSandbox(ctx, api, req, leaseID, sandboxID, slug, &leaseID, &slug); err != nil {
-			return RunResult{Provider: providerName, ExitCode: 1, Total: core.ClockNow(b.rt.Clock).Sub(started), SyncDelegated: true}, errors.Join(cause, err)
+			return core.RunResult{Provider: providerName, ExitCode: 1, Total: core.ClockNow(b.rt.Clock).Sub(started), SyncDelegated: true}, errors.Join(cause, err)
 		}
 	}
 	if leaseID != "" {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, shouldStop)
+		core.HandleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, shouldStop)
 	}
-	return RunResult{
+	return core.RunResult{
 		Provider:      providerName,
 		LeaseID:       leaseID,
 		Slug:          slug,
@@ -382,29 +384,29 @@ func (b *backend) setupFailure(ctx context.Context, req RunRequest, api client, 
 	}, cause
 }
 
-func (b *backend) crownestRunSession(leaseID, slug string, reused, kept bool) *RunSessionHandle {
+func (b *backend) crownestRunSession(leaseID, slug string, reused, kept bool) *core.RunSessionHandle {
 	if leaseID == "" {
 		return nil
 	}
-	return &RunSessionHandle{
+	return &core.RunSessionHandle{
 		Provider:       providerName,
 		LeaseID:        leaseID,
 		Slug:           slug,
 		Reused:         reused,
 		Kept:           kept,
-		CleanupCommand: crownestCleanupCommand(b.cfg, blank(slug, leaseID)),
+		CleanupCommand: crownestCleanupCommand(b.cfg, core.Blank(slug, leaseID)),
 	}
 }
 
-func crownestCleanupCommand(cfg Config, id string) string {
+func crownestCleanupCommand(cfg core.Config, id string) string {
 	return "crabbox stop --provider " + providerName +
-		" --crownest-url " + shellQuote(cfg.Crownest.APIURL) +
-		" --crownest-project-id " + shellQuote(cfg.Crownest.ProjectID) +
-		" --crownest-template " + shellQuote(cfg.Crownest.Template) +
-		" --id " + shellQuote(id)
+		" --crownest-url " + core.ShellQuote(cfg.Crownest.APIURL) +
+		" --crownest-project-id " + core.ShellQuote(cfg.Crownest.ProjectID) +
+		" --crownest-template " + core.ShellQuote(cfg.Crownest.Template) +
+		" --id " + core.ShellQuote(id)
 }
 
-func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *backend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	api, err := b.client()
 	if err != nil {
 		return nil, err
@@ -413,7 +415,7 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 	if err != nil {
 		return nil, err
 	}
-	views := make([]LeaseView, 0, len(claims))
+	views := make([]core.LeaseView, 0, len(claims))
 	scope := claimScope(api.BaseURL(), b.cfg)
 	for _, claim := range claims {
 		if claim.Provider != providerName || claim.ProviderScope != scope {
@@ -437,14 +439,14 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 	return views, nil
 }
 
-func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, error) {
+func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
 	api, err := b.client()
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	leaseID, sandboxID, slug, err := resolveLeaseID(req.ID, "", false, 0, claimScope(api.BaseURL(), b.cfg))
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	waitTimeout := req.WaitTimeout
 	if waitTimeout <= 0 {
@@ -460,15 +462,15 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		sb, getErr := api.GetSandbox(pollCtx, sandboxID)
 		if getErr != nil {
 			if req.Wait && ctx.Err() == nil && pollCtx.Err() != nil {
-				return StatusView{}, exit(5, "timed out waiting for crownest sandbox %s to become ready", sandboxID)
+				return core.StatusView{}, core.Exit(5, "timed out waiting for crownest sandbox %s to become ready", sandboxID)
 			}
 			if ctx.Err() != nil {
-				return StatusView{}, ctx.Err()
+				return core.StatusView{}, ctx.Err()
 			}
-			return StatusView{}, getErr
+			return core.StatusView{}, getErr
 		}
 		state := normalizedSandboxState(sb)
-		view := StatusView{
+		view := core.StatusView{
 			ID:       leaseID,
 			Slug:     slug,
 			Provider: providerName,
@@ -487,20 +489,20 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 			return view, nil
 		}
 		if isTerminalState(state) {
-			return StatusView{}, exit(5, "crownest sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
+			return core.StatusView{}, core.Exit(5, "crownest sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
 		select {
 		case <-pollCtx.Done():
 			if ctx.Err() == nil {
-				return StatusView{}, exit(5, "timed out waiting for crownest sandbox %s to become ready", sandboxID)
+				return core.StatusView{}, core.Exit(5, "timed out waiting for crownest sandbox %s to become ready", sandboxID)
 			}
-			return StatusView{}, pollCtx.Err()
+			return core.StatusView{}, pollCtx.Err()
 		case <-time.After(statusPollInterval):
 		}
 	}
 }
 
-func (b *backend) Stop(ctx context.Context, req StopRequest) error {
+func (b *backend) Stop(ctx context.Context, req core.StopRequest) error {
 	api, err := b.client()
 	if err != nil {
 		return err
@@ -524,12 +526,12 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 		}
 		fmt.Fprintf(b.rt.Stderr, "warning: forgetting missing crownest sandbox=%s after explicit request\n", sandboxID)
 	}
-	removeLeaseClaim(leaseID)
+	core.RemoveLeaseClaim(leaseID)
 	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s\n", leaseID, sandboxID)
 	return nil
 }
 
-func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
+func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	api, err := b.client()
 	if err != nil {
 		return err
@@ -540,88 +542,23 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	}
 	scope := claimScope(api.BaseURL(), b.cfg)
 	now := core.ClockNow(b.rt.Clock).UTC()
-	checked := 0
-	removed := 0
-	claimsRemoved := 0
-	for _, listed := range claims {
-		if listed.Provider != providerName || listed.ProviderScope != scope {
-			continue
-		}
-		var checkedOne, removedOne, claimRemovedOne bool
-		err := func() error {
-			unlockOperation, err := lockCrownestLeaseOperation(ctx, listed.LeaseID)
-			if err != nil {
-				return err
-			}
-			defer unlockOperation()
-			claim, err := readLeaseClaim(listed.LeaseID)
-			if err != nil {
-				return err
-			}
-			if claim.LeaseID == "" || claim.Provider != providerName || claim.ProviderScope != scope {
-				return nil
-			}
-			checkedOne = true
-			sandboxID := sandboxIDFromLease(claim.LeaseID)
-			_, err = api.GetSandbox(ctx, sandboxID)
-			if err != nil {
-				if !isNotFound(err) {
-					return err
-				}
-				if !b.cfg.Crownest.ForgetMissing {
-					fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=missing-or-inaccessible; set crownest forget-missing to remove the claim\n", sandboxID, claim.LeaseID)
-					return nil
-				}
-				if req.DryRun {
-					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
-					return nil
-				}
-				if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
-					return err
-				}
-				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
-				claimRemovedOne = true
-				return nil
-			}
-			due, reason := crownestClaimCleanupDue(claim, now)
-			if !due {
-				fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-				return nil
-			}
-			if req.DryRun {
-				fmt.Fprintf(b.rt.Stdout, "would delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-				return nil
-			}
-			if err := api.DeleteSandbox(ctx, sandboxID); err != nil && !isNotFound(err) {
-				return err
-			}
-			if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
-				return err
-			}
-			fmt.Fprintf(b.rt.Stdout, "delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-			removedOne = true
-			return nil
-		}()
-		if err != nil {
-			return err
-		}
-		if checkedOne {
-			checked++
-		}
-		if removedOne {
-			removed++
-		}
-		if claimRemovedOne {
-			claimsRemoved++
-		}
-	}
-	if !req.DryRun {
-		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d claims_removed=%d checked=%d\n", providerName, removed, claimsRemoved, checked)
-	}
-	return nil
+	return shared.CleanupSandboxClaims(ctx, req, claims, shared.SandboxClaimCleanup[sandbox]{
+		Provider:          providerName,
+		Runtime:           b.rt,
+		Now:               now,
+		MatchesScope:      func(claim core.LeaseClaim) bool { return claim.ProviderScope == scope },
+		Lock:              lockCrownestLeaseOperation,
+		SandboxID:         func(claim core.LeaseClaim) string { return sandboxIDFromLease(claim.LeaseID) },
+		Get:               api.GetSandbox,
+		Delete:            api.DeleteSandbox,
+		IsNotFound:        isNotFound,
+		ForgetMissing:     b.cfg.Crownest.ForgetMissing,
+		ForgetMissingHint: "crownest forget-missing",
+		Due:               crownestClaimCleanupDue,
+	})
 }
 
-func (b *backend) createSandbox(ctx context.Context, api client, repo Repo, reclaim bool, requestedSlug string) (string, string, string, error) {
+func (b *backend) createSandbox(ctx context.Context, api client, repo core.Repo, reclaim bool, requestedSlug string) (string, string, string, error) {
 	sb, err := api.CreateSandbox(ctx, createSandboxRequest{
 		ProjectID: strings.TrimSpace(b.cfg.Crownest.ProjectID),
 		Template:  strings.TrimSpace(b.cfg.Crownest.Template),
@@ -635,11 +572,11 @@ func (b *backend) createSandbox(ctx context.Context, api client, repo Repo, recl
 		return "", "", "", err
 	}
 	leaseID := leasePrefix + sb.ID
-	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
+	slug, err := core.AllocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return leaseID, sb.ID, "", b.cleanupCreateFailure(ctx, api, sb.ID, err)
 	}
-	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope(api.BaseURL(), b.cfg), b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope(api.BaseURL(), b.cfg), b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
 		return leaseID, sb.ID, slug, b.cleanupCreateFailure(ctx, api, sb.ID, err)
 	}
 	return leaseID, sb.ID, slug, nil
@@ -657,7 +594,7 @@ func (b *backend) cleanupCreateFailure(ctx context.Context, api client, sandboxI
 	return cause
 }
 
-func (b *backend) prepareArchive(ctx context.Context, req RunRequest) (*os.File, string, int64, []timingPhase, time.Duration, error) {
+func (b *backend) prepareArchive(ctx context.Context, req core.RunRequest) (*os.File, string, int64, []core.TimingPhase, time.Duration, error) {
 	start := core.ClockNow(b.rt.Clock)
 	syncCtx := ctx
 	cancel := func() {}
@@ -665,23 +602,23 @@ func (b *backend) prepareArchive(ctx context.Context, req RunRequest) (*os.File,
 		syncCtx, cancel = context.WithTimeout(ctx, b.cfg.Sync.Timeout)
 	}
 	defer cancel()
-	excludes, err := syncExcludes(req.Repo.Root, b.cfg)
+	excludes, err := core.SyncExcludes(req.Repo.Root, b.cfg)
 	if err != nil {
 		return nil, "", 0, nil, 0, err
 	}
 	manifestStart := core.ClockNow(b.rt.Clock)
-	manifest, err := syncManifest(req.Repo.Root, excludes, b.cfg.Sync.Includes)
+	manifest, err := core.BuildSyncManifestFiltered(req.Repo.Root, excludes, b.cfg.Sync.Includes)
 	if err != nil {
-		return nil, "", 0, nil, 0, exit(6, "build sync file list: %v", err)
+		return nil, "", 0, nil, 0, core.Exit(6, "build sync file list: %v", err)
 	}
 	manifestDuration := core.ClockNow(b.rt.Clock).Sub(manifestStart)
 	preflightStart := core.ClockNow(b.rt.Clock)
-	if err := checkSyncPreflight(manifest, b.cfg, req.ForceSyncLarge, b.rt.Stderr); err != nil {
+	if err := core.CheckSyncPreflight(manifest, b.cfg, req.ForceSyncLarge, b.rt.Stderr); err != nil {
 		return nil, "", 0, nil, 0, err
 	}
 	preflightDuration := core.ClockNow(b.rt.Clock).Sub(preflightStart)
 	archiveStart := core.ClockNow(b.rt.Clock)
-	archive, err := createPortableSyncArchive(syncCtx, req.Repo, manifest, "crabbox-crownest-sync-*.tgz")
+	archive, err := core.CreateSyncArchive(syncCtx, req.Repo, manifest, "crabbox-crownest-sync-*.tgz")
 	if err != nil {
 		return nil, "", 0, nil, 0, err
 	}
@@ -693,7 +630,7 @@ func (b *backend) prepareArchive(ctx context.Context, req RunRequest) (*os.File,
 		return nil, "", 0, nil, 0, err
 	}
 	total := core.ClockNow(b.rt.Clock).Sub(start)
-	return archive, sum, size, []timingPhase{
+	return archive, sum, size, []core.TimingPhase{
 		{Name: "manifest", Ms: manifestDuration.Milliseconds()},
 		{Name: "preflight", Ms: preflightDuration.Milliseconds()},
 		{Name: "archive", Ms: archiveDuration.Milliseconds()},
@@ -703,20 +640,20 @@ func (b *backend) prepareArchive(ctx context.Context, req RunRequest) (*os.File,
 
 func hashArchive(file *os.File) (string, int64, error) {
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return "", 0, exit(6, "rewind sync archive: %v", err)
+		return "", 0, core.Exit(6, "rewind sync archive: %v", err)
 	}
 	h := sha256.New()
 	size, err := io.Copy(h, file)
 	if err != nil {
-		return "", 0, exit(6, "hash sync archive: %v", err)
+		return "", 0, core.Exit(6, "hash sync archive: %v", err)
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return "", 0, exit(6, "rewind sync archive: %v", err)
+		return "", 0, core.Exit(6, "rewind sync archive: %v", err)
 	}
 	return hex.EncodeToString(h.Sum(nil)), size, nil
 }
 
-func (b *backend) streamRun(ctx context.Context, api client, workspaceRunID string) (workspaceRun, error) {
+func (b *backend) streamRun(ctx context.Context, api client, workspaceRunID string, stdout, stderr io.Writer) (workspaceRun, error) {
 	var afterSeq int64
 	for attempts := 0; attempts < 3; attempts++ {
 		body, err := api.StreamWorkspaceRunEvents(ctx, workspaceRunID, afterSeq)
@@ -730,13 +667,13 @@ func (b *backend) streamRun(ctx context.Context, api client, workspaceRunID stri
 			}
 			switch event.Type {
 			case "stdout":
-				_, _ = io.WriteString(b.rt.Stdout, event.Data)
+				_, _ = io.WriteString(stdout, event.Data)
 			case "stderr":
-				_, _ = io.WriteString(b.rt.Stderr, event.Data)
+				_, _ = io.WriteString(stderr, event.Data)
 			case "terminal":
 				terminal = event.WorkspaceRun
 			case "error":
-				return exit(5, "crownest event error %s: %s", blank(event.Code, "error"), event.Message)
+				return core.Exit(5, "crownest event error %s: %s", core.Blank(event.Code, "error"), event.Message)
 			}
 			return nil
 		})
@@ -748,7 +685,7 @@ func (b *backend) streamRun(ctx context.Context, api client, workspaceRunID stri
 			return workspaceRun{}, err
 		}
 	}
-	return workspaceRun{}, exit(5, "crownest event stream ended before terminal event")
+	return workspaceRun{}, core.Exit(5, "crownest event stream ended before terminal event")
 }
 
 func (b *backend) cleanupCreatedRun(ctx context.Context, api client, leaseID, sandboxID string, deleteSandbox bool, shouldStop *bool) error {
@@ -764,7 +701,7 @@ func (b *backend) cleanupCreatedRun(ctx context.Context, api client, leaseID, sa
 		}
 	}
 	if leaseID != "" {
-		removeLeaseClaim(leaseID)
+		core.RemoveLeaseClaim(leaseID)
 	}
 	return nil
 }
@@ -772,49 +709,49 @@ func (b *backend) cleanupCreatedRun(ctx context.Context, api client, leaseID, sa
 func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration, scope string) (string, string, string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return "", "", "", exit(2, "provider=crownest requires a Crabbox-created sandbox slug or lease id")
+		return "", "", "", core.Exit(2, "provider=crownest requires a Crabbox-created sandbox slug or lease id")
 	}
 	exactLeaseID := id
 	if !strings.HasPrefix(exactLeaseID, leasePrefix) {
 		exactLeaseID = leasePrefix + exactLeaseID
 	}
-	if claim, err := readLeaseClaim(exactLeaseID); err == nil && claim.LeaseID == exactLeaseID && claim.Provider == providerName {
+	if claim, err := core.ReadLeaseClaim(exactLeaseID); err == nil && claim.LeaseID == exactLeaseID && claim.Provider == providerName {
 		return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout, scope)
 	}
 	claims, err := listCrownestLeaseClaims()
 	if err != nil {
 		return "", "", "", err
 	}
-	slug := normalizeLeaseSlug(id)
+	slug := core.NormalizeLeaseSlug(id)
 	for _, claim := range claims {
 		if claim.Provider != providerName {
 			continue
 		}
-		if claim.LeaseID == id || normalizeLeaseSlug(claim.Slug) == slug {
+		if claim.LeaseID == id || core.NormalizeLeaseSlug(claim.Slug) == slug {
 			return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout, scope)
 		}
 	}
-	return "", "", "", exit(4, "crownest sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<sandbox-id>", id, leasePrefix)
+	return "", "", "", core.Exit(4, "crownest sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<sandbox-id>", id, leasePrefix)
 }
 
-func finishResolvedLease(claim LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, scope string) (string, string, string, error) {
+func finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, scope string) (string, string, string, error) {
 	if claim.ProviderScope != scope {
-		return "", "", "", exit(4, "crownest lease %q belongs to a different API endpoint, project, or template", claim.LeaseID)
+		return "", "", "", core.Exit(4, "crownest lease %q belongs to a different API endpoint, project, or template", claim.LeaseID)
 	}
 	if repoRoot != "" {
-		if err := claimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, repoRoot, timeoutOrDefault(idleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), reclaim); err != nil {
+		if err := core.ClaimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, repoRoot, timeoutOrDefault(idleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), reclaim); err != nil {
 			return "", "", "", err
 		}
 	}
 	slug := claim.Slug
 	if strings.TrimSpace(slug) == "" {
-		slug = newLeaseSlug(claim.LeaseID)
+		slug = core.NewLeaseSlug(claim.LeaseID)
 	}
 	return claim.LeaseID, sandboxIDFromLease(claim.LeaseID), slug, nil
 }
 
-func serverFromClaim(claim LeaseClaim, state string) Server {
-	return Server{
+func serverFromClaim(claim core.LeaseClaim, state string) core.Server {
+	return core.Server{
 		Provider: providerName,
 		CloudID:  sandboxIDFromLease(claim.LeaseID),
 		Name:     sandboxIDFromLease(claim.LeaseID),
@@ -834,7 +771,7 @@ func sandboxIDFromLease(leaseID string) string {
 	return strings.TrimPrefix(leaseID, leasePrefix)
 }
 
-func claimScope(baseURL string, cfg Config) string {
+func claimScope(baseURL string, cfg core.Config) string {
 	return strings.Join([]string{
 		"endpoint:" + strings.TrimSpace(baseURL),
 		"project:" + strings.TrimSpace(cfg.Crownest.ProjectID),
@@ -872,7 +809,7 @@ func isProviderAuthEnv(name string) bool {
 		strings.HasPrefix(name, "CROWNEST_")
 }
 
-func crownestClaimCleanupDue(claim LeaseClaim, now time.Time) (bool, string) {
+func crownestClaimCleanupDue(claim core.LeaseClaim, now time.Time) (bool, string) {
 	if claim.IdleTimeoutSeconds <= 0 {
 		return false, "idle-timeout-disabled"
 	}
@@ -898,7 +835,7 @@ func timeoutMS(timeoutSecs int) int64 {
 	return int64(timeoutSecs) * int64(time.Second/time.Millisecond)
 }
 
-func ttlMS(cfg Config) int64 {
+func ttlMS(cfg core.Config) int64 {
 	if cfg.TTL <= 0 {
 		return 0
 	}
@@ -913,7 +850,7 @@ func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
 }
 
 func normalizedSandboxState(sb sandbox) string {
-	return strings.ToLower(blank(strings.TrimSpace(sb.Status), "unknown"))
+	return strings.ToLower(core.Blank(strings.TrimSpace(sb.Status), "unknown"))
 }
 
 func isReadyState(state string) bool {
@@ -947,13 +884,9 @@ func normalizedWorkspaceRunStatus(status string) string {
 	return strings.TrimSpace(strings.ToLower(status))
 }
 
-func repoName(repo Repo) string {
+func repoName(repo core.Repo) string {
 	if strings.TrimSpace(repo.Name) != "" {
 		return repo.Name
 	}
 	return repo.Root
-}
-
-func randomSuffix() string {
-	return shared.RandomSuffix()
 }

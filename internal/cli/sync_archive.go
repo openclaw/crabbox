@@ -13,6 +13,19 @@ import (
 )
 
 func CreateSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, tempPattern string) (*os.File, error) {
+	managed, err := newManagedSyncScope(repo.Root)
+	if err != nil {
+		return nil, err
+	}
+	for _, rel := range manifest.Files {
+		protected, err := managed.contains(rel)
+		if err != nil {
+			return nil, err
+		}
+		if protected {
+			return nil, Exit(6, "sync archive contains a protected managed-state member")
+		}
+	}
 	archive, err := os.CreateTemp("", tempPattern)
 	if err != nil {
 		return nil, fmt.Errorf("create sync archive temp file: %w", err)
@@ -28,18 +41,24 @@ func CreateSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, te
 	gz := gzip.NewWriter(archive)
 	tw := tar.NewWriter(gz)
 	for _, rel := range manifest.Files {
+		protected, scopeErr := managed.contains(rel)
+		if scopeErr != nil || protected {
+			_ = tw.Close()
+			_ = gz.Close()
+			return nil, Exit(6, "sync archive managed-state scope changed before member read: %v", scopeErr)
+		}
 		if err := appendSyncArchiveMember(ctx, tw, repo.Root, rel); err != nil {
 			_ = tw.Close()
 			_ = gz.Close()
-			return nil, exit(6, "create sync archive: %v", err)
+			return nil, Exit(6, "create sync archive: %v", err)
 		}
 	}
 	if err := tw.Close(); err != nil {
 		_ = gz.Close()
-		return nil, exit(6, "create sync archive: %v", err)
+		return nil, Exit(6, "create sync archive: %v", err)
 	}
 	if err := gz.Close(); err != nil {
-		return nil, exit(6, "create sync archive: %v", err)
+		return nil, Exit(6, "create sync archive: %v", err)
 	}
 	if _, err := archive.Seek(0, 0); err != nil {
 		return nil, fmt.Errorf("rewind sync archive: %w", err)

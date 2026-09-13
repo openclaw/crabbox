@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestCleanAzureDynamicSessionsWorkspacePathRejectsUnsafeRoots(t *testing.T) {
@@ -32,7 +34,7 @@ func TestCleanAzureDynamicSessionsWorkspacePathCleansDedicatedAbsolutePath(t *te
 }
 
 func TestCreateAzureDynamicSessionsSyncArchiveRejectsUnsafeManifestPath(t *testing.T) {
-	_, err := createAzureDynamicSessionsSyncArchive(t.Context(), Repo{Root: t.TempDir()}, SyncManifest{Files: []string{"../secret.txt"}})
+	_, err := createAzureDynamicSessionsSyncArchive(t.Context(), core.Repo{Root: t.TempDir()}, core.SyncManifest{Files: []string{"../secret.txt"}})
 	if err == nil || !strings.Contains(err.Error(), "unsafe sync path") {
 		t.Fatalf("err = %v, want unsafe path", err)
 	}
@@ -46,7 +48,7 @@ func TestCreateAzureDynamicSessionsSyncArchiveIncludesFilesAndSymlinks(t *testin
 	if err := os.Symlink("file.txt", filepath.Join(repo, "link.txt")); err != nil {
 		t.Fatal(err)
 	}
-	archive, err := createAzureDynamicSessionsSyncArchive(t.Context(), Repo{Root: repo}, SyncManifest{Files: []string{"file.txt", "link.txt"}})
+	archive, err := createAzureDynamicSessionsSyncArchive(t.Context(), core.Repo{Root: repo}, core.SyncManifest{Files: []string{"file.txt", "link.txt"}})
 	if err != nil {
 		t.Fatal(err)
 	}

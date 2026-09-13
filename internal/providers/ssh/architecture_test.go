@@ -19,7 +19,7 @@ import (
 func stubStaticArchitecture(t *testing.T) {
 	t.Helper()
 	old := runArchitectureProbe
-	runArchitectureProbe = func(_ context.Context, target SSHTarget, _ string, _ int) (string, error) {
+	runArchitectureProbe = func(_ context.Context, target core.SSHTarget, _ string, _ int) (string, error) {
 		_, source, _ := architectureProbe(target)
 		if source == "ssh-uname" {
 			return "v1|arm64|-|-|-", nil
@@ -34,7 +34,7 @@ func staticArchitectureFixture(t *testing.T, target, mode, assertion string) (*s
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	old := waitForSSH
-	waitForSSH = func(ctx context.Context, target *SSHTarget, _ io.Writer) error {
+	waitForSSH = func(ctx context.Context, target *core.SSHTarget, _ io.Writer) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -52,17 +52,17 @@ func staticArchitectureFixture(t *testing.T, target, mode, assertion string) (*s
 		core.MarkArchitectureExplicit(&cfg)
 	}
 	var log bytes.Buffer
-	b := NewStaticSSHLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stderr: &log, Clock: staticLifecycleClock{now: time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)}}).(*staticLeaseBackend)
+	b := NewStaticSSHLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: &log, Clock: staticLifecycleClock{now: time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)}}).(*staticLeaseBackend)
 	return b, &log, t.TempDir()
 }
 
 func TestStaticSSHArchitectureAliasesAndTargets(t *testing.T) {
-	for _, cfg := range []Config{{TargetOS: "worker-runtime"}, {TargetOS: "windows", WindowsMode: "unsupported"}, {TargetOS: "macos", WindowsMode: "wsl2"}} {
+	for _, cfg := range []core.Config{{TargetOS: "worker-runtime"}, {TargetOS: "windows", WindowsMode: "unsupported"}, {TargetOS: "macos", WindowsMode: "wsl2"}} {
 		if (Provider{}).SupportsArchitecture(cfg, "arm64") {
 			t.Fatalf("unsupported tuple admitted: target=%s mode=%s", cfg.TargetOS, cfg.WindowsMode)
 		}
 	}
-	if (Provider{}).SupportsArchitecture(Config{TargetOS: "linux"}, "s390x") {
+	if (Provider{}).SupportsArchitecture(core.Config{TargetOS: "linux"}, "s390x") {
 		t.Fatal("unsupported architecture admitted")
 	}
 	for _, alias := range []string{"ssh", "static", "static-ssh"} {
@@ -80,7 +80,7 @@ func TestStaticSSHArchitectureAliasesAndTargets(t *testing.T) {
 					}
 					// The real CLI admission path must reach the adapter's readiness boundary.
 					sentinel := errors.New("admitted to static adapter")
-					waitForSSH = func(context.Context, *SSHTarget, io.Writer) error { return sentinel }
+					waitForSSH = func(context.Context, *core.SSHTarget, io.Writer) error { return sentinel }
 					t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "absent.yaml"))
 					t.Setenv("CRABBOX_PROVIDER", "ssh")
 					var log bytes.Buffer
@@ -146,7 +146,7 @@ func TestStaticSSHArchitectureAssertions(t *testing.T) {
 			}
 			b, log, repo := staticArchitectureFixture(t, target, mode, tc.assertion)
 			beforeCfg := b.Cfg
-			runArchitectureProbe = func(ctx context.Context, target SSHTarget, command string, limit int) (string, error) {
+			runArchitectureProbe = func(ctx context.Context, target core.SSHTarget, command string, limit int) (string, error) {
 				if target.Port != "2207" || target.FallbackPorts == nil || len(target.FallbackPorts) != 0 {
 					t.Fatalf("probe did not pin resolved port: %#v", target)
 				}
@@ -166,7 +166,7 @@ func TestStaticSSHArchitectureAssertions(t *testing.T) {
 				}
 				return tc.output, tc.probeErr
 			}
-			lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+			lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 			if (err != nil) != tc.fail {
 				t.Fatalf("err=%v want failure=%t", err, tc.fail)
 			}
@@ -210,7 +210,7 @@ func TestStaticSSHArchitecturePreparedReuseAndHistoricalLookup(t *testing.T) {
 	for _, cached := range []bool{false, true} {
 		t.Run(map[bool]string{false: "claimed", true: "cached"}[cached], func(t *testing.T) {
 			b, log, repo := staticArchitectureFixture(t, "linux", "normal", "")
-			lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+			lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -219,12 +219,15 @@ func TestStaticSSHArchitecturePreparedReuseAndHistoricalLookup(t *testing.T) {
 				b = NewStaticSSHLeaseBackend(Provider{}.Spec(), b.Cfg, b.RT).(*staticLeaseBackend)
 			}
 			calls := 0
-			runArchitectureProbe = func(context.Context, SSHTarget, string, int) (string, error) { calls++; return "v1|amd64|-|-|-", nil }
-			offline, err := b.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID})
+			runArchitectureProbe = func(context.Context, core.SSHTarget, string, int) (string, error) {
+				calls++
+				return "v1|amd64|-|-|-", nil
+			}
+			offline, err := b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID})
 			if err != nil {
 				t.Fatal(err)
 			}
-			views, err := b.List(context.Background(), ListRequest{})
+			views, err := b.List(context.Background(), core.ListRequest{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -233,7 +236,7 @@ func TestStaticSSHArchitecturePreparedReuseAndHistoricalLookup(t *testing.T) {
 			}
 			b.Cfg.Architecture = "amd64"
 			core.MarkArchitectureExplicit(&b.Cfg)
-			fresh, err := b.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID, Prepare: true})
+			fresh, err := b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, Prepare: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -248,7 +251,7 @@ func TestStaticSSHArchitecturePreparedReuseAndHistoricalLookup(t *testing.T) {
 			if !reflect.DeepEqual(afterPrepare, initial) {
 				t.Fatal("Prepare published evidence before its caller")
 			}
-			updated, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(lease.LeaseID, serverSlug(fresh.Server), b.Cfg, fresh.Server, fresh.SSH, repo, b.Cfg.IdleTimeout, false, expected, exists)
+			updated, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(lease.LeaseID, core.ServerSlug(fresh.Server), b.Cfg, fresh.Server, fresh.SSH, repo, b.Cfg.IdleTimeout, false, expected, exists)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -258,7 +261,7 @@ func TestStaticSSHArchitecturePreparedReuseAndHistoricalLookup(t *testing.T) {
 				}
 			}
 			core.SetServerLeaseClaimSnapshot(&fresh.Server, updated, true)
-			touched, err := b.Touch(context.Background(), TouchRequest{Lease: fresh, State: "busy"})
+			touched, err := b.Touch(context.Background(), core.TouchRequest{Lease: fresh, State: "busy"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -277,7 +280,7 @@ func TestStaticSSHArchitectureFailedRefreshPreservesClaimsAndCache(t *testing.T)
 	for _, path := range []string{"acquire", "claimed", "cached"} {
 		t.Run(path, func(t *testing.T) {
 			b, _, repo := staticArchitectureFixture(t, "linux", "normal", "")
-			lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+			lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -288,9 +291,9 @@ func TestStaticSSHArchitectureFailedRefreshPreservesClaimsAndCache(t *testing.T)
 				b = NewStaticSSHLeaseBackend(Provider{}.Spec(), b.Cfg, b.RT).(*staticLeaseBackend)
 			}
 			if path == "acquire" {
-				_, err = b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+				_, err = b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 			} else {
-				_, err = b.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID, Prepare: true})
+				_, err = b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, Prepare: true})
 			}
 			if err == nil {
 				t.Fatal("accepted mismatch")
@@ -311,7 +314,7 @@ func TestStaticSSHArchitectureClaimReplacementRaces(t *testing.T) {
 		for _, remove := range []bool{false, true} {
 			t.Run(path+map[bool]string{false: "/replace", true: "/remove"}[remove], func(t *testing.T) {
 				b, _, repo := staticArchitectureFixture(t, "linux", "normal", "")
-				lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+				lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -320,7 +323,7 @@ func TestStaticSSHArchitectureClaimReplacementRaces(t *testing.T) {
 					b = NewStaticSSHLeaseBackend(Provider{}.Spec(), b.Cfg, b.RT).(*staticLeaseBackend)
 				}
 				var replacement core.LeaseClaim
-				runArchitectureProbe = func(context.Context, SSHTarget, string, int) (string, error) {
+				runArchitectureProbe = func(context.Context, core.SSHTarget, string, int) (string, error) {
 					if remove {
 						core.RemoveLeaseClaim(lease.LeaseID)
 					} else {
@@ -337,9 +340,9 @@ func TestStaticSSHArchitectureClaimReplacementRaces(t *testing.T) {
 					return "v1|amd64|-|-|-", nil
 				}
 				if path == "acquire" {
-					_, err = b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+					_, err = b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 				} else {
-					_, err = b.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID, Prepare: true})
+					_, err = b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, Prepare: true})
 				}
 				if err == nil || !strings.Contains(err.Error(), "claim changed") {
 					t.Fatalf("race err=%v", err)
@@ -357,7 +360,7 @@ func TestStaticSSHArchitectureLegacyAndEndpointOverrides(t *testing.T) {
 	for _, change := range []string{"legacy", "host", "user", "port", "target", "mode", "key"} {
 		t.Run(change, func(t *testing.T) {
 			b, _, repo := staticArchitectureFixture(t, "linux", "normal", "")
-			lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+			lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -392,8 +395,11 @@ func TestStaticSSHArchitectureLegacyAndEndpointOverrides(t *testing.T) {
 			}
 			fresh := NewStaticSSHLeaseBackend(Provider{}.Spec(), cfg, b.RT).(*staticLeaseBackend)
 			calls := 0
-			runArchitectureProbe = func(context.Context, SSHTarget, string, int) (string, error) { calls++; return "v1|amd64|-|-|-", nil }
-			offline, err := fresh.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID})
+			runArchitectureProbe = func(context.Context, core.SSHTarget, string, int) (string, error) {
+				calls++
+				return "v1|amd64|-|-|-", nil
+			}
+			offline, err := fresh.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -401,7 +407,7 @@ func TestStaticSSHArchitectureLegacyAndEndpointOverrides(t *testing.T) {
 				t.Fatal("attached old evidence to changed/legacy route")
 			}
 			if change == "legacy" {
-				prepared, err := fresh.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID, Prepare: true})
+				prepared, err := fresh.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, Prepare: true})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -416,8 +422,11 @@ func TestStaticSSHArchitectureLegacyAndEndpointOverrides(t *testing.T) {
 func TestStaticSSHArchitectureCancellationBeforePublication(t *testing.T) {
 	b, _, repo := staticArchitectureFixture(t, "linux", "normal", "")
 	ctx, cancel := context.WithCancel(context.Background())
-	runArchitectureProbe = func(context.Context, SSHTarget, string, int) (string, error) { cancel(); return "v1|arm64|-|-|-", nil }
-	if _, err := b.Acquire(ctx, AcquireRequest{Repo: core.Repo{Root: repo}}); !errors.Is(err, context.Canceled) {
+	runArchitectureProbe = func(context.Context, core.SSHTarget, string, int) (string, error) {
+		cancel()
+		return "v1|arm64|-|-|-", nil
+	}
+	if _, err := b.Acquire(ctx, core.AcquireRequest{Repo: core.Repo{Root: repo}}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err=%v", err)
 	}
 	if _, exists, _ := core.ReadLeaseClaimWithPresence(b.Cfg.Static.ID); exists {
@@ -428,7 +437,7 @@ func TestStaticSSHArchitectureCancellationBeforePublication(t *testing.T) {
 // WSL must select POSIX execution-environment queries, not Windows host queries.
 func TestStaticSSHArchitectureProbeSelection(t *testing.T) {
 	for _, tc := range []struct{ target, mode, source, scope string }{{"linux", "normal", "ssh-uname", "posix-environment"}, {"macos", "normal", "ssh-uname-sysctl", "posix-process"}, {"windows", "normal", "ssh-iswow64process2", "powershell-process"}, {"windows", "wsl2", "ssh-uname", "wsl-environment"}} {
-		command, source, scope := architectureProbe(SSHTarget{TargetOS: tc.target, WindowsMode: tc.mode})
+		command, source, scope := architectureProbe(core.SSHTarget{TargetOS: tc.target, WindowsMode: tc.mode})
 		if source != tc.source || scope != tc.scope || command == "" {
 			t.Fatalf("selection %s/%s", tc.target, tc.mode)
 		}
@@ -437,8 +446,8 @@ func TestStaticSSHArchitectureProbeSelection(t *testing.T) {
 
 func TestStaticSSHArchitectureResolvedTransportPreserved(t *testing.T) {
 	b, _, repo := staticArchitectureFixture(t, "linux", "normal", "")
-	var resolved SSHTarget
-	waitForSSH = func(_ context.Context, target *SSHTarget, _ io.Writer) error {
+	var resolved core.SSHTarget
+	waitForSSH = func(_ context.Context, target *core.SSHTarget, _ io.Writer) error {
 		target.Port = "2207"
 		target.Key = "/fixture/resolved-key"
 		target.CertificateFile = "/fixture/certificate"
@@ -452,13 +461,13 @@ func TestStaticSSHArchitectureResolvedTransportPreserved(t *testing.T) {
 		resolved.FallbackPorts = []string{}
 		return nil
 	}
-	runArchitectureProbe = func(_ context.Context, target SSHTarget, _ string, _ int) (string, error) {
+	runArchitectureProbe = func(_ context.Context, target core.SSHTarget, _ string, _ int) (string, error) {
 		if !reflect.DeepEqual(target, resolved) {
 			t.Fatalf("probe changed resolved transport: %#v", target)
 		}
 		return "v1|arm64|-|-|-", nil
 	}
-	lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,14 +479,14 @@ func TestStaticSSHArchitectureResolvedTransportPreserved(t *testing.T) {
 func TestStaticSSHArchitectureFreshAcquireClaimRace(t *testing.T) {
 	b, _, repo := staticArchitectureFixture(t, "linux", "normal", "")
 	var replacement core.LeaseClaim
-	runArchitectureProbe = func(context.Context, SSHTarget, string, int) (string, error) {
+	runArchitectureProbe = func(context.Context, core.SSHTarget, string, int) (string, error) {
 		if err := core.ClaimLeaseForRepoProvider(b.Cfg.Static.ID, "concurrent-claim", "ssh", repo, 0, false); err != nil {
 			t.Fatal(err)
 		}
 		replacement, _, _ = core.ReadLeaseClaimWithPresence(b.Cfg.Static.ID)
 		return "v1|arm64|-|-|-", nil
 	}
-	if _, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}}); err == nil || !strings.Contains(err.Error(), "claim changed") {
+	if _, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}}); err == nil || !strings.Contains(err.Error(), "claim changed") {
 		t.Fatalf("err=%v", err)
 	}
 	after, _, _ := core.ReadLeaseClaimWithPresence(b.Cfg.Static.ID)
@@ -488,16 +497,16 @@ func TestStaticSSHArchitectureFreshAcquireClaimRace(t *testing.T) {
 
 func TestStaticSSHArchitectureSuccessfulReacquirePreservesLifecycle(t *testing.T) {
 	b, _, repo := staticArchitectureFixture(t, "linux", "normal", "")
-	lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	touched, err := b.Touch(context.Background(), TouchRequest{Lease: lease, State: "busy"})
+	touched, err := b.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "busy"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	runArchitectureProbe = func(context.Context, SSHTarget, string, int) (string, error) { return "v1|amd64|-|-|-", nil }
-	fresh, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+	runArchitectureProbe = func(context.Context, core.SSHTarget, string, int) (string, error) { return "v1|amd64|-|-|-", nil }
+	fresh, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,7 +575,7 @@ func TestStaticSSHArchitectureLegacyConfigMigration(t *testing.T) {
 		}
 	}
 	probes := 0
-	runArchitectureProbe = func(_ context.Context, target SSHTarget, _ string, _ int) (string, error) {
+	runArchitectureProbe = func(_ context.Context, target core.SSHTarget, _ string, _ int) (string, error) {
 		probes++
 		if target.Host != "build.example.test" || target.User != "builder" || target.Port != "2207" || target.TargetOS != "linux" {
 			t.Fatalf("migration changed the resolved SSH identity: %#v", target)
@@ -653,8 +662,11 @@ func TestStaticSSHArchitectureDestinationApprovalPrecedesProbe(t *testing.T) {
 	t.Setenv("CRABBOX_CONFIG", path)
 	t.Setenv("CRABBOX_PROVIDER", "ssh")
 	calls := 0
-	waitForSSH = func(context.Context, *SSHTarget, io.Writer) error { calls++; return errors.New("unexpected readiness") }
-	runArchitectureProbe = func(context.Context, SSHTarget, string, int) (string, error) {
+	waitForSSH = func(context.Context, *core.SSHTarget, io.Writer) error {
+		calls++
+		return errors.New("unexpected readiness")
+	}
+	runArchitectureProbe = func(context.Context, core.SSHTarget, string, int) (string, error) {
 		calls++
 		return "", errors.New("unexpected probe")
 	}
@@ -672,7 +684,7 @@ func TestStaticSSHArchitecturePreparedWindowsModeOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: root}})
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: root}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -684,7 +696,7 @@ func TestStaticSSHArchitecturePreparedWindowsModeOverride(t *testing.T) {
 	t.Setenv("CRABBOX_PROVIDER", "ssh")
 	sentinel := errors.New("native Windows probe selected")
 	calls := 0
-	runArchitectureProbe = func(_ context.Context, target SSHTarget, command string, _ int) (string, error) {
+	runArchitectureProbe = func(_ context.Context, target core.SSHTarget, command string, _ int) (string, error) {
 		calls++
 		if target.TargetOS != "windows" || target.WindowsMode != "normal" || !strings.Contains(command, "IsWow64Process2") {
 			t.Fatalf("mode override ignored: target=%#v", target)

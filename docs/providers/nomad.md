@@ -70,6 +70,29 @@ region and namespace values. A reachable ACL-disabled cluster passes without a
 token; an anonymous `401`/`403` reports the missing token environment variable.
 Every check prints `mutation=false`.
 
+Finite JSON calls (`agent.self`, regions, namespace information, job registration,
+job information, job allocations, evaluation information and deregistration)
+have a two-minute request ceiling, preserving earlier caller deadlines and
+cancellation. Regions queries carry the caller context and retain sorted results.
+Internally created HTTP transports also bound response-header waits to 30 seconds;
+injected clients retain their settings. No whole-request client timeout is added
+to established allocation exec streams. Exec startup's HTTP node discovery can
+encounter the header deadline before the WebSocket connection is established.
+
+Before registration, Crabbox durably records the exact job and lease identity.
+If registration remains uncertain after reconciliation, Crabbox retains that
+recovery claim; a single missing-job response does not prove registration was
+rejected. `status` and `list` show
+`registration-pending` while a submitted job is absent, and `stop`/`cleanup`
+retain the claim with an unknown-outcome diagnostic. A prepared attempt that was
+never submitted can be removed locally. Matching observed jobs use the existing
+ownership-checked removal path; unexpected state is not adopted or deleted.
+Run failures expose a kept recovery session only for the exact retained claim,
+and warmup failures retain recovery identifiers in their diagnostic. Registration
+is not automatically retried. Existing claims without registration markers keep
+their confirmed-job behavior. Setup-failure rollback remains adapter-owned and
+does not become a retained successful allocation merely because `--keep` is set.
+
 `warmup` creates a Nomad job and local Crabbox claim. The job stays running
 until explicit `stop` or `cleanup`, even if `--keep` is omitted. A `run` without
 `--id` creates a fresh job and deletes it after the command unless `--keep` or

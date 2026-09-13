@@ -63,7 +63,10 @@ and SIGQUIT dispositions, including intentionally ignored signals.
 
 POSIX workspace ownership uses `flock`, BSD `lockf`, or an atomic directory gate
 when neither tool is available. Acquire, renewal, release, and foreground-child
-registration share the same gate. The directory fallback never steals a gate
+registration share the same gate. The directory fallback requires a
+BSD/GNU-compatible `mkdir -v` creation receipt, so a tool that
+incorrectly returns success for an existing directory cannot grant ownership.
+It never steals a gate
 based on elapsed time: an interrupted helper may still have a writer in flight.
 Stop and replace a managed lease if that gate remains ambiguous. Normal owner
 expiry recovery still requires proof that the recorded foreground child exited.
@@ -827,6 +830,13 @@ Before sync, `run` prints a compact context block with run ID, portal/log URLs,
 lease ID, slug, provider, SSH target, remote workdir, and whether the workspace
 is raw or Actions-hydrated.
 
+When available, an additional image line separates the configured reference,
+runtime image ID, and reported repository digests. The same optional
+`imageEvidence` object is retained in timing JSON and opt-in local history and
+included in `--emit-proof` output. These initial image observations are unsigned;
+they do not change signed receipt or checkpoint identities. See
+[local-container image evidence](../providers/local-container.md#initial-image-evidence).
+
 For newly created brokered leases, `run` also prints the exact selected image
 ID/source and provider-side request, network-readiness, bootstrap, and total
 startup timings when the provider reports them.
@@ -937,6 +947,15 @@ history item. [`crabbox history`](history.md) lists those records and [`crabbox
 logs <run-id>`](logs.md) prints retained remote output (retention is bounded so
 a noisy command cannot fill storage). See
 [history and logs](../features/history-logs.md).
+
+Use `--record-local` to retain private, bounded local history for this run,
+including coordinator-free and delegated execution. Trusted user configuration
+can enable `history.local.enabled`; an explicit `--record-local=false` disables
+it for one run. Repository policy cannot silently enable this storage. The
+printed run ID works with local history/logs/results after lease cleanup.
+Local history finalization runs after the existing timing/receipt operations;
+failure warns and leaves incomplete metadata without changing their result or
+the original process exit. It never uploads a direct run or creates attestation.
 
 ## Pond
 
@@ -1066,4 +1085,5 @@ Run-specific flags:
 --label <text>
 --timing-json
 --timing-record default|off|path
+--record-local
 ```

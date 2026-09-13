@@ -12,9 +12,14 @@ crabbox results run_abcdef123456 --failed-only
 crabbox results run_abcdef123456 --json
 ```
 
-The run id is accepted as a positional argument or via `--id`. A coordinator
-must be configured (`CRABBOX_COORDINATOR` or `config set-broker`), because
-results are read back from the recorded run, not from the live box.
+The run id is accepted as a positional argument or via `--id`. Results are read
+from recorded runs, not from the live box. A configured coordinator
+(`CRABBOX_COORDINATOR` or `config set-broker`) remains the default source.
+Opted-in local records also work without a coordinator: use `--source local`, or
+`--source coordinator|all` for explicit source selection. Existing configured
+broker defaults are unchanged. Local results preserve collected summary totals
+and disclose unavailable results or clipped/omitted details; they do not retain
+raw XML or claim coordinator attestation.
 
 ## How results get attached
 

@@ -283,10 +283,12 @@ receipt-bearing CLI.
 The fixed-ID `PUT` route is fail-closed and does not replace legacy `POST`.
 It atomically reserves a versioned normalized immutable request hash before
 provider work. An identical owner-scoped replay returns an active lease or the
-same provisioning record; request drift and terminal-ID reuse return
-`lease_id_conflict` without invoking the provider. CLIs using `--lease-id`
-poll a provisioning replay until it becomes active or terminal. Coordinators
-that predate this route return not found before any create side effect.
+same provisioning record; the same request against its terminal record returns
+`fixed_lease_terminal`, while request drift and terminal-ID reuse by a different
+request return `lease_id_conflict`. Neither terminal response invokes the
+provider. CLIs using `--lease-id` poll a provisioning replay until it becomes
+active or terminal. Coordinators that predate this route return not found before
+any create side effect.
 If the PUT response is ambiguous, the CLI repeats the full identical PUT until
 the coordinator atomically confirms the same stored intent or returns a
 conflict/definite error. Public GET is used only after that PUT confirmation,

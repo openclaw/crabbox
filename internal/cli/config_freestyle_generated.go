@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"strconv"
 )
 
 type fileFreestyleConfig struct {
@@ -31,51 +30,14 @@ type FreestyleConfigApplied struct {
 
 func (cfg *FreestyleConfig) applyFile(file *fileFreestyleConfig, trusted bool) (FreestyleConfigApplied, error) {
 	var applied FreestyleConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.APIURL != "" {
-		cfg.APIURL = file.APIURL
-		applied.InputAccepted = true
-	}
-	if file.Workdir != "" {
-		cfg.Workdir = file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.VCPUs > 0 {
-		cfg.VCPUs = file.VCPUs
-		applied.InputAccepted = true
-	}
-	if file.MemoryGB > 0 {
-		cfg.MemoryGB = file.MemoryGB
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "freestyle")
+	return applied, err
 }
 
 func (cfg *FreestyleConfig) applyEnv() (FreestyleConfigApplied, error) {
 	var applied FreestyleConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_FREESTYLE_API_KEY", "FREESTYLE_API_KEY"); ok {
-		cfg.APIKey = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FREESTYLE_API_URL", "FREESTYLE_API_URL"); ok {
-		cfg.APIURL = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FREESTYLE_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_FREESTYLE_VCPUS", strconv.IntSize); ok {
-		cfg.VCPUs = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_FREESTYLE_MEMORY_GB", strconv.IntSize); ok {
-		cfg.MemoryGB = int(value)
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 5)
+	return applied, err
 }
 
 // FreestyleConfigFlagValues holds parsed values; only visited flags are applied.
@@ -88,32 +50,14 @@ type FreestyleConfigFlagValues struct {
 
 // RegisterFreestyleConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterFreestyleConfigFlags(fs *flag.FlagSet, defaults FreestyleConfig) FreestyleConfigFlagValues {
-	return FreestyleConfigFlagValues{
-		APIURL:   fs.String("freestyle-api-url", defaults.APIURL, "Freestyle API URL"),
-		Workdir:  fs.String("freestyle-workdir", defaults.Workdir, "Freestyle sandbox workdir"),
-		VCPUs:    fs.Int("freestyle-vcpus", defaults.VCPUs, "Freestyle sandbox vCPUs (power of two; omit for plan default)"),
-		MemoryGB: fs.Int("freestyle-memory-gb", defaults.MemoryGB, "Freestyle sandbox memory in GiB (power of two; omit for plan default)"),
-	}
+	var values FreestyleConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values FreestyleConfigFlagValues) Apply(cfg *FreestyleConfig, fs *flag.FlagSet) (FreestyleConfigApplied, error) {
 	var applied FreestyleConfigApplied
-	if flagWasSet(fs, "freestyle-api-url") {
-		cfg.APIURL = *values.APIURL
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "freestyle-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "freestyle-vcpus") {
-		cfg.VCPUs = *values.VCPUs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "freestyle-memory-gb") {
-		cfg.MemoryGB = *values.MemoryGB
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

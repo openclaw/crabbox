@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -11,7 +12,7 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-func NewAzureDynamicSessionsBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+func NewAzureDynamicSessionsBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = providerName
 	return &azureDynamicSessionsBackend{spec: spec, cfg: cfg, rt: rt}
 }
@@ -19,16 +20,16 @@ func NewAzureDynamicSessionsBackend(spec ProviderSpec, cfg Config, rt Runtime) B
 var azureDynamicSessionsDeleteTimeout = 30 * time.Second
 
 type azureDynamicSessionsBackend struct {
-	spec ProviderSpec
-	cfg  Config
-	rt   Runtime
+	spec core.ProviderSpec
+	cfg  core.Config
+	rt   core.Runtime
 }
 
-func (b *azureDynamicSessionsBackend) Spec() ProviderSpec { return b.spec }
+func (b *azureDynamicSessionsBackend) Spec() core.ProviderSpec { return b.spec }
 
-func (b *azureDynamicSessionsBackend) Warmup(ctx context.Context, req WarmupRequest) error {
+func (b *azureDynamicSessionsBackend) Warmup(ctx context.Context, req core.WarmupRequest) error {
 	if req.ActionsRunner {
-		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
+		return core.Exit(2, "--actions-runner is not supported for provider=%s", providerName)
 	}
 	started := core.ClockNow(b.rt.Clock)
 	client, err := newAzureDynamicSessionsClient(ctx, b.cfg, b.rt)
@@ -45,7 +46,7 @@ func (b *azureDynamicSessionsBackend) Warmup(ctx context.Context, req WarmupRequ
 		if err != nil {
 			return err
 		}
-		if err := removeLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
+		if err := core.RemoveLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
 			return client.DeleteSession(ctx, leaseID)
 		}); err != nil {
 			return providerError("delete session", err)
@@ -61,11 +62,11 @@ func (b *azureDynamicSessionsBackend) Warmup(ctx context.Context, req WarmupRequ
 	})
 }
 
-func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
 	workspace, workspaceErr := azureDynamicSessionsWorkspace(b.cfg)
 	var client azureDynamicSessionsAPI
 	var leaseID, slug string
-	var cleanupClaim LeaseClaim
+	var cleanupClaim core.LeaseClaim
 	handle := func() shared.DelegatedSandbox {
 		return shared.DelegatedSandbox{LeaseID: leaseID, Slug: slug, CleanupCommand: azureDynamicSessionsCleanupCommand(leaseID)}
 	}
@@ -73,11 +74,11 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req RunRequest) (
 		Provider: providerName, Runtime: b.rt, Workdir: workspace,
 		IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL, CleanupTimeout: azureDynamicSessionsDeleteTimeout,
 		Preflight: func(ctx context.Context) error {
-			if err := delegatedSyncOptionsError(b.spec, req); err != nil {
+			if err := core.RejectDelegatedSyncOptionsForSpec(b.spec, req); err != nil {
 				return err
 			}
 			if !req.SyncOnly && len(req.Command) == 0 {
-				return exit(2, "missing command")
+				return core.Exit(2, "missing command")
 			}
 			var err error
 			client, err = newAzureDynamicSessionsClient(ctx, b.cfg, b.rt)
@@ -121,14 +122,14 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req RunRequest) (
 				return shared.DelegatedSandboxCommand{}, err
 			}
 			if req.EnvSummary {
-				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+				core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
-			return shared.DelegatedSandboxCommand{Text: command, Run: func(ctx context.Context) (int, error) {
+			return shared.DelegatedSandboxCommand{Text: command, Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
 				fmt.Fprintf(b.rt.Stderr, "running on %s %s\n", providerName, strings.Join(req.Command, " "))
 				return client.ExecStream(ctx, leaseID, azureDynamicSessionsExecRequest{
 					Command: command, Cwd: workspace, Env: req.Env,
 					TimeoutMS: durationMillisecondsCeil(azureDynamicSessionsTimeout(b.cfg)),
-				}, b.rt.Stdout, b.rt.Stderr)
+				}, stdout, stderr)
 			}}, nil
 		},
 		Cleanup: func(ctx context.Context) error {
@@ -139,7 +140,7 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req RunRequest) (
 	})
 }
 
-func (b *azureDynamicSessionsBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *azureDynamicSessionsBackend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	client, err := newAzureDynamicSessionsClient(ctx, b.cfg, b.rt)
 	if err != nil {
 		return nil, err
@@ -148,7 +149,7 @@ func (b *azureDynamicSessionsBackend) List(ctx context.Context, req ListRequest)
 	if err != nil {
 		return nil, providerError("list sessions", err)
 	}
-	claims, err := listLeaseClaims()
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +163,7 @@ func (b *azureDynamicSessionsBackend) List(ctx context.Context, req ListRequest)
 			claimByID[claim.LeaseID] = coreLeaseClaim{LeaseID: claim.LeaseID, Slug: claim.Slug, RepoRoot: claim.RepoRoot}
 		}
 	}
-	servers := make([]Server, 0, len(sessions))
+	servers := make([]core.Server, 0, len(sessions))
 	for _, session := range sessions {
 		identifier := session.Identifier
 		if identifier == "" {
@@ -177,78 +178,52 @@ func (b *azureDynamicSessionsBackend) List(ctx context.Context, req ListRequest)
 	return servers, nil
 }
 
-func (b *azureDynamicSessionsBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
-	servers, err := b.List(ctx, ListRequest{})
+func (b *azureDynamicSessionsBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
+	servers, err := b.List(ctx, core.ListRequest{})
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
-	return inventoryDoctorResult(providerName, len(servers)), nil
+	return core.InventoryDoctorResult(providerName, len(servers)), nil
 }
 
-func (b *azureDynamicSessionsBackend) Status(ctx context.Context, req StatusRequest) (statusView, error) {
+func (b *azureDynamicSessionsBackend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
 	client, err := newAzureDynamicSessionsClient(ctx, b.cfg, b.rt)
 	if err != nil {
-		return statusView{}, err
+		return core.StatusView{}, err
 	}
-	waitTimeout := req.WaitTimeout
-	if waitTimeout <= 0 {
-		waitTimeout = 5 * time.Minute
-	}
-	deadline := core.ClockNow(b.rt.Clock).Add(waitTimeout)
-	pollCtx := ctx
-	cancel := func() {}
-	if req.Wait {
-		pollCtx, cancel = context.WithTimeout(ctx, waitTimeout)
-	}
-	defer cancel()
-	leaseID, slug, err := b.resolveSessionID(pollCtx, client, req.ID, "", false)
+	wait := shared.NewStatusWait(ctx, req, b.rt.Clock, func(id string) error {
+		return core.Exit(5, "timed out waiting for session %s to become ready", id)
+	})
+	defer wait.Close()
+	leaseID, slug, err := b.resolveSessionID(wait.Context(), client, req.ID, "", false)
 	if err != nil {
-		return statusView{}, err
+		return core.StatusView{}, err
 	}
 	for {
-		session, err := client.GetSession(pollCtx, leaseID)
+		session, err := client.GetSession(wait.Context(), leaseID)
 		if err == nil {
 			view := b.statusView(leaseID, slug, session)
 			if !req.Wait || view.Ready {
 				return view, nil
 			}
-			if core.ClockNow(b.rt.Clock).After(deadline) {
-				return statusView{}, exit(5, "timed out waiting for session %s to become ready", leaseID)
-			}
-			select {
-			case <-pollCtx.Done():
-				if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-					return statusView{}, exit(5, "timed out waiting for session %s to become ready", leaseID)
-				}
-				return statusView{}, pollCtx.Err()
-			case <-time.After(2 * time.Second):
+			if err := wait.Next(leaseID, 2*time.Second); err != nil {
+				return core.StatusView{}, err
 			}
 			continue
 		}
-		if req.Wait && errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-			return statusView{}, exit(5, "timed out waiting for session %s to become ready", leaseID)
-		}
-		if ctx.Err() != nil {
-			return statusView{}, ctx.Err()
+		if ctxErr := wait.ContextError(leaseID); ctxErr != nil {
+			return core.StatusView{}, ctxErr
 		}
 		if !isNotFoundError(err) || !req.Wait {
-			return statusView{}, providerError("get session", err)
+			return core.StatusView{}, providerError("get session", err)
 		}
-		if core.ClockNow(b.rt.Clock).After(deadline) {
-			return statusView{}, exit(5, "timed out waiting for session %s to become ready", leaseID)
-		}
-		select {
-		case <-pollCtx.Done():
-			if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return statusView{}, exit(5, "timed out waiting for session %s to become ready", leaseID)
-			}
-			return statusView{}, pollCtx.Err()
-		case <-time.After(2 * time.Second):
+		if err := wait.Next(leaseID, 2*time.Second); err != nil {
+			return core.StatusView{}, err
 		}
 	}
 }
 
-func (b *azureDynamicSessionsBackend) Stop(ctx context.Context, req StopRequest) error {
+func (b *azureDynamicSessionsBackend) Stop(ctx context.Context, req core.StopRequest) error {
 	client, err := newAzureDynamicSessionsClient(ctx, b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -262,7 +237,7 @@ func (b *azureDynamicSessionsBackend) Stop(ctx context.Context, req StopRequest)
 		return err
 	}
 	missing := false
-	if err := removeLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
+	if err := core.RemoveLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
 		if err := client.DeleteSession(ctx, leaseID); err != nil {
 			if isNotFoundError(err) {
 				missing = true
@@ -282,9 +257,9 @@ func (b *azureDynamicSessionsBackend) Stop(ctx context.Context, req StopRequest)
 	return nil
 }
 
-func (b *azureDynamicSessionsBackend) createSession(ctx context.Context, client azureDynamicSessionsAPI, repo Repo, reclaim bool, requestedSlug string) (string, string, error) {
+func (b *azureDynamicSessionsBackend) createSession(ctx context.Context, client azureDynamicSessionsAPI, repo core.Repo, reclaim bool, requestedSlug string) (string, string, error) {
 	leaseID := newSessionID()
-	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
+	slug, err := core.AllocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return "", "", err
 	}
@@ -296,7 +271,7 @@ func (b *azureDynamicSessionsBackend) createSession(ctx context.Context, client 
 	if err != nil {
 		return "", "", b.rollbackCreatedSession(client, leaseID, err)
 	}
-	if err := claimLeaseForRepoProviderScope(leaseID, slug, providerName, scope, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScope(leaseID, slug, providerName, scope, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
 		return "", "", b.rollbackCreatedSession(client, leaseID, err)
 	}
 	return leaseID, slug, nil
@@ -315,24 +290,24 @@ func (b *azureDynamicSessionsBackend) deleteSessionBounded(client azureDynamicSe
 	return client.DeleteSession(ctx, leaseID)
 }
 
-func (b *azureDynamicSessionsBackend) sessionClaimForDeletion(leaseID string) (LeaseClaim, error) {
+func (b *azureDynamicSessionsBackend) sessionClaimForDeletion(leaseID string) (core.LeaseClaim, error) {
 	scope, err := b.claimScope()
 	if err != nil {
-		return LeaseClaim{}, err
+		return core.LeaseClaim{}, err
 	}
 	claim, ok, err := resolveAzureDynamicSessionsClaim(leaseID, scope)
 	if err != nil {
-		return LeaseClaim{}, err
+		return core.LeaseClaim{}, err
 	}
 	if !ok || claim.LeaseID != leaseID {
-		return LeaseClaim{}, exit(4, "%s session %q is not claimed by Crabbox", providerName, leaseID)
+		return core.LeaseClaim{}, core.Exit(4, "%s session %q is not claimed by Crabbox", providerName, leaseID)
 	}
 	return claim, nil
 }
 
 func (b *azureDynamicSessionsBackend) resolveSessionID(_ context.Context, _ azureDynamicSessionsAPI, id, repoRoot string, reclaim bool) (string, string, error) {
 	if id == "" {
-		return "", "", exit(2, "provider=%s requires a kept Crabbox lease id or slug", providerName)
+		return "", "", core.Exit(2, "provider=%s requires a kept Crabbox lease id or slug", providerName)
 	}
 	scope, err := b.claimScope()
 	if err != nil {
@@ -342,13 +317,13 @@ func (b *azureDynamicSessionsBackend) resolveSessionID(_ context.Context, _ azur
 		return "", "", err
 	} else if ok {
 		if repoRoot != "" {
-			if err := claimLeaseForRepoProviderScope(claim.LeaseID, claim.Slug, providerName, scope, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim); err != nil {
+			if err := core.ClaimLeaseForRepoProviderScope(claim.LeaseID, claim.Slug, providerName, scope, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim); err != nil {
 				return "", "", err
 			}
 		}
 		return claim.LeaseID, claim.Slug, nil
 	}
-	return "", "", exit(4, "%s session %q is not claimed by Crabbox; use a kept Crabbox lease id or slug", providerName, id)
+	return "", "", core.Exit(4, "%s session %q is not claimed by Crabbox; use a kept Crabbox lease id or slug", providerName, id)
 }
 
 func (b *azureDynamicSessionsBackend) claimScope() (string, error) {
@@ -359,21 +334,21 @@ func (b *azureDynamicSessionsBackend) claimScope() (string, error) {
 	return "endpoint:" + endpoint, nil
 }
 
-func resolveAzureDynamicSessionsClaim(identifier, scope string) (LeaseClaim, bool, error) {
-	claims, err := listLeaseClaims()
+func resolveAzureDynamicSessionsClaim(identifier, scope string) (core.LeaseClaim, bool, error) {
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
-		return LeaseClaim{}, false, err
+		return core.LeaseClaim{}, false, err
 	}
-	slug := normalizeLeaseSlug(identifier)
+	slug := core.NormalizeLeaseSlug(identifier)
 	for _, claim := range claims {
 		if claim.Provider != providerName || strings.TrimSpace(claim.ProviderScope) != scope {
 			continue
 		}
-		if claim.LeaseID == identifier || (slug != "" && normalizeLeaseSlug(claim.Slug) == slug) {
+		if claim.LeaseID == identifier || (slug != "" && core.NormalizeLeaseSlug(claim.Slug) == slug) {
 			return claim, true, nil
 		}
 	}
-	return LeaseClaim{}, false, nil
+	return core.LeaseClaim{}, false, nil
 }
 
 type coreLeaseClaim struct {
@@ -382,20 +357,20 @@ type coreLeaseClaim struct {
 	RepoRoot string
 }
 
-func (b *azureDynamicSessionsBackend) sessionToServer(session azureDynamicSessionsSession, claim coreLeaseClaim) Server {
+func (b *azureDynamicSessionsBackend) sessionToServer(session azureDynamicSessionsSession, claim coreLeaseClaim) core.Server {
 	identifier := session.Identifier
 	slug := claim.Slug
 	if slug == "" {
-		slug = newLeaseSlug(identifier)
+		slug = core.NewLeaseSlug(identifier)
 	}
 	status := azureDynamicSessionsSessionStatus(session)
 	labels := map[string]string{
 		"crabbox":  "true",
 		"provider": providerName,
 		"lease":    identifier,
-		"slug":     normalizeLeaseSlug(slug),
+		"slug":     core.NormalizeLeaseSlug(slug),
 		"target":   targetLinux,
-		"state":    blank(status, "ready"),
+		"state":    core.Blank(status, "ready"),
 	}
 	if claim.RepoRoot != "" {
 		labels["claimed"] = "true"
@@ -403,25 +378,25 @@ func (b *azureDynamicSessionsBackend) sessionToServer(session azureDynamicSessio
 	if expires := azureDynamicSessionsSessionExpires(session); expires != "" {
 		labels["expires_at"] = expires
 	}
-	server := Server{
+	server := core.Server{
 		Provider: providerName,
 		CloudID:  identifier,
 		Name:     identifier,
-		Status:   blank(status, "ready"),
+		Status:   core.Blank(status, "ready"),
 		Labels:   labels,
 	}
 	server.ServerType.Name = "custom-container"
 	return server
 }
 
-func (b *azureDynamicSessionsBackend) statusView(leaseID, slug string, session azureDynamicSessionsSession) statusView {
+func (b *azureDynamicSessionsBackend) statusView(leaseID, slug string, session azureDynamicSessionsSession) core.StatusView {
 	status := azureDynamicSessionsSessionStatus(session)
-	return statusView{
+	return core.StatusView{
 		ID:         leaseID,
 		Slug:       slug,
 		Provider:   providerName,
 		TargetOS:   targetLinux,
-		State:      blank(status, "ready"),
+		State:      core.Blank(status, "ready"),
 		ServerID:   leaseID,
 		ServerType: "custom-container",
 		Network:    networkPublic,
@@ -430,7 +405,7 @@ func (b *azureDynamicSessionsBackend) statusView(leaseID, slug string, session a
 		Labels: map[string]string{
 			"provider": providerName,
 			"lease":    leaseID,
-			"slug":     normalizeLeaseSlug(slug),
+			"slug":     core.NormalizeLeaseSlug(slug),
 			"target":   targetLinux,
 		},
 	}

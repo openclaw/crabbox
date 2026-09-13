@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type unikraftCloudProvenanceAPI struct {
@@ -58,7 +60,7 @@ func TestWarmupRefusesPreexistingGeneratedNameBeforeCreate(t *testing.T) {
 	}
 	b := testBackend(api, nil, nil)
 
-	err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}})
+	err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}})
 	if err == nil || !strings.Contains(err.Error(), "already exists before create") {
 		t.Fatalf("Warmup err = %v, want ownership conflict", err)
 	}
@@ -79,7 +81,7 @@ func TestWarmupRefusesMalformedPreflightInventoryBeforeCreate(t *testing.T) {
 	}
 	b := testBackend(api, nil, nil)
 
-	err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}})
+	err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}})
 	if err == nil || !strings.Contains(err.Error(), "invalid instance UUID") {
 		t.Fatalf("Warmup err = %v, want malformed inventory rejection", err)
 	}
@@ -110,7 +112,7 @@ func TestWarmupNeverAdoptsExactNameAfterDefiniteCreateRejection(t *testing.T) {
 	}
 	b := testBackend(api, nil, nil)
 
-	err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}})
+	err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}})
 	if err == nil || !strings.Contains(err.Error(), "non-adoptable recovery claim") {
 		t.Fatalf("Warmup err = %v, want retained non-adoptable conflict", err)
 	}
@@ -122,14 +124,14 @@ func TestWarmupNeverAdoptsExactNameAfterDefiniteCreateRejection(t *testing.T) {
 		t.Fatalf("conflict claim = %#v", conflict)
 	}
 
-	if _, listErr := b.List(context.Background(), ListRequest{}); listErr != nil {
+	if _, listErr := b.List(context.Background(), core.ListRequest{}); listErr != nil {
 		t.Fatalf("List conflict claim: %v", listErr)
 	}
 	stillConflict := onlyTestClaim(t)
 	if stillConflict.CloudID != "" || stillConflict.Labels["state"] != ukcStateCreateConflict {
 		t.Fatalf("List adopted rejected create: %#v", stillConflict)
 	}
-	if stopErr := b.Stop(context.Background(), StopRequest{ID: conflict.LeaseID}); stopErr == nil {
+	if stopErr := b.Stop(context.Background(), core.StopRequest{ID: conflict.LeaseID}); stopErr == nil {
 		t.Fatal("Stop adopted or deleted a rejected create conflict")
 	}
 	if len(base.deletedIDs) != 0 {
@@ -146,14 +148,14 @@ func TestStopRetainsAmbiguousCreateThatAppearsDuringAbsenceGrace(t *testing.T) {
 	api := &unikraftCloudEventuallyVisibleCreateAPI{fakeUnikraftCloudAPI: base}
 	b := testBackend(api, nil, nil)
 
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err == nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}}); err == nil {
 		t.Fatal("Warmup succeeded, want ambiguous create error")
 	}
 	intent := onlyTestClaim(t)
 	if intent.CloudID != "" || intent.Labels["state"] != ukcStateCreateIntent {
 		t.Fatalf("intent = %#v", intent)
 	}
-	err := b.Stop(context.Background(), StopRequest{ID: intent.LeaseID})
+	err := b.Stop(context.Background(), core.StopRequest{ID: intent.LeaseID})
 	if err == nil || !strings.Contains(err.Error(), "became visible") {
 		t.Fatalf("Stop err = %v, want eventual-visibility retention", err)
 	}

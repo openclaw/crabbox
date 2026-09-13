@@ -83,7 +83,7 @@ func (c *failureStreamCapture) writer(base io.Writer, phase *phaseMarkerWriter, 
 	if c.explicitPath != "" {
 		file, err := openPrivateRunOutputFile(c.explicitPath)
 		if err != nil {
-			return nil, false, exit(2, "capture %s: %v", c.label, err)
+			return nil, false, Exit(2, "capture %s: %v", c.label, err)
 		}
 		c.capture = &countingWriteCloser{WriteCloser: file}
 		fmt.Fprintf(status, "capturing %s to %s\n", c.label, c.explicitPath)
@@ -136,13 +136,13 @@ func (c *failureStreamCapture) closeAfterStream(streamErr error, code int, statu
 			_ = c.capture.Close()
 			c.captureBytes = c.capture.N
 			c.captureClosed = true
-			return exit(2, "capture %s: %v", c.label, streamErr)
+			return Exit(2, "capture %s: %v", c.label, streamErr)
 		}
 		closeErr := c.capture.Close()
 		c.captureBytes = c.capture.N
 		c.captureClosed = true
 		if closeErr != nil && code == 0 {
-			return exit(2, "capture %s close: %v", c.label, closeErr)
+			return Exit(2, "capture %s close: %v", c.label, closeErr)
 		}
 		fmt.Fprintf(status, "captured %s=%s bytes=%d\n", c.label, c.explicitPath, c.captureBytes)
 		c.capture = nil
@@ -150,7 +150,7 @@ func (c *failureStreamCapture) closeAfterStream(streamErr error, code int, statu
 	}
 	if c.bundleFile != nil {
 		if err := c.bundleFile.Close(); err != nil && code == 0 {
-			return exit(2, "failure bundle %s close: %v", c.label, err)
+			return Exit(2, "failure bundle %s close: %v", c.label, err)
 		}
 		c.bundleFile = nil
 	}

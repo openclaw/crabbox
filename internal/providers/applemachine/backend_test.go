@@ -89,6 +89,34 @@ func testBackend(runner *recordingRunner) *backend {
 	return newBackend(Provider{}.Spec(), cfg, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 }
 
+func TestManagedStateNativeAppleMachineHomeMount(t *testing.T) {
+	originalGOOS, originalGOARCH := hostGOOS, hostGOARCH
+	hostGOOS, hostGOARCH = "darwin", "arm64"
+	t.Cleanup(func() { hostGOOS, hostGOARCH = originalGOOS, originalGOARCH })
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state-outside-repo"))
+	for _, noSync := range []bool{false, true} {
+		runner := &recordingRunner{}
+		_, err := testBackend(runner).Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: filepath.Join(home, "repo")}, NoSync: noSync, Command: []string{"true"}})
+		if err == nil || !strings.Contains(err.Error(), "apple-machine home mount") || len(runner.requests) != 0 {
+			t.Fatalf("noSync=%t err=%v native calls=%v", noSync, err, runner.requests)
+		}
+	}
+	runner := &recordingRunner{}
+	if err := testBackend(runner).createMachine(t.Context(), "fixture"); err == nil || len(runner.requests) != 0 {
+		t.Fatalf("mount handoff err=%v calls=%v", err, runner.requests)
+	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := validateRepoMount(filepath.Join(home, "repo")); err != nil {
+		t.Fatalf("state outside HOME: %v", err)
+	}
+	t.Setenv("XDG_STATE_HOME", "")
+	if err := validateRepoMount(filepath.Join(home, "repo")); err != nil {
+		t.Fatalf("unset compatibility: %v", err)
+	}
+}
+
 func TestAppleMachineConfigFlags(t *testing.T) {
 	defaults := core.Config{AppleContainer: core.AppleContainerConfig{CLIPath: "tool", Image: "image-example", User: "user-example", WorkRoot: "/workspace/example", CPUs: 3, Memory: "6g", ExtraRunArgs: []string{"token"}}}
 	fs := flag.NewFlagSet("machine", flag.ContinueOnError)
@@ -185,8 +213,8 @@ func TestRunUsesHomeMountedRepoAndEnv(t *testing.T) {
 	fixture.claim(t, leaseID, slug, repo)
 	var stderr bytes.Buffer
 	b := newBackend(Provider{}.Spec(), testBackend(runner).cfg, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*backend)
-	result, err := b.Run(t.Context(), RunRequest{
-		Repo:       Repo{Root: repo},
+	result, err := b.Run(t.Context(), core.RunRequest{
+		Repo:       core.Repo{Root: repo},
 		ID:         leaseID,
 		Keep:       true,
 		TimingJSON: true,
@@ -202,7 +230,7 @@ func TestRunUsesHomeMountedRepoAndEnv(t *testing.T) {
 	if result.Session == nil || result.Session.Provider != providerName || result.Session.LeaseID != leaseID || result.Session.Slug != slug || !result.Session.Reused || !result.Session.Kept {
 		t.Fatalf("session=%#v", result.Session)
 	}
-	if result.Session.CleanupCommand != "crabbox stop --provider apple-machine --id "+shellQuote(leaseID) {
+	if result.Session.CleanupCommand != "crabbox stop --provider apple-machine --id "+core.ShellQuote(leaseID) {
 		t.Fatalf("cleanup command=%q", result.Session.CleanupCommand)
 	}
 	req := runner.requests[len(runner.requests)-1]
@@ -243,8 +271,8 @@ func TestRunTimingJSONClassifiesCommandFailure(t *testing.T) {
 	fixture := newMachineFixture(t, runner)
 	fixture.claim(t, leaseID, slug, repo)
 	b := newBackend(Provider{}.Spec(), testBackend(runner).cfg, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*backend)
-	result, err := b.Run(t.Context(), RunRequest{
-		Repo:       Repo{Root: repo},
+	result, err := b.Run(t.Context(), core.RunRequest{
+		Repo:       core.Repo{Root: repo},
 		ID:         leaseID,
 		Keep:       true,
 		TimingJSON: true,
@@ -275,8 +303,8 @@ func TestRunDeletesOneShotMachineSession(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	newMachineFixture(t, runner)
 	b := newBackend(Provider{}.Spec(), testBackend(runner).cfg, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*backend)
-	result, err := b.Run(t.Context(), RunRequest{
-		Repo:    Repo{Root: repo},
+	result, err := b.Run(t.Context(), core.RunRequest{
+		Repo:    core.Repo{Root: repo},
 		Command: []string{"true"},
 	})
 	if err != nil {
@@ -409,7 +437,7 @@ func TestRunTerminalOutcomeAndRetention(t *testing.T) {
 				}
 				return core.LocalCommandResult{}, nil, false
 			}
-			req := RunRequest{Repo: Repo{Root: repo}, Command: []string{"true"}, Env: map[string]string{"FIXTURE": "synthetic"}, TimingJSON: true, Keep: tc.keep, KeepOnFailure: tc.keepFailure, Label: "terminal-fixture"}
+			req := core.RunRequest{Repo: core.Repo{Root: repo}, Command: []string{"true"}, Env: map[string]string{"FIXTURE": "synthetic"}, TimingJSON: true, Keep: tc.keep, KeepOnFailure: tc.keepFailure, Label: "terminal-fixture"}
 			if tc.badEnv {
 				req.Env = map[string]string{"FIXTURE": "invalid\nvalue"}
 			}
@@ -532,7 +560,7 @@ func TestWriteEnvFileRejectsExplicitHostOwnedVariable(t *testing.T) {
 	}
 }
 
-func decodeLastTimingReport(t *testing.T, output string) timingReport {
+func decodeLastTimingReport(t *testing.T, output string) core.TimingReport {
 	t.Helper()
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -541,12 +569,12 @@ func decodeLastTimingReport(t *testing.T, output string) timingReport {
 		if start < 0 {
 			continue
 		}
-		var report timingReport
+		var report core.TimingReport
 		if err := json.Unmarshal([]byte(line[start:]), &report); err != nil {
 			t.Fatalf("timing json: %v\noutput=%s", err, output)
 		}
 		return report
 	}
 	t.Fatalf("output does not contain timing JSON: %s", output)
-	return timingReport{}
+	return core.TimingReport{}
 }

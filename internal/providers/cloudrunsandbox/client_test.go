@@ -19,6 +19,7 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestCloudRunNativeExitFixture(t *testing.T) {
@@ -64,8 +65,8 @@ func TestDirectTransportExecPreservesNativeBoundary(t *testing.T) {
 		{name: "canceled exit", code: 23, err: errors.Join(plain, context.Canceled)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			transport := &directTransport{rt: Runtime{Exec: recordingLocalExec{handler: func(LocalCommandRequest) (LocalCommandResult, error) {
-				return LocalCommandResult{ExitCode: tc.code}, tc.err
+			transport := &directTransport{rt: core.Runtime{Exec: recordingLocalExec{handler: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				return core.LocalCommandResult{ExitCode: tc.code}, tc.err
 			}}}}
 			code, err := transport.Exec(t.Context(), "fixture", "true", execOptions{}, io.Discard, io.Discard)
 			if code != tc.code || tc.plain && err != nil || !tc.plain && !errors.Is(err, tc.err) {
@@ -100,7 +101,7 @@ func TestClientHelpers(t *testing.T) {
 	if got := firstNonEmpty("", "  ", " value ", "later"); got != "value" {
 		t.Fatalf("firstNonEmpty=%q", got)
 	}
-	if !isLoopbackHost("localhost") || !isLoopbackHost("::1") || isLoopbackHost("example.com") {
+	if !shared.IsLoopbackHost("localhost") || !shared.IsLoopbackHost("::1") || shared.IsLoopbackHost("example.com") {
 		t.Fatal("unexpected loopback classification")
 	}
 	if err := validateEnv(map[string]string{"VALID_1": "x"}); err != nil {
@@ -116,7 +117,7 @@ func TestClientHelpers(t *testing.T) {
 
 func TestRemoteRequestBody(t *testing.T) {
 	t.Parallel()
-	transport := &remoteTransport{cfg: Config{CloudRunSandbox: CloudRunSandboxConfig{
+	transport := &remoteTransport{cfg: core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{
 		AllowEgress: true,
 		Write:       true,
 		Rootfs:      "base",
@@ -139,7 +140,7 @@ func TestRemoteRequestBody(t *testing.T) {
 func TestCloudRunOperationOptionsKeepRawConfigSemantics(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
-		cfg             Config
+		cfg             core.Config
 		opts            runOptions
 		args            []string
 		write, egress   bool
@@ -147,8 +148,8 @@ func TestCloudRunOperationOptionsKeepRawConfigSemantics(t *testing.T) {
 	}{
 		{name: "raw zero"},
 		{name: "base", cfg: core.BaseConfig(), args: []string{"--rootfs", "/", "--workdir", "/tmp/crabbox", "--write"}, write: true, rootfs: "/", workdir: "/tmp/crabbox"},
-		{name: "option priority", cfg: Config{CloudRunSandbox: CloudRunSandboxConfig{Rootfs: "/base", Workdir: "/base", Write: true}}, opts: runOptions{Rootfs: "/option", Workdir: "/option", AllowEgress: true}, args: []string{"--allow-egress", "--rootfs", "/option", "--workdir", "/option", "--write"}, write: true, egress: true, rootfs: "/option", workdir: "/option"},
-		{name: "config OR", cfg: Config{CloudRunSandbox: CloudRunSandboxConfig{AllowEgress: true}}, opts: runOptions{Write: true}, args: []string{"--allow-egress", "--write"}, write: true, egress: true},
+		{name: "option priority", cfg: core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{Rootfs: "/base", Workdir: "/base", Write: true}}, opts: runOptions{Rootfs: "/option", Workdir: "/option", AllowEgress: true}, args: []string{"--allow-egress", "--rootfs", "/option", "--workdir", "/option", "--write"}, write: true, egress: true, rootfs: "/option", workdir: "/option"},
+		{name: "config OR", cfg: core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{AllowEgress: true}}, opts: runOptions{Write: true}, args: []string{"--allow-egress", "--write"}, write: true, egress: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			direct := &directTransport{cfg: tc.cfg}
@@ -169,10 +170,10 @@ func TestCloudRunOperationOptionsKeepRawConfigSemantics(t *testing.T) {
 	}
 	cfg := core.BaseConfig()
 	cfg.CloudRunSandbox.Workdir = "/tmp/custom"
-	var calls []LocalCommandRequest
-	transport := &directTransport{cfg: cfg, rt: Runtime{Exec: recordingLocalExec{handler: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	var calls []core.LocalCommandRequest
+	transport := &directTransport{cfg: cfg, rt: core.Runtime{Exec: recordingLocalExec{handler: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		calls = append(calls, req)
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}}}}
 	if err := transport.Create(context.Background(), "example", runOptions{OwnershipToken: "example", Workdir: "/tmp/option"}); err != nil {
 		t.Fatal(err)
@@ -247,8 +248,8 @@ func TestRemoteTransportLifecycle(t *testing.T) {
 	transport := &remoteTransport{
 		baseURL: server.URL,
 		secret:  "test-secret",
-		cfg: Config{
-			CloudRunSandbox: CloudRunSandboxConfig{
+		cfg: core.Config{
+			CloudRunSandbox: core.CloudRunSandboxConfig{
 				GatewayURL: server.URL,
 				CLIPath:    "/usr/local/gcp/bin/sandbox",
 				Workdir:    "/tmp/crabbox",
@@ -341,20 +342,20 @@ func TestNewTransportRemoteAndDirect(t *testing.T) {
 	t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_SECRET", "")
 	t.Setenv("CLOUD_RUN_AUTH_TOKEN", "")
 	t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_AUTH_TOKEN", "")
-	_, err := newTransport(Config{CloudRunSandbox: CloudRunSandboxConfig{
+	_, err := newTransport(core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{
 		GatewayURL: "https://gw.example.run.app",
 		CLIPath:    "/usr/local/gcp/bin/sandbox",
-	}}, Runtime{})
+	}}, core.Runtime{})
 	if err == nil || !strings.Contains(err.Error(), "requires CLOUD_RUN_SANDBOX_SECRET") {
 		t.Fatalf("expected secret requirement, got %v", err)
 	}
 
 	t.Setenv("CLOUD_RUN_SANDBOX_SECRET", "sec")
 	t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_AUTH_TOKEN", "tok")
-	transport, err := newTransport(Config{CloudRunSandbox: CloudRunSandboxConfig{
+	transport, err := newTransport(core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{
 		GatewayURL: "https://gw.example.run.app/",
 		CLIPath:    "/usr/local/gcp/bin/sandbox",
-	}}, Runtime{})
+	}}, core.Runtime{})
 	if err != nil {
 		t.Fatalf("remote newTransport: %v", err)
 	}
@@ -367,14 +368,14 @@ func TestNewTransportRemoteAndDirect(t *testing.T) {
 	}
 
 	// Direct mode requires Runtime.Exec.
-	_, err = newTransport(Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox"}}, Runtime{})
+	_, err = newTransport(core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox"}}, core.Runtime{})
 	if err == nil || !strings.Contains(err.Error(), "requires Runtime.Exec") {
 		t.Fatalf("expected Exec requirement, got %v", err)
 	}
 
-	transport, err = newTransport(Config{CloudRunSandbox: CloudRunSandboxConfig{
+	transport, err = newTransport(core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{
 		CLIPath: "/bin/sandbox",
-	}}, Runtime{Exec: stubLocalExec{}})
+	}}, core.Runtime{Exec: stubLocalExec{}})
 	if err != nil {
 		t.Fatalf("direct newTransport: %v", err)
 	}
@@ -408,7 +409,7 @@ func TestRemoteTransportErrorPaths(t *testing.T) {
 		secret:    "sec",
 		authToken: "tok",
 		http:      server.Client(),
-		cfg:       Config{CloudRunSandbox: CloudRunSandboxConfig{Write: true}},
+		cfg:       core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{Write: true}},
 	}
 	ctx := context.Background()
 	if err := transport.Health(ctx); err == nil {
@@ -558,36 +559,36 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { re
 
 func TestDirectTransportLifecycle(t *testing.T) {
 	var calls []string
-	exec := recordingLocalExec{handler: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	exec := recordingLocalExec{handler: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		joined := strings.Join(append([]string{req.Name}, req.Args...), " ")
 		calls = append(calls, joined)
 		if strings.Contains(joined, "--help") {
-			return LocalCommandResult{ExitCode: 0}, nil
+			return core.LocalCommandResult{ExitCode: 0}, nil
 		}
 		if strings.Contains(joined, " delete ") {
 			if strings.Contains(joined, "missing-box") {
 				_, _ = io.WriteString(req.Stderr, "sandbox missing-box not found")
-				return LocalCommandResult{ExitCode: 1}, nil
+				return core.LocalCommandResult{ExitCode: 1}, nil
 			}
-			return LocalCommandResult{ExitCode: 0}, nil
+			return core.LocalCommandResult{ExitCode: 0}, nil
 		}
 		if strings.Contains(joined, " run ") || strings.Contains(joined, " exec ") {
 			if req.Stdout != nil {
 				_, _ = io.WriteString(req.Stdout, "ok\n")
 			}
-			return LocalCommandResult{ExitCode: 0}, nil
+			return core.LocalCommandResult{ExitCode: 0}, nil
 		}
-		return LocalCommandResult{ExitCode: 0}, nil
+		return core.LocalCommandResult{ExitCode: 0}, nil
 	}}
 	transport := &directTransport{
-		cfg: Config{CloudRunSandbox: CloudRunSandboxConfig{
+		cfg: core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{
 			CLIPath:     "/bin/sandbox",
 			AllowEgress: true,
 			Write:       true,
 			Rootfs:      "/",
 			Workdir:     "/tmp/crabbox",
 		}},
-		rt: Runtime{Exec: exec},
+		rt: core.Runtime{Exec: exec},
 	}
 	ctx := context.Background()
 	if err := transport.Health(ctx); err != nil {
@@ -635,10 +636,10 @@ func TestDirectTransportLifecycle(t *testing.T) {
 func TestDirectTransportExecHonorsTimeout(t *testing.T) {
 	t.Parallel()
 	transport := &directTransport{
-		cfg: Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/bin/sandbox"}},
-		rt: Runtime{Exec: contextLocalExec{run: func(ctx context.Context, _ LocalCommandRequest) (LocalCommandResult, error) {
+		cfg: core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/bin/sandbox"}},
+		rt: core.Runtime{Exec: contextLocalExec{run: func(ctx context.Context, _ core.LocalCommandRequest) (core.LocalCommandResult, error) {
 			<-ctx.Done()
-			return LocalCommandResult{ExitCode: 124}, ctx.Err()
+			return core.LocalCommandResult{ExitCode: 124}, ctx.Err()
 		}}},
 	}
 	started := time.Now()
@@ -655,13 +656,13 @@ func TestDirectTransportBoundsControlCommands(t *testing.T) {
 	t.Parallel()
 	calls := 0
 	transport := &directTransport{
-		cfg: Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/bin/sandbox"}},
-		rt: Runtime{Exec: contextLocalExec{run: func(ctx context.Context, _ LocalCommandRequest) (LocalCommandResult, error) {
+		cfg: core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/bin/sandbox"}},
+		rt: core.Runtime{Exec: contextLocalExec{run: func(ctx context.Context, _ core.LocalCommandRequest) (core.LocalCommandResult, error) {
 			calls++
 			if _, ok := ctx.Deadline(); !ok {
 				t.Fatal("direct CLI call has no deadline")
 			}
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		}}},
 	}
 	ctx := context.Background()
@@ -682,12 +683,12 @@ func TestDirectTransportBoundsControlCommands(t *testing.T) {
 func TestDirectTransportWriteFileStreamsLargePayloadOnStdin(t *testing.T) {
 	t.Parallel()
 	payload := strings.Repeat("sensitive-workspace-data", 8<<10)
-	var request LocalCommandRequest
+	var request core.LocalCommandRequest
 	transport := &directTransport{
-		cfg: Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/bin/sandbox"}},
-		rt: Runtime{Exec: recordingLocalExec{handler: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		cfg: core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/bin/sandbox"}},
+		rt: core.Runtime{Exec: recordingLocalExec{handler: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 			request = req
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		}}},
 	}
 	if err := transport.WriteFile(context.Background(), "box", "/tmp/archive.b64", payload, false); err != nil {
@@ -710,12 +711,12 @@ func TestDirectTransportWriteFileStreamsLargePayloadOnStdin(t *testing.T) {
 
 func TestDirectTransportExecStreamsEnvironmentOnStdin(t *testing.T) {
 	t.Parallel()
-	var request LocalCommandRequest
+	var request core.LocalCommandRequest
 	transport := &directTransport{
-		cfg: Config{CloudRunSandbox: CloudRunSandboxConfig{CLIPath: "/bin/sandbox"}},
-		rt: Runtime{Exec: recordingLocalExec{handler: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		cfg: core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/bin/sandbox"}},
+		rt: core.Runtime{Exec: recordingLocalExec{handler: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 			request = req
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		}}},
 	}
 	const value = "sensitive-env-value"
@@ -732,7 +733,7 @@ func TestDirectTransportExecStreamsEnvironmentOnStdin(t *testing.T) {
 	if err != nil || !strings.Contains(string(script), value) {
 		t.Fatalf("stdin script=%q err=%v", script, err)
 	}
-	if !strings.Contains(string(script), "export PATH="+shellQuote(defaultSandboxPath)) {
+	if !strings.Contains(string(script), "export PATH="+core.ShellQuote(defaultSandboxPath)) {
 		t.Fatalf("stdin script has no baseline PATH: %q", script)
 	}
 	if _, err := transport.Exec(context.Background(), "box", "true", execOptions{Env: map[string]string{"PATH": "/custom/bin"}}, nil, nil); err != nil {
@@ -748,16 +749,16 @@ func TestSecureHTTPClientSameOrigin(t *testing.T) {
 	t.Parallel()
 	trusted, _ := url.Parse("https://gw.example.run.app")
 	other, _ := url.Parse("https://evil.example")
-	if !shared.SameOrigin(trusted, trusted) || shared.SameOrigin(trusted, other) {
+	if !core.SameHTTPOrigin(trusted, trusted) || core.SameHTTPOrigin(trusted, other) {
 		t.Fatal("sameOrigin mismatch")
 	}
 	explicitHTTPS, _ := url.Parse("https://gw.example.run.app:443")
-	if !shared.SameOrigin(trusted, explicitHTTPS) {
+	if !core.SameHTTPOrigin(trusted, explicitHTTPS) {
 		t.Fatal("default HTTPS port mismatch")
 	}
 	httpURL, _ := url.Parse("http://127.0.0.1")
 	explicitHTTP, _ := url.Parse("http://127.0.0.1:80")
-	if !shared.SameOrigin(httpURL, explicitHTTP) {
+	if !core.SameHTTPOrigin(httpURL, explicitHTTP) {
 		t.Fatal("default HTTP port mismatch")
 	}
 	client := shared.SecureHTTPClient(http.DefaultClient, trusted, cloudRunSandboxRedirectError)
@@ -768,25 +769,103 @@ func TestSecureHTTPClientSameOrigin(t *testing.T) {
 
 type stubLocalExec struct{}
 
-func (stubLocalExec) Run(context.Context, LocalCommandRequest) (LocalCommandResult, error) {
-	return LocalCommandResult{}, nil
+func (stubLocalExec) Run(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	return core.LocalCommandResult{}, nil
 }
 
 type recordingLocalExec struct {
-	handler func(LocalCommandRequest) (LocalCommandResult, error)
+	handler func(core.LocalCommandRequest) (core.LocalCommandResult, error)
 }
 
 type contextLocalExec struct {
-	run func(context.Context, LocalCommandRequest) (LocalCommandResult, error)
+	run func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error)
 }
 
-func (r contextLocalExec) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r contextLocalExec) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	return r.run(ctx, req)
 }
 
-func (r recordingLocalExec) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r recordingLocalExec) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	if r.handler != nil {
 		return r.handler(req)
 	}
-	return LocalCommandResult{}, nil
+	return core.LocalCommandResult{}, nil
+}
+
+func TestCompactJSONRemoteRequestAndExecEnvelopes(t *testing.T) {
+	type key struct{}
+	for _, parentDeadline := range []bool{false, true} {
+		for _, tc := range []struct {
+			name string
+			body map[string]any
+			want string
+			exec bool
+		}{
+			{"typed nil map", nil, "null", false}, {"empty map", map[string]any{}, "{}", false}, {"map JSON", map[string]any{"message": "<&>"}, `{"message":"\u003c\u0026\u003e"}`, false},
+			{name: "exec", exec: true, want: `{"allowEgress":false,"command":"\u003c\u0026\u003e","executionMode":"stateful","sandboxId":"box","timeout":7,"write":false}`},
+		} {
+			t.Run(tc.name+map[bool]string{false: "/default deadline", true: "/parent deadline"}[parentDeadline], func(t *testing.T) {
+				ctx := context.WithValue(context.Background(), key{}, "ctx")
+				cancel := func() {}
+				if parentDeadline {
+					ctx, cancel = context.WithTimeout(ctx, time.Minute)
+				}
+				defer cancel()
+				before := time.Now()
+				calls := 0
+				var captured context.Context
+				headers := http.Header{}
+				headers.Set("Content-Type", "application/json")
+				headers.Set("Accept", "application/json")
+				headers.Set("X-ComputeSDK-Cloud-Run-Secret", "synthetic-secret")
+				headers.Set("Authorization", "Bearer synthetic-token")
+				endpoint := "https://api.example.test/base/records"
+				if tc.exec {
+					endpoint = "https://api.example.test/base/v1/sandbox/exec"
+					headers.Set("Accept", "application/x-ndjson")
+				}
+				transport := &remoteTransport{baseURL: "https://api.example.test/base", secret: "synthetic-secret", authToken: "synthetic-token", http: &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+					calls++
+					captured = req.Context()
+					if captured == ctx || captured.Value(key{}) != "ctx" {
+						t.Fatal("timeout context lost parent values or was not derived")
+					}
+					testutil.RequireRequestEnvelope(t, req, captured, http.MethodPost, endpoint, tc.want, headers)
+					return nil, errors.New("synthetic-transport-stop")
+				})}}
+				var err error
+				if tc.exec {
+					var code int
+					code, err = transport.Exec(ctx, "box", "<&>", execOptions{Timeout: 7 * time.Millisecond}, io.Discard, io.Discard)
+					if code != 1 {
+						t.Fatalf("code=%d", code)
+					}
+				} else {
+					var out json.RawMessage
+					out, err = transport.request(ctx, "/records", tc.body)
+					if out != nil {
+						t.Fatalf("out=%s", out)
+					}
+				}
+				if err == nil || !strings.Contains(err.Error(), "synthetic-transport-stop") || calls != 1 {
+					t.Fatalf("error=%v calls=%d", err, calls)
+				}
+				deadline, ok := captured.Deadline()
+				if !ok {
+					t.Fatal("missing request deadline")
+				}
+				if parentDeadline {
+					want, _ := ctx.Deadline()
+					if !deadline.Equal(want) {
+						t.Fatalf("deadline=%v want%v", deadline, want)
+					}
+				} else if deadline.Before(before.Add(defaultExecTimeout)) || deadline.After(time.Now().Add(defaultExecTimeout)) {
+					t.Fatalf("default deadline=%v", deadline)
+				}
+				if captured.Err() != context.Canceled || ctx.Err() != nil {
+					t.Fatalf("cancellation child=%v parent=%v", captured.Err(), ctx.Err())
+				}
+			})
+		}
+	}
 }

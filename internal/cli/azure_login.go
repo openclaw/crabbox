@@ -20,24 +20,24 @@ func (a App) azureLogin(ctx context.Context, args []string) error {
 
 	info, err := azAccountShow(ctx, *subscription)
 	if err != nil {
-		return exit(3, "%v", err)
+		return Exit(3, "%v", err)
 	}
 
 	fmt.Fprintf(a.Stderr, "validating azure credentials for subscription %q (%s)...\n", info.Name, info.ID)
 	cred, err := azidentity.NewDefaultAzureCredential(nil)
 	if err != nil {
-		return exit(3, "azure credential: %v", err)
+		return Exit(3, "azure credential: %v", err)
 	}
 	_, err = cred.GetToken(ctx, policy.TokenRequestOptions{
 		Scopes: []string{"https://management.azure.com/.default"},
 	})
 	if err != nil {
-		return exit(3, "azure token acquisition failed: %v\nRun 'az login' to authenticate.", err)
+		return Exit(3, "azure token acquisition failed: %v\nRun 'az login' to authenticate.", err)
 	}
 
 	path := writableConfigPath()
 	if path == "" {
-		return exit(2, "user config directory is unavailable")
+		return Exit(2, "user config directory is unavailable")
 	}
 	file, err := readFileConfig(path)
 	if err != nil {

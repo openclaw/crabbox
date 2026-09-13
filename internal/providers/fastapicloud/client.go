@@ -131,12 +131,12 @@ func (s fastAPICloudDeploymentStatus) State() string {
 	}
 }
 
-func newFastAPICloudClient(cfg Config, rt Runtime) (fastAPICloudAPI, error) {
+func newFastAPICloudClient(cfg core.Config, rt core.Runtime) (fastAPICloudAPI, error) {
 	token := strings.TrimSpace(cfg.FastAPICloud.Token)
 	if token == "" {
-		return nil, exit(2, "provider=%s requires FASTAPI_CLOUD_TOKEN", providerName)
+		return nil, core.Exit(2, "provider=%s requires FASTAPI_CLOUD_TOKEN", providerName)
 	}
-	apiURL, err := validateFastAPICloudAPIURL(blank(cfg.FastAPICloud.APIURL, core.FastAPICloudConfigDefaultAPIURL))
+	apiURL, err := validateFastAPICloudAPIURL(core.Blank(cfg.FastAPICloud.APIURL, core.FastAPICloudConfigDefaultAPIURL))
 	if err != nil {
 		return nil, err
 	}
@@ -156,14 +156,14 @@ func validateFastAPICloudAPIURL(raw string) (string, error) {
 	apiURL := strings.TrimRight(strings.TrimSpace(raw), "/")
 	parsed, err := url.Parse(apiURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
-		return "", exit(2, "provider=%s API URL must be an absolute HTTPS URL", providerName)
+		return "", core.Exit(2, "provider=%s API URL must be an absolute HTTPS URL", providerName)
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", exit(2, "provider=%s API URL must not contain userinfo, query parameters, or a fragment", providerName)
+		return "", core.Exit(2, "provider=%s API URL must not contain userinfo, query parameters, or a fragment", providerName)
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
-		return "", exit(2, "provider=%s API URL must use HTTPS except for loopback development endpoints", providerName)
+	if parsed.Scheme != "https" && !shared.IsLoopbackHTTPURL(parsed) {
+		return "", core.Exit(2, "provider=%s API URL must use HTTPS except for loopback development endpoints", providerName)
 	}
 	return apiURL, nil
 }
@@ -334,8 +334,4 @@ func (c *fastAPICloudClient) endpoint(apiPath string, params url.Values) (string
 		parsed.RawQuery = params.Encode()
 	}
 	return parsed.String(), nil
-}
-
-func isLoopbackHTTPURL(parsed *url.URL) bool {
-	return shared.IsLoopbackHTTPURL(parsed)
 }

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type recordingRunner struct {
@@ -267,7 +268,7 @@ func TestCreateInstanceBuildsLaunchArgsAndCloudInit(t *testing.T) {
 		t.Fatalf("darwin qemu launch should not include --mount:\n%s", args)
 	}
 	mountArgs := recordedArgsForCommand(t, runner, "mount")
-	for _, want := range []string{"mount\n--type\nnative", filepath.Join(root, multipassCacheVolumeName("my-app/linux node24 lock")), "crabbox-blue-1234abcd:/var/cache/crabbox/pnpm"} {
+	for _, want := range []string{"mount\n--type\nnative", filepath.Join(root, shared.CacheVolumeName("my-app/linux node24 lock")), "crabbox-blue-1234abcd:/var/cache/crabbox/pnpm"} {
 		if !strings.Contains(mountArgs, want) {
 			t.Fatalf("native mount args missing %q:\n%s", want, mountArgs)
 		}
@@ -308,7 +309,7 @@ func TestCreateInstanceFallsBackToClassicMountsForDarwinVirtualBox(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mountArg := filepath.Join(root, multipassCacheVolumeName("gomod")) + ":/var/cache/crabbox/go"
+	mountArg := filepath.Join(root, shared.CacheVolumeName("gomod")) + ":/var/cache/crabbox/go"
 	if !strings.Contains(args, "--mount\n"+mountArg) {
 		t.Fatalf("virtualbox launch args missing classic mount %q:\n%s", mountArg, args)
 	}
@@ -536,7 +537,7 @@ func findStoredTestboxKeys(root string) ([]string, error) {
 func TestAcquireRemovesClaimAfterEndpointUpdateFailure(t *testing.T) {
 	runner, b := setupAcquireMetadataFailureTest(t)
 	oldUpdate := updateLeaseClaimEndpoint
-	updateLeaseClaimEndpoint = func(string, Server, SSHTarget) error {
+	updateLeaseClaimEndpoint = func(string, core.Server, core.SSHTarget) error {
 		return errors.New("endpoint boom")
 	}
 	t.Cleanup(func() { updateLeaseClaimEndpoint = oldUpdate })
@@ -564,7 +565,7 @@ func TestAcquireRemovesClaimAfterCacheVolumeUpdateFailure(t *testing.T) {
 func TestAcquireKeepsClaimWhenMetadataRollbackDeleteFails(t *testing.T) {
 	runner, b := setupAcquireMetadataFailureTest(t)
 	oldUpdate := updateLeaseClaimEndpoint
-	updateLeaseClaimEndpoint = func(string, Server, SSHTarget) error {
+	updateLeaseClaimEndpoint = func(string, core.Server, core.SSHTarget) error {
 		return errors.New("endpoint boom")
 	}
 	t.Cleanup(func() { updateLeaseClaimEndpoint = oldUpdate })
@@ -574,7 +575,7 @@ func TestAcquireKeepsClaimWhenMetadataRollbackDeleteFails(t *testing.T) {
 		t.Fatalf("Acquire error=%v, want metadata and cleanup errors", err)
 	}
 	_ = recordedArgsForCommand(t, runner, "delete")
-	claims, claimErr := listLeaseClaims()
+	claims, claimErr := core.ListLeaseClaims()
 	if claimErr != nil {
 		t.Fatal(claimErr)
 	}
@@ -591,7 +592,7 @@ func setupAcquireMetadataFailureTest(t *testing.T) (*recordingRunner, *backend) 
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	oldWait := waitForSSHReady
-	waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+	waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
 		return nil
 	}
 	t.Cleanup(func() { waitForSSHReady = oldWait })
@@ -609,7 +610,7 @@ func assertAcquireRollbackRemovedInstanceAndClaim(t *testing.T, runner *recordin
 	if !strings.Contains(deleteArgs, "delete\n--purge\ncrabbox-") {
 		t.Fatalf("delete not recorded after metadata failure:\n%s", deleteArgs)
 	}
-	claims, err := listLeaseClaims()
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -642,8 +643,8 @@ func TestDurationSecondsCeil(t *testing.T) {
 }
 
 func TestCacheVolumeNameIsStableAndFilesystemSafe(t *testing.T) {
-	got := multipassCacheVolumeName("My App/linux node24 lock")
-	again := multipassCacheVolumeName("My App/linux node24 lock")
+	got := shared.CacheVolumeName("My App/linux node24 lock")
+	again := shared.CacheVolumeName("My App/linux node24 lock")
 	if got != again {
 		t.Fatalf("cache volume name unstable: %q then %q", got, again)
 	}
@@ -761,14 +762,14 @@ func TestServerFromUnclaimedCrabboxNamedInstance(t *testing.T) {
 }
 
 func TestShouldCleanupRespectsKeepLabel(t *testing.T) {
-	server := Server{Status: "stopped", Labels: map[string]string{"keep": "true"}}
+	server := core.Server{Status: "stopped", Labels: map[string]string{"keep": "true"}}
 	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, true, time.Now()); ok || reason != "keep=true" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
 	}
 }
 
 func TestShouldCleanupExpiredClaim(t *testing.T) {
-	server := Server{Status: "running", Labels: map[string]string{}}
+	server := core.Server{Status: "running", Labels: map[string]string{}}
 	claim := core.LeaseClaim{LeaseID: "cbx_123", LastUsedAt: time.Now().Add(-48 * time.Hour).Format(time.RFC3339), IdleTimeoutSeconds: int((30 * time.Minute).Seconds())}
 	if ok, reason := shouldCleanup(server, claim, true, time.Now()); !ok || reason != "claim expired" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
@@ -776,14 +777,14 @@ func TestShouldCleanupExpiredClaim(t *testing.T) {
 }
 
 func TestShouldCleanupSkipsMissingClaim(t *testing.T) {
-	server := Server{Status: "running", Labels: map[string]string{}}
+	server := core.Server{Status: "running", Labels: map[string]string{}}
 	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, false, time.Now()); ok || reason != "missing claim" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
 	}
 }
 
 func TestShouldCleanupSkipsStoppedMissingClaim(t *testing.T) {
-	server := Server{Status: "stopped", Labels: map[string]string{}}
+	server := core.Server{Status: "stopped", Labels: map[string]string{}}
 	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, false, time.Now()); ok || reason != "missing claim" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
 	}
@@ -795,20 +796,20 @@ func TestReleaseRequiresExactClaim(t *testing.T) {
 	const name = "crabbox-release-1234"
 	runner := &recordingRunner{}
 	b := testBackend(runner)
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		LeaseID: leaseID,
-		Server:  Server{CloudID: name, Labels: map[string]string{"lease": leaseID, "instance": name}},
+		Server:  core.Server{CloudID: name, Labels: map[string]string{"lease": leaseID, "instance": name}},
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "no exact local claim") {
 		t.Fatalf("ReleaseLease unclaimed err=%v", err)
 	}
 	if len(runner.calls) != 0 {
 		t.Fatalf("unclaimed release mutated provider: %#v", runner.calls)
 	}
-	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "release", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, lease.Server, SSHTarget{}); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "release", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, lease.Server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatalf("ReleaseLease exact claim: %v", err)
 	}
 	if got := recordedArgsForCommand(t, runner, "delete"); !strings.Contains(got, "--purge\n"+name) {
@@ -843,7 +844,7 @@ func TestInheritedWorkRootCallerContract(t *testing.T) {
 		{"/provider/root", "/srv/custom", "/provider/root"},
 	} {
 		for _, explicit := range []bool{false, true} {
-			cfg := Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
+			cfg := core.Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
 			if explicit {
 				core.MarkWorkRootExplicit(&cfg)
 				cfg.TargetOS = "existing-target"

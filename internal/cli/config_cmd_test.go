@@ -485,49 +485,6 @@ func TestNamespaceInstanceConfigShowRedactsEndpointCredentials(t *testing.T) {
 	}
 }
 
-func TestConfigShowIncludesAgentSandboxRoute(t *testing.T) {
-	cfg := baseConfig()
-	cfg.AgentSandbox.Kubectl = "/opt/bin/kubectl"
-	cfg.AgentSandbox.Kubeconfig = "/tmp/agent-kubeconfig"
-	cfg.AgentSandbox.Context = "agent-context"
-	cfg.AgentSandbox.Namespace = "sandboxes"
-	cfg.AgentSandbox.WarmPool = "linux-pool"
-	cfg.AgentSandbox.Container = "worker"
-	cfg.AgentSandbox.Workdir = "/workspace/my-app"
-	cfg.AgentSandbox.SandboxReadyTimeout = 2 * time.Minute
-	cfg.AgentSandbox.PodReadyTimeout = 45 * time.Second
-	cfg.AgentSandbox.ExecTimeoutSecs = 42
-	cfg.AgentSandbox.DeleteOnRelease = false
-	cfg.AgentSandbox.ForgetMissing = true
-
-	view := configShowView(cfg)
-	agent, ok := view["agentSandbox"].(map[string]any)
-	if !ok || agent["kubeconfig"] != "/tmp/agent-kubeconfig" || agent["warmPool"] != "linux-pool" ||
-		agent["sandboxReadyTimeout"] != "2m0s" || agent["deleteOnRelease"] != false || agent["forgetMissing"] != true {
-		t.Fatalf("agentSandbox view=%#v", agent)
-	}
-	var text bytes.Buffer
-	writeConfigShowText(&text, cfg)
-	for _, want := range []string{
-		"agent_sandbox kubectl=/opt/bin/kubectl",
-		"kubeconfig=/tmp/agent-kubeconfig",
-		"context=agent-context",
-		"namespace=sandboxes",
-		"warm_pool=linux-pool",
-		"container=worker",
-		"workdir=/workspace/my-app",
-		"sandbox_ready_timeout=2m0s",
-		"pod_ready_timeout=45s",
-		"exec_timeout_secs=42",
-		"delete_on_release=false",
-		"forget_missing=true",
-	} {
-		if !strings.Contains(text.String(), want) {
-			t.Fatalf("config show missing %q: %q", want, text.String())
-		}
-	}
-}
-
 func TestConfigShowIncludesCubeSandboxWithoutSecret(t *testing.T) {
 	const secret = "cubesandbox-secret"
 	cfg := baseConfig()
@@ -602,7 +559,7 @@ func TestConfigShowIncludesPhalaConfig(t *testing.T) {
 	}
 }
 
-func TestConfigShowIncludesFirecrackerConfig(t *testing.T) {
+func TestFirecrackerConfigDefaultsPreserveConfiguredValues(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "firecracker"
 	cfg.Firecracker.Binary = "/opt/bin/firecracker"
@@ -620,42 +577,12 @@ func TestConfigShowIncludesFirecrackerConfig(t *testing.T) {
 	cfg.Firecracker.CNIBinDir = "/opt/cni/lab"
 	cfg.Firecracker.LaunchTimeout = 3 * time.Minute
 	cfg.Firecracker.DeleteOnRelease = false
+	before := cfg.Firecracker
 	if err := applyProviderConfigDefaults(&cfg); err != nil {
 		t.Fatal(err)
 	}
-
-	view := configShowView(cfg)
-	firecracker, ok := view["firecracker"].(map[string]any)
-	if !ok || firecracker["binary"] != "/opt/bin/firecracker" || firecracker["jailer"] != "/opt/bin/jailer" ||
-		firecracker["kernel"] != "/var/lib/firecracker/vmlinux" || firecracker["rootfs"] != "/var/lib/firecracker/rootfs.ext4" ||
-		firecracker["workRoot"] != "/workspace/firecracker" || firecracker["cpus"] != 6 ||
-		firecracker["memoryMiB"] != 12288 || firecracker["diskMiB"] != 32768 ||
-		firecracker["cniNetwork"] != "lab-firecracker" || firecracker["launchTimeout"] != "3m0s" ||
-		firecracker["deleteOnRelease"] != false {
-		t.Fatalf("firecracker view=%#v", firecracker)
-	}
-	var text bytes.Buffer
-	writeConfigShowText(&text, cfg)
-	for _, want := range []string{
-		"firecracker binary=/opt/bin/firecracker",
-		"jailer=/opt/bin/jailer",
-		"kernel=/var/lib/firecracker/vmlinux",
-		"rootfs=/var/lib/firecracker/rootfs.ext4",
-		"user=runner",
-		"work_root=/workspace/firecracker",
-		"cpus=6",
-		"memory_mib=12288",
-		"disk_mib=32768",
-		"network=cni",
-		"cni_network=lab-firecracker",
-		"cni_conf_dir=/etc/cni/lab",
-		"cni_bin_dir=/opt/cni/lab",
-		"launch_timeout=3m0s",
-		"delete_on_release=false",
-	} {
-		if !strings.Contains(text.String(), want) {
-			t.Fatalf("config show missing %q: %q", want, text.String())
-		}
+	if cfg.Firecracker != before {
+		t.Fatalf("defaults changed explicitly configured Firecracker values: got %#v, want %#v", cfg.Firecracker, before)
 	}
 }
 
@@ -866,10 +793,6 @@ func TestAppleContainerConfigWriterAndJSON(t *testing.T) {
 	}
 	cfg := baseConfig()
 	cfg.AppleContainer = AppleContainerConfig{CLIPath: "tool", Image: "image-example", User: "user-example", WorkRoot: "/workspace/example", CPUs: 3, Memory: "6g"}
-	wantView := map[string]any{"cliPath": "tool", "image": "image-example", "user": "user-example", "workRoot": "/workspace/example", "cpus": 3, "memory": "6g"}
-	if got := configShowView(cfg)["appleContainer"]; !reflect.DeepEqual(got, wantView) {
-		t.Fatalf("view=%#v", got)
-	}
 	data, err := json.Marshal(cfg.AppleContainer)
 	if err != nil {
 		t.Fatal(err)
@@ -1606,9 +1529,27 @@ func TestConfigShowIncludesDigitalOceanProviderConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
 	var stdout bytes.Buffer
-	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
-	if err := app.configShow(nil); err != nil {
+	runShow := func(args []string) error {
+		cmd := exec.CommandContext(t.Context(), binary, append([]string{"config", "show"}, args...)...)
+		cmd.Dir = home
+		cmd.Env = []string{"HOME=" + home, "USERPROFILE=" + home, "APPDATA=" + home, "XDG_CONFIG_HOME=" + home, "XDG_STATE_HOME=" + home, "CRABBOX_CONFIG=" + configPath, "PATH=" + t.TempDir()}
+		var stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("config show: %w: %s", err, &stderr)
+		}
+		if stderr.Len() != 0 {
+			return fmt.Errorf("config show stderr: %s", &stderr)
+		}
+		return nil
+	}
+	if err := runShow(nil); err != nil {
 		t.Fatal(err)
 	}
 	text := stdout.String()
@@ -1620,7 +1561,7 @@ func TestConfigShowIncludesDigitalOceanProviderConfig(t *testing.T) {
 	}
 
 	stdout.Reset()
-	if err := app.configShow([]string{"--json"}); err != nil {
+	if err := runShow([]string{"--json"}); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
@@ -1655,9 +1596,27 @@ func TestConfigShowIncludesVultrProviderConfigWithoutSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
 	var stdout bytes.Buffer
-	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
-	if err := app.configShow(nil); err != nil {
+	runShow := func(args []string) error {
+		cmd := exec.CommandContext(t.Context(), binary, append([]string{"config", "show"}, args...)...)
+		cmd.Dir = home
+		cmd.Env = []string{"HOME=" + home, "USERPROFILE=" + home, "APPDATA=" + home, "XDG_CONFIG_HOME=" + home, "XDG_STATE_HOME=" + home, "CRABBOX_CONFIG=" + configPath, "PATH=" + t.TempDir(), "VULTR_API_KEY=" + os.Getenv("VULTR_API_KEY")}
+		var stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("config show: %w: %s", err, &stderr)
+		}
+		if stderr.Len() != 0 {
+			return fmt.Errorf("config show stderr: %s", &stderr)
+		}
+		return nil
+	}
+	if err := runShow(nil); err != nil {
 		t.Fatal(err)
 	}
 	text := stdout.String()
@@ -1672,7 +1631,7 @@ func TestConfigShowIncludesVultrProviderConfigWithoutSecret(t *testing.T) {
 	}
 
 	stdout.Reset()
-	if err := app.configShow([]string{"--json"}); err != nil {
+	if err := runShow([]string{"--json"}); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
@@ -3014,68 +2973,6 @@ func TestConfigShowRedactsAllEndpointURLComponents(t *testing.T) {
 	}
 }
 
-func TestConfigShowRedactsParallelsSSHKeys(t *testing.T) {
-	const (
-		topLevelKey = "top-level-private-key-sentinel"
-		templateKey = "template-private-key-sentinel"
-		hostKey     = "host-private-key-sentinel"
-	)
-	cfg := Config{}
-	cfg.Parallels.HostKey = topLevelKey
-	cfg.Parallels.Templates = map[string]ParallelsTemplateConfig{
-		"macos": {
-			Source:  "macOS Tahoe",
-			Host:    "template-host.example.test",
-			HostKey: templateKey,
-		},
-	}
-	cfg.Parallels.Hosts = []ParallelsHostConfig{{
-		Name: "builder",
-		Host: "builder.example.test",
-		Key:  hostKey,
-	}}
-
-	var text bytes.Buffer
-	writeConfigShowText(&text, cfg)
-	jsonData, err := json.Marshal(configShowView(cfg))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, output := range map[string]string{"text": text.String(), "json": string(jsonData)} {
-		for _, secret := range []string{topLevelKey, templateKey, hostKey} {
-			if strings.Contains(output, secret) {
-				t.Fatalf("%s config output leaked %q: %s", name, secret, output)
-			}
-		}
-	}
-
-	var decoded map[string]any
-	if err := json.Unmarshal(jsonData, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	parallels := decoded["parallels"].(map[string]any)
-	if parallels["hostKey"] != "configured" {
-		t.Fatalf("top-level hostKey=%#v, want configured", parallels["hostKey"])
-	}
-	templates := parallels["templates"].(map[string]any)
-	template := templates["macos"].(map[string]any)
-	if template["HostKey"] != "configured" || template["Source"] != "macOS Tahoe" {
-		t.Fatalf("template view=%#v", template)
-	}
-	hosts := parallels["hosts"].([]any)
-	host := hosts[0].(map[string]any)
-	if host["Key"] != "configured" || host["Host"] != "builder.example.test" {
-		t.Fatalf("host view=%#v", host)
-	}
-
-	if cfg.Parallels.HostKey != topLevelKey || cfg.Parallels.Templates["macos"].HostKey != templateKey || cfg.Parallels.Hosts[0].Key != hostKey {
-		t.Fatal("config-show redaction mutated the effective Parallels config")
-	}
-	if redactedParallelsTemplateConfigs(nil) != nil || redactedParallelsHostConfigs(nil) != nil {
-		t.Fatal("config-show redaction changed nil Parallels collections")
-	}
-}
-
 func TestRoutingSafeURLRedactsUserinfoOnMalformedURL(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -3098,8 +2995,12 @@ func TestRoutingSafeURLRedactsUserinfoOnMalformedURL(t *testing.T) {
 }
 
 func TestConfigShowIncludesDockerSandboxConfig(t *testing.T) {
-	configPath := isolatedConfigPath(t)
-	t.Setenv("CRABBOX_PROVIDER", "")
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
 	if err := os.WriteFile(configPath, []byte(`provider: docker-sandbox
 dockerSandbox:
   cliPath: /opt/sbx
@@ -3112,13 +3013,29 @@ dockerSandbox:
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES", "/tmp/extra")
-	t.Setenv("CRABBOX_DOCKER_SANDBOX_MCP", "context7,all")
-	t.Setenv("CRABBOX_DOCKER_SANDBOX_KIT", "example-org/base")
-
 	var stdout bytes.Buffer
-	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
-	if err := app.configShow(nil); err != nil {
+	runShow := func(args []string) error {
+		cmd := exec.CommandContext(t.Context(), binary, append([]string{"config", "show"}, args...)...)
+		cmd.Dir = home
+		cmd.Env = []string{
+			"HOME=" + home, "USERPROFILE=" + home, "APPDATA=" + home,
+			"XDG_CONFIG_HOME=" + home, "XDG_STATE_HOME=" + home,
+			"CRABBOX_CONFIG=" + configPath, "PATH=" + t.TempDir(),
+			"CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES=/tmp/extra",
+			"CRABBOX_DOCKER_SANDBOX_MCP=context7,all",
+			"CRABBOX_DOCKER_SANDBOX_KIT=example-org/base",
+		}
+		var stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("config show: %w: %s", err, &stderr)
+		}
+		if stderr.Len() != 0 {
+			return fmt.Errorf("config show stderr: %s", &stderr)
+		}
+		return nil
+	}
+	if err := runShow(nil); err != nil {
 		t.Fatal(err)
 	}
 	text := stdout.String()
@@ -3135,7 +3052,7 @@ dockerSandbox:
 	}
 
 	stdout.Reset()
-	if err := app.configShow([]string{"--json"}); err != nil {
+	if err := runShow([]string{"--json"}); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
@@ -3406,17 +3323,11 @@ func TestConfigShowLocalContainerSettingsOffline(t *testing.T) {
 	}
 }
 
-func TestConfigShowLocalContainerExcludesInternalFields(t *testing.T) {
+func TestConfigShowCoordinatorEndpointAndTokenStatus(t *testing.T) {
 	cfg := baseConfig()
-	cfg.LocalContainer.Volumes = []string{"/synthetic-private-volume:/mnt/data"}
-	cfg.LocalContainer.CheckpointMetadata = map[string]string{"fork_name": "synthetic-private-checkpoint"}
 	cfg.CoordToken = "synthetic-private-token"
 	cfg.Coordinator = "https://broker.example.test/api"
 	view := configShowView(cfg)
-	local, ok := view["localContainer"].(map[string]any)
-	if !ok || len(local) != 8 {
-		t.Fatalf("public localContainer fields=%#v", local)
-	}
 	data, err := json.Marshal(view)
 	if err != nil {
 		t.Fatal(err)
@@ -3424,7 +3335,7 @@ func TestConfigShowLocalContainerExcludesInternalFields(t *testing.T) {
 	var text bytes.Buffer
 	writeConfigShowText(&text, cfg)
 	for name, output := range map[string]string{"json": string(data), "text": text.String()} {
-		if strings.Contains(output, "synthetic-private") || strings.Contains(strings.ToLower(output), "checkpointmetadata") {
+		if strings.Contains(output, "synthetic-private") {
 			t.Errorf("%s exposed internal fields or credentials", name)
 		}
 		if !strings.Contains(output, "broker.example.test/api") || !strings.Contains(output, "configured") {

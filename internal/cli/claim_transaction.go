@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 )
 
@@ -80,8 +79,8 @@ func transactLeaseClaim(leaseID string, tx leaseClaimTransaction) (leaseClaim, e
 		}
 	}
 	if tx.directory != claimDirectoryExisting {
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			return leaseClaim{}, exit(2, "create claim directory: %v", err)
+		if err := makePrivateClaimDirectories(filepath.Dir(path)); err != nil {
+			return leaseClaim{}, Exit(2, "create claim directory: %v", err)
 		}
 	}
 	var updated leaseClaim

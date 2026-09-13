@@ -56,7 +56,7 @@ type controlPlane interface {
 
 type sdkControlPlane struct{ client *lambdamicrovms.Client }
 
-func newControlPlane(ctx context.Context, cfg Config) (controlPlane, error) {
+func newControlPlane(ctx context.Context, cfg core.Config) (controlPlane, error) {
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(cfg.AWSRegion))
 	if err != nil {
 		return nil, err

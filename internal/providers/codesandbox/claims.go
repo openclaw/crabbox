@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -23,7 +24,7 @@ const (
 	codeSandboxScopeTagPrefix   = "crabboxscope"
 )
 
-func (b *codeSandboxBackend) createSandbox(ctx context.Context, api codeSandboxAPI, repo Repo, reclaim bool, requestedSlug string) (string, string, string, error) {
+func (b *codeSandboxBackend) createSandbox(ctx context.Context, api codeSandboxAPI, repo core.Repo, reclaim bool, requestedSlug string) (string, string, string, error) {
 	scope, err := newCodeSandboxClaimScope()
 	if err != nil {
 		return "", "", "", err
@@ -42,98 +43,75 @@ func (b *codeSandboxBackend) createSandbox(ctx context.Context, api codeSandboxA
 		return "", "", "", err
 	}
 	if strings.TrimSpace(sb.ID) == "" {
-		return "", "", "", exit(5, "codesandbox create returned an empty sandbox id")
+		return "", "", "", core.Exit(5, "codesandbox create returned an empty sandbox id")
 	}
 	leaseID := leasePrefix + sb.ID
-	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
+	slug, err := core.AllocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return leaseID, sb.ID, "", b.cleanupCreateFailure(ctx, api, sb.ID, err)
 	}
-	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, scope, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, scope, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
 		return leaseID, sb.ID, slug, b.cleanupCreateFailure(ctx, api, sb.ID, err)
 	}
 	return leaseID, sb.ID, slug, nil
 }
 
-func resolveLeaseID(id string) (string, string, string, LeaseClaim, error) {
+func resolveLeaseID(id string) (string, string, string, core.LeaseClaim, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return "", "", "", LeaseClaim{}, exit(2, "provider=codesandbox requires a Crabbox-created sandbox slug or lease id")
+		return "", "", "", core.LeaseClaim{}, core.Exit(2, "provider=codesandbox requires a Crabbox-created sandbox slug or lease id")
 	}
 	exactLeaseID := id
 	if !strings.HasPrefix(exactLeaseID, leasePrefix) {
 		exactLeaseID = leasePrefix + exactLeaseID
 	}
-	if claim, err := readLeaseClaim(exactLeaseID); err != nil {
-		return "", "", "", LeaseClaim{}, err
+	if claim, err := core.ReadLeaseClaim(exactLeaseID); err != nil {
+		return "", "", "", core.LeaseClaim{}, err
 	} else if claim.LeaseID == exactLeaseID && claim.Provider == providerName {
 		return finishResolvedLease(claim)
 	}
 	claim, ok, err := resolveCodeSandboxLeaseClaim(id)
 	if err != nil {
-		return "", "", "", LeaseClaim{}, err
+		return "", "", "", core.LeaseClaim{}, err
 	}
 	if ok {
 		return finishResolvedLease(claim)
 	}
-	return "", "", "", LeaseClaim{}, exit(4, "codesandbox sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<sandbox-id>", id, leasePrefix)
+	return "", "", "", core.LeaseClaim{}, core.Exit(4, "codesandbox sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<sandbox-id>", id, leasePrefix)
 }
 
-func resolveCodeSandboxLeaseClaim(identifier string) (LeaseClaim, bool, error) {
-	claims, err := listCodeSandboxLeaseClaims()
-	if err != nil {
-		return LeaseClaim{}, false, err
-	}
-	for _, claim := range claims {
-		if claim.Provider == providerName && claim.LeaseID == identifier {
-			if err := validateCodeSandboxClaimScope(claim); err != nil {
-				return LeaseClaim{}, false, err
-			}
-			return claim, true, nil
-		}
-	}
-	slug := normalizeLeaseSlug(identifier)
-	if slug != "" {
-		for _, claim := range claims {
-			if claim.Provider == providerName && normalizeLeaseSlug(claim.Slug) == slug {
-				if err := validateCodeSandboxClaimScope(claim); err != nil {
-					return LeaseClaim{}, false, err
-				}
-				return claim, true, nil
-			}
-		}
-	}
-	return LeaseClaim{}, false, nil
+func resolveCodeSandboxLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
+	return shared.ResolveScopedLeaseClaim(identifier, providerName, listCodeSandboxLeaseClaims, validateCodeSandboxClaimScope)
 }
 
-func finishResolvedLease(claim LeaseClaim) (string, string, string, LeaseClaim, error) {
+func finishResolvedLease(claim core.LeaseClaim) (string, string, string, core.LeaseClaim, error) {
 	if err := validateCodeSandboxClaimScope(claim); err != nil {
-		return "", "", "", LeaseClaim{}, err
+		return "", "", "", core.LeaseClaim{}, err
 	}
 	sandboxID := strings.TrimPrefix(claim.LeaseID, leasePrefix)
 	if sandboxID == "" {
-		return "", "", "", LeaseClaim{}, exit(4, "codesandbox lease %q has no provider sandbox id", claim.LeaseID)
+		return "", "", "", core.LeaseClaim{}, core.Exit(4, "codesandbox lease %q has no provider sandbox id", claim.LeaseID)
 	}
 	slug := claim.Slug
 	if strings.TrimSpace(slug) == "" {
-		slug = newLeaseSlug(claim.LeaseID)
+		slug = core.NewLeaseSlug(claim.LeaseID)
 	}
 	return claim.LeaseID, sandboxID, slug, claim, nil
 }
 
-func validateCodeSandboxClaimScope(claim LeaseClaim) error {
+func validateCodeSandboxClaimScope(claim core.LeaseClaim) error {
 	if claim.Provider != providerName || !strings.HasPrefix(claim.LeaseID, leasePrefix) {
-		return exit(4, "codesandbox lease %q is not a CodeSandbox Crabbox claim", claim.LeaseID)
+		return core.Exit(4, "codesandbox lease %q is not a CodeSandbox Crabbox claim", claim.LeaseID)
 	}
 	if !strings.HasPrefix(strings.TrimSpace(claim.ProviderScope), codeSandboxClaimScopePrefix) {
-		return exit(4, "codesandbox lease %q has an invalid ownership scope", claim.LeaseID)
+		return core.Exit(4, "codesandbox lease %q has an invalid ownership scope", claim.LeaseID)
 	}
 	return nil
 }
 
-func validateCodeSandboxSandboxOwnership(claim LeaseClaim, sb SandboxSummary) error {
+func validateCodeSandboxSandboxOwnership(claim core.LeaseClaim, sb SandboxSummary) error {
 	if strings.TrimSpace(sb.ID) != "" && strings.TrimSpace(sb.ID) != strings.TrimPrefix(claim.LeaseID, leasePrefix) {
-		return exit(4, "codesandbox sandbox %q does not match local claim %q", sb.ID, claim.LeaseID)
+		return core.Exit(4, "codesandbox sandbox %q does not match local claim %q", sb.ID, claim.LeaseID)
 	}
 	remoteScope := ""
 	for _, tag := range sb.Tags {
@@ -143,10 +121,10 @@ func validateCodeSandboxSandboxOwnership(claim LeaseClaim, sb SandboxSummary) er
 		}
 	}
 	if remoteScope == "" {
-		return exit(4, "codesandbox sandbox %q is missing its Crabbox ownership tag", sb.ID)
+		return core.Exit(4, "codesandbox sandbox %q is missing its Crabbox ownership tag", sb.ID)
 	}
 	if remoteScope != claim.ProviderScope {
-		return exit(4, "codesandbox sandbox %q ownership tag does not match its local claim", sb.ID)
+		return core.Exit(4, "codesandbox sandbox %q ownership tag does not match its local claim", sb.ID)
 	}
 	return nil
 }
@@ -169,13 +147,13 @@ func codeSandboxScopeFromTag(tag string) (string, bool) {
 func newCodeSandboxClaimScope() (string, error) {
 	var token [16]byte
 	if _, err := rand.Read(token[:]); err != nil {
-		return "", exit(5, "generate codesandbox ownership token: %v", err)
+		return "", core.Exit(5, "generate codesandbox ownership token: %v", err)
 	}
 	return codeSandboxClaimScopePrefix + hex.EncodeToString(token[:]), nil
 }
 
-func newSandboxTitle(repo Repo) string {
-	base := normalizeLeaseSlug(repo.Name)
+func newSandboxTitle(repo core.Repo) string {
+	base := core.NormalizeLeaseSlug(repo.Name)
 	if base == "" {
 		base = "workspace"
 	}
@@ -186,27 +164,27 @@ func newSandboxTitle(repo Repo) string {
 	if base == "" {
 		base = "workspace"
 	}
-	return codeSandboxNamePrefix + base + "-" + randomSuffix()
+	return codeSandboxNamePrefix + base + "-" + shared.RandomSuffix()
 }
 
-func codeSandboxWorkdir(cfg Config) (string, error) {
+func codeSandboxWorkdir(cfg core.Config) (string, error) {
 	workdir := strings.TrimSpace(cfg.CodeSandbox.Workdir)
 	if workdir == "" {
 		workdir = defaultWorkdir
 	}
 	if strings.IndexFunc(workdir, func(r rune) bool { return r == 0 || (!utf8.ValidRune(r)) || (r < 0x20) }) >= 0 {
-		return "", exit(2, "codesandbox workdir contains control characters")
+		return "", core.Exit(2, "codesandbox workdir contains control characters")
 	}
 	clean := path.Clean(workdir)
 	if !strings.HasPrefix(clean, "/") {
-		return "", exit(2, "codesandbox workdir %q must be an absolute path", workdir)
+		return "", core.Exit(2, "codesandbox workdir %q must be an absolute path", workdir)
 	}
 	switch clean {
 	case "/", "/project":
-		return "", exit(2, "codesandbox workdir %q is too broad; choose a path under %s", clean, defaultWorkdir)
+		return "", core.Exit(2, "codesandbox workdir %q is too broad; choose a path under %s", clean, defaultWorkdir)
 	}
 	if clean != defaultWorkdir && !strings.HasPrefix(clean, defaultWorkdir+"/") {
-		return "", exit(2, "codesandbox workdir %q must be under %s", clean, defaultWorkdir)
+		return "", core.Exit(2, "codesandbox workdir %q must be under %s", clean, defaultWorkdir)
 	}
 	return clean, nil
 }
@@ -229,10 +207,6 @@ func isTerminalState(state string) bool {
 	}
 }
 
-func randomSuffix() string {
-	return shared.RandomSuffix()
-}
-
 func (b *codeSandboxBackend) cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), codeSandboxCleanupTimeout)
 }
@@ -244,21 +218,6 @@ func (b *codeSandboxBackend) cleanupCreateFailure(ctx context.Context, api codeS
 		return errors.Join(cause, fmt.Errorf("codesandbox cleanup failed for sandbox %s; delete it in the CodeSandbox console: %w", sandboxID, err))
 	}
 	return cause
-}
-
-func claimCleanupDue(claim LeaseClaim, now time.Time) (bool, string) {
-	if claim.IdleTimeoutSeconds <= 0 {
-		return false, "idle timeout disabled"
-	}
-	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
-	if err != nil {
-		return false, "invalid last-used time"
-	}
-	deadline := lastUsed.Add(time.Duration(claim.IdleTimeoutSeconds) * time.Second)
-	if now.Before(deadline) {
-		return false, "idle timeout not reached"
-	}
-	return true, "idle timeout"
 }
 
 func (b *codeSandboxBackend) execTimeoutSecs() int {

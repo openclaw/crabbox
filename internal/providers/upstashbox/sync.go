@@ -10,20 +10,20 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func (b *backend) prepareArchive(ctx context.Context, req RunRequest) (*core.PreparedArchive, error) {
+func (b *backend) prepareArchive(ctx context.Context, req core.RunRequest) (*core.PreparedArchive, error) {
 	return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 		Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
 		TempPattern: "crabbox-upstash-box-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 	})
 }
 
-func (b *backend) syncWorkspace(ctx context.Context, client api, boxID string, req RunRequest, workdir, folder string, prepared ...*core.PreparedArchive) ([]timingPhase, time.Duration, error) {
+func (b *backend) syncWorkspace(ctx context.Context, client api, boxID string, req core.RunRequest, workdir, folder string, prepared ...*core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
 	expectedFolder, err := workspaceFolder(workdir)
 	if err != nil {
 		return nil, 0, err
 	}
 	if folder != expectedFolder || strings.Contains(folder, "..") {
-		return nil, 0, exit(2, "upstash-box sync folder does not match workdir")
+		return nil, 0, core.Exit(2, "upstash-box sync folder does not match workdir")
 	}
 	var archive *core.PreparedArchive
 	if len(prepared) > 0 {
@@ -57,9 +57,9 @@ func (b *backend) syncWorkspace(ctx context.Context, client api, boxID string, r
 func (b *backend) prepareWorkspace(ctx context.Context, client api, boxID, folder string) error {
 	folder = strings.Trim(strings.TrimSpace(folder), "/")
 	if folder == "" || strings.Contains(folder, "..") {
-		return exit(2, "upstash-box workspace folder %q is invalid", folder)
+		return core.Exit(2, "upstash-box workspace folder %q is invalid", folder)
 	}
-	return b.execShell(ctx, client, boxID, "mkdir -p "+shellQuote(folder), io.Discard)
+	return b.execShell(ctx, client, boxID, "mkdir -p "+core.ShellQuote(folder), io.Discard)
 }
 
 func (b *backend) execShell(ctx context.Context, client api, boxID, command string, stdout io.Writer) error {

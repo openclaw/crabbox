@@ -315,7 +315,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("/usr/local/bin/crabbox-configure-desktop-theme");
     expect(got).toContain("/etc/systemd/system/crabbox-desktop.service");
     expect(got).toContain("/usr/local/bin/crabbox-desktop-session");
-    expect(got).toContain("/etc/systemd/system/crabbox-desktop-session.service");
+    expect(got).toContain("/etc/xdg/autostart/crabbox-desktop.desktop");
     expect(got).not.toContain("/etc/systemd/system/crabbox-x11vnc.service");
     expect(got).toContain("ExecStart=/usr/bin/Xtigervnc :99");
     expect(got).toContain("-AcceptSetDesktopSize");
@@ -323,11 +323,8 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("-SecurityTypes VncAuth");
     expect(got).toContain("ExecStart=/usr/bin/startxfce4");
     expect(got).toContain("systemctl is-active --quiet crabbox-desktop.service");
-    expect(got).toContain("systemctl is-active --quiet crabbox-desktop-session.service");
-    expect(got).toContain('requested_mode="${1:-${CRABBOX_DESKTOP_THEME:-}}"');
+    expect(got).toContain('requested_mode="${1:-}"');
     expect(got).toContain('"$config_dir/crabbox/desktop-theme"');
-    expect(got).toContain(`printf '%s\\n' "$mode" > "$config_dir/crabbox/desktop-theme"`);
-    expect(got).not.toContain(`printf '%s\n' "$mode" > "$config_dir/crabbox/desktop-theme"`);
     expect(got).toContain("gtk_theme=Adwaita-dark");
     expect(got).toContain('gtk_candidates="Arc-Dark Greybird-dark Adwaita-dark Greybird"');
     expect(got).toContain('gtk_candidates="Arc Greybird Adwaita"');
@@ -350,15 +347,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain('mkdir -p "$config_dir/xfce4/xfconf/xfce-perchannel-xml"');
     expect(got).toContain("xfconf-query -c xsettings -p /Gtk/ApplicationPreferDarkTheme");
     expect(got).toContain("xfconf-query -c xfwm4 -p /general/theme");
-    expect(got).toContain("xfconf-query -c xfwm4 -p /general/box_move");
-    expect(got).toContain("xfconf-query -c xfwm4 -p /general/box_resize");
-    expect(got).toContain("xfconf-query -c xfwm4 -p /general/move_opacity");
-    expect(got).toContain("xfconf-query -c xfwm4 -p /general/resize_opacity");
-    expect(got).toContain("xfconf-query -c xfwm4 -p /general/snap_to_border");
     expect(got).toContain("xfconf-query -c xfwm4 -p /general/snap_width");
-    expect(got).toContain("xfconf-query -c xfwm4 -p /general/tile_on_move");
-    expect(got).toContain("xfconf-query -c xfwm4 -p /general/use_compositing");
-    expect(got).toContain("xfconf-query -c xfwm4 -p /general/wrap_windows");
     expect(got).toContain("xfconf-query -c xfce4-panel -p /panels/dark-mode");
     expect(got).toContain("/panels/$panel_id/background-rgba");
     expect(got).toContain("desktop-background-$mode.svg");
@@ -368,15 +357,6 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("border-color: transparent");
     expect(got).toContain("menubar > menuitem");
     expect(got).toContain("menubar > menuitem label");
-    expect(got).toContain("crabbox-xfce4-panel-$user.log");
-    expect(got).toContain('pkill -TERM -u "$user_id" -x xfce4-panel');
-    expect(got).toContain("pkill -TERM -u \"$user_id\" -f '/xfce4/panel/wrapper-2.0'");
-    expect(got).toContain('pgrep -u "$user_id" -x xfce4-panel');
-    expect(got).toContain("sleep 1");
-    expect(got).toContain("xfce4-panel --disable-wm-check");
-    expect(got).toContain("xfwm4 --replace --compositor=off");
-    expect(got).toContain('xsetroot -solid "$root_color"');
-    expect(got).toContain("crabbox-xfdesktop-$user.log");
     expect(got).toContain(
       'gsettings set org.gnome.desktop.interface color-scheme "$gsettings_scheme"',
     );
@@ -395,12 +375,8 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain(
       "systemctl disable --now crabbox-wayvnc.service crabbox-x11vnc.service 2>/dev/null || true",
     );
-    expect(got).toContain(
-      "systemctl enable crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service",
-    );
-    expect(got).toContain(
-      "systemctl restart crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service",
-    );
+    expect(got).toContain("systemctl enable crabbox-xvfb.service crabbox-desktop.service");
+    expect(got).toContain("systemctl restart crabbox-xvfb.service crabbox-desktop.service");
   });
 
   it("adds Wayland desktop services when requested", () => {

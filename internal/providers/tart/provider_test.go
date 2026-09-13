@@ -14,6 +14,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
@@ -298,14 +299,14 @@ func TestInstanceScopeRoundTrip(t *testing.T) {
 }
 
 func TestShouldCleanupRespectsKeepLabel(t *testing.T) {
-	server := Server{Status: "stopped", Labels: map[string]string{"keep": "true"}}
+	server := core.Server{Status: "stopped", Labels: map[string]string{"keep": "true"}}
 	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, true, time.Now()); ok || reason != "keep=true" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
 	}
 }
 
 func TestShouldCleanupExpiredClaim(t *testing.T) {
-	server := Server{Status: "running", Labels: map[string]string{}}
+	server := core.Server{Status: "running", Labels: map[string]string{}}
 	claim := core.LeaseClaim{LeaseID: "cbx_123", LastUsedAt: time.Now().Add(-48 * time.Hour).Format(time.RFC3339), IdleTimeoutSeconds: int((30 * time.Minute).Seconds())}
 	if ok, reason := shouldCleanup(server, claim, true, time.Now()); !ok || reason != "claim expired" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
@@ -313,7 +314,7 @@ func TestShouldCleanupExpiredClaim(t *testing.T) {
 }
 
 func TestShouldCleanupSkipsMissingClaim(t *testing.T) {
-	server := Server{Status: "running", Labels: map[string]string{}}
+	server := core.Server{Status: "running", Labels: map[string]string{}}
 	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, false, time.Now()); ok || reason != "missing claim" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
 	}
@@ -980,7 +981,7 @@ func TestConfigureVMSkipsZeroCPUAndMemory(t *testing.T) {
 }
 
 func TestShouldCleanupStoppedInstance(t *testing.T) {
-	server := Server{Status: "stopped", Labels: map[string]string{}}
+	server := core.Server{Status: "stopped", Labels: map[string]string{}}
 	ok, reason := shouldCleanup(server, core.LeaseClaim{}, true, time.Now())
 	if !ok || reason != "instance state=stopped" {
 		t.Fatalf("cleanup=%v reason=%q, want true/instance state=stopped", ok, reason)
@@ -988,7 +989,7 @@ func TestShouldCleanupStoppedInstance(t *testing.T) {
 }
 
 func TestShouldCleanupZeroIdleTimeout(t *testing.T) {
-	server := Server{Status: "running", Labels: map[string]string{}}
+	server := core.Server{Status: "running", Labels: map[string]string{}}
 	claim := core.LeaseClaim{
 		LeaseID:            "cbx_123",
 		LastUsedAt:         time.Now().Add(-48 * time.Hour).Format(time.RFC3339),
@@ -1031,7 +1032,7 @@ func TestConfigureVMSkipsExplicitZeroDisk(t *testing.T) {
 }
 
 func TestShouldCleanupGracePeriodNotExpired(t *testing.T) {
-	server := Server{Status: "running", Labels: map[string]string{}}
+	server := core.Server{Status: "running", Labels: map[string]string{}}
 	now := time.Now()
 	claim := core.LeaseClaim{
 		LeaseID:            "cbx_123",
@@ -1576,7 +1577,7 @@ func TestCleanupRemovesOrphanedClaimsWithoutDeletingStoredKey(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(os.Getenv("TART_HOME"), "vms", "crabbox-gone-9999")); err != nil {
 		t.Fatal(err)
 	}
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := core.TestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatalf("testbox key path: %v", err)
 	}
@@ -2135,42 +2136,14 @@ func TestInstanceNameFromClaim(t *testing.T) {
 }
 
 func TestFirstNonBlank(t *testing.T) {
-	if got := firstNonBlank("", "  ", "hello", "world"); got != "hello" {
+	if got := shared.FirstNonBlank("", "  ", "hello", "world"); got != "hello" {
 		t.Fatalf("firstNonBlank = %q, want hello", got)
 	}
-	if got := firstNonBlank("", "", ""); got != "" {
+	if got := shared.FirstNonBlank("", "", ""); got != "" {
 		t.Fatalf("firstNonBlank all blank = %q", got)
 	}
-	if got := firstNonBlank("first"); got != "first" {
+	if got := shared.FirstNonBlank("first"); got != "first" {
 		t.Fatalf("firstNonBlank single = %q", got)
-	}
-}
-
-func TestCommandError(t *testing.T) {
-	err := commandError("tart stop", core.LocalCommandResult{ExitCode: 1, Stderr: "VM not running"}, fmt.Errorf("exit status 1"))
-	if !strings.Contains(err.Error(), "VM not running") {
-		t.Fatalf("commandError should include stderr: %v", err)
-	}
-	if !strings.Contains(err.Error(), "tart stop") {
-		t.Fatalf("commandError should include action: %v", err)
-	}
-}
-
-func TestCommandErrorFallsBackToStdout(t *testing.T) {
-	err := commandError("tart stop", core.LocalCommandResult{ExitCode: 1, Stdout: "some output"}, fmt.Errorf("exit status 1"))
-	if !strings.Contains(err.Error(), "some output") {
-		t.Fatalf("commandError should fall back to stdout: %v", err)
-	}
-}
-
-func TestCommandErrorMinimalExitCode(t *testing.T) {
-	err := commandError("tart stop", core.LocalCommandResult{ExitCode: 0}, fmt.Errorf("exit status 1"))
-	var exitErr core.ExitError
-	if !core.AsExitError(err, &exitErr) {
-		t.Fatalf("expected ExitError, got %T", err)
-	}
-	if exitErr.Code != 1 {
-		t.Fatalf("exit code = %d, want 1 (minimum)", exitErr.Code)
 	}
 }
 
@@ -2453,7 +2426,7 @@ func TestReleaseLeasePrunesMissingResolvedInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setup claim: %v", err)
 	}
-	keyPath, err := testboxKeyPath("cbx_missingrel")
+	keyPath, err := core.TestboxKeyPath("cbx_missingrel")
 	if err != nil {
 		t.Fatalf("testbox key path: %v", err)
 	}
@@ -2489,7 +2462,7 @@ func TestReleaseLeasePrunesMissingResolvedInstance(t *testing.T) {
 			t.Fatal("ReleaseLease should not delete an already-missing resolved VM")
 		}
 	}
-	if _, ok, err := resolveLeaseClaimForProvider("cbx_missingrel", providerName); err != nil {
+	if _, ok, err := core.ResolveLeaseClaimForProvider("cbx_missingrel", providerName); err != nil {
 		t.Fatalf("resolve claim: %v", err)
 	} else if ok {
 		t.Fatal("ReleaseLease should prune the stale claim")
@@ -2507,7 +2480,7 @@ func TestReleaseLeasePrunesAlreadyResolvedMissingInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setup claim: %v", err)
 	}
-	keyPath, err := testboxKeyPath("cbx_resolvedmissing")
+	keyPath, err := core.TestboxKeyPath("cbx_resolvedmissing")
 	if err != nil {
 		t.Fatalf("testbox key path: %v", err)
 	}
@@ -2542,7 +2515,7 @@ func TestReleaseLeasePrunesAlreadyResolvedMissingInstance(t *testing.T) {
 	if len(runner.calls) != 0 {
 		t.Fatalf("ReleaseLease should not call tart for already-resolved missing instance, calls=%v", runner.calls)
 	}
-	if _, ok, err := resolveLeaseClaimForProvider("cbx_resolvedmissing", providerName); err != nil {
+	if _, ok, err := core.ResolveLeaseClaimForProvider("cbx_resolvedmissing", providerName); err != nil {
 		t.Fatalf("resolve claim: %v", err)
 	} else if ok {
 		t.Fatal("ReleaseLease should prune the stale claim")
@@ -3330,60 +3303,6 @@ func TestInjectSSHKeyExecError(t *testing.T) {
 	}
 }
 
-func TestCommandErrorWithStderr(t *testing.T) {
-	result := core.LocalCommandResult{ExitCode: 5, Stderr: "some detail\n"}
-	err := commandError("test-action", result, fmt.Errorf("wrapped"))
-	if err == nil {
-		t.Fatal("commandError should return non-nil")
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "test-action failed") {
-		t.Fatalf("should mention action: %s", msg)
-	}
-	if !strings.Contains(msg, "some detail") {
-		t.Fatalf("should include stderr detail: %s", msg)
-	}
-}
-
-func TestCommandErrorWithStdoutFallback(t *testing.T) {
-	result := core.LocalCommandResult{ExitCode: 0, Stderr: "", Stdout: "stdout detail\n"}
-	err := commandError("test-action", result, fmt.Errorf("wrapped"))
-	if err == nil {
-		t.Fatal("commandError should return non-nil")
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "stdout detail") {
-		t.Fatalf("should fallback to stdout: %s", msg)
-	}
-}
-
-func TestCommandErrorNoDetail(t *testing.T) {
-	result := core.LocalCommandResult{ExitCode: 0, Stderr: "", Stdout: ""}
-	err := commandError("test-action", result, fmt.Errorf("original"))
-	if err == nil {
-		t.Fatal("commandError should return non-nil")
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "test-action failed") {
-		t.Fatalf("should mention action: %s", msg)
-	}
-	if !strings.Contains(msg, "original") {
-		t.Fatalf("should include original error: %s", msg)
-	}
-}
-
-func TestCommandErrorZeroExitCodeBecomesOne(t *testing.T) {
-	result := core.LocalCommandResult{ExitCode: 0}
-	err := commandError("action", result, fmt.Errorf("err"))
-	var exitErr core.ExitError
-	if !core.AsExitError(err, &exitErr) {
-		t.Fatalf("expected ExitError, got %T", err)
-	}
-	if exitErr.Code == 0 {
-		t.Fatal("exit code 0 should become non-zero")
-	}
-}
-
 func TestFirstLineEmpty(t *testing.T) {
 	if got := firstLine(""); got != "unknown" {
 		t.Fatalf("firstLine(\"\") = %q, want \"unknown\"", got)
@@ -3406,19 +3325,19 @@ func TestFirstLineMultiLine(t *testing.T) {
 }
 
 func TestFirstNonBlankAllEmpty(t *testing.T) {
-	if got := firstNonBlank("", "  ", "\t"); got != "" {
+	if got := shared.FirstNonBlank("", "  ", "\t"); got != "" {
 		t.Fatalf("firstNonBlank all empty = %q, want \"\"", got)
 	}
 }
 
 func TestFirstNonBlankFindsFirst(t *testing.T) {
-	if got := firstNonBlank("", "hello", "world"); got != "hello" {
+	if got := shared.FirstNonBlank("", "hello", "world"); got != "hello" {
 		t.Fatalf("firstNonBlank = %q, want \"hello\"", got)
 	}
 }
 
 func TestFirstNonBlankSingleValue(t *testing.T) {
-	if got := firstNonBlank("only"); got != "only" {
+	if got := shared.FirstNonBlank("only"); got != "only" {
 		t.Fatalf("firstNonBlank(\"only\") = %q", got)
 	}
 }
@@ -3820,7 +3739,7 @@ func TestApplyFlagsConfigMemoryZeroWithExplicit(t *testing.T) {
 }
 
 func TestShouldCleanupUnparseableLastUsedAt(t *testing.T) {
-	server := Server{
+	server := core.Server{
 		Status: "running",
 		Labels: map[string]string{"state": "ready"},
 	}
@@ -3839,7 +3758,7 @@ func TestShouldCleanupUnparseableLastUsedAt(t *testing.T) {
 }
 
 func TestShouldCleanupZeroLastUsedAt(t *testing.T) {
-	server := Server{
+	server := core.Server{
 		Status: "running",
 		Labels: map[string]string{"state": "ready"},
 	}
@@ -3868,9 +3787,9 @@ func TestReleaseLeaseMessageFormat(t *testing.T) {
 	runner := &recordingRunner{}
 	cfg := core.BaseConfig()
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		LeaseID: "test-lease-id",
-		Server: Server{
+		Server: core.Server{
 			CloudID: "crabbox-test-vm",
 			Labels:  map[string]string{},
 		},
@@ -3888,9 +3807,9 @@ func TestReleaseLeaseMessageNoCloudID(t *testing.T) {
 	runner := &recordingRunner{}
 	cfg := core.BaseConfig()
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		LeaseID: "test-lease-id",
-		Server: Server{
+		Server: core.Server{
 			Labels: map[string]string{"instance": "from-labels"},
 		},
 	}
@@ -3904,9 +3823,9 @@ func TestReleaseLeaseMessageEmptyBoth(t *testing.T) {
 	runner := &recordingRunner{}
 	cfg := core.BaseConfig()
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		LeaseID: "test-lease-id",
-		Server: Server{
+		Server: core.Server{
 			Labels: map[string]string{},
 		},
 	}
@@ -4156,7 +4075,7 @@ func TestServerFromInstanceSourcePreferred(t *testing.T) {
 }
 
 func TestShouldCleanupNegativeIdleTimeout(t *testing.T) {
-	server := Server{
+	server := core.Server{
 		Status: "running",
 		Labels: map[string]string{"state": "ready"},
 	}
@@ -4172,7 +4091,7 @@ func TestShouldCleanupNegativeIdleTimeout(t *testing.T) {
 }
 
 func TestShouldCleanupNotRunningNotReady(t *testing.T) {
-	server := Server{
+	server := core.Server{
 		Status: "suspended",
 		Labels: map[string]string{"state": "suspended"},
 	}
@@ -4187,7 +4106,7 @@ func TestShouldCleanupNotRunningNotReady(t *testing.T) {
 }
 
 func TestShouldCleanupEmptyStatus(t *testing.T) {
-	server := Server{
+	server := core.Server{
 		Status: "",
 		Labels: map[string]string{},
 	}
@@ -4199,10 +4118,10 @@ func TestShouldCleanupEmptyStatus(t *testing.T) {
 }
 
 func TestBlankHelper(t *testing.T) {
-	if got := blank("value", "fallback"); got != "value" {
+	if got := core.Blank("value", "fallback"); got != "value" {
 		t.Fatalf("blank(\"value\", \"fallback\") = %q", got)
 	}
-	if got := blank("", "fallback"); got != "fallback" {
+	if got := core.Blank("", "fallback"); got != "fallback" {
 		t.Fatalf("blank(\"\", \"fallback\") = %q", got)
 	}
 }
@@ -4271,13 +4190,13 @@ func TestInstanceNameFromClaimReturnsEmptyForMissing(t *testing.T) {
 }
 
 func TestNormalizeLeaseSlugEmpty(t *testing.T) {
-	if got := normalizeLeaseSlug(""); got != "" {
+	if got := core.NormalizeLeaseSlug(""); got != "" {
 		t.Fatalf("normalizeLeaseSlug(\"\") = %q", got)
 	}
 }
 
 func TestNormalizeLeaseSlugWithPrefix(t *testing.T) {
-	result := normalizeLeaseSlug("my-slug")
+	result := core.NormalizeLeaseSlug("my-slug")
 	if result == "" {
 		t.Fatal("normalizeLeaseSlug should return non-empty for valid slug")
 	}
@@ -4304,7 +4223,7 @@ func TestInheritedWorkRootCallerContract(t *testing.T) {
 		{"/provider/root", "/srv/custom", "/provider/root"},
 	} {
 		for _, explicit := range []bool{false, true} {
-			cfg := Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
+			cfg := core.Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
 			if explicit {
 				core.MarkWorkRootExplicit(&cfg)
 				cfg.TargetOS = "existing-target"

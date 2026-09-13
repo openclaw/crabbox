@@ -48,7 +48,7 @@ func TestDeleteHetznerCheckpointImageRequiresUniqueLocalRecord(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			store := checkpointStore{root: t.TempDir()}
 			for _, record := range tc.records {
-				if _, err := store.Create(record); err != nil {
+				if _, _, err := store.Reserve(record); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -80,7 +80,7 @@ func TestDeleteHetznerCheckpointImageChecksLocationAndDeletesRemoteFirst(t *test
 	}
 	store := checkpointStore{root: t.TempDir()}
 	record := hetznerImageDeleteRecord("chk_owned", "99", "fsn1")
-	if _, err := store.Create(record); err != nil {
+	if _, _, err := store.Reserve(record); err != nil {
 		t.Fatal(err)
 	}
 	lifecycle := &fakeImageDeleteLifecycle{}
@@ -137,7 +137,7 @@ func TestImageDeleteHetznerRejectsProjectBeforeProviderAccess(t *testing.T) {
 func TestDeleteHetznerCheckpointLocalOnlyKeepsProviderSnapshot(t *testing.T) {
 	store := checkpointStore{root: t.TempDir()}
 	record := hetznerImageDeleteRecord("chk_localonly", "99", "fsn1")
-	if _, err := store.Create(record); err != nil {
+	if _, _, err := store.Reserve(record); err != nil {
 		t.Fatal(err)
 	}
 	if err := deleteCheckpoint(context.Background(), store, record.ID, true); err != nil {

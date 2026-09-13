@@ -23,17 +23,17 @@ import (
 )
 
 type openSandboxBackend struct {
-	spec                   ProviderSpec
-	cfg                    Config
-	rt                     Runtime
-	newClient              func(Config, Runtime) (openSandboxClient, error)
+	spec                   core.ProviderSpec
+	cfg                    core.Config
+	rt                     core.Runtime
+	newClient              func(core.Config, core.Runtime) (openSandboxClient, error)
 	cleanupTimeoutOverride time.Duration
 	reconcilePollOverride  time.Duration
 	statusPollOverride     time.Duration
 	statusProbeOverride    time.Duration
 }
 
-func (b *openSandboxBackend) Spec() ProviderSpec { return b.spec }
+func (b *openSandboxBackend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *openSandboxBackend) client() (openSandboxClient, error) {
 	if b.newClient != nil {
@@ -42,12 +42,12 @@ func (b *openSandboxBackend) client() (openSandboxClient, error) {
 	return newOpenSandboxClient(b.cfg, b.rt)
 }
 
-func (b *openSandboxBackend) Warmup(ctx context.Context, req WarmupRequest) error {
+func (b *openSandboxBackend) Warmup(ctx context.Context, req core.WarmupRequest) error {
 	if req.ActionsRunner {
-		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
+		return core.Exit(2, "--actions-runner is not supported for provider=%s", providerName)
 	}
 	if req.Options.Tailscale.Enabled {
-		return exit(2, "provider=opensandbox is delegated-run only and does not support Tailscale options")
+		return core.Exit(2, "provider=opensandbox is delegated-run only and does not support Tailscale options")
 	}
 	if err := validateOpenSandboxRunConfig(b.cfg); err != nil {
 		return err
@@ -77,8 +77,7 @@ func (b *openSandboxBackend) Warmup(ctx context.Context, req WarmupRequest) erro
 	}
 	required := openSandboxRunBudgetForConfig(b.cfg, false, false)
 	if remaining := deadline.Sub(core.ClockNow(b.rt.Clock)); remaining < required {
-		return b.cleanupClaimedSandboxFailure(ctx, api, leaseID, sandboxID,
-			exit(5, "opensandbox sandbox %s has %s remaining after warmup, less than the %s default run budget", sandboxID, remaining.Round(time.Second), required))
+		return b.cleanupClaimedSandboxFailure(ctx, api, leaseID, sandboxID, core.Exit(5, "opensandbox sandbox %s has %s remaining after warmup, less than the %s default run budget", sandboxID, remaining.Round(time.Second), required))
 	}
 	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s sandbox=%s\n", leaseID, slug, providerName, sandboxID)
 	if !req.Keep {
@@ -93,12 +92,12 @@ func (b *openSandboxBackend) Warmup(ctx context.Context, req WarmupRequest) erro
 	})
 }
 
-func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *openSandboxBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
 	workdir, workdirErr := openSandboxWorkdir(b.cfg)
 	var api openSandboxClient
 	var leaseID, sandboxID, slug string
 	var sb sandboxInfo
-	var claim LeaseClaim
+	var claim core.LeaseClaim
 	var deadline time.Time
 	cleanupTimeout := openSandboxCleanupTimeout
 	if b.cleanupTimeoutOverride > 0 {
@@ -117,10 +116,10 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 			return err
 		}
 		if !deadline.After(core.ClockNow(b.rt.Clock)) {
-			return exit(5, "opensandbox sandbox %s exceeded its absolute Crabbox TTL", sandboxID)
+			return core.Exit(5, "opensandbox sandbox %s exceeded its absolute Crabbox TTL", sandboxID)
 		}
 		if remaining, required := deadline.Sub(core.ClockNow(b.rt.Clock)), b.runLifetimeBudget(req); remaining < required {
-			return exit(5, "opensandbox sandbox %s has %s remaining before its absolute TTL, less than the %s sync/command budget; create a new sandbox", sandboxID, remaining.Round(time.Second), required)
+			return core.Exit(5, "opensandbox sandbox %s has %s remaining before its absolute TTL, less than the %s sync/command budget; create a new sandbox", sandboxID, remaining.Round(time.Second), required)
 		}
 		return nil
 	}
@@ -129,7 +128,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL, CleanupTimeout: cleanupTimeout,
 		Preflight: func(context.Context) error {
 			if req.Options.Tailscale.Enabled {
-				return exit(2, "provider=opensandbox is delegated-run only and does not support Tailscale options")
+				return core.Exit(2, "provider=opensandbox is delegated-run only and does not support Tailscale options")
 			}
 			if req.ID == "" {
 				if err := validateOpenSandboxRequestConfig(b.cfg, req); err != nil {
@@ -177,7 +176,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 			if err != nil {
 				return resolved, err
 			}
-			claim, err = readLeaseClaim(leaseID)
+			claim, err = core.ReadLeaseClaim(leaseID)
 			if err != nil {
 				return resolved, err
 			}
@@ -186,7 +185,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 			}
 			slug = claim.Slug
 			if strings.TrimSpace(slug) == "" {
-				slug = newLeaseSlug(leaseID)
+				slug = core.NewLeaseSlug(leaseID)
 			}
 			resolved.LeaseID, resolved.Slug = leaseID, slug
 			resolved.CleanupCommand = openSandboxCleanupCommand(leaseID)
@@ -200,10 +199,10 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 				return err
 			}
 			if !deadline.After(core.ClockNow(b.rt.Clock)) {
-				return exit(5, "opensandbox sandbox %s exceeded its absolute Crabbox TTL while resuming", sandboxID)
+				return core.Exit(5, "opensandbox sandbox %s exceeded its absolute Crabbox TTL while resuming", sandboxID)
 			}
 			if remaining, required := deadline.Sub(core.ClockNow(b.rt.Clock)), b.runLifetimeBudget(req); remaining < required {
-				return exit(5, "opensandbox sandbox %s has %s remaining after resume before its absolute TTL, less than the %s sync/command budget; create a new sandbox", sandboxID, remaining.Round(time.Second), required)
+				return core.Exit(5, "opensandbox sandbox %s has %s remaining after resume before its absolute TTL, less than the %s sync/command budget; create a new sandbox", sandboxID, remaining.Round(time.Second), required)
 			}
 			if err := ctx.Err(); err != nil {
 				return err
@@ -232,17 +231,18 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 				return shared.DelegatedSandboxCommand{}, err
 			}
 			if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
-				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+				core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
 			if remaining := deadline.Sub(core.ClockNow(b.rt.Clock)); remaining < b.commandLifetime() {
-				return shared.DelegatedSandboxCommand{}, exit(5, "opensandbox sandbox %s has %s remaining before its absolute TTL, less than the %s command budget; create a new sandbox", sandboxID, remaining.Round(time.Second), b.commandLifetime())
+				return shared.DelegatedSandboxCommand{}, core.Exit(5, "opensandbox sandbox %s has %s remaining before its absolute TTL, less than the %s command budget; create a new sandbox", sandboxID, remaining.Round(time.Second), b.commandLifetime())
 			}
 			text := intent.ShellCommand("bash", "-lc")
 			return shared.DelegatedSandboxCommand{
-				Text: text,
-				Run: func(ctx context.Context) (int, error) {
+				Text: text, OutputScope: core.RunOutputProvider,
+				Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
 					return api.RunCommand(ctx, sandboxID, runCommandRequest{
 						Command: text, Workdir: workdir, Env: req.Env, TimeoutSecs: b.execTimeoutSecs(),
+						Stdout: stdout, Stderr: stderr,
 					})
 				},
 			}, nil
@@ -254,13 +254,13 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 			if err := api.DeleteSandbox(ctx, sandboxID); err != nil && !isOpenSandboxNotFound(err) {
 				return fmt.Errorf("opensandbox delete failed for %s: %w", sandboxID, err)
 			}
-			removeLeaseClaim(leaseID)
+			core.RemoveLeaseClaim(leaseID)
 			return nil
 		},
 	})
 }
 
-func (b *openSandboxBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *openSandboxBackend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	_ = req
 	api, err := b.client()
 	if err != nil {
@@ -270,7 +270,7 @@ func (b *openSandboxBackend) List(ctx context.Context, req ListRequest) ([]Lease
 	if err != nil {
 		return nil, err
 	}
-	servers := make([]Server, 0, len(claims))
+	servers := make([]core.Server, 0, len(claims))
 	for _, claim := range claims {
 		if claim.Provider != providerName || !strings.HasPrefix(claim.LeaseID, leasePrefix) {
 			continue
@@ -294,9 +294,9 @@ func (b *openSandboxBackend) List(ctx context.Context, req ListRequest) ([]Lease
 			if err := validateOpenSandboxOwnership(claim, sb); err != nil {
 				return nil, err
 			}
-			state = blank(strings.ToLower(sb.State), statusViewReady)
+			state = core.Blank(strings.ToLower(sb.State), statusViewReady)
 		}
-		servers = append(servers, Server{
+		servers = append(servers, core.Server{
 			Provider: providerName,
 			CloudID:  sandboxID,
 			Name:     sandboxID,
@@ -314,80 +314,69 @@ func (b *openSandboxBackend) List(ctx context.Context, req ListRequest) ([]Lease
 	return servers, nil
 }
 
-func (b *openSandboxBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+func (b *openSandboxBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	api, err := b.client()
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
 	if err := api.Probe(ctx); err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
-	servers, err := b.List(ctx, ListRequest{})
+	servers, err := b.List(ctx, core.ListRequest{})
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
-	return inventoryDoctorResult(providerName, len(servers)), nil
+	return core.InventoryDoctorResult(providerName, len(servers)), nil
 }
 
-func (b *openSandboxBackend) Status(ctx context.Context, req StatusRequest) (StatusView, error) {
+func (b *openSandboxBackend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
 	api, err := b.client()
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	leaseID, sandboxID, slug, err := resolveLeaseID(req.ID, "", false, 0, api.BaseURL())
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	claim, ok, err := resolveOpenSandboxLeaseClaim(leaseID, api.BaseURL())
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	if !ok {
-		return StatusView{}, exit(4, "opensandbox sandbox %q is not claimed by Crabbox", req.ID)
+		return core.StatusView{}, core.Exit(4, "opensandbox sandbox %q is not claimed by Crabbox", req.ID)
 	}
-	waitTimeout := req.WaitTimeout
-	if waitTimeout <= 0 {
-		waitTimeout = 5 * time.Minute
-	}
-	deadline := core.ClockNow(b.rt.Clock).Add(waitTimeout)
-	pollCtx := ctx
-	cancel := func() {}
-	if req.Wait {
-		pollCtx, cancel = context.WithTimeout(ctx, waitTimeout)
-	}
-	defer cancel()
+	wait := shared.NewStatusWait(ctx, req, b.rt.Clock, func(id string) error {
+		return core.Exit(5, "timed out waiting for opensandbox sandbox %s to become ready", id)
+	})
+	defer wait.Close()
 	for {
-		sb, getErr := api.GetSandbox(pollCtx, sandboxID)
+		sb, getErr := api.GetSandbox(wait.Context(), sandboxID)
 		if getErr != nil {
-			if req.Wait && errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return StatusView{}, exit(5, "timed out waiting for opensandbox sandbox %s to become ready", sandboxID)
+			if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
+				return core.StatusView{}, ctxErr
 			}
-			if ctx.Err() != nil {
-				return StatusView{}, ctx.Err()
-			}
-			return StatusView{}, getErr
+			return core.StatusView{}, getErr
 		}
 		if err := validateOpenSandboxOwnership(claim, sb); err != nil {
-			return StatusView{}, err
+			return core.StatusView{}, err
 		}
 		state := strings.ToLower(strings.TrimSpace(sb.State))
 		ready := false
 		if isReadyState(state) {
-			probeCtx, probeCancel := context.WithTimeout(pollCtx, b.statusProbeTimeout())
+			probeCtx, probeCancel := context.WithTimeout(wait.Context(), b.statusProbeTimeout())
 			pingErr := api.PingSandbox(probeCtx, sandboxID)
 			probeCancel()
 			ready = pingErr == nil
-			if pingErr != nil && pollCtx.Err() != nil {
-				if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-					return StatusView{}, exit(5, "timed out waiting for opensandbox sandbox %s to become ready", sandboxID)
+			if pingErr != nil {
+				if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
+					return core.StatusView{}, ctxErr
 				}
-				return StatusView{}, pollCtx.Err()
 			}
 			if pingErr != nil && !isOpenSandboxReadinessPending(pingErr) {
-				return StatusView{}, fmt.Errorf("opensandbox status execd health: %w", pingErr)
+				return core.StatusView{}, fmt.Errorf("opensandbox status execd health: %w", pingErr)
 			}
 		}
-		view := StatusView{
+		view := core.StatusView{
 			ID:       leaseID,
 			Slug:     slug,
 			Provider: providerName,
@@ -408,23 +397,15 @@ func (b *openSandboxBackend) Status(ctx context.Context, req StatusRequest) (Sta
 			return view, nil
 		}
 		if isTerminalState(state) {
-			return StatusView{}, exit(5, "opensandbox sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
+			return core.StatusView{}, core.Exit(5, "opensandbox sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
-		if core.ClockNow(b.rt.Clock).After(deadline) {
-			return StatusView{}, exit(5, "timed out waiting for opensandbox sandbox %s to become ready", sandboxID)
-		}
-		select {
-		case <-pollCtx.Done():
-			if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return StatusView{}, exit(5, "timed out waiting for opensandbox sandbox %s to become ready", sandboxID)
-			}
-			return StatusView{}, pollCtx.Err()
-		case <-time.After(b.statusPollInterval()):
+		if err := wait.Next(sandboxID, b.statusPollInterval()); err != nil {
+			return core.StatusView{}, err
 		}
 	}
 }
 
-func (b *openSandboxBackend) Stop(ctx context.Context, req StopRequest) error {
+func (b *openSandboxBackend) Stop(ctx context.Context, req core.StopRequest) error {
 	api, err := b.client()
 	if err != nil {
 		return err
@@ -447,7 +428,7 @@ func (b *openSandboxBackend) Stop(ctx context.Context, req StopRequest) error {
 			return err
 		}
 		fmt.Fprintf(b.rt.Stderr, "warning: forgetting missing opensandbox sandbox=%s after explicit request\n", sandboxID)
-		removeLeaseClaim(leaseID)
+		core.RemoveLeaseClaim(leaseID)
 		return nil
 	}
 	if err := api.DeleteSandbox(ctx, sandboxID); err != nil {
@@ -456,12 +437,12 @@ func (b *openSandboxBackend) Stop(ctx context.Context, req StopRequest) error {
 		}
 		fmt.Fprintf(b.rt.Stderr, "warning: forgetting missing opensandbox sandbox=%s after explicit request\n", sandboxID)
 	}
-	removeLeaseClaim(leaseID)
+	core.RemoveLeaseClaim(leaseID)
 	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s\n", leaseID, sandboxID)
 	return nil
 }
 
-func (b *openSandboxBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
+func (b *openSandboxBackend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	api, err := b.client()
 	if err != nil {
 		return err
@@ -471,95 +452,31 @@ func (b *openSandboxBackend) Cleanup(ctx context.Context, req CleanupRequest) er
 		return err
 	}
 	now := core.ClockNow(b.rt.Clock).UTC()
-	checked := 0
-	removed := 0
-	claimsRemoved := 0
-	for _, listedClaim := range claims {
-		if listedClaim.Provider != providerName || !openSandboxClaimMatchesEndpoint(listedClaim, api.BaseURL()) {
-			continue
-		}
-		var removedOne, claimRemovedOne, checkedOne bool
-		err := func() error {
-			unlock, err := lockOpenSandboxLeaseOperation(ctx, listedClaim.LeaseID)
-			if err != nil {
-				return err
+	return shared.CleanupSandboxClaims(ctx, req, claims, shared.SandboxClaimCleanup[sandboxInfo]{
+		Provider:          providerName,
+		Runtime:           b.rt,
+		Now:               now,
+		MatchesScope:      func(claim core.LeaseClaim) bool { return openSandboxClaimMatchesEndpoint(claim, api.BaseURL()) },
+		Lock:              lockOpenSandboxLeaseOperation,
+		SandboxID:         func(claim core.LeaseClaim) string { return strings.TrimPrefix(claim.LeaseID, leasePrefix) },
+		Get:               api.GetSandbox,
+		Delete:            api.DeleteSandbox,
+		IsNotFound:        isOpenSandboxNotFound,
+		ForgetMissing:     b.cfg.OpenSandbox.ForgetMissing,
+		ForgetMissingHint: "opensandbox forget-missing",
+		Due:               shared.ClaimIdleCleanupDue,
+		Validate:          validateOpenSandboxOwnership,
+		Special: func(ctx context.Context, claim core.LeaseClaim) (bool, bool, bool, error) {
+			if !strings.HasPrefix(claim.LeaseID, recoveryPrefix) {
+				return false, false, false, nil
 			}
-			defer unlock()
-			claim, err := readLeaseClaim(listedClaim.LeaseID)
-			if err != nil {
-				return err
-			}
-			if claim.LeaseID == "" || claim.Provider != providerName || !openSandboxClaimMatchesEndpoint(claim, api.BaseURL()) {
-				return nil
-			}
-			checkedOne = true
-			if strings.HasPrefix(claim.LeaseID, recoveryPrefix) {
-				removedOne, claimRemovedOne, err = b.cleanupOpenSandboxRecovery(ctx, api, claim, now, req.DryRun)
-				return err
-			}
-			sandboxID := strings.TrimPrefix(claim.LeaseID, leasePrefix)
-			sb, getErr := api.GetSandbox(ctx, sandboxID)
-			if getErr != nil {
-				if !isOpenSandboxNotFound(getErr) {
-					return getErr
-				}
-				if !b.cfg.OpenSandbox.ForgetMissing {
-					fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=missing-or-inaccessible; set opensandbox forget-missing to remove the claim\n", sandboxID, claim.LeaseID)
-					return nil
-				}
-				if req.DryRun {
-					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
-					return nil
-				}
-				if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
-					return err
-				}
-				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
-				claimRemovedOne = true
-				return nil
-			}
-			due, reason := openSandboxClaimCleanupDue(claim, now)
-			if !due {
-				fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-				return nil
-			}
-			if err := validateOpenSandboxOwnership(claim, sb); err != nil {
-				return err
-			}
-			if req.DryRun {
-				fmt.Fprintf(b.rt.Stdout, "would delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-				return nil
-			}
-			if err := api.DeleteSandbox(ctx, sandboxID); err != nil && !isOpenSandboxNotFound(err) {
-				return err
-			}
-			if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
-				return err
-			}
-			fmt.Fprintf(b.rt.Stdout, "delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-			removedOne = true
-			return nil
-		}()
-		if err != nil {
-			return err
-		}
-		if checkedOne {
-			checked++
-		}
-		if removedOne {
-			removed++
-		}
-		if claimRemovedOne {
-			claimsRemoved++
-		}
-	}
-	if !req.DryRun {
-		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d claims_removed=%d checked=%d\n", providerName, removed, claimsRemoved, checked)
-	}
-	return nil
+			removed, claimRemoved, err := b.cleanupOpenSandboxRecovery(ctx, api, claim, now, req.DryRun)
+			return true, removed, claimRemoved, err
+		},
+	})
 }
 
-func (b *openSandboxBackend) cleanupOpenSandboxRecovery(ctx context.Context, api openSandboxClient, claim LeaseClaim, now time.Time, dryRun bool) (bool, bool, error) {
+func (b *openSandboxBackend) cleanupOpenSandboxRecovery(ctx context.Context, api openSandboxClient, claim core.LeaseClaim, now time.Time, dryRun bool) (bool, bool, error) {
 	sandboxes, err := api.ListSandboxes(ctx, map[string]string{openSandboxClaimKey: claim.ProviderScope})
 	if err != nil {
 		return false, false, err
@@ -570,7 +487,7 @@ func (b *openSandboxBackend) cleanupOpenSandboxRecovery(ctx context.Context, api
 			continue
 		}
 		if strings.TrimSpace(sb.ID) == "" {
-			return false, false, exit(5, "opensandbox recovery %s matched a sandbox without an id", claim.LeaseID)
+			return false, false, core.Exit(5, "opensandbox recovery %s matched a sandbox without an id", claim.LeaseID)
 		}
 		matches = append(matches, sb)
 	}
@@ -587,7 +504,7 @@ func (b *openSandboxBackend) cleanupOpenSandboxRecovery(ctx context.Context, api
 			fmt.Fprintf(b.rt.Stdout, "would remove recovery=%s reason=sandbox lifetime elapsed\n", claim.LeaseID)
 			return false, false, nil
 		}
-		if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 			return false, false, err
 		}
 		fmt.Fprintf(b.rt.Stdout, "remove recovery=%s reason=sandbox lifetime elapsed\n", claim.LeaseID)
@@ -604,7 +521,7 @@ func (b *openSandboxBackend) cleanupOpenSandboxRecovery(ctx context.Context, api
 			return false, false, err
 		}
 	}
-	if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+	if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 		return false, false, err
 	}
 	for _, sb := range matches {
@@ -613,38 +530,23 @@ func (b *openSandboxBackend) cleanupOpenSandboxRecovery(ctx context.Context, api
 	return true, false, nil
 }
 
-func openSandboxRecoveryExpired(claim LeaseClaim, now time.Time) (bool, error) {
+func openSandboxRecoveryExpired(claim core.LeaseClaim, now time.Time) (bool, error) {
 	createdAt, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.ClaimedAt))
 	if err != nil {
-		return false, exit(5, "opensandbox recovery %s has invalid claimed time", claim.LeaseID)
+		return false, core.Exit(5, "opensandbox recovery %s has invalid claimed time", claim.LeaseID)
 	}
 	if claim.IdleTimeoutSeconds <= 0 {
-		return false, exit(5, "opensandbox recovery %s has no sandbox lifetime", claim.LeaseID)
+		return false, core.Exit(5, "opensandbox recovery %s has no sandbox lifetime", claim.LeaseID)
 	}
 	return !now.Before(createdAt.Add(time.Duration(claim.IdleTimeoutSeconds) * time.Second)), nil
 }
 
-func openSandboxClaimMatchesEndpoint(claim LeaseClaim, baseURL string) bool {
+func openSandboxClaimMatchesEndpoint(claim core.LeaseClaim, baseURL string) bool {
 	return strings.HasPrefix(strings.TrimSpace(claim.ProviderScope), openSandboxEndpointScope(baseURL)+"-own-")
 }
 
-func openSandboxClaimCleanupDue(claim LeaseClaim, now time.Time) (bool, string) {
-	if claim.IdleTimeoutSeconds <= 0 {
-		return false, "idle timeout disabled"
-	}
-	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
-	if err != nil {
-		return false, "invalid last-used time"
-	}
-	deadline := lastUsed.Add(time.Duration(claim.IdleTimeoutSeconds) * time.Second)
-	if now.Before(deadline) {
-		return false, "idle timeout not reached"
-	}
-	return true, "idle timeout"
-}
-
 func (b *openSandboxBackend) refreshOpenSandboxLeaseActivity(leaseID string) error {
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		return err
 	}
@@ -652,7 +554,7 @@ func (b *openSandboxBackend) refreshOpenSandboxLeaseActivity(leaseID string) err
 		return nil
 	}
 	idleTimeout := timeoutOrDefault(b.cfg.IdleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second)
-	return claimLeaseForRepoProviderScopePond(
+	return core.ClaimLeaseForRepoProviderScopePond(
 		claim.LeaseID,
 		claim.Slug,
 		providerName,
@@ -664,7 +566,7 @@ func (b *openSandboxBackend) refreshOpenSandboxLeaseActivity(leaseID string) err
 	)
 }
 
-func (b *openSandboxBackend) createSandbox(ctx context.Context, api openSandboxClient, repo Repo, reclaim bool, requestedSlug string) (string, string, string, sandboxInfo, func(), error) {
+func (b *openSandboxBackend) createSandbox(ctx context.Context, api openSandboxClient, repo core.Repo, reclaim bool, requestedSlug string) (string, string, string, sandboxInfo, func(), error) {
 	providerScope, err := newOpenSandboxClaimScope(api.BaseURL())
 	if err != nil {
 		return "", "", "", sandboxInfo{}, nil, err
@@ -708,13 +610,13 @@ func (b *openSandboxBackend) createSandbox(ctx context.Context, api openSandboxC
 	if err != nil {
 		return leaseID, sb.ID, "", sandboxInfo{}, nil, b.cleanupCreateFailure(ctx, api, sb.ID, err)
 	}
-	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
+	slug, err := core.AllocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		cleanupErr := b.cleanupCreateFailure(ctx, api, sb.ID, err)
 		unlockOperation()
 		return leaseID, sb.ID, "", sandboxInfo{}, nil, cleanupErr
 	}
-	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, providerScope, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, providerScope, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
 		cleanupErr := b.cleanupCreateFailure(ctx, api, sb.ID, err)
 		unlockOperation()
 		return leaseID, sb.ID, slug, sandboxInfo{}, nil, cleanupErr
@@ -722,12 +624,12 @@ func (b *openSandboxBackend) createSandbox(ctx context.Context, api openSandboxC
 	return leaseID, sb.ID, slug, sb, unlockOperation, nil
 }
 
-func (b *openSandboxBackend) recordAmbiguousCreate(providerScope string, repo Repo) (string, error) {
+func (b *openSandboxBackend) recordAmbiguousCreate(providerScope string, repo core.Repo) (string, error) {
 	if strings.TrimSpace(repo.Root) == "" {
 		return "", errors.New("repository root is required")
 	}
 	recoveryLeaseID := openSandboxRecoveryLeaseID(providerScope)
-	if err := claimLeaseForRepoProviderScopePond(
+	if err := core.ClaimLeaseForRepoProviderScopePond(
 		recoveryLeaseID,
 		"",
 		providerName,
@@ -750,7 +652,7 @@ func (b *openSandboxBackend) reconcileAmbiguousCreateFailure(ctx context.Context
 		return fmt.Errorf("%w; lock opensandbox create recovery=%s: %v", cause, recoveryLeaseID, err)
 	}
 	defer unlockOperation()
-	recoveryClaim, err := readLeaseClaim(recoveryLeaseID)
+	recoveryClaim, err := core.ReadLeaseClaim(recoveryLeaseID)
 	if err != nil {
 		return fmt.Errorf("%w; read opensandbox create recovery=%s: %v", cause, recoveryLeaseID, err)
 	}
@@ -820,62 +722,62 @@ func openSandboxRecoveryLeaseID(providerScope string) string {
 }
 
 func removeOpenSandboxRecoveryClaim(leaseID, providerScope string) error {
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		return err
 	}
 	if claim.LeaseID == "" || claim.Provider != providerName || claim.ProviderScope != providerScope {
 		return nil
 	}
-	return removeLeaseClaimIfUnchanged(leaseID, claim)
+	return core.RemoveLeaseClaimIfUnchanged(leaseID, claim)
 }
 
 func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL string) (string, string, string, error) {
 	return shared.ResolveScopedLeaseID(id, shared.ScopedLeaseResolver{
 		Provider:      providerName,
 		LeasePrefix:   leasePrefix,
-		ReadClaim:     readLeaseClaim,
+		ReadClaim:     core.ReadLeaseClaim,
 		ListClaims:    listOpenSandboxLeaseClaims,
-		ValidateClaim: func(claim LeaseClaim) error { return validateOpenSandboxClaimScope(claim, baseURL) },
-		FinishClaim: func(claim LeaseClaim) (string, string, string, error) {
+		ValidateClaim: func(claim core.LeaseClaim) error { return validateOpenSandboxClaimScope(claim, baseURL) },
+		FinishClaim: func(claim core.LeaseClaim) (string, string, string, error) {
 			return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout, baseURL)
 		},
 		EmptyIdentifierError: func() error {
-			return exit(2, "provider=opensandbox requires a Crabbox-created sandbox slug or lease id")
+			return core.Exit(2, "provider=opensandbox requires a Crabbox-created sandbox slug or lease id")
 		},
 		UnclaimedIdentifierError: func(identifier string) error {
-			return exit(4, "opensandbox sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<sandbox-id>", identifier, leasePrefix)
+			return core.Exit(4, "opensandbox sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<sandbox-id>", identifier, leasePrefix)
 		},
 	})
 }
 
-func resolveOpenSandboxLeaseClaim(identifier, baseURL string) (LeaseClaim, bool, error) {
-	return shared.ResolveScopedLeaseClaim(identifier, providerName, listOpenSandboxLeaseClaims, func(claim LeaseClaim) error {
+func resolveOpenSandboxLeaseClaim(identifier, baseURL string) (core.LeaseClaim, bool, error) {
+	return shared.ResolveScopedLeaseClaim(identifier, providerName, listOpenSandboxLeaseClaims, func(claim core.LeaseClaim) error {
 		return validateOpenSandboxClaimScope(claim, baseURL)
 	})
 }
 
-func finishResolvedLease(claim LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL string) (string, string, string, error) {
+func finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL string) (string, string, string, error) {
 	return shared.FinishScopedLease(claim, shared.ScopedLeaseFinishOptions{
 		Provider:      providerName,
 		LeasePrefix:   leasePrefix,
 		RepoRoot:      repoRoot,
 		Reclaim:       reclaim,
 		IdleTimeout:   idleTimeout,
-		ValidateClaim: func(claim LeaseClaim) error { return validateOpenSandboxClaimScope(claim, baseURL) },
+		ValidateClaim: func(claim core.LeaseClaim) error { return validateOpenSandboxClaimScope(claim, baseURL) },
 	})
 }
 
-func authorizeOpenSandboxRepoClaim(claim LeaseClaim, repoRoot string, reclaim bool) error {
+func authorizeOpenSandboxRepoClaim(claim core.LeaseClaim, repoRoot string, reclaim bool) error {
 	if repoRoot == "" || claim.RepoRoot == "" || claim.RepoRoot == repoRoot || reclaim {
 		return nil
 	}
-	return exit(2, "lease %s is claimed by repo %s; use --reclaim to claim it for %s", claim.LeaseID, claim.RepoRoot, repoRoot)
+	return core.Exit(2, "lease %s is claimed by repo %s; use --reclaim to claim it for %s", claim.LeaseID, claim.RepoRoot, repoRoot)
 }
 
-func validateOpenSandboxClaimScope(claim LeaseClaim, baseURL string) error {
+func validateOpenSandboxClaimScope(claim core.LeaseClaim, baseURL string) error {
 	if !strings.HasPrefix(strings.TrimSpace(claim.ProviderScope), openSandboxEndpointScope(baseURL)+"-own-") {
-		return exit(4, "opensandbox lease %q belongs to a different API endpoint; restore the endpoint used to create it", claim.LeaseID)
+		return core.Exit(4, "opensandbox lease %q belongs to a different API endpoint; restore the endpoint used to create it", claim.LeaseID)
 	}
 	return nil
 }
@@ -886,7 +788,7 @@ func openSandboxPlatformOS(value string) (string, error) {
 		return "", nil
 	}
 	if !strings.EqualFold(value, "linux") {
-		return "", exit(2, "provider=opensandbox only supports Linux sandboxes; set openSandbox.platformOS to linux or leave it empty")
+		return "", core.Exit(2, "provider=opensandbox only supports Linux sandboxes; set openSandbox.platformOS to linux or leave it empty")
 	}
 	return "linux", nil
 }
@@ -898,7 +800,7 @@ func openSandboxPlatform(osValue, archValue string) (string, string, error) {
 	}
 	archValue = strings.TrimSpace(archValue)
 	if (osValue == "") != (archValue == "") {
-		return "", "", exit(2, "openSandbox.platformOS and openSandbox.platformArch must be set together or both left empty")
+		return "", "", core.Exit(2, "openSandbox.platformOS and openSandbox.platformArch must be set together or both left empty")
 	}
 	return osValue, archValue, nil
 }
@@ -906,7 +808,7 @@ func openSandboxPlatform(osValue, archValue string) (string, string, error) {
 func newOpenSandboxClaimScope(baseURL string) (string, error) {
 	var token [16]byte
 	if _, err := rand.Read(token[:]); err != nil {
-		return "", exit(5, "generate opensandbox ownership token: %v", err)
+		return "", core.Exit(5, "generate opensandbox ownership token: %v", err)
 	}
 	return openSandboxEndpointScope(baseURL) + "-own-" + hex.EncodeToString(token[:]), nil
 }
@@ -917,7 +819,7 @@ func openSandboxEndpointScope(baseURL string) string {
 }
 
 func verifyOpenSandboxClaim(ctx context.Context, api openSandboxClient, leaseID, sandboxID string) (sandboxInfo, error) {
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		return sandboxInfo{}, err
 	}
@@ -934,9 +836,9 @@ func verifyOpenSandboxClaim(ctx context.Context, api openSandboxClient, leaseID,
 	return sb, nil
 }
 
-func validateOpenSandboxOwnership(claim LeaseClaim, sb sandboxInfo) error {
+func validateOpenSandboxOwnership(claim core.LeaseClaim, sb sandboxInfo) error {
 	if sb.Metadata[openSandboxClaimKey] != claim.ProviderScope {
-		return exit(4, "opensandbox sandbox %q ownership metadata does not match its local claim", sb.ID)
+		return core.Exit(4, "opensandbox sandbox %q ownership metadata does not match its local claim", sb.ID)
 	}
 	return nil
 }
@@ -949,22 +851,22 @@ func (b *openSandboxBackend) ensureReusableSandbox(ctx context.Context, api open
 		fmt.Fprintf(b.rt.Stderr, "resuming opensandbox sandbox=%s\n", sandboxID)
 		return api.ResumeSandbox(ctx, sandboxID)
 	default:
-		return exit(4, "opensandbox sandbox %q is %s and cannot be reused until it is running", sandboxID, sb.State)
+		return core.Exit(4, "opensandbox sandbox %q is %s and cannot be reused until it is running", sandboxID, sb.State)
 	}
 }
 
-func openSandboxWorkdir(cfg Config) (string, error) {
+func openSandboxWorkdir(cfg core.Config) (string, error) {
 	workdir := strings.TrimSpace(cfg.OpenSandbox.Workdir)
 	if workdir == "" {
 		workdir = defaultWorkdir
 	}
 	clean := path.Clean(workdir)
 	if !strings.HasPrefix(clean, "/") {
-		return "", exit(2, "opensandbox workdir %q must be an absolute path", workdir)
+		return "", core.Exit(2, "opensandbox workdir %q must be an absolute path", workdir)
 	}
 	switch clean {
 	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var", "/workspace":
-		return "", exit(2, "opensandbox workdir %q is too broad; choose a dedicated subdirectory", clean)
+		return "", core.Exit(2, "opensandbox workdir %q is too broad; choose a dedicated subdirectory", clean)
 	}
 	return clean, nil
 }
@@ -994,8 +896,8 @@ func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
 	return fallback
 }
 
-func newSandboxName(repo Repo) string {
-	base := normalizeLeaseSlug(repo.Name)
+func newSandboxName(repo core.Repo) string {
+	base := core.NormalizeLeaseSlug(repo.Name)
 	if base == "" {
 		base = "crabbox"
 	}
@@ -1010,11 +912,7 @@ func newSandboxName(repo Repo) string {
 	if base == "" {
 		base = "crabbox"
 	}
-	return namePrefix + base + "-" + randomSuffix()
-}
-
-func randomSuffix() string {
-	return shared.RandomSuffix()
+	return namePrefix + base + "-" + shared.RandomSuffix()
 }
 
 func (b *openSandboxBackend) cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -1043,7 +941,7 @@ func (b *openSandboxBackend) cleanupClaimedSandboxFailure(ctx context.Context, a
 	if err := api.DeleteSandbox(cleanupCtx, sandboxID); err != nil && !isOpenSandboxNotFound(err) {
 		return fmt.Errorf("%w; cleanup opensandbox sandbox %s failed: %v", cause, sandboxID, err)
 	}
-	removeLeaseClaim(leaseID)
+	core.RemoveLeaseClaim(leaseID)
 	return cause
 }
 
@@ -1062,13 +960,13 @@ func (b *openSandboxBackend) commandLifetime() time.Duration {
 	return openSandboxCommandBudgetForConfig(b.cfg)
 }
 
-func (b *openSandboxBackend) runLifetimeBudget(req RunRequest) time.Duration {
+func (b *openSandboxBackend) runLifetimeBudget(req core.RunRequest) time.Duration {
 	return openSandboxRunBudgetForConfig(b.cfg, req.NoSync, req.SyncOnly)
 }
 
 func openSandboxExpiration(sb sandboxInfo) (time.Time, error) {
 	if sb.ExpiresAt == nil || sb.ExpiresAt.IsZero() {
-		return time.Time{}, exit(5, "opensandbox sandbox %s did not report an expiration", sb.ID)
+		return time.Time{}, core.Exit(5, "opensandbox sandbox %s did not report an expiration", sb.ID)
 	}
 	return sb.ExpiresAt.UTC(), nil
 }

@@ -37,14 +37,14 @@ type githubCLI interface {
 }
 
 type backend struct {
-	spec             ProviderSpec
-	cfg              Config
-	rt               Runtime
+	spec             core.ProviderSpec
+	cfg              core.Config
+	rt               core.Runtime
 	clientFactory    func(string) codespacesAPI
 	ghFactory        func() githubCLI
-	bindClaim        func(string, LeaseClaim, Server) (LeaseClaim, error)
+	bindClaim        func(string, core.LeaseClaim, core.Server) (core.LeaseClaim, error)
 	newRecoveryNonce func() (string, error)
-	waitSSH          func(context.Context, *SSHTarget, string, time.Duration) error
+	waitSSH          func(context.Context, *core.SSHTarget, string, time.Duration) error
 	now              func() time.Time
 	pollInterval     time.Duration
 	readyTimeout     time.Duration
@@ -78,7 +78,7 @@ const (
 	defaultReadyTimeout = 10 * time.Minute
 )
 
-func newBackend(spec ProviderSpec, cfg Config, rt Runtime) *backend {
+func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) *backend {
 	b := &backend{spec: spec, cfg: cfg, rt: rt, pollInterval: defaultPollInterval, readyTimeout: defaultReadyTimeout}
 	b.clientFactory = func(token string) codespacesAPI {
 		return newClient(cfg.GitHubCodespaces, rt, token)
@@ -86,12 +86,12 @@ func newBackend(spec ProviderSpec, cfg Config, rt Runtime) *backend {
 	b.ghFactory = func() githubCLI {
 		return newGHRunner(cfg.GitHubCodespaces, rt)
 	}
-	b.bindClaim = func(leaseID string, expected LeaseClaim, server Server) (LeaseClaim, error) {
-		return updateLeaseClaimEndpointIfUnchanged(leaseID, expected, server, SSHTarget{})
+	b.bindClaim = func(leaseID string, expected core.LeaseClaim, server core.Server) (core.LeaseClaim, error) {
+		return core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, expected, server, core.SSHTarget{})
 	}
 	b.newRecoveryNonce = newGitHubCodespacesRecoveryNonce
-	b.waitSSH = func(ctx context.Context, target *SSHTarget, phase string, timeout time.Duration) error {
-		return waitForSSHReady(ctx, target, b.stderr(), phase, timeout)
+	b.waitSSH = func(ctx context.Context, target *core.SSHTarget, phase string, timeout time.Duration) error {
+		return core.WaitForSSHReady(ctx, target, b.stderr(), phase, timeout)
 	}
 	b.now = func() time.Time {
 		if rt.Clock != nil {
@@ -102,34 +102,34 @@ func newBackend(spec ProviderSpec, cfg Config, rt Runtime) *backend {
 	return b
 }
 
-func (b *backend) Spec() ProviderSpec { return b.spec }
+func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
-func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
+func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	gh, api, user, err := b.controlPlane(ctx)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	repo, err := b.resolveRepo(req.Repo)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	cfg := b.claimConfig(repo)
 	if _, err := api.listMachines(ctx, repo, b.cfg.GitHubCodespaces.Ref); err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	leaseID := strings.TrimSpace(req.RequestedLeaseID)
 	if leaseID == "" {
-		leaseID = newLeaseID()
+		leaseID = core.NewLeaseID()
 	}
 	unlockLease, err := lockGitHubCodespacesLeaseOperation(ctx, leaseID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	defer unlockLease()
 
 	unlockSlug, err := lockGitHubCodespacesSlugAllocation(ctx)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	defer func() {
 		if unlockSlug != nil {
@@ -138,44 +138,44 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	}()
 	live, err := api.listCodespaces(ctx)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	existing, err := b.serversFromCodespaces(live)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	// The core allocator checks durable claim files as well as this live-server
 	// snapshot, so pending and temporarily absent claims reserve their slugs.
-	slug, err := allocateDirectLeaseSlug(leaseID, req.RequestedSlug, existing)
+	slug, err := core.AllocateDirectLeaseSlug(leaseID, req.RequestedSlug, existing)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	release := releaseDelete
-	if !githubCodespacesDeleteOnRelease(LeaseTarget{}, cfg) {
+	if !githubCodespacesDeleteOnRelease(core.LeaseTarget{}, cfg) {
 		release = releaseStop
 	}
 	repoRoot, err := repoRootForClaim(req.Repo)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if b.newRecoveryNonce == nil {
-		return LeaseTarget{}, exit(2, "generate github-codespaces recovery nonce")
+		return core.LeaseTarget{}, core.Exit(2, "generate github-codespaces recovery nonce")
 	}
 	recoveryNonce, err := b.newRecoveryNonce()
 	recoveryNonce = strings.TrimSpace(recoveryNonce)
 	if err != nil {
-		return LeaseTarget{}, fmt.Errorf("generate github-codespaces recovery nonce: %w", err)
+		return core.LeaseTarget{}, fmt.Errorf("generate github-codespaces recovery nonce: %w", err)
 	}
 	if recoveryNonce == "" {
-		return LeaseTarget{}, exit(2, "generate github-codespaces recovery nonce")
+		return core.LeaseTarget{}, core.Exit(2, "generate github-codespaces recovery nonce")
 	}
 	displayName := githubCodespacesDisplayName(leaseID, slug, recoveryNonce)
 	if err := rejectExistingRecoveryIdentity(live, displayName, repo); err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	claim, err := b.claimPendingCreate(leaseID, slug, repo, user, displayName, recoveryNonce, repoRoot, release, req.Keep, req.Reclaim)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	// The durable pending claim reserves both the lease and slug. Provider
 	// creation remains protected by the lease lock, but unrelated acquires may proceed.
@@ -190,7 +190,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		Geo:              strings.TrimSpace(b.cfg.GitHubCodespaces.Geo),
 		IdleTimeout:      b.githubIdleTimeout(),
 		RetentionPeriod:  b.cfg.GitHubCodespaces.RetentionPeriod,
-		RetentionSet:     retentionPeriodExplicit(b.cfg),
+		RetentionSet:     core.GitHubCodespacesRetentionExplicit(b.cfg),
 		DisplayName:      displayName,
 	})
 	if createErr == nil && strings.TrimSpace(created.Name) == "" {
@@ -198,11 +198,11 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	}
 	if createErr != nil {
 		if !githubCodespacesCreateMayHaveSucceeded(createErr) {
-			return LeaseTarget{}, errors.Join(createErr, discardPendingClaim(claim))
+			return core.LeaseTarget{}, errors.Join(createErr, discardPendingClaim(claim))
 		}
 		recovered, recoveryErr := b.recoverPendingResource(api, claim, user)
 		if recoveryErr != nil {
-			return LeaseTarget{}, errors.Join(
+			return core.LeaseTarget{}, errors.Join(
 				fmt.Errorf("github-codespaces create outcome is uncertain for lease=%s display_name=%q repo=%q; recovery claim retained: %w", leaseID, displayName, repo, createErr),
 				recoveryErr,
 			)
@@ -211,13 +211,13 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	} else {
 		created, err = validateCreatedCodespaceIdentity(claim, created)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 	}
 	if req.OnAcquired != nil {
-		acquired := LeaseTarget{Server: b.serverFromCodespace(created, cloneLabels(claim.Labels)), LeaseID: leaseID}
+		acquired := core.LeaseTarget{Server: b.serverFromCodespace(created, cloneLabels(claim.Labels)), LeaseID: leaseID}
 		if err := req.OnAcquired(acquired); err != nil {
-			return LeaseTarget{}, errors.Join(err, rollbackUnboundCreatedCodespace(api, claim, created))
+			return core.LeaseTarget{}, errors.Join(err, rollbackUnboundCreatedCodespace(api, claim, created))
 		}
 	}
 	claim, err = b.bindValidatedCreatedClaim(claim, created)
@@ -225,23 +225,23 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		if !req.Keep {
 			err = errors.Join(err, rollbackUnboundCreatedCodespace(api, claim, created))
 		}
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	available, err := b.waitForAvailable(ctx, api, created.Name)
 	if err != nil {
 		if !req.Keep {
 			err = errors.Join(err, rollbackCreatedCodespace(api, claim))
 		}
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if err := validateCodespaceClaimResource(claim, available); err != nil {
 		if !req.Keep {
 			err = errors.Join(err, rollbackCreatedCodespace(api, claim))
 		}
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if err := validateStopPreservesCodespace(available); err != nil {
-		return LeaseTarget{}, errors.Join(err, rollbackCreatedCodespace(api, claim))
+		return core.LeaseTarget{}, errors.Join(err, rollbackCreatedCodespace(api, claim))
 	}
 	refreshedUser := user
 	refreshedUser.Login = claim.Labels[labelLogin]
@@ -254,16 +254,16 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		if !req.Keep {
 			err = errors.Join(err, rollbackCreatedCodespace(api, claim))
 		}
-		return LeaseTarget{}, b.sshPrerequisiteError(err)
+		return core.LeaseTarget{}, b.sshPrerequisiteError(err)
 	}
 	if err := b.waitSSH(ctx, &target, "github-codespaces ssh", b.readyTimeout); err != nil {
 		if !req.Keep {
 			err = errors.Join(err, rollbackCreatedCodespace(api, claim))
 		}
-		return LeaseTarget{}, b.sshPrerequisiteError(err)
+		return core.LeaseTarget{}, b.sshPrerequisiteError(err)
 	}
-	lease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
-	finalClaim, err := updateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, target, func() error {
+	lease := core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+	finalClaim, err := core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, target, func() error {
 		_, err := storeSSHConfig(leaseID, sshConfig)
 		return err
 	})
@@ -271,25 +271,25 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		if !req.Keep {
 			err = errors.Join(err, rollbackCreatedCodespace(api, claim))
 		}
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
-	setServerLeaseClaimSnapshot(&lease.Server, finalClaim, true)
+	core.SetServerLeaseClaimSnapshot(&lease.Server, finalClaim, true)
 	fmt.Fprintf(b.stderr(), "provisioned provider=github-codespaces lease=%s slug=%s codespace=%s repo=%s state=%s\n", leaseID, slug, available.Name, repo, available.State)
 	return lease, nil
 }
 
-func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
 	gh, api, user, err := b.controlPlane(ctx)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	live, err := api.listCodespaces(ctx)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	candidate, candidateOK, err := resolveUniqueGitHubCodespacesClaim(req.ID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	leaseID := ""
 	if candidateOK {
@@ -297,41 +297,41 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 	} else {
 		_, leaseID, err = b.resolveServer(live, req.ID)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 	}
 	if strings.TrimSpace(leaseID) == "" {
-		return LeaseTarget{}, exit(4, "github-codespaces lease not found: %s", req.ID)
+		return core.LeaseTarget{}, core.Exit(4, "github-codespaces lease not found: %s", req.ID)
 	}
 	unlockOperation, err := lockGitHubCodespacesLeaseOperation(ctx, leaseID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	defer unlockOperation()
 	currentCandidate, currentCandidateOK, err := resolveUniqueGitHubCodespacesClaim(req.ID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if !currentCandidateOK || currentCandidate.LeaseID != leaseID {
-		return LeaseTarget{}, exit(2, "github-codespaces identifier %s changed during resolve; retry", req.ID)
+		return core.LeaseTarget{}, core.Exit(2, "github-codespaces identifier %s changed during resolve; retry", req.ID)
 	}
 	claim := currentCandidate
 
 	live, err = api.listCodespaces(ctx)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if claim.Provider != providerName {
-		return LeaseTarget{}, exit(4, "github-codespaces lease %s has no current local claim", leaseID)
+		return core.LeaseTarget{}, core.Exit(4, "github-codespaces lease %s has no current local claim", leaseID)
 	}
 
-	server := Server{}
+	server := core.Server{}
 	pendingReadOnly := false
 	if strings.TrimSpace(claim.CloudID) == "" && claim.Labels[labelRecovery] == recoveryPreCreate {
 		if req.NoLocalStateMutations {
 			item, err := b.matchPendingClaimFromInventory(claim, user, live)
 			if err != nil {
-				return LeaseTarget{}, err
+				return core.LeaseTarget{}, err
 			}
 			server = b.mergeLiveServer(serverFromClaim(claim), item)
 			pendingReadOnly = true
@@ -339,7 +339,7 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 			var item codespace
 			claim, item, err = b.recoverPendingClaimFromInventory(claim, user, live)
 			if err != nil {
-				return LeaseTarget{}, err
+				return core.LeaseTarget{}, err
 			}
 			server = b.mergeLiveServer(serverFromClaim(claim), item)
 		}
@@ -347,17 +347,17 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 		var resolvedLeaseID string
 		server, resolvedLeaseID, err = b.resolveServer(live, leaseID)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		if resolvedLeaseID != "" && resolvedLeaseID != leaseID {
-			return LeaseTarget{}, exit(3, "github-codespaces lease identity changed during resolve: expected=%s got=%s", leaseID, resolvedLeaseID)
+			return core.LeaseTarget{}, core.Exit(3, "github-codespaces lease identity changed during resolve: expected=%s got=%s", leaseID, resolvedLeaseID)
 		}
 	}
 	if server.CloudID == "" {
-		return LeaseTarget{}, exit(4, "github-codespaces lease not found: %s", req.ID)
+		return core.LeaseTarget{}, core.Exit(4, "github-codespaces lease not found: %s", req.ID)
 	}
 	if err := b.validateClaimForServer(claim, server, user); err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	validateResolvedItem := func(item codespace) error {
 		if !pendingReadOnly {
@@ -368,30 +368,30 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 			return err
 		}
 		if matched.Name != server.CloudID {
-			return exit(3, "github-codespaces pending recovery resource changed during resolve: expected=%s got=%s", server.CloudID, matched.Name)
+			return core.Exit(3, "github-codespaces pending recovery resource changed during resolve: expected=%s got=%s", server.CloudID, matched.Name)
 		}
 		return nil
 	}
-	resolveAction := func() (Server, SSHTarget, bool, error) {
+	resolveAction := func() (core.Server, core.SSHTarget, bool, error) {
 		item, err := api.getCodespace(ctx, server.CloudID)
 		if err != nil {
 			if req.ReleaseOnly && isGitHubNotFound(err) {
 				server.Status = "deleted"
 				server.Labels[labelState] = "deleted"
-				return server, SSHTarget{}, false, nil
+				return server, core.SSHTarget{}, false, nil
 			}
-			return Server{}, SSHTarget{}, false, err
+			return core.Server{}, core.SSHTarget{}, false, err
 		}
 		if err := validateResolvedItem(item); err != nil {
-			return Server{}, SSHTarget{}, false, err
+			return core.Server{}, core.SSHTarget{}, false, err
 		}
 		server = b.mergeLiveServer(server, item)
 		if codespaceStopped(item.State) && (req.StatusOnly || req.NoLocalStateMutations) {
 			server.Labels[labelState] = "stopped"
-			return server, SSHTarget{}, false, nil
+			return server, core.SSHTarget{}, false, nil
 		}
 		if req.ReleaseOnly || (req.StatusOnly && !req.ReadyProbe) {
-			return server, SSHTarget{}, false, nil
+			return server, core.SSHTarget{}, false, nil
 		}
 		if codespaceStopping(item.State) {
 			waitCtx := ctx
@@ -402,124 +402,124 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 			item, err = b.waitForStopped(waitCtx, api, item.Name)
 			cancel()
 			if err != nil {
-				return Server{}, SSHTarget{}, false, err
+				return core.Server{}, core.SSHTarget{}, false, err
 			}
 			if err := validateResolvedItem(item); err != nil {
-				return Server{}, SSHTarget{}, false, err
+				return core.Server{}, core.SSHTarget{}, false, err
 			}
 			server = b.mergeLiveServer(server, item)
 		}
 		if codespaceStopped(item.State) && (req.StatusOnly || req.NoLocalStateMutations) {
 			server.Labels[labelState] = "stopped"
-			return server, SSHTarget{}, false, nil
+			return server, core.SSHTarget{}, false, nil
 		}
 		if codespaceStopped(item.State) {
 			item, err = api.startCodespace(ctx, item.Name)
 			if err != nil {
-				return Server{}, SSHTarget{}, false, err
+				return core.Server{}, core.SSHTarget{}, false, err
 			}
 			if strings.TrimSpace(item.Name) != server.CloudID {
-				return Server{}, SSHTarget{}, false, exit(3, "github-codespaces start returned a different resource: expected=%s got=%s", server.CloudID, item.Name)
+				return core.Server{}, core.SSHTarget{}, false, core.Exit(3, "github-codespaces start returned a different resource: expected=%s got=%s", server.CloudID, item.Name)
 			}
 			item, err = b.waitForAvailable(ctx, api, item.Name)
 			if err != nil {
-				return Server{}, SSHTarget{}, false, err
+				return core.Server{}, core.SSHTarget{}, false, err
 			}
 			if err := validateResolvedItem(item); err != nil {
-				return Server{}, SSHTarget{}, false, err
+				return core.Server{}, core.SSHTarget{}, false, err
 			}
 			server = b.mergeLiveServer(server, item)
 		}
 		if codespaceTerminal(item.State) {
-			return Server{}, SSHTarget{}, false, exit(5, "github-codespaces codespace %s entered terminal state=%s", item.Name, item.State)
+			return core.Server{}, core.SSHTarget{}, false, core.Exit(5, "github-codespaces codespace %s entered terminal state=%s", item.Name, item.State)
 		}
 		if !codespaceAvailable(item.State) {
 			item, err = b.waitForAvailable(ctx, api, item.Name)
 			if err != nil {
-				return Server{}, SSHTarget{}, false, err
+				return core.Server{}, core.SSHTarget{}, false, err
 			}
 			if err := validateResolvedItem(item); err != nil {
-				return Server{}, SSHTarget{}, false, err
+				return core.Server{}, core.SSHTarget{}, false, err
 			}
 			server = b.mergeLiveServer(server, item)
 		}
-		repo := firstNonEmpty(server.Labels[labelRepository], item.Repository.FullName)
+		repo := shared.FirstNonBlankTrimmed(server.Labels[labelRepository], item.Repository.FullName)
 		cfg := b.repoConfig(repo)
 		if server.Labels == nil {
 			server.Labels = map[string]string{}
 		}
 		server.Labels["work_root"] = cfg.WorkRoot
-		server.Labels = touchDirectLeaseLabels(server.Labels, cfg, "ready", b.now().UTC())
+		server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", b.now().UTC())
 		target, sshConfig, err := b.sshTargetWithConfig(ctx, gh, item.Name, repo)
 		if err != nil {
-			return Server{}, SSHTarget{}, false, b.sshPrerequisiteError(err)
+			return core.Server{}, core.SSHTarget{}, false, b.sshPrerequisiteError(err)
 		}
 		if req.ReadyProbe {
 			if err := b.waitSSH(ctx, &target, "github-codespaces ssh", b.readyTimeout); err != nil {
-				return Server{}, SSHTarget{}, false, b.sshPrerequisiteError(err)
+				return core.Server{}, core.SSHTarget{}, false, b.sshPrerequisiteError(err)
 			}
 		}
 		if !req.NoLocalStateMutations {
 			if _, err := storeSSHConfig(leaseID, sshConfig); err != nil {
-				return Server{}, SSHTarget{}, false, err
+				return core.Server{}, core.SSHTarget{}, false, err
 			}
 		}
 		return server, target, true, nil
 	}
-	target := SSHTarget{}
+	target := core.SSHTarget{}
 	if req.NoLocalStateMutations {
-		if err := withLeaseClaimUnchanged(leaseID, claim, func() error {
+		if err := core.WithLeaseClaimUnchanged(leaseID, claim, func() error {
 			var actionErr error
 			server, target, _, actionErr = resolveAction()
 			return actionErr
 		}); err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 	} else {
-		_, server, target, err = updateLeaseClaimEndpointIfUnchangedAction(leaseID, claim, resolveAction)
+		_, server, target, err = core.UpdateLeaseClaimEndpointIfUnchangedAction(leaseID, claim, resolveAction)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 	}
-	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
-func resolveUniqueGitHubCodespacesClaim(identifier string) (LeaseClaim, bool, error) {
+func resolveUniqueGitHubCodespacesClaim(identifier string) (core.LeaseClaim, bool, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
-		return LeaseClaim{}, false, nil
+		return core.LeaseClaim{}, false, nil
 	}
-	if isCanonicalLeaseID(identifier) {
-		claim, exists, err := readLeaseClaimWithPresence(identifier)
+	if core.IsCanonicalLeaseID(identifier) {
+		claim, exists, err := core.ReadLeaseClaimWithPresence(identifier)
 		if err != nil {
-			return LeaseClaim{}, false, err
+			return core.LeaseClaim{}, false, err
 		}
 		if exists {
 			if claim.Provider != providerName {
-				return LeaseClaim{}, false, exit(4, "%q is claimed by provider %s", identifier, claim.Provider)
+				return core.LeaseClaim{}, false, core.Exit(4, "%q is claimed by provider %s", identifier, claim.Provider)
 			}
 			return claim, true, nil
 		}
-		return LeaseClaim{}, false, nil
+		return core.LeaseClaim{}, false, nil
 	}
-	claims, err := listLeaseClaims()
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
-		return LeaseClaim{}, false, err
+		return core.LeaseClaim{}, false, err
 	}
-	var match LeaseClaim
+	var match core.LeaseClaim
 	for _, claim := range claims {
-		if claim.Provider != providerName || !leaseClaimMatchesIdentifier(claim, identifier) {
+		if claim.Provider != providerName || !core.LeaseClaimMatchesIdentifier(claim, identifier) {
 			continue
 		}
 		if match.LeaseID != "" {
-			return LeaseClaim{}, false, exit(2, "multiple github-codespaces claims match identifier %s", identifier)
+			return core.LeaseClaim{}, false, core.Exit(2, "multiple github-codespaces claims match identifier %s", identifier)
 		}
 		match = claim
 	}
 	return match, match.LeaseID != "", nil
 }
 
-func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) {
+func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseView, error) {
 	_, api, _, err := b.controlPlane(ctx)
 	if err != nil {
 		return nil, err
@@ -531,63 +531,63 @@ func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) 
 	return b.serversFromCodespaces(live)
 }
 
-func (b *backend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
+func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	leaseID := strings.TrimSpace(req.Lease.LeaseID)
 	if leaseID == "" {
-		return Server{}, exit(2, "github-codespaces touch requires a lease id")
+		return core.Server{}, core.Exit(2, "github-codespaces touch requires a lease id")
 	}
 	unlockOperation, err := lockGitHubCodespacesLeaseOperation(ctx, leaseID)
 	if err != nil {
-		return Server{}, err
+		return core.Server{}, err
 	}
 	defer unlockOperation()
 
-	claim, ok, err := readLeaseClaimWithPresence(leaseID)
+	claim, ok, err := core.ReadLeaseClaimWithPresence(leaseID)
 	if err != nil {
-		return Server{}, err
+		return core.Server{}, err
 	}
 	if !ok || claim.Provider != providerName {
-		return Server{}, exit(4, "github-codespaces touch requires a current local claim for lease %s", leaseID)
+		return core.Server{}, core.Exit(4, "github-codespaces touch requires a current local claim for lease %s", leaseID)
 	}
 	if strings.TrimSpace(claim.CloudID) == "" || claim.Labels[labelRecovery] == recoveryPreCreate {
-		return Server{}, exit(4, "github-codespaces lease %s is not active", leaseID)
+		return core.Server{}, core.Exit(4, "github-codespaces lease %s is not active", leaseID)
 	}
 	state := strings.ToLower(strings.TrimSpace(claim.Labels[labelState]))
 	if codespaceStopped(state) || codespaceTerminal(state) || state == "paused" || state == "deleting" || state == "deleted" {
-		return Server{}, exit(4, "github-codespaces lease %s is not active (state=%s)", leaseID, state)
+		return core.Server{}, core.Exit(4, "github-codespaces lease %s is not active (state=%s)", leaseID, state)
 	}
-	requestedName := firstNonEmpty(req.Lease.Server.CloudID, req.Lease.Server.Name, req.Lease.Server.Labels[labelCodespaceName])
+	requestedName := shared.FirstNonBlankTrimmed(req.Lease.Server.CloudID, req.Lease.Server.Name, req.Lease.Server.Labels[labelCodespaceName])
 	if requestedName != "" && requestedName != claim.CloudID {
-		return Server{}, exit(3, "github-codespaces touch resource mismatch: claim=%s request=%s", claim.CloudID, requestedName)
+		return core.Server{}, core.Exit(3, "github-codespaces touch resource mismatch: claim=%s request=%s", claim.CloudID, requestedName)
 	}
 	repo := strings.TrimSpace(claim.Labels[labelRepository])
 	if expectedScope := providerClaimScope(b.claimConfig(repo)); expectedScope == "" || claim.ProviderScope != expectedScope {
-		return Server{}, exit(4, "github-codespaces claim %s scope mismatch: claim=%q current=%q", claim.LeaseID, claim.ProviderScope, expectedScope)
+		return core.Server{}, core.Exit(4, "github-codespaces claim %s scope mismatch: claim=%q current=%q", claim.LeaseID, claim.ProviderScope, expectedScope)
 	}
 	server := serverFromClaim(claim)
-	server.Labels = touchDirectLeaseLabels(server.Labels, b.repoConfig(repo), req.State, b.now().UTC())
-	updated, err := updateLeaseClaimEndpointIfUnchanged(leaseID, claim, server, SSHTarget{})
+	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.repoConfig(repo), req.State, b.now().UTC())
+	updated, err := core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, claim, server, core.SSHTarget{})
 	if err != nil {
-		return Server{}, err
+		return core.Server{}, err
 	}
 	return serverFromClaim(updated), nil
 }
 
-func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
 	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
 	return err
 }
 
-func (b *backend) ReleaseLeaseWithOutcome(ctx context.Context, req ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+func (b *backend) ReleaseLeaseWithOutcome(ctx context.Context, req core.ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
 	var outcome core.ReleaseLeaseOutcome
 	err := b.releaseLease(ctx, req, &outcome)
 	return outcome, err
 }
 
-func (b *backend) releaseLease(ctx context.Context, req ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
+func (b *backend) releaseLease(ctx context.Context, req core.ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	leaseID := strings.TrimSpace(req.Lease.LeaseID)
 	if leaseID == "" {
-		return exit(2, "github-codespaces release requires a lease id")
+		return core.Exit(2, "github-codespaces release requires a lease id")
 	}
 	unlockOperation, err := lockGitHubCodespacesLeaseOperation(ctx, leaseID)
 	if err != nil {
@@ -599,12 +599,12 @@ func (b *backend) releaseLease(ctx context.Context, req ReleaseLeaseRequest, out
 		return err
 	}
 	requestedServer := req.Lease.Server
-	claim, claimOK, err := readLeaseClaimWithPresence(leaseID)
+	claim, claimOK, err := core.ReadLeaseClaimWithPresence(leaseID)
 	if err != nil {
 		return err
 	}
 	if !claimOK {
-		return exit(2, "github-codespaces release requires a local claim for lease %s", leaseID)
+		return core.Exit(2, "github-codespaces release requires a local claim for lease %s", leaseID)
 	}
 	if strings.TrimSpace(claim.CloudID) == "" && claim.Labels[labelRecovery] == recoveryPreCreate {
 		claim, _, err = b.recoverPendingClaim(api, claim, user)
@@ -612,16 +612,16 @@ func (b *backend) releaseLease(ctx context.Context, req ReleaseLeaseRequest, out
 			return err
 		}
 	}
-	if requestedName := firstNonEmpty(requestedServer.CloudID, requestedServer.Name, requestedServer.Labels[labelCodespaceName]); requestedName != "" && requestedName != claim.CloudID {
-		return exit(3, "github-codespaces release resource mismatch: claim=%s request=%s", claim.CloudID, requestedName)
+	if requestedName := shared.FirstNonBlankTrimmed(requestedServer.CloudID, requestedServer.Name, requestedServer.Labels[labelCodespaceName]); requestedName != "" && requestedName != claim.CloudID {
+		return core.Exit(3, "github-codespaces release resource mismatch: claim=%s request=%s", claim.CloudID, requestedName)
 	}
 	server := serverFromClaim(claim)
 	if err := b.validateClaimForServer(claim, server, user); err != nil {
 		return err
 	}
-	name := firstNonEmpty(server.CloudID, server.Name, server.Labels[labelCodespaceName])
+	name := shared.FirstNonBlankTrimmed(server.CloudID, server.Name, server.Labels[labelCodespaceName])
 	if name == "" {
-		return exit(2, "github-codespaces release requires a claim-backed codespace name")
+		return core.Exit(2, "github-codespaces release requires a claim-backed codespace name")
 	}
 	authoritativeLease := req.Lease
 	authoritativeLease.Server = server
@@ -647,11 +647,11 @@ func (b *backend) releaseLease(ctx context.Context, req ReleaseLeaseRequest, out
 	return b.stopCodespaceAndRetainWithOutcome(ctx, api, leaseID, claim, server, name, outcome)
 }
 
-func (b *backend) stopCodespaceAndRetain(ctx context.Context, api codespacesAPI, leaseID string, claim LeaseClaim, server Server, name string) error {
+func (b *backend) stopCodespaceAndRetain(ctx context.Context, api codespacesAPI, leaseID string, claim core.LeaseClaim, server core.Server, name string) error {
 	return b.stopCodespaceAndRetainWithOutcome(ctx, api, leaseID, claim, server, name, &core.ReleaseLeaseOutcome{})
 }
 
-func (b *backend) stopCodespaceAndRetainWithOutcome(ctx context.Context, api codespacesAPI, leaseID string, claim LeaseClaim, server Server, name string, outcome *core.ReleaseLeaseOutcome) error {
+func (b *backend) stopCodespaceAndRetainWithOutcome(ctx context.Context, api codespacesAPI, leaseID string, claim core.LeaseClaim, server core.Server, name string, outcome *core.ReleaseLeaseOutcome) error {
 	server.Provider = providerName
 	server.CloudID = name
 	server.Name = name
@@ -676,7 +676,7 @@ func (b *backend) stopCodespaceAndRetainWithOutcome(ctx context.Context, api cod
 		}
 	}
 	absent := false
-	updated, err := updateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, SSHTarget{}, func() error {
+	updated, err := core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, core.SSHTarget{}, func() error {
 		item, err := api.getCodespace(ctx, name)
 		if isGitHubNotFound(err) {
 			absent = true
@@ -703,21 +703,21 @@ func (b *backend) stopCodespaceAndRetainWithOutcome(ctx context.Context, api cod
 	if err != nil || !absent {
 		return err
 	}
-	return removeLeaseClaimIfUnchangedAfter(leaseID, updated, func() error {
+	return core.RemoveLeaseClaimIfUnchangedAfter(leaseID, updated, func() error {
 		return removeStoredSSHConfig(leaseID)
 	})
 }
 
-func (b *backend) deleteClaimedCodespace(ctx context.Context, api codespacesAPI, claim LeaseClaim, name string) error {
+func (b *backend) deleteClaimedCodespace(ctx context.Context, api codespacesAPI, claim core.LeaseClaim, name string) error {
 	return b.deleteClaimedCodespaceWithOutcome(ctx, api, claim, name, &core.ReleaseLeaseOutcome{})
 }
 
-func (b *backend) deleteClaimedCodespaceWithOutcome(ctx context.Context, api codespacesAPI, claim LeaseClaim, name string, outcome *core.ReleaseLeaseOutcome) error {
+func (b *backend) deleteClaimedCodespaceWithOutcome(ctx context.Context, api codespacesAPI, claim core.LeaseClaim, name string, outcome *core.ReleaseLeaseOutcome) error {
 	name = strings.TrimSpace(name)
 	if name == "" || claim.CloudID != name || claim.Labels[labelCodespaceName] != name {
-		return exit(4, "refusing github-codespaces delete for lease=%s without its exact bound resource identity", claim.LeaseID)
+		return core.Exit(4, "refusing github-codespaces delete for lease=%s without its exact bound resource identity", claim.LeaseID)
 	}
-	return removeLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+	return core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
 		deleteCtx, cancel := context.WithTimeout(ctx, githubCodespacesDeleteTimeout)
 		defer cancel()
 
@@ -774,17 +774,17 @@ func (b *backend) deleteClaimedCodespaceWithOutcome(ctx context.Context, api cod
 	})
 }
 
-func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
+func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	if githubCodespacesClaimRelease(lease.LeaseID) == releaseStop {
-		return fmt.Sprintf("stopped github-codespaces lease=%s codespace=%s retained=true", lease.LeaseID, firstNonEmpty(lease.Server.CloudID, lease.Server.Name))
+		return fmt.Sprintf("stopped github-codespaces lease=%s codespace=%s retained=true", lease.LeaseID, shared.FirstNonBlankTrimmed(lease.Server.CloudID, lease.Server.Name))
 	}
 	if githubCodespacesDeleteOnRelease(lease, b.cfg) {
-		return fmt.Sprintf("deleted github-codespaces lease=%s codespace=%s", lease.LeaseID, firstNonEmpty(lease.Server.CloudID, lease.Server.Name))
+		return fmt.Sprintf("deleted github-codespaces lease=%s codespace=%s", lease.LeaseID, shared.FirstNonBlankTrimmed(lease.Server.CloudID, lease.Server.Name))
 	}
-	return fmt.Sprintf("stopped github-codespaces lease=%s codespace=%s retained=true", lease.LeaseID, firstNonEmpty(lease.Server.CloudID, lease.Server.Name))
+	return fmt.Sprintf("stopped github-codespaces lease=%s codespace=%s retained=true", lease.LeaseID, shared.FirstNonBlankTrimmed(lease.Server.CloudID, lease.Server.Name))
 }
 
-func (b *backend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool {
+func (b *backend) RetainLeaseClaimAfterRelease(lease core.LeaseTarget) bool {
 	switch githubCodespacesClaimRelease(lease.LeaseID) {
 	case releaseStop:
 		return true
@@ -795,14 +795,14 @@ func (b *backend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool {
 }
 
 func githubCodespacesClaimRelease(leaseID string) string {
-	claim, ok, err := readLeaseClaimWithPresence(strings.TrimSpace(leaseID))
+	claim, ok, err := core.ReadLeaseClaimWithPresence(strings.TrimSpace(leaseID))
 	if err != nil || !ok {
 		return ""
 	}
 	return strings.ToLower(strings.TrimSpace(claim.Labels[labelRelease]))
 }
 
-func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
+func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	_, api, user, err := b.controlPlane(ctx)
 	if err != nil {
 		return err
@@ -819,7 +819,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	for _, server := range servers {
 		seen[strings.ToLower(strings.TrimSpace(server.CloudID))] = server.Labels["lease"]
 	}
-	claims, err := listLeaseClaims()
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return err
 	}
@@ -831,7 +831,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		}
 		key := strings.ToLower(cloudID)
 		if otherLease, ok := boundOwners[key]; ok && otherLease != claim.LeaseID {
-			return exit(3, "multiple github-codespaces claims bind resource %s: leases=%s,%s", cloudID, otherLease, claim.LeaseID)
+			return core.Exit(3, "multiple github-codespaces claims bind resource %s: leases=%s,%s", cloudID, otherLease, claim.LeaseID)
 		}
 		boundOwners[key] = claim.LeaseID
 	}
@@ -843,18 +843,18 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		}
 		if otherLease, ok := seen[strings.ToLower(cloudID)]; ok {
 			if otherLease != snapshotClaim.LeaseID {
-				return exit(3, "multiple github-codespaces claims bind resource %s: leases=%s,%s", cloudID, otherLease, snapshotClaim.LeaseID)
+				return core.Exit(3, "multiple github-codespaces claims bind resource %s: leases=%s,%s", cloudID, otherLease, snapshotClaim.LeaseID)
 			}
 			continue
 		}
-		claim, item, found, err := func() (LeaseClaim, codespace, bool, error) {
+		claim, item, found, err := func() (core.LeaseClaim, codespace, bool, error) {
 			unlockOperation, err := lockGitHubCodespacesLeaseOperation(ctx, snapshotClaim.LeaseID)
 			if err != nil {
-				return LeaseClaim{}, codespace{}, false, err
+				return core.LeaseClaim{}, codespace{}, false, err
 			}
 			defer unlockOperation()
 
-			claim, ok, err := readLeaseClaimWithPresence(snapshotClaim.LeaseID)
+			claim, ok, err := core.ReadLeaseClaimWithPresence(snapshotClaim.LeaseID)
 			if err != nil || !ok {
 				return claim, codespace{}, false, err
 			}
@@ -867,7 +867,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			}
 			if otherLease, ok := seen[strings.ToLower(cloudID)]; ok {
 				if otherLease != claim.LeaseID {
-					return claim, codespace{}, false, exit(3, "multiple github-codespaces claims bind resource %s: leases=%s,%s", cloudID, otherLease, claim.LeaseID)
+					return claim, codespace{}, false, core.Exit(3, "multiple github-codespaces claims bind resource %s: leases=%s,%s", cloudID, otherLease, claim.LeaseID)
 				}
 				return claim, codespace{}, false, nil
 			}
@@ -898,7 +898,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		if found {
 			key := strings.ToLower(strings.TrimSpace(item.Name))
 			if otherLease, ok := seen[key]; ok {
-				return exit(3, "multiple github-codespaces claims bind resource %s: leases=%s,%s", item.Name, otherLease, claim.LeaseID)
+				return core.Exit(3, "multiple github-codespaces claims bind resource %s: leases=%s,%s", item.Name, otherLease, claim.LeaseID)
 			}
 			seen[key] = claim.LeaseID
 			servers = append(servers, b.mergeLiveServer(serverFromClaim(claim), item))
@@ -908,14 +908,14 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		if snapshotClaim.Provider != providerName || strings.TrimSpace(snapshotClaim.CloudID) != "" || snapshotClaim.Labels[labelRecovery] != recoveryPreCreate {
 			continue
 		}
-		claim, item, found, err := func() (LeaseClaim, codespace, bool, error) {
+		claim, item, found, err := func() (core.LeaseClaim, codespace, bool, error) {
 			unlockOperation, err := lockGitHubCodespacesLeaseOperation(ctx, snapshotClaim.LeaseID)
 			if err != nil {
-				return LeaseClaim{}, codespace{}, false, err
+				return core.LeaseClaim{}, codespace{}, false, err
 			}
 			defer unlockOperation()
 
-			claim, ok, err := readLeaseClaimWithPresence(snapshotClaim.LeaseID)
+			claim, ok, err := core.ReadLeaseClaimWithPresence(snapshotClaim.LeaseID)
 			if err != nil || !ok {
 				return claim, codespace{}, false, err
 			}
@@ -949,7 +949,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		}
 		key := strings.ToLower(strings.TrimSpace(item.Name))
 		if otherLease, ok := seen[key]; ok {
-			return exit(3, "multiple github-codespaces claims bind recovery resource %s: leases=%s,%s", item.Name, otherLease, claim.LeaseID)
+			return core.Exit(3, "multiple github-codespaces claims bind recovery resource %s: leases=%s,%s", item.Name, otherLease, claim.LeaseID)
 		}
 		seen[key] = claim.LeaseID
 		servers = append(servers, b.mergeLiveServer(serverFromClaim(claim), item))
@@ -958,7 +958,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		err := func() error {
 			leaseID := strings.TrimSpace(listedServer.Labels["lease"])
 			if leaseID == "" {
-				return exit(3, "refusing to cleanup github-codespaces codespace=%s without a lease identity", listedServer.DisplayID())
+				return core.Exit(3, "refusing to cleanup github-codespaces codespace=%s without a lease identity", listedServer.DisplayID())
 			}
 			unlockOperation, err := lockGitHubCodespacesLeaseOperation(ctx, leaseID)
 			if err != nil {
@@ -966,12 +966,12 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			}
 			defer unlockOperation()
 
-			claim, ok, err := readLeaseClaimWithPresence(leaseID)
+			claim, ok, err := core.ReadLeaseClaimWithPresence(leaseID)
 			if err != nil {
 				return err
 			}
 			if !ok {
-				return exit(3, "refusing to cleanup github-codespaces codespace=%s without local claim", listedServer.DisplayID())
+				return core.Exit(3, "refusing to cleanup github-codespaces codespace=%s without local claim", listedServer.DisplayID())
 			}
 			server := serverFromClaim(claim)
 			pending := strings.TrimSpace(claim.CloudID) == "" && claim.Labels[labelRecovery] == recoveryPreCreate
@@ -987,18 +987,18 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 					return nil
 				}
 				if listedServer.CloudID != "" && listedServer.CloudID != pendingItem.Name {
-					return exit(2, "github-codespaces pending claim %s resource changed during cleanup; retry", leaseID)
+					return core.Exit(2, "github-codespaces pending claim %s resource changed during cleanup; retry", leaseID)
 				}
 				server = b.mergeLiveServer(server, pendingItem)
 			} else if listedServer.CloudID != "" && listedServer.CloudID != server.CloudID {
-				return exit(2, "github-codespaces claim %s resource changed during cleanup; retry", leaseID)
+				return core.Exit(2, "github-codespaces claim %s resource changed during cleanup; retry", leaseID)
 			}
 			if !pending {
 				if err := b.validateClaimForServer(claim, server, user); err != nil {
 					return err
 				}
 			}
-			shouldDelete, reason := shouldCleanupServer(server, now)
+			shouldDelete, reason := core.ShouldCleanupServer(server, now)
 			if !shouldDelete {
 				fmt.Fprintf(b.stderr(), "skip codespace=%s reason=%s\n", server.DisplayID(), reason)
 				return nil
@@ -1085,50 +1085,50 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	return nil
 }
 
-func shouldDiscardMissingClaim(claim LeaseClaim, now time.Time) (bool, string) {
+func shouldDiscardMissingClaim(claim core.LeaseClaim, now time.Time) (bool, string) {
 	server := serverFromClaim(claim)
 	server.Labels = cloneLabels(server.Labels)
 	server.Labels[labelState] = "provisioning"
-	return shouldCleanupServer(server, now)
+	return core.ShouldCleanupServer(server, now)
 }
 
-func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	_, api, user, err := b.controlPlane(ctx)
-	checks := []DoctorCheck{}
+	checks := []core.DoctorCheck{}
 	if err != nil {
-		return DoctorResult{
+		return core.DoctorResult{
 			Provider: providerName,
 			Status:   "failed",
 			Message:  "auth=failed control_plane=unchecked inventory=unchecked mutation=false",
-			Checks:   append(checks, DoctorCheck{Status: "failed", Check: "auth", Message: err.Error()}),
+			Checks:   append(checks, core.DoctorCheck{Status: "failed", Check: "auth", Message: err.Error()}),
 		}, err
 	}
-	repo, repoErr := b.resolveRepo(Repo{})
+	repo, repoErr := b.resolveRepo(core.Repo{})
 	if repoErr == nil {
 		if _, err := api.listMachines(ctx, repo, b.cfg.GitHubCodespaces.Ref); err != nil {
-			checks = append(checks, DoctorCheck{Status: "failed", Check: "machines", Message: err.Error(), Details: map[string]string{"repo": repo}})
-			return DoctorResult{Provider: providerName, Status: "failed", Message: "auth=ready control_plane=failed inventory=unchecked mutation=false", Checks: checks}, err
+			checks = append(checks, core.DoctorCheck{Status: "failed", Check: "machines", Message: err.Error(), Details: map[string]string{"repo": repo}})
+			return core.DoctorResult{Provider: providerName, Status: "failed", Message: "auth=ready control_plane=failed inventory=unchecked mutation=false", Checks: checks}, err
 		}
-		checks = append(checks, DoctorCheck{Status: "ok", Check: "machines", Details: map[string]string{"repo": repo}})
+		checks = append(checks, core.DoctorCheck{Status: "ok", Check: "machines", Details: map[string]string{"repo": repo}})
 	} else {
-		checks = append(checks, DoctorCheck{Status: "warning", Check: "repo", Message: repoErr.Error()})
+		checks = append(checks, core.DoctorCheck{Status: "warning", Check: "repo", Message: repoErr.Error()})
 	}
 	live, err := api.listCodespaces(ctx)
 	if err != nil {
-		checks = append(checks, DoctorCheck{Status: "failed", Check: "inventory", Message: err.Error()})
-		return DoctorResult{Provider: providerName, Status: "failed", Message: "auth=ready control_plane=ready inventory=failed mutation=false", Checks: checks}, err
+		checks = append(checks, core.DoctorCheck{Status: "failed", Check: "inventory", Message: err.Error()})
+		return core.DoctorResult{Provider: providerName, Status: "failed", Message: "auth=ready control_plane=ready inventory=failed mutation=false", Checks: checks}, err
 	}
 	leases := 0
 	servers, err := b.serversFromCodespaces(live)
 	if err != nil {
-		checks = append(checks, DoctorCheck{Status: "failed", Check: "claims", Message: err.Error()})
-		return DoctorResult{Provider: providerName, Status: "failed", Message: "auth=ready control_plane=ready inventory=unsafe mutation=false", Checks: checks}, err
+		checks = append(checks, core.DoctorCheck{Status: "failed", Check: "claims", Message: err.Error()})
+		return core.DoctorResult{Provider: providerName, Status: "failed", Message: "auth=ready control_plane=ready inventory=unsafe mutation=false", Checks: checks}, err
 	}
 	leases = len(servers)
-	claims, err := listLeaseClaims()
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
-		checks = append(checks, DoctorCheck{Status: "failed", Check: "claims", Message: err.Error()})
-		return DoctorResult{Provider: providerName, Status: "failed", Message: "auth=ready control_plane=ready inventory=unsafe mutation=false", Checks: checks}, err
+		checks = append(checks, core.DoctorCheck{Status: "failed", Check: "claims", Message: err.Error()})
+		return core.DoctorResult{Provider: providerName, Status: "failed", Message: "auth=ready control_plane=ready inventory=unsafe mutation=false", Checks: checks}, err
 	}
 	liveNames := make(map[string]struct{}, len(live))
 	for _, item := range live {
@@ -1140,8 +1140,8 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 			continue
 		}
 		if err := b.validateClaimScope(claim, user); err != nil {
-			checks = append(checks, DoctorCheck{Status: "failed", Check: "claim-scope", Message: err.Error(), Details: map[string]string{"lease": claim.LeaseID}})
-			return DoctorResult{Provider: providerName, Status: "failed", Message: "auth=ready control_plane=ready inventory=unsafe mutation=false", Checks: checks}, err
+			checks = append(checks, core.DoctorCheck{Status: "failed", Check: "claim-scope", Message: err.Error(), Details: map[string]string{"lease": claim.LeaseID}})
+			return core.DoctorResult{Provider: providerName, Status: "failed", Message: "auth=ready control_plane=ready inventory=unsafe mutation=false", Checks: checks}, err
 		}
 		name := strings.ToLower(strings.TrimSpace(claim.CloudID))
 		if name != "" {
@@ -1151,10 +1151,10 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 		}
 	}
 	if stranded > 0 {
-		checks = append(checks, DoctorCheck{Status: "warning", Check: "claims", Message: "local claims are absent from current GitHub Codespaces inventory", Details: map[string]string{"stranded": strconv.Itoa(stranded)}})
+		checks = append(checks, core.DoctorCheck{Status: "warning", Check: "claims", Message: "local claims are absent from current GitHub Codespaces inventory", Details: map[string]string{"stranded": strconv.Itoa(stranded)}})
 	}
-	checks = append(checks, DoctorCheck{Status: "ok", Check: "inventory", Details: map[string]string{"leases": strconv.Itoa(leases)}})
-	return DoctorResult{Provider: providerName, Message: fmt.Sprintf("auth=ready control_plane=ready inventory=ready api=list mutation=false leases=%d stranded=%d runtime=unchecked", leases, stranded), Checks: checks}, nil
+	checks = append(checks, core.DoctorCheck{Status: "ok", Check: "inventory", Details: map[string]string{"leases": strconv.Itoa(leases)}})
+	return core.DoctorResult{Provider: providerName, Message: fmt.Sprintf("auth=ready control_plane=ready inventory=ready api=list mutation=false leases=%d stranded=%d runtime=unchecked", leases, stranded), Checks: checks}, nil
 }
 
 func (b *backend) controlPlane(ctx context.Context) (githubCLI, codespacesAPI, githubUser, error) {
@@ -1178,7 +1178,7 @@ func (b *backend) controlPlane(ctx context.Context) (githubCLI, codespacesAPI, g
 	return gh, api, user, nil
 }
 
-func githubCodespacesTokenFromEnv(cfg GitHubCodespacesConfig) string {
+func githubCodespacesTokenFromEnv(cfg core.GitHubCodespacesConfig) string {
 	names := []string{"GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"}
 	if githubCodespacesUsesDotcomTokenEnv(cfg) {
 		names = []string{"GH_TOKEN", "GITHUB_TOKEN"}
@@ -1209,7 +1209,7 @@ func (b *backend) waitForAvailable(ctx context.Context, api codespacesAPI, name 
 				return true, nil
 			}
 			if codespaceTerminal(item.State) {
-				return false, exit(5, "github-codespaces codespace %s entered terminal state=%s", name, item.State)
+				return false, core.Exit(5, "github-codespaces codespace %s entered terminal state=%s", name, item.State)
 			}
 			return false, nil
 		}, nil)
@@ -1233,7 +1233,7 @@ func (b *backend) waitForStopped(ctx context.Context, api codespacesAPI, name st
 				return true, nil
 			}
 			if codespaceTerminal(item.State) {
-				return false, exit(5, "github-codespaces codespace %s entered terminal state=%s while stopping", name, item.State)
+				return false, core.Exit(5, "github-codespaces codespace %s entered terminal state=%s while stopping", name, item.State)
 			}
 			return false, nil
 		}, nil)
@@ -1272,10 +1272,10 @@ func waitForCodespaceDeleted(ctx context.Context, api codespacesAPI, name string
 	return err
 }
 
-func (b *backend) sshTargetWithConfig(ctx context.Context, gh githubCLI, codespaceName, repo string) (SSHTarget, string, error) {
+func (b *backend) sshTargetWithConfig(ctx context.Context, gh githubCLI, codespaceName, repo string) (core.SSHTarget, string, error) {
 	data, err := gh.codespaceSSHConfig(ctx, codespaceName)
 	if err != nil {
-		return SSHTarget{}, "", err
+		return core.SSHTarget{}, "", err
 	}
 	cfg := b.cfg
 	cfg = b.repoConfig(repo)
@@ -1290,17 +1290,17 @@ func (b *backend) sshPrerequisiteError(err error) error {
 	return fmt.Errorf("%w; github-codespaces requires an SSH server in the devcontainer image (for example ghcr.io/devcontainers/features/sshd:1) and git, rsync, and tar in the codespace", err)
 }
 
-func (b *backend) resolveRepo(repo Repo) (string, error) {
+func (b *backend) resolveRepo(repo core.Repo) (string, error) {
 	if configured := strings.TrimSpace(b.cfg.GitHubCodespaces.Repo); configured != "" {
 		if !validRepo(configured) {
-			return "", exit(2, "github-codespaces repo must be owner/name")
+			return "", core.Exit(2, "github-codespaces repo must be owner/name")
 		}
 		return configured, nil
 	}
 	if parsed := repoFromRemote(repo.RemoteURL); parsed != "" {
 		return parsed, nil
 	}
-	return "", exit(2, "github-codespaces repo is required; set githubCodespaces.repo or --github-codespaces-repo")
+	return "", core.Exit(2, "github-codespaces repo is required; set githubCodespaces.repo or --github-codespaces-repo")
 }
 
 func (b *backend) githubIdleTimeout() time.Duration {
@@ -1317,12 +1317,12 @@ func (b *backend) effectiveMachine() string {
 	if b.cfg.ServerTypeExplicit && strings.TrimSpace(b.cfg.ServerType) != "" {
 		return strings.TrimSpace(b.cfg.ServerType)
 	}
-	return firstNonEmpty(strings.TrimSpace(b.cfg.GitHubCodespaces.Machine), defaultCodespaceMachine)
+	return shared.FirstNonBlankTrimmed(strings.TrimSpace(b.cfg.GitHubCodespaces.Machine), defaultCodespaceMachine)
 }
 
 func (b *backend) effectiveWorkRoot(repo string) string {
 	workRoot := strings.TrimSpace(b.cfg.GitHubCodespaces.WorkRoot)
-	if workRootExplicit(&b.cfg) && strings.TrimSpace(b.cfg.WorkRoot) != "" && (workRoot == "" || workRoot == defaultWorkRoot) {
+	if core.IsWorkRootExplicit(&b.cfg) && strings.TrimSpace(b.cfg.WorkRoot) != "" && (workRoot == "" || workRoot == defaultWorkRoot) {
 		return strings.TrimSpace(b.cfg.WorkRoot)
 	}
 	repoName := repoName(repo)
@@ -1338,7 +1338,7 @@ func (b *backend) effectiveWorkRoot(repo string) string {
 	return workRoot
 }
 
-func (b *backend) repoConfig(repo string) Config {
+func (b *backend) repoConfig(repo string) core.Config {
 	cfg := b.cfg
 	cfg.GitHubCodespaces.WorkRoot = b.effectiveWorkRoot(repo)
 	cfg.WorkRoot = cfg.GitHubCodespaces.WorkRoot
@@ -1347,7 +1347,7 @@ func (b *backend) repoConfig(repo string) Config {
 
 func githubCodespacesDisplayName(leaseID, slug, recoveryNonce string) string {
 	const maxDisplayNameLength = 48
-	name := leaseProviderName(leaseID, slug)
+	name := core.LeaseProviderName(leaseID, slug)
 	const prefix = "crabbox-"
 	nonceHash := sha256.Sum256([]byte(recoveryNonce))
 	nonceSuffix := fmt.Sprintf("-%x", nonceHash[:8])
@@ -1387,7 +1387,7 @@ func (b *backend) labelsFor(leaseID, slug, repo, login string, keep bool, releas
 	if len(users) > 0 {
 		user = users[0]
 	}
-	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", keep, b.now().UTC())
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, b.now().UTC())
 	labels[labelState] = state
 	labels[labelRelease] = release
 	labels[labelCodespaceName] = item.Name
@@ -1398,12 +1398,12 @@ func (b *backend) labelsFor(leaseID, slug, repo, login string, keep bool, releas
 	if item.Owner.ID > 0 {
 		labels[labelOwnerID] = strconv.FormatInt(item.Owner.ID, 10)
 	}
-	labels[labelRepository] = firstNonEmpty(item.Repository.FullName, repo)
+	labels[labelRepository] = shared.FirstNonBlankTrimmed(item.Repository.FullName, repo)
 	if item.Repository.ID > 0 {
 		labels[labelRepositoryID] = strconv.FormatInt(item.Repository.ID, 10)
 	}
 	labels[labelRef] = strings.TrimSpace(b.cfg.GitHubCodespaces.Ref)
-	labels[labelMachine] = firstNonEmpty(item.Machine.Name, b.effectiveMachine())
+	labels[labelMachine] = shared.FirstNonBlankTrimmed(item.Machine.Name, b.effectiveMachine())
 	labels[labelLogin] = strings.TrimSpace(user.Login)
 	if user.ID > 0 {
 		labels[labelUserID] = strconv.FormatInt(user.ID, 10)
@@ -1412,24 +1412,24 @@ func (b *backend) labelsFor(leaseID, slug, repo, login string, keep bool, releas
 	return labels
 }
 
-func (b *backend) serverFromCodespace(item codespace, labels map[string]string) Server {
-	server := Server{
+func (b *backend) serverFromCodespace(item codespace, labels map[string]string) core.Server {
+	server := core.Server{
 		CloudID:  item.Name,
 		Provider: providerName,
 		Name:     item.Name,
 		Status:   item.State,
 		Labels:   cloneLabels(labels),
 	}
-	server.ServerType.Name = firstNonEmpty(item.Machine.Name, b.effectiveMachine())
+	server.ServerType.Name = shared.FirstNonBlankTrimmed(item.Machine.Name, b.effectiveMachine())
 	return server
 }
 
-func (b *backend) serversFromCodespaces(items []codespace) ([]LeaseView, error) {
-	claims, err := listLeaseClaims()
+func (b *backend) serversFromCodespaces(items []codespace) ([]core.LeaseView, error) {
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return nil, err
 	}
-	byName := map[string]LeaseClaim{}
+	byName := map[string]core.LeaseClaim{}
 	for _, claim := range claims {
 		if claim.Provider != providerName {
 			continue
@@ -1440,24 +1440,24 @@ func (b *backend) serversFromCodespaces(items []codespace) ([]LeaseView, error) 
 			continue
 		}
 		if cloudID == "" || labelName == "" || cloudID != labelName {
-			return nil, exit(3, "github-codespaces claim %s has inconsistent resource identity: cloud_id=%q label=%q", claim.LeaseID, cloudID, labelName)
+			return nil, core.Exit(3, "github-codespaces claim %s has inconsistent resource identity: cloud_id=%q label=%q", claim.LeaseID, cloudID, labelName)
 		}
 		key := strings.ToLower(cloudID)
 		if other, exists := byName[key]; exists {
-			return nil, exit(3, "multiple github-codespaces claims bind resource %s: leases=%s,%s", cloudID, other.LeaseID, claim.LeaseID)
+			return nil, core.Exit(3, "multiple github-codespaces claims bind resource %s: leases=%s,%s", cloudID, other.LeaseID, claim.LeaseID)
 		}
 		byName[key] = claim
 	}
-	servers := make([]LeaseView, 0, len(items))
+	servers := make([]core.LeaseView, 0, len(items))
 	seenLive := make(map[string]struct{}, len(items))
 	for _, item := range items {
 		name := strings.TrimSpace(item.Name)
 		if name == "" {
-			return nil, exit(3, "github-codespaces inventory returned a resource without a name")
+			return nil, core.Exit(3, "github-codespaces inventory returned a resource without a name")
 		}
 		key := strings.ToLower(name)
 		if _, exists := seenLive[key]; exists {
-			return nil, exit(3, "github-codespaces inventory returned duplicate resource name %s", name)
+			return nil, core.Exit(3, "github-codespaces inventory returned duplicate resource name %s", name)
 		}
 		seenLive[key] = struct{}{}
 		claim, ok := byName[key]
@@ -1469,32 +1469,32 @@ func (b *backend) serversFromCodespaces(items []codespace) ([]LeaseView, error) 
 		}
 		server := b.serverFromCodespace(item, cloneLabels(claim.Labels))
 		server.Labels[labelCodespaceName] = item.Name
-		server.Labels[labelEnvironmentID] = firstNonEmpty(item.EnvironmentID, server.Labels[labelEnvironmentID])
-		server.Labels[labelRepository] = firstNonEmpty(item.Repository.FullName, server.Labels[labelRepository])
-		server.Labels[labelMachine] = firstNonEmpty(item.Machine.Name, server.Labels[labelMachine])
+		server.Labels[labelEnvironmentID] = shared.FirstNonBlankTrimmed(item.EnvironmentID, server.Labels[labelEnvironmentID])
+		server.Labels[labelRepository] = shared.FirstNonBlankTrimmed(item.Repository.FullName, server.Labels[labelRepository])
+		server.Labels[labelMachine] = shared.FirstNonBlankTrimmed(item.Machine.Name, server.Labels[labelMachine])
 		servers = append(servers, server)
 	}
 	return servers, nil
 }
 
-func (b *backend) resolveServer(items []codespace, id string) (Server, string, error) {
+func (b *backend) resolveServer(items []codespace, id string) (core.Server, string, error) {
 	servers, err := b.serversFromCodespaces(items)
 	if err != nil {
-		return Server{}, "", err
+		return core.Server{}, "", err
 	}
-	server, leaseID, err := findServerByAlias(servers, id)
+	server, leaseID, err := core.FindServerByAlias(servers, id)
 	if err != nil {
-		return Server{}, "", err
+		return core.Server{}, "", err
 	}
 	if leaseID != "" || server.CloudID != "" {
 		return server, leaseID, nil
 	}
 	claim, ok, err := resolveUniqueGitHubCodespacesClaim(id)
 	if err != nil {
-		return Server{}, "", err
+		return core.Server{}, "", err
 	}
 	if ok {
-		name := firstNonEmpty(claim.CloudID, claim.Labels[labelCodespaceName])
+		name := shared.FirstNonBlankTrimmed(claim.CloudID, claim.Labels[labelCodespaceName])
 		for _, item := range items {
 			if item.Name == name {
 				return b.serverFromCodespace(item, cloneLabels(claim.Labels)), claim.LeaseID, nil
@@ -1508,18 +1508,18 @@ func (b *backend) resolveServer(items []codespace, id string) (Server, string, e
 		if item.Name == id {
 			claim, ok, err := resolveUniqueGitHubCodespacesClaim(item.Name)
 			if err != nil {
-				return Server{}, "", err
+				return core.Server{}, "", err
 			}
 			if !ok {
-				return Server{}, "", exit(3, "refusing unmanaged github-codespaces codespace=%s without local claim", item.Name)
+				return core.Server{}, "", core.Exit(3, "refusing unmanaged github-codespaces codespace=%s without local claim", item.Name)
 			}
 			return b.serverFromCodespace(item, cloneLabels(claim.Labels)), claim.LeaseID, nil
 		}
 	}
-	return Server{}, "", nil
+	return core.Server{}, "", nil
 }
 
-func (b *backend) mergeLiveServer(server Server, item codespace) Server {
+func (b *backend) mergeLiveServer(server core.Server, item codespace) core.Server {
 	server.CloudID = item.Name
 	server.Provider = providerName
 	server.Name = item.Name
@@ -1531,29 +1531,29 @@ func (b *backend) mergeLiveServer(server Server, item codespace) Server {
 	if item.ID > 0 {
 		server.Labels[labelCodespaceID] = strconv.FormatInt(item.ID, 10)
 	}
-	server.Labels[labelEnvironmentID] = firstNonEmpty(item.EnvironmentID, server.Labels[labelEnvironmentID])
+	server.Labels[labelEnvironmentID] = shared.FirstNonBlankTrimmed(item.EnvironmentID, server.Labels[labelEnvironmentID])
 	if item.Owner.ID > 0 {
 		server.Labels[labelOwnerID] = strconv.FormatInt(item.Owner.ID, 10)
 	}
-	server.Labels[labelRepository] = firstNonEmpty(item.Repository.FullName, server.Labels[labelRepository])
+	server.Labels[labelRepository] = shared.FirstNonBlankTrimmed(item.Repository.FullName, server.Labels[labelRepository])
 	if item.Repository.ID > 0 {
 		server.Labels[labelRepositoryID] = strconv.FormatInt(item.Repository.ID, 10)
 	}
-	server.Labels[labelMachine] = firstNonEmpty(item.Machine.Name, server.Labels[labelMachine])
-	server.ServerType.Name = firstNonEmpty(item.Machine.Name, server.ServerType.Name)
+	server.Labels[labelMachine] = shared.FirstNonBlankTrimmed(item.Machine.Name, server.Labels[labelMachine])
+	server.ServerType.Name = shared.FirstNonBlankTrimmed(item.Machine.Name, server.ServerType.Name)
 	return server
 }
 
-func (b *backend) validateClaimForServer(claim LeaseClaim, server Server, user githubUser) error {
+func (b *backend) validateClaimForServer(claim core.LeaseClaim, server core.Server, user githubUser) error {
 	if err := b.validateClaimScope(claim, user); err != nil {
 		return err
 	}
 	if strings.TrimSpace(claim.CloudID) != "" && server.CloudID != "" && claim.CloudID != server.CloudID {
-		return exit(3, "github-codespaces claim cloud id mismatch: claim=%s live=%s", claim.CloudID, server.CloudID)
+		return core.Exit(3, "github-codespaces claim cloud id mismatch: claim=%s live=%s", claim.CloudID, server.CloudID)
 	}
 	expectedName := strings.TrimSpace(claim.Labels[labelCodespaceName])
 	if expectedName != "" && server.CloudID != "" && expectedName != server.CloudID {
-		return exit(3, "github-codespaces claim codespace mismatch: claim=%s live=%s", expectedName, server.CloudID)
+		return core.Exit(3, "github-codespaces claim codespace mismatch: claim=%s live=%s", expectedName, server.CloudID)
 	}
 	return nil
 }
@@ -1565,7 +1565,7 @@ func (b *backend) stderr() io.Writer {
 	return io.Discard
 }
 
-func githubCodespacesDeleteOnRelease(lease LeaseTarget, cfg Config) bool {
+func githubCodespacesDeleteOnRelease(lease core.LeaseTarget, cfg core.Config) bool {
 	if deleteOnReleaseExplicit(cfg) {
 		return cfg.GitHubCodespaces.DeleteOnRelease
 	}
@@ -1608,10 +1608,10 @@ func codespaceTerminal(state string) bool {
 
 func validateStopPreservesCodespace(item codespace) error {
 	if item.RetentionPeriodMinutes == nil {
-		return exit(3, "refusing to stop github-codespaces codespace=%s without an effective retention period", item.Name)
+		return core.Exit(3, "refusing to stop github-codespaces codespace=%s without an effective retention period", item.Name)
 	}
 	if *item.RetentionPeriodMinutes <= 0 {
-		return exit(3, "refusing to stop github-codespaces codespace=%s because effective retention is zero", item.Name)
+		return core.Exit(3, "refusing to stop github-codespaces codespace=%s because effective retention is zero", item.Name)
 	}
 	return nil
 }
@@ -1631,18 +1631,18 @@ func (e *unsafeCodespaceDeleteError) Unwrap() error {
 func validateDeleteSafe(item codespace) error {
 	status := item.GitStatus
 	if !status.deletionSafetyKnown() {
-		return &unsafeCodespaceDeleteError{err: exit(3, "refusing to delete github-codespaces codespace=%s because Git status safety fields are missing", item.Name)}
+		return &unsafeCodespaceDeleteError{err: core.Exit(3, "refusing to delete github-codespaces codespace=%s because Git status safety fields are missing", item.Name)}
 	}
 	if status.HasUncommittedChanges || status.HasUnpushedChanges || status.Ahead > 0 {
-		return &unsafeCodespaceDeleteError{err: exit(3, "refusing to delete github-codespaces codespace=%s with uncommitted or unpushed changes", item.Name)}
+		return &unsafeCodespaceDeleteError{err: core.Exit(3, "refusing to delete github-codespaces codespace=%s with uncommitted or unpushed changes", item.Name)}
 	}
 	return nil
 }
 
-func validateCodespaceClaimResource(claim LeaseClaim, item codespace) error {
+func validateCodespaceClaimResource(claim core.LeaseClaim, item codespace) error {
 	expectedName := strings.TrimSpace(claim.Labels[labelCodespaceName])
 	if expectedName == "" || strings.TrimSpace(claim.CloudID) != expectedName || strings.TrimSpace(item.Name) != expectedName {
-		return exit(4, "refusing github-codespaces delete for lease=%s after resource identity changed", claim.LeaseID)
+		return core.Exit(4, "refusing github-codespaces delete for lease=%s after resource identity changed", claim.LeaseID)
 	}
 	for _, identity := range []struct {
 		label string
@@ -1656,20 +1656,20 @@ func validateCodespaceClaimResource(claim LeaseClaim, item codespace) error {
 	} {
 		expected := strings.TrimSpace(claim.Labels[identity.label])
 		if expected == "" || strings.TrimSpace(identity.live) == "" {
-			return exit(4, "refusing github-codespaces mutation for lease=%s without complete %s identity", claim.LeaseID, identity.name)
+			return core.Exit(4, "refusing github-codespaces mutation for lease=%s without complete %s identity", claim.LeaseID, identity.name)
 		}
 		if strings.TrimSpace(identity.live) != expected {
-			return exit(4, "refusing github-codespaces delete for lease=%s after %s changed", claim.LeaseID, identity.name)
+			return core.Exit(4, "refusing github-codespaces delete for lease=%s after %s changed", claim.LeaseID, identity.name)
 		}
 	}
 	return nil
 }
 
-func serverFromClaim(claim LeaseClaim) Server {
-	server := Server{
-		CloudID:  firstNonEmpty(claim.CloudID, claim.Labels[labelCodespaceName]),
+func serverFromClaim(claim core.LeaseClaim) core.Server {
+	server := core.Server{
+		CloudID:  shared.FirstNonBlankTrimmed(claim.CloudID, claim.Labels[labelCodespaceName]),
 		Provider: providerName,
-		Name:     firstNonEmpty(claim.CloudID, claim.Labels[labelCodespaceName]),
+		Name:     shared.FirstNonBlankTrimmed(claim.CloudID, claim.Labels[labelCodespaceName]),
 		Status:   claim.Labels[labelState],
 		Labels:   cloneLabels(claim.Labels),
 	}
@@ -1709,7 +1709,7 @@ func cloneLabels(labels map[string]string) map[string]string {
 	return out
 }
 
-func repoRootForClaim(repo Repo) (string, error) {
+func repoRootForClaim(repo core.Repo) (string, error) {
 	if strings.TrimSpace(repo.Root) != "" {
 		return repo.Root, nil
 	}

@@ -2,11 +2,77 @@
 
 ## Unreleased
 
-- Daytona: attest API-key cleanup through current-key organization metadata and retire acquired fixed leases after verified native TTL or external deletion; inspection records a terminal tombstone without issuing deletion or reusing the fixed ID. [PR 2111](https://github.com/openclaw/crabbox/pull/2111). Thanks @steipete.
-- Show Freestyle and Crownest settings through a shared offline JSON/text display path, preserving zero and false values while redacting URLs and reporting only loaded key presence. [PR 2104](https://github.com/openclaw/crabbox/pull/2104). Thanks @steipete.
-- Retain recognized workspace-owner protocol states in child and phase-witness inspection errors, improving diagnostics without changing ownership decisions or retry behavior. [PR 2106](https://github.com/openclaw/crabbox/pull/2106). Thanks @steipete.
-
 - Daytona: omit unverified default class labels from snapshot forks and document opt-in workload concurrency and memory limits. [PR 2114](https://github.com/openclaw/crabbox/pull/2114). Thanks @Patrick-Erichsen.
+
+## 0.58.0 - 2026-09-12
+
+### Highlights
+
+- **Keep run history after a lease is gone.** Opt into private local logs and parsed results with `--record-local`, then read them offline without a coordinator.
+- **See which container image actually ran.** Docker and Podman evidence now distinguishes the requested image reference from the runtime image ID and reported repository digests, and keeps that snapshot after cleanup.
+- **More reliable cleanup and lease recovery.** Finish AWS cleanup when an instance has already disappeared, recover eligible legacy cleanup from original allocation evidence, and recognize repeated fixed-ID coordinator requests without creating another machine.
+- **Smoother sync and artifact collection on macOS.** Avoid scanning unrelated files in crowded directories, handle socket and FIFO state paths safely, and keep artifact matching consistent with the stock shell.
+
+### Upgrade notes
+
+- Local recording is off by default. Use `crabbox run --record-local -- <command>` or enable `history.local.enabled` in trusted user configuration; repository configuration cannot opt you in. Retained command output is not automatically secret-redacted. Read it with `history`, `logs`, or `results --source local`; default retention is 100 inactive records, 256 MiB, and 30 days. [PR 2141](https://github.com/openclaw/crabbox/pull/2141).
+- Setting `XDG_STATE_HOME` now also selects the root for generated lease SSH keys and host trust. Keep the same root through acquisition, reuse, and cleanup; switching roots does not migrate existing keys or discover leases from the old root. Unset defaults and user-supplied keys keep their existing paths. [PR 2164](https://github.com/openclaw/crabbox/pull/2164).
+- AWS legacy cleanup recovery is administrator-only and requires authenticated evidence of the original allocation. Missing account or Region authority leaves cleanup unresolved; an absent instance alone does not prove that owned keys and access resources are cleaned up. [PR 1904](https://github.com/openclaw/crabbox/pull/1904), [PR 1975](https://github.com/openclaw/crabbox/pull/1975).
+
+### Changes
+
+- Add private local run history with bounded logs, parsed results, explicit source provenance, and offline readback after lease cleanup. Support `--source local|coordinator|all`, bounded pruning, and deletion of inactive records while preserving existing coordinator defaults. [PR 2141](https://github.com/openclaw/crabbox/pull/2141). Thanks @coygeek.
+- Record Docker and Podman creation references, runtime image IDs, and reported repository digests in run evidence, timing JSON, retained inspection, and opt-in local history. Preserve the initial snapshot through bootstrap and cleanup; unavailable digests remain explicit, and the observation is not a signed filesystem attestation. [PR 2202](https://github.com/openclaw/crabbox/pull/2202). Thanks @coygeek.
+- Add a credential-free local-container quickstart skill and make both Crabbox skills discoverable by installers, with validated catalog metadata and an installation guide that works on narrow screens. [PR 1911](https://github.com/openclaw/crabbox/pull/1911). Thanks @zozo123.
+- AWS: complete cleanup after a verified empty instance response without skipping owned keys, bind new leases to their original account and Region, and recover eligible legacy cleanup using original CloudTrail allocation evidence with an atomic recovery audit. [PR 1904](https://github.com/openclaw/crabbox/pull/1904), [PR 1975](https://github.com/openclaw/crabbox/pull/1975). Thanks @vincentkoc.
+- Keep portable workspace ownership exclusive when a runner reports successful directory creation after losing a creation race. [PR 2201](https://github.com/openclaw/crabbox/pull/2201).
+- Recognize identical fixed-ID coordinator replays of terminal leases separately from conflicting create requests, without repeating provider creation. [PR 1925](https://github.com/openclaw/crabbox/pull/1925). Thanks @Melbourneandrew.
+- Honor an explicit `XDG_STATE_HOME` for generated lease SSH keys and host trust, including isolated-root reuse and cleanup, while retaining private storage permissions. [PR 2164](https://github.com/openclaw/crabbox/pull/2164). Thanks @coygeek.
+- Resolve macOS managed-state path spelling with bounded metadata queries instead of scanning sibling files. Handle Unix sockets and FIFOs without opening them, so crowded temporary directories do not block sync preparation. [PR 2187](https://github.com/openclaw/crabbox/pull/2187), [PR 2207](https://github.com/openclaw/crabbox/pull/2207).
+- Collect nested artifact globs from safe literal directory prefixes without traversing unrelated siblings. Keep matching case-sensitive on macOS when `nocaseglob` is enabled, while preserving explicit `nocasematch` behavior, archive membership, and collection limits. [PR 2162](https://github.com/openclaw/crabbox/pull/2162), [PR 2208](https://github.com/openclaw/crabbox/pull/2208). Thanks @vincentkoc.
+- Nomad: bound finite control-plane requests, retain durable recovery identity when registration is uncertain, and preserve caller cancellation and established execution streams. [PR 1916](https://github.com/openclaw/crabbox/pull/1916). Thanks @SebTardif.
+- GCP: preserve capacity fallback when a bounded error summary omits retry evidence, while keeping displayed diagnostics redacted and bounded. [PR 1987](https://github.com/openclaw/crabbox/pull/1987). Thanks @steipete.
+- Linode: record the actual selected instance type when an explicit type contains only whitespace. [PR 2186](https://github.com/openclaw/crabbox/pull/2186).
+
+### Maintenance
+
+- Consolidate shared provider configuration, SSH access, cleanup, storage, and coordinator helpers, preserving provider-owned behavior and existing CLI, configuration, and wire formats. [PR 2171](https://github.com/openclaw/crabbox/pull/2171), [PR 2205](https://github.com/openclaw/crabbox/pull/2205). Thanks @steipete.
+- Remove obsolete provider and checkpoint forwarding layers and strengthen cross-platform fixtures, lifecycle checks, and coordinator storage tests. [PR 2204](https://github.com/openclaw/crabbox/pull/2204), [PR 2206](https://github.com/openclaw/crabbox/pull/2206). Thanks @steipete.
+
+## 0.57.0 - 2026-09-11
+
+### Highlights
+
+- **Run commands on existing Daytona fixed-ID leases.** The new `crabbox exec` streams commands without workspace sync or hydration and keeps repository ownership protected until transport cleanup finishes.
+- **Smoother XFCE desktops.** Prevent duplicate panels and notification-area warnings, start the visible terminal inside the desktop session, and refresh panel styling without restarting the rest of the desktop.
+- **Safer Daytona fixed-lease cleanup and expiry recovery.** Verify API-key organization identity during cleanup, reconcile leases deleted by native TTL or external actions, and use `stop --current-repo` for repository-scoped cleanup.
+- **See more provider settings offline.** Inspect Freestyle, Crownest, OpenComputer, OpenSandbox, and CUA configuration in text and JSON, including providers that are not currently selected.
+
+### Upgrade notes
+
+- `exec` initially supports completed direct Daytona fixed-ID Linux leases; `stop --current-repo` provides repository-scoped cleanup for that direct fixed-ID route. Check capabilities with `crabbox exec --check --provider daytona` before allocating; other providers, ordinary leases, coordinator routes, and Windows targets are not supported by these execution and cleanup modes. [PR 2119](https://github.com/openclaw/crabbox/pull/2119).
+- `exec` leaves the SSH account's initial working directory unchanged and requires piped or redirected stdin; use `</dev/null` when no input is needed and an explicit shell command to change directories. Non-PTY streams preserve bytes; `--pty` uses terminal semantics. [PR 2119](https://github.com/openclaw/crabbox/pull/2119).
+- Daytona fixed-lease cleanup with API keys requires organization metadata from the current-key endpoint. Older servers that omit it require an OAuth organization profile for cleanup; a bare 404 or elapsed TTL does not prove that a sandbox has been removed. [PR 2111](https://github.com/openclaw/crabbox/pull/2111).
+- New XFCE bootstrap runs retain `crabbox-desktop-session.service` as an alias of `crabbox-desktop.service` so released clients can still reset the desktop. Panel refresh does not clear existing terminal color or menu caches. [PR 2117](https://github.com/openclaw/crabbox/pull/2117).
+
+### Changes
+
+- Add `crabbox exec` for commands on completed Daytona fixed-ID leases without workspace sync or hydration. Forward non-PTY streams without rewriting their bytes, resolve fresh SSH access, and retain the repository claim through command execution and local transport cleanup. [PR 2119](https://github.com/openclaw/crabbox/pull/2119). Thanks @steipete.
+- Add offline `exec --check` capability discovery and `stop --current-repo` cleanup for supported fixed-ID leases. Validate repository ownership under the same lock used for deletion, so cleanup waits for active `exec` commands and a previous owner cannot delete a lease after another repository reclaims it. [PR 2119](https://github.com/openclaw/crabbox/pull/2119). Thanks @steipete.
+- Let XFCE own its panel, window manager, desktop renderer, and visible-terminal autostart. Apply theme changes through the matching user session, restart only the existing panel when its CSS changes, and leave unchanged styling alone to prevent duplicate components and notification-area warnings. [PR 2117](https://github.com/openclaw/crabbox/pull/2117). Thanks @steipete.
+- Daytona: verify fixed-lease cleanup with API keys against current-key organization metadata and reconcile acquired fixed leases after confirmed native TTL or external deletion. Inspection records a terminal tombstone without issuing deletion or recreating the fixed ID; incomplete or ambiguous cleanup retains the claim. [PR 2111](https://github.com/openclaw/crabbox/pull/2111). Thanks @steipete.
+- Show Freestyle, Crownest, OpenComputer, OpenSandbox, and CUA settings in offline `config show` text and JSON, including unselected providers. Preserve explicit zero/false values and URL redaction, report only already-loaded key presence, and avoid credential discovery, external default resolution, or SDK bridge execution. [PR 2104](https://github.com/openclaw/crabbox/pull/2104), [PR 2112](https://github.com/openclaw/crabbox/pull/2112). Thanks @steipete.
+- Include recognized workspace-owner protocol states in child and phase-witness inspection errors, making ownership failures easier to diagnose while preserving ownership decisions and retry behavior. [PR 2106](https://github.com/openclaw/crabbox/pull/2106). Thanks @steipete.
+
+### Maintenance
+
+- Go installation verification: retry recognized checksum-service and module-ZIP HTTP/2 interruptions once during dependency download, retaining checksum enforcement and the unchanged offline install checks. [PR 2113](https://github.com/openclaw/crabbox/pull/2113), [PR 2118](https://github.com/openclaw/crabbox/pull/2118). Thanks @steipete.
+- Move existing local, cloud, VPS, and runtime configuration displays into provider adapters while preserving published fields, text positions, redaction, and zero/false/null/empty values. [PR 2110](https://github.com/openclaw/crabbox/pull/2110), [PR 2116](https://github.com/openclaw/crabbox/pull/2116), [PR 2120](https://github.com/openclaw/crabbox/pull/2120), [PR 2121](https://github.com/openclaw/crabbox/pull/2121), [PR 2127](https://github.com/openclaw/crabbox/pull/2127). Thanks @steipete.
+- Share default and compact JSON request construction across provider adapters while retaining exact wire formats, nil-body handling, request replay, and provider-owned authentication, timeout, and retry policies. [PR 2122](https://github.com/openclaw/crabbox/pull/2122), [PR 2124](https://github.com/openclaw/crabbox/pull/2124), [PR 2125](https://github.com/openclaw/crabbox/pull/2125). Thanks @steipete.
+- Share buffered JSON response decoding for E2B, CubeSandbox, and Azure Dynamic Sessions while keeping body closing, successful header copies, and typed API errors in their adapters. [PR 2126](https://github.com/openclaw/crabbox/pull/2126). Thanks @steipete.
+- Reuse the shared exact tag codecs in DigitalOcean, Linode, and Scaleway without changing their tag formats. [PR 2091](https://github.com/openclaw/crabbox/pull/2091). Thanks @vincentkoc.
+- Select Linode paginated resource types at their call sites, preserving page traversal, ordering, duplicates, and results collected before a later page fails. [PR 2123](https://github.com/openclaw/crabbox/pull/2123). Thanks @steipete.
+- Reuse shared loopback-host validation and request-envelope test assertions while preserving URL validation errors and exact wire checks. [PR 2129](https://github.com/openclaw/crabbox/pull/2129), [PR 2130](https://github.com/openclaw/crabbox/pull/2130). Thanks @vincentkoc and @steipete.
 
 ## 0.56.0 - 2026-09-11
 

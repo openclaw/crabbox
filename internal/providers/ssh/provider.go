@@ -13,7 +13,7 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) SupportsArchitecture(cfg Config, architecture string) bool {
+func (Provider) SupportsArchitecture(cfg core.Config, architecture string) bool {
 	if architecture != core.ArchitectureAMD64 && architecture != core.ArchitectureARM64 {
 		return false
 	}

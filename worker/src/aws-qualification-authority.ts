@@ -2,7 +2,6 @@ import { AwsClient } from "aws4fetch";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { XMLParser } from "fast-xml-parser";
 
-import { sha256Hex } from "./auth";
 import {
   awsQualificationAttestationVersion,
   awsQualificationInstanceTypes,
@@ -19,6 +18,7 @@ import {
   type AWSQualificationService,
 } from "./aws-qualification-contract";
 import { requireAWSRegion } from "./aws-region";
+import { sha256Hex } from "./encoding";
 import type { AWSCredentials } from "./types";
 
 const ec2Version = "2016-11-15";
@@ -53,7 +53,15 @@ const maxActiveImages = 1;
 const maxActiveSnapshots = 1;
 const reconciliationBackoffMs = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000] as const;
 const inventoryBackoffMs = reconciliationBackoffMs;
-const parser = new XMLParser({ ignoreAttributes: false });
+const parser = new XMLParser({
+  ignoreAttributes: false,
+  // AWS account IDs are decimal-looking identifiers. Undefined preserves their lexical form.
+  tagValueProcessor: (_tagName, _value, jPath) =>
+    jPath === "GetCallerIdentityResponse.GetCallerIdentityResult.Account" ||
+    jPath === "DescribeInstancesResponse.reservationSet.item.ownerId"
+      ? undefined
+      : _value,
+});
 const requestKeys = new Set(["action", "opId", "parameters", "region", "service"]);
 
 const allowedEC2Actions = new Set([
@@ -666,6 +674,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
           normalizedRequest.action,
           result.body,
           authorized.parameters,
+          policy.accountId,
         );
       }
       await this.ctx.storage.put(ledgerKey, ledger);
@@ -1347,7 +1356,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       for (const result of [instances, images, snapshots, volumes, keys]) {
         if (result.status >= 300) throw new Error(`inventory http ${result.status}`);
       }
-      ledger.instanceIds = reservationsFromXML(instances.body)
+      ledger.instanceIds = reservationsFromXML(instances.body, run.policy.accountId)
         .flatMap((reservation) => items(record(reservation["instancesSet"])["item"]).map(record))
         .filter((instance) => asString(record(instance["instanceState"])["name"]) !== "terminated")
         .map((instance) => asString(instance["instanceId"]))
@@ -1436,7 +1445,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     });
     const result = await boundedResponse(response);
     if (result.status < 200 || result.status >= 300) return false;
-    const instances = reservationsFromXML(result.body)
+    const instances = reservationsFromXML(result.body, policy.accountId)
       .flatMap((reservation) => items(record(reservation["instancesSet"])["item"]).map(record))
       .filter((instance) => {
         const tags = awsTagMap(instance["tagSet"]);
@@ -1518,9 +1527,15 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     } else {
       missing.delete(instanceId);
       if (result.status >= 200 && result.status < 300) {
-        updateLedgerFromResponse(ledger, "DescribeInstances", result.body, {
-          "InstanceId.1": instanceId,
-        });
+        updateLedgerFromResponse(
+          ledger,
+          "DescribeInstances",
+          result.body,
+          {
+            "InstanceId.1": instanceId,
+          },
+          policy.accountId,
+        );
       }
     }
     await this.reconcilePendingTerminationInstances(policy, ledger, instanceIds.slice(1), missing);
@@ -1548,9 +1563,15 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     if (isMissingInstance(result)) {
       retireInstance(ledger, instanceId);
     } else if (result.status >= 200 && result.status < 300) {
-      updateLedgerFromResponse(ledger, "DescribeInstances", result.body, {
-        "InstanceId.1": instanceId,
-      });
+      updateLedgerFromResponse(
+        ledger,
+        "DescribeInstances",
+        result.body,
+        {
+          "InstanceId.1": instanceId,
+        },
+        policy.accountId,
+      );
     }
     await this.confirmRequestedInstanceAbsenceEntries(policy, ledger, instanceIds.slice(1));
   }
@@ -2161,6 +2182,7 @@ function updateLedgerFromResponse(
   action: string,
   body: string,
   parameters: Record<string, unknown>,
+  expectedAccountId?: string,
 ): void {
   const root = awsXMLRoot(body, action);
   if (action === "RunInstances") {
@@ -2196,7 +2218,7 @@ function updateLedgerFromResponse(
     );
   }
   if (action === "DescribeInstances") {
-    const described = items(record(root["reservationSet"])["item"])
+    const described = reservationsFromRoot(root, expectedAccountId)
       .flatMap((reservation) => items(record(record(reservation)["instancesSet"])["item"]))
       .map(record);
     const states = new Map(
@@ -2875,8 +2897,29 @@ function imageSnapshotIDs(image: Record<string, unknown>): string[] {
     .filter(Boolean);
 }
 
-function reservationsFromXML(body: string): Record<string, unknown>[] {
-  return items(record(awsXMLRoot(body, "DescribeInstances")["reservationSet"])["item"]).map(record);
+function reservationsFromXML(body: string, expectedAccountId: string): Record<string, unknown>[] {
+  return reservationsFromRoot(awsXMLRoot(body, "DescribeInstances"), expectedAccountId);
+}
+
+function reservationsFromRoot(
+  root: Record<string, unknown>,
+  expectedAccountId?: string,
+): Record<string, unknown>[] {
+  const reservations = items(record(root["reservationSet"])["item"]).map(record);
+  if (!expectedAccountId) return reservations;
+  for (const reservation of reservations) {
+    if (reservation["ownerId"] === undefined) continue;
+    const ownerId = asString(reservation["ownerId"]);
+    if (!/^\d{12}$/.test(ownerId)) {
+      throw new Error("AWS qualification DescribeInstances reservation owner is malformed");
+    }
+    if (ownerId !== expectedAccountId) {
+      throw new Error(
+        "AWS qualification DescribeInstances reservation owner does not match the qualification account",
+      );
+    }
+  }
+  return reservations;
 }
 
 function canonicalJSON(value: unknown): string {

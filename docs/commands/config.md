@@ -26,6 +26,12 @@ report that override exactly as supplied, including a relative or symlink path.
 Without an override, they report the absolute OS user-config path. Reporting a
 path does not create the file or change its trust classification.
 
+`XDG_STATE_HOME` independently selects the local runtime-state root, including
+generated per-lease SSH keys and host trust. It must be an absolute operator-owned
+path; it is not a repository configuration option. Without it, existing OS
+default locations remain unchanged. See [SSH keys](../features/ssh-keys.md) for
+privacy requirements and why changing roots does not migrate or find old keys.
+
 ## config show
 
 Prints the merged effective configuration with secret values redacted:
@@ -71,6 +77,15 @@ Zero sizing remains zero rather than a guessed service-plan default. Crownest
 shows its loaded URL, project, template, timeout and cleanup preference without
 looking up credentials. Zero timeout and explicit false remain visible. URLs
 are redacted; these values are configuration, not live-provider proof.
+
+OpenComputer, OpenSandbox and CUA expose their loaded settings in the JSON
+`openComputer`, `openSandbox` and `cua` sections and corresponding lowercase
+text lines, even when unselected. URLs are redacted; raw zero, false and empty
+values are not replaced with service defaults. These sections do not discover
+credentials or read external CLI configuration. CUA's bridge command and SDK
+package/import names are configured references, not evidence that an executable
+or SDK is installed or working. Displaying them does not execute the bridge or
+enable CUA provisioning.
 
 ### Offline provider status
 
@@ -269,6 +284,12 @@ file is written with `0600` permissions, and `crabbox doctor` flags it when the
 permissions are broader than that.
 
 ## Repo-local config
+
+Private local run recording is off by default. Set `history.local.enabled: true`
+only in your user config to enable it for runs; repository files cannot change
+this policy. An explicit `run --record-local=false` overrides the user setting.
+See [local history](../features/history-logs.md#private-local-history) for storage
+bounds, output scope, and offline readers.
 
 User config holds machine-wide defaults and secrets; repo-local config holds
 project-specific, checkout-shareable settings. Keep sync rules, environment

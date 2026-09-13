@@ -76,7 +76,7 @@ func (a App) syncPlan(ctx context.Context, args []string) error {
 		return err
 	}
 	if *limit <= 0 {
-		return exit(2, "sync-plan --limit must be positive")
+		return Exit(2, "sync-plan --limit must be positive")
 	}
 	cfg, err := loadConfig()
 	if err != nil {
@@ -92,7 +92,7 @@ func (a App) syncPlan(ctx context.Context, args []string) error {
 	}
 	manifest, err := syncManifestFilteredRules(boundary.root, excludes, syncIncludes(cfg))
 	if err != nil {
-		return exit(6, "build sync file list: %v", err)
+		return Exit(6, "build sync file list: %v", err)
 	}
 	files, dirs := syncPlanRows(boundary.root, manifest, *limit)
 	if *jsonOut {

@@ -17,6 +17,30 @@ crabbox stop --provider ssh --static-host mac-studio.local mac-studio.local
 
 `crabbox release` is a compatibility alias for `crabbox stop`.
 
+## Repository-scoped cleanup
+
+Ordinary `stop` is an administrative lease operation: changing the current
+directory does not restrict it to that repository's claims. Integrations that
+must not clean up a lease after another checkout reclaims it use:
+
+```sh
+crabbox stop --current-repo --id cbx_0a1b2c3d4e5f
+```
+
+This mode requires a canonical fixed-ID lease and a supported provider. The
+release owner validates the current repository under the same exclusive claim
+fence used for deletion, before provider or connection cleanup. A transfer that
+finishes first makes the previous repository's cleanup fail. A running
+[`exec`](exec.md) keeps this release waiting until its transport has finished.
+Validated terminal tombstones are safe, side-effect-free successes even when a
+compact tombstone no longer retains a repository path.
+
+Direct Daytona fixed-ID leases initially support this mode. Other providers,
+ordinary non-fixed claims, coordinator routes, and recovery/controller identity
+flag combinations are rejected. Query `crabbox exec --check` before allocation
+and require `currentRepoStop: true` when integrating fixed-ID lifecycle cleanup.
+Ordinary administrative `stop` remains unchanged.
+
 For coordinator-backed leases, the preliminary lookup has a ten-second budget.
 If it stalls, ordinary stop warns and proceeds through the existing
 provider-scoped release request. Provider identity mismatches still block
@@ -239,6 +263,7 @@ for marker paths, Linux egress process-matching scope, and Tailscale limits.
 ```text
 --provider <name>          provider to act against (see crabbox providers)
 --id <lease-or-slug>        lease ID or slug (equivalent to the positional arg)
+--current-repo              restrict fixed-ID cleanup to its current repository owner
 --reclaim                   explicitly adopt a provider resource when that provider supports safe stop adoption
 --force                     recover one exact resource through verified provider adoption or an inspected coordinator lease
 --target linux|macos|windows

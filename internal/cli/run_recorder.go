@@ -40,6 +40,7 @@ type runRecorder struct {
 	leaseSlug          string
 	leaseProvider      string
 	finished           bool
+	terminalConfirmed  bool
 	warned             bool
 	warnMu             sync.Mutex
 	publisher          *runEventPublisher
@@ -75,7 +76,7 @@ func (r *runRecorder) UseCoordinator(coord *CoordinatorClient) error {
 		return nil
 	}
 	if r.createBaseURL != "" && strings.TrimRight(coord.BaseURL, "/") != r.createBaseURL {
-		return exit(7, "run admission %s belongs to a different coordinator; restore the original route", r.requestedRunID)
+		return Exit(7, "run admission %s belongs to a different coordinator; restore the original route", r.requestedRunID)
 	}
 	r.coord = coord
 	return nil
@@ -111,9 +112,9 @@ func (r *runRecorder) requireHandle() error {
 		return nil
 	}
 	if r.createErr != nil {
-		return exit(7, "run admission %s unavailable before command: %v", r.requestedRunID, r.createErr)
+		return Exit(7, "run admission %s unavailable before command: %v", r.requestedRunID, r.createErr)
 	}
-	return exit(7, "run history unavailable before command; refusing execution without a coordinator run handle")
+	return Exit(7, "run history unavailable before command; refusing execution without a coordinator run handle")
 }
 
 func (r *runRecorder) Event(kind, phase, message string) {
@@ -157,7 +158,7 @@ func (r *runRecorder) AttachLease(ctx context.Context, leaseID, slug string, cfg
 	}
 	if r.runID == "" && r.createPending && r.coord != nil && leaseID != "" {
 		if err := r.createRun(ctx, leaseID, cfg); err != nil {
-			return exit(7, "run admission %s unavailable before command: %v", r.requestedRunID, err)
+			return Exit(7, "run admission %s unavailable before command: %v", r.requestedRunID, err)
 		}
 	}
 
@@ -183,7 +184,7 @@ func (r *runRecorder) AttachLease(ctx context.Context, leaseID, slug string, cfg
 	needsBinding := r.leaseID != leaseID || r.leaseSlug != slug || r.leaseProvider != cfg.Provider
 	if needsBinding {
 		if err := r.publisher.Bind(ctx, r.coord, r.runID, input); err != nil {
-			return exit(7, "run history lease attribution failed for %s: %v", r.runID, err)
+			return Exit(7, "run history lease attribution failed for %s: %v", r.runID, err)
 		}
 	} else {
 		r.publisher.append(r.coord, r.runID, input)
@@ -276,6 +277,7 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 		_, finishErr := r.coord.FinishRun(ctx, r.runID, exitCode, sync, command, log, truncated, results, telemetry, classification, receipt)
 		if finishErr == nil && receipt == nil {
 			r.finished = true
+			r.terminalConfirmed = true
 			return nil
 		}
 		lastErr = nil
@@ -288,6 +290,7 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 			if receiptErr == nil {
 				if committed == *receipt {
 					r.finished = true
+					r.terminalConfirmed = true
 					return nil
 				}
 				lastErr = fmt.Errorf("stored terminal receipt differs from the signed finish payload")
@@ -311,7 +314,7 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 		}
 	}
 	lastErr = errors.Join(lastErr, ctx.Err())
-	return exit(7, "run history terminal commit failed for %s after %d attempts: %v; recover with `crabbox receipt %s`", r.runID, attempts, lastErr, r.runID)
+	return Exit(7, "run history terminal commit failed for %s after %d attempts: %v; recover with `crabbox receipt %s`", r.runID, attempts, lastErr, r.runID)
 }
 
 func runRecorderFinishRetryable(err error) bool {

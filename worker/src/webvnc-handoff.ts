@@ -1,5 +1,5 @@
-import { sha256Hex } from "./auth";
 import type { CoordinatorRuntime } from "./coordinator-runtime";
+import { bytesToHex, sha256Hex } from "./encoding";
 
 const ticketPrefix = "vnc_handoff_";
 const storagePrefix = "webvnc-credential-handoff:";
@@ -88,7 +88,7 @@ export class WebVNCCredentialHandoffs {
 function newTicket(): string {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
-  return `${ticketPrefix}${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  return `${ticketPrefix}${bytesToHex(bytes)}`;
 }
 
 function validTicket(value: string): boolean {
@@ -113,7 +113,7 @@ async function sealCredentials(
     await credentialKey(ticket, ["encrypt"]),
     encoder.encode(JSON.stringify(credentials)),
   );
-  return { iv: encodeHex(iv), ciphertext: encodeHex(new Uint8Array(ciphertext)) };
+  return { iv: bytesToHex(iv), ciphertext: bytesToHex(new Uint8Array(ciphertext)) };
 }
 
 async function openCredentials(
@@ -188,10 +188,6 @@ function validHex(value: unknown, exactLength?: number): value is string {
     value.length % 2 === 0 &&
     /^[a-f0-9]+$/.test(value)
   );
-}
-
-function encodeHex(value: Uint8Array): string {
-  return [...value].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function decodeHex(value: string): Uint8Array {

@@ -68,6 +68,7 @@ type forwardSSHServer struct {
 	release  chan struct{}
 	mu       sync.Mutex
 	conns    []net.Conn
+	users    []string
 	wg       sync.WaitGroup
 	allowed  map[uint32]bool
 	hostKey  string
@@ -93,6 +94,9 @@ func newForwardSSHServer(t *testing.T, user string, allowedPorts ...int) *forwar
 	}
 	var once sync.Once
 	cfg := &ssh.ServerConfig{NoClientAuth: true, NoClientAuthCallback: func(meta ssh.ConnMetadata) (*ssh.Permissions, error) {
+		s.mu.Lock()
+		s.users = append(s.users, meta.User())
+		s.mu.Unlock()
 		if meta.User() != user {
 			return nil, fmt.Errorf("unexpected synthetic SSH user")
 		}
@@ -327,7 +331,7 @@ func testCoordinatorReleaseJoinsSSHControlMasters(t *testing.T, modes ...string)
 				if _, err := fmt.Sscanf(checked, "Master running (pid=%d)", &identity.pid); err != nil {
 					t.Fatal(err)
 				}
-				identity.started, err = webVNCDaemonProcessStartIdentity(identity.pid)
+				identity.started, err = LocalProcessStartIdentity(identity.pid)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -370,7 +374,7 @@ func testCoordinatorReleaseJoinsSSHControlMasters(t *testing.T, modes ...string)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := claimLeaseTargetForConfig(releasedID, "mux-release", Config{Provider: "aws"}, Server{Provider: "aws"}, second.target, time.Hour); err != nil {
+			if err := ClaimLeaseTargetForConfig(releasedID, "mux-release", Config{Provider: "aws"}, Server{Provider: "aws"}, second.target, time.Hour); err != nil {
 				t.Fatal(err)
 			}
 			broker := coordinatorReleaseTestServer(t, func() CoordinatorLease {
@@ -412,7 +416,7 @@ func testCoordinatorReleaseJoinsSSHControlMasters(t *testing.T, modes ...string)
 				if err == nil || !strings.Contains(err.Error(), "remote deletion is confirmed") {
 					t.Errorf("unresponsive endpoint cleanup error=%v", err)
 				}
-				if _, exists, err := readLeaseClaimWithPresence(releasedID); err != nil || !exists {
+				if _, exists, err := ReadLeaseClaimWithPresence(releasedID); err != nil || !exists {
 					t.Errorf("local cleanup debt lost its claim: exists=%t err=%v", exists, err)
 				}
 			} else if err != nil {
@@ -424,7 +428,7 @@ func testCoordinatorReleaseJoinsSSHControlMasters(t *testing.T, modes ...string)
 				if output, err := control(identity.path, "check"); err == nil {
 					t.Errorf("confirmed lease release left a real SSH master alive: %s", output)
 				}
-				current, err := webVNCDaemonProcessStartIdentity(identity.pid)
+				current, err := LocalProcessStartIdentity(identity.pid)
 				state, stateErr := exec.CommandContext(ctx, "ps", "-o", "stat=", "-p", strconv.Itoa(identity.pid)).Output()
 				zombie := stateErr == nil && strings.HasPrefix(strings.TrimSpace(string(state)), "Z")
 				if mode == "unreaped native masters" && !zombie {

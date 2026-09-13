@@ -12,19 +12,19 @@ import (
 )
 
 type srtCLI struct {
-	cfg Config
-	rt  Runtime
+	cfg core.Config
+	rt  core.Runtime
 }
 
-func newSRTCLI(cfg Config, rt Runtime) (*srtCLI, error) {
+func newSRTCLI(cfg core.Config, rt core.Runtime) (*srtCLI, error) {
 	if rt.Exec == nil {
-		return nil, exit(2, "provider=anthropic-sandbox-runtime requires Runtime.Exec")
+		return nil, core.Exit(2, "provider=anthropic-sandbox-runtime requires Runtime.Exec")
 	}
 	return &srtCLI{cfg: cfg, rt: rt}, nil
 }
 
 func (c *srtCLI) binary() string {
-	return blank(strings.TrimSpace(c.cfg.AnthropicSRT.CLIPath), core.AnthropicSRTConfigDefaultCLIPath)
+	return core.Blank(strings.TrimSpace(c.cfg.AnthropicSRT.CLIPath), core.AnthropicSRTConfigDefaultCLIPath)
 }
 
 func (c *srtCLI) baseArgs() []string {
@@ -93,7 +93,7 @@ func (c *srtCLI) version(ctx context.Context) (string, error) {
 
 func (c *srtCLI) runQuiet(ctx context.Context, args []string) (string, string, error) {
 	var stdout, stderr bytes.Buffer
-	result, err := c.rt.Exec.Run(ctx, LocalCommandRequest{
+	result, err := c.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:   c.binary(),
 		Args:   args,
 		Env:    c.env(nil),
@@ -108,7 +108,7 @@ func (c *srtCLI) runQuiet(ctx context.Context, args []string) (string, string, e
 
 func (c *srtCLI) runCommand(ctx context.Context, dir, commandText string, env map[string]string, stdout, stderr io.Writer) (int, error) {
 	args := append(c.baseArgs(), "-c", commandText)
-	result, err := c.rt.Exec.Run(ctx, LocalCommandRequest{
+	result, err := c.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:   c.binary(),
 		Args:   args,
 		Env:    c.env(env),
@@ -125,7 +125,7 @@ func (c *srtCLI) runCommand(ctx context.Context, dir, commandText string, env ma
 	return result.ExitCode, nil
 }
 
-func srtError(args []string, result LocalCommandResult, stdout, stderr string, err error) error {
+func srtError(args []string, result core.LocalCommandResult, stdout, stderr string, err error) error {
 	detail := strings.TrimSpace(stderr)
 	if detail == "" {
 		detail = strings.TrimSpace(stdout)

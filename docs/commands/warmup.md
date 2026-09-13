@@ -88,11 +88,12 @@ it and may append a short suffix if an active lease already uses that slug.
 providers that explicitly support fixed identities. Direct AWS, Machine0, Daytona, Incus,
 and local-container leases, managed coordinator leases, and explicitly capable
 external providers accept it. Replaying the same normalized create intent
-returns or joins the same lease, including after the creating process loses its
-response. Reusing the ID with a different provider, slug request, SSH key,
-machine or container shape, capabilities, lifetime, or other immutable create
-input fails with `lease_id_conflict` before another provider create. Slugs
-remain display aliases and are never used as the idempotency key.
+returns or joins the same live lease, including after the creating process loses
+its response. A managed coordinator reports `fixed_lease_terminal` when that
+same intent has already ended. Reusing the ID with a different provider, slug
+request, SSH key, machine or container shape, capabilities, lifetime, or other
+immutable create input fails with `lease_id_conflict` before another provider
+create. Slugs remain display aliases and are never used as the idempotency key.
 
 Daytona binds the native organization before allocation and preserves that scope
 across credential rotation. See [Daytona fixed operation IDs](../providers/daytona.md#fixed-operation-ids)

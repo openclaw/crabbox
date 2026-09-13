@@ -25,6 +25,15 @@ func TestSleepContextHonorsCancellation(t *testing.T) {
 	}
 }
 
+func TestSleepContextPreservesContextError(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(errors.New("provider cancellation detail"))
+	if err := SleepContext(ctx, time.Hour); err != context.Canceled {
+		t.Fatalf("SleepContext returned %v, want context.Canceled", err)
+	}
+}
+
 func TestSleepContextCompletesWhenContextStaysLive(t *testing.T) {
 	t.Parallel()
 	start := time.Now()

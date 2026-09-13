@@ -13,10 +13,11 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type ISOE2EOptions struct {
-	Config      Config
+	Config      core.Config
 	Mode        string
 	OS          string
 	ISO         string
@@ -81,15 +82,11 @@ var (
 	isoE2EWaitForSSHReady = func(ctx context.Context, target *core.SSHTarget, phase string, timeout time.Duration) error {
 		return core.WaitForSSHReady(ctx, target, os.Stderr, phase, timeout)
 	}
-	isoE2ERunSSHQuiet = func(ctx context.Context, target core.SSHTarget, remote string) error {
-		return core.RunSSHQuiet(ctx, target, remote)
-	}
-	isoE2EEnsureTestboxKey = func(cfg Config, leaseID string) (string, string, error) {
-		return core.EnsureTestboxKeyForConfig(cfg, leaseID)
-	}
+	isoE2ERunSSHQuiet             = core.RunSSHQuiet
+	isoE2EEnsureTestboxKey        = core.EnsureTestboxKeyForConfig
 	isoE2EStoredTestboxKeyExists  = storedISOE2ETestboxKeyExists
 	isoE2ENewLeaseID              = core.NewLeaseID
-	isoE2EProviderKeyForLease     = func(leaseID string) string { return core.ProviderKeyForLease(leaseID) }
+	isoE2EProviderKeyForLease     = core.ProviderKeyForLease
 	isoE2ERemasterUbuntuISO       = remasterUbuntuAutoinstallISO
 	isoE2EWriteLinuxSeedISO       = writeLinuxSeedISO
 	isoE2EWriteWindowsAnswerISO   = writeWindowsAnswerISO
@@ -252,7 +249,7 @@ func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcp
 	labelCfg := opts.Config
 	labelCfg.TargetOS = core.TargetWindows
 	labelCfg.WindowsMode = core.WindowsModeNormal
-	workRoot := strings.TrimSpace(firstNonBlank(labelCfg.XCPNg.WorkRoot, labelCfg.WorkRoot))
+	workRoot := strings.TrimSpace(shared.FirstNonBlank(labelCfg.XCPNg.WorkRoot, labelCfg.WorkRoot))
 	if workRoot == "" || strings.HasPrefix(workRoot, "/") {
 		workRoot = `C:\crabbox`
 	}
@@ -357,9 +354,9 @@ func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcp
 	runtime.sshTarget.TargetOS = "windows"
 	runtime.sshTarget.WindowsMode = "normal"
 	runtime.sshTarget.Key = runtime.keyPath
-	runtime.sshTarget.User = firstNonBlank(runtime.windowsUser, runtime.sshTarget.User, opts.Config.XCPNg.User, opts.Config.SSHUser)
+	runtime.sshTarget.User = shared.FirstNonBlank(runtime.windowsUser, runtime.sshTarget.User, opts.Config.XCPNg.User, opts.Config.SSHUser)
 	if runtime.sshTarget.Port == "" {
-		runtime.sshTarget.Port = firstNonBlank(opts.Config.SSHPort, "22")
+		runtime.sshTarget.Port = shared.FirstNonBlank(opts.Config.SSHPort, "22")
 	}
 	if err = isoE2EWaitForSSHReady(ctx, &runtime.sshTarget, "windows_first_boot", opts.Timeout); err != nil {
 		result.Classification = "environment_blocked"
@@ -389,7 +386,7 @@ func runISOE2ELinux(ctx context.Context, client lifecycleClient, placement xcpNg
 	guestCfg := opts.Config
 	guestCfg.TargetOS = core.TargetLinux
 	guestCfg.WindowsMode = ""
-	workRoot := strings.TrimSpace(firstNonBlank(guestCfg.XCPNg.WorkRoot, guestCfg.WorkRoot))
+	workRoot := strings.TrimSpace(shared.FirstNonBlank(guestCfg.XCPNg.WorkRoot, guestCfg.WorkRoot))
 	if workRoot == "" || !strings.HasPrefix(workRoot, "/") {
 		workRoot = "/work/crabbox"
 	}
@@ -486,10 +483,10 @@ func runISOE2ELinux(ctx context.Context, client lifecycleClient, placement xcpNg
 	runtime.sshTarget = core.SSHTargetFromConfig(opts.Config, firstBootIP)
 	runtime.sshTarget.Key = runtime.keyPath
 	if runtime.sshTarget.User == "" {
-		runtime.sshTarget.User = firstNonBlank(opts.Config.XCPNg.User, opts.Config.SSHUser)
+		runtime.sshTarget.User = shared.FirstNonBlank(opts.Config.XCPNg.User, opts.Config.SSHUser)
 	}
 	if runtime.sshTarget.Port == "" {
-		runtime.sshTarget.Port = firstNonBlank(opts.Config.SSHPort, "22")
+		runtime.sshTarget.Port = shared.FirstNonBlank(opts.Config.SSHPort, "22")
 	}
 	if err = isoE2EWaitForSSHReady(ctx, &runtime.sshTarget, "linux_first_boot", minDuration(isoE2EGuestMetricsTimeout, opts.Timeout/3)); err != nil {
 		result.Classification = "environment_blocked"
@@ -1068,7 +1065,7 @@ func (r *isoE2ERuntime) cleanupLocalArtifacts() error {
 	return cleanupErr
 }
 
-func resolveISOE2EPlacement(ctx context.Context, client lifecycleClient, cfg Config) (xcpNgPlacement, error) {
+func resolveISOE2EPlacement(ctx context.Context, client lifecycleClient, cfg core.Config) (xcpNgPlacement, error) {
 	xcfg := xcpNgProviderConfig(cfg)
 	if err := validateXCPNgConfig(xcfg); err != nil {
 		return xcpNgPlacement{}, err

@@ -135,7 +135,7 @@ func TestFailureBundleWindowsPreservesUnwritablePrivateDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err := crabboxStateDir()
+	state, err := CrabboxStateDir()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -463,6 +463,39 @@ func TestManagedAttestKeyWindowsRepairsPermissiveDACL(t *testing.T) {
 	})
 }
 
+func TestLocalHistoryStoreWindowsPrivateDirectoryCreation(t *testing.T) {
+	dir := t.TempDir()
+	testSID := makeWindowsTestParentPermissive(t, dir)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	created, err := localHistoryCreateDirectory(root, "initial")
+	if err != nil || !created {
+		t.Fatalf("create=%t err=%v", created, err)
+	}
+	// Inspect immediately: no later checkpoint or securing call may establish privacy.
+	assertWindowsPathPrivateFromSID(t, filepath.Join(dir, "initial"), true, testSID)
+	entries, err := os.ReadDir(filepath.Join(dir, "initial"))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("initial directory entries=%v err=%v", entries, err)
+	}
+	created, err = localHistoryCreateDirectory(root, "initial")
+	if err != nil || created {
+		t.Fatalf("existing private directory create=%t err=%v", created, err)
+	}
+	if err := root.Mkdir("existing", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	existing := filepath.Join(dir, "existing")
+	assertWindowsPathGrantsSID(t, existing, testSID)
+	if created, err := localHistoryCreateDirectory(root, "existing"); err == nil || created {
+		t.Fatalf("nonprivate existing directory create=%t err=%v", created, err)
+	}
+	assertWindowsPathGrantsSID(t, existing, testSID)
+}
+
 func TestArtifactOutputWindowsPrivacyFollowsSignedURLs(t *testing.T) {
 	signedFile := artifactFile{
 		Kind:          "proof",
@@ -494,6 +527,24 @@ func TestArtifactOutputWindowsPrivacyFollowsSignedURLs(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer file.Close()
+		if _, err := file.WriteString("ordinary fixture\n"); err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		duplicate, err := openArtifactBundleTemp(root, ".private.crabbox-test", privateRunOutputFileMode, true)
+		if duplicate != nil {
+			duplicate.Close()
+			t.Fatal("exclusive creation returned an existing file")
+		}
+		if !errors.Is(err, os.ErrExist) {
+			t.Fatalf("duplicate creation error=%v, want os.ErrExist", err)
+		}
+		data, err := root.ReadFile(".private.crabbox-test")
+		if err != nil || string(data) != "ordinary fixture\n" {
+			t.Fatalf("duplicate creation changed bytes: %q, %v", data, err)
+		}
 		assertWindowsPathPrivateFromSID(t, filepath.Join(dir, ".private.crabbox-test"), false, testSID)
 	})
 

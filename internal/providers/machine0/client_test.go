@@ -42,7 +42,7 @@ func (r *recordingRunner) Run(ctx context.Context, req core.LocalCommandRequest)
 }
 
 func testClient(runner *recordingRunner) *client {
-	return &client{cfg: Machine0Config{CLIPath: "/opt/bin/machine0"}, rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	return &client{cfg: core.Machine0Config{CLIPath: "/opt/bin/machine0"}, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
 }
 
 func TestClientCreateCommandConstruction(t *testing.T) {
@@ -297,7 +297,7 @@ func TestClientReadRetriesUnavailableThenSucceeds(t *testing.T) {
 			sequence = append(sequence, runnerResponse{result: core.LocalCommandResult{Stdout: detail}})
 			runner := &recordingRunner{sequence: sequence}
 			var stderr bytes.Buffer
-			c := &client{cfg: Machine0Config{CLIPath: "/opt/bin/machine0", PollInterval: tc.pollInterval}, rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}}
+			c := &client{cfg: core.Machine0Config{CLIPath: "/opt/bin/machine0", PollInterval: tc.pollInterval}, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}}
 			var sleeps []time.Duration
 			c.sleep = func(_ context.Context, delay time.Duration) error {
 				sleeps = append(sleeps, delay)

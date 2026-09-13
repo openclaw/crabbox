@@ -420,7 +420,7 @@ func (s *wslStageSpool) run(ctx context.Context, target *SSHTarget, connectTimeo
 		err = context.Cause(execCtx)
 	}
 	if err != nil && (shouldRetrySSHPort(err) || errors.Is(context.Cause(execCtx), context.DeadlineExceeded)) {
-		err = exit(7, "WSL2 staged command result is ambiguous: %v", err)
+		err = Exit(7, "WSL2 staged command result is ambiguous: %v", err)
 	}
 	return finish(err)
 }
@@ -434,7 +434,7 @@ func requireWSLStageExecutionReserve(ctx context.Context, reserve time.Duration)
 	}
 	deadline, ok := ctx.Deadline()
 	if !ok || time.Until(deadline) <= reserve {
-		return exit(7, "WSL2 staged command cannot preserve its execution and cleanup deadline")
+		return Exit(7, "WSL2 staged command cannot preserve its execution and cleanup deadline")
 	}
 	return nil
 }

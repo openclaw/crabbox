@@ -197,7 +197,7 @@ func TestDaytonaSnapshotLifecycleWaitsEvenWithoutWaitFlag(t *testing.T) {
 			if stopped && (f.starts != 0 || f.stops != 0) || !stopped && (f.starts != 1 || f.stops != 1) {
 				t.Fatal("source state not preserved")
 			}
-			resource := core.NativeCheckpointResourceRequest{LoadConfig: func() (Config, error) { return f.request.Config, nil }, Image: result.Image, Metadata: result.Metadata}
+			resource := core.NativeCheckpointResourceRequest{LoadConfig: func() (core.Config, error) { return f.request.Config, nil }, Image: result.Image, Metadata: result.Metadata}
 			verified, err := (Provider{}).VerifyNativeCheckpoint(t.Context(), resource)
 			if err != nil || verified.NextAction != "fork_or_delete" {
 				t.Fatalf("verify=%+v err=%v", verified, err)
@@ -238,15 +238,24 @@ func TestDaytonaClassForkKeepsCapturedSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.classSnapshot = f.snapshot
-	claim, _, err := resolveLeaseClaimForProvider(f.request.LeaseID, daytonaProvider)
+	claim, _, err := core.ResolveLeaseClaimForProvider(f.request.LeaseID, daytonaProvider)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := runDaytonaClassWarmup(t, cfg, Repo{Root: claim.RepoRoot}); err != nil {
+	if err := runDaytonaClassWarmup(t, cfg, core.Repo{Root: claim.RepoRoot}); err != nil {
 		t.Fatal(err)
 	}
 	if f.create.GetSnapshot() != result.Image.ID || f.sandboxCreates != 2 {
 		t.Fatalf("fork replaced captured filesystem: snapshot=%s creates=%d", f.create.GetSnapshot(), f.sandboxCreates)
+	}
+	forkClaim, err := core.ReadLeaseClaim(f.create.GetLabels()["lease"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for source, labels := range map[string]map[string]string{"create": f.create.GetLabels(), "sandbox": f.sandbox.GetLabels(), "claim": forkClaim.Labels} {
+		if labels["class"] != "standard" {
+			t.Errorf("%s lost the explicitly validated custom-snapshot class: %q", source, labels["class"])
+		}
 	}
 }
 
@@ -309,7 +318,7 @@ func TestDaytonaSnapshotFailureRetainsIdentityAndRestoresSource(t *testing.T) {
 			var stalled *snapshotDeadlineClient
 			if failure == "unconfirmed" || httpTimeout {
 				original := newDaytonaClient
-				newDaytonaClient = func(cfg Config, rt Runtime) (daytonaAPI, error) {
+				newDaytonaClient = func(cfg core.Config, rt core.Runtime) (daytonaAPI, error) {
 					client, err := original(cfg, rt)
 					if err != nil {
 						return nil, err
@@ -426,7 +435,7 @@ func TestDaytonaSnapshotDeletionRejectsIdentityAndScopeDrift(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			resource := core.NativeCheckpointResourceRequest{LoadConfig: func() (Config, error) { return f.request.Config, nil }, Image: result.Image, Metadata: result.Metadata}
+			resource := core.NativeCheckpointResourceRequest{LoadConfig: func() (core.Config, error) { return f.request.Config, nil }, Image: result.Image, Metadata: result.Metadata}
 			switch drift {
 			case "api":
 				resource.Metadata["api_url"] = "https://other.example/api"
@@ -465,7 +474,7 @@ func TestDaytonaSnapshotRejectedRequestRestartsWithoutWaitingForMissingSnapshot(
 func TestDaytonaCheckpointCLILeavesStoppedSourceStopped(t *testing.T) {
 	f := newSnapshotFixture(t)
 	f.sandbox.SetState(api.SANDBOXSTATE_STOPPED)
-	claim, _, err := resolveLeaseClaimForProvider(f.request.LeaseID, daytonaProvider)
+	claim, _, err := core.ResolveLeaseClaimForProvider(f.request.LeaseID, daytonaProvider)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -78,31 +78,31 @@ func (a App) webVNCLocal(ctx context.Context, args []string) error {
 		a.Stdout = webVNCRedactingWriter{Writer: a.Stdout}
 	}
 	if !localWebVNCSupported() {
-		return exit(2, "webvnc local is supported only on macOS and Linux")
+		return Exit(2, "webvnc local is supported only on macOS and Linux")
 	}
 	if *vncHost != vncLoopbackHost {
-		return exit(2, "--vnc-host must be exactly %s", vncLoopbackHost)
+		return Exit(2, "--vnc-host must be exactly %s", vncLoopbackHost)
 	}
 	if !validWebVNCDaemonPort(*vncPort) {
-		return exit(2, "--vnc-port must be an integer between 1 and 65535")
+		return Exit(2, "--vnc-port must be an integer between 1 and 65535")
 	}
 	if err := validateLocalWebVNCUsername(*username); err != nil {
 		return err
 	}
 	if *securityType != localWebVNCSecurityAuto && *securityType != localWebVNCSecurityVNC {
-		return exit(2, "--security-type must be auto or vnc")
+		return Exit(2, "--security-type must be auto or vnc")
 	}
 	if !*passwordStdin {
-		return exit(2, "webvnc local requires --password-stdin")
+		return Exit(2, "webvnc local requires --password-stdin")
 	}
 
 	sourceIdentity, err := localWebVNCListenerIdentity(*vncPort)
 	if err != nil {
-		return exit(5, "pin local VNC source %s:%s: %v", *vncHost, *vncPort, err)
+		return Exit(5, "pin local VNC source %s:%s: %v", *vncHost, *vncPort, err)
 	}
 	dialVNC := pinnedLocalWebVNCDialer(*vncHost, *vncPort, sourceIdentity)
 	if err := probeLocalWebVNC(ctx, dialVNC); err != nil {
-		return exit(5, "probe local VNC source %s:%s: %v", *vncHost, *vncPort, err)
+		return Exit(5, "probe local VNC source %s:%s: %v", *vncHost, *vncPort, err)
 	}
 	bridgeCtx, cancelBridge := context.WithCancelCause(ctx)
 	defer cancelBridge(context.Canceled)
@@ -114,13 +114,13 @@ func (a App) webVNCLocal(ctx context.Context, args []string) error {
 
 	reservation, err := reserveLocalWebVNCBrowserPort(*localPort, *vncPort)
 	if err != nil {
-		return exit(5, "reserve local WebVNC port: %v", err)
+		return Exit(5, "reserve local WebVNC port: %v", err)
 	}
 	webPort := reservation.port
 	webListener, err := reservation.listener()
 	if err != nil {
 		reservation.release()
-		return exit(5, "open local WebVNC listener: %v", err)
+		return Exit(5, "open local WebVNC listener: %v", err)
 	}
 	defer webListener.Close()
 
@@ -210,14 +210,14 @@ func validateLocalWebVNCUsername(username string) error {
 	if username == "" || username != strings.TrimSpace(username) || strings.IndexFunc(username, func(r rune) bool {
 		return r < 32 || r == 127
 	}) >= 0 {
-		return exit(2, "--username must be non-empty and contain no surrounding whitespace or control characters")
+		return Exit(2, "--username must be non-empty and contain no surrounding whitespace or control characters")
 	}
 	return nil
 }
 
 func readLocalWebVNCPassword(ctx context.Context, input io.Reader) (string, error) {
 	if input == nil {
-		return "", exit(2, "read VNC password from stdin: stdin is unavailable")
+		return "", Exit(2, "read VNC password from stdin: stdin is unavailable")
 	}
 	if err := context.Cause(ctx); err != nil {
 		return "", err
@@ -241,19 +241,19 @@ func readLocalWebVNCPassword(ctx context.Context, input io.Reader) (string, erro
 		data, err = read.data, read.err
 	}
 	if err != nil {
-		return "", exit(2, "read VNC password from stdin: %v", err)
+		return "", Exit(2, "read VNC password from stdin: %v", err)
 	}
 	if len(data) > maxLocalWebVNCPasswordBytes {
-		return "", exit(2, "VNC password from stdin exceeds %d bytes", maxLocalWebVNCPasswordBytes)
+		return "", Exit(2, "VNC password from stdin exceeds %d bytes", maxLocalWebVNCPasswordBytes)
 	}
 	password := string(data)
 	password = strings.TrimSuffix(password, "\n")
 	password = strings.TrimSuffix(password, "\r")
 	if password == "" {
-		return "", exit(2, "VNC password from stdin is empty")
+		return "", Exit(2, "VNC password from stdin is empty")
 	}
 	if strings.ContainsAny(password, "\r\n\x00") {
-		return "", exit(2, "VNC password from stdin must be one line without NUL bytes")
+		return "", Exit(2, "VNC password from stdin must be one line without NUL bytes")
 	}
 	return password, nil
 }
@@ -323,7 +323,7 @@ func (a App) serveLocalWebVNCBridge(
 	// process, so the ARD viewer receives no credential endpoint.
 	session, err := newMacOSWebVNCSession()
 	if err != nil {
-		return exit(5, "generate viewer session: %v", err)
+		return Exit(5, "generate viewer session: %v", err)
 	}
 	mux := http.NewServeMux()
 	viewerNeedsCredentials := authMode == localWebVNCAuthAuto || authMode == localWebVNCAuthVNC
@@ -413,7 +413,7 @@ func (a App) serveLocalWebVNCBridge(
 	case <-ctx.Done():
 		return context.Cause(ctx)
 	case err := <-serverErrors:
-		return exit(5, "serve local WebVNC: %v", err)
+		return Exit(5, "serve local WebVNC: %v", err)
 	}
 }
 

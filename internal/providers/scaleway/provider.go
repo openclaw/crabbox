@@ -524,7 +524,7 @@ func (b *Backend) UpdateTailscaleMetadata(ctx context.Context, lease core.LeaseT
 		return core.Server{}, err
 	}
 	labels := live.Labels
-	applyTailscaleMetadata(labels, meta)
+	shared.ApplyTailscaleMetadata(labels, meta)
 	updateResp, err := client.Instance().UpdateServer(&instance.UpdateServerRequest{
 		Zone:     scw.Zone(client.Zone()),
 		ServerID: resp.Server.ID,
@@ -718,7 +718,9 @@ func (b *Backend) targetFromServer(ctx context.Context, client Client, item *ins
 		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	ssh := core.SSHTargetFromConfig(b.cfgForRun(), server.PublicNet.IPv4.IP)
-	core.UseStoredTestboxKey(&ssh, leaseID)
+	if err := core.UseStoredTestboxKey(&ssh, leaseID); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	if req.Repo.Root != "" && !req.NoLocalStateMutations {
 		if _, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, server.Labels["slug"], b.cfgForRun(), server, ssh, req.Repo.Root, b.cfgForRun().IdleTimeout, req.Reclaim, claim, exists); err != nil {
 			return core.LeaseTarget{}, err
@@ -779,7 +781,6 @@ func (b *Backend) releaseTargetFromClaim(ctx context.Context, client Client, id 
 	if claim.SSHPort > 0 {
 		ssh.Port = strconv.Itoa(claim.SSHPort)
 	}
-	core.UseStoredTestboxKey(&ssh, claim.LeaseID)
 	return core.LeaseTarget{Server: server, LeaseID: claim.LeaseID, SSH: ssh}, nil
 }
 
@@ -1174,7 +1175,7 @@ func replaceCrabboxTags(existing, desired []string) []string {
 		}
 		tags = append(tags, tag)
 	}
-	return normalizeTags(tags)
+	return shared.NormalizeTags(tags)
 }
 
 func publicIPv4(item *instance.Server) string {
@@ -1227,8 +1228,4 @@ func isAmbiguousScalewayError(err error) bool {
 		}
 	}
 	return false
-}
-
-func applyTailscaleMetadata(labels map[string]string, meta core.TailscaleMetadata) {
-	shared.ApplyTailscaleMetadata(labels, meta)
 }

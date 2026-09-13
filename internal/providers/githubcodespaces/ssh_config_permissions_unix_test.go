@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestValidatePrivateSSHConfigFileRequires0600(t *testing.T) {
@@ -42,7 +44,7 @@ func TestRewriteProxyCommandPreservesSpaceContainingArgument(t *testing.T) {
 		rewriteProxyCommandGHPath(command, defaultGHPath),
 		identityFile,
 	)
-	if !strings.HasPrefix(rewritten, shellQuote(ghPath)+" ") || !strings.HasSuffix(rewritten, shellQuote(identityFile)) {
+	if !strings.HasPrefix(rewritten, core.ShellQuote(ghPath)+" ") || !strings.HasSuffix(rewritten, core.ShellQuote(identityFile)) {
 		t.Fatalf("proxy=%q", rewritten)
 	}
 	out, err := exec.Command("sh", "-c", rewritten).CombinedOutput()

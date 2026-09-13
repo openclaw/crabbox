@@ -17,21 +17,21 @@ import (
 )
 
 type backend struct {
-	spec ProviderSpec
-	cfg  Config
-	rt   Runtime
+	spec core.ProviderSpec
+	cfg  core.Config
+	rt   core.Runtime
 }
 
 var windowsSandboxHostOS = runtime.GOOS
 
 const windowsSandboxProcessNames = "WindowsSandbox,WindowsSandboxClient,WindowsSandboxServer,WindowsSandboxRemoteSession"
 
-func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	applyDefaults(&cfg)
 	return &backend{spec: spec, cfg: cfg, rt: rt}
 }
 
-func applyDefaults(cfg *Config) {
+func applyDefaults(cfg *core.Config) {
 	cfg.Provider = providerName
 	if cfg.TargetOS == "" {
 		cfg.TargetOS = targetWindows
@@ -74,36 +74,36 @@ func applyDefaults(cfg *Config) {
 	cfg.WorkRoot = cfg.WindowsSandbox.Workdir
 }
 
-func (b *backend) Spec() ProviderSpec { return b.spec }
+func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
-func (b *backend) configForRun() Config {
+func (b *backend) configForRun() core.Config {
 	cfg := b.cfg
 	applyDefaults(&cfg)
 	return cfg
 }
 
-func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
+func (b *backend) Warmup(ctx context.Context, req core.WarmupRequest) error {
 	_ = ctx
 	_ = req
-	return exit(2, "provider=%s does not support warmup; Windows Sandbox is launched per run", providerName)
+	return core.Exit(2, "provider=%s does not support warmup; Windows Sandbox is launched per run", providerName)
 }
 
-func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
 	if err := rejectWindowsSandboxRunOptions(b.spec, req); err != nil {
-		return RunResult{}, err
+		return core.RunResult{}, err
 	}
 	if len(req.Command) == 0 {
-		return RunResult{}, exit(2, "missing command")
+		return core.RunResult{}, core.Exit(2, "missing command")
 	}
 	if err := requireWindowsHost(); err != nil {
-		return RunResult{}, err
+		return core.RunResult{}, err
 	}
 
 	started := core.ClockNow(b.rt.Clock)
 	cfg := b.configForRun()
 	run, syncPhases, syncDuration, err := b.prepareRun(ctx, cfg, req)
 	if err != nil {
-		return RunResult{Total: core.ClockNow(b.rt.Clock).Sub(started), SyncDelegated: true, Provider: providerName}, err
+		return core.RunResult{Total: core.ClockNow(b.rt.Clock).Sub(started), SyncDelegated: true, Provider: providerName}, err
 	}
 	keepWorkspace := req.Keep
 	defer func() {
@@ -116,16 +116,18 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	}()
 
 	if req.EnvSummary {
-		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+		core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
 	fmt.Fprintf(b.rt.Stderr, "provider=%s workdir=%s host_workspace=%s networking=%s vgpu=%s\n", providerName, cfg.WindowsSandbox.Workdir, run.hostWorkspace, cfg.WindowsSandbox.Networking, cfg.WindowsSandbox.VGPU)
 
 	commandStarted := core.ClockNow(b.rt.Clock)
-	execResult, execErr := b.runHostRunner(ctx, LocalCommandRequest{
+	req.Observation.Phase(core.RunPhaseCommand)
+	stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, core.RunOutputProvider)
+	execResult, execErr := b.runHostRunner(ctx, core.LocalCommandRequest{
 		Name:                 "powershell.exe",
 		Args:                 hostRunnerArgs(run, cfg, req),
-		Stdout:               b.rt.Stdout,
-		Stderr:               b.rt.Stderr,
+		Stdout:               stdout,
+		Stderr:               stderr,
 		DisableOutputCapture: true,
 	}, filepath.Join(run.hostControl, "cancel.txt"), req.Keep || req.KeepOnFailure)
 	commandDuration := core.ClockNow(b.rt.Clock).Sub(commandStarted)
@@ -138,7 +140,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		fmt.Fprintf(b.rt.Stderr, "windows-sandbox temp preserved path=%s policy=%s\n", run.root, keepPolicy(req, exitCode))
 	}
 
-	result := RunResult{
+	result := core.RunResult{
 		ExitCode:      exitCode,
 		Command:       commandDuration,
 		Total:         core.ClockNow(b.rt.Clock).Sub(started),
@@ -147,14 +149,14 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		Slug:          filepath.Base(run.root),
 		CommandText:   windowsSandboxCommandText(req),
 	}
-	result = finalizeRunResult(result, execErr)
+	result = core.FinalizeRunResult(result, execErr)
 	if req.NoSync {
 		fmt.Fprintf(b.rt.Stderr, "windows-sandbox run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
 	} else {
 		fmt.Fprintf(b.rt.Stderr, "windows-sandbox run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
 	}
 	if req.TimingJSON {
-		report := timingReportWithRunResult(timingReport{
+		report := core.TimingReportWithRunResult(core.TimingReport{
 			Provider:      providerName,
 			Slug:          result.Slug,
 			SyncDelegated: true,
@@ -166,39 +168,39 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			ExitCode:      result.ExitCode,
 			Label:         strings.TrimSpace(req.Label),
 		}, result, execErr)
-		if err := writeTimingJSON(b.rt.Stderr, report); err != nil {
+		if err := core.WriteTimingJSON(b.rt.Stderr, report); err != nil {
 			return result, err
 		}
 	}
 	if execErr != nil || result.ExitCode != 0 {
-		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s run exited %d", providerName, result.ExitCode)}
+		return result, core.ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s run exited %d", providerName, result.ExitCode)}
 	}
 	return result, nil
 }
 
-func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *backend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	_ = ctx
 	_ = req
-	return nil, exit(2, "provider=%s does not expose persistent inventory; Windows Sandbox supports one disposable session at a time", providerName)
+	return nil, core.Exit(2, "provider=%s does not expose persistent inventory; Windows Sandbox supports one disposable session at a time", providerName)
 }
 
-func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, error) {
+func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
 	_ = ctx
 	_ = req
-	return StatusView{}, exit(2, "provider=%s does not expose persistent status; close the Windows Sandbox window or rerun the command", providerName)
+	return core.StatusView{}, core.Exit(2, "provider=%s does not expose persistent status; close the Windows Sandbox window or rerun the command", providerName)
 }
 
-func (b *backend) Stop(ctx context.Context, req StopRequest) error {
+func (b *backend) Stop(ctx context.Context, req core.StopRequest) error {
 	_ = ctx
 	_ = req
-	return exit(2, "provider=%s stop is not supported; close the Windows Sandbox window", providerName)
+	return core.Exit(2, "provider=%s stop is not supported; close the Windows Sandbox window", providerName)
 }
 
-func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	if err := requireWindowsHost(); err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
-	result, err := b.rt.Exec.Run(ctx, LocalCommandRequest{
+	result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name: "powershell.exe",
 		Args: []string{
 			"-NoProfile",
@@ -213,11 +215,11 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 		if code == 0 {
 			code = 2
 		}
-		return DoctorResult{}, exit(code, "provider=%s doctor failed: %s", providerName, commandDetail(result, err))
+		return core.DoctorResult{}, core.Exit(code, "provider=%s doctor failed: %s", providerName, commandDetail(result, err))
 	}
 	cfg := b.configForRun()
 	msg := fmt.Sprintf("cli=ready control_plane=local sandbox=ready mutation=false runtime=%s networking=%s vgpu=%s workdir=%s", strings.TrimSpace(result.Stdout), cfg.WindowsSandbox.Networking, cfg.WindowsSandbox.VGPU, cfg.WindowsSandbox.Workdir)
-	return DoctorResult{Provider: providerName, Message: msg}, nil
+	return core.DoctorResult{Provider: providerName, Message: msg}, nil
 }
 
 type preparedRun struct {
@@ -228,7 +230,7 @@ type preparedRun struct {
 	hostRunner    string
 }
 
-func (b *backend) prepareRun(ctx context.Context, cfg Config, req RunRequest) (preparedRun, []timingPhase, time.Duration, error) {
+func (b *backend) prepareRun(ctx context.Context, cfg core.Config, req core.RunRequest) (preparedRun, []core.TimingPhase, time.Duration, error) {
 	root, err := os.MkdirTemp(strings.TrimSpace(cfg.WindowsSandbox.TempRoot), "crabbox-wsb-*")
 	if err != nil {
 		return preparedRun{}, nil, 0, fmt.Errorf("create windows-sandbox temp dir: %w", err)
@@ -279,13 +281,13 @@ func (b *backend) prepareRun(ctx context.Context, cfg Config, req RunRequest) (p
 	return run, syncPhases, syncDuration, nil
 }
 
-func (b *backend) syncWorkspace(ctx context.Context, cfg Config, req RunRequest, hostWorkspace string) ([]timingPhase, time.Duration, error) {
+func (b *backend) syncWorkspace(ctx context.Context, cfg core.Config, req core.RunRequest, hostWorkspace string) ([]core.TimingPhase, time.Duration, error) {
 	started := core.ClockNow(b.rt.Clock)
 	if req.NoSync {
 		if err := os.MkdirAll(hostWorkspace, 0o700); err != nil {
 			return nil, 0, fmt.Errorf("create windows-sandbox workspace: %w", err)
 		}
-		return []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}, 0, nil
+		return []core.TimingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}, 0, nil
 	}
 	syncCtx := ctx
 	cancel := func() {}
@@ -294,18 +296,18 @@ func (b *backend) syncWorkspace(ctx context.Context, cfg Config, req RunRequest,
 	}
 	defer cancel()
 
-	excludes, err := syncExcludes(req.Repo.Root, cfg)
+	excludes, err := core.SyncExcludes(req.Repo.Root, cfg)
 	if err != nil {
 		return nil, 0, err
 	}
 	manifestStarted := core.ClockNow(b.rt.Clock)
-	manifest, err := syncManifest(req.Repo.Root, excludes, cfg.Sync.Includes)
+	manifest, err := core.BuildSyncManifestFiltered(req.Repo.Root, excludes, cfg.Sync.Includes)
 	if err != nil {
-		return nil, 0, exit(6, "build sync file list: %v", err)
+		return nil, 0, core.Exit(6, "build sync file list: %v", err)
 	}
 	manifestDuration := core.ClockNow(b.rt.Clock).Sub(manifestStarted)
 	preflightStarted := core.ClockNow(b.rt.Clock)
-	if err := checkSyncPreflight(manifest, cfg, req.ForceSyncLarge, b.rt.Stderr); err != nil {
+	if err := core.CheckSyncPreflight(manifest, cfg, req.ForceSyncLarge, b.rt.Stderr); err != nil {
 		return nil, 0, err
 	}
 	preflightDuration := core.ClockNow(b.rt.Clock).Sub(preflightStarted)
@@ -323,7 +325,7 @@ func (b *backend) syncWorkspace(ctx context.Context, cfg Config, req RunRequest,
 	}
 	copyDuration := core.ClockNow(b.rt.Clock).Sub(copyStarted)
 	total := core.ClockNow(b.rt.Clock).Sub(started)
-	return []timingPhase{
+	return []core.TimingPhase{
 		{Name: "manifest", Ms: manifestDuration.Milliseconds()},
 		{Name: "preflight", Ms: preflightDuration.Milliseconds()},
 		{Name: "copy", Ms: copyDuration.Milliseconds()},
@@ -331,7 +333,7 @@ func (b *backend) syncWorkspace(ctx context.Context, cfg Config, req RunRequest,
 	}, total, nil
 }
 
-func copyManifest(ctx context.Context, root, dstRoot string, manifest SyncManifest) error {
+func copyManifest(ctx context.Context, root, dstRoot string, manifest core.SyncManifest) error {
 	for _, rel := range manifest.Files {
 		select {
 		case <-ctx.Done():
@@ -340,7 +342,7 @@ func copyManifest(ctx context.Context, root, dstRoot string, manifest SyncManife
 		}
 		clean := path.Clean(filepath.ToSlash(rel))
 		if clean == "." || path.IsAbs(clean) || strings.HasPrefix(clean, "../") || clean != filepath.ToSlash(rel) {
-			return exit(6, "unsafe sync path %q", rel)
+			return core.Exit(6, "unsafe sync path %q", rel)
 		}
 		src := filepath.Join(root, filepath.FromSlash(clean))
 		dst := filepath.Join(dstRoot, filepath.FromSlash(clean))
@@ -361,7 +363,7 @@ func copyWorkspaceEntry(src, dst, rel string) error {
 	}
 	mode := info.Mode()
 	if mode&os.ModeSymlink != 0 {
-		return exit(6, "provider=%s does not support syncing symlink %q; exclude it or replace it with a regular file before using Windows Sandbox", providerName, filepath.ToSlash(rel))
+		return core.Exit(6, "provider=%s does not support syncing symlink %q; exclude it or replace it with a regular file before using Windows Sandbox", providerName, filepath.ToSlash(rel))
 	}
 	if !mode.IsRegular() {
 		return nil
@@ -385,7 +387,7 @@ func copyWorkspaceEntry(src, dst, rel string) error {
 	return nil
 }
 
-func hostRunnerArgs(run preparedRun, cfg Config, req RunRequest) []string {
+func hostRunnerArgs(run preparedRun, cfg core.Config, req core.RunRequest) []string {
 	timeout := durationSecondsCeil(cfg.TTL)
 	if timeout <= 0 {
 		timeout = 5400
@@ -413,11 +415,11 @@ func hostRunnerArgs(run preparedRun, cfg Config, req RunRequest) []string {
 }
 
 type localCommandOutcome struct {
-	result LocalCommandResult
+	result core.LocalCommandResult
 	err    error
 }
 
-func (b *backend) runHostRunner(ctx context.Context, command LocalCommandRequest, cancelPath string, keepOnCancel bool) (LocalCommandResult, error) {
+func (b *backend) runHostRunner(ctx context.Context, command core.LocalCommandRequest, cancelPath string, keepOnCancel bool) (core.LocalCommandResult, error) {
 	runCtx, cancelRun := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelRun()
 	done := make(chan localCommandOutcome, 1)
@@ -467,7 +469,7 @@ func (b *backend) runHostRunner(ctx context.Context, command LocalCommandRequest
 func (b *backend) stopCanceledSandbox(ctx context.Context) {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 	defer cancel()
-	result, err := b.rt.Exec.Run(cleanupCtx, LocalCommandRequest{
+	result, err := b.rt.Exec.Run(cleanupCtx, core.LocalCommandRequest{
 		Name: "powershell.exe",
 		Args: []string{
 			"-NoProfile",
@@ -483,7 +485,7 @@ func (b *backend) stopCanceledSandbox(ctx context.Context) {
 	}
 }
 
-func windowsSandboxConfigXML(cfg Config, run preparedRun) ([]byte, error) {
+func windowsSandboxConfigXML(cfg core.Config, run preparedRun) ([]byte, error) {
 	workdir, err := cleanWindowsSandboxPath(cfg.WindowsSandbox.Workdir)
 	if err != nil {
 		return nil, err
@@ -538,7 +540,7 @@ type wsbLogonCommand struct {
 	Command string `xml:"Command"`
 }
 
-func sandboxRunScript(cfg Config, req RunRequest) (string, error) {
+func sandboxRunScript(cfg core.Config, req core.RunRequest) (string, error) {
 	workdir, err := cleanWindowsSandboxPath(cfg.WindowsSandbox.Workdir)
 	if err != nil {
 		return "", err
@@ -582,9 +584,9 @@ func sandboxRunScript(cfg Config, req RunRequest) (string, error) {
 	}, "\r\n"), nil
 }
 
-func sandboxCommand(req RunRequest) (string, error) {
+func sandboxCommand(req core.RunRequest) (string, error) {
 	if len(req.Command) == 0 {
-		return "", exit(2, "missing command")
+		return "", core.Exit(2, "missing command")
 	}
 	if req.ShellMode {
 		return "& powershell.exe -NoProfile -ExecutionPolicy Bypass -Command " + psSingleQuote(strings.Join(req.Command, " ")), nil
@@ -602,8 +604,8 @@ func powershellEnvLines(env map[string]string) (string, error) {
 	}
 	keys := make([]string, 0, len(env))
 	for key := range env {
-		if !validEnvName(key) {
-			return "", exit(2, "invalid environment variable name %q for provider=%s", key, providerName)
+		if !core.ValidShellEnvName(key) {
+			return "", core.Exit(2, "invalid environment variable name %q for provider=%s", key, providerName)
 		}
 		keys = append(keys, key)
 	}
@@ -765,25 +767,25 @@ while ($true) {
 `, "__SANDBOX_PROCESS_NAMES__", windowsSandboxProcessNames), "\n", "\r\n")
 }
 
-func rejectWindowsSandboxRunOptions(spec ProviderSpec, req RunRequest) error {
-	if err := rejectDelegatedSyncOptionsForSpec(spec, req); err != nil {
+func rejectWindowsSandboxRunOptions(spec core.ProviderSpec, req core.RunRequest) error {
+	if err := core.RejectDelegatedSyncOptionsForSpec(spec, req); err != nil {
 		return err
 	}
 	if req.ID != "" {
-		return exit(2, "provider=%s does not support --id; Windows Sandbox sessions are disposable", providerName)
+		return core.Exit(2, "provider=%s does not support --id; Windows Sandbox sessions are disposable", providerName)
 	}
 	if req.SyncOnly {
-		return exit(2, "provider=%s does not support --sync-only; Windows Sandbox workspaces are created per run", providerName)
+		return core.Exit(2, "provider=%s does not support --sync-only; Windows Sandbox workspaces are created per run", providerName)
 	}
 	if req.Reclaim {
-		return exit(2, "provider=%s does not support --reclaim; Windows Sandbox sessions are disposable", providerName)
+		return core.Exit(2, "provider=%s does not support --reclaim; Windows Sandbox sessions are disposable", providerName)
 	}
 	return nil
 }
 
 func requireWindowsHost() error {
 	if windowsSandboxHostOS != "windows" {
-		return exit(2, "provider=%s requires a Windows host with the Windows Sandbox optional feature enabled", providerName)
+		return core.Exit(2, "provider=%s requires a Windows host with the Windows Sandbox optional feature enabled", providerName)
 	}
 	return nil
 }
@@ -797,7 +799,7 @@ func normalizeWSBState(value, flagName string) (string, error) {
 	case "disable", "disabled", "false", "no", "off":
 		return "Disable", nil
 	default:
-		return "", exit(2, "%s must be enable, disable, or default", flagName)
+		return "", core.Exit(2, "%s must be enable, disable, or default", flagName)
 	}
 }
 
@@ -809,7 +811,7 @@ func normalizeWSBStateBestEffort(value string) string {
 	return normalized
 }
 
-func validateWindowsSandboxConfig(cfg Config) error {
+func validateWindowsSandboxConfig(cfg core.Config) error {
 	checks := map[string]string{
 		"windows-sandbox.networking":         cfg.WindowsSandbox.Networking,
 		"windows-sandbox.vgpu":               cfg.WindowsSandbox.VGPU,
@@ -825,7 +827,7 @@ func validateWindowsSandboxConfig(cfg Config) error {
 		}
 	}
 	if cfg.WindowsSandbox.MemoryMB < 0 {
-		return exit(2, "windows-sandbox.memoryMB must be non-negative")
+		return core.Exit(2, "windows-sandbox.memoryMB must be non-negative")
 	}
 	_, err := cleanWindowsSandboxPath(cfg.WindowsSandbox.Workdir)
 	return err
@@ -834,22 +836,22 @@ func validateWindowsSandboxConfig(cfg Config) error {
 func cleanWindowsSandboxPath(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return "", exit(2, "windows-sandbox workdir must not be empty")
+		return "", core.Exit(2, "windows-sandbox workdir must not be empty")
 	}
 	if strings.Contains(value, "/") {
 		value = strings.ReplaceAll(value, "/", `\`)
 	}
 	if len(value) < 3 || value[1] != ':' || value[2] != '\\' {
-		return "", exit(2, "windows-sandbox workdir %q must be an absolute Windows path like C:\\crabbox-work", value)
+		return "", core.Exit(2, "windows-sandbox workdir %q must be an absolute Windows path like C:\\crabbox-work", value)
 	}
 	drive := value[0]
 	if !((drive >= 'A' && drive <= 'Z') || (drive >= 'a' && drive <= 'z')) {
-		return "", exit(2, "windows-sandbox workdir %q must start with a Windows drive letter like C:\\crabbox-work", value)
+		return "", core.Exit(2, "windows-sandbox workdir %q must start with a Windows drive letter like C:\\crabbox-work", value)
 	}
 	clean := cleanWindowsPath(value)
 	switch strings.ToUpper(clean) {
 	case `C:\`, `C:\WINDOWS`, `C:\USERS`, `C:\PROGRAM FILES`, `C:\PROGRAM FILES (X86)`:
-		return "", exit(2, "windows-sandbox workdir %q is too broad; choose a dedicated directory", clean)
+		return "", core.Exit(2, "windows-sandbox workdir %q is too broad; choose a dedicated directory", clean)
 	}
 	return clean, nil
 }
@@ -886,24 +888,11 @@ func psBool(value bool) string {
 	return "$false"
 }
 
-func validEnvName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for i, r := range name {
-		ok := r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || i > 0 && r >= '0' && r <= '9'
-		if !ok {
-			return false
-		}
-	}
-	return true
-}
-
-func windowsSandboxCommandText(req RunRequest) string {
+func windowsSandboxCommandText(req core.RunRequest) string {
 	return strings.Join(req.Command, " ")
 }
 
-func keepPolicy(req RunRequest, exitCode int) string {
+func keepPolicy(req core.RunRequest, exitCode int) string {
 	if req.Keep {
 		return "keep"
 	}
@@ -913,7 +902,7 @@ func keepPolicy(req RunRequest, exitCode int) string {
 	return "none"
 }
 
-func commandDetail(result LocalCommandResult, err error) string {
+func commandDetail(result core.LocalCommandResult, err error) string {
 	text := strings.TrimSpace(result.Stderr)
 	if text == "" {
 		text = strings.TrimSpace(result.Stdout)
@@ -921,5 +910,5 @@ func commandDetail(result LocalCommandResult, err error) string {
 	if text == "" && err != nil {
 		text = err.Error()
 	}
-	return blank(text, "unknown error")
+	return core.Blank(text, "unknown error")
 }

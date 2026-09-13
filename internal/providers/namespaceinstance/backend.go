@@ -96,8 +96,7 @@ func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID st
 	if err := core.UseLeaseKnownHosts(&target.SSH, leaseID); err != nil {
 		return err
 	}
-	core.UseStoredTestboxKey(&target.SSH, leaseID)
-	return nil
+	return core.UseStoredTestboxKey(&target.SSH, leaseID)
 }
 
 func (b *backend) configForRun() core.Config {
@@ -193,7 +192,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		recoveryLabels["recovery"] = recovery
 		recoveryLabels["state"] = "provisioning"
 		item := instance{ClusterID: id, Labels: recoveryLabels}
-		lease, err := b.lease(item, cfg, leaseID)
+		lease, err := b.lease(item, cfg, leaseID, false)
 		if err != nil {
 			return err
 		}
@@ -223,7 +222,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
-	lease, err := b.lease(item, cfg, leaseID)
+	lease, err := b.lease(item, cfg, leaseID, false)
 	if err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
@@ -249,7 +248,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	lease, err := b.lease(item, cfg, leaseID)
+	lease, err := b.lease(item, cfg, leaseID, req.ReleaseOnly)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -768,7 +767,7 @@ func (b *backend) resolve(ctx context.Context, identifier string, cfg core.Confi
 	return instance{}, "", core.Exit(4, "Namespace instance lease not found: %s", identifier)
 }
 
-func (b *backend) lease(item instance, cfg core.Config, leaseID string) (core.LeaseTarget, error) {
+func (b *backend) lease(item instance, cfg core.Config, leaseID string, releaseOnly bool) (core.LeaseTarget, error) {
 	target := core.SSHTarget{
 		User:            "root",
 		Host:            item.ClusterID,
@@ -781,11 +780,13 @@ func (b *backend) lease(item instance, cfg core.Config, leaseID string) (core.Le
 		SSHConfigProxy:  true,
 		ProxyCommand:    proxyCommand(cfg, item.ClusterID),
 	}
-	if leaseID != "" {
+	if leaseID != "" && !releaseOnly {
 		if err := core.UseLeaseKnownHosts(&target, leaseID); err != nil {
 			return core.LeaseTarget{}, err
 		}
-		core.UseStoredTestboxKey(&target, leaseID)
+		if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
+			return core.LeaseTarget{}, err
+		}
 	}
 	server := b.server(item, cfg)
 	if claim, ok, _ := resolveNamespaceClaim(leaseID, cfg); ok {
@@ -836,11 +837,11 @@ func (b *backend) server(item instance, cfg core.Config) core.Server {
 	if labels["state"] == "" {
 		labels["state"] = "running"
 	}
-	labels["server_type"] = firstNonBlank(labels["server_type"], shapeName(item.Shape), cfg.ServerType)
+	labels["server_type"] = shared.FirstNonBlankTrimmed(labels["server_type"], shapeName(item.Shape), cfg.ServerType)
 	server := core.Server{
 		CloudID:  item.ClusterID,
 		Provider: providerName,
-		Name:     firstNonBlank(labels["slug"], item.ClusterID),
+		Name:     shared.FirstNonBlankTrimmed(labels["slug"], item.ClusterID),
 		Status:   labels["state"],
 		Labels:   labels,
 	}
@@ -1002,20 +1003,9 @@ func proxyCommand(cfg core.Config, instanceID string) string {
 	}
 	words = append(words, instanceID)
 	for i := range words {
-		words[i] = quoteProxyWord(words[i])
+		words[i] = shared.QuoteSSHProxyCommandWord(words[i])
 	}
 	return strings.Join(words, " ")
-}
-
-func quoteProxyWord(word string) string {
-	word = strings.ReplaceAll(word, "%", "%%")
-	if word != "" && strings.IndexFunc(word, func(r rune) bool {
-		return !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') ||
-			strings.ContainsRune("_-./:,@%+=", r))
-	}) == -1 {
-		return word
-	}
-	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, "$", `\$`, "`", "\\`").Replace(word) + `"`
 }
 
 func (b *backend) destroy(ctx context.Context, id string) error {
@@ -1094,8 +1084,4 @@ func commandError(action string, result core.LocalCommandResult, err error) erro
 		return core.Exit(result.ExitCode, "%s failed: %v: %s", action, err, detail)
 	}
 	return core.Exit(result.ExitCode, "%s failed: %v", action, err)
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlankTrimmed(values...)
 }

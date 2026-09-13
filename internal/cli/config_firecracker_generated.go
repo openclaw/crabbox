@@ -4,8 +4,6 @@ package cli
 
 import (
 	"flag"
-	"os"
-	"strconv"
 	"time"
 )
 
@@ -75,155 +73,14 @@ type FirecrackerConfigApplied struct {
 
 func (cfg *FirecrackerConfig) applyFile(file *fileFirecrackerConfig, trusted bool) (FirecrackerConfigApplied, error) {
 	var applied FirecrackerConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.Binary != "" {
-		cfg.Binary = file.Binary
-		applied.InputAccepted = true
-		applied.Binary = true
-	}
-	if trusted && file.Jailer != "" {
-		cfg.Jailer = file.Jailer
-		applied.InputAccepted = true
-		applied.Jailer = true
-	}
-	if trusted && file.Kernel != "" {
-		cfg.Kernel = file.Kernel
-		applied.InputAccepted = true
-		applied.Kernel = true
-	}
-	if trusted && file.RootFS != "" {
-		cfg.RootFS = file.RootFS
-		applied.InputAccepted = true
-		applied.RootFS = true
-	}
-	if file.User != "" {
-		cfg.User = file.User
-		applied.InputAccepted = true
-		applied.User = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if file.CPUs != nil {
-		cfg.CPUs = *file.CPUs
-		applied.InputAccepted = true
-	}
-	if file.MemoryMiB != nil {
-		cfg.MemoryMiB = *file.MemoryMiB
-		applied.InputAccepted = true
-	}
-	if file.DiskMiB != nil {
-		cfg.DiskMiB = *file.DiskMiB
-		applied.InputAccepted = true
-	}
-	if trusted && file.Network != "" {
-		cfg.Network = file.Network
-		applied.InputAccepted = true
-	}
-	if trusted && file.CNINetwork != "" {
-		cfg.CNINetwork = file.CNINetwork
-		applied.InputAccepted = true
-	}
-	if trusted && file.CNIConfDir != "" {
-		cfg.CNIConfDir = file.CNIConfDir
-		applied.InputAccepted = true
-		applied.CNIConfDir = true
-	}
-	if trusted && file.CNIBinDir != "" {
-		cfg.CNIBinDir = file.CNIBinDir
-		applied.InputAccepted = true
-		applied.CNIBinDir = true
-	}
-	if file.LaunchTimeout != "" {
-		if applyLeaseDuration(&cfg.LaunchTimeout, file.LaunchTimeout) {
-			applied.InputAccepted = true
-		}
-	}
-	if file.DeleteOnRelease != nil {
-		cfg.DeleteOnRelease = *file.DeleteOnRelease
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "firecracker")
+	return applied, err
 }
 
 func (cfg *FirecrackerConfig) applyEnv() (FirecrackerConfigApplied, error) {
 	var applied FirecrackerConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_FIRECRACKER_BINARY"); ok {
-		cfg.Binary = value
-		applied.InputAccepted = true
-		applied.Binary = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FIRECRACKER_JAILER"); ok {
-		cfg.Jailer = value
-		applied.InputAccepted = true
-		applied.Jailer = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FIRECRACKER_KERNEL"); ok {
-		cfg.Kernel = value
-		applied.InputAccepted = true
-		applied.Kernel = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FIRECRACKER_ROOTFS"); ok {
-		cfg.RootFS = value
-		applied.InputAccepted = true
-		applied.RootFS = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FIRECRACKER_USER"); ok {
-		cfg.User = value
-		applied.InputAccepted = true
-		applied.User = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FIRECRACKER_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_FIRECRACKER_CPUS", strconv.IntSize); ok {
-		cfg.CPUs = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_FIRECRACKER_MEMORY_MIB", strconv.IntSize); ok {
-		cfg.MemoryMiB = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_FIRECRACKER_DISK_MIB", strconv.IntSize); ok {
-		cfg.DiskMiB = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FIRECRACKER_NETWORK"); ok {
-		cfg.Network = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FIRECRACKER_CNI_NETWORK"); ok {
-		cfg.CNINetwork = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FIRECRACKER_CNI_CONF_DIR"); ok {
-		cfg.CNIConfDir = value
-		applied.InputAccepted = true
-		applied.CNIConfDir = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FIRECRACKER_CNI_BIN_DIR"); ok {
-		cfg.CNIBinDir = value
-		applied.InputAccepted = true
-		applied.CNIBinDir = true
-	}
-	if value := os.Getenv("CRABBOX_FIRECRACKER_LAUNCH_TIMEOUT"); value != "" {
-		if applyLeaseDuration(&cfg.LaunchTimeout, value) {
-			applied.InputAccepted = true
-		}
-	}
-	if value, ok := getenvBool("CRABBOX_FIRECRACKER_DELETE_ON_RELEASE"); ok {
-		cfg.DeleteOnRelease = value
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 15)
+	return applied, err
 }
 
 // FirecrackerConfigFlagValues holds parsed values; only visited flags are applied.
@@ -247,23 +104,9 @@ type FirecrackerConfigFlagValues struct {
 
 // RegisterFirecrackerConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterFirecrackerConfigFlags(fs *flag.FlagSet, defaults FirecrackerConfig) FirecrackerConfigFlagValues {
-	return FirecrackerConfigFlagValues{
-		Binary:          fs.String("firecracker-binary", defaults.Binary, "Firecracker binary name or path"),
-		Jailer:          fs.String("firecracker-jailer", defaults.Jailer, "Optional Firecracker jailer binary path"),
-		Kernel:          fs.String("firecracker-kernel", defaults.Kernel, "Linux kernel image for Firecracker guests"),
-		RootFS:          fs.String("firecracker-rootfs", defaults.RootFS, "Root filesystem image for Firecracker guests"),
-		User:            fs.String("firecracker-user", defaults.User, "SSH user inside Firecracker guests"),
-		WorkRoot:        fs.String("firecracker-work-root", defaults.WorkRoot, "Remote Crabbox work root inside Firecracker guests"),
-		CPUs:            fs.Int("firecracker-cpus", defaults.CPUs, "vCPU count for Firecracker guests"),
-		MemoryMiB:       fs.Int("firecracker-memory-mib", defaults.MemoryMiB, "Guest memory in MiB"),
-		DiskMiB:         fs.Int("firecracker-disk-mib", defaults.DiskMiB, "Per-lease writable disk size in MiB"),
-		Network:         fs.String("firecracker-network", defaults.Network, "Firecracker network mode (currently cni)"),
-		CNINetwork:      fs.String("firecracker-cni-network", defaults.CNINetwork, "CNI network name for Firecracker guests"),
-		CNIConfDir:      fs.String("firecracker-cni-conf-dir", defaults.CNIConfDir, "CNI network configuration directory"),
-		CNIBinDir:       fs.String("firecracker-cni-bin-dir", defaults.CNIBinDir, "CNI plugin binary directory"),
-		LaunchTimeout:   fs.String("firecracker-launch-timeout", defaults.LaunchTimeout.String(), "Firecracker launch timeout"),
-		DeleteOnRelease: fs.Bool("firecracker-delete-on-release", defaults.DeleteOnRelease, "Delete owned Firecracker artifacts when releasing a lease"),
-	}
+	var values FirecrackerConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // FirecrackerConfigVisitedFlags records raw flag visits, independently of application.
@@ -281,94 +124,14 @@ type FirecrackerConfigVisitedFlags struct {
 
 // FirecrackerConfigFlagPresence reports visits for tracked flag bindings.
 func FirecrackerConfigFlagPresence(fs *flag.FlagSet) FirecrackerConfigVisitedFlags {
-	return FirecrackerConfigVisitedFlags{
-		Binary:          flagWasSet(fs, "firecracker-binary"),
-		Jailer:          flagWasSet(fs, "firecracker-jailer"),
-		Kernel:          flagWasSet(fs, "firecracker-kernel"),
-		RootFS:          flagWasSet(fs, "firecracker-rootfs"),
-		User:            flagWasSet(fs, "firecracker-user"),
-		WorkRoot:        flagWasSet(fs, "firecracker-work-root"),
-		CNIConfDir:      flagWasSet(fs, "firecracker-cni-conf-dir"),
-		CNIBinDir:       flagWasSet(fs, "firecracker-cni-bin-dir"),
-		DeleteOnRelease: flagWasSet(fs, "firecracker-delete-on-release"),
-	}
+	var visited FirecrackerConfigVisitedFlags
+	recordConfigFlagVisits[FirecrackerConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values FirecrackerConfigFlagValues) Apply(cfg *FirecrackerConfig, fs *flag.FlagSet) (FirecrackerConfigApplied, error) {
 	var applied FirecrackerConfigApplied
-	visited := FirecrackerConfigFlagPresence(fs)
-	if visited.Binary {
-		cfg.Binary = *values.Binary
-		applied.InputAccepted = true
-		applied.Binary = true
-	}
-	if visited.Jailer {
-		cfg.Jailer = *values.Jailer
-		applied.InputAccepted = true
-		applied.Jailer = true
-	}
-	if visited.Kernel {
-		cfg.Kernel = *values.Kernel
-		applied.InputAccepted = true
-		applied.Kernel = true
-	}
-	if visited.RootFS {
-		cfg.RootFS = *values.RootFS
-		applied.InputAccepted = true
-		applied.RootFS = true
-	}
-	if visited.User {
-		cfg.User = *values.User
-		applied.InputAccepted = true
-		applied.User = true
-	}
-	if visited.WorkRoot {
-		cfg.WorkRoot = *values.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if flagWasSet(fs, "firecracker-cpus") {
-		cfg.CPUs = *values.CPUs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "firecracker-memory-mib") {
-		cfg.MemoryMiB = *values.MemoryMiB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "firecracker-disk-mib") {
-		cfg.DiskMiB = *values.DiskMiB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "firecracker-network") {
-		cfg.Network = *values.Network
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "firecracker-cni-network") {
-		cfg.CNINetwork = *values.CNINetwork
-		applied.InputAccepted = true
-	}
-	if visited.CNIConfDir {
-		cfg.CNIConfDir = *values.CNIConfDir
-		applied.InputAccepted = true
-		applied.CNIConfDir = true
-	}
-	if visited.CNIBinDir {
-		cfg.CNIBinDir = *values.CNIBinDir
-		applied.InputAccepted = true
-		applied.CNIBinDir = true
-	}
-	if flagWasSet(fs, "firecracker-launch-timeout") {
-		if err := ApplyLeaseDuration(&cfg.LaunchTimeout, *values.LaunchTimeout); err != nil {
-			return applied, err
-		} else if *values.LaunchTimeout != "" {
-			applied.InputAccepted = true
-		}
-	}
-	if visited.DeleteOnRelease {
-		cfg.DeleteOnRelease = *values.DeleteOnRelease
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

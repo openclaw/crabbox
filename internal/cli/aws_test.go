@@ -68,8 +68,8 @@ func TestAWSFixedAttemptIdentityIsStableAndScopedToResolvedLaunch(t *testing.T) 
 	}
 
 	createdAt := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
-	left := directLeaseLabels(cfg, "cbx_abcdef123456", "fixed", "aws", "on-demand", true, createdAt)
-	right := directLeaseLabels(cfg, "cbx_abcdef123456", "fixed", "aws", "on-demand", true, createdAt)
+	left := DirectLeaseLabels(cfg, "cbx_abcdef123456", "fixed", "aws", "on-demand", true, createdAt)
+	right := DirectLeaseLabels(cfg, "cbx_abcdef123456", "fixed", "aws", "on-demand", true, createdAt)
 	leftData, err := json.Marshal(left)
 	if err != nil {
 		t.Fatal(err)

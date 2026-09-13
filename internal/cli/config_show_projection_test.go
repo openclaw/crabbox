@@ -235,13 +235,17 @@ func TestConfigShowLegacySlotPositions(t *testing.T) {
 			order = append(order, value)
 		} else if sel.Sel.Name == "Fprintf" {
 			name := strings.SplitN(value, " ", 2)[0]
-			if name == "docker_sandbox" || name == "machine0" || name == "cloudflare" {
+			if strings.HasPrefix(value, "jobs=") {
+				name = "jobs"
+			}
+			switch name {
+			case "actions", "phala", "superserve", "local_container", "apple_container", "mxc", "docker_sandbox", "machine0", "cloudflare", "cloudflare_sandbox", "results", "jobs", "aws", "aws_lambda_microvm", "azure", "digitalocean", "vultr", "linode", "github_codespaces", "azure_dynamic_sessions", "gcp", "proxmox", "xcp_ng":
 				order = append(order, name)
 			}
 		}
 		return true
 	})
-	if got := strings.Join(order, ","); got != "docker_sandbox,multipass,machine0,tart,lume,cloudflare" {
+	if got := strings.Join(order, ","); got != "actions,blacksmith,agent_sandbox,phala,superserve,local_container,apple_container,mxc,docker_sandbox,multipass,machine0,tart,lume,cloudflare,cloudflare_sandbox,static,results,jobs,aws,aws_lambda_microvm,azure,digitalocean,vultr,linode,github_codespaces,azure_dynamic_sessions,gcp,proxmox,firecracker,xcp_ng,parallels" {
 		t.Fatalf("legacy text slot positions: %s", got)
 	}
 }
@@ -250,9 +254,9 @@ func TestConfigShowTextLayoutConsumesSlotsOnce(t *testing.T) {
 	section := func(label string) ProviderConfigShowSection {
 		return ProviderConfigShowSection{TextLabel: label, Fields: []ProviderConfigShowField{{TextName: "value", TextValue: label}}}
 	}
-	layout := newConfigShowTextLayout([]ProviderConfigShowSection{section("alpha"), section("lume"), section("multipass"), section("tart"), section("zeta")})
+	layout := newConfigShowTextLayout([]ProviderConfigShowSection{section("alpha"), section("lume"), section("multipass"), section("tart"), section("zeta"), section("docker_sandbox"), section("mxc"), section("apple_container"), section("local_container"), section("aws"), section("azure"), section("gcp"), section("digitalocean"), section("vultr"), section("linode")})
 	var out bytes.Buffer
-	for _, label := range []string{"absent", "multipass", "multipass", "tart", "lume"} {
+	for _, label := range []string{"absent", "local_container", "apple_container", "mxc", "docker_sandbox", "local_container", "apple_container", "mxc", "docker_sandbox", "multipass", "multipass", "tart", "lume", "aws", "azure", "gcp", "digitalocean", "vultr", "linode", "aws", "azure", "gcp", "digitalocean", "vultr", "linode"} {
 		if err := layout.writeSlot(&out, label); err != nil {
 			t.Fatal(err)
 		}
@@ -260,7 +264,7 @@ func TestConfigShowTextLayoutConsumesSlotsOnce(t *testing.T) {
 	if err := layout.writeRemaining(&out); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := out.String(), "multipass value=multipass\ntart value=tart\nlume value=lume\nalpha value=alpha\nzeta value=zeta\n"; got != want {
+	if got, want := out.String(), "local_container value=local_container\napple_container value=apple_container\nmxc value=mxc\ndocker_sandbox value=docker_sandbox\nmultipass value=multipass\ntart value=tart\nlume value=lume\naws value=aws\nazure value=azure\ngcp value=gcp\ndigitalocean value=digitalocean\nvultr value=vultr\nlinode value=linode\nalpha value=alpha\nzeta value=zeta\n"; got != want {
 		t.Fatalf("slot order/duplication got %q want %q", got, want)
 	}
 	out.Reset()
@@ -345,5 +349,28 @@ func TestProviderConfigShowFormattingBridges(t *testing.T) {
 	value := "https://example.invalid/path?sample=value"
 	if got := ConfigShowURL(value); got != redactedConfigURL(value) || strings.Contains(got, "sample=value") {
 		t.Fatal("URL bridge changed")
+	}
+}
+
+func TestConfigShowMigratedLegacyOwnershipRetired(t *testing.T) {
+	view := configShowView(Config{})
+	for _, tc := range []struct{ key, label string }{
+		{"localContainer", "local_container"}, {"appleContainer", "apple_container"}, {"mxc", "mxc"}, {"dockerSandbox", "docker_sandbox"},
+		{"aws", "aws"}, {"azure", "azure"}, {"gcp", "gcp"},
+		{"digitalocean", "digitalocean"}, {"vultr", "vultr"}, {"linode", "linode"},
+		{"blacksmith", "blacksmith"}, {"agentSandbox", "agent_sandbox"}, {"firecracker", "firecracker"},
+		{"parallels", "parallels"},
+		{"static", "static"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			if _, exists := view[tc.key]; exists {
+				t.Errorf("core still owns %s values", tc.key)
+			}
+			for _, reserved := range strings.Fields(legacyConfigShowTextLabels) {
+				if reserved == tc.label {
+					t.Errorf("migrated label %s still reserved as legacy", tc.label)
+				}
+			}
+		})
 	}
 }

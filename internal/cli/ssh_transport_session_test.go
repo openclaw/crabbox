@@ -1056,7 +1056,7 @@ exit 0
 	runEnvProfileTestTouchHook = func(req TouchRequest) error {
 		touches++
 		snapshot, exists, set := ServerLeaseClaimSnapshot(req.Lease.Server)
-		current, err := readLeaseClaim(req.Lease.LeaseID)
+		current, err := ReadLeaseClaim(req.Lease.LeaseID)
 		if err != nil || !set || !exists || !reflect.DeepEqual(snapshot, current) {
 			return fmt.Errorf("touch received stale snapshot: snapshot=%#v current=%#v err=%v", snapshot, current, err)
 		}
@@ -1072,7 +1072,7 @@ exit 0
 		t.Fatal(err)
 	}
 	final, exists, set := ServerLeaseClaimSnapshot(lease.Server)
-	current, err := readLeaseClaim(lease.LeaseID)
+	current, err := ReadLeaseClaim(lease.LeaseID)
 	if err != nil || !set || !exists || lease.SSH.Port != "2202" || touches != 2 || first.Revision == initial.Revision || final.Revision == first.Revision || !reflect.DeepEqual(final, current) {
 		t.Fatalf("port=%q touches=%d initial=%#v first=%#v final=%#v current=%#v err=%v", lease.SSH.Port, touches, initial, first, final, current, err)
 	}

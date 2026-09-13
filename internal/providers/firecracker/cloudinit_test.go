@@ -4,10 +4,12 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"testing"
+
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func TestBuildFAT16ImagePreservesFirecrackerEncoding(t *testing.T) {
-	image, err := buildFAT16Image("cidata", []fatFile{
+	image, err := buildFAT16Image("cidata", []shared.FATFile{
 		{Name: "user-data", Data: []byte("#cloud-config\nusers:\n- name: alice\n")},
 		{Name: "meta-data", Data: []byte("instance-id: crabbox-test\nlocal-hostname: my-app\n")},
 	})

@@ -273,7 +273,9 @@ func (b *backend) prepare(ctx context.Context, c *consoleClient, claim core.Leas
 	if err := core.UseLeaseKnownHosts(&target, claim.LeaseID); err != nil {
 		return core.LeaseTarget{}, err
 	}
-	core.UseStoredTestboxKey(&target, claim.LeaseID)
+	if err := core.UseStoredTestboxKey(&target, claim.LeaseID); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	if err := pinHostKey(target); err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -359,7 +361,9 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		target := core.SSHTargetFromConfig(b.cfg, vm.PublicIP)
 		target.User, target.Port, target.SSHHostKey = "boxd", strconv.Itoa(claim.SSHPort), claim.Labels["ssh_host_key"]
 		target.Key = ""
-		core.UseStoredTestboxKey(&target, claim.LeaseID)
+		if err := core.UseStoredTestboxKey(&target, claim.LeaseID); err != nil {
+			return core.LeaseTarget{}, err
+		}
 		if target.Key == "" {
 			return core.LeaseTarget{}, core.Exit(5, "boxd stored lease SSH key is missing")
 		}

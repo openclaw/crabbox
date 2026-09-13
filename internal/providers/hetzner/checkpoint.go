@@ -23,7 +23,7 @@ const (
 )
 
 type hetznerSnapshotClient interface {
-	GetServer(context.Context, int64) (Server, error)
+	GetServer(context.Context, int64) (core.Server, error)
 	CreateServerSnapshot(context.Context, int64, string, map[string]string) (core.HetznerImage, error)
 	GetImage(context.Context, int64) (core.HetznerImage, error)
 	DeleteImage(context.Context, int64) error
@@ -53,7 +53,7 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 			err = core.NativeCheckpointNotSubmittedError{Cause: err}
 		}
 	}()
-	if firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != core.TargetLinux {
+	if shared.FirstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != core.TargetLinux {
 		return core.NativeCheckpointCreateResult{}, core.Exit(2, "Hetzner native checkpoints require a Linux lease")
 	}
 	if core.NormalizeCheckpointStrategy(req.Strategy) == core.CheckpointStrategyImage {
@@ -176,7 +176,7 @@ func (Provider) VerifyNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	} else if failedHetznerSnapshotState(state) {
 		next = "delete"
 	}
-	return core.NativeCheckpointVerifyResult{ProviderState: blank(state, "unknown"), NextAction: next}, nil
+	return core.NativeCheckpointVerifyResult{ProviderState: core.Blank(state, "unknown"), NextAction: next}, nil
 }
 
 func (Provider) DeleteNativeCheckpoint(ctx context.Context, req core.NativeCheckpointResourceRequest) error {
@@ -220,7 +220,7 @@ func validateHetznerSnapshot(req core.NativeCheckpointResourceRequest, snapshot 
 		return core.Exit(2, "refusing to operate on a non-direct Hetzner checkpoint record")
 	}
 	if snapshot.Type != "snapshot" {
-		return core.Exit(2, "refusing to operate on Hetzner image %d with type=%s", snapshot.ID, blank(snapshot.Type, "unknown"))
+		return core.Exit(2, "refusing to operate on Hetzner image %d with type=%s", snapshot.ID, core.Blank(snapshot.Type, "unknown"))
 	}
 	if strconv.FormatInt(snapshot.ID, 10) != strings.TrimSpace(req.Image.ID) {
 		return core.Exit(2, "refusing to operate on a mismatched Hetzner snapshot identity")
@@ -268,7 +268,7 @@ func hetznerCheckpointResult(snapshot core.HetznerImage, location string, metada
 	return core.NativeCheckpointCreateResult{
 		Image: core.NativeCheckpointImage{
 			ID:           strconv.FormatInt(snapshot.ID, 10),
-			Name:         firstNonBlank(snapshot.Description, snapshot.Name),
+			Name:         shared.FirstNonBlank(snapshot.Description, snapshot.Name),
 			State:        snapshot.Status,
 			Provider:     providerName,
 			Kind:         core.CheckpointKindHetzner,
@@ -287,7 +287,7 @@ func waitForHetznerSnapshot(ctx context.Context, client hetznerSnapshotClient, i
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	timeoutError := func() error {
-		return core.Exit(5, "timed out waiting for Hetzner snapshot %d; last state=%s", last.ID, blank(last.Status, "unknown"))
+		return core.Exit(5, "timed out waiting for Hetzner snapshot %d; last state=%s", last.ID, core.Blank(last.Status, "unknown"))
 	}
 	waitError := func(err error) error {
 		if parentErr := ctx.Err(); parentErr != nil {
@@ -347,7 +347,7 @@ func waitForHetznerSnapshot(ctx context.Context, client hetznerSnapshotClient, i
 				return true, nil
 			}
 			if failedHetznerSnapshotState(state) {
-				return false, core.Exit(5, "Hetzner snapshot %d failed; last state=%s", last.ID, blank(last.Status, "unknown"))
+				return false, core.Exit(5, "Hetzner snapshot %d failed; last state=%s", last.ID, core.Blank(last.Status, "unknown"))
 			}
 			if parentErr := ctx.Err(); parentErr != nil {
 				return false, parentErr
@@ -364,7 +364,7 @@ func waitForHetznerSnapshot(ctx context.Context, client hetznerSnapshotClient, i
 		},
 		func(shared.PollResult[core.HetznerImage]) {
 			if stderr != nil {
-				fmt.Fprintf(stderr, "waiting image=%d state=%s\n", last.ID, blank(last.Status, "creating"))
+				fmt.Fprintf(stderr, "waiting image=%d state=%s\n", last.ID, core.Blank(last.Status, "creating"))
 			}
 		})
 	if err != nil {
@@ -378,7 +378,7 @@ func validateCreatedHetznerSnapshot(snapshot core.HetznerImage, expectedArchitec
 		return core.Exit(5, "Hetzner returned image %d with unexpected type=%s", snapshot.ID, snapshot.Type)
 	}
 	if snapshot.Architecture != expectedArchitecture {
-		return core.Exit(5, "Hetzner snapshot %d architecture=%s does not match source architecture=%s", snapshot.ID, blank(snapshot.Architecture, "unknown"), expectedArchitecture)
+		return core.Exit(5, "Hetzner snapshot %d architecture=%s does not match source architecture=%s", snapshot.ID, core.Blank(snapshot.Architecture, "unknown"), expectedArchitecture)
 	}
 	return nil
 }
@@ -392,19 +392,19 @@ func failedHetznerSnapshotState(state string) bool {
 	}
 }
 
-func hetznerServerArchitecture(server Server) (string, error) {
+func hetznerServerArchitecture(server core.Server) (string, error) {
 	imageArchitecture := ""
 	if server.Image != nil {
 		imageArchitecture = server.Image.Architecture
 	}
-	value := firstNonBlank(imageArchitecture, server.ServerType.Architecture, server.Labels["architecture"])
+	value := shared.FirstNonBlank(imageArchitecture, server.ServerType.Architecture, server.Labels["architecture"])
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "x86", "amd64", "x86_64":
 		return "x86", nil
 	case "arm", "arm64", "aarch64":
 		return "arm", nil
 	default:
-		return "", core.Exit(2, "Hetzner source server %s has unsupported architecture=%s", server.DisplayID(), blank(value, "unknown"))
+		return "", core.Exit(2, "Hetzner source server %s has unsupported architecture=%s", server.DisplayID(), core.Blank(value, "unknown"))
 	}
 }
 
@@ -415,7 +415,7 @@ func coreArchitectureFromHetzner(value string) (string, error) {
 	case "arm":
 		return core.ArchitectureARM64, nil
 	default:
-		return "", core.Exit(2, "unsupported Hetzner snapshot architecture=%s", blank(value, "unknown"))
+		return "", core.Exit(2, "unsupported Hetzner snapshot architecture=%s", core.Blank(value, "unknown"))
 	}
 }
 
@@ -445,10 +445,6 @@ func cloneMetadata(values map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlank(values...)
 }
 
 var (

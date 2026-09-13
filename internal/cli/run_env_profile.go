@@ -19,7 +19,7 @@ func loadEnvProfiles(paths []string) (map[string]string, error) {
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return nil, exit(2, "read env profile %s: %v", path, err)
+			return nil, Exit(2, "read env profile %s: %v", path, err)
 		}
 		for key, value := range parseEnvProfile(data) {
 			out[key] = value
@@ -31,7 +31,7 @@ func loadEnvProfiles(paths []string) (map[string]string, error) {
 func allowedEnvFromProfiles(allow []string, profileEnv map[string]string) map[string]string {
 	out := allowedEnv(allow)
 	for key, value := range profileEnv {
-		if validEnvName(key) && envAllowed(key, allow) {
+		if ValidShellEnvName(key) && envAllowed(key, allow) {
 			out[key] = value
 		}
 	}
@@ -41,7 +41,7 @@ func allowedEnvFromProfiles(allow []string, profileEnv map[string]string) map[st
 func allowedProfileEnv(allow []string, profileEnv map[string]string) map[string]string {
 	out := map[string]string{}
 	for key, value := range profileEnv {
-		if validEnvName(key) && envAllowed(key, allow) {
+		if ValidShellEnvName(key) && envAllowed(key, allow) {
 			out[key] = value
 		}
 	}
@@ -184,7 +184,7 @@ func parseEnvProfile(data []byte) map[string]string {
 			continue
 		}
 		key = strings.TrimSpace(key)
-		if !validEnvName(key) {
+		if !ValidShellEnvName(key) {
 			continue
 		}
 		value = strings.TrimSpace(value)
@@ -280,9 +280,9 @@ func uploadRunEnvProfile(ctx context.Context, target SSHTarget, workdir, remoteP
 	if err := runSSHInput(ctx, target, remote, strings.NewReader(input), &stdout, &stderr); err != nil {
 		detail := trimFailureDetail(strings.TrimSpace(stdout.String() + "\n" + stderr.String()))
 		if detail != "" {
-			return exit(7, "upload env profile %s: %v: %s", remotePath, err, detail)
+			return Exit(7, "upload env profile %s: %v: %s", remotePath, err, detail)
 		}
-		return exit(7, "upload env profile %s: %v", remotePath, err)
+		return Exit(7, "upload env profile %s: %v", remotePath, err)
 	}
 	return nil
 }
@@ -298,14 +298,14 @@ func runEnvHelperPath(name string) string {
 func safeEnvHelperName(name string) (string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return "", exit(2, "--env-helper requires a name")
+		return "", Exit(2, "--env-helper requires a name")
 	}
 	if strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
-		return "", exit(2, "--env-helper must be a simple name, not a path")
+		return "", Exit(2, "--env-helper must be a simple name, not a path")
 	}
 	safe := safeCaptureName(name)
 	if safe == "" || safe != name {
-		return "", exit(2, "--env-helper must contain only letters, numbers, dash, or underscore")
+		return "", Exit(2, "--env-helper must contain only letters, numbers, dash, or underscore")
 	}
 	return safe, nil
 }
@@ -321,11 +321,11 @@ func probeRunEnvProfile(ctx context.Context, target SSHTarget, workdir, remotePa
 	}
 	out, err := runSSHOutput(ctx, target, remote)
 	if err != nil {
-		return exit(7, "probe env profile %s: %v", remotePath, err)
+		return Exit(7, "probe env profile %s: %v", remotePath, err)
 	}
 	entries := splitNonEmptyLines(out)
 	if len(entries) == 0 {
-		return exit(7, "probe env profile %s: empty probe output", remotePath)
+		return Exit(7, "probe env profile %s: empty probe output", remotePath)
 	}
 	fmt.Fprintf(stderr, "env profile remote=%s vars=%s\n", remotePath, strings.Join(entries, ","))
 	return nil
@@ -341,9 +341,9 @@ func uploadRunEnvHelper(ctx context.Context, target SSHTarget, workdir, helperPa
 	if err := runSSHInput(ctx, target, remote, strings.NewReader(input), &stdout, &stderr); err != nil {
 		detail := trimFailureDetail(strings.TrimSpace(stdout.String() + "\n" + stderr.String()))
 		if detail != "" {
-			return exit(7, "upload env helper %s: %v: %s", helperPath, err, detail)
+			return Exit(7, "upload env helper %s: %v: %s", helperPath, err, detail)
 		}
-		return exit(7, "upload env helper %s: %v", helperPath, err)
+		return Exit(7, "upload env helper %s: %v", helperPath, err)
 	}
 	return nil
 }
@@ -353,7 +353,7 @@ func validateRunEnvHelperTarget(target SSHTarget, helperPath string) error {
 		return nil
 	}
 	if isWindowsNativeTarget(target) {
-		return exit(2, "--env-helper is not supported for native Windows targets yet")
+		return Exit(2, "--env-helper is not supported for native Windows targets yet")
 	}
 	return nil
 }
@@ -370,7 +370,7 @@ func remoteProbeRunEnvProfileCommand(workdir, remotePath string, names []string)
 	b.WriteString(shellQuote(remotePath))
 	b.WriteByte('\n')
 	for _, name := range names {
-		if !validEnvName(name) {
+		if !ValidShellEnvName(name) {
 			continue
 		}
 		secret := "false"
@@ -452,7 +452,7 @@ func formatShellEnvFile(env map[string]string) string {
 	keys := sortedEnvNames(env)
 	var b strings.Builder
 	for _, key := range keys {
-		if !validEnvName(key) {
+		if !ValidShellEnvName(key) {
 			continue
 		}
 		fmt.Fprintf(&b, "export %s=%s\n", key, shellQuote(env[key]))
@@ -464,7 +464,7 @@ func formatPlainEnvFile(env map[string]string) string {
 	keys := sortedEnvNames(env)
 	var b strings.Builder
 	for _, key := range keys {
-		if !validEnvName(key) {
+		if !ValidShellEnvName(key) {
 			continue
 		}
 		fmt.Fprintf(&b, "%s=%s\n", key, strings.NewReplacer("\r", "", "\n", "").Replace(env[key]))
@@ -481,7 +481,7 @@ func windowsRemoteRemoveRunEnvProfileCommand(workdir, remotePath string) string 
 Set-Location -LiteralPath ` + psQuote(workdir) + `
 Remove-Item -LiteralPath ` + psQuote(remotePath) + ` -Force -ErrorAction SilentlyContinue
 `
-	return powershellCommand(script)
+	return PowershellCommand(script)
 }
 
 func windowsRemoteProbeRunEnvProfileCommand(workdir, remotePath string, names []string) string {
@@ -497,7 +497,7 @@ Get-Content -Encoding UTF8 -LiteralPath $profilePath | ForEach-Object {
 }
 `
 	for _, name := range names {
-		if !validEnvName(name) {
+		if !ValidShellEnvName(name) {
 			continue
 		}
 		secret := envNameLooksSecret(name)
@@ -518,7 +518,7 @@ if ($null -eq $value) {
 		script += `}
 `
 	}
-	return powershellCommand(script)
+	return PowershellCommand(script)
 }
 
 func secretSuffix(secret bool, length int) string {
@@ -561,22 +561,4 @@ func shellDir(path string) string {
 		return path[:idx]
 	}
 	return "."
-}
-
-func validEnvName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for i, r := range name {
-		if i == 0 {
-			if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || r == '_') {
-				return false
-			}
-			continue
-		}
-		if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_') {
-			return false
-		}
-	}
-	return true
 }

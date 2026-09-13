@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestManualConfigInputFlags(t *testing.T) {
@@ -65,7 +67,7 @@ func TestProviderSpecAndFlags(t *testing.T) {
 		}
 	}
 	fs := newTestFlagSet()
-	Provider{}.RegisterFlags(fs, Config{})
+	Provider{}.RegisterFlags(fs, core.Config{})
 	if fs.Lookup("cloudflare-dynamic-workers-token") != nil {
 		t.Fatal("provider must not expose a token CLI flag")
 	}
@@ -89,7 +91,7 @@ func TestProviderFlagsRejectExpose(t *testing.T) {
 func TestConfigureNormalizesDefaultLinuxTarget(t *testing.T) {
 	cfg := testConfig("http://127.0.0.1:1")
 	cfg.TargetOS = "linux"
-	configured, err := Provider{}.Configure(cfg, Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+	configured, err := Provider{}.Configure(cfg, core.Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +104,7 @@ func TestConfigureRejectsExplicitLinuxTarget(t *testing.T) {
 	cfg := testConfig("http://127.0.0.1:1")
 	cfg.TargetOS = core.TargetLinux
 	core.MarkTargetExplicit(&cfg)
-	_, err := Provider{}.Configure(cfg, Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+	_, err := Provider{}.Configure(cfg, core.Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
 	if err == nil || !strings.Contains(err.Error(), "supports target=worker-runtime only") {
 		t.Fatalf("error=%v", err)
 	}
@@ -113,7 +115,7 @@ func TestConfigureRejectsUnsupportedImplicitTargets(t *testing.T) {
 		t.Run(target, func(t *testing.T) {
 			cfg := testConfig("http://127.0.0.1:1")
 			cfg.TargetOS = target
-			_, err := Provider{}.Configure(cfg, Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+			_, err := Provider{}.Configure(cfg, core.Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
 			if err == nil || !strings.Contains(err.Error(), "supports target=worker-runtime only") {
 				t.Fatalf("target=%q error=%v", target, err)
 			}
@@ -124,8 +126,8 @@ func TestConfigureRejectsUnsupportedImplicitTargets(t *testing.T) {
 func TestListWithoutRefreshValidatesLoaderURL(t *testing.T) {
 	cfg := testConfig("")
 	cfg.CloudflareDynamicWorkers.LoaderURL = ""
-	configured := NewBackend(Provider{}.Spec(), cfg, Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
-	_, err := configured.(*backend).List(context.Background(), ListRequest{})
+	configured := NewBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+	_, err := configured.(*backend).List(context.Background(), core.ListRequest{})
 	if err == nil || !strings.Contains(err.Error(), "requires cloudflareDynamicWorkers.loaderUrl") {
 		t.Fatalf("err=%v", err)
 	}
@@ -133,7 +135,7 @@ func TestListWithoutRefreshValidatesLoaderURL(t *testing.T) {
 
 func TestWarmupRejectsMissingModuleSource(t *testing.T) {
 	backend := newTestBackend("http://127.0.0.1:1", &bytes.Buffer{}, &bytes.Buffer{})
-	err := backend.Warmup(context.Background(), WarmupRequest{})
+	err := backend.Warmup(context.Background(), core.WarmupRequest{})
 	if err == nil || !strings.Contains(err.Error(), "requires module source") {
 		t.Fatalf("err=%v", err)
 	}
@@ -260,7 +262,7 @@ func TestNewLoaderAPIRejectsUnsupportedDefaultTransport(t *testing.T) {
 	recorder := &recordingDefaultRoundTripper{}
 	http.DefaultTransport = recorder
 
-	client, err := newLoaderAPI(testConfig("http://127.0.0.1:8787"), Runtime{})
+	client, err := newLoaderAPI(testConfig("http://127.0.0.1:8787"), core.Runtime{})
 	if client != nil || err == nil || !strings.Contains(err.Error(), "non-nil *http.Transport") {
 		t.Fatalf("client=%#v err=%v, want transport setup error", client, err)
 	}
@@ -276,7 +278,7 @@ func TestNewLoaderAPIAcceptsExplicitClientWithUnsupportedDefault(t *testing.T) {
 	injectedTransport := &recordingDefaultRoundTripper{}
 	injected := &http.Client{Transport: injectedTransport}
 
-	api, err := newLoaderAPI(testConfig("http://127.0.0.1:8787"), Runtime{HTTP: injected})
+	api, err := newLoaderAPI(testConfig("http://127.0.0.1:8787"), core.Runtime{HTTP: injected})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +682,7 @@ func TestClientRejectsRedirectWithoutForwardingCredentialsOrPayload(t *testing.T
 	}))
 	defer loader.Close()
 
-	loaderClient, err := newLoaderAPI(testConfig(loader.URL), Runtime{HTTP: loader.Client()})
+	loaderClient, err := newLoaderAPI(testConfig(loader.URL), core.Runtime{HTTP: loader.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -719,7 +721,7 @@ func TestDoctorReadinessUsesBearerAuthAndDoesNotMutate(t *testing.T) {
 	}))
 	defer server.Close()
 	backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -742,7 +744,7 @@ func TestDoctorRequiresDurableRunMetadata(t *testing.T) {
 	}))
 	defer server.Close()
 	backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -784,9 +786,9 @@ func TestRunPostsModuleSourceWithStableCacheAndLimits(t *testing.T) {
 	defer server.Close()
 	var stdout, stderr bytes.Buffer
 	backend := newTestBackend(server.URL, &stdout, &stderr)
-	req := RunRequest{
-		Repo: Repo{Root: t.TempDir(), Name: "my-app"},
-		Script: &RunScriptSpec{
+	req := core.RunRequest{
+		Repo: core.Repo{Root: t.TempDir(), Name: "my-app"},
+		Script: &core.RunScriptSpec{
 			Source:     "../worker module.mjs",
 			RemotePath: ".crabbox/scripts/abc123-worker-module.mjs",
 			Data:       []byte("export default { fetch() { return new Response('ok') } }\n"),
@@ -850,9 +852,9 @@ func TestRunRejectsSuccessfulLoaderResponseWithoutStatus(t *testing.T) {
 	defer server.Close()
 
 	backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
-	result, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), core.RunRequest{
 		ScriptRequested: true,
-		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+		Script:          &core.RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
 	})
 	if err == nil || result.ExitCode != 1 {
 		t.Fatalf("result=%#v err=%v", result, err)
@@ -890,9 +892,9 @@ func TestRunCleansGeneratedIdentityAfterMalformedSuccessfulResponse(t *testing.T
 
 	backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
 	backend.cfg.CloudflareDynamicWorkers.CacheMode = "one-shot"
-	result, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), core.RunRequest{
 		ScriptRequested: true,
-		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+		Script:          &core.RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
 	})
 	if err == nil || result.ExitCode != 1 {
 		t.Fatalf("result=%#v err=%v", result, err)
@@ -927,9 +929,9 @@ func TestRunCleansSubmittedIdentityAfterInvalidJSONResponse(t *testing.T) {
 	defer server.Close()
 
 	backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
-	result, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), core.RunRequest{
 		ScriptRequested: true,
-		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+		Script:          &core.RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
 	})
 	if err == nil || result.ExitCode != 1 {
 		t.Fatalf("result=%#v err=%v", result, err)
@@ -942,7 +944,7 @@ func TestRunCleansSubmittedIdentityAfterInvalidJSONResponse(t *testing.T) {
 func TestRunMalformedResponseCleanupIgnoresCanceledCallerContext(t *testing.T) {
 	loader := &contractErrorLoader{}
 	originalNewLoaderAPI := newLoaderAPI
-	newLoaderAPI = func(Config, Runtime) (loaderAPI, error) {
+	newLoaderAPI = func(core.Config, core.Runtime) (loaderAPI, error) {
 		return loader, nil
 	}
 	defer func() {
@@ -952,9 +954,9 @@ func TestRunMalformedResponseCleanupIgnoresCanceledCallerContext(t *testing.T) {
 	backend := newTestBackend("http://127.0.0.1:1", &bytes.Buffer{}, &bytes.Buffer{})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	result, err := backend.Run(ctx, RunRequest{
+	result, err := backend.Run(ctx, core.RunRequest{
 		ScriptRequested: true,
-		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+		Script:          &core.RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
 	})
 	if err == nil || result.ExitCode != 1 {
 		t.Fatalf("result=%#v err=%v", result, err)
@@ -966,8 +968,8 @@ func TestRunMalformedResponseCleanupIgnoresCanceledCallerContext(t *testing.T) {
 
 func TestRunStableCacheUsesUniqueRunIDsAndStableWorkerID(t *testing.T) {
 	backend := newTestBackend("http://127.0.0.1:1", &bytes.Buffer{}, &bytes.Buffer{})
-	req := RunRequest{
-		Script: &RunScriptSpec{
+	req := core.RunRequest{
+		Script: &core.RunScriptSpec{
 			Source: "worker.mjs",
 			Data:   []byte("export default { fetch() { return new Response('ok') } }"),
 		},
@@ -1013,10 +1015,10 @@ func TestRunTimingJSONRemainsFinalLineAfterUnterminatedLoaderOutput(t *testing.T
 
 	var stderr bytes.Buffer
 	backend := newTestBackend(server.URL, &bytes.Buffer{}, &stderr)
-	result, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), core.RunRequest{
 		TimingJSON:      true,
 		ScriptRequested: true,
-		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+		Script:          &core.RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1067,13 +1069,13 @@ func TestRunPreservesStructuredFailedRunAndKeepOnFailureClaim(t *testing.T) {
 	defer server.Close()
 	var stderr bytes.Buffer
 	backend := newTestBackend(server.URL, &bytes.Buffer{}, &stderr)
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:            Repo{Root: t.TempDir()},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:            core.Repo{Root: t.TempDir()},
 		KeepOnFailure:   true,
 		RequestedSlug:   "debug-failure",
 		TimingJSON:      true,
 		ScriptRequested: true,
-		Script: &RunScriptSpec{
+		Script: &core.RunScriptSpec{
 			Source:     "../worker module.mjs",
 			RemotePath: ".crabbox/scripts/abc123-worker-module.mjs",
 			Data:       []byte("export default {}"),
@@ -1127,10 +1129,10 @@ func TestRunKeepOnFailureRemovesMetadataAfterAcknowledgedSuccess(t *testing.T) {
 	defer server.Close()
 
 	backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
-	result, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), core.RunRequest{
 		KeepOnFailure:   true,
 		ScriptRequested: true,
-		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+		Script:          &core.RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1177,12 +1179,12 @@ func TestRunKeepsLifecycleUncertainClaimFromLiveStatus(t *testing.T) {
 
 	var stderr bytes.Buffer
 	backend := newTestBackend(server.URL, &bytes.Buffer{}, &stderr)
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:            Repo{Root: t.TempDir()},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:            core.Repo{Root: t.TempDir()},
 		Keep:            true,
 		RequestedSlug:   "uncertain-success",
 		ScriptRequested: true,
-		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+		Script:          &core.RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1241,10 +1243,10 @@ func TestRunKeepsLifecycleUncertainWithoutRetentionRequest(t *testing.T) {
 			var stderr bytes.Buffer
 			backend := newTestBackend(server.URL, &bytes.Buffer{}, &stderr)
 			backend.cfg.CloudflareDynamicWorkers.CacheMode = cacheMode
-			result, err := backend.Run(context.Background(), RunRequest{
-				Repo:            Repo{Root: t.TempDir()},
+			result, err := backend.Run(context.Background(), core.RunRequest{
+				Repo:            core.Repo{Root: t.TempDir()},
 				ScriptRequested: true,
-				Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+				Script:          &core.RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -1310,10 +1312,10 @@ func TestRunLifecycleUncertainSurfacesRecoveryClaimPersistenceFailure(t *testing
 			defer server.Close()
 
 			backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
-			result, err := backend.Run(context.Background(), RunRequest{
-				Repo:            Repo{Root: t.TempDir()},
+			result, err := backend.Run(context.Background(), core.RunRequest{
+				Repo:            core.Repo{Root: t.TempDir()},
 				ScriptRequested: true,
-				Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+				Script:          &core.RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
 			})
 			if err == nil || !strings.Contains(err.Error(), "persist cloudflare-dynamic-workers uncertain-lifecycle recovery claim") {
 				t.Fatalf("result=%#v err=%v", result, err)
@@ -1322,7 +1324,7 @@ func TestRunLifecycleUncertainSurfacesRecoveryClaimPersistenceFailure(t *testing
 				t.Fatalf("result=%#v runID=%q", result, runID)
 			}
 			if tc.exitCode != 0 {
-				var exitErr ExitError
+				var exitErr core.ExitError
 				if !errors.As(err, &exitErr) || exitErr.Code != tc.exitCode {
 					t.Fatalf("joined run error=%v, want exit code %d", err, tc.exitCode)
 				}
@@ -1398,9 +1400,9 @@ func TestRunWarnsWhenCompatibilityCleanupFailsAfterSuccess(t *testing.T) {
 
 	var stderr bytes.Buffer
 	backend := newTestBackend(server.URL, &bytes.Buffer{}, &stderr)
-	result, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), core.RunRequest{
 		ScriptRequested: true,
-		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+		Script:          &core.RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1440,18 +1442,18 @@ func TestRunPreservesKeepOnFailureClaimWhenPostResponseIsLost(t *testing.T) {
 
 	var stderr bytes.Buffer
 	cfg := testConfig(server.URL)
-	backend := NewBackend(Provider{}.Spec(), cfg, Runtime{
+	backend := NewBackend(Provider{}.Spec(), cfg, core.Runtime{
 		HTTP:   &http.Client{Transport: losePostResponseTransport{base: http.DefaultTransport}},
 		Stdout: &bytes.Buffer{},
 		Stderr: &stderr,
 	}).(*backend)
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:            Repo{Root: t.TempDir()},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:            core.Repo{Root: t.TempDir()},
 		KeepOnFailure:   true,
 		RequestedSlug:   "uncertain-failure",
 		TimingJSON:      true,
 		ScriptRequested: true,
-		Script: &RunScriptSpec{
+		Script: &core.RunScriptSpec{
 			Source:     "../worker module.mjs",
 			RemotePath: ".crabbox/scripts/abc123-worker-module.mjs",
 			Data:       []byte("export default {}"),
@@ -1480,7 +1482,7 @@ func TestRunPreservesKeepOnFailureClaimWhenPostResponseIsLost(t *testing.T) {
 	}
 }
 
-func decodeLastTimingReport(t *testing.T, output string) timingReport {
+func decodeLastTimingReport(t *testing.T, output string) core.TimingReport {
 	t.Helper()
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -1488,14 +1490,14 @@ func decodeLastTimingReport(t *testing.T, output string) timingReport {
 		if !strings.HasPrefix(line, "{") {
 			continue
 		}
-		var report timingReport
+		var report core.TimingReport
 		if err := json.Unmarshal([]byte(line), &report); err != nil {
 			t.Fatalf("timing json: %v\noutput=%s", err, output)
 		}
 		return report
 	}
 	t.Fatalf("output does not contain timing JSON: %s", output)
-	return timingReport{}
+	return core.TimingReport{}
 }
 
 func TestRunPreservesKeepOnFailureClaimAfterUnstructuredServerError(t *testing.T) {
@@ -1524,12 +1526,12 @@ func TestRunPreservesKeepOnFailureClaimAfterUnstructuredServerError(t *testing.T
 
 	var stderr bytes.Buffer
 	backend := newTestBackend(server.URL, &bytes.Buffer{}, &stderr)
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:            Repo{Root: t.TempDir()},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:            core.Repo{Root: t.TempDir()},
 		KeepOnFailure:   true,
 		RequestedSlug:   "gateway-failure",
 		ScriptRequested: true,
-		Script: &RunScriptSpec{
+		Script: &core.RunScriptSpec{
 			Source: "worker.mjs",
 			Data:   []byte("export default {}"),
 		},
@@ -1580,12 +1582,12 @@ func TestRunPreservesKeepOnFailureClaimAfterInvalidLifecycleRejection(t *testing
 
 	var stderr bytes.Buffer
 	backend := newTestBackend(server.URL, &bytes.Buffer{}, &stderr)
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:            Repo{Root: t.TempDir()},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:            core.Repo{Root: t.TempDir()},
 		KeepOnFailure:   true,
 		RequestedSlug:   "invalid-response",
 		ScriptRequested: true,
-		Script: &RunScriptSpec{
+		Script: &core.RunScriptSpec{
 			Source: "worker.mjs",
 			Data:   []byte("export default {}"),
 		},
@@ -1619,7 +1621,7 @@ func (t losePostResponseTransport) RoundTrip(req *http.Request) (*http.Response,
 }
 
 func TestWorkerModuleNameBoundsLongGeneratedPaths(t *testing.T) {
-	name := workerModuleName(&RunScriptSpec{
+	name := workerModuleName(&core.RunScriptSpec{
 		RemotePath: ".crabbox/scripts/abc123-" + strings.Repeat("a", 250) + ".mjs",
 	})
 	if len(name) > 256 {
@@ -1631,7 +1633,7 @@ func TestWorkerModuleNameBoundsLongGeneratedPaths(t *testing.T) {
 }
 
 func TestWorkerModuleNameUsesJavaScriptForStdin(t *testing.T) {
-	name := workerModuleName(&RunScriptSpec{
+	name := workerModuleName(&core.RunScriptSpec{
 		Source:     "stdin",
 		RemotePath: ".crabbox/scripts/abc123-script.sh",
 	})
@@ -1679,9 +1681,7 @@ func TestStableRunIDIncludesForwardedEnv(t *testing.T) {
 func TestBuildRunRequestSendsEffectiveCompatibilityDate(t *testing.T) {
 	backend := newTestBackend("http://127.0.0.1:1", &bytes.Buffer{}, &bytes.Buffer{})
 	backend.cfg.CloudflareDynamicWorkers.CompatibilityDate = ""
-	req := backend.buildRunRequest(
-		RunRequest{Script: &RunScriptSpec{Source: "stdin", Data: []byte("export default {}")}},
-		"run_1",
+	req := backend.buildRunRequest(core.RunRequest{Script: &core.RunScriptSpec{Source: "stdin", Data: []byte("export default {}")}}, "run_1",
 		"worker_1",
 		"stable",
 	)
@@ -1701,9 +1701,9 @@ func TestTerminalStateIncludesSuccessfulRunStates(t *testing.T) {
 func TestRunExplicitCacheRequiresID(t *testing.T) {
 	backend := newTestBackend("http://127.0.0.1:1", &bytes.Buffer{}, &bytes.Buffer{})
 	backend.cfg.CloudflareDynamicWorkers.CacheMode = "explicit"
-	_, err := backend.Run(context.Background(), RunRequest{
+	_, err := backend.Run(context.Background(), core.RunRequest{
 		ScriptRequested: true,
-		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+		Script:          &core.RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
 	})
 	if err == nil || !strings.Contains(err.Error(), "cache=explicit requires --id") {
 		t.Fatalf("err=%v", err)
@@ -1728,11 +1728,11 @@ func TestRunExplicitCachePrintsGeneratedLifecycleID(t *testing.T) {
 	var stderr bytes.Buffer
 	backend := newTestBackend(server.URL, &bytes.Buffer{}, &stderr)
 	backend.cfg.CloudflareDynamicWorkers.CacheMode = "explicit"
-	result, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), core.RunRequest{
 		ID:              "named-worker",
-		Repo:            Repo{Root: t.TempDir()},
+		Repo:            core.Repo{Root: t.TempDir()},
 		ScriptRequested: true,
-		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+		Script:          &core.RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1747,10 +1747,10 @@ func TestRunExplicitCachePrintsGeneratedLifecycleID(t *testing.T) {
 
 func TestRunRejectsIDOutsideExplicitCache(t *testing.T) {
 	backend := newTestBackend("http://127.0.0.1:1", &bytes.Buffer{}, &bytes.Buffer{})
-	_, err := backend.Run(context.Background(), RunRequest{
+	_, err := backend.Run(context.Background(), core.RunRequest{
 		ID:              "named-worker",
 		ScriptRequested: true,
-		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+		Script:          &core.RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
 	})
 	if err == nil || !strings.Contains(err.Error(), "--id requires cache=explicit") {
 		t.Fatalf("err=%v", err)
@@ -1760,9 +1760,9 @@ func TestRunRejectsIDOutsideExplicitCache(t *testing.T) {
 func TestRunRejectsInterceptEgressWithReusableCache(t *testing.T) {
 	backend := newTestBackend("http://127.0.0.1:1", &bytes.Buffer{}, &bytes.Buffer{})
 	backend.cfg.CloudflareDynamicWorkers.Egress = "intercept"
-	_, err := backend.Run(context.Background(), RunRequest{
+	_, err := backend.Run(context.Background(), core.RunRequest{
 		ScriptRequested: true,
-		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+		Script:          &core.RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
 	})
 	if err == nil || !strings.Contains(err.Error(), "egress=intercept requires cache=one-shot") {
 		t.Fatalf("err=%v", err)
@@ -1786,7 +1786,7 @@ func TestStopMissingRemoteRemovesStaleLocalClaim(t *testing.T) {
 	}
 	var stdout bytes.Buffer
 	backend.rt.Stdout = &stdout
-	if err := backend.Stop(context.Background(), StopRequest{ID: "stale-claim"}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: "stale-claim"}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(stdout.String(), "removed stale cloudflare-dynamic-workers claim cfdw_stale reason=not-found") {
@@ -1813,8 +1813,8 @@ func TestStopRefusesUnrelatedExactClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := backend.Stop(context.Background(), StopRequest{ID: "shared-id"})
-	var exitErr ExitError
+	err := backend.Stop(context.Background(), core.StopRequest{ID: "shared-id"})
+	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "refusing to delete") || !strings.Contains(err.Error(), "exact local claim") {
 		t.Fatalf("err=%v, want exit(2) ownership refusal", err)
 	}
@@ -1837,8 +1837,8 @@ func TestStopRefusesUnclaimedRun(t *testing.T) {
 	defer server.Close()
 	backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
 
-	err := backend.Stop(context.Background(), StopRequest{ID: "cfdw_unclaimed"})
-	var exitErr ExitError
+	err := backend.Stop(context.Background(), core.StopRequest{ID: "cfdw_unclaimed"})
+	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "refusing to delete") || !strings.Contains(err.Error(), "exact local claim") {
 		t.Fatalf("err=%v, want exit(2) ownership refusal", err)
 	}
@@ -1861,8 +1861,8 @@ func TestStopRefusesClaimFromDifferentLoaderEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := backend.Stop(context.Background(), StopRequest{ID: "cfdw_other_loader"})
-	var exitErr ExitError
+	err := backend.Stop(context.Background(), core.StopRequest{ID: "cfdw_other_loader"})
+	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "different loader endpoint") {
 		t.Fatalf("err=%v, want exit(2) loader-scope refusal", err)
 	}
@@ -1892,7 +1892,7 @@ func TestStopDeletesOwnedRunAndRemovesClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := backend.Stop(context.Background(), StopRequest{ID: "owned-run"}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: "owned-run"}); err != nil {
 		t.Fatal(err)
 	}
 	if deleteRequests != 1 {
@@ -1917,7 +1917,7 @@ func TestStatusAllowsUnclaimedRunID(t *testing.T) {
 	defer server.Close()
 	backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
 
-	view, err := backend.Status(context.Background(), StatusRequest{ID: "cfdw_unclaimed"})
+	view, err := backend.Status(context.Background(), core.StatusRequest{ID: "cfdw_unclaimed"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1941,7 +1941,7 @@ func TestStopPreservesConcurrentlyReplacedClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := backend.Stop(context.Background(), StopRequest{ID: "race-claim"})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: "race-claim"})
 	if err == nil || !strings.Contains(err.Error(), "claim changed; retry") {
 		t.Fatalf("err=%v", err)
 	}
@@ -1971,7 +1971,7 @@ func TestCleanupDeletesTerminalMetadataBeforeClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(requests, ","); got != "GET /v1/runs/cfdw_terminal,DELETE /v1/runs/cfdw_terminal" {
@@ -1998,7 +1998,7 @@ func TestCleanupPreservesClaimReplacedDuringMissingStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	claim, ok, err := core.ResolveLeaseClaim("cfdw_race")
@@ -2030,7 +2030,7 @@ func TestCleanupPreservesClaimReplacedDuringTerminalDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	claim, ok, err := core.ResolveLeaseClaim("cfdw_race")
@@ -2061,7 +2061,7 @@ func TestCleanupRetainsClaimWhenTerminalMetadataDeleteFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := resolveLeaseClaim("terminal-claim", backend.cfg); err != nil || !ok {
@@ -2149,7 +2149,7 @@ func TestLoaderClaimScopeCanonicalizesUnreservedEscapes(t *testing.T) {
 	}
 }
 
-func mustLoaderClaimScope(t *testing.T, cfg Config) string {
+func mustLoaderClaimScope(t *testing.T, cfg core.Config) string {
 	t.Helper()
 	scope, err := loaderClaimScope(cfg)
 	if err != nil {
@@ -2208,7 +2208,7 @@ func TestListRefreshUsesLiveStatusOverLocalClaimState(t *testing.T) {
 	if err := claimLease("cfdw_live", "live-claim", backend.cfg, t.TempDir(), time.Minute, false, runServer("cfdw_live", "live-claim", runStatus{ID: "cfdw_live", Status: "ready"}, map[string]string{"state": "ready"})); err != nil {
 		t.Fatal(err)
 	}
-	views, err := backend.List(context.Background(), ListRequest{Refresh: true})
+	views, err := backend.List(context.Background(), core.ListRequest{Refresh: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2225,7 +2225,7 @@ func TestClientRedactsConfiguredTokenFromErrors(t *testing.T) {
 		http.Error(w, `{"error":"bad bearer test-token Authorization: Bearer test-token"}`, http.StatusUnauthorized)
 	}))
 	defer server.Close()
-	client, err := newLoaderAPI(testConfig(server.URL), Runtime{})
+	client, err := newLoaderAPI(testConfig(server.URL), core.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2242,7 +2242,7 @@ func TestClientRedactsConfiguredTokenFromErrors(t *testing.T) {
 }
 
 func newTestBackend(url string, stdout, stderr *bytes.Buffer) *backend {
-	return NewBackend(Provider{}.Spec(), testConfig(url), Runtime{Stdout: stdout, Stderr: stderr}).(*backend)
+	return NewBackend(Provider{}.Spec(), testConfig(url), core.Runtime{Stdout: stdout, Stderr: stderr}).(*backend)
 }
 
 type contractErrorLoader struct {
@@ -2272,8 +2272,8 @@ func (l *contractErrorLoader) DeleteAcknowledgedComplete(ctx context.Context, id
 	return l.cleanupContextErr
 }
 
-func testConfig(url string) Config {
-	cfg := Config{}
+func testConfig(url string) core.Config {
+	cfg := core.Config{}
 	cfg.CloudflareDynamicWorkers.LoaderURL = url
 	cfg.CloudflareDynamicWorkers.Token = "test-token"
 	cfg.CloudflareDynamicWorkers.CacheMode = "stable"
@@ -2291,4 +2291,80 @@ func testConfig(url string) Config {
 
 func newTestFlagSet() *flag.FlagSet {
 	return flag.NewFlagSet("test", flag.ContinueOnError)
+}
+
+func TestJSONRequestAdoptionEnvelope(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "capture")
+	var typedNil *struct{ Value string }
+	const base = "https://api.example.test/base"
+	sentinel := errors.New("synthetic captured transport stop")
+	for _, tc := range []struct {
+		name        string
+		body        any
+		want        string
+		query, fail bool
+	}{
+		{name: "nil"},
+		{name: "typed nil", body: typedNil, want: "null\n"},
+		{name: "JSON bytes", body: map[string]string{"message": "<&>"}, want: "{\"message\":\"\\u003c\\u0026\\u003e\"}\n"},
+		{name: "query without body", query: true},
+		{name: "transport error", fail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			endpoint := "/records"
+			if tc.query {
+				endpoint += "?limit=2&prefix=two+words"
+			}
+
+			headers := http.Header{"Authorization": []string{"Bearer synthetic-token"}}
+
+			if tc.body != nil {
+				headers.Set("Content-Type", "application/json")
+			}
+			transport := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, base+endpoint, tc.want, headers)
+				if tc.fail {
+					return nil, sentinel
+				}
+				return &http.Response{StatusCode: 204, Header: http.Header{"X-Capture": []string{"yes"}}, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+			})}
+			c := &client{baseURL: base, token: "synthetic-token", http: transport}
+			var gotHeaders http.Header
+			err := c.doJSON(ctx, http.MethodPost, endpoint, tc.body, nil)
+			if tc.fail {
+				if !errors.Is(err, sentinel) || gotHeaders != nil {
+					t.Fatalf("error/headers=%v %v", err, gotHeaders)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+
+			if calls != 1 {
+				t.Fatalf("calls=%d", calls)
+			}
+		})
+	}
+}
+
+func TestJSONRequestAdoptionConcreteEnvelope(t *testing.T) {
+	ctx := context.Background()
+	sentinel := errors.New("synthetic captured concrete request")
+	calls := 0
+	headers := http.Header{"Authorization": []string{"Bearer synthetic-token"}, "Content-Type": []string{"application/json"}}
+	transport := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, "https://api.example.test/base/v1/runs", "{\"cacheMode\":\"none\",\"retainMetadata\":true,\"module\":{\"source\":\"\\u003c\\u0026\\u003e\"},\"egress\":\"none\",\"limits\":{},\"timeoutMs\":7}\n", headers)
+		return nil, sentinel
+	})}
+	c := &client{baseURL: "https://api.example.test/base", token: "synthetic-token", http: transport}
+	out, err := c.Run(ctx, runRequest{CacheMode: "none", RetainMetadata: true, Module: moduleSource{Source: "<&>"}, Egress: "none", TimeoutMS: 7})
+	if !reflect.DeepEqual(out, runResponse{}) {
+		t.Fatalf("out=%#v", out)
+	}
+	if !errors.Is(err, sentinel) || calls != 1 {
+		t.Fatalf("error=%v calls=%d", err, calls)
+	}
 }

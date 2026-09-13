@@ -6,11 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestCleanupServersUsesSingleBatchCutoff(t *testing.T) {
@@ -433,5 +436,74 @@ func TestAcquireCleanupFailureVetoesRetryThroughWrapping(t *testing.T) {
 	primary := bootstrapWaitErr()
 	if got := JoinAcquireCleanupError(primary, nil); got != primary {
 		t.Fatalf("successful cleanup changed primary: %v", got)
+	}
+}
+
+func TestResolvedLeaseTargetPreservesEndpoint(t *testing.T) {
+	for _, stored := range []bool{false, true} {
+		for _, enabled := range []bool{false, true} {
+			for _, releaseOnly := range []bool{false, true} {
+				t.Run(fmt.Sprintf("stored=%t/enabled=%t/release=%t", stored, enabled, releaseOnly), func(t *testing.T) {
+					testutil.IsolateUserDirs(t)
+					const leaseID = "cbx_123456abcdef"
+					path, err := core.TestboxKeyPath(leaseID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if stored {
+						path, err = core.PrepareStoredTestboxKeyPath(leaseID)
+						if err != nil {
+							t.Fatal(err)
+						}
+						file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+						if err != nil {
+							t.Fatal(err)
+						}
+						secureErr := core.SecureCreatedLeaseSSHFile(file)
+						closeErr := file.Close()
+						if secureErr != nil {
+							t.Fatal(secureErr)
+						}
+						if closeErr != nil {
+							t.Fatal(closeErr)
+						}
+					}
+					target := core.SSHTarget{User: "alice", Host: "192.0.2.10", Key: "configured-key", Port: "2222", FallbackPorts: []string{"22"}, TargetOS: "linux", WindowsMode: "normal", ReadyCheck: "true", CertificateFile: "certificate", KnownHostsFile: "known-hosts", HostKeyAlias: "alias", SSHHostKey: "host-key", NoControlMaster: true, SSHConfigProxy: true, ProxyCommand: "proxy", ChildEnvDenylist: []string{"EXAMPLE"}, ChildEnv: map[string]string{"EXAMPLE_MODE": "test"}}
+					server := core.Server{CloudID: "instance", Labels: map[string]string{"lease": leaseID}}
+					want := core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+					if stored && enabled && !releaseOnly {
+						want.SSH.Key = path
+					}
+					backend := DirectSSHBackend{StoredLeaseKeys: enabled}
+					got, err := backend.ResolvedLeaseTarget(server, target, leaseID, releaseOnly)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(got, want) {
+						t.Fatalf("target mismatch: got %#v want %#v", got, want)
+					}
+					if target.Key != "configured-key" {
+						t.Fatal("input target changed")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestResolvedLeaseTargetLookupErrorAndReleaseOnly(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	t.Setenv("XDG_STATE_HOME", "relative-state")
+	backend := DirectSSHBackend{StoredLeaseKeys: true}
+	server := core.Server{CloudID: "instance"}
+	target := core.SSHTarget{Host: "192.0.2.10", Key: "configured-key"}
+	got, err := backend.ResolvedLeaseTarget(server, target, "cbx_123456abcdef", false)
+	if err == nil || !reflect.DeepEqual(got, core.LeaseTarget{}) {
+		t.Fatalf("lookup error=%v target=%#v", err, got)
+	}
+	got, err = backend.ResolvedLeaseTarget(server, target, "cbx_123456abcdef", true)
+	want := core.LeaseTarget{Server: server, SSH: target, LeaseID: "cbx_123456abcdef"}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("release-only error=%v target=%#v", err, got)
 	}
 }

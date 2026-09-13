@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -101,7 +102,7 @@ type warmPoolResponse struct {
 	Total int `json:"total,omitempty"`
 }
 
-func newBridgeClient(cfg Config, rt Runtime) (bridgeClient, error) {
+func newBridgeClient(cfg core.Config, rt core.Runtime) (bridgeClient, error) {
 	baseURL, err := bridgeURL(cfg)
 	if err != nil {
 		return nil, err
@@ -246,7 +247,7 @@ func (c *client) parseExecSSE(body io.Reader, stdout, stderr io.Writer) (execRes
 		if err := json.Unmarshal([]byte(data), &frame); err != nil {
 			return fmt.Errorf("decode cloudflare-sandbox exec SSE event: %w", err)
 		}
-		kind := strings.ToLower(blank(frame.Type, ev))
+		kind := strings.ToLower(core.Blank(frame.Type, ev))
 		stream := strings.ToLower(frame.Stream)
 		switch kind {
 		case "stdout", "stderr", "output":

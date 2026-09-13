@@ -2,6 +2,12 @@
 
 `crabbox logs` prints the retained command output for a recorded run.
 
+For opted-in local runs, use `--source local` (or read an existing local record
+without a coordinator). `--source coordinator|all` selects other recorded data.
+Configured-coordinator defaults are unchanged. Local readback exposes retained
+stream scope, omission, and truncation separately from log text, and works after
+the lease is removed. See [private local history](../features/history-logs.md#private-local-history).
+
 ```sh
 crabbox logs run_abcdef123456
 crabbox logs --id run_abcdef123456

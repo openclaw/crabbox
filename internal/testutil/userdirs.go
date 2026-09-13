@@ -116,6 +116,11 @@ func prepareUserDirs(dirs UserDirs) error {
 		filepath.Join(dirs.Root, "local-appdata"),
 	}
 	for _, path := range paths {
+		if path == dirs.StateHome {
+			if err := createIsolatedStateHome(path); err != nil {
+				return fmt.Errorf("create private state home %q: %w", path, err)
+			}
+		}
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			return fmt.Errorf("create %q: %w", path, err)
 		}

@@ -19,7 +19,7 @@ type flagValues struct {
 	TimeoutSecs        *int
 }
 
-func RegisterProviderFlags(fs *flag.FlagSet, defaults Config) any {
+func RegisterProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 	cfg := defaults.CloudflareDynamicWorkers
 	return flagValues{
 		URL:                fs.String("cloudflare-dynamic-workers-url", cfg.LoaderURL, "Cloudflare Dynamic Workers loader URL"),
@@ -33,13 +33,13 @@ func RegisterProviderFlags(fs *flag.FlagSet, defaults Config) any {
 	}
 }
 
-func ApplyProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+func ApplyProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if core.ProviderNameMatchesExact(cfg.Provider, Provider{}) {
 		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
 			return err
 		}
 		if core.FlagWasSet(fs, "expose") {
-			return exit(2, "--expose is not supported for provider=%s", providerName)
+			return core.Exit(2, "--expose is not supported for provider=%s", providerName)
 		}
 	}
 	v, ok := values.(flagValues)
@@ -81,25 +81,25 @@ func ApplyProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	return validateProviderConfig(*cfg)
 }
 
-func validateProviderConfig(cfg Config) error {
+func validateProviderConfig(cfg core.Config) error {
 	switch normalizeCacheMode(cfg.CloudflareDynamicWorkers.CacheMode) {
 	case "one-shot", "stable", "explicit":
 	default:
-		return exit(2, "invalid %s cache mode %q", providerName, cfg.CloudflareDynamicWorkers.CacheMode)
+		return core.Exit(2, "invalid %s cache mode %q", providerName, cfg.CloudflareDynamicWorkers.CacheMode)
 	}
 	switch normalizeEgress(cfg.CloudflareDynamicWorkers.Egress) {
 	case "blocked", "intercept":
 	default:
-		return exit(2, "invalid %s egress mode %q", providerName, cfg.CloudflareDynamicWorkers.Egress)
+		return core.Exit(2, "invalid %s egress mode %q", providerName, cfg.CloudflareDynamicWorkers.Egress)
 	}
 	if cfg.CloudflareDynamicWorkers.CPUMs < 0 {
-		return exit(2, "%s cpu-ms must be non-negative", providerName)
+		return core.Exit(2, "%s cpu-ms must be non-negative", providerName)
 	}
 	if cfg.CloudflareDynamicWorkers.Subrequests < 0 {
-		return exit(2, "%s subrequests must be non-negative", providerName)
+		return core.Exit(2, "%s subrequests must be non-negative", providerName)
 	}
 	if cfg.CloudflareDynamicWorkers.TimeoutSecs < 0 {
-		return exit(2, "%s timeout-secs must be non-negative", providerName)
+		return core.Exit(2, "%s timeout-secs must be non-negative", providerName)
 	}
 	return nil
 }

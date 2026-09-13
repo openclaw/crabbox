@@ -21,7 +21,6 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
@@ -32,6 +31,49 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 // --- pure-function tests -----------------------------------------------------
+
+func TestOpenComputerConfigShowCompletePassiveSection(t *testing.T) {
+	projector, ok := any(Provider{}).(core.ProviderConfigShowProjector)
+	if !ok {
+		t.Fatal("actual provider has no passive config display section")
+	}
+	for _, selected := range []string{"other", "opencomputer"} {
+		for _, populated := range []bool{false, true} {
+			cfg := core.Config{Provider: selected}
+			want := core.ProviderConfigShowSection{JSONKey: "openComputer", TextLabel: "opencomputer", Providers: []string{"opencomputer"}, Fields: []core.ProviderConfigShowField{
+				{JSONName: "apiUrl", JSONValue: "", TextName: "api_url", TextValue: "-"},
+				{JSONName: "workdir", JSONValue: "", TextName: "workdir", TextValue: ""},
+				{JSONName: "cpu", JSONValue: 0, TextName: "cpu", TextValue: "0"},
+				{JSONName: "memoryMB", JSONValue: 0, TextName: "memory_mb", TextValue: "0"},
+				{JSONName: "timeoutSecs", JSONValue: 0, TextName: "timeout_secs", TextValue: "0"},
+				{JSONName: "execTimeoutSecs", JSONValue: 0, TextName: "exec_timeout_secs", TextValue: "0"},
+				{JSONName: "burst", JSONValue: false, TextName: "burst", TextValue: "false"},
+				{JSONName: "forgetMissing", JSONValue: false, TextName: "forget_missing", TextValue: "false"},
+			}}
+			if populated {
+				cfg.OpenComputer = core.OpenComputerConfig{APIURL: "https://example.invalid/path?view=compact#part", Workdir: " raw-workdir ", CPU: 0, MemoryMB: -2, TimeoutSecs: 7, ExecTimeoutSecs: 0, Burst: true, ForgetMissing: false}
+				want.Fields = []core.ProviderConfigShowField{
+					{JSONName: "apiUrl", JSONValue: "https://example.invalid/path", TextName: "api_url", TextValue: "https://example.invalid/path"},
+					{JSONName: "workdir", JSONValue: " raw-workdir ", TextName: "workdir", TextValue: " raw-workdir "},
+					{JSONName: "cpu", JSONValue: 0, TextName: "cpu", TextValue: "0"},
+					{JSONName: "memoryMB", JSONValue: -2, TextName: "memory_mb", TextValue: "-2"},
+					{JSONName: "timeoutSecs", JSONValue: 7, TextName: "timeout_secs", TextValue: "7"},
+					{JSONName: "execTimeoutSecs", JSONValue: 0, TextName: "exec_timeout_secs", TextValue: "0"},
+					{JSONName: "burst", JSONValue: true, TextName: "burst", TextValue: "true"},
+					{JSONName: "forgetMissing", JSONValue: false, TextName: "forget_missing", TextValue: "false"},
+				}
+			}
+			before := cfg
+			got := projector.ConfigShowSection(cfg)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("passive section got %#v want %#v", got, want)
+			}
+			if !reflect.DeepEqual(cfg, before) {
+				t.Fatal("projection mutated supplied config")
+			}
+		}
+	}
+}
 
 func TestProviderSpec(t *testing.T) {
 	p := Provider{}
@@ -153,14 +195,14 @@ func TestResolveLeaseIDRequiresIdentifier(t *testing.T) {
 func TestResolveLeaseIDFallsBackForSluglessClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "ocbx_sb-known123"
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "", providerName, testOCClaimScope("https://api.example.test"), "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "", providerName, testOCClaimScope("https://api.example.test"), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	gotLease, sandboxID, slug, err := resolveLeaseID(leaseID, "", false, 0, "https://api.example.test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotLease != leaseID || sandboxID != "sb-known123" || slug != newLeaseSlug(leaseID) {
+	if gotLease != leaseID || sandboxID != "sb-known123" || slug != core.NewLeaseSlug(leaseID) {
 		t.Fatalf("lease=%q sandbox=%q slug=%q", gotLease, sandboxID, slug)
 	}
 }
@@ -168,10 +210,10 @@ func TestResolveLeaseIDFallsBackForSluglessClaim(t *testing.T) {
 func TestResolveLeaseIDPrefersExactLeaseOverCollidingSlug(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	exactLeaseID := "ocbx_sb-z-exact"
-	if err := claimLeaseForRepoProviderScopePond(exactLeaseID, "exact", providerName, testOCClaimScope("https://api.example.test"), "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(exactLeaseID, "exact", providerName, testOCClaimScope("https://api.example.test"), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseForRepoProviderScopePond("ocbx_sb-a-other", exactLeaseID, providerName, testOCClaimScope("https://api.example.test"), "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond("ocbx_sb-a-other", exactLeaseID, providerName, testOCClaimScope("https://api.example.test"), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	leaseID, sandboxID, _, err := resolveLeaseID(exactLeaseID, "", false, 0, "https://api.example.test")
@@ -187,10 +229,10 @@ func TestStopSurfacesMalformedExactClaimBeforeSlugFallback(t *testing.T) {
 	f := newFakeAPI(t)
 	backend := newAPIBackend(t, f)
 	exactLeaseID := leasePrefix + "sb-z-exact"
-	if err := claimLeaseForRepoProviderScopePond(exactLeaseID, "exact", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(exactLeaseID, "exact", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseForRepoProviderScopePond(leasePrefix+"sb-a-other", exactLeaseID, providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leasePrefix+"sb-a-other", exactLeaseID, providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	claimPath := path.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims", exactLeaseID+".json")
@@ -198,7 +240,7 @@ func TestStopSurfacesMalformedExactClaimBeforeSlugFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := backend.Stop(context.Background(), StopRequest{ID: exactLeaseID})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: exactLeaseID})
 	if err == nil || !strings.Contains(err.Error(), "parse claim") {
 		t.Fatalf("Stop err=%v, want malformed exact claim error", err)
 	}
@@ -212,10 +254,10 @@ func TestStopRejectsClaimFromDifferentAPIAccount(t *testing.T) {
 	backend := newAPIBackend(t, f)
 	leaseID := leasePrefix + f.sandboxID
 	otherScope := openComputerEndpointScope(f.server.URL) + "/ownership:11111111111111111111111111111111"
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "other-account", providerName, otherScope, "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "other-account", providerName, otherScope, "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	err := backend.Stop(context.Background(), StopRequest{ID: leaseID})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: leaseID})
 	if err == nil || !strings.Contains(err.Error(), "ownership tag") {
 		t.Fatalf("Stop err=%v, want ownership mismatch", err)
 	}
@@ -229,16 +271,16 @@ func TestRunVerifiesOwnershipBeforeReclaim(t *testing.T) {
 	backend := newAPIBackend(t, f)
 	leaseID := leasePrefix + f.sandboxID
 	otherScope := openComputerEndpointScope(f.server.URL) + "/ownership:11111111111111111111111111111111"
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "other-account", providerName, otherScope, "", "/original", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "other-account", providerName, otherScope, "", "/original", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	_, err := backend.Run(context.Background(), RunRequest{
-		ID: leaseID, Repo: Repo{Name: "carbbox", Root: "/replacement"}, Reclaim: true, NoSync: true, Command: []string{"true"},
+	_, err := backend.Run(context.Background(), core.RunRequest{
+		ID: leaseID, Repo: core.Repo{Name: "carbbox", Root: "/replacement"}, Reclaim: true, NoSync: true, Command: []string{"true"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "ownership tag") {
 		t.Fatalf("Run err=%v, want ownership mismatch", err)
 	}
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,26 +290,26 @@ func TestRunVerifiesOwnershipBeforeReclaim(t *testing.T) {
 }
 
 func TestNewSandboxName(t *testing.T) {
-	if name := newSandboxName(Repo{Name: "carbbox"}); !strings.HasPrefix(name, "crabbox-carbbox-") {
+	if name := newSandboxName(core.Repo{Name: "carbbox"}); !strings.HasPrefix(name, "crabbox-carbbox-") {
 		t.Fatalf("name=%q", name)
 	}
-	if name := newSandboxName(Repo{Name: "crabbox-app"}); strings.HasPrefix(name, "crabbox-crabbox-") || !strings.HasPrefix(name, "crabbox-app-") {
+	if name := newSandboxName(core.Repo{Name: "crabbox-app"}); strings.HasPrefix(name, "crabbox-crabbox-") || !strings.HasPrefix(name, "crabbox-app-") {
 		t.Fatalf("name=%q double/!prefixed", name)
 	}
-	if name := newSandboxName(Repo{Name: strings.Repeat("very-long-repo-name-", 8)}); len(name) > 63 || strings.HasSuffix(name, "-") {
+	if name := newSandboxName(core.Repo{Name: strings.Repeat("very-long-repo-name-", 8)}); len(name) > 63 || strings.HasSuffix(name, "-") {
 		t.Fatalf("name len=%d %q", len(name), name)
 	}
 }
 
 func TestSpecAllowsForceSyncLargeAndSyncOnly(t *testing.T) {
 	spec := Provider{}.Spec()
-	if err := core.RejectDelegatedSyncOptionsForSpec(spec, RunRequest{ForceSyncLarge: true}); err != nil {
+	if err := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{ForceSyncLarge: true}); err != nil {
 		t.Fatalf("--force-sync-large should be allowed, got %v", err)
 	}
-	if err := core.RejectDelegatedSyncOptionsForSpec(spec, RunRequest{SyncOnly: true}); err != nil {
+	if err := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{SyncOnly: true}); err != nil {
 		t.Fatalf("--sync-only should be allowed, got %v", err)
 	}
-	if err := core.RejectDelegatedSyncOptionsForSpec(spec, RunRequest{ChecksumSync: true}); err == nil {
+	if err := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{ChecksumSync: true}); err == nil {
 		t.Fatalf("--checksum should be rejected")
 	}
 }
@@ -455,8 +497,8 @@ func (f *fakeAPI) firstRequest(method, path string) (recordedRequest, bool) {
 	return recordedRequest{}, false
 }
 
-func newTestConfig(apiURL string) Config {
-	cfg := Config{}
+func newTestConfig(apiURL string) core.Config {
+	cfg := core.Config{}
 	cfg.OpenComputer.APIURL = apiURL
 	cfg.OpenComputer.Workdir = "/workspace/crabbox"
 	return cfg
@@ -474,7 +516,7 @@ func newAPIBackend(t *testing.T, f *fakeAPI) *openComputerBackend {
 	t.Setenv("HOME", t.TempDir()) // no real ~/.oc/config.json
 	t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", "osb_testkey")
 	f.tags = map[string]string{openComputerClaimTagKey: testOCClaimScope(f.server.URL)}
-	rt := Runtime{Stdout: io.Discard, Stderr: io.Discard, HTTP: f.server.Client()}
+	rt := core.Runtime{Stdout: io.Discard, Stderr: io.Discard, HTTP: f.server.Client()}
 	return NewOpenComputerBackend(Provider{}.Spec(), newTestConfig(f.server.URL), rt).(*openComputerBackend)
 }
 
@@ -484,8 +526,8 @@ func TestRunCreatesExecsAndKillsEphemeral(t *testing.T) {
 	f := newFakeAPI(t)
 	f.execReply = []execRunResult{{ExitCode: 0}, {ExitCode: 0, Stdout: "hello\n"}} // mkdir, user cmd
 	backend := newAPIBackend(t, f)
-	res, err := backend.Run(context.Background(), RunRequest{
-		Repo: Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"echo", "hello"}, NoSync: true,
+	res, err := backend.Run(context.Background(), core.RunRequest{
+		Repo: core.Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"echo", "hello"}, NoSync: true,
 	})
 	if err != nil {
 		t.Fatalf("Run err=%v", err)
@@ -502,7 +544,7 @@ func TestRunCreatesExecsAndKillsEphemeral(t *testing.T) {
 	if res.Session.Provider != providerName || res.Session.LeaseID != res.LeaseID || res.Session.Slug != res.Slug || res.Session.Reused || res.Session.Kept {
 		t.Fatalf("session=%#v result=%#v", res.Session, res)
 	}
-	if res.Session.CleanupCommand != "crabbox stop --provider opencomputer --id "+shellQuote(res.LeaseID) {
+	if res.Session.CleanupCommand != "crabbox stop --provider opencomputer --id "+core.ShellQuote(res.LeaseID) {
 		t.Fatalf("cleanup command=%q", res.Session.CleanupCommand)
 	}
 	if f.callsExact(http.MethodPost, "/api/sandboxes") != 1 {
@@ -549,13 +591,13 @@ func TestRunPreservesCommandErrorCause(t *testing.T) {
 				}
 				return transport.RoundTrip(req)
 			})
-			result, err := backend.Run(context.Background(), RunRequest{
-				Repo: Repo{Name: "fixture", Root: t.TempDir()}, Command: []string{"fixture-user"}, NoSync: true,
+			result, err := backend.Run(context.Background(), core.RunRequest{
+				Repo: core.Repo{Name: "fixture", Root: t.TempDir()}, Command: []string{"fixture-user"}, NoSync: true,
 			})
 			if !errors.Is(err, cause) {
 				t.Errorf("Run error %v lost cause %v", err, cause)
 			}
-			var exitErr ExitError
+			var exitErr core.ExitError
 			if !errors.As(err, &exitErr) || exitErr.Code != 1 || !strings.HasPrefix(err.Error(), "opencomputer run failed: ") {
 				t.Errorf("Run error=%v, want provider failure with exit code 1", err)
 			}
@@ -611,13 +653,13 @@ func TestRunCancellationThroughNativeHTTPTransport(t *testing.T) {
 				}
 				f.handle(w, r)
 			})
-			result, err := backend.Run(ctx, RunRequest{
-				Repo: Repo{Name: "fixture", Root: t.TempDir()}, Command: []string{"fixture-user"}, NoSync: true, KeepOnFailure: keep,
+			result, err := backend.Run(ctx, core.RunRequest{
+				Repo: core.Repo{Name: "fixture", Root: t.TempDir()}, Command: []string{"fixture-user"}, NoSync: true, KeepOnFailure: keep,
 			})
 			if !errors.Is(err, context.Canceled) {
 				t.Errorf("Run error %v lost native request cancellation", err)
 			}
-			var exitErr ExitError
+			var exitErr core.ExitError
 			if !errors.As(err, &exitErr) || exitErr.Code != 1 {
 				t.Errorf("Run error=%v, want exit code 1", err)
 			}
@@ -633,11 +675,11 @@ func TestRunCancellationThroughNativeHTTPTransport(t *testing.T) {
 				t.Fatalf("deletes=%d, keep-on-failure=%t", got, keep)
 			}
 			if keep {
-				if err := backend.Stop(context.Background(), StopRequest{ID: result.LeaseID}); err != nil {
+				if err := backend.Stop(context.Background(), core.StopRequest{ID: result.LeaseID}); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if claim, err := readLeaseClaim(result.LeaseID); err != nil || claim.LeaseID != "" {
+			if claim, err := core.ReadLeaseClaim(result.LeaseID); err != nil || claim.LeaseID != "" {
 				t.Fatalf("claim remains after cleanup: %#v, %v", claim, err)
 			}
 		})
@@ -654,10 +696,10 @@ func TestRunCleanupCannotBlockForever(t *testing.T) {
 	backend.cleanupTimeoutOverride = 20 * time.Millisecond
 	started := time.Now()
 
-	res, err := backend.Run(context.Background(), RunRequest{
-		Repo: Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true,
+	res, err := backend.Run(context.Background(), core.RunRequest{
+		Repo: core.Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true,
 	})
-	var exitErr ExitError
+	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 1 || res.ExitCode != 1 || res.ErrorKind != core.RunErrorProvider {
 		t.Fatalf("result=%#v err=%v, want cleanup failure", res, err)
 	}
@@ -705,8 +747,8 @@ func TestRunLifecycleFinalization(t *testing.T) {
 			if tc.missingCommand {
 				command = nil
 			}
-			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "fixture", Root: t.TempDir()}, Command: command, NoSync: true, TimingJSON: true, KeepOnFailure: tc.keepOnFailure})
-			var exitErr ExitError
+			result, err := backend.Run(t.Context(), core.RunRequest{Repo: core.Repo{Name: "fixture", Root: t.TempDir()}, Command: command, NoSync: true, TimingJSON: true, KeepOnFailure: tc.keepOnFailure})
+			var exitErr core.ExitError
 			if !errors.As(err, &exitErr) || exitErr.Code != tc.wantCode || result.ExitCode != tc.wantCode || result.ErrorKind != tc.wantKind {
 				t.Errorf("result=%#v err=%v, want code=%d kind=%s", result, err, tc.wantCode, tc.wantKind)
 			}
@@ -729,7 +771,7 @@ func TestRunLifecycleFinalization(t *testing.T) {
 				}
 			}
 			fake.deleteStatus = 0
-			if err := backend.Stop(context.Background(), StopRequest{ID: result.LeaseID}); err != nil {
+			if err := backend.Stop(context.Background(), core.StopRequest{ID: result.LeaseID}); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -750,12 +792,12 @@ func TestRunClearsClaimWhenAcquiredSandboxAlreadyMissingAtCleanup(t *testing.T) 
 	f.deleteStatus = http.StatusNotFound
 	f.execReply = []execRunResult{{ExitCode: 0}, {ExitCode: 0}}
 	backend := newAPIBackend(t, f)
-	if _, err := backend.Run(context.Background(), RunRequest{
-		Repo: Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true,
+	if _, err := backend.Run(context.Background(), core.RunRequest{
+		Repo: core.Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true,
 	}); err != nil {
 		t.Fatalf("Run err=%v", err)
 	}
-	if _, ok, err := resolveLeaseClaim(leasePrefix + f.sandboxID); err != nil || ok {
+	if _, ok, err := core.ResolveLeaseClaim(leasePrefix + f.sandboxID); err != nil || ok {
 		t.Fatalf("acquired missing sandbox claim remains: ok=%t err=%v", ok, err)
 	}
 }
@@ -766,8 +808,8 @@ func TestRunForwardsEnvInExecBodyOffArgv(t *testing.T) {
 	backend := newAPIBackend(t, f)
 	var stderr bytes.Buffer
 	backend.rt.Stderr = &stderr
-	_, err := backend.Run(context.Background(), RunRequest{
-		Repo:       Repo{Name: "carbbox", Root: t.TempDir()},
+	_, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:       core.Repo{Name: "carbbox", Root: t.TempDir()},
 		Command:    []string{"printenv", "SECRET_TOKEN"},
 		NoSync:     true,
 		Env:        map[string]string{"SECRET_TOKEN": "super-secret"},
@@ -800,8 +842,8 @@ func TestRunUsesConfiguredExecTimeout(t *testing.T) {
 	f.execReply = []execRunResult{{ExitCode: 0}, {ExitCode: 0}}
 	backend := newAPIBackend(t, f)
 	backend.cfg.OpenComputer.ExecTimeoutSecs = 123
-	if _, err := backend.Run(context.Background(), RunRequest{
-		Repo: Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true,
+	if _, err := backend.Run(context.Background(), core.RunRequest{
+		Repo: core.Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true,
 	}); err != nil {
 		t.Fatalf("Run err=%v", err)
 	}
@@ -818,9 +860,9 @@ func TestRunRequiresAPIKey(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", "")
 	t.Setenv("OPENCOMPUTER_API_KEY", "")
-	rt := Runtime{Stdout: io.Discard, Stderr: io.Discard, HTTP: f.server.Client()}
+	rt := core.Runtime{Stdout: io.Discard, Stderr: io.Discard, HTTP: f.server.Client()}
 	backend := NewOpenComputerBackend(Provider{}.Spec(), newTestConfig(f.server.URL), rt).(*openComputerBackend)
-	_, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "x", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true})
+	_, err := backend.Run(context.Background(), core.RunRequest{Repo: core.Repo{Name: "x", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true})
 	if err == nil || !strings.Contains(err.Error(), "API key") {
 		t.Fatalf("err=%v, want API-key error", err)
 	}
@@ -833,7 +875,7 @@ func TestRunPerformsArchiveSyncViaFileAPI(t *testing.T) {
 	f := newFakeAPI(t)
 	f.execReply = []execRunResult{{ExitCode: 0}, {ExitCode: 0}, {ExitCode: 0, Stdout: "done\n"}} // mkdir, extract, user
 	backend := newAPIBackend(t, f)
-	_, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "carbbox", Root: newGitRepo(t)}, Command: []string{"true"}})
+	_, err := backend.Run(context.Background(), core.RunRequest{Repo: core.Repo{Name: "carbbox", Root: newGitRepo(t)}, Command: []string{"true"}})
 	if err != nil {
 		t.Fatalf("Run err=%v", err)
 	}
@@ -863,8 +905,8 @@ func TestSyncHonorsConfiguredTimeout(t *testing.T) {
 	repoRoot := newGitRepo(t)
 	result := make(chan error, 1)
 	go func() {
-		_, err := backend.Run(ctx, RunRequest{
-			Repo: Repo{Name: "carbbox", Root: repoRoot}, Command: []string{"true"}, Keep: true,
+		_, err := backend.Run(ctx, core.RunRequest{
+			Repo: core.Repo{Name: "carbbox", Root: repoRoot}, Command: []string{"true"}, Keep: true,
 		})
 		result <- err
 	}()
@@ -906,8 +948,8 @@ func TestSyncDeleteDoesNotTouchLiveWorkspaceBeforeUploadSucceeds(t *testing.T) {
 	f.uploadStatus = http.StatusServiceUnavailable
 	backend := newAPIBackend(t, f)
 	backend.cfg.Sync.Delete = true
-	_, err := backend.Run(context.Background(), RunRequest{
-		Repo: Repo{Name: "carbbox", Root: newGitRepo(t)}, Command: []string{"true"}, Keep: true,
+	_, err := backend.Run(context.Background(), core.RunRequest{
+		Repo: core.Repo{Name: "carbbox", Root: newGitRepo(t)}, Command: []string{"true"}, Keep: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "upload denied") {
 		t.Fatalf("Run err=%v, want upload failure", err)
@@ -930,8 +972,8 @@ func TestSyncFailureHonorsKeepOnFailure(t *testing.T) {
 	var stderr bytes.Buffer
 	backend.rt.Stderr = &stderr
 
-	_, err := backend.Run(context.Background(), RunRequest{
-		Repo: Repo{Name: "carbbox", Root: newGitRepo(t)}, Command: []string{"true"}, KeepOnFailure: true,
+	_, err := backend.Run(context.Background(), core.RunRequest{
+		Repo: core.Repo{Name: "carbbox", Root: newGitRepo(t)}, Command: []string{"true"}, KeepOnFailure: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "upload denied") {
 		t.Fatalf("Run err=%v, want upload failure", err)
@@ -940,8 +982,8 @@ func TestSyncFailureHonorsKeepOnFailure(t *testing.T) {
 		t.Fatal("sync failure deleted sandbox despite --keep-on-failure")
 	}
 	leaseID := leasePrefix + f.sandboxID
-	t.Cleanup(func() { removeLeaseClaim(leaseID) })
-	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID != leaseID {
+	t.Cleanup(func() { core.RemoveLeaseClaim(leaseID) })
+	if claim, err := core.ReadLeaseClaim(leaseID); err != nil || claim.LeaseID != leaseID {
 		t.Fatalf("retained claim=%#v err=%v", claim, err)
 	}
 	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease="+leaseID) {
@@ -953,8 +995,8 @@ func TestSyncDeleteStagesBeforeReplacingWorkspace(t *testing.T) {
 	f := newFakeAPI(t)
 	backend := newAPIBackend(t, f)
 	backend.cfg.Sync.Delete = true
-	if _, err := backend.Run(context.Background(), RunRequest{
-		Repo: Repo{Name: "carbbox", Root: newGitRepo(t)}, Command: []string{"true"},
+	if _, err := backend.Run(context.Background(), core.RunRequest{
+		Repo: core.Repo{Name: "carbbox", Root: newGitRepo(t)}, Command: []string{"true"},
 	}); err != nil {
 		t.Fatalf("Run err=%v", err)
 	}
@@ -995,8 +1037,8 @@ func TestSyncDeleteWarnsWhenPreviousWorkspaceCleanupFails(t *testing.T) {
 	backend.cfg.Sync.Delete = true
 	var stderr bytes.Buffer
 	backend.rt.Stderr = &stderr
-	if _, err := backend.Run(context.Background(), RunRequest{
-		Repo: Repo{Name: "carbbox", Root: newGitRepo(t)}, Command: []string{"true"},
+	if _, err := backend.Run(context.Background(), core.RunRequest{
+		Repo: core.Repo{Name: "carbbox", Root: newGitRepo(t)}, Command: []string{"true"},
 	}); err != nil {
 		t.Fatalf("Run err=%v", err)
 	}
@@ -1011,11 +1053,11 @@ func TestNoSyncDoesNotDeleteRetainedWorkspace(t *testing.T) {
 	backend := newAPIBackend(t, f)
 	backend.cfg.Sync.Delete = true
 	leaseID := leasePrefix + f.sandboxID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "retained", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "retained", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := backend.Run(context.Background(), RunRequest{
-		ID: leaseID, Repo: Repo{Name: "carbbox", Root: "/repo"}, Command: []string{"true"}, NoSync: true,
+	if _, err := backend.Run(context.Background(), core.RunRequest{
+		ID: leaseID, Repo: core.Repo{Name: "carbbox", Root: "/repo"}, Command: []string{"true"}, NoSync: true,
 	}); err != nil {
 		t.Fatalf("Run err=%v", err)
 	}
@@ -1044,11 +1086,11 @@ func TestCreateSandboxForwardsPartialSizing(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			leaseID, _, _, err := backend.createSandbox(context.Background(), api, Repo{Name: "carbbox", Root: t.TempDir()}, false, "")
+			leaseID, _, _, err := backend.createSandbox(context.Background(), api, core.Repo{Name: "carbbox", Root: t.TempDir()}, false, "")
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { removeLeaseClaim(leaseID) })
+			t.Cleanup(func() { core.RemoveLeaseClaim(leaseID) })
 			recorded, ok := f.firstRequest(http.MethodPost, "/api/sandboxes")
 			if !ok {
 				t.Fatal("missing create request")
@@ -1072,11 +1114,11 @@ func TestCreateSandboxForwardsBurst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	leaseID, _, _, err := backend.createSandbox(context.Background(), api, Repo{Name: "carbbox", Root: t.TempDir()}, false, "")
+	leaseID, _, _, err := backend.createSandbox(context.Background(), api, core.Repo{Name: "carbbox", Root: t.TempDir()}, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { removeLeaseClaim(leaseID) })
+	t.Cleanup(func() { core.RemoveLeaseClaim(leaseID) })
 	recorded, ok := f.firstRequest(http.MethodPost, "/api/sandboxes")
 	if !ok {
 		t.Fatal("missing create request")
@@ -1105,7 +1147,7 @@ func TestCreateSandboxReportsCleanupFailureAndSandboxID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	leaseID, sandboxID, _, err := backend.createSandbox(context.Background(), api, Repo{Name: "carbbox", Root: t.TempDir()}, false, "taken")
+	leaseID, sandboxID, _, err := backend.createSandbox(context.Background(), api, core.Repo{Name: "carbbox", Root: t.TempDir()}, false, "taken")
 	if err == nil {
 		t.Fatal("expected claim setup and cleanup failure")
 	}
@@ -1123,7 +1165,7 @@ func TestSyncOnlySkipsUserCommand(t *testing.T) {
 	f := newFakeAPI(t)
 	f.execReply = []execRunResult{{ExitCode: 0}, {ExitCode: 0}} // mkdir, extract
 	backend := newAPIBackend(t, f)
-	res, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "carbbox", Root: newGitRepo(t)}, Command: []string{"echo", "should-not-run"}, SyncOnly: true})
+	res, err := backend.Run(context.Background(), core.RunRequest{Repo: core.Repo{Name: "carbbox", Root: newGitRepo(t)}, Command: []string{"echo", "should-not-run"}, SyncOnly: true})
 	if err != nil {
 		t.Fatalf("Run err=%v", err)
 	}
@@ -1146,11 +1188,11 @@ func TestRunSurfacesNonZeroExit(t *testing.T) {
 	backend := newAPIBackend(t, f)
 	var stderr bytes.Buffer
 	backend.rt.Stderr = &stderr
-	res, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"false"}, NoSync: true, TimingJSON: true})
+	res, err := backend.Run(context.Background(), core.RunRequest{Repo: core.Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"false"}, NoSync: true, TimingJSON: true})
 	if res.ExitCode != 7 {
 		t.Fatalf("exit=%d want 7", res.ExitCode)
 	}
-	ee, ok := err.(ExitError)
+	ee, ok := err.(core.ExitError)
 	if !ok || ee.Code != 7 {
 		t.Fatalf("err=%v want ExitError code 7", err)
 	}
@@ -1168,7 +1210,7 @@ func TestKeepRetainsSandbox(t *testing.T) {
 	f := newFakeAPI(t)
 	f.execReply = []execRunResult{{ExitCode: 0}, {ExitCode: 0}}
 	backend := newAPIBackend(t, f)
-	res, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true, Keep: true})
+	res, err := backend.Run(context.Background(), core.RunRequest{Repo: core.Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true, Keep: true})
 	if err != nil {
 		t.Fatalf("Run err=%v", err)
 	}
@@ -1186,12 +1228,12 @@ func TestRunReturnsReusedSandboxSession(t *testing.T) {
 	backend := newAPIBackend(t, f)
 	repoRoot := t.TempDir()
 	leaseID := leasePrefix + f.sandboxID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "blue", providerName, testOCClaimScope(f.server.URL), "", repoRoot, time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "blue", providerName, testOCClaimScope(f.server.URL), "", repoRoot, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	res, err := backend.Run(context.Background(), RunRequest{
+	res, err := backend.Run(context.Background(), core.RunRequest{
 		ID:      leaseID,
-		Repo:    Repo{Name: "carbbox", Root: repoRoot},
+		Repo:    core.Repo{Name: "carbbox", Root: repoRoot},
 		Command: []string{"true"},
 		NoSync:  true,
 	})
@@ -1209,7 +1251,7 @@ func TestRunReturnsReusedSandboxSession(t *testing.T) {
 func TestWarmupRejectsActionsRunnerBeforeCreate(t *testing.T) {
 	f := newFakeAPI(t)
 	backend := newAPIBackend(t, f)
-	err := backend.Warmup(context.Background(), WarmupRequest{ActionsRunner: true})
+	err := backend.Warmup(context.Background(), core.WarmupRequest{ActionsRunner: true})
 	if err == nil || !strings.Contains(err.Error(), "--actions-runner is not supported") {
 		t.Fatalf("Warmup err=%v", err)
 	}
@@ -1221,7 +1263,7 @@ func TestWarmupRejectsActionsRunnerBeforeCreate(t *testing.T) {
 func TestStopRejectsUnclaimedID(t *testing.T) {
 	f := newFakeAPI(t)
 	backend := newAPIBackend(t, f)
-	err := backend.Stop(context.Background(), StopRequest{ID: "sb-not-claimed"})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: "sb-not-claimed"})
 	if err == nil || !strings.Contains(err.Error(), "not claimed by Crabbox") {
 		t.Fatalf("err=%v want unclaimed rejection", err)
 	}
@@ -1232,14 +1274,14 @@ func TestStopClearsClaimWhenSandboxAlreadyDeleted(t *testing.T) {
 	f.deleteStatus = http.StatusNotFound
 	backend := newAPIBackend(t, f)
 	leaseID := leasePrefix + f.sandboxID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "gone", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "gone", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	backend.cfg.OpenComputer.ForgetMissing = true
-	if err := backend.Stop(context.Background(), StopRequest{ID: leaseID}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: leaseID}); err != nil {
 		t.Fatalf("Stop err=%v", err)
 	}
-	if _, ok, err := resolveLeaseClaim(leaseID); err != nil || ok {
+	if _, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || ok {
 		t.Fatalf("claim remains after idempotent stop: ok=%t err=%v", ok, err)
 	}
 }
@@ -1249,17 +1291,17 @@ func TestStopPreservesClaimForAmbiguousMissingSandbox(t *testing.T) {
 	f.deleteStatus = http.StatusNotFound
 	backend := newAPIBackend(t, f)
 	leaseID := leasePrefix + f.sandboxID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "possibly-other-account", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "possibly-other-account", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	err := backend.Stop(context.Background(), StopRequest{ID: leaseID})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: leaseID})
 	if err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("Stop err=%v, want ambiguous missing error", err)
 	}
 	if f.calls(http.MethodDelete, "/api/sandboxes/") != 1 {
 		t.Fatal("stop did not attempt remote deletion")
 	}
-	if _, ok, err := resolveLeaseClaim(leaseID); err != nil || !ok {
+	if _, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || !ok {
 		t.Fatalf("claim removed without explicit forget: ok=%t err=%v", ok, err)
 	}
 }
@@ -1278,7 +1320,7 @@ func TestAPIURLPrecedenceHonorsOCConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	// No explicit Crabbox API URL → oc config api_url wins over the default.
-	api, err := newOCAPIClient(newTestConfig(""), Runtime{})
+	api, err := newOCAPIClient(newTestConfig(""), core.Runtime{})
 	if err != nil {
 		t.Fatalf("newOCAPIClient err=%v", err)
 	}
@@ -1289,7 +1331,7 @@ func TestAPIURLPrecedenceHonorsOCConfig(t *testing.T) {
 		t.Fatalf("apiKey not read from oc config: %q", api.apiKey)
 	}
 	// Explicit Crabbox API URL takes precedence over the oc config file.
-	api, err = newOCAPIClient(newTestConfig("https://explicit.example"), Runtime{})
+	api, err = newOCAPIClient(newTestConfig("https://explicit.example"), core.Runtime{})
 	if err != nil {
 		t.Fatalf("newOCAPIClient err=%v", err)
 	}
@@ -1310,7 +1352,7 @@ func TestAPIURLRejectsUnsafeCredentialDestinations(t *testing.T) {
 		"api.example.test",
 	} {
 		t.Run(apiURL, func(t *testing.T) {
-			if _, err := newOCAPIClient(newTestConfig(apiURL), Runtime{}); err == nil {
+			if _, err := newOCAPIClient(newTestConfig(apiURL), core.Runtime{}); err == nil {
 				t.Fatalf("newOCAPIClient(%q) succeeded", apiURL)
 			}
 		})
@@ -1327,7 +1369,7 @@ func TestAPIURLAllowsLoopbackHTTP(t *testing.T) {
 		"http://[::1]:8080/",
 	} {
 		t.Run(apiURL, func(t *testing.T) {
-			api, err := newOCAPIClient(newTestConfig(apiURL), Runtime{})
+			api, err := newOCAPIClient(newTestConfig(apiURL), core.Runtime{})
 			if err != nil {
 				t.Fatalf("newOCAPIClient(%q) err=%v", apiURL, err)
 			}
@@ -1342,7 +1384,7 @@ func TestAPIURLNormalizesTrailingAPISuffix(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", "osb_test")
 	t.Setenv("OPENCOMPUTER_API_KEY", "")
-	api, err := newOCAPIClient(newTestConfig("https://api.example.test/gateway/api/"), Runtime{})
+	api, err := newOCAPIClient(newTestConfig("https://api.example.test/gateway/api/"), core.Runtime{})
 	if err != nil {
 		t.Fatalf("newOCAPIClient err=%v", err)
 	}
@@ -1390,7 +1432,7 @@ func TestAPIClientBlocksCrossOriginRedirects(t *testing.T) {
 	}))
 	defer source.Close()
 
-	api, err := newOCAPIClient(newTestConfig(source.URL), Runtime{HTTP: source.Client()})
+	api, err := newOCAPIClient(newTestConfig(source.URL), core.Runtime{HTTP: source.Client()})
 	if err != nil {
 		t.Fatalf("newOCAPIClient err=%v", err)
 	}
@@ -1474,8 +1516,8 @@ func TestSameOCOriginNormalizesDefaultPorts(t *testing.T) {
 		{a: "https://api.example.test", b: "http://api.example.test:443", want: false},
 		{a: "https://api.example.test", b: "https://other.example.test", want: false},
 	} {
-		if got := shared.SameOrigin(parse(tc.a), parse(tc.b)); got != tc.want {
-			t.Errorf("shared.SameOrigin(%q, %q)=%t want %t", tc.a, tc.b, got, tc.want)
+		if got := core.SameHTTPOrigin(parse(tc.a), parse(tc.b)); got != tc.want {
+			t.Errorf("core.SameHTTPOrigin(%q, %q)=%t want %t", tc.a, tc.b, got, tc.want)
 		}
 	}
 }
@@ -1503,7 +1545,7 @@ func TestControlAndExecRequestsUseOperationDeadlines(t *testing.T) {
 			Request:    req,
 		}, nil
 	})}
-	api, err := newOCAPIClient(newTestConfig(""), Runtime{HTTP: httpClient})
+	api, err := newOCAPIClient(newTestConfig(""), core.Runtime{HTTP: httpClient})
 	if err != nil {
 		t.Fatalf("newOCAPIClient err=%v", err)
 	}
@@ -1537,7 +1579,7 @@ func TestListFetchesClaimedHibernatedSandbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Unclaimed sandboxes are not inventory and do not trigger remote calls.
-	views, err := backend.List(context.Background(), ListRequest{})
+	views, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatalf("List err=%v", err)
 	}
@@ -1549,10 +1591,10 @@ func TestListFetchesClaimedHibernatedSandbox(t *testing.T) {
 	}
 	// The collection endpoint omits hibernated sandboxes, so List must fetch
 	// each locally claimed sandbox by ID.
-	if err := claimLeaseForRepoProviderScopePond("ocbx_"+f.sandboxID, "slug", providerName, testOCClaimScope(f.server.URL), "alpha", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond("ocbx_"+f.sandboxID, "slug", providerName, testOCClaimScope(f.server.URL), "alpha", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	views, err = backend.List(context.Background(), ListRequest{})
+	views, err = backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatalf("List err=%v", err)
 	}
@@ -1565,7 +1607,7 @@ func TestListFetchesClaimedHibernatedSandbox(t *testing.T) {
 	if f.callsExact(http.MethodGet, "/api/sandboxes/"+f.sandboxID+"/tags") != 1 {
 		t.Fatalf("want one ownership-tag fetch, requests=%#v", f.requests)
 	}
-	status, err := backend.Status(context.Background(), StatusRequest{ID: "slug"})
+	status, err := backend.Status(context.Background(), core.StatusRequest{ID: "slug"})
 	if err != nil {
 		t.Fatalf("Status err=%v", err)
 	}
@@ -1578,10 +1620,10 @@ func TestListKeepsAmbiguousMissingClaimVisible(t *testing.T) {
 	f := newFakeAPI(t)
 	f.getStatusCode = http.StatusNotFound
 	backend := newAPIBackend(t, f)
-	if err := claimLeaseForRepoProviderScopePond(leasePrefix+f.sandboxID, "ambiguous", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leasePrefix+f.sandboxID, "ambiguous", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	views, err := backend.List(context.Background(), ListRequest{})
+	views, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatalf("List err=%v", err)
 	}
@@ -1593,14 +1635,14 @@ func TestListKeepsAmbiguousMissingClaimVisible(t *testing.T) {
 func TestListSurfacesMalformedMatchingClaim(t *testing.T) {
 	f := newFakeAPI(t)
 	backend := newAPIBackend(t, f)
-	if err := claimLeaseForRepoProviderScopePond(leasePrefix+f.sandboxID, "valid", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leasePrefix+f.sandboxID, "valid", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	claimsDir := path.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims")
 	if err := os.WriteFile(path.Join(claimsDir, leasePrefix+"broken.json"), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := backend.List(context.Background(), ListRequest{})
+	_, err := backend.List(context.Background(), core.ListRequest{})
 	if err == nil || !strings.Contains(err.Error(), "parse claim") {
 		t.Fatalf("List err=%v, want malformed matching claim error", err)
 	}
@@ -1610,7 +1652,7 @@ func TestDoctorProbesControlPlaneWithoutClaims(t *testing.T) {
 	f := newFakeAPI(t)
 	f.listStatus = http.StatusUnauthorized
 	backend := newAPIBackend(t, f)
-	_, err := backend.Doctor(context.Background(), DoctorRequest{})
+	_, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err == nil || !strings.Contains(err.Error(), "list denied") {
 		t.Fatalf("Doctor err=%v, want control-plane failure", err)
 	}
@@ -1625,10 +1667,10 @@ func TestStatusSurfacesAPIError(t *testing.T) {
 	f := newFakeAPI(t)
 	f.getStatusCode = http.StatusInternalServerError
 	backend := newAPIBackend(t, f)
-	if err := claimLeaseForRepoProviderScopePond("ocbx_"+f.sandboxID, "slug", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond("ocbx_"+f.sandboxID, "slug", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	_, err := backend.Status(context.Background(), StatusRequest{ID: "ocbx_" + f.sandboxID})
+	_, err := backend.Status(context.Background(), core.StatusRequest{ID: "ocbx_" + f.sandboxID})
 	if err == nil || !strings.Contains(err.Error(), "500") {
 		t.Fatalf("err=%v, want surfaced API error", err)
 	}
@@ -1638,11 +1680,11 @@ func TestStatusWaitTimeoutCancelsBlockedAPIRequest(t *testing.T) {
 	f := newFakeAPI(t)
 	f.blockGet = true
 	backend := newAPIBackend(t, f)
-	if err := claimLeaseForRepoProviderScopePond(leasePrefix+f.sandboxID, "slug", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leasePrefix+f.sandboxID, "slug", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	started := time.Now()
-	_, err := backend.Status(context.Background(), StatusRequest{
+	_, err := backend.Status(context.Background(), core.StatusRequest{
 		ID: leasePrefix + f.sandboxID, Wait: true, WaitTimeout: 50 * time.Millisecond,
 	})
 	if err == nil || !strings.Contains(err.Error(), "timed out waiting") {
@@ -1673,8 +1715,8 @@ func TestRunCommandIntentReachesNativeRequest(t *testing.T) {
 	testutil.VerifyNativeCommandIntent(t, "bash", true, func(t *testing.T, intent testutil.CommandIntent) []string {
 		fake := newFakeAPI(t)
 		backend := newAPIBackend(t, fake)
-		_, err := backend.Run(t.Context(), RunRequest{
-			Repo:               Repo{Name: "my-app", Root: t.TempDir()},
+		_, err := backend.Run(t.Context(), core.RunRequest{
+			Repo:               core.Repo{Name: "my-app", Root: t.TempDir()},
 			NoSync:             true,
 			Command:            intent.Command,
 			ShellMode:          intent.ShellMode,
@@ -1694,7 +1736,7 @@ func TestRunCommandIntentReachesNativeRequest(t *testing.T) {
 func TestRunMissingCommandRetainsCleanup(t *testing.T) {
 	fake := newFakeAPI(t)
 	backend := newAPIBackend(t, fake)
-	_, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, NoSync: true})
+	_, err := backend.Run(t.Context(), core.RunRequest{Repo: core.Repo{Name: "my-app", Root: t.TempDir()}, NoSync: true})
 	if err == nil || err.Error() != "missing command" {
 		t.Fatalf("err=%v", err)
 	}
@@ -1708,7 +1750,7 @@ func TestRunMissingCommandRetainsCleanup(t *testing.T) {
 
 func TestOpenComputerConfigFlagContract(t *testing.T) {
 	for _, provider := range []string{"opencomputer", " OC ", "open-computer", "aws"} {
-		cfg := Config{Provider: provider, OpenComputer: core.OpenComputerConfig{APIURL: "prior-url", Workdir: "/workspace/prior", CPU: 8, MemoryMB: 1024, TimeoutSecs: 45, ExecTimeoutSecs: 90, Burst: true, ForgetMissing: true}}
+		cfg := core.Config{Provider: provider, OpenComputer: core.OpenComputerConfig{APIURL: "prior-url", Workdir: "/workspace/prior", CPU: 8, MemoryMB: 1024, TimeoutSecs: 45, ExecTimeoutSecs: 90, Burst: true, ForgetMissing: true}}
 		fs := flag.NewFlagSet("contract", flag.ContinueOnError)
 		values := RegisterOpenComputerProviderFlags(fs, cfg)
 		count := 0
@@ -1759,7 +1801,7 @@ func TestOpenComputerConfigFlagContract(t *testing.T) {
 func TestOpenComputerConfigMachineFlagOrder(t *testing.T) {
 	for _, provider := range []string{"opencomputer", " OC ", "open-computer", "aws"} {
 		for _, args := range [][]string{{"--class=large", "--type=machine"}, {"--type=machine"}} {
-			cfg := Config{Provider: provider}
+			cfg := core.Config{Provider: provider}
 			fs := flag.NewFlagSet("contract", flag.ContinueOnError)
 			fs.String("class", "", "")
 			fs.String("type", "", "")
@@ -1787,15 +1829,15 @@ func TestOpenComputerConfigMachineFlagOrder(t *testing.T) {
 
 func TestOpenComputerConfigEffectiveDefaults(t *testing.T) {
 	for _, tc := range []struct{ workdir, want string }{{"", "/workspace/crabbox"}, {"  ", "/workspace/crabbox"}, {" /workspace/example/ ", "/workspace/example"}} {
-		cfg := Config{OpenComputer: core.OpenComputerConfig{Workdir: tc.workdir}}
+		cfg := core.Config{OpenComputer: core.OpenComputerConfig{Workdir: tc.workdir}}
 		got, err := openComputerWorkdir(cfg)
 		if err != nil || got != tc.want {
 			t.Fatalf("workdir=%q err=%v want=%q", got, err, tc.want)
 		}
 	}
 	for _, n := range []int{-2, 0, 45} {
-		cfg := Config{OpenComputer: core.OpenComputerConfig{ExecTimeoutSecs: n}}
-		backend := NewOpenComputerBackend(Provider{}.Spec(), cfg, Runtime{}).(*openComputerBackend)
+		cfg := core.Config{OpenComputer: core.OpenComputerConfig{ExecTimeoutSecs: n}}
+		backend := NewOpenComputerBackend(Provider{}.Spec(), cfg, core.Runtime{}).(*openComputerBackend)
 		want := 3600
 		if n > 0 {
 			want = n
@@ -1830,7 +1872,7 @@ func TestOpenComputerConfigClientFallbackContract(t *testing.T) {
 			if err := os.WriteFile(home+"/.oc/config.json", data, 0600); err != nil {
 				t.Fatal(err)
 			}
-			api, err := newOCAPIClient(Config{}, Runtime{})
+			api, err := newOCAPIClient(core.Config{}, core.Runtime{})
 			if err != nil {
 				t.Fatal(err)
 			}

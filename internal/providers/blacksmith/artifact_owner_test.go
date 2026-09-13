@@ -24,11 +24,11 @@ func TestBlacksmithArtifactRefusesControllerOwnedGroup(t *testing.T) {
 			isolateBlacksmithOwnership(t)
 			t.Setenv("CRABBOX_CONTROLLER_PROCESS_TREE_OWNED", "1")
 			calls := 0
-			backend := newTestBlacksmithBackend(baseConfig(), ownershipRunner(func(context.Context, LocalCommandRequest) (LocalCommandResult, error) {
+			backend := newTestBlacksmithBackend(core.BaseConfig(), ownershipRunner(func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				calls++
-				return LocalCommandResult{}, errors.New("unexpected native call")
+				return core.LocalCommandResult{}, errors.New("unexpected native call")
 			}))
-			req := RunRequest{Repo: Repo{Root: t.TempDir()}, Command: []string{"true"}, ArtifactGlobs: []string{"report"}}
+			req := core.RunRequest{Repo: core.Repo{Root: t.TempDir()}, Command: []string{"true"}, ArtifactGlobs: []string{"report"}}
 			var err error
 			if boundary == "run-options" {
 				_, err = backend.Run(t.Context(), req)
@@ -58,8 +58,8 @@ func TestBlacksmithDownloadCancellationRetainsClaimUntilClosure(t *testing.T) {
 	fakeNative := "#!/bin/sh\nfor arg do destination=$arg; done\nscp \"$destination\"\n"
 	fakeSCP := "#!/bin/sh\nprintf x > \"$1\"\n(\n" +
 		"  i=0\n  while [ \"$i\" -lt 16 ]; do\n" +
-		"    printf x >> " + shellQuote(writes) + "\n" +
-		"    if [ \"$i\" -eq 0 ]; then printf ready > " + shellQuote(ready) + "; fi\n" +
+		"    printf x >> " + core.ShellQuote(writes) + "\n" +
+		"    if [ \"$i\" -eq 0 ]; then printf ready > " + core.ShellQuote(ready) + "; fi\n" +
 		"    sleep 0.02\n    i=$((i + 1))\n  done\n) &\nwait\n"
 	for name, source := range map[string]string{"blacksmith": fakeNative, "scp": fakeSCP} {
 		if err := os.WriteFile(filepath.Join(toolsDir, name), []byte(source), 0o700); err != nil {
@@ -71,12 +71,12 @@ func TestBlacksmithDownloadCancellationRetainsClaimUntilClosure(t *testing.T) {
 	route, _, _ := blacksmithClaimBinding(claim)
 	realRunner := core.RuntimeForProviderOperation(io.Discard).Exec
 	var downloads atomic.Int32
-	backend := newTestBlacksmithBackend(baseConfig(), ownershipRunner(func(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	backend := newTestBlacksmithBackend(core.BaseConfig(), ownershipRunner(func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if req.Name == "blacksmith" && len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "status" {
-			return LocalCommandResult{Stdout: testBlacksmithStatus(id, "ready")}, nil
+			return core.LocalCommandResult{Stdout: testBlacksmithStatus(id, "ready")}, nil
 		}
 		if req.Name != "/bin/sh" || req.Dir != root || !req.RequireProcessGroupJoin {
-			return LocalCommandResult{ExitCode: 2}, errors.New("download did not require inline process-group closure")
+			return core.LocalCommandResult{ExitCode: 2}, errors.New("download did not require inline process-group closure")
 		}
 		downloads.Add(1)
 		return realRunner.Run(ctx, req)

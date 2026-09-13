@@ -203,7 +203,7 @@ func TestFixedAWSCreateIntentClassifiesEveryExportedConfigField(t *testing.T) {
 		AppleContainer AppleVM MXC Multipass Machine0 Tart Lume HyperV WindowsSandbox Static
 	`)
 	classify("post-acquisition command, transport, or reporting behavior", `
-		Sync Run EnvAllow Actions Results Shard Profiles Presets ProofTemplates Jobs
+		Sync Run EnvAllow Actions Results Shard Profiles Presets ProofTemplates Jobs RecordLocal
 	`)
 
 	configType := reflect.TypeOf(Config{})

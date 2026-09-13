@@ -54,29 +54,29 @@ func (Provider) ValidateConfig(cfg core.Config) error {
 	return validateOpenSandboxConfig(cfg)
 }
 
-func validateOpenSandboxConfig(cfg Config) error {
+func validateOpenSandboxConfig(cfg core.Config) error {
 	if cfg.OpenSandbox.TimeoutSecs < 0 {
-		return exit(2, "opensandbox timeoutSecs must be non-negative")
+		return core.Exit(2, "opensandbox timeoutSecs must be non-negative")
 	}
 	if cfg.OpenSandbox.ExecTimeoutSecs < 0 {
-		return exit(2, "opensandbox execTimeoutSecs must be non-negative")
+		return core.Exit(2, "opensandbox execTimeoutSecs must be non-negative")
 	}
 	return nil
 }
 
-func validateOpenSandboxRunConfig(cfg Config) error {
-	return validateOpenSandboxRequestConfig(cfg, RunRequest{})
+func validateOpenSandboxRunConfig(cfg core.Config) error {
+	return validateOpenSandboxRequestConfig(cfg, core.RunRequest{})
 }
 
-func validateOpenSandboxRequestConfig(cfg Config, req RunRequest) error {
+func validateOpenSandboxRequestConfig(cfg core.Config, req core.RunRequest) error {
 	required := openSandboxRunBudgetForConfig(cfg, req.NoSync, req.SyncOnly)
 	if lifetime := openSandboxLifetimeForConfig(cfg); lifetime < required {
-		return exit(2, "opensandbox effective lifetime %s must cover sync/command budget %s", lifetime, required)
+		return core.Exit(2, "opensandbox effective lifetime %s must cover sync/command budget %s", lifetime, required)
 	}
 	return nil
 }
 
-func openSandboxCommandBudgetForConfig(cfg Config) time.Duration {
+func openSandboxCommandBudgetForConfig(cfg core.Config) time.Duration {
 	execTimeout := cfg.OpenSandbox.ExecTimeoutSecs
 	if execTimeout == 0 {
 		execTimeout = openSandboxExecTimeoutSecs
@@ -84,7 +84,7 @@ func openSandboxCommandBudgetForConfig(cfg Config) time.Duration {
 	return time.Duration(execTimeout)*time.Second + openSandboxExecGrace
 }
 
-func openSandboxRunBudgetForConfig(cfg Config, noSync, syncOnly bool) time.Duration {
+func openSandboxRunBudgetForConfig(cfg core.Config, noSync, syncOnly bool) time.Duration {
 	commandBudget := openSandboxCommandBudgetForConfig(cfg)
 	// Even --no-sync runs one remote command to create the configured workdir.
 	syncBudget := commandBudget
@@ -97,7 +97,7 @@ func openSandboxRunBudgetForConfig(cfg Config, noSync, syncOnly bool) time.Durat
 	return syncBudget + commandBudget
 }
 
-func openSandboxLifetimeForConfig(cfg Config) time.Duration {
+func openSandboxLifetimeForConfig(cfg core.Config) time.Duration {
 	lifetime := time.Duration(0)
 	for _, candidate := range []time.Duration{
 		time.Duration(cfg.OpenSandbox.TimeoutSecs) * time.Second,

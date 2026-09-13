@@ -305,7 +305,7 @@ func validateCoordinatorCredentialDestination(cfg Config) error {
 		{cfg.Access.Token, provenance.accessToken},
 	}
 	if inheritedCredential(credentials...) {
-		return exit(2, "repository-configured broker.url cannot be combined with inherited coordinator credentials; set CRABBOX_COORDINATOR or pass an explicit coordinator URL to approve the credential destination")
+		return Exit(2, "repository-configured broker.url cannot be combined with inherited coordinator credentials; set CRABBOX_COORDINATOR or pass an explicit coordinator URL to approve the credential destination")
 	}
 	return nil
 }
@@ -467,7 +467,7 @@ func validateProviderCredentialDestination(cfg Config) error {
 		}
 	case "external":
 		if err := ValidateExternalDesktopPasswordEnvironmentName(cfg.External.Connection.Desktop.PasswordEnv); err != nil {
-			return exit(2, "%v", err)
+			return Exit(2, "%v", err)
 		}
 		if cfg.External.Connection.SSH.TrustProviderOutput && provenance.externalSSHOutput == credentialSourceRepository {
 			return repositoryCredentialDestinationError("external", "external.connection.ssh.trustProviderOutput", "the same provider-output contract in trusted user config")
@@ -663,7 +663,7 @@ func ValidateProviderCredentialDestination(cfg Config) error {
 // before adapter output may supply SSH coordinates directly.
 func ValidateExternalProviderSSHOutput(cfg Config) error {
 	if !cfg.External.Connection.SSH.TrustProviderOutput {
-		return exit(2, "external provider SSH output requires external.connection.ssh.trustProviderOutput in trusted user config")
+		return Exit(2, "external provider SSH output requires external.connection.ssh.trustProviderOutput in trusted user config")
 	}
 	if cfg.credentialProvenance.externalSSHOutput == credentialSourceRepository {
 		return repositoryCredentialDestinationError("external", "external.connection.ssh.trustProviderOutput", "the same provider-output contract in trusted user config")
@@ -1157,9 +1157,9 @@ func nomadSelectedTokenEnvHasValue(cfg Config) bool {
 }
 
 func repositoryCredentialDestinationError(provider, field, override string) error {
-	return exit(2, "provider=%s refuses repository-configured %s with inherited credentials; set %s to explicitly approve the credential destination", provider, field, override)
+	return Exit(2, "provider=%s refuses repository-configured %s with inherited credentials; set %s to explicitly approve the credential destination", provider, field, override)
 }
 
 func repositoryCubeSandboxDestinationError(field, override string) error {
-	return exit(2, "provider=cubesandbox refuses repository-configured %s because CubeSandbox routes receive ephemeral credentials and workspace data; set %s to explicitly approve the destination", field, override)
+	return Exit(2, "provider=cubesandbox refuses repository-configured %s because CubeSandbox routes receive ephemeral credentials and workspace data; set %s to explicitly approve the destination", field, override)
 }

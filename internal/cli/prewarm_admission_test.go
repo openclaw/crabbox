@@ -55,7 +55,7 @@ func (p *probeAdmissionProvider) ClaimScope(cfg Config) string {
 func (p *probeAdmissionProvider) ValidateRunOptions(req RunRequest) error {
 	p.admissions = append(p.admissions, req)
 	if p.reject {
-		return exit(2, "probe admission: --no-sync unsupported; use a provider workflow probe")
+		return Exit(2, "probe admission: --no-sync unsupported; use a provider workflow probe")
 	}
 	return nil
 }

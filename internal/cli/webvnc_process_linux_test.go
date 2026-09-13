@@ -20,11 +20,11 @@ import (
 )
 
 func TestWebVNCDaemonProcessStartIdentityFromProc(t *testing.T) {
-	first, err := webVNCDaemonProcessStartIdentity(os.Getpid())
+	first, err := LocalProcessStartIdentity(os.Getpid())
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := webVNCDaemonProcessStartIdentity(os.Getpid())
+	second, err := LocalProcessStartIdentity(os.Getpid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,11 +37,11 @@ func TestWebVNCDaemonProcessStartIdentityFromProc(t *testing.T) {
 }
 
 func TestLinuxProcessBootIdentityFromProc(t *testing.T) {
-	first, err := processBootIdentity()
+	first, err := LocalProcessBootIdentity()
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := processBootIdentity()
+	second, err := LocalProcessBootIdentity()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestWebVNCDaemonStopDoesNotSignalPriorBootPID(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	nonce := "abcdef0123456789abcdef0123456789"
 	cmd := startTestWebVNCDaemonProcess(t, nonce)
-	started, err := webVNCDaemonProcessStartIdentity(cmd.Process.Pid)
+	started, err := LocalProcessStartIdentity(cmd.Process.Pid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestWebVNCDaemonStopDoesNotSignalPriorBootPID(t *testing.T) {
 	if err != nil || !stopped || !strings.Contains(output.String(), "removed prior-boot identity") {
 		t.Fatalf("prior-boot cleanup stopped=%t output=%q err=%v", stopped, output.String(), err)
 	}
-	if _, alive := webVNCDaemonProcessCommand(cmd.Process.Pid); !alive {
+	if _, alive := LocalProcessCommand(cmd.Process.Pid); !alive {
 		t.Fatal("prior-boot identity signaled the recycled PID")
 	}
 	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
@@ -91,7 +91,7 @@ func TestDirectSSHWebVNCRemoteIdentityRejectsPriorBootPID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	started, err := webVNCDaemonProcessStartIdentity(os.Getpid())
+	started, err := LocalProcessStartIdentity(os.Getpid())
 	if err != nil {
 		t.Fatal(err)
 	}

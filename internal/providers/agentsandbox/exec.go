@@ -32,20 +32,22 @@ func (b *backend) execShell(ctx context.Context, client kubernetesClient, ready 
 		Stderr:  b.rt.Stderr,
 	}); err != nil {
 		if code, ok := remoteExitStatus(err); ok {
-			return exit(code, "agent-sandbox exec %q exited %d", command, code)
+			return core.Exit(code, "agent-sandbox exec %q exited %d", command, code)
 		}
 		return err
 	}
 	return nil
 }
 
-func (b *backend) runCommand(ctx context.Context, client kubernetesClient, ready sandboxReadiness, req RunRequest, workdir string) (int, error) {
+func (b *backend) runCommand(ctx context.Context, client kubernetesClient, ready sandboxReadiness, req core.RunRequest, workdir string) (int, error) {
+	req.Observation.Phase(core.RunPhaseCommand)
+	stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, core.RunOutputProvider)
 	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 	if err != nil {
 		return 0, err
 	}
 	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
-		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+		core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
 	script := shared.ShellWorkspaceCommand(workdir, req.Env, intent, "bash", "-lc")
 	execCtx, cancel := b.execContext(ctx)
@@ -53,8 +55,8 @@ func (b *backend) runCommand(ctx context.Context, client kubernetesClient, ready
 	err = b.execPod(execCtx, client, ready, podExecRequest{
 		Command: []string{"sh", "-s"},
 		Stdin:   strings.NewReader(script),
-		Stdout:  b.rt.Stdout,
-		Stderr:  b.rt.Stderr,
+		Stdout:  stdout,
+		Stderr:  stderr,
 	})
 	if err == nil {
 		return 0, nil

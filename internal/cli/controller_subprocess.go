@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/openclaw/crabbox/internal/atomicfile"
 	"github.com/openclaw/crabbox/internal/prefixbuffer"
 )
 
@@ -850,12 +851,12 @@ func controllerAbsenceIdentitySet(identifier string, request controllerWorkspace
 	rawSlug := request.ProviderSlug
 	slug := strings.TrimSpace(rawSlug)
 	if slug != "" {
-		if rawSlug != slug || normalizeLeaseSlug(slug) != slug {
+		if rawSlug != slug || NormalizeLeaseSlug(slug) != slug {
 			return controllerAbsenceIdentities{}, fmt.Errorf("invalid persisted provider slug identity %q", slug)
 		}
 		identities.Names = appendUniqueStrings(identities.Names, slug)
 		for _, leaseID := range identities.LeaseIDs {
-			identities.Names = appendUniqueStrings(identities.Names, leaseProviderName(leaseID, slug))
+			identities.Names = appendUniqueStrings(identities.Names, LeaseProviderName(leaseID, slug))
 		}
 	}
 	rawResourceID := request.ProviderResourceID
@@ -1257,8 +1258,8 @@ func (r *execControllerWorkspaceRunner) RecoverControllerChildren(ctx context.Co
 			}
 			continue
 		}
-		command, alive := webVNCDaemonProcessCommand(identity.PID)
-		started, startErr := webVNCDaemonProcessStartIdentity(identity.PID)
+		command, alive := LocalProcessCommand(identity.PID)
+		started, startErr := LocalProcessStartIdentity(identity.PID)
 		if startErr != nil {
 			if alive {
 				return fmt.Errorf("inspect controller child pid %d start identity: %w", identity.PID, startErr)
@@ -1308,11 +1309,11 @@ func (r *execControllerWorkspaceRunner) RecoverControllerChildren(ctx context.Co
 		}
 		deadline := time.Now().Add(5 * time.Second)
 		for {
-			command, alive := webVNCDaemonProcessCommand(identity.PID)
+			command, alive := LocalProcessCommand(identity.PID)
 			if !alive || strings.Contains(strings.ToLower(command), "<defunct>") {
 				break
 			}
-			current, currentErr := webVNCDaemonProcessStartIdentity(identity.PID)
+			current, currentErr := LocalProcessStartIdentity(identity.PID)
 			if currentErr != nil || strings.TrimSpace(current) != identity.ProcessStarted {
 				break
 			}
@@ -1353,11 +1354,11 @@ func (r *execControllerWorkspaceRunner) registerControllerChild(pid int, workspa
 	if !validWebVNCDaemonNonce(nonce) {
 		return "", fmt.Errorf("invalid controller child nonce")
 	}
-	started, err := webVNCDaemonProcessStartIdentity(pid)
+	started, err := LocalProcessStartIdentity(pid)
 	if err != nil {
 		return "", err
 	}
-	bootID, err := processBootIdentity()
+	bootID, err := LocalProcessBootIdentity()
 	if err != nil {
 		return "", err
 	}
@@ -1425,28 +1426,7 @@ func writeControllerChildIdentity(path string, identity controllerChildIdentity)
 	}
 	data = append(data, '\n')
 	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".controller-child-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := replaceControllerFile(tmpPath, path); err != nil {
+	if err := atomicfile.WritePrivate(path, ".controller-child-*.tmp", data, replaceControllerFile); err != nil {
 		return err
 	}
 	if err := syncControllerDirectory(dir); err != nil {

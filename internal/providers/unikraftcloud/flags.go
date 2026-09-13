@@ -18,7 +18,7 @@ type unikraftCloudFlagValues struct {
 // The API key is sourced from CRABBOX_UNIKRAFT_CLOUD_API_KEY /
 // UNIKRAFT_CLOUD_API_KEY / UKC_API_KEY / UKC_TOKEN or the unikraftCloud.apiKey
 // config key so it is never passed as a command-line argument.
-func registerUnikraftCloudProviderFlags(fs *flag.FlagSet, defaults Config) any {
+func registerUnikraftCloudProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return unikraftCloudFlagValues{
 		APIURL:   fs.String("unikraft-cloud-url", defaults.UnikraftCloud.APIURL, "Unikraft Cloud API URL override (default derived from the metro)"),
 		Metro:    fs.String("unikraft-cloud-metro", defaults.UnikraftCloud.Metro, "Unikraft Cloud metro (fra, dal, sin, was, sfo)"),
@@ -27,7 +27,7 @@ func registerUnikraftCloudProviderFlags(fs *flag.FlagSet, defaults Config) any {
 	}
 }
 
-func applyUnikraftCloudProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+func applyUnikraftCloudProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
 			return err

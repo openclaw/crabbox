@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 )
@@ -44,7 +43,7 @@ func requireRunArtifactGlobs(ctx context.Context, target SSHTarget, workdir stri
 	remote := remoteRequireArtifactGlobsCommand(target, workdir, globs)
 	out, err := runSSHCombinedOutput(ctx, target, remote)
 	if err != nil {
-		return strings.TrimSpace(out), exit(7, "require artifacts: %v: %s", err, strings.TrimSpace(out))
+		return strings.TrimSpace(out), Exit(7, "require artifacts: %v: %s", err, strings.TrimSpace(out))
 	}
 	return strings.TrimSpace(out), nil
 }
@@ -66,7 +65,7 @@ func collectRunArtifactGlobs(ctx context.Context, target SSHTarget, workdir, rep
 	err := runSSHInput(ctx, target, remoteRunArtifactShellInputCommand(target), strings.NewReader(script), &output, &output)
 	out := output.String()
 	if err != nil {
-		return nil, "", exit(7, "collect artifacts: %v: %s", err, strings.TrimSpace(out))
+		return nil, "", Exit(7, "collect artifacts: %v: %s", err, strings.TrimSpace(out))
 	}
 	defer func() {
 		_, _ = runSSHCombinedOutput(context.Background(), target, remoteRemoveRunArtifactCommand(target, workdir, remotePath))
@@ -110,11 +109,11 @@ func ValidateRequiredRunArtifactGlobs(globs []string) error {
 func validateRunArtifactGlobsForFlag(flag string, globs []string) error {
 	for _, glob := range globs {
 		if !safeArtifactGlob(glob) {
-			return exit(2, "%s contains unsupported characters or non-relative path: %s", flag, glob)
+			return Exit(2, "%s contains unsupported characters or non-relative path: %s", flag, glob)
 		}
 		for _, component := range strings.Split(filepath.ToSlash(strings.TrimSpace(glob)), "/") {
 			if component == ".git" || component == ".crabbox" {
-				return exit(2, "%s excludes protected path components: %s", flag, glob)
+				return Exit(2, "%s excludes protected path components: %s", flag, glob)
 			}
 		}
 	}
@@ -131,7 +130,7 @@ func validateRequiredRunArtifactGlobTarget(target SSHTarget, globs []string) err
 
 func validateRunArtifactGlobTargetForFlag(target SSHTarget, globs []string, flag string) error {
 	if len(globs) > 0 && isWindowsNativeTarget(target) {
-		return exit(2, "%s is not supported for native Windows targets", flag)
+		return Exit(2, "%s is not supported for native Windows targets", flag)
 	}
 	return nil
 }
@@ -187,6 +186,8 @@ func remoteRunArtifactShellInputCommand(target SSHTarget) string {
 }
 
 func writeArtifactGlobMatcher(b *strings.Builder) {
+	// Bash 3.2 also applies nocaseglob to regex matching; retain explicit nocasematch.
+	b.WriteString("shopt -u nocaseglob\n")
 	b.WriteString("artifact_rel_path() { local rel=\"${1#./}\"; case \"$rel\" in \"\"|.|/*|..|../*|*/../*|*/..) return 1;; esac; case \"/$rel/\" in */.git/*|*/.crabbox/*) return 1;; esac; printf '%s' \"$rel\"; }\n")
 	b.WriteString("artifact_safe_search_root() { local root=\"${1#./}\" component path=; [ \"$1\" = . ] && return 0; case \"$root\" in \"\"|.|/*|..|../*|*/../*|*/..) return 1;; esac; while [ -n \"$root\" ]; do component=${root%%/*}; case \"$component\" in \"\"|.|..|.git|.crabbox) return 1;; esac; if [ \"$component\" = \"$root\" ]; then root=; else root=${root#*/}; fi; if [ -n \"$path\" ]; then path=\"$path/$component\"; else path=$component; fi; [ ! -L \"$path\" ] || return 1; [ -d \"$path\" ] || return 1; done; }\n")
 }
@@ -198,7 +199,19 @@ func writeArtifactGlobEnumeration(b *strings.Builder, glob, addFunction string) 
 	if !strings.ContainsAny(glob, "*?") {
 		depth = " -mindepth 1 -maxdepth 1"
 	}
-	b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; artifact_root=" + shellQuote(artifactGlobSearchRoot(glob)) + "; if artifact_safe_search_root \"$artifact_root\"; then while IFS= read -r -d '' f; do rel=$(artifact_rel_path \"$f\") || continue; if [[ \"$rel\" =~ $artifact_regex || \"./$rel\" =~ $artifact_regex ]]; then " + addFunction + " \"$f\"; fi; done < <(find \"$artifact_root\"" + depth + " \\( -name .git -o -name .crabbox \\) -prune -o \\( -type f -o -type l \\) -print0); fi\n")
+	b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; artifact_root=" + shellQuote(artifactGlobSearchRoot(glob)) + "\n")
+	if candidate := artifactGlobNarrowSearchRoot(glob); candidate != "" {
+		// A successful directory lookup alone can hide spelling differences on
+		// case-insensitive filesystems. Match an actual entry before narrowing.
+		b.WriteString("artifact_candidate=" + shellQuote(candidate) + "\n")
+		b.WriteString(`if ! shopt -q nocasematch && artifact_safe_search_root "$artifact_root" && artifact_safe_search_root "$artifact_candidate"; then
+  while IFS= read -r -d '' artifact_entry; do
+    if [ "$artifact_entry" = "$artifact_candidate" ]; then artifact_root=$artifact_candidate; break; fi
+  done < <(find "$artifact_root" -mindepth 1 -maxdepth 1 -type d -print0)
+fi
+`)
+	}
+	b.WriteString("if artifact_safe_search_root \"$artifact_root\"; then while IFS= read -r -d '' f; do rel=$(artifact_rel_path \"$f\") || continue; if [[ \"$rel\" =~ $artifact_regex || \"./$rel\" =~ $artifact_regex ]]; then " + addFunction + " \"$f\"; fi; done < <(find \"$artifact_root\"" + depth + " \\( -name .git -o -name .crabbox \\) -prune -o \\( -type f -o -type l \\) -print0); fi\n")
 }
 
 func runArtifactRequireScript(workdir string, globs []string) string {
@@ -334,6 +347,22 @@ func artifactGlobSearchRoot(glob string) string {
 	return dir
 }
 
+func artifactGlobNarrowSearchRoot(glob string) string {
+	if glob != strings.TrimSpace(glob) || !safeArtifactGlob(glob) {
+		return ""
+	}
+	firstMeta := strings.IndexAny(glob, "*?")
+	if firstMeta <= 0 || glob[firstMeta-1] != '/' {
+		return ""
+	}
+	candidate := strings.TrimPrefix(glob[:firstMeta-1], "./")
+	root := artifactGlobSearchRoot(glob)
+	if candidate != filepath.ToSlash(filepath.Clean(candidate)) || candidate != root+"/"+filepath.Base(candidate) {
+		return ""
+	}
+	return candidate
+}
+
 func artifactGlobRegex(glob string) string {
 	var b strings.Builder
 	b.WriteByte('^')
@@ -363,20 +392,21 @@ func artifactGlobRegex(glob string) string {
 }
 
 type proofRenderInput struct {
-	Template    ProofTemplateConfig
-	Provider    string
-	LeaseID     string
-	Slug        string
-	RunID       string
-	Command     string
-	LogExcerpt  string
-	Captures    []streamCaptureMetadata
-	ActionsURL  string
-	Artifacts   []runArtifact
-	Variables   map[string]string
-	CommandMs   int64
-	ExitCode    int
-	GeneratedAt time.Time
+	ImageEvidence *ImageEvidence
+	Template      ProofTemplateConfig
+	Provider      string
+	LeaseID       string
+	Slug          string
+	RunID         string
+	Command       string
+	LogExcerpt    string
+	Captures      []streamCaptureMetadata
+	ActionsURL    string
+	Artifacts     []runArtifact
+	Variables     map[string]string
+	CommandMs     int64
+	ExitCode      int
+	GeneratedAt   time.Time
 }
 
 func writeRunProof(path, templateName string, input proofRenderInput) (runArtifact, error) {
@@ -386,11 +416,11 @@ func writeRunProof(path, templateName string, input proofRenderInput) (runArtifa
 	}
 	if dir := filepath.Dir(path); dir != "." && dir != "" {
 		if err := createPrivateRunOutputDir(dir); err != nil {
-			return runArtifact{}, exit(2, "create proof directory: %v", err)
+			return runArtifact{}, Exit(2, "create proof directory: %v", err)
 		}
 	}
 	if err := writePrivateRunOutputFile(path, []byte(content)); err != nil {
-		return runArtifact{}, exit(2, "write proof %s: %v", path, err)
+		return runArtifact{}, Exit(2, "write proof %s: %v", path, err)
 	}
 	return runArtifact{Kind: "proof", Path: path, Template: templateName, Bytes: len(content)}, nil
 }
@@ -423,6 +453,9 @@ func renderRunProof(input proofRenderInput) (string, error) {
 	b.WriteString("## Real behavior proof\n\n")
 	b.WriteString("Behavior addressed: " + behavior + "\n\n")
 	b.WriteString("Real environment tested: " + environment + "\n\n")
+	if input.ImageEvidence != nil {
+		b.WriteString(imageEvidenceSummary(input.ImageEvidence) + "\n\n")
+	}
 	stepsOpenFence, stepsCloseFence := markdownFence("sh", steps)
 	b.WriteString("Exact steps or command run:\n\n" + stepsOpenFence + "\n")
 	b.WriteString(steps)
@@ -503,6 +536,12 @@ func proofTemplateValues(input proofRenderInput) map[string]string {
 		"logExcerpt": input.LogExcerpt,
 		"actionsUrl": input.ActionsURL,
 	}
+	if input.ImageEvidence != nil {
+		builtins["imageConfiguredReference"] = input.ImageEvidence.ConfiguredReference
+		builtins["runtimeImageId"] = input.ImageEvidence.RuntimeImageID
+		builtins["repositoryDigests"] = strings.Join(input.ImageEvidence.RepositoryDigests, ",")
+		builtins["repositoryDigestStatus"] = input.ImageEvidence.RepositoryDigestStatus
+	}
 	for key, value := range builtins {
 		values[key] = value
 	}
@@ -513,29 +552,10 @@ func renderProofTemplateField(label, templateValue, fallback string, values map[
 	if strings.TrimSpace(templateValue) == "" {
 		return strings.TrimSpace(fallback), nil
 	}
-	if err := validateProofTemplatePlaceholders(label, templateValue, values); err != nil {
+	if err := validatePresetTemplatePlaceholders("proof template "+label, templateValue, values); err != nil {
 		return "", err
 	}
 	return expandPresetValue(templateValue, values), nil
-}
-
-func validateProofTemplatePlaceholders(label, value string, values map[string]string) error {
-	matches := presetPlaceholderPattern.FindAllString(value, -1)
-	if len(matches) == 0 {
-		return nil
-	}
-	var missing []string
-	for _, match := range appendUniqueStrings(nil, matches...) {
-		key := strings.TrimSuffix(strings.TrimPrefix(match, "{{"), "}}")
-		if _, ok := values[key]; !ok {
-			missing = append(missing, match)
-		}
-	}
-	if len(missing) == 0 {
-		return nil
-	}
-	sort.Strings(missing)
-	return exit(2, "proof template %s has unresolved preset variable(s): %s", label, strings.Join(missing, ", "))
 }
 
 func markdownFence(info, content string) (string, string) {

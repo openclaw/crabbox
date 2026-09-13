@@ -91,8 +91,12 @@ crabbox ssh --id swift-crab
 **Fixes**
 
 - Upgrade to a build that quotes SSH config values containing spaces.
-- Keep per-lease keys under the Crabbox config `testboxes/<lease>` directory
-  (see [SSH keys](features/ssh-keys.md)).
+- Keep the same `XDG_STATE_HOME` for acquire, reuse and cleanup. An absolute
+  value selects `<state>/crabbox/testboxes/<lease>`; unset or empty retains the
+  OS user-config `crabbox/testboxes/<lease>` location. Changing `CRABBOX_CONFIG`
+  does not move keys, and changing the state root does not migrate or find old
+  leases. Return to the original root rather than copying key files (see
+  [SSH keys](features/ssh-keys.md)).
 - Do not manually override `UserKnownHostsFile` or `ControlPath` unless you are
   debugging SSH itself.
 

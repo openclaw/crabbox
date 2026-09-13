@@ -1,3 +1,4 @@
+import { base64URL, base64URLDecode, sha256Hex } from "./encoding";
 import {
   GitHubCredentialError,
   githubAccountID,
@@ -929,11 +930,6 @@ async function userTokenCredentialKey(secret: string): Promise<CryptoKey> {
   return crypto.subtle.importKey("raw", material, "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 
-export async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(value));
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
 export async function adminGrantVersion(
   env: Pick<Env, "CRABBOX_ADMIN_TOKEN" | "CRABBOX_GITHUB_ADMIN_OWNERS">,
 ): Promise<string> {
@@ -944,25 +940,4 @@ export async function adminGrantVersion(
       owners: [...new Set(envList(env.CRABBOX_GITHUB_ADMIN_OWNERS))].toSorted(),
     }),
   );
-}
-
-export function base64URL(data: Uint8Array): string {
-  let binary = "";
-  for (const byte of data) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
-}
-
-function base64URLDecode(value: string): Uint8Array {
-  const padded = value
-    .replaceAll("-", "+")
-    .replaceAll("_", "/")
-    .padEnd(Math.ceil(value.length / 4) * 4, "=");
-  const binary = atob(padded);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    out[i] = binary.charCodeAt(i);
-  }
-  return out;
 }

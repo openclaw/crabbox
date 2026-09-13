@@ -47,28 +47,28 @@ func (a App) initProject(_ context.Context, args []string) error {
 	for _, file := range files {
 		canonical, err := canonicalInitTargetPath(file.Path)
 		if err != nil {
-			return exit(2, "inspect %s: %v", file.Path, err)
+			return Exit(2, "inspect %s: %v", file.Path, err)
 		}
 		// Treat case-only variants as aliases on every platform. Generated target
 		// paths are conventional names, so two variants are always accidental.
 		key := strings.ToLower(filepath.ToSlash(canonical))
 		if _, exists := seenPaths[key]; exists {
-			return exit(2, "init target path is repeated: %s", file.Path)
+			return Exit(2, "init target path is repeated: %s", file.Path)
 		}
 		seenPaths[key] = struct{}{}
 		info, err := os.Stat(file.Path)
 		if err == nil {
 			for _, existing := range existingTargets {
 				if os.SameFile(info, existing) {
-					return exit(2, "init target path is repeated: %s", file.Path)
+					return Exit(2, "init target path is repeated: %s", file.Path)
 				}
 			}
 			existingTargets = append(existingTargets, info)
 			if !*force {
-				return exit(2, "%s already exists; use --force to overwrite", file.Path)
+				return Exit(2, "%s already exists; use --force to overwrite", file.Path)
 			}
 		} else if !os.IsNotExist(err) {
-			return exit(2, "inspect %s: %v", file.Path, err)
+			return Exit(2, "inspect %s: %v", file.Path, err)
 		}
 	}
 	for _, file := range files {
@@ -95,10 +95,10 @@ type initGeneratedFile struct {
 func normalizeInitSkillPath(skillPath string) (string, error) {
 	clean := filepath.Clean(skillPath)
 	if !filepath.IsLocal(clean) {
-		return "", exit(2, "--skill must be a repository-relative path ending in crabbox%cSKILL.md", filepath.Separator)
+		return "", Exit(2, "--skill must be a repository-relative path ending in crabbox%cSKILL.md", filepath.Separator)
 	}
 	if filepath.Base(clean) != "SKILL.md" || filepath.Base(filepath.Dir(clean)) != "crabbox" {
-		return "", exit(2, "--skill must end in crabbox%cSKILL.md so the directory matches the declared skill name", filepath.Separator)
+		return "", Exit(2, "--skill must end in crabbox%cSKILL.md so the directory matches the declared skill name", filepath.Separator)
 	}
 	return clean, nil
 }
@@ -133,13 +133,13 @@ func canonicalInitTargetPath(target string) (string, error) {
 
 func writeInitFile(path, content string, force bool) error {
 	if _, err := os.Stat(path); err == nil && !force {
-		return exit(2, "%s already exists; use --force to overwrite", path)
+		return Exit(2, "%s already exists; use --force to overwrite", path)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return exit(2, "create %s: %v", filepath.Dir(path), err)
+		return Exit(2, "create %s: %v", filepath.Dir(path), err)
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return exit(2, "write %s: %v", path, err)
+		return Exit(2, "write %s: %v", path, err)
 	}
 	return nil
 }

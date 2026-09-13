@@ -52,7 +52,7 @@ func (b *sshScriptTestBackend) Status(context.Context, StatusRequest) (StatusVie
 }
 func (b *sshScriptTestBackend) Stop(context.Context, StopRequest) error { return nil }
 func (b *sshScriptTestBackend) BeginSSHRunActivity(ctx context.Context, lease LeaseTarget) (func(), error) {
-	if claim, err := readLeaseClaim(lease.LeaseID); err != nil || claim.Provider != b.spec.Name {
+	if claim, err := ReadLeaseClaim(lease.LeaseID); err != nil || claim.Provider != b.spec.Name {
 		return nil, fmt.Errorf("activity started before admission: %v", err)
 	}
 	if b.starts == 0 {

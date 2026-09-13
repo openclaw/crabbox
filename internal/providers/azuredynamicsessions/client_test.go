@@ -17,15 +17,17 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestAzureDynamicSessionsFlagRouteAndDeferredPoolContract(t *testing.T) {
 	p := Provider{}
-	cfg := Config{}
+	cfg := core.Config{}
 	if err := p.RouteConfig(&cfg, nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -33,8 +35,8 @@ func TestAzureDynamicSessionsFlagRouteAndDeferredPoolContract(t *testing.T) {
 		t.Fatal("Azure backend route changed")
 	}
 	for _, target := range []string{"", core.TargetLinux, "darwin"} {
-		cfg := Config{TargetOS: target}
-		b, err := p.Configure(cfg, Runtime{})
+		cfg := core.Config{TargetOS: target}
+		b, err := p.Configure(cfg, core.Runtime{})
 		if target == "darwin" {
 			if err == nil || err.Error() != "azure-dynamic-sessions supports target=linux only" {
 				t.Fatalf("target check=%v", err)
@@ -56,7 +58,7 @@ func TestAzureDynamicSessionsFlagRouteAndDeferredPoolContract(t *testing.T) {
 	if fs.Lookup("azure-dynamic-sessions-pool") != nil {
 		t.Fatal("legacy Pool acquired a flag")
 	}
-	cfg.AzureDynamicSessions = AzureDynamicSessionsConfig{Endpoint: "https://example.invalid/pool", Pool: "legacy", APIVersion: "version", Workdir: "/workspace/app", TimeoutSecs: 12}
+	cfg.AzureDynamicSessions = core.AzureDynamicSessionsConfig{Endpoint: "https://example.invalid/pool", Pool: "legacy", APIVersion: "version", Workdir: "/workspace/app", TimeoutSecs: 12}
 	before := cfg
 	if err := ApplyAzureDynamicSessionsProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
@@ -67,7 +69,7 @@ func TestAzureDynamicSessionsFlagRouteAndDeferredPoolContract(t *testing.T) {
 	if err := fs.Parse([]string{"--azure-dynamic-sessions-endpoint=https://example.invalid/pool", "--azure-dynamic-sessions-api-version=version", "--azure-dynamic-sessions-workdir=/workspace/app", "--azure-dynamic-sessions-timeout-secs=12"}); err != nil {
 		t.Fatal(err)
 	}
-	cfg.AzureDynamicSessions = AzureDynamicSessionsConfig{Pool: "legacy"}
+	cfg.AzureDynamicSessions = core.AzureDynamicSessionsConfig{Pool: "legacy"}
 	if err := ApplyAzureDynamicSessionsProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +83,7 @@ func TestAzureDynamicSessionsFlagRouteAndDeferredPoolContract(t *testing.T) {
 	if err := ApplyAzureDynamicSessionsProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal("flag application performed deferred validation")
 	}
-	before.AzureDynamicSessions = AzureDynamicSessionsConfig{Pool: "legacy", TimeoutSecs: -1}
+	before.AzureDynamicSessions = core.AzureDynamicSessionsConfig{Pool: "legacy", TimeoutSecs: -1}
 	if !reflect.DeepEqual(cfg, before) {
 		t.Fatal("explicit fields or central marker phase changed")
 	}
@@ -98,7 +100,7 @@ func TestAzureDynamicSessionsFlagRouteAndDeferredPoolContract(t *testing.T) {
 		t.Fatalf("legacy Pool later rejection=%v", err)
 	}
 	for _, name := range []string{providerName, "Azure-Dynamic-Sessions", " azure-dynamic-sessions "} {
-		cfg := Config{Provider: name}
+		cfg := core.Config{Provider: name}
 		fs := flag.NewFlagSet("guard", flag.ContinueOnError)
 		fs.String("class", "", "")
 		fs.String("type", "", "")
@@ -130,9 +132,9 @@ func TestAzureDynamicSessionsFlagRouteAndDeferredPoolContract(t *testing.T) {
 func TestAzureDynamicSessionsDefaultConsumersWithMockedAuth(t *testing.T) {
 	t.Setenv(tokenEnvName, "")
 	for _, raw := range []string{"", "  ", " custom-version "} {
-		cfg := Config{AzureDynamicSessions: AzureDynamicSessionsConfig{Endpoint: "http://127.0.0.1:8787", APIVersion: raw, Workdir: "  "}}
-		runner := &recordingRunner{result: LocalCommandResult{Stdout: "inert-mocked-auth\n"}}
-		api, err := newAzureDynamicSessionsClient(context.Background(), cfg, Runtime{Exec: runner, HTTP: &http.Client{}})
+		cfg := core.Config{AzureDynamicSessions: core.AzureDynamicSessionsConfig{Endpoint: "http://127.0.0.1:8787", APIVersion: raw, Workdir: "  "}}
+		runner := &recordingRunner{result: core.LocalCommandResult{Stdout: "inert-mocked-auth\n"}}
+		api, err := newAzureDynamicSessionsClient(context.Background(), cfg, core.Runtime{Exec: runner, HTTP: &http.Client{}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -155,12 +157,12 @@ func TestAzureDynamicSessionsDefaultConsumersWithMockedAuth(t *testing.T) {
 		ttl        time.Duration
 		want       int
 	}{{0, 0, 1800}, {-1, 0, 1800}, {0, -time.Second, 1800}, {0, 1500 * time.Millisecond, 2}, {-1, 42 * time.Second, 42}, {7, 42 * time.Second, 7}} {
-		cfg := Config{TTL: tc.ttl, AzureDynamicSessions: AzureDynamicSessionsConfig{TimeoutSecs: tc.configured}}
+		cfg := core.Config{TTL: tc.ttl, AzureDynamicSessions: core.AzureDynamicSessionsConfig{TimeoutSecs: tc.configured}}
 		if got := azureDynamicSessionsTimeoutSeconds(cfg); got != tc.want {
 			t.Fatalf("timeout configured=%d ttl=%s got=%d want=%d", tc.configured, tc.ttl, got, tc.want)
 		}
 	}
-	cfg := Config{AzureDynamicSessions: AzureDynamicSessionsConfig{Workdir: " /workspace/custom/ "}}
+	cfg := core.Config{AzureDynamicSessions: core.AzureDynamicSessionsConfig{Workdir: " /workspace/custom/ "}}
 	if got, err := azureDynamicSessionsWorkspace(cfg); err != nil || got != "/workspace/custom" {
 		t.Fatalf("custom workspace=%q error=%v", got, err)
 	}
@@ -168,8 +170,8 @@ func TestAzureDynamicSessionsDefaultConsumersWithMockedAuth(t *testing.T) {
 	if defaults.APIVersion != "2025-02-02-preview" || defaults.Workdir != "/workspace/crabbox" || defaults.TimeoutSecs != 1800 {
 		t.Fatal("compiled defaults changed")
 	}
-	runner := &recordingRunner{result: LocalCommandResult{Stdout: "inert"}}
-	_, err := newAzureDynamicSessionsClient(context.Background(), Config{AzureDynamicSessions: AzureDynamicSessionsConfig{Pool: "legacy"}}, Runtime{Exec: runner, HTTP: &http.Client{}})
+	runner := &recordingRunner{result: core.LocalCommandResult{Stdout: "inert"}}
+	_, err := newAzureDynamicSessionsClient(context.Background(), core.Config{AzureDynamicSessions: core.AzureDynamicSessionsConfig{Pool: "legacy"}}, core.Runtime{Exec: runner, HTTP: &http.Client{}})
 	if err == nil || len(runner.calls) != 0 {
 		t.Fatal("legacy Pool validation must precede mocked authentication")
 	}
@@ -231,9 +233,9 @@ func TestAzureDynamicSessionsFallbackBoundsControlAndPreservesExecStream(t *test
 func TestAzureDynamicSessionsInjectedHTTPClientIsPreservedForBothPlanes(t *testing.T) {
 	t.Setenv(tokenEnvName, "test-token")
 	injected := &http.Client{Timeout: 17 * time.Second}
-	api, err := newAzureDynamicSessionsClient(context.Background(), Config{AzureDynamicSessions: AzureDynamicSessionsConfig{
+	api, err := newAzureDynamicSessionsClient(context.Background(), core.Config{AzureDynamicSessions: core.AzureDynamicSessionsConfig{
 		Endpoint: "http://127.0.0.1:8787",
-	}}, Runtime{HTTP: injected})
+	}}, core.Runtime{HTTP: injected})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +246,7 @@ func TestAzureDynamicSessionsInjectedHTTPClientIsPreservedForBothPlanes(t *testi
 }
 
 func TestAzureDynamicSessionsEndpointRequiresPoolManagementEndpoint(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	if _, err := azureDynamicSessionsEndpoint(cfg); err == nil {
 		t.Fatal("endpoint should be required")
 	}
@@ -261,12 +263,12 @@ func TestAzureDynamicSessionsEndpointRequiresPoolManagementEndpoint(t *testing.T
 
 func TestAzureDynamicSessionsPoolSelectorIsUnsupported(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	RegisterAzureDynamicSessionsProviderFlags(fs, Config{})
+	RegisterAzureDynamicSessionsProviderFlags(fs, core.Config{})
 	if fs.Lookup("azure-dynamic-sessions-pool") != nil {
 		t.Fatal("azure-dynamic-sessions-pool should not be registered")
 	}
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.AzureDynamicSessions.Endpoint = "https://pool.env.eastus.azurecontainerapps.io"
 	cfg.AzureDynamicSessions.Pool = "pool"
 	_, err := azureDynamicSessionsEndpoint(cfg)
@@ -286,7 +288,7 @@ func TestAzureDynamicSessionsEndpointRejectsUnsafeTokenDestinations(t *testing.T
 		"pool.env.eastus.azurecontainerapps.io",
 	} {
 		t.Run(endpoint, func(t *testing.T) {
-			cfg := Config{}
+			cfg := core.Config{}
 			cfg.AzureDynamicSessions.Endpoint = endpoint
 			_, err := azureDynamicSessionsEndpoint(cfg)
 			if err == nil {
@@ -297,7 +299,7 @@ func TestAzureDynamicSessionsEndpointRejectsUnsafeTokenDestinations(t *testing.T
 }
 
 func TestAzureDynamicSessionsEndpointAllowsLoopbackHTTPForLocalRunner(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.AzureDynamicSessions.Endpoint = "http://127.0.0.1:8787/"
 	got, err := azureDynamicSessionsEndpoint(cfg)
 	if err != nil {
@@ -310,9 +312,9 @@ func TestAzureDynamicSessionsEndpointAllowsLoopbackHTTPForLocalRunner(t *testing
 
 func TestAzureDynamicSessionsAccessTokenUsesDynamicsessionsAudience(t *testing.T) {
 	t.Setenv(tokenEnvName, "")
-	runner := &recordingRunner{result: LocalCommandResult{Stdout: "token\n"}}
-	cfg := Config{AzureTenant: "tenant-1", AzureSubscription: "sub-1"}
-	token, err := azureDynamicSessionsAccessToken(context.Background(), cfg, Runtime{Exec: runner})
+	runner := &recordingRunner{result: core.LocalCommandResult{Stdout: "token\n"}}
+	cfg := core.Config{AzureTenant: "tenant-1", AzureSubscription: "sub-1"}
+	token, err := azureDynamicSessionsAccessToken(context.Background(), cfg, core.Runtime{Exec: runner})
 	if err != nil {
 		t.Fatalf("access token: %v", err)
 	}
@@ -333,9 +335,9 @@ func TestAzureDynamicSessionsAccessTokenUsesDynamicsessionsAudience(t *testing.T
 
 func TestAzureDynamicSessionsAccessTokenPrefersEnvironmentToken(t *testing.T) {
 	t.Setenv(tokenEnvName, " env-token ")
-	runner := &recordingRunner{result: LocalCommandResult{Stdout: "az-token\n"}}
+	runner := &recordingRunner{result: core.LocalCommandResult{Stdout: "az-token\n"}}
 
-	token, err := azureDynamicSessionsAccessToken(context.Background(), Config{}, Runtime{Exec: runner})
+	token, err := azureDynamicSessionsAccessToken(context.Background(), core.Config{}, core.Runtime{Exec: runner})
 	if err != nil {
 		t.Fatalf("access token: %v", err)
 	}
@@ -706,11 +708,11 @@ func (w errWriter) Write([]byte) (int, error) {
 }
 
 type recordingRunner struct {
-	calls  []LocalCommandRequest
-	result LocalCommandResult
+	calls  []core.LocalCommandRequest
+	result core.LocalCommandResult
 }
 
-func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
 	return r.result, nil
 }
@@ -757,6 +759,177 @@ func TestAzureDynamicSessionsStreamCancellationAtCleanEOF(t *testing.T) {
 			} else if !errors.Is(err, context.Canceled) {
 				t.Fatalf("cancellation lost at clean EOF: %v", err)
 			}
+		})
+	}
+}
+
+func TestJSONRequestAdoptionEnvelope(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "capture")
+	var typedNil *struct{ Value string }
+	const base = "https://api.example.test/base"
+	sentinel := errors.New("synthetic captured transport stop")
+	for _, tc := range []struct {
+		name        string
+		body        any
+		want        string
+		query, fail bool
+	}{
+		{name: "nil"},
+		{name: "typed nil", body: typedNil, want: "null\n"},
+		{name: "JSON bytes", body: map[string]string{"message": "<&>"}, want: "{\"message\":\"\\u003c\\u0026\\u003e\"}\n"},
+		{name: "query without body", query: true},
+		{name: "transport error", fail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			endpoint := "/records"
+			if tc.query {
+				endpoint += "?limit=2&prefix=two+words"
+			}
+
+			headers := http.Header{"Authorization": []string{"Bearer synthetic-token"}}
+			headers.Set("Accept", "application/json")
+			headers.Set("User-Agent", "crabbox/azure-dynamic-sessions")
+			if tc.body != nil {
+				headers.Set("Content-Type", "application/json")
+			}
+			transport := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, base+endpoint, tc.want, headers)
+				if tc.fail {
+					return nil, sentinel
+				}
+				return &http.Response{StatusCode: 204, Header: http.Header{"X-Capture": []string{"yes"}}, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+			})}
+			c := &azureDynamicSessionsClient{endpoint: base, token: "synthetic-token", httpClient: transport}
+			var gotHeaders http.Header
+			err := c.doJSONURL(ctx, http.MethodPost, base+endpoint, tc.body, nil)
+			if tc.fail {
+				if !errors.Is(err, sentinel) || gotHeaders != nil {
+					t.Fatalf("error/headers=%v %v", err, gotHeaders)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+
+			if calls != 1 {
+				t.Fatalf("calls=%d", calls)
+			}
+		})
+	}
+}
+
+func TestJSONRequestAdoptionConcreteEnvelope(t *testing.T) {
+	ctx := context.Background()
+	sentinel := errors.New("synthetic captured concrete request")
+	calls := 0
+	headers := http.Header{"Authorization": []string{"Bearer synthetic-token"}, "Content-Type": []string{"application/json"}}
+	headers.Set("Accept", "application/json")
+	headers.Set("User-Agent", "crabbox/azure-dynamic-sessions")
+	transport := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, "https://api.example.test/base/v1/exec?identifier=session+one", "{\"command\":\"\\u003c\\u0026\\u003e\",\"cwd\":\"/work\",\"env\":{\"A\":\"B\"},\"timeoutMs\":7}\n", headers)
+		return nil, sentinel
+	})}
+	c := &azureDynamicSessionsClient{endpoint: "https://api.example.test/base", token: "synthetic-token", httpClient: transport}
+	code, err := c.ExecStream(ctx, "session one", azureDynamicSessionsExecRequest{Command: "<&>", Cwd: "/work", Env: map[string]string{"A": "B"}, TimeoutMS: 7}, io.Discard, io.Discard)
+	if code != 0 {
+		t.Fatalf("exit=%d", code)
+	}
+	if !errors.Is(err, sentinel) || calls != 1 {
+		t.Fatalf("error=%v calls=%d", err, calls)
+	}
+}
+
+type responseCloseObserver struct {
+	io.Reader
+	close func() error
+}
+
+func (b responseCloseObserver) Close() error { return b.close() }
+
+func TestRawJSONResponseContract(t *testing.T) {
+	readFailure := errors.New("synthetic response read failure")
+	closeFailure := errors.New("synthetic ignored close failure")
+	for _, tc := range []struct {
+		name, data        string
+		status            int
+		nilOut, readError bool
+		wantError         string
+		wantValue         int
+	}{
+		{name: "nil output still reads invalid JSON", data: "not JSON", nilOut: true, wantValue: 99},
+		{name: "raw empty", wantValue: 99},
+		{name: "whitespace with output", data: " \t\n", wantError: "syntax", wantValue: 99},
+		{name: "whitespace without output", data: " \t\n", nilOut: true, wantValue: 99},
+		{name: "JSON object", data: `{"value":12}`, wantValue: 12},
+		{name: "JSON null", data: "null", wantValue: 99},
+		{name: "JSON trailing whitespace", data: "{\"value\":12}\n \t", wantValue: 12},
+		{name: "trailing JSON value", data: `{"value":12}{"value":13}`, wantError: "syntax", wantValue: 99},
+		{name: "wrong JSON field type", data: `{"value":"bad"}`, wantError: "type", wantValue: 99},
+		{name: "status error", data: "  unavailable \n", status: 503, wantError: "status", wantValue: 99},
+		{name: "status error with nil output", data: "  unavailable \n", status: 503, nilOut: true, wantError: "status", wantValue: 99},
+		{name: "read error beats success", data: `{"value":12}`, readError: true, wantError: "read", wantValue: 99},
+		{name: "read error beats status and nil output", data: "partial body", status: 503, nilOut: true, readError: true, wantError: "read", wantValue: 99},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := bytes.NewReader([]byte(tc.data))
+			var reader io.Reader = payload
+			if tc.readError {
+				reader = io.MultiReader(payload, iotest.ErrReader(readFailure))
+			}
+			closed, calls := 0, 0
+			responseHeaders := http.Header{"X-Trace": []string{"before-close", "second"}}
+			body := responseCloseObserver{Reader: reader, close: func() error { closed++; responseHeaders["X-Trace"][0] = "after-close"; return closeFailure }}
+			status := tc.status
+			if status == 0 {
+				status = 200
+			}
+			const base = "https://api.example.test"
+			httpClient := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				return &http.Response{StatusCode: status, Status: strconv.Itoa(status) + " Synthetic", Header: responseHeaders, Body: body, Request: req}, nil
+			})}
+			client := &azureDynamicSessionsClient{endpoint: base, token: "synthetic-token", httpClient: httpClient}
+			out := struct {
+				Value int `json:"value"`
+			}{Value: 99}
+			var destination any = &out
+			if tc.nilOut {
+				destination = nil
+			}
+			err := client.doJSONURL(context.Background(), http.MethodGet, base+"/records", nil, destination)
+			if calls != 1 || closed != 1 || payload.Len() != 0 {
+				t.Fatalf("calls=%d closes=%d unread=%d", calls, closed, payload.Len())
+			}
+			if out.Value != tc.wantValue {
+				t.Fatalf("value=%d want%d", out.Value, tc.wantValue)
+			}
+			switch tc.wantError {
+			case "":
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "read":
+				if err != readFailure {
+					t.Fatalf("read error=%T %v want exact sentinel", err, err)
+				}
+			case "syntax":
+				if _, ok := err.(*json.SyntaxError); !ok {
+					t.Fatalf("decode error=%T %v want unwrapped SyntaxError", err, err)
+				}
+			case "type":
+				if _, ok := err.(*json.UnmarshalTypeError); !ok {
+					t.Fatalf("decode error=%T %v want unwrapped UnmarshalTypeError", err, err)
+				}
+			case "status":
+				api, ok := err.(*azureDynamicSessionsAPIError)
+				if !ok || api.StatusCode != 503 || api.Status != "503 Synthetic" || api.Body != "unavailable" {
+					t.Fatalf("status error=%T %#v", err, err)
+				}
+			}
+
 		})
 	}
 }

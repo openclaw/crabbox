@@ -12,37 +12,36 @@ import (
 
 	gosdk "github.com/islo-labs/go-sdk"
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type SyncManifest = core.SyncManifest
-
-func rejectIsloSyncOptions(req RunRequest) error {
+func rejectIsloSyncOptions(req core.RunRequest) error {
 	if req.SyncOnly {
-		return exit(2, "%s uses Islo archive sync; --sync-only is not supported", isloProvider)
+		return core.Exit(2, "%s uses Islo archive sync; --sync-only is not supported", isloProvider)
 	}
 	if req.ChecksumSync {
-		return exit(2, "%s uses Islo archive sync; --checksum is not supported", isloProvider)
+		return core.Exit(2, "%s uses Islo archive sync; --checksum is not supported", isloProvider)
 	}
 	if len(req.ArtifactGlobs) > 0 {
-		return exit(2, "%s supports bounded single-file artifacts; --artifact-glob is not supported", isloProvider)
+		return core.Exit(2, "%s supports bounded single-file artifacts; --artifact-glob is not supported", isloProvider)
 	}
 	return nil
 }
 
-func (b *isloBackend) syncWorkspace(ctx context.Context, client isloAPI, name string, req RunRequest, user string) ([]timingPhase, time.Duration, error) {
+func (b *isloBackend) syncWorkspace(ctx context.Context, client isloAPI, name string, req core.RunRequest, user string) ([]core.TimingPhase, time.Duration, error) {
 	start := b.now()
-	excludes, err := syncExcludes(req.Repo.Root, b.cfg)
+	excludes, err := core.SyncExcludes(req.Repo.Root, b.cfg)
 	if err != nil {
 		return nil, 0, err
 	}
 	manifestStarted := b.now()
-	manifest, err := syncManifest(req.Repo.Root, excludes, b.cfg.Sync.Includes)
+	manifest, err := core.BuildSyncManifestFiltered(req.Repo.Root, excludes, b.cfg.Sync.Includes)
 	if err != nil {
-		return nil, 0, exit(6, "build sync file list: %v", err)
+		return nil, 0, core.Exit(6, "build sync file list: %v", err)
 	}
 	manifestDuration := b.now().Sub(manifestStarted)
 	preflightStarted := b.now()
-	if err := checkSyncPreflight(manifest, b.cfg, req.ForceSyncLarge, b.rt.Stderr); err != nil {
+	if err := core.CheckSyncPreflight(manifest, b.cfg, req.ForceSyncLarge, b.rt.Stderr); err != nil {
 		return nil, 0, err
 	}
 	preflightDuration := b.now().Sub(preflightStarted)
@@ -87,7 +86,7 @@ func (b *isloBackend) syncWorkspace(ctx context.Context, client isloAPI, name st
 	}
 	uploadDuration := b.now().Sub(uploadStarted)
 	total := b.now().Sub(start)
-	return []timingPhase{
+	return []core.TimingPhase{
 		{Name: "manifest", Ms: manifestDuration.Milliseconds()},
 		{Name: "preflight", Ms: preflightDuration.Milliseconds()},
 		{Name: "prepare", Ms: prepareDuration.Milliseconds()},
@@ -98,9 +97,9 @@ func (b *isloBackend) syncWorkspace(ctx context.Context, client isloAPI, name st
 }
 
 func (b *isloBackend) prepareWorkspace(ctx context.Context, client isloAPI, name, workspace, user string, replace bool) error {
-	command := "mkdir -p " + shellQuote(workspace)
+	command := "mkdir -p " + core.ShellQuote(workspace)
 	if replace {
-		command = "rm -rf " + shellQuote(workspace) + " && " + command
+		command = "rm -rf " + core.ShellQuote(workspace) + " && " + command
 	}
 	return b.execShellAs(ctx, client, name, command, user, io.Discard)
 }
@@ -112,21 +111,21 @@ func (b *isloBackend) repairWorkspaceOwnership(ctx context.Context, client isloA
 func isloWorkspaceOwnershipRepairCommand(workspace string) string {
 	return strings.Join([]string{
 		"set -e",
-		"mkdir -p " + shellQuote(workspace),
-		"chown -R " + shellQuote(isloWorkloadUser+":"+isloWorkloadUser) + " " + shellQuote(workspace),
+		"mkdir -p " + core.ShellQuote(workspace),
+		"chown -R " + core.ShellQuote(isloWorkloadUser+":"+isloWorkloadUser) + " " + core.ShellQuote(workspace),
 	}, "\n")
 }
 
 func (b *isloBackend) restoreWorkspaceOwnership(ctx context.Context, client isloAPI, name, workspace, user string) error {
-	command := "chown -R " + shellQuote(user+":"+user) + " " + shellQuote(workspace)
+	command := "chown -R " + core.ShellQuote(user+":"+user) + " " + core.ShellQuote(workspace)
 	return b.execShellAs(ctx, client, name, command, isloAdminUser, io.Discard)
 }
 
 func (b *isloBackend) uploadArchiveViaExec(ctx context.Context, client isloAPI, name, workspace string, archive io.Reader, user string) error {
-	suffix := isloRandomSuffix()
+	suffix := shared.RandomSuffix()
 	remoteB64 := path.Join("/tmp", "crabbox-"+suffix+".tgz.b64")
 	remoteArchive := path.Join("/tmp", "crabbox-"+suffix+".tgz")
-	cleanup := "rm -f " + shellQuote(remoteB64) + " " + shellQuote(remoteArchive)
+	cleanup := "rm -f " + core.ShellQuote(remoteB64) + " " + core.ShellQuote(remoteArchive)
 	if err := b.execShellAs(ctx, client, name, cleanup, user, io.Discard); err != nil {
 		return err
 	}
@@ -143,7 +142,7 @@ func (b *isloBackend) uploadArchiveViaExec(ctx context.Context, client isloAPI, 
 		n, readErr := archive.Read(buf)
 		if n > 0 {
 			chunk := base64.StdEncoding.EncodeToString(buf[:n])
-			command := "printf %s " + shellQuote(chunk) + " >> " + shellQuote(remoteB64)
+			command := "printf %s " + core.ShellQuote(chunk) + " >> " + core.ShellQuote(remoteB64)
 			if err := b.execShellAs(ctx, client, name, command, user, io.Discard); err != nil {
 				return err
 			}
@@ -164,10 +163,10 @@ func (b *isloBackend) uploadArchiveViaExec(ctx context.Context, client isloAPI, 
 
 func isloFallbackExtractCommand(remoteB64, remoteArchive, workspace string) string {
 	extract := strings.Join([]string{
-		"if base64 -d " + shellQuote(remoteB64) + " > " + shellQuote(remoteArchive) + " 2>/dev/null; then :; else base64 --decode " + shellQuote(remoteB64) + " > " + shellQuote(remoteArchive) + "; fi",
-		"tar -xzf " + shellQuote(remoteArchive) + " -C " + shellQuote(workspace),
+		"if base64 -d " + core.ShellQuote(remoteB64) + " > " + core.ShellQuote(remoteArchive) + " 2>/dev/null; then :; else base64 --decode " + core.ShellQuote(remoteB64) + " > " + core.ShellQuote(remoteArchive) + "; fi",
+		"tar -xzf " + core.ShellQuote(remoteArchive) + " -C " + core.ShellQuote(workspace),
 	}, " && ")
-	cleanup := "rm -f " + shellQuote(remoteB64) + " " + shellQuote(remoteArchive)
+	cleanup := "rm -f " + core.ShellQuote(remoteB64) + " " + core.ShellQuote(remoteArchive)
 	return extract + "; status=$?; " + cleanup + "; exit $status"
 }
 
@@ -181,7 +180,7 @@ func (b *isloBackend) execShellAs(ctx context.Context, client isloAPI, name, com
 		return fmt.Errorf("islo exec %q: %w", isloCommandForError(command), err)
 	}
 	if code != 0 {
-		return exit(code, "islo exec %q exited %d", isloCommandForError(command), code)
+		return core.Exit(code, "islo exec %q exited %d", isloCommandForError(command), code)
 	}
 	return nil
 }
@@ -193,11 +192,11 @@ func isloCommandForError(command string) string {
 	return command
 }
 
-func createIsloSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, _ io.Writer) (*os.File, error) {
+func createIsloSyncArchive(ctx context.Context, repo core.Repo, manifest core.SyncManifest, _ io.Writer) (*os.File, error) {
 	return core.CreateSyncArchive(ctx, repo, manifest, "crabbox-islo-sync-*.tgz")
 }
 
-func isloWorkspacePath(cfg Config) (string, error) {
+func isloWorkspacePath(cfg core.Config) (string, error) {
 	workdir, err := isloRelativeWorkdir(cfg)
 	if err != nil {
 		return "", err
@@ -205,17 +204,17 @@ func isloWorkspacePath(cfg Config) (string, error) {
 	return path.Join("/workspace", workdir), nil
 }
 
-func isloRelativeWorkdir(cfg Config) (string, error) {
+func isloRelativeWorkdir(cfg core.Config) (string, error) {
 	workdir := strings.TrimSpace(cfg.Islo.Workdir)
 	if workdir == "" {
 		workdir = "crabbox"
 	}
 	if strings.HasPrefix(workdir, "/") {
-		return "", exit(2, "islo workdir %q must be relative under /workspace", workdir)
+		return "", core.Exit(2, "islo workdir %q must be relative under /workspace", workdir)
 	}
 	workdir = path.Clean(workdir)
 	if workdir == "." || workdir == ".." || strings.HasPrefix(workdir, "../") {
-		return "", exit(2, "islo workdir %q escapes /workspace", workdir)
+		return "", core.Exit(2, "islo workdir %q escapes /workspace", workdir)
 	}
 	return workdir, nil
 }

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -69,7 +70,7 @@ func (f *fakeAPI) AccountID(ctx context.Context) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	return firstNonBlank(f.accountID, "fixture-account"), f.accountErr
+	return shared.FirstNonBlankTrimmed(f.accountID, "fixture-account"), f.accountErr
 }
 
 func (f *fakeAPI) Version(ctx context.Context) (string, error) {
@@ -214,7 +215,7 @@ func (f *fakeAPI) GetImage(ctx context.Context, name string) (machineImageDetail
 func (f *fakeAPI) recordImageSnapshot(detail machineImageDetail) {
 	state := "MISSING"
 	if len(detail.Versions) > 0 {
-		state = strings.ToUpper(blank(detail.Versions[0].SnapshotStatus, "UNKNOWN"))
+		state = strings.ToUpper(core.Blank(detail.Versions[0].SnapshotStatus, "UNKNOWN"))
 	}
 	f.actions = append(f.actions, "image:"+state)
 	if state == "READY" {
@@ -266,11 +267,11 @@ func testBackendWithAPI(api *fakeAPI) *backend {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.SSHKey = "/tmp/test-key"
-	b := newBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	b.api = api
 	b.sleep = func(context.Context, time.Duration) error { return nil }
-	b.waitSSH = func(context.Context, *SSHTarget, time.Duration) error { return nil }
-	b.prepareNativeImageSource = func(context.Context, SSHTarget) error { return nil }
+	b.waitSSH = func(context.Context, *core.SSHTarget, time.Duration) error { return nil }
+	b.prepareNativeImageSource = func(context.Context, core.SSHTarget) error { return nil }
 	return b
 }
 
@@ -290,7 +291,7 @@ func TestNewBackendConfiguresClientReadRetryCadenceAndContextSleep(t *testing.T)
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := core.BaseConfig()
 			cfg.Machine0.PollInterval = tc.configured
-			b := newBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+			b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 			c, ok := b.api.(*client)
 			if !ok || b.cfg.Machine0.PollInterval != tc.want || c.cfg.PollInterval != tc.want || c.sleep == nil {
 				t.Fatalf("backend interval=%s client=%#v ok=%v want=%s", b.cfg.Machine0.PollInterval, c, ok, tc.want)
@@ -328,14 +329,14 @@ func TestEffectiveMachine0WorkRootUsesResolvedSSHUser(t *testing.T) {
 
 	for _, tc := range []struct {
 		name     string
-		cfg      Config
+		cfg      core.Config
 		item     machine
 		wantUser string
 		wantRoot string
 	}{
 		{name: "ubuntu default", cfg: base, item: ubuntu, wantUser: "ubuntu", wantRoot: "/home/ubuntu/crabbox"},
 		{name: "nixos default", cfg: base, item: nixos, wantUser: "nix", wantRoot: "/home/nix/crabbox"},
-		{name: "explicit override", cfg: func() Config { cfg := base; cfg.Machine0.WorkRoot = "/srv/machine0-work"; return cfg }(), item: nixos, wantUser: "nix", wantRoot: "/srv/machine0-work"},
+		{name: "explicit override", cfg: func() core.Config { cfg := base; cfg.Machine0.WorkRoot = "/srv/machine0-work"; return cfg }(), item: nixos, wantUser: "nix", wantRoot: "/srv/machine0-work"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := effectiveMachine0Config(tc.cfg, tc.item)
@@ -352,17 +353,17 @@ func TestPrepareLeaseUsesDeterministicPrivateMachineKnownHosts(t *testing.T) {
 	item := readyMachine("203.0.113.10")
 	b := testBackendWithAPI(&fakeAPI{machine: item})
 
-	first, err := b.prepareLease(context.Background(), item, Server{CloudID: item.ID}, "cbx_trust", false)
+	first, err := b.prepareLease(context.Background(), item, core.Server{CloudID: item.ID}, "cbx_trust", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := b.prepareLease(context.Background(), item, Server{CloudID: item.ID}, "cbx_trust", false)
+	again, err := b.prepareLease(context.Background(), item, core.Server{CloudID: item.ID}, "cbx_trust", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	other := item
 	other.ID = "vm-456"
-	second, err := b.prepareLease(context.Background(), other, Server{CloudID: other.ID}, "cbx_other", false)
+	second, err := b.prepareLease(context.Background(), other, core.Server{CloudID: other.ID}, "cbx_other", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,12 +425,12 @@ func TestPrepareLeaseMachine0FilenameOverridesGenericSSHKey(t *testing.T) {
 	api := &fakeAPI{machine: item}
 	b := testBackendWithAPI(api)
 	b.cfg.SSHKey = "/tmp/unrelated-crabbox-key"
-	var waited SSHTarget
-	b.waitSSH = func(_ context.Context, target *SSHTarget, _ time.Duration) error {
+	var waited core.SSHTarget
+	b.waitSSH = func(_ context.Context, target *core.SSHTarget, _ time.Duration) error {
 		waited = *target
 		return nil
 	}
-	lease, err := b.prepareLease(context.Background(), item, Server{CloudID: item.ID}, "cbx_keytest", true)
+	lease, err := b.prepareLease(context.Background(), item, core.Server{CloudID: item.ID}, "cbx_keytest", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -485,12 +486,12 @@ func TestPrepareLeaseValidatesMachine0KeyFilenameBeforeSideEffects(t *testing.T)
 				return machine0KnownHostsFile(root, machineID)
 			}
 			sshCalls := 0
-			b.waitSSH = func(context.Context, *SSHTarget, time.Duration) error {
+			b.waitSSH = func(context.Context, *core.SSHTarget, time.Duration) error {
 				sshCalls++
 				return nil
 			}
 
-			lease, err := b.prepareLease(context.Background(), item, Server{CloudID: item.ID}, "cbx_key_validation", true)
+			lease, err := b.prepareLease(context.Background(), item, core.Server{CloudID: item.ID}, "cbx_key_validation", true)
 			if tc.wantOK {
 				if err != nil {
 					t.Fatal(err)
@@ -528,7 +529,7 @@ func TestPrepareLeasePrimesMissingMachine0KeyAndVerifiesMaterialization(t *testi
 	}
 	b := testBackendWithAPI(api)
 
-	lease, err := b.prepareLease(context.Background(), item, Server{CloudID: item.ID}, "cbx_keymaterialize", true)
+	lease, err := b.prepareLease(context.Background(), item, core.Server{CloudID: item.ID}, "cbx_keymaterialize", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -545,7 +546,7 @@ func TestPrepareLeaseRejectsPrimeWithoutExpectedMachine0Key(t *testing.T) {
 	api := &fakeAPI{machine: item}
 	b := testBackendWithAPI(api)
 
-	_, err := b.prepareLease(context.Background(), item, Server{CloudID: item.ID}, "cbx_keymissing", true)
+	_, err := b.prepareLease(context.Background(), item, core.Server{CloudID: item.ID}, "cbx_keymissing", true)
 	wantPath := filepath.Join(keyRoot, "id_ed25519")
 	if err == nil || !strings.Contains(err.Error(), wantPath) || !strings.Contains(err.Error(), "SSH_KEY_PATH") || !strings.Contains(err.Error(), "materialize") {
 		t.Fatalf("err=%v", err)
@@ -581,7 +582,7 @@ func TestPrepareLeaseSelectsMachine0KeyOwnershipWithoutFilename(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			lease, err := b.prepareLease(context.Background(), item, Server{CloudID: item.ID}, "cbx_keyfallback", true)
+			lease, err := b.prepareLease(context.Background(), item, core.Server{CloudID: item.ID}, "cbx_keyfallback", true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -599,7 +600,7 @@ func TestAcquirePollsToRunningAndDefaultReleaseDestroys(t *testing.T) {
 	repo := setupState(t)
 	api := &fakeAPI{sizes: []machineSize{testSize()}, getSequence: []machine{{ID: "vm-123", Name: "crabbox-blue", Status: "CREATING"}, readyMachine("203.0.113.10")}}
 	b := testBackendWithAPI(api)
-	lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}, RequestedSlug: "blue"})
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}, RequestedSlug: "blue"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -616,7 +617,7 @@ func TestAcquirePollsToRunningAndDefaultReleaseDestroys(t *testing.T) {
 	if err != nil || !ok || claim.Labels["work_root"] != "/home/ubuntu/crabbox" {
 		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatal(err)
 	}
 	if len(api.removed) != 1 || len(api.suspended) != 0 {
@@ -652,11 +653,11 @@ func TestAcquirePreservesConfiguredNativeSizeAcrossClassChanges(t *testing.T) {
 					{result: core.LocalCommandResult{Stdout: `[]`}},
 					{err: errors.New("create intercepted")},
 				}}
-				b, err := (Provider{}).Configure(cfg, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
+				b, err := (Provider{}).Configure(cfg, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
 				if err != nil {
 					t.Fatal(err)
 				}
-				_, err = b.(*backend).Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+				_, err = b.(*backend).Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 				if err == nil || !strings.Contains(err.Error(), "create intercepted") {
 					t.Fatalf("Acquire error=%v, want intercepted create", err)
 				}
@@ -680,7 +681,7 @@ func TestAcquireTerminalStateRollsBackWithDiagnostic(t *testing.T) {
 	repo := setupState(t)
 	api := &fakeAPI{sizes: []machineSize{testSize()}, getSequence: []machine{{ID: "vm-123", Name: "crabbox-blue", Status: "ERRORED", LastErrorMessage: "regional capacity unavailable"}}}
 	b := testBackendWithAPI(api)
-	_, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 	if err == nil || !strings.Contains(err.Error(), "regional capacity unavailable") {
 		t.Fatalf("err=%v", err)
 	}
@@ -719,7 +720,7 @@ func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := setupState(t)
 			api := &fakeAPI{sizes: []machineSize{testSize()}, removeErr: tc.removeErr}
-			var observed LeaseClaim
+			var observed core.LeaseClaim
 			api.getFn = func(_ context.Context, name string) (machine, error) {
 				claims, err := core.ListLeaseClaims()
 				if err != nil || len(claims) != 1 {
@@ -756,7 +757,7 @@ func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
 			}
 			b := testBackendWithAPI(api)
 			if tc.ready && !tc.bindingFails && !tc.wrongSize {
-				b.waitSSH = func(context.Context, *SSHTarget, time.Duration) error {
+				b.waitSSH = func(context.Context, *core.SSHTarget, time.Duration) error {
 					bound, ok, err := resolveClaim(observed.LeaseID)
 					if err != nil || !ok || bound.CloudID != "vm-123" || bound.ProviderScope != machineScope("vm-123") {
 						t.Fatalf("claim was not ID-scoped before SSH readiness: claim=%#v ok=%v err=%v", bound, ok, err)
@@ -764,7 +765,7 @@ func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
 					return tc.sshErr
 				}
 			}
-			lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}, RequestedSlug: "recovery", Keep: tc.keep})
+			lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}, RequestedSlug: "recovery", Keep: tc.keep})
 			if tc.ready && !tc.bindingFails && !tc.wrongSize && tc.sshErr == nil {
 				if err != nil {
 					t.Fatal(err)
@@ -786,7 +787,7 @@ func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
 				t.Fatalf("final claim=%#v lease=%#v", claim, lease)
 			}
 			if tc.stopRecovery {
-				views, listErr := b.List(context.Background(), ListRequest{})
+				views, listErr := b.List(context.Background(), core.ListRequest{})
 				if listErr != nil || len(views) != 1 {
 					t.Fatalf("recovery list=%#v err=%v", views, listErr)
 				}
@@ -794,7 +795,7 @@ func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
 					t.Fatal("pending recovery stop must remove the exact name without adopting an inventory machine")
 					return machine{}, nil
 				}
-				if releaseErr := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: claim.LeaseID}}); releaseErr != nil {
+				if releaseErr := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: claim.LeaseID}}); releaseErr != nil {
 					t.Fatalf("recovery stop: %v", releaseErr)
 				}
 				if _, remains, resolveErr := core.ReadLeaseClaimWithPresence(claim.LeaseID); resolveErr != nil || remains {
@@ -873,7 +874,7 @@ func TestAcquirePreflightsPublicSSHKeyBeforeCreate(t *testing.T) {
 		{name: "managed key can materialize later", key: machineKey{Name: "managed-key", Type: "MANAGED", FileName: "machine0__managed-key"}},
 	} {
 		for _, leaseID := range []string{"", fixedMachine0TestLeaseID} {
-			t.Run(tc.name+"/"+blank(leaseID, "ordinary"), func(t *testing.T) {
+			t.Run(tc.name+"/"+core.Blank(leaseID, "ordinary"), func(t *testing.T) {
 				repo := setupState(t)
 				keyPath := filepath.Join(os.Getenv("SSH_KEY_PATH"), tc.key.FileName)
 				if tc.private != nil {
@@ -913,8 +914,8 @@ func TestAcquirePreflightsPublicSSHKeyBeforeCreate(t *testing.T) {
 				var diagnostics bytes.Buffer
 				b.rt.Stdout, b.rt.Stderr = &diagnostics, &diagnostics
 				waited := 0
-				b.waitSSH = func(context.Context, *SSHTarget, time.Duration) error { waited++; return nil }
-				_, err := b.Acquire(ctx, AcquireRequest{RequestedLeaseID: leaseID, Repo: core.Repo{Root: repo}})
+				b.waitSSH = func(context.Context, *core.SSHTarget, time.Duration) error { waited++; return nil }
+				_, err := b.Acquire(ctx, core.AcquireRequest{RequestedLeaseID: leaseID, Repo: core.Repo{Root: repo}})
 				for _, material := range []string{public, otherPublic, string(private), "sensitive diagnostic"} {
 					if strings.Contains(diagnostics.String(), material) {
 						t.Fatal("preflight logged key material or raw extraction diagnostics")
@@ -987,7 +988,7 @@ func TestAcquirePublicSSHKeyFileKinds(t *testing.T) {
 	}
 	for _, kind := range []string{"fifo", "symlink fifo", "device", "symlink regular"} {
 		for _, leaseID := range []string{"", fixedMachine0TestLeaseID} {
-			t.Run(kind+"/"+blank(leaseID, "ordinary"), func(t *testing.T) {
+			t.Run(kind+"/"+core.Blank(leaseID, "ordinary"), func(t *testing.T) {
 				repo := setupState(t)
 				keyPath := filepath.Join(os.Getenv("SSH_KEY_PATH"), "local-key")
 				target := keyPath + "-target"
@@ -1024,7 +1025,7 @@ func TestAcquirePublicSSHKeyFileKinds(t *testing.T) {
 					return core.LocalCommandResult{Stdout: string(output)}, err
 				}}
 				b.rt.Exec = runner
-				_, err := b.Acquire(t.Context(), AcquireRequest{RequestedLeaseID: leaseID, Repo: core.Repo{Root: repo}})
+				_, err := b.Acquire(t.Context(), core.AcquireRequest{RequestedLeaseID: leaseID, Repo: core.Repo{Root: repo}})
 				wantExtractions := 0
 				if kind == "symlink regular" {
 					wantExtractions = 1
@@ -1040,11 +1041,11 @@ func TestAcquirePublicSSHKeyFileKinds(t *testing.T) {
 func TestPendingRecoveryReleaseRejectsInvalidOwnershipAndSuspend(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		mutate func(*backend, *LeaseClaim)
+		mutate func(*backend, *core.LeaseClaim)
 	}{
-		{name: "mismatched name scope", mutate: func(_ *backend, claim *LeaseClaim) { claim.ProviderScope = machine0NameScope("another-machine") }},
-		{name: "mismatched machine name", mutate: func(_ *backend, claim *LeaseClaim) { claim.Labels["machine0_name"] = "another-machine" }},
-		{name: "pending claim cannot suspend", mutate: func(b *backend, _ *LeaseClaim) { b.cfg.Machine0.ReleasePolicy = "suspend" }},
+		{name: "mismatched name scope", mutate: func(_ *backend, claim *core.LeaseClaim) { claim.ProviderScope = machine0NameScope("another-machine") }},
+		{name: "mismatched machine name", mutate: func(_ *backend, claim *core.LeaseClaim) { claim.Labels["machine0_name"] = "another-machine" }},
+		{name: "pending claim cannot suspend", mutate: func(b *backend, _ *core.LeaseClaim) { b.cfg.Machine0.ReleasePolicy = "suspend" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := setupState(t)
@@ -1056,7 +1057,7 @@ func TestPendingRecoveryReleaseRejectsInvalidOwnershipAndSuspend(t *testing.T) {
 				return machine{}, context.Canceled
 			}
 			b := testBackendWithAPI(api)
-			if _, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}, RequestedSlug: "pending", Keep: true}); err == nil {
+			if _, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}, RequestedSlug: "pending", Keep: true}); err == nil {
 				t.Fatal("expected interrupted acquisition")
 			}
 			claims, err := core.ListLeaseClaims()
@@ -1072,7 +1073,7 @@ func TestPendingRecoveryReleaseRejectsInvalidOwnershipAndSuspend(t *testing.T) {
 			if err := core.ReplaceLeaseClaimIfUnchanged(claim.LeaseID, claim, replacement); err != nil {
 				t.Fatal(err)
 			}
-			err = b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: claim.LeaseID}})
+			err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: claim.LeaseID}})
 			if err == nil || len(api.removed) != 0 {
 				t.Fatalf("pending release err=%v removals=%v", err, api.removed)
 			}
@@ -1089,7 +1090,7 @@ func TestAcquireDoesNotStartUnexpectedStoppedMachine(t *testing.T) {
 	stopped.Status = "STOPPED"
 	api := &fakeAPI{sizes: []machineSize{testSize()}, getSequence: []machine{stopped}}
 	b := testBackendWithAPI(api)
-	_, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 	if err == nil || !strings.Contains(err.Error(), "stable state STOPPED") {
 		t.Fatalf("err=%v", err)
 	}
@@ -1144,7 +1145,7 @@ func TestResolveUnclaimedIdentifier(t *testing.T) {
 			if tc.listErr != nil {
 				api.listFn = func(context.Context, int) ([]machine, error) { return nil, tc.listErr }
 			}
-			lease, err := testBackendWithAPI(api).Resolve(context.Background(), ResolveRequest{ID: tc.id, StatusOnly: true})
+			lease, err := testBackendWithAPI(api).Resolve(context.Background(), core.ResolveRequest{ID: tc.id, StatusOnly: true})
 			switch {
 			case tc.listErr != nil:
 				if !errors.Is(err, tc.listErr) {
@@ -1206,7 +1207,7 @@ func TestResolveUnclaimedMachineNameUsesDetail(t *testing.T) {
 			if mode == "generic key" {
 				keyPath = b.cfg.SSHKey
 			}
-			b.waitSSH = func(_ context.Context, target *SSHTarget, _ time.Duration) error {
+			b.waitSSH = func(_ context.Context, target *core.SSHTarget, _ time.Duration) error {
 				waits++
 				if target.Key != keyPath || target.Host != detail.IP || target.User != "nix" {
 					t.Fatalf("readiness target=%#v", target)
@@ -1214,7 +1215,7 @@ func TestResolveUnclaimedMachineNameUsesDetail(t *testing.T) {
 				return nil
 			}
 			ready := mode != "status"
-			lease, err := b.Resolve(context.Background(), ResolveRequest{ID: inventory.Name, StatusOnly: true, ReadyProbe: ready})
+			lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: inventory.Name, StatusOnly: true, ReadyProbe: ready})
 			if err != nil || gets != 1 || api.listCalls != 0 || lease.Server.PublicNet.IPv4.IP != detail.IP || lease.Server.Labels["work_root"] != "/home/nix/crabbox" {
 				t.Fatalf("lease=%#v gets=%d lists=%d err=%v", lease, gets, api.listCalls, err)
 			}
@@ -1252,11 +1253,11 @@ func TestResolveUnclaimedLeaseHashCollisionFailsClosed(t *testing.T) {
 				return inventory, nil
 			}}
 			b := testBackendWithAPI(api)
-			b.waitSSH = func(context.Context, *SSHTarget, time.Duration) error {
+			b.waitSSH = func(context.Context, *core.SSHTarget, time.Duration) error {
 				t.Fatal("readiness ran on a hash-only candidate")
 				return nil
 			}
-			_, err := b.Resolve(context.Background(), ResolveRequest{ID: id, Reclaim: true, ReadyProbe: true, Repo: core.Repo{Root: repo}})
+			_, err := b.Resolve(context.Background(), core.ResolveRequest{ID: id, Reclaim: true, ReadyProbe: true, Repo: core.Repo{Root: repo}})
 			var exitErr core.ExitError
 			if !errors.As(err, &exitErr) || exitErr.Code != 4 || !strings.Contains(err.Error(), "matches only a short name hash") {
 				t.Fatalf("unexpected error=%v", err)
@@ -1276,7 +1277,7 @@ func TestResolveRefreshesChangedIPAndPrefersReturnedUsername(t *testing.T) {
 	repo := setupState(t)
 	api := &fakeAPI{sizes: []machineSize{testSize()}, getSequence: []machine{readyMachine("203.0.113.10")}}
 	b := testBackendWithAPI(api)
-	lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1294,7 +1295,7 @@ func TestResolveRefreshesChangedIPAndPrefersReturnedUsername(t *testing.T) {
 		}
 		return api.machine, nil
 	}
-	resolved, err := b.Resolve(context.Background(), ResolveRequest{Repo: core.Repo{Root: repo}, ID: lease.LeaseID})
+	resolved, err := b.Resolve(context.Background(), core.ResolveRequest{Repo: core.Repo{Root: repo}, ID: lease.LeaseID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1323,7 +1324,7 @@ func TestResolveRunningMachinePreservesIsolatedHostTrust(t *testing.T) {
 	repo := setupState(t)
 	api := &fakeAPI{sizes: []machineSize{testSize()}, getSequence: []machine{readyMachine("203.0.113.10")}}
 	b := testBackendWithAPI(api)
-	lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1333,7 +1334,7 @@ func TestResolveRunningMachinePreservesIsolatedHostTrust(t *testing.T) {
 	}
 	api.machine = readyMachine("203.0.113.10")
 
-	resolved, err := b.Resolve(context.Background(), ResolveRequest{Repo: core.Repo{Root: repo}, ID: lease.LeaseID})
+	resolved, err := b.Resolve(context.Background(), core.ResolveRequest{Repo: core.Repo{Root: repo}, ID: lease.LeaseID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1360,7 +1361,7 @@ func TestMachine0RunResolutionPreparesWithoutPublishingClaim(t *testing.T) {
 					t.Fatal(err)
 				}
 				if scenario == "checkpoint hold" {
-					if err := core.WithDurableLeaseClaimLock(lease.LeaseID, func(claim *LeaseClaim, _ bool, persist func() error) error {
+					if err := core.WithDurableLeaseClaimLock(lease.LeaseID, func(claim *core.LeaseClaim, _ bool, persist func() error) error {
 						claim.CheckpointCapture = &core.CheckpointCaptureBinding{ID: "chk_runhold", Revision: claim.Revision, BoundRevision: claim.Revision}
 						return persist()
 					}); err != nil {
@@ -1391,7 +1392,7 @@ func TestMachine0RunResolutionPreparesWithoutPublishingClaim(t *testing.T) {
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
 				prepared := false
-				b.waitSSH = func(prepareCtx context.Context, target *SSHTarget, _ time.Duration) error {
+				b.waitSSH = func(prepareCtx context.Context, target *core.SSHTarget, _ time.Duration) error {
 					prepared = true
 					if target.Host != ready.IP || target.KnownHostsFile != lease.SSH.KnownHostsFile {
 						t.Fatal("readiness lost the exact endpoint or isolated trust path")
@@ -1402,7 +1403,7 @@ func TestMachine0RunResolutionPreparesWithoutPublishingClaim(t *testing.T) {
 					}
 					return nil
 				}
-				resolved, resolveErr := b.ResolveRunLeaseUnderClaim(ctx, ResolveRequest{ID: lease.LeaseID, Repo: req.Repo, Prepare: true}, before)
+				resolved, resolveErr := b.ResolveRunLeaseUnderClaim(ctx, core.ResolveRequest{ID: lease.LeaseID, Repo: req.Repo, Prepare: true}, before)
 				if scenario == "ready" || scenario == "stopped" {
 					if resolveErr != nil || !prepared || resolved.Server.CloudID != before.CloudID || resolved.SSH.Host != ready.IP {
 						t.Fatalf("run resolution did not prepare the bound machine: %v", resolveErr)
@@ -1445,7 +1446,7 @@ func TestAcquirePreservesExplicitMachine0WorkRoot(t *testing.T) {
 	api := &fakeAPI{sizes: []machineSize{testSize()}, getSequence: []machine{readyMachine("203.0.113.10")}}
 	b := testBackendWithAPI(api)
 	b.cfg.Machine0.WorkRoot = "/srv/explicit-machine0"
-	lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1463,7 +1464,7 @@ func TestSuspendResumePreservesMachineIDAndRefreshesChangedIP(t *testing.T) {
 	api := &fakeAPI{sizes: []machineSize{testSize()}, getSequence: []machine{readyMachine("203.0.113.10")}}
 	b := testBackendWithAPI(api)
 	b.cfg.Machine0.ReleasePolicy = "suspend"
-	lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1475,7 +1476,7 @@ func TestSuspendResumePreservesMachineIDAndRefreshesChangedIP(t *testing.T) {
 	suspended := readyMachine("")
 	suspended.Status = "SUSPENDED"
 	api.getSequence = []machine{readyMachine("203.0.113.10"), suspending, suspended}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatal(err)
 	}
 	if len(api.suspended) != 1 || len(api.removed) != 0 || !b.RetainLeaseClaimAfterRelease(lease) {
@@ -1485,7 +1486,7 @@ func TestSuspendResumePreservesMachineIDAndRefreshesChangedIP(t *testing.T) {
 		t.Fatal(err)
 	}
 	api.getSequence = []machine{func() machine { m := readyMachine("203.0.113.77"); m.Status = "STARTING"; return m }(), readyMachine("203.0.113.77")}
-	if err := b.Resume(context.Background(), ResumeRequest{ID: lease.LeaseID}); err != nil {
+	if err := b.Resume(context.Background(), core.ResumeRequest{ID: lease.LeaseID}); err != nil {
 		t.Fatal(err)
 	}
 	if len(api.started) != 1 {
@@ -1494,7 +1495,7 @@ func TestSuspendResumePreservesMachineIDAndRefreshesChangedIP(t *testing.T) {
 	if _, err := os.Stat(lease.SSH.KnownHostsFile); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("resume did not reset isolated host trust: %v", err)
 	}
-	resolved, err := b.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID, StatusOnly: true, ReadyProbe: true})
+	resolved, err := b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true, ReadyProbe: true})
 	if err != nil || resolved.Server.CloudID != "vm-123" || resolved.SSH.Host != "203.0.113.77" || resolved.SSH.Host == lease.SSH.Host {
 		t.Fatalf("resolved=%#v err=%v", resolved, err)
 	}
@@ -1505,7 +1506,7 @@ func TestPauseAndCleanupWaitForExactSuspendedState(t *testing.T) {
 		repo := setupState(t)
 		api := &fakeAPI{sizes: []machineSize{testSize()}, getSequence: []machine{readyMachine("203.0.113.10")}}
 		b := testBackendWithAPI(api)
-		lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+		lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1514,7 +1515,7 @@ func TestPauseAndCleanupWaitForExactSuspendedState(t *testing.T) {
 		suspended := readyMachine("")
 		suspended.Status = "SUSPENDED"
 		api.getSequence = []machine{readyMachine("203.0.113.10"), suspending, suspended}
-		if err := b.Pause(context.Background(), PauseRequest{ID: lease.LeaseID}); err != nil {
+		if err := b.Pause(context.Background(), core.PauseRequest{ID: lease.LeaseID}); err != nil {
 			t.Fatal(err)
 		}
 		claim, ok, err := resolveClaim(lease.LeaseID)
@@ -1531,7 +1532,7 @@ func TestPauseAndCleanupWaitForExactSuspendedState(t *testing.T) {
 		api := &fakeAPI{sizes: []machineSize{testSize()}, getSequence: []machine{readyMachine("203.0.113.10")}}
 		b := testBackendWithAPI(api)
 		b.cfg.Machine0.ReleasePolicy = "suspend"
-		lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+		lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1541,7 +1542,7 @@ func TestPauseAndCleanupWaitForExactSuspendedState(t *testing.T) {
 		suspended := readyMachine("")
 		suspended.Status = "SUSPENDED"
 		api.getSequence = []machine{suspending, suspended}
-		if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 			t.Fatal(err)
 		}
 		claim, ok, err := resolveClaim(lease.LeaseID)
@@ -1555,7 +1556,7 @@ func TestSuspendFailureDoesNotClearLiveClaimEndpoint(t *testing.T) {
 	repo := setupState(t)
 	api := &fakeAPI{sizes: []machineSize{testSize()}, getSequence: []machine{readyMachine("203.0.113.10")}}
 	b := testBackendWithAPI(api)
-	lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1563,7 +1564,7 @@ func TestSuspendFailureDoesNotClearLiveClaimEndpoint(t *testing.T) {
 	failed.Status = "ERRORED"
 	failed.LastErrorMessage = "snapshot failed"
 	api.getSequence = []machine{readyMachine("203.0.113.10"), failed}
-	if err := b.Pause(context.Background(), PauseRequest{ID: lease.LeaseID}); err == nil || !strings.Contains(err.Error(), "snapshot failed") {
+	if err := b.Pause(context.Background(), core.PauseRequest{ID: lease.LeaseID}); err == nil || !strings.Contains(err.Error(), "snapshot failed") {
 		t.Fatalf("err=%v", err)
 	}
 	claim, ok, err := resolveClaim(lease.LeaseID)
@@ -1586,7 +1587,7 @@ func TestWaitForSuspendedHonorsContextAndTimeout(t *testing.T) {
 			item := readyMachine("203.0.113.10")
 			item.Status = "SUSPENDING"
 			b := testBackendWithAPI(&fakeAPI{machine: item})
-			b.sleep = sleepContext
+			b.sleep = core.SleepContext
 			_, err := b.waitForSuspended(tc.ctx(), item.Name, tc.timeout)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err=%v", err)
@@ -1633,7 +1634,7 @@ func TestResolveStartsOnceAfterStoppingTransition(t *testing.T) {
 			repo := setupState(t)
 			api := &fakeAPI{sizes: []machineSize{testSize()}, getSequence: []machine{readyMachine("203.0.113.10")}}
 			b := testBackendWithAPI(api)
-			lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+			lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1646,7 +1647,7 @@ func TestResolveStartsOnceAfterStoppingTransition(t *testing.T) {
 				}
 				api.getSequence = append(api.getSequence, item)
 			}
-			resolved, err := b.Resolve(context.Background(), ResolveRequest{Repo: core.Repo{Root: repo}, ID: lease.LeaseID})
+			resolved, err := b.Resolve(context.Background(), core.ResolveRequest{Repo: core.Repo{Root: repo}, ID: lease.LeaseID})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1691,7 +1692,7 @@ func TestCatalogValidationUsesLiveRegions(t *testing.T) {
 func TestDoctorChecksCLIAuthInventoryAndCatalogWithoutMutation(t *testing.T) {
 	api := &fakeAPI{machine: readyMachine("203.0.113.10"), sizes: []machineSize{testSize()}}
 	b := testBackendWithAPI(api)
-	result, err := b.Doctor(context.Background(), DoctorRequest{})
+	result, err := b.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1714,7 +1715,7 @@ func TestDoctorRunsSlowProviderProbesWithinSharedBudget(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	started := time.Now()
-	result, err := testBackendWithAPI(api).Doctor(ctx, DoctorRequest{})
+	result, err := testBackendWithAPI(api).Doctor(ctx, core.DoctorRequest{})
 	if err != nil {
 		t.Fatalf("doctor failed within shared budget: %v", err)
 	}
@@ -1735,7 +1736,7 @@ func TestDoctorProbeFailureCancelsSiblingProbes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := testBackendWithAPI(api).Doctor(ctx, DoctorRequest{})
+	_, err := testBackendWithAPI(api).Doctor(ctx, core.DoctorRequest{})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("doctor error=%v, want original probe error %v", err, wantErr)
 	}
@@ -1748,11 +1749,11 @@ func TestCleanupDestroysStoppedClaimByDefault(t *testing.T) {
 	repo := setupState(t)
 	api := &fakeAPI{sizes: []machineSize{testSize()}, getSequence: []machine{readyMachine("203.0.113.10")}}
 	b := testBackendWithAPI(api)
-	if _, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}}); err != nil {
+	if _, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}}); err != nil {
 		t.Fatal(err)
 	}
 	api.machine.Status = "STOPPED"
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(api.removed) != 1 || len(api.suspended) != 0 {
@@ -1763,10 +1764,10 @@ func TestCleanupDestroysStoppedClaimByDefault(t *testing.T) {
 func TestCleanupRejectsPartialOrMismatchedOwnership(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		mutate func(*LeaseClaim)
+		mutate func(*core.LeaseClaim)
 	}{
-		{name: "missing cloud id with mutable label fallback", mutate: func(claim *LeaseClaim) { claim.CloudID = "" }},
-		{name: "mismatched provider scope", mutate: func(claim *LeaseClaim) { claim.ProviderScope = machineScope("vm-other") }},
+		{name: "missing cloud id with mutable label fallback", mutate: func(claim *core.LeaseClaim) { claim.CloudID = "" }},
+		{name: "mismatched provider scope", mutate: func(claim *core.LeaseClaim) { claim.ProviderScope = machineScope("vm-other") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := setupState(t)
@@ -1774,7 +1775,7 @@ func TestCleanupRejectsPartialOrMismatchedOwnership(t *testing.T) {
 			var stderr bytes.Buffer
 			b := testBackendWithAPI(api)
 			b.rt.Stderr = &stderr
-			lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+			lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1788,7 +1789,7 @@ func TestCleanupRejectsPartialOrMismatchedOwnership(t *testing.T) {
 				t.Fatal(err)
 			}
 			api.machine.Status = "STOPPED"
-			if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+			if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 				t.Fatal(err)
 			}
 			if len(api.removed) != 0 || len(api.suspended) != 0 {
@@ -2045,12 +2046,12 @@ func TestNativeCheckpointWorkdirUsesResolvedMachine0Root(t *testing.T) {
 	}
 }
 
-func checkpointCreateFixture(t *testing.T) (*backend, *fakeAPI, LeaseTarget, LeaseClaim, core.NativeCheckpointCreateRequest) {
+func checkpointCreateFixture(t *testing.T) (*backend, *fakeAPI, core.LeaseTarget, core.LeaseClaim, core.NativeCheckpointCreateRequest) {
 	t.Helper()
 	repo := setupState(t)
 	api := &fakeAPI{sizes: []machineSize{testSize()}, getSequence: []machine{readyMachine("203.0.113.10")}}
 	b := testBackendWithAPI(api)
-	lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repo}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2082,7 +2083,7 @@ func checkpointSource(req core.NativeCheckpointCreateRequest, ip string) machine
 	return item
 }
 
-func readyCheckpointImage(req core.NativeCheckpointCreateRequest, claim LeaseClaim, version int) machineImageDetail {
+func readyCheckpointImage(req core.NativeCheckpointCreateRequest, claim core.LeaseClaim, version int) machineImageDetail {
 	return machineImageDetail{
 		Image: machineImage{ID: "img-1", Name: req.Name, Status: "READY"},
 		Versions: []machineImageVersion{{
@@ -2092,7 +2093,7 @@ func readyCheckpointImage(req core.NativeCheckpointCreateRequest, claim LeaseCla
 	}
 }
 
-func checkpointImageSnapshotState(req core.NativeCheckpointCreateRequest, claim LeaseClaim, version int, snapshotStatus string) machineImageDetail {
+func checkpointImageSnapshotState(req core.NativeCheckpointCreateRequest, claim core.LeaseClaim, version int, snapshotStatus string) machineImageDetail {
 	detail := readyCheckpointImage(req, claim, version)
 	detail.Versions[0].SnapshotStatus = snapshotStatus
 	return detail
@@ -2114,7 +2115,7 @@ func TestCreateNativeCheckpointStopsSavesRestartsAndRefreshesClaimEndpoint(t *te
 		func() machine { item := checkpointSource(req, "203.0.113.77"); item.Status = "STARTING"; return item }(),
 		checkpointSource(req, "203.0.113.77"),
 	}
-	b.prepareNativeImageSource = func(context.Context, SSHTarget) error {
+	b.prepareNativeImageSource = func(context.Context, core.SSHTarget) error {
 		api.actions = append(api.actions, "prepare")
 		return nil
 	}
@@ -2133,7 +2134,7 @@ func TestCreateNativeCheckpointStopsSavesRestartsAndRefreshesClaimEndpoint(t *te
 	if err := os.WriteFile(globalKnownHosts, []byte(globalTrust), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	b.waitSSH = func(_ context.Context, target *SSHTarget, _ time.Duration) error {
+	b.waitSSH = func(_ context.Context, target *core.SSHTarget, _ time.Duration) error {
 		if target.KnownHostsFile != lease.SSH.KnownHostsFile {
 			t.Fatalf("restart known hosts=%q want=%q", target.KnownHostsFile, lease.SSH.KnownHostsFile)
 		}
@@ -2270,7 +2271,7 @@ func TestCreateNativeCheckpointRestartsAfterSnapshotTimeout(t *testing.T) {
 	b, api, _, claim, req := checkpointCreateFixture(t)
 	req.Wait = false
 	req.WaitTimeout = 10 * time.Millisecond
-	b.sleep = sleepContext
+	b.sleep = core.SleepContext
 	api.imageDetail = checkpointImageSnapshotState(req, claim, 1, "CREATING")
 	api.getSequence = []machine{
 		checkpointSource(req, "203.0.113.10"),
@@ -2293,7 +2294,7 @@ func TestCreateNativeCheckpointRestartsAfterSnapshotTimeout(t *testing.T) {
 
 func TestCreateNativeCheckpointRestartsAfterCallerCancellation(t *testing.T) {
 	b, api, _, claim, req := checkpointCreateFixture(t)
-	b.sleep = sleepContext
+	b.sleep = core.SleepContext
 	api.imageDetail = checkpointImageSnapshotState(req, claim, 1, "CREATING")
 	api.getSequence = []machine{
 		checkpointSource(req, "203.0.113.10"),
@@ -2328,7 +2329,7 @@ func TestMachine0CheckpointSnapshotTimeoutPrecedence(t *testing.T) {
 func TestCreateNativeCheckpointStopTimeoutRestartsWithoutSaving(t *testing.T) {
 	b, api, _, claim, req := checkpointCreateFixture(t)
 	b.cfg.Machine0.CreateTimeout = time.Nanosecond
-	b.sleep = sleepContext
+	b.sleep = core.SleepContext
 	stopping := checkpointSource(req, "203.0.113.10")
 	stopping.Status = "STOPPING"
 	api.getSequence = []machine{checkpointSource(req, "203.0.113.10"), checkpointSource(req, "203.0.113.10"), stopping, checkpointSource(req, "203.0.113.10")}
@@ -2352,7 +2353,7 @@ func TestCreateNativeCheckpointPreservesAlreadyStoppedSource(t *testing.T) {
 	stopped := checkpointSource(req, "203.0.113.10")
 	stopped.Status = "STOPPED"
 	api.getSequence = []machine{stopped}
-	b.prepareNativeImageSource = func(context.Context, SSHTarget) error {
+	b.prepareNativeImageSource = func(context.Context, core.SSHTarget) error {
 		t.Fatal("pre-stopped source must not require SSH preparation")
 		return nil
 	}
@@ -2433,7 +2434,7 @@ func TestWaitForStoppedRequiresExactStoppedState(t *testing.T) {
 			stopping := readyMachine("203.0.113.10")
 			stopping.Status = "STOPPING"
 			b := testBackendWithAPI(&fakeAPI{machine: stopping})
-			b.sleep = sleepContext
+			b.sleep = core.SleepContext
 			_, err := b.waitForStopped(tc.ctx(), stopping.Name, tc.timeout)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err=%v", err)
@@ -2548,7 +2549,7 @@ func TestImageWaitKeepsObservedVersionOnTimeoutAndError(t *testing.T) {
 
 	t.Run("timeout retains observed identity", func(t *testing.T) {
 		b := testBackendWithAPI(&fakeAPI{imageDetail: pending})
-		b.sleep = sleepContext
+		b.sleep = core.SleepContext
 		detail, version, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, 10*time.Millisecond, io.Discard)
 		if err == nil || !strings.Contains(err.Error(), "timed out") {
 			t.Fatalf("err=%v", err)

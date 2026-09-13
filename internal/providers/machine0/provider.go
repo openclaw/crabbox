@@ -68,10 +68,10 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 		return nil, err
 	}
 	if cfg.TargetOS != targetLinux {
-		return nil, exit(2, "provider=%s supports target=linux only", providerName)
+		return nil, core.Exit(2, "provider=%s supports target=linux only", providerName)
 	}
 	if cfg.Tailscale.Enabled || string(cfg.Network) == "tailscale" {
-		return nil, exit(2, "--tailscale is not supported for provider=%s; use the Machine0 public IP or authenticated HTTPS URL", providerName)
+		return nil, core.Exit(2, "--tailscale is not supported for provider=%s; use the Machine0 public IP or authenticated HTTPS URL", providerName)
 	}
 	return newBackend(p.Spec(), cfg, rt), nil
 }
@@ -89,22 +89,22 @@ func (Provider) ValidateConfig(cfg core.Config) error {
 		"machine0.region":  m.Region,
 	} {
 		if strings.TrimSpace(value) == "" {
-			return exit(2, "%s is required", name)
+			return core.Exit(2, "%s is required", name)
 		}
 	}
 	switch strings.ToLower(strings.TrimSpace(m.ReleasePolicy)) {
 	case "", "destroy", "suspend":
 	default:
-		return exit(2, "machine0.releasePolicy must be destroy or suspend")
+		return core.Exit(2, "machine0.releasePolicy must be destroy or suspend")
 	}
 	if m.CreateTimeout <= 0 {
-		return exit(2, "machine0.createTimeout must be positive")
+		return core.Exit(2, "machine0.createTimeout must be positive")
 	}
 	if m.ImageVersion < 0 {
-		return exit(2, "machine0.imageVersion must not be negative")
+		return core.Exit(2, "machine0.imageVersion must not be negative")
 	}
 	if m.PollInterval <= 0 {
-		return exit(2, "machine0.pollInterval must be positive")
+		return core.Exit(2, "machine0.pollInterval must be positive")
 	}
 	return nil
 }

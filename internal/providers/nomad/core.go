@@ -2,7 +2,6 @@ package nomad
 
 import (
 	"io"
-	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -40,10 +39,6 @@ func exit(code int, format string, args ...any) core.ExitError {
 
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
-}
-
-func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
 }
 
 func readLeaseClaim(leaseID string) (LeaseClaim, error) {

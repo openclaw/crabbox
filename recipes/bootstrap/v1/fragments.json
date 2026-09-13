@@ -2,6 +2,25 @@
   "schema": "crabbox-bootstrap-fragments/v1",
   "fragments": [
     {
+      "name": "xfceSessionEnvironment",
+      "file": "xfceSessionEnvironment.sh",
+      "literal": true,
+      "parameters": {}
+    },
+    {
+      "name": "xfceDesktopTheme",
+      "file": "xfceDesktopTheme.sh",
+      "parameters": {
+        "cssStyle": "sh-string"
+      }
+    },
+    {
+      "name": "xfceDesktopSession",
+      "file": "xfceDesktopSession.sh",
+      "literal": true,
+      "parameters": {}
+    },
+    {
       "name": "gnomeDesktopTheme",
       "file": "gnomeDesktopTheme.sh",
       "literal": true,

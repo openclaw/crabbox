@@ -49,7 +49,7 @@ func (b *backend) execShell(ctx context.Context, client Client, ready allocation
 	return nil
 }
 
-func (b *backend) runCommand(ctx context.Context, client Client, ready allocationReadiness, req RunRequest, workdir string) (int, error) {
+func (b *backend) runCommand(ctx context.Context, client Client, ready allocationReadiness, req RunRequest, workdir string, stdout, stderr io.Writer) (int, error) {
 	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 	if err != nil {
 		return 0, err
@@ -60,7 +60,7 @@ func (b *backend) runCommand(ctx context.Context, client Client, ready allocatio
 	script := shared.ShellWorkspaceCommand(workdir, req.Env, intent, "bash", "-lc")
 	execCtx, cancel := b.execContext(ctx)
 	defer cancel()
-	exitCode, err := b.allocationExec(execCtx, client, ready, []string{"sh", "-s"}, strings.NewReader(script), b.rt.Stdout, b.rt.Stderr)
+	exitCode, err := b.allocationExec(execCtx, client, ready, []string{"sh", "-s"}, strings.NewReader(script), stdout, stderr)
 	if err != nil {
 		exitCode = normalizeExitCode(exitCode)
 		if exitCode == 0 {

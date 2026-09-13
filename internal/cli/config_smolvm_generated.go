@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"strconv"
 )
 
 type fileSmolvmConfig struct {
@@ -44,78 +43,14 @@ type SmolvmConfigApplied struct {
 
 func (cfg *SmolvmConfig) applyFile(file *fileSmolvmConfig) (SmolvmConfigApplied, error) {
 	var applied SmolvmConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.BaseURL != "" {
-		cfg.BaseURL = file.BaseURL
-		applied.InputAccepted = true
-		applied.BaseURL = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-	}
-	if file.Workdir != "" {
-		cfg.Workdir = file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.CPUs > 0 {
-		cfg.CPUs = file.CPUs
-		applied.InputAccepted = true
-	}
-	if file.MemoryMB > 0 {
-		cfg.MemoryMB = file.MemoryMB
-		applied.InputAccepted = true
-	}
-	if file.Network != "" {
-		cfg.Network = file.Network
-		applied.InputAccepted = true
-	}
-	if file.Keep != nil {
-		cfg.Keep = *file.Keep
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "smolvm")
+	return applied, err
 }
 
 func (cfg *SmolvmConfig) applyEnv() (SmolvmConfigApplied, error) {
 	var applied SmolvmConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_SMOLVM_API_KEY", "SMOLMACHINES_API_KEY", "SMK_API_KEY"); ok {
-		cfg.APIKey = value
-		applied.InputAccepted = true
-		applied.APIKey = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SMOLVM_BASE_URL"); ok {
-		cfg.BaseURL = value
-		applied.InputAccepted = true
-		applied.BaseURL = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SMOLVM_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SMOLVM_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_SMOLVM_CPUS", strconv.IntSize); ok {
-		cfg.CPUs = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_SMOLVM_MEMORY_MB", strconv.IntSize); ok {
-		cfg.MemoryMB = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SMOLVM_NETWORK"); ok {
-		cfg.Network = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_SMOLVM_KEEP"); ok {
-		cfg.Keep = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 8)
+	return applied, err
 }
 
 // SmolvmConfigFlagValues holds parsed values; only visited flags are applied.
@@ -131,15 +66,9 @@ type SmolvmConfigFlagValues struct {
 
 // RegisterSmolvmConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterSmolvmConfigFlags(fs *flag.FlagSet, defaults SmolvmConfig) SmolvmConfigFlagValues {
-	return SmolvmConfigFlagValues{
-		BaseURL:  fs.String("smolvm-base-url", defaults.BaseURL, "SmolVM / SmolFleet API base URL"),
-		Image:    fs.String("smolvm-image", defaults.Image, "source image for smolvm machines (e.g. ubuntu:24.04)"),
-		Workdir:  fs.String("smolvm-workdir", defaults.Workdir, "absolute working directory inside the smolvm machine"),
-		CPUs:     fs.Int("smolvm-cpus", defaults.CPUs, "number of vCPUs for the smolvm machine"),
-		MemoryMB: fs.Int("smolvm-memory-mb", defaults.MemoryMB, "memory in MiB for the smolvm machine"),
-		Network:  fs.String("smolvm-network", defaults.Network, "network mode: open or blocked"),
-		Keep:     fs.Bool("smolvm-keep", defaults.Keep, "keep the smolvm machine after run (do not auto-delete)"),
-	}
+	var values SmolvmConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // SmolvmConfigVisitedFlags records raw flag visits, independently of application.
@@ -149,43 +78,14 @@ type SmolvmConfigVisitedFlags struct {
 
 // SmolvmConfigFlagPresence reports visits for tracked flag bindings.
 func SmolvmConfigFlagPresence(fs *flag.FlagSet) SmolvmConfigVisitedFlags {
-	return SmolvmConfigVisitedFlags{
-		BaseURL: flagWasSet(fs, "smolvm-base-url"),
-	}
+	var visited SmolvmConfigVisitedFlags
+	recordConfigFlagVisits[SmolvmConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values SmolvmConfigFlagValues) Apply(cfg *SmolvmConfig, fs *flag.FlagSet) (SmolvmConfigApplied, error) {
 	var applied SmolvmConfigApplied
-	visited := SmolvmConfigFlagPresence(fs)
-	if visited.BaseURL {
-		cfg.BaseURL = *values.BaseURL
-		applied.InputAccepted = true
-		applied.BaseURL = true
-	}
-	if flagWasSet(fs, "smolvm-image") {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "smolvm-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "smolvm-cpus") {
-		cfg.CPUs = *values.CPUs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "smolvm-memory-mb") {
-		cfg.MemoryMB = *values.MemoryMB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "smolvm-network") {
-		cfg.Network = *values.Network
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "smolvm-keep") {
-		cfg.Keep = *values.Keep
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

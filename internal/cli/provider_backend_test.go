@@ -68,7 +68,7 @@ func TestFastAPICloudFlagSourceCentralPhase(t *testing.T) {
 		seen := credentialSourceUnknown
 		var applyErr error
 		if fail {
-			applyErr = exit(2, "synthetic invalid configuration")
+			applyErr = Exit(2, "synthetic invalid configuration")
 		}
 		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.fastAPICloudAPIURL }}
 		fs := newFlagSet("test", io.Discard)
@@ -101,7 +101,7 @@ func TestRailwayFlagSourceCentralPhase(t *testing.T) {
 		seen := credentialSourceUnknown
 		var applyErr error
 		if fail {
-			applyErr = exit(2, "synthetic invalid configuration")
+			applyErr = Exit(2, "synthetic invalid configuration")
 		}
 		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.railwayAPIURL }}
 		fs := newFlagSet("test", io.Discard)
@@ -134,7 +134,7 @@ func TestUpstashBoxFlagSourceCentralPhase(t *testing.T) {
 		seen := credentialSourceUnknown
 		var applyErr error
 		if fail {
-			applyErr = exit(2, "synthetic invalid configuration")
+			applyErr = Exit(2, "synthetic invalid configuration")
 		}
 		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.upstashBoxBaseURL }}
 		fs := newFlagSet("test", io.Discard)
@@ -167,7 +167,7 @@ func TestCloudflareFlagSourceCentralPhase(t *testing.T) {
 		seen := credentialSourceUnknown
 		var applyErr error
 		if fail {
-			applyErr = exit(2, "synthetic invalid configuration")
+			applyErr = Exit(2, "synthetic invalid configuration")
 		}
 		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.cloudflareAPIURL }}
 		fs := newFlagSet("test", io.Discard)
@@ -200,7 +200,7 @@ func TestAzureDynamicSessionsFlagSourceCentralPhase(t *testing.T) {
 		seen := credentialSourceUnknown
 		var applyErr error
 		if fail {
-			applyErr = exit(2, "synthetic invalid configuration")
+			applyErr = Exit(2, "synthetic invalid configuration")
 		}
 		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.azSessionsEndpoint }}
 		fs := newFlagSet("test", io.Discard)
@@ -233,7 +233,7 @@ func TestSmolvmFlagSourceCentralPhase(t *testing.T) {
 		seen := credentialSourceUnknown
 		var applyErr error
 		if fail {
-			applyErr = exit(2, "synthetic invalid configuration")
+			applyErr = Exit(2, "synthetic invalid configuration")
 		}
 		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.smolvmBaseURL }}
 		fs := newFlagSet("test", io.Discard)
@@ -266,7 +266,7 @@ func TestSemaphoreFlagSourceCentralPhase(t *testing.T) {
 		seen := credentialSourceUnknown
 		var applyErr error
 		if fail {
-			applyErr = exit(2, "synthetic invalid configuration")
+			applyErr = Exit(2, "synthetic invalid configuration")
 		}
 		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.semaphoreHost }}
 		fs := newFlagSet("test", io.Discard)
@@ -300,7 +300,7 @@ func TestE2BFlagSourcesCentralPhase(t *testing.T) {
 			seenURL, seenDomain := credentialSourceUnknown, credentialSourceUnknown
 			var applyErr error
 			if fail {
-				applyErr = exit(2, "synthetic invalid configuration")
+				applyErr = Exit(2, "synthetic invalid configuration")
 			}
 			providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(c Config) {
 				seenURL, seenDomain = c.credentialProvenance.e2bAPIURL, c.credentialProvenance.e2bDomain
@@ -1336,10 +1336,10 @@ func TestConfiguredCacheVolumeAllowsExistingLeaseReuse(t *testing.T) {
 		Path:     "/var/cache/crabbox/pnpm",
 		Required: true,
 	}}
-	if err := claimLeaseForRepoProvider("tbx_existing", "existing", "blacksmith-testbox", "/repo", time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProvider("tbx_existing", "existing", "blacksmith-testbox", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := updateLeaseClaimCacheVolumes("tbx_existing", CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes)); err != nil {
+	if err := UpdateLeaseClaimCacheVolumes("tbx_existing", CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes)); err != nil {
 		t.Fatal(err)
 	}
 	if err := applyLeaseCreateFlagsForLease(&cfg, fs, values, "tbx_existing"); err != nil {
@@ -1362,7 +1362,7 @@ func TestConfiguredCacheVolumeRejectsExistingLeaseWithoutClaimedVolume(t *testin
 		Path:     "/var/cache/crabbox/pnpm",
 		Required: true,
 	}}
-	if err := claimLeaseForRepoProvider("tbx_existing", "existing", "blacksmith-testbox", "/repo", time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProvider("tbx_existing", "existing", "blacksmith-testbox", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	err := applyLeaseCreateFlagsForLease(&cfg, fs, values, "tbx_existing")

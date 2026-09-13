@@ -45,7 +45,7 @@ func nativeStopStatusTable(cells ...string) string {
 func seedStopClaim(t *testing.T, id string) core.LeaseClaim {
 	t.Helper()
 	testOwnedBlacksmithClaim(t, id, "stop-"+strings.TrimPrefix(id, "tbx_"), t.TempDir())
-	key, err := testboxKeyPath(id)
+	key, err := core.TestboxKeyPath(id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func seedStopClaim(t *testing.T, id string) core.LeaseClaim {
 	if err := os.WriteFile(key, []byte("synthetic-key-"+id), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	claim, err := readLeaseClaim(id)
+	claim, err := core.ReadLeaseClaim(id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func seedStopClaim(t *testing.T, id string) core.LeaseClaim {
 
 func assertStopState(t *testing.T, claim core.LeaseClaim, retained bool) {
 	t.Helper()
-	got, err := readLeaseClaim(claim.LeaseID)
+	got, err := core.ReadLeaseClaim(claim.LeaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func assertStopState(t *testing.T, claim core.LeaseClaim, retained bool) {
 	} else if got.LeaseID != "" {
 		t.Fatalf("claim retained: %#v", got)
 	}
-	key, err := testboxKeyPath(claim.LeaseID)
+	key, err := core.TestboxKeyPath(claim.LeaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,16 +103,16 @@ func TestBlacksmithStopReconcilesCompletedClaim(t *testing.T) {
 				if err := core.ReplaceLeaseClaimIfUnchanged(id, claim, changed); err != nil {
 					t.Fatal(err)
 				}
-				claim, _ = readLeaseClaim(id)
+				claim, _ = core.ReadLeaseClaim(id)
 			}
 			var stdout, stderr bytes.Buffer
 			stopped := false
 			alreadyCompleted := mode == "never-assigned-already-completed"
 			successfulStop := mode == "successful-stop" || mode == "never-assigned-successful-stop"
 			var operations []string
-			cfg := baseConfig()
+			cfg := core.BaseConfig()
 			cfg.Blacksmith.Org = "example-org"
-			backend := newTestBlacksmithBackend(cfg, reconciliationRunner(t, func(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+			backend := newTestBlacksmithBackend(cfg, reconciliationRunner(t, func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				operations = append(operations, req.Args[1])
 				deadline, ok := ctx.Deadline()
 				if !ok || time.Until(deadline) > blacksmithCleanupTimeout {
@@ -125,7 +125,7 @@ func TestBlacksmithStopReconcilesCompletedClaim(t *testing.T) {
 						if stopped || alreadyCompleted {
 							state = "completed"
 						}
-						return LocalCommandResult{Stdout: nativeNeverAssignedStatus(id, state)}, nil
+						return core.LocalCommandResult{Stdout: nativeNeverAssignedStatus(id, state)}, nil
 					}
 					state, ip := "ready", "192.0.2.10"
 					if stopped {
@@ -134,19 +134,19 @@ func TestBlacksmithStopReconcilesCompletedClaim(t *testing.T) {
 					if mode != "with-ip" {
 						ip = ""
 					}
-					return LocalCommandResult{Stdout: nativeStopStatusTable(id, state, ip, claim.Labels["workflow"], "test", "main", "2026-08-30T12:00:00.123456Z", "https://github.com/example-org/my-app/actions/runs/123456789")}, nil
+					return core.LocalCommandResult{Stdout: nativeStopStatusTable(id, state, ip, claim.Labels["workflow"], "test", "main", "2026-08-30T12:00:00.123456Z", "https://github.com/example-org/my-app/actions/runs/123456789")}, nil
 				case "stop":
 					stopped = true
 					if successfulStop {
-						return LocalCommandResult{Stdout: "stopped\n", Stderr: "stop note\n"}, nil
+						return core.LocalCommandResult{Stdout: "stopped\n", Stderr: "stop note\n"}, nil
 					}
-					return LocalCommandResult{ExitCode: 1, Stderr: stopDiagnostic}, errors.New("exit status 1")
+					return core.LocalCommandResult{ExitCode: 1, Stderr: stopDiagnostic}, errors.New("exit status 1")
 				default:
-					return LocalCommandResult{}, errors.New("unexpected operation")
+					return core.LocalCommandResult{}, errors.New("unexpected operation")
 				}
 			}))
 			backend.rt.Stdout, backend.rt.Stderr = &stdout, &stderr
-			if err := backend.Stop(t.Context(), StopRequest{ID: claim.Slug}); err != nil {
+			if err := backend.Stop(t.Context(), core.StopRequest{ID: claim.Slug}); err != nil {
 				t.Fatal(err)
 			}
 			wantOperations := []string{"status", "stop", "status", "status"}
@@ -285,12 +285,12 @@ func TestBlacksmithStopReconciliationFailsClosed(t *testing.T) {
 			}
 			stopped := false
 			var operations []string
-			cfg := baseConfig()
+			cfg := core.BaseConfig()
 			cfg.Blacksmith.Org = "example-org"
-			backend := newTestBlacksmithBackend(cfg, reconciliationRunner(t, func(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+			backend := newTestBlacksmithBackend(cfg, reconciliationRunner(t, func(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				operations = append(operations, req.Args[1])
 				if req.Args[1] == "status" && !stopped {
-					return LocalCommandResult{Stdout: nativeStopStatus(id, "ready", "")}, nil
+					return core.LocalCommandResult{Stdout: nativeStopStatus(id, "ready", "")}, nil
 				}
 				if req.Args[1] == tt.cancelAt {
 					cancel()
@@ -298,19 +298,19 @@ func TestBlacksmithStopReconciliationFailsClosed(t *testing.T) {
 				switch req.Args[1] {
 				case "stop":
 					stopped = true
-					return LocalCommandResult{ExitCode: 1, Stdout: "stop stdout\n", Stderr: stopDiagnostic}, errors.New("exit status 1")
+					return core.LocalCommandResult{ExitCode: 1, Stdout: "stop stdout\n", Stderr: stopDiagnostic}, errors.New("exit status 1")
 				case "status":
 					if tt.deadline {
 						<-ctx.Done()
 					}
-					return LocalCommandResult{ExitCode: tt.code, Stdout: tt.stdout, Stderr: tt.stderr}, tt.err
+					return core.LocalCommandResult{ExitCode: tt.code, Stdout: tt.stdout, Stderr: tt.stderr}, tt.err
 				default:
-					return LocalCommandResult{}, errors.New("unexpected operation")
+					return core.LocalCommandResult{}, errors.New("unexpected operation")
 				}
 			}))
 			backend.rt.Stdout, backend.rt.Stderr = &stdout, &stderr
-			err := backend.Stop(ctx, StopRequest{ID: id})
-			var exitErr ExitError
+			err := backend.Stop(ctx, core.StopRequest{ID: id})
+			var exitErr core.ExitError
 			if !core.AsExitError(err, &exitErr) || exitErr.Code != 1 || !strings.Contains(exitErr.Message, "blacksmith failed: exit status 1") || !strings.Contains(exitErr.Message, "verification") {
 				t.Fatalf("original stop error lost: %v", err)
 			}
@@ -338,12 +338,12 @@ func TestBlacksmithStopRejectsForeignProviderClaim(t *testing.T) {
 	if err := core.ReplaceLeaseClaimIfUnchanged(claim.LeaseID, claim, foreign); err != nil {
 		t.Fatal(err)
 	}
-	foreign, _ = readLeaseClaim(claim.LeaseID)
-	backend := newTestBlacksmithBackend(baseConfig(), ownershipRunner(func(context.Context, LocalCommandRequest) (LocalCommandResult, error) {
+	foreign, _ = core.ReadLeaseClaim(claim.LeaseID)
+	backend := newTestBlacksmithBackend(core.BaseConfig(), ownershipRunner(func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		t.Error("foreign claim reached provider")
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}))
-	if err := backend.Stop(t.Context(), StopRequest{ID: claim.LeaseID}); err == nil {
+	if err := backend.Stop(t.Context(), core.StopRequest{ID: claim.LeaseID}); err == nil {
 		t.Fatal("foreign claim stopped")
 	}
 	assertStopState(t, foreign, true)
@@ -359,11 +359,11 @@ func TestBlacksmithReconciliationRetainsOriginalErrorUntilFinalized(t *testing.T
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			inspections := 0
-			cfg := baseConfig()
+			cfg := core.BaseConfig()
 			cfg.Blacksmith.Org = "example-org"
-			backend := newTestBlacksmithBackend(cfg, reconciliationRunner(t, func(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+			backend := newTestBlacksmithBackend(cfg, reconciliationRunner(t, func(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				if req.Args[1] == "stop" {
-					return LocalCommandResult{ExitCode: 1, Stdout: "stop stdout\n", Stderr: stopDiagnostic}, errors.New("exit status 1")
+					return core.LocalCommandResult{ExitCode: 1, Stdout: "stop stdout\n", Stderr: stopDiagnostic}, errors.New("exit status 1")
 				}
 				inspections++
 				state := "completed"
@@ -380,7 +380,7 @@ func TestBlacksmithReconciliationRetainsOriginalErrorUntilFinalized(t *testing.T
 				if inspections == 3 {
 					switch mode {
 					case "status-error":
-						return LocalCommandResult{ExitCode: 7}, errors.New("final verification unavailable")
+						return core.LocalCommandResult{ExitCode: 7}, errors.New("final verification unavailable")
 					case "cancelled":
 						cancel()
 					case "changed-identity":
@@ -389,11 +389,11 @@ func TestBlacksmithReconciliationRetainsOriginalErrorUntilFinalized(t *testing.T
 						output = strings.Replace(output, "completed", "ready    ", 1)
 					}
 				}
-				return LocalCommandResult{Stdout: output}, nil
+				return core.LocalCommandResult{Stdout: output}, nil
 			}))
 			backend.rt.Stdout, backend.rt.Stderr = &stdout, &stderr
-			err := backend.Stop(ctx, StopRequest{ID: claim.LeaseID})
-			var nativeErr ExitError
+			err := backend.Stop(ctx, core.StopRequest{ID: claim.LeaseID})
+			var nativeErr core.ExitError
 			if !core.AsExitError(err, &nativeErr) || nativeErr.Code != 1 || !strings.Contains(nativeErr.Message, "blacksmith failed: exit status 1") || nativeErr.Message != err.Error() || inspections != 3 {
 				t.Fatalf("original failure lost after finalization: err=%v inspections=%d", err, inspections)
 			}
@@ -417,7 +417,7 @@ func TestBlacksmithStopRejectsChangedClaimBeforeProviderCalls(t *testing.T) {
 			if err := core.ReplaceLeaseClaimIfUnchanged(claim.LeaseID, claim, replacement); err != nil {
 				t.Fatal(err)
 			}
-			rewritten, err := readLeaseClaim(claim.LeaseID)
+			rewritten, err := core.ReadLeaseClaim(claim.LeaseID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -429,7 +429,7 @@ func TestBlacksmithStopRejectsChangedClaimBeforeProviderCalls(t *testing.T) {
 				t.Fatalf("unexpected rewrite: got %#v want %#v", rewritten, replacement)
 			}
 			runner := &blacksmithFuncRunner{}
-			backend := newTestBlacksmithBackend(baseConfig(), runner)
+			backend := newTestBlacksmithBackend(core.BaseConfig(), runner)
 			err = backend.stopClaimedTestbox(t.Context(), claim.LeaseID, claim)
 			if err == nil || !strings.Contains(err.Error(), "claim changed; retry") || len(runner.calls) != 0 {
 				t.Fatalf("replacement was not fenced: err=%v calls=%v", err, runner.calls)
@@ -457,35 +457,35 @@ func testBlacksmithStopHoldsClaimFenceDuringStatus(t *testing.T, neverAssigned b
 	defer release()
 	stopped := false
 	inspections := 0
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Blacksmith.Org = "example-org"
-	backend := newTestBlacksmithBackend(cfg, reconciliationRunner(t, func(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	backend := newTestBlacksmithBackend(cfg, reconciliationRunner(t, func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch req.Args[1] {
 		case "stop":
 			stopped = true
-			return LocalCommandResult{ExitCode: 1, Stderr: stopDiagnostic}, errors.New("exit status 1")
+			return core.LocalCommandResult{ExitCode: 1, Stderr: stopDiagnostic}, errors.New("exit status 1")
 		case "status":
 			inspections++
 			if !stopped {
 				if neverAssigned {
-					return LocalCommandResult{Stdout: nativeNeverAssignedStatus(claim.LeaseID, "queued")}, nil
+					return core.LocalCommandResult{Stdout: nativeNeverAssignedStatus(claim.LeaseID, "queued")}, nil
 				}
-				return LocalCommandResult{Stdout: nativeStopStatus(claim.LeaseID, "ready", "")}, nil
+				return core.LocalCommandResult{Stdout: nativeStopStatus(claim.LeaseID, "ready", "")}, nil
 			}
 			if inspections == 2 {
 				close(entered)
 				select {
 				case <-proceed:
 				case <-ctx.Done():
-					return LocalCommandResult{}, ctx.Err()
+					return core.LocalCommandResult{}, ctx.Err()
 				}
 			}
 			if neverAssigned {
-				return LocalCommandResult{Stdout: nativeNeverAssignedStatus(claim.LeaseID, "completed")}, nil
+				return core.LocalCommandResult{Stdout: nativeNeverAssignedStatus(claim.LeaseID, "completed")}, nil
 			}
-			return LocalCommandResult{Stdout: nativeStopStatus(claim.LeaseID, "completed", "")}, nil
+			return core.LocalCommandResult{Stdout: nativeStopStatus(claim.LeaseID, "completed", "")}, nil
 		default:
-			return LocalCommandResult{}, errors.New("unexpected command")
+			return core.LocalCommandResult{}, errors.New("unexpected command")
 		}
 	}))
 	done := make(chan error, 1)
@@ -513,7 +513,7 @@ func testBlacksmithStopHoldsClaimFenceDuringStatus(t *testing.T, neverAssigned b
 		if stopErr == nil {
 			t.Fatal("replacement was deleted")
 		}
-		after, _ := readLeaseClaim(claim.LeaseID)
+		after, _ := core.ReadLeaseClaim(claim.LeaseID)
 		assertStopState(t, after, true)
 	} else {
 		if stopErr != nil {
@@ -525,11 +525,11 @@ func testBlacksmithStopHoldsClaimFenceDuringStatus(t *testing.T, neverAssigned b
 
 func TestBlacksmithClaimlessStopRefusesProviderAccess(t *testing.T) {
 	isolateBlacksmithOwnership(t)
-	backend := newTestBlacksmithBackend(baseConfig(), ownershipRunner(func(context.Context, LocalCommandRequest) (LocalCommandResult, error) {
+	backend := newTestBlacksmithBackend(core.BaseConfig(), ownershipRunner(func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		t.Error("unclaimed ID reached provider")
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}))
-	if err := backend.Stop(t.Context(), StopRequest{ID: "tbx_raw123"}); err == nil {
+	if err := backend.Stop(t.Context(), core.StopRequest{ID: "tbx_raw123"}); err == nil {
 		t.Fatal("unclaimed stop succeeded")
 	}
 }
@@ -556,22 +556,22 @@ func TestBlacksmithOneShotReconciliationPreservesCommandResult(t *testing.T) {
 				var stderr bytes.Buffer
 				stopped := false
 				keyMoved := false
-				runner := reconciliationRunner(t, func(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+				runner := reconciliationRunner(t, func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 					switch req.Args[1] {
 					case "warmup":
-						return LocalCommandResult{Stdout: id + "\n"}, nil
+						return core.LocalCommandResult{Stdout: id + "\n"}, nil
 					case "run":
 						fmt.Fprint(req.Stderr, command.output)
 						if command.code != 0 {
-							return LocalCommandResult{ExitCode: command.code}, fmt.Errorf("exit status %d", command.code)
+							return core.LocalCommandResult{ExitCode: command.code}, fmt.Errorf("exit status %d", command.code)
 						}
-						return LocalCommandResult{}, nil
+						return core.LocalCommandResult{}, nil
 					case "stop":
 						stopped = true
-						return LocalCommandResult{ExitCode: 1, Stderr: stopDiagnostic}, errors.New("exit status 1")
+						return core.LocalCommandResult{ExitCode: 1, Stderr: stopDiagnostic}, errors.New("exit status 1")
 					case "status":
 						if !stopped {
-							return LocalCommandResult{Stdout: nativeStopStatus(id, "ready", "")}, nil
+							return core.LocalCommandResult{Stdout: nativeStopStatus(id, "ready", "")}, nil
 						}
 						deadline, ok := ctx.Deadline()
 						if !ok || time.Until(deadline) > blacksmithCleanupTimeout {
@@ -581,7 +581,7 @@ func TestBlacksmithOneShotReconciliationPreservesCommandResult(t *testing.T) {
 						if state == "artifact-failure" {
 							observed = "completed"
 							if !keyMoved {
-								key, err := testboxKeyPath(id)
+								key, err := core.TestboxKeyPath(id)
 								if err != nil {
 									t.Fatal(err)
 								}
@@ -595,23 +595,23 @@ func TestBlacksmithOneShotReconciliationPreservesCommandResult(t *testing.T) {
 								keyMoved = true
 							}
 						}
-						return LocalCommandResult{Stdout: nativeStopStatus(id, observed, "")}, nil
+						return core.LocalCommandResult{Stdout: nativeStopStatus(id, observed, "")}, nil
 					default:
 						t.Fatalf("unexpected command: %v", req.Args)
-						return LocalCommandResult{}, nil
+						return core.LocalCommandResult{}, nil
 					}
 				})
-				cfg := baseConfig()
+				cfg := core.BaseConfig()
 				cfg.Blacksmith.Org = "example-org"
 				cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
 				backend := newTestBlacksmithBackend(cfg, runner)
 				backend.rt.Stderr = &stderr
-				result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Root: repo}, Command: []string{"test-runner"}, TimingJSON: true})
+				result, err := backend.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: repo}, Command: []string{"test-runner"}, TimingJSON: true})
 				wantCode := command.code
 				if state != "completed" && wantCode == 0 {
 					wantCode = 1
 				}
-				var exitErr ExitError
+				var exitErr core.ExitError
 				if wantCode == 0 {
 					if err != nil {
 						t.Fatal(err)
@@ -638,11 +638,11 @@ func TestBlacksmithOneShotReconciliationPreservesCommandResult(t *testing.T) {
 				if len(reports) != 1 || reports[0].ExitCode != wantCode || reports[0].LeaseID != id || reports[0].CommandMs != result.Command.Milliseconds() || reports[0].TotalMs != result.Total.Milliseconds() {
 					t.Fatalf("timing changed: %#v; result=%#v", reports, result)
 				}
-				claim, err := readLeaseClaim(id)
+				claim, err := core.ReadLeaseClaim(id)
 				if err != nil {
 					t.Fatal(err)
 				}
-				key, err := testboxKeyPath(id)
+				key, err := core.TestboxKeyPath(id)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -673,32 +673,33 @@ func TestBlacksmithReconciliationRespectsKeepAndReuse(t *testing.T) {
 			repo := t.TempDir()
 			t.Chdir(repo)
 			const id = "tbx_kept123"
-			runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+			runner := &blacksmithFuncRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				switch req.Args[1] {
 				case "warmup":
-					return LocalCommandResult{Stdout: id + "\n"}, nil
+					return core.LocalCommandResult{Stdout: id + "\n"}, nil
 				case "run":
-					return LocalCommandResult{ExitCode: 255}, errors.New("exit status 255")
+					return core.LocalCommandResult{ExitCode: 255}, errors.New("exit status 255")
 				default:
 					t.Fatalf("kept/reused testbox reached cleanup: %v", req.Args)
-					return LocalCommandResult{}, nil
+					return core.LocalCommandResult{}, nil
 				}
 			}}
-			cfg := baseConfig()
+			cfg := core.BaseConfig()
 			cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
-			req := RunRequest{Repo: Repo{Root: repo}, Command: []string{"false"}, Keep: mode == "keep", KeepOnFailure: mode == "keep-on-failure"}
+			req := core.RunRequest{Repo: core.Repo{Root: repo}, Command: []string{"false"}, Keep: mode == "keep", KeepOnFailure: mode == "keep-on-failure"}
 			if mode == "reuse" {
 				req.ID = id
+				prepareBlacksmithGuestKey(t, id)
 				testOwnedBlacksmithClaim(t, id, "kept", repo)
 			}
 			backend := newTestBlacksmithBackend(cfg, runner)
 			backend.rt.Stderr = io.Discard
 			result, err := backend.Run(t.Context(), req)
-			var exitErr ExitError
+			var exitErr core.ExitError
 			if !errors.As(err, &exitErr) || exitErr.Code != 255 || result.ExitCode != 255 || result.Session == nil || !result.Session.Kept {
 				t.Fatalf("kept result=%#v err=%v", result, err)
 			}
-			claim, err := readLeaseClaim(id)
+			claim, err := core.ReadLeaseClaim(id)
 			if err != nil || claim.LeaseID != id {
 				t.Fatalf("kept claim=%#v err=%v", claim, err)
 			}
@@ -706,9 +707,9 @@ func TestBlacksmithReconciliationRespectsKeepAndReuse(t *testing.T) {
 	}
 }
 
-func reconciliationRunner(t *testing.T, fn func(context.Context, LocalCommandRequest) (LocalCommandResult, error)) ownershipRunner {
+func reconciliationRunner(t *testing.T, fn func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error)) ownershipRunner {
 	t.Helper()
-	return func(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	return func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if testBlacksmithFlag(req.Args, "--org") != "example-org" || testBlacksmithFlag(req.Args, "--api-url") != "https://backend.blacksmith.sh" {
 			t.Error("native operation lost exact route")
 		}
@@ -726,11 +727,11 @@ func TestBlacksmithStopArtifactFinalization(t *testing.T) {
 			isolateBlacksmithOwnership(t)
 			const id = "tbx_artifact123"
 			claim := testOwnedBlacksmithClaim(t, id, "artifact-krill", t.TempDir())
-			key, err := testboxKeyPath(id)
+			key, err := core.TestboxKeyPath(id)
 			if err != nil {
 				t.Fatal(err)
 			}
-			sibling, err := testboxKeyPath("tbx_sibling123")
+			sibling, err := core.TestboxKeyPath("tbx_sibling123")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -767,12 +768,12 @@ func TestBlacksmithStopArtifactFinalization(t *testing.T) {
 			var stderr bytes.Buffer
 			inspections, stops := 0, 0
 			nativeCause := errors.New("synthetic stop failure")
-			cfg := baseConfig()
+			cfg := core.BaseConfig()
 			cfg.Blacksmith.Org = "example-org"
-			backend := newTestBlacksmithBackend(cfg, reconciliationRunner(t, func(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+			backend := newTestBlacksmithBackend(cfg, reconciliationRunner(t, func(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				if req.Args[1] == "stop" {
 					stops++
-					return LocalCommandResult{ExitCode: 9, Stderr: stopDiagnostic}, nativeCause
+					return core.LocalCommandResult{ExitCode: 9, Stderr: stopDiagnostic}, nativeCause
 				}
 				inspections++
 				state := "completed"
@@ -783,13 +784,13 @@ func TestBlacksmithStopArtifactFinalization(t *testing.T) {
 					}
 				}
 				if neverAssigned {
-					return LocalCommandResult{Stdout: nativeNeverAssignedStatus(id, state)}, nil
+					return core.LocalCommandResult{Stdout: nativeNeverAssignedStatus(id, state)}, nil
 				}
-				return LocalCommandResult{Stdout: nativeStopStatus(id, state, "")}, nil
+				return core.LocalCommandResult{Stdout: nativeStopStatus(id, state, "")}, nil
 			}))
 			backend.rt.Stderr = &stderr
-			err = backend.Stop(t.Context(), StopRequest{ID: id})
-			got, readErr := readLeaseClaim(id)
+			err = backend.Stop(t.Context(), core.StopRequest{ID: id})
+			got, readErr := core.ReadLeaseClaim(id)
 			if readErr != nil {
 				t.Fatal(readErr)
 			}
@@ -798,7 +799,7 @@ func TestBlacksmithStopArtifactFinalization(t *testing.T) {
 					t.Fatalf("missing directory cleanup: err=%v claim=%+v", err, got)
 				}
 			} else {
-				if err == nil || !strings.Contains(err.Error(), "local connection artifacts") || !strings.Contains(err.Error(), "non-directory") {
+				if err == nil || !strings.Contains(err.Error(), "local connection artifacts") || !strings.Contains(err.Error(), "lease SSH directory has an unsafe path component") {
 					t.Errorf("artifact failure hidden: %v", err)
 				}
 				if !reflect.DeepEqual(got, claim) {
@@ -809,7 +810,7 @@ func TestBlacksmithStopArtifactFinalization(t *testing.T) {
 				}
 			}
 			if mode == "reconciled-unsafe" {
-				var exitErr ExitError
+				var exitErr core.ExitError
 				if !core.AsExitError(err, &exitErr) || exitErr.Code != 9 || exitErr.Message != err.Error() || !errors.Is(err, nativeCause) || stops != 1 || inspections != 3 {
 					t.Errorf("late failure lost native error: %v stops=%d inspections=%d", err, stops, inspections)
 				}
@@ -836,30 +837,30 @@ func TestBlacksmithStopVerificationDiagnostics(t *testing.T) {
 			ctx, cancel := context.WithCancelCause(t.Context())
 			defer cancel(nil)
 			inspections := 0
-			cfg := baseConfig()
+			cfg := core.BaseConfig()
 			cfg.Blacksmith.Org = "example-org"
-			backend := newTestBlacksmithBackend(cfg, reconciliationRunner(t, func(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+			backend := newTestBlacksmithBackend(cfg, reconciliationRunner(t, func(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				if req.Args[1] == "stop" {
 					if mode == "cancel-stop" {
 						cancel(cancelCause)
 					}
-					return LocalCommandResult{ExitCode: 9}, nativeCause
+					return core.LocalCommandResult{ExitCode: 9}, nativeCause
 				}
 				inspections++
 				if inspections == 1 || mode == "nonterminal" {
-					return LocalCommandResult{Stdout: nativeStopStatus(claim.LeaseID, "ready", "")}, nil
+					return core.LocalCommandResult{Stdout: nativeStopStatus(claim.LeaseID, "ready", "")}, nil
 				}
 				if mode == "cancel-query" {
 					cancel(cancelCause)
-					return LocalCommandResult{Stdout: nativeStopStatus(claim.LeaseID, "completed", "")}, nil
+					return core.LocalCommandResult{Stdout: nativeStopStatus(claim.LeaseID, "completed", "")}, nil
 				}
 				if mode == "late-query-error" && inspections == 2 {
-					return LocalCommandResult{Stdout: nativeStopStatus(claim.LeaseID, "completed", "")}, nil
+					return core.LocalCommandResult{Stdout: nativeStopStatus(claim.LeaseID, "completed", "")}, nil
 				}
-				return LocalCommandResult{ExitCode: 7, Stdout: nativeStopStatus(claim.LeaseID, "completed", ""), Stderr: "authentication unavailable\n"}, queryCause
+				return core.LocalCommandResult{ExitCode: 7, Stdout: nativeStopStatus(claim.LeaseID, "completed", ""), Stderr: "authentication unavailable\n"}, queryCause
 			}))
-			err := backend.Stop(ctx, StopRequest{ID: claim.LeaseID})
-			var exitErr ExitError
+			err := backend.Stop(ctx, core.StopRequest{ID: claim.LeaseID})
+			var exitErr core.ExitError
 			if !core.AsExitError(err, &exitErr) || exitErr.Code != 9 || exitErr.Message != err.Error() || strings.Count(exitErr.Message, nativeCause.Error()) != 1 || !errors.Is(err, nativeCause) {
 				t.Errorf("native diagnostic/cause lost: %v", err)
 			}
@@ -885,7 +886,7 @@ func TestBlacksmithStopVerificationDiagnostics(t *testing.T) {
 func TestBlacksmithRollbackWarnsOnArtifactFailure(t *testing.T) {
 	isolateBlacksmithOwnership(t)
 	const pending = "tbx_pending_artifact123"
-	key, err := testboxKeyPath(pending)
+	key, err := core.TestboxKeyPath(pending)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -901,11 +902,11 @@ func TestBlacksmithRollbackWarnsOnArtifactFailure(t *testing.T) {
 		t.Skipf("directory symlink unavailable: %v", err)
 	}
 	var stderr bytes.Buffer
-	backend := newTestBlacksmithBackend(baseConfig(), reconciliationRunner(t, func(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	backend := newTestBlacksmithBackend(core.BaseConfig(), reconciliationRunner(t, func(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if req.Args[1] != "status" {
 			t.Fatalf("already-terminal rollback reached %v", req.Args)
 		}
-		return LocalCommandResult{Stdout: nativeStopStatus("tbx_rollback123", "completed", "")}, nil
+		return core.LocalCommandResult{Stdout: nativeStopStatus("tbx_rollback123", "completed", "")}, nil
 	}))
 	backend.route = &blacksmithRoute{API: blacksmithDefaultAPI, Org: "example-org"}
 	backend.rt.Stderr = &stderr

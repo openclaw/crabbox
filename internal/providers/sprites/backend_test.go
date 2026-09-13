@@ -14,6 +14,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestSpritesSSHTargetUsesSpriteProxy(t *testing.T) {
@@ -99,7 +100,7 @@ func TestResolveSpriteNameAcceptsPrefixOnlyWithReclaim(t *testing.T) {
 
 func TestResolveSpriteNameUsesAdoptedSpriteNameFromClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if err := claimLeaseForRepoProvider("spr_handmade-sprite", "adopted", spritesProvider, t.TempDir(), 0, true); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("spr_handmade-sprite", "adopted", spritesProvider, t.TempDir(), 0, true); err != nil {
 		t.Fatal(err)
 	}
 	backend := &spritesBackend{client: &fakeSpritesAPI{}}
@@ -114,7 +115,7 @@ func TestResolveSpriteNameUsesAdoptedSpriteNameFromClaim(t *testing.T) {
 
 func TestResolveSpriteNameAcceptsProviderlessCrabboxClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if err := claimLeaseForRepoProvider("cbx_abcdef123456", "blue-lobster", "", t.TempDir(), 0, true); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_abcdef123456", "blue-lobster", "", t.TempDir(), 0, true); err != nil {
 		t.Fatal(err)
 	}
 	backend := &spritesBackend{client: &fakeSpritesAPI{}}
@@ -129,7 +130,7 @@ func TestResolveSpriteNameAcceptsProviderlessCrabboxClaim(t *testing.T) {
 
 func TestResolveSpriteNameRejectsOtherProviderClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if err := claimLeaseForRepoProvider("cbx_abcdef123456", "blue-lobster", "aws", t.TempDir(), 0, true); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("cbx_abcdef123456", "blue-lobster", "aws", t.TempDir(), 0, true); err != nil {
 		t.Fatal(err)
 	}
 	backend := &spritesBackend{client: &fakeSpritesAPI{}}
@@ -143,22 +144,22 @@ func TestResolveReleaseOnlySkipsSpriteCLIAndBootstrap(t *testing.T) {
 	stateDir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateDir)
 	repoRoot := t.TempDir()
-	cfg := Config{Provider: spritesProvider, Sprites: SpritesConfig{WorkRoot: "/home/sprite/crabbox"}}
-	server := Server{Provider: spritesProvider, CloudID: "unhealthy-sprite", Name: "unhealthy-sprite", Labels: map[string]string{
+	cfg := core.Config{Provider: spritesProvider, Sprites: core.SpritesConfig{WorkRoot: "/home/sprite/crabbox"}}
+	server := core.Server{Provider: spritesProvider, CloudID: "unhealthy-sprite", Name: "unhealthy-sprite", Labels: map[string]string{
 		"provider": spritesProvider, "lease": "spr_unhealthy-sprite", "slug": "unhealthy", "name": "unhealthy-sprite",
 		"sprites_ownership": "adopted", "sprites_resource_id": "sprite-immutable-1",
 	}}
-	if err := core.ClaimLeaseTargetForRepoConfig("spr_unhealthy-sprite", "unhealthy", cfg, server, SSHTarget{}, repoRoot, 0, true); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig("spr_unhealthy-sprite", "unhealthy", cfg, server, core.SSHTarget{}, repoRoot, 0, true); err != nil {
 		t.Fatal(err)
 	}
 	api := &fakeSpritesAPI{get: spritesInfo{ID: "sprite-immutable-1", Name: "unhealthy-sprite"}}
 	runner := &recordingRunner{}
 	backend := &spritesBackend{
 		cfg:    cfg,
-		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+		rt:     core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
 		client: api,
 	}
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "unhealthy", ReleaseOnly: true})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "unhealthy", ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,13 +169,13 @@ func TestResolveReleaseOnlySkipsSpriteCLIAndBootstrap(t *testing.T) {
 	if lease.LeaseID != "spr_unhealthy-sprite" || lease.Server.Name != "unhealthy-sprite" {
 		t.Fatalf("lease=%#v", lease)
 	}
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
 		t.Fatal(err)
 	}
 	if api.deleted != "unhealthy-sprite" {
 		t.Fatalf("deleted=%q", api.deleted)
 	}
-	if _, ok, err := resolveLeaseClaim("unhealthy"); err != nil || ok {
+	if _, ok, err := core.ResolveLeaseClaim("unhealthy"); err != nil || ok {
 		t.Fatalf("claim still resolves ok=%t err=%v", ok, err)
 	}
 }
@@ -183,10 +184,10 @@ func TestReleaseLeaseRejectsUnclaimedPrefixOnlySprite(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	api := &fakeSpritesAPI{get: spritesInfo{Name: "crabbox-handmade"}}
 	backend := &spritesBackend{client: api}
-	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{
-		Lease: LeaseTarget{
+	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{
 			LeaseID: "spr_crabbox-handmade",
-			Server:  Server{Name: "crabbox-handmade"},
+			Server:  core.Server{Name: "crabbox-handmade"},
 		},
 		Force: true,
 	})
@@ -218,19 +219,19 @@ func TestSpritesReleaseRequiresExactScopedClaimAndLiveOwnership(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
-			cfg := Config{Provider: spritesProvider, Sprites: SpritesConfig{WorkRoot: "/home/sprite/crabbox"}}
+			cfg := core.Config{Provider: spritesProvider, Sprites: core.SpritesConfig{WorkRoot: "/home/sprite/crabbox"}}
 			claimCfg := cfg
 			claimCfg.Sprites.APIURL = tc.claimedAPIURL
-			claimedServer := Server{Provider: spritesProvider, CloudID: tc.claimedName, Name: tc.claimedName, Labels: map[string]string{
+			claimedServer := core.Server{Provider: spritesProvider, CloudID: tc.claimedName, Name: tc.claimedName, Labels: map[string]string{
 				"provider": spritesProvider, "lease": "cbx_abcdef123456", "slug": "owned", "name": tc.claimedName,
 			}}
-			if err := core.ClaimLeaseTargetForRepoConfig("cbx_abcdef123456", "owned", claimCfg, claimedServer, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+			if err := core.ClaimLeaseTargetForRepoConfig("cbx_abcdef123456", "owned", claimCfg, claimedServer, core.SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
 				t.Fatal(err)
 			}
 			api := &fakeSpritesAPI{get: tc.live, deleteErr: tc.deleteErr}
-			backend := &spritesBackend{cfg: cfg, client: api, rt: Runtime{Stderr: io.Discard}}
-			err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{
-				LeaseID: "cbx_abcdef123456", Server: Server{Name: "sprite-owned", Labels: map[string]string{"slug": "owned"}},
+			backend := &spritesBackend{cfg: cfg, client: api, rt: core.Runtime{Stderr: io.Discard}}
+			err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+				LeaseID: "cbx_abcdef123456", Server: core.Server{Name: "sprite-owned", Labels: map[string]string{"slug": "owned"}},
 			}})
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
@@ -264,7 +265,7 @@ func TestSpritesLegacyReleaseRequiresExplicitImmutableAdoption(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
-			cfg := Config{Provider: spritesProvider}
+			cfg := core.Config{Provider: spritesProvider}
 			labels := map[string]string{"provider": spritesProvider, "lease": "spr_legacy", "slug": "legacy", "name": "legacy"}
 			if tc.adopted {
 				labels["sprites_ownership"] = "adopted"
@@ -272,14 +273,14 @@ func TestSpritesLegacyReleaseRequiresExplicitImmutableAdoption(t *testing.T) {
 			if tc.claimID != "" {
 				labels["sprites_resource_id"] = tc.claimID
 			}
-			server := Server{Provider: spritesProvider, CloudID: "legacy", Name: "legacy", Labels: labels}
-			if err := core.ClaimLeaseTargetForRepoConfig("spr_legacy", "legacy", cfg, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+			server := core.Server{Provider: spritesProvider, CloudID: "legacy", Name: "legacy", Labels: labels}
+			if err := core.ClaimLeaseTargetForRepoConfig("spr_legacy", "legacy", cfg, server, core.SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
 				t.Fatal(err)
 			}
 			api := &fakeSpritesAPI{get: spritesInfo{ID: tc.liveID, Name: "legacy"}}
-			backend := &spritesBackend{cfg: cfg, client: api, rt: Runtime{Stderr: io.Discard}}
-			err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{
-				LeaseID: "spr_legacy", Server: Server{Name: "legacy", Labels: map[string]string{"slug": "legacy"}},
+			backend := &spritesBackend{cfg: cfg, client: api, rt: core.Runtime{Stderr: io.Discard}}
+			err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+				LeaseID: "spr_legacy", Server: core.Server{Name: "legacy", Labels: map[string]string{"slug": "legacy"}},
 			}})
 			if tc.wantDelete != (err == nil) || tc.wantDelete != (api.deleted == "legacy") {
 				t.Fatalf("err=%v deleted=%q wantDelete=%t", err, api.deleted, tc.wantDelete)
@@ -294,12 +295,12 @@ func TestAcquireKeepFailurePreservesRetainedSpriteKey(t *testing.T) {
 	api := &fakeSpritesAPI{}
 	runner := &recordingRunner{failContains: "exec -s", err: errors.New("bootstrap failed")}
 	backend := &spritesBackend{
-		cfg:    Config{Sprites: SpritesConfig{WorkRoot: "/home/sprite/crabbox"}},
-		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+		cfg:    core.Config{Sprites: core.SpritesConfig{WorkRoot: "/home/sprite/crabbox"}},
+		rt:     core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
 		client: api,
 	}
 
-	_, err := backend.Acquire(context.Background(), AcquireRequest{Keep: true, Repo: core.Repo{Root: t.TempDir()}})
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Keep: true, Repo: core.Repo{Root: t.TempDir()}})
 	if err == nil || !strings.Contains(err.Error(), "bootstrap failed") {
 		t.Fatalf("Acquire err=%v, want bootstrap failure", err)
 	}
@@ -323,12 +324,12 @@ func TestAcquireFailureDeletesReturnedSpriteName(t *testing.T) {
 	api := &fakeSpritesAPI{create: spritesInfo{Name: "canonical-sprite"}}
 	runner := &recordingRunner{failContains: "exec -s", err: errors.New("bootstrap failed")}
 	backend := &spritesBackend{
-		cfg:    Config{Sprites: SpritesConfig{WorkRoot: "/home/sprite/crabbox"}},
-		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+		cfg:    core.Config{Sprites: core.SpritesConfig{WorkRoot: "/home/sprite/crabbox"}},
+		rt:     core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
 		client: api,
 	}
 
-	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
 	if err == nil || !strings.Contains(err.Error(), "bootstrap failed") {
 		t.Fatalf("Acquire err=%v, want bootstrap failure", err)
 	}
@@ -341,29 +342,29 @@ func TestAcquireFailureDeletesReturnedSpriteName(t *testing.T) {
 }
 
 func TestSpritesRejectsTailscale(t *testing.T) {
-	cfg := Config{Sprites: SpritesConfig{Token: "test-token"}}
+	cfg := core.Config{Sprites: core.SpritesConfig{Token: "test-token"}}
 	cfg.Tailscale.Enabled = true
-	_, err := NewSpritesBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}})
+	_, err := NewSpritesBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}})
 	if err == nil || !strings.Contains(err.Error(), "--tailscale is not supported for provider=sprites") {
 		t.Fatalf("err=%v", err)
 	}
 }
 
 func TestSpritesRejectsUnsafeWorkRootBeforeBackend(t *testing.T) {
-	cfg := Config{Sprites: SpritesConfig{Token: "test-token", WorkRoot: "/tmp"}}
-	_, err := NewSpritesBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}})
+	cfg := core.Config{Sprites: core.SpritesConfig{Token: "test-token", WorkRoot: "/tmp"}}
+	_, err := NewSpritesBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}})
 	if err == nil || !strings.Contains(err.Error(), "too broad") {
 		t.Fatalf("err=%v", err)
 	}
 }
 
 func TestSpritesRejectsUnsafeAPIURLBeforeBackend(t *testing.T) {
-	cfg := Config{Sprites: SpritesConfig{
+	cfg := core.Config{Sprites: core.SpritesConfig{
 		Token:    "test-token",
 		APIURL:   "http://api.sprites.dev",
 		WorkRoot: "/home/sprite/crabbox",
 	}}
-	_, err := NewSpritesBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}})
+	_, err := NewSpritesBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}})
 	if err == nil || !strings.Contains(err.Error(), "must use HTTPS") {
 		t.Fatalf("err=%v", err)
 	}
@@ -418,7 +419,7 @@ func TestSpritesAPIURLValidation(t *testing.T) {
 }
 
 func TestSpritesClientDefaultsAPIURL(t *testing.T) {
-	client, err := newSpritesClient(Config{Sprites: SpritesConfig{Token: "test-token"}}, Runtime{})
+	client, err := newSpritesClient(core.Config{Sprites: core.SpritesConfig{Token: "test-token"}}, core.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,10 +439,7 @@ func TestSpritesClientRejectsCrossOriginRedirect(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	client, err := newSpritesClient(
-		Config{Sprites: SpritesConfig{Token: "test-token", APIURL: origin.URL}},
-		Runtime{HTTP: origin.Client()},
-	)
+	client, err := newSpritesClient(core.Config{Sprites: core.SpritesConfig{Token: "test-token", APIURL: origin.URL}}, core.Runtime{HTTP: origin.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,10 +468,7 @@ func TestSpritesClientPreservesAuthOnSameOriginRedirect(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := newSpritesClient(
-		Config{Sprites: SpritesConfig{Token: "test-token", APIURL: srv.URL}},
-		Runtime{HTTP: srv.Client()},
-	)
+	client, err := newSpritesClient(core.Config{Sprites: core.SpritesConfig{Token: "test-token", APIURL: srv.URL}}, core.Runtime{HTTP: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -498,10 +493,7 @@ func TestSpritesClientPreservesCustomRedirectPolicy(t *testing.T) {
 		return errors.New("custom redirect stop")
 	}
 
-	client, err := newSpritesClient(
-		Config{Sprites: SpritesConfig{Token: "test-token", APIURL: srv.URL}},
-		Runtime{HTTP: source},
-	)
+	client, err := newSpritesClient(core.Config{Sprites: core.SpritesConfig{Token: "test-token", APIURL: srv.URL}}, core.Runtime{HTTP: source})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,7 +557,7 @@ func TestSpritesClientLifecycleRequests(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := newSpritesClient(Config{Sprites: SpritesConfig{Token: "test-token", APIURL: srv.URL}}, Runtime{HTTP: srv.Client()})
+	client, err := newSpritesClient(core.Config{Sprites: core.SpritesConfig{Token: "test-token", APIURL: srv.URL}}, core.Runtime{HTTP: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -602,7 +594,7 @@ func TestSpritesClientRedactsErrorResponseCredentials(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := newSpritesClient(Config{Sprites: SpritesConfig{Token: token, APIURL: srv.URL}}, Runtime{HTTP: srv.Client()})
+	client, err := newSpritesClient(core.Config{Sprites: core.SpritesConfig{Token: token, APIURL: srv.URL}}, core.Runtime{HTTP: srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -635,7 +627,7 @@ func TestSpritesClientRedactsErrorStatusText(t *testing.T) {
 			Request:    r,
 		}, nil
 	})}
-	client, err := newSpritesClient(Config{Sprites: SpritesConfig{Token: token}}, Runtime{HTTP: httpClient})
+	client, err := newSpritesClient(core.Config{Sprites: core.SpritesConfig{Token: token}}, core.Runtime{HTTP: httpClient})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -670,7 +662,7 @@ func TestSpritesClientRejectsBadPagination(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			client, err := newSpritesClient(Config{Sprites: SpritesConfig{Token: "test-token", APIURL: srv.URL}}, Runtime{HTTP: srv.Client()})
+			client, err := newSpritesClient(core.Config{Sprites: core.SpritesConfig{Token: "test-token", APIURL: srv.URL}}, core.Runtime{HTTP: srv.Client()})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -690,7 +682,7 @@ func TestSpritesClientRejectsBadPagination(t *testing.T) {
 
 func TestSpritesEnsureCLIUsesSpriteBinary(t *testing.T) {
 	runner := &recordingRunner{}
-	backend := &spritesBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	backend := &spritesBackend{rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 	if err := backend.ensureCLI(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -701,7 +693,7 @@ func TestSpritesEnsureCLIUsesSpriteBinary(t *testing.T) {
 
 func TestSpritesBootstrapInstallsFullSyncToolchain(t *testing.T) {
 	runner := &recordingRunner{}
-	backend := &spritesBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	backend := &spritesBackend{rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
 	if err := backend.bootstrapSSH(context.Background(), "crabbox-blue-lobster-12345678", "ssh-ed25519 AAAAtest"); err != nil {
 		t.Fatal(err)
 	}
@@ -718,12 +710,12 @@ func TestSpritesBootstrapInstallsFullSyncToolchain(t *testing.T) {
 
 type recordingRunner struct {
 	calls        []string
-	requests     []LocalCommandRequest
+	requests     []core.LocalCommandRequest
 	failContains string
 	err          error
 }
 
-func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	call := strings.Join(append([]string{req.Name}, req.Args...), " ")
 	r.calls = append(r.calls, call)
 	r.requests = append(r.requests, req)
@@ -732,9 +724,9 @@ func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (Local
 		if err == nil {
 			err = errors.New("command failed")
 		}
-		return LocalCommandResult{ExitCode: 1, Stderr: err.Error()}, err
+		return core.LocalCommandResult{ExitCode: 1, Stderr: err.Error()}, err
 	}
-	return LocalCommandResult{}, nil
+	return core.LocalCommandResult{}, nil
 }
 
 type fakeSpritesAPI struct {
@@ -780,4 +772,63 @@ func (f *fakeSpritesAPI) DeleteSprite(_ context.Context, name string) error {
 	}
 	f.deleted = name
 	return nil
+}
+
+func TestJSONRequestAdoptionEnvelope(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "capture")
+	var typedNil *struct{ Value string }
+	const base = "https://api.example.test/base"
+	sentinel := errors.New("synthetic captured transport stop")
+	for _, tc := range []struct {
+		name        string
+		body        any
+		want        string
+		query, fail bool
+	}{
+		{name: "nil"},
+		{name: "typed nil", body: typedNil, want: "null\n"},
+		{name: "JSON bytes", body: map[string]string{"message": "<&>"}, want: "{\"message\":\"\\u003c\\u0026\\u003e\"}\n"},
+		{name: "query without body", query: true},
+		{name: "transport error", fail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			endpoint := "/records"
+			if tc.query {
+				endpoint += "?limit=2&prefix=two+words"
+			}
+			var query url.Values
+			if tc.query {
+				query = url.Values{"limit": []string{"2"}, "prefix": []string{"two words"}}
+			}
+			headers := http.Header{"Authorization": []string{"Bearer synthetic-token"}}
+			headers.Set("Accept", "application/json")
+			if tc.body != nil {
+				headers.Set("Content-Type", "application/json")
+			}
+			transport := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, base+endpoint, tc.want, headers)
+				if tc.fail {
+					return nil, sentinel
+				}
+				return &http.Response{StatusCode: 204, Header: http.Header{"X-Capture": []string{"yes"}}, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+			})}
+			c := &spritesClient{apiURL: base, token: "synthetic-token", httpClient: transport}
+			var gotHeaders http.Header
+			err := c.doJSON(ctx, http.MethodPost, "/records", query, tc.body, nil)
+			if tc.fail {
+				if !errors.Is(err, sentinel) || gotHeaders != nil {
+					t.Fatalf("error/headers=%v %v", err, gotHeaders)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+
+			if calls != 1 {
+				t.Fatalf("calls=%d", calls)
+			}
+		})
+	}
 }

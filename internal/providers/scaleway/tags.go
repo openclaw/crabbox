@@ -18,6 +18,17 @@ const (
 
 var tagSafeRe = regexp.MustCompile(`[^A-Za-z0-9_:\-]`)
 
+// Share field definitions while retaining Scaleway's own decoding precedence.
+var tagSchema = shared.LeaseTagSchema(append(shared.TailscaleTagFields(),
+	shared.TagLabelField{Key: "recovery"},
+	shared.TagLabelField{Key: "scaleway_project"},
+	shared.TagLabelField{Key: "scaleway_organization"},
+	shared.TagLabelField{Key: "scaleway_region"},
+	shared.TagLabelField{Key: "scaleway_zone"},
+	shared.TagLabelField{Key: "scaleway_ssh_key_id"},
+	shared.TagLabelField{Key: "scaleway_ssh_key_name"},
+)...)
+
 func leaseTags(cfg core.Config, leaseID, slug, state string, keep bool, now time.Time) []string {
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, now)
 	labels["state"] = state
@@ -28,35 +39,18 @@ func leaseTags(cfg core.Config, leaseID, slug, state string, keep bool, now time
 }
 
 func tagsFromLabels(labels map[string]string) []string {
-	tags := []string{
+	return tagSchema.EncodeTags(labels, []string{
 		tagCrabbox,
 		"crabbox:provider:" + providerName,
 		"crabbox:target:" + core.TargetLinux,
-	}
-	for _, key := range tagLabelKeys() {
-		if value := labels[key]; value != "" {
-			tags = append(tags, encodeTagKV(key, value))
-		}
-	}
-	return normalizeTags(tags)
-}
-
-func tagLabelKeys() []string {
-	return []string{
-		"lease", "slug", "state", "keep", "target", "class", "server_type", "provider_key",
-		"ttl_secs", "idle_timeout", "idle_timeout_secs", "expires_at", "created_at", "last_touched_at", "updated_at",
-		"profile", "market", "desktop", "desktop_env", "browser", "code", "pond", "crabbox_exposed_ports",
-		"tailscale", "tailscale_state", "tailscale_hostname", "tailscale_tags", "tailscale_ipv4", "tailscale_fqdn", "tailscale_error",
-		"tailscale_exit_node", "tailscale_exit_node_allow_lan_access",
-		"recovery", "scaleway_project", "scaleway_organization", "scaleway_region", "scaleway_zone", "scaleway_ssh_key_id", "scaleway_ssh_key_name",
-	}
+	}, encodeTagKV)
 }
 
 func encodeTagKV(key, value string) string {
 	key = sanitizeTagPart(key)
-	if exactTagValueKey(key) {
+	if tagSchema.Exact(key) {
 		key += "_v1"
-		return tagPrefix + key + ":" + encodeExactTagValue(value, 255-len(tagPrefix)-len(key)-1)
+		return tagPrefix + key + ":" + shared.EncodeExactTagValue(value, 255-len(tagPrefix)-len(key)-1)
 	}
 	return tagPrefix + key + ":" + sanitizeTagPart(value)
 }
@@ -74,41 +68,9 @@ func sanitizeTagPart(value string) string {
 	return value
 }
 
-func exactTagValueKey(key string) bool {
-	switch key {
-	case "tailscale_hostname", "tailscale_tags", "tailscale_ipv4", "tailscale_fqdn", "tailscale_error", "tailscale_exit_node":
-		return true
-	default:
-		return false
-	}
-}
-
 func versionedExactTagValueKey(key string) (string, bool) {
 	logical := strings.TrimSuffix(key, "_v1")
-	return logical, logical != key && exactTagValueKey(logical)
-}
-
-func encodeExactTagValue(value string, maxLen int) string {
-	return shared.EncodeExactTagValue(value, maxLen)
-}
-
-func decodeExactTagValue(value string) string {
-	return shared.DecodeExactTagValue(value)
-}
-
-func normalizeTags(tags []string) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0, len(tags))
-	for _, tag := range tags {
-		tag = strings.TrimSpace(tag)
-		if tag == "" || seen[tag] {
-			continue
-		}
-		seen[tag] = true
-		out = append(out, tag)
-	}
-	sort.Strings(out)
-	return out
+	return logical, logical != key && tagSchema.Exact(logical)
 }
 
 func labelsFromTags(tags []string) map[string]string {
@@ -128,7 +90,7 @@ func labelsFromTags(tags []string) map[string]string {
 			key := strings.ToLower(parts[0])
 			value := parts[1]
 			if logical, ok := versionedExactTagValueKey(key); ok {
-				labels[logical] = decodeExactTagValue(value)
+				labels[logical] = shared.DecodeExactTagValue(value)
 				continue
 			}
 			switch key {

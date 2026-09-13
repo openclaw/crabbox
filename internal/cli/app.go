@@ -34,7 +34,7 @@ func (a App) input() io.Reader {
 func (a App) Run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		a.printHelp()
-		return exit(2, "missing command")
+		return Exit(2, "missing command")
 	}
 
 	switch args[0] {
@@ -125,6 +125,8 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.ssh(ctx, helpArgs), true
 	case "connect":
 		return a.connect(ctx, helpArgs), true
+	case "exec":
+		return a.execCommand(ctx, helpArgs), true
 	case "open":
 		return a.open(ctx, helpArgs), true
 	case "ports":
@@ -234,6 +236,7 @@ Commands:
   checkpoint  Create, restore, and fork workspace checkpoints
   ssh         Print the SSH command for a lease
   connect     Open an interactive SSH session to a lease
+  exec        Execute a command under the current lease claim without syncing
   open        Prepare an editor handoff for a lease
   ports       Publish, list, or unpublish provider-native ports
   cp          Copy files between the host and a lease
@@ -393,7 +396,7 @@ func parseFlags(fs *flag.FlagSet, args []string) error {
 		if errors.Is(err, flag.ErrHelp) {
 			return ExitError{Code: 0}
 		}
-		return exit(2, "%v", err)
+		return Exit(2, "%v", err)
 	}
 	return nil
 }

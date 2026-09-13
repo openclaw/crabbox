@@ -24,8 +24,8 @@ func TestAcquireCreatesClaimGeneratesSSHConfigAndWaitsReady(t *testing.T) {
 	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
 	b := newTestBackend(t, fc, fg)
 
-	lease, err := b.Acquire(context.Background(), AcquireRequest{
-		Repo:          Repo{Root: t.TempDir(), Name: "my-app"},
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:          core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedSlug: "green-box",
 	})
 	if err != nil {
@@ -56,7 +56,7 @@ func TestAcquireCreatesClaimGeneratesSSHConfigAndWaitsReady(t *testing.T) {
 	if !strings.Contains(wait.ReadyCheck, "test -d '/workspaces/my-app'") {
 		t.Fatalf("ready check=%q", wait.ReadyCheck)
 	}
-	claim, ok, err := resolveLeaseClaimForProvider(lease.LeaseID, providerName)
+	claim, ok, err := core.ResolveLeaseClaimForProvider(lease.LeaseID, providerName)
 	if err != nil || !ok {
 		t.Fatalf("claim ok=%t err=%v", ok, err)
 	}
@@ -76,7 +76,7 @@ func TestAcquireUsesExplicitGenericServerType(t *testing.T) {
 	b.cfg.ServerType = "premiumLinux"
 	b.cfg.ServerTypeExplicit = true
 
-	if _, err := b.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir(), Name: "my-app"}}); err != nil {
+	if _, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir(), Name: "my-app"}}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fc.creates) != 1 || fc.creates[0].Machine != "premiumLinux" {
@@ -92,7 +92,7 @@ func TestAcquirePersistsRecoveryClaimBeforeCreate(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789aa1"
 	fc.onCreate = func(req createCodespaceRequest) {
-		claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+		claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 		if err != nil || !ok {
 			t.Fatalf("pre-create claim ok=%t err=%v", ok, err)
 		}
@@ -104,8 +104,8 @@ func TestAcquirePersistsRecoveryClaimBeforeCreate(t *testing.T) {
 		}
 	}
 
-	lease, err := b.Acquire(context.Background(), AcquireRequest{
-		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "durable-box",
 	})
@@ -131,13 +131,13 @@ func TestAcquireRecoversAmbiguousCreateByExactIdentity(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	callbackCalled := false
 
-	lease, err := b.Acquire(context.Background(), AcquireRequest{
-		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: "cbx_123456789aa2",
 		RequestedSlug:    "recovered-box",
-		OnAcquired: func(lease LeaseTarget) error {
+		OnAcquired: func(lease core.LeaseTarget) error {
 			callbackCalled = true
-			claim, ok, claimErr := resolveLeaseClaimForProvider(lease.LeaseID, providerName)
+			claim, ok, claimErr := core.ResolveLeaseClaimForProvider(lease.LeaseID, providerName)
 			if claimErr != nil || !ok || claim.CloudID != "" || claim.Labels[labelRecovery] != recoveryPreCreate {
 				t.Fatalf("claim was bound before callback: claim=%#v ok=%t err=%v", claim, ok, claimErr)
 			}
@@ -150,7 +150,7 @@ func TestAcquireRecoversAmbiguousCreateByExactIdentity(t *testing.T) {
 	if !callbackCalled || lease.Server.CloudID != "cs-recovered" || len(fc.deletes) != 0 {
 		t.Fatalf("lease=%#v deletes=%#v", lease, fc.deletes)
 	}
-	claim, ok, err := resolveLeaseClaimForProvider(lease.LeaseID, providerName)
+	claim, ok, err := core.ResolveLeaseClaimForProvider(lease.LeaseID, providerName)
 	if err != nil || !ok || claim.CloudID != "cs-recovered" || claim.Labels[labelRecovery] != "" {
 		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, err)
 	}
@@ -169,8 +169,8 @@ func TestAcquireRecoversIdentitylessSuccessByExactIdentity(t *testing.T) {
 	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
 	b := newTestBackend(t, fc, fg)
 
-	lease, err := b.Acquire(context.Background(), AcquireRequest{
-		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: "cbx_123456789aa8",
 		RequestedSlug:    "identityless-box",
 	})
@@ -205,11 +205,11 @@ func TestAcquireRejectsIncompletePermanentIdentity(t *testing.T) {
 			leaseID := "cbx_123456789ab2"
 			callbackCalled := false
 
-			_, err := b.Acquire(context.Background(), AcquireRequest{
-				Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+			_, err := b.Acquire(context.Background(), core.AcquireRequest{
+				Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 				RequestedLeaseID: leaseID,
 				RequestedSlug:    "incomplete-box",
-				OnAcquired: func(LeaseTarget) error {
+				OnAcquired: func(core.LeaseTarget) error {
 					callbackCalled = true
 					return nil
 				},
@@ -220,7 +220,7 @@ func TestAcquireRejectsIncompletePermanentIdentity(t *testing.T) {
 			if callbackCalled || len(fc.deletes) != 0 {
 				t.Fatalf("callback=%t deletes=%#v", callbackCalled, fc.deletes)
 			}
-			claim, ok, claimErr := readLeaseClaimWithPresence(leaseID)
+			claim, ok, claimErr := core.ReadLeaseClaimWithPresence(leaseID)
 			if claimErr != nil || !ok || claim.CloudID != "" || claim.Labels[labelRecovery] != recoveryPreCreate {
 				t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, claimErr)
 			}
@@ -236,8 +236,8 @@ func TestAcquireAcceptsRenamedOwnerWithSameUserID(t *testing.T) {
 	fc.createResult.Owner.Login = "alice-renamed"
 	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "test" + "-value"})
 
-	lease, err := b.Acquire(context.Background(), AcquireRequest{
-		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: "cbx_123456789af1",
 		RequestedSlug:    "renamed-owner-box",
 	})
@@ -262,8 +262,8 @@ func TestAcquireRejectsAndRollsBackZeroEffectiveRetention(t *testing.T) {
 	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "test" + "-value"})
 	leaseID := "cbx_123456789af7"
 
-	_, err := b.Acquire(context.Background(), AcquireRequest{
-		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "zero-effective-retention",
 	})
@@ -273,7 +273,7 @@ func TestAcquireRejectsAndRollsBackZeroEffectiveRetention(t *testing.T) {
 	if strings.Join(fc.deletes, ",") != "cs-zero-effective-retention" {
 		t.Fatalf("deletes=%#v", fc.deletes)
 	}
-	if _, ok, claimErr := readLeaseClaimWithPresence(leaseID); claimErr != nil || ok {
+	if _, ok, claimErr := core.ReadLeaseClaimWithPresence(leaseID); claimErr != nil || ok {
 		t.Fatalf("claim ok=%t err=%v", ok, claimErr)
 	}
 }
@@ -281,7 +281,7 @@ func TestAcquireRejectsAndRollsBackZeroEffectiveRetention(t *testing.T) {
 func TestValidateClaimScopeAcceptsRenamedLoginForSameUserID(t *testing.T) {
 	b := newTestBackend(t, newFakeCodespacesClient(), &fakeGH{login: "alice", token: "test" + "-value"})
 	user := fakeGitHubUser("alice")
-	claim := LeaseClaim{
+	claim := core.LeaseClaim{
 		LeaseID:       "cbx_123456789af2",
 		Provider:      providerName,
 		ProviderScope: providerClaimScope(b.claimConfig("example-org/my-app")),
@@ -305,15 +305,15 @@ func TestAcquireRetainsClaimWhenAmbiguousCreateHasNoMatch(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789aa3"
 
-	_, err := b.Acquire(context.Background(), AcquireRequest{
-		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "pending-box",
 	})
 	if err == nil || !strings.Contains(err.Error(), "claim retained") {
 		t.Fatalf("err=%v", err)
 	}
-	claim, ok, claimErr := resolveLeaseClaimForProvider(leaseID, providerName)
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 	if claimErr != nil || !ok || claim.CloudID != "" || claim.Labels[labelRecovery] != recoveryPreCreate {
 		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, claimErr)
 	}
@@ -337,8 +337,8 @@ func TestAcquireRejectsDuplicateRecoveryMatches(t *testing.T) {
 	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
 	b := newTestBackend(t, fc, fg)
 
-	_, err := b.Acquire(context.Background(), AcquireRequest{
-		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: "cbx_123456789aa4",
 		RequestedSlug:    "duplicate-box",
 	})
@@ -358,15 +358,15 @@ func TestAcquireDiscardsClaimAfterDefinitiveCreateRejection(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789aa5"
 
-	_, err := b.Acquire(context.Background(), AcquireRequest{
-		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "rejected-box",
 	})
 	if err == nil || !strings.Contains(err.Error(), "status=422") {
 		t.Fatalf("err=%v", err)
 	}
-	if _, ok, claimErr := resolveLeaseClaimForProvider(leaseID, providerName); claimErr != nil || ok {
+	if _, ok, claimErr := core.ResolveLeaseClaimForProvider(leaseID, providerName); claimErr != nil || ok {
 		t.Fatalf("claim retained ok=%t err=%v", ok, claimErr)
 	}
 	if len(fc.deletes) != 0 {
@@ -379,13 +379,13 @@ func TestAcquireRollsBackExactCreateWhenClaimBindingFails(t *testing.T) {
 	fc := newFakeCodespacesClient()
 	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
 	b := newTestBackend(t, fc, fg)
-	b.bindClaim = func(_ string, expected LeaseClaim, _ Server) (LeaseClaim, error) {
+	b.bindClaim = func(_ string, expected core.LeaseClaim, _ core.Server) (core.LeaseClaim, error) {
 		return expected, errors.New("claim write failed")
 	}
 	leaseID := "cbx_123456789aa9"
 
-	_, err := b.Acquire(context.Background(), AcquireRequest{
-		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "bind-failure-box",
 	})
@@ -398,7 +398,7 @@ func TestAcquireRollsBackExactCreateWhenClaimBindingFails(t *testing.T) {
 	if !fc.deleteDeadline {
 		t.Fatal("rollback delete context had no deadline")
 	}
-	if _, ok, claimErr := resolveLeaseClaimForProvider(leaseID, providerName); claimErr != nil || ok {
+	if _, ok, claimErr := core.ResolveLeaseClaimForProvider(leaseID, providerName); claimErr != nil || ok {
 		t.Fatalf("claim retained ok=%t err=%v", ok, claimErr)
 	}
 }
@@ -409,17 +409,17 @@ func TestAcquireDoesNotRollbackWhenPendingClaimRaces(t *testing.T) {
 	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789aaa"
-	b.bindClaim = func(_ string, expected LeaseClaim, _ Server) (LeaseClaim, error) {
+	b.bindClaim = func(_ string, expected core.LeaseClaim, _ core.Server) (core.LeaseClaim, error) {
 		server := serverFromClaim(expected)
 		server.Labels["raced"] = "true"
-		if err := updateLeaseClaimEndpoint(expected.LeaseID, server, SSHTarget{}); err != nil {
+		if err := core.UpdateLeaseClaimEndpoint(expected.LeaseID, server, core.SSHTarget{}); err != nil {
 			t.Fatal(err)
 		}
 		return expected, errors.New("claim raced")
 	}
 
-	_, err := b.Acquire(context.Background(), AcquireRequest{
-		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "race-box",
 	})
@@ -429,7 +429,7 @@ func TestAcquireDoesNotRollbackWhenPendingClaimRaces(t *testing.T) {
 	if len(fc.deletes) != 0 {
 		t.Fatalf("deleted after claim race=%#v", fc.deletes)
 	}
-	claim, ok, claimErr := resolveLeaseClaimForProvider(leaseID, providerName)
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 	if claimErr != nil || !ok || claim.Labels[labelRecovery] != recoveryPreCreate || claim.Labels["raced"] != "true" {
 		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, claimErr)
 	}
@@ -443,17 +443,17 @@ func TestAcquireOnAcquiredErrorRollsBackEvenWhenKept(t *testing.T) {
 	callbackErr := errors.New("controller rejected identity")
 	called := false
 
-	_, err := b.Acquire(context.Background(), AcquireRequest{
-		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "callback-box",
 		Keep:             true,
-		OnAcquired: func(lease LeaseTarget) error {
+		OnAcquired: func(lease core.LeaseTarget) error {
 			called = true
 			if lease.LeaseID != leaseID || lease.Server.CloudID != "cs-1" || lease.SSH.Host != "" {
 				t.Fatalf("callback lease=%#v", lease)
 			}
-			claim, ok, claimErr := resolveLeaseClaimForProvider(leaseID, providerName)
+			claim, ok, claimErr := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 			if claimErr != nil || !ok || claim.CloudID != "" || claim.Labels[labelRecovery] != recoveryPreCreate {
 				t.Fatalf("claim was bound before callback: claim=%#v ok=%t err=%v", claim, ok, claimErr)
 			}
@@ -466,7 +466,7 @@ func TestAcquireOnAcquiredErrorRollsBackEvenWhenKept(t *testing.T) {
 	if got := strings.Join(fc.deletes, ","); got != "cs-1" {
 		t.Fatalf("deletes=%q", got)
 	}
-	if _, ok, claimErr := readLeaseClaimWithPresence(leaseID); claimErr != nil || ok {
+	if _, ok, claimErr := core.ReadLeaseClaimWithPresence(leaseID); claimErr != nil || ok {
 		t.Fatalf("claim retained ok=%t err=%v", ok, claimErr)
 	}
 }
@@ -478,11 +478,11 @@ func TestAcquireOnAcquiredErrorRetainsPendingClaimWhenRollbackCannotConfirmResou
 	leaseID := "cbx_123456789ab0"
 	callbackErr := errors.New("controller rejected identity")
 
-	_, err := b.Acquire(context.Background(), AcquireRequest{
-		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "callback-missing-box",
-		OnAcquired: func(lease LeaseTarget) error {
+		OnAcquired: func(lease core.LeaseTarget) error {
 			delete(fc.items, lease.Server.CloudID)
 			return callbackErr
 		},
@@ -493,7 +493,7 @@ func TestAcquireOnAcquiredErrorRetainsPendingClaimWhenRollbackCannotConfirmResou
 	if len(fc.deletes) != 0 {
 		t.Fatalf("deleted unconfirmed resource=%#v", fc.deletes)
 	}
-	claim, ok, claimErr := readLeaseClaimWithPresence(leaseID)
+	claim, ok, claimErr := core.ReadLeaseClaimWithPresence(leaseID)
 	if claimErr != nil || !ok || claim.CloudID != "" || claim.Labels[labelRecovery] != recoveryPreCreate {
 		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, claimErr)
 	}
@@ -513,11 +513,11 @@ func TestAcquireOnAcquiredErrorRetainsClaimWhenResourceDisappearsAfterPreflight(
 	leaseID := "cbx_123456789ab4"
 	callbackErr := errors.New("controller rejected identity")
 
-	_, err := b.Acquire(context.Background(), AcquireRequest{
-		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "callback-vanished-box",
-		OnAcquired: func(LeaseTarget) error {
+		OnAcquired: func(core.LeaseTarget) error {
 			return callbackErr
 		},
 	})
@@ -527,7 +527,7 @@ func TestAcquireOnAcquiredErrorRetainsClaimWhenResourceDisappearsAfterPreflight(
 	if getCount != 2 || len(fc.deletes) != 0 {
 		t.Fatalf("gets=%d deletes=%#v", getCount, fc.deletes)
 	}
-	claim, ok, claimErr := readLeaseClaimWithPresence(leaseID)
+	claim, ok, claimErr := core.ReadLeaseClaimWithPresence(leaseID)
 	if claimErr != nil || !ok || claim.CloudID != "" || claim.Labels[labelRecovery] != recoveryPreCreate {
 		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, claimErr)
 	}
@@ -541,10 +541,10 @@ func TestRollbackCreatedCodespaceRetainsClaimWhenResourceDisappearsAfterPrefligh
 	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
 	leaseID := "cbx_123456789ab6"
 	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "rollback-missing-box", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "rollback-missing-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "rollback-missing-box", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	claim, ok, err := readLeaseClaimWithPresence(leaseID)
+	claim, ok, err := core.ReadLeaseClaimWithPresence(leaseID)
 	if err != nil || !ok {
 		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, err)
 	}
@@ -563,7 +563,7 @@ func TestRollbackCreatedCodespaceRetainsClaimWhenResourceDisappearsAfterPrefligh
 	if getCount != 2 || len(fc.deletes) != 0 {
 		t.Fatalf("gets=%d deletes=%#v", getCount, fc.deletes)
 	}
-	retained, ok, claimErr := readLeaseClaimWithPresence(leaseID)
+	retained, ok, claimErr := core.ReadLeaseClaimWithPresence(leaseID)
 	if claimErr != nil || !ok || retained.CloudID != item.Name {
 		t.Fatalf("claim=%#v ok=%t err=%v", retained, ok, claimErr)
 	}
@@ -576,11 +576,11 @@ func TestAcquireOnAcquiredErrorRollsBackAfterDisplayNameChanges(t *testing.T) {
 	leaseID := "cbx_123456789ab5"
 	callbackErr := errors.New("controller rejected identity")
 
-	_, err := b.Acquire(context.Background(), AcquireRequest{
-		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "callback-renamed-box",
-		OnAcquired: func(lease LeaseTarget) error {
+		OnAcquired: func(lease core.LeaseTarget) error {
 			item := fc.items[lease.Server.CloudID]
 			item.DisplayName = "renamed-after-create"
 			fc.items[item.Name] = item
@@ -593,7 +593,7 @@ func TestAcquireOnAcquiredErrorRollsBackAfterDisplayNameChanges(t *testing.T) {
 	if got := strings.Join(fc.deletes, ","); got != "cs-1" {
 		t.Fatalf("deletes=%q", got)
 	}
-	if _, ok, claimErr := readLeaseClaimWithPresence(leaseID); claimErr != nil || ok {
+	if _, ok, claimErr := core.ReadLeaseClaimWithPresence(leaseID); claimErr != nil || ok {
 		t.Fatalf("claim retained ok=%t err=%v", ok, claimErr)
 	}
 }
@@ -607,8 +607,8 @@ func TestAcquireRetainsClaimAndRefusesRollbackAfterReadyIdentityChanges(t *testi
 	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
 	leaseID := "cbx_123456789ab0"
 
-	_, err := b.Acquire(context.Background(), AcquireRequest{
-		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "replacement-box",
 	})
@@ -618,7 +618,7 @@ func TestAcquireRetainsClaimAndRefusesRollbackAfterReadyIdentityChanges(t *testi
 	if len(fc.deletes) != 0 {
 		t.Fatalf("replacement deleted: %#v", fc.deletes)
 	}
-	claim, ok, claimErr := readLeaseClaimWithPresence(leaseID)
+	claim, ok, claimErr := core.ReadLeaseClaimWithPresence(leaseID)
 	if claimErr != nil || !ok || claim.CloudID != "cs-1" {
 		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, claimErr)
 	}
@@ -632,15 +632,15 @@ func TestReleaseRecoversPendingCreateThenDeletesExactResource(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789aa6"
 
-	_, err := b.Acquire(context.Background(), AcquireRequest{
-		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "later-box",
 	})
 	if err == nil {
 		t.Fatal("acquire unexpectedly succeeded")
 	}
-	claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 	if err != nil || !ok {
 		t.Fatalf("pending claim ok=%t err=%v", ok, err)
 	}
@@ -649,13 +649,13 @@ func TestReleaseRecoversPendingCreateThenDeletesExactResource(t *testing.T) {
 	item.Repository.FullName = "Example-Org/My-App"
 	fc.items[item.Name] = item
 
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID}}); err != nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(fc.deletes, ","); got != item.Name {
 		t.Fatalf("deletes=%q", got)
 	}
-	if _, ok, err := resolveLeaseClaimForProvider(leaseID, providerName); err != nil || ok {
+	if _, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName); err != nil || ok {
 		t.Fatalf("claim retained ok=%t err=%v", ok, err)
 	}
 }
@@ -670,8 +670,8 @@ func TestAcquireKeepDoesNotOverrideDeleteOnReleasePolicy(t *testing.T) {
 	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
 	b := newTestBackend(t, fc, fg)
 
-	lease, err := b.Acquire(context.Background(), AcquireRequest{
-		Repo:          Repo{Root: t.TempDir(), Name: "my-app"},
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:          core.Repo{Root: t.TempDir(), Name: "my-app"},
 		Keep:          true,
 		RequestedSlug: "warm-box",
 	})
@@ -681,7 +681,7 @@ func TestAcquireKeepDoesNotOverrideDeleteOnReleasePolicy(t *testing.T) {
 	if lease.Server.Labels["keep"] != "true" || lease.Server.Labels[labelRelease] != releaseDelete {
 		t.Fatalf("labels=%#v", lease.Server.Labels)
 	}
-	claim, ok, err := resolveLeaseClaimForProvider(lease.LeaseID, providerName)
+	claim, ok, err := core.ResolveLeaseClaimForProvider(lease.LeaseID, providerName)
 	if err != nil || !ok {
 		t.Fatalf("claim ok=%t err=%v", ok, err)
 	}
@@ -698,8 +698,8 @@ func TestAcquireRetainsClaimWhenRollbackDeleteFails(t *testing.T) {
 	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
 	b := newTestBackend(t, fc, fg)
 
-	_, err := b.Acquire(context.Background(), AcquireRequest{
-		Repo:             Repo{Root: t.TempDir(), Name: "my-app"},
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: "cbx_123456789abc",
 		RequestedSlug:    "rollback-box",
 	})
@@ -711,7 +711,7 @@ func TestAcquireRetainsClaimWhenRollbackDeleteFails(t *testing.T) {
 			t.Fatalf("err=%q missing %q", err, want)
 		}
 	}
-	if _, ok, err := resolveLeaseClaimForProvider("cbx_123456789abc", providerName); err != nil || !ok {
+	if _, ok, err := core.ResolveLeaseClaimForProvider("cbx_123456789abc", providerName); err != nil || !ok {
 		t.Fatalf("recovery claim missing ok=%t err=%v", ok, err)
 	}
 	if !fc.deleteDeadline {
@@ -732,11 +732,11 @@ func TestResolveStartsStoppedCodespaceAndRefreshesTarget(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789abc"
 	server := b.serverFromCodespace(fc.items["cs-stopped"], b.labelsFor(leaseID, "sleepy-box", "example-org/my-app", "alice", true, releaseStop, fc.items["cs-stopped"], "stopped"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "sleepy-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "sleepy-box", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "sleepy-box", ReadyProbe: true})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "sleepy-box", ReadyProbe: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -746,7 +746,7 @@ func TestResolveStartsStoppedCodespaceAndRefreshesTarget(t *testing.T) {
 	if lease.Server.Status != "Available" || lease.SSH.Host != "cs.cs-stopped.main" {
 		t.Fatalf("lease=%#v", lease)
 	}
-	claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 	if err != nil || !ok {
 		t.Fatalf("claim ok=%t err=%v", ok, err)
 	}
@@ -773,11 +773,11 @@ func TestResolveWaitsForShutdownThenRestartsCodespace(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789ad0"
 	server := b.serverFromCodespace(fc.items["cs-stopping"], b.labelsFor(leaseID, "stopping-box", "example-org/my-app", "alice", true, releaseStop, fc.items["cs-stopping"], "stopping"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "stopping-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "stopping-box", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReadyProbe: true})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReadyProbe: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -796,11 +796,11 @@ func TestResolveShuttingDownCodespaceUsesReadyTimeout(t *testing.T) {
 	b.pollInterval = time.Hour
 	leaseID := "cbx_123456789ad1"
 	server := b.serverFromCodespace(fc.items["cs-stopping"], b.labelsFor(leaseID, "stopping-box", "example-org/my-app", "alice", true, releaseStop, fc.items["cs-stopping"], "stopping"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "stopping-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "stopping-box", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := b.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReadyProbe: true})
+	_, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReadyProbe: true})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err=%v", err)
 	}
@@ -819,11 +819,11 @@ func TestResolveWaitsForTransitionalCodespaceBeforeSSH(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789ae1"
 	server := b.serverFromCodespace(fc.items["cs-starting"], b.labelsFor(leaseID, "starting-box", "example-org/my-app", "alice", true, releaseStop, fc.items["cs-starting"], "provisioning"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "starting-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "starting-box", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReadyProbe: true})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReadyProbe: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -840,11 +840,11 @@ func TestResolveStatusOnlyReadyProbeDoesNotStartStoppedCodespace(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789ac5"
 	server := b.serverFromCodespace(fc.items["cs-stopped-status"], b.labelsFor(leaseID, "stopped-status-box", "example-org/my-app", "alice", true, releaseStop, fc.items["cs-stopped-status"], "stopped"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "stopped-status-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "stopped-status-box", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "stopped-status-box", StatusOnly: true, ReadyProbe: true, NoLocalStateMutations: true})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "stopped-status-box", StatusOnly: true, ReadyProbe: true, NoLocalStateMutations: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -864,11 +864,11 @@ func TestResolveStatusOnlyNormalizesStoppedCodespace(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789ac6"
 	server := b.serverFromCodespace(fc.items["cs-stopped-status"], b.labelsFor(leaseID, "stopped-status-box", "example-org/my-app", "alice", true, releaseStop, fc.items["cs-stopped-status"], "ready"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "stopped-status-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "stopped-status-box", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: leaseID, StatusOnly: true})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, StatusOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -885,11 +885,11 @@ func TestResolveNoLocalStateMutationsDoesNotStartStoppedCodespace(t *testing.T) 
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789ac7"
 	server := b.serverFromCodespace(fc.items["cs-readonly-stopped"], b.labelsFor(leaseID, "readonly-stopped", "example-org/my-app", "alice", true, releaseStop, fc.items["cs-readonly-stopped"], "stopped"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "readonly-stopped", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "readonly-stopped", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: leaseID, NoLocalStateMutations: true, ReadyProbe: true})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, NoLocalStateMutations: true, ReadyProbe: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -907,11 +907,11 @@ func TestResolveNoLocalStateMutationsDoesNotStoreSSHConfig(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789ac3"
 	server := b.serverFromCodespace(fc.items["cs-readonly"], b.labelsFor(leaseID, "readonly-box", "example-org/my-app", "alice", true, releaseStop, fc.items["cs-readonly"], "ready"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "readonly-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "readonly-box", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "readonly-box", NoLocalStateMutations: true})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "readonly-box", NoLocalStateMutations: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -932,11 +932,11 @@ func TestResolveStatusOnlyReadyProbeBuildsSSHTarget(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789ac4"
 	server := b.serverFromCodespace(fc.items["cs-status"], b.labelsFor(leaseID, "status-box", "example-org/my-app", "alice", false, releaseDelete, fc.items["cs-status"], "ready"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "status-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "status-box", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "status-box", StatusOnly: true, ReadyProbe: true})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "status-box", StatusOnly: true, ReadyProbe: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -953,7 +953,7 @@ func TestReleaseDeleteRemovesOnlyClaimBackedCodespaceAndConfig(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789abd"
 	server := b.serverFromCodespace(fc.items["cs-delete"], b.labelsFor(leaseID, "delete-box", "example-org/my-app", "alice", false, releaseDelete, fc.items["cs-delete"], "ready"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "delete-box", b.cfg, server, SSHTarget{Host: "cs-delete", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "delete-box", b.cfg, server, core.SSHTarget{Host: "cs-delete", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	configPath, err := storeSSHConfig(leaseID, fg.config("cs-delete"))
@@ -961,13 +961,13 @@ func TestReleaseDeleteRemovesOnlyClaimBackedCodespaceAndConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil || !outcome.Terminal {
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil || !outcome.Terminal {
 		t.Fatalf("deletion outcome=%+v err=%v", outcome, err)
 	}
 	if strings.Join(fc.deletes, ",") != "cs-delete" {
 		t.Fatalf("deletes=%#v", fc.deletes)
 	}
-	if _, ok, err := resolveLeaseClaimForProvider(leaseID, providerName); err != nil || ok {
+	if _, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName); err != nil || ok {
 		t.Fatalf("claim remains ok=%t err=%v", ok, err)
 	}
 	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
@@ -984,7 +984,7 @@ func TestReleaseDeleteRetainsClaimUntilAbsenceIsConfirmed(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789ab1"
 	server := b.serverFromCodespace(fc.items["cs-delete-pending"], b.labelsFor(leaseID, "delete-pending-box", "example-org/my-app", "alice", false, releaseDelete, fc.items["cs-delete-pending"], "ready"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "delete-pending-box", b.cfg, server, SSHTarget{Host: "cs-delete-pending", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "delete-pending-box", b.cfg, server, core.SSHTarget{Host: "cs-delete-pending", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	configPath, err := storeSSHConfig(leaseID, fg.config("cs-delete-pending"))
@@ -994,14 +994,14 @@ func TestReleaseDeleteRetainsClaimUntilAbsenceIsConfirmed(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	fc.onDelete = func(string) { cancel() }
-	err = b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
+	err = b.ReleaseLease(ctx, core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err=%v", err)
 	}
 	if strings.Join(fc.deletes, ",") != "cs-delete-pending" {
 		t.Fatalf("deletes=%#v", fc.deletes)
 	}
-	if _, ok, claimErr := resolveLeaseClaimForProvider(leaseID, providerName); claimErr != nil || !ok {
+	if _, ok, claimErr := core.ResolveLeaseClaimForProvider(leaseID, providerName); claimErr != nil || !ok {
 		t.Fatalf("claim retained ok=%t err=%v", ok, claimErr)
 	}
 	if _, statErr := os.Stat(configPath); statErr != nil {
@@ -1017,22 +1017,22 @@ func TestReleaseDeleteRejectsClaimRaceBeforeMutation(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789aab"
 	server := b.serverFromCodespace(fc.items["cs-race-delete"], b.labelsFor(leaseID, "race-delete-box", "example-org/my-app", "alice", false, releaseDelete, fc.items["cs-race-delete"], "ready"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "race-delete-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "race-delete-box", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	fc.onGet = func(string) {
-		claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+		claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 		if err != nil || !ok {
 			t.Fatalf("claim ok=%t err=%v", ok, err)
 		}
 		raced := serverFromClaim(claim)
 		raced.Labels["raced"] = "true"
-		if err := updateLeaseClaimEndpoint(leaseID, raced, SSHTarget{}); err != nil {
+		if err := core.UpdateLeaseClaimEndpoint(leaseID, raced, core.SSHTarget{}); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
 	if err == nil || !strings.Contains(err.Error(), "claim changed") {
 		t.Fatalf("err=%v", err)
 	}
@@ -1049,7 +1049,7 @@ func TestReleaseDeleteRequiresLocalClaim(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	server := b.serverFromCodespace(fc.items["cs-orphan"], b.labelsFor("cbx_123456789ad0", "orphan-box", "example-org/my-app", "alice", false, releaseDelete, fc.items["cs-orphan"], "ready"))
 
-	err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: "cbx_123456789ad0", Server: server}})
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_123456789ad0", Server: server}})
 	if err == nil || !strings.Contains(err.Error(), "requires a local claim") {
 		t.Fatalf("err=%v", err)
 	}
@@ -1067,12 +1067,12 @@ func TestReleaseRefusesProviderScopeMismatch(t *testing.T) {
 	leaseID := "cbx_123456789aa7"
 	server := b.serverFromCodespace(fc.items["cs-scope"], b.labelsFor(leaseID, "scope-box", "example-org/my-app", "alice", false, releaseDelete, fc.items["cs-scope"], "ready"))
 	server.Labels[labelDisplayName] = "crabbox-scope-box"
-	if err := claimLeaseTargetForRepoConfig(leaseID, "scope-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "scope-box", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	b.cfg.GitHubCodespaces.APIURL = "https://api.enterprise.example"
 
-	err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
 	if err == nil || !strings.Contains(err.Error(), "scope mismatch") {
 		t.Fatalf("err=%v", err)
 	}
@@ -1091,27 +1091,27 @@ func TestReleaseDeleteFallsBackToStopForDirtyCodespace(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789ac2"
 	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "dirty-box", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "dirty-box", b.cfg, server, SSHTarget{Host: "cs-dirty", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "dirty-box", b.cfg, server, core.SSHTarget{Host: "cs-dirty", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
-	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil || outcome.Terminal {
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil || outcome.Terminal {
 		t.Fatalf("dirty fallback outcome=%+v err=%v", outcome, err)
 	}
 	if strings.Join(fc.stops, ",") != "cs-dirty" || len(fc.deletes) != 0 {
 		t.Fatalf("stops=%#v deletes=%#v", fc.stops, fc.deletes)
 	}
-	claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 	if err != nil || !ok {
 		t.Fatalf("claim ok=%t err=%v", ok, err)
 	}
 	if claim.SSHHost != "" || claim.SSHPort != 0 || claim.Labels[labelRelease] != releaseStop || claim.Labels[labelState] != "stopped" {
 		t.Fatalf("claim=%#v", claim)
 	}
-	if !b.RetainLeaseClaimAfterRelease(LeaseTarget{LeaseID: leaseID, Server: server}) {
+	if !b.RetainLeaseClaimAfterRelease(core.LeaseTarget{LeaseID: leaseID, Server: server}) {
 		t.Fatal("dirty release fallback should retain local claim")
 	}
-	if got := b.ReleaseLeaseMessage(LeaseTarget{LeaseID: leaseID, Server: server}); !strings.Contains(got, "retained=true") {
+	if got := b.ReleaseLeaseMessage(core.LeaseTarget{LeaseID: leaseID, Server: server}); !strings.Contains(got, "retained=true") {
 		t.Fatalf("message=%q", got)
 	}
 }
@@ -1127,11 +1127,11 @@ func TestReleaseDirtyCodespaceRefusesZeroRetentionWithoutStopping(t *testing.T) 
 	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "test" + "-value"})
 	leaseID := "cbx_123456789af3"
 	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "zero-retention", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "zero-retention", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "zero-retention", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
-	err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
 	if err == nil || !strings.Contains(err.Error(), "effective retention is zero") {
 		t.Fatalf("err=%v", err)
 	}
@@ -1150,11 +1150,11 @@ func TestReleaseCleanCodespaceRefusesZeroRetentionWithoutStopping(t *testing.T) 
 	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "test" + "-value"})
 	leaseID := "cbx_123456789af6"
 	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "clean-zero-retention", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "clean-zero-retention", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "clean-zero-retention", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
-	err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
 	if err == nil || !strings.Contains(err.Error(), "effective retention is zero") {
 		t.Fatalf("err=%v", err)
 	}
@@ -1175,11 +1175,11 @@ func TestCleanupDryRunReportsDirtyRetentionWithoutMutation(t *testing.T) {
 	leaseID := "cbx_123456789af4"
 	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "dirty-dry-run", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
 	server.Labels["expires_at"] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
-	if err := claimLeaseTargetForRepoConfig(leaseID, "dirty-dry-run", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "dirty-dry-run", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := b.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(stderr.String(), "retain codespace=cs-dirty-dry-run") || len(fc.stops) != 0 || len(fc.deletes) != 0 {
@@ -1208,17 +1208,17 @@ func TestReleaseDeleteRechecksGitStatusAfterStop(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789ac5"
 	server := b.serverFromCodespace(fc.items["cs-dirty-race"], b.labelsFor(leaseID, "dirty-race-box", "example-org/my-app", "alice", false, releaseDelete, fc.items["cs-dirty-race"], "ready"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "dirty-race-box", b.cfg, server, SSHTarget{Host: "cs-dirty-race", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "dirty-race-box", b.cfg, server, core.SSHTarget{Host: "cs-dirty-race", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fc.deletes) != 0 || len(fc.stops) != 2 {
 		t.Fatalf("stops=%#v deletes=%#v", fc.stops, fc.deletes)
 	}
-	claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 	if err != nil || !ok || claim.Labels[labelRelease] != releaseStop || claim.Labels[labelState] != "stopped" {
 		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, err)
 	}
@@ -1237,11 +1237,11 @@ func TestReleaseDeleteRechecksIdentityAfterStop(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789ac6"
 	server := b.serverFromCodespace(fc.items["cs-identity-race"], b.labelsFor(leaseID, "identity-race-box", "example-org/my-app", "alice", false, releaseDelete, fc.items["cs-identity-race"], "ready"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "identity-race-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "identity-race-box", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
-	err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
 	if err == nil || !strings.Contains(err.Error(), "environment id changed") {
 		t.Fatalf("err=%v", err)
 	}
@@ -1259,17 +1259,17 @@ func TestReleaseRetainedStopsAndClearsEndpoint(t *testing.T) {
 	b.cfg.GitHubCodespaces.DeleteOnRelease = false
 	leaseID := "cbx_123456789abe"
 	server := b.serverFromCodespace(fc.items["cs-stop"], b.labelsFor(leaseID, "stop-box", "example-org/my-app", "alice", true, releaseStop, fc.items["cs-stop"], "ready"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "stop-box", b.cfg, server, SSHTarget{Host: "cs-stop", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "stop-box", b.cfg, server, core.SSHTarget{Host: "cs-stop", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Join(fc.stops, ",") != "cs-stop" || len(fc.deletes) != 0 {
 		t.Fatalf("stops=%#v deletes=%#v", fc.stops, fc.deletes)
 	}
-	claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 	if err != nil || !ok {
 		t.Fatalf("claim ok=%t err=%v", ok, err)
 	}
@@ -1289,17 +1289,17 @@ func TestReleaseRetainedRemovesClaimWhenCodespaceIsAlreadyAbsent(t *testing.T) {
 	leaseID := "cbx_123456789ab9"
 	item := fakeCodespace("cs-retained-absent", "Shutdown")
 	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "retained-absent-box", "example-org/my-app", "alice", true, releaseStop, item, "stopped"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "retained-absent-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "retained-absent-box", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := storeSSHConfig(leaseID, "Host retained-absent-box\n"); err != nil {
 		t.Fatal(err)
 	}
 
-	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil || !outcome.Terminal {
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil || !outcome.Terminal {
 		t.Fatalf("absent resource under stop policy: outcome=%+v err=%v", outcome, err)
 	}
-	if _, ok, err := resolveLeaseClaimForProvider(leaseID, providerName); err != nil || ok {
+	if _, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName); err != nil || ok {
 		t.Fatalf("claim ok=%t err=%v", ok, err)
 	}
 	configPath := filepath.Join(stateHome, "crabbox", "github-codespaces", leaseID+".ssh_config")
@@ -1318,17 +1318,17 @@ func TestCleanupDryRunKeepsProviderNonMutating(t *testing.T) {
 	leaseID := "cbx_123456789abf"
 	server := b.serverFromCodespace(fc.items["cs-expired"], b.labelsFor(leaseID, "expired-box", "example-org/my-app", "alice", false, releaseDelete, fc.items["cs-expired"], "ready"))
 	server.Labels["expires_at"] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
-	if err := claimLeaseTargetForRepoConfig(leaseID, "expired-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "expired-box", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := b.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fc.deletes) != 0 {
 		t.Fatalf("dry run deleted: %#v", fc.deletes)
 	}
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Join(fc.deletes, ",") != "cs-expired" {
@@ -1350,20 +1350,20 @@ func TestCleanupRecoversExpiredPendingCreateBeforeDelete(t *testing.T) {
 	item.DisplayName = displayName
 	fc.items[item.Name] = item
 
-	if err := b.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatal(err)
 	}
-	claim, ok, err := readLeaseClaimWithPresence(leaseID)
+	claim, ok, err := core.ReadLeaseClaimWithPresence(leaseID)
 	if err != nil || !ok || claim.CloudID != "" || len(fc.deletes) != 0 {
 		t.Fatalf("dry-run claim=%#v ok=%t err=%v deletes=%#v", claim, ok, err, fc.deletes)
 	}
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Join(fc.deletes, ",") != item.Name {
 		t.Fatalf("deletes=%#v", fc.deletes)
 	}
-	if _, ok, err := readLeaseClaimWithPresence(leaseID); err != nil || ok {
+	if _, ok, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || ok {
 		t.Fatalf("claim remained ok=%t err=%v", ok, err)
 	}
 }
@@ -1378,16 +1378,16 @@ func TestCleanupDiscardsExpiredPendingCreateWithoutInventoryMatch(t *testing.T) 
 	persistPendingRecoveryClaimForTest(t, b, leaseID, "pending-absent", "pending-absent-nonce", true)
 	b.now = func() time.Time { return now }
 
-	if err := b.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := readLeaseClaimWithPresence(leaseID); err != nil || !ok {
+	if _, ok, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || !ok {
 		t.Fatalf("dry-run claim ok=%t err=%v", ok, err)
 	}
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := readLeaseClaimWithPresence(leaseID); err != nil || ok {
+	if _, ok, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || ok {
 		t.Fatalf("claim remained ok=%t err=%v", ok, err)
 	}
 	if len(fc.deletes) != 0 {
@@ -1404,21 +1404,21 @@ func TestCleanupDiscardsExpiredBoundClaimAfterConfirmedAbsence(t *testing.T) {
 	b.now = func() time.Time { return now.Add(-14 * time.Hour) }
 	item := fakeCodespace("cs-bound-absent", "Available")
 	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "bound-absent", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "bound-absent", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "bound-absent", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	b.now = func() time.Time { return now }
 
-	if err := b.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := readLeaseClaimWithPresence(leaseID); err != nil || !ok {
+	if _, ok, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || !ok {
 		t.Fatalf("dry-run claim ok=%t err=%v", ok, err)
 	}
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := readLeaseClaimWithPresence(leaseID); err != nil || ok {
+	if _, ok, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || ok {
 		t.Fatalf("claim remained ok=%t err=%v", ok, err)
 	}
 	if len(fc.deletes) != 0 {
@@ -1435,17 +1435,17 @@ func TestCleanupRetainsExpiredAbsentClaimForDifferentGitHubIdentity(t *testing.T
 	b.now = func() time.Time { return now.Add(-14 * time.Hour) }
 	item := fakeCodespace("cs-other-account", "Available")
 	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "other-account", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "other-account", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "other-account", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	b.now = func() time.Time { return now }
 	fc.user = fakeGitHubUser("bob")
 
-	err := b.Cleanup(context.Background(), CleanupRequest{})
+	err := b.Cleanup(context.Background(), core.CleanupRequest{})
 	if err == nil || !strings.Contains(err.Error(), "account mismatch") {
 		t.Fatalf("err=%v", err)
 	}
-	if _, ok, claimErr := readLeaseClaimWithPresence(leaseID); claimErr != nil || !ok {
+	if _, ok, claimErr := core.ReadLeaseClaimWithPresence(leaseID); claimErr != nil || !ok {
 		t.Fatalf("claim ok=%t err=%v", ok, claimErr)
 	}
 	if len(fc.deletes) != 0 {
@@ -1462,10 +1462,10 @@ func TestCleanupRefusesIdentityMismatch(t *testing.T) {
 	leaseID := "cbx_123456789ac1"
 	server := b.serverFromCodespace(fc.items["cs-mismatch"], b.labelsFor(leaseID, "mismatch-box", "example-org/my-app", "alice", false, releaseDelete, fc.items["cs-mismatch"], "ready"))
 	server.Labels["expires_at"] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
-	if err := claimLeaseTargetForRepoConfig(leaseID, "mismatch-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "mismatch-box", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	err := b.Cleanup(context.Background(), CleanupRequest{})
+	err := b.Cleanup(context.Background(), core.CleanupRequest{})
 	if err == nil || !strings.Contains(err.Error(), "account mismatch") {
 		t.Fatalf("err=%v", err)
 	}
@@ -1483,22 +1483,22 @@ func TestCleanupRejectsClaimRaceBeforeMutation(t *testing.T) {
 	leaseID := "cbx_123456789aac"
 	server := b.serverFromCodespace(fc.items["cs-cleanup-race"], b.labelsFor(leaseID, "cleanup-race-box", "example-org/my-app", "alice", false, releaseDelete, fc.items["cs-cleanup-race"], "ready"))
 	server.Labels["expires_at"] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
-	if err := claimLeaseTargetForRepoConfig(leaseID, "cleanup-race-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "cleanup-race-box", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	fc.onGet = func(string) {
-		claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+		claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
 		if err != nil || !ok {
 			t.Fatalf("claim ok=%t err=%v", ok, err)
 		}
 		raced := serverFromClaim(claim)
 		raced.Labels["raced"] = "true"
-		if err := updateLeaseClaimEndpoint(leaseID, raced, SSHTarget{}); err != nil {
+		if err := core.UpdateLeaseClaimEndpoint(leaseID, raced, core.SSHTarget{}); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	err := b.Cleanup(context.Background(), CleanupRequest{})
+	err := b.Cleanup(context.Background(), core.CleanupRequest{})
 	if err == nil || !strings.Contains(err.Error(), "claim changed") {
 		t.Fatalf("err=%v", err)
 	}
@@ -1516,13 +1516,13 @@ func TestListAllowsUserRenamedDisplayName(t *testing.T) {
 	leaseID := "cbx_123456789ad1"
 	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "renamed-display", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
 	server.Labels[labelDisplayName] = "original-display"
-	if err := claimLeaseTargetForRepoConfig(leaseID, "renamed-display", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "renamed-display", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	item.DisplayName = "user-renamed-display"
 	fc.items[item.Name] = item
 
-	views, err := b.List(context.Background(), ListRequest{})
+	views, err := b.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1537,7 +1537,7 @@ func TestDoctorIsNonMutating(t *testing.T) {
 	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
 	b := newTestBackend(t, fc, fg)
 
-	result, err := b.Doctor(context.Background(), DoctorRequest{})
+	result, err := b.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1557,11 +1557,11 @@ func TestDoctorFailsClosedAfterGitHubAccountSwitch(t *testing.T) {
 	b := newTestBackend(t, fc, &fakeGH{login: "bob", token: "ghp_this_token_value_is_redacted"})
 	leaseID := "cbx_123456789ad2"
 	server := b.serverFromCodespace(item, b.labelsFor(leaseID, "other-account", "example-org/my-app", "alice", false, releaseDelete, item, "ready"))
-	if err := claimLeaseTargetForRepoConfig(leaseID, "other-account", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "other-account", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
-	result, err := b.Doctor(context.Background(), DoctorRequest{})
+	result, err := b.Doctor(context.Background(), core.DoctorRequest{})
 	if err == nil || result.Status != "failed" || !strings.Contains(err.Error(), "account mismatch") {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
@@ -1635,15 +1635,15 @@ func TestWaitForAvailableUsesReadyTimeout(t *testing.T) {
 }
 
 func TestEffectiveWorkRootHonorsExplicitGenericWorkRoot(t *testing.T) {
-	cfg := Config{
+	cfg := core.Config{
 		Provider: providerName,
 		WorkRoot: "/custom/workspace",
-		GitHubCodespaces: GitHubCodespacesConfig{
+		GitHubCodespaces: core.GitHubCodespacesConfig{
 			WorkRoot: defaultWorkRoot,
 		},
 	}
 	core.MarkWorkRootExplicit(&cfg)
-	b := newBackend(Provider{}.Spec(), cfg, Runtime{})
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{})
 
 	if got := b.effectiveWorkRoot("example-org/my-app"); got != "/custom/workspace" {
 		t.Fatalf("work root=%q", got)
@@ -1651,7 +1651,7 @@ func TestEffectiveWorkRootHonorsExplicitGenericWorkRoot(t *testing.T) {
 }
 
 func TestRepoConfigReadyCheckUsesEffectiveWorkRoot(t *testing.T) {
-	b := newBackend(Provider{}.Spec(), Config{GitHubCodespaces: GitHubCodespacesConfig{WorkRoot: defaultWorkRoot}}, Runtime{})
+	b := newBackend(Provider{}.Spec(), core.Config{GitHubCodespaces: core.GitHubCodespacesConfig{WorkRoot: defaultWorkRoot}}, core.Runtime{})
 	check := githubCodespacesReadyCheck(b.repoConfig("example-org/my-app"))
 	if !strings.Contains(check, "'/workspaces/my-app'") || strings.Contains(check, "'/workspaces/crabbox'") {
 		t.Fatalf("ready check=%q", check)
@@ -1684,18 +1684,18 @@ func TestDisplayNameFitsGitHubCodespacesLimit(t *testing.T) {
 
 type testBackend struct {
 	*backend
-	waits []SSHTarget
+	waits []core.SSHTarget
 }
 
 func newTestBackend(t *testing.T, fc *fakeCodespacesClient, fg *fakeGH) *testBackend {
 	t.Helper()
-	cfg := Config{
+	cfg := core.Config{
 		Provider:    providerName,
 		TargetOS:    targetLinux,
 		SSHUser:     "vscode",
 		SSHPort:     "22",
 		IdleTimeout: time.Hour,
-		GitHubCodespaces: GitHubCodespacesConfig{
+		GitHubCodespaces: core.GitHubCodespacesConfig{
 			APIURL:           defaultAPIURL,
 			GHPath:           "gh",
 			Repo:             "example-org/my-app",
@@ -1710,14 +1710,14 @@ func newTestBackend(t *testing.T, fc *fakeCodespacesClient, fg *fakeGH) *testBac
 			WorkRoot:         defaultWorkRoot,
 		},
 	}
-	rt := Runtime{}
+	rt := core.Runtime{}
 	b := newBackend(Provider{}.Spec(), cfg, rt)
 	fc.user = fakeGitHubUser(fg.login)
 	b.pollInterval = time.Nanosecond
 	tb := &testBackend{backend: b}
 	b.clientFactory = func(string) codespacesAPI { return fc }
 	b.ghFactory = func() githubCLI { return fg }
-	b.waitSSH = func(_ context.Context, target *SSHTarget, _ string, _ time.Duration) error {
+	b.waitSSH = func(_ context.Context, target *core.SSHTarget, _ string, _ time.Duration) error {
 		tb.waits = append(tb.waits, *target)
 		return nil
 	}
