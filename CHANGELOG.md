@@ -10,7 +10,7 @@
 
 ### Fixes
 
-- Reject decoded negative Hyper-V CPU and memory values from environment or flags before backend construction; preserve zero defaults, positive sizing, and positive-only YAML application.
+- Reject decoded negative Hyper-V CPU and memory values from environment or flags before backend construction; preserve zero defaults, positive sizing, and positive-only YAML application. [PR 2242](https://github.com/openclaw/crabbox/pull/2242).
 
 - Reject stale administrator grants before committing legacy AWS cleanup recovery, preserving the lease, audit, and cleanup wake when authorization changes.
 - Share delegated command parsing so single shell strings execute correctly and literal operator arguments stay quoted across provider transports. [PR 2233](https://github.com/openclaw/crabbox/pull/2233).
