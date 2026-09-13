@@ -125,7 +125,7 @@ func (b *modalBackend) Run(ctx context.Context, req core.RunRequest) (core.RunRe
 			return handle(), err
 		},
 		Command: func(ctx context.Context) (shared.DelegatedSandboxCommand, error) {
-			command, err := buildModalCommand(req.Command, req.ShellMode, workdir)
+			command, err := buildModalCommand(req, workdir)
 			if err != nil {
 				return shared.DelegatedSandboxCommand{}, err
 			}
@@ -459,18 +459,12 @@ func durationSecondsCeil(duration time.Duration) int {
 	return int((duration + time.Second - 1) / time.Second)
 }
 
-func buildModalCommand(command []string, shellMode bool, workdir string) ([]string, error) {
-	if len(command) == 0 {
-		return nil, errors.New("missing command")
+func buildModalCommand(req core.RunRequest, workdir string) ([]string, error) {
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
+	if err != nil {
+		return nil, err
 	}
-	var script string
-	if shellMode {
-		script = strings.Join(command, " ")
-	} else if core.ShouldUseShell(command) || core.LeadingEnvAssignment(command) {
-		script = core.ShellScriptFromArgv(command)
-	} else {
-		script = "exec " + strings.Join(core.ShellWords(command), " ")
-	}
+	script := intent.ShellSource()
 	if strings.TrimSpace(workdir) != "" {
 		script = "cd " + core.ShellQuote(workdir) + " && " + script
 	}

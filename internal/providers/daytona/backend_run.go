@@ -197,10 +197,11 @@ func (b *daytonaLeaseBackend) run(ctx context.Context, req core.RunRequest, orig
 		}
 		return result, nil
 	}
-	command := daytonaCommandString(req.Command, req.ShellMode)
-	if command == "" {
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
+	if err != nil || intent.ShellScript() == "" {
 		return core.RunResult{}, core.Exit(2, "missing command")
 	}
+	command := intent.ShellScript()
 	commandStarted := time.Now()
 	req.Observation.Phase(core.RunPhaseCommand)
 	req.Observation.OmitStream("stderr", "provider-combines-output")
@@ -560,19 +561,6 @@ func daytonaExtractArchiveCommand(workdir, archivePath, deletePrefix string) str
 
 func createDaytonaSyncArchive(ctx context.Context, repo core.Repo, manifest core.SyncManifest, _ io.Writer) (*os.File, error) {
 	return core.CreateSyncArchive(ctx, repo, manifest, "crabbox-daytona-sync-*.tgz")
-}
-
-func daytonaCommandString(command []string, shellMode bool) string {
-	if len(command) == 0 {
-		return ""
-	}
-	if shellMode {
-		return strings.Join(command, " ")
-	}
-	if core.ShouldUseShell(command) || core.LeadingEnvAssignment(command) {
-		return core.ShellScriptFromArgv(command)
-	}
-	return strings.Join(core.ShellWords(command), " ")
 }
 
 func daytonaStatusView(leaseID string, sandbox *apidaytona.Sandbox) core.StatusView {

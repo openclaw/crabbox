@@ -438,8 +438,13 @@ func TestIsloCreatePreservesAuthAndInjectedTimeouts(t *testing.T) {
 				if client.createHTTPClient != nil || client.httpClient.Transport != injected.Transport || injected.Timeout != 10*time.Millisecond {
 					t.Fatal("explicit HTTP client changed")
 				}
-				if _, err := client.auth.Token(context.Background()); err != nil {
-					t.Fatal(err)
+				// Prime auth outside the deliberately tiny create deadline.
+				authTimeout := client.httpClient.Timeout
+				client.httpClient.Timeout = time.Second
+				_, authErr := client.auth.Token(context.Background())
+				client.httpClient.Timeout = authTimeout
+				if authErr != nil {
+					t.Fatal(authErr)
 				}
 			}
 			if _, err := client.CreateSandbox(context.Background(), &gosdk.CreateSandboxRequest{}); err == nil {

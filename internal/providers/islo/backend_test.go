@@ -209,36 +209,6 @@ func TestParseIsloSSEPreservesCompletionRules(t *testing.T) {
 	}
 }
 
-func TestIsloExecCommandPreservesShellString(t *testing.T) {
-	got, err := isloExecCommand([]string{"pnpm install && pnpm test"}, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"bash", "-lc", "pnpm install && pnpm test"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("command=%#v want %#v", got, want)
-	}
-}
-
-func TestIsloExecCommandQuotesImplicitShellArgv(t *testing.T) {
-	got, err := isloExecCommand([]string{"FOO=bar", "pnpm", "test"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 3 || got[0] != "bash" || got[1] != "-lc" || !strings.Contains(got[2], "FOO=") || !strings.Contains(got[2], "'pnpm'") {
-		t.Fatalf("command=%#v", got)
-	}
-}
-
-func TestLeadingEnvAssignmentUsesShell(t *testing.T) {
-	if !leadingEnvAssignment([]string{"FOO=bar", "pnpm", "test"}) {
-		t.Fatal("expected leading env assignment to require shell")
-	}
-	if leadingEnvAssignment([]string{"pnpm", "test"}) {
-		t.Fatal("plain argv should not require shell")
-	}
-}
-
 func TestIsloStatusReady(t *testing.T) {
 	// The live Islo API emits exactly one ready state, "running" (case-insensitive).
 	for _, status := range []string{"running", "RUNNING", " running "} {
@@ -1967,7 +1937,7 @@ func TestIsloFallbackExtractCommandCleansUploadsOnFailure(t *testing.T) {
 func TestIsloExecForwardsEnv(t *testing.T) {
 	client := &fakeIsloSyncClient{}
 	backend := &isloBackend{rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-	code, err := backend.exec(context.Background(), client, "crabbox-test", "/workspace/repo", []string{"env"}, false, map[string]string{
+	code, err := backend.exec(context.Background(), client, "crabbox-test", "/workspace/repo", core.RunRequest{Command: []string{"env"}}, map[string]string{
 		"API_TOKEN": "secret",
 		"CI":        "1",
 	}, "", backend.rt.Stdout, backend.rt.Stderr)

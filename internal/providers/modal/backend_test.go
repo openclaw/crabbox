@@ -111,7 +111,7 @@ func hasFeature(features core.FeatureSet, want core.Feature) bool {
 }
 
 func TestBuildModalCommandWrapsWorkdirAndShell(t *testing.T) {
-	got, err := buildModalCommand([]string{"pnpm", "test"}, false, "/workspace/crabbox")
+	got, err := buildModalCommand(core.RunRequest{Command: []string{"pnpm", "test"}}, "/workspace/crabbox")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestBuildModalCommandWrapsWorkdirAndShell(t *testing.T) {
 		t.Fatalf("command script=%q", got[2])
 	}
 
-	got, err = buildModalCommand([]string{"pnpm install && pnpm test"}, true, "/workspace/crabbox")
+	got, err = buildModalCommand(core.RunRequest{Command: []string{"pnpm install && pnpm test"}, ShellMode: true}, "/workspace/crabbox")
 	if err != nil {
 		t.Fatal(err)
 	}

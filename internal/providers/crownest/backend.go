@@ -751,20 +751,7 @@ func finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, i
 }
 
 func serverFromClaim(claim core.LeaseClaim, state string) core.Server {
-	return core.Server{
-		Provider: providerName,
-		CloudID:  sandboxIDFromLease(claim.LeaseID),
-		Name:     sandboxIDFromLease(claim.LeaseID),
-		Status:   state,
-		Labels: map[string]string{
-			"provider": providerName,
-			"lease":    claim.LeaseID,
-			"slug":     claim.Slug,
-			"pond":     claim.Pond,
-			"target":   targetLinux,
-			"state":    state,
-		},
-	}
+	return shared.SandboxLeaseView(providerName, targetLinux, claim, sandboxIDFromLease(claim.LeaseID), sandboxIDFromLease(claim.LeaseID), state)
 }
 
 func sandboxIDFromLease(leaseID string) string {

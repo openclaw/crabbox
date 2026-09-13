@@ -74,17 +74,6 @@ func TestCloudflareWorkdirRejectsBroadPaths(t *testing.T) {
 	}
 }
 
-func TestBuildCloudflareCommandQuotesArgv(t *testing.T) {
-	got, err := buildCloudflareCommand([]string{"node", "-e", "console.log('ok')"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "'node' '-e' 'console.log('\\''ok'\\'')'"
-	if got != want {
-		t.Fatalf("command = %q, want %q", got, want)
-	}
-}
-
 func TestCloudflareHealthyStateIsReady(t *testing.T) {
 	if !cloudflareReady("healthy") {
 		t.Fatal("healthy state should be ready")

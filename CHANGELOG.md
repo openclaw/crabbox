@@ -10,6 +10,7 @@
 
 ### Fixes
 
+- Share delegated command parsing so single shell strings execute correctly and literal operator arguments stay quoted across provider transports. [PR 2233](https://github.com/openclaw/crabbox/pull/2233).
 - Allow retained AWS image qualification when an AMI includes instance-store mappings beside its single EBS root, while preserving exact root identity, volume bounds, and borrowed-resource cleanup checks. [PR 2238](https://github.com/openclaw/crabbox/pull/2238). Thanks @vincentkoc.
 - Reject decoded negative Freestyle VM sizing, including explicit negative sizing flags, before backend construction rather than silently omitting it; preserve zero/default and positive-value handling. [PR 2235](https://github.com/openclaw/crabbox/pull/2235).
 - Preserve Anthropic Sandbox Runtime command cancellation and deadline causes in recorded run outcomes and timing without changing numeric exit codes or diagnostics. [PR 2229](https://github.com/openclaw/crabbox/pull/2229).

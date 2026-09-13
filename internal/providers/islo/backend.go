@@ -272,7 +272,7 @@ func (b *isloBackend) Run(ctx context.Context, req core.RunRequest) (result core
 	commandStart := b.now()
 	req.Observation.Phase(core.RunPhaseCommand)
 	stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, core.RunOutputWorkload)
-	exitCode, runErr := b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, isloWorkloadEnv(req.Env, tailnetReady), workloadUser, stdout, stderr)
+	exitCode, runErr := b.exec(ctx, client, name, workspace, req, isloWorkloadEnv(req.Env, tailnetReady), workloadUser, stdout, stderr)
 	commandDuration := b.now().Sub(commandStart)
 	commandRan = true
 	result.Command = commandDuration
@@ -691,12 +691,12 @@ func (b *isloBackend) cleanupCreatedIsloSandbox(client isloAPI, identity isloIde
 	return nil
 }
 
-func (b *isloBackend) exec(ctx context.Context, client isloAPI, name, workdir string, command []string, shellMode bool, env map[string]string, user string, stdout, stderr io.Writer) (int, error) {
-	execCommand, err := isloExecCommand(command, shellMode)
+func (b *isloBackend) exec(ctx context.Context, client isloAPI, name, workdir string, run core.RunRequest, env map[string]string, user string, stdout, stderr io.Writer) (int, error) {
+	intent, err := core.ParseCommandIntent(run.Command, run.ShellMode, run.CommandLiteralArgs)
 	if err != nil {
 		return 2, err
 	}
-	req := &gosdk.ExecRequest{Command: execCommand}
+	req := &gosdk.ExecRequest{Command: intent.Argv("bash", "-lc")}
 	if user != "" {
 		req.User = stringValue(user)
 	}
@@ -711,19 +711,6 @@ func (b *isloBackend) exec(ctx context.Context, client isloAPI, name, workdir st
 		}
 	}
 	return client.ExecStream(ctx, name, req, stdout, stderr)
-}
-
-func isloExecCommand(command []string, shellMode bool) ([]string, error) {
-	if len(command) == 0 {
-		return nil, errors.New("missing command")
-	}
-	if shellMode {
-		return []string{"bash", "-lc", strings.Join(command, " ")}, nil
-	}
-	if core.ShouldUseShell(command) || leadingEnvAssignment(command) {
-		return []string{"bash", "-lc", core.ShellScriptFromArgv(command)}, nil
-	}
-	return command, nil
 }
 
 func resolveIsloLeaseID(id, repoRoot string, reclaim bool) (string, string, string, error) {
@@ -1047,10 +1034,6 @@ func newIsloSandboxName(repo core.Repo) string {
 
 func isCrabboxIsloSandboxName(name string) bool {
 	return name == core.NormalizeLeaseSlug(name) && strings.HasPrefix(name, isloNamePrefix)
-}
-
-func leadingEnvAssignment(command []string) bool {
-	return len(command) > 1 && strings.Contains(command[0], "=") && !strings.HasPrefix(command[0], "-")
 }
 
 func stringValue(v string) *string { return &v }

@@ -216,21 +216,7 @@ func blacksmithCommandString(command []string, shellMode bool) string {
 	if shellMode || len(command) == 1 {
 		return trimBlacksmithShellCommand(strings.Join(command, " "))
 	}
-	if core.ShouldUseShell(command) {
-		return core.ShellScriptFromArgv(command)
-	}
-	parts := make([]string, 0, len(command))
-	seenCommand := false
-	for _, word := range command {
-		if !seenCommand && core.IsShellEnvAssignment(word) {
-			key, value, _ := strings.Cut(word, "=")
-			parts = append(parts, key+"="+core.ShellQuote(value))
-			continue
-		}
-		seenCommand = true
-		parts = append(parts, core.ShellQuote(word))
-	}
-	return strings.Join(parts, " ")
+	return core.ShellScriptFromArgv(command)
 }
 
 func trimBlacksmithShellCommand(command string) string {
