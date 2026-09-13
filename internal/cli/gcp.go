@@ -112,66 +112,51 @@ func GCPMachineTypeCandidatesForConfig(cfg Config) []string {
 }
 
 func (c *GCPClient) CreateServerWithFallback(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any)) (Server, Config, error) {
-	var candidates []string
-	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
-		candidates = []string{cfg.ServerType}
-	} else {
+	attempts, err := gcpProvisioningPlan(cfg)
+	if err != nil {
+		return Server{}, cfg, err
+	}
+	return ProvisionServerCandidates(ctx, cfg, attempts, ServerProvisioner{
+		Create: func(ctx context.Context, next Config) (Server, error) {
+			server, err := c.withZone(next.GCPZone).createServer(ctx, next, publicKey, leaseID, slug, keep)
+			if err == nil {
+				c.Zone = next.GCPZone
+			}
+			return server, err
+		},
+		CanRetry: isGCPFallbackProvisioningError,
+	}, logf)
+}
+
+func gcpProvisioningPlan(cfg Config) ([]ProvisioningCandidate, error) {
+	candidates := []string{cfg.ServerType}
+	if !cfg.ServerTypeExplicit || cfg.ServerType == "" {
 		candidates = GCPMachineTypeCandidatesForConfig(cfg)
-		if len(candidates) == 0 {
-			provider, _ := ProviderFor(cfg.Provider)
-			if provider == nil {
-				return Server{}, cfg, Exit(2, "provider=%s has no class profile for class=%s", cfg.Provider, cfg.Class)
-			}
-			if err := validateProviderClassSelector(provider, cfg); err != nil {
-				return Server{}, cfg, err
-			}
-			return Server{}, cfg, Exit(2, "provider=%s has no usable provisioning candidates for class=%s", cfg.Provider, cfg.Class)
-		}
+	}
+	if err := validateProvisioningCandidates(cfg, candidates); err != nil {
+		return nil, err
 	}
 	zones := uniqueStrings(append([]string{cfg.GCPZone}, cfg.Capacity.AvailabilityZones...))
-	var errs []error
-	for _, zone := range zones {
-		for i, machineType := range candidates {
-			next := cfg
-			next.GCPZone = zone
-			next.ServerType = machineType
-			if (i > 0 || zone != cfg.GCPZone) && logf != nil {
-				logf("fallback provisioning zone=%s type=%s after fallback-eligible provisioning error\n", zone, machineType)
-			}
-			server, err := c.withZone(zone).createServer(ctx, next, publicKey, leaseID, slug, keep)
-			if err == nil {
-				c.Zone = zone
-				return server, next, nil
-			}
-			errs = append(errs, fmt.Errorf("%s/%s: %w", zone, machineType, err))
-			if !isGCPFallbackProvisioningError(err) {
-				return Server{}, next, joinErrors(errs)
-			}
-		}
-	}
-	if strings.EqualFold(cfg.Capacity.Market, "spot") && strings.HasPrefix(cfg.Capacity.Fallback, "on-demand") {
+	var attempts []ProvisioningCandidate
+	for marketIndex, market := range provisioningMarkets(cfg) {
 		for _, zone := range zones {
-			for _, machineType := range candidates {
+			for i, machineType := range candidates {
 				next := cfg
 				next.GCPZone = zone
 				next.ServerType = machineType
-				next.Capacity.Market = "on-demand"
-				if logf != nil {
-					logf("fallback provisioning zone=%s type=%s market=on-demand after spot rejection\n", zone, machineType)
+				next.Capacity.Market = market
+				attempt := ProvisioningCandidate{Config: next, FailureLabel: zone + "/" + machineType}
+				if marketIndex > 0 {
+					attempt.FailureLabel = "on-demand " + attempt.FailureLabel
+					attempt.FallbackMessage = fmt.Sprintf("fallback provisioning zone=%s type=%s market=on-demand after spot rejection\n", zone, machineType)
+				} else if i > 0 || zone != cfg.GCPZone {
+					attempt.FallbackMessage = fmt.Sprintf("fallback provisioning zone=%s type=%s after fallback-eligible provisioning error\n", zone, machineType)
 				}
-				server, err := c.withZone(zone).createServer(ctx, next, publicKey, leaseID, slug, keep)
-				if err == nil {
-					c.Zone = zone
-					return server, next, nil
-				}
-				errs = append(errs, fmt.Errorf("on-demand %s/%s: %w", zone, machineType, err))
-				if !isGCPFallbackProvisioningError(err) {
-					return Server{}, next, joinErrors(errs)
-				}
+				attempts = append(attempts, attempt)
 			}
 		}
 	}
-	return Server{}, cfg, joinErrors(errs)
+	return attempts, nil
 }
 
 func (c *GCPClient) withZone(zone string) *GCPClient {

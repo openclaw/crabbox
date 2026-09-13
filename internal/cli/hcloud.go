@@ -319,33 +319,25 @@ func (c *HetznerClient) CreateServerWithFallback(ctx context.Context, cfg Config
 	if len(candidates) == 0 && cfg.ServerTypeExplicit && cfg.ServerType != "" {
 		candidates = []string{cfg.ServerType}
 	}
-	if len(candidates) == 0 {
-		provider, _ := ProviderFor(cfg.Provider)
-		if provider == nil {
-			return Server{}, cfg, Exit(2, "provider=%s has no class profile for class=%s", cfg.Provider, cfg.Class)
-		}
-		if err := validateProviderClassSelector(provider, cfg); err != nil {
-			return Server{}, cfg, err
-		}
-		return Server{}, cfg, Exit(2, "provider=%s has no usable provisioning candidates for class=%s", cfg.Provider, cfg.Class)
+	if err := validateProvisioningCandidates(cfg, candidates); err != nil {
+		return Server{}, cfg, err
 	}
-	var errs []error
+	attempts := make([]ProvisioningCandidate, 0, len(candidates))
 	for i, serverType := range candidates {
 		next := cfg
 		next.ServerType = serverType
-		if i > 0 && logf != nil {
-			logf("fallback provisioning type=%s after quota/capacity rejection\n", serverType)
+		attempt := ProvisioningCandidate{Config: next, FailureLabel: serverType}
+		if i > 0 {
+			attempt.FallbackMessage = fmt.Sprintf("fallback provisioning type=%s after quota/capacity rejection\n", serverType)
 		}
-		server, err := c.CreateServer(ctx, next, publicKey, leaseID, slug, keep)
-		if err == nil {
-			return server, next, nil
-		}
-		errs = append(errs, fmt.Errorf("%s: %w", serverType, err))
-		if !isRetryableProvisioningError(err) {
-			return Server{}, next, joinErrors(errs)
-		}
+		attempts = append(attempts, attempt)
 	}
-	return Server{}, cfg, joinErrors(errs)
+	return ProvisionServerCandidates(ctx, cfg, attempts, ServerProvisioner{
+		Create: func(ctx context.Context, next Config) (Server, error) {
+			return c.CreateServer(ctx, next, publicKey, leaseID, slug, keep)
+		},
+		CanRetry: isRetryableProvisioningError,
+	}, logf)
 }
 
 func isRetryableProvisioningError(err error) bool {

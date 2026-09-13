@@ -781,75 +781,55 @@ func (c *AzureClient) LeaseClaimScope() string {
 }
 
 func (c *AzureClient) createServerWithFallbackInLocation(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any)) (Server, Config, error) {
-	candidates := azureProvisioningCandidatesForConfig(cfg)
-	if len(candidates) == 0 {
-		provider, _ := ProviderFor(cfg.Provider)
-		if provider == nil {
-			return Server{}, cfg, Exit(2, "provider=%s has no class profile for class=%s", cfg.Provider, cfg.Class)
-		}
-		if err := validateProviderClassSelector(provider, cfg); err != nil {
-			return Server{}, cfg, err
-		}
-		return Server{}, cfg, Exit(2, "provider=%s has no usable provisioning candidates for class=%s", cfg.Provider, cfg.Class)
+	attempts, err := azureProvisioningPlan(cfg)
+	if err != nil {
+		return Server{}, cfg, err
 	}
-	var errs []error
 	sharedInfraReady := false
-	for i, vmSize := range candidates {
-		next := cfg
-		next.ServerType = vmSize
-		if i > 0 && logf != nil {
-			logf("fallback provisioning type=%s after quota/capacity rejection\n", vmSize)
-		}
-		if next.AzureSnapshot == "" {
-			if _, err := c.validatedAzureOSDiskMode(ctx, next); err != nil {
-				return Server{}, next, err
-			}
-		}
-		if !sharedInfraReady {
-			if err := c.EnsureSharedInfra(ctx); err != nil {
-				return Server{}, next, err
-			}
-			sharedInfraReady = true
-		}
-		server, err := c.createServer(ctx, next, publicKey, leaseID, slug, keep)
-		if err == nil {
-			return server, next, nil
-		}
-		errs = append(errs, fmt.Errorf("%s: %w", vmSize, err))
-		if !isAzureRetryableProvisioningError(err) {
-			return Server{}, next, joinErrors(errs)
-		}
-	}
-	if strings.EqualFold(cfg.Capacity.Market, "spot") && strings.HasPrefix(cfg.Capacity.Fallback, "on-demand") {
-		for _, vmSize := range candidates {
-			next := cfg
-			next.ServerType = vmSize
-			next.Capacity.Market = "on-demand"
-			if logf != nil {
-				logf("fallback provisioning type=%s market=on-demand after spot rejection\n", vmSize)
-			}
+	return ProvisionServerCandidates(ctx, cfg, attempts, ServerProvisioner{
+		Prepare: func(ctx context.Context, next Config) error {
 			if next.AzureSnapshot == "" {
 				if _, err := c.validatedAzureOSDiskMode(ctx, next); err != nil {
-					return Server{}, next, err
+					return err
 				}
 			}
 			if !sharedInfraReady {
 				if err := c.EnsureSharedInfra(ctx); err != nil {
-					return Server{}, next, err
+					return err
 				}
 				sharedInfraReady = true
 			}
-			server, err := c.createServer(ctx, next, publicKey, leaseID, slug, keep)
-			if err == nil {
-				return server, next, nil
+			return nil
+		},
+		Create: func(ctx context.Context, next Config) (Server, error) {
+			return c.createServer(ctx, next, publicKey, leaseID, slug, keep)
+		},
+		CanRetry: isAzureRetryableProvisioningError,
+	}, logf)
+}
+
+func azureProvisioningPlan(cfg Config) ([]ProvisioningCandidate, error) {
+	candidates := azureProvisioningCandidatesForConfig(cfg)
+	if err := validateProvisioningCandidates(cfg, candidates); err != nil {
+		return nil, err
+	}
+	var attempts []ProvisioningCandidate
+	for marketIndex, market := range provisioningMarkets(cfg) {
+		for i, vmSize := range candidates {
+			next := cfg
+			next.ServerType = vmSize
+			next.Capacity.Market = market
+			attempt := ProvisioningCandidate{Config: next, FailureLabel: vmSize}
+			if marketIndex > 0 {
+				attempt.FailureLabel = "on-demand " + vmSize
+				attempt.FallbackMessage = fmt.Sprintf("fallback provisioning type=%s market=on-demand after spot rejection\n", vmSize)
+			} else if i > 0 {
+				attempt.FallbackMessage = fmt.Sprintf("fallback provisioning type=%s after quota/capacity rejection\n", vmSize)
 			}
-			errs = append(errs, fmt.Errorf("on-demand %s: %w", vmSize, err))
-			if !isAzureRetryableProvisioningError(err) {
-				return Server{}, next, joinErrors(errs)
-			}
+			attempts = append(attempts, attempt)
 		}
 	}
-	return Server{}, cfg, joinErrors(errs)
+	return attempts, nil
 }
 
 func azureProvisioningCandidatesForConfig(cfg Config) []string {

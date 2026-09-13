@@ -47,6 +47,15 @@ Core owns the entire workflow after acquisition:
 - heartbeat/touch;
 - release.
 
+For capacity fallback, use `ProvisionServerCandidates` with an ordered list of
+`ProvisioningCandidate` values and a `ServerProvisioner`. The adapter selects
+the exact configurations and diagnostics; shared code sequences preparation and
+creation, aggregates create failures, and returns the successful configuration.
+`Prepare` errors stop immediately. Only the adapter's `CanRetry` decision allows
+another create, after its create path has handled partial-resource cleanup.
+GCP, Azure, and Hetzner use this owner. Region routing, resource identity,
+cleanup, and provider-specific market eligibility stay in the adapters.
+
 The backend owns only the provider lifecycle:
 
 ```go
