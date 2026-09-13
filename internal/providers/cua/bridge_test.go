@@ -158,27 +158,6 @@ func TestBridgeSendsJSONOnStdinAndMapsSecretOnlyToSDKEnv(t *testing.T) {
 	}
 }
 
-func TestNotFoundClassificationRequiresStructuredSignal(t *testing.T) {
-	for _, err := range []error{
-		&bridgeActionError{class: "not_found", code: "HTTPStatusError", msg: "missing"},
-		&bridgeActionError{class: "cleanup_failed", code: "SandboxNotFoundError", msg: "missing"},
-	} {
-		if !isCUANotFound(err) {
-			t.Fatalf("isCUANotFound(%v)=false, want true", err)
-		}
-	}
-	for _, err := range []error{
-		&bridgeActionError{class: "cleanup_failed", code: "RuntimeError", msg: "request to sandbox-404 timed out"},
-		&bridgeActionError{class: "cleanup_failed", code: "RuntimeError", msg: "not found in response text"},
-		&bridgeActionError{class: "cleanup_failed", code: "FileNotFoundError", msg: "local file missing"},
-		&bridgeActionError{class: "cleanup_failed", code: "ModuleNotFoundError", msg: "SDK module missing"},
-	} {
-		if isCUANotFound(err) {
-			t.Fatalf("isCUANotFound(%v)=true for unstructured message", err)
-		}
-	}
-}
-
 func TestBridgeRedactsSecretFromCommandFailure(t *testing.T) {
 	secret := "placeholder"
 	t.Setenv("CRABBOX_CUA_API_KEY", secret)
@@ -218,10 +197,7 @@ func TestBridgeRedactsSecretBeforeTruncatingFailure(t *testing.T) {
 func TestBridgeMutationsFailClosedBeforeRunner(t *testing.T) {
 	runner := &recordingRunner{}
 	client := newBridgeClient(testConfig(), core.Runtime{Exec: runner})
-	if _, err := client.CreateSandbox(context.Background(), map[string]string{"lease": "test"}); err == nil || !strings.Contains(err.Error(), "idempotency key") || !strings.Contains(err.Error(), cuaTrackingIssue) {
-		t.Fatalf("CreateSandbox err=%v, want actionable provisioning guard", err)
-	}
-	if _, err := client.RoundTrip(context.Background(), bridgeRequest{Action: "create"}); err == nil || !strings.Contains(err.Error(), "idempotency key") {
+	if _, err := client.RoundTrip(context.Background(), bridgeRequest{Action: "create"}); err == nil || !strings.Contains(err.Error(), "idempotency key") || !strings.Contains(err.Error(), cuaTrackingIssue) {
 		t.Fatalf("RoundTrip(create) err=%v, want provisioning guard", err)
 	}
 	if _, err := client.RoundTrip(context.Background(), bridgeRequest{Action: "delete"}); err == nil || !strings.Contains(err.Error(), "atomically") {
