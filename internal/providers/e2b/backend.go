@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"path"
 	"strings"
 	"time"
 
@@ -53,7 +52,7 @@ const e2bMaxSandboxTimeout = time.Hour
 func (b *e2bBackend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *e2bBackend) Warmup(ctx context.Context, req core.WarmupRequest) error {
-	if err := validateE2BUser(b.cfg.E2B.User); err != nil {
+	if _, err := workspaceForConfig(b.cfg, b.rt).ProcessUser(); err != nil {
 		return err
 	}
 	started := core.ClockNow(b.rt.Clock)
@@ -80,7 +79,7 @@ func (b *e2bBackend) Warmup(ctx context.Context, req core.WarmupRequest) error {
 
 func (b *e2bBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
 	var processUser string
-	workspace := e2bWorkspacePath(b.cfg)
+	workspace := workspaceForConfig(b.cfg, b.rt).Path()
 	var client shared.EnvdSandboxAPI
 	var session shared.EnvdSandboxSession
 	var leaseID, sandboxID, slug string
@@ -95,7 +94,7 @@ func (b *e2bBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResu
 				return err
 			}
 			var err error
-			processUser, err = e2bProcessUser(b.cfg.E2B.User)
+			processUser, err = workspaceForConfig(b.cfg, b.rt).ProcessUser()
 			if err != nil {
 				return err
 			}
@@ -129,10 +128,10 @@ func (b *e2bBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResu
 			return e2bError("connect sandbox", err)
 		},
 		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, client, session, req, workspace, prepared)
+			return workspaceForConfig(b.cfg, b.rt).Sync(ctx, client, session, req, workspace, prepared)
 		},
 		NoSync: func(ctx context.Context) error {
-			return b.prepareWorkspace(ctx, client, session, workspace)
+			return workspaceForConfig(b.cfg, b.rt).Prepare(ctx, client, session, workspace)
 		},
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
 			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
@@ -325,7 +324,7 @@ func (b *e2bBackend) createSandbox(ctx context.Context, client shared.EnvdSandbo
 	}
 	template := core.Blank(b.cfg.E2B.Template, core.E2BConfigDefaultTemplate)
 	cfg := b.cfg
-	workspace, err := cleanE2BWorkspacePath(e2bWorkspacePath(cfg))
+	workspace, err := shared.CleanPOSIXWorkspacePath("e2b workspace path", workspaceForConfig(cfg, b.rt).Path())
 	if err != nil {
 		return "", shared.EnvdSandbox{}, "", err
 	}
@@ -609,52 +608,6 @@ func e2bTimeoutDuration(ttl time.Duration) time.Duration {
 
 func e2bTimeoutSeconds(ttl time.Duration) int {
 	return durationSecondsCeil(e2bTimeoutDuration(ttl))
-}
-
-func e2bWorkspacePath(cfg core.Config) string {
-	workdir := strings.TrimSpace(cfg.E2B.Workdir)
-	if workdir == "" {
-		workdir = core.E2BConfigDefaultWorkdir
-	}
-	if strings.HasPrefix(workdir, "/") {
-		return path.Clean(workdir)
-	}
-	return path.Join(e2bUserHome(cfg.E2B.User), workdir)
-}
-
-func e2bUserHome(user string) string {
-	user = e2bWorkspaceUser(user)
-	if user == "" {
-		user = "user"
-	}
-	if user == "root" {
-		return "/root"
-	}
-	return path.Join("/home", user)
-}
-
-func e2bWorkspaceUser(user string) string {
-	clean, err := e2bProcessUser(user)
-	if err != nil || clean == "" {
-		return "user"
-	}
-	return clean
-}
-
-func validateE2BUser(user string) error {
-	_, err := e2bProcessUser(user)
-	return err
-}
-
-func e2bProcessUser(user string) (string, error) {
-	clean := strings.TrimSpace(user)
-	if clean == "" {
-		return "", nil
-	}
-	if clean == "." || clean == ".." || strings.ContainsAny(clean, `/\`) || strings.ContainsRune(clean, 0) {
-		return "", core.Exit(2, "invalid e2b.user %q: use a login name, not a path", user)
-	}
-	return clean, nil
 }
 
 func rejectE2BSyncOptions(req core.RunRequest) error {

@@ -447,19 +447,7 @@ func workdir(cfg core.Config) string {
 }
 
 func cleanWorkdir(workdir string) (string, error) {
-	trimmed := strings.TrimSpace(workdir)
-	if trimmed == "" {
-		return "", core.Exit(2, "upstash-box workdir is empty")
-	}
-	clean := path.Clean(trimmed)
-	if !strings.HasPrefix(clean, "/") {
-		return "", core.Exit(2, "upstash-box workdir %q must resolve to an absolute path", workdir)
-	}
-	switch clean {
-	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var", "/workspace", "/workspace/home":
-		return "", core.Exit(2, "upstash-box workdir %q is too broad; choose a dedicated subdirectory", clean)
-	}
-	return clean, nil
+	return shared.CleanPOSIXWorkspacePath("upstash-box workdir", workdir, "/workspace", "/workspace/home")
 }
 
 const workspaceRoot = "/workspace/home"

@@ -165,6 +165,18 @@ some SDK/CLI transports support it without archive sync. An adapter that cannot
 skip transfer must reject it before acquisition or provider execution. Blacksmith
 Testbox does this because its native run command has no supported sync bypass.
 
+### Shared sandbox workspaces
+
+E2B-compatible adapters use `shared.EnvdWorkspace` for process-user resolution,
+home-relative workspace paths, directory preparation, and archive sync over the
+shared envd API. Adapters retain their user default, archive naming, transport
+credentials, endpoint routing, and command-stream completion policy.
+
+`shared.CleanPOSIXWorkspacePath` provides the common dedicated-directory check.
+Pass any additional protected mount roots explicitly; reserved roots are exact
+matches, so dedicated subdirectories remain valid. Providers with different
+path admission rules keep those checks in their own adapter.
+
 ### Optional interfaces
 
 `ProviderServerTypeProvider` has one operation, `ServerTypeForConfig(Config)`.
