@@ -10,6 +10,7 @@
 
 ### Fixes
 
+- Validate documentation-site heading links against the renderer's shared heading identities, excluding fenced/commented pseudoheadings while preserving published IDs and separate repository-only anchor rules.
 - Preserve Anthropic Sandbox Runtime command cancellation and deadline causes in recorded run outcomes and timing without changing numeric exit codes or diagnostics. [PR 2229](https://github.com/openclaw/crabbox/pull/2229).
 - Reject non-finite Vercel Sandbox vCPU values during configuration validation instead of failing later while encoding a bridge request; preserve zero/service-default and supported fractional values. [PR 2230](https://github.com/openclaw/crabbox/pull/2230).
 - Disable Corepack downloads and automatic project pinning during package-manager preflight version probes, and suppress supported pnpm secondary version/lockfile management, without changing Corepack's project selection or the later workload's environment. [PR 2224](https://github.com/openclaw/crabbox/pull/2224).

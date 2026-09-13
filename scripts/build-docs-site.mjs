@@ -2,7 +2,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { reserveHeadingAnchor } from "./lib/markdown-headings.mjs";
+import { scanSiteMarkdownLines } from "./lib/markdown-headings.mjs";
 
 const root = process.cwd();
 const docsDir = path.join(root, "docs");
@@ -359,13 +359,12 @@ function titleize(input) {
 }
 
 export function markdownToHtml(markdown, currentRel) {
-  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+  const structure = scanSiteMarkdownLines(markdown);
+  const lines = structure.map((entry) => entry.line);
   const html = [];
-  const anchors = new Set();
   let paragraph = [];
   let list = null;
   let fence = null;
-  let htmlComment = false;
 
   const flushParagraph = () => {
     if (!paragraph.length) return;
@@ -387,30 +386,26 @@ export function markdownToHtml(markdown, currentRel) {
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const fenceMatch = line.match(/^```(\w+)?\s*$/);
-    if (fenceMatch) {
+    const entry = structure[i];
+    if (entry.kind === "fence-open" || entry.kind === "fence-close") {
       flushParagraph();
       closeList();
-      if (fence) {
+      if (entry.kind === "fence-close") {
         html.push(`<pre><code class="language-${fence.lang}">${escapeHtml(fence.lines.join("\n"))}</code></pre>`);
         fence = null;
       } else {
-        fence = { lang: fenceMatch[1] || "text", lines: [] };
+        fence = { lang: entry.language, lines: [] };
       }
       continue;
     }
-    if (fence) {
+    if (entry.kind === "code") {
       fence.lines.push(line);
       continue;
     }
-    if (htmlComment) {
-      if (line.includes("-->")) htmlComment = false;
-      continue;
-    }
-    if (line.trimStart().startsWith("<!--")) {
+    if (entry.kind === "comment") continue;
+    if (entry.kind === "comment-start") {
       flushParagraph();
       closeList();
-      htmlComment = !line.includes("-->");
       continue;
     }
     if (!line.trim()) {
@@ -418,14 +413,10 @@ export function markdownToHtml(markdown, currentRel) {
       closeList();
       continue;
     }
-    const heading = line.match(/^(#{1,4})\s+(.+)$/);
-    if (heading) {
+    if (entry.kind === "heading") {
       flushParagraph();
       closeList();
-      const level = heading[1].length;
-      const text = heading[2].trim();
-      const base = slug(text);
-      const id = base ? reserveHeadingAnchor(anchors, base) : base;
+      const { level, text, id } = entry;
       const inner = inline(text, currentRel);
       if (level === 1) {
         html.push(`<h1 id="${id}">${inner}</h1>`);
@@ -1473,24 +1464,6 @@ function crabSvg() {
 </svg>`;
 }
 
-function slug(text) {
-  let out = "";
-  let lastDash = false;
-  for (const char of text.toLowerCase()) {
-    if (char === "`") continue;
-    const code = char.charCodeAt(0);
-    const ok = (code >= 97 && code <= 122) || (code >= 48 && code <= 57);
-    if (ok) {
-      out += char;
-      lastDash = false;
-    } else if (!lastDash) {
-      out += "-";
-      lastDash = true;
-    }
-  }
-  return trimDashes(out);
-}
-
 function firstIndex(left, right) {
   if (left < 0) return right;
   if (right < 0) return left;
@@ -1518,14 +1491,6 @@ function stripHtmlTags(value) {
     if (!inTag) out += char;
   }
   return out;
-}
-
-function trimDashes(value) {
-  let start = 0;
-  let end = value.length;
-  while (start < end && value[start] === "-") start += 1;
-  while (end > start && value[end - 1] === "-") end -= 1;
-  return value.slice(start, end);
 }
 
 function escapeHtml(value) {
