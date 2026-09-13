@@ -32,6 +32,43 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // --- pure-function tests -----------------------------------------------------
 
+func TestOpenComputerConfigureSizing(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		cpu     int
+		memory  int
+		wantErr string
+	}{
+		{name: "defaults"},
+		{name: "cpu only", cpu: 7},
+		{name: "memory only", memory: 7},
+		{name: "positive", cpu: 7, memory: 3},
+		{name: "negative cpu", cpu: -2, wantErr: "opencomputer cpu must be non-negative"},
+		{name: "negative memory", memory: -2, wantErr: "opencomputer memoryMB must be non-negative"},
+		{name: "both negative", cpu: -2, memory: -2, wantErr: "opencomputer cpu must be non-negative"},
+		{name: "negative cpu with memory", cpu: -2, memory: 7, wantErr: "opencomputer cpu must be non-negative"},
+		{name: "negative memory with cpu", cpu: 7, memory: -2, wantErr: "opencomputer memoryMB must be non-negative"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.Config{Provider: "opencomputer", OpenComputer: core.OpenComputerConfig{CPU: tc.cpu, MemoryMB: tc.memory}}
+			backend, err := (Provider{}).Configure(cfg, core.Runtime{})
+			if tc.wantErr != "" {
+				var exitErr core.ExitError
+				if backend != nil || !errors.As(err, &exitErr) || exitErr.Code != 2 || err.Error() != tc.wantErr {
+					t.Fatalf("Configure backend=%T err=%v, want nil backend and exit 2: %s", backend, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := backend.(*openComputerBackend).cfg.OpenComputer; got != cfg.OpenComputer {
+				t.Fatalf("sizing changed: %#v want %#v", got, cfg.OpenComputer)
+			}
+		})
+	}
+}
+
 func TestOpenComputerConfigShowCompletePassiveSection(t *testing.T) {
 	projector, ok := any(Provider{}).(core.ProviderConfigShowProjector)
 	if !ok {
