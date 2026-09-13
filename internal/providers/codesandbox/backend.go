@@ -475,20 +475,7 @@ func codeSandboxServerView(claim core.LeaseClaim, sb SandboxSummary) core.Server
 		sandboxID = sb.ID
 	}
 	name := blank(sb.Title, sandboxID)
-	return core.Server{
-		Provider: providerName,
-		CloudID:  sandboxID,
-		Name:     name,
-		Status:   state,
-		Labels: map[string]string{
-			"provider": providerName,
-			"lease":    claim.LeaseID,
-			"slug":     claim.Slug,
-			"pond":     claim.Pond,
-			"target":   targetLinux,
-			"state":    state,
-		},
-	}
+	return shared.SandboxLeaseView(providerName, targetLinux, claim, sandboxID, name, state)
 }
 
 func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
