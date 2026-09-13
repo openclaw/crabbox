@@ -768,7 +768,7 @@ func TestWandbStopRejectsUnownedID(t *testing.T) {
 func TestWandbDoctorReturnsInventoryResult(t *testing.T) {
 	t.Setenv("WANDB_API_KEY", "fake")
 	api := &fakeWandbAPI{versionValue: "coreweave.sandbox.v1beta2", listValue: []wandbSandbox{{ID: "sb-1"}}}
-	doctor, err := Provider{}.ConfigureDoctor(core.Config{}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+	doctor, err := core.ConfigureProviderDoctor(Provider{}, core.Config{}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatal(err)
 	}

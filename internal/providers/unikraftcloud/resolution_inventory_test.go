@@ -3,6 +3,7 @@ package unikraftcloud
 import (
 	"context"
 	"errors"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"strings"
 	"testing"
 
@@ -133,7 +134,7 @@ func TestStatusDoesNotRawFallbackForCorruptExactClaim(t *testing.T) {
 		t.Fatalf("Warmup: %v", err)
 	}
 	claim := onlyTestClaim(t)
-	labels := cloneLabels(claim.Labels)
+	labels := shared.CloneLabels(claim.Labels)
 	labels[ukcLabelAccountUUID] = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
 	if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels); err != nil {
 		t.Fatalf("corrupt claim: %v", err)

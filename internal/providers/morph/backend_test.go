@@ -445,7 +445,7 @@ func TestApplyMorphProviderFlagsUpdatesServerType(t *testing.T) {
 }
 
 func TestConfigureDoctorReturnsMorphDoctorBackend(t *testing.T) {
-	doctor, err := Provider{}.ConfigureDoctor(testMorphConfig(), core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+	doctor, err := core.ConfigureProviderDoctor(Provider{}, testMorphConfig(), core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatalf("ConfigureDoctor: %v", err)
 	}

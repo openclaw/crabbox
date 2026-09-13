@@ -191,7 +191,3 @@ func serverTypeCandidatesForClass(class string) []string {
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewHetznerLeaseBackend(p.Spec(), cfg, rt), nil
 }
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("hetzner", func() (core.Backend, error) { return p.Configure(cfg, rt) })
-}

@@ -91,7 +91,7 @@ func TestProviderConfigureAndFlags(t *testing.T) {
 	if backend.Spec().Name != providerName {
 		t.Fatalf("spec name=%q", backend.Spec().Name)
 	}
-	doctor, err := p.ConfigureDoctor(cfg, rt)
+	doctor, err := core.ConfigureProviderDoctor(p, cfg, rt)
 	if err != nil {
 		t.Fatalf("ConfigureDoctor: %v", err)
 	}

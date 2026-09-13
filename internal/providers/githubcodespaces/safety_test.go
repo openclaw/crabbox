@@ -3,6 +3,7 @@ package githubcodespaces
 import (
 	"context"
 	"errors"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"reflect"
 	"strings"
 	"testing"
@@ -188,7 +189,7 @@ func TestSafetyClaimResourceRequiresPermanentIdentity(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			claim := baseClaim
-			claim.Labels = cloneLabels(baseClaim.Labels)
+			claim.Labels = shared.CloneLabels(baseClaim.Labels)
 			live := item
 			if test.mutateClaim != nil {
 				test.mutateClaim(&claim)
@@ -229,9 +230,9 @@ func TestSafetyTouchCannotRestoreStaleEndpointAfterRelease(t *testing.T) {
 	staleTarget := core.SSHTarget{Host: "cs.cs-stale-touch.main", Port: "22"}
 	server := mustCreateSafetyClaim(t, b, item, leaseID, "stale-touch", releaseStop, "ready", time.Now().Add(time.Hour), staleTarget)
 	staleServer := server
-	staleServer.Labels = cloneLabels(server.Labels)
+	staleServer.Labels = shared.CloneLabels(server.Labels)
 	releaseServer := server
-	releaseServer.Labels = cloneLabels(server.Labels)
+	releaseServer.Labels = shared.CloneLabels(server.Labels)
 
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
 		Lease: core.LeaseTarget{LeaseID: leaseID, Server: releaseServer, SSH: staleTarget},

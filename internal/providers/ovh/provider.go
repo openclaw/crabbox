@@ -80,10 +80,6 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	return NewBackend(p.Spec(), cfg, rt), nil
 }
 
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return NewBackend(p.Spec(), cfg, rt), nil
-}
-
 func ovhServerTypeForClass(class string) string {
 	for _, profile := range classProfiles {
 		if profile.Class == class {

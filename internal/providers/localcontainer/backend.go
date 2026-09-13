@@ -226,12 +226,12 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		if !hasCompleteCapturedRuntimeScope(completedScope) {
 			return core.LeaseTarget{}, core.Exit(2, "local-container runtime identity is incomplete; refusing to create an unscoped lease")
 		}
-		metadata := cloneLabels(cfg.LocalContainer.CheckpointMetadata)
+		metadata := shared.CloneLabels(cfg.LocalContainer.CheckpointMetadata)
 		for _, key := range checkpointScopeMetadataKeys {
 			metadata[key] = completedScope[key]
 		}
-		cfg.LocalContainer.CheckpointMetadata = cloneLabels(metadata)
-		b.cfg.LocalContainer.CheckpointMetadata = cloneLabels(metadata)
+		cfg.LocalContainer.CheckpointMetadata = shared.CloneLabels(metadata)
+		b.cfg.LocalContainer.CheckpointMetadata = shared.CloneLabels(metadata)
 	}
 	if strings.TrimSpace(req.RequestedLeaseID) != "" {
 		return b.acquireFixed(ctx, req, cfg)
@@ -369,7 +369,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		return core.LeaseTarget{}, errors.Join(err, reconcileErr)
 	}
 	lease.Server.Status = "ready"
-	lease.Server.Labels = cloneLabels(lease.Server.Labels)
+	lease.Server.Labels = shared.CloneLabels(lease.Server.Labels)
 	lease.Server.Labels["state"] = "ready"
 	delete(lease.Server.Labels, "recovery")
 	readyClaim, err := core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, pendingClaim, lease.Server, lease.SSH)
@@ -583,7 +583,7 @@ func markPendingLease(server *core.Server) {
 	if server.Labels == nil {
 		server.Labels = map[string]string{}
 	} else {
-		server.Labels = cloneLabels(server.Labels)
+		server.Labels = shared.CloneLabels(server.Labels)
 	}
 	server.Status = pendingClaimState
 	server.Labels["state"] = pendingClaimState
@@ -684,7 +684,7 @@ func (b *backend) rollbackPendingLease(expected core.LeaseClaim, lease core.Leas
 		if err := b.removeContainer(rollbackCtx, lease.Server.CloudID); err != nil {
 			return err
 		}
-		labels := cloneLabels(lease.Server.Labels)
+		labels := shared.CloneLabels(lease.Server.Labels)
 		labels["bootstrap_dir"] = bootstrapDir
 		return b.cleanupContainerSidecars(lease.LeaseID, labels, true)
 	})
@@ -837,7 +837,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 				return core.LeaseTarget{}, errors.Join(err, reconcileErr)
 			}
 			lease.Server.Status = "ready"
-			lease.Server.Labels = cloneLabels(lease.Server.Labels)
+			lease.Server.Labels = shared.CloneLabels(lease.Server.Labels)
 			lease.Server.Labels["state"] = "ready"
 			delete(lease.Server.Labels, "recovery")
 			updatedClaim, updateErr = core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, exactClaim, lease.Server, lease.SSH)
@@ -916,7 +916,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	lease.Server.Labels = publicLocalContainerClaimLabels(lease.Server.Labels)
 	if req.IncludeDiagnostics && req.IsReadOnlyStatus() && !req.ReadyProbe {
 		// All ownership/claim merges are complete. Enrich only the returned copy.
-		lease.Server.Labels = cloneLabels(lease.Server.Labels)
+		lease.Server.Labels = shared.CloneLabels(lease.Server.Labels)
 		for key := range lease.Server.Labels {
 			if strings.HasPrefix(key, memoryDiagnosticPrefix) {
 				delete(lease.Server.Labels, key)
@@ -2672,7 +2672,7 @@ func mergeLocalContainerClaim(server core.Server, claim core.LeaseClaim) core.Se
 }
 
 func publicLocalContainerClaimLabels(labels map[string]string) map[string]string {
-	out := cloneLabels(labels)
+	out := shared.CloneLabels(labels)
 	for key := range out {
 		if privateLocalContainerScopeLabel(key) {
 			delete(out, key)
@@ -2696,14 +2696,6 @@ func isPendingLocalContainerClaim(claim core.LeaseClaim) bool {
 		strings.TrimSpace(claim.Labels["recovery"]) == pendingRecoveryKind &&
 		strings.TrimSpace(claim.CloudID) != "" &&
 		strings.TrimSpace(claim.ProviderScope) != ""
-}
-
-func cloneLabels(labels map[string]string) map[string]string {
-	cloned := make(map[string]string, len(labels))
-	for key, value := range labels {
-		cloned[key] = value
-	}
-	return cloned
 }
 
 func containerSSHHostPort(container inspectContainer) (string, string, error) {

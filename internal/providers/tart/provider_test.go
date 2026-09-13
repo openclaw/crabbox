@@ -2242,7 +2242,7 @@ func TestConfigureDoctor(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	p := Provider{}
-	backend, err := p.ConfigureDoctor(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}})
+	backend, err := core.ConfigureProviderDoctor(p, cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}})
 	if err != nil {
 		t.Fatalf("ConfigureDoctor: %v", err)
 	}
@@ -3777,7 +3777,7 @@ func TestConfigureDoctorError(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.Tailscale.Enabled = true
-	_, err := (Provider{}).ConfigureDoctor(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}})
+	_, err := core.ConfigureProviderDoctor((Provider{}), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}})
 	if err == nil {
 		t.Fatal("ConfigureDoctor should propagate Configure error")
 	}

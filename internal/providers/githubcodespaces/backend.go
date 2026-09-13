@@ -215,7 +215,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 	}
 	if req.OnAcquired != nil {
-		acquired := core.LeaseTarget{Server: b.serverFromCodespace(created, cloneLabels(claim.Labels)), LeaseID: leaseID}
+		acquired := core.LeaseTarget{Server: b.serverFromCodespace(created, shared.CloneLabels(claim.Labels)), LeaseID: leaseID}
 		if err := req.OnAcquired(acquired); err != nil {
 			return core.LeaseTarget{}, errors.Join(err, rollbackUnboundCreatedCodespace(api, claim, created))
 		}
@@ -1087,7 +1087,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 
 func shouldDiscardMissingClaim(claim core.LeaseClaim, now time.Time) (bool, string) {
 	server := serverFromClaim(claim)
-	server.Labels = cloneLabels(server.Labels)
+	server.Labels = shared.CloneLabels(server.Labels)
 	server.Labels[labelState] = "provisioning"
 	return core.ShouldCleanupServer(server, now)
 }
@@ -1418,7 +1418,7 @@ func (b *backend) serverFromCodespace(item codespace, labels map[string]string) 
 		Provider: providerName,
 		Name:     item.Name,
 		Status:   item.State,
-		Labels:   cloneLabels(labels),
+		Labels:   shared.CloneLabels(labels),
 	}
 	server.ServerType.Name = shared.FirstNonBlankTrimmed(item.Machine.Name, b.effectiveMachine())
 	return server
@@ -1467,7 +1467,7 @@ func (b *backend) serversFromCodespaces(items []codespace) ([]core.LeaseView, er
 		if err := validateCodespaceClaimResource(claim, item); err != nil {
 			return nil, err
 		}
-		server := b.serverFromCodespace(item, cloneLabels(claim.Labels))
+		server := b.serverFromCodespace(item, shared.CloneLabels(claim.Labels))
 		server.Labels[labelCodespaceName] = item.Name
 		server.Labels[labelEnvironmentID] = shared.FirstNonBlankTrimmed(item.EnvironmentID, server.Labels[labelEnvironmentID])
 		server.Labels[labelRepository] = shared.FirstNonBlankTrimmed(item.Repository.FullName, server.Labels[labelRepository])
@@ -1497,7 +1497,7 @@ func (b *backend) resolveServer(items []codespace, id string) (core.Server, stri
 		name := shared.FirstNonBlankTrimmed(claim.CloudID, claim.Labels[labelCodespaceName])
 		for _, item := range items {
 			if item.Name == name {
-				return b.serverFromCodespace(item, cloneLabels(claim.Labels)), claim.LeaseID, nil
+				return b.serverFromCodespace(item, shared.CloneLabels(claim.Labels)), claim.LeaseID, nil
 			}
 		}
 		if name != "" {
@@ -1513,7 +1513,7 @@ func (b *backend) resolveServer(items []codespace, id string) (core.Server, stri
 			if !ok {
 				return core.Server{}, "", core.Exit(3, "refusing unmanaged github-codespaces codespace=%s without local claim", item.Name)
 			}
-			return b.serverFromCodespace(item, cloneLabels(claim.Labels)), claim.LeaseID, nil
+			return b.serverFromCodespace(item, shared.CloneLabels(claim.Labels)), claim.LeaseID, nil
 		}
 	}
 	return core.Server{}, "", nil
@@ -1671,7 +1671,7 @@ func serverFromClaim(claim core.LeaseClaim) core.Server {
 		Provider: providerName,
 		Name:     shared.FirstNonBlankTrimmed(claim.CloudID, claim.Labels[labelCodespaceName]),
 		Status:   claim.Labels[labelState],
-		Labels:   cloneLabels(claim.Labels),
+		Labels:   shared.CloneLabels(claim.Labels),
 	}
 	server.ServerType.Name = claim.Labels[labelMachine]
 	return server
@@ -1699,14 +1699,6 @@ func repoName(repo string) string {
 		return ""
 	}
 	return strings.TrimSuffix(name, ".git")
-}
-
-func cloneLabels(labels map[string]string) map[string]string {
-	out := map[string]string{}
-	for key, value := range labels {
-		out[key] = value
-	}
-	return out
 }
 
 func repoRootForClaim(repo core.Repo) (string, error) {

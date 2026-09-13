@@ -23,6 +23,7 @@ package localcontainer
 import (
 	"bytes"
 	"context"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"io"
 	"os"
 	"path/filepath"
@@ -407,7 +408,7 @@ func TestCleanupRetainsKeyPreparedByConcurrentAcquire(t *testing.T) {
 }
 
 func cleanupTOCTOUScopeLabels(labels map[string]string, contextName string) map[string]string {
-	out := cloneLabels(labels)
+	out := shared.CloneLabels(labels)
 	for key, value := range checkpointScopeMetadata(checkpointScope{
 		Runtime: "docker", Context: contextName, Endpoint: "unix:///tmp/docker-test.sock", DaemonID: "daemon-test",
 	}) {

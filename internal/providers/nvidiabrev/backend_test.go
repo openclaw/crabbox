@@ -299,7 +299,7 @@ func TestNvidiaBrevDoctorRunsReadOnlyCommands(t *testing.T) {
 		}
 		return core.LocalCommandResult{}, nil
 	}
-	doctor, err := Provider{}.ConfigureDoctor(core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
+	doctor, err := core.ConfigureProviderDoctor(Provider{}, core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatal(err)
 	}

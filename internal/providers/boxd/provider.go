@@ -77,14 +77,6 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	return newBackend(p.Spec(), cfg, rt), nil
 }
 
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	backend, err := p.Configure(cfg, rt)
-	if err != nil {
-		return nil, err
-	}
-	return backend.(core.DoctorBackend), nil
-}
-
 // ClaimScope binds routing; the authenticated user is independently fenced in each claim.
 func (Provider) ClaimScope(cfg core.Config) string {
 	u, err := consoleURL(cfg.Boxd.APIURL)

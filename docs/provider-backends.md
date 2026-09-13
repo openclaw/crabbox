@@ -283,9 +283,10 @@ type DoctorBackend interface {
 Use `DoctorBackend` when a provider owns direct credentials or a delegated runner
 outside the coordinator. The check must validate provider-specific readiness
 without creating resources, and it must not treat unrelated coordinator health as
-proof that the provider itself is configured correctly. Expose it through the
-matching provider-level hook so `doctor` does not configure every provider just
-to discover the optional capability:
+proof that the provider itself is configured correctly. Core configures only the
+selected provider and discovers `DoctorBackend` on its normal backend. Implement
+the following override only when diagnostics need different configuration, such
+as allowing missing acquisition-only inputs:
 
 ```go
 type DoctorProvider interface {

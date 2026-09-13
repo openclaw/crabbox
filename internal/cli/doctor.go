@@ -444,62 +444,51 @@ All flags:
 		return finish()
 	}
 
-	doctorProvider, doctorSupported := providerDef.(DoctorProvider)
-	if doctorSupported {
-		if err := validateProviderConfig(cfg); err != nil {
-			class := doctorErrorClass(err)
-			hint := doctorErrorHint(providerDef.Name(), class)
-			record("failed", "provider", fmt.Sprintf("provider=%s class=%s hint=%s %v", providerDef.Name(), class, hint, err), map[string]string{"provider": providerDef.Name(), "class": class, "hint": hint, "error": err.Error()})
-			ok = false
-			return finish()
-		}
-		doctor, err := doctorProvider.ConfigureDoctor(cfg, runtimeForApp(a))
+	if err := validateProviderConfig(cfg); err != nil {
+		class := doctorErrorClass(err)
+		hint := doctorErrorHint(providerDef.Name(), class)
+		record("failed", "provider", fmt.Sprintf("provider=%s class=%s hint=%s %v", providerDef.Name(), class, hint, err), map[string]string{"provider": providerDef.Name(), "class": class, "hint": hint, "error": err.Error()})
+		ok = false
+		return finish()
+	}
+	doctor, err := ConfigureProviderDoctor(providerDef, cfg, runtimeForApp(a))
+	if err != nil {
+		class := doctorErrorClass(err)
+		hint := doctorErrorHint(providerDef.Name(), class)
+		record("failed", "provider", fmt.Sprintf("provider=%s class=%s hint=%s %v", providerDef.Name(), class, hint, err), map[string]string{"provider": providerDef.Name(), "class": class, "hint": hint, "error": err.Error()})
+		ok = false
+	} else if doctor == nil {
+		record("skip", "provider", fmt.Sprintf("provider=%s direct_doctor=unsupported", providerDef.Name()), map[string]string{"provider": providerDef.Name(), "direct_doctor": "unsupported"})
+	} else {
+		doctorCtx, cancel := context.WithTimeout(ctx, doctorProviderTimeout)
+		result, err := doctor.Doctor(doctorCtx, DoctorRequest{ProbeSSH: *probeSSH})
+		cancel()
 		if err != nil {
 			class := doctorErrorClass(err)
-			hint := doctorErrorHint(providerDef.Name(), class)
-			record("failed", "provider", fmt.Sprintf("provider=%s class=%s hint=%s %v", providerDef.Name(), class, hint, err), map[string]string{"provider": providerDef.Name(), "class": class, "hint": hint, "error": err.Error()})
+			hint := doctorErrorHint(doctor.Spec().Name, class)
+			record("failed", "provider", fmt.Sprintf("provider=%s class=%s hint=%s %v", doctor.Spec().Name, class, hint, err), map[string]string{"provider": doctor.Spec().Name, "class": class, "hint": hint, "error": err.Error(), "timeout": doctorProviderTimeout.String()})
 			ok = false
 		} else {
-			doctorCtx, cancel := context.WithTimeout(ctx, doctorProviderTimeout)
-			result, err := doctor.Doctor(doctorCtx, DoctorRequest{ProbeSSH: *probeSSH})
-			cancel()
-			if err != nil {
-				class := doctorErrorClass(err)
-				hint := doctorErrorHint(doctor.Spec().Name, class)
-				record("failed", "provider", fmt.Sprintf("provider=%s class=%s hint=%s %v", doctor.Spec().Name, class, hint, err), map[string]string{"provider": doctor.Spec().Name, "class": class, "hint": hint, "error": err.Error(), "timeout": doctorProviderTimeout.String()})
-				ok = false
+			if len(result.Checks) > 0 {
+				for _, check := range result.Checks {
+					recordProviderDoctorCheck(result.Provider, check)
+				}
 			} else {
-				if len(result.Checks) > 0 {
-					for _, check := range result.Checks {
-						recordProviderDoctorCheck(result.Provider, check)
-					}
-				} else {
-					status := strings.TrimSpace(result.Status)
-					if status == "" {
-						status = "ok"
-					}
-					message := fmt.Sprintf("provider=%s timeout=%s %s", result.Provider, doctorProviderTimeout, result.Message)
-					details := parseDoctorDetails(result.Message)
-					details["provider"] = result.Provider
-					details["timeout"] = doctorProviderTimeout.String()
-					record(status, "provider", message, details)
-					if doctorStatusFails(status) {
-						ok = false
-					}
+				status := strings.TrimSpace(result.Status)
+				if status == "" {
+					status = "ok"
+				}
+				message := fmt.Sprintf("provider=%s timeout=%s %s", result.Provider, doctorProviderTimeout, result.Message)
+				details := parseDoctorDetails(result.Message)
+				details["provider"] = result.Provider
+				details["timeout"] = doctorProviderTimeout.String()
+				record(status, "provider", message, details)
+				if doctorStatusFails(status) {
+					ok = false
 				}
 			}
 		}
-		return finish()
 	}
-
-	if providerDef.Spec().Kind == ProviderKindDelegatedRun {
-		if !doctorSupported {
-			record("skip", "provider", fmt.Sprintf("provider=%s direct_doctor=unsupported", providerDef.Name()), map[string]string{"provider": providerDef.Name(), "direct_doctor": "unsupported"})
-		}
-		return finish()
-	}
-
-	record("skip", "provider", fmt.Sprintf("provider=%s direct_doctor=unsupported", providerDef.Name()), map[string]string{"provider": providerDef.Name(), "direct_doctor": "unsupported"})
 	return finish()
 }
 

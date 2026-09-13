@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -98,8 +97,4 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	}
 	cfg.Provider = providerName
 	return &codeSandboxBackend{spec: p.Spec(), cfg: cfg, rt: rt}, nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("codesandbox", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }

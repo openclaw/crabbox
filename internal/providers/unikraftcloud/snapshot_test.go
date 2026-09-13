@@ -1,6 +1,7 @@
 package unikraftcloud
 
 import (
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"strings"
 	"testing"
 
@@ -26,7 +27,7 @@ func TestVerifyUnikraftCloudClaimSnapshotRejectsRebind(t *testing.T) {
 		},
 	}
 	current := snapshot
-	current.Labels = cloneLabels(snapshot.Labels)
+	current.Labels = shared.CloneLabels(snapshot.Labels)
 	current.CloudID = "66666666-7777-8888-9999-000000000000"
 	current.Labels[ukcLabelInstanceUUID] = current.CloudID
 

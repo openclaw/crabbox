@@ -67,7 +67,3 @@ func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewLinodeLeaseBackend(p.Spec(), cfg, rt), nil
 }
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return newLinodeLeaseBackend(p.Spec(), cfg, rt), nil
-}

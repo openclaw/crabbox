@@ -96,10 +96,6 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	return NewDigitalOceanLeaseBackend(p.Spec(), cfg, rt), nil
 }
 
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("digitalocean", func() (core.Backend, error) { return p.Configure(cfg, rt) })
-}
-
 func digitalOceanServerTypeForClass(class string) string {
 	for _, profile := range classProfiles {
 		if profile.Class == class {

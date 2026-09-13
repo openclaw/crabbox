@@ -389,7 +389,7 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 					State:      claim.Labels["state"],
 					ServerType: "unikraft-cloud-instance",
 					Network:    networkPublic,
-					Labels:     cloneLabels(claim.Labels),
+					Labels:     shared.CloneLabels(claim.Labels),
 				}, nil
 			}
 			if state := claim.Labels["state"]; state == ukcStateCreatePreflight || state == ukcStateCreateConflict {

@@ -67,7 +67,7 @@ func TestExeDevDoctorListsInventory(t *testing.T) {
 		}
 		return core.LocalCommandResult{Stdout: `{"vms":[{"vm_name":"crabbox-blue-12345678","ssh_dest":"crabbox-blue-12345678.exe.xyz","status":"running","tags":["crabbox","crabbox-lease-cbx_abcdef123456","crabbox-slug-blue"]}]}`}, nil
 	}}
-	doctor, err := Provider{}.ConfigureDoctor(core.Config{}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	doctor, err := core.ConfigureProviderDoctor(Provider{}, core.Config{}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 	if err != nil {
 		t.Fatal(err)
 	}

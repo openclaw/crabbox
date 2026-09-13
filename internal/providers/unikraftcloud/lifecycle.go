@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"net/http"
 	"reflect"
 	"strings"
@@ -46,14 +47,6 @@ func unikraftCloudCreateRequestHash(req createInstanceRequest) string {
 	return fmt.Sprintf("%x", sum[:])
 }
 
-func cloneLabels(labels map[string]string) map[string]string {
-	out := make(map[string]string, len(labels))
-	for key, value := range labels {
-		out[key] = value
-	}
-	return out
-}
-
 func (b *backend) createIntentClaim(leaseID, slug, scope, accountUUID string, req core.WarmupRequest, createReq createInstanceRequest) (core.LeaseClaim, error) {
 	labels := directLeaseLabels(b.cfg, leaseID, slug, req.Keep, core.ClockNow(b.rt.Clock))
 	labels["state"] = ukcStateCreatePreflight
@@ -83,7 +76,7 @@ func transitionUnikraftCloudCreateState(claim core.LeaseClaim, state string) (co
 		return core.LeaseClaim{}, core.Exit(5, "%s lease %s is already bound to instance %s", providerName, claim.LeaseID, claim.CloudID)
 	}
 	updated := claim
-	updated.Labels = cloneLabels(claim.Labels)
+	updated.Labels = shared.CloneLabels(claim.Labels)
 	updated.Labels["state"] = state
 	written, err := replaceLeaseClaimIfUnchangedDurable(claim.LeaseID, claim, updated)
 	if err != nil {
@@ -197,7 +190,7 @@ func (b *backend) publishReadyClaim(intent core.LeaseClaim, instance ukcInstance
 	if err := validateUnikraftCloudInstanceIdentity(instance, strings.TrimSpace(instance.UUID), resourceName); err != nil {
 		return core.LeaseClaim{}, err
 	}
-	labels := cloneLabels(intent.Labels)
+	labels := shared.CloneLabels(intent.Labels)
 	labels["state"] = ukcStateReady
 	labels[ukcLabelInstanceUUID] = instance.UUID
 	labels[ukcLabelProviderState] = normalizedInstanceState(instance.State)
@@ -247,7 +240,7 @@ func (b *backend) reconcileReadyClaimWrite(intent core.LeaseClaim, instance ukcI
 		unlockSlug()
 		return core.LeaseClaim{}, errors.Join(writeErr, fmt.Errorf("reserve restored %s lease slug: %w", providerName, slugErr))
 	}
-	labels := cloneLabels(intent.Labels)
+	labels := shared.CloneLabels(intent.Labels)
 	labels["slug"] = recoveredSlug
 	labels["state"] = ukcStateReady
 	labels[ukcLabelInstanceUUID] = instance.UUID
@@ -509,7 +502,7 @@ func (b *backend) deleteClaimedInstance(ctx context.Context, api unikraftCloudAP
 			return false, err
 		}
 		if state != ukcStateDeleteAttempt {
-			labels := cloneLabels(claim.Labels)
+			labels := shared.CloneLabels(claim.Labels)
 			labels["state"] = ukcStateDeleteAttempt
 			updated := claim
 			updated.Labels = labels
@@ -529,7 +522,7 @@ func (b *backend) deleteClaimedInstance(ctx context.Context, api unikraftCloudAP
 		if err := validateUnikraftCloudDeleteIdentity(deleted, instanceID, resourceName); err != nil {
 			return false, err
 		}
-		labels := cloneLabels(claim.Labels)
+		labels := shared.CloneLabels(claim.Labels)
 		labels["state"] = ukcStateDeleteAccepted
 		labels[ukcLabelProviderState] = normalizedInstanceState(deleted.State)
 		updated := claim
@@ -657,7 +650,7 @@ func unikraftCloudTerminalState(state string) bool {
 }
 
 func serverFromClaim(claim core.LeaseClaim) core.Server {
-	labels := cloneLabels(claim.Labels)
+	labels := shared.CloneLabels(claim.Labels)
 	return core.Server{
 		CloudID:  claim.CloudID,
 		Provider: providerName,

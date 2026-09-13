@@ -301,10 +301,6 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	return NewAWSLeaseBackend(p.Spec(), cfg, rt), nil
 }
 
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("aws", func() (core.Backend, error) { return p.Configure(cfg, rt) })
-}
-
 func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (core.NativeCheckpointCapability, bool) {
 	if req.Server.CloudID == "" {
 		return core.NativeCheckpointCapability{}, false

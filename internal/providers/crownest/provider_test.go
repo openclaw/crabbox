@@ -227,7 +227,7 @@ func TestConfigureReturnsDelegatedCleanupAndDoctor(t *testing.T) {
 	if _, ok := configured.(core.CleanupBackend); !ok {
 		t.Fatalf("configured backend does not implement CleanupBackend: %T", configured)
 	}
-	doctor, err := provider.ConfigureDoctor(testConfig(), core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+	doctor, err := core.ConfigureProviderDoctor(provider, testConfig(), core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatalf("ConfigureDoctor err=%v", err)
 	}

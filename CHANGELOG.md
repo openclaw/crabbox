@@ -2,7 +2,13 @@
 
 ## Unreleased
 
+### Changes
+
 - Add an opt-in `python3-venv` preflight that checks a disposable Python environment and pip with confirmed cleanup, without installing host tools or blocking workloads on missing capability. [PR 2217](https://github.com/openclaw/crabbox/pull/2217). Thanks @coygeek.
+
+### Fixes
+
+- Bound artifact discovery to the possible match depth for canonical non-recursive wildcard patterns, preserving selection and recursive glob behavior. [PR 2214](https://github.com/openclaw/crabbox/pull/2214). Thanks @vincentkoc.
 
 ## 0.58.0 - 2026-09-12
 
