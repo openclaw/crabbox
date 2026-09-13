@@ -260,10 +260,51 @@ async function frame(page) {
   });
 }
 
-async function screenshot(page, name) {
-  const bytes = await page.screenshot({ path: path.join(output, `${name}.png`) });
-  check(bytes.length > 4096 && bytes.length < 8 * 1024 * 1024, "screenshot_size");
+async function screenshot(page, name, failureImage = false) {
+  const bytes = await page.screenshot({ path: path.join(output, `${name}.png`), timeout: 5000 });
+  check(bytes.length > (failureImage ? 0 : 4096) && bytes.length < 8 * 1024 * 1024, "screenshot_size");
   proof.screenshots.push({ file: `${name}.png`, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") });
+}
+
+async function renderedFrame(page, name) {
+  // noVNC sets canvas dimensions and emits connect before its first framebuffer
+  // arrives. Observe pixels within the existing readiness budget, not a sleep.
+  const started = Date.now();
+  const readyUntil = Math.min(started + 30_000, deadline);
+  let actual = null;
+  let sampledAt = 0;
+  let finished = false;
+  let timer;
+  // Evaluation has no native timeout. The context's finally cancels unfinished
+  // calls; finished prevents their late results from changing this receipt.
+  try {
+    await Promise.race([
+      (async () => {
+        while (!finished && !interrupted && Date.now() < readyUntil) {
+          const sample = await frame(page);
+          if (finished) return;
+          actual = sample;
+          sampledAt = Date.now();
+          if (sampledAt >= readyUntil || !sample.connected || sample.colors > 8) return;
+          await delay(Math.min(200, Math.max(1, readyUntil - Date.now())));
+        }
+      })(),
+      new Promise((resolve) => { timer = setTimeout(resolve, Math.max(0, readyUntil - Date.now())); }),
+    ]);
+  } finally {
+    finished = true;
+    clearTimeout(timer);
+  }
+  if (interrupted) throw interrupted;
+  if (!actual || actual.colors <= 8 || sampledAt >= readyUntil) {
+    const details = { canvas: actual, frameUnavailable: !actual, elapsedMs: Date.now() - started };
+    const error = new ProofFailure("blank_canvas", details);
+    failure ??= error;
+    try { await screenshot(page, `${name}-unready`, true); }
+    catch { details.failureImageUnavailable = true; }
+    throw error;
+  }
+  return actual;
 }
 
 async function fit(page, exec, name, expected) {
@@ -271,7 +312,7 @@ async function fit(page, exec, name, expected) {
     await page.setViewportSize(viewport);
     await page.waitForFunction(() => document.querySelector("#noVNC_container canvas")?.width > 0);
     await delay(800);
-    const actual = await frame(page);
+    const actual = await renderedFrame(page, `${name}-fit-${viewport.width}`);
     const server = await geometry(exec);
     check(server.width === expected.width && server.height === expected.height, "fit_resized_server", { server, expected });
     check(actual.connected && actual.scale && !actual.resize, "fit_flags");
@@ -329,7 +370,7 @@ async function exercise(url, exec, name, resizable) {
         return c && (c.width !== previous.width || c.height !== previous.height);
       }, initial);
       await delay(800);
-      const actual = await frame(page);
+      const actual = await renderedFrame(page, `${name}-remote`);
       const server = await geometry(exec);
       check(actual.resize && !actual.scale && actual.connected, "remote_flags");
       check(server.width === actual.width && server.height === actual.height &&
@@ -391,6 +432,32 @@ async function dependencyIdentity(exec, name, legacy = false) {
     return { file: files[index], sha256: line.slice(0, 64) };
   });
   proof.cases.push({ name: `${name}_dependencies`, identities });
+}
+
+async function desktopServiceState() {
+  const units = ["crabbox-xvfb.service", "crabbox-desktop.service", "crabbox-x11vnc.service"];
+  const text = await run("desktop_service_state", "systemctl", ["show", ...units,
+    "--property=Id,ActiveState,SubState,Result,ExecMainStatus,NRestarts"], 5000);
+  const enums = {
+    ActiveState: ["active", "inactive", "activating", "deactivating", "failed", "reloading", "maintenance"],
+    SubState: ["running", "dead", "failed", "auto-restart", "start", "start-pre", "start-post", "stop", "stop-sigterm", "stop-sigkill", "stop-post", "exited"],
+    Result: ["success", "exit-code", "signal", "core-dump", "timeout", "watchdog", "exec-condition", "start-limit-hit", "resources", "oom-kill", "protocol"],
+  };
+  const records = text.trim().split(/\n\n+/).map((block) => Object.fromEntries(block.split("\n").map((line) => {
+    const split = line.indexOf("=");
+    return [line.slice(0, split), line.slice(split + 1)];
+  })));
+  check(records.length === units.length && new Set(records.map((record) => record.Id)).size === units.length &&
+    records.every((record) => units.includes(record.Id)), "service_diagnostic_identity");
+  return records.map((record) => {
+    const result = { unit: record.Id };
+    for (const [key, values] of Object.entries(enums)) result[key] = values.includes(record[key]) ? record[key] : "unknown";
+    for (const key of ["ExecMainStatus", "NRestarts"]) {
+      const value = Number(record[key]);
+      result[key] = /^\d+$/.test(record[key]) && Number.isSafeInteger(value) ? value : null;
+    }
+    return result;
+  });
 }
 
 async function cleanup(name, action) {
@@ -503,6 +570,10 @@ try {
   failure = interrupted || failure || error;
   proof.passed = false;
   proof.failure = { phase, ...project(failure) };
+  if (installerStarted) {
+    try { proof.desktopServiceState = await desktopServiceState(); }
+    catch { proof.desktopServiceStateUnavailable = true; }
+  }
 } finally {
   cleaning = true;
   clearTimeout(deadlineTimer);
