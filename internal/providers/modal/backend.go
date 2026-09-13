@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path"
 	"strings"
 	"time"
 
@@ -455,19 +454,7 @@ func modalWorkdir(cfg core.Config) string {
 }
 
 func cleanModalWorkdir(workdir string) (string, error) {
-	trimmed := strings.TrimSpace(workdir)
-	if trimmed == "" {
-		return "", core.Exit(2, "modal workdir is empty")
-	}
-	clean := path.Clean(trimmed)
-	if !strings.HasPrefix(clean, "/") {
-		return "", core.Exit(2, "modal workdir %q must resolve to an absolute path", workdir)
-	}
-	switch clean {
-	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var", "/workspace":
-		return "", core.Exit(2, "modal workdir %q is too broad; choose a dedicated subdirectory", clean)
-	}
-	return clean, nil
+	return shared.CleanPOSIXWorkspacePath("modal workdir", workdir, "/workspace")
 }
 
 func modalTimeoutDuration(ttl time.Duration) time.Duration {

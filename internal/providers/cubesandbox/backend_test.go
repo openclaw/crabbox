@@ -257,19 +257,19 @@ func TestCubeSandboxDataPlaneStreamOutlivesControlTimeout(t *testing.T) {
 }
 
 func TestCubeSandboxWorkspacePath(t *testing.T) {
-	if got := cubesandboxWorkspacePath(core.Config{}); got != "/root/crabbox" {
+	if got := workspaceForConfig(core.Config{}, core.Runtime{}).Path(); got != "/root/crabbox" {
 		t.Fatalf("workspace=%q", got)
 	}
-	if got := cubesandboxWorkspacePath(core.Config{CubeSandbox: core.CubeSandboxConfig{Workdir: "repo"}}); got != "/root/repo" {
+	if got := workspaceForConfig(core.Config{CubeSandbox: core.CubeSandboxConfig{Workdir: "repo"}}, core.Runtime{}).Path(); got != "/root/repo" {
 		t.Fatalf("workspace=%q", got)
 	}
-	if got := cubesandboxWorkspacePath(core.Config{CubeSandbox: core.CubeSandboxConfig{User: "ubuntu", Workdir: "repo"}}); got != "/home/ubuntu/repo" {
+	if got := workspaceForConfig(core.Config{CubeSandbox: core.CubeSandboxConfig{User: "ubuntu", Workdir: "repo"}}, core.Runtime{}).Path(); got != "/home/ubuntu/repo" {
 		t.Fatalf("workspace=%q", got)
 	}
-	if got := cubesandboxWorkspacePath(core.Config{CubeSandbox: core.CubeSandboxConfig{User: "root", Workdir: "repo"}}); got != "/root/repo" {
+	if got := workspaceForConfig(core.Config{CubeSandbox: core.CubeSandboxConfig{User: "root", Workdir: "repo"}}, core.Runtime{}).Path(); got != "/root/repo" {
 		t.Fatalf("workspace=%q", got)
 	}
-	if got := cubesandboxWorkspacePath(core.Config{CubeSandbox: core.CubeSandboxConfig{Workdir: "/work/repo"}}); got != "/work/repo" {
+	if got := workspaceForConfig(core.Config{CubeSandbox: core.CubeSandboxConfig{Workdir: "/work/repo"}}, core.Runtime{}).Path(); got != "/work/repo" {
 		t.Fatalf("workspace=%q", got)
 	}
 }
@@ -290,7 +290,7 @@ func TestCubeSandboxProcessUser(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := cubesandboxProcessUser(tt.user)
+			got, err := workspaceForConfig(core.Config{CubeSandbox: core.CubeSandboxConfig{User: tt.user}}, core.Runtime{}).ProcessUser()
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("err=%v, want %q", err, tt.wantErr)
@@ -343,7 +343,7 @@ func TestCleanCubeSandboxWorkspacePath(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := cleanCubeSandboxWorkspacePath(tt.workspace)
+			got, err := shared.CleanPOSIXWorkspacePath("cubesandbox workspace path", tt.workspace)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("err=%v, want %q", err, tt.wantErr)
@@ -722,8 +722,8 @@ func TestCubeSandboxSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 		cfg: cfg,
 		rt:  core.Runtime{Stderr: io.Discard},
 	}
-	workspace := cubesandboxWorkspacePath(backend.cfg)
-	_, _, err := backend.syncWorkspace(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
+	workspace := workspaceForConfig(backend.cfg, core.Runtime{}).Path()
+	_, _, err := workspaceForConfig(backend.cfg, backend.rt).Sync(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
 		Repo: core.Repo{Root: root, Name: "repo"},
 	}, workspace)
 	if err != nil {
@@ -781,8 +781,8 @@ func TestCubeSandboxSyncWorkspaceCleansRemoteArchiveWhenExtractFails(t *testing.
 		cfg: cfg,
 		rt:  core.Runtime{Stderr: io.Discard},
 	}
-	workspace := cubesandboxWorkspacePath(backend.cfg)
-	_, _, err := backend.syncWorkspace(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
+	workspace := workspaceForConfig(backend.cfg, core.Runtime{}).Path()
+	_, _, err := workspaceForConfig(backend.cfg, backend.rt).Sync(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
 		Repo: core.Repo{Root: root, Name: "repo"},
 	}, workspace)
 	if err == nil {
@@ -810,7 +810,7 @@ func TestCubeSandboxPrepareWorkspaceRejectsUnsafePath(t *testing.T) {
 		cfg: cfg,
 		rt:  core.Runtime{Stderr: io.Discard},
 	}
-	err := backend.prepareWorkspace(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, "/")
+	err := workspaceForConfig(backend.cfg, backend.rt).Prepare(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, "/")
 	if err == nil || !strings.Contains(err.Error(), "too broad") {
 		t.Fatalf("err=%v, want unsafe workspace error", err)
 	}
@@ -822,7 +822,7 @@ func TestCubeSandboxPrepareWorkspaceRejectsUnsafePath(t *testing.T) {
 func TestCubeSandboxPrepareWorkspacePreservesExistingWithoutSync(t *testing.T) {
 	client := &fakeCubeSandboxSyncClient{}
 	backend := &cubesandboxBackend{rt: core.Runtime{Stderr: io.Discard}}
-	if err := backend.prepareWorkspace(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, "/root/repo"); err != nil {
+	if err := workspaceForConfig(backend.cfg, backend.rt).Prepare(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, "/root/repo"); err != nil {
 		t.Fatal(err)
 	}
 	if len(client.commands) != 1 || client.commands[0] != "mkdir -p '/root/repo'" {
