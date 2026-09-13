@@ -360,19 +360,8 @@ func TestClaimCleanupDue(t *testing.T) {
 	}
 }
 
-func TestBuildCommandAndHelpers(t *testing.T) {
+func TestCleanupCommandAndHelpers(t *testing.T) {
 	t.Parallel()
-	if _, err := buildCommand(nil, false); err == nil {
-		t.Fatal("expected missing command")
-	}
-	got, err := buildCommand([]string{"echo", "hi"}, false)
-	if err != nil || len(got) != 2 || got[0] != "echo" {
-		t.Fatalf("argv mode: %v %v", got, err)
-	}
-	got, err = buildCommand([]string{"echo", "hi"}, true)
-	if err != nil || len(got) != 1 || got[0] != "echo hi" {
-		t.Fatalf("shell mode: %v %v", got, err)
-	}
 	directCleanup := cleanupCommand(core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox"}}, "gcrs_x")
 	if directCleanup != `crabbox stop --provider cloud-run-sandbox --id 'gcrs_x'` {
 		t.Fatalf("cleanupCommand=%q", directCleanup)
@@ -450,14 +439,6 @@ func TestExecCommandAndUploadArchive(t *testing.T) {
 		t.Fatalf("expected decode exec, got %v", execs)
 	}
 
-	code, err := b.execCommand(context.Background(), fake, "box", "/tmp/work", []string{"echo", "hi"}, map[string]string{"A": "1"}, io.Discard, io.Discard)
-	if err != nil || code != 0 {
-		t.Fatalf("execCommand: code=%d err=%v", code, err)
-	}
-	code, err = b.execCommand(context.Background(), fake, "box", "/tmp/work", nil, nil, nil, nil)
-	if code != 2 {
-		t.Fatalf("missing command code=%d err=%v", code, err)
-	}
 	if err := b.execShell(context.Background(), &fakeTransport{
 		onExec: func(string, string) (int, string, string, error) { return 3, "", "", nil },
 	}, "box", "false"); err == nil {

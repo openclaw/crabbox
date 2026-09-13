@@ -194,6 +194,22 @@ func TestRunBuildsSRTCommandAndStreamsOutput(t *testing.T) {
 	}
 }
 
+func TestRunKeepsLiteralArgumentsInShellTransport(t *testing.T) {
+	runner := &recordingRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) { return core.LocalCommandResult{}, nil }}
+	backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
+	_, err := backend.Run(t.Context(), core.RunRequest{
+		Repo:    core.Repo{Name: "my-app", Root: t.TempDir()},
+		Command: []string{"printf", "%s", "&&"}, CommandLiteralArgs: map[int]bool{2: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := runner.onlyCall(t)
+	if got := call.Args[len(call.Args)-1]; got != "'printf' '%s' '&&'" {
+		t.Fatalf("command=%q", got)
+	}
+}
+
 func TestRunForwardsEnvOutsideArgv(t *testing.T) {
 	cfg := newTestConfig()
 	secret := "secret-token-value"
@@ -375,32 +391,6 @@ func TestLifecycleIsOneShot(t *testing.T) {
 	}
 	if err := backend.Stop(context.Background(), core.StopRequest{}); err == nil || !strings.Contains(err.Error(), "does not support stop") {
 		t.Fatalf("Stop err=%v", err)
-	}
-}
-
-func TestBuildCommandText(t *testing.T) {
-	tests := []struct {
-		name      string
-		command   []string
-		shellMode bool
-		want      string
-	}{
-		{name: "argv quotes spaces", command: []string{"echo", "hello world"}, want: "'echo' 'hello world'"},
-		{name: "shell operator", command: []string{"printf", "ok", "&&", "cat", "file name"}, want: "'printf' 'ok' && 'cat' 'file name'"},
-		{name: "leading env", command: []string{"NAME=hello world", "sh", "-c", "echo \"$NAME\""}, want: "NAME='hello world' 'sh' '-c' 'echo \"$NAME\"'"},
-		{name: "single shell string", command: []string{"printf ok && echo done"}, want: "printf ok && echo done"},
-		{name: "explicit shell mode", command: []string{"printf", "ok", "&&", "echo", "done"}, shellMode: true, want: "printf ok && echo done"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := buildCommandText(tt.command, tt.shellMode)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got != tt.want {
-				t.Fatalf("command=%q want %q", got, tt.want)
-			}
-		})
 	}
 }
 

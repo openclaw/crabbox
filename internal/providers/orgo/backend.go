@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -22,8 +21,6 @@ const (
 	orgoReadyPollInterval     = 250 * time.Millisecond
 	orgoCleanupTimeout        = 30 * time.Second
 )
-
-var orgoEnvNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func NewOrgoBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = providerName
@@ -136,11 +133,15 @@ func (b *orgoBackend) Run(ctx context.Context, req core.RunRequest) (result core
 		}
 	}()
 
-	command, err := b.buildCommand(req)
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 	if err != nil {
 		return result, err
 	}
-	result.CommandText = orgoCommandText(req)
+	command, err := b.buildCommand(intent, req.Env)
+	if err != nil {
+		return result, err
+	}
+	result.CommandText = intent.ShellScript()
 	if req.EnvSummary {
 		core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
@@ -689,14 +690,14 @@ func orgoComputersForWorkspace(workspace orgoWorkspace) []orgoComputer {
 	return computers
 }
 
-func (b *orgoBackend) buildCommand(req core.RunRequest) (string, error) {
-	command := orgoCommandText(req)
-	if len(req.Env) == 0 {
+func (b *orgoBackend) buildCommand(intent core.CommandIntent, env map[string]string) (string, error) {
+	command := intent.ShellScript()
+	if len(env) == 0 {
 		return command, nil
 	}
-	names := make([]string, 0, len(req.Env))
-	for name := range req.Env {
-		if !orgoEnvNamePattern.MatchString(name) {
+	names := make([]string, 0, len(env))
+	for name := range env {
+		if !core.ValidShellEnvName(name) {
 			return "", core.Exit(2, "provider=%s cannot forward invalid env var name %q", providerName, name)
 		}
 		names = append(names, name)
@@ -704,17 +705,10 @@ func (b *orgoBackend) buildCommand(req core.RunRequest) (string, error) {
 	sort.Strings(names)
 	var bld strings.Builder
 	for _, name := range names {
-		fmt.Fprintf(&bld, "export %s=%s\n", name, core.ShellQuote(req.Env[name]))
+		fmt.Fprintf(&bld, "export %s=%s\n", name, core.ShellQuote(env[name]))
 	}
 	bld.WriteString(command)
 	return bld.String(), nil
-}
-
-func orgoCommandText(req core.RunRequest) string {
-	if req.ShellMode {
-		return strings.Join(req.Command, " ")
-	}
-	return core.ShellScriptFromArgv(req.Command)
 }
 
 func (b *orgoBackend) rejectRunOptions(req core.RunRequest) error {

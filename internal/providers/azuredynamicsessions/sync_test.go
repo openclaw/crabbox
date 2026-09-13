@@ -79,34 +79,3 @@ func TestCreateAzureDynamicSessionsSyncArchiveIncludesFilesAndSymlinks(t *testin
 		t.Fatalf("link header = %#v", seen["link.txt"])
 	}
 }
-
-func TestBuildAzureDynamicSessionsCommandPreservesArgvQuoting(t *testing.T) {
-	got, err := buildAzureDynamicSessionsCommand([]string{"printf", "%s\n", "two words"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(got, "'two words'") {
-		t.Fatalf("command = %q, want quoted argument", got)
-	}
-}
-
-func TestBuildAzureDynamicSessionsCommandPreservesSingleShellString(t *testing.T) {
-	got, err := buildAzureDynamicSessionsCommand([]string{"npm test"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "npm test" {
-		t.Fatalf("command = %q, want unquoted shell string", got)
-	}
-}
-
-func TestBuildAzureDynamicSessionsCommandQuotesMultiArgShellCommand(t *testing.T) {
-	got, err := buildAzureDynamicSessionsCommand([]string{"npm", "test", "&&", "npm", "run", "lint"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "'npm' 'test' && 'npm' 'run' 'lint'"
-	if got != want {
-		t.Fatalf("command = %q, want %q", got, want)
-	}
-}

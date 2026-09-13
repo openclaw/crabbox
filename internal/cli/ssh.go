@@ -1879,25 +1879,7 @@ func remoteBashLoginScript(workdir, script string) string {
 }
 
 func shellScriptFromArgv(command []string) string {
-	parts := make([]string, 0, len(command))
-	seenCommand := false
-	for _, word := range command {
-		if isShellControlOperator(word) {
-			parts = append(parts, word)
-			if resetsShellCommandPosition(word) {
-				seenCommand = false
-			}
-			continue
-		}
-		if !seenCommand && IsShellEnvAssignment(word) {
-			key, value, _ := strings.Cut(word, "=")
-			parts = append(parts, key+"="+shellQuote(value))
-			continue
-		}
-		seenCommand = true
-		parts = append(parts, shellQuote(word))
-	}
-	return strings.Join(parts, " ")
+	return shellScriptFromArgvWithLiteralArgs(command, nil)
 }
 
 func ShellScriptFromArgv(command []string) string {

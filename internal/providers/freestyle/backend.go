@@ -140,7 +140,7 @@ func (b *freestyleBackend) Run(ctx context.Context, req core.RunRequest) (core.R
 				core.PrintEnvForwardingSummary(b.rt.Stderr, freestyleProvider, "forwarded", req.Options.EnvAllow, req.Env)
 			}
 			return shared.DelegatedSandboxCommand{Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
-				return b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, req.Env, stdout, stderr)
+				return b.exec(ctx, client, name, workspace, req, stdout, stderr)
 			}}, nil
 		},
 		Cleanup: func(ctx context.Context) error {
@@ -286,16 +286,19 @@ func freestyleCleanupCommand(leaseID string) string {
 	return fmt.Sprintf("crabbox stop --provider %s --id %s", freestyleProvider, core.ShellQuote(leaseID))
 }
 
-func (b *freestyleBackend) exec(ctx context.Context, client freestyleAPI, id, workdir string, command []string, shellMode bool, env map[string]string, stdout, stderr io.Writer) (int, error) {
-	execCommand := freestyleExecCommand(command, shellMode)
+func (b *freestyleBackend) exec(ctx context.Context, client freestyleAPI, id, workdir string, req core.RunRequest, stdout, stderr io.Writer) (int, error) {
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
+	if err != nil {
+		return 0, err
+	}
 	parts := make([]string, 0, 3)
 	if workdir != "" {
 		parts = append(parts, "cd "+core.ShellQuote(workdir))
 	}
-	if envCommand := freestyleEnvExportCommand(env); envCommand != "" {
+	if envCommand := freestyleEnvExportCommand(req.Env); envCommand != "" {
 		parts = append(parts, envCommand)
 	}
-	parts = append(parts, execCommand)
+	parts = append(parts, intent.ShellScript())
 	fullCommand := strings.Join(parts, " && ")
 	return client.Exec(ctx, id, "bash -lc "+core.ShellQuote(fullCommand), stdout, stderr)
 }
@@ -323,22 +326,6 @@ func freestyleEnvExportCommand(env map[string]string) string {
 		b.WriteString(core.ShellQuote(env[name]))
 	}
 	return b.String()
-}
-
-func freestyleExecCommand(command []string, shellMode bool) string {
-	if len(command) == 0 {
-		return ""
-	}
-	if shellMode {
-		return strings.Join(command, " ")
-	}
-	if len(command) == 1 && core.ShouldUseShell(command) {
-		return command[0]
-	}
-	if core.ShouldUseShell(command) || core.LeadingEnvAssignment(command) {
-		return core.ShellScriptFromArgv(command)
-	}
-	return strings.Join(core.ShellWords(command), " ")
 }
 
 func (b *freestyleBackend) resolveLeaseID(ctx context.Context, client freestyleAPI, id, repoRoot string, reclaim bool) (string, string, error) {

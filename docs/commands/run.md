@@ -36,7 +36,8 @@ snippets, pipes, or shell expansion.
 
 On Cloudflare Sandbox, Superserve, Crownest, Vercel Sandbox, Nomad, CodeSandbox,
 OpenComputer, Docker Sandbox, Agent Sandbox, SmolVM, Upstash Box, Tensorlake,
-and OpenSandbox,
+OpenSandbox, Blaxel, Cloudflare containers, Azure Dynamic Sessions, Anthropic
+Sandbox Runtime, Daytona, Freestyle, Islo, Modal, Cloud Run Sandbox, and Orgo,
 quoted or interpolated profile arguments retain their literal meaning through
 the delegated command transport. A value such as `&&` does not become a shell
 operator, and an executable named `FOO=x` is invoked rather than treated as an

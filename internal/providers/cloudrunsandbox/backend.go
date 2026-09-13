@@ -73,12 +73,12 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (finalResult cor
 	if req.Options.Tailscale.Enabled {
 		return core.RunResult{}, core.Exit(2, "provider=%s is delegated-run only and does not support Tailscale options", providerName)
 	}
-	var command []string
+	var command core.CommandIntent
 	if !req.SyncOnly {
 		var err error
-		command, err = buildCommand(req.Command, req.ShellMode)
+		command, err = core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 		if err != nil {
-			return core.RunResult{}, err
+			return core.RunResult{}, core.Exit(2, "%v", err)
 		}
 	}
 	workdir, err := cloudRunSandboxWorkdir(b.cfg)
@@ -230,7 +230,9 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (finalResult cor
 			commandStart := core.ClockNow(b.rt.Clock)
 			req.Observation.Phase(core.RunPhaseCommand)
 			stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, core.RunOutputProvider)
-			exitCode, runErr := b.execCommand(ctx, transport, sandboxID, workdir, command, req.Env, stdout, stderr)
+			exitCode, runErr := transport.Exec(ctx, sandboxID, command.ShellScript(), execOptions{
+				Workdir: workdir, Env: req.Env, Timeout: defaultExecTimeout,
+			}, stdout, stderr)
 			commandDuration := core.ClockNow(b.rt.Clock).Sub(commandStart)
 			commandRan = true
 			outcome := shared.FinalizeDelegatedCommandOutcome(exitCode, runErr)
