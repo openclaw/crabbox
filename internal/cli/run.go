@@ -3856,16 +3856,8 @@ func shouldUseShellWithLiteralArgs(command []string, literalArgs map[int]bool) b
 	return false
 }
 
-func ShouldUseShell(command []string) bool {
-	return shouldUseShell(command)
-}
-
 func leadingEnvAssignment(command []string) bool {
 	return len(command) > 1 && IsShellEnvAssignment(command[0])
-}
-
-func LeadingEnvAssignment(command []string) bool {
-	return leadingEnvAssignment(command)
 }
 
 func shellScriptFromArgvWithLiteralArgs(command []string, literalArgs map[int]bool) string {
