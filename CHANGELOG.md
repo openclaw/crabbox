@@ -8,7 +8,7 @@
 
 ### Fixes
 
-- Render XFCE clients in explicitly requested 8-bit desktops by selecting an 8-bit TrueColor visual, preserving the requested depth and fixed-size Xvfb/x11vnc backend. [Issue 2218](https://github.com/openclaw/crabbox/issues/2218). Thanks @vincentkoc.
+- Render XFCE clients in explicitly requested 8-bit desktops by selecting an 8-bit TrueColor visual, preserving the requested depth and fixed-size Xvfb/x11vnc backend. [PR 2222](https://github.com/openclaw/crabbox/pull/2222). Thanks @vincentkoc.
 - Bound artifact discovery to the possible match depth for canonical non-recursive wildcard patterns, preserving selection and recursive glob behavior. [PR 2214](https://github.com/openclaw/crabbox/pull/2214). Thanks @vincentkoc.
 - Match Linux portal desktops to the viewer window with controller-only resize requests, bounded collaboration requests, and a Fit opt-out; use resize-capable TigerVNC for new local-container and public-installer XFCE desktops, retire the stopped legacy exporter's failure marker on upgrade, preserve direct SSH's local-scaling default and the installer's 8-bit backend selection, and document existing 8-bit rendering and Wayland sizing limits. [PR 2075](https://github.com/openclaw/crabbox/pull/2075). Thanks @vincentkoc.
 
