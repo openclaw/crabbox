@@ -212,9 +212,11 @@ Rules:
   provider runs direct from the CLI unless a broker URL is configured (see
   [Coordinator](coordinator.md)).
 
-Actions runner hydration is not a feature flag. Core checks for an SSH lease
-backend on a `linux` or `windows` target (`localcontainer` is explicitly
-rejected). Set `target=linux` only on a backend that can actually satisfy it.
+`--actions-runner` requires an SSH lease backend on a `linux` or `windows` target.
+Set `ProviderSpec.ActionsRunnerUnsupported` when the provider cannot host the
+native GitHub Actions runner, as local-container, apple-container, and multipass
+do. This restriction does not disable ordinary Actions hydration. Set
+`target=linux` only on a backend that can actually satisfy it.
 
 Versioned workspace features describe provider depth, not the presence of
 Crabbox checkpoint commands. Core can always record a generic checkpoint from

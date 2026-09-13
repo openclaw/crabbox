@@ -476,16 +476,12 @@ func (a App) registerGitHubActionsRunnerOwned(ctx context.Context, cfg Config, t
 	return nil
 }
 
-func supportsActionsRunnerTarget(target SSHTarget) bool {
-	return supportsGitHubActionsRunnerTarget(target)
-}
-
 func supportsLocalActionsHydrateTarget(target SSHTarget) bool {
 	return target.TargetOS == "" || target.TargetOS == targetLinux || isWindowsWSL2Target(target)
 }
 
 func supportsGitHubActionsRunnerTarget(target SSHTarget) bool {
-	return target.TargetOS == "" || target.TargetOS == targetLinux || target.TargetOS == targetWindows || isWindowsWSL2Target(target)
+	return target.TargetOS == "" || target.TargetOS == targetLinux || target.TargetOS == targetWindows
 }
 
 func targetWithConfigDefaults(target SSHTarget, cfg Config) SSHTarget {

@@ -120,6 +120,19 @@ func TestManualBatchBCodespacesGenericTypeInput(t *testing.T) {
 	}
 }
 
+func TestProviderActionsRunnerRestrictions(t *testing.T) {
+	restricted := map[string]bool{"local-container": true, "apple-container": true, "multipass": true}
+	for _, name := range core.RegisteredProviderNames() {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := provider.Spec().ActionsRunnerUnsupported; got != restricted[name] {
+			t.Fatalf("provider=%s ActionsRunnerUnsupported=%t, want %t", name, got, restricted[name])
+		}
+	}
+}
+
 func TestProviderAuthenticationDeclarations(t *testing.T) {
 	methods := map[core.ProviderAuthenticationMethod]bool{
 		"api_key": true, "api_token": true, "session_token": true,

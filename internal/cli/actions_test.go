@@ -834,27 +834,30 @@ func TestValidateActionsRunnerCapabilityAllowsWSL2(t *testing.T) {
 	}
 }
 
-func TestValidateActionsRunnerCapabilityRejectsLocalContainer(t *testing.T) {
-	backend := testSSHBackend{spec: ProviderSpec{Name: "local-container"}}
-	err := validateActionsRunnerCapability(backend, Config{Provider: "local-container", TargetOS: targetLinux})
-	if err == nil || !strings.Contains(err.Error(), "provider=local-container") {
-		t.Fatalf("local-container actions runner error=%v", err)
+func TestValidateActionsRunnerCapabilityUsesSpec(t *testing.T) {
+	for _, name := range []string{"example", "local-container", "apple-container", "multipass"} {
+		for _, unsupported := range []bool{false, true} {
+			backend := testSSHBackend{spec: ProviderSpec{Name: name, ActionsRunnerUnsupported: unsupported}}
+			err := validateActionsRunnerCapability(backend, Config{Provider: name, TargetOS: targetLinux})
+			if !unsupported {
+				if err != nil {
+					t.Fatalf("provider=%s ignored supported metadata: %v", name, err)
+				}
+			} else if err == nil || err.Error() != fmt.Sprintf("--actions-runner is not supported for provider=%s; use normal crabbox run or a remote SSH provider", name) {
+				t.Fatalf("provider=%s restriction error=%v", name, err)
+			}
+		}
 	}
 }
 
-func TestValidateActionsRunnerCapabilityRejectsAppleContainer(t *testing.T) {
-	backend := testSSHBackend{spec: ProviderSpec{Name: "apple-container"}}
-	err := validateActionsRunnerCapability(backend, Config{Provider: "apple-container", TargetOS: targetLinux})
-	if err == nil || !strings.Contains(err.Error(), "provider=apple-container") {
-		t.Fatalf("apple-container actions runner error=%v", err)
+func TestValidateActionsRunnerCapabilityPreservesAdmissionOrder(t *testing.T) {
+	spec := ProviderSpec{Name: "example", ActionsRunnerUnsupported: true}
+	cfg := Config{TargetOS: targetMacOS}
+	if err := validateActionsRunnerCapability(testDelegatedBackend{spec: spec}, cfg); err == nil || err.Error() != "--actions-runner requires an SSH lease provider" {
+		t.Fatalf("non-SSH admission error=%v", err)
 	}
-}
-
-func TestValidateActionsRunnerCapabilityRejectsMultipass(t *testing.T) {
-	backend := testSSHBackend{spec: ProviderSpec{Name: "multipass"}}
-	err := validateActionsRunnerCapability(backend, Config{Provider: "multipass", TargetOS: targetLinux})
-	if err == nil || !strings.Contains(err.Error(), "provider=multipass") {
-		t.Fatalf("multipass actions runner error=%v", err)
+	if err := validateActionsRunnerCapability(testSSHBackend{spec: spec}, cfg); err == nil || !strings.Contains(err.Error(), "is not supported for provider=example") {
+		t.Fatalf("provider restriction must precede target admission: %v", err)
 	}
 }
 

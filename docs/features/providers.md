@@ -11,7 +11,8 @@ selects one with `--provider <name>` or the `provider:` config key, normalizing
 aliases on the way in. Every built-in adapter lives under
 `internal/providers/<name>` and is registered for its side effects in
 `internal/providers/all/all.go`; the source-of-truth list of identifiers and
-aliases is each adapter's `provider.go` (`Name()`, `Aliases()`, `Spec()`).
+aliases is each adapter's `Spec()` in `provider.go` (`ProviderSpec.Name` and
+`ProviderSpec.Aliases`).
 
 ## How a provider is wired
 

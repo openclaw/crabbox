@@ -1925,6 +1925,8 @@ func (testLocalContainerProvider) Spec() ProviderSpec {
 		Targets:     []TargetSpec{{OS: targetLinux}},
 		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCacheVolume, FeatureCheckpoint, FeatureFork, FeatureRunSession},
 		Coordinator: CoordinatorNever,
+
+		ActionsRunnerUnsupported: true,
 	}
 }
 
@@ -2128,6 +2130,8 @@ func (testMultipassProvider) Spec() ProviderSpec {
 		Targets:     []TargetSpec{{OS: targetLinux}},
 		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureCacheVolume},
 		Coordinator: CoordinatorNever,
+
+		ActionsRunnerUnsupported: true,
 	}
 }
 
