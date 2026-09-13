@@ -22,7 +22,6 @@ type sshScriptTestProvider struct {
 	backend Backend
 }
 
-func (p *sshScriptTestProvider) Name() string                               { return p.spec.Name }
 func (p *sshScriptTestProvider) Spec() ProviderSpec                         { return p.spec }
 func (p *sshScriptTestProvider) Configure(Config, Runtime) (Backend, error) { return p.backend, nil }
 
@@ -92,12 +91,12 @@ func setupSSHScriptRun(t *testing.T) (*sshScriptTestProvider, *sshScriptTestBack
 		Coordinator: CoordinatorNever,
 	}}
 	b := &sshScriptTestBackend{runEnvProfileTestBackend: runEnvProfileTestBackend{spec: p.spec}, activityPath: filepath.Join(dir, "activity")}
-	b.lease = LeaseTarget{LeaseID: "cbx_123456789abc", Server: Server{Provider: p.Name()}, SSH: SSHTarget{
+	b.lease = LeaseTarget{LeaseID: "cbx_123456789abc", Server: Server{Provider: p.Spec().Name}, SSH: SSHTarget{
 		User: "synthetic-script-credential", Host: "fixture.invalid", Port: "22", TargetOS: targetLinux, SSHConfigProxy: true, AuthSecret: true,
 	}}
 	p.backend = b
 	RegisterProvider(p)
-	t.Cleanup(func() { delete(providerRegistry, p.Name()) })
+	t.Cleanup(func() { delete(providerRegistry, p.Spec().Name) })
 	t.Setenv("CRABBOX_SCRIPT_ACTIVITY", b.activityPath)
 	t.Setenv("CRABBOX_SCRIPT_SSH_LOG", filepath.Join(dir, "ssh.log"))
 	completions := filepath.Join(dir, "ssh-completions")
@@ -176,7 +175,7 @@ printf 'script-err\n' >&2
 			if err := os.WriteFile(profile, []byte("API_TOKEN=synthetic-profile-value\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			args := []string{"--provider", p.Name(), "--no-sync", "--no-hydrate", "--keep", "--allow-env", "API_TOKEN", "--env-from-profile", profile}
+			args := []string{"--provider", p.Spec().Name, "--no-sync", "--no-hydrate", "--keep", "--allow-env", "API_TOKEN", "--env-from-profile", profile}
 			var stdout, stderr bytes.Buffer
 			app := App{Stdout: &stdout, Stderr: &stderr, Stdin: strings.NewReader(source)}
 			if tc.prefix == "" {
@@ -220,10 +219,10 @@ printf 'script-err\n' >&2
 			if strings.Contains(string(log), b.lease.SSH.User) || strings.Contains(string(log), "synthetic-profile-value") || strings.Contains(string(log), "script-out:") {
 				t.Fatal("private input leaked into SSH argv")
 			}
-			if err := app.runCommand(t.Context(), []string{"--provider", p.Name(), "--no-sync", "--", "ordinary", "arg"}); err != nil {
+			if err := app.runCommand(t.Context(), []string{"--provider", p.Spec().Name, "--no-sync", "--", "ordinary", "arg"}); err != nil {
 				t.Fatal(err)
 			}
-			if err := app.warmup(t.Context(), []string{"--provider", p.Name()}); err != nil {
+			if err := app.warmup(t.Context(), []string{"--provider", p.Spec().Name}); err != nil {
 				t.Fatal(err)
 			}
 			if len(b.requests) != 1 || !reflect.DeepEqual(b.requests[0].Command, []string{"ordinary", "arg"}) || b.warmups != 1 || b.starts != 1 {
@@ -247,7 +246,7 @@ func TestHybridSSHScriptRejectsInvalidRouteBeforeInputOrActivity(t *testing.T) {
 			}
 			b.spec = p.spec
 			input := strings.NewReader("must remain unread")
-			err := (App{Stdout: io.Discard, Stderr: io.Discard, Stdin: input}).runCommand(t.Context(), []string{"--provider", p.Name(), "--no-sync", "--script-stdin"})
+			err := (App{Stdout: io.Discard, Stderr: io.Discard, Stdin: input}).runCommand(t.Context(), []string{"--provider", p.Spec().Name, "--no-sync", "--script-stdin"})
 			if ExitCodeForError(err, 0) != 2 || !strings.Contains(err.Error(), "SSH") || input.Len() != len("must remain unread") || b.acquired != 0 || b.starts != 0 {
 				t.Fatalf("error=%v unread=%d acquired=%d activity=%d", err, input.Len(), b.acquired, b.starts)
 			}
@@ -258,7 +257,7 @@ func TestHybridSSHScriptRejectsInvalidRouteBeforeInputOrActivity(t *testing.T) {
 func TestHybridSSHScriptPrewarmAdmissionUsesScriptRoute(t *testing.T) {
 	p, b, _ := setupSSHScriptRun(t)
 	p.spec.Kind = ProviderKindDelegatedRun
-	args := []string{"--provider", p.Name(), "--no-sync", "--script-stdin", "--capture-stdout", "stdout.txt"}
+	args := []string{"--provider", p.Spec().Name, "--no-sync", "--script-stdin", "--capture-stdout", "stdout.txt"}
 	if err := admitPrewarmProbe(args); err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +281,7 @@ func TestHybridSSHScriptCancellationAndSameLeaseReplay(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- (App{Stdout: &stdout, Stderr: &stderr, Stdin: strings.NewReader(source)}).runCommand(ctx, []string{
-			"--provider", p.Name(), "--no-sync", "--no-hydrate", "--keep", "--script-stdin",
+			"--provider", p.Spec().Name, "--no-sync", "--no-hydrate", "--keep", "--script-stdin",
 		})
 	}()
 	joined := false
@@ -337,7 +336,7 @@ func TestHybridSSHScriptCancellationAndSameLeaseReplay(t *testing.T) {
 		return acquireWorkspaceOwnerWithTransport(ctx, target, leaseID, stderr, observed, workspaceOwnerWaitTimeout, workspaceOwnerTTL, workspaceOwnerRenewInterval)
 	}
 	err = replayApp.runCommand(replayCtx, []string{
-		"--provider", p.Name(), "--id", b.lease.LeaseID, "--no-sync", "--no-hydrate", "--keep", "--script-stdin",
+		"--provider", p.Spec().Name, "--id", b.lease.LeaseID, "--no-sync", "--no-hydrate", "--keep", "--script-stdin",
 	})
 	if !errors.Is(err, context.Canceled) || (refusal != "BUSY" && refusal != "CHILD") || b.joined != 2 || len(b.requests) != 0 {
 		t.Fatalf("ambiguous same-lease replay=%v refusal=%q joins=%d\nstdout=%s\nstderr=%s", err, refusal, b.joined, stdout.String(), stderr.String())
@@ -350,7 +349,7 @@ func TestHybridSSHScriptCancellationAndSameLeaseReplay(t *testing.T) {
 func TestHybridSSHScriptActivityFailureStopsBeforeSetup(t *testing.T) {
 	p, b, dir := setupSSHScriptRun(t)
 	b.activityErr = errors.New("activity unavailable")
-	err := (App{Stdout: io.Discard, Stderr: io.Discard, Stdin: strings.NewReader("exit 0\n")}).runCommand(t.Context(), []string{"--provider", p.Name(), "--no-sync", "--keep", "--script-stdin"})
+	err := (App{Stdout: io.Discard, Stderr: io.Discard, Stdin: strings.NewReader("exit 0\n")}).runCommand(t.Context(), []string{"--provider", p.Spec().Name, "--no-sync", "--keep", "--script-stdin"})
 	if err == nil || !strings.Contains(err.Error(), "activity unavailable") || b.starts != 1 || b.joined != 0 {
 		t.Fatalf("error=%v starts=%d joined=%d", err, b.starts, b.joined)
 	}

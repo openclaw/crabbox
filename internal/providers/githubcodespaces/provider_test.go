@@ -25,7 +25,7 @@ func TestProviderSpec(t *testing.T) {
 }
 
 func TestProviderAliases(t *testing.T) {
-	got := strings.Join(Provider{}.Aliases(), ",")
+	got := strings.Join(Provider{}.Spec().Aliases, ",")
 	if got != "codespaces,gh-codespaces" {
 		t.Fatalf("aliases=%q", got)
 	}

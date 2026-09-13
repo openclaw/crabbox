@@ -29,9 +29,9 @@ func (a App) providerSizes(ctx context.Context, args []string) error {
 		return err
 	}
 	if *withContext && provider.Spec().SizeSelection == "" {
-		return Exit(2, "provider=%s does not expose native size selection", provider.Name())
+		return Exit(2, "provider=%s does not expose native size selection", provider.Spec().Name)
 	}
-	cfg, err := loadConfigWithOverrides("", provider.Name())
+	cfg, err := loadConfigWithOverrides("", provider.Spec().Name)
 	if err != nil {
 		return err
 	}
@@ -47,13 +47,13 @@ func (a App) providerSizes(ctx context.Context, args []string) error {
 	}
 	catalog, ok := backend.(ProviderSizeCatalogBackend)
 	if !ok {
-		return Exit(2, "provider=%s does not expose a live size catalog", provider.Name())
+		return Exit(2, "provider=%s does not expose a live size catalog", provider.Spec().Name)
 	}
 	var selection ProviderSizeSelection
 	if *withContext {
 		selector, ok := backend.(ProviderSizeSelectionBackend)
 		if !ok {
-			return Exit(2, "provider=%s does not expose native size selection", provider.Name())
+			return Exit(2, "provider=%s does not expose native size selection", provider.Spec().Name)
 		}
 		selection = selector.SizeSelection()
 	}

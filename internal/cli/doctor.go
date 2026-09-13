@@ -446,19 +446,19 @@ All flags:
 
 	if err := validateProviderConfig(cfg); err != nil {
 		class := doctorErrorClass(err)
-		hint := doctorErrorHint(providerDef.Name(), class)
-		record("failed", "provider", fmt.Sprintf("provider=%s class=%s hint=%s %v", providerDef.Name(), class, hint, err), map[string]string{"provider": providerDef.Name(), "class": class, "hint": hint, "error": err.Error()})
+		hint := doctorErrorHint(providerDef.Spec().Name, class)
+		record("failed", "provider", fmt.Sprintf("provider=%s class=%s hint=%s %v", providerDef.Spec().Name, class, hint, err), map[string]string{"provider": providerDef.Spec().Name, "class": class, "hint": hint, "error": err.Error()})
 		ok = false
 		return finish()
 	}
 	doctor, err := ConfigureProviderDoctor(providerDef, cfg, runtimeForApp(a))
 	if err != nil {
 		class := doctorErrorClass(err)
-		hint := doctorErrorHint(providerDef.Name(), class)
-		record("failed", "provider", fmt.Sprintf("provider=%s class=%s hint=%s %v", providerDef.Name(), class, hint, err), map[string]string{"provider": providerDef.Name(), "class": class, "hint": hint, "error": err.Error()})
+		hint := doctorErrorHint(providerDef.Spec().Name, class)
+		record("failed", "provider", fmt.Sprintf("provider=%s class=%s hint=%s %v", providerDef.Spec().Name, class, hint, err), map[string]string{"provider": providerDef.Spec().Name, "class": class, "hint": hint, "error": err.Error()})
 		ok = false
 	} else if doctor == nil {
-		record("skip", "provider", fmt.Sprintf("provider=%s direct_doctor=unsupported", providerDef.Name()), map[string]string{"provider": providerDef.Name(), "direct_doctor": "unsupported"})
+		record("skip", "provider", fmt.Sprintf("provider=%s direct_doctor=unsupported", providerDef.Spec().Name), map[string]string{"provider": providerDef.Spec().Name, "direct_doctor": "unsupported"})
 	} else {
 		doctorCtx, cancel := context.WithTimeout(ctx, doctorProviderTimeout)
 		result, err := doctor.Doctor(doctorCtx, DoctorRequest{ProbeSSH: *probeSSH})

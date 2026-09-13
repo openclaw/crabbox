@@ -125,10 +125,10 @@ func TestManualConfigInputFlags(t *testing.T) {
 
 func TestProviderSpecIsDelegatedLinuxAliasFree(t *testing.T) {
 	provider := Provider{}
-	if provider.Name() != providerName {
-		t.Fatalf("Name=%q want %q", provider.Name(), providerName)
+	if provider.Spec().Name != providerName {
+		t.Fatalf("Name=%q want %q", provider.Spec().Name, providerName)
 	}
-	if aliases := provider.Aliases(); len(aliases) != 0 {
+	if aliases := provider.Spec().Aliases; len(aliases) != 0 {
 		t.Fatalf("aliases=%v want none", aliases)
 	}
 	spec := provider.Spec()

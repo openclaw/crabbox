@@ -672,8 +672,8 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", tc.name, err)
 		}
-		if provider.Name() != tc.canonical {
-			t.Fatalf("ProviderFor(%q).Name() = %q, want %q", tc.name, provider.Name(), tc.canonical)
+		if provider.Spec().Name != tc.canonical {
+			t.Fatalf("ProviderFor(%q).Spec().Name = %q, want %q", tc.name, provider.Spec().Name, tc.canonical)
 		}
 	}
 	if _, err := ProviderFor("missing"); err == nil {
@@ -1978,13 +1978,41 @@ func TestServerLeaseClaimSnapshotIsExplicitAndCloned(t *testing.T) {
 // The nil embedded provider makes any non-metadata method call fail this test.
 type nameMetadataOnlyTestProvider struct {
 	Provider
-	nameCalls, aliasCalls *int
+	specCalls *int
 }
 
-func (p nameMetadataOnlyTestProvider) Name() string { *p.nameCalls++; return " Metadata-Only " }
-func (p nameMetadataOnlyTestProvider) Aliases() []string {
-	*p.aliasCalls++
-	return []string{" Alias-One ", "SECOND"}
+func (p nameMetadataOnlyTestProvider) Spec() ProviderSpec {
+	*p.specCalls++
+	return ProviderSpec{Name: " Metadata-Only ", Aliases: []string{" Alias-One ", "SECOND"}}
+}
+
+func TestProviderRegistrationUsesSpecIdentity(t *testing.T) {
+	specCalls := 0
+	p := nameMetadataOnlyTestProvider{specCalls: &specCalls}
+	RegisterProvider(p)
+	t.Cleanup(func() {
+		for _, name := range []string{"metadata-only", "alias-one", "second"} {
+			delete(providerRegistry, name)
+		}
+	})
+	if specCalls != 1 {
+		t.Fatalf("registration read metadata %d times, want once", specCalls)
+	}
+	for _, name := range []string{"metadata-only", " METADATA-ONLY ", "alias-one", " ALIAS-ONE ", "second", "SECOND"} {
+		got, err := ProviderFor(name)
+		if err != nil || got != p {
+			t.Fatalf("ProviderFor(%q) = %v, %v; want the registered adapter", name, got, err)
+		}
+	}
+	count := 0
+	for _, name := range RegisteredProviderNames() {
+		if name == " Metadata-Only " {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("canonical metadata name appeared %d times, want once", count)
+	}
 }
 
 func TestProviderNameMatchesMetadataOnly(t *testing.T) {
@@ -1992,8 +2020,8 @@ func TestProviderNameMatchesMetadataOnly(t *testing.T) {
 		t.Fatal("fixture must not be registered")
 	}
 	registrySize := len(providerRegistry)
-	nameCalls, aliasCalls := 0, 0
-	p := nameMetadataOnlyTestProvider{nameCalls: &nameCalls, aliasCalls: &aliasCalls}
+	specCalls := 0
+	p := nameMetadataOnlyTestProvider{specCalls: &specCalls}
 	for _, tc := range []struct {
 		name string
 		want bool
@@ -2002,7 +2030,7 @@ func TestProviderNameMatchesMetadataOnly(t *testing.T) {
 			t.Fatalf("name=%q got=%t want=%t", tc.name, got, tc.want)
 		}
 	}
-	if nameCalls == 0 || aliasCalls == 0 || len(providerRegistry) != registrySize {
+	if specCalls == 0 || len(providerRegistry) != registrySize {
 		t.Fatal("metadata consultation or registry boundary changed")
 	}
 }
@@ -2012,8 +2040,8 @@ func TestProviderNameMatchesExactMetadataOnly(t *testing.T) {
 		t.Fatal("fixture must not be registered")
 	}
 	registrySize := len(providerRegistry)
-	nameCalls, aliasCalls := 0, 0
-	p := nameMetadataOnlyTestProvider{nameCalls: &nameCalls, aliasCalls: &aliasCalls}
+	specCalls := 0
+	p := nameMetadataOnlyTestProvider{specCalls: &specCalls}
 	for _, tc := range []struct {
 		name string
 		want bool
@@ -2022,7 +2050,7 @@ func TestProviderNameMatchesExactMetadataOnly(t *testing.T) {
 			t.Fatalf("exact name=%q got=%t want=%t", tc.name, got, tc.want)
 		}
 	}
-	if nameCalls == 0 || aliasCalls == 0 || len(providerRegistry) != registrySize {
+	if specCalls == 0 || len(providerRegistry) != registrySize {
 		t.Fatal("metadata consultation or registry boundary changed")
 	}
 }

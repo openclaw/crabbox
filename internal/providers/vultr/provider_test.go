@@ -13,10 +13,10 @@ import (
 
 func TestProviderSpec(t *testing.T) {
 	provider := Provider{}
-	if provider.Name() != providerName {
-		t.Fatalf("Name=%q", provider.Name())
+	if provider.Spec().Name != providerName {
+		t.Fatalf("Name=%q", provider.Spec().Name)
 	}
-	if aliases := provider.Aliases(); len(aliases) != 0 {
+	if aliases := provider.Spec().Aliases; len(aliases) != 0 {
 		t.Fatalf("Aliases=%v want none", aliases)
 	}
 	spec := provider.Spec()
@@ -41,11 +41,11 @@ func TestProviderForResolvesCanonicalOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if provider.Name() != providerName {
-		t.Fatalf("provider=%s", provider.Name())
+	if provider.Spec().Name != providerName {
+		t.Fatalf("provider=%s", provider.Spec().Name)
 	}
 	for _, alias := range []string{"vlt", "vultr-cloud"} {
-		if got, err := core.ProviderFor(alias); err == nil && got.Name() == providerName {
+		if got, err := core.ProviderFor(alias); err == nil && got.Spec().Name == providerName {
 			t.Fatalf("%q alias unexpectedly resolves to vultr", alias)
 		}
 	}

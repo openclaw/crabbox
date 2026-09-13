@@ -76,13 +76,13 @@ func validateReadyPoolIdentityProvider(value string) (string, error) {
 		return "", Exit(2, "ready-pool identity image.provider must be a canonical provider name")
 	}
 	provider, err := ProviderFor(value)
-	if err != nil || provider.Name() != value {
+	if err != nil || provider.Spec().Name != value {
 		return "", Exit(2, "ready-pool identity image.provider must be a canonical provider name")
 	}
 	if provider.Spec().Coordinator != CoordinatorSupported {
 		return "", Exit(2, "ready-pool identity provider %q does not support coordinator-managed leases", value)
 	}
-	return provider.Name(), nil
+	return provider.Spec().Name, nil
 }
 
 func readyPoolSeedDigest(repo, ref, commit, fingerprint string) (string, error) {

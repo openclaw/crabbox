@@ -84,7 +84,7 @@ type configShowProjectionTestProvider struct {
 	section ProviderConfigShowSection
 }
 
-func (p configShowProjectionTestProvider) Name() string { return p.name }
+func (p configShowProjectionTestProvider) Spec() ProviderSpec { return ProviderSpec{Name: p.name} }
 func (p configShowProjectionTestProvider) ConfigShowSection(Config) ProviderConfigShowSection {
 	return p.section
 }
@@ -334,8 +334,8 @@ func TestProviderConfigShowProjectionCollisionBeforeTextOutput(t *testing.T) {
 	s := projectionTestSection("collision_projection")
 	s.TextLabel = "config"
 	p := configShowProjectionTestProvider{name: "collision_projection", section: s}
-	providerRegistry[p.Name()] = p
-	t.Cleanup(func() { delete(providerRegistry, p.Name()) })
+	providerRegistry[p.Spec().Name] = p
+	t.Cleanup(func() { delete(providerRegistry, p.Spec().Name) })
 	var out bytes.Buffer
 	if err := writeConfigShowText(&out, Config{}); err == nil || out.Len() != 0 {
 		t.Fatalf("error=%v output=%q", err, out.String())

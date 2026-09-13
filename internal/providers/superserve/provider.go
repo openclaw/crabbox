@@ -13,9 +13,6 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return nil }
-
 func (Provider) DiagnosticSecrets(core.Config) []string {
 	return []string{
 		os.Getenv("CRABBOX_SUPERSERVE_API_KEY"),

@@ -167,7 +167,7 @@ func writeVNCCredentials(w io.Writer, cfg Config, target SSHTarget, endpoint vnc
 	passwordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv)
 	providerName := normalizeProviderName(cfg.Provider)
 	if provider, err := ProviderFor(cfg.Provider); err == nil {
-		providerName = provider.Name()
+		providerName = provider.Spec().Name
 	}
 	externalDesktopCredentials := providerName == "external" || providerName == "exec-provider"
 	if externalDesktopCredentials && normalizeTargetOS(target.TargetOS) == targetMacOS && len(externalDesktopChildEnvDenylist(cfg, target.TargetOS)) > 0 {

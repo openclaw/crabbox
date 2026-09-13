@@ -44,8 +44,8 @@ func TestProviderForLinode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if provider.Name() != providerName {
-		t.Fatalf("provider=%s", provider.Name())
+	if provider.Spec().Name != providerName {
+		t.Fatalf("provider=%s", provider.Spec().Name)
 	}
 }
 

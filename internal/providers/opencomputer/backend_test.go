@@ -77,10 +77,10 @@ func TestOpenComputerConfigShowCompletePassiveSection(t *testing.T) {
 
 func TestProviderSpec(t *testing.T) {
 	p := Provider{}
-	if p.Name() != "opencomputer" {
-		t.Fatalf("Name=%q want opencomputer", p.Name())
+	if p.Spec().Name != "opencomputer" {
+		t.Fatalf("Name=%q want opencomputer", p.Spec().Name)
 	}
-	if len(p.Aliases()) == 0 {
+	if len(p.Spec().Aliases) == 0 {
 		t.Fatalf("expected aliases, got none")
 	}
 	spec := p.Spec()
@@ -104,8 +104,8 @@ func TestProviderForResolvesNameAndAliases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProviderFor(%q) err=%v", name, err)
 		}
-		if got.Name() != "opencomputer" {
-			t.Fatalf("ProviderFor(%q).Name()=%q want opencomputer", name, got.Name())
+		if got.Spec().Name != "opencomputer" {
+			t.Fatalf("ProviderFor(%q).Name()=%q want opencomputer", name, got.Spec().Name)
 		}
 	}
 }

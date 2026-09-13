@@ -361,8 +361,6 @@ func init() {
 
 type heartbeatDirectProvider struct{}
 
-func (heartbeatDirectProvider) Name() string      { return heartbeatDirectProviderName }
-func (heartbeatDirectProvider) Aliases() []string { return nil }
 func (heartbeatDirectProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        heartbeatDirectProviderName,

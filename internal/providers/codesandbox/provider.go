@@ -14,9 +14,6 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return []string{"csb", "code-sandbox"} }
-
 func (Provider) DiagnosticSecrets(core.Config) []string {
 	return []string{
 		os.Getenv(codesandboxPrimaryAPIKeyEnv),
@@ -26,6 +23,7 @@ func (Provider) DiagnosticSecrets(core.Config) []string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:                    []string{"csb", "code-sandbox"},
 		Authentication:             core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		SyncGuardrailFullCandidate: true,
 		Name:                       providerName,

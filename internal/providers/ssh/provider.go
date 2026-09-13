@@ -26,12 +26,9 @@ func (Provider) SupportsArchitecture(cfg core.Config, architecture string) bool 
 	}
 }
 
-func (Provider) Name() string { return "ssh" }
-func (Provider) Aliases() []string {
-	return []string{"static", "static-ssh"}
-}
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:        []string{"static", "static-ssh"},
 		Authentication: core.DirectProviderAuthentication(core.ProviderAuthenticationSSH),
 		Name:           "ssh",
 		Family:         "ssh",

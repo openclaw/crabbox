@@ -12,9 +12,6 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return nil }
-
 func (Provider) ServerTypeForConfig(core.Config) string { return "" }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{

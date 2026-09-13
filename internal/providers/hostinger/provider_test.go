@@ -32,8 +32,8 @@ func TestProviderSpecAndFlags(t *testing.T) {
 	if spec.Name != providerName || spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever {
 		t.Fatalf("spec=%#v", spec)
 	}
-	if len(Provider{}.Aliases()) != 0 {
-		t.Fatalf("hostinger must not register aliases, got %#v", Provider{}.Aliases())
+	if len(Provider{}.Spec().Aliases) != 0 {
+		t.Fatalf("hostinger must not register aliases, got %#v", Provider{}.Spec().Aliases)
 	}
 	if !spec.Features.Has(core.FeatureSSH) || !spec.Features.Has(core.FeatureCrabboxSync) || !spec.Features.Has(core.FeatureCleanup) {
 		t.Fatalf("features=%#v; want ssh/crabbox-sync/cleanup", spec.Features)

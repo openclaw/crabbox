@@ -13,9 +13,6 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return []string{"weights-and-biases"} }
-
 func (Provider) DiagnosticSecrets(cfg core.Config) []string {
 	return []string{
 		os.Getenv("CRABBOX_WANDB_API_KEY"),
@@ -27,6 +24,7 @@ func (Provider) DiagnosticSecrets(cfg core.Config) []string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"weights-and-biases"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		Name:             providerName,
 		Family:           "wandb",

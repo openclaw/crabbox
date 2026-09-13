@@ -273,8 +273,29 @@ Configure the `image-publisher` GitHub environment with:
   secrets when the coordinator is behind Cloudflare Access.
 
 Add required reviewers to that environment so paid image creation and
-fleet-wide promotion need explicit administrator approval. Dispatch one
-platform at a time from the protected default branch:
+fleet-wide promotion need explicit administrator approval.
+
+Before publishing, dispatch `Verify Image Publisher Auth` from the protected
+default branch to check the existing environment credential without creating
+leases, building images, or changing the fleet:
+
+```bash
+gh workflow run image-publisher-auth-check.yml --ref main
+```
+
+The check retains the `image-publisher` approval rules, including independent
+approval when self-review is disabled. It requires `CRABBOX_COORDINATOR` to be
+exactly `https://crabbox.openclaw.ai`, makes one read-only `/v1/whoami` request,
+and fails unless the response confirms administrator access. It never follows
+redirects or retries; the request has a 10-second deadline and 64 KiB response
+limit. Logs contain only a fixed result status, HTTP status, recognized auth
+kind, and administrator boolean. Success verifies only the current credential,
+not image readiness or permission to publish. A pending approval is not auth
+proof; inspect the completed verification job before proceeding. HTTP, transport,
+or response-validation failures do not by themselves prove that the credential
+is invalid; resolve the reported failure before changing credentials.
+
+Dispatch publication one platform at a time from the protected default branch:
 
 ```bash
 gh workflow run devtools-image-publish.yml \

@@ -160,36 +160,36 @@ func validateProviderTarget(cfg Config) error {
 		return err
 	}
 	if !providerSpecSupportsTarget(provider.Spec(), cfg.TargetOS, cfg.WindowsMode) {
-		return Exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Name(), cfg))
+		return Exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Spec().Name, cfg))
 	}
 	machineTarget := cfg.TargetOS != targetWorkerRuntime
 	_, ownsArchitecture := provider.(ProviderArchitectureCapability)
-	if machineTarget && !ownsArchitecture && (provider.Name() == "tart" || provider.Name() == "apple-vm" || provider.Name() == "lume" || provider.Name() == "aws-lambda-microvm") && cfg.architectureExplicit && effectiveArchitectureForConfig(cfg) != ArchitectureARM64 {
-		return Exit(2, "provider=%s supports architecture=arm64 only", provider.Name())
+	if machineTarget && !ownsArchitecture && (provider.Spec().Name == "tart" || provider.Spec().Name == "apple-vm" || provider.Spec().Name == "lume" || provider.Spec().Name == "aws-lambda-microvm") && cfg.architectureExplicit && effectiveArchitectureForConfig(cfg) != ArchitectureARM64 {
+		return Exit(2, "provider=%s supports architecture=arm64 only", provider.Spec().Name)
 	}
 	architecture := effectiveArchitectureForConfig(cfg)
 	if machineTarget && ownsArchitecture && !providerSupportsArchitecture(provider, cfg, architecture) {
-		return Exit(2, "provider=%s does not support target=%s windows.mode=%s architecture=%s", provider.Name(), cfg.TargetOS, cfg.WindowsMode, architecture)
+		return Exit(2, "provider=%s does not support target=%s windows.mode=%s architecture=%s", provider.Spec().Name, cfg.TargetOS, cfg.WindowsMode, architecture)
 	}
 	if machineTarget && !ownsArchitecture && architecture == ArchitectureARM64 {
 		if !providerSupportsArchitecture(provider, cfg, architecture) {
 			return Exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, provider=tart, provider=apple-container, provider=apple-vm, provider=lume, provider=aws-lambda-microvm, provider=external, or a provider with runtime-native architecture support such as provider=local-container")
 		}
 		if cfg.TargetOS != targetLinux &&
-			!(provider.Name() == "azure" && cfg.TargetOS == targetWindows) &&
-			!((provider.Name() == "tart" || provider.Name() == "lume") && cfg.TargetOS == targetMacOS) &&
-			!(provider.Name() == "external" && (cfg.TargetOS == targetMacOS || cfg.TargetOS == targetWindows)) {
+			!(provider.Spec().Name == "azure" && cfg.TargetOS == targetWindows) &&
+			!((provider.Spec().Name == "tart" || provider.Spec().Name == "lume") && cfg.TargetOS == targetMacOS) &&
+			!(provider.Spec().Name == "external" && (cfg.TargetOS == targetMacOS || cfg.TargetOS == targetWindows)) {
 			return Exit(2, "architecture=arm64 currently supports target=linux, provider=azure target=windows, provider=tart/provider=lume target=macos, or provider=external target=macos/windows only")
 		}
-		if provider.Name() == "azure" && cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 {
+		if provider.Spec().Name == "azure" && cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 {
 			return Exit(2, "provider=azure target=windows architecture=arm64 supports windows.mode=normal only; windows.mode=wsl2 requires nested virtualization, which Azure Cobalt ARM64 VM sizes do not support")
 		}
-		if provider.Name() == "azure" && cfg.TargetOS == targetWindows && !azureWindowsARM64HasExplicitImage(cfg) {
+		if provider.Spec().Name == "azure" && cfg.TargetOS == targetWindows && !azureWindowsARM64HasExplicitImage(cfg) {
 			return Exit(2, "provider=azure target=windows architecture=arm64 requires azure.image or CRABBOX_AZURE_IMAGE with an ARM64 Windows image; the built-in Windows default is x64")
 		}
 	}
-	if (cfg.TargetOS == targetLinux || (provider.Name() == "azure" && cfg.TargetOS == targetWindows)) && strings.TrimSpace(cfg.ServerType) != "" {
-		switch provider.Name() {
+	if (cfg.TargetOS == targetLinux || (provider.Spec().Name == "azure" && cfg.TargetOS == targetWindows)) && strings.TrimSpace(cfg.ServerType) != "" {
+		switch provider.Spec().Name {
 		case "aws":
 			if err := validateArchitectureServerType("AWS instance type", cfg, awsInstanceTypeIsARM64(cfg.ServerType)); err != nil {
 				return err
@@ -200,7 +200,7 @@ func validateProviderTarget(cfg Config) error {
 			}
 		}
 	}
-	if provider.Name() == "aws" &&
+	if provider.Spec().Name == "aws" &&
 		cfg.TargetOS == targetWindows &&
 		cfg.WindowsMode == windowsModeWSL2 &&
 		cfg.ServerTypeExplicit &&
@@ -224,7 +224,7 @@ func providerSupportsArchitecture(provider Provider, cfg Config, architecture st
 		return capability.SupportsArchitecture(cfg, architecture)
 	}
 	if architecture == ArchitectureARM64 {
-		return providerSupportsARM64(provider.Name())
+		return providerSupportsARM64(provider.Spec().Name)
 	}
 	return true
 }
@@ -244,7 +244,7 @@ func validateProviderTargetSupport(cfg Config) (Provider, error) {
 		return nil, err
 	}
 	if !providerSpecSupportsTarget(provider.Spec(), cfg.TargetOS, cfg.WindowsMode) {
-		return nil, Exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Name(), cfg))
+		return nil, Exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Spec().Name, cfg))
 	}
 	return provider, nil
 }
@@ -398,9 +398,9 @@ func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, ta
 		return nil
 	}
 	provider, providerErr := ProviderFor(cfg.Provider)
-	providerSelected := providerErr == nil && provider.Name() == "external"
+	providerSelected := providerErr == nil && provider.Spec().Name == "external"
 	if cfg.providerExplicit {
-		if providerErr != nil || provider.Name() != "external" {
+		if providerErr != nil || provider.Spec().Name != "external" {
 			return nil
 		}
 	}

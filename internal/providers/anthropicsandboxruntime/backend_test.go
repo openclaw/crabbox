@@ -25,7 +25,7 @@ func TestProviderSpecIsDelegatedOneShotAnthropicSandboxRuntime(t *testing.T) {
 	if len(spec.Features) != 0 {
 		t.Fatalf("features=%v want none", spec.Features)
 	}
-	if aliases := provider.Aliases(); !reflect.DeepEqual(aliases, []string{"srt"}) {
+	if aliases := provider.Spec().Aliases; !reflect.DeepEqual(aliases, []string{"srt"}) {
 		t.Fatalf("aliases=%v", aliases)
 	}
 	targets := []string{}

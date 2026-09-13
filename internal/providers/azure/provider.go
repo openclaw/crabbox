@@ -28,8 +28,6 @@ type flagValues struct {
 
 var classProfiles = buildClassProfiles()
 
-func (Provider) Name() string      { return "azure" }
-func (Provider) Aliases() []string { return nil }
 func (Provider) RoutingFlagNames() []string {
 	return []string{"azure-backend"}
 }
@@ -92,7 +90,7 @@ func (p Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) err
 			return err
 		}
 	}
-	if cfg.Provider != p.Name() {
+	if cfg.Provider != p.Spec().Name {
 		return nil
 	}
 	flags, _ := values.(flagValues)

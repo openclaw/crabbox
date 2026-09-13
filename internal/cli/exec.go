@@ -148,7 +148,7 @@ func execCapabilitiesForConfig(cfg Config) (execCapabilities, error) {
 	direct := !ShouldUseCoordinator(cfg, spec)
 	posix := (cfg.TargetOS == targetLinux || cfg.TargetOS == targetMacOS) && providerSpecSupportsTarget(spec, cfg.TargetOS, cfg.WindowsMode)
 	return execCapabilities{
-		Provider: provider.Name(), Target: cfg.TargetOS,
+		Provider: provider.Spec().Name, Target: cfg.TargetOS,
 		Execution:       direct && posix && spec.Features.Has(FeatureSSH) && spec.Features.Has(FeatureClaimExec),
 		CurrentRepoStop: direct && spec.Features.Has(FeatureFixedCurrentRepoStop),
 	}, nil

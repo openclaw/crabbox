@@ -31,7 +31,7 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("targets=%#v", spec.Targets)
 	}
-	if aliases := provider.Aliases(); !reflect.DeepEqual(aliases, []string{"csb", "code-sandbox"}) {
+	if aliases := provider.Spec().Aliases; !reflect.DeepEqual(aliases, []string{"csb", "code-sandbox"}) {
 		t.Fatalf("aliases=%v", aliases)
 	}
 }

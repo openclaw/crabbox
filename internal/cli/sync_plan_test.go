@@ -168,8 +168,8 @@ func TestSyncPlanProviderGuardrailMatchesArchivePreflight(t *testing.T) {
 				provider.spec.SyncGuardrailFullCandidate = true
 			}
 			RegisterProvider(provider)
-			t.Cleanup(func() { delete(providerRegistry, provider.Name()) })
-			config := fmt.Sprintf("provider: %s\nsync:\n  failFiles: %d\n  failBytes: %d\n  allowLarge: %t\n", provider.Name(), tc.failFiles, tc.failBytes, tc.allow)
+			t.Cleanup(func() { delete(providerRegistry, provider.Spec().Name) })
+			config := fmt.Sprintf("provider: %s\nsync:\n  failFiles: %d\n  failBytes: %d\n  allowLarge: %t\n", provider.Spec().Name, tc.failFiles, tc.failBytes, tc.allow)
 			if tc.exclude {
 				config += "  exclude: [b.txt]\n"
 			}

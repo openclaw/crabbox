@@ -194,7 +194,7 @@ func controllerRunnerCredentialBoundary(configPath, provider, workDir string) (c
 	}
 	providerName := normalizeProviderName(cfg.Provider)
 	if registered, providerErr := ProviderFor(cfg.Provider); providerErr == nil {
-		providerName = registered.Name()
+		providerName = registered.Spec().Name
 	}
 	result.Provider = providerName
 	if providerName != "external" && providerName != "exec-provider" {
@@ -748,7 +748,7 @@ func (r *execControllerWorkspaceRunner) pinExternalDesktopCredentialOwnerArgs(ar
 		provider = boundary.Provider
 	}
 	if registered, err := ProviderFor(provider); err == nil {
-		provider = registered.Name()
+		provider = registered.Spec().Name
 	} else {
 		provider = normalizeProviderName(provider)
 	}
@@ -1609,7 +1609,7 @@ func (r *execControllerWorkspaceRunner) childCredentialPolicy(request controller
 	}
 	provider := effectiveProvider
 	if registered, providerErr := ProviderFor(provider); providerErr == nil {
-		provider = registered.Name()
+		provider = registered.Spec().Name
 	} else {
 		provider = normalizeProviderName(provider)
 	}

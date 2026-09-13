@@ -14,12 +14,6 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string { return providerName }
-
-func (Provider) Aliases() []string {
-	return []string{"gcrun-sandbox", "google-cloud-run-sandbox", "cloudrun-sandbox"}
-}
-
 func (Provider) DiagnosticSecrets(core.Config) []string {
 	return []string{
 		os.Getenv("CRABBOX_CLOUD_RUN_SANDBOX_SECRET"),
@@ -34,6 +28,7 @@ func (Provider) DiagnosticSecrets(core.Config) []string {
 func (Provider) ServerTypeForConfig(core.Config) string { return "" }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases: []string{"gcrun-sandbox", "google-cloud-run-sandbox", "cloudrun-sandbox"},
 		Authentication: core.ProviderAuthentication{
 			{Route: "gateway", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationSharedSecret, core.ProviderAuthenticationIdentityToken}, Description: "The gateway uses a shared secret; a private IAM-protected gateway additionally uses an identity token."},
 			{Route: "embedded-launcher", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationLocalContext}, Description: "The mounted CLI runs in an already provisioned sandbox-launcher service context."},

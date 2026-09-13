@@ -91,7 +91,7 @@ func normalizeDoctorAllProviders(values []string) []string {
 				continue
 			}
 			if provider, err := ProviderFor(name); err == nil {
-				name = provider.Name()
+				name = provider.Spec().Name
 			}
 			key := normalizeProviderName(name)
 			if _, ok := seen[key]; ok {
@@ -112,7 +112,7 @@ func doctorPrepareCheck(provider string) []doctorJSONCheck {
 	configuredProvider := cfg.Provider
 	cfg.Provider = provider
 	if resolved, err := ProviderFor(provider); err == nil {
-		cfg.Provider = resolved.Name()
+		cfg.Provider = resolved.Spec().Name
 	}
 	if !cfg.ServerTypeExplicit || normalizeProviderName(configuredProvider) != normalizeProviderName(cfg.Provider) {
 		cfg.ServerType = ""

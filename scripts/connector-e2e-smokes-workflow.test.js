@@ -12,6 +12,22 @@ const workflow = fs.readFileSync(
   "utf8",
 );
 
+function runScript(step) {
+  const marker = "        run: |\n";
+  assert.ok(step.includes(marker), "step has a literal run block");
+  const lines = step.slice(step.indexOf(marker) + marker.length).split("\n");
+  const end = lines.findIndex((line) => line.trim() && !line.startsWith("          "));
+  return lines.slice(0, end < 0 ? undefined : end)
+    .map((line) => line.replace(/^ {10}/, "")).join("\n");
+}
+
+test("run block extraction stops at the next step or job and accepts EOF", () => {
+  const block = "        run: |\n          echo fixture\n";
+  for (const suffix of ["", "      - name: Next\n", "  next-job:\n"]) {
+    assert.equal(runScript(block + suffix).trim(), "echo fixture");
+  }
+});
+
 test("connector lifecycle gate runs on pull requests, main pushes, and manual dispatch only", () => {
   const trigger = workflow.slice(workflow.indexOf("\non:"), workflow.indexOf("permissions:"));
   assert.match(trigger, /pull_request:/);
@@ -79,8 +95,7 @@ for (const scenario of [
       .split("\n      - name:")[0];
     assert.match(step, /RSYNC_VERSION: 3\.4\.4\n/);
     assert.match(step, /RSYNC_SHA256: bd88cf82fa653da32314fb229136407c5c90f80d1758d8f4b091767877d8fa96\n/);
-    const script = step.split("        run: |\n")[1].split("\n")
-      .map((line) => line.replace(/^ {10}/, "")).join("\n");
+    const script = runScript(step);
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-rsync-download-"));
     t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
     const bin = path.join(dir, "bin");
@@ -150,11 +165,7 @@ fs.appendFileSync(process.env.FIXTURE_CALLS, JSON.stringify({tool:path.basename(
 test("failed bootstrap diagnostics read only the unique smoke container", (t) => {
   const marker = "      - name: Diagnose local-container bootstrap\n";
   const step = workflow.slice(workflow.indexOf(marker) + marker.length);
-  const script = step
-    .slice(step.indexOf("        run: |\n") + "        run: |\n".length)
-    .split("\n")
-    .map((line) => line.replace(/^ {10}/, ""))
-    .join("\n");
+  const script = runScript(step);
   assert.match(step, /if: failure\(\) && matrix\.name == 'local-container'/);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-bootstrap-diagnostics-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

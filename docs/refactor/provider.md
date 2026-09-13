@@ -123,8 +123,6 @@ For the up-to-date provider/capability matrix, run `crabbox providers` or
 
 ```go
 type Provider interface {
-	Name() string
-	Aliases() []string
 	Spec() ProviderSpec
 
 	RegisterFlags(fs *flag.FlagSet, defaults Config) any
@@ -459,7 +457,8 @@ Built-in providers register at init time:
 var providerRegistry = map[string]Provider{}
 
 func RegisterProvider(provider Provider) {
-	names := append([]string{provider.Name()}, provider.Aliases()...)
+	spec := provider.Spec()
+	names := append([]string{spec.Name}, spec.Aliases...)
 	for _, name := range names {
 		key := normalizeProviderName(name)
 		if key == "" {
@@ -484,7 +483,7 @@ func ProviderFor(name string) (Provider, error) {
 Each provider package registers itself in its `init`, and
 `internal/providers/all` blank-imports every package so a single import of `all`
 wires the whole registry. Canonical names and compatibility aliases come from
-`Name()`/`Aliases()`, for example:
+`ProviderSpec.Name`/`ProviderSpec.Aliases`, for example:
 
 ```text
 ssh                 # aliases: static, static-ssh
@@ -570,7 +569,7 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg.Provider = provider.Name()
+	cfg.Provider = provider.Spec().Name
 	backend, err := provider.Configure(cfg, rt)
 	if err != nil {
 		return nil, err

@@ -13,10 +13,10 @@ import (
 
 func TestProviderSpecAndAliases(t *testing.T) {
 	p := Provider{}
-	if p.Name() != "vast" {
-		t.Fatalf("Name=%q", p.Name())
+	if p.Spec().Name != "vast" {
+		t.Fatalf("Name=%q", p.Spec().Name)
 	}
-	aliases := p.Aliases()
+	aliases := p.Spec().Aliases
 	if len(aliases) != 2 || aliases[0] != "vast-ai" || aliases[1] != "vastai" {
 		t.Fatalf("aliases=%v", aliases)
 	}

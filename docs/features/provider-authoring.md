@@ -109,9 +109,6 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string      { return "example" }
-func (Provider) Aliases() []string { return nil }
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Name:    "example",
@@ -140,14 +137,15 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 }
 ```
 
-`Name()` is the canonical name used in docs, config (`provider: example`), and
-the `--provider` flag. `RegisterProvider` registers the canonical name plus
-every alias and panics on a duplicate, so keep names unique. Aliases are for
+`ProviderSpec.Name` is the canonical name used in docs, config (`provider: example`),
+and the `--provider` flag. `RegisterProvider` registers it plus every entry in
+`ProviderSpec.Aliases` and panics on a duplicate, so keep names unique. Aliases are for
 compatibility — Blacksmith uses `blacksmith` as an alias for
 `blacksmith-testbox`. Do not invent aliases for new providers; pick one
 canonical name.
 
-`Spec()` is the source of truth for what the provider can do. Read on.
+`Spec()` owns identity and capabilities. Return stable metadata without side
+effects: core reads it during registration and selection before configuration.
 
 ## Step 4. Be Honest In `Spec`
 

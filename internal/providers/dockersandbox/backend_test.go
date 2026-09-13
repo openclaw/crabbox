@@ -76,7 +76,7 @@ func TestProviderSpecIsDelegatedLinuxAndAliasFree(t *testing.T) {
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("targets=%#v want linux only", spec.Targets)
 	}
-	if aliases := (Provider{}).Aliases(); len(aliases) != 0 {
+	if aliases := (Provider{}).Spec().Aliases; len(aliases) != 0 {
 		t.Fatalf("aliases=%v want none", aliases)
 	}
 }

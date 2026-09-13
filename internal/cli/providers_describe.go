@@ -100,8 +100,8 @@ func describeProvider(requestedName string) (providerDescription, error) {
 	if err != nil {
 		return providerDescription{}, err
 	}
-	canonical := normalizeProviderName(provider.Name())
 	spec := provider.Spec()
+	canonical := normalizeProviderName(spec.Name)
 	switch spec.Kind {
 	case ProviderKindSSHLease, ProviderKindDelegatedRun:
 	case ProviderKindServiceControl:
@@ -121,7 +121,7 @@ func describeProvider(requestedName string) (providerDescription, error) {
 			for _, item := range added {
 				owned[item.Name] = true
 			}
-			providerOwned[normalizeProviderName(owner.Name())] = owned
+			providerOwned[normalizeProviderName(owner.Spec().Name)] = owned
 		},
 	})
 
@@ -179,7 +179,7 @@ func describeProvider(requestedName string) (providerDescription, error) {
 	if _, ok := provider.(NativeCheckpointProvider); ok {
 		entry.Lifecycle = append(entry.Lifecycle, "checkpoint-retirement-prepare")
 	}
-	aliases := normalizedSortedStrings(provider.Aliases())
+	aliases := normalizedSortedStrings(spec.Aliases)
 	inputAlias := ""
 	if requested != canonical {
 		inputAlias = requested
@@ -231,7 +231,7 @@ func providerFlagContractNames(provider Provider, owned map[string]bool, contrac
 	for _, raw := range names {
 		name := strings.TrimLeft(strings.TrimSpace(raw), "-")
 		if name == "" || !owned[name] {
-			return nil, Exit(2, "provider %q %s flag annotation references unregistered provider flag --%s", provider.Name(), contract, name)
+			return nil, Exit(2, "provider %q %s flag annotation references unregistered provider flag --%s", provider.Spec().Name, contract, name)
 		}
 		result[name] = true
 	}

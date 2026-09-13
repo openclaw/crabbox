@@ -1051,7 +1051,7 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 	if err != nil {
 		return CoordinatorLease{}, err
 	}
-	cfg.Provider = provider.Name()
+	cfg.Provider = provider.Spec().Name
 	if slug == "" {
 		slug = NewLeaseSlug(leaseID)
 	}
@@ -1733,7 +1733,7 @@ func (c *CoordinatorClient) ProviderReadiness(ctx context.Context, cfg Config) (
 	values.Set("market", cfg.Capacity.Market)
 	values.Set("fallback", cfg.Capacity.Fallback)
 	values.Set("region", cfg.AWSRegion)
-	path := "/v1/providers/" + url.PathEscape(provider.Name()) + "/readiness"
+	path := "/v1/providers/" + url.PathEscape(provider.Spec().Name) + "/readiness"
 	if encoded := values.Encode(); encoded != "" {
 		path += "?" + encoded
 	}

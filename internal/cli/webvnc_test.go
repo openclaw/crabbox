@@ -1202,8 +1202,6 @@ func TestWebVNCBridgeArgsPreserveProviderRouting(t *testing.T) {
 
 type directWebVNCTestProvider struct{}
 
-func (directWebVNCTestProvider) Name() string      { return "direct-webvnc-test" }
-func (directWebVNCTestProvider) Aliases() []string { return nil }
 func (directWebVNCTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "direct-webvnc-test",

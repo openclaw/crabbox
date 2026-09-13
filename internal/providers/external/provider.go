@@ -16,8 +16,6 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return []string{"exec-provider"} }
 func (Provider) DiagnosticSecrets(cfg core.Config) []string {
 	passwordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv)
 	if password, ok := core.LookupExternalDesktopPassword(cfg, passwordEnv); ok {
@@ -27,6 +25,7 @@ func (Provider) DiagnosticSecrets(cfg core.Config) []string {
 }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"exec-provider"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationExternalContract),
 		Name:             providerName,
 		Family:           "external",

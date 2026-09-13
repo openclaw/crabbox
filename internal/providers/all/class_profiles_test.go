@@ -63,7 +63,7 @@ func TestProductionProviderClassCatalogCompleteness(t *testing.T) {
 		if catalog.Profiles == nil {
 			t.Errorf("provider=%s catalog profiles is nil", name)
 		}
-		for _, alias := range provider.Aliases() {
+		for _, alias := range provider.Spec().Aliases {
 			resolved, err := core.ProviderFor(alias)
 			if err != nil {
 				t.Errorf("provider=%s alias=%s: %v", name, alias, err)
@@ -467,7 +467,7 @@ func TestProviderSizingSelectorContracts(t *testing.T) {
 				t.Fatal(err)
 			}
 			names := append([]string{tc.name, " " + strings.ToUpper(tc.name) + " ", "unselected"}, tc.aliases...)
-			names = append(names, provider.Aliases()...)
+			names = append(names, provider.Spec().Aliases...)
 			for _, selector := range names {
 				selected := selector == tc.name
 				for _, alias := range tc.aliases {
@@ -554,7 +554,7 @@ func TestProviderSizingLocalOrderContracts(t *testing.T) {
 		flag string
 	}{{[]string{"--expose=8080", "--type=machine", "--class=large"}, "class"}, {[]string{"--expose=8080", "--type="}, "type"}, {[]string{"--expose="}, "expose"}} {
 		cfg := core.BaseConfig()
-		cfg.Provider = provider.Name()
+		cfg.Provider = provider.Spec().Name
 		fs, values := sizingContractFlags(t, provider, cfg, tc.args)
 		before := fmt.Sprintf("%#v", cfg)
 		assertSizingContractError(t, provider.ApplyFlags(&cfg, fs, values), "--"+tc.flag+" is not supported for provider=cloudflare-dynamic-workers")
@@ -567,7 +567,7 @@ func TestProviderSizingLocalOrderContracts(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := core.BaseConfig()
-	cfg.Provider = provider.Name()
+	cfg.Provider = provider.Spec().Name
 	cfg.TargetOS = "linux"
 	cfg.WindowsMode = "prior-mode"
 	fs, values := sizingContractFlags(t, provider, cfg, nil)

@@ -13,10 +13,10 @@ import (
 
 func TestProviderSpecIsDelegatedLinuxAndAliasFree(t *testing.T) {
 	provider := Provider{}
-	if provider.Name() != providerName {
-		t.Fatalf("Name=%q want %q", provider.Name(), providerName)
+	if provider.Spec().Name != providerName {
+		t.Fatalf("Name=%q want %q", provider.Spec().Name, providerName)
 	}
-	if aliases := provider.Aliases(); len(aliases) != 0 {
+	if aliases := provider.Spec().Aliases; len(aliases) != 0 {
 		t.Fatalf("aliases=%v want none", aliases)
 	}
 	spec := provider.Spec()
@@ -42,11 +42,11 @@ func TestProviderForResolvesCanonicalOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(superserve): %v", err)
 	}
-	if got.Name() != providerName {
-		t.Fatalf("ProviderFor(superserve).Name=%q", got.Name())
+	if got.Spec().Name != providerName {
+		t.Fatalf("ProviderFor(superserve).Name=%q", got.Spec().Name)
 	}
 	for _, alias := range []string{"ss", "sup", "super-serve"} {
-		if got, err := core.ProviderFor(alias); err == nil && got.Name() == providerName {
+		if got, err := core.ProviderFor(alias); err == nil && got.Spec().Name == providerName {
 			t.Fatalf("%q alias unexpectedly resolves to superserve", alias)
 		}
 	}

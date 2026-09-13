@@ -18,7 +18,7 @@ import (
 
 func TestProviderAliasesAndDiagnosticSecrets(t *testing.T) {
 	p := Provider{}
-	aliases := p.Aliases()
+	aliases := p.Spec().Aliases
 	if len(aliases) == 0 {
 		t.Fatal("expected aliases")
 	}

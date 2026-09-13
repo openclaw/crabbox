@@ -12,11 +12,6 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string { return "freestyle" }
-func (Provider) Aliases() []string {
-	return nil
-}
-
 // ServerTypeForConfig implements ProviderServerTypeProvider
 // so core needs no provider == "freestyle" special-case. Delegated-run Freestyle
 // VMs have no server-type concept, so both return "".

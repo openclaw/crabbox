@@ -42,7 +42,7 @@ func TestRunCoordinatorCleanupOutcomes(t *testing.T) {
 				sshPort := startTCPReadinessFixture(t)
 				setupRunCleanupWorkspaceOwnerTest(t)
 				const id = "cbx_abcdef123456"
-				provider := runReadyPoolPreflightTestProvider{}.Name()
+				provider := runReadyPoolPreflightTestProvider{}.Spec().Name
 				t.Setenv("CRABBOX_OWNER", "alice@example.com")
 				t.Setenv("CRABBOX_SSH_CONFIG_PROXY", "true")
 				key, err := testboxKeyPath(id)
@@ -225,7 +225,7 @@ func TestRunSuccessfulRetainedCleanup(t *testing.T) {
 			calls := 0
 			runEnvProfileTestReleaseHook = func() error { calls++; return nil }
 			var stdout, stderr bytes.Buffer
-			args := []string{"--provider", runEnvProfileTestProvider{}.Name(), "--no-sync", "--no-hydrate", "--timing-json"}
+			args := []string{"--provider", runEnvProfileTestProvider{}.Spec().Name, "--no-sync", "--no-hydrate", "--timing-json"}
 			if policy != "" {
 				args = append(args, "--stop-after", policy)
 			}

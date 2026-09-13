@@ -12,10 +12,10 @@ import (
 
 func TestProviderSpec(t *testing.T) {
 	provider := Provider{}
-	if provider.Name() != "xcp-ng" {
-		t.Fatalf("Name=%q", provider.Name())
+	if provider.Spec().Name != "xcp-ng" {
+		t.Fatalf("Name=%q", provider.Spec().Name)
 	}
-	if aliases := provider.Aliases(); len(aliases) != 0 {
+	if aliases := provider.Spec().Aliases; len(aliases) != 0 {
 		t.Fatalf("Aliases=%v want none", aliases)
 	}
 	spec := provider.Spec()
@@ -37,8 +37,8 @@ func TestProviderForResolvesCanonicalOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if provider.Name() != "xcp-ng" {
-		t.Fatalf("provider=%s", provider.Name())
+	if provider.Spec().Name != "xcp-ng" {
+		t.Fatalf("provider=%s", provider.Spec().Name)
 	}
 	if _, err := core.ProviderFor("xcpng"); err == nil {
 		t.Fatal("xcpng alias must not resolve")

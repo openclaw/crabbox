@@ -174,8 +174,8 @@ func TestAppleContainerRegistersWithoutAliasCollision(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", alias, err)
 		}
-		if provider.Name() != "apple-container" {
-			t.Fatalf("ProviderFor(%q).Name=%q want apple-container", alias, provider.Name())
+		if provider.Spec().Name != "apple-container" {
+			t.Fatalf("ProviderFor(%q).Name=%q want apple-container", alias, provider.Spec().Name)
 		}
 	}
 	// The bare "container" alias must keep pointing at local-container.
@@ -183,8 +183,8 @@ func TestAppleContainerRegistersWithoutAliasCollision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(container): %v", err)
 	}
-	if got.Name() != "local-container" {
-		t.Fatalf("'container' alias now resolves to %q; apple-container must not steal it", got.Name())
+	if got.Spec().Name != "local-container" {
+		t.Fatalf("'container' alias now resolves to %q; apple-container must not steal it", got.Spec().Name)
 	}
 }
 
@@ -193,16 +193,16 @@ func TestDockerSandboxRegistersWithoutAliasCollision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(docker-sandbox): %v", err)
 	}
-	if provider.Name() != "docker-sandbox" {
-		t.Fatalf("ProviderFor(docker-sandbox).Name=%q", provider.Name())
+	if provider.Spec().Name != "docker-sandbox" {
+		t.Fatalf("ProviderFor(docker-sandbox).Name=%q", provider.Spec().Name)
 	}
 	for _, alias := range []string{"docker", "container", "local-docker"} {
 		got, err := core.ProviderFor(alias)
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", alias, err)
 		}
-		if got.Name() != "local-container" {
-			t.Fatalf("%q alias now resolves to %q; docker-sandbox must not steal local-container aliases", alias, got.Name())
+		if got.Spec().Name != "local-container" {
+			t.Fatalf("%q alias now resolves to %q; docker-sandbox must not steal local-container aliases", alias, got.Spec().Name)
 		}
 	}
 }
@@ -212,11 +212,11 @@ func TestOpenSandboxRegistersWithoutAliasCollision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(opensandbox): %v", err)
 	}
-	if provider.Name() != "opensandbox" {
-		t.Fatalf("ProviderFor(opensandbox).Name=%q", provider.Name())
+	if provider.Spec().Name != "opensandbox" {
+		t.Fatalf("ProviderFor(opensandbox).Name=%q", provider.Spec().Name)
 	}
 	for _, alias := range []string{"osb", "open-sandbox"} {
-		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "opensandbox" {
+		if got, err := core.ProviderFor(alias); err == nil && got.Spec().Name == "opensandbox" {
 			t.Fatalf("%q alias unexpectedly resolves to opensandbox; v1 should reserve aliases", alias)
 		}
 	}
@@ -227,8 +227,8 @@ func TestCuaRegistersCanonicalWithoutAliases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(cua): %v", err)
 	}
-	if provider.Name() != "cua" {
-		t.Fatalf("ProviderFor(cua).Name=%q", provider.Name())
+	if provider.Spec().Name != "cua" {
+		t.Fatalf("ProviderFor(cua).Name=%q", provider.Spec().Name)
 	}
 	spec := provider.Spec()
 	if spec.Kind != core.ProviderKindServiceControl || spec.Family != "cua" || spec.Coordinator != core.CoordinatorNever {
@@ -241,7 +241,7 @@ func TestCuaRegistersCanonicalWithoutAliases(t *testing.T) {
 		t.Fatalf("cua features=%v", spec.Features)
 	}
 	for _, alias := range []string{"cua-cloud", "cua-sandbox", "trycua"} {
-		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "cua" {
+		if got, err := core.ProviderFor(alias); err == nil && got.Spec().Name == "cua" {
 			t.Fatalf("%q alias unexpectedly resolves to cua", alias)
 		}
 	}
@@ -253,8 +253,8 @@ func TestNvidiaBrevRegistersCanonicalAndAliases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", name, err)
 		}
-		if provider.Name() != "nvidia-brev" {
-			t.Fatalf("ProviderFor(%q).Name=%q want nvidia-brev", name, provider.Name())
+		if provider.Spec().Name != "nvidia-brev" {
+			t.Fatalf("ProviderFor(%q).Name=%q want nvidia-brev", name, provider.Spec().Name)
 		}
 	}
 }
@@ -265,8 +265,8 @@ func TestVastRegistersCanonicalAndAliases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", name, err)
 		}
-		if provider.Name() != "vast" {
-			t.Fatalf("ProviderFor(%q).Name=%q want vast", name, provider.Name())
+		if provider.Spec().Name != "vast" {
+			t.Fatalf("ProviderFor(%q).Name=%q want vast", name, provider.Spec().Name)
 		}
 	}
 	provider, err := core.ProviderFor("vast")
@@ -292,8 +292,8 @@ func TestLambdaRegistersAsBuiltInProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(lambda): %v", err)
 	}
-	if provider.Name() != "lambda" {
-		t.Fatalf("ProviderFor(lambda).Name=%q", provider.Name())
+	if provider.Spec().Name != "lambda" {
+		t.Fatalf("ProviderFor(lambda).Name=%q", provider.Spec().Name)
 	}
 	spec := provider.Spec()
 	if spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever || len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
@@ -311,8 +311,8 @@ func TestNebiusRegistersWithoutAliases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(nebius): %v", err)
 	}
-	if provider.Name() != "nebius" {
-		t.Fatalf("ProviderFor(nebius).Name=%q", provider.Name())
+	if provider.Spec().Name != "nebius" {
+		t.Fatalf("ProviderFor(nebius).Name=%q", provider.Spec().Name)
 	}
 	spec := provider.Spec()
 	if spec.Family != "nebius" || spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever {
@@ -327,7 +327,7 @@ func TestNebiusRegistersWithoutAliases(t *testing.T) {
 		}
 	}
 	for _, alias := range []string{"nebius-ai", "nebius-compute", "nb"} {
-		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "nebius" {
+		if got, err := core.ProviderFor(alias); err == nil && got.Spec().Name == "nebius" {
 			t.Fatalf("%q alias unexpectedly resolves to nebius", alias)
 		}
 	}
@@ -338,8 +338,8 @@ func TestNomadRegistersWithoutAliases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(nomad): %v", err)
 	}
-	if provider.Name() != "nomad" {
-		t.Fatalf("ProviderFor(nomad).Name=%q", provider.Name())
+	if provider.Spec().Name != "nomad" {
+		t.Fatalf("ProviderFor(nomad).Name=%q", provider.Spec().Name)
 	}
 	spec := provider.Spec()
 	if spec.Family != "nomad" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
@@ -355,7 +355,7 @@ func TestNomadRegistersWithoutAliases(t *testing.T) {
 		t.Fatalf("nomad features=%v, want archive-sync after Wave 3 run sync", spec.Features)
 	}
 	for _, alias := range []string{"nomad-provider", "nomad-run", "hashicorp-nomad"} {
-		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "nomad" {
+		if got, err := core.ProviderFor(alias); err == nil && got.Spec().Name == "nomad" {
 			t.Fatalf("%q alias unexpectedly resolves to nomad", alias)
 		}
 	}
@@ -366,8 +366,8 @@ func TestSealosDevboxRegistersWithRequestedAliases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(sealos-devbox): %v", err)
 	}
-	if provider.Name() != "sealos-devbox" {
-		t.Fatalf("ProviderFor(sealos-devbox).Name=%q", provider.Name())
+	if provider.Spec().Name != "sealos-devbox" {
+		t.Fatalf("ProviderFor(sealos-devbox).Name=%q", provider.Spec().Name)
 	}
 	spec := provider.Spec()
 	if spec.Family != "sealos" || spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever {
@@ -386,11 +386,11 @@ func TestSealosDevboxRegistersWithRequestedAliases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", alias, err)
 		}
-		if got.Name() != "sealos-devbox" {
-			t.Fatalf("ProviderFor(%q).Name=%q want sealos-devbox", alias, got.Name())
+		if got.Spec().Name != "sealos-devbox" {
+			t.Fatalf("ProviderFor(%q).Name=%q want sealos-devbox", alias, got.Spec().Name)
 		}
 	}
-	if got, err := core.ProviderFor("devbox"); err == nil && got.Name() == "sealos-devbox" {
+	if got, err := core.ProviderFor("devbox"); err == nil && got.Spec().Name == "sealos-devbox" {
 		t.Fatal(`"devbox" alias unexpectedly resolves to sealos-devbox`)
 	}
 }
@@ -400,8 +400,8 @@ func TestAgentSandboxRegistersWithoutAliases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(agent-sandbox): %v", err)
 	}
-	if provider.Name() != "agent-sandbox" {
-		t.Fatalf("ProviderFor(agent-sandbox).Name=%q", provider.Name())
+	if provider.Spec().Name != "agent-sandbox" {
+		t.Fatalf("ProviderFor(agent-sandbox).Name=%q", provider.Spec().Name)
 	}
 	spec := provider.Spec()
 	if spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever || len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
@@ -411,7 +411,7 @@ func TestAgentSandboxRegistersWithoutAliases(t *testing.T) {
 		t.Fatalf("agent-sandbox features=%v", spec.Features)
 	}
 	for _, alias := range []string{"agentsandbox", "asb", "sandbox"} {
-		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "agent-sandbox" {
+		if got, err := core.ProviderFor(alias); err == nil && got.Spec().Name == "agent-sandbox" {
 			t.Fatalf("%q alias unexpectedly resolves to agent-sandbox", alias)
 		}
 	}
@@ -422,8 +422,8 @@ func TestSuperserveRegistersWithoutAliases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(superserve): %v", err)
 	}
-	if provider.Name() != "superserve" {
-		t.Fatalf("ProviderFor(superserve).Name=%q", provider.Name())
+	if provider.Spec().Name != "superserve" {
+		t.Fatalf("ProviderFor(superserve).Name=%q", provider.Spec().Name)
 	}
 	spec := provider.Spec()
 	if spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever || len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
@@ -433,7 +433,7 @@ func TestSuperserveRegistersWithoutAliases(t *testing.T) {
 		t.Fatalf("superserve features=%v", spec.Features)
 	}
 	for _, alias := range []string{"ss", "sup", "super-serve"} {
-		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "superserve" {
+		if got, err := core.ProviderFor(alias); err == nil && got.Spec().Name == "superserve" {
 			t.Fatalf("%q alias unexpectedly resolves to superserve", alias)
 		}
 	}
@@ -444,11 +444,11 @@ func TestScalewayRegistersWithoutAliases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(scaleway): %v", err)
 	}
-	if provider.Name() != "scaleway" {
-		t.Fatalf("ProviderFor(scaleway).Name=%q", provider.Name())
+	if provider.Spec().Name != "scaleway" {
+		t.Fatalf("ProviderFor(scaleway).Name=%q", provider.Spec().Name)
 	}
-	if provider.Aliases() != nil {
-		t.Fatalf("scaleway aliases=%v, want none", provider.Aliases())
+	if provider.Spec().Aliases != nil {
+		t.Fatalf("scaleway aliases=%v, want none", provider.Spec().Aliases)
 	}
 	spec := provider.Spec()
 	if spec.Kind != core.ProviderKindSSHLease || spec.Family != "scaleway" || spec.Coordinator != core.CoordinatorNever {
@@ -469,11 +469,11 @@ func TestCrownestRegistersWithoutAliases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(crownest): %v", err)
 	}
-	if provider.Name() != "crownest" {
-		t.Fatalf("ProviderFor(crownest).Name=%q", provider.Name())
+	if provider.Spec().Name != "crownest" {
+		t.Fatalf("ProviderFor(crownest).Name=%q", provider.Spec().Name)
 	}
 	for _, alias := range []string{"cn", "crow", "nest"} {
-		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "crownest" {
+		if got, err := core.ProviderFor(alias); err == nil && got.Spec().Name == "crownest" {
 			t.Fatalf("%q alias unexpectedly resolves to crownest", alias)
 		}
 	}
@@ -485,16 +485,16 @@ func TestNamespaceInstanceRegistersWithoutAliasCollision(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", name, err)
 		}
-		if provider.Name() != "namespace-instance" {
-			t.Fatalf("ProviderFor(%q).Name=%q", name, provider.Name())
+		if provider.Spec().Name != "namespace-instance" {
+			t.Fatalf("ProviderFor(%q).Name=%q", name, provider.Spec().Name)
 		}
 	}
 	provider, err := core.ProviderFor("namespace")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if provider.Name() != "namespace-devbox" {
-		t.Fatalf("namespace alias resolves to %q; want namespace-devbox", provider.Name())
+	if provider.Spec().Name != "namespace-devbox" {
+		t.Fatalf("namespace alias resolves to %q; want namespace-devbox", provider.Spec().Name)
 	}
 }
 
@@ -503,8 +503,8 @@ func TestVercelSandboxRegistersWithoutAliases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(vercel-sandbox): %v", err)
 	}
-	if provider.Name() != "vercel-sandbox" {
-		t.Fatalf("ProviderFor(vercel-sandbox).Name=%q", provider.Name())
+	if provider.Spec().Name != "vercel-sandbox" {
+		t.Fatalf("ProviderFor(vercel-sandbox).Name=%q", provider.Spec().Name)
 	}
 	spec := provider.Spec()
 	if spec.Family != "vercel" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
@@ -517,7 +517,7 @@ func TestVercelSandboxRegistersWithoutAliases(t *testing.T) {
 		t.Fatalf("vercel-sandbox features=%v", spec.Features)
 	}
 	for _, alias := range []string{"vercel", "vsb", "sandbox"} {
-		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "vercel-sandbox" {
+		if got, err := core.ProviderFor(alias); err == nil && got.Spec().Name == "vercel-sandbox" {
 			t.Fatalf("%q alias unexpectedly resolves to vercel-sandbox", alias)
 		}
 	}
@@ -528,11 +528,11 @@ func TestBlaxelRegistersCanonicalWithoutAliases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(blaxel): %v", err)
 	}
-	if provider.Name() != "blaxel" {
-		t.Fatalf("ProviderFor(blaxel).Name=%q", provider.Name())
+	if provider.Spec().Name != "blaxel" {
+		t.Fatalf("ProviderFor(blaxel).Name=%q", provider.Spec().Name)
 	}
 	for _, alias := range []string{"blx", "sandbox"} {
-		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "blaxel" {
+		if got, err := core.ProviderFor(alias); err == nil && got.Spec().Name == "blaxel" {
 			t.Fatalf("%q alias unexpectedly resolves to blaxel", alias)
 		}
 	}
@@ -551,8 +551,8 @@ func TestAnthropicSandboxRuntimeRegistersCanonicalAndAlias(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", name, err)
 		}
-		if provider.Name() != "anthropic-sandbox-runtime" {
-			t.Fatalf("ProviderFor(%q).Name=%q", name, provider.Name())
+		if provider.Spec().Name != "anthropic-sandbox-runtime" {
+			t.Fatalf("ProviderFor(%q).Name=%q", name, provider.Spec().Name)
 		}
 	}
 	spec := mustProvider(t, "anthropic-sandbox-runtime").Spec()
@@ -567,15 +567,15 @@ func TestCloudflareDynamicWorkersRegistersCanonicalAndAliases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", name, err)
 		}
-		if provider.Name() != "cloudflare-dynamic-workers" {
-			t.Fatalf("ProviderFor(%q).Name=%q", name, provider.Name())
+		if provider.Spec().Name != "cloudflare-dynamic-workers" {
+			t.Fatalf("ProviderFor(%q).Name=%q", name, provider.Spec().Name)
 		}
 	}
-	if provider := mustProvider(t, "cloudflare"); provider.Name() != "cloudflare" {
-		t.Fatalf("cloudflare resolved to %q; dynamic workers must not replace Cloudflare Containers", provider.Name())
+	if provider := mustProvider(t, "cloudflare"); provider.Spec().Name != "cloudflare" {
+		t.Fatalf("cloudflare resolved to %q; dynamic workers must not replace Cloudflare Containers", provider.Spec().Name)
 	}
-	if provider := mustProvider(t, "cf"); provider.Name() != "cloudflare" {
-		t.Fatalf("cf alias resolved to %q; dynamic workers must not steal it", provider.Name())
+	if provider := mustProvider(t, "cf"); provider.Spec().Name != "cloudflare" {
+		t.Fatalf("cf alias resolved to %q; dynamic workers must not steal it", provider.Spec().Name)
 	}
 	spec := mustProvider(t, "cloudflare-dynamic-workers").Spec()
 	if spec.Family != "cloudflare" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
@@ -596,8 +596,8 @@ func TestCloudflareSandboxRegistersWithoutAliasCollision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(cloudflare-sandbox): %v", err)
 	}
-	if provider.Name() != "cloudflare-sandbox" {
-		t.Fatalf("ProviderFor(cloudflare-sandbox).Name=%q", provider.Name())
+	if provider.Spec().Name != "cloudflare-sandbox" {
+		t.Fatalf("ProviderFor(cloudflare-sandbox).Name=%q", provider.Spec().Name)
 	}
 	spec := provider.Spec()
 	if spec.Family != "cloudflare" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
@@ -613,18 +613,18 @@ func TestCloudflareSandboxRegistersWithoutAliasCollision(t *testing.T) {
 	}
 	for _, alias := range []string{"cloudflare", "cf", "cloudflare-dynamic-workers", "cf-dynamic", "cfdw", "sandbox"} {
 		got, err := core.ProviderFor(alias)
-		if err == nil && got.Name() == "cloudflare-sandbox" {
+		if err == nil && got.Spec().Name == "cloudflare-sandbox" {
 			t.Fatalf("%q alias unexpectedly resolves to cloudflare-sandbox", alias)
 		}
 	}
-	if provider := mustProvider(t, "cloudflare"); provider.Name() != "cloudflare" {
-		t.Fatalf("cloudflare resolved to %q; sandbox must not replace Cloudflare Containers", provider.Name())
+	if provider := mustProvider(t, "cloudflare"); provider.Spec().Name != "cloudflare" {
+		t.Fatalf("cloudflare resolved to %q; sandbox must not replace Cloudflare Containers", provider.Spec().Name)
 	}
-	if provider := mustProvider(t, "cf"); provider.Name() != "cloudflare" {
-		t.Fatalf("cf alias resolved to %q; sandbox must not steal it", provider.Name())
+	if provider := mustProvider(t, "cf"); provider.Spec().Name != "cloudflare" {
+		t.Fatalf("cf alias resolved to %q; sandbox must not steal it", provider.Spec().Name)
 	}
-	if provider := mustProvider(t, "cloudflare-dynamic-workers"); provider.Name() != "cloudflare-dynamic-workers" {
-		t.Fatalf("cloudflare-dynamic-workers resolved to %q; sandbox must not replace Dynamic Workers", provider.Name())
+	if provider := mustProvider(t, "cloudflare-dynamic-workers"); provider.Spec().Name != "cloudflare-dynamic-workers" {
+		t.Fatalf("cloudflare-dynamic-workers resolved to %q; sandbox must not replace Dynamic Workers", provider.Spec().Name)
 	}
 }
 
@@ -634,8 +634,8 @@ func TestCodeSandboxRegistersCanonicalAndAliases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", name, err)
 		}
-		if provider.Name() != "codesandbox" {
-			t.Fatalf("ProviderFor(%q).Name=%q want codesandbox", name, provider.Name())
+		if provider.Spec().Name != "codesandbox" {
+			t.Fatalf("ProviderFor(%q).Name=%q want codesandbox", name, provider.Spec().Name)
 		}
 	}
 	spec := mustProvider(t, "codesandbox").Spec()
@@ -661,8 +661,8 @@ func TestGitHubCodespacesRegistersCanonicalAndAliases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", name, err)
 		}
-		if provider.Name() != "github-codespaces" {
-			t.Fatalf("ProviderFor(%q).Name=%q want github-codespaces", name, provider.Name())
+		if provider.Spec().Name != "github-codespaces" {
+			t.Fatalf("ProviderFor(%q).Name=%q want github-codespaces", name, provider.Spec().Name)
 		}
 	}
 	spec := mustProvider(t, "github-codespaces").Spec()
@@ -684,8 +684,8 @@ func TestIncusRegistersAsBuiltInProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(incus): %v", err)
 	}
-	if provider.Name() != "incus" {
-		t.Fatalf("ProviderFor(incus).Name=%q", provider.Name())
+	if provider.Spec().Name != "incus" {
+		t.Fatalf("ProviderFor(incus).Name=%q", provider.Spec().Name)
 	}
 }
 
@@ -694,8 +694,8 @@ func TestVultrRegistersAsBuiltInProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(vultr): %v", err)
 	}
-	if provider.Name() != "vultr" {
-		t.Fatalf("ProviderFor(vultr).Name=%q", provider.Name())
+	if provider.Spec().Name != "vultr" {
+		t.Fatalf("ProviderFor(vultr).Name=%q", provider.Spec().Name)
 	}
 	spec := provider.Spec()
 	if spec.Family != "vultr" || spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever {
@@ -714,8 +714,8 @@ func TestFirecrackerRegistersWithoutAliases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(firecracker): %v", err)
 	}
-	if provider.Name() != "firecracker" {
-		t.Fatalf("ProviderFor(firecracker).Name=%q", provider.Name())
+	if provider.Spec().Name != "firecracker" {
+		t.Fatalf("ProviderFor(firecracker).Name=%q", provider.Spec().Name)
 	}
 	spec := provider.Spec()
 	if spec.Family != "firecracker" || spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever {
@@ -730,7 +730,7 @@ func TestFirecrackerRegistersWithoutAliases(t *testing.T) {
 		}
 	}
 	for _, alias := range []string{"fc", "firecracker-vm"} {
-		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "firecracker" {
+		if got, err := core.ProviderFor(alias); err == nil && got.Spec().Name == "firecracker" {
 			t.Fatalf("%q alias unexpectedly resolves to firecracker", alias)
 		}
 	}
@@ -742,8 +742,8 @@ func TestAppleVMRegistersAsBuiltInProvider(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", name, err)
 		}
-		if provider.Name() != "apple-vm" {
-			t.Fatalf("ProviderFor(%q).Name=%q want apple-vm", name, provider.Name())
+		if provider.Spec().Name != "apple-vm" {
+			t.Fatalf("ProviderFor(%q).Name=%q want apple-vm", name, provider.Spec().Name)
 		}
 	}
 }

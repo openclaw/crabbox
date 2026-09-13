@@ -79,8 +79,6 @@ func serveTestARDHandshakeUntilSecurityResult(conn net.Conn, username, password 
 	return err
 }
 
-func (desktopCredentialTestProvider) Name() string      { return "desktop-credential-test" }
-func (desktopCredentialTestProvider) Aliases() []string { return nil }
 func (desktopCredentialTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{Name: "desktop-credential-test"}
 }

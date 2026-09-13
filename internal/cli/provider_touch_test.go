@@ -114,7 +114,7 @@ func TestClaimAndTouchPreservesParentCancellation(t *testing.T) {
 			t.Run(command+"/"+when, func(t *testing.T) {
 				lease, _ := setupRunClaimSnapshotTest(t)
 				cfg := baseConfig()
-				setProviderSelection(&cfg, runEnvProfileTestProvider{}.Name(), providerSelectionFlag)
+				setProviderSelection(&cfg, runEnvProfileTestProvider{}.Spec().Name, providerSelectionFlag)
 				cause := errors.New("caller canceled before transport")
 				ctx, cancel := context.WithCancelCause(t.Context())
 				defer cancel(nil)

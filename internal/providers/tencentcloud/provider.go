@@ -19,13 +19,9 @@ var classProfiles = buildClassProfiles()
 
 var _ core.ProviderClassProfileProvider = Provider{}
 
-func (Provider) Name() string { return providerName }
-func (Provider) Aliases() []string {
-	return []string{"tencent", "tencent-cvm", "cvm"}
-}
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"tencent", "tencent-cvm", "cvm"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPICredentials),
 		Name:             providerName,
 		Family:           providerName,

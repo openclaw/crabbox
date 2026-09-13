@@ -1051,7 +1051,7 @@ exit 0
 		t.Fatal(err)
 	}
 	cfg := baseConfig()
-	setProviderSelection(&cfg, runEnvProfileTestProvider{}.Name(), providerSelectionFlag)
+	setProviderSelection(&cfg, runEnvProfileTestProvider{}.Spec().Name, providerSelectionFlag)
 	touches := 0
 	runEnvProfileTestTouchHook = func(req TouchRequest) error {
 		touches++

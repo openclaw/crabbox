@@ -18,11 +18,9 @@ var classProfiles = buildClassProfiles()
 
 var _ core.ProviderClassProfileProvider = Provider{}
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return []string{"phala-cloud", "dstack"} }
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"phala-cloud", "dstack"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationCLI),
 		Name:             providerName,
 		Family:           providerName,

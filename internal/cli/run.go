@@ -4640,7 +4640,7 @@ func (a App) stop(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if resolvedProvider.Name() == "external" {
+		if resolvedProvider.Spec().Name == "external" {
 			leaseID := firstNonBlank(expectedIdentity.LeaseID, expectedIdentity.AttemptLeaseID)
 			path, err := ExternalRoutingPath(leaseID)
 			if err != nil {

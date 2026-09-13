@@ -334,7 +334,7 @@ func TestProviderRegistered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected azure provider to be registered: %v", err)
 	}
-	if got := provider.Name(); got != "azure" {
+	if got := provider.Spec().Name; got != "azure" {
 		t.Fatalf("provider name = %q, want %q", got, "azure")
 	}
 }

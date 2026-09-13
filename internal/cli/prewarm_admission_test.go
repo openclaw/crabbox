@@ -27,8 +27,6 @@ type probeAdmissionProvider struct {
 	warmupConfig                     Config
 }
 
-func (p *probeAdmissionProvider) Name() string       { return p.spec.Name }
-func (p *probeAdmissionProvider) Aliases() []string  { return nil }
 func (p *probeAdmissionProvider) Spec() ProviderSpec { return p.spec }
 func (p *probeAdmissionProvider) CreationOnlyFlagNames() []string {
 	return []string{"admission-create"}
@@ -80,7 +78,7 @@ func (b *probeAdmissionBackend) Warmup(context.Context, WarmupRequest) error {
 func (b *probeAdmissionBackend) Run(_ context.Context, req RunRequest) (RunResult, error) {
 	b.p.ran++
 	b.p.execution = probeAdmissionObservation{b.cfg, req}
-	return RunResult{Provider: b.p.Name(), LeaseID: req.ID}, nil
+	return RunResult{Provider: b.p.Spec().Name, LeaseID: req.ID}, nil
 }
 func (b *probeAdmissionBackend) Stop(context.Context, StopRequest) error { b.p.stopped++; return nil }
 func (b *probeAdmissionBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
@@ -116,7 +114,7 @@ func setupProbeAdmission(t *testing.T, features FeatureSet) *probeAdmissionProvi
 		Targets: []TargetSpec{{OS: targetLinux}}, Features: features, Coordinator: CoordinatorNever,
 	}}
 	RegisterProvider(p)
-	t.Cleanup(func() { delete(providerRegistry, p.Name()) })
+	t.Cleanup(func() { delete(providerRegistry, p.Spec().Name) })
 	writeFile(t, filepath.Join(root, "config.yaml"), "provider: probe-admission-test\nblacksmith:\n  org: config-route\n  workflow: config-only\n")
 	return p
 }

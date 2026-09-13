@@ -61,7 +61,7 @@ func TestProviderSpecAndFlags(t *testing.T) {
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != targetWorker {
 		t.Fatalf("targets=%#v", spec.Targets)
 	}
-	for _, alias := range (Provider{}).Aliases() {
+	for _, alias := range (Provider{}).Spec().Aliases {
 		if alias != "cf-dynamic" && alias != "cfdw" {
 			t.Fatalf("unexpected alias %q", alias)
 		}

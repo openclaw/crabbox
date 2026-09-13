@@ -15,9 +15,6 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string      { return "xcp-ng" }
-func (Provider) Aliases() []string { return nil }
-
 func (Provider) ClaimScope(cfg core.Config) string {
 	endpoint, err := xapiEndpoint(cfg.XCPNg.APIURL)
 	if err != nil {

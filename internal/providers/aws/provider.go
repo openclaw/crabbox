@@ -44,8 +44,6 @@ var memoryGiBPerVCPU = map[string]int{
 
 var classProfiles = buildClassProfiles()
 
-func (Provider) Name() string      { return "aws" }
-func (Provider) Aliases() []string { return nil }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Authentication: core.ProviderAuthentication{

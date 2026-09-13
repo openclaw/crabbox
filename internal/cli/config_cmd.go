@@ -981,7 +981,7 @@ func validateBrokerProvider(provider string) (string, error) {
 	if spec.Coordinator != CoordinatorSupported {
 		return "", Exit(2, "provider %q cannot be used with a broker; supported broker providers are aws, azure, daytona, gcp, and hetzner", provider)
 	}
-	return resolved.Name(), nil
+	return resolved.Spec().Name, nil
 }
 
 func validateBrokerProviderForMode(provider, mode string) (string, error) {
@@ -999,7 +999,7 @@ func validateBrokerProviderForMode(provider, mode string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return resolved.Name(), nil
+	return resolved.Spec().Name, nil
 }
 
 func tokenState(token string) string {

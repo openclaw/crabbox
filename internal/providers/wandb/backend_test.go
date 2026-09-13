@@ -35,7 +35,7 @@ func TestWandbProviderSpec(t *testing.T) {
 	if spec.Kind != "delegated-run" {
 		t.Fatalf("spec.Kind = %q, want delegated-run", spec.Kind)
 	}
-	aliases := Provider{}.Aliases()
+	aliases := Provider{}.Spec().Aliases
 	if len(aliases) != 1 || aliases[0] != "weights-and-biases" {
 		t.Fatalf("aliases = %#v, want [weights-and-biases]", aliases)
 	}

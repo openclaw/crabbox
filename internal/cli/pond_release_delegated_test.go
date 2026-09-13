@@ -19,8 +19,6 @@ type pondReleaseDelegatedProvider struct {
 	backend *pondReleaseDelegatedBackend
 }
 
-func (pondReleaseDelegatedProvider) Name() string      { return pondReleaseDelegatedProviderName }
-func (pondReleaseDelegatedProvider) Aliases() []string { return nil }
 func (pondReleaseDelegatedProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name: pondReleaseDelegatedProviderName, Kind: ProviderKindDelegatedRun,

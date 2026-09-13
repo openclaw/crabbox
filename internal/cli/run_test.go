@@ -620,10 +620,6 @@ exit 0
 
 type windowsEnvHelperTestProvider struct{}
 
-func (windowsEnvHelperTestProvider) Name() string { return "windows-env-helper-test" }
-func (windowsEnvHelperTestProvider) Aliases() []string {
-	return nil
-}
 func (windowsEnvHelperTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name: "windows-env-helper-test",
@@ -681,10 +677,6 @@ func (b windowsEnvHelperTestBackend) Touch(context.Context, TouchRequest) (Serve
 
 type runEnvProfileTestProvider struct{}
 
-func (runEnvProfileTestProvider) Name() string { return "run-env-profile-test" }
-func (runEnvProfileTestProvider) Aliases() []string {
-	return nil
-}
 func (runEnvProfileTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "run-env-profile-test",
@@ -706,10 +698,6 @@ func (p runEnvProfileTestProvider) Configure(Config, Runtime) (Backend, error) {
 
 type runReadyPoolPreflightTestProvider struct{}
 
-func (runReadyPoolPreflightTestProvider) Name() string { return "run-ready-pool-preflight-test" }
-func (runReadyPoolPreflightTestProvider) Aliases() []string {
-	return nil
-}
 func (runReadyPoolPreflightTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "run-ready-pool-preflight-test",
@@ -822,7 +810,7 @@ func setupRunClaimSnapshotTest(t *testing.T) (LeaseTarget, leaseClaim) {
 		t.Fatal(err)
 	}
 	cfg := baseConfig()
-	cfg.Provider = runEnvProfileTestProvider{}.Name()
+	cfg.Provider = runEnvProfileTestProvider{}.Spec().Name
 	lease := LeaseTarget{
 		LeaseID: "cbx_env_profile_test",
 		Server: Server{
@@ -879,7 +867,7 @@ func TestRunCommandOneShotCleanupUsesUpdatedClaimSnapshot(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
-		"--provider", runEnvProfileTestProvider{}.Name(),
+		"--provider", runEnvProfileTestProvider{}.Spec().Name,
 		"--no-sync",
 		"--",
 		"true",
@@ -907,7 +895,7 @@ func TestWarmupFailureAfterRegistrationReleasesNewestClaimSnapshot(t *testing.T)
 		return RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, snapshot, nil)
 	}
 	err := (App{Stdout: io.Discard, Stderr: io.Discard}).warmup(context.Background(), []string{
-		"--provider", runEnvProfileTestProvider{}.Name(), "--network", "tailscale",
+		"--provider", runEnvProfileTestProvider{}.Spec().Name, "--network", "tailscale",
 	})
 	if err == nil || !strings.Contains(err.Error(), "no tailnet address") || releases != 1 {
 		t.Fatalf("warmup error=%v releases=%d", err, releases)
@@ -920,7 +908,7 @@ func TestWarmupFailureAfterRegistrationReleasesNewestClaimSnapshot(t *testing.T)
 func TestResolvedRegistrationTouchReceivesNewestClaimSnapshot(t *testing.T) {
 	lease, initial := setupRunClaimSnapshotTest(t)
 	cfg := baseConfig()
-	setProviderSelection(&cfg, runEnvProfileTestProvider{}.Name(), providerSelectionFlag)
+	setProviderSelection(&cfg, runEnvProfileTestProvider{}.Spec().Name, providerSelectionFlag)
 	touches := 0
 	runEnvProfileTestTouchHook = func(req TouchRequest) error {
 		touches++
@@ -962,7 +950,7 @@ func TestRunCommandCleanupRejectsClaimReplacedAfterRegistration(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
-		"--provider", runEnvProfileTestProvider{}.Name(),
+		"--provider", runEnvProfileTestProvider{}.Spec().Name,
 		"--no-sync",
 		"--",
 		"true",
@@ -1004,10 +992,6 @@ type runWorkdirCase struct {
 
 type runArchiveSyncPreflightTestProvider struct{}
 
-func (runArchiveSyncPreflightTestProvider) Name() string { return "run-archive-sync-preflight-test" }
-func (runArchiveSyncPreflightTestProvider) Aliases() []string {
-	return nil
-}
 func (runArchiveSyncPreflightTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "run-archive-sync-preflight-test",
@@ -1081,7 +1065,7 @@ func setupDelegatedArchiveSyncPreflightWorkspace(t *testing.T, colocatedGit, inv
 }
 
 func TestRunDelegatedArchiveSyncValidatesSourceBeforeProviderCall(t *testing.T) {
-	provider := runArchiveSyncPreflightTestProvider{}.Name()
+	provider := runArchiveSyncPreflightTestProvider{}.Spec().Name
 
 	t.Run("native Jujutsu", func(t *testing.T) {
 		root := setupDelegatedArchiveSyncPreflightWorkspace(t, false, false)
@@ -1412,10 +1396,6 @@ func TestRunBuildsSyncManifestAfterAcquire(t *testing.T) {
 
 type runPrepareTestProvider struct{}
 
-func (runPrepareTestProvider) Name() string { return "run-prepare-test" }
-func (runPrepareTestProvider) Aliases() []string {
-	return nil
-}
 func (runPrepareTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "run-prepare-test",
@@ -1461,10 +1441,6 @@ func (b runPrepareTestBackend) Touch(context.Context, TouchRequest) (Server, err
 
 type runModuleRuntimeTestProvider struct{}
 
-func (runModuleRuntimeTestProvider) Name() string { return "module-runtime-test" }
-func (runModuleRuntimeTestProvider) Aliases() []string {
-	return nil
-}
 func (runModuleRuntimeTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "module-runtime-test",
@@ -7040,7 +7016,7 @@ func TestPreflightRawEmptyFlagKeepsConfiguredTools(t *testing.T) {
 			acquireCalls := 0
 			runEnvProfileTestAcquireHook = func(AcquireRequest) { acquireCalls++ }
 			t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
-			args := []string{"--provider", runEnvProfileTestProvider{}.Name(), "--preflight", "--no-sync", "--no-hydrate"}
+			args := []string{"--provider", runEnvProfileTestProvider{}.Spec().Name, "--preflight", "--no-sync", "--no-hydrate"}
 			if supplied {
 				args = append(args, "--preflight-tools", "")
 			}
@@ -7064,7 +7040,7 @@ func TestCMakeUnknownPreflightToolFailsBeforeAcquire(t *testing.T) {
 	t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
 
 	err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(t.Context(), []string{
-		"--provider", runEnvProfileTestProvider{}.Name(),
+		"--provider", runEnvProfileTestProvider{}.Spec().Name,
 		"--preflight",
 		"--preflight-tools", "cmake,cmake3",
 		"--no-sync",

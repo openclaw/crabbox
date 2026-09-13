@@ -27,7 +27,7 @@ func TestUnikraftCloudProviderSpec(t *testing.T) {
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("spec.Targets = %#v, want linux only", spec.Targets)
 	}
-	aliases := Provider{}.Aliases()
+	aliases := Provider{}.Spec().Aliases
 	if len(aliases) != 2 || aliases[0] != "unikraftcloud" || aliases[1] != "ukc" {
 		t.Fatalf("aliases = %#v, want [unikraftcloud ukc]", aliases)
 	}

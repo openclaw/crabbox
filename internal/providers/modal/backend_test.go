@@ -20,11 +20,11 @@ import (
 
 func TestProviderSpec(t *testing.T) {
 	p := Provider{}
-	if p.Name() != "modal" {
-		t.Fatalf("Name=%q want modal", p.Name())
+	if p.Spec().Name != "modal" {
+		t.Fatalf("Name=%q want modal", p.Spec().Name)
 	}
-	if len(p.Aliases()) != 0 {
-		t.Fatalf("aliases=%v want none", p.Aliases())
+	if len(p.Spec().Aliases) != 0 {
+		t.Fatalf("aliases=%v want none", p.Spec().Aliases)
 	}
 	spec := p.Spec()
 	if spec.Kind != core.ProviderKindDelegatedRun {
@@ -52,8 +52,8 @@ func TestProviderForResolvesModal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(modal): %v", err)
 	}
-	if got.Name() != "modal" {
-		t.Fatalf("ProviderFor(modal).Name=%q", got.Name())
+	if got.Spec().Name != "modal" {
+		t.Fatalf("ProviderFor(modal).Name=%q", got.Spec().Name)
 	}
 }
 

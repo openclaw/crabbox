@@ -13,9 +13,6 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return nil }
-
 func (Provider) ClaimScope(cfg core.Config) string {
 	endpoint, err := normalizeMorphAPIURL(cfg.Morph.APIURL)
 	if err != nil {
