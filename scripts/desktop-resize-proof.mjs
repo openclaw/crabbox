@@ -57,7 +57,9 @@ function check(value, name, details) {
 }
 
 function project(error) {
-  return error instanceof ProofFailure ? { code: error.code, details: error.details } : { code: "operation_failed" };
+  if (error instanceof ProofFailure) return { code: error.code, details: error.details };
+  const nativeCode = ["EACCES", "EPERM", "ENOENT", "ENOSPC", "EMFILE", "EIO"].includes(error?.code) ? error.code : undefined;
+  return { code: "operation_failed", nativeCode };
 }
 
 function shutdown(code) {
@@ -168,7 +170,7 @@ const guest = (label, ...args) => docker(label, "exec", "--user", "crabbox", "--
 const host = (label, ...args) => run(label, "sudo", ["-n", "-u", "crabbox", "env", "DISPLAY=:99", ...args]);
 const containerIDs = () => docker("container_identity", "ps", "-aq", "--no-trunc", "--filter", `label=lease=${lease}`);
 const claimPath = path.join(env.XDG_STATE_HOME, "crabbox", "claims", `${lease}.json`);
-const keyDirectory = path.join(env.XDG_CONFIG_HOME, "crabbox", "testboxes", lease);
+const keyDirectory = path.join(env.XDG_STATE_HOME, "crabbox", "testboxes", lease);
 
 async function absent(file) {
   try { await fs.lstat(file); return false; }
@@ -369,13 +371,20 @@ try {
   const build = await run("binary_identity", "go", ["version", "-m", binary]);
   check(build.includes(`vcs.revision=${proof.source}`) && build.includes("vcs.modified=false"), "binary_source_mismatch");
   proof.binarySha256 = createHash("sha256").update(await fs.readFile(binary)).digest("hex");
+  phase = "lease_preimage";
   check((await containerIDs()).trim() === "", "lease_preexists");
   check(await absent(claimPath) && await absent(keyDirectory), "lease_state_preexists");
-  for (const file of ["/var/lib/crabbox", "/etc/systemd/system/crabbox-xvfb.service", "/etc/systemd/system/crabbox-desktop.service",
+  phase = "installer_preimage";
+  // Root owns these paths; unprivileged lstat can fail inside sudoers.d even
+  // when the requested file is absent. Check dangling symlinks as well.
+  await run("installer_path_preimage", "sudo", ["-n", "sh", "-c",
+    'for file do if [ -e "$file" ] || [ -L "$file" ]; then exit 1; fi; done', "sh",
+    "/var/lib/crabbox", "/etc/systemd/system/crabbox-xvfb.service", "/etc/systemd/system/crabbox-desktop.service",
     "/etc/systemd/system/crabbox-x11vnc.service", "/usr/local/bin/crabbox-start-desktop", "/etc/sudoers.d/crabbox-desktop-reset",
-    "/tmp/.X99-lock", "/tmp/.X11-unix/X99"]) check(await absent(file), "installer_path_preexists");
+    "/tmp/.X99-lock", "/tmp/.X11-unix/X99"]);
   await run("installer_account_preimage", "sh", ["-c", "! getent passwd crabbox"]);
   check((await run("installer_port_preimage", "ss", ["-ltnH", "sport = :5900"])).trim() === "", "installer_port_preexists");
+  phase = "browser_launch";
   browser = await chromium.launch({ headless: true });
   phase = "local_container_bootstrap";
   acquisitionStarted = true;

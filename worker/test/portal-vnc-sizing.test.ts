@@ -194,7 +194,7 @@ describe("emitted WebVNC sizing policy", () => {
     expect(rfb.resizeSession).toBe(false);
   });
 
-  it("keeps the Wayland takeover notice visible across status polls, including mobile text", async () => {
+  it("keeps the Wayland takeover notice across polls and reconnects without owner acknowledgement", async () => {
     const v = await viewer();
     await v.connect();
     await v.elements.get("vnc-takeover")!.fire("click");
@@ -207,6 +207,11 @@ describe("emitted WebVNC sizing policy", () => {
     await v.mode("fit");
     expect(notice.hidden).toBe(true);
     await v.mode("match");
+    expect(notice.hidden).toBe(false);
+    await v.reconnect();
+    await v.connect();
+    expect(v.clients).toHaveLength(2);
+    expect(v.clients[1]!.resizeSession).toBe(true);
     expect(notice.hidden).toBe(false);
   });
 
