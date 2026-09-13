@@ -1443,7 +1443,7 @@ type RunSessionHandle struct {
 }
 
 func ValidateRunSessionFeatureSpec(spec ProviderSpec) error {
-	if !featureSetHas(spec.Features, FeatureRunSession) {
+	if !spec.Features.Has(FeatureRunSession) {
 		return nil
 	}
 	provider := blank(strings.TrimSpace(spec.Name), "provider")
@@ -1451,10 +1451,10 @@ func ValidateRunSessionFeatureSpec(spec ProviderSpec) error {
 	case ProviderKindDelegatedRun:
 		return nil
 	case ProviderKindSSHLease:
-		if !featureSetHas(spec.Features, FeatureSSH) {
+		if !spec.Features.Has(FeatureSSH) {
 			return Exit(2, "%s advertises %s as an SSH lease provider without %s", provider, FeatureRunSession, FeatureSSH)
 		}
-		if !featureSetHas(spec.Features, FeatureCleanup) {
+		if !spec.Features.Has(FeatureCleanup) {
 			return Exit(2, "%s advertises %s as an SSH lease provider without %s", provider, FeatureRunSession, FeatureCleanup)
 		}
 		return nil
@@ -1469,7 +1469,7 @@ func ValidateRunSessionForSpec(spec ProviderSpec, result RunResult) error {
 		return nil
 	}
 	provider := blank(strings.TrimSpace(spec.Name), "provider")
-	if !featureSetHas(spec.Features, FeatureRunSession) {
+	if !spec.Features.Has(FeatureRunSession) {
 		return Exit(2, "%s returned a run session but does not advertise %s", provider, FeatureRunSession)
 	}
 	if err := ValidateRunSessionFeatureSpec(spec); err != nil {
@@ -1960,20 +1960,11 @@ func validateActionsRunnerCapability(backend Backend, cfg Config) error {
 	return nil
 }
 
-func featureSetHas(features FeatureSet, feature Feature) bool {
-	for _, candidate := range features {
-		if candidate == feature {
-			return true
-		}
-	}
-	return false
-}
-
 func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error {
 	// NoSync is adapter-owned: SDK/CLI transports can skip sync without archive sync.
 	provider := spec.Name
-	archiveSync := featureSetHas(spec.Features, FeatureArchiveSync)
-	moduleRun := featureSetHas(spec.Features, FeatureModuleRun)
+	archiveSync := spec.Features.Has(FeatureArchiveSync)
+	moduleRun := spec.Features.Has(FeatureModuleRun)
 	if req.SyncOnly && !archiveSync {
 		return Exit(2, "%s delegates sync; --sync-only is not supported", provider)
 	}
@@ -1998,8 +1989,8 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 	if req.CaptureOnFail {
 		return Exit(2, "%s delegates run execution; --capture-on-fail is not supported", provider)
 	}
-	runArtifacts := featureSetHas(spec.Features, FeatureRunArtifacts)
-	runDownloads := featureSetHas(spec.Features, FeatureRunDownloads)
+	runArtifacts := spec.Features.Has(FeatureRunArtifacts)
+	runDownloads := spec.Features.Has(FeatureRunDownloads)
 	if len(req.Downloads) > 0 && !runDownloads {
 		return Exit(2, "%s delegates run execution; --download is not supported", provider)
 	}
@@ -2019,7 +2010,7 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 			return err
 		}
 	}
-	if req.EmitProof != "" && !featureSetHas(spec.Features, FeatureRunProof) {
+	if req.EmitProof != "" && !spec.Features.Has(FeatureRunProof) {
 		return Exit(2, "%s delegates run execution; --emit-proof is not supported", provider)
 	}
 	if req.StopAfter != "" {

@@ -238,12 +238,12 @@ func providerCapabilities(provider string) ProviderCapabilities {
 	if p, err := ProviderFor(provider); err == nil {
 		spec := p.Spec()
 		features := spec.Features
-		tailscale := featureSetHas(features, FeatureTailscale)
+		tailscale := features.Has(FeatureTailscale)
 		return ProviderCapabilities{
 			Tailscale:       tailscale && !spec.TailscaleEgressOnly,
 			TailscaleEgress: tailscale && spec.TailscaleEgressOnly,
-			SSHMesh:         spec.Kind == ProviderKindSSHLease && featureSetHas(features, FeatureSSH),
-			URLBridge:       featureSetHas(features, FeatureURLBridge),
+			SSHMesh:         spec.Kind == ProviderKindSSHLease && features.Has(FeatureSSH),
+			URLBridge:       features.Has(FeatureURLBridge),
 		}
 	}
 	return ProviderCapabilities{}
