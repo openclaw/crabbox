@@ -28,11 +28,20 @@ await fs.mkdir(output, { recursive: true });
 const children = new Set();
 const proof = { source: process.env.GITHUB_SHA, run: process.env.GITHUB_RUN_ID, cases: [], screenshots: [], cleanup: {},
   coverage: { localContainer: "candidate_cli_ssh_tunnel_and_guest_novnc",
-    installer: "clean_systemd_tigervnc_then_depth8_transition",
+    installer: "released_xvfb_to_candidate_tigervnc_upgrade_reset_then_depth8",
     legacyFit: "actual_legacy_novnc_with_captured_cli_url_settings",
     legacySSHStartup: false } };
+const releasedInstaller = {
+  tag: "v0.57.0",
+  tagObject: "a57d956766076368baa0e67f1f21f1de4f0517b0",
+  commit: "baa6c9a783f55f7af65d7f5d1868ecaf9260f371",
+  blob: "5058f4952e9763f2913c60299d9d005c30969ed5",
+  sha256: "e8125c3c44a355f1b00a83e36aad9cfc534f4b3053c5bf6e8c51af527dc323bd",
+  bytes: 6668,
+};
 let phase = "preflight";
 let container = "";
+let releaseClaim;
 let acquisitionStarted = false;
 let installerStarted = false;
 let browser;
@@ -177,6 +186,18 @@ async function absent(file) {
   catch (error) { if (error.code === "ENOENT") return true; throw error; }
 }
 
+async function readClaim() {
+  if (await absent(claimPath)) return null;
+  const stat = await fs.lstat(claimPath);
+  check(stat.isFile() && stat.size < 1024 * 1024, "lease_claim_shape");
+  const claim = JSON.parse(await fs.readFile(claimPath, "utf8"));
+  check(claim.leaseID === lease && claim.slug === slug && claim.provider === "local-container-fixed-v1" &&
+    claim.fixedCreateIntent?.version === 1 && claim.fixedCreateIntent.slug === slug &&
+    /^[a-f0-9]{64}$/.test(claim.fixedCreateIntent.fingerprint) &&
+    claim.providerScope && claim.providerScope === claim.fixedCreateIntent.providerScope, "lease_claim_identity");
+  return claim;
+}
+
 async function ownedContainer() {
   const id = (await containerIDs()).trim();
   if (!id) return "";
@@ -197,8 +218,10 @@ async function port() {
 }
 
 async function viewer() {
+  // Explicitly reveal this fresh fixture's URL only into our private buffers.
+  // The product default intentionally omits the whole credential-bearing URL.
   const item = start("direct_ssh_viewer", binary,
-    ["webvnc", "--provider", "local-container", "--id", lease, "--local-port", String(await port())], 10 * 60_000);
+    ["webvnc", "--provider", "local-container", "--id", lease, "--redact-credentials=false", "--local-port", String(await port())], 10 * 60_000);
   for (let i = 0; i < 300; i++) {
     const match = item.stdout.match(/^webvnc: (http:\/\/127\.0\.0\.1:\d+\/vnc\.html\?[^\r\n]+)$/m);
     if (match) {
@@ -207,6 +230,7 @@ async function viewer() {
       check(url.searchParams.has("password"), "direct_ssh_credential_missing");
       return { item, url };
     }
+    check(!/^webvnc: \[redacted\]$/m.test(item.stdout), "viewer_output_redacted");
     check(exists(item) && !item.timedOut && !item.overflow, "viewer_start_failed");
     await delay(200);
   }
@@ -355,6 +379,20 @@ async function loopback(name) {
   proof.cases.push({ name: `${name}_loopback`, passed: true });
 }
 
+async function dependencyIdentity(exec, name, legacy = false) {
+  // The installer source is release-pinned; distro packages are current. Bind
+  // the actual server and noVNC bytes separately instead of claiming old packages.
+  const files = ["/usr/share/novnc/app/ui.js", "/usr/share/novnc/core/rfb.js",
+    ...legacy ? ["/usr/bin/Xvfb", "/usr/bin/x11vnc"] : ["/usr/bin/Xtigervnc"]];
+  const lines = (await exec("dependency_identity", "sha256sum", ...files)).trim().split("\n");
+  check(lines.length === files.length, "dependency_identity_count");
+  const identities = lines.map((line, index) => {
+    check(/^[a-f0-9]{64}  /.test(line) && line.slice(66) === files[index], "dependency_identity_shape");
+    return { file: files[index], sha256: line.slice(0, 64) };
+  });
+  proof.cases.push({ name: `${name}_dependencies`, identities });
+}
+
 async function cleanup(name, action) {
   try { await action(); proof.cleanup[name] = true; }
   catch (error) {
@@ -394,18 +432,31 @@ try {
   check(container, "acquired_container_missing");
   await cb("desktop_doctor", "desktop", "doctor", "--provider", "local-container", "--id", lease);
   await guest("tigervnc_running", "pgrep", "-x", "Xtigervnc");
+  await dependencyIdentity(guest, "local-container");
+  proof.cases.push({ name: "local-container_bootstrap", desktopDoctor: true, tigerVNC: true });
+  phase = "direct_ssh_viewer";
   const direct = await viewer();
   try {
     await authentication(direct.url, guest, "local-container");
     await exercise(direct.url, guest, "local-container", true);
   }
   finally { await stop(direct.item); }
-  phase = "installer_tigervnc";
+  phase = "released_installer_source";
+  const source = await run("released_installer_source", "curl", ["--disable", "--fail", "--silent", "--show-error",
+    "--location", "--proto", "=https", "--proto-redir", "=https", "--connect-timeout", "10", "--max-time", "60",
+    `https://raw.githubusercontent.com/openclaw/crabbox/${releasedInstaller.commit}/scripts/install-linux-desktop.sh`]);
+  check(Buffer.byteLength(source) === releasedInstaller.bytes &&
+    createHash("sha256").update(source).digest("hex") === releasedInstaller.sha256, "released_installer_identity");
+  const releasedPath = path.join(work, "released-install-linux-desktop.sh");
+  await fs.writeFile(releasedPath, source, { mode: 0o700, flag: "wx" });
+  proof.releasedInstaller = releasedInstaller;
+  phase = "released_installer_xvfb";
   installerStarted = true;
-  await run("install_desktop", "sudo", ["-n", "bash", path.join(root, "scripts/install-linux-desktop.sh")], 12 * 60_000);
-  await run("installer_services", "systemctl", ["is-active", "--quiet", "crabbox-xvfb.service", "crabbox-desktop.service"]);
-  await host("installer_tigervnc_running", "pgrep", "-x", "Xtigervnc");
-  await loopback("installer-tigervnc");
+  await run("install_released_desktop", "sudo", ["-n", "bash", releasedPath], 12 * 60_000);
+  await run("released_services", "systemctl", ["is-active", "--quiet", "crabbox-xvfb.service", "crabbox-desktop.service", "crabbox-x11vnc.service"]);
+  await host("released_xvfb_running", "pgrep", "-x", "Xvfb");
+  await loopback("released-installer");
+  await dependencyIdentity(host, "released-installer", true);
   const password = (await run("installer_credential", "sudo", ["-n", "cat", "/var/lib/crabbox/vnc.password"])).trim();
   const webPort = await port();
   const web = start("installer_novnc", "websockify", ["--web", "/usr/share/novnc", `127.0.0.1:${webPort}`, "127.0.0.1:5900"], 12 * 60_000);
@@ -415,13 +466,32 @@ try {
   installedURL.searchParams.set("password", password);
   await delay(500);
   try {
-    await authentication(installedURL, host, "installer-tigervnc");
-    await exercise(installedURL, host, "installer-tigervnc", true);
+    await authentication(installedURL, host, "released-installer", true);
+    await exercise(installedURL, host, "released-installer", false);
+    phase = "installer_tigervnc_upgrade";
+    await run("install_desktop", "sudo", ["-n", "bash", path.join(root, "scripts/install-linux-desktop.sh")], 12 * 60_000);
+    await run("installer_services", "systemctl", ["is-active", "--quiet", "crabbox-xvfb.service", "crabbox-desktop.service"]);
+    await host("installer_tigervnc_running", "pgrep", "-x", "Xtigervnc");
+    const obsolete = await run("obsolete_exporter", "systemctl", ["show", "crabbox-x11vnc.service", "--property=ActiveState,UnitFileState"]);
+    check(obsolete.trim().split("\n").sort().join("\n") === "ActiveState=inactive\nUnitFileState=disabled", "obsolete_exporter_active");
+    await loopback("installer-upgrade");
+    await dependencyIdentity(host, "installer-upgrade");
+    installedURL.searchParams.set("password", (await run("upgrade_credential", "sudo", ["-n", "cat", "/var/lib/crabbox/vnc.password"])).trim());
+    await authentication(installedURL, host, "installer-upgrade");
+    await exercise(installedURL, host, "installer-upgrade", true);
+    phase = "installer_reset";
+    await host("installer_reset", "sudo", "-n", "/bin/bash", "/usr/local/bin/crabbox-start-desktop");
+    await run("reset_services", "systemctl", ["is-active", "--quiet", "crabbox-xvfb.service", "crabbox-desktop.service"]);
+    await host("reset_tigervnc_running", "pgrep", "-x", "Xtigervnc");
+    await loopback("installer-reset");
+    await authentication(installedURL, host, "installer-reset");
+    await exercise(installedURL, host, "installer-reset", true);
     phase = "installer_depth8_transition";
     await run("install_depth8", "sudo", ["-n", "env", "CRABBOX_DESKTOP_GEOMETRY=1920x1080x8", "bash", path.join(root, "scripts/install-linux-desktop.sh")], 12 * 60_000);
     await run("depth8_services", "systemctl", ["is-active", "--quiet", "crabbox-xvfb.service", "crabbox-desktop.service", "crabbox-x11vnc.service"]);
     await host("depth8_xvfb_running", "pgrep", "-x", "Xvfb");
     await loopback("installer-depth8-transition");
+    await dependencyIdentity(host, "installer-depth8-transition", true);
     installedURL.searchParams.set("password", (await run("depth8_credential", "sudo", ["-n", "cat", "/var/lib/crabbox/vnc.password"])).trim());
     await authentication(installedURL, host, "installer-depth8-transition", true);
     await exercise(installedURL, host, "installer-depth8-transition", false);
@@ -445,12 +515,27 @@ try {
     if (acquisitionStarted) {
       const actual = await ownedContainer();
       check(!container || !actual || actual === container, "cleanup_identity_drift");
-      if (actual || !(await absent(claimPath))) await cb("release_owned_lease", "stop", "--provider", "local-container", lease);
+      releaseClaim = await readClaim();
+      if (actual || releaseClaim) await cb("release_owned_lease", "stop", "--provider", "local-container", lease);
       check((await containerIDs()).trim() === "", "container_remains");
     }
   });
   await cleanup("leaseState", async () => {
-    check(await absent(claimPath) && await absent(keyDirectory), "lease_state_remains");
+    check(await absent(keyDirectory), "lease_keys_remain");
+    const terminal = await readClaim();
+    if (!releaseClaim) check(!terminal, "unexpected_lease_claim");
+    else {
+      // Fixed IDs retain immutable create intent so replay cannot recreate a
+      // released resource. Validate that tombstone before disposing private work.
+      check(terminal?.fixedCreateIntent.state === "released" &&
+        terminal.fixedCreateIntent.fingerprint === releaseClaim.fixedCreateIntent.fingerprint &&
+        terminal.providerScope === releaseClaim.providerScope &&
+        terminal.fixedCreateIntent.checkpointId === releaseClaim.fixedCreateIntent.checkpointId &&
+        !terminal.fixedCreateIntent.attempt && !terminal.fixedCreateIntent.failedAttempts &&
+        !terminal.cloudID && !terminal.labels && !terminal.sshHost && !terminal.sshPort,
+        "lease_release_record_invalid");
+      proof.cleanup.releasedIntentRetained = true;
+    }
   });
   if (installerStarted) {
     for (const unit of ["crabbox-x11vnc.service", "crabbox-desktop.service", "crabbox-xvfb.service"]) {
