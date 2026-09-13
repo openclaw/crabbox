@@ -23,7 +23,7 @@
 - Bound artifact discovery to the possible match depth for canonical non-recursive wildcard patterns, preserving selection and recursive glob behavior. [PR 2214](https://github.com/openclaw/crabbox/pull/2214). Thanks @vincentkoc.
 - Match Linux portal desktops to the viewer window with controller-only resize requests, bounded collaboration requests, and a Fit opt-out; use resize-capable TigerVNC for new local-container and public-installer XFCE desktops, retire the stopped legacy exporter's failure marker on upgrade, preserve direct SSH's local-scaling default and the installer's 8-bit backend selection, and document existing 8-bit rendering and Wayland sizing limits. [PR 2075](https://github.com/openclaw/crabbox/pull/2075). Thanks @vincentkoc.
 
-- Reject decoded negative Multipass CPU counts from environment or flags before backend construction; preserve zero/default, positive counts, and positive-only YAML application.
+- Reject decoded negative Multipass CPU counts from environment or flags before backend construction; preserve zero/default, positive counts, and positive-only YAML application. [PR 2241](https://github.com/openclaw/crabbox/pull/2241).
 
 - Validate documentation-site heading links against the renderer's shared heading identities, excluding fenced/commented pseudoheadings while preserving published IDs and separate repository-only anchor rules. [PR 2231](https://github.com/openclaw/crabbox/pull/2231).
 
