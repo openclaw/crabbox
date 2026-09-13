@@ -357,6 +357,16 @@ Preflight is a probe layer, not an installer. Missing tools print
 a prebaked image, a devcontainer/Nix/mise/asdf setup, or the uploaded
 script/command itself.
 
+For `npm`, `pnpm`, and `yarn`, probe-local Corepack controls disable networking,
+latest-version lookup, automatic project pinning, and download prompts. Cached
+project versions remain selectable; unavailable versions must be hydrated
+separately. The workload keeps its original environment. This is not a universal
+network sandbox or a guarantee that external tools never touch cache files.
+The pnpm probe additionally uses `PNPM_CONFIG_PM_ON_FAIL=ignore` to suppress
+secondary version/environment-lockfile management on versions supporting that
+setting. Corepack's project-version selection is retained; the workload keeps
+its original pnpm policy. Standalone legacy wrappers may have other behavior.
+
 The built-in probes cover common toolchains and target-specific capabilities.
 Use [`crabbox preflight-tools [--json]`](commands/preflight-tools.md) for the
 complete names, selector aliases, default membership, and target support in the

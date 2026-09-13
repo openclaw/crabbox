@@ -510,18 +510,27 @@ func windowsRemoteCapabilityPreflightScript(workdir string, env map[string]strin
     Write-Output ($Label + "=error:" + $_.Exception.Message)
   }
 }
-function Test-Tool($Label, $Exe, $Arguments) {
+function Test-Tool($Label, $Exe, $Arguments, $ProbeEnvironment = @{}) {
   $cmd = Get-Command $Exe -ErrorAction SilentlyContinue
   if (-not $cmd) {
     Write-Output ($Label + "=missing")
     return
   }
+  $savedEnvironment = @{}
   try {
+    foreach ($name in $ProbeEnvironment.Keys) {
+      $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+      [Environment]::SetEnvironmentVariable($name, $ProbeEnvironment[$name], 'Process')
+    }
     $value = & $Exe @Arguments 2>&1 | Select-Object -First 1
     if ($null -eq $value -or "$value" -eq "") { $value = "present" }
     Write-Output ($Label + "=" + $value)
   } catch {
     Write-Output ($Label + "=error:" + $_.Exception.Message)
+  } finally {
+    foreach ($name in $savedEnvironment.Keys) {
+      [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process')
+    }
   }
 }
 Test-Value "user" { whoami }
@@ -792,6 +801,31 @@ func preflightOSKind(target SSHTarget) string {
 	return "linux"
 }
 
+type preflightProbeEnv struct {
+	name  string
+	value string
+}
+
+func preflightProbeEnvironment(tool string) []preflightProbeEnv {
+	switch tool {
+	case "npm", "pnpm", "yarn":
+	default:
+		return nil
+	}
+	// Corepack shims can bootstrap a package manager even for --version.
+	policy := []preflightProbeEnv{
+		{"COREPACK_ENABLE_NETWORK", "0"},
+		{"COREPACK_DEFAULT_TO_LATEST", "0"},
+		{"COREPACK_ENABLE_AUTO_PIN", "0"},
+		{"COREPACK_ENABLE_DOWNLOAD_PROMPT", "0"},
+	}
+	if tool == "pnpm" {
+		// pnpm 12 can synchronize its own environment lockfile before --version.
+		policy = append(policy, preflightProbeEnv{"PNPM_CONFIG_PM_ON_FAIL", "ignore"})
+	}
+	return policy
+}
+
 func posixPreflightProbe(tool string) string {
 	switch tool {
 	case "sudo":
@@ -810,7 +844,15 @@ fi
 	if len(spec.Posix) == 0 {
 		return ""
 	}
-	return "preflight_cmd " + shellQuote(tool) + " " + shellQuote(spec.Posix[0]) + " " + strings.Join(readableShellWords(spec.Posix), " ") + "\n"
+	command := "preflight_cmd " + shellQuote(tool) + " " + shellQuote(spec.Posix[0]) + " " + strings.Join(readableShellWords(spec.Posix), " ")
+	if policy := preflightProbeEnvironment(tool); len(policy) > 0 {
+		var assignments []string
+		for _, setting := range policy {
+			assignments = append(assignments, setting.name+"="+shellQuote(setting.value))
+		}
+		return "(export " + strings.Join(assignments, " ") + "; " + command + ")\n"
+	}
+	return command + "\n"
 }
 
 func windowsPreflightProbe(tool string) string {
@@ -828,7 +870,15 @@ func windowsPreflightProbe(tool string) string {
 	if len(spec.Windows) == 0 {
 		return ""
 	}
-	return "Test-Tool " + psQuote(tool) + " " + psQuote(spec.Windows[0]) + " @(" + psArrayLiteral(spec.Windows[1:]) + ")\n"
+	command := "Test-Tool " + psQuote(tool) + " " + psQuote(spec.Windows[0]) + " @(" + psArrayLiteral(spec.Windows[1:]) + ")"
+	if policy := preflightProbeEnvironment(tool); len(policy) > 0 {
+		var assignments []string
+		for _, setting := range policy {
+			assignments = append(assignments, psQuote(setting.name)+"="+psQuote(setting.value))
+		}
+		command += " @{" + strings.Join(assignments, "; ") + "}"
+	}
+	return command + "\n"
 }
 
 func psArrayLiteral(values []string) string {

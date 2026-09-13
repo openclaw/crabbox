@@ -6301,6 +6301,123 @@ func TestWindowsRemoteCapabilityPreflightCommandUsesCommandEnvironment(t *testin
 	}
 }
 
+func TestPackageManagerPreflightWindowsEnvironment(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows process environment restoration")
+	}
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failure_%t", fail), func(t *testing.T) {
+			env := map[string]string{"COREPACK_ENABLE_NETWORK": "1", "COREPACK_DEFAULT_TO_LATEST": "1", "COREPACK_ENABLE_AUTO_PIN": "1", "COREPACK_ENABLE_PROJECT_SPEC": "1", "PNPM_CONFIG_PM_ON_FAIL": "error"}
+			body := `Write-Output (($args -join ',') + '|' + $env:COREPACK_ENABLE_NETWORK + '|' + $env:COREPACK_DEFAULT_TO_LATEST + '|' + $env:COREPACK_ENABLE_AUTO_PIN + '|' + $env:COREPACK_ENABLE_DOWNLOAD_PROMPT + '|' + $env:COREPACK_ENABLE_PROJECT_SPEC + '|' + $env:PNPM_CONFIG_PM_ON_FAIL)`
+			if fail {
+				body = `throw 'ordinary probe error'`
+			}
+			script := "function npm { " + body + " }\nfunction pnpm { " + body + " }\nfunction yarn { " + body + " }\n"
+			script += windowsRemoteCapabilityPreflightScript(t.TempDir(), env, nil, []string{"npm", "pnpm", "yarn"})
+			script += `Write-Output ('after=' + $env:COREPACK_ENABLE_NETWORK + '|' + $env:COREPACK_DEFAULT_TO_LATEST + '|' + $env:COREPACK_ENABLE_AUTO_PIN + '|' + [string](Test-Path Env:COREPACK_ENABLE_DOWNLOAD_PROMPT) + '|' + $env:COREPACK_ENABLE_PROJECT_SPEC + '|' + $env:PNPM_CONFIG_PM_ON_FAIL)`
+			path := filepath.Join(t.TempDir(), "probe.ps1")
+			if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path)
+			for _, value := range os.Environ() {
+				if !strings.HasPrefix(strings.ToUpper(value), "COREPACK_") {
+					cmd.Env = append(cmd.Env, value)
+				}
+			}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("Windows probe: %v\n%s", err, out)
+			}
+			for _, tool := range []string{"npm", "pnpm", "yarn"} {
+				want := "--version|0|0|0|0|1|error"
+				if tool == "pnpm" {
+					want = "--version|0|0|0|0|1|ignore"
+				}
+				if fail {
+					want = "error:ordinary probe error"
+				}
+				if !strings.Contains(string(out), tool+"="+want) {
+					t.Fatalf("%s probe output: %s", tool, out)
+				}
+			}
+			if !strings.Contains(string(out), "after=1|1|1|False|1|error") {
+				t.Fatalf("Windows environment not restored: %s", out)
+			}
+		})
+	}
+}
+
+func TestPackageManagerPreflightEnvironment(t *testing.T) {
+	for _, tool := range []string{"npm", "pnpm", "yarn"} {
+		t.Run(tool, func(t *testing.T) {
+			windows := windowsPreflightProbe(tool)
+			for _, setting := range preflightProbeEnvironment(tool) {
+				if !strings.Contains(windows, psQuote(setting.name)+"="+psQuote(setting.value)) {
+					t.Fatalf("Windows probe missing %s: %s", setting.name, windows)
+				}
+			}
+			if !strings.Contains(windows, "@('--version')") {
+				t.Fatalf("literal arguments changed: %s", windows)
+			}
+		})
+	}
+	if len(preflightProbeEnvironment("python")) != 0 || len(preflightProbeEnvironment("python3")) != 0 || len(preflightProbeEnvironment("corepack")) != 0 {
+		t.Fatal("unrelated version probes must keep their environment")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX execution; Windows renderer assertions above remain active")
+	}
+	for _, exitCode := range []int{0, 12} {
+		t.Run(fmt.Sprintf("posix_exit_%d", exitCode), func(t *testing.T) {
+			bin := t.TempDir()
+			for name, path := range map[string]string{"id": "/usr/bin/id", "sed": "/usr/bin/sed", "whoami": "/usr/bin/whoami"} {
+				if err := os.Symlink(path, filepath.Join(bin, name)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			files := map[string]string{
+				"bash":    "#!/bin/sh\nif [ \"$1\" = \"-lc\" ]; then exec /bin/bash --noprofile --norc -c \"$2\"; fi\nexec /bin/bash \"$@\"\n",
+				"python3": "#!/bin/sh\nprintf '%s|%s|%s|%s|%s|%s|%s\\n' \"$COREPACK_ENABLE_NETWORK\" \"$COREPACK_DEFAULT_TO_LATEST\" \"$COREPACK_ENABLE_AUTO_PIN\" \"${COREPACK_ENABLE_DOWNLOAD_PROMPT-unset}\" \"$COREPACK_ENABLE_PROJECT_SPEC\" \"$PNPM_CONFIG_PM_ON_FAIL\" \"$pnpm_config_pm_on_fail\"\n",
+			}
+			for _, tool := range []string{"npm", "pnpm", "yarn"} {
+				files[tool] = "#!/bin/sh\nprintf '%s|%s|%s|%s|%s|%s|%s|%s\\n' \"$*\" \"$COREPACK_ENABLE_NETWORK\" \"$COREPACK_DEFAULT_TO_LATEST\" \"$COREPACK_ENABLE_AUTO_PIN\" \"$COREPACK_ENABLE_DOWNLOAD_PROMPT\" \"$COREPACK_ENABLE_PROJECT_SPEC\" \"$PNPM_CONFIG_PM_ON_FAIL\" \"$pnpm_config_pm_on_fail\"\n" + fmt.Sprintf("exit %d\n", exitCode)
+			}
+			for name, body := range files {
+				if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			repo := t.TempDir()
+			profile := filepath.Join(repo, "profile.env")
+			if err := os.WriteFile(profile, []byte("export COREPACK_ENABLE_AUTO_PIN=1\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			env := map[string]string{"PATH": bin, "COREPACK_ENABLE_NETWORK": "1", "COREPACK_DEFAULT_TO_LATEST": "1", "COREPACK_ENABLE_PROJECT_SPEC": "1", "PNPM_CONFIG_PM_ON_FAIL": "error", "pnpm_config_pm_on_fail": "download"}
+			command := remoteCapabilityPreflightCommand(repo, env, []string{profile}, []string{"npm", "pnpm", "yarn", "python3"})
+			command += "; " + remoteShellCommandWithEnvFiles(repo, env, []string{profile}, "python3")
+			cmd := exec.Command("/bin/sh", "-c", command)
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + t.TempDir()}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("probe/workload: %v\n%s", err, out)
+			}
+			for _, tool := range []string{"npm", "pnpm", "yarn"} {
+				want := "error"
+				if tool == "pnpm" {
+					want = "ignore"
+				}
+				if !strings.Contains(string(out), tool+"=--version|0|0|0|0|1|"+want+"|download\n") {
+					t.Fatalf("probe policy missing for %s: %s", tool, out)
+				}
+			}
+			if !strings.Contains(string(out), "python3=1|1|1|unset|1|error|download\n") || !strings.HasSuffix(string(out), "1|1|1|unset|1|error|download\n") {
+				t.Fatalf("later probe/workload environment changed: %s", out)
+			}
+		})
+	}
+}
+
 func TestWindowsRemoteCapabilityPreflightUploadsScriptBeforeRunning(t *testing.T) {
 	dir := t.TempDir()
 	logPath := installRecordingSSH(t, dir)

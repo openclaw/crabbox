@@ -244,6 +244,7 @@ jobs:
         run: |
           $required = @(
             'TestWindowsNativeStdinRuntime',
+            'TestPackageManagerPreflightWindowsEnvironment',
             'TestWindowsNativeStdinCancellation',
             'TestWindowsSSHStdinReaderBehavior',
             'TestWindowsWitnessRedirectedStdinUploadBehavior',

@@ -573,6 +573,19 @@ host tools, or fail just because a tool is missing. Install logic
 belongs in Actions hydration, a prebaked image, a devcontainer, Nix/mise/asdf,
 or the command/script you run.
 
+The `npm`, `pnpm`, and `yarn` version probes disable Corepack networking,
+latest-version lookup, automatic project pinning, and download prompts for that
+probe only. An uncached Corepack-managed version may therefore be unavailable;
+hydrate it separately. The selected project version and the later workload's
+environment are unchanged. These controls do not make arbitrary executable
+wrappers filesystem-pure or prevent every package manager from touching caches.
+The pnpm probe also sets `PNPM_CONFIG_PM_ON_FAIL=ignore` for that child only:
+pnpm versions supporting `pmOnFail` skip their own secondary version checks and
+environment-lockfile reconciliation, while Corepack still selects the project's
+pinned version. Older Corepack-managed pnpm already skips its own version
+switching; this does not promise to suppress every standalone legacy wrapper's
+self-management. The workload's original pnpm policy is restored.
+
 By default it probes common language and infrastructure tools plus OS-specific
 basics. Run [`crabbox preflight-tools`](preflight-tools.md), or add `--json`, to
 inspect every accepted name, aliases, default membership, and target support
