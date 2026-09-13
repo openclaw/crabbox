@@ -878,3 +878,46 @@ func TestInheritedWorkRootCallerContract(t *testing.T) {
 		}
 	}
 }
+
+func TestMultipassDecodedCPUSizing(t *testing.T) {
+	for _, cpus := range []int{-2, -1, 0, 1, 3, 4} {
+		t.Run(strconv.Itoa(cpus), func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			cfg.TargetOS = core.TargetLinux
+			cfg.Multipass.CPUs = cpus
+			before := cfg.Multipass
+			validator, ok := any(Provider{}).(core.ProviderConfigValidator)
+			if !ok {
+				t.Error("selected provider has no configuration validator")
+			} else {
+				err := validator.ValidateConfig(cfg)
+				if cpus < 0 {
+					var exitErr core.ExitError
+					if !errors.As(err, &exitErr) || exitErr.Code != 2 || err.Error() != "multipass.cpus must be zero or greater" {
+						t.Errorf("ValidateConfig error = %v", err)
+					}
+				} else if err != nil {
+					t.Errorf("ValidateConfig: %v", err)
+				}
+			}
+			got, err := (Provider{}).Configure(cfg, core.Runtime{})
+			if cpus < 0 {
+				var exitErr core.ExitError
+				if !errors.As(err, &exitErr) || exitErr.Code != 2 || err.Error() != "multipass.cpus must be zero or greater" || got != nil {
+					t.Fatalf("Configure = %T, %v; want negative CPU rejection", got, err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.(*backend).cfg.Multipass.CPUs != cpus {
+					t.Fatalf("Configure changed CPU count %d", cpus)
+				}
+			}
+			if cfg.Multipass != before {
+				t.Fatal("validation changed caller configuration")
+			}
+		})
+	}
+}
