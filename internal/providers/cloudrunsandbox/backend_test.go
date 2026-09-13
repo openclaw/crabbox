@@ -1113,7 +1113,7 @@ func TestCloudRunSandboxStatusReportsExpiredClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	labels := cloneLabels(claim.Labels)
+	labels := shared.CloneLabels(claim.Labels)
 	labels[claimExpiresAtLabel] = now.Add(-time.Second).Format(time.RFC3339Nano)
 	if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels); err != nil {
 		t.Fatal(err)

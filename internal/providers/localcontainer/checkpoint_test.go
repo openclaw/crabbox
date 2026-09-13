@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"io"
 	"os"
 	"path/filepath"
@@ -475,7 +476,7 @@ func TestCheckpointScopeForServerUsesExactClaimSnapshot(t *testing.T) {
 		checkpointMetadataContext:  "remote-context",
 		checkpointMetadataDaemonID: "daemon-123",
 	}}
-	claimLabels := cloneLabels(server.Labels)
+	claimLabels := shared.CloneLabels(server.Labels)
 	claimLabels[checkpointMetadataConfig] = "/claim/docker-config"
 	claimLabels[checkpointMetadataEndpoint] = "unix:///claim/docker.sock"
 	core.SetServerLeaseClaimSnapshot(&server, core.LeaseClaim{Labels: claimLabels}, true)

@@ -1662,7 +1662,7 @@ func TestRunFailureMemoryContext(t *testing.T) {
 
 func TestMemoryDiagnosticsResolveDoesNotPersist(t *testing.T) {
 	leaseID, _, initial, runner := createLocalContainerTouchClaim(t, time.Minute)
-	labels := cloneLabels(initial.Labels)
+	labels := shared.CloneLabels(initial.Labels)
 	labels["diagnostic.memory.stale"] = "old-observation"
 	var err error
 	initial, err = core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, initial, labels)
@@ -2768,7 +2768,7 @@ func TestCreateContainerDoesNotLabelPrivateRuntimeScope(t *testing.T) {
 	cfg.LocalContainer.CheckpointMetadata = checkpointScopeMetadata(checkpointScope{
 		Runtime: "docker", Context: "named", Config: "/private/docker-config", Host: "tcp://user:password@example.invalid:2376", Endpoint: "tcp://user:password@example.invalid:2376", DaemonID: "daemon-private",
 	})
-	b.cfg.LocalContainer.CheckpointMetadata = cloneLabels(cfg.LocalContainer.CheckpointMetadata)
+	b.cfg.LocalContainer.CheckpointMetadata = shared.CloneLabels(cfg.LocalContainer.CheckpointMetadata)
 	_, bootstrapDir, err := b.createContainer(context.Background(), cfg, "crabbox-private", "cbx_private", "private", "ssh-ed25519 AAAA test", true)
 	if err != nil {
 		t.Fatal(err)
@@ -3877,7 +3877,7 @@ func TestAcquireSSHReadinessSuccessCannotOverwriteNewerClaim(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		labels := cloneLabels(claim.Labels)
+		labels := shared.CloneLabels(claim.Labels)
 		labels["state"] = "superseded"
 		_, err = core.UpdateLeaseClaimLabelsIfUnchanged(*leaseID, claim, labels)
 		return err
@@ -3912,7 +3912,7 @@ func TestAcquireReadyCASRollsBackContainerClaimedByNewerIdentity(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		labels := cloneLabels(claim.Labels)
+		labels := shared.CloneLabels(claim.Labels)
 		labels["state"] = "ready"
 		replacement := claim
 		replacement.CloudID = "newer-container"
@@ -3951,7 +3951,7 @@ func TestAcquireReadinessFailureReconcilesDifferentClaim(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		labels := cloneLabels(claim.Labels)
+		labels := shared.CloneLabels(claim.Labels)
 		replacement := claim
 		replacement.CloudID = "newer-container"
 		replacement.Labels = labels
@@ -3995,7 +3995,7 @@ func TestKeepFalseReadinessRollbackFailurePrintsRecovery(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		labels := cloneLabels(claim.Labels)
+		labels := shared.CloneLabels(claim.Labels)
 		labels["concurrent_touch"] = "true"
 		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(*leaseID, claim, labels); err != nil {
 			return err
@@ -5934,7 +5934,7 @@ func TestResolvePreviouslyReadyTerminalContainerWithoutSSHPort(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			labels := cloneLabels(claim.Labels)
+			labels := shared.CloneLabels(claim.Labels)
 			labels["state"] = "ready"
 			claim, err = core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels)
 			if err != nil {
@@ -5990,7 +5990,7 @@ func TestLocalContainerTouchPersistsExactClaimLifecycle(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			leaseID, _, initial, runner := createLocalContainerTouchClaim(t, 37*time.Minute)
 			if test.ttlLabel != "" {
-				labels := cloneLabels(initial.Labels)
+				labels := shared.CloneLabels(initial.Labels)
 				labels["ttl_secs"] = test.ttlLabel
 				updated, err := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, initial, labels)
 				if err != nil {
@@ -6069,7 +6069,7 @@ func TestLocalContainerTouchRejectsUnownedOrChangedClaimWithoutMutation(t *testi
 		mutate func(*testing.T, *backend, *core.LeaseTarget, core.LeaseClaim)
 	}{
 		{name: "missing carried snapshot", mutate: func(_ *testing.T, _ *backend, lease *core.LeaseTarget, _ core.LeaseClaim) {
-			lease.Server = core.Server{Provider: lease.Server.Provider, CloudID: lease.Server.CloudID, Labels: cloneLabels(lease.Server.Labels)}
+			lease.Server = core.Server{Provider: lease.Server.Provider, CloudID: lease.Server.CloudID, Labels: shared.CloneLabels(lease.Server.Labels)}
 		}},
 		{name: "wrong provider", mutate: func(t *testing.T, _ *backend, lease *core.LeaseTarget, claim core.LeaseClaim) {
 			claim.Provider = "aws"
@@ -6083,12 +6083,12 @@ func TestLocalContainerTouchRejectsUnownedOrChangedClaimWithoutMutation(t *testi
 			lease.Server.CloudID = strings.Repeat("b", 64)
 		}},
 		{name: "runtime metadata mismatch", mutate: func(t *testing.T, _ *backend, lease *core.LeaseTarget, claim core.LeaseClaim) {
-			claim.Labels = cloneLabels(claim.Labels)
+			claim.Labels = shared.CloneLabels(claim.Labels)
 			claim.Labels[checkpointMetadataContext] = "other"
 			core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
 		}},
 		{name: "stale carried snapshot after CAS replacement", mutate: func(t *testing.T, _ *backend, lease *core.LeaseTarget, claim core.LeaseClaim) {
-			labels := cloneLabels(claim.Labels)
+			labels := shared.CloneLabels(claim.Labels)
 			labels["concurrent_replacement"] = "true"
 			if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, claim, labels); err != nil {
 				t.Fatal(err)
@@ -6438,7 +6438,7 @@ func TestReleaseLeaseRejectsClaimChangedAfterResolution(t *testing.T) {
 	}
 	server := core.Server{CloudID: "snapshot-container", Labels: map[string]string{"lease": leaseID}}
 	core.SetServerLeaseClaimSnapshot(&server, claim, true)
-	labels := cloneLabels(claim.Labels)
+	labels := shared.CloneLabels(claim.Labels)
 	labels["state"] = "newer"
 	if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels); err != nil {
 		t.Fatal(err)
@@ -6687,7 +6687,7 @@ func TestMissingReleaseRejectsClaimChangedAfterResolution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	labels := cloneLabels(claim.Labels)
+	labels := shared.CloneLabels(claim.Labels)
 	labels["state"] = "ready"
 	if _, err := core.UpdateLeaseClaimEndpointIfUnchanged(
 		leaseID,
@@ -7259,7 +7259,7 @@ func TestCleanupLiveClaimChangeFencesMutation(t *testing.T) {
 			fixture := newCleanupClaimFixture(t, "cbx_cleanup_reclaimed", "cleanup-old-container", "exited", false)
 			replacement := fixture.claim
 			replacement.CloudID = "cleanup-replacement-container"
-			replacement.Labels = cloneLabels(replacement.Labels)
+			replacement.Labels = shared.CloneLabels(replacement.Labels)
 			replaced := false
 			fixture.b.beforeCleanupMutation = func(leaseID string) {
 				if leaseID != fixture.leaseID || replaced {
@@ -7389,7 +7389,7 @@ func TestCleanupMissingPendingRechecksAbsenceInsideFence(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newCleanupClaimFixture(t, "cbx_cleanup_missing_pending", "cleanup-missing-pending", "exited", false)
 			fixture.runner.responses[commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"})] = core.LocalCommandResult{}
-			labels := cloneLabels(fixture.claim.Labels)
+			labels := shared.CloneLabels(fixture.claim.Labels)
 			labels["state"] = pendingClaimState
 			labels["recovery"] = pendingRecoveryKind
 			updated, err := core.UpdateLeaseClaimLabelsIfUnchanged(fixture.leaseID, fixture.claim, labels)
@@ -8022,7 +8022,7 @@ func addDefaultLocalContainerScopeResponses(runner *recordingRunner) {
 }
 
 func testCapturedScopeLabels(labels map[string]string) map[string]string {
-	out := cloneLabels(labels)
+	out := shared.CloneLabels(labels)
 	for key, value := range checkpointScopeMetadata(checkpointScope{
 		Runtime: "docker", Context: "default", Endpoint: "unix:///tmp/docker-test.sock", DaemonID: "daemon-test",
 	}) {

@@ -209,7 +209,7 @@ func claimMetadataLabels(cfg core.Config, leaseID string, ready sandboxReadiness
 }
 
 func claimReadinessLabels(labels map[string]string, ready sandboxReadiness) map[string]string {
-	updated := cloneStringMap(labels)
+	updated := shared.CloneLabels(labels)
 	updated[claimLabelSandboxName] = ready.SandboxName
 	updated[claimLabelPodName] = ready.PodName
 	updated[claimLabelContainer] = ready.Container
@@ -342,14 +342,6 @@ func claimNameFromLocalClaim(claim core.LeaseClaim) string {
 		}
 	}
 	return strings.TrimPrefix(claim.LeaseID, leasePrefix)
-}
-
-func cloneStringMap(in map[string]string) map[string]string {
-	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
 }
 
 func newClaimRecoveryNonce() (string, error) {

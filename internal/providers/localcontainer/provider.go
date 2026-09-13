@@ -2,6 +2,7 @@ package localcontainer
 
 import (
 	"flag"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"path/filepath"
 	"strings"
 
@@ -67,7 +68,7 @@ func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, sl
 	if existing.CloudID != "" && server.CloudID != "" && existing.CloudID != server.CloudID {
 		return core.Server{}, core.Exit(2, "local-container lease %s is bound to container %s; refusing endpoint rewrite to %s", existing.LeaseID, shortID(existing.CloudID), shortID(server.CloudID))
 	}
-	labels := cloneLabels(server.Labels)
+	labels := shared.CloneLabels(server.Labels)
 	for _, key := range append([]string{
 		"bootstrap_dir", "bootstrap_owned", "docker_socket", "host_work_root", "keep", "runtime", "runtime_context", "ssh_key_owned", "ssh_user", "work_root",
 	}, checkpointScopeMetadataKeys...) {

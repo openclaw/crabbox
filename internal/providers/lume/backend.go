@@ -414,7 +414,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		return core.LeaseTarget{}, cleanupUnclaimedVM(err)
 	}
 	readyClaim := persistedClaim
-	readyClaim.Labels = cloneLabels(persistedClaim.Labels)
+	readyClaim.Labels = shared.CloneLabels(persistedClaim.Labels)
 	readyClaim.Labels["state"] = "ready"
 	lease, err := b.prepareLease(ctx, cfg, inst, readyClaim, true)
 	if err != nil {
@@ -1616,7 +1616,7 @@ func (b *backend) recoverPendingCloneClaim(ctx context.Context, claim core.Lease
 		}
 		bound := claim
 		bound.CloudImmutableID = immutableID
-		bound.Labels = cloneLabels(claim.Labels)
+		bound.Labels = shared.CloneLabels(claim.Labels)
 		bound.Labels["state"] = "error"
 		bound.Labels["recovery"] = "clone-ambiguous"
 		observed = inst
@@ -1817,14 +1817,6 @@ func removeLaunchHandoff(claim core.LeaseClaim) {
 	if handoff, err := launchHandoffForToken(strings.TrimSpace(claim.Labels["run_launch_token"])); err == nil {
 		_ = os.RemoveAll(handoff.Dir)
 	}
-}
-
-func cloneLabels(labels map[string]string) map[string]string {
-	cloned := make(map[string]string, len(labels))
-	for key, value := range labels {
-		cloned[key] = value
-	}
-	return cloned
 }
 
 func ownerProcessMatches(owner lumeRunOwner) bool {

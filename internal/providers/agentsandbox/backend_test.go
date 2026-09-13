@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"io"
 	"os"
 	"os/exec"
@@ -966,7 +967,7 @@ func TestExistingRunReleasesClaimExpiringDuringReadiness(t *testing.T) {
 		t.Fatal(err)
 	}
 	expiresAt := now.Add(10 * time.Millisecond).Format(time.RFC3339)
-	labels := cloneStringMap(claim.Labels)
+	labels := shared.CloneLabels(claim.Labels)
 	labels[claimLabelExpiresAt] = expiresAt
 	claim, err = core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
 	if err != nil {
@@ -1389,7 +1390,7 @@ func TestRunReportsAndReleasesClaimThatExpiresDuringCommand(t *testing.T) {
 					t.Fatalf("claims=%#v err=%v", claims, err)
 				}
 				current := claims[0]
-				labels := cloneStringMap(current.Labels)
+				labels := shared.CloneLabels(current.Labels)
 				labels["test_activity_refresh"] = "true"
 				if _, updateErr := core.UpdateLeaseClaimLabelsIfUnchanged(current.LeaseID, current, labels); updateErr != nil {
 					t.Fatal(updateErr)

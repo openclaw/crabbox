@@ -2,6 +2,7 @@ package unikraftcloud
 
 import (
 	"context"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"strings"
 	"testing"
 
@@ -59,7 +60,7 @@ func TestStopRejectsDuplicateInstanceClaimsBeforeMutation(t *testing.T) {
 
 func TestCleanupRejectsDuplicateInstanceClaimsBeforeMutation(t *testing.T) {
 	b, api, first, _ := duplicateBoundUnikraftCloudClaims(t)
-	labels := cloneLabels(first.Labels)
+	labels := shared.CloneLabels(first.Labels)
 	labels["keep"] = "false"
 	labels["expires_at"] = "1"
 	if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(first.LeaseID, first, labels); err != nil {

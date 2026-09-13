@@ -621,7 +621,7 @@ func (b *backend) releaseClaimedSandboxIfUnchanged(ctx context.Context, transpor
 }
 
 func (b *backend) markClaimActivity(claim core.LeaseClaim, state string, timeout time.Duration) (core.LeaseClaim, error) {
-	labels := cloneLabels(claim.Labels)
+	labels := shared.CloneLabels(claim.Labels)
 	labels[claimStateLabel] = state
 	activeUntil := core.ClockNow(b.rt.Clock).UTC().Add(timeout)
 	if expires, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(labels[claimExpiresAtLabel])); err == nil && expires.Before(activeUntil) {
@@ -632,18 +632,10 @@ func (b *backend) markClaimActivity(claim core.LeaseClaim, state string, timeout
 }
 
 func (b *backend) clearClaimActivity(claim core.LeaseClaim) (core.LeaseClaim, error) {
-	labels := cloneLabels(claim.Labels)
+	labels := shared.CloneLabels(claim.Labels)
 	delete(labels, claimStateLabel)
 	delete(labels, claimActiveUntilLabel)
 	return core.UpdateLeaseClaimLabelsAndLastUsedIfUnchanged(claim.LeaseID, claim, labels, core.ClockNow(b.rt.Clock).UTC())
-}
-
-func cloneLabels(labels map[string]string) map[string]string {
-	cloned := make(map[string]string, len(labels)+3)
-	for key, value := range labels {
-		cloned[key] = value
-	}
-	return cloned
 }
 
 func claimOperationTimeout(claim core.LeaseClaim, maximum time.Duration, now time.Time) (time.Duration, error) {
@@ -772,13 +764,13 @@ func (b *backend) createSandbox(ctx context.Context, transport sandboxTransport,
 	}
 	createCtx, cancel := context.WithTimeout(ctx, createTimeout)
 	defer cancel()
-	recoveryLabels := cloneLabels(claim.Labels)
+	recoveryLabels := shared.CloneLabels(claim.Labels)
 	recoveryLabels[claimStateLabel] = "recovery"
 	delete(recoveryLabels, claimActiveUntilLabel)
-	conflictLabels := cloneLabels(claim.Labels)
+	conflictLabels := shared.CloneLabels(claim.Labels)
 	conflictLabels[claimStateLabel] = "conflict"
 	delete(conflictLabels, claimActiveUntilLabel)
-	readyLabels := cloneLabels(claim.Labels)
+	readyLabels := shared.CloneLabels(claim.Labels)
 	delete(readyLabels, claimStateLabel)
 	delete(readyLabels, claimActiveUntilLabel)
 	resolvedClaim, conflictClaimRemoved, actionSucceeded, createErr := core.ResolveLeaseClaimAfterActionIfUnchanged(leaseID, claim, func() error {
@@ -810,7 +802,7 @@ func (b *backend) createSandbox(ctx context.Context, transport sandboxTransport,
 		if rollbackErr == nil {
 			return "", "", "", core.LeaseClaim{}, fmt.Errorf("cloud-run-sandbox create succeeded but publishing ready ownership failed; sandbox rolled back lease=%s: %w", leaseID, createErr)
 		}
-		fallbackLabels := cloneLabels(rollbackClaim.Labels)
+		fallbackLabels := shared.CloneLabels(rollbackClaim.Labels)
 		fallbackLabels[claimStateLabel] = "recovery"
 		delete(fallbackLabels, claimActiveUntilLabel)
 		_, recoveryErr := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, rollbackClaim, fallbackLabels)
