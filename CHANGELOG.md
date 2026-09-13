@@ -7,6 +7,7 @@
 - Qualify an existing AWS image through an isolated protected catalog with predeployment archive-helper admission, one normal-selection lease, exact promotion-revision evidence, full runtime smoke, receipt rollback, and borrowed-image-safe cleanup, without reminting. [PR 2225](https://github.com/openclaw/crabbox/pull/2225). Thanks @vincentkoc.
 - Add an opt-in `python3-venv` preflight that checks a disposable Python environment and pip with confirmed cleanup, without installing host tools or blocking workloads on missing capability. [PR 2217](https://github.com/openclaw/crabbox/pull/2217). Thanks @coygeek.
 - Add a protected, verification-only image-publisher auth check that confirms administrator access without creating leases or publishing images. [PR 2219](https://github.com/openclaw/crabbox/pull/2219). Thanks @vincentkoc.
+- Add passive Hyper-V configuration sections to text and JSON output, preserving loaded nonsecret values without invoking Hyper-V or displaying guest credentials.
 
 ### Fixes
 

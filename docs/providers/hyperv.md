@@ -80,6 +80,12 @@ Notes:
 
 ## Configuration
 
+`crabbox config show` displays loaded nonsecret Hyper-V settings in the `hyperv`
+text line and JSON section, even when another provider is selected. It preserves
+empty, zero and false values without resolving new defaults or invoking Hyper-V.
+The guest password and credential-presence information are not displayed;
+`initPassword` is only the configured boolean, not evidence of guest changes.
+
 ### Flags
 
 | Flag | Default | Description |

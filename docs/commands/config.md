@@ -87,6 +87,12 @@ package/import names are configured references, not evidence that an executable
 or SDK is installed or working. Displaying them does not execute the bridge or
 enable CUA provisioning.
 
+Hyper-V's JSON `hyperv` section and text `hyperv` line expose loaded image,
+user, work-root, CPU, memory, switch and `initPassword` settings, even when
+unselected. Empty strings, zero values and false remain visible. The guest
+password and credential-presence information are omitted. This passive display
+does not invoke Hyper-V, inspect a guest, or establish runtime readiness.
+
 ### Offline provider status
 
 JSON adds a `providerStatus` object with `schemaVersion: 1`, `kind: "offline"`,
