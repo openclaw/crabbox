@@ -213,7 +213,7 @@ func TestConfigureReturnsLifecycleBackendAndCredentialedDoctor(t *testing.T) {
 		t.Fatalf("configured backend does not implement CleanupBackend: %T", configured)
 	}
 	_ = cleanup
-	doctor, err := provider.ConfigureDoctor(cfg, rt)
+	doctor, err := core.ConfigureProviderDoctor(provider, cfg, rt)
 	if err != nil {
 		t.Fatalf("ConfigureDoctor err=%v", err)
 	}

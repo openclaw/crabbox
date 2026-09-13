@@ -94,10 +94,6 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	return &Backend{spec: p.Spec(), cfg: cfg, rt: rt, newClient: newClient}, nil
 }
 
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("scaleway", func() (core.Backend, error) { return p.Configure(cfg, rt) })
-}
-
 type Backend struct {
 	spec      core.ProviderSpec
 	cfg       core.Config

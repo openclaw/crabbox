@@ -104,7 +104,7 @@ func TestProviderWrappersConfigureBackendAndDoctor(t *testing.T) {
 	if configured.Spec().Name != providerName {
 		t.Fatalf("backend spec=%#v", configured.Spec())
 	}
-	doctor, err := provider.ConfigureDoctor(cfg, rt)
+	doctor, err := core.ConfigureProviderDoctor(provider, cfg, rt)
 	if err != nil {
 		t.Fatalf("ConfigureDoctor err=%v", err)
 	}
@@ -1767,7 +1767,7 @@ func TestDockerSandboxCopy(t *testing.T) {
 func TestConfigureDoctorRejectsInvalidConfig(t *testing.T) {
 	cfg := newTestConfig()
 	cfg.DockerSandbox.Agent = "codex"
-	if _, err := (Provider{}).ConfigureDoctor(cfg, core.Runtime{Exec: newRunner(nil, nil)}); err == nil || !strings.Contains(err.Error(), "v1 supports shell only") {
+	if _, err := core.ConfigureProviderDoctor((Provider{}), cfg, core.Runtime{Exec: newRunner(nil, nil)}); err == nil || !strings.Contains(err.Error(), "v1 supports shell only") {
 		t.Fatalf("ConfigureDoctor err=%v, want invalid config rejection", err)
 	}
 }
