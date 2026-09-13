@@ -3467,7 +3467,7 @@ func rawJSRuntimeHydrateSuggestion(cfg Config, target SSHTarget, leaseID string,
 		return ""
 	}
 	if !acquired || keep || keepOnFailure {
-		return hydrateCommandSuggestion(cfg, target, leaseID, supportsActionsRunnerTarget(target))
+		return hydrateCommandSuggestion(cfg, target, leaseID, supportsGitHubActionsRunnerTarget(target))
 	}
 	return "rerun with --keep and then hydrate the kept lease"
 }
