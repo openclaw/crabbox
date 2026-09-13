@@ -472,6 +472,14 @@ it must not infer operators or assignments again. An exact three-word
 preserving the single login-shell boundary used by Modal and Tensorlake. Profile
 sourcing is failure-gated without adding global errexit to user source.
 
+Runners using the `command`, `cwd`, `env`, and `timeoutMs` JSON contract share
+`shared.CommandStreamRequest`. Cloudflare containers and Azure Dynamic Sessions
+use `shared.CommandStream` to consume their NDJSON response: bounded events,
+stdout/stderr forwarding, and explicit completion have one owner. Adapters retain
+HTTP authentication, redirects, request deadlines, status errors, response-body
+cleanup, and error redaction. A decoded completion wins over cancellation;
+an EOF without completion never establishes success.
+
 Agent Sandbox and Nomad use `shared.ShellWorkspaceCommand` for their common
 POSIX-stdin wrapper: create and enter the workdir, export validated environment
 names in deterministic order, then execute the classified command. Pod and

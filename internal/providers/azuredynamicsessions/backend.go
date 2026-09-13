@@ -117,7 +117,7 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req core.RunReque
 			}
 			return shared.DelegatedSandboxCommand{Text: command, Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
 				fmt.Fprintf(b.rt.Stderr, "running on %s %s\n", providerName, strings.Join(req.Command, " "))
-				return client.ExecStream(ctx, leaseID, azureDynamicSessionsExecRequest{
+				return client.ExecStream(ctx, leaseID, shared.CommandStreamRequest{
 					Command: command, Cwd: workspace, Env: req.Env,
 					TimeoutMS: durationMillisecondsCeil(azureDynamicSessionsTimeout(b.cfg)),
 				}, stdout, stderr)

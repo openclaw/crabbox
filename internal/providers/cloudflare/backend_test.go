@@ -20,6 +20,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
@@ -330,7 +331,7 @@ func TestCloudflareClientRejectsCrossOriginExecRedirectBeforeReplay(t *testing.T
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = client.execStream(context.Background(), "cbx_test", execStreamRequest{
+			_, err = client.execStream(context.Background(), "cbx_test", shared.CommandStreamRequest{
 				Command: "deploy",
 				Env:     map[string]string{"DEPLOY_TOKEN": "sensitive"},
 			}, io.Discard, io.Discard)
@@ -541,7 +542,7 @@ func TestCloudflareClientRedactsStreamError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = client.execStream(context.Background(), "cbx_test", execStreamRequest{Command: "true"}, io.Discard, io.Discard)
+	_, err = client.execStream(context.Background(), "cbx_test", shared.CommandStreamRequest{Command: "true"}, io.Discard, io.Discard)
 	if err == nil {
 		t.Fatal("execStream returned nil")
 	}
@@ -876,7 +877,7 @@ func TestCloudflareSyncPreservesWorkspaceUntilReplacement(t *testing.T) {
 					}
 					w.WriteHeader(http.StatusOK)
 				case strings.HasSuffix(r.URL.Path, "/exec-stream"):
-					var command execStreamRequest
+					var command shared.CommandStreamRequest
 					if err := json.NewDecoder(r.Body).Decode(&command); err != nil {
 						t.Error(err)
 						http.Error(w, "decode", 500)
@@ -957,7 +958,7 @@ func TestCloudflareSyncPreservesWorkspaceUntilReplacement(t *testing.T) {
 }
 
 func TestCloudflareRemoteDiskCheckRejectsSmallContainer(t *testing.T) {
-	var got execStreamRequest
+	var got shared.CommandStreamRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/sandboxes/cbx_test/exec-stream" {
 			http.NotFound(w, r)
@@ -1042,7 +1043,7 @@ func TestCloudflareClientExecStream(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code, err := client.execStream(context.Background(), "cbx_test", execStreamRequest{Command: "true"}, &stdout, &stderr)
+	code, err := client.execStream(context.Background(), "cbx_test", shared.CommandStreamRequest{Command: "true"}, &stdout, &stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1098,7 +1099,7 @@ func TestCloudflareClientExecStreamPropagatesWriterErrors(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = client.execStream(context.Background(), "cbx_test", execStreamRequest{Command: "true"}, tc.stdout, tc.stderr)
+			_, err = client.execStream(context.Background(), "cbx_test", shared.CommandStreamRequest{Command: "true"}, tc.stdout, tc.stderr)
 			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), tc.writerErr) {
 				t.Fatalf("execStream error = %v, want %q and %q", err, tc.want, tc.writerErr)
 			}
@@ -2130,7 +2131,7 @@ func TestCloudflareStreamCancellationAtCleanEOF(t *testing.T) {
 				data = "{\"type\":\"complete\",\"exitCode\":7}\n"
 			}
 			client := &cloudflareClient{baseURL: "http://127.0.0.1", http: &http.Client{Transport: cloudflareStreamEOFTransport{body: &cloudflareCancelingEOFBody{data: data, cancel: cancel}}}}
-			code, err := client.execStream(ctx, "fixture", execStreamRequest{Command: "true"}, io.Discard, io.Discard)
+			code, err := client.execStream(ctx, "fixture", shared.CommandStreamRequest{Command: "true"}, io.Discard, io.Discard)
 			if complete {
 				if err != nil || code != 7 {
 					t.Fatalf("accepted completion changed: code=%d err=%v", code, err)
@@ -2209,7 +2210,7 @@ func TestJSONRequestAdoptionConcreteEnvelope(t *testing.T) {
 		return nil, sentinel
 	})}
 	c := &cloudflareClient{baseURL: "https://api.example.test/base", token: "synthetic-token", instanceType: "large size", http: transport}
-	code, err := c.execStream(ctx, "sandbox one", execStreamRequest{Command: "<&>", Cwd: "/work", Env: map[string]string{"A": "B"}, TimeoutMS: 7}, io.Discard, io.Discard)
+	code, err := c.execStream(ctx, "sandbox one", shared.CommandStreamRequest{Command: "<&>", Cwd: "/work", Env: map[string]string{"A": "B"}, TimeoutMS: 7}, io.Discard, io.Discard)
 	if code != 0 {
 		t.Fatalf("exit=%d", code)
 	}

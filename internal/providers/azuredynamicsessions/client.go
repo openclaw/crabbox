@@ -1,14 +1,10 @@
 package azuredynamicsessions
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,7 +18,7 @@ import (
 type azureDynamicSessionsAPI interface {
 	CheckRunner(context.Context, string) error
 	UploadFile(context.Context, string, string, string) error
-	ExecStream(context.Context, string, azureDynamicSessionsExecRequest, io.Writer, io.Writer) (int, error)
+	ExecStream(context.Context, string, shared.CommandStreamRequest, io.Writer, io.Writer) (int, error)
 	GetSession(context.Context, string) (azureDynamicSessionsSession, error)
 	ListSessions(context.Context) ([]azureDynamicSessionsSession, error)
 	DeleteSession(context.Context, string) error
@@ -37,20 +33,6 @@ type azureDynamicSessionsClient struct {
 }
 
 const azureDynamicSessionsControlTimeout = 60 * time.Second
-
-type azureDynamicSessionsExecRequest struct {
-	Command   string            `json:"command"`
-	Cwd       string            `json:"cwd,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
-	TimeoutMS int64             `json:"timeoutMs,omitempty"`
-}
-
-type azureDynamicSessionsExecEvent struct {
-	Type     string `json:"type"`
-	Data     string `json:"data,omitempty"`
-	Error    string `json:"error,omitempty"`
-	ExitCode *int   `json:"exitCode,omitempty"`
-}
 
 type azureDynamicSessionsSession struct {
 	Identifier     string `json:"identifier"`
@@ -233,7 +215,7 @@ func (c *azureDynamicSessionsClient) UploadFile(ctx context.Context, identifier,
 	return nil
 }
 
-func (c *azureDynamicSessionsClient) ExecStream(ctx context.Context, identifier string, execReq azureDynamicSessionsExecRequest, stdout, stderr io.Writer) (int, error) {
+func (c *azureDynamicSessionsClient) ExecStream(ctx context.Context, identifier string, execReq shared.CommandStreamRequest, stdout, stderr io.Writer) (int, error) {
 	req, err := shared.NewJSONRequest(ctx, http.MethodPost, c.url("/v1/exec", c.sessionQuery(identifier)), execReq)
 	if err != nil {
 		return 0, err
@@ -248,57 +230,10 @@ func (c *azureDynamicSessionsClient) ExecStream(ctx context.Context, identifier 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return 0, c.responseError(resp)
 	}
-	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	if mediaType != "" && mediaType != "application/x-ndjson" && mediaType != "application/jsonl" {
-		return 0, fmt.Errorf("unexpected %s stream content-type %q", providerName, resp.Header.Get("Content-Type"))
-	}
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	exitCode := 0
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		var event azureDynamicSessionsExecEvent
-		if err := json.Unmarshal(line, &event); err != nil {
-			return exitCode, fmt.Errorf("decode %s stream event: %w", providerName, err)
-		}
-		switch event.Type {
-		case "stdout":
-			if stdout != nil {
-				if _, err := io.WriteString(stdout, event.Data); err != nil {
-					return exitCode, fmt.Errorf("write %s stdout: %w", providerName, err)
-				}
-			}
-		case "stderr":
-			if stderr != nil {
-				if _, err := io.WriteString(stderr, event.Data); err != nil {
-					return exitCode, fmt.Errorf("write %s stderr: %w", providerName, err)
-				}
-			}
-		case "complete":
-			if event.ExitCode != nil {
-				exitCode = *event.ExitCode
-			}
-			return exitCode, nil
-		case "error":
-			if event.Error == "" {
-				event.Error = "stream error"
-			}
-			return exitCode, errors.New(shared.RedactErrorSecrets(event.Error, c.token))
-		case "start", "heartbeat":
-		default:
-			return exitCode, fmt.Errorf("unknown %s stream event %q", providerName, event.Type)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return exitCode, err
-	}
-	if err := ctx.Err(); err != nil {
-		return exitCode, err
-	}
-	return exitCode, fmt.Errorf("%s stream ended before completion", providerName)
+	return (shared.CommandStream{
+		Provider:    providerName,
+		RedactError: func(message string) string { return shared.RedactErrorSecrets(message, c.token) },
+	}).Read(ctx, resp, stdout, stderr)
 }
 
 func (c *azureDynamicSessionsClient) GetSession(ctx context.Context, identifier string) (azureDynamicSessionsSession, error) {

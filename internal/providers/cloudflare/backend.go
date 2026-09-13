@@ -141,7 +141,7 @@ func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.
 				core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
 			return shared.DelegatedSandboxCommand{Text: command, Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
-				return client.execStream(ctx, claim.LeaseID, execStreamRequest{Command: command, Cwd: workdir, Env: req.Env, TimeoutMS: durationMillisecondsCeil(b.cfg.TTL)}, stdout, stderr)
+				return client.execStream(ctx, claim.LeaseID, shared.CommandStreamRequest{Command: command, Cwd: workdir, Env: req.Env, TimeoutMS: durationMillisecondsCeil(b.cfg.TTL)}, stdout, stderr)
 			}}, nil
 		},
 		Cleanup: func(ctx context.Context) error { _, err := destroyClaimedSandbox(ctx, client, claim); return err },
