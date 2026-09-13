@@ -12,14 +12,9 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string { return providerName }
-
-func (Provider) Aliases() []string {
-	return []string{"apple", "applecontainer"}
-}
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"apple", "applecontainer"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationLocalContext),
 		Name:             providerName,
 		Family:           "container",

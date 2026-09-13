@@ -213,14 +213,14 @@ func providerMatrix() []providerMatrixEntry {
 
 func providerMatrixEntryFor(provider Provider) providerMatrixEntry {
 	spec := provider.Spec()
-	name := firstNonBlank(spec.Name, provider.Name())
+	name := spec.Name
 	category := benchmarkProviderCategories[name]
 	targets := formatProviderTargets(spec.Targets)
 	entry := providerMatrixEntry{
 		providerStaticStatus: providerStaticStatusFor(spec),
 		Provider:             name,
-		Family:               firstNonBlank(spec.Family, provider.Name()),
-		Aliases:              append([]string(nil), provider.Aliases()...),
+		Family:               firstNonBlank(spec.Family, spec.Name),
+		Aliases:              append([]string(nil), spec.Aliases...),
 		Kind:                 spec.Kind,
 		Category:             category,
 		Targets:              targets,

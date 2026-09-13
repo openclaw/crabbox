@@ -114,11 +114,11 @@ func providerConfigStatus(cfg Config) providerConfigStatusView {
 	selected := ""
 	if providerSelectionIsActionable(cfg) {
 		if provider, err := ProviderFor(cfg.Provider); err == nil {
-			selected = provider.Name()
+			selected = provider.Spec().Name
 		}
 	}
 	for _, provider := range registeredProviders() {
-		name := provider.Name()
+		name := provider.Spec().Name
 		static := providerStaticStatusFor(provider.Spec())
 		selection := providerSelectionView{Selected: name == selected}
 		if selection.Selected {

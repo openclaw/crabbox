@@ -95,11 +95,11 @@ func TestOpenSandboxConfigShowCompletePassiveSection(t *testing.T) {
 
 func TestProviderSpec(t *testing.T) {
 	p := Provider{}
-	if p.Name() != "opensandbox" {
-		t.Fatalf("Name=%q want opensandbox", p.Name())
+	if p.Spec().Name != "opensandbox" {
+		t.Fatalf("Name=%q want opensandbox", p.Spec().Name)
 	}
-	if len(p.Aliases()) != 0 {
-		t.Fatalf("v1 should not register aliases, got %#v", p.Aliases())
+	if len(p.Spec().Aliases) != 0 {
+		t.Fatalf("v1 should not register aliases, got %#v", p.Spec().Aliases)
 	}
 	spec := p.Spec()
 	if spec.Kind != core.ProviderKindDelegatedRun {
@@ -127,11 +127,11 @@ func TestProviderForResolvesNameOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(opensandbox): %v", err)
 	}
-	if got.Name() != "opensandbox" {
-		t.Fatalf("Name=%q want opensandbox", got.Name())
+	if got.Spec().Name != "opensandbox" {
+		t.Fatalf("Name=%q want opensandbox", got.Spec().Name)
 	}
 	for _, alias := range []string{"osb", "open-sandbox"} {
-		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "opensandbox" {
+		if got, err := core.ProviderFor(alias); err == nil && got.Spec().Name == "opensandbox" {
 			t.Fatalf("alias %q unexpectedly resolves to opensandbox", alias)
 		}
 	}

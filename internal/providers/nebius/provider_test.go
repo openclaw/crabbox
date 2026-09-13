@@ -64,7 +64,7 @@ func TestProviderSpec(t *testing.T) {
 			t.Fatalf("features=%v missing %s", spec.Features, feature)
 		}
 	}
-	if aliases := (Provider{}).Aliases(); len(aliases) != 0 {
+	if aliases := (Provider{}).Spec().Aliases; len(aliases) != 0 {
 		t.Fatalf("aliases=%v, want none", aliases)
 	}
 }

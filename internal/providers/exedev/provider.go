@@ -12,14 +12,9 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string { return providerName }
-
-func (Provider) Aliases() []string {
-	return []string{"exe", "exedev"}
-}
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"exe", "exedev"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationSSH),
 		Name:             providerName,
 		Family:           "exe-dev",

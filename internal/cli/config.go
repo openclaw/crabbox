@@ -1113,7 +1113,7 @@ func normalizeBrokerMode(value string) (BrokerMode, error) {
 func canonicalizeConfigProvider(cfg *Config) {
 	provider, err := ProviderFor(cfg.Provider)
 	if err == nil {
-		cfg.Provider = provider.Name()
+		cfg.Provider = provider.Spec().Name
 	}
 }
 
@@ -1582,7 +1582,7 @@ func applySingleProviderTargetDefault(cfg *Config) {
 	if err != nil {
 		return
 	}
-	providerName := provider.Name()
+	providerName := provider.Spec().Name
 	if IsTargetExplicit(cfg) {
 		cfg.inferredTargetProvider = ""
 		return
@@ -1623,7 +1623,7 @@ func prepareProviderDefaults(cfg *Config) {
 	if err != nil {
 		return
 	}
-	providerName := provider.Name()
+	providerName := provider.Spec().Name
 	if cfg.providerDefaultsApplied != "" && cfg.providerDefaultsApplied != providerName {
 		if cfg.providerDefaultsApplied == parallelsProvider {
 			cfg.parallelsTemplateApplied = false
@@ -7166,7 +7166,7 @@ func redactRemoteURL(value string) string {
 
 func serverTypeForConfig(cfg Config) string {
 	if resolved, err := ProviderFor(cfg.Provider); err == nil {
-		cfg.Provider = resolved.Name()
+		cfg.Provider = resolved.Spec().Name
 		if resolved.Spec().ClassDisposition == ProviderClassDispositionMapped {
 			if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
 				return cfg.ServerType

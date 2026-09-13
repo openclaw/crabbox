@@ -12,14 +12,9 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string { return providerName }
-
-func (Provider) Aliases() []string {
-	return []string{"ascii", "asciibox"}
-}
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"ascii", "asciibox"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		Name:             providerName,
 		Kind:             core.ProviderKindSSHLease,

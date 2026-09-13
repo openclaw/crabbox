@@ -944,5 +944,5 @@ func applyNativeCheckpointForkConfigAndFlags(cfg *Config, fs *flag.FlagSet, reco
 	if !ok {
 		return nil
 	}
-	return flagProvider.ApplyNativeCheckpointForkFlags(cfg, fs, providerFlags[provider.Name()])
+	return flagProvider.ApplyNativeCheckpointForkFlags(cfg, fs, providerFlags[provider.Spec().Name])
 }

@@ -118,7 +118,7 @@ func desktopScreenshotCapturePathFor(cfg Config, target SSHTarget, localMacTarge
 	}
 	providerName := normalizeProviderName(cfg.Provider)
 	if provider, err := ProviderFor(cfg.Provider); err == nil {
-		providerName = normalizeProviderName(provider.Name())
+		providerName = normalizeProviderName(provider.Spec().Name)
 	}
 	if localMacTarget && providerName != "external" && providerName != "exec-provider" {
 		return desktopScreenshotCaptureLocalMac

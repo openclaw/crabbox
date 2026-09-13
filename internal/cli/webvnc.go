@@ -825,7 +825,7 @@ func webVNCPortalCredentials(target SSHTarget, endpoint vncEndpoint, username, p
 
 func externalProviderRoute(provider string) bool {
 	if registered, err := ProviderFor(provider); err == nil {
-		provider = registered.Name()
+		provider = registered.Spec().Name
 	} else {
 		provider = normalizeProviderName(provider)
 	}
@@ -3073,7 +3073,7 @@ func webVNCObserverSlotsExhausted(status CoordinatorWebVNCStatus) bool {
 
 func isLocalContainerProvider(provider string) bool {
 	p, err := ProviderFor(provider)
-	return err == nil && p.Name() == "local-container"
+	return err == nil && p.Spec().Name == "local-container"
 }
 
 // guardMacOSDirectWebVNC rejects the direct WebVNC browser path for macOS

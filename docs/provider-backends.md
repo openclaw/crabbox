@@ -745,8 +745,6 @@ A provider implements `cli.Provider`:
 
 ```go
 type Provider interface {
-	Name() string
-	Aliases() []string
 	Spec() ProviderSpec
 
 	RegisterFlags(fs *flag.FlagSet, defaults Config) any
@@ -757,9 +755,11 @@ type Provider interface {
 ```
 
 Normalized selection guards use `cli.ProviderNameMatches(name, Provider{})` so
-`Name()` and `Aliases()` remain the single name-set owner. The matcher reads only
-that metadata and uses the existing name normalizer; it does not look up or
-register a provider, call `Spec` or `Configure`, or mutate configuration. Keep
+`ProviderSpec.Name` and `ProviderSpec.Aliases` remain the single name-set owner.
+`Spec` must return stable, side-effect-free metadata: registration, selection,
+and discovery can call it before configuration. The matcher uses the existing
+name normalizer; it does not look up or register a provider, call `Configure`, or
+mutate configuration. Keep
 the check at its existing position relative to flag copying and validation.
 
 This is not a replacement for raw comparisons, case-fold-only comparisons,
@@ -789,9 +789,6 @@ func init() {
 }
 
 type Provider struct{}
-
-func (Provider) Name() string      { return "example" }
-func (Provider) Aliases() []string { return nil }
 
 func (Provider) Spec() cli.ProviderSpec {
 	return cli.ProviderSpec{

@@ -17,14 +17,9 @@ var _ core.ProviderClassProfileProvider = Provider{}
 
 var classProfiles = core.UniformLinuxAMD64ClassProfiles(core.ProviderClassMachine{Type: "standard-4"})
 
-func (Provider) Name() string { return providerName }
-
-func (Provider) Aliases() []string {
-	return []string{providerAlias}
-}
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:                    []string{providerAlias},
 		Authentication:             core.DirectProviderAuthentication(core.ProviderAuthenticationAPIToken),
 		SyncGuardrailFullCandidate: true,
 		Name:                       providerName,

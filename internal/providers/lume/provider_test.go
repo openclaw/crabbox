@@ -172,8 +172,8 @@ func TestSpecAndAliases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", alias, err)
 		}
-		if got.Name() != providerName {
-			t.Fatalf("ProviderFor(%q).Name=%q", alias, got.Name())
+		if got.Spec().Name != providerName {
+			t.Fatalf("ProviderFor(%q).Name=%q", alias, got.Spec().Name)
 		}
 	}
 	spec := p.Spec()

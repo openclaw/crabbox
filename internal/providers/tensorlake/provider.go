@@ -12,11 +12,9 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return []string{"tl", "tensorlake-sbx"} }
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:                    []string{"tl", "tensorlake-sbx"},
 		Authentication:             core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		SyncGuardrailFullCandidate: true,
 		Name:                       providerName,

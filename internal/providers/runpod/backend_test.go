@@ -27,7 +27,7 @@ func TestRunpodProviderSpec(t *testing.T) {
 	if spec.Kind != "ssh-lease" {
 		t.Fatalf("spec.Kind = %q, want ssh-lease", spec.Kind)
 	}
-	aliases := Provider{}.Aliases()
+	aliases := Provider{}.Spec().Aliases
 	if len(aliases) != 2 || aliases[0] != "run-pod" || aliases[1] != "runpodio" {
 		t.Fatalf("aliases = %#v, want [run-pod runpodio]", aliases)
 	}

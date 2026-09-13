@@ -2256,8 +2256,8 @@ func TestProviderAliases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", name, err)
 		}
-		if provider.Name() != providerName {
-			t.Fatalf("ProviderFor(%q).Name=%q", name, provider.Name())
+		if provider.Spec().Name != providerName {
+			t.Fatalf("ProviderFor(%q).Name=%q", name, provider.Spec().Name)
 		}
 	}
 	spec := Provider{}.Spec()

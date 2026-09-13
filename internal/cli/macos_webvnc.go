@@ -182,7 +182,7 @@ func resolveMacOSWebVNCCredentials(ctx context.Context, cfg Config, target SSHTa
 		return rfbCredentials{}, localWebVNCAuthAuto, Exit(5, "managed macOS desktop password is empty")
 	}
 	authMode := localWebVNCAuthARD
-	if provider, providerErr := ProviderFor(cfg.Provider); providerErr == nil && provider.Name() == parallelsProvider {
+	if provider, providerErr := ProviderFor(cfg.Provider); providerErr == nil && provider.Spec().Name == parallelsProvider {
 		authMode = localWebVNCAuthVNC
 	}
 	return rfbCredentials{

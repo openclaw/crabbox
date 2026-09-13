@@ -12,9 +12,6 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string      { return spritesProvider }
-func (Provider) Aliases() []string { return nil }
-
 func (Provider) ClaimScope(cfg core.Config) string {
 	endpoint, _, err := validateSpritesAPIURL(core.Blank(cfg.Sprites.APIURL, "https://api.sprites.dev"))
 	if err != nil {

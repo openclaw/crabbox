@@ -15,9 +15,6 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string      { return "semaphore" }
-func (Provider) Aliases() []string { return []string{"sem"} }
-
 func (Provider) ClaimScope(cfg core.Config) string {
 	host, err := normalizeSemaphoreHost(cfg.Semaphore.Host)
 	project := strings.TrimSpace(cfg.Semaphore.Project)
@@ -29,6 +26,7 @@ func (Provider) ClaimScope(cfg core.Config) string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"sem"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPIToken),
 		Name:             "semaphore",
 		Family:           "semaphore",

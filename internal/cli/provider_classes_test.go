@@ -145,11 +145,10 @@ func (testCloudflareProvider) ClassProfiles() []ProviderClassProfile {
 	return UniformLinuxAMD64ClassProfiles(ProviderClassMachine{Type: "standard-4"})
 }
 
-func (selectorClassProfileProvider) Name() string      { return "selector-class-profile" }
-func (selectorClassProfileProvider) Aliases() []string { return []string{"selector-class-alias"} }
 func (selectorClassProfileProvider) Spec() ProviderSpec {
 	return ProviderSpec{
-		Name: "selector-class-profile", Kind: ProviderKindSSHLease,
+		Aliases: []string{"selector-class-alias"},
+		Name:    "selector-class-profile", Kind: ProviderKindSSHLease,
 		Targets:          []TargetSpec{{OS: targetLinux}, {OS: targetWindows, WindowsMode: windowsModeNormal}, {OS: targetWindows, WindowsMode: windowsModeWSL2}},
 		ClassDisposition: ProviderClassDispositionMapped,
 	}
@@ -179,15 +178,15 @@ func TestProviderClassProfileSelectionIsExact(t *testing.T) {
 		want []string
 		ok   bool
 	}{
-		{name: "exact architecture beats mixed", cfg: Config{Provider: provider.Name(), TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: "standard"}, want: []string{"amd64-primary", "amd64-fallback"}, ok: true},
-		{name: "mixed is explicit fallback", cfg: Config{Provider: provider.Name(), TargetOS: targetLinux, Architecture: ArchitectureARM64, Class: "standard"}, want: []string{"mixed-primary", "mixed-fallback"}, ok: true},
-		{name: "empty Windows mode normalizes", cfg: Config{Provider: provider.Name(), TargetOS: targetWindows, Architecture: ArchitectureAMD64, Class: "standard"}, want: []string{"windows-normal"}, ok: true},
-		{name: "exact Windows mode", cfg: Config{Provider: provider.Name(), TargetOS: targetWindows, WindowsMode: windowsModeWSL2, Architecture: ArchitectureAMD64, Class: "standard"}, want: []string{"windows-wsl2"}, ok: true},
-		{name: "no architecture fallback", cfg: Config{Provider: provider.Name(), TargetOS: targetWindows, WindowsMode: windowsModeNormal, Architecture: ArchitectureARM64, Class: "standard"}},
-		{name: "no Windows mode fallback", cfg: Config{Provider: provider.Name(), TargetOS: targetWindows, WindowsMode: "future", Architecture: ArchitectureAMD64, Class: "standard"}},
-		{name: "custom class not synthesized", cfg: Config{Provider: provider.Name(), TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: "custom"}},
-		{name: "uppercase class not normalized", cfg: Config{Provider: provider.Name(), TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: "STANDARD"}},
-		{name: "padded class not trimmed", cfg: Config{Provider: provider.Name(), TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: " standard "}},
+		{name: "exact architecture beats mixed", cfg: Config{Provider: provider.Spec().Name, TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: "standard"}, want: []string{"amd64-primary", "amd64-fallback"}, ok: true},
+		{name: "mixed is explicit fallback", cfg: Config{Provider: provider.Spec().Name, TargetOS: targetLinux, Architecture: ArchitectureARM64, Class: "standard"}, want: []string{"mixed-primary", "mixed-fallback"}, ok: true},
+		{name: "empty Windows mode normalizes", cfg: Config{Provider: provider.Spec().Name, TargetOS: targetWindows, Architecture: ArchitectureAMD64, Class: "standard"}, want: []string{"windows-normal"}, ok: true},
+		{name: "exact Windows mode", cfg: Config{Provider: provider.Spec().Name, TargetOS: targetWindows, WindowsMode: windowsModeWSL2, Architecture: ArchitectureAMD64, Class: "standard"}, want: []string{"windows-wsl2"}, ok: true},
+		{name: "no architecture fallback", cfg: Config{Provider: provider.Spec().Name, TargetOS: targetWindows, WindowsMode: windowsModeNormal, Architecture: ArchitectureARM64, Class: "standard"}},
+		{name: "no Windows mode fallback", cfg: Config{Provider: provider.Spec().Name, TargetOS: targetWindows, WindowsMode: "future", Architecture: ArchitectureAMD64, Class: "standard"}},
+		{name: "custom class not synthesized", cfg: Config{Provider: provider.Spec().Name, TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: "custom"}},
+		{name: "uppercase class not normalized", cfg: Config{Provider: provider.Spec().Name, TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: "STANDARD"}},
+		{name: "padded class not trimmed", cfg: Config{Provider: provider.Spec().Name, TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: " standard "}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -204,7 +203,7 @@ func TestProviderClassProfileSelectionIsExact(t *testing.T) {
 
 func TestCanonicalProviderClassRequiresMatchingSelector(t *testing.T) {
 	provider := selectorClassProfileProvider{}
-	cfg := Config{Provider: provider.Name(), TargetOS: targetWindows, WindowsMode: windowsModeNormal, Architecture: ArchitectureARM64, Class: "standard"}
+	cfg := Config{Provider: provider.Spec().Name, TargetOS: targetWindows, WindowsMode: windowsModeNormal, Architecture: ArchitectureARM64, Class: "standard"}
 	err := validateProviderClassSelector(provider, cfg)
 	var exitErr ExitError
 	if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "no class profile") {
@@ -540,10 +539,10 @@ func TestServerTypeForConfigRecomputesNonExplicitStoredType(t *testing.T) {
 			return serverType, serverType != ""
 		},
 	}
-	providerRegistry[provider.Name()] = provider
-	t.Cleanup(func() { delete(providerRegistry, provider.Name()) })
+	providerRegistry[provider.Spec().Name] = provider
+	t.Cleanup(func() { delete(providerRegistry, provider.Spec().Name) })
 
-	cfg := Config{Provider: provider.Name(), TargetOS: targetWindows, Architecture: ArchitectureARM64, Class: "standard", ServerType: "stored-arm-type"}
+	cfg := Config{Provider: provider.Spec().Name, TargetOS: targetWindows, Architecture: ArchitectureARM64, Class: "standard", ServerType: "stored-arm-type"}
 	if got := serverTypeForConfig(cfg); got != "provider-default" {
 		t.Fatalf("server type=%q want provider-default", got)
 	}

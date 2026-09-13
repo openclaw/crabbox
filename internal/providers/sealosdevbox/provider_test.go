@@ -26,12 +26,12 @@ func testConfig() core.Config {
 
 func TestProviderSpecAndAutomationSurface(t *testing.T) {
 	provider := Provider{}
-	if provider.Name() != providerName {
-		t.Fatalf("name=%q", provider.Name())
+	if provider.Spec().Name != providerName {
+		t.Fatalf("name=%q", provider.Spec().Name)
 	}
-	aliases := provider.Aliases()
+	aliases := provider.Spec().Aliases
 	if len(aliases) != 2 || aliases[0] != "sealos" || aliases[1] != "sealos-dev" {
-		t.Fatalf("aliases=%v", provider.Aliases())
+		t.Fatalf("aliases=%v", provider.Spec().Aliases)
 	}
 	spec := provider.Spec()
 	if spec.Name != providerName || spec.Family != familyName {

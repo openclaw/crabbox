@@ -18,14 +18,9 @@ var coreRegisterProvider = func(provider Provider) {
 
 type Provider struct{}
 
-func (Provider) Name() string { return providerName }
-
-func (Provider) Aliases() []string {
-	return []string{"codespaces", "gh-codespaces"}
-}
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"codespaces", "gh-codespaces"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationCLI),
 		Name:             providerName,
 		Family:           providerFamily,

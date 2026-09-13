@@ -44,12 +44,9 @@ var (
 	)
 )
 
-func (Provider) Name() string { return "gcp" }
-func (Provider) Aliases() []string {
-	return []string{"google", "google-cloud"}
-}
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases: []string{"google", "google-cloud"},
 		Authentication: core.ProviderAuthentication{
 			{Route: "direct", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationSDKCredentials}, Description: "Direct access uses Google Application Default Credentials."},
 			{Route: "brokered", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationCoordinator}, Description: "The client authenticates to the coordinator; cloud credentials remain server-side."},

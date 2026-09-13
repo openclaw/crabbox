@@ -319,15 +319,15 @@ func TestIncusOrdinaryFlagPresence(t *testing.T) {
 
 func TestProviderSpecAndFlags(t *testing.T) {
 	p := Provider{}
-	if p.Name() != providerName {
-		t.Fatalf("Name=%q want %s", p.Name(), providerName)
+	if p.Spec().Name != providerName {
+		t.Fatalf("Name=%q want %s", p.Spec().Name, providerName)
 	}
 	got, err := core.ProviderFor("incus")
 	if err != nil {
 		t.Fatalf("ProviderFor(incus): %v", err)
 	}
-	if got.Name() != providerName {
-		t.Fatalf("ProviderFor(incus).Name=%q", got.Name())
+	if got.Spec().Name != providerName {
+		t.Fatalf("ProviderFor(incus).Name=%q", got.Spec().Name)
 	}
 	spec := p.Spec()
 	if spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever {

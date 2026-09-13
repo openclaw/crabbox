@@ -58,7 +58,7 @@ func canonicalProviderName(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return provider.Name(), nil
+	return provider.Spec().Name, nil
 }
 
 func canonicalProvidersMatch(expected, actual string) bool {

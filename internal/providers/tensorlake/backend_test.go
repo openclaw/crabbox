@@ -27,10 +27,10 @@ func osExec(name string, args ...string) *osexec.Cmd { return osexec.Command(nam
 
 func TestProviderSpec(t *testing.T) {
 	p := Provider{}
-	if p.Name() != "tensorlake" {
-		t.Fatalf("Name=%q want tensorlake", p.Name())
+	if p.Spec().Name != "tensorlake" {
+		t.Fatalf("Name=%q want tensorlake", p.Spec().Name)
 	}
-	if len(p.Aliases()) == 0 {
+	if len(p.Spec().Aliases) == 0 {
 		t.Fatalf("expected aliases, got none")
 	}
 	spec := p.Spec()
@@ -57,8 +57,8 @@ func TestProviderForResolvesNameAndAliases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProviderFor(%q) err=%v", name, err)
 		}
-		if got.Name() != "tensorlake" {
-			t.Fatalf("ProviderFor(%q).Name()=%q want tensorlake", name, got.Name())
+		if got.Spec().Name != "tensorlake" {
+			t.Fatalf("ProviderFor(%q).Name()=%q want tensorlake", name, got.Spec().Name)
 		}
 	}
 }

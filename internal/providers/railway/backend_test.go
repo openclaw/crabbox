@@ -27,7 +27,7 @@ func TestRailwayProviderSpec(t *testing.T) {
 	if spec.Kind != "service-control" {
 		t.Fatalf("spec.Kind = %q, want service-control", spec.Kind)
 	}
-	aliases := Provider{}.Aliases()
+	aliases := Provider{}.Spec().Aliases
 	if len(aliases) != 2 || aliases[0] != "rail" || aliases[1] != "railwayapp" {
 		t.Fatalf("aliases = %#v, want [rail railwayapp]", aliases)
 	}

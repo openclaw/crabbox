@@ -32,8 +32,6 @@ type claimRoutingCommandProvider struct {
 	configureErr error
 }
 
-func (p claimRoutingCommandProvider) Name() string      { return p.name }
-func (p claimRoutingCommandProvider) Aliases() []string { return nil }
 func (p claimRoutingCommandProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        p.name,

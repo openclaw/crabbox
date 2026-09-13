@@ -14,14 +14,9 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string { return providerName }
-
-func (Provider) Aliases() []string {
-	return []string{"vast-ai", "vastai"}
-}
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"vast-ai", "vastai"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		Name:             providerName,
 		Family:           "vast",

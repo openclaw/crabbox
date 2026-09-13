@@ -120,11 +120,11 @@ func TestManualConfigInputFlags(t *testing.T) {
 func TestProviderSpecAndAliases(t *testing.T) {
 	provider := Provider{}
 	spec := provider.Spec()
-	if provider.Name() != providerName {
-		t.Fatalf("provider name=%q", provider.Name())
+	if provider.Spec().Name != providerName {
+		t.Fatalf("provider name=%q", provider.Spec().Name)
 	}
-	if len(provider.Aliases()) != 0 {
-		t.Fatalf("aliases=%v want none", provider.Aliases())
+	if len(provider.Spec().Aliases) != 0 {
+		t.Fatalf("aliases=%v want none", provider.Spec().Aliases)
 	}
 	if spec.Name != providerName || spec.Family != "firecracker" || spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever {
 		t.Fatalf("spec=%#v", spec)

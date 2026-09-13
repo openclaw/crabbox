@@ -425,7 +425,7 @@ func TestRunFailureEvidenceFinalization(t *testing.T) {
 				return nil
 			}
 			t.Cleanup(func() { runEnvProfileTestEvidenceHook = nil })
-			args := []string{"--provider", runEnvProfileTestProvider{}.Name(), "--no-sync", "--no-hydrate", "--timing-json"}
+			args := []string{"--provider", runEnvProfileTestProvider{}.Spec().Name, "--no-sync", "--no-hydrate", "--timing-json"}
 			if keep {
 				args = append(args, "--id", lease.LeaseID, "--keep")
 			}

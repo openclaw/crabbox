@@ -242,7 +242,7 @@ func validateProviderClassSelector(provider Provider, cfg Config) error {
 	}
 	source, ok := provider.(ProviderClassProfileProvider)
 	if !ok {
-		return Exit(2, "provider=%s declares mapped classes without class profiles", provider.Name())
+		return Exit(2, "provider=%s declares mapped classes without class profiles", provider.Spec().Name)
 	}
 	if _, matched := ProviderClassCandidatesForProfiles(source.ClassProfiles(), cfg); matched {
 		return nil
@@ -266,7 +266,7 @@ func validateProviderClassSelector(provider Provider, cfg Config) error {
 	if normalized, err := NormalizeArchitecture(architecture); err == nil {
 		architecture = normalized
 	}
-	return Exit(2, "provider=%s has no class profile for class=%s target=%s windowsMode=%s architecture=%s", provider.Name(), cfg.Class, target, blank(windowsMode, "-"), architecture)
+	return Exit(2, "provider=%s has no class profile for class=%s target=%s windowsMode=%s architecture=%s", provider.Spec().Name, cfg.Class, target, blank(windowsMode, "-"), architecture)
 }
 
 func normalizeProfileWindowsMode(target, mode string) string {

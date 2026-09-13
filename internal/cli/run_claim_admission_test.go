@@ -15,10 +15,9 @@ import (
 
 type runClaimAdmissionTestProvider struct{ runEnvProfileTestProvider }
 
-func (runClaimAdmissionTestProvider) Name() string { return "run-claim-admission-test" }
 func (p runClaimAdmissionTestProvider) Spec() ProviderSpec {
 	spec := p.runEnvProfileTestProvider.Spec()
-	spec.Name = p.Name()
+	spec.Name = "run-claim-admission-test"
 	return spec
 }
 func (runClaimAdmissionTestProvider) Configure(Config, Runtime) (Backend, error) {
@@ -56,9 +55,9 @@ func TestRunClaimAdmissionCoexistsWithHeartbeat(t *testing.T) {
 	RemoveLeaseClaim(lease.LeaseID)
 	lease.LeaseID = "cbx_123456789abc"
 	provider := runClaimAdmissionTestProvider{}
-	lease.Server.Provider = provider.Name()
+	lease.Server.Provider = provider.Spec().Name
 	lease.Server.Labels = cloneStringMap(lease.Server.Labels)
-	lease.Server.Labels["provider"] = provider.Name()
+	lease.Server.Labels["provider"] = provider.Spec().Name
 	lease.Server.Labels["lease"] = lease.LeaseID
 	lease.Server.Labels["tailscale_ipv4"] = "127.0.0.1"
 	sshPath := filepath.Join(filepath.Dir(os.Getenv("CRABBOX_FAKE_SSH_LOG")), "ssh")
@@ -82,7 +81,7 @@ decoded=""`), 1)
 		t.Fatal(err)
 	}
 	cfg := baseConfig()
-	cfg.Provider = provider.Name()
+	cfg.Provider = provider.Spec().Name
 	if err := ClaimLeaseTargetForRepoConfig(lease.LeaseID, "claim-snapshot", cfg, lease.Server, lease.SSH, repo.Root, time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +119,7 @@ decoded=""`), 1)
 	var stdout, stderr bytes.Buffer
 	go func() {
 		runDone <- (App{Stdout: &stdout, Stderr: &stderr}).runCommand(ctx, []string{
-			"--provider", provider.Name(), "--id", lease.LeaseID, "--keep", "--no-sync", "--no-hydrate", "--", "claim-admission-sentinel",
+			"--provider", provider.Spec().Name, "--id", lease.LeaseID, "--keep", "--no-sync", "--no-hydrate", "--", "claim-admission-sentinel",
 		})
 	}()
 	select {
@@ -224,15 +223,15 @@ func TestRunClaimAdmissionPublishesOnlyValidatedCurrentOwner(t *testing.T) {
 			lease, _ := setupRunClaimSnapshotTest(t)
 			lease.LeaseID = "cbx_123456789abc"
 			provider := runClaimAdmissionTestProvider{}
-			lease.Server.Provider = provider.Name()
-			lease.Server.Labels["provider"] = provider.Name()
+			lease.Server.Provider = provider.Spec().Name
+			lease.Server.Labels["provider"] = provider.Spec().Name
 			lease.Server.Labels["lease"] = lease.LeaseID
 			repo, err := findRepo()
 			if err != nil {
 				t.Fatal(err)
 			}
 			cfg := baseConfig()
-			cfg.Provider = provider.Name()
+			cfg.Provider = provider.Spec().Name
 			if err := ClaimLeaseTargetForRepoConfig(lease.LeaseID, "claim-snapshot", cfg, lease.Server, lease.SSH, repo.Root, cfg.IdleTimeout, false); err != nil {
 				t.Fatal(err)
 			}
@@ -275,7 +274,7 @@ func TestRunClaimAdmissionPublishesOnlyValidatedCurrentOwner(t *testing.T) {
 					t.Fatal(err)
 				}
 				after, readErr = ReadLeaseClaim(lease.LeaseID)
-				if readErr != nil || after.Provider != provider.Name() || after.CloudID != before.CloudID {
+				if readErr != nil || after.Provider != provider.Spec().Name || after.CloudID != before.CloudID {
 					t.Fatal("legacy resolution did not retain its resource and bind the provider")
 				}
 				return

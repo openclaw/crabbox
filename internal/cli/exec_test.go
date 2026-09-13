@@ -20,10 +20,9 @@ type execTestProvider struct {
 	backend *execTestBackend
 }
 
-func (p execTestProvider) Name() string { return "exec-command-test" }
 func (p execTestProvider) Spec() ProviderSpec {
 	spec := p.runEnvProfileTestProvider.Spec()
-	spec.Name = p.Name()
+	spec.Name = "exec-command-test"
 	spec.Features = append(spec.Features, FeatureClaimExec)
 	return spec
 }
@@ -82,10 +81,10 @@ exec /bin/sh -c "$command"
 	p := execTestProvider{backend: b}
 	b.spec = p.Spec()
 	RegisterProvider(p)
-	t.Cleanup(func() { delete(providerRegistry, p.Name()) })
-	b.lease = LeaseTarget{LeaseID: "cbx_123456789abc", Server: Server{Provider: p.Name(), CloudID: "synthetic-resource", Labels: map[string]string{"lease": "cbx_123456789abc", "provider": p.Name(), "state": "ready"}}, SSH: SSHTarget{User: "synthetic-token", Host: "fixture.invalid", Port: "22", TargetOS: targetLinux, AuthSecret: true}}
+	t.Cleanup(func() { delete(providerRegistry, p.Spec().Name) })
+	b.lease = LeaseTarget{LeaseID: "cbx_123456789abc", Server: Server{Provider: p.Spec().Name, CloudID: "synthetic-resource", Labels: map[string]string{"lease": "cbx_123456789abc", "provider": p.Spec().Name, "state": "ready"}}, SSH: SSHTarget{User: "synthetic-token", Host: "fixture.invalid", Port: "22", TargetOS: targetLinux, AuthSecret: true}}
 	cfg := baseConfig()
-	cfg.Provider = p.Name()
+	cfg.Provider = p.Spec().Name
 	if err := ClaimLeaseTargetForRepoConfig(b.lease.LeaseID, "exec-fixture", cfg, b.lease.Server, b.lease.SSH, dir, time.Hour, false); err != nil {
 		t.Fatal(err)
 	}

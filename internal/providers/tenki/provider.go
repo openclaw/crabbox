@@ -13,9 +13,6 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string      { return tenkiProvider }
-func (Provider) Aliases() []string { return nil }
-
 func (Provider) ClaimScope(cfg core.Config) string {
 	// Workspace and project no longer select Tenki CLI inventory. Keep them in
 	// the local claim identity so older scoped leases can still be resolved and

@@ -3563,7 +3563,7 @@ done < "$tmp"
 			if err := os.WriteFile(filepath.Join(binDir, "rsync"), []byte(rsyncScript), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			providerName := runEnvProfileTestProvider{}.Name()
+			providerName := runEnvProfileTestProvider{}.Spec().Name
 			runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) {
 				return LeaseTarget{Server: Server{Provider: providerName}, SSH: SSHTarget{
 					User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetLinux, SSHConfigProxy: true,
@@ -4046,7 +4046,7 @@ func TestRunMissingOriginReplacementLeaseStaysPlainManifest(t *testing.T) {
 	}
 	remoteRoot := filepath.Join(testRoot, "remote")
 	var leaseIDs [2]string
-	providerName := runReadyPoolPreflightTestProvider{}.Name()
+	providerName := runReadyPoolPreflightTestProvider{}.Spec().Name
 	var (
 		acquires atomic.Int32
 		receipt  terminalRunReceipt

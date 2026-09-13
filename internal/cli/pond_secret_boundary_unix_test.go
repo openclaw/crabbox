@@ -67,7 +67,6 @@ type forwardBoundaryProvider struct {
 	lease LeaseTarget
 }
 
-func (forwardBoundaryProvider) Name() string { return "forward-boundary" }
 func (forwardBoundaryProvider) Spec() ProviderSpec {
 	return ProviderSpec{Name: "forward-boundary", Kind: ProviderKindSSHLease,
 		Targets: []TargetSpec{{OS: targetLinux}}, Features: FeatureSet{FeatureSSH}, Coordinator: CoordinatorNever}
@@ -103,18 +102,18 @@ func TestPondSecretBoundaryDaemon(t *testing.T) {
 				Labels: map[string]string{"pond": "boundary", "lease": "cbx_boundary", "slug": "peer", pondExposedPortsLabelKey: "8080-8081"},
 			}}
 			provider := forwardBoundaryProvider{lease: lease}
-			if providerRegistry[provider.Name()] != nil {
+			if providerRegistry[provider.Spec().Name] != nil {
 				t.Fatal("fixture provider name already registered")
 			}
-			providerRegistry[provider.Name()] = provider
-			t.Cleanup(func() { delete(providerRegistry, provider.Name()) })
-			if err := ClaimLeaseForRepoProviderScopePond(lease.LeaseID, "peer", provider.Name(), "", "boundary", f.root, time.Minute, false); err != nil {
+			providerRegistry[provider.Spec().Name] = provider
+			t.Cleanup(func() { delete(providerRegistry, provider.Spec().Name) })
+			if err := ClaimLeaseForRepoProviderScopePond(lease.LeaseID, "peer", provider.Spec().Name, "", "boundary", f.root, time.Minute, false); err != nil {
 				t.Fatal(err)
 			}
 			app := App{Stdout: io.Discard, Stderr: io.Discard}
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			if err := app.pondConnect(ctx, []string{"boundary", "--provider", provider.Name(), "--export"}); err != nil {
+			if err := app.pondConnect(ctx, []string{"boundary", "--provider", provider.Spec().Name, "--export"}); err != nil {
 				t.Fatal(err)
 			}
 			if ctx.Err() != nil {

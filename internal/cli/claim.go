@@ -1237,7 +1237,7 @@ func canonicalClaimProvider(provider string) string {
 		return "external"
 	}
 	if resolved, err := ProviderFor(provider); err == nil {
-		return resolved.Name()
+		return resolved.Spec().Name
 	}
 	return normalizeProviderName(provider)
 }

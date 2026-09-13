@@ -10,10 +10,10 @@ import (
 
 func TestProviderSpecIsDelegatedRunLinuxWithoutAliases(t *testing.T) {
 	p := Provider{}
-	if p.Name() != providerName {
-		t.Fatalf("Name=%q", p.Name())
+	if p.Spec().Name != providerName {
+		t.Fatalf("Name=%q", p.Spec().Name)
 	}
-	if aliases := p.Aliases(); len(aliases) != 0 {
+	if aliases := p.Spec().Aliases; len(aliases) != 0 {
 		t.Fatalf("Aliases=%v, want none", aliases)
 	}
 	spec := p.Spec()

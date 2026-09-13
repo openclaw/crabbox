@@ -17,9 +17,6 @@ func init() {
 // Provider uses the HTTPS console for lifecycle and authenticated guest bootstrap.
 type Provider struct{}
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return nil }
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationSessionToken),

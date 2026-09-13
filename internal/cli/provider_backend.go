@@ -17,8 +17,7 @@ import (
 )
 
 type Provider interface {
-	Name() string
-	Aliases() []string
+	// Spec returns stable metadata without runtime configuration or side effects.
 	Spec() ProviderSpec
 	RegisterFlags(fs *flag.FlagSet, defaults Config) any
 	ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error
@@ -668,6 +667,7 @@ type CheckpointLeaseIDBackend interface {
 type ProviderSpec struct {
 	Authentication   ProviderAuthentication
 	Name             string
+	Aliases          []string
 	Family           string
 	Kind             ProviderKind
 	Targets          []TargetSpec
@@ -1511,7 +1511,8 @@ type LeaseView = Server
 var providerRegistry = map[string]Provider{}
 
 func RegisterProvider(provider Provider) {
-	names := append([]string{provider.Name()}, provider.Aliases()...)
+	spec := provider.Spec()
+	names := append([]string{spec.Name}, spec.Aliases...)
 	for _, name := range names {
 		key := normalizeProviderName(name)
 		if key == "" {
@@ -1536,7 +1537,7 @@ func registeredProviders() []Provider {
 	seen := map[string]struct{}{}
 	providers := make([]Provider, 0, len(providerRegistry))
 	for _, provider := range providerRegistry {
-		name := normalizeProviderName(provider.Name())
+		name := normalizeProviderName(provider.Spec().Name)
 		if _, ok := seen[name]; ok {
 			continue
 		}
@@ -1544,7 +1545,7 @@ func registeredProviders() []Provider {
 		providers = append(providers, provider)
 	}
 	sort.Slice(providers, func(i, j int) bool {
-		return providers[i].Name() < providers[j].Name()
+		return providers[i].Spec().Name < providers[j].Spec().Name
 	})
 	return providers
 }
@@ -1554,7 +1555,7 @@ func RegisteredProviderNames() []string {
 	providers := registeredProviders()
 	names := make([]string, 0, len(providers))
 	for _, provider := range providers {
-		names = append(names, provider.Name())
+		names = append(names, provider.Spec().Name)
 	}
 	return names
 }
@@ -1614,7 +1615,7 @@ func registerProviderFlagsObserved(fs *flag.FlagSet, defaults Config, observe pr
 			before = map[string]bool{}
 			fs.VisitAll(func(item *flag.Flag) { before[item.Name] = true })
 		}
-		values[provider.Name()] = provider.RegisterFlags(fs, defaults)
+		values[provider.Spec().Name] = provider.RegisterFlags(fs, defaults)
 		if observe != nil {
 			var added []*flag.Flag
 			fs.VisitAll(func(item *flag.Flag) {
@@ -1639,7 +1640,7 @@ func providerNamesForHelp(include func(ProviderSpec) bool) []string {
 		if include != nil && !include(spec) {
 			continue
 		}
-		names = append(names, provider.Name())
+		names = append(names, spec.Name)
 	}
 	return names
 }
@@ -1652,16 +1653,16 @@ func applyProviderRoutingFlags(cfg *Config, fs *flag.FlagSet, values providerFla
 	if err != nil {
 		return err
 	}
-	cfg.Provider = provider.Name()
+	cfg.Provider = provider.Spec().Name
 	if ProviderSelectionIsAuthoritativeRoute(*cfg) {
 		return nil
 	}
 	if router, ok := provider.(ProviderRouter); ok {
-		if err := router.RouteConfig(cfg, fs, values[provider.Name()]); err != nil {
+		if err := router.RouteConfig(cfg, fs, values[provider.Spec().Name]); err != nil {
 			return err
 		}
 		if resolved, err := ProviderFor(cfg.Provider); err == nil {
-			cfg.Provider = resolved.Name()
+			cfg.Provider = resolved.Spec().Name
 		}
 	}
 	return nil
@@ -1679,20 +1680,20 @@ func applyProviderFlags(cfg *Config, fs *flag.FlagSet, values providerFlagValues
 	if err != nil {
 		return err
 	}
-	before := provider.Name()
-	if err := provider.ApplyFlags(cfg, fs, values[provider.Name()]); err != nil {
+	before := provider.Spec().Name
+	if err := provider.ApplyFlags(cfg, fs, values[before]); err != nil {
 		return err
 	}
 	after, err := ProviderFor(cfg.Provider)
-	if err != nil || after.Name() == before {
+	if err != nil || after.Spec().Name == before {
 		if err == nil {
 			markCredentialDestinationFlagSources(cfg, fs)
 			applyCloudflareDynamicWorkersRepositoryCaps(cfg)
 		}
 		return err
 	}
-	cfg.Provider = after.Name()
-	if err := after.ApplyFlags(cfg, fs, values[after.Name()]); err != nil {
+	cfg.Provider = after.Spec().Name
+	if err := after.ApplyFlags(cfg, fs, values[after.Spec().Name]); err != nil {
 		return err
 	}
 	markCredentialDestinationFlagSources(cfg, fs)
@@ -1734,12 +1735,12 @@ func routeProviderFlagOverride(cfg *Config, fs *flag.FlagSet, values providerFla
 		if !ok {
 			continue
 		}
-		setProviderSelection(cfg, candidate.Name(), providerSelectionFlag)
-		if err := router.RouteConfig(cfg, fs, values[candidate.Name()]); err != nil {
+		setProviderSelection(cfg, candidate.Spec().Name, providerSelectionFlag)
+		if err := router.RouteConfig(cfg, fs, values[candidate.Spec().Name]); err != nil {
 			return true, err
 		}
 		if resolved, err := ProviderFor(cfg.Provider); err == nil {
-			cfg.Provider = resolved.Name()
+			cfg.Provider = resolved.Spec().Name
 		}
 		return true, nil
 	}
@@ -1748,7 +1749,7 @@ func routeProviderFlagOverride(cfg *Config, fs *flag.FlagSet, values providerFla
 
 func providerFamily(provider Provider) string {
 	spec := provider.Spec()
-	return firstNonBlank(spec.Family, provider.Name())
+	return firstNonBlank(spec.Family, spec.Name)
 }
 
 func anyFlagWasSet(fs *flag.FlagSet, names []string) bool {
@@ -1765,7 +1766,7 @@ func routeConfiguredProvider(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	cfg.Provider = provider.Name()
+	cfg.Provider = provider.Spec().Name
 	if ProviderSelectionIsAuthoritativeRoute(*cfg) {
 		return nil
 	}
@@ -1775,7 +1776,7 @@ func routeConfiguredProvider(cfg *Config) error {
 		}
 	}
 	if resolved, err := ProviderFor(cfg.Provider); err == nil {
-		cfg.Provider = resolved.Name()
+		cfg.Provider = resolved.Spec().Name
 	}
 	return nil
 }
@@ -1796,10 +1797,10 @@ func controllerProviderIdentityForConfig(cfg Config) (string, string, bool, erro
 	if err != nil {
 		return "", "", false, err
 	}
-	cfg.Provider = provider.Name()
+	cfg.Provider = provider.Spec().Name
 	contract, ok := provider.(ControllerProviderContract)
 	if !ok {
-		return "", "", false, fmt.Errorf("provider=%s does not expose a controller routing scope", provider.Name())
+		return "", "", false, fmt.Errorf("provider=%s does not expose a controller routing scope", provider.Spec().Name)
 	}
 	scope, err := contract.ControllerProviderScope(cfg)
 	if err != nil {
@@ -1807,9 +1808,9 @@ func controllerProviderIdentityForConfig(cfg Config) (string, string, bool, erro
 	}
 	scope = strings.TrimSpace(scope)
 	if scope == "" {
-		return "", "", false, fmt.Errorf("provider=%s returned an empty controller routing scope", provider.Name())
+		return "", "", false, fmt.Errorf("provider=%s returned an empty controller routing scope", provider.Spec().Name)
 	}
-	return provider.Name(), scope, contract.SupportsControllerFixedLeaseID(cfg), nil
+	return provider.Spec().Name, scope, contract.SupportsControllerFixedLeaseID(cfg), nil
 }
 
 func validateControllerProviderScope(cfg Config) error {
@@ -1872,7 +1873,7 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg.Provider = provider.Name()
+	cfg.Provider = provider.Spec().Name
 	if err := validateControllerProviderScope(cfg); err != nil {
 		return nil, err
 	}
@@ -1894,7 +1895,7 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 }
 
 func configureProviderBackend(provider Provider, cfg *Config, rt Runtime) (Backend, error) {
-	cfg.Provider = provider.Name()
+	cfg.Provider = provider.Spec().Name
 	applySingleProviderTargetDefault(cfg)
 	if err := validateProviderConfig(*cfg); err != nil {
 		return nil, err

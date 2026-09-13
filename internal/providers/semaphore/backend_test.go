@@ -62,14 +62,14 @@ func withWaitForRunningPollInterval(t *testing.T, interval time.Duration) {
 
 func TestProviderName(t *testing.T) {
 	p := Provider{}
-	if p.Name() != "semaphore" {
-		t.Errorf("name = %q, want semaphore", p.Name())
+	if p.Spec().Name != "semaphore" {
+		t.Errorf("name = %q, want semaphore", p.Spec().Name)
 	}
 }
 
 func TestProviderAliases(t *testing.T) {
 	p := Provider{}
-	aliases := p.Aliases()
+	aliases := p.Spec().Aliases
 	if len(aliases) != 1 || aliases[0] != "sem" {
 		t.Errorf("aliases = %v, want [sem]", aliases)
 	}

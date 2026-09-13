@@ -16,14 +16,12 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string { return providerName }
-
 // The provider was named apple-vz before the vz library was replaced with
 // the native VM daemon; the old names stay routable for existing configs.
-func (Provider) Aliases() []string { return []string{"applevm", "apple-vz", "applevz"} }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"applevm", "apple-vz", "applevz"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationLocalContext),
 		Name:             providerName,
 		Family:           "local-vm",

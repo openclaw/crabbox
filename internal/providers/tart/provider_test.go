@@ -79,16 +79,16 @@ func TestTartConfigShowSection(t *testing.T) {
 
 func TestProviderSpecAndAliases(t *testing.T) {
 	p := Provider{}
-	if p.Name() != providerName {
-		t.Fatalf("Name=%q want %s", p.Name(), providerName)
+	if p.Spec().Name != providerName {
+		t.Fatalf("Name=%q want %s", p.Spec().Name, providerName)
 	}
 	for _, alias := range []string{"tart", "local-tart", "macos-vm"} {
 		got, err := core.ProviderFor(alias)
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", alias, err)
 		}
-		if got.Name() != providerName {
-			t.Fatalf("ProviderFor(%q).Name=%q", alias, got.Name())
+		if got.Spec().Name != providerName {
+			t.Fatalf("ProviderFor(%q).Name=%q", alias, got.Spec().Name)
 		}
 	}
 	spec := p.Spec()

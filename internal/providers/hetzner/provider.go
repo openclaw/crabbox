@@ -38,8 +38,6 @@ var serverShapes = map[string]struct {
 
 var classProfiles = buildClassProfiles()
 
-func (Provider) Name() string      { return "hetzner" }
-func (Provider) Aliases() []string { return nil }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Authentication: core.ProviderAuthentication{

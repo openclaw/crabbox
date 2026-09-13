@@ -583,10 +583,9 @@ type attestOutcomeProvider struct {
 	err    error
 }
 
-func (p attestOutcomeProvider) Name() string { return "attest-outcome-test" }
 func (p attestOutcomeProvider) Spec() ProviderSpec {
 	spec := p.testStopReclaimProvider.Spec()
-	spec.Name = p.Name()
+	spec.Name = "attest-outcome-test"
 	return spec
 }
 func (p attestOutcomeProvider) Configure(Config, Runtime) (Backend, error) {
@@ -629,10 +628,10 @@ func TestDelegatedAttestUsesNormalizedPrimaryOutcome(t *testing.T) {
 			}
 			p := attestOutcomeProvider{result: result, err: runErr}
 			RegisterProvider(p)
-			t.Cleanup(func() { delete(providerRegistry, p.Name()) })
+			t.Cleanup(func() { delete(providerRegistry, p.Spec().Name) })
 			receiptPath := filepath.Join(t.TempDir(), "receipt.json")
 			app := App{Stdout: io.Discard, Stderr: io.Discard}
-			err := app.Run(t.Context(), []string{"run", "--provider", p.Name(), "--no-sync", "--attest", receiptPath, "--", "true"})
+			err := app.Run(t.Context(), []string{"run", "--provider", p.Spec().Name, "--no-sync", "--attest", receiptPath, "--", "true"})
 			if !errors.Is(err, runErr) {
 				t.Fatalf("primary error changed: %v", err)
 			}

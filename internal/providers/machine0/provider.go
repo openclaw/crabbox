@@ -13,9 +13,6 @@ type Provider struct{}
 
 var machine0ClassProfiles = buildClassProfiles()
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return nil }
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationCLI),

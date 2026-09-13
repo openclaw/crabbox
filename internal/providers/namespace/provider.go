@@ -17,12 +17,9 @@ var _ core.ProviderClassProfileProvider = Provider{}
 
 var classProfiles = buildClassProfiles()
 
-func (Provider) Name() string { return namespaceProvider }
-func (Provider) Aliases() []string {
-	return []string{"namespace", "namespace-devboxes"}
-}
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"namespace", "namespace-devboxes"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationCLI),
 		Name:             namespaceProvider,
 		Family:           "namespace",

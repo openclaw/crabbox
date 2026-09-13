@@ -23,11 +23,9 @@ var (
 
 var classProfiles = buildClassProfiles()
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return []string{"namespace-compute"} }
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"namespace-compute"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationCLI),
 		Name:             providerName,
 		Family:           providerName,

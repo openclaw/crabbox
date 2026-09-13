@@ -143,16 +143,16 @@ func sampleInspectJSON(id, slug, lease string) string {
 
 func TestProviderSpecAndAliases(t *testing.T) {
 	p := Provider{}
-	if p.Name() != providerName {
-		t.Fatalf("Name=%q want %s", p.Name(), providerName)
+	if p.Spec().Name != providerName {
+		t.Fatalf("Name=%q want %s", p.Spec().Name, providerName)
 	}
 	for _, alias := range []string{"apple-container", "apple", "applecontainer"} {
 		got, err := core.ProviderFor(alias)
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", alias, err)
 		}
-		if got.Name() != providerName {
-			t.Fatalf("ProviderFor(%q).Name=%q", alias, got.Name())
+		if got.Spec().Name != providerName {
+			t.Fatalf("ProviderFor(%q).Name=%q", alias, got.Spec().Name)
 		}
 	}
 	spec := p.Spec()
@@ -174,7 +174,7 @@ func TestAliasDoesNotCollideWithLocalContainer(t *testing.T) {
 	// The bare "container" alias belongs to local-container; apple-container
 	// must not steal it. Cross-provider registry collisions are asserted in
 	// internal/providers/all; here we guard the provider's own alias set.
-	for _, alias := range (Provider{}).Aliases() {
+	for _, alias := range (Provider{}).Spec().Aliases {
 		if alias == "container" {
 			t.Fatalf("apple-container must not declare the 'container' alias")
 		}
@@ -1335,8 +1335,8 @@ func TestAppleContainerConfigShowSharedCanonicalCoverage(t *testing.T) {
 			continue
 		}
 		owners++
-		if provider.Name() != "apple-container" {
-			t.Fatalf("unexpected shared owner %s", provider.Name())
+		if provider.Spec().Name != "apple-container" {
+			t.Fatalf("unexpected shared owner %s", provider.Spec().Name)
 		}
 		for _, canonical := range section.Providers {
 			coverage[canonical]++

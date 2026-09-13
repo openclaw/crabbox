@@ -314,7 +314,7 @@ func validateProviderCredentialDestination(cfg Config) error {
 	provenance := cfg.credentialProvenance
 	providerName := normalizeProviderName(cfg.Provider)
 	if provider, err := ProviderFor(providerName); err == nil {
-		providerName = provider.Name()
+		providerName = provider.Spec().Name
 	}
 	switch providerName {
 	case "proxmox":

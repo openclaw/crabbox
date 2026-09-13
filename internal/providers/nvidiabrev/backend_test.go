@@ -30,7 +30,7 @@ func TestNvidiaBrevProviderSpec(t *testing.T) {
 			t.Fatalf("missing feature %q in %#v", feature, spec.Features)
 		}
 	}
-	if got := strings.Join(Provider{}.Aliases(), ","); got != "brev,nvidia" {
+	if got := strings.Join(Provider{}.Spec().Aliases, ","); got != "brev,nvidia" {
 		t.Fatalf("aliases=%q", got)
 	}
 }

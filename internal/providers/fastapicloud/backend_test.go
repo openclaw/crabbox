@@ -28,7 +28,7 @@ func TestFastAPICloudProviderSpec(t *testing.T) {
 	if spec.Kind != "service-control" {
 		t.Fatalf("spec.Kind = %q, want service-control", spec.Kind)
 	}
-	aliases := Provider{}.Aliases()
+	aliases := Provider{}.Spec().Aliases
 	if len(aliases) != 2 || aliases[0] != "fastapicloud" || aliases[1] != "fastapi" {
 		t.Fatalf("aliases = %#v, want [fastapicloud fastapi]", aliases)
 	}
