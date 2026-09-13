@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changes
+
+- Add a protected, verification-only image-publisher auth check that confirms administrator access without creating leases or publishing images.
+
 ### Fixes
 
 - Bound artifact discovery to the possible match depth for canonical non-recursive wildcard patterns, preserving selection and recursive glob behavior. [PR 2214](https://github.com/openclaw/crabbox/pull/2214). Thanks @vincentkoc.
