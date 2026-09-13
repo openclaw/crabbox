@@ -11,6 +11,7 @@ import {
   createRetainedCapsule,
   digest,
   retainedImageFromEnv,
+  verifyManifest,
   verifyRetainedSelection,
 } from "./image-qualification-control.mjs";
 import relay from "./image-qualification-relay-worker.mjs";
@@ -182,6 +183,155 @@ test("retained capsule binds all 13 entries and permits only nonbaked CLI source
     } finally {
       fs.rmSync(temp, { recursive: true, force: true });
     }
+  });
+});
+
+const currentInstaller = fs.readFileSync(
+  path.join(root, "scripts/install-linux-developer-tools.sh"),
+  "utf8",
+);
+const legacyInstaller = currentInstaller.replace(
+  /^(?:rust|uv)_smoke_script\(\) \{\n[\s\S]*?^\}\n/gm,
+  "",
+);
+// The retained installer adds these exact generator declarations. Keep the real
+// Node/Go/Bun installer source instead of substituting permissive shell stubs.
+const retainedInstaller =
+  legacyInstaller +
+  String.raw`
+rust_smoke_script() {
+  printf 'pinned_rust_version=%q\nrust_seed_root=%q\n' "$pinned_rust_version" "$rust_seed_root"
+  declare -f log linux_x64_supported toolchain_archive_spec verify_toolchain_archive check_root_owned_path rust_seed_inputs rust_seed_path check_rust_seed rust_runtime_probe
+  printf '%s\n' 'if linux_x64_supported; then' '  rust_runtime_probe' 'fi'
+}
+
+uv_smoke_script() {
+  printf 'public_toolchain_archive_dir=%q\npinned_uv_version=%q\n' "$public_toolchain_archive_dir" "$pinned_uv_version"
+  declare -f log linux_x64_supported toolchain_archive_spec verify_toolchain_archive stage_toolchain_archive offline_uv_probe
+  printf '%s\n' 'if linux_x64_supported; then' '  offline_uv_probe' 'fi'
+}
+`;
+
+function withInstallerBundle(source, callback) {
+  return scopedEnvironment(() => {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-retained-admission-"));
+    try {
+      const candidateSha = "a".repeat(40);
+      const workflowSha = "b".repeat(40);
+      const installerPath = "scripts/install-linux-developer-tools.sh";
+      const records = capsulePaths.map((file) => {
+        const bytes = Buffer.from(file === installerPath ? source : `${file}\n`);
+        return {
+          path: file,
+          mode: "100644",
+          blob: crypto
+            .createHash("sha1")
+            .update(`blob ${bytes.length}\0`)
+            .update(bytes)
+            .digest("hex"),
+          bytes: bytes.length,
+          sha256: digest(bytes),
+        };
+      });
+      Object.assign(process.env, {
+        QUALIFICATION_MODE: "retained",
+        QUALIFICATION_RETAINED_IMAGE_ID: "ami-11111111",
+        QUALIFICATION_RETAINED_SNAPSHOT_ID: "snap-22222222",
+        QUALIFICATION_RETAINED_SOURCE_SHA: candidateSha,
+        QUALIFICATION_RETAINED_CAPSULE_SHA256: digest(canonical(records)),
+        QUALIFICATION_CANDIDATE_SHA: candidateSha,
+      });
+      const files = {
+        [`candidate/${installerPath}`]: source,
+        "build-inputs.json": JSON.stringify({
+          version: 1,
+          candidateSha,
+          workflowSha,
+          workerSourceSha256: "c".repeat(64),
+          protectedBuildInputsSha256: "d".repeat(64),
+        }),
+        "retained-capsule.json": JSON.stringify({
+          version: 1,
+          sourceSha: candidateSha,
+          candidateSha,
+          sourceCapsuleSha256: process.env.QUALIFICATION_RETAINED_CAPSULE_SHA256,
+          sourceFiles: records,
+          candidateFiles: records,
+          bakedInputsIdentical: true,
+        }),
+      };
+      const manifest = {
+        version: 1,
+        candidateSha,
+        workflowSha,
+        files: Object.entries(files).map(([file, bytes]) => {
+          fs.mkdirSync(path.dirname(path.join(temp, file)), { recursive: true });
+          fs.writeFileSync(path.join(temp, file), bytes);
+          return { path: file, bytes: Buffer.byteLength(bytes), sha256: digest(bytes) };
+        }),
+      };
+      manifest.manifestSha256 = digest(canonical(manifest));
+      fs.writeFileSync(path.join(temp, "manifest.json"), JSON.stringify(manifest));
+      return callback(() => verifyManifest(temp, candidateSha, workflowSha), temp);
+    } finally {
+      fs.rmSync(temp, { recursive: true, force: true });
+    }
+  });
+}
+
+test("retained installer admission rejects the real legacy installer before deployment", () => {
+  withInstallerBundle(legacyInstaller, (verify) => {
+    assert.throws(verify, /lacks rust_smoke_script generator/);
+  });
+  const control = fs.readFileSync(
+    path.join(root, "scripts/image-qualification-control.mjs"),
+    "utf8",
+  );
+  const deploy = control.slice(
+    control.indexOf("async function deploy()"),
+    control.indexOf("async function arm()"),
+  );
+  const admission = deploy.indexOf("verifyManifest(");
+  const deployment = deploy.indexOf("await preparePrivateCandidate(");
+  assert.ok(admission >= 0 && deployment > admission);
+  const admit = control.slice(
+    control.indexOf('if (command === "admit")'),
+    control.indexOf('if (command === "manifest")'),
+  );
+  assert.match(admit, /verifyManifest\(/);
+});
+
+test("retained installer admission accepts the supported layout without executing source", () => {
+  withInstallerBundle(retainedInstaller, (verify, temp) => {
+    const sentinel = path.join(temp, "executed");
+    withInstallerBundle(`touch '${sentinel}'\n${retainedInstaller}`, (verifySentinel) => {
+      assert.doesNotThrow(verifySentinel);
+      assert.equal(fs.existsSync(sentinel), false);
+    });
+    assert.doesNotThrow(verify);
+  });
+});
+
+for (const name of ["node_pnpm", "go", "bun", "rust", "uv"]) {
+  test(`retained installer admission requires the ${name} generator declaration`, () => {
+    const declaration = `${name}_smoke_script() {`;
+    assert.ok(retainedInstaller.includes(declaration));
+    const changed = retainedInstaller.replace(declaration, `${name}_removed() {`);
+    const incidental = `\n# ${declaration}\nprintf '%s\\n' '${declaration}'\n`;
+    withInstallerBundle(changed + incidental, (verify) => {
+      assert.throws(verify, new RegExp(`lacks ${name}_smoke_script generator`));
+    });
+  });
+}
+
+test("retained installer admission bounds source bytes and leaves mint mode unchanged", () => {
+  withInstallerBundle(retainedInstaller + "#".repeat(256 * 1024), (verify) => {
+    assert.throws(verify, /retained installer exceeds the source byte limit/);
+  });
+  withInstallerBundle(legacyInstaller, (verify) => {
+    for (const name of names) delete process.env[name];
+    process.env.QUALIFICATION_MODE = "mint";
+    assert.doesNotThrow(verify);
   });
 });
 

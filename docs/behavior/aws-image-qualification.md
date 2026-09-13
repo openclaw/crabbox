@@ -165,6 +165,10 @@ candidate checkout exactly. `actions.go` is recorded separately as nonbaked
 CLI source; it may differ. This is input equivalence, not whole-source or
 runtime equivalence. The candidate CLI and Worker are newly built from the
 same admitted candidate SHA, including the current build-control contract.
+Before deployment or allocation, retained bundle admission also requires the
+installer's Node/pnpm, Go, Bun, Rust and uv smoke-generator declarations.
+Admission reads bounded source text without executing candidate code; this
+compatibility check does not replace source review or the full runtime smoke.
 
 Retained mode keeps the existing authority account, Region, subnet and security
 group. Before enrollment, the authority verifies the exact available, owned

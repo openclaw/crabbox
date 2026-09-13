@@ -674,6 +674,24 @@ export function verifyManifest(artifactDir, expectedCandidate, expectedWorkflow)
   if (actual.some((file) => !expected.has(file)))
     throw new Error("candidate artifact has extra files");
   verifyRetainedCapsule(artifactDir, expectedCandidate);
+  if (retainedImageFromEnv()) {
+    const installer = path.join(artifactDir, "candidate/scripts/install-linux-developer-tools.sh");
+    if (fs.statSync(installer).size > 256 * 1024) {
+      throw new Error("candidate retained installer exceeds the source byte limit");
+    }
+    const source = fs.readFileSync(installer, "utf8");
+    // Match the reviewed multiline generator layout without sourcing candidate
+    // code in credentialed admission. This checks compatibility, not shell safety.
+    for (const name of ["node_pnpm", "go", "bun", "rust", "uv"]) {
+      const declaration = new RegExp(
+        `^${name}_smoke_script\\(\\) \\{\\r?\\n(?:[ \\t]+[^\\r\\n]*\\r?\\n)+\\}\\r?$`,
+        "m",
+      );
+      if (!declaration.test(source)) {
+        throw new Error(`candidate retained installer lacks ${name}_smoke_script generator`);
+      }
+    }
+  }
   return manifest;
 }
 
