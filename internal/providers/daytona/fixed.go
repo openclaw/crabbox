@@ -213,8 +213,9 @@ func (b *daytonaLeaseBackend) acquireFixed(ctx context.Context, req core.Acquire
 			if remaining <= 0 {
 				return core.LeaseTarget{}, core.Exit(4, "Daytona fixed create intent expired before submission")
 			}
-			cfg.Daytona.Snapshot = snapshot.GetId()
 			body := daytonaCreateBody(cfg, req.RequestedLeaseID, intent.Slug, req.Keep, createdAt)
+			cfg.Daytona.Snapshot = snapshot.GetId()
+			body.SetSnapshot(cfg.Daytona.Snapshot)
 			// Replay retains the original lease deadline, including native TTL.
 			body.AdditionalProperties["ttlMinutes"] = core.DurationMinutesCeil(remaining)
 			labels := body.GetLabels()

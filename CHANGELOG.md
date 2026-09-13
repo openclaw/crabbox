@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Daytona: omit unverified default class labels from snapshot forks and document opt-in workload concurrency and memory limits. [PR 2114](https://github.com/openclaw/crabbox/pull/2114). Thanks @Patrick-Erichsen.
+
 ## 0.58.0 - 2026-09-12
 
 ### Highlights
