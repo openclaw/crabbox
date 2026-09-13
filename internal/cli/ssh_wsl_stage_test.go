@@ -2146,6 +2146,165 @@ public class HandoffFixture {
     public void GetResult() { }
 }'`
 
+func TestWSLFunctionalPreflightControlUsesDirectMetadataTransport(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake SSH endpoint")
+	}
+	const nonce = "0123456789abcdef0123456789abcdef"
+	record := "CBX-PREFLIGHT-1\n" + nonce + "\ncanceled\nworker-quiesced\nscratch-removed\ncomplete\n"
+	for _, tc := range []struct {
+		name, action, output       string
+		invalid, failure, deadline bool
+	}{
+		{name: "observe", action: "observe", output: record},
+		{name: "cancel", action: "cancel", output: record},
+		{name: "retire", action: "retire"},
+		{name: "transport failure", action: "observe", output: record, failure: true},
+		{name: "shared deadline", action: "cancel", deadline: true},
+		{name: "oversized completion", action: "observe", output: record + strings.Repeat("x", 1024)},
+		{name: "invalid action", action: "unknown", invalid: true},
+		{name: "invalid nonce", action: "observe", invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			argsPath, callsPath := filepath.Join(dir, "args"), filepath.Join(dir, "calls")
+			body := "#!/bin/sh\nprintf 'call\\n' >> " + shellQuote(callsPath) + "\nprintf '%s\\0' \"$@\" > " + shellQuote(argsPath) + "\n"
+			if tc.deadline {
+				body += "exec /bin/sleep 10\n"
+			} else {
+				body += "printf %s " + shellQuote(tc.output) + "\n"
+				if tc.failure {
+					body += "exit 255\n"
+				}
+			}
+			writeExecutable(t, filepath.Join(dir, "ssh"), body)
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			oldStage := stageWSLSpool
+			t.Cleanup(func() { stageWSLSpool = oldStage })
+			stages := 0
+			stageWSLSpool = func(*wslStageSpool, context.Context, *SSHTarget, wslStageTiming, string, string, io.Writer) (string, error) {
+				stages++
+				return "", errors.New("fixed preflight control must not stage another workload")
+			}
+			target := SSHTarget{Host: "fixture.example", User: "runner", Port: "2207", FallbackPorts: []string{"22"}, TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
+			ctx := t.Context()
+			if tc.deadline {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 100*time.Millisecond)
+				defer cancel()
+			}
+			requestedNonce := nonce
+			if tc.name == "invalid nonce" {
+				requestedNonce = "invalid"
+			}
+			started := time.Now()
+			out, err := functionalPreflightControl(ctx, target, requestedNonce, tc.action)
+			if stages != 0 {
+				t.Fatalf("control staged %d extra workloads: %v", stages, err)
+			}
+			wantErr := tc.invalid || tc.failure || tc.deadline
+			if (err != nil) != wantErr || wantErr && len(out) != 0 {
+				t.Fatalf("output=%q error=%v wantError=%t", out, err, wantErr)
+			}
+			if tc.deadline {
+				if ctx.Err() != context.DeadlineExceeded || time.Since(started) > 2*time.Second {
+					t.Fatalf("control replaced the shared deadline: elapsed=%s error=%v", time.Since(started), err)
+				}
+				return // A loaded host may expire before spawning the fake endpoint.
+			}
+			calls, readErr := os.ReadFile(callsPath)
+			if tc.invalid {
+				if !os.IsNotExist(readErr) {
+					t.Fatalf("invalid control dispatched SSH: %q %v", calls, readErr)
+				}
+				return
+			}
+			if readErr != nil || string(calls) != "call\n" {
+				t.Fatalf("control replayed: %q %v", calls, readErr)
+			}
+			argsData, readErr := os.ReadFile(argsPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			args := strings.Split(strings.TrimSuffix(string(argsData), "\x00"), "\x00")
+			command, commandErr := functionalPreflightControlCommand(nonce, tc.action)
+			if commandErr != nil {
+				t.Fatal(commandErr)
+			}
+			wrapper := PowershellCommand(strings.ReplaceAll(functionalPreflightWSLControlTemplate, "@PROGRAM@", base64.StdEncoding.EncodeToString([]byte(command))))
+			if len(wrapper) >= wslStageLauncherCommandLimit {
+				t.Fatalf("control exceeds native command limit: %d", len(wrapper))
+			}
+			pinned := target
+			pinned.NoControlMaster, pinned.FallbackPorts = true, []string{}
+			wantArgs := sshArgsNoInputWithOptions(pinned, wrapper, "2", "1")
+			if strings.Join(args, "\x00") != strings.Join(wantArgs, "\x00") {
+				t.Fatalf("control changed route, user, input or fixed stdin wrapper: got=%x want=%x", sha256.Sum256([]byte(strings.Join(args, "\x00"))), sha256.Sum256([]byte(strings.Join(wantArgs, "\x00"))))
+			}
+			native := decodePowerShellEncodedCommand(t, args[len(args)-1])
+			prefix := "$b=[Convert]::FromBase64String('"
+			parts := strings.SplitN(native, prefix, 2)
+			if len(parts) != 2 {
+				t.Fatal("control program did not use the private stdin pipe")
+			}
+			encoded, _, ok := strings.Cut(parts[1], "')")
+			program, decodeErr := base64.StdEncoding.DecodeString(encoded)
+			if !ok || decodeErr != nil || string(program) != command {
+				t.Fatal("stdin control program bytes changed")
+			}
+			if !strings.Contains(native, "$i.Arguments='--exec bash -s'") {
+				t.Fatal("control program entered native argv")
+			}
+			if tc.failure {
+				return
+			}
+			if len(tc.output) > functionalPreflightCompletionLimit {
+				if len(out) != 0 {
+					t.Fatalf("overflowed completion output was exposed: %d", len(out))
+				}
+				if _, err := parseFunctionalPreflightCompletion(out, nonce); err == nil {
+					t.Fatal("oversized completion accepted")
+				}
+			} else if string(out) != tc.output {
+				t.Fatalf("completion changed: %q", out)
+			}
+		})
+	}
+}
+
+func TestWSLFunctionalPreflightControlPreservesOrdinaryStaging(t *testing.T) {
+	oldEntropy := wslStageEntropy
+	wslStageEntropy = strings.NewReader(strings.Repeat("a", wslStageBlindingSize))
+	t.Cleanup(func() { wslStageEntropy = oldEntropy })
+	command, err := functionalPreflightControlCommand(strings.Repeat("a", 32), "observe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte{0, 255, '\r', '\n'}
+	transport, err := prepareSSHTransport(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, command, bytes.NewReader(payload), int64(len(payload)), sshCommandLimit{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transport.close()
+	if transport.stage == nil || transport.direct != nil {
+		t.Fatal("ordinary transport bypassed WSL staging based on command text")
+	}
+	input, err := transport.stage.input.reset()
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := io.ReadAll(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, helper, gotCommand, gotPayload := decodeWSLStage(t, frame)
+	if helper != wslLinuxHelper || gotCommand != command || !bytes.Equal(gotPayload, payload) || binary.LittleEndian.Uint64(frame[32:]) != 0 {
+		t.Fatal("ordinary WSL helper, command, binary input or unlimited execution changed")
+	}
+	t.Logf("ordinary WSL frame sha256=%x", sha256.Sum256(frame))
+}
+
 func TestWSLFunctionalPreflightStagesPrivateCommand(t *testing.T) {
 	oldStage, oldControl := stageWSLSpool, runFunctionalPreflightControl
 	t.Cleanup(func() { stageWSLSpool, runFunctionalPreflightControl = oldStage, oldControl })

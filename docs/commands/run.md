@@ -642,6 +642,13 @@ bounded transport setup; this is not a promise that the whole command finishes
 within 120 seconds. This functional probe cannot be used
 as a profile-doctor version-only tool requirement.
 
+On WSL2, completion and retirement use fixed metadata checks on the selected SSH
+endpoint without creating another staged workload. A private stdin pipe preserves
+the fixed program’s quotes and bytes without passing it as native arguments.
+Each check has a 20-second caller-side cap that cannot extend the shared cleanup deadline. This cap is not
+an independent native WSL watchdog; cleanup still requires verified completion
+and retirement.
+
 `raw_socket` uses `python3`, then `python`, to open and immediately close
 `socket(AF_INET, SOCK_RAW, IPPROTO_RAW)` without binding, connecting, sending,
 or receiving. Its stable result is `direct`, `sudo`, `unavailable`, or

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	_ "embed"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,9 @@ var functionalPreflightCompletionScript string
 
 //go:embed scripts/functional-preflight-posix.sh
 var functionalPreflightPOSIXTemplate string
+
+//go:embed scripts/functional-preflight-wsl-control.ps1
+var functionalPreflightWSLControlTemplate string
 
 var runFunctionalPreflightControl = functionalPreflightControl
 
@@ -275,12 +279,43 @@ func functionalPreflightControl(ctx context.Context, target SSHTarget, nonce, ac
 		return nil, err
 	}
 	out := newSynchronizedBuffer(functionalPreflightCompletionLimit + 1)
-	err = executePreparedSSH(ctx, &target, "bash -c "+shellQuote(command), nil, 0,
-		sshCommandLimit{execution: 20 * time.Second}, "2", "1", &out, io.Discard)
+	limit := sshCommandLimit{execution: 20 * time.Second}
+	if isWindowsWSL2Target(target) {
+		remote, controlErr := functionalPreflightWSLControlCommand(nonce, action)
+		if controlErr != nil {
+			return nil, controlErr
+		}
+		// Only this validated nonce/action program uses direct metadata dispatch.
+		// A second workload stage would consume the original cleanup reserve.
+		target.NoControlMaster, target.FallbackPorts = true, []string{}
+		controlCtx, cancel := context.WithTimeout(ctx, limit.execution)
+		defer cancel()
+		transport := sshTransportPreparation{command: remote}
+		_, err = transport.runOnce(controlCtx, target, "2", "1", &out, io.Discard, false)
+		if err == nil {
+			err = context.Cause(controlCtx)
+		}
+	} else {
+		err = executePreparedSSH(ctx, &target, "bash -c "+shellQuote(command), nil, 0,
+			limit, "2", "1", &out, io.Discard)
+	}
 	if err != nil {
 		return nil, errors.Join(errors.New("functional preflight cleanup unconfirmed"), err)
 	}
 	return []byte(out.String()), nil
+}
+
+func functionalPreflightWSLControlCommand(nonce, action string) (string, error) {
+	program, err := functionalPreflightControlCommand(nonce, action)
+	if err != nil {
+		return "", err
+	}
+	remote := PowershellCommand(strings.ReplaceAll(functionalPreflightWSLControlTemplate,
+		"@PROGRAM@", base64.StdEncoding.EncodeToString([]byte(program))))
+	if len(remote) >= wslStageLauncherCommandLimit {
+		return "", errors.New("functional preflight control exceeds native command limit")
+	}
+	return remote, nil
 }
 
 func functionalPreflightControlCommand(nonce, action string) (string, error) {
