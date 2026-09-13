@@ -204,6 +204,8 @@ type Backend interface {
 	Spec() ProviderSpec
 }
 
+// DoctorProvider overrides diagnostic configuration when the ordinary backend
+// requires acquisition-only inputs. Otherwise core uses Configure and DoctorBackend.
 type DoctorProvider interface {
 	Provider
 	ConfigureDoctor(cfg Config, rt Runtime) (DoctorBackend, error)

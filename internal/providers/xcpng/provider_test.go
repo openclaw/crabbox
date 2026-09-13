@@ -204,7 +204,7 @@ func TestConfigureDoctorReturnsNonMutatingBackend(t *testing.T) {
 		return fake, nil
 	}
 	t.Cleanup(func() { newLifecycleClient = old })
-	doctor, err := Provider{}.ConfigureDoctor(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+	doctor, err := core.ConfigureProviderDoctor(Provider{}, cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestConfigureDoctorReturnsNonMutatingBackend(t *testing.T) {
 func TestDoctorReportsIncompleteConfigWithoutSecretValues(t *testing.T) {
 	cfg := core.Config{}
 	cfg.XCPNg.Password = "secret"
-	doctor, err := Provider{}.ConfigureDoctor(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+	doctor, err := core.ConfigureProviderDoctor(Provider{}, cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatal(err)
 	}

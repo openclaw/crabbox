@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -51,10 +50,6 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewTenkiBackend(p.Spec(), cfg, rt)
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("tenki", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }
 
 func (Provider) ServerTypeForConfig(cfg core.Config) string {

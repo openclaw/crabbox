@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const providerName = "kubevirt"
@@ -106,8 +105,4 @@ func configWithInheritedWorkRoot(cfg core.Config) core.KubeVirtConfig {
 		values.WorkRoot = cfg.WorkRoot
 	}
 	return values
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor(providerName, func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }

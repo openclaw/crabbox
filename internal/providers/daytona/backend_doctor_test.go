@@ -88,7 +88,7 @@ func TestDaytonaDoctorListsInventoryOnly(t *testing.T) {
 	}
 	t.Cleanup(func() { newDaytonaClient = old })
 
-	doctor, err := Provider{}.ConfigureDoctor(core.Config{}, core.Runtime{})
+	doctor, err := core.ConfigureProviderDoctor(Provider{}, core.Config{}, core.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
