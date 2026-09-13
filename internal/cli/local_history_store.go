@@ -49,7 +49,7 @@ func localHistoryID(id string) bool {
 
 // The state namespace is separate from lease claims. Opening a reader never creates it.
 func localHistoryRoot(create bool) (*os.Root, error) {
-	state, err := crabboxStateDir()
+	state, err := CrabboxStateDir()
 	if err != nil {
 		return nil, err
 	}

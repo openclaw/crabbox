@@ -23,7 +23,7 @@ type doctorAllJSONOutput struct {
 func (a App) doctorAll(ctx context.Context, opts doctorAllOptions) error {
 	providers := normalizeDoctorAllProviders(opts.Providers)
 	if len(providers) == 0 {
-		return exit(2, "doctor --all requires at least one provider")
+		return Exit(2, "doctor --all requires at least one provider")
 	}
 	results := make([]doctorJSONOutput, 0, len(providers))
 	ok := true
@@ -76,7 +76,7 @@ func (a App) doctorAll(ctx context.Context, opts doctorAllOptions) error {
 		}
 	}
 	if !ok {
-		return exit(1, "doctor found problems")
+		return Exit(1, "doctor found problems")
 	}
 	return nil
 }

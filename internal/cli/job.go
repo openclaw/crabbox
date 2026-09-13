@@ -52,7 +52,7 @@ func (a App) jobRun(ctx context.Context, args []string) (err error) {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox job run <name>")
+		return Exit(2, "usage: crabbox job run <name>")
 	}
 	name := fs.Arg(0)
 	cfg, err := loadConfig()
@@ -61,7 +61,7 @@ func (a App) jobRun(ctx context.Context, args []string) (err error) {
 	}
 	job, ok := cfg.Jobs[name]
 	if !ok {
-		return exit(2, "job %q is not configured", name)
+		return Exit(2, "job %q is not configured", name)
 	}
 	if err := validateJobConfig(name, job); err != nil {
 		return err
@@ -75,7 +75,7 @@ func (a App) jobRun(ctx context.Context, args []string) (err error) {
 	plannedLease := blank(leaseID, "<lease>")
 	runNoHydrate := *noHydrate || !job.Hydrate.Actions
 	if err := validateJobRunOptions(cfg, job, leaseID); err != nil {
-		return exit(2, "job %q: %v", name, err)
+		return Exit(2, "job %q: %v", name, err)
 	}
 	if *dryRun {
 		for _, line := range jobPlanCommands(cfg, name, job, plannedLease, createdLease, runNoHydrate, *githubRunner, stopPolicy) {
@@ -92,7 +92,7 @@ func (a App) jobRun(ctx context.Context, args []string) (err error) {
 		}
 		leaseID = parseWarmupLeaseID(out.String())
 		if leaseID == "" {
-			return exit(2, "job %q could not parse warmup lease id", name)
+			return Exit(2, "job %q could not parse warmup lease id", name)
 		}
 	}
 	shouldStop := false
@@ -160,7 +160,7 @@ func validateJobRunOptions(cfg Config, job JobConfig, leaseID string) error {
 
 func validateJobConfig(name string, job JobConfig) error {
 	if strings.TrimSpace(job.Command) == "" && !job.SyncOnly {
-		return exit(2, "job %q requires command or syncOnly", name)
+		return Exit(2, "job %q requires command or syncOnly", name)
 	}
 	return nil
 }
@@ -177,7 +177,7 @@ func validateJobStopPolicy(policy string) error {
 	case "", "auto", "always", "success", "failure", "never":
 		return nil
 	default:
-		return exit(2, "--stop must be auto, always, success, failure, or never")
+		return Exit(2, "--stop must be auto, always, success, failure, or never")
 	}
 }
 

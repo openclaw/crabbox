@@ -831,7 +831,7 @@ func testCheckpointManagedInspectAbsence(t *testing.T, binary string) {
 				}
 			case "capture", "corrupt claim":
 				const leaseID = "cbx_abcdef123456"
-				if err := withDurableLeaseClaimLock(leaseID, func(claim *leaseClaim, _ bool, persist func() error) error {
+				if err := WithDurableLeaseClaimLock(leaseID, func(claim *leaseClaim, _ bool, persist func() error) error {
 					*claim = leaseClaim{LeaseID: leaseID, Provider: "aws", CheckpointCapture: &CheckpointCaptureBinding{ID: id}}
 					return persist()
 				}); err != nil {

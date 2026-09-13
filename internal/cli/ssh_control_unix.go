@@ -169,7 +169,7 @@ func closeSSHControlMaster(ctx context.Context, path string) error {
 	if err != nil || pid <= 0 || output != fmt.Sprintf("Master running (pid=%d)", pid) {
 		return fmt.Errorf("OpenSSH did not return a valid control-master identity")
 	}
-	started, err := webVNCDaemonProcessStartIdentity(pid)
+	started, err := LocalProcessStartIdentity(pid)
 	if err != nil {
 		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
 			if absent, absentErr := removeInactiveSSHControlSocket(ctx, path); absent {

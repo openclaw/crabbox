@@ -548,6 +548,10 @@ credential admission. Exact forwarding functions and type aliases only add a
 second name for an existing owner; use the core definition at the call site.
 Mutable injection hooks retain their explicit adapter boundary.
 
+Core exports live beside their implementations and domain data. Exposing an
+existing operation does not need a private implementation plus a second public
+forwarder; use one exported definition for both core and adapter callers.
+
 Generated SSH configuration shares a connection-record parser in
 `shared.ParseGeneratedSSHConfig`. Adapters supply their generated format's
 comment and directive rules and keep host selection, proxy rewriting, and

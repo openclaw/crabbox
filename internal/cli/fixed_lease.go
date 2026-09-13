@@ -62,10 +62,10 @@ func AcquireFixedLease(
 	var acquired LeaseTarget
 	err := WithDurableLeaseClaimLock(opts.LeaseID, func(claim *LeaseClaim, exists bool, persist func() error) error {
 		if exists && opts.Kind.IsFixedClaim(*claim) && claim.FixedCreateIntent.State == "released" {
-			return exit(4, "lease_id_conflict: fixed lease %s is terminal and cannot be replayed", opts.LeaseID)
+			return Exit(4, "lease_id_conflict: fixed lease %s is terminal and cannot be replayed", opts.LeaseID)
 		}
 		if exists && claim.FixedCreateIntent != nil && claim.FixedCreateIntent.CheckpointID != opts.CheckpointID {
-			return exit(4, "lease_id_conflict: lease %s is bound to checkpoint %s, not checkpoint %s", opts.LeaseID, blank(claim.FixedCreateIntent.CheckpointID, "<none>"), blank(opts.CheckpointID, "<none>"))
+			return Exit(4, "lease_id_conflict: lease %s is bound to checkpoint %s, not checkpoint %s", opts.LeaseID, blank(claim.FixedCreateIntent.CheckpointID, "<none>"), blank(opts.CheckpointID, "<none>"))
 		}
 		binding, err := prepare(ctx, claim, exists)
 		if err != nil {
@@ -76,13 +76,13 @@ func AcquireFixedLease(
 				claim.FixedCreateIntent.Version != opts.Kind.IntentVersion ||
 				claim.FixedCreateIntent.Fingerprint != binding.Fingerprint ||
 				claim.FixedCreateIntent.ProviderScope != binding.ProviderScope {
-				return exit(4, "lease_id_conflict: lease %s is bound to another create intent", opts.LeaseID)
+				return Exit(4, "lease_id_conflict: lease %s is bound to another create intent", opts.LeaseID)
 			}
 			if claim.Provider != opts.Kind.ClaimProvider {
-				return exit(4, "lease_id_conflict: lease %s is bound to provider=%s", opts.LeaseID, claim.Provider)
+				return Exit(4, "lease_id_conflict: lease %s is bound to provider=%s", opts.LeaseID, claim.Provider)
 			}
 			if claim.RepoRoot != "" && claim.RepoRoot != opts.RepoRoot && !opts.Reclaim {
-				return exit(4, "lease_id_conflict: lease %s is bound to another repository", opts.LeaseID)
+				return Exit(4, "lease_id_conflict: lease %s is bound to another repository", opts.LeaseID)
 			}
 		} else {
 			current := now().UTC()
@@ -112,14 +112,14 @@ func AcquireFixedLease(
 
 		intent := claim.FixedCreateIntent
 		if intent.State != "prepared" && intent.State != "acquired" {
-			return exit(4, "lease_id_conflict: fixed lease %s has invalid create state %q", opts.LeaseID, intent.State)
+			return Exit(4, "lease_id_conflict: fixed lease %s has invalid create state %q", opts.LeaseID, intent.State)
 		}
 		createdAt, err := time.Parse(time.RFC3339Nano, intent.CreatedAt)
 		if err != nil {
-			return exit(4, "lease_id_conflict: lease %s has invalid fixed create timestamp", opts.LeaseID)
+			return Exit(4, "lease_id_conflict: lease %s has invalid fixed create timestamp", opts.LeaseID)
 		}
 		if opts.TTL > 0 && now().UTC().After(createdAt.Add(opts.TTL)) {
-			return exit(4, "lease_id_conflict: fixed create intent for lease %s has expired", opts.LeaseID)
+			return Exit(4, "lease_id_conflict: fixed create intent for lease %s has expired", opts.LeaseID)
 		}
 
 		acquired, err = acquire(ctx, claim, intent, persist)

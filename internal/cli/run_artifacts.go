@@ -43,7 +43,7 @@ func requireRunArtifactGlobs(ctx context.Context, target SSHTarget, workdir stri
 	remote := remoteRequireArtifactGlobsCommand(target, workdir, globs)
 	out, err := runSSHCombinedOutput(ctx, target, remote)
 	if err != nil {
-		return strings.TrimSpace(out), exit(7, "require artifacts: %v: %s", err, strings.TrimSpace(out))
+		return strings.TrimSpace(out), Exit(7, "require artifacts: %v: %s", err, strings.TrimSpace(out))
 	}
 	return strings.TrimSpace(out), nil
 }
@@ -65,7 +65,7 @@ func collectRunArtifactGlobs(ctx context.Context, target SSHTarget, workdir, rep
 	err := runSSHInput(ctx, target, remoteRunArtifactShellInputCommand(target), strings.NewReader(script), &output, &output)
 	out := output.String()
 	if err != nil {
-		return nil, "", exit(7, "collect artifacts: %v: %s", err, strings.TrimSpace(out))
+		return nil, "", Exit(7, "collect artifacts: %v: %s", err, strings.TrimSpace(out))
 	}
 	defer func() {
 		_, _ = runSSHCombinedOutput(context.Background(), target, remoteRemoveRunArtifactCommand(target, workdir, remotePath))
@@ -109,11 +109,11 @@ func ValidateRequiredRunArtifactGlobs(globs []string) error {
 func validateRunArtifactGlobsForFlag(flag string, globs []string) error {
 	for _, glob := range globs {
 		if !safeArtifactGlob(glob) {
-			return exit(2, "%s contains unsupported characters or non-relative path: %s", flag, glob)
+			return Exit(2, "%s contains unsupported characters or non-relative path: %s", flag, glob)
 		}
 		for _, component := range strings.Split(filepath.ToSlash(strings.TrimSpace(glob)), "/") {
 			if component == ".git" || component == ".crabbox" {
-				return exit(2, "%s excludes protected path components: %s", flag, glob)
+				return Exit(2, "%s excludes protected path components: %s", flag, glob)
 			}
 		}
 	}
@@ -130,7 +130,7 @@ func validateRequiredRunArtifactGlobTarget(target SSHTarget, globs []string) err
 
 func validateRunArtifactGlobTargetForFlag(target SSHTarget, globs []string, flag string) error {
 	if len(globs) > 0 && isWindowsNativeTarget(target) {
-		return exit(2, "%s is not supported for native Windows targets", flag)
+		return Exit(2, "%s is not supported for native Windows targets", flag)
 	}
 	return nil
 }
@@ -413,11 +413,11 @@ func writeRunProof(path, templateName string, input proofRenderInput) (runArtifa
 	}
 	if dir := filepath.Dir(path); dir != "." && dir != "" {
 		if err := createPrivateRunOutputDir(dir); err != nil {
-			return runArtifact{}, exit(2, "create proof directory: %v", err)
+			return runArtifact{}, Exit(2, "create proof directory: %v", err)
 		}
 	}
 	if err := writePrivateRunOutputFile(path, []byte(content)); err != nil {
-		return runArtifact{}, exit(2, "write proof %s: %v", path, err)
+		return runArtifact{}, Exit(2, "write proof %s: %v", path, err)
 	}
 	return runArtifact{Kind: "proof", Path: path, Template: templateName, Bytes: len(content)}, nil
 }

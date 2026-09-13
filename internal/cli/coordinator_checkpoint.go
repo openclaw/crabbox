@@ -139,7 +139,7 @@ func configuredCheckpointCoordinatorFor(ctx context.Context) (*CoordinatorClient
 	admin, _ := ctx.Value(checkpointAdminContextKey{}).(bool)
 	if admin {
 		if cfg.CoordAdminToken == "" {
-			return nil, exit(2, "checkpoint --admin requires a configured coordinator admin token")
+			return nil, Exit(2, "checkpoint --admin requires a configured coordinator admin token")
 		}
 		cfg.CoordToken = cfg.CoordAdminToken
 		cfg.CoordTokenCommand = nil
@@ -151,7 +151,7 @@ func configuredCheckpointCoordinatorFor(ctx context.Context) (*CoordinatorClient
 		return nil, err
 	}
 	if !ok {
-		return nil, exit(2, "checkpoint operation requires a configured coordinator")
+		return nil, Exit(2, "checkpoint operation requires a configured coordinator")
 	}
 	return coord, nil
 }
@@ -377,10 +377,10 @@ func checkpointRecordFromCoordinator(checkpoint coordinatorCheckpoint, origin st
 		return checkpointRecord{}, err
 	}
 	if checkpoint.Image == nil && checkpoint.State != "creating" && checkpoint.State != "failed" {
-		return checkpointRecord{}, exit(2, "coordinator checkpoint %s has no verified provider resource", checkpoint.ID)
+		return checkpointRecord{}, Exit(2, "coordinator checkpoint %s has no verified provider resource", checkpoint.ID)
 	}
 	if checkpoint.Image != nil && (checkpoint.Image.ID == "" || checkpoint.Image.ResourceID == "" || checkpoint.Image.ImmutableID == "") {
-		return checkpointRecord{}, exit(2, "coordinator checkpoint %s has no verified provider resource", checkpoint.ID)
+		return checkpointRecord{}, Exit(2, "coordinator checkpoint %s has no verified provider resource", checkpoint.ID)
 	}
 	kind := checkpoint.State
 	if checkpoint.Image != nil {

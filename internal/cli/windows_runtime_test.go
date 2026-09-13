@@ -13,7 +13,7 @@ func TestWindowsRuntimeBeforeManagedReadiness(t *testing.T) {
 			cfg.TargetOS, cfg.WindowsMode, cfg.Architecture = targetWindows, windowsModeNormal, architecture
 			cfg.Desktop = desktop
 			cfg.Provider = "aws"
-			aws := windowsBootstrapPowerShell(cfg, "ssh-ed25519 fixture")
+			aws := WindowsBootstrapPowerShell(cfg, "ssh-ed25519 fixture")
 			cfg.Provider = "azure"
 			for name, script := range map[string]string{
 				"aws-shared-core": aws,
@@ -62,7 +62,7 @@ func TestWindowsRuntimeDefaultNativeMode(t *testing.T) {
 	cfg := baseConfig()
 	cfg.TargetOS, cfg.WindowsMode = targetWindows, ""
 	for name, render := range map[string]func(Config, string) string{
-		"aws-shared-core": windowsBootstrapPowerShell,
+		"aws-shared-core": WindowsBootstrapPowerShell,
 		"azure-extension": azureWindowsBootstrapPowerShell,
 		"azure-snapshot":  azureWindowsSnapshotRehydratePowerShell,
 	} {
@@ -89,7 +89,7 @@ func TestWindowsRuntimeAbsentFromWSL2(t *testing.T) {
 	cfg := baseConfig()
 	cfg.TargetOS, cfg.WindowsMode = targetWindows, windowsModeWSL2
 	for name, render := range map[string]func(Config, string) string{
-		"aws-shared-core": windowsBootstrapPowerShell,
+		"aws-shared-core": WindowsBootstrapPowerShell,
 		"azure-extension": azureWindowsBootstrapPowerShell,
 		"azure-snapshot":  azureWindowsSnapshotRehydratePowerShell,
 	} {

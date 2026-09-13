@@ -49,10 +49,10 @@ func (a App) vnc(ctx context.Context, args []string) error {
 		return err
 	}
 	if *nativeHandoff && *openClient {
-		return exit(2, "--native-handoff and --open cannot be used together")
+		return Exit(2, "--native-handoff and --open cannot be used together")
 	}
 	if (*nativeGrantURL != "" || *nativeGrantStdin) && (!*nativeHandoff || *nativeGrantURL == "" || !*nativeGrantStdin) {
-		return exit(2, "--native-grant-url and --native-grant-stdin must be used together with --native-handoff")
+		return Exit(2, "--native-grant-url and --native-grant-stdin must be used together with --native-handoff")
 	}
 	setIDFromFirstArg(fs, id)
 	if *nativeGrantURL != "" {
@@ -66,13 +66,13 @@ func (a App) vnc(ctx context.Context, args []string) error {
 		return err
 	}
 	if isBlacksmithProvider(cfg.Provider) {
-		return exit(2, "desktop/VNC is not supported for provider=%s; Blacksmith owns machine connectivity", cfg.Provider)
+		return Exit(2, "desktop/VNC is not supported for provider=%s; Blacksmith owns machine connectivity", cfg.Provider)
 	}
 	if err := requireLeaseID(*id, "crabbox vnc --id <lease-id-or-slug>", cfg); err != nil {
 		return err
 	}
 	if *openClient && isStaticProvider(cfg.Provider) && !*hostManaged {
-		return exit(2, "static %s VNC is an existing host, not a Crabbox-created box; rerun with --host-managed only if you want to open that host's OS login prompt", cfg.TargetOS)
+		return Exit(2, "static %s VNC is an existing host, not a Crabbox-created box; rerun with --host-managed only if you want to open that host's OS login prompt", cfg.TargetOS)
 	}
 	server, target, leaseID, err := a.resolveNetworkLeaseTargetForRepo(ctx, cfg, *id, true, *reclaim)
 	if err != nil {
@@ -105,9 +105,9 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	tunnel := vncTunnelCommand(target, *localPort)
 	staticHostVNC := isStaticProvider(cfg.Provider) && !endpoint.Managed
 	if staticHostVNC {
-		fmt.Fprintf(a.Stdout, "target: static-host slug=%s provider=%s os=%s host=%s\n", blank(serverSlug(server), "-"), blank(server.Provider, cfg.Provider), blank(target.TargetOS, cfg.TargetOS), target.Host)
+		fmt.Fprintf(a.Stdout, "target: static-host slug=%s provider=%s os=%s host=%s\n", blank(ServerSlug(server), "-"), blank(server.Provider, cfg.Provider), blank(target.TargetOS, cfg.TargetOS), target.Host)
 	} else {
-		fmt.Fprintf(a.Stdout, "lease: %s slug=%s provider=%s target=%s\n", leaseID, blank(serverSlug(server), "-"), blank(server.Provider, cfg.Provider), blank(target.TargetOS, cfg.TargetOS))
+		fmt.Fprintf(a.Stdout, "lease: %s slug=%s provider=%s target=%s\n", leaseID, blank(ServerSlug(server), "-"), blank(server.Provider, cfg.Provider), blank(target.TargetOS, cfg.TargetOS))
 	}
 	if staticHostVNC {
 		fmt.Fprintln(a.Stdout, "managed: false")
@@ -224,16 +224,16 @@ func (a App) vncFromNativeGrant(ctx context.Context, expectedLeaseID, brokerURL,
 	parsed, err := url.Parse(strings.TrimSpace(brokerURL))
 	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
 		(parsed.Scheme != "https" && !(parsed.Scheme == "http" && isNativeVNCLoopbackHost(parsed.Hostname()))) {
-		return exit(2, "--native-grant-url must be an HTTPS coordinator URL or loopback HTTP URL")
+		return Exit(2, "--native-grant-url must be an HTTPS coordinator URL or loopback HTTP URL")
 	}
 	ticketBytes, err := io.ReadAll(io.LimitReader(a.input(), 4097))
 	if err != nil {
-		return exit(2, "read native VNC grant: %v", err)
+		return Exit(2, "read native VNC grant: %v", err)
 	}
 	ticket := strings.TrimSuffix(string(ticketBytes), "\n")
 	ticket = strings.TrimSuffix(ticket, "\r")
 	if len(ticketBytes) > 4096 || !validNativeVNCTicket(ticket) {
-		return exit(2, "native VNC grant is invalid")
+		return Exit(2, "native VNC grant is invalid")
 	}
 	parsed.Path = "/v1/native-vnc/handoff"
 	parsed.RawPath = ""
@@ -247,15 +247,15 @@ func (a App) vncFromNativeGrant(ctx context.Context, expectedLeaseID, brokerURL,
 	ws, response, err := websocket.Dial(ctx, parsed.String(), &websocket.DialOptions{HTTPHeader: header})
 	if err != nil {
 		if response != nil {
-			return exit(5, "native VNC coordinator websocket: http %d", response.StatusCode)
+			return Exit(5, "native VNC coordinator websocket: http %d", response.StatusCode)
 		}
-		return exit(5, "native VNC coordinator websocket: %v", err)
+		return Exit(5, "native VNC coordinator websocket: %v", err)
 	}
 	defer ws.Close(websocket.StatusNormalClosure, "native VNC closed")
 	ws.SetReadLimit(1 << 20)
 	messageType, payload, err := ws.Read(ctx)
 	if err != nil || messageType != websocket.MessageText {
-		return exit(5, "native VNC coordinator returned an invalid ready message")
+		return Exit(5, "native VNC coordinator returned an invalid ready message")
 	}
 	var ready struct {
 		Schema   string `json:"schema"`
@@ -267,10 +267,10 @@ func (a App) vncFromNativeGrant(ctx context.Context, expectedLeaseID, brokerURL,
 		ready.LeaseID == "" || len(ready.LeaseID) > 256 || len(ready.Username) > 256 ||
 		ready.Password == "" || len(ready.Password) > 256 ||
 		strings.ContainsAny(ready.LeaseID+ready.Username+ready.Password, "\x00\r\n") {
-		return exit(5, "native VNC coordinator returned an invalid ready message")
+		return Exit(5, "native VNC coordinator returned an invalid ready message")
 	}
 	if expectedLeaseID != "" && ready.LeaseID != expectedLeaseID {
-		return exit(5, "native VNC grant returned a different lease")
+		return Exit(5, "native VNC grant returned a different lease")
 	}
 	return runNativeVNCWebSocketHandoff(ctx, a.Stdout, ws, localPort, ready.Username, ready.Password)
 }
@@ -287,7 +287,7 @@ func runNativeVNCWebSocketHandoff(
 	}
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
-		return exit(5, "reserve native VNC loopback port: %v", err)
+		return Exit(5, "reserve native VNC loopback port: %v", err)
 	}
 	defer listener.Close()
 	port := listener.Addr().(*net.TCPAddr).Port
@@ -315,11 +315,11 @@ func runNativeVNCWebSocketHandoff(
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return exit(5, "accept native VNC client: %v", err)
+		return Exit(5, "accept native VNC client: %v", err)
 	}
 	defer tcp.Close()
 	if err := ws.Write(ctx, websocket.MessageText, []byte("start")); err != nil {
-		return exit(5, "start native VNC coordinator tunnel: %v", err)
+		return Exit(5, "start native VNC coordinator tunnel: %v", err)
 	}
 	relayCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -329,7 +329,7 @@ func runNativeVNCWebSocketHandoff(
 	err = <-errors
 	cancel()
 	if err != nil && ctx.Err() == nil && !isExpectedNativeVNCRelayClose(err) {
-		return exit(5, "native VNC tunnel: %v", err)
+		return Exit(5, "native VNC tunnel: %v", err)
 	}
 	return nil
 }
@@ -388,10 +388,10 @@ type vncNativeHandoff struct {
 
 func validateNativeVNCHandoffEndpoint(endpoint vncEndpoint) error {
 	if !endpoint.Managed {
-		return exit(2, "--native-handoff requires a Crabbox-managed desktop over a loopback SSH tunnel")
+		return Exit(2, "--native-handoff requires a Crabbox-managed desktop over a loopback SSH tunnel")
 	}
 	if endpoint.Direct {
-		return exit(2, "--native-handoff requires a loopback SSH tunnel")
+		return Exit(2, "--native-handoff requires a loopback SSH tunnel")
 	}
 	return nil
 }
@@ -417,10 +417,10 @@ func runVNCNativeHandoff(
 	defer stopProcess(tunnel)
 	port, err := strconv.Atoi(localPort)
 	if err != nil || port < 1 || port > 65535 {
-		return exit(5, "invalid reserved VNC tunnel port")
+		return Exit(5, "invalid reserved VNC tunnel port")
 	}
 	if len(username) > 256 || len(password) > 4096 {
-		return exit(5, "native VNC credentials exceed the handoff limit")
+		return Exit(5, "native VNC credentials exceed the handoff limit")
 	}
 	handoff := vncNativeHandoff{
 		Schema: vncNativeHandoffSchema, Host: vncLoopbackHost, Port: port,
@@ -481,7 +481,7 @@ func startVNCTunnel(ctx context.Context, target SSHTarget, localPort, remoteHost
 		err = fmt.Errorf("%w: %s", err, diagnostic)
 	}
 	if cause := context.Cause(ctx); cause == nil || !errors.Is(err, cause) {
-		err = errors.Join(exit(5, "start VNC SSH tunnel on %s:%s", vncLoopbackHost, localPort), err)
+		err = errors.Join(Exit(5, "start VNC SSH tunnel on %s:%s", vncLoopbackHost, localPort), err)
 	}
 	return 0, errors.Join(err, cleanupErr)
 }
@@ -536,7 +536,7 @@ func vncTunnelArgs(target SSHTarget, localPort, remoteHost, remotePort string) [
 func openLocalURLWithEnvironment(url string, denied ...string) error {
 	name, args := openURLCommand(url)
 	if name == "" {
-		return exit(2, "opening VNC URLs is not supported on this local OS")
+		return Exit(2, "opening VNC URLs is not supported on this local OS")
 	}
 	cmd := exec.Command(name, args...)
 	cmd.Env = browserOpenerEnvironment(os.Environ(), denied...)

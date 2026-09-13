@@ -27,7 +27,7 @@ func TestClaimsListReadableNonWritableStore(t *testing.T) {
 				writeClaimsListRawFixture(t, "cbx_broken.json", []byte("{"))
 			}
 
-			stateDir, err := crabboxStateDir()
+			stateDir, err := CrabboxStateDir()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -89,7 +89,7 @@ func TestClaimsListReadableNonWritableStore(t *testing.T) {
 func TestClaimsListRejectsLargeSparseFilesWithoutCreatingState(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	writeClaimsListFixture(t, "cbx_valid.json", leaseClaim{LeaseID: "cbx_valid", Provider: "local-container"})
-	stateDir, err := crabboxStateDir()
+	stateDir, err := CrabboxStateDir()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestClaimsListRejectsLargeSparseFilesWithoutCreatingState(t *testing.T) {
 
 func TestRuntimeClaimsSnapshotRejectsNonRegularFilesWithoutLocks(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	stateDir, err := crabboxStateDir()
+	stateDir, err := CrabboxStateDir()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -45,7 +45,7 @@ func (e coordinatorProviderIdentityError) Error() string {
 }
 
 func (e coordinatorProviderIdentityError) Unwrap() error {
-	return exit(4, "%s", e.Error())
+	return Exit(4, "%s", e.Error())
 }
 
 func isCoordinatorProviderIdentityError(err error) bool {
@@ -179,7 +179,7 @@ func selectCoordinatorLeaseSSHPort(lease CoordinatorLease, cfg Config) (Coordina
 	// Explicit selection pins an advertised route before any SSH delivery;
 	// it cannot add endpoints or replay a workload on another port.
 	if !slices.Contains(append([]string{lease.SSHPort}, lease.SSHFallbackPorts...), cfg.SSHPort) {
-		return CoordinatorLease{}, exit(2, "SSH port %s is not advertised by coordinator lease %s; select its primary or fallback port, or remove the --ssh-port, ssh.port, or CRABBOX_SSH_PORT override to use automatic selection", cfg.SSHPort, lease.ID)
+		return CoordinatorLease{}, Exit(2, "SSH port %s is not advertised by coordinator lease %s; select its primary or fallback port, or remove the --ssh-port, ssh.port, or CRABBOX_SSH_PORT override to use automatic selection", cfg.SSHPort, lease.ID)
 	}
 	lease.SSHPort, lease.SSHFallbackPorts = cfg.SSHPort, []string{}
 	return lease, nil
@@ -212,7 +212,7 @@ func (b *coordinatorLeaseBackend) Acquire(ctx context.Context, req AcquireReques
 	}
 	claim, checkpointBacked := checkpointLeaseClaimFromContext(ctx)
 	if req.RequestedLeaseID != "" && ((req.RequestedCheckpointID != "") != checkpointBacked || checkpointBacked && req.RequestedCheckpointID != claim.CheckpointID) {
-		return LeaseTarget{}, exit(2, "fixed coordinator checkpoint acquisition requires its exact checkpoint use context")
+		return LeaseTarget{}, Exit(2, "fixed coordinator checkpoint acquisition requires its exact checkpoint use context")
 	}
 	if strings.TrimSpace(req.RequestedLeaseID) != "" {
 		acquired, err := b.acquireOnceWithLeaseID(ctx, req.Keep, strings.TrimSpace(req.RequestedLeaseID), req.RequestedSlug)
@@ -243,12 +243,12 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 	var slug string
 	var err error
 	if requestedLeaseID != "" {
-		slug = normalizeLeaseSlug(requestedSlug)
+		slug = NormalizeLeaseSlug(requestedSlug)
 		if slug == "" {
-			slug = newLeaseSlug(leaseID)
+			slug = NewLeaseSlug(leaseID)
 		}
 	} else {
-		slug, err = allocateClaimLeaseSlug(leaseID, requestedSlug)
+		slug, err = AllocateClaimLeaseSlug(leaseID, requestedSlug)
 		if err != nil {
 			return LeaseTarget{}, err
 		}
@@ -596,19 +596,19 @@ func isCoordinatorLeaseIDConflict(err error) bool {
 
 func (b *coordinatorLeaseBackend) validateCoordinatorLeaseCreateResult(cfg Config, lease CoordinatorLease, requestedLeaseID string) error {
 	if lease.ID != requestedLeaseID {
-		return coordinatorLeaseIDConflict{err: exit(4, "lease_id_conflict: coordinator returned lease %s (slug %s) for operation %s; no bootstrap or cleanup was attempted", blank(lease.ID, "<empty>"), blank(lease.Slug, "-"), requestedLeaseID)}
+		return coordinatorLeaseIDConflict{err: Exit(4, "lease_id_conflict: coordinator returned lease %s (slug %s) for operation %s; no bootstrap or cleanup was attempted", blank(lease.ID, "<empty>"), blank(lease.Slug, "-"), requestedLeaseID)}
 	}
 	if strings.TrimSpace(lease.ID) == "" {
-		return exit(4, "coordinator create returned an empty canonical lease id for operation %s", requestedLeaseID)
+		return Exit(4, "coordinator create returned an empty canonical lease id for operation %s", requestedLeaseID)
 	}
 	if err := b.validateCoordinatorLeaseProviderIdentity(lease); err != nil {
 		return err
 	}
 	if lease.TargetOS != "" && cfg.TargetOS != "" && !strings.EqualFold(lease.TargetOS, cfg.TargetOS) {
-		return exit(4, "coordinator lease target mismatch: requested=%s returned=%s lease=%s", cfg.TargetOS, lease.TargetOS, lease.ID)
+		return Exit(4, "coordinator lease target mismatch: requested=%s returned=%s lease=%s", cfg.TargetOS, lease.TargetOS, lease.ID)
 	}
 	if cfg.TargetOS == targetWindows && cfg.WindowsMode != "" && lease.WindowsMode != "" && lease.WindowsMode != cfg.WindowsMode {
-		return exit(4, "coordinator lease Windows mode mismatch: requested=%s returned=%s lease=%s", cfg.WindowsMode, lease.WindowsMode, lease.ID)
+		return Exit(4, "coordinator lease Windows mode mismatch: requested=%s returned=%s lease=%s", cfg.WindowsMode, lease.WindowsMode, lease.ID)
 	}
 	return nil
 }
@@ -851,7 +851,7 @@ const coordinatorReleaseResolveTimeout = 10 * time.Second
 
 func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
 	cfg := b.cfg
-	prepare := req.Prepare && !req.ReleaseOnly && isCanonicalLeaseID(req.ID)
+	prepare := req.Prepare && !req.ReleaseOnly && IsCanonicalLeaseID(req.ID)
 	if req.ReleaseOnly {
 		// Provider cleanup must not depend on an optional guest route selection.
 		cfg.explicitSSHPort = ""
@@ -902,7 +902,7 @@ func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveReques
 			return LeaseTarget{}, err
 		}
 		if lease.ID != req.ID {
-			return LeaseTarget{}, exit(4, "coordinator returned lease %s for requested lease %s", blank(lease.ID, "<empty>"), req.ID)
+			return LeaseTarget{}, Exit(4, "coordinator returned lease %s for requested lease %s", blank(lease.ID, "<empty>"), req.ID)
 		}
 	}
 	target, err := b.coordinatorLeaseTargetForConfig(lease, cfg, coord, req.ReleaseOnly)
@@ -910,7 +910,7 @@ func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveReques
 		return LeaseTarget{}, err
 	}
 	if req.Prepare && !req.ReleaseOnly && target.providerRelease != nil {
-		return LeaseTarget{}, exit(2, "lease %s is released; start a new lease before running commands", target.LeaseID)
+		return LeaseTarget{}, Exit(2, "lease %s is released; start a new lease before running commands", target.LeaseID)
 	}
 	return target, nil
 }
@@ -950,7 +950,7 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		if err := prepareLeaseSSHTrust(&target, leaseID); err != nil {
 			return statusView{}, err
 		}
-		ready = probeSSHReady(ctx, &target, statusSSHReadinessTimeout(target))
+		ready = ProbeSSHReady(ctx, &target, statusSSHReadinessTimeout(target))
 	}
 	return statusView{
 		ID:                           lease.ID,
@@ -1052,7 +1052,7 @@ func (b *coordinatorLeaseBackend) listUserLeases(ctx context.Context) ([]Coordin
 
 func (b *coordinatorLeaseBackend) listMachines(ctx context.Context) ([]CoordinatorMachine, map[string]struct{}, error) {
 	if b.cfg.CoordAdminToken == "" {
-		return nil, nil, exit(2, "pool list requires broker.adminToken or CRABBOX_COORDINATOR_ADMIN_TOKEN when a coordinator is configured")
+		return nil, nil, Exit(2, "pool list requires broker.adminToken or CRABBOX_COORDINATOR_ADMIN_TOKEN when a coordinator is configured")
 	}
 	cfg := b.cfg
 	cfg.CoordToken = cfg.CoordAdminToken
@@ -1137,12 +1137,12 @@ func (b *coordinatorLeaseBackend) ReleaseLeaseWithOutcome(ctx context.Context, r
 
 func (b *coordinatorLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRequest, outcome *ReleaseLeaseOutcome) error {
 	if req.Lease.LeaseID == "" {
-		return exit(2, "missing coordinator lease id")
+		return Exit(2, "missing coordinator lease id")
 	}
 	if err := ValidateLeaseTargetProviderIdentity(req.Lease, req.ExpectedProviderIdentity); err != nil {
 		return err
 	}
-	claim, exists, err := readLeaseClaimWithPresence(req.Lease.LeaseID)
+	claim, exists, err := ReadLeaseClaimWithPresence(req.Lease.LeaseID)
 	if err != nil {
 		return err
 	}
@@ -1160,7 +1160,7 @@ func (b *coordinatorLeaseBackend) releaseLease(ctx context.Context, req ReleaseL
 
 func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Context, req ReleaseLeaseRequest, outcome *ReleaseLeaseOutcome) (bool, error) {
 	if req.Lease.LeaseID == "" {
-		return false, exit(2, "missing coordinator lease id")
+		return false, Exit(2, "missing coordinator lease id")
 	}
 	expectedProvider, err := b.expectedProvider()
 	if err != nil {
@@ -1275,7 +1275,7 @@ func (b *coordinatorLeaseBackend) CheckpointSourceAbsent(ctx context.Context, re
 		return false, err
 	}
 	if lease.ID != req.LeaseID || lease.Provider != req.Resource.Image.Provider || lease.CloudID != req.Capture.SourceID {
-		return false, exit(2, "coordinator checkpoint source identity changed")
+		return false, Exit(2, "coordinator checkpoint source identity changed")
 	}
 	return coordinatorProviderReleaseConfirmed(lease), nil
 }

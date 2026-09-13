@@ -146,16 +146,16 @@ func (a App) shard(ctx context.Context, args []string) error {
 	}
 	ctx = withCheckpointAdmin(ctx, *admin)
 	if fs.NArg() > 0 {
-		return exit(2, "unexpected argument %q; place the command after --", fs.Arg(0))
+		return Exit(2, "unexpected argument %q; place the command after --", fs.Arg(0))
 	}
 	if *count < 1 {
-		return exit(2, "--count must be at least 1")
+		return Exit(2, "--count must be at least 1")
 	}
 	if strings.TrimSpace(*from) == "" {
-		return exit(2, "usage: crabbox shard --count <n> --from <checkpoint-id> [flags] -- <command...>")
+		return Exit(2, "usage: crabbox shard --count <n> --from <checkpoint-id> [flags] -- <command...>")
 	}
 	if len(command) == 0 {
-		return exit(2, "usage: crabbox shard --count <n> --from <checkpoint-id> [flags] -- <command...>")
+		return Exit(2, "usage: crabbox shard --count <n> --from <checkpoint-id> [flags] -- <command...>")
 	}
 	requestedSlug, err := requestedLeaseSlug(*leaseFlags.Slug)
 	if err != nil {
@@ -174,7 +174,7 @@ func (a App) shard(ctx context.Context, args []string) error {
 		return err
 	}
 	if cfg.Shard.MaxCount > 0 && *count > cfg.Shard.MaxCount {
-		return exit(2, "--count %d exceeds shard.maxCount %d", *count, cfg.Shard.MaxCount)
+		return Exit(2, "--count %d exceeds shard.maxCount %d", *count, cfg.Shard.MaxCount)
 	}
 	nativeCheckpoint := isNativeCheckpointKind(record.Kind)
 	if nativeCheckpoint && record.TargetOS == targetMacOS && !flagWasSet(fs, "market") {
@@ -189,11 +189,11 @@ func (a App) shard(ctx context.Context, args []string) error {
 		}
 	}
 	if record.Kind != checkpointKindArchive && !nativeCheckpoint {
-		return exit(2, "checkpoint %s has kind=%s; shard requires %s or a native image checkpoint", record.ID, record.Kind, checkpointKindArchive)
+		return Exit(2, "checkpoint %s has kind=%s; shard requires %s or a native image checkpoint", record.ID, record.Kind, checkpointKindArchive)
 	}
 	if nativeCheckpoint {
 		if nativeCheckpointResourceID(record) == "" {
-			return exit(2, "checkpoint %s is pending; native provider resource is not recorded yet", record.ID)
+			return Exit(2, "checkpoint %s is pending; native provider resource is not recorded yet", record.ID)
 		}
 		if err := applyNativeCheckpointForkConfigAndFlags(&cfg, fs, record, leaseFlags.ProviderFlags); err != nil {
 			return err
@@ -213,7 +213,7 @@ func (a App) shard(ctx context.Context, args []string) error {
 	}
 	if *dryRun {
 		if !providerSelectionIsActionable(cfg) {
-			return exit(2, "%s", providerSelectionRequiredDiagnostic)
+			return Exit(2, "%s", providerSelectionRequiredDiagnostic)
 		}
 		for i := 1; i <= *count; i++ {
 			slug := checkpointForkFanoutSlug(requestedSlug, i, *count)
@@ -232,7 +232,7 @@ func (a App) shard(ctx context.Context, args []string) error {
 	}
 	sshBackend, ok := backend.(SSHLeaseBackend)
 	if !ok {
-		return exit(2, "provider=%s does not support shard: it requires an SSH lease provider that supports checkpoint fork", backend.Spec().Name)
+		return Exit(2, "provider=%s does not support shard: it requires an SSH lease provider that supports checkpoint fork", backend.Spec().Name)
 	}
 	opts := shardOptions{
 		Checkpoint:         record.ID,
@@ -313,7 +313,7 @@ func (a App) shardRun(ctx context.Context, opts shardOptions, mux *shardOutputMu
 				return
 			}
 			leaseID := lease.Lease.LeaseID
-			leaseSlug := serverSlug(lease.Lease.Server)
+			leaseSlug := ServerSlug(lease.Lease.Server)
 			if !opts.Keep {
 				defer lease.Release(context.Background())
 			}
@@ -489,7 +489,7 @@ func shardExitError(opts shardOptions, results []shardResult, merged *TestResult
 		}
 	}
 	if infraFailures > 0 {
-		return exit(7, "%d of %d shards failed to provision or run", infraFailures, opts.Count)
+		return Exit(7, "%d of %d shards failed to provision or run", infraFailures, opts.Count)
 	}
 	if commandFailures > 0 {
 		code := 1

@@ -20,10 +20,10 @@ func (a App) receipt(ctx context.Context, args []string) error {
 		*runID = fs.Arg(0)
 	}
 	if *runID == "" {
-		return exit(2, "usage: crabbox receipt <run-id>")
+		return Exit(2, "usage: crabbox receipt <run-id>")
 	}
 	if signer := strings.TrimSpace(*expectedSigner); signer != "" && !validSHA256Digest(signer) {
-		return exit(2, "--expected-signer must be a sha256 fingerprint")
+		return Exit(2, "--expected-signer must be a sha256 fingerprint")
 	}
 	coord, err := configuredCoordinator()
 	if err != nil {
@@ -34,12 +34,12 @@ func (a App) receipt(ctx context.Context, args []string) error {
 		return err
 	}
 	if run.ExitCode == nil || strings.TrimSpace(run.EndedAt) == "" {
-		return exit(4, "run %s has no committed terminal evidence", *runID)
+		return Exit(4, "run %s has no committed terminal evidence", *runID)
 	}
 	receipt, err := coord.RunReceipt(ctx, *runID)
 	if err != nil {
 		if isCoordinatorNotFoundError(err) {
-			return exit(4, "run %s has no committed terminal receipt; execution remains ambiguous", *runID)
+			return Exit(4, "run %s has no committed terminal receipt; execution remains ambiguous", *runID)
 		}
 		return err
 	}
@@ -49,11 +49,11 @@ func (a App) receipt(ctx context.Context, args []string) error {
 	}
 	startedAt, err := time.Parse(time.RFC3339Nano, run.StartedAt)
 	if err != nil {
-		return exit(2, "run %s has invalid startedAt", *runID)
+		return Exit(2, "run %s has invalid startedAt", *runID)
 	}
 	endedAt, err := time.Parse(time.RFC3339Nano, run.EndedAt)
 	if err != nil {
-		return exit(2, "run %s has invalid endedAt", *runID)
+		return Exit(2, "run %s has invalid endedAt", *runID)
 	}
 	retainedDigest := sha256Digest([]byte(logText))
 	fullDigest := retainedDigest
@@ -75,10 +75,10 @@ func (a App) receipt(ctx context.Context, args []string) error {
 		RetainedLogSHA256: retainedDigest,
 		LogTruncated:      run.LogTruncated,
 	}); err != nil {
-		return exit(1, "receipt verification failed for %s: %v", *runID, err)
+		return Exit(1, "receipt verification failed for %s: %v", *runID, err)
 	}
 	if signer := strings.TrimSpace(*expectedSigner); signer != "" && receipt.Signer != signer {
-		return exit(1, "receipt signer mismatch for %s: got %s want %s", *runID, receipt.Signer, signer)
+		return Exit(1, "receipt signer mismatch for %s: got %s want %s", *runID, receipt.Signer, signer)
 	}
 	encoder := json.NewEncoder(a.Stdout)
 	encoder.SetIndent("", "  ")

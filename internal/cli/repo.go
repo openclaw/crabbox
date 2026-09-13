@@ -767,7 +767,7 @@ func readCrabboxIgnore(root string) ([]string, error) {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, exit(2, "read .crabboxignore: %v", err)
+		return nil, Exit(2, "read .crabboxignore: %v", err)
 	}
 	lines := strings.Split(string(data), "\n")
 	patterns := make([]string, 0, len(lines))
@@ -983,7 +983,7 @@ func gitSyncFileList(root string) ([]byte, error) {
 
 func validateLocalWorkspaceSyncSource(repo Repo) error {
 	if _, err := gitSyncFileList(repo.Root); err != nil {
-		return exit(6, "build sync file list: %v", err)
+		return Exit(6, "build sync file list: %v", err)
 	}
 	return nil
 }
@@ -998,7 +998,7 @@ func validateLocalWorkspaceSyncScope(repo Repo, cfg Config) error {
 		return err
 	}
 	if _, err := validatedSyncManifestScope(repo.Root, excludes, syncIncludes(cfg)); err != nil {
-		return exit(6, "build sync file list: %v", err)
+		return Exit(6, "build sync file list: %v", err)
 	}
 	return nil
 }
@@ -1390,9 +1390,9 @@ func checkSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io
 		}
 		printSyncTopDirs(stderr, guard.Paths)
 		if reason.Metric == "files" {
-			return exit(6, "sync %s too large: %d files >= limit %d; use --force-sync-large or CRABBOX_SYNC_ALLOW_LARGE=1", guard.Scope, reason.Actual, reason.Limit)
+			return Exit(6, "sync %s too large: %d files >= limit %d; use --force-sync-large or CRABBOX_SYNC_ALLOW_LARGE=1", guard.Scope, reason.Actual, reason.Limit)
 		}
-		return exit(6, "sync %s too large: %s >= limit %s; use --force-sync-large or CRABBOX_SYNC_ALLOW_LARGE=1", guard.Scope, humanBytes(reason.Actual), humanBytes(reason.Limit))
+		return Exit(6, "sync %s too large: %s >= limit %s; use --force-sync-large or CRABBOX_SYNC_ALLOW_LARGE=1", guard.Scope, humanBytes(reason.Actual), humanBytes(reason.Limit))
 	}
 	warned := false
 	for _, reason := range guard.Reasons {

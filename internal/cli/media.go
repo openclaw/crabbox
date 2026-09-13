@@ -168,44 +168,44 @@ func (a App) mediaPreview(ctx context.Context, args []string) error {
 
 func createMediaPreview(ctx context.Context, opts mediaPreviewOptions) (mediaPreviewResult, error) {
 	if strings.TrimSpace(opts.Input) == "" {
-		return mediaPreviewResult{}, exit(2, "media preview requires --input")
+		return mediaPreviewResult{}, Exit(2, "media preview requires --input")
 	}
 	if strings.TrimSpace(opts.Output) == "" {
-		return mediaPreviewResult{}, exit(2, "media preview requires --output")
+		return mediaPreviewResult{}, Exit(2, "media preview requires --output")
 	}
 	if opts.Width <= 0 {
-		return mediaPreviewResult{}, exit(2, "media preview --width must be positive")
+		return mediaPreviewResult{}, Exit(2, "media preview --width must be positive")
 	}
 	if opts.FPS <= 0 {
-		return mediaPreviewResult{}, exit(2, "media preview --fps must be positive")
+		return mediaPreviewResult{}, Exit(2, "media preview --fps must be positive")
 	}
 	if opts.FreezeDuration <= 0 {
-		return mediaPreviewResult{}, exit(2, "media preview --freeze-duration must be positive")
+		return mediaPreviewResult{}, Exit(2, "media preview --freeze-duration must be positive")
 	}
 	if opts.MinDuration < 0 {
-		return mediaPreviewResult{}, exit(2, "media preview --min-duration must be non-negative")
+		return mediaPreviewResult{}, Exit(2, "media preview --min-duration must be non-negative")
 	}
 	gifsicleMode := strings.ToLower(strings.TrimSpace(opts.GifsicleMode))
 	if gifsicleMode == "" {
 		gifsicleMode = defaultMediaPreviewGifsicleMode
 	}
 	if gifsicleMode != "auto" && gifsicleMode != "off" && gifsicleMode != "required" {
-		return mediaPreviewResult{}, exit(2, "media preview --gifsicle must be auto, off, or required")
+		return mediaPreviewResult{}, Exit(2, "media preview --gifsicle must be auto, off, or required")
 	}
 	if opts.GifsicleLossy < 0 {
-		return mediaPreviewResult{}, exit(2, "media preview --gifsicle-lossy must be non-negative")
+		return mediaPreviewResult{}, Exit(2, "media preview --gifsicle-lossy must be non-negative")
 	}
 	if opts.GifsicleGamma <= 0 {
-		return mediaPreviewResult{}, exit(2, "media preview --gifsicle-gamma must be positive")
+		return mediaPreviewResult{}, Exit(2, "media preview --gifsicle-gamma must be positive")
 	}
 	if _, err := os.Stat(opts.Input); err != nil {
-		return mediaPreviewResult{}, exit(2, "read input video: %v", err)
+		return mediaPreviewResult{}, Exit(2, "read input video: %v", err)
 	}
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		return mediaPreviewResult{}, exit(2, "ffmpeg is required for media preview: %v", err)
+		return mediaPreviewResult{}, Exit(2, "ffmpeg is required for media preview: %v", err)
 	}
 	if _, err := exec.LookPath("ffprobe"); err != nil {
-		return mediaPreviewResult{}, exit(2, "ffprobe is required for media preview: %v", err)
+		return mediaPreviewResult{}, Exit(2, "ffprobe is required for media preview: %v", err)
 	}
 
 	duration, err := probeMediaDuration(ctx, opts.Input, opts.ChildEnvDenylist)
@@ -230,7 +230,7 @@ func createMediaPreview(ctx context.Context, opts mediaPreviewOptions) (mediaPre
 	previewDuration := intervalsDuration(segments)
 
 	if err := os.MkdirAll(filepath.Dir(opts.Output), 0o755); err != nil && filepath.Dir(opts.Output) != "." {
-		return mediaPreviewResult{}, exit(2, "create output directory: %v", err)
+		return mediaPreviewResult{}, Exit(2, "create output directory: %v", err)
 	}
 	previewInput := opts.Input
 	previewSegment := segments[0]
@@ -283,10 +283,10 @@ func createMediaPreview(ctx context.Context, opts mediaPreviewOptions) (mediaPre
 
 func createMediaContactSheet(ctx context.Context, opts mediaContactSheetOptions) (mediaContactSheetResult, error) {
 	if strings.TrimSpace(opts.Input) == "" {
-		return mediaContactSheetResult{}, exit(2, "media contact sheet requires input")
+		return mediaContactSheetResult{}, Exit(2, "media contact sheet requires input")
 	}
 	if strings.TrimSpace(opts.Output) == "" {
-		return mediaContactSheetResult{}, exit(2, "media contact sheet requires output")
+		return mediaContactSheetResult{}, Exit(2, "media contact sheet requires output")
 	}
 	if opts.Frames <= 0 {
 		opts.Frames = 5
@@ -298,13 +298,13 @@ func createMediaContactSheet(ctx context.Context, opts mediaContactSheetOptions)
 		opts.Width = 320
 	}
 	if _, err := os.Stat(opts.Input); err != nil {
-		return mediaContactSheetResult{}, exit(2, "read input video: %v", err)
+		return mediaContactSheetResult{}, Exit(2, "read input video: %v", err)
 	}
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		return mediaContactSheetResult{}, exit(2, "ffmpeg is required for media contact sheet: %v", err)
+		return mediaContactSheetResult{}, Exit(2, "ffmpeg is required for media contact sheet: %v", err)
 	}
 	if _, err := exec.LookPath("ffprobe"); err != nil {
-		return mediaContactSheetResult{}, exit(2, "ffprobe is required for media contact sheet: %v", err)
+		return mediaContactSheetResult{}, Exit(2, "ffprobe is required for media contact sheet: %v", err)
 	}
 	duration, err := probeMediaDuration(ctx, opts.Input, opts.ChildEnvDenylist)
 	if err != nil {
@@ -312,7 +312,7 @@ func createMediaContactSheet(ctx context.Context, opts mediaContactSheetOptions)
 	}
 	rows := int(math.Ceil(float64(opts.Frames) / float64(opts.Cols)))
 	if err := os.MkdirAll(filepath.Dir(opts.Output), 0o755); err != nil && filepath.Dir(opts.Output) != "." {
-		return mediaContactSheetResult{}, exit(2, "create contact sheet directory: %v", err)
+		return mediaContactSheetResult{}, Exit(2, "create contact sheet directory: %v", err)
 	}
 	if err := runMediaCommand(ctx, opts.ChildEnvDenylist, "ffmpeg", contactSheetArgs(opts.Input, opts.Output, opts.Frames, opts.Cols, rows, opts.Width, duration)...); err != nil {
 		return mediaContactSheetResult{}, err
@@ -331,11 +331,11 @@ func createMediaContactSheet(ctx context.Context, opts mediaContactSheetOptions)
 func probeMediaDuration(ctx context.Context, input string, childEnvDenylist []string) (float64, error) {
 	out, err := mediaCommandOutput(ctx, childEnvDenylist, "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", input)
 	if err != nil {
-		return 0, exit(2, "ffprobe duration failed: %v: %s", err, strings.TrimSpace(out))
+		return 0, Exit(2, "ffprobe duration failed: %v: %s", err, strings.TrimSpace(out))
 	}
 	duration, err := strconv.ParseFloat(strings.TrimSpace(out), 64)
 	if err != nil || duration <= 0 {
-		return 0, exit(2, "ffprobe returned invalid duration %q", strings.TrimSpace(out))
+		return 0, Exit(2, "ffprobe returned invalid duration %q", strings.TrimSpace(out))
 	}
 	return duration, nil
 }
@@ -344,7 +344,7 @@ func detectFreezeIntervals(ctx context.Context, input string, duration float64, 
 	filter := fmt.Sprintf("freezedetect=n=%s:d=%.3f", noise, freezeDuration.Seconds())
 	out, err := mediaCommandOutput(ctx, childEnvDenylist, "ffmpeg", "-hide_banner", "-i", input, "-vf", filter, "-an", "-f", "null", "-")
 	if err != nil {
-		return nil, exit(2, "ffmpeg freezedetect failed: %v: %s", err, tailForError(out))
+		return nil, Exit(2, "ffmpeg freezedetect failed: %v: %s", err, tailForError(out))
 	}
 	return parseFreezeIntervals(out, duration), nil
 }
@@ -390,7 +390,7 @@ func gifsicleOptimizeArgs(input, output string, lossy int, gamma float64) []stri
 func optimizeGIF(ctx context.Context, output string, lossy int, gamma float64, required bool, childEnvDenylist []string) (bool, error) {
 	if _, err := exec.LookPath("gifsicle"); err != nil {
 		if required {
-			return false, exit(2, "gifsicle is required for media preview: %v", err)
+			return false, Exit(2, "gifsicle is required for media preview: %v", err)
 		}
 		return false, nil
 	}
@@ -400,7 +400,7 @@ func optimizeGIF(ctx context.Context, output string, lossy int, gamma float64, r
 		return false, err
 	}
 	if err := os.Rename(temp, output); err != nil {
-		return false, exit(2, "replace optimized GIF: %v", err)
+		return false, Exit(2, "replace optimized GIF: %v", err)
 	}
 	return true, nil
 }
@@ -421,7 +421,7 @@ func trimmedVideoArgs(input, output string, segments []mediaInterval) []string {
 
 func createTrimmedVideo(ctx context.Context, childEnvDenylist []string, input, output string, segments []mediaInterval) error {
 	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil && filepath.Dir(output) != "." {
-		return exit(2, "create trimmed video output directory: %v", err)
+		return Exit(2, "create trimmed video output directory: %v", err)
 	}
 	return runMediaCommand(ctx, childEnvDenylist, "ffmpeg", trimmedVideoArgs(input, output, segments)...)
 }
@@ -489,7 +489,7 @@ func segmentedVideoFilter(segments []mediaInterval, outputFilter string) string 
 func runMediaCommand(ctx context.Context, childEnvDenylist []string, name string, args ...string) error {
 	out, err := mediaCommandOutput(ctx, childEnvDenylist, name, args...)
 	if err != nil {
-		return exit(2, "%s failed: %v: %s", name, err, tailForError(out))
+		return Exit(2, "%s failed: %v: %s", name, err, tailForError(out))
 	}
 	return nil
 }

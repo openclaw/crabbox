@@ -88,7 +88,7 @@ func TestCoordinatorPrepareResolveRecovery(t *testing.T) {
 				if !isCoordinatorProviderIdentityError(err) {
 					t.Fatalf("error=%v", err)
 				}
-			case tc.wrongID && tc.prepare && isCanonicalLeaseID(tc.id):
+			case tc.wrongID && tc.prepare && IsCanonicalLeaseID(tc.id):
 				if ExitCodeForError(err, 0) != 4 || lease.LeaseID != "" {
 					t.Fatalf("mismatched lease adopted: lease=%s error=%v", lease.LeaseID, err)
 				}

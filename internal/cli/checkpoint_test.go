@@ -400,7 +400,7 @@ func TestCheckpointRestoreDryRunUsesStoredLeaseTarget(t *testing.T) {
 		"windows_mode": windowsModeNormal,
 		"work_root":    `C:\crabbox`,
 	}}
-	if err := claimLeaseTargetForRepoConfig(leaseID, "windows-dryrun", cfg, server, SSHTarget{}, repo, time.Minute, false); err != nil {
+	if err := ClaimLeaseTargetForRepoConfig(leaseID, "windows-dryrun", cfg, server, SSHTarget{}, repo, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1147,7 +1147,7 @@ func TestCheckpointForkFailedFixedLeaseReplayPreservesAdoptedLease(t *testing.T)
 	if backend.creates != 1 || backend.releaseCount != 0 {
 		t.Fatalf("fixed lease creates=%d releases=%d, want 1/0", backend.creates, backend.releaseCount)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || !exists {
+	if _, exists, err := ReadLeaseClaimWithPresence(leaseID); err != nil || !exists {
 		t.Fatalf("adopted fixed lease claim exists=%t err=%v", exists, err)
 	}
 	if len(results) != 1 || results[0].LeaseID != leaseID || results[0].CheckpointID != record.ID {
@@ -1690,7 +1690,7 @@ func TestCheckpointForkMetadataWriteFailureReleasesProvisionedLease(t *testing.T
 		t.Fatalf("metadata write failure releases=%d, want 1", releases)
 	}
 	snapshot, exists, set := ServerLeaseClaimSnapshot(backend.releaseLease.Server)
-	current, claimErr := readLeaseClaim(backend.releaseLease.LeaseID)
+	current, claimErr := ReadLeaseClaim(backend.releaseLease.LeaseID)
 	if claimErr != nil || !set || !exists || !reflect.DeepEqual(snapshot, current) {
 		t.Fatalf("rollback snapshot=%#v current=%#v exists=%t set=%t err=%v", snapshot, current, exists, set, claimErr)
 	}
@@ -2784,7 +2784,7 @@ func (b *checkpointFixedForkBackend) Acquire(_ context.Context, req AcquireReque
 	}
 	cloudID, exists := b.leases[leaseID]
 	if exists && b.checkpoints[leaseID] != req.RequestedCheckpointID {
-		return LeaseTarget{}, exit(4, "lease_id_conflict: lease %s is bound to checkpoint %s, not checkpoint %s", leaseID, b.checkpoints[leaseID], req.RequestedCheckpointID)
+		return LeaseTarget{}, Exit(4, "lease_id_conflict: lease %s is bound to checkpoint %s, not checkpoint %s", leaseID, b.checkpoints[leaseID], req.RequestedCheckpointID)
 	}
 	if !exists {
 		b.creates++

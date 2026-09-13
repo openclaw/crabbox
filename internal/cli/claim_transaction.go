@@ -80,7 +80,7 @@ func transactLeaseClaim(leaseID string, tx leaseClaimTransaction) (leaseClaim, e
 	}
 	if tx.directory != claimDirectoryExisting {
 		if err := makePrivateClaimDirectories(filepath.Dir(path)); err != nil {
-			return leaseClaim{}, exit(2, "create claim directory: %v", err)
+			return leaseClaim{}, Exit(2, "create claim directory: %v", err)
 		}
 	}
 	var updated leaseClaim

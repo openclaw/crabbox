@@ -36,7 +36,7 @@ func TestPauseResumeCommandsRouteOrdinaryClaims(t *testing.T) {
 	t.Run("claim provider without ambient config", func(t *testing.T) {
 		clearConfigEnv(t)
 		t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
-		if err := claimLeaseForRepoProvider("isb_1335_pause", "Pause Claimed", "islo", "/repo", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider("isb_1335_pause", "Pause Claimed", "islo", "/repo", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 		var stderr bytes.Buffer
@@ -51,7 +51,7 @@ func TestPauseResumeCommandsRouteOrdinaryClaims(t *testing.T) {
 	t.Run("explicit provider wins", func(t *testing.T) {
 		clearConfigEnv(t)
 		t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
-		if err := claimLeaseForRepoProvider("isb_1335_resume", "Resume Claimed", "e2b", "/repo", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider("isb_1335_resume", "Resume Claimed", "e2b", "/repo", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 		var stderr bytes.Buffer

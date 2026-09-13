@@ -163,7 +163,7 @@ func TestTailscaleExitNodeEgressCheckFailsClosed(t *testing.T) {
 }
 
 func TestRenderTailscaleHostname(t *testing.T) {
-	got := renderTailscaleHostname("CBX-{slug}-{provider}-{id}", "cbx_abcdef123456", "Blue Lobster", "aws")
+	got := RenderTailscaleHostname("CBX-{slug}-{provider}-{id}", "cbx_abcdef123456", "Blue Lobster", "aws")
 	if got != "cbx-blue-lobster-aws-cbx-abcdef123456" {
 		t.Fatalf("renderTailscaleHostname=%q", got)
 	}

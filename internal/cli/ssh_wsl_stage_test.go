@@ -2458,7 +2458,7 @@ func TestWSLStagePowerShellDefaultShellPreservesNativeStreamsAndExit(t *testing.
 	}
 	// A real child inherits the OS streams, as wsl.exe does in the Windows owner.
 	child := `[Console]::OpenStandardOutput().Write([byte[]](65,0,255,13,10),0,5);[Console]::OpenStandardError().Write([byte[]](66,0,254,10),0,4);exit 23`
-	childArgs := strings.TrimPrefix(powershellCommand(child), "powershell.exe ")
+	childArgs := strings.TrimPrefix(PowershellCommand(child), "powershell.exe ")
 	script := `$p=[Diagnostics.ProcessStartInfo]::new(` + psQuote(powerShell) + `);$p.UseShellExecute=$false;$p.Arguments=` + psQuote(childArgs) + `;$c=[Diagnostics.Process]::Start($p);$c.WaitForExit();exit $c.ExitCode`
 	command := wslStagePowerShellCommand(script, wslStagePowerShell)
 	var stdout, stderr bytes.Buffer

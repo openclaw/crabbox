@@ -135,7 +135,7 @@ func TestFailureBundleWindowsPreservesUnwritablePrivateDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err := crabboxStateDir()
+	state, err := CrabboxStateDir()
 	if err != nil {
 		t.Fatal(err)
 	}

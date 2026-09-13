@@ -36,10 +36,10 @@ func MaterializeDelegatedRunDownloads(ctx context.Context, backend DelegatedRunD
 			MaxBytes:   DelegatedRunDownloadMaxBytes,
 		})
 		if err != nil {
-			return nil, exit(7, "delegated artifact %s: %v", remote, err)
+			return nil, Exit(7, "delegated artifact %s: %v", remote, err)
 		}
 		if len(data) > DelegatedRunDownloadMaxBytes {
-			return nil, exit(7, "delegated artifact %s exceeds %d bytes", remote, DelegatedRunDownloadMaxBytes)
+			return nil, Exit(7, "delegated artifact %s exceeds %d bytes", remote, DelegatedRunDownloadMaxBytes)
 		}
 		cache[remote] = data
 		return data, nil
@@ -66,7 +66,7 @@ func MaterializeDelegatedRunDownloads(ctx context.Context, backend DelegatedRunD
 			return nil, err
 		}
 		if err := writeRunDownloadFile(spec.Local, data); err != nil {
-			return nil, exit(2, "download %s: write %s: %v", spec.Remote, spec.Local, err)
+			return nil, Exit(2, "download %s: write %s: %v", spec.Remote, spec.Local, err)
 		}
 		fmt.Fprintf(stderr, "downloaded %s bytes=%d\n", spec.Local, len(data))
 		artifacts = append(artifacts, RunArtifact{
@@ -112,7 +112,7 @@ func validateDelegatedRunFilePath(flag, remote string) error {
 func normalizeDelegatedRunFilePath(flag, remote string) (string, error) {
 	remote = strings.TrimSpace(remote)
 	if remote == "" {
-		return "", exit(2, "%s requires a non-empty remote path", flag)
+		return "", Exit(2, "%s requires a non-empty remote path", flag)
 	}
 	remote = path.Clean(remote)
 	protected := false
@@ -127,7 +127,7 @@ func normalizeDelegatedRunFilePath(flag, remote string) (string, error) {
 		strings.ContainsAny(remote, "*?:\\") ||
 		strings.HasPrefix(remote, "/") ||
 		protected {
-		return "", exit(2, "%s for delegated providers requires a safe relative file path: %s", flag, remote)
+		return "", Exit(2, "%s for delegated providers requires a safe relative file path: %s", flag, remote)
 	}
 	return remote, nil
 }

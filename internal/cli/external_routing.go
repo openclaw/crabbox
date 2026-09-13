@@ -75,7 +75,7 @@ func SetExternalRoutingArchitecture(cfg *ExternalConfig, architecture string) {
 	if cfg != nil {
 		architecture = strings.ToLower(strings.TrimSpace(architecture))
 		if architecture != "" {
-			if normalized, err := normalizeArchitecture(architecture); err == nil {
+			if normalized, err := NormalizeArchitecture(architecture); err == nil {
 				architecture = normalized
 			}
 		}
@@ -85,7 +85,7 @@ func SetExternalRoutingArchitecture(cfg *ExternalConfig, architecture string) {
 
 func ExternalRoutingArchitecture(cfg ExternalConfig) string {
 	architecture := strings.ToLower(strings.TrimSpace(cfg.routingArchitecture))
-	if normalized, err := normalizeArchitecture(architecture); architecture != "" && err == nil {
+	if normalized, err := NormalizeArchitecture(architecture); architecture != "" && err == nil {
 		return normalized
 	}
 	return architecture
@@ -356,10 +356,10 @@ func removeExternalRoutingIfUnchangedWithSync(leaseID string, expected ExternalC
 			// deterministic deletion tombstone before a prior remove failed.
 			// Always let the platform file operation finish that recovery.
 			if removeErr := removeControllerFile(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-				return exit(2, "remove external routing tombstone for lease %s: %v", leaseID, removeErr)
+				return Exit(2, "remove external routing tombstone for lease %s: %v", leaseID, removeErr)
 			}
 			if syncErr := syncDirectory(filepath.Dir(path)); syncErr != nil && !errors.Is(syncErr, os.ErrNotExist) {
-				return exit(2, "sync confirmed-absent external routing directory %s: %v", filepath.Dir(path), syncErr)
+				return Exit(2, "sync confirmed-absent external routing directory %s: %v", filepath.Dir(path), syncErr)
 			}
 			return nil
 		}
@@ -375,19 +375,19 @@ func removeExternalRoutingIfUnchangedWithSync(leaseID string, expected ExternalC
 			return fmt.Errorf("encode expected external routing state: %w", err)
 		}
 		if !bytes.Equal(actualData, expectedData) {
-			return exit(4, "external routing state changed for lease %s; refusing local cleanup", leaseID)
+			return Exit(4, "external routing state changed for lease %s; refusing local cleanup", leaseID)
 		}
 		if expected.routingGeneration != actual.routingGeneration {
-			return exit(4, "external routing generation changed for lease %s; refusing local cleanup", leaseID)
+			return Exit(4, "external routing generation changed for lease %s; refusing local cleanup", leaseID)
 		}
 		if expected.routingDigest != "" && actual.routingDigest != expected.routingDigest {
-			return exit(4, "external routing generation changed for lease %s; refusing local cleanup", leaseID)
+			return Exit(4, "external routing generation changed for lease %s; refusing local cleanup", leaseID)
 		}
 		if err := removeControllerFile(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return exit(2, "remove external routing state for lease %s: %v", leaseID, err)
+			return Exit(2, "remove external routing state for lease %s: %v", leaseID, err)
 		}
 		if err := syncDirectory(filepath.Dir(path)); err != nil {
-			return exit(2, "sync removed external routing directory %s: %v", filepath.Dir(path), err)
+			return Exit(2, "sync removed external routing directory %s: %v", filepath.Dir(path), err)
 		}
 		return nil
 	})

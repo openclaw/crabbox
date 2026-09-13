@@ -36,14 +36,14 @@ func TestCheckpointCaptureBindingSurvivesReopenAndRejectsReplacedGeneration(t *t
 		t.Run(mutation, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			const leaseID = "cbx_abcdef123456"
-			err := withDurableLeaseClaimLock(leaseID, func(claim *leaseClaim, _ bool, persist func() error) error {
+			err := WithDurableLeaseClaimLock(leaseID, func(claim *leaseClaim, _ bool, persist func() error) error {
 				*claim = leaseClaim{LeaseID: leaseID, Provider: "machine0", CloudID: "fixture-source", ProviderScope: "fixture-scope", RepoRoot: "/fixture-repo", ClaimedAt: "2026-08-01T00:00:00Z"}
 				return persist()
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
-			original, err := readLeaseClaim(leaseID)
+			original, err := ReadLeaseClaim(leaseID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -119,13 +119,13 @@ func TestCheckpointCaptureBindingSurvivesReopenAndRejectsReplacedGeneration(t *t
 func TestCheckpointReservationFencesPreviouslyAuthorizedTouch(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const leaseID = "cbx_abcdef123456"
-	if err := withDurableLeaseClaimLock(leaseID, func(claim *leaseClaim, _ bool, persist func() error) error {
+	if err := WithDurableLeaseClaimLock(leaseID, func(claim *leaseClaim, _ bool, persist func() error) error {
 		*claim = leaseClaim{LeaseID: leaseID, Provider: "machine0", CloudID: "fixture-source", ProviderScope: "fixture-scope", RepoRoot: "/fixture-repo", ClaimedAt: "2026-08-01T00:00:00Z"}
 		return persist()
 	}); err != nil {
 		t.Fatal(err)
 	}
-	original, err := readLeaseClaim(leaseID)
+	original, err := ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,10 +146,10 @@ func TestCheckpointReservationFencesPreviouslyAuthorizedTouch(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := updateLeaseClaimTouchIfUnchanged(t.Context(), leaseID, original, map[string]string{"state": "ready"}, time.Now(), nil); err == nil {
+	if _, err := UpdateLeaseClaimTouchIfUnchanged(t.Context(), leaseID, original, map[string]string{"state": "ready"}, time.Now(), nil); err == nil {
 		t.Fatal("previously authorized touch rewrote the reserved source claim")
 	}
-	current, err := readLeaseClaim(leaseID)
+	current, err := ReadLeaseClaim(leaseID)
 	if err != nil || !reflect.DeepEqual(current, original) {
 		t.Fatalf("rejected touch changed source ownership: current=%+v err=%v", current, err)
 	}

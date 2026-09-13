@@ -1625,7 +1625,7 @@ func assertGitOverlaySnapshotFingerprint(t *testing.T, repo Repo, cfg Config, ex
 }
 
 func TestFinalizeGitOverlaySnapshotCleanupPreservesPrimaryFailure(t *testing.T) {
-	primary := exit(17, "primary transfer failure")
+	primary := Exit(17, "primary transfer failure")
 	cleanupErr := errors.New("cleanup failure")
 	var runErr error = primary
 	var runFailure error = primary
@@ -1715,7 +1715,7 @@ func TestTerminalGitOverlaySnapshotCleanupClosesHandlesAndPreservesPrimaryFailur
 	}
 	root := snapshot.Root
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	primary := exit(17, "primary transfer failure")
+	primary := Exit(17, "primary transfer failure")
 	cleanupFailure := errors.New("cleanup exhausted")
 	var runErr error = primary
 	var runFailure error = primary

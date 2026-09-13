@@ -409,7 +409,7 @@ func TestCoordinatorReleaseRemovesOnlyPerLeaseConnectionArtifacts(t *testing.T) 
 	if err := os.WriteFile(sharedKey, []byte("shared"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseTargetForConfig(leaseID, "release-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
+	if err := ClaimLeaseTargetForConfig(leaseID, "release-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	var releasePosts, observations atomic.Int32
@@ -448,7 +448,7 @@ func TestCoordinatorReleaseRemovesOnlyPerLeaseConnectionArtifacts(t *testing.T) 
 	if err := removeStoredTestboxConnectionArtifacts(context.Background(), leaseID); err != nil {
 		t.Fatalf("idempotent cleanup: %v", err)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+	if _, exists, err := ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
 		t.Fatalf("claim exists=%t err=%v, want removed after final cleanup", exists, err)
 	}
 	if posts, observed := releasePosts.Load(), observations.Load(); posts != 1 || observed != 2 {
@@ -479,7 +479,7 @@ func TestCoordinatorReleaseObservesPendingCreation(t *testing.T) {
 			if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := claimLeaseTargetForConfig(leaseID, "release-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
+			if err := ClaimLeaseTargetForConfig(leaseID, "release-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
 				t.Fatal(err)
 			}
 			var releasePosts, observations atomic.Int32
@@ -497,7 +497,7 @@ func TestCoordinatorReleaseObservesPendingCreation(t *testing.T) {
 					if _, err := os.Stat(keyPath); err != nil {
 						t.Errorf("SSH artifacts removed before terminal observation: %v", err)
 					}
-					if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || !exists {
+					if _, exists, err := ReadLeaseClaimWithPresence(leaseID); err != nil || !exists {
 						t.Errorf("claim removed before terminal observation: exists=%t err=%v", exists, err)
 					}
 					lease["cloudID"] = "i-late-allocation"
@@ -542,7 +542,7 @@ func TestCoordinatorReleaseObservesPendingCreation(t *testing.T) {
 			if cleanupFails && statErr != nil || !cleanupFails && !errors.Is(statErr, os.ErrNotExist) {
 				t.Fatalf("artifact state does not match confirmed cleanup: %v", statErr)
 			}
-			if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists != cleanupFails {
+			if _, exists, err := ReadLeaseClaimWithPresence(leaseID); err != nil || exists != cleanupFails {
 				t.Fatalf("claim exists=%t err=%v cleanupFails=%t", exists, err, cleanupFails)
 			}
 		})
@@ -595,7 +595,7 @@ func TestCoordinatorReleasePreservesArtifactsWithoutConfirmedDestroy(t *testing.
 			if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := claimLeaseTargetForConfig(leaseID, "release-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
+			if err := ClaimLeaseTargetForConfig(leaseID, "release-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
 				t.Fatal(err)
 			}
 			var releasePosts, observations atomic.Int32
@@ -648,7 +648,7 @@ func TestCoordinatorReleasePreservesArtifactsWithoutConfirmedDestroy(t *testing.
 			if !tc.wantRemoved && statErr != nil {
 				t.Fatalf("lease artifacts removed after unconfirmed/retained release: %v", statErr)
 			}
-			_, claimExists, claimErr := readLeaseClaimWithPresence(leaseID)
+			_, claimExists, claimErr := ReadLeaseClaimWithPresence(leaseID)
 			if claimErr != nil || claimExists != tc.wantClaim {
 				t.Fatalf("claim exists=%t err=%v want=%t", claimExists, claimErr, tc.wantClaim)
 			}
@@ -680,7 +680,7 @@ func TestCoordinatorReleaseCancellationDuringObservationPreservesLocalState(t *t
 	if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseTargetForConfig(leaseID, "release-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
+	if err := ClaimLeaseTargetForConfig(leaseID, "release-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -713,7 +713,7 @@ func TestCoordinatorReleaseCancellationDuringObservationPreservesLocalState(t *t
 	if _, err := os.Stat(keyPath); err != nil {
 		t.Fatalf("artifacts removed after canceled observation: %v", err)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || !exists {
+	if _, exists, err := ReadLeaseClaimWithPresence(leaseID); err != nil || !exists {
 		t.Fatalf("claim exists=%t err=%v, want retained", exists, err)
 	}
 }
@@ -732,7 +732,7 @@ func TestCoordinatorReleaseObservationProviderMismatchFailsClosed(t *testing.T) 
 	if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseTargetForConfig(leaseID, "release-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
+	if err := ClaimLeaseTargetForConfig(leaseID, "release-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	var releasePosts, observations atomic.Int32
@@ -760,7 +760,7 @@ func TestCoordinatorReleaseObservationProviderMismatchFailsClosed(t *testing.T) 
 	if _, err := os.Stat(keyPath); err != nil {
 		t.Fatalf("artifacts removed after observation mismatch: %v", err)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || !exists {
+	if _, exists, err := ReadLeaseClaimWithPresence(leaseID); err != nil || !exists {
 		t.Fatalf("claim exists=%t err=%v, want retained", exists, err)
 	}
 }
@@ -779,7 +779,7 @@ func TestCoordinatorReleasePreservesRemoteOutcomeWhenLocalArtifactCleanupFails(t
 	if err := os.Symlink(outside, filepath.Dir(keyPath)); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	if err := claimLeaseTargetForConfig(leaseID, "release-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
+	if err := ClaimLeaseTargetForConfig(leaseID, "release-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	var releasePosts atomic.Int32
@@ -810,7 +810,7 @@ func TestCoordinatorReleasePreservesRemoteOutcomeWhenLocalArtifactCleanupFails(t
 	if info, err := os.Lstat(filepath.Dir(keyPath)); err != nil || info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("unsafe path was followed or removed: info=%v err=%v", info, err)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || !exists {
+	if _, exists, err := ReadLeaseClaimWithPresence(leaseID); err != nil || !exists {
 		t.Fatalf("claim exists=%t err=%v, want retained for local cleanup retry", exists, err)
 	}
 	if err := os.Remove(filepath.Dir(keyPath)); err != nil {
@@ -829,7 +829,7 @@ func TestCoordinatorReleasePreservesRemoteOutcomeWhenLocalArtifactCleanupFails(t
 	if releasePosts.Load() != 1 {
 		t.Fatalf("local cleanup retry repeated provider release: requests=%d", releasePosts.Load())
 	}
-	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+	if _, exists, err := ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
 		t.Fatalf("local cleanup retry left claim: exists=%t err=%v", exists, err)
 	}
 }

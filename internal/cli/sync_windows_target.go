@@ -11,7 +11,7 @@ import (
 
 func syncWindowsNative(ctx context.Context, target SSHTarget, repo Repo, cfg Config, coherence gitCoherencePlan, workdir string, manifest SyncManifest, stdout, stderr anyWriter, opts rsyncOptions) error {
 	if err := runSSHQuiet(ctx, target, windowsPrepareWorkdir(workdir, cfg.Sync.Delete)); err != nil {
-		return exit(7, "prepare remote workdir: %v", err)
+		return Exit(7, "prepare remote workdir: %v", err)
 	}
 	if coherence.seedEnabled() {
 		if out, err := runSSHCombinedOutputLimit(ctx, target, windowsGitSeed(workdir, coherence), gitSeedDiagnosticLimit); err != nil {
@@ -23,7 +23,7 @@ func syncWindowsNative(ctx context.Context, target SSHTarget, repo Repo, cfg Con
 		manifestData := manifest.NUL()
 		manifestInput := fmt.Sprintf("%d\n", len(manifestData)) + string(manifestData) + string(manifest.DeletedNUL())
 		if err := runSSHInputQuiet(ctx, target, windowsPruneSeededSyncManifest(workdir), manifestInput); err != nil {
-			return exit(6, "prune seeded Windows sync paths: %v", err)
+			return Exit(6, "prune seeded Windows sync paths: %v", err)
 		}
 	}
 	archive, err := CreateSyncArchive(ctx, repo, manifest, "crabbox-windows-sync-*.tgz")
@@ -42,14 +42,14 @@ func syncWindowsNative(ctx context.Context, target SSHTarget, repo Repo, cfg Con
 	err = runSSHInput(ctx, target, windowsExtractArchive(workdir), archive, stdout, stderr)
 	stopHeartbeat()
 	if ctx.Err() == context.DeadlineExceeded {
-		return exit(6, "archive sync timed out after %s", opts.Timeout)
+		return Exit(6, "archive sync timed out after %s", opts.Timeout)
 	}
 	if err != nil {
-		return exit(6, "archive sync failed: %v", err)
+		return Exit(6, "archive sync failed: %v", err)
 	}
 	if coherence.enabled() {
 		if err := runSSHQuiet(ctx, target, windowsGitCoherence(workdir, coherence)); err != nil {
-			return exit(6, "align remote Git metadata: %v", err)
+			return Exit(6, "align remote Git metadata: %v", err)
 		}
 	}
 	return nil
@@ -68,14 +68,14 @@ if (Test-Path -LiteralPath $workdir) {
 }
 `
 	}
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 $workdir = ` + psQuote(workdir) + `
 New-Item -ItemType Directory -Force -Path $workdir | Out-Null
 ` + deleteScript)
 }
 
 func windowsExtractArchive(workdir string) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 $workdir = ` + psQuote(workdir) + `
 New-Item -ItemType Directory -Force -Path $workdir | Out-Null
 tar -xzf - -C $workdir
@@ -115,9 +115,9 @@ function Test-CrabboxSameDirectory([string]$Left, [string]$Right) {
 
 func windowsGitSeed(workdir string, plan gitCoherencePlan) string {
 	if !plan.seedEnabled() {
-		return powershellCommand(`exit 0`)
+		return PowershellCommand(`exit 0`)
 	}
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 Write-Output 'crabbox-git-seed phase=prerequisite'
 Get-Command git -ErrorAction Stop | Out-Null
 Write-Output 'crabbox-git-seed phase=prepare'
@@ -204,9 +204,9 @@ try {
 
 func windowsGitCoherence(workdir string, plan gitCoherencePlan) string {
 	if !plan.enabled() {
-		return powershellCommand(`exit 0`)
+		return PowershellCommand(`exit 0`)
 	}
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 $workdir = ` + psQuote(workdir) + `; Set-Location -LiteralPath $workdir
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) { exit 0 }
 ` + windowsGitRootIdentityScript() + `
@@ -310,7 +310,7 @@ try {
 }
 
 func windowsPruneSeededSyncManifest(workdir string) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 $workdir = ` + psQuote(workdir) + `
 if (-not (Test-Path -LiteralPath (Join-Path $workdir ".git"))) { exit 0 }
 Set-Location -LiteralPath $workdir
@@ -382,7 +382,7 @@ func windowsRemoteCommandWithEnvFiles(workdir string, env map[string]string, env
 		}
 		b.WriteString("\nexit $LASTEXITCODE\n")
 	}
-	return powershellCommand(b.String())
+	return PowershellCommand(b.String())
 }
 
 func windowsRemoteShellCommandWithEnvFile(workdir string, env map[string]string, envFile, script string) string {
@@ -395,7 +395,7 @@ func windowsRemoteShellCommandWithEnvFiles(workdir string, env map[string]string
 	b.WriteString(script)
 	b.WriteString("\nif (-not $?) { exit 1 }\n")
 	b.WriteString("if ($null -ne $global:LASTEXITCODE) { exit $global:LASTEXITCODE }\n")
-	return powershellCommand(b.String())
+	return PowershellCommand(b.String())
 }
 
 func writeWindowsRemotePrefix(b *bytes.Buffer, workdir string, env map[string]string, envFiles []string) {
@@ -452,11 +452,11 @@ if (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TOOL_CACHE)) {
 }
 
 func windowsRemoteMkdir(workdir string) string {
-	return powershellCommand(`New-Item -ItemType Directory -Force -Path ` + psQuote(workdir) + ` | Out-Null`)
+	return PowershellCommand(`New-Item -ItemType Directory -Force -Path ` + psQuote(workdir) + ` | Out-Null`)
 }
 
 func windowsRemoteResetWorkdir(workdir string) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 $workdir = ` + psQuote(workdir) + `
 if (Test-Path -LiteralPath $workdir) {
   Remove-Item -LiteralPath $workdir -Recurse -Force
@@ -480,11 +480,11 @@ $rh=[Cbx.N]::CreateFile($pwd.Path,0,([IO.FileShare]::ReadWrite -bor [IO.FileShar
 		b.WriteString(psQuote(path))
 	}
 	b.WriteString(`)|ForEach-Object{$f=$_;$s=$null;try{if([IO.Path]::IsPathRooted($f)){$o=$f}else{$o=Join-Path $pwd.Path $f};$s=[IO.File]::Open($o,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete));$p=FinalPath $s.SafeFileHandle;if($p.StartsWith($q,[StringComparison]::Ordinal)){$z=New-Object IO.StreamReader($s,[Text.Encoding]::UTF8,$true,4096,$true);try{$v=$z.ReadToEnd()}finally{$z.Dispose()};Write-Output "` + resultFileMarker + `${f}";Write-Output $v}}catch{}finally{if($s){$s.Dispose()}}}`)
-	return powershellCommand(b.String())
+	return PowershellCommand(b.String())
 }
 
 func windowsRemoteTouchResultsMarker(workdir string) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 Set-Location -LiteralPath ` + psQuote(workdir) + `
 ` + windowsResolveResultsMarker() + `
 $markerDir = Split-Path -Parent $marker
@@ -560,7 +560,7 @@ func windowsRemoteFindJUnitResultFiles(workdir, marker string) string {
 	b.WriteString(`  }` + "\n")
 	b.WriteString(`  if ($count -ge $maxFiles) { break }` + "\n")
 	b.WriteString(`}` + "\n")
-	return powershellCommand(b.String())
+	return PowershellCommand(b.String())
 }
 
 func windowsResolveResultsMarker() string {
@@ -572,7 +572,7 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
 }
 
 func windowsRemoteDoctor() string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 Write-Output ("git=" + (git --version))
 Write-Output ("tar=" + ((tar --version | Select-Object -First 1) -join ""))
 Write-Output ("powershell=" + $PSVersionTable.PSVersion.ToString())
@@ -580,5 +580,5 @@ Write-Output ("powershell=" + $PSVersionTable.PSVersion.ToString())
 }
 
 func windowsRemoteCacheUnsupported() string {
-	return powershellCommand(`Write-Output "cache		native Windows cache commands are not supported"`)
+	return PowershellCommand(`Write-Output "cache		native Windows cache commands are not supported"`)
 }

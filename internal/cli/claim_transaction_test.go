@@ -22,22 +22,22 @@ func claimContractOperations() []claimContractOperation {
 	server := Server{Provider: "aws", CloudID: "i-contract"}
 	return []claimContractOperation{
 		{"endpoint after", true, func(id string, expected leaseClaim, action func() error) (leaseClaim, error) {
-			return updateLeaseClaimEndpointIfUnchangedAfter(id, expected, server, SSHTarget{}, action)
+			return UpdateLeaseClaimEndpointIfUnchangedAfter(id, expected, server, SSHTarget{}, action)
 		}},
 		{"endpoint action", true, func(id string, expected leaseClaim, action func() error) (leaseClaim, error) {
-			updated, _, _, err := updateLeaseClaimEndpointIfUnchangedAction(id, expected, func() (Server, SSHTarget, bool, error) {
+			updated, _, _, err := UpdateLeaseClaimEndpointIfUnchangedAction(id, expected, func() (Server, SSHTarget, bool, error) {
 				return server, SSHTarget{}, true, action()
 			})
 			return updated, err
 		}},
 		{"labels after", false, func(id string, expected leaseClaim, action func() error) (leaseClaim, error) {
-			return updateLeaseClaimLabelsIfUnchangedAfter(id, expected, map[string]string{"state": "ready"}, action)
+			return UpdateLeaseClaimLabelsIfUnchangedAfter(id, expected, map[string]string{"state": "ready"}, action)
 		}},
 		{"durable repo after", true, func(id string, expected leaseClaim, action func() error) (leaseClaim, error) {
-			return claimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(id, "contract", Config{Provider: "aws"}, "", server, SSHTarget{}, "/repo", time.Minute, false, expected, true, action)
+			return ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(id, "contract", Config{Provider: "aws"}, "", server, SSHTarget{}, "/repo", time.Minute, false, expected, true, action)
 		}},
 		{"durable replacement after", false, func(id string, expected leaseClaim, action func() error) (leaseClaim, error) {
-			return replaceLeaseClaimIfUnchangedDurableAfter(id, expected, expected, action)
+			return ReplaceLeaseClaimIfUnchangedDurableAfter(id, expected, expected, action)
 		}},
 	}
 }
@@ -46,10 +46,10 @@ func seedClaimContract(t *testing.T) leaseClaim {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const id = "cbx_transaction_contract"
-	if err := claimLeaseForRepoProvider(id, "contract", "aws", "/repo", time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProvider(id, "contract", "aws", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	claim, err := readLeaseClaim(id)
+	claim, err := ReadLeaseClaim(id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,17 +225,17 @@ func TestClaimTransactionContractEndpointPreparationOrder(t *testing.T) {
 			var err error
 			switch mode {
 			case "update":
-				_, err = updateLeaseClaimEndpointIfUnchanged(expected.LeaseID, expected, server, SSHTarget{})
+				_, err = UpdateLeaseClaimEndpointIfUnchanged(expected.LeaseID, expected, server, SSHTarget{})
 			case "metadata":
-				_, err = updateLeaseClaimEndpointIfUnchangedWithProviderMetadata(expected.LeaseID, expected, server, SSHTarget{})
+				_, err = UpdateLeaseClaimEndpointIfUnchangedWithProviderMetadata(expected.LeaseID, expected, server, SSHTarget{})
 			case "replace metadata":
-				_, err = replaceLeaseClaimEndpointIfUnchangedWithProviderMetadata(expected.LeaseID, expected, server, SSHTarget{})
+				_, err = ReplaceLeaseClaimEndpointIfUnchangedWithProviderMetadata(expected.LeaseID, expected, server, SSHTarget{})
 			case "after":
-				_, err = updateLeaseClaimEndpointIfUnchangedAfter(expected.LeaseID, expected, server, SSHTarget{}, action)
+				_, err = UpdateLeaseClaimEndpointIfUnchangedAfter(expected.LeaseID, expected, server, SSHTarget{}, action)
 			case "action":
-				_, _, _, err = updateLeaseClaimEndpointIfUnchangedAction(expected.LeaseID, expected, func() (Server, SSHTarget, bool, error) { return server, SSHTarget{}, true, action() })
+				_, _, _, err = UpdateLeaseClaimEndpointIfUnchangedAction(expected.LeaseID, expected, func() (Server, SSHTarget, bool, error) { return server, SSHTarget{}, true, action() })
 			case "repo after":
-				_, err = claimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(expected.LeaseID, "contract", Config{Provider: "aws"}, "", server, SSHTarget{}, "/another-repo", time.Minute, false, expected, true, action)
+				_, err = ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(expected.LeaseID, "contract", Config{Provider: "aws"}, "", server, SSHTarget{}, "/another-repo", time.Minute, false, expected, true, action)
 			}
 			if !errors.Is(err, prepareErr) {
 				t.Fatalf("err=%v", err)
@@ -343,9 +343,9 @@ func TestClaimTransactionContractNoopActions(t *testing.T) {
 		for _, outcome := range []string{"nil", "no update", "canceled", "same endpoint"} {
 			t.Run(map[bool]string{false: "update", true: "replace"}[replace]+"/"+outcome, func(t *testing.T) {
 				expected := seedClaimContract(t)
-				run := updateLeaseClaimEndpointIfUnchangedAction
+				run := UpdateLeaseClaimEndpointIfUnchangedAction
 				if replace {
-					run = replaceLeaseClaimEndpointIfUnchangedAction
+					run = ReplaceLeaseClaimEndpointIfUnchangedAction
 				}
 				calls := 0
 				var action func() (Server, SSHTarget, bool, error)
@@ -404,13 +404,13 @@ func TestClaimTransactionContractEndpointReplacement(t *testing.T) {
 				var updated leaseClaim
 				switch mode {
 				case "metadata update":
-					updated, err = updateLeaseClaimEndpointIfUnchangedWithProviderMetadata(expected.LeaseID, expected, server, target)
+					updated, err = UpdateLeaseClaimEndpointIfUnchangedWithProviderMetadata(expected.LeaseID, expected, server, target)
 				case "metadata replace":
-					updated, err = replaceLeaseClaimEndpointIfUnchangedWithProviderMetadata(expected.LeaseID, expected, server, target)
+					updated, err = ReplaceLeaseClaimEndpointIfUnchangedWithProviderMetadata(expected.LeaseID, expected, server, target)
 				case "action replace":
-					updated, _, _, err = replaceLeaseClaimEndpointIfUnchangedAction(expected.LeaseID, expected, func() (Server, SSHTarget, bool, error) { return server, target, true, nil })
+					updated, _, _, err = ReplaceLeaseClaimEndpointIfUnchangedAction(expected.LeaseID, expected, func() (Server, SSHTarget, bool, error) { return server, target, true, nil })
 				case "repo replace":
-					updated, err = claimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(expected.LeaseID, expected.Slug, Config{Provider: "aws"}, "", server, target, "/repo", time.Minute, false, expected, true)
+					updated, err = ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(expected.LeaseID, expected.Slug, Config{Provider: "aws"}, "", server, target, "/repo", time.Minute, false, expected, true)
 				}
 				if err != nil {
 					t.Fatal(err)
@@ -457,7 +457,7 @@ func TestClaimTransactionContractMissingClaimDoesNotPrepareEndpoint(t *testing.T
 	t.Cleanup(func() { providerRegistry["aws"] = original })
 	providerRegistry["aws"] = claimContractProvider{Provider: original, prepare: func(leaseClaim, bool) error { t.Fatal("new claim passed to existing endpoint policy"); return nil }}
 	calls := 0
-	updated, err := claimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter("cbx_new_contract", "new", Config{Provider: "aws"}, "account:one", Server{Provider: "aws"}, SSHTarget{}, "/repo", time.Minute, false, leaseClaim{}, false, func() error { calls++; return nil })
+	updated, err := ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter("cbx_new_contract", "new", Config{Provider: "aws"}, "account:one", Server{Provider: "aws"}, SSHTarget{}, "/repo", time.Minute, false, leaseClaim{}, false, func() error { calls++; return nil })
 	if err != nil || calls != 1 || updated.Revision == "" {
 		t.Fatalf("calls=%d updated=%#v err=%v", calls, updated, err)
 	}
@@ -484,7 +484,7 @@ func TestClaimTransactionContractAtomicWriteDoesNotFollowSymlink(t *testing.T) {
 	if err := os.Symlink(target, path); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
-	updated, err := updateLeaseClaimLabelsIfUnchangedAfter(expected.LeaseID, expected, map[string]string{"state": "ready"}, nil)
+	updated, err := UpdateLeaseClaimLabelsIfUnchangedAfter(expected.LeaseID, expected, map[string]string{"state": "ready"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -546,9 +546,9 @@ func TestClaimTransactionContractIncompleteLabels(t *testing.T) {
 			labels := map[string]string{"state": "failed"}
 			var updated leaseClaim
 			if after {
-				updated, err = updateLeaseClaimLabelsIfUnchangedAfter(seed.LeaseID, leaseClaim{}, labels, nil)
+				updated, err = UpdateLeaseClaimLabelsIfUnchangedAfter(seed.LeaseID, leaseClaim{}, labels, nil)
 			} else {
-				updated, err = updateLeaseClaimLabelsIfUnchanged(seed.LeaseID, leaseClaim{}, labels)
+				updated, err = UpdateLeaseClaimLabelsIfUnchanged(seed.LeaseID, leaseClaim{}, labels)
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -579,7 +579,7 @@ func TestClaimTransactionContractEmptyIDAndRepo(t *testing.T) {
 	t.Run("empty repo does not run action", func(t *testing.T) {
 		expected := seedClaimContract(t)
 		calls := 0
-		updated, err := claimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(expected.LeaseID, expected.Slug, Config{Provider: "aws"}, "", Server{}, SSHTarget{}, "", time.Minute, false, expected, true, func() error { calls++; return nil })
+		updated, err := ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(expected.LeaseID, expected.Slug, Config{Provider: "aws"}, "", Server{}, SSHTarget{}, "", time.Minute, false, expected, true, func() error { calls++; return nil })
 		if err != nil || calls != 0 || !reflect.DeepEqual(updated, leaseClaim{}) {
 			t.Fatalf("calls=%d updated=%#v err=%v", calls, updated, err)
 		}
