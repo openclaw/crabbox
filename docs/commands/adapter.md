@@ -561,7 +561,8 @@ also installs `/usr/local/bin/crabbox-start-desktop`, the reset helper used by
 WebVNC to restart the matching XFCE and TigerVNC units. TigerVNC accepts
 client-requested desktop resizing; `CRABBOX_DESKTOP_GEOMETRY` sets the initial
 width, height, and depth. An explicit 8-bit depth retains the fixed-size
-Xvfb/x11vnc backend; 16/24/32-bit depths use TigerVNC. The bootstrap installs
+Xvfb/x11vnc backend with an 8-bit TrueColor default visual so XFCE clients render;
+16/24/32-bit depths use TigerVNC. The bootstrap installs
 `sudo` and a mode-`0440` sudoers rule granting only the desktop user passwordless
 execution of that root-owned helper; it does not grant general sudo access. It
 installs no proprietary browser. External provider lifecycle configuration can

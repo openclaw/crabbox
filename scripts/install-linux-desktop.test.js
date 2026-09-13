@@ -52,12 +52,13 @@ test("public Linux desktop selects the matching server for every supported geome
 		assert.equal(result.status, 0, result.stderr);
 		assert.match(result.stdout, /After=crabbox-xvfb.service\nRequires=crabbox-xvfb.service/);
 		if (depth === 8) {
-			assert.match(result.stdout, /Xvfb :99 -screen 0 1280x720x8 -nolisten tcp -ac/);
+			assert.match(result.stdout, /Xvfb :99 -cc 4 -screen 0 1280x720x8 -nolisten tcp -ac/);
 			assert.match(result.stdout, /x11vnc -display :99 -localhost -rfbport 5900 -forever -shared -passwdfile \/var\/lib\/crabbox\/vnc.password/);
 			assert.doesNotMatch(result.stdout, /Xtigervnc/);
 			assert.match(result.stdout, /SYSTEMCTL restart crabbox-xvfb.service crabbox-desktop.service crabbox-x11vnc.service/);
 		} else {
 			assert.match(result.stdout, new RegExp(`Xtigervnc :99 -geometry 1280x720 -depth ${depth} `));
+			assert.doesNotMatch(result.stdout, /-cc 4/);
 			assert.doesNotMatch(result.stdout, /ExecStart=\/usr\/bin\/x11vnc|ExecStart=\/usr\/bin\/Xvfb/);
 			assert.match(result.stdout, /SYSTEMCTL restart crabbox-xvfb.service crabbox-desktop.service\n/);
 		}

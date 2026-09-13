@@ -66,11 +66,11 @@ The installer keeps `CRABBOX_DESKTOP_GEOMETRY=1920x1080x24` as its initial size
 and depth, not a permanent size limit. Depths 16, 24, and 32 use TigerVNC.
 The 8-bit input still selects the fixed-size Xvfb/x11vnc backend because
 TigerVNC cannot start at depth 8; the installer never silently changes the
-requested depth. With the tested Ubuntu packages, both the released v0.57.0
-installer and the current backend produce a black desktop at depth 8.
-This pre-existing rendering limitation is tracked in
+requested depth. The installer selects an 8-bit TrueColor default visual so
+XFCE clients render instead of leaving blank client areas with Xvfb's default
+PseudoColor visual, as reported in
 [issue 2218](https://github.com/openclaw/crabbox/issues/2218).
-Use the default 24-bit geometry for a working, resize-capable desktop.
+Use the default 24-bit geometry when a resize-capable desktop is needed.
 
 The `wayland` and `gnome` profiles need a resize-capable WayVNC and a headless
 compositor output. Actual Ubuntu 26.04 packages include WayVNC 0.9.1; Ubuntu

@@ -198,7 +198,8 @@ install_services() {
 	local services
 	read -r -a services <<< "$(desktop_services)"
 	if [[ "$depth" == 8 ]]; then
-		display_command="/usr/bin/Xvfb $display -screen 0 $geometry -nolisten tcp -ac"
+		# GTK clients need a TrueColor default visual, even at depth 8.
+		display_command="/usr/bin/Xvfb $display -cc 4 -screen 0 $geometry -nolisten tcp -ac"
 	fi
 	write_managed_file /etc/systemd/system/crabbox-xvfb.service 0644 root root <<EOF
 [Unit]
