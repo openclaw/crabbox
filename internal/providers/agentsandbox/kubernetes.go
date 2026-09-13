@@ -602,8 +602,8 @@ func podStateFromObject(object kubernetesObject) podState {
 	state := podState{
 		Name:            object.Metadata.Name,
 		UID:             object.Metadata.UID,
-		Labels:          cloneStringMap(object.Metadata.Labels),
-		Annotations:     cloneStringMap(object.Metadata.Annotations),
+		Labels:          shared.CloneLabels(object.Metadata.Labels),
+		Annotations:     shared.CloneLabels(object.Metadata.Annotations),
 		OwnerReferences: append([]ownerReference(nil), object.Metadata.OwnerReferences...),
 		Phase:           object.Status.Phase,
 		PodIP:           object.Status.PodIP,

@@ -233,7 +233,7 @@ func (b *backend) bindValidatedCreatedClaim(expected core.LeaseClaim, item codes
 	name := strings.TrimSpace(item.Name)
 	displayName := strings.TrimSpace(expected.Labels[labelDisplayName])
 	repo := shared.FirstNonBlankTrimmed(strings.TrimSpace(item.Repository.FullName), strings.TrimSpace(expected.Labels[labelRepository]))
-	labels := cloneLabels(expected.Labels)
+	labels := shared.CloneLabels(expected.Labels)
 	delete(labels, labelRecovery)
 	labels[labelCodespaceName] = name
 	labels[labelCodespaceID] = strconv.FormatInt(item.ID, 10)

@@ -434,13 +434,13 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 		if expired, reason := sandboxClaimExpired(claim, liveClaim, core.ClockNow(b.rt.Clock).UTC()); expired {
 			view := baseView
 			view.State = "expired"
-			view.Labels = cloneStringMap(baseView.Labels)
+			view.Labels = shared.CloneLabels(baseView.Labels)
 			view.Labels["reason"] = reason
 			return view, nil
 		}
 		ready, readyErr := sandboxReadinessOnce(pollCtx, client, b.cfg.AgentSandbox.Namespace, claimName, identity)
 		view := baseView
-		view.Labels = cloneStringMap(baseView.Labels)
+		view.Labels = shared.CloneLabels(baseView.Labels)
 		if readyErr == nil {
 			view.State = statusViewReady
 			view.Ready = true
@@ -925,7 +925,7 @@ func (b *backend) claimIdentityForLiveClaim(claim core.LeaseClaim, live *kuberne
 	if !persist {
 		return claim, identity, nil
 	}
-	labels := cloneStringMap(claim.Labels)
+	labels := shared.CloneLabels(claim.Labels)
 	labels[claimLabelClaimUID] = uid
 	labels[claimLabelClaimUIDPending] = "false"
 	updated, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)

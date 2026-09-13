@@ -3,6 +3,7 @@ package unikraftcloud
 import (
 	"context"
 	"errors"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"net/http"
 	"reflect"
 	"strings"
@@ -74,7 +75,7 @@ func TestReconcileReadyClaimWriteRejectsChangedRecoveryIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	changed := ready
-	changed.Labels = cloneLabels(ready.Labels)
+	changed.Labels = shared.CloneLabels(ready.Labels)
 	changed.Labels[ukcLabelRequestHash] = strings.Repeat("0", 64)
 	if err := core.ReplaceLeaseClaimIfUnchanged(ready.LeaseID, ready, changed); err != nil {
 		t.Fatal(err)
@@ -185,7 +186,7 @@ func TestCreateStateTransitionDoesNotReconcileGuardConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	concurrent := preflight
-	concurrent.Labels = cloneLabels(preflight.Labels)
+	concurrent.Labels = shared.CloneLabels(preflight.Labels)
 	concurrent.Labels["state"] = ukcStateCreateIntent
 	concurrent, err = replaceLeaseClaimIfUnchangedDurable(leaseID, preflight, concurrent)
 	if err != nil {

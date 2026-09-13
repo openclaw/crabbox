@@ -96,7 +96,7 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		if err == nil || committed || strings.TrimSpace(created.ID) == "" {
 			return
 		}
-		recoveryLabels := cloneStringMap(labels)
+		recoveryLabels := shared.CloneLabels(labels)
 		if req.Keep {
 			recoveryLabels["recovery"] = "kept-after-failure"
 			retainKey = true
@@ -281,7 +281,7 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	labels := liveServer.Labels
 	if req.IdleTimeout > 0 {
 		cfg.IdleTimeout = req.IdleTimeout
-		labels = cloneStringMap(labels)
+		labels = shared.CloneLabels(labels)
 		delete(labels, "idle_timeout")
 		delete(labels, "idle_timeout_secs")
 	}
@@ -475,14 +475,6 @@ func nebiusServerType(cfg core.Config) string {
 		return strings.TrimSpace(cfg.ServerType)
 	}
 	return strings.TrimSpace(cfg.Nebius.Preset)
-}
-
-func cloneStringMap(in map[string]string) map[string]string {
-	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
 }
 
 var _ core.SSHLeaseBackend = (*backend)(nil)

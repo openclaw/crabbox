@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"io"
 	"net/http"
 	"os"
@@ -136,7 +137,7 @@ func (f *fakeHetznerSnapshotClient) CreateServerSnapshot(_ context.Context, serv
 	f.events = append(f.events, "create-snapshot")
 	f.createServerID = serverID
 	f.createDescription = description
-	f.createLabels = cloneMetadata(labels)
+	f.createLabels = shared.CloneLabels(labels)
 	return f.created, f.createErr
 }
 
@@ -594,7 +595,7 @@ func TestHetznerCheckpointForkConfigPreservesImageLocationArchitectureAndOverrid
 		t.Fatalf("err=%v, want architecture refusal", err)
 	}
 	badSource := record
-	badSource.Metadata = cloneMetadata(record.Metadata)
+	badSource.Metadata = shared.CloneLabels(record.Metadata)
 	badSource.Metadata[checkpointMetadataSourceType] = "backup"
 	if err := (Provider{}).ApplyNativeCheckpointForkConfig(core.NativeCheckpointForkRequest{Config: &core.Config{}, Record: badSource}); err == nil {
 		t.Fatal("expected source type refusal")
