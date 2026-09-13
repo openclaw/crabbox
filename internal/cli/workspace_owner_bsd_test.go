@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +15,477 @@ import (
 	"testing"
 	"time"
 )
+
+// The outer provider transport records dispatch, while the functional operation
+// runs the real local supervisor and completion controls with inert workers.
+// This covers CLI continuation, not SSH or Python installation readiness.
+func TestRunFunctionalPreflightContinuation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires the POSIX supervisor fixture")
+	}
+	for _, tc := range []struct {
+		name, state                                                                                         string
+		code, workloadCode                                                                                  int
+		cancelCause                                                                                         error
+		timeout, canceled, lostAck, lostRetire, cleanedError, lateCancel, ownerStoredFailure, ownerDeadline bool
+	}{
+		{name: "ready", state: "ready"},
+		{name: "workload failure", state: "ready", workloadCode: 7},
+		{name: "success with late cancellation", state: "ready", lateCancel: true},
+		{name: "workload failure with late cancellation", state: "ready", workloadCode: 7, lateCancel: true},
+		{name: "missing", state: "missing-python3", code: 20},
+		{name: "venv", state: "venv-unavailable", code: 21},
+		{name: "pip", state: "pip-unavailable", code: 22},
+		{name: "worker", state: "worker-failed", code: 23},
+		{name: "timeout", state: "timed-out", code: 74, timeout: true},
+		{name: "canceled", state: "canceled", canceled: true},
+		{name: "stored owner failure", state: "unavailable", ownerStoredFailure: true},
+		{name: "stored owner timeout", state: "unavailable", ownerStoredFailure: true, ownerDeadline: true},
+		{name: "caller deadline", state: "canceled", canceled: true, cancelCause: context.DeadlineExceeded},
+		{name: "named caller cancellation", state: "canceled", canceled: true, cancelCause: fmt.Errorf("interrupt signal received: %w", context.Canceled)},
+		{name: "operational cancellation cause", state: "unavailable", canceled: true, cancelCause: &workspaceOwnerSetupError{phase: "renew", cause: errors.New("workspace ownership lost")}},
+		{name: "primary operational cause", state: "unavailable", canceled: true, cancelCause: runClassificationTestError{err: fmt.Errorf("workspace ownership lost: %w", context.Canceled), cause: errors.New("workspace ownership lost")}},
+		{name: "unconfirmed acknowledgement", state: "unavailable", lostAck: true},
+		{name: "unconfirmed retirement", state: "unavailable", code: 21, lostRetire: true},
+		{name: "cleaned operational error", state: "unavailable", code: 21, cleanedError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			t.Chdir(dir)
+			logPath := installRecordingSSH(t, dir)
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			if tc.workloadCode != 0 {
+				sshPath := filepath.Join(dir, "ssh")
+				script, err := os.ReadFile(sshPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				script = bytes.Replace(script, []byte("case \"$match\" in"), []byte("case \"$match\" in\n  *cbx-after-functional*) exit "+strconv.Itoa(tc.workloadCode)+" ;;"), 1)
+				if err := os.WriteFile(sshPath, script, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			oldRun, oldControl := runOwnedFunctionalPreflight, runFunctionalPreflightControl
+			t.Cleanup(func() { runOwnedFunctionalPreflight, runFunctionalPreflightControl = oldRun, oldControl })
+			controlFailure := errors.New("synthetic owned control transport unavailable")
+			var ownerFailure error = Exit(7, "remote workspace owner renewal failed closed: synthetic stored failure")
+			if tc.ownerDeadline {
+				ownerFailure = errors.Join(ownerFailure, fmt.Errorf("ownership operation: %w", context.DeadlineExceeded))
+			}
+			calls := 0
+			var operationStage string
+			var operationDone <-chan struct{}
+			runOwnedFunctionalPreflight = func(probeCtx context.Context, target SSHTarget, _ string, _ map[string]string, _ []string) (functionalPreflightCompletion, error) {
+				calls++
+				nonce, err := randomHex(16)
+				if err != nil {
+					t.Fatal(err)
+				}
+				stage := "/tmp/crabbox-command-" + nonce
+				operationStage = stage
+				if _, err := os.Lstat(stage); !os.IsNotExist(err) {
+					t.Fatal("fixture stage already exists")
+				}
+				worker := "printf started >" + shellQuote(filepath.Join(stage, "scratch", "started")) + " || exit 75\n"
+				budget := 10 * time.Second
+				if tc.timeout || tc.canceled || tc.lostAck || tc.ownerStoredFailure {
+					worker += "mkfifo " + shellQuote(filepath.Join(stage, "scratch", "wait")) + "\nexec 7<>" + shellQuote(filepath.Join(stage, "scratch", "wait")) + "\ntrap 'exit 0' TERM\nwhile :; do read -r -t 1 -u 7 ignored || :; done\n"
+					if tc.timeout {
+						budget = time.Second
+					}
+				} else {
+					worker += "exit " + strconv.Itoa(tc.code) + "\n"
+				}
+				helper := functionalPOSIXPreflightHelper(budget)
+				remoteCtx, remoteCancel := context.WithTimeout(t.Context(), 25*time.Second)
+				cmd := exec.CommandContext(remoteCtx, "/bin/bash", "-c", helper, "sh", "run", stage, nonce, strconv.Itoa(len(worker)), "0", "15000", "100")
+				cmd.Env = []string{"HOME=" + dir, "PATH=/usr/bin:/bin", "CBX_HELPER=" + helper}
+				cmd.Stdin = strings.NewReader(worker)
+				cmd.WaitDelay = 5 * time.Second
+				output := newSynchronizedBuffer(16 << 10)
+				cmd.Stdout, cmd.Stderr = &output, &output
+				if err := cmd.Start(); err != nil {
+					remoteCancel()
+					t.Fatal(err)
+				}
+				done := make(chan struct{})
+				operationDone = done
+				var runErr error
+				go func() { runErr = cmd.Wait(); close(done) }()
+				localControl := func(controlCtx context.Context, _ SSHTarget, gotNonce, action string) ([]byte, error) {
+					text, err := functionalPreflightControlCommand(gotNonce, action)
+					if err != nil {
+						return nil, err
+					}
+					control := exec.CommandContext(controlCtx, "/bin/bash", "-c", text)
+					control.Env = []string{"HOME=" + dir, "PATH=/usr/bin:/bin"}
+					return control.Output()
+				}
+				t.Cleanup(func() {
+					defer remoteCancel()
+					cleanupCtx, stop := context.WithTimeout(context.Background(), 30*time.Second)
+					defer stop()
+					if _, err := os.Lstat(stage); err == nil {
+						record, err := localControl(cleanupCtx, target, nonce, "cancel")
+						if err != nil {
+							t.Errorf("owned stage retained %s: %v %s", stage, err, output.String())
+							return
+						}
+						if _, err := parseFunctionalPreflightCompletion(record, nonce); err != nil {
+							t.Error(err)
+							return
+						}
+						if _, err := localControl(cleanupCtx, target, nonce, "retire"); err != nil {
+							t.Error(err)
+							return
+						}
+					}
+					select {
+					case <-done:
+					case <-cleanupCtx.Done():
+						t.Error("owned supervisor reaping unconfirmed")
+					}
+				})
+				runFunctionalPreflightControl = func(controlCtx context.Context, target SSHTarget, nonce, action string) ([]byte, error) {
+					if tc.lostAck || tc.lostRetire && action == "retire" {
+						return nil, controlFailure
+					}
+					return localControl(controlCtx, target, nonce, action)
+				}
+				cleanupCtx, stop := functionalPreflightCleanupBudget(probeCtx)
+				defer stop()
+				if tc.canceled || tc.lostAck || tc.ownerStoredFailure {
+					limit := time.Now().Add(5 * time.Second)
+					for {
+						if _, err := os.Stat(filepath.Join(stage, "scratch", "started")); err == nil {
+							break
+						}
+						if time.Now().After(limit) {
+							t.Fatal("worker did not start")
+						}
+						time.Sleep(10 * time.Millisecond)
+					}
+					if tc.ownerStoredFailure || tc.canceled {
+						owner := workspaceOwnerFromContext(probeCtx)
+						if owner == nil || owner.Err() != nil {
+							t.Fatal("fixture requires a healthy acquired workspace owner")
+						}
+						if tc.ownerStoredFailure {
+							// Model the existing stored error + plain cancellation without
+							// changing a remote owner or invoking its renewal transport.
+							owner.mu.Lock()
+							owner.renewErr = ownerFailure
+							owner.mu.Unlock()
+							owner.cancel()
+							if context.Cause(probeCtx) != context.Canceled || ctx.Err() != nil {
+								t.Fatal("owner failure must cancel only its plain child context")
+							}
+						} else {
+							cancel(tc.cancelCause)
+						}
+					} else {
+						return finishFunctionalPreflight(probeCtx, cleanupCtx, target, nonce, controlFailure)
+					}
+					return finishFunctionalPreflight(probeCtx, cleanupCtx, target, nonce, context.Cause(probeCtx))
+				}
+				<-done
+				if tc.cleanedError {
+					runErr = errors.Join(runErr, controlFailure)
+				}
+				return finishFunctionalPreflight(probeCtx, cleanupCtx, target, nonce, runErr)
+			}
+			var stdout, stderr bytes.Buffer
+			timingPath := filepath.Join(dir, "timing.jsonl")
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommandWithBenchmarkRecord(ctx, []string{"--record-local", "--timing-record", timingPath, "--provider", "ssh", "--static-host", "127.0.0.1", "--static-user", "runner", "--static-work-root", filepath.Join(dir, "remote"), "--no-sync", "--preflight", "--preflight-tools", "python3-venv,python3-venv", "--", "printf", "cbx-after-functional"}, benchmarkRecordContext{OnRecord: func() {
+				if tc.lateCancel {
+					cancel(nil)
+				}
+			}})
+			blocked := tc.canceled || tc.lostAck || tc.lostRetire || tc.cleanedError || tc.ownerStoredFailure
+			if (err != nil) != (blocked || tc.workloadCode != 0) || calls != 1 {
+				t.Fatalf("calls=%d err=%v stderr=%s", calls, err, stderr.String())
+			}
+			if tc.canceled {
+				cause := tc.cancelCause
+				if cause == nil {
+					cause = context.Canceled
+				}
+				if !errors.Is(err, cause) {
+					t.Fatalf("cancellation cause lost: %v", err)
+				}
+				if code := ExitCodeForError(err, 1); code != 1 {
+					t.Fatalf("CLI cancellation exit policy changed: %d", code)
+				}
+			}
+			if tc.ownerStoredFailure {
+				if !errors.Is(err, ownerFailure) || ExitCodeForError(err, 1) != 7 {
+					t.Fatalf("stored owner failure or its exit policy lost: %v", err)
+				}
+				wantStatus, wantKind := RunStatusFailed, RunErrorProvider
+				if tc.ownerDeadline {
+					wantStatus, wantKind = RunStatusTimedOut, RunErrorTimeout
+				}
+				if !errors.Is(err, context.Canceled) || RunStatusForResult(RunResult{}, err) != wantStatus || RunErrorKindForResult(RunResult{}, err) != wantKind {
+					t.Errorf("cleanup joins changed the primary owner classification: %v", err)
+				}
+			}
+			if (tc.lostAck || tc.lostRetire || tc.cleanedError) && !errors.Is(err, controlFailure) {
+				t.Fatalf("control cause lost: %v", err)
+			}
+			wantStatus, wantKind, wantCode := RunStatusSucceeded, RunErrorNone, tc.workloadCode
+			if tc.workloadCode != 0 {
+				wantStatus, wantKind = RunStatusFailed, RunErrorCommandExit
+			}
+			if blocked {
+				wantStatus, wantKind, wantCode = RunStatusFailed, RunErrorProvider, 7
+				if tc.ownerDeadline || tc.canceled && tc.cancelCause == context.DeadlineExceeded {
+					wantStatus, wantKind = RunStatusTimedOut, RunErrorTimeout
+				} else if tc.canceled && tc.state == "canceled" {
+					wantStatus, wantKind = RunStatusCanceled, RunErrorCanceled
+				}
+			}
+			records, readErr := readBenchmarkTimingRecords(timingPath)
+			if readErr != nil || len(records) != 1 {
+				t.Fatalf("timing records=%+v err=%v", records, readErr)
+			}
+			report := records[0].Timing
+			if report.RunStatus != wantStatus || report.ErrorKind != wantKind || report.ExitCode != wantCode || (blocked && report.CommandMs != 0) {
+				t.Errorf("saved timing=%+v want=%s/%s/%d", report, wantStatus, wantKind, wantCode)
+			}
+			local, _, _, readErr := readLocalHistory(report.RunID)
+			if readErr != nil || local.RunStatus != wantStatus || local.ErrorKind != wantKind || local.ExitCode == nil || *local.ExitCode != wantCode || (blocked && local.CommandMs != 0) {
+				t.Errorf("local observation=%+v err=%v want=%s/%s/%d", local, readErr, wantStatus, wantKind, wantCode)
+			}
+			if err != nil && !strings.Contains(local.Diagnostic, err.Error()) {
+				t.Errorf("local observation lost cause: %q, want %v", local.Diagnostic, err)
+			}
+			if tc.lostAck {
+				select {
+				case <-operationDone:
+					t.Fatal("unconfirmed-ack fixture did not retain the active worker")
+				default:
+				}
+				if _, err := os.Stat(filepath.Join(operationStage, "scratch", "started")); err != nil {
+					t.Fatal(err)
+				}
+			} else if tc.lostRetire {
+				if _, err := os.Stat(filepath.Join(operationStage, ".completion")); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Lstat(filepath.Join(operationStage, "scratch")); !os.IsNotExist(err) {
+					t.Fatal("completed worker scratch remains")
+				}
+			} else if _, err := os.Lstat(operationStage); !os.IsNotExist(err) {
+				t.Fatalf("production control did not retire stage before continuation: %v", err)
+			}
+			log, readErr := os.ReadFile(logPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if strings.Contains(string(log), "cbx-after-functional") == blocked {
+				t.Fatalf("workload dispatch blocked=%t: %s", blocked, log)
+			}
+			cleanup := "confirmed"
+			if tc.lostAck || tc.lostRetire {
+				cleanup = "unconfirmed"
+			}
+			want := "remote preflight python3-venv=" + tc.state + " cleanup=" + cleanup
+			if strings.Count(stderr.String(), "remote preflight python3-venv=") != 1 || !strings.Contains(stderr.String(), want) {
+				t.Fatalf("diagnostic wanted %q: %s", want, stderr.String())
+			}
+		})
+	}
+}
+
+func TestFunctionalPreflightOwnerErrorPreservesPrimaryExit(t *testing.T) {
+	ownerErr := Exit(7, "synthetic stored owner failure")
+	for _, code := range []int{0, 23} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			owner := &workspaceOwner{renewErr: ownerErr}
+			var original error = context.Cause(ctx)
+			wantCode := 7
+			if code != 0 {
+				original = errors.Join(Exit(code, "synthetic preflight transport failure"), original)
+				wantCode = code
+			}
+			got := functionalPreflightWithOwnerError(contextWithWorkspaceOwner(ctx, owner), original)
+			got = errors.Join(got, context.DeadlineExceeded)
+			if ExitCodeForError(got, 1) != wantCode {
+				t.Errorf("original public exit code changed: got=%d want=%d", ExitCodeForError(got, 1), wantCode)
+			}
+			if !errors.Is(got, original) || !errors.Is(got, ownerErr) || !errors.Is(got, context.DeadlineExceeded) {
+				t.Fatalf("original, owner, or cleanup error lost: %v", got)
+			}
+			if RunStatusForResult(RunResult{}, got) != RunStatusFailed || RunErrorKindForResult(RunResult{}, got) != RunErrorProvider {
+				t.Fatalf("cleanup join displaced ownership classification: %v", got)
+			}
+		})
+	}
+}
+
+func TestFunctionalPreflightCallerCancellationKeepsOwnerHealthy(t *testing.T) {
+	for _, duringRenewal := range []bool{false, true} {
+		t.Run(fmt.Sprintf("during_renewal=%t", duringRenewal), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			calls := 0
+			owner := &workspaceOwner{
+				ctx: ctx, cancel: cancel, stop: make(chan struct{}), done: make(chan struct{}),
+				transport: workspaceOwnerTransportFunc(func(renewCtx context.Context, req workspaceOwnerRemoteRequest) (string, error) {
+					calls++
+					cancel()
+					if req.Action != workspaceOwnerRenew || renewCtx.Err() != nil {
+						t.Fatal("caller cancellation reached the independent renewal transport")
+					}
+					return "RENEWED", nil
+				}),
+			}
+			ticks := make(chan time.Time, 1)
+			wantCalls := 0
+			if duringRenewal {
+				ticks <- time.Now()
+				wantCalls = 1
+			} else {
+				cancel()
+			}
+			owner.renewLoopWithTicks(ticks, time.Second)
+			if calls != wantCalls || owner.Err() != nil || context.Cause(ctx) != context.Canceled {
+				t.Fatalf("caller stop became owner failure: calls=%d error=%v cause=%v", calls, owner.Err(), context.Cause(ctx))
+			}
+		})
+	}
+}
+
+func TestFunctionalPOSIXPreflightOwner(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX supervisor requires a POSIX host")
+	}
+	for _, tc := range []struct {
+		name, state     string
+		code            int
+		cancel, timeout bool
+	}{
+		{name: "ready", state: "ready"},
+		{name: "capability unavailable", state: "venv-unavailable", code: 21},
+		{name: "worker failed", state: "worker-failed", code: 23},
+		{name: "caller cancellation", state: "canceled", cancel: true},
+		{name: "worker deadline", state: "timed-out", code: 74, timeout: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			waitFile := func(path string, limit time.Duration) {
+				t.Helper()
+				deadline := time.Now().Add(limit)
+				for {
+					if _, err := os.Stat(path); err == nil {
+						return
+					} else if !os.IsNotExist(err) {
+						t.Fatal(err)
+					}
+					if time.Now().After(deadline) {
+						t.Fatalf("owned fixture did not publish %s", path)
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+			root, err := os.MkdirTemp("", "cbx-functional-owner-test-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			directory := filepath.Join(root, "owned")
+			nonce := strings.Repeat("a", 32)
+			tools := filepath.Join(root, "tools")
+			if err := os.Mkdir(tools, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"bash", "ps", "mkdir", "head", "wc", "cat", "mkfifo", "mv", "rm", "sleep"} {
+				path := filepath.Join("/bin", name)
+				if _, err := os.Stat(path); err != nil {
+					path = filepath.Join("/usr/bin", name)
+				}
+				if err := os.Symlink(path, filepath.Join(tools, name)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			command := "test -d " + shellQuote(filepath.Join(directory, "scratch")) + " || exit 75\nprintf marker >" + shellQuote(filepath.Join(directory, "scratch", "marker")) + " || exit 75\n"
+			budget := 10 * time.Second
+			if tc.cancel || tc.timeout {
+				command += "mkfifo " + shellQuote(filepath.Join(directory, "scratch", "wait")) + "\nexec 7<>" + shellQuote(filepath.Join(directory, "scratch", "wait")) + "\ntrap 'exit 0' TERM\nwhile :; do read -r -t 1 -u 7 ignored || :; done\n"
+				if tc.timeout {
+					budget = time.Second
+				}
+			} else {
+				command += "sleep .2\nexit " + strconv.Itoa(tc.code) + "\n"
+			}
+			helper := functionalPOSIXPreflightHelper(budget)
+			ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "/bin/bash", "-c", helper, "sh", "run", directory, nonce, strconv.Itoa(len(command)), "0", "15000", "100")
+			cmd.Env = []string{"PATH=" + tools, "HOME=" + root, "CBX_HELPER=" + helper}
+			cmd.Stdin = strings.NewReader(command)
+			var out synchronizedBuffer = newSynchronizedBuffer(16 << 10)
+			cmd.Stdout, cmd.Stderr = &out, &out
+			cmd.WaitDelay = 5 * time.Second
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan struct{})
+			var processErr error
+			go func() { processErr = cmd.Wait(); close(done) }()
+			t.Cleanup(func() {
+				if data, _ := os.ReadFile(filepath.Join(directory, ".nonce")); string(data) == nonce {
+					_ = os.WriteFile(filepath.Join(directory, ".cancel"), nil, 0o600)
+				}
+				select {
+				case <-done:
+				case <-time.After(20 * time.Second):
+					t.Errorf("owned supervisor unconfirmed; retained %s", root)
+					return
+				}
+				record, _ := os.ReadFile(filepath.Join(directory, ".completion"))
+				if _, err := parseFunctionalPreflightCompletion(record, nonce); err != nil {
+					t.Errorf("owned stage cleanup unconfirmed; retained %s: %s", root, out.String())
+					return
+				}
+				if err := os.RemoveAll(root); err != nil {
+					t.Error(err)
+				}
+			})
+			if tc.cancel {
+				waitFile(filepath.Join(directory, "scratch", "marker"), 20*time.Second)
+				// Match caller transport cancellation, then issue only the
+				// registered stage's ordinary cancellation control.
+				cancel()
+				if err := os.WriteFile(filepath.Join(directory, ".cancel"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			select {
+			case <-done:
+			case <-time.After(25 * time.Second):
+				t.Fatal("supervisor did not return")
+			}
+			if !tc.cancel && exitCode(processErr) != tc.code {
+				t.Fatalf("exit=%v: %s", processErr, out.String())
+			}
+			waitFile(filepath.Join(directory, ".completion"), 10*time.Second)
+			record, err := os.ReadFile(filepath.Join(directory, ".completion"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := parseFunctionalPreflightCompletion(record, nonce)
+			if err != nil || got.State != tc.state || !got.WorkerQuiesced || !got.ScratchRemoved {
+				t.Fatalf("completion=%+v error=%v: %s", got, err, out.String())
+			}
+			if _, err := os.Lstat(filepath.Join(directory, "scratch")); !os.IsNotExist(err) {
+				t.Fatalf("scratch remains: %v", err)
+			}
+		})
+	}
+}
 
 // Stock BSD tools only: no flock, lockf, GNU stat/date, or /proc helpers.
 func workspaceOwnerBSDPath(t *testing.T) string {

@@ -568,8 +568,8 @@ stays on the remote workdir until you delete it or reset the lease. See
 ## Preflight
 
 `--preflight` prints a target-specific capability snapshot after sync and before
-the remote command. It is diagnostic only: Crabbox does not install tools,
-change the machine, or fail just because a tool is missing. Install logic
+the remote command. It is diagnostic only: Crabbox does not install or upgrade
+host tools, or fail just because a tool is missing. Install logic
 belongs in Actions hydration, a prebaked image, a devcontainer, Nix/mise/asdf,
 or the command/script you run.
 
@@ -586,6 +586,7 @@ crabbox run --preflight --preflight-tools node,bun,docker -- bun test
 crabbox run --preflight --preflight-tools default,uv -- node --test
 crabbox run --preflight --preflight-tools default,cmake -- cmake --build build
 crabbox run --preflight --preflight-tools python,python3 -- python3 -m pytest
+crabbox run --preflight --preflight-tools default,python3-venv -- python3 -m pytest
 crabbox run --preflight --preflight-tools raw_socket -- ./packet-tests
 crabbox run --preflight --preflight-tools none -- ./smoke.sh
 ```
@@ -602,6 +603,51 @@ probes likewise invoke the literal requested command with `--version`, including
 `python` and `python3` on native Windows; Crabbox does not map either name to
 `py`. An unavailable literal command prints `<name>=missing` and the run
 continues.
+
+`python3-venv` is a separate, opt-in functional probe for Linux, macOS and WSL2;
+native Windows skips it. It creates a fresh disposable virtual environment with
+pip, then invokes that environment's Python and pip. It never selects, activates
+or reuses a project environment, installs project packages, or upgrades host
+Python, `venv`, `ensurepip` or pip. Pip seeding stays inside the disposable
+environment. The literal `python` and `python3` version probes and default list
+remain unchanged; `default,python3-venv,python3-venv` keeps the default order and
+adds one functional result.
+
+The result line is `remote preflight python3-venv=<state> cleanup=<confirmed|unconfirmed>`.
+States are `ready`, `missing-python3`, `venv-unavailable`, `pip-unavailable`,
+`worker-failed`, `timed-out`, `canceled` and `unavailable`. `ready` requires both
+environment-local commands to succeed, owner-confirmed probe-process quiescence
+and scratch removal, and caller-confirmed retirement of the exact transport
+stage. `venv-unavailable` covers missing venv support, environment-creation failure
+or failure of the environment's Python; `pip-unavailable` covers missing or failing
+`ensurepip`, pip seeding or the environment's pip. `unavailable` means no reliable
+capability result. Cleanup is independent: a transport, setup or envelope error
+can remain after confirmed cleanup (`unavailable cleanup=confirmed`); unresolved
+quiescence, scratch removal or stage retirement reports `cleanup=unconfirmed`.
+
+Missing or broken capability is diagnostic only and does not skip the workload.
+Worker failure or probe timeout is also diagnostic only when cleanup is confirmed.
+In contrast, an operational transport, setup, envelope, ownership or cleanup
+failure prevents the next workload, even if cleanup is confirmed. In particular,
+`unavailable cleanup=unconfirmed` never permits continuation with an unresolved
+owned stage.
+Caller cancellation remains cancellation (`canceled`), and no later workload
+starts. An expired caller deadline also reports `canceled` in the preflight line;
+`timed-out` identifies expiration of the functional worker allowance. Operational
+ownership failures report `unavailable`. Saved timing and local history retain
+the caller cancellation or deadline classification, and operational preflight
+failures are not reported as workload `command-exit` errors. The probe has a
+90-second allowance and an independent 30-second cleanup reserve, plus separately
+bounded transport setup; this is not a promise that the whole command finishes
+within 120 seconds. This functional probe cannot be used
+as a profile-doctor version-only tool requirement.
+
+On WSL2, completion and retirement use fixed metadata checks on the selected SSH
+endpoint without creating another staged workload. A private stdin pipe preserves
+the fixed program’s quotes and bytes without passing it as native arguments.
+Each check has a 20-second caller-side cap that cannot extend the shared cleanup deadline. This cap is not
+an independent native WSL watchdog; cleanup still requires verified completion
+and retirement.
 
 `raw_socket` uses `python3`, then `python`, to open and immediately close
 `socket(AF_INET, SOCK_RAW, IPPROTO_RAW)` without binding, connecting, sending,

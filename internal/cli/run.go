@@ -1613,6 +1613,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return
 		}
 		report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, ServerSlug(server), timings, time.Since(timings.started), ExitCodeForError(err, 7), actionsURL)
+		// This fallback has no recorded workload outcome; its synthetic exit code
+		// must not classify an operational failure as a workload command exit.
+		if err != nil {
+			report = TimingReportWithRunResult(report, RunResult{}, err)
+		}
 		populateRunTimingMetadata(&report, cfg, repo, server, leaseID, executionRunID, workdir, nil)
 		report.Label = runLabelValue
 		finalTimingReport = &report
@@ -1651,9 +1656,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		printRunContextSummary(a.Stderr, coord, cfg, server, currentTarget, leaseID, executionRunID, recorder.runID, workdir, hydratedByActions, actionsURL)
 		contextPrinted = true
 	}
-	printPreflight := func(currentTarget SSHTarget) {
+	printPreflight := func(currentTarget SSHTarget) error {
 		if !*preflight || preflightPrinted {
-			return
+			return nil
 		}
 		hydrateTarget := currentTarget
 		if hydrateTarget.TargetOS == "" {
@@ -1663,8 +1668,12 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			hydrateTarget.WindowsMode = cfg.WindowsMode
 		}
 		hydrateSupported := supportsLocalActionsHydrateTarget(hydrateTarget) || supportsGitHubActionsRunnerTarget(hydrateTarget)
-		printRemoteCapabilityPreflight(ctx, a.Stderr, cfg, server, currentTarget, leaseID, workdir, remoteRunEnvFiles(actionsEnvFile, profileEnvFile), hydratedByActions, actionsURL, hydrateSupported, envSelection.Inline)
+		preflightErr := printRemoteCapabilityPreflight(ctx, a.Stderr, cfg, server, currentTarget, leaseID, workdir, remoteRunEnvFiles(actionsEnvFile, profileEnvFile), hydratedByActions, actionsURL, hydrateSupported, envSelection.Inline)
 		preflightPrinted = true
+		if preflightErr != nil {
+			return preflightErr
+		}
+		return context.Cause(ctx)
 	}
 	preflightRawJSRuntime := func(currentTarget SSHTarget) error {
 		if rawJSRuntimePreflightDone {
@@ -2354,7 +2363,9 @@ afterSync:
 		}
 	}
 	if *syncOnly {
-		printPreflight(target)
+		if err := printPreflight(target); err != nil {
+			return recordFailure(err)
+		}
 		fmt.Fprintf(a.Stdout, "synced %s\n", workdir)
 		fmt.Fprintln(a.Stderr, formatRunSummary(timings, time.Since(timings.started), 0))
 		if *timingJSON || timingRecordEnabled || observation != nil {
@@ -2470,7 +2481,9 @@ afterSync:
 			fmt.Fprintf(a.Stderr, "env helper remote=%s usage=%s\n", envHelperPath, shellQuote("./"+envHelperPath+" <command>"))
 		}
 	}
-	printPreflight(target)
+	if err := printPreflight(target); err != nil {
+		return recordFailure(err)
+	}
 	if expansion.Profile.Doctor.Enabled {
 		fmt.Fprintf(a.Stderr, "profile doctor profile=%s\n", cfg.Profile)
 		out, err := runSSHCombinedOutput(ctx, target, remoteProfileDoctorCommand(cfg.Profile, expansion.Profile.Doctor, workdir))
