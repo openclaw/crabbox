@@ -4,7 +4,7 @@
 
 ### Changes
 
-- Add a protected, verification-only image-publisher auth check that confirms administrator access without creating leases or publishing images.
+- Add a protected, verification-only image-publisher auth check that confirms administrator access without creating leases or publishing images. [PR 2219](https://github.com/openclaw/crabbox/pull/2219). Thanks @vincentkoc.
 
 ### Fixes
 
