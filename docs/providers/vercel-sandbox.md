@@ -116,7 +116,7 @@ vercelSandbox:
   projectId: prj_example
   teamId: team_example
   scope: example-org
-  vcpus: 1
+  vcpus: 1                    # finite; 0 = service default, otherwise >= 0.25
   timeoutSecs: 0
   execTimeoutSecs: 600
   persistent: false

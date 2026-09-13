@@ -3,6 +3,7 @@ package vercelsandbox
 import (
 	"flag"
 	"io"
+	"math"
 	"strings"
 	"testing"
 
@@ -102,6 +103,10 @@ func TestValidateVercelSandboxConfigRejectsInvalidValues(t *testing.T) {
 		{"timeout", func(c *core.Config) { c.VercelSandbox.TimeoutSecs = -1 }, "non-negative"},
 		{"exec-timeout", func(c *core.Config) { c.VercelSandbox.ExecTimeoutSecs = -1 }, "non-negative"},
 		{"vcpus", func(c *core.Config) { c.VercelSandbox.VCPUs = -1 }, "vcpus"},
+		{"vcpus too small", func(c *core.Config) { c.VercelSandbox.VCPUs = 0.1 }, "at least 0.25"},
+		{"vcpus NaN", func(c *core.Config) { c.VercelSandbox.VCPUs = math.NaN() }, "must be finite"},
+		{"vcpus positive infinity", func(c *core.Config) { c.VercelSandbox.VCPUs = math.Inf(1) }, "must be finite"},
+		{"vcpus negative infinity", func(c *core.Config) { c.VercelSandbox.VCPUs = math.Inf(-1) }, "must be finite"},
 		{"network-policy", func(c *core.Config) { c.VercelSandbox.NetworkPolicy = "mystery" }, "networkPolicy"},
 		{"network-none-with-rules", func(c *core.Config) {
 			c.VercelSandbox.NetworkPolicy = "none"
@@ -119,6 +124,44 @@ func TestValidateVercelSandboxConfigRejectsInvalidValues(t *testing.T) {
 			err := validateVercelSandboxConfig(cfg)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err=%v want contains %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestVercelSandboxVCPUFlagValidation(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  float64
+		err   string
+	}{
+		{"NaN", 0, "vercel-sandbox vcpus must be finite"},
+		{"+Inf", 0, "vercel-sandbox vcpus must be finite"},
+		{"-Inf", 0, "vercel-sandbox vcpus must be finite"},
+		{"-1", 0, "vercel-sandbox vcpus must be positive when set"},
+		{"0.1", 0, "vercel-sandbox vcpus must be at least 0.25 when set"},
+		{"0", 0, ""},
+		{"0.25", 0.25, ""},
+		{"1.5", 1.5, ""},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			values := RegisterVercelSandboxProviderFlags(fs, cfg)
+			if err := fs.Parse([]string{"--vercel-sandbox-vcpus=" + tc.value}); err != nil {
+				t.Fatalf("float parser rejected value before provider validation: %v", err)
+			}
+			err := ApplyVercelSandboxProviderFlags(&cfg, fs, values)
+			if tc.err != "" {
+				var exitErr core.ExitError
+				if !core.AsExitError(err, &exitErr) || exitErr.Code != 2 || err.Error() != tc.err {
+					t.Fatalf("validation error=%v, want exit 2 with %q", err, tc.err)
+				}
+				return
+			}
+			if err != nil || cfg.VercelSandbox.VCPUs != tc.want {
+				t.Fatalf("vcpus=%v error=%v, want %v unchanged", cfg.VercelSandbox.VCPUs, err, tc.want)
 			}
 		})
 	}
