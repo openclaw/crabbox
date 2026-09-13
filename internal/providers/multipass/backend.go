@@ -96,6 +96,9 @@ func (b *backend) configForRun() core.Config {
 
 func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	cfg := b.configForRun()
+	if cfg.Multipass.CPUs < 0 {
+		return core.LeaseTarget{}, core.Exit(2, "multipass.cpus must be zero or greater")
+	}
 	leaseID := core.NewLeaseID()
 	instances, err := b.listInstances(ctx)
 	if err != nil {

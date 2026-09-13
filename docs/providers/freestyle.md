@@ -98,8 +98,9 @@ Provider flags:
 ```
 
 When Freestyle is selected, decoded negative `vcpus` or `memoryGB` values,
-including explicit negative sizing flags, fail with exit 2 before backend
-construction instead of silently omitting sizing. Zero still omits that sizing
+including explicit negative sizing flags, fail with exit 2 before fresh sandbox
+creation instead of silently omitting sizing. Existing lease reuse, inspection,
+and stop do not consume creation sizing. Zero still omits that sizing
 field, and positive values are passed through for service-side validation.
 This check does not change the existing YAML/environment decoding rules; it
 does not make every raw negative YAML or environment value an error.

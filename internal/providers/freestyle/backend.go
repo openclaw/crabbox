@@ -54,7 +54,20 @@ type freestyleBackend struct {
 
 func (b *freestyleBackend) Spec() core.ProviderSpec { return b.spec }
 
+func (b *freestyleBackend) validateCreationSizing() error {
+	if b.cfg.Freestyle.VCPUs < 0 {
+		return core.Exit(2, "freestyle vcpus must be non-negative")
+	}
+	if b.cfg.Freestyle.MemoryGB < 0 {
+		return core.Exit(2, "freestyle memoryGB must be non-negative")
+	}
+	return nil
+}
+
 func (b *freestyleBackend) Warmup(ctx context.Context, req core.WarmupRequest) error {
+	if err := b.validateCreationSizing(); err != nil {
+		return err
+	}
 	if req.ActionsRunner {
 		return core.Exit(2, "--actions-runner is not supported for provider=%s", freestyleProvider)
 	}
@@ -81,6 +94,11 @@ func (b *freestyleBackend) Warmup(ctx context.Context, req core.WarmupRequest) e
 }
 
 func (b *freestyleBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
+	if req.ID == "" {
+		if err := b.validateCreationSizing(); err != nil {
+			return core.RunResult{}, err
+		}
+	}
 	workspace, workspaceErr := freestyleWorkspacePath(b.cfg)
 	var client freestyleAPI
 	var leaseID, name, slug string
@@ -225,6 +243,9 @@ func (b *freestyleBackend) Stop(ctx context.Context, req core.StopRequest) error
 }
 
 func (b *freestyleBackend) createSandbox(ctx context.Context, client freestyleAPI, repo core.Repo, reclaim bool, requestedSlug string) (string, string, string, error) {
+	if err := b.validateCreationSizing(); err != nil {
+		return "", "", "", err
+	}
 	if _, err := freestyleRelativeWorkdir(b.cfg); err != nil {
 		return "", "", "", err
 	}

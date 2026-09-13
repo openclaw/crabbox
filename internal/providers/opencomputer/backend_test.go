@@ -52,18 +52,28 @@ func TestOpenComputerConfigureSizing(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := core.Config{Provider: "opencomputer", OpenComputer: core.OpenComputerConfig{CPU: tc.cpu, MemoryMB: tc.memory}}
 			backend, err := (Provider{}).Configure(cfg, core.Runtime{})
-			if tc.wantErr != "" {
-				var exitErr core.ExitError
-				if backend != nil || !errors.As(err, &exitErr) || exitErr.Code != 2 || err.Error() != tc.wantErr {
-					t.Fatalf("Configure backend=%T err=%v, want nil backend and exit 2: %s", backend, err, tc.wantErr)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatal(err)
 			}
 			if got := backend.(*openComputerBackend).cfg.OpenComputer; got != cfg.OpenComputer {
 				t.Fatalf("sizing changed: %#v want %#v", got, cfg.OpenComputer)
+			}
+			if tc.wantErr != "" {
+				b := backend.(*openComputerBackend)
+				checks := map[string]func() error{
+					"warmup": func() error { return b.Warmup(t.Context(), core.WarmupRequest{}) },
+					"run":    func() error { _, err := b.Run(t.Context(), core.RunRequest{}); return err },
+					"create": func() error { _, _, _, err := b.createSandbox(t.Context(), nil, core.Repo{}, false, ""); return err },
+				}
+				for name, check := range checks {
+					t.Run(name, func(t *testing.T) {
+						err := check()
+						var exitErr core.ExitError
+						if !errors.As(err, &exitErr) || exitErr.Code != 2 || err.Error() != tc.wantErr {
+							t.Fatalf("creation err=%v, want exit 2: %s", err, tc.wantErr)
+						}
+					})
+				}
 			}
 		})
 	}
@@ -1260,6 +1270,13 @@ func TestRunReturnsReusedSandboxSession(t *testing.T) {
 	f := newFakeAPI(t)
 	f.execReply = []execRunResult{{ExitCode: 0}, {ExitCode: 0}}
 	backend := newAPIBackend(t, f)
+	backend.cfg.OpenComputer.CPU = -2
+	backend.cfg.OpenComputer.MemoryMB = -2
+	configured, err := (Provider{}).Configure(backend.cfg, backend.rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend = configured.(*openComputerBackend)
 	repoRoot := t.TempDir()
 	leaseID := leasePrefix + f.sandboxID
 	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "blue", providerName, testOCClaimScope(f.server.URL), "", repoRoot, time.Minute, false); err != nil {
@@ -1279,6 +1296,12 @@ func TestRunReturnsReusedSandboxSession(t *testing.T) {
 	}
 	if f.calls(http.MethodDelete, "/api/sandboxes/") != 0 {
 		t.Fatalf("reused sandbox should not be deleted")
+	}
+	if err := backend.Stop(t.Context(), core.StopRequest{ID: leaseID}); err != nil {
+		t.Fatal(err)
+	}
+	if f.callsExact(http.MethodDelete, "/api/sandboxes/"+f.sandboxID) != 1 {
+		t.Fatal("expected exactly one delete of the owned sandbox")
 	}
 }
 

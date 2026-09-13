@@ -36,22 +36,12 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	return applyFlags(cfg, fs, values)
 }
 
-func (Provider) ValidateConfig(cfg core.Config) error {
-	if cfg.Multipass.CPUs < 0 {
-		return core.Exit(2, "multipass.cpus must be zero or greater")
-	}
-	return nil
-}
-
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return nil, core.Exit(2, "provider=%s supports target=linux only", providerName)
 	}
 	if cfg.Tailscale.Enabled || string(cfg.Network) == "tailscale" {
 		return nil, core.Exit(2, "--tailscale is not supported for provider=%s; use a remote SSH provider when tailnet reachability is required", providerName)
-	}
-	if err := p.ValidateConfig(cfg); err != nil {
-		return nil, err
 	}
 	return newBackend(p.Spec(), cfg, rt), nil
 }
