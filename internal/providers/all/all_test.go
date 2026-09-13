@@ -256,9 +256,6 @@ func TestNvidiaBrevRegistersCanonicalAndAliases(t *testing.T) {
 		if provider.Name() != "nvidia-brev" {
 			t.Fatalf("ProviderFor(%q).Name=%q want nvidia-brev", name, provider.Name())
 		}
-		if _, ok := provider.(core.DoctorProvider); !ok {
-			t.Fatalf("ProviderFor(%q) does not expose doctor", name)
-		}
 	}
 }
 
@@ -307,9 +304,6 @@ func TestLambdaRegistersAsBuiltInProvider(t *testing.T) {
 			t.Fatalf("lambda features=%v missing %s", spec.Features, feature)
 		}
 	}
-	if _, ok := provider.(core.DoctorProvider); !ok {
-		t.Fatal("lambda does not expose doctor")
-	}
 }
 
 func TestNebiusRegistersWithoutAliases(t *testing.T) {
@@ -319,9 +313,6 @@ func TestNebiusRegistersWithoutAliases(t *testing.T) {
 	}
 	if provider.Name() != "nebius" {
 		t.Fatalf("ProviderFor(nebius).Name=%q", provider.Name())
-	}
-	if _, ok := provider.(core.DoctorProvider); !ok {
-		t.Fatal("nebius provider does not expose doctor")
 	}
 	spec := provider.Spec()
 	if spec.Family != "nebius" || spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever {
@@ -350,9 +341,6 @@ func TestNomadRegistersWithoutAliases(t *testing.T) {
 	if provider.Name() != "nomad" {
 		t.Fatalf("ProviderFor(nomad).Name=%q", provider.Name())
 	}
-	if _, ok := provider.(core.DoctorProvider); !ok {
-		t.Fatal("nomad provider does not expose doctor")
-	}
 	spec := provider.Spec()
 	if spec.Family != "nomad" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
 		t.Fatalf("nomad spec=%#v", spec)
@@ -380,9 +368,6 @@ func TestSealosDevboxRegistersWithRequestedAliases(t *testing.T) {
 	}
 	if provider.Name() != "sealos-devbox" {
 		t.Fatalf("ProviderFor(sealos-devbox).Name=%q", provider.Name())
-	}
-	if _, ok := provider.(core.DoctorProvider); !ok {
-		t.Fatal("sealos-devbox provider does not expose doctor")
 	}
 	spec := provider.Spec()
 	if spec.Family != "sealos" || spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever {
@@ -476,9 +461,6 @@ func TestScalewayRegistersWithoutAliases(t *testing.T) {
 		if !spec.Features.Has(feature) {
 			t.Fatalf("scaleway features=%v missing %s", spec.Features, feature)
 		}
-	}
-	if _, ok := provider.(core.DoctorProvider); !ok {
-		t.Fatal("scaleway does not expose doctor")
 	}
 }
 
@@ -617,9 +599,6 @@ func TestCloudflareSandboxRegistersWithoutAliasCollision(t *testing.T) {
 	if provider.Name() != "cloudflare-sandbox" {
 		t.Fatalf("ProviderFor(cloudflare-sandbox).Name=%q", provider.Name())
 	}
-	if _, ok := provider.(core.DoctorProvider); !ok {
-		t.Fatalf("ProviderFor(cloudflare-sandbox) does not expose doctor")
-	}
 	spec := provider.Spec()
 	if spec.Family != "cloudflare" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
 		t.Fatalf("cloudflare-sandbox spec=%#v", spec)
@@ -657,9 +636,6 @@ func TestCodeSandboxRegistersCanonicalAndAliases(t *testing.T) {
 		}
 		if provider.Name() != "codesandbox" {
 			t.Fatalf("ProviderFor(%q).Name=%q want codesandbox", name, provider.Name())
-		}
-		if _, ok := provider.(core.DoctorProvider); !ok {
-			t.Fatalf("ProviderFor(%q) does not expose doctor", name)
 		}
 	}
 	spec := mustProvider(t, "codesandbox").Spec()
@@ -769,20 +745,6 @@ func TestAppleVMRegistersAsBuiltInProvider(t *testing.T) {
 		if provider.Name() != "apple-vm" {
 			t.Fatalf("ProviderFor(%q).Name=%q want apple-vm", name, provider.Name())
 		}
-	}
-}
-
-func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
-	for _, name := range allBuiltInProviderNames() {
-		t.Run(name, func(t *testing.T) {
-			provider, err := core.ProviderFor(name)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, ok := provider.(core.DoctorProvider); !ok {
-				t.Fatalf("%s does not implement DoctorProvider", name)
-			}
-		})
 	}
 }
 

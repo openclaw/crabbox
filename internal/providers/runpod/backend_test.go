@@ -333,7 +333,7 @@ func TestRunpodDoctorChecksAuthAndListPods(t *testing.T) {
 	cfg := core.Config{}
 	cfg.Runpod.APIKey = "test-key"
 	cfg.Runpod.APIURL = server.URL
-	doctor, err := Provider{}.ConfigureDoctor(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, HTTP: server.Client()})
+	doctor, err := core.ConfigureProviderDoctor(Provider{}, cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +350,7 @@ func TestRunpodDoctorChecksAuthAndListPods(t *testing.T) {
 }
 
 func TestRunpodDoctorReportsMissingAPIKey(t *testing.T) {
-	doctor, err := Provider{}.ConfigureDoctor(core.Config{}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+	doctor, err := core.ConfigureProviderDoctor(Provider{}, core.Config{}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatal(err)
 	}
