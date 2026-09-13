@@ -194,10 +194,14 @@ func writeArtifactGlobMatcher(b *strings.Builder) {
 
 func writeArtifactGlobEnumeration(b *strings.Builder, glob, addFunction string) {
 	depth := ""
+	wildcardDepth := 0
 	// Literal globs need only their guarded parent. Keep case folding and
 	// filename normalization in the existing matcher rather than a name prefilter.
 	if !strings.ContainsAny(glob, "*?") {
 		depth = " -mindepth 1 -maxdepth 1"
+	} else if wildcardDepth = artifactGlobWildcardDepth(glob); wildcardDepth > 0 {
+		b.WriteString("artifact_depth=" + fmt.Sprint(wildcardDepth) + "\n")
+		depth = ` -mindepth 1 -maxdepth "$artifact_depth"`
 	}
 	b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; artifact_root=" + shellQuote(artifactGlobSearchRoot(glob)) + "\n")
 	if candidate := artifactGlobNarrowSearchRoot(glob); candidate != "" {
@@ -206,7 +210,11 @@ func writeArtifactGlobEnumeration(b *strings.Builder, glob, addFunction string) 
 		b.WriteString("artifact_candidate=" + shellQuote(candidate) + "\n")
 		b.WriteString(`if ! shopt -q nocasematch && artifact_safe_search_root "$artifact_root" && artifact_safe_search_root "$artifact_candidate"; then
   while IFS= read -r -d '' artifact_entry; do
-    if [ "$artifact_entry" = "$artifact_candidate" ]; then artifact_root=$artifact_candidate; break; fi
+    if [ "$artifact_entry" = "$artifact_candidate" ]; then artifact_root=$artifact_candidate; `)
+		if wildcardDepth > 0 {
+			b.WriteString("artifact_depth=$((artifact_depth - 1)); ")
+		}
+		b.WriteString(`break; fi
   done < <(find "$artifact_root" -mindepth 1 -maxdepth 1 -type d -print0)
 fi
 `)
@@ -361,6 +369,23 @@ func artifactGlobNarrowSearchRoot(glob string) string {
 		return ""
 	}
 	return candidate
+}
+
+func artifactGlobWildcardDepth(glob string) int {
+	if strings.Contains(glob, "**") || glob != strings.TrimSpace(glob) || !safeArtifactGlob(glob) {
+		return 0
+	}
+	relative := strings.TrimPrefix(glob, "./")
+	if relative != filepath.ToSlash(filepath.Clean(relative)) {
+		return 0
+	}
+	// Single wildcards cannot cross a slash. Start at the legacy root; the
+	// generated shell reduces this only when it actually adopts a deeper root.
+	depth := strings.Count(relative, "/") + 1
+	if root := artifactGlobSearchRoot(glob); root != "." {
+		depth -= strings.Count(root, "/") + 1
+	}
+	return depth
 }
 
 func artifactGlobRegex(glob string) string {

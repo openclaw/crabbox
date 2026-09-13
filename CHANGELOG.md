@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- Bound artifact discovery to the possible match depth for canonical non-recursive wildcard patterns, preserving selection and recursive glob behavior. Thanks @vincentkoc.
+
 ## 0.58.0 - 2026-09-12
 
 ### Highlights
