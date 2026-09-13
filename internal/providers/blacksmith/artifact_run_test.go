@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -224,6 +225,142 @@ func TestBlacksmithArtifactRunShellAndTerminalExit(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestBlacksmithArtifactRunBoundsNonRecursiveEnumeration(t *testing.T) {
+	requireBlacksmithArtifactShell(t)
+	for _, command := range []string{"find", "tar", "tee"} {
+		if _, err := exec.LookPath(command); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tt := range []struct {
+		name, glob string
+		want       []string
+		overDepth  []string
+	}{
+		{
+			name: "literal directory", glob: "reports/data/*.json",
+			want:      []string{"reports/data/summary.json"},
+			overDepth: []string{"reports/data/deep/hidden.json"},
+		},
+		{
+			name: "wildcard directory", glob: "reports/run.*/diagnostics/*.json",
+			want:      []string{"reports/run.a/diagnostics/start.json", "reports/run.b/diagnostics/end.json"},
+			overDepth: []string{"reports/run.a/diagnostics/deep/hidden.json", "reports/runtime/lib/node_modules/pkg/package.json"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateArtifactOwnership(t)
+			repo := t.TempDir()
+			t.Chdir(repo)
+			root := testPreparedBlacksmithArtifactRoot(t, repo)
+			for _, name := range []string{
+				"reports/data/summary.json", "reports/data/note.txt",
+				"reports/data/deep/hidden.json",
+				"reports/run.a/diagnostics/start.json", "reports/run.b/diagnostics/end.json",
+				"reports/run.a/diagnostics/deep/hidden.json",
+				"reports/runtime/lib/node_modules/pkg/package.json",
+				"reports/.git/private.json", "reports/.crabbox/private.json",
+			} {
+				testWriteBlacksmithFile(t, root, name, name+"\n")
+			}
+			traceDir := t.TempDir()
+			startup := filepath.Join(traceDir, "bash-env")
+			// Observe the real find output separately for every enumeration;
+			// neither the supervisor, collector nor protocol is substituted.
+			testWriteBlacksmithFile(t, traceDir, "bash-env", `find() {
+  local trace
+  trace=$(mktemp `+core.ShellQuote(filepath.Join(traceDir, "find.XXXXXX"))+`)
+  printf '%s\0' "$@" > "$trace.argv"
+  command find "$@" | tee "$trace.paths"
+}
+`)
+			const id = "tbx_globdepth"
+			prepareBlacksmithGuestKey(t, id)
+			testOwnedBlacksmithClaim(t, id, "fixture-run", repo)
+			var nativeOutput, stdout, stderr bytes.Buffer
+			runs := 0
+			runner := &blacksmithFuncRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				runs++
+				req.Env = append(req.Env, "BASH_ENV="+startup)
+				req.Stdout = io.MultiWriter(req.Stdout, &nativeOutput)
+				return runSyntheticBlacksmithCommand(t, t.Context(), req)
+			}}
+			provider, err := core.ProviderFor("blacksmith-testbox")
+			if err != nil {
+				t.Fatal(err)
+			}
+			backend, err := provider.Configure(core.BaseConfig(), core.Runtime{
+				Stdout: &stdout, Stderr: &stderr, Clock: testClock{}, Exec: runner,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			delegated, ok := backend.(core.DelegatedRunBackend)
+			if !ok {
+				t.Fatal("registered provider does not support delegated runs")
+			}
+			result, err := delegated.Run(t.Context(), core.RunRequest{
+				ID: id, Repo: core.Repo{Root: repo}, Command: []string{":"}, ShellMode: true,
+				ArtifactGlobs: []string{tt.glob}, RequiredArtifactGlobs: []string{tt.glob},
+			})
+			if err != nil || result.ExitCode != 0 || runs != 1 || len(result.Artifacts) != 1 {
+				t.Fatalf("registered run/publication failed: result=%+v runs=%d err=%v", result, runs, err)
+			}
+			assertArtifactTransferCalls(t, runner.calls, 1)
+			archive := result.Artifacts[0]
+			info, err := os.Stat(archive.Path)
+			if err != nil || info.Mode().Perm() != 0600 || info.Size() != int64(archive.Bytes) {
+				t.Fatalf("archive publication metadata changed: info=%v err=%v", info, err)
+			}
+			files := readBlacksmithArchive(t, archive.Path)
+			if len(files) != len(tt.want) {
+				t.Fatalf("archive membership changed: %v", files)
+			}
+			for _, name := range tt.want {
+				got, ok := files[name]
+				if !ok || sha256.Sum256([]byte(got)) != sha256.Sum256([]byte(name+"\n")) {
+					t.Fatalf("archive content changed for %s", name)
+				}
+			}
+			required := fmt.Sprintf("required artifact %s matched=%d\n", tt.glob, len(tt.want))
+			if strings.Count(nativeOutput.String(), required) != 1 {
+				t.Fatalf("required membership changed: want %q", required)
+			}
+			if strings.Contains(stdout.String()+stderr.String()+result.LogExcerpt, "\x1eCRABBOX_BS_") {
+				t.Fatal("native protocol leaked")
+			}
+			t.Logf("registered run: protocol/publication/required matches/archive bytes/content hashes PASS; members=%q bytes=%d", tt.want, archive.Bytes)
+			traces, err := filepath.Glob(filepath.Join(traceDir, "*.paths"))
+			if err != nil || len(traces) == 0 {
+				t.Fatalf("missing real enumeration traces: %v", err)
+			}
+			var allPaths []byte
+			for _, path := range traces {
+				paths, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				argv, err := os.ReadFile(strings.TrimSuffix(path, ".paths") + ".argv")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Logf("find argv=%q output=%q", argv, paths)
+				allPaths = append(allPaths, paths...)
+			}
+			for _, name := range tt.want {
+				if bytes.Count(allPaths, []byte(name+"\x00")) != 3 {
+					t.Fatalf("expected real required and two collection enumerations for %s: %q", name, allPaths)
+				}
+			}
+			for _, name := range tt.overDepth {
+				if bytes.Contains(allPaths, []byte(name+"\x00")) {
+					t.Errorf("over-depth find enumeration despite correct published archive: %s", name)
+				}
+			}
+		})
 	}
 }
 

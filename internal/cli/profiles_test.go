@@ -1413,6 +1413,149 @@ func TestRunArtifactNestedGlobRequiresExactDirectoryEntry(t *testing.T) {
 	}
 }
 
+func TestRunArtifactNonRecursiveGlobBoundsEnumeration(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("artifact glob scripts require a POSIX target")
+	}
+	for _, tt := range []struct {
+		name, glob, setup, probeEntry string
+		want, overDepth, stillVisited []string
+	}{
+		{name: "root", glob: "*.json", want: []string{"root.json"}, overDepth: []string{"reports/data/summary.json"}},
+		{name: "one directory", glob: "reports/*.json", want: []string{"reports/root.json"}, overDepth: []string{"reports/data/summary.json"}},
+		{name: "narrowed directory", glob: "reports/data/*.json", want: []string{"reports/data/a.json", "reports/data/summary.json"}, overDepth: []string{"reports/data/deep/hidden.json"}},
+		{name: "relative prefix", glob: "./reports/data/*.json", want: []string{"reports/data/a.json", "reports/data/summary.json"}, overDepth: []string{"reports/data/deep/hidden.json"}},
+		{name: "partial filename", glob: "reports/data/sum*.json", want: []string{"reports/data/summary.json"}, overDepth: []string{"reports/data/deep/hidden.json"}},
+		{name: "question mark", glob: "rep*/data/?.json", want: []string{"reports/data/a.json"}, overDepth: []string{"reports/data/deep/hidden.json"}},
+		{name: "wildcard directory", glob: "reports/run.*/diagnostics/*.json", want: []string{"reports/run.a/diagnostics/start.json", "reports/run.b/diagnostics/end.json"}, overDepth: []string{"reports/run.a/diagnostics/deep/hidden.json", "reports/runtime/lib/node_modules/pkg/package.json"}},
+		{name: "folded matching", glob: "reports/data/*.json", setup: "shopt -s nocasematch\n", want: []string{"reports/data/UPPER.JSON", "reports/data/a.json", "reports/data/summary.json"}, overDepth: []string{"reports/data/deep/hidden.json"}},
+		{name: "refused narrowing", glob: "reports/data/*.json", probeEntry: "reports/DATA", want: []string{"reports/data/a.json", "reports/data/summary.json"}, overDepth: []string{"reports/data/deep/hidden.json"}},
+		{name: "recursive", glob: "reports/data/**/*.json", want: []string{"reports/data/a.json", "reports/data/deep/hidden.json", "reports/data/summary.json"}, stillVisited: []string{"reports/data/deep/hidden.json"}},
+		{name: "embedded recursive", glob: "reports/pre**post.json", want: []string{"reports/pre/inner/post.json"}, stillVisited: []string{"reports/runtime/lib/node_modules/pkg/package.json"}},
+		{name: "double separator", glob: "reports/data//*.json", stillVisited: []string{"reports/data/deep/hidden.json"}},
+		{name: "dot component", glob: "reports/./data/*.json", stillVisited: []string{"reports/data/deep/hidden.json"}},
+		{name: "leading space", glob: " reports/data/*.json", stillVisited: []string{"reports/data/deep/hidden.json"}},
+	} {
+		for _, mode := range []string{"required", "collect", "delegated", "delegated-file"} {
+			t.Run(tt.name+"/"+mode, func(t *testing.T) {
+				dir := t.TempDir()
+				for _, name := range []string{
+					"root.json", "reports/root.json", "reports/data/a.json",
+					"reports/data/summary.json", "reports/data/UPPER.JSON", "reports/data/deep/hidden.json",
+					"reports/run.a/diagnostics/start.json", "reports/run.b/diagnostics/end.json",
+					"reports/run.a/diagnostics/deep/hidden.json",
+					"reports/runtime/lib/node_modules/pkg/package.json", "reports/pre/inner/post.json",
+					"reports/.git/private.json", "reports/.crabbox/private.json",
+				} {
+					writeFile(t, filepath.Join(dir, name), name)
+				}
+				traceDir := t.TempDir()
+				prefix := tt.setup + "find() {\n"
+				if tt.probeEntry != "" {
+					// Only the existing shallow spelling probe is controlled.
+					prefix += `if [ "$*" = 'reports -mindepth 1 -maxdepth 1 -type d -print0' ]; then printf '%s\0' ` + shellQuote(tt.probeEntry) + "; return; fi\n"
+				}
+				prefix += "local trace\ntrace=$(mktemp " + shellQuote(filepath.Join(traceDir, "find.XXXXXX")) + ")\n" +
+					"printf '%s\\0' \"$@\" > \"$trace.argv\"\ncommand find \"$@\" | tee \"$trace.paths\"\n}\n"
+				globs := []string{tt.glob}
+				script := runArtifactRequireScript(dir, globs)
+				archiveDir, err := filepath.EvalSymlinks(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				archive := filepath.Join(archiveDir, "archive.tgz")
+				var args []string
+				switch mode {
+				case "collect":
+					archive = filepath.Join(dir, ".crabbox/artifacts.tgz")
+					script = runArtifactCollectScript(dir, ".crabbox/artifacts.tgz", globs)
+				case "delegated":
+					script = DelegatedRunArtifactScript(globs, globs, 16, 1024*1024)
+				case "delegated-file":
+					script = DelegatedRunArtifactFileScript(globs, globs, 16, 1024*1024)
+					args = []string{archive}
+				}
+				cmd := exec.CommandContext(t.Context(), "bash", append([]string{"-c", prefix + script, "--"}, args...)...)
+				cmd.Dir = dir
+				cmd.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + t.TempDir()}
+				out, err := cmd.CombinedOutput()
+				missing := len(tt.want) == 0 && mode != "collect"
+				if missing {
+					var exitErr *exec.ExitError
+					if !errors.As(err, &exitErr) || exitErr.ExitCode() != 8 {
+						t.Fatalf("missing required exit changed: %v\n%s", err, out)
+					}
+					if _, statErr := os.Stat(archive); !errors.Is(statErr, os.ErrNotExist) || strings.Contains(string(out), DelegatedRunArtifactBeginMarker) {
+						t.Fatalf("missing required artifact published an archive: %v\n%s", statErr, out)
+					}
+				} else if err != nil {
+					t.Fatalf("generated script failed: %v\n%s", err, out)
+				}
+				if !missing && mode != "collect" {
+					if !strings.Contains(string(out), fmt.Sprintf("required artifact %s matched=%d", tt.glob, len(tt.want))) {
+						t.Fatalf("required membership changed: %s", out)
+					}
+				}
+				if !missing && mode == "delegated" {
+					_, encoded, begin := strings.Cut(string(out), DelegatedRunArtifactBeginMarker+"\n")
+					encoded, _, end := strings.Cut(encoded, DelegatedRunArtifactEndMarker+"\n")
+					if !begin || !end {
+						t.Fatal("missing archive framing")
+					}
+					data, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(encoded), ""))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(archive, data, 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if !missing && mode != "required" {
+					names := tarGzNames(t, archive)
+					slices.Sort(names)
+					if !slices.Equal(names, tt.want) {
+						t.Fatalf("archive membership=%q, want %q", names, tt.want)
+					}
+					contents := readTarGzContents(t, archive)
+					for _, name := range tt.want {
+						if string(contents[name]) != name {
+							t.Fatalf("archive content changed for %s", name)
+						}
+					}
+				}
+				t.Logf("selection/required outcome/archive content PASS: %q", tt.want)
+				traces, err := filepath.Glob(filepath.Join(traceDir, "*.paths"))
+				if err != nil || len(traces) == 0 {
+					t.Fatalf("missing find traces: %v", err)
+				}
+				var enumerated []byte
+				for _, path := range traces {
+					paths, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					argv, err := os.ReadFile(strings.TrimSuffix(path, ".paths") + ".argv")
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Logf("find argv=%q output=%q", argv, paths)
+					enumerated = append(enumerated, paths...)
+				}
+				for _, name := range append(append([]string{}, tt.want...), tt.stillVisited...) {
+					if !bytes.Contains(enumerated, []byte(name+"\x00")) {
+						t.Errorf("real discovery lost %s", name)
+					}
+				}
+				for _, name := range tt.overDepth {
+					if bytes.Contains(enumerated, []byte(name+"\x00")) {
+						t.Errorf("over-depth find enumeration despite correct selection: %s", name)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestArtifactGlobNarrowSearchRootAddsOneLiteralDirectory(t *testing.T) {
 	for glob, want := range map[string]string{
 		"reports/data/**/*.txt":       "reports/data",
