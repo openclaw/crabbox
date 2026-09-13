@@ -299,7 +299,7 @@ func (a App) advanceCheckpointCapture(ctx context.Context, cfg Config, repo Repo
 	observe := func(result NativeCheckpointCreateResult) error {
 		strategy := record.Native.Strategy
 		if result.Image.ID != "" {
-			applyNativeImageCheckpointRecord(record, coordinatorImageFromNativeCheckpoint(result.Image), record.Native.NoReboot)
+			record.applyNativeImage(coordinatorImageFromNativeCheckpoint(result.Image), record.Native.NoReboot)
 			record.Native.Strategy = strategy
 		}
 		if result.Metadata != nil {
@@ -333,7 +333,7 @@ func (a App) advanceCheckpointCapture(ctx context.Context, cfg Config, repo Repo
 		image, metadata, createErr := a.createNativeCheckpointRequest(ctx, NativeCheckpointCreateRequest{Config: cfg, Server: server, Target: target, CheckpointID: record.ID, LeaseID: record.LeaseID, RepoName: repo.Name, Workdir: record.Workdir, Strategy: record.Native.Strategy, NoReboot: record.Native.NoReboot, Stderr: a.Stderr, Capture: capture})
 		if image.ID != "" {
 			strategy := record.Native.Strategy
-			applyNativeImageCheckpointRecord(record, image, record.Native.NoReboot)
+			record.applyNativeImage(image, record.Native.NoReboot)
 			record.Native.Strategy = strategy
 			record.Native.Metadata = metadata
 			capture.Phase = "pending"
@@ -560,5 +560,5 @@ func (a App) retireCheckpointSource(ctx context.Context, cfg Config, repo Repo, 
 }
 
 func unresolvedCheckpoint(record checkpointRecord) bool {
-	return isNativeCheckpointKind(record.Kind) && (record.Capture != nil && record.Capture.Phase != "retired" || strings.TrimSpace(nativeCheckpointDeleteID(record)) == "")
+	return isNativeCheckpointKind(record.Kind) && (record.Capture != nil && record.Capture.Phase != "retired" || strings.TrimSpace(record.nativeDeleteID()) == "")
 }

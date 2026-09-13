@@ -412,15 +412,6 @@ func (a App) createNativeCheckpointRequest(ctx context.Context, req NativeCheckp
 	return image, nil, err
 }
 
-func (a App) createAWSAMICheckpoint(ctx context.Context, cfg Config, target SSHTarget, leaseID, name, repoName string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, error) {
-	image, _, err := a.createNativeCheckpointRequest(ctx, NativeCheckpointCreateRequest{
-		Config: cfg, Server: Server{Provider: "aws", CloudID: leaseID}, Target: target,
-		LeaseID: leaseID, Name: name, RepoName: repoName, Strategy: checkpointStrategyImage,
-		NoReboot: noReboot, Wait: wait, WaitTimeout: waitTimeout, Stderr: a.Stderr,
-	})
-	return image, err
-}
-
 func coordinatorImageFromNativeCheckpoint(image NativeCheckpointImage) CoordinatorImage {
 	return CoordinatorImage{
 		ID:           image.ID,
@@ -445,21 +436,6 @@ func nativeCheckpointLifecycleProvider(cfg Config, server Server) (NativeCheckpo
 	}
 	lifecycle, ok := provider.(NativeCheckpointLifecycleProvider)
 	return lifecycle, ok
-}
-
-func (a App) createDirectAWSAMICheckpoint(ctx context.Context, cfg Config, server Server, target SSHTarget, leaseID, name, repoName string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, error) {
-	return directAWSAMICheckpointDriver{}.Create(ctx, NativeCheckpointCreateRequest{
-		Config:      cfg,
-		Server:      server,
-		Target:      target,
-		LeaseID:     leaseID,
-		Name:        name,
-		RepoName:    repoName,
-		NoReboot:    noReboot,
-		Wait:        wait,
-		WaitTimeout: waitTimeout,
-		Stderr:      a.Stderr,
-	})
 }
 
 func waitForDirectAWSImage(ctx context.Context, client *AWSClient, imageID, accountID string, timeout time.Duration, stderr io.Writer) (CoordinatorImage, error) {
@@ -686,22 +662,6 @@ func (record *checkpointRecord) applyNativeImage(image CoordinatorImage, noReboo
 	record.Native.NoReboot = noReboot
 }
 
-func applyNativeImageCheckpointRecord(record *checkpointRecord, image CoordinatorImage, noReboot bool) {
-	record.applyNativeImage(image, noReboot)
-}
-
-func applyAWSAMIImageCheckpointRecord(record *checkpointRecord, image CoordinatorImage, noReboot bool) {
-	record.applyNativeImage(image, noReboot)
-}
-
-func nativeCheckpointResourceID(record checkpointRecord) string {
-	return record.nativeResourceID()
-}
-
-func nativeCheckpointDeleteID(record checkpointRecord) string {
-	return record.nativeDeleteID()
-}
-
 func nativeCheckpointResourceRequest(record checkpointRecord) NativeCheckpointResourceRequest {
 	return NativeCheckpointResourceRequest{
 		LoadConfig: loadConfig,
@@ -796,7 +756,7 @@ func directAzureCheckpointConfig(record checkpointRecord) (Config, bool) {
 	if record.Native.Region != "" {
 		cfg.AzureLocation = record.Native.Region
 	}
-	resourceID := nativeCheckpointResourceID(record)
+	resourceID := record.nativeResourceID()
 	parts := strings.Split(strings.Trim(resourceID, "/"), "/")
 	for index := 0; index+1 < len(parts); index += 1 {
 		switch {
@@ -985,8 +945,4 @@ func applyNativeCheckpointForkConfigAndFlags(cfg *Config, fs *flag.FlagSet, reco
 		return nil
 	}
 	return flagProvider.ApplyNativeCheckpointForkFlags(cfg, fs, providerFlags[provider.Name()])
-}
-
-func applyAWSAMICheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record checkpointRecord) error {
-	return applyNativeCheckpointForkConfig(cfg, fs, record)
 }

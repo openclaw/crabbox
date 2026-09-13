@@ -192,7 +192,7 @@ func (a App) shard(ctx context.Context, args []string) error {
 		return Exit(2, "checkpoint %s has kind=%s; shard requires %s or a native image checkpoint", record.ID, record.Kind, checkpointKindArchive)
 	}
 	if nativeCheckpoint {
-		if nativeCheckpointResourceID(record) == "" {
+		if record.nativeResourceID() == "" {
 			return Exit(2, "checkpoint %s is pending; native provider resource is not recorded yet", record.ID)
 		}
 		if err := applyNativeCheckpointForkConfigAndFlags(&cfg, fs, record, leaseFlags.ProviderFlags); err != nil {

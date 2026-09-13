@@ -121,11 +121,6 @@ func (s checkpointStore) Reserve(record checkpointRecord) (checkpointRecord, che
 	return record, paths, nil
 }
 
-func (s checkpointStore) Create(record checkpointRecord) (checkpointRecord, error) {
-	record, _, err := s.Reserve(record)
-	return record, err
-}
-
 func (s checkpointStore) Write(record checkpointRecord) error {
 	if err := validateCheckpointRecordTimes(record); err != nil {
 		return err
@@ -320,7 +315,7 @@ func (s checkpointStore) Delete(id string) error {
 // interruption. Do not advance the caller's state until the durable write succeeds.
 func (s checkpointStore) WriteNativeProgress(record *checkpointRecord, result NativeCheckpointCreateResult, noReboot bool) error {
 	next := *record
-	applyNativeImageCheckpointRecord(&next, coordinatorImageFromNativeCheckpoint(result.Image), noReboot)
+	next.applyNativeImage(coordinatorImageFromNativeCheckpoint(result.Image), noReboot)
 	next.Native.Metadata = maps.Clone(result.Metadata)
 	if err := s.Write(next); err != nil {
 		return err

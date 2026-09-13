@@ -47,7 +47,7 @@ func (a App) checkpointAbandon(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if !isNativeCheckpointKind(record.Kind) || record.coordinatorManaged() || nativeCheckpointDeleteID(record) != "" || record.Native.ImageID != "" || record.Native.Resource != "" || record.LeaseID != *leaseID || record.Provider != cfg.Provider || record.Repo.Root != repo.Root {
+		if !isNativeCheckpointKind(record.Kind) || record.coordinatorManaged() || record.nativeDeleteID() != "" || record.Native.ImageID != "" || record.Native.Resource != "" || record.LeaseID != *leaseID || record.Provider != cfg.Provider || record.Repo.Root != repo.Root {
 			return Exit(2, "checkpoint abandon requires an unresolved ordinary native record for this exact source lease, provider, and repository")
 		}
 		backend, err := loadBackend(cfg, runtimeForApp(operation))

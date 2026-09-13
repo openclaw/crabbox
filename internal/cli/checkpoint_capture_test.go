@@ -20,7 +20,7 @@ func TestCheckpointForkRejectsDiscardedCapture(t *testing.T) {
 	}
 	record := checkpointRecord{ID: "chk_discarded", Kind: checkpointKindMachine0, Provider: "machine0", Capture: &NativeCheckpointCapture{SourceDisposition: "retire", Phase: "retired", DiscardFailed: true}}
 	record.Native.ImageID = "deleted-image"
-	if _, err := store.Create(record); err != nil {
+	if _, _, err := store.Reserve(record); err != nil {
 		t.Fatal(err)
 	}
 	if err := (App{Stdout: io.Discard, Stderr: io.Discard}).checkpointFork(context.Background(), []string{record.ID, "--dry-run"}); err == nil || !strings.Contains(err.Error(), "discarded") {

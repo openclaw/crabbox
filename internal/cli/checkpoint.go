@@ -298,7 +298,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 				},
 			})
 			if image.ID != "" {
-				applyNativeImageCheckpointRecord(&record, image, *noReboot)
+				record.applyNativeImage(image, *noReboot)
 				record.Native.Metadata = metadata
 				if image.managedCheckpoint != nil {
 					managed, managedErr := checkpointRecordFromCoordinator(*image.managedCheckpoint, checkpointCoordinatorOrigin(cfg.Coordinator))
@@ -1247,7 +1247,7 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 		return Exit(2, "checkpoint %s has kind=%s; fork requires %s or a native image checkpoint", record.ID, record.Kind, checkpointKindArchive)
 	}
 	if nativeCheckpoint {
-		if nativeCheckpointResourceID(record) == "" {
+		if record.nativeResourceID() == "" {
 			return Exit(2, "checkpoint %s is pending; native provider resource is not recorded yet", record.ID)
 		}
 		if err := applyNativeCheckpointForkConfigAndFlags(&cfg, fs, record, leaseFlags.ProviderFlags); err != nil {
@@ -1266,9 +1266,9 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 				commandSuffix = " command=" + strconv.Quote(runCommandDisplay(expandedCommand, false))
 			}
 			if *count == 1 {
-				fmt.Fprintf(a.Stdout, "would fork checkpoint id=%s provider=%s resource=%s slug=%s keep=%t%s\n", record.ID, cfg.Provider, blank(nativeCheckpointResourceID(record), "-"), blank(slug, "-"), *keep, commandSuffix)
+				fmt.Fprintf(a.Stdout, "would fork checkpoint id=%s provider=%s resource=%s slug=%s keep=%t%s\n", record.ID, cfg.Provider, blank(record.nativeResourceID(), "-"), blank(slug, "-"), *keep, commandSuffix)
 			} else {
-				fmt.Fprintf(a.Stdout, "would fork checkpoint id=%s provider=%s resource=%s slug=%s keep=%t index=%d/%d%s\n", record.ID, cfg.Provider, blank(nativeCheckpointResourceID(record), "-"), blank(slug, "-"), *keep, i, *count, commandSuffix)
+				fmt.Fprintf(a.Stdout, "would fork checkpoint id=%s provider=%s resource=%s slug=%s keep=%t index=%d/%d%s\n", record.ID, cfg.Provider, blank(record.nativeResourceID(), "-"), blank(slug, "-"), *keep, i, *count, commandSuffix)
 			}
 		}
 		return nil
@@ -1692,7 +1692,7 @@ func (a App) checkpointForkRecordOnce(ctx context.Context, cfg Config, backend B
 		return a.runCheckpointForkCommand(ctx, leaseID, slug, runOpts)
 	}
 	if isNativeCheckpointKind(record.Kind) {
-		fmt.Fprintf(a.Stdout, "checkpoint forked id=%s lease=%s slug=%s image=%s workdir=%s\n", record.ID, leaseID, blank(slug, "-"), nativeCheckpointResourceID(*record), blank(provision.Workdir, "-"))
+		fmt.Fprintf(a.Stdout, "checkpoint forked id=%s lease=%s slug=%s image=%s workdir=%s\n", record.ID, leaseID, blank(slug, "-"), record.nativeResourceID(), blank(provision.Workdir, "-"))
 	} else {
 		fmt.Fprintf(a.Stdout, "checkpoint forked id=%s lease=%s slug=%s workdir=%s\n", record.ID, leaseID, blank(slug, "-"), provision.Workdir)
 	}
@@ -1973,7 +1973,7 @@ func (a App) checkpointDelete(ctx context.Context, args []string) error {
 			}
 			return localErr
 		}
-		fmt.Fprintf(a.Stdout, "would delete checkpoint id=%s kind=%s provider=%s resource=%s local_only=%t\n", record.ID, record.Kind, blank(record.Provider, "-"), blank(nativeCheckpointDeleteID(record), "-"), *localOnly)
+		fmt.Fprintf(a.Stdout, "would delete checkpoint id=%s kind=%s provider=%s resource=%s local_only=%t\n", record.ID, record.Kind, blank(record.Provider, "-"), blank(record.nativeDeleteID(), "-"), *localOnly)
 		return nil
 	}
 	deleteLocal := func() error { return deleteCheckpoint(ctx, store, id, *localOnly) }
@@ -2072,7 +2072,7 @@ func deleteCheckpointResource(ctx context.Context, store checkpointStore, record
 		}
 		return coord.DeleteCheckpoint(ctx, record.ID)
 	}
-	providerID := nativeCheckpointDeleteID(record)
+	providerID := record.nativeDeleteID()
 	if !isNativeCheckpointKind(record.Kind) || providerID == "" {
 		return nil
 	}
@@ -2364,7 +2364,7 @@ func (a App) verifyCheckpointResource(ctx context.Context, store checkpointStore
 	case isNativeCheckpointKind(record.Kind):
 		providerID := strings.TrimSpace(record.Native.ImageID)
 		if providerID == "" {
-			if nativeCheckpointResourceID(record) != "" {
+			if record.nativeResourceID() != "" {
 				audit.ProviderState = "unverified_ref"
 				audit.NextAction = "fork_or_delete_local"
 				return audit, nil
