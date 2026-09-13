@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type srtCLI struct {
@@ -144,9 +145,9 @@ func srtError(args []string, result core.LocalCommandResult, stdout, stderr stri
 		action = cNameForError
 	}
 	if result.ExitCode != 0 {
-		return fmt.Errorf("srt %s failed exit=%d: %s", action, result.ExitCode, detail)
+		return shared.ExitErrorWithCause(result.ExitCode, fmt.Sprintf("srt %s failed exit=%d: %s", action, result.ExitCode, detail), err)
 	}
-	return fmt.Errorf("srt %s failed: %s", action, detail)
+	return shared.ExitErrorWithCause(1, fmt.Sprintf("srt %s failed: %s", action, detail), err)
 }
 
 const cNameForError = "command"

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type backend struct {
@@ -74,10 +75,11 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 		}
 	}
 	if runErr != nil {
-		if exitCode != 0 {
-			return result, core.Exit(exitCode, "anthropic-sandbox-runtime run failed: %v", runErr)
+		code := exitCode
+		if code == 0 {
+			code = 1
 		}
-		return result, core.Exit(1, "anthropic-sandbox-runtime run failed: %v", runErr)
+		return result, shared.ExitErrorWithCause(code, fmt.Sprintf("anthropic-sandbox-runtime run failed: %v", runErr), runErr)
 	}
 	return result, nil
 }

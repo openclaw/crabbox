@@ -229,31 +229,69 @@ func TestRunForwardsEnvOutsideArgv(t *testing.T) {
 }
 
 func TestRunReturnsNonZeroExitWithoutPersistentSession(t *testing.T) {
-	runner := &recordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-		if req.Stderr != nil {
-			_, _ = io.WriteString(req.Stderr, "boom\n")
-		}
-		return core.LocalCommandResult{ExitCode: 7, Stderr: "boom\n"}, errors.New("exit status 7")
-	}}
-	var stderr bytes.Buffer
-	backend := newTestBackend(newTestConfig(), runner, io.Discard, &stderr)
-	result, err := backend.Run(context.Background(), core.RunRequest{
-		Repo:       core.Repo{Name: "my-app", Root: t.TempDir()},
-		Command:    []string{"false"},
-		TimingJSON: true,
-	})
-	var exitErr core.ExitError
-	if !core.AsExitError(err, &exitErr) || exitErr.Code != 7 {
-		t.Fatalf("Run err=%v result=%#v", err, result)
+	for _, tc := range []struct {
+		name       string
+		code       int
+		cause      error
+		publicCode int
+		status     core.RunStatus
+		kind       core.RunErrorKind
+	}{
+		{"ordinary exit", 7, errors.New("exit status 7"), 7, core.RunStatusFailed, core.RunErrorCommandExit},
+		{"exit without runner error", 7, nil, 7, core.RunStatusFailed, core.RunErrorCommandExit},
+		{"canceled", 1, context.Canceled, 1, core.RunStatusCanceled, core.RunErrorCanceled},
+		{"deadline", 1, context.DeadlineExceeded, 1, core.RunStatusTimedOut, core.RunErrorTimeout},
+		{"joined deadline", 7, errors.Join(errors.New("exit status 7"), context.DeadlineExceeded), 7, core.RunStatusTimedOut, core.RunErrorTimeout},
+		{"zero-code provider error", 0, errors.New("runner unavailable"), 1, core.RunStatusFailed, core.RunErrorProvider},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &recordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				if req.Stderr != nil {
+					_, _ = io.WriteString(req.Stderr, "boom\n")
+				}
+				return core.LocalCommandResult{ExitCode: tc.code, Stderr: "boom\n"}, tc.cause
+			}}
+			var stderr bytes.Buffer
+			backend := newTestBackend(newTestConfig(), runner, io.Discard, &stderr)
+			result, err := backend.Run(context.Background(), core.RunRequest{
+				Repo:       core.Repo{Name: "my-app", Root: t.TempDir()},
+				Command:    []string{"false"},
+				TimingJSON: true,
+			})
+			var exitErr core.ExitError
+			if !core.AsExitError(err, &exitErr) || exitErr.Code != tc.publicCode {
+				t.Fatalf("Run err=%v result=%#v", err, result)
+			}
+			if result.Session != nil || result.ExitCode != tc.code {
+				t.Fatalf("result=%#v", result)
+			}
+			if result.Status != tc.status || result.ErrorKind != tc.kind {
+				t.Fatalf("status/error=%q/%q", result.Status, result.ErrorKind)
+			}
+			if !strings.Contains(stderr.String(), `"runStatus":"`+string(tc.status)+`"`) || !strings.Contains(stderr.String(), `"errorKind":"`+string(tc.kind)+`"`) {
+				t.Fatalf("stderr = %q, want %s/%s timing", stderr.String(), tc.status, tc.kind)
+			}
+			if tc.cause != nil && !errors.Is(err, tc.cause) {
+				t.Fatalf("runner cause lost: %v", err)
+			}
+		})
 	}
-	if result.Session != nil || result.ExitCode != 7 {
-		t.Fatalf("result=%#v", result)
-	}
-	if result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorCommandExit {
-		t.Fatalf("status/error=%q/%q", result.Status, result.ErrorKind)
-	}
-	if !strings.Contains(stderr.String(), `"runStatus":"failed"`) || !strings.Contains(stderr.String(), `"errorKind":"command-exit"`) {
-		t.Fatalf("stderr = %q, want failed command-exit timing", stderr.String())
+}
+
+func TestSRTErrorPreservesCauseAndDiagnostic(t *testing.T) {
+	cause := errors.New("ordinary runner failure")
+	for _, tc := range []struct{ name, stdout, stderr, detail string }{
+		{"stderr first", "ignored", " detail\n", "detail"},
+		{"stdout fallback", " output\n", "\t", "output"},
+		{"cause fallback", "", "", cause.Error()},
+		{"bounded prefix", "ignored", strings.Repeat("x", 4100), strings.Repeat("x", 4096)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := srtError([]string{"-c", "false"}, core.LocalCommandResult{ExitCode: 7}, tc.stdout, tc.stderr, cause)
+			if err.Error() != "srt -c false failed exit=7: "+tc.detail || !errors.Is(err, cause) {
+				t.Fatalf("message or cause changed: %v", err)
+			}
+		})
 	}
 }
 
