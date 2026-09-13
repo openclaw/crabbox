@@ -4,7 +4,7 @@
 
 ### Fixes
 
-- Bound artifact discovery to the possible match depth for canonical non-recursive wildcard patterns, preserving selection and recursive glob behavior. Thanks @vincentkoc.
+- Bound artifact discovery to the possible match depth for canonical non-recursive wildcard patterns, preserving selection and recursive glob behavior. [PR 2214](https://github.com/openclaw/crabbox/pull/2214). Thanks @vincentkoc.
 
 ## 0.58.0 - 2026-09-12
 
