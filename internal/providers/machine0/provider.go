@@ -129,15 +129,6 @@ func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
 	return size, cfg.Machine0.SizeExplicit && size != ""
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	for _, profile := range machine0ClassProfiles {
-		if profile.Class == class {
-			return profile.Primary.Type
-		}
-	}
-	return core.BaseConfig().Machine0.Size
-}
-
 func (Provider) ClassProfiles() []core.ProviderClassProfile { return machine0ClassProfiles }
 
 func buildClassProfiles() []core.ProviderClassProfile {

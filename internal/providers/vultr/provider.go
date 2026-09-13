@@ -58,10 +58,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return vultrServerTypeForClass(cfg.Class)
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	return vultrServerTypeForClass(class)
-}
-
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewBackend(p.Spec(), cfg, rt), nil
 }

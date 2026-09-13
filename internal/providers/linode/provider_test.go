@@ -25,8 +25,8 @@ func TestProviderSpec(t *testing.T) {
 }
 
 func TestProviderServerTypeDefaults(t *testing.T) {
-	if got := (Provider{}).ServerTypeForClass("standard"); got != defaultType {
-		t.Fatalf("ServerTypeForClass standard=%q", got)
+	if got := (Provider{}).ServerTypeForConfig(core.Config{Class: "standard"}); got != defaultType {
+		t.Fatalf("ServerTypeForConfig standard=%q", got)
 	}
 	if got := (Provider{}).ServerTypeForConfig(core.Config{ServerType: "g6-standard-2", ServerTypeExplicit: true}); got != "g6-standard-2" {
 		t.Fatalf("explicit ServerTypeForConfig=%q", got)

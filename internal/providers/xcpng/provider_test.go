@@ -63,9 +63,6 @@ func TestProviderServerTypeUsesTemplateIdentity(t *testing.T) {
 			}
 		})
 	}
-	if got := provider.ServerTypeForClass("linux-small"); got != "template" {
-		t.Fatalf("ServerTypeForClass=%q want template", got)
-	}
 }
 
 func TestFlagsApplyNonSecretConfigOnly(t *testing.T) {

@@ -34,7 +34,7 @@ func TestProviderAliasesAndDiagnosticSecrets(t *testing.T) {
 			t.Fatalf("missing alias %q in %v", want, aliases)
 		}
 	}
-	if p.ServerTypeForConfig(core.Config{}) != "" || p.ServerTypeForClass("any") != "" {
+	if p.ServerTypeForConfig(core.Config{}) != "" {
 		t.Fatal("expected empty server type surface")
 	}
 	t.Setenv("CLOUD_RUN_SANDBOX_SECRET", "s1")

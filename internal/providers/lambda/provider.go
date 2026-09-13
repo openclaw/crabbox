@@ -43,10 +43,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return typeForConfig(cfg)
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	return serverTypeForClass(class)
-}
-
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return &backend{spec: p.Spec(), cfg: cfg, rt: rt, clientFactory: newLambdaAPIClient}, nil
 }

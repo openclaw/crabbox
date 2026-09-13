@@ -78,10 +78,6 @@ func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
 	return serverType, core.TencentCloudTypeWasExplicit(cfg) && serverType != ""
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	return serverTypeForClass(class)
-}
-
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewBackend(p.Spec(), cfg, rt), nil
 }

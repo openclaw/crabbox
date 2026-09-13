@@ -127,10 +127,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return candidates[0]
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	return awsInstanceTypeCandidatesForClass(class)[0]
-}
-
 func (Provider) ClassProfiles() []core.ProviderClassProfile {
 	return classProfiles
 }

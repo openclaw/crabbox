@@ -548,7 +548,7 @@ func TestScalewayBindingProfilePrecedence(t *testing.T) {
 		}
 	}
 	p := Provider{}
-	if p.ServerTypeForClass("standard") != "DEV1-S" || p.ServerTypeForClass("unknown") != "DEV1-S" {
+	if p.ServerTypeForConfig(core.Config{Class: "standard"}) != "DEV1-S" || p.ServerTypeForConfig(core.Config{Class: "unknown"}) != "DEV1-S" {
 		t.Fatal("fixed class fallback changed")
 	}
 	for _, raw := range []string{"", "  "} {

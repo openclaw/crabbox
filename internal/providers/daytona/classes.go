@@ -40,7 +40,7 @@ func buildClassProfiles() []core.ProviderClassProfile {
 
 func (Provider) ClassProfiles() []core.ProviderClassProfile { return classProfiles }
 
-func (Provider) ServerTypeForClass(class string) string {
+func snapshotForClass(class string) string {
 	for _, profile := range classProfiles {
 		if profile.Class == class {
 			return profile.Primary.Type
@@ -63,7 +63,7 @@ func (p Provider) ServerTypeForConfig(cfg core.Config) string {
 	if snapshot := strings.TrimSpace(cfg.Daytona.Snapshot); snapshot != "" {
 		return snapshot
 	}
-	return p.ServerTypeForClass(cfg.Class)
+	return snapshotForClass(cfg.Class)
 }
 
 func (b *daytonaLeaseBackend) ValidateCoordinatorAcquire() error {

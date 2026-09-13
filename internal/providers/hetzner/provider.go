@@ -126,14 +126,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return cfg.Class
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	cfg := core.Config{Provider: "hetzner", TargetOS: core.TargetLinux, Architecture: core.ArchitectureAMD64, Class: class}
-	if candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg); matched {
-		return candidates[0]
-	}
-	return class
-}
-
 func (Provider) ClassProfiles() []core.ProviderClassProfile {
 	return classProfiles
 }

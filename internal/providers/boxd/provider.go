@@ -108,10 +108,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return "machine"
 }
 
-func (Provider) ServerTypeForClass(string) string {
-	return "machine"
-}
-
 func applyDefaults(cfg *core.Config) {
 	cfg.Provider = providerName
 	if strings.TrimSpace(cfg.TargetOS) == "" {

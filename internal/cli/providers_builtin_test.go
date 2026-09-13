@@ -229,9 +229,6 @@ func (testAzureProvider) ServerTypeForConfig(cfg Config) string {
 	}
 	return candidates[0]
 }
-func (testAzureProvider) ServerTypeForClass(class string) string {
-	return azureVMSizeCandidatesForClass(class)[0]
-}
 func (p testAzureProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
@@ -295,7 +292,6 @@ func (testAzureDynamicSessionsProvider) ApplyFlags(*Config, *flag.FlagSet, any) 
 	return nil
 }
 func (testAzureDynamicSessionsProvider) ServerTypeForConfig(Config) string { return "" }
-func (testAzureDynamicSessionsProvider) ServerTypeForClass(string) string  { return "" }
 func (p testAzureDynamicSessionsProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testDelegatedBackend{spec: p.Spec()}, nil
 }
@@ -416,9 +412,6 @@ func (testHetznerProvider) ServerTypeForConfig(cfg Config) string {
 	}
 	return candidates[0]
 }
-func (testHetznerProvider) ServerTypeForClass(class string) string {
-	return serverTypeCandidatesForClass(class)[0]
-}
 func (p testHetznerProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testHetznerBackend{testSSHBackend{spec: p.Spec()}}, nil
 }
@@ -459,7 +452,6 @@ func (testDigitalOceanProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (testDigitalOceanProvider) ServerTypeForConfig(Config) string { return "s-1vcpu-1gb" }
-func (testDigitalOceanProvider) ServerTypeForClass(string) string  { return "s-1vcpu-1gb" }
 func (p testDigitalOceanProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
@@ -483,7 +475,6 @@ func (testVultrProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (testVultrProvider) ServerTypeForConfig(Config) string { return "vc2-1c-1gb" }
-func (testVultrProvider) ServerTypeForClass(string) string  { return "vc2-1c-1gb" }
 func (p testVultrProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
@@ -515,7 +506,6 @@ func (testLinodeProvider) ServerTypeForConfig(cfg Config) string {
 	}
 	return "g6-standard-1"
 }
-func (testLinodeProvider) ServerTypeForClass(string) string { return "g6-standard-1" }
 func (p testLinodeProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
@@ -547,7 +537,6 @@ func (testLambdaProvider) ServerTypeForConfig(cfg Config) string {
 	}
 	return "gpu_1x_a10"
 }
-func (testLambdaProvider) ServerTypeForClass(string) string { return "gpu_1x_a10" }
 func (p testLambdaProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
@@ -601,7 +590,6 @@ func (testScalewayProvider) ServerTypeForConfig(cfg Config) string {
 	}
 	return "DEV1-S"
 }
-func (testScalewayProvider) ServerTypeForClass(string) string { return "DEV1-S" }
 func (p testScalewayProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
@@ -662,9 +650,6 @@ func (testGCPProvider) ServerTypeForConfig(cfg Config) string {
 		return ""
 	}
 	return candidates[0]
-}
-func (testGCPProvider) ServerTypeForClass(class string) string {
-	return gcpMachineTypeCandidatesForClass(class)[0]
 }
 func (p testGCPProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
@@ -744,9 +729,6 @@ func (testAWSProvider) ServerTypeForConfig(cfg Config) string {
 		return ""
 	}
 	return candidates[0]
-}
-func (testAWSProvider) ServerTypeForClass(class string) string {
-	return awsInstanceTypeCandidatesForClass(class)[0]
 }
 func (p testAWSProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	if testAWSBackendOverride != nil {
@@ -1085,7 +1067,6 @@ func (testXCPNgProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) e
 func (testXCPNgProvider) ServerTypeForConfig(cfg Config) string {
 	return xcpNgTestServerTypeForConfig(cfg)
 }
-func (testXCPNgProvider) ServerTypeForClass(string) string { return "template" }
 func (p testXCPNgProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
@@ -1412,16 +1393,6 @@ func (testNamespaceProvider) ServerTypeForConfig(cfg Config) string {
 	}
 	return strings.ToUpper(strings.TrimSpace(cfg.Class))
 }
-func (testNamespaceProvider) ServerTypeForClass(class string) string {
-	cfg := Config{Provider: "namespace-devbox", TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: class}
-	if candidates, matched := providerClassCandidatesForConfig(cfg); matched {
-		return candidates[0]
-	}
-	if class == "" {
-		return "M"
-	}
-	return strings.ToUpper(strings.TrimSpace(class))
-}
 func (p testNamespaceProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
@@ -1502,8 +1473,6 @@ func (testMorphProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) e
 func (testMorphProvider) ServerTypeForConfig(cfg Config) string {
 	return firstNonBlank(cfg.Morph.Snapshot, "snapshot")
 }
-
-func (testMorphProvider) ServerTypeForClass(string) string { return "snapshot" }
 
 func (p testMorphProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
@@ -1816,14 +1785,11 @@ func (testCloudflareProvider) ServerTypeForConfig(cfg Config) string {
 	if IsCanonicalProviderClass(cfg.Class) {
 		return ""
 	}
-	return cloudflareContainerInstanceTypeForClass(cfg.Class)
-}
-func (testCloudflareProvider) ServerTypeForClass(class string) string {
-	normalized := strings.ToLower(strings.TrimSpace(class))
-	if normalized == "" {
-		normalized = "standard"
+	class := cfg.Class
+	cfg.Class = strings.ToLower(strings.TrimSpace(class))
+	if cfg.Class == "" {
+		cfg.Class = "standard"
 	}
-	cfg := Config{Provider: "cloudflare", TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: normalized}
 	if candidates, matched := providerClassCandidatesForConfig(cfg); matched {
 		return candidates[0]
 	}

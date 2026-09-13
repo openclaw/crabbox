@@ -16,7 +16,6 @@ type selectorOverrideProvider struct {
 }
 
 func (p selectorOverrideProvider) ServerTypeForConfig(cfg Config) string { return p.resolve(cfg) }
-func (selectorOverrideProvider) ServerTypeForClass(class string) string  { return class }
 func (p selectorOverrideProvider) ServerTypeOverrideForConfig(cfg Config) (string, bool) {
 	if p.override == nil {
 		return "", false

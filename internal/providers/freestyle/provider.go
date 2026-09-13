@@ -18,11 +18,10 @@ func (Provider) Aliases() []string {
 	return nil
 }
 
-// ServerTypeForConfig / ServerTypeForClass implement ProviderServerTypeProvider
+// ServerTypeForConfig implements ProviderServerTypeProvider
 // so core needs no provider == "freestyle" special-case. Delegated-run Freestyle
 // VMs have no server-type concept, so both return "".
 func (Provider) ServerTypeForConfig(core.Config) string { return "" }
-func (Provider) ServerTypeForClass(string) string       { return "" }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Authentication:             core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),

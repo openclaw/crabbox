@@ -165,10 +165,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return gcpMachineTypeCandidatesForClass(cfg.Class)[0]
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	return gcpMachineTypeCandidatesForClass(class)[0]
-}
-
 func (Provider) ClassProfiles() []core.ProviderClassProfile {
 	return classProfiles
 }

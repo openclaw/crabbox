@@ -48,8 +48,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return applevmhelper.ImageIdentity(strings.TrimSpace(cfg.AppleVM.Image), cfg.AppleVM.ImageSHA256)
 }
 
-func (Provider) ServerTypeForClass(string) string { return "" }
-
 func (Provider) ValidateConfig(cfg core.Config) error {
 	if err := validateConfigBeforeDefaults(cfg); err != nil {
 		return err

@@ -149,10 +149,6 @@ func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
 	return machineType, machineType != ""
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	return machineTypeForClass(class)
-}
-
 func (Provider) ClassProfiles() []core.ProviderClassProfile {
 	return classProfiles
 }

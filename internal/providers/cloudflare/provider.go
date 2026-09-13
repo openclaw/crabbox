@@ -55,14 +55,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return cloudflareTypeForClass(cfg.Class)
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	cfg := core.Config{Provider: providerName, TargetOS: core.TargetLinux, Architecture: core.ArchitectureAMD64, Class: class}
-	if candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg); matched {
-		return candidates[0]
-	}
-	return cloudflareTypeForClass(class)
-}
-
 func cloudflareTypeForClass(class string) string {
 	normalizedClass := strings.ToLower(strings.TrimSpace(class))
 	if normalizedClass != class {

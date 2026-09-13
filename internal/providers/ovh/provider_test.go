@@ -56,8 +56,8 @@ func TestProviderFlagsApplyNonSecretConfig(t *testing.T) {
 
 func TestProviderServerTypeForConfig(t *testing.T) {
 	provider := Provider{}
-	if got := provider.ServerTypeForClass("standard"); got != "b3-8" {
-		t.Fatalf("ServerTypeForClass standard=%q", got)
+	if got := provider.ServerTypeForConfig(core.Config{Class: "standard"}); got != "b3-8" {
+		t.Fatalf("ServerTypeForConfig standard=%q", got)
 	}
 	if got := provider.ServerTypeForConfig(core.Config{ServerType: "b3-16", ServerTypeExplicit: true, OVH: core.OVHConfig{Flavor: "b3-8"}}); got != "b3-16" {
 		t.Fatalf("explicit ServerTypeForConfig=%q", got)
@@ -140,7 +140,7 @@ func TestOVHBindingEndpointAndClassContract(t *testing.T) {
 		}
 	}
 	p := Provider{}
-	if p.ServerTypeForClass("standard") != "b3-8" || p.ServerTypeForClass("unknown-class") != "b3-8" {
+	if p.ServerTypeForConfig(core.Config{Class: "standard"}) != "b3-8" || p.ServerTypeForConfig(core.Config{Class: "unknown-class"}) != "b3-8" {
 		t.Fatal("fixed class policy changed")
 	}
 	for _, tc := range []struct {

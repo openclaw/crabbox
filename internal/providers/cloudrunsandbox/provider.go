@@ -33,8 +33,6 @@ func (Provider) DiagnosticSecrets(core.Config) []string {
 // ServerTypeForConfig / ServerTypeForClass: Cloud Run sandboxes share the
 // parent service resources; there is no Crabbox class/type surface.
 func (Provider) ServerTypeForConfig(core.Config) string { return "" }
-func (Provider) ServerTypeForClass(string) string       { return "" }
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Authentication: core.ProviderAuthentication{

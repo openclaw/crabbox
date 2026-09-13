@@ -133,7 +133,3 @@ func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
 	selected := core.PhalaInstanceTypeWasExplicit(cfg) && core.PhalaInstanceTypeOverridesClass(cfg) && instanceType != ""
 	return instanceType, selected
 }
-
-func (Provider) ServerTypeForClass(class string) string {
-	return instanceTypeForClass(class)
-}

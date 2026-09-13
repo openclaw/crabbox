@@ -76,10 +76,6 @@ func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
 	return flavor, flavor != ""
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	return ovhServerTypeForClass(class)
-}
-
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewBackend(p.Spec(), cfg, rt), nil
 }

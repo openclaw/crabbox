@@ -66,7 +66,3 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	}
 	return "sandbox"
 }
-
-func (Provider) ServerTypeForClass(string) string {
-	return "sandbox"
-}

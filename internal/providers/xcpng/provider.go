@@ -168,8 +168,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return xcpNgServerTypeForConfig(cfg)
 }
 
-func (Provider) ServerTypeForClass(string) string { return "template" }
-
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewLeaseBackend(p.Spec(), cfg, rt), nil
 }

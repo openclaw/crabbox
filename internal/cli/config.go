@@ -7215,40 +7215,7 @@ func serverTypeForConfig(cfg Config) string {
 }
 
 func serverTypeForProviderClass(provider, class string) string {
-	if resolved, err := ProviderFor(provider); err == nil {
-		provider = resolved.Name()
-		if typer, ok := resolved.(ProviderServerTypeProvider); ok {
-			return typer.ServerTypeForClass(class)
-		}
-	}
-	if isBlacksmithProvider(provider) || isStaticProvider(provider) || provider == "islo" || provider == "sprites" || provider == "local-container" || provider == "multipass" {
-		return ""
-	}
-	if provider == "e2b" {
-		return "base"
-	}
-	if provider == "exe-dev" {
-		return "default"
-	}
-	if provider == "modal" {
-		return "python:3.13-slim"
-	}
-	if provider == "daytona" {
-		return "snapshot"
-	}
-	if provider == "proxmox" {
-		return "template"
-	}
-	if provider == "firecracker" {
-		return "microvm"
-	}
-	if provider == "incus" {
-		return "container"
-	}
-	if provider == "parallels" {
-		return "template"
-	}
-	return ""
+	return serverTypeForConfig(Config{Provider: provider, TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: class})
 }
 
 func incusServerTypeForConfig(cfg Config) string {
@@ -7430,7 +7397,7 @@ func cloudflareContainerInstanceTypeForClass(class string) string {
 	provider, err := ProviderFor("cloudflare")
 	if err == nil {
 		if resolver, ok := provider.(ProviderServerTypeProvider); ok {
-			return resolver.ServerTypeForClass(class)
+			return resolver.ServerTypeForConfig(Config{Provider: "cloudflare", TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: class})
 		}
 	}
 	return strings.TrimSpace(class)

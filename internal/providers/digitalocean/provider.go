@@ -92,10 +92,6 @@ func (p Provider) ServerTypeForConfig(cfg core.Config) string {
 	return digitalOceanServerTypeForClass(cfg.Class)
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	return digitalOceanServerTypeForClass(class)
-}
-
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewDigitalOceanLeaseBackend(p.Spec(), cfg, rt), nil
 }

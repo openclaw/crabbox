@@ -39,8 +39,8 @@ func TestServerTypeForConfigUsesMachineOrExplicitType(t *testing.T) {
 	if got := provider.ServerTypeForConfig(core.Config{ServerType: "premiumLinux", ServerTypeExplicit: true, GitHubCodespaces: core.GitHubCodespacesConfig{Machine: "standardLinux32gb"}}); got != "premiumLinux" {
 		t.Fatalf("explicit ServerTypeForConfig=%q", got)
 	}
-	if got := provider.ServerTypeForClass("beast"); got != defaultCodespaceMachine {
-		t.Fatalf("ServerTypeForClass=%q", got)
+	if got := provider.ServerTypeForConfig(core.Config{Class: "beast"}); got != defaultCodespaceMachine {
+		t.Fatalf("ServerTypeForConfig=%q", got)
 	}
 }
 

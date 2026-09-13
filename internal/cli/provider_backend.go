@@ -177,7 +177,6 @@ type DesktopCredentialResolver interface {
 
 type ProviderServerTypeProvider interface {
 	ServerTypeForConfig(cfg Config) string
-	ServerTypeForClass(class string) string
 }
 
 // ClassSpec reports the concrete machine one class resolves to on this

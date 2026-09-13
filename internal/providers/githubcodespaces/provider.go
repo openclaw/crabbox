@@ -95,10 +95,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return defaultCodespaceMachine
 }
 
-func (Provider) ServerTypeForClass(string) string {
-	return defaultCodespaceMachine
-}
-
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	cfg.Provider = providerName
 	if err := ValidateGitHubCodespacesConfig(cfg); err != nil {

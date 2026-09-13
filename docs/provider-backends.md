@@ -158,6 +158,11 @@ Testbox does this because its native run command has no supported sync bypass.
 
 ### Optional interfaces
 
+`ProviderServerTypeProvider` has one operation, `ServerTypeForConfig(Config)`.
+Resolve class defaults and explicit native size selectors from that request;
+providers do not need a separate class-only resolver. `ClassProfiles` remains
+the declarative catalog for supported target and architecture combinations.
+
 Add optional capabilities as small interfaces instead of widening every backend.
 
 Provider-owned idle activity during an SSH run is optional:

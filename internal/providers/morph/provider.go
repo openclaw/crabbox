@@ -68,7 +68,3 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	}
 	return "snapshot"
 }
-
-func (Provider) ServerTypeForClass(string) string {
-	return "snapshot"
-}

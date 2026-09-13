@@ -1936,7 +1936,7 @@ func TestProviderClassCatalogAndSizeSelection(t *testing.T) {
 			cfg.Provider = providerName
 			cfg.Class = class
 			core.MarkClassExplicit(&cfg)
-			if got := provider.ServerTypeForClass(class); got != wantSizes[index] {
+			if got := provider.ServerTypeForConfig(cfg); got != wantSizes[index] {
 				t.Fatalf("class size=%q want=%q", got, wantSizes[index])
 			}
 			if err := provider.ApplyConfigDefaults(&cfg); err != nil || cfg.Machine0.Size != wantSizes[index] || cfg.ServerType != wantSizes[index] {

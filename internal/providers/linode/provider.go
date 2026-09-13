@@ -64,10 +64,6 @@ func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
 	return serverType, serverType != ""
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	return linodeServerTypeForClass(class)
-}
-
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewLinodeLeaseBackend(p.Spec(), cfg, rt), nil
 }

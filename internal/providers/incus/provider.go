@@ -44,11 +44,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return core.IncusServerTypeForConfig(cfg)
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	_ = class
-	return "container"
-}
-
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return nil, core.Exit(2, "provider=%s supports target=linux only", providerName)

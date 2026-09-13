@@ -115,9 +115,6 @@ func TestProviderDoesNotReportServerTypeMetadata(t *testing.T) {
 	if got := p.ServerTypeForConfig(core.Config{Provider: providerName, Class: "beast"}); got != "" {
 		t.Fatalf("ServerTypeForConfig=%q want empty", got)
 	}
-	if got := p.ServerTypeForClass("beast"); got != "" {
-		t.Fatalf("ServerTypeForClass=%q want empty", got)
-	}
 }
 
 func TestOpenComputerWorkdirRejectsRelative(t *testing.T) {

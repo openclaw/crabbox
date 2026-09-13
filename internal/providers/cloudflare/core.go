@@ -12,5 +12,5 @@ const (
 )
 
 func cloudflareContainerInstanceTypeForClass(class string) string {
-	return (Provider{}).ServerTypeForClass(class)
+	return (Provider{}).ServerTypeForConfig(core.Config{Provider: providerName, TargetOS: core.TargetLinux, Architecture: core.ArchitectureAMD64, Class: class})
 }

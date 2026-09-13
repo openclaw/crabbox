@@ -45,8 +45,6 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 
 func (Provider) ServerTypeForConfig(core.Config) string { return "" }
 
-func (Provider) ServerTypeForClass(string) string { return "" }
-
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return nil, core.Exit(2, "%s supports target=linux only", providerName)
