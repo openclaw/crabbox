@@ -2896,8 +2896,8 @@ func localContainerReadyCheck(cfg core.Config) string {
 			)
 		default:
 			checks = append(checks,
-				"pgrep -f 'Xvfb :99' >/dev/null",
-				"pgrep -f 'x11vnc.*-rfbport 5900' >/dev/null",
+				// Existing leases keep their original desktop server until recreated.
+				"(pgrep -f 'Xtigervnc :99' >/dev/null || (pgrep -f 'Xvfb :99' >/dev/null && pgrep -f 'x11vnc.*-rfbport 5900' >/dev/null))",
 				"ss -ltn | grep -q '127.0.0.1:5900'",
 				"test -s /var/lib/crabbox/vnc.password",
 			)
@@ -3290,7 +3290,7 @@ if [ "${CRABBOX_DESKTOP:-0}" = "1" ] && command -v apt-get >/dev/null 2>&1; then
       apt-get install -y --no-install-recommends labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr dbus-user-session xwayland xdg-desktop-portal-wlr fonts-dejavu-core fonts-liberation iproute2 openssl procps netcat-openbsd novnc websockify
     fi
   else
-    apt-get install -y --no-install-recommends xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme procps netcat-openbsd novnc websockify
+    apt-get install -y --no-install-recommends tigervnc-standalone-server tigervnc-tools xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme procps netcat-openbsd novnc websockify
   fi
 fi
 ` + localContainerBrowserInstallScript + `
@@ -3570,7 +3570,7 @@ DESKTOP
     chmod 0755 /usr/local/bin/crabbox-start-desktop
     CRABBOX_SSH_USER="$user" /usr/local/bin/crabbox-start-desktop
   else
-  { head -c 8 /var/lib/crabbox/vnc.password; printf '\n'; head -c 8 /var/lib/crabbox/vnc.password; printf '\n\n'; } | x11vnc -storepasswd /var/lib/crabbox/vnc.pass >/dev/null 2>&1
+  head -c 8 /var/lib/crabbox/vnc.password | tigervncpasswd -f > /var/lib/crabbox/vnc.pass
   chown "$user" /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
   chmod 0600 /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
   printf 'CRABBOX_DESKTOP_ENV=xfce\nDISPLAY=:99\n' >/var/lib/crabbox/desktop.env
@@ -3599,8 +3599,8 @@ set -eu
 user="${CRABBOX_SSH_USER:-crabbox}"
 runtime="/tmp/crabbox-runtime-$user"
 install -d -m 0700 -o "$user" "$runtime"
-if ! pgrep -u "$user" -f 'Xvfb :99' >/dev/null 2>&1; then
-  su "$user" -s /bin/sh -c "XDG_RUNTIME_DIR='$runtime' Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac >/tmp/crabbox-xvfb.log 2>&1 &"
+if ! pgrep -u "$user" -f 'Xtigervnc :99' >/dev/null 2>&1; then
+  su "$user" -s /bin/sh -c "XDG_RUNTIME_DIR='$runtime' Xtigervnc :99 -geometry 1920x1080 -depth 24 -localhost yes -rfbport 5900 -SecurityTypes VncAuth -PasswordFile=/var/lib/crabbox/vnc.pass -AlwaysShared -AcceptSetDesktopSize -nolisten tcp -ac >/tmp/crabbox-xvfb.log 2>&1 &"
 fi
 sleep 1
 if ! pgrep -u "$user" -x xfce4-session >/dev/null 2>&1; then
@@ -3608,9 +3608,6 @@ if ! pgrep -u "$user" -x xfce4-session >/dev/null 2>&1; then
   su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' dbus-launch startxfce4 >/tmp/crabbox-desktop.log 2>&1 &"
 else
   runuser -u "$user" -- env DISPLAY=:99 /usr/local/bin/crabbox-desktop-session "${1:-}"
-fi
-if ! ss -ltn | grep -q '127.0.0.1:5900'; then
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' x11vnc -display :99 -localhost -rfbport 5900 -forever -shared -rfbauth /var/lib/crabbox/vnc.pass -wait 16 -defer 8 -nowait_bog -o /tmp/crabbox-x11vnc.log >/tmp/crabbox-x11vnc.stdout.log 2>&1 &"
 fi
 DESKTOP
   chmod 0755 /usr/local/bin/crabbox-start-desktop

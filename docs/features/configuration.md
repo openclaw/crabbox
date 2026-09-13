@@ -609,7 +609,7 @@ socket from `DOCKER_HOST` or the Docker context and rejects remote TCP contexts.
 With the socket enabled and no explicit work root, Crabbox chooses a host-visible
 cache work root so nested bind mounts can see the synced checkout.
 
-Use `--desktop --browser` to bootstrap Xvfb, XFCE, x11vnc, noVNC/websockify,
+Use `--desktop --browser` to bootstrap TigerVNC, XFCE, noVNC/websockify,
 desktop input tools, screenshot tools, ffmpeg, and a packaged browser inside
 the container.
 

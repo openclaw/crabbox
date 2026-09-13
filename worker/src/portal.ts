@@ -1087,6 +1087,10 @@ export function portalVNC(
         meta: `<span>WebVNC ${escapeHTML(slug)}</span><span class="vnc-dot"></span>${providerBadge(lease.provider)}<span class="vnc-dot"></span>${targetBadge(target, lease.windowsMode)}<span class="vnc-dot"></span><span class="vnc-id">${escapeHTML(lease.id)}</span>`,
         actions: `
           <span id="status" class="status-pill">waiting for bridge</span>
+          <select id="vnc-sizing" aria-label="desktop sizing" title="Match requests the window size from a supported server; Fit scales without resizing. Wayland sizing stays with the first resizing viewer until it disconnects.">
+            <option value="match"${target === "linux" ? " selected" : ""}>Match window</option>
+            <option value="fit"${target !== "linux" ? " selected" : ""}>Fit desktop</option>
+          </select>
           <button id="vnc-takeover" class="oc-action oc-action-outline vnc-control" type="button" hidden>take control</button>
           <button id="vnc-copy-remote" class="icon-btn" type="button" title="copy remote clipboard" aria-label="copy remote clipboard" disabled>${copyIcon}</button>
           <button id="vnc-paste" class="icon-btn" type="button" title="paste clipboard" aria-label="paste clipboard">${pasteIcon}</button>
@@ -1096,7 +1100,10 @@ export function portalVNC(
           ${viewerOnly ? "" : `<a class="oc-action oc-action-outline" href="/portal">leases</a>${portalLogoutButton()}`}
         `,
       })}
-      <section id="screen" class="screen" aria-label="WebVNC display" tabindex="0"></section>
+      <div class="vnc-display">
+        <p id="vnc-sizing-notice" class="vnc-sizing-notice" role="status" hidden>Wayland sizing may remain owned by the previous viewer. Close that viewer, then reconnect.</p>
+        <section id="screen" class="screen" aria-label="WebVNC display" tabindex="0"></section>
+      </div>
       ${
         canManage
           ? `<footer class="vnc-bridge">
@@ -1171,6 +1178,9 @@ export function portalVNC(
       statusURL.searchParams.set("viewer", viewerID);
       const fragment = new URLSearchParams(window.location.hash.slice(1));
       const target = ${JSON.stringify(target)};
+      const mayUseWayland = ${JSON.stringify(target === "linux" && lease.desktopEnv !== "xfce")};
+      const sizing = document.getElementById("vnc-sizing");
+      const sizingNotice = document.getElementById("vnc-sizing-notice");
       let username = fragment.get("username") || "";
       let password = fragment.get("password") || "";
       const handoffTicket = fragment.get("handoff") || "";
@@ -1346,6 +1356,14 @@ export function portalVNC(
       let statusTimer;
       let controllerLabel = "";
       let isController = false;
+      let controllerID = "";
+      let sizingOwnerChanged = false;
+      let connectionEpoch = 0;
+      let collaborationRequest = 0;
+      let statusPending = false;
+      let controlPending = false;
+      const collaborationControllers = new Set();
+      const collaborationTimeoutMs = 10000;
       let takeControlAttempted = false;
       let credentialsSent = false;
       let authenticationFailed = false;
@@ -1353,6 +1371,32 @@ export function portalVNC(
       let lastDesktopTheme = "";
       let desktopThemeTimer;
       const terminalStatusCodes = new Set([403, 404, 409, 410]);
+      function applySizing() {
+        if (rfb) {
+          const controlling = connected && isController;
+          rfb.viewOnly = !controlling;
+          const resize = controlling && sizing.value === "match";
+          // The noVNC setter sends a resize; unchanged status polls must not resend it.
+          if (rfb.resizeSession !== resize) rfb.resizeSession = resize;
+        }
+        sizingNotice.hidden = !mayUseWayland || !sizingOwnerChanged || sizing.value !== "match";
+      }
+      sizing.addEventListener("change", applySizing);
+      function retireConnection() {
+        connectionEpoch += 1;
+        collaborationRequest += 1;
+        for (const controller of collaborationControllers) controller.abort();
+        connected = false;
+        isController = false;
+        statusPending = false;
+        controlPending = false;
+        window.clearInterval(statusTimer);
+        clearDesktopThemeSyncState();
+        applySizing();
+        const previous = rfb;
+        rfb = undefined;
+        try { previous?.disconnect(); } catch (_) {}
+      }
       function focusVNC() {
         if (!isController || document.body.dataset.portalDialogOpen === "true") return;
         try {
@@ -1385,6 +1429,29 @@ export function portalVNC(
           return fallback;
         }
       }
+      async function collaborationOperation(operation) {
+        const controller = new AbortController();
+        collaborationControllers.add(controller);
+        let timedOut = false;
+        // Coalesced requests must release their slot even if headers or the body
+        // stall. Retirement aborts transport; epochs still fence obsolete replies.
+        const timer = window.setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, collaborationTimeoutMs);
+        try {
+          const result = await operation(controller.signal);
+          // A JSON fallback must not convert a cancelled takeover into success.
+          if (controller.signal.aborted) throw new Error("WebVNC collaboration request cancelled");
+          return result;
+        } catch (error) {
+          if (timedOut) throw new Error("WebVNC collaboration request timed out; try again");
+          throw error;
+        } finally {
+          window.clearTimeout(timer);
+          collaborationControllers.delete(controller);
+        }
+      }
       function fallbackCopyText(text) {
         const ta = document.createElement("textarea");
         ta.value = text;
@@ -1410,33 +1477,36 @@ export function portalVNC(
       }
       async function bridgeState() {
         try {
-          const response = await fetch(statusURL, { cache: "no-store" });
-          if (response.ok) {
-            return await response.json();
-          }
-          const message = await responseMessage(response, "WebVNC bridge unavailable");
-          if (terminalStatusCodes.has(response.status)) {
-            return { terminal: true, message };
-          }
-          return { transient: true, message };
+          return await collaborationOperation(async (signal) => {
+            const response = await fetch(statusURL, { cache: "no-store", signal });
+            if (response.ok) {
+              return await response.json();
+            }
+            const message = await responseMessage(response, "WebVNC bridge unavailable");
+            if (terminalStatusCodes.has(response.status)) {
+              return { terminal: true, message };
+            }
+            return { transient: true, message };
+          });
         } catch (error) {
           return { transient: true, message: error instanceof Error ? error.message : String(error) };
         }
       }
       function applyCollaborationState(state) {
-        if (!state) return;
+        if (!state || !connected) return;
         const role = state.viewerRole || "none";
         const takeoverBtn = document.getElementById("vnc-takeover");
         const previousControllerLabel = controllerLabel;
         const wasController = isController;
         controllerLabel = state.controllerLabel || "";
+        const nextControllerID = state.controllerID || "";
+        if (controllerID && nextControllerID && controllerID !== nextControllerID) sizingOwnerChanged = true;
+        if (nextControllerID) controllerID = nextControllerID;
         const controlling = role === "controller";
         const connectedViewer = role === "controller" || role === "observer";
         isController = controlling;
-        if (rfb) {
-          rfb.viewOnly = !controlling;
-          if (controlling) window.setTimeout(focusVNC, 0);
-        }
+        applySizing();
+        if (controlling) window.setTimeout(focusVNC, 0);
         if (takeoverBtn) {
           takeoverBtn.hidden = !connectedViewer;
           takeoverBtn.disabled = controlling || !connectedViewer;
@@ -1456,9 +1526,18 @@ export function portalVNC(
         }
       }
       async function refreshCollaborationState() {
-        const state = await bridgeState();
-        applyCollaborationState(state);
-        return state;
+        if (!connected || controlPending || statusPending) return;
+        const epoch = connectionEpoch;
+        const request = ++collaborationRequest;
+        statusPending = true;
+        try {
+          const state = await bridgeState();
+          if (!connected || epoch !== connectionEpoch || request !== collaborationRequest) return;
+          applyCollaborationState(state);
+          return state;
+        } finally {
+          if (epoch === connectionEpoch) statusPending = false;
+        }
       }
       async function refreshCollaborationStateAndMaybeTakeControl() {
         const state = await refreshCollaborationState();
@@ -1466,18 +1545,34 @@ export function portalVNC(
         return state;
       }
       async function takeControl(label = "you took control") {
-        const response = await fetch(controlURL, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ viewerID }),
-        });
-        const state = response.ok ? await response.json() : undefined;
-        if (!response.ok) throw new Error(state?.message || "takeover failed");
-        applyCollaborationState(state);
-        setStatus(label, "ok");
-        queueDesktopTheme();
-        focusVNC();
-        return state;
+        if (!connected || controlPending) return;
+        const epoch = connectionEpoch;
+        const request = ++collaborationRequest;
+        controlPending = true;
+        try {
+          const { response, state } = await collaborationOperation(async (signal) => {
+            const response = await fetch(controlURL, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ viewerID }),
+              signal,
+            });
+            const state = await response.json().catch(() => ({}));
+            return { response, state };
+          });
+          if (!connected || epoch !== connectionEpoch || request !== collaborationRequest) return;
+          if (!response.ok) throw new Error(state.message || "takeover failed");
+          applyCollaborationState(state);
+          setStatus(label, "ok");
+          queueDesktopTheme();
+          focusVNC();
+          return state;
+        } catch (error) {
+          if (!connected || epoch !== connectionEpoch || request !== collaborationRequest) return;
+          throw error;
+        } finally {
+          if (epoch === connectionEpoch) controlPending = false;
+        }
       }
       async function takeControlIfRequested(state) {
         if (!takeControlOnConnect || takeControlAttempted) return;
@@ -1486,8 +1581,8 @@ export function portalVNC(
           return;
         }
         if (state?.viewerRole !== "observer") return;
-        await takeControl();
-        takeControlAttempted = true;
+        const result = await takeControl();
+        if (result?.viewerRole === "controller") takeControlAttempted = true;
       }
       function resolvedPortalTheme() {
         return document.documentElement.dataset.theme === "light" ? "light" : "dark";
@@ -1519,11 +1614,8 @@ export function portalVNC(
       }
       function stopPolling(label) {
         stopped = true;
-        connected = false;
         window.clearTimeout(retryTimer);
-        window.clearInterval(statusTimer);
-        clearDesktopThemeSyncState();
-        try { rfb?.disconnect(); } catch (_) {}
+        retireConnection();
         screen.replaceChildren();
         setStatus(label, "bad");
       }
@@ -1537,13 +1629,18 @@ export function portalVNC(
       }
       async function connect() {
         if (stopped) return;
-        connected = false;
+        retireConnection();
+        const epoch = connectionEpoch;
+        const current = () => !stopped && epoch === connectionEpoch;
         credentialsSent = false;
         authenticationFailed = false;
         screen.replaceChildren();
         try {
           await loadHandoffCredentials();
+          if (!current()) return;
           const state = await bridgeState();
+          if (!current()) return;
+          if (state?.controllerID) controllerID = state.controllerID;
           if (state?.terminal) {
             stopPolling(state.message || "WebVNC bridge unavailable");
             return;
@@ -1566,8 +1663,8 @@ export function portalVNC(
           rfb.showDotCursor = true;
           rfb.focusOnClick = true;
           rfb.scaleViewport = true;
-          rfb.resizeSession = false;
           rfb.viewOnly = true;
+          rfb.resizeSession = false;
           if (target === "macos") {
             rfb.compressionLevel = 1;
             rfb.qualityLevel = 2;
@@ -1576,6 +1673,7 @@ export function portalVNC(
             rfb.qualityLevel = 6;
           }
           rfb.addEventListener("connect", () => {
+            if (!current()) return;
             connected = true;
             retryAttempt = 0;
             setStatus("connected", "ok");
@@ -1587,6 +1685,7 @@ export function portalVNC(
             }, 1500);
           });
           rfb.addEventListener("clipboard", (event) => {
+            if (!current()) return;
             remoteClipboardText = event.detail?.text || "";
             if (copyRemoteBtn) {
               copyRemoteBtn.disabled = !remoteClipboardText;
@@ -1596,10 +1695,9 @@ export function portalVNC(
             }
           });
           rfb.addEventListener("disconnect", () => {
-            if (stopped) return;
+            if (!current()) return;
             const wasConnected = connected;
-            connected = false;
-            clearDesktopThemeSyncState();
+            retireConnection();
             if (!wasConnected && (authenticationFailed || credentialsSent)) {
               stopPolling(authenticationFailed ? failedVNCCredentialMessage : "VNC authentication timed out; reopen WebVNC from crabbox webvnc status");
               return;
@@ -1607,6 +1705,7 @@ export function portalVNC(
             scheduleRetry(wasConnected ? "VNC bridge disconnected" : "waiting for VNC bridge");
           });
           rfb.addEventListener("credentialsrequired", (event) => {
+            if (!current()) return;
             const types = event.detail?.types || ["password"];
             const values = {};
             if (types.includes("username")) {
@@ -1627,6 +1726,7 @@ export function portalVNC(
             rfb.sendCredentials(values);
           });
           rfb.addEventListener("securityfailure", () => {
+            if (!current()) return;
             authenticationFailed = true;
             const historyState = window.history.state;
             if (historyState && typeof historyState === "object" && historyState.crabboxWebVNCCredentials?.id === credentialStorageID) {
@@ -1637,16 +1737,15 @@ export function portalVNC(
             stopPolling(failedVNCCredentialMessage);
           });
         } catch (error) {
+          if (!current()) return;
           scheduleRetry(error instanceof Error ? error.message : String(error));
         }
       }
       window.addEventListener("beforeunload", () => {
         stopped = true;
         window.clearTimeout(retryTimer);
-        window.clearInterval(statusTimer);
-        window.clearTimeout(desktopThemeTimer);
+        retireConnection();
         reuseChannel?.close();
-        rfb?.disconnect();
       });
       const takeoverBtn = document.getElementById("vnc-takeover");
       takeoverBtn?.addEventListener("click", async () => {
@@ -1661,7 +1760,6 @@ export function portalVNC(
         window.clearTimeout(retryTimer);
         retryAttempt = 0;
         stopped = false;
-        try { rfb?.disconnect(); } catch (_) {}
         connect();
       });
       const fullscreenBtn = document.getElementById("vnc-fullscreen");
@@ -3652,7 +3750,7 @@ function html(
     .event-table th:nth-child(2) { width:24%; }
     .event-table th:nth-child(3) { width:96px; }
     .event-table th:nth-child(4) { width:150px; }
-    .vnc-page { width:100vw; height:100vh; padding:0 12px 10px; display:grid; grid-template-rows:auto minmax(0,1fr) auto; gap:10px; overflow:auto; }
+    .vnc-page { width:100vw; height:100vh; padding:0 12px 10px; display:grid; grid-template-columns:minmax(0,1fr); grid-template-rows:auto minmax(0,1fr) auto; gap:10px; overflow:auto; }
     .vnc-bar { position:sticky; top:0; z-index:10; display:flex; align-items:center; justify-content:space-between; gap:14px; min-height:42px; margin:0 -12px; padding:6px 16px; border-bottom:1px solid var(--line); background:color-mix(in srgb, var(--panel) 92%, transparent); box-shadow:0 8px 24px rgba(0,0,0,0.25); }
     .vnc-meta { display:flex; align-items:baseline; gap:12px; min-width:0; }
     .vnc-meta h1 { font-size:18px; font-weight:700; letter-spacing:-0.01em; white-space:nowrap; }
@@ -3660,12 +3758,17 @@ function html(
     .vnc-meta .vnc-id { font-family:var(--mono); font-size:11px; opacity:0.85; }
     .vnc-meta .vnc-dot { width:3px; height:3px; border-radius:50%; background:var(--hover-line); flex-shrink:0; }
     .portal-actions { display:flex; align-items:center; justify-content:flex-end; gap:6px; flex-shrink:0; flex-wrap:wrap; }
+    .vnc-bar .portal-actions { flex-shrink:1; max-width:100%; }
     .status-pill { display:inline-flex; align-items:center; gap:8px; height:32px; padding:0 12px 0 11px; border-radius:7px; background:var(--panel-2); border:1px solid var(--line); font-size:12px; color:var(--muted); white-space:nowrap; transition:color 0.2s, border-color 0.2s; }
     .status-pill::before { content:""; width:8px; height:8px; border-radius:50%; background:currentColor; box-shadow:0 0 0 3px color-mix(in srgb, currentColor 18%, transparent); flex-shrink:0; }
     .status-pill[data-tone="ok"] { color:var(--ok); border-color:color-mix(in srgb, var(--ok) 35%, var(--line)); }
     .status-pill[data-tone="warn"] { color:var(--warn); border-color:color-mix(in srgb, var(--warn) 35%, var(--line)); }
     .status-pill[data-tone="bad"] { color:var(--bad); border-color:color-mix(in srgb, var(--bad) 45%, var(--line)); }
     .vnc-control { min-width:112px; transition:background 0.15s,border-color 0.15s,color 0.15s; }
+    #vnc-sizing { width:142px; height:32px; padding:0 8px; font-size:12px; }
+    .vnc-display { min-width:0; min-height:0; display:flex; flex-direction:column; }
+    .vnc-display > .screen { flex:1; }
+    .vnc-sizing-notice { margin:0 0 8px; color:var(--warn); font-size:12px; overflow-wrap:anywhere; }
     .vnc-control[data-role="controller"]:disabled { opacity:1; cursor:default; color:var(--fg); border-color:var(--line); background:var(--panel-2); }
     .vnc-control[data-role="observer"] { color:var(--accent-soft-fg); border-color:color-mix(in srgb, var(--accent) 38%, var(--line)); background:color-mix(in srgb, var(--accent) 8%, transparent); }
     .icon-btn { display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; padding:0; border-radius:8px; background:transparent; color:var(--fg); border:1px solid var(--line); cursor:pointer; transition:background 0.15s, border-color 0.15s, color 0.15s; }

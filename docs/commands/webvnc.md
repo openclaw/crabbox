@@ -1,5 +1,12 @@
 # webvnc
 
+Linux portal viewers default to **Match window**: only the connected controller
+requests a new desktop size. Choose **Fit desktop** to scale without resizing.
+Direct SSH viewers default to noVNC's Local scaling. Generic local handoff
+viewers, macOS, and Windows default to Fit. Resizing requires server support;
+see [Linux window sizing](../features/vnc-linux.md#window-sizing) for direct SSH
+resizing controls, existing Xvfb leases, and WayVNC version and takeover limits.
+
 `crabbox webvnc` opens a desktop lease in a browser tab. Coordinator-backed
 leases bridge into the authenticated coordinator portal. Direct macOS providers
 such as Tart and Parallels use that same portal whenever coordinator login is

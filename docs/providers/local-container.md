@@ -370,7 +370,7 @@ state; the original removal failure is not converted into success.
    login profile. Profiles added after bootstrap can prepend to or intentionally
    replace that baseline; the profile selected during bootstrap keeps its final
    managed restore block.
-4. With `--desktop`, the container installs and starts Xvfb, XFCE, x11vnc,
+4. With `--desktop`, the container installs and starts resize-capable TigerVNC, XFCE,
    xdotool, screenshot tools, ffmpeg, noVNC, and websockify — no systemd
    required.
 5. With `--browser`, the container preserves a working Chrome, Chromium, Firefox
