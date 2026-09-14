@@ -4,7 +4,7 @@
 
 ### Fixes
 
-- Warn when `--expose` cannot change an existing coordinator-managed lease's Pond ports and point to `crabbox tunnel` for forwarding an existing service.
+- Warn when `--expose` cannot change an existing coordinator-managed lease's Pond ports and point to `crabbox tunnel` for forwarding an existing service. [PR 2256](https://github.com/openclaw/crabbox/pull/2256).
 
 ## 0.59.0 - 2026-09-13
 
