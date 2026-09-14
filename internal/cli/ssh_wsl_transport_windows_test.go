@@ -65,6 +65,7 @@ func readFakeWSLStageInput() []byte {
 }
 
 func runFakeWSLStageLauncher(mode string) {
+	started := time.Now()
 	role := ""
 	if len(os.Args) > 8 {
 		role = os.Args[8]
@@ -76,6 +77,13 @@ func runFakeWSLStageLauncher(mode string) {
 			_, _ = fmt.Fprintln(file, line)
 			_ = file.Close()
 		}
+	}
+	timingRole := role
+	if timingRole == "run" {
+		timingRole = "main"
+	}
+	if timingRole == "main" || timingRole == "cleanup" {
+		_ = appendFakeWSLStageTiming(logPath, timingRole, "helper-entry", started, started)
 	}
 	switch role {
 	case "run":
@@ -100,6 +108,7 @@ func runFakeWSLStageLauncher(mode string) {
 		log("main-started")
 		_ = os.Stdout.Close()
 		_ = os.Stderr.Close()
+		_ = appendFakeWSLStageTiming(logPath, timingRole, "wait-start", started, time.Now())
 		time.Sleep(20 * time.Second)
 	case "cleanup":
 		_ = readFakeWSLStageInput()
@@ -109,13 +118,30 @@ func runFakeWSLStageLauncher(mode string) {
 			_ = os.WriteFile(logPath+".cleanup.pid", []byte(strconv.Itoa(os.Getpid())), 0o600)
 			_ = os.Stdout.Close()
 			_ = os.Stderr.Close()
+			_ = appendFakeWSLStageTiming(logPath, timingRole, "wait-start", started, time.Now())
 			time.Sleep(20 * time.Second)
 		}
 	default:
 		log("unexpected-role:" + role)
 		os.Exit(91)
 	}
+	_ = appendFakeWSLStageTiming(logPath, timingRole, "normal-exit-intent", started, time.Now())
 	os.Exit(0)
+}
+
+// Timing is best-effort and uses a private file, never the helper's closed
+// stdout/stderr. Exit intent is not an observation that the process has exited.
+func appendFakeWSLStageTiming(logPath, role, event string, started, at time.Time) bool {
+	if logPath == "" {
+		return false
+	}
+	file, err := os.OpenFile(logPath+".timing", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return false
+	}
+	_, writeErr := fmt.Fprintf(file, "fixture-timing role=%s event=%s unix_ns=%d elapsed_ns=%d\n", role, event, at.UnixNano(), at.Sub(started).Nanoseconds())
+	closeErr := file.Close()
+	return writeErr == nil && closeErr == nil
 }
 
 func readFakeWSLStageFile(path string) string {
@@ -782,6 +808,34 @@ func TestWSLStageLauncherConfirmsOriginalAndCleanupTermination(t *testing.T) {
 			bin := installFakeWSLStageExecutable(t)
 			home, nonce := t.TempDir(), strings.Repeat("e", 32)
 			logPath := filepath.Join(t.TempDir(), "launcher.log")
+			started := time.Now()
+			type timingEvent struct {
+				event string
+				at    time.Time
+			}
+			var parentTiming []timingEvent
+			timing := func(event string, at time.Time) {
+				parentTiming = append(parentTiming, timingEvent{event, at})
+			}
+			t.Cleanup(func() {
+				for _, event := range parentTiming {
+					if !appendFakeWSLStageTiming(logPath, "parent", event.event, started, event.at) {
+						t.Log("fixture timing record unavailable")
+					}
+				}
+				file, err := os.Open(logPath + ".timing")
+				if err != nil {
+					t.Log("fixture timing log unavailable")
+					return
+				}
+				defer file.Close()
+				data, err := io.ReadAll(io.LimitReader(file, 8193))
+				if err != nil || len(data) > 8192 {
+					t.Log("fixture timing log incomplete")
+					return
+				}
+				t.Logf("fixture-owned timing (timestamps, not append order):\n%s", data)
+			})
 			t.Setenv("HOME", home)
 			t.Setenv("USERPROFILE", home)
 			t.Setenv(fakeWSLStageLauncherMode, test.mode)
@@ -817,6 +871,7 @@ func TestWSLStageLauncherConfirmsOriginalAndCleanupTermination(t *testing.T) {
 			}
 			ready := writeWSLStageReady(t, home, nonce, data)
 			defer func() {
+				timing("teardown-start", time.Now())
 				for _, role := range []string{"main", "cleanup"} {
 					if pid, err := strconv.Atoi(readFakeWSLStageFile(logPath + "." + role + ".pid")); err == nil && !fakeWSLStageProcessExited(pid) {
 						process, findErr := os.FindProcess(pid)
@@ -829,7 +884,11 @@ func TestWSLStageLauncherConfirmsOriginalAndCleanupTermination(t *testing.T) {
 
 			script := `[Environment]::CurrentDirectory=` + psQuote(bin) + `;` +
 				decodePowerShellCommand(t, wslStageLauncherCommand(nonce, spool.size, spool.digest(), wslStageCMD))
+			invocationStarted := time.Now()
 			output, err := runWindowsPowerShellScript(t, script)
+			invocationReturned := time.Now()
+			timing("invocation-start", invocationStarted)
+			timing("invocation-return", invocationReturned)
 			logs := readFakeWSLStageFile(logPath)
 			if err == nil || !strings.Contains(string(output), test.want) {
 				t.Fatalf("output=%q error=%v logs=%q want=%q", output, err, logs, test.want)
@@ -845,7 +904,21 @@ func TestWSLStageLauncherConfirmsOriginalAndCleanupTermination(t *testing.T) {
 			}
 			if test.wantSurvivor != "" {
 				pid, parseErr := strconv.Atoi(readFakeWSLStageFile(logPath + "." + test.wantSurvivor + ".pid"))
-				if parseErr != nil || fakeWSLStageProcessExited(pid) {
+				observationStarted := time.Now()
+				exited := false
+				if parseErr == nil {
+					exited = fakeWSLStageProcessExited(pid)
+				}
+				observationReturned := time.Now()
+				timing("observation-start", observationStarted)
+				event := "observation-not-exited-or-unobservable"
+				if parseErr != nil {
+					event = "observation-skipped-parse-error"
+				} else if exited {
+					event = "observation-exited-or-absent"
+				}
+				timing(event, observationReturned)
+				if parseErr != nil || exited {
 					t.Fatalf("exact %s launcher did not exercise failed termination: pid=%d error=%v", test.wantSurvivor, pid, parseErr)
 				}
 			}
