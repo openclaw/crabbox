@@ -12,6 +12,7 @@
 
 ### Fixes
 
+- Show help before pond release or disconnect can act, reject malformed lifecycle arguments, and preserve literal pond names and the `--` argument separator.
 - Keep existing-lease operations available when creation-only sizing is invalid for Hyper-V, Multipass, Freestyle, and OpenComputer. [PR 2244](https://github.com/openclaw/crabbox/pull/2244).
 - Reject decoded negative Hyper-V CPU and memory values from environment or flags before VM creation; preserve zero defaults, positive sizing, and positive-only YAML application. [PR 2242](https://github.com/openclaw/crabbox/pull/2242).
 

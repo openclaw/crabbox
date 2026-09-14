@@ -492,10 +492,11 @@ func (a App) pondConnect(ctx context.Context, args []string) error {
 
 func (a App) pondDisconnect(_ context.Context, args []string) error {
 	fs := newFlagSet("pond disconnect", a.Stderr)
-	if err := parseFlags(fs, args); err != nil {
+	fs.Usage = func() { fmt.Fprintln(a.Stderr, "Usage:\n  crabbox pond disconnect <name>") }
+	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
-	if fs.NArg() < 1 {
+	if fs.NArg() != 1 {
 		return Exit(2, "usage: crabbox pond disconnect <name>")
 	}
 	pond, err := requestedPondName(fs.Arg(0))

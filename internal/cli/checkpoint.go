@@ -2695,6 +2695,7 @@ func reorderInterspersedFlags(fs *flag.FlagSet, args []string) []string {
 		arg := args[i]
 		if arg == "--" {
 			positionals = append(positionals, args[i+1:]...)
+			positionals = append([]string{"--"}, positionals...)
 			break
 		}
 		if !strings.HasPrefix(arg, "-") || arg == "-" {
