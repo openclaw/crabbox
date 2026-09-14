@@ -4,8 +4,7 @@
 
 ### Changes
 
-- Add explicit include-only directory sync through the existing POSIX/WSL SSH manifest path, using isolated Git ignore matching without creating source Git metadata. [Issue 1334](https://github.com/openclaw/crabbox/issues/1334). Thanks @coygeek.
-
+- Add explicit include-only directory sync through the existing POSIX/WSL SSH manifest path, using isolated Git ignore matching without creating source Git metadata. [PR 2253](https://github.com/openclaw/crabbox/pull/2253). Thanks @coygeek.
 - Add opt-in Islo idle pausing and resume paused leases before reuse, without changing default creation or adding provider deletion deadlines. [PR 1706](https://github.com/openclaw/crabbox/pull/1706). Thanks @zozo123.
 - Qualify an existing AWS image through an isolated protected catalog with predeployment archive-helper admission, one normal-selection lease, exact promotion-revision evidence, full runtime smoke, receipt rollback, and borrowed-image-safe cleanup, without reminting. [PR 2225](https://github.com/openclaw/crabbox/pull/2225). Thanks @vincentkoc.
 - Add an opt-in `python3-venv` preflight that checks a disposable Python environment and pip with confirmed cleanup, without installing host tools or blocking workloads on missing capability. [PR 2217](https://github.com/openclaw/crabbox/pull/2217). Thanks @coygeek.
