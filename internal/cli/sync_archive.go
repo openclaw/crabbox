@@ -5,7 +5,6 @@ import (
 	"compress/gzip"
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -108,32 +107,8 @@ func appendSyncArchiveMember(ctx context.Context, tw *tar.Writer, root, rel stri
 		return fmt.Errorf("open sync path %s: %w", rel, err)
 	}
 	defer file.Close()
-	if err := copySyncArchiveMember(ctx, tw, file); err != nil {
+	if _, err := copySourceBytes(ctx, tw, file, -1); err != nil {
 		return fmt.Errorf("archive path %s: %w", rel, err)
 	}
 	return nil
-}
-
-func copySyncArchiveMember(ctx context.Context, dst io.Writer, src io.Reader) error {
-	buf := make([]byte, 128*1024)
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		n, readErr := src.Read(buf)
-		if n > 0 {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if _, err := dst.Write(buf[:n]); err != nil {
-				return err
-			}
-		}
-		if readErr == io.EOF {
-			return nil
-		}
-		if readErr != nil {
-			return readErr
-		}
-	}
 }

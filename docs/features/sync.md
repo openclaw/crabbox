@@ -409,6 +409,11 @@ dirty, staged, untracked, renamed, executable, and symlink paths. Local staging
 state is not copied: remote modifications are compared against the selected HEAD.
 Edits made after snapshot acceptance wait for the next sync.
 
+Snapshot file copying honors cancellation between reads and writes. Cancellation
+stops preparation and cleans owned staging; it does not fall back to another sync
+method. An already-blocked filesystem operation must return before cancellation
+can be observed. Cleanup failures retain their diagnostic path and error cause.
+
 The bundle contains the complete selected HEAD and base histories, plus locally
 present tags that peel to those histories. An explicit `sync.baseRef` must resolve
 locally; short names prefer the corresponding origin tracking ref. An inferred
@@ -476,6 +481,7 @@ fingerprint. Rsync reads the accepted snapshot, so edits made after acceptance
 wait for the next sync. If preparation cannot produce a stable supported
 snapshot, Crabbox falls back to ordinary full-manifest sync after successful
 cleanup. Cleanup failures stop the run and report the retained snapshot path.
+Cancellation stops preparation rather than triggering this fallback.
 
 The optimization is off by default and requires `sync.gitSeed: true`,
 `sync.delete: true`, an unrestricted, complete, conflict-free Git checkout

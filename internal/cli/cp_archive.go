@@ -350,7 +350,7 @@ func (s *copyArchiveCreateState) append(root *os.Root, name, archiveName string)
 		return fmt.Errorf("write copy archive header %s: %w", archiveName, err)
 	}
 	if info.Mode().IsRegular() {
-		copyErr := copySyncArchiveMember(s.ctx, s.writer, opened)
+		_, copyErr := copySourceBytes(s.ctx, s.writer, opened, -1)
 		if copyErr != nil {
 			return fmt.Errorf("archive copy source %s: %w", archiveName, copyErr)
 		}

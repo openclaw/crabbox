@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,13 +36,16 @@ func prepareLocalGitSeedSnapshot(ctx context.Context, repo Repo, cfg Config, _ S
 			return localGitSeedSnapshotFingerprint(repo, cfg, manifest, excludes, checkout)
 		},
 	}
-	return prepareGitSnapshotWithCleanup(repo, cfg, syncIncludes(cfg), policy, nil, func(snapshot *gitOverlaySnapshot) error {
+	return prepareGitSnapshotWithCleanup(ctx, repo, cfg, syncIncludes(cfg), policy, nil, func(snapshot *gitOverlaySnapshot) error {
 		return snapshot.cleanup()
 	})
 }
 
 func readLocalGitSeedCheckoutState(ctx context.Context, root string) (gitOverlayCheckoutState, error) {
 	head, err := localGitSeedSourceOutput(ctx, root, "rev-parse", "--verify", "--end-of-options", "HEAD^{commit}")
+	if err != nil && (ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return gitOverlayCheckoutState{}, errors.Join(err, ctx.Err())
+	}
 	if err != nil || !validGitObjectID(head) {
 		return gitOverlayCheckoutState{}, fmt.Errorf("invalid_head")
 	}

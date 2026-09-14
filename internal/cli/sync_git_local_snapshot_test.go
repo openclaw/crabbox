@@ -228,7 +228,7 @@ func TestGitSnapshotPolicyPreservesOverlaySelection(t *testing.T) {
 	fixture := newGitOverlayFixture(t)
 	mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "changed\n")
 	manifest, excludes := fixture.manifest(t)
-	snapshot, err := prepareGitOverlaySnapshot(fixture.repo, fixture.cfg, excludes, nil, fixture.plan)
+	snapshot, err := prepareGitOverlaySnapshot(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan)
 	if err != nil {
 		t.Fatal(err)
 	}

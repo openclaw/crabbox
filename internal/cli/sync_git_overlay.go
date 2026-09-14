@@ -2,10 +2,10 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -304,16 +304,18 @@ func (root *gitOverlaySnapshotRoot) adopt(parents *gitOverlaySnapshotParents) {
 }
 
 func prepareGitOverlaySnapshot(
+	ctx context.Context,
 	repo Repo,
 	cfg Config,
 	excludes SyncExcludeRules,
 	includes []string,
 	plan gitCoherencePlan,
 ) (gitOverlaySnapshot, error) {
-	return prepareGitOverlaySnapshotWithHook(repo, cfg, excludes, includes, plan, nil)
+	return prepareGitOverlaySnapshotWithHook(ctx, repo, cfg, excludes, includes, plan, nil)
 }
 
 func prepareGitOverlaySnapshotWithHook(
+	ctx context.Context,
 	repo Repo,
 	cfg Config,
 	excludes SyncExcludeRules,
@@ -321,12 +323,13 @@ func prepareGitOverlaySnapshotWithHook(
 	plan gitCoherencePlan,
 	hook gitOverlaySnapshotHook,
 ) (gitOverlaySnapshot, error) {
-	return prepareGitOverlaySnapshotWithCleanup(repo, cfg, excludes, includes, plan, hook, func(snapshot *gitOverlaySnapshot) error {
+	return prepareGitOverlaySnapshotWithCleanup(ctx, repo, cfg, excludes, includes, plan, hook, func(snapshot *gitOverlaySnapshot) error {
 		return snapshot.cleanup()
 	})
 }
 
 func prepareGitOverlaySnapshotWithCleanup(
+	ctx context.Context,
 	repo Repo,
 	cfg Config,
 	_ SyncExcludeRules,
@@ -345,7 +348,7 @@ func prepareGitOverlaySnapshotWithCleanup(
 			return syncFingerprintForManifest(repo, cfg, manifest, excludes, plan)
 		},
 	}
-	return prepareGitSnapshotWithCleanup(repo, cfg, includes, policy, hook, cleanup)
+	return prepareGitSnapshotWithCleanup(ctx, repo, cfg, includes, policy, hook, cleanup)
 }
 
 type gitSnapshotPolicy struct {
@@ -358,14 +361,23 @@ type gitSnapshotPolicy struct {
 }
 
 func prepareGitSnapshotWithCleanup(
+	ctx context.Context,
 	repo Repo,
 	cfg Config,
 	includes []string,
 	policy gitSnapshotPolicy,
 	hook gitOverlaySnapshotHook,
 	cleanup func(*gitOverlaySnapshot) error,
-) (gitOverlaySnapshot, error) {
+) (accepted gitOverlaySnapshot, result error) {
+	defer func() {
+		if result != nil && ctx.Err() != nil && !errors.Is(result, ctx.Err()) {
+			result = errors.Join(result, ctx.Err())
+		}
+	}()
 	for attempt := 1; attempt <= gitOverlaySnapshotMaxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return gitOverlaySnapshot{}, err
+		}
 		checkout, err := policy.checkout(repo.Root)
 		if err != nil {
 			if errors.Is(err, errGitOverlaySnapshotDrift) && attempt < gitOverlaySnapshotMaxAttempts {
@@ -401,6 +413,9 @@ func prepareGitSnapshotWithCleanup(
 		if validationErr != nil {
 			return gitOverlaySnapshot{}, validationErr
 		}
+		if err := ctx.Err(); err != nil {
+			return gitOverlaySnapshot{}, err
+		}
 		snapshot, err := newGitOverlaySnapshot()
 		if err != nil {
 			return gitOverlaySnapshot{}, err
@@ -411,7 +426,7 @@ func prepareGitSnapshotWithCleanup(
 		if hook != nil {
 			hook("snapshot_created", attempt, snapshot.Root)
 		}
-		if err := copyGitOverlaySnapshotOwned(repo.Root, &snapshot, policy.files(manifest), attempt, hook); err != nil {
+		if err := copyGitOverlaySnapshotOwned(ctx, repo.Root, &snapshot, policy.files(manifest), attempt, hook); err != nil {
 			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, err, cleanup); retry {
 				continue
 			} else {
@@ -420,6 +435,9 @@ func prepareGitSnapshotWithCleanup(
 		}
 		if hook != nil {
 			hook("snapshot_copied", attempt, snapshot.Root)
+		}
+		if err := ctx.Err(); err != nil {
+			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
 		}
 		snapshotRepo := repo
 		snapshotRepo.Root = snapshot.Root
@@ -521,6 +539,9 @@ func prepareGitSnapshotWithCleanup(
 			sameSyncManifest(manifest, finalManifest) &&
 			snapshot.Fingerprint == liveFingerprint &&
 			snapshot.Fingerprint == acceptedFingerprint {
+			if err := ctx.Err(); err != nil {
+				return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
+			}
 			snapshot.Manifest = acceptedManifest
 			snapshot.Excludes = acceptedExcludes
 			return snapshot, nil
@@ -655,28 +676,31 @@ func gitOverlayGitEnvironment() []string {
 	return environment
 }
 
-func copyGitOverlaySnapshot(sourceRoot, snapshotRoot string, paths []string) error {
-	return copyGitOverlaySnapshotWithHook(sourceRoot, snapshotRoot, paths, 0, nil)
+func copyGitOverlaySnapshot(ctx context.Context, sourceRoot, snapshotRoot string, paths []string) error {
+	return copyGitOverlaySnapshotWithHook(ctx, sourceRoot, snapshotRoot, paths, 0, nil)
 }
 
-func copyGitOverlaySnapshotWithHook(sourceRoot, snapshotRoot string, paths []string, attempt int, hook gitOverlaySnapshotHook) (result error) {
-	return copyGitOverlaySnapshotContents(sourceRoot, snapshotRoot, paths, attempt, hook, nil)
+func copyGitOverlaySnapshotWithHook(ctx context.Context, sourceRoot, snapshotRoot string, paths []string, attempt int, hook gitOverlaySnapshotHook) (result error) {
+	return copyGitOverlaySnapshotContents(ctx, sourceRoot, snapshotRoot, paths, attempt, hook, nil)
 }
 
-func copyGitOverlaySnapshotOwned(sourceRoot string, snapshot *gitOverlaySnapshot, paths []string, attempt int, hook gitOverlaySnapshotHook) error {
+func copyGitOverlaySnapshotOwned(ctx context.Context, sourceRoot string, snapshot *gitOverlaySnapshot, paths []string, attempt int, hook gitOverlaySnapshotHook) error {
 	if snapshot == nil || snapshot.Root == "" || snapshot.cleanupRoot == nil {
 		return fmt.Errorf("missing git overlay snapshot ownership")
 	}
-	return copyGitOverlaySnapshotContents(sourceRoot, snapshot.Root, paths, attempt, hook, snapshot.cleanupRoot)
+	return copyGitOverlaySnapshotContents(ctx, sourceRoot, snapshot.Root, paths, attempt, hook, snapshot.cleanupRoot)
 }
 
-func copyGitOverlaySnapshotContents(sourceRoot, snapshotRoot string, paths []string, attempt int, hook gitOverlaySnapshotHook, owner *gitOverlaySnapshotRoot) (result error) {
-	return copyGitOverlaySnapshotContentsWithThaw(sourceRoot, snapshotRoot, paths, attempt, hook, owner, func(parents *gitOverlaySnapshotParents) error {
+func copyGitOverlaySnapshotContents(ctx context.Context, sourceRoot, snapshotRoot string, paths []string, attempt int, hook gitOverlaySnapshotHook, owner *gitOverlaySnapshotRoot) (result error) {
+	return copyGitOverlaySnapshotContentsWithThaw(ctx, sourceRoot, snapshotRoot, paths, attempt, hook, owner, func(parents *gitOverlaySnapshotParents) error {
 		return parents.thaw()
 	})
 }
 
-func copyGitOverlaySnapshotContentsWithThaw(sourceRoot, snapshotRoot string, paths []string, attempt int, hook gitOverlaySnapshotHook, owner *gitOverlaySnapshotRoot, thaw gitOverlaySnapshotThaw) (result error) {
+func copyGitOverlaySnapshotContentsWithThaw(ctx context.Context, sourceRoot, snapshotRoot string, paths []string, attempt int, hook gitOverlaySnapshotHook, owner *gitOverlaySnapshotRoot, thaw gitOverlaySnapshotThaw) (result error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	parents, err := newGitOverlaySnapshotParents(sourceRoot)
 	if err != nil {
 		return err
@@ -697,6 +721,9 @@ func copyGitOverlaySnapshotContentsWithThaw(sourceRoot, snapshotRoot string, pat
 		result = errors.Join(result, thawErr)
 	}()
 	for _, rel := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if !safeRepoRel(rel) {
 			return fmt.Errorf("unsafe overlay snapshot path %q", rel)
 		}
@@ -758,7 +785,7 @@ func copyGitOverlaySnapshotContentsWithThaw(sourceRoot, snapshotRoot string, pat
 				return fmt.Errorf("overlay snapshot symlink target changed at %q", rel)
 			}
 		case info.Mode().IsRegular():
-			if err := copyGitOverlaySnapshotFile(source, destination, info); err != nil {
+			if err := copyGitOverlaySnapshotFile(ctx, source, destination, info); err != nil {
 				return fmt.Errorf("copy overlay snapshot file %q: %w", rel, err)
 			}
 		default:
@@ -774,7 +801,7 @@ func copyGitOverlaySnapshotContentsWithThaw(sourceRoot, snapshotRoot string, pat
 	if err := parents.restore(attempt, snapshotRoot, hook); err != nil {
 		return err
 	}
-	return nil
+	return ctx.Err()
 }
 
 func newGitOverlaySnapshotParents(sourceRoot string) (*gitOverlaySnapshotParents, error) {
@@ -985,7 +1012,10 @@ func verifyGitOverlaySnapshotParents(identities []gitOverlaySnapshotParentIdenti
 	return nil
 }
 
-func copyGitOverlaySnapshotFile(source, destination string, info os.FileInfo) error {
+func copyGitOverlaySnapshotFile(ctx context.Context, source, destination string, info os.FileInfo) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	input, err := os.Open(source)
 	if err != nil {
 		return classifyGitOverlaySnapshotSourceError(source, info, err)
@@ -1002,9 +1032,12 @@ func copyGitOverlaySnapshotFile(source, destination string, info os.FileInfo) er
 	if err != nil {
 		return err
 	}
-	written, err := io.Copy(output, input)
+	written, err := copySourceBytes(ctx, output, input, openedInfo.Size())
 	if err != nil {
 		_ = output.Close()
+		if errors.Is(err, errSourceCopyLimit) {
+			return fmt.Errorf("%w: snapshot source grew beyond its accepted size", errGitOverlaySnapshotDrift)
+		}
 		return err
 	}
 	postCopyInfo, err := input.Stat()
@@ -1106,6 +1139,19 @@ func sameGitOverlaySnapshotIdentity(left, right os.FileInfo) bool {
 
 func sameSyncExcludeRules(left, right SyncExcludeRules) bool {
 	return slices.Equal(left.rules, right.rules)
+}
+
+func terminalGitOverlayPreparationError(err error, retained bool, contextErr error) error {
+	if contextErr != nil && !errors.Is(err, contextErr) {
+		err = errors.Join(err, contextErr)
+	}
+	if retained {
+		return fmt.Errorf("%w: %w", Exit(6, "create immutable git overlay snapshot"), err)
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return nil
 }
 
 func decideGitOverlay(cfg Config, repo Repo, target SSHTarget, manifest SyncManifest, coherence gitCoherencePlan, credentialBlocked, fullResync, hydratedByActions bool) gitOverlayDecision {

@@ -2115,15 +2115,15 @@ retrySync:
 		}
 		var overlaySnapshot gitOverlaySnapshot
 		if overlayDecision.Enabled {
-			overlaySnapshot, err = prepareGitOverlaySnapshot(repo, cfg, excludes, syncIncludes(cfg), coherence)
+			overlaySnapshot, err = prepareGitOverlaySnapshot(ctx, repo, cfg, excludes, syncIncludes(cfg), coherence)
 			defer finalizeGitOverlaySnapshotCleanup(returnedRunError, &runFailure, func() error {
 				return terminalGitOverlaySnapshotCleanup(&overlaySnapshot, func(snapshot *gitOverlaySnapshot) error {
 					return snapshot.cleanup()
 				})
 			})
 			if err != nil {
-				if overlaySnapshot.Root != "" {
-					return recordFailure(Exit(6, "create immutable git overlay snapshot: %v", err))
+				if terminalErr := terminalGitOverlayPreparationError(err, overlaySnapshot.Root != "", ctx.Err()); terminalErr != nil {
+					return recordFailure(terminalErr)
 				}
 				overlayDecision.Enabled = false
 				overlayDecision.Reason = gitOverlayLocalFallbackReason(err)
