@@ -12,6 +12,7 @@
 
 ### Fixes
 
+- Prepare immutable qualification identity and deadlines before credential-dependent deployment, reject delayed admission after the work cutoff, and preserve independent cleanup ownership.
 - Recognize AWS Tailscale endpoints in Pond peers and policy diagnostics while preserving SSH discovery for leases without Tailscale enrollment. [PR 2246](https://github.com/openclaw/crabbox/pull/2246).
 - Show help before pond release or disconnect can act, reject malformed lifecycle arguments, and preserve literal pond names and the `--` argument separator.
 - Stop replaying confirmed brokered Tailscale preparation failures while preserving exact-attempt cancellation and recovery for uncertain provider creation. [PR 2247](https://github.com/openclaw/crabbox/pull/2247).

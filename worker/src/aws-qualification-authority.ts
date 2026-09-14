@@ -296,6 +296,8 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
       throw new Error("AWS qualification registry run is retired");
     }
     const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
+    // Retirement and registry reads may outlive the admission window.
+    validateRunWindow(identity);
     if (active) {
       if (canonicalJSON(registryIdentity(active)) !== canonicalJSON(registryIdentity(identity))) {
         throw new Error("AWS qualification registry already has an active run");
@@ -444,6 +446,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       }
       const policyHash = await qualificationPolicyHash(policy);
       const retainedRootDeviceName = await this.verifyRetainedImage(identity, policy);
+      validateRunWindow(identity);
       await this.ctx.storage.put({
         [stateKey]: {
           identity: structuredClone(identity),
@@ -461,6 +464,9 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       await this.ctx.storage.setAlarm(
         expiresAt - (identity.retainedImage ? awsQualificationCleanupReserveMs : 0),
       );
+      // Keep persisted ownership and its alarm if storage crossed the cutoff.
+      // A refused registry claim must not orphan a run that already owns cleanup.
+      validateRunWindow(identity);
     });
   }
 
@@ -2541,6 +2547,9 @@ function validateRunWindow(identity: AWSQualificationRunIdentity): void {
   const maximum = identity.retainedImage ? awsQualificationRetainedRunMs : awsQualificationMaxRunMs;
   if (expiresAt <= now || expiresAt > now + maximum) {
     throw new Error(`AWS qualification expiry must be in the next ${maximum / 60_000} minutes`);
+  }
+  if (identity.retainedImage && now >= expiresAt - awsQualificationCleanupReserveMs) {
+    throw new Error("AWS qualification retained work window expired");
   }
 }
 

@@ -508,6 +508,86 @@ describe("AWS qualification authority deployment", () => {
 });
 
 describe("AWS qualification authority", () => {
+  it.each(["GetCallerIdentity", "DescribeImages", "DescribeSnapshots"])(
+    "refuses enrollment when awaited %s verification consumes the retained work window",
+    async (delayedAction) => {
+      const retained = retainedIdentity();
+      const fixture = authorityFixture();
+      const now = vi.spyOn(Date, "now").mockReturnValue(Date.now());
+      const execute = fixture.signer.execute.bind(fixture.signer);
+      vi.spyOn(fixture.signer, "execute").mockImplementation(async (...args) => {
+        const response = await execute(...args);
+        if (args[1] === delayedAction) {
+          now.mockReturnValue(Date.parse(retained.expiresAt) - 8 * 60_000);
+        }
+        return response;
+      });
+      await expect(fixture.run.enroll(controller, retained)).rejects.toThrow("work window expired");
+      expect(await fixture.storage.get("run")).toBeUndefined();
+      expect(fixture.storage.alarm).toBeUndefined();
+      expect(fixture.signer.calls.some(({ action }) => action === "RunInstances")).toBe(false);
+    },
+  );
+
+  it.each(["run persistence", "registry transport", "retirement read", "active registry read"])(
+    "retains the cleanup owner when %s crosses the retained admission cutoff",
+    async (delay) => {
+      useImmediateTimeouts();
+      const retained = retainedIdentity();
+      const fixture = authorityHTTPFixture(retained);
+      const now = vi.spyOn(Date, "now").mockReturnValue(Date.now());
+      const expireWork = () => now.mockReturnValue(Date.parse(retained.expiresAt) - 8 * 60_000);
+      if (delay === "run persistence") {
+        const put = fixture.storage.put.bind(fixture.storage);
+        vi.spyOn(fixture.storage, "put").mockImplementation(async (key, value) => {
+          await put(key, value);
+          if (typeof key === "object" && Object.hasOwn(key, "run")) expireWork();
+        });
+      } else if (delay === "registry transport") {
+        const claim = fixture.registry.claim.bind(fixture.registry);
+        vi.spyOn(fixture.registry, "claim").mockImplementation(async (...args) => {
+          expireWork();
+          return await claim(...args);
+        });
+      } else {
+        const get = fixture.registryStorage.get.bind(fixture.registryStorage);
+        vi.spyOn(fixture.registryStorage, "get").mockImplementation(
+          async <T>(key: string): Promise<T | undefined> => {
+            const value = await get<T>(key);
+            if (key === (delay === "retirement read" ? "retired" : "active")) expireWork();
+            return value;
+          },
+        );
+      }
+      await expect(fixture.controller.claim(retained)).rejects.toThrow("work window expired");
+      expect(await fixture.registryStorage.get("active")).toBeUndefined();
+      expect(await fixture.storage.get("run")).toMatchObject({ identity: retained });
+      expect(fixture.storage.alarm).toBe(Date.parse(retained.expiresAt) - 8 * 60_000);
+      await expect(fixture.candidate.execute(request("GetCallerIdentity"))).rejects.toThrow(
+        "not active",
+      );
+      await fixture.run.alarm();
+      expect((await fixture.run.attest(controller)).finalized).toBe(true);
+      expect(fixture.storage.alarm).toBeUndefined();
+      expect(fixture.signer.calls.some(({ action }) => action === "RunInstances")).toBe(false);
+    },
+  );
+
+  it("keeps mint admission open until its original expiry, without a retained cleanup cutoff", async () => {
+    const fixture = authorityFixture();
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse(identity.expiresAt) - 1);
+    await expect(fixture.run.enroll(controller, identity)).resolves.toBeUndefined();
+    expect(fixture.storage.alarm).toBe(Date.parse(identity.expiresAt));
+    const storage = new MemoryStorage();
+    const registry = new AWSQualificationRegistry({ storage } as never, {} as never);
+    await expect(registry.claim(controller, identity)).resolves.toMatchObject({
+      cleanupState: "claimed",
+    });
+    now.mockReturnValue(Date.parse(identity.expiresAt));
+    await expect(registry.claim(controller, identity)).rejects.toThrow("expiry");
+    expect(await fixture.storage.get("run")).toMatchObject({ identity });
+  });
+
   it("preserves lexical AWS account IDs when verifying retained resources", async () => {
     const fixture = authorityFixture();
     fixture.env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID = "001234567890";

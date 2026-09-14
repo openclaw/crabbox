@@ -111,9 +111,17 @@ test("candidate downloads extract the artifact at the canonical path", () => {
       /^      - name: [^\n]+\n        uses: actions\/download-artifact@[^\n]+\n        with:\n((?:          .+\n)+)/gm,
     ),
   ];
-  const candidateDownloads = downloadSteps.filter(([, inputs]) => inputs.includes("artifact-ids:"));
+  const candidateDownloads = downloadSteps.filter(([, inputs]) =>
+    inputs.includes("needs.build-candidate.outputs.candidate_artifact_id"),
+  );
 
   assert.equal(candidateDownloads.length, 3);
+  assert.equal(
+    downloadSteps.filter(([, inputs]) =>
+      inputs.includes("needs.admit.outputs.handoff_artifact_id"),
+    ).length,
+    2,
+  );
   for (const [, inputs] of candidateDownloads) {
     assert.match(
       inputs,
@@ -134,6 +142,29 @@ test("finalization skips protected approval when deployment never started", () =
     finalizeJob,
     /^    if: \$\{\{ always\(\) && needs\.deploy-enroll\.result != 'skipped' \}\}$/m,
   );
+});
+
+test("protected preparation exports immutable identity before the separate deployment approval", () => {
+  const admitJob = workflow.slice(workflow.indexOf("  admit:"), workflow.indexOf("  deploy-enroll:"));
+  assert.match(admitJob, /environment: image-qualification/);
+  assert.match(admitJob, /QUALIFICATION_HANDOFF_DIR:/);
+  assert.match(admitJob, /CLOUDFLARE_ACCOUNT_ID: \$\{\{ vars\.CLOUDFLARE_ACCOUNT_ID \}\}/);
+  assert.match(admitJob, /QUALIFICATION_SUBNET_ID: \$\{\{ vars\./);
+  assert.match(admitJob, /QUALIFICATION_SECURITY_GROUP_ID: \$\{\{ vars\./);
+  assert.match(admitJob, /QUALIFICATION_AUTHORITY_SHA: \$\{\{ vars\./);
+  assert.doesNotMatch(admitJob, /secrets\.|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN/);
+  assert.match(admitJob, /image-qualification-handoff-\$\{\{ github\.run_id \}\}-1/);
+  assert.match(admitJob, /overwrite: false/);
+  assert.match(admitJob, /handoff_sha256: \$\{\{ steps\.admit\.outputs\.handoff_sha256 \}\}/);
+  assert.ok(admitJob.indexOf("image-qualification-control.mjs admit") < admitJob.indexOf("id: handoff"));
+  const deployJob = workflow.slice(workflow.indexOf("  deploy-enroll:"), workflow.indexOf("  arm:"));
+  const armJob = workflow.slice(workflow.indexOf("  arm:"), workflow.indexOf("  execute:"));
+  for (const job of [deployJob, armJob]) {
+    assert.match(job, /environment: image-qualification/);
+    assert.match(job, /artifact-ids: \$\{\{ needs\.admit\.outputs\.handoff_artifact_id \}\}/);
+    assert.match(job, /QUALIFICATION_HANDOFF_SHA256: \$\{\{ needs\.admit\.outputs\.handoff_sha256 \}\}/);
+    assert.match(job, /QUALIFICATION_HANDOFF_ARTIFACT_DIGEST:/);
+  }
 });
 
 test("all workflow actions use immutable repository-standard pins", () => {

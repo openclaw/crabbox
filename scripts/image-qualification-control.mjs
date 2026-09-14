@@ -15,6 +15,7 @@ const workerNamePattern = /^crabbox-image-qualification-[0-9]+-[0-9]+$/;
 const relayNamePattern = /^crabbox-image-qualification-relay-[0-9]+-[0-9]+$/;
 const maxRunMs = 120 * 60 * 1000;
 const retainedRunMs = 38 * 60 * 1000;
+const retainedCleanupMs = 8 * 60 * 1000;
 const controllerName = "crabbox-image-qualification-controller";
 const authorityName = "crabbox-aws-qualification-authority";
 const qualificationWorkflowPath = ".github/workflows/image-qualification.yml";
@@ -910,6 +911,141 @@ function qualificationConfig() {
   };
 }
 
+function qualificationHandoff(identityCheck, manifestSha256, startsAt) {
+  const config = qualificationConfig();
+  const runId = `image-qualification-${identityCheck.runId}-${required("GITHUB_RUN_ATTEMPT")}`;
+  const expiresAt = new Date(
+    Date.parse(startsAt) + (config.retainedImage ? retainedRunMs : maxRunMs),
+  ).toISOString();
+  return {
+    version: 1,
+    repository: identityCheck.repository,
+    workflowSha: identityCheck.workflowSha,
+    candidateSha: identityCheck.candidateSha,
+    runId,
+    attempt: 1,
+    owner: `${runId}@example.invalid`,
+    candidateWorker: `crabbox-${runId}`,
+    relayWorker: relayNameForRun(runId),
+    candidateArtifactId: identityCheck.artifactId,
+    candidateArtifactDigest: identityCheck.artifactDigest,
+    manifestSha256,
+    authoritySha: required("QUALIFICATION_AUTHORITY_SHA", sha40),
+    authorityVersion: boundedString("QUALIFICATION_AUTHORITY_VERSION", 64),
+    policyHash: required("QUALIFICATION_EXPECTED_POLICY_HASH", sha64),
+    // Private deployment coordinates are inputs, never published handoff fields.
+    configurationSha256: digest(
+      canonical({
+        account: required("CLOUDFLARE_ACCOUNT_ID", /^[0-9a-f]{32}$/),
+        config,
+      }),
+    ),
+    mode: config.retainedImage ? "retained" : "mint",
+    ...(config.retainedImage ? { retainedCapsuleSha256: config.retainedImage.capsuleSha256 } : {}),
+    startsAt,
+    workExpiresAt: new Date(
+      Date.parse(expiresAt) - (config.retainedImage ? retainedCleanupMs : 0),
+    ).toISOString(),
+    expiresAt,
+  };
+}
+
+function assertHandoffWindow(handoff) {
+  const now = Date.now();
+  if (
+    !Number.isFinite(Date.parse(handoff.startsAt)) ||
+    Date.parse(handoff.startsAt) > now ||
+    now >= Date.parse(handoff.workExpiresAt)
+  ) {
+    throw new Error("qualification handoff work window is not active");
+  }
+}
+
+function publishHandoff(identityCheck, manifest) {
+  for (const name of [
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "CLOUDFLARE_API_TOKEN",
+    "QUALIFICATION_CONTROLLER_TOKEN",
+  ]) {
+    if (Object.hasOwn(process.env, name)) throw new Error(`${name} must be absent from preparation`);
+  }
+  const handoff = qualificationHandoff(
+    identityCheck,
+    manifest.manifestSha256,
+    new Date(Date.now()).toISOString(),
+  );
+  const directory = path.resolve(required("QUALIFICATION_HANDOFF_DIR"));
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  // Never replace a prepared identity, even when a caller repeats admission locally.
+  fs.writeFileSync(path.join(directory, "handoff.json"), `${canonical(handoff)}\n`, {
+    flag: "wx",
+    mode: 0o600,
+  });
+  let projection;
+  if (handoff.mode === "retained") {
+    projection = {
+      authority_owner: handoff.owner,
+      run_id: handoff.runId,
+      source_sha: handoff.candidateSha,
+      starts_at: handoff.startsAt,
+      creation_expires_at: handoff.workExpiresAt,
+      cleanup_expires_at: handoff.expiresAt,
+    };
+    fs.writeFileSync(path.join(directory, "iam-inputs.json"), `${canonical(projection)}\n`, {
+      flag: "wx",
+      mode: 0o600,
+    });
+  }
+  appendOutput("handoff_sha256", digest(canonical(handoff)));
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    fs.appendFileSync(
+      process.env.GITHUB_STEP_SUMMARY,
+      `## Qualification handoff\n\nRun: \`${handoff.runId}\`\n\n` +
+        `Work cutoff: ${handoff.workExpiresAt}; absolute expiry: ${handoff.expiresAt}.\n\n` +
+        "Preparation, credential delivery, approvals and deployment consume this window. " +
+        "Approve deployment only after the exact binding and cleanup custody are verified. " +
+        "Expired preparation requires a newly authorized run; it cannot be extended.\n\n" +
+        (projection ? `\`\`\`json\n${JSON.stringify(projection, null, 2)}\n\`\`\`\n` : ""),
+      { mode: 0o600 },
+    );
+  }
+}
+
+async function verifyHandoff(identityCheck, manifestSha256) {
+  const handoff = readJSON(path.join(required("QUALIFICATION_HANDOFF_DIR"), "handoff.json"));
+  const startsAt = handoff.startsAt;
+  if (
+    typeof startsAt !== "string" ||
+    !Number.isFinite(Date.parse(startsAt)) ||
+    new Date(startsAt).toISOString() !== startsAt
+  ) {
+    throw new Error("qualification handoff start is invalid");
+  }
+  const expected = qualificationHandoff(identityCheck, manifestSha256, startsAt);
+  if (
+    canonical(handoff) !== canonical(expected) ||
+    digest(canonical(handoff)) !== required("QUALIFICATION_HANDOFF_SHA256", sha64)
+  ) {
+    throw new Error("qualification handoff identity changed");
+  }
+  const artifactId = required("QUALIFICATION_HANDOFF_ARTIFACT_ID", /^[1-9][0-9]*$/);
+  const artifact = await github(`/repos/${identityCheck.repository}/actions/artifacts/${artifactId}`);
+  if (
+    String(artifact.id) !== artifactId ||
+    artifact.name !== `image-qualification-handoff-${identityCheck.runId}-1` ||
+    artifact.expired !== false ||
+    artifact.digest !== normalizeArtifactDigest(required("QUALIFICATION_HANDOFF_ARTIFACT_DIGEST")) ||
+    String(artifact.workflow_run?.id) !== identityCheck.runId ||
+    artifact.workflow_run?.head_sha !== identityCheck.workflowSha
+  ) {
+    throw new Error("qualification handoff artifact changed");
+  }
+  assertHandoffWindow(handoff);
+  return handoff;
+}
+
 function candidateBindings(identity, adminToken, sharedToken, config) {
   const vars = {
     CRABBOX_DEFAULT_ORG: "image-qualification",
@@ -1249,16 +1385,11 @@ async function deploy() {
   verifyPublisherContract(
     fs.readFileSync(path.join(artifactDir, "candidate/scripts/mint-aws-devtools-image.sh"), "utf8"),
   );
-  const runId = `image-qualification-${required("GITHUB_RUN_ID", /^[1-9][0-9]*$/)}-${required("GITHUB_RUN_ATTEMPT", /^[1-9][0-9]*$/)}`;
-  const candidateWorker = `crabbox-${runId}`;
+  const handoff = await verifyHandoff(identityCheck, manifest.manifestSha256);
+  const { runId, candidateWorker, relayWorker, owner, expiresAt } = handoff;
   if (!workerNamePattern.test(candidateWorker)) throw new Error("candidate Worker name is invalid");
-  const relayWorker = relayNameForRun(runId);
   if (!relayNamePattern.test(relayWorker)) throw new Error("relay Worker name is invalid");
-  const owner = `${runId}@example.invalid`;
   const config = qualificationConfig();
-  const expiresAt = new Date(
-    Date.now() + (config.retainedImage ? retainedRunMs : maxRunMs),
-  ).toISOString();
   const authoritySha = required("QUALIFICATION_AUTHORITY_SHA", sha40);
   const authorityVersion = boundedString("QUALIFICATION_AUTHORITY_VERSION", 64);
   const policyHash = required("QUALIFICATION_EXPECTED_POLICY_HASH", sha64);
@@ -1399,6 +1530,7 @@ async function deploy() {
     assertWorkerIsolation(cf, controllerName, 0, true),
   ]);
   await verifyCandidateIdentity({ artifact: true });
+  assertHandoffWindow(handoff);
   const record = await controllerCall(controllerURL, controllerToken, "claim", { identity });
   if (record.runId !== runId || record.cleanupState !== "claimed")
     throw new Error("authority claim readback mismatch");
@@ -1421,6 +1553,7 @@ async function deploy() {
   const proofDir = path.resolve(required("QUALIFICATION_PROOF_DIR"));
   writeJSON(path.join(proofDir, "deployment.json"), {
     version: 1,
+    handoffSha256: digest(canonical(handoff)),
     runId,
     candidateSha: identity.candidateSha,
     workflowSha: identityCheck.workflowSha,
@@ -1494,7 +1627,20 @@ async function deploy() {
 
 async function arm() {
   const expected = qualificationExpectedFromEnv();
-  await verifyCandidateIdentity({ artifact: true });
+  const identityCheck = await verifyCandidateIdentity({ artifact: true });
+  const handoff = await verifyHandoff(identityCheck, expected.manifestSha256);
+  for (const field of [
+    "runId",
+    "candidateSha",
+    "candidateWorker",
+    "relayWorker",
+    "expiresAt",
+    "authoritySha",
+    "authorityVersion",
+    "policyHash",
+  ]) {
+    if (expected[field] !== handoff[field]) throw new Error("deployment differs from prepared handoff");
+  }
   const cf = cloudflareFromEnv();
   await verifyExecutionDeployment(cf, expected);
   const token = required("QUALIFICATION_CONTROLLER_TOKEN");
@@ -1514,10 +1660,8 @@ async function arm() {
     runId: expected.runId,
   });
   verifyAttestationIdentity(attestation, expected, { finalized: false });
+  assertHandoffWindow(handoff);
   const armedAt = new Date().toISOString();
-  if (Date.parse(armedAt) >= Date.parse(expected.expiresAt)) {
-    throw new Error("qualification expired before protected execution admission");
-  }
   const proofDir = path.resolve(required("QUALIFICATION_PROOF_DIR"));
   writeJSON(path.join(proofDir, "execution-manifest.json"), {
     version: 1,
@@ -2128,13 +2272,14 @@ async function main() {
   if (command === "admit") {
     const result = await verifyCandidateIdentity({ artifact: true });
     const artifactDir = path.resolve(required("QUALIFICATION_ARTIFACT_DIR"));
-    verifyManifest(artifactDir, result.candidateSha, result.workflowSha);
+    const manifest = verifyManifest(artifactDir, result.candidateSha, result.workflowSha);
     verifyPublisherContract(
       fs.readFileSync(
         path.join(artifactDir, "candidate/scripts/mint-aws-devtools-image.sh"),
         "utf8",
       ),
     );
+    publishHandoff(result, manifest);
     return;
   }
   if (command === "manifest") {
