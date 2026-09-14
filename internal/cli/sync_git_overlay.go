@@ -1105,7 +1105,7 @@ func sameGitOverlaySnapshotIdentity(left, right os.FileInfo) bool {
 }
 
 func sameSyncExcludeRules(left, right SyncExcludeRules) bool {
-	return slices.Equal(left.rules, right.rules)
+	return left.managedSubtree == right.managedSubtree && slices.Equal(left.rules, right.rules)
 }
 
 func decideGitOverlay(cfg Config, repo Repo, target SSHTarget, manifest SyncManifest, coherence gitCoherencePlan, credentialBlocked, fullResync, hydratedByActions bool) gitOverlayDecision {

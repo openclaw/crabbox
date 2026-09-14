@@ -22,6 +22,27 @@ import (
 	"time"
 )
 
+func TestManagedStateSyncExcludeRulesEquality(t *testing.T) {
+	left := newSyncExcludeRules([]string{"build", "!build/source.txt"}, syncExcludeConfigured)
+	left.managedSubtree = "state/crabbox"
+	for _, tc := range []struct {
+		name, managed string
+		wantEqual     bool
+	}{
+		{name: "same scope", managed: "state/crabbox", wantEqual: true},
+		{name: "different scope", managed: "other-state/crabbox"},
+		{name: "scope removed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			right := left
+			right.managedSubtree = tc.managed
+			if got := sameSyncExcludeRules(left, right); got != tc.wantEqual {
+				t.Fatalf("scope equality=%v want %v", got, tc.wantEqual)
+			}
+		})
+	}
+}
+
 type gitOverlayFixture struct {
 	root           string
 	origin         string
