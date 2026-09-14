@@ -12,7 +12,7 @@
 
 ### Fixes
 
-- Honor cancellation while hashing sync content and keep regular-file reads bounded to their observed size, without changing stable fingerprints.
+- Honor cancellation while hashing sync content and keep regular-file reads bounded to their observed size, without changing stable fingerprints. [PR 2269](https://github.com/openclaw/crabbox/pull/2269).
 - Honor cancellation during Git snapshot copying and preserve cancellation alongside cleanup errors instead of falling back to full sync. [PR 2268](https://github.com/openclaw/crabbox/pull/2268).
 - Revalidate managed-state exclusion scope during snapshot acceptance even when ordinary ignore rules are unchanged. [PR 2267](https://github.com/openclaw/crabbox/pull/2267).
 - Keep directory-to-file replacement sync working with a custom state root, preserving historical deletions and managed-state exclusions. [PR 2266](https://github.com/openclaw/crabbox/pull/2266).
