@@ -116,6 +116,45 @@ func TestManagedStateTransferScopeBoundaries(t *testing.T) {
 	}
 }
 
+func TestManagedStateSyncDirectoryReplacedByFile(t *testing.T) {
+	for _, location := range []string{"unset", "outside", "nested"} {
+		t.Run(location, func(t *testing.T) {
+			root := t.TempDir()
+			state := ""
+			if location == "outside" {
+				state = t.TempDir()
+			} else if location == "nested" {
+				state = filepath.Join(root, "state")
+			}
+			t.Setenv("XDG_STATE_HOME", state)
+			runGit(t, root, "init")
+			runGit(t, root, "config", "user.email", "test@example.com")
+			runGit(t, root, "config", "user.name", "Test")
+			old := "src/replaced/deep/old.txt"
+			writeFile(t, filepath.Join(root, filepath.FromSlash(old)), "old source\n")
+			runGit(t, root, "add", ".")
+			runGit(t, root, "commit", "-m", "original directory")
+			for _, rel := range []string{old, "src/replaced/deep", "src/replaced"} {
+				if err := os.Remove(filepath.Join(root, filepath.FromSlash(rel))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeFile(t, filepath.Join(root, "src", "replaced"), "replacement file\n")
+			rules, err := syncExcludes(root, baseConfig())
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := syncManifestFilteredRules(root, rules, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(manifest.Files, []string{"src/replaced"}) || !slices.Equal(manifest.Deleted, []string{old}) {
+				t.Fatalf("replacement manifest files=%q deleted=%q", manifest.Files, manifest.Deleted)
+			}
+		})
+	}
+}
+
 func TestManagedStateTransferCaseSpelling(t *testing.T) {
 	parent := t.TempDir()
 	original := filepath.Join(parent, "MixedCase")

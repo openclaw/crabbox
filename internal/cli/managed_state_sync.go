@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 )
 
 // NormalizeManagedStateTransferRoot resolves metadata only, including an absent
@@ -31,7 +32,7 @@ func normalizeManagedTransferPath(path string, depth int) (string, error) {
 		return "", fmt.Errorf("managed-state transfer path exceeds metadata depth limit")
 	}
 	info, err := os.Lstat(path)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err != nil && !managedTransferPathAbsent(err) {
 		return "", err
 	}
 	parent := filepath.Dir(path)
@@ -81,6 +82,12 @@ func normalizeManagedTransferPath(path string, depth int) (string, error) {
 		return managedStateEntrySpelling(resolvedParent, name, info)
 	}
 	return filepath.Join(resolvedParent, name), nil
+}
+
+func managedTransferPathAbsent(err error) bool {
+	// Historical manifest paths can have a now-regular-file ancestor after a
+	// directory replacement. Resolve that existing ancestor and retain the suffix.
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
 }
 
 func selectedManagedStateNamespace() (string, error) {
@@ -186,7 +193,7 @@ func (scope *managedSyncScope) contains(rel string) (bool, error) {
 	}
 	parent := filepath.Dir(full)
 	info, statErr := os.Stat(parent)
-	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+	if statErr != nil && !managedTransferPathAbsent(statErr) {
 		return false, statErr
 	}
 	cached, ok := scope.parents[parent]

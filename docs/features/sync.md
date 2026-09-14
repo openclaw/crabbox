@@ -230,6 +230,11 @@ Git seeding is disabled so a seeded tree cannot materialize excluded paths.
 These protections do not remove state already committed upstream or previously
 shared with a runner.
 
+Managed-state filtering also applies to historical deletion paths. Replacing a
+tracked directory with a regular file still syncs the replacement and removes
+the previously managed descendants, even though their old parent directories
+no longer exist.
+
 On macOS, managed-state path spelling uses entry-name and identity attributes
 relative to a retained parent descriptor, rather than opening the leaf or
 enumerating sibling files. This also supports Unix socket and FIFO entries
