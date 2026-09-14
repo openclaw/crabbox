@@ -44,23 +44,40 @@ func TestManagedStateSyncExcludeRulesEquality(t *testing.T) {
 }
 
 func TestManagedStateSnapshotRevalidatesConfigurationChange(t *testing.T) {
+	repo, cfg := newLocalGitSnapshotFixture(t)
+	testSnapshotManagedConfigurationChange(t, repo.Root, func(hook gitOverlaySnapshotHook) (gitOverlaySnapshot, error) {
+		return prepareLocalGitSeedSnapshotWithHook(context.Background(), repo, cfg, hook)
+	})
+}
+
+func TestGitOverlaySnapshotRevalidatesManagedConfigurationChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("overlay validation requires POSIX Git checkout settings")
+	}
 	fixture := newGitOverlayFixture(t)
-	mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "stable local change\n")
+	_, excludes := fixture.manifest(t)
+	testSnapshotManagedConfigurationChange(t, fixture.root, func(hook gitOverlaySnapshotHook) (gitOverlaySnapshot, error) {
+		return prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, hook)
+	})
+}
+
+func testSnapshotManagedConfigurationChange(t *testing.T, root string, prepare func(gitOverlaySnapshotHook) (gitOverlaySnapshot, error)) {
+	t.Helper()
+	mustWriteTestFile(t, filepath.Join(root, "unstaged.txt"), "stable local change\n")
 	for _, name := range []string{"state-a", "state-b"} {
-		if err := os.MkdirAll(filepath.Join(fixture.root, name, "crabbox"), 0o700); err != nil {
+		if err := os.MkdirAll(filepath.Join(root, name, "crabbox"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
-	t.Setenv("XDG_STATE_HOME", filepath.Join(fixture.root, "state-a"))
-	_, excludes := fixture.manifest(t)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state-a"))
 	var attempts []int
-	snapshot, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
+	snapshot, err := prepare(func(phase string, attempt int, _ string) {
 		if phase == "snapshot_created" {
 			attempts = append(attempts, attempt)
 		}
 		if phase == "snapshot_copied" && attempt == 1 {
 			// Reconfigure at an explicit boundary; source files stay unchanged.
-			t.Setenv("XDG_STATE_HOME", filepath.Join(fixture.root, "state-b"))
+			t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state-b"))
 		}
 	})
 	if err != nil {
