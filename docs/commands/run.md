@@ -5,6 +5,14 @@ streams the output back, and exits with the remote command's exit code. It is
 the core verb: lease (or reuse) a machine, ship your code, run something, get
 the result.
 
+By default the source is Git. Opt into `sync.source: directory` with a nonempty
+`sync.include` to sync the effective current directory through the ordinary
+POSIX/WSL SSH managed-manifest transport. This still requires installed Git for
+source-tree ignore matching, but does not create source Git metadata. Full
+manifest and size validation runs before acquisition and again before transfer.
+See [directory source](../features/sync.md#explicit-directory-source) for the
+explicit unsupported Git-only, delegated, native-Windows, and watch modes.
+
 ```sh
 crabbox run --id swift-crab -- pnpm test:changed
 crabbox run --class beast -- pnpm check

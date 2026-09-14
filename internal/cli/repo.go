@@ -1016,16 +1016,9 @@ func syncManifestFiltered(root string, excludes, includes []string) (SyncManifes
 }
 
 func syncManifestFilteredRules(root string, excludes SyncExcludeRules, includes []string) (SyncManifest, error) {
-	managed, err := newManagedSyncScope(root)
+	managed, excludes, err := prepareSyncManifestRoot(root, excludes)
 	if err != nil {
 		return SyncManifest{}, err
-	}
-	if managed.namespace != "" && managedPathContains(managed.source, managed.namespace) {
-		rel, err := filepath.Rel(managed.source, managed.namespace)
-		if err != nil {
-			return SyncManifest{}, err
-		}
-		excludes.managedSubtree = filepath.ToSlash(rel)
 	}
 	out, err := gitSyncFileList(root)
 	if err != nil {
@@ -1036,13 +1029,62 @@ func syncManifestFilteredRules(root string, excludes SyncExcludeRules, includes 
 		return SyncManifest{}, err
 	}
 	trackedRegular, gitlinkPaths := scope.trackedRegular, scope.gitlinkPaths
+	manifest, seen, err := projectSyncManifest(root, excludes, includes, splitNul(out), scope, managed)
+	if err != nil {
+		return SyncManifest{}, err
+	}
+	deleted, deletedGitlinks, deletedRegular, err := syncDeletedPaths(root, excludes, includes, trackedRegular)
+	if err != nil {
+		return SyncManifest{}, err
+	}
+	deleted, err = managed.filter(deleted)
+	if err != nil {
+		return SyncManifest{}, err
+	}
+	for rel := range deletedGitlinks {
+		gitlinkPaths[rel] = struct{}{}
+	}
+	manifest.Deleted = filterDeletedPaths(deleted, seen, gitlinkPaths)
+	for rel := range deletedRegular {
+		trackedRegular[rel] = struct{}{}
+	}
+	changed, err := changedSyncPaths(root, excludes, includes, trackedRegular)
+	if err != nil {
+		return SyncManifest{}, err
+	}
+	changed, err = managed.filter(changed)
+	if err != nil {
+		return SyncManifest{}, err
+	}
+	manifest.Changed, manifest.ChangedBytes = changedPathSetBytes(root, changed)
+	manifest.OverlayFiles, manifest.OverlayBytes = overlayPathSetBytes(root, manifest.Files, manifest.Changed)
+	return manifest, nil
+}
+
+func prepareSyncManifestRoot(root string, excludes SyncExcludeRules) (*managedSyncScope, SyncExcludeRules, error) {
+	managed, err := newManagedSyncScope(root)
+	if err != nil {
+		return nil, excludes, err
+	}
+	if managed.namespace != "" && managedPathContains(managed.source, managed.namespace) {
+		rel, err := filepath.Rel(managed.source, managed.namespace)
+		if err != nil {
+			return nil, excludes, err
+		}
+		excludes.managedSubtree = filepath.ToSlash(rel)
+	}
+	return managed, excludes, nil
+}
+
+func projectSyncManifest(root string, excludes SyncExcludeRules, includes, paths []string, scope syncManifestScope, managed *managedSyncScope) (SyncManifest, map[string]bool, error) {
+	trackedRegular, gitlinkPaths := scope.trackedRegular, scope.gitlinkPaths
 	seen := map[string]bool{}
 	manifest := SyncManifest{}
-	for _, rel := range splitNul(out) {
+	for _, rel := range paths {
 		rel = filepath.ToSlash(rel)
 		protected, err := managed.contains(rel)
 		if err != nil {
-			return SyncManifest{}, err
+			return SyncManifest{}, nil, err
 		}
 		if protected {
 			continue
@@ -1071,32 +1113,7 @@ func syncManifestFilteredRules(root string, excludes SyncExcludeRules, includes 
 	sort.Slice(manifest.ProtectedTrackedExcludes, func(i, j int) bool {
 		return manifest.ProtectedTrackedExcludes[i].Path < manifest.ProtectedTrackedExcludes[j].Path
 	})
-	deleted, deletedGitlinks, deletedRegular, err := syncDeletedPaths(root, excludes, includes, trackedRegular)
-	if err != nil {
-		return SyncManifest{}, err
-	}
-	deleted, err = managed.filter(deleted)
-	if err != nil {
-		return SyncManifest{}, err
-	}
-	for rel := range deletedGitlinks {
-		gitlinkPaths[rel] = struct{}{}
-	}
-	manifest.Deleted = filterDeletedPaths(deleted, seen, gitlinkPaths)
-	for rel := range deletedRegular {
-		trackedRegular[rel] = struct{}{}
-	}
-	changed, err := changedSyncPaths(root, excludes, includes, trackedRegular)
-	if err != nil {
-		return SyncManifest{}, err
-	}
-	changed, err = managed.filter(changed)
-	if err != nil {
-		return SyncManifest{}, err
-	}
-	manifest.Changed, manifest.ChangedBytes = changedPathSetBytes(root, changed)
-	manifest.OverlayFiles, manifest.OverlayBytes = overlayPathSetBytes(root, manifest.Files, manifest.Changed)
-	return manifest, nil
+	return manifest, seen, nil
 }
 
 type syncManifestScope struct {
@@ -1744,6 +1761,37 @@ func pathIncluded(rel string, includes []string) bool {
 			return true
 		}
 		if ok, _ := filepath.Match(include, rel); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// A glob matching a directory is not a recursive include. It must have
+// remaining path components to admit a file below that directory.
+func includeMaySelectDescendant(dir string, includes []string) bool {
+	dir = strings.Trim(filepath.ToSlash(dir), "/")
+	parts := strings.Split(dir, "/")
+	for _, include := range includes {
+		include = strings.Trim(filepath.ToSlash(strings.TrimSpace(include)), "/")
+		if include == "" {
+			continue
+		}
+		if dir == include || strings.HasPrefix(dir, include+"/") || strings.HasPrefix(include, dir+"/") {
+			return true
+		}
+		pattern := strings.Split(include, "/")
+		if len(pattern) <= len(parts) {
+			continue
+		}
+		matched := true
+		for i, part := range parts {
+			if ok, _ := filepath.Match(pattern[i], part); !ok {
+				matched = false
+				break
+			}
+		}
+		if matched {
 			return true
 		}
 	}

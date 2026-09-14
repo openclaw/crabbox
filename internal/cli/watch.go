@@ -129,6 +129,12 @@ func (a App) watch(ctx context.Context, args []string) error {
 	if err := applyLeaseCreateFlagsForLease(&cfg, fs, leaseFlags, *leaseIDFlag); err != nil {
 		return err
 	}
+	if err := validateSyncSource(cfg); err != nil {
+		return err
+	}
+	if effectiveSyncSource(cfg) == "directory" {
+		return Exit(2, "watch does not support sync.source=directory; use run or sync-plan")
+	}
 	repo, err := findRepo()
 	if err != nil {
 		return err

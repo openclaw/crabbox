@@ -748,9 +748,19 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		cfg.Results.FailOnFailures = *failOnTestFailures
 		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
-	repo, err := findRepo()
+	repo, err := findSyncRepo(cfg, !*noSync)
 	if err != nil {
 		return err
+	}
+	directorySync := !*noSync && effectiveSyncSource(cfg) == "directory"
+	if directorySync {
+		if err := validateDirectorySyncConfig(cfg); err != nil {
+			return err
+		}
+		if strings.TrimSpace(*freshPRValue) != "" || *applyLocalPatch || strings.TrimSpace(*readyPool) != "" {
+			return Exit(2, "sync.source=directory cannot use --fresh-pr, --apply-local-patch or Git-backed ready pools")
+		}
+		cfg.Sync.GitSeed, cfg.Sync.Fingerprint = false, false
 	}
 	trustedPoolRemoteURL := ""
 	if strings.TrimSpace(*readyPool) != "" && readyPoolRunNeedsTrustedRemote(*readyPoolReturn) {
@@ -861,6 +871,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return err
 		}
 		providerSpec := provider.Spec()
+		if directorySync {
+			if err := validateDirectorySyncProvider(providerSpec); err != nil {
+				return err
+			}
+		}
 		if len(requiredArtifactChanges) > 0 && providerSpec.Kind != ProviderKindSSHLease {
 			return Exit(2, "--require-artifact-change requires an ordinary SSH-backed Linux provider")
 		}
@@ -896,6 +911,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	backend, err := loadBackend(cfg, backendRuntime)
 	if err != nil {
 		return err
+	}
+	if directorySync {
+		if err := validateDirectorySyncProvider(backend.Spec()); err != nil {
+			return err
+		}
 	}
 	sshScriptRun, err := selectSSHScriptRun(backend.Spec(), runReq)
 	if err != nil {
@@ -1186,7 +1206,19 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 	}
 	if !*noSync && freshPR.Empty() {
-		if err := validateLocalWorkspaceSyncScope(repo, cfg); err != nil {
+		if directorySync {
+			excludes, err := syncExcludes(repo.Root, cfg)
+			if err != nil {
+				return err
+			}
+			manifest, err := syncManifestForSource(ctx, repo, cfg, excludes)
+			if err != nil {
+				return Exit(6, "build sync file list: %v", err)
+			}
+			if err := checkSyncPreflight(manifest, cfg, *forceSyncLarge, io.Discard); err != nil {
+				return err
+			}
+		} else if err := validateLocalWorkspaceSyncScope(repo, cfg); err != nil {
 			return err
 		}
 	}
@@ -1629,10 +1661,16 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		workdir = remoteJoin(cfg, leaseID, freshPR.WorkdirName())
 	} else {
 		state, stateErr := readActionsHydrationState(ctx, target, leaseID)
+		if stateErr != nil && directorySync {
+			return recordFailure(Exit(7, "verify directory sync workspace has no Actions hydration marker: %v", stateErr))
+		}
 		if stateErr != nil && borrowedPool != nil && readyPoolRunNeedsTrustedRemote(*readyPoolReturn) {
 			return recordFailure(Exit(7, "verify ready-pool Actions hydration marker: %v", stateErr))
 		}
 		if stateErr == nil && state.Workspace != "" {
+			if directorySync {
+				return recordFailure(Exit(2, "directory sync cannot modify an Actions-owned workspace; use a fresh raw workspace"))
+			}
 			workdir = state.Workspace
 			actionsEnvFile = state.EnvFile
 			if state.RunID != "" {
@@ -1889,7 +1927,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	originDisposition := classifyGitOrigin(repo.RemoteURL)
 retrySync:
-	plainManifestMode := originDisposition != gitOriginRemoteAttemptSafe
+	plainManifestMode := directorySync || originDisposition != gitOriginRemoteAttemptSafe
 	if fullResyncRequested && hydratedByActions && !*syncOnly {
 		if !autoHydrateActions {
 			return recordFailure(Exit(2, "--full-resync would invalidate the adopted Actions workspace for %s, but this run cannot rehydrate it; configure actions.workflow and omit --no-hydrate, or use --sync-only", leaseID))
@@ -2004,7 +2042,7 @@ retrySync:
 			return recordFailure(err)
 		}
 		stepStart = time.Now()
-		manifest, err := syncManifestFilteredRules(repo.Root, excludes, syncIncludes(cfg))
+		manifest, err := syncManifestForSource(ctx, repo, cfg, excludes)
 		if err != nil {
 			return recordFailure(Exit(6, "build sync file list: %v", err))
 		}
@@ -2044,7 +2082,7 @@ retrySync:
 				if err != nil {
 					return recordFailure(err)
 				}
-				manifest, err = syncManifestFilteredRules(repo.Root, excludes, syncIncludes(cfg))
+				manifest, err = syncManifestForSource(ctx, repo, cfg, excludes)
 				if err != nil {
 					return recordFailure(Exit(6, "rebuild full sync file list after git overlay snapshot fallback: %v", err))
 				}
@@ -2153,7 +2191,7 @@ retrySync:
 					if refreshErr != nil {
 						return recordFailure(refreshErr)
 					}
-					refreshedManifest, refreshErr := syncManifestFilteredRules(repo.Root, refreshedExcludes, syncIncludes(cfg))
+					refreshedManifest, refreshErr := syncManifestForSource(ctx, repo, cfg, refreshedExcludes)
 					if refreshErr != nil {
 						return recordFailure(Exit(6, "rebuild full sync file list after git overlay fallback: %v", refreshErr))
 					}

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changes
+
+- Add explicit include-only directory sync through the existing POSIX/WSL SSH manifest path, using isolated Git ignore matching without creating source Git metadata. [PR 2253](https://github.com/openclaw/crabbox/pull/2253). Thanks @coygeek.
+
 ### Fixes
 
 - Warn when `--expose` cannot change an existing coordinator-managed lease's Pond ports and point to `crabbox tunnel` for forwarding an existing service. [PR 2256](https://github.com/openclaw/crabbox/pull/2256).

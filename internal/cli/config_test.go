@@ -687,6 +687,7 @@ func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	isolateTestUserDirs(t)
 	for _, key := range []string{
+		"CRABBOX_SYNC_SOURCE",
 		"CRABBOX_ENV_ALLOW",
 		"CRABBOX_RESULTS_JUNIT",
 		"CRABBOX_RESULTS_AUTO",
@@ -17978,5 +17979,47 @@ func TestManualBatchCRepoAndZeroInputs(t *testing.T) {
 				t.Fatalf("repo summary=%#v", got)
 			}
 		})
+	}
+}
+
+func TestSyncSourceConfig(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if effectiveSyncSource(cfg) != "git" {
+		t.Fatal("default source changed")
+	}
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("sync: {source: directory, include: [README.txt]}\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if effectiveSyncSource(cfg) != "directory" || len(syncIncludes(cfg)) != 1 {
+		t.Fatalf("sync=%+v", cfg.Sync)
+	}
+	if got := configShowView(cfg)["sync"].(map[string]any)["source"]; got != "directory" {
+		t.Fatalf("source projection=%v", got)
+	}
+	var text bytes.Buffer
+	if err := writeConfigShowText(&text, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text.String(), "sync source=directory") {
+		t.Fatal("source missing from text configuration")
+	}
+	t.Setenv("CRABBOX_SYNC_SOURCE", "git")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if effectiveSyncSource(cfg) != "git" {
+		t.Fatal("environment did not override YAML")
+	}
+	t.Setenv("CRABBOX_SYNC_SOURCE", "unsupported")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal("inactive sync configuration blocked config loading", err)
+	}
+	if err := validateSyncSource(cfg); err == nil {
+		t.Fatal("active invalid source accepted")
 	}
 }

@@ -117,6 +117,9 @@ func TestSyncPlanJSONOutput(t *testing.T) {
 		t.Fatalf("decode sync-plan JSON: %v\n%s", err, stdout.String())
 	}
 
+	if got.Source != "" || got.Root != "" {
+		t.Fatal("Git sync-plan acquired directory metadata")
+	}
 	if got.Candidate.Files != 2 || got.Candidate.Bytes != 25 || got.Candidate.HumanBytes != "25 B" {
 		t.Fatalf("candidate=%+v", got.Candidate)
 	}
@@ -273,4 +276,30 @@ func syncPlanHasReason(got []syncPlanJSONGuardrailReason, want syncPlanJSONGuard
 		}
 	}
 	return false
+}
+
+func TestSyncPlanDirectorySource(t *testing.T) {
+	clearConfigEnv(t)
+	root := t.TempDir()
+	t.Setenv("TMPDIR", t.TempDir())
+	t.Chdir(root)
+	writeFile(t, filepath.Join(root, "README.txt"), "readme\n")
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	writeFile(t, config, "provider: run-env-profile-test\nsync: {source: directory, include: [README.txt]}\n")
+	t.Setenv("CRABBOX_CONFIG", config)
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).syncPlan(context.Background(), []string{"--json"})
+	if err != nil {
+		t.Fatalf("error=%v stderr=%s", err, &stderr)
+	}
+	var got syncPlanJSONOutput
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != "directory" || got.Root != canonicalRepositoryPath(root) || got.Candidate.Files != 1 || got.Guardrail.Scope != "candidate" {
+		t.Fatalf("output=%+v", got)
+	}
+	if got.DirtyDelta.Files != 0 || got.DeletedTrackedPaths != 0 {
+		t.Fatalf("Git delta=%+v", got)
+	}
 }
