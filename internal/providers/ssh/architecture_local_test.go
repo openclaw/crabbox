@@ -72,13 +72,19 @@ func TestStaticSSHArchitectureLocalWindowsPowerShell51Probe(t *testing.T) {
 		t.Fatal("SystemRoot must identify the Windows installation")
 	}
 	powershell := filepath.Join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-	versionCtx, versionCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer versionCancel()
-	versionOutput, err := exec.CommandContext(versionCtx, powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `[Console]::WriteLine($PSVersionTable.PSEdition + '|' + $PSVersionTable.PSVersion.ToString())`).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), architectureProbeTimeout)
+	defer cancel()
+	// Identify the same interpreter that evaluates the unchanged production script, with one cold start.
+	command := `[Console]::WriteLine($PSVersionTable.PSEdition + '|' + $PSVersionTable.PSVersion.ToString())` + "\n" + windowsArchitectureProbe
+	combinedOutput, err := exec.CommandContext(ctx, powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command).Output()
 	if err != nil {
-		t.Fatalf("Windows PowerShell version: %v (context: %v)", err, versionCtx.Err())
+		t.Fatalf("local Windows architecture probe: %v (context: %v)", err, ctx.Err())
 	}
-	engine := strings.Split(strings.TrimSpace(string(versionOutput)), "|")
+	versionOutput, output, ok := strings.Cut(string(combinedOutput), "\n")
+	if !ok {
+		t.Fatalf("missing Windows PowerShell version evidence: %q", combinedOutput)
+	}
+	engine := strings.Split(strings.TrimSpace(versionOutput), "|")
 	if len(engine) != 2 {
 		t.Fatalf("unexpected Windows PowerShell version evidence: %q", versionOutput)
 	}
@@ -88,17 +94,10 @@ func TestStaticSSHArchitectureLocalWindowsPowerShell51Probe(t *testing.T) {
 	}
 	t.Logf("Windows PowerShell edition=%s version=%s", engine[0], engine[1])
 
-	ctx, cancel := context.WithTimeout(context.Background(), architectureProbeTimeout)
-	defer cancel()
-	// Evaluate the production script unchanged; an exit-zero unknown tuple is not proof.
-	output, err := exec.CommandContext(ctx, powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", windowsArchitectureProbe).Output()
-	if err != nil {
-		t.Fatalf("local Windows architecture probe: %v (context: %v)", err, ctx.Err())
-	}
 	if len(output) > architectureProbeLimit {
 		t.Fatalf("local Windows architecture evidence exceeds %d bytes", architectureProbeLimit)
 	}
-	observation, err := parseArchitectureObservation(string(output), true)
+	observation, err := parseArchitectureObservation(output, true)
 	if err != nil {
 		t.Fatal(err)
 	}
