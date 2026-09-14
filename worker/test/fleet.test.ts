@@ -45227,6 +45227,196 @@ describe("fleet run history", () => {
     ).toEqual(["run.started", "command.finished"]);
   });
 
+  it.each([false, true])(
+    "terminalizes an abandoned admission atomically (already stored=%s)",
+    async (stored) => {
+      const storage = new MemoryStorage();
+      const fleet = testFleet(storage);
+      const id = `run_${"d".repeat(32)}`;
+      const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+      const admission = { provider: "aws", command: ["true"], label: "attempt" };
+      const created = stored
+        ? await fleet.fetch(request("PUT", `/v1/runs/${id}`, { headers, body: admission }))
+        : undefined;
+      expect(created?.status).toBe(stored ? 201 : undefined);
+      const body = { admission, exitCode: 7, message: "admission timed out" };
+      const fail = () =>
+        fleet.fetch(request("POST", `/v1/runs/${id}/admission-failure`, { headers, body }));
+      const first = await fail();
+      expect(first.status).toBe(200);
+      const result = (await first.json()) as { run: RunRecord };
+      expect(result.run).toMatchObject({
+        id,
+        state: "failed",
+        phase: "failed",
+        exitCode: 7,
+        commandMs: 0,
+        admissionFailedBeforeWork: true,
+      });
+      expect(result.run.endedAt).toBeTruthy();
+      expect(result.run.terminalReceipt).toBeUndefined();
+      expect(result.run).not.toHaveProperty("createRequestSHA256");
+      expect(await (await fail()).json()).toEqual(result);
+      const late = await fleet.fetch(
+        request("PUT", `/v1/runs/${id}`, { headers, body: admission }),
+      );
+      expect(late.status).toBe(200);
+      expect(await late.json()).toEqual(result);
+      expect(
+        [...(await storage.list<RunEventRecord>({ prefix: `runevent:${id}:` })).values()].map(
+          (e) => e.type,
+        ),
+      ).toEqual(stored ? ["run.started", "run.failed"] : ["run.failed"]);
+      expect(
+        (
+          await fleet.fetch(
+            request("POST", `/v1/runs/${id}/admission-failure`, {
+              headers,
+              body: { ...body, message: "different outcome" },
+            }),
+          )
+        ).status,
+      ).toBe(409);
+    },
+  );
+
+  it("rejects abandoned-admission binding changes and advanced runs", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const id = `run_${"e".repeat(32)}`;
+    const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+    const admission = { provider: "aws", command: ["true"] };
+    expect(
+      (await fleet.fetch(request("PUT", `/v1/runs/${id}`, { headers, body: admission }))).status,
+    ).toBe(201);
+    const body = { admission, exitCode: 7, message: "setup failed" };
+    const rejected = await Promise.all(
+      [
+        { ...headers, "x-crabbox-owner": "bob@example.com" },
+        { ...headers, "x-crabbox-org": "other-org" },
+      ].map((changed) =>
+        fleet.fetch(
+          request("POST", `/v1/runs/${id}/admission-failure`, { headers: changed, body }),
+        ),
+      ),
+    );
+    expect(rejected.map((response) => response.status)).toEqual([404, 404]);
+    expect(
+      (
+        await fleet.fetch(
+          request("POST", `/v1/runs/${id}/admission-failure`, {
+            headers,
+            body: { ...body, admission: { ...admission, command: ["different"] } },
+          }),
+        )
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await fleet.fetch(
+          request("POST", `/v1/runs/${id}/admission-failure`, {
+            headers,
+            body: { ...body, exitCode: 0 },
+          }),
+        )
+      ).status,
+    ).toBe(400);
+    const original = storage.value<RunRecord>(`run:${id}`)!;
+    storage.seed(`run:${id}`, { ...original, eventCount: 2 });
+    expect(
+      (await fleet.fetch(request("POST", `/v1/runs/${id}/admission-failure`, { headers, body })))
+        .status,
+    ).toBe(409);
+    expect(storage.value<RunRecord>(`run:${id}`)).toEqual({ ...original, eventCount: 2 });
+    storage.seed(`run:${id}`, { ...original, phase: "command" });
+    expect(
+      (await fleet.fetch(request("POST", `/v1/runs/${id}/admission-failure`, { headers, body })))
+        .status,
+    ).toBe(409);
+    expect(storage.value<RunRecord>(`run:${id}`)).toEqual({ ...original, phase: "command" });
+  });
+
+  it("preserves resolved lease attribution for an absent abandoned admission", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+    const lease = testLease({
+      id: "cbx_000000000001",
+      owner: "alice@example.com",
+      org: "example-org",
+      provider: "aws",
+      target: "windows",
+      windowsMode: "wsl2",
+      slug: "owned-runner",
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const admission = {
+      leaseID: lease.id,
+      provider: "hetzner",
+      target: "linux",
+      command: ["true"],
+    };
+    const normal = await fleet.fetch(
+      request("PUT", `/v1/runs/run_${"1".repeat(32)}`, { headers, body: admission }),
+    );
+    expect(normal.status).toBe(201);
+    const expected = ((await normal.json()) as { run: RunRecord }).run;
+    const id = `run_${"2".repeat(32)}`;
+    const failed = await fleet.fetch(
+      request("POST", `/v1/runs/${id}/admission-failure`, {
+        headers,
+        body: { admission, exitCode: 7, message: "admission timed out" },
+      }),
+    );
+    expect(failed.status).toBe(200);
+    const actual = ((await failed.json()) as { run: RunRecord }).run;
+    for (const key of [
+      "leaseID",
+      "leaseIDs",
+      "leaseOwners",
+      "provider",
+      "target",
+      "windowsMode",
+      "slug",
+      "class",
+      "serverType",
+    ] as const)
+      expect(actual[key]).toEqual(expected[key]);
+    const replay = await fleet.fetch(
+      request("PUT", `/v1/runs/${id}`, { headers, body: admission }),
+    );
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual({ run: actual });
+    const invisible = await fleet.fetch(
+      request("POST", `/v1/runs/run_${"3".repeat(32)}/admission-failure`, {
+        headers: { ...headers, "x-crabbox-org": "other-org" },
+        body: { admission, exitCode: 7, message: "admission timed out" },
+      }),
+    );
+    expect(invisible.status).toBe(404);
+    expect(storage.value(`run:run_${"3".repeat(32)}`)).toBeUndefined();
+  });
+
+  it("rolls back abandoned admission when terminal event persistence fails", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const id = `run_${"f".repeat(32)}`;
+    const body = { admission: { command: ["true"] }, exitCode: 7, message: "admission timed out" };
+    storage.beforePut = async (key) => {
+      if (key.startsWith("runevent:")) throw new Error("event storage unavailable");
+    };
+    expect(
+      (await fleet.fetch(request("POST", `/v1/runs/${id}/admission-failure`, { body }))).status,
+    ).toBe(500);
+    expect(storage.value(`run:${id}`)).toBeUndefined();
+    expect((await storage.list({ prefix: `runevent:${id}:` })).size).toBe(0);
+    storage.beforePut = undefined;
+    expect(
+      (await fleet.fetch(request("POST", `/v1/runs/${id}/admission-failure`, { body }))).status,
+    ).toBe(200);
+    expect(storage.value<RunRecord>(`run:${id}`)?.state).toBe("failed");
+  });
+
   it("keeps run admission bound to its original caller and request after lease attribution", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);

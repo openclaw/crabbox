@@ -1014,6 +1014,7 @@ export interface RunRecord {
   terminalFinishSHA256?: string;
   terminalLogPrefix?: string;
   createRequestSHA256?: string;
+  admissionFailedBeforeWork?: boolean;
 }
 
 export interface TerminalRunReceipt {
@@ -1048,6 +1049,12 @@ export interface RunCreateRequest {
   serverType?: string;
   command?: string[];
   label?: string;
+}
+
+export interface RunAdmissionFailureRequest {
+  admission: RunCreateRequest;
+  exitCode: number;
+  message: string;
 }
 
 export interface RunFinishRequest {

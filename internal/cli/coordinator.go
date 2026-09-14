@@ -28,9 +28,17 @@ type CoordinatorClient struct {
 	Access                 AccessConfig
 	Client                 *http.Client
 	ChildEnvDenylist       []string
+	admissionAuth          *coordinatorAdmissionAuth
 	checkpointSupportMu    sync.Mutex
 	checkpointSupportKnown bool
 	checkpointSupported    bool
+}
+
+// Only a recorder-owned admission client retains this in-memory header binding.
+type coordinatorAdmissionAuth struct {
+	captured bool
+	headers  http.Header
+	err      error
 }
 
 func (c *CoordinatorClient) hasConfiguredAuth() bool {
@@ -615,36 +623,37 @@ type CoordinatorRunLeaseOwner struct {
 }
 
 type CoordinatorRun struct {
-	ID           string                     `json:"id"`
-	LeaseID      string                     `json:"leaseID"`
-	LeaseIDs     []string                   `json:"leaseIDs,omitempty"`
-	Slug         string                     `json:"slug,omitempty"`
-	Owner        string                     `json:"owner"`
-	Org          string                     `json:"org"`
-	LeaseOwners  []CoordinatorRunLeaseOwner `json:"leaseOwners,omitempty"`
-	Provider     string                     `json:"provider"`
-	TargetOS     string                     `json:"target,omitempty"`
-	WindowsMode  string                     `json:"windowsMode,omitempty"`
-	Class        string                     `json:"class"`
-	ServerType   string                     `json:"serverType"`
-	Command      []string                   `json:"command"`
-	Label        string                     `json:"label,omitempty"`
-	State        string                     `json:"state"`
-	Phase        string                     `json:"phase,omitempty"`
-	ExitCode     *int                       `json:"exitCode,omitempty"`
-	SyncMs       int64                      `json:"syncMs,omitempty"`
-	CommandMs    int64                      `json:"commandMs,omitempty"`
-	DurationMs   int64                      `json:"durationMs,omitempty"`
-	LogBytes     int64                      `json:"logBytes"`
-	LogTruncated bool                       `json:"logTruncated"`
-	BlockedStage string                     `json:"blockedStage,omitempty"`
-	RetryLikely  string                     `json:"retryLikely,omitempty"`
-	Results      *TestResultSummary         `json:"results,omitempty"`
-	Telemetry    *RunTelemetrySummary       `json:"telemetry,omitempty"`
-	StartedAt    string                     `json:"startedAt"`
-	LastEventAt  string                     `json:"lastEventAt,omitempty"`
-	EventCount   int                        `json:"eventCount,omitempty"`
-	EndedAt      string                     `json:"endedAt,omitempty"`
+	AdmissionFailedBeforeWork bool                       `json:"admissionFailedBeforeWork,omitempty"`
+	ID                        string                     `json:"id"`
+	LeaseID                   string                     `json:"leaseID"`
+	LeaseIDs                  []string                   `json:"leaseIDs,omitempty"`
+	Slug                      string                     `json:"slug,omitempty"`
+	Owner                     string                     `json:"owner"`
+	Org                       string                     `json:"org"`
+	LeaseOwners               []CoordinatorRunLeaseOwner `json:"leaseOwners,omitempty"`
+	Provider                  string                     `json:"provider"`
+	TargetOS                  string                     `json:"target,omitempty"`
+	WindowsMode               string                     `json:"windowsMode,omitempty"`
+	Class                     string                     `json:"class"`
+	ServerType                string                     `json:"serverType"`
+	Command                   []string                   `json:"command"`
+	Label                     string                     `json:"label,omitempty"`
+	State                     string                     `json:"state"`
+	Phase                     string                     `json:"phase,omitempty"`
+	ExitCode                  *int                       `json:"exitCode,omitempty"`
+	SyncMs                    int64                      `json:"syncMs,omitempty"`
+	CommandMs                 int64                      `json:"commandMs,omitempty"`
+	DurationMs                int64                      `json:"durationMs,omitempty"`
+	LogBytes                  int64                      `json:"logBytes"`
+	LogTruncated              bool                       `json:"logTruncated"`
+	BlockedStage              string                     `json:"blockedStage,omitempty"`
+	RetryLikely               string                     `json:"retryLikely,omitempty"`
+	Results                   *TestResultSummary         `json:"results,omitempty"`
+	Telemetry                 *RunTelemetrySummary       `json:"telemetry,omitempty"`
+	StartedAt                 string                     `json:"startedAt"`
+	LastEventAt               string                     `json:"lastEventAt,omitempty"`
+	EventCount                int                        `json:"eventCount,omitempty"`
+	EndedAt                   string                     `json:"endedAt,omitempty"`
 }
 
 type CoordinatorRunEventsResponse struct {
@@ -2310,7 +2319,7 @@ func imagePath(imageID, action string, refs ...CoordinatorImageRef) string {
 	return path
 }
 
-func (c *CoordinatorClient) CreateRun(ctx context.Context, runID, leaseID string, cfg Config, command []string, label string) (CoordinatorRun, error) {
+func runAdmissionBody(leaseID string, cfg Config, command []string, label string) map[string]any {
 	body := map[string]any{
 		"leaseID":     leaseID,
 		"provider":    cfg.Provider,
@@ -2323,9 +2332,27 @@ func (c *CoordinatorClient) CreateRun(ctx context.Context, runID, leaseID string
 	if strings.TrimSpace(label) != "" {
 		body["label"] = strings.TrimSpace(label)
 	}
+	return body
+}
+
+func (c *CoordinatorClient) CreateRun(ctx context.Context, runID, leaseID string, cfg Config, command []string, label string) (CoordinatorRun, error) {
+	body := runAdmissionBody(leaseID, cfg, command, label)
 	// Only identity-bound admission is replayed, within the caller's original budget.
 	ctx, cancel := context.WithTimeout(ctx, runRecorderRequestTimeout)
 	defer cancel()
+	if binding := c.admissionAuth; binding != nil {
+		if !binding.captured {
+			binding.captured = true
+			binding.headers = make(http.Header)
+			binding.err = c.resolveRequestHeaders(ctx, binding.headers)
+		}
+		if binding.err != nil {
+			if ctx.Err() != nil {
+				return CoordinatorRun{}, ctx.Err()
+			}
+			return CoordinatorRun{}, binding.err
+		}
+	}
 	var err error
 	for attempt := 0; attempt < 2 && ctx.Err() == nil; attempt++ {
 		var res CoordinatorRunResponse
@@ -2350,6 +2377,20 @@ func (c *CoordinatorClient) CreateRun(ctx context.Context, runID, leaseID string
 		return CoordinatorRun{}, fmt.Errorf("coordinator run admission unavailable; upgrade the coordinator: %w", err)
 	}
 	return CoordinatorRun{}, err
+}
+
+// FailRunAdmission finalizes only the authenticated original admission, never a workload.
+func (c *CoordinatorClient) FailRunAdmission(ctx context.Context, runID, leaseID string, cfg Config, command []string, label string, code int, message string) (CoordinatorRun, error) {
+	body := map[string]any{"admission": runAdmissionBody(leaseID, cfg, command, label), "exitCode": code, "message": message}
+	var res CoordinatorRunResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/runs/"+url.PathEscape(runID)+"/admission-failure", body, &res); err != nil {
+		return CoordinatorRun{}, err
+	}
+	_, endedErr := time.Parse(time.RFC3339Nano, res.Run.EndedAt)
+	if endedErr != nil || res.Run.ID != runID || !res.Run.AdmissionFailedBeforeWork || res.Run.State != "failed" || res.Run.Phase != "failed" || res.Run.ExitCode == nil || *res.Run.ExitCode != code || res.Run.CommandMs != 0 || !slices.Equal(res.Run.Command, command) {
+		return CoordinatorRun{}, Exit(7, "coordinator returned a mismatched admission failure for %s", runID)
+	}
+	return res.Run, nil
 }
 
 func (c *CoordinatorClient) FinishRun(ctx context.Context, runID string, exitCode int, sync, command time.Duration, log string, truncated bool, results *TestResultSummary, telemetry *RunTelemetrySummary, classification FailureClassification, receipt *terminalRunReceipt) (CoordinatorRun, error) {
@@ -2557,6 +2598,22 @@ func (c *CoordinatorClient) secureHTTPClient() *http.Client {
 }
 
 func (c *CoordinatorClient) addRequestHeaders(ctx context.Context, headers http.Header) error {
+	if binding := c.admissionAuth; binding != nil {
+		if !binding.captured {
+			return errors.New("original admission authentication was not captured")
+		}
+		if binding.err != nil {
+			return binding.err
+		}
+		for name, values := range binding.headers {
+			headers[name] = append([]string(nil), values...)
+		}
+		return ctx.Err()
+	}
+	return c.resolveRequestHeaders(ctx, headers)
+}
+
+func (c *CoordinatorClient) resolveRequestHeaders(ctx context.Context, headers http.Header) error {
 	token, err := c.authorizationToken(ctx)
 	if err != nil {
 		return err
