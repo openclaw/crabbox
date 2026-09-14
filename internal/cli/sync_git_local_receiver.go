@@ -7,6 +7,8 @@ import (
 	"strings"
 )
 
+const localGitSeedHeadRef = "refs/crabbox/local-head"
+
 // gitLocalSeedPlan binds receiver metadata to one self-contained local artifact.
 // The ordinary sync manifest remains the sole authority for working files.
 type gitLocalSeedPlan struct {
@@ -36,7 +38,7 @@ func (p gitLocalSeedPlan) valid() bool {
 			return false
 		}
 		seen[ref.Name] = true
-		if ref.Name == "refs/crabbox/local-head" {
+		if ref.Name == localGitSeedHeadRef {
 			headRef = ref.OID == p.Head
 		}
 	}
@@ -54,6 +56,18 @@ func (p gitLocalSeedPlan) refLines() string {
 
 func (p gitLocalSeedPlan) refsDigest() string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(p.refLines())))
+}
+
+func (p gitLocalSeedPlan) metadataRefsDigest() string {
+	refs := p.Refs
+	p.Refs = nil
+	for _, ref := range refs {
+		// The bundle's HEAD anchor is transport metadata, not a receiver ref.
+		if ref.Name != localGitSeedHeadRef {
+			p.Refs = append(p.Refs, ref)
+		}
+	}
+	return p.refsDigest()
 }
 
 func remoteGitLocalSeed(workdir string, plan gitLocalSeedPlan) string {
@@ -81,6 +95,8 @@ expected_tree=` + shellQuote(plan.Tree) + `
 expected_format=` + shellQuote(plan.ObjectFormat) + `
 expected_digest=` + shellQuote(plan.Digest) + `
 expected_refs_digest=` + shellQuote(plan.refsDigest()) + `
+expected_metadata_refs_digest=` + shellQuote(plan.metadataRefsDigest()) + `
+transport_head_ref=` + shellQuote(localGitSeedHeadRef) + `
 expected_fingerprint=` + shellQuote(plan.Fingerprint) + `
 stage=
 backup=
@@ -149,7 +165,7 @@ verify_metadata() {
   [ "$(plain_git --git-dir="$metadata" write-tree 2>/dev/null)" = "$expected_tree" ] || return 1
   actual_refs="$(plain_git --git-dir="$metadata" for-each-ref --format='%(objectname) %(refname)' 2>/dev/null)" || return 1
   actual_refs="$(printf '%s\n' "$actual_refs" | sort)" || return 1
-  [ "$(printf '%s' "$actual_refs" | hash_stdin)" = "$expected_refs_digest" ] || return 1
+  [ "$(printf '%s' "$actual_refs" | hash_stdin)" = "$expected_metadata_refs_digest" ] || return 1
   [ ! -e "$metadata/shallow" ] && [ ! -e "$metadata/objects/info/alternates" ] || return 1
   [ ! -e "$metadata/config.worktree" ] && [ ! -e "$metadata/info/grafts" ] || return 1
   config_keys="$(plain_git config --file "$metadata/config" --no-includes --name-only --list 2>/dev/null)" || return 1
@@ -190,6 +206,7 @@ plain_git --git-dir="$fresh" bundle verify "$bundle" >/dev/null 2>&1 || fail
 plain_git --git-dir="$fresh" bundle unbundle "$bundle" >/dev/null 2>&1 || fail
 while IFS=' ' read -r oid ref; do
   plain_git check-ref-format "$ref" >/dev/null 2>&1 || fail
+  if [ "$ref" = "$transport_head_ref" ]; then continue; fi
   plain_git --git-dir="$fresh" update-ref "$ref" "$oid" >/dev/null 2>&1 || fail
 done <<< "$bundle_refs"
 plain_git --git-dir="$fresh" update-ref --no-deref HEAD "$expected_head" >/dev/null 2>&1 || fail
@@ -274,6 +291,8 @@ $expectedTree = ` + psQuote(plan.Tree) + `
 $expectedFormat = ` + psQuote(plan.ObjectFormat) + `
 $expectedDigest = ` + psQuote(plan.Digest) + `
 $expectedRefsDigest = ` + psQuote(plan.refsDigest()) + `
+$expectedMetadataRefsDigest = ` + psQuote(plan.metadataRefsDigest()) + `
+$transportHeadRef = ` + psQuote(localGitSeedHeadRef) + `
 $phase = 'prepare'
 $stage = $null
 $backup = $null
@@ -327,7 +346,7 @@ function Assert-LocalMetadata {
   if ((Invoke-LocalGit --git-dir=$metadata rev-parse --verify 'HEAD^{tree}') -cne $expectedTree) { throw 'tree mismatch' }
   if ((Invoke-LocalGit --git-dir=$metadata write-tree) -cne $expectedTree) { throw 'index mismatch' }
   $actualRefs = Sort-LocalLines (Invoke-LocalGit --git-dir=$metadata for-each-ref '--format=%(objectname) %(refname)')
-  if ((Get-LocalRefsDigest $actualRefs) -cne $expectedRefsDigest) { throw 'refs mismatch' }
+  if ((Get-LocalRefsDigest $actualRefs) -cne $expectedMetadataRefsDigest) { throw 'refs mismatch' }
   foreach ($name in @('shallow', 'objects/info/alternates', 'config.worktree', 'info/grafts')) {
     if (Test-Path -LiteralPath (Join-Path $metadata $name)) { throw 'unsupported metadata' }
   }
@@ -400,6 +419,7 @@ try {
   foreach ($line in ($bundleRefs -split "` + "`n" + `")) {
     $parts = $line.Split(' ', 2)
     $null = Invoke-LocalGit check-ref-format $parts[1]
+    if ($parts[1] -ceq $transportHeadRef) { continue }
     $null = Invoke-LocalGit --git-dir=$fresh update-ref $parts[1] $parts[0]
   }
   $null = Invoke-LocalGit --git-dir=$fresh update-ref --no-deref HEAD $expectedHead

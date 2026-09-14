@@ -248,7 +248,7 @@ func prepareLocalGitSeedArtifact(ctx context.Context, root string, selection loc
 	if selection.Base == "" && selection.BaseRef != "" {
 		return artifact, fmt.Errorf("local Git base ref has no selected object")
 	}
-	refs := []localGitSeedRef{{"refs/crabbox/local-head", selection.Head}}
+	refs := []localGitSeedRef{{localGitSeedHeadRef, selection.Head}}
 	if selection.Base != "" {
 		baseRef := selection.BaseRef
 		if baseRef == "" {

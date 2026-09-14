@@ -65,6 +65,36 @@ func TestGitLocalReceiverSHA256(t *testing.T) {
 	}
 }
 
+func TestGitLocalReceiverDetachedNoBase(t *testing.T) {
+	for _, format := range []string{"sha1", "sha256"} {
+		t.Run(format, func(t *testing.T) {
+			plan, _, source := localReceiverFixture(t, format)
+			bundle := filepath.Join(t.TempDir(), "head.bundle")
+			runGit(t, source, "bundle", "create", bundle, "refs/crabbox/local-head")
+			data, err := os.ReadFile(bundle)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan.Refs = plan.Refs[:1]
+			plan.PackedBytes = int64(len(data))
+			digest := sha256.Sum256(data)
+			plan.Digest = hex.EncodeToString(digest[:])
+			workdir := t.TempDir()
+			requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+			requireLocalReceiver(t, remoteGitLocalSeedFinalize(workdir, plan), nil)
+			if refs := gitOutput(workdir, "for-each-ref", "--format=%(refname)"); refs != "" {
+				t.Fatalf("detached no-base receiver invented refs: %q", refs)
+			}
+			if head := gitOutput(workdir, "rev-parse", "HEAD"); head != plan.Head {
+				t.Fatalf("detached HEAD changed: %q", head)
+			}
+			if out := requireLocalReceiver(t, remoteGitLocalSeedFingerprint(workdir, plan), nil); string(out) != plan.Fingerprint {
+				t.Fatalf("detached no-base fingerprint: %q", out)
+			}
+		})
+	}
+}
+
 func runLocalReceiver(t *testing.T, command string, input []byte) ([]byte, error) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -100,6 +130,9 @@ func TestGitLocalReceiverMetadataOnlyAndFinalize(t *testing.T) {
 	}
 	if gitOutput(workdir, "rev-parse", "HEAD") != plan.Head || gitOutput(workdir, "write-tree") != plan.Tree {
 		t.Fatal("HEAD/index identity mismatch")
+	}
+	if refs := gitOutput(workdir, "for-each-ref", "--format=%(refname)"); refs != "refs/heads/base\nrefs/tags/v1.0.0" {
+		t.Fatalf("receiver must retain only selected user refs: %q", refs)
 	}
 	if got := gitOutput(workdir, "show", "HEAD^:historical.txt"); got != "complete historical blob" {
 		t.Fatalf("historical closure: %q", got)

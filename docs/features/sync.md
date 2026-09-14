@@ -407,8 +407,9 @@ Edits made after snapshot acceptance wait for the next sync.
 The bundle contains the complete selected HEAD and base histories, plus locally
 present tags that peel to those histories. An explicit `sync.baseRef` must resolve
 locally; short names prefer the corresponding origin tracking ref. An inferred
-base is optional, so detached repositories without an origin work too. Ref names
-are recreated without remote URLs. Exact commit, tree, blob, and tag identities
+base is optional, so detached repositories without an origin work too. Selected
+ref names are recreated without remote URLs; the bundle's internal HEAD anchor
+is not installed as a receiver ref. Exact commit, tree, blob, and tag identities
 are preserved, allowing offline parent queries, historical diffs, and ordinary
 `git describe`/`git describe --tags`. Root commits still have no parent, unrelated
 histories still have no merge base, and unrelated descendant tags are not copied.
