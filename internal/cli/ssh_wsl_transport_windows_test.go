@@ -886,6 +886,8 @@ func TestWSLStageLauncherConfirmsOriginalAndCleanupTermination(t *testing.T) {
 				decodePowerShellCommand(t, wslStageLauncherCommand(nonce, spool.size, spool.digest(), wslStageCMD))
 			invocationStarted := time.Now()
 			cmd := windowsPowerShellScriptCommand(t, script)
+			// Bound inherited output-pipe draining after PowerShell exits, not helper lifetime.
+			cmd.WaitDelay = sshCommandWaitDelay
 			output, err := cmd.CombinedOutput()
 			invocationReturned := time.Now()
 			timing("invocation-start", invocationStarted)
@@ -902,7 +904,7 @@ func TestWSLStageLauncherConfirmsOriginalAndCleanupTermination(t *testing.T) {
 				timing("direct-powershell-os-exit-unavailable", invocationReturned)
 			}
 			logs := readFakeWSLStageFile(logPath)
-			if err == nil || !strings.Contains(string(output), test.want) {
+			if err == nil || cmd.ProcessState == nil || cmd.ProcessState.Success() || !strings.Contains(string(output), test.want) {
 				t.Fatalf("output=%q error=%v logs=%q want=%q", output, err, logs, test.want)
 			}
 			if test.mode == "main-no-read" && strings.Contains(string(output), "phase=execute") {
