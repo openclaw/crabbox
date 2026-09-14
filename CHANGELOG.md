@@ -4,6 +4,7 @@
 
 ### Changes
 
+- Add explicit offline local-object Git seeding with complete selected histories and reachable tags, while retaining ordinary working-file and deletion sync. [PR 2264](https://github.com/openclaw/crabbox/pull/2264). Thanks @coygeek.
 - Add explicit include-only directory sync through the existing POSIX/WSL SSH manifest path, using isolated Git ignore matching without creating source Git metadata. [PR 2253](https://github.com/openclaw/crabbox/pull/2253). Thanks @coygeek.
 - Report the observed Multipass state when an instance is no longer running instead of retaining a stale ready label. [PR 2258](https://github.com/openclaw/crabbox/pull/2258).
 
