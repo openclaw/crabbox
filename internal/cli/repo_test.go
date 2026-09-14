@@ -3,7 +3,10 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"errors"
 	"fmt"
+	"hash"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +15,63 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestSyncFingerprintPathsPreservesContentEncoding(t *testing.T) {
+	root := t.TempDir()
+	const content = "ordinary fingerprint content\n"
+	path := filepath.Join(root, "source.txt")
+	writeFile(t, path, content)
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := sha256.New()
+	fmt.Fprintf(want, "path=source.txt\nmode=%s size=%d\n", info.Mode().String(), info.Size())
+	want.Write([]byte(content))
+	want.Write([]byte{0})
+	got := sha256.New()
+	if err := syncFingerprintPaths(context.Background(), got, root, []string{"source.txt"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.Sum(nil), want.Sum(nil)) {
+		t.Fatal("stable fingerprint encoding changed")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := syncFingerprintPaths(ctx, sha256.New(), root, []string{"source.txt"}, true); !errors.Is(err, context.Canceled) {
+		t.Fatalf("fingerprint ignored cancellation: %v", err)
+	}
+}
+
+func TestSyncFingerprintPathsCancellationDuringContent(t *testing.T) {
+	root := t.TempDir()
+	content := strings.Repeat("x", 256*1024)
+	writeFile(t, filepath.Join(root, "source.txt"), content)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h := &cancelSourceFingerprintHash{Hash: sha256.New(), cancel: cancel}
+	err := syncFingerprintPaths(ctx, h, root, []string{"source.txt"}, true)
+	if !errors.Is(err, context.Canceled) || h.chunks != 1 || h.bytes <= 0 || h.bytes >= len(content) {
+		t.Fatalf("canceled=%t payload_chunks=%d payload_bytes=%d error=%v", errors.Is(err, context.Canceled), h.chunks, h.bytes, err)
+	}
+	t.Logf("canceled=true; payload_chunks=%d; payload_bytes=%d; total_bytes=%d", h.chunks, h.bytes, len(content))
+}
+
+type cancelSourceFingerprintHash struct {
+	hash.Hash
+	cancel        func()
+	chunks, bytes int
+}
+
+func (h *cancelSourceFingerprintHash) Write(data []byte) (int, error) {
+	n, err := h.Hash.Write(data)
+	if len(data) > 1024 && data[0] == 'x' {
+		h.chunks++
+		h.bytes += n
+		h.cancel()
+	}
+	return n, err
+}
 
 func TestManagedStateSyncExclusionIsLiteralAndProtected(t *testing.T) {
 	root := t.TempDir()
@@ -1388,11 +1448,11 @@ func TestSyncFingerprintIncludesExcludeRuleProvenance(t *testing.T) {
 	plan := gitCoherencePlan{RemoteURL: "https://example.test/repo.git", Target: "target", Tree: "tree", Branch: "main"}
 	builtIn := newSyncExcludeRules([]string{"target"}, syncExcludeBuiltIn)
 	configured := newSyncExcludeRules([]string{"target"}, syncExcludeConfigured)
-	a, err := syncFingerprintForManifest(Repo{Root: t.TempDir()}, baseConfig(), SyncManifest{}, builtIn, plan)
+	a, err := syncFingerprintForManifest(context.Background(), Repo{Root: t.TempDir()}, baseConfig(), SyncManifest{}, builtIn, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := syncFingerprintForManifest(Repo{Root: t.TempDir()}, baseConfig(), SyncManifest{}, configured, plan)
+	b, err := syncFingerprintForManifest(context.Background(), Repo{Root: t.TempDir()}, baseConfig(), SyncManifest{}, configured, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1429,7 +1489,7 @@ func TestSyncFingerprintHashesChangedSymlinkIdentity(t *testing.T) {
 				plan := gitCoherencePlan{RemoteURL: "https://example.test/repo.git", Target: "target", Tree: "tree", Branch: "main"}
 				fingerprint := func() string {
 					t.Helper()
-					value, err := syncFingerprintForManifest(Repo{Root: root}, cfg, manifest, SyncExcludeRules{}, plan)
+					value, err := syncFingerprintForManifest(context.Background(), Repo{Root: root}, cfg, manifest, SyncExcludeRules{}, plan)
 					if err != nil {
 						t.Fatalf("fingerprint changed %s symlink: %v", targetKind, err)
 					}
@@ -1903,7 +1963,7 @@ func TestSyncGitCoherencePlanSelectsEligibleOriginBranch(t *testing.T) {
 		if !plan.seedEnabled() || plan.enabled() {
 			t.Fatalf("plan should seed without coherence: %#v", plan)
 		}
-		fingerprint, _ := syncFingerprintForManifest(Repo{}, baseConfig(), SyncManifest{}, SyncExcludeRules{}, plan)
+		fingerprint, _ := syncFingerprintForManifest(context.Background(), Repo{}, baseConfig(), SyncManifest{}, SyncExcludeRules{}, plan)
 		if fingerprint != "" {
 			t.Fatalf("ineligible coherence published fingerprint %q", fingerprint)
 		}

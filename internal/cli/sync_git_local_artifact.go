@@ -35,7 +35,7 @@ type localGitSeedArtifact struct {
 	Refs                             []localGitSeedRef
 	PackedBytes, ObjectBytes         int64
 	ObjectCount                      int
-	owner                            *gitOverlaySnapshot
+	owner                            *sourceSnapshot
 }
 
 func (a *localGitSeedArtifact) cleanup() error {
@@ -273,7 +273,7 @@ func prepareLocalGitSeedArtifact(ctx context.Context, root string, selection loc
 	if err != nil {
 		return artifact, err
 	}
-	owner, err := newGitOverlaySnapshot()
+	owner, err := newSourceSnapshot()
 	if err != nil {
 		return artifact, err
 	}

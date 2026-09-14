@@ -145,13 +145,13 @@ func TestLocalGitSeedSnapshotFingerprintFullFilesAndMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	baseline, err := localGitSeedSnapshotFingerprint(repo, cfg, manifest, excludes, checkout)
+	baseline, err := localGitSeedSnapshotFingerprint(context.Background(), repo, cfg, manifest, excludes, checkout)
 	if err != nil {
 		t.Fatal(err)
 	}
 	checkDifferent := func(t *testing.T, cfg Config, manifest SyncManifest, excludes SyncExcludeRules, checkout gitOverlayCheckoutState) {
 		t.Helper()
-		got, err := localGitSeedSnapshotFingerprint(repo, cfg, manifest, excludes, checkout)
+		got, err := localGitSeedSnapshotFingerprint(context.Background(), repo, cfg, manifest, excludes, checkout)
 		if err != nil || got == baseline {
 			t.Fatalf("fingerprint did not change: %q, %v", got, err)
 		}
@@ -184,7 +184,7 @@ func TestLocalGitSeedSnapshotFingerprintFullFilesAndMetadata(t *testing.T) {
 		}
 		withLink := manifest
 		withLink.Files = append(slices.Clone(manifest.Files), "link")
-		before, err := localGitSeedSnapshotFingerprint(repo, cfg, withLink, excludes, checkout)
+		before, err := localGitSeedSnapshotFingerprint(context.Background(), repo, cfg, withLink, excludes, checkout)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -194,7 +194,7 @@ func TestLocalGitSeedSnapshotFingerprintFullFilesAndMetadata(t *testing.T) {
 		if err := os.Symlink("./clean.txt", path); err != nil {
 			t.Fatal(err)
 		}
-		after, err := localGitSeedSnapshotFingerprint(repo, cfg, withLink, excludes, checkout)
+		after, err := localGitSeedSnapshotFingerprint(context.Background(), repo, cfg, withLink, excludes, checkout)
 		if err != nil || before == after {
 			t.Fatalf("symlink identity did not change fingerprint: %q, %v", after, err)
 		}
@@ -246,7 +246,7 @@ func TestGitSnapshotPolicyPreservesOverlaySelection(t *testing.T) {
 	if got, err := os.ReadFile(filepath.Join(snapshot.Root, "unstaged.txt")); err != nil || string(got) != "changed\n" {
 		t.Fatalf("overlay copied contents = %q, %v", got, err)
 	}
-	if want, err := syncFingerprintForManifest(fixture.repo, fixture.cfg, manifest, excludes, fixture.plan); err != nil || snapshot.Fingerprint != want {
+	if want, err := syncFingerprintForManifest(context.Background(), fixture.repo, fixture.cfg, manifest, excludes, fixture.plan); err != nil || snapshot.Fingerprint != want {
 		t.Fatalf("overlay fingerprint = %q, want %q, %v", snapshot.Fingerprint, want, err)
 	}
 }

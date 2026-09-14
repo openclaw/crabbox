@@ -761,7 +761,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 	}
 	fingerprint := ""
 	if cfg.Sync.Fingerprint && !plainManifest {
-		if value, err := syncFingerprintForManifest(repo, cfg, manifest, excludes, coherence); err == nil {
+		if value, err := syncFingerprintForManifest(ctx, repo, cfg, manifest, excludes, coherence); err == nil {
 			fingerprint = value
 		} else {
 			fmt.Fprintf(a.Stderr, "warning: sync fingerprint failed: %v\n", err)

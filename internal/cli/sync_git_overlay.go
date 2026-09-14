@@ -12,9 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
-	"time"
 )
 
 const (
@@ -54,60 +52,21 @@ const (
 
 const (
 	gitOverlaySnapshotMaxAttempts = 3
-	gitOverlayCleanupMaxAttempts  = 3
-	gitOverlayCleanupRetryDelay   = 50 * time.Millisecond
 )
 
 type gitOverlaySnapshot struct {
-	Root        string
+	sourceSnapshot
 	Manifest    SyncManifest
 	Excludes    SyncExcludeRules
 	Fingerprint string
 	Checkout    gitOverlayCheckoutState
-	cleanupRoot *gitOverlaySnapshotRoot
 }
-
-type gitOverlaySnapshotHook func(phase string, attempt int, root string)
 
 type gitOverlayCheckoutState struct {
 	Head             string
 	IndexTree        string
 	IndexFingerprint string
 }
-
-type gitOverlaySnapshotParentIdentity struct {
-	path string
-	info os.FileInfo
-}
-
-type gitOverlaySnapshotParent struct {
-	source      gitOverlaySnapshotParentIdentity
-	destination string
-	relative    string
-	handle      *os.File
-	finalMode   os.FileMode
-	tempMode    os.FileMode
-	finalMTime  time.Time
-	depth       int
-}
-
-type gitOverlaySnapshotParents struct {
-	sourceRoot gitOverlaySnapshotParentIdentity
-	byPath     map[string]*gitOverlaySnapshotParent
-	ordered    []*gitOverlaySnapshotParent
-}
-
-type gitOverlaySnapshotThaw func(*gitOverlaySnapshotParents) error
-
-type gitOverlaySnapshotRoot struct {
-	parent      *os.Root
-	root        *os.Root
-	name        string
-	identity    os.FileInfo
-	directories []*gitOverlaySnapshotParent
-}
-
-var errGitOverlaySnapshotDrift = errors.New("local Git overlay changed during snapshot creation")
 
 var gitOverlayGitExecutable = func() string {
 	path, err := exec.LookPath("git")
@@ -117,190 +76,9 @@ var gitOverlayGitExecutable = func() string {
 	return path
 }()
 
-func (snapshot *gitOverlaySnapshot) cleanup() error {
-	return snapshot.cleanupWith(func(string) error {
-		if snapshot.cleanupRoot == nil {
-			return fmt.Errorf("missing git overlay snapshot cleanup capability")
-		}
-		return snapshot.cleanupRoot.remove()
-	}, time.Sleep)
-}
-
-func (snapshot *gitOverlaySnapshot) cleanupWith(removeAll func(string) error, sleep func(time.Duration)) error {
-	root := snapshot.Root
-	if root == "" {
-		return nil
-	}
-	var cleanupErr error
-	for attempt := 1; attempt <= gitOverlayCleanupMaxAttempts; attempt++ {
-		cleanupErr = removeAll(root)
-		if cleanupErr == nil {
-			snapshot.closeCleanupRoot()
-			snapshot.Root = ""
-			return nil
-		}
-		if attempt < gitOverlayCleanupMaxAttempts {
-			sleep(gitOverlayCleanupRetryDelay)
-		}
-	}
-	return fmt.Errorf("remove git overlay snapshot %q after %d attempts: %w", root, gitOverlayCleanupMaxAttempts, cleanupErr)
-}
-
-func (snapshot *gitOverlaySnapshot) closeCleanupRoot() {
-	if snapshot.cleanupRoot == nil {
-		return
-	}
-	snapshot.cleanupRoot.close()
-	snapshot.cleanupRoot = nil
-}
-
 func newGitOverlaySnapshot() (gitOverlaySnapshot, error) {
-	root, err := os.MkdirTemp("", "crabbox-git-overlay-")
-	if err != nil {
-		return gitOverlaySnapshot{}, err
-	}
-	parentPath := filepath.Dir(root)
-	name := filepath.Base(root)
-	parent, err := os.OpenRoot(parentPath)
-	if err != nil {
-		_ = os.Remove(root)
-		return gitOverlaySnapshot{}, err
-	}
-	cleanupRoot := &gitOverlaySnapshotRoot{parent: parent, name: name}
-	cleanupRoot.root, err = parent.OpenRoot(name)
-	if err != nil {
-		cleanupRoot.close()
-		_ = os.Remove(root)
-		return gitOverlaySnapshot{}, err
-	}
-	cleanupRoot.identity, err = cleanupRoot.root.Stat(".")
-	if err != nil {
-		cleanupRoot.close()
-		_ = os.Remove(root)
-		return gitOverlaySnapshot{}, err
-	}
-	if err := cleanupRoot.verifyIdentity(); err != nil {
-		cleanupRoot.close()
-		_ = os.Remove(root)
-		return gitOverlaySnapshot{}, err
-	}
-	return gitOverlaySnapshot{Root: root, cleanupRoot: cleanupRoot}, nil
-}
-
-func (root *gitOverlaySnapshotRoot) verifyIdentity() error {
-	if root == nil || root.parent == nil || root.root == nil || root.identity == nil {
-		return fmt.Errorf("incomplete git overlay snapshot cleanup capability")
-	}
-	opened, err := root.root.Stat(".")
-	if err != nil {
-		return fmt.Errorf("stat git overlay snapshot root handle: %w", err)
-	}
-	current, err := root.parent.Lstat(root.name)
-	if err != nil {
-		return fmt.Errorf("stat git overlay snapshot root path: %w", err)
-	}
-	if !opened.IsDir() ||
-		!current.IsDir() ||
-		current.Mode()&os.ModeSymlink != 0 ||
-		!os.SameFile(root.identity, opened) ||
-		!os.SameFile(opened, current) {
-		return fmt.Errorf("git overlay snapshot root identity changed")
-	}
-	return nil
-}
-
-func (root *gitOverlaySnapshotRoot) remove() error {
-	if err := root.verifyIdentity(); err != nil {
-		return err
-	}
-	if err := root.thawDirectories(); err != nil {
-		return err
-	}
-	if err := thawGitOverlaySnapshotFiles(root.root); err != nil {
-		return err
-	}
-	directory, err := root.root.Open(".")
-	if err != nil {
-		return fmt.Errorf("open git overlay snapshot root: %w", err)
-	}
-	entries, readErr := directory.ReadDir(-1)
-	closeErr := directory.Close()
-	if readErr != nil {
-		return fmt.Errorf("read git overlay snapshot root: %w", readErr)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close git overlay snapshot root: %w", closeErr)
-	}
-	for _, entry := range entries {
-		if err := root.root.RemoveAll(entry.Name()); err != nil {
-			return fmt.Errorf("remove git overlay snapshot entry %q: %w", entry.Name(), err)
-		}
-	}
-	if err := root.verifyIdentity(); err != nil {
-		return err
-	}
-	if err := root.parent.Remove(root.name); err != nil {
-		return fmt.Errorf("remove git overlay snapshot root: %w", err)
-	}
-	return nil
-}
-
-func (root *gitOverlaySnapshotRoot) thawDirectories() error {
-	for _, directory := range root.directories {
-		if directory == nil || directory.handle == nil {
-			continue
-		}
-		opened, err := directory.handle.Stat()
-		if err != nil {
-			return fmt.Errorf("stat git overlay snapshot cleanup handle %q: %w", directory.relative, err)
-		}
-		current, err := root.root.Lstat(filepath.ToSlash(directory.relative))
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("stat git overlay snapshot cleanup path %q: %w", directory.relative, err)
-		}
-		if !opened.IsDir() ||
-			!current.IsDir() ||
-			current.Mode()&os.ModeSymlink != 0 ||
-			!os.SameFile(opened, current) {
-			return fmt.Errorf("git overlay snapshot cleanup path changed at %q", directory.relative)
-		}
-		if err := directory.handle.Chmod(directory.tempMode); err != nil {
-			return fmt.Errorf("thaw git overlay snapshot directory %q: %w", directory.relative, err)
-		}
-	}
-	return nil
-}
-
-func (root *gitOverlaySnapshotRoot) close() {
-	if root == nil {
-		return
-	}
-	for _, directory := range root.directories {
-		if directory != nil && directory.handle != nil {
-			_ = directory.handle.Close()
-			directory.handle = nil
-		}
-	}
-	if root.root != nil {
-		_ = root.root.Close()
-		root.root = nil
-	}
-	if root.parent != nil {
-		_ = root.parent.Close()
-		root.parent = nil
-	}
-}
-
-func (root *gitOverlaySnapshotRoot) adopt(parents *gitOverlaySnapshotParents) {
-	if root == nil || parents == nil || len(parents.ordered) == 0 {
-		return
-	}
-	root.directories = append(root.directories, parents.ordered...)
-	parents.ordered = nil
-	parents.byPath = nil
+	snapshot, err := newSourceSnapshot()
+	return gitOverlaySnapshot{sourceSnapshot: snapshot}, err
 }
 
 func prepareGitOverlaySnapshot(
@@ -321,7 +99,7 @@ func prepareGitOverlaySnapshotWithHook(
 	excludes SyncExcludeRules,
 	includes []string,
 	plan gitCoherencePlan,
-	hook gitOverlaySnapshotHook,
+	hook sourceSnapshotHook,
 ) (gitOverlaySnapshot, error) {
 	return prepareGitOverlaySnapshotWithCleanup(ctx, repo, cfg, excludes, includes, plan, hook, func(snapshot *gitOverlaySnapshot) error {
 		return snapshot.cleanup()
@@ -335,7 +113,7 @@ func prepareGitOverlaySnapshotWithCleanup(
 	_ SyncExcludeRules,
 	includes []string,
 	plan gitCoherencePlan,
-	hook gitOverlaySnapshotHook,
+	hook sourceSnapshotHook,
 	cleanup func(*gitOverlaySnapshot) error,
 ) (gitOverlaySnapshot, error) {
 	policy := gitSnapshotPolicy{
@@ -345,7 +123,7 @@ func prepareGitOverlaySnapshotWithCleanup(
 		validate: validateGitOverlayManifestAtState,
 		files:    func(manifest SyncManifest) []string { return manifest.OverlayFiles },
 		fingerprint: func(repo Repo, manifest SyncManifest, excludes SyncExcludeRules, _ gitOverlayCheckoutState) (string, error) {
-			return syncFingerprintForManifest(repo, cfg, manifest, excludes, plan)
+			return syncFingerprintForManifest(ctx, repo, cfg, manifest, excludes, plan)
 		},
 	}
 	return prepareGitSnapshotWithCleanup(ctx, repo, cfg, includes, policy, hook, cleanup)
@@ -366,7 +144,7 @@ func prepareGitSnapshotWithCleanup(
 	cfg Config,
 	includes []string,
 	policy gitSnapshotPolicy,
-	hook gitOverlaySnapshotHook,
+	hook sourceSnapshotHook,
 	cleanup func(*gitOverlaySnapshot) error,
 ) (accepted gitOverlaySnapshot, result error) {
 	defer func() {
@@ -380,7 +158,7 @@ func prepareGitSnapshotWithCleanup(
 		}
 		checkout, err := policy.checkout(repo.Root)
 		if err != nil {
-			if errors.Is(err, errGitOverlaySnapshotDrift) && attempt < gitOverlaySnapshotMaxAttempts {
+			if errors.Is(err, errSourceSnapshotDrift) && attempt < gitOverlaySnapshotMaxAttempts {
 				continue
 			}
 			return gitOverlaySnapshot{}, err
@@ -408,7 +186,7 @@ func prepareGitSnapshotWithCleanup(
 			if attempt < gitOverlaySnapshotMaxAttempts {
 				continue
 			}
-			return gitOverlaySnapshot{}, errGitOverlaySnapshotDrift
+			return gitOverlaySnapshot{}, errSourceSnapshotDrift
 		}
 		if validationErr != nil {
 			return gitOverlaySnapshot{}, validationErr
@@ -426,7 +204,7 @@ func prepareGitSnapshotWithCleanup(
 		if hook != nil {
 			hook("snapshot_created", attempt, snapshot.Root)
 		}
-		if err := copyGitOverlaySnapshotOwned(ctx, repo.Root, &snapshot, policy.files(manifest), attempt, hook); err != nil {
+		if err := copySourceSnapshotOwned(ctx, repo.Root, &snapshot.sourceSnapshot, policy.files(manifest), attempt, hook); err != nil {
 			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, err, cleanup); retry {
 				continue
 			} else {
@@ -453,7 +231,7 @@ func prepareGitSnapshotWithCleanup(
 			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
 		}
 		if !sameSyncExcludeRules(excludes, refreshedExcludes) {
-			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, errGitOverlaySnapshotDrift, cleanup); retry {
+			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, errSourceSnapshotDrift, cleanup); retry {
 				continue
 			} else {
 				return retained, result
@@ -464,7 +242,7 @@ func prepareGitSnapshotWithCleanup(
 			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
 		}
 		if !sameSyncManifest(manifest, refreshed) {
-			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, errGitOverlaySnapshotDrift, cleanup); retry {
+			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, errSourceSnapshotDrift, cleanup); retry {
 				continue
 			} else {
 				return retained, result
@@ -493,7 +271,7 @@ func prepareGitSnapshotWithCleanup(
 		}
 		finalCheckout, err := policy.checkout(repo.Root)
 		if err != nil || finalCheckout != checkout {
-			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, errGitOverlaySnapshotDrift, cleanup); retry {
+			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, errSourceSnapshotDrift, cleanup); retry {
 				continue
 			} else {
 				return retained, result
@@ -517,7 +295,7 @@ func prepareGitSnapshotWithCleanup(
 		}
 		acceptedCheckout, err := policy.checkout(repo.Root)
 		if err != nil || acceptedCheckout != finalCheckout {
-			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, errGitOverlaySnapshotDrift, cleanup); retry {
+			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, errSourceSnapshotDrift, cleanup); retry {
 				continue
 			} else {
 				return retained, result
@@ -525,7 +303,7 @@ func prepareGitSnapshotWithCleanup(
 		}
 		if !sameSyncExcludeRules(finalExcludes, acceptedExcludes) ||
 			!sameSyncManifest(finalManifest, acceptedManifest) {
-			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, errGitOverlaySnapshotDrift, cleanup); retry {
+			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, errSourceSnapshotDrift, cleanup); retry {
 				continue
 			} else {
 				return retained, result
@@ -546,13 +324,13 @@ func prepareGitSnapshotWithCleanup(
 			snapshot.Excludes = acceptedExcludes
 			return snapshot, nil
 		}
-		if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, errGitOverlaySnapshotDrift, cleanup); retry {
+		if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, errSourceSnapshotDrift, cleanup); retry {
 			continue
 		} else {
 			return retained, result
 		}
 	}
-	return gitOverlaySnapshot{}, errGitOverlaySnapshotDrift
+	return gitOverlaySnapshot{}, errSourceSnapshotDrift
 }
 
 func captureGitOverlayCheckoutState(root string) (gitOverlayCheckoutState, error) {
@@ -579,7 +357,7 @@ func captureGitCheckoutStateWithStateReader(root string, betweenSamples func(), 
 	}
 	topLevelBytes, err := readBytes(root, "rev-parse", "--show-toplevel")
 	if err != nil {
-		return gitOverlayCheckoutState{}, errGitOverlaySnapshotDrift
+		return gitOverlayCheckoutState{}, errSourceSnapshotDrift
 	}
 	canonicalRoot, err := filepath.Abs(root)
 	if err != nil {
@@ -599,7 +377,7 @@ func captureGitCheckoutStateWithStateReader(root string, betweenSamples func(), 
 		return gitOverlayCheckoutState{}, err
 	}
 	if first != second {
-		return gitOverlayCheckoutState{}, errGitOverlaySnapshotDrift
+		return gitOverlayCheckoutState{}, errSourceSnapshotDrift
 	}
 	return first, nil
 }
@@ -676,439 +454,6 @@ func gitOverlayGitEnvironment() []string {
 	return environment
 }
 
-func copyGitOverlaySnapshot(ctx context.Context, sourceRoot, snapshotRoot string, paths []string) error {
-	return copyGitOverlaySnapshotWithHook(ctx, sourceRoot, snapshotRoot, paths, 0, nil)
-}
-
-func copyGitOverlaySnapshotWithHook(ctx context.Context, sourceRoot, snapshotRoot string, paths []string, attempt int, hook gitOverlaySnapshotHook) (result error) {
-	return copyGitOverlaySnapshotContents(ctx, sourceRoot, snapshotRoot, paths, attempt, hook, nil)
-}
-
-func copyGitOverlaySnapshotOwned(ctx context.Context, sourceRoot string, snapshot *gitOverlaySnapshot, paths []string, attempt int, hook gitOverlaySnapshotHook) error {
-	if snapshot == nil || snapshot.Root == "" || snapshot.cleanupRoot == nil {
-		return fmt.Errorf("missing git overlay snapshot ownership")
-	}
-	return copyGitOverlaySnapshotContents(ctx, sourceRoot, snapshot.Root, paths, attempt, hook, snapshot.cleanupRoot)
-}
-
-func copyGitOverlaySnapshotContents(ctx context.Context, sourceRoot, snapshotRoot string, paths []string, attempt int, hook gitOverlaySnapshotHook, owner *gitOverlaySnapshotRoot) (result error) {
-	return copyGitOverlaySnapshotContentsWithThaw(ctx, sourceRoot, snapshotRoot, paths, attempt, hook, owner, func(parents *gitOverlaySnapshotParents) error {
-		return parents.thaw()
-	})
-}
-
-func copyGitOverlaySnapshotContentsWithThaw(ctx context.Context, sourceRoot, snapshotRoot string, paths []string, attempt int, hook gitOverlaySnapshotHook, owner *gitOverlaySnapshotRoot, thaw gitOverlaySnapshotThaw) (result error) {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	parents, err := newGitOverlaySnapshotParents(sourceRoot)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if result == nil {
-			if owner != nil {
-				owner.adopt(parents)
-			}
-			parents.close()
-			return
-		}
-		thawErr := thaw(parents)
-		if thawErr != nil && owner != nil {
-			owner.adopt(parents)
-		}
-		parents.close()
-		result = errors.Join(result, thawErr)
-	}()
-	for _, rel := range paths {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if !safeRepoRel(rel) {
-			return fmt.Errorf("unsafe overlay snapshot path %q", rel)
-		}
-		source := filepath.Join(sourceRoot, filepath.FromSlash(rel))
-		destination := filepath.Join(snapshotRoot, filepath.FromSlash(rel))
-		info, err := os.Lstat(source)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return fmt.Errorf("%w: snapshot overlay path %q disappeared", errGitOverlaySnapshotDrift, rel)
-			}
-			return fmt.Errorf("snapshot overlay path %q: %w", rel, err)
-		}
-		if hook != nil {
-			hook("after_lstat", attempt, snapshotRoot)
-		}
-		identities, err := parents.ensure(snapshotRoot, filepath.Dir(rel), source, info)
-		if err != nil {
-			return fmt.Errorf("create overlay snapshot parent for %q: %w", rel, err)
-		}
-		switch {
-		case info.Mode()&os.ModeSymlink != 0:
-			target, err := os.Readlink(source)
-			if err != nil {
-				return fmt.Errorf("read overlay snapshot symlink %q: %w", rel, classifyGitOverlaySnapshotSourceError(source, info, err))
-			}
-			if err := os.Symlink(target, destination); err != nil {
-				return fmt.Errorf("create overlay snapshot symlink %q: %w", rel, err)
-			}
-			finalMTime := normalizedGitOverlayFileTime(info.ModTime())
-			if err := syncGitOverlaySymlinkTimes(destination, finalMTime); err != nil {
-				return fmt.Errorf("restore overlay snapshot symlink mtime %q: %w", rel, err)
-			}
-			refreshed, err := os.Lstat(source)
-			if err != nil {
-				return fmt.Errorf("restat overlay snapshot symlink %q: %w", rel, classifyGitOverlaySnapshotSourceError(source, info, err))
-			}
-			if !sameGitOverlaySnapshotIdentity(info, refreshed) {
-				return fmt.Errorf("%w: overlay snapshot symlink changed during copy at %q", errGitOverlaySnapshotDrift, rel)
-			}
-			refreshedTarget, err := os.Readlink(source)
-			if err != nil {
-				return fmt.Errorf("reread overlay snapshot symlink %q: %w", rel, classifyGitOverlaySnapshotSourceError(source, info, err))
-			}
-			if refreshedTarget != target {
-				return fmt.Errorf("%w: overlay snapshot symlink target changed during copy at %q", errGitOverlaySnapshotDrift, rel)
-			}
-			copied, err := os.Lstat(destination)
-			if err != nil {
-				return fmt.Errorf("stat overlay snapshot symlink destination %q: %w", rel, err)
-			}
-			if copied.Mode()&os.ModeSymlink == 0 || !copied.ModTime().Equal(finalMTime) {
-				return fmt.Errorf("overlay snapshot symlink metadata changed at %q", rel)
-			}
-			copiedTarget, err := os.Readlink(destination)
-			if err != nil {
-				return fmt.Errorf("read overlay snapshot symlink destination %q: %w", rel, err)
-			}
-			if copiedTarget != target {
-				return fmt.Errorf("overlay snapshot symlink target changed at %q", rel)
-			}
-		case info.Mode().IsRegular():
-			if err := copyGitOverlaySnapshotFile(ctx, source, destination, info); err != nil {
-				return fmt.Errorf("copy overlay snapshot file %q: %w", rel, err)
-			}
-		default:
-			return fmt.Errorf("unsupported overlay snapshot file type at %q", rel)
-		}
-		if err := verifyGitOverlaySnapshotParents(identities); err != nil {
-			return fmt.Errorf("verify overlay snapshot parent for %q: %w", rel, err)
-		}
-		if err := parents.verifyDestinations(false); err != nil {
-			return fmt.Errorf("verify overlay snapshot destination parent for %q: %w", rel, err)
-		}
-	}
-	if err := parents.restore(attempt, snapshotRoot, hook); err != nil {
-		return err
-	}
-	return ctx.Err()
-}
-
-func newGitOverlaySnapshotParents(sourceRoot string) (*gitOverlaySnapshotParents, error) {
-	rootInfo, err := os.Lstat(sourceRoot)
-	if err != nil {
-		return nil, err
-	}
-	if !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("snapshot root is not a real directory")
-	}
-	return &gitOverlaySnapshotParents{
-		sourceRoot: gitOverlaySnapshotParentIdentity{path: sourceRoot, info: rootInfo},
-		byPath:     make(map[string]*gitOverlaySnapshotParent),
-	}, nil
-}
-
-func (parents *gitOverlaySnapshotParents) ensure(snapshotRoot, parent, observedSource string, observedInfo os.FileInfo) ([]gitOverlaySnapshotParentIdentity, error) {
-	identities := []gitOverlaySnapshotParentIdentity{parents.sourceRoot}
-	if parent == "." || parent == "" {
-		return identities, nil
-	}
-	source := parents.sourceRoot.path
-	destination := snapshotRoot
-	relative := ""
-	for _, component := range strings.Split(filepath.ToSlash(parent), "/") {
-		source = filepath.Join(source, filepath.FromSlash(component))
-		destination = filepath.Join(destination, filepath.FromSlash(component))
-		relative = filepath.Join(relative, filepath.FromSlash(component))
-		info, err := os.Lstat(source)
-		if err != nil {
-			return nil, classifyGitOverlaySnapshotSourceError(observedSource, observedInfo, err)
-		}
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("snapshot parent is not a real directory")
-		}
-		if retained, ok := parents.byPath[destination]; ok {
-			if !sameGitOverlaySnapshotIdentity(retained.source.info, info) {
-				return nil, fmt.Errorf("%w: snapshot parent changed during copy at %q", errGitOverlaySnapshotDrift, source)
-			}
-			if err := verifyGitOverlaySnapshotDestination(retained, retained.tempMode, true, false); err != nil {
-				return nil, err
-			}
-			identities = append(identities, retained.source)
-			continue
-		}
-		identity := gitOverlaySnapshotParentIdentity{path: source, info: info}
-		finalMode := gitOverlaySupportedMode(info.Mode())
-		tempMode := gitOverlayTemporaryDirectoryMode(finalMode)
-		if err := os.Mkdir(destination, tempMode); err != nil {
-			return nil, err
-		}
-		handle, err := openGitOverlaySnapshotParent(destination)
-		if err != nil {
-			return nil, err
-		}
-		retained := &gitOverlaySnapshotParent{
-			source:      identity,
-			destination: destination,
-			relative:    relative,
-			handle:      handle,
-			finalMode:   finalMode,
-			tempMode:    tempMode,
-			finalMTime:  normalizedGitOverlayFileTime(info.ModTime()),
-			depth:       len(identities),
-		}
-		parents.byPath[destination] = retained
-		parents.ordered = append(parents.ordered, retained)
-		if err := verifyGitOverlaySnapshotDestination(retained, 0, false, false); err != nil {
-			return nil, err
-		}
-		if err := retained.handle.Chmod(tempMode); err != nil {
-			return nil, err
-		}
-		if err := verifyGitOverlaySnapshotDestination(retained, tempMode, true, false); err != nil {
-			return nil, err
-		}
-		identities = append(identities, identity)
-	}
-	if err := verifyGitOverlaySnapshotParents(identities); err != nil {
-		return nil, err
-	}
-	return identities, nil
-}
-
-func (parents *gitOverlaySnapshotParents) restore(attempt int, snapshotRoot string, hook gitOverlaySnapshotHook) error {
-	ordered := append([]*gitOverlaySnapshotParent(nil), parents.ordered...)
-	sort.Slice(ordered, func(i, j int) bool {
-		if ordered[i].depth != ordered[j].depth {
-			return ordered[i].depth > ordered[j].depth
-		}
-		return ordered[i].destination < ordered[j].destination
-	})
-	for _, parent := range ordered {
-		if hook != nil {
-			hook("before_parent_mode_restore", attempt, snapshotRoot)
-		}
-		if err := verifyGitOverlaySnapshotParents([]gitOverlaySnapshotParentIdentity{parents.sourceRoot, parent.source}); err != nil {
-			return err
-		}
-		if err := verifyGitOverlaySnapshotDestination(parent, parent.tempMode, true, false); err != nil {
-			return err
-		}
-		if err := syncGitOverlayFileTimes(parent.handle, parent.finalMTime); err != nil {
-			return fmt.Errorf("restore overlay snapshot parent mtime at %q: %w", parent.destination, err)
-		}
-		if err := parent.handle.Chmod(parent.finalMode); err != nil {
-			return fmt.Errorf("restore overlay snapshot parent mode at %q: %w", parent.destination, err)
-		}
-		if err := verifyGitOverlaySnapshotDestination(parent, parent.finalMode, true, true); err != nil {
-			return err
-		}
-		if err := verifyGitOverlaySnapshotParents([]gitOverlaySnapshotParentIdentity{parents.sourceRoot, parent.source}); err != nil {
-			return err
-		}
-	}
-	if err := verifyGitOverlaySnapshotParents(parents.sourceIdentities()); err != nil {
-		return err
-	}
-	return parents.verifyDestinations(true)
-}
-
-func (parents *gitOverlaySnapshotParents) sourceIdentities() []gitOverlaySnapshotParentIdentity {
-	identities := make([]gitOverlaySnapshotParentIdentity, 0, len(parents.ordered)+1)
-	identities = append(identities, parents.sourceRoot)
-	for _, parent := range parents.ordered {
-		identities = append(identities, parent.source)
-	}
-	return identities
-}
-
-func (parents *gitOverlaySnapshotParents) verifyDestinations(final bool) error {
-	for _, parent := range parents.ordered {
-		mode := parent.tempMode
-		if final {
-			mode = parent.finalMode
-		}
-		if err := verifyGitOverlaySnapshotDestination(parent, mode, true, final); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func verifyGitOverlaySnapshotDestination(parent *gitOverlaySnapshotParent, wantMode os.FileMode, checkMode, checkMTime bool) error {
-	opened, err := parent.handle.Stat()
-	if err != nil {
-		return fmt.Errorf("stat overlay snapshot parent handle %q: %w", parent.destination, err)
-	}
-	current, err := os.Lstat(parent.destination)
-	if err != nil {
-		return fmt.Errorf("stat overlay snapshot parent path %q: %w", parent.destination, err)
-	}
-	if !opened.IsDir() ||
-		!current.IsDir() ||
-		current.Mode()&os.ModeSymlink != 0 ||
-		!os.SameFile(opened, current) {
-		return fmt.Errorf("overlay snapshot parent path changed at %q", parent.destination)
-	}
-	if checkMode && (gitOverlaySupportedMode(opened.Mode()) != wantMode || gitOverlaySupportedMode(current.Mode()) != wantMode) {
-		return fmt.Errorf("overlay snapshot parent mode at %q is %#o, want %#o", parent.destination, gitOverlaySupportedMode(current.Mode()), wantMode)
-	}
-	if checkMTime &&
-		(!opened.ModTime().Equal(parent.finalMTime) || !current.ModTime().Equal(parent.finalMTime)) {
-		return fmt.Errorf("overlay snapshot parent mtime at %q is %s, want %s", parent.destination, current.ModTime(), parent.finalMTime)
-	}
-	return nil
-}
-
-func gitOverlaySupportedMode(mode os.FileMode) os.FileMode {
-	return mode & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)
-}
-
-func (parents *gitOverlaySnapshotParents) thaw() error {
-	var errs []error
-	for _, parent := range parents.ordered {
-		if parent.handle == nil {
-			continue
-		}
-		if err := parent.handle.Chmod(parent.tempMode); err != nil {
-			errs = append(errs, fmt.Errorf("thaw overlay snapshot parent %q: %w", parent.destination, err))
-		}
-	}
-	return errors.Join(errs...)
-}
-
-func (parents *gitOverlaySnapshotParents) close() {
-	for _, parent := range parents.ordered {
-		if parent.handle != nil {
-			_ = parent.handle.Close()
-			parent.handle = nil
-		}
-	}
-}
-
-func verifyGitOverlaySnapshotParents(identities []gitOverlaySnapshotParentIdentity) error {
-	for _, identity := range identities {
-		refreshed, err := os.Lstat(identity.path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return fmt.Errorf("%w: snapshot parent changed during copy at %q: %v", errGitOverlaySnapshotDrift, identity.path, err)
-			}
-			return fmt.Errorf("stat snapshot parent during copy at %q: %w", identity.path, err)
-		}
-		if !refreshed.IsDir() || refreshed.Mode()&os.ModeSymlink != 0 || !sameGitOverlaySnapshotIdentity(identity.info, refreshed) {
-			return fmt.Errorf("%w: snapshot parent changed during copy at %q", errGitOverlaySnapshotDrift, identity.path)
-		}
-	}
-	return nil
-}
-
-func copyGitOverlaySnapshotFile(ctx context.Context, source, destination string, info os.FileInfo) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	input, err := os.Open(source)
-	if err != nil {
-		return classifyGitOverlaySnapshotSourceError(source, info, err)
-	}
-	defer input.Close()
-	openedInfo, err := input.Stat()
-	if err != nil {
-		return err
-	}
-	if !openedInfo.Mode().IsRegular() || !sameGitOverlaySnapshotIdentity(info, openedInfo) {
-		return fmt.Errorf("%w: snapshot source changed before copy", errGitOverlaySnapshotDrift)
-	}
-	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, openedInfo.Mode().Perm())
-	if err != nil {
-		return err
-	}
-	written, err := copySourceBytes(ctx, output, input, openedInfo.Size())
-	if err != nil {
-		_ = output.Close()
-		if errors.Is(err, errSourceCopyLimit) {
-			return fmt.Errorf("%w: snapshot source grew beyond its accepted size", errGitOverlaySnapshotDrift)
-		}
-		return err
-	}
-	postCopyInfo, err := input.Stat()
-	if err != nil {
-		_ = output.Close()
-		return err
-	}
-	finalPathInfo, finalPathErr := os.Lstat(source)
-	if finalPathErr != nil {
-		_ = output.Close()
-		return classifyGitOverlaySnapshotSourceError(source, info, finalPathErr)
-	}
-	if !sameGitOverlaySnapshotIdentity(openedInfo, postCopyInfo) ||
-		!sameGitOverlaySnapshotIdentity(postCopyInfo, finalPathInfo) ||
-		written != openedInfo.Size() {
-		_ = output.Close()
-		return fmt.Errorf("%w: snapshot source changed during copy", errGitOverlaySnapshotDrift)
-	}
-	if err := verifyGitOverlaySnapshotFileDestination(output, destination, 0, time.Time{}, false); err != nil {
-		_ = output.Close()
-		return err
-	}
-	finalMode := gitOverlaySupportedMode(openedInfo.Mode())
-	finalMTime := normalizedGitOverlayFileTime(openedInfo.ModTime())
-	if err := syncGitOverlayFileTimes(output, finalMTime); err != nil {
-		_ = output.Close()
-		return err
-	}
-	if err := output.Chmod(finalMode); err != nil {
-		_ = output.Close()
-		return err
-	}
-	if err := verifyGitOverlaySnapshotFileDestination(output, destination, finalMode, finalMTime, true); err != nil {
-		_ = output.Close()
-		return err
-	}
-	return output.Close()
-}
-
-func verifyGitOverlaySnapshotFileDestination(file *os.File, path string, wantMode os.FileMode, wantMTime time.Time, checkMetadata bool) error {
-	opened, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("stat overlay snapshot file handle %q: %w", path, err)
-	}
-	current, err := os.Lstat(path)
-	if err != nil {
-		return fmt.Errorf("stat overlay snapshot file path %q: %w", path, err)
-	}
-	if !opened.Mode().IsRegular() ||
-		!current.Mode().IsRegular() ||
-		current.Mode()&os.ModeSymlink != 0 ||
-		!os.SameFile(opened, current) {
-		return fmt.Errorf("overlay snapshot file path changed at %q", path)
-	}
-	if checkMetadata && (gitOverlaySupportedMode(opened.Mode()) != wantMode || gitOverlaySupportedMode(current.Mode()) != wantMode) {
-		return fmt.Errorf("overlay snapshot file mode at %q is %#o, want %#o", path, gitOverlaySupportedMode(current.Mode()), wantMode)
-	}
-	if checkMetadata && (!opened.ModTime().Equal(wantMTime) || !current.ModTime().Equal(wantMTime)) {
-		return fmt.Errorf("overlay snapshot file mtime at %q is %s, want %s", path, current.ModTime(), wantMTime)
-	}
-	return nil
-}
-
-func classifyGitOverlaySnapshotSourceError(source string, observed os.FileInfo, operationErr error) error {
-	refreshed, err := os.Lstat(source)
-	if os.IsNotExist(err) || (err == nil && !sameGitOverlaySnapshotIdentity(observed, refreshed)) {
-		return fmt.Errorf("%w: snapshot source changed at %q", errGitOverlaySnapshotDrift, source)
-	}
-	return operationErr
-}
-
 func cleanupGitOverlaySnapshotAfterFailure(snapshot gitOverlaySnapshot, primary error, cleanup func(*gitOverlaySnapshot) error) (gitOverlaySnapshot, error) {
 	cleanupErr := cleanup(&snapshot)
 	if cleanupErr == nil {
@@ -1122,19 +467,10 @@ func retryGitOverlaySnapshotAfterDrift(snapshot *gitOverlaySnapshot, err error, 
 	if cleanupErr != nil {
 		return false, *snapshot, errors.Join(err, cleanupErr)
 	}
-	if errors.Is(err, errGitOverlaySnapshotDrift) {
+	if errors.Is(err, errSourceSnapshotDrift) {
 		return true, gitOverlaySnapshot{}, nil
 	}
 	return false, gitOverlaySnapshot{}, err
-}
-
-func sameGitOverlaySnapshotIdentity(left, right os.FileInfo) bool {
-	return left != nil &&
-		right != nil &&
-		os.SameFile(left, right) &&
-		left.Mode() == right.Mode() &&
-		left.Size() == right.Size() &&
-		left.ModTime().Equal(right.ModTime())
 }
 
 func sameSyncExcludeRules(left, right SyncExcludeRules) bool {

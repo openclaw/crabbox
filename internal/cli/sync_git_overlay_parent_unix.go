@@ -10,20 +10,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func gitOverlayTemporaryDirectoryMode(finalMode os.FileMode) os.FileMode {
+func sourceSnapshotTemporaryDirectoryMode(finalMode os.FileMode) os.FileMode {
 	return finalMode | 0o700
 }
 
-func syncGitOverlaySymlinkTimes(path string, modTime time.Time) error {
+func syncSourceSnapshotSymlinkTimes(path string, modTime time.Time) error {
 	value := unix.NsecToTimeval(modTime.UnixNano())
 	return unix.Lutimes(path, []unix.Timeval{value, value})
 }
 
-func thawGitOverlaySnapshotFiles(*os.Root) error {
+func thawSourceSnapshotFiles(*os.Root) error {
 	return nil
 }
 
-func openGitOverlaySnapshotParent(path string) (*os.File, error) {
+func openSourceSnapshotParent(path string) (*os.File, error) {
 	before, err := os.Lstat(path)
 	if err != nil {
 		return nil, err

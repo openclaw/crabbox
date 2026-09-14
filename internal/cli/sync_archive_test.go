@@ -95,6 +95,28 @@ func TestCopySourceBytesCancellationOnFinalData(t *testing.T) {
 	}
 }
 
+func TestObservedSourceFileReadStopsAfterCancellation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "payload.txt")
+	content := strings.Repeat("x", 256*1024)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	observed, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writer := &cancelAfterFirstWrite{cancel: cancel}
+	written, err := copyObservedSourceFileBytes(ctx, writer, path, observed)
+	if !errors.Is(err, context.Canceled) || writer.writes != 1 || written <= 0 || written >= int64(len(content)) {
+		t.Fatalf("writes=%d bytes=%d error=%v", writer.writes, written, err)
+	}
+	if after, err := os.Lstat(path); err != nil || !sameSourceSnapshotIdentity(observed, after) {
+		t.Fatalf("source observation changed: %v", err)
+	}
+}
+
 func TestCopySourceBytesLimitsAndCounts(t *testing.T) {
 	for _, tc := range []struct {
 		name, input string

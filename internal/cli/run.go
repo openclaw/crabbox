@@ -2175,7 +2175,7 @@ retrySync:
 			} else {
 				fingerprintConfig := cfg
 				fingerprintConfig.Sync.GitOverlay = false
-				fingerprint, err = syncFingerprintForManifest(repo, fingerprintConfig, manifest, excludes, coherence)
+				fingerprint, err = syncFingerprintForManifest(ctx, repo, fingerprintConfig, manifest, excludes, coherence)
 			}
 			timings.syncSteps.fingerprintLocal = time.Since(stepStart)
 			if err != nil {

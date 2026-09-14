@@ -411,10 +411,13 @@ dirty, staged, untracked, renamed, executable, and symlink paths. Local staging
 state is not copied: remote modifications are compared against the selected HEAD.
 Edits made after snapshot acceptance wait for the next sync.
 
-Snapshot file copying honors cancellation between reads and writes. Cancellation
-stops preparation and cleans owned staging; it does not fall back to another sync
-method. An already-blocked filesystem operation must return before cancellation
-can be observed. Cleanup failures retain their diagnostic path and error cause.
+Snapshot file copying and content fingerprinting honor cancellation between
+reads and writes. Cancellation stops preparation and cleans owned staging; it
+does not fall back to another sync method. An already-blocked filesystem
+operation must return before cancellation can be observed. Cleanup failures
+retain their diagnostic path and error cause.
+Both operations read regular files within their observed sizes and verify that
+the file identity and metadata still match. Stable fingerprint encoding is unchanged.
 
 The bundle contains the complete selected HEAD and base histories, plus locally
 present tags that peel to those histories. An explicit `sync.baseRef` must resolve

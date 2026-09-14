@@ -9,12 +9,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func syncGitOverlayFileTimes(file *os.File, modTime time.Time) error {
+func syncSourceSnapshotFileTimes(file *os.File, modTime time.Time) error {
 	value := unix.NsecToTimeval(modTime.UnixNano())
 	return unix.Futimes(int(file.Fd()), []unix.Timeval{value, value})
 }
 
-func normalizedGitOverlayFileTime(value time.Time) time.Time {
+func normalizedSourceSnapshotFileTime(value time.Time) time.Time {
 	timeval := unix.NsecToTimeval(value.UnixNano())
 	return time.Unix(0, unix.TimevalToNsec(timeval)).In(value.Location())
 }

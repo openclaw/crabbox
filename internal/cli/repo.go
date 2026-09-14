@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -875,7 +876,7 @@ func defaultBaseRef(root string) string {
 	return ""
 }
 
-func syncFingerprintForManifest(repo Repo, cfg Config, manifest SyncManifest, excludes SyncExcludeRules, plan gitCoherencePlan) (string, error) {
+func syncFingerprintForManifest(ctx context.Context, repo Repo, cfg Config, manifest SyncManifest, excludes SyncExcludeRules, plan gitCoherencePlan) (string, error) {
 	if !plan.enabled() {
 		return "", nil
 	}
@@ -892,14 +893,17 @@ func syncFingerprintForManifest(repo Repo, cfg Config, manifest SyncManifest, ex
 	for _, exclude := range excludes.rules {
 		fmt.Fprintf(h, "exclude=%d:%s\n", exclude.origin, exclude.pattern)
 	}
-	if err := syncFingerprintPaths(h, repo.Root, manifest.Changed, false); err != nil {
+	if err := syncFingerprintPaths(ctx, h, repo.Root, manifest.Changed, false); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func syncFingerprintPaths(h hash.Hash, root string, paths []string, requirePresent bool) error {
+func syncFingerprintPaths(ctx context.Context, h hash.Hash, root string, paths []string, requirePresent bool) error {
 	for _, rel := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		fmt.Fprintf(h, "path=%s\n", rel)
 		full := filepath.Join(root, filepath.FromSlash(rel))
 		info, err := os.Lstat(full)
@@ -923,18 +927,12 @@ func syncFingerprintPaths(h hash.Hash, root string, paths []string, requirePrese
 			h.Write([]byte{0})
 			continue
 		}
-		file, err := os.Open(full)
-		if err != nil {
+		if _, err := copyObservedSourceFileBytes(ctx, h, full, info); err != nil {
 			return err
 		}
-		if _, err := io.Copy(h, file); err != nil {
-			_ = file.Close()
-			return err
-		}
-		_ = file.Close()
 		h.Write([]byte{0})
 	}
-	return nil
+	return ctx.Err()
 }
 
 type SyncManifest struct {

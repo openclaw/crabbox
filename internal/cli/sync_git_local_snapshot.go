@@ -19,7 +19,7 @@ func prepareLocalGitSeedSnapshot(ctx context.Context, repo Repo, cfg Config, _ S
 	return prepareLocalGitSeedSnapshotWithHook(ctx, repo, cfg, nil)
 }
 
-func prepareLocalGitSeedSnapshotWithHook(ctx context.Context, repo Repo, cfg Config, hook gitOverlaySnapshotHook) (gitOverlaySnapshot, error) {
+func prepareLocalGitSeedSnapshotWithHook(ctx context.Context, repo Repo, cfg Config, hook sourceSnapshotHook) (gitOverlaySnapshot, error) {
 	policy := gitSnapshotPolicy{
 		target: repo.Head,
 		checkout: func(root string) (gitOverlayCheckoutState, error) {
@@ -37,7 +37,7 @@ func prepareLocalGitSeedSnapshotWithHook(ctx context.Context, repo Repo, cfg Con
 		},
 		files: func(manifest SyncManifest) []string { return manifest.Files },
 		fingerprint: func(repo Repo, manifest SyncManifest, excludes SyncExcludeRules, checkout gitOverlayCheckoutState) (string, error) {
-			return localGitSeedSnapshotFingerprint(repo, cfg, manifest, excludes, checkout)
+			return localGitSeedSnapshotFingerprint(ctx, repo, cfg, manifest, excludes, checkout)
 		},
 	}
 	return prepareGitSnapshotWithCleanup(ctx, repo, cfg, syncIncludes(cfg), policy, hook, func(snapshot *gitOverlaySnapshot) error {
@@ -224,7 +224,7 @@ func localGitSnapshotGlobalIgnore(ctx context.Context, root string) (string, err
 	return filepath.Join(home, ".config", "git", "ignore"), nil
 }
 
-func localGitSeedSnapshotFingerprint(repo Repo, cfg Config, manifest SyncManifest, excludes SyncExcludeRules, checkout gitOverlayCheckoutState) (string, error) {
+func localGitSeedSnapshotFingerprint(ctx context.Context, repo Repo, cfg Config, manifest SyncManifest, excludes SyncExcludeRules, checkout gitOverlayCheckoutState) (string, error) {
 	h := sha256.New()
 	fmt.Fprintf(h, "v1-local-git-snapshot\nhead=%s\nindex=%s\n", checkout.Head, checkout.IndexFingerprint)
 	fmt.Fprintf(h, "delete=%t\nchecksum=%t\n", cfg.Sync.Delete, cfg.Sync.Checksum)
@@ -236,7 +236,7 @@ func localGitSeedSnapshotFingerprint(repo Repo, cfg Config, manifest SyncManifes
 		fmt.Fprintf(h, "exclude=%d:%q\n", exclude.origin, exclude.pattern)
 	}
 	fmt.Fprintf(h, "managedSubtree=%q\n", excludes.managedSubtree)
-	if err := syncFingerprintPaths(h, repo.Root, manifest.Files, true); err != nil {
+	if err := syncFingerprintPaths(ctx, h, repo.Root, manifest.Files, true); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
