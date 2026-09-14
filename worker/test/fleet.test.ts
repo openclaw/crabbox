@@ -24872,6 +24872,70 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("lease:cbx_abcdef123456")).toBeUndefined();
   });
 
+  it("returns Tailscale OAuth failures before provisioning and preserves the unbound create attempt", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const createAttemptID = "cat_0123456789abcdef0123456789abcdef";
+    const createServer = vi.fn();
+    const prepareLease = vi.fn((config: LeaseConfig, lease: LeaseRecord) => ({ config, lease }));
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      jsonResponse({ message: "invalid client credentials" }, 401),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const fleet = testFleet(
+      storage,
+      {
+        hetzner: fakeProvider(createServer, { onPrepareLeaseCreate: prepareLease }),
+      },
+      {
+        CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
+        CRABBOX_TAILSCALE_CLIENT_SECRET: "client-secret",
+        CRABBOX_TAILSCALE_TAGS: "tag:ci",
+      },
+    );
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+        body: {
+          leaseID,
+          createAttemptID,
+          provider: "hetzner",
+          tailscale: true,
+          tailscaleTags: ["tag:ci"],
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(create.status).toBe(502);
+    await expect(create.json()).resolves.toEqual({
+      error: "tailscale_unavailable",
+      message: "tailscale oauth token failed: http 401",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.tailscale.com/api/v2/oauth/token",
+      expect.anything(),
+    );
+    expect(prepareLease).not.toHaveBeenCalled();
+    expect(createServer).not.toHaveBeenCalled();
+    expect(storage.value(`lease:${leaseID}`)).toBeUndefined();
+    expect(storage.value(`provider-access:${leaseID}`)).toBeUndefined();
+    expect(storage.value(provisioningOperationKey(leaseID))).toBeUndefined();
+    const attempt = storage.value(`create-attempt:${leaseID}`);
+    expect(attempt).toMatchObject({
+      requestedLeaseID: leaseID,
+      token: createAttemptID,
+      owner: "alice@example.com",
+      org: orgKeyForLabel("example-org"),
+      state: "pending",
+    });
+    expect(attempt).not.toHaveProperty("canonicalLeaseID");
+    expect(attempt).not.toHaveProperty("cloudID");
+    expect(attempt).not.toHaveProperty("generation");
+  });
+
   it.each(["oauth token", "create auth key"])(
     "translates brokered Tailscale %s tag ownership denials without raw diagnostics",
     async (operation) => {

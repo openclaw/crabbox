@@ -56,6 +56,20 @@ func (e CoordinatorHTTPError) Error() string {
 	return fmt.Sprintf("coordinator %s %s: http %d", e.Method, e.Path, e.StatusCode)
 }
 
+func coordinatorResponseErrorCode(err error, status int) string {
+	var httpErr CoordinatorHTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != status {
+		return ""
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal([]byte(httpErr.Message), &body) != nil {
+		return ""
+	}
+	return body.Error
+}
+
 type CoordinatorLease struct {
 	ID                           string                         `json:"id"`
 	Slug                         string                         `json:"slug,omitempty"`

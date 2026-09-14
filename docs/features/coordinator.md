@@ -253,6 +253,11 @@ An unbound canceled tombstone rejects only that exact owner/org/token operation;
 it does not reserve the provisional ID against a fresh token or a fixed,
 registered, or workspace lifecycle. Pending and canonical-bound attempts remain
 global ID reservations.
+An exact `502 tailscale_unavailable` response stops create replay because the
+coordinator rejected Tailscale preparation before provider allocation. The CLI
+still cancels its ordinary create attempt and reports the original error; fixed
+ID operations retain their existing caller-owned recovery. Other server errors
+and transport failures continue to use the same-token recovery path.
 Tokenless POSTs from older CLIs remain supported with their previous behavior,
 but they do not gain this cancellation guarantee. Roll out the coordinator
 before distributing a CLI that sends create attempts; once token-bound creates

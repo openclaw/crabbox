@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -417,20 +416,6 @@ func runtimeAdapterRegistrationReplay(err error) bool {
 
 func runtimeAdapterDeleteCompletionMismatch(err error) bool {
 	return coordinatorResponseErrorCode(err, 409) == "runtime_adapter_delete_completion_mismatch"
-}
-
-func coordinatorResponseErrorCode(err error, status int) string {
-	var httpErr CoordinatorHTTPError
-	if !errors.As(err, &httpErr) || httpErr.StatusCode != status {
-		return ""
-	}
-	var body struct {
-		Error string `json:"error"`
-	}
-	if json.Unmarshal([]byte(httpErr.Message), &body) != nil {
-		return ""
-	}
-	return body.Error
 }
 
 func (a App) coordinatorRegistrationWarning(leaseID string, err error) {
