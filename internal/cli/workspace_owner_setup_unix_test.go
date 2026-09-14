@@ -156,40 +156,118 @@ func testWorkspaceOwnerClosedDiagnosticPipe(t *testing.T, shell string) {
 	}
 }
 
-func TestWorkspaceOwnerPOSIXSignalDenialPreservesLiveWitness(t *testing.T) {
+func TestWorkspaceOwnerPOSIXObservationFailurePreservesLiveWitness(t *testing.T) {
 	for _, action := range []workspaceOwnerAction{workspaceOwnerAcquire, workspaceOwnerInspect, workspaceOwnerRelease} {
-		t.Run(string(action), func(t *testing.T) {
+		for _, observation := range []string{"signal denied", "identity unavailable", "process listing unavailable"} {
+			t.Run(string(action)+"/"+observation, func(t *testing.T) {
+				home, owner := workspaceOwnerSetupFixture(t)
+				root := filepath.Join(home, ".crabbox", "workspace-owners")
+				statePath := filepath.Join(root, owner.key+".owner")
+				if action == workspaceOwnerAcquire {
+					if err := os.WriteFile(statePath, []byte("v1\n"+owner.token+"\n1\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				identity, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(os.Getpid())).Output()
+				if err != nil {
+					t.Fatal(err)
+				}
+				childPath := filepath.Join(root, owner.key+".child")
+				child := []byte(fmt.Sprintf("%d\n%s\n", os.Getpid(), strings.Join(strings.Fields(string(identity)), " ")))
+				if err := os.WriteFile(childPath, child, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				before, err := os.ReadFile(statePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				req := workspaceOwnerRemoteRequest{Action: action, Key: owner.key, Token: owner.token, TTL: time.Minute}
+				path := os.Getenv("PATH")
+				if observation == "signal denied" {
+					path = workspaceOwnerDenySignals(t)
+				} else {
+					realPS, err := exec.LookPath("ps")
+					if err != nil {
+						t.Fatal(err)
+					}
+					tools := t.TempDir()
+					probe := "#!/bin/sh\nexit 1\n"
+					if observation == "identity unavailable" {
+						probe = "#!/bin/sh\n[ \"$1\" != -o ] || exit 1\nexec " + shellQuote(realPS) + " \"$@\"\n"
+					}
+					writeExecutable(t, filepath.Join(tools, "ps"), probe)
+					path = tools + string(os.PathListSeparator) + path
+				}
+				cmd, ctx := boundedWorkspaceOwnerCommand(t, home, path, remoteWorkspaceOwnerPOSIX(req))
+				out, err := cmd.CombinedOutput()
+				if ctx.Err() != nil || exitCode(err) != 74 || string(out) != "AMBIGUOUS" {
+					t.Fatalf("uncertain liveness did not fail closed: exit=%d", exitCode(err))
+				}
+				after, stateErr := os.ReadFile(statePath)
+				retained, childErr := os.ReadFile(childPath)
+				if stateErr != nil || childErr != nil || !bytes.Equal(before, after) || !bytes.Equal(child, retained) {
+					t.Fatal("uncertain liveness changed owner or child authority")
+				}
+			})
+		}
+	}
+}
+
+func TestWorkspaceOwnerPOSIXChildExitBetweenLivenessProbes(t *testing.T) {
+	for _, action := range []string{"acquire", "inspect", "release", "replace"} {
+		t.Run(action, func(t *testing.T) {
 			home, owner := workspaceOwnerSetupFixture(t)
 			root := filepath.Join(home, ".crabbox", "workspace-owners")
 			statePath := filepath.Join(root, owner.key+".owner")
-			if action == workspaceOwnerAcquire {
-				if err := os.WriteFile(statePath, []byte("v1\n"+owner.token+"\n1\n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
+			if action == "acquire" {
+				mustWriteTestFile(t, statePath, "v1\n"+owner.token+"\n1\n")
 			}
-			identity, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(os.Getpid())).Output()
+			child, _ := boundedWorkspaceOwnerCommand(t, home, os.Getenv("PATH"), "exec sleep 30")
+			if err := child.Start(); err != nil {
+				t.Fatal(err)
+			}
+			pid := strconv.Itoa(child.Process.Pid)
+			realPS, err := exec.LookPath("ps")
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity, err := exec.Command(realPS, "-o", "lstart=", "-p", pid).Output()
 			if err != nil {
 				t.Fatal(err)
 			}
 			childPath := filepath.Join(root, owner.key+".child")
-			child := []byte(fmt.Sprintf("%d\n%s\n", os.Getpid(), strings.Join(strings.Fields(string(identity)), " ")))
-			if err := os.WriteFile(childPath, child, 0o600); err != nil {
+			mustWriteTestFile(t, childPath, pid+"\n"+strings.Join(strings.Fields(string(identity)), " ")+"\n")
+			tools := t.TempDir()
+			probe, reaped := filepath.Join(home, "identity-probe"), filepath.Join(home, "child-reaped")
+			// The real kill probe succeeds; let the real PID disappear before ps.
+			writeExecutable(t, filepath.Join(tools, "ps"), "#!/bin/sh\n"+
+				"if [ \"$1\" = -o ] && [ \"$2\" = lstart= ] && [ \"$4\" = "+shellQuote(pid)+" ]; then\n"+
+				"  touch "+shellQuote(probe)+"\n"+
+				"  while [ ! -f "+shellQuote(reaped)+" ]; do sleep .01; done\nfi\n"+
+				"exec "+shellQuote(realPS)+" \"$@\"\n")
+			req := workspaceOwnerRemoteRequest{Action: workspaceOwnerAction(action), Key: owner.key, Token: owner.token, TTL: time.Minute}
+			script := remoteWorkspaceOwnerPOSIX(req)
+			want := map[string]string{"acquire": "RECOVERED", "inspect": "OWNED", "release": "RELEASED", "replace": "replacement-ran"}[action]
+			if action == "replace" {
+				script = remoteWorkspaceOwnerPOSIXWitness(owner.key, owner.token, "printf replacement-ran")
+			}
+			cmd, ctx := boundedWorkspaceOwnerCommand(t, home, tools+string(os.PathListSeparator)+os.Getenv("PATH"), script)
+			var output bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &output, &output
+			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
-			before, err := os.ReadFile(statePath)
-			if err != nil {
+			waitForWorkspaceOwnerTestFile(t, probe)
+			if err := child.Process.Kill(); err != nil {
 				t.Fatal(err)
 			}
-			req := workspaceOwnerRemoteRequest{Action: action, Key: owner.key, Token: owner.token, TTL: time.Minute}
-			cmd, ctx := boundedWorkspaceOwnerCommand(t, home, workspaceOwnerDenySignals(t), remoteWorkspaceOwnerPOSIX(req))
-			out, err := cmd.CombinedOutput()
-			if ctx.Err() != nil || err == nil || string(out) != "AMBIGUOUS" {
-				t.Fatalf("denied liveness did not fail closed: exit=%d", exitCode(err))
+			_ = child.Wait()
+			mustWriteTestFile(t, reaped, "")
+			if err := cmd.Wait(); err != nil || ctx.Err() != nil || output.String() != want {
+				t.Fatalf("exited child remained ambiguous: output=%q err=%v context=%v", &output, err, ctx.Err())
 			}
-			after, stateErr := os.ReadFile(statePath)
-			retained, childErr := os.ReadFile(childPath)
-			if stateErr != nil || childErr != nil || !bytes.Equal(before, after) || !bytes.Equal(child, retained) {
-				t.Fatal("denied liveness changed owner or child authority")
+			if _, err := os.Stat(childPath); !os.IsNotExist(err) {
+				t.Fatalf("completed operation retained dead child witness: %v", err)
 			}
 		})
 	}

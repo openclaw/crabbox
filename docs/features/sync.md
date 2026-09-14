@@ -221,6 +221,8 @@ waiting child from running the workload. After handoff, the existing witnessed
 child and recovery rules continue to apply. A denied `kill -0` is never proof
 that a recorded child is dead: cleanup and recovery require independent PID
 absence evidence, and retain authority when observation is ambiguous.
+If a child exits between the signal and start-time probes, the same PID absence
+check allows the completed phase to settle without retrying an ambiguous result.
 
 Once ownership is established, sync runs these steps:
 

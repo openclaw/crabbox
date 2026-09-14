@@ -614,12 +614,20 @@ func workspaceOwnerTTLSeconds(ttl time.Duration) int64 {
 	return seconds
 }
 
-// A denied signal probe is not proof of death. Never erase a witness until
-// independent PID-only observation confirms absence (no process arguments).
-const workspaceOwnerPOSIXAbsent = `owner_child_absent() {
-  observed_pids=$(ps -e -o pid= 2>/dev/null) || return 1
-  matching_pid=$(printf '%s\n' "$observed_pids" | awk -v pid="$1" '$1 == pid { print $1 }') || return 1
-  [ -z "$matching_pid" ]
+// Signal denial or exit between liveness probes requires independent PID-only
+// absence evidence before erasing a witness (no process arguments).
+const workspaceOwnerPOSIXProcess = `owner_process_status() {
+  if kill -0 "$1" 2>/dev/null; then
+    live_identity=$(ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
+    if [ -n "$live_identity" ]; then
+      [ "$live_identity" = "$2" ] && return 0
+      return 1
+    fi
+  fi
+  observed_pids=$(ps -e -o pid= 2>/dev/null) || return 2
+  matching_pid=$(printf '%s\n' "$observed_pids" | awk -v pid="$1" '$1 == pid { print $1 }') || return 2
+  [ -z "$matching_pid" ] || return 2
+  return 1
 }
 `
 
@@ -655,7 +663,7 @@ func workspaceOwnerPOSIXGate(timeout string) string {
 
 func remoteWorkspaceOwnerPOSIX(req workspaceOwnerRemoteRequest) string {
 	body := `set -eu
-` + workspaceOwnerPOSIXAbsent + `
+` + workspaceOwnerPOSIXProcess + `
 root="$HOME/.crabbox/workspace-owners"
 key=` + shellQuote(req.Key) + `
 token=` + shellQuote(req.Token) + `
@@ -688,14 +696,7 @@ child_status() {
   child_identity=$(sed -n '2p' "$child" 2>/dev/null || true)
   case "$child_pid" in ''|*[!0-9]*) return 2 ;; esac
   [ -n "$child_identity" ] && [ "${#child_identity}" -le 96 ] || return 2
-  if kill -0 "$child_pid" 2>/dev/null; then
-    live_identity=$(ps -o lstart= -p "$child_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
-    [ -n "$live_identity" ] || return 2
-    [ "$live_identity" = "$child_identity" ] && return 0
-  else
-    owner_child_absent "$child_pid" || return 2
-  fi
-  return 1
+  owner_process_status "$child_pid" "$child_identity"
 }
 case "$action" in
   acquire)
@@ -930,7 +931,7 @@ func remoteWorkspaceOwnerPOSIXWitnessScript(key, token, remote, setupMarker stri
 	}
 	gateFunction := workspaceOwnerPOSIXGate("5")
 	installBody := `set -eu
-` + workspaceOwnerPOSIXAbsent + `
+` + workspaceOwnerPOSIXProcess + `
 [ "$(sed -n '2p' "$state" 2>/dev/null || true)" = "$token" ] || exit 75
 owner_expiry=$(sed -n '3p' "$state" 2>/dev/null || true)
 case "$owner_expiry" in ''|*[!0-9]*) exit 74 ;; esac
@@ -943,30 +944,21 @@ if [ -f "$child" ]; then
 	existing_identity=$(sed -n '2p' "$child" 2>/dev/null || true)
 	case "$existing_pid" in ''|*[!0-9]*) exit 74 ;; esac
 	[ -n "$existing_identity" ] && [ "${#existing_identity}" -le 96 ] || exit 74
-	if kill -0 "$existing_pid" 2>/dev/null; then
-		live_existing_identity=$(ps -o lstart= -p "$existing_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
-		[ -n "$live_existing_identity" ] || exit 74
-		[ "$live_existing_identity" != "$existing_identity" ] || exit 75
-	else
-		owner_child_absent "$existing_pid" || exit 74
-	fi
+	if owner_process_status "$existing_pid" "$existing_identity"; then exit 75; else existing_rc=$?; fi
+	[ "$existing_rc" -ne 2 ] || exit 74
 	rm -f "$child"
 fi
 child_tmp="$child.tmp.$$"
 (umask 077; printf '%s\n%s\n' "$child_pid" "$child_identity" >"$child_tmp")
 mv "$child_tmp" "$child"`
 	clearBody := `set -eu
-` + workspaceOwnerPOSIXAbsent + `
+` + workspaceOwnerPOSIXProcess + `
 [ "$(sed -n '2p' "$state" 2>/dev/null || true)" = "$token" ] || exit 75
 recorded_pid=$(sed -n '1p' "$child" 2>/dev/null || true)
 recorded_identity=$(sed -n '2p' "$child" 2>/dev/null || true)
 [ "$recorded_pid" = "$child_pid" ] && [ "$recorded_identity" = "$child_identity" ] || exit 74
-if kill -0 "$recorded_pid" 2>/dev/null; then
-	live_identity=$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
-	[ -n "$live_identity" ] && [ "$live_identity" != "$recorded_identity" ] || exit 74
-else
-	owner_child_absent "$recorded_pid" || exit 74
-fi
+if owner_process_status "$recorded_pid" "$recorded_identity"; then exit 74; else recorded_rc=$?; fi
+[ "$recorded_rc" -ne 2 ] || exit 74
 rm -f "$child"`
 	// An asynchronous shell list makes INT/QUIT ignored before exec. Register in
 	// a foreground shell instead; close its identity pipe before user code runs.
