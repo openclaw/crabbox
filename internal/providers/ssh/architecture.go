@@ -17,7 +17,12 @@ import (
 const architectureProbeTimeout = 15 * time.Second
 const architectureProbeLimit = 256
 
-var runArchitectureProbe = core.RunSSHOutputBounded
+var runArchitectureProbe = func(ctx context.Context, target core.SSHTarget, command string, maxBytes int) (string, error) {
+	if target.TargetOS == core.TargetWindows && target.WindowsMode == "wsl2" {
+		return core.RunSSHOutputBoundedWithExecutionTimeout(ctx, target, command, maxBytes, architectureProbeTimeout)
+	}
+	return core.RunSSHOutputBounded(ctx, target, command, maxBytes)
+}
 
 // uname describes the SSH execution environment, not bare-metal provenance.
 const posixArchitectureProbe = `machine=$(uname -m 2>/dev/null) || machine=unknown
@@ -143,7 +148,10 @@ func parseArchitectureObservation(output string, detailed bool) (architectureObs
 }
 
 func (b *staticLeaseBackend) observeArchitecture(ctx context.Context, lease *core.LeaseTarget) error {
-	probeCtx, cancel := context.WithTimeout(ctx, architectureProbeTimeout)
+	probeCtx, cancel := ctx, func() {}
+	if lease.SSH.TargetOS != core.TargetWindows || lease.SSH.WindowsMode != "wsl2" {
+		probeCtx, cancel = context.WithTimeout(ctx, architectureProbeTimeout)
+	}
 	defer cancel()
 	// Readiness selected this exact port. nil would silently re-enable port 22.
 	lease.SSH.FallbackPorts = []string{}

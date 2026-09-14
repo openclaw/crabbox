@@ -12,6 +12,7 @@
 
 ### Fixes
 
+- Give WSL2 static SSH architecture probes a 15-second execution allowance plus the existing bounded transport setup and cleanup budgets, instead of exhausting a 15-second whole-call deadline during staging. [PR 2265](https://github.com/openclaw/crabbox/pull/2265).
 - Seed detached commits by their exact origin SHA before POSIX/WSL2 file sync, verifying the seed and retaining normal sync when the remote cannot serve the commit.
 - Warn when `--expose` cannot change an existing coordinator-managed lease's Pond ports and point to `crabbox tunnel` for forwarding an existing service. [PR 2256](https://github.com/openclaw/crabbox/pull/2256).
 

@@ -151,7 +151,11 @@ func TestStaticSSHArchitectureAssertions(t *testing.T) {
 					t.Fatalf("probe did not pin resolved port: %#v", target)
 				}
 				deadline, ok := ctx.Deadline()
-				if !ok || time.Until(deadline) > architectureProbeTimeout {
+				if target.TargetOS == "windows" && target.WindowsMode == "wsl2" {
+					if ok {
+						t.Fatal("provider imposed a WSL whole-call deadline")
+					}
+				} else if !ok || time.Until(deadline) > architectureProbeTimeout {
 					t.Fatal("probe is unbounded")
 				}
 				if limit != architectureProbeLimit {
@@ -201,6 +205,49 @@ func TestStaticSSHArchitectureAssertions(t *testing.T) {
 			}
 			if strings.Contains(tc.output, "|true") && !strings.Contains(log.String(), "translated=true") {
 				t.Fatal("translation hidden")
+			}
+		})
+	}
+}
+
+func TestStaticSSHArchitectureBudgetOwnership(t *testing.T) {
+	for _, platform := range []struct{ os, mode string }{{"windows", "wsl2"}, {"windows", "normal"}, {"linux", "normal"}, {"macos", "normal"}} {
+		t.Run(platform.os+"/"+platform.mode, func(t *testing.T) {
+			for _, callerLimit := range []time.Duration{0, 5 * time.Second} {
+				t.Run(callerLimit.String(), func(t *testing.T) {
+					b, _, _ := staticArchitectureFixture(t, platform.os, platform.mode, "")
+					ctx := t.Context()
+					if callerLimit > 0 {
+						var cancel context.CancelFunc
+						ctx, cancel = context.WithTimeout(ctx, callerLimit)
+						defer cancel()
+					}
+					stopped := errors.New("probe boundary")
+					runArchitectureProbe = func(probeCtx context.Context, _ core.SSHTarget, _ string, _ int) (string, error) {
+						if platform.os == "windows" && platform.mode == "wsl2" {
+							if probeCtx != ctx {
+								t.Fatal("WSL caller context replaced")
+							}
+						} else {
+							deadline, ok := probeCtx.Deadline()
+							if !ok || time.Until(deadline) > 15*time.Second || architectureProbeTimeout != 15*time.Second {
+								t.Fatal("non-WSL 15-second whole-call cap changed")
+							}
+						}
+						if callerLimit > 0 {
+							want, _ := ctx.Deadline()
+							got, _ := probeCtx.Deadline()
+							if !got.Equal(want) {
+								t.Fatal("earlier caller deadline changed")
+							}
+						}
+						return "", stopped
+					}
+					_, err := b.Acquire(ctx, core.AcquireRequest{})
+					if !errors.Is(err, stopped) {
+						t.Fatalf("probe boundary not reached: %v", err)
+					}
+				})
 			}
 		})
 	}
