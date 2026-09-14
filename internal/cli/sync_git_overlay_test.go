@@ -38,18 +38,28 @@ func TestGitOverlaySnapshotCancellationCleansOwnedStaging(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var created string
+	observedPaths := 0
 	snapshot, err := prepareGitOverlaySnapshotWithHook(ctx, fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, _ int, root string) {
 		if phase == "snapshot_created" {
 			created = root
 			cancel()
 		}
+		if phase == "after_lstat" {
+			observedPaths++
+		}
 	})
-	if !errors.Is(err, context.Canceled) || snapshot.Root != "" || created == "" {
-		t.Fatalf("snapshot=%+v created=%q error=%v", snapshot, created, err)
+	t.Cleanup(func() {
+		if err := snapshot.cleanup(); err != nil {
+			t.Error(err)
+		}
+	})
+	if !errors.Is(err, context.Canceled) || snapshot.Root != "" || created == "" || observedPaths != 0 {
+		t.Fatalf("canceled=%t staged_root_retained=%t created=%t observed_paths=%d error=%v", errors.Is(err, context.Canceled), snapshot.Root != "", created != "", observedPaths, err)
 	}
 	if _, err := os.Stat(created); !os.IsNotExist(err) {
 		t.Fatalf("cancelled staging remains: %v", err)
 	}
+	t.Log("phase=snapshot_created; canceled=true; observed_paths=0; owned_staging_removed=true")
 }
 
 func TestGitOverlaySnapshotCancellationRetainsCleanupFailure(t *testing.T) {
