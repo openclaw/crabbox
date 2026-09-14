@@ -24876,8 +24876,10 @@ describe("fleet lease identity and idle", () => {
     const storage = new MemoryStorage();
     const leaseID = "cbx_abcdef123456";
     const createAttemptID = "cat_0123456789abcdef0123456789abcdef";
-    const createServer = vi.fn();
-    const prepareLease = vi.fn((config: LeaseConfig, lease: LeaseRecord) => ({ config, lease }));
+    const createMachine = vi.fn<(config: LeaseConfig) => void>();
+    const prepareLease = vi.fn<
+      (config: LeaseConfig, lease: LeaseRecord) => { config: LeaseConfig; lease: LeaseRecord }
+    >((config, lease) => ({ config, lease }));
     const fetchMock = vi.fn<typeof fetch>(async () =>
       jsonResponse({ message: "invalid client credentials" }, 401),
     );
@@ -24885,7 +24887,7 @@ describe("fleet lease identity and idle", () => {
     const fleet = testFleet(
       storage,
       {
-        hetzner: fakeProvider(createServer, { onPrepareLeaseCreate: prepareLease }),
+        hetzner: fakeProvider(createMachine, { onPrepareLeaseCreate: prepareLease }),
       },
       {
         CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
@@ -24919,7 +24921,7 @@ describe("fleet lease identity and idle", () => {
       expect.anything(),
     );
     expect(prepareLease).not.toHaveBeenCalled();
-    expect(createServer).not.toHaveBeenCalled();
+    expect(createMachine).not.toHaveBeenCalled();
     expect(storage.value(`lease:${leaseID}`)).toBeUndefined();
     expect(storage.value(`provider-access:${leaseID}`)).toBeUndefined();
     expect(storage.value(provisioningOperationKey(leaseID))).toBeUndefined();
