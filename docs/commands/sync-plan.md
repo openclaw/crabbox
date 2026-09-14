@@ -39,6 +39,10 @@ The same preflight rejects tracked non-gitlink paths hidden by sparse-checkout
 or `skip-worktree` state only when they remain in the effective manifest after
 `sync.include` and ordered excludes. On Git older than 2.41, an ambiguous
 missing in-scope path fails closed; out-of-scope paths do not affect the plan.
+Materialize the checkout, or intentionally adjust `sync.include`, ordered
+`sync.exclude`, or `.crabboxignore`; later reinclusion rules still determine
+effective scope. Ordinary SSH runs perform this scope check before lease work
+and independently rebuild the final manifest after acquisition.
 
 ## Output
 
@@ -92,14 +96,22 @@ machine-readable shape for CI checks and agent preflights:
 ```
 
 `candidate` is the full manifest that would be present on the remote after
-sync. `dirtyDelta` is the locally changed/untracked/deleted path set that
-`crabbox run` uses for large-sync guardrails when it is non-empty.
+sync. `dirtyDelta` is the locally changed/untracked/deleted path set. Ordinary
+SSH sync uses this delta for large-sync guardrails when it is non-empty;
+providers that enforce full-archive limits use the complete candidate even
+when only one file changed. Both size summaries remain visible.
 `protectedTrackedFiles` counts tracked regular files kept despite an ambiguous
 built-in exclude and includes up to five path-and-pattern examples.
 `guardrail.scope` is therefore either `dirty_delta` or `candidate`, matching
-the sync preflight path. `guardrail.status` is `ok`, `warning`, or `failed`;
+the configured provider's ordinary workspace-sync preflight. This selection
+uses provider metadata locally; it does not configure or contact the provider.
+`guardrail.status` is `ok`, `warning`, or `failed`;
 warnings and failures are listed in `guardrail.reasons` when configured
 `sync.warn*` or `sync.fail*` thresholds are reached.
+
+The preview does not predict compressed upload limits, native service limits,
+authentication, or command-specific routes such as module execution. A later
+`run --no-sync` does not transfer the previewed workspace.
 
 ## Flags
 

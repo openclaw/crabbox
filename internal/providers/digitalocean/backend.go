@@ -106,7 +106,7 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	now := b.now()
+	now := core.ClockNow(b.RT.Clock).UTC()
 	created := droplet{}
 	committed := false
 	defer func() {
@@ -426,7 +426,7 @@ func (b *digitalOceanLeaseBackend) releaseTargetFromClaim(ctx context.Context, c
 		if recoveryName == "" {
 			recoveryName = "ambiguous-create"
 		}
-		if createdAt <= 0 || b.now().Before(time.Unix(createdAt, 0).Add(grace)) {
+		if createdAt <= 0 || core.ClockNow(b.RT.Clock).UTC().Before(time.Unix(createdAt, 0).Add(grace)) {
 			return core.LeaseTarget{}, core.Exit(4, "digitalocean %s recovery is still pending for lease=%s; retry stop later", recoveryName, claim.LeaseID)
 		}
 		if recovery == "ambiguous-key-create" {
@@ -680,7 +680,7 @@ func (b *digitalOceanLeaseBackend) targetFromDroplet(item droplet, req core.Reso
 		if expectedAccountID != accountID {
 			return core.LeaseTarget{}, core.Exit(3, "digitalocean account mismatch: current account %s does not match lease account %s", accountID, expectedAccountID)
 		}
-		liveCloudID := firstNonBlank(server.CloudID, strconv.FormatInt(server.ID, 10))
+		liveCloudID := shared.FirstNonBlank(server.CloudID, strconv.FormatInt(server.ID, 10))
 		if claim.CloudID != "" && claim.CloudID != liveCloudID {
 			return core.LeaseTarget{}, core.Exit(2, "refusing to resolve DigitalOcean Droplet %d from stale local claim", server.ID)
 		}
@@ -708,10 +708,8 @@ func (b *digitalOceanLeaseBackend) targetFromDroplet(item droplet, req core.Reso
 		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	ssh := core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
-	if keyPath, err := core.TestboxKeyPath(leaseID); err == nil {
-		if _, statErr := os.Stat(keyPath); statErr == nil {
-			ssh.Key = keyPath
-		}
+	if err := core.UseStoredTestboxKey(&ssh, leaseID); err != nil {
+		return core.LeaseTarget{}, err
 	}
 	if req.Repo.Root != "" && !req.NoLocalStateMutations {
 		updated, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, server.Labels["slug"], b.Cfg, server, ssh, req.Repo.Root, b.Cfg.IdleTimeout, req.Reclaim, claim, claimExists)
@@ -796,8 +794,8 @@ func (b *digitalOceanLeaseBackend) Touch(ctx context.Context, req core.TouchRequ
 	labels := normalizedDropletLabels(item.Tags)
 	accountID := strings.TrimSpace(server.Labels[digitalOceanAccountLabel])
 	liveTailscale := map[string]string{}
-	for _, key := range tagLabelKeys() {
-		if value, ok := labels[key]; ok && exactTagValueKey(key) {
+	for _, key := range tagSchema.Keys() {
+		if value, ok := labels[key]; ok && tagSchema.Exact(key) {
 			liveTailscale[key] = value
 		}
 	}
@@ -807,7 +805,7 @@ func (b *digitalOceanLeaseBackend) Touch(ctx context.Context, req core.TouchRequ
 		delete(labels, "idle_timeout")
 		delete(labels, "idle_timeout_secs")
 	}
-	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, b.now())
+	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, core.ClockNow(b.RT.Clock).UTC())
 	for key, value := range liveTailscale {
 		labels[key] = value
 	}
@@ -864,7 +862,7 @@ func (b *digitalOceanLeaseBackend) UpdateTailscaleMetadata(ctx context.Context, 
 	labels := normalizedDropletLabels(item.Tags)
 	preserveDigitalOceanKeyIdentity(labels, expected.Labels)
 	labels[digitalOceanAccountLabel] = accountID
-	applyTailscaleMetadata(labels, meta)
+	shared.ApplyTailscaleMetadata(labels, meta)
 	updatedClaim, server, _, err := core.UpdateLeaseClaimEndpointIfUnchangedAction(lease.LeaseID, expected, func() (core.Server, core.SSHTarget, bool, error) {
 		currentAccountID, err := client.AccountID(ctx)
 		if err != nil {
@@ -1023,7 +1021,7 @@ func validateDigitalOceanCleanupClaim(server core.Server, claim core.LeaseClaim,
 		if _, ok := parseDropletID(claim.CloudID); !ok {
 			return core.Exit(2, "digitalocean lease=%s has invalid immutable Droplet id %q", leaseID, claim.CloudID)
 		}
-		if liveID := firstNonBlank(server.CloudID, dropletIDString(server.ID)); liveID != "" && liveID != claim.CloudID {
+		if liveID := shared.FirstNonBlank(server.CloudID, dropletIDString(server.ID)); liveID != "" && liveID != claim.CloudID {
 			return core.Exit(2, "refusing to release DigitalOcean Droplet %d from stale local claim", server.ID)
 		}
 	} else {
@@ -1053,10 +1051,6 @@ func validateDigitalOceanCleanupClaim(server core.Server, claim core.LeaseClaim,
 		}
 	}
 	return nil
-}
-
-func applyTailscaleMetadata(labels map[string]string, meta core.TailscaleMetadata) {
-	shared.ApplyTailscaleMetadata(labels, meta)
 }
 
 func (b *digitalOceanLeaseBackend) deleteServer(ctx context.Context, _ core.Config, server core.Server) error {
@@ -1287,13 +1281,6 @@ func (b *digitalOceanLeaseBackend) waitForDropletIP(ctx context.Context, client 
 	return result.Value, nil
 }
 
-func (b *digitalOceanLeaseBackend) now() time.Time {
-	if b.RT.Clock != nil {
-		return b.RT.Clock.Now().UTC()
-	}
-	return time.Now().UTC()
-}
-
 func rollbackDigitalOceanAcquire(client digitalOceanAPI, dropletID, keyID int64) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -1342,7 +1329,7 @@ func serverFromDroplet(item droplet, cfg core.Config) core.Server {
 		Labels:   labels,
 	}
 	server.PublicNet.IPv4.IP = publicIPv4(item)
-	server.ServerType.Name = firstNonBlank(item.Size.Slug, cfg.ServerType)
+	server.ServerType.Name = shared.FirstNonBlank(item.Size.Slug, cfg.ServerType)
 	return server
 }
 
@@ -1399,10 +1386,10 @@ func applyDigitalOceanDefaults(cfg *core.Config) {
 		cfg.TargetOS = core.TargetLinux
 	}
 	if cfg.DigitalOcean.Region == "" {
-		cfg.DigitalOcean.Region = "nyc3"
+		cfg.DigitalOcean.Region = core.DigitalOceanRegionFallback
 	}
 	if cfg.DigitalOcean.Image == "" {
-		cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
+		cfg.DigitalOcean.Image = core.DigitalOceanImageFallback
 	}
 	if !cfg.ServerTypeExplicit || cfg.ServerType == "" {
 		cfg.ServerType = digitalOceanServerTypeForClass(cfg.Class)
@@ -1414,8 +1401,4 @@ func applyDigitalOceanDefaults(cfg *core.Config) {
 		cfg.SSHPort = "22"
 	}
 	cfg.SSHFallbackPorts = nil
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlank(values...)
 }

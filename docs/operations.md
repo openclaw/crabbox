@@ -388,6 +388,31 @@ the shutdown timeout.
 PostgreSQL state and pg-boss jobs are durable, but lifecycle serialization and
 live bridge ownership remain process-local. Do not horizontally scale yet.
 
+Durable provisioning uses the existing KV table for its private sorted due
+index and transactional wake outbox. pg-boss is a notification hint for this
+work: immediate startup reconciliation and a one-second scanner inspect the
+committed due index independently of the legacy alarm queue. Queue deletion,
+enqueue failure, or a missing queued job must not strand an admitted operation.
+Cloudflare commits due changes and native alarms in the same Durable Object
+transaction; legacy reschedule/clear operations preserve the earliest durable
+due time. Constructor repair performs bounded storage work only.
+
+Alarms await the bounded provisioning tick and wake commit. Slow legacy
+maintenance is a runtime-owned single-flight task, with sanitized failures and
+retry scheduling. Node tracks and drains that task during shutdown. Manual
+admin sweep endpoints still await their actual operation. `waitUntil` and
+pg-boss do not replace the durable operation/claim records.
+
+Keep `CRABBOX_DURABLE_PROVISIONING_ADMISSION` unset or `false` until the
+journal-aware version and a stable existing `CRABBOX_SESSION_SECRET` are ready.
+Setting the gate to `false` stops new admissions but resumes existing journals.
+The session secret must be distinct from the shared token and at least 32
+characters; missing, changed or lost encryption material blocks affected
+forward replay without deleting cleanup evidence. Do not provision or rotate a
+secret as an implicit part of enabling this feature. Resolve existing shared
+infrastructure and cleanup debt before enabling new admissions; never erase
+old cleanup records based on the presence of a new operation.
+
 ### Dedicated AWS private-workspace service
 
 Use the checked-in ECS Fargate deployment when one Node/PostgreSQL coordinator
@@ -543,6 +568,33 @@ artifact upload/read URLs. Scope them to the artifact bucket or prefix; they
 should not carry Cloudflare account, Worker deployment, lease-provider, or VM
 permissions.
 
+The shipped production configuration in `worker/wrangler.jsonc` wires the
+existing R2 artifact backend; signing keys remain deployed secrets, and reads
+use expiring signed URLs by default. The **Deploy Coordinator** workflow
+(`.github/workflows/coordinator-deploy.yml`) owns redeploys when these settings
+change on `main`. Missing required backend configuration fails with
+`artifact_upload_unavailable` before any file upload. Checking artifact
+publishing configuration requires no compute lease.
+
+For workflow-managed R2 signing keys, set the optional GitHub environment
+secret `CRABBOX_ARTIFACTS_CREDENTIALS_JSON` in `coordinator` to exactly:
+
+```json
+{
+  "CRABBOX_ARTIFACTS_ACCESS_KEY_ID": "<access-key-id>",
+  "CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY": "<secret-access-key>"
+}
+```
+
+Both values must be nonempty strings; no other fields are accepted. Use
+dedicated keys with Object Read & Write access scoped to the existing artifact
+bucket, not shared deployment keys. Replace the entire bundle to rotate the
+pair atomically, then run **Deploy Coordinator**, the existing serialized
+deployment owner. It deploys both runtime secrets in the same Worker version,
+together with `CRABBOX_DAYTONA_SNAPSHOT` when configured. An absent bundle
+preserves the existing artifact credentials; it does not clear them or change
+unrelated secret bindings.
+
 A typical R2-compatible configuration looks like:
 
 ```text
@@ -680,13 +732,38 @@ preparation state, which older workers reject safely.
 
 Trusted operators can use `crabbox admin release` or `crabbox admin delete --force` for stuck leases.
 
-After AWS credential or account rotation, scan old provider accounts directly for Crabbox-tagged EC2 instances that the current coordinator can no longer see:
+Direct AWS cleanup uses one immutable credential snapshot for STS identity, EC2
+observation, termination confirmation, and owned SSH-key deletion. The separate
+image-qualification authority binds a fixed account and Region policy and runs
+immediate STS checks around protected operations; its signer may refresh
+credentials between operations. Empty inventory can complete direct cleanup
+only for leases that persisted the matching 12-digit account scope and explicit
+Region. Historical unbound leases remain cleanupable when the instance is still
+present with exact Crabbox lease labels, but an empty lookup is intentionally
+inconclusive. Administrators can use [audited legacy AWS recovery](commands/inspect.md#audited-legacy-aws-cleanup-recovery)
+when authenticated CloudTrail allocation evidence proves the original scope and
+an exact current read confirms absence. It restores scope and schedules normal
+remaining cleanup, not a deletion receipt. There is no override that turns
+missing account or Region evidence into proof of deletion.
+
+After AWS credential or account rotation, scan old provider accounts directly
+for Crabbox-tagged EC2 instances that the current coordinator can no longer see:
 
 ```sh
 scripts/aws-crabbox-orphan-audit.sh --profile old-crabbox-account
 ```
 
-The audit is read-only. It skips `keep=true` instances, protects active coordinator leases by lease tag or EC2 instance ID, and applies the same grace window as the broker sweep before reporting stale labels. The script intentionally refuses `--terminate`: a local AWS scan cannot atomically lock coordinator lease state before deleting an instance. For broker-owned accounts, use the coordinator AWS orphan sweep below. For rotated legacy accounts, treat the JSON output as investigation evidence and delete through an explicit operator or infrastructure workflow only after confirming no active coordinator can still claim the instance.
+The audit is read-only. It skips `keep=true` instances, protects active
+coordinator leases by lease tag or EC2 instance ID, and applies the same grace
+window as the broker sweep before reporting stale labels. The script
+intentionally refuses `--terminate`: a local AWS scan cannot atomically lock
+coordinator lease state before deleting an instance. For broker-owned accounts,
+restore the lease's original account and Region credentials and retry
+coordinator cleanup. For rotated legacy accounts, treat the JSON output as
+investigation evidence and delete through an explicit operator or infrastructure
+workflow only after confirming no active coordinator can still claim the
+instance. Do not clear the retained cleanup fields or local access evidence to
+force completion.
 
 Direct-provider cleanup is only for debug mode without a coordinator:
 
@@ -875,17 +952,20 @@ The authoritative serialized release contract is [Release engineering](RELEASING
 One explicit full release/publish request authorizes the complete normal sequence
 through closeout, without renewed chat approval at each stage. Narrow requests
 stay narrow. The original request supplies authorization; GitHub events alone
-do not. No event automatically publishes a tag or updates Homebrew. Technical
+do not. No event automatically publishes a tag. Publication makes the release eligible
+for the ordinary tap updater and independent generic reconciliation. Technical
 gates, identity binding, credential isolation, immutability, exact frozen inputs,
-actual exclusive-writer coordination, and cancellation boundaries still apply.
+immediate publication readbacks, and cancellation boundaries still apply.
+Publication does not require a particular PR-approval ruleset or an
+administrative writer freeze; existing GitHub merge protections still apply.
 
 Before creating or reusing a signed release tag:
 
-- Rebase release preparation on the current `main`, restore the full changelog from the latest tag if concurrent work regressed it, and verify every published version remains represented.
-- Reorder `CHANGELOG.md` with the user-facing changes first, date the release section, and keep contributor thanks / co-author notes intact.
+- Rebase release preparation on the current `main`, restore missing published history from the latest tag while preserving `Unreleased` and other new entries, and verify every published version remains represented.
+- Finalize the `Unreleased` entries maintained as work lands into a versioned, dated release section in `CHANGELOG.md`, with user-facing changes first and contributor thanks / co-author notes intact.
 - Update every package metadata file that carries the project version. The current release surface is `worker/package.json` plus both root package entries in `worker/package-lock.json`; the removed root plugin package must not be recreated.
 - `go vet ./...`
-- `go test -race ./...`
+- `go test -race -timeout=20m ./...`
 - `scripts/test-go-modules.sh`
 - `scripts/verify-go-install.sh v0.0.0 "$(git rev-parse HEAD)"`
 - `go build -trimpath -o bin/crabbox ./cmd/crabbox`
@@ -922,43 +1002,97 @@ Then advance sequentially under that authorization as each technical gate passes
    Intel jobs download assets with narrowly scoped credentials, remove all API,
    Actions, OIDC, and Homebrew credentials, then verify and execute the matching
    candidates in a clean environment.
-5. **Publication.** Establish and verify the administrative freeze of all release
-   writers required by [Release engineering](RELEASING.md#serialized-gates);
-   the release request is not evidence that the freeze is active. Re-read and
+5. **Publication.** Follow the exact-record checks in
+   [Release engineering](RELEASING.md#serialized-gates). Re-read and
    compare the unchanged draft, successful native proofs, tag, protected verifier
    SHA, notes, asset IDs, sizes, and digests. Publication is a single draft-state
-   transition; it does not rebuild, replace, or delete anything.
-6. **Published verification.** Re-download the public assets by immutable asset
-   ID and repeat the exact metadata, checksum, signature, notarization, native
-   execution, and notes proof. The proof must be newer than publication and
-   every release or asset mutation.
-7. **Public Go installation.** From fresh `HOME`, `GOPATH`, module/build caches,
-   and `GOBIN`, install
-   `github.com/openclaw/crabbox/cmd/crabbox@vX.Y.Z` using only the public Go
-   module proxy. Require exact replacement-free build metadata, the immutable
-   JSON Schema fork version, exact `--version`, `--help`, and `run --help` as
-   documented in [Release engineering](RELEASING.md#operator-command-sequence).
-8. **Homebrew.** Only after published verification and the public Go-install
-   proof succeed, update the tap under the original release authorization.
-   Bind every formula URL and SHA-256 to the frozen release record, then
-   run the documented downstream verifier on clean native Apple Silicon and
-   Intel hosts. The verifier re-fetches the current public release and run,
-   authenticates both supplied native proof ZIPs against GitHub artifact
-   digests, and requires that successful run to be newer than publication and
-   every release or asset update. It then performs `brew update`, a fresh install or reinstall,
-   `brew test`, archive-to-install byte comparison, signature/notarization
-   checks, exact `crabbox --version`, and the Apple Silicon helper's
-   non-mutating `vmd-info` check. Those checks are the bounded installed-binary
-   smoke; they do not create a provider lease or authorize unrelated provider
-   mutations.
-9. **Closeout.** After all public and Homebrew proofs succeed, add the next patch
-   `Unreleased` section, commit and push, wait for exact-head CI, pull with
-   `--ff-only`, and leave `main` clean and synchronized.
+   transition; it does not rebuild, replace, or delete anything. The final read
+   and publication are not atomic: no administrative freeze is required, and
+   a detected post-publication mismatch is an incident, not permission to rewrite
+   the release.
+6. **Homebrew update.** Publication establishes eligibility. Explicitly dispatch
+   the tap's ordinary `update-formula.yml` with `formula=crabbox`, the tag,
+   `repository=openclaw/crabbox`, and the four-target `assets` JSON constructed
+   by the runnable [handoff](RELEASING.md#operator-command-sequence). Do not wait
+   for public native or Go smoke results. The updater owns all-four URL/hash
+   maintenance and preserves maintained formula code. Retry the same handoff
+   after a failure; an already-current update is success. Never rebuild,
+   recreate a draft, or republish to retry Homebrew. Generic tap reconciliation
+   remains a valid fallback.
+7. **Independent channel smokes.** Run public-download/native verification,
+   fresh proxy-only public Go installation, and the installed-Homebrew verifier
+   independently. Homebrew needs only tag, assets, tag object, source commit,
+   verifier commit, and release ID, not public run IDs or proof ZIPs. Before
+   formula evaluation it checks immutable public bytes and static provenance.
+   Tap maintainers own executable Ruby, evaluated only credential-free; native
+   structured metadata must match the exact formula identity, version, URL,
+   and checksum. This is not a Ruby sandbox. Fresh fetch/install or reinstall,
+   installed-byte, signature/notarization, architecture, version, and arm64 VMD
+   trust checks are bounded smokes; they do not authorize unrelated provider mutations.
+8. **Closeout.** Record publication, tap update, and independent smoke results
+   (including outstanding failures). Verify release notes match the finalized
+   release section in the changelog. Keep later user-visible work under
+   `Unreleased` on `main`, without rewriting the frozen tagged source or
+   published notes for downstream retries. Finish authorized release commits
+   and leave the intended checkout clean and synchronized.
 
-On cancellation, a failed gate, or uncertainty, stop all release and tap writes.
+On cancellation, stop this operator’s release and tap writes. Cancellation
+cannot stop independent reconciliation of an already-public release. Before
+publication, a failed gate or uncertainty also stops release writes.
 Inspect and record the exact draft/public release and tap state, but do not
 delete a partial draft or release, replace assets, rewrite the tag, redispatch, publish, or
 update Homebrew while stopped. Explicit cancellation requires renewed direction
 authorizing the next mutation. For a failed gate or uncertain state, resolve the
 blocker and re-establish the exact frozen state and required proofs before
 continuing under the original release authorization.
+
+### Durable provisioning record diagnostics
+
+The private `provisioning-quarantine:` namespace records unsupported operation
+schemas or inconsistent attempt revisions. Their original operation, attempt and
+material records remain untouched, and continue to fence legacy cleanup. The
+controller removes their runnable due entry so unrelated jobs can progress.
+Inspect these records with the corresponding implementation version before any
+manual repair; deleting a marker or changing a schema number does not establish
+provider ownership or successful cleanup. Stale due entries without a matching
+live operation are removed transactionally during the bounded controller tick.
+
+Nonsecret plan/attempt histories and exact completed Azure deletion claims are
+retained alongside lease history without automatic pruning. Do not remove
+retained or unresolved histories to clear a cleanup incident. The shared Azure
+scope lock is released after settled terminal/retained completion; an unresolved
+shared-infrastructure write retains its lock. A retained legacy fence is resolved
+automatically on the next lease once the resource group, location's vnet, and NSG
+read back as absent or in a settled provisioning state (`Succeeded`, `Failed`, or
+`Canceled`). A durable provisioning operation's fence is never taken over.
+
+### AWS provisioning timing logs
+
+Each regional AWS create attempt emits one `crabbox_aws_provisioning` coordinator
+log on completion or failure. Correlate it with the lease ID and region in an
+authenticated coordinator log capture. It records total elapsed milliseconds and
+fixed step buckets with call counts, elapsed totals and error counts. No API
+payloads, credentials, addresses or exception text are included. These logs do
+not change lease timing fields or persist additional coordinator state.
+
+`ingress_wait` measures admission to the shared ingress queue; `lifecycle_wait`
+measures the subsequent lifecycle lock wait; `access_snapshot` measures the
+authoritative lease/access reread. `security_group` starts after those waits and
+contains lookup, creation, stale-rule pruning, world-rule revocation, ingress
+authorization and compaction buckets. Duplicate authorizations and absent world
+rules have separate counters, so expected API errors remain distinguishable from
+failed provisioning. Key-pair preparation, image selection, quota checks and
+instance creation have separate buckets.
+
+The initial quota lookup overlaps security-group preparation within one regional
+create attempt. Its result is reused only by that attempt; every candidate still
+passes its market's quota check before launch. Both preparations settle before
+launch or failure cleanup. The quota bucket counts actual lookups, including a
+separate on-demand lookup only when that fallback is needed.
+
+Durations include each operation's awaited work, including its transport and
+retries; they are not AWS service-side timings. Nested buckets overlap and must
+not be added to their parent. Missing buckets mean the step was not observed,
+and uninstrumented work can remain between steps. An interrupted request may
+not emit a completion log; use the existing lease lifecycle outcome as the
+authority for resource state.

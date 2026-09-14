@@ -114,6 +114,11 @@ func TestCoordinatorStopSharesCompletionBudget(t *testing.T) {
 					}
 				} else if r.Method == http.MethodGet {
 					read := reads.Add(1)
+					// These phases must reach provider release; a terminal initial
+					// lookup now retries local cleanup without another mutation.
+					if posts.Load() == 0 && (strings.Contains(phase, "observation") || phase == "egress fence") {
+						lease.State = "active"
+					}
 					if read == 1 {
 						close(entered)
 						if err := sleepContext(r.Context(), observationDelay); err != nil {
@@ -136,6 +141,10 @@ func TestCoordinatorStopSharesCompletionBudget(t *testing.T) {
 					t.Errorf("unexpected method %s", r.Method)
 					http.NotFound(w, r)
 					return
+				}
+				if lease.State == "released" && lease.CleanupStartedAt == "" {
+					lease = confirmedCoordinatorRelease(id, "aws")
+					lease.TargetOS = targetLinux
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
 			}))
@@ -255,7 +264,7 @@ func managedStopLocalState(t *testing.T, id string) (string, string) {
 	if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseTargetForConfig(id, "stop-lifetime-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
+	if err := ClaimLeaseTargetForConfig(id, "stop-lifetime-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	claimPath, err := leaseClaimPath(id)

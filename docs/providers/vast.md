@@ -129,6 +129,25 @@ Do not pass the Vast API key as a command-line argument or store it in
 repository config. Crabbox reads it from `CRABBOX_VAST_API_KEY` or
 `VAST_API_KEY` and sends it only in the `Authorization: Bearer ...` header.
 
+### Input and default behavior
+
+The fifteen settings use shared typed bindings; API keys remain environment-only.
+At the binding stage, empty YAML/environment strings preserve prior values and
+nonempty strings retain whitespace. A visited `--vast-instance-type` flag is
+normalized immediately; file/environment values retain their raw spelling until
+the existing selected-provider phases handle them.
+
+For YAML `gpuCount` and `diskGB`, omitted/null/zero preserves the prior integer,
+while a nonzero value assigns. The float fields `maxDphTotal` and `minReliability`
+instead accept explicit zero, including clearing a prior value. Existing provider
+validation remains responsible for negative/range errors.
+
+Explicit generic SSH-user settings still win. Accepted provider work-root and
+release-action inputs retain their explicit-setting markers, including flags whose
+value equals the default or is empty. An explicit post-default disk-size zero or
+empty image is not silently refilled by backend defaults; native payload omission
+and stored release-action interpretation remain unchanged.
+
 ## Token Scope
 
 The provider uses Vast account identity, offer search, instances, instance

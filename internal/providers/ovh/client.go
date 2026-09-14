@@ -21,8 +21,6 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-const defaultEndpoint = "https://api.us.ovhcloud.com/1.0"
-
 var (
 	errOVHCrossOriginRedirect = errors.New("ovh refused cross-origin redirect")
 	errOVHInvalidRedirect     = errors.New("ovh refused invalid redirect")
@@ -201,7 +199,7 @@ type InstanceCreateRequest struct {
 func newClient(cfg core.Config, rt core.Runtime) (*Client, error) {
 	endpoint := strings.TrimSpace(cfg.OVH.Endpoint)
 	if endpoint == "" {
-		endpoint = defaultEndpoint
+		endpoint = core.OVHConfigDefaultEndpoint
 	}
 	return newClientWithConfig(clientConfig{
 		Endpoint:          endpoint,
@@ -253,7 +251,7 @@ func secureOVHHTTPClient(source *http.Client, trusted *url.URL) *http.Client {
 	client := *source
 	originalCheckRedirect := source.CheckRedirect
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !sameOVHOrigin(trusted, req.URL) {
+		if !core.SameHTTPOrigin(trusted, req.URL) {
 			return errOVHCrossOriginRedirect
 		}
 		if originalCheckRedirect != nil {
@@ -265,27 +263,6 @@ func secureOVHHTTPClient(source *http.Client, trusted *url.URL) *http.Client {
 		return nil
 	}
 	return &client
-}
-
-func sameOVHOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveOVHPort(a) == effectiveOVHPort(b)
-}
-
-func effectiveOVHPort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
 }
 
 func sanitizeOVHClientError(err error) error {
@@ -576,7 +553,7 @@ func isOVHEndpointHost(host string) bool {
 func normalizeEndpointAlias(endpoint string) string {
 	switch strings.ToLower(strings.TrimSpace(endpoint)) {
 	case "":
-		return defaultEndpoint
+		return core.OVHConfigDefaultEndpoint
 	case "ovh-us":
 		return "https://api.us.ovhcloud.com/1.0"
 	case "ovh-ca":

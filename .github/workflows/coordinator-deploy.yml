@@ -11,6 +11,7 @@ on:
     paths:
       - "worker/**"
       - ".github/workflows/coordinator-deploy.yml"
+      - "scripts/prepare-coordinator-deploy-secrets.mjs"
   workflow_dispatch:
     inputs:
       clearDaytonaSnapshot:
@@ -73,31 +74,20 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ "${CLEAR_DAYTONA_SNAPSHOT}" = "true" ]; then
-            if [ -n "${CRABBOX_DAYTONA_SNAPSHOT}" ]; then
-              echo "::error::Remove CRABBOX_DAYTONA_SNAPSHOT from the coordinator GitHub environment before clearing the Worker binding."
-              exit 1
-            fi
-            npm run deploy
-            printf '{"CRABBOX_DAYTONA_SNAPSHOT":null}\n' |
-              npx wrangler secret bulk
-          elif [ -n "${CRABBOX_DAYTONA_SNAPSHOT}" ]; then
-            SECRETS_FILE="$(mktemp "${RUNNER_TEMP}/crabbox-coordinator-secrets.XXXXXX")"
-            export SECRETS_FILE
-            trap 'rm -f "${SECRETS_FILE}"' EXIT
-            node --input-type=module -e '
-              import fs from "node:fs";
-              fs.writeFileSync(
-                process.env.SECRETS_FILE,
-                JSON.stringify({
-                  CRABBOX_DAYTONA_SNAPSHOT: process.env.CRABBOX_DAYTONA_SNAPSHOT,
-                }),
-              );
-            '
+          SECRETS_FILE="$(mktemp "${RUNNER_TEMP}/crabbox-coordinator-secrets.XXXXXX")"
+          export SECRETS_FILE
+          trap 'rm -f "${SECRETS_FILE}"' EXIT
+          node ../scripts/prepare-coordinator-deploy-secrets.mjs
+
+          if [ -s "${SECRETS_FILE}" ]; then
             npm run deploy -- --secrets-file "${SECRETS_FILE}"
           else
-            echo "::notice::CRABBOX_DAYTONA_SNAPSHOT is not set; deploying without changing existing secret bindings."
             npm run deploy
+          fi
+
+          if [ "${CLEAR_DAYTONA_SNAPSHOT}" = "true" ]; then
+            printf '{"CRABBOX_DAYTONA_SNAPSHOT":null}\n' |
+              npx wrangler secret bulk
           fi
         working-directory: worker
         env:
@@ -107,4 +97,5 @@ jobs:
           # account-agnostic, so CI supplies it explicitly.
           CLOUDFLARE_ACCOUNT_ID: "91b59577e757131d68d55a471fe32aca"
           CRABBOX_DAYTONA_SNAPSHOT: ${{ secrets.CRABBOX_DAYTONA_SNAPSHOT }}
+          CRABBOX_ARTIFACTS_CREDENTIALS_JSON: ${{ secrets.CRABBOX_ARTIFACTS_CREDENTIALS_JSON }}
           CLEAR_DAYTONA_SNAPSHOT: ${{ inputs.clearDaytonaSnapshot }}

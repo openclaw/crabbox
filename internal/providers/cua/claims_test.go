@@ -2,19 +2,33 @@ package cua
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func TestCUALeaseIDUsesProviderPrefix(t *testing.T) {
-	leaseID := newCUALeaseID()
-	if !strings.HasPrefix(leaseID, leasePrefix) {
-		t.Fatalf("leaseID=%q missing %q", leaseID, leasePrefix)
+func claimLabels(cfg core.Config, sandboxName, createdAt string, missing bool) map[string]string {
+	workdir, _ := cuaWorkdir(cfg)
+	labels := map[string]string{
+		labelSandboxName: sandboxName,
+		"cua.image":      strings.TrimSpace(core.Blank(cfg.Cua.Image, core.CuaConfigDefaultImage)),
+		"cua.kind":       strings.ToLower(strings.TrimSpace(core.Blank(cfg.Cua.Kind, core.CuaConfigDefaultKind))),
+		"cua.region":     strings.TrimSpace(cfg.Cua.Region),
+		"cua.workdir":    workdir,
+		labelCreatedAt:   strings.TrimSpace(createdAt),
 	}
+	if cfg.TTL > 0 {
+		labels["cua.ttl-seconds"] = fmt.Sprintf("%d", int64(cfg.TTL/time.Second))
+	}
+	if missing {
+		labels["cua.missing"] = "true"
+	}
+	return labels
 }
 
 func TestCUAScopeNormalizesAPIURL(t *testing.T) {
@@ -66,7 +80,7 @@ func TestResolveClaimFiltersProviderAndScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve claim: %v", err)
 	}
-	if !ok || claim.LeaseID != "cuabx_111111111111" || !claimIsMissing(claim) {
+	if !ok || claim.LeaseID != "cuabx_111111111111" || claim.Labels["cua.missing"] != "true" {
 		t.Fatalf("claim=%#v ok=%v", claim, ok)
 	}
 	other := cfg

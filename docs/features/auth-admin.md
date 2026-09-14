@@ -162,8 +162,9 @@ POST /v1/leases/{id}/tailscale   owner, manage share, or admin
 GET/PUT/DELETE /v1/leases/{id}/share owner, manage share, or admin
 GET  /v1/runs and logs/events    own runs only
 GET  /v1/usage                   own usage only
+GET  /v1/capacity                self-owner admission aggregate across months/orgs
 GET  /v1/pool                    admin token only
-POST /v1/leases with hostId      admin token only
+POST /v1/leases with hostId      admin, or matching org-owned Mac allocation
 /v1/admin/*                      admin token only
 ```
 
@@ -172,10 +173,40 @@ and org), an admin, or a share recipient. It is **manageable** by the owner, an
 admin, or a `manage` share recipient. Non-admin admin-route requests are
 rejected with `403 admin token required`.
 
+[`capacity`](../commands/capacity.md) is a narrow aggregate exception to owner/org
+visibility. It uses normal authentication, remains self-owner only even for
+admins, rejects all query parameters, and exposes only owner, active admission
+count, effective owner limit, and observed time. It grants no additional lease
+visibility or monthly-report access; admin authentication alone does not grant
+an elevated owner limit.
+
 Provider host inventory is also capacity administration. Normal portal users
 see a Dedicated Host only when it backs an active lease already visible to
-them; unattached host inventory and explicit host-pinned lease creation require
-admin authentication.
+them; unattached host inventory remains admin-only. Pinning an unused AWS Mac
+Dedicated Host also permits authenticated members only when an exact coordinator
+allocation record matches that host, the requested region, and their current org
+identity. New admin allocations persist that org. Missing or ambiguous records,
+other-org records, and historical managed leases do not grant permission. Hosts
+allocated by older coordinators without a record remain admin-only; no claim or
+backfill command is added by this change.
+Other provider pins and other AWS resource selectors remain admin-only; existing
+checkpoint grants retain their exact host scope.
+
+Host permission never authorizes adopting an occupying lease. A create request
+fails with `host_in_use` while that host has a live or retained instance. Exact
+fixed-ID replay preserves its existing owner and intent checks. Kept leases
+remain visible to their owners and share recipients in ordinary CLI listing,
+even when released with the instance retained.
+
+Host reservation inspection and repair are admin-only, including the legacy
+Mac-host route: `GET` or `POST /v1/admin/hosts/<host-id>/reservation`
+(and `/v1/admin/mac-hosts/<host-id>/reservation`). Pass `region` and optionally
+`provider=aws&target=macos`. POST rejects live or potentially retained leases
+with `409 host_in_use` unless `force=true`; missing leases and safely ended
+associations can be cleared without force. The response includes safe summaries,
+not lease credentials. Neither operation changes EC2 resources or allocation
+ownership. Use `crabbox admin mac-hosts reservation <host-id>` to inspect and
+`crabbox admin mac-hosts clear <host-id> [--force]` to repair.
 
 ## Lease sharing
 

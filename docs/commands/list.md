@@ -25,7 +25,9 @@ crabbox list --json
 The shape of the output depends on the selected `--provider`:
 
 - **Coordinator-backed providers** (`hetzner`, `aws`, `azure`, `daytona`, `gcp` with a broker
-  configured) list the leases the broker tracks for you. Add `--all` to request
+  configured) list visible active/provisioning leases and retained leases, including
+  released `keep=true` leases whose provider cleanup is not confirmed. Both text
+  and `--json` include them. Add `--all` to request
   admin-wide provider inventory when an admin token is configured.
 - **Direct cloud / hypervisor / static providers** list the machines the provider
   itself reports. In `provider=ssh` mode this prints the single configured static
@@ -35,6 +37,12 @@ The shape of the output depends on the selected `--provider`:
   view, so both human output and `--json` use the normalized Crabbox lease shape.
 
 Providers that do not implement listing exit with an error.
+
+Coordinator listing requests the current lease view and filters ended history
+locally when talking to an older coordinator. At the 1,000-row response limit,
+the CLI warns that older kept leases may be omitted; inspect a known lease with
+`crabbox inspect --provider aws --id <lease-id>`. Updating the coordinator lets
+it filter visible current/retained leases before applying that limit.
 
 ## Refreshing provider state
 

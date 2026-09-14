@@ -181,27 +181,37 @@ tracked in https://github.com/openclaw/crabbox/issues/1157. See the [integration
 catalog](docs/integrations/README.md) for current support and lifecycle
 boundaries.
 
-Existing repositories that only need agent discovery can install the generic
-Skill with GitHub CLI:
+Repositories that only need agent discovery can install Crabbox's published
+Agent Skills with GitHub CLI:
 
 ```sh
 gh skill install openclaw/crabbox skills/crabbox \
   --pin refs/heads/main --agent codex --scope project
+gh skill install openclaw/crabbox skills/crabbox-quickstart \
+  --pin refs/heads/main --agent codex --scope project
 ```
 
-Or use the cross-client Skills CLI:
+Or install the sandbox execution skill with the [skills.sh](https://skills.sh) CLI:
 
 ```sh
-npx skills add https://github.com/openclaw/crabbox --skill crabbox
+npx skills add openclaw/crabbox --skill crabbox
+npx skills add openclaw/crabbox --skill crabbox-quickstart
 ```
+
+Choose `crabbox` for sandbox execution and remote testing, or
+`crabbox-quickstart` for a first local Docker/Podman run. Skills teach your agent
+how to use Crabbox; install the CLI separately using the instructions above.
+See the [skill installation guide](docs/integrations/agents.md#install-through-ecosystem-skill-managers)
+for discovery and supported clients.
 
 Crabbox also publishes a digest-verified discovery index from its own domain:
 
 ```sh
 npx skills add https://crabbox.sh --skill crabbox
+npx skills add https://crabbox.sh --skill crabbox-quickstart
 ```
 
-Cross-vendor discovery services can index the same Skill through Crabbox's
+Cross-vendor discovery services can index both Skills through Crabbox's
 [draft-compatible AI Catalog](https://crabbox.sh/.well-known/ai-catalog.json).
 
 Herdr users can add Crabbox lease controls and repository workflows to the
@@ -322,7 +332,7 @@ hardware for macOS VM workflows.
 | [Microsoft Execution Containers](docs/providers/mxc.md) — `mxc` (`execution-container`)                        | Windows      | Policy-driven local Windows process containment.                                |
 | [OpenComputer](docs/providers/opencomputer.md) — `opencomputer` (`oc`, `open-computer`)                        | Linux        | OpenComputer Linux VMs through the OpenComputer REST API.                       |
 | [OpenSandbox](docs/providers/opensandbox.md) — `opensandbox`                                                   | Linux        | OpenSandbox delegated containers through the OpenSandbox Go SDK.                |
-| [Railway](docs/providers/railway.md) — `railway` (`rail`, `railwayapp`)                                        | Linux        | Redeploy and stream an existing Railway service.                                |
+| [Railway](docs/providers/railway.md) — `railway` (`rail`, `railwayapp`)                                        | Linux        | Inspect and stop an existing Railway service.                                   |
 | [Anthropic Sandbox Runtime](docs/providers/anthropic-sandbox-runtime.md) — `anthropic-sandbox-runtime` (`srt`) | macOS, Linux | Local one-shot sandboxing through Anthropic's `srt` CLI.                        |
 | [SmolVM](docs/providers/smolvm.md) — `smolvm` (`smol`, `smolmachines`, `smolfleet`)                            | Linux        | Smol Machines microVM sandboxes via the smolfleet API.                          |
 | [Tensorlake](docs/providers/tensorlake.md) — `tensorlake` (`tl`, `tensorlake-sbx`)                             | Linux        | Tensorlake Firecracker sandbox via the Tensorlake CLI.                          |
@@ -623,7 +633,7 @@ and the [provider docs](docs/providers/README.md).
 # Go CLI
 go build -trimpath -o bin/crabbox ./cmd/crabbox
 go vet ./...
-go test -race ./...
+go test -race -timeout=20m ./...
 
 # Coordinator runtimes (Node 22+ locally; CI runs Node 24)
 npm ci --prefix worker
@@ -653,13 +663,19 @@ lint/typecheck/tests/build) on every push and PR. The required `Go` check aggreg
 three independent 30-minute jobs: `Go test` (formatting, vet, deadcode, full race
 suite, Linux supervision proof, and build), `Go modules` (normal tests in every
 module, including the root), and `Go coverage` (90% core coverage threshold).
-Both the race suite and all-module normal tests use a 15-minute package timeout.
+The race suite, all-module normal tests, and coverage collection use a 15-minute
+package timeout.
+Use the explicit timeout locally too: the CLI race suite can exceed Go's default
+10-minute package deadline even when its individual tests pass.
 Production releases use a serialized, draft-first process: preserve and verify
 the signed tag, build and
 Developer ID sign/notarize the macOS candidates locally, verify the exact draft
 on native Apple Silicon and Intel runners from protected-default code, then
-publish, verify the public release and public Go installation, update and prove
-Homebrew, and close out. One explicit full release/publish request authorizes
+publish those exact artifacts, dispatch the ordinary Homebrew tap update, and
+run independent public-download, public Go installation, and native Homebrew
+smokes. Publication establishes eligibility; retry a failed Homebrew update
+without rebuilding or republishing. The tap handoff is an explicit operator
+step, with generic tap reconciliation as an independent fallback. One explicit full release/publish request authorizes
 this complete normal sequence without renewed chat approval at each stage.
 Narrow requests stay narrow. The original request supplies authorization;
 GitHub events alone do not. Sequential technical gates, separate trust domains,
@@ -671,6 +687,15 @@ origins. Their local SSH stand-ins isolate Git authentication settings and
 disable interactive credential requests, including during ordinary seed
 fallback. A credential-helper/askpass canary guards this test-only boundary;
 the separate production overlay security tests still inject hostile Git config.
+
+CLI runtime optimizations retain the full normal, race, and coverage modes and
+their existing deadlines and observation windows. Synchronous POSIX test-executable
+helpers suppress only the race runtime's exit delay in their child environment,
+preserving inherited detection and reporting options; Windows keeps its existing
+execution path. HTTP deadline cases with
+explicit configuration and private servers overlap their real waits without
+changing timeout contracts. The shared immutable CLI and provider builds stay
+inside `M.Run`, with their existing fixture cleanup and rebuild ownership.
 
 Cloudflare, Node/PostgreSQL, container, ingress, secrets, and DNS deployment live
 in [docs/infrastructure.md](docs/infrastructure.md). The dedicated ECS Fargate
@@ -697,6 +722,13 @@ the `docs/` Markdown:
 scripts/check-docs.sh
 open dist/docs-site/index.html
 ```
+
+When editing `docs/`, use the site's supported level 1–4 headings and
+triple-backtick code fences. Site-target heading links are checked against the
+same heading identities the renderer emits; examples and comments do not reserve
+anchors. Keep published heading IDs stable. Repository-only Markdown targets
+retain the checker's separate existing GitHub-oriented anchor rules, not a claim
+of complete GitHub Markdown support.
 
 ## License
 

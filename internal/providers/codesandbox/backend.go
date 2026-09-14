@@ -12,21 +12,22 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type codeSandboxBackend struct {
-	spec ProviderSpec
-	cfg  Config
-	rt   Runtime
+	spec core.ProviderSpec
+	cfg  core.Config
+	rt   core.Runtime
 }
 
-func (b *codeSandboxBackend) Spec() ProviderSpec { return b.spec }
+func (b *codeSandboxBackend) Spec() core.ProviderSpec { return b.spec }
 
-func (b *codeSandboxBackend) Warmup(ctx context.Context, req WarmupRequest) error {
+func (b *codeSandboxBackend) Warmup(ctx context.Context, req core.WarmupRequest) error {
 	if req.ActionsRunner {
-		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
+		return core.Exit(2, "--actions-runner is not supported for provider=%s", providerName)
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	api, err := newCodeSandboxClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -39,206 +40,99 @@ func (b *codeSandboxBackend) Warmup(ctx context.Context, req WarmupRequest) erro
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: codesandbox warmup keeps the sandbox until explicit stop\n")
 	}
-	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  leaseID,
-			Slug:     slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	total := core.ClockNow(b.rt.Clock).Sub(started)
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
 
-func (b *codeSandboxBackend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
-	if err := delegatedSyncOptionsError(b.spec, req); err != nil {
-		return RunResult{}, err
+func (b *codeSandboxBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
+	if err := core.RejectDelegatedSyncOptionsForSpec(b.spec, req); err != nil {
+		return core.RunResult{}, err
 	}
 	workdir, err := codeSandboxWorkdir(b.cfg)
 	if err != nil {
-		return RunResult{}, err
+		return core.RunResult{}, err
 	}
 	if !req.SyncOnly && (len(req.Command) == 0 || (len(req.Command) == 1 && strings.TrimSpace(req.Command[0]) == "")) {
-		return RunResult{}, exit(2, "missing command")
+		return core.RunResult{}, core.Exit(2, "missing command")
 	}
-	started := b.now()
-	api, err := newCodeSandboxClient(b.cfg, b.rt)
-	if err != nil {
-		return RunResult{}, err
+	var api codeSandboxAPI
+	var leaseID, sandboxID, slug string
+	boundSandbox := func() shared.DelegatedSandbox {
+		fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
+		return shared.DelegatedSandbox{LeaseID: leaseID, Slug: slug, CleanupCommand: codeSandboxCleanupCommand(leaseID)}
 	}
-	var prepared *core.PreparedArchive
-	if req.ID == "" && !req.NoSync {
-		prepared, err = core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-			Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-			TempPattern: "crabbox-codesandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
-		})
-		if err != nil {
-			return RunResult{}, err
-		}
-		defer prepared.Close()
-	}
-	leaseID, sandboxID, slug := "", "", ""
-	acquired := false
-	if req.ID == "" {
-		leaseID, sandboxID, slug, err = b.createSandbox(ctx, api, req.Repo, req.Reclaim, req.RequestedSlug)
-		if err != nil {
-			return RunResult{}, err
-		}
-		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s\n", leaseID, slug, providerName, sandboxID)
-		acquired = true
-	} else {
-		var claim LeaseClaim
-		leaseID, sandboxID, slug, claim, err = resolveLeaseID(req.ID)
-		if err != nil {
-			return RunResult{}, err
-		}
-		sb, err := api.GetSandbox(ctx, sandboxID)
-		if err != nil {
-			return RunResult{}, err
-		}
-		if err := validateCodeSandboxSandboxOwnership(claim, sb); err != nil {
-			return RunResult{}, err
-		}
-		if req.Repo.Root != "" {
-			if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claim.ProviderScope, b.cfg.Pond, req.Repo.Root,
-				timeoutOrDefault(b.cfg.IdleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), req.Reclaim); err != nil {
-				return RunResult{}, err
+	return shared.RunDelegatedSandbox(ctx, req, shared.DelegatedSandboxLifecycle{
+		Provider: providerName, Runtime: b.rt, Workdir: workdir,
+		IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL, CleanupTimeout: codeSandboxCleanupTimeout,
+		Preflight: func(context.Context) error {
+			var err error
+			api, err = newCodeSandboxClient(b.cfg, b.rt)
+			return err
+		},
+		Workspace: func() shared.SandboxWorkspace { return b.workspace(api, sandboxID, req, workdir) },
+		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var err error
+			leaseID, sandboxID, slug, err = b.createSandbox(ctx, api, req.Repo, req.Reclaim, req.RequestedSlug)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
 			}
-		}
-	}
-	shouldStop := acquired && !req.Keep
-	cleanedUp := false
-	session := &RunSessionHandle{
-		Provider:       providerName,
-		LeaseID:        leaseID,
-		Slug:           slug,
-		Reused:         !acquired,
-		Kept:           !shouldStop,
-		CleanupCommand: codeSandboxCleanupCommand(leaseID),
-	}
-	finishResult := func(result RunResult) RunResult {
-		result.Session = session
-		result.Session.Kept = !cleanedUp && !shouldStop
-		return result
-	}
-	if shouldStop {
-		defer func() {
-			if !shouldStop {
-				result = finishResult(result)
-				return
+			fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s\n", leaseID, slug, providerName, sandboxID)
+			return boundSandbox(), nil
+		},
+		Resolve: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var claim core.LeaseClaim
+			var err error
+			leaseID, sandboxID, slug, claim, err = resolveLeaseID(req.ID)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
 			}
-			cleanupCtx, cancel := b.cleanupContext(ctx)
-			defer cancel()
-			if err := api.DeleteSandbox(cleanupCtx, sandboxID); err != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: codesandbox stop failed for %s: %v\n", sandboxID, err)
-				result = finishResult(result)
-				return
+			sb, err := api.GetSandbox(ctx, sandboxID)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
 			}
-			removeLeaseClaim(leaseID)
-			cleanedUp = true
-			result = finishResult(result)
-		}()
-	}
-	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
-
-	syncDuration := time.Duration(0)
-	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
-	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, api, sandboxID, req, workdir, prepared)
-		if err != nil {
-			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-			return finishResult(RunResult{Total: b.now().Sub(started), SyncDelegated: true, Provider: providerName, LeaseID: leaseID, Slug: slug}), err
-		}
-		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.ensureWorkspace(ctx, api, sandboxID, workdir); err != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return finishResult(RunResult{}), err
-	}
-
-	if req.SyncOnly {
-		result := finishResult(RunResult{Total: b.now().Sub(started), SyncDelegated: true, Provider: providerName, LeaseID: leaseID, Slug: slug})
-		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
-		if req.TimingJSON {
-			return result, writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-				Provider:      providerName,
-				LeaseID:       leaseID,
-				Slug:          slug,
-				SyncDelegated: true,
-				SyncMs:        syncDuration.Milliseconds(),
-				SyncPhases:    syncPhases,
-				SyncSkipped:   req.NoSync,
-				TotalMs:       result.Total.Milliseconds(),
-				ExitCode:      0,
-				Label:         strings.TrimSpace(req.Label),
-				Workdir:       workdir,
-			}, result, nil))
-		}
-		return result, nil
-	}
-
-	command, err := buildCommand(req.Command, req.ShellMode)
-	if err != nil {
-		return finishResult(RunResult{}), err
-	}
-	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
-		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
-	}
-	commandStart := b.now()
-	exitCode, runErr := b.execCommand(ctx, api, sandboxID, workdir, command, req.Env)
-	commandDuration := b.now().Sub(commandStart)
-	result = finishResult(RunResult{
-		ExitCode:      exitCode,
-		Command:       commandDuration,
-		Total:         b.now().Sub(started),
-		SyncDelegated: true,
-		Provider:      providerName,
-		LeaseID:       leaseID,
-		Slug:          slug,
-		CommandText:   strings.Join(command, " "),
+			if err := validateCodeSandboxSandboxOwnership(claim, sb); err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			if req.Repo.Root != "" {
+				if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claim.ProviderScope, b.cfg.Pond, req.Repo.Root,
+					timeoutOrDefault(b.cfg.IdleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), req.Reclaim); err != nil {
+					return shared.DelegatedSandbox{}, err
+				}
+			}
+			return boundSandbox(), nil
+		},
+		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
+			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
+			if err != nil {
+				return shared.DelegatedSandboxCommand{}, err
+			}
+			command := intent.Argv("bash", "-lc")
+			if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
+				core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+			}
+			return shared.DelegatedSandboxCommand{
+				Text: strings.Join(command, " "),
+				Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
+					return b.execCommand(ctx, api, sandboxID, workdir, command, req.Env, stdout, stderr)
+				},
+			}, nil
+		},
+		Cleanup: func(ctx context.Context) error {
+			if err := api.DeleteSandbox(ctx, sandboxID); err != nil {
+				return err
+			}
+			core.RemoveLeaseClaim(leaseID)
+			return nil
+		},
 	})
-	if req.NoSync {
-		fmt.Fprintf(b.rt.Stderr, "codesandbox run summary sync_skipped=true command=%s total=%s exit=%d\n",
-			result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
-	} else {
-		fmt.Fprintf(b.rt.Stderr, "codesandbox run summary sync=%s command=%s total=%s exit=%d\n",
-			syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
-	}
-	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-			Provider:      providerName,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			SyncDelegated: true,
-			SyncMs:        syncDuration.Milliseconds(),
-			SyncPhases:    syncPhases,
-			SyncSkipped:   req.NoSync,
-			CommandMs:     result.Command.Milliseconds(),
-			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      exitCode,
-			Label:         strings.TrimSpace(req.Label),
-			Workdir:       workdir,
-		}, result, runErr)); err != nil {
-			return result, err
-		}
-	}
-	if runErr != nil {
-		if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
-			return result, runErr
-		}
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return result, ExitError{Code: 1, Message: fmt.Sprintf("codesandbox run failed: %v", runErr)}
-	}
-	if exitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("codesandbox run exited %d", exitCode)}
-	}
-	return result, nil
 }
 
-func (b *codeSandboxBackend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) {
+func (b *codeSandboxBackend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseView, error) {
 	api, err := newCodeSandboxClient(b.cfg, b.rt)
 	if err != nil {
 		return nil, err
@@ -247,7 +141,7 @@ func (b *codeSandboxBackend) List(ctx context.Context, _ ListRequest) ([]LeaseVi
 	if err != nil {
 		return nil, err
 	}
-	servers := make([]Server, 0, len(claims))
+	servers := make([]core.Server, 0, len(claims))
 	for _, claim := range claims {
 		if claim.Provider != providerName || !strings.HasPrefix(claim.LeaseID, leasePrefix) {
 			continue
@@ -271,42 +165,32 @@ func (b *codeSandboxBackend) List(ctx context.Context, _ ListRequest) ([]LeaseVi
 	return servers, nil
 }
 
-func (b *codeSandboxBackend) Status(ctx context.Context, req StatusRequest) (StatusView, error) {
+func (b *codeSandboxBackend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
 	api, err := newCodeSandboxClient(b.cfg, b.rt)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	leaseID, sandboxID, slug, claim, err := resolveLeaseID(req.ID)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
-	waitTimeout := req.WaitTimeout
-	if waitTimeout <= 0 {
-		waitTimeout = 5 * time.Minute
-	}
-	deadline := b.now().Add(waitTimeout)
-	pollCtx := ctx
-	cancel := func() {}
-	if req.Wait {
-		pollCtx, cancel = context.WithTimeout(ctx, waitTimeout)
-	}
-	defer cancel()
-	for {
-		sb, getErr := api.GetSandbox(pollCtx, sandboxID)
+	wait := shared.NewStatusWait(ctx, req, b.rt.Clock, func(id string) error {
+		return core.Exit(5, "timed out waiting for codesandbox sandbox %s to become ready", id)
+	})
+	defer wait.Close()
+	return wait.Poll(sandboxID, 2*time.Second, func(ctx context.Context) (core.StatusView, bool, error) {
+		sb, getErr := api.GetSandbox(ctx, sandboxID)
 		if getErr != nil {
-			if req.Wait && errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return StatusView{}, exit(5, "timed out waiting for codesandbox sandbox %s to become ready", sandboxID)
+			if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
+				return core.StatusView{}, false, ctxErr
 			}
-			if ctx.Err() != nil {
-				return StatusView{}, ctx.Err()
-			}
-			return StatusView{}, getErr
+			return core.StatusView{}, false, getErr
 		}
 		if err := validateCodeSandboxSandboxOwnership(claim, sb); err != nil {
-			return StatusView{}, err
+			return core.StatusView{}, false, err
 		}
 		state := strings.ToLower(strings.TrimSpace(blank(sb.State, "unknown")))
-		view := StatusView{
+		view := core.StatusView{
 			ID:       leaseID,
 			Slug:     slug,
 			Provider: providerName,
@@ -324,27 +208,14 @@ func (b *codeSandboxBackend) Status(ctx context.Context, req StatusRequest) (Sta
 				"state":    state,
 			},
 		}
-		if !req.Wait || view.Ready {
-			return view, nil
+		if req.Wait && !view.Ready && isTerminalState(state) {
+			return core.StatusView{}, false, core.Exit(5, "codesandbox sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
-		if isTerminalState(state) {
-			return StatusView{}, exit(5, "codesandbox sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
-		}
-		if b.now().After(deadline) {
-			return StatusView{}, exit(5, "timed out waiting for codesandbox sandbox %s to become ready", sandboxID)
-		}
-		select {
-		case <-pollCtx.Done():
-			if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return StatusView{}, exit(5, "timed out waiting for codesandbox sandbox %s to become ready", sandboxID)
-			}
-			return StatusView{}, pollCtx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
+		return view, false, nil
+	})
 }
 
-func (b *codeSandboxBackend) Stop(ctx context.Context, req StopRequest) error {
+func (b *codeSandboxBackend) Stop(ctx context.Context, req core.StopRequest) error {
 	api, err := newCodeSandboxClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -363,12 +234,12 @@ func (b *codeSandboxBackend) Stop(ctx context.Context, req StopRequest) error {
 	if err := api.DeleteSandbox(ctx, sandboxID); err != nil {
 		return err
 	}
-	removeLeaseClaim(leaseID)
+	core.RemoveLeaseClaim(leaseID)
 	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s\n", leaseID, sandboxID)
 	return nil
 }
 
-func (b *codeSandboxBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
+func (b *codeSandboxBackend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	api, err := newCodeSandboxClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -377,14 +248,14 @@ func (b *codeSandboxBackend) Cleanup(ctx context.Context, req CleanupRequest) er
 	if err != nil {
 		return err
 	}
-	now := b.now().UTC()
+	now := core.ClockNow(b.rt.Clock).UTC()
 	checked := 0
 	removed := 0
 	for _, listed := range claims {
 		if listed.Provider != providerName || !strings.HasPrefix(listed.LeaseID, leasePrefix) {
 			continue
 		}
-		claim, err := readLeaseClaim(listed.LeaseID)
+		claim, err := core.ReadLeaseClaim(listed.LeaseID)
 		if err != nil {
 			return err
 		}
@@ -395,7 +266,7 @@ func (b *codeSandboxBackend) Cleanup(ctx context.Context, req CleanupRequest) er
 			return err
 		}
 		checked++
-		due, reason := claimCleanupDue(claim, now)
+		due, reason := shared.ClaimIdleCleanupDue(claim, now)
 		sandboxID := strings.TrimPrefix(claim.LeaseID, leasePrefix)
 		if !due {
 			fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
@@ -415,7 +286,7 @@ func (b *codeSandboxBackend) Cleanup(ctx context.Context, req CleanupRequest) er
 		if err := api.DeleteSandbox(ctx, sandboxID); err != nil {
 			return err
 		}
-		if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 			return err
 		}
 		fmt.Fprintf(b.rt.Stdout, "delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
@@ -427,7 +298,7 @@ func (b *codeSandboxBackend) Cleanup(ctx context.Context, req CleanupRequest) er
 	return nil
 }
 
-func (b *codeSandboxBackend) Pause(ctx context.Context, req PauseRequest) error {
+func (b *codeSandboxBackend) Pause(ctx context.Context, req core.PauseRequest) error {
 	api, err := newCodeSandboxClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -450,7 +321,7 @@ func (b *codeSandboxBackend) Pause(ctx context.Context, req PauseRequest) error 
 	return nil
 }
 
-func (b *codeSandboxBackend) Resume(ctx context.Context, req ResumeRequest) error {
+func (b *codeSandboxBackend) Resume(ctx context.Context, req core.ResumeRequest) error {
 	api, err := newCodeSandboxClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -471,15 +342,15 @@ func (b *codeSandboxBackend) Resume(ctx context.Context, req ResumeRequest) erro
 		return err
 	}
 	if strings.TrimSpace(resumed.ID) != "" && strings.TrimSpace(resumed.ID) != sandboxID {
-		return exit(4, "codesandbox resumed sandbox %q does not match local claim %q", resumed.ID, claim.LeaseID)
+		return core.Exit(4, "codesandbox resumed sandbox %q does not match local claim %q", resumed.ID, claim.LeaseID)
 	}
 	fmt.Fprintf(b.rt.Stderr, "resumed lease=%s sandbox=%s\n", leaseID, sandboxID)
 	return nil
 }
 
-func (b *codeSandboxBackend) Ports(ctx context.Context, req PortsRequest) (string, error) {
+func (b *codeSandboxBackend) Ports(ctx context.Context, req core.PortsRequest) (string, error) {
 	if len(req.Unpublish) > 0 {
-		return "", exit(2, "provider=codesandbox does not support ports --unpublish; stop the process inside the sandbox instead")
+		return "", core.Exit(2, "provider=codesandbox does not support ports --unpublish; stop the process inside the sandbox instead")
 	}
 	api, err := newCodeSandboxClient(b.cfg, b.rt)
 	if err != nil {
@@ -536,18 +407,18 @@ func (b *codeSandboxBackend) Ports(ctx context.Context, req PortsRequest) (strin
 	return strings.Join(lines, "\n"), nil
 }
 
-func (b *codeSandboxBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+func (b *codeSandboxBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	token, source, ok := authFromEnv()
 	if !ok {
-		return DoctorResult{}, missingAuthError{}
+		return core.DoctorResult{}, missingAuthError{}
 	}
 	client, err := newCodeSandboxClient(b.cfg, b.rt)
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
-	result := DoctorResult{
+	result := core.DoctorResult{
 		Provider: providerName,
-		Checks: []DoctorCheck{
+		Checks: []core.DoctorCheck{
 			doctorCheck("codesandbox_auth", nil, map[string]string{
 				"source":   source,
 				"redacted": "true",
@@ -571,11 +442,11 @@ func (b *codeSandboxBackend) Doctor(ctx context.Context, _ DoctorRequest) (Docto
 		"totalCount": fmt.Sprint(listed.TotalCount),
 	}))
 	result.Status = "ok"
-	result.Message = inventoryDoctorResult(providerName, len(listed.Sandboxes)).Message
+	result.Message = core.InventoryDoctorResult(providerName, len(listed.Sandboxes)).Message
 	return result, nil
 }
 
-func (b *codeSandboxBackend) execCommand(ctx context.Context, api codeSandboxAPI, sandboxID, workdir string, command []string, env map[string]string) (int, error) {
+func (b *codeSandboxBackend) execCommand(ctx context.Context, api codeSandboxAPI, sandboxID, workdir string, command []string, env map[string]string, stdout, stderr io.Writer) (int, error) {
 	if len(command) == 0 {
 		return 2, errors.New("missing command")
 	}
@@ -589,35 +460,22 @@ func (b *codeSandboxBackend) execCommand(ctx context.Context, api codeSandboxAPI
 		return 1, err
 	}
 	if res.Stdout != "" {
-		_, _ = io.WriteString(b.rt.Stdout, res.Stdout)
+		_, _ = io.WriteString(stdout, res.Stdout)
 	}
 	if res.Stderr != "" {
-		_, _ = io.WriteString(b.rt.Stderr, res.Stderr)
+		_, _ = io.WriteString(stderr, res.Stderr)
 	}
 	return res.ExitCode, nil
 }
 
-func codeSandboxServerView(claim LeaseClaim, sb SandboxSummary) Server {
+func codeSandboxServerView(claim core.LeaseClaim, sb SandboxSummary) core.Server {
 	state := blank(sb.State, "unknown")
 	sandboxID := strings.TrimPrefix(claim.LeaseID, leasePrefix)
 	if strings.TrimSpace(sb.ID) != "" {
 		sandboxID = sb.ID
 	}
 	name := blank(sb.Title, sandboxID)
-	return Server{
-		Provider: providerName,
-		CloudID:  sandboxID,
-		Name:     name,
-		Status:   state,
-		Labels: map[string]string{
-			"provider": providerName,
-			"lease":    claim.LeaseID,
-			"slug":     claim.Slug,
-			"pond":     claim.Pond,
-			"target":   targetLinux,
-			"state":    state,
-		},
-	}
+	return shared.SandboxLeaseView(providerName, targetLinux, claim, sandboxID, name, state)
 }
 
 func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
@@ -628,29 +486,29 @@ func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
 }
 
 var _ interface {
-	Warmup(context.Context, WarmupRequest) error
-	Run(context.Context, RunRequest) (RunResult, error)
-	List(context.Context, ListRequest) ([]LeaseView, error)
-	Status(context.Context, StatusRequest) (StatusView, error)
-	Stop(context.Context, StopRequest) error
-	Cleanup(context.Context, CleanupRequest) error
-	Pause(context.Context, PauseRequest) error
-	Resume(context.Context, ResumeRequest) error
-	Ports(context.Context, PortsRequest) (string, error)
-	Doctor(context.Context, DoctorRequest) (DoctorResult, error)
+	Warmup(context.Context, core.WarmupRequest) error
+	Run(context.Context, core.RunRequest) (core.RunResult, error)
+	List(context.Context, core.ListRequest) ([]core.LeaseView, error)
+	Status(context.Context, core.StatusRequest) (core.StatusView, error)
+	Stop(context.Context, core.StopRequest) error
+	Cleanup(context.Context, core.CleanupRequest) error
+	Pause(context.Context, core.PauseRequest) error
+	Resume(context.Context, core.ResumeRequest) error
+	Ports(context.Context, core.PortsRequest) (string, error)
+	Doctor(context.Context, core.DoctorRequest) (core.DoctorResult, error)
 } = (*codeSandboxBackend)(nil)
 
 func parseCodeSandboxPortSpec(spec string) (int, error) {
 	value := strings.TrimSpace(spec)
 	if value == "" {
-		return 0, exit(2, "codesandbox port spec must not be empty")
+		return 0, core.Exit(2, "codesandbox port spec must not be empty")
 	}
 	if strings.ContainsAny(value, ":/") {
-		return 0, exit(2, "codesandbox ports only support a sandbox port number, got %q", spec)
+		return 0, core.Exit(2, "codesandbox ports only support a sandbox port number, got %q", spec)
 	}
 	port, err := strconv.Atoi(value)
 	if err != nil || port < 1 || port > 65535 {
-		return 0, exit(2, "codesandbox port must be an integer between 1 and 65535, got %q", spec)
+		return 0, core.Exit(2, "codesandbox port must be an integer between 1 and 65535, got %q", spec)
 	}
 	return port, nil
 }

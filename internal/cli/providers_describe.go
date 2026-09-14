@@ -13,6 +13,7 @@ import (
 const providerDescriptionSchemaVersion = 2
 
 type providerDescription struct {
+	providerStaticStatus
 	SchemaVersion int                         `json:"schemaVersion"`
 	Provider      providerDescriptionIdentity `json:"provider"`
 	Runnable      bool                        `json:"runnable"`
@@ -66,7 +67,7 @@ func (a App) providerDescribe(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox providers describe <provider> [--json]")
+		return Exit(2, "usage: crabbox providers describe <provider> [--json]")
 	}
 	description, err := describeProvider(fs.Arg(0))
 	if err != nil {
@@ -93,20 +94,20 @@ func splitProviderDescribeArgs(args []string) (flagArgs, positional []string) {
 func describeProvider(requestedName string) (providerDescription, error) {
 	requested := normalizeProviderName(requestedName)
 	if requested == "" {
-		return providerDescription{}, exit(2, "provider name must not be empty")
+		return providerDescription{}, Exit(2, "provider name must not be empty")
 	}
 	provider, err := ProviderFor(requested)
 	if err != nil {
 		return providerDescription{}, err
 	}
-	canonical := normalizeProviderName(provider.Name())
 	spec := provider.Spec()
+	canonical := normalizeProviderName(spec.Name)
 	switch spec.Kind {
 	case ProviderKindSSHLease, ProviderKindDelegatedRun:
 	case ProviderKindServiceControl:
-		return providerDescription{}, exit(2, "provider %q is not runnable (kind %s); providers describe supports ssh-lease and delegated-run providers", canonical, spec.Kind)
+		return providerDescription{}, Exit(2, "provider %q is not runnable (kind %s); providers describe supports ssh-lease and delegated-run providers", canonical, spec.Kind)
 	default:
-		return providerDescription{}, exit(2, "provider %q has unsupported kind %q; providers describe supports ssh-lease and delegated-run providers", canonical, spec.Kind)
+		return providerDescription{}, Exit(2, "provider %q has unsupported kind %q; providers describe supports ssh-lease and delegated-run providers", canonical, spec.Kind)
 	}
 
 	providerOwned := map[string]map[string]bool{}
@@ -120,7 +121,7 @@ func describeProvider(requestedName string) (providerDescription, error) {
 			for _, item := range added {
 				owned[item.Name] = true
 			}
-			providerOwned[normalizeProviderName(owner.Name())] = owned
+			providerOwned[normalizeProviderName(owner.Spec().Name)] = owned
 		},
 	})
 
@@ -178,13 +179,14 @@ func describeProvider(requestedName string) (providerDescription, error) {
 	if _, ok := provider.(NativeCheckpointProvider); ok {
 		entry.Lifecycle = append(entry.Lifecycle, "checkpoint-retirement-prepare")
 	}
-	aliases := normalizedSortedStrings(provider.Aliases())
+	aliases := normalizedSortedStrings(spec.Aliases)
 	inputAlias := ""
 	if requested != canonical {
 		inputAlias = requested
 	}
 	return providerDescription{
-		SchemaVersion: providerDescriptionSchemaVersion,
+		providerStaticStatus: entry.providerStaticStatus.clone(),
+		SchemaVersion:        providerDescriptionSchemaVersion,
 		Provider: providerDescriptionIdentity{
 			Requested:   requested,
 			Canonical:   canonical,
@@ -229,7 +231,7 @@ func providerFlagContractNames(provider Provider, owned map[string]bool, contrac
 	for _, raw := range names {
 		name := strings.TrimLeft(strings.TrimSpace(raw), "-")
 		if name == "" || !owned[name] {
-			return nil, exit(2, "provider %q %s flag annotation references unregistered provider flag --%s", provider.Name(), contract, name)
+			return nil, Exit(2, "provider %q %s flag annotation references unregistered provider flag --%s", provider.Spec().Name, contract, name)
 		}
 		result[name] = true
 	}
@@ -239,7 +241,7 @@ func providerFlagContractNames(provider Provider, owned map[string]bool, contrac
 func describeRegisteredFlag(item *flag.Flag) (providerDescriptionFlag, error) {
 	getter, ok := item.Value.(flag.Getter)
 	if !ok {
-		return providerDescriptionFlag{}, exit(2, "run flag --%s uses unsupported value type %T; implement flag.Getter with a supported typed value", item.Name, item.Value)
+		return providerDescriptionFlag{}, Exit(2, "run flag --%s uses unsupported value type %T; implement flag.Getter with a supported typed value", item.Name, item.Value)
 	}
 	value := getter.Get()
 	record := providerDescriptionFlag{
@@ -273,12 +275,12 @@ func describeRegisteredFlag(item *flag.Flag) (providerDescriptionFlag, error) {
 		record.Default = append([]string{}, typed...)
 		record.Repeatable = true
 	default:
-		return providerDescriptionFlag{}, exit(2, "run flag --%s uses unsupported getter value type %T", item.Name, value)
+		return providerDescriptionFlag{}, Exit(2, "run flag --%s uses unsupported getter value type %T", item.Name, value)
 	}
 	annotation := annotationForFlag(item)
 	if annotation.Deprecated {
 		if item.Name == annotation.Replacement || item.Value == nil {
-			return providerDescriptionFlag{}, exit(2, "run flag --%s has invalid deprecation metadata", item.Name)
+			return providerDescriptionFlag{}, Exit(2, "run flag --%s has invalid deprecation metadata", item.Name)
 		}
 		record.Deprecated = true
 		record.Replacement = annotation.Replacement
@@ -305,6 +307,7 @@ func printProviderDescription(out io.Writer, description providerDescription) {
 	} else {
 		fmt.Fprintln(out, identity.Canonical)
 	}
+	writeProviderStaticStatus(out, description.providerStaticStatus)
 	fmt.Fprintf(out, "  kind: %s\n", description.Kind)
 	fmt.Fprintf(out, "  runnable: %t\n", description.Runnable)
 	fmt.Fprintf(out, "  family: %s\n", description.Family)

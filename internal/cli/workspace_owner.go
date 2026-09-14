@@ -82,7 +82,17 @@ type sshWorkspaceOwnerTransport struct {
 }
 
 func (t sshWorkspaceOwnerTransport) CallBudget() time.Duration {
-	return sshTransportCallBudget(t.target, sshControlMetadataLimit, sshCommandLimit{execution: workspaceOwnerRemoteTimeout, control: true})
+	return sshTransportCallBudget(t.target, sshControlMetadataLimit, workspaceOwnerCommandLimit(t.target, workspaceOwnerRenew))
+}
+
+func workspaceOwnerCommandLimit(target SSHTarget, action workspaceOwnerAction) sshCommandLimit {
+	limit := sshCommandLimit{execution: workspaceOwnerRemoteTimeout, control: true}
+	if isWindowsWSL2Target(target) && action == workspaceOwnerRenew {
+		// The distro shares CPU and disk with the workload. Keep the native
+		// watchdog finite, but allow a renewal to survive a busy scheduler.
+		limit.execution = time.Minute
+	}
+	return limit
 }
 
 func (t sshWorkspaceOwnerTransport) Do(ctx context.Context, req workspaceOwnerRemoteRequest) (string, error) {
@@ -98,10 +108,18 @@ func (t sshWorkspaceOwnerTransport) Do(ctx context.Context, req workspaceOwnerRe
 		input = []byte(script)
 		remote = windowsPowerShellStdinScriptCommand(len([]byte(script)))
 	}
-	return runWorkspaceOwnerSSHProtocol(ctx, t.target, remote, input, req.Token)
+	limit := workspaceOwnerCommandLimit(t.target, req.Action)
+	for attempt := 0; ; attempt++ {
+		response, err := runWorkspaceOwnerSSHProtocol(ctx, t.target, remote, input, req.Token, limit)
+		// BUSY certifies that the renewal did not enter the gate or mutate
+		// state. Never replay an ambiguous execution or a rejected token.
+		if !isWindowsWSL2Target(t.target) || req.Action != workspaceOwnerRenew || err != nil || response != "BUSY" || attempt == 2 {
+			return response, err
+		}
+	}
 }
 
-func runWorkspaceOwnerSSHProtocol(ctx context.Context, target SSHTarget, remote string, input []byte, requestToken string) (output string, err error) {
+func runWorkspaceOwnerSSHProtocol(ctx context.Context, target SSHTarget, remote string, input []byte, requestToken string, limit sshCommandLimit) (output string, err error) {
 	if len(remote)+len(input) > sshControlMetadataLimit {
 		return "", errors.New("workspace owner metadata exceeds its accounted transport budget")
 	}
@@ -109,8 +127,8 @@ func runWorkspaceOwnerSSHProtocol(ctx context.Context, target SSHTarget, remote 
 	if input != nil {
 		source = bytes.NewReader(input)
 	}
-	var stdout, stderr synchronizedBuffer
-	err = executePreparedSSH(ctx, &target, remote, source, int64(len(input)), sshCommandLimit{execution: workspaceOwnerRemoteTimeout, control: true},
+	stdout, stderr := newSynchronizedBuffer(0), newSynchronizedBuffer(0)
+	err = executePreparedSSH(ctx, &target, remote, source, int64(len(input)), limit,
 		workspaceOwnerSSHConnectTimeoutOption, workspaceOwnerSSHConnectionAttemptsOption, &stdout, &stderr)
 	output = strings.TrimSpace(stdout.String())
 	if err != nil {
@@ -222,7 +240,7 @@ func stageWorkspaceOwnerWindowsWitness(ctx context.Context, target SSHTarget, ow
 		cleanup: remoteWorkspaceOwnerWindowsCleanupWitnessCommand(name),
 		name:    name,
 	}
-	var output synchronizedBuffer
+	output := newSynchronizedBuffer(0)
 	if err := runSSHInput(ctx, target, remoteWorkspaceOwnerWindowsStageWitnessCommand(owner.key, owner.token, name, int64(len([]byte(script)))), strings.NewReader(script), &output, &output); err != nil {
 		detail := trimFailureDetail(strings.TrimSpace(output.String()))
 		// The remote write may have succeeded even when its SSH result was lost.
@@ -258,8 +276,10 @@ func workspaceOwnerKey(leaseID string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte("crabbox-workspace-owner-v1\x00"+leaseID)))
 }
 
-func shouldAcquireWorkspaceOwner(acquired, mayRetain bool, backend SSHLeaseBackend) bool {
-	if !acquired || mayRetain {
+func shouldAcquireWorkspaceOwner(target SSHTarget, acquired, mayRetain bool, backend SSHLeaseBackend) bool {
+	// The Windows witness also converts overlapped SSH stdin into ordinary
+	// redirected input for upload and sync commands, even on exclusive leases.
+	if isWindowsNativeTarget(target) || !acquired || mayRetain {
 		return true
 	}
 	exclusive, ok := backend.(ExclusiveOneShotAcquireBackend)
@@ -288,7 +308,7 @@ func acquireWorkspaceOwner(ctx context.Context, target SSHTarget, leaseID string
 
 func acquireWorkspaceOwnerWithTransport(ctx context.Context, target SSHTarget, leaseID string, stderr io.Writer, transport workspaceOwnerTransport, waitTimeout, ttl, renewInterval time.Duration) (*workspaceOwner, error) {
 	if strings.TrimSpace(leaseID) == "" {
-		return nil, exit(7, "workspace owner requires a lease identity")
+		return nil, Exit(7, "workspace owner requires a lease identity")
 	}
 	if waitTimeout <= 0 {
 		waitTimeout = workspaceOwnerWaitTimeout
@@ -301,7 +321,7 @@ func acquireWorkspaceOwnerWithTransport(ctx context.Context, target SSHTarget, l
 	}
 	token, err := randomHex(32)
 	if err != nil {
-		return nil, exit(7, "create workspace owner fencing token: %v", err)
+		return nil, Exit(7, "create workspace owner fencing token: %v", err)
 	}
 	owner := &workspaceOwner{
 		target:    target,
@@ -319,7 +339,7 @@ func acquireWorkspaceOwnerWithTransport(ctx context.Context, target SSHTarget, l
 	for {
 		response, callErr := callWorkspaceOwnerTransport(waitCtx, owner.callTimeout(), transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerAcquire, Key: owner.key, Token: owner.token, TTL: ttl})
 		if callErr != nil {
-			return nil, exit(7, "acquire remote workspace owner: ambiguous remote state: %v", callErr)
+			return nil, Exit(7, "acquire remote workspace owner: ambiguous remote state: %v", callErr)
 		}
 		switch response {
 		case "ACQUIRED", "RECOVERED":
@@ -334,16 +354,16 @@ func acquireWorkspaceOwnerWithTransport(ctx context.Context, target SSHTarget, l
 				nextProgress += workspaceOwnerProgressEvery
 			}
 		case "AMBIGUOUS":
-			return nil, exit(7, "acquire remote workspace owner: ambiguous protocol state")
+			return nil, Exit(7, "acquire remote workspace owner: ambiguous protocol state")
 		default:
-			return nil, exit(7, "acquire remote workspace owner: unexpected protocol response %q", response)
+			return nil, Exit(7, "acquire remote workspace owner: unexpected protocol response %q", response)
 		}
 		timer := time.NewTimer(workspaceOwnerPollInterval)
 		select {
 		case <-waitCtx.Done():
 			timer.Stop()
 			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
-				return nil, exit(7, "timed out after %s waiting for reusable workspace owner", waitTimeout)
+				return nil, Exit(7, "timed out after %s waiting for reusable workspace owner", waitTimeout)
 			}
 			return nil, waitCtx.Err()
 		case <-timer.C:
@@ -378,15 +398,25 @@ func (o *workspaceOwner) renewLoopWithTicks(ticks <-chan time.Time, callTimeout 
 				continue
 			}
 			if err == nil {
-				err = fmt.Errorf("unexpected protocol response %q", response)
+				err = errors.New("unexpected protocol response")
 			}
+			err = workspaceOwnerProtocolError(response, err)
 			o.mu.Lock()
-			o.renewErr = exit(7, "remote workspace owner renewal failed closed: %v", err)
+			o.renewErr = Exit(7, "remote workspace owner renewal failed closed: %v", err)
 			o.mu.Unlock()
 			o.cancel()
 			return
 		}
 	}
+}
+
+// Only recognized states are safe to add to transport diagnostics.
+func workspaceOwnerProtocolError(response string, err error) error {
+	switch response {
+	case "MISMATCH", "EXPIRED", "AMBIGUOUS":
+		return fmt.Errorf("protocol state %s: %w", response, err)
+	}
+	return err
 }
 
 func (o *workspaceOwner) Err() error {
@@ -401,7 +431,7 @@ func (o *workspaceOwner) Err() error {
 func (o *workspaceOwner) ConfirmNoChild(ctx context.Context) error {
 	result, err := o.inspectChild(ctx)
 	if err == nil && result == workspaceOwnerChildActive {
-		err = exit(7, "confirm remote workspace owner child state failed closed: child")
+		err = Exit(7, "confirm remote workspace owner child state failed closed: child")
 	}
 	return err
 }
@@ -415,7 +445,8 @@ func (o *workspaceOwner) inspectChild(ctx context.Context) (workspaceOwnerInspec
 	}
 	response, err := callWorkspaceOwnerTransport(ctx, o.callTimeout(), o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerInspect, Key: o.key, Token: o.token, TTL: o.ttl})
 	if err != nil {
-		return workspaceOwnerQuiescent, exit(7, "confirm remote workspace owner child state: ambiguous remote state: %v", err)
+		err = workspaceOwnerProtocolError(response, err)
+		return workspaceOwnerQuiescent, Exit(7, "confirm remote workspace owner child state: ambiguous remote state: %v", err)
 	}
 	switch response {
 	case "OWNED":
@@ -423,7 +454,7 @@ func (o *workspaceOwner) inspectChild(ctx context.Context) (workspaceOwnerInspec
 	case "CHILD":
 		return workspaceOwnerChildActive, nil
 	default:
-		return workspaceOwnerQuiescent, exit(7, "confirm remote workspace owner child state failed closed: %s", strings.ToLower(firstNonBlank(response, "ambiguous")))
+		return workspaceOwnerQuiescent, Exit(7, "confirm remote workspace owner child state failed closed: %s", strings.ToLower(firstNonBlank(response, "ambiguous")))
 	}
 }
 
@@ -435,19 +466,20 @@ func (o *workspaceOwner) WaitForChild(ctx context.Context, timeout time.Duration
 	for {
 		response, err := callWorkspaceOwnerTransport(ctx, min(o.callTimeout(), time.Until(deadline)), o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerInspect, Key: o.key, Token: o.token, TTL: o.ttl})
 		if err != nil {
-			return exit(7, "confirm remote workspace phase witness: ambiguous remote state: %v", err)
+			err = workspaceOwnerProtocolError(response, err)
+			return Exit(7, "confirm remote workspace phase witness: ambiguous remote state: %v", err)
 		}
 		switch response {
 		case "CHILD":
 			return nil
 		case "OWNED":
 			if time.Now().After(deadline) {
-				return exit(7, "timed out waiting for remote workspace phase witness")
+				return Exit(7, "timed out waiting for remote workspace phase witness")
 			}
 		case "MISMATCH", "AMBIGUOUS":
-			return exit(7, "confirm remote workspace phase witness failed closed: %s", strings.ToLower(response))
+			return Exit(7, "confirm remote workspace phase witness failed closed: %s", strings.ToLower(response))
 		default:
-			return exit(7, "confirm remote workspace phase witness: unexpected protocol response %q", response)
+			return Exit(7, "confirm remote workspace phase witness: unexpected protocol response %q", response)
 		}
 		timer := time.NewTimer(50 * time.Millisecond)
 		select {
@@ -496,9 +528,9 @@ func (o *workspaceOwner) Close(ctx context.Context) error {
 	renewErr := o.Err()
 	response, releaseErr := callWorkspaceOwnerTransport(ctx, o.callTimeout(), o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerRelease, Key: o.key, Token: o.token, TTL: o.ttl})
 	if releaseErr != nil {
-		releaseErr = exit(7, "release remote workspace owner: ambiguous remote state: %v", releaseErr)
+		releaseErr = Exit(7, "release remote workspace owner: ambiguous remote state: %v", releaseErr)
 	} else if response != "RELEASED" {
-		releaseErr = exit(7, "release remote workspace owner failed closed: %s", strings.ToLower(firstNonBlank(response, "ambiguous")))
+		releaseErr = Exit(7, "release remote workspace owner failed closed: %s", strings.ToLower(firstNonBlank(response, "ambiguous")))
 	}
 	return errors.Join(renewErr, releaseErr)
 }
@@ -568,6 +600,9 @@ func remoteWorkspaceOwnerCommand(target SSHTarget, req workspaceOwnerRemoteReque
 	if isWindowsNativeTarget(target) {
 		return windowsPowerShellStdinScriptCommand(len([]byte(remoteWorkspaceOwnerWindows(req))))
 	}
+	if isWindowsWSL2Target(target) && req.Action == workspaceOwnerRenew {
+		return remoteWorkspaceOwnerWSL2Renew(req)
+	}
 	return remoteWorkspaceOwnerPOSIXLauncher(req.Key, req.Token, remoteWorkspaceOwnerPOSIX(req))
 }
 
@@ -587,6 +622,36 @@ const workspaceOwnerPOSIXAbsent = `owner_child_absent() {
   [ -z "$matching_pid" ]
 }
 `
+
+// The directory gate is deliberately never stolen on a timeout: a suspended
+// writer can resume after its deadline. Ambiguous gates require lease cleanup.
+func workspaceOwnerPOSIXGate(timeout string) string {
+	return `run_owner_gate() {
+  if command -v flock >/dev/null 2>&1; then
+    flock -x -w ` + timeout + ` "$gate" /bin/sh -c "$1"
+  elif command -v lockf >/dev/null 2>&1; then
+    lockf -k -t ` + timeout + ` "$gate" /bin/sh -c "$1"
+  else
+    /bin/sh -c '
+      gate_dir="$1.portable"
+      remaining="$2"
+      # Some mkdir implementations return success after an EEXIST race.
+      # Require the verbose creation receipt as well as a successful exit.
+      while ! { created=$(mkdir -m 700 -v "$gate_dir" 2>/dev/null) && [ -n "$created" ]; }; do
+        # A successful contender may already have removed the gate.
+        [ ! -f "$gate_dir" ] && [ ! -L "$gate_dir" ] || exit 74
+        [ "$remaining" -gt 0 ] || exit 73
+        sleep 1
+        remaining=$((remaining - 1))
+      done
+      trap '\''rmdir "$gate_dir" 2>/dev/null || true'\'' 0
+      trap '\''trap - 0; exit 74'\'' HUP INT TERM
+      eval "$3"
+    ' owner-gate "$gate" ` + timeout + ` "$1"
+  fi
+}
+`
+}
 
 func remoteWorkspaceOwnerPOSIX(req workspaceOwnerRemoteRequest) string {
 	body := `set -eu
@@ -689,21 +754,13 @@ chmod 700 "$HOME/.crabbox" "$root" 2>/dev/null || true
 protocol_action=` + shellQuote(string(req.Action)) + `
 gate="$root/` + req.Key + `.gate"
 body=` + shellQuote(body) + `
-run_locked() {
-	if command -v flock >/dev/null 2>&1; then
-		flock -x -w ` + timeout + ` "$gate" /bin/sh -c "$body"
-	elif command -v lockf >/dev/null 2>&1; then
-		lockf -t ` + timeout + ` "$gate" /bin/sh -c "$body"
-	else
-		return 73
-	fi
-}
+` + workspaceOwnerPOSIXGate(timeout) + `
 set +e
-output=$(run_locked)
+output=$(run_owner_gate "$body")
 lock_status=$?
 set -e
 if [ "$lock_status" -ne 0 ] && [ -z "$output" ]; then
-	if [ ` + shellQuote(string(req.Action)) + ` = acquire ]; then printf BUSY; exit 0; fi
+	case "$lock_status:$protocol_action" in 1:acquire|73:acquire|75:acquire) printf BUSY; exit 0 ;; esac
 	printf AMBIGUOUS; exit 74
 fi
 printf %s "$output"
@@ -871,16 +928,7 @@ func remoteWorkspaceOwnerPOSIXWitnessScript(key, token, remote, setupMarker stri
 `
 		inputRedirect = ` <"$run_dir/input"`
 	}
-	gateFunction := `run_owner_gate() {
-	if command -v flock >/dev/null 2>&1; then
-		flock -x -w 5 "$gate" /bin/sh -c "$1" 2>/dev/null
-	elif command -v lockf >/dev/null 2>&1; then
-		lockf -t 5 "$gate" /bin/sh -c "$1" 2>/dev/null
-	else
-		return 74
-	fi
-}
-`
+	gateFunction := workspaceOwnerPOSIXGate("5")
 	installBody := `set -eu
 ` + workspaceOwnerPOSIXAbsent + `
 [ "$(sed -n '2p' "$state" 2>/dev/null || true)" = "$token" ] || exit 75
@@ -927,6 +975,18 @@ rm -f "$child"`
 	// Pre-start waits use the lock's five-second deadline, never signal-based
 	// cleanup. If the supervisor disappears, the identity pipe refuses handoff.
 	// A closed diagnostic stream must not recursively raise PIPE in its handler.
+	// Apple's Bash 3 can retain a saved command-substitution pipe above fd 9
+	// across exec. Close extra descriptors in a fresh -c shell (no script fd),
+	// so a detached user daemon cannot hold the witness identity pipe open.
+	macExec := `if [ "$(uname -s)" = Darwin ]; then
+  exec /bin/bash -c 'for owner_fd in /dev/fd/*; do
+    owner_fd=${owner_fd##*/}
+    case "$owner_fd" in ""|*[!0-9]*|0|1|2) continue ;; esac
+    eval "exec $owner_fd>&-"
+  done
+  exec /bin/sh -c "$1"' owner-command "$owner_command"` + inputRedirect + `
+fi
+`
 	registrar := diagnostic + `set -u
 trap '' HUP
 trap 'rm -rf "$run_dir" 2>/dev/null' 0
@@ -935,11 +995,14 @@ child_pid=$$
 child_identity=$(ps -o lstart= -p "$child_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
 [ -n "$child_identity" ] || setup_failed identity
 export child_pid child_identity
-` + gateFunction + `run_owner_gate ` + shellQuote(installBody) + ` || setup_failed registration "$?"
+eval "$owner_gate_function"
+unset owner_gate_function
+run_owner_gate ` + shellQuote(installBody) + ` || setup_failed registration "$?"
 printf '%s\n%s\n' "$child_pid" "$child_identity" >&3 || setup_failed handoff
 exec 3>&-
 umask "$command_umask"
-` + started + `exec sh -c ` + shellQuote(remote) + inputRedirect + `
+` + started + `owner_command=` + shellQuote(remote) + `
+` + macExec + `exec sh -c "$owner_command"` + inputRedirect + `
 `
 	return diagnostic + `set -u
 command_umask=$(umask)
@@ -951,9 +1014,10 @@ state="$root/$key.owner"
 child="$root/$key.child"
 gate="$root/$key.gate"
 run_dir="$root/$key.run.$token.$$"
-` + gateFunction + `
+owner_gate_function=` + shellQuote(gateFunction) + `
+eval "$owner_gate_function"
 mkdir -m 700 "$run_dir" 2>/dev/null || setup_failed staging
-` + inputSetup + `export state child gate token command_umask run_dir
+` + inputSetup + `export state child gate token command_umask run_dir owner_gate_function
 exec 4>&1
 trap : INT QUIT
 set +e
@@ -976,7 +1040,7 @@ exit "$code"
 }
 
 func remoteWorkspaceOwnerWindowsStageWitnessCommand(key, token, name string, scriptSize int64) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 $root = Join-Path $HOME ".crabbox\workspace-owners"
 $state = Join-Path $root (` + psQuote(key) + ` + ".owner")
 $path = Join-Path $root ` + psQuote(name) + `
@@ -1005,7 +1069,7 @@ try {
 }
 
 func remoteWorkspaceOwnerWindowsRunWitnessCommand(name string) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 $path = Join-Path (Join-Path $HOME ".crabbox\workspace-owners") ` + psQuote(name) + `
 try {
 	if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "staged workspace witness is missing" }
@@ -1019,7 +1083,7 @@ exit $code
 }
 
 func remoteWorkspaceOwnerWindowsCleanupWitnessCommand(name string) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 $path = Join-Path (Join-Path $HOME ".crabbox\workspace-owners") ` + psQuote(name) + `
 Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
 `)
@@ -1036,7 +1100,7 @@ try {
 }
 
 func remoteWorkspaceOwnerWindowsStartBackgroundWitnessCommand(name string) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 $path = Join-Path (Join-Path $HOME ".crabbox\workspace-owners") ` + psQuote(name) + `
 try {
 	if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "staged workspace witness is missing" }

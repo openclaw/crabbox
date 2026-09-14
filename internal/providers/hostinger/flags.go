@@ -1,6 +1,10 @@
 package hostinger
 
-import "flag"
+import (
+	"flag"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+)
 
 type hostingerFlagValues struct {
 	APIURL          *string
@@ -15,7 +19,7 @@ type hostingerFlagValues struct {
 	ReleaseAction   *string
 }
 
-func RegisterHostingerProviderFlags(fs *flag.FlagSet, defaults Config) any {
+func RegisterHostingerProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return hostingerFlagValues{
 		APIURL:          fs.String("hostinger-url", defaults.Hostinger.APIURL, "Hostinger API URL"),
 		ItemID:          fs.String("hostinger-item-id", defaults.Hostinger.ItemID, "Hostinger priced item ID to purchase, e.g. hostingercom-vps-kvm2-usd-1m"),
@@ -30,43 +34,53 @@ func RegisterHostingerProviderFlags(fs *flag.FlagSet, defaults Config) any {
 	}
 }
 
-func ApplyHostingerProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+func ApplyHostingerProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	v, ok := values.(hostingerFlagValues)
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "hostinger-url") {
+	if core.FlagWasSet(fs, "hostinger-url") {
 		cfg.Hostinger.APIURL = *v.APIURL
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if flagWasSet(fs, "hostinger-item-id") {
+	if core.FlagWasSet(fs, "hostinger-item-id") {
 		cfg.Hostinger.ItemID = *v.ItemID
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if flagWasSet(fs, "hostinger-payment-method-id") {
+	if core.FlagWasSet(fs, "hostinger-payment-method-id") {
 		cfg.Hostinger.PaymentMethodID = *v.PaymentMethodID
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if flagWasSet(fs, "hostinger-template-id") {
+	if core.FlagWasSet(fs, "hostinger-template-id") {
 		cfg.Hostinger.TemplateID = *v.TemplateID
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if flagWasSet(fs, "hostinger-data-center-id") {
+	if core.FlagWasSet(fs, "hostinger-data-center-id") {
 		cfg.Hostinger.DataCenterID = *v.DataCenterID
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if flagWasSet(fs, "hostinger-hostname-prefix") {
+	if core.FlagWasSet(fs, "hostinger-hostname-prefix") {
 		cfg.Hostinger.HostnamePrefix = *v.HostnamePrefix
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if flagWasSet(fs, "hostinger-user") {
+	if core.FlagWasSet(fs, "hostinger-user") {
 		cfg.Hostinger.User = *v.User
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 		cfg.SSHUser = *v.User
-		markHostingerUserExplicit(cfg)
+		core.MarkHostingerUserExplicit(cfg)
 	}
-	if flagWasSet(fs, "hostinger-work-root") {
+	if core.FlagWasSet(fs, "hostinger-work-root") {
 		cfg.Hostinger.WorkRoot = *v.WorkRoot
-		markHostingerWorkRootExplicit(cfg)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
+		core.MarkHostingerWorkRootExplicit(cfg)
 	}
-	if flagWasSet(fs, "hostinger-allow-purchase") {
+	if core.FlagWasSet(fs, "hostinger-allow-purchase") {
 		cfg.Hostinger.AllowPurchase = *v.AllowPurchase
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if flagWasSet(fs, "hostinger-release-action") {
+	if core.FlagWasSet(fs, "hostinger-release-action") {
 		cfg.Hostinger.ReleaseAction = *v.ReleaseAction
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if cfg.Provider == providerName {
 		applyDefaults(cfg)

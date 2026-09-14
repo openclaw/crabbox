@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -13,22 +16,22 @@ const (
 	defaultWaitTimeout = 5 * time.Minute
 )
 
-func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = providerName
 	return &backend{spec: spec, cfg: cfg, rt: rt, newClient: newUnikraftCloudClient, pollInterval: statusPollInterval, deleteConfirmationTimeout: 30 * time.Second}
 }
 
 type backend struct {
-	spec      ProviderSpec
-	cfg       Config
-	rt        Runtime
-	newClient func(Config, Runtime) (unikraftCloudAPI, error)
+	spec      core.ProviderSpec
+	cfg       core.Config
+	rt        core.Runtime
+	newClient func(core.Config, core.Runtime) (unikraftCloudAPI, error)
 
 	pollInterval              time.Duration
 	deleteConfirmationTimeout time.Duration
 }
 
-func (b *backend) Spec() ProviderSpec { return b.spec }
+func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *backend) client() (unikraftCloudAPI, error) {
 	if b.newClient != nil {
@@ -37,49 +40,49 @@ func (b *backend) client() (unikraftCloudAPI, error) {
 	return newUnikraftCloudClient(b.cfg, b.rt)
 }
 
-func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	api, err := b.client()
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
 	if _, err := api.UserUUID(ctx); err != nil {
 		if isUnauthorized(err) {
-			return DoctorResult{}, exit(3, "provider=%s API key was rejected; check UKC_TOKEN / UNIKRAFT_CLOUD_API_KEY and the configured metro: %v", providerName, err)
+			return core.DoctorResult{}, core.Exit(3, "provider=%s API key was rejected; check UKC_TOKEN / UNIKRAFT_CLOUD_API_KEY and the configured metro: %v", providerName, err)
 		}
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
 	instances, err := api.ListInstances(ctx)
 	if err != nil {
 		if isUnauthorized(err) {
-			return DoctorResult{}, exit(3, "provider=%s API key was rejected; check UKC_TOKEN / UNIKRAFT_CLOUD_API_KEY and the configured metro: %v", providerName, err)
+			return core.DoctorResult{}, core.Exit(3, "provider=%s API key was rejected; check UKC_TOKEN / UNIKRAFT_CLOUD_API_KEY and the configured metro: %v", providerName, err)
 		}
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
 	if _, err := indexUnikraftCloudInventory(instances); err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
-	return inventoryDoctorResult(providerName, len(instances)), nil
+	return core.InventoryDoctorResult(providerName, len(instances)), nil
 }
 
 // Warmup creates an instance from the configured OCI image and starts it.
 // Unikraft Cloud instances run their image entrypoint as a microVM service;
 // there is no exec or SSH surface, so warmup is the create-and-claim step and
 // stop deletes the instance.
-func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
+func (b *backend) Warmup(ctx context.Context, req core.WarmupRequest) error {
 	if req.ActionsRunner {
-		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
+		return core.Exit(2, "--actions-runner is not supported for provider=%s", providerName)
 	}
 	if req.Options.Tailscale.Enabled {
-		return exit(2, "provider=%s is service-control only and does not support Tailscale options", providerName)
+		return core.Exit(2, "provider=%s is service-control only and does not support Tailscale options", providerName)
 	}
 	image := strings.TrimSpace(b.cfg.UnikraftCloud.Image)
 	if image == "" {
-		return exit(2, "provider=%s warmup requires an OCI image; set --unikraft-cloud-image, UNIKRAFT_CLOUD_IMAGE, or unikraftCloud.image", providerName)
+		return core.Exit(2, "provider=%s warmup requires an OCI image; set --unikraft-cloud-image, UNIKRAFT_CLOUD_IMAGE, or unikraftCloud.image", providerName)
 	}
 	if b.cfg.UnikraftCloud.MemoryMB < 0 {
-		return exit(2, "provider=%s memory must be zero or greater", providerName)
+		return core.Exit(2, "provider=%s memory must be zero or greater", providerName)
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	api, err := b.client()
 	if err != nil {
 		return err
@@ -102,13 +105,13 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if err != nil {
 		return err
 	}
-	slug, err := allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
+	slug, err := core.AllocateClaimLeaseSlug(leaseID, req.RequestedSlug)
 	if err != nil {
 		unlockSlug()
 		return err
 	}
 	createReq := createInstanceRequest{
-		Name:      leaseProviderName(leaseID, ""),
+		Name:      core.LeaseProviderName(leaseID, ""),
 		Image:     image,
 		MemoryMB:  b.cfg.UnikraftCloud.MemoryMB,
 		Autostart: true,
@@ -135,7 +138,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 			if proofErr := b.proveInstanceAbsent(proofCtx, api, resourceName, resourceName); proofErr != nil {
 				return errors.Join(createErr, fmt.Errorf("%s create rejection could not prove zero residue; non-adoptable recovery claim %s retained: %w", providerName, leaseID, proofErr))
 			}
-			if removeErr := removeLeaseClaimIfUnchanged(conflict.LeaseID, conflict); removeErr != nil {
+			if removeErr := core.RemoveLeaseClaimIfUnchanged(conflict.LeaseID, conflict); removeErr != nil {
 				return errors.Join(createErr, fmt.Errorf("remove rejected %s create claim %s: %w", providerName, leaseID, removeErr))
 			}
 			return createErr
@@ -156,7 +159,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	return b.finishWarmup(started, ready, instance, req)
 }
 
-func (b *backend) preflightCreateIntent(ctx context.Context, api unikraftCloudAPI, preflight LeaseClaim) (LeaseClaim, error) {
+func (b *backend) preflightCreateIntent(ctx context.Context, api unikraftCloudAPI, preflight core.LeaseClaim) (core.LeaseClaim, error) {
 	resourceName := strings.TrimSpace(preflight.Labels[ukcLabelResourceName])
 	instances, listErr := api.ListInstances(ctx)
 	if listErr == nil {
@@ -165,61 +168,56 @@ func (b *backend) preflightCreateIntent(ctx context.Context, api unikraftCloudAP
 	if listErr == nil {
 		for _, instance := range instances {
 			if instance.Name == resourceName {
-				cleanupErr := removeLeaseClaimIfUnchanged(preflight.LeaseID, preflight)
-				conflictErr := exit(4, "%s instance name %q already exists before create; refusing to claim or mutate it", providerName, resourceName)
+				cleanupErr := core.RemoveLeaseClaimIfUnchanged(preflight.LeaseID, preflight)
+				conflictErr := core.Exit(4, "%s instance name %q already exists before create; refusing to claim or mutate it", providerName, resourceName)
 				if cleanupErr != nil {
-					return LeaseClaim{}, errors.Join(conflictErr, fmt.Errorf("remove unused preflight claim %s: %w", preflight.LeaseID, cleanupErr))
+					return core.LeaseClaim{}, errors.Join(conflictErr, fmt.Errorf("remove unused preflight claim %s: %w", preflight.LeaseID, cleanupErr))
 				}
-				return LeaseClaim{}, conflictErr
+				return core.LeaseClaim{}, conflictErr
 			}
 		}
 	}
 	if listErr != nil {
-		if cleanupErr := removeLeaseClaimIfUnchanged(preflight.LeaseID, preflight); cleanupErr != nil {
-			return LeaseClaim{}, errors.Join(listErr, fmt.Errorf("remove unused preflight claim %s: %w", preflight.LeaseID, cleanupErr))
+		if cleanupErr := core.RemoveLeaseClaimIfUnchanged(preflight.LeaseID, preflight); cleanupErr != nil {
+			return core.LeaseClaim{}, errors.Join(listErr, fmt.Errorf("remove unused preflight claim %s: %w", preflight.LeaseID, cleanupErr))
 		}
-		return LeaseClaim{}, fmt.Errorf("preflight %s instance inventory: %w", providerName, listErr)
+		return core.LeaseClaim{}, fmt.Errorf("preflight %s instance inventory: %w", providerName, listErr)
 	}
 	intent, err := transitionUnikraftCloudCreateState(preflight, ukcStateCreateIntent)
 	if err != nil {
 		cause := fmt.Errorf("arm %s create intent %s: %w", providerName, preflight.LeaseID, err)
-		return LeaseClaim{}, discardUnmutatedUnikraftCloudCreateClaim(preflight, cause)
+		return core.LeaseClaim{}, discardUnmutatedUnikraftCloudCreateClaim(preflight, cause)
 	}
 	return intent, nil
 }
 
-func (b *backend) finishWarmup(started time.Time, claim LeaseClaim, instance ukcInstance, req WarmupRequest) error {
+func (b *backend) finishWarmup(started time.Time, claim core.LeaseClaim, instance ukcInstance, req core.WarmupRequest) error {
 	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s instance=%s state=%s fqdn=%s\n",
-		claim.LeaseID, claim.Slug, providerName, instance.UUID, normalizedInstanceState(instance.State), blank(instanceFQDN(instance), "-"))
+		claim.LeaseID, claim.Slug, providerName, instance.UUID, normalizedInstanceState(instance.State), core.Blank(instanceFQDN(instance), "-"))
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: %s warmup keeps the instance until explicit stop or eligible cleanup\n", providerName)
 	}
-	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  claim.LeaseID,
-			Slug:     claim.Slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	total := core.ClockNow(b.rt.Clock).Sub(started)
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  claim.LeaseID,
+		Slug:     claim.Slug,
+		Total:    total,
+	})
 }
 
-func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
 	_ = ctx
-	if err := rejectUnikraftCloudRunOptions(req); err != nil {
-		return RunResult{}, err
+	if err := shared.RejectServiceRunOptions(req, providerName, "cannot run commands", "cannot open an interactive shell"); err != nil {
+		return core.RunResult{}, err
 	}
 	if len(req.Command) == 0 {
-		return RunResult{}, exit(2, "missing command")
+		return core.RunResult{}, core.Exit(2, "missing command")
 	}
-	return RunResult{}, exit(2, "provider=%s cannot execute arbitrary run commands; Unikraft Cloud instances run their OCI image entrypoint", providerName)
+	return core.RunResult{}, core.Exit(2, "provider=%s cannot execute arbitrary run commands; Unikraft Cloud instances run their OCI image entrypoint", providerName)
 }
 
-func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *backend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	api, err := b.client()
 	if err != nil {
 		return nil, err
@@ -248,7 +246,7 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 		return nil, err
 	}
 	claimedUUIDs := make(map[string]string)
-	servers := make([]Server, 0, len(instances)+len(claims))
+	servers := make([]core.Server, 0, len(instances)+len(claims))
 	for _, snapshot := range claims {
 		if snapshot.Provider != providerName || snapshot.ProviderScope != scope {
 			continue
@@ -262,7 +260,7 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 			if err != nil {
 				return nil, err
 			}
-			current, exists, readErr := readLeaseClaimWithPresence(claim.LeaseID)
+			current, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID)
 			if readErr != nil {
 				unlock()
 				return nil, readErr
@@ -287,7 +285,7 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 		}
 		instanceKey := strings.ToLower(claim.CloudID)
 		if previous, exists := claimedUUIDs[instanceKey]; exists {
-			return nil, exit(5, "%s instance %s is claimed by both %s and %s", providerName, claim.CloudID, previous, claim.LeaseID)
+			return nil, core.Exit(5, "%s instance %s is claimed by both %s and %s", providerName, claim.CloudID, previous, claim.LeaseID)
 		}
 		claimedUUIDs[instanceKey] = claim.LeaseID
 		instance, exists := instanceByUUID[instanceKey]
@@ -307,30 +305,30 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 			if _, claimed := claimedUUIDs[strings.ToLower(instance.UUID)]; claimed {
 				continue
 			}
-			servers = append(servers, unikraftCloudServer(instance, LeaseClaim{}))
+			servers = append(servers, unikraftCloudServer(instance, core.LeaseClaim{}))
 		}
 	}
 	return servers, nil
 }
 
-func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, error) {
+func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
 	api, err := b.client()
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	accountUUID, err := api.UserUUID(ctx)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	scope, err := unikraftCloudClaimScope(api.BaseURL(), accountUUID)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	claim, claimed, claimErr := b.resolveClaim(req.ID, scope)
 	if claimErr != nil {
 		var notClaimed *unikraftCloudClaimNotFoundError
 		if !errors.As(claimErr, &notClaimed) || !unikraftCloudUUIDPattern.MatchString(strings.TrimSpace(req.ID)) {
-			return StatusView{}, claimErr
+			return core.StatusView{}, claimErr
 		}
 	}
 	leaseID := ""
@@ -355,27 +353,27 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		for {
 			unlock, err := lockUnikraftCloudLeaseOperation(pollCtx, claim.LeaseID)
 			if err != nil {
-				return StatusView{}, err
+				return core.StatusView{}, err
 			}
-			current, exists, readErr := readLeaseClaimWithPresence(claim.LeaseID)
+			current, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID)
 			if readErr != nil {
 				unlock()
-				return StatusView{}, readErr
+				return core.StatusView{}, readErr
 			}
 			if !exists {
 				unlock()
-				return StatusView{}, exit(4, "%s lease %s no longer exists", providerName, claim.LeaseID)
+				return core.StatusView{}, core.Exit(4, "%s lease %s no longer exists", providerName, claim.LeaseID)
 			}
 			if err := validateUnikraftCloudClaim(current, scope); err != nil {
 				unlock()
-				return StatusView{}, err
+				return core.StatusView{}, err
 			}
 			claim = current
 			if claim.CloudID == "" {
 				claim, _, _, err = b.reconcileCreateIntent(pollCtx, api, current, false)
 				if err != nil {
 					unlock()
-					return StatusView{}, err
+					return core.StatusView{}, err
 				}
 			}
 			unlock()
@@ -383,7 +381,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 				break
 			}
 			if !req.Wait {
-				return StatusView{
+				return core.StatusView{
 					ID:         claim.LeaseID,
 					Slug:       claim.Slug,
 					Provider:   providerName,
@@ -391,15 +389,15 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 					State:      claim.Labels["state"],
 					ServerType: "unikraft-cloud-instance",
 					Network:    networkPublic,
-					Labels:     cloneLabels(claim.Labels),
+					Labels:     shared.CloneLabels(claim.Labels),
 				}, nil
 			}
 			if state := claim.Labels["state"]; state == ukcStateCreatePreflight || state == ukcStateCreateConflict {
-				return StatusView{}, exit(5, "%s lease %s reached non-adoptable state=%s before an instance was created", providerName, claim.LeaseID, state)
+				return core.StatusView{}, core.Exit(5, "%s lease %s reached non-adoptable state=%s before an instance was created", providerName, claim.LeaseID, state)
 			}
 			select {
 			case <-pollCtx.Done():
-				return StatusView{}, exit(5, "timed out waiting for %s lease %s create outcome", providerName, claim.LeaseID)
+				return core.StatusView{}, core.Exit(5, "timed out waiting for %s lease %s create outcome", providerName, claim.LeaseID)
 			case <-time.After(pollInterval):
 			}
 		}
@@ -409,18 +407,18 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		instanceID = claim.CloudID
 	}
 	if instanceID == "" {
-		return StatusView{}, exit(2, "provider=%s requires --id <lease-id, slug, or instance uuid>", providerName)
+		return core.StatusView{}, core.Exit(2, "provider=%s requires --id <lease-id, slug, or instance uuid>", providerName)
 	}
 	for {
 		instance, getErr := api.GetInstance(pollCtx, instanceID)
 		if getErr != nil {
 			if req.Wait && ctx.Err() == nil && pollCtx.Err() != nil {
-				return StatusView{}, exit(5, "timed out waiting for %s instance %s to become ready", providerName, instanceID)
+				return core.StatusView{}, core.Exit(5, "timed out waiting for %s instance %s to become ready", providerName, instanceID)
 			}
 			if ctx.Err() != nil {
-				return StatusView{}, ctx.Err()
+				return core.StatusView{}, ctx.Err()
 			}
-			return StatusView{}, getErr
+			return core.StatusView{}, getErr
 		}
 		expectedName := ""
 		expectedUUID := instanceID
@@ -429,7 +427,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 			expectedName = resourceName
 		}
 		if err := validateUnikraftCloudInstanceIdentity(instance, expectedUUID, expectedName); err != nil {
-			return StatusView{}, err
+			return core.StatusView{}, err
 		}
 		state := normalizedInstanceState(instance.State)
 		labels := unikraftCloudLabels(instance)
@@ -439,8 +437,8 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 			}
 			labels[ukcLabelProviderState] = state
 		}
-		view := StatusView{
-			ID:         blank(leaseID, instance.UUID),
+		view := core.StatusView{
+			ID:         core.Blank(leaseID, instance.UUID),
 			Slug:       slug,
 			Provider:   providerName,
 			TargetOS:   targetLinux,
@@ -456,20 +454,20 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 			return view, nil
 		}
 		if unikraftCloudTerminalState(state) {
-			return StatusView{}, exit(5, "%s instance %s reached terminal state=%s before becoming ready", providerName, instanceID, state)
+			return core.StatusView{}, core.Exit(5, "%s instance %s reached terminal state=%s before becoming ready", providerName, instanceID, state)
 		}
 		select {
 		case <-pollCtx.Done():
 			if ctx.Err() == nil {
-				return StatusView{}, exit(5, "timed out waiting for %s instance %s to become ready", providerName, instanceID)
+				return core.StatusView{}, core.Exit(5, "timed out waiting for %s instance %s to become ready", providerName, instanceID)
 			}
-			return StatusView{}, pollCtx.Err()
+			return core.StatusView{}, pollCtx.Err()
 		case <-time.After(pollInterval):
 		}
 	}
 }
 
-func (b *backend) Stop(ctx context.Context, req StopRequest) error {
+func (b *backend) Stop(ctx context.Context, req core.StopRequest) error {
 	api, err := b.client()
 	if err != nil {
 		return err
@@ -491,12 +489,12 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 		return err
 	}
 	defer unlock()
-	claim, exists, err := readLeaseClaimWithPresence(snapshot.LeaseID)
+	claim, exists, err := core.ReadLeaseClaimWithPresence(snapshot.LeaseID)
 	if err != nil {
 		return err
 	}
 	if !exists {
-		return exit(4, "%s lease %s no longer exists", providerName, snapshot.LeaseID)
+		return core.Exit(4, "%s lease %s no longer exists", providerName, snapshot.LeaseID)
 	}
 	if err := validateUnikraftCloudClaim(claim, scope); err != nil {
 		return err
@@ -517,13 +515,13 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 		return err
 	}
 	if missing {
-		fmt.Fprintf(b.rt.Stderr, "warning: %s instance=%s was already gone; removed local claim\n", providerName, blank(instanceID, "pending"))
+		fmt.Fprintf(b.rt.Stderr, "warning: %s instance=%s was already gone; removed local claim\n", providerName, core.Blank(instanceID, "pending"))
 	}
-	fmt.Fprintf(b.rt.Stderr, "released lease=%s instance=%s\n", claim.LeaseID, blank(instanceID, "pending"))
+	fmt.Fprintf(b.rt.Stderr, "released lease=%s instance=%s\n", claim.LeaseID, core.Blank(instanceID, "pending"))
 	return nil
 }
 
-func unikraftCloudServer(instance ukcInstance, claim LeaseClaim) Server {
+func unikraftCloudServer(instance ukcInstance, claim core.LeaseClaim) core.Server {
 	labels := unikraftCloudLabels(instance)
 	if claim.LeaseID != "" {
 		providerState := labels["state"]
@@ -532,10 +530,10 @@ func unikraftCloudServer(instance ukcInstance, claim LeaseClaim) Server {
 		}
 		labels[ukcLabelProviderState] = providerState
 	}
-	return Server{
+	return core.Server{
 		CloudID:  instance.UUID,
 		Provider: providerName,
-		Name:     blank(instance.Name, instance.UUID),
+		Name:     core.Blank(instance.Name, instance.UUID),
 		Status:   normalizedInstanceState(instance.State),
 		Labels:   labels,
 	}
@@ -577,43 +575,5 @@ func instanceFQDN(instance ukcInstance) string {
 }
 
 func normalizedInstanceState(state string) string {
-	return strings.ToLower(blank(strings.TrimSpace(state), "unknown"))
-}
-
-func rejectUnikraftCloudRunOptions(req RunRequest) error {
-	if req.Keep {
-		return exit(2, "provider=%s cannot run commands; --keep is not supported", providerName)
-	}
-	if req.Reclaim {
-		return exit(2, "provider=%s cannot run commands; --reclaim is not supported", providerName)
-	}
-	if !req.NoSync {
-		return exit(2, "provider=%s does not support workspace sync; pass --no-sync", providerName)
-	}
-	if req.SyncOnly {
-		return exit(2, "provider=%s does not support sync; --sync-only is rejected", providerName)
-	}
-	if req.ChecksumSync {
-		return exit(2, "provider=%s does not support sync; --checksum is rejected", providerName)
-	}
-	if req.ForceSyncLarge {
-		return exit(2, "provider=%s does not support sync; --force-sync-large is rejected", providerName)
-	}
-	if req.FullResync {
-		return exit(2, "provider=%s does not support sync; --full-resync is rejected", providerName)
-	}
-	if req.ShellMode {
-		return exit(2, "provider=%s cannot open an interactive shell; --shell is not supported", providerName)
-	}
-	if req.EnvSummary {
-		return exit(2, "provider=%s cannot forward per-run environment variables", providerName)
-	}
-	return nil
-}
-
-func (b *backend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
+	return strings.ToLower(core.Blank(strings.TrimSpace(state), "unknown"))
 }

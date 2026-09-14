@@ -25,19 +25,19 @@ func TestCoordinatorStopUsesFreshCleanupState(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			for _, tc := range []struct {
-				name                             string
-				state                            string
-				deletes                          *bool
-				pending, failure, retry          string
-				provider                         string
-				inspectFails, wantSSH, wantError bool
-				admin                            bool
-				network                          NetworkMode
-				tailHost, wantHost               string
+				name                                        string
+				state                                       string
+				deletes                                     *bool
+				pending, failure, retry                     string
+				provider                                    string
+				inspectFails, wantSSH, wantError, localOnly bool
+				admin                                       bool
+				network                                     NetworkMode
+				tailHost, wantHost                          string
 			}{
-				{name: "confirmed legacy release", state: "released"},
-				{name: "confirmed deleting release", state: "released", deletes: &deleting},
-				{name: "admin confirmed release", state: "released", admin: true},
+				{name: "confirmed legacy release", state: "released", localOnly: true},
+				{name: "confirmed deleting release", state: "released", deletes: &deleting, localOnly: true},
+				{name: "admin confirmed release", state: "released", admin: true, localOnly: true},
 				{name: "admin active", state: "active", admin: true, wantSSH: true},
 				{name: "active", state: "active", wantSSH: true},
 				{name: "retained", state: "released", deletes: &retained, wantSSH: true},
@@ -49,7 +49,7 @@ func TestCoordinatorStopUsesFreshCleanupState(t *testing.T) {
 				{name: "tailscale route", state: "active", network: NetworkTailscale, tailHost: "127.0.0.1", wantHost: "127.0.0.1", wantSSH: true},
 				{name: "auto tailnet route", state: "active", network: NetworkAuto, tailHost: "127.0.0.1", wantHost: "127.0.0.1", wantSSH: true},
 				{name: "explicit public route", state: "active", network: NetworkPublic, tailHost: "127.0.0.1", wantSSH: true},
-				{name: "confirmed tailnet deletion", state: "released", network: NetworkTailscale, tailHost: "127.0.0.1"},
+				{name: "confirmed tailnet deletion", state: "released", network: NetworkTailscale, tailHost: "127.0.0.1", localOnly: true},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					clearConfigEnv(t)
@@ -108,10 +108,15 @@ cmd=""`, 1))
 							if provider == "" {
 								provider = "aws"
 							}
-							_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+							lease := CoordinatorLease{
 								ID: id, Provider: provider, State: tc.state, Host: "192.0.2.70", SSHPort: port, SSHUser: "crabbox", TargetOS: targetLinux, Tailscale: tailnet,
 								ReleaseDeletesServer: tc.deletes, CleanupStartedAt: tc.pending, CleanupError: tc.failure, CleanupRetryAt: tc.retry,
-							}})
+							}
+							if tc.localOnly {
+								lease = confirmedCoordinatorRelease(id, provider)
+								lease.TargetOS = targetLinux
+							}
+							_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
 						case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+id+"/release":
 							releases++
 							var body map[string]any
@@ -121,7 +126,7 @@ cmd=""`, 1))
 							if body["delete"] != true || body["expectedProvider"] != "aws" {
 								t.Errorf("release body=%v", body)
 							}
-							_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: id, Provider: "aws", State: "released"}})
+							_ = json.NewEncoder(w).Encode(map[string]any{"lease": confirmedCoordinatorRelease(id, "aws")})
 						default:
 							http.NotFound(w, r)
 						}
@@ -169,7 +174,7 @@ cmd=""`, 1))
 						t.Fatalf("stop error=%v, wantError=%v; stderr=%s", err, tc.wantError, stderr.String())
 					}
 					wantReleases := 1
-					if tc.wantError {
+					if tc.wantError || tc.localOnly {
 						wantReleases = 0
 					}
 					if releases != wantReleases {
@@ -219,7 +224,7 @@ func TestCoordinatorReleasePreservesCallerIdentityAndCancellation(t *testing.T) 
 					_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: id, Provider: "aws", State: "active"}})
 				} else {
 					releases++
-					_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: id, Provider: "aws", State: "released"}})
+					_ = json.NewEncoder(w).Encode(map[string]any{"lease": confirmedCoordinatorRelease(id, "aws")})
 				}
 			}))
 			defer server.Close()
@@ -237,6 +242,9 @@ func TestCoordinatorReleasePreservesCallerIdentityAndCancellation(t *testing.T) 
 }
 
 func TestCoordinatorStopReleasesAfterUnreachableGuestCleanup(t *testing.T) {
+	if runParallelCLIContract(t, 0) {
+		return
+	}
 	clearConfigEnv(t)
 	dir := t.TempDir()
 	logPath := installRecordingSSH(t, dir)
@@ -258,7 +266,7 @@ if [ -n "${CRABBOX_FAKE_SSH_STDIN_LOG:-}" ]; then`, 1))
 		lease := CoordinatorLease{ID: id, Provider: "aws", State: "active", Host: "192.0.2.70", SSHPort: "22", SSHUser: "crabbox", TargetOS: targetLinux}
 		if r.Method == http.MethodPost {
 			releases++
-			lease.State = "released"
+			lease = confirmedCoordinatorRelease(id, "aws")
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
 	}))
@@ -291,7 +299,7 @@ func TestCoordinatorReleaseRejectsContradictoryIdentityWhenInspectFails(t *testi
 			return
 		}
 		releases++
-		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: id, Provider: "aws", State: "released"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": confirmedCoordinatorRelease(id, "aws")})
 	}))
 	defer server.Close()
 	backend := coordinatorReleaseTestBackend(server, io.Discard)
@@ -362,7 +370,7 @@ func TestCoordinatorReleaseNetworkSelectionKeepsCleanupBounded(t *testing.T) {
 				lease := CoordinatorLease{ID: id, Provider: "aws", State: "active", Host: "192.0.2.70", SSHPort: port, SSHUser: "crabbox", TargetOS: targetLinux, Tailscale: &TailscaleMetadata{Enabled: true, FQDN: "127.0.0.1"}}
 				if r.Method == http.MethodPost {
 					releases.Add(1)
-					lease.State = "released"
+					lease = confirmedCoordinatorRelease(id, "aws")
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
 			}))

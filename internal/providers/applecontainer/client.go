@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 // inspectContainer mirrors the JSON returned by `container inspect <id>` and
@@ -160,7 +162,7 @@ func (c inspectContainer) ip() string {
 
 func firstNetworkAddress(networks []inspectNetwork) string {
 	for _, n := range networks {
-		addr := firstNonBlank(n.Address, n.IPv4Address)
+		addr := shared.FirstNonBlank(n.Address, n.IPv4Address)
 		if addr == "" {
 			continue
 		}

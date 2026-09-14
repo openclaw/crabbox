@@ -47,11 +47,11 @@ func (b watchExactClaimReleaseBackend) ReleaseLeaseConnectionCleanupSafe() bool 
 func (b watchExactClaimReleaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
 	b.testing.Helper()
 	snapshot, exists, set := ServerLeaseClaimSnapshot(req.Lease.Server)
-	current, err := readLeaseClaim(req.Lease.LeaseID)
+	current, err := ReadLeaseClaim(req.Lease.LeaseID)
 	if err != nil || !set || !exists || !reflect.DeepEqual(snapshot, current) {
 		return fmt.Errorf("release did not carry the exact registered claim: snapshot=%#v current=%#v exists=%t set=%t err=%v", snapshot, current, exists, set, err)
 	}
-	if err := removeLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, snapshot, nil); err != nil {
+	if err := RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, snapshot, nil); err != nil {
 		return err
 	}
 	return b.SSHLeaseBackend.ReleaseLease(ctx, req)

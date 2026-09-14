@@ -104,7 +104,7 @@ func TestStaticSSHRunCommandReleasePolicy(t *testing.T) {
 }
 
 type staticCommandFixture struct {
-	cfg                    Config
+	cfg                    core.Config
 	repo, logPath, keyPath string
 	other                  core.LeaseClaim
 }
@@ -184,7 +184,7 @@ CRABBOX_STATIC_TEST_HELPER=1 exec "$CRABBOX_STATIC_TEST_BINARY" -test.run='^Test
 `, 0o700)
 	writeStaticCommandFile(t, filepath.Join(bin, "git"), "#!/bin/sh\nexit 1\n", 0o700)
 	oldWait := waitForSSH
-	waitForSSH = func(_ context.Context, target *SSHTarget, _ io.Writer) error {
+	waitForSSH = func(_ context.Context, target *core.SSHTarget, _ io.Writer) error {
 		// Core waits again after acquisition. Fake ssh alone does not prevent
 		// its direct TCP probe; this flag routes readiness through fake ssh too.
 		target.SSHConfigProxy = true
@@ -196,8 +196,8 @@ CRABBOX_STATIC_TEST_HELPER=1 exec "$CRABBOX_STATIC_TEST_BINARY" -test.run='^Test
 	otherCfg.Static.ID = "static_unrelated_fixture"
 	otherCfg.Static.Name = "unrelated-fixture"
 	otherCfg.Static.Host = "unrelated.invalid"
-	backend := NewStaticSSHLeaseBackend(Provider{}.Spec(), otherCfg, Runtime{Stderr: io.Discard})
-	if _, err := backend.(core.SSHLeaseBackend).Acquire(t.Context(), AcquireRequest{Repo: core.Repo{Root: f.repo}, Keep: true}); err != nil {
+	backend := NewStaticSSHLeaseBackend(Provider{}.Spec(), otherCfg, core.Runtime{Stderr: io.Discard})
+	if _, err := backend.(core.SSHLeaseBackend).Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: f.repo}, Keep: true}); err != nil {
 		t.Fatal(err)
 	}
 	f.other = readStaticCommandClaim(t, otherCfg.Static.ID)
@@ -206,8 +206,8 @@ CRABBOX_STATIC_TEST_HELPER=1 exec "$CRABBOX_STATIC_TEST_BINARY" -test.run='^Test
 
 func (f staticCommandFixture) acquire(t *testing.T) core.LeaseClaim {
 	t.Helper()
-	backend := NewStaticSSHLeaseBackend(Provider{}.Spec(), f.cfg, Runtime{Stderr: io.Discard})
-	if _, err := backend.(core.SSHLeaseBackend).Acquire(t.Context(), AcquireRequest{Repo: core.Repo{Root: f.repo}, Keep: true}); err != nil {
+	backend := NewStaticSSHLeaseBackend(Provider{}.Spec(), f.cfg, core.Runtime{Stderr: io.Discard})
+	if _, err := backend.(core.SSHLeaseBackend).Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: f.repo}, Keep: true}); err != nil {
 		t.Fatal(err)
 	}
 	return readStaticCommandClaim(t, f.cfg.Static.ID)

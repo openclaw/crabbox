@@ -1,18 +1,13 @@
 package cloudflare
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -49,57 +44,43 @@ type createSandboxRequest struct {
 	Labels             map[string]string `json:"labels,omitempty"`
 }
 
-type execStreamRequest struct {
-	Command   string            `json:"command"`
-	Cwd       string            `json:"cwd,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
-	TimeoutMS int64             `json:"timeoutMs,omitempty"`
-}
-
-type execStreamEvent struct {
-	Type     string `json:"type"`
-	Data     string `json:"data,omitempty"`
-	Error    string `json:"error,omitempty"`
-	ExitCode *int   `json:"exitCode,omitempty"`
-}
-
 const cloudflareDefaultResponseHeaderTimeout = 30 * time.Second
 
 var cloudflareCleanupTimeout = 15 * time.Second
 
 var cloudflareBearerPattern = regexp.MustCompile(`(?i)\bbearer[ \t]+[A-Za-z0-9._~+/=-]+`)
 
-func newCloudflareClient(cfg Config, rt Runtime) (*cloudflareClient, error) {
+func newCloudflareClient(cfg core.Config, rt core.Runtime) (*cloudflareClient, error) {
 	apiURL := strings.TrimSpace(cfg.Cloudflare.APIURL)
 	if apiURL == "" {
-		return nil, exit(2, "%s requires --cloudflare-url or CRABBOX_CLOUDFLARE_RUNNER_URL", providerName)
+		return nil, core.Exit(2, "%s requires --cloudflare-url or CRABBOX_CLOUDFLARE_RUNNER_URL", providerName)
 	}
 	token := strings.TrimSpace(cfg.Cloudflare.Token)
 	if token == "" {
-		return nil, exit(2, "%s requires CRABBOX_CLOUDFLARE_RUNNER_TOKEN or user-level config", providerName)
+		return nil, core.Exit(2, "%s requires CRABBOX_CLOUDFLARE_RUNNER_TOKEN or user-level config", providerName)
 	}
-	instanceType, ok := normalizeCloudflareContainerInstanceType(blank(cfg.ServerType, cloudflareContainerInstanceTypeForClass(cfg.Class)))
+	instanceType, ok := core.NormalizeCloudflareContainerInstanceType(core.Blank(cfg.ServerType, cloudflareContainerInstanceTypeForClass(cfg.Class)))
 	if !ok {
 		if cfg.ServerTypeExplicit {
-			return nil, exit(2, "%s --type must be one of %s", providerName, strings.Join(cloudflareContainerInstanceTypes(), ", "))
+			return nil, core.Exit(2, "%s --type must be one of %s", providerName, strings.Join(core.CloudflareContainerInstanceTypes(), ", "))
 		}
 		instanceType = cloudflareContainerInstanceTypeForClass(cfg.Class)
 	}
 	parsed, err := url.Parse(apiURL)
 	if err != nil {
-		return nil, exit(2, "%s url %q is invalid", providerName, apiURL)
+		return nil, core.Exit(2, "%s url %q is invalid", providerName, apiURL)
 	}
 	if parsed.User != nil {
-		return nil, exit(2, "%s url must not include userinfo", providerName)
+		return nil, core.Exit(2, "%s url must not include userinfo", providerName)
 	}
 	if parsed.Scheme == "" || parsed.Host == "" {
-		return nil, exit(2, "%s url %q is invalid", providerName, apiURL)
+		return nil, core.Exit(2, "%s url %q is invalid", providerName, apiURL)
 	}
-	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
-		return nil, exit(2, "%s url %q must use https unless it targets localhost", providerName, apiURL)
+	if parsed.Scheme != "https" && !shared.IsLoopbackHTTPURL(parsed) {
+		return nil, core.Exit(2, "%s url %q must use https unless it targets localhost", providerName, apiURL)
 	}
 	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return nil, exit(2, "%s url %q must not include query or fragment components", providerName, apiURL)
+		return nil, core.Exit(2, "%s url %q must not include query or fragment components", providerName, apiURL)
 	}
 	baseURL := strings.TrimRight(parsed.String(), "/")
 	httpClient := rt.HTTP
@@ -118,7 +99,7 @@ func newCloudflareClient(cfg Config, rt Runtime) (*cloudflareClient, error) {
 }
 
 func (c *cloudflareClient) useInstanceType(instanceType string) {
-	if normalized, ok := normalizeCloudflareContainerInstanceType(instanceType); ok {
+	if normalized, ok := core.NormalizeCloudflareContainerInstanceType(instanceType); ok {
 		c.instanceType = normalized
 	}
 }
@@ -138,10 +119,6 @@ func defaultCloudflareHTTPClient() (*http.Client, error) {
 
 func cloudflareRedirectError(destination *url.URL) error {
 	return fmt.Errorf("%s refused cross-origin redirect to %s", providerName, destination.Redacted())
-}
-
-func isLoopbackHTTPURL(parsed *url.URL) bool {
-	return shared.IsLoopbackHTTPURL(parsed)
 }
 
 func (c *cloudflareClient) createSandbox(ctx context.Context, req createSandboxRequest) (cloudflareContainer, error) {
@@ -203,12 +180,8 @@ func (c *cloudflareClient) uploadFile(ctx context.Context, sandboxID, localPath,
 	return nil
 }
 
-func (c *cloudflareClient) execStream(ctx context.Context, sandboxID string, req execStreamRequest, stdout, stderr io.Writer) (int, error) {
-	var body bytes.Buffer
-	if err := json.NewEncoder(&body).Encode(req); err != nil {
-		return 0, err
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+c.sandboxEndpoint(sandboxID, "/exec-stream"), &body)
+func (c *cloudflareClient) execStream(ctx context.Context, sandboxID string, req shared.CommandStreamRequest, stdout, stderr io.Writer) (int, error) {
+	httpReq, err := shared.NewJSONRequest(ctx, http.MethodPost, c.baseURL+c.sandboxEndpoint(sandboxID, "/exec-stream"), req)
 	if err != nil {
 		return 0, err
 	}
@@ -222,54 +195,10 @@ func (c *cloudflareClient) execStream(ctx context.Context, sandboxID string, req
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return 0, c.responseError(resp)
 	}
-	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	if mediaType != "" && mediaType != "application/x-ndjson" && mediaType != "application/jsonl" {
-		return 0, fmt.Errorf("unexpected %s stream content-type %q", providerName, resp.Header.Get("Content-Type"))
-	}
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	exitCode := 0
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		var event execStreamEvent
-		if err := json.Unmarshal(line, &event); err != nil {
-			return exitCode, fmt.Errorf("decode %s stream event: %w", providerName, err)
-		}
-		switch event.Type {
-		case "stdout":
-			if stdout != nil {
-				if _, err := io.WriteString(stdout, event.Data); err != nil {
-					return exitCode, fmt.Errorf("write %s stdout: %w", providerName, err)
-				}
-			}
-		case "stderr":
-			if stderr != nil {
-				if _, err := io.WriteString(stderr, event.Data); err != nil {
-					return exitCode, fmt.Errorf("write %s stderr: %w", providerName, err)
-				}
-			}
-		case "complete":
-			if event.ExitCode != nil {
-				exitCode = *event.ExitCode
-			}
-			return exitCode, nil
-		case "error":
-			if event.Error == "" {
-				event.Error = "stream error"
-			}
-			return exitCode, errors.New(redactCloudflareRunnerSecrets(event.Error, c.token))
-		case "start", "heartbeat":
-		default:
-			return exitCode, fmt.Errorf("unknown %s stream event %q", providerName, event.Type)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return exitCode, err
-	}
-	return exitCode, fmt.Errorf("%s stream ended before completion", providerName)
+	return (shared.CommandStream{
+		Provider:    providerName,
+		RedactError: func(message string) string { return redactCloudflareRunnerSecrets(message, c.token) },
+	}).Read(ctx, resp, stdout, stderr)
 }
 
 func (c *cloudflareClient) sandboxEndpoint(sandboxID, suffix string) string {
@@ -278,15 +207,7 @@ func (c *cloudflareClient) sandboxEndpoint(sandboxID, suffix string) string {
 }
 
 func (c *cloudflareClient) doJSON(ctx context.Context, method, endpoint string, input any, output any) error {
-	var body io.Reader
-	if input != nil {
-		var buf bytes.Buffer
-		if err := json.NewEncoder(&buf).Encode(input); err != nil {
-			return err
-		}
-		body = &buf
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+endpoint, body)
+	req, err := shared.NewJSONRequest(ctx, method, c.baseURL+endpoint, input)
 	if err != nil {
 		return err
 	}
@@ -308,19 +229,26 @@ func (c *cloudflareClient) doJSON(ctx context.Context, method, endpoint string, 
 	return json.NewDecoder(resp.Body).Decode(output)
 }
 
+type cloudflareResponseError struct {
+	statusCode int
+	message    string
+}
+
+func (e *cloudflareResponseError) Error() string { return e.message }
+
 func (c *cloudflareClient) responseError(resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	var payload struct {
 		Error string `json:"error"`
 	}
-	if err := json.Unmarshal(body, &payload); err == nil && strings.TrimSpace(payload.Error) != "" {
-		return fmt.Errorf("%s API %s: %s", providerName, resp.Status, redactCloudflareRunnerSecrets(payload.Error, c.token))
-	}
 	text := strings.TrimSpace(string(body))
+	if err := json.Unmarshal(body, &payload); err == nil && strings.TrimSpace(payload.Error) != "" {
+		text = payload.Error
+	}
 	if text == "" {
 		text = resp.Status
 	}
-	return fmt.Errorf("%s API %s: %s", providerName, resp.Status, redactCloudflareRunnerSecrets(text, c.token))
+	return &cloudflareResponseError{statusCode: resp.StatusCode, message: fmt.Sprintf("%s API %s: %s", providerName, resp.Status, redactCloudflareRunnerSecrets(text, c.token))}
 }
 
 func redactCloudflareRunnerSecrets(value string, secrets ...string) string {
@@ -332,8 +260,4 @@ func redactCloudflareRunnerSecrets(value string, secrets ...string) string {
 		}
 	}
 	return cloudflareBearerPattern.ReplaceAllString(redacted, "Bearer [redacted]")
-}
-
-func remoteArchivePath() string {
-	return path.Join("/tmp", "crabbox-cloudflare-sync-"+time.Now().UTC().Format("20060102150405.000000000")+".tgz")
 }

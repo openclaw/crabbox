@@ -58,14 +58,14 @@ func captureRemoteMacVNCScreenshot(ctx context.Context, cfg Config, target SSHTa
 	defer conn.Close()
 	img, err := captureRFBFrameFromConn(ctx, conn, creds, authMode)
 	if err != nil {
-		return exit(5, "capture macOS VNC screenshot: %v", err)
+		return Exit(5, "capture macOS VNC screenshot: %v", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
-		return exit(2, "create screenshot directory: %v", err)
+		return Exit(2, "create screenshot directory: %v", err)
 	}
 	file, err := os.Create(outputPath)
 	if err != nil {
-		return exit(2, "create screenshot %s: %v", outputPath, err)
+		return Exit(2, "create screenshot %s: %v", outputPath, err)
 	}
 	ok := false
 	defer func() {
@@ -75,7 +75,7 @@ func captureRemoteMacVNCScreenshot(ctx context.Context, cfg Config, target SSHTa
 		}
 	}()
 	if err := png.Encode(file, img); err != nil {
-		return exit(5, "write screenshot PNG: %v", err)
+		return Exit(5, "write screenshot PNG: %v", err)
 	}
 	ok = true
 	return nil

@@ -2,10 +2,7 @@ package cli
 
 import (
 	"context"
-	"fmt"
-	"io"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 )
@@ -112,16 +109,6 @@ func shortenProbeError(s string) string {
 	return s
 }
 
-// Reachability cell states used by the pond doctor matrix. The mapping in
-// reachabilityCell captures the asymmetric reality of the four planes — a
-// peer reachable only by URL cannot be dialed from a peer that lives only
-// on the tailnet (the tailnet member has no public endpoint to push toward).
-const (
-	reachOK   = "ok"
-	reachWarn = "warn"
-	reachNo   = "no"
-)
-
 // ReachabilityCell records a single source→destination cell of the pond
 // reachability matrix. Note carries the honest caveat for non-trivial cells
 // (operator-side bridges, asymmetric reach, …).
@@ -142,153 +129,4 @@ type PondReachabilityMatrix struct {
 	Breakdown  map[string]int     `json:"breakdown"`
 	Transports []string           `json:"transports"`
 	Cells      []ReachabilityCell `json:"cells"`
-}
-
-// pondReachableTransports is the canonical ordering for matrix rows/cols.
-// `pending` is folded into `tailnet` in the breakdown (class is known; only
-// the live endpoint is missing); `none` is reported as a separate row so
-// doctor can be honest about the gap.
-var pondReachableTransports = []string{
-	TransportTailnet,
-	TransportURL,
-	TransportSSH,
-	TransportPending,
-	TransportNone,
-}
-
-// reachabilityCell returns the ok/warn/no cell for a (from, to) transport
-// pair plus the honest note attached to it. The mapping is asymmetric on
-// purpose — see docs/features/pond.md for the rationale.
-func reachabilityCell(from, to string) ReachabilityCell {
-	cell := ReachabilityCell{From: from, To: to, State: reachNo}
-	switch from {
-	case TransportTailnet:
-		switch to {
-		case TransportTailnet:
-			cell.State = reachOK
-		case TransportURL:
-			cell.State = reachOK
-			cell.Note = "via outbound HTTPS"
-		case TransportSSH:
-			cell.State = reachWarn
-			cell.Note = "requires operator-side bridge — see SSH-mesh DRAFT PR"
-		case TransportNone, TransportPending:
-			cell.Note = "destination has no published endpoint"
-		}
-	case TransportURL:
-		switch to {
-		case TransportTailnet:
-			cell.Note = "no public endpoint on tailnet members"
-		case TransportURL:
-			cell.State = reachOK
-		case TransportSSH:
-			cell.State = reachWarn
-			cell.Note = "requires operator-side bridge"
-		case TransportNone, TransportPending:
-			cell.Note = "destination has no published endpoint"
-		}
-	case TransportSSH:
-		switch to {
-		case TransportTailnet:
-			cell.State = reachWarn
-			cell.Note = "requires operator-side bridge"
-		case TransportURL:
-			cell.State = reachOK
-			cell.Note = "via outbound HTTPS"
-		case TransportSSH:
-			cell.State = reachWarn
-			cell.Note = "requires operator-side bridge — peers do not share a mesh"
-		case TransportNone, TransportPending:
-			cell.Note = "destination has no published endpoint"
-		}
-	case TransportNone:
-		cell.Note = "source provider owns its own connectivity"
-	case TransportPending:
-		cell.Note = "endpoint not yet discovered"
-	}
-	return cell
-}
-
-// buildPondReachabilityMatrix folds a peer list into the doctor matrix. It
-// only emits rows/cols for transports actually present in the pond, so a
-// pond with no SSH-lease members will not get an "ssh →" row.
-func buildPondReachabilityMatrix(pond string, peers []BridgePeer) PondReachabilityMatrix {
-	breakdown := map[string]int{}
-	for _, peer := range peers {
-		key := peer.Transport
-		breakdown[key]++
-	}
-	transports := observedTransports(breakdown)
-	cells := make([]ReachabilityCell, 0, len(transports)*len(transports))
-	for _, from := range transports {
-		for _, to := range transports {
-			cells = append(cells, reachabilityCell(from, to))
-		}
-	}
-	return PondReachabilityMatrix{
-		Pond:       pond,
-		Members:    peers,
-		Breakdown:  breakdown,
-		Transports: transports,
-		Cells:      cells,
-	}
-}
-
-func observedTransports(breakdown map[string]int) []string {
-	seen := map[string]bool{}
-	for transport, count := range breakdown {
-		if count > 0 {
-			seen[transport] = true
-		}
-	}
-	out := make([]string, 0, len(seen))
-	// Use the canonical ordering rather than alphabetical so the matrix reads
-	// "tailnet, url, ssh, none" — the natural order from least-trust to
-	// most-isolated source.
-	for _, t := range pondReachableTransports {
-		if seen[t] {
-			out = append(out, t)
-		}
-	}
-	return out
-}
-
-// renderPondReachabilityMatrix prints the doctor matrix in the same shape
-// shown in the user-facing docs. Cell glyphs are pure ASCII so the output
-// stays readable on terminals without unicode font support.
-func renderPondReachabilityMatrix(w io.Writer, matrix PondReachabilityMatrix) {
-	fmt.Fprintf(w, "pond %q: %d members\n", matrix.Pond, len(matrix.Members))
-	parts := make([]string, 0, len(matrix.Breakdown))
-	for _, transport := range pondReachableTransports {
-		if matrix.Breakdown[transport] > 0 {
-			parts = append(parts, fmt.Sprintf("%s=%d", transport, matrix.Breakdown[transport]))
-		}
-	}
-	sort.Strings(parts)
-	fmt.Fprintf(w, "  transport breakdown: %s\n", strings.Join(parts, " "))
-	if len(matrix.Cells) == 0 {
-		return
-	}
-	fmt.Fprintln(w, "  reachability:")
-	for _, cell := range matrix.Cells {
-		glyph := reachabilityGlyph(cell.State)
-		line := fmt.Sprintf("    %-7s -> %-7s : %s", cell.From, cell.To, glyph)
-		if cell.Note != "" {
-			line += " (" + cell.Note + ")"
-		}
-		fmt.Fprintln(w, line)
-	}
-}
-
-func reachabilityGlyph(state string) string {
-	switch state {
-	case reachOK:
-		return "OK"
-	case reachWarn:
-		return "WARN"
-	case reachNo:
-		return "NO"
-	default:
-		return state
-	}
 }

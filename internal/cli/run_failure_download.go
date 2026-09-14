@@ -99,10 +99,10 @@ func (w *runExitWitness) finish(ctx context.Context, transportCode int, transpor
 		return transportCode, transportErr, false
 	}
 	if w.invalid || !w.exited {
-		return 7, exit(7, "SSH completion did not include a valid owned workload exit marker; failure downloads skipped"), false
+		return 7, Exit(7, "SSH completion did not include a valid owned workload exit marker; failure downloads skipped"), false
 	}
 	if !w.started && w.code == 0 {
-		return 7, exit(7, "SSH setup did not reach the workload; failure downloads skipped"), false
+		return 7, Exit(7, "SSH setup did not reach the workload; failure downloads skipped"), false
 	}
 	return w.code, nil, w.started && w.code != 0
 }
@@ -138,7 +138,7 @@ func (w *runExitWitness) command(workdir string, env map[string]string, envFiles
 
 func validateFailureDownloadTarget(target SSHTarget, downloads []string) error {
 	if len(downloads) > 0 && target.TargetOS != targetLinux {
-		return exit(2, "--download-on-failure requires an ordinary SSH-backed Linux target")
+		return Exit(2, "--download-on-failure requires an ordinary SSH-backed Linux target")
 	}
 	return nil
 }

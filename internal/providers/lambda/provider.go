@@ -15,10 +15,9 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return nil }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		Name:             providerName,
 		Family:           providerName,
 		Kind:             core.ProviderKindSSHLease,
@@ -40,10 +39,6 @@ func (Provider) ValidateConfig(cfg core.Config) error {
 
 func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return typeForConfig(cfg)
-}
-
-func (Provider) ServerTypeForClass(class string) string {
-	return serverTypeForClass(class)
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {

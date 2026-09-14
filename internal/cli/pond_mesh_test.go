@@ -232,7 +232,7 @@ func TestDirectLeaseLabelsRecordExposedPorts(t *testing.T) {
 		TTL:          15 * time.Minute,
 		IdleTimeout:  4 * time.Minute,
 	}
-	labels := directLeaseLabels(cfg, "cbx_abcdef123456", "blue-lobster", "hetzner", "", true, now)
+	labels := DirectLeaseLabels(cfg, "cbx_abcdef123456", "blue-lobster", "hetzner", "", true, now)
 	if labels[pondExposedPortsLabelKey] != "8080-9090" {
 		t.Fatalf("crabbox_exposed_ports label=%q want 8080-9090; full=%#v", labels[pondExposedPortsLabelKey], labels)
 	}
@@ -248,7 +248,7 @@ func TestDirectLeaseLabelsOmitExposedPortsWhenEmpty(t *testing.T) {
 		TTL:         15 * time.Minute,
 		IdleTimeout: 4 * time.Minute,
 	}
-	labels := directLeaseLabels(cfg, "cbx_abcdef123456", "blue-lobster", "hetzner", "", true, now)
+	labels := DirectLeaseLabels(cfg, "cbx_abcdef123456", "blue-lobster", "hetzner", "", true, now)
 	if _, ok := labels[pondExposedPortsLabelKey]; ok {
 		t.Fatalf("expected no exposed-ports label when none requested; got %#v", labels)
 	}
@@ -265,25 +265,6 @@ func TestParseExposedPortsLabelTolerantOfGarbage(t *testing.T) {
 	}
 	if got := parseExposedPortsLabel("99999999"); len(got) != 0 {
 		t.Fatalf("out-of-range token should be dropped; got %v", got)
-	}
-}
-
-func TestPondMeshDoctorCounts(t *testing.T) {
-	servers := []Server{
-		{Name: "web", Labels: map[string]string{pondLabelKey: "alpha", pondExposedPortsLabelKey: "8080-9090"}},
-		{Name: "client", Labels: map[string]string{pondLabelKey: "alpha"}},
-		{Name: "worker", Labels: map[string]string{pondLabelKey: "alpha", pondExposedPortsLabelKey: "3000"}},
-	}
-	members, exposed, ports := pondMeshDoctorCounts(servers)
-	if members != 3 || exposed != 2 || ports != 3 {
-		t.Fatalf("counts=(%d,%d,%d) want (3,2,3)", members, exposed, ports)
-	}
-}
-
-func TestPondMeshDoctorCountsEmpty(t *testing.T) {
-	members, exposed, ports := pondMeshDoctorCounts(nil)
-	if members != 0 || exposed != 0 || ports != 0 {
-		t.Fatalf("counts=(%d,%d,%d) want (0,0,0)", members, exposed, ports)
 	}
 }
 
@@ -735,7 +716,7 @@ func TestCollectPondMembersResolvesByLeaseIDBeforeSlug(t *testing.T) {
 		{Name: "server-b", Labels: map[string]string{pondLabelKey: "alpha", "slug": "web", "lease": "cbx_web_b", pondExposedPortsLabelKey: "9090"}},
 	}
 	for _, leaseID := range []string{"cbx_web_a", "cbx_web_b"} {
-		if err := claimLeaseForRepoProvider(leaseID, leaseID, "hetzner", t.TempDir(), time.Hour, false); err != nil {
+		if err := ClaimLeaseForRepoProvider(leaseID, leaseID, "hetzner", t.TempDir(), time.Hour, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -750,7 +731,7 @@ func TestCollectPondMembersResolvesByLeaseIDBeforeSlug(t *testing.T) {
 		t.Fatalf("members=%#v", members)
 	}
 	for _, leaseID := range []string{"cbx_web_a", "cbx_web_b"} {
-		claim, ok, err := resolveLeaseClaimForProvider(leaseID, "hetzner")
+		claim, ok, err := ResolveLeaseClaimForProvider(leaseID, "hetzner")
 		if err != nil || !ok || claim.SSHHost != leaseID+".example" || claim.SSHPort != 22 {
 			t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
 		}
@@ -775,7 +756,7 @@ func TestCollectPondMembersRefreshesRetainedStoppedClaim(t *testing.T) {
 			pondExposedPortsLabelKey: "8080",
 		},
 	}
-	if err := claimLeaseTargetForRepoConfig(leaseID, "web", Config{Provider: "hetzner"}, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := ClaimLeaseTargetForRepoConfig(leaseID, "web", Config{Provider: "hetzner"}, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	members, err := collectPondMembers(context.Background(), &pondMeshResolveRecordingBackend{}, Config{}, []Server{server}, "alpha")
@@ -785,7 +766,7 @@ func TestCollectPondMembersRefreshesRetainedStoppedClaim(t *testing.T) {
 	if len(members) != 1 || members[0].SSH.Host != leaseID+".example" {
 		t.Fatalf("members=%#v", members)
 	}
-	claim, ok, err := resolveLeaseClaimForProvider(leaseID, "hetzner")
+	claim, ok, err := ResolveLeaseClaimForProvider(leaseID, "hetzner")
 	if err != nil || !ok || claim.Labels["state"] != "ready" || claim.SSHHost != leaseID+".example" || claim.SSHPort != 22 {
 		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
 	}
@@ -805,12 +786,12 @@ func TestCollectPondMembersDoesNotRestoreStoppedClaim(t *testing.T) {
 		pondExposedPortsLabelKey: "8080",
 	}
 	server := Server{CloudID: "server-web", Provider: "hetzner", Name: "server-web", Labels: labels}
-	if err := claimLeaseTargetForRepoConfig(leaseID, "web", Config{Provider: "hetzner"}, server, SSHTarget{Host: "old.example", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
+	if err := ClaimLeaseTargetForRepoConfig(leaseID, "web", Config{Provider: "hetzner"}, server, SSHTarget{Host: "old.example", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	var stopErr error
 	backend := &pondMeshResolveRecordingBackend{afterResolve: func(LeaseTarget) {
-		claim, ok, err := resolveLeaseClaimForProvider(leaseID, "hetzner")
+		claim, ok, err := ResolveLeaseClaimForProvider(leaseID, "hetzner")
 		if err != nil || !ok {
 			stopErr = fmt.Errorf("resolve claim: ok=%t err=%v", ok, err)
 			return
@@ -818,7 +799,7 @@ func TestCollectPondMembersDoesNotRestoreStoppedClaim(t *testing.T) {
 		stopped := server
 		stopped.Labels = cloneStringMap(server.Labels)
 		stopped.Labels["state"] = "stopped"
-		_, stopErr = updateLeaseClaimEndpointIfUnchanged(leaseID, claim, stopped, SSHTarget{})
+		_, stopErr = UpdateLeaseClaimEndpointIfUnchanged(leaseID, claim, stopped, SSHTarget{})
 	}}
 	_, err := collectPondMembers(context.Background(), backend, Config{}, []Server{server}, "alpha")
 	if stopErr != nil {
@@ -827,7 +808,7 @@ func TestCollectPondMembersDoesNotRestoreStoppedClaim(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "became inactive during resolve") {
 		t.Fatalf("collectPondMembers err=%v", err)
 	}
-	claim, ok, err := resolveLeaseClaimForProvider(leaseID, "hetzner")
+	claim, ok, err := ResolveLeaseClaimForProvider(leaseID, "hetzner")
 	if err != nil || !ok || claim.Labels["state"] != "stopped" || claim.SSHHost != "" || claim.SSHPort != 0 {
 		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
 	}

@@ -21,7 +21,7 @@ trap cleanup EXIT
 profile="$work_dir/coverage.out"
 core_profile="$work_dir/core-coverage.out"
 
-go test ./... -covermode=atomic -coverprofile="$profile"
+go test -timeout=15m ./... -covermode=atomic -coverprofile="$profile"
 
 awk '
   NR == 1 {

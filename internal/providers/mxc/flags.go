@@ -44,36 +44,47 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "mxc-cli") {
 		cfg.MXC.CLIPath = *v.CLIPath
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "mxc-version") {
 		cfg.MXC.Version = *v.Version
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "mxc-containment") {
 		cfg.MXC.Containment = *v.Containment
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "mxc-network") {
 		cfg.MXC.Network = *v.Network
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "mxc-readonly-paths") {
 		cfg.MXC.ReadOnlyPaths = splitCSV(*v.ReadOnly)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "mxc-readwrite-paths") {
 		cfg.MXC.ReadWritePaths = splitCSV(*v.ReadWrite)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "mxc-allowed-hosts") {
 		cfg.MXC.AllowedHosts = splitCSV(*v.AllowedHosts)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "mxc-blocked-hosts") {
 		cfg.MXC.BlockedHosts = splitCSV(*v.BlockedHosts)
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "mxc-allow-dacl-mutation") {
 		cfg.MXC.AllowDACLMutation = *v.AllowDACLMutation
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "mxc-allow-windows-ui") {
 		cfg.MXC.AllowWindowsUI = *v.AllowWindowsUI
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	if core.FlagWasSet(fs, "mxc-experimental") {
 		cfg.MXC.Experimental = *v.Experimental
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
 	return nil
 }

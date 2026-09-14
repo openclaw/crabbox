@@ -143,7 +143,7 @@ func TestFailureBundleReadErrorsDoNotFallback(t *testing.T) {
 
 func assertNoFailureBundleFallback(t *testing.T) {
 	t.Helper()
-	state, err := crabboxStateDir()
+	state, err := CrabboxStateDir()
 	if err != nil {
 		t.Fatal(err)
 	}

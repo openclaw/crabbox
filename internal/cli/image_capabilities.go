@@ -31,7 +31,7 @@ type imageRequirements struct {
 
 func parseImageVersions(values []string, flagName string) (map[string]string, error) {
 	if len(values) > 32 {
-		return nil, exit(2, "--%s supports at most 32 entries", flagName)
+		return nil, Exit(2, "--%s supports at most 32 entries", flagName)
 	}
 	parsed := map[string]string{}
 	for _, value := range values {
@@ -39,10 +39,10 @@ func parseImageVersions(values []string, flagName string) (map[string]string, er
 		name = strings.ToLower(strings.TrimSpace(name))
 		version = strings.TrimSpace(version)
 		if !ok || !validImageCapabilityName(name) || !validImageVersion(version) {
-			return nil, exit(2, "--%s must use name=dot.separated.numeric.version", flagName)
+			return nil, Exit(2, "--%s must use name=dot.separated.numeric.version", flagName)
 		}
 		if existing, ok := parsed[name]; ok && existing != version {
-			return nil, exit(2, "--%s declares conflicting versions for %s", flagName, name)
+			return nil, Exit(2, "--%s declares conflicting versions for %s", flagName, name)
 		}
 		parsed[name] = version
 	}
@@ -59,12 +59,12 @@ func mergeImageVersions(base, additions map[string]string, baseFlag, additionsFl
 	}
 	for name, version := range additions {
 		if existing, ok := merged[name]; ok && existing != version {
-			return nil, exit(2, "--%s and --%s declare conflicting versions for %s", baseFlag, additionsFlag, name)
+			return nil, Exit(2, "--%s and --%s declare conflicting versions for %s", baseFlag, additionsFlag, name)
 		}
 		merged[name] = version
 	}
 	if len(merged) > 32 {
-		return nil, exit(2, "--%s and --%s support at most 32 combined entries", baseFlag, additionsFlag)
+		return nil, Exit(2, "--%s and --%s support at most 32 combined entries", baseFlag, additionsFlag)
 	}
 	if len(merged) == 0 {
 		return nil, nil
@@ -123,7 +123,7 @@ func validImageVersion(value string) bool {
 
 func validateImageVersion(value, flagName string) error {
 	if value != "" && !validImageVersion(value) {
-		return exit(2, "--%s must be a dot-separated numeric version", flagName)
+		return Exit(2, "--%s must be a dot-separated numeric version", flagName)
 	}
 	return nil
 }
@@ -135,7 +135,7 @@ func imageRequirementsEmpty(value imageRequirements) bool {
 
 func validateReadyPoolImageRequirements(value imageRequirements, pool string) error {
 	if strings.TrimSpace(pool) != "" && !imageRequirementsEmpty(value) {
-		return exit(2, "--pool cannot verify image capability requirements; omit --pool or the --image-* flags")
+		return Exit(2, "--pool cannot verify image capability requirements; omit --pool or the --image-* flags")
 	}
 	return nil
 }

@@ -1,5 +1,8 @@
 #!/bin/bash
-set -euxo pipefail
+# User-data stdout/stderr are logged; never trace generated account credentials.
+set +x
+set -euo pipefail
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 crabbox_user={{user}}
 crabbox_work_root={{workRoot}}
 crabbox_public_key={{publicKey}}
@@ -52,8 +55,9 @@ if [ ! -s /var/db/crabbox/vnc.password ]; then
     echo "failed to generate vnc password" >&2
     exit 1
   fi
-  printf '%s\n' "$pw" >/var/db/crabbox/vnc.password
-  dscl . -passwd /Users/{{user}} "$pw"
+  (umask 077 && printf '%s\n' "$pw" >/var/db/crabbox/vnc.password)
+  # EC2 user data has no TTY, so dscl's password prompt reads stdin.
+  dscl . -passwd /Users/{{user}} </var/db/crabbox/vnc.password
 fi
 chmod 0600 /var/db/crabbox/vnc.password
 launchctl enable system/com.apple.screensharing || true
@@ -62,8 +66,11 @@ launchctl kickstart -k system/com.apple.screensharing || true
 cat >/usr/local/bin/crabbox-ready <<'READY'
 #!/bin/bash
 set -euo pipefail
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 rsync --version >/dev/null
 curl --version >/dev/null
+node --version >/dev/null
+npm --version >/dev/null
 test -w {{workRoot}}
 ssh_ready=0
 for port in {{ports}}; do

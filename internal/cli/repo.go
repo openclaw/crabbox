@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -184,10 +185,11 @@ func repositoryGitEnvironment() []string {
 }
 
 type gitTrackedPath struct {
-	name         string
-	mode         string
-	stage        int
-	skipWorktree bool
+	name            string
+	mode            string
+	stage           int
+	skipWorktree    bool
+	assumeUnchanged bool
 }
 
 // GitCheckoutHasHiddenOmissions reports whether sparse rules or skip-worktree
@@ -229,7 +231,7 @@ func gitCheckoutSparseEnabled(root string) bool {
 }
 
 func loadGitTrackedPaths(root string) ([]gitTrackedPath, error) {
-	trackedCmd := exec.Command("git", "ls-files", "-t", "--stage", "-z")
+	trackedCmd := exec.Command("git", "ls-files", "-v", "--stage", "-z")
 	trackedCmd.Dir = root
 	trackedCmd.Env = repositoryGitEnvironment()
 	tagged, err := trackedCmd.Output()
@@ -319,10 +321,11 @@ func parseGitTrackedPaths(tagged []byte) ([]gitTrackedPath, error) {
 			return nil, fmt.Errorf("parse tracked path stage %q", fields[2])
 		}
 		tracked = append(tracked, gitTrackedPath{
-			name:         string(name),
-			mode:         mode,
-			stage:        stage,
-			skipWorktree: record[0] == 'S',
+			name:            string(name),
+			mode:            mode,
+			stage:           stage,
+			skipWorktree:    record[0] == 'S' || record[0] == 's',
+			assumeUnchanged: record[0] >= 'a' && record[0] <= 'z',
 		})
 	}
 	return tracked, nil
@@ -374,7 +377,9 @@ func nulPathSet(out []byte) map[string]struct{} {
 	return paths
 }
 
-func findRepo() (Repo, error) {
+// Root-only callers share Git/Jujutsu discovery without querying remote or
+// branch metadata that cannot affect workspace ownership.
+func findRepositoryBoundary() (repositoryBoundary, error) {
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 	cmd.Env = repositoryGitEnvironment()
 	out, err := cmd.Output()
@@ -383,25 +388,37 @@ func findRepo() (Repo, error) {
 		if !explicitGitRepositoryRouting() {
 			boundary, boundaryErr := nearestRepositoryBoundary(wd, "")
 			if boundaryErr != nil {
-				return Repo{}, boundaryErr
+				return repositoryBoundary{}, boundaryErr
 			}
 			if boundary.kind == repositoryBoundaryNativeJujutsu {
-				return Repo{Root: boundary.root, Name: filepath.Base(boundary.root)}, nil
+				return boundary, nil
 			}
 		}
-		return Repo{Root: wd, Name: filepath.Base(wd)}, nil
+		return repositoryBoundary{root: wd}, nil
 	}
 	root := strings.TrimSpace(string(out))
 	if !explicitGitRepositoryRouting() {
 		wd, getwdErr := os.Getwd()
 		if getwdErr != nil {
-			return Repo{}, getwdErr
+			return repositoryBoundary{}, getwdErr
 		}
 		if boundary, boundaryErr := nearestRepositoryBoundary(wd, root); boundaryErr != nil {
-			return Repo{}, boundaryErr
+			return repositoryBoundary{}, boundaryErr
 		} else if boundary.kind == repositoryBoundaryNativeJujutsu {
-			return Repo{Root: boundary.root, Name: filepath.Base(boundary.root)}, nil
+			return boundary, nil
 		}
+	}
+	return repositoryBoundary{root: root, kind: repositoryBoundaryGit}, nil
+}
+
+func findRepo() (Repo, error) {
+	boundary, err := findRepositoryBoundary()
+	if err != nil {
+		return Repo{}, err
+	}
+	root := boundary.root
+	if boundary.kind != repositoryBoundaryGit {
+		return Repo{Root: root, Name: filepath.Base(root)}, nil
 	}
 	remoteURL := gitOutput(root, "remote", "get-url", "origin")
 	return Repo{
@@ -501,7 +518,8 @@ type syncExcludeRule struct {
 // SyncExcludeRules keeps ordered matcher provenance internal while allowing
 // provider adapters to pass the rules back to the core manifest owner.
 type SyncExcludeRules struct {
-	rules []syncExcludeRule
+	rules          []syncExcludeRule
+	managedSubtree string
 }
 
 func configuredExcludes(cfg Config) SyncExcludeRules {
@@ -516,6 +534,11 @@ func configuredExcludes(cfg Config) SyncExcludeRules {
 
 func syncExcludes(root string, cfg Config) (SyncExcludeRules, error) {
 	excludes := configuredExcludes(cfg)
+	managed, err := managedStateSyncSubtree(root)
+	if err != nil {
+		return SyncExcludeRules{}, err
+	}
+	excludes.managedSubtree = managed
 	ignore, err := readCrabboxIgnore(root)
 	if err != nil {
 		return SyncExcludeRules{}, err
@@ -529,7 +552,7 @@ func newSyncExcludeRules(patterns []string, origin syncExcludeOrigin) SyncExclud
 }
 
 func (r SyncExcludeRules) append(patterns []string, origin syncExcludeOrigin) SyncExcludeRules {
-	out := SyncExcludeRules{rules: append([]syncExcludeRule(nil), r.rules...)}
+	out := SyncExcludeRules{rules: append([]syncExcludeRule(nil), r.rules...), managedSubtree: r.managedSubtree}
 	for _, pattern := range patterns {
 		if pattern = strings.TrimSpace(pattern); pattern != "" {
 			out.rules = append(out.rules, syncExcludeRule{pattern: pattern, origin: origin})
@@ -616,12 +639,17 @@ func syncGitCoherencePlan(cfg Config, repo Repo) (gitCoherencePlan, bool) {
 	if !cfg.Sync.GitSeed || len(syncIncludes(cfg)) != 0 || repo.Root == "" || repo.RemoteURL == "" || repo.Head == "" {
 		return gitCoherencePlan{}, false
 	}
+	// A seed materializes a whole remote tree, outside local file filtering.
+	// Nested managed state therefore uses file sync, including on Windows.
+	if subtree, err := managedStateSyncSubtree(repo.Root); err != nil || subtree != "" {
+		return gitCoherencePlan{}, false
+	}
 	if gitRemoteURLHasCredentials(repo.RemoteURL) {
 		return gitCoherencePlan{}, true
 	}
 	target := gitOutput(repo.Root, "rev-parse", "--verify", repo.Head+"^{commit}")
 	tree := gitOutput(repo.Root, "rev-parse", "--verify", repo.Head+"^{tree}")
-	branch := originBranchForTarget(repo.Root, repo.BaseRef, target)
+	branch := originBranchForTarget(repo.Root, firstNonBlank(cfg.Sync.BaseRef, repo.BaseRef), target)
 	plan := gitCoherencePlan{RemoteURL: normalizeGitRemoteURL(repo.RemoteURL), Target: target, Branch: branch}
 	if target == "" || target != repo.Head || branch == "" {
 		return gitCoherencePlan{}, false
@@ -638,17 +666,18 @@ func originBranchForTarget(root, baseRef, target string) string {
 	if target == "" {
 		return ""
 	}
+	out := gitOutput(root, "for-each-ref", "--contains="+target, "--sort=refname", "--format=%(refname)", "refs/remotes/origin")
+	eligibleRefs := strings.Split(out, "\n")
 	if branch := normalizedOriginBranch(baseRef); branch != "" &&
-		gitOutput(root, "rev-parse", "--verify", "refs/remotes/origin/"+branch+"^{commit}") == target {
+		slices.Contains(eligibleRefs, "refs/remotes/origin/"+branch) {
 		return branch
 	}
 	originHead := gitOutput(root, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
 	if branch := normalizedOriginBranch(originHead); branch != "" &&
-		gitOutput(root, "rev-parse", "--verify", "refs/remotes/origin/"+branch+"^{commit}") == target {
+		slices.Contains(eligibleRefs, "refs/remotes/origin/"+branch) {
 		return branch
 	}
-	out := gitOutput(root, "for-each-ref", "--contains="+target, "--sort=refname", "--format=%(refname)", "refs/remotes/origin")
-	for _, line := range strings.Split(out, "\n") {
+	for _, line := range eligibleRefs {
 		if branch := normalizedOriginBranch(line); branch != "" {
 			return branch
 		}
@@ -738,7 +767,7 @@ func readCrabboxIgnore(root string) ([]string, error) {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, exit(2, "read .crabboxignore: %v", err)
+		return nil, Exit(2, "read .crabboxignore: %v", err)
 	}
 	lines := strings.Split(string(data), "\n")
 	patterns := make([]string, 0, len(lines))
@@ -759,7 +788,7 @@ func allowedEnv(allow []string) map[string]string {
 		if !ok {
 			continue
 		}
-		if !validEnvName(k) {
+		if !ValidShellEnvName(k) {
 			continue
 		}
 		if envAllowed(k, allow) {
@@ -852,7 +881,7 @@ func syncFingerprintForManifest(repo Repo, cfg Config, manifest SyncManifest, ex
 		fmt.Fprintf(h, "v1-overlay\nremote=%s\nbranch=%s\nhead=%s\ntree=%s\n", plan.RemoteURL, plan.Branch, plan.Target, plan.Tree)
 		fmt.Fprintf(h, "delete=%t\nchecksum=%t\ngitOverlay=true\n", cfg.Sync.Delete, cfg.Sync.Checksum)
 	} else {
-		fmt.Fprintf(h, "v5\nremote=%s\nbranch=%s\nhead=%s\ntree=%s\n", plan.RemoteURL, plan.Branch, plan.Target, plan.Tree)
+		fmt.Fprintf(h, "v6\nremote=%s\nbranch=%s\nhead=%s\ntree=%s\n", plan.RemoteURL, plan.Branch, plan.Target, plan.Tree)
 		fmt.Fprintf(h, "delete=%t\nchecksum=%t\n", cfg.Sync.Delete, cfg.Sync.Checksum)
 	}
 	fmt.Fprintf(h, "manifest=%x\n", sha256.Sum256(manifest.NUL()))
@@ -872,7 +901,7 @@ func syncFingerprintForManifest(repo Repo, cfg Config, manifest SyncManifest, ex
 		if info.IsDir() {
 			continue
 		}
-		if cfg.Sync.GitOverlay && info.Mode()&os.ModeSymlink != 0 {
+		if info.Mode()&os.ModeSymlink != 0 {
 			target, err := os.Readlink(full)
 			if err != nil {
 				return "", err
@@ -954,7 +983,22 @@ func gitSyncFileList(root string) ([]byte, error) {
 
 func validateLocalWorkspaceSyncSource(repo Repo) error {
 	if _, err := gitSyncFileList(repo.Root); err != nil {
-		return exit(6, "build sync file list: %v", err)
+		return Exit(6, "build sync file list: %v", err)
+	}
+	return nil
+}
+
+// Validate effective scope without retaining a manifest; transfer rebuilds it later.
+func validateLocalWorkspaceSyncScope(repo Repo, cfg Config) error {
+	if err := validateLocalWorkspaceSyncSource(repo); err != nil {
+		return err
+	}
+	excludes, err := syncExcludes(repo.Root, cfg)
+	if err != nil {
+		return err
+	}
+	if _, err := validatedSyncManifestScope(repo.Root, excludes, syncIncludes(cfg)); err != nil {
+		return Exit(6, "build sync file list: %v", err)
 	}
 	return nil
 }
@@ -972,38 +1016,37 @@ func syncManifestFiltered(root string, excludes, includes []string) (SyncManifes
 }
 
 func syncManifestFilteredRules(root string, excludes SyncExcludeRules, includes []string) (SyncManifest, error) {
+	managed, err := newManagedSyncScope(root)
+	if err != nil {
+		return SyncManifest{}, err
+	}
+	if managed.namespace != "" && managedPathContains(managed.source, managed.namespace) {
+		rel, err := filepath.Rel(managed.source, managed.namespace)
+		if err != nil {
+			return SyncManifest{}, err
+		}
+		excludes.managedSubtree = filepath.ToSlash(rel)
+	}
 	out, err := gitSyncFileList(root)
 	if err != nil {
 		return SyncManifest{}, err
 	}
-	tracked, err := loadGitTrackedPaths(root)
+	scope, err := validatedSyncManifestScope(root, excludes, includes)
 	if err != nil {
-		return SyncManifest{}, fmt.Errorf("verify sync manifest scope: %w", err)
+		return SyncManifest{}, err
 	}
-	trackedRegular := trackedRegularPathSet(tracked)
-	inManifestScope := func(entry gitTrackedPath) bool {
-		rel := filepath.ToSlash(entry.name)
-		return safeRepoRel(rel) &&
-			!pathExcludedByRules(rel, excludes, gitModeIsRegular(entry.mode)) &&
-			pathIncluded(rel, includes)
-	}
-	gitlinkPaths, err := trackedGitlinkPaths(tracked, inManifestScope)
-	if err != nil {
-		return SyncManifest{}, fmt.Errorf("verify sync manifest scope: %w", err)
-	}
-	hidden, err := gitCheckoutHiddenOmissionForTracked(root, tracked, gitCheckoutSparseEnabled(root), func(entry gitTrackedPath) bool {
-		return entry.mode != "160000" && inManifestScope(entry)
-	}, sparseCheckoutIncludedPaths)
-	if err != nil {
-		return SyncManifest{}, fmt.Errorf("verify sync manifest scope: %w", err)
-	}
-	if hidden != "" {
-		return SyncManifest{}, fmt.Errorf("tracked path %q is hidden by sparse checkout or skip-worktree state but remains in sync manifest scope", hidden)
-	}
+	trackedRegular, gitlinkPaths := scope.trackedRegular, scope.gitlinkPaths
 	seen := map[string]bool{}
 	manifest := SyncManifest{}
 	for _, rel := range splitNul(out) {
 		rel = filepath.ToSlash(rel)
+		protected, err := managed.contains(rel)
+		if err != nil {
+			return SyncManifest{}, err
+		}
+		if protected {
+			continue
+		}
 		_, isTrackedRegular := trackedRegular[rel]
 		excluded, protectedPattern := pathExcludeDecision(rel, excludes, isTrackedRegular)
 		if _, isGitlink := gitlinkPaths[rel]; isGitlink || !safeRepoRel(rel) || excluded || !pathIncluded(rel, includes) || seen[rel] {
@@ -1032,6 +1075,10 @@ func syncManifestFilteredRules(root string, excludes SyncExcludeRules, includes 
 	if err != nil {
 		return SyncManifest{}, err
 	}
+	deleted, err = managed.filter(deleted)
+	if err != nil {
+		return SyncManifest{}, err
+	}
 	for rel := range deletedGitlinks {
 		gitlinkPaths[rel] = struct{}{}
 	}
@@ -1043,9 +1090,46 @@ func syncManifestFilteredRules(root string, excludes SyncExcludeRules, includes 
 	if err != nil {
 		return SyncManifest{}, err
 	}
+	changed, err = managed.filter(changed)
+	if err != nil {
+		return SyncManifest{}, err
+	}
 	manifest.Changed, manifest.ChangedBytes = changedPathSetBytes(root, changed)
 	manifest.OverlayFiles, manifest.OverlayBytes = overlayPathSetBytes(root, manifest.Files, manifest.Changed)
 	return manifest, nil
+}
+
+type syncManifestScope struct {
+	trackedRegular map[string]struct{}
+	gitlinkPaths   map[string]struct{}
+}
+
+func validatedSyncManifestScope(root string, excludes SyncExcludeRules, includes []string) (syncManifestScope, error) {
+	tracked, err := loadGitTrackedPaths(root)
+	if err != nil {
+		return syncManifestScope{}, fmt.Errorf("verify sync manifest scope: %w", err)
+	}
+	trackedRegular := trackedRegularPathSet(tracked)
+	inManifestScope := func(entry gitTrackedPath) bool {
+		rel := filepath.ToSlash(entry.name)
+		return safeRepoRel(rel) &&
+			!pathExcludedByRules(rel, excludes, gitModeIsRegular(entry.mode)) &&
+			pathIncluded(rel, includes)
+	}
+	gitlinkPaths, err := trackedGitlinkPaths(tracked, inManifestScope)
+	if err != nil {
+		return syncManifestScope{}, fmt.Errorf("verify sync manifest scope: %w", err)
+	}
+	hidden, err := gitCheckoutHiddenOmissionForTracked(root, tracked, gitCheckoutSparseEnabled(root), func(entry gitTrackedPath) bool {
+		return entry.mode != "160000" && inManifestScope(entry)
+	}, sparseCheckoutIncludedPaths)
+	if err != nil {
+		return syncManifestScope{}, fmt.Errorf("verify sync manifest scope: %w", err)
+	}
+	if hidden != "" {
+		return syncManifestScope{}, fmt.Errorf("tracked path %q is hidden by sparse checkout or skip-worktree state but remains in sync manifest scope; materialize the checkout, or adjust sync.include, ordered sync.exclude, or .crabboxignore so this path is outside sync scope", hidden)
+	}
+	return syncManifestScope{trackedRegular: trackedRegular, gitlinkPaths: gitlinkPaths}, nil
 }
 
 func trackedRegularPathSet(tracked []gitTrackedPath) map[string]struct{} {
@@ -1306,9 +1390,9 @@ func checkSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io
 		}
 		printSyncTopDirs(stderr, guard.Paths)
 		if reason.Metric == "files" {
-			return exit(6, "sync %s too large: %d files >= limit %d; use --force-sync-large or CRABBOX_SYNC_ALLOW_LARGE=1", guard.Scope, reason.Actual, reason.Limit)
+			return Exit(6, "sync %s too large: %d files >= limit %d; use --force-sync-large or CRABBOX_SYNC_ALLOW_LARGE=1", guard.Scope, reason.Actual, reason.Limit)
 		}
-		return exit(6, "sync %s too large: %s >= limit %s; use --force-sync-large or CRABBOX_SYNC_ALLOW_LARGE=1", guard.Scope, humanBytes(reason.Actual), humanBytes(reason.Limit))
+		return Exit(6, "sync %s too large: %s >= limit %s; use --force-sync-large or CRABBOX_SYNC_ALLOW_LARGE=1", guard.Scope, humanBytes(reason.Actual), humanBytes(reason.Limit))
 	}
 	warned := false
 	for _, reason := range guard.Reasons {
@@ -1408,6 +1492,14 @@ func syncGuardrailScope(manifest SyncManifest) (count int, bytes int64, scope st
 		return len(manifest.Changed), manifest.ChangedBytes, "dirty_delta", manifest.Changed
 	}
 	return len(manifest.Files), manifest.Bytes, "candidate", manifest.Files
+}
+
+// FullSyncGuardrailManifest selects the complete transfer without changing the
+// caller's dirty-delta diagnostics or the archive's file manifest.
+func FullSyncGuardrailManifest(manifest SyncManifest) SyncManifest {
+	manifest.Changed = nil
+	manifest.ChangedBytes = 0
+	return manifest
 }
 
 func CheckSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io.Writer) error {
@@ -1530,6 +1622,9 @@ func pathExcludedByRules(rel string, rules SyncExcludeRules, trackedRegular bool
 
 func pathExcludeDecision(rel string, rules SyncExcludeRules, trackedRegular bool) (bool, string) {
 	rel = filepath.ToSlash(rel)
+	if rules.protectsManagedState(rel) {
+		return true, ""
+	}
 	excluded := false
 	protectedPattern := ""
 	for _, rule := range rules.rules {
@@ -1547,6 +1642,12 @@ func pathExcludeDecision(rel string, rules SyncExcludeRules, trackedRegular bool
 		protectedPattern = ""
 	}
 	return excluded, protectedPattern
+}
+
+func (rules SyncExcludeRules) protectsManagedState(rel string) bool {
+	rel = filepath.ToSlash(rel)
+	protected := rules.managedSubtree
+	return protected != "" && (rel == protected || strings.HasPrefix(rel, protected+"/"))
 }
 
 func excludeRule(rule string) (pattern string, negated bool) {

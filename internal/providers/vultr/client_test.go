@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -144,6 +147,43 @@ func TestVultrClientCursorPaginationAndRateLimit(t *testing.T) {
 	if len(instances) != 1 || instances[0].ID != "two" {
 		t.Fatalf("instances=%#v", instances)
 	}
+
+	t.Run("reencode body on retry", func(t *testing.T) {
+		ctx := context.Background()
+		encodes, calls, delays := 0, 0, 0
+		body := envelopeMarshaler(func() ([]byte, error) { encodes++; return []byte(`{"attempt":` + strconv.Itoa(encodes) + `}`), nil })
+		client := &vultrClient{token: "synthetic-envelope-token", baseURL: "https://api.example.test", sleep: func(got context.Context, d time.Duration) error {
+			delays++
+			if got != ctx || d != time.Second {
+				t.Fatalf("retry delay context/duration=%v %v", got, d)
+			}
+			return nil
+		}}
+		client.client = &http.Client{Transport: envelopeRoundTripper(func(req *http.Request) (*http.Response, error) {
+			calls++
+			data, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := `{"attempt":` + strconv.Itoa(calls) + "}\n"
+			if string(data) != want {
+				t.Fatalf("attempt%d body=%q want %q", calls, data, want)
+			}
+			status := http.StatusNoContent
+			header := make(http.Header)
+			if calls == 1 {
+				status = http.StatusTooManyRequests
+				header.Set("Retry-After", "1")
+			}
+			return &http.Response{StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+		})}
+		if err := client.do(ctx, http.MethodPost, "/records", body, nil); err != nil {
+			t.Fatal(err)
+		}
+		if encodes != 2 || calls != 2 || delays != 1 {
+			t.Fatalf("encodes=%d calls=%d delays=%d", encodes, calls, delays)
+		}
+	})
 }
 
 func TestVultrClientRedactsSecretsFromErrors(t *testing.T) {
@@ -249,4 +289,109 @@ func containsVultrTag(tags []any, want string) bool {
 		}
 	}
 	return false
+}
+
+type envelopeRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f envelopeRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+type envelopeMarshaler func() ([]byte, error)
+
+func (f envelopeMarshaler) MarshalJSON() ([]byte, error) { return f() }
+
+func TestVultrClientRequestEnvelope(t *testing.T) {
+	type contextKey struct{}
+	ctx := context.WithValue(context.Background(), contextKey{}, "envelope-context")
+	var pointer *struct{ Value string }
+	var slice []string
+	for _, tc := range []struct {
+		name    string
+		body    any
+		want    string
+		nilBody bool
+	}{
+		{"nil interface", nil, "", true},
+		{"typed nil pointer", pointer, "null\n", false},
+		{"typed nil slice", slice, "null\n", false},
+		{"JSON bytes and HTML escaping", map[string]string{"message": "<&>"}, "{\"message\":\"\\u003c\\u0026\\u003e\"}\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			transport := envelopeRoundTripper(func(req *http.Request) (*http.Response, error) {
+				calls++
+				if req.Context() != ctx || req.Context().Value(contextKey{}) != "envelope-context" {
+					t.Fatal("request lost caller context")
+				}
+				if req.Method != http.MethodPost || req.URL.String() != "https://api.example.test/v1/records?limit=2" {
+					t.Fatalf("request=%s %s", req.Method, req.URL)
+				}
+				if req.Header.Get("Authorization") != "Bearer synthetic-envelope-token" || req.Header.Get("Accept") != "application/json" {
+					t.Fatalf("headers=%v", req.Header)
+				}
+				contentType := "application/json"
+
+				if req.Header.Get("Content-Type") != contentType {
+					t.Fatalf("Content-Type=%q want %q", req.Header.Get("Content-Type"), contentType)
+				}
+				if (req.Body == nil) != tc.nilBody {
+					t.Fatalf("nil body=%v want %v", req.Body == nil, tc.nilBody)
+				}
+				if req.ContentLength != int64(len(tc.want)) {
+					t.Fatalf("ContentLength=%d want %d", req.ContentLength, len(tc.want))
+				}
+				if req.Body != nil {
+					data, err := io.ReadAll(req.Body)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if string(data) != tc.want {
+						t.Fatalf("body=%q want %q", data, tc.want)
+					}
+				}
+				if tc.nilBody {
+					if req.GetBody != nil {
+						t.Fatal("nil input gained GetBody")
+					}
+				} else {
+					if req.GetBody == nil {
+						t.Fatal("encoded body lost GetBody")
+					}
+					replay, err := req.GetBody()
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer replay.Close()
+					data, err := io.ReadAll(replay)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if string(data) != tc.want {
+						t.Fatalf("replay=%q want %q", data, tc.want)
+					}
+				}
+				return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+			})
+			client := &vultrClient{token: "synthetic-envelope-token", baseURL: "https://api.example.test/v1", client: &http.Client{Transport: transport}}
+			if err := client.do(ctx, http.MethodPost, "/records?limit=2", tc.body, nil); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 1 {
+				t.Fatalf("transport calls=%d", calls)
+			}
+		})
+	}
+	t.Run("encoding fails before request construction and transport", func(t *testing.T) {
+		sentinel := errors.New("synthetic encoder failure")
+		calls := 0
+		client := &vultrClient{baseURL: ":invalid", client: &http.Client{Transport: envelopeRoundTripper(func(*http.Request) (*http.Response, error) { calls++; return nil, errors.New("unexpected transport") })}}
+		body := envelopeMarshaler(func() ([]byte, error) { return nil, sentinel })
+		err := client.do(nil, "invalid method", "/records", body, nil)
+		var marshalerError *json.MarshalerError
+		if !errors.As(err, &marshalerError) || !errors.Is(err, sentinel) {
+			t.Fatalf("error=%T %v want original encoding cause", err, err)
+		}
+		if calls != 0 {
+			t.Fatalf("transport calls=%d", calls)
+		}
+	})
 }

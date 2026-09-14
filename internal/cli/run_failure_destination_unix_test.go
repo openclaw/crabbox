@@ -356,7 +356,7 @@ func TestFailureBundleUnwritableProjectFallsBack(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				state, err := crabboxStateDir()
+				state, err := CrabboxStateDir()
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -389,14 +389,14 @@ func TestFailureBundleFallbackErrorsNameBothDestinations(t *testing.T) {
 			project := t.TempDir()
 			t.Chdir(project)
 			makeFailureBundleDirUnwritable(t, project)
-			state, err := crabboxStateDir()
+			state, err := CrabboxStateDir()
 			if err != nil {
 				t.Fatal(err)
 			}
 			if err := os.MkdirAll(state, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			resolve := crabboxStateDir
+			resolve := CrabboxStateDir
 			want := filepath.Join(state, "captures", "bundle.tar.gz")
 			switch failure {
 			case "unwritable":
@@ -459,7 +459,7 @@ exit 0
 			project := t.TempDir()
 			t.Chdir(project)
 			makeFailureBundleDirUnwritable(t, project)
-			state, err := crabboxStateDir()
+			state, err := CrabboxStateDir()
 			if err != nil {
 				t.Fatal(err)
 			}

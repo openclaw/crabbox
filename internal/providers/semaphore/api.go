@@ -318,7 +318,7 @@ func (c *apiClient) resolvePaginationRef(ref string) (string, error) {
 	if resolved.User != nil {
 		return "", fmt.Errorf("semaphore pagination link contains userinfo")
 	}
-	if !sameOriginURL(base, resolved) {
+	if !core.SameHTTPOrigin(base, resolved) {
 		return "", fmt.Errorf("semaphore pagination link points outside configured host")
 	}
 	return resolved.RequestURI(), nil
@@ -350,31 +350,10 @@ func (c *apiClient) apiURL(path string) (string, error) {
 	if resolved.User != nil {
 		return "", fmt.Errorf("semaphore request URL contains userinfo")
 	}
-	if !sameOriginURL(base, resolved) {
+	if !core.SameHTTPOrigin(base, resolved) {
 		return "", fmt.Errorf("semaphore request URL points outside configured host")
 	}
 	return resolved.String(), nil
-}
-
-func sameOriginURL(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveURLPort(a) == effectiveURLPort(b)
-}
-
-func effectiveURLPort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
 }
 
 func (c *apiClient) getWithHeaders(ctx context.Context, path string) ([]byte, http.Header, error) {

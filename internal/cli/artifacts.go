@@ -130,28 +130,28 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 		*gif = true
 	}
 	if *gif && !*video {
-		return exit(2, "artifacts collect --gif requires --video or --all")
+		return Exit(2, "artifacts collect --gif requires --video or --all")
 	}
 	if *duration <= 0 {
-		return exit(2, "artifacts collect --duration must be positive")
+		return Exit(2, "artifacts collect --duration must be positive")
 	}
 	if *fps <= 0 {
-		return exit(2, "artifacts collect --fps must be positive")
+		return Exit(2, "artifacts collect --fps must be positive")
 	}
 	if *gifWidth <= 0 {
-		return exit(2, "artifacts collect --gif-width must be positive")
+		return Exit(2, "artifacts collect --gif-width must be positive")
 	}
 	if *gifFPS <= 0 {
-		return exit(2, "artifacts collect --gif-fps must be positive")
+		return Exit(2, "artifacts collect --gif-fps must be positive")
 	}
 	if *contactSheetFrames <= 0 {
-		return exit(2, "artifacts collect --contact-sheet-frames must be positive")
+		return Exit(2, "artifacts collect --contact-sheet-frames must be positive")
 	}
 	if *contactSheetCols <= 0 {
-		return exit(2, "artifacts collect --contact-sheet-cols must be positive")
+		return Exit(2, "artifacts collect --contact-sheet-cols must be positive")
 	}
 	if *contactSheetWidth <= 0 {
-		return exit(2, "artifacts collect --contact-sheet-width must be positive")
+		return Exit(2, "artifacts collect --contact-sheet-width must be positive")
 	}
 	if *noContactSheet {
 		*contactSheet = false
@@ -165,7 +165,7 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 		return err
 	}
 	if isBlacksmithProvider(cfg.Provider) {
-		return exit(2, "artifacts collect is not supported for provider=%s; Blacksmith owns machine connectivity", cfg.Provider)
+		return Exit(2, "artifacts collect is not supported for provider=%s; Blacksmith owns machine connectivity", cfg.Provider)
 	}
 	if err := requireLeaseID(*id, "crabbox artifacts collect --id <lease-id-or-slug> [--output <dir>]", cfg); err != nil {
 		return err
@@ -175,7 +175,7 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 		return err
 	}
 	if isStaticProvider(cfg.Provider) && target.TargetOS != targetLinux {
-		return exit(2, "desktop artifacts are not collected from static %s hosts because those are existing host machines, not Crabbox-created desktops", target.TargetOS)
+		return Exit(2, "desktop artifacts are not collected from static %s hosts because those are existing host machines, not Crabbox-created desktops", target.TargetOS)
 	}
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
@@ -186,10 +186,10 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 	dir := strings.TrimSpace(*output)
 	explicitOutput := dir != ""
 	if dir == "" {
-		dir = defaultArtifactBundleDir(leaseID, serverSlug(server))
+		dir = defaultArtifactBundleDir(leaseID, ServerSlug(server))
 	}
 	if err := ensureArtifactBundleDir(dir, explicitOutput); err != nil {
-		return exit(2, "create artifact directory: %v", err)
+		return Exit(2, "create artifact directory: %v", err)
 	}
 
 	result := artifactCollectResult{
@@ -198,7 +198,7 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 			CreatedAt: time.Now().UTC().Format(time.RFC3339),
 			Version:   currentVersion(),
 			LeaseID:   leaseID,
-			Slug:      serverSlug(server),
+			Slug:      ServerSlug(server),
 			Provider:  cfg.Provider,
 			Network:   string(cfg.Network),
 			TargetOS:  target.TargetOS,
@@ -241,7 +241,7 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 		path := filepath.Join(dir, "doctor.txt")
 		out, err := runSSHOutput(ctx, target, desktopDoctorRemoteCommand(target))
 		if err != nil {
-			doctorErr := exit(5, "desktop doctor failed: %v", err)
+			doctorErr := Exit(5, "desktop doctor failed: %v", err)
 			return fail(doctorErr, artifactWarning{
 				Problem: classifyDesktopFailure(out),
 				Detail:  trimFailureDetail(out),
@@ -249,7 +249,7 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 			})
 		}
 		if err := os.WriteFile(path, []byte(out+"\n"), 0o644); err != nil {
-			return exit(2, "write doctor artifact: %v", err)
+			return Exit(2, "write doctor artifact: %v", err)
 		}
 		addFile("doctor", path)
 	}
@@ -278,7 +278,7 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 	}
 	if *video {
 		if target.TargetOS != targetLinux && !isWindowsNativeTarget(target) {
-			err := exit(2, "artifacts collect --video currently requires target=linux with ffmpeg/x11grab or native Windows desktop capture")
+			err := Exit(2, "artifacts collect --video currently requires target=linux with ffmpeg/x11grab or native Windows desktop capture")
 			return fail(err, artifactWarning{
 				Problem: rescueArtifactCaptureFailed,
 				Detail:  err.Error(),
@@ -389,15 +389,15 @@ func (a App) artifactsVideo(ctx context.Context, args []string) error {
 	}
 	output, _ := stringFlagValue(args, "output")
 	if strings.TrimSpace(output) == "" {
-		output = "crabbox-" + normalizeLeaseSlug(leaseID) + "-screen.mp4"
+		output = "crabbox-" + NormalizeLeaseSlug(leaseID) + "-screen.mp4"
 	}
 	duration := durationFlagValue(args, "duration", 10*time.Second)
 	fps := floatFlagValue(args, "fps", 15)
 	if duration <= 0 {
-		return exit(2, "artifacts video --duration must be positive")
+		return Exit(2, "artifacts video --duration must be positive")
 	}
 	if fps <= 0 {
-		return exit(2, "artifacts video --fps must be positive")
+		return Exit(2, "artifacts video --fps must be positive")
 	}
 	contactEnabled := boolFlagValueOr(args, "contact-sheet", true) && !boolFlagPresent(args, "no-contact-sheet")
 	contactPath, _ := stringFlagValue(args, "contact-sheet-output")
@@ -408,13 +408,13 @@ func (a App) artifactsVideo(ctx context.Context, args []string) error {
 	contactCols := intFlagValueOr(args, "contact-sheet-cols", 5)
 	contactWidth := intFlagValueOr(args, "contact-sheet-width", 320)
 	if contactFrames <= 0 {
-		return exit(2, "artifacts video --contact-sheet-frames must be positive")
+		return Exit(2, "artifacts video --contact-sheet-frames must be positive")
 	}
 	if contactCols <= 0 {
-		return exit(2, "artifacts video --contact-sheet-cols must be positive")
+		return Exit(2, "artifacts video --contact-sheet-cols must be positive")
 	}
 	if contactWidth <= 0 {
-		return exit(2, "artifacts video --contact-sheet-width must be positive")
+		return Exit(2, "artifacts video --contact-sheet-width must be positive")
 	}
 	if err := rejectWaylandDesktopVideoTarget(ctx, target, "artifacts video"); err != nil {
 		return err
@@ -472,7 +472,7 @@ func (a App) artifactsTemplate(ctx context.Context, args []string) error {
 		return nil
 	}
 	if err := os.WriteFile(*output, []byte(body), 0o644); err != nil {
-		return exit(2, "write template: %v", err)
+		return Exit(2, "write template: %v", err)
 	}
 	fmt.Fprintf(a.Stdout, "template: %s\n", *output)
 	return nil
@@ -550,7 +550,7 @@ func (a App) artifactsPull(ctx context.Context, args []string) error {
 		ref = fs.Arg(0)
 	}
 	if *output == "" {
-		return exit(2, "artifacts pull requires --output")
+		return Exit(2, "artifacts pull requires --output")
 	}
 	result, err := pullArtifactManifest(ctx, ref, *output, *overwrite)
 	if err != nil {
@@ -592,11 +592,11 @@ func (a App) publishArtifactDirectory(ctx context.Context, opts artifactPublishO
 	ensureArtifactPublishPrefix(&opts)
 	absDirectory, err := filepath.Abs(opts.Directory)
 	if err != nil {
-		return nil, "", "", exit(2, "resolve artifact directory: %v", err)
+		return nil, "", "", Exit(2, "resolve artifact directory: %v", err)
 	}
 	bundleRoot, err := os.OpenRoot(opts.Directory)
 	if err != nil {
-		return nil, "", "", exit(2, "read artifact directory: %v", err)
+		return nil, "", "", Exit(2, "read artifact directory: %v", err)
 	}
 	defer bundleRoot.Close()
 	resolvedDirectory, rootInfo, err := validateArtifactBundleRoot(bundleRoot, absDirectory)
@@ -616,7 +616,7 @@ func (a App) publishArtifactDirectory(ctx context.Context, opts artifactPublishO
 		return nil, "", "", err
 	}
 	if len(files) == 0 {
-		return nil, "", "", exit(2, "artifact directory has no files: %s", opts.Directory)
+		return nil, "", "", Exit(2, "artifact directory has no files: %s", opts.Directory)
 	}
 	publishFiles := files
 	cleanupSnapshots := func() {}
@@ -697,7 +697,7 @@ func (a App) publishArtifactDirectory(ctx context.Context, opts artifactPublishO
 	}
 	if opts.PR > 0 && !opts.NoComment {
 		if opts.Storage == "local" && opts.BaseURL == "" {
-			return nil, "", "", exit(2, "artifacts publish --pr needs brokered publishing, --storage s3|r2|cloudflare, or --base-url for already-hosted local assets")
+			return nil, "", "", Exit(2, "artifacts publish --pr needs brokered publishing, --storage s3|r2|cloudflare, or --base-url for already-hosted local assets")
 		}
 		if opts.DryRun {
 			fmt.Fprintf(a.Stdout, "dry-run comment: gh issue comment %d --body-file %s\n", opts.PR, bodyPath)
@@ -716,7 +716,7 @@ func defaultArtifactBundleDir(leaseID, slug string) string {
 	if name == "" {
 		name = time.Now().UTC().Format("20060102-150405")
 	}
-	return filepath.Join("artifacts", normalizeLeaseSlug(name))
+	return filepath.Join("artifacts", NormalizeLeaseSlug(name))
 }
 
 func ensureArtifactBundleDir(path string, explicitOutput bool) error {
@@ -729,11 +729,11 @@ func ensureArtifactBundleDir(path string, explicitOutput bool) error {
 func writeJSONFile(path string, value any) error {
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
-		return exit(2, "encode %s: %v", path, err)
+		return Exit(2, "encode %s: %v", path, err)
 	}
 	data = append(data, '\n')
 	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return exit(2, "write %s: %v", path, err)
+		return Exit(2, "write %s: %v", path, err)
 	}
 	return nil
 }
@@ -741,11 +741,11 @@ func writeJSONFile(path string, value any) error {
 func writePrivateArtifactJSONFile(path string, value any) error {
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
-		return exit(2, "encode %s: %v", path, err)
+		return Exit(2, "encode %s: %v", path, err)
 	}
 	data = append(data, '\n')
 	if err := writePrivateRunOutputFile(path, data); err != nil {
-		return exit(2, "write %s: %v", path, err)
+		return Exit(2, "write %s: %v", path, err)
 	}
 	return nil
 }
@@ -815,7 +815,7 @@ func artifactErrorCode(warnings []artifactWarning) string {
 	if len(warnings) == 0 || strings.TrimSpace(warnings[len(warnings)-1].Problem) == "" {
 		return "artifact_collect_failed"
 	}
-	return normalizeLeaseSlug(warnings[len(warnings)-1].Problem)
+	return NormalizeLeaseSlug(warnings[len(warnings)-1].Problem)
 }
 
 func printArtifactWarning(w io.Writer, warning artifactWarning) {
@@ -828,7 +828,7 @@ func writeArtifactRunLogs(ctx context.Context, cfg Config, childEnvDenylist []st
 		return "", "", err
 	}
 	if !configured {
-		return "", "", exit(2, "command requires a configured coordinator")
+		return "", "", Exit(2, "command requires a configured coordinator")
 	}
 	coord.ChildEnvDenylist = appendUniqueStrings(coord.ChildEnvDenylist, childEnvDenylist...)
 	logText, err := coord.RunLogs(ctx, runID)
@@ -842,7 +842,7 @@ func writeArtifactRunLogs(ctx context.Context, cfg Config, childEnvDenylist []st
 	logPath := filepath.Join(dir, "logs.txt")
 	runPath := filepath.Join(dir, "run.json")
 	if err := writePrivateRunOutputFile(logPath, []byte(logText)); err != nil {
-		return "", "", exit(2, "write logs artifact: %v", err)
+		return "", "", Exit(2, "write logs artifact: %v", err)
 	}
 	if err := writePrivateArtifactJSONFile(runPath, run); err != nil {
 		return "", "", err
@@ -855,17 +855,17 @@ func captureDesktopVideo(ctx context.Context, target SSHTarget, outputPath strin
 		return captureWindowsDesktopVideo(ctx, target, outputPath, duration, fps)
 	}
 	if target.TargetOS != targetLinux {
-		return exit(2, "artifacts video currently requires target=linux or native Windows desktop capture")
+		return Exit(2, "artifacts video currently requires target=linux or native Windows desktop capture")
 	}
 	if err := rejectWaylandDesktopVideoTarget(ctx, target, "desktop video capture"); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil && filepath.Dir(outputPath) != "." {
-		return exit(2, "create video directory: %v", err)
+		return Exit(2, "create video directory: %v", err)
 	}
 	file, err := os.Create(outputPath)
 	if err != nil {
-		return exit(2, "create video %s: %v", outputPath, err)
+		return Exit(2, "create video %s: %v", outputPath, err)
 	}
 	ok := false
 	defer func() {
@@ -875,7 +875,7 @@ func captureDesktopVideo(ctx context.Context, target SSHTarget, outputPath strin
 		}
 	}()
 	if err := runSSHToWriter(ctx, target, desktopVideoRemoteCommand(duration, fps), file); err != nil {
-		return exit(5, "capture video: %v", err)
+		return Exit(5, "capture video: %v", err)
 	}
 	ok = true
 	return nil
@@ -918,21 +918,21 @@ func rejectWaylandDesktopVideoTarget(ctx context.Context, target SSHTarget, comm
 
 func captureWindowsDesktopVideo(ctx context.Context, target SSHTarget, outputPath string, duration time.Duration, fps float64) error {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		return exit(2, "ffmpeg is required to encode Windows desktop video locally: %v", err)
+		return Exit(2, "ffmpeg is required to encode Windows desktop video locally: %v", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil && filepath.Dir(outputPath) != "." {
-		return exit(2, "create video directory: %v", err)
+		return Exit(2, "create video directory: %v", err)
 	}
 	tempDir, err := os.MkdirTemp("", "crabbox-windows-video-*")
 	if err != nil {
-		return exit(2, "create temp video dir: %v", err)
+		return Exit(2, "create temp video dir: %v", err)
 	}
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	zipPath := filepath.Join(tempDir, "frames.zip")
 	zipFile, err := os.Create(zipPath)
 	if err != nil {
-		return exit(2, "create frame archive: %v", err)
+		return Exit(2, "create frame archive: %v", err)
 	}
 	token := strconv.FormatInt(time.Now().UnixNano(), 36)
 	remoteBase := "C:/ProgramData/crabbox"
@@ -948,11 +948,11 @@ func captureWindowsDesktopVideo(ctx context.Context, target SSHTarget, outputPat
 		intervalMS,
 	)), 0o644); err != nil {
 		_ = zipFile.Close()
-		return exit(2, "write Windows capture script: %v", err)
+		return Exit(2, "write Windows capture script: %v", err)
 	}
 	if out, err := runSSHCombinedOutput(ctx, target, `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType Directory -Force -Path C:\ProgramData\crabbox | Out-Null"`); err != nil {
 		_ = zipFile.Close()
-		return exit(5, "prepare Windows capture script dir: %v: %s", err, trimFailureDetail(out))
+		return Exit(5, "prepare Windows capture script dir: %v: %s", err, trimFailureDetail(out))
 	}
 	if err := copyLocalFileToTarget(ctx, target, localScript, remoteScript); err != nil {
 		_ = zipFile.Close()
@@ -965,14 +965,14 @@ func captureWindowsDesktopVideo(ctx context.Context, target SSHTarget, outputPat
 		duration,
 	), zipFile); err != nil {
 		_ = zipFile.Close()
-		return exit(5, "capture Windows video frames: %v", err)
+		return Exit(5, "capture Windows video frames: %v", err)
 	}
 	if err := zipFile.Close(); err != nil {
-		return exit(2, "close frame archive: %v", err)
+		return Exit(2, "close frame archive: %v", err)
 	}
 	framesDir := filepath.Join(tempDir, "frames")
 	if err := os.MkdirAll(framesDir, 0o755); err != nil {
-		return exit(2, "create frames dir: %v", err)
+		return Exit(2, "create frames dir: %v", err)
 	}
 	if err := extractFrameArchive(zipPath, framesDir); err != nil {
 		return err
@@ -991,7 +991,7 @@ func captureWindowsDesktopVideo(ctx context.Context, target SSHTarget, outputPat
 	cmd := windowsDesktopVideoEncoderCommand(ctx, target, args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		_ = os.Remove(outputPath)
-		return exit(5, "encode Windows video: %v: %s", err, tailForError(string(out)))
+		return Exit(5, "encode Windows video: %v: %s", err, tailForError(string(out)))
 	}
 	return nil
 }
@@ -1018,7 +1018,7 @@ func copyLocalFileToTarget(ctx context.Context, target SSHTarget, localPath, rem
 		err = handle.Wait()
 	}
 	if err != nil {
-		return exit(5, "copy %s to target: %v: %s", filepath.Base(localPath), err, strings.TrimSpace(redactSSHTransportDiagnostic(target, output.String())))
+		return Exit(5, "copy %s to target: %v: %s", filepath.Base(localPath), err, strings.TrimSpace(redactSSHTransportDiagnostic(target, output.String())))
 	}
 	return nil
 }
@@ -1026,7 +1026,7 @@ func copyLocalFileToTarget(ctx context.Context, target SSHTarget, localPath, rem
 func extractFrameArchive(zipPath, framesDir string) error {
 	reader, err := zip.OpenReader(zipPath)
 	if err != nil {
-		return exit(5, "read frame archive: %v", err)
+		return Exit(5, "read frame archive: %v", err)
 	}
 	defer func() { _ = reader.Close() }()
 	count := 0
@@ -1037,27 +1037,27 @@ func extractFrameArchive(zipPath, framesDir string) error {
 		}
 		src, err := file.Open()
 		if err != nil {
-			return exit(5, "open frame %s: %v", name, err)
+			return Exit(5, "open frame %s: %v", name, err)
 		}
 		dstPath := filepath.Join(framesDir, name)
 		dst, err := os.Create(dstPath)
 		if err != nil {
 			_ = src.Close()
-			return exit(2, "create frame %s: %v", name, err)
+			return Exit(2, "create frame %s: %v", name, err)
 		}
 		_, copyErr := io.Copy(dst, src)
 		closeErr := dst.Close()
 		_ = src.Close()
 		if copyErr != nil {
-			return exit(2, "write frame %s: %v", name, copyErr)
+			return Exit(2, "write frame %s: %v", name, copyErr)
 		}
 		if closeErr != nil {
-			return exit(2, "close frame %s: %v", name, closeErr)
+			return Exit(2, "close frame %s: %v", name, closeErr)
 		}
 		count++
 	}
 	if count == 0 {
-		return exit(5, "frame archive contained no frames")
+		return Exit(5, "frame archive contained no frames")
 	}
 	return nil
 }

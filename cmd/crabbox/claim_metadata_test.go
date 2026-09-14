@@ -119,6 +119,19 @@ esac
 				}
 			}
 			const ownerID = "cbx_metadata_owner"
+			if mode == "claimed ID" || mode == "slug" {
+				keyPath, err := cli.PrepareStoredTestboxKeyPath(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				key, err := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := key.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if err := cli.ClaimLeaseForRepoProvider(ownerID, "metadata-owner", "aws", "/repo/owner", time.Minute, false); err != nil {
 				t.Fatal(err)
 			}

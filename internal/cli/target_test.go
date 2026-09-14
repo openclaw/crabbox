@@ -11,10 +11,6 @@ import (
 
 type architectureCapabilityTestProvider struct{ denyAMD64 bool }
 
-func (architectureCapabilityTestProvider) Name() string {
-	return "architecture-capability-test"
-}
-func (architectureCapabilityTestProvider) Aliases() []string { return nil }
 func (architectureCapabilityTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:             "architecture-capability-test",
@@ -40,13 +36,13 @@ func (p architectureCapabilityTestProvider) SupportsArchitecture(_ Config, archi
 
 func TestProviderArchitectureCapabilityOwnsTargetAdmission(t *testing.T) {
 	p := architectureCapabilityTestProvider{denyAMD64: true}
-	providerRegistry[p.Name()] = p
-	t.Cleanup(func() { delete(providerRegistry, p.Name()) })
+	providerRegistry[p.Spec().Name] = p
+	t.Cleanup(func() { delete(providerRegistry, p.Spec().Name) })
 	for _, target := range []string{targetLinux, targetMacOS, targetWindows} {
 		for _, arch := range []string{ArchitectureAMD64, ArchitectureARM64} {
 			t.Run(target+"/"+arch, func(t *testing.T) {
 				cfg := baseConfig()
-				cfg.Provider, cfg.TargetOS, cfg.Architecture = p.Name(), target, arch
+				cfg.Provider, cfg.TargetOS, cfg.Architecture = p.Spec().Name, target, arch
 				cfg.architectureExplicit = true
 				err := validateProviderTarget(cfg)
 				if (err == nil) != (arch == ArchitectureARM64) {
@@ -56,7 +52,7 @@ func TestProviderArchitectureCapabilityOwnsTargetAdmission(t *testing.T) {
 		}
 	}
 	cfg := baseConfig()
-	cfg.Provider, cfg.TargetOS, cfg.Architecture = p.Name(), targetWorkerRuntime, ArchitectureARM64
+	cfg.Provider, cfg.TargetOS, cfg.Architecture = p.Spec().Name, targetWorkerRuntime, ArchitectureARM64
 	if err := validateProviderTarget(cfg); err == nil {
 		t.Fatal("capability bypassed ProviderSpec.Targets")
 	}

@@ -5,15 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type recordingRunner struct {
@@ -94,18 +97,51 @@ func sampleInfoJSON(name string) string {
 	return `{"errors":[],"info":{"` + name + `":{"state":"Running","ipv4":["192.168.64.7"],"release":"Ubuntu 24.04.4 LTS","image_hash":"abc123","image_release":"24.04 LTS"}}}`
 }
 
+func TestMultipassConfigShowSection(t *testing.T) {
+	for _, tc := range []struct {
+		raw, memory, disk string
+		cpus              int
+		timeout           time.Duration
+	}{{"", "", "", 0, 0}, {" raw ", "", " disk ", -2, -time.Second}, {"configured", "8G", "40G", 4, 2 * time.Minute}} {
+		cfg := core.Config{Provider: "other", Multipass: core.MultipassConfig{CLIPath: tc.raw, Image: tc.raw, User: tc.raw, WorkRoot: tc.raw, CPUs: tc.cpus, Memory: tc.memory, Disk: tc.disk, LaunchTimeout: tc.timeout}}
+		before := cfg
+		section := (Provider{}).ConfigShowSection(cfg)
+		got := map[string]any{}
+		var fields []string
+		for _, f := range section.Fields {
+			got[f.JSONName] = f.JSONValue
+			fields = append(fields, f.TextName+"="+f.TextValue)
+		}
+		want := map[string]any{"cliPath": tc.raw, "image": tc.raw, "user": tc.raw, "workRoot": tc.raw, "cpus": tc.cpus, "memory": tc.memory, "disk": tc.disk, "launchTimeout": tc.timeout.String()}
+		memory, disk := tc.memory, tc.disk
+		if memory == "" {
+			memory = "-"
+		}
+		if disk == "" {
+			disk = "-"
+		}
+		text := fmt.Sprintf("cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s disk=%s launch_timeout=%s", tc.raw, tc.raw, tc.raw, tc.raw, tc.cpus, memory, disk, tc.timeout.String())
+		if section.JSONKey != "multipass" || section.TextLabel != "multipass" || !reflect.DeepEqual(section.Providers, []string{"multipass"}) || len(section.Fields) != 8 || !reflect.DeepEqual(got, want) || strings.Join(fields, " ") != text {
+			t.Fatalf("Multipass projection %#v", section)
+		}
+		if !reflect.DeepEqual(cfg, before) {
+			t.Fatal("projection mutated config")
+		}
+	}
+}
+
 func TestProviderSpecAndAliases(t *testing.T) {
 	p := Provider{}
-	if p.Name() != providerName {
-		t.Fatalf("Name=%q want %s", p.Name(), providerName)
+	if p.Spec().Name != providerName {
+		t.Fatalf("Name=%q want %s", p.Spec().Name, providerName)
 	}
 	for _, alias := range []string{"multipass", "mp", "canonical-multipass"} {
 		got, err := core.ProviderFor(alias)
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", alias, err)
 		}
-		if got.Name() != providerName {
-			t.Fatalf("ProviderFor(%q).Name=%q", alias, got.Name())
+		if got.Spec().Name != providerName {
+			t.Fatalf("ProviderFor(%q).Name=%q", alias, got.Spec().Name)
 		}
 	}
 	spec := p.Spec()
@@ -115,6 +151,57 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureCacheVolume} {
 		if !spec.Features.Has(feature) {
 			t.Fatalf("features=%v missing %s", spec.Features, feature)
+		}
+	}
+}
+
+func TestMultipassOrdinaryFlagMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		raw      string
+		duration time.Duration
+		bad      bool
+	}{{"", time.Minute, false}, {"2m", 2 * time.Minute, false}, {"0s", time.Minute, true}, {" 0s ", time.Minute, true}, {"0", time.Minute, true}, {"-1m", time.Minute, true}, {" 2m ", time.Minute, true}, {" ", time.Minute, true}, {"invalid", time.Minute, true}} {
+		t.Run(fmt.Sprintf("%q", tc.raw), func(t *testing.T) {
+			cfg := core.Config{Provider: "unselected-metadata", SSHUser: "generic", WorkRoot: "generic", Multipass: core.MultipassConfig{CLIPath: "prior", Image: "image-example", User: "prior", WorkRoot: "prior", CPUs: 4, Memory: "8G", Disk: "30G", LaunchTimeout: time.Minute}}
+			fs := flag.NewFlagSet("metadata", flag.ContinueOnError)
+			values := (Provider{}).RegisterFlags(fs, cfg)
+			before := cfg
+			if fs.Lookup("multipass-launch-timeout").DefValue != "1m0s" {
+				t.Fatal("string timeout registration")
+			}
+			if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, before) {
+				t.Fatal("unvisited values changed")
+			}
+			if err := fs.Parse([]string{"--multipass-cli=~/literal", "--multipass-image=image-example", "--multipass-user= user ", "--multipass-work-root=~/guest", "--multipass-cpus=-2", "--multipass-memory=4G", "--multipass-disk=20G", "--multipass-launch-timeout=" + tc.raw}); err != nil {
+				t.Fatal(err)
+			}
+			err := (Provider{}).ApplyFlags(&cfg, fs, values)
+			if tc.bad {
+				if err == nil || err.Error() != fmt.Sprintf("invalid duration %q", tc.raw) {
+					t.Fatalf("timeout error=%v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			want := before
+			want.Multipass = core.MultipassConfig{CLIPath: "~/literal", Image: "image-example", User: " user ", WorkRoot: "~/guest", CPUs: -2, Memory: "4G", Disk: "20G", LaunchTimeout: tc.duration}
+			want.SSHUser = " user "
+			want.WorkRoot = "~/guest"
+			core.MarkMultipassImageExplicit(&want)
+			core.RecordProviderFlagInputs(&want, true, providerName)
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("partial values/effects=%#v want %#v", cfg.Multipass, want.Multipass)
+			}
+		})
+	}
+	cfg := core.Config{Provider: "unselected-metadata", Multipass: core.MultipassConfig{Image: "prior"}}
+	before := cfg
+	for _, foreign := range []any{nil, struct{}{}} {
+		if err := (Provider{}).ApplyFlags(&cfg, flag.NewFlagSet("foreign", flag.ContinueOnError), foreign); err != nil || !reflect.DeepEqual(cfg, before) {
+			t.Fatal("foreign values changed config")
 		}
 	}
 }
@@ -181,7 +268,7 @@ func TestCreateInstanceBuildsLaunchArgsAndCloudInit(t *testing.T) {
 		t.Fatalf("darwin qemu launch should not include --mount:\n%s", args)
 	}
 	mountArgs := recordedArgsForCommand(t, runner, "mount")
-	for _, want := range []string{"mount\n--type\nnative", filepath.Join(root, multipassCacheVolumeName("my-app/linux node24 lock")), "crabbox-blue-1234abcd:/var/cache/crabbox/pnpm"} {
+	for _, want := range []string{"mount\n--type\nnative", filepath.Join(root, shared.CacheVolumeName("my-app/linux node24 lock")), "crabbox-blue-1234abcd:/var/cache/crabbox/pnpm"} {
 		if !strings.Contains(mountArgs, want) {
 			t.Fatalf("native mount args missing %q:\n%s", want, mountArgs)
 		}
@@ -222,7 +309,7 @@ func TestCreateInstanceFallsBackToClassicMountsForDarwinVirtualBox(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mountArg := filepath.Join(root, multipassCacheVolumeName("gomod")) + ":/var/cache/crabbox/go"
+	mountArg := filepath.Join(root, shared.CacheVolumeName("gomod")) + ":/var/cache/crabbox/go"
 	if !strings.Contains(args, "--mount\n"+mountArg) {
 		t.Fatalf("virtualbox launch args missing classic mount %q:\n%s", mountArg, args)
 	}
@@ -450,7 +537,7 @@ func findStoredTestboxKeys(root string) ([]string, error) {
 func TestAcquireRemovesClaimAfterEndpointUpdateFailure(t *testing.T) {
 	runner, b := setupAcquireMetadataFailureTest(t)
 	oldUpdate := updateLeaseClaimEndpoint
-	updateLeaseClaimEndpoint = func(string, Server, SSHTarget) error {
+	updateLeaseClaimEndpoint = func(string, core.Server, core.SSHTarget) error {
 		return errors.New("endpoint boom")
 	}
 	t.Cleanup(func() { updateLeaseClaimEndpoint = oldUpdate })
@@ -478,7 +565,7 @@ func TestAcquireRemovesClaimAfterCacheVolumeUpdateFailure(t *testing.T) {
 func TestAcquireKeepsClaimWhenMetadataRollbackDeleteFails(t *testing.T) {
 	runner, b := setupAcquireMetadataFailureTest(t)
 	oldUpdate := updateLeaseClaimEndpoint
-	updateLeaseClaimEndpoint = func(string, Server, SSHTarget) error {
+	updateLeaseClaimEndpoint = func(string, core.Server, core.SSHTarget) error {
 		return errors.New("endpoint boom")
 	}
 	t.Cleanup(func() { updateLeaseClaimEndpoint = oldUpdate })
@@ -488,7 +575,7 @@ func TestAcquireKeepsClaimWhenMetadataRollbackDeleteFails(t *testing.T) {
 		t.Fatalf("Acquire error=%v, want metadata and cleanup errors", err)
 	}
 	_ = recordedArgsForCommand(t, runner, "delete")
-	claims, claimErr := listLeaseClaims()
+	claims, claimErr := core.ListLeaseClaims()
 	if claimErr != nil {
 		t.Fatal(claimErr)
 	}
@@ -505,7 +592,7 @@ func setupAcquireMetadataFailureTest(t *testing.T) (*recordingRunner, *backend) 
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	oldWait := waitForSSHReady
-	waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+	waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
 		return nil
 	}
 	t.Cleanup(func() { waitForSSHReady = oldWait })
@@ -523,7 +610,7 @@ func assertAcquireRollbackRemovedInstanceAndClaim(t *testing.T, runner *recordin
 	if !strings.Contains(deleteArgs, "delete\n--purge\ncrabbox-") {
 		t.Fatalf("delete not recorded after metadata failure:\n%s", deleteArgs)
 	}
-	claims, err := listLeaseClaims()
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -556,8 +643,8 @@ func TestDurationSecondsCeil(t *testing.T) {
 }
 
 func TestCacheVolumeNameIsStableAndFilesystemSafe(t *testing.T) {
-	got := multipassCacheVolumeName("My App/linux node24 lock")
-	again := multipassCacheVolumeName("My App/linux node24 lock")
+	got := shared.CacheVolumeName("My App/linux node24 lock")
+	again := shared.CacheVolumeName("My App/linux node24 lock")
 	if got != again {
 		t.Fatalf("cache volume name unstable: %q then %q", got, again)
 	}
@@ -675,14 +762,14 @@ func TestServerFromUnclaimedCrabboxNamedInstance(t *testing.T) {
 }
 
 func TestShouldCleanupRespectsKeepLabel(t *testing.T) {
-	server := Server{Status: "stopped", Labels: map[string]string{"keep": "true"}}
+	server := core.Server{Status: "stopped", Labels: map[string]string{"keep": "true"}}
 	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, true, time.Now()); ok || reason != "keep=true" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
 	}
 }
 
 func TestShouldCleanupExpiredClaim(t *testing.T) {
-	server := Server{Status: "running", Labels: map[string]string{}}
+	server := core.Server{Status: "running", Labels: map[string]string{}}
 	claim := core.LeaseClaim{LeaseID: "cbx_123", LastUsedAt: time.Now().Add(-48 * time.Hour).Format(time.RFC3339), IdleTimeoutSeconds: int((30 * time.Minute).Seconds())}
 	if ok, reason := shouldCleanup(server, claim, true, time.Now()); !ok || reason != "claim expired" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
@@ -690,14 +777,14 @@ func TestShouldCleanupExpiredClaim(t *testing.T) {
 }
 
 func TestShouldCleanupSkipsMissingClaim(t *testing.T) {
-	server := Server{Status: "running", Labels: map[string]string{}}
+	server := core.Server{Status: "running", Labels: map[string]string{}}
 	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, false, time.Now()); ok || reason != "missing claim" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
 	}
 }
 
 func TestShouldCleanupSkipsStoppedMissingClaim(t *testing.T) {
-	server := Server{Status: "stopped", Labels: map[string]string{}}
+	server := core.Server{Status: "stopped", Labels: map[string]string{}}
 	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, false, time.Now()); ok || reason != "missing claim" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
 	}
@@ -709,20 +796,20 @@ func TestReleaseRequiresExactClaim(t *testing.T) {
 	const name = "crabbox-release-1234"
 	runner := &recordingRunner{}
 	b := testBackend(runner)
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		LeaseID: leaseID,
-		Server:  Server{CloudID: name, Labels: map[string]string{"lease": leaseID, "instance": name}},
+		Server:  core.Server{CloudID: name, Labels: map[string]string{"lease": leaseID, "instance": name}},
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "no exact local claim") {
 		t.Fatalf("ReleaseLease unclaimed err=%v", err)
 	}
 	if len(runner.calls) != 0 {
 		t.Fatalf("unclaimed release mutated provider: %#v", runner.calls)
 	}
-	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "release", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, lease.Server, SSHTarget{}); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "release", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, lease.Server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatalf("ReleaseLease exact claim: %v", err)
 	}
 	if got := recordedArgsForCommand(t, runner, "delete"); !strings.Contains(got, "--purge\n"+name) {
@@ -733,5 +820,142 @@ func TestReleaseRequiresExactClaim(t *testing.T) {
 func TestLaunchArgTimeoutValueIsNumeric(t *testing.T) {
 	if _, err := strconv.Atoi(strconv.Itoa(durationSecondsCeil(10 * time.Minute))); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestInheritedWorkRootCallerContract(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USER", "fixture-user")
+	for _, tc := range []struct{ providerRoot, genericRoot, want string }{
+		{"", "", "/work/crabbox"},
+		{"", "/work/crabbox", "/work/crabbox"},
+		{"", "/Users/ec2-user/crabbox", "/work/crabbox"},
+		{"", "C:\\crabbox", "/work/crabbox"},
+		{"", " /work/crabbox ", " /work/crabbox "},
+		{"", "/WORK/crabbox", "/WORK/crabbox"},
+		{"", "c:\\crabbox", "c:\\crabbox"},
+		{"", "/srv/custom", "/srv/custom"},
+		{"", "/Users/alice/custom", "/Users/alice/custom"},
+		{"", "D:\\custom", "D:\\custom"},
+		{"", "  ", "  "},
+		{" ", "/srv/custom", " "},
+		{"/work/crabbox", "/srv/custom", "/work/crabbox"},
+		{"relative", "/srv/custom", "relative"},
+		{"/provider/root", "/srv/custom", "/provider/root"},
+	} {
+		for _, explicit := range []bool{false, true} {
+			cfg := core.Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
+			if explicit {
+				core.MarkWorkRootExplicit(&cfg)
+				cfg.TargetOS = "existing-target"
+				cfg.WindowsMode = "prior-mode"
+			}
+			cfg.WorkRoot = tc.genericRoot
+			cfg.Multipass.WorkRoot = tc.providerRoot
+
+			want := cfg
+			want.Provider = "multipass"
+			if !explicit {
+				want.TargetOS = "linux"
+			}
+			want.Multipass.WorkRoot = tc.want
+			want.WorkRoot = tc.want
+			want.Multipass.CLIPath = "multipass"
+			want.Multipass.Image = "26.04"
+			want.Multipass.User = "crabbox"
+			want.Multipass.LaunchTimeout = 20 * time.Minute
+			want.SSHUser = "crabbox"
+			want.SSHPort = "22"
+			want.SSHFallbackPorts = []string{}
+			want.ServerType = "26.04"
+			if !explicit {
+				want.WindowsMode = ""
+			}
+			applyDefaults(&cfg)
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("whole config differs for roots=%q/%q explicit=%t: got=%#v want=%#v", tc.providerRoot, tc.genericRoot, explicit, cfg, want)
+			}
+		}
+	}
+}
+
+func TestMultipassDecodedCPUSizing(t *testing.T) {
+	for _, cpus := range []int{-2, -1, 0, 1, 3, 4} {
+		t.Run(strconv.Itoa(cpus), func(t *testing.T) {
+			runner := &recordingRunner{}
+			cfg := testBackend(runner).cfg
+			cfg.TargetOS = core.TargetLinux
+			cfg.Multipass.CPUs = cpus
+			before := cfg.Multipass
+			got, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+			if err != nil {
+				t.Fatalf("Configure: %v", err)
+			}
+			if got.(*backend).cfg.Multipass.CPUs != cpus {
+				t.Fatalf("Configure changed CPU count %d", cpus)
+			}
+			if cpus < 0 {
+				_, err = got.(*backend).Acquire(context.Background(), core.AcquireRequest{})
+				var exitErr core.ExitError
+				if !errors.As(err, &exitErr) || exitErr.Code != 2 || err.Error() != "multipass.cpus must be zero or greater" {
+					t.Fatalf("Acquire error = %v", err)
+				}
+				if len(runner.calls) != 0 {
+					t.Fatalf("invalid sizing reached provider: %#v", runner.calls)
+				}
+			}
+			if cfg.Multipass != before {
+				t.Fatal("validation changed caller configuration")
+			}
+		})
+	}
+}
+
+func TestMultipassExistingLeaseIgnoresCreationCPUs(t *testing.T) {
+	for _, operation := range []string{"stop", "cleanup"} {
+		for _, cpus := range []int{-2, 0} {
+			t.Run(operation+"/"+strconv.Itoa(cpus), func(t *testing.T) {
+				t.Setenv("HOME", t.TempDir())
+				t.Setenv("XDG_STATE_HOME", t.TempDir())
+				const leaseID = "cbx_123"
+				const name = "crabbox-blue-1234abcd"
+				server := core.Server{CloudID: name, Labels: map[string]string{"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": "blue-lobster", "instance": name, "ssh_user": "runner", "ssh_port": "22", "work_root": "/workspace/crabbox"}}
+				if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "blue-lobster", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, server, core.SSHTarget{Host: "192.168.64.7", Port: "22"}); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { core.RemoveLeaseClaim(leaseID) })
+				runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+					commandKey([]string{"list", "--format", "json"}):       {Stdout: strings.ReplaceAll(sampleListJSON(), "Running", "Stopped")},
+					commandKey([]string{"info", "--format", "json", name}): {Stdout: sampleInfoJSON(name)},
+				}}
+				cfg := testBackend(runner).cfg
+				cfg.TargetOS = core.TargetLinux
+				cfg.Multipass.CPUs = cpus
+				configured, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+				if err != nil {
+					t.Fatalf("Configure existing lease: %v", err)
+				}
+				b := configured.(*backend)
+				if operation == "stop" {
+					lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+					t.Fatal(err)
+				}
+				if args := recordedArgsForCommand(t, runner, "delete"); args != "delete\n--purge\n"+name {
+					t.Fatalf("delete args=%q", args)
+				}
+				for _, call := range runner.calls {
+					if len(call.Args) > 0 && call.Args[0] == "launch" {
+						t.Fatal("existing operation launched VM")
+					}
+				}
+			})
+		}
 	}
 }

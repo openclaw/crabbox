@@ -10,7 +10,6 @@ type daytonaSnapshotAPI interface {
 	daytonaAPI
 	StopSandbox(context.Context, string) error
 	CreateSnapshot(context.Context, string, string) error
-	GetSnapshot(context.Context, string) (*api.SnapshotDto, error)
 	DeleteSnapshot(context.Context, string) error
 }
 

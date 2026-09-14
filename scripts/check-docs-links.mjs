@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
+import { reserveHeadingAnchor, scanSiteMarkdownLines } from "./lib/markdown-headings.mjs";
 
 const root = process.cwd();
 const explicitFiles = [
@@ -15,7 +16,7 @@ const failures = [];
 
 for (const file of files) {
   const markdown = fs.readFileSync(file, "utf8");
-  const headings = headingAnchors(markdown);
+  const headings = headingAnchors(markdown, file);
   const links = markdown.matchAll(/\[[^\]]+\]\(([^)]+)\)/g);
   for (const match of links) {
     const href = splitMarkdownTarget(match[1].trim());
@@ -30,7 +31,7 @@ for (const file of files) {
       continue;
     }
     if (rawAnchor && target.endsWith(".md")) {
-      const targetHeadings = target === file ? headings : headingAnchors(fs.readFileSync(target, "utf8"));
+      const targetHeadings = target === file ? headings : headingAnchors(fs.readFileSync(target, "utf8"), target);
       if (!targetHeadings.has(rawAnchor)) {
         failures.push(`${rel(file)} links to missing heading ${href}`);
       }
@@ -56,7 +57,16 @@ function walk(dir) {
     .sort();
 }
 
-function headingAnchors(markdown) {
+function headingAnchors(markdown, file) {
+  const relative = path.relative(path.join(root, "docs"), file);
+  if (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
+    return new Set(scanSiteMarkdownLines(markdown).filter((entry) => entry.kind === "heading" && entry.id).map((entry) => entry.id));
+  }
+  // Repository-only Markdown keeps its existing GitHub-oriented anchor contract.
+  return repositoryHeadingAnchors(markdown);
+}
+
+function repositoryHeadingAnchors(markdown) {
   const anchors = new Set();
   for (const rawLine of markdown.split("\n")) {
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
@@ -71,13 +81,7 @@ function headingAnchors(markdown) {
     if (!base) {
       continue;
     }
-    let anchor = base;
-    let suffix = 0;
-    while (anchors.has(anchor)) {
-      suffix += 1;
-      anchor = `${base}-${suffix}`;
-    }
-    anchors.add(anchor);
+    reserveHeadingAnchor(anchors, base);
   }
   return anchors;
 }

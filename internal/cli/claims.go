@@ -51,7 +51,7 @@ func (a App) claimsList(args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return exit(2, "claims list does not accept positional arguments")
+		return Exit(2, "claims list does not accept positional arguments")
 	}
 
 	snapshot, err := snapshotLeaseClaimsReadOnly()

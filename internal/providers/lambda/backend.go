@@ -66,15 +66,7 @@ func (b *backend) initDirect() {
 	if b.cfg.ServerType == "" {
 		b.cfg.ServerType = typeForConfig(b.cfg)
 	}
-	if b.cfg.Lambda.Region == "" {
-		b.cfg.Lambda.Region = defaultRegion
-	}
-	if b.cfg.Lambda.Type == "" {
-		b.cfg.Lambda.Type = defaultType
-	}
-	if b.cfg.Lambda.Image == "" && b.cfg.Lambda.ImageFamily == "" {
-		b.cfg.Lambda.ImageFamily = defaultImageFamily
-	}
+	b.cfg.Lambda = b.cfg.Lambda.WithRuntimeDefaults()
 	b.DirectSSHBackend = shared.DirectSSHBackend{
 		SpecValue:       b.spec,
 		Cfg:             b.cfg,
@@ -142,7 +134,7 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
 	}
-	now := b.now()
+	now := core.ClockNow(b.rt.Clock).UTC()
 	var (
 		key        lambdaSSHKeyIdentity
 		instanceID string
@@ -235,7 +227,7 @@ func (b *backend) launchRequest(cfg core.Config, leaseID, slug, publicKey string
 		InstanceTypeName: typeForConfig(cfg),
 		Quantity:         1,
 		SSHKeyNames:      []string{key.Name},
-		UserData:         lambdaUserData(cfg, publicKey),
+		UserData:         core.CloudInitUserData(cfg, publicKey),
 	}
 	if image := imageForConfig(cfg); image != "" {
 		req.ImageID = image
@@ -291,11 +283,11 @@ func (b *backend) ensureSSHKey(ctx context.Context, client lambdaAPI, name, publ
 	if err != nil {
 		return lambdaSSHKeyIdentity{Name: name, Created: isAmbiguousLambdaMutationError(err)}, err
 	}
-	return lambdaSSHKeyIdentity{ID: key.ID, Name: firstNonBlank(key.Name, name), Created: true}, nil
+	return lambdaSSHKeyIdentity{ID: key.ID, Name: shared.FirstNonBlankTrimmed(key.Name, name), Created: true}, nil
 }
 
 func (b *backend) waitForInstanceReady(ctx context.Context, client lambdaAPI, id string) (Instance, error) {
-	deadline := b.now().Add(5 * time.Minute)
+	deadline := core.ClockNow(b.rt.Clock).UTC().Add(5 * time.Minute)
 	result, err := shared.Poll(context.WithoutCancel(ctx), 0, 3*time.Second,
 		func(context.Context, time.Duration) error {
 			if err := shared.SleepContext(ctx, 3*time.Second); err != nil {
@@ -314,7 +306,7 @@ func (b *backend) waitForInstanceReady(ctx context.Context, client lambdaAPI, id
 			if isTerminalInstanceStatus(item.Status) {
 				return false, core.Exit(5, "lambda instance %s reached terminal status %s", id, item.Status)
 			}
-			if b.now().After(deadline) {
+			if core.ClockNow(b.rt.Clock).UTC().After(deadline) {
 				return false, core.Exit(5, "timed out waiting for Lambda instance %s to become active with public IP", id)
 			}
 			return false, nil
@@ -411,7 +403,9 @@ func (b *backend) targetFromClaimedServer(server core.Server, req core.ResolveRe
 		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	ssh := core.SSHTargetFromConfig(b.cfg, server.PublicNet.IPv4.IP)
-	core.UseStoredTestboxKey(&ssh, leaseID)
+	if err := core.UseStoredTestboxKey(&ssh, leaseID); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	if req.Repo.Root != "" {
 		if err := core.ClaimLeaseTargetForRepoConfig(leaseID, server.Labels["slug"], b.cfg, server, ssh, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
 			return core.LeaseTarget{}, err
@@ -471,7 +465,7 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	if req.IdleTimeout > 0 {
 		cfg.IdleTimeout = req.IdleTimeout
 	}
-	labels := core.TouchDirectLeaseLabels(server.Labels, cfg, req.State, b.now())
+	labels := core.TouchDirectLeaseLabels(server.Labels, cfg, req.State, core.ClockNow(b.rt.Clock).UTC())
 	labels[lambdaTouchLocalLabel] = "true"
 	server.Labels = labels
 	updated, err := core.UpdateLeaseClaimLabelsIfUnchanged(req.Lease.LeaseID, claim, labels)
@@ -513,7 +507,7 @@ func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 	if err != nil {
 		return err
 	}
-	instanceID := firstNonBlank(server.CloudID, claim.CloudID)
+	instanceID := shared.FirstNonBlankTrimmed(server.CloudID, claim.CloudID)
 	if claim.CloudID == "" {
 		switch claim.Labels[lambdaRecoveryKeyLabel] {
 		case "rollback-cleanup", "ambiguous-key-create":
@@ -645,7 +639,7 @@ func (b *backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, re
 	labels := leaseTags(cfg, leaseID, slug, "provisioning", keep, now)
 	labels[lambdaRecoveryKeyLabel] = recovery
 	labels[lambdaKeyIDLabel] = key.ID
-	labels[lambdaKeyNameLabel] = firstNonBlank(key.Name, cfg.ProviderKey)
+	labels[lambdaKeyNameLabel] = shared.FirstNonBlankTrimmed(key.Name, cfg.ProviderKey)
 	labels[lambdaKeyOwnedLabel] = fmt.Sprint(key.Created)
 	if repoRoot == "" {
 		var err error
@@ -785,12 +779,12 @@ func serverFromInstance(item Instance, cfg core.Config) core.Server {
 	server := core.Server{
 		CloudID:  item.ID,
 		Provider: providerName,
-		Name:     firstNonBlank(item.Name, item.Hostname, item.ID),
+		Name:     shared.FirstNonBlankTrimmed(item.Name, item.Hostname, item.ID),
 		Status:   normalizeInstanceStatus(item.Status),
 		Labels:   labels,
 	}
 	server.PublicNet.IPv4.IP = strings.TrimSpace(item.IP)
-	server.ServerType.Name = firstNonBlank(item.Type, cfg.ServerType, typeForConfig(cfg))
+	server.ServerType.Name = shared.FirstNonBlankTrimmed(item.Type, cfg.ServerType, typeForConfig(cfg))
 	return server
 }
 
@@ -928,11 +922,4 @@ func providerKeyForLease(leaseID string) string {
 		key = key[:64]
 	}
 	return strings.TrimRight(key, "-")
-}
-
-func (b *backend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now().UTC()
-	}
-	return time.Now().UTC()
 }

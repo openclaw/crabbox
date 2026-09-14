@@ -151,6 +151,9 @@ are idempotent, so repeated job delivery is expected and safe.
 
 Node does not inherit Durable Object event ordering, so lifecycle mutations use
 an explicit process mutex. Slow provider calls do not hold that mutex.
+The Node and Cloudflare runtimes share the same FIFO mutex implementation.
+Borrowing, bridge tickets, ingress, and maintenance keep separate mutexes;
+runtime deletion and snapshot bootstrap use independent queues per resource key.
 Provisioning follows three phases:
 
 1. reserve the lease and cost under the lifecycle lock;

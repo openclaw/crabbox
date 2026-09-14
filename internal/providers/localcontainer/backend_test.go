@@ -2,6 +2,7 @@ package localcontainer
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -20,14 +21,331 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 const testRecoveredContainerID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+func TestConcreteFlagInputAttribution(t *testing.T) {
+	for _, raw := range []string{"unvisited", "bridge", ""} {
+		t.Run(raw, func(t *testing.T) {
+			cfg := core.Config{Provider: "other", LocalContainer: core.LocalContainerConfig{Network: "bridge"}}
+			want := cfg
+			fs := flag.NewFlagSet("inputs", flag.ContinueOnError)
+			values := registerFlags(fs, cfg)
+			if raw != "unvisited" {
+				if err := fs.Parse([]string{"--local-container-network", raw}); err != nil {
+					t.Fatal(err)
+				}
+				want.LocalContainer.Network = raw
+				core.RecordProviderFlagInputs(&want, true, "local-container")
+			}
+			if err := applyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("unexpected applied config: %#v", cfg)
+			}
+		})
+	}
+	for _, supplied := range []bool{false, true} {
+		t.Run(fmt.Sprintf("volume-%t", supplied), func(t *testing.T) {
+			const volume = "/tmp/fixture:/work/fixture"
+			cfg := core.Config{Provider: "other", LocalContainer: core.LocalContainerConfig{Volumes: []string{volume}}}
+			want := cfg
+			fs := flag.NewFlagSet("inputs", flag.ContinueOnError)
+			values := registerFlags(fs, cfg)
+			if supplied {
+				if err := fs.Parse([]string{"--local-container-volume", volume}); err != nil {
+					t.Fatal(err)
+				}
+				want.LocalContainer.Volumes = []string{volume, volume}
+				core.RecordProviderFlagInputs(&want, true, "local-container")
+			}
+			if err := applyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("inherited/explicit volumes changed: %#v", cfg)
+			}
+		})
+	}
+}
 
 type recordingRunner struct {
 	calls     []core.LocalCommandRequest
 	responses map[string]core.LocalCommandResult
 	run       func(core.LocalCommandRequest) (core.LocalCommandResult, error)
+}
+
+func TestLocalContainerImageEvidence(t *testing.T) {
+	digestA := "example.invalid/base@sha256:" + strings.Repeat("a", 64)
+	digestB := "example.invalid/base@sha256:" + strings.Repeat("b", 64)
+	for _, runtimeName := range []string{"docker", "podman"} {
+		for _, tc := range []struct {
+			name, output, status string
+			digests              []string
+			err                  error
+		}{
+			{"available", fmt.Sprintf("[%q,%q,%q]", digestB, digestA, digestA), "available", []string{digestA, digestB}, nil},
+			{"empty", "[]", "unavailable", []string{}, nil},
+			{"null", "null", "unavailable", []string{}, nil},
+			{"query-failure", "", "unknown", []string{}, errors.New("ordinary metadata failure")},
+			{"own-timeout", "", "unknown", []string{}, context.DeadlineExceeded},
+		} {
+			t.Run(runtimeName+"/"+tc.name, func(t *testing.T) {
+				var warning strings.Builder
+				runner := &recordingRunner{run: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					return core.LocalCommandResult{Stdout: tc.output}, tc.err
+				}}
+				cfg := core.Config{LocalContainer: core.LocalContainerConfig{Runtime: runtimeName, Image: "later:override", CheckpointMetadata: map[string]string{checkpointMetadataRuntime: runtimeName, checkpointMetadataContext: "captured-context"}}}
+				b := &backend{rt: core.Runtime{Exec: runner, Stderr: &warning}}
+				container := inspectContainer{ID: "owned-container", Image: "sha256:runtime-image", Config: inspectConfig{Image: "runtime:reference", Labels: map[string]string{"image": "created:reference"}}}
+				got, err := b.observeImageEvidence(t.Context(), cfg, container, core.LeaseClaim{})
+				if err != nil || got.ConfiguredReference != "created:reference" || got.RuntimeImageID != container.Image || got.RepositoryDigestStatus != tc.status || !reflect.DeepEqual(got.RepositoryDigests, tc.digests) {
+					t.Fatalf("evidence=%+v err=%v", got, err)
+				}
+				wantArgs := []string{"image", "inspect", container.Image, "--format", "{{json .RepoDigests}}"}
+				flag := "--context"
+				if runtimeName == "podman" {
+					flag = "--connection"
+				}
+				wantArgs = append([]string{flag, "captured-context"}, wantArgs...)
+				if len(runner.calls) != 1 || runner.calls[0].Name != runtimeName || !reflect.DeepEqual(runner.calls[0].Args, wantArgs) || runner.calls[0].MaxCapturedOutputBytes != imageEvidenceOutputLimit {
+					t.Fatalf("unexpected metadata command: %+v", runner.commandSummary())
+				}
+				if (warning.Len() > 0) != (tc.status == "unknown") {
+					t.Fatalf("warning=%q", warning.String())
+				}
+			})
+		}
+	}
+}
+
+func TestLocalContainerImageEvidenceSnapshotAndCancellation(t *testing.T) {
+	runner := &recordingRunner{}
+	b := &backend{rt: core.Runtime{Exec: runner}}
+	container := inspectContainer{ID: "container", Image: "image"}
+	claim := core.LeaseClaim{CloudID: container.ID, ImageEvidence: &core.ImageEvidence{ConfiguredReference: "original:tag", RuntimeImageID: "image", RepositoryDigests: []string{"example.invalid/a@sha256:" + strings.Repeat("a", 64)}, RepositoryDigestStatus: "available"}}
+	evidence, err := b.observeImageEvidence(t.Context(), core.Config{}, container, claim)
+	if err != nil || len(runner.calls) != 0 || evidence.ConfiguredReference != "original:tag" {
+		t.Fatalf("snapshot=%+v error=%v calls=%d", evidence, err, len(runner.calls))
+	}
+	evidence.RepositoryDigests[0] = "changed"
+	if claim.ImageEvidence.RepositoryDigests[0] == "changed" {
+		t.Fatal("snapshot shares digest storage")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := b.observeImageEvidence(ctx, core.Config{}, container, claim); !errors.Is(err, context.Canceled) || len(runner.calls) != 0 {
+		t.Fatalf("cancelled snapshot lookup: %v", err)
+	}
+	ctx, cancel = context.WithCancel(t.Context())
+	runner.run = func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		cancel()
+		return core.LocalCommandResult{Stdout: "[]"}, nil
+	}
+	if _, err := b.observeImageEvidence(ctx, core.Config{}, container, core.LeaseClaim{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("parent cancellation was swallowed: %v", err)
+	}
+}
+
+func TestLocalContainerImageEvidenceIdentity(t *testing.T) {
+	pinned := "example.invalid/base@sha256:" + strings.Repeat("a", 64)
+	for _, tc := range []struct{ name, containerID, imageID string }{
+		{"different-container", "new-container", "old-image"},
+		{"different-image", "old-container", "new-image"},
+		{"missing-image", "old-container", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &recordingRunner{run: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				return core.LocalCommandResult{Stdout: "[]"}, nil
+			}}
+			b := &backend{rt: core.Runtime{Exec: runner}}
+			container := inspectContainer{ID: tc.containerID, Image: tc.imageID, Config: inspectConfig{Image: pinned}}
+			claim := core.LeaseClaim{CloudID: "old-container", ImageEvidence: &core.ImageEvidence{ConfiguredReference: "stale:tag", RuntimeImageID: "old-image"}}
+			got, err := b.observeImageEvidence(t.Context(), core.Config{}, container, claim)
+			if err != nil || got.ConfiguredReference != pinned || got.RuntimeImageID != tc.imageID || got.RepositoryDigests == nil || len(got.RepositoryDigests) != 0 {
+				t.Fatalf("observation=%+v error=%v", got, err)
+			}
+			wantQueries, wantStatus := 1, "unavailable"
+			if tc.imageID == "" {
+				wantQueries, wantStatus = 0, "unknown"
+			}
+			if len(runner.calls) != wantQueries || got.RepositoryDigestStatus != wantStatus {
+				t.Fatalf("calls=%d status=%q", len(runner.calls), got.RepositoryDigestStatus)
+			}
+		})
+	}
+}
+
+func TestLocalContainerImageEvidenceProvisioningSnapshot(t *testing.T) {
+	for _, mode := range []string{"normal", "fixed", "prepare-recovery"} {
+		t.Run(mode, func(t *testing.T) {
+			b, runner, _, leaseID, _, _ := pendingAcquireBackend(t)
+			testutil.IsolateUserDirs(t)
+			original := runner.run
+			imageID := "sha256:" + strings.Repeat("a", 64)
+			initial := []string{"example.invalid/a@" + imageID, "example.invalid/b@" + imageID}
+			digests := append([]string{}, initial...)
+			queries, waits := 0, 0
+			readStatus := func() (core.LeaseTarget, error) {
+				return testBackend(runner).Resolve(t.Context(), core.ResolveRequest{ID: *leaseID, StatusOnly: true, NoLocalStateMutations: true})
+			}
+			runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				if firstArg(req.Args) == "image" {
+					queries++
+					if queries == 1 {
+						before, err := core.ReadLeaseClaim(*leaseID)
+						if err != nil {
+							return core.LocalCommandResult{}, err
+						}
+						status, err := readStatus()
+						if err != nil || status.Server.ImageEvidence != nil {
+							return core.LocalCommandResult{}, fmt.Errorf("pre-publication status exposed transient evidence: %+v: %v", status.Server.ImageEvidence, err)
+						}
+						after, err := core.ReadLeaseClaim(*leaseID)
+						if err != nil || !reflect.DeepEqual(before, after) {
+							return core.LocalCommandResult{}, fmt.Errorf("status mutated pending claim: %v", err)
+						}
+					}
+					data, err := json.Marshal(digests)
+					return core.LocalCommandResult{Stdout: string(data)}, err
+				}
+				result, err := original(req)
+				if err == nil && firstArg(req.Args) == "inspect" {
+					var containers []inspectContainer
+					if err := json.Unmarshal([]byte(result.Stdout), &containers); err != nil {
+						return result, err
+					}
+					for i := range containers {
+						containers[i].Image = imageID
+					}
+					data, err := json.Marshal(containers)
+					result.Stdout = string(data)
+					return result, err
+				}
+				return result, err
+			}
+			b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
+				waits++
+				digests = initial[:1]
+				claim, err := core.ReadLeaseClaim(*leaseID)
+				if err != nil || claim.ImageEvidence == nil || !reflect.DeepEqual(claim.ImageEvidence.RepositoryDigests, initial) {
+					return fmt.Errorf("snapshot not durable before SSH wait: %+v: %v", claim.ImageEvidence, err)
+				}
+				status, err := readStatus()
+				if err != nil || status.Server.ImageEvidence == nil || !reflect.DeepEqual(status.Server.ImageEvidence.RepositoryDigests, initial) {
+					return fmt.Errorf("provisioning snapshot changed: %+v: %v", status.Server.ImageEvidence, err)
+				}
+				if mode == "prepare-recovery" && waits == 1 {
+					return context.Canceled
+				}
+				return nil
+			}
+			req := core.AcquireRequest{Keep: true, Repo: core.Repo{Root: t.TempDir()}}
+			if mode == "fixed" {
+				req.RequestedLeaseID = "cbx_abcdef160100"
+			}
+			lease, err := b.Acquire(t.Context(), req)
+			if mode == "prepare-recovery" {
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("first readiness error=%v", err)
+				}
+				lease, err = b.Resolve(t.Context(), core.ResolveRequest{ID: *leaseID, Prepare: true})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if queries != 1 || lease.Server.ImageEvidence == nil || !reflect.DeepEqual(lease.Server.ImageEvidence.RepositoryDigests, initial) {
+				t.Fatalf("final snapshot=%+v queries=%d", lease.Server.ImageEvidence, queries)
+			}
+			if err := b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+				t.Fatal(err)
+			}
+			if queries != 1 || !reflect.DeepEqual(lease.Server.ImageEvidence.RepositoryDigests, initial) {
+				t.Fatal("cleanup changed initial snapshot")
+			}
+		})
+	}
+}
+
+func TestLocalContainerImageEvidenceLifecycle(t *testing.T) {
+	b, runner, _, _, _, present := pendingAcquireBackend(t)
+	testutil.IsolateUserDirs(t)
+	repo := core.Repo{Root: t.TempDir()}
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	b.cfg.LocalContainer.Image = "fixture:mutable"
+	imageID := "sha256:" + strings.Repeat("a", 64)
+	original := runner.run
+	queries := 0
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if firstArg(req.Args) == "image" {
+			queries++
+			if !reflect.DeepEqual(req.Args, []string{"image", "inspect", imageID, "--format", "{{json .RepoDigests}}"}) {
+				t.Fatalf("image query did not use observed ID: %v", req.Args)
+			}
+			return core.LocalCommandResult{Stdout: "[]"}, nil
+		}
+		result, err := original(req)
+		if err == nil && firstArg(req.Args) == "inspect" {
+			var containers []inspectContainer
+			if err := json.Unmarshal([]byte(result.Stdout), &containers); err != nil {
+				t.Fatal(err)
+			}
+			for i := range containers {
+				containers[i].Image = imageID
+			}
+			data, err := json.Marshal(containers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result.Stdout = string(data)
+		}
+		return result, err
+	}
+	first, err := b.Acquire(t.Context(), core.AcquireRequest{Keep: true, Repo: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queries != 1 || first.Server.ServerType.Name != "ubuntu:24.04" || first.Server.ImageEvidence == nil || first.Server.ImageEvidence.RuntimeImageID != imageID {
+		t.Fatalf("acquired image=%+v queries=%d", first.Server.ImageEvidence, queries)
+	}
+	claim, err := core.ReadLeaseClaim(first.LeaseID)
+	if err != nil || claim.CloudID != first.Server.CloudID || !reflect.DeepEqual(claim.ImageEvidence, first.Server.ImageEvidence) {
+		t.Fatalf("captured claim=%+v error=%v", claim.ImageEvidence, err)
+	}
+	b.cfg.LocalContainer.Image = "later:override"
+	reused, err := b.Resolve(t.Context(), core.ResolveRequest{ID: first.LeaseID, StatusOnly: true, NoLocalStateMutations: true})
+	if err != nil || queries != 1 || !reflect.DeepEqual(reused.Server.ImageEvidence, first.Server.ImageEvidence) {
+		t.Fatalf("retained image=%+v queries=%d error=%v", reused.Server.ImageEvidence, queries, err)
+	}
+	if err := b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: first}); err != nil {
+		t.Fatal(err)
+	}
+	if *present || queries != 1 {
+		t.Fatal("cleanup queried image metadata or retained container")
+	}
+	firstEvidence := core.CloneImageEvidence(first.Server.ImageEvidence)
+	imageID = "sha256:" + strings.Repeat("b", 64)
+	// A fresh invocation does not inherit the resolved lease's runtime metadata.
+	b = testBackend(runner)
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	b.cfg.LocalContainer.Image = "fixture:mutable"
+	second, err := b.Acquire(t.Context(), core.AcquireRequest{Repo: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Server.ImageEvidence.ConfiguredReference != firstEvidence.ConfiguredReference || second.Server.ImageEvidence.RuntimeImageID == firstEvidence.RuntimeImageID || queries != 2 {
+		t.Fatal("same-tag different-image runs are indistinguishable")
+	}
+	if err := b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: second}); err != nil {
+		t.Fatal(err)
+	}
+	if *present || queries != 2 || firstEvidence.RuntimeImageID == imageID {
+		t.Fatal("cleanup changed retained evidence or queried image metadata")
+	}
 }
 
 type recordedCommandSummary struct {
@@ -122,6 +440,63 @@ func TestBackendAdvertisesAcquireCapabilities(t *testing.T) {
 	fixed, ok := any(b).(core.IdempotentLeaseIDBackend)
 	if !ok || !fixed.SupportsRequestedLeaseID() {
 		t.Fatal("local-container must advertise idempotent fixed lease acquisitions")
+	}
+}
+
+func TestFixedLocalContainerFingerprintNoHostnameCompatibility(t *testing.T) {
+	cfg := core.Config{
+		LocalContainer: core.LocalContainerConfig{
+			Runtime: "docker", Image: "example.org/runner:stable", User: "runner",
+			WorkRoot: "/work", CPUs: 2, Memory: "2g", Network: "bridge",
+		},
+		DesktopEnv: "xfce", TTL: 90 * time.Second, IdleTimeout: 30 * time.Second,
+	}
+	req := core.AcquireRequest{Keep: true, RequestedSlug: "legacy-shape"}
+	// Existing fixed leases persist this fingerprint; the default must not gain a JSON field.
+	const legacyFingerprint = "7b7b7ee1fa690a3fcaa079e3351cea2f16440391a18895ee71cc011103f0776c"
+	for _, noHostname := range []bool{false, true, false} {
+		cfg.LocalContainer.NoHostname = noHostname
+		got, err := fixedLocalContainerFingerprint(cfg, req, "ssh-ed25519 fixture")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (got == legacyFingerprint) == noHostname {
+			t.Fatalf("NoHostname=%t fingerprint=%q, legacy=%q", noHostname, got, legacyFingerprint)
+		}
+	}
+}
+
+func TestFixedAcquireNoHostnameReplayAndDrift(t *testing.T) {
+	for _, noHostname := range []bool{false, true} {
+		t.Run(fmt.Sprintf("noHostname=%t", noHostname), func(t *testing.T) {
+			b, runner, _, _, _, _ := pendingAcquireBackend(t)
+			b.cfg.LocalContainer.NoHostname = noHostname
+			b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+			req := core.AcquireRequest{
+				Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+				RequestedLeaseID: "cbx_abcdef123467", RequestedSlug: "hostname-replay",
+			}
+			lease, err := b.Acquire(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restarted := testBackend(runner)
+			restarted.cfg.LocalContainer.NoHostname = noHostname
+			restarted.waitForSSHReady = b.waitForSSHReady
+			replayed, err := restarted.Acquire(context.Background(), req)
+			if err != nil || replayed.Server.CloudID != lease.Server.CloudID {
+				t.Fatalf("same-intent replay cloudID=%q err=%v", replayed.Server.CloudID, err)
+			}
+			restarted.cfg.LocalContainer.NoHostname = !noHostname
+			_, err = restarted.Acquire(context.Background(), req)
+			requireFixedLocalContainerConflict(t, err)
+			if creates := localContainerCreateCalls(runner); creates != 1 {
+				t.Fatalf("container creates after hostname drift=%d, want 1", creates)
+			}
+			if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: replayed}); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
@@ -275,6 +650,19 @@ func TestFixedAcquireCreatesRequestedIDAndReplays(t *testing.T) {
 	}
 	if creates := localContainerCreateCalls(runner); creates != 1 {
 		t.Fatalf("container creates=%d, want 1", creates)
+	}
+	// Fixed acquisition, replay, and Touch are not presentation requests. Neither
+	// the persisted intent nor the runtime actuator may gain diagnostic fields.
+	for _, value := range []any{claim, replayed, runner.calls} {
+		data, err := json.Marshal(value)
+		if err != nil || strings.Contains(string(data), memoryDiagnosticPrefix) {
+			t.Fatalf("fixed authority contains presentation diagnostics: %v", err)
+		}
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(strings.Join(call.Args, " "), "MemTotal") {
+			t.Fatal("fixed lifecycle acquired a capacity probe")
+		}
 	}
 	if err := restarted.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: replayed}); err != nil {
 		t.Fatal(err)
@@ -1193,6 +1581,352 @@ func TestReadOOMKillCountFallsBackToCgroupV1(t *testing.T) {
 	}
 }
 
+func TestRunFailureMemoryContext(t *testing.T) {
+	for _, tc := range []struct {
+		name, memory, swap, kind, bytes, swapKind, hint string
+	}{
+		{"below", "1073741824", "2147483648", "finite", "1073741824", "finite", "recreate"},
+		{"equal", "8589934592", "0", "finite", "8589934592", "default", "does not add RAM"},
+		{"above", "12884901888", "-1", "finite", "12884901888", "unlimited", "does not add RAM"},
+		{"unlimited", "0", "0", "unlimited", "", "default", "No finite"},
+		{"missing", "null", "null", "unknown", "", "unknown", "Check"},
+		{"malformed", `"12g"`, `{}`, "unknown", "", "unknown", "Check"},
+		{"malformed swap only", "1073741824", `{}`, "finite", "1073741824", "unknown", "recreate"},
+		{"malformed limit only", `"12g"`, "2147483648", "unknown", "", "finite", "Check"},
+		{"negative", "-1", "-2", "unknown", "", "unknown", "Check"},
+		{"overflow", "18446744073709551616", "18446744073709551616", "unknown", "", "unknown", "Check"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reads, infos := 0, 0
+			runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				switch req.Args[0] {
+				case "exec":
+					reads++
+					return core.LocalCommandResult{Stdout: fmt.Sprintf("oom_kill %d\n", reads)}, nil
+				case "inspect":
+					return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"Id":"container-123","State":{"Running":true},"HostConfig":{"Memory":%s,"MemorySwap":%s}}]`, tc.memory, tc.swap)}, nil
+				case "info":
+					infos++
+					if req.MaxCapturedOutputBytes <= 0 || req.MaxCapturedOutputBytes > 4096 {
+						t.Fatal("capacity probe must bound output at capture")
+					}
+					return core.LocalCommandResult{Stdout: "daemon-test\n8589934592\n"}, nil
+				default:
+					t.Fatalf("unexpected runtime command %v", req.Args)
+					return core.LocalCommandResult{}, nil
+				}
+			}}
+			b := testBackend(runner)
+			b.cfg.LocalContainer.Memory = "24g" // Invocation config is not the retained container's setting.
+			b.cfg.LocalContainer.CheckpointMetadata = testCapturedScopeLabels(nil)
+			collector, err := b.BeginRunFailureEvidence(t.Context(), core.RunFailureEvidenceRequest{Lease: core.LeaseTarget{Server: core.Server{CloudID: "container-123"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if infos != 0 {
+				t.Fatal("capacity queried before OOM")
+			}
+			evidence, err := collector(t.Context())
+			if err != nil || evidence.ResourceExhaustion != core.ResourceExhaustionMemory {
+				t.Fatalf("OOM lost: evidence=%+v err=%v", evidence, err)
+			}
+			data, err := json.Marshal(evidence)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got struct {
+				Hint    string
+				Details map[string]string
+			}
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			for key, want := range map[string]string{
+				"container_memory_limit": tc.kind, "container_memory_limit_bytes": tc.bytes,
+				"container_memory_swap": tc.swapKind, "runtime_memory_total_bytes": "8589934592",
+				"settings_phase": "before-command", "container_id": "container-123",
+			} {
+				if got.Details[key] != want {
+					t.Errorf("%s=%q want %q", key, got.Details[key], want)
+				}
+			}
+			if infos != 1 || !strings.Contains(got.Hint, tc.hint) || !strings.Contains(got.Hint, "swap") || !strings.Contains(got.Hint, "parent") {
+				t.Errorf("capacity calls=%d hint=%q", infos, got.Hint)
+			}
+			if strings.Contains(string(data), "docker-test.sock") || strings.Contains(string(data), "24g") {
+				t.Fatal("private route or invocation setting leaked into evidence")
+			}
+		})
+	}
+}
+
+func TestMemoryDiagnosticsResolveDoesNotPersist(t *testing.T) {
+	leaseID, _, initial, runner := createLocalContainerTouchClaim(t, time.Minute)
+	labels := shared.CloneLabels(initial.Labels)
+	labels["diagnostic.memory.stale"] = "old-observation"
+	var err error
+	initial, err = core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, initial, labels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := &recordingRunner{responses: runner.responses}
+	infos := 0
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if req.Args[0] == "info" && strings.Contains(strings.Join(req.Args, " "), "MemTotal") {
+			infos++
+			return core.LocalCommandResult{Stdout: "daemon-test\n8589934592\n"}, nil
+		}
+		result, err := original.Run(t.Context(), req)
+		if req.Args[0] == "inspect" && err == nil {
+			var containers []map[string]any
+			if err := json.Unmarshal([]byte(result.Stdout), &containers); err != nil {
+				t.Fatal(err)
+			}
+			containers[0]["HostConfig"] = map[string]any{"Memory": 1073741824, "MemorySwap": 2147483648}
+			data, err := json.Marshal(containers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result.Stdout = string(data)
+		}
+		return result, err
+	}
+	b := testBackend(runner)
+	req := core.ResolveRequest{ID: leaseID, StatusOnly: true, NoLocalStateMutations: true}
+	req.IncludeDiagnostics = true
+	lease, err := b.Resolve(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.Labels["diagnostic.memory.container_memory_limit_bytes"] != "1073741824" || infos != 1 {
+		t.Fatalf("fresh memory diagnostics missing; info calls=%d", infos)
+	}
+	if _, exists := lease.Server.Labels["diagnostic.memory.stale"]; exists {
+		t.Fatal("later claim merge resurrected stale diagnostic")
+	}
+	after, err := core.ReadLeaseClaim(leaseID)
+	if err != nil || !reflect.DeepEqual(after, initial) {
+		t.Fatal("inspection changed stored claim")
+	}
+	snapshot, _, _ := core.ServerLeaseClaimSnapshot(lease.Server)
+	if !reflect.DeepEqual(snapshot, initial) {
+		t.Fatal("inspection changed claim snapshot")
+	}
+	req.IncludeDiagnostics = false
+	plain, err := b.Resolve(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if infos != 1 {
+		t.Fatal("non-presentation resolve queried memory")
+	}
+	if plain.Server.Labels["diagnostic.memory.container_memory_limit_bytes"] != "" {
+		t.Fatal("fresh diagnostics escaped presentation")
+	}
+	// An opt-in alone must not authorize observation on ordinary or ready-probe paths.
+	for _, guarded := range []core.ResolveRequest{
+		{ID: leaseID, IncludeDiagnostics: true, StatusOnly: true},
+		{ID: leaseID, IncludeDiagnostics: true, StatusOnly: true, NoLocalStateMutations: true, ReadyProbe: true},
+		{ID: leaseID, IncludeDiagnostics: true, StatusOnly: true, NoLocalStateMutations: true, ReleaseOnly: true},
+	} {
+		if _, err := b.Resolve(t.Context(), guarded); err != nil {
+			t.Fatal(err)
+		}
+		if infos != 1 {
+			t.Fatal("non-presentation path acquired a capacity probe")
+		}
+	}
+}
+
+type memoryEvidenceCommandRunner func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error)
+
+func (f memoryEvidenceCommandRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	return f(ctx, req)
+}
+
+func TestRunFailureMemoryContextFreezesRuntime(t *testing.T) {
+	for _, runtimeName := range []string{"docker", "podman"} {
+		t.Run(runtimeName, func(t *testing.T) {
+			scope := checkpointScope{Runtime: runtimeName, Context: "owned", Endpoint: "unix:///synthetic-owned.sock", DaemonID: "daemon-test"}
+			identity := scope.DaemonID
+			if runtimeName == "podman" {
+				identity = "host|store|run|socket|true"
+				sum := sha256.Sum256([]byte(identity))
+				scope.DaemonID = fmt.Sprintf("podman-%x", sum[:16])
+			}
+			reads, infos := 0, 0
+			runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				if req.Name != runtimeName || len(req.Args) < 3 || req.Args[1] != "owned" {
+					t.Fatal("command escaped the captured runtime/connection")
+				}
+				for _, value := range req.Env {
+					if strings.Contains(value, "synthetic-ambient-changed") {
+						t.Fatal("ambient route escaped snapshot")
+					}
+				}
+				args := req.Args[2:]
+				switch args[0] {
+				case "exec":
+					reads++
+					return core.LocalCommandResult{Stdout: fmt.Sprintf("oom_kill %d\n", reads)}, nil
+				case "inspect":
+					return core.LocalCommandResult{Stdout: `[{"Id":"container-123","HostConfig":{"Memory":1024,"MemorySwap":0}}]`}, nil
+				case "context":
+					return core.LocalCommandResult{Stdout: scope.Endpoint}, nil
+				case "system":
+					return core.LocalCommandResult{Stdout: `[{"Name":"owned","URI":"unix:///synthetic-owned.sock"}]`}, nil
+				case "info":
+					infos++
+					return core.LocalCommandResult{Stdout: identity + "\n8388608\n"}, nil
+				}
+				t.Fatalf("unexpected runtime command %v", args)
+				return core.LocalCommandResult{}, nil
+			}}
+			b := testBackend(runner)
+			b.cfg.LocalContainer.Runtime = runtimeName
+			b.cfg.LocalContainer.CheckpointMetadata = checkpointScopeMetadata(scope)
+			collector, err := b.BeginRunFailureEvidence(t.Context(), core.RunFailureEvidenceRequest{Lease: core.LeaseTarget{Server: core.Server{CloudID: "container-123"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.cfg.LocalContainer.Runtime = "wrong-runtime"
+			b.cfg.LocalContainer.CheckpointMetadata[checkpointMetadataContext] = "wrong-context"
+			t.Setenv("DOCKER_HOST", "synthetic-ambient-changed")
+			t.Setenv("CONTAINER_HOST", "synthetic-ambient-changed")
+			evidence, err := collector(t.Context())
+			if err != nil || evidence.ResourceExhaustion != core.ResourceExhaustionMemory || infos != 1 {
+				t.Fatalf("frozen collection failed: OOM=%s infos=%d err=%v", evidence.ResourceExhaustion, infos, err)
+			}
+		})
+	}
+}
+
+func TestRunFailureMemoryContextOptionalFailures(t *testing.T) {
+	for _, failure := range []string{"error", "empty", "malformed", "overflow", "oversized", "identity", "timeout", "unknown route", "budget spent", "ordinary", "reset"} {
+		t.Run(failure, func(t *testing.T) {
+			b := testBackend(&recordingRunner{})
+			b.cfg.LocalContainer.CheckpointMetadata = testCapturedScopeLabels(nil)
+			if failure == "unknown route" {
+				b.cfg.LocalContainer.CheckpointMetadata = nil
+			}
+			reads, infos := 0, 0
+			b.rt.Exec = memoryEvidenceCommandRunner(func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				switch req.Args[0] {
+				case "exec":
+					reads++
+					count := reads + 4
+					if failure == "ordinary" {
+						count = 5
+					}
+					if failure == "reset" && reads > 1 {
+						count = 0
+					}
+					return core.LocalCommandResult{Stdout: fmt.Sprintf("oom_kill %d\n", count)}, nil
+				case "inspect":
+					return core.LocalCommandResult{Stdout: `[{"Id":"container-123","HostConfig":{"Memory":1024,"MemorySwap":0}}]`}, nil
+				case "info":
+					infos++
+					deadline, ok := ctx.Deadline()
+					if !ok || time.Until(deadline) > 500*time.Millisecond {
+						t.Fatal("optional probe has no bounded sub-budget")
+					}
+					switch failure {
+					case "error":
+						return core.LocalCommandResult{}, errors.New("synthetic optional error")
+					case "empty":
+						return core.LocalCommandResult{}, nil
+					case "malformed":
+						return core.LocalCommandResult{Stdout: "daemon-test\nnot-a-number"}, nil
+					case "overflow":
+						return core.LocalCommandResult{Stdout: "daemon-test\n18446744073709551616"}, nil
+					case "oversized":
+						return core.LocalCommandResult{Stdout: strings.Repeat("x", 4097)}, nil
+					case "identity":
+						return core.LocalCommandResult{Stdout: "different-daemon\n8388608"}, nil
+					case "timeout":
+						<-ctx.Done()
+						return core.LocalCommandResult{}, ctx.Err()
+					}
+				}
+				t.Fatalf("unexpected capacity probe after %s", failure)
+				return core.LocalCommandResult{}, nil
+			})
+			collector, err := b.BeginRunFailureEvidence(t.Context(), core.RunFailureEvidenceRequest{Lease: core.LeaseTarget{Server: core.Server{CloudID: "container-123"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			budget := time.Second
+			if failure == "budget spent" {
+				budget = 30 * time.Millisecond
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), budget)
+			defer cancel()
+			evidence, err := collector(ctx)
+			if err != nil {
+				t.Fatalf("optional failure replaced primary evidence: %v", err)
+			}
+			if failure == "ordinary" || failure == "reset" {
+				if evidence.ResourceExhaustion != "" || infos != 0 {
+					t.Fatal("non-OOM acquired capacity evidence")
+				}
+				return
+			}
+			if evidence.ResourceExhaustion != core.ResourceExhaustionMemory {
+				t.Fatal("lost verified OOM")
+			}
+			wantInfos := 1
+			if failure == "budget spent" || failure == "unknown route" {
+				wantInfos = 0
+			}
+			if infos != wantInfos {
+				t.Fatalf("optional calls=%d want %d", infos, wantInfos)
+			}
+			data, _ := json.Marshal(evidence)
+			var got struct{ Details map[string]string }
+			_ = json.Unmarshal(data, &got)
+			if got.Details["capacity_status"] != "unknown" || got.Details["runtime_memory_total_bytes"] != "" {
+				t.Fatalf("optional failure manufactured capacity: %s", data)
+			}
+		})
+	}
+}
+
+func TestRunFailureMemoryContextChangedRoute(t *testing.T) {
+	for _, runtimeName := range []string{"docker", "podman"} {
+		t.Run(runtimeName, func(t *testing.T) {
+			reads, infos := 0, 0
+			runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				args := req.Args[2:]
+				switch args[0] {
+				case "exec":
+					reads++
+					return core.LocalCommandResult{Stdout: fmt.Sprintf("oom_kill %d\n", reads)}, nil
+				case "inspect":
+					return core.LocalCommandResult{Stdout: `[{"Id":"container-123","HostConfig":{"Memory":1024,"MemorySwap":0}}]`}, nil
+				case "context":
+					return core.LocalCommandResult{Stdout: "unix:///changed.sock"}, nil
+				case "system":
+					return core.LocalCommandResult{Stdout: `[{"Name":"owned","URI":"unix:///changed.sock"}]`}, nil
+				case "info":
+					infos++
+				}
+				return core.LocalCommandResult{}, nil
+			}}
+			b := testBackend(runner)
+			b.cfg.LocalContainer.Runtime = runtimeName
+			b.cfg.LocalContainer.CheckpointMetadata = checkpointScopeMetadata(checkpointScope{Runtime: runtimeName, Context: "owned", Endpoint: "unix:///original.sock", DaemonID: "original"})
+			collector, err := b.BeginRunFailureEvidence(t.Context(), core.RunFailureEvidenceRequest{Lease: core.LeaseTarget{Server: core.Server{CloudID: "container-123"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			evidence, err := collector(t.Context())
+			if err != nil || evidence.ResourceExhaustion != core.ResourceExhaustionMemory || evidence.Details["capacity_status"] != "unknown" || infos != 0 {
+				t.Fatalf("changed route was adopted or OOM lost: %+v calls=%d err=%v", evidence, infos, err)
+			}
+		})
+	}
+}
+
 func TestDockerPinsCheckpointForkScope(t *testing.T) {
 	runner := &recordingRunner{}
 	b := testBackend(runner)
@@ -1334,7 +2068,7 @@ func TestResolveContainerHydratesCustomRuntimeRouteBeforeLookup(t *testing.T) {
 			t.Setenv("DOCKER_HOST", "unix:///ambient.sock")
 			leaseID := "cbx_hydrated_route"
 			labels := checkpointScopeMetadata(checkpointScope{
-				Runtime: tc.runtime, Context: tc.context, Host: tc.host, Endpoint: firstNonBlank(tc.host, "connection://captured-podman"), DaemonID: "daemon-captured",
+				Runtime: tc.runtime, Context: tc.context, Host: tc.host, Endpoint: shared.FirstNonBlank(tc.host, "connection://captured-podman"), DaemonID: "daemon-captured",
 			})
 			labels["provider"] = providerName
 			labels["lease"] = leaseID
@@ -1522,8 +2256,8 @@ func TestProviderAliases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", name, err)
 		}
-		if provider.Name() != providerName {
-			t.Fatalf("ProviderFor(%q).Name=%q", name, provider.Name())
+		if provider.Spec().Name != providerName {
+			t.Fatalf("ProviderFor(%q).Name=%q", name, provider.Spec().Name)
 		}
 	}
 	spec := Provider{}.Spec()
@@ -1848,7 +2582,7 @@ func resolveArchitectureFixture(t *testing.T, runtimeName, contextName, requeste
 	if err != nil {
 		t.Fatal(err)
 	}
-	inspectJSON := fmt.Sprintf(`[{"Id":%q,"Name":"/crabbox-resolve-arch","Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":%q,"slug":%q,"state":"ready","runtime":%q,"ssh_user":"runner","work_root":"/workspace/crabbox"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49153"}]}}}]`, containerID, leaseID, slug, runtimeName)
+	inspectJSON := fmt.Sprintf(`[{"Id":%q,"Name":"/crabbox-resolve-arch","Mounts":[],"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":%q,"slug":%q,"state":"ready","runtime":%q,"ssh_user":"runner","work_root":"/workspace/crabbox"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49153"}]}}}]`, containerID, leaseID, slug, runtimeName)
 	prefix := []string{}
 	if contextName != "" && contextName != "default" {
 		if runtimeName == "podman" {
@@ -1991,6 +2725,36 @@ func TestCreateContainerUsesDockerCompatibleSSHLease(t *testing.T) {
 	}
 }
 
+func TestCreateContainerNoHostname(t *testing.T) {
+	for _, noHostname := range []bool{false, true} {
+		t.Run(fmt.Sprintf("noHostname=%t", noHostname), func(t *testing.T) {
+			runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+				"run": {Stdout: "container123456\n"},
+			}}
+			b := testBackend(runner)
+			cfg := b.configForRun()
+			cfg.LocalContainer.NoHostname = noHostname
+			_, bootstrapDir, err := b.createContainer(context.Background(), cfg, "crabbox-hostname", "cbx_123", "hostname", "ssh-ed25519 fixture", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(bootstrapDir) })
+			args := recordedArgsForCommand(t, runner, "run")
+			if strings.Contains(args, "--hostname\n") == noHostname {
+				t.Fatalf("NoHostname=%t hostname argument mismatch", noHostname)
+			}
+			if !noHostname && !strings.Contains(args, "--hostname\ncrabbox-hostname\n") {
+				t.Fatal("default hostname must remain the container name")
+			}
+			for _, want := range []string{"--name\ncrabbox-hostname", "--network\nbridge", "-p\n127.0.0.1::2222"} {
+				if !strings.Contains(args, want) {
+					t.Fatalf("container args missing %q", want)
+				}
+			}
+		})
+	}
+}
+
 func TestCreateContainerDoesNotLabelPrivateRuntimeScope(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
@@ -2004,7 +2768,7 @@ func TestCreateContainerDoesNotLabelPrivateRuntimeScope(t *testing.T) {
 	cfg.LocalContainer.CheckpointMetadata = checkpointScopeMetadata(checkpointScope{
 		Runtime: "docker", Context: "named", Config: "/private/docker-config", Host: "tcp://user:password@example.invalid:2376", Endpoint: "tcp://user:password@example.invalid:2376", DaemonID: "daemon-private",
 	})
-	b.cfg.LocalContainer.CheckpointMetadata = cloneLabels(cfg.LocalContainer.CheckpointMetadata)
+	b.cfg.LocalContainer.CheckpointMetadata = shared.CloneLabels(cfg.LocalContainer.CheckpointMetadata)
 	_, bootstrapDir, err := b.createContainer(context.Background(), cfg, "crabbox-private", "cbx_private", "private", "ssh-ed25519 AAAA test", true)
 	if err != nil {
 		t.Fatal(err)
@@ -2989,7 +3753,7 @@ func TestPendingRecoveryCommandsUseSafeExactRoute(t *testing.T) {
 			var stderr strings.Builder
 			b.rt.Stderr = &stderr
 			labels := checkpointScopeMetadata(checkpointScope{
-				Runtime: tc.runtime, Context: tc.context, Host: tc.host, Config: tc.config, Endpoint: firstNonBlank(tc.host, "local"), DaemonID: "daemon-test",
+				Runtime: tc.runtime, Context: tc.context, Host: tc.host, Config: tc.config, Endpoint: shared.FirstNonBlank(tc.host, "local"), DaemonID: "daemon-test",
 			})
 			labels["runtime"] = tc.runtime
 			claim := core.LeaseClaim{LeaseID: "cbx_recovery_route", Provider: providerName, CloudID: "container-route", Labels: labels}
@@ -3113,7 +3877,7 @@ func TestAcquireSSHReadinessSuccessCannotOverwriteNewerClaim(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		labels := cloneLabels(claim.Labels)
+		labels := shared.CloneLabels(claim.Labels)
 		labels["state"] = "superseded"
 		_, err = core.UpdateLeaseClaimLabelsIfUnchanged(*leaseID, claim, labels)
 		return err
@@ -3148,7 +3912,7 @@ func TestAcquireReadyCASRollsBackContainerClaimedByNewerIdentity(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		labels := cloneLabels(claim.Labels)
+		labels := shared.CloneLabels(claim.Labels)
 		labels["state"] = "ready"
 		replacement := claim
 		replacement.CloudID = "newer-container"
@@ -3187,7 +3951,7 @@ func TestAcquireReadinessFailureReconcilesDifferentClaim(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		labels := cloneLabels(claim.Labels)
+		labels := shared.CloneLabels(claim.Labels)
 		replacement := claim
 		replacement.CloudID = "newer-container"
 		replacement.Labels = labels
@@ -3231,7 +3995,7 @@ func TestKeepFalseReadinessRollbackFailurePrintsRecovery(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		labels := cloneLabels(claim.Labels)
+		labels := shared.CloneLabels(claim.Labels)
 		labels["concurrent_touch"] = "true"
 		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(*leaseID, claim, labels); err != nil {
 			return err
@@ -3405,6 +4169,7 @@ func pendingAcquireBackendWithImageFixedIntent(t *testing.T, imageFixedIntent st
 			data, err := json.Marshal([]inspectContainer{{
 				ID: "container-pending", Name: "/" + containerName, Config: inspectConfig{Image: containerRuntimeImage, Labels: labels},
 				State:           inspectState{Status: "running", Running: true},
+				Mounts:          testLocalContainerBindMounts(t, bootstrapDir),
 				NetworkSettings: inspectNetworking{Ports: map[string][]inspectPort{"2222/tcp": {{HostIP: "127.0.0.1", HostPort: "49170"}}}},
 			}})
 			return core.LocalCommandResult{Stdout: string(data)}, err
@@ -4085,7 +4850,7 @@ func TestCreateContainerMountsCacheVolumes(t *testing.T) {
 	}
 	args := recordedArgsForCommand(t, runner, "run")
 	for _, volume := range cfg.Cache.Volumes {
-		want := "-v\n" + localContainerCacheVolumeName(volume.Key) + ":" + volume.Path
+		want := "-v\n" + shared.CacheVolumeName(volume.Key) + ":" + volume.Path
 		if !strings.Contains(args, want) {
 			t.Fatalf("cache volume mount missing %q:\n%s", want, args)
 		}
@@ -4099,8 +4864,8 @@ func TestCreateContainerMountsCacheVolumes(t *testing.T) {
 }
 
 func TestLocalContainerCacheVolumeNameIsStableAndDockerSafe(t *testing.T) {
-	got := localContainerCacheVolumeName("My App/linux node24 lock")
-	again := localContainerCacheVolumeName("My App/linux node24 lock")
+	got := shared.CacheVolumeName("My App/linux node24 lock")
+	again := shared.CacheVolumeName("My App/linux node24 lock")
 	if got != again {
 		t.Fatalf("cache volume name unstable: %q then %q", got, again)
 	}
@@ -4558,6 +5323,65 @@ func TestLocalContainerReadyCheckReportsFailureDiagnostics(t *testing.T) {
 	}
 }
 
+func TestBootstrapDesktopResetRestoresTerminalInExistingSession(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell")
+	}
+	const marker = "cat >/usr/local/bin/crabbox-start-desktop <<'DESKTOP'\n"
+	start := strings.LastIndex(bootstrapScript, marker)
+	if start < 0 {
+		t.Fatal("bootstrap does not install the desktop startup helper")
+	}
+	start += len(marker)
+	end := strings.Index(bootstrapScript[start:], "\nDESKTOP\n")
+	if end < 0 {
+		t.Fatal("desktop startup helper is incomplete")
+	}
+	fixture := `install() { :; }
+pgrep() { return 0; }
+sleep() { :; }
+ss() { echo '127.0.0.1:5900'; }
+su() {
+  [ "$1" = fixture ] || return 2
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = -c ]; then sh -c "$2"; return; fi
+    shift
+  done
+  return 3
+}
+runuser() {
+  [ "$1" = -u ] && [ "$2" = fixture ] && [ "$3" = -- ] || return 2
+  shift 3
+  "$@"
+}
+`
+	for _, tc := range []struct{ name, mode string }{
+		{name: "saved theme"},
+		{name: "light", mode: "light"},
+		{name: "dark", mode: "dark"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			launcher := filepath.Join(dir, "desktop-session")
+			receipt := filepath.Join(dir, "terminal-restored")
+			if err := os.WriteFile(launcher, []byte("#!/bin/sh\nprintf '%s\\n' \"$DISPLAY\" \"${1:-}\" >\"$RESTORED\"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			command := strings.ReplaceAll(bootstrapScript[start:start+end], "/usr/local/bin/crabbox-desktop-session", launcher)
+			cmd := exec.Command("sh", "-c", fixture+command, "desktop-reset", tc.mode)
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "CRABBOX_SSH_USER=fixture", "RESTORED=" + receipt}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("desktop reset failed: %v: %s", err, out)
+			}
+			got, err := os.ReadFile(receipt)
+			want := ":99\n" + tc.mode + "\n"
+			if err != nil || string(got) != want {
+				t.Fatalf("desktop reset did not restore the terminal with its requested display and theme: got %q, want %q, error %v", got, want, err)
+			}
+		})
+	}
+}
+
 func TestBootstrapScriptUsesAccountHomeDirectory(t *testing.T) {
 	for _, want := range []string{
 		`home_dir="$(getent passwd "$user" | cut -d: -f6)"`,
@@ -4587,7 +5411,7 @@ func TestBootstrapScriptUsesAccountHomeDirectory(t *testing.T) {
 		`chown -R "$user" "$home_dir/.ssh" "$work_root"`,
 		`arc-theme`,
 		`"$config_dir/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml"`,
-		`mode="${CRABBOX_DESKTOP_THEME:-}"`,
+		`requested_mode="${1:-}"`,
 		`"$config_dir/crabbox/desktop-theme"`,
 		`gtk_theme=Adwaita-dark`,
 		`gtk_candidates="Arc-Dark Greybird-dark Adwaita-dark Greybird"`,
@@ -4601,22 +5425,11 @@ func TestBootstrapScriptUsesAccountHomeDirectory(t *testing.T) {
 		`gtk-application-prefer-dark-theme=$gtk_prefer_dark_ini`,
 		`xfconf-query -c xsettings -p /Gtk/ApplicationPreferDarkTheme`,
 		`xfconf-query -c xfwm4 -p /general/theme`,
-		`xfconf-query -c xfwm4 -p /general/box_move`,
-		`xfconf-query -c xfwm4 -p /general/box_resize`,
-		`xfconf-query -c xfwm4 -p /general/move_opacity`,
-		`xfconf-query -c xfwm4 -p /general/resize_opacity`,
-		`xfconf-query -c xfwm4 -p /general/snap_to_border`,
 		`xfconf-query -c xfwm4 -p /general/snap_width`,
-		`xfconf-query -c xfwm4 -p /general/tile_on_move`,
-		`xfconf-query -c xfwm4 -p /general/use_compositing`,
-		`xfconf-query -c xfwm4 -p /general/wrap_windows`,
 		`xfconf-query -c xfce4-panel -p /panels/dark-mode`,
 		`/panels/$panel_id/background-rgba`,
 		`crabbox desktop theme start`,
-		`crabbox-xfce4-panel-$user.log`,
-		`pkill -TERM -x xfce4-panel`,
-		`xfwm4 --replace --compositor=off`,
-		`-wait 16 -defer 8 -nowait_bog`,
+		`su "$user" -s /bin/sh -c "XDG_RUNTIME_DIR='$runtime' Xtigervnc :99 -geometry 1920x1080 -depth 24 -localhost yes -rfbport 5900 -SecurityTypes VncAuth -PasswordFile=/var/lib/crabbox/vnc.pass -AlwaysShared -AcceptSetDesktopSize -nolisten tcp -ac`,
 		`wayvnc --config '$home_dir/.config/wayvnc/config' --render-cursor --max-fps=60`,
 		`gsettings set org.gnome.desktop.interface color-scheme '$gsettings_scheme'`,
 		`if [ "$(id -u)" -eq 0 ]; then`,
@@ -4790,7 +5603,56 @@ func TestBootstrapImagePathProfileCanonicalization(t *testing.T) {
 	}
 }
 
+func TestBootstrapScriptSupportsResizableXFCE(t *testing.T) {
+	for _, want := range []string{
+		"tigervnc-standalone-server tigervnc-tools",
+		"head -c 8 /var/lib/crabbox/vnc.password | tigervncpasswd -f > /var/lib/crabbox/vnc.pass",
+		"Xtigervnc :99 -geometry 1920x1080 -depth 24",
+		"-localhost yes -rfbport 5900 -SecurityTypes VncAuth -PasswordFile=/var/lib/crabbox/vnc.pass",
+		"-AlwaysShared -AcceptSetDesktopSize -nolisten tcp -ac",
+	} {
+		if !strings.Contains(bootstrapScript, want) {
+			t.Fatalf("bootstrap missing %q", want)
+		}
+	}
+	if strings.Contains(bootstrapScript, "Xvfb :99") || strings.Contains(bootstrapScript, "x11vnc") {
+		t.Fatal("new desktop bootstrap still starts a fixed-size server")
+	}
+	cfg := core.BaseConfig()
+	cfg.Desktop = true
+	check := localContainerReadyCheck(cfg)
+	// Execute the emitted process predicate against both shipped generations.
+	start := strings.Index(check, "(pgrep -f 'Xtigervnc")
+	if start < 0 {
+		t.Fatalf("desktop ready predicate missing: %s", check)
+	}
+	end := strings.Index(check[start:], "; } || {")
+	if end < 0 {
+		t.Fatalf("desktop ready predicate terminator missing: %s", check)
+	}
+	predicate := check[start : start+end]
+	for _, server := range []string{"Xtigervnc", "legacy", "missing"} {
+		cmd := exec.Command("sh", "-c", `
+pgrep() {
+  case "$server:$*" in
+    Xtigervnc:*Xtigervnc*|legacy:*Xvfb*|legacy:*x11vnc*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+`+predicate)
+		cmd.Env = append(os.Environ(), "server="+server)
+		out, err := cmd.CombinedOutput()
+		if (err == nil) != (server != "missing") {
+			t.Fatalf("ready predicate %s: %v: %s", server, err, out)
+		}
+	}
+}
+
 func TestBootstrapScriptSupportsWaylandDesktop(t *testing.T) {
+	if strings.Count(bootstrapScript, core.GnomeDesktopThemeScript()) != 1 {
+		t.Fatal("container bootstrap must install exactly one complete shared GNOME theme script")
+	}
+
 	for _, want := range []string{
 		`CRABBOX_DESKTOP_ENV:-xfce`,
 		`labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr`,
@@ -5029,6 +5891,7 @@ func TestApplyDefaultsDoesNotMaskUnsupportedTarget(t *testing.T) {
 func TestListAndResolveContainers(t *testing.T) {
 	inspectJSON := `[{
 		"Id":"abcdef1234567890",
+		"Mounts":[],
 		"Name":"/crabbox-blue",
 		"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_123","slug":"blue-lobster","state":"ready","server_type":"ubuntu:24.04","ssh_user":"runner","work_root":"/workspace/crabbox"}},
 		"State":{"Status":"running","Running":true},
@@ -5116,7 +5979,7 @@ func TestResolvePreviouslyReadyTerminalContainerWithoutSSHPort(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			labels := cloneLabels(claim.Labels)
+			labels := shared.CloneLabels(claim.Labels)
 			labels["state"] = "ready"
 			claim, err = core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels)
 			if err != nil {
@@ -5163,12 +6026,23 @@ func TestLocalContainerTouchPersistsExactClaimLifecycle(t *testing.T) {
 		name        string
 		override    *time.Duration
 		wantTimeout time.Duration
+		ttlLabel    string
 	}{
 		{name: "omitted override preserves stored timeout", wantTimeout: 37 * time.Minute},
 		{name: "explicit override persists", override: durationPointer(45 * time.Minute), wantTimeout: 45 * time.Minute},
+		{name: "duration-form TTL stays exact", wantTimeout: 37 * time.Minute, ttlLabel: "24h"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			leaseID, _, initial, runner := createLocalContainerTouchClaim(t, 37*time.Minute)
+			if test.ttlLabel != "" {
+				labels := shared.CloneLabels(initial.Labels)
+				labels["ttl_secs"] = test.ttlLabel
+				updated, err := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, initial, labels)
+				if err != nil {
+					t.Fatal(err)
+				}
+				initial = updated
+			}
 			touchedAt := time.Date(2026, time.August, 17, 20, 30, 0, 0, time.UTC)
 			b := testBackend(runner)
 			b.cfg.IdleTimeout = 5 * time.Minute
@@ -5203,7 +6077,7 @@ func TestLocalContainerTouchPersistsExactClaimLifecycle(t *testing.T) {
 			if got := unixLocalContainerLabelTime(t, committed.Labels["expires_at"]); !got.Equal(touchedAt.Add(test.wantTimeout)) {
 				t.Fatalf("expires=%s want=%s", got, touchedAt.Add(test.wantTimeout))
 			}
-			for _, key := range []string{"bootstrap_dir", "host_work_root", "work_root", checkpointMetadataConfig, checkpointMetadataEndpoint, checkpointMetadataDaemonID} {
+			for _, key := range []string{"created_at", "ttl_secs", "bootstrap_dir", "host_work_root", "work_root", checkpointMetadataConfig, checkpointMetadataEndpoint, checkpointMetadataDaemonID} {
 				if committed.Labels[key] != initial.Labels[key] {
 					t.Fatalf("claim label %s=%q want exact %q", key, committed.Labels[key], initial.Labels[key])
 				}
@@ -5240,7 +6114,7 @@ func TestLocalContainerTouchRejectsUnownedOrChangedClaimWithoutMutation(t *testi
 		mutate func(*testing.T, *backend, *core.LeaseTarget, core.LeaseClaim)
 	}{
 		{name: "missing carried snapshot", mutate: func(_ *testing.T, _ *backend, lease *core.LeaseTarget, _ core.LeaseClaim) {
-			lease.Server = core.Server{Provider: lease.Server.Provider, CloudID: lease.Server.CloudID, Labels: cloneLabels(lease.Server.Labels)}
+			lease.Server = core.Server{Provider: lease.Server.Provider, CloudID: lease.Server.CloudID, Labels: shared.CloneLabels(lease.Server.Labels)}
 		}},
 		{name: "wrong provider", mutate: func(t *testing.T, _ *backend, lease *core.LeaseTarget, claim core.LeaseClaim) {
 			claim.Provider = "aws"
@@ -5254,12 +6128,12 @@ func TestLocalContainerTouchRejectsUnownedOrChangedClaimWithoutMutation(t *testi
 			lease.Server.CloudID = strings.Repeat("b", 64)
 		}},
 		{name: "runtime metadata mismatch", mutate: func(t *testing.T, _ *backend, lease *core.LeaseTarget, claim core.LeaseClaim) {
-			claim.Labels = cloneLabels(claim.Labels)
+			claim.Labels = shared.CloneLabels(claim.Labels)
 			claim.Labels[checkpointMetadataContext] = "other"
 			core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
 		}},
 		{name: "stale carried snapshot after CAS replacement", mutate: func(t *testing.T, _ *backend, lease *core.LeaseTarget, claim core.LeaseClaim) {
-			labels := cloneLabels(claim.Labels)
+			labels := shared.CloneLabels(claim.Labels)
 			labels["concurrent_replacement"] = "true"
 			if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, claim, labels); err != nil {
 				t.Fatal(err)
@@ -5371,11 +6245,9 @@ func TestFindContainerForClaimRejectsSlugOnlyMatch(t *testing.T) {
 
 func TestReleaseLeaseRemovesStoredKey(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	keyPath, err := core.TestboxKeyPath("cbx_release")
+	writeLocalContainerReleaseClaim(t, "cbx_release", "container123")
+	keyPath, err := core.PrepareStoredTestboxKeyPath("cbx_release")
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
@@ -5387,7 +6259,6 @@ func TestReleaseLeaseRemovesStoredKey(t *testing.T) {
 		},
 	}
 	addDefaultLocalContainerScopeResponses(runner)
-	writeLocalContainerReleaseClaim(t, "cbx_release", "container123")
 	b := testBackend(runner)
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_release", Server: core.Server{CloudID: "container123"}}}); err != nil {
 		t.Fatal(err)
@@ -5612,7 +6483,7 @@ func TestReleaseLeaseRejectsClaimChangedAfterResolution(t *testing.T) {
 	}
 	server := core.Server{CloudID: "snapshot-container", Labels: map[string]string{"lease": leaseID}}
 	core.SetServerLeaseClaimSnapshot(&server, claim, true)
-	labels := cloneLabels(claim.Labels)
+	labels := shared.CloneLabels(claim.Labels)
 	labels["state"] = "newer"
 	if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels); err != nil {
 		t.Fatal(err)
@@ -5642,6 +6513,7 @@ func TestResolveRawContainerRequiresExplicitReclaimAndPersistsBinding(t *testing
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	inspectJSON := `[{
 		"Id":"raw-container",
+		"Mounts":[],
 		"Name":"/crabbox-raw",
 		"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_raw_local","slug":"raw-local","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox"}},
 		"State":{"Status":"running","Running":true},
@@ -5700,7 +6572,7 @@ func TestLegacyLocalContainerClaimRequiresReclaimBeforeStop(t *testing.T) {
 	if err := core.ReplaceLeaseClaimIfUnchanged(leaseID, legacy, replacement); err != nil {
 		t.Fatal(err)
 	}
-	inspectJSON := `[{"Id":"legacy-container","Name":"/legacy-container","Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_legacy_local","slug":"legacy-local","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox","runtime":"docker","docker_context":"stale-context","docker_endpoint":"unix:///stale.sock","docker_daemon_id":"stale-daemon"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49160"}]}}}]`
+	inspectJSON := `[{"Id":"legacy-container","Name":"/legacy-container","Mounts":[],"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_legacy_local","slug":"legacy-local","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox","runtime":"docker","docker_context":"stale-context","docker_endpoint":"unix:///stale.sock","docker_daemon_id":"stale-daemon"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49160"}]}}}]`
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
 		commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {Stdout: "legacy-container\n"},
 		commandKey([]string{"inspect", "legacy-container"}):  {Stdout: inspectJSON},
@@ -5734,8 +6606,8 @@ func TestResolveReclaimDoesNotRetargetBoundLocalContainerClaim(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	addDefaultLocalContainerScopeResponses(runner)
 	writeLocalContainerReleaseClaim(t, "cbx_bound_local", "container-a")
-	inspectA := `[{"Id":"container-a","Name":"/container-a","Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_stale_label","slug":"stale-label","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49156"}]}}}]`
-	inspectB := `[{"Id":"container-b","Name":"/container-b","Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_bound_local","slug":"bound-local","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49157"}]}}}]`
+	inspectA := `[{"Id":"container-a","Name":"/container-a","Mounts":[],"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_stale_label","slug":"stale-label","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49156"}]}}}]`
+	inspectB := `[{"Id":"container-b","Name":"/container-b","Mounts":[],"Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_bound_local","slug":"bound-local","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49157"}]}}}]`
 	runner.responses[commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"})] = core.LocalCommandResult{Stdout: "container-b\ncontainer-a\n"}
 	runner.responses[commandKey([]string{"inspect", "container-a"})] = core.LocalCommandResult{Stdout: inspectA}
 	runner.responses[commandKey([]string{"inspect", "container-b"})] = core.LocalCommandResult{Stdout: inspectB}
@@ -5860,7 +6732,7 @@ func TestMissingReleaseRejectsClaimChangedAfterResolution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	labels := cloneLabels(claim.Labels)
+	labels := shared.CloneLabels(claim.Labels)
 	labels["state"] = "ready"
 	if _, err := core.UpdateLeaseClaimEndpointIfUnchanged(
 		leaseID,
@@ -5941,6 +6813,14 @@ func TestExactContainerAbsenceRejectsRoutingNotFound(t *testing.T) {
 		{name: "missing object", detail: "Error: No such object: " + testRecoveredContainerID, wantAbsent: true},
 		{name: "missing container", detail: "container " + testRecoveredContainerID + " not found", wantAbsent: true},
 		{name: "missing podman container", detail: `Error: no container with name or ID "` + testRecoveredContainerID + `" found: no such container`, wantAbsent: true},
+		{name: "podman exact double-quoted container", detail: `Error: no such container "` + testRecoveredContainerID + `"`, wantAbsent: true},
+		{name: "podman wrong double-quoted container", detail: `Error: no such container "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"`, wantErr: true},
+		{name: "podman longer quoted ID", detail: `Error: no such container "` + testRecoveredContainerID + `b"`, wantErr: true},
+		{name: "generic missing container", detail: "Error: no such container", wantErr: true},
+		{name: "permission failure quoting container", detail: `Error: permission denied: no such container "` + testRecoveredContainerID + `"`, wantErr: true},
+		{name: "authentication failure quoting container", detail: `Error: unauthorized: no such container "` + testRecoveredContainerID + `"`, wantErr: true},
+		{name: "quoted missing container with extra permission failure", detail: `Error: no such container "` + testRecoveredContainerID + "\"\npermission denied", wantErr: true},
+		{name: "podman connection failure quoting container", detail: `cannot connect to Podman: no such container "` + testRecoveredContainerID + `"`, wantErr: true},
 		{name: "missing docker context", detail: `context "captured" not found`, wantErr: true},
 		{name: "missing podman connection", detail: `connection "captured" not found`, wantErr: true},
 		{name: "container runtime endpoint missing", detail: `container runtime endpoint not found while inspecting ` + testRecoveredContainerID, wantErr: true},
@@ -5951,7 +6831,7 @@ func TestExactContainerAbsenceRejectsRoutingNotFound(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runner := &recordingRunner{run: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
-				return core.LocalCommandResult{Stderr: tc.detail, ExitCode: 1}, errors.New("inspect failed")
+				return core.LocalCommandResult{Stdout: "[]\n", Stderr: tc.detail, ExitCode: 125}, errors.New("inspect failed")
 			}}
 			b := testBackend(runner)
 			absent, err := b.exactContainerAbsent(context.Background(), testRecoveredContainerID)
@@ -5959,6 +6839,63 @@ func TestExactContainerAbsenceRejectsRoutingNotFound(t *testing.T) {
 				t.Fatalf("absent=%v err=%v", absent, err)
 			}
 		})
+	}
+}
+
+func TestMissingReleaseQuotedPodmanAbsenceRetry(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_missing_quoted_retry"
+	keyPath := writeLocalContainerClaimAndKey(t, leaseID, "missing-quoted-retry", localContainerClaimScope("docker", "default"))
+	original, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err = core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, original,
+		core.Server{CloudID: testRecoveredContainerID, Provider: providerName, Labels: original.Labels}, core.SSHTarget{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	addDefaultLocalContainerScopeResponses(runner)
+	b := testBackend(runner)
+	b.confirmContainerAbsent = b.exactContainerAbsent
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks := 0
+	detail := `Error: permission denied: no such container "` + original.CloudID + `"`
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if slices.Equal(req.Args, []string{"inspect", "--type", "container", original.CloudID}) {
+			checks++
+			return core.LocalCommandResult{Stdout: "[]\n", Stderr: detail, ExitCode: 125}, errors.New("inspect failed")
+		}
+		return runner.responses[commandKey(req.Args)], nil
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil {
+		t.Fatal("permission failure retired a missing-container claim")
+	}
+	retained, err := core.ReadLeaseClaim(leaseID)
+	if err != nil || !reflect.DeepEqual(retained, original) {
+		t.Fatalf("failed confirmation changed claim: %v", err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("failed confirmation removed key: %v", err)
+	}
+	// Retry the same snapshot only after the exact captured Podman diagnostic.
+	detail = `Error: no such container "` + original.CloudID + `"`
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if claim, err := core.ReadLeaseClaim(leaseID); err != nil || claim.LeaseID != "" {
+		t.Fatalf("confirmed absent claim remains: %v", err)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("confirmed absent key remains: %v", err)
+	}
+	if checks != 2 || recordedCommandCount(runner, "rm") != 0 {
+		t.Fatalf("exact confirmations=%d; absent-container release must not remove a container", checks)
 	}
 }
 
@@ -6367,7 +7304,7 @@ func TestCleanupLiveClaimChangeFencesMutation(t *testing.T) {
 			fixture := newCleanupClaimFixture(t, "cbx_cleanup_reclaimed", "cleanup-old-container", "exited", false)
 			replacement := fixture.claim
 			replacement.CloudID = "cleanup-replacement-container"
-			replacement.Labels = cloneLabels(replacement.Labels)
+			replacement.Labels = shared.CloneLabels(replacement.Labels)
 			replaced := false
 			fixture.b.beforeCleanupMutation = func(leaseID string) {
 				if leaseID != fixture.leaseID || replaced {
@@ -6497,7 +7434,7 @@ func TestCleanupMissingPendingRechecksAbsenceInsideFence(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newCleanupClaimFixture(t, "cbx_cleanup_missing_pending", "cleanup-missing-pending", "exited", false)
 			fixture.runner.responses[commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"})] = core.LocalCommandResult{}
-			labels := cloneLabels(fixture.claim.Labels)
+			labels := shared.CloneLabels(fixture.claim.Labels)
 			labels["state"] = pendingClaimState
 			labels["recovery"] = pendingRecoveryKind
 			updated, err := core.UpdateLeaseClaimLabelsIfUnchanged(fixture.leaseID, fixture.claim, labels)
@@ -6990,14 +7927,22 @@ func writeLocalContainerClaimAndKey(t *testing.T, leaseID, slug string, scopes .
 func createLocalContainerTouchClaim(t *testing.T, idleTimeout time.Duration) (string, string, core.LeaseClaim, *recordingRunner) {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	mountRoot := t.TempDir()
+	bootstrapRoot := filepath.Join(mountRoot, "bootstrap touch")
+	hostRoot := filepath.Join(mountRoot, "work root touch")
+	for _, root := range []string{bootstrapRoot, hostRoot} {
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	leaseID := "cbx_local_touch"
 	containerID := strings.Repeat("a", 64)
 	labels := testCapturedScopeLabels(map[string]string{
-		"bootstrap_dir":   filepath.Join(os.TempDir(), "crabbox-bootstrap-touch test"),
+		"bootstrap_dir":   bootstrapRoot,
 		"container_id":    containerID[:12],
 		"crabbox":         "true",
 		"docker_socket":   "1",
-		"host_work_root":  filepath.Join(os.TempDir(), "crabbox local touch"),
+		"host_work_root":  hostRoot,
 		"image":           "ubuntu:24.04",
 		"lease":           leaseID,
 		"provider":        providerName,
@@ -7038,6 +7983,10 @@ func createLocalContainerTouchClaim(t *testing.T, idleTimeout time.Duration) (st
 
 func localContainerTouchRunner(t *testing.T, leaseID, containerID string) *recordingRunner {
 	t.Helper()
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	container := inspectContainer{
 		ID:   containerID,
 		Name: "/crabbox-local-touch",
@@ -7045,7 +7994,8 @@ func localContainerTouchRunner(t *testing.T, leaseID, containerID string) *recor
 			"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": "local-touch",
 			"state": "ready", "server_type": "ubuntu:24.04", "ssh_user": "runner", "work_root": "/workspace/crabbox touch",
 		}},
-		State: inspectState{Status: "running", Running: true},
+		State:  inspectState{Status: "running", Running: true},
+		Mounts: testLocalContainerBindMounts(t, claim.Labels["bootstrap_dir"], claim.Labels["host_work_root"]),
 		NetworkSettings: inspectNetworking{Ports: map[string][]inspectPort{
 			sshPort + "/tcp": {{HostIP: "127.0.0.1", HostPort: "49153"}},
 		}},
@@ -7117,7 +8067,7 @@ func addDefaultLocalContainerScopeResponses(runner *recordingRunner) {
 }
 
 func testCapturedScopeLabels(labels map[string]string) map[string]string {
-	out := cloneLabels(labels)
+	out := shared.CloneLabels(labels)
 	for key, value := range checkpointScopeMetadata(checkpointScope{
 		Runtime: "docker", Context: "default", Endpoint: "unix:///tmp/docker-test.sock", DaemonID: "daemon-test",
 	}) {
@@ -7133,14 +8083,11 @@ func writeLocalContainerClaimAndKeyAt(t *testing.T, leaseID, slug, scope string,
 	if err := writeLocalContainerClaim(t, leaseID, slug, scope, lastUsed, idle); err != nil {
 		t.Fatal(err)
 	}
-	keyPath, err := core.TestboxKeyPath(leaseID)
+	keyPath, err := core.PrepareStoredTestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
+	if err := core.WritePreparedLeaseSSHKeyFile(keyPath, []byte("private")); err != nil {
 		t.Fatal(err)
 	}
 	return keyPath
@@ -7168,6 +8115,154 @@ func markTestLocalContainerWorkRoot(t *testing.T, root string) {
 	t.Helper()
 	if err := markLocalContainerWorkRoot(root); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func testLocalContainerBindMounts(t *testing.T, sources ...string) json.RawMessage {
+	t.Helper()
+	mounts := make([]map[string]string, 0, len(sources))
+	for _, source := range sources {
+		mounts = append(mounts, map[string]string{"Type": "bind", "Source": source})
+	}
+	data, err := json.Marshal(mounts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestManagedStateNativeLocalContainerHostVolume(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.LocalContainer.Volumes = []string{base + ":/mnt/fixture:ro"}
+	if _, _, err := b.createContainer(t.Context(), cfg, "fixture", "cbx_fixture", "fixture", "synthetic-public-marker", true); err == nil || !strings.Contains(err.Error(), "local-container host volume") || len(runner.calls) != 0 {
+		t.Fatalf("err=%v native calls=%v", err, runner.commandSummary())
+	}
+	for _, source := range []string{filepath.Join(base, "source-sibling"), "named-volume"} {
+		cfg.LocalContainer.Volumes = []string{source + ":/mnt/fixture:ro"}
+		if _, err := validateLocalContainerHostVolumes(cfg, cfg.LocalContainer.WorkRoot); err != nil {
+			t.Fatalf("unrelated source %q: %v", source, err)
+		}
+	}
+	t.Setenv("XDG_STATE_HOME", "")
+	cfg.LocalContainer.Volumes = []string{base + ":/mnt/fixture:ro"}
+	if _, err := validateLocalContainerHostVolumes(cfg, cfg.LocalContainer.WorkRoot); err != nil {
+		t.Fatalf("unset compatibility: %v", err)
+	}
+}
+
+func TestManagedStateNativeLocalContainerAutomaticWorkRootMount(t *testing.T) {
+	base := t.TempDir()
+	hostRoot := filepath.Join(base, "host-work")
+	t.Setenv("XDG_STATE_HOME", filepath.Join(hostRoot, "selected-state"))
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.LocalContainer.DockerSocket = true
+	cfg.LocalContainer.WorkRoot, cfg.WorkRoot = hostRoot, hostRoot
+	if _, _, err := b.createContainer(t.Context(), cfg, "fixture", "cbx_fixture", "fixture", "synthetic-public-marker", true); err == nil || !strings.Contains(err.Error(), "host work-root mount") || len(runner.calls) != 0 {
+		t.Fatalf("err=%v native calls=%v", err, runner.commandSummary())
+	}
+	if _, err := os.Stat(hostRoot); !os.IsNotExist(err) {
+		t.Fatalf("host work root created before admission: %v", err)
+	}
+}
+
+func TestManagedStateNativeLocalContainerBootstrapAndSocketScopes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrapRoot := localContainerBootstrapRoot()
+	if err := os.MkdirAll(bootstrapRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(bootstrapRoot, "ordinary-marker")
+	if err := os.WriteFile(marker, []byte("keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_STATE_HOME", cache)
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	if _, _, err := b.createContainer(t.Context(), cfg, "fixture", "cbx_fixture", "fixture", "synthetic-public-marker", true); err == nil || !strings.Contains(err.Error(), "bootstrap mount") || len(runner.calls) != 0 {
+		t.Fatalf("bootstrap admission err=%v calls=%v", err, runner.commandSummary())
+	}
+	entries, err := os.ReadDir(bootstrapRoot)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "ordinary-marker" {
+		t.Fatalf("owned empty temp cleanup changed parent: %v %v", entries, err)
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "keep\n" {
+		t.Fatalf("parent marker changed: %q %v", data, err)
+	}
+	if err := validateLocalContainerHostMount("local-container Docker socket mount", filepath.Join(cache, "crabbox", "socket-marker")); err == nil {
+		t.Fatal("socket source path overlap accepted")
+	}
+	t.Setenv("XDG_STATE_HOME", filepath.Join(bootstrapRoot, "state-sibling"))
+	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "fixture-container\n"}
+	_, dir, err := b.createContainer(t.Context(), cfg, "fixture", "cbx_fixture", "fixture", "synthetic-public-marker", true)
+	if err != nil || dir == "" {
+		t.Fatalf("unrelated created bootstrap directory rejected: %v", err)
+	}
+}
+
+func TestManagedStateNativeLocalContainerRetainedMounts(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("missing=%t", missing), func(t *testing.T) {
+			b, runner, leaseID, _ := resolveArchitectureFixture(t, "docker", "default", core.ArchitectureAMD64, core.ArchitectureAMD64)
+			original := runner.run
+			mountedSource := os.Getenv("XDG_STATE_HOME")
+			b.cfg.LocalContainer.Volumes = []string{t.TempDir() + ":/mnt/current-config"}
+			runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				result, err := original(req)
+				if err != nil || !slices.Contains(req.Args, "inspect") {
+					return result, err
+				}
+				var rows []map[string]any
+				if err := json.Unmarshal([]byte(result.Stdout), &rows); err != nil {
+					t.Fatal(err)
+				}
+				for _, row := range rows {
+					if missing {
+						delete(row, "Mounts")
+					} else {
+						row["Mounts"] = []map[string]string{{"Type": "bind", "Source": mountedSource, "Destination": "/mnt/original"}}
+					}
+				}
+				data, err := json.Marshal(rows)
+				if err != nil {
+					t.Fatal(err)
+				}
+				result.Stdout = string(data)
+				return result, nil
+			}
+			if _, err := b.Resolve(t.Context(), core.ResolveRequest{ID: leaseID, Prepare: true}); err == nil || !strings.Contains(err.Error(), "retained bind mount") {
+				t.Fatalf("guest access err=%v", err)
+			}
+			for _, req := range runner.calls {
+				if slices.Contains(req.Args, "exec") || slices.Contains(req.Args, "run") {
+					t.Fatalf("guest/source access preceded mount admission: %v", req.Args)
+				}
+			}
+			for _, req := range []core.ResolveRequest{{ID: leaseID, StatusOnly: true}, {ID: leaseID, ReleaseOnly: true}} {
+				if _, err := b.Resolve(t.Context(), req); err != nil {
+					t.Fatalf("control-only resolution blocked: %v", err)
+				}
+			}
+		})
+	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := validateLocalContainerInspectedMounts(inspectContainer{Mounts: json.RawMessage(`[]`)}); err != nil {
+		t.Fatalf("explicit empty mount inventory: %v", err)
+	}
+	t.Setenv("XDG_STATE_HOME", "")
+	if err := validateLocalContainerInspectedMounts(inspectContainer{}); err != nil {
+		t.Fatalf("unset compatibility: %v", err)
 	}
 }
 

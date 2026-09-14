@@ -172,7 +172,8 @@ export CRABBOX_COORDINATOR_TOKEN_COMMAND='["credential-helper","read","crabbox-u
 ```
 
 The command is executed directly without a shell. It must print exactly one
-token line, complete within 15 seconds, and stay within the output limit. The
+token line and complete within 15 seconds. Crabbox retains at most 16 KiB of
+stdout, including line endings, and rejects overflow before token parsing. The
 CLI reruns it for HTTP requests and reconnecting WebSockets, so an expiring
 token does not need to be persisted. Its output must be a bearer the
 coordinator accepts, such as its shared/admin token or a signed `cbxu_` user

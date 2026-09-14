@@ -62,7 +62,7 @@ func (a App) resolveSSHCommandTargetWithOptions(ctx context.Context, command str
 	idFlagSet := flagWasSet(fs, "id")
 	setIDFromFirstArg(fs, id)
 	if fs.NArg() > 1 || (idFlagSet && fs.NArg() > 0) {
-		return resolvedSSHCommandTarget{}, exit(2, "usage: crabbox %s [flags] <lease-id-or-slug>", command)
+		return resolvedSSHCommandTarget{}, Exit(2, "usage: crabbox %s [flags] <lease-id-or-slug>", command)
 	}
 	cfg, err := loadSSHCommandConfig(fs, *provider, providerFlags, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
 	if err != nil {
@@ -79,6 +79,9 @@ func (a App) resolveSSHCommandTargetWithOptions(ctx context.Context, command str
 		return resolvedSSHCommandTarget{}, err
 	}
 	if err := a.claimAndTouchLeaseTarget(ctx, cfg, &lease.Server, lease.SSH, lease.LeaseID, *reclaim); err != nil {
+		return resolvedSSHCommandTarget{}, err
+	}
+	if err := ensureSSHControlDirectory(lease.SSH); err != nil {
 		return resolvedSSHCommandTarget{}, err
 	}
 	resolved := resolvedSSHCommandTarget{

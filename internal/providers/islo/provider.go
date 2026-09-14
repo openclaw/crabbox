@@ -4,7 +4,6 @@ import (
 	"flag"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -13,12 +12,9 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string { return "islo" }
-func (Provider) Aliases() []string {
-	return nil
-}
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:      core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		Name:                "islo",
 		Family:              "islo",
 		Kind:                core.ProviderKindDelegatedRun,
@@ -35,10 +31,12 @@ func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	return ApplyIsloProviderFlags(cfg, fs, values)
 }
+
+// ClaimScope contributes the API endpoint identity to every claim core writes
+// for this provider, the same way the other sandbox providers do, so a claim
+// created against one endpoint is never matched against another.
+func (Provider) ClaimScope(cfg core.Config) string { return isloClaimScope(cfg) }
+
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewIsloBackend(p.Spec(), cfg, rt), nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("islo", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }

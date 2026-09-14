@@ -1,8 +1,10 @@
 package mxc
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -22,7 +24,7 @@ func TestBuildConfigDefaultsToBlockedProcessContainer(t *testing.T) {
 	t.Setenv("OS", `Windows_NT`)
 	cfg := core.BaseConfig()
 	cfg.MXC.ReadOnlyPaths = []string{`C:\Windows`}
-	config, err := buildConfig(cfg, RunRequest{
+	config, err := buildConfig(cfg, core.RunRequest{
 		Repo:    core.Repo{Root: `C:\src\example`},
 		Command: []string{"powershell.exe", "-Command", `Write-Output "hello world"`},
 		Env:     map[string]string{"CI": "1"},
@@ -81,7 +83,7 @@ func TestBuildConfigAllowsExplicitDACLMutationFallback(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.MXC.AllowDACLMutation = true
 	cfg.MXC.AllowWindowsUI = true
-	config, err := buildConfig(cfg, RunRequest{Command: []string{"cmd.exe", "/c", "exit", "0"}})
+	config, err := buildConfig(cfg, core.RunRequest{Command: []string{"cmd.exe", "/c", "exit", "0"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +96,7 @@ func TestBuildConfigAllowsExplicitDACLMutationFallback(t *testing.T) {
 }
 
 func TestBuildConfigShellRequiresWindowsUI(t *testing.T) {
-	_, err := buildConfig(core.BaseConfig(), RunRequest{Command: []string{"npm", "test"}, ShellMode: true})
+	_, err := buildConfig(core.BaseConfig(), core.RunRequest{Command: []string{"npm", "test"}, ShellMode: true})
 	if err == nil || !strings.Contains(err.Error(), "--mxc-allow-windows-ui") {
 		t.Fatalf("err=%v", err)
 	}
@@ -103,7 +105,7 @@ func TestBuildConfigShellRequiresWindowsUI(t *testing.T) {
 func TestBuildConfigRejectsVolumeRoot(t *testing.T) {
 	for _, root := range []string{`C:\`, `\\server\share\`, `\\?\C:\`, `\\?\UNC\server\share\`} {
 		t.Run(root, func(t *testing.T) {
-			_, err := buildConfig(core.BaseConfig(), RunRequest{Repo: core.Repo{Root: root}, Command: []string{"cmd.exe", "/c", "exit", "0"}})
+			_, err := buildConfig(core.BaseConfig(), core.RunRequest{Repo: core.Repo{Root: root}, Command: []string{"cmd.exe", "/c", "exit", "0"}})
 			if err == nil || !strings.Contains(err.Error(), "volume root") {
 				t.Fatalf("root=%q err=%v", root, err)
 			}
@@ -118,7 +120,7 @@ func TestBuildConfigRejectsVolumeRoot(t *testing.T) {
 
 func TestBuildIsolatedConfigUsesPrivateTemporaryDirectory(t *testing.T) {
 	cfg := core.BaseConfig()
-	config, _, cleanup, err := buildIsolatedConfig(cfg, RunRequest{Command: []string{"cmd.exe", "/c", "exit", "0"}, Env: map[string]string{"Temp": `C:\attacker`, "tmp": `C:\other`}})
+	config, _, cleanup, err := buildIsolatedConfig(cfg, core.RunRequest{Command: []string{"cmd.exe", "/c", "exit", "0"}, Env: map[string]string{"Temp": `C:\attacker`, "tmp": `C:\other`}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,4 +212,52 @@ func containsFold(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestMXCConfigShowSection(t *testing.T) {
+	projector, ok := any(Provider{}).(core.ProviderConfigShowProjector)
+	if !ok {
+		t.Fatal("real provider is missing passive config-show ownership")
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  core.MXCConfig
+		want map[string]any
+		text string
+	}{
+		{name: "nil lists", cfg: core.MXCConfig{CLIPath: "", Version: "", Containment: "", Network: "", ReadOnlyPaths: []string(nil), ReadWritePaths: []string(nil), AllowedHosts: []string(nil), BlockedHosts: []string(nil), AllowDACLMutation: false, AllowWindowsUI: false, Experimental: false}, want: map[string]any{"cliPath": "", "version": "", "containment": "", "network": "", "readOnlyPaths": []string(nil), "readWritePaths": []string(nil), "allowedHosts": []string(nil), "blockedHosts": []string(nil), "allowDaclMutation": false, "allowWindowsUI": false, "experimental": false}, text: "mxc cli= version= containment= network= readonly_paths=0 readwrite_paths=0 allowed_hosts=0 blocked_hosts=0 allow_dacl_mutation=false allow_windows_ui=false experimental=false\n"},
+		{name: "empty lists", cfg: core.MXCConfig{CLIPath: "", Version: "", Containment: "", Network: "", ReadOnlyPaths: []string{}, ReadWritePaths: []string{}, AllowedHosts: []string{}, BlockedHosts: []string{}, AllowDACLMutation: false, AllowWindowsUI: false, Experimental: false}, want: map[string]any{"cliPath": "", "version": "", "containment": "", "network": "", "readOnlyPaths": []string{}, "readWritePaths": []string{}, "allowedHosts": []string{}, "blockedHosts": []string{}, "allowDaclMutation": false, "allowWindowsUI": false, "experimental": false}, text: "mxc cli= version= containment= network= readonly_paths=0 readwrite_paths=0 allowed_hosts=0 blocked_hosts=0 allow_dacl_mutation=false allow_windows_ui=false experimental=false\n"},
+		{name: "ordered lists", cfg: core.MXCConfig{CLIPath: " raw-cli ", Version: " raw-version ", Containment: " raw-containment ", Network: " raw-network ", ReadOnlyPaths: []string{"/example/a", " /example/b ", "/example/a"}, ReadWritePaths: []string{"/example/c"}, AllowedHosts: []string{"example.test", " example.test "}, BlockedHosts: []string{"blocked.example", "blocked.example"}, AllowDACLMutation: true, AllowWindowsUI: true, Experimental: true}, want: map[string]any{"cliPath": " raw-cli ", "version": " raw-version ", "containment": " raw-containment ", "network": " raw-network ", "readOnlyPaths": []string{"/example/a", " /example/b ", "/example/a"}, "readWritePaths": []string{"/example/c"}, "allowedHosts": []string{"example.test", " example.test "}, "blockedHosts": []string{"blocked.example", "blocked.example"}, "allowDaclMutation": true, "allowWindowsUI": true, "experimental": true}, text: "mxc cli= raw-cli  version= raw-version  containment= raw-containment  network= raw-network  readonly_paths=3 readwrite_paths=1 allowed_hosts=2 blocked_hosts=2 allow_dacl_mutation=true allow_windows_ui=true experimental=true\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.Config{Provider: "unselected-display-test", MXC: tc.cfg}
+			before, err := json.Marshal(cfg.MXC)
+			if err != nil {
+				t.Fatal(err)
+			}
+			section := projector.ConfigShowSection(cfg)
+			got := map[string]any{}
+			var fields []string
+			for _, field := range section.Fields {
+				got[field.JSONName] = field.JSONValue
+				fields = append(fields, field.TextName+"="+field.TextValue)
+			}
+			if section.JSONKey != "mxc" || section.TextLabel != "mxc" || !reflect.DeepEqual(section.Providers, []string{"mxc"}) || len(section.Fields) != 11 {
+				t.Fatalf("section metadata=%#v", section)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("public fields=%#v want %#v", got, tc.want)
+			}
+			if line := section.TextLabel + " " + strings.Join(fields, " ") + "\n"; line != tc.text {
+				t.Fatalf("text=%q want %q", line, tc.text)
+			}
+			after, err := json.Marshal(cfg.MXC)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("projection mutated original config or slice contents")
+			}
+		})
+	}
 }

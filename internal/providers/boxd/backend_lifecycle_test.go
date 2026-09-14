@@ -546,6 +546,42 @@ func TestTouchUsesSnapshotAndAccountFence(t *testing.T) {
 		})
 	}
 }
+
+func TestTouchCancelsBehindClaimOwner(t *testing.T) {
+	b, _ := fixtureBackend(t)
+	lease := acquireFixture(t, b, false)
+	before := onlyClaim(t)
+	done := make(chan error, 1)
+	joined := false
+	err := core.WithLeaseClaimUnchanged(lease.LeaseID, before, func() error {
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		defer cancel()
+		go func() {
+			_, err := b.Touch(ctx, core.TouchRequest{Lease: lease, State: "running"})
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			joined = true
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("canceled touch returned %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Error("canceled touch remained blocked behind the claim owner")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !joined {
+		<-done
+	}
+	if onlyClaim(t).Revision != before.Revision {
+		t.Fatal("canceled touch changed the owned claim")
+	}
+}
+
 func TestAcquireWithRepositoryAndReuseRetainsTimeout(t *testing.T) {
 	b, _ := fixtureBackend(t)
 	repo := core.Repo{Root: t.TempDir()}

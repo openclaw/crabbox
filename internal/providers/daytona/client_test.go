@@ -3,13 +3,123 @@ package daytona
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	apidaytona "github.com/daytonaio/daytona/libs/api-client-go"
+	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+const daytonaControlTestTimeout = 40 * time.Millisecond
+
+type daytonaDeadlineRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f daytonaDeadlineRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestDaytonaControlRequestsUseDefaultOrCallerDeadline(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		injected      bool
+		clientTimeout time.Duration
+		callerTimeout time.Duration
+		wantLimit     time.Duration
+	}{
+		{name: "default", wantLimit: daytonaControlTimeout},
+		{name: "supplied", injected: true, clientTimeout: 17 * time.Second, wantLimit: 17 * time.Second},
+		{name: "supplied untimed", injected: true},
+		{name: "shorter caller", callerTimeout: 5 * time.Second, wantLimit: 5 * time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requests := 0
+			transport := daytonaDeadlineRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				requests++
+				deadline, bounded := req.Context().Deadline()
+				if test.wantLimit == 0 {
+					if bounded {
+						t.Errorf("caller-owned untimed client acquired deadline %s", deadline)
+					}
+				} else if !bounded {
+					t.Error("control request has no deadline")
+				} else if remaining := time.Until(deadline); remaining <= 0 || remaining > test.wantLimit {
+					t.Errorf("request deadline in %s, want within %s", remaining, test.wantLimit)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": {"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"items":[],"nextCursor":null}`)),
+					Request:    req,
+				}, nil
+			})
+			var supplied *http.Client
+			if test.injected {
+				supplied = &http.Client{Transport: transport, Timeout: test.clientTimeout}
+			}
+			cfg := core.Config{}
+			cfg.Daytona.APIKey, cfg.Daytona.APIURL = "daytona-test", "http://127.0.0.1"
+			api, err := newDaytonaClient(cfg, core.Runtime{HTTP: supplied})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if supplied == nil {
+				api.(*daytonaSDKClient).api.GetConfig().HTTPClient.Transport = transport
+			}
+			ctx := t.Context()
+			if test.callerTimeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, test.callerTimeout)
+				defer cancel()
+			}
+			if _, err := api.ListCrabboxSandboxes(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if requests != 1 {
+				t.Fatalf("requests through supplied transport=%d, want 1", requests)
+			}
+			if supplied != nil && supplied.Timeout != test.clientTimeout {
+				t.Fatalf("supplied client timeout was mutated: %s", supplied.Timeout)
+			}
+		})
+	}
+}
+
+func TestDaytonaControlClientBoundsStalledResponses(t *testing.T) {
+	for _, phase := range []string{"headers", "body"} {
+		t.Run(phase, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if phase == "body" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"items":[`)
+					w.(http.Flusher).Flush()
+				}
+				<-req.Context().Done()
+			}))
+			defer server.Close()
+			cfg := core.Config{}
+			cfg.Daytona.APIKey, cfg.Daytona.APIURL = "daytona-test", server.URL
+			api, err := newDaytonaClient(cfg, core.Runtime{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Exercise the production SDK client with a short test-only budget.
+			api.(*daytonaSDKClient).api.GetConfig().HTTPClient.Timeout = daytonaControlTestTimeout
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			_, err = api.ListCrabboxSandboxes(ctx)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("stalled %s error=%v, want deadline exceeded", phase, err)
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("stalled %s outlasted the control timeout and reached the caller deadline", phase)
+			}
+		})
+	}
+}
 
 func TestDaytonaListCrabboxSandboxesUsesCursorPagination(t *testing.T) {
 	var cursors []string
@@ -60,7 +170,7 @@ func TestDaytonaListCrabboxSandboxesUsesCursorPagination(t *testing.T) {
 	if got[1].GetId() != "sandbox-two" || got[1].GetLabels()["slug"] != "slug-two" {
 		t.Fatalf("second sandbox=%#v labels=%#v", got[1], got[1].GetLabels())
 	}
-	resolved, leaseID, err := resolveDaytonaSandbox(context.Background(), client, Config{}, "slug-two")
+	resolved, leaseID, err := resolveDaytonaSandbox(context.Background(), client, core.Config{}, "slug-two")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +208,7 @@ func TestResolveDaytonaSandboxDirectLookupErrorHandling(t *testing.T) {
 	apiCfg.HTTPClient = srv.Client()
 	client := &daytonaSDKClient{api: apidaytona.NewAPIClient(apiCfg), token: "api-token"}
 
-	got, leaseID, err := resolveDaytonaSandbox(context.Background(), client, Config{}, "direct-one")
+	got, leaseID, err := resolveDaytonaSandbox(context.Background(), client, core.Config{}, "direct-one")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,13 +216,13 @@ func TestResolveDaytonaSandboxDirectLookupErrorHandling(t *testing.T) {
 		t.Fatalf("direct lookup=%s lease=%s, want direct-one cbx_111111111111", got.GetId(), leaseID)
 	}
 
-	_, _, err = resolveDaytonaSandbox(context.Background(), client, Config{}, "missing")
-	var exitErr ExitError
+	_, _, err = resolveDaytonaSandbox(context.Background(), client, core.Config{}, "missing")
+	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 4 || !strings.Contains(err.Error(), "daytona sandbox not found: missing") {
 		t.Fatalf("missing err=%v, want local not-found exit", err)
 	}
 
-	_, _, err = resolveDaytonaSandbox(context.Background(), client, Config{}, "denied")
+	_, _, err = resolveDaytonaSandbox(context.Background(), client, core.Config{}, "denied")
 	if err == nil || !strings.Contains(err.Error(), "daytona get sandbox: 401 Unauthorized") {
 		t.Fatalf("denied err=%v, want preserved get-sandbox failure", err)
 	}
@@ -123,7 +233,7 @@ func TestResolveDaytonaSandboxDirectLookupErrorHandling(t *testing.T) {
 		t.Fatalf("denied err=%v, want no not-found rewrite", err)
 	}
 
-	_, _, err = resolveDaytonaSandbox(context.Background(), client, Config{}, "unowned")
+	_, _, err = resolveDaytonaSandbox(context.Background(), client, core.Config{}, "unowned")
 	if !errors.As(err, &exitErr) || exitErr.Code != 4 || !strings.Contains(err.Error(), "is not owned by Crabbox") {
 		t.Fatalf("unowned err=%v, want ownership refusal", err)
 	}

@@ -31,7 +31,7 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("targets=%#v", spec.Targets)
 	}
-	if aliases := provider.Aliases(); !reflect.DeepEqual(aliases, []string{"csb", "code-sandbox"}) {
+	if aliases := provider.Spec().Aliases; !reflect.DeepEqual(aliases, []string{"csb", "code-sandbox"}) {
 		t.Fatalf("aliases=%v", aliases)
 	}
 }
@@ -67,7 +67,7 @@ func TestProviderFlagsApplyAndValidateNonSecretFields(t *testing.T) {
 	if got.HibernationTimeoutSecs != 900 || got.AutomaticWakeupHTTP || !got.AutomaticWakeupWebSocket || got.BridgeCommand != "/opt/node" || got.SDKPackage != "@codesandbox/sdk@2.4.2" || got.DoctorListLimit != 2 || got.OperationTimeoutSecs != 45 {
 		t.Fatalf("codesandbox config=%#v", got)
 	}
-	if _, ok := reflect.TypeOf(CodeSandboxConfig{}).FieldByName("APIKey"); ok {
+	if _, ok := reflect.TypeOf(core.CodeSandboxConfig{}).FieldByName("APIKey"); ok {
 		t.Fatal("CodeSandboxConfig must not persist API keys")
 	}
 }
@@ -83,10 +83,14 @@ func TestProviderFlagsRejectGenericSizingForAliases(t *testing.T) {
 				fs.String("class", "", "")
 				fs.String("type", "", "")
 				values := RegisterCodeSandboxProviderFlags(fs, cfg)
-				if err := fs.Parse([]string{"--" + flagName, "large"}); err != nil {
+				if err := fs.Parse([]string{"--" + flagName, "large", "--codesandbox-template-id=changed"}); err != nil {
 					t.Fatal(err)
 				}
+				before := cfg.CodeSandbox
 				err := ApplyCodeSandboxProviderFlags(&cfg, fs, values)
+				if cfg.CodeSandbox != before {
+					t.Fatal("sizing guard copied provider flags")
+				}
 				if err == nil || !strings.Contains(err.Error(), "--codesandbox-vm-tier") {
 					t.Fatalf("provider=%q flag=%s err=%v", provider, flagName, err)
 				}
@@ -98,14 +102,14 @@ func TestProviderFlagsRejectGenericSizingForAliases(t *testing.T) {
 func TestValidateCodeSandboxConfigRejectsUnsafeValues(t *testing.T) {
 	tests := []struct {
 		name   string
-		mutate func(*Config)
+		mutate func(*core.Config)
 		want   string
 	}{
-		{name: "workdir outside project workspace", mutate: func(cfg *Config) { cfg.CodeSandbox.Workdir = "/tmp/app" }, want: "under /project/workspace"},
-		{name: "empty bridge command", mutate: func(cfg *Config) { cfg.CodeSandbox.BridgeCommand = " " }, want: "bridgeCommand"},
-		{name: "invalid privacy", mutate: func(cfg *Config) { cfg.CodeSandbox.Privacy = "team-only" }, want: "privacy"},
-		{name: "invalid vm tier", mutate: func(cfg *Config) { cfg.CodeSandbox.VMTier = "huge" }, want: "vmTier"},
-		{name: "negative timeout", mutate: func(cfg *Config) { cfg.CodeSandbox.OperationTimeoutSecs = -1 }, want: "operationTimeoutSecs"},
+		{name: "workdir outside project workspace", mutate: func(cfg *core.Config) { cfg.CodeSandbox.Workdir = "/tmp/app" }, want: "under /project/workspace"},
+		{name: "empty bridge command", mutate: func(cfg *core.Config) { cfg.CodeSandbox.BridgeCommand = " " }, want: "bridgeCommand"},
+		{name: "invalid privacy", mutate: func(cfg *core.Config) { cfg.CodeSandbox.Privacy = "team-only" }, want: "privacy"},
+		{name: "invalid vm tier", mutate: func(cfg *core.Config) { cfg.CodeSandbox.VMTier = "huge" }, want: "vmTier"},
+		{name: "negative timeout", mutate: func(cfg *core.Config) { cfg.CodeSandbox.OperationTimeoutSecs = -1 }, want: "operationTimeoutSecs"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -137,13 +141,13 @@ func TestDoctorRequiresEnvOnlyAuthBeforeBridge(t *testing.T) {
 	t.Setenv(codesandboxPrimaryAPIKeyEnv, "")
 	t.Setenv(codesandboxFallbackAPIKeyEnv, "")
 	calls := 0
-	restore := replaceClientFactory(func(Config, Runtime) (codeSandboxAPI, error) {
+	restore := replaceClientFactory(func(core.Config, core.Runtime) (codeSandboxAPI, error) {
 		calls++
 		return &fakeSandboxLister{}, nil
 	})
 	defer restore()
 	backend := newTestBackend(newTestConfig())
-	_, err := backend.Doctor(context.Background(), DoctorRequest{})
+	_, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err == nil || !strings.Contains(err.Error(), codesandboxPrimaryAPIKeyEnv) || strings.Contains(err.Error(), "secret") {
 		t.Fatalf("Doctor err=%v", err)
 	}
@@ -160,12 +164,12 @@ func TestDoctorIsNonMutatingListReadiness(t *testing.T) {
 			TotalCount: 1,
 		},
 	}
-	restore := replaceClientFactory(func(Config, Runtime) (codeSandboxAPI, error) {
+	restore := replaceClientFactory(func(core.Config, core.Runtime) (codeSandboxAPI, error) {
 		return fake, nil
 	})
 	defer restore()
 	backend := newTestBackend(newTestConfig())
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatalf("Doctor err=%v", err)
 	}
@@ -177,13 +181,13 @@ func TestDoctorIsNonMutatingListReadiness(t *testing.T) {
 	}
 }
 
-func newTestConfig() Config {
+func newTestConfig() core.Config {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	return cfg
 }
 
-func newTestBackend(cfg Config) *codeSandboxBackend {
+func newTestBackend(cfg core.Config) *codeSandboxBackend {
 	backend, err := Provider{}.Configure(cfg, discardRuntime())
 	if err != nil {
 		panic(err)
@@ -191,7 +195,7 @@ func newTestBackend(cfg Config) *codeSandboxBackend {
 	return backend.(*codeSandboxBackend)
 }
 
-func replaceClientFactory(fn func(Config, Runtime) (codeSandboxAPI, error)) func() {
+func replaceClientFactory(fn func(core.Config, core.Runtime) (codeSandboxAPI, error)) func() {
 	prev := newCodeSandboxClient
 	newCodeSandboxClient = fn
 	return func() { newCodeSandboxClient = prev }
@@ -245,4 +249,63 @@ func (f *fakeSandboxLister) ListPorts(context.Context, string) ([]PortInfo, erro
 
 func (f *fakeSandboxLister) WaitForPortURL(context.Context, string, int) (PortInfo, error) {
 	return PortInfo{}, nil
+}
+
+func TestProviderFlagPresenceBeforeValidation(t *testing.T) {
+	cfg := newTestConfig()
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	values := RegisterCodeSandboxProviderFlags(fs, cfg)
+	// Earlier layers may change after registration; unvisited flags must not restore defaults.
+	cfg.CodeSandbox.TemplateID = "later-template"
+	cfg.CodeSandbox.VMTier = "micro"
+	cfg.CodeSandbox.Workdir = "/project/workspace/later"
+	cfg.CodeSandbox.Privacy = "public-hosts"
+	cfg.CodeSandbox.HibernationTimeoutSecs = 90
+	cfg.CodeSandbox.AutomaticWakeupHTTP = true
+	cfg.CodeSandbox.AutomaticWakeupWebSocket = true
+	cfg.CodeSandbox.BridgeCommand = "later-node"
+	cfg.CodeSandbox.SDKPackage = "@codesandbox/sdk"
+	cfg.CodeSandbox.DoctorListLimit = 3
+	cfg.CodeSandbox.OperationTimeoutSecs = 40
+	before := cfg.CodeSandbox
+	if err := ApplyCodeSandboxProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CodeSandbox != before {
+		t.Fatalf("unvisited flags changed config: %#v", cfg.CodeSandbox)
+	}
+	if err := fs.Parse([]string{
+		"--codesandbox-template-id=", "--codesandbox-workdir=", "--codesandbox-vm-tier=", "--codesandbox-privacy=",
+		"--codesandbox-hibernation-timeout-secs=0", "--codesandbox-automatic-wakeup-http=false", "--codesandbox-automatic-wakeup-websocket=false",
+		"--codesandbox-bridge-command=", "--codesandbox-sdk-package=", "--codesandbox-doctor-list-limit=0", "--codesandbox-operation-timeout-secs=0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyCodeSandboxProviderFlags(&cfg, fs, values); err == nil {
+		t.Fatal("expected semantic validation failure")
+	}
+	if cfg.CodeSandbox != (core.CodeSandboxConfig{}) {
+		t.Fatalf("explicit zero values not copied before validation: %#v", cfg.CodeSandbox)
+	}
+}
+
+func TestProviderFlagsWrongValuesBeforeSizingGuard(t *testing.T) {
+	for _, values := range []any{nil, struct{}{}} {
+		cfg := newTestConfig()
+		cfg.Provider = "csb"
+		cfg.CodeSandbox.BridgeCommand = ""
+		before := cfg.CodeSandbox
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.String("class", "", "")
+		if err := fs.Parse([]string{"--class=large"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyCodeSandboxProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatalf("wrong values %T reached guard/validation: %v", values, err)
+		}
+		if cfg.CodeSandbox != before {
+			t.Fatal("wrong values changed config")
+		}
+	}
 }

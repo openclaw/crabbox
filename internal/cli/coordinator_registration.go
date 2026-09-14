@@ -56,7 +56,7 @@ func refreshRunLeaseClaimEndpoint(leaseID string, server *Server, target SSHTarg
 	if !set || !exists {
 		return
 	}
-	updated, err := updateLeaseClaimEndpointIfUnchanged(leaseID, expected, *server, target)
+	updated, err := UpdateLeaseClaimEndpointIfUnchanged(leaseID, expected, *server, target)
 	if err == nil {
 		SetServerLeaseClaimSnapshot(server, updated, true)
 	}
@@ -79,12 +79,12 @@ func (a App) claimLeaseTargetForRepoAndRegisterMode(
 	} else if server.claimSnapshotSet {
 		expected, expectedExists, err = resolvedLeaseClaimSnapshot(leaseID, *server)
 	} else {
-		expected, expectedExists, err = readLeaseClaimWithPresence(leaseID)
+		expected, expectedExists, err = ReadLeaseClaimWithPresence(leaseID)
 	}
 	if err != nil {
 		return err
 	}
-	claimed, err := claimLeaseTargetForRepoConfigIfUnchanged(
+	claimed, err := ClaimLeaseTargetForRepoConfigIfUnchanged(
 		leaseID,
 		slug,
 		cfg,
@@ -140,7 +140,7 @@ func (a App) registerCoordinatorLeaseBestEffort(ctx context.Context, cfg Config,
 	provider := firstNonBlank(server.Provider, cfg.Provider)
 	targetOS := firstNonBlank(target.TargetOS, cfg.TargetOS)
 	registration := CoordinatorLeaseRegistration{
-		Slug:               firstNonBlank(serverSlug(server), lease.LeaseID),
+		Slug:               firstNonBlank(ServerSlug(server), lease.LeaseID),
 		Provider:           provider,
 		TargetOS:           targetOS,
 		WindowsMode:        firstNonBlank(target.WindowsMode, cfg.WindowsMode),
@@ -159,7 +159,7 @@ func (a App) registerCoordinatorLeaseBestEffort(ctx context.Context, cfg Config,
 		WorkRoot:           cfg.WorkRoot,
 		Profile:            cfg.Profile,
 		Class:              cfg.Class,
-		Pond:               normalizePondName(cfg.Pond),
+		Pond:               NormalizePondName(cfg.Pond),
 		ExposedPorts:       append([]string(nil), cfg.ExposedPorts...),
 		TTLSeconds:         int(cfg.TTL.Seconds()),
 		IdleTimeoutSeconds: int(cfg.IdleTimeout.Seconds()),
@@ -493,7 +493,7 @@ func (a App) releaseRegisteredCoordinatorLeaseAfterConfirmedAbsence(ctx context.
 	if adapterMode {
 		return a.completeRuntimeAdapterDeleteAfterConfirmedAbsence(ctx, cfg, leaseID, adapterID, workspaceID)
 	}
-	claim, exists, err := readLeaseClaimWithPresence(leaseID)
+	claim, exists, err := ReadLeaseClaimWithPresence(leaseID)
 	if err != nil {
 		return err
 	}
@@ -521,7 +521,7 @@ func (a App) completeRuntimeAdapterDeleteAfterConfirmedAbsence(ctx context.Conte
 		}
 		return err
 	}
-	claim, exists, err := readLeaseClaimWithPresence(leaseID)
+	claim, exists, err := ReadLeaseClaimWithPresence(leaseID)
 	if err != nil {
 		return err
 	}

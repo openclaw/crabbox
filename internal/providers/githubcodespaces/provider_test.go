@@ -25,7 +25,7 @@ func TestProviderSpec(t *testing.T) {
 }
 
 func TestProviderAliases(t *testing.T) {
-	got := strings.Join(Provider{}.Aliases(), ",")
+	got := strings.Join(Provider{}.Spec().Aliases, ",")
 	if got != "codespaces,gh-codespaces" {
 		t.Fatalf("aliases=%q", got)
 	}
@@ -39,8 +39,8 @@ func TestServerTypeForConfigUsesMachineOrExplicitType(t *testing.T) {
 	if got := provider.ServerTypeForConfig(core.Config{ServerType: "premiumLinux", ServerTypeExplicit: true, GitHubCodespaces: core.GitHubCodespacesConfig{Machine: "standardLinux32gb"}}); got != "premiumLinux" {
 		t.Fatalf("explicit ServerTypeForConfig=%q", got)
 	}
-	if got := provider.ServerTypeForClass("beast"); got != defaultCodespaceMachine {
-		t.Fatalf("ServerTypeForClass=%q", got)
+	if got := provider.ServerTypeForConfig(core.Config{Class: "beast"}); got != defaultCodespaceMachine {
+		t.Fatalf("ServerTypeForConfig=%q", got)
 	}
 }
 
@@ -289,7 +289,7 @@ func TestCodespacesWorkRootFlagControlsDefaultDerivation(t *testing.T) {
 			if err := (Provider{}).ApplyConfigDefaults(&cfg); err != nil {
 				t.Fatal(err)
 			}
-			backend := newBackend(Provider{}.Spec(), cfg, Runtime{})
+			backend := newBackend(Provider{}.Spec(), cfg, core.Runtime{})
 			if got := backend.effectiveWorkRoot("example-org/my-app"); got != tt.want {
 				t.Fatalf("work root=%q want %q", got, tt.want)
 			}

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	sandboxv1 "github.com/openclaw/crabbox/internal/providers/wandb/gen/coreweave/sandbox/v1beta2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -84,7 +85,7 @@ func TestMapRPCErrorRedactsOpaqueAPIKey(t *testing.T) {
 
 func TestWandbAPIErrorAsExitError(t *testing.T) {
 	err := &wandbAPIError{ExitCode: 77, Stderr: "auth failed", Code: codes.Unauthenticated}
-	var ee ExitError
+	var ee core.ExitError
 	if !errors.As(err, &ee) {
 		t.Fatal("errors.As failed for *wandbAPIError -> ExitError")
 	}
@@ -104,24 +105,24 @@ func TestResolveAuthPrecedence(t *testing.T) {
 	t.Setenv("WANDB_API_KEY", "wandb-key")
 	t.Setenv("WANDB_ENTITY_NAME", "team")
 
-	auth, err := resolveAuth(Config{Wandb: WandbConfig{APIKey: "cfg-key"}})
+	auth, err := resolveAuth(core.Config{Wandb: core.WandbConfig{APIKey: "cfg-key"}})
 	if err != nil || auth.APIKey != "crabbox-key" || auth.Entity != "team" {
 		t.Fatalf("CRABBOX precedence: auth=%#v err=%v", auth, err)
 	}
 
 	t.Setenv("CRABBOX_WANDB_API_KEY", "")
-	auth, err = resolveAuth(Config{Wandb: WandbConfig{APIKey: "cfg-key"}})
+	auth, err = resolveAuth(core.Config{Wandb: core.WandbConfig{APIKey: "cfg-key"}})
 	if err != nil || auth.APIKey != "cfg-key" {
 		t.Fatalf("cfg precedence: auth=%#v err=%v", auth, err)
 	}
 
-	auth, err = resolveAuth(Config{})
+	auth, err = resolveAuth(core.Config{})
 	if err != nil || auth.APIKey != "wandb-key" {
 		t.Fatalf("WANDB precedence: auth=%#v err=%v", auth, err)
 	}
 
 	t.Setenv("WANDB_API_KEY", "")
-	auth, err = resolveAuth(Config{})
+	auth, err = resolveAuth(core.Config{})
 	if err != nil || auth.APIKey != "netrc-key" {
 		t.Fatalf("netrc precedence: auth=%#v err=%v", auth, err)
 	}
@@ -245,7 +246,7 @@ func TestWandbClientUsesPlaintextForHTTPOverride(t *testing.T) {
 	t.Setenv("CRABBOX_WANDB_API_KEY", "test-key")
 	t.Setenv("WANDB_ENTITY_NAME", "test-entity")
 	t.Setenv("CWSANDBOX_BASE_URL", "http://"+lis.Addr().String())
-	api, err := newWandbClient(Config{}, Runtime{})
+	api, err := newWandbClient(core.Config{}, core.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +293,7 @@ func TestResolveAuthMissingKey(t *testing.T) {
 	t.Setenv("CRABBOX_WANDB_API_KEY", "")
 	t.Setenv("WANDB_API_KEY", "")
 	t.Setenv("WANDB_ENTITY_NAME", "team")
-	_, err := resolveAuth(Config{})
+	_, err := resolveAuth(core.Config{})
 	if err == nil || !strings.Contains(err.Error(), "W&B API key") {
 		t.Fatalf("err = %v, want missing-key error", err)
 	}
@@ -302,7 +303,7 @@ func TestResolveAuthRequiresEntity(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CRABBOX_WANDB_API_KEY", "crabbox-key")
 	t.Setenv("WANDB_ENTITY_NAME", "")
-	_, err := resolveAuth(Config{})
+	_, err := resolveAuth(core.Config{})
 	if err == nil || !strings.Contains(err.Error(), "WANDB_ENTITY_NAME") {
 		t.Fatalf("err = %v, want missing entity error", err)
 	}

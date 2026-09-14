@@ -527,7 +527,7 @@ func TestAutoRouteExternalLeaseUsesPersistedClaimRouting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseForRepoProviderScope(
+	if err := ClaimLeaseForRepoProviderScope(
 		leaseID,
 		"old-box",
 		"external",
@@ -561,6 +561,35 @@ func TestAutoRouteExternalLeaseUsesPersistedClaimRouting(t *testing.T) {
 	}
 }
 
+func TestAutoRouteExternalLeaseDoesNotTreatCanonicalIDAsSlug(t *testing.T) {
+	root := setExternalRoutingTestHome(t)
+	const leaseID = "cbx_bbbbbbbbbbbb"
+	routing := ExternalConfig{Command: "other-provider", WorkRoot: "/other/work"}
+	if _, err := PersistExternalRouting(leaseID, routing); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClaimLeaseForRepoProviderScope(leaseID, "cbx-aaaaaaaaaaaa", "external", "other-scope", root, time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	cfg.Provider = "external"
+	cfg.External = ExternalConfig{Command: "current-provider", WorkRoot: "/current/work"}
+	fs := newFlagSet("test", io.Discard)
+	if err := autoRouteExternalLease(&cfg, fs, "cbx_aaaaaaaaaaaa"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.External.Command != "current-provider" || cfg.External.RoutingFile != "" {
+		t.Errorf("missing canonical ID loaded unrelated routing: %#v", cfg.External)
+	}
+	cfg.External = ExternalConfig{Command: "current-provider", WorkRoot: "/current/work"}
+	if err := autoRouteExternalLease(&cfg, fs, "cbx-aaaaaaaaaaaa"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.External.Command != routing.Command || cfg.External.WorkRoot != routing.WorkRoot {
+		t.Fatalf("explicit slug did not restore routing: %#v", cfg.External)
+	}
+}
+
 func TestAutoRouteExternalLeaseAcceptsCanonicalProviderAliasClaims(t *testing.T) {
 	for _, identifier := range []string{"cbx_1257eeee0001", "legacy-external"} {
 		t.Run(identifier, func(t *testing.T) {
@@ -570,7 +599,7 @@ func TestAutoRouteExternalLeaseAcceptsCanonicalProviderAliasClaims(t *testing.T)
 			if _, err := PersistExternalRouting(leaseID, routing); err != nil {
 				t.Fatal(err)
 			}
-			if err := claimLeaseForRepoProviderScope(leaseID, "legacy-external", "exec-provider", "legacy-scope", root, time.Minute, false); err != nil {
+			if err := ClaimLeaseForRepoProviderScope(leaseID, "legacy-external", "exec-provider", "legacy-scope", root, time.Minute, false); err != nil {
 				t.Fatal(err)
 			}
 			cfg := baseConfig()
@@ -593,7 +622,7 @@ func TestAutoRouteExternalLeaseDoesNotReplaceRecordedRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseForRepoProviderScope(leaseID, "unrelated-external", "external", "unrelated-scope", root, time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProviderScope(leaseID, "unrelated-external", "external", "unrelated-scope", root, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	cfg := baseConfig()
@@ -628,7 +657,7 @@ func TestAutoRouteExternalLeaseRestoresAuthoritativeMetadataWithoutChangingProve
 	if _, err := PersistExternalRouting(leaseID, routing); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseForRepoProviderScope(leaseID, "recorded-external", "external", "recorded-scope", root, time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProviderScope(leaseID, "recorded-external", "external", "recorded-scope", root, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	cfg := baseConfig()
@@ -648,7 +677,7 @@ func TestAutoRouteExternalLeaseRejectsAmbiguousAlias(t *testing.T) {
 		if _, err := PersistExternalRouting(leaseID, ExternalConfig{Command: "provider", WorkRoot: "/work/crabbox"}); err != nil {
 			t.Fatal(err)
 		}
-		if err := claimLeaseForRepoProviderScope(leaseID, "shared-alias", "external", leaseID, root, time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProviderScope(leaseID, "shared-alias", "external", leaseID, root, time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -683,7 +712,7 @@ func TestAutoRouteExternalLeaseRejectsCrossProviderAliasCollision(t *testing.T) 
 		leaseID  string
 		provider string
 	}{{"cbx_111111111111", "external"}, {"cbx_222222222222", "aws"}} {
-		if err := claimLeaseForRepoProviderScope(tc.leaseID, "shared-alias", tc.provider, tc.leaseID, root, time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProviderScope(tc.leaseID, "shared-alias", tc.provider, tc.leaseID, root, time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -708,7 +737,7 @@ func TestAutoRouteExternalLeaseRejectsCrossProviderAliasCollision(t *testing.T) 
 func TestAutoRouteExternalLeaseFailsClosedWithoutRoutingState(t *testing.T) {
 	root := setExternalRoutingTestHome(t)
 	leaseID := "cbx_abcdef123456"
-	if err := claimLeaseForRepoProviderScope(leaseID, "old-box", "external", "old-scope", root, time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProviderScope(leaseID, "old-box", "external", "old-scope", root, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	cfg := baseConfig()
@@ -772,7 +801,7 @@ func TestAutoRouteExternalLeaseHonorsConfiguredRoutingFile(t *testing.T) {
 		if selectedPath == "" {
 			selectedPath = path
 		}
-		if err := claimLeaseForRepoProviderScope(leaseID, "shared-alias", "external", leaseID, root, time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProviderScope(leaseID, "shared-alias", "external", leaseID, root, time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -819,7 +848,7 @@ func TestRouteExternalLeaseClaimOverridesAmbientRouting(t *testing.T) {
 			t.Fatal(err)
 		}
 		paths[leaseID] = path
-		if err := claimLeaseForRepoProviderScope(leaseID, leaseID, "external", leaseID, root, time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProviderScope(leaseID, leaseID, "external", leaseID, root, time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -845,7 +874,7 @@ func TestRunExistingExternalLeaseLoadsPersistedRoutingBeforeValidation(t *testin
 	if _, err := PersistExternalRouting(leaseID, oldRouting); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseForRepoProviderScope(leaseID, "old-box", "external", "old-scope", root, time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProviderScope(leaseID, "old-box", "external", "old-scope", root, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -873,7 +902,7 @@ func TestResolveLeaseTargetUsesPersistedExternalRouting(t *testing.T) {
 	if _, err := PersistExternalRouting(leaseID, oldRouting); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseForRepoProviderScope(leaseID, "old-box", "external", "old-scope", root, time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProviderScope(leaseID, "old-box", "external", "old-scope", root, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	cfg := baseConfig()
@@ -893,7 +922,7 @@ func TestLeaseTargetConfigPreservesExplicitNonExternalProvider(t *testing.T) {
 	if _, err := PersistExternalRouting(leaseID, ExternalConfig{Command: "old-provider", WorkRoot: "/old/work"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseForRepoProviderScope(leaseID, "old-box", "external", "old-scope", root, time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProviderScope(leaseID, "old-box", "external", "old-scope", root, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	defaults := baseConfig()
@@ -921,7 +950,7 @@ func TestLeaseTargetConfigPreservesImplicitExternalClaimRouting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseForRepoProviderScope(leaseID, "claimed-external", "external", "claimed-scope", root, time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProviderScope(leaseID, "claimed-external", "external", "claimed-scope", root, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(t.TempDir(), "crabbox.yaml")
@@ -957,7 +986,7 @@ func TestLeaseTargetConfigProviderResourceIDSkipsExternalRouting(t *testing.T) {
 	if _, err := PersistExternalRouting(leaseID, routing); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseForRepoProviderScope(leaseID, "native-vm-name", "external", "claimed-scope", root, time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProviderScope(leaseID, "native-vm-name", "external", "claimed-scope", root, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 

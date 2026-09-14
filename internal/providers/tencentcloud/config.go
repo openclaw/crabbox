@@ -8,15 +8,10 @@ import (
 )
 
 const (
-	defaultRegion                  = "ap-shanghai"
-	defaultZone                    = "ap-shanghai-2"
-	defaultType                    = "SA5.MEDIUM2"
-	defaultRootGB                  = int64(50)
-	defaultInternetChargeType      = "TRAFFIC_POSTPAID_BY_HOUR"
-	defaultInternetMaxBandwidthOut = int64(5)
-	defaultCVMEndpoint             = "https://cvm.tencentcloudapi.com"
-	defaultTagEndpoint             = "https://tag.tencentcloudapi.com"
-	defaultSTSEndpoint             = "https://sts.tencentcloudapi.com"
+	// Class selection remains independent of configured runtime defaults.
+	defaultType        = "SA5.MEDIUM2"
+	defaultTagEndpoint = "https://tag.tencentcloudapi.com"
+	defaultSTSEndpoint = "https://sts.tencentcloudapi.com"
 )
 
 func cfgForRun(cfg core.Config) core.Config {
@@ -25,21 +20,21 @@ func cfgForRun(cfg core.Config) core.Config {
 		cfg.TargetOS = core.TargetLinux
 	}
 	if cfg.TencentCloud.Region == "" {
-		cfg.TencentCloud.Region = defaultRegion
+		cfg.TencentCloud.Region = core.TencentCloudRegionFallback
 	}
 	if cfg.TencentCloud.Zone == "" {
-		cfg.TencentCloud.Zone = defaultZone
+		cfg.TencentCloud.Zone = core.TencentCloudZoneFallback
 	}
 	resolvedType := serverTypeForConfig(cfg)
 	cfg.TencentCloud.Type = resolvedType
 	if cfg.TencentCloud.RootGB == 0 {
-		cfg.TencentCloud.RootGB = defaultRootGB
+		cfg.TencentCloud.RootGB = core.TencentCloudRootGBFallback
 	}
 	if cfg.TencentCloud.InternetChargeType == "" {
-		cfg.TencentCloud.InternetChargeType = defaultInternetChargeType
+		cfg.TencentCloud.InternetChargeType = core.TencentCloudInternetChargeTypeFallback
 	}
 	if cfg.TencentCloud.InternetMaxBandwidthOut == 0 {
-		cfg.TencentCloud.InternetMaxBandwidthOut = defaultInternetMaxBandwidthOut
+		cfg.TencentCloud.InternetMaxBandwidthOut = core.TencentCloudInternetMaxBandwidthOutFallback
 	}
 	if !core.IsSSHUserExplicit(&cfg) && (cfg.SSHUser == "" || cfg.SSHUser == core.BaseConfig().SSHUser) {
 		cfg.SSHUser = "ubuntu"
@@ -56,14 +51,14 @@ func regionForConfig(cfg core.Config) string {
 	if value := strings.TrimSpace(cfg.TencentCloud.Region); value != "" {
 		return value
 	}
-	return defaultRegion
+	return core.TencentCloudRegionFallback
 }
 
 func zoneForConfig(cfg core.Config) string {
 	if value := strings.TrimSpace(cfg.TencentCloud.Zone); value != "" {
 		return value
 	}
-	return defaultZone
+	return core.TencentCloudZoneFallback
 }
 
 func imageForConfig(cfg core.Config) string {
@@ -89,7 +84,7 @@ func serverTypeForConfig(cfg core.Config) string {
 	if value := strings.TrimSpace(cfg.TencentCloud.Type); value != "" {
 		return value
 	}
-	return defaultType
+	return core.TencentCloudTypeFallback
 }
 
 func serverTypeForClass(class string) string {
@@ -150,7 +145,7 @@ func cvmEndpointForConfig(cfg core.Config) string {
 	if value := strings.TrimSpace(cfg.TencentCloud.APIEndpoint); value != "" {
 		return normalizeEndpoint(value)
 	}
-	return defaultCVMEndpoint
+	return core.TencentCloudAPIEndpointFallback
 }
 
 func tagEndpointForConfig(cfg core.Config) string {

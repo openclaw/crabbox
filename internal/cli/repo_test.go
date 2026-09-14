@@ -7,9 +7,146 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestManagedStateSyncExclusionIsLiteralAndProtected(t *testing.T) {
+	root := t.TempDir()
+	runGit(t, root, "init")
+	runGit(t, root, "config", "user.email", "test@example.com")
+	runGit(t, root, "config", "user.name", "Test")
+	base := "state [cache]"
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, base))
+	managed := base + "/crabbox/marker.txt"
+	deleted := base + "/crabbox/old-marker.txt"
+	for _, path := range []string{managed, deleted, base + "/source.txt", base + "/old-source.txt", "source.txt"} {
+		writeFile(t, filepath.Join(root, filepath.FromSlash(path)), "benign marker\n")
+	}
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-m", "markers")
+	writeFile(t, filepath.Join(root, filepath.FromSlash(managed)), "updated marker\n")
+	writeFile(t, filepath.Join(root, base, "crabbox", "new-marker.txt"), "new marker\n")
+	writeFile(t, filepath.Join(root, base, "source.txt"), "updated source marker\n")
+	if err := os.Remove(filepath.Join(root, filepath.FromSlash(deleted))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, base, "old-source.txt")); err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	cfg.Sync.Excludes = []string{"!**"}
+	writeFile(t, filepath.Join(root, ".crabboxignore"), "!**\n")
+	rules, err := syncExcludes(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	includes := []string{base, "source.txt"}
+	if !pathIncluded(managed, includes) {
+		t.Fatal("include control must admit the entire managed subtree before protection")
+	}
+	manifest, err := syncManifestFilteredRules(root, rules, includes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, paths := range [][]string{manifest.Files, manifest.Changed, manifest.Deleted, manifest.OverlayFiles} {
+		for _, path := range paths {
+			if strings.HasPrefix(path, base+"/crabbox/") {
+				t.Fatalf("managed marker remained in manifest: %q", path)
+			}
+		}
+	}
+	for _, wanted := range []string{base + "/source.txt", "source.txt"} {
+		if !slices.Contains(manifest.Files, wanted) {
+			t.Fatalf("ordinary source omitted: %q", wanted)
+		}
+	}
+	if !slices.Contains(manifest.Changed, base+"/source.txt") || !slices.Contains(manifest.OverlayFiles, base+"/source.txt") || !slices.Contains(manifest.Deleted, base+"/old-source.txt") {
+		t.Fatal("ordinary changed/overlay/deleted controls were lost")
+	}
+	if newWatchPathScope(rules, nil).traverseExcludedDir(base + "/crabbox") {
+		t.Fatal("negation reopened protected watch subtree")
+	}
+	cfg.Sync.GitSeed = true
+	cfg.Sync.BaseRef = "main"
+	head := gitOutput(root, "rev-parse", "HEAD")
+	if head == "" {
+		t.Fatal("fixture HEAD unavailable")
+	}
+	runGit(t, root, "remote", "add", "origin", "https://example.invalid/repository")
+	runGit(t, root, "update-ref", "refs/remotes/origin/main", head)
+	repo := Repo{Root: root, Head: head, BaseRef: "main", RemoteURL: "https://example.invalid/repository"}
+	for _, state := range []string{"", t.TempDir()} {
+		t.Setenv("XDG_STATE_HOME", state)
+		plan, _ := syncGitCoherencePlan(cfg, repo)
+		if !plan.seedEnabled() || !plan.enabled() {
+			t.Fatal("ordinary metadata-only seed control is not eligible")
+		}
+	}
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, base))
+	plan, _ := syncGitCoherencePlan(cfg, repo)
+	if plan.seedEnabled() || plan.enabled() {
+		t.Fatal("nested state retained whole-tree seeding")
+	}
+}
+
+func TestManagedStateTransferScopeBoundaries(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	for _, scope := range []string{root, filepath.Join(root, "state", "crabbox"), filepath.Join(root, "state", "crabbox", "marker.txt")} {
+		if err := ValidateManagedStateTransferScope("fixture native scope", scope); err == nil {
+			t.Fatalf("overlap accepted: %q", scope)
+		}
+	}
+	if err := ValidateManagedStateTransferScope("fixture native scope", filepath.Join(root, "state", "source")); err != nil {
+		t.Fatal(err)
+	}
+	volumeRoot := filepath.VolumeName(root) + string(filepath.Separator)
+	if !managedPathContains(volumeRoot, root) {
+		t.Fatal("filesystem root containment failed")
+	}
+	if _, err := managedStateSyncSubtree(filepath.Join(root, "state", "crabbox", "repo")); err == nil {
+		t.Fatal("source inside managed namespace accepted")
+	}
+	t.Setenv("XDG_STATE_HOME", "")
+	if err := ValidateManagedStateTransferScope("fixture", "relative-default-scope"); err != nil {
+		t.Fatal("unset default changed")
+	}
+}
+
+func TestManagedStateTransferCaseSpelling(t *testing.T) {
+	parent := t.TempDir()
+	original := filepath.Join(parent, "MixedCase")
+	if err := os.Mkdir(original, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := NormalizeManagedStateTransferRoot(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	variant := filepath.Join(parent, "mixedcase")
+	got, err := NormalizeManagedStateTransferRoot(variant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalInfo, err := os.Stat(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	variantInfo, statErr := os.Stat(variant)
+	if statErr == nil {
+		if !os.SameFile(originalInfo, variantInfo) || got != canonical {
+			t.Fatal("case alias did not resolve to its actual directory")
+		}
+	} else if os.IsNotExist(statErr) {
+		if got != filepath.Join(filepath.Dir(canonical), "mixedcase") {
+			t.Fatal("case-sensitive missing sibling was conflated")
+		}
+	} else {
+		t.Fatal(statErr)
+	}
+}
 
 func TestRepositoryGitEnvironmentExcludesSecretsAndPreservesSafeGitRouting(t *testing.T) {
 	t.Setenv("SCREEN_SHARING_PASSWORD", "operator-secret")
@@ -269,20 +406,21 @@ func TestRepoNameFromRootAndRemoteFallsBackToRemoteBasename(t *testing.T) {
 
 func TestParseGitTrackedPaths(t *testing.T) {
 	raw := []byte(
-		"H 100644 aaaa 0\tspace name.txt\x00" +
+		"h 100644 aaaa 0\tspace name.txt\x00" +
 			"S 120000 bbbb 0\ttab\tname\n.txt\x00" +
 			"M 100644 cccc 1\tconflict.txt\x00" +
 			"M 100755 dddd 2\tconflict.txt\x00" +
-			"H 160000 eeee 0\tvendor/submodule\x00",
+			"H 160000 eeee 0\tvendor/submodule\x00" +
+			"s 100644 ffff 0\thidden.txt\x00",
 	)
 	got, err := parseGitTrackedPaths(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 5 {
+	if len(got) != 6 {
 		t.Fatalf("tracked=%#v", got)
 	}
-	if got[0].name != "space name.txt" || got[0].mode != "100644" || got[0].stage != 0 || got[0].skipWorktree {
+	if got[0].name != "space name.txt" || got[0].mode != "100644" || got[0].stage != 0 || got[0].skipWorktree || !got[0].assumeUnchanged {
 		t.Fatalf("regular=%#v", got[0])
 	}
 	if got[1].name != "tab\tname\n.txt" || got[1].mode != "120000" || got[1].stage != 0 || !got[1].skipWorktree {
@@ -294,6 +432,9 @@ func TestParseGitTrackedPaths(t *testing.T) {
 	}
 	if got[4].mode != "160000" || got[4].stage != 0 {
 		t.Fatalf("gitlink=%#v", got[4])
+	}
+	if got[5].name != "hidden.txt" || !got[5].skipWorktree || !got[5].assumeUnchanged {
+		t.Fatalf("combined index flags=%#v", got[5])
 	}
 }
 
@@ -424,6 +565,13 @@ func TestGitCheckoutHasHiddenOmissions(t *testing.T) {
 	if omitted, err := GitCheckoutHasHiddenOmissions(dir); err != nil || !omitted {
 		t.Fatal("dense checkout missed absent skip-worktree path")
 	}
+	runGit(t, dir, "update-index", "--assume-unchanged", "included/keep.txt")
+	if omitted, err := GitCheckoutHasHiddenOmissions(dir); err != nil || !omitted {
+		t.Error("dense checkout missed absent skip-worktree path marked assume-unchanged")
+	}
+	if _, err := syncManifestFiltered(dir, nil, nil); err == nil || !strings.Contains(err.Error(), "skip-worktree") {
+		t.Errorf("combined index flags bypassed manifest omission guard: %v", err)
+	}
 }
 
 func TestGitCheckoutHiddenOmissionAppliesScopeBeforeClassification(t *testing.T) {
@@ -528,6 +676,53 @@ func TestGitCheckoutHasHiddenOmissionsThroughSymlinkAncestor(t *testing.T) {
 	}
 	if omitted, err := GitCheckoutHasHiddenOmissions(dir); err != nil || !omitted {
 		t.Fatalf("symlink-shadowed omission=%v err=%v", omitted, err)
+	}
+}
+
+func setupOrdinaryHiddenSyncRepo(t *testing.T, skipWorktree bool) string {
+	t.Helper()
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, t.TempDir())
+	t.Chdir(dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, "visible", "keep.txt"), "keep\n")
+	writeFile(t, filepath.Join(dir, "hidden", "drop.txt"), "drop\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	if skipWorktree {
+		runGit(t, dir, "update-index", "--skip-worktree", "hidden/drop.txt")
+		if err := os.Remove(filepath.Join(dir, "hidden", "drop.txt")); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		runGit(t, dir, "sparse-checkout", "set", "visible")
+	}
+	return dir
+}
+
+func assertOrdinaryHiddenSyncGuidance(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected hidden in-scope path error")
+	}
+	for _, text := range []string{`tracked path "hidden/drop.txt"`, "materialize", "sync.include", "sync.exclude", ".crabboxignore"} {
+		if !strings.Contains(err.Error(), text) {
+			t.Errorf("diagnostic missing %q: %v", text, err)
+		}
+	}
+}
+
+func TestSyncManifestOrdinaryHiddenPathRecovery(t *testing.T) {
+	for _, skip := range []bool{false, true} {
+		t.Run(fmt.Sprintf("skip=%t", skip), func(t *testing.T) {
+			dir := setupOrdinaryHiddenSyncRepo(t, skip)
+			_, err := syncManifestFiltered(dir, nil, nil)
+			assertOrdinaryHiddenSyncGuidance(t, err)
+		})
 	}
 }
 
@@ -1166,6 +1361,62 @@ func TestSyncFingerprintIncludesExcludeRuleProvenance(t *testing.T) {
 	}
 }
 
+func TestSyncFingerprintHashesChangedSymlinkIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink fixture requires Unix semantics")
+	}
+	for _, overlay := range []bool{false, true} {
+		for _, targetKind := range []string{"file", "directory", "missing"} {
+			t.Run(fmt.Sprintf("overlay=%t/%s", overlay, targetKind), func(t *testing.T) {
+				root := t.TempDir()
+				for _, name := range []string{"target-a", "target-b"} {
+					switch targetKind {
+					case "file":
+						writeFile(t, filepath.Join(root, name), "identical target contents\n")
+					case "directory":
+						if err := os.Mkdir(filepath.Join(root, name), 0o755); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				link := filepath.Join(root, "link")
+				if err := os.Symlink("target-a", link); err != nil {
+					t.Fatal(err)
+				}
+				cfg := baseConfig()
+				cfg.Sync.GitOverlay = overlay
+				manifest := SyncManifest{Files: []string{"link"}, Changed: []string{"link"}}
+				plan := gitCoherencePlan{RemoteURL: "https://example.test/repo.git", Target: "target", Tree: "tree", Branch: "main"}
+				fingerprint := func() string {
+					t.Helper()
+					value, err := syncFingerprintForManifest(Repo{Root: root}, cfg, manifest, SyncExcludeRules{}, plan)
+					if err != nil {
+						t.Fatalf("fingerprint changed %s symlink: %v", targetKind, err)
+					}
+					return value
+				}
+				before := fingerprint()
+				if err := os.Remove(link); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("target-b", link); err != nil {
+					t.Fatal(err)
+				}
+				after := fingerprint()
+				if before == after {
+					t.Error("retargeted symlink kept the same fingerprint")
+				}
+				if targetKind == "file" {
+					writeFile(t, filepath.Join(root, "target-b"), "changed target contents\n")
+					if got := fingerprint(); got != after {
+						t.Error("fingerprint followed symlink target contents outside the manifest")
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestSyncExcludeRuleUpgradeCompatibilityPreservesRenderedOrder(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, ".crabboxignore"), "coverage\n!coverage/keep.txt\n")
@@ -1673,6 +1924,52 @@ func TestSyncGitCoherencePlanSelectsEligibleOriginBranch(t *testing.T) {
 		runGit(t, dir, "update-ref", "refs/remotes/origin/main", "HEAD")
 		requireSeedOnly(t, planFor(dir, gitOutput(dir, "rev-parse", "HEAD"), ""))
 	})
+}
+
+func TestSyncGitCoherencePlanRanksContainingOriginBranches(t *testing.T) {
+	t.Parallel()
+	f := newGitCoherenceFixture(t)
+	runGit(t, f.source, "update-ref", "refs/remotes/origin/alpha", f.b)
+	runGit(t, f.source, "update-ref", "refs/remotes/origin/release", f.c)
+	runGit(t, f.source, "update-ref", "refs/remotes/origin/trunk", f.c)
+	runGit(t, f.source, "update-ref", "refs/remotes/origin/old", f.a)
+	tree := gitOutput(f.source, "rev-parse", f.b+"^{tree}")
+	for _, tc := range []struct {
+		name, configuredBase, baseRef, originHead, want string
+	}{
+		{"repository ancestor", "", "main", "trunk", "main"},
+		{"origin-prefixed ancestor", "", "origin/main", "trunk", "main"},
+		{"remote-ref ancestor", "", "refs/remotes/origin/main", "trunk", "main"},
+		{"heads-ref ancestor", "", "refs/heads/main", "trunk", "main"},
+		{"repository base before default", "", "release", "trunk", "release"},
+		{"configured before inferred and default", "release", "main", "main", "release"},
+		{"absent base", "", "", "trunk", "trunk"},
+		{"missing base", "", "missing", "trunk", "trunk"},
+		{"base lacks target", "", "old", "trunk", "trunk"},
+		{"missing configured base", "missing", "main", "trunk", "trunk"},
+		{"configured base lacks target", "old", "main", "trunk", "trunk"},
+		{"invalid base", "", "main~1", "trunk", "trunk"},
+		{"default lacks target", "", "old", "old", "alpha"},
+		{"missing default", "", "missing", "missing", "alpha"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runGit(t, f.source, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/"+tc.originHead)
+			refs := gitOutput(f.source, "for-each-ref", "--format=%(refname) %(objectname) %(symref)", "refs/remotes/origin")
+			cfg := baseConfig()
+			cfg.Sync.BaseRef = tc.configuredBase
+			plan, blocked := syncGitCoherencePlan(cfg, Repo{
+				Root: f.source, RemoteURL: f.origin, Head: f.b, BaseRef: tc.baseRef,
+			})
+			if blocked || !plan.enabled() || plan.Branch != tc.want {
+				t.Errorf("plan=%#v blocked=%v; want branch %q", plan, blocked, tc.want)
+			}
+			if plan.Target != f.b || plan.Tree != tree {
+				t.Errorf("plan changed selected commit/tree: %#v; want target=%s tree=%s", plan, f.b, tree)
+			}
+			requireGitOutput(t, f.source, refs, "for-each-ref", "--format=%(refname) %(objectname) %(symref)", "refs/remotes/origin")
+			requireGitOutput(t, f.source, f.c, "rev-parse", "HEAD")
+		})
+	}
 }
 
 func TestCheckSyncPreflightFailsLargeCandidate(t *testing.T) {

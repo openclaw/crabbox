@@ -3,9 +3,7 @@ package incus
 import (
 	"encoding/json"
 	"fmt"
-	"maps"
 	"strings"
-	"time"
 
 	"github.com/lxc/incus/v7/shared/api"
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -25,7 +23,7 @@ func (s connectionIdentity) scope() string {
 const connectionLabel = "incus_connection"
 const identityLabel = "incus_identity"
 
-func connectionMetadata(cfg Config, identity connectionIdentity) map[string]string {
+func connectionMetadata(cfg core.Config, identity connectionIdentity) map[string]string {
 	// Config stores paths to existing trust material, never certificate keys or tokens.
 	config := cfg.Incus
 	config.CheckpointMetadata = nil
@@ -33,7 +31,7 @@ func connectionMetadata(cfg Config, identity connectionIdentity) map[string]stri
 	return map[string]string{connectionLabel: string(data), identityLabel: identity.scope()}
 }
 
-func configFromMetadata(metadata map[string]string) (Config, error) {
+func configFromMetadata(metadata map[string]string) (core.Config, error) {
 	cfg := core.BaseConfig()
 	if metadata[connectionLabel] == "" || metadata[identityLabel] == "" {
 		return cfg, fmt.Errorf("Incus resource has no recorded connection identity")
@@ -109,15 +107,4 @@ func requireAcquiredIntent(claim core.LeaseClaim) error {
 		return core.Exit(4, "Incus lease acquisition is incomplete; replay warmup with the original intent or stop the lease")
 	}
 	return nil
-}
-
-// Generic cloud labels are length-limited and cannot carry an Incus connection
-// document or SHA-256. Only copy the lifecycle fields computed by core.
-func touchInstanceLabels(labels map[string]string, cfg Config, state string, now time.Time) map[string]string {
-	computed := core.TouchDirectLeaseLabels(labels, cfg, state, now)
-	result := maps.Clone(labels)
-	for _, key := range []string{"state", "created_at", "last_touched_at", "idle_timeout", "idle_timeout_secs", "ttl_secs", "expires_at"} {
-		result[key] = computed[key]
-	}
-	return result
 }

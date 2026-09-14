@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 	sandboxv1 "github.com/openclaw/crabbox/internal/providers/wandb/gen/coreweave/sandbox/v1beta2"
 	"google.golang.org/grpc"
@@ -99,8 +100,8 @@ func (e *wandbAPIError) Error() string {
 // path picks up the mapped sysexit code (77/69/124/…) as the process exit.
 // Without this, mapRPCError's exit codes were inert — main printed and exited 1.
 func (e *wandbAPIError) As(target any) bool {
-	if t, ok := target.(*ExitError); ok {
-		*t = ExitError{Code: e.ExitCode, Message: e.Error()}
+	if t, ok := target.(*core.ExitError); ok {
+		*t = core.ExitError{Code: e.ExitCode, Message: e.Error()}
 		return true
 	}
 	return false
@@ -127,7 +128,7 @@ type wandbClient struct {
 	apiKey string
 }
 
-func newWandbClient(cfg Config, _ Runtime) (wandbAPI, error) {
+func newWandbClient(cfg core.Config, _ core.Runtime) (wandbAPI, error) {
 	auth, err := resolveAuth(cfg)
 	if err != nil {
 		return nil, err
@@ -194,7 +195,7 @@ func (c *wandbClient) Close() error {
 //
 // WANDB_ENTITY_NAME is required for W&B-authenticated sandboxes; WANDB_PROJECT
 // is optional.
-func resolveAuth(cfg Config) (Auth, error) {
+func resolveAuth(cfg core.Config) (Auth, error) {
 	key := strings.TrimSpace(os.Getenv("CRABBOX_WANDB_API_KEY"))
 	if key == "" {
 		key = strings.TrimSpace(cfg.Wandb.APIKey)
@@ -206,11 +207,11 @@ func resolveAuth(cfg Config) (Auth, error) {
 		key = readNetrcWandbKey()
 	}
 	if key == "" {
-		return Auth{}, exit(2, "provider=%s requires a W&B API key (run `wandb login`, set CRABBOX_WANDB_API_KEY, or add `wandb.apiKey` to your crabbox config)", providerName)
+		return Auth{}, core.Exit(2, "provider=%s requires a W&B API key (run `wandb login`, set CRABBOX_WANDB_API_KEY, or add `wandb.apiKey` to your crabbox config)", providerName)
 	}
 	entity := strings.TrimSpace(os.Getenv("WANDB_ENTITY_NAME"))
 	if entity == "" {
-		return Auth{}, exit(2, "provider=%s requires WANDB_ENTITY_NAME when using W&B credentials", providerName)
+		return Auth{}, core.Exit(2, "provider=%s requires WANDB_ENTITY_NAME when using W&B credentials", providerName)
 	}
 	return Auth{
 		APIKey:  key,

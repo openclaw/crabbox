@@ -31,6 +31,45 @@ type doctorJSONCheck struct {
 func (a App) doctor(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("doctor", a.Stderr)
+	fs.Usage = func() {
+		fmt.Fprint(fs.Output(), `Usage:
+  crabbox doctor [flags]
+
+Check local tools and configured broker/provider readiness without creating,
+mutating, or deleting provider resources.
+
+Modes:
+  crabbox doctor                              check configured readiness
+  crabbox doctor --provider aws               check a selected provider strictly
+  crabbox doctor --id blue-box                inspect a lease and probe remote tools
+  crabbox doctor --profile live-qa --id blue-box  check an enabled profile's remote prerequisites
+  crabbox doctor --from-run run_abcdef123456   diagnose a recorded run (requires coordinator)
+  crabbox doctor --pond my-pond               verify an existing pond's Tailscale policy
+  crabbox doctor --all --prepare-check        check the test-runner provider matrix
+  crabbox doctor --json                       print structured check results
+
+Doctor flags:
+  --provider <name>             provider to validate (defaults to configured selection)
+  --profile <name>              profile for remote prerequisite checks
+  --id <lease-id-or-slug>       resolve a lease and run remote SSH/tool checks
+  --from-run <run-id>           load recorded provider, target, lease, and phase context
+  --pond <name>                 verify Tailscale policy setup for this pond
+  --all                         check the test-runner matrix, not every provider
+  --providers <list>            comma-separated providers for --all
+  --prepare-check               include preparation readiness checks with --all
+  --doctor-probe-ssh            opt in to static SSH reachability checks
+  --json                        print JSON
+  --target linux|macos|windows  select the target OS
+  --windows-mode normal|wsl2    select the Windows execution mode
+
+With no selected provider, doctor checks local readiness and skips provider
+credentials with a warning. Configured broker checks may still access the network.
+Profile prerequisite checks require doctor.enabled and do not support native Windows.
+
+All flags:
+`)
+		fs.PrintDefaults()
+	}
 	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
 	profile := fs.String("profile", defaults.Profile, "configured profile for remote prerequisite checks")
 	id := fs.String("id", "", "remote lease id to inspect")
@@ -55,6 +94,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		return err
 	}
 	cfg.Profile = strings.TrimSpace(*profile)
+	recordConfigInput(&cfg, configInputGeneric, configInputFlag, flagWasSet(fs, "profile"))
 	if err := applySelectedProfileConfig(&cfg); err != nil {
 		return err
 	}
@@ -64,6 +104,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 			return err
 		}
 		cfg.Pond = pondName
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	resolvedDoctorID := strings.TrimSpace(*id)
 	ok := true
@@ -136,7 +177,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 			}
 		}
 		if !ok {
-			return exit(1, "doctor found problems")
+			return Exit(1, "doctor found problems")
 		}
 		return nil
 	}
@@ -248,7 +289,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 			remote := "printf 'git='; git --version; printf 'rsync='; rsync --version | head -1; printf 'curl='; curl --version | head -1; printf 'jq='; jq --version"
 			if cfg.Profiles[cfg.Profile].Doctor.Enabled {
 				if isWindowsNativeTarget(target) {
-					return exit(2, "profile doctor is not supported for native Windows targets")
+					return Exit(2, "profile doctor is not supported for native Windows targets")
 				}
 				remote = remoteProfileDoctorCommand(cfg.Profile, cfg.Profiles[cfg.Profile].Doctor, profileDoctorWorkdirForLease(cfg, leaseID))
 			}
@@ -268,7 +309,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 					}
 					_ = json.NewEncoder(a.Stdout).Encode(doctorJSONOutput{OK: false, Provider: provider, Checks: checks})
 				}
-				return exit(7, "remote doctor failed for %s: %v", resolvedDoctorID, err)
+				return Exit(7, "remote doctor failed for %s: %v", resolvedDoctorID, err)
 			}
 			record("ok", "remote", fmt.Sprintf("%s\n%s", resolvedDoctorID, out), map[string]string{"id": resolvedDoctorID})
 		}
@@ -282,7 +323,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 	useCoordinator := false
 	useCoordinatorForDoctor := cfg.BrokerMode != BrokerModeRegistered && strings.TrimSpace(cfg.Coordinator) != ""
 	if providerSelected {
-		useCoordinatorForDoctor = shouldUseCoordinator(cfg, providerDef.Spec())
+		useCoordinatorForDoctor = ShouldUseCoordinator(cfg, providerDef.Spec())
 	}
 	if useCoordinatorForDoctor {
 		if coord, coordinatorConfigured, err := newTargetCoordinatorClient(cfg); err != nil {
@@ -403,62 +444,51 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		return finish()
 	}
 
-	doctorProvider, doctorSupported := providerDef.(DoctorProvider)
-	if doctorSupported {
-		if err := validateProviderConfig(cfg); err != nil {
-			class := doctorErrorClass(err)
-			hint := doctorErrorHint(providerDef.Name(), class)
-			record("failed", "provider", fmt.Sprintf("provider=%s class=%s hint=%s %v", providerDef.Name(), class, hint, err), map[string]string{"provider": providerDef.Name(), "class": class, "hint": hint, "error": err.Error()})
-			ok = false
-			return finish()
-		}
-		doctor, err := doctorProvider.ConfigureDoctor(cfg, runtimeForApp(a))
+	if err := validateProviderConfig(cfg); err != nil {
+		class := doctorErrorClass(err)
+		hint := doctorErrorHint(providerDef.Spec().Name, class)
+		record("failed", "provider", fmt.Sprintf("provider=%s class=%s hint=%s %v", providerDef.Spec().Name, class, hint, err), map[string]string{"provider": providerDef.Spec().Name, "class": class, "hint": hint, "error": err.Error()})
+		ok = false
+		return finish()
+	}
+	doctor, err := ConfigureProviderDoctor(providerDef, cfg, runtimeForApp(a))
+	if err != nil {
+		class := doctorErrorClass(err)
+		hint := doctorErrorHint(providerDef.Spec().Name, class)
+		record("failed", "provider", fmt.Sprintf("provider=%s class=%s hint=%s %v", providerDef.Spec().Name, class, hint, err), map[string]string{"provider": providerDef.Spec().Name, "class": class, "hint": hint, "error": err.Error()})
+		ok = false
+	} else if doctor == nil {
+		record("skip", "provider", fmt.Sprintf("provider=%s direct_doctor=unsupported", providerDef.Spec().Name), map[string]string{"provider": providerDef.Spec().Name, "direct_doctor": "unsupported"})
+	} else {
+		doctorCtx, cancel := context.WithTimeout(ctx, doctorProviderTimeout)
+		result, err := doctor.Doctor(doctorCtx, DoctorRequest{ProbeSSH: *probeSSH})
+		cancel()
 		if err != nil {
 			class := doctorErrorClass(err)
-			hint := doctorErrorHint(providerDef.Name(), class)
-			record("failed", "provider", fmt.Sprintf("provider=%s class=%s hint=%s %v", providerDef.Name(), class, hint, err), map[string]string{"provider": providerDef.Name(), "class": class, "hint": hint, "error": err.Error()})
+			hint := doctorErrorHint(doctor.Spec().Name, class)
+			record("failed", "provider", fmt.Sprintf("provider=%s class=%s hint=%s %v", doctor.Spec().Name, class, hint, err), map[string]string{"provider": doctor.Spec().Name, "class": class, "hint": hint, "error": err.Error(), "timeout": doctorProviderTimeout.String()})
 			ok = false
 		} else {
-			doctorCtx, cancel := context.WithTimeout(ctx, doctorProviderTimeout)
-			result, err := doctor.Doctor(doctorCtx, DoctorRequest{ProbeSSH: *probeSSH})
-			cancel()
-			if err != nil {
-				class := doctorErrorClass(err)
-				hint := doctorErrorHint(doctor.Spec().Name, class)
-				record("failed", "provider", fmt.Sprintf("provider=%s class=%s hint=%s %v", doctor.Spec().Name, class, hint, err), map[string]string{"provider": doctor.Spec().Name, "class": class, "hint": hint, "error": err.Error(), "timeout": doctorProviderTimeout.String()})
-				ok = false
+			if len(result.Checks) > 0 {
+				for _, check := range result.Checks {
+					recordProviderDoctorCheck(result.Provider, check)
+				}
 			} else {
-				if len(result.Checks) > 0 {
-					for _, check := range result.Checks {
-						recordProviderDoctorCheck(result.Provider, check)
-					}
-				} else {
-					status := strings.TrimSpace(result.Status)
-					if status == "" {
-						status = "ok"
-					}
-					message := fmt.Sprintf("provider=%s timeout=%s %s", result.Provider, doctorProviderTimeout, result.Message)
-					details := parseDoctorDetails(result.Message)
-					details["provider"] = result.Provider
-					details["timeout"] = doctorProviderTimeout.String()
-					record(status, "provider", message, details)
-					if doctorStatusFails(status) {
-						ok = false
-					}
+				status := strings.TrimSpace(result.Status)
+				if status == "" {
+					status = "ok"
+				}
+				message := fmt.Sprintf("provider=%s timeout=%s %s", result.Provider, doctorProviderTimeout, result.Message)
+				details := parseDoctorDetails(result.Message)
+				details["provider"] = result.Provider
+				details["timeout"] = doctorProviderTimeout.String()
+				record(status, "provider", message, details)
+				if doctorStatusFails(status) {
+					ok = false
 				}
 			}
 		}
-		return finish()
 	}
-
-	if providerDef.Spec().Kind == ProviderKindDelegatedRun {
-		if !doctorSupported {
-			record("skip", "provider", fmt.Sprintf("provider=%s direct_doctor=unsupported", providerDef.Name()), map[string]string{"provider": providerDef.Name(), "direct_doctor": "unsupported"})
-		}
-		return finish()
-	}
-
-	record("skip", "provider", fmt.Sprintf("provider=%s direct_doctor=unsupported", providerDef.Name()), map[string]string{"provider": providerDef.Name(), "direct_doctor": "unsupported"})
 	return finish()
 }
 
@@ -468,7 +498,7 @@ func applyDoctorFromRunContext(ctx context.Context, cfg *Config, runID string) (
 		return CoordinatorRun{}, nil, err
 	}
 	if !ok {
-		return CoordinatorRun{}, nil, exit(2, "doctor --from-run requires a configured coordinator")
+		return CoordinatorRun{}, nil, Exit(2, "doctor --from-run requires a configured coordinator")
 	}
 	run, err := coord.Run(ctx, runID)
 	if err != nil {
@@ -603,6 +633,20 @@ func doctorProviderMessage(provider, message string) string {
 		fields = append(fields[:insert], append([]string{timeoutField}, fields[insert:]...)...)
 	}
 	return strings.Join(fields, " ")
+}
+
+// DoctorChecksStatus returns failed, warning, or ok without modifying checks or their details.
+func DoctorChecksStatus(checks []DoctorCheck) string {
+	status := "ok"
+	for _, check := range checks {
+		if doctorStatusFails(check.Status) {
+			return "failed"
+		}
+		if strings.TrimSpace(strings.ToLower(check.Status)) == "warning" {
+			status = "warning"
+		}
+	}
+	return status
 }
 
 func doctorStatusFails(status string) bool {

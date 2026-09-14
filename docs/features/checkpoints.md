@@ -245,9 +245,13 @@ catalog entries are retired or replaced. Provider failures retain ownership,
 redacted retry diagnostics, and the exact resource identity for safe recovery.
 
 Source-retirement captures keep their host-owned capture journal and image lifecycle;
-`--expire-unused-after` cannot be combined with retirement flags. Fixed-ID forks
-remain available on providers that already support checkpoint-bound fixed IDs;
-coordinator-managed forks do not add fixed-ID support.
+`--expire-unused-after` cannot be combined with retirement flags. Managed native
+forks also support `--lease-id`: the coordinator atomically binds its fixed create
+intent, exact checkpoint incarnation/image, and provisioning use claim. Concurrent
+or repeated requests adopt that same live lease without replacing the original
+claim or counting another completed use. A changed source or intent, canceled
+attempt, or terminal lease fails closed. Existing direct-provider fixed forks keep
+their provider-owned acquisition contract.
 
 Default `checkpoint list` includes the coordinator inventory when available. If
 that optional refresh fails because of a transport error, internal timeout, or

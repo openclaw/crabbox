@@ -16,6 +16,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -82,7 +83,8 @@ func printRunContextSummary(w io.Writer, coord *CoordinatorClient, cfg Config, s
 	}
 	fmt.Fprintln(w, "run context:")
 	fmt.Fprintf(w, "  run=%s portal=%s logs=%s\n", blank(runID, "-"), runPortalURL(coord, historyRunID), runLogsURL(coord, historyRunID))
-	fmt.Fprintf(w, "  lease=%s slug=%s provider=%s target=%s type=%s\n", leaseID, blank(serverSlug(server), "-"), cfg.Provider, blank(target.TargetOS, cfg.TargetOS), server.ServerType.Name)
+	fmt.Fprintf(w, "  lease=%s slug=%s provider=%s target=%s type=%s\n", leaseID, blank(ServerSlug(server), "-"), cfg.Provider, blank(target.TargetOS, cfg.TargetOS), server.ServerType.Name)
+	printImageEvidence(w, server.ImageEvidence)
 	fmt.Fprintf(w, "  ssh=%s@%s:%s ip=%s\n", redactedSSHUser(cfg, server, target), target.Host, target.Port, blank(server.PublicNet.IPv4.IP, target.Host))
 	fmt.Fprintf(w, "  workdir=%s workspace=%s actions=%s\n", workdir, workspace, blank(actionsURL, "-"))
 }
@@ -91,12 +93,12 @@ func printKeepOnFailureSSHHint(w io.Writer, cfg Config, leaseID string, server S
 	if w == nil {
 		return
 	}
-	id := firstNonBlank(serverSlug(server), leaseID)
-	expires := blank(leaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"])
+	id := firstNonBlank(ServerSlug(server), leaseID)
+	expires := blank(LeaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"])
 	if expires == "" {
 		expires = "idle/ttl"
 	}
-	fmt.Fprintf(w, "keep-on-failure: kept lease=%s slug=%s expires=%s idle_timeout=%s ttl=%s\n", leaseID, blank(serverSlug(server), "-"), expires, cfg.IdleTimeout, cfg.TTL)
+	fmt.Fprintf(w, "keep-on-failure: kept lease=%s slug=%s expires=%s idle_timeout=%s ttl=%s\n", leaseID, blank(ServerSlug(server), "-"), expires, cfg.IdleTimeout, cfg.TTL)
 	fmt.Fprintf(w, "inspect: crabbox inspect --provider %s --id %s\n", displayShellArg(cfg.Provider), displayShellArg(id))
 	fmt.Fprintf(w, "ssh: crabbox ssh --provider %s --id %s\n", displayShellArg(cfg.Provider), displayShellArg(id))
 	if target.Host != "" && !target.AuthSecret {
@@ -150,9 +152,9 @@ func runLogsURL(coord *CoordinatorClient, runID string) string {
 	return strings.TrimRight(redactedConfigURL(coord.BaseURL), "/") + "/v1/runs/" + url.PathEscape(runID) + "/logs"
 }
 
-func printRemoteCapabilityPreflight(ctx context.Context, w io.Writer, cfg Config, server Server, target SSHTarget, leaseID, workdir string, envFiles []string, hydrated bool, actionsURL string, hydrateSupported bool, env map[string]string) {
+func printRemoteCapabilityPreflight(ctx context.Context, w io.Writer, cfg Config, server Server, target SSHTarget, leaseID, workdir string, envFiles []string, hydrated bool, actionsURL string, hydrateSupported bool, env map[string]string) error {
 	if w == nil {
-		return
+		return nil
 	}
 	for _, line := range remotePreflightWorkspaceLines(cfg, target, leaseID, workdir, hydrated, actionsURL, hydrateSupported) {
 		fmt.Fprintln(w, line)
@@ -164,11 +166,16 @@ func printRemoteCapabilityPreflight(ctx context.Context, w io.Writer, cfg Config
 	}
 	tools := preflightToolsForTarget(target, cfg.Run.PreflightTools)
 	if len(tools) == 0 {
-		return
+		return nil
 	}
 	baseTools := make([]string, 0, len(tools))
 	rawSocketRequested := false
+	venvRequested := false
 	for _, tool := range tools {
+		if tool == pythonVenvPreflightTool {
+			venvRequested = true
+			continue
+		}
 		if tool == rawSocketPreflightTool {
 			rawSocketRequested = true
 			continue
@@ -198,10 +205,25 @@ func printRemoteCapabilityPreflight(ctx context.Context, w io.Writer, cfg Config
 			}
 		}
 	}
+	if venvRequested {
+		completion, err := runOwnedFunctionalPreflight(ctx, target, workdir, env, envFiles)
+		err = functionalPreflightWithOwnerError(ctx, err)
+		fmt.Fprintf(w, "remote preflight %s\n", functionalPreflightDiagnostic(ctx, completion, err))
+		if err != nil {
+			return err
+		}
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
+		}
+		if !completion.WorkerQuiesced || !completion.ScratchRemoved || !completion.StageRetired {
+			return errors.New("functional preflight cleanup unconfirmed")
+		}
+	}
 	if rawSocketRequested {
 		state := runRawSocketCapabilityPreflight(ctx, target, workdir, env, envFiles)
 		fmt.Fprintf(w, "remote preflight %s=%s\n", rawSocketPreflightTool, state)
 	}
+	return nil
 }
 
 func printDelegatedPreflightUnsupported(w io.Writer, provider string) {
@@ -303,7 +325,7 @@ func runWSL2ControlCombinedOutput(ctx context.Context, target SSHTarget, remote 
 	defer cancel()
 	out, err := runWSL2ControlScriptCombinedOutput(commandCtx, target, remote, 15*time.Second, "2", "1")
 	if commandCtx.Err() == context.DeadlineExceeded {
-		return out, exit(7, "WSL2 control SSH probe timed out after 30s")
+		return out, Exit(7, "WSL2 control SSH probe timed out after 30s")
 	}
 	return out, err
 }
@@ -323,7 +345,7 @@ func windowsRemoteMissingToolsCommand(tools []string) string {
   }
 }
 `)
-	return powershellCommand(b.String())
+	return PowershellCommand(b.String())
 }
 
 func parseMissingRemoteToolsOutput(value string) []string {
@@ -356,7 +378,7 @@ func rawJSRuntimeMissingError(cfg Config, missing []string, command []string, sh
 	}
 	parts = append(parts, "or include Node/Corepack/package-manager setup before the command")
 	parts = append(parts, "or choose a provider/image with the JS toolchain")
-	return exit(5, "%s", strings.Join(parts, "; "))
+	return Exit(5, "%s", strings.Join(parts, "; "))
 }
 
 func printCommandNotFoundHint(w io.Writer, cfg Config, target SSHTarget, leaseID string, command []string, shellMode bool, exitCode int, hydrated bool, hydrateSuggestion string) {
@@ -408,7 +430,7 @@ preflight_cmd() {
 }
 
 func windowsRemoteCapabilityPreflightCommand(workdir string, env map[string]string, envFiles []string, tools []string) string {
-	return powershellCommand(windowsRemoteCapabilityPreflightScript(workdir, env, envFiles, tools))
+	return PowershellCommand(windowsRemoteCapabilityPreflightScript(workdir, env, envFiles, tools))
 }
 
 func runWindowsRemoteCapabilityPreflight(ctx context.Context, target SSHTarget, workdir string, env map[string]string, envFiles []string, tools []string) (string, error) {
@@ -458,7 +480,7 @@ func windowsRemoteCapabilityPreflightPath(script string) string {
 }
 
 func windowsRemoteRunCapabilityPreflightCommand(workdir, remotePath string) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 Set-Location -LiteralPath ` + psQuote(workdir) + `
 $__crabboxPreflight = ` + psQuote(remotePath) + `
 & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $__crabboxPreflight
@@ -467,7 +489,7 @@ exit $LASTEXITCODE
 }
 
 func windowsRemoteRemoveCapabilityPreflightCommand(workdir, remotePath string) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 Set-Location -LiteralPath ` + psQuote(workdir) + `
 $__crabboxPreflight = ` + psQuote(remotePath) + `
 if (Test-Path -LiteralPath $__crabboxPreflight) {
@@ -488,18 +510,27 @@ func windowsRemoteCapabilityPreflightScript(workdir string, env map[string]strin
     Write-Output ($Label + "=error:" + $_.Exception.Message)
   }
 }
-function Test-Tool($Label, $Exe, $Arguments) {
+function Test-Tool($Label, $Exe, $Arguments, $ProbeEnvironment = @{}) {
   $cmd = Get-Command $Exe -ErrorAction SilentlyContinue
   if (-not $cmd) {
     Write-Output ($Label + "=missing")
     return
   }
+  $savedEnvironment = @{}
   try {
+    foreach ($name in $ProbeEnvironment.Keys) {
+      $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+      [Environment]::SetEnvironmentVariable($name, $ProbeEnvironment[$name], 'Process')
+    }
     $value = & $Exe @Arguments 2>&1 | Select-Object -First 1
     if ($null -eq $value -or "$value" -eq "") { $value = "present" }
     Write-Output ($Label + "=" + $value)
   } catch {
     Write-Output ($Label + "=error:" + $_.Exception.Message)
+  } finally {
+    foreach ($name in $savedEnvironment.Keys) {
+      [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process')
+    }
   }
 }
 Test-Value "user" { whoami }
@@ -542,32 +573,33 @@ except BaseException:
     sys.exit(78)`
 
 var preflightToolRegistry = map[string]preflightToolSpec{
-	"apt":                  {Posix: []string{"apt-get", "--version"}, OS: map[string]bool{"linux": true}},
-	"bubblewrap":           {Posix: []string{"bwrap", "--version"}, OS: map[string]bool{"linux": true}},
-	"bun":                  {Posix: []string{"bun", "--version"}, Windows: []string{"bun", "--version"}},
-	"bwrap":                {Posix: []string{"bwrap", "--version"}, OS: map[string]bool{"linux": true}},
-	"cargo":                {Posix: []string{"cargo", "--version"}, Windows: []string{"cargo", "--version"}},
-	"cmake":                {Posix: []string{"cmake", "--version"}, Windows: []string{"cmake", "--version"}},
-	"corepack":             {Posix: []string{"corepack", "--version"}, Windows: []string{"corepack", "--version"}},
-	"docker":               {Posix: []string{"docker", "--version"}, Windows: []string{"docker", "--version"}},
-	"execution_policy":     {Windows: []string{"Get-ExecutionPolicy -Scope Process"}, OS: map[string]bool{"windows": true}},
-	"git":                  {Posix: []string{"git", "--version"}, Windows: []string{"git", "--version"}},
-	"go":                   {Posix: []string{"go", "version"}, Windows: []string{"go", "version"}},
-	"longpaths":            {Windows: []string{"git config --global --get core.longpaths"}, OS: map[string]bool{"windows": true}},
-	"make":                 {Posix: []string{"make", "--version"}},
-	"node":                 {Posix: []string{"node", "--version"}, Windows: []string{"node", "--version"}},
-	"npm":                  {Posix: []string{"npm", "--version"}, Windows: []string{"npm", "--version"}},
-	"pnpm":                 {Posix: []string{"pnpm", "--version"}, Windows: []string{"pnpm", "--version"}},
-	"powershell":           {Windows: []string{"$PSVersionTable.PSVersion.ToString()"}, OS: map[string]bool{"windows": true}},
-	"python":               {Posix: []string{"python", "--version"}, Windows: []string{"python", "--version"}},
-	"python3":              {Posix: []string{"python3", "--version"}, Windows: []string{"python3", "--version"}},
-	"pwsh":                 {Windows: []string{"pwsh", "--version"}, OS: map[string]bool{"windows": true}},
-	rawSocketPreflightTool: {OS: map[string]bool{"linux": true}},
-	"sudo":                 {OS: map[string]bool{"linux": true, "macos": true}},
-	"tar":                  {Posix: []string{"tar", "--version"}, Windows: []string{"tar", "--version"}},
-	"temp":                 {Windows: []string{"$env:TEMP"}, OS: map[string]bool{"windows": true}},
-	"uv":                   {Posix: []string{"uv", "--version"}, Windows: []string{"uv", "--version"}},
-	"yarn":                 {Posix: []string{"yarn", "--version"}, Windows: []string{"yarn", "--version"}},
+	"apt":                   {Posix: []string{"apt-get", "--version"}, OS: map[string]bool{"linux": true}},
+	"bubblewrap":            {Posix: []string{"bwrap", "--version"}, OS: map[string]bool{"linux": true}},
+	"bun":                   {Posix: []string{"bun", "--version"}, Windows: []string{"bun", "--version"}},
+	"bwrap":                 {Posix: []string{"bwrap", "--version"}, OS: map[string]bool{"linux": true}},
+	"cargo":                 {Posix: []string{"cargo", "--version"}, Windows: []string{"cargo", "--version"}},
+	"cmake":                 {Posix: []string{"cmake", "--version"}, Windows: []string{"cmake", "--version"}},
+	"corepack":              {Posix: []string{"corepack", "--version"}, Windows: []string{"corepack", "--version"}},
+	"docker":                {Posix: []string{"docker", "--version"}, Windows: []string{"docker", "--version"}},
+	"execution_policy":      {Windows: []string{"Get-ExecutionPolicy -Scope Process"}, OS: map[string]bool{"windows": true}},
+	"git":                   {Posix: []string{"git", "--version"}, Windows: []string{"git", "--version"}},
+	"go":                    {Posix: []string{"go", "version"}, Windows: []string{"go", "version"}},
+	"longpaths":             {Windows: []string{"git config --global --get core.longpaths"}, OS: map[string]bool{"windows": true}},
+	"make":                  {Posix: []string{"make", "--version"}},
+	"node":                  {Posix: []string{"node", "--version"}, Windows: []string{"node", "--version"}},
+	"npm":                   {Posix: []string{"npm", "--version"}, Windows: []string{"npm", "--version"}},
+	"pnpm":                  {Posix: []string{"pnpm", "--version"}, Windows: []string{"pnpm", "--version"}},
+	"powershell":            {Windows: []string{"$PSVersionTable.PSVersion.ToString()"}, OS: map[string]bool{"windows": true}},
+	"python":                {Posix: []string{"python", "--version"}, Windows: []string{"python", "--version"}},
+	"python3":               {Posix: []string{"python3", "--version"}, Windows: []string{"python3", "--version"}},
+	pythonVenvPreflightTool: {OS: map[string]bool{"linux": true, "macos": true}},
+	"pwsh":                  {Windows: []string{"pwsh", "--version"}, OS: map[string]bool{"windows": true}},
+	rawSocketPreflightTool:  {OS: map[string]bool{"linux": true}},
+	"sudo":                  {OS: map[string]bool{"linux": true, "macos": true}},
+	"tar":                   {Posix: []string{"tar", "--version"}, Windows: []string{"tar", "--version"}},
+	"temp":                  {Windows: []string{"$env:TEMP"}, OS: map[string]bool{"windows": true}},
+	"uv":                    {Posix: []string{"uv", "--version"}, Windows: []string{"uv", "--version"}},
+	"yarn":                  {Posix: []string{"yarn", "--version"}, Windows: []string{"yarn", "--version"}},
 }
 
 const rawSocketSudoPATH = "/usr/local/bin:/usr/bin:/bin:/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/run/current-system/profile/bin"
@@ -699,7 +731,7 @@ func normalizePreflightToolNames(values []string) []string {
 			if name == "" {
 				continue
 			}
-			if name == "default" || name == "defaults" {
+			if name == preflightDefaultSelector || name == preflightDefaultsAlias {
 				out = appendUniqueStrings(out, defaultPreflightToolNames...)
 				continue
 			}
@@ -711,11 +743,11 @@ func normalizePreflightToolNames(values []string) []string {
 
 func validatePreflightTools(tools []string) error {
 	for _, tool := range normalizePreflightToolNames(tools) {
-		if tool == "none" {
+		if tool == preflightNoneSelector {
 			continue
 		}
 		if _, ok := preflightToolRegistry[tool]; !ok {
-			return exit(2, "unknown preflight tool %q", tool)
+			return Exit(2, "unknown preflight tool %q; run 'crabbox preflight-tools' to list supported names", tool)
 		}
 	}
 	return nil
@@ -736,7 +768,7 @@ func preflightToolsForTarget(target SSHTarget, configured []string) []string {
 	if configured == nil {
 		tools = defaultPreflightToolNames
 	}
-	if len(tools) == 1 && tools[0] == "none" {
+	if len(tools) == 1 && tools[0] == preflightNoneSelector {
 		return nil
 	}
 	kind := preflightOSKind(target)
@@ -769,6 +801,31 @@ func preflightOSKind(target SSHTarget) string {
 	return "linux"
 }
 
+type preflightProbeEnv struct {
+	name  string
+	value string
+}
+
+func preflightProbeEnvironment(tool string) []preflightProbeEnv {
+	switch tool {
+	case "npm", "pnpm", "yarn":
+	default:
+		return nil
+	}
+	// Corepack shims can bootstrap a package manager even for --version.
+	policy := []preflightProbeEnv{
+		{"COREPACK_ENABLE_NETWORK", "0"},
+		{"COREPACK_DEFAULT_TO_LATEST", "0"},
+		{"COREPACK_ENABLE_AUTO_PIN", "0"},
+		{"COREPACK_ENABLE_DOWNLOAD_PROMPT", "0"},
+	}
+	if tool == "pnpm" {
+		// pnpm 12 can synchronize its own environment lockfile before --version.
+		policy = append(policy, preflightProbeEnv{"PNPM_CONFIG_PM_ON_FAIL", "ignore"})
+	}
+	return policy
+}
+
 func posixPreflightProbe(tool string) string {
 	switch tool {
 	case "sudo":
@@ -787,7 +844,15 @@ fi
 	if len(spec.Posix) == 0 {
 		return ""
 	}
-	return "preflight_cmd " + shellQuote(tool) + " " + shellQuote(spec.Posix[0]) + " " + strings.Join(readableShellWords(spec.Posix), " ") + "\n"
+	command := "preflight_cmd " + shellQuote(tool) + " " + shellQuote(spec.Posix[0]) + " " + strings.Join(readableShellWords(spec.Posix), " ")
+	if policy := preflightProbeEnvironment(tool); len(policy) > 0 {
+		var assignments []string
+		for _, setting := range policy {
+			assignments = append(assignments, setting.name+"="+shellQuote(setting.value))
+		}
+		return "(export " + strings.Join(assignments, " ") + "; " + command + ")\n"
+	}
+	return command + "\n"
 }
 
 func windowsPreflightProbe(tool string) string {
@@ -805,7 +870,15 @@ func windowsPreflightProbe(tool string) string {
 	if len(spec.Windows) == 0 {
 		return ""
 	}
-	return "Test-Tool " + psQuote(tool) + " " + psQuote(spec.Windows[0]) + " @(" + psArrayLiteral(spec.Windows[1:]) + ")\n"
+	command := "Test-Tool " + psQuote(tool) + " " + psQuote(spec.Windows[0]) + " @(" + psArrayLiteral(spec.Windows[1:]) + ")"
+	if policy := preflightProbeEnvironment(tool); len(policy) > 0 {
+		var assignments []string
+		for _, setting := range policy {
+			assignments = append(assignments, psQuote(setting.name)+"="+psQuote(setting.value))
+		}
+		command += " @{" + strings.Join(assignments, "; ") + "}"
+	}
+	return command + "\n"
 }
 
 func psArrayLiteral(values []string) string {
@@ -842,7 +915,7 @@ func openFailureStreamBundleFile(label, explicitPath string) (*os.File, string, 
 	}
 	file, err := os.CreateTemp("", "crabbox-failure-*."+label+".log")
 	if err != nil {
-		return nil, "", func() {}, exit(2, "failure bundle %s temp: %v", label, err)
+		return nil, "", func() {}, Exit(2, "failure bundle %s temp: %v", label, err)
 	}
 	path := file.Name()
 	cleanup := func() {
@@ -854,28 +927,35 @@ func openFailureStreamBundleFile(label, explicitPath string) (*os.File, string, 
 
 func captureFailureArtifacts(ctx context.Context, target SSHTarget, workdir, leaseID, runID string, meta FailureCaptureMetadata) (local string, bytes int, err error) {
 	if isWindowsNativeTarget(target) {
-		return "", 0, exit(2, "capture-on-fail is not supported for native Windows targets")
+		return "", 0, Exit(2, "capture-on-fail is not supported for native Windows targets")
 	}
 	name := safeCaptureName(firstNonBlank(runID, leaseID, "run")) + "-" + time.Now().UTC().Format("20060102T150405Z") + ".tar.gz"
 	remotePath := ".crabbox/" + name
-	if out, err := runSSHCombinedOutput(ctx, target, remoteFailureCaptureCommand(workdir, remotePath, meta.RemoteScriptPath)); err != nil {
+	out, prepareErr := runSSHCombinedOutput(ctx, target, remoteFailureCaptureCommand(workdir, remotePath, meta.RemoteScriptPath))
+	if prepareErr != nil {
+		if remoteFailureCaptureOwned(out, remotePath) {
+			cleanupOut, cleanupErr := cleanupRemoteFailureCapture(ctx, target, workdir, remotePath, runSSHCombinedOutput)
+			if cleanupErr != nil {
+				out = strings.TrimSpace(out) + "; remote cleanup: " + cleanupErr.Error() + ": " + strings.TrimSpace(cleanupOut)
+			}
+		}
 		local, bytes, bundleErr := writeLocalFailureBundle(name, "", meta)
 		if bundleErr != nil {
-			return local, bytes, exit(7, "capture-on-fail prepare: %v: %s; local bundle: %v", err, strings.TrimSpace(out), bundleErr)
+			return local, bytes, Exit(7, "capture-on-fail prepare: %v: %s; local bundle: %v", prepareErr, strings.TrimSpace(out), bundleErr)
 		}
-		return local, bytes, exit(7, "capture-on-fail prepare: %v: %s", err, strings.TrimSpace(out))
+		return local, bytes, Exit(7, "capture-on-fail prepare: %v: %s", prepareErr, strings.TrimSpace(out))
 	}
 	defer func() {
-		if out, cleanupErr := runSSHCombinedOutput(ctx, target, remoteRemoveFailureCaptureCommand(workdir, remotePath)); cleanupErr != nil && err == nil {
-			err = exit(7, "capture-on-fail remote cleanup: %v: %s", cleanupErr, strings.TrimSpace(out))
+		if out, cleanupErr := cleanupRemoteFailureCapture(ctx, target, workdir, remotePath, runSSHCombinedOutput); cleanupErr != nil && err == nil {
+			err = Exit(7, "capture-on-fail remote cleanup: %v: %s", cleanupErr, strings.TrimSpace(out))
 		}
 	}()
 	remoteLocalPath := filepath.Join(os.TempDir(), safeCaptureName(firstNonBlank(runID, leaseID, "run"))+"-remote-"+name)
-	_, remoteLocal, downloadErr := downloadRemoteFile(ctx, target, workdir, remotePath+"="+remoteLocalPath)
+	_, remoteLocal, downloadErr := downloadRemoteFileWithLimits(ctx, target, workdir, remotePath+"="+remoteLocalPath, failureCaptureDownloadLimits)
 	if downloadErr != nil {
 		local, bytes, bundleErr := writeLocalFailureBundle(name, "", meta)
 		if bundleErr != nil {
-			return local, bytes, exit(7, "capture-on-fail download: %v; local bundle: %v", downloadErr, bundleErr)
+			return local, bytes, Exit(7, "capture-on-fail download: %v; local bundle: %v", downloadErr, bundleErr)
 		}
 		return local, bytes, downloadErr
 	}
@@ -896,7 +976,7 @@ func captureFailureBundle(ctx context.Context, target SSHTarget, workdir, leaseI
 }
 
 func writeLocalFailureBundle(name, remoteTarPath string, meta FailureCaptureMetadata) (string, int, error) {
-	file, localPath, err := openFailureBundleDestination(name, crabboxStateDir, openFailureBundleOutput)
+	file, localPath, err := openFailureBundleDestination(name, CrabboxStateDir, openFailureBundleOutput)
 	if err != nil {
 		return localPath, 0, err
 	}
@@ -934,14 +1014,14 @@ func writeLocalFailureBundle(name, remoteTarPath string, meta FailureCaptureMeta
 		}
 	}
 	if err := closeErr(true); err != nil {
-		return localPath, int(counting.N), exit(2, "failure bundle close %s: %v", localPath, err)
+		return localPath, int(counting.N), Exit(2, "failure bundle close %s: %v", localPath, err)
 	}
 	return localPath, int(counting.N), nil
 }
 
 func openFailureBundleDestination(name string, stateDir func() (string, error), openFile func(string) (*failureBundleOutput, error)) (*failureBundleOutput, string, error) {
 	if name == "." || !filepath.IsLocal(name) || filepath.Base(name) != name {
-		return nil, "", exit(2, "invalid failure bundle name %q", name)
+		return nil, "", Exit(2, "invalid failure bundle name %q", name)
 	}
 	localPath := filepath.Join(".crabbox", "captures", name)
 	file, err := openFile(localPath)
@@ -949,16 +1029,16 @@ func openFailureBundleDestination(name string, stateDir func() (string, error), 
 		return file, localPath, nil
 	}
 	if !failureBundleDestinationUnwritable(err) {
-		return nil, localPath, exit(2, "failure bundle create %s: %v", localPath, err)
+		return nil, localPath, Exit(2, "failure bundle create %s: %v", localPath, err)
 	}
 	state, stateErr := stateDir()
 	if stateErr != nil {
-		return nil, localPath, exit(2, "failure bundle create %s: %v; resolve user state fallback: %v", localPath, err, stateErr)
+		return nil, localPath, Exit(2, "failure bundle create %s: %v; resolve user state fallback: %v", localPath, err, stateErr)
 	}
 	fallbackPath := filepath.Join(state, "captures", name)
 	file, fallbackErr := openFile(fallbackPath)
 	if fallbackErr != nil {
-		return nil, fallbackPath, exit(2, "failure bundle create %s: %v; fallback %s: %v", localPath, err, fallbackPath, fallbackErr)
+		return nil, fallbackPath, Exit(2, "failure bundle create %s: %v; fallback %s: %v", localPath, err, fallbackPath, fallbackErr)
 	}
 	return file, fallbackPath, nil
 }
@@ -1050,21 +1130,21 @@ func addFailureBundleFile(tw *tar.Writer, name, path string) error {
 		if os.IsNotExist(err) {
 			return addFailureBundleBytes(tw, name, nil)
 		}
-		return exit(2, "failure bundle stat %s: %v", path, err)
+		return Exit(2, "failure bundle stat %s: %v", path, err)
 	}
 	if !info.Mode().IsRegular() {
-		return exit(2, "failure bundle read %s: not a regular file", path)
+		return Exit(2, "failure bundle read %s: not a regular file", path)
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return exit(2, "failure bundle open %s: %v", path, err)
+		return Exit(2, "failure bundle open %s: %v", path, err)
 	}
 	defer file.Close()
 	if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: info.Size(), ModTime: info.ModTime()}); err != nil {
 		return err
 	}
 	if _, err := io.Copy(tw, file); err != nil {
-		return exit(2, "failure bundle stream %s: %v", path, err)
+		return Exit(2, "failure bundle stream %s: %v", path, err)
 	}
 	return nil
 }
@@ -1072,12 +1152,12 @@ func addFailureBundleFile(tw *tar.Writer, name, path string) error {
 func appendRemoteFailureTar(tw *tar.Writer, remoteTarPath, prefix string) error {
 	file, err := os.Open(remoteTarPath)
 	if err != nil {
-		return exit(2, "failure bundle open remote tar %s: %v", remoteTarPath, err)
+		return Exit(2, "failure bundle open remote tar %s: %v", remoteTarPath, err)
 	}
 	defer file.Close()
 	gzipReader, err := gzip.NewReader(file)
 	if err != nil {
-		return exit(2, "failure bundle read remote tar %s: %v", remoteTarPath, err)
+		return Exit(2, "failure bundle read remote tar %s: %v", remoteTarPath, err)
 	}
 	defer gzipReader.Close()
 	tr := tar.NewReader(gzipReader)
@@ -1087,7 +1167,7 @@ func appendRemoteFailureTar(tw *tar.Writer, remoteTarPath, prefix string) error 
 			return nil
 		}
 		if err != nil {
-			return exit(2, "failure bundle read remote tar %s: %v", remoteTarPath, err)
+			return Exit(2, "failure bundle read remote tar %s: %v", remoteTarPath, err)
 		}
 		cleanName, ok := cleanRemoteFailureTarPath(header.Name)
 		if !ok {
@@ -1231,22 +1311,85 @@ func safeCaptureName(value string) string {
 }
 
 func remoteFailureCaptureCommand(workdir, remotePath, scriptPath string) string {
+	return remoteFailureCaptureCommandWithLimits(workdir, remotePath, scriptPath, failureCaptureDownloadLimits)
+}
+
+func remoteFailureCaptureCommandWithLimits(workdir, remotePath, scriptPath string, limits runDownloadLimits) string {
 	var script bytes.Buffer
 	script.WriteString("set -eu\n")
 	script.WriteString("cd " + shellQuote(workdir) + "\n")
 	script.WriteString("mkdir -p .crabbox\n")
 	script.WriteString("out=" + shellQuote(remotePath) + "\n")
 	script.WriteString("script=" + shellQuote(scriptPath) + "\n")
-	script.WriteString(`manifest=.crabbox/capture-manifest.txt
-files=.crabbox/capture-files.txt
+	script.WriteString("capture_max_bytes=" + strconv.FormatInt(limits.MaxBytes, 10) + "\n")
+	script.WriteString("capture_reserve_bytes=" + strconv.FormatInt(limits.DiskReserveBytes, 10) + "\n")
+	script.WriteString(`if [ -e "$out" ] || [ -L "$out" ]; then
+  printf 'failure capture destination already exists: %s\n' "$out" >&2
+  exit 7
+fi
+if [ "$capture_max_bytes" -le 0 ] || [ $((capture_max_bytes % 1024)) -ne 0 ] || [ "$capture_reserve_bytes" -lt 0 ]; then
+  printf 'invalid failure capture limits: max=%s reserve=%s\n' "$capture_max_bytes" "$capture_reserve_bytes" >&2
+  exit 7
+fi
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/crabbox-failure-capture.XXXXXX")
+cleanup_capture_scratch() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ "$status" -ne 0 ]; then rm -f -- "$out" || true; fi
+  rm -rf -- "$scratch" || true
+}
+trap cleanup_capture_scratch EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+printf '` + remoteFailureCaptureOwnedPrefix + `%s\n' "$out"
+capture_file_blocks=$((capture_max_bytes / 1024))
+capture_required_blocks=$(((capture_reserve_bytes + 2 * capture_max_bytes + 1023) / 1024))
+capture_require_space() {
+  label=$1
+  path=$2
+  if ! blocks=$(LC_ALL=C df -Pk "$path" 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ { print $4; found=1; exit } END { if (!found) exit 1 }'); then
+    printf 'failure capture disk availability unknown: %s path=%s\n' "$label" "$path" >&2
+    return 7
+  fi
+  if [ "$blocks" -lt "$capture_required_blocks" ]; then
+    printf 'failure capture disk reserve unavailable: %s path=%s available_blocks=%s required_blocks=%s\n' "$label" "$path" "$blocks" "$capture_required_blocks" >&2
+    return 7
+  fi
+}
+capture_apply_file_limit() {
+  if ! inherited=$(ulimit -Sf 2>/dev/null); then
+    printf 'failure capture file limit unavailable\n' >&2
+    return 7
+  fi
+  case "$inherited" in
+    unlimited) ;;
+    ''|*[!0-9]*)
+      printf 'failure capture file limit unknown: %s\n' "$inherited" >&2
+      return 7
+      ;;
+    *)
+      if [ "$inherited" -lt "$capture_file_blocks" ]; then
+        printf 'failure capture inherited file limit is lower: inherited=%s required=%s\n' "$inherited" "$capture_file_blocks" >&2
+        return 7
+      fi
+      ;;
+  esac
+  ulimit -f "$capture_file_blocks"
+}
+out_dir=$(dirname "$out")
+capture_require_space scratch "$scratch"
+capture_require_space output "$out_dir"
+mkdir -p "$scratch/.crabbox"
+manifest="$scratch/.crabbox/capture-manifest.txt"
+files="$scratch/capture-files.txt"
 {
   printf 'captured_at=%s\n' "$(date -Is 2>/dev/null || date)"
   printf 'host=%s\n' "$(hostname 2>/dev/null || printf unknown)"
   printf 'pwd=%s\n' "$(pwd -P 2>/dev/null || pwd)"
   printf 'note=%s\n' 'local-only failure capture; caller owns redaction before sharing'
 } > "$manifest"
-gateway_tail=.crabbox/gateway-log-tail.txt
-rm -f "$gateway_tail"
+gateway_tail="$scratch/.crabbox/gateway-log-tail.txt"
 for path in /tmp/crabbox-gateway.log /tmp/gateway.log gateway.log logs/gateway.log .crabbox/gateway.log; do
   if [ -f "$path" ]; then
     tail -n 400 "$path" > "$gateway_tail" 2>/dev/null || true
@@ -1257,7 +1400,7 @@ done
 if [ -n "$script" ] && [ -f "$script" ] && [ ! -L "$script" ]; then
   printf '%s\n' "$script" >> "$files"
 fi
-for path in test-results playwright-report coverage junit.xml results.xml .crabbox/capture-manifest.txt .crabbox/gateway-log-tail.txt; do
+for path in test-results playwright-report coverage junit.xml results.xml; do
   if [ -e "$path" ]; then printf '%s\n' "$path" >> "$files"; fi
 done
 find . -maxdepth 3 -path './.crabbox/scripts' -prune -o \
@@ -1267,7 +1410,28 @@ find . -maxdepth 3 -path './.crabbox/scripts' -prune -o \
   ! -path './coverage/*' \
   -print 2>/dev/null | sed 's#^\./##' >> "$files" || true
 sort -u "$files" > "$files.sorted"
-tar -czf "$out" -T "$files.sorted" 2>/dev/null || tar -czf "$out" "$manifest"
+archive_list="$scratch/archive-files.txt"
+checkout=$(pwd -P 2>/dev/null || pwd)
+while IFS= read -r path; do
+  printf '%s\0' "$path"
+done < "$files.sorted" > "$archive_list"
+metadata=(.crabbox/capture-manifest.txt)
+if [ -f "$gateway_tail" ]; then metadata+=(.crabbox/gateway-log-tail.txt); fi
+capture_require_space scratch "$scratch"
+capture_require_space output "$out_dir"
+raw_archive="$scratch/capture.tar"
+(
+  capture_apply_file_limit
+  COPYFILE_DISABLE=1 tar -cf "$raw_archive" -C "$checkout" --null -T "$archive_list" 2>/dev/null
+)
+(
+  capture_apply_file_limit
+  COPYFILE_DISABLE=1 tar -rf "$raw_archive" -C "$scratch" "${metadata[@]}" 2>/dev/null
+)
+(
+  capture_apply_file_limit
+  gzip -c "$raw_archive"
+) > "$out"
 printf '%s\n' "$out"
 `)
 	return "bash -lc " + shellQuote(script.String())
@@ -1276,6 +1440,29 @@ printf '%s\n' "$out"
 func remoteRemoveFailureCaptureCommand(workdir, remotePath string) string {
 	script := "set -eu\ncd " + shellQuote(workdir) + "\nrm -f -- " + shellQuote(remotePath)
 	return "bash -lc " + shellQuote(script)
+}
+
+const (
+	remoteFailureCaptureOwnedPrefix = "CRABBOX_FAILURE_CAPTURE_OWNED="
+	remoteFailureCaptureCleanupTime = 10 * time.Second
+)
+
+type remoteFailureCaptureRunner func(context.Context, SSHTarget, string) (string, error)
+
+func remoteFailureCaptureOwned(output, remotePath string) bool {
+	want := remoteFailureCaptureOwnedPrefix + remotePath
+	for _, line := range strings.Split(output, "\n") {
+		if strings.TrimSpace(line) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func cleanupRemoteFailureCapture(ctx context.Context, target SSHTarget, workdir, remotePath string, run remoteFailureCaptureRunner) (string, error) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), remoteFailureCaptureCleanupTime)
+	defer cancel()
+	return run(cleanupCtx, target, remoteRemoveFailureCaptureCommand(workdir, remotePath))
 }
 
 func printFailureTail(w io.Writer, label string, tail *streamTailBuffer, capturedPath string) {

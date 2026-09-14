@@ -4,6 +4,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -13,14 +14,17 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestWebVNCDaemonProcessStartIdentityFromProc(t *testing.T) {
-	first, err := webVNCDaemonProcessStartIdentity(os.Getpid())
+	first, err := LocalProcessStartIdentity(os.Getpid())
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := webVNCDaemonProcessStartIdentity(os.Getpid())
+	second, err := LocalProcessStartIdentity(os.Getpid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,11 +37,11 @@ func TestWebVNCDaemonProcessStartIdentityFromProc(t *testing.T) {
 }
 
 func TestLinuxProcessBootIdentityFromProc(t *testing.T) {
-	first, err := processBootIdentity()
+	first, err := LocalProcessBootIdentity()
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := processBootIdentity()
+	second, err := LocalProcessBootIdentity()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +54,7 @@ func TestWebVNCDaemonStopDoesNotSignalPriorBootPID(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	nonce := "abcdef0123456789abcdef0123456789"
 	cmd := startTestWebVNCDaemonProcess(t, nonce)
-	started, err := webVNCDaemonProcessStartIdentity(cmd.Process.Pid)
+	started, err := LocalProcessStartIdentity(cmd.Process.Pid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +78,7 @@ func TestWebVNCDaemonStopDoesNotSignalPriorBootPID(t *testing.T) {
 	if err != nil || !stopped || !strings.Contains(output.String(), "removed prior-boot identity") {
 		t.Fatalf("prior-boot cleanup stopped=%t output=%q err=%v", stopped, output.String(), err)
 	}
-	if _, alive := webVNCDaemonProcessCommand(cmd.Process.Pid); !alive {
+	if _, alive := LocalProcessCommand(cmd.Process.Pid); !alive {
 		t.Fatal("prior-boot identity signaled the recycled PID")
 	}
 	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
@@ -87,7 +91,7 @@ func TestDirectSSHWebVNCRemoteIdentityRejectsPriorBootPID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	started, err := webVNCDaemonProcessStartIdentity(os.Getpid())
+	started, err := LocalProcessStartIdentity(os.Getpid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,4 +132,36 @@ func differentLinuxBootID(bootID string) string {
 		replacement = '1'
 	}
 	return string(replacement) + bootID[1:]
+}
+
+func TestSSHControlMasterReleaseDoesNotRequireReaping(t *testing.T) {
+	const child = "CRABBOX_TEST_SSH_SUBREAPER"
+	if os.Getenv(child) == "1" {
+		// Only this isolated test child adopts the daemonized native masters.
+		// Their exit must not depend on an unrelated PID 1 reaping them.
+		if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			// This subprocess runs only this fixture; ordinary exec children have
+			// already been waited, leaving just its adopted native SSH masters.
+			for {
+				pid, _ := unix.Wait4(-1, nil, unix.WNOHANG, nil)
+				if pid <= 0 {
+					break
+				}
+			}
+		})
+		testCoordinatorReleaseJoinsSSHControlMasters(t, "unreaped native masters")
+		return
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSSHControlMasterReleaseDoesNotRequireReaping$", "-test.v")
+	cmd.Env = append(os.Environ(), child+"=1")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native unreaped-master proof: %v\n%s", err, output)
+	}
+	t.Logf("%s", output)
 }

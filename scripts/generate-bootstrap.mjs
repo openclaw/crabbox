@@ -19,6 +19,7 @@ export const imageFields = {
   ContainerName: "containerName", AppleVMImage: "appleVMImage", AppleVMSHA256: "appleVMSHA256",
 };
 const artifactFields = {
+  windowsVCRuntimeX64: ["URL", "SHA256"], windowsVCRuntimeARM64: ["URL", "SHA256"],
   tightVNCMSI: ["URL", "SHA256"], gitForWindowsSetup: ["URL", "SHA256"],
   openSSHWin64Zip: ["URL", "SHA256"], ubuntuWSLRootFS: ["URL", "SHA256"],
   wslTruffleHog: ["Version", "AMD64SHA256"],
@@ -27,7 +28,7 @@ const artifactFields = {
   googleLinuxSigningKey: ["Fingerprint"],
 };
 /** @typedef {"ps-string" | "ps-strings" | "sh-string" | "sh-strings"} ParameterType */
-/** @typedef {{name: string, file: string, parameters: Record<string, ParameterType>, source: string}} Fragment */
+/** @typedef {{name: string, file: string, parameters: Record<string, ParameterType>, literal?: true, source: string}} Fragment */
 const parameterTypes = new Set(["ps-string", "ps-strings", "sh-string", "sh-strings"]);
 const identifier = /^[a-z][A-Za-z0-9]*$/u;
 
@@ -108,6 +109,10 @@ export const psQuote = (value) => `'${value.replaceAll("'", "''")}'`;
 export const shellQuote = (value) => `'${value.replaceAll("'", "'\\''").replaceAll("\n", () => "'$'\\n''").replaceAll("\r", () => "'$'\\r''")}'`;
 
 export function fragmentTokens(fragment, constants) {
+  if (Object.hasOwn(fragment, "literal")) {
+    if (fragment.literal !== true || Object.keys(fragment.parameters).length) throw new Error(`${fragment.name}: literal fragments require literal: true and no parameters`);
+    return [{ literal: fragment.source }];
+  }
   const used = new Set();
   const tokens = [];
   let offset = 0;
@@ -146,7 +151,7 @@ export async function loadSources(root = repoRoot) {
   const names = new Set();
   const fragments = [];
   for (const fragment of manifest.fragments) {
-    exactKeys(fragment, ["name", "file", "parameters"], "fragment");
+    exactKeys(fragment, ["name", "file", "parameters", ...(Object.hasOwn(fragment, "literal") ? ["literal"] : [])], "fragment");
     if (!identifier.test(fragment.name) || names.has(fragment.name)) throw new Error("invalid or duplicate fragment name");
     names.add(fragment.name);
     if (!new RegExp(`^${fragment.name}\\.(sh|ps1)$`, "u").test(fragment.file)) throw new Error("invalid fragment file");
@@ -160,6 +165,38 @@ export async function loadSources(root = repoRoot) {
     fragmentTokens(loaded, constants);
     fragments.push(loaded);
   }
+  // Ship the canonical installer with its Node-only entrypoint; never fetch mutable script bytes at boot.
+  const installer = await readFile(resolve(root, "scripts/install-linux-developer-tools.sh"), "utf8");
+  const delimiter = "CRABBOX_LINUX_DEVELOPER_TOOLS";
+  if (!installer.endsWith("\n") || installer.includes("\r") || installer.includes("\0") ||
+      installer.split("\n").some((line) => line === delimiter || line === "'@")) {
+    throw new Error("Linux developer-tools installer must be LF text safe for the bootstrap heredocs");
+  }
+  fragments.push({
+    name: "linuxNodeInstall", file: "scripts/install-linux-developer-tools.sh", literal: true, parameters: {},
+    source: `cat >/var/lib/crabbox/install-linux-developer-tools.sh <<'${delimiter}'\n${installer}${delimiter}\nbash /var/lib/crabbox/install-linux-developer-tools.sh --node-only\n`,
+  });
+  const detached = await readFile(resolve(root, "scripts/start-windows-detached-process.ps1"), "utf8");
+  if (!detached.endsWith("\n") || detached.includes("\r") || detached.includes("\0") ||
+      detached.split("\n").some((line) => line === "'@")) {
+    throw new Error("Windows detached launcher must be LF text safe for a PowerShell here-string");
+  }
+  fragments.push({
+    name: "windowsDetachInstall", file: "scripts/start-windows-detached-process.ps1", literal: true, parameters: {},
+    source: `
+$detachBin = Join-Path $env:ProgramFiles "Crabbox\\bin"
+New-Item -ItemType Directory -Force -Path $detachBin | Out-Null
+$detachSource = @'
+${detached}'@
+[IO.File]::WriteAllText((Join-Path $detachBin "Start-CrabboxDetachedProcess.ps1"), $detachSource, [Text.UTF8Encoding]::new($true))
+$machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+if (@($machinePath -split ";") -notcontains $detachBin) {
+  $machinePath = $machinePath + ";" + $detachBin
+  [Environment]::SetEnvironmentVariable("Path", $machinePath, "Machine")
+}
+$env:Path = $machinePath + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+`,
+  });
   return { constants, catalog, fragments };
 }
 function gofmt(source) {
@@ -231,6 +268,8 @@ function bootstrapShellQuote(value: string): string {
   catalogGo += '\nvar osImageSpecs = map[string]osImageSpec{\n' + catalog.images.map((image) => `${JSON.stringify(image.Selector)}: {\n` + Object.entries(image).map(([k,v]) => `${k}: ${JSON.stringify(v)},`).join('\n') + '\n},').join('\n') + '\n}\n';
   catalogTS += '\n// prettier-ignore\nexport const osImageSpecs: Readonly<Record<string, OSImageSpec>> = ' + JSON.stringify(Object.fromEntries(catalog.images.map((image) => [image.Selector, Object.fromEntries(Object.entries(image).map(([key,value]) => [imageFields[key], value]))]))) + ';\n';
   return new Map([
+    ["scripts/windows-runtime.generated.ps1", provenance.replace("//", "#") +
+      fragmentTokens(fragments.find((fragment) => fragment.name === "windowsRuntime"), constants).map((token) => token.literal).join("")],
     ["internal/cli/bootstrap_generated.go", gofmt(go)],
     ["worker/src/bootstrap.generated.ts", ts],
     ["internal/cli/os_image.go", gofmt(catalogGo)],

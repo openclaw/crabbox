@@ -88,6 +88,10 @@ func writePrivateRunOutputFile(path string, data []byte) error {
 	return nil
 }
 
+func replacePrivateRunOutputTemp(tempPath, path string) error {
+	return os.Rename(tempPath, path)
+}
+
 func createPrivateRunOutputTemp(path string) (*os.File, string, error) {
 	dir := filepath.Dir(path)
 	file, err := os.CreateTemp(dir, "."+filepath.Base(path)+".crabbox-*")
@@ -147,11 +151,11 @@ func openExistingPrivateRunOutputFile(path string) (*os.File, error) {
 func checkPrivateRunOutputReplaceable(label, path string) error {
 	dirInfo, err := os.Stat(filepath.Dir(path))
 	if err != nil {
-		return exit(2, "%s: %v", label, err)
+		return Exit(2, "%s: %v", label, err)
 	}
 	fileInfo, err := os.Lstat(path)
 	if err != nil {
-		return exit(2, "%s: %v", label, err)
+		return Exit(2, "%s: %v", label, err)
 	}
 	dirStat, dirOK := dirInfo.Sys().(*syscall.Stat_t)
 	fileStat, fileOK := fileInfo.Sys().(*syscall.Stat_t)
@@ -159,7 +163,7 @@ func checkPrivateRunOutputReplaceable(label, path string) error {
 		return nil
 	}
 	if !stickyRunOutputReplaceAllowed(uint32(os.Geteuid()), fileStat.Uid, dirStat.Uid, dirInfo.Mode()&os.ModeSticky != 0) {
-		return exit(2, "%s: cannot replace %s in sticky directory owned by another user", label, path)
+		return Exit(2, "%s: cannot replace %s in sticky directory owned by another user", label, path)
 	}
 	return nil
 }

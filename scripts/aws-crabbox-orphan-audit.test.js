@@ -4,13 +4,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { writeExecutable } from "./test-support/smoke-fixtures.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
-
-function writeExecutable(file, body) {
-  fs.writeFileSync(file, body, "utf8");
-  fs.chmodSync(file, 0o755);
-}
 
 function setupFakes({ active = false, invalidLeases = false, regionDiscoveryFails = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-aws-orphan-audit-"));

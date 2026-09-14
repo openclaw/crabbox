@@ -3,6 +3,7 @@ package islo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
 	"net/http"
@@ -16,45 +17,6 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-// newIsloCreateCaptureServer serves the auth handshake plus a single sandbox
-// create, recording the exact JSON body Crabbox put on the wire.
-func newIsloCreateCaptureServer(t *testing.T, body *[]byte) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/auth/token":
-			_ = json.NewEncoder(w).Encode(map[string]any{"session_token": "jwt-from-test", "cookie_max_age": 3600})
-		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes":
-			raw, err := io.ReadAll(r.Body)
-			if err != nil {
-				t.Fatalf("read create body: %v", err)
-			}
-			*body = raw
-			var request struct {
-				Name string `json:"name"`
-			}
-			if err := json.Unmarshal(raw, &request); err != nil {
-				t.Fatalf("decode create body: %v", err)
-			}
-			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"id":         "01930000-0000-7000-8000-000000000000",
-				"name":       request.Name,
-				"status":     "running",
-				"image":      "docker.io/library/ubuntu:26.04",
-				"created_at": "2026-08-31T00:00:00Z",
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-}
-
-// TestIsloCreateSandboxSendsMappedLeasePolicy pins the wire contract on both
-// sides of the opt-in: with islo.idlePause unset the create request carries no
-// lifecycle object at all, and with it set the idle timeout is the only lease
-// input that reaches Islo, as pause_after_idle seconds, with Crabbox never
-// asking the provider to delete or auto-resume a sandbox it holds a claim on.
 func TestIsloCreateSandboxSendsMappedLeasePolicy(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -86,6 +48,12 @@ func TestIsloCreateSandboxSendsMappedLeasePolicy(t *testing.T) {
 			want:        map[string]any{"auto_resume": "never", "pause_after_idle": float64(2)},
 		},
 		{
+			name:        "maximum positive idle timeout rounds without overflow",
+			idlePause:   true,
+			idleTimeout: time.Duration(1<<63 - 1),
+			want:        map[string]any{"auto_resume": "never", "pause_after_idle": float64(9223372037)},
+		},
+		{
 			name:      "opted in with no idle timeout sends no policy at all",
 			idlePause: true,
 			ttl:       90 * time.Minute,
@@ -96,20 +64,40 @@ func TestIsloCreateSandboxSendsMappedLeasePolicy(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			var body []byte
-			srv := newIsloCreateCaptureServer(t, &body)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/auth/token" {
+					io.WriteString(w, `{"session_token":"synthetic-token"}`)
+					return
+				}
+				if r.Method != http.MethodPost || r.URL.Path != "/sandboxes" {
+					http.NotFound(w, r)
+					return
+				}
+				var err error
+				body, err = io.ReadAll(r.Body)
+				if err != nil {
+					t.Error(err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				w.WriteHeader(http.StatusCreated)
+				json.NewEncoder(w).Encode(map[string]string{
+					"id": isloTestResourceID, "name": "crabbox-repo-abcdef", "status": "running",
+				})
+			}))
 			defer srv.Close()
 
-			cfg := Config{
+			cfg := core.Config{
 				IdleTimeout: test.idleTimeout,
 				TTL:         test.ttl,
-				Islo:        IsloConfig{APIKey: "ak_test", BaseURL: srv.URL, Workdir: "crabbox", IdlePause: test.idlePause},
+				Islo:        core.IsloConfig{APIKey: "ak_test", BaseURL: srv.URL, Workdir: "crabbox", IdlePause: test.idlePause},
 			}
-			client, err := newIsloClient(cfg, Runtime{HTTP: srv.Client()})
+			client, err := newIsloClient(cfg, core.Runtime{HTTP: srv.Client()})
 			if err != nil {
 				t.Fatal(err)
 			}
-			backend := &isloBackend{cfg: cfg, rt: Runtime{Stderr: io.Discard}}
-			if _, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, ""); err != nil {
+			backend := &isloBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard}}
+			if _, _, _, _, err := backend.createSandbox(context.Background(), client, core.Repo{Root: t.TempDir(), Name: "repo"}, false, ""); err != nil {
 				t.Fatal(err)
 			}
 
@@ -128,10 +116,6 @@ func TestIsloCreateSandboxSendsMappedLeasePolicy(t *testing.T) {
 			}
 			if !reflect.DeepEqual(payload, want) {
 				t.Fatalf("create body=%s want %v and nothing else", body, want)
-			}
-			// A TTL must never become a provider-side deletion deadline.
-			if strings.Contains(string(body), "delete_after") {
-				t.Fatalf("create body=%s must not hand deletion to the provider", body)
 			}
 		})
 	}
@@ -207,73 +191,31 @@ func TestIsloLeasePolicyConflictOnReclaim(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			sandbox := &gosdk.SandboxResponse{Name: "crabbox-repo-abcdef", Lifecycle: test.lifecycle}
-			cfg := Config{IdleTimeout: test.idleTimeout, TTL: test.ttl, Islo: IsloConfig{IdlePause: test.idlePause}}
-			err := isloLifecycleConflict(sandbox.GetName(), sandbox, cfg)
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			const name = "crabbox-repo-abcdef"
+			const leaseID = "isb_" + name
+			client := &fakeIsloSyncClient{getSandbox: &gosdk.SandboxResponse{
+				ID: isloTestResourceID, Name: name, Status: "running", Lifecycle: test.lifecycle,
+			}}
+			backend := &isloBackend{
+				cfg: core.Config{IdleTimeout: test.idleTimeout, TTL: test.ttl, Islo: core.IsloConfig{IdlePause: test.idlePause}},
+				rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+			}
+			gotID, gotName, _, err := backend.resolveLeaseIDForRepo(context.Background(), client, name, t.TempDir(), true)
 			if test.wantErr == "" {
-				if err != nil {
-					t.Fatalf("unexpected conflict: %v", err)
+				if err != nil || gotID != leaseID || gotName != name {
+					t.Fatalf("reclaim id=%q name=%q err=%v", gotID, gotName, err)
 				}
-				return
+			} else {
+				var exitErr core.ExitError
+				if !core.AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("err=%v want exit 2 containing %q", err, test.wantErr)
+				}
 			}
-			var exitErr ExitError
-			if !core.AsExitError(err, &exitErr) || exitErr.Code != 2 {
-				t.Fatalf("err=%v want exit 2 conflict", err)
-			}
-			if !strings.Contains(err.Error(), test.wantErr) {
-				t.Fatalf("err=%v want %q", err, test.wantErr)
+			if _, claimed, claimErr := core.ResolveLeaseClaim(leaseID); claimErr != nil || claimed != (test.wantErr == "") {
+				t.Fatalf("claim published=%v err=%v; want publication only on successful reclaim", claimed, claimErr)
 			}
 		})
-	}
-}
-
-// TestIsloReclaimRejectsDriftedIdlePause exercises the conflict through the real
-// reclaim entry point: the drift must abort before a local claim is written.
-func TestIsloReclaimRejectsDriftedIdlePause(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	seconds := int64(1800)
-	client := &fakeIsloSyncClient{getSandbox: &gosdk.SandboxResponse{
-		Name:      "crabbox-repo-abcdef",
-		Status:    "running",
-		Lifecycle: &gosdk.LifecyclePolicy{PauseAfterIdle: &seconds},
-	}}
-	backend := &isloBackend{
-		cfg: Config{IdleTimeout: 10 * time.Minute, Islo: IsloConfig{APIKey: "test", Workdir: "repo", IdlePause: true}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
-	}
-	_, _, _, err := backend.resolveLeaseIDForRepo(context.Background(), client, "crabbox-repo-abcdef", t.TempDir(), true)
-	var exitErr ExitError
-	if !core.AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "pause_after_idle=1800") {
-		t.Fatalf("err=%v want exit 2 lifecycle conflict", err)
-	}
-	if _, ok, claimErr := resolveLeaseClaim("isb_crabbox-repo-abcdef"); claimErr != nil || ok {
-		t.Fatalf("claim written despite conflict: ok=%v err=%v", ok, claimErr)
-	}
-}
-
-// TestIsloReclaimAcceptsMatchingIdlePause is the counterpart: a matching policy
-// still claims the lease, so the conflict check cannot be blocking every reclaim.
-func TestIsloReclaimAcceptsMatchingIdlePause(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	seconds := int64(1800)
-	client := &fakeIsloSyncClient{getSandbox: &gosdk.SandboxResponse{
-		Name:      "crabbox-repo-abcdef",
-		Status:    "running",
-		Lifecycle: &gosdk.LifecyclePolicy{PauseAfterIdle: &seconds},
-	}}
-	backend := &isloBackend{
-		cfg: Config{IdleTimeout: 30 * time.Minute, Islo: IsloConfig{APIKey: "test", Workdir: "repo", IdlePause: true}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
-	}
-	leaseID, name, _, err := backend.resolveLeaseIDForRepo(context.Background(), client, "crabbox-repo-abcdef", t.TempDir(), true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if name != "crabbox-repo-abcdef" {
-		t.Fatalf("sandbox=%q want crabbox-repo-abcdef", name)
-	}
-	if _, ok, claimErr := resolveLeaseClaim(leaseID); claimErr != nil || !ok {
-		t.Fatalf("claim missing after matching reclaim: ok=%v err=%v", ok, claimErr)
 	}
 }
 
@@ -281,42 +223,60 @@ func TestIsloReclaimAcceptsMatchingIdlePause(t *testing.T) {
 // mapping creates: a reused lease Islo paused must be resumed before sync and
 // exec, without relying on any Islo auto-resume behaviour.
 func TestIsloRunResumesPausedReusedLease(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	leaseID := "isb_crabbox-repo-abcdef"
-	if err := claimLeaseForRepoProvider(leaseID, "repo", isloProvider, t.TempDir(), time.Minute, false); err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeIsloSyncClient{getSandbox: &gosdk.SandboxResponse{Name: "crabbox-repo-abcdef", Status: "paused"}}
-	restore := swapNewIsloClient(client)
-	defer restore()
-	backend := &isloBackend{
-		cfg: Config{IdleTimeout: 30 * time.Minute, Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
-	}
-
-	result, err := backend.Run(context.Background(), RunRequest{
-		ID:      leaseID,
-		Keep:    true,
-		NoSync:  true,
-		Command: []string{"true"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if client.resumeCalls != 1 || client.resumedName != "crabbox-repo-abcdef" {
-		t.Fatalf("resume calls=%d name=%q want one resume of the reused sandbox", client.resumeCalls, client.resumedName)
-	}
-	if result.ExitCode != 0 {
-		t.Fatalf("exit=%d want 0", result.ExitCode)
-	}
-	ran := false
-	for _, req := range client.execRequests {
-		if strings.Join(req.GetCommand(), " ") == "true" {
-			ran = true
+	for _, failResume := range []bool{false, true} {
+		name := "ready"
+		if failResume {
+			name = "resume failure retains session"
 		}
-	}
-	if !ran {
-		t.Fatalf("workload never ran on the resumed sandbox: %#v", client.execRequests)
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			leaseID := "isb_crabbox-repo-abcdef"
+			repo := core.Repo{Root: t.TempDir(), Name: "repo"}
+			if err := core.ClaimLeaseForRepoProvider(leaseID, "repo", isloProvider, repo.Root, time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			client := &fakeIsloSyncClient{getSandbox: &gosdk.SandboxResponse{Name: "crabbox-repo-abcdef", Status: "paused"}}
+			cause := errors.New("fixture resume unavailable")
+			if failResume {
+				client.resumeErr = cause
+			}
+			restore := swapNewIsloClient(client)
+			defer restore()
+			backend := &isloBackend{
+				cfg: core.Config{IdleTimeout: 30 * time.Minute, Islo: core.IsloConfig{APIKey: "test", Workdir: "repo"}},
+				rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+			}
+			result, err := backend.Run(context.Background(), core.RunRequest{
+				ID: leaseID, Repo: repo, Keep: true, NoSync: true, Command: []string{"true"},
+			})
+			if client.resumeCalls != 1 || client.resumedName != "crabbox-repo-abcdef" {
+				t.Fatalf("resume calls=%d name=%q", client.resumeCalls, client.resumedName)
+			}
+			if failResume {
+				if !errors.Is(err, cause) || result.Session == nil || !result.Session.Reused || !result.Session.Kept || result.Session.LeaseID != leaseID {
+					t.Fatalf("resume failure lost its bound recovery session: result=%+v err=%v", result, err)
+				}
+				if len(client.execRequests) != 0 {
+					t.Fatal("execution started after failed resume")
+				}
+				if _, ok, claimErr := core.ResolveLeaseClaim(leaseID); claimErr != nil || !ok || client.deleteCalls != 0 {
+					t.Fatalf("failed resume lost the retained lease: claim=%v err=%v deletes=%d", ok, claimErr, client.deleteCalls)
+				}
+				return
+			}
+			if err != nil || result.ExitCode != 0 {
+				t.Fatalf("exit=%d err=%v", result.ExitCode, err)
+			}
+			ran := false
+			for _, req := range client.execRequests {
+				if strings.Join(req.GetCommand(), " ") == "true" {
+					ran = true
+				}
+			}
+			if !ran {
+				t.Fatal("workload never ran on the resumed sandbox")
+			}
+		})
 	}
 }
 
@@ -367,33 +327,5 @@ func TestIsloIdlePauseIsOptIn(t *testing.T) {
 	}
 	if policy := isloLifecycleForConfig(off); policy != nil {
 		t.Fatalf("opted-out lifecycle=%#v want none", policy)
-	}
-}
-
-// TestIsloReclaimWithoutIdlePauseAdoptsDriftedPolicy keeps the adoption conflict
-// coherent with an unset knob: a sandbox carrying some pause policy Crabbox did
-// not ask for is still adoptable, because with the knob off Crabbox promises
-// nothing about the provider-side policy.
-func TestIsloReclaimWithoutIdlePauseAdoptsDriftedPolicy(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	seconds := int64(1800)
-	client := &fakeIsloSyncClient{getSandbox: &gosdk.SandboxResponse{
-		Name:      "crabbox-repo-abcdef",
-		Status:    "running",
-		Lifecycle: &gosdk.LifecyclePolicy{PauseAfterIdle: &seconds},
-	}}
-	backend := &isloBackend{
-		cfg: Config{IdleTimeout: 10 * time.Minute, Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
-	}
-	leaseID, name, _, err := backend.resolveLeaseIDForRepo(context.Background(), client, "crabbox-repo-abcdef", t.TempDir(), true)
-	if err != nil {
-		t.Fatalf("reclaim without the idle-pause knob must not conflict: %v", err)
-	}
-	if name != "crabbox-repo-abcdef" {
-		t.Fatalf("sandbox=%q want crabbox-repo-abcdef", name)
-	}
-	if _, ok, claimErr := resolveLeaseClaim(leaseID); claimErr != nil || !ok {
-		t.Fatalf("claim missing after reclaim: ok=%v err=%v", ok, claimErr)
 	}
 }

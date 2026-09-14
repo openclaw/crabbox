@@ -14,21 +14,21 @@ import (
 func trustedReadyPoolRemoteURL(remoteURL string) (string, error) {
 	remoteURL = strings.TrimSpace(remoteURL)
 	if remoteURL == "" {
-		return "", exit(7, "ready-pool reuse requires a canonical local Git origin")
+		return "", Exit(7, "ready-pool reuse requires a canonical local Git origin")
 	}
 	if gitRemoteURLHasCredentials(remoteURL) {
-		return "", exit(7, "ready-pool reuse refuses a credential-bearing local Git origin")
+		return "", Exit(7, "ready-pool reuse refuses a credential-bearing local Git origin")
 	}
 	if strings.HasPrefix(remoteURL, "ssh://") || (!strings.Contains(remoteURL, "://") && strings.Contains(remoteURL, "@")) {
-		return "", exit(7, "ready-pool reuse requires an anonymously fetchable non-SSH Git origin")
+		return "", Exit(7, "ready-pool reuse requires an anonymously fetchable non-SSH Git origin")
 	}
 	canonical := normalizeGitRemoteURL(remoteURL)
 	if canonical == "" {
-		return "", exit(7, "ready-pool reuse could not normalize the local Git origin")
+		return "", Exit(7, "ready-pool reuse could not normalize the local Git origin")
 	}
 	parsed, err := url.Parse(canonical)
 	if err != nil || parsed.User != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Opaque != "" {
-		return "", exit(7, "ready-pool reuse requires an anonymously fetchable HTTPS Git origin")
+		return "", Exit(7, "ready-pool reuse requires an anonymously fetchable HTTPS Git origin")
 	}
 	return canonical, nil
 }
@@ -38,7 +38,7 @@ func preflightReadyPoolRemote(ctx context.Context, remoteURL, branch string) err
 	defer cancel()
 	workdir, err := os.MkdirTemp("", "crabbox-ready-pool-preflight-")
 	if err != nil {
-		return exit(7, "create ready-pool origin preflight directory")
+		return Exit(7, "create ready-pool origin preflight directory")
 	}
 	defer os.RemoveAll(workdir)
 	configNull := "/dev/null"
@@ -58,21 +58,21 @@ func preflightReadyPoolRemote(ctx context.Context, remoteURL, branch string) err
 		"GCM_INTERACTIVE=Never",
 	}
 	if err := cmd.Run(); err != nil {
-		return exit(7, "ready-pool reuse requires an anonymously fetchable Git origin before borrowing")
+		return Exit(7, "ready-pool reuse requires an anonymously fetchable Git origin before borrowing")
 	}
 	return nil
 }
 
 func (a App) scrubReadyPoolLease(ctx context.Context, target SSHTarget, entry CoordinatorReadyPoolEntry, workdir, trustedRemoteURL string, requireActionsHydration bool) (string, bool, error) {
 	if strings.TrimSpace(workdir) == "" {
-		return "", false, exit(7, "ready-pool scrub has no remote workdir")
+		return "", false, Exit(7, "ready-pool scrub has no remote workdir")
 	}
 	branch, err := readyPoolScrubBranch(entry.Ref)
 	if err != nil {
-		return "", false, exit(7, "ready-pool scrub requires a branch ref")
+		return "", false, Exit(7, "ready-pool scrub requires a branch ref")
 	}
 	if strings.TrimSpace(trustedRemoteURL) == "" {
-		return "", false, exit(7, "ready-pool scrub has no trusted Git origin")
+		return "", false, Exit(7, "ready-pool scrub has no trusted Git origin")
 	}
 	command := remoteReadyPoolScrub(workdir, branch, trustedRemoteURL)
 	if isWindowsNativeTarget(target) {
@@ -80,24 +80,24 @@ func (a App) scrubReadyPoolLease(ctx context.Context, target SSHTarget, entry Co
 	}
 	out, err := runSSHOutput(ctx, target, command)
 	if err != nil {
-		return "", false, exit(7, "ready-pool scrub failed on %s: %v", target.Host, err)
+		return "", false, Exit(7, "ready-pool scrub failed on %s: %v", target.Host, err)
 	}
 	preparedCommit := strings.TrimSpace(out)
 	if !isGitCommitSHA(preparedCommit) {
-		return "", false, exit(7, "ready-pool scrub did not report one valid prepared commit")
+		return "", false, Exit(7, "ready-pool scrub did not report one valid prepared commit")
 	}
 	hydrationCompatible := true
 	state, err := readActionsHydrationState(ctx, target, entry.LeaseID)
 	if err != nil {
-		return "", false, exit(7, "read ready-pool Actions hydration marker: %v", err)
+		return "", false, Exit(7, "read ready-pool Actions hydration marker: %v", err)
 	}
 	if strings.TrimSpace(state.Workspace) != "" {
 		if strings.TrimSpace(state.Workspace) != strings.TrimSpace(workdir) {
-			return "", false, exit(7, "ready-pool Actions hydration marker no longer owns the prepared workspace")
+			return "", false, Exit(7, "ready-pool Actions hydration marker no longer owns the prepared workspace")
 		}
 		hydrationCompatible = isGitCommitSHA(state.Commit) && strings.EqualFold(state.Commit, preparedCommit)
 	} else if requireActionsHydration {
-		return "", false, exit(7, "ready-pool entry requires an Actions hydration marker")
+		return "", false, Exit(7, "ready-pool entry requires an Actions hydration marker")
 	}
 	return preparedCommit, hydrationCompatible, nil
 }
@@ -114,6 +114,55 @@ func readyPoolScrubBranch(ref string) (string, error) {
 		return "", fmt.Errorf("ready-pool scrub requires a branch ref")
 	}
 	return ref, nil
+}
+
+func remoteIgnoredWarmCacheCleanScript(gitCommand, label string) string {
+	return `crabbox_clean_ignored_warm_caches() {
+clean_args=(-ffdx --quiet)
+cache_paths="$(/usr/bin/mktemp)"
+if ! /usr/bin/find -P . \( -ipath './.git' -o -ipath './.crabbox' \) -prune -o \( -type d -o -type l \) \( -iname node_modules -o -iname .pnpm-store -o -ipath '*/.yarn/cache' -o -ipath '*/.yarn/unplugged' \) -print0 -prune > "$cache_paths"; then
+  rm -f -- "$cache_paths"
+  echo "` + label + ` cache discovery failed" >&2
+  return 1
+fi
+while IFS= read -r -d '' cache_path; do
+  cache_lookup_path="$cache_path"
+  cache_path="${cache_path#./}"
+  if printf '%s\0' "$cache_lookup_path" | ` + gitCommand + ` check-ignore -q -z --stdin; then
+    if [ -L "$cache_path" ] || [ ! -d "$cache_path" ]; then
+      rm -f -- "$cache_paths"
+      echo "` + label + ` cache root must be a real directory" >&2
+      return 1
+    fi
+    resolved_cache="$(cd -P -- "$cache_path" && pwd -P)"
+    case "$resolved_cache/" in
+      "$workdir"/*) ;;
+      *)
+        rm -f -- "$cache_paths"
+        echo "` + label + ` cache root escapes the workspace" >&2
+        return 1
+        ;;
+    esac
+    cache_pattern="${cache_path//\\/\\\\}"
+    cache_pattern="${cache_pattern//\*/\\*}"
+    cache_pattern="${cache_pattern//\?/\\?}"
+    cache_pattern="${cache_pattern//\[/\\[}"
+    cache_pattern="${cache_pattern//\]/\\]}"
+    cache_pattern="${cache_pattern//!/\\!}"
+    cache_pattern="${cache_pattern//#/\\#}"
+    clean_args+=(-e "$cache_pattern/")
+  elif [ "$?" -ne 1 ]; then
+    rm -f -- "$cache_paths"
+    echo "` + label + ` cache ignore check failed" >&2
+    return 1
+  fi
+done < "$cache_paths"
+rm -f -- "$cache_paths"
+if ! ` + gitCommand + ` clean "${clean_args[@]}"; then
+  echo "` + label + ` clean failed" >&2
+  return 1
+fi
+}`
 }
 
 func remoteReadyPoolScrub(workdir, ref, trustedRemoteURL string) string {
@@ -167,44 +216,8 @@ if safe_git ls-files --stage | awk '$1 == "160000" { found=1 } END { exit !found
   echo "ready-pool scrub does not reuse submodule worktrees" >&2
   exit 1
 fi
-clean_args=(-ffdx --quiet)
-cache_paths=".git/crabbox-cache-paths.$$"
-trap 'rm -f -- "$cache_paths"' EXIT
-if ! /usr/bin/find -P . \( -ipath './.git' -o -ipath './.crabbox' \) -prune -o \( -type d -o -type l \) \( -iname node_modules -o -iname .pnpm-store -o -ipath '*/.yarn/cache' -o -ipath '*/.yarn/unplugged' \) -print0 -prune > "$cache_paths"; then
-  echo "ready-pool cache discovery failed" >&2
-  exit 1
-fi
-while IFS= read -r -d '' cache_path; do
-  cache_path="${cache_path#./}"
-  if safe_git check-ignore -q -- "$cache_path"; then
-    if [ -L "$cache_path" ] || [ ! -d "$cache_path" ]; then
-      echo "ready-pool cache root must be a real directory" >&2
-      exit 1
-    fi
-    resolved_cache="$(cd -P -- "$cache_path" && pwd -P)"
-    case "$resolved_cache/" in
-      "$workdir"/*) ;;
-      *)
-        echo "ready-pool cache root escapes the workspace" >&2
-        exit 1
-        ;;
-    esac
-    cache_pattern="${cache_path//\\/\\\\}"
-    cache_pattern="${cache_pattern//\*/\\*}"
-    cache_pattern="${cache_pattern//\?/\\?}"
-    cache_pattern="${cache_pattern//\[/\\[}"
-    cache_pattern="${cache_pattern//\]/\\]}"
-    cache_pattern="${cache_pattern//!/\\!}"
-    cache_pattern="${cache_pattern//#/\\#}"
-    clean_args+=(-e "$cache_pattern/")
-  elif [ "$?" -ne 1 ]; then
-    echo "ready-pool cache ignore check failed" >&2
-    exit 1
-  fi
-done < "$cache_paths"
-rm -f -- "$cache_paths"
-trap - EXIT
-safe_git clean "${clean_args[@]}"
+` + remoteIgnoredWarmCacheCleanScript("safe_git", "ready-pool") + `
+crabbox_clean_ignored_warm_caches
 if [ -L .crabbox ]; then
   echo "ready-pool .crabbox root must not be a symlink" >&2
   exit 1
@@ -234,7 +247,7 @@ printf '%s\n' "$target_commit"`
 }
 
 func windowsRemoteReadyPoolScrub(workdir, ref, trustedRemoteURL string) string {
-	return powershellCommand(`$ErrorActionPreference = "Stop"
+	return PowershellCommand(`$ErrorActionPreference = "Stop"
 $workdir = ` + psQuote(workdir) + `
 $ref = ` + psQuote(strings.TrimSpace(ref)) + `
 $trustedRemote = ` + psQuote(strings.TrimSpace(trustedRemoteURL)) + `

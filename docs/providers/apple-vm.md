@@ -186,6 +186,18 @@ CRABBOX_APPLE_VM_MEMORY
 CRABBOX_APPLE_VM_DISK
 ```
 
+When both file sections are present, `appleVM` wins as a whole, including an
+empty mapping; an omitted or null current section can fall back to `appleVZ`.
+Current environment names win when nonempty, otherwise their legacy names are
+used. A visited current flag wins over its legacy spelling regardless of argument
+order; an invalid current value is not replaced by a valid legacy value.
+
+Explicit numeric zero is not the same as an omitted setting: files retain it,
+and validation rejects it rather than silently replacing it with a default.
+File and environment strings retain their text; provider flags trim surrounding
+whitespace. Accepted image overrides clear the earlier image checksum, then an
+accompanying checksum sets the new pair.
+
 ## Images and integrity
 
 The portable `osImage` selector maps to dated Ubuntu ARM64 cloud images:

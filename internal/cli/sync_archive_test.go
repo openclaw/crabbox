@@ -12,6 +12,25 @@ import (
 	"testing"
 )
 
+func TestManagedStateArchiveRejectsSuppliedMarker(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	writeFile(t, filepath.Join(root, "state", "crabbox", "marker.txt"), "benign state marker\n")
+	writeFile(t, filepath.Join(root, "state", "source.txt"), "ordinary source marker\n")
+	if archive, err := CreateSyncArchive(context.Background(), Repo{Root: root}, SyncManifest{Files: []string{"state/crabbox/marker.txt"}}, "managed-marker-*.tgz"); err == nil || archive != nil {
+		t.Fatal("explicit archive manifest admitted managed marker")
+	}
+	archive, err := CreateSyncArchive(context.Background(), Repo{Root: root}, SyncManifest{Files: []string{"state/source.txt"}}, "ordinary-marker-*.tgz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(archive.Name())
+	defer archive.Close()
+	if names := syncArchiveNames(t, archive); len(names) != 1 || !names["state/source.txt"] {
+		t.Fatalf("ordinary archive names=%v", names)
+	}
+}
+
 func TestCreateSyncArchiveTreatsOptionLikeNamesAsFiles(t *testing.T) {
 	root := t.TempDir()
 	names := []string{

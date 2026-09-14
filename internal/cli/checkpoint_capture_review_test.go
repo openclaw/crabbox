@@ -12,6 +12,7 @@ import (
 )
 
 func runCheckpointCaptureReviewContract(t *testing.T, repo, binary string) {
+	t.Parallel()
 	t.Run("retirement admission is read only and holds existing operations", func(t *testing.T) {
 		f := newCheckpointCaptureFixture(t, repo, binary)
 		description := f.run("providers", "describe", "machine0", "--json")

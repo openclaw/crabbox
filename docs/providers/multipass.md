@@ -148,6 +148,12 @@ CRABBOX_MULTIPASS_DISK
 CRABBOX_MULTIPASS_LAUNCH_TIMEOUT
 ```
 
+Decoded negative CPU counts, including environment and explicit flag values, are
+rejected before acquiring a new VM. Creation-only CPU sizing does not block
+operations on existing leases, including stop and cleanup. Zero leaves the Multipass CPU default,
+and positive counts are passed through. YAML CPU values still apply only when
+positive; zero or negative YAML values leave the previous setting unchanged.
+
 ## Lease Behavior
 
 1. `warmup` or a fresh `run` creates a per-lease SSH key.

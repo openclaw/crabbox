@@ -16,14 +16,14 @@ import (
 func TestDescribeProviderCoversRegisteredRunnableKinds(t *testing.T) {
 	for _, provider := range registeredProviders() {
 		provider := provider
-		t.Run(provider.Name(), func(t *testing.T) {
-			description, err := describeProvider(provider.Name())
+		t.Run(provider.Spec().Name, func(t *testing.T) {
+			description, err := describeProvider(provider.Spec().Name)
 			switch provider.Spec().Kind {
 			case ProviderKindSSHLease, ProviderKindDelegatedRun:
 				if err != nil {
-					t.Fatalf("describeProvider(%q): %v", provider.Name(), err)
+					t.Fatalf("describeProvider(%q): %v", provider.Spec().Name, err)
 				}
-				if !description.Runnable || description.Provider.Canonical != normalizeProviderName(provider.Name()) {
+				if !description.Runnable || description.Provider.Canonical != normalizeProviderName(provider.Spec().Name) {
 					t.Fatalf("description=%#v", description)
 				}
 			case ProviderKindServiceControl:
@@ -113,7 +113,7 @@ func TestDescribeProviderClassCatalogMatchesMatrixForCanonicalAndAliases(t *test
 			continue
 		}
 		matrixCatalog := providerMatrixEntryFor(provider).ClassCatalog
-		for _, requested := range append([]string{provider.Name()}, provider.Aliases()...) {
+		for _, requested := range append([]string{provider.Spec().Name}, provider.Spec().Aliases...) {
 			description, err := describeProvider(requested)
 			if err != nil {
 				t.Fatalf("describeProvider(%q): %v", requested, err)
@@ -168,13 +168,13 @@ func TestDescribeProviderCanonicalIdentityAndAppleDeprecations(t *testing.T) {
 func TestDescribeProviderRegistersOnlyAndUsesBaseDefaults(t *testing.T) {
 	counters := &describeProviderCounters{}
 	provider := countingDescribeProvider{counters: counters}
-	providerRegistry[provider.Name()] = provider
-	t.Cleanup(func() { delete(providerRegistry, provider.Name()) })
+	providerRegistry[provider.Spec().Name] = provider
+	t.Cleanup(func() { delete(providerRegistry, provider.Spec().Name) })
 	t.Setenv("CRABBOX_PROVIDER", "ENV_SECRET_MARKER")
 	t.Setenv("CRABBOX_SERVER_TYPE", "SERVER_TYPE_SECRET_MARKER")
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
 
-	description, err := describeProvider(provider.Name())
+	description, err := describeProvider(provider.Spec().Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,9 +274,7 @@ func TestProviderFlagAnnotationsFailOnDrift(t *testing.T) {
 
 type driftContractProvider struct{}
 
-func (driftContractProvider) Name() string                                 { return "drift" }
-func (driftContractProvider) Aliases() []string                            { return nil }
-func (driftContractProvider) Spec() ProviderSpec                           { return ProviderSpec{} }
+func (driftContractProvider) Spec() ProviderSpec                           { return ProviderSpec{Name: "drift"} }
 func (driftContractProvider) RegisterFlags(*flag.FlagSet, Config) any      { return NoProviderFlags() }
 func (driftContractProvider) ApplyFlags(*Config, *flag.FlagSet, any) error { return nil }
 func (driftContractProvider) Configure(Config, Runtime) (Backend, error)   { return nil, nil }
@@ -292,10 +290,8 @@ type countingDescribeProvider struct {
 	counters *describeProviderCounters
 }
 
-func (p countingDescribeProvider) Name() string      { return "counting-describe" }
-func (p countingDescribeProvider) Aliases() []string { return nil }
 func (p countingDescribeProvider) Spec() ProviderSpec {
-	return ProviderSpec{Name: p.Name(), Kind: ProviderKindSSHLease, Targets: []TargetSpec{{OS: targetLinux}}}
+	return ProviderSpec{Name: "counting-describe", Kind: ProviderKindSSHLease, Targets: []TargetSpec{{OS: targetLinux}}}
 }
 func (p countingDescribeProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
 	p.counters.register++

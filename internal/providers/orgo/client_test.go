@@ -12,6 +12,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func TestRunBashExitCodeFieldPresence(t *testing.T) {
@@ -403,7 +406,7 @@ func (fn orgoRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error)
 func TestNewOrgoClientRejectsInsecureNonLoopbackAPIBase(t *testing.T) {
 	t.Setenv("CRABBOX_ORGO_API_KEY", "test-key")
 	t.Setenv("CRABBOX_ORGO_API_BASE", "http://api.example.test")
-	if _, err := newOrgoClient(Config{}, Runtime{}); err == nil || !strings.Contains(err.Error(), "must use https") {
+	if _, err := newOrgoClient(core.Config{Orgo: core.OrgoConfig{APIBase: "http://api.example.test"}}, core.Runtime{}); err == nil || !strings.Contains(err.Error(), "must use https") {
 		t.Fatalf("err=%v, want HTTPS requirement", err)
 	}
 }
@@ -411,7 +414,8 @@ func TestNewOrgoClientRejectsInsecureNonLoopbackAPIBase(t *testing.T) {
 func TestNewOrgoClientUsesResolvedConfigBeforeAmbientAPIBase(t *testing.T) {
 	t.Setenv("CRABBOX_ORGO_API_KEY", "test-key")
 	t.Setenv("CRABBOX_ORGO_API_BASE", "https://ambient.example.test")
-	client, err := newOrgoClient(Config{Orgo: OrgoConfig{APIBase: "https://flag-selected.example.test"}}, Runtime{})
+	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIBase: "https://flag-selected.example.test"}}, core.Runtime{}).(*orgoBackend)
+	client, err := backend.api()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +449,7 @@ func TestOrgoFallbackBoundsControlAndPreservesCommand(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	control, data := orgoHTTPClients(nil, controlTimeout)
+	control, data := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	client := &orgoHTTPClient{baseURL: server.URL, apiKey: "test-key", http: control, dataHTTP: data}
 	started := time.Now()
 	_, err := client.GetComputer(context.Background(), "computer-1")
@@ -472,7 +476,7 @@ func TestOrgoFallbackBoundsControlAndPreservesCommand(t *testing.T) {
 func TestOrgoInjectedHTTPClientIsPreservedForBothPlanes(t *testing.T) {
 	t.Setenv("CRABBOX_ORGO_API_KEY", "test-key")
 	injected := &http.Client{Timeout: 17 * time.Second}
-	api, err := newOrgoClient(Config{Orgo: OrgoConfig{APIBase: "http://127.0.0.1:8787"}}, Runtime{HTTP: injected})
+	api, err := newOrgoClient(core.Config{Orgo: core.OrgoConfig{APIBase: "http://127.0.0.1:8787"}}, core.Runtime{HTTP: injected})
 	if err != nil {
 		t.Fatal(err)
 	}

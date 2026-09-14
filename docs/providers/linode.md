@@ -60,6 +60,10 @@ Config keys under `linode:`:
 | `firewall` | `cfg.Linode.FirewallID` | empty | Optional numeric existing Linode firewall id to attach at create time. |
 | `sshCIDRs` | `cfg.Linode.SSHCIDRs` | empty | Reserved for firewall-aware follow-up work; Phase 1 does not create firewall rules. |
 
+Acquisition trims the selected native type. A blank explicit `--type` falls back
+to `linode.type`, then the class default. The create request, lease metadata, and
+recovery records use that same resolved type.
+
 The portable `--os ubuntu:24.04` selector maps to `linode/ubuntu24.04`. Linode
 does not currently offer the portable default Ubuntu 26.04 image in this
 provider, so provisioning with an explicit `--os ubuntu:26.04` is rejected
@@ -67,6 +71,15 @@ unless `linode.image` or `CRABBOX_LINODE_IMAGE` provides an explicit image slug.
 Validation occurs when Crabbox acquires a new Linode, after CLI overrides;
 `config show`, provider overrides, and cleanup commands remain available when
 the configured portable selector is unsupported.
+
+The five file/environment bindings are declared together in
+`internal/cli/config_linode.go`; this adds no provider-specific flags. Raw
+initial configuration keeps the image selected by the portable-OS mapping,
+including an empty unsupported image. Later effective defaults remain separate
+from acquisition validation. Empty scalar input leaves the prior value intact;
+accepted image/type input remains explicit even when equal to its default.
+Nonempty YAML CIDR lists retain their entries as written, while environment
+lists trim entries and discard blanks.
 
 Linode leases default to `root` on SSH port `22` with no fallback port. Explicit
 generic `ssh.user` and `ssh.port` values remain authoritative. The effective

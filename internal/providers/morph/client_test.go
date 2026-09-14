@@ -11,7 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/openclaw/crabbox/internal/providers/shared"
+	core "github.com/openclaw/crabbox/internal/cli"
+
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestMorphClientRedactsReflectedCredential(t *testing.T) {
@@ -78,10 +80,7 @@ func TestMorphClientRefusesCrossOriginRedirectBeforeReplay(t *testing.T) {
 	}))
 	defer trusted.Close()
 
-	client, err := newMorphClient(
-		Config{Morph: MorphConfig{APIKey: "test-key", APIURL: trusted.URL}},
-		Runtime{HTTP: trusted.Client()},
-	)
+	client, err := newMorphClient(core.Config{Morph: core.MorphConfig{APIKey: "test-key", APIURL: trusted.URL}}, core.Runtime{HTTP: trusted.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,10 +111,7 @@ func TestMorphClientFollowsSameOriginRedirect(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := newMorphClient(
-		Config{Morph: MorphConfig{APIKey: "test-key", APIURL: server.URL}},
-		Runtime{HTTP: server.Client()},
-	)
+	client, err := newMorphClient(core.Config{Morph: core.MorphConfig{APIKey: "test-key", APIURL: server.URL}}, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,10 +136,7 @@ func TestMorphClientPreservesCallerRedirectPolicy(t *testing.T) {
 		callerChecks++
 		return callerErr
 	}
-	client, err := newMorphClient(
-		Config{Morph: MorphConfig{APIKey: "test-key", APIURL: server.URL}},
-		Runtime{HTTP: httpClient},
-	)
+	client, err := newMorphClient(core.Config{Morph: core.MorphConfig{APIKey: "test-key", APIURL: server.URL}}, core.Runtime{HTTP: httpClient})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,8 +162,8 @@ func TestSameMorphOrigin(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			candidate, _ := url.Parse(test.raw)
-			if got := shared.SameOrigin(trusted, candidate); got != test.want {
-				t.Fatalf("shared.SameOrigin(%q)=%v, want %v", test.raw, got, test.want)
+			if got := core.SameHTTPOrigin(trusted, candidate); got != test.want {
+				t.Fatalf("core.SameHTTPOrigin(%q)=%v, want %v", test.raw, got, test.want)
 			}
 		})
 	}
@@ -229,5 +222,54 @@ func TestMorphClientListInstancesAndWakeOnRequest(t *testing.T) {
 	}
 	if err := client.UpdateInstanceWakeOn(context.Background(), "inst_1", boolPtr(true), nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCompactJSONRequestEnvelope(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "ctx")
+	const base = "https://api.example.test/base"
+	var ptr *string
+	var slice []string
+	for _, tc := range []struct {
+		name string
+		body any
+		want string
+	}{
+		{name: "nil"}, {name: "typed nil pointer", body: ptr, want: "null"}, {name: "typed nil slice", body: slice, want: "null"}, {name: "compact escaped JSON", body: map[string]string{"message": "<&>"}, want: "{\"message\":\"\\u003c\\u0026\\u003e\"}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			path := "/records"
+			endpoint := base + path
+			headers := http.Header{}
+			headers.Set("Authorization", "Bearer synthetic-token")
+			if tc.body != nil {
+				headers.Set("Content-Type", "application/json")
+			}
+			httpClient := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, endpoint, tc.want, headers)
+				return nil, errors.New("synthetic-transport-stop")
+			})}
+			c := &morphClient{apiURL: base, apiKey: "synthetic-token", httpClient: httpClient}
+			out, err := c.doRaw(ctx, http.MethodPost, path, nil, tc.body)
+			if out != nil {
+				t.Fatalf("out=%v", out)
+			}
+			if err == nil || !strings.Contains(err.Error(), "synthetic-transport-stop") || calls != 1 {
+				t.Fatalf("error=%v calls=%d", err, calls)
+			}
+		})
+	}
+}
+
+func TestCompactJSONMorphURLFailurePrecedesEncoding(t *testing.T) {
+	calls := 0
+	c := &morphClient{apiURL: "https://api.example.test/%", httpClient: &http.Client{Transport: testutil.RoundTripFunc(func(*http.Request) (*http.Response, error) { calls++; return nil, errors.New("unexpected transport") })}}
+	out, err := c.doRaw(context.Background(), http.MethodPost, "/records", nil, make(chan int))
+	var urlError *url.Error
+	if out != nil || !errors.As(err, &urlError) || calls != 0 {
+		t.Fatalf("out=%v error=%T %v calls=%d", out, err, err, calls)
 	}
 }

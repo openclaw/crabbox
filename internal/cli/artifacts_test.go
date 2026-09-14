@@ -19,6 +19,19 @@ import (
 	"time"
 )
 
+func uploadArtifactGrant(ctx context.Context, path string, grant CoordinatorArtifactUploadGrant) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return Exit(2, "open artifact %s: %v", grant.Name, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return Exit(2, "stat artifact %s: %v", grant.Name, err)
+	}
+	return uploadArtifactGrantReader(ctx, file, info.Size(), grant)
+}
+
 func TestParseArtifactPublishOptionsNormalizesStorage(t *testing.T) {
 	opts, err := parseArtifactPublishOptions([]string{
 		"--dir", "bundle",
@@ -220,7 +233,7 @@ func TestWriteArtifactRunLogsUsesRoutedCoordinatorAndScrubsDesktopCredentials(t 
 
 	cfg := Config{
 		Coordinator:       server.URL,
-		CoordTokenCommand: []string{os.Args[0], "-test.run=^TestArtifactRunLogCoordinatorTokenHelper$"},
+		CoordTokenCommand: synchronousTestHelperCommand("TestArtifactRunLogCoordinatorTokenHelper"),
 		Provider:          "external",
 		TargetOS:          targetMacOS,
 	}
@@ -2841,7 +2854,7 @@ func TestArtifactCollectFailureJSONIsParseable(t *testing.T) {
 		Metadata:  artifactBundleMetadata{LeaseID: "cbx_123"},
 		Files:     []artifactFile{{Kind: "metadata", Name: "metadata.json", Path: "/tmp/bundle/metadata.json"}},
 	}
-	err := app.finishArtifactCollectFailure(&result, true, exit(5, "capture screenshot: boom"), artifactWarning{
+	err := app.finishArtifactCollectFailure(&result, true, Exit(5, "capture screenshot: boom"), artifactWarning{
 		Problem: rescueScreenshotCaptureBroken,
 		Detail:  "capture screenshot: boom",
 		Rescue:  []string{"crabbox desktop doctor --id cbx_123"},
@@ -2874,7 +2887,7 @@ func TestContactSheetWarningJSONIsParseable(t *testing.T) {
 		Metadata:  artifactBundleMetadata{LeaseID: "cbx_123"},
 		Files:     []artifactFile{{Kind: "video", Name: "screen.mp4", Path: "/tmp/bundle/screen.mp4"}},
 	}
-	appendContactSheetWarning(&result.Warnings, exit(2, "ffprobe is required"))
+	appendContactSheetWarning(&result.Warnings, Exit(2, "ffprobe is required"))
 	if err := json.NewEncoder(&stdout).Encode(result); err != nil {
 		t.Fatal(err)
 	}

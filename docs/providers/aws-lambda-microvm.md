@@ -105,6 +105,14 @@ maximum duration from Crabbox TTL, capped at eight hours, and maps the idle
 timeout to Lambda auto-suspend/auto-resume. Explicit `pause` and `resume` call
 the Lambda lifecycle APIs.
 
+Run results and timing are finalized after automatic termination. A termination
+failure fails an otherwise successful run and retains its recovery session;
+later termination or timing-writer failures do not replace the primary command
+failure. Early setup failures retain their public exit code and session, and
+transport errors are not classified as command exits. The existing successful
+command-only claim refresh remains outside command timing, and a reused lease's
+operation lock stays held through final cleanup and reporting.
+
 Each data-plane request gets a short-lived, port-8080-scoped JWE token through
 `CreateMicrovmAuthToken`. Crabbox accepts only the Region-bound
 `*.lambda-microvm.<region>.on.aws` endpoint returned by AWS and refuses

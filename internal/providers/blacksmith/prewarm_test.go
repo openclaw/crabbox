@@ -41,7 +41,7 @@ func TestBlacksmithPrewarmProbeAdmission(t *testing.T) {
 						if err := core.ClaimLeaseForRepoProvider(existingID, "existing-box", blacksmithTestboxProvider, repo, time.Minute, false); err != nil {
 							t.Fatal(err)
 						}
-						before, err := readLeaseClaim(existingID)
+						before, err := core.ReadLeaseClaim(existingID)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -55,11 +55,11 @@ func TestBlacksmithPrewarmProbeAdmission(t *testing.T) {
 						if err != nil && !os.IsNotExist(err) {
 							t.Fatal(err)
 						}
-						claim, err := readLeaseClaim(leaseID)
+						claim, err := core.ReadLeaseClaim(leaseID)
 						if err != nil {
 							t.Fatal(err)
 						}
-						after, err := readLeaseClaim(existingID)
+						after, err := core.ReadLeaseClaim(existingID)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -67,7 +67,7 @@ func TestBlacksmithPrewarmProbeAdmission(t *testing.T) {
 							t.Error("prewarm changed an existing claim")
 						}
 						if probe.name == "probe" {
-							var exitErr ExitError
+							var exitErr core.ExitError
 							if !core.AsExitError(runErr, &exitErr) || exitErr.Code != 2 {
 								t.Errorf("prewarm error=%v, want exit 2", runErr)
 							}
@@ -106,7 +106,7 @@ func TestBlacksmithPrewarmProbeAdmission(t *testing.T) {
 						if claim.LeaseID != "" {
 							t.Errorf("retained claim=%q, want no acquired lease", claim.LeaseID)
 						}
-						keyPath, err := testboxKeyPath(leaseID)
+						keyPath, err := core.TestboxKeyPath(leaseID)
 						if err != nil {
 							t.Fatal(err)
 						}

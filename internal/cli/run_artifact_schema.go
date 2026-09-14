@@ -1644,7 +1644,7 @@ func parseRequireArtifactSchemaSpec(value string) (remote, schemaPath string, er
 	remote = strings.TrimSpace(remote)
 	schemaPath = strings.TrimSpace(schemaPath)
 	if !ok || remote == "" || schemaPath == "" {
-		return "", "", exit(2, "--require-artifact-schema expects remote=schema.json")
+		return "", "", Exit(2, "--require-artifact-schema expects remote=schema.json")
 	}
 	remote, err = normalizeArtifactSchemaRemotePath(remote)
 	if err != nil {
@@ -1657,7 +1657,7 @@ func normalizeArtifactSchemaRemotePath(remote string) (string, error) {
 	remote = strings.TrimSpace(remote)
 	clean := path.Clean(remote)
 	if remote == "" || clean == "." || !safeArtifactGlob(remote) || strings.ContainsAny(remote, "*?:\\[]") || strings.HasPrefix(remote, "/") {
-		return "", exit(2, "--require-artifact-schema requires a safe relative artifact path: %s", remote)
+		return "", Exit(2, "--require-artifact-schema requires a safe relative artifact path: %s", remote)
 	}
 	return clean, nil
 }
@@ -1671,16 +1671,16 @@ func loadRequireArtifactSchemas(values []string) ([]loadedArtifactSchema, error)
 			return nil, err
 		}
 		if seen[remote] {
-			return nil, exit(2, "--require-artifact-schema lists %q more than once", remote)
+			return nil, Exit(2, "--require-artifact-schema lists %q more than once", remote)
 		}
 		seen[remote] = true
 		data, err := readBoundedSchemaDefinition(schemaPath)
 		if err != nil {
-			return nil, exit(2, "--require-artifact-schema: read schema %s: %v", schemaPath, err)
+			return nil, Exit(2, "--require-artifact-schema: read schema %s: %v", schemaPath, err)
 		}
 		schema, err := parseArtifactSchema(data)
 		if err != nil {
-			return nil, exit(2, "--require-artifact-schema: invalid schema %s: %v", schemaPath, err)
+			return nil, Exit(2, "--require-artifact-schema: invalid schema %s: %v", schemaPath, err)
 		}
 		out = append(out, loadedArtifactSchema{remote: remote, schemaPath: schemaPath, schema: schema})
 	}
@@ -1722,7 +1722,7 @@ func validateArtifactSchemasWithReader(ctx context.Context, target SSHTarget, wo
 			results = append(results, result)
 			lines = append(lines, fmt.Sprintf("schema %s: fetch failed: %v", s.remote, err))
 			if firstFailure == nil {
-				firstFailure = exit(7, "require artifact schema: fetch %s: %v", s.remote, err)
+				firstFailure = Exit(7, "require artifact schema: fetch %s: %v", s.remote, err)
 			}
 			continue
 		}
@@ -1743,7 +1743,7 @@ func validateArtifactSchemasWithReader(ctx context.Context, target SSHTarget, wo
 			lines = append(lines, "  - "+v.String())
 		}
 		if firstFailure == nil {
-			firstFailure = exit(7, "artifact schema validation failed: %s (%s)", s.remote, violationSummary)
+			firstFailure = Exit(7, "artifact schema validation failed: %s (%s)", s.remote, violationSummary)
 		}
 	}
 	return results, strings.Join(lines, "\n"), firstFailure
@@ -1778,7 +1778,7 @@ func decodeBoundedBase64(encoded string, maxBytes int) ([]byte, error) {
 func remoteBoundedReadBase64Command(target SSHTarget, workdir, remotePath string, maxBytes int) string {
 	limit := maxBytes + 1
 	if isWindowsNativeTarget(target) {
-		return powershellCommand(`$ErrorActionPreference = "Stop"
+		return PowershellCommand(`$ErrorActionPreference = "Stop"
 Set-Location -LiteralPath ` + psQuote(workdir) + `
 $path = ` + psQuote(remotePath) + `
 if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "artifact not found: $path" }

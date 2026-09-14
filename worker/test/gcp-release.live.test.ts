@@ -44,16 +44,20 @@ live("GCP release ownership live", () => {
       sshPublicKey: requiredEnv("LIVE_SSH_PUBLIC_KEY"),
     });
     let cloudID = "";
+    let ownedLease: LeaseRecord | undefined;
     let denied = false;
     let released = false;
+    let testFailed = false;
+    let testError: unknown;
     try {
       const machine = await client.createServer(config, leaseID, slug, owner);
       cloudID = machine.cloudID;
-      const readBack = await client.getServer(cloudID);
-      expect(readBack.host).not.toBe("");
-      expect(readBack.labels).toMatchObject({ lease: leaseID, provider: "gcp" });
+      const providerResourceID = exactProviderResourceID(
+        machine.providerResourceID,
+        "created machine",
+      );
       const now = new Date().toISOString();
-      const lease = {
+      ownedLease = {
         id: leaseID,
         slug,
         provider: "gcp",
@@ -67,9 +71,10 @@ live("GCP release ownership live", () => {
         class: "standard",
         serverType: "e2-micro",
         serverID: 0,
+        providerResourceID,
         serverName: cloudID,
         providerKey: "",
-        host: readBack.host,
+        host: machine.host,
         sshUser: "crabbox",
         sshPort: "22",
         workRoot: "/workspace",
@@ -83,13 +88,24 @@ live("GCP release ownership live", () => {
         expiresAt: new Date(Date.now() + 900_000).toISOString(),
       } satisfies LeaseRecord;
 
+      const readBack = await client.getServer(cloudID);
+      const readBackProviderResourceID = exactProviderResourceID(
+        readBack.providerResourceID,
+        "read-back machine",
+      );
+      expect(readBackProviderResourceID).toBe(providerResourceID);
+      expect(readBack.host).not.toBe("");
+      expect(readBack.labels).toMatchObject({ lease: leaseID, provider: "gcp" });
+
       await expect(
-        provider.releaseLease({ ...lease, owner: "foreign@example.com" }),
+        provider.releaseLease({ ...ownedLease, owner: "foreign@example.com" }),
       ).rejects.toThrow("ownership does not match");
       denied = true;
-      await expect(client.getServer(cloudID)).resolves.toMatchObject({ cloudID });
+      const afterDenied = await client.getServer(cloudID);
+      expect(afterDenied.providerResourceID).toBe(providerResourceID);
+      expect(afterDenied.labels).toEqual(readBack.labels);
 
-      await provider.releaseLease(lease);
+      await provider.releaseLease(ownedLease);
       released = true;
       await expect(client.findServer(cloudID)).resolves.toBeUndefined();
       const disks = await (
@@ -102,13 +118,61 @@ live("GCP release ownership live", () => {
       );
       expect(disks.items ?? []).toEqual([]);
       console.log(JSON.stringify({ provider: "gcp", leaseID, denied, released, residue: 0 }));
-    } finally {
-      if (cloudID) {
-        await client.deleteServer(cloudID);
-      }
+    } catch (error) {
+      testFailed = true;
+      testError = error;
     }
+
+    let cleanupFailed = false;
+    let cleanupError: unknown;
+    if (!released && ownedLease) {
+      try {
+        await provider.releaseLease(ownedLease);
+      } catch (error) {
+        cleanupFailed = true;
+        cleanupError = error;
+        console.error(
+          JSON.stringify({
+            provider: "gcp",
+            leaseID,
+            cloudID: ownedLease.cloudID,
+            cleanup: "failed",
+            errorType: errorType(error),
+          }),
+        );
+      }
+    } else if (!released && !ownedLease) {
+      console.error(
+        JSON.stringify({
+          provider: "gcp",
+          leaseID,
+          cloudID: cloudID || undefined,
+          cleanup: "manual-required",
+          reason: "exact provider resource identity unavailable",
+        }),
+      );
+    }
+    if (testFailed && cleanupFailed) {
+      throw new AggregateError(
+        [testError, cleanupError],
+        "GCP release verification failed and exact cleanup also failed",
+      );
+    }
+    if (testFailed) throw testError;
+    if (cleanupFailed) throw cleanupError;
   }, 600_000);
 });
+
+function exactProviderResourceID(value: string | undefined, source: string): string {
+  if (!value || !/^[0-9]+$/.test(value)) {
+    throw new Error(`${source} did not return an exact numeric GCP resource id`);
+  }
+  return value;
+}
+
+function errorType(error: unknown): string {
+  return error instanceof Error ? error.name : typeof error;
+}
 
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();

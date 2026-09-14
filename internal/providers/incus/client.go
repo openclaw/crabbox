@@ -15,14 +15,11 @@ import (
 	incusclient "github.com/lxc/incus/v7/client"
 	"github.com/lxc/incus/v7/shared/api"
 	"github.com/lxc/incus/v7/shared/cliconfig"
+	"github.com/openclaw/crabbox/internal/atomicfile"
 	"github.com/zitadel/oidc/v3/pkg/oidc"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
-
-type Config = core.Config
-type Runtime = core.Runtime
-type Server = core.Server
 
 type instanceClient interface {
 	Identity() (connectionIdentity, error)
@@ -211,7 +208,7 @@ type instanceConnection struct {
 	oidcLock         *flock.Flock
 }
 
-var newClient = func(cfg Config) (instanceClient, error) {
+var newClient = func(cfg core.Config) (instanceClient, error) {
 	connection, err := connectInstanceConnection(cfg)
 	if err != nil {
 		return nil, err
@@ -233,7 +230,7 @@ type doctorConnectionInfo struct {
 	Auth     string
 }
 
-func connectInstanceServer(cfg Config) (incusclient.InstanceServer, error) {
+func connectInstanceServer(cfg core.Config) (incusclient.InstanceServer, error) {
 	connection, err := connectInstanceConnection(cfg)
 	if err != nil {
 		return nil, err
@@ -241,7 +238,7 @@ func connectInstanceServer(cfg Config) (incusclient.InstanceServer, error) {
 	return connection.server, nil
 }
 
-func connectInstanceConnection(cfg Config) (instanceConnection, error) {
+func connectInstanceConnection(cfg core.Config) (instanceConnection, error) {
 	if socket := strings.TrimSpace(cfg.Incus.Socket); socket != "" {
 		server, err := incusclient.ConnectIncusUnix(socket, nil)
 		if err != nil {
@@ -347,7 +344,7 @@ func connectInstanceConnection(cfg Config) (instanceConnection, error) {
 	return connection, nil
 }
 
-func doctorConnectionInfoForConfig(cfg Config) (doctorConnectionInfo, error) {
+func doctorConnectionInfoForConfig(cfg core.Config) (doctorConnectionInfo, error) {
 	info := doctorConnectionInfo{
 		Project: selectedProject(cfg, nil),
 	}
@@ -397,12 +394,12 @@ func doctorConnectionInfoForConfig(cfg Config) (doctorConnectionInfo, error) {
 	return info, nil
 }
 
-func connectionArgsForAddress(cfg Config) (*incusclient.ConnectionArgs, error) {
+func connectionArgsForAddress(cfg core.Config) (*incusclient.ConnectionArgs, error) {
 	args, _, err := connectionArgsForAddressWithTokenPath(cfg)
 	return args, err
 }
 
-func connectionArgsForAddressWithTokenPath(cfg Config) (*incusclient.ConnectionArgs, string, error) {
+func connectionArgsForAddressWithTokenPath(cfg core.Config) (*incusclient.ConnectionArgs, string, error) {
 	args := &incusclient.ConnectionArgs{
 		InsecureSkipVerify: cfg.Incus.InsecureTLS,
 	}
@@ -515,28 +512,7 @@ func writeOIDCTokens(path string, tokens *oidc.Tokens[*oidc.IDTokenClaims]) erro
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
+	return atomicfile.WritePrivate(path, "."+filepath.Base(path)+".tmp-*", data, os.Rename)
 }
 
 func lockOIDCTokens(path string) (*flock.Flock, error) {
@@ -566,7 +542,7 @@ func disableOIDCKeepAlive(clientConfig *cliconfig.Config, remoteName string) {
 	clientConfig.Remotes[remoteName] = remote
 }
 
-func doctorAddressAuth(cfg Config) (string, error) {
+func doctorAddressAuth(cfg core.Config) (string, error) {
 	args, err := connectionArgsForAddress(cfg)
 	if err != nil {
 		return "", err
@@ -657,7 +633,7 @@ func loadOIDCTokens(path string) (*oidc.Tokens[*oidc.IDTokenClaims], error) {
 	return &tokens, nil
 }
 
-func configuredRemoteName(cfg Config, clientConfig *cliconfig.Config) string {
+func configuredRemoteName(cfg core.Config, clientConfig *cliconfig.Config) string {
 	remote := strings.TrimSpace(cfg.Incus.Remote)
 	if remote == "" && clientConfig != nil {
 		remote = strings.TrimSpace(clientConfig.DefaultRemote)
@@ -673,7 +649,7 @@ func configuredRemoteAddr(remote cliconfig.Remote) string {
 	return addr
 }
 
-func selectedProject(cfg Config, remote *cliconfig.Remote) string {
+func selectedProject(cfg core.Config, remote *cliconfig.Remote) string {
 	if project := strings.TrimSpace(cfg.Incus.Project); project != "" {
 		return project
 	}
@@ -704,7 +680,7 @@ func useProject(server incusclient.InstanceServer, project string) incusclient.I
 	return server.UseProject(project)
 }
 
-func imageSourceForConfig(cfg Config) api.InstanceSource {
+func imageSourceForConfig(cfg core.Config) api.InstanceSource {
 	image := strings.TrimSpace(cfg.Incus.Image)
 	server := strings.TrimSpace(cfg.Incus.RemoteImageServer)
 	source := api.InstanceSource{Type: "image"}
@@ -791,7 +767,7 @@ func imageRemoteFromConfig(clientConfig *cliconfig.Config, name string) (string,
 	return addr, protocol, true
 }
 
-func sshHostForConfig(cfg Config) string {
+func sshHostForConfig(cfg core.Config) string {
 	if host := strings.TrimSpace(cfg.Incus.ProxyListenHost); host != "" && !isWildcardHost(host) {
 		return host
 	}

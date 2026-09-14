@@ -4,13 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { writeExecutable } from "./test-support/smoke-fixtures.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
-
-function writeExecutable(file, body) {
-  fs.writeFileSync(file, body, "utf8");
-  fs.chmodSync(file, 0o755);
-}
 
 function runSmoke(env = {}) {
   return spawnSync("bash", ["scripts/deploy-cloudflare-dynamic-workers-smoke.sh"], {

@@ -24,7 +24,7 @@ func (b *isloBackend) Resolve(ctx context.Context, req core.ResolveRequest) (cor
 		return core.LeaseTarget{}, err
 	}
 	if !req.StatusOnly {
-		if err := requireIsloLeaseClaim(leaseID, "SSH reuse"); err != nil {
+		if _, err := requireIsloLeaseClaim(leaseID, "SSH reuse"); err != nil {
 			return core.LeaseTarget{}, err
 		}
 	}
@@ -41,34 +41,30 @@ func (b *isloBackend) Resolve(ctx context.Context, req core.ResolveRequest) (cor
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
-func (b *isloBackend) Touch(_ context.Context, req core.TouchRequest) (Server, error) {
+func (b *isloBackend) Touch(_ context.Context, req core.TouchRequest) (core.Server, error) {
 	server := req.Lease.Server
 	if server.Labels == nil {
 		server.Labels = map[string]string{}
 	}
-	server.Labels["state"] = blank(req.State, blank(server.Labels["state"], server.Status))
+	server.Labels["state"] = core.Blank(req.State, core.Blank(server.Labels["state"], server.Status))
 	return server, nil
 }
 
-// resolveRunningSandbox returns the sandbox once it reports ready, resuming it
-// if Islo has it paused. Every path that resolves a lease before driving it goes
-// through this, so a sync, an exec, or a rendered SSH target is never built
-// against a paused sandbox. The paths that work straight off the lease ID -
-// PublishPeer and fetchRunFileAs - do not resolve and can still act on a paused
-// sandbox; see the opt-in idle pause policy in docs/providers/islo.md.
+// Readiness is shared by explicit SSH resolution and admitted delegated reuse;
+// callers decide admission and retention before requesting a billable resume.
 func (b *isloBackend) resolveRunningSandbox(ctx context.Context, client isloAPI, name string, req core.ResolveRequest) (*gosdk.SandboxResponse, error) {
 	sandbox, err := client.GetSandbox(ctx, name)
 	if err != nil {
 		return nil, isloError("get sandbox", err)
 	}
 	if sandbox == nil {
-		return nil, exit(4, "islo sandbox %s not found", name)
+		return nil, core.Exit(4, "islo sandbox %s not found", name)
 	}
 	if req.StatusOnly || isloStatusReady(sandbox.GetStatus()) {
 		return sandbox, nil
 	}
 	if isloStatusTerminal(sandbox.GetStatus()) {
-		return nil, exit(5, "islo sandbox %s entered terminal state=%s", name, sandbox.GetStatus())
+		return nil, core.Exit(5, "islo sandbox %s entered terminal state=%s", name, sandbox.GetStatus())
 	}
 	if strings.EqualFold(strings.TrimSpace(sandbox.GetStatus()), "paused") {
 		sandbox, err = resumeIsloSandbox(ctx, client, name)
@@ -96,7 +92,7 @@ func waitForIsloSandboxRunning(ctx context.Context, client isloAPI, name string,
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-deadline.C:
-				return exit(5, "timed out waiting for islo sandbox %s to become running", name)
+				return core.Exit(5, "timed out waiting for islo sandbox %s to become running", name)
 			case <-ticker.C:
 				return nil
 			}
@@ -117,13 +113,13 @@ func waitForIsloSandboxRunning(ctx context.Context, client isloAPI, name string,
 				return false, isloError("get sandbox", fetchErr)
 			}
 			if current.sandbox == nil {
-				return false, exit(4, "islo sandbox %s not found", name)
+				return false, core.Exit(4, "islo sandbox %s not found", name)
 			}
 			if isloStatusReady(current.sandbox.GetStatus()) {
 				return true, nil
 			}
 			if isloStatusTerminal(current.sandbox.GetStatus()) {
-				return false, exit(5, "islo sandbox %s entered terminal state=%s", name, current.sandbox.GetStatus())
+				return false, core.Exit(5, "islo sandbox %s entered terminal state=%s", name, current.sandbox.GetStatus())
 			}
 			return false, nil
 		}, nil)
@@ -161,7 +157,7 @@ func isloSSHHost(name string) string {
 	return strings.TrimSpace(name) + "." + isloSSHDomain
 }
 
-func applyIsloSSHLabels(server *Server, leaseID string, cfg Config) {
+func applyIsloSSHLabels(server *core.Server, leaseID string, cfg core.Config) {
 	if server.Labels == nil {
 		server.Labels = map[string]string{}
 	}

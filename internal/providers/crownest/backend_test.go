@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestRunUploadsArchiveStreamsLogsAndCleansUp(t *testing.T) {
@@ -24,16 +26,17 @@ func TestRunUploadsArchiveStreamsLogsAndCleansUp(t *testing.T) {
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt: Runtime{
+		rt: core.Runtime{
 			Stdout: &stdout,
 			Stderr: &stderr,
 		},
-		newClient: func(Config, Runtime) (client, error) { return api, nil },
+		newClient: func(core.Config, core.Runtime) (client, error) { return api, nil },
 	}
 
-	result, err := b.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: repoRoot, Name: "demo"},
-		Command: []string{"pnpm", "test"},
+	result, err := b.Run(context.Background(), core.RunRequest{
+		Repo:               core.Repo{Root: repoRoot, Name: "demo"},
+		Command:            []string{"pnpm", "test", "&&"},
+		CommandLiteralArgs: map[int]bool{2: true},
 	})
 	if err != nil {
 		t.Fatalf("Run err=%v", err)
@@ -64,8 +67,196 @@ func TestRunUploadsArchiveStreamsLogsAndCleansUp(t *testing.T) {
 	if strings.Contains(stderr.String(), "cn_test") {
 		t.Fatalf("stderr leaked secret: %q", stderr.String())
 	}
-	if claim, err := readLeaseClaim(result.LeaseID); err != nil || claim.LeaseID != "" {
+	if claim, err := core.ReadLeaseClaim(result.LeaseID); err != nil || claim.LeaseID != "" {
 		t.Fatalf("claim=%#v err=%v, want one-shot local claim removed without sandbox delete", claim, err)
+	}
+	if result.CommandText != "'pnpm' 'test' '&&'" {
+		t.Fatalf("literal intent lost in final payload: %q", result.CommandText)
+	}
+}
+
+type crownestOutcomeClock struct{ current time.Time }
+
+func (c *crownestOutcomeClock) Now() time.Time        { return c.current }
+func (c *crownestOutcomeClock) Sleep(d time.Duration) { c.current = c.current.Add(d) }
+
+type crownestOutcomeWriter struct {
+	bytes.Buffer
+	report *core.TimingReport
+	err    error
+	onTime func()
+}
+
+func (w *crownestOutcomeWriter) WriteTimingReport(report core.TimingReport) error {
+	if w.onTime != nil {
+		w.onTime()
+	}
+	w.report = &report
+	return w.err
+}
+
+func TestRunFinalizesCrownestOutcomesAfterTerminalActions(t *testing.T) {
+	streamFailure := errors.New("stream disconnected")
+	deleteFailure := errors.New("delete failed")
+	cancelFailure := errors.New("cancel failed")
+	writerFailure := errors.New("timing writer failed")
+	typedCleanupFailure := &apiError{StatusCode: 503, err: core.Exit(5, "typed cleanup provider failure")}
+	for _, tc := range []struct {
+		name        string
+		terminal    string
+		streamErr   error
+		cancelLocal bool
+		cancelErr   error
+		keep        bool
+		keepFailure bool
+		deleteErr   error
+		writerErr   error
+		wantCode    int
+		wantStatus  core.RunStatus
+		wantKind    core.RunErrorKind
+		wantKept    bool
+	}{
+		{name: "one-shot success control", wantStatus: core.RunStatusSucceeded},
+		{name: "kept success control", keep: true, wantKept: true, wantStatus: core.RunStatusSucceeded},
+		{name: "keep-on-failure success deletes once", keepFailure: true, wantStatus: core.RunStatusSucceeded},
+		{name: "cleanup-only failure", keepFailure: true, deleteErr: deleteFailure, wantKept: true, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "cleanup and writer failure", keepFailure: true, deleteErr: deleteFailure, writerErr: writerFailure, wantKept: true, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "typed cleanup failure keeps public code", keepFailure: true, deleteErr: typedCleanupFailure, wantKept: true, wantCode: 5, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "typed cleanup code survives writer failure", keepFailure: true, deleteErr: typedCleanupFailure, writerErr: writerFailure, wantKept: true, wantCode: 5, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "command control", terminal: "command", wantCode: 7, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorCommandExit},
+		{name: "retained command control", terminal: "command", keepFailure: true, wantKept: true, wantCode: 7, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorCommandExit},
+		{name: "command and writer failure", terminal: "command", writerErr: writerFailure, wantCode: 7, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorCommandExit},
+		{name: "platform failure", terminal: "platform", wantCode: 5, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "platform and writer failure", terminal: "platform", writerErr: writerFailure, wantCode: 5, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "missing exit failure", terminal: "missing", wantCode: 5, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "stream failure accepted cancellation", streamErr: streamFailure, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "stream and writer failure", streamErr: streamFailure, writerErr: writerFailure, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "transport deadline preserves cause", streamErr: context.DeadlineExceeded, wantCode: 1, wantStatus: core.RunStatusTimedOut, wantKind: core.RunErrorTimeout},
+		{name: "local cancellation and writer failure", streamErr: context.Canceled, cancelLocal: true, writerErr: writerFailure, wantCode: 1, wantStatus: core.RunStatusCanceled, wantKind: core.RunErrorCanceled},
+		{name: "failed cancellation keeps recovery claim", streamErr: streamFailure, cancelErr: cancelFailure, wantKept: true, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "cancel deadline cannot replace stream failure", streamErr: streamFailure, cancelErr: context.DeadlineExceeded, writerErr: writerFailure, wantKept: true, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "failed cancellation preserves local cancellation", streamErr: context.Canceled, cancelLocal: true, cancelErr: cancelFailure, wantKept: true, wantCode: 1, wantStatus: core.RunStatusCanceled, wantKind: core.RunErrorCanceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			clock := &crownestOutcomeClock{current: time.Unix(1700000000, 0)}
+			api := &fakeCrownestClient{baseURL: "https://api.crownest.dev", createSandboxID: "sbx_123", latestRun: workspaceRun{ID: "wsr_123", Status: "running", SandboxID: "sbx_123"}}
+			deleteCalls, cancelCalls := 0, 0
+			api.deleteHook = func(ctx context.Context) error {
+				deleteCalls++
+				clock.Sleep(3 * time.Second)
+				return tc.deleteErr
+			}
+			api.cancelHook = func(cleanupCtx context.Context) (workspaceRun, error) {
+				cancelCalls++
+				if cleanupCtx.Err() != nil {
+					t.Errorf("cancellation request inherited canceled context: %v", cleanupCtx.Err())
+				}
+				if _, ok := cleanupCtx.Deadline(); !ok {
+					t.Error("cancellation request has no deadline")
+				}
+				claim, err := core.ReadLeaseClaim(leasePrefix + "sbx_123")
+				if err != nil || claim.LeaseID == "" {
+					t.Errorf("claim retired before cancellation attempt: claim=%+v err=%v", claim, err)
+				}
+				clock.Sleep(2 * time.Second)
+				// Accepted cancellation need not be terminal; retain the server-owned contract.
+				return workspaceRun{ID: "wsr_123", Status: "canceling"}, tc.cancelErr
+			}
+			api.stream = func() (io.ReadCloser, error) {
+				if tc.cancelLocal {
+					cancel()
+				}
+				if tc.streamErr != nil {
+					return nil, tc.streamErr
+				}
+				terminal := workspaceRun{ID: "wsr_123", Status: "succeeded", SandboxID: "sbx_123"}
+				code := 0
+				terminal.ExitCode = &code
+				switch tc.terminal {
+				case "command":
+					code, terminal.Status, terminal.FailureReason = 7, "failed", "command_exit"
+				case "platform":
+					terminal.Status, terminal.FailureReason, terminal.FailureClass = "failed", "provisioning", "platform"
+				case "missing":
+					terminal.Status, terminal.FailureReason, terminal.ExitCode = "canceled", "timeout", nil
+				}
+				payload, err := json.Marshal(streamEvent{Type: "terminal", Seq: 1, WorkspaceRun: terminal})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return io.NopCloser(strings.NewReader("data: " + string(payload) + "\n\n")), nil
+			}
+			writer := &crownestOutcomeWriter{err: tc.writerErr}
+			writer.onTime = func() {
+				if tc.streamErr != nil && cancelCalls != 1 {
+					t.Errorf("timing emitted before cancellation: calls=%d", cancelCalls)
+				}
+			}
+			b := &backend{spec: Provider{}.Spec(), cfg: testConfig(), rt: core.Runtime{Stdout: io.Discard, Stderr: writer, Clock: clock}, newClient: func(core.Config, core.Runtime) (client, error) { return api, nil }}
+			result, err := b.Run(ctx, core.RunRequest{Repo: core.Repo{Root: tempGitRepo(t), Name: "demo"}, Command: []string{"true"}, Keep: tc.keep, KeepOnFailure: tc.keepFailure, TimingJSON: true})
+			final := core.FinalizeRunResult(result, err)
+			if final.ExitCode != tc.wantCode || final.Status != tc.wantStatus || final.ErrorKind != tc.wantKind {
+				t.Errorf("outcome=(%d,%s,%s), want (%d,%s,%s); error=%v", final.ExitCode, final.Status, final.ErrorKind, tc.wantCode, tc.wantStatus, tc.wantKind, err)
+			}
+			if tc.wantCode == 0 && err != nil {
+				t.Errorf("success error=%v", err)
+			}
+			if tc.wantCode != 0 {
+				var public core.ExitError
+				if !errors.As(err, &public) || public.Code != tc.wantCode {
+					t.Errorf("public error=%v, want code %d", err, tc.wantCode)
+				}
+				for _, cause := range []error{tc.streamErr, tc.cancelErr, tc.deleteErr, tc.writerErr} {
+					if cause != nil && (!errors.Is(err, cause) || !strings.Contains(public.Message, cause.Error())) {
+						t.Errorf("cause or public diagnostic lost: cause=%v error=%v public=%q", cause, err, public.Message)
+					}
+				}
+			}
+			if result.Session == nil || result.Session.Kept != tc.wantKept {
+				t.Errorf("session=%+v, want kept=%v", result.Session, tc.wantKept)
+			}
+			claim, claimErr := core.ReadLeaseClaim(result.LeaseID)
+			if claimErr != nil || (claim.LeaseID != "") != tc.wantKept {
+				t.Errorf("claim=%+v err=%v, want retained=%v", claim, claimErr, tc.wantKept)
+			}
+			wantDeletes := 0
+			if tc.keepFailure && tc.terminal == "" && tc.streamErr == nil {
+				wantDeletes = 1
+			}
+			if deleteCalls != wantDeletes {
+				t.Errorf("delete calls=%d, want %d", deleteCalls, wantDeletes)
+			}
+			wantTotal := time.Duration(deleteCalls*3+cancelCalls*2) * time.Second
+			if result.Total != wantTotal {
+				t.Errorf("total=%s, want terminal actions included: %s", result.Total, wantTotal)
+			}
+			if writer.report == nil || writer.report.ExitCode != tc.wantCode || writer.report.RunStatus != tc.wantStatus || writer.report.ErrorKind != tc.wantKind || writer.report.TotalMs != wantTotal.Milliseconds() {
+				t.Errorf("timing=%+v, want final (%d,%s,%s) total=%s", writer.report, tc.wantCode, tc.wantStatus, tc.wantKind, wantTotal)
+			}
+		})
+	}
+}
+
+func TestRunPreservesFirstTypedTimingWriterFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeCrownestClient{baseURL: "https://api.crownest.dev"}
+	writerFailure := core.Exit(69, "typed timing writer failure")
+	writer := &crownestOutcomeWriter{err: writerFailure}
+	b := &backend{spec: Provider{}.Spec(), cfg: testConfig(), rt: core.Runtime{Stdout: io.Discard, Stderr: writer}, newClient: func(core.Config, core.Runtime) (client, error) { return api, nil }}
+	result, err := b.Run(context.Background(), core.RunRequest{Repo: core.Repo{Root: tempGitRepo(t), Name: "demo"}, Command: []string{"true"}, TimingJSON: true})
+	var public core.ExitError
+	if !errors.As(err, &public) || public.Code != 69 || !errors.Is(err, writerFailure) {
+		t.Errorf("typed writer failure changed: result=%+v error=%v", result, err)
+	}
+	if result.ExitCode != 69 || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider {
+		t.Errorf("outcome=%+v, want 69/failed/provider-error", result)
+	}
+	// A rejected record cannot be rewritten after the writer returns its error.
+	if writer.report == nil || writer.report.ExitCode != 0 || writer.report.RunStatus != core.RunStatusSucceeded {
+		t.Errorf("attempted timing=%+v, want the completed successful outcome", writer.report)
 	}
 }
 
@@ -80,14 +271,14 @@ func TestRunCleanupCommandIncludesCrownestScopeFlags(t *testing.T) {
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
-		newClient: func(Config, Runtime) (client, error) {
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(core.Config, core.Runtime) (client, error) {
 			return api, nil
 		},
 	}
 
-	result, err := b.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: repoRoot, Name: "demo"},
+	result, err := b.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: repoRoot, Name: "demo"},
 		Command: []string{"pnpm", "test"},
 		Keep:    true,
 	})
@@ -117,14 +308,14 @@ func TestRunMarksSessionKeptWhenRetainedCleanupFails(t *testing.T) {
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  testConfig(),
-		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
-		newClient: func(Config, Runtime) (client, error) {
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(core.Config, core.Runtime) (client, error) {
 			return api, nil
 		},
 	}
 
-	result, err := b.Run(context.Background(), RunRequest{
-		Repo:          Repo{Root: repoRoot, Name: "demo"},
+	result, err := b.Run(context.Background(), core.RunRequest{
+		Repo:          core.Repo{Root: repoRoot, Name: "demo"},
 		Command:       []string{"pnpm", "test"},
 		KeepOnFailure: true,
 	})
@@ -144,18 +335,53 @@ func TestRunRejectsWorkspaceEnvUntilCrownestSupportsIt(t *testing.T) {
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  testConfig(),
-		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
-		newClient: func(Config, Runtime) (client, error) {
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(core.Config, core.Runtime) (client, error) {
 			return &fakeCrownestClient{baseURL: "https://api.crownest.dev"}, nil
 		},
 	}
-	_, err := b.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: tempGitRepo(t), Name: "demo"},
+	_, err := b.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: tempGitRepo(t), Name: "demo"},
 		Command: []string{"printenv", "FOO"},
 		Env:     map[string]string{"FOO": "bar"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "does not support command environment forwarding") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRunDistinguishesFrameworkMetadataFromUnsupportedUserEnv(t *testing.T) {
+	for _, userName := range []string{"", "FOO", "CRABBOX_CUSTOM", "CRABBOX_RUN_ID_EXTRA", "CRABBOX_SLUG_PREFIX", "CRABBOX_LEASE_ID_SUFFIX"} {
+		t.Run(core.Blank(userName, "framework-only"), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			api := &fakeCrownestClient{baseURL: "https://api.crownest.dev"}
+			var stderr bytes.Buffer
+			b := &backend{spec: Provider{}.Spec(), cfg: testConfig(), rt: core.Runtime{Stdout: io.Discard, Stderr: &stderr}, newClient: func(core.Config, core.Runtime) (client, error) { return api, nil }}
+			env := map[string]string{"CRABBOX_LEASE_ID": "framework-lease", "crabbox_run_id": "framework-run", "CrAbBoX_SlUg": "framework-slug", "CROWNEST_API_KEY": "fixture-auth"}
+			if userName != "" {
+				env[userName] = "user-value"
+			}
+			_, err := b.Run(context.Background(), core.RunRequest{Repo: core.Repo{Root: tempGitRepo(t), Name: "demo"}, Command: []string{"true"}, Env: env})
+			if userName != "" {
+				var public core.ExitError
+				if !errors.As(err, &public) || public.Code != 2 || !strings.Contains(err.Error(), "does not support command environment forwarding") || api.created.Command != "" {
+					t.Fatalf("unsupported user env admitted: error=%v request=%+v", err, api.created)
+				}
+				return
+			}
+			if err != nil || !api.started || api.uploadBytes == 0 {
+				t.Fatalf("framework metadata prevented run: error=%v started=%v upload=%d", err, api.started, api.uploadBytes)
+			}
+			payload, err := json.Marshal(api.created)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, value := range env {
+				if bytes.Contains(payload, []byte(value)) || strings.Contains(stderr.String(), value) {
+					t.Fatalf("local framework/auth value forwarded or printed: request=%s stderr=%s", payload, stderr.String())
+				}
+			}
+		})
 	}
 }
 
@@ -165,15 +391,15 @@ func TestRunRejectsSyncOnlyBeforeCreatingWorkspaceRun(t *testing.T) {
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  testConfig(),
-		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
-		newClient: func(Config, Runtime) (client, error) {
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(core.Config, core.Runtime) (client, error) {
 			calledClient = true
 			return &fakeCrownestClient{baseURL: "https://api.crownest.dev"}, nil
 		},
 	}
 
-	_, err := b.Run(context.Background(), RunRequest{
-		Repo:     Repo{Root: tempGitRepo(t), Name: "demo"},
+	_, err := b.Run(context.Background(), core.RunRequest{
+		Repo:     core.Repo{Root: tempGitRepo(t), Name: "demo"},
 		Command:  []string{"echo", "should-not-run"},
 		SyncOnly: true,
 	})
@@ -200,14 +426,14 @@ func TestRunCancelsWorkspaceRunWhenLocalContextIsCanceled(t *testing.T) {
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  testConfig(),
-		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
-		newClient: func(Config, Runtime) (client, error) {
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(core.Config, core.Runtime) (client, error) {
 			return api, nil
 		},
 	}
 
-	_, err := b.Run(ctx, RunRequest{
-		Repo:    Repo{Root: repoRoot, Name: "demo"},
+	_, err := b.Run(ctx, core.RunRequest{
+		Repo:    core.Repo{Root: repoRoot, Name: "demo"},
 		Command: []string{"pnpm", "test"},
 		Keep:    true,
 	})
@@ -233,14 +459,14 @@ func TestRunCancelsWorkspaceRunWhenStreamFailsBeforeTerminal(t *testing.T) {
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  testConfig(),
-		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
-		newClient: func(Config, Runtime) (client, error) {
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(core.Config, core.Runtime) (client, error) {
 			return api, nil
 		},
 	}
 
-	result, err := b.Run(context.Background(), RunRequest{
-		Repo:          Repo{Root: repoRoot, Name: "demo"},
+	result, err := b.Run(context.Background(), core.RunRequest{
+		Repo:          core.Repo{Root: repoRoot, Name: "demo"},
 		Command:       []string{"pnpm", "test"},
 		KeepOnFailure: true,
 	})
@@ -264,20 +490,20 @@ func TestRunReusesClaimWithoutDeletingSandbox(t *testing.T) {
 	cfg := testConfig()
 	api := &fakeCrownestClient{baseURL: "https://api.crownest.dev", startSandboxID: "sbx_reused"}
 	leaseID := leasePrefix + "sbx_reused"
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "kept", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, repoRoot, cfg.IdleTimeout, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "kept", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, repoRoot, cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
-		newClient: func(Config, Runtime) (client, error) {
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(core.Config, core.Runtime) (client, error) {
 			return api, nil
 		},
 	}
 
-	result, err := b.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: repoRoot, Name: "demo"},
+	result, err := b.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: repoRoot, Name: "demo"},
 		ID:      "kept",
 		Command: []string{"pnpm", "test"},
 	})
@@ -301,7 +527,7 @@ func TestRunReuseHonorsOperationLock(t *testing.T) {
 	cfg := testConfig()
 	api := &fakeCrownestClient{baseURL: "https://api.crownest.dev", startSandboxID: "sbx_reused"}
 	leaseID := leasePrefix + "sbx_reused"
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "kept", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, repoRoot, cfg.IdleTimeout, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "kept", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, repoRoot, cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
 	unlock, err := lockCrownestLeaseOperation(context.Background(), leaseID)
@@ -312,16 +538,16 @@ func TestRunReuseHonorsOperationLock(t *testing.T) {
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
-		newClient: func(Config, Runtime) (client, error) {
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(core.Config, core.Runtime) (client, error) {
 			return api, nil
 		},
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	_, err = b.Run(ctx, RunRequest{
-		Repo:    Repo{Root: repoRoot, Name: "demo"},
+	_, err = b.Run(ctx, core.RunRequest{
+		Repo:    core.Repo{Root: repoRoot, Name: "demo"},
 		ID:      "kept",
 		Command: []string{"pnpm", "test"},
 	})
@@ -342,20 +568,20 @@ func TestStatusWaitPollsUntilSandboxReady(t *testing.T) {
 		getSandboxStates: []string{"starting", "running"},
 	}
 	leaseID := leasePrefix + "sbx_123"
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "status-wait", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, repoRoot, cfg.IdleTimeout, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "status-wait", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, repoRoot, cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { removeLeaseClaim(leaseID) })
+	t.Cleanup(func() { core.RemoveLeaseClaim(leaseID) })
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
-		newClient: func(Config, Runtime) (client, error) {
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(core.Config, core.Runtime) (client, error) {
 			return api, nil
 		},
 	}
 
-	view, err := b.Status(context.Background(), StatusRequest{ID: "status-wait", Wait: true, WaitTimeout: time.Second})
+	view, err := b.Status(context.Background(), core.StatusRequest{ID: "status-wait", Wait: true, WaitTimeout: time.Second})
 	if err != nil {
 		t.Fatalf("Status err=%v", err)
 	}
@@ -373,7 +599,7 @@ func TestStopHonorsOperationLock(t *testing.T) {
 	cfg := testConfig()
 	api := &fakeCrownestClient{baseURL: "https://api.crownest.dev"}
 	leaseID := leasePrefix + "sbx_stop_locked"
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "stop-locked", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, repoRoot, cfg.IdleTimeout, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "stop-locked", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, repoRoot, cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
 	unlock, err := lockCrownestLeaseOperation(context.Background(), leaseID)
@@ -384,15 +610,15 @@ func TestStopHonorsOperationLock(t *testing.T) {
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
-		newClient: func(Config, Runtime) (client, error) {
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(core.Config, core.Runtime) (client, error) {
 			return api, nil
 		},
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	err = b.Stop(ctx, StopRequest{ID: "stop-locked"})
+	err = b.Stop(ctx, core.StopRequest{ID: "stop-locked"})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err=%v, want context deadline while waiting for operation lock", err)
 	}
@@ -408,10 +634,10 @@ func TestCleanupSerializesAndRechecksLeaseActivity(t *testing.T) {
 	cfg.IdleTimeout = time.Minute
 	api := &fakeCrownestClient{baseURL: "https://api.crownest.dev"}
 	leaseID := leasePrefix + "sbx_cleanup_locked"
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "cleanup-locked", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, repoRoot, cfg.IdleTimeout, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "cleanup-locked", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, repoRoot, cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,15 +651,15 @@ func TestCleanupSerializesAndRechecksLeaseActivity(t *testing.T) {
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
-		newClient: func(Config, Runtime) (client, error) {
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(core.Config, core.Runtime) (client, error) {
 			return api, nil
 		},
 	}
 
 	cleanupDone := make(chan error, 1)
 	go func() {
-		cleanupDone <- b.Cleanup(context.Background(), CleanupRequest{})
+		cleanupDone <- b.Cleanup(context.Background(), core.CleanupRequest{})
 	}()
 	select {
 	case err := <-cleanupDone:
@@ -477,14 +703,14 @@ func TestRunRemovesOneShotClaimAfterArchiveSetupFailure(t *testing.T) {
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  testConfig(),
-		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
-		newClient: func(Config, Runtime) (client, error) {
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(core.Config, core.Runtime) (client, error) {
 			return api, nil
 		},
 	}
 
-	_, err := b.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: repoRoot, Name: "demo"},
+	_, err := b.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: repoRoot, Name: "demo"},
 		Command: []string{"pnpm", "test"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "transfer failed") {
@@ -494,7 +720,7 @@ func TestRunRemovesOneShotClaimAfterArchiveSetupFailure(t *testing.T) {
 		t.Fatalf("deletedSandboxID=%q, want Crownest-owned one-shot cleanup", api.deletedSandboxID)
 	}
 	leaseID := leasePrefix + "sbx_created"
-	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID != "" {
+	if claim, err := core.ReadLeaseClaim(leaseID); err != nil || claim.LeaseID != "" {
 		t.Fatalf("claim=%#v err=%v, want one-shot setup-failure claim removed", claim, err)
 	}
 }
@@ -510,14 +736,14 @@ func TestRunDeletesPartialCreateSandboxWhenWorkspaceRunIDIsMissing(t *testing.T)
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  testConfig(),
-		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
-		newClient: func(Config, Runtime) (client, error) {
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(core.Config, core.Runtime) (client, error) {
 			return api, nil
 		},
 	}
 
-	_, err := b.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: repoRoot, Name: "demo"},
+	_, err := b.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: repoRoot, Name: "demo"},
 		Command: []string{"pnpm", "test"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "returned no id") {
@@ -527,7 +753,7 @@ func TestRunDeletesPartialCreateSandboxWhenWorkspaceRunIDIsMissing(t *testing.T)
 		t.Fatalf("deletedSandboxID=%q, want partial sandbox cleanup", api.deletedSandboxID)
 	}
 	leaseID := leasePrefix + "sbx_partial"
-	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID != "" {
+	if claim, err := core.ReadLeaseClaim(leaseID); err != nil || claim.LeaseID != "" {
 		t.Fatalf("claim=%#v err=%v, want no partial-create claim", claim, err)
 	}
 }
@@ -544,14 +770,14 @@ func TestRunKeepOnFailureRetainsCreatedSandboxAfterArchiveSetupFailure(t *testin
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  testConfig(),
-		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr},
-		newClient: func(Config, Runtime) (client, error) {
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: &stderr},
+		newClient: func(core.Config, core.Runtime) (client, error) {
 			return api, nil
 		},
 	}
 
-	result, err := b.Run(context.Background(), RunRequest{
-		Repo:          Repo{Root: repoRoot, Name: "demo"},
+	result, err := b.Run(context.Background(), core.RunRequest{
+		Repo:          core.Repo{Root: repoRoot, Name: "demo"},
 		Command:       []string{"pnpm", "test"},
 		KeepOnFailure: true,
 	})
@@ -562,8 +788,8 @@ func TestRunKeepOnFailureRetainsCreatedSandboxAfterArchiveSetupFailure(t *testin
 		t.Fatalf("deletedSandboxID=%q, want retained sandbox", api.deletedSandboxID)
 	}
 	leaseID := leasePrefix + "sbx_kept_setup"
-	t.Cleanup(func() { removeLeaseClaim(leaseID) })
-	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID != leaseID {
+	t.Cleanup(func() { core.RemoveLeaseClaim(leaseID) })
+	if claim, err := core.ReadLeaseClaim(leaseID); err != nil || claim.LeaseID != leaseID {
 		t.Fatalf("claim=%#v err=%v, want retained claim", claim, err)
 	}
 	if result.Session == nil || !result.Session.Kept || result.Session.LeaseID != leaseID {
@@ -583,21 +809,21 @@ func TestRunKeepDeletesCreatedSandboxWhenLocalClaimFails(t *testing.T) {
 		createSandboxID: "sbx_unclaimable",
 	}
 	leaseID := leasePrefix + "sbx_unclaimable"
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "existing", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, filepath.Join(repoRoot, "other"), cfg.IdleTimeout, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "existing", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, filepath.Join(repoRoot, "other"), cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { removeLeaseClaim(leaseID) })
+	t.Cleanup(func() { core.RemoveLeaseClaim(leaseID) })
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
-		newClient: func(Config, Runtime) (client, error) {
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(core.Config, core.Runtime) (client, error) {
 			return api, nil
 		},
 	}
 
-	_, err := b.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: repoRoot, Name: "demo"},
+	_, err := b.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: repoRoot, Name: "demo"},
 		Command: []string{"pnpm", "test"},
 		Keep:    true,
 	})
@@ -626,18 +852,18 @@ func TestRunKeepOnFailureRetainsCreatedSandbox(t *testing.T) {
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  testConfig(),
-		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr},
-		newClient: func(Config, Runtime) (client, error) {
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: &stderr},
+		newClient: func(core.Config, core.Runtime) (client, error) {
 			return api, nil
 		},
 	}
 
-	result, err := b.Run(context.Background(), RunRequest{
-		Repo:          Repo{Root: repoRoot, Name: "demo"},
+	result, err := b.Run(context.Background(), core.RunRequest{
+		Repo:          core.Repo{Root: repoRoot, Name: "demo"},
 		Command:       []string{"false"},
 		KeepOnFailure: true,
 	})
-	var exitErr ExitError
+	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
 		t.Fatalf("err=%v, want exit 7", err)
 	}
@@ -650,7 +876,7 @@ func TestRunKeepOnFailureRetainsCreatedSandbox(t *testing.T) {
 	if result.Session == nil || !result.Session.Kept {
 		t.Fatalf("session=%#v, want kept session after failure", result.Session)
 	}
-	if claim, err := readLeaseClaim(result.LeaseID); err != nil || claim.LeaseID != result.LeaseID {
+	if claim, err := core.ReadLeaseClaim(result.LeaseID); err != nil || claim.LeaseID != result.LeaseID {
 		t.Fatalf("claim=%#v err=%v, want retained claim", claim, err)
 	}
 	if !strings.Contains(stderr.String(), "keep-on-failure") {
@@ -674,14 +900,14 @@ func TestRunReturnsErrorForCanceledTerminalWithoutExitCode(t *testing.T) {
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  testConfig(),
-		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
-		newClient: func(Config, Runtime) (client, error) {
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(core.Config, core.Runtime) (client, error) {
 			return api, nil
 		},
 	}
 
-	result, err := b.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: repoRoot, Name: "demo"},
+	result, err := b.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: repoRoot, Name: "demo"},
 		Command: []string{"pnpm", "test"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "status=canceled") {
@@ -693,7 +919,7 @@ func TestRunReturnsErrorForCanceledTerminalWithoutExitCode(t *testing.T) {
 	if api.deletedSandboxID != "" {
 		t.Fatalf("deletedSandboxID=%q, want Crownest-owned canceled sandbox cleanup", api.deletedSandboxID)
 	}
-	if claim, err := readLeaseClaim(result.LeaseID); err != nil || claim.LeaseID != "" {
+	if claim, err := core.ReadLeaseClaim(result.LeaseID); err != nil || claim.LeaseID != "" {
 		t.Fatalf("claim=%#v err=%v, want one-shot terminal-failure claim removed", claim, err)
 	}
 }
@@ -707,16 +933,16 @@ func TestCreateSandboxCleansUpRemoteWhenLocalClaimFails(t *testing.T) {
 		createSandboxID: "sbx_new",
 	}
 	leaseID := leasePrefix + "sbx_new"
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "existing", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, filepath.Join(repoRoot, "other"), cfg.IdleTimeout, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "existing", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, filepath.Join(repoRoot, "other"), cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
 
-	_, _, _, err := b.createSandbox(context.Background(), api, Repo{Root: repoRoot, Name: "demo"}, false, "")
+	_, _, _, err := b.createSandbox(context.Background(), api, core.Repo{Root: repoRoot, Name: "demo"}, false, "")
 	if err == nil || !strings.Contains(err.Error(), "claimed by repo") {
 		t.Fatalf("err=%v, want claim repo conflict", err)
 	}
@@ -742,6 +968,8 @@ type fakeCrownestClient struct {
 	deletedSandboxID string
 	canceledRunID    string
 	deleteErr        error
+	deleteHook       func(context.Context) error
+	cancelHook       func(context.Context) (workspaceRun, error)
 	transferErr      error
 	stream           func() (io.ReadCloser, error)
 }
@@ -749,7 +977,7 @@ type fakeCrownestClient struct {
 func (f *fakeCrownestClient) BaseURL() string { return f.baseURL }
 
 func (f *fakeCrownestClient) CreateSandbox(context.Context, createSandboxRequest) (sandbox, error) {
-	return sandbox{ID: blank(f.createSandboxID, "sbx_123"), Status: "running"}, nil
+	return sandbox{ID: core.Blank(f.createSandboxID, "sbx_123"), Status: "running"}, nil
 }
 
 func (f *fakeCrownestClient) GetSandbox(context.Context, string) (sandbox, error) {
@@ -764,8 +992,11 @@ func (f *fakeCrownestClient) GetSandbox(context.Context, string) (sandbox, error
 	return sandbox{ID: "sbx_123", Status: "running"}, nil
 }
 
-func (f *fakeCrownestClient) DeleteSandbox(_ context.Context, id string) error {
+func (f *fakeCrownestClient) DeleteSandbox(ctx context.Context, id string) error {
 	f.deletedSandboxID = id
+	if f.deleteHook != nil {
+		return f.deleteHook(ctx)
+	}
 	return f.deleteErr
 }
 
@@ -801,12 +1032,15 @@ func (f *fakeCrownestClient) FinalizeArchive(_ context.Context, _ string, req fi
 
 func (f *fakeCrownestClient) StartWorkspaceRun(context.Context, string, string) (workspaceRun, error) {
 	f.started = true
-	sandboxID := blank(f.startSandboxID, "sbx_123")
+	sandboxID := core.Blank(f.startSandboxID, "sbx_123")
 	return workspaceRun{ID: "wsr_123", Status: "running", SandboxID: sandboxID}, nil
 }
 
-func (f *fakeCrownestClient) CancelWorkspaceRun(_ context.Context, id string, _ string) (workspaceRun, error) {
+func (f *fakeCrownestClient) CancelWorkspaceRun(ctx context.Context, id string, _ string) (workspaceRun, error) {
 	f.canceledRunID = id
+	if f.cancelHook != nil {
+		return f.cancelHook(ctx)
+	}
 	return workspaceRun{ID: "wsr_123", Status: "canceled"}, nil
 }
 
@@ -832,7 +1066,7 @@ func (f *fakeCrownestClient) StreamWorkspaceRunEvents(context.Context, string, i
 
 func (f *fakeCrownestClient) Probe(context.Context) error { return nil }
 
-func writeCrownestClaimFixture(t *testing.T, claim LeaseClaim) {
+func writeCrownestClaimFixture(t *testing.T, claim core.LeaseClaim) {
 	t.Helper()
 	data, err := json.MarshalIndent(claim, "", "  ")
 	if err != nil {

@@ -34,7 +34,7 @@ func TestProviderSpec(t *testing.T) {
 }
 
 func TestApplyDefaultsSelectsNativeWindowsAndSecureWSBDefaults(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	applyDefaults(&cfg)
 	if cfg.Provider != providerName {
 		t.Fatalf("Provider=%q", cfg.Provider)
@@ -99,7 +99,7 @@ func TestWindowsSandboxConfigXML(t *testing.T) {
 func TestSandboxRunScriptQuotesCommandEnvAndKeepOnFailure(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.WindowsSandbox.Workdir = `C:\work\repo`
-	script, err := sandboxRunScript(cfg, RunRequest{
+	script, err := sandboxRunScript(cfg, core.RunRequest{
 		Command:       []string{"pwsh", "-NoProfile", "-Command", "Write-Output 'hi'"},
 		KeepOnFailure: true,
 		Env: map[string]string{
@@ -214,7 +214,7 @@ func TestGeneratedPowerShellScriptsParse(t *testing.T) {
 		t.Skip("powershell.exe not available")
 	}
 	cfg := core.BaseConfig()
-	sandboxScript, err := sandboxRunScript(cfg, RunRequest{Command: []string{"cmd.exe", "/c", "echo ok"}})
+	sandboxScript, err := sandboxRunScript(cfg, core.RunRequest{Command: []string{"cmd.exe", "/c", "echo ok"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +250,7 @@ func TestCleanWindowsSandboxPathUsesWindowsSemantics(t *testing.T) {
 }
 
 func TestRejectWindowsSandboxSyncOnly(t *testing.T) {
-	err := rejectWindowsSandboxRunOptions(Provider{}.Spec(), RunRequest{SyncOnly: true})
+	err := rejectWindowsSandboxRunOptions(Provider{}.Spec(), core.RunRequest{SyncOnly: true})
 	if err == nil || !strings.Contains(err.Error(), "--sync-only") {
 		t.Fatalf("err=%v, want --sync-only rejection", err)
 	}
@@ -265,7 +265,7 @@ func TestCopyManifestRejectsSymlinks(t *testing.T) {
 	if err := os.Symlink("target.txt", filepath.Join(repo, "link.txt")); err != nil {
 		t.Skipf("symlink creation unavailable on this host: %v", err)
 	}
-	err := copyManifest(context.Background(), repo, dst, SyncManifest{Files: []string{"link.txt"}})
+	err := copyManifest(context.Background(), repo, dst, core.SyncManifest{Files: []string{"link.txt"}})
 	if err == nil || !strings.Contains(err.Error(), "does not support syncing symlink") {
 		t.Fatalf("err=%v, want symlink rejection", err)
 	}
@@ -289,7 +289,7 @@ func TestSyncManifestHonorsIncludes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	manifest, err := syncManifest(repo, core.SyncExcludeRules{}, []string{"keep.txt", "nested/"})
+	manifest, err := core.BuildSyncManifestFiltered(repo, core.SyncExcludeRules{}, []string{"keep.txt", "nested/"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +308,7 @@ func TestRunInvokesHostRunnerWithNoSync(t *testing.T) {
 	cfg.WindowsSandbox.TempRoot = t.TempDir()
 	cfg.TTL = 2 * time.Minute
 	be := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
-	result, err := be.(*backend).Run(context.Background(), RunRequest{
+	result, err := be.(*backend).Run(context.Background(), core.RunRequest{
 		NoSync:  true,
 		Command: []string{"cmd.exe", "/c", "echo ok"},
 	})
@@ -350,7 +350,7 @@ func TestRunSignalsCancellationAndWaitsForHostCleanup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := be.(*backend).Run(ctx, RunRequest{
+		_, err := be.(*backend).Run(ctx, core.RunRequest{
 			NoSync:  true,
 			Command: []string{"cmd.exe", "/c", "timeout /t 30"},
 		})
@@ -392,7 +392,7 @@ func TestRunHostRunnerNormalizesCancellationFallbackExitCode(t *testing.T) {
 	cancelPath := filepath.Join(t.TempDir(), "missing", "cancel.txt")
 	done := make(chan localCommandOutcome, 1)
 	go func() {
-		result, err := be.runHostRunner(ctx, LocalCommandRequest{Name: "powershell.exe"}, cancelPath, true)
+		result, err := be.runHostRunner(ctx, core.LocalCommandRequest{Name: "powershell.exe"}, cancelPath, true)
 		done <- localCommandOutcome{result: result, err: err}
 	}()
 	<-runner.started
@@ -411,12 +411,12 @@ func TestRunKeepsWorkspaceOnFailureWithKeepOnFailure(t *testing.T) {
 	windowsSandboxHostOS = "windows"
 	defer func() { windowsSandboxHostOS = oldOS }()
 
-	runner := &recordingRunner{result: LocalCommandResult{ExitCode: 7}, err: errors.New("exit status 7")}
+	runner := &recordingRunner{result: core.LocalCommandResult{ExitCode: 7}, err: errors.New("exit status 7")}
 	cfg := core.BaseConfig()
 	cfg.WindowsSandbox.TempRoot = t.TempDir()
 	var stderr strings.Builder
 	be := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: &stderr, Exec: runner})
-	result, err := be.(*backend).Run(context.Background(), RunRequest{
+	result, err := be.(*backend).Run(context.Background(), core.RunRequest{
 		NoSync:        true,
 		KeepOnFailure: true,
 		Command:       []string{"cmd.exe", "/c", "exit 7"},
@@ -450,11 +450,11 @@ type recordingRunner struct {
 	name                 string
 	args                 []string
 	disableOutputCapture bool
-	result               LocalCommandResult
+	result               core.LocalCommandResult
 	err                  error
 }
 
-func (r *recordingRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *recordingRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	_ = ctx
 	r.name = req.Name
 	r.args = append([]string(nil), req.Args...)
@@ -471,16 +471,16 @@ type cancelOnContextRunner struct {
 	started chan struct{}
 }
 
-func (r *cancelOnContextRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *cancelOnContextRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	_ = req
 	close(r.started)
 	<-ctx.Done()
-	return LocalCommandResult{ExitCode: 1}, ctx.Err()
+	return core.LocalCommandResult{ExitCode: 1}, ctx.Err()
 }
 
-func (r *cancelAwareRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *cancelAwareRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	if req.Name != "powershell.exe" {
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}
 	close(r.started)
 	var controlDir string
@@ -494,11 +494,11 @@ func (r *cancelAwareRunner) Run(ctx context.Context, req LocalCommandRequest) (L
 	for {
 		if _, err := os.Stat(cancelPath); err == nil {
 			close(r.observedCancel)
-			return LocalCommandResult{ExitCode: 130}, errors.New("exit status 130")
+			return core.LocalCommandResult{ExitCode: 130}, errors.New("exit status 130")
 		}
 		select {
 		case <-ctx.Done():
-			return LocalCommandResult{ExitCode: 1}, ctx.Err()
+			return core.LocalCommandResult{ExitCode: 1}, ctx.Err()
 		case <-time.After(10 * time.Millisecond):
 		}
 	}

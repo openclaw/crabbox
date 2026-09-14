@@ -22,9 +22,9 @@ func TestCheckpointSourceAbsenceUsesExactAccountRegionAndID(t *testing.T) {
 		{name: "wrong account", account: "999999999999", failure: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := &fakeAWSClient{accountID: tc.account, getErr: tc.err, get: map[string]Server{"i-fixture": {CloudID: "i-fixture", Status: tc.state}}}
+			fake := &fakeAWSClient{accountID: tc.account, getErr: tc.err, get: map[string]core.Server{"i-fixture": {CloudID: "i-fixture", Status: tc.state}}}
 			old := newAWSClient
-			newAWSClient = func(_ context.Context, cfg Config) (awsClient, error) {
+			newAWSClient = func(_ context.Context, cfg core.Config) (awsClient, error) {
 				if cfg.AWSRegion != "us-east-1" {
 					t.Fatalf("wrong source region: %q", cfg.AWSRegion)
 				}

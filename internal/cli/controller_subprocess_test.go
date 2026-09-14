@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/prefixbuffer"
 )
 
 func controllerSubprocessTestTimeout(base time.Duration) time.Duration {
@@ -49,6 +51,39 @@ func (b *confirmedAbsentCleanupTestBackend) CleanupConfirmedAbsentLocalState(_ c
 
 func (r *fixedIdentityExecControllerRunner) ProviderIdentity(context.Context) (controllerProviderIdentity, error) {
 	return controllerProviderIdentity{Route: "external", Scope: "test-provider-scope", IdempotentFixedLeaseID: true}, nil
+}
+
+func TestFreestyleConfigLoadersAgree(t *testing.T) {
+	clearConfigEnv(t)
+	home, repo := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_FREESTYLE_MEMORY_GB", "16")
+	t.Chdir(repo)
+	userPath := userConfigPath()
+	if err := os.MkdirAll(filepath.Dir(userPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userPath, []byte("freestyle:\n  apiUrl: https://user.example.test\n  workdir: user-workdir\n  vcpus: 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "crabbox.yaml"), []byte("freestyle:\n  apiUrl: https://repo.example.test\n  workdir: repo-workdir\n  vcpus: 4\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := FreestyleConfig{APIURL: "https://user.example.test", Workdir: "repo-workdir", VCPUs: 4, MemoryGB: 16}
+	for _, load := range []func() (Config, error){
+		func() (Config, error) { return loadConfigWithOverrides("", "xcp-ng") },
+		func() (Config, error) { return loadControllerRunnerConfigState("", "xcp-ng", repo) },
+	} {
+		cfg, err := load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Freestyle != want {
+			t.Fatalf("Freestyle configuration = %#v, want %#v", cfg.Freestyle, want)
+		}
+	}
 }
 
 func TestControllerWarmupArgsUseFixedRoutingAndCapabilities(t *testing.T) {
@@ -819,7 +854,7 @@ func TestControllerTrackedChildTerminatesDescendantsAfterDirectChildExit(t *test
 	if err != nil || pid <= 0 {
 		t.Fatalf("descendant pid=%q err=%v", data, err)
 	}
-	if command, alive := webVNCDaemonProcessCommand(pid); alive && !strings.Contains(strings.ToLower(command), "<defunct>") {
+	if command, alive := LocalProcessCommand(pid); alive && !strings.Contains(strings.ToLower(command), "<defunct>") {
 		t.Fatalf("detached lifecycle descendant survived successful wrapper exit pid=%d command=%q", pid, command)
 	}
 }
@@ -864,7 +899,7 @@ func TestControllerTrackedChildTerminatesDescendantsOnCancellation(t *testing.T)
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("run error=%v", err)
 	}
-	if command, alive := webVNCDaemonProcessCommand(pid); alive && !strings.Contains(strings.ToLower(command), "<defunct>") {
+	if command, alive := LocalProcessCommand(pid); alive && !strings.Contains(strings.ToLower(command), "<defunct>") {
 		t.Fatalf("lifecycle descendant survived cancellation pid=%d command=%q", pid, command)
 	}
 }
@@ -891,7 +926,7 @@ func TestControllerStartupTerminatesTrackedLifecycleChild(t *testing.T) {
 			_ = child.Wait()
 		}
 	})
-	started, err := webVNCDaemonProcessStartIdentity(child.Process.Pid)
+	started, err := LocalProcessStartIdentity(child.Process.Pid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -974,7 +1009,7 @@ func TestControllerTrackedChildDiesWithControllerProcess(t *testing.T) {
 	if childPID <= 0 {
 		t.Fatal("tracked lifecycle child did not start")
 	}
-	started, err := webVNCDaemonProcessStartIdentity(childPID)
+	started, err := LocalProcessStartIdentity(childPID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -985,8 +1020,8 @@ func TestControllerTrackedChildDiesWithControllerProcess(t *testing.T) {
 	helperDone = true
 	deadline = time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		current, currentErr := webVNCDaemonProcessStartIdentity(childPID)
-		command, alive := webVNCDaemonProcessCommand(childPID)
+		current, currentErr := LocalProcessStartIdentity(childPID)
+		command, alive := LocalProcessCommand(childPID)
 		if currentErr != nil || current != started || !alive || strings.Contains(strings.ToLower(command), "<defunct>") {
 			return
 		}
@@ -1149,7 +1184,7 @@ func TestControllerLifecycleCommandsUsePersistedExternalRoutingWithoutClaim(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+	if _, exists, err := ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
 		t.Fatalf("claim exists=%t err=%v", exists, err)
 	}
 	calls := filepath.Join(root, "calls")
@@ -1279,7 +1314,7 @@ func TestConfirmedAbsentLocalCleanupRemovesOnlyFullyMatchingClaim(t *testing.T) 
 	leaseID := "cbx_abc123abc123"
 	scope := "scope-a"
 	server := Server{Provider: "external", CloudID: "provider/resource", Labels: map[string]string{"provider": "external", "slug": "fast-coral"}}
-	if err := claimLeaseForRepoProviderScopePondEndpoint(leaseID, "fast-coral", "external", scope, "", "/repo", time.Minute, false, server, SSHTarget{}); err != nil {
+	if err := ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "fast-coral", "external", scope, "", "/repo", time.Minute, false, server, SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
 	backend := &confirmedAbsentCleanupTestBackend{}
@@ -1292,7 +1327,7 @@ func TestConfirmedAbsentLocalCleanupRemovesOnlyFullyMatchingClaim(t *testing.T) 
 	if backend.cleanupCalls != 1 {
 		t.Fatalf("sidecar cleanup calls=%d", backend.cleanupCalls)
 	}
-	if claim, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists || claim.LeaseID != "" {
+	if claim, exists, err := ReadLeaseClaimWithPresence(leaseID); err != nil || exists || claim.LeaseID != "" {
 		t.Fatalf("claim=%#v exists=%t err=%v", claim, exists, err)
 	}
 }
@@ -1301,7 +1336,7 @@ func TestConfirmedAbsentLocalCleanupFailsClosedForFixedAWSMarker(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const leaseID = "cbx_abcdef123465"
 	const scope = "account:123456789012"
-	err := withDurableLeaseClaimLock(leaseID, func(claim *leaseClaim, _ bool, persist func() error) error {
+	err := WithDurableLeaseClaimLock(leaseID, func(claim *leaseClaim, _ bool, persist func() error) error {
 		claim.LeaseID = leaseID
 		claim.Slug = "fixed-confirmed-absent"
 		claim.Provider = FixedAWSClaimProvider
@@ -1326,7 +1361,7 @@ func TestConfirmedAbsentLocalCleanupFailsClosedForFixedAWSMarker(t *testing.T) {
 	if backend.cleanupCalls != 0 {
 		t.Fatalf("confirmed-absence sidecar cleanup calls=%d, want 0", backend.cleanupCalls)
 	}
-	if claim, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || !exists || claim.Provider != FixedAWSClaimProvider {
+	if claim, exists, readErr := ReadLeaseClaimWithPresence(leaseID); readErr != nil || !exists || claim.Provider != FixedAWSClaimProvider {
 		t.Fatalf("fixed claim was removed: claim=%#v exists=%t err=%v", claim, exists, readErr)
 	}
 }
@@ -1346,7 +1381,7 @@ func TestConfirmedAbsentLocalCleanupPreservesClaimOnIdentityOrSidecarFailure(t *
 			leaseID := "cbx_abc123abc123"
 			scope := "scope-a"
 			server := Server{Provider: "external", CloudID: "provider/resource", Labels: map[string]string{"provider": "external", "slug": "fast-coral"}}
-			if err := claimLeaseForRepoProviderScopePondEndpoint(leaseID, "fast-coral", "external", scope, "", "/repo", time.Minute, false, server, SSHTarget{}); err != nil {
+			if err := ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "fast-coral", "external", scope, "", "/repo", time.Minute, false, server, SSHTarget{}); err != nil {
 				t.Fatal(err)
 			}
 			backend := &confirmedAbsentCleanupTestBackend{cleanupErr: test.cleanupErr}
@@ -1359,7 +1394,7 @@ func TestConfirmedAbsentLocalCleanupPreservesClaimOnIdentityOrSidecarFailure(t *
 			if backend.cleanupCalls != test.wantCleanup {
 				t.Fatalf("sidecar cleanup calls=%d want=%d", backend.cleanupCalls, test.wantCleanup)
 			}
-			if claim, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || !exists || claim.LeaseID != leaseID {
+			if claim, exists, readErr := ReadLeaseClaimWithPresence(leaseID); readErr != nil || !exists || claim.LeaseID != leaseID {
 				t.Fatalf("claim=%#v exists=%t err=%v", claim, exists, readErr)
 			}
 		})
@@ -1378,7 +1413,7 @@ func TestStopConfirmedAbsentLocalCleanupSkipsProviderReleasePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := Server{Provider: "external", CloudID: resourceID, Labels: map[string]string{"provider": "external", "slug": slug}}
-	if err := claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, "external", scope, "", "/repo", time.Minute, false, server, SSHTarget{}); err != nil {
+	if err := ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, "external", scope, "", "/repo", time.Minute, false, server, SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
 	app := App{Stdout: io.Discard, Stderr: io.Discard}
@@ -1394,7 +1429,7 @@ func TestStopConfirmedAbsentLocalCleanupSkipsProviderReleasePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if claim, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists || claim.LeaseID != "" {
+	if claim, exists, err := ReadLeaseClaimWithPresence(leaseID); err != nil || exists || claim.LeaseID != "" {
 		t.Fatalf("claim=%#v exists=%t err=%v", claim, exists, err)
 	}
 }
@@ -1418,7 +1453,7 @@ func TestStopConfirmedAbsentLocalCleanupRejectsCoordinatorBindingDriftBeforeMuta
 		t.Fatal(err)
 	}
 	server := Server{Provider: "external", CloudID: resourceID, Labels: map[string]string{"provider": "external", "slug": slug}}
-	if err := claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, "external", scope, "", "/repo", time.Minute, false, server, SSHTarget{}); err != nil {
+	if err := ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, "external", scope, "", "/repo", time.Minute, false, server, SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
 	app := App{Stdout: io.Discard, Stderr: io.Discard}
@@ -1434,7 +1469,7 @@ func TestStopConfirmedAbsentLocalCleanupRejectsCoordinatorBindingDriftBeforeMuta
 	if err == nil || !strings.Contains(err.Error(), "coordinator registration binding changed") {
 		t.Fatalf("binding drift error=%v", err)
 	}
-	if _, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || !exists {
+	if _, exists, readErr := ReadLeaseClaimWithPresence(leaseID); readErr != nil || !exists {
 		t.Fatalf("claim exists=%t err=%v", exists, readErr)
 	}
 	if _, statErr := os.Stat(routingPath); statErr != nil {
@@ -1490,7 +1525,7 @@ func TestStopConfirmedAbsentDeregistrationFailureRetainsRouteForRetry(t *testing
 		t.Fatal(err)
 	}
 	serverIdentity := Server{Provider: "external", CloudID: resourceID, Labels: map[string]string{"provider": "external", "slug": slug}}
-	if err := claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, "external", scope, "", "/repo", time.Minute, false, serverIdentity, SSHTarget{}); err != nil {
+	if err := ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, "external", scope, "", "/repo", time.Minute, false, serverIdentity, SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
 	args := []string{
@@ -1506,7 +1541,7 @@ func TestStopConfirmedAbsentDeregistrationFailureRetainsRouteForRetry(t *testing
 	if err := app.stop(context.Background(), args); err == nil || !strings.Contains(err.Error(), "deregister coordinator lease") {
 		t.Fatalf("deregistration error=%v", err)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || !exists {
+	if _, exists, err := ReadLeaseClaimWithPresence(leaseID); err != nil || !exists {
 		t.Fatalf("claim exists=%t err=%v", exists, err)
 	}
 	if _, err := os.Stat(routingPath); err != nil {
@@ -1520,7 +1555,7 @@ func TestStopConfirmedAbsentDeregistrationFailureRetainsRouteForRetry(t *testing
 	if err := app.stop(context.Background(), args); err != nil {
 		t.Fatalf("retry after provider config drift: %v", err)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+	if _, exists, err := ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
 		t.Fatalf("claim exists after retry=%t err=%v", exists, err)
 	}
 	if _, err := os.Stat(routingPath); !errors.Is(err, os.ErrNotExist) {
@@ -1668,7 +1703,7 @@ func TestControllerAbsenceIdentitySetUsesEveryPersistedIdentity(t *testing.T) {
 			t.Fatalf("lease identities=%q missing %q", identities.LeaseIDs, want)
 		}
 	}
-	for _, want := range []string{"target-slug", leaseProviderName("cbx_target", "target-slug"), leaseProviderName("cbx_attempt", "target-slug")} {
+	for _, want := range []string{"target-slug", LeaseProviderName("cbx_target", "target-slug"), LeaseProviderName("cbx_attempt", "target-slug")} {
 		if !slices.Contains(identities.Names, want) {
 			t.Fatalf("name identities=%q missing %q", identities.Names, want)
 		}
@@ -1678,16 +1713,18 @@ func TestControllerAbsenceIdentitySetUsesEveryPersistedIdentity(t *testing.T) {
 	}
 }
 
-func TestControllerLimitedBufferReportsOverflow(t *testing.T) {
-	var output controllerLimitedBuffer
-	output.limit = 4
-	if n, err := output.Write([]byte("12345")); err != nil || n != 5 {
-		t.Fatalf("write bytes=%d err=%v", n, err)
+func TestControllerOutputReportsOverflow(t *testing.T) {
+	output := prefixbuffer.NewLimited(4)
+	if err := controllerOutputOverflowError(output.Exceeded(), "controller provider inventory", 4); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := io.Copy(&output, struct{ io.Reader }{strings.NewReader("12345")}); err != nil || n != 5 {
+		t.Fatalf("copied bytes=%d err=%v", n, err)
 	}
 	if got := output.String(); got != "1234" {
 		t.Fatalf("retained output=%q", got)
 	}
-	if err := output.overflowError("controller provider inventory"); err == nil || !strings.Contains(err.Error(), "exceeded 4-byte output limit") {
+	if err := controllerOutputOverflowError(output.Exceeded(), "controller provider inventory", 4); err == nil || err.Error() != "controller provider inventory exceeded 4-byte output limit" {
 		t.Fatalf("overflow error=%v", err)
 	}
 }

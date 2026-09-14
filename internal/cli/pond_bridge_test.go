@@ -115,7 +115,7 @@ func withTempClaims(t *testing.T, claims []leaseClaim) {
 	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "")
 	t.Setenv("CRABBOX_PROVIDER", "")
 	for _, claim := range claims {
-		if err := claimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, claim.Provider, claim.ProviderScope, claim.Pond, claim.RepoRoot, 30*time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, claim.Provider, claim.ProviderScope, claim.Pond, claim.RepoRoot, 30*time.Minute, false); err != nil {
 			t.Fatalf("seed claim %s: %v", claim.LeaseID, err)
 		}
 	}
@@ -690,7 +690,7 @@ func TestFinalizePondReleaseClaimUsesProviderPolicy(t *testing.T) {
 			if got != tc.retain {
 				t.Fatalf("retained=%v want %v", got, tc.retain)
 			}
-			claims, err := listLeaseClaims()
+			claims, err := ListLeaseClaims()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -716,7 +716,7 @@ func TestFinalizePondReleaseClaimPreservesClaimOnRetentionError(t *testing.T) {
 	if retained || !errors.Is(err, want) {
 		t.Fatalf("retained=%t err=%v", retained, err)
 	}
-	claims, listErr := listLeaseClaims()
+	claims, listErr := ListLeaseClaims()
 	if listErr != nil {
 		t.Fatal(listErr)
 	}
@@ -981,86 +981,6 @@ func TestPondPeersHandlesBlacksmithAsNone(t *testing.T) {
 	}
 }
 
-// TestDoctorPondReachabilityMatrixAsymmetric pins the asymmetry that
-// `crabbox doctor --pond` reports between the transport planes. The
-// matrix must not pretend `url -> tailnet` is reachable, and it must
-// flag `* -> ssh` and `ssh -> *` as warnings (operator-side bridge
-// required) rather than ok.
-func TestDoctorPondReachabilityMatrixAsymmetric(t *testing.T) {
-	peers := []BridgePeer{
-		{Slug: "web", Provider: "hetzner", Transport: TransportTailnet, Endpoint: "100.64.1.3"},
-		{Slug: "api", Provider: "islo", Transport: TransportURL, Endpoint: "https://api.share.islo.dev"},
-		{Slug: "db", Provider: "runpod", Transport: TransportSSH, Endpoint: "ssh://1.2.3.4:22"},
-		{Slug: "what", Provider: "blacksmith", Transport: TransportNone, Note: "blacksmith owns connectivity"},
-	}
-	matrix := buildPondReachabilityMatrix("alpha", peers)
-	if got, want := len(matrix.Transports), 4; got != want {
-		t.Fatalf("transports=%d want %d (%v)", got, want, matrix.Transports)
-	}
-	cellState := func(from, to string) string {
-		for _, cell := range matrix.Cells {
-			if cell.From == from && cell.To == to {
-				return cell.State
-			}
-		}
-		t.Fatalf("cell %s -> %s missing", from, to)
-		return ""
-	}
-	if got := cellState(TransportURL, TransportTailnet); got != reachNo {
-		t.Fatalf("url -> tailnet should be NO (no public endpoint on tailnet), got %q", got)
-	}
-	if got := cellState(TransportTailnet, TransportURL); got != reachOK {
-		t.Fatalf("tailnet -> url should be OK (outbound HTTPS), got %q", got)
-	}
-	if got := cellState(TransportTailnet, TransportSSH); got != reachWarn {
-		t.Fatalf("tailnet -> ssh should be WARN (operator-side bridge), got %q", got)
-	}
-	if got := cellState(TransportSSH, TransportSSH); got != reachWarn {
-		t.Fatalf("ssh -> ssh should be WARN (no shared mesh), got %q", got)
-	}
-	if got := cellState(TransportSSH, TransportURL); got != reachOK {
-		t.Fatalf("ssh -> url should be OK (outbound HTTPS), got %q", got)
-	}
-	if got := cellState(TransportNone, TransportTailnet); got != reachNo {
-		t.Fatalf("none -> tailnet should be NO (provider owns its own connectivity), got %q", got)
-	}
-	for _, want := range []string{TransportTailnet, TransportURL, TransportSSH, TransportNone} {
-		found := false
-		for _, got := range matrix.Transports {
-			if got == want {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Fatalf("matrix transports missing %q (have %v)", want, matrix.Transports)
-		}
-	}
-	if matrix.Breakdown[TransportTailnet] != 1 || matrix.Breakdown[TransportURL] != 1 || matrix.Breakdown[TransportSSH] != 1 || matrix.Breakdown[TransportNone] != 1 {
-		t.Fatalf("unexpected breakdown: %#v", matrix.Breakdown)
-	}
-}
-
-// TestRenderPondReachabilityMatrixIncludesAsymmetricNotes checks the
-// human renderer surfaces the per-cell notes verbatim so reviewers can
-// audit the claims without parsing JSON.
-func TestRenderPondReachabilityMatrixIncludesAsymmetricNotes(t *testing.T) {
-	peers := []BridgePeer{
-		{Slug: "web", Provider: "hetzner", Transport: TransportTailnet, Endpoint: "100.64.1.3"},
-		{Slug: "api", Provider: "islo", Transport: TransportURL, Endpoint: "https://x"},
-	}
-	matrix := buildPondReachabilityMatrix("alpha", peers)
-	var buf strings.Builder
-	renderPondReachabilityMatrix(&buf, matrix)
-	out := buf.String()
-	if !strings.Contains(out, "tailnet -> url") {
-		t.Fatalf("renderer should label rows by transport pair, got:\n%s", out)
-	}
-	if !strings.Contains(out, "no public endpoint on tailnet members") {
-		t.Fatalf("renderer should surface the url -> tailnet asymmetry note, got:\n%s", out)
-	}
-}
-
 // mutateClaim is a helper for tests that need to overlay endpoint
 // metadata onto a seeded lease claim. It re-reads the claim sidecar
 // produced by withTempClaims, applies the mutation, and writes it back
@@ -1068,7 +988,7 @@ func TestRenderPondReachabilityMatrixIncludesAsymmetricNotes(t *testing.T) {
 // changes stay covered by the on-disk format.
 func mutateClaim(t *testing.T, leaseID string, fn func(*leaseClaim)) {
 	t.Helper()
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatalf("readLeaseClaim %s: %v", leaseID, err)
 	}

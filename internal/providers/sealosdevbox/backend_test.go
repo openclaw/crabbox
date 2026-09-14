@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -16,6 +19,70 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 	"gopkg.in/yaml.v3"
 )
+
+func TestDoctorResultStatusSummary(t *testing.T) {
+	const readySummary = "automation_surface=crd_first control_plane=ready mutation=false"
+	const blockedSummary = "automation_surface=crd_first control_plane=blocked mutation=false"
+	tests := []struct {
+		name        string
+		checks      []core.DoctorCheck
+		wantStatus  string
+		wantSummary string
+	}{
+		{name: "nil checks", wantStatus: "ready", wantSummary: readySummary},
+		{name: "empty checks", checks: []core.DoctorCheck{}, wantStatus: "ready", wantSummary: readySummary},
+		{name: "ok", checks: []core.DoctorCheck{{Status: "ok"}}, wantStatus: "ready", wantSummary: readySummary},
+		{name: "nonfailure statuses", checks: []core.DoctorCheck{{}, {Status: " \t"}, {Status: "skip"}, {Status: "unknown"}, {Status: "blocked"}}, wantStatus: "ready", wantSummary: readySummary},
+		{name: "failed", checks: []core.DoctorCheck{{Status: "failed"}}, wantStatus: "blocked", wantSummary: blockedSummary},
+		{name: "literal missing", checks: []core.DoctorCheck{{Status: "missing"}}, wantStatus: "blocked", wantSummary: blockedSummary},
+		{name: "mixed case failed", checks: []core.DoctorCheck{{Status: "FaIlEd"}}, wantStatus: "blocked", wantSummary: blockedSummary},
+		{name: "mixed case missing", checks: []core.DoctorCheck{{Status: "MiSsInG"}}, wantStatus: "blocked", wantSummary: blockedSummary},
+		{name: "normalized failed", checks: []core.DoctorCheck{{Status: "\tFaIlEd\n"}}, wantStatus: "blocked", wantSummary: blockedSummary},
+		{name: "normalized missing", checks: []core.DoctorCheck{{Status: " MiSsInG "}}, wantStatus: "blocked", wantSummary: blockedSummary},
+		{
+			name: "warnings remain advisory and preserve raw checks",
+			checks: []core.DoctorCheck{
+				{Status: "warning", Check: "network", Message: "advisory", Details: map[string]string{"mutation": "false"}},
+				{Status: " WaRnInG ", Check: " inventory ", Message: " advisory\n", Details: map[string]string{"note": " raw value "}},
+				{Status: "", Check: "empty details", Details: map[string]string{}},
+				{Status: " SkIp ", Check: "nil details"},
+			},
+			wantStatus:  "ready",
+			wantSummary: readySummary,
+		},
+		{
+			name: "failure after warning preserves raw checks",
+			checks: []core.DoctorCheck{
+				{Status: " WaRnInG ", Check: " network ", Message: " advisory\n", Details: map[string]string{"note": " retain me "}},
+				{Status: " MiSsInG ", Check: " config ", Message: " unavailable\n", Details: map[string]string{"mutation": "false"}},
+			},
+			wantStatus:  "blocked",
+			wantSummary: blockedSummary,
+		},
+		{name: "warning after failure", checks: []core.DoctorCheck{{Status: " FaIlEd "}, {Status: "warning"}}, wantStatus: "blocked", wantSummary: blockedSummary},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := slices.Clone(tt.checks)
+			for i := range before {
+				before[i].Details = maps.Clone(tt.checks[i].Details)
+			}
+			got := doctorResult(tt.checks)
+			if got.Provider != "sealos-devbox" || got.Status != tt.wantStatus || got.Message != tt.wantSummary {
+				t.Errorf("doctorResult() = %#v, want provider=sealos-devbox status=%q message=%q", got, tt.wantStatus, tt.wantSummary)
+			}
+			if !reflect.DeepEqual(tt.checks, before) {
+				t.Errorf("input checks changed: got %#v, want %#v", tt.checks, before)
+			}
+			if !reflect.DeepEqual(got.Checks, before) {
+				t.Errorf("result checks changed: got %#v, want %#v", got.Checks, before)
+			}
+			if len(tt.checks) > 0 && (len(got.Checks) == 0 || &got.Checks[0] != &tt.checks[0]) {
+				t.Error("result does not retain the input checks slice")
+			}
+		})
+	}
+}
 
 type fixedClock struct{ t time.Time }
 
@@ -558,7 +625,9 @@ func TestAcquireOnAcquiredErrorRollsBackBeforeLocalState(t *testing.T) {
 				t.Fatalf("claim exists during OnAcquired=%v err=%v", exists, err)
 			}
 			target := core.SSHTarget{}
-			core.UseStoredTestboxKey(&target, leaseID)
+			if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
+				t.Fatal(err)
+			}
 			if target.Key != "" {
 				t.Fatalf("stored key exists during OnAcquired: %s", target.Key)
 			}
@@ -673,7 +742,9 @@ func TestAcquireRollsBackUnkeptDevboxAfterSSHReadinessFailure(t *testing.T) {
 		t.Fatalf("claim exists=%v err=%v after rollback", exists, err)
 	}
 	target := core.SSHTarget{}
-	core.UseStoredTestboxKey(&target, leaseID)
+	if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
+		t.Fatal(err)
+	}
 	if target.Key != "" {
 		t.Fatalf("stored key still exists after rollback: %s", target.Key)
 	}
@@ -822,7 +893,9 @@ func TestResolveReadOnlyDoesNotPersistSecretKey(t *testing.T) {
 		t.Fatalf("read-only resolve fetched Secret: %s", got)
 	}
 	target := core.SSHTarget{}
-	core.UseStoredTestboxKey(&target, leaseID)
+	if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
+		t.Fatal(err)
+	}
 	if target.Key != "" {
 		t.Fatalf("read-only resolve persisted key: %s", target.Key)
 	}
@@ -905,7 +978,9 @@ func TestResolveChecksRepoClaimBeforeResumeOrSecretRead(t *testing.T) {
 		t.Fatalf("claim rejection mutated resource or read Secret: %s", commands)
 	}
 	target := core.SSHTarget{}
-	core.UseStoredTestboxKey(&target, leaseID)
+	if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
+		t.Fatal(err)
+	}
 	if target.Key != "" {
 		t.Fatalf("claim rejection persisted SSH key: %s", target.Key)
 	}
@@ -1068,7 +1143,9 @@ func TestResolveRejectsSecretOwnedByAnotherDevbox(t *testing.T) {
 		t.Fatalf("Resolve error=%v", err)
 	}
 	target := core.SSHTarget{}
-	core.UseStoredTestboxKey(&target, leaseID)
+	if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
+		t.Fatal(err)
+	}
 	if target.Key != "" {
 		t.Fatalf("unowned Secret key persisted: %s", target.Key)
 	}

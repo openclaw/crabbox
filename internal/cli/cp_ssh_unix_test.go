@@ -63,6 +63,30 @@ func TestResolvedSSHRemoteSecludedArgsProbeHonorsCancellation(t *testing.T) {
 	assertDescendantReaped(t, "probe", childPID)
 }
 
+func TestResolvedSSHCopyHelpersApplyTargetEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	script := `#!/bin/sh
+test "$CRABBOX_TEST_COPY_OVERRIDE" = target-value && test -z "$CRABBOX_TEST_COPY_DENIED"
+`
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_TEST_COPY_OVERRIDE", "ambient-value")
+	t.Setenv("CRABBOX_TEST_COPY_DENIED", "ambient-denied")
+	target := SSHTarget{
+		ChildEnv:         map[string]string{"CRABBOX_TEST_COPY_OVERRIDE": "target-value"},
+		ChildEnvDenylist: []string{"CRABBOX_TEST_COPY_DENIED"},
+	}
+	session := &sshTransportSession{configPath: filepath.Join(dir, "config")}
+	if err := probeResolvedSSHRemoteSecludedArgs(t.Context(), session, target, ""); err != nil {
+		t.Errorf("capability probe lost target environment: %v", err)
+	}
+	if err := runResolvedSSHArchiveCommand(t.Context(), session, target, "true", nil, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Errorf("archive command lost target environment: %v", err)
+	}
+}
+
 func TestOwnedSSHTransportCommandReapsDescendants(t *testing.T) {
 	dir := t.TempDir()
 	sshPath := filepath.Join(dir, "ssh")

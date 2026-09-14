@@ -4,10 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1265,20 +1271,155 @@ func proxmoxChecksByName(checks []ProxmoxReadinessCheck) map[string]ProxmoxReadi
 	return byName
 }
 
+// The owned child consumes the bootstrap script without executing it. Only the
+// SSH readiness probe is stubbed; input delivery and native process exit are real.
+func installProxmoxBootstrapChild(t *testing.T, output string, code int) (Config, string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("synthetic SSH child uses a POSIX shell")
+	}
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "bootstrap-input")
+	script := "#!/bin/sh\ncat > " + shellQuote(inputPath) + "\n" + output + "\nexit " + fmt.Sprint(code) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	original := proxmoxRunSSHQuietWithOptions
+	proxmoxRunSSHQuietWithOptions = func(context.Context, SSHTarget, string, string, string) error { return nil }
+	t.Cleanup(func() { proxmoxRunSSHQuietWithOptions = original })
+	cfg := baseConfig()
+	cfg.SSHUser = "fixture-user"
+	cfg.SSHPort = "22"
+	cfg.SSHKey = filepath.Join(dir, "unused-key")
+	cfg.SSHFallbackPorts = []string{}
+	return cfg, inputPath
+}
+
+func TestProxmoxBootstrapNativeDiagnostics(t *testing.T) {
+	for _, tc := range []struct {
+		name, output string
+		code         int
+		want         []string
+		absent       []string
+	}{
+		{name: "quiet_success", output: "printf 'success-output\\n'; printf 'success-stderr\\n' >&2", code: 0},
+		{name: "stderr", output: "printf 'fixture-bootstrap-apt-failed\\n' >&2", code: 1, want: []string{"proxmox guest bootstrap", "exit=1", "fixture-bootstrap-apt-failed"}},
+		{name: "stdout", output: "printf 'fixture-bootstrap-stdout\\n'", code: 7, want: []string{"exit=7", "fixture-bootstrap-stdout"}},
+		{name: "transport_exit", output: "printf 'fixture-ssh-disconnected\\n' >&2", code: 255, want: []string{"exit=255", "fixture-ssh-disconnected"}},
+		{name: "empty", code: 1, want: []string{"proxmox guest bootstrap", "exit=1"}},
+		{name: "redacted", output: "printf 'operation-failed token=synthetic-token-value PVEAPIToken=fixture@pve!proof=synthetic-pve-secret\\n' >&2", code: 1, want: []string{"operation-failed", "redacted"}, absent: []string{"synthetic-token-value", "synthetic-pve-secret", "fixture@pve!proof"}},
+		{name: "truncated", output: "printf 'discard-this-prefix\\n'; printf '%s' " + shellQuote(strings.Repeat("x", 128<<10)) + "; printf 'discard-this-tail\\n' >&2", code: 1, want: []string{"diagnostics truncated", "exit=1"}, absent: []string{"discard-this-prefix", "discard-this-tail", strings.Repeat("x", 100)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, inputPath := installProxmoxBootstrapChild(t, tc.output, tc.code)
+			client := &ProxmoxClient{TokenID: "fixture@pve!proof", TokenSecret: "synthetic-pve-secret"}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err := client.bootstrapSSH(ctx, "fixture.invalid", cfg)
+			input, readErr := os.ReadFile(inputPath)
+			if readErr != nil || string(input) != proxmoxBootstrapScript(cfg) {
+				t.Fatalf("bootstrap input delivery mismatch: %v", readErr)
+			}
+			if tc.code == 0 {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			var native *exec.ExitError
+			if !errors.As(err, &native) || native.ExitCode() != tc.code {
+				t.Fatalf("native exit not preserved: %v", err)
+			}
+			if got := ExitCodeForError(err, 1); got != 1 {
+				t.Fatalf("public fallback=%d, want1", got)
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("ordinary child exit acquired a context cause: %v", err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("diagnostic %q missing %q", err, want)
+				}
+			}
+			for _, absent := range tc.absent {
+				if strings.Contains(err.Error(), absent) {
+					t.Errorf("diagnostic includes excluded content %q", absent)
+				}
+			}
+			if len(err.Error()) > 20<<10 {
+				t.Fatalf("diagnostic unbounded: %d", len(err.Error()))
+			}
+		})
+	}
+}
+
+func TestProxmoxBootstrapPreservesCause(t *testing.T) {
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded, errors.Join(context.Canceled, errors.New("token=synthetic-error-secret"))} {
+		t.Run(fmt.Sprint(cause), func(t *testing.T) {
+			probe, input := proxmoxRunSSHQuietWithOptions, proxmoxRunSSHInput
+			proxmoxRunSSHQuietWithOptions = func(context.Context, SSHTarget, string, string, string) error { return nil }
+			proxmoxRunSSHInput = func(context.Context, SSHTarget, string, io.Reader, io.Writer, io.Writer) error { return cause }
+			t.Cleanup(func() { proxmoxRunSSHQuietWithOptions, proxmoxRunSSHInput = probe, input })
+			err := (&ProxmoxClient{}).bootstrapSSH(context.Background(), "fixture.invalid", baseConfig())
+			if !errors.Is(err, cause) || ExitCodeForError(err, 1) != 1 {
+				t.Fatalf("cause or code lost: %v", err)
+			}
+			if !strings.Contains(err.Error(), "proxmox guest bootstrap") || strings.Contains(err.Error(), "synthetic-error-secret") {
+				t.Fatalf("unsafe or unstaged error: %v", err)
+			}
+		})
+	}
+}
+
+func TestProxmoxBootstrapProbeFailureDoesNotRunInput(t *testing.T) {
+	probe, input := proxmoxRunSSHQuietWithOptions, proxmoxRunSSHInput
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proxmoxRunSSHQuietWithOptions = func(context.Context, SSHTarget, string, string, string) error { cancel(); return context.Canceled }
+	proxmoxRunSSHInput = func(context.Context, SSHTarget, string, io.Reader, io.Writer, io.Writer) error {
+		t.Fatal("bootstrap ran after failed transport probe")
+		return nil
+	}
+	t.Cleanup(func() { proxmoxRunSSHQuietWithOptions, proxmoxRunSSHInput = probe, input })
+	if err := (&ProxmoxClient{}).bootstrapSSH(ctx, "fixture.invalid", baseConfig()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("probe cause=%v", err)
+	}
+}
+
 func TestProxmoxCreateServerFlow(t *testing.T) {
+	for _, failBootstrap := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bootstrap_failure=%t", failBootstrap), func(t *testing.T) {
+			testProxmoxCreateServerFlow(t, failBootstrap)
+		})
+	}
+}
+
+func testProxmoxCreateServerFlow(t *testing.T, failBootstrap bool) {
+	var nativeCfg Config
+	if failBootstrap {
+		nativeCfg, _ = installProxmoxBootstrapChild(t, "printf 'fixture-bootstrap-cleanup-diagnostic\\n' >&2", 7)
+	}
 	var forms []url.Values
 	var events []string
 	var bootstrapInput string
 	origProbe := proxmoxRunSSHQuietWithOptions
-	origInput := proxmoxRunSSHInputQuiet
+	origInput := proxmoxRunSSHInput
 	proxmoxRunSSHQuietWithOptions = func(context.Context, SSHTarget, string, string, string) error { return nil }
-	proxmoxRunSSHInputQuiet = func(_ context.Context, _ SSHTarget, _ string, input string) error {
-		bootstrapInput = input
+	proxmoxRunSSHInput = func(ctx context.Context, _ SSHTarget, _ string, input io.Reader, stdout, stderr io.Writer) error {
+		data, err := io.ReadAll(input)
+		if err != nil {
+			return err
+		}
+		bootstrapInput = string(data)
+		if failBootstrap {
+			return runSSHInput(ctx, SSHTargetFromConfig(nativeCfg, "fixture.invalid"), "sudo /bin/bash -s", strings.NewReader(bootstrapInput), stdout, stderr)
+		}
 		return nil
 	}
 	t.Cleanup(func() {
 		proxmoxRunSSHQuietWithOptions = origProbe
-		proxmoxRunSSHInputQuiet = origInput
+		proxmoxRunSSHInput = origInput
 	})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "PVEAPIToken=runner@pve!crabbox=secret" {
@@ -1299,6 +1440,8 @@ func TestProxmoxCreateServerFlow(t *testing.T) {
 				events = append(events, "wait-config")
 			case strings.Contains(r.URL.Path, "start"):
 				events = append(events, "wait-start")
+			case strings.Contains(r.URL.Path, "stop"), strings.Contains(r.URL.Path, "delete"):
+				events = append(events, "wait-cleanup")
 			default:
 				t.Fatalf("unexpected task path %s", r.URL.Path)
 			}
@@ -1310,6 +1453,12 @@ func TestProxmoxCreateServerFlow(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/api2/json/nodes/pve1/qemu/101/status/start":
 			events = append(events, "start")
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": "UPID:pve1:start"})
+		case r.Method == http.MethodPost && r.URL.Path == "/api2/json/nodes/pve1/qemu/101/status/stop":
+			events = append(events, "stop")
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": "UPID:pve1:stop"})
+		case r.Method == http.MethodDelete && r.URL.Path == "/api2/json/nodes/pve1/qemu/101":
+			events = append(events, "delete")
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": "UPID:pve1:delete"})
 		case r.Method == http.MethodGet && r.URL.Path == "/api2/json/nodes/pve1/qemu/101/agent/network-get-interfaces":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"result": []any{
 				map[string]any{"name": "lo", "ip-addresses": []any{map[string]any{"ip-address-type": "ipv4", "ip-address": "127.0.0.1"}}},
@@ -1351,6 +1500,17 @@ func TestProxmoxCreateServerFlow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	got, err := client.CreateServer(ctx, cfg, "ssh-ed25519 AAAA test", "cbx_123456abcdef", "blue-crab", false)
+	if failBootstrap {
+		var native *exec.ExitError
+		if !errors.As(err, &native) || native.ExitCode() != 7 || !strings.Contains(err.Error(), "fixture-bootstrap-cleanup-diagnostic") || !strings.Contains(err.Error(), "proxmox guest bootstrap") {
+			t.Errorf("bootstrap diagnostic/cause lost after cleanup: %v", err)
+		}
+		want := []string{"clone", "wait-clone", "config", "wait-config", "start", "wait-start", "stop", "wait-cleanup", "delete", "wait-cleanup"}
+		if !reflect.DeepEqual(events, want) {
+			t.Fatalf("events=%v want %v", events, want)
+		}
+		return
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

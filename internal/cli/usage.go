@@ -19,7 +19,7 @@ func (a App) usage(ctx context.Context, args []string) error {
 		return err
 	}
 	if *scope != "user" && *scope != "org" && *scope != "all" {
-		return exit(2, "usage scope must be user, org, or all")
+		return Exit(2, "usage scope must be user, org, or all")
 	}
 	cfg, err := loadConfig()
 	if err != nil {
@@ -30,7 +30,7 @@ func (a App) usage(ctx context.Context, args []string) error {
 		return err
 	}
 	if !ok {
-		return exit(2, "usage requires a configured coordinator")
+		return Exit(2, "usage requires a configured coordinator")
 	}
 	res, err := coord.Usage(ctx, *scope, *owner, *org, *month)
 	if err != nil {

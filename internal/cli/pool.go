@@ -73,7 +73,7 @@ func (a App) list(ctx context.Context, args []string) error {
 	case DelegatedRunBackend:
 		servers, err = b.List(ctx, ListRequest{Options: leaseOptionsFromConfig(cfg), All: *all, Refresh: *refresh})
 	default:
-		return exit(2, "provider=%s does not support list", backend.Spec().Name)
+		return Exit(2, "provider=%s does not support list", backend.Spec().Name)
 	}
 	if err != nil {
 		return err
@@ -101,7 +101,7 @@ func (a App) list(ctx context.Context, args []string) error {
 // (int → float64). Typed entries are kept in their original form so downstream
 // JSON encoding preserves field order, struct tags, and number precision.
 func filterJSONListViewByPond(view any, pond string) any {
-	pond = normalizePondName(pond)
+	pond = NormalizePondName(pond)
 	if pond == "" {
 		return view
 	}
@@ -125,7 +125,7 @@ func filterJSONListViewByPond(view any, pond string) any {
 		if labels == nil {
 			continue
 		}
-		if normalizePondName(labels[pondLabelKey]) == pond {
+		if NormalizePondName(labels[pondLabelKey]) == pond {
 			kept = append(kept, entry)
 		}
 	}
@@ -241,7 +241,7 @@ func filterTypedSliceByPond(view any, pond string) any {
 		labels := extractLabelMap(elem.Interface())
 		if labels != nil {
 			hasLabels = true
-			if normalizePondName(labels[pondLabelKey]) == pond {
+			if NormalizePondName(labels[pondLabelKey]) == pond {
 				kept = reflect.Append(kept, elem)
 			}
 		}
@@ -556,11 +556,11 @@ func (a App) cleanup(ctx context.Context, args []string) error {
 		return err
 	}
 	if backendCoordinator(backend) != nil {
-		return exit(2, "machine cleanup is disabled when a coordinator is configured; coordinator TTL alarms own brokered cleanup")
+		return Exit(2, "machine cleanup is disabled when a coordinator is configured; coordinator TTL alarms own brokered cleanup")
 	}
 	cleaner, ok := backend.(CleanupBackend)
 	if !ok {
-		return exit(2, "machine cleanup is not supported for provider=%s", cfg.Provider)
+		return Exit(2, "machine cleanup is not supported for provider=%s", cfg.Provider)
 	}
 	return cleaner.Cleanup(ctx, CleanupRequest{Options: leaseOptionsFromConfig(cfg), DryRun: *dryRun})
 }

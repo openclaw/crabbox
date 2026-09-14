@@ -14,6 +14,7 @@ import (
 	gosdk "github.com/islo-labs/go-sdk"
 	islcore "github.com/islo-labs/go-sdk/core"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 // The version and architecture-specific digests move together in code review
@@ -253,7 +254,7 @@ func (b *isloBackend) claimedTailscaleSettings(claim core.LeaseClaim, leaseID, s
 	}
 	restart := *b
 	restart.cfg.Pond = claim.Pond
-	appendDirectPondTailscaleTag(&restart.cfg)
+	core.AppendDirectPondTailscaleTag(&restart.cfg)
 	return restart.configuredTailscaleSettings(leaseID, slug)
 }
 
@@ -279,7 +280,7 @@ func (b *isloBackend) maybeJoinTailscale(ctx context.Context, client isloAPI, sa
 	if err := b.runTailscaleBringUp(ctx, client, sandboxName, leaseID, settings); err != nil {
 		return err
 	}
-	return updateLeaseClaimTailscaleSettings(leaseID, settings.Hostname, settings.Tags, settings.LoginServer, settings.ExitNode, settings.ExitNodeLAN)
+	return core.UpdateLeaseClaimTailscaleSettings(leaseID, settings.Hostname, settings.Tags, settings.LoginServer, settings.ExitNode, settings.ExitNodeLAN)
 }
 
 func (b *isloBackend) runTailscaleBringUp(ctx context.Context, client isloAPI, sandboxName, leaseID string, settings isloTailscaleSettings) error {
@@ -305,57 +306,90 @@ func (b *isloBackend) runTailscaleBringUp(ctx context.Context, client isloAPI, s
 		req.Env[k] = &v
 	}
 
-	fmt.Fprintf(b.rt.Stderr, "islo: joining tailnet (hostname=%s tags=%s)\n", settings.Hostname, blank(tags, "<none>"))
+	fmt.Fprintf(b.rt.Stderr, "islo: joining tailnet (hostname=%s tags=%s)\n", settings.Hostname, core.Blank(tags, "<none>"))
 	var out bytes.Buffer
 	code, err := client.ExecStream(ctx, sandboxName, req, &out, b.rt.Stderr)
 	if err != nil {
-		return exit(1, "islo tailscale bring-up: %v", err)
+		return shared.ExitErrorWithCause(1, fmt.Sprintf("islo tailscale bring-up: %v", err), err)
 	}
 	if code != 0 {
 		if code == isloTailscaleRecoveryPendingExitCode {
 			return fmt.Errorf("%w: saved-state recovery is still starting", core.ErrTailnetPeerValidationUnavailable)
 		}
-		return exit(1, "islo tailscale bring-up exited %d", code)
+		return core.Exit(1, "islo tailscale bring-up exited %d", code)
 	}
 	m := isloTailscaleIPRe.FindStringSubmatch(out.String())
 	if m == nil || m[1] == "" {
-		return exit(1, "islo tailscale bring-up: no tailnet IPv4 reported")
+		return core.Exit(1, "islo tailscale bring-up: no tailnet IPv4 reported")
 	}
 	fmt.Fprintf(b.rt.Stderr, "islo: joined tailnet ip=%s\n", m[1])
-	return updateLeaseClaimTailscale(leaseID, m[1], "")
+	return core.UpdateLeaseClaimTailscale(leaseID, m[1], "")
+}
+
+// Admission records the existing claim and live observation before readiness
+// or repair can fail. Legacy claims retain their existing weaker identity checks.
+type isloTailscaleAdmission struct {
+	claim   core.LeaseClaim
+	sandbox *gosdk.SandboxResponse
 }
 
 func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, sandboxName, slug, leaseID string, repair bool) (core.TailscaleMetadata, error) {
-	claim, ok, err := resolveLeaseClaim(leaseID)
+	admission, err := b.admitLeaseTailscale(ctx, client, sandboxName, leaseID)
 	if err != nil {
 		return core.TailscaleMetadata{}, err
 	}
+	return b.ensureAdmittedLeaseTailscale(ctx, client, sandboxName, slug, leaseID, admission, repair)
+}
+
+func (b *isloBackend) admitLeaseTailscale(ctx context.Context, client isloAPI, sandboxName, leaseID string) (*isloTailscaleAdmission, error) {
+	claim, ok, err := core.ResolveLeaseClaim(leaseID)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
-		return core.TailscaleMetadata{}, nil
+		return nil, nil
 	}
 	if !isloClaimTailscaleEnrolled(claim) {
-		return core.TailscaleMetadata{}, nil
+		return nil, nil
+	}
+	if err := requireIsloClaimScope(claim, b.claimScope()); err != nil {
+		return nil, err
 	}
 	sandbox, sandboxErr := client.GetSandbox(ctx, sandboxName)
 	if sandboxErr != nil {
 		if isloSandboxGoneError(sandboxErr) {
-			if err := clearLeaseClaimTailscale(leaseID); err != nil {
-				return core.TailscaleMetadata{}, err
+			if err := core.ClearLeaseClaimTailscale(leaseID); err != nil {
+				return nil, err
 			}
-			return core.TailscaleMetadata{}, fmt.Errorf("%w: sandbox %s no longer exists", core.ErrTailnetPeerUnavailable, sandboxName)
+			return nil, fmt.Errorf("%w: sandbox %s no longer exists", core.ErrTailnetPeerUnavailable, sandboxName)
 		}
-		return core.TailscaleMetadata{}, fmt.Errorf("%w: get sandbox: %v", core.ErrTailnetPeerValidationUnavailable, sandboxErr)
+		return nil, fmt.Errorf("%w: get sandbox: %v", core.ErrTailnetPeerValidationUnavailable, sandboxErr)
+	}
+	if sandbox != nil {
+		live := isloIdentityFromSandbox(sandbox)
+		if bound := isloClaimIdentity(claim).ID; bound != "" && (live.ID != bound || live.Name != sandboxName) {
+			return nil, core.Exit(4, "islo sandbox %q did not identify claimed resource %s before the Tailscale check; refusing remote execution", sandboxName, bound)
+		}
 	}
 	if sandbox == nil || isloStatusTerminal(sandbox.GetStatus()) {
-		if err := clearLeaseClaimTailscale(leaseID); err != nil {
-			return core.TailscaleMetadata{}, err
+		if err := core.ClearLeaseClaimTailscale(leaseID); err != nil {
+			return nil, err
 		}
-		return core.TailscaleMetadata{}, fmt.Errorf("%w: sandbox %s is %s", core.ErrTailnetPeerUnavailable, sandboxName, blank(sandboxStatus(sandbox), "missing"))
+		return nil, fmt.Errorf("%w: sandbox %s is %s", core.ErrTailnetPeerUnavailable, sandboxName, core.Blank(sandboxStatus(sandbox), "missing"))
 	}
+	return &isloTailscaleAdmission{claim: claim, sandbox: sandbox}, nil
+}
+
+func (b *isloBackend) ensureAdmittedLeaseTailscale(ctx context.Context, client isloAPI, sandboxName, slug, leaseID string, admission *isloTailscaleAdmission, repair bool) (core.TailscaleMetadata, error) {
+	if admission == nil {
+		return core.TailscaleMetadata{}, nil
+	}
+	claim, sandbox := admission.claim, admission.sandbox
 	if repair && strings.EqualFold(strings.TrimSpace(sandbox.GetStatus()), "paused") {
+		var err error
 		sandbox, err = resumeIsloSandbox(ctx, client, sandboxName)
 		if err != nil {
-			return core.TailscaleMetadata{}, fmt.Errorf("%w: resume sandbox: %v", core.ErrTailnetPeerValidationUnavailable, err)
+			return core.TailscaleMetadata{}, isloTailscalePreparationError(core.ErrTailnetPeerValidationUnavailable, "resume sandbox: ", err)
 		}
 	}
 	if !isloStatusReady(sandbox.GetStatus()) {
@@ -372,11 +406,11 @@ func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, 
 	defer cancel()
 	code, checkErr := client.ExecStream(healthCtx, sandboxName, req, &out, b.rt.Stderr)
 	if checkErr != nil {
-		return core.TailscaleMetadata{}, fmt.Errorf("%w: %v", core.ErrTailnetPeerValidationUnavailable, checkErr)
+		return core.TailscaleMetadata{}, isloTailscalePreparationError(core.ErrTailnetPeerValidationUnavailable, "", checkErr)
 	}
 	if code == 0 {
 		if match := isloTailscaleIPRe.FindStringSubmatch(out.String()); match != nil && match[1] != "" {
-			if err := updateLeaseClaimTailscale(leaseID, match[1], claim.TailscaleFQDN); err != nil {
+			if err := core.UpdateLeaseClaimTailscale(leaseID, match[1], claim.TailscaleFQDN); err != nil {
 				return core.TailscaleMetadata{}, err
 			}
 			return core.TailscaleMetadata{Enabled: true, IPv4: match[1], FQDN: claim.TailscaleFQDN, State: "ready"}, nil
@@ -387,20 +421,20 @@ func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, 
 		return core.TailscaleMetadata{}, fmt.Errorf("%w: tailnet recovery is in progress", core.ErrTailnetPeerValidationUnavailable)
 	}
 	if !repair {
-		if err := clearLeaseClaimTailscale(leaseID); err != nil {
+		if err := core.ClearLeaseClaimTailscale(leaseID); err != nil {
 			return core.TailscaleMetadata{}, err
 		}
 		return core.TailscaleMetadata{}, fmt.Errorf("%w: health check reported tailnet unavailable", core.ErrTailnetPeerUnavailable)
 	}
 	restart := *b
 	restart.cfg.Tailscale.Enabled = true
-	settings := restart.claimedTailscaleSettings(claim, leaseID, blank(claim.Slug, slug))
+	settings := restart.claimedTailscaleSettings(claim, leaseID, core.Blank(claim.Slug, slug))
 	restartErr := restart.runTailscaleBringUp(ctx, client, sandboxName, leaseID, settings)
 	if restartErr == nil {
-		if err := updateLeaseClaimTailscaleSettings(leaseID, settings.Hostname, settings.Tags, settings.LoginServer, settings.ExitNode, settings.ExitNodeLAN); err != nil {
+		if err := core.UpdateLeaseClaimTailscaleSettings(leaseID, settings.Hostname, settings.Tags, settings.LoginServer, settings.ExitNode, settings.ExitNodeLAN); err != nil {
 			return core.TailscaleMetadata{}, err
 		}
-		updated, _, readErr := resolveLeaseClaim(leaseID)
+		updated, _, readErr := core.ResolveLeaseClaim(leaseID)
 		if readErr != nil {
 			return core.TailscaleMetadata{}, readErr
 		}
@@ -409,10 +443,16 @@ func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, 
 	if errors.Is(restartErr, core.ErrTailnetPeerValidationUnavailable) {
 		return core.TailscaleMetadata{}, restartErr
 	}
-	if err := clearLeaseClaimTailscale(leaseID); err != nil {
+	if err := core.ClearLeaseClaimTailscale(leaseID); err != nil {
 		return core.TailscaleMetadata{}, err
 	}
-	return core.TailscaleMetadata{}, fmt.Errorf("%w: restart failed: %v", core.ErrTailnetPeerUnavailable, restartErr)
+	return core.TailscaleMetadata{}, isloTailscalePreparationError(core.ErrTailnetPeerUnavailable, "restart failed: ", restartErr)
+}
+
+// These wrappers historically exposed only fallback code 1. Preserve that code
+// while making the sentinel and actual post-admission cause independently visible.
+func isloTailscalePreparationError(sentinel error, detail string, cause error) error {
+	return shared.ExitErrorWithCause(1, fmt.Sprintf("%v: %s%v", sentinel, detail, cause), errors.Join(sentinel, cause))
 }
 
 func resumeIsloSandbox(ctx context.Context, client isloAPI, sandboxName string) (*gosdk.SandboxResponse, error) {
@@ -442,7 +482,7 @@ func resumeIsloSandbox(ctx context.Context, client isloAPI, sandboxName string) 
 				return sandbox, nil
 			}
 			if sandbox == nil || isloStatusTerminal(sandbox.GetStatus()) {
-				return nil, fmt.Errorf("sandbox %s entered %s while resuming", sandboxName, blank(sandboxStatus(sandbox), "missing"))
+				return nil, fmt.Errorf("sandbox %s entered %s while resuming", sandboxName, core.Blank(sandboxStatus(sandbox), "missing"))
 			}
 		}
 	}
@@ -465,12 +505,12 @@ func sandboxStatus(sandbox *gosdk.SandboxResponse) string {
 }
 
 func (b *isloBackend) ValidateTailnetPeer(ctx context.Context, leaseID string) (core.TailscaleMetadata, error) {
-	claim, ok, err := resolveLeaseClaim(leaseID)
+	claim, ok, err := core.ResolveLeaseClaim(leaseID)
 	if err != nil {
 		return core.TailscaleMetadata{}, err
 	}
 	if !ok {
-		return core.TailscaleMetadata{}, exit(4, "islo lease claim %s not found", leaseID)
+		return core.TailscaleMetadata{}, core.Exit(4, "islo lease claim %s not found", leaseID)
 	}
 	client, err := newIsloClient(b.cfg, b.rt)
 	if err != nil {
@@ -489,15 +529,15 @@ func (b *isloBackend) validateTailscaleConfig() error {
 	if !b.cfg.Tailscale.Enabled || strings.TrimSpace(b.cfg.Tailscale.AuthKey) != "" {
 		return nil
 	}
-	return exit(2, "provider=islo: --tailscale requires a reusable, ephemeral node auth key in $%s", blank(b.cfg.Tailscale.AuthKeyEnv, "CRABBOX_TAILSCALE_AUTH_KEY"))
+	return core.Exit(2, "provider=islo: --tailscale requires a reusable, ephemeral node auth key in $%s", core.Blank(b.cfg.Tailscale.AuthKeyEnv, "CRABBOX_TAILSCALE_AUTH_KEY"))
 }
 
 // isloTailscaleHostname resolves the tailnet hostname for a sandbox from the
 // configured template, substituting all shared tokens and sanitizing the result.
-func isloTailscaleHostname(cfg Config, leaseID, slug string) string {
+func isloTailscaleHostname(cfg core.Config, leaseID, slug string) string {
 	template := strings.TrimSpace(cfg.Tailscale.Hostname)
 	if template == "" {
 		template = cfg.Tailscale.HostnameTemplate
 	}
-	return renderTailscaleHostname(template, leaseID, slug, isloProvider)
+	return core.RenderTailscaleHostname(template, leaseID, slug, isloProvider)
 }

@@ -66,6 +66,7 @@ func TestMaterializeDelegatedRunDownloadsCachesRequiredDownload(t *testing.T) {
 func TestValidateDelegatedRunFilePath(t *testing.T) {
 	for input, want := range map[string]string{
 		"reports/manifest.json":         "reports/manifest.json",
+		"reports/result..json":          "reports/result..json",
 		"./reports/proof.txt":           "reports/proof.txt",
 		"results/a+b@example.test.json": "results/a+b@example.test.json",
 	} {

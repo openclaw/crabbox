@@ -257,6 +257,7 @@ func TestExplicitEgressTicketDoesNotCreateFakeBearer(t *testing.T) {
 		"https://broker.example.com",
 		"cbx_abcdef123456",
 		"egress_ticket",
+		false,
 	)
 	if err != nil {
 		t.Fatal(err)

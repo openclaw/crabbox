@@ -87,8 +87,9 @@ wandb:
   maxLifetimeSeconds: 1800   # 30 min; W&B reclaims the sandbox at this limit
 ```
 
-Defaults applied when unset: `defaultImage` is `ubuntu:24.04` and
-`maxLifetimeSeconds` is `1800`.
+Runtime defaults applied when unset: `defaultImage` is `ubuntu:24.04` and
+`maxLifetimeSeconds` is `1800`. The raw configuration remains empty/zero until
+the provider applies these defaults; flag registration does not eagerly fill them.
 
 Provider flags (each overrides the matching `wandb.*` config key):
 
@@ -107,6 +108,14 @@ Environment overrides:
   `api.cwsandbox.com:443`); the `https://` / `http://` scheme is stripped if
   present.
 
+The three configuration settings use shared typed bindings. Empty file/environment
+strings preserve prior values. File `maxLifetimeSeconds` assigns only when positive;
+zero or negative file values leave the prior setting intact. Environment parsing
+instead accepts signed integers: a parsed primary value, including zero or a
+negative value, wins. An empty or malformed primary falls back to the vendor alias,
+then to the prior setting. Runtime defaulting and the lease TTL still determine the
+effective lifetime. The client-owned API-key precedence above is unchanged.
+
 ## Lifecycle
 
 `crabbox run`:
@@ -120,6 +129,18 @@ Environment overrides:
    ownership claim, `Exec` the command, then `Stop` it unless `--keep` is set.
    If claim persistence fails, Crabbox rolls back the acquired sandbox before
    returning.
+
+Run outcomes and timing are finalized after automatic Stop. A Stop failure
+makes an otherwise successful run fail with exit `1` and retains its recovery
+session and unchanged claim. Command failures and mapped gRPC exit codes stay
+primary when Stop or timing output also fails; secondary diagnostics remain
+visible. gRPC/API failures are classified as `provider-error`, not as observed
+command exits, while keeping their mapped numeric exit codes. `--keep-on-failure`
+is decided before timing output, so a reporting
+failure cannot discard an already-failed run's sandbox. A timing-output failure
+after successful Stop does not claim the sandbox is retained. Closing the local
+gRPC connection remains warning-only. Command timing measures Exec separately;
+total timing includes acquisition and automatic cleanup.
 
 `status` and `stop` enforce the same exact claim and tagged-inventory checks
 before issuing Get or Stop. A tagged sandbox without the matching local claim,
@@ -152,9 +173,15 @@ the lesser of five minutes and the sandbox lifetime.
 - `Exec` is the unary RPC, so command output is buffered server-side and
   returned at completion rather than streamed; there is no interactive PTY.
 - Environment variables are applied at `Start` time only. When you target an
-  existing sandbox with `--id`, env vars cannot be forwarded onto it (the
-  `Exec` RPC has no env field), so an `--id` run with `--allow-env` is
-  rejected.
+  existing sandbox with `--id`, selected user env vars cannot be forwarded onto
+  it (the `Exec` RPC has no env field), so explicit `--allow-env` selections
+  containing such values are rejected, including `CI` and `NODE_OPTIONS`.
+  Crabbox's local run metadata (`CRABBOX_LEASE_ID`, `CRABBOX_RUN_ID`, and
+  `CRABBOX_SLUG`) may be omitted for reuse, including when an env summary is
+  requested. The built-in implicit `CI`/`NODE_OPTIONS` defaults retain their
+  existing omission exception. Neither exception forwards values through `Exec`
+  or refreshes the sandbox's original `Start`-time environment; similarly named
+  custom variables are not treated as reserved metadata.
 - `--reclaim`, `--shell`, `--sync-only`, `--checksum`, `--force-sync-large`,
   `--full-resync`, `--download`, `--artifact-glob`, and `--require-artifact`
   are rejected: W&B owns the sandbox lifecycle and there is no Crabbox
@@ -223,5 +250,3 @@ Related docs:
 - [Provider backends](../provider-backends.md)
 - [W&B Sandboxes docs](https://docs.wandb.ai/sandboxes)
 - [CoreWeave Sandboxes docs](https://docs.coreweave.com/products/sandboxes)
-</content>
-</invoke>

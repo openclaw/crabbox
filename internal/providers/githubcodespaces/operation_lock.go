@@ -15,7 +15,7 @@ var ensureGitHubCodespacesClaimNamespace = func(string) error {
 
 func lockGitHubCodespacesLeaseOperation(ctx context.Context, leaseID string) (func(), error) {
 	if !core.IsCanonicalLeaseID(leaseID) {
-		return nil, exit(2, "invalid github-codespaces lease id %q", leaseID)
+		return nil, core.Exit(2, "invalid github-codespaces lease id %q", leaseID)
 	}
 	return lockGitHubCodespacesOperation(
 		ctx,
@@ -42,14 +42,14 @@ func lockGitHubCodespacesOperation(ctx context.Context, lockName, description st
 	}
 	stateDir = filepath.Clean(stateDir)
 	if !filepath.IsAbs(stateDir) {
-		return nil, exit(2, "github-codespaces state directory must be absolute: %s", stateDir)
+		return nil, core.Exit(2, "github-codespaces state directory must be absolute: %s", stateDir)
 	}
 	if err := ensureGitHubCodespacesClaimNamespace(stateDir); err != nil {
-		return nil, exit(2, "create github-codespaces claim namespace: %v", err)
+		return nil, core.Exit(2, "create github-codespaces claim namespace: %v", err)
 	}
 	lockDir := filepath.Join(stateDir, "claim-locks")
 	if err := os.MkdirAll(lockDir, 0o700); err != nil {
-		return nil, exit(2, "create github-codespaces lock directory: %v", err)
+		return nil, core.Exit(2, "create github-codespaces lock directory: %v", err)
 	}
 	lockPath := filepath.Join(lockDir, lockName)
 	return shared.LockOperationFile(ctx, lockPath, description)
