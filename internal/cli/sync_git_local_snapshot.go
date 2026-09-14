@@ -16,6 +16,10 @@ import (
 // Local seeds transport every accepted working file independently of Git's
 // checkout transforms; only the snapshot acquisition loop is shared with overlay.
 func prepareLocalGitSeedSnapshot(ctx context.Context, repo Repo, cfg Config, _ SyncExcludeRules) (gitOverlaySnapshot, error) {
+	return prepareLocalGitSeedSnapshotWithHook(ctx, repo, cfg, nil)
+}
+
+func prepareLocalGitSeedSnapshotWithHook(ctx context.Context, repo Repo, cfg Config, hook gitOverlaySnapshotHook) (gitOverlaySnapshot, error) {
 	policy := gitSnapshotPolicy{
 		target: repo.Head,
 		checkout: func(root string) (gitOverlayCheckoutState, error) {
@@ -36,7 +40,7 @@ func prepareLocalGitSeedSnapshot(ctx context.Context, repo Repo, cfg Config, _ S
 			return localGitSeedSnapshotFingerprint(repo, cfg, manifest, excludes, checkout)
 		},
 	}
-	return prepareGitSnapshotWithCleanup(ctx, repo, cfg, syncIncludes(cfg), policy, nil, func(snapshot *gitOverlaySnapshot) error {
+	return prepareGitSnapshotWithCleanup(ctx, repo, cfg, syncIncludes(cfg), policy, hook, func(snapshot *gitOverlaySnapshot) error {
 		return snapshot.cleanup()
 	})
 }

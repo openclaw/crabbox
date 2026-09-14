@@ -1138,7 +1138,7 @@ func sameGitOverlaySnapshotIdentity(left, right os.FileInfo) bool {
 }
 
 func sameSyncExcludeRules(left, right SyncExcludeRules) bool {
-	return slices.Equal(left.rules, right.rules)
+	return left.managedSubtree == right.managedSubtree && slices.Equal(left.rules, right.rules)
 }
 
 func terminalGitOverlayPreparationError(err error, retained bool, contextErr error) error {

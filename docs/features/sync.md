@@ -229,6 +229,8 @@ silently uploading an empty checkout. When this namespace overlaps a checkout,
 Git seeding is disabled so a seeded tree cannot materialize excluded paths.
 These protections do not remove state already committed upstream or previously
 shared with a runner.
+Snapshot acceptance compares the effective protected subtree alongside ordinary
+ignore rules, so a changed managed-state exclusion scope requires revalidation.
 
 Managed-state filtering also applies to historical deletion paths. Replacing a
 tracked directory with a regular file still syncs the replacement and removes

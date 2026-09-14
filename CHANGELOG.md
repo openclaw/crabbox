@@ -13,6 +13,7 @@
 ### Fixes
 
 - Honor cancellation during Git snapshot copying and preserve cancellation alongside cleanup errors instead of falling back to full sync. [PR 2268](https://github.com/openclaw/crabbox/pull/2268).
+- Revalidate managed-state exclusion scope during snapshot acceptance even when ordinary ignore rules are unchanged. [PR 2267](https://github.com/openclaw/crabbox/pull/2267).
 - Keep directory-to-file replacement sync working with a custom state root, preserving historical deletions and managed-state exclusions. [PR 2266](https://github.com/openclaw/crabbox/pull/2266).
 - Give WSL2 static SSH architecture probes a 15-second execution allowance plus the existing bounded transport setup and cleanup budgets, instead of exhausting a 15-second whole-call deadline during staging. [PR 2265](https://github.com/openclaw/crabbox/pull/2265).
 - Seed detached commits by their exact origin SHA before POSIX/WSL2 file sync, verifying the seed and retaining normal sync when the remote cannot serve the commit.

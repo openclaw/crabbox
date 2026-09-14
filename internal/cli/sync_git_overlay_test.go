@@ -22,6 +22,81 @@ import (
 	"time"
 )
 
+func TestManagedStateSyncExcludeRulesEquality(t *testing.T) {
+	left := newSyncExcludeRules([]string{"build", "!build/source.txt"}, syncExcludeConfigured)
+	left.managedSubtree = "state/crabbox"
+	for _, tc := range []struct {
+		name, managed string
+		wantEqual     bool
+	}{
+		{name: "same scope", managed: "state/crabbox", wantEqual: true},
+		{name: "different scope", managed: "other-state/crabbox"},
+		{name: "scope removed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			right := left
+			right.managedSubtree = tc.managed
+			if got := sameSyncExcludeRules(left, right); got != tc.wantEqual {
+				t.Fatalf("scope equality=%v want %v", got, tc.wantEqual)
+			}
+		})
+	}
+}
+
+func TestManagedStateSnapshotRevalidatesConfigurationChange(t *testing.T) {
+	repo, cfg := newLocalGitSnapshotFixture(t)
+	testSnapshotManagedConfigurationChange(t, repo.Root, func(hook gitOverlaySnapshotHook) (gitOverlaySnapshot, error) {
+		return prepareLocalGitSeedSnapshotWithHook(context.Background(), repo, cfg, hook)
+	})
+}
+
+func TestGitOverlaySnapshotRevalidatesManagedConfigurationChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("overlay validation requires POSIX Git checkout settings")
+	}
+	fixture := newGitOverlayFixture(t)
+	_, excludes := fixture.manifest(t)
+	testSnapshotManagedConfigurationChange(t, fixture.root, func(hook gitOverlaySnapshotHook) (gitOverlaySnapshot, error) {
+		return prepareGitOverlaySnapshotWithHook(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan, hook)
+	})
+}
+
+func testSnapshotManagedConfigurationChange(t *testing.T, root string, prepare func(gitOverlaySnapshotHook) (gitOverlaySnapshot, error)) {
+	t.Helper()
+	mustWriteTestFile(t, filepath.Join(root, "unstaged.txt"), "stable local change\n")
+	for _, name := range []string{"state-a", "state-b"} {
+		if err := os.MkdirAll(filepath.Join(root, name, "crabbox"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state-a"))
+	var attempts []int
+	snapshot, err := prepare(func(phase string, attempt int, _ string) {
+		if phase == "snapshot_created" {
+			attempts = append(attempts, attempt)
+		}
+		if phase == "snapshot_copied" && attempt == 1 {
+			// Reconfigure at an explicit boundary; source files stay unchanged.
+			t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state-b"))
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := snapshot.cleanup(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if !slices.Equal(attempts, []int{1, 2}) || snapshot.Excludes.managedSubtree != "state-b/crabbox" {
+		t.Fatalf("attempts=%v accepted scope=%q", attempts, snapshot.Excludes.managedSubtree)
+	}
+	if got, err := os.ReadFile(filepath.Join(snapshot.Root, "unstaged.txt")); err != nil || string(got) != "stable local change\n" {
+		t.Fatalf("accepted content=%q error=%v", got, err)
+	}
+	t.Logf("snapshot attempts=%v; accepted managed subtree=%q; stable content preserved", attempts, snapshot.Excludes.managedSubtree)
+}
+
 type gitOverlayFixture struct {
 	root           string
 	origin         string
