@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -1151,65 +1152,80 @@ func TestCloudflareRunReportsCommandErrorAsFailure(t *testing.T) {
 func TestCloudflareRunCleanupDestroyUsesBoundedContext(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	withCloudflareCleanupTimeout(t, 20*time.Millisecond)
-	var createdID string
-	execCalls := 0
-	deleteSeen := make(chan struct{}, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
-			var req createSandboxRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Fatalf("decode create request: %v", err)
+	// Measure request cancellation after local claim admission, without racing
+	// the cleanup deadline against HTTP connection setup or handler scheduling.
+	synctest.Test(t, func(t *testing.T) {
+		var createdID string
+		execCalls := 0
+		deleteSeen := make(chan struct{}, 1)
+		var deleteDeadlineRemaining time.Duration
+		transport := &http.Client{Transport: testutil.RoundTripFunc(func(r *http.Request) (*http.Response, error) {
+			response := func(body, contentType string) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{contentType}}, Body: io.NopCloser(strings.NewReader(body))}, nil
 			}
-			createdID = req.ID
-			_, _ = fmt.Fprintf(w, `{"id":%q,"state":"running","workdir":%q}`, req.ID, req.Workdir)
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/"+createdID+"/exec-stream":
-			execCalls++
-			w.Header().Set("Content-Type", "application/x-ndjson")
-			_, _ = io.WriteString(w, `{"type":"complete","exitCode":0}`+"\n")
-		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/"+createdID:
-			deleteSeen <- struct{}{}
-			<-r.Context().Done()
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+				var req createSandboxRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					t.Fatalf("decode create request: %v", err)
+				}
+				createdID = req.ID
+				return response(fmt.Sprintf(`{"id":%q,"state":"running","workdir":%q}`, req.ID, req.Workdir), "application/json")
+			case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/"+createdID+"/exec-stream":
+				execCalls++
+				return response(`{"type":"complete","exitCode":0}`+"\n", "application/x-ndjson")
+			case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/"+createdID:
+				deadline, ok := r.Context().Deadline()
+				if !ok {
+					t.Fatal("destroy request has no deadline")
+				}
+				deleteDeadlineRemaining = time.Until(deadline)
+				deleteSeen <- struct{}{}
+				<-r.Context().Done()
+				return nil, r.Context().Err()
+			default:
+				return nil, fmt.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
+		})}
 
-	cfg := core.Config{Provider: providerName}
-	cfg.Cloudflare.APIURL = server.URL
-	cfg.Cloudflare.Token = "token"
-	var stderr bytes.Buffer
-	backend := cloudflareBackend{cfg: cfg, rt: core.Runtime{HTTP: server.Client(), Stderr: &stderr, Stdout: io.Discard}}
-	start := time.Now()
-	result, err := backend.Run(context.Background(), core.RunRequest{
-		Repo:    core.Repo{Name: "repo", Root: t.TempDir()},
-		Command: []string{"true"},
-		NoSync:  true,
+		cfg := core.Config{Provider: providerName}
+		cfg.Cloudflare.APIURL = "https://runner.example.test"
+		cfg.Cloudflare.Token = "token"
+		var stderr bytes.Buffer
+		backend := cloudflareBackend{cfg: cfg, rt: core.Runtime{HTTP: transport, Stderr: &stderr, Stdout: io.Discard}}
+		start := time.Now()
+		result, err := backend.Run(context.Background(), core.RunRequest{
+			Repo:    core.Repo{Name: "repo", Root: t.TempDir()},
+			Command: []string{"true"},
+			NoSync:  true,
+		})
+		if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("cleanup error=%v", err)
+		}
+		if result.ExitCode != 1 || result.Session == nil || !result.Session.Kept {
+			t.Fatalf("result=%#v", result)
+		}
+		if result.Status != "failed" || result.ErrorKind != core.RunErrorProvider {
+			t.Fatalf("status/error=%q/%q", result.Status, result.ErrorKind)
+		}
+		if execCalls != 2 {
+			t.Fatalf("exec calls=%d, want prepare and command", execCalls)
+		}
+		select {
+		case <-deleteSeen:
+		default:
+			t.Fatal("destroy was not attempted")
+		}
+		if deleteDeadlineRemaining <= 0 || deleteDeadlineRemaining > 20*time.Millisecond {
+			t.Fatalf("destroy deadline remaining=%s, want positive and at most 20ms", deleteDeadlineRemaining)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("Run took %s, want bounded cleanup", elapsed)
+		}
+		if _, ok, err := core.ResolveLeaseClaimForProvider(createdID, providerName); err != nil || !ok {
+			t.Fatalf("missing recovery claim: %v", err)
+		}
 	})
-	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("cleanup error=%v", err)
-	}
-	if result.ExitCode != 1 || result.Session == nil || !result.Session.Kept {
-		t.Fatalf("result=%#v", result)
-	}
-	if result.Status != "failed" || result.ErrorKind != core.RunErrorProvider {
-		t.Fatalf("status/error=%q/%q", result.Status, result.ErrorKind)
-	}
-	if execCalls != 2 {
-		t.Fatalf("exec calls=%d, want prepare and command", execCalls)
-	}
-	select {
-	case <-deleteSeen:
-	default:
-		t.Fatal("destroy was not attempted")
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("Run took %s, want bounded cleanup", elapsed)
-	}
-	if _, ok, err := core.ResolveLeaseClaimForProvider(createdID, providerName); err != nil || !ok {
-		t.Fatalf("missing recovery claim: %v", err)
-	}
 }
 
 func TestCloudflareRunKeepReturnsSessionHandle(t *testing.T) {
