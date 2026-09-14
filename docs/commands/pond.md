@@ -26,6 +26,12 @@ crabbox pond release alpha
 crabbox doctor --pond alpha
 ```
 
+Use `--help` or `-h` on any subcommand to show its usage. For `connect`,
+`disconnect`, and `release`, help flags also work after the pond name and exit
+before loading operational state. `disconnect` and `release` require exactly
+one name and reject unknown flags. Use `--` before a name that starts with `-`
+to treat it as a literal name.
+
 Pond discovery reads **local claim sidecars** (the per-repo lease records this
 machine wrote), not the coordinator. Leases claimed on another operator machine
 do not appear. For coordinator-authoritative lease listings filtered by pond,
