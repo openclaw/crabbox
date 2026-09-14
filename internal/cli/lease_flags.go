@@ -60,7 +60,7 @@ func registerLeaseCreateFlagsWithOptions(fs *flag.FlagSet, defaults Config, opti
 	cacheVolumes := stringListFlag{}
 	imageSDK := stringListFlag{}
 	imageRuntime := stringListFlag{}
-	fs.Var(&expose, "expose", "declare a TCP port for SSH-mesh discovery; creation-only for managed leases; repeatable")
+	fs.Var(&expose, "expose", "declare a TCP port this lease wants reachable over the SSH-mesh plane; repeatable")
 	fs.Var(&cacheVolumes, "cache-volume", "provider-backed cache volume [name=]key:path; repeatable")
 	fs.Var(&imageSDK, "image-sdk", "minimum SDK in name=version form; repeatable")
 	fs.Var(&imageRuntime, "image-runtime", "minimum runtime in name=version form; repeatable")
