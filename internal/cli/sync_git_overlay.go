@@ -583,10 +583,6 @@ func captureGitCheckoutStateWithStateReader(root string, betweenSamples func(), 
 	return first, nil
 }
 
-func readGitOverlayCheckoutState(root string) (gitOverlayCheckoutState, error) {
-	return readGitCheckoutStateWithReader(root, gitOverlayGitBytes)
-}
-
 func readGitCheckoutStateWithReader(root string, readBytes func(string, ...string) ([]byte, error)) (gitOverlayCheckoutState, error) {
 	output := func(args ...string) (string, error) {
 		out, err := readBytes(root, args...)
@@ -615,11 +611,6 @@ func validGitObjectID(value string) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil
-}
-
-func gitOverlayGitOutput(root string, args ...string) (string, error) {
-	output, err := gitOverlayGitBytes(root, args...)
-	return strings.TrimSpace(string(output)), err
 }
 
 func gitOverlayGitBytes(root string, args ...string) ([]byte, error) {
