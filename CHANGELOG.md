@@ -2,10 +2,6 @@
 
 ## Unreleased
 
-### Fixes
-
-- Seed detached commits by their exact origin SHA before POSIX/WSL2 file sync, verifying the seed and retaining normal sync when the remote cannot serve the commit.
-
 ### Changes
 
 - Add explicit include-only directory sync through the existing POSIX/WSL SSH manifest path, using isolated Git ignore matching without creating source Git metadata. [PR 2253](https://github.com/openclaw/crabbox/pull/2253). Thanks @coygeek.
@@ -15,6 +11,7 @@
 
 ### Fixes
 
+- Seed detached commits by their exact origin SHA before POSIX/WSL2 file sync, verifying the seed and retaining normal sync when the remote cannot serve the commit.
 - Warn when `--expose` cannot change an existing coordinator-managed lease's Pond ports and point to `crabbox tunnel` for forwarding an existing service. [PR 2256](https://github.com/openclaw/crabbox/pull/2256).
 
 ## 0.59.0 - 2026-09-13
