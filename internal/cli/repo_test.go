@@ -1817,7 +1817,7 @@ func TestSyncManifestDoesNotDeleteStagedGitlink(t *testing.T) {
 	}
 }
 
-func TestRemoteGitSeedCandidateRequiresRemoteTrackingRef(t *testing.T) {
+func TestGitCoherenceRequiresRemoteTrackingRef(t *testing.T) {
 	dir := t.TempDir()
 	runGit(t, dir, "init")
 	runGit(t, dir, "config", "user.email", "test@example.com")
@@ -1829,11 +1829,11 @@ func TestRemoteGitSeedCandidateRequiresRemoteTrackingRef(t *testing.T) {
 
 	repo := Repo{Root: dir, RemoteURL: "https://github.com/openclaw/crabbox.git", Head: head}
 	if plan, _ := syncGitCoherencePlan(baseConfig(), repo); plan.enabled() {
-		t.Fatal("unpublished head should not be a seed candidate")
+		t.Fatal("head without a containing branch should not enable coherence")
 	}
 	runGit(t, dir, "update-ref", "refs/remotes/origin/main", head)
 	if plan, _ := syncGitCoherencePlan(baseConfig(), repo); !plan.enabled() {
-		t.Fatal("head in a remote-tracking ref should be a seed candidate")
+		t.Fatal("head in a remote-tracking ref should enable coherence")
 	}
 }
 

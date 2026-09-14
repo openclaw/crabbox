@@ -630,10 +630,12 @@ func syncIncludes(cfg Config) []string {
 type gitCoherencePlan struct{ RemoteURL, Target, Tree, Branch string }
 
 func (p gitCoherencePlan) seedEnabled() bool {
-	return p.RemoteURL != "" && normalizeGitRemoteURL(p.RemoteURL) == p.RemoteURL && p.Target != "" && p.Branch != ""
+	return p.RemoteURL != "" && normalizeGitRemoteURL(p.RemoteURL) == p.RemoteURL && p.Target != "" && (p.Branch != "" || p.Tree != "")
 }
 
-func (p gitCoherencePlan) enabled() bool { return p.seedEnabled() && p.Tree != "" }
+// Exact-SHA seeds do not establish the advertised-branch contract needed for
+// coherence, fingerprint reuse, or the opt-in Git overlay.
+func (p gitCoherencePlan) enabled() bool { return p.seedEnabled() && p.Branch != "" && p.Tree != "" }
 
 func syncGitCoherencePlan(cfg Config, repo Repo) (gitCoherencePlan, bool) {
 	if !cfg.Sync.GitSeed || len(syncIncludes(cfg)) != 0 || repo.Root == "" || repo.RemoteURL == "" || repo.Head == "" {
@@ -651,7 +653,7 @@ func syncGitCoherencePlan(cfg Config, repo Repo) (gitCoherencePlan, bool) {
 	tree := gitOutput(repo.Root, "rev-parse", "--verify", repo.Head+"^{tree}")
 	branch := originBranchForTarget(repo.Root, firstNonBlank(cfg.Sync.BaseRef, repo.BaseRef), target)
 	plan := gitCoherencePlan{RemoteURL: normalizeGitRemoteURL(repo.RemoteURL), Target: target, Branch: branch}
-	if target == "" || target != repo.Head || branch == "" {
+	if target == "" || target != repo.Head || (branch == "" && !cfg.Sync.Delete) {
 		return gitCoherencePlan{}, false
 	}
 	overlayOnly, err := gitTargetRequiresOverlayOnly(repo.Root, target)

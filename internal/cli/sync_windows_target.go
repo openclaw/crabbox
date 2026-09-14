@@ -10,6 +10,11 @@ import (
 )
 
 func syncWindowsNative(ctx context.Context, target SSHTarget, repo Repo, cfg Config, coherence gitCoherencePlan, workdir string, manifest SyncManifest, stdout, stderr anyWriter, opts rsyncOptions) error {
+	// Native Windows transfers a complete archive; speculative SHA seeding
+	// cannot reduce its payload and keeps the existing branch-only contract.
+	if coherence.Branch == "" {
+		coherence = gitCoherencePlan{}
+	}
 	if err := runSSHQuiet(ctx, target, windowsPrepareWorkdir(workdir, cfg.Sync.Delete)); err != nil {
 		return Exit(7, "prepare remote workdir: %v", err)
 	}
@@ -114,7 +119,7 @@ function Test-CrabboxSameDirectory([string]$Left, [string]$Right) {
 }
 
 func windowsGitSeed(workdir string, plan gitCoherencePlan) string {
-	if !plan.seedEnabled() {
+	if !plan.seedEnabled() || plan.Branch == "" {
 		return PowershellCommand(`exit 0`)
 	}
 	return PowershellCommand(`$ErrorActionPreference = "Stop"

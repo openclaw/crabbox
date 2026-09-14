@@ -2234,8 +2234,11 @@ retrySync:
 		if !overlayDecision.Enabled && !plainManifestMode && coherence.seedEnabled() {
 			stepStart = time.Now()
 			if out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
-				if reason, fallback := gitOriginRuntimeFallbackResult(coherence.RemoteURL, out, err); fallback {
+				if reason, fallback := gitSeedRuntimeFallbackResult(coherence, out, err); fallback {
 					usePlainManifestForOrigin(reason)
+				} else if coherence.Branch == "" {
+					reportRemoteGitSeedFailure(a.Stderr, out, err, "aborting before file sync")
+					return recordFailure(Exit(6, "remote git seed failed: %v", err))
 				} else {
 					warnRemoteGitSeedFailure(a.Stderr, out, err)
 				}

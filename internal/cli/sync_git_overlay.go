@@ -1355,6 +1355,15 @@ func gitOverlayFallbackResult(output string, err error) (string, bool) {
 	return reason, fallback
 }
 
+func gitSeedRuntimeFallbackResult(plan gitCoherencePlan, output string, err error) (string, bool) {
+	// The runner has not published the private seed when its exact-SHA fetch
+	// fails. Local-only commits and servers that refuse SHA wants use file sync.
+	if plan.Branch == "" && plan.seedEnabled() && err != nil && exitCode(err) == gitOriginRuntimeFallbackExitCode {
+		return "exact_commit_unavailable", true
+	}
+	return gitOriginRuntimeFallbackResult(plan.RemoteURL, output, err)
+}
+
 func gitOriginRuntimeFallbackResult(remoteURL, output string, err error) (string, bool) {
 	if err == nil || exitCode(err) != gitOriginRuntimeFallbackExitCode {
 		return "", false

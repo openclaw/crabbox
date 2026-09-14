@@ -297,8 +297,8 @@ Once ownership is established, sync runs these steps:
    the remote one. If they match, print
    `No changes detected, skipping sync` and skip the rest.
 5. On `--full-resync` / `--fresh-sync`, reset the remote workdir first.
-6. Seed the remote Git tree from `origin` at the local `HEAD` when that commit
-   is reachable from a remote ref, so rsync only ships the diff.
+6. Seed the remote Git tree from `origin` at the local `HEAD` when the runner
+   can fetch that commit, so rsync only ships the diff.
 7. Write the manifest (and the deletion list) to the remote workdir.
 8. When delete-sync is enabled, prune previously synced remote files that are no
    longer in the manifest.
@@ -331,8 +331,7 @@ already carries that fingerprint, the sync is skipped entirely. `--full-resync`
 ignores the remote fingerprint and forces a clean transfer.
 
 Git seeding (`sync.gitSeed`, default on) clones or fetches the base tree on the
-runner before rsync, so only your diff travels over the wire. It activates only
-when the local `HEAD` commit is reachable from a remote ref.
+runner before rsync, so only your diff travels over the wire.
 Among local origin tracking branches that contain the selected commit, Crabbox
 prefers the explicit `sync.baseRef` (or the inferred repository base when unset),
 then origin's symbolic default branch, then
@@ -341,6 +340,20 @@ commits; the selected commit and tree remain unchanged. Planning does not contac
 origin or prune tracking refs, so a local candidate may still be stale. On the
 runner, Git coherence fetches the chosen advertised branch and verifies target
 ancestry and tree before aligning metadata.
+
+Without a containing origin tracking branch, POSIX/WSL2 delete-sync attempts an exact
+commit fetch from the same origin. This supports detached CI merge commits and
+other commits the remote serves by SHA without creating local tracking refs.
+The runner verifies the commit and tree in a private directory before publishing
+the seed, then ordinary manifest pruning and rsync apply local edits, additions,
+deletions, and excludes. Missing runner Git and a refused or unavailable exact
+commit fetch fall back to plain file sync; commit or tree verification failures
+abort before transfer. With `sync.delete: false`, this optimization stays off so
+the seed cannot introduce excluded files that sync would then retain.
+These seeds do not enable branch-based coherence, reusable fingerprints, or Git
+overlay. Native Windows retains branch-only seeding because it transfers the
+complete archive. Submodules and filter-managed trees retain file sync when no
+containing branch is available.
 
 Crabbox disables Git seeding when the origin is an HTTP(S) URL with embedded
 userinfo, warns without printing the URL, and uses the normal file sync instead.
@@ -362,7 +375,7 @@ Fallback warnings contain only a fixed reason. The plain manifest path clears
 reusable fingerprints and Git hydration markers and does not forward local
 credentials.
 
-Local Actions hydration keeps unclassified seeding failures fatal, including
+For branch-based seeds, local Actions hydration keeps unclassified seeding failures fatal, including
 missing refs, verification failures, and HTTP 5xx or other server failures,
 and aborts before file sync. Seed failure diagnostics report a fixed phase,
 advisory category, and command exit status. Raw Git/SSH output, URLs, paths,

@@ -2029,9 +2029,26 @@ func remoteGitSeed(workdir string, plan gitCoherencePlan) string {
 		return "true"
 	}
 	parent := filepath.ToSlash(filepath.Dir(workdir))
+	seed := `origin_git clone --quiet --filter=blob:none --no-checkout --single-branch --branch ` + shellQuote(plan.Branch) + ` "$expected_origin" "$tmp"`
+	prepare, seedManifest := "", ""
+	checkoutGit := "git"
+	prerequisiteExitCode := 127
+	if plan.Branch == "" {
+		prerequisiteExitCode = gitOriginRuntimeFallbackExitCode
+		prepare = `origin_git init --quiet --template= "$tmp"
+origin_git -C "$tmp" remote add origin "$expected_origin"
+`
+		seed = `origin_git -C "$tmp" fetch --quiet --filter=blob:none --no-tags origin ` + shellQuote(plan.Target)
+		checkoutGit = "origin_git"
+		// The private seed owns these files. Recording them lets the normal
+		// manifest prune excluded paths before local files are transferred.
+		seedManifest = remoteSyncMetaDirScript() + `mkdir -p "$meta_dir"
+git ls-files -z > "$meta_dir/sync-manifest"
+`
+	}
 	script := `set -e
 printf 'crabbox-git-seed phase=prerequisite\n'
-command -v git >/dev/null 2>&1 || exit 127
+command -v git >/dev/null 2>&1 || exit ` + strconv.Itoa(prerequisiteExitCode) + `
 printf 'crabbox-git-seed phase=prepare\n'
 workdir=` + shellQuote(workdir) + `
 expected_origin=` + shellQuote(plan.RemoteURL) + `
@@ -2051,13 +2068,14 @@ tmp="$(mktemp -d ` + shellQuote(parent+"/.seed.XXXXXX") + `)"
 transport_error="$tmp.transport-error"
 cleanup_seed() { rm -rf -- "$tmp"; rm -f -- "$transport_error"; }
 trap cleanup_seed EXIT
+` + prepare + `
 printf 'crabbox-git-seed phase=clone\n'
-if ! origin_git clone --quiet --filter=blob:none --no-checkout --single-branch --branch ` + shellQuote(plan.Branch) + ` "$expected_origin" "$tmp" >/dev/null 2>"$transport_error"; then
+if ! { ` + seed + `; } >/dev/null 2>"$transport_error"; then
   cat "$transport_error" >&2
   exit ` + strconv.Itoa(gitOriginRuntimeFallbackExitCode) + `
 fi
 printf 'crabbox-git-seed phase=checkout\n'
-git -C "$tmp" checkout --quiet --detach ` + shellQuote(plan.Target) + `
+` + checkoutGit + ` -C "$tmp" checkout --quiet --detach ` + shellQuote(plan.Target) + `
 printf 'crabbox-git-seed phase=verify\n'
 [ "$(git -C "$tmp" rev-parse --verify HEAD^{commit})" = ` + shellQuote(plan.Target) + ` ]
 cd "$tmp"
@@ -2067,6 +2085,7 @@ if [ -n "$expected_tree" ]; then
 fi
 printf 'crabbox-git-seed phase=origin\n'
 repair_origin
+` + seedManifest + `
 printf 'crabbox-git-seed phase=publish\n'
 cd /
 rm -rf -- "$workdir"
