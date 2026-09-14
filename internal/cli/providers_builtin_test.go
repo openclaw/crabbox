@@ -664,7 +664,7 @@ func (testAWSProvider) Spec() ProviderSpec {
 			{OS: targetWindows, WindowsMode: windowsModeWSL2},
 			{OS: targetMacOS},
 		},
-		Features:         FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCode, FeatureRunSession},
+		Features:         FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCode, FeatureRunSession, FeatureTailscale},
 		Coordinator:      CoordinatorSupported,
 		ClassDisposition: ProviderClassDispositionMapped,
 	}

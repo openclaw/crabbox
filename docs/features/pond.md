@@ -57,7 +57,7 @@ instead.
 
 | Plane     | Feature flag       | Providers that advertise it (today)                                                                                       | What you get                                                |
 | --------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Tailscale | `FeatureTailscale` | Hetzner, Azure, GCP, Islo (userspace `tailscaled` via exec, opt-in with `--tailscale`)                                    | tailnet membership; OS-routed peer mesh on managed Linux, userspace proxy path on Islo |
+| Tailscale | `FeatureTailscale` | AWS, Hetzner, Azure, GCP, Islo (userspace `tailscaled` via exec, opt-in with `--tailscale`)                               | tailnet membership; OS-routed peer mesh on managed Linux, userspace proxy path on Islo |
 | Bridge    | `FeatureURLBridge` | Islo, E2B, Railway                                                                                                      | provider-native HTTP(S) endpoints for discovery and sharing |
 | SSH-mesh  | `FeatureSSH`       | any provider advertising SSH: Hetzner, Azure, GCP, AWS, Proxmox, static `ssh`, RunPod, exe-dev, Daytona, Sprites, Namespace, Semaphore, local-container, Parallels | operator-side `ssh -L` tunnels via `pond connect`           |
 
@@ -106,8 +106,9 @@ every plane that member's provider supports:
 
 The endpoint shape depends on the primary plane: a tailnet IPv4/FQDN for
 Tailscale members, `ssh://host:port` for SSH-lease members, and a per-port
-HTTPS URL for URL-bridge members. Members whose endpoint is not yet recorded
-surface with `transport: "pending"` and an honest note; providers with no
+HTTPS URL for URL-bridge members. SSH leases without Tailscale enrollment use
+their SSH endpoint even when the provider supports Tailscale. Members whose
+endpoint is not yet recorded surface with `transport: "pending"` and an honest note; providers with no
 networking adapter (e.g. Blacksmith) surface with `transport: "none"`.
 
 The bridge plane is HTTP-only by design. For URL-bridge providers you can

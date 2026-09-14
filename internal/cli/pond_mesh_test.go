@@ -978,7 +978,7 @@ func TestProviderCapabilitiesPrimary(t *testing.T) {
 		{"hetzner", TransportTailnet},
 		{"azure", TransportTailnet},
 		{"gcp", TransportTailnet},
-		{"aws", TransportSSH},     // FeatureSSH only; no FeatureTailscale yet
+		{"aws", TransportTailnet},
 		{"proxmox", TransportSSH}, // legacy mapping was TransportTailnet — capability model corrects to SSH
 		{"exe-dev", TransportSSH},
 		{"daytona", TransportSSH},
@@ -1008,7 +1008,7 @@ func TestProviderCapabilitiesAvailable(t *testing.T) {
 		{"hetzner", []string{TransportTailnet, TransportSSH}},
 		{"azure", []string{TransportTailnet, TransportSSH}},
 		{"gcp", []string{TransportTailnet, TransportSSH}},
-		{"aws", []string{TransportSSH}},
+		{"aws", []string{TransportTailnet, TransportSSH}},
 		{"exe-dev", []string{TransportSSH}},
 		{"islo", []string{TransportURL}},
 		{"modal", nil},

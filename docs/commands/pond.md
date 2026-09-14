@@ -74,16 +74,19 @@ optional `note`:
 
 ### Transports
 
-A peer's `transport` is its provider's *primary* (recommended) plane; the full
-list of planes the provider supports is on `transports`. A provider opts into a
-plane by declaring the matching feature (`tailscale`, `ssh`, `url-bridge`), so
+A peer's `transport` is its recommended plane for the recorded lease; the full
+list of planes the provider supports is on `transports`. SSH leases without
+Tailscale enrollment keep their SSH endpoint. Once enrollment is recorded,
+the tailnet endpoint takes priority and missing tailnet addresses surface as
+`pending`. A provider opts into a plane by declaring the matching feature
+(`tailscale`, `ssh`, `url-bridge`), so
 one provider can advertise several — managed-Linux providers offer both the
 tailnet peer mesh and the operator-side SSH mesh.
 
 | Transport | Producers                                                                                                  | Endpoint shape                |
 | --------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------- |
-| `tailnet` | Hetzner / Azure / GCP (managed Linux with Tailscale)                                                       | tailnet IPv4 (or FQDN)        |
-| `ssh`     | AWS / Proxmox / static SSH / exe.dev / RunPod / Daytona / Sprites / Namespace / Semaphore                  | `ssh://<host>:<port>`         |
+| `tailnet` | AWS / Hetzner / Azure / GCP (managed Linux with Tailscale)                                                 | tailnet IPv4 (or FQDN)        |
+| `ssh`     | SSH leases without Tailscale enrollment, including AWS / Proxmox / static SSH / exe.dev / RunPod / Daytona / Sprites / Namespace / Semaphore | `ssh://<host>:<port>` |
 | `url`     | Islo / E2B / Railway                                                                                       | per-sandbox public HTTPS URL  |
 | `pending` | a tailnet- or SSH-capable provider whose claim has no endpoint recorded yet                                | empty (note explains)         |
 | `none`    | Blacksmith (owns its own connectivity), or any provider with no bridge adapter                             | empty (note explains)         |
@@ -96,8 +99,8 @@ the gap rather than mistaking it for "no shares published yet".
 
 | Provider                                                     | Transport | Notes                                                                                                       |
 | ------------------------------------------------------------ | --------- | ----------------------------------------------------------------------------------------------------------- |
-| Hetzner / Azure / GCP                                        | `tailnet` | Endpoint = tailnet IPv4 (or FQDN) from the local claim sidecar. Empty endpoint surfaces as `pending`.       |
-| AWS / Proxmox / static SSH                                   | `ssh`     | Endpoint = `ssh://<host>:<port>` from the claim. Empty host or port surfaces as `pending`.                  |
+| AWS / Hetzner / Azure / GCP                                  | `tailnet` or `ssh` | Tailscale enrollment selects the tailnet IPv4 (or FQDN) from the claim; an address still pending stays `pending`. Without enrollment, uses the recorded SSH endpoint. |
+| Proxmox / static SSH                                         | `ssh`     | Endpoint = `ssh://<host>:<port>` from the claim. Empty host or port surfaces as `pending`.                  |
 | exe.dev / RunPod / Daytona / Sprites / Namespace / Semaphore | `ssh`     | Endpoint = `ssh://<host>:<port>` from the claim. Empty host or port surfaces as `pending`.                  |
 | Islo                                                         | `url`     | Uses the Islo shares API. Existing shares are reused, so the call is idempotent.                            |
 | E2B                                                          | `url`     | Synthesizes the canonical per-port preview URL from the existing sandbox and config.                        |

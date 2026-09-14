@@ -545,6 +545,10 @@ func bridgePeerFromClaim(claim leaseClaim, class string) BridgePeer {
 	if caps.TailscaleEgress && claimHasTailscaleMetadata(claim) {
 		peer.Note = "tailnet available for outbound proxy traffic only"
 	}
+	// Tailscale is optional on SSH leases; capability alone does not enroll a peer.
+	if class == TransportTailnet && caps.SSHMesh && !claimHasTailscaleMetadata(claim) {
+		class = TransportSSH
+	}
 	switch class {
 	case TransportTailnet:
 		endpoint := firstNonEmpty(claim.TailscaleIPv4, claim.TailscaleFQDN)
