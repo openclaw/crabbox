@@ -885,10 +885,22 @@ func TestWSLStageLauncherConfirmsOriginalAndCleanupTermination(t *testing.T) {
 			script := `[Environment]::CurrentDirectory=` + psQuote(bin) + `;` +
 				decodePowerShellCommand(t, wslStageLauncherCommand(nonce, spool.size, spool.digest(), wslStageCMD))
 			invocationStarted := time.Now()
-			output, err := runWindowsPowerShellScript(t, script)
+			cmd := windowsPowerShellScriptCommand(t, script)
+			output, err := cmd.CombinedOutput()
 			invocationReturned := time.Now()
 			timing("invocation-start", invocationStarted)
 			timing("invocation-return", invocationReturned)
+			// Stored OS timing describes the direct PowerShell child, not the fixture helper.
+			directExitRecorded := false
+			if cmd.ProcessState != nil {
+				if usage, ok := cmd.ProcessState.SysUsage().(*syscall.Rusage); ok && usage != nil && usage.ExitTime != (syscall.Filetime{}) {
+					timing("direct-powershell-os-exit", time.Unix(0, usage.ExitTime.Nanoseconds()))
+					directExitRecorded = true
+				}
+			}
+			if !directExitRecorded {
+				timing("direct-powershell-os-exit-unavailable", invocationReturned)
+			}
 			logs := readFakeWSLStageFile(logPath)
 			if err == nil || !strings.Contains(string(output), test.want) {
 				t.Fatalf("output=%q error=%v logs=%q want=%q", output, err, logs, test.want)
