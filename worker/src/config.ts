@@ -135,7 +135,8 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     provider !== "aws" &&
     provider !== "azure" &&
     provider !== "gcp" &&
-    provider !== "daytona"
+    provider !== "daytona" &&
+    provider !== "koyeb"
   ) {
     throw new Error(`unsupported provider: ${String(provider)}`);
   }
@@ -179,7 +180,8 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
       provider === "hetzner" ||
       provider === "azure" ||
       provider === "gcp" ||
-      provider === "daytona"
+      provider === "daytona" ||
+      provider === "koyeb"
     ) {
       throw new Error(unsupportedManagedTargetMessage(provider, target));
     }
@@ -218,6 +220,16 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
       "brokered provider=daytona takes CPU, memory, and disk from the configured Daytona snapshot",
     );
   }
+  if (provider === "koyeb") {
+    if (input.serverTypeExplicit) {
+      throw new Error(
+        "brokered provider=koyeb takes CPU and memory from the coordinator Koyeb instance configuration",
+      );
+    }
+    if (input.tailscaleExitNode?.trim()) {
+      throw new Error("brokered provider=koyeb does not support a Tailscale exit node");
+    }
+  }
   if (
     provider === "azure" &&
     target === "windows" &&
@@ -249,8 +261,10 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
   const azureSnapshot = input.azureSnapshot ?? "";
   const serverTypeAzureOSDisk = azureSnapshot ? "managed" : azureOSDisk;
   const serverType =
-    provider === "daytona"
-      ? "snapshot"
+    provider === "daytona" || provider === "koyeb"
+      ? provider === "daytona"
+        ? "snapshot"
+        : "large"
       : (input.serverType ??
         serverTypeForConfig(
           provider,
@@ -260,7 +274,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
           architecture,
           serverTypeAzureOSDisk,
         ));
-  if (input.serverType && provider !== "daytona") {
+  if (input.serverType && provider !== "daytona" && provider !== "koyeb") {
     validateArchitectureServerType(
       provider,
       target,
@@ -323,7 +337,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     browser: input.browser ?? false,
     imageRequirements: normalizeImageRequirements(input.imageRequirements),
     code: input.code ?? false,
-    tailscale: input.tailscale ?? false,
+    tailscale: provider === "koyeb" ? (input.tailscale ?? true) : (input.tailscale ?? false),
     tailscaleTags: normalizeTailscaleTags(input.tailscaleTags ?? ["tag:crabbox"]),
     tailscaleHostname: input.tailscaleHostname ?? "",
     tailscaleAuthKey: "",
@@ -380,13 +394,18 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     capacityAvailabilityZones: input.capacity?.availabilityZones ?? [],
     capacityHints: input.capacity?.hints ?? true,
     sshUser,
-    sshPort: provider === "daytona" ? "22" : (input.sshPort ?? "2222"),
-    sshFallbackPorts: provider === "daytona" ? [] : validPorts(input.sshFallbackPorts ?? ["22"]),
+    sshPort: provider === "daytona" || provider === "koyeb" ? "22" : (input.sshPort ?? "2222"),
+    sshFallbackPorts:
+      provider === "daytona" || provider === "koyeb"
+        ? []
+        : validPorts(input.sshFallbackPorts ?? ["22"]),
     providerKey: input.providerKey?.trim() ?? "",
     workRoot:
       input.workRoot ??
-      (provider === "daytona"
-        ? "/home/daytona/crabbox"
+      (provider === "daytona" || provider === "koyeb"
+        ? provider === "daytona"
+          ? "/home/daytona/crabbox"
+          : "/workspace/crabbox"
         : defaultWorkRoot(target, windowsMode, sshUser)),
     ttlSeconds,
     idleTimeoutSeconds,
@@ -811,22 +830,6 @@ export function serverTypeForClass(machineClass: string): string {
   return serverTypeCandidatesForClass(machineClass)[0] ?? machineClass;
 }
 
-export function serverTypeForProviderClass(provider: Provider, machineClass: string): string {
-  if (provider === "daytona") {
-    return "snapshot";
-  }
-  if (provider === "aws") {
-    return awsInstanceTypeCandidatesForClass(machineClass)[0] ?? machineClass;
-  }
-  if (provider === "azure") {
-    return azureVMSizeCandidatesForClass(machineClass)[0] ?? machineClass;
-  }
-  if (provider === "gcp") {
-    return gcpMachineTypeCandidatesForClass(machineClass)[0] ?? machineClass;
-  }
-  return serverTypeForClass(machineClass);
-}
-
 export function serverTypeForConfig(
   provider: Provider,
   target: TargetOS,
@@ -837,6 +840,9 @@ export function serverTypeForConfig(
 ): string {
   if (provider === "daytona") {
     return "snapshot";
+  }
+  if (provider === "koyeb") {
+    return "large";
   }
   if (provider === "aws") {
     return (

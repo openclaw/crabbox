@@ -39,6 +39,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/hyperv"
 	_ "github.com/openclaw/crabbox/internal/providers/incus"
 	_ "github.com/openclaw/crabbox/internal/providers/islo"
+	_ "github.com/openclaw/crabbox/internal/providers/koyeb"
 	_ "github.com/openclaw/crabbox/internal/providers/kubevirt"
 	_ "github.com/openclaw/crabbox/internal/providers/lambda"
 	_ "github.com/openclaw/crabbox/internal/providers/linode"

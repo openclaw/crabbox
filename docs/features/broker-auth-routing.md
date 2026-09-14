@@ -184,6 +184,10 @@ Login is gated by GitHub org membership before a user token is minted:
 - The allowed org set comes from `CRABBOX_GITHUB_ALLOWED_ORG` or comma-separated
   `CRABBOX_GITHUB_ALLOWED_ORGS`; if neither is set, it falls back to `CRABBOX_DEFAULT_ORG`.
   If no allowed org resolves, login is rejected.
+- If `CRABBOX_GITHUB_ALLOWED_OWNERS` is set, the immutable account owner must match one of
+  its comma-separated, canonical `github:<positive-numeric-id>` entries. Unset or blank
+  preserves org/team-only admission. Invalid or mutable entries fail closed, and policy
+  changes reject existing signed user and portal tokens before a warm membership cache is used.
 - The user must be an **active** member of an allowed org.
 - If `CRABBOX_GITHUB_ALLOWED_TEAMS` (or `CRABBOX_GITHUB_ALLOWED_TEAM`) is set, the user must
   also belong to at least one listed team after org membership passes. Entries are team
@@ -203,6 +207,7 @@ Login is gated by GitHub org membership before a user token is minted:
 ```text
 CRABBOX_GITHUB_CLIENT_ID
 CRABBOX_GITHUB_CLIENT_SECRET
+CRABBOX_GITHUB_ALLOWED_OWNERS    # optional; comma-separated github:<positive-numeric-id> owners
 CRABBOX_GITHUB_ALLOWED_ORG       # or CRABBOX_GITHUB_ALLOWED_ORGS (comma-separated)
 CRABBOX_GITHUB_ALLOWED_TEAMS     # optional; comma-separated team slugs
 CRABBOX_GITHUB_ADMIN_OWNERS      # optional; comma-separated github:<numeric-id> owners with admin

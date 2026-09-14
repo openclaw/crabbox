@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ "$#" -eq 0 ]] || { echo "crabbox-worker-browser does not accept arguments" >&2; exit 64; }
+[[ -r /var/lib/crabbox/desktop.env ]] || { echo "Crabbox desktop environment is unavailable" >&2; exit 1; }
+grep -Fx 'CRABBOX_DESKTOP_ENV=xfce' /var/lib/crabbox/desktop.env >/dev/null || {
+  echo "Crabbox desktop environment is not XFCE" >&2
+  exit 1
+}
+grep -Fx 'DISPLAY=:99' /var/lib/crabbox/desktop.env >/dev/null || {
+  echo "Crabbox XFCE display is not :99" >&2
+  exit 1
+}
+[[ -x /usr/local/bin/crabbox-browser ]] || { echo "Crabbox browser is unavailable" >&2; exit 1; }
+[[ -r /var/lib/crabbox/lease-id ]] || { echo "Crabbox lease identity is unavailable" >&2; exit 1; }
+
+lease_id="$(< /var/lib/crabbox/lease-id)"
+[[ "$lease_id" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || { echo "Crabbox lease identity is invalid" >&2; exit 1; }
+worker_home="$(getent passwd "$(id -u)" | cut -d: -f6)"
+case "$worker_home" in
+  /*) ;;
+  *) echo "Crabbox worker home is invalid" >&2; exit 1 ;;
+esac
+
+export DISPLAY=:99
+export HOME="$worker_home"
+export CRABBOX_BROWSER_PROFILE="$worker_home/.cache/crabbox/worker-browser/$lease_id"
+mkdir -p "$CRABBOX_BROWSER_PROFILE"
+chmod 0700 "$CRABBOX_BROWSER_PROFILE"
+exec 9>"$CRABBOX_BROWSER_PROFILE/.crabbox-launch.lock"
+flock -x 9
+
+cdp_url=http://127.0.0.1:9222/json/version
+if curl --fail --silent --show-error --max-time 1 "$cdp_url" >/dev/null; then
+  exit 0
+fi
+
+launch_log="$CRABBOX_BROWSER_PROFILE/launch.log"
+: >"$launch_log"
+nohup /usr/local/bin/crabbox-browser \
+  --remote-debugging-address=127.0.0.1 \
+  --remote-debugging-port=9222 \
+  about:blank >>"$launch_log" 2>&1 </dev/null &
+for _attempt in $(seq 1 40); do
+  if curl --fail --silent --show-error --max-time 1 "$cdp_url" >/dev/null; then
+    exit 0
+  fi
+  sleep 0.5
+done
+
+echo "Browser CDP did not become ready on 127.0.0.1:9222 within 20 seconds" >&2
+exit 1

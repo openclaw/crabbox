@@ -2,7 +2,7 @@ import type { LeaseConfig } from "./config";
 import type { CoordinatorStorageView } from "./coordinator-runtime";
 import type { ProvisioningMaterial } from "./provisioning-material";
 import type { Provider } from "./types";
-import type { LeaseRecord, ProviderMachine, LeaseImageIdentity } from "./types";
+import type { LeaseRecord, ProviderMachine, LeaseImageIdentity, TailscaleMetadata } from "./types";
 
 export type ProvisioningPhase =
   | "prepared"
@@ -27,6 +27,14 @@ export interface ProvisioningPublication {
   server: ProviderMachine;
   serverType: string;
   market: string;
+  access?: {
+    sshUser: string;
+    sshPort: string;
+    sshFallbackPorts: string[];
+    workRoot: string;
+    sshHostKey?: string;
+    tailscale?: TailscaleMetadata;
+  };
   image?: LeaseImageIdentity;
   cost?: { hourlyUSD: number; maxUSD: number };
 }
@@ -67,6 +75,8 @@ export interface ProviderResumableProvisioning {
       deadline: number;
       retain?: boolean;
       recovering: boolean;
+      // Revalidate the claimed operation after provider reads, immediately before cleanup mutation.
+      assertCleanupOwner?: () => Promise<void>;
     } & (
       | { canceled: false; material: ProvisioningMaterial }
       | { canceled: true; material?: never }
@@ -75,7 +85,7 @@ export interface ProviderResumableProvisioning {
 }
 
 export interface ProviderProvisioningCleanupClaim {
-  provider: Extract<Provider, "aws" | "azure" | "gcp" | "daytona">;
+  provider: Extract<Provider, "aws" | "azure" | "gcp" | "daytona" | "koyeb">;
   cloudID: string;
   region?: string;
   providerProject?: string;
@@ -166,6 +176,11 @@ export function validateProviderProvisioningCleanupClaim(
       // original allocation context grants managed cleanup authority.
       return /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(claim.cloudID) &&
         /^daytona:context:v1:[a-f0-9]{64}$/.test(claim.providerScope ?? "")
+        ? claim
+        : undefined;
+    case "koyeb":
+      return /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(claim.cloudID) &&
+        /^koyeb:context:v1:[a-f0-9]{64}$/.test(claim.providerScope ?? "")
         ? claim
         : undefined;
   }

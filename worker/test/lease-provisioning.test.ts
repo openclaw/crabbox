@@ -1075,6 +1075,13 @@ describe("durable Azure admission and reconstruction", () => {
     expect(await readiness.json()).toMatchObject({
       resumableProvisioning: { available: false, missing: ["CRABBOX_SESSION_SECRET"] },
     });
+    const legacyReadiness = await fleet(storage, azure, {
+      CRABBOX_SESSION_SECRET: "",
+      CRABBOX_DURABLE_PROVISIONING_ADMISSION: "false",
+    }).coordinator.fetch(request("GET", "/v1/providers/azure/readiness?target=windows"));
+    expect(await legacyReadiness.json()).toMatchObject({
+      resumableProvisioning: { available: false, missing: ["CRABBOX_SESSION_SECRET"] },
+    });
   });
 
   it("keeps fixed PUT replay and intent-conflict contracts", async () => {
@@ -1530,9 +1537,15 @@ describe("protected material", () => {
       generation: "generation",
       scope,
     };
-    const material = { adminPassword: "generated-password-123!", bootstrap: "original bootstrap" };
+    const material = {
+      adminPassword: "generated-password-123!",
+      bootstrap: "original bootstrap",
+      providerSecret: "provider-secret-value-with-32-bytes",
+    };
     const sealed = await sealProvisioningMaterial(env, binding, material);
     expect(JSON.stringify(sealed)).not.toContain(material.adminPassword);
+    expect(JSON.stringify(sealed)).not.toContain(material.bootstrap);
+    expect(JSON.stringify(sealed)).not.toContain(material.providerSecret);
     expect(await openProvisioningMaterial(env, binding, sealed)).toEqual(material);
     for (const field of ["leaseID", "operationID", "generation", "scope"] as const)
       await expect(
@@ -1547,5 +1560,16 @@ describe("protected material", () => {
         ciphertext: `AAAA${sealed.ciphertext.slice(4)}`,
       }),
     ).rejects.toThrow("unavailable");
+    await expect(
+      sealProvisioningMaterial(env, binding, { ...material, providerSecret: "too-short" }),
+    ).rejects.toThrow("unavailable");
+    const legacy = { adminPassword: material.adminPassword, bootstrap: material.bootstrap };
+    expect(
+      await openProvisioningMaterial(
+        env,
+        binding,
+        await sealProvisioningMaterial(env, binding, legacy),
+      ),
+    ).toEqual(legacy);
   });
 });

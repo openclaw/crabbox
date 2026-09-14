@@ -111,8 +111,11 @@ describe("GitHub user-token membership", () => {
     expect(payload.githubCredential).toEqual(expect.any(String));
   });
 
-  it("periodically revalidates the immutable account and organization membership", async () => {
-    const env = testEnv({ CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS: "300" });
+  it("authorizes an allowed owner and reuses the warm membership cache", async () => {
+    const env = testEnv({
+      CRABBOX_GITHUB_ALLOWED_OWNERS: `github:67890, github:${accountID}`,
+      CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS: "300",
+    });
     const token = await testToken(env);
     const fetchMock = membershipFetch();
     vi.stubGlobal("fetch", fetchMock);
@@ -127,6 +130,54 @@ describe("GitHub user-token membership", () => {
       authorized: true,
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([undefined, "", " \t "])(
+    "preserves org-only admission when the owner allowlist is %s",
+    (allowedOwners) => {
+      expect(
+        githubMembershipPolicy(
+          teamIdentity(),
+          testEnv({ CRABBOX_GITHUB_ALLOWED_OWNERS: allowedOwners }),
+        ),
+      ).toMatchObject({ org: "example-org" });
+    },
+  );
+
+  it("rejects an issued token immediately when its owner leaves the allowlist", async () => {
+    const env = testEnv({
+      CRABBOX_GITHUB_ALLOWED_OWNERS: `github:${accountID}`,
+      CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS: "300",
+    });
+    const token = await testToken(env);
+    const fetchMock = membershipFetch();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(authenticateRequest(tokenRequest(token), env)).resolves.toMatchObject({
+      authorized: true,
+    });
+    env.CRABBOX_GITHUB_ALLOWED_OWNERS = "github:67890";
+    await expect(authenticateRequest(tokenRequest(token), env)).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    "alice",
+    "owner:github:12345",
+    "github:0",
+    "github:-1",
+    "github:001",
+    "GitHub:12345",
+    "github:9007199254740992",
+    "github:12345,",
+  ])("fails closed on mutable or invalid allowed-owner selector %s", async (allowedOwners) => {
+    const env = testEnv({ CRABBOX_GITHUB_ALLOWED_OWNERS: allowedOwners });
+    const token = await testToken(env);
+    const fetchMock = vi.fn<() => void>();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(authenticateRequest(tokenRequest(token), env)).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("supports uncached membership checks for device principals", async () => {
