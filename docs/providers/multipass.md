@@ -174,6 +174,10 @@ positive; zero or negative YAML values leave the previous setting unchanged.
    non-`keep` VMs whose local claim is stale past the idle timeout plus the
    direct-provider grace window.
 
+List and status report the observed state for non-running instances, even when
+a previous readiness check saved a ready label. For running instances, an
+existing saved ready label remains visible.
+
 Multipass does not expose provider labels. Crabbox therefore treats the exact
 instance-bound local lease claim as the source of ownership. `stop` and
 `cleanup` skip every unclaimed instance, including stopped `crabbox-`-prefixed

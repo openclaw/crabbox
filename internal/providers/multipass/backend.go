@@ -642,6 +642,9 @@ func (b *backend) serverFromInstance(inst multipassInstance, claim core.LeaseCla
 		"work_root":   cfg.Multipass.WorkRoot,
 	})
 	status := multipassState(inst.State)
+	if !instanceRunning(inst.State) {
+		labels["state"] = status
+	}
 	if instanceRunning(inst.State) && labels["state"] == "ready" {
 		status = "ready"
 	}

@@ -753,11 +753,36 @@ func TestLaunchTimeoutArgumentRoundsUp(t *testing.T) {
 	}
 }
 
-func TestServerFromUnclaimedCrabboxNamedInstance(t *testing.T) {
-	b := testBackend(&recordingRunner{})
-	server := b.serverFromInstance(multipassInstance{Name: "crabbox-blue-1234abcd", State: "Running", IPv4: []string{"192.168.64.7"}, Release: "Ubuntu 24.04 LTS"}, core.LeaseClaim{}, b.configForRun())
-	if server.CloudID != "crabbox-blue-1234abcd" || server.Labels["provider"] != providerName || server.Labels["instance"] != "crabbox-blue-1234abcd" {
-		t.Fatalf("server=%#v", server)
+func TestServerFromInstanceMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name, observed, saved, want string
+	}{
+		{name: "unclaimed running", observed: "Running", want: "running"},
+		{name: "stopped overrides saved ready", observed: " Stopped ", saved: "ready", want: "stopped"},
+		{name: "running preserves saved ready", observed: "Running", saved: "ready", want: "ready"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := testBackend(&recordingRunner{})
+			cfg := b.configForRun()
+			claim := core.LeaseClaim{}
+			if tc.saved != "" {
+				claim.Labels = map[string]string{"state": tc.saved, "custom": "retained", "ssh_user": "saved-user"}
+			}
+			before := shared.CloneLabels(claim.Labels)
+			server := b.serverFromInstance(multipassInstance{Name: "crabbox-blue-1234abcd", State: tc.observed, IPv4: []string{"192.168.64.7"}, Release: "Ubuntu 24.04 LTS"}, claim, cfg)
+			if server.Status != tc.want || server.Labels["state"] != tc.want {
+				t.Fatalf("status=%q label=%q want %q", server.Status, server.Labels["state"], tc.want)
+			}
+			if server.CloudID != "crabbox-blue-1234abcd" || server.Name != "crabbox-blue-1234abcd" || server.Provider != providerName || server.Labels["provider"] != providerName || server.Labels["instance"] != "crabbox-blue-1234abcd" || server.PublicNet.IPv4.IP != "192.168.64.7" || server.ServerType.Name != "Ubuntu 24.04 LTS" {
+				t.Fatalf("unrelated resource metadata changed: %#v", server)
+			}
+			if tc.saved != "" && (server.Labels["custom"] != "retained" || server.Labels["ssh_user"] != "saved-user") {
+				t.Fatalf("saved metadata changed: %#v", server.Labels)
+			}
+			if !reflect.DeepEqual(shared.CloneLabels(claim.Labels), before) {
+				t.Fatal("projection mutated input labels")
+			}
+		})
 	}
 }
 

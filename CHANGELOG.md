@@ -5,6 +5,7 @@
 ### Changes
 
 - Add explicit include-only directory sync through the existing POSIX/WSL SSH manifest path, using isolated Git ignore matching without creating source Git metadata. [PR 2253](https://github.com/openclaw/crabbox/pull/2253). Thanks @coygeek.
+- Report the observed Multipass state when an instance is no longer running instead of retaining a stale ready label.
 
 ## 0.59.0 - 2026-09-13
 
