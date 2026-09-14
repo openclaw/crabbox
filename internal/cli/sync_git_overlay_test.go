@@ -1768,7 +1768,7 @@ func TestGitOverlaySnapshotDriftJoinsCleanupExhaustion(t *testing.T) {
 	if snapshotRoot != "" {
 		t.Cleanup(func() { _ = os.RemoveAll(snapshotRoot) })
 	}
-	if err == nil || !strings.Contains(err.Error(), "local Git overlay changed during snapshot creation") {
+	if !errors.Is(err, errSourceSnapshotDrift) {
 		t.Fatalf("snapshot drift error=%v", err)
 	}
 	if snapshot.Root == "" || snapshot.cleanupRoot == nil {
@@ -1779,7 +1779,7 @@ func TestGitOverlaySnapshotDriftJoinsCleanupExhaustion(t *testing.T) {
 	if !errors.Is(err, cleanupFailure) || !strings.Contains(err.Error(), "after 3 attempts") {
 		t.Fatalf("snapshot drift omitted exhausted cleanup failure: %v", err)
 	}
-	if driftAt, cleanupAt := strings.Index(err.Error(), "local Git overlay changed"), strings.Index(err.Error(), cleanupFailure.Error()); driftAt < 0 || cleanupAt < 0 || driftAt >= cleanupAt {
+	if driftAt, cleanupAt := strings.Index(err.Error(), errSourceSnapshotDrift.Error()), strings.Index(err.Error(), cleanupFailure.Error()); driftAt < 0 || cleanupAt < 0 || driftAt >= cleanupAt {
 		t.Fatalf("snapshot drift error order=%q", err)
 	}
 	if err := snapshot.cleanup(); err != nil {
