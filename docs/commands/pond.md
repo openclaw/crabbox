@@ -186,6 +186,9 @@ these aliases are operator-side conveniences, not lease-to-lease DNS:
 
 A lease declares the ports it wants reachable over the SSH mesh at warmup time
 with `--expose <port>` (repeatable, up to 10 distinct ports per lease).
+For coordinator-managed leases, these declarations cannot be changed by a later
+`run --id ... --expose ...`. To forward an existing loopback service without
+recreating the lease, use [`crabbox tunnel --id <lease> <port>`](tunnel.md).
 
 ## `pond disconnect`
 

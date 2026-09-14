@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- Warn when `--expose` cannot change an existing coordinator-managed lease's Pond ports and point to `crabbox tunnel` for forwarding an existing service.
+
 ## 0.59.0 - 2026-09-13
 
 ### Highlights

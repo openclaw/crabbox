@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -205,18 +206,39 @@ func TestApplyLeaseCreateFlagsSetsExposedPorts(t *testing.T) {
 		Network:     NetworkAuto,
 		Capacity:    CapacityConfig{Market: "spot"},
 	}
-	fs := flag.NewFlagSet("warmup", flag.ContinueOnError)
-	values := registerLeaseCreateFlags(fs, defaults)
-	if err := fs.Parse([]string{"--expose", "8080", "--expose", "9090"}); err != nil {
-		t.Fatal(err)
-	}
-	cfg := defaults
-	if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
-		t.Fatalf("applyLeaseCreateFlags: %v", err)
-	}
-	want := []string{"8080", "9090"}
-	if !reflect.DeepEqual(cfg.ExposedPorts, want) {
-		t.Fatalf("cfg.ExposedPorts=%v want %v", cfg.ExposedPorts, want)
+	for _, tc := range []struct {
+		name        string
+		leaseID     string
+		coordinator string
+		mode        BrokerMode
+	}{
+		{name: "managed creation", coordinator: "https://coordinator.example.com", mode: BrokerModeManaged},
+		{name: "direct reuse", leaseID: "cbx_direct"},
+		{name: "registered reuse", leaseID: "cbx_registered", coordinator: "https://coordinator.example.com", mode: BrokerModeRegistered},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := defaults
+			cfg.BrokerMode = tc.mode
+			cfg.Coordinator = tc.coordinator
+			var stderr bytes.Buffer
+			fs := flag.NewFlagSet("warmup", flag.ContinueOnError)
+			fs.SetOutput(&stderr)
+			values := registerLeaseCreateFlags(fs, cfg)
+			if err := fs.Parse([]string{"--provider", "hetzner", "--expose", "9090,8080", "--expose", "9090"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyLeaseCreateFlagsForLease(&cfg, fs, values, tc.leaseID); err != nil {
+				t.Fatalf("applyLeaseCreateFlags: %v", err)
+			}
+			want := []string{"8080", "9090"}
+			if !reflect.DeepEqual(cfg.ExposedPorts, want) {
+				t.Fatalf("cfg.ExposedPorts=%v want %v", cfg.ExposedPorts, want)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("unexpected diagnostic: %s", stderr.String())
+			}
+		})
 	}
 }
 

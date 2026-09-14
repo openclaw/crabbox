@@ -488,6 +488,48 @@ func assertSSHLogContains(t *testing.T, logPath, want string) {
 	}
 }
 
+func TestRunExposeOnExistingManagedLeaseDiagnostic(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	const leaseID = "cbx_abcdef123456"
+	var leaseReads atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/control":
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+leaseID:
+			leaseReads.Add(1)
+			http.Error(w, "expose run reached coordinator", http.StatusNotFound)
+		default:
+			t.Errorf("unexpected coordinator request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-token")
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), []string{
+		"run", "--provider", "run-ready-pool-preflight-test", "--id", leaseID,
+		"--expose", "8080", "--no-sync", "--no-hydrate", "--", "true",
+	})
+	var httpErr CoordinatorHTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusNotFound || !strings.Contains(httpErr.Message, "expose run reached coordinator") {
+		t.Fatalf("run error=%v, want coordinator lookup failure; stderr=%s", err, stderr.String())
+	}
+	if got := leaseReads.Load(); got != 1 {
+		t.Fatalf("lease reads=%d, want 1 after the warning", got)
+	}
+	for _, want := range []string{"warning: --expose", leaseID, "port declarations are unchanged", "crabbox tunnel --id"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q: %s", want, stderr.String())
+		}
+	}
+}
+
 func TestRunCommandInjectsReservedMetadataAcrossSSHCommandModes(t *testing.T) {
 	tests := []struct {
 		name string

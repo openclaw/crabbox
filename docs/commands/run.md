@@ -1062,7 +1062,7 @@ lease-acting commands):
 --market spot|on-demand
 --slug <slug>                Only when creating a fresh lease.
 --pond <name>
---expose <port>              Repeatable; SSH-mesh-reachable TCP port.
+--expose <port>              Repeatable; SSH-mesh TCP port; creation-only for managed leases.
 --cache-volume [name=]key:path
                              Require a provider cache volume.
 --ttl <duration>             Default 90m.
@@ -1091,6 +1091,13 @@ lease-acting commands):
 --tailscale-exit-node <name-or-100.x>
 --tailscale-exit-node-allow-lan-access
 ```
+
+For coordinator-managed leases, `--expose` records Pond ports only when creating
+the lease. `run --id <lease> --expose <port>` warns and continues without changing
+those declarations. To reach an existing service on remote loopback, use
+[`crabbox tunnel --id <lease> <port>`](tunnel.md); it does not require a prior
+`--expose` declaration. Registered coordinator leases can still refresh port
+declarations during registration.
 
 Provider-specific flags are registered by each adapter and only apply to that
 provider (for example `--azure-backend`, `--azure-os-disk`, the

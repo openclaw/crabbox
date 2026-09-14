@@ -181,6 +181,16 @@ discover them without a separate store. Up to 10 distinct ports per lease.
 crabbox warmup --pond pr-42 --slug api --provider hetzner --expose 8080 --expose 5432
 ```
 
+Coordinator-managed leases keep the declarations from creation. A later
+`crabbox run --id api --expose 8080 -- ...` warns and leaves them unchanged;
+registered coordinator leases can refresh declarations during registration.
+For an existing service bound to remote loopback, open a foreground
+[`tunnel`](../commands/tunnel.md) without changing the lease's Pond metadata:
+
+```sh
+crabbox tunnel --id api --local-port 51820 8080
+```
+
 ## Example use cases
 
 **Per-PR isolated E2E environment.** Every PR gets its own staging; the pond
