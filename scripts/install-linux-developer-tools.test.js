@@ -50,7 +50,7 @@ install_go_toolchain
     );
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.includes("go-installed"), expected);
-    assert.equal(result.stdout.includes("archive=go1.27.0.linux-amd64.tar.gz"), expected);
+    assert.equal(result.stdout.includes("archive=go1.27.1.linux-amd64.tar.gz"), expected);
   });
 }
 
@@ -70,6 +70,69 @@ test("linux developer image installs every readiness package from the generated 
   assert.doesNotMatch(source, /(?:>|tee\s+).*\/var\/lib\/crabbox(?:\/image-ready|-readiness\/linux\.json)/);
 });
 
+for (const failure of ["", "apt", "pnpm", "go"]) {
+  test(`full developer packages are deduplicated and stop on ${failure || "no"} failure`, (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-developer-packages-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const result = spawnSync("bash", ["-c", `
+source scripts/install-linux-developer-tools.sh
+need_root() { :; }
+readiness_producer_path() { printf '%s\\n' "$PWD/scripts/linux-readiness.generated.sh"; }
+retry() { :; }
+apt_install() {
+  printf 'apt=%s\\n' "$*"
+  [[ "$FIXTURE_FAILURE" != apt || " $* " != *" cmake "* ]] || return 47
+}
+add_nodesource() { :; }
+add_docker_repo() { :; }
+ln() { :; }
+install_node_pnpm() { [[ "$FIXTURE_FAILURE" != pnpm ]] || return 49; }
+install_go_toolchain() { [[ "$FIXTURE_FAILURE" != go ]] || return 48; }
+install_bun() { echo post-go; }
+install_uv() { :; }
+install_rust() { :; }
+install_trufflehog() { :; }
+install_docker() { :; }
+prepare_fast_boot() { echo cleanup; }
+print_versions() { :; }
+if main; then exit 0; else exit "$?"; fi
+`], {
+      cwd: repoRoot,
+      env: {
+        PATH: process.env.PATH,
+        HOME: root,
+        TMPDIR: root,
+        FIXTURE_FAILURE: failure,
+        CRABBOX_LINUX_APT_CONF_DIR: path.join(root, "apt"),
+        CRABBOX_LINUX_APT_SOURCES_DIR: path.join(root, "sources"),
+        CRABBOX_LINUX_BROWSER: "0",
+      },
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    assert.equal(result.status, failure === "apt" ? 47 : failure === "go" ? 48 : failure === "pnpm" ? 49 : 0,
+      result.error?.message || result.stderr);
+    if (failure) {
+      assert.doesNotMatch(result.stdout, /post-go|cleanup/);
+      return;
+    }
+    const packages = result.stdout.split("\n").filter((line) => line.startsWith("apt="))
+      .flatMap((line) => line.slice(4).split(" "));
+    assert.equal(packages.length, new Set(packages).size, "request every APT package once");
+    for (const name of [
+      "build-essential", "pkg-config", "cmake", "ninja-build", "autoconf", "automake",
+      "gawk", "nasm", "yasm", "bat", "direnv", "zoxide", "sqlite3",
+      "at-spi2-core", "curl", "dbus-x11", "ffmpeg", "file", "gir1.2-atspi-2.0",
+      "gstreamer1.0-libav", "gstreamer1.0-plugins-bad", "gstreamer1.0-plugins-good",
+      "gstreamer1.0-tools", "libatk-adaptor", "libayatana-appindicator3-dev", "libegl1",
+      "libgles2", "librsvg2-dev", "libssl-dev", "libwebkit2gtk-4.1-dev", "libxdo-dev",
+      "mesa-utils", "patchelf", "pciutils", "procps", "psmisc", "python3-gi",
+      "wget", "wmctrl", "xauth", "xdg-utils", "xvfb", "python3-build", "python3-setuptools", "python3-wheel",
+    ]) assert.ok(packages.includes(name), `missing developer package ${name}`);
+    assert.match(result.stdout, /post-go\ncleanup/);
+  });
+}
+
 test("linux developer image executes the standalone producer and stops when capability proof fails", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-readiness-installer-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -83,7 +146,11 @@ test("linux developer image executes the standalone producer and stops when capa
   );
   writeExecutable(
     path.join(scriptRoot, "linux-readiness.generated.sh"),
-    `#!/usr/bin/env bash\nprintf 'verified\\n' >${JSON.stringify(marker)}\nexit \"\${CRABBOX_FAKE_PRODUCER_EXIT:-0}\"\n`,
+    `#!/usr/bin/env bash
+printf '%s\\n' "$*" >>${JSON.stringify(marker)}
+if [[ "\${1:-}" == --verify ]]; then exit "\${CRABBOX_FAKE_VERIFY_EXIT:-0}"; fi
+exit "\${CRABBOX_FAKE_PRODUCER_EXIT:-0}"
+`,
   );
   const shell = `set -euo pipefail
 source ${JSON.stringify(path.join(scriptRoot, "install.sh"))}
@@ -94,7 +161,7 @@ sync() { return 0; }
 prepare_fast_boot`;
   const successful = spawnSync("bash", ["-c", shell], { cwd: repoRoot, encoding: "utf8" });
   assert.equal(successful.status, 0, successful.stderr || successful.stdout);
-  assert.equal(fs.readFileSync(marker, "utf8"), "verified\n");
+  assert.equal(fs.readFileSync(marker, "utf8"), "\n--verify linux-builder\n");
   assert.equal(fs.readFileSync(cleaned, "utf8"), "cleaned\n");
   fs.unlinkSync(cleaned);
   const failed = spawnSync("bash", ["-c", shell], {
@@ -104,6 +171,13 @@ prepare_fast_boot`;
   });
   assert.equal(failed.status, 73, failed.stderr || failed.stdout);
   assert.equal(fs.existsSync(cleaned), false);
+  const downgraded = spawnSync("bash", ["-c", shell], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: { ...process.env, CRABBOX_FAKE_VERIFY_EXIT: "74" },
+  });
+  assert.equal(downgraded.status, 74, downgraded.stderr || downgraded.stdout);
+  assert.equal(fs.existsSync(cleaned), false, "minimal producer success must not reach cleanup");
 });
 
 test("linux developer image cloud-init cleanup preserves current-boot facts", async (t) => {
@@ -115,7 +189,8 @@ test("linux developer image cloud-init cleanup preserves current-boot facts", as
     path.join(repoRoot, "scripts/install-linux-developer-tools.sh"),
     "utf8",
   );
-  assert.equal(source.split("/usr/bin/python3").length, 2, "one distro Python invocation");
+  const cleanupPython = "/usr/bin/python3 -I - <<'PY'";
+  assert.equal(source.split(cleanupPython).length, 2, "one isolated distro Python cleanup invocation");
   for (const scenario of [
     { name: "completed boot survives cache and seed cleanup", cleaned: true },
     { name: "cleanup failure after cache deletion", failure: "clean", cleaned: true },
@@ -262,7 +337,7 @@ if [ "$FIXTURE_FAILURE" = disk ]; then printf 'ext4\\n'; else printf 'tmpfs\\n';
       const producer = path.join(bin, "producer");
       writeExecutable(producer, "#!/bin/sh\nexit 0\n");
       const installer = path.join(root, "install.sh");
-      fs.writeFileSync(installer, source.replace("/usr/bin/python3", '"$FIXTURE_PYTHON_WRAPPER"'));
+      fs.writeFileSync(installer, source.replace(cleanupPython, '"$FIXTURE_PYTHON_WRAPPER" -I - <<\'PY\''));
       const shell = `set -euo pipefail
 source "$1"
 readiness_producer_path() { printf '%s\\n' "$FIXTURE_PRODUCER"; }
@@ -444,6 +519,7 @@ done
 					CRABBOX_FAKE_SUDO_LOG: sudoLog,
 				},
 				encoding: "utf8",
+				timeout: 10000,
 			},
 		),
 		sudoLog,
@@ -480,6 +556,7 @@ test("linux developer tool setup isolates root HOME and preserves approved confi
 		...expectedEnv,
 		[unrelatedName]: unrelatedValue,
 	});
+	assert.equal(result.error, undefined);
 	assert.equal(result.status, 0, result.stderr || result.stdout);
 	const lines = fs.readFileSync(sudoLog, "utf8").trim().split("\n");
 	const args = lines.filter((line) => line.startsWith("arg=")).map((line) => line.slice(4));
@@ -1059,8 +1136,9 @@ test("linux developer image keeps the existing TruffleHog binary when candidate 
 	assert.equal(fs.readFileSync(target, "utf8"), existing);
 });
 
-test("linux developer image reports TruffleHog from the configured install directory", () => {
+test("linux developer image reports TruffleHog from the configured install directory", (t) => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-trufflehog-version-"));
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
 	const fixture = installTruffleHogFixture(dir);
 	const goLinkDir = path.join(dir, "go-links");
 	const osRelease = path.join(dir, "os-release");
@@ -1072,7 +1150,7 @@ test("linux developer image reports TruffleHog from the configured install direc
 	);
 	writeExecutable(
 		path.join(goLinkDir, "go"),
-		"#!/usr/bin/env bash\nprintf 'go version go1.27.0 linux/amd64\\n'\n",
+		"#!/usr/bin/env bash\nprintf 'go version go1.27.1 linux/amd64\\n'\n",
 	);
 	for (const command of [
 		"git",
@@ -1086,6 +1164,8 @@ test("linux developer image reports TruffleHog from the configured install direc
 		"corepack",
 		"pnpm",
 		"bun",
+		"uv",
+		"uvx",
 		"docker",
 	]) {
 		writeExecutable(
@@ -1106,7 +1186,12 @@ test("linux developer image reports TruffleHog from the configured install direc
 		"bash",
 		[
 			"-c",
-			'set -euo pipefail\nsource scripts/install-linux-developer-tools.sh\ngo_link_dir="$1"\nprint_versions',
+			`set -euo pipefail
+source scripts/install-linux-developer-tools.sh
+go_link_dir="$1"
+resolve_rust_runtime_user() { runtime_user=alice; runtime_home=/home/alice; }
+run_rust_runtime_user() { printf 'runtime-rust=%s\\n' "$*"; }
+print_versions`,
 			"bash",
 			goLinkDir,
 		],
@@ -1119,15 +1204,54 @@ test("linux developer image reports TruffleHog from the configured install direc
 				CRABBOX_LINUX_TRUFFLEHOG_BIN_DIR: fixture.targetBin,
 			},
 			encoding: "utf8",
+			timeout: 15_000,
 		},
 	);
 
+	assert.ifError(result.error);
 	assert.equal(result.status, 0, result.stderr || result.stdout);
-	assert.match(result.stdout, /go version go1\.27\.0 linux\/amd64/);
+	assert.match(result.stdout, /go version go1\.27\.1 linux\/amd64/);
 	assert.match(result.stdout, /bun test-version/);
+	assert.match(result.stdout, /uv test-version/);
+	assert.match(result.stdout, /uvx test-version/);
+	assert.match(result.stdout, /runtime-rust=env RUSTUP_AUTO_INSTALL=0 \/bin\/bash -lc set -e; cd \/; rustup --version; rustc --version; cargo --version; rustfmt --version/);
 	assert.match(result.stdout, new RegExp(`${fixture.bin}/bunx`));
 	assert.match(result.stdout, /trufflehog 3\.95\.9/);
+	assert.match(result.stdout, /pnpm test-version/);
 });
+
+for (const [failure, expected] of [["runtime", 42], ["activate", 43], ["", 0]]) {
+  test(`pnpm conditional installation preserves ${failure || "success"} result`, () => {
+    const result = spawnSync("bash", ["-c", `
+source scripts/install-linux-developer-tools.sh
+install_node_runtime() { echo runtime >&2; [[ "$FAIL" != runtime ]] || return 42; }
+pinned_node_supported() { return 1; }
+corepack() { echo activate >&2; [[ "$FAIL" != activate ]] || return 43; }
+command() { echo verify >&2; builtin command "$@"; }
+pnpm() { :; }
+if install_node_pnpm; then echo complete; else exit $?; fi
+`], { cwd: repoRoot, env: { PATH: process.env.PATH, FAIL: failure }, encoding: "utf8", timeout: 10_000 });
+    assert.equal(result.status, expected, result.stderr);
+    if (failure) assert.doesNotMatch(result.stdout, /complete/);
+    if (failure === "runtime") assert.doesNotMatch(result.stderr, /activate|verify/);
+    if (failure === "activate") assert.doesNotMatch(result.stderr, /verify/);
+  });
+}
+
+for (const missing of ["npm", "corepack"]) {
+  test(`conditional Node runtime rejects missing ${missing} before activation`, () => {
+    const result = spawnSync("bash", ["-c", `
+source scripts/install-linux-developer-tools.sh
+pinned_node_supported() { return 1; }
+apt_install() { :; }
+command() { [[ "$*" != "-v $MISSING" ]] || return 71; builtin command "$@"; }
+corepack() { echo unexpected-enable; }
+if install_node_pnpm; then echo unexpected-success; else exit $?; fi
+`], { cwd: repoRoot, env: { PATH: process.env.PATH, MISSING: missing }, encoding: "utf8", timeout: 10_000 });
+    assert.equal(result.status, 71, result.stderr);
+    assert.doesNotMatch(result.stdout, /unexpected-/);
+  });
+}
 
 test("linux developer image keeps pinned TruffleHog probes update-free", () => {
 	const script = fs.readFileSync(path.join(repoRoot, "scripts/install-linux-developer-tools.sh"), "utf8");

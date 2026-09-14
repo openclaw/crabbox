@@ -92,6 +92,8 @@ count=0
   read -r count <"$QUALIFICATION_ADAPTER_STATE/launch-count"
 expected_count=3
 [[ "${QUALIFICATION_MODE:-mint}" != retained ]] || expected_count=1
+# Readiness is a separate run before smoke; inject only after the publisher's
+# complete shell payload, never after verification or an unrelated command.
 full_smoke=0
 if [[ "$command_name" == run && "$#" -ge 4 ]]; then
   args=("$@")

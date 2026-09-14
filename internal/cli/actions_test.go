@@ -407,7 +407,7 @@ exit 99
 }
 
 func TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache(t *testing.T) {
-	for _, name := range []string{"bash", "python3"} {
+	for _, name := range []string{"bash", "python3", "tar"} {
 		if _, err := exec.LookPath(name); err != nil {
 			t.Skip(name + " is required")
 		}
@@ -417,11 +417,18 @@ func TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache(t *testing.T) {
 		env              map[string]string
 		dotEnv           string
 		workFolder       string
+		registration     string
+		fresh            bool
 		change           string
 		managerEnv       string
 		wantNode, wantGo bool
 	}{
-		{name: "default", wantNode: true, wantGo: true},
+		{name: "default", fresh: true, wantNode: true, wantGo: true},
+		{name: "BOM registration", registration: "bom", fresh: true, wantNode: true, wantGo: true},
+		{name: "existing registration", change: "registered", wantNode: true, wantGo: true},
+		{name: "writable existing dotenv", change: "dotenv-writable", dotEnv: "LANG=C\n"},
+		{name: "malformed registration", registration: "malformed"},
+		{name: "malformed BOM registration", registration: "malformed-bom"},
 		{name: "custom work folder", workFolder: "custom"},
 		{name: "inherited root", env: map[string]string{"RUNNER_TOOL_CACHE": "/custom"}},
 		{name: "legacy runner root", env: map[string]string{"RUNNER_TOOLSDIRECTORY": "/custom"}},
@@ -520,6 +527,12 @@ func TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache(t *testing.T) {
 					t.Fatal(err)
 				}
 				write(filepath.Join(slot, "bin", tool), body, 0o755)
+				// Archive fixture modes must not depend on the caller's umask.
+				for _, path := range []string{slot, filepath.Join(slot, "bin"), filepath.Join(slot, "bin", tool)} {
+					if err := os.Chmod(path, 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if tool == "node" {
 					for _, name := range []string{"pnpm", "pnpx", "yarn", "yarnpkg"} {
 						link("../lib/node_modules/corepack/dist/"+name+".js", filepath.Join(slot, "bin", name))
@@ -530,25 +543,71 @@ func TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache(t *testing.T) {
 				return fmt.Sprintf("%x", sha256.Sum256(buf.Bytes()))
 			}
 			nodeDigest := pack("node", "24.19.0", "node-v24.19.0-linux-x64.tar.xz")
-			goDigest := pack("go", "1.27.0", "go1.27.0.linux-amd64.tar.gz")
+			goDigest := pack("go", "1.27.1", "go1.27.1.linux-amd64.tar.gz")
 			nodeSlot := filepath.Join(image, "node", "24.19.0", "x64")
-			goSlot := filepath.Join(image, "go", "1.27.0", "x64")
-			destGo := filepath.Join(cache, "go", "1.27.0", "x64")
-			write(filepath.Join(runner, ".crabbox-runner-version-2.337.0-x64-sha256-"+strings.Repeat("a", 64)), "", 0o644)
+			goSlot := filepath.Join(image, "go", "1.27.1", "x64")
+			destGo := filepath.Join(cache, "go", "1.27.1", "x64")
 			workFolder := tc.workFolder
 			if workFolder == "" {
 				workFolder = "_work"
 			}
-			write(filepath.Join(runner, "config.sh"), "#!/bin/sh\nif [ \"${1:-}\" = remove ]; then rm -f .runner; exit 0; fi\nprintf '{\"workFolder\":\""+workFolder+"\"}\\n' >.runner\nprintf 'configured\\n' >>\"$HOME/order\"\n", 0o755)
-			write(filepath.Join(runner, ".env"), tc.dotEnv, 0o600)
-			write(filepath.Join(bin, "curl"), "#!/bin/sh\nprintf '{}'\n", 0o755)
-			write(filepath.Join(bin, "jq"), "#!/bin/sh\ncase \"$*\" in *tag_name*) printf 2.337.0;; *digest*) printf '"+strings.Repeat("a", 64)+"';; *) exit 2;; esac\n", 0o755)
+			configuration := "{\"workFolder\":\"" + workFolder + "\"}\n"
+			if strings.HasPrefix(tc.registration, "malformed") {
+				configuration = "{invalid\n"
+			}
+			// Runner's IOUtil.SaveObject emits UTF-8 with a BOM.
+			if strings.HasSuffix(tc.registration, "bom") {
+				configuration = "\ufeff" + configuration
+			}
+			// Like Runner's env.sh and IOUtil.SaveObject, creation inherits the installer's mask.
+			configScript := "#!/bin/sh\n[ -f .env ] || touch .env\nprintf '%s\\n' \"$PATH\" >.path\n" +
+				"if [ \"${1:-}\" = remove ]; then rm -f .runner .credentials .credentials_rsaparams; printf 'removed\\n' >>\"$HOME/order\"; exit 0; fi\n" +
+				"printf '%s' " + shellQuote(configuration) + " >.runner\nprintf '{}' >.credentials\nprintf '{}' >.credentials_rsaparams\nprintf 'configured\\n' >>\"$HOME/order\"\n"
+			write(filepath.Join(runner, "config.sh"), configScript, 0o755)
+			if tc.dotEnv != "" {
+				write(filepath.Join(runner, ".env"), tc.dotEnv, 0o600)
+			}
+			runnerDigest := strings.Repeat("a", 64)
+			if tc.fresh {
+				// A real tiny archive exercises extraction and the installer's marker creation.
+				var buf bytes.Buffer
+				gz := gzip.NewWriter(&buf)
+				tw := tar.NewWriter(gz)
+				if err := tw.WriteHeader(&tar.Header{Name: "config.sh", Typeflag: tar.TypeReg, Mode: 0o755, Size: int64(len(configScript))}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := tw.Write([]byte(configScript)); err != nil {
+					t.Fatal(err)
+				}
+				if err := tw.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if err := gz.Close(); err != nil {
+					t.Fatal(err)
+				}
+				write(filepath.Join(root, "runner.tar.gz"), buf.String(), 0o600)
+				runnerDigest = fmt.Sprintf("%x", sha256.Sum256(buf.Bytes()))
+			}
+			runnerArch := map[bool]string{true: "arm64", false: "x64"}[tc.change == "arm"]
+			versionMarker := ".crabbox-runner-version-2.337.0-" + runnerArch + "-sha256-" + runnerDigest
+			if !tc.fresh {
+				write(filepath.Join(runner, versionMarker), "", 0o644)
+			}
+			write(filepath.Join(bin, "curl"), "#!/bin/sh\nif [ \"${2:-}\" = -o ]; then cp \"$HOME/runner.tar.gz\" \"$3\"; else printf '{}'; fi\n", 0o755)
+			write(filepath.Join(bin, "sha256sum"), "#!/usr/bin/env python3\nimport hashlib\nimport sys\nwith open(sys.argv[1], 'rb') as archive:\n    print(hashlib.sha256(archive.read()).hexdigest() + '  ' + sys.argv[1])\n", 0o755)
+			write(filepath.Join(bin, "jq"), "#!/bin/sh\ncase \"$*\" in *tag_name*) printf 2.337.0;; *digest*) printf '"+runnerDigest+"';; *) exit 2;; esac\n", 0o755)
 			write(filepath.Join(bin, "uname"), "#!/bin/sh\nprintf '"+map[bool]string{true: "aarch64", false: "x86_64"}[tc.change == "arm"]+"\\n'\n", 0o755)
 			// Nothing privileged or networked runs: only the generated owner's filesystem logic.
 			write(filepath.Join(bin, "sudo"), "#!/bin/sh\nif [ \"$1\" = tee ]; then cat >/dev/null; elif [ \"$1\" = systemctl ]; then shift; exec systemctl \"$@\"; fi\n", 0o755)
 			write(filepath.Join(bin, "pgrep"), "#!/bin/sh\nexit "+map[bool]string{true: "0", false: "1"}[tc.change == "busy"]+"\n", 0o755)
 			unitState := "LoadState=not-found\\nActiveState=inactive\\nEnvironment=\\nEnvironmentFiles=\\nDropInPaths=\\n"
 			switch tc.change {
+			case "registered":
+				write(filepath.Join(runner, ".runner"), "old registration", 0o600)
+			case "dotenv-writable":
+				if err := os.Chmod(filepath.Join(runner, ".env"), 0o664); err != nil {
+					t.Fatal(err)
+				}
 			case "active":
 				unitState = "LoadState=loaded\\nActiveState=active\\n"
 			case "service-env":
@@ -579,7 +638,7 @@ func TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "archive":
-				write(filepath.Join(archives, "go1.27.0.linux-amd64.tar.gz"), "tampered", 0o644)
+				write(filepath.Join(archives, "go1.27.1.linux-amd64.tar.gz"), "tampered", 0o644)
 			case "tree":
 				write(filepath.Join(goSlot, "bin", "go"), "tampered", 0o755)
 			case "extra":
@@ -634,13 +693,10 @@ esac
 				"/opt/hostedtoolcache", image,
 				"/opt/crabbox/toolchain-archives", archives,
 				"14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647", nodeDigest,
-				"675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685", goDigest,
+				"63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445", goDigest,
 			).Replace(githubActionsRunnerInstallScript("2.337.0", true))
-			// The ARM case must not trigger the unrelated Runner download path.
-			if tc.change == "arm" {
-				write(filepath.Join(runner, ".crabbox-runner-version-2.337.0-arm64-sha256-"+strings.Repeat("a", 64)), "", 0o644)
-			}
-			cmd := exec.Command("bash", "-c", script)
+			// The installer runs in its own shell and must not alter the caller's umask.
+			cmd := exec.Command("bash", "-c", "umask 002; bash -c \"$1\"; result=$?; [ \"$(umask)\" = 0002 ] || exit 99; exit \"$result\"", "fixture", script)
 			cmd.Env = []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"), "HOME=" + root,
 				"RUNNER_REPO=example-org/my-app", "RUNNER_NAME=fixture", "RUNNER_TOKEN=fixture",
 				"RUNNER_LABELS=fixture"}
@@ -654,11 +710,41 @@ esac
 			if err != nil {
 				t.Fatalf("installer failed: %v\n%s", err, output)
 			}
+			gotConfiguration, err := os.ReadFile(filepath.Join(runner, ".runner"))
+			if err != nil || string(gotConfiguration) != configuration {
+				t.Fatalf("registration changed: %v", err)
+			}
+			modes := map[string]os.FileMode{
+				".runner": 0o600, ".env": 0o600, ".path": 0o600,
+				".credentials": 0o600, ".credentials_rsaparams": 0o600, "run-crabbox.sh": 0o700,
+			}
+			if tc.fresh {
+				modes[versionMarker] = 0o600
+			}
+			if tc.change == "dotenv-writable" {
+				modes[".env"] = 0o664
+				if !strings.Contains(string(output), "runner-toolcache: skipped nonowned runner environment") {
+					t.Fatalf("unsafe environment was not rejected: %s", output)
+				}
+			}
+			for name, want := range modes {
+				info, err := os.Stat(filepath.Join(runner, name))
+				if err != nil {
+					t.Fatalf("%s: %v", name, err)
+				}
+				if info.Mode().Perm() != want {
+					t.Fatalf("%s mode=%#o want %#o", name, info.Mode().Perm(), want)
+				}
+			}
+			gotEnv, err := os.ReadFile(filepath.Join(runner, ".env"))
+			if err != nil || string(gotEnv) != tc.dotEnv {
+				t.Fatalf("existing environment changed: %v", err)
+			}
 			for _, expected := range []struct {
 				tool, version string
 				present       bool
 			}{
-				{"node", "24.19.0", tc.wantNode}, {"go", "1.27.0", tc.wantGo},
+				{"node", "24.19.0", tc.wantNode}, {"go", "1.27.1", tc.wantGo},
 			} {
 				slot := filepath.Join(cache, expected.tool, expected.version, "x64")
 				_, err := os.Stat(slot + ".complete")
@@ -710,7 +796,11 @@ esac
 				t.Fatalf("missing copy cost: %s", output)
 			}
 			order, _ := os.ReadFile(filepath.Join(root, "order"))
-			if string(order) != "configured\nstarted\n" {
+			wantOrder := "configured\nstarted\n"
+			if tc.change == "registered" {
+				wantOrder = "removed\n" + wantOrder
+			}
+			if string(order) != wantOrder {
 				t.Fatalf("lifecycle order %q", order)
 			}
 		})

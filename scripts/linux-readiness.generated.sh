@@ -12,7 +12,7 @@ if test "${1:-}" = '--print-packages'; then
   exit 0
 fi
 
-if test "$(id -u)" -ne 0; then
+if test "${1:-}" != '--verify' && test "$(id -u)" -ne 0; then
   command -v sudo >/dev/null 2>&1 || { echo 'Linux readiness producer requires root' >&2; exit 1; }
   exec sudo -H bash "$0" "$@"
 fi
@@ -22,7 +22,15 @@ if test "${1:-}" = '--install'; then
   install -m 0755 -o root -g root "$0" /usr/local/libexec/crabbox/linux-readiness.generated.sh
   exit 0
 fi
-test "$#" -eq 0 || { echo 'usage: linux-readiness.generated.sh [--install|--print-packages PROFILE]' >&2; exit 2; }
+if test "${1:-}" = '--verify'; then
+  test "$#" -eq 2 || { echo 'usage: linux-readiness.generated.sh --verify PROFILE' >&2; exit 2; }
+  case "$2" in
+    linux-minimal|linux-builder) ;;
+    *) echo 'unknown Linux readiness profile' >&2; exit 2 ;;
+  esac
+else
+  test "$#" -eq 0 || { echo 'usage: linux-readiness.generated.sh [--install|--print-packages PROFILE|--verify PROFILE]' >&2; exit 2; }
+fi
 
 crabbox_readiness_manifest_path='/var/lib/crabbox-readiness/linux.json'
 crabbox_legacy_image_marker_path='/var/lib/crabbox/image-ready'
@@ -51,6 +59,21 @@ crabbox_minimal_readiness_probes() (
 crabbox_builder_additional_readiness_probes() (
   PATH="$crabbox_readiness_system_path"
   export PATH
+  # Python dependencies can leave scratch outside the venv. Own their TMPDIR before Python starts.
+  umask 077
+  crabbox_probe_directory="$(command mktemp -d "${TMPDIR:-/tmp}/crabbox-builder-probe.XXXXXXXX")" || exit $?
+  trap 'crabbox_probe_status=$?
+    trap - 0
+    if ! command rm -rf -- "$crabbox_probe_directory"; then
+      echo "Linux readiness: builder probe temporary cleanup failed" >&2
+      test "$crabbox_probe_status" -ne 0 || crabbox_probe_status=1
+    fi
+    exit "$crabbox_probe_status"' 0
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  TMPDIR="$crabbox_probe_directory"
+  export TMPDIR
   command cc --version >/dev/null 2>&1 &&
   command git lfs version >/dev/null 2>&1 &&
   command make --version >/dev/null 2>&1 &&
@@ -276,6 +299,22 @@ crabbox_write_legacy_image_marker() (
   crabbox_legacy_image_marker_trusted || return 1
   sync "$crabbox_marker_parent" 2>/dev/null || sync -f "$crabbox_marker_parent" 2>/dev/null || sync || return 1
 )
+
+if test "${1:-}" = '--verify'; then
+  # Verification never repairs or downgrades image evidence, and rejects its claim before probing.
+  crabbox_readiness_manifest_metadata_matches || { echo 'Linux readiness verification: untrusted or noncanonical manifest' >&2; exit 1; }
+  case "$2" in
+    linux-minimal) crabbox_required_sha256="$crabbox_minimal_manifest_sha256" ;;
+    linux-builder) crabbox_required_sha256="$crabbox_builder_manifest_sha256" ;;
+  esac
+  test "$crabbox_file_sha256" = "$crabbox_required_sha256" || { echo "Linux readiness verification: $2 manifest required" >&2; exit 1; }
+  case "$2" in
+    linux-minimal) crabbox_minimal_readiness_probes ;;
+    linux-builder) crabbox_builder_readiness_probes ;;
+  esac || { echo "Linux readiness verification: $2 capability proof failed" >&2; exit 1; }
+  echo "crabbox Linux readiness verified: $2"
+  exit 0
+fi
 
 if ! crabbox_minimal_readiness_probes; then
   echo 'Linux readiness producer: minimal capability proof failed' >&2
