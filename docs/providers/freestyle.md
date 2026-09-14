@@ -165,6 +165,9 @@ reported, and bounded cleanup preserves the primary error. An unknown remote
 write completing after cleanup can still leave its isolated attempt file; it
 cannot overwrite the archive consumed by the fallback.
 
+Freestyle does not report an instance type. Status leaves `serverType` empty,
+matching the inventory type; the VM name remains available in `crabbox list`.
+
 The raw VM ID, Crabbox VM name, and generated slug shown by `crabbox list` can
 identify a VM after local claim state is lost. Read-only status recovery still
 requires the provider VM name to match Crabbox's canonical `crabbox-...` form.

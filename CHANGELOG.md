@@ -4,6 +4,8 @@
 
 ### Changes
 
+- Leave Freestyle status instance type empty instead of reporting the VM name, matching its type-less inventory metadata.
+
 - Add explicit include-only directory sync through the existing POSIX/WSL SSH manifest path, using isolated Git ignore matching without creating source Git metadata. [PR 2253](https://github.com/openclaw/crabbox/pull/2253). Thanks @coygeek.
 
 ## 0.59.0 - 2026-09-13

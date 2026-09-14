@@ -1113,6 +1113,9 @@ func TestFreestyleListAndStatusUseStoredClaimSlug(t *testing.T) {
 	if status.Slug != "blue-lobster" || status.Labels["slug"] != "blue-lobster" || status.Labels["pond"] != "demo" {
 		t.Fatalf("status=%#v labels=%v", status, status.Labels)
 	}
+	if server.ServerType.Name != "" || status.ServerType != "" {
+		t.Fatalf("Freestyle has no server type: list=%q status=%q", server.ServerType.Name, status.ServerType)
+	}
 }
 
 func TestFreestyleCreateSandboxReportsBoundedCleanupFailure(t *testing.T) {

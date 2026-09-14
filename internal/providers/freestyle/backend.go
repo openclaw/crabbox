@@ -463,16 +463,15 @@ func freestyleStatusView(leaseID string, vm freestyleVM) core.StatusView {
 	}
 	applyFreestyleClaimMetadata(labels, leaseID)
 	return core.StatusView{
-		ID:         leaseID,
-		Slug:       labels["slug"],
-		Provider:   freestyleProvider,
-		TargetOS:   targetLinux,
-		State:      vm.State,
-		ServerID:   vm.ID,
-		ServerType: vm.Name,
-		Network:    NetworkPublic,
-		Ready:      freestyleStatusReady(vm.State),
-		Labels:     labels,
+		ID:       leaseID,
+		Slug:     labels["slug"],
+		Provider: freestyleProvider,
+		TargetOS: targetLinux,
+		State:    vm.State,
+		ServerID: vm.ID,
+		Network:  NetworkPublic,
+		Ready:    freestyleStatusReady(vm.State),
+		Labels:   labels,
 	}
 }
 
