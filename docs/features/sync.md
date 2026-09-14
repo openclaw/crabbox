@@ -48,7 +48,7 @@ adopted workspace when it cannot safely rebuild that path. See
 
 ## What gets synced
 
-Sync transfers the Git-managed working set, not the whole directory tree. The
+By default (`sync.source: git`), sync transfers the Git-managed working set, not the whole directory tree. The
 file list comes from `git ls-files --cached --others --exclude-standard -z`,
 which is:
 
@@ -83,6 +83,68 @@ letting you test uncommitted local edits.
 
 Filesystem Git origins are resolved on the runner during Git seeding and must
 be readable from that runner; otherwise Crabbox falls back to a full manifest sync.
+
+### Explicit directory source
+
+Use `sync.source: directory` to sync an include-only working set from a directory
+without creating a repository. There is no automatic fallback when Git discovery
+fails. The source root is the effective current working directory, including when
+that directory is inside an outer Git checkout; `run --workdir` selects that
+current directory before loading configuration. A nonempty `sync.include`
+allowlist is required:
+
+```yaml
+sync:
+  source: directory
+  include: [README.md, src]
+```
+
+`CRABBOX_SYNC_SOURCE=git|directory` overrides the YAML selection. Installed Git
+is still required: Crabbox creates private, temporary bare metadata **outside**
+the source and uses an empty index to ask Git for nonignored files. Only
+`.gitignore` files in the selected source tree participate, not the outer
+repository's ignores, `.git/info/exclude`, or global Git excludes. Crabbox does
+not create `.git`, stage files, or change source Git configuration. Temporary
+metadata is removed after enumeration; the system temporary directory must be
+outside the selected source.
+
+The resulting paths pass through the same include, ordered exclude, filesystem,
+managed-state, and size checks as ordinary sync. All directory-source files are
+untracked for built-in artifact filtering; no tracked-file exemption or Git
+dirty delta is manufactured. Git-ignored files are absent before Crabbox exclude
+negations run, so those negations cannot restore them. Includes keep their
+existing prefix/ordinary-glob syntax, not recursive globstar syntax. For example,
+`src` selects descendants, while `src/*` only matches direct paths under `src`.
+An in-scope nested repository is rejected rather than silently omitting its
+contents; exclude that subtree or run from it as the selected source. A nested
+repository outside the include scope, a fully excluded literal include prefix,
+or an identically excluded include pattern does not block the plan unless later
+rules can reinclude descendants. Nested repositories are not traversed to resolve
+other overlapping wildcard rules. For example, include `src/nested/file?.txt`
+and exclude `src/nested/*.txt` still require an explicit `src/nested` subtree
+exclude: when the whole nested scope cannot be established by these bounded
+checks, Crabbox stops with guidance rather than silently dropping contents.
+Ordinary files continue to use the existing ordered matching rules.
+
+Directory mode uses the existing managed-manifest SSH transport on POSIX and
+WSL targets. The complete candidate list and size limits are checked before
+acquisition, then rebuilt and checked again before transfer. An empty admitted
+list is allowed without widening the allowlist: ordinary managed-manifest
+pruning removes previously synced files, subject to the existing deletion
+settings and guards, while unrelated remote files remain outside that manifest.
+
+`watch`, delegated/native-source providers, native-Windows archive replacement,
+Git-backed ready pools, Actions hydration/owned workspaces, `sync.gitOverlay`,
+`sync.baseRef`, `--fresh-pr`, and `--apply-local-patch` are unsupported. Explicit
+unsupported selections fail before acquisition; an existing Actions-owned
+workspace is rejected after its marker is read, before sync changes it; lookup failures stop rather than assume a raw workspace. Default
+Git seeding and fingerprinting are inapplicable, and directory runs explicitly
+use plain-manifest mode. Native Jujutsu workspaces remain unsupported.
+
+With `--no-sync`, a valid directory selection is inactive: no include requirement,
+enumeration, or temporary Git metadata is needed. Existing provider-specific
+`--no-sync` restrictions still apply. Unrelated sync settings do not prevent
+`stop` from cleaning up an existing lease.
 
 ### Jujutsu workspaces
 

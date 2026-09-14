@@ -26,6 +26,9 @@ rejected with an error; use `crabbox run` for those.
   flags apply) and releases it on every exit path: idle exit, Ctrl-C, and
   failures. Pass `--keep` to retain the lease instead.
 
+`watch` requires the default Git source. `sync.source: directory` is rejected
+before lease work; use repeated `run` calls for explicit directory sync instead.
+
 ## Change detection
 
 The initial run starts immediately. After that, filesystem events are debounced

@@ -960,6 +960,7 @@ than YAML. See [Provider Reference](../providers/README.md) for the per-provider
 
 ```yaml
 sync:
+  source: git # git (default) or explicit include-only directory
   delete: true
   checksum: false
   gitSeed: true
@@ -977,6 +978,13 @@ sync:
     - .turbo
     - dist
 ```
+
+`sync.source` selects `git` (default) or explicit `directory` mode;
+`CRABBOX_SYNC_SOURCE` overrides it. Directory mode requires a nonempty effective
+`sync.include`, uses the current directory as its root, and still requires Git
+for isolated source-tree ignore matching. See
+[directory source](sync.md#explicit-directory-source) for supported transports,
+Git-only restrictions, and inactive `--no-sync` behavior.
 
 A `.crabboxignore` file at the repo root appends to `sync.exclude`.
 `sync.gitOverlay` is an opt-in, credential-free Git transfer optimization for

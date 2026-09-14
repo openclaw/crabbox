@@ -11,7 +11,7 @@ crabbox sync-plan --limit 10
 crabbox sync-plan --json
 ```
 
-The command reads only your local Git checkout. It does not require a
+The command reads only your selected local sync source. It does not require a
 lease, does not call the broker, and does not call any provider API.
 
 ## What it reads
@@ -43,6 +43,22 @@ Materialize the checkout, or intentionally adjust `sync.include`, ordered
 `sync.exclude`, or `.crabboxignore`; later reinclusion rules still determine
 effective scope. Ordinary SSH runs perform this scope check before lease work
 and independently rebuild the final manifest after acquisition.
+
+### Directory source
+
+With `sync.source: directory` and a nonempty `sync.include`, `sync-plan` uses the
+effective current directory, even below an outer Git checkout. Installed Git
+interprets source-tree `.gitignore` files using temporary metadata outside the
+source; no source repository is created or modified. The same shared manifest
+checks apply, and size guardrails cover the full candidate rather than a Git
+dirty delta. In-scope nested repositories are rejected, not silently traversed
+or omitted. See [directory source](../features/sync.md#explicit-directory-source)
+for ignore semantics and supported transports.
+
+Directory text output starts with `sync source=directory root=<absolute-path>`.
+JSON adds `"source": "directory"` and `"root": "<absolute-path>"`; Git-mode output
+is unchanged. Deleted tracked paths and the dirty delta remain empty because
+there is no source index or history.
 
 ## Output
 

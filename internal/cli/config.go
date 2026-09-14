@@ -321,6 +321,7 @@ func providerSelectionSourceForConfigPath(trust configPathTrust) providerSelecti
 }
 
 type SyncConfig struct {
+	Source      string
 	Excludes    []string
 	Includes    []string
 	Delete      bool
@@ -2109,6 +2110,7 @@ func baseConfig() Config {
 		TTL:              90 * time.Minute,
 		IdleTimeout:      30 * time.Minute,
 		Sync: SyncConfig{
+			Source:      "git",
 			Delete:      true,
 			Checksum:    false,
 			GitSeed:     true,
@@ -2602,6 +2604,7 @@ type fileSSHConfig struct {
 }
 
 type fileSyncConfig struct {
+	Source      string   `yaml:"source,omitempty"`
 	Exclude     []string `yaml:"exclude,omitempty"`
 	Excludes    []string `yaml:"excludes,omitempty"`
 	Include     []string `yaml:"include,omitempty"`
@@ -4063,6 +4066,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyLeaseDuration(&cfg.IdleTimeout, file.Lease.IdleTimeout))
 	}
 	if file.Sync != nil {
+		if file.Sync.Source != "" {
+			cfg.Sync.Source = file.Sync.Source
+			recordConfigInput(cfg, configInputGeneric, inputSource, true)
+		}
 		{
 			var accepted bool
 			cfg.Sync.Excludes, accepted = appendOrderedStringsAccepted(cfg.Sync.Excludes, file.Sync.Exclude...)
@@ -7076,6 +7083,7 @@ func applyEnv(cfg *Config) error {
 		cfg.Capacity.AvailabilityZones = splitCommaList(zones)
 		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)
 	}
+	cfg.Sync.Source = configInputEnvString(cfg, configInputGeneric, cfg.Sync.Source, "CRABBOX_SYNC_SOURCE")
 	if value, ok := getenvBool("CRABBOX_SYNC_CHECKSUM"); ok {
 		cfg.Sync.Checksum = value
 		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)

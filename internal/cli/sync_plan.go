@@ -16,6 +16,8 @@ type syncPlanRow struct {
 }
 
 type syncPlanJSONOutput struct {
+	Source              string                `json:"source,omitempty"`
+	Root                string                `json:"root,omitempty"`
 	Candidate           syncPlanJSONSize      `json:"candidate"`
 	DirtyDelta          syncPlanJSONSize      `json:"dirtyDelta"`
 	DeletedTrackedPaths int                   `json:"deletedTrackedPaths"`
@@ -68,7 +70,6 @@ type syncPlanJSONGuardrailReason struct {
 }
 
 func (a App) syncPlan(ctx context.Context, args []string) error {
-	_ = ctx
 	fs := newFlagSet("sync-plan", a.Stderr)
 	limit := fs.Int("limit", 20, "number of top files and directories to print")
 	jsonOut := fs.Bool("json", false, "print JSON")
@@ -82,29 +83,56 @@ func (a App) syncPlan(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	boundary, err := findRepositoryBoundary()
+	if err := validateSyncSource(cfg); err != nil {
+		return err
+	}
+	var repo Repo
+	directory := effectiveSyncSource(cfg) == "directory"
+	if directory {
+		repo, err = findSyncRepo(cfg, true)
+		if err == nil {
+			err = validateDirectorySyncConfig(cfg)
+		}
+		if err == nil {
+			provider, providerErr := ProviderFor(cfg.Provider)
+			if providerErr != nil {
+				return providerErr
+			}
+			err = validateDirectorySyncProvider(provider.Spec())
+		}
+	} else {
+		var boundary repositoryBoundary
+		boundary, err = findRepositoryBoundary()
+		repo.Root = boundary.root
+	}
 	if err != nil {
 		return err
 	}
-	excludes, err := syncExcludes(boundary.root, cfg)
+	excludes, err := syncExcludes(repo.Root, cfg)
 	if err != nil {
 		return err
 	}
-	manifest, err := syncManifestFilteredRules(boundary.root, excludes, syncIncludes(cfg))
+	manifest, err := syncManifestForSource(ctx, repo, cfg, excludes)
 	if err != nil {
 		return Exit(6, "build sync file list: %v", err)
 	}
-	files, dirs := syncPlanRows(boundary.root, manifest, *limit)
+	files, dirs := syncPlanRows(repo.Root, manifest, *limit)
 	if *jsonOut {
 		provider, err := ProviderFor(cfg.Provider)
 		if err != nil {
 			return err
 		}
 		out := syncPlanJSON(manifest, files, dirs, cfg, provider.Spec().SyncGuardrailFullCandidate)
+		if directory {
+			out.Source, out.Root = "directory", repo.Root
+		}
 		if err := json.NewEncoder(a.Stdout).Encode(out); err != nil {
 			return err
 		}
 		return nil
+	}
+	if directory {
+		fmt.Fprintf(a.Stdout, "sync source=directory root=%s\n", repo.Root)
 	}
 	fmt.Fprintf(a.Stdout, "sync candidate: %d files, %s\n", len(manifest.Files), humanBytes(manifest.Bytes))
 	printProtectedTrackedExcludes(a.Stdout, manifest)

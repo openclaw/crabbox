@@ -692,7 +692,10 @@ func (runEnvProfileTestProvider) RegisterFlags(*flag.FlagSet, Config) any {
 func (runEnvProfileTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
-func (p runEnvProfileTestProvider) Configure(Config, Runtime) (Backend, error) {
+func (p runEnvProfileTestProvider) Configure(cfg Config, _ Runtime) (Backend, error) {
+	if runEnvProfileTestConfigureHook != nil {
+		runEnvProfileTestConfigureHook(cfg)
+	}
 	return runEnvProfileTestBackend{spec: p.Spec()}, nil
 }
 
@@ -731,6 +734,7 @@ var runEnvProfileTestPreservesSSHWorkspace bool
 var runEnvProfileTestRetainsLease bool
 var runEnvProfileTestTerminalReleaseError bool
 var runEnvProfileTestAcquireHook func(AcquireRequest)
+var runEnvProfileTestConfigureHook func(Config)
 var runEnvProfileTestAcquireLease func(AcquireRequest) (LeaseTarget, error)
 var runEnvProfileTestTouchHook func(TouchRequest) error
 var runEnvProfileTestEvidenceHook func(context.Context, RunFailureEvidenceRequest) (RunFailureEvidenceCollector, error)
@@ -1335,62 +1339,88 @@ func TestRunWorkdirFailsBeforeReadyPoolBorrow(t *testing.T) {
 }
 
 func TestRunBuildsSyncManifestAfterAcquire(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	isolateRunTestUserDirs(t, dir)
-	t.Chdir(dir)
-	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
-	runGit(t, dir, "init")
-	runGit(t, dir, "config", "user.email", "test@example.com")
-	runGit(t, dir, "config", "user.name", "Test")
-	writeFile(t, filepath.Join(dir, "before-acquire.txt"), "before\n")
-	runGit(t, dir, "add", ".")
-	runGit(t, dir, "commit", "-m", "init")
+	for _, source := range []string{"git", "directory", "directory-size-growth"} {
+		t.Run(source, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, t.TempDir())
+			t.Setenv("TMPDIR", t.TempDir())
+			t.Chdir(dir)
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+			if source == "git" {
+				runGit(t, dir, "init")
+				runGit(t, dir, "config", "user.email", "test@example.com")
+				runGit(t, dir, "config", "user.name", "Test")
+			}
+			writeFile(t, filepath.Join(dir, "before-acquire.txt"), "before\n")
+			if source == "git" {
+				runGit(t, dir, "add", ".")
+				runGit(t, dir, "commit", "-m", "init")
+			} else {
+				config := filepath.Join(t.TempDir(), "config.yaml")
+				writeFile(t, config, "sync: {source: directory, include: ['*.txt']}\n")
+				if source == "directory-size-growth" {
+					writeFile(t, config, "sync: {source: directory, include: ['*.txt'], failBytes: 12}\n")
+				}
+				t.Setenv("CRABBOX_CONFIG", config)
+			}
 
-	binDir := filepath.Join(dir, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	sshPath := filepath.Join(binDir, "ssh")
-	if err := os.WriteFile(sshPath, []byte("#!/bin/sh\n/bin/cat >/dev/null || true\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	rsyncLog := filepath.Join(dir, "rsync-manifest.log")
-	rsyncPath := filepath.Join(binDir, "rsync")
-	if err := os.WriteFile(rsyncPath, []byte("#!/bin/sh\n/bin/cat > \"$CRABBOX_FAKE_RSYNC_STDIN_LOG\"\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("CRABBOX_FAKE_RSYNC_STDIN_LOG", rsyncLog)
-	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
-	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
-	acquireCalls := 0
-	runEnvProfileTestAcquireHook = func(req AcquireRequest) {
-		acquireCalls++
-		writeFile(t, filepath.Join(req.Repo.Root, "after-acquire.txt"), "after\n")
-	}
-	t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
+			binDir := filepath.Join(dir, "bin")
+			if err := os.MkdirAll(binDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			sshPath := filepath.Join(binDir, "ssh")
+			if err := os.WriteFile(sshPath, []byte("#!/bin/sh\n/bin/cat >/dev/null || true\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			rsyncLog := filepath.Join(dir, "rsync-manifest.log")
+			rsyncPath := filepath.Join(binDir, "rsync")
+			if err := os.WriteFile(rsyncPath, []byte("#!/bin/sh\n/bin/cat > \"$CRABBOX_FAKE_RSYNC_STDIN_LOG\"\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_FAKE_RSYNC_STDIN_LOG", rsyncLog)
+			t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+			t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+			acquireCalls := 0
+			runEnvProfileTestAcquireHook = func(req AcquireRequest) {
+				acquireCalls++
+				writeFile(t, filepath.Join(req.Repo.Root, "after-acquire.txt"), "after\n")
+			}
+			t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
 
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
-		"--provider", "run-env-profile-test",
-		"--", "true",
-	})
-	if err != nil {
-		t.Fatalf("run error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
-	}
-	if acquireCalls != 1 {
-		t.Fatalf("Acquire calls=%d, want 1", acquireCalls)
-	}
-	manifest, err := os.ReadFile(rsyncLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(manifest, []byte("before-acquire.txt\x00")) {
-		t.Fatalf("ordinary sync omitted initial file: %q", manifest)
-	}
-	if !bytes.Contains(manifest, []byte("after-acquire.txt\x00")) {
-		t.Fatalf("ordinary sync reused the pre-acquisition file list: %q", manifest)
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+				"--provider", "run-env-profile-test",
+				"--", "true",
+			})
+			if source == "directory-size-growth" {
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != 6 || acquireCalls != 1 {
+					t.Fatalf("calls=%d error=%v stderr=%s", acquireCalls, err, &stderr)
+				}
+				if _, statErr := os.Stat(rsyncLog); !os.IsNotExist(statErr) {
+					t.Fatalf("transfer ran before final guardrail: %v", statErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("run error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+			}
+			if acquireCalls != 1 {
+				t.Fatalf("Acquire calls=%d, want 1", acquireCalls)
+			}
+			manifest, err := os.ReadFile(rsyncLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(manifest, []byte("before-acquire.txt\x00")) {
+				t.Fatalf("ordinary sync omitted initial file: %q", manifest)
+			}
+			if !bytes.Contains(manifest, []byte("after-acquire.txt\x00")) {
+				t.Fatalf("ordinary sync reused the pre-acquisition file list: %q", manifest)
+			}
+		})
 	}
 }
 
@@ -9426,5 +9456,180 @@ func TestLoadRunConfigBindsReadyPoolIdentityBeforeProviderDefaults(t *testing.T)
 	}
 	if cfg.ServerType == defaults.ServerType || cfg.ServerType != serverTypeForConfig(cfg) {
 		t.Fatalf("server type=%q, compiled hetzner=%q, projected aws=%q", cfg.ServerType, defaults.ServerType, serverTypeForConfig(cfg))
+	}
+}
+
+func TestRunDirectorySourcePreAcquire(t *testing.T) {
+	for _, tc := range []struct {
+		name, config, diagnostic string
+		args                     []string
+		code                     int
+	}{
+		{name: "missing include", config: "sync: {source: directory}", diagnostic: "nonempty sync.include", code: 2},
+		{name: "unknown source", config: "sync: {source: other}", diagnostic: "sync.source", code: 2},
+		{name: "size", config: "sync: {source: directory, include: [README.txt], failBytes: 2}", diagnostic: "sync", code: 6},
+		{name: "overlay", config: "sync: {source: directory, include: [README.txt], gitOverlay: true}", diagnostic: "gitOverlay", code: 2},
+		{name: "base ref", config: "sync: {source: directory, include: [README.txt], baseRef: main}", diagnostic: "baseRef", code: 2},
+		{name: "fresh PR", config: "sync: {source: directory, include: [README.txt]}", args: []string{"--fresh-pr", "1"}, diagnostic: "--fresh-pr", code: 2},
+		{name: "local patch", config: "sync: {source: directory, include: [README.txt]}", args: []string{"--apply-local-patch"}, diagnostic: "--apply-local-patch", code: 2},
+		{name: "Actions", config: "sync: {source: directory, include: [README.txt]}\nactions: {workflow: ci.yml}", diagnostic: "Actions hydration", code: 2},
+		{name: "native Windows", config: "sync: {source: directory, include: [README.txt]}", args: []string{"--target", "windows"}, diagnostic: "native-Windows", code: 2},
+		{name: "delegated", config: "sync: {source: directory, include: [README.txt]}", args: []string{"--provider", "module-runtime-test"}, diagnostic: "ordinary SSH lease", code: 2},
+		{name: "SSH without manifest sync", config: "sync: {source: directory, include: [README.txt]}", args: []string{"--provider", claimRoutingUnusableProvider}, diagnostic: "ordinary SSH lease provider with crabbox-sync is required", code: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			root := t.TempDir()
+			t.Chdir(root)
+			t.Setenv("TMPDIR", t.TempDir())
+			writeFile(t, filepath.Join(root, "README.txt"), "ordinary readme\n")
+			config := filepath.Join(t.TempDir(), "config.yaml")
+			writeFile(t, config, tc.config+"\n")
+			t.Setenv("CRABBOX_CONFIG", config)
+			calls := 0
+			runEnvProfileTestAcquireHook = func(AcquireRequest) { calls++ }
+			t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
+			args := append([]string{"--provider", "run-env-profile-test"}, tc.args...)
+			args = append(args, "--", "true")
+			var out, stderr bytes.Buffer
+			err := (App{Stdout: &out, Stderr: &stderr}).runCommand(context.Background(), args)
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != tc.code || !strings.Contains(err.Error(), tc.diagnostic) {
+				t.Fatalf("error=%v want=%d/%s stderr=%s", err, tc.code, tc.diagnostic, &stderr)
+			}
+			if calls != 0 {
+				t.Fatalf("Acquire calls=%d", calls)
+			}
+		})
+	}
+}
+
+func TestRunDirectorySourceNoSyncDoesNotEnumerate(t *testing.T) {
+	clearConfigEnv(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	// If active enumeration ran, an in-source temporary root would reject it.
+	t.Setenv("TMPDIR", root)
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	writeFile(t, config, "sync: {source: directory}\n")
+	t.Setenv("CRABBOX_CONFIG", config)
+	calls := 0
+	runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) {
+		calls++
+		return LeaseTarget{}, Exit(9, "ordinary acquisition control")
+	}
+	t.Cleanup(func() { runEnvProfileTestAcquireLease = nil })
+	var out, stderr bytes.Buffer
+	err := (App{Stdout: &out, Stderr: &stderr}).runCommand(context.Background(), []string{"--provider", "run-env-profile-test", "--no-sync", "--", "true"})
+	if calls != 1 || err == nil || !strings.Contains(err.Error(), "ordinary acquisition control") {
+		t.Fatalf("calls=%d error=%v stderr=%s", calls, err, &stderr)
+	}
+	matches, err := filepath.Glob(filepath.Join(root, "crabbox-directory-sync-*"))
+	if err != nil || len(matches) != 0 {
+		t.Fatalf("metadata=%v err=%v", matches, err)
+	}
+}
+
+func TestRunDirectorySourceActionsWorkspaceRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name, response, diagnostic string
+		code                       int
+	}{
+		{"owned workspace", "printf 'WORKSPACE=/work/prepared-actions\\n'", "Actions-owned workspace", 2},
+		{"lookup error", "exit 1", "verify directory sync workspace", 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			root := t.TempDir()
+			t.Chdir(root)
+			t.Setenv("TMPDIR", t.TempDir())
+			writeFile(t, filepath.Join(root, "README.txt"), "ordinary readme\n")
+			config := filepath.Join(t.TempDir(), "config.yaml")
+			writeFile(t, config, "sync: {source: directory, include: [README.txt]}\n")
+			t.Setenv("CRABBOX_CONFIG", config)
+			bin := t.TempDir()
+			events := filepath.Join(t.TempDir(), "events")
+			script := "#!/bin/sh\ncase \"$1\" in\n *'cat '*'.crabbox/actions/cbx_env_profile_test.env'*) printf 'marker\\n' >> " + shellQuote(events) + "; " + tc.response + "; exit 0 ;;\n *'invalid sync manifest length'*) printf 'unexpected-sync\\n' >> " + shellQuote(events) + " ;;\nesac\n/bin/cat >/dev/null || true\nexit 0\n"
+			installWorkspaceOwnerAwareSSH(t, filepath.Join(bin, "ssh"), script)
+			if err := os.WriteFile(filepath.Join(bin, "rsync"), []byte("#!/bin/sh\nprintf 'unexpected-sync\\n' >> "+shellQuote(events)+"\nexit 0\n"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+			t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+			releases := 0
+			runEnvProfileTestReleaseHook = func() error { releases++; return nil }
+			t.Cleanup(func() { runEnvProfileTestReleaseHook = nil })
+			var out, stderr bytes.Buffer
+			err := (App{Stdout: &out, Stderr: &stderr}).runCommand(context.Background(), []string{"--provider", "run-env-profile-test", "--", "true"})
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != tc.code || !strings.Contains(err.Error(), tc.diagnostic) {
+				t.Fatalf("error=%v stderr=%s", err, &stderr)
+			}
+			data, readErr := os.ReadFile(events)
+			if readErr != nil || !bytes.Contains(data, []byte("marker\n")) || bytes.Contains(data, []byte("unexpected-sync")) {
+				t.Fatalf("events=%q error=%v", data, readErr)
+			}
+			if releases != 1 {
+				t.Fatalf("release calls=%d", releases)
+			}
+		})
+	}
+}
+
+func TestStopIgnoresInactiveSyncSource(t *testing.T) {
+	clearConfigEnv(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	writeFile(t, config, "sync: {source: unsupported, gitOverlay: true, baseRef: unused}\n")
+	t.Setenv("CRABBOX_CONFIG", config)
+	bin := t.TempDir()
+	installWorkspaceOwnerAwareSSH(t, filepath.Join(bin, "ssh"), "#!/bin/sh\n/bin/cat >/dev/null || true\nexit 0\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+	releases := 0
+	runEnvProfileTestReleaseHook = func() error { releases++; return nil }
+	t.Cleanup(func() { runEnvProfileTestReleaseHook = nil })
+	var out, stderr bytes.Buffer
+	err := (App{Stdout: &out, Stderr: &stderr}).stop(context.Background(), []string{"--provider", "run-env-profile-test", "--id", "cbx_env_profile_test"})
+	if err != nil || releases != 1 {
+		t.Fatalf("releases=%d error=%v stderr=%s", releases, err, &stderr)
+	}
+}
+
+func TestRunDirectorySourcePreservesConfigRoot(t *testing.T) {
+	clearConfigEnv(t)
+	outer := t.TempDir()
+	runGit(t, outer, "init")
+	root := filepath.Join(outer, "inner")
+	writeFile(t, filepath.Join(root, "README.txt"), "inner\n")
+	t.Chdir(root)
+	t.Setenv("TMPDIR", t.TempDir())
+	config := filepath.Join(root, "crabbox.yaml")
+	writeFile(t, config, "sync: {source: directory, include: [README.txt]}\n")
+	t.Setenv("CRABBOX_CONFIG", config)
+	before, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.credentialProvenance.repositoryRoot != canonicalRepositoryPath(outer) {
+		t.Fatalf("configuration root=%q", before.credentialProvenance.repositoryRoot)
+	}
+	var configuredRoot, acquiredRoot string
+	runEnvProfileTestConfigureHook = func(cfg Config) { configuredRoot = cfg.credentialProvenance.repositoryRoot }
+	runEnvProfileTestAcquireLease = func(req AcquireRequest) (LeaseTarget, error) {
+		acquiredRoot = req.Repo.Root
+		return LeaseTarget{}, Exit(9, "ordinary acquisition control")
+	}
+	t.Cleanup(func() { runEnvProfileTestConfigureHook = nil; runEnvProfileTestAcquireLease = nil })
+	var out, stderr bytes.Buffer
+	err = (App{Stdout: &out, Stderr: &stderr}).runCommand(context.Background(), []string{"--provider", "run-env-profile-test", "--", "true"})
+	if err == nil || !strings.Contains(err.Error(), "ordinary acquisition control") {
+		t.Fatalf("error=%v stderr=%s", err, &stderr)
+	}
+	if configuredRoot != before.credentialProvenance.repositoryRoot || acquiredRoot != canonicalRepositoryPath(root) {
+		t.Fatalf("configured root=%q acquired source=%q", configuredRoot, acquiredRoot)
 	}
 }

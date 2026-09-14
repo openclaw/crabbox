@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -2065,5 +2066,186 @@ func writeFile(t *testing.T, path, value string) {
 	}
 	if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDirectorySyncManifest(t *testing.T) {
+	clearConfigEnv(t)
+	root, scratch := t.TempDir(), t.TempDir()
+	t.Setenv("TMPDIR", scratch)
+	files := map[string]string{
+		".gitignore": "*.tmp\n!keep.tmp\n",
+		"README.txt": "readme\n", "src/a.txt": "a\n", "src/drop.tmp": "drop\n",
+		"src/nested/.gitignore": "local.txt\n", "src/nested/local.txt": "local\n",
+		"src/nested/keep.tmp": "keep\n", "src/nested/b.txt": "b\n",
+		".crabboxignore": "src/a.txt\n!src/a.txt\nsrc/nested/b.txt\n",
+		"outside.txt":    "outside\n",
+	}
+	before := map[string]os.FileInfo{}
+	for name, data := range files {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		writeFile(t, path, data)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[name] = info
+	}
+	// Ambient Git excludes must not participate in a directory-source manifest.
+	ambient := filepath.Join(t.TempDir(), "global-ignore")
+	writeFile(t, ambient, "README.txt\n")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "core.excludesFile")
+	t.Setenv("GIT_CONFIG_VALUE_0", ambient)
+	cfg := baseConfig()
+	cfg.Sync.Source = "directory"
+	cfg.Sync.Includes = []string{"README.txt", "src"}
+	rules, err := syncExcludes(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"README.txt", "src/a.txt", "src/nested/.gitignore", "src/nested/keep.tmp"}
+	for i := 0; i < 2; i++ {
+		got, err := syncManifestForSource(context.Background(), Repo{Root: root}, cfg, rules)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(got.Files, want) {
+			t.Fatalf("files=%q want=%q", got.Files, want)
+		}
+		if len(got.Changed) != 0 || len(got.Deleted) != 0 || len(got.OverlayFiles) != 0 {
+			t.Fatalf("manufactured Git delta: %+v", got)
+		}
+		count, size, _, _ := syncGuardrailScope(got)
+		if count != len(want) || size != got.Bytes {
+			t.Fatalf("guardrail=%d/%d manifest=%+v", count, size, got)
+		}
+	}
+	for name, data := range files {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != data || info.Mode() != before[name].Mode() || !info.ModTime().Equal(before[name].ModTime()) {
+			t.Fatalf("source changed: %s", name)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(root, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("source metadata: %v", err)
+	}
+	entries, err := os.ReadDir(scratch)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("temporary metadata retained: %v %v", entries, err)
+	}
+	cfg.Sync.Includes = []string{"absent.txt"}
+	got, err := syncManifestForSource(context.Background(), Repo{Root: root}, cfg, rules)
+	if err != nil || len(got.Files) != 0 {
+		t.Fatalf("empty admitted manifest=%+v err=%v", got, err)
+	}
+	cfg.Sync.Includes = []string{" ", ""}
+	if _, err := syncManifestForSource(context.Background(), Repo{Root: root}, cfg, rules); err == nil {
+		t.Fatal("empty include accepted")
+	}
+}
+
+func TestDirectorySyncNestedRepositoryScope(t *testing.T) {
+	clearConfigEnv(t)
+	root := t.TempDir()
+	t.Setenv("TMPDIR", t.TempDir())
+	writeFile(t, filepath.Join(root, "src/plain.txt"), "plain\n")
+	nested := filepath.Join(root, "src/nested")
+	writeFile(t, filepath.Join(nested, "file.txt"), "nested\n")
+	runGit(t, nested, "init")
+	for _, tc := range []struct {
+		name               string
+		includes, excludes []string
+		reject             bool
+	}{
+		{"literal ancestor", []string{"src"}, nil, true},
+		{"literal repository", []string{"src/nested"}, nil, true},
+		{"literal child", []string{"src/nested/file.txt"}, nil, true},
+		{"child glob", []string{"src/nested/*.txt"}, nil, true},
+		{"component glob", []string{"src/*/*.txt"}, nil, true},
+		{"nonrecursive glob", []string{"src/*"}, nil, false},
+		{"identical glob excluded", []string{"src/nested/*.txt"}, []string{"src/nested/*.txt"}, false},
+		{"normalized identical glob", []string{"/src/nested/*.txt/"}, []string{"src/nested/*.txt"}, false},
+		{"identical glob reopened", []string{"src/nested/*.txt"}, []string{"src/nested/*.txt", "!src/nested/file.txt"}, true},
+		{"identical glob final exclusion", []string{"src/nested/*.txt"}, []string{"src/nested/*.txt", "!src/nested/file.txt", "src/nested/*.txt"}, false},
+		{"overlapping wildcard unresolved", []string{"src/nested/file?.txt"}, []string{"src/nested/*.txt"}, true},
+
+		{"outside include", []string{"src/plain.txt"}, nil, false},
+		{"excluded", []string{"src"}, []string{"src/nested"}, false},
+		{"excluded literal grant", []string{"src/nested/file.txt"}, []string{"src/nested/file.txt"}, false},
+		{"excluded literal prefix grant", []string{"src/nested/subdir"}, []string{"src/nested/subdir"}, false},
+		{"literal grant reopened", []string{"src/nested/subdir"}, []string{"src/nested/subdir", "!src/nested/subdir/file.txt"}, true},
+		{"later reinclude", []string{"src"}, []string{"src/nested", "!src/nested/file.txt"}, true},
+		{"final subtree exclusion", []string{"src"}, []string{"src/nested", "!src/nested/file.txt", "src/nested"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Sync.Source = "directory"
+			cfg.Sync.Includes = tc.includes
+			cfg.Sync.Excludes = tc.excludes
+			rules, err := syncExcludes(root, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = syncManifestForSource(context.Background(), Repo{Root: root}, cfg, rules)
+			if tc.reject {
+				if err == nil || !strings.Contains(err.Error(), "nested repository") {
+					t.Fatalf("error=%v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestDirectorySyncEffectiveRoot(t *testing.T) {
+	clearConfigEnv(t)
+	outer := t.TempDir()
+	runGit(t, outer, "init")
+	root := filepath.Join(outer, "inner")
+	writeFile(t, filepath.Join(root, "README.txt"), "inner\n")
+	t.Chdir(root)
+	cfg := baseConfig()
+	cfg.Sync.Source = "directory"
+	cfg.Sync.Includes = []string{"README.txt"}
+	repo, err := findSyncRepo(cfg, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repo.Root != canonicalRepositoryPath(root) || repo.Head != "" || repo.RemoteURL != "" {
+		t.Fatalf("repo=%+v", repo)
+	}
+	if err := os.Mkdir(filepath.Join(root, ".jj"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findSyncRepo(cfg, true); err == nil || !strings.Contains(err.Error(), "native Jujutsu") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestDirectorySyncMetadataCleanupOnGitFailure(t *testing.T) {
+	clearConfigEnv(t)
+	root, scratch := t.TempDir(), t.TempDir()
+	t.Setenv("TMPDIR", scratch)
+	t.Setenv("PATH", t.TempDir())
+	_, err := directorySyncFileList(context.Background(), root)
+	if err == nil || !strings.Contains(err.Error(), "installed Git required") {
+		t.Fatalf("error=%v", err)
+	}
+	entries, readErr := os.ReadDir(scratch)
+	if readErr != nil || len(entries) != 0 {
+		t.Fatalf("temporary metadata=%v error=%v", entries, readErr)
+	}
+	if _, err := os.Lstat(filepath.Join(root, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("source Git metadata: %v", err)
 	}
 }

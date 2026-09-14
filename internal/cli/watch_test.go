@@ -1596,3 +1596,18 @@ func TestTopLevelHelpListsWatch(t *testing.T) {
 		t.Fatal("top-level help does not list watch")
 	}
 }
+
+func TestWatchDirectorySourceRejected(t *testing.T) {
+	clearConfigEnv(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	writeFile(t, config, "provider: run-env-profile-test\nsync: {source: directory, include: [README.txt]}\n")
+	t.Setenv("CRABBOX_CONFIG", config)
+	var out, stderr bytes.Buffer
+	err := (App{Stdout: &out, Stderr: &stderr}).watch(context.Background(), []string{"--", "true"})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "watch does not support") {
+		t.Fatalf("error=%v", err)
+	}
+}
