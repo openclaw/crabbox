@@ -1694,7 +1694,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	} else {
 		state, stateErr := readActionsHydrationState(ctx, target, leaseID)
 		if stateErr != nil && (directorySync || localGitSeed) {
-			return recordFailure(Exit(7, "verify explicit sync source has no Actions hydration marker: %v", stateErr))
+			source := "directory sync"
+			if localGitSeed {
+				source = "local Git seed"
+			}
+			return recordFailure(Exit(7, "verify %s workspace has no Actions hydration marker: %v", source, stateErr))
 		}
 		if stateErr != nil && borrowedPool != nil && readyPoolRunNeedsTrustedRemote(*readyPoolReturn) {
 			return recordFailure(Exit(7, "verify ready-pool Actions hydration marker: %v", stateErr))
