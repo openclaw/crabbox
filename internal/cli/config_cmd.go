@@ -192,21 +192,22 @@ func configShowView(cfg Config) map[string]any {
 		"ttl":                        cfg.TTL.String(),
 		"idleTimeout":                cfg.IdleTimeout.String(),
 		"sync": map[string]any{
-			"source":      effectiveSyncSource(cfg),
-			"exclude":     configuredExcludes(cfg).patterns(),
-			"include":     syncIncludes(cfg),
-			"delete":      cfg.Sync.Delete,
-			"checksum":    cfg.Sync.Checksum,
-			"gitSeed":     cfg.Sync.GitSeed,
-			"gitOverlay":  cfg.Sync.GitOverlay,
-			"fingerprint": cfg.Sync.Fingerprint,
-			"baseRef":     cfg.Sync.BaseRef,
-			"timeout":     cfg.Sync.Timeout.String(),
-			"warnFiles":   cfg.Sync.WarnFiles,
-			"warnBytes":   cfg.Sync.WarnBytes,
-			"failFiles":   cfg.Sync.FailFiles,
-			"failBytes":   cfg.Sync.FailBytes,
-			"allowLarge":  cfg.Sync.AllowLarge,
+			"source":        effectiveSyncSource(cfg),
+			"exclude":       configuredExcludes(cfg).patterns(),
+			"include":       syncIncludes(cfg),
+			"delete":        cfg.Sync.Delete,
+			"checksum":      cfg.Sync.Checksum,
+			"gitSeed":       cfg.Sync.GitSeed,
+			"gitSeedSource": effectiveGitSeedSource(cfg),
+			"gitOverlay":    cfg.Sync.GitOverlay,
+			"fingerprint":   cfg.Sync.Fingerprint,
+			"baseRef":       cfg.Sync.BaseRef,
+			"timeout":       cfg.Sync.Timeout.String(),
+			"warnFiles":     cfg.Sync.WarnFiles,
+			"warnBytes":     cfg.Sync.WarnBytes,
+			"failFiles":     cfg.Sync.FailFiles,
+			"failBytes":     cfg.Sync.FailBytes,
+			"allowLarge":    cfg.Sync.AllowLarge,
 		},
 		"env": map[string]any{
 			"allow": cfg.EnvAllow,
@@ -649,7 +650,7 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 	fmt.Fprintf(w, "access_auth=%s\n", accessAuthState(cfg.Access))
 	fmt.Fprintf(w, "ssh=%s@<host>:%s fallback_ports=%s key=%s\n", cfg.SSHUser, cfg.SSHPort, blank(strings.Join(cfg.SSHFallbackPorts, ","), "-"), cfg.SSHKey)
 	fmt.Fprintf(w, "sync source=%s\n", effectiveSyncSource(cfg))
-	fmt.Fprintf(w, "sync delete=%t checksum=%t git_seed=%t git_overlay=%t fingerprint=%t base_ref=%s excludes=%d includes=%d timeout=%s\n", cfg.Sync.Delete, cfg.Sync.Checksum, cfg.Sync.GitSeed, cfg.Sync.GitOverlay, cfg.Sync.Fingerprint, blank(cfg.Sync.BaseRef, "-"), len(configuredExcludes(cfg).rules), len(syncIncludes(cfg)), cfg.Sync.Timeout)
+	fmt.Fprintf(w, "sync delete=%t checksum=%t git_seed=%t git_seed_source=%s git_overlay=%t fingerprint=%t base_ref=%s excludes=%d includes=%d timeout=%s\n", cfg.Sync.Delete, cfg.Sync.Checksum, cfg.Sync.GitSeed, effectiveGitSeedSource(cfg), cfg.Sync.GitOverlay, cfg.Sync.Fingerprint, blank(cfg.Sync.BaseRef, "-"), len(configuredExcludes(cfg).rules), len(syncIncludes(cfg)), cfg.Sync.Timeout)
 	fmt.Fprintf(w, "env allow=%s\n", strings.Join(cfg.EnvAllow, ","))
 	fmt.Fprintf(w, "run preflight_tools=%s\n", blank(strings.Join(cfg.Run.PreflightTools, ","), "-"))
 	fmt.Fprintf(w, "capacity market=%s strategy=%s fallback=%s regions=%s hints=%t\n", cfg.Capacity.Market, cfg.Capacity.Strategy, cfg.Capacity.Fallback, blank(strings.Join(cfg.Capacity.Regions, ","), "-"), cfg.Capacity.Hints)

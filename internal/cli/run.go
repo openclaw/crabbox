@@ -402,6 +402,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	defaults := defaultConfig()
 	fs := newFlagSet("run", a.Stderr)
 	runFlags := registerRunFlags(fs, defaults, ordinaryLeaseCreateFlagRegistrationOptions())
+	gitSeedSource := fs.String("git-seed-source", "", "Git metadata source: origin or explicit offline local objects")
 	var requiredArtifactChanges stringListFlag
 	fs.Var(&requiredArtifactChanges, "require-artifact-change", "require created or changed bytes at an exact relative file path after successful Linux SSH execution; identical rewrites fail; repeatable")
 	var failureDownloads stringListFlag
@@ -736,6 +737,19 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		cfg.Sync.Checksum = *checksumSync
 		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
+	if flagWasSet(fs, "git-seed-source") {
+		cfg.Sync.GitSeedSource = *gitSeedSource
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
+	}
+	if !*noSync {
+		if err := validateGitSeedSource(cfg); err != nil {
+			return err
+		}
+	}
+	localGitSeed := !*noSync && effectiveGitSeedSource(cfg) == "local"
+	if localGitSeed && (strings.TrimSpace(*freshPRValue) != "" || *applyLocalPatch || strings.TrimSpace(*readyPool) != "" || shouldAutoHydrateActions(cfg, *noHydrate, false, FreshPRSpec{}, *syncOnly)) {
+		return Exit(2, "local Git seeding owns metadata and cannot use fresh PR, ready-pool or Actions hydration; use a raw workspace with --no-hydrate")
+	}
 	if *junitResults != "" {
 		cfg.Results.JUnit = splitCommaList(*junitResults)
 		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
@@ -871,6 +885,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return err
 		}
 		providerSpec := provider.Spec()
+		if localGitSeed && providerSpec.Kind != ProviderKindSSHLease {
+			return Exit(2, "local Git seeding requires an SSH-backed provider that supports ordinary workspace sync")
+		}
 		if directorySync {
 			if err := validateDirectorySyncProvider(providerSpec); err != nil {
 				return err
@@ -911,6 +928,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	backend, err := loadBackend(cfg, backendRuntime)
 	if err != nil {
 		return err
+	}
+	if localGitSeed && backend.Spec().Kind != ProviderKindSSHLease {
+		return Exit(2, "local Git seeding requires an SSH-backed provider that supports ordinary workspace sync")
 	}
 	if directorySync {
 		if err := validateDirectorySyncProvider(backend.Spec()); err != nil {
@@ -1205,7 +1225,19 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return Exit(2, "attest key: %v", err)
 		}
 	}
-	if !*noSync && freshPR.Empty() {
+	var localSeed preparedLocalGitSeed
+	if localGitSeed {
+		localSeed, err = prepareLocalGitSeed(ctx, repo, cfg, *forceSyncLarge, a.Stderr)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			cleanupErr := localSeed.cleanup()
+			err = errors.Join(err, cleanupErr)
+			runFailure = errors.Join(runFailure, cleanupErr)
+		}()
+	}
+	if !*noSync && freshPR.Empty() && !localGitSeed {
 		if directorySync {
 			excludes, err := syncExcludes(repo.Root, cfg)
 			if err != nil {
@@ -1661,13 +1693,16 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		workdir = remoteJoin(cfg, leaseID, freshPR.WorkdirName())
 	} else {
 		state, stateErr := readActionsHydrationState(ctx, target, leaseID)
-		if stateErr != nil && directorySync {
-			return recordFailure(Exit(7, "verify directory sync workspace has no Actions hydration marker: %v", stateErr))
+		if stateErr != nil && (directorySync || localGitSeed) {
+			return recordFailure(Exit(7, "verify explicit sync source has no Actions hydration marker: %v", stateErr))
 		}
 		if stateErr != nil && borrowedPool != nil && readyPoolRunNeedsTrustedRemote(*readyPoolReturn) {
 			return recordFailure(Exit(7, "verify ready-pool Actions hydration marker: %v", stateErr))
 		}
 		if stateErr == nil && state.Workspace != "" {
+			if localGitSeed {
+				return recordFailure(Exit(2, "local Git seeding cannot modify an Actions-owned workspace; use a fresh raw workspace"))
+			}
 			if directorySync {
 				return recordFailure(Exit(2, "directory sync cannot modify an Actions-owned workspace; use a fresh raw workspace"))
 			}
@@ -1927,7 +1962,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	originDisposition := classifyGitOrigin(repo.RemoteURL)
 retrySync:
-	plainManifestMode := directorySync || originDisposition != gitOriginRemoteAttemptSafe
+	plainManifestMode := directorySync || (!localGitSeed && originDisposition != gitOriginRemoteAttemptSafe)
 	if fullResyncRequested && hydratedByActions && !*syncOnly {
 		if !autoHydrateActions {
 			return recordFailure(Exit(2, "--full-resync would invalidate the adopted Actions workspace for %s, but this run cannot rehydrate it; configure actions.workflow and omit --no-hydrate, or use --sync-only", leaseID))
@@ -2037,14 +2072,24 @@ retrySync:
 			recorder.Event("sync.finished", "synced", fmt.Sprintf("duration=%s fresh_pr=%s", timings.sync.Round(time.Millisecond), freshPR.Slug()))
 			goto afterSync
 		}
-		excludes, err := syncExcludes(repo.Root, cfg)
-		if err != nil {
-			return recordFailure(err)
-		}
 		stepStart = time.Now()
-		manifest, err := syncManifestForSource(ctx, repo, cfg, excludes)
-		if err != nil {
-			return recordFailure(Exit(6, "build sync file list: %v", err))
+		var excludes SyncExcludeRules
+		var manifest SyncManifest
+		if localGitSeed {
+			manifest, excludes = localSeed.Snapshot.Manifest, localSeed.Snapshot.Excludes
+			timings.syncMode = "git-local"
+			timings.syncTransferFiles, timings.syncTransferBytes = len(manifest.Files), manifest.Bytes
+			timings.syncSeedBytes = localSeed.Artifact.PackedBytes
+			fmt.Fprintf(a.Stderr, "Git seed source=local head=%s objects=%d object_bytes=%d seed_bytes=%d; exclusions apply to files, not committed history\n", localSeed.Selection.Head, localSeed.Artifact.ObjectCount, localSeed.Artifact.ObjectBytes, localSeed.Artifact.PackedBytes)
+		} else {
+			excludes, err = syncExcludes(repo.Root, cfg)
+			if err != nil {
+				return recordFailure(err)
+			}
+			manifest, err = syncManifestForSource(ctx, repo, cfg, excludes)
+			if err != nil {
+				return recordFailure(Exit(6, "build sync file list: %v", err))
+			}
 		}
 		timings.syncSteps.manifest = time.Since(stepStart)
 		stepStart = time.Now()
@@ -2061,6 +2106,9 @@ retrySync:
 			coherence = gitCoherencePlan{}
 		}
 		syncSourceRoot := repo.Root
+		if localGitSeed {
+			syncSourceRoot = localSeed.Snapshot.Root
+		}
 		var overlaySnapshot gitOverlaySnapshot
 		if overlayDecision.Enabled {
 			overlaySnapshot, err = prepareGitOverlaySnapshot(repo, cfg, excludes, syncIncludes(cfg), coherence)
@@ -2107,8 +2155,16 @@ retrySync:
 			timings.syncFallbackReason = overlayDecision.Reason
 		}
 		fingerprint := ""
+		if localGitSeed && cfg.Sync.Fingerprint && !fullResyncRequested && !isWindowsNativeTarget(target) {
+			remoteFingerprint, fingerprintErr := runSSHOutput(ctx, target, remoteGitLocalSeedFingerprint(workdir, localSeed.Plan))
+			if fingerprintErr == nil && remoteFingerprint == localSeed.Plan.Fingerprint {
+				timings.sync, timings.syncSkipped = time.Since(syncStart), true
+				fmt.Fprintln(a.Stderr, "No changes detected, skipping sync (verified local Git metadata)")
+				goto afterSync
+			}
+		}
 		fingerprintUnsafe := cfg.Sync.Fingerprint && overlayDecision.Requested && !overlayDecision.Enabled && gitOverlayLocalFingerprintUnsafe(repo.Root)
-		if cfg.Sync.Fingerprint && !fingerprintUnsafe && !isWindowsNativeTarget(target) && !plainManifestMode {
+		if !localGitSeed && cfg.Sync.Fingerprint && !fingerprintUnsafe && !isWindowsNativeTarget(target) && !plainManifestMode {
 			stepStart = time.Now()
 			if overlayDecision.Enabled {
 				fingerprint = overlaySnapshot.Fingerprint
@@ -2162,10 +2218,24 @@ retrySync:
 			}
 			timings.syncSteps.mkdir = time.Since(stepStart)
 		}
+		if localGitSeed {
+			stepStart = time.Now()
+			if err := transferLocalGitSeed(ctx, target, workdir, localSeed, cfg.Sync.Timeout, a.Stderr); err != nil {
+				return recordFailure(err)
+			}
+			timings.syncSteps.gitSeed += time.Since(stepStart)
+		}
 		if isWindowsNativeTarget(target) {
 			stepStart = time.Now()
-			if err := syncWindowsNative(ctx, target, repo, cfg, coherence, workdir, manifest, a.Stdout, a.Stderr, rsyncOptions{Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, FullResync: fullResyncRequested, Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
+			transferRepo := repo
+			transferRepo.Root = syncSourceRoot
+			if err := syncWindowsNative(ctx, target, transferRepo, cfg, coherence, workdir, manifest, a.Stdout, a.Stderr, rsyncOptions{Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, FullResync: fullResyncRequested, Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
 				return recordFailure(err)
+			}
+			if localGitSeed {
+				if err := runSSHQuiet(ctx, target, windowsGitLocalSeedFinalize(workdir, localSeed.Plan)); err != nil {
+					return recordFailure(Exit(6, "verify local Git seed after Windows file sync: %v", err))
+				}
 			}
 			timings.syncSteps.rsync = time.Since(stepStart)
 			timings.sync = time.Since(syncStart)
@@ -2323,7 +2393,7 @@ retrySync:
 		if shouldPruneRemoteSync(cfg.Sync.Delete, fullResyncRequested) {
 			// Full resync can git-seed files that are absent from the local manifest.
 			// Seed the old manifest from git so prune removes those resurrected paths.
-			if !overlayDecision.Enabled && !plainManifestMode && shouldSeedRemotePruneManifest(hydratedByActions, fullResyncRequested) {
+			if !localGitSeed && !overlayDecision.Enabled && !plainManifestMode && shouldSeedRemotePruneManifest(hydratedByActions, fullResyncRequested) {
 				if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteSeedSyncManifestFromGit(workdir), idempotentSSHRetryDelay); err != nil {
 					return recordFailure(Exit(6, "remote sync seed manifest failed: %v", err))
 				}
@@ -2353,6 +2423,10 @@ retrySync:
 		}
 		baseSHA := gitHydrateBaseSHA(repo, cfg.Sync.BaseRef)
 		hydrateGit := true
+		finalizeBaseRef := cfg.Sync.BaseRef
+		if localGitSeed {
+			hydrateGit, finalizeBaseRef, baseSHA = false, "", ""
+		}
 		if !plainManifestMode && hydratedByActions {
 			reason, err := runSSHOutput(ctx, target, remoteGitHydrateStatus(workdir, cfg.Sync.BaseRef, baseSHA))
 			if err == nil && reason != "" {
@@ -2368,7 +2442,7 @@ retrySync:
 			HydrateGit:         hydrateGit && !overlayDecision.Enabled && !plainManifestMode,
 			GitOverlay:         overlayDecision.Enabled,
 			PlainManifest:      plainManifestMode,
-			BaseRef:            cfg.Sync.BaseRef,
+			BaseRef:            finalizeBaseRef,
 			BaseSHA:            baseSHA,
 			Fingerprint:        fingerprint,
 			Token:              finalizeToken,
@@ -2384,6 +2458,11 @@ retrySync:
 			return recordFailure(Exit(6, "remote sync finalize failed: %v", finalizeErr))
 		}
 		pendingSyncMetadata = false
+		if localGitSeed {
+			if err := runSSHQuiet(ctx, target, remoteGitLocalSeedFinalize(workdir, localSeed.Plan)); err != nil {
+				return recordFailure(Exit(6, "verify local Git seed after file sync: %v", err))
+			}
+		}
 		timings.syncSteps.finalize = time.Since(stepStart)
 		timings.sync = time.Since(syncStart)
 		fmt.Fprintf(a.Stderr, "sync complete in %s\n", timings.sync.Round(time.Millisecond))
@@ -2393,6 +2472,11 @@ retrySync:
 		recorder.Event("sync.finished", "synced", "skipped by --no-sync")
 	}
 afterSync:
+	if localGitSeed {
+		if cleanupErr := localSeed.cleanup(); cleanupErr != nil {
+			return recordFailure(Exit(6, "clean up local Git seed before workload: %v", cleanupErr))
+		}
+	}
 	if !*syncOnly && !*noSync {
 		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteInvalidateSyncFingerprintForTarget(target, workdir, plainManifestMode), idempotentSSHRetryDelay); err != nil {
 			return recordFailure(Exit(7, "invalidate reusable sync fingerprint before execution: %v", err))
@@ -3363,6 +3447,7 @@ type runTimings struct {
 	syncMode              string
 	syncTransferFiles     int
 	syncTransferBytes     int64
+	syncSeedBytes         int64
 	syncFallbackReason    string
 	blockedStage          string
 	resourceExhaustion    ResourceExhaustionReason

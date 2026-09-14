@@ -384,6 +384,71 @@ limited to 16 KiB in memory; oversized or unrecognized output produces an
 `unknown` diagnosis instead of guessing. Existing Git metadata may still be
 present; a failed seed has not established that it is current or usable.
 
+### Opt-in local Git metadata
+
+Use `sync.gitSeedSource: local`, `CRABBOX_SYNC_GIT_SEED_SOURCE=local`, or
+`--git-seed-source local` on `run` and `sync-plan` when the runner cannot fetch
+your origin. The default remains `origin`; local mode is never an automatic
+authentication fallback. `sync.gitSeed` must remain enabled.
+
+```sh
+crabbox sync-plan --git-seed-source local --json
+crabbox run --git-seed-source local --no-hydrate -- git describe --tags
+```
+
+Local mode freezes the complete ordinary file manifest and a self-contained Git
+bundle before acquiring a lease. The receiver imports only fresh metadata and
+an index at the selected `HEAD`; it does not check out historical files. Normal
+file transfer and deletion rules then apply the accepted working files, including
+dirty, staged, untracked, renamed, executable, and symlink paths. Local staging
+state is not copied: remote modifications are compared against the selected HEAD.
+Edits made after snapshot acceptance wait for the next sync.
+
+The bundle contains the complete selected HEAD and base histories, plus locally
+present tags that peel to those histories. An explicit `sync.baseRef` must resolve
+locally; short names prefer the corresponding origin tracking ref. An inferred
+base is optional, so detached repositories without an origin work too. Ref names
+are recreated without remote URLs. Exact commit, tree, blob, and tag identities
+are preserved, allowing offline parent queries, historical diffs, and ordinary
+`git describe`/`git describe --tags`. Root commits still have no parent, unrelated
+histories still have no merge base, and unrelated descendant tags are not copied.
+Abbreviated object IDs can differ when unrelated objects are omitted.
+
+**Exclusions do not redact Git history.** They control materialized working files,
+not blobs committed in selected history. That history can contain excluded paths
+or previously committed sensitive content. Use local seeding only when transferring
+the complete selected histories is appropriate. Source configuration, hooks,
+credential helpers, remotes, reflogs, worktree registrations, and alternate paths
+are not transferred. Linked worktrees and readable local alternate object stores
+are supported; the resulting bundle has no dependency on those stores.
+
+Preparation does not fetch missing objects. Incomplete selected histories,
+unreadable tag targets, conflicts, hidden sparse paths, assume-unchanged entries,
+and submodules fail with a local diagnostic instead of silently dropping metadata.
+The combined full file payload and uncompressed Git objects count against ordinary
+sync size guardrails, even when the dirty delta is small. The existing allow-large
+override affects those soft limits only. Separate hard bounds limit each of the
+uncompressed object total and bundle to 512 MiB, control output to 16 MiB, and
+selected objects to one million; a control-output limit may be reached first.
+Metadata preparation and import each have a five-minute deadline. `sync-plan`
+reports selected identities, object count, object bytes, bundle bytes, and digest;
+timing JSON adds `syncMode: "git-local"` and `syncSeedBytes`.
+
+Local metadata is supported on ordinary SSH-backed Linux, macOS, WSL2, and native
+Windows targets with a compatible Git version. Existing workspaces must either
+have no `.git` or contain metadata previously created by local mode. Switching an
+existing origin checkout requires an explicit `--full-resync`; otherwise Crabbox
+refuses to replace it. POSIX fingerprint reuse verifies local metadata identity
+and completeness; native Windows retains full archive transfer. Failed preparation
+or verification never falls back to origin or file-only sync. Cleanup failures
+report retained temporary state instead of declaring a successful transfer.
+
+Actions hydration, fresh PR checkouts, ready pools, directory sync, and Git overlay
+have different metadata owners and cannot be combined with local seeding. Use a
+raw workspace and `--no-hydrate` when Actions hydration is configured. `--no-sync`
+does not prepare or transfer a local seed. Existing mass-deletion guardrails still
+apply, including when many tracked paths are intentionally excluded.
+
 ### Opt-in Git overlay
 
 Set `sync.gitOverlay: true` or `CRABBOX_SYNC_GIT_OVERLAY=true` to let eligible

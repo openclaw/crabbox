@@ -1127,6 +1127,7 @@ Run-specific flags:
 --no-hydrate
 --full-resync                Alias: --fresh-sync
 --checksum
+--git-seed-source <origin|local>
 --force-sync-large
 --debug
 --shell

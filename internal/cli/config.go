@@ -321,21 +321,22 @@ func providerSelectionSourceForConfigPath(trust configPathTrust) providerSelecti
 }
 
 type SyncConfig struct {
-	Source      string
-	Excludes    []string
-	Includes    []string
-	Delete      bool
-	Checksum    bool
-	GitSeed     bool
-	GitOverlay  bool
-	Fingerprint bool
-	BaseRef     string
-	Timeout     time.Duration
-	WarnFiles   int
-	WarnBytes   int64
-	FailFiles   int
-	FailBytes   int64
-	AllowLarge  bool
+	Source        string
+	Excludes      []string
+	Includes      []string
+	Delete        bool
+	Checksum      bool
+	GitSeed       bool
+	GitSeedSource string
+	GitOverlay    bool
+	Fingerprint   bool
+	BaseRef       string
+	Timeout       time.Duration
+	WarnFiles     int
+	WarnBytes     int64
+	FailFiles     int
+	FailBytes     int64
+	AllowLarge    bool
 }
 
 type RunConfig struct {
@@ -2110,16 +2111,17 @@ func baseConfig() Config {
 		TTL:              90 * time.Minute,
 		IdleTimeout:      30 * time.Minute,
 		Sync: SyncConfig{
-			Source:      "git",
-			Delete:      true,
-			Checksum:    false,
-			GitSeed:     true,
-			Fingerprint: true,
-			Timeout:     15 * time.Minute,
-			WarnFiles:   50_000,
-			WarnBytes:   5 * 1024 * 1024 * 1024,
-			FailFiles:   150_000,
-			FailBytes:   20 * 1024 * 1024 * 1024,
+			Source:        "git",
+			Delete:        true,
+			Checksum:      false,
+			GitSeed:       true,
+			GitSeedSource: "origin",
+			Fingerprint:   true,
+			Timeout:       15 * time.Minute,
+			WarnFiles:     50_000,
+			WarnBytes:     5 * 1024 * 1024 * 1024,
+			FailFiles:     150_000,
+			FailBytes:     20 * 1024 * 1024 * 1024,
 		},
 		EnvAllow: []string{"CI", "NODE_OPTIONS"},
 		Capacity: CapacityConfig{
@@ -2604,23 +2606,24 @@ type fileSSHConfig struct {
 }
 
 type fileSyncConfig struct {
-	Source      string   `yaml:"source,omitempty"`
-	Exclude     []string `yaml:"exclude,omitempty"`
-	Excludes    []string `yaml:"excludes,omitempty"`
-	Include     []string `yaml:"include,omitempty"`
-	Includes    []string `yaml:"includes,omitempty"`
-	Delete      *bool    `yaml:"delete,omitempty"`
-	Checksum    *bool    `yaml:"checksum,omitempty"`
-	GitSeed     *bool    `yaml:"gitSeed,omitempty"`
-	GitOverlay  *bool    `yaml:"gitOverlay,omitempty"`
-	Fingerprint *bool    `yaml:"fingerprint,omitempty"`
-	BaseRef     string   `yaml:"baseRef,omitempty"`
-	Timeout     string   `yaml:"timeout,omitempty"`
-	WarnFiles   int      `yaml:"warnFiles,omitempty"`
-	WarnBytes   int64    `yaml:"warnBytes,omitempty"`
-	FailFiles   int      `yaml:"failFiles,omitempty"`
-	FailBytes   int64    `yaml:"failBytes,omitempty"`
-	AllowLarge  *bool    `yaml:"allowLarge,omitempty"`
+	Source        string   `yaml:"source,omitempty"`
+	Exclude       []string `yaml:"exclude,omitempty"`
+	Excludes      []string `yaml:"excludes,omitempty"`
+	Include       []string `yaml:"include,omitempty"`
+	Includes      []string `yaml:"includes,omitempty"`
+	Delete        *bool    `yaml:"delete,omitempty"`
+	Checksum      *bool    `yaml:"checksum,omitempty"`
+	GitSeed       *bool    `yaml:"gitSeed,omitempty"`
+	GitSeedSource string   `yaml:"gitSeedSource,omitempty"`
+	GitOverlay    *bool    `yaml:"gitOverlay,omitempty"`
+	Fingerprint   *bool    `yaml:"fingerprint,omitempty"`
+	BaseRef       string   `yaml:"baseRef,omitempty"`
+	Timeout       string   `yaml:"timeout,omitempty"`
+	WarnFiles     int      `yaml:"warnFiles,omitempty"`
+	WarnBytes     int64    `yaml:"warnBytes,omitempty"`
+	FailFiles     int      `yaml:"failFiles,omitempty"`
+	FailBytes     int64    `yaml:"failBytes,omitempty"`
+	AllowLarge    *bool    `yaml:"allowLarge,omitempty"`
 }
 
 type fileEnvConfig struct {
@@ -4093,6 +4096,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Sync.Delete, file.Sync.Delete))
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Sync.Checksum, file.Sync.Checksum))
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Sync.GitSeed, file.Sync.GitSeed))
+		if file.Sync.GitSeedSource != "" {
+			cfg.Sync.GitSeedSource = file.Sync.GitSeedSource
+			recordConfigInput(cfg, configInputGeneric, inputSource, true)
+		}
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Sync.GitOverlay, file.Sync.GitOverlay))
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Sync.Fingerprint, file.Sync.Fingerprint))
 		if file.Sync.BaseRef != "" {
@@ -7096,6 +7103,7 @@ func applyEnv(cfg *Config) error {
 		cfg.Sync.GitSeed = value
 		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)
 	}
+	cfg.Sync.GitSeedSource = configInputEnvString(cfg, configInputGeneric, cfg.Sync.GitSeedSource, "CRABBOX_SYNC_GIT_SEED_SOURCE")
 	if value, ok := getenvBool("CRABBOX_SYNC_GIT_OVERLAY"); ok {
 		cfg.Sync.GitOverlay = value
 		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)

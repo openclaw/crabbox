@@ -62,6 +62,15 @@ there is no source index or history.
 
 ## Output
 
+With `--git-seed-source local` (or `sync.gitSeedSource: local`), the preview also
+prepares and verifies the offline Git bundle in temporary local storage, then
+cleans it up. JSON adds `localGitSeed` with the selected HEAD/base, object format,
+object count, uncompressed object bytes, packed seed bytes, and SHA-256 digest.
+`guardrail.scope` becomes `candidate_and_git_objects`; a small dirty delta does
+not hide the complete-history transfer. Exclusions govern working files, not
+historical blobs. See [local Git metadata](../features/sync.md#opt-in-local-git-metadata)
+for scope, fixed preparation limits, and unsupported combinations.
+
 The first line reports the candidate file count and total size. If the
 checkout has tracked files that were deleted locally (and would be pruned
 on the remote), a `deleted tracked paths` line follows. Then `sync-plan`
@@ -134,6 +143,7 @@ authentication, or command-specific routes such as module execution. A later
 ```text
 --limit <n>   number of top files and directories to print (default 20)
 --json        print machine-readable JSON
+--git-seed-source <origin|local>  choose origin or explicit offline local objects
 ```
 
 `--limit` must be positive; `--limit 0` (or any non-positive value) is

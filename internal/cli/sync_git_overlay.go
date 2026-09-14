@@ -70,8 +70,9 @@ type gitOverlaySnapshot struct {
 type gitOverlaySnapshotHook func(phase string, attempt int, root string)
 
 type gitOverlayCheckoutState struct {
-	Head      string
-	IndexTree string
+	Head             string
+	IndexTree        string
+	IndexFingerprint string
 }
 
 type gitOverlaySnapshotParentIdentity struct {
@@ -334,15 +335,45 @@ func prepareGitOverlaySnapshotWithCleanup(
 	hook gitOverlaySnapshotHook,
 	cleanup func(*gitOverlaySnapshot) error,
 ) (gitOverlaySnapshot, error) {
+	policy := gitSnapshotPolicy{
+		target:   plan.Target,
+		checkout: captureGitOverlayCheckoutState,
+		manifest: syncManifestFilteredRules,
+		validate: validateGitOverlayManifestAtState,
+		files:    func(manifest SyncManifest) []string { return manifest.OverlayFiles },
+		fingerprint: func(repo Repo, manifest SyncManifest, excludes SyncExcludeRules, _ gitOverlayCheckoutState) (string, error) {
+			return syncFingerprintForManifest(repo, cfg, manifest, excludes, plan)
+		},
+	}
+	return prepareGitSnapshotWithCleanup(repo, cfg, includes, policy, hook, cleanup)
+}
+
+type gitSnapshotPolicy struct {
+	target      string
+	checkout    func(string) (gitOverlayCheckoutState, error)
+	manifest    func(string, SyncExcludeRules, []string) (SyncManifest, error)
+	validate    func(Repo, SyncManifest, gitOverlayCheckoutState) error
+	files       func(SyncManifest) []string
+	fingerprint func(Repo, SyncManifest, SyncExcludeRules, gitOverlayCheckoutState) (string, error)
+}
+
+func prepareGitSnapshotWithCleanup(
+	repo Repo,
+	cfg Config,
+	includes []string,
+	policy gitSnapshotPolicy,
+	hook gitOverlaySnapshotHook,
+	cleanup func(*gitOverlaySnapshot) error,
+) (gitOverlaySnapshot, error) {
 	for attempt := 1; attempt <= gitOverlaySnapshotMaxAttempts; attempt++ {
-		checkout, err := captureGitOverlayCheckoutState(repo.Root)
+		checkout, err := policy.checkout(repo.Root)
 		if err != nil {
 			if errors.Is(err, errGitOverlaySnapshotDrift) && attempt < gitOverlaySnapshotMaxAttempts {
 				continue
 			}
 			return gitOverlaySnapshot{}, err
 		}
-		if checkout.Head != repo.Head || checkout.Head != plan.Target {
+		if checkout.Head != repo.Head || checkout.Head != policy.target {
 			return gitOverlaySnapshot{}, fmt.Errorf("head_changed")
 		}
 		if hook != nil {
@@ -352,15 +383,15 @@ func prepareGitOverlaySnapshotWithCleanup(
 		if err != nil {
 			return gitOverlaySnapshot{}, err
 		}
-		manifest, err := syncManifestFilteredRules(repo.Root, excludes, includes)
+		manifest, err := policy.manifest(repo.Root, excludes, includes)
 		if err != nil {
 			return gitOverlaySnapshot{}, err
 		}
-		validationErr := validateGitOverlayManifestAtState(repo, manifest, checkout)
+		validationErr := policy.validate(repo, manifest, checkout)
 		if hook != nil {
 			hook("before_initial_validation_checkout_state", attempt, "")
 		}
-		validatedCheckout, checkoutErr := captureGitOverlayCheckoutState(repo.Root)
+		validatedCheckout, checkoutErr := policy.checkout(repo.Root)
 		if checkoutErr != nil || validatedCheckout != checkout {
 			if attempt < gitOverlaySnapshotMaxAttempts {
 				continue
@@ -380,7 +411,7 @@ func prepareGitOverlaySnapshotWithCleanup(
 		if hook != nil {
 			hook("snapshot_created", attempt, snapshot.Root)
 		}
-		if err := copyGitOverlaySnapshotOwned(repo.Root, &snapshot, manifest.OverlayFiles, attempt, hook); err != nil {
+		if err := copyGitOverlaySnapshotOwned(repo.Root, &snapshot, policy.files(manifest), attempt, hook); err != nil {
 			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, err, cleanup); retry {
 				continue
 			} else {
@@ -392,7 +423,7 @@ func prepareGitOverlaySnapshotWithCleanup(
 		}
 		snapshotRepo := repo
 		snapshotRepo.Root = snapshot.Root
-		snapshot.Fingerprint, err = syncFingerprintForManifest(snapshotRepo, cfg, manifest, excludes, plan)
+		snapshot.Fingerprint, err = policy.fingerprint(snapshotRepo, manifest, excludes, checkout)
 		if err != nil {
 			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
 		}
@@ -410,7 +441,7 @@ func prepareGitOverlaySnapshotWithCleanup(
 				return retained, result
 			}
 		}
-		refreshed, err := syncManifestFilteredRules(repo.Root, refreshedExcludes, includes)
+		refreshed, err := policy.manifest(repo.Root, refreshedExcludes, includes)
 		if err != nil {
 			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
 		}
@@ -424,7 +455,7 @@ func prepareGitOverlaySnapshotWithCleanup(
 		if hook != nil {
 			hook("before_live_fingerprint", attempt, snapshot.Root)
 		}
-		liveFingerprint, err := syncFingerprintForManifest(repo, cfg, refreshed, refreshedExcludes, plan)
+		liveFingerprint, err := policy.fingerprint(repo, refreshed, refreshedExcludes, checkout)
 		if err != nil {
 			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
 		}
@@ -435,14 +466,14 @@ func prepareGitOverlaySnapshotWithCleanup(
 		if err != nil {
 			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
 		}
-		finalManifest, err := syncManifestFilteredRules(repo.Root, finalExcludes, includes)
+		finalManifest, err := policy.manifest(repo.Root, finalExcludes, includes)
 		if err != nil {
 			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
 		}
 		if hook != nil {
 			hook("before_final_checkout_state", attempt, snapshot.Root)
 		}
-		finalCheckout, err := captureGitOverlayCheckoutState(repo.Root)
+		finalCheckout, err := policy.checkout(repo.Root)
 		if err != nil || finalCheckout != checkout {
 			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, errGitOverlaySnapshotDrift, cleanup); retry {
 				continue
@@ -450,23 +481,23 @@ func prepareGitOverlaySnapshotWithCleanup(
 				return retained, result
 			}
 		}
-		finalValidationErr := validateGitOverlayManifestAtState(repo, finalManifest, finalCheckout)
+		finalValidationErr := policy.validate(repo, finalManifest, finalCheckout)
 		acceptedExcludes, err := syncExcludes(repo.Root, cfg)
 		if err != nil {
 			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
 		}
-		acceptedManifest, err := syncManifestFilteredRules(repo.Root, acceptedExcludes, includes)
+		acceptedManifest, err := policy.manifest(repo.Root, acceptedExcludes, includes)
 		if err != nil {
 			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
 		}
-		acceptedFingerprint, err := syncFingerprintForManifest(repo, cfg, acceptedManifest, acceptedExcludes, plan)
+		acceptedFingerprint, err := policy.fingerprint(repo, acceptedManifest, acceptedExcludes, finalCheckout)
 		if err != nil {
 			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
 		}
 		if hook != nil {
 			hook("before_accepted_checkout_state", attempt, snapshot.Root)
 		}
-		acceptedCheckout, err := captureGitOverlayCheckoutState(repo.Root)
+		acceptedCheckout, err := policy.checkout(repo.Root)
 		if err != nil || acceptedCheckout != finalCheckout {
 			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, errGitOverlaySnapshotDrift, cleanup); retry {
 				continue
@@ -508,14 +539,24 @@ func captureGitOverlayCheckoutState(root string) (gitOverlayCheckoutState, error
 }
 
 func captureGitOverlayCheckoutStateWithHook(root string, betweenSamples func()) (gitOverlayCheckoutState, error) {
-	first, err := readGitOverlayCheckoutState(root)
+	return captureGitCheckoutStateWithReader(root, betweenSamples, gitOverlayGitBytes)
+}
+
+func captureGitCheckoutStateWithReader(root string, betweenSamples func(), readBytes func(string, ...string) ([]byte, error)) (gitOverlayCheckoutState, error) {
+	return captureGitCheckoutStateWithStateReader(root, betweenSamples, readBytes, func(root string) (gitOverlayCheckoutState, error) {
+		return readGitCheckoutStateWithReader(root, readBytes)
+	})
+}
+
+func captureGitCheckoutStateWithStateReader(root string, betweenSamples func(), readBytes func(string, ...string) ([]byte, error), readState func(string) (gitOverlayCheckoutState, error)) (gitOverlayCheckoutState, error) {
+	first, err := readState(root)
 	if err != nil {
 		return gitOverlayCheckoutState{}, err
 	}
 	if betweenSamples != nil {
 		betweenSamples()
 	}
-	topLevel, err := gitOverlayGitOutput(root, "rev-parse", "--show-toplevel")
+	topLevelBytes, err := readBytes(root, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return gitOverlayCheckoutState{}, errGitOverlaySnapshotDrift
 	}
@@ -523,7 +564,7 @@ func captureGitOverlayCheckoutStateWithHook(root string, betweenSamples func()) 
 	if err != nil {
 		return gitOverlayCheckoutState{}, fmt.Errorf("invalid_checkout_root")
 	}
-	canonicalTopLevel, err := filepath.Abs(topLevel)
+	canonicalTopLevel, err := filepath.Abs(strings.TrimSpace(string(topLevelBytes)))
 	if err != nil {
 		return gitOverlayCheckoutState{}, fmt.Errorf("invalid_checkout_root")
 	}
@@ -532,7 +573,7 @@ func captureGitOverlayCheckoutStateWithHook(root string, betweenSamples func()) 
 	if !sameCanonicalRepositoryPath(canonicalRoot, canonicalTopLevel) {
 		return gitOverlayCheckoutState{}, fmt.Errorf("checkout_root_mismatch")
 	}
-	second, err := readGitOverlayCheckoutState(root)
+	second, err := readState(root)
 	if err != nil {
 		return gitOverlayCheckoutState{}, err
 	}
@@ -543,16 +584,24 @@ func captureGitOverlayCheckoutStateWithHook(root string, betweenSamples func()) 
 }
 
 func readGitOverlayCheckoutState(root string) (gitOverlayCheckoutState, error) {
-	head, err := gitOverlayGitOutput(root, "rev-parse", "--verify", "HEAD^{commit}")
+	return readGitCheckoutStateWithReader(root, gitOverlayGitBytes)
+}
+
+func readGitCheckoutStateWithReader(root string, readBytes func(string, ...string) ([]byte, error)) (gitOverlayCheckoutState, error) {
+	output := func(args ...string) (string, error) {
+		out, err := readBytes(root, args...)
+		return strings.TrimSpace(string(out)), err
+	}
+	head, err := output("rev-parse", "--verify", "HEAD^{commit}")
 	if err != nil || !validGitObjectID(head) {
-		if symbolic, symbolicErr := gitOverlayGitOutput(root, "symbolic-ref", "--quiet", "HEAD"); symbolicErr == nil && symbolic != "" {
+		if symbolic, symbolicErr := output("symbolic-ref", "--quiet", "HEAD"); symbolicErr == nil && symbolic != "" {
 			return gitOverlayCheckoutState{}, fmt.Errorf("unborn_head")
 		}
 		return gitOverlayCheckoutState{}, fmt.Errorf("invalid_head")
 	}
-	indexTree, err := gitOverlayGitOutput(root, "write-tree")
+	indexTree, err := output("write-tree")
 	if err != nil || !validGitObjectID(indexTree) {
-		if unmerged, unmergedErr := gitOverlayGitBytes(root, "ls-files", "--unmerged", "-z"); unmergedErr == nil && len(unmerged) != 0 {
+		if unmerged, unmergedErr := readBytes(root, "ls-files", "--unmerged", "-z"); unmergedErr == nil && len(unmerged) != 0 {
 			return gitOverlayCheckoutState{}, fmt.Errorf("unmerged_index")
 		}
 		return gitOverlayCheckoutState{}, fmt.Errorf("invalid_index")

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net/url"
 	"os"
@@ -638,7 +639,7 @@ func (p gitCoherencePlan) seedEnabled() bool {
 func (p gitCoherencePlan) enabled() bool { return p.seedEnabled() && p.Branch != "" && p.Tree != "" }
 
 func syncGitCoherencePlan(cfg Config, repo Repo) (gitCoherencePlan, bool) {
-	if !cfg.Sync.GitSeed || len(syncIncludes(cfg)) != 0 || repo.Root == "" || repo.RemoteURL == "" || repo.Head == "" {
+	if !cfg.Sync.GitSeed || effectiveGitSeedSource(cfg) == "local" || len(syncIncludes(cfg)) != 0 || repo.Root == "" || repo.RemoteURL == "" || repo.Head == "" {
 		return gitCoherencePlan{}, false
 	}
 	// A seed materializes a whole remote tree, outside local file filtering.
@@ -891,11 +892,21 @@ func syncFingerprintForManifest(repo Repo, cfg Config, manifest SyncManifest, ex
 	for _, exclude := range excludes.rules {
 		fmt.Fprintf(h, "exclude=%d:%s\n", exclude.origin, exclude.pattern)
 	}
-	for _, rel := range manifest.Changed {
+	if err := syncFingerprintPaths(h, repo.Root, manifest.Changed, false); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func syncFingerprintPaths(h hash.Hash, root string, paths []string, requirePresent bool) error {
+	for _, rel := range paths {
 		fmt.Fprintf(h, "path=%s\n", rel)
-		full := filepath.Join(repo.Root, filepath.FromSlash(rel))
+		full := filepath.Join(root, filepath.FromSlash(rel))
 		info, err := os.Lstat(full)
 		if err != nil {
+			if requirePresent {
+				return err
+			}
 			fmt.Fprintf(h, "missing\n")
 			continue
 		}
@@ -906,7 +917,7 @@ func syncFingerprintForManifest(repo Repo, cfg Config, manifest SyncManifest, ex
 		if info.Mode()&os.ModeSymlink != 0 {
 			target, err := os.Readlink(full)
 			if err != nil {
-				return "", err
+				return err
 			}
 			fmt.Fprintf(h, "symlink=%s\n", target)
 			h.Write([]byte{0})
@@ -914,16 +925,16 @@ func syncFingerprintForManifest(repo Repo, cfg Config, manifest SyncManifest, ex
 		}
 		file, err := os.Open(full)
 		if err != nil {
-			return "", err
+			return err
 		}
 		if _, err := io.Copy(h, file); err != nil {
 			_ = file.Close()
-			return "", err
+			return err
 		}
 		_ = file.Close()
 		h.Write([]byte{0})
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return nil
 }
 
 type SyncManifest struct {
@@ -1018,15 +1029,33 @@ func syncManifestFiltered(root string, excludes, includes []string) (SyncManifes
 }
 
 func syncManifestFilteredRules(root string, excludes SyncExcludeRules, includes []string) (SyncManifest, error) {
+	return syncManifestFilteredRulesWithSource(root, excludes, includes, syncManifestSource{
+		fileList: gitSyncFileList,
+		scope:    validatedSyncManifestScope,
+		deleted:  syncDeletedPaths,
+		changed: func(root string, excludes SyncExcludeRules, includes []string, trackedRegular map[string]struct{}, _ SyncManifest) ([]string, error) {
+			return changedSyncPaths(root, excludes, includes, trackedRegular)
+		},
+	})
+}
+
+type syncManifestSource struct {
+	fileList func(string) ([]byte, error)
+	scope    func(string, SyncExcludeRules, []string) (syncManifestScope, error)
+	deleted  func(string, SyncExcludeRules, []string, map[string]struct{}) ([]string, map[string]struct{}, map[string]struct{}, error)
+	changed  func(string, SyncExcludeRules, []string, map[string]struct{}, SyncManifest) ([]string, error)
+}
+
+func syncManifestFilteredRulesWithSource(root string, excludes SyncExcludeRules, includes []string, source syncManifestSource) (SyncManifest, error) {
 	managed, excludes, err := prepareSyncManifestRoot(root, excludes)
 	if err != nil {
 		return SyncManifest{}, err
 	}
-	out, err := gitSyncFileList(root)
+	out, err := source.fileList(root)
 	if err != nil {
 		return SyncManifest{}, err
 	}
-	scope, err := validatedSyncManifestScope(root, excludes, includes)
+	scope, err := source.scope(root, excludes, includes)
 	if err != nil {
 		return SyncManifest{}, err
 	}
@@ -1035,7 +1064,7 @@ func syncManifestFilteredRules(root string, excludes SyncExcludeRules, includes 
 	if err != nil {
 		return SyncManifest{}, err
 	}
-	deleted, deletedGitlinks, deletedRegular, err := syncDeletedPaths(root, excludes, includes, trackedRegular)
+	deleted, deletedGitlinks, deletedRegular, err := source.deleted(root, excludes, includes, trackedRegular)
 	if err != nil {
 		return SyncManifest{}, err
 	}
@@ -1050,7 +1079,7 @@ func syncManifestFilteredRules(root string, excludes SyncExcludeRules, includes 
 	for rel := range deletedRegular {
 		trackedRegular[rel] = struct{}{}
 	}
-	changed, err := changedSyncPaths(root, excludes, includes, trackedRegular)
+	changed, err := source.changed(root, excludes, includes, trackedRegular, manifest)
 	if err != nil {
 		return SyncManifest{}, err
 	}
@@ -1128,6 +1157,10 @@ func validatedSyncManifestScope(root string, excludes SyncExcludeRules, includes
 	if err != nil {
 		return syncManifestScope{}, fmt.Errorf("verify sync manifest scope: %w", err)
 	}
+	return validatedSyncManifestScopeWithTracked(root, excludes, includes, tracked, gitCheckoutSparseEnabled(root), sparseCheckoutIncludedPaths)
+}
+
+func validatedSyncManifestScopeWithTracked(root string, excludes SyncExcludeRules, includes []string, tracked []gitTrackedPath, sparseEnabled bool, resolveSparseRules func(string, []gitTrackedPath) (map[string]struct{}, error)) (syncManifestScope, error) {
 	trackedRegular := trackedRegularPathSet(tracked)
 	inManifestScope := func(entry gitTrackedPath) bool {
 		rel := filepath.ToSlash(entry.name)
@@ -1139,9 +1172,9 @@ func validatedSyncManifestScope(root string, excludes SyncExcludeRules, includes
 	if err != nil {
 		return syncManifestScope{}, fmt.Errorf("verify sync manifest scope: %w", err)
 	}
-	hidden, err := gitCheckoutHiddenOmissionForTracked(root, tracked, gitCheckoutSparseEnabled(root), func(entry gitTrackedPath) bool {
+	hidden, err := gitCheckoutHiddenOmissionForTracked(root, tracked, sparseEnabled, func(entry gitTrackedPath) bool {
 		return entry.mode != "160000" && inManifestScope(entry)
-	}, sparseCheckoutIncludedPaths)
+	}, resolveSparseRules)
 	if err != nil {
 		return syncManifestScope{}, fmt.Errorf("verify sync manifest scope: %w", err)
 	}
@@ -1247,6 +1280,10 @@ func syncDeletedPaths(root string, excludes SyncExcludeRules, includes []string,
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	return projectSyncDeletedPaths(excludes, includes, trackedRegular, worktreeOut, cached)
+}
+
+func projectSyncDeletedPaths(excludes SyncExcludeRules, includes []string, trackedRegular map[string]struct{}, worktreeOut []byte, cached []gitCachedDeletion) ([]string, map[string]struct{}, map[string]struct{}, error) {
 	seen := map[string]bool{}
 	gitlinks := map[string]struct{}{}
 	regular := map[string]struct{}{}

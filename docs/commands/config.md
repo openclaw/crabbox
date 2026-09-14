@@ -322,6 +322,7 @@ actions:
 sync:
   checksum: false
   gitSeed: true
+  gitSeedSource: origin
   gitOverlay: false
   fingerprint: true
   timeout: 15m

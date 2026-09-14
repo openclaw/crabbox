@@ -108,6 +108,9 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
+	if effectiveGitSeedSource(cfg) == "local" {
+		return Exit(2, "Actions hydration owns Git metadata; set sync.gitSeedSource=origin for Actions hydration")
+	}
 	repo, err := findRepo()
 	if err != nil {
 		return err
@@ -530,6 +533,9 @@ type localActionsHydrationPlan struct {
 }
 
 func prepareLocalActionsHydration(cfg Config, repo Repo, target SSHTarget, leaseID, expectedJob string, fields []string) (localActionsHydrationPlan, error) {
+	if effectiveGitSeedSource(cfg) == "local" {
+		return localActionsHydrationPlan{}, Exit(2, "Actions hydration cannot use local-object Git seeding")
+	}
 	target = targetWithConfigDefaults(target, cfg)
 	if !supportsLocalActionsHydrateTarget(target) {
 		return localActionsHydrationPlan{}, Exit(2, "local Actions hydration currently supports Linux and Windows WSL2 targets only")
