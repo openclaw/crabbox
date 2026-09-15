@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"os/user"
 	"reflect"
 	"slices"
 	"strings"
@@ -119,6 +120,32 @@ func TestExeDevCreateVMUsesSSHControlAPI(t *testing.T) {
 	}
 	if vm.Name() != "crabbox-blue-12345678" || vm.SSHHost() != "crabbox-blue-12345678.exe.xyz" {
 		t.Fatalf("vm=%#v", vm)
+	}
+}
+
+func TestExeDevCreateVMRefreshesMissingAdvertisedSSHRoute(t *testing.T) {
+	runner := &exeDevRecordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		got := strings.Join(req.Args, " ")
+		switch {
+		case strings.Contains(got, "exe.dev new"):
+			return core.LocalCommandResult{Stdout: `{"vm_name":"fixture-vm","status":"running"}`}, nil
+		case strings.Contains(got, "exe.dev ls --l --json"):
+			return core.LocalCommandResult{Stdout: `{"vms":[{"vm_name":"fixture-vm","ssh_dest":"fixture-vm","status":"running"}]}`}, nil
+		default:
+			t.Fatalf("unexpected command: %v", req.Args)
+			return core.LocalCommandResult{}, nil
+		}
+	}}
+	backend := &exeDevLeaseBackend{cfg: core.Config{}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	vm, err := backend.createVM(t.Context(), backend.configForRun(), "fixture-vm", "cbx_fixture", "fixture", "cbx_generation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vm.SSHDest != "fixture-vm" {
+		t.Fatalf("ssh_dest=%q want provider-advertised alias", vm.SSHDest)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("recorded calls=%d want new plus inventory refresh", len(runner.calls))
 	}
 }
 
@@ -1119,6 +1146,24 @@ func TestExeDevSSHTargetUsesSSHDestUserPortAndWorkRootLabel(t *testing.T) {
 	server := exeDevServer(vm, "cbx_lease", "blue", cfg, true)
 	if server.Labels["work_root"] != "/tmp/crabbox" {
 		t.Fatalf("labels=%#v", server.Labels)
+	}
+}
+
+func TestExeDevSSHTargetUsesOSAccountForUnqualifiedAdvertisedHost(t *testing.T) {
+	account, err := user.Current()
+	if err != nil || strings.TrimSpace(account.Username) == "" {
+		t.Skipf("current OS account is unavailable: %v", err)
+	}
+	t.Setenv("USER", "wrong-environment-user")
+	cfg := core.BaseConfig()
+	applyExeDevDefaults(&cfg)
+	vm := exeDevVM{VMName: "crabbox-blue-12345678", SSHDest: "crabbox-blue-12345678.exe.xyz", Status: "running"}
+	target := exeDevSSHTarget(cfg, vm)
+	if target.User != account.Username {
+		t.Fatalf("target user=%q, want current OS account %q", target.User, account.Username)
+	}
+	if !target.SSHConfigProxy {
+		t.Fatal("exe.dev target must preserve the ambient SSH config route")
 	}
 }
 

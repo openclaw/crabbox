@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/user"
 	"strconv"
 	"strings"
 	"time"
@@ -393,12 +394,21 @@ func applyExeDevDefaults(cfg *core.Config) {
 	if cfg.ExeDev.User != "" {
 		cfg.SSHUser = cfg.ExeDev.User
 	} else if cfg.SSHUser == "" || cfg.SSHUser == "crabbox" {
-		cfg.SSHUser = core.Blank(os.Getenv("USER"), "root")
+		cfg.SSHUser = currentExeDevSSHUser()
 	}
 	if cfg.ExeDev.WorkRoot != "" {
 		cfg.WorkRoot = cfg.ExeDev.WorkRoot
 	}
 	cfg.ServerType = exeDevImage(*cfg)
+}
+
+func currentExeDevSSHUser() string {
+	if account, err := user.Current(); err == nil {
+		if username := strings.TrimSpace(account.Username); username != "" {
+			return username
+		}
+	}
+	return core.Blank(strings.TrimSpace(os.Getenv("USER")), "root")
 }
 
 func (b *exeDevLeaseBackend) createVM(ctx context.Context, cfg core.Config, name, leaseID, slug, generation string) (exeDevVM, error) {
@@ -426,11 +436,35 @@ func (b *exeDevLeaseBackend) createVM(ctx context.Context, cfg core.Config, name
 		return exeDevVM{}, err
 	}
 	vm, err := parseExeDevVM(out)
-	if err == nil && vm.Name() != "" {
+	if err == nil && vm.Name() != "" && vm.SSHHost() != "" {
 		return vm, nil
 	}
-	vm, _, _, err = b.resolveVM(ctx, name)
-	return vm, err
+	return b.waitForExeDevSSHRoute(ctx, cfg, name)
+}
+
+func (b *exeDevLeaseBackend) waitForExeDevSSHRoute(ctx context.Context, cfg core.Config, name string) (exeDevVM, error) {
+	timer := time.NewTimer(core.BootstrapWaitTimeout(cfg))
+	defer timer.Stop()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		vm, err := b.findVMByExactName(ctx, name)
+		if err == nil && vm.SSHHost() != "" {
+			return vm, nil
+		}
+		if err != nil && core.ExitCodeForError(err, 0) != 4 {
+			return exeDevVM{}, err
+		}
+
+		select {
+		case <-ctx.Done():
+			return exeDevVM{}, core.Exit(2, "exe.dev VM %s SSH route wait canceled: %v", name, context.Cause(ctx))
+		case <-timer.C:
+			return exeDevVM{}, core.Exit(5, "timed out waiting for exe.dev VM %s to advertise an SSH destination", name)
+		case <-ticker.C:
+		}
+	}
 }
 
 func (b *exeDevLeaseBackend) deleteVM(ctx context.Context, name string) error {
@@ -1036,6 +1070,7 @@ func exeDevSSHTarget(cfg core.Config, vm exeDevVM) core.SSHTarget {
 	address := vm.SSHAddress()
 	target := core.SSHTargetFromConfig(cfg, address.Host)
 	target.Key = ""
+	target.SSHConfigProxy = true
 	if address.User != "" {
 		target.User = address.User
 	}
