@@ -16,6 +16,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type exeDevLeaseBackend struct {
@@ -38,7 +39,7 @@ func NewExeDevLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runt
 
 func (b *exeDevLeaseBackend) Spec() core.ProviderSpec { return b.spec }
 
-func (b *exeDevLeaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+func (b *exeDevLeaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (_ core.LeaseTarget, retErr error) {
 	leaseID := core.NewLeaseID()
 	servers, err := b.listServers(ctx, false)
 	if err != nil {
@@ -52,30 +53,28 @@ func (b *exeDevLeaseBackend) Acquire(ctx context.Context, req core.AcquireReques
 	name := core.LeaseProviderName(leaseID, slug)
 	generation := core.NewLeaseID()
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s name=%s image=%s cpus=%d memory=%s disk=%s keep=%v\n", providerName, leaseID, slug, name, exeDevImage(cfg), cfg.ExeDev.CPUs, cfg.ExeDev.Memory, cfg.ExeDev.Disk, req.Keep)
-	vm, err := b.createVM(ctx, cfg, name, leaseID, slug, generation)
+	vm, created, err := b.createVM(ctx, cfg, name, leaseID, slug, generation)
+	if created && !req.Keep {
+		defer func() {
+			if retErr != nil {
+				retErr = b.rollbackCreatedVM(name, leaseID, slug, generation, retErr)
+			}
+		}()
+	}
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
 	lease, err := b.prepareLease(ctx, cfg, vm, leaseID, slug, req.Keep, true)
 	if err != nil {
-		if !req.Keep {
-			err = b.rollbackCreatedVM(name, leaseID, slug, generation, err)
-		}
 		return core.LeaseTarget{}, err
 	}
 	providerScope, err := b.controlScope(ctx)
 	if err != nil {
-		if !req.Keep {
-			err = b.rollbackCreatedVM(name, leaseID, slug, generation, err)
-		}
 		return core.LeaseTarget{}, err
 	}
 	lease.Server.Labels[exeDevClaimGenerationLabel] = generation
 	claim, err := claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, providerScope, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, core.LeaseClaim{}, false)
 	if err != nil {
-		if !req.Keep {
-			err = b.rollbackCreatedVM(name, leaseID, slug, generation, err)
-		}
 		return core.LeaseTarget{}, err
 	}
 	core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
@@ -411,7 +410,7 @@ func currentExeDevSSHUser() string {
 	return core.Blank(strings.TrimSpace(os.Getenv("USER")), "root")
 }
 
-func (b *exeDevLeaseBackend) createVM(ctx context.Context, cfg core.Config, name, leaseID, slug, generation string) (exeDevVM, error) {
+func (b *exeDevLeaseBackend) createVM(ctx context.Context, cfg core.Config, name, leaseID, slug, generation string) (vm exeDevVM, created bool, err error) {
 	args := []string{"new", "--name", name, "--json", "--tag", "crabbox", "--tag", "crabbox-lease-" + leaseID, "--tag", "crabbox-slug-" + slug, "--tag", exeDevClaimGenerationTagPrefix + generation}
 	if cfg.ExeDev.NoEmail {
 		args = append(args, "--no-email")
@@ -433,38 +432,40 @@ func (b *exeDevLeaseBackend) createVM(ctx context.Context, cfg core.Config, name
 	}
 	out, err := b.controlOutput(ctx, args)
 	if err != nil {
-		return exeDevVM{}, err
+		return exeDevVM{}, false, err
 	}
-	vm, err := parseExeDevVM(out)
+	vm, err = parseExeDevVM(out)
 	if err == nil && vm.Name() != "" && vm.SSHHost() != "" {
-		return vm, nil
+		return vm, true, nil
 	}
-	return b.waitForExeDevSSHRoute(ctx, cfg, name)
+	vm, err = b.waitForExeDevSSHRoute(ctx, name, core.BootstrapWaitTimeout(cfg))
+	return vm, true, err
 }
 
-func (b *exeDevLeaseBackend) waitForExeDevSSHRoute(ctx context.Context, cfg core.Config, name string) (exeDevVM, error) {
-	timer := time.NewTimer(core.BootstrapWaitTimeout(cfg))
-	defer timer.Stop()
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		vm, err := b.findVMByExactName(ctx, name)
-		if err == nil && vm.SSHHost() != "" {
-			return vm, nil
+func (b *exeDevLeaseBackend) waitForExeDevSSHRoute(ctx context.Context, name string, timeout time.Duration) (exeDevVM, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := shared.Poll(waitCtx, 0, 250*time.Millisecond, shared.SleepContext,
+		func(ctx context.Context) (exeDevVM, error) { return b.findVMByExactName(ctx, name) },
+		func(ctx context.Context, vm exeDevVM, err error) (bool, error) {
+			if err != nil && ctx.Err() != nil {
+				return false, context.Cause(ctx)
+			}
+			if err != nil && core.ExitCodeForError(err, 0) != 4 {
+				return false, err
+			}
+			return err == nil && vm.SSHHost() != "", nil
+		}, nil)
+	if err != nil {
+		if ctx.Err() != nil {
+			return exeDevVM{}, shared.PollTerminationError(ctx, err, core.Exit(2, "exe.dev VM %s SSH route wait canceled: %v", name, context.Cause(ctx)))
 		}
-		if err != nil && core.ExitCodeForError(err, 0) != 4 {
-			return exeDevVM{}, err
+		if waitCtx.Err() != nil {
+			return exeDevVM{}, shared.PollTerminationError(waitCtx, err, core.Exit(5, "timed out waiting for exe.dev VM %s to advertise an SSH destination", name))
 		}
-
-		select {
-		case <-ctx.Done():
-			return exeDevVM{}, core.Exit(2, "exe.dev VM %s SSH route wait canceled: %v", name, context.Cause(ctx))
-		case <-timer.C:
-			return exeDevVM{}, core.Exit(5, "timed out waiting for exe.dev VM %s to advertise an SSH destination", name)
-		case <-ticker.C:
-		}
+		return exeDevVM{}, err
 	}
+	return result.Value, nil
 }
 
 func (b *exeDevLeaseBackend) deleteVM(ctx context.Context, name string) error {
