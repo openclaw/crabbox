@@ -4,12 +4,24 @@
 
 ## Project Structure & Module Organization
 
-Crabbox is a Go CLI with an optional coordinator running on Cloudflare Workers or Node.js with PostgreSQL. The CLI entrypoint is `cmd/crabbox`, with command implementation and tests in `internal/cli`; provider adapters live in `internal/providers/<name>`. Shared coordinator source lives in `worker/src`, Node.js runtime code in `worker/node`, and Vitest tests in `worker/test`. Documentation lives in `docs/`; command docs are under `docs/commands`, and feature notes under `docs/features`. Release configuration is in `.goreleaser.yaml`; GitHub Actions live in `.github/workflows`. Generated outputs such as `bin/`, `dist/`, `worker/dist/`, and `worker/node_modules/` should not be edited by hand.
+Crabbox is a Go CLI with an optional coordinator on Cloudflare Workers or Node.js with PostgreSQL.
+
+| Area | Location |
+| --- | --- |
+| CLI entrypoint and command behavior | `cmd/crabbox`, `internal/cli` |
+| Go provider adapters | `internal/providers/<name>` |
+| Shared coordinator and Node.js runtime | `worker/src`, `worker/node` |
+| Coordinator tests | `worker/test` |
+| Command and feature documentation | `docs/commands`, `docs/features` |
+| CI and release configuration | `.github/workflows`, `.goreleaser.yaml` |
+
+Use `docs/source-map.md` for the detailed code map. Generated outputs such as `bin/`, `dist/`, `worker/dist/`, and `worker/node_modules/` should not be edited by hand.
 
 ## Working Approach
 
-- Read the affected implementation and nearby tests before editing. Use `docs/source-map.md` to locate behavior and `VISION.md` for product scope.
+- Read the affected implementation, callers, and nearby tests before editing; use `VISION.md` for product scope. Identify the expected behavior and how to verify it. For changes spanning multiple boundaries, outline the approach before implementation.
 - Make the smallest complete change that solves the requested problem. Preserve unrelated work; avoid incidental refactors, dependency upgrades, and repository-wide formatting.
+- Treat design principles below as decision rules for the requested change, not a mandate to restructure existing code. Explain a necessary tradeoff when the simplest local fix would break an established contract.
 - Keep this file focused on durable, actionable rules. Link to detailed documentation instead of duplicating it; verify commands and paths against the repository when updating guidance.
 
 ## Product Positioning
@@ -24,15 +36,15 @@ Before adding or changing a provider, read `docs/features/provider-authoring.md`
 
 ## Design Principles: KISS, YAGNI, DRY, SOLID
 
-Apply these principles to concrete changes, using idiomatic Go and TypeScript:
+Use idiomatic Go and TypeScript; prefer existing abstractions and plain functions.
 
-- **KISS / YAGNI:** Prefer straightforward control flow and existing helpers. Add abstractions, options, dependencies, and extension points only for a demonstrated need in the current task.
-- **DRY:** Give shared policy one owner. Extract duplication when the behavior and reasons to change are the same; similar-looking provider code alone does not justify coupling providers.
-- **Single responsibility:** Keep command orchestration, provider operations, persistence, and presentation in their existing boundaries. Split functions when they mix responsibilities, not to meet an arbitrary line limit.
-- **Open/closed:** Extend provider behavior through existing registration and capability hooks. Add a hook only when a real requirement cannot fit the current contract.
-- **Liskov substitution:** Implement the advertised backend contract consistently, including errors, cancellation, ownership, and cleanup. Reject unsupported requested capabilities before side effects; preserve documented fallback behavior.
-- **Interface segregation:** Prefer small interfaces defined by the consuming code. Use optional capabilities instead of forcing every provider to implement unrelated methods.
-- **Dependency inversion:** Keep orchestration dependent on behavior contracts. Pass external dependencies explicitly at existing boundaries; use concrete types where an interface adds no value. Prefer composition to inheritance or new dependency-injection frameworks.
+- **KISS / YAGNI:** Choose straightforward control flow. Add a helper, option, dependency, or extension point only when the current requirement needs it.
+- **DRY:** Share policy with the same meaning and reason to change. Similar-looking provider code is insufficient reason to couple providers.
+- **Single responsibility:** Separate orchestration, provider operations, persistence, and presentation. Split by responsibility, not arbitrary function or file length.
+- **Open/closed:** Extend providers through existing registration and capability hooks; add a hook only when the current contract cannot express a real requirement.
+- **Liskov substitution:** Preserve the advertised backend's errors, cancellation, ownership, and cleanup semantics. Reject unsupported requested capabilities before side effects; retain documented fallbacks.
+- **Interface segregation:** Define small interfaces at the consumer. Use optional capabilities instead of adding unrelated methods to every backend.
+- **Dependency inversion:** Pass external dependencies at existing boundaries so orchestration depends on behavior contracts. Keep concrete types where an interface adds no value.
 
 ## Build, Test, and Development Commands
 
@@ -66,9 +78,12 @@ Use standard Go formatting and keep package names short and lowercase. Prefer ta
 
 ## Testing Guidelines
 
-Name Go tests `*_test.go` beside the code they cover. Name Worker tests `*.test.ts` under `worker/test`. Add regression tests for bug fixes when practical. Test observable behavior and contracts, including applicable failure, cancellation, and cleanup paths. Use deterministic fakes at external boundaries; ordinary tests must not require live provider credentials or provision paid resources.
-
-Before handoff, run the relevant subset and applicable formatting/static checks; before release or broad changes, run the full CI-equivalent gate from the README and `.github/workflows/ci.yml`. For shared coordinator changes, verify both runtime checks/builds. Report exactly what ran, what passed or failed, and what could not be verified. For instructions-only changes, verify referenced paths, commands, and the diff; application test suites are unnecessary. For docs-site or generated-documentation changes, run the relevant documentation checks.
+- Put Go tests in `*_test.go` beside the code and coordinator tests in `worker/test/*.test.ts`. For bug fixes, reproduce the failure before changing behavior when practical, then keep the regression test.
+- Test observable behavior at the lowest level that proves the contract. Cover relevant failure, cancellation, and cleanup paths. Use deterministic fakes at external boundaries; ordinary tests must not require live credentials or provision paid resources.
+- Run the affected package or test file first, plus applicable formatting and static checks. Shared coordinator changes need checks/builds for both runtimes. Before release or broad changes, run the full CI-equivalent gate from the README and `.github/workflows/ci.yml`.
+- For instructions-only changes, check referenced paths, commands, symlinks, and existing tests that validate the instructions. Application suites are unnecessary. Docs-site or generated-documentation changes need their relevant documentation checks.
+- Investigate failures and keep assertions aligned with the intended contract. Do not disable checks or weaken assertions merely to obtain a passing result.
+- Before handoff, review the final diff for unintended changes, compatibility regressions, and leaked credentials. Report what changed, the exact checks and outcomes, and any unverified behavior. Re-run affected checks after subsequent edits; an earlier pass does not validate newer changes.
 
 ## Commit & Pull Request Guidelines
 
@@ -87,6 +102,8 @@ Follow `docs/RELEASING.md` exactly. One explicit full release/publish request au
 - The producer is credential-free and refuses to run if any release credential is present; unset every variable in the check at the top of `scripts/build-release-candidate.sh` (the GitHub, Homebrew-tap, and Actions tokens plus the codesign identity and notary profile), not just `GH_TOKEN`/`GITHUB_TOKEN`.
 
 ## Security & Configuration Tips
+
+For auth, isolation, or credential-handling changes, read `SECURITY.md` and `docs/security.md` first. Preserve the documented trusted-user/team model and supported workflows. Captured command output and failure bundles are not automatically scrubbed; review them before sharing.
 
 Keep provider and broker tokens out of the repository. Do not pass secrets as command-line arguments. Local config belongs in `~/.config/crabbox/config.yaml`, `~/Library/Application Support/crabbox/config.yaml`, `crabbox.yaml`, or `.crabbox.yaml` as documented.
 Tenki provider SSH uses `tenki sandbox ssh-proxy` with Tenki-managed key/cert files under `~/.config/tenki`; do not use Crabbox per-lease keys for gateway auth.
