@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Crownest status waits consistently preserve caller cancellation while sharing request deadlines and polling with other providers.
+- Crownest status waits consistently preserve caller cancellation while sharing request deadlines and polling with other providers. [PR 2276](https://github.com/openclaw/crabbox/pull/2276).
 
 ## 0.60.0 - 2026-09-14
 

@@ -598,6 +598,7 @@ func TestStatusWaitContextAndObservationResults(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		wait    bool
+		timeout time.Duration
 		observe func(context.Context, context.CancelFunc) (sandbox, error)
 		want    error
 		message string
@@ -606,7 +607,7 @@ func TestStatusWaitContextAndObservationResults(t *testing.T) {
 		{name: "nonwaiting terminal observation", state: "failed", observe: func(context.Context, context.CancelFunc) (sandbox, error) { return sandbox{Status: "failed"}, nil }},
 		{name: "waiting terminal observation", wait: true, message: `entered terminal state "failed"`, observe: func(context.Context, context.CancelFunc) (sandbox, error) { return sandbox{Status: "failed"}, nil }},
 		{name: "provider error unchanged", wait: true, want: apiError, observe: func(context.Context, context.CancelFunc) (sandbox, error) { return sandbox{}, apiError }},
-		{name: "blocked request timeout", wait: true, message: "timed out waiting for crownest sandbox sbx_123 to become ready", observe: func(ctx context.Context, _ context.CancelFunc) (sandbox, error) {
+		{name: "blocked request timeout", wait: true, timeout: time.Millisecond, message: "timed out waiting for crownest sandbox sbx_123 to become ready", observe: func(ctx context.Context, _ context.CancelFunc) (sandbox, error) {
 			<-ctx.Done()
 			return sandbox{}, ctx.Err()
 		}},
@@ -615,7 +616,7 @@ func TestStatusWaitContextAndObservationResults(t *testing.T) {
 			<-ctx.Done()
 			return sandbox{}, ctx.Err()
 		}},
-		{name: "parent cancels after child expiry before sleep", wait: true, want: context.Canceled, observe: func(ctx context.Context, cancel context.CancelFunc) (sandbox, error) {
+		{name: "parent cancels after child expiry before sleep", wait: true, timeout: time.Millisecond, want: context.Canceled, observe: func(ctx context.Context, cancel context.CancelFunc) (sandbox, error) {
 			<-ctx.Done()
 			cancel()
 			return sandbox{Status: "starting"}, nil
@@ -639,7 +640,7 @@ func TestStatusWaitContextAndObservationResults(t *testing.T) {
 			}
 			t.Cleanup(func() { core.RemoveLeaseClaim(leaseID) })
 			b := &backend{spec: Provider{}.Spec(), cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}, newClient: func(core.Config, core.Runtime) (client, error) { return api, nil }}
-			view, err := b.Status(parent, core.StatusRequest{ID: "status-result", Wait: tc.wait, WaitTimeout: time.Millisecond})
+			view, err := b.Status(parent, core.StatusRequest{ID: "status-result", Wait: tc.wait, WaitTimeout: tc.timeout})
 			if tc.message != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.message) {
 					t.Fatalf("error=%v, want %q", err, tc.message)
