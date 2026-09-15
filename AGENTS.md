@@ -1,8 +1,16 @@
 # Repository Guidelines
 
+`CLAUDE.md` is a symlink to this file. Edit `AGENTS.md` and preserve the link so agent instructions stay in sync.
+
 ## Project Structure & Module Organization
 
-Crabbox is a Go CLI plus a Cloudflare Worker coordinator. The CLI entrypoint is `cmd/crabbox`, with implementation and Go tests in `internal/cli`. Worker source lives in `worker/src`, with Vitest tests in `worker/test`. Documentation lives in `docs/`; command docs are under `docs/commands`, and feature notes under `docs/features`. Release configuration is in `.goreleaser.yaml`; GitHub Actions live in `.github/workflows`. Generated outputs such as `bin/`, `dist/`, `worker/dist/`, and `worker/node_modules/` should not be edited by hand.
+Crabbox is a Go CLI with an optional coordinator running on Cloudflare Workers or Node.js with PostgreSQL. The CLI entrypoint is `cmd/crabbox`, with command implementation and tests in `internal/cli`; provider adapters live in `internal/providers/<name>`. Shared coordinator source lives in `worker/src`, Node.js runtime code in `worker/node`, and Vitest tests in `worker/test`. Documentation lives in `docs/`; command docs are under `docs/commands`, and feature notes under `docs/features`. Release configuration is in `.goreleaser.yaml`; GitHub Actions live in `.github/workflows`. Generated outputs such as `bin/`, `dist/`, `worker/dist/`, and `worker/node_modules/` should not be edited by hand.
+
+## Working Approach
+
+- Read the affected implementation and nearby tests before editing. Use `docs/source-map.md` to locate behavior and `VISION.md` for product scope.
+- Make the smallest complete change that solves the requested problem. Preserve unrelated work; avoid incidental refactors, dependency upgrades, and repository-wide formatting.
+- Keep this file focused on durable, actionable rules. Link to detailed documentation instead of duplicating it; verify commands and paths against the repository when updating guidance.
 
 ## Product Positioning
 
@@ -12,27 +20,55 @@ Crabbox is a generic remote software testing and execution tool. New code, docs,
 
 Keep core provider-neutral. Core may pass generic request/lease context and call provider capabilities for defaults, access, provision, images, release, cleanup, and diagnostics. Provider-specific reconciliation, firewall/security-group semantics, labels, snapshots, hosts, regions, rollout compatibility, and resource naming live behind provider adapters. No `provider == aws/gcp/...` logic in core unless it is unavoidable routing/config glue and no provider hook fits.
 
+Before adding or changing a provider, read `docs/features/provider-authoring.md` and `docs/provider-backends.md`. Preserve shared behavior across the Cloudflare and Node.js coordinator runtimes; keep runtime-specific storage and scheduling in their existing adapters.
+
+## Design Principles: KISS, YAGNI, DRY, SOLID
+
+Apply these principles to concrete changes, using idiomatic Go and TypeScript:
+
+- **KISS / YAGNI:** Prefer straightforward control flow and existing helpers. Add abstractions, options, dependencies, and extension points only for a demonstrated need in the current task.
+- **DRY:** Give shared policy one owner. Extract duplication when the behavior and reasons to change are the same; similar-looking provider code alone does not justify coupling providers.
+- **Single responsibility:** Keep command orchestration, provider operations, persistence, and presentation in their existing boundaries. Split functions when they mix responsibilities, not to meet an arbitrary line limit.
+- **Open/closed:** Extend provider behavior through existing registration and capability hooks. Add a hook only when a real requirement cannot fit the current contract.
+- **Liskov substitution:** Implement the advertised backend contract consistently, including errors, cancellation, ownership, and cleanup. Reject unsupported requested capabilities before side effects; preserve documented fallback behavior.
+- **Interface segregation:** Prefer small interfaces defined by the consuming code. Use optional capabilities instead of forcing every provider to implement unrelated methods.
+- **Dependency inversion:** Keep orchestration dependent on behavior contracts. Pass external dependencies explicitly at existing boundaries; use concrete types where an interface adds no value. Prefer composition to inheritance or new dependency-injection frameworks.
+
 ## Build, Test, and Development Commands
+
+Run from the repository root. Use the Go toolchain declared in `go.mod` and the Node version in `.node-version`.
 
 - `go build -trimpath -o bin/crabbox ./cmd/crabbox`: build the local CLI.
 - `go vet ./...`: run Go static checks.
 - `go test -race -timeout=20m ./...`: run the Go test suite with the race detector and CI's race-test package timeout.
-- `gofmt -w $(git ls-files '*.go')`: format Go files.
-- `npm ci --prefix worker`: install Worker dependencies.
+- `gofmt -w path/to/changed.go`: format changed Go files; substitute their actual paths.
+- `npm ci --prefix worker`: install coordinator dependencies.
 - `npm run format:check --prefix worker`: verify TypeScript formatting.
 - `npm run lint --prefix worker`: run `oxlint`.
 - `npm run check --prefix worker`: run TypeScript typechecking.
+- `npm run check:node --prefix worker`: typecheck the Node.js coordinator.
 - `npm test --prefix worker`: run Vitest tests.
 - `npm run build --prefix worker`: dry-run the Worker build through Wrangler.
+- `npm run build:node --prefix worker`: build the Node.js coordinator.
 - `node scripts/build-docs-site.mjs`: generate the docs site into `dist/docs-site`.
 
 ## Coding Style & Naming Conventions
 
 Use standard Go formatting and keep package names short and lowercase. Prefer table-driven Go tests where behavior has multiple cases, and keep command behavior close to the matching file in `internal/cli` (for example, cache behavior in `cache.go`). Worker code is TypeScript ESM; use existing module boundaries in `worker/src` and rely on `oxfmt`, `oxlint`, and `tsc`.
 
+## Errors, Resources, and Compatibility
+
+- Propagate cancellation and deadlines through HTTP, SSH, subprocess, and polling operations. Follow existing lifecycle ownership; cleanup that must outlive cancellation needs an independent, bounded context.
+- Bound retries and preserve provider retry policy. A timeout does not prove creation failed: reconcile ambiguous results or use supported idempotency before retrying a resource creation.
+- Make resource ownership and cleanup explicit on success, failure, and cancellation. Preserve exact ownership checks before destructive provider operations; never broaden cleanup to compensate for uncertain state.
+- Return errors with useful operation context and preserve their cause. Keep the primary failure visible when cleanup also fails; do not turn a failed operation into apparent success.
+- Preserve CLI flags, exit codes, JSON output, config semantics, and coordinator contracts unless the task explicitly changes them. Update affected docs and contract tests together.
+
 ## Testing Guidelines
 
-Name Go tests `*_test.go` beside the code they cover. Name Worker tests `*.test.ts` under `worker/test`. Add regression tests for bug fixes when practical. Before handoff, run the relevant subset; before release or broad changes, run the full CI-equivalent gate from the README.
+Name Go tests `*_test.go` beside the code they cover. Name Worker tests `*.test.ts` under `worker/test`. Add regression tests for bug fixes when practical. Test observable behavior and contracts, including applicable failure, cancellation, and cleanup paths. Use deterministic fakes at external boundaries; ordinary tests must not require live provider credentials or provision paid resources.
+
+Before handoff, run the relevant subset and applicable formatting/static checks; before release or broad changes, run the full CI-equivalent gate from the README and `.github/workflows/ci.yml`. For shared coordinator changes, verify both runtime checks/builds. Report exactly what ran, what passed or failed, and what could not be verified. For instructions-only changes, verify referenced paths, commands, and the diff; application test suites are unnecessary. For docs-site or generated-documentation changes, run the relevant documentation checks.
 
 ## Commit & Pull Request Guidelines
 
