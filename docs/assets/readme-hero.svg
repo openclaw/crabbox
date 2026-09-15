@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="320" viewBox="0 0 1200 320" role="img" aria-labelledby="title desc">
+  <title id="title">Crabbox</title>
+  <desc id="desc">Warm a box, sync the diff, run the suite. A coral crab sits inside a box between a working-tree diff and a completed run.</desc>
+  <defs>
+    <linearGradient id="background" x2="1" y2="1">
+      <stop stop-color="#09121f"/>
+      <stop offset="1" stop-color="#111c2d"/>
+    </linearGradient>
+    <linearGradient id="box" x2="0" y2="1">
+      <stop stop-color="#ff9a86"/>
+      <stop offset="1" stop-color="#ee6955"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#a5c7df" stroke-opacity=".045"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="320" rx="24" fill="url(#background)"/>
+  <rect x="480" width="720" height="320" rx="24" fill="url(#grid)"/>
+  <path d="M48 46h40" stroke="#ff927d" stroke-width="4" stroke-linecap="round"/>
+  <g font-family="Geist, system-ui, sans-serif">
+    <text x="48" y="137" fill="#f2f6fc" font-size="70" font-weight="700" letter-spacing="-3">Crabbox</text>
+    <text x="51" y="187" fill="#c1cedd" font-size="25">Warm a box, sync the diff,</text>
+    <text x="51" y="220" fill="#c1cedd" font-size="25">run the suite.</text>
+    <text x="51" y="279" fill="#8d9fb4" font-size="15" letter-spacing="3">LOCAL EDITS. REMOTE EXECUTION.</text>
+  </g>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M704 151h39m200 0h39" stroke="#61cfc9" stroke-width="2"/>
+    <path d="m735 146 8 5-8 5m239-5 8 5-8 5" stroke="#61cfc9" stroke-width="2"/>
+    <rect x="562" y="94" width="142" height="114" rx="15" fill="#142235" stroke="#223b50"/>
+    <path d="M580 115h9m7 0h9m7 0h9" stroke="#53677e" stroke-width="3"/>
+    <path d="M581 143h10m-5-5v10m13-5h78M581 165h10m-5-5v10m13-5h52" stroke="#61cfc9" stroke-width="3"/>
+    <path d="M581 186h10m8 0h63" stroke="#8c9cb0" stroke-width="3"/>
+    <rect x="752" y="60" width="182" height="182" rx="34" fill="#ff9077" fill-opacity=".045" stroke="#f48a74" stroke-opacity=".15"/>
+    <path d="m843 80 72 40v80l-72 40-72-40v-80z" fill="#172233" stroke="url(#box)" stroke-width="2"/>
+    <path d="m771 120 72 40 72-40m-72 40v80" stroke="#f58a75" stroke-opacity=".4" stroke-width="2"/>
+    <ellipse cx="843" cy="156" rx="23" ry="17" fill="#ff927d" stroke="none"/>
+    <path d="m823 149-15-13m55 13 15-13m-55 24-17 9m17-2-12 17m50-24 17 9m-17-2 12 17" stroke="#ff927d" stroke-width="5"/>
+    <path d="M808 137c-16-1-22-16-15-29l11 13 11-12c7 13 4 25-7 28m70 0c16-1 22-16 15-29l-11 13-11-12c-7 13-4 25 7 28" fill="#ff927d" stroke="none"/>
+    <path d="M836 140v-6m14 6v-6" stroke="#ff927d" stroke-width="5"/>
+    <rect x="982" y="94" width="142" height="114" rx="15" fill="#142235" stroke="#223b50"/>
+    <circle cx="1053" cy="138" r="20" fill="#61cfc9" fill-opacity=".08" stroke="#61cfc9"/>
+    <path d="m1044 138 6 6 12-13" stroke="#61cfc9" stroke-width="3"/>
+    <path d="M1015 180h76" stroke="#53677e" stroke-width="3"/>
+  </g>
+  <g font-family="Geist, system-ui, sans-serif" font-size="19" fill="#c1cedd" text-anchor="middle">
+    <text x="633" y="270">Your diff</text>
+    <text x="843" y="281">Your box</text>
+    <text x="1053" y="270">Your result</text>
+  </g>
+</svg>
