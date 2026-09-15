@@ -20,7 +20,8 @@ stream the output, and get the command's exit code back.
 Inside a Git repository you trust, with Docker or Podman running:
 
 ```sh
-crabbox run --provider docker \
+crabbox run \
+  --provider docker \
   -- uname -a
 ```
 
