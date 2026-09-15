@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -231,13 +232,14 @@ func (versionGatewayServer) List(_ context.Context, req *sandboxv1.ListSandboxes
 	return &sandboxv1.ListSandboxesResponse{}, nil
 }
 
-func TestWandbClientUsesPlaintextForHTTPOverride(t *testing.T) {
+func newWandbTestGRPCClient(t *testing.T, service sandboxv1.GatewayServiceServer) *wandbClient {
+	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	server := grpc.NewServer()
-	sandboxv1.RegisterGatewayServiceServer(server, versionGatewayServer{})
+	sandboxv1.RegisterGatewayServiceServer(server, service)
 	go func() {
 		_ = server.Serve(lis)
 	}()
@@ -254,16 +256,15 @@ func TestWandbClientUsesPlaintextForHTTPOverride(t *testing.T) {
 	if !ok {
 		t.Fatalf("api = %T, want *wandbClient", api)
 	}
-	closed := false
-	t.Cleanup(func() {
-		if !closed {
-			_ = client.Close()
-		}
-	})
+	t.Cleanup(func() { _ = client.Close() })
+	return client
+}
 
+func TestWandbClientUsesPlaintextForHTTPOverride(t *testing.T) {
+	client := newWandbTestGRPCClient(t, versionGatewayServer{})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	version, err := api.Version(ctx)
+	version, err := client.Version(ctx)
 	if err != nil {
 		t.Fatalf("Version with http override err: %v", err)
 	}
@@ -273,19 +274,39 @@ func TestWandbClientUsesPlaintextForHTTPOverride(t *testing.T) {
 	if err := client.Close(); err != nil {
 		t.Fatalf("Close err: %v", err)
 	}
-	closed = true
 	if got := client.conn.GetState(); got != connectivity.Shutdown {
 		t.Fatalf("conn state = %s, want %s", got, connectivity.Shutdown)
 	}
 }
 
-type pollGatewayClient struct {
-	sandboxv1.GatewayServiceClient
-	get func(context.Context, *sandboxv1.GetSandboxRequest) (*sandboxv1.GetSandboxResponse, error)
+type pollGatewayServer struct {
+	sandboxv1.UnimplementedGatewayServiceServer
+	calls atomic.Int32
 }
 
-func (f pollGatewayClient) Get(ctx context.Context, req *sandboxv1.GetSandboxRequest, _ ...grpc.CallOption) (*sandboxv1.GetSandboxResponse, error) {
-	return f.get(ctx, req)
+func (s *pollGatewayServer) Get(_ context.Context, req *sandboxv1.GetSandboxRequest) (*sandboxv1.GetSandboxResponse, error) {
+	if req.SandboxId != "fixture-sandbox" {
+		return nil, status.Error(codes.InvalidArgument, "unexpected fixture sandbox")
+	}
+	state := sandboxv1.SandboxStatus_SANDBOX_STATUS_RUNNING
+	if s.calls.Add(1) == 1 {
+		state = sandboxv1.SandboxStatus_SANDBOX_STATUS_PENDING
+	}
+	return &sandboxv1.GetSandboxResponse{SandboxStatus: state}, nil
+}
+
+type observedPollGatewayClient struct {
+	sandboxv1.GatewayServiceClient
+	afterPending func()
+}
+
+func (f observedPollGatewayClient) Get(ctx context.Context, req *sandboxv1.GetSandboxRequest, options ...grpc.CallOption) (*sandboxv1.GetSandboxResponse, error) {
+	// Cancellation follows a real RPC response, not a substituted gateway result.
+	response, err := f.GatewayServiceClient.Get(ctx, req, options...)
+	if err == nil && response.SandboxStatus == sandboxv1.SandboxStatus_SANDBOX_STATUS_PENDING {
+		f.afterPending()
+	}
+	return response, err
 }
 
 func TestPollUntilRunningDelay(t *testing.T) {
@@ -299,28 +320,25 @@ func TestPollUntilRunningDelay(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancelCause(t.Context())
 			defer cancel(nil)
-			calls := 0
-			client := &wandbClient{gw: pollGatewayClient{get: func(_ context.Context, req *sandboxv1.GetSandboxRequest) (*sandboxv1.GetSandboxResponse, error) {
-				if req.SandboxId != "fixture-sandbox" {
-					t.Fatalf("sandbox ID=%q", req.SandboxId)
-				}
-				calls++
-				if calls == 1 {
-					if tc.cancel {
-						cancel(errors.New("fixture cancellation cause"))
-					}
-					return &sandboxv1.GetSandboxResponse{SandboxStatus: sandboxv1.SandboxStatus_SANDBOX_STATUS_PENDING}, nil
-				}
-				return &sandboxv1.GetSandboxResponse{SandboxStatus: sandboxv1.SandboxStatus_SANDBOX_STATUS_RUNNING}, nil
-			}}}
+			server := &pollGatewayServer{}
+			client := newWandbTestGRPCClient(t, server)
+			if tc.cancel {
+				client.gw = observedPollGatewayClient{GatewayServiceClient: client.gw, afterPending: func() {
+					cancel(errors.New("fixture cancellation cause"))
+				}}
+			}
+			started := time.Now()
 			got, err := client.pollUntilRunning(ctx, "fixture-sandbox")
+			elapsed := time.Since(started)
+			calls := server.calls.Load()
 			if tc.cancel {
 				if err != context.Canceled || calls != 1 {
 					t.Fatalf("canceled poll: err=%v calls=%d", err, calls)
 				}
-			} else if err != nil || calls != 2 || got.ID != "fixture-sandbox" || got.Status != "running" {
+			} else if err != nil || calls != 2 || got.ID != "fixture-sandbox" || got.Status != "running" || elapsed < 200*time.Millisecond {
 				t.Fatalf("ready poll: sandbox=%+v err=%v calls=%d", got, err, calls)
 			}
+			t.Logf("real gRPC requests=%d elapsed=%s canceled=%v result=%v", calls, elapsed, tc.cancel, err)
 		})
 	}
 }
