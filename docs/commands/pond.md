@@ -262,5 +262,3 @@ The bridge plane is **HTTP-only** for URL-transport peers. Non-HTTP protocols
 (raw TCP/UDP, SSH on a custom port, Postgres, Redis, …) are not exposed by
 per-port HTTPS shares — use a tailnet-capable provider, or the SSH mesh via
 `pond connect`, for those.
-</content>
-</invoke>
