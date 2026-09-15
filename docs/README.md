@@ -103,3 +103,10 @@ Build and validate the site locally:
 scripts/check-docs.sh
 open dist/docs-site/index.html
 ```
+
+When editing `docs/`, use the site's supported level 1–4 headings and
+triple-backtick code fences. Site-target heading links are checked against the
+same heading identities the renderer emits; examples and comments do not reserve
+anchors. Keep published heading IDs stable. Repository-only Markdown targets
+retain the checker's separate existing GitHub-oriented anchor rules, not a claim
+of complete GitHub Markdown support.

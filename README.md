@@ -17,7 +17,7 @@ stream the output, and get the command's exit code back.
 **[Quick start](#quick-start)** · [Commands](#everyday-commands) · [Install](#install) ·
 [Providers](#providers) · [Documentation](https://crabbox.sh/) · [Security](#trust-model)
 
-Inside a Git repository, with Docker or Podman running:
+Inside a Git repository you trust, with Docker or Podman running:
 
 ```sh
 crabbox run --provider docker \
@@ -182,9 +182,12 @@ the [CLI reference](docs/cli.md) lists all flags and environment variables.
 | Output is binary or terminal-hostile | `--capture-stdout <path>`, and `--capture-stderr <path>`. |
 | You need a file the run produced | `--download remote=local`, repeatable for several files. |
 
-Failed SSH-backed runs also write a local bundle to `.crabbox/captures/*.tar.gz`
-and print `failure-bundle local=…` with the exact path. Crabbox does not scrub
-bundles, captured output, or artifacts; review them before sharing.
+Failed SSH-backed and Blacksmith delegated runs save local bundles to
+`.crabbox/captures/*.tar.gz` by default, falling back to the Crabbox user state
+directory when the project destination is unwritable. Follow the reported
+`failure-bundle local=…` path; see [local capture storage](docs/observability.md#capturing-run-output-locally).
+Crabbox does not scrub bundles, captured output, or artifacts; review them before
+sharing.
 
 [Troubleshooting](docs/troubleshooting.md) ·
 [History and logs](docs/features/history-logs.md) ·
@@ -280,9 +283,10 @@ crabbox init --detect
 crabbox config show
 ```
 
-Settings resolve in order: flags, environment, repository `.crabbox.yaml`, user
-`~/.config/crabbox/config.yaml`, then defaults. A few lines in the repository are
-usually enough to drop the flags from your everyday commands:
+Settings resolve in order: flags, environment, repository configuration, user
+configuration, then defaults. Run `crabbox config path` to locate your user
+configuration; its default location varies by platform. A few lines in
+`.crabbox.yaml` are usually enough to drop the flags from your everyday commands:
 
 ```yaml
 provider: local-container
@@ -371,7 +375,8 @@ Read the [Security Policy](SECURITY.md),
 ## Development
 
 Contributions are welcome. Read [Repository guidelines](AGENTS.md) for architecture
-boundaries, coding conventions, and review expectations.
+boundaries, coding conventions, and review expectations, and
+[Documentation authoring](docs/README.md#about-these-docs) for site conventions.
 
 <details>
 <summary>Build, test, and release reference for contributors</summary>
