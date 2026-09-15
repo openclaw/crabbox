@@ -14,8 +14,8 @@ stream the output, and get the command's exit code back.
 [![Latest release](https://badgen.net/github/release/openclaw/crabbox/stable)](https://github.com/openclaw/crabbox/releases/latest)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**[Quick start](#quick-start)** · [Install](#install) · [Providers](#providers) ·
-[Documentation](https://crabbox.sh/) · [Security](#trust-model)
+**[Quick start](#quick-start)** · [Commands](#everyday-commands) · [Install](#install) ·
+[Providers](#providers) · [Documentation](https://crabbox.sh/) · [Security](#trust-model)
 
 Inside a Git repository, with Docker or Podman running:
 
@@ -112,8 +112,9 @@ crabbox run --provider local-container \
   --shell 'npm ci && npm test'
 ```
 
-Choose a Node version compatible with your project. For other stacks, use an
-appropriate image or the repository's setup scripts. Crabbox can also reuse
+Choose a Node version compatible with your project. Crabbox does not install
+project runtimes for you: supply them with a prepared image, the repository's own
+setup scripts, a devcontainer, Nix, or mise/asdf. Crabbox can also reuse
 [supported setup steps from GitHub Actions](docs/features/actions-hydration.md);
 full Actions semantics require the documented runner path.
 
@@ -138,7 +139,6 @@ A lease has both a stable `cbx_...` ID and a friendly slug; either works with
 
 For a complete repository setup, see [Getting started](docs/getting-started.md)
 and [Local Container](docs/providers/local-container.md).
-If a run fails, start with [Troubleshooting](docs/troubleshooting.md).
 
 ### Already have a team coordinator?
 
@@ -154,6 +154,41 @@ This assumes the repository's provider and remote runtime/dependency setup are
 configured. For your own cloud account, follow a
 [direct-provider setup guide](docs/providers/README.md) and skip login.
 Cloud runs use your infrastructure and may incur charges.
+
+## Everyday commands
+
+| Command | What it does |
+| --- | --- |
+| `crabbox doctor` | Check local prerequisites, configuration, and provider reachability. |
+| `crabbox run -- <cmd>` | One-shot: get a box, sync, run, stream output, release. |
+| `crabbox run --shell '<script>'` | The same, for a multi-step shell command. |
+| `crabbox warmup` / `crabbox prewarm` | Create a reusable box; `prewarm` also runs Actions hydration. |
+| `crabbox run --id <box> -- <cmd>` | Reuse a warm box, syncing only what changed. |
+| `crabbox ssh --id <box>` | Open an interactive shell on the box. |
+| `crabbox job run <name>` | Run a named workflow defined in `.crabbox.yaml`. |
+| `crabbox list` / `crabbox stop <box>` | See active boxes, and release one when finished. |
+
+Pass long commands as a file with `--script <file>` instead of a large quoted
+string. Every command has a page under [Commands](docs/commands/README.md), and
+the [CLI reference](docs/cli.md) lists all flags and environment variables.
+
+## When a run fails
+
+| Situation | Try this |
+| --- | --- |
+| The run never reaches the box | `crabbox doctor --provider <name>` for prerequisites and reachability. |
+| You need to inspect the failure | Add `--keep-on-failure`, then `crabbox ssh --id <box>` into the exact box that failed. |
+| A warm box behaves as if stale | Add `--full-resync` to reset the remote workdir before syncing. |
+| Output is binary or terminal-hostile | `--capture-stdout <path>`, and `--capture-stderr <path>`. |
+| You need a file the run produced | `--download remote=local`, repeatable for several files. |
+
+Failed SSH-backed runs also write a local bundle to `.crabbox/captures/*.tar.gz`
+and print `failure-bundle local=…` with the exact path. Crabbox does not scrub
+bundles, captured output, or artifacts; review them before sharing.
+
+[Troubleshooting](docs/troubleshooting.md) ·
+[History and logs](docs/features/history-logs.md) ·
+[Observability](docs/observability.md)
 
 ## How it works
 
@@ -245,15 +280,30 @@ crabbox init --detect
 crabbox config show
 ```
 
+Settings resolve in order: flags, environment, repository `.crabbox.yaml`, user
+`~/.config/crabbox/config.yaml`, then defaults. A few lines in the repository are
+usually enough to drop the flags from your everyday commands:
+
+```yaml
+provider: local-container
+localContainer:
+  image: node:22-bookworm
+lease:
+  idleTimeout: 30m
+```
+
 Review the generated configuration and setup before running it. Put repeatable
 validation flows in [named jobs](docs/features/jobs.md), then invoke them with
 `crabbox job run <name>`.
 
-Keep provider credentials in environment variables or user configuration, outside
-the repository. Shell environment variables are not forwarded automatically;
-configure an explicit allowlist when a command needs them.
+Your shell environment is not forwarded. Only `CI` and `NODE_OPTIONS` cross over
+by default; add names to `env.allow` in configuration, or pass `--allow-env NAME`
+and `--env-from-profile <file>` for a single run. Keep provider credentials in
+environment variables or user configuration, outside the repository, and never in
+command-line arguments.
 
-See [Configuration](docs/features/configuration.md) for precedence and YAML,
+See [Configuration](docs/features/configuration.md) for the full schema,
+[Environment forwarding](docs/features/env-forwarding.md) for the allowlist,
 [Sync](docs/features/sync.md) for file selection, and [CLI reference](docs/cli.md)
 for flags and environment variables.
 
