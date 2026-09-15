@@ -38,8 +38,8 @@ func (vm exeDevVM) SSHHost() string {
 
 func (vm exeDevVM) SSHAddress() exeDevSSHAddress {
 	value := strings.TrimSpace(vm.SSHDest)
-	if value == "" && vm.Name() != "" {
-		return exeDevSSHAddress{Host: vm.Name() + ".exe.xyz"}
+	if value == "" {
+		return exeDevSSHAddress{}
 	}
 	user := ""
 	if strings.Contains(value, "@") {

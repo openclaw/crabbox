@@ -107,7 +107,13 @@ or negative values reach the existing runtime fallback. Explicit
    `crabbox-claim-<generation>` resource-binding tag, plus
    `--no-email`, `--image`, `--cpu`, `--memory`, `--disk`, and `--command` as
    configured.
-2. Crabbox waits for SSH readiness on the returned `ssh_dest`, then uses its
+2. If creation has not yet returned `ssh_dest`, Crabbox refreshes the exact VM
+   until the provider advertises its route. The bootstrap deadline covers both
+   inventory requests and polling delays; no hostname is synthesized. Crabbox
+   preserves ambient SSH configuration and uses the advertised user and port,
+   falling back to the current OS account when no user is advertised. Failures
+   after accepted creation use the normal verified rollback unless `--keep` is
+   set. Crabbox then waits for SSH readiness on `ssh_dest` and uses its
    standard rsync + remote command execution and persists the exact VM name,
    SSH endpoint, ownership tags, exe.dev control route, and a non-secret hash
    of the authenticated exe.dev account in the local claim.

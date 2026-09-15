@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Wait for fresh exe.dev VMs to advertise their SSH route, preserve ambient SSH configuration, and bound route discovery with the bootstrap timeout while retaining post-create rollback. [PR 2271](https://github.com/openclaw/crabbox/pull/2271). Thanks @salmonumbrella.
 - Crownest status waits consistently preserve caller cancellation while sharing request deadlines and polling with other providers. [PR 2276](https://github.com/openclaw/crabbox/pull/2276).
 
 ## 0.60.0 - 2026-09-14
