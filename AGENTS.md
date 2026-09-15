@@ -17,13 +17,6 @@ Crabbox is a Go CLI with an optional coordinator on Cloudflare Workers or Node.j
 
 Use `docs/source-map.md` for the detailed code map. Generated outputs such as `bin/`, `dist/`, `worker/dist/`, and `worker/node_modules/` should not be edited by hand.
 
-## Working Approach
-
-- Read the affected implementation, callers, and nearby tests before editing; use `VISION.md` for product scope. Identify the expected behavior and how to verify it. For changes spanning multiple boundaries, outline the approach before implementation.
-- Make the smallest complete change that solves the requested problem. Preserve unrelated work; avoid incidental refactors, dependency upgrades, and repository-wide formatting.
-- Treat design principles below as decision rules for the requested change, not a mandate to restructure existing code. Explain a necessary tradeoff when the simplest local fix would break an established contract.
-- Keep this file focused on durable, actionable rules. Link to detailed documentation instead of duplicating it; verify commands and paths against the repository when updating guidance.
-
 ## Product Positioning
 
 Crabbox is a generic remote software testing and execution tool. New code, docs, tests, and examples should not mention OpenClaw, Peter, or other project/person-specific workflows unless the file is explicitly about legacy compatibility or release history. Prefer neutral examples such as `example-org`, `alice@example.com`, `my-app`, `test:live`, and generic repository workflows.
@@ -32,19 +25,7 @@ Crabbox is a generic remote software testing and execution tool. New code, docs,
 
 Keep core provider-neutral. Core may pass generic request/lease context and call provider capabilities for defaults, access, provision, images, release, cleanup, and diagnostics. Provider-specific reconciliation, firewall/security-group semantics, labels, snapshots, hosts, regions, rollout compatibility, and resource naming live behind provider adapters. No `provider == aws/gcp/...` logic in core unless it is unavoidable routing/config glue and no provider hook fits.
 
-Before adding or changing a provider, read `docs/features/provider-authoring.md` and `docs/provider-backends.md`. Preserve shared behavior across the Cloudflare and Node.js coordinator runtimes; keep runtime-specific storage and scheduling in their existing adapters.
-
-## Design Principles: KISS, YAGNI, DRY, SOLID
-
-Use idiomatic Go and TypeScript; prefer existing abstractions and plain functions.
-
-- **KISS / YAGNI:** Choose straightforward control flow. Add a helper, option, dependency, or extension point only when the current requirement needs it.
-- **DRY:** Share policy with the same meaning and reason to change. Similar-looking provider code is insufficient reason to couple providers.
-- **Single responsibility:** Separate orchestration, provider operations, persistence, and presentation. Split by responsibility, not arbitrary function or file length.
-- **Open/closed:** Extend providers through existing registration and capability hooks; add a hook only when the current contract cannot express a real requirement.
-- **Liskov substitution:** Preserve the advertised backend's errors, cancellation, ownership, and cleanup semantics. Reject unsupported requested capabilities before side effects; retain documented fallbacks.
-- **Interface segregation:** Define small interfaces at the consumer. Use optional capabilities instead of adding unrelated methods to every backend.
-- **Dependency inversion:** Pass external dependencies at existing boundaries so orchestration depends on behavior contracts. Keep concrete types where an interface adds no value.
+Provider contracts and extension points are documented in `docs/features/provider-authoring.md` and `docs/provider-backends.md`; coordinator runtime boundaries are described in `docs/architecture.md`.
 
 ## Build, Test, and Development Commands
 
@@ -68,22 +49,9 @@ Run from the repository root. Use the Go toolchain declared in `go.mod` and the 
 
 Use standard Go formatting and keep package names short and lowercase. Prefer table-driven Go tests where behavior has multiple cases, and keep command behavior close to the matching file in `internal/cli` (for example, cache behavior in `cache.go`). Worker code is TypeScript ESM; use existing module boundaries in `worker/src` and rely on `oxfmt`, `oxlint`, and `tsc`.
 
-## Errors, Resources, and Compatibility
-
-- Propagate cancellation and deadlines through HTTP, SSH, subprocess, and polling operations. Follow existing lifecycle ownership; cleanup that must outlive cancellation needs an independent, bounded context.
-- Bound retries and preserve provider retry policy. A timeout does not prove creation failed: reconcile ambiguous results or use supported idempotency before retrying a resource creation.
-- Make resource ownership and cleanup explicit on success, failure, and cancellation. Preserve exact ownership checks before destructive provider operations; never broaden cleanup to compensate for uncertain state.
-- Return errors with useful operation context and preserve their cause. Keep the primary failure visible when cleanup also fails; do not turn a failed operation into apparent success.
-- Preserve CLI flags, exit codes, JSON output, config semantics, and coordinator contracts unless the task explicitly changes them. Update affected docs and contract tests together.
-
 ## Testing Guidelines
 
-- Put Go tests in `*_test.go` beside the code and coordinator tests in `worker/test/*.test.ts`. For bug fixes, reproduce the failure before changing behavior when practical, then keep the regression test.
-- Test observable behavior at the lowest level that proves the contract. Cover relevant failure, cancellation, and cleanup paths. Use deterministic fakes at external boundaries; ordinary tests must not require live credentials or provision paid resources.
-- Run the affected package or test file first, plus applicable formatting and static checks. Shared coordinator changes need checks/builds for both runtimes. Before release or broad changes, run the full CI-equivalent gate from the README and `.github/workflows/ci.yml`.
-- For instructions-only changes, check referenced paths, commands, symlinks, and existing tests that validate the instructions. Application suites are unnecessary. Docs-site or generated-documentation changes need their relevant documentation checks.
-- Investigate failures and keep assertions aligned with the intended contract. Do not disable checks or weaken assertions merely to obtain a passing result.
-- Before handoff, review the final diff for unintended changes, compatibility regressions, and leaked credentials. Report what changed, the exact checks and outcomes, and any unverified behavior. Re-run affected checks after subsequent edits; an earlier pass does not validate newer changes.
+Name Go tests `*_test.go` beside the code they cover. Name Worker tests `*.test.ts` under `worker/test`. Add regression tests for bug fixes when practical. Before handoff, run the relevant subset; before release or broad changes, run the full CI-equivalent gate from the README.
 
 ## Commit & Pull Request Guidelines
 
@@ -103,7 +71,7 @@ Follow `docs/RELEASING.md` exactly. One explicit full release/publish request au
 
 ## Security & Configuration Tips
 
-For auth, isolation, or credential-handling changes, read `SECURITY.md` and `docs/security.md` first. Preserve the documented trusted-user/team model and supported workflows. Captured command output and failure bundles are not automatically scrubbed; review them before sharing.
+The authentication and isolation model is documented in `SECURITY.md` and `docs/security.md`.
 
 Keep provider and broker tokens out of the repository. Do not pass secrets as command-line arguments. Local config belongs in `~/.config/crabbox/config.yaml`, `~/Library/Application Support/crabbox/config.yaml`, `crabbox.yaml`, or `.crabbox.yaml` as documented.
 Tenki provider SSH uses `tenki sandbox ssh-proxy` with Tenki-managed key/cert files under `~/.config/tenki`; do not use Crabbox per-lease keys for gateway auth.
